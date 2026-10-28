@@ -258,7 +258,7 @@ urMQTT/
 # Rust (https://rustup.rs). The pinned toolchain installs itself from rust-toolchain.toml.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-brew install qemu xorriso llvm mosquitto openssl
+brew install qemu xorriso llvm mosquitto openssl@3   # OpenSSL >= 3 (LibreSSL is not enough)
 cargo install cargo-fuzz --locked      # optional, for make fuzz
 ```
 
