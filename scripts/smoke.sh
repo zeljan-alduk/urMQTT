@@ -81,6 +81,10 @@ check() {
         PASSED=$((PASSED + 1))
     else
         echo "  serial log: $log"
+        if [[ -s "$log.qemu" ]]; then
+            echo "  qemu stderr:"
+            sed 's/^/    ! /' "$log.qemu" | tail -10
+        fi
         clean "$log" | grep -vE '^\s*$' | tail -25 | sed 's/^/    | /'
         FAILED=$((FAILED + 1))
     fi

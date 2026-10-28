@@ -7,6 +7,7 @@
 #                       [--pcap FILE] [--gdb] [--no-net] [-- extra qemu args]
 #
 # Without --serial the serial console is on stdio. Ctrl-A X quits QEMU.
+# Option ROMs are disabled (romfile=): no iPXE in the firmware, faster boot.
 set -euo pipefail
 
 ISO="" ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
@@ -63,18 +64,21 @@ ARGS=(
     -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
     -bios "$FW"
     -drive "if=none,id=cd0,file=$ISO,format=raw,readonly=on,media=cdrom"
-    -device virtio-scsi-pci,id=scsi0 -device scsi-cd,drive=cd0,bus=scsi0.0,bootindex=0
-    -device virtio-rng-pci
+    -device virtio-scsi-pci,id=scsi0,romfile= -device scsi-cd,drive=cd0,bus=scsi0.0,bootindex=0
+    -device virtio-rng-pci,romfile=
     -device ramfb
     -display none -no-reboot
 )
 if [[ -n "$DATA" ]]; then
-    ARGS+=(-drive "if=none,id=data0,file=$DATA,format=raw,cache=none" -device virtio-blk-pci,drive=data0)
+    ARGS+=(-drive "if=none,id=data0,file=$DATA,format=raw,cache=none" -device virtio-blk-pci,drive=data0,romfile=)
 fi
 if [[ $NET -eq 1 ]]; then
     ARGS+=(-netdev "user,id=n0,hostfwd=tcp:127.0.0.1:1883-:1883,hostfwd=tcp:127.0.0.1:8883-:8883"
-           -device virtio-net-pci,netdev=n0)
+           -device virtio-net-pci,netdev=n0,romfile=)
     [[ -n "$PCAP" ]] && ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
+else
+    # Without this QEMU adds a default NIC (with an iPXE option ROM).
+    ARGS+=(-nic none)
 fi
 if [[ -n "$SERIAL" ]]; then
     ARGS+=(-serial "file:$SERIAL" -monitor none)
