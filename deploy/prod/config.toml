@@ -42,3 +42,6 @@ metrics_udp = ""               # statsd
 [watchdog]
 handler_budget_ms = 10
 action = "reset"                # "log" | "drop" | "reset"
+
+[memory]
+kernel_heap_mb = 8                # power of two; boot-time structures and TLS handshakes

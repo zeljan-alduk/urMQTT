@@ -85,3 +85,47 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - Exceptions run on the boot stack. A dedicated exception stack comes in M2, with guard pages.
 - Entry at EL2 (VHE) is untested (ADR-018).
 - `cpu=` comes from the Limine MP response. The application processors stay parked until M4.
+
+## M2 — Memory (2026-10-29)
+
+**Done**
+
+- `mm` (host-tested, with proptest):
+  - Bitmap frame allocator (single frames and aligned contiguous runs; double-free and foreign-address detection).
+  - Binary buddy heap, headerless with per-order free bitmaps, behind a spinlock as the kernel `#[global_allocator]`.
+- `arch-aarch64`:
+  - 2 MiB block mappings, auto-sized ranges, a leaf walker, in-place permission changes.
+  - CPU feature decoding (PAuth, FPAC, BTI, RNG, crypto, LSE, MTE, SVE).
+  - PAC key programming and an assembly stack switch that enables PAC.
+- `kernel/vm`:
+  - Own TTBR1 tables with W^X, the HHDM alias of the kernel image read-only, the lower half disabled (EPD0) and WXN on (ADR-019).
+  - Per-CPU stack slots with guard pages, exceptions on a separate SP_EL1 stack (ADR-020).
+  - Heap mapped from `memory.kernel_heap_mb` (a new config key).
+  - Page tables locked read-only at the end of boot, with no writable alias left.
+- PAC and BTI enabled when present (ADR-021).
+- Boot self-tests:
+  - The frame allocator (1000 single frames plus a 16-frame contiguous run, all freed, accounting checked, double free refused).
+  - The heap (coalesces back fully).
+  - A full W^X audit of all leaf mappings after locking, plus spot checks: text RX, data/heap/stack RW-NX, guard unmapped, page-table alias gone, kernel alias read-only.
+- Test switches (dev only): `test=write-text`, `exec-heap`, `stack-overflow`, `null`, `pac`, `bti`.
+
+**Measured** (HVF, 512 MB)
+
+- 45 page-table pages for the whole address space (2 MiB blocks for the HHDM). 442 MiB free after setup. 13 385 leaf mappings audited. Heap 32 MiB.
+- CPU features under HVF on the M4 Pro: pauth, fpac, bti, aes, pmull, sha2, lse. No RNDR, no MTE, no SVE.
+- `make smoke`: 24/24 (12 scenarios × HVF + TCG). Reports from those runs:
+  - write to text: permission fault L3
+  - executing heap memory: instruction abort, permission fault L3
+  - stack overflow: data abort on the main stack guard page, reported on the exception stack
+  - null pointer: translation fault L0
+  - PAC forgery: EC 0x1c
+  - BTI violation: EC 0x0d
+- Kernel ELF: **113 240 bytes** (+34 KB: buddy heap, frame allocator, mapper, branch protection).
+- Host tests: 80.
+
+**Known gaps**
+
+- Bootloader-reclaimable memory (about 30 MB at 512 MB) is not reclaimed yet. It still holds the DTB and memmap, which later milestones read.
+- The page-table pool rounds up to 2 MiB (about 1.8 MB unused at 512 MB RAM).
+- Only the boot CPU's stacks exist; M4 maps the others before the lock.
+- MTE is not used (HVF does not expose it).

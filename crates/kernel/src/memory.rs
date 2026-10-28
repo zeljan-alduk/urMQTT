@@ -1,8 +1,6 @@
-//! Boot-time view of memory: the Limine memory map, the HHDM and an MMIO
-//! window carved into the bootloader's higher-half tables.
-//!
-//! M2 replaces the bootloader tables with the kernel's own W^X tables; until
-//! then this module is the only place that touches translation tables.
+//! Boot-time view of memory: the Limine memory map, the HHDM, and the MMIO
+//! registry that works both before and after the kernel's own page tables
+//! take over (see `vm`).
 
 #![allow(unsafe_code)]
 
@@ -13,16 +11,19 @@ use limine::memmap::{
 use urmqtt_arch_aarch64::paging::{
     self, MapError, Mapper, MemType, PAGE_SIZE, PageAttrs, TableMemory,
 };
+use urmqtt_arch_aarch64::sync::SpinLock;
 use urmqtt_arch_aarch64::{cpu, regs};
 use urmqtt_log::info;
 use urmqtt_mm::BumpFrames;
 use urmqtt_platform::acpi::PhysMemory;
 use urmqtt_platform::fdt::Fdt;
 
-/// Frames reserved for MMIO page tables before the real allocator exists.
+use crate::layout::{MMIO_BASE, MMIO_SIZE};
+
+/// Frames for page tables extending the bootloader's tables before the
+/// frame allocator exists (MMIO mappings only).
 const EARLY_TABLE_FRAMES: u64 = 64;
-/// Size of the MMIO window (one level-0 slot is 512 GiB; we use 1 GiB).
-const MMIO_WINDOW: u64 = 1 << 30;
+const MAX_MMIO_MAPPINGS: usize = 64;
 
 pub struct BootMemory {
     hhdm: u64,
@@ -30,7 +31,7 @@ pub struct BootMemory {
 }
 
 /// Memory types that base revision >= 4 maps into the HHDM.
-const fn hhdm_mapped(kind: u64) -> bool {
+pub const fn hhdm_mapped(kind: u64) -> bool {
     matches!(
         kind,
         MEMMAP_USABLE
@@ -40,6 +41,17 @@ const fn hhdm_mapped(kind: u64) -> bool {
             | MEMMAP_ACPI_RECLAIMABLE
             | MEMMAP_ACPI_NVS
             | MEMMAP_MAPPED_RESERVED
+    )
+}
+
+/// RAM-like types: what the kernel can eventually use.
+pub const fn is_ram(kind: u64) -> bool {
+    matches!(
+        kind,
+        MEMMAP_USABLE
+            | MEMMAP_BOOTLOADER_RECLAIMABLE
+            | MEMMAP_EXECUTABLE_AND_MODULES
+            | MEMMAP_ACPI_RECLAIMABLE
     )
 }
 
@@ -61,19 +73,18 @@ impl BootMemory {
         Self { hhdm, map }
     }
 
-    /// RAM the kernel can eventually use: usable plus reclaimable regions.
+    pub fn hhdm(&self) -> u64 {
+        self.hhdm
+    }
+
+    pub fn entries(&self) -> &'static [&'static Entry] {
+        self.map
+    }
+
     pub fn ram_bytes(&self) -> u64 {
         self.map
             .iter()
-            .filter(|e| {
-                matches!(
-                    e.type_,
-                    MEMMAP_USABLE
-                        | MEMMAP_BOOTLOADER_RECLAIMABLE
-                        | MEMMAP_EXECUTABLE_AND_MODULES
-                        | MEMMAP_ACPI_RECLAIMABLE
-                )
-            })
+            .filter(|e| is_ram(e.type_))
             .map(|e| e.length)
             .sum()
     }
@@ -82,7 +93,6 @@ impl BootMemory {
         va.checked_sub(self.hhdm)
     }
 
-    /// Whether `[pa, pa + len)` lies inside one HHDM-mapped region.
     fn is_mapped(&self, pa: u64, len: u64) -> bool {
         let Some(end) = pa.checked_add(len) else {
             return false;
@@ -100,16 +110,16 @@ impl BootMemory {
         Fdt::new(self.bytes(pa, size)?).ok()
     }
 
-    /// Steals `EARLY_TABLE_FRAMES` frames from the top of the largest usable
-    /// region. M2's frame allocator must treat them as allocated.
-    fn early_frames(&self) -> Option<BumpFrames> {
+    /// `EARLY_TABLE_FRAMES` frames from the top of the largest usable
+    /// region. The frame allocator reserves them until they are retired.
+    pub fn early_frames_range(&self) -> Option<(u64, u64)> {
         let largest = self
             .map
             .iter()
             .filter(|e| e.type_ == MEMMAP_USABLE)
             .max_by_key(|e| e.length)?;
         let len = (EARLY_TABLE_FRAMES * PAGE_SIZE).min(largest.length);
-        Some(BumpFrames::new(largest.base + largest.length - len, len))
+        Some((largest.base + largest.length - len, len))
     }
 
     pub fn log_summary(&self) {
@@ -130,15 +140,16 @@ impl PhysMemory for BootMemory {
         if !self.is_mapped(pa, len as u64) {
             return None;
         }
-        // SAFETY: the range is inside a region the bootloader mapped into the
-        // HHDM, and firmware tables / the DTB are not modified while borrowed.
+        // SAFETY: the range is inside a region mapped into the HHDM (by the
+        // bootloader, and identically by the kernel's tables), and firmware
+        // tables / the DTB are not modified while borrowed.
         Some(unsafe { core::slice::from_raw_parts((self.hhdm + pa) as *const u8, len) })
     }
 }
 
 /// Translation tables reached through the HHDM.
-struct HhdmTables {
-    hhdm: u64,
+pub struct HhdmTables {
+    pub hhdm: u64,
 }
 
 impl HhdmTables {
@@ -150,75 +161,136 @@ impl HhdmTables {
 
 impl TableMemory for HhdmTables {
     fn read(&self, table_pa: u64, idx: usize) -> u64 {
-        // SAFETY: table frames come from TTBR1 or from our early frames, both
-        // in HHDM-mapped RAM; idx < 512 keeps the access inside the frame.
+        // SAFETY: table frames are HHDM-mapped RAM (bootloader tables, early
+        // frames or the kernel's page-table pool); the address stays inside
+        // the 4 KiB frame.
         unsafe { (self.entry_addr(table_pa, idx) as *const u64).read_volatile() }
     }
 
     fn write(&mut self, table_pa: u64, idx: usize, value: u64) {
-        // SAFETY: as in `read`. Writes become visible to the walker after
-        // the barrier in `MmioWindow::map`.
+        // SAFETY: as in `read`; callers issue the barriers that make the
+        // new entry visible to the table walker.
         unsafe { (self.entry_addr(table_pa, idx) as *mut u64).write_volatile(value) }
     }
 }
 
-/// A range of kernel virtual addresses for device mappings.
-pub struct MmioWindow {
-    base: u64,
-    next: u64,
-    root: u64,
-    tables: HhdmTables,
-    frames: BumpFrames,
+#[derive(Clone, Copy)]
+struct MmioMapping {
+    va: u64,
+    pa: u64,
+    len: u64,
 }
 
-impl MmioWindow {
-    /// Claims a free level-0 slot of the higher-half tables and programs the
-    /// kernel's MAIR attributes. `None` if no slot or no frames are free.
-    pub fn new(mem: &BootMemory) -> Option<Self> {
-        // SAFETY: indices 0 and 1 (used by the bootloader's mappings) are
-        // preserved; the kernel's indices were unused until now.
-        unsafe { regs::set_mair_el1(MemType::merge_into_mair(regs::mair_el1())) };
-        cpu::isb();
-        let root = regs::ttbr1_el1() & 0x0000_ffff_ffff_fffe;
-        let mut tables = HhdmTables { hhdm: mem.hhdm };
-        let slot = Mapper::new(&mut tables, root).free_l0_slot(256..511)?;
-        let base = paging::upper_half_l0_base(slot);
-        Some(Self {
-            base,
-            next: base,
-            root,
-            tables,
-            frames: mem.early_frames()?,
-        })
-    }
+/// All device mappings, so they can be replayed into the kernel's tables.
+struct Mmio {
+    maps: [MmioMapping; MAX_MMIO_MAPPINGS],
+    count: usize,
+    next: u64,
+    hhdm: u64,
+    early: Option<(u64, BumpFrames)>,
+}
 
-    pub fn base(&self) -> u64 {
-        self.base
-    }
+static MMIO: SpinLock<Option<Mmio>> = SpinLock::new(None);
 
-    /// Maps `len` bytes of device memory at `pa`; returns the virtual address.
-    pub fn map(&mut self, _mem: &BootMemory, pa: u64, len: u64) -> Result<u64, MapError> {
-        let page_off = pa % PAGE_SIZE;
-        let pages = (page_off + len).div_ceil(PAGE_SIZE);
-        let va = self.next;
-        if va + pages * PAGE_SIZE > self.base + MMIO_WINDOW - PAGE_SIZE {
-            return Err(MapError::OutOfFrames);
+/// Prepares device mappings in the bootloader's tables. Returns false if the
+/// MMIO slot is taken or no frames are available.
+pub fn init_early_mmio(mem: &BootMemory) -> bool {
+    // SAFETY: MAIR indices 0 and 1 (used by the bootloader's mappings) are
+    // preserved; the kernel's indices were unused until now.
+    unsafe { regs::set_mair_el1(MemType::merge_into_mair(regs::mair_el1())) };
+    cpu::isb();
+    let root = regs::ttbr1_el1() & 0x0000_ffff_ffff_fffe;
+    let mut tables = HhdmTables { hhdm: mem.hhdm };
+    let slot = paging::index(MMIO_BASE, 0);
+    if Mapper::new(&mut tables, root)
+        .free_l0_slot(slot..slot + 1)
+        .is_none()
+    {
+        return false;
+    }
+    let Some((base, len)) = mem.early_frames_range() else {
+        return false;
+    };
+    *MMIO.lock() = Some(Mmio {
+        maps: [MmioMapping {
+            va: 0,
+            pa: 0,
+            len: 0,
+        }; MAX_MMIO_MAPPINGS],
+        count: 0,
+        next: MMIO_BASE,
+        hhdm: mem.hhdm,
+        early: Some((root, BumpFrames::new(base, len))),
+    });
+    true
+}
+
+/// Maps `len` bytes of device memory at `pa`; returns the virtual address.
+/// Before the kernel tables are active this edits the bootloader's tables;
+/// afterwards it goes through `vm` (and fails once the tables are locked).
+pub fn map_mmio(pa: u64, len: u64) -> Result<u64, MapError> {
+    let mut guard = MMIO.lock();
+    let m = guard.as_mut().ok_or(MapError::OutOfFrames)?;
+    let page_off = pa % PAGE_SIZE;
+    let base = pa - page_off;
+    let size = (page_off + len).div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    let va = m.next;
+    if va + size > MMIO_BASE + MMIO_SIZE - PAGE_SIZE || m.count >= MAX_MMIO_MAPPINGS {
+        return Err(MapError::OutOfFrames);
+    }
+    let hhdm = m.hhdm;
+    match m.early.as_mut() {
+        Some((root, frames)) => {
+            let mut tables = HhdmTables { hhdm };
+            Mapper::new(&mut tables, *root).map_range(va, base, size, PageAttrs::mmio(), frames)?;
+            cpu::dsb_ishst();
+            cpu::isb();
         }
-        Mapper::new(&mut self.tables, self.root).map_range(
+        None => crate::vm::map_device(va, base, size)?,
+    }
+    if let Some(slot) = m.maps.get_mut(m.count) {
+        *slot = MmioMapping {
             va,
-            pa - page_off,
-            pages * PAGE_SIZE,
-            PageAttrs::mmio(),
-            &mut self.frames,
-        )?;
-        cpu::dsb_ishst();
-        cpu::isb();
-        self.next += pages * PAGE_SIZE;
-        Ok(va + page_off)
+            pa: base,
+            len: size,
+        };
     }
+    m.count += 1;
+    // Leave an unmapped page between mappings to catch overruns.
+    m.next += size + PAGE_SIZE;
+    Ok(va + page_off)
+}
 
-    /// An address inside the window that is guaranteed to be unmapped.
-    pub fn unmapped_probe(&self) -> u64 {
-        self.base + MMIO_WINDOW - PAGE_SIZE
+/// Replays every device mapping into a new table tree.
+pub fn replay_mmio<M: TableMemory, F: paging::FrameSource>(
+    mapper: &mut Mapper<'_, M>,
+    frames: &mut F,
+) -> Result<(), MapError> {
+    let guard = MMIO.lock();
+    let Some(m) = guard.as_ref() else {
+        return Ok(());
+    };
+    for map in m.maps.iter().take(m.count) {
+        mapper.map_range(map.va, map.pa, map.len, PageAttrs::mmio(), frames)?;
     }
+    Ok(())
+}
+
+/// Called once the kernel tables are active: later mappings go through `vm`.
+pub fn retire_early_mmio() {
+    if let Some(m) = MMIO.lock().as_mut() {
+        m.early = None;
+    }
+}
+
+/// An address in the MMIO window that is never mapped (for fault tests).
+pub fn unmapped_mmio_probe() -> u64 {
+    MMIO_BASE + MMIO_SIZE - PAGE_SIZE
+}
+
+/// Number of MMIO mappings and bytes mapped.
+pub fn mmio_stats() -> (usize, u64) {
+    MMIO.lock().as_ref().map_or((0, 0), |m| {
+        (m.count, m.maps.iter().take(m.count).map(|x| x.len).sum())
+    })
 }

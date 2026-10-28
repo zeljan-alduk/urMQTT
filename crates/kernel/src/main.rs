@@ -6,6 +6,9 @@
 #![cfg_attr(target_os = "none", no_std, no_main)]
 #![deny(unsafe_code)]
 
+#[cfg(target_os = "none")]
+extern crate alloc;
+
 // Crates not wired in yet are still linked so the bare-metal build checks them.
 use urmqtt_broker as _;
 use urmqtt_mqtt as _;
@@ -24,11 +27,17 @@ mod boot;
 #[cfg(target_os = "none")]
 mod console;
 #[cfg(target_os = "none")]
+mod layout;
+#[cfg(target_os = "none")]
 mod memory;
 #[cfg(target_os = "none")]
 mod power;
 #[cfg(target_os = "none")]
+mod selftest;
+#[cfg(target_os = "none")]
 mod trap;
+#[cfg(target_os = "none")]
+mod vm;
 
 /// Image version: `git describe` passed in by the Makefile, else the crate version.
 pub const VERSION: &str = match option_env!("URMQTT_VERSION") {

@@ -4,17 +4,20 @@
 
 use limine::BaseRevision;
 use limine::request::{
-    BootloaderInfoRequest, DateAtBootRequest, DtbRequest, ExecutableCmdlineRequest,
-    FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest, RsdpRequest,
+    BootloaderInfoRequest, DateAtBootRequest, DtbRequest, ExecutableAddressRequest,
+    ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest, Request,
+    RsdpRequest,
 };
 use limine::{RequestsEndMarker, RequestsStartMarker};
 
-use urmqtt_arch_aarch64::{exception, regs};
-use urmqtt_log::{info, warn};
+use urmqtt_arch_aarch64::features::Features;
+use urmqtt_arch_aarch64::sync::SpinLock;
+use urmqtt_arch_aarch64::{cpu, exception, pac, regs};
+use urmqtt_log::{error, info, warn};
 use urmqtt_platform::{EarlyPlatform, PsciMethod, Uart};
 
 use crate::cmdline::{BootOptions, TestFault};
-use crate::{VERSION, console, memory, power, trap};
+use crate::{VERSION, console, layout, memory, power, selftest, trap, vm};
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
@@ -50,6 +53,29 @@ static CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
 #[unsafe(link_section = ".requests")]
 static DATE_AT_BOOT: DateAtBootRequest = DateAtBootRequest::new();
 #[used]
+#[unsafe(link_section = ".requests")]
+static EXECUTABLE_ADDRESS: ExecutableAddressRequest = ExecutableAddressRequest::new();
+
+/// Limine "Entropy" response (not yet wrapped by the `limine` crate).
+#[repr(C)]
+pub struct EntropyRespData {
+    value_count: u64,
+    values: *const u64,
+}
+/// Random 64-bit values from the bootloader's best source (EFI RNG, RNDR).
+const ENTROPY_VALUES: u64 = 8;
+#[used]
+#[unsafe(link_section = ".requests")]
+// SAFETY: id and response layout follow the Limine protocol's Entropy feature.
+static ENTROPY: Request<EntropyRespData, u64> = unsafe {
+    Request::new_raw(
+        [0x65ea_8025_5d56_82c5, 0x9117_2407_23f4_93eb],
+        0,
+        ENTROPY_VALUES,
+    )
+};
+
+#[used]
 #[unsafe(link_section = ".requests_end_marker")]
 static REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
 
@@ -61,6 +87,7 @@ core::arch::global_asm!(
     ".section .text.boot, \"ax\"",
     ".global _start",
     "_start:",
+    "hint #34", // bti c
     "mrs x9, cpacr_el1",
     "orr x9, x9, #(3 << 20)",
     "msr cpacr_el1, x9",
@@ -80,6 +107,16 @@ core::arch::global_asm!(
 /// builds when neither the DTB nor SPCR describe a UART.
 const DEV_FALLBACK_UART: u64 = 0x0900_0000;
 
+/// State carried across the stack switch into [`kmain_stage2`].
+struct Stage2 {
+    options: BootOptions,
+    built: vm::Built,
+    early_frames: (u64, u64),
+    features: Features,
+}
+
+static STAGE2: SpinLock<Option<Stage2>> = SpinLock::new(None);
+
 #[unsafe(no_mangle)]
 extern "C" fn urmqtt_kmain() -> ! {
     exception::set_handler(trap::handle);
@@ -87,10 +124,10 @@ extern "C" fn urmqtt_kmain() -> ! {
 
     if !BASE_REVISION.is_supported() {
         // No console yet; nothing better to do than stop.
-        urmqtt_arch_aarch64::cpu::halt();
+        cpu::halt();
     }
     let Some(hhdm) = HHDM.response().map(|r| r.offset) else {
-        urmqtt_arch_aarch64::cpu::halt();
+        cpu::halt();
     };
     let memmap = MEMMAP.response().map_or(&[][..], |r| r.entries());
     let mem = memory::BootMemory::new(hhdm, memmap);
@@ -113,8 +150,10 @@ extern "C" fn urmqtt_kmain() -> ! {
         None => {}
     }
 
-    let mut mmio = memory::MmioWindow::new(&mem);
-    let uart_va = uart.and_then(|u| mmio.as_mut().and_then(|w| w.map(&mem, u.base, 0x1000).ok()));
+    let mmio_ok = memory::init_early_mmio(&mem);
+    let uart_va = uart
+        .filter(|_| mmio_ok)
+        .and_then(|u| memory::map_mmio(u.base, 0x1000).ok());
     if let Some(va) = uart_va {
         console::init_uart(va);
     }
@@ -156,9 +195,6 @@ extern "C" fn urmqtt_kmain() -> ! {
             uart.map_or(0, |u| u.base)
         );
     }
-    if let Some(w) = &mmio {
-        info!("mmio window at {:#x}", w.base());
-    }
     if el2 {
         warn!("entered at EL2 (VHE): untested configuration, PSCI only via SMC");
     }
@@ -183,15 +219,142 @@ extern "C" fn urmqtt_kmain() -> ! {
         warn!("ignored {} kernel command line option(s)", options.ignored);
     }
 
-    if let Some(fault) = options.test_fault {
-        run_test_fault(fault, mmio.as_ref().map(|w| w.unmapped_probe()));
+    // Memory management (M2): kernel page tables, frames, stacks, heap.
+    let features = Features::decode(pac::id_regs());
+    info!(
+        "cpu features: pauth={} fpac={} bti={} rndr={} aes={} pmull={} sha2={} lse={} mte={} sve={}",
+        features.pauth,
+        features.fpac,
+        features.bti,
+        features.rndr,
+        features.aes,
+        features.pmull,
+        features.sha2,
+        features.lse,
+        features.mte,
+        features.sve
+    );
+    let Some(exe) = EXECUTABLE_ADDRESS.response() else {
+        fatal("no executable address response from the bootloader");
+    };
+    let heap_mb = urmqtt_config::CONFIG.memory.kernel_heap_mb;
+    let built = match vm::build(
+        &mem,
+        exe.physical_base,
+        exe.virtual_base,
+        features.bti,
+        heap_mb,
+    ) {
+        Ok(b) => b,
+        Err(e) => fatal_fmt(format_args!(
+            "building the kernel address space failed: {e:?}"
+        )),
+    };
+    info!(
+        "vm: kernel tables built ({} table pages), {} MiB free, heap {heap_mb} MiB",
+        built.pt_frames,
+        (built.free_frames as u64 * 4096) >> 20
+    );
+
+    let pac_on = features.pauth && set_pac_key();
+    vm::activate();
+    info!("vm: switched to kernel tables (TTBR1), lower half disabled, WXN on");
+    let (main_top, exc_top) = (built.main_top, built.exc_top);
+    *STAGE2.lock() = Some(Stage2 {
+        options,
+        built,
+        early_frames: mem.early_frames_range().unwrap_or((0, 0)),
+        features,
+    });
+    // SAFETY: both stacks were mapped by `vm::build` and are 16-byte aligned
+    // at the top; this frame (on the bootloader's stack) is abandoned.
+    unsafe { pac::switch_to(main_top, exc_top, 0, kmain_stage2, pac_on) }
+}
+
+/// Seeds the IA key from bootloader entropy (and RNDR if present).
+fn set_pac_key() -> bool {
+    let mut key = [0u64; 2];
+    let from_limine = ENTROPY.response().and_then(|r| {
+        let n = usize::try_from(r.value_count)
+            .ok()?
+            .min(ENTROPY_VALUES as usize);
+        if n < 2 || r.values.is_null() {
+            return None;
+        }
+        // SAFETY: Limine provides `value_count` u64s at `values` (HHDM).
+        Some(unsafe { core::slice::from_raw_parts(r.values, n) })
+    });
+    let Some(values) = from_limine else {
+        warn!("pac: no bootloader entropy, leaving pointer authentication off");
+        return false;
+    };
+    for (i, v) in values.iter().enumerate() {
+        if let Some(k) = key.get_mut(i % 2) {
+            *k ^= v.rotate_left((i as u32) * 17);
+        }
+    }
+    // SAFETY: PAC is not enabled yet, no signed pointers exist.
+    unsafe { pac::set_ia_key(key[0], key[1]) };
+    true
+}
+
+/// Runs on the kernel's main stack (SP_EL0) with exceptions on SP_EL1.
+extern "C" fn kmain_stage2(_arg: u64) -> ! {
+    let Some(s) = STAGE2.lock().take() else {
+        fatal("stage 2 entered without state");
+    };
+    vm::retire_early_frames(s.early_frames);
+    if let Err(e) = vm::init_heap(s.built.heap_order, s.built.heap_meta_words) {
+        fatal_fmt(format_args!("heap init failed: {e:?}"));
+    }
+    info!(
+        "vm: running on kernel stacks (main {} KiB at {:#x}, exception {} KiB), pac={} bti={}",
+        layout::MAIN_STACK_SIZE >> 10,
+        s.built.main_top,
+        layout::EXC_STACK_SIZE >> 10,
+        if s.features.pauth {
+            "on"
+        } else {
+            "unsupported"
+        },
+        if s.features.bti { "on" } else { "unsupported" },
+    );
+
+    let (mmio_maps, mmio_bytes) = memory::mmio_stats();
+    info!("vm: {mmio_maps} MMIO mapping(s), {} KiB", mmio_bytes >> 10);
+    if let Err(msg) = selftest::memory() {
+        fatal(msg);
+    }
+    match vm::lock() {
+        Ok(bytes) => info!(
+            "vm: page tables locked ({} KiB read-only, no writable alias)",
+            bytes >> 10
+        ),
+        Err(e) => fatal_fmt(format_args!("locking page tables failed: {e:?}")),
+    }
+    if let Err(msg) = selftest::wx_audit() {
+        fatal(msg);
+    }
+
+    if let Some(fault) = s.options.test_fault {
+        run_test_fault(fault, s.features);
     }
 
     urmqtt_log::raw(format_args!("URMQTT READY\n"));
-    if options.smoke {
+    if s.options.smoke {
         power::off();
     }
-    urmqtt_arch_aarch64::cpu::halt();
+    cpu::halt();
+}
+
+fn fatal(msg: &str) -> ! {
+    error!("fatal: {msg}");
+    power::fatal()
+}
+
+fn fatal_fmt(args: core::fmt::Arguments<'_>) -> ! {
+    error!("fatal: {args}");
+    power::fatal()
 }
 
 /// Nanoseconds since the counter started (boot), from the generic timer.
@@ -212,19 +375,22 @@ fn discover(mem: &memory::BootMemory) -> Option<EarlyPlatform> {
     urmqtt_platform::early_from_acpi(&acpi).ok()
 }
 
-fn run_test_fault(fault: TestFault, probe: Option<u64>) {
+fn run_test_fault(fault: TestFault, features: Features) {
     warn!("test mode: triggering {fault:?}");
     match fault {
-        TestFault::DataAbort => {
-            if let Some(va) = probe {
-                trap::probe_read(va);
-            }
-        }
+        TestFault::DataAbort => trap::probe_read(memory::unmapped_mmio_probe()),
         TestFault::BrkResume => {
             trap::brk_resume();
             info!("test: resumed after brk");
         }
         TestFault::Undefined => trap::undefined_instruction(),
         TestFault::Panic => panic!("test panic requested on the command line"),
+        TestFault::WriteText => selftest::write_text(),
+        TestFault::ExecHeap => selftest::exec_heap(),
+        TestFault::StackOverflow => selftest::stack_overflow(),
+        TestFault::NullDeref => trap::probe_read(0x8),
+        TestFault::Pac if features.pauth => selftest::pac_violation(),
+        TestFault::Bti if features.bti => selftest::bti_violation(),
+        TestFault::Pac | TestFault::Bti => info!("test: {fault:?} skipped, CPU lacks the feature"),
     }
 }

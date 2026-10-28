@@ -15,6 +15,18 @@ pub enum TestFault {
     Undefined,
     /// Kernel panic.
     Panic,
+    /// Store to kernel text (must be a permission fault).
+    WriteText,
+    /// Branch into heap memory (must be an instruction abort, PXN).
+    ExecHeap,
+    /// Unbounded recursion into the guard page.
+    StackOverflow,
+    /// Load through a near-null pointer (lower half is disabled).
+    NullDeref,
+    /// Return through a corrupted, unsigned return address.
+    Pac,
+    /// Indirect branch to an instruction without a BTI landing pad.
+    Bti,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,6 +52,12 @@ impl BootOptions {
                 "test=brk" => o.test_fault = Some(TestFault::BrkResume),
                 "test=undef" => o.test_fault = Some(TestFault::Undefined),
                 "test=panic" => o.test_fault = Some(TestFault::Panic),
+                "test=write-text" => o.test_fault = Some(TestFault::WriteText),
+                "test=exec-heap" => o.test_fault = Some(TestFault::ExecHeap),
+                "test=stack-overflow" => o.test_fault = Some(TestFault::StackOverflow),
+                "test=null" => o.test_fault = Some(TestFault::NullDeref),
+                "test=pac" => o.test_fault = Some(TestFault::Pac),
+                "test=bti" => o.test_fault = Some(TestFault::Bti),
                 _ => o.ignored += 1,
             }
         }

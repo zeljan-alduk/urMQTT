@@ -11,14 +11,15 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M1)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M2)-red)
 
 </div>
 
 > [!WARNING]
-> **urMQTT is pre-alpha and does not serve MQTT yet.** Milestones **M0** (workspace, configuration,
-> tooling, CI) and **M1** (UEFI boot, console, decoded exception reports, PSCI power control) are
-> complete, and the kernel boots under QEMU with HVF and TCG. MQTT over TLS arrives in **M10**. Every feature and example below is tagged with the milestone that delivers it, and
+> **urMQTT is pre-alpha and does not serve MQTT yet.** **M0** (tooling, CI), **M1** (UEFI boot,
+> console, exception reports) and **M2** (own page tables with enforced W^X, guard pages, locked
+> tables, PAC and BTI) are complete. The kernel boots under QEMU with HVF and TCG. MQTT over TLS
+> arrives in **M10**. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
 
 ---
@@ -71,7 +72,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | Bootable UEFI ISO (Limine) for aarch64 | ✅ M1 |
 | | Bit-for-bit reproducible, signed images; raw disk image | 📋 M17 |
 | **Kernel** | EL1 exception vectors with decoded ESR/ELR/FAR reports | ✅ M1 |
-| | Own page tables with W^X, guard pages, PAC/BTI when present | 📋 M2 |
+| | Own page tables with W^X, guard pages, PAC/BTI when present | ✅ M2 |
 | | GICv3, generic timer, monotonic clock | 📋 M3 |
 | | SMP bring-up, per-CPU data (`TPIDR_EL1`), SGI IPIs | 📋 M4 |
 | | Hardware discovery via **DTB and ACPI** (MADT, GTDT, MCFG, SPCR) | 📋 M5 |
@@ -201,7 +202,12 @@ against:
 - **One port.** TCP 8883: TLS 1.3 only, client certificates required, signed by the CA compiled into the image. The MQTT client id must equal the certificate's device id.
 - **No ways in.** No shell, console input, SSH, admin API, dynamic code, network-reachable SQL or filesystem.
 - **Memory safety.** Rust, with `forbid(unsafe_code)` in the protocol crates, every `unsafe` block justified with a `// SAFETY:` comment (lint-enforced), and no panics on external input (clippy denies `unwrap`, `expect`, indexing and `panic!` in data-path crates).
-- **Exploit mitigation.** W^X, page tables locked after boot, guard pages, PAC/BTI when the CPU supports them.
+- **Exploit mitigation.**
+  - W^X is enforced by the descriptor encoding and by `SCTLR_EL1.WXN`, and audited on every boot.
+  - Page tables are read-only after boot, with no writable alias left.
+  - The lower half of the address space is disabled.
+  - Every stack has guard pages, and exceptions run on a separate stack.
+  - PAC (`pac-ret`) and BTI are enabled when the CPU supports them, and verified by the smoke tests.
 - **Abuse resistance.** SYN cookies, per-core handshake admission control, per-device rate limits, bounded queues, and a TCP window tied to broker backpressure.
 - **Immutable.** Configuration, CA and server key are baked into the image, and changing anything means a new image.
 
@@ -304,8 +310,25 @@ URMQTT BOOT 0.0.1 cpu=4 mem=503
 URMQTT READY
 ```
 
-`make smoke` boots six scenarios under HVF and TCG (ACPI and device-tree discovery, a data
-abort, an undefined instruction, a resumable `brk`, a panic) and checks the decoded reports:
+Boot also builds the kernel's own address space and audits it before announcing readiness:
+
+```text
+[    5.162] INFO  cpu features: pauth=true fpac=true bti=true rndr=false aes=true pmull=true ...
+[    5.164] INFO  vm: kernel tables built (45 table pages), 442 MiB free, heap 32 MiB
+[    5.164] INFO  vm: switched to kernel tables (TTBR1), lower half disabled, WXN on
+[    5.165] INFO  vm: running on kernel stacks (main 128 KiB ...), pac=on bti=on
+[    5.166] INFO  vm: page tables locked (2048 KiB read-only, no writable alias)
+[    5.167] INFO  selftest: W^X ok (13385 leaf mappings audited, 0 W+X, text-only execute, ...)
+```
+
+`make smoke` boots twelve scenarios under HVF and TCG and checks the decoded reports:
+- ACPI and device-tree discovery
+- data abort, undefined instruction, resumable `brk`, panic
+- write to kernel text, executing heap memory
+- stack overflow into the guard page, null pointer
+- forged return address (PAC), branch to a non-landing pad (BTI)
+
+A data abort report looks like this:
 
 ```text
 !!! EXCEPTION: synchronous, current EL, SPx
@@ -565,7 +588,7 @@ shasum -a 256 build/urmqtt-prod-*.iso
 | `make build` | Release kernel ELF (fat LTO, `codegen-units=1`, `panic=abort`) |
 | `make iso ENV=…` | Bootable UEFI ISO |
 | `make run` / `run-tcg` / `run-smp N=8` / `debug` | QEMU variants (M1, M4) |
-| `make smoke` | Headless boot scenarios under HVF + TCG (TCG only in CI), serial-log checks |
+| `make smoke` | Headless boot and fault scenarios under HVF + TCG (TCG only in CI), serial-log checks |
 | `make data-img` | Blank sparse data disk (layout initialised from M11) |
 | `make fuzz T=<target>` | Bounded cargo-fuzz run (`FUZZ_TIME`, default 600 s) |
 | `make loadtest` | Host-side load generator (M10/M13) |
@@ -613,7 +636,7 @@ shasum -a 256 -c SHA256SUMS
 |---|---|---|
 | ✅ | **M0** Workspace & tooling | `make check` green on macOS |
 | ✅ | **M1** Boot | Limine ISO boots under HVF and TCG; a test fault prints a decoded exception |
-| 📋 | **M2** Memory | W^X verified by deliberate faults; PAC/BTI detection logged |
+| ✅ | **M2** Memory | W^X verified by deliberate faults; PAC/BTI detection logged |
 | 📋 | **M3** Interrupts & time | GICv3, periodic tick, IRQ latency measured |
 | 📋 | **M4** SMP | `run-smp N=8`, IPI ping-pong between all core pairs |
 | 📋 | **M5** Platform discovery | `acpi=on` and `acpi=off` give identical summaries |

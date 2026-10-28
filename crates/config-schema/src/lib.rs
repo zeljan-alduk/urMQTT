@@ -95,6 +95,13 @@ struct RawConfig {
     storage: RawStorage,
     observability: RawObservability,
     watchdog: RawWatchdog,
+    memory: RawMemory,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMemory {
+    kernel_heap_mb: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -236,6 +243,11 @@ pub struct Observability {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Memory {
+    pub kernel_heap_mb: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watchdog {
     pub handler_budget_ms: u32,
     pub action: WatchdogAction,
@@ -252,6 +264,7 @@ pub struct Config {
     pub storage: Storage,
     pub observability: Observability,
     pub watchdog: Watchdog,
+    pub memory: Memory,
 }
 
 /// Environments allowed to open the plaintext MQTT port.
@@ -278,6 +291,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
     let storage = validate_storage(&raw.storage, &limits, &mut errors);
     let observability = validate_observability(&raw.observability, &mut errors);
     let watchdog = validate_watchdog(&raw.watchdog, &mut errors);
+    let memory = validate_memory(&raw.memory, &mut errors);
 
     if !errors.is_empty() {
         return Err(errors);
@@ -291,6 +305,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         storage,
         observability,
         watchdog,
+        memory,
     })
 }
 
@@ -648,6 +663,17 @@ fn validate_watchdog(raw: &RawWatchdog, errors: &mut Vec<ConfigError>) -> Watchd
     }
 }
 
+fn validate_memory(raw: &RawMemory, errors: &mut Vec<ConfigError>) -> Memory {
+    let mb = raw.kernel_heap_mb;
+    if !(1..=1024).contains(&mb) || !mb.is_power_of_two() {
+        errors.push(err(
+            "memory.kernel_heap_mb",
+            "must be a power of two in 1..=1024 (the heap is one buddy region)",
+        ));
+    }
+    Memory { kernel_heap_mb: mb }
+}
+
 /// Kind of PEM object expected in an embedded file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PemKind {
@@ -781,6 +807,9 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         handler_budget_ms: {hb},
         action: WatchdogAction::{wa:?},
     }},
+    memory: Memory {{
+        kernel_heap_mb: {heap_kernel},
+    }},
 }};
 
 /// CA certificate (PEM) that device certificates must chain to.
@@ -815,6 +844,7 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         metrics = render_addr(cfg.observability.metrics_udp),
         hb = cfg.watchdog.handler_budget_ms,
         wa = cfg.watchdog.action,
+        heap_kernel = cfg.memory.kernel_heap_mb,
         ca = files.ca,
         cert = files.cert,
         key = files.key,

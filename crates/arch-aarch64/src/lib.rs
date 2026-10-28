@@ -9,6 +9,7 @@
 #![deny(unsafe_code)]
 
 pub mod esr;
+pub mod features;
 pub mod paging;
 pub mod sync;
 
@@ -16,6 +17,8 @@ pub mod sync;
 pub mod cpu;
 #[cfg(target_os = "none")]
 pub mod exception;
+#[cfg(target_os = "none")]
+pub mod pac;
 #[cfg(target_os = "none")]
 pub mod psci;
 #[cfg(target_os = "none")]

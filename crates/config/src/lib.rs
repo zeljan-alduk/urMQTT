@@ -114,6 +114,12 @@ pub struct Watchdog {
     pub action: WatchdogAction,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Memory {
+    /// Kernel heap (buddy allocator), a power of two.
+    pub kernel_heap_mb: u32,
+}
+
 /// The complete build-time configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildConfig {
@@ -126,6 +132,7 @@ pub struct BuildConfig {
     pub storage: Storage,
     pub observability: Observability,
     pub watchdog: Watchdog,
+    pub memory: Memory,
 }
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));

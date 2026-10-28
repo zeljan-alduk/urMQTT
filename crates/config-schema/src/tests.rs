@@ -293,6 +293,26 @@ fn storage_bounds() {
 }
 
 #[test]
+fn kernel_heap_must_be_power_of_two() {
+    assert_rejected(
+        "dev",
+        &dev_with("kernel_heap_mb", "kernel_heap_mb = 24"),
+        "memory.kernel_heap_mb",
+    );
+    assert_rejected(
+        "dev",
+        &dev_with("kernel_heap_mb", "kernel_heap_mb = 0"),
+        "memory.kernel_heap_mb",
+    );
+    assert_rejected(
+        "dev",
+        &dev_with("kernel_heap_mb", "kernel_heap_mb = 2048"),
+        "memory.kernel_heap_mb",
+    );
+    assert_eq!(parse("dev", DEV).unwrap().memory.kernel_heap_mb, 32);
+}
+
+#[test]
 fn file_names_must_stay_in_env_dir() {
     for bad in ["", ".", "..", "../x.pem", "a/b.pem", ".hidden", "c:\\x"] {
         assert!(check_file_name(bad).is_err(), "{bad:?} must be rejected");
@@ -357,4 +377,5 @@ fn render_contains_validated_values() {
     assert!(out.contains("metrics_udp: None"));
     assert!(out.contains("LogLevel::Debug"));
     assert!(out.contains(r#"include_bytes!("/abs/server.key")"#));
+    assert!(out.contains("kernel_heap_mb: 32"));
 }

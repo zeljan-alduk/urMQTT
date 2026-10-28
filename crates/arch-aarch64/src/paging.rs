@@ -131,6 +131,15 @@ pub const fn page_descriptor(pa: u64, attrs: PageAttrs) -> u64 {
     d
 }
 
+/// Size of a level-2 block mapping.
+pub const BLOCK_2M: u64 = 2 << 20;
+
+/// Encodes a level-2 (2 MiB) block descriptor with the same attributes as
+/// [`page_descriptor`].
+pub const fn block_descriptor(pa: u64, attrs: PageAttrs) -> u64 {
+    (page_descriptor(0, attrs) & !TABLE_OR_PAGE) | (pa & ADDR_MASK & !(BLOCK_2M - 1))
+}
+
 /// Encodes a table descriptor pointing at the next-level table.
 pub const fn table_descriptor(table_pa: u64) -> u64 {
     (table_pa & ADDR_MASK) | VALID | TABLE_OR_PAGE
@@ -188,9 +197,11 @@ pub enum MapError {
     OutOfFrames,
 }
 
+/// With 48-bit regions (T0SZ = T1SZ = 16), TTBR0 covers addresses whose top
+/// 16 bits are zero and TTBR1 those whose top 16 bits are all ones.
 const fn is_canonical(va: u64) -> bool {
-    let top = va >> 47;
-    top == 0 || top == 0x1_ffff
+    let top = va >> 48;
+    top == 0 || top == 0xffff
 }
 
 /// Walks and edits one translation regime rooted at `root` (TTBRn base).
@@ -224,20 +235,7 @@ impl<'m, M: TableMemory> Mapper<'m, M> {
         }
         let mut table = self.root;
         for level in 0..3u8 {
-            let idx = index(va, level);
-            let desc = self.mem.read(table, idx);
-            table = if desc & VALID == 0 {
-                let new = frames.alloc_frame().ok_or(MapError::OutOfFrames)?;
-                for i in 0..ENTRIES {
-                    self.mem.write(new, i, 0);
-                }
-                self.mem.write(table, idx, table_descriptor(new));
-                new
-            } else if desc & TABLE_OR_PAGE == 0 {
-                return Err(MapError::BlockInTheWay);
-            } else {
-                desc & ADDR_MASK
-            };
+            table = self.next_table(table, index(va, level), frames)?;
         }
         let idx = index(va, 3);
         let new = page_descriptor(pa, attrs);
@@ -270,6 +268,143 @@ impl<'m, M: TableMemory> Mapper<'m, M> {
         Ok(())
     }
 
+    /// Maps one 2 MiB block at level 2.
+    pub fn map_block_2m<F: FrameSource>(
+        &mut self,
+        va: u64,
+        pa: u64,
+        attrs: PageAttrs,
+        frames: &mut F,
+    ) -> Result<(), MapError> {
+        if !va.is_multiple_of(BLOCK_2M) || !pa.is_multiple_of(BLOCK_2M) {
+            return Err(MapError::Unaligned);
+        }
+        if !is_canonical(va) {
+            return Err(MapError::NonCanonical);
+        }
+        let mut table = self.root;
+        for level in 0..2u8 {
+            table = self.next_table(table, index(va, level), frames)?;
+        }
+        let idx = index(va, 2);
+        let new = block_descriptor(pa, attrs);
+        let old = self.mem.read(table, idx);
+        if old & VALID != 0 {
+            return if old == new {
+                Ok(())
+            } else {
+                Err(MapError::AlreadyMapped)
+            };
+        }
+        self.mem.write(table, idx, new);
+        Ok(())
+    }
+
+    /// Like [`map_range`](Self::map_range) but uses 2 MiB blocks wherever
+    /// both addresses are block aligned and a whole block remains.
+    pub fn map_range_auto<F: FrameSource>(
+        &mut self,
+        va: u64,
+        pa: u64,
+        len: u64,
+        attrs: PageAttrs,
+        frames: &mut F,
+    ) -> Result<(), MapError> {
+        let end = len.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+        let mut off = 0;
+        while off < end {
+            let (v, p) = (va + off, pa + off);
+            if v.is_multiple_of(BLOCK_2M) && p.is_multiple_of(BLOCK_2M) && end - off >= BLOCK_2M {
+                self.map_block_2m(v, p, attrs, frames)?;
+                off += BLOCK_2M;
+            } else {
+                self.map_page(v, p, attrs, frames)?;
+                off += PAGE_SIZE;
+            }
+        }
+        Ok(())
+    }
+
+    fn next_table<F: FrameSource>(
+        &mut self,
+        table: u64,
+        idx: usize,
+        frames: &mut F,
+    ) -> Result<u64, MapError> {
+        let desc = self.mem.read(table, idx);
+        if desc & VALID == 0 {
+            let new = frames.alloc_frame().ok_or(MapError::OutOfFrames)?;
+            for i in 0..ENTRIES {
+                self.mem.write(new, i, 0);
+            }
+            self.mem.write(table, idx, table_descriptor(new));
+            Ok(new)
+        } else if desc & TABLE_OR_PAGE == 0 {
+            Err(MapError::BlockInTheWay)
+        } else {
+            Ok(desc & ADDR_MASK)
+        }
+    }
+
+    /// Changes the access permissions of an existing 4 KiB page, keeping
+    /// its address and memory type. Used to make page tables read-only.
+    pub fn set_page_access(&mut self, va: u64, access: Access) -> Result<(), MapError> {
+        let mut table = self.root;
+        for level in 0..3u8 {
+            let desc = self.mem.read(table, index(va, level));
+            if desc & VALID == 0 || desc & TABLE_OR_PAGE == 0 {
+                return Err(MapError::BlockInTheWay);
+            }
+            table = desc & ADDR_MASK;
+        }
+        let idx = index(va, 3);
+        let old = self.mem.read(table, idx);
+        if old & VALID == 0 {
+            return Err(MapError::BlockInTheWay);
+        }
+        let attrs = PageAttrs {
+            access,
+            mem: match Leaf::decode(old).attr_index {
+                1 => MemType::Framebuffer,
+                2 => MemType::Device,
+                3 => MemType::DeviceStrict,
+                4 => MemType::NonCacheable,
+                _ => MemType::Normal,
+            },
+            bti_guarded: old & GP != 0,
+        };
+        self.mem
+            .write(table, idx, page_descriptor(old & ADDR_MASK, attrs));
+        Ok(())
+    }
+
+    /// Calls `f(va, descriptor, level)` for every valid leaf. `upper` selects
+    /// how VAs are formed (TTBR1 upper half vs TTBR0 lower half).
+    pub fn for_each_leaf<G: FnMut(u64, u64, u8)>(&self, upper: bool, mut f: G) {
+        self.walk(
+            self.root,
+            0,
+            if upper { 0xffff_0000_0000_0000 } else { 0 },
+            &mut f,
+        );
+    }
+
+    fn walk<G: FnMut(u64, u64, u8)>(&self, table: u64, level: u8, va_base: u64, f: &mut G) {
+        let shift = 39 - 9 * u64::from(level);
+        for i in 0..ENTRIES {
+            let desc = self.mem.read(table, i);
+            if desc & VALID == 0 {
+                continue;
+            }
+            let va = va_base | ((i as u64) << shift);
+            if level == 3 || desc & TABLE_OR_PAGE == 0 {
+                f(va, desc, level);
+            } else {
+                self.walk(desc & ADDR_MASK, level + 1, va, f);
+            }
+        }
+    }
+
     /// Translates `va` through the tables: the leaf descriptor and the level
     /// it was found at (1 or 2 for blocks, 3 for pages).
     pub fn lookup(&self, va: u64) -> Option<(u64, u8)> {
@@ -289,6 +424,20 @@ impl<'m, M: TableMemory> Mapper<'m, M> {
             table = desc & ADDR_MASK;
         }
         None
+    }
+
+    /// Physical address of the table consulted at `level` (0 = root) when
+    /// translating `va`, if the walk reaches that level.
+    pub fn table_at_level(&self, va: u64, level: u8) -> Option<u64> {
+        let mut table = self.root;
+        for l in 0..level {
+            let desc = self.mem.read(table, index(va, l));
+            if desc & VALID == 0 || desc & TABLE_OR_PAGE == 0 {
+                return None;
+            }
+            table = desc & ADDR_MASK;
+        }
+        Some(table)
     }
 
     /// Physical address `va` maps to, if any.
@@ -466,6 +615,79 @@ mod tests {
         assert_eq!(
             m.map_page(0x1000, 0, PageAttrs::data(), &mut frames),
             Err(MapError::OutOfFrames)
+        );
+    }
+
+    #[test]
+    fn auto_ranges_use_blocks_and_walk_finds_everything() {
+        let mut mem = FakeMem::default();
+        let mut frames = Bump(0x20_0000, 0x40_0000);
+        let mut m = Mapper::new(&mut mem, ROOT);
+        let va = upper_half_l0_base(0);
+        // 1 page + 2 blocks + 1 page.
+        m.map_range_auto(
+            va + BLOCK_2M - PAGE_SIZE,
+            0x4000_0000 + BLOCK_2M - PAGE_SIZE,
+            2 * BLOCK_2M + 2 * PAGE_SIZE,
+            PageAttrs::data(),
+            &mut frames,
+        )
+        .unwrap();
+        let mut seen = Vec::new();
+        m.for_each_leaf(true, |va, d, level| {
+            seen.push((va, Leaf::decode(d).pa, level))
+        });
+        assert_eq!(seen.len(), 4);
+        assert_eq!(seen.iter().filter(|s| s.2 == 2).count(), 2);
+        assert_eq!(
+            m.translate(va + BLOCK_2M + 0x1234),
+            Some(0x4000_0000 + BLOCK_2M + 0x1234)
+        );
+        assert_eq!(seen[1], (va + BLOCK_2M, 0x4000_0000 + BLOCK_2M, 2));
+        assert!(seen.iter().all(|s| s.0 >> 48 == 0xffff));
+    }
+
+    #[test]
+    fn set_page_access_downgrades_in_place() {
+        let mut mem = FakeMem::default();
+        let mut frames = Bump(0x20_0000, 0x30_0000);
+        let mut m = Mapper::new(&mut mem, ROOT);
+        let va = upper_half_l0_base(10);
+        m.map_page(va, 0x5000, PageAttrs::data(), &mut frames)
+            .unwrap();
+        m.set_page_access(va, Access::ReadOnly).unwrap();
+        let (d, _) = m.lookup(va).unwrap();
+        let leaf = Leaf::decode(d);
+        assert_eq!(
+            (leaf.pa, leaf.writable, leaf.executable),
+            (0x5000, false, false)
+        );
+        assert_eq!(
+            m.set_page_access(va + PAGE_SIZE, Access::ReadOnly),
+            Err(MapError::BlockInTheWay)
+        );
+        m.map_block_2m(upper_half_l0_base(11), 0, PageAttrs::data(), &mut frames)
+            .unwrap();
+        assert_eq!(
+            m.set_page_access(upper_half_l0_base(11), Access::ReadOnly),
+            Err(MapError::BlockInTheWay)
+        );
+    }
+
+    #[test]
+    fn block_descriptor_keeps_wx_rules() {
+        let d = block_descriptor(0x4020_0000, PageAttrs::data());
+        assert_eq!(d & 0b11, 0b01);
+        assert_eq!(Leaf::decode(d).pa, 0x4020_0000);
+        assert!(!Leaf::decode(d).executable);
+        assert_eq!(
+            Mapper::new(&mut FakeMem::default(), ROOT).map_block_2m(
+                0x1000,
+                0,
+                PageAttrs::data(),
+                &mut Bump(0, 0)
+            ),
+            Err(MapError::Unaligned)
         );
     }
 

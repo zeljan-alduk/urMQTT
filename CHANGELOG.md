@@ -11,5 +11,6 @@ All notable changes to this project are documented here. The format follows
 - M0: Cargo workspace with all crates, pinned nightly toolchain and Makefile.
 - M0: Validated build-time configuration (`deploy/<env>/config.toml`) compiled into typed constants.
 - M0: Dev certificate generator, including negative-test certificates.
+- M2: Kernel page tables with enforced W^X, locked tables, guard pages, frame allocator, buddy heap, PAC/BTI.
 - M1: Bootable UEFI ISO, console, decoded exception reports, PSCI, `make run`/`smoke`, CI smoke job.
 - M0: CI and CD: lint, host tests, kernel build, cargo-deny, fuzzing, CodeQL, Scorecard, Dependabot and a release workflow with provenance.

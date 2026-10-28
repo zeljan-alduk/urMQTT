@@ -1,0 +1,5 @@
+# Kernel (bare-metal) builds are instrumented for PAC and BTI (ADR-002).
+# They also need -Zbuild-std, which the Makefile passes (KERNEL_FLAGS);
+# host builds and tests are unaffected.
+[target.aarch64-unknown-none]
+rustflags = ["-Zbranch-protection=bti,pac-ret"]

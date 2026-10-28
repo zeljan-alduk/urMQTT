@@ -110,13 +110,16 @@ echo "smoke: accelerators: $ACCELS"
 BOOT_LINE='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$'
 NO_FAULT='NOT:EXCEPTION|PANIC'
 
+MEMORY_OK=("vm: switched to kernel tables" "selftest: frames ok" "page tables locked" "selftest: W\^X ok \([0-9]+ leaf mappings audited, 0 W\+X")
+
 scenario boot-acpi "smoke" on \
     "$BOOT_LINE" "platform: Acpi" "console: pl011 at 0x9000000" "psci 1\.[0-9]+ via hvc" \
-    "^URMQTT READY$" "$NO_FAULT"
+    "${MEMORY_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 scenario boot-dtb "smoke" off \
-    "$BOOT_LINE" "platform: DeviceTree" "console: pl011 at 0x9000000" "^URMQTT READY$" "$NO_FAULT"
+    "$BOOT_LINE" "platform: DeviceTree" "console: pl011 at 0x9000000" "${MEMORY_OK[@]}" \
+    "^URMQTT READY$" "$NO_FAULT"
 scenario fault-data-abort "smoke test=data-abort" on \
-    "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SPx" \
+    "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
     "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \
     "fatal exception, stopping" "NOT:URMQTT READY"
 scenario fault-undefined "smoke test=undef" on \
@@ -125,6 +128,20 @@ scenario brk-resume "smoke test=brk" on \
     "resumable brk at 0x" "test: resumed after brk" "^URMQTT READY$" "NOT:fatal exception"
 scenario panic "smoke test=panic" on \
     "PANIC: panicked at" "test panic requested on the command line" "NOT:URMQTT READY"
+# M2: W^X, guard pages, lower half, PAC, BTI.
+scenario wx-write-text "smoke test=write-text" on \
+    "${MEMORY_OK[@]}" "data abort \(same EL\), write, permission fault, level 3" "NOT:URMQTT READY"
+scenario wx-exec-heap "smoke test=exec-heap" on \
+    "instruction abort \(same EL\), permission fault, level 3" "NOT:URMQTT READY"
+scenario stack-overflow "smoke test=stack-overflow" on \
+    "EXCEPTION: synchronous, current EL, SP0" "data abort \(same EL\), write, translation fault" \
+    "FAR is in: main stack guard page \(stack overflow\)" "NOT:URMQTT READY"
+scenario null-deref "smoke test=null" on \
+    "translation fault, level 0" "FAR is in: lower half" "NOT:URMQTT READY"
+scenario pac-forgery "smoke test=pac" on \
+    "pointer authentication failure|instruction abort" "NOT:was NOT detected" "NOT:URMQTT READY"
+scenario bti-violation "smoke test=bti" on \
+    "branch target exception \(BTI\)" "NOT:was NOT detected" "NOT:URMQTT READY"
 
 echo "smoke: $PASSED passed, $FAILED failed"
 [[ $FAILED -eq 0 ]]

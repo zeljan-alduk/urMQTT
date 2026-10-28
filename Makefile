@@ -16,6 +16,8 @@ DATA_SIZE ?= 1G
 TARGET      := aarch64-unknown-none
 CARGO       := cargo
 CARGO_FLAGS := --locked
+# core/alloc rebuilt with the kernel's branch protection (ADR-002).
+KERNEL_FLAGS := -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
 BUILD_DIR   := build
 KERNEL_ELF  := target/$(TARGET)/release/urmqtt
@@ -43,7 +45,7 @@ certs: ## Generate development certificates into deploy/dev/ (idempotent)
 
 .PHONY: build
 build: $(if $(filter dev,$(ENV)),certs) ## Build the kernel ELF (release, LTO, panic=abort)
-	$(CARGO) build $(CARGO_FLAGS) --release -p urmqtt-kernel --target $(TARGET)
+	$(CARGO) build $(CARGO_FLAGS) $(KERNEL_FLAGS) --release -p urmqtt-kernel --target $(TARGET)
 	@printf 'kernel: %s (%s bytes)\n' "$(KERNEL_ELF)" "$$(wc -c < $(KERNEL_ELF) | tr -d ' ')"
 
 .PHONY: iso
@@ -83,7 +85,7 @@ check: certs ## fmt --check, clippy -D warnings (host + bare metal), host tests
 	$(CARGO) fmt --all --check
 	cd fuzz && $(CARGO) fmt --check
 	$(CARGO) clippy $(CARGO_FLAGS) --workspace --all-targets -- -D warnings
-	$(CARGO) clippy $(CARGO_FLAGS) -p urmqtt-kernel --target $(TARGET) -- -D warnings
+	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-kernel --target $(TARGET) -- -D warnings
 	$(CARGO) test $(CARGO_FLAGS) --workspace
 
 .PHONY: fuzz

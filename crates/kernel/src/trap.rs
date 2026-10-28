@@ -37,6 +37,11 @@ pub fn handle(frame: &mut TrapFrame, vector: Vector) {
     emergency(format_args!("\n!!! EXCEPTION: {}\n", vector.name()));
     if vector.is_synchronous() {
         emergency(format_args!("    {esr}\n"));
+        if esr.class().is_abort()
+            && let Some((what, cpu)) = crate::layout::describe(frame.far)
+        {
+            emergency(format_args!("    FAR is in: {what} (cpu {cpu})\n"));
+        }
     }
     emergency(format_args!(
         "    ESR={:#018x} ELR={:#018x} FAR={:#018x} SPSR={:#010x}\n",
