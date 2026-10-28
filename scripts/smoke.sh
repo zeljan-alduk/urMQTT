@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# Boots urMQTT headless and checks the serial log. Non-zero exit on any failure.
+#
+#   scripts/smoke.sh [--kernel ELF] [--accels "hvf tcg"] [--out build/smoke]
+#
+# Each scenario builds an ISO with a dev-only kernel command line, boots it,
+# waits for QEMU to exit (the kernel powers off via PSCI in smoke mode) and
+# greps the serial log. Scenarios grow with each milestone.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+KERNEL="$ROOT/target/aarch64-unknown-none/release/urmqtt"
+OUT="$ROOT/build/smoke"
+ACCELS=""
+TIMEOUT=${SMOKE_TIMEOUT:-120}
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --kernel) KERNEL=$2; shift 2 ;;
+        --accels) ACCELS=$2; shift 2 ;;
+        --out) OUT=$2; shift 2 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+if [[ -z "$ACCELS" ]]; then
+    case "$(uname -s)-$(uname -m)" in
+        Darwin-arm64) ACCELS="hvf tcg" ;;
+        Linux-aarch64) [[ -w /dev/kvm ]] && ACCELS="kvm tcg" || ACCELS="tcg" ;;
+        *) ACCELS="tcg" ;;
+    esac
+fi
+mkdir -p "$OUT"
+FAILED=0
+PASSED=0
+
+# Patterns are extended regexes that must match; prefix NOT: for ones that must not.
+
+# boot <name> <log> <qemu args...>: runs QEMU until it exits or times out.
+# Returns QEMU's exit status, or 124 on timeout.
+boot() {
+    local log=$1
+    shift
+    rm -f "$log"
+    "$ROOT/scripts/run-qemu.sh" --serial "$log" "$@" >"$log.qemu" 2>&1 &
+    local pid=$! waited=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if (( waited >= TIMEOUT * 10 )); then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 124
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    wait "$pid"
+}
+
+# Strip terminal escapes the firmware and Limine print.
+clean() { LC_ALL=C sed -e $'s/\x1b\\[[0-9;?=]*[A-Za-z]//g' -e $'s/\r//g' "$1"; }
+
+check() {
+    local name=$1 log=$2 status=$3
+    shift 3
+    local ok=1 pat
+    if [[ $status -ne 0 ]]; then
+        echo "  ✗ QEMU exit status $status (124 = timeout after ${TIMEOUT}s)"
+        ok=0
+    fi
+    for pat in "$@"; do
+        if [[ $pat == NOT:* ]]; then
+            if clean "$log" | grep -Eq -- "${pat:4}"; then
+                echo "  ✗ unexpected: ${pat:4}"
+                ok=0
+            fi
+        elif ! clean "$log" | grep -Eq -- "$pat"; then
+            echo "  ✗ missing: $pat"
+            ok=0
+        fi
+    done
+    if [[ $ok -eq 1 ]]; then
+        echo "  ✓ $name"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  serial log: $log"
+        clean "$log" | grep -vE '^\s*$' | tail -25 | sed 's/^/    | /'
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+# scenario <name> <cmdline> <acpi on|off> <patterns...>
+scenario() {
+    local name=$1 cmdline=$2 acpi=$3
+    shift 3
+    local iso="$OUT/$name.iso"
+    [[ -f "$iso" ]] || "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "$cmdline" >/dev/null
+    for accel in $ACCELS; do
+        local log="$OUT/$name-$accel.log" status=0
+        boot "$log" --iso "$iso" --accel "$accel" --acpi "$acpi" --headless --no-net || status=$?
+        check "$name [$accel]" "$log" "$status" "$@"
+    done
+}
+
+[[ -f "$KERNEL" ]] || { echo "error: $KERNEL not found (make build)" >&2; exit 1; }
+rm -f "$OUT"/*.iso
+echo "smoke: accelerators: $ACCELS"
+
+BOOT_LINE='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$'
+NO_FAULT='NOT:EXCEPTION|PANIC'
+
+scenario boot-acpi "smoke" on \
+    "$BOOT_LINE" "platform: Acpi" "console: pl011 at 0x9000000" "psci 1\.[0-9]+ via hvc" \
+    "^URMQTT READY$" "$NO_FAULT"
+scenario boot-dtb "smoke" off \
+    "$BOOT_LINE" "platform: DeviceTree" "console: pl011 at 0x9000000" "^URMQTT READY$" "$NO_FAULT"
+scenario fault-data-abort "smoke test=data-abort" on \
+    "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SPx" \
+    "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \
+    "fatal exception, stopping" "NOT:URMQTT READY"
+scenario fault-undefined "smoke test=undef" on \
+    "EXCEPTION: synchronous" "EC=0x00 unknown reason \(undefined instruction\)" "NOT:URMQTT READY"
+scenario brk-resume "smoke test=brk" on \
+    "resumable brk at 0x" "test: resumed after brk" "^URMQTT READY$" "NOT:fatal exception"
+scenario panic "smoke test=panic" on \
+    "PANIC: panicked at" "test panic requested on the command line" "NOT:URMQTT READY"
+
+echo "smoke: $PASSED passed, $FAILED failed"
+[[ $FAILED -eq 0 ]]

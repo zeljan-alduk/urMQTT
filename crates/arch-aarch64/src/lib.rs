@@ -1,6 +1,22 @@
-//! AArch64 support: boot glue, EL1 exception vectors, MMU, GICv3, generic timer, PSCI, per-CPU data, PAC/BTI.
+//! AArch64 support: boot glue, EL1 exception vectors, MMU, GICv3, generic
+//! timer, PSCI, per-CPU data, PAC/BTI.
 //!
-//! **Status: stub (M0).** Implementation lands in M1–M4; see `docs/PROGRESS.md`.
+//! Pure logic (ESR decoding, descriptor encoding, locks) is host-testable.
+//! Everything that executes system instructions is compiled only for the
+//! bare-metal target (`target_os = "none"`).
 
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_code)]
+
+pub mod esr;
+pub mod paging;
+pub mod sync;
+
+#[cfg(target_os = "none")]
+pub mod cpu;
+#[cfg(target_os = "none")]
+pub mod exception;
+#[cfg(target_os = "none")]
+pub mod psci;
+#[cfg(target_os = "none")]
+pub mod regs;

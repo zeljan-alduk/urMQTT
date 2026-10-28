@@ -23,6 +23,9 @@ ISO         := $(BUILD_DIR)/urmqtt-$(ENV)-$(VERSION).iso
 DATA_IMG    := $(BUILD_DIR)/data.img
 
 export URMQTT_ENV := $(ENV)
+export URMQTT_VERSION := $(VERSION)
+ACCEL ?=
+QEMU_ARGS ?=
 
 define not_yet
 	@echo "make $@: not implemented yet — arrives in $(1) (see docs/PROGRESS.md)" >&2
@@ -44,24 +47,25 @@ build: $(if $(filter dev,$(ENV)),certs) ## Build the kernel ELF (release, LTO, p
 	@printf 'kernel: %s (%s bytes)\n' "$(KERNEL_ELF)" "$$(wc -c < $(KERNEL_ELF) | tr -d ' ')"
 
 .PHONY: iso
-iso: ## Build the bootable UEFI ISO for deploy/<ENV>/
-	$(call not_yet,M1)
+iso: build ## Build the bootable UEFI ISO for deploy/<ENV>/
+	scripts/mkiso.sh --kernel $(KERNEL_ELF) --out $(ISO)
+	@ln -sf $(notdir $(ISO)) $(BUILD_DIR)/urmqtt-$(ENV).iso
 
 .PHONY: run
-run: ## Boot the ISO in QEMU with HVF (4 vCPU, 512 MB, virtio-net/blk/rng)
-	$(call not_yet,M1)
+run: iso data-img ## Boot the ISO in QEMU (HVF on macOS), 4 vCPU, 512 MB, serial on stdio
+	scripts/run-qemu.sh --iso $(ISO) --data $(DATA_IMG) $(if $(ACCEL),--accel $(ACCEL)) -- $(QEMU_ARGS)
 
 .PHONY: run-tcg
-run-tcg: ## Same as run, with TCG instead of HVF
-	$(call not_yet,M1)
+run-tcg: iso data-img ## Same as run, with TCG instead of HVF
+	scripts/run-qemu.sh --iso $(ISO) --data $(DATA_IMG) --accel tcg -- $(QEMU_ARGS)
 
 .PHONY: run-smp
-run-smp: ## Boot with N vCPUs (make run-smp N=8)
-	$(call not_yet,M4)
+run-smp: iso data-img ## Boot with N vCPUs (make run-smp N=8)
+	scripts/run-qemu.sh --iso $(ISO) --data $(DATA_IMG) --smp $(N) $(if $(ACCEL),--accel $(ACCEL)) -- $(QEMU_ARGS)
 
 .PHONY: debug
-debug: ## Boot QEMU halted with a gdb stub (-s -S)
-	$(call not_yet,M1)
+debug: iso data-img ## Boot QEMU halted with a gdb stub (-s -S)
+	scripts/run-qemu.sh --iso $(ISO) --data $(DATA_IMG) --gdb $(if $(ACCEL),--accel $(ACCEL)) -- $(QEMU_ARGS)
 
 .PHONY: data-img
 data-img: ## Create a blank sparse data disk image (layout init arrives in M11)
@@ -89,20 +93,22 @@ fuzz: ## Run fuzz target T for FUZZ_TIME seconds (default 600)
 	$(CARGO) fuzz run $(T) fuzz/corpus/$(T) $(wildcard fuzz/seeds/$(T)) -- -max_total_time=$(FUZZ_TIME)
 
 .PHONY: smoke
-smoke: ## Boot headless, wait for URMQTT READY, run client checks
-	$(call not_yet,M1)
+smoke: ## Boot headless (HVF+TCG on macOS, TCG elsewhere) and check the serial log
+	@$(MAKE) --no-print-directory build ENV=dev
+	scripts/smoke.sh $(if $(ACCELS),--accels "$(ACCELS)")
 
 .PHONY: loadtest
 loadtest: ## Run the host-side load generator
 	$(call not_yet,M10/M13)
 
 .PHONY: dist
-dist: build ## Collect release artifacts and SHA256SUMS into build/dist/
+dist: iso ## Collect release artifacts and SHA256SUMS into build/dist/
 	@rm -rf $(BUILD_DIR)/dist && mkdir -p $(BUILD_DIR)/dist
 	cp $(KERNEL_ELF) $(BUILD_DIR)/dist/urmqtt-$(ENV)-$(VERSION).elf
+	cp $(ISO) $(BUILD_DIR)/dist/
 	cd $(BUILD_DIR)/dist && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
 
 .PHONY: clean
 clean: ## Remove build outputs (keeps certificates and data.img)
 	$(CARGO) clean
-	rm -rf $(BUILD_DIR)/dist fuzz/target
+	rm -rf $(BUILD_DIR)/dist $(BUILD_DIR)/smoke $(BUILD_DIR)/*.iso fuzz/target

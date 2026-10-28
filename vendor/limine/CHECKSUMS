@@ -1,0 +1,8 @@
+# Limine v12.9.4 (2026-10-19), aarch64 UEFI only.
+# Source: https://github.com/limine-bootloader/limine/releases/download/v12.9.4/limine-binary.tar.gz
+# Upstream tarball sha256 847334bc4bc142de996fbd132806b89ed73ac9ab34dbc1e90cfebf1fcc68c2b1,
+# GPG signature verified 2026-10-29: "Good signature from Mintsuki <mintsuki@protonmail.com>",
+# key 05D29860D0A0668AAEFB9D691F3C021BECA23821.
+# Only BOOTAA64.EFI and LICENSE are vendored (no x86 binaries, PROMPT.md §2).
+82d5dfc9f46d1f1a96728fa165579e18e1da02449a5bfb78cae667ac23aee6f4  BOOTAA64.EFI
+5372ada69c825812b93b9e3f222253be3919bed3489372e797c9a85cd4e37fbc  LICENSE

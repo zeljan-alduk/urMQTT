@@ -15,20 +15,24 @@ test = false
 bench = false
 
 [dependencies]
-urmqtt-arch-aarch64 = { path = "../arch-aarch64" }
 urmqtt-broker = { path = "../broker" }
 urmqtt-config.workspace = true
-urmqtt-log = { path = "../log" }
-urmqtt-mm = { path = "../mm" }
 urmqtt-mqtt = { path = "../mqtt" }
 urmqtt-net = { path = "../net" }
 urmqtt-pci = { path = "../pci" }
-urmqtt-platform = { path = "../platform" }
 urmqtt-store = { path = "../store" }
 urmqtt-tcp = { path = "../tcp" }
 urmqtt-timer-wheel = { path = "../timer-wheel" }
 urmqtt-tls = { path = "../tls" }
 urmqtt-virtio = { path = "../virtio" }
+
+# Only the bare-metal kernel uses these; the host stub links none of them.
+[target.'cfg(target_os = "none")'.dependencies]
+limine = "0.6.5"
+urmqtt-arch-aarch64 = { path = "../arch-aarch64" }
+urmqtt-log = { path = "../log" }
+urmqtt-mm = { path = "../mm" }
+urmqtt-platform = { path = "../platform" }
 
 [lints]
 workspace = true

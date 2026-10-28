@@ -5,3 +5,4 @@ extend-exclude = ["vendor/", "*.pem", "*.key", "Cargo.lock", "fuzz/Cargo.lock"]
 mosquitto = "mosquitto"
 Mosquitto = "Mosquitto"
 BA = "BA"
+INDX = "INDX"

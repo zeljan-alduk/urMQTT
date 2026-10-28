@@ -42,3 +42,46 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - `make data-img` creates a blank sparse image only. The superblock/region layout arrives in M11.
 - `tools/loadgen` exits with an explicit "not implemented" error. `tools/certgen` (optional) was not created, because `gen-dev-certs.sh` covers it.
 - `vendor/limine` and `vendor/sqlite` are empty and get populated in M1 and M11.
+
+## M1 — Boot (2026-10-29)
+
+**Done**
+
+- Vendored Limine v12.9.4 `BOOTAA64.EFI` (GPG-verified, SHA-256 pinned).
+- `scripts/mkiso.sh` builds a UEFI-only ISO (ADR-015): no menu, no editor, kernel pinned by BLAKE2b, deterministic timestamps and FAT serial.
+- Kernel entry (`crates/kernel/src/boot.rs`):
+  - Limine base revision 6 requests (HHDM, memmap, MP, DTB, RSDP, framebuffer, cmdline, date at boot).
+  - The asm stub enables FP/SIMD (ADR-003) and switches to SP_ELx.
+  - Linker script with three PT_LOADs: RX, R and RW.
+- `platform`: panic-free FDT parser and ACPI parser (RSDP, XSDT/RSDT, SPCR, FADT) with early discovery of the console UART and the PSCI conduit. Host tests run against real QEMU DTBs (HVF/TCG, GICv2/v3) and synthetic ACPI tables, including truncation and bit-flip robustness.
+- Console:
+  - PL011 output-only driver, mapped through an MMIO window (ADR-016), with a dev-only fallback to 0x0900_0000.
+  - 8×8 framebuffer text console (ramfb in QEMU).
+  - Global logger with uptime timestamps from the generic timer.
+- `arch-aarch64`:
+  - EL1 vector table that saves the full GPR and FP/SIMD state.
+  - ESR decoding (exception class, fault status, WnR, imm16), host-tested.
+  - Stage-1 descriptor encoding with W^X by construction, and a table walker/mapper, host-tested.
+  - PSCI (version, SYSTEM_OFF, SYSTEM_RESET, CPU_ON), a ticket spinlock and system-register accessors.
+- Fault handling:
+  - Decoded exception reports (vector, EC, fault status, ESR/ELR/FAR/SPSR, x0–x30).
+  - A panic handler that logs, then calls PSCI SYSTEM_RESET, or SYSTEM_OFF in smoke mode.
+  - Nested-fault guard.
+- `make iso`, `run`, `run-tcg`, `run-smp N=…`, `debug` and `smoke`. CI gains a smoke job (QEMU TCG on arm64 Linux) and the release workflow ships the ISO.
+
+**Measured**
+
+- HVF boot to `URMQTT READY` in about 5 s of wall time, most of it UEFI firmware. QEMU exits through PSCI SYSTEM_OFF.
+- `make smoke`: 12/12 pass. Six scenarios run under both HVF and TCG: ACPI boot, DTB boot (`acpi=off`), data abort, undefined instruction, resumable `brk`, panic.
+- Exception report sample (HVF):
+  `EC=0x25 data abort (same EL), read, translation fault, level 2 … FAR=0xffff80003ffff000`.
+- Kernel ELF: **79 280 bytes**. ISO: about 8.8 MB, mostly the FAT image that M17 will shrink.
+- Host tests: 64.
+- HVF/GIC findings: ADR-014.
+
+**Known gaps**
+
+- The bootloader's page tables are still active. Own W^X tables, guard pages and PAC/BTI arrive in M2.
+- Exceptions run on the boot stack. A dedicated exception stack comes in M2, with guard pages.
+- Entry at EL2 (VHE) is untested (ADR-018).
+- `cpu=` comes from the Limine MP response. The application processors stay parked until M4.

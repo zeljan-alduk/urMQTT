@@ -11,14 +11,14 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M0)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M1)-red)
 
 </div>
 
 > [!WARNING]
-> **urMQTT is pre-alpha and does not serve MQTT yet.** Milestone **M0** (workspace, configuration
-> system, tooling, CI) is complete. The kernel boots from **M1** on, and MQTT over TLS arrives in
-> **M10**. Every feature and example below is tagged with the milestone that delivers it, and
+> **urMQTT is pre-alpha and does not serve MQTT yet.** Milestones **M0** (workspace, configuration,
+> tooling, CI) and **M1** (UEFI boot, console, decoded exception reports, PSCI power control) are
+> complete, and the kernel boots under QEMU with HVF and TCG. MQTT over TLS arrives in **M10**. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
 
 ---
@@ -68,14 +68,14 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 |---|---|---|
 | **Build** | Reproducible workspace, pinned toolchain, `--locked` everywhere | ✅ M0 |
 | | Build-time configuration, validated, compiled to constants | ✅ M0 |
-| | Bootable UEFI ISO (Limine) for aarch64 | 📋 M1 |
+| | Bootable UEFI ISO (Limine) for aarch64 | ✅ M1 |
 | | Bit-for-bit reproducible, signed images; raw disk image | 📋 M17 |
-| **Kernel** | EL1 exception vectors with decoded ESR/ELR/FAR reports | 📋 M1 |
+| **Kernel** | EL1 exception vectors with decoded ESR/ELR/FAR reports | ✅ M1 |
 | | Own page tables with W^X, guard pages, PAC/BTI when present | 📋 M2 |
 | | GICv3, generic timer, monotonic clock | 📋 M3 |
 | | SMP bring-up, per-CPU data (`TPIDR_EL1`), SGI IPIs | 📋 M4 |
 | | Hardware discovery via **DTB and ACPI** (MADT, GTDT, MCFG, SPCR) | 📋 M5 |
-| **Devices** | PL011 UART, Limine framebuffer text log | 📋 M1 |
+| **Devices** | PL011 UART, Limine framebuffer text log | ✅ M1 |
 | | PCIe ECAM, virtio-pci modern: net, blk, rng | 📋 M6 |
 | | virtio-net multiqueue + RSS, fallback software dispatcher | 📋 M13 |
 | **Network** | DHCPv4, ARP, ICMP echo (smoltcp prototype) | 📋 M7 |
@@ -283,7 +283,7 @@ make build                   # target/aarch64-unknown-none/release/urmqtt
 
 `make help` lists every target.
 
-### Boot it (from M1)
+### Boot it (works today)
 
 ```bash
 make iso ENV=dev             # build/urmqtt-dev-<version>.iso
@@ -291,12 +291,28 @@ make data-img                # build/data.img (blank, sparse, 1 GiB)
 make run                     # QEMU + HVF, 4 vCPU, 512 MB, serial on stdio
 ```
 
-Expected serial output:
+Expected serial output (HVF, 4 vCPU, 512 MB):
 
 ```text
-URMQTT BOOT 0.1.0 cpu=4 mem=512
+URMQTT BOOT 0.0.1 cpu=4 mem=503
+[    5.137] INFO  env=dev el=1 bootloader=Limine 12.9.4
+[    5.137] INFO  platform: Acpi, uart=0x9000000, psci=Some(Hvc)
+[    5.137] INFO  console: pl011 at 0x9000000 mapped at 0xffff800000000000
+[    5.138] INFO  psci 1.1 via hvc
+[    5.138] INFO  framebuffer: 800x600 text console
 ...
 URMQTT READY
+```
+
+`make smoke` boots six scenarios under HVF and TCG (ACPI and device-tree discovery, a data
+abort, an undefined instruction, a resumable `brk`, a panic) and checks the decoded reports:
+
+```text
+!!! EXCEPTION: synchronous, current EL, SPx
+    EC=0x25 data abort (same EL), read, translation fault, level 2 (ISS=0x0000006, IL=1)
+    ESR=0x0000000096000006 ELR=0xffffffff8000481c FAR=0xffff80003ffff000 SPSR=0x800003c5
+    x0 =0x0000000000000000 x1 =0x000000000000000a ...
+!!! fatal exception, stopping
 ```
 
 ## Configuration
@@ -523,7 +539,7 @@ against the same data disk.
 
 | Target | Path | Status |
 |---|---|---|
-| QEMU (macOS HVF / Linux KVM / TCG) | `make run`, `make run-tcg` | 📋 M1 |
+| QEMU (macOS HVF / Linux KVM / TCG) | `make run`, `make run-tcg` | ✅ M1 |
 | Generic KVM / Proxmox (aarch64) | UEFI VM, ISO or raw image, virtio-net/blk/rng | 📋 M17 |
 | Hetzner Cloud CAX (Ampere) | raw image via rescue system and snapshot | 📋 M17 |
 | Oracle Cloud Always Free (Ampere A1) | custom image import, paravirtualized (virtio) | 📋 after M5 + M17 |
@@ -547,9 +563,9 @@ shasum -a 256 build/urmqtt-prod-*.iso
 |---|---|
 | `make check` | `cargo fmt --check`, `clippy -D warnings` on host **and** `aarch64-unknown-none`, host tests |
 | `make build` | Release kernel ELF (fat LTO, `codegen-units=1`, `panic=abort`) |
-| `make iso ENV=…` | Bootable UEFI ISO (M1) |
+| `make iso ENV=…` | Bootable UEFI ISO |
 | `make run` / `run-tcg` / `run-smp N=8` / `debug` | QEMU variants (M1, M4) |
-| `make smoke` | Headless boot, wait for `URMQTT READY`, run client checks, power off (M1+) |
+| `make smoke` | Headless boot scenarios under HVF + TCG (TCG only in CI), serial-log checks |
 | `make data-img` | Blank sparse data disk (layout initialised from M11) |
 | `make fuzz T=<target>` | Bounded cargo-fuzz run (`FUZZ_TIME`, default 600 s) |
 | `make loadtest` | Host-side load generator (M10/M13) |
@@ -573,7 +589,7 @@ green, a `M<n>: …` commit, a [PROGRESS](docs/PROGRESS.md) entry, and an
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| [`ci.yml`](.github/workflows/ci.yml) | push, PR, merge queue | fmt, clippy (host + bare metal), typos, actionlint, shellcheck · host tests on **Linux arm64 and macOS arm64** · kernel build for `dev` and `prod` configs, with the ELF size in the job summary · cargo-deny (advisories, licenses, bans, sources) · 60 s fuzz smoke per target |
+| [`ci.yml`](.github/workflows/ci.yml) | push, PR, merge queue | fmt, clippy (host + bare metal), typos, actionlint, shellcheck · host tests on **Linux arm64 and macOS arm64** · kernel build for `dev` and `prod` configs, with the ELF size in the job summary · **QEMU smoke boots** · cargo-deny (advisories, licenses, bans, sources) · 60 s fuzz smoke per target |
 | [`fuzz.yml`](.github/workflows/fuzz.yml) | nightly, manual | 10 minutes per fuzz target, corpus cached between runs, crashes uploaded |
 | [`codeql.yml`](.github/workflows/codeql.yml) | push, PR, weekly | CodeQL for Rust and GitHub Actions |
 | [`scorecard.yml`](.github/workflows/scorecard.yml) | push, weekly | OpenSSF Scorecard supply-chain report |
@@ -581,8 +597,8 @@ green, a `M<n>: …` commit, a [PROGRESS](docs/PROGRESS.md) entry, and an
 | [Dependabot](.github/dependabot.yml) | weekly | grouped cargo and Actions updates |
 
 Every third-party action is pinned to a full commit SHA, and workflows run with read-only
-permissions unless a job needs more. QEMU smoke tests join CI in M1 and run under TCG on the arm64
-runners.
+permissions unless a job needs more. The smoke job boots every scenario under QEMU TCG on the arm64
+runners and uploads the serial logs.
 
 Verify a release artifact:
 
@@ -596,7 +612,7 @@ shasum -a 256 -c SHA256SUMS
 | | Milestone | Acceptance |
 |---|---|---|
 | ✅ | **M0** Workspace & tooling | `make check` green on macOS |
-| 📋 | **M1** Boot | Limine ISO boots under HVF and TCG; a test fault prints a decoded exception |
+| ✅ | **M1** Boot | Limine ISO boots under HVF and TCG; a test fault prints a decoded exception |
 | 📋 | **M2** Memory | W^X verified by deliberate faults; PAC/BTI detection logged |
 | 📋 | **M3** Interrupts & time | GICv3, periodic tick, IRQ latency measured |
 | 📋 | **M4** SMP | `run-smp N=8`, IPI ping-pong between all core pairs |

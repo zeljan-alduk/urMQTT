@@ -9,6 +9,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
+name = "font8x8"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -23,6 +29,12 @@ dependencies = [
  "equivalent",
  "hashbrown",
 ]
+
+[[package]]
+name = "limine"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29363c0f37e66e18575fadf7141c56ee7ea04ae5fecbeb25eff303f77af203a9"
 
 [[package]]
 name = "proc-macro2"
@@ -164,6 +176,7 @@ dependencies = [
 name = "urmqtt-kernel"
 version = "0.0.1"
 dependencies = [
+ "limine",
  "urmqtt-arch-aarch64",
  "urmqtt-broker",
  "urmqtt-config",
@@ -187,10 +200,18 @@ version = "0.0.1"
 [[package]]
 name = "urmqtt-log"
 version = "0.0.1"
+dependencies = [
+ "font8x8",
+ "urmqtt-arch-aarch64",
+ "urmqtt-config",
+]
 
 [[package]]
 name = "urmqtt-mm"
 version = "0.0.1"
+dependencies = [
+ "urmqtt-arch-aarch64",
+]
 
 [[package]]
 name = "urmqtt-mqtt"

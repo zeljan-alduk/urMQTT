@@ -1,57 +1,47 @@
-//! urMQTT kernel entry point.
+//! urMQTT kernel: boot sequence, per-core loop and wiring of all crates.
 //!
-//! **Status: M0 skeleton.** On `aarch64-unknown-none` this links every crate
-//! into one bare-metal ELF so `make build` proves the whole tree is `no_std`
-//! clean. The entry point parks the CPU; the Limine boot path arrives in M1.
-//! On the host the binary only exists so workspace-wide `cargo clippy` works.
+//! On the host the binary only exists so workspace-wide `cargo clippy` works;
+//! the real kernel is built for `aarch64-unknown-none` (`make build`).
 
 #![cfg_attr(target_os = "none", no_std, no_main)]
+#![deny(unsafe_code)]
 
-// Keep every crate linked so the bare-metal build checks all of them.
-use urmqtt_arch_aarch64 as _;
+// Crates not wired in yet are still linked so the bare-metal build checks them.
 use urmqtt_broker as _;
-use urmqtt_log as _;
-use urmqtt_mm as _;
 use urmqtt_mqtt as _;
 use urmqtt_net as _;
 use urmqtt_pci as _;
-use urmqtt_platform as _;
 use urmqtt_store as _;
 use urmqtt_tcp as _;
 use urmqtt_timer_wheel as _;
 use urmqtt_tls as _;
 use urmqtt_virtio as _;
 
-/// Build-time environment baked into this image.
-const ENV: &str = urmqtt_config::CONFIG.env;
+mod cmdline;
 
 #[cfg(target_os = "none")]
-mod bare {
-    use core::panic::PanicInfo;
+mod boot;
+#[cfg(target_os = "none")]
+mod console;
+#[cfg(target_os = "none")]
+mod memory;
+#[cfg(target_os = "none")]
+mod power;
+#[cfg(target_os = "none")]
+mod trap;
 
-    /// M0 placeholder entry: parks the CPU. Replaced by the Limine entry in M1.
-    #[unsafe(no_mangle)]
-    extern "C" fn _start() -> ! {
-        let _ = super::ENV;
-        park()
-    }
-
-    #[panic_handler]
-    fn panic(_info: &PanicInfo<'_>) -> ! {
-        park()
-    }
-
-    fn park() -> ! {
-        loop {
-            core::hint::spin_loop();
-        }
-    }
-}
+/// Image version: `git describe` passed in by the Makefile, else the crate version.
+pub const VERSION: &str = match option_env!("URMQTT_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 #[cfg(not(target_os = "none"))]
 fn main() {
+    let _ = cmdline::BootOptions::parse("", false);
     eprintln!(
-        "urmqtt ({ENV} build) is a bare-metal kernel; build it with `make build` and boot it with `make run`"
+        "urmqtt {VERSION} ({} build) is a bare-metal kernel; build it with `make build` and boot it with `make run`",
+        urmqtt_config::CONFIG.env
     );
     std::process::exit(2);
 }

@@ -13,3 +13,6 @@ bench = false
 
 [lints]
 workspace = true
+
+[dependencies]
+urmqtt-arch-aarch64 = { path = "../arch-aarch64" }
