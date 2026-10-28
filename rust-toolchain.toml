@@ -1,0 +1,7 @@
+# Pinned nightly: -Zbranch-protection (PAC/BTI) and -Zbuild-std are nightly-only.
+# See docs/DECISIONS.md, ADR-002. Bump deliberately, never float.
+[toolchain]
+channel = "nightly-2026-10-20"
+components = ["rust-src", "llvm-tools", "clippy", "rustfmt"]
+targets = ["aarch64-unknown-none"]
+profile = "minimal"

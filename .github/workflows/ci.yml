@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+jobs:
+  lint:
+    name: Lint (fmt, clippy, typos, actionlint)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: lint
+      - run: make certs
+      - name: rustfmt
+        run: |
+          cargo fmt --all --check
+          (cd fuzz && cargo fmt --check)
+      - name: clippy (host)
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: clippy (aarch64-unknown-none)
+        run: cargo clippy --locked -p urmqtt-kernel --target aarch64-unknown-none -- -D warnings
+      - uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: actionlint,shellcheck
+      - name: actionlint
+        run: actionlint
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+  test:
+    name: Host tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: test
+      - run: make certs
+      - run: cargo test --locked --workspace
+
+  kernel:
+    name: Kernel (aarch64-unknown-none, ${{ matrix.env }})
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [dev, prod]
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: kernel
+      - run: make certs
+      - name: Stage throwaway certificates for the prod build check
+        if: matrix.env == 'prod'
+        # Real prod secrets never touch CI; this only proves deploy/prod/config.toml builds.
+        run: cp deploy/dev/{ca.pem,server.pem,server.key} deploy/prod/
+      - run: make build ENV=${{ matrix.env }}
+      - name: Report kernel size
+        run: |
+          size=$(wc -c < target/aarch64-unknown-none/release/urmqtt)
+          echo "### Kernel ELF (${{ matrix.env }}): ${size} bytes" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: urmqtt-kernel-${{ matrix.env }}
+          path: target/aarch64-unknown-none/release/urmqtt
+          if-no-files-found: error
+          retention-days: 14
+
+  deny:
+    name: Dependencies (cargo-deny)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories bans licenses sources
+
+  fuzz-smoke:
+    name: Fuzz smoke (60 s per target)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: fuzz
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-fuzz
+      - name: Run every fuzz target briefly
+        run: |
+          for t in $(cargo fuzz list); do
+            make fuzz T="$t" FUZZ_TIME=60
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/

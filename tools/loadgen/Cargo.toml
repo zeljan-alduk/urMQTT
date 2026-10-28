@@ -1,0 +1,18 @@
+[package]
+name = "urmqtt-loadgen"
+description = "Host-side MQTT/TLS load generator for urMQTT."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "urmqtt-loadgen"
+path = "src/main.rs"
+test = false
+bench = false
+
+[lints]
+workspace = true

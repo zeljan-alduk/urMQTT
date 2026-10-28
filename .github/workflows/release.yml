@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build and publish ${{ github.ref_name }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: release
+      - run: make certs
+      # Only the dev image is published: prod images embed private keys and are
+      # built by the operator from their own deploy/prod/ (docs/DEPLOY.md).
+      - run: make dist ENV=dev
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: build/dist/*
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: build/dist/*
+          generate_release_notes: true
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}

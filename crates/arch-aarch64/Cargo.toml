@@ -1,0 +1,15 @@
+[package]
+name = "urmqtt-arch-aarch64"
+description = "AArch64 support: boot glue, EL1 exception vectors, MMU, GICv3, generic timer, PSCI, per-CPU data, PAC/BTI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true

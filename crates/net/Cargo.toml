@@ -1,0 +1,15 @@
+[package]
+name = "urmqtt-net"
+description = "Ethernet, ARP, IPv4, ICMP and DHCPv4 handling with dispatch to TCP."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true

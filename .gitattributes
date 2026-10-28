@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.iso binary
+*.img binary
+*.fd binary
+vendor/** -diff linguist-vendored

@@ -1,0 +1,15 @@
+[package]
+name = "urmqtt-timer-wheel"
+description = "Hierarchical timing wheel for TCP and MQTT timers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true

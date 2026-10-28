@@ -1,0 +1,19 @@
+[package]
+name = "urmqtt-config-schema"
+description = "Schema, validation and Rust code generation for build-time urMQTT configuration (host-side, used by the config crate's build script)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
+
+[lints]
+workspace = true

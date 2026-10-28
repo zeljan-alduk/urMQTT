@@ -1,0 +1,44 @@
+# Production configuration template. Certificates and keys are NOT committed:
+# place ca.pem, server.pem and server.key in deploy/prod/ before `make iso ENV=prod`.
+
+[network]
+mode = "dhcp"                  # "dhcp" | "static" (static needs address + gateway)
+mqtt_tls_port = 8883
+mqtt_plain_port = 0            # plaintext is rejected outside dev
+
+[tls]
+ca = "ca.pem"                  # files are read from deploy/<env>/
+cert = "server.pem"
+key = "server.key"
+identity_field = "cn"          # "cn" | "san_uri"
+resumption = true
+
+[limits]
+max_connections_per_core = 2000000
+max_packet_size = 4096
+max_topic_len = 256
+max_topic_levels = 16
+max_subscriptions_per_session = 8
+max_inflight_qos1 = 16
+max_queued_per_offline_session = 64
+publish_rate_per_device = "10/s"
+handshakes_per_core_per_sec = 2000
+
+[acl]
+device_publish = ["devices/{id}/#"]
+device_subscribe = ["devices/{id}/cmd/#"]
+
+[storage]
+sqlite_heap_mb = 8                # sized for a 64 MB VM; raise with RAM (ADR-008)
+telemetry_topics = ["devices/+/telemetry/#"]
+retention_days = 30
+require_flush = true
+
+[observability]
+log_level = "info"
+syslog_udp = ""                # "10.0.0.5:514" for a private collector
+metrics_udp = ""               # statsd
+
+[watchdog]
+handler_budget_ms = 10
+action = "reset"                # "log" | "drop" | "reset"

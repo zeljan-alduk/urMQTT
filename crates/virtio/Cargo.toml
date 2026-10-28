@@ -1,0 +1,15 @@
+[package]
+name = "urmqtt-virtio"
+description = "virtio-pci modern transport, split virtqueues and the net, blk and rng devices."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true

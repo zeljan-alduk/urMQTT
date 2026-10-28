@@ -1,0 +1,34 @@
+[package]
+name = "urmqtt-kernel"
+description = "The urMQTT unikernel binary: boot sequence, per-core loop and wiring of all crates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "urmqtt"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+urmqtt-arch-aarch64 = { path = "../arch-aarch64" }
+urmqtt-broker = { path = "../broker" }
+urmqtt-config.workspace = true
+urmqtt-log = { path = "../log" }
+urmqtt-mm = { path = "../mm" }
+urmqtt-mqtt = { path = "../mqtt" }
+urmqtt-net = { path = "../net" }
+urmqtt-pci = { path = "../pci" }
+urmqtt-platform = { path = "../platform" }
+urmqtt-store = { path = "../store" }
+urmqtt-tcp = { path = "../tcp" }
+urmqtt-timer-wheel = { path = "../timer-wheel" }
+urmqtt-tls = { path = "../tls" }
+urmqtt-virtio = { path = "../virtio" }
+
+[lints]
+workspace = true

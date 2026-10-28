@@ -1,0 +1,15 @@
+[package]
+name = "urmqtt-log"
+description = "Lock-free per-CPU log rings drained to UART, framebuffer and UDP syslog sinks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true

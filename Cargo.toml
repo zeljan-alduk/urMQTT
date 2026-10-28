@@ -1,0 +1,52 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/arch-aarch64",
+    "crates/broker",
+    "crates/config",
+    "crates/config-schema",
+    "crates/kernel",
+    "crates/log",
+    "crates/mm",
+    "crates/mqtt",
+    "crates/net",
+    "crates/pci",
+    "crates/platform",
+    "crates/store",
+    "crates/tcp",
+    "crates/timer-wheel",
+    "crates/tls",
+    "crates/virtio",
+    "tools/loadgen",
+]
+# cargo-fuzz targets need sanitizer flags and live in their own workspace.
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.101"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zeljan-alduk/urMQTT"
+
+[workspace.dependencies]
+urmqtt-config = { path = "crates/config" }
+urmqtt-config-schema = { path = "crates/config-schema" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false

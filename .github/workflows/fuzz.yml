@@ -1,0 +1,59 @@
+name: Fuzz (scheduled)
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: "600"
+
+permissions:
+  contents: read
+
+jobs:
+  list:
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: list
+        run: |
+          targets=$(find fuzz/fuzz_targets -name '*.rs' -exec basename {} .rs \; | sort | jq -R . | jq -sc .)
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    needs: list
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.list.outputs.targets) }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: fuzz
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-fuzz
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: corpus-${{ matrix.target }}-
+      - run: make fuzz T="${{ matrix.target }}" FUZZ_TIME="${SECONDS_PER_TARGET}"
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/

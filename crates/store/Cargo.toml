@@ -1,0 +1,15 @@
+[package]
+name = "urmqtt-store"
+description = "SQLite FFI, raw-disk VFS over virtio-blk, telemetry log and data disk layout."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true

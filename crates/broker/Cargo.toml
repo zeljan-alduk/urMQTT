@@ -1,0 +1,15 @@
+[package]
+name = "urmqtt-broker"
+description = "MQTT broker core: sessions, topic tree, subscriptions, routing, QoS, retained messages, LWT, ACL and limits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true

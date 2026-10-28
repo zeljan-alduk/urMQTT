@@ -1,0 +1,7 @@
+[files]
+extend-exclude = ["vendor/", "*.pem", "*.key", "Cargo.lock", "fuzz/Cargo.lock"]
+
+[default.extend-words]
+mosquitto = "mosquitto"
+Mosquitto = "Mosquitto"
+BA = "BA"
