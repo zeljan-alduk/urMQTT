@@ -13,3 +13,6 @@ bench = false
 
 [lints]
 workspace = true
+
+[dependencies]
+urmqtt-timer-wheel = { path = "../timer-wheel" }

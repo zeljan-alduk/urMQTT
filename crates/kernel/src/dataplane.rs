@@ -25,7 +25,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
 
-use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 use urmqtt_arch_aarch64::cpu;
 use urmqtt_arch_aarch64::spsc::{Consumer, Producer, Spsc};
 use urmqtt_arch_aarch64::sync::OnceCell;
@@ -56,7 +55,7 @@ pub fn new_frame() -> Frame {
 /// A connection relayed between a transport core and a home core is named
 /// by the transport core's slot and a generation, so a late message never
 /// reaches a reused slot.
-pub type Tconn = u32;
+pub type Tconn = u64;
 
 /// Messages between data cores (one ring per ordered pair).
 pub enum CoreMsg {
@@ -79,8 +78,8 @@ pub enum CoreMsg {
     Route { msg: Msg, qos: QoS, retain: bool },
     /// Core 0 → all: the interface address changed (DHCP).
     IpConfig {
-        cidr: Option<Ipv4Cidr>,
-        router: Option<Ipv4Address>,
+        addr: Option<([u8; 4], u8)>,
+        router: Option<[u8; 4]>,
     },
 }
 
@@ -209,6 +208,22 @@ impl Idle {
 impl Default for Idle {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Counts an accepted connection on `core` (statistics).
+pub fn count_accept(core: usize) {
+    if let Some(a) = ACCEPTED.get(core) {
+        // Relaxed: statistics.
+        a.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Adds TLS processing time on `core` (statistics).
+pub fn tls_time(core: usize, ns: u64) {
+    if let Some(a) = TLS_NS.get(core) {
+        // Relaxed: statistics.
+        a.fetch_add(ns, Ordering::Relaxed);
     }
 }
 

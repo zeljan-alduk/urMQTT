@@ -300,6 +300,7 @@ dependencies = [
  "urmqtt-mqtt",
  "urmqtt-platform",
  "urmqtt-store",
+ "urmqtt-tcp",
 ]
 
 [[package]]
@@ -318,6 +319,17 @@ dependencies = [
  "sha2",
  "urmqtt-arch-aarch64",
 ]
+
+[[package]]
+name = "urmqtt-tcp"
+version = "0.0.1"
+dependencies = [
+ "urmqtt-timer-wheel",
+]
+
+[[package]]
+name = "urmqtt-timer-wheel"
+version = "0.0.1"
 
 [[package]]
 name = "winnow"

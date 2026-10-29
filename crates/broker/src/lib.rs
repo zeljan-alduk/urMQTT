@@ -157,6 +157,8 @@ struct Conn {
     last_rx_ms: u64,
     will: Option<Will>,
     close: Option<CloseReason>,
+    /// Listed in `ready` since the last `drain_ready`.
+    ready: bool,
 }
 
 struct Bucket {
@@ -189,6 +191,8 @@ pub struct Broker {
     ops: Vec<PersistOp>,
     telemetry: Vec<Msg>,
     routes: Vec<(Msg, QoS, bool)>,
+    /// Connections with new output or a close request.
+    ready: Vec<ConnId>,
 }
 
 /// Stored topics are re-checked on restore: limits may have changed.
@@ -216,6 +220,28 @@ impl Broker {
             ops: Vec::new(),
             telemetry: Vec::new(),
             routes: Vec::new(),
+            ready: Vec::new(),
+        }
+    }
+
+    /// Connections that got output or a close request since the last call,
+    /// so the transport never has to scan every connection.
+    pub fn drain_ready(&mut self, out: &mut Vec<ConnId>) {
+        for &c in &self.ready {
+            if let Some(k) = self.conns.get_mut(c as usize).and_then(Option::as_mut) {
+                k.ready = false;
+                out.push(c);
+            }
+        }
+        self.ready.clear();
+    }
+
+    fn make_ready(&mut self, c: ConnId) {
+        if let Some(k) = self.conns.get_mut(c as usize).and_then(Option::as_mut)
+            && !k.ready
+        {
+            k.ready = true;
+            self.ready.push(c);
         }
     }
 
@@ -341,6 +367,7 @@ impl Broker {
             last_rx_ms: now_ms,
             will: None,
             close: None,
+            ready: false,
         };
         let slot = self.conns.iter().position(Option::is_none);
         Some(match slot {
@@ -501,13 +528,20 @@ impl Broker {
     }
 
     /// Enforces keepalive (1.5 × the client's interval, §3.1.2.10).
+    /// Callers run this periodically (every 100 ms is plenty); it scans the
+    /// connections, so it is kept off the per-packet path.
     pub fn tick(&mut self, now_ms: u64) {
-        for k in self.conns.iter_mut().flatten() {
-            if k.close.is_none()
+        for (i, k) in self.conns.iter_mut().enumerate() {
+            if let Some(k) = k
+                && k.close.is_none()
                 && k.keepalive_ms > 0
                 && now_ms.saturating_sub(k.last_rx_ms) > k.keepalive_ms * 3 / 2
             {
                 k.close = Some(CloseReason::KeepAliveTimeout);
+                if !k.ready {
+                    k.ready = true;
+                    self.ready.push(i as ConnId);
+                }
             }
         }
     }
@@ -520,6 +554,7 @@ impl Broker {
         {
             conn.close = Some(why);
         }
+        self.make_ready(c);
     }
 
     fn send(&mut self, c: ConnId, p: &Packet<'_>) {
@@ -535,6 +570,7 @@ impl Broker {
                 conn.outbuf.truncate(start);
             }
         }
+        self.make_ready(c);
     }
 
     fn handle(&mut self, c: ConnId, packet: Packet<'_>, now_ms: u64) {

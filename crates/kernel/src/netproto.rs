@@ -1,389 +1,167 @@
-//! Per-core network loops on smoltcp (M7 prototype, multicore in M13,
-//! ADR-032). Replaced by the own TCP stack in M14.
+//! Per-core network loops on the own stack (M14, ADR-033; multicore since
+//! M13, ADR-032).
 //!
 //! Core 0 owns the single virtio-net queue pair. It steers TCP frames for
-//! the MQTT ports to their flow's core (Toeplitz hash), copies ARP replies
-//! to every core, keeps everything else (DHCP, ICMP, the dev echo service)
-//! and transmits the frames the other cores send back. Every data core runs
-//! its own smoltcp interface with the same addresses, its own sockets and
-//! its MQTT service; core 0 publishes the DHCP lease to the others.
+//! the MQTT ports to their flow's worker core (Toeplitz hash) and keeps
+//! everything else: ARP, ICMP echo, DHCP and the dev echo port. It also
+//! transmits the frames the workers send back. Every data core runs its
+//! own `urmqtt-net` interface and `urmqtt-tcp` stack with the same
+//! addresses; core 0 publishes the DHCP lease to the others.
 
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
-use alloc::vec;
 use alloc::vec::Vec;
 
-use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{self, ChecksumCapabilities, DeviceCapabilities, Medium};
-use smoltcp::socket::{dhcpv4, icmp, tcp};
-use smoltcp::time::Instant;
-use smoltcp::wire::{
-    EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Address,
-    Ipv4Cidr,
-};
-use urmqtt_arch_aarch64::spsc::{Consumer, Producer};
 use urmqtt_arch_aarch64::{cpu, timer};
-use urmqtt_config::CONFIG;
+use urmqtt_config::{CONFIG, NetworkMode};
 use urmqtt_log::{info, warn};
 use urmqtt_net::Class;
+use urmqtt_net::dhcp;
+use urmqtt_net::iface::{Event, Iface, Rx};
+use urmqtt_tcp::{App, CloseReason, ConnId, Endpoint, TcpStack};
 use urmqtt_virtio::net::{MTU_FRAME, VirtioNet};
 
-use crate::dataplane::{
-    self, CoreMsg, DROPPED_FRAMES, FRAME_RING, Frame, Link, POOL_MAX, new_frame,
-};
+use crate::dataplane::{self, CoreMsg, DROPPED_FRAMES, Frame, Link, POOL_MAX, new_frame};
 use crate::db::Restored;
 use crate::devices;
-use crate::mqtt_service::MqttService;
+use crate::mqtt_service::{MAX_CONNS, MqttService, TcpEvents};
 
 /// TCP echo (RFC 862) port, dev builds only.
 pub const ECHO_PORT: u16 = 7;
-const ECHO_SOCKETS: usize = 4;
-const ECHO_BUF: usize = 4096;
 const PING_IDENT: u16 = 0x5155;
-const PING_TIMEOUT_US: u64 = 2_000_000;
+const PING_TIMEOUT_MS: u64 = 2_000;
 /// Frames taken from the NIC per pass.
 const RX_BURST: usize = 64;
 /// Messages taken from each peer per pass.
 const MSG_BURST: usize = 256;
 
-/// A received frame owned by a smoltcp RX token; returned to `done`.
-struct RxOwned<'a> {
-    frame: Frame,
-    done: &'a mut Vec<Frame>,
-}
-
-impl phy::RxToken for RxOwned<'_> {
-    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
-        let r = f(self.frame.data.get(..self.frame.len).unwrap_or(&[]));
-        if self.done.len() < POOL_MAX {
-            self.done.push(self.frame);
-        }
-        r
-    }
-}
-
-/// Core 0: transmits straight to the NIC.
-struct NicTx<'a> {
-    net: &'a mut VirtioNet,
-    buf: &'a mut [u8; MTU_FRAME],
-}
-
-impl phy::TxToken for NicTx<'_> {
-    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let len = len.min(MTU_FRAME);
-        let frame = self.buf.get_mut(..len).unwrap_or(&mut []);
-        let r = f(frame);
-        // Kicked once per loop pass (`VirtioNet::flush`); a full TX ring
-        // drops the frame (TCP retransmits, `tx_full` counts it).
-        let _ = self.net.queue(frame);
-        r
-    }
-}
-
-/// Other cores: hand the frame to core 0 over the ring.
-struct RingTx<'a> {
-    tx: &'a mut Producer<'static, Frame, FRAME_RING>,
-    pool: &'a mut Vec<Frame>,
-    /// A frame went to core 0 since the last wake-up.
-    sent: &'a mut bool,
-}
-
-impl phy::TxToken for RingTx<'_> {
-    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let len = len.min(MTU_FRAME);
-        let mut frame = self.pool.pop().unwrap_or_else(new_frame);
-        frame.len = len;
-        let r = f(frame.data.get_mut(..len).unwrap_or(&mut []));
-        if self.tx.push(frame).is_err() {
-            // Ring full: TCP retransmits.
-            DROPPED_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        }
-        *self.sent = true;
-        r
-    }
-}
-
-fn caps() -> DeviceCapabilities {
-    let mut caps = DeviceCapabilities::default();
-    caps.medium = Medium::Ethernet;
-    caps.max_transmission_unit = MTU_FRAME;
-    caps.max_burst_size = Some(1);
-    caps
-}
-
-/// Core 0's device: frames the dispatcher kept for this core.
-struct NicPhy {
-    net: VirtioNet,
-    local: VecDeque<Frame>,
-    done: Vec<Frame>,
-    tx: [u8; MTU_FRAME],
-}
-
-impl phy::Device for NicPhy {
-    type RxToken<'a> = RxOwned<'a>;
-    type TxToken<'a> = NicTx<'a>;
-
-    fn receive(&mut self, _t: Instant) -> Option<(RxOwned<'_>, NicTx<'_>)> {
-        let frame = self.local.pop_front()?;
-        Some((
-            RxOwned {
-                frame,
-                done: &mut self.done,
-            },
-            NicTx {
-                net: &mut self.net,
-                buf: &mut self.tx,
-            },
-        ))
-    }
-
-    fn transmit(&mut self, _t: Instant) -> Option<NicTx<'_>> {
-        Some(NicTx {
-            net: &mut self.net,
-            buf: &mut self.tx,
-        })
-    }
-
-    fn capabilities(&self) -> DeviceCapabilities {
-        caps()
-    }
-}
-
-/// Other cores' device: frames from core 0, frames back to core 0.
-struct RingPhy {
-    rx: Consumer<'static, Frame, FRAME_RING>,
-    tx: Producer<'static, Frame, FRAME_RING>,
-    pool: Vec<Frame>,
-    done: Vec<Frame>,
-    sent: bool,
-}
-
-impl phy::Device for RingPhy {
-    type RxToken<'a> = RxOwned<'a>;
-    type TxToken<'a> = RingTx<'a>;
-
-    fn receive(&mut self, _t: Instant) -> Option<(RxOwned<'_>, RingTx<'_>)> {
-        let frame = self.rx.pop()?;
-        Some((
-            RxOwned {
-                frame,
-                done: &mut self.done,
-            },
-            RingTx {
-                tx: &mut self.tx,
-                pool: &mut self.pool,
-                sent: &mut self.sent,
-            },
-        ))
-    }
-
-    fn transmit(&mut self, _t: Instant) -> Option<RingTx<'_>> {
-        Some(RingTx {
-            tx: &mut self.tx,
-            pool: &mut self.pool,
-            sent: &mut self.sent,
-        })
-    }
-
-    fn capabilities(&self) -> DeviceCapabilities {
-        caps()
-    }
-}
-
-fn now() -> Instant {
-    Instant::from_micros((timer::uptime_ns() / 1000) as i64)
+fn now_ms() -> u64 {
+    timer::uptime_ns() / 1_000_000
 }
 
 fn is_mqtt_port(port: u16) -> bool {
     port == CONFIG.network.mqtt_tls_port || CONFIG.network.mqtt_plain_port == Some(port)
 }
 
-/// Core 0: moves frames from the NIC to their cores and frames from the
-/// cores to the NIC. Returns whether anything moved.
-fn dispatch(phy: &mut NicPhy, link: &mut Link, pool: &mut Vec<Frame>) -> bool {
-    let n = link.n;
-    let mut moved = false;
-    let mut steered = false;
-    for _ in 0..RX_BURST {
-        let mut f = pool.pop().unwrap_or_else(new_frame);
-        match phy.net.recv(&mut f.data) {
-            Ok(Some(len)) => f.len = len,
-            _ => {
-                pool.push(f);
-                break;
+fn ip_str(a: [u8; 4]) -> alloc::string::String {
+    alloc::format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3])
+}
+
+fn new_tcp(addr: [u8; 4], ports: Vec<u16>) -> TcpStack {
+    let mut key = [0u8; 16];
+    // Entropy is required to run at all (boot refuses otherwise).
+    let _ = urmqtt_tls::rng::fill_global(&mut key);
+    TcpStack::new(
+        urmqtt_tcp::Config {
+            local_addr: addr,
+            ports,
+            mss: 1460,
+            rcv_wnd: 65535,
+            max_conns: MAX_CONNS,
+            tx_max: 64 * 1024,
+            cookie_key: key,
+            rst_per_sec: 200,
+        },
+        now_ms(),
+    )
+}
+
+/// The dev echo service (RFC 862) on core 0.
+#[derive(Default)]
+struct EchoSvc {
+    /// Per connection: bytes to echo, bytes served, peer closed.
+    conns: BTreeMap<ConnId, (Vec<u8>, u64, bool)>,
+}
+
+impl EchoSvc {
+    fn pump(&mut self, tcp: &mut TcpStack) {
+        for (&c, (pending, _, peer_closed)) in self.conns.iter_mut() {
+            if !pending.is_empty() {
+                let n = tcp.send(c, pending);
+                pending.drain(..n);
             }
-        }
-        moved = true;
-        dataplane::DISPATCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        match urmqtt_net::classify(f.data.get(..f.len).unwrap_or(&[])) {
-            Class::Tcp {
-                src,
-                dst,
-                sport,
-                dport,
-            } if n > 1 && is_mqtt_port(dport) => {
-                let core = dataplane::core_of_flow(src, dst, sport, dport, n);
-                if core == 0 {
-                    phy.local.push_back(f);
-                } else if let Some(tx) = link.steer.get_mut(core).and_then(Option::as_mut) {
-                    match tx.push(f) {
-                        Ok(()) => steered = true,
-                        Err(f) => {
-                            DROPPED_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                            pool.push(f);
-                        }
-                    }
-                }
-            }
-            Class::Arp { reply: true } => {
-                // Every core's neighbour cache needs it.
-                for core in 1..n {
-                    let mut copy = pool.pop().unwrap_or_else(new_frame);
-                    copy.len = f.len;
-                    copy.data[..f.len].copy_from_slice(&f.data[..f.len]);
-                    if let Some(tx) = link.steer.get_mut(core).and_then(Option::as_mut) {
-                        match tx.push(copy) {
-                            Ok(()) => steered = true,
-                            Err(c) => pool.push(c),
-                        }
-                    }
-                }
-                phy.local.push_back(f);
-            }
-            _ => phy.local.push_back(f),
-        }
-    }
-    // Wake only the cores that got frames.
-    if steered {
-        for core in 1..n {
-            dataplane::wake(core);
-        }
-    }
-    for rx in link.collect.iter_mut().flatten() {
-        while let Some(f) = rx.pop() {
-            moved = true;
-            dataplane::DISPATCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if phy.net.queue(f.data.get(..f.len).unwrap_or(&[])).is_err() {
-                DROPPED_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            }
-            if pool.len() < POOL_MAX {
-                pool.push(f);
+            if *peer_closed && pending.is_empty() {
+                tcp.close(c);
             }
         }
     }
-    phy.net.flush();
-    moved
 }
 
-struct Echo {
-    handle: SocketHandle,
-    served: u64,
+/// Core 0's TCP application: the echo port, then MQTT.
+struct CoreApp<'a> {
+    mqtt: TcpEvents<'a>,
+    echo: Option<&'a mut EchoSvc>,
 }
 
-fn new_iface<D: phy::Device>(mac: [u8; 6], dev: &mut D) -> Interface {
-    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
-    config.random_seed = devices::RNG
-        .lock()
-        .as_mut()
-        .map_or(0x5155_7155, urmqtt_tls::rng::Csprng::next_u64)
-        ^ (dataplane_seed_salt() << 32);
-    Interface::new(config, dev, now())
-}
-
-fn dataplane_seed_salt() -> u64 {
-    crate::smp::current() as u64
-}
-
-fn apply_ip(iface: &mut Interface, cidr: Option<Ipv4Cidr>, router: Option<Ipv4Address>) {
-    iface.update_ip_addrs(|a| {
-        a.clear();
-        if let Some(c) = cidr {
-            let _ = a.push(IpCidr::Ipv4(c));
+impl App for CoreApp<'_> {
+    fn accept(&mut self, c: ConnId, port: u16, remote: Endpoint) -> bool {
+        if port == ECHO_PORT
+            && let Some(e) = self.echo.as_mut()
+        {
+            e.conns.insert(c, (Vec::new(), 0, false));
+            return true;
         }
-    });
-    match router {
-        Some(r) => {
-            let _ = iface.routes_mut().add_default_ipv4_route(r);
+        self.mqtt.accept(c, port, remote)
+    }
+
+    fn data(&mut self, c: ConnId, data: &[u8]) {
+        if let Some((p, served, _)) = self.echo.as_mut().and_then(|e| e.conns.get_mut(&c)) {
+            p.extend_from_slice(data);
+            *served += data.len() as u64;
+            return;
         }
-        None => {
-            iface.routes_mut().remove_default_ipv4_route();
+        self.mqtt.data(c, data);
+    }
+
+    fn peer_closed(&mut self, c: ConnId) {
+        if let Some((_, _, closed)) = self.echo.as_mut().and_then(|e| e.conns.get_mut(&c)) {
+            *closed = true;
+            return;
         }
+        self.mqtt.peer_closed(c);
+    }
+
+    fn closed(&mut self, c: ConnId, why: CloseReason) {
+        if let Some((_, served, _)) = self.echo.as_mut().and_then(|e| e.conns.remove(&c)) {
+            info!("net: echo connection closed after {served} byte(s)");
+            return;
+        }
+        self.mqtt.closed(c, why);
     }
 }
 
 /// Handles the mesh messages for this core; IP configuration goes to the
-/// interface, the rest to the MQTT service.
-fn drain_mesh(link: &mut Link, mqtt: &mut MqttService, iface: &mut Interface, now_ms: u64) -> bool {
+/// interface and the TCP stack, the rest to the MQTT service.
+fn drain_mesh(
+    link: &mut Link,
+    mqtt: &mut MqttService,
+    iface: &mut Iface,
+    tcp: &mut TcpStack,
+    now: u64,
+) -> bool {
     let mut any = false;
     for peer in 0..link.n {
         for _ in 0..MSG_BURST {
             let Some(m) = link.recv(peer) else { break };
             any = true;
             match m {
-                CoreMsg::IpConfig { cidr, router } => apply_ip(iface, cidr, router),
-                other => mqtt.on_msg(peer, other, link, now_ms),
+                CoreMsg::IpConfig { addr, router } => {
+                    iface.set_addr(addr, router);
+                    tcp.set_local_addr(addr.map_or([0; 4], |a| a.0));
+                }
+                other => mqtt.on_msg(peer, other, link, now),
             }
         }
     }
     any
 }
 
-/// Runs data core `me`'s network loop forever.
-pub fn run(me: usize, echo: bool, restored: Option<Arc<Restored>>) -> ! {
-    let Some(mut link) = Link::take(me) else {
-        warn!("net: core {me} has no data-plane rings, idling");
-        loop {
-            cpu::wfi();
-        }
-    };
-    if me == 0 {
-        run_core0(link, echo, restored)
-    } else {
-        let (Some(rx), Some(tx)) = (link.frames_in.take(), link.frames_out.take()) else {
-            warn!("net: core {me} has no frame rings, idling");
-            loop {
-                cpu::wfi();
-            }
-        };
-        let mac = MAC
-            .load(core::sync::atomic::Ordering::Acquire)
-            .to_be_bytes();
-        let mac = [mac[2], mac[3], mac[4], mac[5], mac[6], mac[7]];
-        let mut phy = RingPhy {
-            rx,
-            tx,
-            pool: Vec::new(),
-            done: Vec::new(),
-            sent: false,
-        };
-        let mut idle = dataplane::Idle::new();
-        let mut iface = new_iface(mac, &mut phy);
-        let mut sockets = SocketSet::new(Vec::new());
-        let mut mqtt = MqttService::new(&mut sockets, restored.as_deref(), me, link.n);
-        loop {
-            let now_ms = timer::uptime_ns() / 1_000_000;
-            let mut activity = drain_mesh(&mut link, &mut mqtt, &mut iface, now_ms);
-            activity |=
-                iface.poll(now(), &mut phy, &mut sockets) != smoltcp::iface::PollResult::None;
-            activity |= mqtt.poll(&mut sockets, &mut link, now_ms);
-            if activity {
-                iface.poll(now(), &mut phy, &mut sockets);
-            }
-            phy.pool.append(&mut phy.done);
-            phy.pool.truncate(POOL_MAX);
-            if core::mem::take(&mut phy.sent) {
-                dataplane::wake(0);
-            }
-            idle.pass(activity, || link.pending() || !phy.rx.is_empty());
-        }
-    }
-}
-
 /// The NIC's MAC for the other cores' interfaces (set by core 0).
 static MAC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
 /// State handed from the boot CPU to the other data cores.
 static RESTORED: urmqtt_arch_aarch64::sync::SpinLock<Option<Arc<Restored>>> =
+    urmqtt_arch_aarch64::sync::SpinLock::new(None);
+static NIC: urmqtt_arch_aarch64::sync::SpinLock<Option<VirtioNet>> =
     urmqtt_arch_aarch64::sync::SpinLock::new(None);
 
 /// Boot CPU, before the other data cores start: takes the NIC (core 0
@@ -411,177 +189,369 @@ pub fn run_ap(me: usize) -> ! {
     run(me, false, restored)
 }
 
-static NIC: urmqtt_arch_aarch64::sync::SpinLock<Option<VirtioNet>> =
-    urmqtt_arch_aarch64::sync::SpinLock::new(None);
+fn mac() -> [u8; 6] {
+    // Acquire: pairs with the Release in `prepare`.
+    let m = MAC
+        .load(core::sync::atomic::Ordering::Acquire)
+        .to_be_bytes();
+    [m[2], m[3], m[4], m[5], m[6], m[7]]
+}
+
+/// Runs data core `me`'s network loop forever.
+pub fn run(me: usize, echo: bool, restored: Option<Arc<Restored>>) -> ! {
+    let Some(link) = Link::take(me) else {
+        warn!("net: core {me} has no data-plane rings, idling");
+        loop {
+            cpu::wfi();
+        }
+    };
+    if me == 0 {
+        run_core0(link, echo, restored)
+    } else {
+        run_worker(me, link, restored)
+    }
+}
+
+fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
+    let (Some(mut rx), Some(mut tx)) = (link.frames_in.take(), link.frames_out.take()) else {
+        warn!("net: core {me} has no frame rings, idling");
+        loop {
+            cpu::wfi();
+        }
+    };
+    let mut iface = Iface::new(mac(), false, None, now_ms());
+    let mut mqtt = MqttService::new(restored.as_deref(), me, link.n);
+    let mut tcp = new_tcp([0; 4], mqtt.ports());
+    let mut pool: Vec<Frame> = Vec::new();
+    let mut idle = dataplane::Idle::new();
+    loop {
+        let now = now_ms();
+        let mut activity = drain_mesh(&mut link, &mut mqtt, &mut iface, &mut tcp, now);
+        let mut sent = false;
+        let mut done: Vec<Frame> = Vec::new();
+        {
+            let mut emit = |f: &[u8]| {
+                let mut frame = pool.pop().unwrap_or_else(new_frame);
+                let n = f.len().min(MTU_FRAME);
+                frame.len = n;
+                if let (Some(d), Some(s)) = (frame.data.get_mut(..n), f.get(..n)) {
+                    d.copy_from_slice(s);
+                }
+                if tx.push(frame).is_err() {
+                    DROPPED_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
+                sent = true;
+            };
+            for _ in 0..RX_BURST {
+                let Some(f) = rx.pop() else { break };
+                activity = true;
+                if let Rx::Tcp { src, seg } =
+                    iface.receive(now, f.data.get(..f.len).unwrap_or(&[]), &mut emit)
+                {
+                    let mut app = TcpEvents {
+                        mqtt: &mut mqtt,
+                        link: &mut link,
+                        now_ms: now,
+                    };
+                    tcp.input(now, src, seg, &mut app, &mut |dst, s| {
+                        iface.send_tcp(dst, s, &mut emit)
+                    });
+                }
+                done.push(f);
+            }
+            activity |= mqtt.poll(&mut tcp, &mut link, now);
+            for c in mqtt.take_aborts() {
+                tcp.abort(c, &mut |dst, s| iface.send_tcp(dst, s, &mut emit));
+            }
+            {
+                let mut app = TcpEvents {
+                    mqtt: &mut mqtt,
+                    link: &mut link,
+                    now_ms: now,
+                };
+                tcp.poll(now, &mut app, &mut |dst, s| {
+                    iface.send_tcp(dst, s, &mut emit)
+                });
+            }
+            tcp.flush(now, &mut |dst, s| iface.send_tcp(dst, s, &mut emit));
+        }
+        link.flush();
+        pool.append(&mut done);
+        pool.truncate(POOL_MAX);
+        if sent {
+            dataplane::wake(0);
+        }
+        idle.pass(activity || sent || tcp.has_pending(), || {
+            link.pending() || !rx.is_empty()
+        });
+    }
+}
+
+/// Core 0: moves frames from the NIC to their cores (or keeps them) and
+/// frames from the cores to the NIC.
+fn dispatch(
+    net: &mut VirtioNet,
+    link: &mut Link,
+    pool: &mut Vec<Frame>,
+    local: &mut VecDeque<Frame>,
+) -> bool {
+    let n = link.n;
+    let mut moved = false;
+    let mut steered = false;
+    for _ in 0..RX_BURST {
+        let mut f = pool.pop().unwrap_or_else(new_frame);
+        match net.recv(&mut f.data) {
+            Ok(Some(len)) => f.len = len,
+            _ => {
+                pool.push(f);
+                break;
+            }
+        }
+        moved = true;
+        dataplane::DISPATCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        match urmqtt_net::classify(f.data.get(..f.len).unwrap_or(&[])) {
+            Class::Tcp {
+                src,
+                dst,
+                sport,
+                dport,
+            } if n > 1 && is_mqtt_port(dport) => {
+                let core = dataplane::core_of_flow(src, dst, sport, dport, n);
+                if core == 0 {
+                    local.push_back(f);
+                } else if let Some(tx) = link.steer.get_mut(core).and_then(Option::as_mut) {
+                    match tx.push(f) {
+                        Ok(()) => steered = true,
+                        Err(f) => {
+                            DROPPED_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            pool.push(f);
+                        }
+                    }
+                }
+            }
+            _ => local.push_back(f),
+        }
+    }
+    if steered {
+        for core in 1..n {
+            dataplane::wake(core);
+        }
+    }
+    for rx in link.collect.iter_mut().flatten() {
+        while let Some(f) = rx.pop() {
+            moved = true;
+            dataplane::DISPATCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if net.queue(f.data.get(..f.len).unwrap_or(&[])).is_err() {
+                DROPPED_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            if pool.len() < POOL_MAX {
+                pool.push(f);
+            }
+        }
+    }
+    net.flush();
+    moved
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ping {
+    Waiting,
+    Resolving { since: u64 },
+    Sent { at: u64 },
+    Done,
+}
 
 fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
-    let Some(net) = NIC.lock().take() else {
+    let Some(mut net) = NIC.lock().take() else {
         warn!("net: no network device, idling");
         loop {
             cpu::wfi();
         }
     };
-    let mac = net.mac;
     let n = link.n;
-    let mut phy = NicPhy {
-        net,
-        local: VecDeque::new(),
-        done: Vec::new(),
-        tx: [0; MTU_FRAME],
-    };
-    let mut pool: Vec<Frame> = Vec::new();
+    let mac = net.mac;
     if n > 1 {
         info!(
             "net: dispatcher mode: core 0 owns the single virtio-net queue pair and steers MQTT flows to {} worker core(s) (Toeplitz hash)",
             n - 1
         );
     }
-    let mut iface = new_iface(mac, &mut phy);
-    let mut sockets = SocketSet::new(Vec::new());
-    let dhcp = sockets.add(dhcpv4::Socket::new());
-
-    let mut echoes: Vec<Echo> = Vec::new();
-    if echo {
-        for _ in 0..ECHO_SOCKETS {
-            let s = tcp::Socket::new(
-                tcp::SocketBuffer::new(vec![0; ECHO_BUF]),
-                tcp::SocketBuffer::new(vec![0; ECHO_BUF]),
+    let mut xid = [0u8; 4];
+    let _ = urmqtt_tls::rng::fill_global(&mut xid);
+    let mut iface = match CONFIG.network.mode {
+        NetworkMode::Dhcp => Iface::new(mac, true, Some(u32::from_be_bytes(xid)), now_ms()),
+        NetworkMode::Static { address, gateway } => {
+            let mut i = Iface::new(mac, true, None, now_ms());
+            i.set_addr(Some((address.addr, address.prefix_len)), Some(gateway));
+            info!(
+                "net: static address {}/{} gateway {}",
+                ip_str(address.addr),
+                address.prefix_len,
+                ip_str(gateway)
             );
-            echoes.push(Echo {
-                handle: sockets.add(s),
-                served: 0,
-            });
+            for core in 1..n {
+                link.send(
+                    core,
+                    CoreMsg::IpConfig {
+                        addr: Some((address.addr, address.prefix_len)),
+                        router: Some(gateway),
+                    },
+                );
+            }
+            i
         }
+    };
+    let mut mqtt = MqttService::new(restored.as_deref(), 0, n);
+    let mut ports = if n == 1 { mqtt.ports() } else { Vec::new() };
+    let mut echo_svc = echo.then(EchoSvc::default);
+    if echo_svc.is_some() {
+        ports.push(ECHO_PORT);
         info!("net: tcp echo service on port {ECHO_PORT} (dev only)");
     }
-    let icmp = sockets.add(icmp::Socket::new(
-        icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY; 4], vec![0; 512]),
-        icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY; 4], vec![0; 512]),
-    ));
-    if sockets
-        .get_mut::<icmp::Socket>(icmp)
-        .bind(icmp::Endpoint::Ident(PING_IDENT))
-        .is_err()
-    {
-        warn!("net: icmp bind failed");
-    }
-
-    let mut mqtt = MqttService::new(&mut sockets, restored.as_deref(), 0, n);
-
+    let mut tcp = new_tcp(iface.addr().unwrap_or([0; 4]), ports);
+    let mut pool: Vec<Frame> = Vec::new();
+    let mut local: VecDeque<Frame> = VecDeque::new();
+    let mut ping = Ping::Waiting;
     let mut idle = dataplane::Idle::new();
-    let mut router: Option<Ipv4Address> = None;
-    let mut ping_sent: Option<Instant> = None;
-    let mut ping_done = false;
-    let mut buf = [0u8; ECHO_BUF];
     loop {
-        let t = now();
-        let now_ms = timer::uptime_ns() / 1_000_000;
-        let mut activity = dispatch(&mut phy, &mut link, &mut pool);
-        activity |= drain_mesh(&mut link, &mut mqtt, &mut iface, now_ms);
-        activity |= iface.poll(t, &mut phy, &mut sockets) != smoltcp::iface::PollResult::None;
-
-        let lease = match sockets.get_mut::<dhcpv4::Socket>(dhcp).poll() {
-            Some(dhcpv4::Event::Configured(c)) => {
-                router = c.router;
-                info!(
-                    "net: dhcp lease {} router {} dns {:?}",
-                    c.address,
-                    c.router.unwrap_or(Ipv4Address::UNSPECIFIED),
-                    c.dns_servers.as_slice()
-                );
-                Some((Some(c.address), c.router))
-            }
-            Some(dhcpv4::Event::Deconfigured) => {
-                // Also emitted once at start, before any lease.
-                if iface.ipv4_addr().is_some() {
-                    warn!("net: dhcp lease lost");
+        let now = now_ms();
+        let mut activity = dispatch(&mut net, &mut link, &mut pool, &mut local);
+        activity |= drain_mesh(&mut link, &mut mqtt, &mut iface, &mut tcp, now);
+        let mut events: Vec<Event> = Vec::new();
+        {
+            let mut emit = |f: &[u8]| {
+                if net.queue(f).is_err() {
+                    DROPPED_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
-                router = None;
-                Some((None, None))
-            }
-            None => None,
-        };
-        if let Some((cidr, r)) = lease {
-            apply_ip(&mut iface, cidr, r);
-            for core in 1..n {
-                link.send(core, CoreMsg::IpConfig { cidr, router: r });
-            }
-        }
-
-        // One ICMP echo to the router after the lease, as an IP-level check.
-        if let (Some(r), None, false) = (router, ping_sent, ping_done) {
-            let repr = Icmpv4Repr::EchoRequest {
-                ident: PING_IDENT,
-                seq_no: 1,
-                data: b"urMQTT ping",
             };
-            let sock = sockets.get_mut::<icmp::Socket>(icmp);
-            if let Ok(out) = sock.send(repr.buffer_len(), IpAddress::Ipv4(r)) {
-                let mut pkt = Icmpv4Packet::new_unchecked(out);
-                repr.emit(&mut pkt, &ChecksumCapabilities::default());
-                ping_sent = Some(t);
-            }
-        }
-        if let (Some(sent), false) = (ping_sent, ping_done) {
-            let sock = sockets.get_mut::<icmp::Socket>(icmp);
-            if let Ok((payload, from)) = sock.recv() {
-                let reply = Icmpv4Packet::new_checked(payload)
-                    .ok()
-                    .and_then(|p| Icmpv4Repr::parse(&p, &ChecksumCapabilities::default()).ok());
-                if let Some(Icmpv4Repr::EchoReply {
-                    ident: PING_IDENT, ..
-                }) = reply
-                {
-                    info!(
-                        "net: icmp echo reply from {from} in {} us",
-                        (t - sent).total_micros()
-                    );
-                    ping_done = true;
+            while let Some(f) = local.pop_front() {
+                activity = true;
+                match iface.receive(now, f.data.get(..f.len).unwrap_or(&[]), &mut emit) {
+                    Rx::Tcp { src, seg } => {
+                        let mut app = CoreApp {
+                            mqtt: TcpEvents {
+                                mqtt: &mut mqtt,
+                                link: &mut link,
+                                now_ms: now,
+                            },
+                            echo: echo_svc.as_mut(),
+                        };
+                        tcp.input(now, src, seg, &mut app, &mut |dst, s| {
+                            iface.send_tcp(dst, s, &mut emit)
+                        });
+                    }
+                    Rx::Event(e) => events.push(e),
+                    Rx::None => {}
                 }
-            } else if (t - sent).total_micros() > PING_TIMEOUT_US {
-                warn!("net: no icmp echo reply from the router");
-                ping_done = true;
-            }
-        }
-
-        for e in &mut echoes {
-            let s = sockets.get_mut::<tcp::Socket>(e.handle);
-            if !s.is_open() {
-                let _ = s.listen(ECHO_PORT);
-            }
-            if s.can_recv() && s.can_send() {
-                let n = s.recv_slice(&mut buf).unwrap_or(0);
-                if n > 0 {
-                    let _ = s.send_slice(buf.get(..n).unwrap_or(&[]));
-                    e.served += n as u64;
+                if pool.len() < POOL_MAX {
+                    pool.push(f);
                 }
             }
-            // Peer finished sending and everything was echoed: close our side.
-            if s.state() == tcp::State::CloseWait && s.send_queue() == 0 {
-                info!("net: echo connection closed after {} byte(s)", e.served);
-                e.served = 0;
-                s.close();
+            if let Some(e) = iface.poll(now, &mut emit) {
+                events.push(e);
             }
-        }
+            for e in events {
+                match e {
+                    Event::Dhcp(dhcp::Event::Bound(l) | dhcp::Event::Renewed(l)) => {
+                        info!(
+                            "net: dhcp lease {}/{} router {} dns [{}]",
+                            ip_str(l.addr),
+                            l.prefix,
+                            l.router.map_or_else(|| "none".into(), ip_str),
+                            l.dns.map_or_else(alloc::string::String::new, ip_str)
+                        );
+                        tcp.set_local_addr(l.addr);
+                        for core in 1..n {
+                            link.send(
+                                core,
+                                CoreMsg::IpConfig {
+                                    addr: Some((l.addr, l.prefix)),
+                                    router: l.router,
+                                },
+                            );
+                        }
+                        if ping == Ping::Waiting
+                            && let Some(r) = l.router
+                        {
+                            iface.resolve(r, &mut emit);
+                            ping = Ping::Resolving { since: now };
+                        }
+                    }
+                    Event::Dhcp(dhcp::Event::Lost) => {
+                        warn!("net: dhcp lease lost");
+                        tcp.set_local_addr([0; 4]);
+                        for core in 1..n {
+                            link.send(
+                                core,
+                                CoreMsg::IpConfig {
+                                    addr: None,
+                                    router: None,
+                                },
+                            );
+                        }
+                    }
+                    Event::PingReply { from, rtt_ms } => {
+                        info!(
+                            "net: icmp echo reply from {} in {} us",
+                            ip_str(from),
+                            rtt_ms * 1000
+                        );
+                        ping = Ping::Done;
+                    }
+                }
+            }
+            // One ICMP echo to the router after the lease, as an IP-level check.
+            match ping {
+                Ping::Resolving { since } => {
+                    if let Some(r) = iface.router()
+                        && iface.ping(now, r, PING_IDENT, &mut emit)
+                    {
+                        ping = Ping::Sent { at: now };
+                    } else if now.saturating_sub(since) > PING_TIMEOUT_MS {
+                        warn!("net: router did not answer ARP");
+                        ping = Ping::Done;
+                    }
+                }
+                Ping::Sent { at } if now.saturating_sub(at) > PING_TIMEOUT_MS => {
+                    warn!("net: no icmp echo reply from the router");
+                    ping = Ping::Done;
+                }
+                _ => {}
+            }
 
-        // One CPU: the DB worker runs here between iterations.
-        crate::db::poll();
-        activity |= mqtt.poll(&mut sockets, &mut link, now_ms);
-        if activity {
-            // Flush what the broker queued in this pass.
-            iface.poll(now(), &mut phy, &mut sockets);
+            // One CPU: the DB worker runs here between iterations.
+            crate::db::poll();
+            if let Some(e) = echo_svc.as_mut() {
+                e.pump(&mut tcp);
+            }
+            activity |= mqtt.poll(&mut tcp, &mut link, now);
+            for c in mqtt.take_aborts() {
+                tcp.abort(c, &mut |dst, s| iface.send_tcp(dst, s, &mut emit));
+            }
+            {
+                let mut app = CoreApp {
+                    mqtt: TcpEvents {
+                        mqtt: &mut mqtt,
+                        link: &mut link,
+                        now_ms: now,
+                    },
+                    echo: echo_svc.as_mut(),
+                };
+                tcp.poll(now, &mut app, &mut |dst, s| {
+                    iface.send_tcp(dst, s, &mut emit)
+                });
+            }
+            tcp.flush(now, &mut |dst, s| iface.send_tcp(dst, s, &mut emit));
         }
-        phy.net.flush();
-        pool.append(&mut phy.done);
-        pool.truncate(POOL_MAX);
-
+        link.flush();
+        net.flush();
         // The NIC is polled: while idle, the 10 ms tick bounds the receive
         // latency of the first packet; other cores wake us for their frames.
-        let soon = iface
-            .poll_delay(now(), &sockets)
-            .is_some_and(|d| d.total_micros() < 1000);
-        idle.pass(activity || soon, || {
-            link.pending() || phy.net.rx_pending() || !phy.local.is_empty()
+        let busy = activity
+            || tcp.has_pending()
+            || matches!(ping, Ping::Resolving { .. } | Ping::Sent { .. });
+        idle.pass(busy, || {
+            link.pending() || net.rx_pending() || !local.is_empty()
         });
     }
 }

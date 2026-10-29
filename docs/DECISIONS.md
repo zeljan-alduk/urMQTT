@@ -206,7 +206,7 @@ verified in the named milestone before it becomes Accepted).
 
 ## ADR-026 — Network prototype on smoltcp, single core, polled
 
-- **Status:** Accepted (M7), to be replaced by the own stack (M14)
+- **Status:** Superseded by ADR-033 (M14): smoltcp is gone from the image
 - **Decision:** smoltcp 0.14 (`alloc`, Ethernet, IPv4, DHCPv4, TCP, ICMP sockets) runs on the boot CPU behind a `phy::Device` adapter around `VirtioNet`. RX is polled; when idle the CPU sleeps in WFI and the 10 ms tick bounds wake-up latency. The other CPUs idle. After `URMQTT READY` the boot CPU runs the network service forever. In dev builds that includes a TCP echo service on port 7, used by smoke tests through `hostfwd`. The `serve` command-line switch keeps a smoke image alive after READY.
 - **Ping from the host** is not possible: QEMU user networking does not deliver ICMP to the guest. Instead the guest pings the slirp gateway (10.0.2.2) after its DHCP lease, which exercises ARP, IPv4 and ICMP in both directions.
 - **smoltcp interface seed** comes from the kernel CSPRNG.
@@ -341,7 +341,7 @@ verified in the named milestone before it becomes Accepted).
   - It classifies each frame (`urmqtt-net::classify`). IPv4 TCP to an MQTT port goes to the worker given by the **Toeplitz hash** of the 4-tuple (Microsoft RSS key, verified against the RSS verification suite), so a later NIC with RSS and the same key would agree. ARP replies go to every core's stack; everything else stays on core 0.
   - Frames move as owned buffers through 0→c and c→0 SPSC rings: one copy out of the DMA ring, none after. Buffers circulate (RX buffers are reused for TX), so the steady state does not allocate.
   - virtio-net multiqueue + RSS is **not implemented**: QEMU user networking (the only backend on macOS without root) has no multiqueue, so the path could not be tested. That is a known gap; the hash already matches RSS.
-- **Per-core stacks:** every data core runs its own smoltcp interface with the same MAC and IP (core 0 forwards the DHCP lease as a control message), its own sockets, TLS server and MQTT service.
+- **Per-core stacks:** every data core runs its own interface and TCP stack (smoltcp in M13, the own stack since M14, ADR-033) with the same MAC and IP (core 0 forwards the DHCP lease as a control message), its own sockets, TLS server and MQTT service.
 - **Sessions: home shards.** A session lives on the worker given by `fnv1a(client id) % workers`, stable across boots, so restored sessions find their shard. Takeover, wills, keepalive and persistence therefore stay core-local.
   - The TCP + TLS connection stays on its *transport* core (the flow's core).
   - If home ≠ transport, plaintext MQTT bytes are relayed: `Open`/`Input`/`Closed` one way, `Output`/`Close` back. The home core sends replies only within a **credit** (32 KiB) that the transport returns as it encrypts them. The transport stops reading the socket while its backlog to the home core is long, so TCP flow control pushes back on the client.
@@ -361,3 +361,34 @@ verified in the named milestone before it becomes Accepted).
 - **Measuring scaling:**
   - `test=dp-bench` runs full TLS 1.3 + mTLS handshakes with CONNECT/CONNACK, client and server in the guest, on 1, 2 and 4 workers in parallel. It isolates the data plane from the host. Smoke requires ≥ 3.0× on 4 workers under HVF/KVM (measured 4.00×).
   - The network benchmark (`urmqtt-loadgen` through QEMU user networking) is capped by QEMU's single-threaded slirp and the userspace GIC: about 0.8–1.25 k conn/s whatever the worker count, falling as spinning vCPUs compete for host CPUs. Inside the guest the TLS cost per handshake stays constant (≈ 0.58 ms HVF, ≈ 3.3 ms TCG) and the workers are not saturated.
+
+## ADR-033 — Own server-only TCP/IP stack
+
+- **Status:** Accepted (M14); supersedes ADR-026. smoltcp is no longer a dependency.
+- **Layering:** both new crates are sans-IO and host-tested.
+  - `urmqtt-net`: Ethernet, ARP, IPv4, ICMP echo, UDP and an own DHCPv4 client, plus a per-core `Iface`.
+  - `urmqtt-tcp`: segments in through `input` with an `App` that receives events synchronously, segments out through a callback, and time in milliseconds.
+  - Every data core runs one `Iface` and one `TcpStack` with the same addresses (ADR-032).
+- **IPv4 strictness:** IP options and fragments are dropped (MF or a non-zero offset; DF alone is fine), as are bad checksums, other protocols and non-IPv4 frames. ICMP echo replies are limited to 100/s, and RSTs to unknown connections to 200/s.
+- **Neighbours:** replies need no ARP. The interface learns the sender's MAC from every IPv4 frame addressed to us, in a 32-entry LRU. Only the owner core answers ARP requests. It asks for the router's MAC before its boot-time ping.
+- **DHCP:** DISCOVER → REQUEST → ACK, renewal at T1 and rebinding at T2 (both broadcast), expiry back to DISCOVER, retransmission 4 → 64 s. Static addressing comes from `network.mode = "static"` in the build-time configuration.
+- **TCP, passive open only:**
+  - **SYN cookies always on:** the ISN is a 5-bit 64 s counter, a 3-bit MSS index and a 24-bit SipHash-2-4 MAC over the 4-tuple, the client ISN and the counter, so a SYN creates no state.
+    - Like Linux without timestamps, cookies cannot carry window scaling or SACK, so neither is negotiated: the window is at most 64 KiB, which is plenty for MQTT.
+    - A data segment that fails the cookie check is dropped instead of reset: it may have overtaken a lost final ACK, and the client retransmits from its first byte.
+  - **Table:** open addressing with linear probing on (remote address, remote port, local port), at most half full, with tombstones rebuilt when they pile up.
+  - **Per-connection state:** about 120 bytes, with the send buffer separate. **No buffers while idle:** received data goes to the application straight from the segment, and the send buffer exists only while data is queued or unacknowledged.
+  - **Timers:** one per connection (retransmission, persist or FIN-WAIT-2) in a 4-level × 64-slot hierarchical wheel (`urmqtt-timer-wheel`). Insert and cancel are O(1) with generation-tagged ids, and empty stretches are skipped.
+  - **RTO** per RFC 6298 (initial 1 s, 200 ms – 60 s, Karn) with exponential backoff, giving up after 8 retries. **NewReno** (RFC 5681/6582, initial window 10 segments) sits behind a `Congestion` trait.
+  - Go-back-N after a timeout, with `snd_max` so ACKs for data sent before the rollback stay valid. The simulated-loss tests found this deadlock.
+  - Persist timer for zero windows. No TCP keepalive: MQTT keepalive is the liveness mechanism.
+  - **ACK coalescing:** ACKs are deferred to `flush` at the end of the loop pass. A reply the application sends in the same pass (PUBACK, CONNACK, PINGRESP) carries the ACK, so one segment goes out instead of two.
+  - **Windows:** the application sets a receive-space limit per connection (`set_recv_space`, its backpressure). The advertised window never retracts.
+  - **Receive in order only:** out-of-order segments are dropped and answered with a duplicate ACK. That is simple, and the sender's fast retransmit repairs single losses.
+  - **RFC 5961:** a RST must hit `rcv_nxt` exactly (in-window gets a challenge ACK), and a SYN on an established connection gets a challenge ACK. A pure ACK with a stale sequence number still has its acknowledgement processed.
+  - **No TIME_WAIT (server-side RST policy):** after the final ACK the connection is forgotten, and a late duplicate gets a RST.
+- **Event-driven MQTT service:** TCP delivers accept/data/peer-closed/closed events, and the broker reports connections with new output (`drain_ready`). Only blocked connections and pending handshakes are revisited, so no per-packet path scans every connection. Keepalive and handshake expiry run every 100 ms.
+- **Testing:**
+  - Unit tests per module: the cookie window and binding, the table against a HashMap under 200 k operations, SipHash reference vectors, checksum and option parsing, the timer wheel against a model.
+  - Stack tests against a scripted client over a simulated link: lossless echo of 100 KB; 8 seeds with 10 % loss and 5 % duplication, including sequence-number wrap; 25 % loss; SYN floods holding no state; forged and expired cookies; RFC 5961 RST/SYN rules; retransmission timeout with backoff; zero window and persist probes; out-of-order data; ACK coalescing; refused connections.
+  - The `tcp_segment` fuzz target drives segments relative to a live connection.

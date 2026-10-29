@@ -1,51 +1,48 @@
-//! MQTT service on smoltcp: the TLS listener (`network.mqtt_tls_port`, mTLS,
-//! identity from the client certificate) and, in dev builds only, the
-//! plaintext listener. Both feed one sans-IO broker.
+//! MQTT service on the own TCP stack (M14): the TLS listener
+//! (`network.mqtt_tls_port`, mTLS, identity from the client certificate)
+//! and, in dev builds only, the plaintext listener. Each data core runs one
+//! instance with its broker *shard* (M13, ADR-032).
+//!
+//! The service is event driven: TCP hands it accepted connections and
+//! in-order data synchronously ([`urmqtt_tcp::App`]), the broker reports
+//! the connections with new output ([`Broker::drain_ready`]), and nothing
+//! on the per-packet path scans all connections.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 
-use smoltcp::iface::{SocketHandle, SocketSet};
-use smoltcp::socket::tcp;
 use urmqtt_arch_aarch64::spsc::{Consumer, Producer};
 use urmqtt_broker::{Acl, Broker, CloseReason, Config, ConnId};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{debug, info, warn};
-use urmqtt_mqtt::Limits;
-use urmqtt_mqtt::QoS;
+use urmqtt_mqtt::{Limits, QoS};
+use urmqtt_tcp::{Endpoint, TcpStack};
 use urmqtt_tls::{Event, IdentityField, ServerSetup, TlsServer, TlsSession};
 
 use crate::dataplane::{self, CoreMsg, Link, Tconn};
 use crate::db::{self, DbReq, DbResp, LogBatch, Restored};
 
 /// Reply bytes in flight from a home core to one relayed connection.
-const RELAY_CREDIT: usize = TX_BUF;
+const RELAY_CREDIT: usize = 32 * 1024;
 const RELAY_CHUNK: usize = 16 * 1024;
-/// Stop reading a relayed socket while this many messages wait for the
-/// home core (TCP flow control then pushes back on the client).
-const RELAY_BACKLOG: usize = 64;
 /// QoS 0 fan-out to a core is dropped beyond this backlog (QoS 1 is kept).
 const ROUTE_BACKLOG: usize = 16_384;
-
 /// Telemetry records held back while the log ring is full; beyond this
 /// they are dropped and counted (the data plane never blocks).
 const LOG_BACKLOG_MAX: usize = 65_536;
 /// Hand a telemetry batch to the DB core at this size or age.
 const LOG_BATCH: usize = 256;
 const LOG_BATCH_MS: u64 = 1;
-
-const TLS_SOCKETS: usize = 32;
-/// Plaintext connections (dev only).
-const PLAIN_SOCKETS: usize = 16;
-const RX_BUF: usize = 8 * 1024;
+/// Ciphertext queued for TCP per connection before we stop taking replies.
 const TX_BUF: usize = 32 * 1024;
-/// A handshake must finish within this time (PROMPT §6).
+/// A handshake (or, on the dev port, the CONNECT) must arrive within this.
 const HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
+/// Connections per core (TLS and plaintext together).
+pub const MAX_CONNS: usize = 4096;
 
-/// Where a transport slot's MQTT session lives.
+/// Where a connection's MQTT session lives.
 #[derive(Clone, Copy)]
 enum Peer {
     /// In this core's broker shard.
@@ -54,14 +51,14 @@ enum Peer {
     Remote { home: usize },
 }
 
-struct Slot {
-    handle: SocketHandle,
-    port: u16,
+/// One TCP connection on this core (its transport side).
+struct Conn {
     tls: bool,
     session: Option<Box<TlsSession>>,
     peer: Option<Peer>,
     tconn: Tconn,
-    /// Ciphertext (or plaintext on the dev port) not yet taken by the socket.
+    /// Bytes for TCP (ciphertext, or plaintext on the dev port) that the
+    /// stack has not taken yet.
     pending: Vec<u8>,
     /// Dev plaintext port: bytes held until the CONNECT names the client.
     early: Vec<u8>,
@@ -69,36 +66,15 @@ struct Slot {
     outq: VecDeque<Vec<u8>>,
     /// The home core asked to close after its replies.
     remote_close: bool,
-    accepted_ms: u64,
+    /// We are closing: close_notify and FIN after `pending`.
     closing: bool,
+    fin_sent: bool,
 }
 
 /// Per-core handshake admission (token bucket, PROMPT §6).
 struct Admission {
     tokens: u32,
     last_ms: u64,
-}
-
-pub struct MqttService {
-    /// This data core and the number of data cores.
-    me: usize,
-    n: usize,
-    /// This core's broker shard: the sessions whose home is this core.
-    broker: Broker,
-    tls: Option<TlsServer>,
-    slots: Vec<Slot>,
-    buf: Vec<u8>,
-    app: Vec<u8>,
-    admission: Admission,
-    refused: u64,
-    db: Option<DbLink>,
-    log: Option<LogLink>,
-    /// Home side: connections relayed from transport cores.
-    remote: BTreeMap<ConnId, Remote>,
-    by_tconn: BTreeMap<(usize, Tconn), ConnId>,
-    /// Slot generations, so late relay messages never hit a reused slot.
-    slot_gen: u16,
-    dropped_routes: u64,
 }
 
 /// A connection relayed from another core's transport (home side).
@@ -108,6 +84,38 @@ struct Remote {
     /// Reply bytes the transport core will still accept.
     credit: usize,
     close_sent: bool,
+}
+
+pub struct MqttService {
+    /// This data core and the number of data cores.
+    me: usize,
+    n: usize,
+    /// This core's broker shard: the sessions whose home is this core.
+    broker: Broker,
+    tls: Option<TlsServer>,
+    tls_port: u16,
+    plain_port: Option<u16>,
+    conns: BTreeMap<u32, Conn>,
+    /// Broker connection → TCP connection (local sessions).
+    by_broker: BTreeMap<ConnId, u32>,
+    /// Connections whose `pending` could not all be handed to TCP.
+    blocked: Vec<u32>,
+    /// Accepted connections not yet attached to a session, oldest first.
+    handshakes: VecDeque<(u64, u32, Tconn)>,
+    app: Vec<u8>,
+    admission: Admission,
+    refused: u64,
+    db: Option<DbLink>,
+    log: Option<LogLink>,
+    /// Home side: connections relayed from transport cores.
+    remote: BTreeMap<ConnId, Remote>,
+    by_tconn: BTreeMap<(usize, Tconn), ConnId>,
+    slot_gen: u32,
+    dropped_routes: u64,
+    last_tick_ms: u64,
+    ready: Vec<ConnId>,
+    /// Connections to reset (handshake timeouts), for the network loop.
+    aborts: Vec<u32>,
 }
 
 /// This core's telemetry ring to the DB core.
@@ -265,32 +273,6 @@ fn tls_server(revoked: &[&str]) -> Option<TlsServer> {
     }
 }
 
-fn new_socket() -> tcp::Socket<'static> {
-    tcp::Socket::new(
-        tcp::SocketBuffer::new(vec![0; RX_BUF]),
-        tcp::SocketBuffer::new(vec![0; TX_BUF]),
-    )
-}
-
-fn add_slots(sockets: &mut SocketSet<'_>, slots: &mut Vec<Slot>, n: usize, port: u16, tls: bool) {
-    for _ in 0..n {
-        slots.push(Slot {
-            handle: sockets.add(new_socket()),
-            port,
-            tls,
-            session: None,
-            peer: None,
-            tconn: 0,
-            pending: Vec::new(),
-            early: Vec::new(),
-            outq: VecDeque::new(),
-            remote_close: false,
-            accepted_ms: 0,
-            closing: false,
-        });
-    }
-}
-
 fn qos_of(q: u8) -> QoS {
     if q == 1 {
         QoS::AtLeastOnce
@@ -300,16 +282,10 @@ fn qos_of(q: u8) -> QoS {
 }
 
 impl MqttService {
-    /// The MQTT service of data core `me` (of `n`): listeners on this
-    /// core's network stack, and the broker shard for the sessions whose
-    /// home is `me`.
-    pub fn new(
-        sockets: &mut SocketSet<'_>,
-        restored: Option<&Restored>,
-        me: usize,
-        n: usize,
-    ) -> Self {
-        let mut slots = Vec::new();
+    /// The MQTT service of data core `me` (of `n`): the broker shard for
+    /// the sessions whose home is `me`, and the connections TCP accepts on
+    /// this core's stack.
+    pub fn new(restored: Option<&Restored>, me: usize, n: usize) -> Self {
         // The revocation list comes from the store (seeded from the
         // build-time list) or, without storage, from the build directly.
         let revoked: Vec<&str> = match restored {
@@ -317,15 +293,8 @@ impl MqttService {
             None => CONFIG.tls.revoked_serials.to_vec(),
         };
         let tls = tls_server(&revoked);
-        if tls.is_some() {
-            add_slots(
-                sockets,
-                &mut slots,
-                TLS_SOCKETS,
-                CONFIG.network.mqtt_tls_port,
-                true,
-            );
-            if me == 0 {
+        if me == dataplane::workers(n).start {
+            if tls.is_some() {
                 info!(
                     "mqtt: TLS 1.3 listener on port {} (mutual TLS, identity = certificate {:?}, {} revoked serial(s))",
                     CONFIG.network.mqtt_tls_port,
@@ -333,16 +302,13 @@ impl MqttService {
                     revoked.len()
                 );
             }
-        }
-        if let Some(port) = CONFIG.network.mqtt_plain_port {
-            add_slots(sockets, &mut slots, PLAIN_SOCKETS, port, false);
-            if me == 0 {
+            if let Some(port) = CONFIG.network.mqtt_plain_port {
                 warn!(
                     "mqtt: PLAINTEXT listener on port {port} (dev build only, identity = client id)"
                 );
             }
         }
-        let mut broker = Broker::new(broker_config((TLS_SOCKETS + PLAIN_SOCKETS) * n, n > 1));
+        let mut broker = Broker::new(broker_config(MAX_CONNS * n, n > 1));
         let mut homed = 0;
         if let Some(r) = restored {
             // Every shard keeps a replica of the retained messages; each
@@ -387,22 +353,27 @@ impl MqttService {
                 since_ms: 0,
                 dropped: 0,
             });
-        info!(
-            "mqtt: shard {me}/{n} ready: {} socket(s), {homed} persistent session(s) homed here, telemetry partition {}",
-            slots.len(),
-            if log.is_some() {
-                urmqtt_store::telemetry::TelemetryLog::partition_of(me) as isize
-            } else {
-                -1
-            }
-        );
+        if dataplane::workers(n).contains(&me) {
+            info!(
+                "mqtt: shard {me}/{n} ready: {homed} persistent session(s) homed here, telemetry partition {}",
+                if log.is_some() {
+                    urmqtt_store::telemetry::TelemetryLog::partition_of(me) as isize
+                } else {
+                    -1
+                }
+            );
+        }
         Self {
             me,
             n,
             broker,
             tls,
-            slots,
-            buf: vec![0; RX_BUF],
+            tls_port: CONFIG.network.mqtt_tls_port,
+            plain_port: CONFIG.network.mqtt_plain_port,
+            conns: BTreeMap::new(),
+            by_broker: BTreeMap::new(),
+            blocked: Vec::new(),
+            handshakes: VecDeque::new(),
             app: Vec::new(),
             admission: Admission {
                 tokens: CONFIG.limits.handshakes_per_core_per_sec,
@@ -415,18 +386,384 @@ impl MqttService {
             by_tconn: BTreeMap::new(),
             slot_gen: 0,
             dropped_routes: 0,
+            last_tick_ms: 0,
+            ready: Vec::new(),
+            aborts: Vec::new(),
         }
     }
 
-    /// One pass over every socket and relayed connection. Returns true if
-    /// any bytes moved.
-    pub fn poll(&mut self, sockets: &mut SocketSet<'_>, link: &mut Link, now_ms: u64) -> bool {
-        let mut activity = false;
-        self.broker.tick(now_ms);
-        for i in 0..self.slots.len() {
-            activity |= self.poll_slot(i, sockets, link, now_ms);
+    /// Connections the network loop must reset (`TcpStack::abort`).
+    pub fn take_aborts(&mut self) -> Vec<u32> {
+        core::mem::take(&mut self.aborts)
+    }
+
+    /// The TCP ports this service listens on.
+    pub fn ports(&self) -> Vec<u16> {
+        let mut p = Vec::new();
+        if self.tls.is_some() {
+            p.push(self.tls_port);
         }
-        activity |= self.pump_remote(link);
+        if let Some(x) = self.plain_port {
+            p.push(x);
+        }
+        p
+    }
+
+    fn admit(&mut self, now_ms: u64) -> bool {
+        let rate = CONFIG.limits.handshakes_per_core_per_sec;
+        let elapsed = now_ms.saturating_sub(self.admission.last_ms);
+        let refill = (elapsed * u64::from(rate) / 1000) as u32;
+        if refill > 0 {
+            self.admission.tokens = self.admission.tokens.saturating_add(refill).min(rate);
+            self.admission.last_ms = now_ms;
+        }
+        if self.admission.tokens == 0 {
+            self.refused += 1;
+            // Rate-limited log: 1st, 2nd, 4th, 8th, ... refusal.
+            if self.refused.is_power_of_two() {
+                warn!(
+                    "tls: {} handshake(s) refused by admission control",
+                    self.refused
+                );
+            }
+            return false;
+        }
+        self.admission.tokens -= 1;
+        true
+    }
+
+    // ---- TCP events (called from the stack, see `TcpEvents`) -------------
+
+    fn on_accept(&mut self, c: u32, port: u16, now_ms: u64) -> bool {
+        let tls = Some(port) != self.plain_port;
+        let session = if tls {
+            if !self.admit(now_ms) {
+                return false;
+            }
+            match self.tls.as_ref().and_then(|t| t.accept().ok()) {
+                Some(s) => Some(Box::new(s)),
+                None => return false,
+            }
+        } else {
+            None
+        };
+        self.slot_gen = self.slot_gen.wrapping_add(1);
+        let tconn = (u64::from(self.slot_gen) << 32) | u64::from(c);
+        self.conns.insert(
+            c,
+            Conn {
+                tls,
+                session,
+                peer: None,
+                tconn,
+                pending: Vec::new(),
+                early: Vec::new(),
+                outq: VecDeque::new(),
+                remote_close: false,
+                closing: false,
+                fin_sent: false,
+            },
+        );
+        self.handshakes.push_back((now_ms, c, tconn));
+        dataplane::count_accept(self.me);
+        true
+    }
+
+    fn on_data(&mut self, c: u32, data: &[u8], link: &mut Link, now_ms: u64) {
+        let Some(k) = self.conns.get_mut(&c) else {
+            return;
+        };
+        if k.closing && k.peer.is_none() {
+            // Session already ended: whatever still arrives is dropped.
+            return;
+        }
+        let Some(sess) = k.session.as_mut() else {
+            if k.peer.is_some() {
+                self.deliver(c, data, link, now_ms);
+            } else {
+                self.sniff_connect(c, data, link, now_ms);
+            }
+            return;
+        };
+        self.app.clear();
+        let t0 = urmqtt_arch_aarch64::timer::uptime_ns();
+        let r = sess.input(data, &mut k.pending, &mut self.app);
+        dataplane::tls_time(self.me, urmqtt_arch_aarch64::timer::uptime_ns() - t0);
+        match r {
+            Ok(Event::Established {
+                identity,
+                suite,
+                resumed,
+            }) => {
+                let home = dataplane::home_of(&identity, self.n);
+                if let Some(dbl) = self.db.as_mut() {
+                    dbl.send(DbReq::DeviceSeen {
+                        id: identity.as_str().into(),
+                        unix: crate::boot::now_unix().unwrap_or(0) as i64,
+                    });
+                }
+                debug!(
+                    "tls: {identity} authenticated ({suite}{}) on core {}, session on core {home}",
+                    if resumed { ", resumed" } else { "" },
+                    self.me
+                );
+                if !self.attach(c, home, Some(&identity), link, now_ms) {
+                    self.start_close(c);
+                }
+            }
+            Ok(Event::PeerClosed) => self.start_close(c),
+            Ok(Event::None) => {}
+            Err(e) => {
+                warn!("tls: connection refused: {e:?}");
+                self.start_close(c);
+            }
+        }
+        if !self.app.is_empty() {
+            let app = core::mem::take(&mut self.app);
+            self.deliver(c, &app, link, now_ms);
+            self.app = app;
+        }
+        self.mark_blocked(c);
+    }
+
+    /// The peer sent FIN: the session ends now (MQTT has no half-close).
+    fn on_peer_closed(&mut self, c: u32, link: &mut Link, now_ms: u64) {
+        self.detach(c, link, now_ms);
+        self.start_close(c);
+        self.mark_blocked(c);
+    }
+
+    /// TCP is done with the connection (normal close, reset or timeout).
+    fn on_closed(&mut self, c: u32, link: &mut Link, now_ms: u64) {
+        self.detach(c, link, now_ms);
+        self.conns.remove(&c);
+    }
+
+    // ---- sessions -----------------------------------------------------------
+
+    /// Attaches a connection to its session's home shard (here or relayed).
+    fn attach(
+        &mut self,
+        c: u32,
+        home: usize,
+        identity: Option<&str>,
+        link: &mut Link,
+        now_ms: u64,
+    ) -> bool {
+        let Some(k) = self.conns.get_mut(&c) else {
+            return false;
+        };
+        if home == self.me {
+            let Some(b) = self.broker.open(now_ms) else {
+                return false;
+            };
+            if let Some(id) = identity {
+                self.broker.set_identity(b, id);
+            }
+            k.peer = Some(Peer::Local(b));
+            self.by_broker.insert(b, c);
+        } else {
+            link.send(
+                home,
+                CoreMsg::Open {
+                    tconn: k.tconn,
+                    identity: identity.map(Into::into),
+                },
+            );
+            k.peer = Some(Peer::Remote { home });
+        }
+        true
+    }
+
+    /// Hands plaintext from the client to its session.
+    fn deliver(&mut self, c: u32, data: &[u8], link: &mut Link, now_ms: u64) {
+        let Some(k) = self.conns.get(&c) else { return };
+        match k.peer {
+            Some(Peer::Local(b)) => self.broker.input(b, data, now_ms),
+            Some(Peer::Remote { home }) => link.send(
+                home,
+                CoreMsg::Input {
+                    tconn: k.tconn,
+                    data: data.to_vec(),
+                },
+            ),
+            None => {}
+        }
+    }
+
+    /// Dev plaintext port: holds bytes until the CONNECT names the client,
+    /// then attaches to its home shard. Garbage goes to this core's shard,
+    /// which rejects it.
+    fn sniff_connect(&mut self, c: u32, data: &[u8], link: &mut Link, now_ms: u64) {
+        let Some(k) = self.conns.get_mut(&c) else {
+            return;
+        };
+        k.early.extend_from_slice(data);
+        let limit = CONFIG.limits.max_packet_size as usize + 5;
+        let home = match urmqtt_mqtt::decode(&k.early, &urmqtt_mqtt::Limits::PROTOCOL_MAX) {
+            Ok((urmqtt_mqtt::Packet::Connect(p), _)) => {
+                Some(dataplane::home_of(p.client_id, self.n))
+            }
+            Err(urmqtt_mqtt::Error::Incomplete(_)) if k.early.len() <= limit => None,
+            _ => Some(self.me),
+        };
+        let Some(home) = home.map(|h| {
+            if dataplane::workers(self.n).contains(&h) {
+                h
+            } else {
+                self.me
+            }
+        }) else {
+            return;
+        };
+        let early = core::mem::take(&mut k.early);
+        if self.attach(c, home, None, link, now_ms) {
+            self.deliver(c, &early, link, now_ms);
+        } else {
+            self.start_close(c);
+        }
+    }
+
+    /// Ends the MQTT session of a connection (persistence snapshot, will)
+    /// as soon as it is closing, without waiting for TCP.
+    fn detach(&mut self, c: u32, link: &mut Link, now_ms: u64) {
+        let Some(k) = self.conns.get_mut(&c) else {
+            return;
+        };
+        match k.peer.take() {
+            Some(Peer::Local(b)) => {
+                self.by_broker.remove(&b);
+                finish(&mut self.broker, b, now_ms);
+            }
+            Some(Peer::Remote { home }) => link.send(home, CoreMsg::Closed { tconn: k.tconn }),
+            None => {}
+        }
+    }
+
+    fn start_close(&mut self, c: u32) {
+        if let Some(k) = self.conns.get_mut(&c)
+            && !k.closing
+        {
+            k.closing = true;
+            if let Some(sess) = k.session.as_mut() {
+                sess.close(&mut k.pending);
+            }
+            self.blocked.push(c);
+        }
+    }
+
+    fn mark_blocked(&mut self, c: u32) {
+        if self
+            .conns
+            .get(&c)
+            .is_some_and(|k| !k.pending.is_empty() || k.closing)
+        {
+            self.blocked.push(c);
+        }
+    }
+
+    /// Handles a message from data core `peer` (everything but IpConfig).
+    pub fn on_msg(&mut self, peer: usize, msg: CoreMsg, link: &mut Link, now_ms: u64) {
+        match msg {
+            CoreMsg::Open { tconn, identity } => match self.broker.open(now_ms) {
+                Some(b) => {
+                    if let Some(id) = &identity {
+                        self.broker.set_identity(b, id);
+                    }
+                    self.remote.insert(
+                        b,
+                        Remote {
+                            from: peer,
+                            tconn,
+                            credit: RELAY_CREDIT,
+                            close_sent: false,
+                        },
+                    );
+                    self.by_tconn.insert((peer, tconn), b);
+                }
+                None => link.send(peer, CoreMsg::Close { tconn }),
+            },
+            CoreMsg::Input { tconn, data } => {
+                if let Some(&b) = self.by_tconn.get(&(peer, tconn)) {
+                    self.broker.input(b, &data, now_ms);
+                }
+            }
+            CoreMsg::Closed { tconn } => {
+                if let Some(b) = self.by_tconn.remove(&(peer, tconn)) {
+                    self.remote.remove(&b);
+                    finish(&mut self.broker, b, now_ms);
+                }
+            }
+            CoreMsg::Credit { tconn, bytes } => {
+                if let Some(&b) = self.by_tconn.get(&(peer, tconn)) {
+                    if let Some(r) = self.remote.get_mut(&b) {
+                        r.credit += bytes as usize;
+                    }
+                    // More may be waiting for the credit.
+                    self.ready.push(b);
+                }
+            }
+            CoreMsg::Output { tconn, data } => {
+                if let Some(c) = self.conn_of(tconn) {
+                    if let Some(k) = self.conns.get_mut(&c) {
+                        k.outq.push_back(data);
+                    }
+                    self.blocked.push(c);
+                }
+            }
+            CoreMsg::Close { tconn } => {
+                if let Some(c) = self.conn_of(tconn) {
+                    if let Some(k) = self.conns.get_mut(&c) {
+                        k.remote_close = true;
+                    }
+                    self.blocked.push(c);
+                }
+            }
+            CoreMsg::Route { msg, qos, retain } => self.broker.route_remote(&msg, qos, retain),
+            CoreMsg::IpConfig { .. } => {}
+        }
+    }
+
+    fn conn_of(&self, tconn: Tconn) -> Option<u32> {
+        let c = (tconn & 0xffff_ffff) as u32;
+        self.conns
+            .get(&c)
+            .filter(|k| k.tconn == tconn && matches!(k.peer, Some(Peer::Remote { .. })))
+            .map(|_| c)
+    }
+
+    /// End of a loop pass: broker output into TLS and TCP, relays, closes,
+    /// fan-out, persistence and telemetry. Returns whether anything moved.
+    pub fn poll(&mut self, tcp: &mut TcpStack, link: &mut Link, now_ms: u64) -> bool {
+        let mut activity = false;
+        if now_ms.saturating_sub(self.last_tick_ms) >= 100 {
+            self.last_tick_ms = now_ms;
+            self.broker.tick(now_ms);
+            self.expire_handshakes(link, now_ms);
+        }
+        let mut ready = core::mem::take(&mut self.ready);
+        self.broker.drain_ready(&mut ready);
+        for b in ready.drain(..) {
+            activity = true;
+            if let Some(&c) = self.by_broker.get(&b) {
+                self.local_output(c, b);
+            } else if self.remote.contains_key(&b) {
+                self.remote_output(b, link);
+            }
+        }
+        self.ready = ready;
+        // Hand pending bytes to TCP; finish closes.
+        let mut blocked = core::mem::take(&mut self.blocked);
+        blocked.sort_unstable();
+        blocked.dedup();
+        let mut still = Vec::new();
+        for c in blocked {
+            activity = true;
+            if self.push_to_tcp(c, tcp, link) {
+                still.push(c);
+            }
+        }
+        self.blocked.append(&mut still);
         for (msg, qos, retain) in self.broker.drain_routes() {
             for peer in dataplane::workers(self.n).filter(|&p| p != self.me) {
                 if qos == QoS::AtMostOnce && link.backlog_len(peer) > ROUTE_BACKLOG {
@@ -464,477 +801,167 @@ impl MqttService {
             }
             None => self.broker.drain_telemetry().for_each(drop),
         }
-        link.flush();
         activity
     }
 
-    /// Home side: sends replies (within credit) and close requests to the
-    /// transport cores of relayed connections.
-    fn pump_remote(&mut self, link: &mut Link) -> bool {
-        let mut activity = false;
-        for (&c, r) in self.remote.iter_mut() {
-            let out = self.broker.output(c);
-            if !out.is_empty() && r.credit > 0 {
-                let n = out.len().min(r.credit).min(RELAY_CHUNK);
-                let data = out.get(..n).unwrap_or(&[]).to_vec();
-                self.broker.consumed(c, n);
-                r.credit -= n;
-                link.send(
-                    r.from,
-                    CoreMsg::Output {
-                        tconn: r.tconn,
-                        data,
-                    },
-                );
-                activity = true;
-            }
-            if !r.close_sent
-                && self.broker.close_requested(c).is_some()
-                && self.broker.output(c).is_empty()
-            {
-                r.close_sent = true;
-                link.send(r.from, CoreMsg::Close { tconn: r.tconn });
-            }
-        }
-        activity
-    }
-
-    /// Handles a message from data core `peer` (everything but IpConfig).
-    pub fn on_msg(&mut self, peer: usize, msg: CoreMsg, link: &mut Link, now_ms: u64) {
-        match msg {
-            CoreMsg::Open { tconn, identity } => match self.broker.open(now_ms) {
-                Some(c) => {
-                    if let Some(id) = &identity {
-                        self.broker.set_identity(c, id);
-                    }
-                    self.remote.insert(
-                        c,
-                        Remote {
-                            from: peer,
-                            tconn,
-                            credit: RELAY_CREDIT,
-                            close_sent: false,
-                        },
-                    );
-                    self.by_tconn.insert((peer, tconn), c);
-                }
-                None => link.send(peer, CoreMsg::Close { tconn }),
-            },
-            CoreMsg::Input { tconn, data } => {
-                if let Some(&c) = self.by_tconn.get(&(peer, tconn)) {
-                    self.broker.input(c, &data, now_ms);
-                }
-            }
-            CoreMsg::Closed { tconn } => {
-                if let Some(c) = self.by_tconn.remove(&(peer, tconn)) {
-                    self.remote.remove(&c);
-                    finish(&mut self.broker, c, now_ms);
-                }
-            }
-            CoreMsg::Credit { tconn, bytes } => {
-                if let Some(r) = self
-                    .by_tconn
-                    .get(&(peer, tconn))
-                    .and_then(|c| self.remote.get_mut(c))
-                {
-                    r.credit += bytes as usize;
-                }
-            }
-            CoreMsg::Output { tconn, data } => {
-                if let Some(slot) = self.slot_of(tconn) {
-                    slot.outq.push_back(data);
-                }
-            }
-            CoreMsg::Close { tconn } => {
-                if let Some(slot) = self.slot_of(tconn) {
-                    slot.remote_close = true;
-                }
-            }
-            CoreMsg::Route { msg, qos, retain } => self.broker.route_remote(&msg, qos, retain),
-            CoreMsg::IpConfig { .. } => {}
-        }
-    }
-
-    fn slot_of(&mut self, tconn: Tconn) -> Option<&mut Slot> {
-        let slot = self.slots.get_mut((tconn & 0xffff) as usize)?;
-        (slot.tconn == tconn && matches!(slot.peer, Some(Peer::Remote { .. }))).then_some(slot)
-    }
-
-    /// Ends the MQTT session of a slot (persistence snapshot, will) as
-    /// soon as we close our side, without waiting for TCP to finish: a
-    /// simultaneous close can keep smoltcp in CLOSING for a retransmission
-    /// timeout (ADR-032).
-    fn detach(broker: &mut Broker, slot: &mut Slot, link: &mut Link, now_ms: u64) {
-        match slot.peer.take() {
-            Some(Peer::Local(c)) => finish(broker, c, now_ms),
-            Some(Peer::Remote { home }) => link.send(home, CoreMsg::Closed { tconn: slot.tconn }),
-            None => {}
-        }
-    }
-
-    /// Ends whatever the slot was serving and makes it reusable.
-    fn reset_slot(broker: &mut Broker, slot: &mut Slot, link: &mut Link, now_ms: u64) {
-        Self::detach(broker, slot, link, now_ms);
-        slot.session = None;
-        slot.pending.clear();
-        slot.early.clear();
-        slot.outq.clear();
-        slot.remote_close = false;
-        slot.closing = false;
-        slot.tconn = 0;
-    }
-
-    /// Attaches the slot to the session's home shard (here or relayed).
-    fn attach(
-        &mut self,
-        i: usize,
-        home: usize,
-        identity: Option<&str>,
-        link: &mut Link,
-        now_ms: u64,
-    ) -> bool {
-        let Some(slot) = self.slots.get_mut(i) else {
-            return false;
+    /// Broker output of a local session → TLS → `pending`.
+    fn local_output(&mut self, c: u32, b: ConnId) {
+        let Some(k) = self.conns.get_mut(&c) else {
+            return;
         };
-        if home == self.me {
-            let Some(c) = self.broker.open(now_ms) else {
-                return false;
-            };
-            if let Some(id) = identity {
-                self.broker.set_identity(c, id);
+        if k.pending.len() < TX_BUF {
+            let out = self.broker.output(b);
+            if !out.is_empty() {
+                let n = out.len();
+                match k.session.as_mut() {
+                    Some(sess) => {
+                        if sess.send(out, &mut k.pending).is_err() {
+                            k.closing = true;
+                        }
+                    }
+                    None => k.pending.extend_from_slice(out),
+                }
+                self.broker.consumed(b, n);
             }
-            slot.peer = Some(Peer::Local(c));
-        } else {
+        }
+        if !self.broker.output(b).is_empty() {
+            // More than fits now: try again next pass.
+            self.ready.push(b);
+        }
+        let done = self.broker.close_requested(b).is_some() && self.broker.output(b).is_empty();
+        self.blocked.push(c);
+        if done {
+            self.start_close(c);
+        }
+    }
+
+    /// Home side: replies (within credit) and close requests for a relayed
+    /// connection.
+    fn remote_output(&mut self, b: ConnId, link: &mut Link) {
+        let Some(r) = self.remote.get_mut(&b) else {
+            return;
+        };
+        let out = self.broker.output(b);
+        if !out.is_empty() && r.credit > 0 {
+            let n = out.len().min(r.credit).min(RELAY_CHUNK);
+            let data = out.get(..n).unwrap_or(&[]).to_vec();
+            self.broker.consumed(b, n);
+            r.credit -= n;
             link.send(
-                home,
-                CoreMsg::Open {
-                    tconn: slot.tconn,
-                    identity: identity.map(Into::into),
+                r.from,
+                CoreMsg::Output {
+                    tconn: r.tconn,
+                    data,
                 },
             );
-            slot.peer = Some(Peer::Remote { home });
         }
-        true
-    }
-
-    /// Hands plaintext from the client to its session.
-    fn deliver(&mut self, i: usize, data: &[u8], link: &mut Link, now_ms: u64) {
-        let Some(slot) = self.slots.get(i) else {
-            return;
-        };
-        match slot.peer {
-            Some(Peer::Local(c)) => self.broker.input(c, data, now_ms),
-            Some(Peer::Remote { home }) => link.send(
-                home,
-                CoreMsg::Input {
-                    tconn: slot.tconn,
-                    data: data.to_vec(),
-                },
-            ),
-            None => {}
+        if !self.broker.output(b).is_empty() && r.credit > 0 {
+            self.ready.push(b);
+        }
+        if !r.close_sent
+            && self.broker.close_requested(b).is_some()
+            && self.broker.output(b).is_empty()
+        {
+            r.close_sent = true;
+            link.send(r.from, CoreMsg::Close { tconn: r.tconn });
         }
     }
 
-    /// Dev plaintext port: holds bytes until the CONNECT names the client,
-    /// then attaches to its home shard. Garbage goes to this core's shard,
-    /// which rejects it.
-    fn sniff_connect(&mut self, i: usize, data: &[u8], link: &mut Link, now_ms: u64) {
-        let Some(slot) = self.slots.get_mut(i) else {
-            return;
-        };
-        slot.early.extend_from_slice(data);
-        let limit = CONFIG.limits.max_packet_size as usize + 5;
-        let home = match urmqtt_mqtt::decode(&slot.early, &urmqtt_mqtt::Limits::PROTOCOL_MAX) {
-            Ok((urmqtt_mqtt::Packet::Connect(c), _)) => {
-                Some(dataplane::home_of(c.client_id, self.n))
-            }
-            Err(urmqtt_mqtt::Error::Incomplete(_)) if slot.early.len() <= limit => None,
-            _ => Some(self.me),
-        };
-        let Some(home) = home else { return };
-        let early = core::mem::take(&mut slot.early);
-        if self.attach(i, home, None, link, now_ms) {
-            self.deliver(i, &early, link, now_ms);
-        } else if let Some(slot) = self.slots.get_mut(i) {
-            slot.closing = true;
-        }
-    }
-
-    fn poll_slot(
-        &mut self,
-        i: usize,
-        sockets: &mut SocketSet<'_>,
-        link: &mut Link,
-        now_ms: u64,
-    ) -> bool {
-        let Some(slot) = self.slots.get_mut(i) else {
+    /// Moves relayed replies and pending bytes into TCP and finishes a
+    /// close. Returns whether bytes are still waiting.
+    fn push_to_tcp(&mut self, c: u32, tcp: &mut TcpStack, link: &mut Link) -> bool {
+        let Some(k) = self.conns.get_mut(&c) else {
             return false;
         };
-        let s = sockets.get_mut::<tcp::Socket>(slot.handle);
-        if !s.is_open() {
-            Self::reset_slot(&mut self.broker, slot, link, now_ms);
-            let _ = s.listen(slot.port);
-            return false;
-        }
-        let mut activity = false;
-        // `tconn == 0`: not accepted yet (it is set below and cleared by
-        // `reset_slot`).
-        let fresh = slot.tconn == 0 && s.may_recv() && !slot.closing;
-        if fresh {
-            self.slot_gen = self.slot_gen.wrapping_add(1).max(1);
-            slot.tconn = (u32::from(self.slot_gen) << 16) | i as u32;
-            slot.accepted_ms = now_ms;
-            if let Some(a) = dataplane::ACCEPTED.get(self.me) {
-                // Relaxed: statistics.
-                a.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            }
-            if slot.tls {
-                let admitted = {
-                    let rate = CONFIG.limits.handshakes_per_core_per_sec;
-                    let elapsed = now_ms.saturating_sub(self.admission.last_ms);
-                    let refill = (elapsed * u64::from(rate) / 1000) as u32;
-                    if refill > 0 {
-                        self.admission.tokens =
-                            self.admission.tokens.saturating_add(refill).min(rate);
-                        self.admission.last_ms = now_ms;
-                    }
-                    self.admission.tokens > 0
+        if let Some(Peer::Remote { home }) = k.peer {
+            while k.pending.len() < TX_BUF {
+                let Some(data) = k.outq.pop_front() else {
+                    break;
                 };
-                let session = self.tls.as_ref().and_then(|t| t.accept().ok());
-                match (admitted, session) {
-                    (true, Some(sess)) => {
-                        self.admission.tokens -= 1;
-                        slot.session = Some(Box::new(sess));
-                    }
-                    _ => {
-                        self.refused += 1;
-                        // Rate-limited log: 1st, 2nd, 4th, 8th, ... refusal.
-                        if self.refused.is_power_of_two() {
-                            warn!(
-                                "tls: {} handshake(s) refused by admission control",
-                                self.refused
-                            );
+                match k.session.as_mut() {
+                    Some(sess) => {
+                        if sess.send(&data, &mut k.pending).is_err() {
+                            k.closing = true;
                         }
-                        s.abort();
-                        return false;
                     }
+                    None => k.pending.extend_from_slice(&data),
+                }
+                link.send(
+                    home,
+                    CoreMsg::Credit {
+                        tconn: k.tconn,
+                        bytes: data.len() as u32,
+                    },
+                );
+            }
+            if k.remote_close && k.outq.is_empty() && !k.closing {
+                k.closing = true;
+                if let Some(sess) = k.session.as_mut() {
+                    sess.close(&mut k.pending);
                 }
             }
         }
-
-        // A listening (or not yet accepted) socket has nothing more to do;
-        // in particular it must not be mistaken for a closed peer below.
-        if slot.tconn == 0 {
-            return activity;
+        if !k.pending.is_empty() {
+            let n = tcp.send(c, &k.pending);
+            k.pending.drain(..n);
         }
+        if k.closing && k.pending.is_empty() && !k.fin_sent {
+            k.fin_sent = true;
+            tcp.close(c);
+        }
+        !k.pending.is_empty() || !k.outq.is_empty()
+    }
 
-        // Inbound. A relayed connection stops reading while the home core
-        // is behind, so TCP flow control pushes back on the client.
-        loop {
-            let Some(slot) = self.slots.get_mut(i) else {
-                return activity;
-            };
-            let s = sockets.get_mut::<tcp::Socket>(slot.handle);
-            if !s.can_recv() {
-                break;
-            }
-            if let Some(Peer::Remote { home }) = slot.peer
-                && link.backlog_len(home) > RELAY_BACKLOG
-            {
-                break;
-            }
-            let n = s.recv_slice(&mut self.buf).unwrap_or(0);
-            if n == 0 {
-                break;
-            }
-            activity = true;
-            if slot.closing && slot.peer.is_none() {
-                // Session already ended: whatever still arrives is dropped.
+    /// Closes connections that never finished their handshake (or, on the
+    /// dev port, never sent CONNECT).
+    fn expire_handshakes(&mut self, link: &mut Link, now_ms: u64) {
+        while let Some(&(at, c, tconn)) = self.handshakes.front() {
+            let attached = self
+                .conns
+                .get(&c)
+                .is_none_or(|k| k.tconn != tconn || k.peer.is_some() || k.closing);
+            if attached {
+                self.handshakes.pop_front();
                 continue;
             }
-            let data = self.buf.get(..n).unwrap_or(&[]).to_vec();
-            if let Some(sess) = slot.session.as_mut() {
-                self.app.clear();
-                let t0 = urmqtt_arch_aarch64::timer::uptime_ns();
-                let r = sess.input(&data, &mut slot.pending, &mut self.app);
-                if let Some(a) = dataplane::TLS_NS.get(self.me) {
-                    // Relaxed: statistics.
-                    a.fetch_add(
-                        urmqtt_arch_aarch64::timer::uptime_ns() - t0,
-                        core::sync::atomic::Ordering::Relaxed,
-                    );
-                }
-                match r {
-                    Ok(Event::Established {
-                        identity,
-                        suite,
-                        resumed,
-                    }) => {
-                        let home = dataplane::home_of(&identity, self.n);
-                        if let Some(dbl) = self.db.as_mut() {
-                            dbl.send(DbReq::DeviceSeen {
-                                id: identity.as_str().into(),
-                                unix: crate::boot::now_unix().unwrap_or(0) as i64,
-                            });
-                        }
-                        debug!(
-                            "tls: {identity} authenticated ({suite}{}) on core {}, session on core {home}",
-                            if resumed { ", resumed" } else { "" },
-                            self.me
-                        );
-                        if !self.attach(i, home, Some(&identity), link, now_ms)
-                            && let Some(slot) = self.slots.get_mut(i)
-                        {
-                            slot.closing = true;
-                        }
-                    }
-                    Ok(Event::PeerClosed) => slot.closing = true,
-                    Ok(Event::None) => {}
-                    Err(e) => {
-                        warn!("tls: connection refused: {e:?}");
-                        slot.closing = true;
-                        s.abort();
-                        return true;
-                    }
-                }
-                if !self.app.is_empty() {
-                    let app = core::mem::take(&mut self.app);
-                    self.deliver(i, &app, link, now_ms);
-                    self.app = app;
-                }
-            } else if slot.peer.is_some() {
-                self.deliver(i, &data, link, now_ms);
-            } else {
-                self.sniff_connect(i, &data, link, now_ms);
+            if now_ms.saturating_sub(at) <= HANDSHAKE_TIMEOUT_MS {
+                break;
             }
-        }
-
-        let Some(slot) = self.slots.get_mut(i) else {
-            return activity;
-        };
-        let s = sockets.get_mut::<tcp::Socket>(slot.handle);
-        // Handshake deadline.
-        if slot.peer.is_none()
-            && !slot.closing
-            && now_ms.saturating_sub(slot.accepted_ms) > HANDSHAKE_TIMEOUT_MS
-        {
-            if slot.tls {
+            self.handshakes.pop_front();
+            if self.conns.get(&c).is_some_and(|k| k.tls) {
                 warn!("tls: handshake timed out");
             } else {
                 warn!("mqtt: no CONNECT within {} s", HANDSHAKE_TIMEOUT_MS / 1000);
             }
-            s.abort();
-            Self::reset_slot(&mut self.broker, slot, link, now_ms);
-            return true;
+            self.detach(c, link, now_ms);
+            self.conns.remove(&c);
+            self.aborts.push(c);
         }
+    }
+}
 
-        // Outbound: session -> (TLS) -> socket.
-        match slot.peer {
-            Some(Peer::Local(c)) if slot.pending.len() < TX_BUF => {
-                let out = self.broker.output(c);
-                if !out.is_empty() {
-                    let n = out.len();
-                    match slot.session.as_mut() {
-                        Some(sess) => {
-                            if sess.send(out, &mut slot.pending).is_err() {
-                                slot.closing = true;
-                            }
-                        }
-                        None => slot.pending.extend_from_slice(out),
-                    }
-                    self.broker.consumed(c, n);
-                }
-            }
-            Some(Peer::Remote { home }) => {
-                while slot.pending.len() < TX_BUF {
-                    let Some(data) = slot.outq.pop_front() else {
-                        break;
-                    };
-                    match slot.session.as_mut() {
-                        Some(sess) => {
-                            if sess.send(&data, &mut slot.pending).is_err() {
-                                slot.closing = true;
-                            }
-                        }
-                        None => slot.pending.extend_from_slice(&data),
-                    }
-                    link.send(
-                        home,
-                        CoreMsg::Credit {
-                            tconn: slot.tconn,
-                            bytes: data.len() as u32,
-                        },
-                    );
-                    activity = true;
-                }
-            }
-            _ => {}
-        }
-        if !slot.pending.is_empty() && s.can_send() {
-            let n = s.send_slice(&slot.pending).unwrap_or(0);
-            if n > 0 {
-                activity = true;
-                slot.pending.drain(..n);
-            }
-        }
+/// Adapts the service to [`urmqtt_tcp::App`] for one `input`/`poll` call.
+pub struct TcpEvents<'a> {
+    pub mqtt: &'a mut MqttService,
+    pub link: &'a mut Link,
+    pub now_ms: u64,
+}
 
-        // Closing.
-        let peer_gone = (!s.may_recv() && !s.may_send()) || s.state() == tcp::State::CloseWait;
-        let session_done = match slot.peer {
-            Some(Peer::Local(c)) => {
-                self.broker.close_requested(c).is_some() && self.broker.output(c).is_empty()
-            }
-            Some(Peer::Remote { .. }) => slot.remote_close && slot.outq.is_empty(),
-            None => false,
-        };
-        if (session_done || peer_gone || slot.closing)
-            && slot.pending.is_empty()
-            && s.state() != tcp::State::Closed
-        {
-            // close_notify even after the peer's FIN (CloseWait still allows
-            // sending): clients like mosquitto half-close right after
-            // DISCONNECT and OpenSSL 3 treats a missing close_notify as an error.
-            if let Some(sess) = slot.session.as_mut()
-                && s.may_send()
-            {
-                sess.close(&mut slot.pending);
-                if !slot.pending.is_empty() && s.can_send() {
-                    let n = s.send_slice(&slot.pending).unwrap_or(0);
-                    slot.pending.drain(..n);
-                }
-            }
-            if !slot.closing || session_done || peer_gone {
-                slot.closing = true;
-                s.close();
-                Self::detach(&mut self.broker, slot, link, now_ms);
-            }
-        }
-        // Once both FINs are exchanged the session is over. Aborting here
-        // would send a RST that can overtake our close_notify (OpenSSL 3 then
-        // reports "unexpected eof"), and smoltcp keeps TIME_WAIT for 10 s,
-        // which would hold the slot. So a socket in TIME_WAIT is replaced by
-        // a fresh listening one; a late duplicate from the old connection
-        // just gets a RST from the stack (ADR-032).
-        // CLOSING (simultaneous close: both FINs sent, ours not yet seen as
-        // acknowledged by smoltcp, which waits a full retransmission timeout)
-        // is treated the same way.
-        if slot.closing
-            && matches!(
-                s.state(),
-                tcp::State::TimeWait | tcp::State::Closing | tcp::State::Closed
-            )
-        {
-            let replace = s.state() != tcp::State::Closed;
-            Self::reset_slot(&mut self.broker, slot, link, now_ms);
-            if replace {
-                sockets.remove(slot.handle);
-                slot.handle = sockets.add(new_socket());
-                let _ = sockets
-                    .get_mut::<tcp::Socket>(slot.handle)
-                    .listen(slot.port);
-            }
-        }
-        activity
+impl urmqtt_tcp::App for TcpEvents<'_> {
+    fn accept(&mut self, c: urmqtt_tcp::ConnId, port: u16, _remote: Endpoint) -> bool {
+        self.mqtt.on_accept(c, port, self.now_ms)
+    }
+
+    fn data(&mut self, c: urmqtt_tcp::ConnId, data: &[u8]) {
+        self.mqtt.on_data(c, data, self.link, self.now_ms);
+    }
+
+    fn peer_closed(&mut self, c: urmqtt_tcp::ConnId) {
+        self.mqtt.on_peer_closed(c, self.link, self.now_ms);
+    }
+
+    fn closed(&mut self, c: urmqtt_tcp::ConnId, _why: urmqtt_tcp::CloseReason) {
+        self.mqtt.on_closed(c, self.link, self.now_ms);
     }
 }
 

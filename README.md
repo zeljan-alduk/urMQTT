@@ -11,7 +11,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M13)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M14)-red)
 
 </div>
 
@@ -32,6 +32,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M11**: SQLite inside the kernel on a raw-disk VFS (WAL, exclusive), with a DB core fed by SPSC rings. State survives restarts and `kill -9`
 > - **M12**: per-core telemetry log with CRC per record, batched writes, crash recovery and torn-tail truncation, verified with a million records
 > - **M13**: multicore data plane: per-core stacks and broker shards, Toeplitz dispatcher, relayed sessions, cross-core fan-out, per-CPU heap caches; linear scaling to 4 worker cores in-guest
+> - **M14**: own server-only TCP/IP stack (SYN cookies, timing wheel, NewReno, ACK coalescing) and DHCP client; smoltcp removed
 >
 > The kernel boots under QEMU with HVF and TCG. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
@@ -94,8 +95,8 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | PCIe ECAM, virtio-pci modern: net, blk, rng | ✅ M6 |
 | | Software dispatcher (Toeplitz/RSS hash) on one virtio-net queue pair | ✅ M13 |
 | | virtio-net multiqueue + RSS | 📋 later (needs tap/vhost to test) |
-| **Network** | DHCPv4, ARP, ICMP echo (smoltcp prototype) | ✅ M7 |
-| | Own server-only TCP: SYN cookies, timing wheel, NewReno, ACK coalescing | 📋 M14 |
+| **Network** | Own DHCPv4 client, ARP, ICMP echo, strict IPv4 (no options, no fragments) | ✅ M14 |
+| | Own server-only TCP: SYN cookies, timing wheel, NewReno, ACK coalescing, no TIME_WAIT | ✅ M14 |
 | | IPv6 + SLAAC | 📋 later |
 | **TLS** | TLS 1.3 only, **mutual TLS**, device id from CN or SAN URI | ✅ M10 |
 | | rustls handshake, then own record layer (AES-128-GCM, ChaCha20-Poly1305, KeyUpdate) | ✅ M10 |
@@ -788,7 +789,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M11** SQLite in the kernel | data survives restarts and `kill -9` |
 | ✅ | **M12** Telemetry log | 1M messages; torn tail truncated on recovery |
 | ✅ | **M13** Multicore data plane | near-linear scaling 1 → 2 → 4 cores |
-| 📋 | **M14** Own TCP stack | smoltcp replaced; loss simulation tests; segment fuzzing |
+| ✅ | **M14** Own TCP stack | smoltcp replaced; loss simulation tests; segment fuzzing |
 | 📋 | **M15** Memory per connection | measured bytes per idle TLS connection ≤ 512 B |
 | 📋 | **M16** Hardening & ops | threat model; a 100k-client reconnect storm survives |
 | 📋 | **M17** Deployment | bit-identical ISO rebuilds, signatures, cloud guides |

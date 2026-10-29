@@ -507,3 +507,36 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - No RX interrupt for core 0 (idle → first packet waits ≤ 10 ms).
 - Fan-out goes to every shard rather than to the shards with subscribers.
 - Relayed connections cost one extra copy per message between cores.
+
+## M14 — Own TCP stack (2026-10-29)
+
+**Done**
+
+- `crates/timer-wheel`: hierarchical wheel, 4 × 64 slots, O(1) insert/cancel with generation ids, empty-range skipping. Tested against a reference model over 20 000 random operations.
+- `crates/tcp` (ADR-033): server-only TCP.
+  - SYN cookies (SipHash-2-4) always on; open-addressing table; RFC 6298 RTO; NewReno behind a trait; persist timer.
+  - Go-back-N with `snd_max`; RFC 5961 RST/SYN handling.
+  - ACK coalescing with application replies; no TIME_WAIT; application-controlled receive window.
+  - The send buffer exists only while data is pending.
+- `crates/net`:
+  - Ethernet/ARP/IPv4 (options and fragments dropped), rate-limited ICMP echo, UDP, an own DHCPv4 client (renew/rebind/expiry).
+  - A per-core `Iface` with a neighbour cache learned from incoming frames; ARP is answered only on the NIC-owning core.
+- Kernel:
+  - smoltcp removed. Core 0 runs `Iface` + `TcpStack` for ARP/ICMP/DHCP/echo; every worker runs its own for its MQTT flows.
+  - The MQTT service is rewritten as event driven: TCP events plus the broker's new `drain_ready`. Only blocked connections are revisited; keepalive and handshake expiry run every 100 ms.
+  - Static addressing (`network.mode = "static"`) is wired up.
+- Fuzz target `tcp_segment`: a live connection driven by fuzzed segments, sends, closes and raw bytes, with invariants checked.
+
+**Measured**
+
+- `make smoke`: **62/62**: every earlier test, unchanged, now on the own stack (DHCP, ping, echo, mTLS and plaintext MQTT, persistence, crash tests, dp-bench).
+- `urmqtt-tcp` host tests: 16, including 8 lossy seeds (10 % loss + 5 % duplication, sequence wrap) and 25 % loss.
+- `make fuzz T=tcp_segment FUZZ_TIME=60`: 2 164 095 runs, no crash or invariant violation.
+- Kernel ELF: 2 339 672 bytes (M13: 2 227 176; smoltcp out, own stack in).
+
+**Known gaps**
+
+- No window scaling or SACK (cookies cannot carry them): 64 KiB windows.
+- In-order receive only.
+- No IPv6 (a later item).
+- One timer per connection: a connection waiting in FIN-WAIT-2 has no retransmission timer to restart.

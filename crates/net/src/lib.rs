@@ -1,10 +1,14 @@
 //! Ethernet, ARP, IPv4, ICMP and DHCPv4 handling with dispatch to TCP.
 //!
-//! M13 adds the receive-side steering used by the fallback dispatcher:
-//! frame classification ([`classify`]) and the Toeplitz hash ([`rss`]).
-//! The own IPv4 stack lands in M14.
+//! - [`classify`] and [`rss`]: receive-side steering for the dispatcher (M13).
+//! - [`ipv4`], [`dhcp`], [`iface`]: the own IPv4 layer with ARP, ICMP echo,
+//!   UDP for DHCP and a DHCPv4 client (M14, replacing smoltcp).
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(
+    test,
+    allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)
+)]
 #![deny(unsafe_code)]
 #![deny(
     clippy::unwrap_used,
@@ -13,6 +17,11 @@
     clippy::panic
 )]
 
+extern crate alloc;
+
+pub mod dhcp;
+pub mod iface;
+pub mod ipv4;
 pub mod rss;
 
 /// What the dispatcher needs to know about a received Ethernet frame.
