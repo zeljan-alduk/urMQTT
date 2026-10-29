@@ -11,5 +11,7 @@ Encrypter = "Encrypter"
 encrypter = "encrypter"
 # TCP retransmission timeout
 RTO = "RTO"
+# x86 Interrupt Stack Table
+IST = "IST"
 # ARP field names (RFC 826): sender/target hardware and protocol address
 tha = "tha"
