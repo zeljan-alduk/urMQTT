@@ -61,7 +61,11 @@ make repro             # builds HEAD twice in fresh worktrees at different paths
 ```
 
 CI runs the same check on every push, with throwaway certificates as the prod
-inputs. The same commit, inputs and toolchain give a bit-identical image. A
+inputs. The same commit, inputs and toolchain give a bit-identical kernel ELF on
+any host. The ISO and the raw image are also identical when xorriso and mtools
+are the same versions (they lay out the image; Homebrew and Ubuntu versions
+differ), so compare images built on the same platform, for example both in CI's
+Ubuntu 24.04. A
 second person with the same `deploy/prod/` can rebuild and compare
 `SHA256SUMS` before anything is deployed.
 

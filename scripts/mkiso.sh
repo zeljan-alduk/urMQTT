@@ -73,6 +73,9 @@ mmd -i "$ESP" ::/EFI ::/EFI/BOOT ::/boot
 mcopy -m -i "$ESP" "$TMP/BOOTAA64.EFI" ::/EFI/BOOT/BOOTAA64.EFI
 mcopy -m -i "$ESP" "$TMP/limine.conf" ::/EFI/BOOT/limine.conf
 mcopy -m -i "$ESP" "$TMP/urmqtt" ::/boot/urmqtt
+# mtools versions differ in which timestamps follow SOURCE_DATE_EPOCH
+# (directories, `.` and `..`): set them all explicitly.
+python3 -I "$ROOT/scripts/fat-stamp.py" "$ESP" "$SOURCE_DATE_EPOCH" >/dev/null
 
 # Limine treats the ISO9660 volume as the boot volume on CD boots, so the
 # config and kernel also live on the ISO filesystem (identical copies).

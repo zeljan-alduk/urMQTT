@@ -666,7 +666,10 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 
 **Measured**
 
-- `make repro` (prod, commit 06bc1e2): ELF `7c5d50c2…`, ISO `0ce0eddb…` and raw image `798b1f27…` identical in both builds (47 s).
+- `make repro` on macOS (prod, the code of this commit): ELF, ISO and raw image identical in both builds (47 s).
+- The CI job's first run on Ubuntu showed the ISO and the raw image differing (ELF identical). Two causes, both in mtools: directory timestamps, and uninitialised memory that `mformat` writes into an unused sector. The fix is `scripts/fat-stamp.py`.
+  - Afterwards, three Ubuntu 24.04 builds in a container gave identical ISO and raw images.
+  - The job also passed despite the mismatch (`| tee` without `pipefail`); fixed.
 - `make smoke`: **70/70**, including `raw-disk` (HVF and TCG): the boot disk is skipped, the data disk is formatted, the boot disk is byte-identical afterwards.
 - `make dist` + `make sign` + `minisign -Vm` + `shasum -c` checked end to end with a throwaway key.
 - Kernel ELF: prod 2 214 352 bytes, dev 2 399 120 bytes.
@@ -675,5 +678,5 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 
 - Not validated on real cloud hardware. Hetzner CAX likely exposes virtio-scsi disks, and urMQTT drives only virtio-blk.
 - No project signing key is created here: the key holder generates it and sets `MINISIGN_SECRET_KEY`.
-- Identical images across different host operating systems are not tested (the same host platform is).
+- The ISO and the raw image are identical only for the same xorriso and mtools versions; macOS (Homebrew) and Ubuntu builds differ there. The ELF does not.
 - Oracle Cloud and ACPI-only validation on real ARM servers remain future work.

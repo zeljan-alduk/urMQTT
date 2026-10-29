@@ -17,10 +17,11 @@ ENV=${1:-prod}
 WORK=$(mktemp -d)
 # shellcheck disable=SC2329 # invoked by the EXIT trap
 cleanup() {
-    for d in a b; do
-        git -C "$ROOT" worktree remove --force "$WORK/$d" 2>/dev/null || true
+    for d in "$WORK/a" "$WORK/b/deeper/path"; do
+        git -C "$ROOT" worktree remove --force "$d" 2>/dev/null || true
     done
     rm -rf "$WORK"
+    git -C "$ROOT" worktree prune
 }
 trap cleanup EXIT
 

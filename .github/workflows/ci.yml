@@ -134,7 +134,10 @@ jobs:
       - run: make certs
       - name: Stage throwaway certificates as prod inputs
         run: cp deploy/dev/{ca.pem,server.pem,server.key} deploy/prod/
-      - run: scripts/repro.sh prod | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Build twice and compare
+        run: |
+          set -o pipefail
+          scripts/repro.sh prod | tee -a "$GITHUB_STEP_SUMMARY"
 
   smoke:
     name: Smoke (QEMU TCG boot + fault reports)

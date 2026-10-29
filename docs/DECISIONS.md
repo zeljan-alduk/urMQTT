@@ -467,7 +467,9 @@ verified in the named milestone before it becomes Accepted).
   - C uses `-ffile-prefix-map`.
   - Before the remap, the kernel contained 76 strings with the builder's home directory (and so the user name). Now it contains none.
   - `scripts/repro.sh` (`make repro`) builds HEAD twice, in two worktrees at paths of different depth with separate target directories, and compares ELF, ISO and raw image. CI runs it for prod with throwaway certificates.
-  - The claim is the same commit, inputs and toolchain → bit-identical images. Identical images across different host operating systems are expected, but not tested.
+  - The first CI run of the check found what a single machine could not. On Ubuntu 24.04, mtools 4.0.43 gives `mmd` directories the current time, and `mformat` leaves uninitialised heap memory (pointers that differ per run) in an unused sector at the end of the FAT image. `scripts/fat-stamp.py` now sets every FAT timestamp to `SOURCE_DATE_EPOCH` and zeroes free clusters, so the ESP no longer depends on the mtools version or on chance.
+    - The job had still reported success, because `| tee` hid the exit status; it now uses `pipefail`.
+  - The claim: the same commit, inputs and toolchain give a bit-identical kernel ELF on any host, as long as paths are remapped. The ISO and the raw image are bit-identical for the same versions of xorriso and mtools; macOS (Homebrew) and Ubuntu versions lay out the ISO differently.
 - **Raw disk image:**
   - `scripts/mkraw.py` wraps the ESP that `mkiso.sh` already builds in a GPT disk: protective MBR, one EFI system partition at 1 MiB, backup GPT, size rounded to whole MiBs (O_DIRECT hosts reject unaligned sizes).
   - Limine finds its config and the kernel on the ESP, as on the ISO.
