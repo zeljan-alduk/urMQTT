@@ -41,16 +41,26 @@ pub struct Uart {
     pub base: u64,
 }
 
-/// GICv3 register frames.
+/// GIC register frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Gic {
     pub gicd: u64,
-    /// Redistributor region: (base, length).
-    pub gicr: (u64, u64),
+    /// How CPUs reach the GIC, which also gives the version.
+    pub cpu: GicCpu,
     /// GICv3 ITS (MSI translation), if present (TCG, KVM).
     pub its: Option<u64>,
     /// GICv2m MSI frame, if present (QEMU under HVF).
     pub v2m: Option<u64>,
+}
+
+/// The per-CPU half of a GIC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GicCpu {
+    /// GICv3: redistributor region (base, length); the CPU interface is
+    /// system registers.
+    V3 { gicr: (u64, u64) },
+    /// GICv2: the memory-mapped CPU interface (GICC) base.
+    V2 { gicc: u64 },
 }
 
 /// Generic timer interrupt IDs (INTIDs).
@@ -169,7 +179,14 @@ impl core::fmt::Display for PlatformInfo {
         })?;
         match self.interrupts {
             Some(i) => {
-                write!(f, " gicd={:#x} gicr={:#x}", i.gic.gicd, i.gic.gicr.0)?;
+                match i.gic.cpu {
+                    GicCpu::V3 { gicr } => {
+                        write!(f, " gicd={:#x} gicr={:#x}", i.gic.gicd, gicr.0)?;
+                    }
+                    GicCpu::V2 { gicc } => {
+                        write!(f, " gicv2 gicd={:#x} gicc={:#x}", i.gic.gicd, gicc)?;
+                    }
+                }
                 match (i.gic.its, i.gic.v2m) {
                     (Some(its), _) => write!(f, " msi=its@{its:#x}")?,
                     (None, Some(v2m)) => write!(f, " msi=v2m@{v2m:#x}")?,
@@ -248,11 +265,30 @@ const PPI_BASE: u32 = 16;
 /// GICv3 redistributor stride with VLPI frames absent (RD + SGI frames).
 pub const GICR_STRIDE: u64 = 0x2_0000;
 
+/// Device-tree compatibles of GICv2-class controllers (QEMU's virt machine
+/// uses the first, Raspberry Pi firmware the second).
+const GICV2_COMPATIBLE: [&str; 3] = ["arm,cortex-a15-gic", "arm,gic-400", "arm,cortex-a9-gic"];
+
+fn gic_from_fdt(fdt: &Fdt<'_>) -> Result<Option<(u64, GicCpu)>, fdt::FdtError> {
+    if let Some(gic) = fdt.find_compatible("arm,gic-v3")? {
+        return Ok(match (gic.reg(0)?, gic.reg(1)?) {
+            (Some((gicd, _)), Some(gicr)) => Some((gicd, GicCpu::V3 { gicr })),
+            _ => None,
+        });
+    }
+    for c in GICV2_COMPATIBLE {
+        if let Some(gic) = fdt.find_compatible(c)? {
+            return Ok(match (gic.reg(0)?, gic.reg(1)?) {
+                (Some((gicd, _)), Some((gicc, _))) => Some((gicd, GicCpu::V2 { gicc })),
+                _ => None,
+            });
+        }
+    }
+    Ok(None)
+}
+
 fn interrupts_from_fdt(fdt: &Fdt<'_>) -> Result<Option<Interrupts>, fdt::FdtError> {
-    let Some(gic) = fdt.find_compatible("arm,gic-v3")? else {
-        return Ok(None);
-    };
-    let (Some((gicd, _)), Some(gicr)) = (gic.reg(0)?, gic.reg(1)?) else {
+    let Some((gicd, cpu)) = gic_from_fdt(fdt)? else {
         return Ok(None);
     };
     let its = fdt
@@ -288,7 +324,7 @@ fn interrupts_from_fdt(fdt: &Fdt<'_>) -> Result<Option<Interrupts>, fdt::FdtErro
     Ok(Some(Interrupts {
         gic: Gic {
             gicd,
-            gicr,
+            cpu,
             its,
             v2m,
         },
@@ -306,18 +342,23 @@ fn interrupts_from_acpi<M: PhysMemory>(
     let Some(t) = acpi::parse_gtdt(&gtdt) else {
         return Ok(None);
     };
-    let gicr = match (m.gicr_range, m.gicc_gicr_base) {
-        (Some(r), _) => r,
-        (None, Some(base)) => (base, GICR_STRIDE * m.cpus.max(1) as u64),
-        (None, None) => return Ok(None),
+    // MADT GIC version 0 means "not stated": then redistributors make it
+    // a GICv3, a GICC base alone a GICv2.
+    let cpu = match (m.version, m.gicr_range, m.gicc_gicr_base, m.gicc_base) {
+        (0 | 3.., Some(r), _, _) => GicCpu::V3 { gicr: r },
+        (0 | 3.., None, Some(base), _) => GicCpu::V3 {
+            gicr: (base, GICR_STRIDE * m.cpus.max(1) as u64),
+        },
+        (0 | 2, None, None, Some(gicc)) => GicCpu::V2 { gicc },
+        _ => return Ok(None),
     };
-    if m.gicd == 0 || (m.version != 0 && m.version < 3) {
+    if m.gicd == 0 {
         return Ok(None);
     }
     Ok(Some(Interrupts {
         gic: Gic {
             gicd: m.gicd,
-            gicr,
+            cpu,
             its: m.its,
             v2m: m.msi_frame.map(|f| f.0),
         },

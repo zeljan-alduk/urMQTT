@@ -371,13 +371,18 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     vm::enable_heap_caches();
     // Interrupts and time (M3). Device mappings must precede the lock.
     let Some(intr) = s.interrupts else {
-        fatal("no GICv3/timer description in DTB or ACPI");
+        fatal("no GIC/timer description in DTB or ACPI");
     };
     match irq::init(&intr.gic, s.cpus) {
         Ok(lines) => info!(
-            "gic: v3 at gicd={:#x} gicr={:#x}, {lines} lines, msi via {}",
+            "gic: {} at gicd={:#x} {}={:#x}, {lines} lines, msi via {}",
+            if irq::is_v2() { "v2" } else { "v3" },
             intr.gic.gicd,
-            intr.gic.gicr.0,
+            if irq::is_v2() { "gicc" } else { "gicr" },
+            match intr.gic.cpu {
+                urmqtt_platform::GicCpu::V3 { gicr } => gicr.0,
+                urmqtt_platform::GicCpu::V2 { gicc } => gicc,
+            },
             match (intr.gic.its, intr.gic.v2m) {
                 (Some(_), _) => "ITS",
                 (None, Some(_)) => "GICv2m frame",
@@ -494,7 +499,13 @@ fn smp_bringup(s: &mut Stage2) {
         info!("smp: no MP response, running on one CPU");
         return;
     };
-    let started = smp::start_aps(mp.cpus(), mp.bsp_mpidr, s.pac_key);
+    // A GICv2 routes by an 8-bit CPU mask.
+    let max = if irq::is_v2() {
+        irq::GICV2_MAX_CPUS
+    } else {
+        smp::MAX_CPUS
+    };
+    let started = smp::start_aps(mp.cpus(), mp.bsp_mpidr, s.pac_key, max);
     // The key is now in every core's registers; drop the copies in memory.
     s.pac_key = None;
     let n = smp::count();

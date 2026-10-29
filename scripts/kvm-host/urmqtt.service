@@ -1,0 +1,18 @@
+[Unit]
+Description=urMQTT broker (unikernel VM under KVM)
+Documentation=https://github.com/zeljan-alduk/urMQTT/blob/main/docs/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/lib/urmqtt/urmqtt-vm.sh
+# The kernel resets itself (watchdog) inside QEMU; a QEMU exit is restarted.
+Restart=always
+RestartSec=5
+# QEMU stops the guest on SIGTERM; the data disk is crash-consistent (WAL,
+# checksummed telemetry log), so a stop is like pulling the power.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

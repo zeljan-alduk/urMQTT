@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2054  # QEMU option syntax uses commas inside one argument
-# Boots an urMQTT ISO (or raw disk image) in QEMU (aarch64 virt, GICv3, UEFI).
+# Boots an urMQTT ISO (or raw disk image) in QEMU (aarch64 virt, UEFI).
 #
 #   scripts/run-qemu.sh --iso ISO | --disk RAW [--accel hvf|tcg|kvm] [--smp N] [--mem 512M]
-#                       [--data IMG] [--bus blk|scsi] [--cpu MODEL] [--no-rng] [--acpi on|off] [--serial FILE] [--headless]
+#                       [--data IMG] [--bus blk|scsi] [--cpu MODEL] [--gic 3|2] [--no-rng] [--acpi on|off] [--serial FILE] [--headless]
 #                       [--pcap FILE] [--gdb] [--no-net] [--fwd HOST:GUEST,...]
 #                       [-- extra qemu args]
 #
@@ -11,6 +11,8 @@
 # KVM host or a cloud server would; the data disk is a second virtio-blk.
 # --bus scsi attaches the boot disk and the data disk as scsi-hd LUNs on a
 # virtio-scsi controller instead, as many clouds do.
+# --gic 2 gives the guest a GICv2, as KVM does on a GIC-400 host such as
+# the Raspberry Pi 4 and 5 (at most 8 CPUs).
 # --fwd replaces the default port forwards (1883 and 8883 on 127.0.0.1);
 # --fwd none disables them.
 #
@@ -18,7 +20,7 @@
 # Option ROMs are disabled (romfile=): no iPXE in the firmware, faster boot.
 set -euo pipefail
 
-ISO="" DISK="" BUS=blk CPU_MODEL="" RNG=1 ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
+ISO="" DISK="" BUS=blk CPU_MODEL="" GIC=3 RNG=1 ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
 FWD="1883:1883,8883:8883"
 EXTRA=()
 while [[ $# -gt 0 ]]; do
@@ -27,6 +29,7 @@ while [[ $# -gt 0 ]]; do
         --disk) DISK=$2; shift 2 ;;
         --bus) BUS=$2; shift 2 ;;
         --cpu) CPU_MODEL=$2; shift 2 ;;
+        --gic) GIC=$2; shift 2 ;;
         --no-rng) RNG=0; shift ;;
         --accel) ACCEL=$2; shift 2 ;;
         --smp) SMP=$2; shift 2 ;;
@@ -78,9 +81,10 @@ firmware() {
     exit 1
 }
 FW=$(firmware)
+[[ $GIC == 2 || $GIC == 3 ]] || { echo "error: --gic 3|2" >&2; exit 2; }
 
 ARGS=(
-    -machine "virt,gic-version=3,acpi=$ACPI"
+    -machine "virt,gic-version=$GIC,acpi=$ACPI"
     -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
     -bios "$FW"
     -device ramfb

@@ -57,7 +57,7 @@ jobs:
           tar -xzf "${tarball}" actionlint
           ./actionlint -shellcheck="$(command -v shellcheck)"
       - name: shellcheck
-        run: shellcheck scripts/*.sh
+        run: shellcheck scripts/*.sh scripts/kvm-host/*.sh
 
   test:
     name: Host tests (${{ matrix.os }})

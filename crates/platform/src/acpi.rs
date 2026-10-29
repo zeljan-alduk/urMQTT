@@ -200,6 +200,8 @@ pub struct MadtGic {
     pub gicr_range: Option<(u64, u64)>,
     /// GICR base of the first GICC entry (used when no GICR range exists).
     pub gicc_gicr_base: Option<u64>,
+    /// GICv2 CPU interface base of the first GICC entry.
+    pub gicc_base: Option<u64>,
     /// Number of enabled GICC (CPU interface) entries.
     pub cpus: usize,
     /// GICv3 ITS base, if present.
@@ -283,6 +285,9 @@ pub fn parse_madt(t: &Sdt<'_>) -> MadtGic {
                     g.cpus += 1;
                     if g.gicc_gicr_base.is_none() {
                         g.gicc_gicr_base = u64_at(e, 60).filter(|&b| b != 0);
+                    }
+                    if g.gicc_base.is_none() {
+                        g.gicc_base = u64_at(e, 32).filter(|&b| b != 0);
                     }
                 }
             }

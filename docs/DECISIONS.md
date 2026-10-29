@@ -523,3 +523,23 @@ verified in the named milestone before it becomes Accepted).
 - **Found on the way: SMP did not start on CPUs without pointer authentication.** The AP trampoline wrote `APIAKey*_EL1` unconditionally; on Cortex-A72 and Neoverse N1 those registers are undefined and the APs died silently. The writes are now skipped when the CPU has no PAuth. Ampere Altra would have run on one core.
 - **NIC:** urMQTT drives virtio-net only, and SR-IOV NICs (Mellanox ConnectX VFs on Oracle's native mode) would each need a large driver. Instead, at boot every network controller without a driver is named with its vendor, the fix is stated (Oracle: launch mode PARAVIRTUALIZED), and a production image stops (a dev image idles).
 - **Testing:** the `no-hw-rng` smoke scenario boots with no virtio-rng: on HVF with the host CPU, and on TCG with `-cpu neoverse-n1` (no RNDR, no PAC/BTI). It checks the fallback's health tests, seeding and 4/4 CPUs online. Host tests cover the estimator and the pool policy.
+
+## ADR-039 — GICv2 (Raspberry Pi and other GIC-400 hosts)
+
+- **Status:** Accepted (after M17).
+- **Problem:** the kernel drove only a GICv3. The Raspberry Pi 4 and 5 (and other GIC-400 boards) have a GICv2, and KVM can only give its guests the host's GIC version. urMQTT could not run as a KVM guest there, only under full emulation.
+- **Design:**
+  - **Discovery:** `GicCpu::V3 { gicr }` or `GicCpu::V2 { gicc }` in `urmqtt-platform::Gic`. From the device tree: `arm,gic-v3`, else `arm,cortex-a15-gic` / `arm,gic-400` / `arm,cortex-a9-gic` with the GICC frame as the second `reg`. From ACPI, by the MADT GICD version: redistributors mean v3, and the first GICC entry's physical base means v2. Version 0 (not stated) is decided by which of the two exists.
+  - **Driver (`urmqtt_arch_aarch64::gic::Gicv2`):** the distributor and a memory-mapped CPU interface.
+    - Interrupt groups stay as reset or firmware left them, as Linux does. Without the security extensions (QEMU, KVM) everything is group 0, and `GICC_IAR` acknowledges it. With them, firmware made everything group 1, which is what a non-secure `GICC_IAR` acknowledges. Bit 0 of both control registers enables that group in either view, and group 0 is signalled as IRQ (`FIQEn` = 0).
+    - Each CPU reads its own target mask from the banked `GICD_ITARGETSR0`. SPIs are routed and SGIs sent (`GICD_SGIR`) with that mask, after a `dsb ishst` as on v3.
+    - `GICC_EOIR` gets back the raw IAR value, which for an SGI includes the sender.
+  - **Kernel:** `irq` hides the version. `irq::send_sgi(sgi, cpu)` and `irq::enable_spi(spi, cpu)` take logical CPU numbers, and a per-CPU `irq::Local` holds the redistributor (v3) or the mask (v2). The dispatch loop is unchanged on v3. On v2, at most 8 CPUs are started.
+  - **MSI-X** works unchanged through the GICv2m frame (QEMU `virt` has one with both GIC versions).
+- **Hosting:** `scripts/kvm-host/` holds a launcher (`virt,gic-version=host`, KVM, virtio devices), a systemd unit and an installer for Debian-family aarch64 hosts (docs/DEPLOY.md §7). The launcher works with a GICv2 or a GICv3 host.
+- **Testing:**
+  - Host tests: discovery from QEMU's GICv2 DTB and from GICv2 MADTs, including the contradictory case of version 2 with redistributors.
+  - The `gicv2` smoke scenarios, under TCG because HVF cannot emulate a GICv2:
+    - boot with ACPI and with DT, checking the tick, IRQ latency, 4/4 CPUs, 12/12 IPI pairs, MSI-X blk completions, virtio-net and SQLite;
+    - the TLS broker scenarios against the GICv2 guest.
+- **Not done:** more than 8 CPUs on a GICv2 (the architecture's limit); the GICv2 virtualization extensions (not needed by a guest); running directly on the Pi without Linux (no drivers for its Ethernet or SD card). Not yet tried on a real Pi.

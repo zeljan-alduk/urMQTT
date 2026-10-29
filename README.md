@@ -21,7 +21,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M0**: tooling and CI
 > - **M1**: UEFI boot, console, exception reports
 > - **M2**: own page tables with enforced W^X, guard pages, locked tables, PAC and BTI
-> - **M3**: GICv3, generic timer, periodic tick with measured IRQ latency
+> - **M3**: GICv3 (GICv2 added later, for Raspberry Pi KVM hosts), generic timer, periodic tick with measured IRQ latency
 > - **M4**: SMP bring-up on up to 64 cores, with IPIs checked between every pair of cores
 > - **M5**: hardware discovery from DTB or ACPI into one description, with identical results from both
 > - **M6**: PCIe and virtio drivers (rng, blk, net), MSI-X, and a CSPRNG seeded from hardware entropy
@@ -92,6 +92,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | **Kernel** | EL1 exception vectors with decoded ESR/ELR/FAR reports | ✅ M1 |
 | | Own page tables with W^X, guard pages, PAC/BTI when present | ✅ M2 |
 | | GICv3, generic timer, monotonic clock | ✅ M3 |
+| | GICv2 (KVM on GIC-400 hosts: Raspberry Pi 4/5), up to 8 CPUs | ✅ after M17 (TCG-tested) |
 | | SMP bring-up, per-CPU data (`TPIDR_EL1`), SGI IPIs | ✅ M4 |
 | | Hardware discovery via **DTB and ACPI** (MADT, GTDT, MCFG, SPCR) | ✅ M5 |
 | **Devices** | PL011 UART, Limine framebuffer text log | ✅ M1 |
@@ -137,7 +138,7 @@ flowchart TB
         store["store<br/>SQLite + raw VFS · telemetry log"]
         drivers["virtio (net · blk · rng) · pci (ECAM · MSI-X)"]
         mm["mm<br/>frames · heap · slabs · pools · key slab"]
-        arch["arch-aarch64<br/>vectors · MMU W^X · GICv3 · timer · PSCI · PAC/BTI"]
+        arch["arch-aarch64<br/>vectors · MMU W^X · GICv3/v2 · timer · PSCI · PAC/BTI"]
         platform["platform<br/>DTB | ACPI → PlatformInfo"]
         config["config<br/>constants + embedded CA/cert/key"]
         broker --> mqtt --> tls --> tcp --> net --> drivers
@@ -282,7 +283,7 @@ urMQTT/
 ├── rust-toolchain.toml     pinned nightly (ADR-002)
 ├── crates/
 │   ├── kernel/             the binary: boot, core loop, wiring
-│   ├── arch-aarch64/       vectors, MMU, GICv3, timer, PSCI, PAC/BTI, RNDR
+│   ├── arch-aarch64/       vectors, MMU, GICv3/v2, timer, PSCI, PAC/BTI, RNDR
 │   ├── platform/           DTB + ACPI discovery
 │   ├── mm/                 frames, heap, slabs, pools
 │   ├── pci/  virtio/       PCIe ECAM + MSI-X, virtio net/blk/rng
@@ -764,6 +765,7 @@ against the same data disk.
 | Generic KVM / Proxmox (aarch64) | UEFI VM, raw image (or ISO) + blank data disk, virtio-net/blk/rng | ✅ M17 (raw-disk boot tested in QEMU) |
 | Hetzner Cloud CAX (Ampere) | raw image written from the rescue system, Volume as data disk | 📖 documented; virtio-scsi supported, not tried on the real service |
 | Oracle Cloud Always Free (Ampere A1) | QCOW2 custom image, paravirtualized | 📖 documented; virtio-scsi supported, not tried on the real service |
+| Raspberry Pi 4/5 (4 GB+), any aarch64 Linux KVM host | `scripts/kvm-host/install.sh`: KVM guest with GICv2/v3, systemd service | 📖 documented; GICv2 tested under TCG, not yet on a Pi |
 
 Platforms that expose only non-virtio devices (AWS ENA/NVMe, Azure MANA) are not supported.
 Details are in [docs/DEPLOY.md](docs/DEPLOY.md).

@@ -461,6 +461,47 @@ no_hw_rng() {
     done
 }
 
+# GICv2 (ADR-039), what KVM gives a guest on a GIC-400 host such as the
+# Raspberry Pi 4/5. HVF cannot emulate a GICv2, so this runs under TCG:
+# boot with ACPI and DT, then the TLS broker scenarios.
+gicv2() {
+    if [[ " $ACCELS " != *" tcg "* ]]; then
+        echo "  - gicv2 skipped (needs tcg in --accels)"
+        return
+    fi
+    local iso="$OUT/gicv2.iso" acpi
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "smoke" >/dev/null
+    for acpi in on off; do
+        local log="$OUT/gicv2-$acpi.log" data="$OUT/gicv2-$acpi.img" status=0
+        rm -f "$data"
+        truncate -s 64m "$data"
+        boot "$log" --iso "$iso" --accel tcg --gic 2 --acpi "$acpi" --headless --data "$data" || status=$?
+        check "gicv2 boot acpi=$acpi [tcg]" "$log" "$status" \
+            "platform summary: .* gicv2 gicd=0x8000000 gicc=0x8010000 msi=v2m@0x8020000" \
+            "gic: v2 at gicd=0x8000000 gicc=0x8010000, [0-9]+ lines, msi via GICv2m frame" \
+            "tick 10$" "irq latency \(wfi, 25 samples\)" "timer: 5[0-9] ticks in [0-9]+ ms" \
+            "${DEV_OK[@]}" "${SMP4_OK[@]}" "${DB_OK[@]}" "msi-x: [0-9]+ blk completion interrupt" \
+            "^URMQTT READY$" "$NO_FAULT"
+    done
+    command -v mosquitto_pub >/dev/null || return 0
+    iso="$OUT/gicv2-serve.iso"
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve" >/dev/null
+    local log="$OUT/gicv2-mqtt-tls.log" data="$OUT/gicv2-mqtt-tls.img" status=0
+    rm -f "$data"
+    truncate -s 64m "$data"
+    start_vm "$log" --iso "$iso" --accel tcg --gic 2 --data "$data" --fwd "18883:8883"
+    if wait_log "$log" "TLS 1.3 listener on port 8883"; then
+        python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" 18883 >"$log.client" 2>&1 || status=$?
+    else
+        status=124
+    fi
+    kill_vm
+    cat "$log.client" >>"$log" 2>/dev/null || true
+    check "gicv2 mqtt-tls [tcg]" "$log" "$status" "gic: v2 at" \
+        "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
+        "client: qos1-after-reconnect ok" "client: tls-revoked-rejected ok" "NOT:FAILED" "$NO_FAULT"
+}
+
 [[ -f "$KERNEL" ]] || { echo "error: $KERNEL not found (make build)" >&2; exit 1; }
 rm -f "$OUT"/*.iso
 echo "smoke: accelerators: $ACCELS"
@@ -582,6 +623,7 @@ observability
 raw_disk
 scsi_disks
 no_hw_rng
+gicv2
 
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
 pcap_has_garp() {

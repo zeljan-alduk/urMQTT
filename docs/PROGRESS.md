@@ -726,3 +726,22 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 
 - The jitter source has only been measured under QEMU, not on Altra hardware. Its warning line reports the figures, so the first cloud boot shows them.
 - No driver for SR-IOV NICs.
+
+## After M17 — GICv2 for Raspberry Pi KVM hosts (2026-10-29)
+
+**Done** (ADR-039)
+
+- GICv2 discovery from DT (`arm,cortex-a15-gic`, `arm,gic-400`, `arm,cortex-a9-gic`) and ACPI (MADT GICD version, GICC base).
+- A `Gicv2` driver: distributor, MMIO CPU interface, target-mask routing, `GICD_SGIR` IPIs, raw-IAR EOI. The kernel's IRQ and SGI layer now takes logical CPUs and works with either GIC version; a GICv2 starts at most 8 CPUs.
+- `run-qemu.sh --gic 2`. The `gicv2` smoke scenarios run under TCG (HVF cannot emulate a GICv2): boot with ACPI and DT, and the mTLS broker scenarios.
+- `scripts/kvm-host/` with `install.sh`, `urmqtt-vm.sh` (`gic-version=host`, KVM, virtio devices, `--dry-run`) and `urmqtt.service`. docs/DEPLOY.md §7 covers the Raspberry Pi 4/5 and other aarch64 Linux KVM hosts.
+
+**Measured (TCG, `gic-version=2`, 4 vCPUs)**
+
+- 4/4 CPUs online and 12/12 IPI pairs, with an average round trip of about 46–50 µs under TCG.
+- MSI-X blk completions through GICv2m, SQLite, virtio-net, and the TLS broker scenarios all pass.
+
+**Known gaps**
+
+- Not yet run on a real Raspberry Pi with KVM.
+- The launcher's QEMU command line was checked under TCG on macOS, not with KVM.

@@ -94,7 +94,7 @@ zeljan-alduk/urMQTT`), and a minisign signature when the repository secret
 |---|---|
 | CPU | aarch64 (ARMv8.0+; PAC/BTI used when present), 2+ vCPUs (with storage the last CPU is the DB core) |
 | Firmware | UEFI (AAVMF/OVMF for aarch64), ACPI or device tree |
-| Interrupts | GICv3; MSI-X through GICv2m frames when present (QEMU `virt`), polling otherwise |
+| Interrupts | GICv3, or GICv2 (at most 8 vCPUs; what KVM offers on a GIC-400 host such as the Raspberry Pi); MSI-X through GICv2m frames when present (QEMU `virt`), polling otherwise |
 | NIC | one virtio-net (PCI); DHCP unless `network.mode = "static"` |
 | Data disk | one virtio-blk disk or virtio-scsi LUN (PCI), 512-byte blocks, blank on first boot, ≥ 64 MiB; with `storage.require_data_disk = true` the broker refuses to serve without it |
 | Entropy | virtio-rng, or `RNDR` on the CPU; otherwise health-tested CPU jitter (`entropy.fallback`), else no boot |
@@ -197,7 +197,46 @@ Then launch an A1.Flex instance from the image, attach a blank paravirtualized
 block volume as the data disk, and allow TCP 8883 in the subnet's security list.
 The serial console (`oci compute instance-console-connection`) shows the log.
 
-## 7. Operating
+## 7. Raspberry Pi 4/5 and other aarch64 Linux boards (KVM)
+
+urMQTT has no drivers for the Pi's own hardware (Ethernet, SD card). It runs
+on the Pi as a KVM guest under 64-bit Linux, which gives it the same virtio
+devices as a cloud. The Pi's interrupt controller is a GIC-400 (GICv2), so
+KVM can only give guests a GICv2; urMQTT supports it (ADR-039).
+
+Requirements: Raspberry Pi 4 or 5 with 4 GB of RAM or more (the prod image
+reserves a 1 GiB heap; the VM gets 2 GiB by default), 64-bit Raspberry Pi OS
+or Ubuntu (`ls /dev/kvm` must show the device), wired Ethernet.
+
+```bash
+# On the Pi, in a checkout of this repository, with your prod image (make dist ENV=prod)
+# and its SHA256SUMS(.minisig) copied over (scp); the image holds the server key:
+minisign -Vm SHA256SUMS -p minisign.pub && sha256sum -c SHA256SUMS --ignore-missing
+sudo scripts/kvm-host/install.sh urmqtt-prod-<version>.img     # --data-size 8G --cpus 4 --mem 2G
+journalctl -u urmqtt -f          # the serial log: boot report, DHCP lease, listener
+```
+
+`install.sh` installs QEMU and the UEFI firmware (`qemu-system-arm`,
+`qemu-efi-aarch64`), copies the image to `/var/lib/urmqtt/boot.img`, creates a
+blank sparse data disk once (`data.img`, never overwritten), writes
+`/etc/urmqtt/vm.conf` and enables `urmqtt.service`. The service runs
+`scripts/kvm-host/urmqtt-vm.sh`: `virt,gic-version=host` with KVM, virtio-rng,
+virtio-blk boot and data disks, virtio-net. `urmqtt-vm.sh --dry-run` prints the
+QEMU command line. The same script works on any aarch64 Linux KVM host, with a
+GICv2 or a GICv3.
+
+**Network.** The default (`--net user`) forwards host port 8883 to the VM, so
+clients connect to the Pi's address; forward TCP 8883 on your router to reach
+it from outside. Every client then appears to come from one address (QEMU's
+NAT), so `limits.max_handshakes_in_flight_per_ip` applies to all of them
+together. With a Linux bridge on the Pi's Ethernet (`nmcli con add type bridge
+ifname br0` and the Ethernet connection as its port), `--net bridge:br0` puts
+the VM on the LAN with its own DHCP address and real client addresses.
+
+**Updating:** run `install.sh` again with the new image. It replaces the boot
+image, keeps the data disk and restarts the service.
+
+## 8. Operating
 
 - **Logs:** the serial console, plus RFC 5424 syslog over UDP to
   `observability.syslog_udp`. Watch for `admission:`, `watchdog:`, `health:`

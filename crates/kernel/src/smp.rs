@@ -11,7 +11,6 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use limine::mp::MpInfo;
-use urmqtt_arch_aarch64::gic::{self, Redistributor};
 use urmqtt_arch_aarch64::sync::OnceCell;
 use urmqtt_arch_aarch64::{cpu, regs, timer};
 use urmqtt_log::{info, warn};
@@ -28,7 +27,7 @@ pub const SGI_WAKE: u32 = 3;
 
 pub struct PerCpu {
     pub mpidr: AtomicU64,
-    pub rd: OnceCell<Redistributor>,
+    pub gic: OnceCell<irq::Local>,
     pub online: AtomicBool,
     pub ticks: AtomicU64,
     /// Logical CPU that last pinged this one.
@@ -47,7 +46,7 @@ impl PerCpu {
     const fn new() -> Self {
         Self {
             mpidr: AtomicU64::new(0),
-            rd: OnceCell::new(),
+            gic: OnceCell::new(),
             online: AtomicBool::new(false),
             ticks: AtomicU64::new(0),
             ping_from: AtomicUsize::new(usize::MAX),
@@ -209,14 +208,21 @@ fn sysreg_vbar() -> u64 {
     regs::vbar_el1()
 }
 
-/// Releases every AP in `cpus` (the Limine MP response). Their stacks must
-/// already be mapped (`vm::map_stacks`). Returns the number started.
-pub fn start_aps(cpus: &[&MpInfo], bsp_mpidr: u64, pac_key: Option<(u64, u64)>) -> usize {
+/// Releases every AP in `cpus` (the Limine MP response), up to `max` CPUs
+/// in all. Their stacks must already be mapped (`vm::map_stacks`). Returns
+/// the number started.
+pub fn start_aps(
+    cpus: &[&MpInfo],
+    bsp_mpidr: u64,
+    pac_key: Option<(u64, u64)>,
+    max: usize,
+) -> usize {
     let (pac, (key_lo, key_hi)) = (pac_key.is_some(), pac_key.unwrap_or((0, 0)));
+    let max = max.min(MAX_CPUS);
     let mut next = 1usize;
     for info in cpus.iter().filter(|c| c.mpidr != bsp_mpidr) {
-        if next >= MAX_CPUS {
-            warn!("smp: more than {MAX_CPUS} CPUs, ignoring the rest");
+        if next >= max {
+            warn!("smp: more than {max} CPUs usable, ignoring the rest");
             break;
         }
         let id = next;
@@ -337,20 +343,15 @@ fn start_work(cpu: usize, work: usize) {
     let Some(pc) = CPUS.get(cpu) else { return };
     // Release: everything prepared for the work item is visible to it.
     pc.work.store(work, Ordering::Release);
-    gic::send_sgi(SGI_WAKE, mpidr_of(cpu));
+    irq::send_sgi(SGI_WAKE, cpu);
 }
 
 /// Sends the wake-up SGI to `cpu` (its handler does nothing; leaving WFI
 /// is the point).
 pub fn send_wake(cpu: usize) {
     if cpu < MAX_CPUS {
-        gic::send_sgi(SGI_WAKE, mpidr_of(cpu));
+        irq::send_sgi(SGI_WAKE, cpu);
     }
-}
-
-fn mpidr_of(cpu: usize) -> u64 {
-    // Relaxed: written before the CPU was started / the test began.
-    CPUS[cpu].mpidr.load(Ordering::Relaxed)
 }
 
 fn on_ping(_intid: u32) {
@@ -358,7 +359,7 @@ fn on_ping(_intid: u32) {
     // (the SGI itself is ordered after it by `dsb ishst`).
     let from = this().ping_from.load(Ordering::Acquire);
     if from < MAX_CPUS {
-        gic::send_sgi(SGI_PONG, mpidr_of(from));
+        irq::send_sgi(SGI_PONG, from);
     }
 }
 
@@ -388,7 +389,7 @@ fn ping_all() {
         // Release: `on_ping` on the target reads it with Acquire.
         CPUS[target].ping_from.store(me_id, Ordering::Release);
         let t0 = timer::now();
-        gic::send_sgi(SGI_PING, mpidr_of(target));
+        irq::send_sgi(SGI_PING, target);
         let deadline = timer::uptime_ns() + PING_TIMEOUT_NS;
         // Acquire: pairs with the Release increment in `on_pong`.
         while me.pongs.load(Ordering::Acquire) == before {
@@ -423,7 +424,7 @@ pub fn ipi_selftest() -> (u64, u64) {
         } else {
             // Release: pairs with the Acquire in `idle_loop`.
             pc.work.store(WORK_PING_ALL, Ordering::Release);
-            gic::send_sgi(SGI_WAKE, mpidr_of(c));
+            irq::send_sgi(SGI_WAKE, c);
             let deadline = timer::uptime_ns() + PING_TIMEOUT_NS * n as u64;
             // Acquire: pairs with the Release of WORK_DONE.
             while pc.work.load(Ordering::Acquire) != WORK_DONE {

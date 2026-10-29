@@ -19,7 +19,7 @@ aarch64 ELF that contains everything needed to be an MQTT broker:
 │  virtio  ─ net · blk · rng      pci ─ ECAM · BARs · MSI-X                        │
 │  mm      ─ frames · heap · per-CPU slabs · pools · key slab                      │
 │  platform ─ DTB | ACPI → one PlatformInfo       log ─ per-CPU rings → sinks      │
-│  arch-aarch64 ─ vectors · MMU (W^X) · GICv3 · timer · PSCI · PAC/BTI · RNDR      │
+│  arch-aarch64 ─ vectors · MMU (W^X) · GICv3/v2 · timer · PSCI · PAC/BTI · RNDR   │
 │  config  ─ compile-time constants + embedded CA / server cert / key              │
 └──────────────────────────────────────────────────────────────────────────────────┘
         ▲ UEFI + Limine                 ▲ virtio-pci devices from the hypervisor
@@ -36,7 +36,7 @@ builds only, enforced at build time).
 3. **Exceptions.** The EL1 vector table is installed. Every synchronous exception prints a decoded ESR (exception class, ISS), ELR, FAR and SPSR. A panic logs, then calls PSCI `SYSTEM_RESET` (`SYSTEM_OFF` in smoke mode).
 4. **Memory.** The frame allocator is built from the Limine memmap, and the kernel switches to its own translation tables with W^X: `.text` RX, `.rodata` R, everything else RW-NX. Every stack gets a guard page. PAC/BTI are enabled if `ID_AA64ISAR1_EL1` / `ID_AA64PFR1_EL1` report them. After boot the tables are locked: nothing is ever remapped executable.
 5. **Platform.** DTB or ACPI tables are reduced to one `PlatformInfo` (CPUs, GIC, timer IRQs, UART, PCIe ECAM, PSCI conduit).
-6. **Interrupts, time, entropy.** GICv3 distributor and redistributors come up, along with the generic timer, the CSPRNG seeded from `RNDR` or virtio-rng. With no entropy source, the kernel halts with a clear error.
+6. **Interrupts, time, entropy.** The GIC comes up (GICv3 distributor and redistributors, or a GICv2 distributor and CPU interface on GIC-400 hosts, ADR-039), along with the generic timer, the CSPRNG seeded from `RNDR` or virtio-rng. With no entropy source, the kernel halts with a clear error.
 7. **SMP.** The application processors start (Limine MP or PSCI `CPU_ON`). Per-CPU data lives behind `TPIDR_EL1`.
 8. **Devices.** PCIe enumeration, then virtio-blk (data disk), virtio-net (queues per core) and virtio-rng.
 9. **Storage.** The data disk superblock is checked, SQLite opens in WAL + `locking_mode=EXCLUSIVE`, `PRAGMA quick_check` runs, and telemetry segments are recovered.

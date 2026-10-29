@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use urmqtt_platform::acpi::{Acpi, AcpiError, PhysMemory, parse_fadt_arm_boot_arch, parse_spcr};
 use urmqtt_platform::fdt::Fdt;
-use urmqtt_platform::{Gic, PsciMethod, Source, TimerIrqs, Uart, early_from_acpi, early_from_fdt};
+use urmqtt_platform::{
+    Gic, GicCpu, PsciMethod, Source, TimerIrqs, Uart, early_from_acpi, early_from_fdt,
+};
 
 /// Sparse fake physical memory made of regions.
 #[derive(Default)]
@@ -223,7 +225,9 @@ fn gic_and_timer_from_madt_gtdt() {
         i.gic,
         Gic {
             gicd: 0x0800_0000,
-            gicr: (0x080a_0000, 0x40000),
+            cpu: GicCpu::V3 {
+                gicr: (0x080a_0000, 0x40000)
+            },
             its: Some(0x0808_0000),
             v2m: None
         }
@@ -243,7 +247,33 @@ fn gicr_from_gicc_when_no_range() {
     ]);
     let acpi = Acpi::new(&mem, 0x2000_0000).unwrap();
     let i = early_from_acpi(&acpi).unwrap().interrupts.unwrap();
-    assert_eq!(i.gic.gicr, (0x080a_0000, 2 * 0x2_0000));
+    assert_eq!(
+        i.gic.cpu,
+        GicCpu::V3 {
+            gicr: (0x080a_0000, 2 * 0x2_0000)
+        }
+    );
+}
+
+#[test]
+fn gicv2_from_madt() {
+    let mut d = gicd(0x0800_0000);
+    d[20] = 2;
+    let mut c0 = gicc(0, 0);
+    c0[32..40].copy_from_slice(&0x0801_0000u64.to_le_bytes());
+    let mem = machine(vec![madt(&[d, c0, gicc(0, 1)]), gtdt(30, 27)]);
+    let acpi = Acpi::new(&mem, 0x2000_0000).unwrap();
+    let i = early_from_acpi(&acpi).unwrap().interrupts.unwrap();
+    assert_eq!(i.gic.cpu, GicCpu::V2 { gicc: 0x0801_0000 });
+    // Version 2 with redistributors is contradictory: no GIC.
+    let mut d = gicd(0x0800_0000);
+    d[20] = 2;
+    let mem = machine(vec![
+        madt(&[d, gicc(0, 0), gicr_range(0x080a_0000, 0x40000)]),
+        gtdt(30, 27),
+    ]);
+    let acpi = Acpi::new(&mem, 0x2000_0000).unwrap();
+    assert_eq!(early_from_acpi(&acpi).unwrap().interrupts, None);
 }
 
 #[test]

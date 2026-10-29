@@ -1,6 +1,12 @@
-//! GICv3 driver: distributor and redistributors via MMIO, CPU interface via
-//! system registers (`ICC_*_EL1`). All interrupts are non-secure group 1
+//! GIC drivers.
+//!
+//! GICv3 (`Gicv3`): distributor and redistributors via MMIO, CPU interface
+//! via system registers (`ICC_*_EL1`). All interrupts are non-secure group 1
 //! with affinity routing.
+//!
+//! GICv2 (`Gicv2`, ADR-039): distributor and CPU interface both via MMIO,
+//! SPIs routed by CPU target masks (at most 8 CPUs). This is what KVM gives
+//! a guest on a GICv2 host such as the Raspberry Pi 4 and 5 (GIC-400).
 
 #![allow(unsafe_code)]
 
@@ -14,7 +20,9 @@ const GICD_ISENABLER: usize = 0x0100;
 const GICD_ICENABLER: usize = 0x0180;
 const GICD_ICPENDR: usize = 0x0280;
 const GICD_IPRIORITYR: usize = 0x0400;
+const GICD_ITARGETSR: usize = 0x0800;
 const GICD_ICFGR: usize = 0x0c00;
+const GICD_SGIR: usize = 0x0f00;
 const GICD_IROUTER: usize = 0x6000;
 const GICD_CTLR_RWP: u32 = 1 << 31;
 /// ARE_NS | EnableGrp1A | EnableGrp1 (NS view); ARE | Grp1 | Grp0 when DS=1.
@@ -36,6 +44,13 @@ const GICR_ISENABLER0: usize = SGI_FRAME + 0x0100;
 const GICR_ICENABLER0: usize = SGI_FRAME + 0x0180;
 const GICR_ICPENDR0: usize = SGI_FRAME + 0x0280;
 const GICR_IPRIORITYR: usize = SGI_FRAME + 0x0400;
+
+// GICv2 CPU interface.
+const GICC_CTLR: usize = 0x0000;
+const GICC_PMR: usize = 0x0004;
+const GICC_BPR: usize = 0x0008;
+const GICC_IAR: usize = 0x000c;
+const GICC_EOIR: usize = 0x0010;
 
 /// Bounded register polling so a broken GIC cannot hang boot.
 const SPIN_LIMIT: u32 = 10_000_000;
@@ -274,4 +289,134 @@ pub fn send_sgi(intid: u32, mpidr_aff: u64) {
         | (aff3 << 48);
     // SAFETY: generating an SGI only changes the target's pending state.
     unsafe { asm!("dsb ishst", "msr S3_0_C12_C11_5, {}", "isb", in(reg) v, options(nostack)) };
+}
+
+/// A GICv2 (GIC-400 class) interrupt controller.
+///
+/// Interrupt groups are left as reset or firmware set them, as Linux does:
+/// without the security extensions (QEMU, KVM) everything is group 0 and
+/// `GICC_IAR` acknowledges it; with them, firmware made everything group 1,
+/// which is what a non-secure `GICC_IAR` acknowledges. Bit 0 of both
+/// control registers enables exactly that group in either view. Group 0
+/// is signalled as IRQ because `GICC_CTLR.FIQEn` stays 0.
+#[derive(Clone, Copy)]
+pub struct Gicv2 {
+    gicd: usize,
+    gicc: usize,
+}
+
+impl Gicv2 {
+    /// # Safety
+    /// `gicd` (4 KiB) and `gicc` (8 KiB) must be virtual addresses of the
+    /// GIC frames, mapped as device memory for the kernel's lifetime.
+    pub const unsafe fn new(gicd: usize, gicc: usize) -> Self {
+        Self { gicd, gicc }
+    }
+
+    /// Number of SPI-capable interrupt lines (INTIDs 32..lines).
+    pub fn lines(&self) -> u32 {
+        let n = rd32(self.gicd + GICD_TYPER) & 0x1f;
+        (32 * (n + 1)).min(1020)
+    }
+
+    /// Distributor setup, once per system: every SPI at default priority,
+    /// level-triggered, disabled, not pending; then enable.
+    pub fn init_distributor(&self) {
+        wr32(self.gicd + GICD_CTLR, 0);
+        let lines = self.lines();
+        for i in (32..lines).step_by(32) {
+            let w = (i / 32) as usize * 4;
+            wr32(self.gicd + GICD_ICENABLER + w, u32::MAX);
+            wr32(self.gicd + GICD_ICPENDR + w, u32::MAX);
+        }
+        let prio = u32::from_ne_bytes([DEFAULT_PRIORITY; 4]);
+        for i in (32..lines).step_by(4) {
+            wr32(self.gicd + GICD_IPRIORITYR + i as usize, prio);
+        }
+        for i in (32..lines).step_by(16) {
+            wr32(self.gicd + GICD_ICFGR + (i / 16) as usize * 4, 0);
+        }
+        wr32(self.gicd + GICD_CTLR, 1);
+    }
+
+    /// Per-CPU setup on the executing CPU: its banked SGIs and PPIs at
+    /// default priority and disabled, then its CPU interface. Returns the
+    /// CPU's target mask (the bit SPIs and SGIs are routed to).
+    pub fn init_cpu(&self) -> u8 {
+        wr32(self.gicd + GICD_ICENABLER, u32::MAX);
+        wr32(self.gicd + GICD_ICPENDR, u32::MAX);
+        let prio = u32::from_ne_bytes([DEFAULT_PRIORITY; 4]);
+        for i in (0..32).step_by(4) {
+            wr32(self.gicd + GICD_IPRIORITYR + i, prio);
+        }
+        wr32(self.gicc + GICC_PMR, 0xff);
+        wr32(self.gicc + GICC_BPR, 0);
+        wr32(self.gicc + GICC_CTLR, 1);
+        // GICD_ITARGETSR0-7 are banked and read as the reading CPU's own
+        // mask in every SGI/PPI field; a uniprocessor GIC reads 0.
+        let own = rd32(self.gicd + GICD_ITARGETSR).to_le_bytes();
+        match own.iter().fold(0, |a, b| a | b) {
+            0 => 1,
+            m => m,
+        }
+    }
+
+    /// Enables SGI/PPI `intid` (< 32) on the executing CPU.
+    pub fn enable_private(&self, intid: u32) {
+        if intid < 32 {
+            wr32(self.gicd + GICD_ISENABLER, 1 << intid);
+        }
+    }
+
+    pub fn disable_private(&self, intid: u32) {
+        if intid < 32 {
+            wr32(self.gicd + GICD_ICENABLER, 1 << intid);
+        }
+    }
+
+    /// Routes SPI `intid` to the CPUs in `targets` and enables it.
+    pub fn enable_spi(&self, intid: u32, targets: u8, edge: bool) {
+        if !(32..self.lines()).contains(&intid) {
+            return;
+        }
+        // Word access: byte access to ITARGETSR is optional for some
+        // emulations.
+        let reg = self.gicd + GICD_ITARGETSR + (intid & !3) as usize;
+        let shift = (intid % 4) * 8;
+        let v = rd32(reg) & !(0xff << shift);
+        wr32(reg, v | (u32::from(targets) << shift));
+        let cfg = self.gicd + GICD_ICFGR + (intid / 16) as usize * 4;
+        let bit = 1 << ((intid % 16) * 2 + 1);
+        let v = rd32(cfg);
+        wr32(cfg, if edge { v | bit } else { v & !bit });
+        wr32(
+            self.gicd + GICD_ISENABLER + (intid / 32) as usize * 4,
+            1 << (intid % 32),
+        );
+    }
+
+    /// Acknowledges the highest-priority pending interrupt. Returns the raw
+    /// `GICC_IAR` value, which `eoi` needs back unchanged (for an SGI it
+    /// also names the sender); the INTID is `raw & 0x3ff`.
+    #[inline]
+    pub fn ack(&self) -> u32 {
+        rd32(self.gicc + GICC_IAR)
+    }
+
+    /// Signals end of interrupt for a value returned by `ack`.
+    #[inline]
+    pub fn eoi(&self, raw: u32) {
+        wr32(self.gicc + GICC_EOIR, raw);
+    }
+
+    /// Sends SGI `intid` (0-15) to the CPUs in `targets`, ordered after
+    /// prior stores as `send_sgi` is.
+    pub fn send_sgi(&self, intid: u32, targets: u8) {
+        // SAFETY: a barrier has no memory-safety effect.
+        unsafe { asm!("dsb ishst", options(nostack, preserves_flags)) };
+        wr32(
+            self.gicd + GICD_SGIR,
+            (u32::from(targets) << 16) | (intid & 0xf),
+        );
+    }
 }

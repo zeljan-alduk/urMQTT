@@ -21,7 +21,7 @@ use urmqtt_virtio::scsi::{ScsiDisk, VirtioScsi};
 use urmqtt_virtio::transport::CapLoc;
 use urmqtt_virtio::{DeviceType, DmaRegion, Env, Region, Transport, VirtioError, find_caps};
 
-use crate::{irq, memory, smp, vm};
+use crate::{irq, memory, vm};
 
 /// ECAM configuration space mapped at `va`.
 pub struct Ecam {
@@ -404,7 +404,7 @@ fn probe_pci(
                 }
                 if let Some(spi) = spi {
                     irq::register(spi, on_blk_irq);
-                    irq::enable_spi(spi, smp::CPUS[0].mpidr.load(Ordering::Relaxed));
+                    irq::enable_spi(spi, 0);
                 }
                 info!(
                     "blk: {} MiB, block size {}, flush={}, read-only={}, msi-x={}",
