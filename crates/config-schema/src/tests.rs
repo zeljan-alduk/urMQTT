@@ -235,6 +235,19 @@ fn acl_and_telemetry_patterns_validated() {
 }
 
 #[test]
+fn service_identity_patterns() {
+    assert!(check_identity_pattern("backend").is_ok());
+    assert!(check_identity_pattern("svc-*").is_ok());
+    assert!(check_identity_pattern("bad/id").is_err());
+    assert!(check_identity_pattern("a*b").is_err());
+    assert!(check_identity_pattern("").is_err());
+    let text = dev_with("service_ids", "service_ids = [\"ok\", \"no+\"]");
+    assert_rejected("dev", &text, "acl.service_ids[1]");
+    let cfg = parse("dev", DEV).unwrap();
+    assert_eq!(cfg.acl.service_ids, vec!["backend".to_owned()]);
+}
+
+#[test]
 fn udp_sinks() {
     let text = dev_with("syslog_udp", "syslog_udp = \"10.0.0.5:514\"");
     let cfg = parse("dev", &text).unwrap();

@@ -91,6 +91,10 @@ pub struct Limits {
 pub struct Acl {
     pub device_publish: &'static [&'static str],
     pub device_subscribe: &'static [&'static str],
+    /// Identities (exact, or prefix with trailing `*`) with service rights.
+    pub service_ids: &'static [&'static str],
+    pub service_publish: &'static [&'static str],
+    pub service_subscribe: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Copy)]

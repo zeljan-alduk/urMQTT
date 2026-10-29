@@ -642,6 +642,9 @@ version = "0.0.1"
 [[package]]
 name = "urmqtt-broker"
 version = "0.0.1"
+dependencies = [
+ "urmqtt-mqtt",
+]
 
 [[package]]
 name = "urmqtt-config"

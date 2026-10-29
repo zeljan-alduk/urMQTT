@@ -289,3 +289,30 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 
 - `make fuzz T=mqtt_decode FUZZ_TIME=600`: **33 621 279 runs in 601 s** (about 56 k/s), coverage 678 edges, corpus 448 inputs. No crash.
 - Host tests: 128.
+
+## M9 — Broker over plain TCP, dev only (2026-10-29)
+
+**Done**
+
+- `crates/broker` (sans-IO, `no_std` + `alloc`, `forbid(unsafe_code)`, ADR-028):
+  - Topic trie with interned `NodeId`s, holding subscriptions and retained messages, with the `$` rule.
+  - Sessions, clean or persistent, with QoS 1 in-flight windows, bounded offline queues and DUP redelivery.
+  - Last Will, keepalive, session takeover.
+  - ACL with `{id}` and coverage checks for subscriptions; service identities.
+  - Per-session token-bucket rate limit, plus limits on packet size, topic length, levels, subscriptions, in-flight, queue, connections and output backpressure.
+  - Payloads stored once and shared through `Arc`.
+- 20 end-to-end host tests over an in-memory transport, feeding byte by byte where the length allows: CONNECT rules and CONNACK codes, protocol violations, pub/sub with wildcards and ACL, retained set/deliver/clear, `$` topics, will vs DISCONNECT, keepalive expiry, QoS 1 redelivery with DUP after reconnect, window and queue bounds, subscription limit and unsubscribe, takeover, rate limit, QoS 2 refusal, oversized packets, 200 concurrent sessions.
+- New config keys `acl.service_ids`, `acl.service_publish`, `acl.service_subscribe` (dev and prod: `backend`).
+- `kernel/mqtt_plain`: 32 smoltcp sockets on `network.mqtt_plain_port` (dev only) pumping the broker, with clean versus unclean close detection and per-disconnect logs.
+- `scripts/mqtt-scenarios.py`: real `mosquitto_pub`/`mosquitto_sub` scenarios, also used by M10 with `--tls`.
+
+**Measured**
+
+- `make smoke`: 34/34. `mqtt-plain` passes under HVF and TCG: pub/sub through a wildcard, retained, LWT after `SIGKILL`ing the client, QoS 1 delivered after reconnect to a persistent session, ACL-denied subscribe ("All subscription requests were denied.").
+- Kernel ELF: **358 400 bytes**.
+
+**Known gaps**
+
+- Topic nodes are never pruned (memory grows with distinct topics; M15).
+- Retained messages and persistent sessions live in RAM only until SQLite arrives (M11).
+- One core (M13).

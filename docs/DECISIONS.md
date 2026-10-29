@@ -221,3 +221,18 @@ verified in the named milestone before it becomes Accepted).
   - Strings: valid UTF-8 without U+0000. Topic names have no wildcards. Topic filters put `#` only as the whole last level and `+` only as a whole level. Length and level count are checked against the limits.
   - Encoding is the inverse. The `mqtt_decode` fuzz target checks *decode → encode → decode* equality for every accepted packet, so parsing is never lossy or ambiguous.
 - **Interop finding:** `mosquitto_pub` 2.1 (`-q 1`) may close TCP right after PUBACK without sending DISCONNECT. That is normal client behaviour. Because a will was set, the broker must treat it as an unclean disconnect and publish the will (M9).
+
+## ADR-028 — Sans-IO broker core; service identities; v1 QoS policy
+
+- **Status:** Accepted (M9)
+- **Sans-IO:** `urmqtt-broker` takes bytes and milliseconds and produces bytes (`input`, `output`/`consumed`, `close_requested`, `closed`, `tick`). It knows nothing about sockets, so it is tested end to end on the host over an in-memory transport, and the transport can change (smoltcp now, the own TCP stack in M14, per-core loops in M13) without touching broker logic.
+- **Identities and ACL:** the identity is the client id in dev plaintext mode and the certificate field from M10. An identity becomes a topic level through `{id}`, so it must be non-empty and contain no `/`, `+`, `#` or leading `$` (otherwise CONNACK 0x02). *Service identities* (`acl.service_ids`: exact ids or `prefix*`) get their own `service_publish` and `service_subscribe` patterns. That is how a backend talks to devices under the default device ACL. A subscription is allowed only if one pattern *covers* the filter: every topic the filter can match must be allowed, so `devices/+/cmd/#` is refused for a device. A will outside the device's publish rights is refused at CONNECT (0x05).
+- **3.1.1 choices:**
+  - An unauthorised or rate-limited PUBLISH is acknowledged and dropped (§3.3.5 allows ack-or-close).
+  - QoS 2 publishes close the connection, and QoS 2 subscriptions are granted QoS 1 (QoS 2 is a "later" item).
+  - Overlapping subscriptions of one session get one delivery at the highest QoS.
+  - Retained messages go to new subscribers with RETAIN=1 and are routed live with RETAIN=0.
+  - A will is published on any close except after DISCONNECT, including takeover and keepalive expiry (1.5 × interval).
+  - Offline persistent sessions queue QoS 1 (bounded by `max_queued_per_offline_session`) and drop QoS 0.
+  - Unacknowledged in-flight messages are resent with DUP on reconnect.
+- **Plaintext port:** only in `dev` (build-time enforced), logged with a warning at boot.

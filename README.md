@@ -11,12 +11,13 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M8)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M9)-red)
 
 </div>
 
 > [!WARNING]
-> **urMQTT is pre-alpha and does not serve MQTT yet.** These milestones are complete:
+> **urMQTT is pre-alpha.** It serves MQTT 3.1.1 over plain TCP in dev builds; MQTT over TLS 1.3
+> (the only transport in production) arrives in **M10**. These milestones are complete:
 > - **M0**: tooling and CI
 > - **M1**: UEFI boot, console, exception reports
 > - **M2**: own page tables with enforced W^X, guard pages, locked tables, PAC and BTI
@@ -26,8 +27,9 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M6**: PCIe and virtio drivers (rng, blk, net), MSI-X, and a CSPRNG seeded from hardware entropy
 > - **M7**: DHCP, ICMP and a TCP echo service on smoltcp
 > - **M8**: complete MQTT 3.1.1 codec, fuzzed and tested against real mosquitto clients
+> - **M9**: broker core with QoS 0/1, wildcards, retained messages, LWT, persistent sessions and ACL, verified with mosquitto clients
 >
-> The kernel boots under QEMU with HVF and TCG. MQTT over TLS arrives in **M10**. Every feature and example below is tagged with the milestone that delivers it, and
+> The kernel boots under QEMU with HVF and TCG. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
 
 ---
@@ -94,8 +96,8 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | rustls handshake, then own record layer (AES-128-GCM, ChaCha20-Poly1305) | 📋 M10 |
 | | Session resumption (PSK tickets), handshake admission control | 📋 M10 |
 | **MQTT** | Zero-copy 3.1.1 codec, fuzzed, `forbid(unsafe_code)` | ✅ M8 |
-| | QoS 0/1, wildcards, retained, LWT, persistent sessions, keepalive | 📋 M9 |
-| | ACL (`devices/{id}/#` by default), per-device rate limits | 📋 M9 |
+| | QoS 0/1, wildcards, retained, LWT, persistent sessions, keepalive | ✅ M9 |
+| | ACL (`devices/{id}/#` by default), service identities, per-device rate limits | ✅ M9 |
 | | MQTT 5.0, QoS 2 | 📋 later |
 | **Storage** | SQLite in the kernel over a raw virtio-blk VFS (WAL, exclusive) | 📋 M11 |
 | | Device registry, revocations, retained messages, sessions | 📋 M11 |
@@ -410,6 +412,9 @@ error: invalid configuration deploy/bad/config.toml:
 | `limits.publish_rate_per_device` | `"N/s"`, `"N/m"`, `"N/h"` | Token bucket per device |
 | `limits.handshakes_per_core_per_sec` | > 0 | Handshake admission control (reconnect storms) |
 | `acl.device_publish`, `acl.device_subscribe` | topic filters, `{id}` = device id | Default device rights |
+| `acl.service_ids` | ids or `prefix*` | Identities with service rights (backends) |
+| `acl.service_publish`, `acl.service_subscribe` | topic filters | Service rights |
+| `memory.kernel_heap_mb` | power of two, 1–1024 | Kernel heap (buddy allocator) |
 | `storage.sqlite_heap_mb` | 1–4096 | Fixed SQLite `memsys5` heap |
 | `storage.telemetry_topics` | topic filters | PUBLISHes appended to the telemetry log |
 | `storage.retention_days` | > 0 | Telemetry retention |
@@ -498,9 +503,8 @@ offline are queued (up to `max_queued_per_offline_session`) and delivered on rec
 
 > [!NOTE]
 > Under the default ACL, devices cannot talk to each other: a device may only subscribe to its own
-> `devices/{id}/cmd/#`. Commands come from a **backend service identity** with wider rights, using a
-> separate certificate profile. Service identities are planned for M10 and are not yet part of the
-> configuration schema.
+> `devices/{id}/cmd/#`. Commands come from a **service identity** such as `backend` (configured in
+> `acl.service_ids`, with its own `service_publish` and `service_subscribe` patterns).
 
 ### 3. A device reports its status with a retained message and Last Will (M10)
 
@@ -545,17 +549,26 @@ mosquitto_pub -h localhost -p 8883 --cafile deploy/dev/ca.pem \
   -i device-001 -t devices/device-002/cmd/reboot -m pwned
 ```
 
-### 5. Plain TCP in dev builds only (M9)
+### 5. Plain TCP in dev builds only (works today)
 
-Before TLS lands, and only in `ENV=dev` with `mqtt_plain_port = 1883`, the broker takes the dev
-identity from the client id:
+In `ENV=dev` with `mqtt_plain_port = 1883` the broker takes the identity from the client id.
+`backend` is a service identity (`acl.service_ids`), so it can watch every device and send commands:
 
 ```bash
-# -d prints the protocol exchange: CONNECT/CONNACK, PUBLISH (QoS 1)/PUBACK
-mosquitto_pub -h localhost -p 1883 -d -q 1 -i device-001 -t devices/device-001/telemetry/t -m 42
+make iso data-img
+scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img --fwd 1883:1883 &
 
-# Holds a persistent session on the device's own command topic
-mosquitto_sub -h localhost -p 1883 -c -q 1 -v -i device-002 -t 'devices/device-002/cmd/#'
+# backend watches all telemetry
+mosquitto_sub -h 127.0.0.1 -p 1883 -i backend -q 1 -v -t 'devices/+/telemetry/#' &
+
+# a device publishes; the backend prints "devices/device-001/telemetry/temp 21.5"
+mosquitto_pub -h 127.0.0.1 -p 1883 -i device-001 -q 1 -t devices/device-001/telemetry/temp -m 21.5
+
+# a device may not read another device's commands
+mosquitto_sub -h 127.0.0.1 -p 1883 -i device-001 -t 'devices/device-002/cmd/#'   # "All subscription requests were denied."
+
+# the whole acceptance set (pub/sub, retained, LWT, QoS 1 after reconnect, ACL):
+python3 scripts/mqtt-scenarios.py 1883
 ```
 
 A prod build with a non-zero `mqtt_plain_port` does not compile.
@@ -692,7 +705,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M6** PCIe & virtio | blk write/flush/read-back; gratuitous ARP in a pcap |
 | ✅ | **M7** Network prototype | DHCP lease, ping, TCP echo through hostfwd |
 | ✅ | **M8** MQTT codec | spec tests, property tests, 10 minutes of fuzzing with no crash |
-| 📋 | **M9** Broker over TCP (dev) | pub/sub, wildcards, retained, LWT, QoS 1 redelivery with mosquitto |
+| ✅ | **M9** Broker over TCP (dev) | pub/sub, wildcards, retained, LWT, QoS 1 redelivery with mosquitto |
 | 📋 | **M10** TLS 1.3 + mTLS | mosquitto over mTLS; wrong CA, expired, client-id mismatch and revoked all rejected |
 | 📋 | **M11** SQLite in the kernel | data survives restarts and `kill -9` |
 | 📋 | **M12** Telemetry log | 1M messages; torn tail truncated on recovery |

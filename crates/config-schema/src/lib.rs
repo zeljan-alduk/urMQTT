@@ -143,6 +143,9 @@ struct RawLimits {
 struct RawAcl {
     device_publish: Vec<String>,
     device_subscribe: Vec<String>,
+    service_ids: Vec<String>,
+    service_publish: Vec<String>,
+    service_subscribe: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -225,6 +228,9 @@ pub struct Limits {
 pub struct Acl {
     pub device_publish: Vec<String>,
     pub device_subscribe: Vec<String>,
+    pub service_ids: Vec<String>,
+    pub service_publish: Vec<String>,
+    pub service_subscribe: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -604,10 +610,41 @@ fn validate_acl(raw: &RawAcl, limits: &Limits, errors: &mut Vec<ConfigError>) ->
         Placeholder::Allowed,
         errors,
     );
+    for (i, id) in raw.service_ids.iter().enumerate() {
+        if let Err(m) = check_identity_pattern(id) {
+            errors.push(err(&format!("acl.service_ids[{i}]"), m));
+        }
+    }
+    for (key, list) in [
+        ("acl.service_publish", &raw.service_publish),
+        ("acl.service_subscribe", &raw.service_subscribe),
+    ] {
+        validate_filters(key, list, limits, Placeholder::Allowed, errors);
+    }
     Acl {
         device_publish: raw.device_publish.clone(),
         device_subscribe: raw.device_subscribe.clone(),
+        service_ids: raw.service_ids.clone(),
+        service_publish: raw.service_publish.clone(),
+        service_subscribe: raw.service_subscribe.clone(),
     }
+}
+
+/// Identity patterns: an exact id, or a prefix ending in `*`.
+pub fn check_identity_pattern(p: &str) -> Result<(), String> {
+    let core = p.strip_suffix('*').unwrap_or(p);
+    if core.is_empty() && !p.ends_with('*') {
+        return Err("empty identity pattern".into());
+    }
+    if !core
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(format!(
+            "{p:?}: identities use [A-Za-z0-9-_.:], `*` only at the end"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_storage(raw: &RawStorage, limits: &Limits, errors: &mut Vec<ConfigError>) -> Storage {
@@ -791,6 +828,9 @@ pub const CONFIG: BuildConfig = BuildConfig {{
     acl: Acl {{
         device_publish: {dp},
         device_subscribe: {ds},
+        service_ids: {sid},
+        service_publish: {sp},
+        service_subscribe: {ss},
     }},
     storage: Storage {{
         sqlite_heap_mb: {heap},
@@ -835,6 +875,9 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         hpc = l.handshakes_per_core_per_sec,
         dp = render_strs(&cfg.acl.device_publish),
         ds = render_strs(&cfg.acl.device_subscribe),
+        sid = render_strs(&cfg.acl.service_ids),
+        sp = render_strs(&cfg.acl.service_publish),
+        ss = render_strs(&cfg.acl.service_subscribe),
         heap = cfg.storage.sqlite_heap_mb,
         tt = render_strs(&cfg.storage.telemetry_topics),
         rd = cfg.storage.retention_days,

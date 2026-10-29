@@ -208,6 +208,17 @@ SERVICE_PORT=7 service net-echo "serve" 17007 "net: dhcp lease" python3 -I "$ROO
     "net: tcp echo service on port 7" "client: echo 1 ok" "client: echo 3000 ok" "client: echo 60000 ok" \
     "net: echo connection closed after 60000 byte" "NOT:dhcp lease lost" "$NO_FAULT"
 
+# M9: broker over plain TCP (dev) with the real mosquitto clients.
+if command -v mosquitto_pub >/dev/null && command -v mosquitto_sub >/dev/null; then
+    SERVICE_PORT=1883 service mqtt-plain "serve" 11883 "PLAINTEXT listener on port 1883" \
+        python3 -I "$ROOT/scripts/mqtt-scenarios.py" -- \
+        "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
+        "client: qos1-after-reconnect ok" "client: acl-subscribe-denied ok" "NOT:FAILED" "$NO_FAULT"
+else
+    echo "  ✗ mosquitto clients not installed (brew install mosquitto / apt install mosquitto-clients)"
+    FAILED=$((FAILED + 1))
+fi
+
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
 pcap_has_garp() {
     python3 -I - "$1" <<'PY'

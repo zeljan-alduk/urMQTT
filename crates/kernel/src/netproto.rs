@@ -144,6 +144,11 @@ pub fn run(echo: bool) -> ! {
         warn!("net: icmp bind failed");
     }
 
+    let mut mqtt = urmqtt_config::CONFIG
+        .network
+        .mqtt_plain_port
+        .map(|port| crate::mqtt_plain::PlainMqtt::new(port, &mut sockets));
+
     let mut router: Option<Ipv4Address> = None;
     let mut ping_sent: Option<Instant> = None;
     let mut ping_done = false;
@@ -236,6 +241,15 @@ pub fn run(echo: bool) -> ! {
                 info!("net: echo connection closed after {} byte(s)", e.served);
                 e.served = 0;
                 s.close();
+            }
+        }
+
+        let mut activity = activity;
+        if let Some(m) = mqtt.as_mut() {
+            activity |= m.poll(&mut sockets, timer::uptime_ns() / 1_000_000);
+            if activity {
+                // Flush what the broker queued in this pass.
+                iface.poll(now(), &mut phy, &mut sockets);
             }
         }
 
