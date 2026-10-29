@@ -476,7 +476,7 @@ verified in the named milestone before it becomes Accepted).
   - Booting from a disk exposed a real hazard: the first virtio-blk device used to become the data disk, and the block self-test writes its last sectors (the backup GPT). Disks with an MBR signature or a GPT header are now skipped (`raw-disk` smoke scenario: the boot disk is byte-identical after boot).
 - **Signatures:** minisign over `SHA256SUMS`, with version, environment and commit in the trusted comment (`make sign`).
   - The release workflow signs when the repository secret `MINISIGN_SECRET_KEY` holds a passwordless key, and keeps its SLSA provenance attestation.
-  - No project key is generated here: the key holder creates it (`docs/DEPLOY.md`).
+  - The project key ([`minisign.pub`](../minisign.pub), `RWSOH9BS…`) is a **test** key, generated at the maintainer's request. Its secret is passwordless and in the CI secret `MINISIGN_SECRET_KEY`. Before a real release, replace it with an offline, password-protected key.
 - **Dev code out of prod:**
   - The in-guest benchmark and the sans-IO TLS client sit behind the `selftest` kernel feature (`urmqtt-tls/client`), which the Makefile enables only for `ENV=dev`. CI lints both variants.
   - The dev certificates for self-tests were already empty in prod. Dev-only command-line switches were already ignored there.

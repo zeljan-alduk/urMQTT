@@ -677,6 +677,9 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 **Known gaps**
 
 - Not validated on real cloud hardware. Hetzner CAX likely exposes virtio-scsi disks, and urMQTT drives only virtio-blk.
-- No project signing key is created here: the key holder generates it and sets `MINISIGN_SECRET_KEY`.
+- The signing key is a test key (`minisign.pub`; the passwordless secret is in the CI secret `MINISIGN_SECRET_KEY`). Replace it with an offline key before a real release.
+- A local test PKI exists in `deploy/prod/` (test CA, server, `device-001`; git-ignored). The prod image built from it was checked end to end on the raw disk image:
+  - mTLS publish at QoS 1 and the `cmd/#` subscription work;
+  - plaintext, a foreign CA, a client id that differs from the CN, and subscriptions outside the ACL are all refused.
 - The ISO and the raw image are identical only for the same xorriso and mtools versions; macOS (Homebrew) and Ubuntu builds differ there. The ELF does not.
 - Oracle Cloud and ACPI-only validation on real ARM servers remain future work.

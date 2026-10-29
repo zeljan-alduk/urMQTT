@@ -141,7 +141,7 @@ sign: ## Sign build/dist/SHA256SUMS with minisign (MINISIGN_KEY=path to the secr
 	@test -s $(BUILD_DIR)/dist/SHA256SUMS || { echo "make sign: run make dist first" >&2; exit 1; }
 	@command -v minisign >/dev/null || { echo "make sign: install minisign" >&2; exit 1; }
 	minisign -S -s "$(or $(MINISIGN_KEY),$(HOME)/.minisign/minisign.key)" -m $(BUILD_DIR)/dist/SHA256SUMS \
-		-t "urMQTT $(VERSION) $(ENV) $$(git rev-parse HEAD)"
+		-t "urMQTT $$(cd $(BUILD_DIR)/dist && ls *.elf | sed 's/^urmqtt-//; s/\.elf$$//') $$(git rev-parse HEAD)"
 	@echo "verify: minisign -Vm SHA256SUMS -p minisign.pub && shasum -a 256 -c SHA256SUMS"
 
 .PHONY: repro

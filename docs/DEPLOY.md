@@ -78,7 +78,12 @@ make sign                             # signs build/dist/SHA256SUMS (MINISIGN_KE
 minisign -Vm SHA256SUMS -p minisign.pub && shasum -a 256 -c SHA256SUMS
 ```
 
-The trusted comment records version, environment and commit. Published dev
+The trusted comment records environment, version and commit. The project's
+release key is [`minisign.pub`](../minisign.pub) in the repository root
+(`RWSOH9BSUuApkkBWq/AZJ03Rn63oOYq+yXzC/vgI1PZ/i5yaE+SVzOWS`). It is a **test**
+key for this pre-alpha: its secret half sits passwordless in the CI secret
+`MINISIGN_SECRET_KEY` and on the maintainer's machine. Replace it with an
+offline, password-protected key before any real release. Published dev
 releases carry SLSA build provenance (`gh attestation verify <file> -R
 zeljan-alduk/urMQTT`), and a minisign signature when the repository secret
 `MINISIGN_SECRET_KEY` holds a passwordless key (`minisign -G -W`).

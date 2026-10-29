@@ -773,6 +773,9 @@ make repro               # rebuild HEAD twice in fresh worktrees: ELF, ISO and r
 make sign                # minisign signature over SHA256SUMS (MINISIGN_KEY=... for another key)
 ```
 
+Releases are signed with the (test) key in [`minisign.pub`](minisign.pub):
+`minisign -Vm SHA256SUMS -P RWSOH9BSUuApkkBWq/AZJ03Rn63oOYq+yXzC/vgI1PZ/i5yaE+SVzOWS`.
+
 > [!CAUTION]
 > A prod image embeds your server private key, so treat the ISO itself as a secret. The images
 > attached to GitHub releases are **dev** builds with throwaway keys, for evaluation only.
