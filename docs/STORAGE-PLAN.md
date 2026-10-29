@@ -204,6 +204,14 @@ Each milestone ends with:
 - A GPT fuzz target (headers and entries, primary/backup disagreement).
 - Fuzz targets for the scanner and the host-side parsers (shared code, so the existing targets cover most of it).
 
+**Status: done** (docs/PROGRESS.md, S1; ADR-051). Deviations from the work list:
+- **No `std` feature needed:** `crates/store` builds for the host as it is. The host backend is `urmqtt-disk`'s file device under the same VFS, the same amalgamation and the same compile options.
+- **`create` and `update-boot`:**
+  - `create` writes a boot image (mkraw-identical) on a disk of the requested size, since under the single-disk model a blank data disk is never used.
+  - `update-boot` (from §2a) is in S1 already, because `make run` and the KVM installer need it.
+- **Host fault runner:** `scripts/fault-loop.sh` waits for its first procedure, the S2 migration. The fault device and a Rust test that cuts every first-boot write exist now.
+- **Read-only media:** `iso-as-cd-refused` runs as `iso-as-cd`. A dev image runs memory-only and says why; the production refusal is the existing `storage.require_data_disk` rule.
+
 ### S2 — Layout v2: alignment, topology, partition count · M
 
 **Work**

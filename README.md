@@ -17,7 +17,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 
 > [!WARNING]
 > **urMQTT is pre-alpha.** It serves MQTT 3.1.1 over TLS 1.3 with mutual TLS (and, in dev builds
-> only, over plain TCP), and keeps its state in SQLite on a raw data disk. These milestones are complete:
+> only, over plain TCP), and keeps its state in SQLite in a raw partition of the disk it boots from. These milestones are complete:
 > - **M0**: tooling and CI
 > - **M1**: UEFI boot, console, exception reports
 > - **M2**: own page tables with enforced W^X, guard pages, locked tables, PAC and BTI
@@ -116,7 +116,8 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | ACL (`devices/{id}/#` by default), service identities, per-device rate limits | ✅ M9 |
 | | MQTT 5.0, QoS 2 | 📋 later |
 | **Storage** | SQLite in the kernel over a raw-disk VFS (WAL, exclusive), quick_check at boot | ✅ M11 |
-| | Data disk on virtio-blk or a virtio-scsi LUN (as clouds attach disks) | ✅ after M17 |
+| | One disk: data in a partition of the boot disk (virtio-blk or virtio-scsi), created on the first boot, crash-safe; other disks never touched | ✅ S1 |
+| | `urmqtt-disk`: offline info, verify, export (SQLite, telemetry), import devices, kernel update | ✅ S1 |
 | | Device registry, revocations, retained messages, persistent sessions with offline queues | ✅ M11 |
 | | Per-core append-only telemetry log with CRC and crash recovery | ✅ M12 |
 | **Scale** | Per-core event loops and broker shards, per-CPU heap caches, frame pools, cross-core fan-out | ✅ M13 |
@@ -267,7 +268,10 @@ The threat model is in [docs/SECURITY.md](docs/SECURITY.md).
 
 ### Persistence
 
-The data lives on a separate disk (virtio-blk or virtio-scsi) with no filesystem:
+The data lives in the urMQTT data partition of the disk the VM boots from, with no filesystem
+(single-disk model, [docs/DISK-FORMAT.md](docs/DISK-FORMAT.md) §0). The first boot of the image on a larger
+disk moves the backup GPT to the end, gives the disk its own GUID and creates the partition, crash-safely;
+no other disk is ever written. Inside the partition:
 
 ```
 LBA 0      [ superblock: magic · layout version · uuid · region table · CRC-32C ]
@@ -277,7 +281,7 @@ last 4 KiB [ scratch for the boot block-device self-test ]
 ```
 
 - **SQLite** (vendored 3.54.1, checksum-verified at build time) is compiled into the kernel with clang, freestanding, and uses a fixed `memsys5` heap. Its VFS maps three fixed files onto disk regions; there is no filesystem. It runs in WAL mode with `locking_mode=EXCLUSIVE` (so no shared-memory index) and `synchronous=FULL`, and the boot fails safe on `quick_check` errors. It holds the device registry, revocations, retained messages and persistent sessions with their offline QoS 1 queues.
-- **The DB core** (the highest-numbered CPU) runs SQLite and nothing else. The data plane sends it state changes over a lock-free SPSC ring; it batches them into one transaction per 5 ms or 512 operations and reports commits on a second ring. A blank disk is formatted on first boot; anything else is never formatted over.
+- **The DB core** (the highest-numbered CPU) runs SQLite and nothing else. The data plane sends it state changes over a lock-free SPSC ring; it batches them into one transaction per 5 ms or 512 operations and reports commits on a second ring. A blank data partition is formatted on first boot; a damaged one is refused and left as it is, never formatted over.
 - **Telemetry**: every accepted PUBLISH on `storage.telemetry_topics` goes to its core's partition of the telemetry log, a ring of segments with a CRC per record (salted with the segment sequence, so old ring passes never reappear). Cores hand records to the DB core over their own SPSC ring without copying. The DB core flushes every 5 ms or 256 KiB. On boot, recovery keeps every flushed record, truncates a torn tail and continues in a fresh segment. Retention is by size (the ring) and by age (`retention_days`).
 
 ## Repository layout
@@ -289,22 +293,28 @@ urMQTT/
 ├── rust-toolchain.toml     pinned nightly (ADR-002)
 ├── crates/
 │   ├── kernel/             the binary: boot, core loop, wiring
-│   ├── arch-aarch64/       vectors, MMU, GICv3/v2, timer, PSCI, PAC/BTI, RNDR
+│   ├── arch/               architecture facade with its API contract (ADR-040)
+│   ├── arch-aarch64/       vectors, MMU, GICv3/v2, timer, PSCI, PAC/BTI, RNDR (all assembly lives here)
+│   ├── sync/               spinlock, once-cell, SPSC ring (architecture-neutral)
+│   ├── dispatch/           CPU feature set and backend selection, `[cpu] disable` (ADR-041)
 │   ├── platform/           DTB + ACPI discovery
 │   ├── mm/                 frames, heap, slabs, pools
-│   ├── pci/  virtio/       PCIe ECAM + MSI-X, virtio net/blk/rng
+│   ├── pci/  virtio/       PCIe ECAM + MSI-X, virtio net/blk/scsi/rng
 │   ├── log/                per-CPU log rings and sinks
 │   ├── net/  tcp/          IPv4 stack, server-only TCP
 │   ├── tls/                TLS 1.3 (rustls handshake + record layer)
 │   ├── mqtt/  broker/      codec and broker core
 │   ├── timer-wheel/        hierarchical timing wheel
-│   ├── store/              SQLite FFI, VFS, telemetry log
+│   ├── store/              SQLite FFI, VFS, telemetry log, boot-disk GPT, fault injection
+│   ├── control/            signed control messages: format, Ed25519, freshness (H1)
 │   ├── config/             no_std typed build-time configuration
 │   └── config-schema/      TOML schema, validation, codegen (host)
 ├── deploy/{dev,prod}/      config.toml per environment (certificates are never committed)
 ├── scripts/                gen-dev-certs.sh, later mkiso.sh, run-qemu.sh, smoke.sh
 ├── fuzz/                   cargo-fuzz targets
 ├── tools/loadgen/          host-side MQTT/TLS load generator
+├── tools/control/          urmqtt-control: sign and publish control messages (H1)
+├── tools/disk/             urmqtt-disk: offline disk info, verify, export, import, update (S1)
 ├── vendor/                 pinned Limine and SQLite, with checksums
 └── docs/                   ARCHITECTURE, DECISIONS (ADRs), PROGRESS, DEPLOY, SECURITY
 ```
@@ -347,9 +357,9 @@ make build                   # target/aarch64-unknown-none/release/urmqtt
 ### Boot it (works today)
 
 ```bash
-make iso ENV=dev             # build/urmqtt-dev-<version>.iso
-make data-img                # build/data.img (blank, sparse, 1 GiB)
-make run                     # QEMU + HVF, 4 vCPU, 512 MB, serial on stdio
+make disk                    # build/disk-dev.img: the raw image on a 1 GiB sparse disk
+                             # (next time: only the kernel is replaced, the data stays)
+make run                     # QEMU + HVF, 4 vCPU, 512 MB, serial on stdio (runs make disk)
 ```
 
 Expected serial output (HVF, 4 vCPU, 512 MB):
@@ -623,8 +633,8 @@ mosquitto_pub -h localhost -p 8883 --cafile deploy/dev/ca.pem \
 The whole TLS acceptance set (the five broker scenarios over mTLS, then the four rejections) runs with:
 
 ```bash
-make certs iso data-img
-scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img &
+make certs disk
+scripts/run-qemu.sh --disk build/disk-dev.img &
 python3 scripts/mqtt-scenarios.py 8883 --tls deploy/dev
 ```
 
@@ -634,8 +644,8 @@ In `ENV=dev` with `mqtt_plain_port = 1883` the broker takes the identity from th
 `backend` is a service identity (`acl.service_ids`), so it can watch every device and send commands:
 
 ```bash
-make iso data-img
-scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img --fwd 1883:1883 &
+make disk
+scripts/run-qemu.sh --disk build/disk-dev.img --fwd 1883:1883 &
 
 # backend watches all telemetry
 mosquitto_sub -h 127.0.0.1 -p 1883 -i backend -q 1 -v -t 'devices/+/telemetry/#' &
@@ -664,16 +674,16 @@ lldb target/aarch64-unknown-none/release/urmqtt -o 'gdb-remote localhost:1234'
 ### 7. Inspecting network traffic (works today)
 
 ```bash
-make iso data-img
-scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img --pcap build/net.pcap
+make disk
+scripts/run-qemu.sh --disk build/disk-dev.img --pcap build/net.pcap
 tcpdump -nn -r build/net.pcap          # gratuitous ARP + ARP exchange with the slirp gateway
 ```
 
 ### 8. State survives a restart and `kill -9` (M11)
 
 ```bash
-make certs iso data-img
-scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img &   # first boot formats the disk
+make certs disk
+scripts/run-qemu.sh --disk build/disk-dev.img &   # the first boot creates and formats the data partition
 D=deploy/dev
 mosquitto_pub -h localhost -p 8883 --cafile $D/ca.pem --cert $D/devices/device-001.pem --key $D/devices/device-001.key \
   -i device-001 -q 1 -r -t devices/device-001/fw -m 2.0.0
@@ -683,7 +693,7 @@ mosquitto_pub -h localhost -p 8883 --cafile $D/ca.pem --cert $D/services/backend
   -i backend -q 1 -t devices/device-002/cmd/reboot -m now      # queued for the offline device
 
 pkill -9 qemu-system-aarch64                                     # pull the plug
-scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img &
+scripts/run-qemu.sh --disk build/disk-dev.img &
 # boot log: "db: restored 1 retained message(s), 1 persistent session(s) with 1 queued message(s) ..."
 mosquitto_sub -h localhost -p 8883 --cafile $D/ca.pem --cert $D/devices/device-002.pem --key $D/devices/device-002.key \
   -i device-002 -c -q 1 -v -t 'devices/device-002/cmd/#' -C 1    # prints "devices/device-002/cmd/reboot now"
@@ -736,8 +746,8 @@ connectors mostly wait for SYN retransmissions.
 ### 10. TCP echo through the port forward (dev, works today)
 
 ```bash
-make iso data-img
-scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img --fwd 7007:7 &
+make disk
+scripts/run-qemu.sh --disk build/disk-dev.img --fwd 7007:7 &
 # wait for "net: dhcp lease 10.0.2.15/24 router 10.0.2.2" on the console, then:
 python3 scripts/echo-client.py 7007        # client: echo 1 ok / 3000 ok / 60000 ok
 ```
@@ -789,14 +799,15 @@ Production images set `observability.syslog_udp` and `metrics_udp` to collectors
 ## Deployment
 
 An image is the entire deployment: the code, configuration, CA and server key are all inside it.
-Persistent data lives on a separate disk (virtio-blk or virtio-scsi), so upgrading means booting a new image
-against the same data disk.
+The VM has one disk: the raw image written to it, the rest becomes the data partition on the first boot.
+Upgrading replaces only the EFI system partition (`urmqtt-disk update-boot`, or `scripts/kvm-host/install.sh`
+again) and keeps the data.
 
 | Target | Path | Status |
 |---|---|---|
 | QEMU (macOS HVF / Linux KVM / TCG) | `make run`, `make run-tcg` | ✅ M1 |
-| Generic KVM / Proxmox (aarch64) | UEFI VM, raw image (or ISO) + blank data disk, virtio-net/blk/rng | ✅ M17 (raw-disk boot tested in QEMU) |
-| Hetzner Cloud CAX (Ampere) | raw image written from the rescue system, Volume as data disk | 📖 documented; virtio-scsi supported, not tried on the real service |
+| Generic KVM / Proxmox (aarch64) | UEFI VM, the raw image on its one disk (grown), virtio-net/blk/rng | ✅ M17, single disk since S1 (tested in QEMU) |
+| Hetzner Cloud CAX (Ampere) | raw image written to the server's disk from the rescue system | 📖 documented; virtio-scsi supported, not tried on the real service |
 | Oracle Cloud Always Free (Ampere A1) | QCOW2 custom image, paravirtualized | 📖 documented; virtio-scsi supported, not tried on the real service |
 | Raspberry Pi 4/5 (4 GB+), any aarch64 Linux KVM host | `scripts/kvm-host/install.sh`: KVM guest with GICv2/v3, systemd service | 📖 documented; GICv2 tested under TCG, not yet on a Pi |
 
@@ -826,7 +837,7 @@ Releases are signed with the (test) key in [`minisign.pub`](minisign.pub):
 | `make iso ENV=…` | Bootable UEFI ISO |
 | `make run` / `run-tcg` / `run-smp N=8` / `debug` | QEMU variants (M1, M4) |
 | `make smoke` | Headless boot and fault scenarios under HVF + TCG (TCG only in CI), serial-log checks |
-| `make data-img` | Blank sparse data disk (formatted by the kernel on first boot) |
+| `make disk` | `build/disk-<env>.img`, the VM's one disk: created from the raw image, or its kernel updated in place |
 | `make fuzz T=<target>` | Bounded cargo-fuzz run (`FUZZ_TIME`, default 600 s) |
 | `make loadtest` | Host-side load generator (`handshake` / `hold` / `storm` modes) |
 | `make bench` | Multicore benchmark table (in-guest and network) |
@@ -933,7 +944,7 @@ Security is the first priority and wins conflicts with the other tracks.
 | | Milestone | Acceptance |
 |---|---|---|
 | ✅ | **S0** Disk format spec | `docs/DISK-FORMAT.md` byte-level and cross-checked against the code; golden v1 images |
-| 📋 | **S1** `urmqtt-disk` & safety | single-disk model: data in a partition of the boot disk, created on first boot (crash-safe), no other disk touched; host tool sharing the kernel's parsers (info, verify, export, import); fault injection |
+| ✅ | **S1** `urmqtt-disk` & safety | single-disk model: data in a partition of the boot disk, created on first boot (crash-safe), no other disk touched; host tool sharing the kernel's parsers (info, verify, export, import); fault injection |
 | 📋 | **S1b** Self-installing ISO | boot menu entry *Install urMQTT on this machine's disk*: target shown with a countdown, image written byte-identical to the raw image and verified; installed disk boots by UEFI and BIOS |
 | 📋 | **S2** Layout v2 | regions aligned to 1 MiB and the device topology, zero misaligned writes; migration from v1 |
 | 📋 | **S3** Growing the disk | 1 → 4 → 64 GiB with data present, crash-safe at every write |

@@ -5,8 +5,8 @@
 use limine::BaseRevision;
 use limine::request::{
     BootloaderInfoRequest, DateAtBootRequest, DtbRequest, ExecutableAddressRequest,
-    ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest, Request,
-    RsdpRequest,
+    ExecutableCmdlineRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest,
+    MemmapRequest, MpRequest, Request, RsdpRequest,
 };
 use limine::{RequestsEndMarker, RequestsStartMarker};
 
@@ -55,6 +55,10 @@ static DATE_AT_BOOT: DateAtBootRequest = DateAtBootRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static EXECUTABLE_ADDRESS: ExecutableAddressRequest = ExecutableAddressRequest::new();
+/// Where the kernel was loaded from: identifies the boot disk (S1).
+#[used]
+#[unsafe(link_section = ".requests")]
+static EXECUTABLE_FILE: ExecutableFileRequest = ExecutableFileRequest::new();
 
 /// Limine "Entropy" response (not yet wrapped by the `limine` crate).
 #[repr(C)]
@@ -97,6 +101,8 @@ struct Stage2 {
     built: vm::Built,
     early_frames: (u64, u64),
     features: Features,
+    /// Read before the bootloader's memory is reclaimed.
+    medium: devices::BootMedium,
 }
 
 static STAGE2: SpinLock<Option<Stage2>> = SpinLock::new(None);
@@ -293,6 +299,7 @@ extern "C" fn urmqtt_kmain() -> ! {
         built,
         early_frames: mem.early_frames_range().unwrap_or((0, 0)),
         features,
+        medium: boot_medium(),
     });
     // SAFETY: both stacks were mapped by `vm::build` and are 16-byte aligned
     // at the top; this frame (on the bootloader's stack) is abandoned.
@@ -394,6 +401,14 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         ),
         Err(e) => fatal_fmt(format_args!("gic init failed: {e:?}")),
     }
+    // The boot volume, for the single-disk model (S1, STORAGE-PLAN §2a).
+    let medium = s.medium;
+    match (medium.optical, medium.disk_guid) {
+        (true, _) => info!("boot: from optical media (CD/ISO)"),
+        (false, Some(g)) => info!("boot: from a GPT disk, disk GUID {g}"),
+        (false, None) => warn!("boot: the bootloader reported no GPT boot disk"),
+    }
+    devices::set_boot_medium(medium);
     // PCIe and virtio (M6): all device MMIO must be mapped before the lock.
     if let Some(p) = s.platform.as_ref() {
         match devices::probe(p, &s.boot_entropy) {
@@ -430,6 +445,12 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
 
     tick_selftest(intr.timer.virt);
+    if let Err(msg) = devices::prepare_boot_disk(s.options.disk_fault) {
+        if urmqtt_config::CONFIG.storage.require_data_disk {
+            fatal_fmt(format_args!("storage: {msg}; refusing to serve"));
+        }
+        error!("storage: {msg}; running WITHOUT persistence (dev configuration)");
+    }
     if let Err(msg) = devices::blk_selftest() {
         fatal(msg);
     }
@@ -665,6 +686,44 @@ pub(crate) fn now_unix_ms() -> Option<u64> {
 /// Nanoseconds since the counter started (boot).
 fn uptime_ns() -> u64 {
     time::uptime_ns()
+}
+
+/// Offsets in Limine's `struct limine_file` (protocol: `media_type` u32,
+/// `unused` u32, `tftp_ip`, `tftp_port`, `partition_index`, `mbr_disk_id`,
+/// then the GPT disk and partition UUIDs). The `limine` crate 0.6.5 omits
+/// `unused`, so its fields after `media_type` are 4 bytes off (checked
+/// against a memory dump under QEMU: its `gpt_disk_uuid` read 4 bytes into
+/// the real one). These are read from the raw struct instead.
+const FILE_MEDIA_TYPE: usize = 40;
+const FILE_GPT_DISK_UUID: usize = 64;
+const FILE_STRUCT_MIN: usize = FILE_GPT_DISK_UUID + 16;
+
+/// The boot volume Limine reports for the kernel file.
+fn boot_medium() -> devices::BootMedium {
+    let Some(f) = EXECUTABLE_FILE.response().map(|r| r.executable_file()) else {
+        return devices::BootMedium::default();
+    };
+    // SAFETY: Limine's file structure is at least FILE_STRUCT_MIN bytes in
+    // every revision with these fields (revision 0 of the protocol's file
+    // has them all), lives in bootloader memory that is still mapped and
+    // not reclaimed (stage 1), and is only read.
+    let raw = unsafe {
+        core::slice::from_raw_parts(core::ptr::from_ref(f).cast::<u8>(), FILE_STRUCT_MIN)
+    };
+    let media = raw
+        .get(FILE_MEDIA_TYPE..FILE_MEDIA_TYPE + 4)
+        .and_then(|b| b.try_into().ok())
+        .map_or(u32::MAX, u32::from_le_bytes);
+    let mut guid = [0u8; 16];
+    guid.copy_from_slice(
+        raw.get(FILE_GPT_DISK_UUID..FILE_STRUCT_MIN)
+            .unwrap_or(&[0; 16]),
+    );
+    devices::BootMedium {
+        optical: media == limine::file::LIMINE_MEDIA_TYPE_OPTICAL,
+        // Already in GPT's on-disk byte order (little-endian fields).
+        disk_guid: (guid != [0; 16]).then_some(urmqtt_store::gpt::Guid(guid)),
+    }
 }
 
 fn discover(mem: &memory::BootMemory) -> Option<EarlyPlatform> {

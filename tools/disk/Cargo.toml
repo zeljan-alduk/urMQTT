@@ -1,0 +1,21 @@
+[package]
+name = "urmqtt-disk-tool"
+description = "Offline tool for urMQTT boot disks: info, verify, export the database and telemetry, import devices, create images, update the kernel (S1)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "urmqtt-disk"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+urmqtt-store = { path = "../../crates/store" }
+
+[lints]
+workspace = true

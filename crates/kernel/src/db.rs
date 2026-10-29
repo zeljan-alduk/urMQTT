@@ -21,16 +21,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::devices::DataDisk;
 use urmqtt_arch::{cpu, time};
 use urmqtt_broker::{Msg, MsgInner, PersistOp};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{error, info, warn};
 use urmqtt_store::telemetry::{Recovery, TelemetryLog};
-use urmqtt_store::{
-    BlockDevice, Disk, DiskError, IoError, Opened, Platform, Retained, SessionRecord, Store,
-    StoreError,
-};
+use urmqtt_store::{Disk, DiskError, Opened, Platform, Retained, SessionRecord, Store, StoreError};
 use urmqtt_sync::spsc::{Consumer, Producer, Spsc};
 use urmqtt_sync::sync::SpinLock;
 
@@ -132,41 +128,6 @@ pub fn notify() {
     }
 }
 
-struct KernelBlk {
-    blk: DataDisk,
-    flush: bool,
-}
-
-// SAFETY: the wrapper owns the device exclusively; it is used by one core
-// at a time (the boot CPU at boot, then the DB core).
-unsafe impl Send for KernelBlk {}
-
-impl BlockDevice for KernelBlk {
-    fn sectors(&self) -> u64 {
-        self.blk.capacity_sectors()
-    }
-
-    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        self.blk.read(lba, buf).map_err(|_| IoError::Device)
-    }
-
-    fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
-        self.blk.write(lba, buf).map_err(|_| IoError::Device)
-    }
-
-    fn flush(&mut self) -> Result<(), IoError> {
-        if !self.flush {
-            // Only reachable with storage.require_flush = false (dev).
-            return Ok(());
-        }
-        self.blk.flush().map_err(|_| IoError::Device)
-    }
-
-    fn max_io(&self) -> usize {
-        self.blk.max_io()
-    }
-}
-
 fn now_ms() -> u64 {
     time::uptime_ns() / 1_000_000
 }
@@ -218,28 +179,21 @@ fn refuse_or_degrade(allowed: bool, what: core::fmt::Arguments<'_>) -> Option<Re
 /// operation (only where the configuration allows it).
 pub fn init(test: Option<DbTest>) -> Option<Restored> {
     let cfg = &CONFIG.storage;
-    let Some(blk) = devices::DEVICES.lock().blk.take() else {
+    // The data partition of the boot disk (single-disk model, STORAGE-PLAN
+    // §2a), prepared by `devices::prepare_boot_disk`.
+    let Some(boot) = devices::DEVICES.lock().boot.take() else {
         return refuse_or_degrade(
             !cfg.require_data_disk,
-            format_args!("no data disk attached"),
+            format_args!("no data partition: {}", devices::no_boot_disk_reason()),
         );
     };
-    if !blk.has_flush() {
-        if cfg.require_flush {
-            crate::boot::fatal(
-                "storage: data disk lacks VIRTIO_BLK_F_FLUSH (storage.require_flush); refusing to run",
-            );
-        }
-        warn!("storage: data disk lacks VIRTIO_BLK_F_FLUSH: writes are NOT durable (dev only)");
-    }
-    if blk.read_only() {
-        return refuse_or_degrade(
-            !cfg.require_data_disk,
-            format_args!("data disk is read-only"),
-        );
-    }
-    let flush = blk.has_flush();
-    let dev = Box::new(KernelBlk { blk, flush });
+    let part = boot.partition;
+    let faulty = boot.faulty;
+    let Some(dev) = urmqtt_store::part::Partition::new(boot.dev, part.first_lba, part.sectors())
+    else {
+        return refuse_or_degrade(false, format_args!("data partition outside the disk"));
+    };
+    let dev = Box::new(dev);
     let uuid = || {
         let mut u = [0u8; 16];
         let _ = urmqtt_tls::rng::fill_global(&mut u);
@@ -248,13 +202,22 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
     let (disk, how) = match Disk::open(dev, uuid) {
         Ok(d) => d,
         Err(DiskError::Layout(e)) => {
-            // Never format over data we do not recognise.
+            // Never format over data we do not recognise: a damaged data
+            // partition is refused, never re-formatted (S5 restores it).
             return refuse_or_degrade(
                 !cfg.refuse_on_corruption,
-                format_args!("data disk layout rejected: {e:?}"),
+                format_args!("data partition is damaged, left as it is: {e:?}"),
             );
         }
-        Err(e) => return refuse_or_degrade(false, format_args!("data disk unreadable: {e:?}")),
+        Err(e) if faulty => {
+            warn!(
+                "disk-fault: power cut injected while opening the data partition ({e:?}), powering off"
+            );
+            crate::power::off()
+        }
+        Err(e) => {
+            return refuse_or_degrade(false, format_args!("data partition unreadable: {e:?}"));
+        }
     };
     log_layout(&disk, how);
 

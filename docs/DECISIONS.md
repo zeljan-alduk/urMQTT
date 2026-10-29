@@ -662,3 +662,43 @@ verified in the named milestone before it becomes Accepted).
   - A boot date before it means the time is unknown. The kernel logs "check the RTC battery or the hypervisor clock" and sets no wall clock. Every certificate check and control message then fails closed.
   - A build without the variable has no bound and says so at boot.
 - **Testing:** smoke `time-before-build` boots with `-rtc base=2020-01-01`. It checks the warning and that a valid device's handshake is refused.
+
+## ADR-051 — The single-disk model: the data partition of the boot disk (S1)
+
+- **Status:** Accepted (S1). It implements PLAN.md decision 6 ("only the disk it boots from") and STORAGE-PLAN §2a, and supersedes the "first non-partitioned disk" rule of M11/M17.
+- **Problem:**
+  - The data disk was "the first disk that is not partitioned". On bare metal that could be a disk holding someone else's data, and the model needed two disks where hosts and clouds give one.
+  - A damaged urMQTT disk had to be told apart from a foreign one by guesswork (H0-W12, W13; DISK-FORMAT G1, G2).
+- **Design:**
+  - **Identification.** Limine's executable-file response gives the boot volume's media type and GPT disk GUID. Every virtio-blk device and every virtio-scsi LUN is read at LBA 1..33. The one whose valid primary header carries that GUID is the boot disk. Others are logged as "not the boot disk, left untouched" and never written.
+    - **A bug worked around:** the `limine` crate 0.6.5 omits the `unused` u32 after `media_type`, so its later fields are 4 bytes off. This was found from a memory dump under QEMU. The kernel reads the protocol's offsets (40 for the media type, 64 for the disk GUID) from the raw structure, and the reason is documented in `boot.rs`. To report upstream.
+  - **First boot** (`urmqtt_store::gpt::prepare`, specified in DISK-FORMAT §0):
+    - repair a torn primary from the backup;
+    - move the backup to the end of a larger disk;
+    - create the data partition: 1 MiB aligned, whole 4 KiB blocks, head zeroed first, fresh partition and disk GUIDs, backup copy before primary, entries before header.
+
+    It is idempotent, and a power cut after any write is recovered on the next boot.
+  - **The store works through a `Partition` window** (`urmqtt_store::part`), so the layout v1 is unchanged and relative to the partition. The block self-test writes the partition's last 8 sectors, never outside it.
+  - **Classification:** blank → format; valid → open; anything else → refused and never written. Dev images then run memory-only; S5 brings restore.
+  - **Read-only media.** Booting the ISO as a CD gives no data partition. The kernel says "booted from read-only media (CD/ISO): write the image to the machine's disk". Production refuses to serve (`storage.require_data_disk`); dev runs memory-only. The self-installing ISO (S1b) turns this into "install, then boot from the disk".
+  - **Fault injection** (`urmqtt_store::fault`) wraps the boot disk in dev images with `test=disk-fault:<spec>`. It can stop after N writes or flushes, tear a write, drop a flush or flip a bit on read. A fired power cut powers the VM off, so smoke boots the disk again. Production never parses the option (command line ignored, H0-W11 test).
+  - **Tools.**
+    - `tools/urmqtt-disk` works on images and block devices, read-only unless `--write`. Its commands are `info`, `verify`, `export-db` (WAL applied in a copy-on-write overlay), `export-telemetry` (csv/jsonl with time and topic filters), `import-devices [--allowlist]`, `create` (the mkraw-identical writer) and `update-boot` (replace the ESP, keep the data).
+    - `make run` uses one persistent `build/disk-<env>.img`, updated in place.
+    - `scripts/kvm-host/install.sh` creates or updates one `disk.img`.
+- **Consequences:**
+  - Deployments attach one disk, larger than the image. The DEPLOY.md recipes changed: no separate data disk for libvirt, Proxmox, Hetzner, Oracle or the Pi.
+  - Updating the kernel means replacing the ESP, not swapping a boot disk.
+  - No image with the two-disk model was released, so nothing is migrated.
+- **Testing:**
+  - Host: 13 GPT tests, among them the crash at every write (cut and torn, cache kept or lost, 40 cases), byte identity with `mkraw.py`, idempotence, repair, shrink, too small, and the new partition formatting with the real layout code. Also partition-window and fault-device tests.
+  - Fuzz target `gpt_parse`.
+  - Smoke:
+    - `first-boot` (with a second disk byte-identical afterwards) and `first-boot-again`;
+    - `first-boot-crash` at four points, then recovery;
+    - `scsi-boot` (format, bench, reopen, a second LUN untouched);
+    - `iso-as-cd`;
+    - `own-damaged-refused`;
+    - `disk-tool-offline` and `disk-tool-import-in-force` (the tool's round trip, with the host `sqlite3`).
+
+    Every older scenario now boots the single-disk image as well.

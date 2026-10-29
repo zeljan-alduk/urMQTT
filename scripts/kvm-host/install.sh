@@ -2,18 +2,20 @@
 # Installs urMQTT as a KVM guest on an aarch64 Debian-family host such as a
 # Raspberry Pi 4/5 with 64-bit Raspberry Pi OS or Ubuntu (docs/DEPLOY.md).
 #
-#   sudo scripts/kvm-host/install.sh IMAGE.img [--data-size 8G] [--cpus 4] [--mem 2G]
+#   sudo scripts/kvm-host/install.sh IMAGE.img [--disk-size 8G] [--cpus 4] [--mem 2G]
 #                                    [--net user|bridge:<bridge>] [--port 8883]
 #
-# IMAGE.img is the raw boot image (make raw / the release's .img). It becomes
-# /var/lib/urmqtt/boot.img; re-running with a new image updates it. The data
-# disk /var/lib/urmqtt/data.img is created blank once and never overwritten.
+# IMAGE.img is the raw boot image (make raw / the release's .img). The VM has
+# one disk, /var/lib/urmqtt/disk.img (single-disk model, STORAGE-PLAN §2a):
+# the first install copies the image onto a disk of --disk-size, whose first
+# boot creates the data partition. Re-running with a new image replaces only
+# the EFI system partition (the kernel) and keeps the data partition.
 set -euo pipefail
 
-IMG="" DATA_SIZE=8G CPUS=4 MEM=2G NET=user PORT=8883
+IMG="" DISK_SIZE=8G CPUS=4 MEM=2G NET=user PORT=8883
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --data-size) DATA_SIZE=$2; shift 2 ;;
+        --disk-size) DISK_SIZE=$2; shift 2 ;;
         --cpus) CPUS=$2; shift 2 ;;
         --mem) MEM=$2; shift 2 ;;
         --net) NET=$2; shift 2 ;;
@@ -54,13 +56,33 @@ esac
 (( vm_mib + 512 <= host_mib )) || echo "warning: --mem $MEM leaves less than 512 MiB of the host's $host_mib MiB"
 
 install -d -m 0750 "$DIR" /etc/urmqtt /usr/local/lib/urmqtt
-install -m 0640 "$IMG" "$DIR/boot.img"
-if [[ ! -e "$DIR/data.img" ]]; then
-    truncate -s "$DATA_SIZE" "$DIR/data.img"
-    chmod 0640 "$DIR/data.img"
-    echo "data disk: $DIR/data.img ($DATA_SIZE, blank: urMQTT formats it on first boot)"
+# u64 at byte offset $2 of file $1 (little-endian, as GPT stores it).
+u64() { od -An -t u8 -j "$2" -N 8 "$1" | tr -d ' '; }
+mib=$(( 1024 * 1024 ))
+img_bytes=$(stat -c %s "$IMG")
+# Every raw image: 1 MiB of tables, the ESP (whole MiBs), 1 MiB at the end.
+esp_mib=$(( img_bytes / mib - 2 ))
+(( esp_mib > 0 )) || { echo "error: $IMG is not a urMQTT raw image" >&2; exit 1; }
+if [[ ! -e "$DIR/disk.img" ]]; then
+    install -m 0640 "$IMG" "$DIR/disk.img"
+    truncate -s "$DISK_SIZE" "$DIR/disk.img"
+    echo "disk: $DIR/disk.img ($DISK_SIZE; the first boot creates the data partition)"
 else
-    echo "data disk: keeping $DIR/data.img"
+    # The ESP is the first partition entry (LBA 2, byte 1024): its first and
+    # last LBA give the room the new kernel must fit in.
+    first=$(u64 "$DIR/disk.img" $(( 1024 + 32 )))
+    last=$(u64 "$DIR/disk.img" $(( 1024 + 40 )))
+    room=$(( (last - first + 1) * 512 ))
+    if [[ $first != 2048 ]] || (( esp_mib * mib > room )); then
+        echo "error: the new ESP ($esp_mib MiB) does not fit the disk's ($room bytes at LBA $first)" >&2
+        exit 1
+    fi
+    systemctl stop urmqtt.service 2>/dev/null || true
+    dd if="$IMG" of="$DIR/disk.img" bs=1M skip=1 seek=1 count="$esp_mib" conv=notrunc,fsync status=none
+    echo "disk: kernel updated in $DIR/disk.img, data partition kept"
+fi
+if [[ -e "$DIR/data.img" || -e "$DIR/boot.img" ]]; then
+    echo "note: $DIR/boot.img and data.img are from the two-disk layout before S1 and are no longer used"
 fi
 install -m 0755 "$HERE/urmqtt-vm.sh" /usr/local/lib/urmqtt/urmqtt-vm.sh
 install -m 0644 "$HERE/urmqtt.service" /etc/systemd/system/urmqtt.service

@@ -30,8 +30,8 @@ firmware() {
     exit 1
 }
 
-[[ -f "$DIR/boot.img" ]] || { echo "error: $DIR/boot.img missing" >&2; exit 1; }
-[[ -f "$DIR/data.img" ]] || { echo "error: $DIR/data.img missing" >&2; exit 1; }
+# One disk: the boot image with its data partition (single-disk model).
+[[ -f "$DIR/disk.img" ]] || { echo "error: $DIR/disk.img missing (run install.sh)" >&2; exit 1; }
 
 case $NET in
     user) NETDEV="user,id=n0,hostfwd=tcp::$PORT-:8883" ;;
@@ -44,10 +44,8 @@ ARGS=(
     -bios "$(firmware)"
     -nodefaults -display none -monitor none -serial stdio
     -device virtio-rng-pci,romfile=
-    -drive "if=none,id=boot0,file=$DIR/boot.img,format=raw"
-    -device virtio-blk-pci,drive=boot0,bootindex=0,romfile=
-    -drive "if=none,id=data0,file=$DIR/data.img,format=raw,cache=none,aio=threads"
-    -device virtio-blk-pci,drive=data0,romfile=
+    -drive "if=none,id=disk0,file=$DIR/disk.img,format=raw,cache=none,aio=threads"
+    -device virtio-blk-pci,drive=disk0,bootindex=0,romfile=
     -netdev "$NETDEV" -device virtio-net-pci,netdev=n0,romfile=
 )
 

@@ -35,20 +35,28 @@ cargo build --release --locked -p urmqtt-loadgen -q
 LOADGEN="$ROOT/target/release/urmqtt-loadgen"
 clean() { LC_ALL=C sed -e $'s/\x1b\\[[0-9;?=]*[A-Za-z]//g' -e $'s/\r//g' "$1"; }
 
-"$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$OUT/dp.iso" --cmdline "smoke test=dp-bench" >/dev/null
-"$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$OUT/net.iso" --cmdline "serve log=info" >/dev/null
+# Single-disk model (S1): each run boots a fresh copy of the raw image.
+mkimg() {
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$1.iso" --cmdline "$2" --esp-out "$1.esp" >/dev/null
+    python3 -I "$ROOT/scripts/mkraw.py" "$1.esp" "$1" >/dev/null
+    rm -f "$1.iso" "$1.esp"
+}
+mkimg "$OUT/dp.raw" "smoke test=dp-bench"
+mkimg "$OUT/net.raw" "serve log=info"
 
+cp "$OUT/dp.raw" "$OUT/dp.img"
 truncate -s 64m "$OUT/dp.img"
-"$ROOT/scripts/run-qemu.sh" --serial "$OUT/dp.log" --iso "$OUT/dp.iso" --accel "$ACCEL" --smp 6 \
-    --headless --data "$OUT/dp.img" --fwd none >/dev/null 2>&1
+"$ROOT/scripts/run-qemu.sh" --serial "$OUT/dp.log" --disk "$OUT/dp.img" --accel "$ACCEL" --smp 6 \
+    --headless --fwd none >/dev/null 2>&1
 dp() { clean "$OUT/dp.log" | grep -Eo "dp-bench: $1 worker core\(s\): [0-9]+" | awk '{print $NF}'; }
 
 net() {
     local smp=$1 log="$OUT/net-$1.log"
     rm -f "$log" "$OUT/net.img"
+    cp "$OUT/net.raw" "$OUT/net.img"
     truncate -s 64m "$OUT/net.img"
-    "$ROOT/scripts/run-qemu.sh" --serial "$log" --iso "$OUT/net.iso" --accel "$ACCEL" --smp "$smp" \
-        --headless --data "$OUT/net.img" --fwd 18883:8883 >/dev/null 2>&1 &
+    "$ROOT/scripts/run-qemu.sh" --serial "$log" --disk "$OUT/net.img" --accel "$ACCEL" --smp "$smp" \
+        --headless --fwd 18883:8883 >/dev/null 2>&1 &
     local pid=$!
     until clean "$log" 2>/dev/null | grep -q "log: level Info"; do sleep 0.2; done
     sleep 1

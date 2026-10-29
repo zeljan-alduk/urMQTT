@@ -13,8 +13,9 @@
 | `urmqtt-config-schema` | `crates/config-schema` | 1794 | 0 | 0 (0) | forbid |
 | `urmqtt-control` | `crates/control` | 609 | 0 | 0 (0) | forbid |
 | `urmqtt-control-tool` | `tools/control` | 416 | 0 | 0 (0) | default |
+| `urmqtt-disk-tool` | `tools/disk` | 679 | 0 | 0 (0) | default |
 | `urmqtt-dispatch` | `crates/dispatch` | 441 | 0 | 0 (0) | forbid |
-| `urmqtt-kernel` | `crates/kernel` | 7404 | 0 | 51 (36) | deny |
+| `urmqtt-kernel` | `crates/kernel` | 7626 | 0 | 53 (37) | deny |
 | `urmqtt-loadgen` | `tools/loadgen` | 452 | 0 | 0 (0) | default |
 | `urmqtt-log` | `crates/log` | 646 | 0 | 5 (5) | deny |
 | `urmqtt-mm` | `crates/mm` | 1219 | 0 | 35 (35) | deny |
@@ -22,13 +23,13 @@
 | `urmqtt-net` | `crates/net` | 1380 | 0 | 0 (0) | deny |
 | `urmqtt-pci` | `crates/pci` | 439 | 0 | 0 (0) | deny |
 | `urmqtt-platform` | `crates/platform` | 1017 | 453 | 0 (0) | deny |
-| `urmqtt-store` | `crates/store` | 3340 | 713 | 118 (106) | deny |
+| `urmqtt-store` | `crates/store` | 4474 | 752 | 118 (106) | deny |
 | `urmqtt-sync` | `crates/sync` | 435 | 0 | 16 (16) | deny |
 | `urmqtt-tcp` | `crates/tcp` | 2452 | 0 | 0 (0) | deny |
 | `urmqtt-timer-wheel` | `crates/timer-wheel` | 395 | 0 | 0 (0) | forbid |
 | `urmqtt-tls` | `crates/tls` | 2402 | 425 | 0 (0) | forbid |
 | `urmqtt-virtio` | `crates/virtio` | 1681 | 0 | 19 (19) | deny |
-| **total** | | **34538** | | **316 (289)** | |
+| **total** | | **36573** | | **318 (290)** | |
 
 ## Vendored components
 
@@ -142,4 +143,4 @@
 
 ## Fuzz targets
 
-`acpi_parse`, `broker_input`, `config_parse`, `control_message`, `disk_layout`, `fdt_parse`, `mqtt_decode`, `net_frame`, `tcp_segment`, `telemetry_recover`, `tls_record`, `x509_identity`
+`acpi_parse`, `broker_input`, `config_parse`, `control_message`, `disk_layout`, `fdt_parse`, `gpt_parse`, `mqtt_decode`, `net_frame`, `tcp_segment`, `telemetry_recover`, `tls_record`, `x509_identity`

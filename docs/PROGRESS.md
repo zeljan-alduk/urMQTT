@@ -960,3 +960,71 @@ PROMPT-security.md H1, plan in docs/SECURITY-PLAN.md (status and deviations ther
 - the `--sign-cmd` hook instead of a linked PKCS#11 library;
 - an epoch plus IPI instead of ring messages;
 - removal of an old CA proven by a host test with two servers instead of a second image in smoke.
+
+## S1 — Single-disk model, `urmqtt-disk`, fault injection (2026-10-30)
+
+PROMPT-storage.md S1, plan in docs/STORAGE-PLAN.md (status and deviations there). ADR-051. Specification in DISK-FORMAT.md §0.
+
+**Done**
+
+- **One disk.** The kernel finds the disk it booted from by the GPT disk GUID in Limine's executable-file response. It keeps its data in a partition of that disk and never writes any other disk.
+  - Found on the way: the `limine` crate 0.6.5's `File` lacks the protocol's `unused` field, so its UUIDs are 4 bytes off. The kernel reads the protocol offsets from the raw structure.
+- **First boot** (`urmqtt_store::gpt`):
+  - a torn primary is repaired from the backup;
+  - the backup moves to the end of a larger disk;
+  - the data partition is created: type `58D3F720-BDF5-4DB7-99EC-DE26C8B8850F`, 1 MiB aligned, whole 4 KiB blocks, head zeroed first, fresh partition and disk GUIDs, backup copy before primary;
+  - every step is idempotent and survives a power cut.
+- **The store through a partition window** (`urmqtt_store::part`), with layout v1 unchanged. The block self-test writes only inside the partition.
+- **Classification:** blank → format, valid → open, damaged → refused and never written.
+- **Booting the ISO as a CD** gives no data partition, with a clear message. Dev runs memory-only; prod refuses.
+- **Fault injection** (`urmqtt_store::fault`): stop after N writes or flushes, a torn write, a dropped flush, a bit flip on read. On the host it wraps `MemDisk`; in dev kernels it is enabled with `test=disk-fault:<spec>`, and an injected power cut powers the VM off.
+- **The GPT writer** `gpt::raw_image` is byte-identical to `scripts/mkraw.py` (test with five ESP sizes). S1b's installer will use it.
+- **`tools/urmqtt-disk`** (host, images and block devices, read-only unless `--write`):
+  - `info`, `verify`;
+  - `export-db` (WAL applied in a copy-on-write overlay; the output opens in the host's `sqlite3`);
+  - `export-telemetry` (csv/jsonl, time and topic filters);
+  - `import-devices [--allowlist]`, which seeds the H1 allowlist offline;
+  - `create` (the mkraw-identical image on a disk of any size);
+  - `update-boot` (new kernel, data kept).
+- **Single disk everywhere:**
+  - `make run` uses one persistent `build/disk-<env>.img` (`make disk` creates it, or updates its kernel in place);
+  - `scripts/bench.sh` and every smoke scenario boot one disk;
+  - `scripts/kvm-host/install.sh` creates and updates one `disk.img`;
+  - DEPLOY.md lost every "separate data disk" step (libvirt, Proxmox, Hetzner, Oracle, Pi).
+- **Fixed:** H0-W12 and W13; DISK-FORMAT G1 and G2.
+
+**Tests**
+
+- **Host:**
+  - 13 GPT tests, among them a power cut at every one of the 10 first-boot writes (cut and torn, with and without the volatile cache surviving: 40 cases), repair, shrink, too small, old data under the new partition, and the real layout formatting the new partition;
+  - a partition-window test; fault-device tests;
+  - the mkraw identity test.
+
+  299 host tests in all.
+- **Fuzz:** new target `gpt_parse`. It patches a valid image, optionally with the CRCs fixed up, and runs the first boot on the result. 150k runs in 120 s reached coverage 422 with no failure.
+- **Smoke: 113 checks, all passing** (HVF and TCG), with every earlier scenario now on a single disk. New:
+  - `first-boot` (a second virtio-blk disk with random data is byte-identical afterwards) and `first-boot-again`;
+  - `first-boot-crash` at four points (stop after write 2, 6, 8; write 9 torn), each followed by a recovery boot;
+  - `scsi-boot`: the boot disk as a virtio-scsi LUN, formatted, db-bench, reopened, a second LUN untouched;
+  - `iso-as-cd`;
+  - `own-damaged-refused`: one flipped byte in the superblock; refused, the partition head unchanged;
+  - `disk-tool-offline`:
+    - `verify` passes;
+    - the exported database passes `integrity_check` in `sqlite3` and holds 1 retained message and 1 session;
+    - the 3 published telemetry values come out of `export-telemetry`;
+    - the read-only commands leave the image unchanged;
+    - import without `--write` is refused;
+  - `disk-tool-import-in-force`: the next boot in allowlist mode admits the imported device-002 and refuses device-003.
+
+  The full run had 107 passing and 6 failing checks, all caused by the new scenarios themselves:
+  - `own-damaged` expected a memory-only fallback, but dev refuses on corruption;
+  - client lines were written into the serial log while QEMU was still writing it.
+
+  The same race was then also fixed in `control-persist` and `time-before-build`, where a lost line could have hidden a failure. The fixed scenarios passed, 10/10 on HVF and TCG.
+- db-bench on the data partition (HVF): 62 610 ops/s batched and 2 378 ops/s with one insert per transaction (virtio-scsi); 56 696 and 2 094 on virtio-blk (M11 baseline: 43 524 / 2 021).
+
+**Not done (as planned for later):**
+- `migrate` and `backup-extract` (S2, S5);
+- `scripts/fault-loop.sh`, which comes with its first procedure, the S2 migration.
+
+**Not re-measured:** `make bench` and bytes per connection. S1 changed only the storage path and boot-time disk handling, not the data plane.

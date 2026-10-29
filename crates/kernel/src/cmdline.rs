@@ -66,6 +66,10 @@ pub struct BootOptions {
     /// `heap_limit_mb=N`: admission behaves as if the heap had only N MiB
     /// (reconnect-storm tests on a host that cannot open enough sockets).
     pub heap_limit_mb: Option<u32>,
+    /// `test=disk-fault:<spec>`: inject faults on the boot disk
+    /// (`urmqtt_store::fault::FaultSpec`), e.g. a power cut after the N-th
+    /// write of the first boot.
+    pub disk_fault: Option<urmqtt_store::fault::FaultSpec>,
     /// `registry=allowlist`: allowlist mode even if the configuration says
     /// "open" (stricter only, for tests of one image in both modes).
     pub allowlist: bool,
@@ -108,13 +112,21 @@ impl BootOptions {
                 "log=debug" => o.log_level = Some(urmqtt_config::LogLevel::Debug),
                 "log=trace" => o.log_level = Some(urmqtt_config::LogLevel::Trace),
                 "registry=allowlist" => o.allowlist = true,
-                w => match w
-                    .strip_prefix("heap_limit_mb=")
-                    .and_then(|v| v.parse().ok())
-                {
-                    Some(mb) => o.heap_limit_mb = Some(mb),
-                    None => o.ignored += 1,
-                },
+                w => {
+                    if let Some(mb) = w
+                        .strip_prefix("heap_limit_mb=")
+                        .and_then(|v| v.parse().ok())
+                    {
+                        o.heap_limit_mb = Some(mb);
+                    } else if let Some(f) = w
+                        .strip_prefix("test=disk-fault:")
+                        .and_then(urmqtt_store::fault::FaultSpec::parse)
+                    {
+                        o.disk_fault = Some(f);
+                    } else {
+                        o.ignored += 1;
+                    }
+                }
             }
         }
         o
@@ -126,7 +138,7 @@ mod tests {
     use super::*;
 
     const EVERYTHING: &str = "smoke serve test=panic test=db-crash log=trace heap_limit_mb=1 \
-                              registry=allowlist test=pac bogus";
+                              registry=allowlist test=pac test=disk-fault:stop-after-write=3 bogus";
 
     /// H0-W11: a production image ignores the whole command line, test
     /// switches included; every word is counted as ignored.
@@ -136,7 +148,7 @@ mod tests {
         assert_eq!(
             o,
             BootOptions {
-                ignored: 9,
+                ignored: 10,
                 ..BootOptions::default()
             }
         );
@@ -150,6 +162,7 @@ mod tests {
         assert_eq!(o.db_test, Some(DbTest::Crash));
         assert_eq!(o.log_level, Some(urmqtt_config::LogLevel::Trace));
         assert_eq!(o.heap_limit_mb, Some(1));
+        assert_eq!(o.disk_fault.and_then(|f| f.stop_after_writes), Some(3));
         assert_eq!(o.ignored, 1);
         assert_eq!(BootOptions::parse("heap_limit_mb=x", true).ignored, 1);
     }

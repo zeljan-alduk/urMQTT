@@ -108,3 +108,10 @@ path = "fuzz_targets/control_message.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "gpt_parse"
+path = "fuzz_targets/gpt_parse.rs"
+test = false
+doc = false
+bench = false

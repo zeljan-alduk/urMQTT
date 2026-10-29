@@ -26,12 +26,15 @@ pub mod crc;
 #[allow(unsafe_code)] // SQLite C API wrappers
 pub mod db;
 pub mod disk;
+pub mod fault;
 #[allow(unsafe_code)] // SQLite FFI declarations
 mod ffi;
+pub mod gpt;
 pub mod layout;
 #[cfg(target_os = "none")]
 #[allow(unsafe_code)] // libc functions SQLite links against
 mod libc;
+pub mod part;
 pub mod schema;
 pub mod store;
 pub mod telemetry;

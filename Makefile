@@ -22,7 +22,7 @@ VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo 
 BUILD_DIR   := build
 KERNEL_ELF  := target/$(TARGET)/release/urmqtt
 ISO         := $(BUILD_DIR)/urmqtt-$(ENV)-$(VERSION).iso
-DATA_IMG    := $(BUILD_DIR)/data.img
+DISK_IMG    := $(BUILD_DIR)/disk-$(ENV).img
 
 # Reproducible images (M17): paths of the toolchain, the crate cache and the
 # checkout are remapped, so neither the home directory nor the checkout
@@ -68,26 +68,30 @@ iso: build ## Build the bootable UEFI ISO for deploy/<ENV>/
 	@ln -sf $(notdir $(ISO)) $(BUILD_DIR)/urmqtt-$(ENV).iso
 
 .PHONY: run
-run: iso data-img ## Boot the ISO in QEMU (HVF on macOS), 4 vCPU, 512 MB, serial on stdio
-	scripts/run-qemu.sh --iso $(ISO) --data $(DATA_IMG) $(if $(ACCEL),--accel $(ACCEL)) -- $(QEMU_ARGS)
+run: disk ## Boot the dev disk in QEMU (HVF on macOS), 4 vCPU, 512 MB, serial on stdio
+	scripts/run-qemu.sh --disk $(DISK_IMG) $(if $(ACCEL),--accel $(ACCEL)) -- $(QEMU_ARGS)
 
 .PHONY: run-tcg
-run-tcg: iso data-img ## Same as run, with TCG instead of HVF
-	scripts/run-qemu.sh --iso $(ISO) --data $(DATA_IMG) --accel tcg -- $(QEMU_ARGS)
+run-tcg: disk ## Same as run, with TCG instead of HVF
+	scripts/run-qemu.sh --disk $(DISK_IMG) --accel tcg -- $(QEMU_ARGS)
 
 .PHONY: run-smp
-run-smp: iso data-img ## Boot with N vCPUs (make run-smp N=8)
-	scripts/run-qemu.sh --iso $(ISO) --data $(DATA_IMG) --smp $(N) $(if $(ACCEL),--accel $(ACCEL)) -- $(QEMU_ARGS)
+run-smp: disk ## Boot with N vCPUs (make run-smp N=8)
+	scripts/run-qemu.sh --disk $(DISK_IMG) --smp $(N) $(if $(ACCEL),--accel $(ACCEL)) -- $(QEMU_ARGS)
 
 .PHONY: debug
-debug: iso data-img ## Boot QEMU halted with a gdb stub (-s -S)
-	scripts/run-qemu.sh --iso $(ISO) --data $(DATA_IMG) --gdb $(if $(ACCEL),--accel $(ACCEL)) -- $(QEMU_ARGS)
+debug: disk ## Boot QEMU halted with a gdb stub (-s -S)
+	scripts/run-qemu.sh --disk $(DISK_IMG) --gdb $(if $(ACCEL),--accel $(ACCEL)) -- $(QEMU_ARGS)
 
-.PHONY: data-img
-data-img: ## Create a blank sparse data disk image (layout init arrives in M11)
-	@mkdir -p $(BUILD_DIR)
-	@if [[ -e $(DATA_IMG) ]]; then echo "$(DATA_IMG) exists, leaving it alone"; \
-	 else truncate -s $(DATA_SIZE) $(DATA_IMG) && echo "created blank $(DATA_SIZE) $(DATA_IMG)"; fi
+.PHONY: disk
+disk: raw ## The VM's only disk (single-disk model, S1): created from the raw image, or its ESP updated in place (data kept)
+	@if [[ -e $(DISK_IMG) ]]; then \
+	 scripts/mkiso.sh --kernel $(KERNEL_ELF) --out $(BUILD_DIR)/.disk-tmp.iso --esp-out $(BUILD_DIR)/.disk-esp.img >/dev/null && \
+	 dd if=$(BUILD_DIR)/.disk-esp.img of=$(DISK_IMG) bs=1048576 seek=1 conv=notrunc status=none && \
+	 rm -f $(BUILD_DIR)/.disk-tmp.iso $(BUILD_DIR)/.disk-esp.img && \
+	 echo "$(DISK_IMG): kernel updated, data partition kept"; \
+	 else cp $(RAW) $(DISK_IMG) && truncate -s $(DATA_SIZE) $(DISK_IMG) && \
+	 echo "created $(DATA_SIZE) $(DISK_IMG) (the first boot creates the data partition)"; fi
 
 .PHONY: fmt
 fmt: ## Format all Rust code

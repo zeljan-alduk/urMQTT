@@ -1,8 +1,10 @@
 # Data disk format, layout version 1
 
-The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0). The
-disk has **no filesystem**: the kernel accesses it raw, as a superblock, a
-region table and fixed regions. The code is in `crates/store`
+The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0). Since
+S1 the "data disk" is the **data partition of the boot disk** (§0); everything
+below §0 is relative to that partition's first sector. The data has **no
+filesystem**: the kernel accesses it raw, as a superblock, a region table and
+fixed regions. The code is in `crates/store`
 (`layout.rs`, `disk.rs`, `vfs.rs`, `telemetry.rs`); ADR-030 and ADR-031 give
 the reasons.
 
@@ -14,6 +16,73 @@ with the real code, then checks two things:
 
 So a field in the code that is missing here fails the test, and so does a
 field listed here that the code does not write.
+
+## 0. The boot disk (S1)
+
+urMQTT uses exactly one disk: the one it boots from (single-disk model,
+STORAGE-PLAN §2a). It is a standard UEFI GPT disk (UEFI 2.10, §5.3) with 128
+entries of 128 bytes, the entry arrays at LBA 2 and at `last - 32`, CRC-32
+(IEEE) as UEFI defines it:
+
+```
+LBA 0            protective MBR (one 0xEE entry over the disk), 0x55AA
+LBA 1            primary GPT header
+LBA 2 .. 33      primary entry array
+LBA 2048 ..      EFI system partition (Limine, kernel, limine.conf), whole MiBs
+1 MiB aligned .. urMQTT data partition (§1 onward), a whole number of 4 KiB blocks
+last-32 .. last-1 backup entry array
+last             backup GPT header
+```
+
+| Partition | Type GUID | Name | Created by |
+|---|---|---|---|
+| EFI system partition | `C12A7328-F81F-11D2-BA4B-00A0C93EC93B` | `EFI system partition` | the image (`scripts/mkraw.py`, `gpt::raw_image`) |
+| urMQTT data | `58D3F720-BDF5-4DB7-99EC-DE26C8B8850F` | `urMQTT data` | the first boot |
+
+**The image** (`make raw`, the release `.img`) is the first three items and a
+backup table right after the ESP. Its GUIDs are derived from the ESP's SHA-256
+(`v4(SHA-256(label ‖ sha256(esp))[0..16])` for the labels `disk` and `esp`), so
+the same ESP always gives the same bytes. The Rust writer `gpt::raw_image` is
+byte-identical to `mkraw.py` (test `raw_image_equals_mkraw_py`, five ESP sizes).
+
+**Identification.** The bootloader reports the boot volume's GPT disk GUID
+(Limine's executable-file response). The kernel reads LBA 1..33 of every disk
+it drives and uses the one whose valid primary header carries that GUID. Every
+other disk is only read, never written. Booting from optical media (the ISO)
+gives no data partition.
+
+**First boot** (`gpt::prepare`), checked again at every boot, each step
+idempotent:
+1. If the primary copy is invalid, it is restored from a valid backup at the
+   last LBA.
+2. If the backup is not at the last LBA (the image on a larger disk), the
+   backup copy is written at the end and then the primary is rewritten with
+   the new `backup_lba` and `last_usable`. The old backup header is then zeroed.
+3. If there is no data partition:
+   - the first 64 sectors (32 KiB) of the free space at the next 1 MiB
+     boundary are zeroed, so the partition classifies as blank whatever the
+     disk held before;
+   - the entry is added with a fresh random partition GUID and a fresh random
+     disk GUID;
+   - the backup copy is written before the primary.
+
+Within one copy, the entry array is always written before its header, and
+every copy ends with a flush. A power cut after any write therefore leaves
+one of three states:
+- a valid primary still without the partition, so the next boot redoes step 3
+  with new GUIDs;
+- a torn primary with a complete backup, so step 1 applies;
+- the finished disk.
+
+The host test `first_boot_survives_a_crash_at_every_write` checks every write,
+cut cleanly or torn, with and without the volatile cache surviving. Smoke
+`first-boot-crash` does the same in the kernel at four points.
+
+**Classification of the data partition** (`Disk::open` on the partition):
+- blank → formatted (§6);
+- a valid superblock → opened;
+- anything else → **damaged**: refused and never written. Dev images then run
+  memory-only (smoke `own-damaged-refused`); a backup restore is S5.
 
 ## 1. Conventions
 
@@ -240,11 +309,10 @@ A crash before step 3 leaves a disk whose superblock is still zero, so it is
 formatted again on the next boot. The telemetry header is written separately
 when the log is first opened (§5.2).
 
-In v1 the data disk is a separate disk: blank when its first 4 KiB are zero,
-and disks with an MBR or GPT are skipped. From S1 on, the data lives in a
-partition of the boot disk instead, and no other disk is touched (PLAN.md
-decision 6, STORAGE-PLAN §2a). This layout then starts at the partition's
-first sector.
+Since S1 this layout starts at the first sector of the boot disk's data
+partition (§0), and "blank" means the partition's first 4 KiB are zero. Until
+M17 the data lived on a separate disk chosen as "not partitioned"; no image
+was released with that model, so there is no migration from it.
 
 ## 7. Invariants
 
@@ -258,9 +326,9 @@ first sector.
 
 | Gap | Description | Fixed in |
 |---|---|---|
-| G1 | the data is on a separate disk chosen by "not partitioned"; the single-disk model puts it in a partition of the boot disk | S1 |
-| G2 | a damaged urMQTT disk must not be taken for a blank one | S1 |
+| ~~G1~~ | ~~the data is on a separate disk chosen by "not partitioned"~~ | **fixed in S1**: the boot disk's data partition, found by GPT disk GUID (§0) |
+| ~~G2~~ | ~~a damaged urMQTT disk must not be taken for a blank one~~ | **fixed in S1**: damaged partitions are refused and left unwritten (smoke `own-damaged-refused`) |
 | G3 | regions are aligned to 4 KiB, not 1 MiB or the device topology; telemetry writes are 512 B granular, which causes read-modify-write on 4 KiB-physical devices | S2 |
 | G4 | the telemetry partition count is fixed at 8 | S2 |
-| G7 | disks whose size is not a multiple of 4 KiB are refused instead of rounded down | S2 |
+| G7 | disks whose size is not a multiple of 4 KiB are refused instead of rounded down; the data partition is created as whole 4 KiB blocks, so it does not arise for it | S2 |
 | G8 | recovery reads the whole telemetry region at boot, so boot time grows with the disk | S2 |

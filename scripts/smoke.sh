@@ -57,6 +57,34 @@ boot() {
 # Strip terminal escapes the firmware and Limine print.
 clean() { LC_ALL=C sed -e $'s/\x1b\\[[0-9;?=]*[A-Za-z]//g' -e $'s/\r//g' "$1"; }
 
+# Single-disk model (S1, STORAGE-PLAN §2a): every VM boots one disk, a copy
+# of the raw GPT image (scripts/mkraw.py) on a larger disk, and the kernel
+# keeps its data in a partition of that disk.
+#
+# mkimg <image> <cmdline>: the raw boot image with <cmdline> (once per run);
+# its ESP is kept as <image>.esp for set_esp.
+mkimg() {
+    local out=$1 cmdline=$2
+    [[ -f "$out" ]] && return 0
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$out.iso" --cmdline "$cmdline" --esp-out "$out.esp" >/dev/null
+    python3 -I "$ROOT/scripts/mkraw.py" "$out.esp" "$out" >/dev/null
+    rm -f "$out.iso"
+}
+
+# fresh_disk <image> <disk> [size]: a new VM disk (default 64 MiB).
+fresh_disk() {
+    rm -f "$2"
+    cp "$1" "$2"
+    truncate -s "${3:-64m}" "$2"
+}
+
+# set_esp <disk> <image>: the next boot of <disk> runs <image>'s ESP (its
+# kernel command line) with the data partition kept, as an offline kernel
+# update does. The ESP starts at 1 MiB in every image.
+set_esp() {
+    dd if="$2.esp" of="$1" bs=1048576 seek=1 conv=notrunc status=none
+}
+
 check() {
     local name=$1 log=$2 status=$3
     shift 3
@@ -97,15 +125,15 @@ check() {
 scenario() {
     local name=$1 cmdline=$2 acpi=$3
     shift 3
-    local iso="$OUT/$name.iso"
-    [[ -f "$iso" ]] || "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "$cmdline" >/dev/null
+    local iso="$OUT/$name.raw"
+    mkimg "$iso" "$cmdline"
     for accel in $ACCELS; do
         local log="$OUT/$name-$accel.log" status=0
         local data="$OUT/$name-$accel.img"
-        rm -f "$data" "$log.pcap"
-        truncate -s 64m "$data"
-        boot "$log" --iso "$iso" --accel "$accel" --acpi "$acpi" --smp "${SMP:-4}" --headless \
-            --data "$data" --pcap "$log.pcap" --fwd "${FWD:-none}" || status=$?
+        rm -f "$log.pcap"
+        fresh_disk "$iso" "$data"
+        boot "$log" --disk "$data" --accel "$accel" --acpi "$acpi" --smp "${SMP:-4}" --headless \
+            --pcap "$log.pcap" --fwd "${FWD:-none}" || status=$?
         check "$name [$accel]" "$log" "$status" "$@"
     done
 }
@@ -123,14 +151,14 @@ service() {
         shift
     done
     shift
-    local iso="$OUT/$name.iso"
-    [[ -f "$iso" ]] || "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "$cmdline" >/dev/null
+    local iso="$OUT/$name.raw"
+    mkimg "$iso" "$cmdline"
     for accel in $ACCELS; do
         local log="$OUT/$name-$accel.log" data="$OUT/$name-$accel.img" status=0 waited=0
-        rm -f "$log" "$data"
-        truncate -s 64m "$data"
-        "$ROOT/scripts/run-qemu.sh" --serial "$log" --iso "$iso" --accel "$accel" --headless \
-            --data "$data" --fwd "$port:${SERVICE_PORT:-$port}" >"$log.qemu" 2>&1 &
+        rm -f "$log"
+        fresh_disk "$iso" "$data"
+        "$ROOT/scripts/run-qemu.sh" --serial "$log" --disk "$data" --accel "$accel" --headless \
+            --fwd "$port:${SERVICE_PORT:-$port}" >"$log.qemu" 2>&1 &
         local pid=$!
         until clean "$log" 2>/dev/null | grep -Eq -- "$ready"; do
             if ! kill -0 "$pid" 2>/dev/null || (( waited >= TIMEOUT * 10 )); then
@@ -184,16 +212,16 @@ kill_vm() {
 # VM is killed, as by a power cut, after the message was applied): the same
 # message replayed to the new boot is rejected, the device stays refused.
 control_persist() {
-    local iso="$OUT/control-persist.iso" msg="$OUT/control-persist.bin"
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve" >/dev/null
+    local iso="$OUT/control-persist.raw" msg="$OUT/control-persist.bin"
+    mkimg "$iso" "serve"
     local d="$ROOT/deploy/dev"
     local tls=(--port 18883 --ca "$d/ca.pem" --client-cert "$d/services/operator.pem" --client-key "$d/services/operator.key")
     for accel in $ACCELS; do
         local log1="$OUT/control-persist-$accel-1.log" log2="$OUT/control-persist-$accel-2.log"
         local data="$OUT/control-persist-$accel.img" status=0
-        rm -f "$data" "$msg"
-        truncate -s 64m "$data"
-        start_vm "$log1" --iso "$iso" --accel "$accel" --data "$data" --fwd 18883:8883
+        rm -f "$msg" "$log2.client"
+        fresh_disk "$iso" "$data"
+        start_vm "$log1" --disk "$data" --accel "$accel" --fwd 18883:8883
         if wait_log "$log1" "TLS 1.3 listener"; then
             "$CONTROL_TOOL" revoke --cert "$d/devices/device-002.pem" --env dev --key "$d/control.key" \
                 --out "$msg" "${tls[@]}" >>"$log1.client" 2>&1 || status=1
@@ -203,20 +231,22 @@ control_persist() {
         fi
         kill_vm
         if [[ $status -eq 0 ]]; then
-            start_vm "$log2" --iso "$iso" --accel "$accel" --data "$data" --fwd 18883:8883
+            start_vm "$log2" --disk "$data" --accel "$accel" --fwd 18883:8883
             if wait_log "$log2" "TLS 1.3 listener"; then
-                "$CONTROL_TOOL" publish-file "$msg" "${tls[@]}" >>"$log2" 2>&1 || status=1
+                "$CONTROL_TOOL" publish-file "$msg" "${tls[@]}" >>"$log2.client" 2>&1 || status=1
                 wait_log "$log2" "rejected: replay" || status=124
                 if mosquitto_pub -h 127.0.0.1 -p 18883 -V mqttv311 -i device-002 --cafile "$d/ca.pem" \
                     --cert "$d/devices/device-002.pem" --key "$d/devices/device-002.key" \
                     -t devices/device-002/x -m x >/dev/null 2>&1; then
-                    echo "client: revoked device admitted after reboot" >>"$log2"
+                    echo "client: revoked device admitted after reboot" >>"$log2.client"
                 fi
                 sleep 0.5
             else
                 status=124
             fi
             kill_vm
+            # Appended only now: QEMU writes the serial log at its own offset.
+            cat "$log2.client" >>"$log2" 2>/dev/null || true
         fi
         check "control-persist [$accel]" "${log2}" "$status" \
             "db: restored .* 2 revoked serial\(s\), .* control seq [1-9][0-9]*" \
@@ -228,26 +258,27 @@ control_persist() {
 # H7: boots with the RTC before the build time; the date is refused and a
 # device handshake fails for want of a trustworthy clock.
 time_before_build() {
-    local iso="$OUT/time-before-build.iso"
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve" >/dev/null
+    local iso="$OUT/time-before-build.raw"
+    mkimg "$iso" "serve"
     local d="$ROOT/deploy/dev"
     for accel in $ACCELS; do
         local log="$OUT/time-before-build-$accel.log" data="$OUT/time-before-build-$accel.img" status=0
-        rm -f "$data"
-        truncate -s 64m "$data"
-        start_vm "$log" --iso "$iso" --accel "$accel" --data "$data" --fwd 18883:8883 \
+        rm -f "$log.client"
+        fresh_disk "$iso" "$data"
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd 18883:8883 \
             -- -rtc base=2020-01-01T00:00:00
         if wait_log "$log" "TLS 1.3 listener"; then
             if mosquitto_pub -h 127.0.0.1 -p 18883 -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
                 --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" \
                 -t devices/device-001/x -m x >/dev/null 2>&1; then
-                echo "client: handshake ACCEPTED without a trustworthy clock" >>"$log"
+                echo "client: handshake ACCEPTED without a trustworthy clock" >>"$log.client"
             fi
             sleep 0.5
         else
             status=124
         fi
         kill_vm
+        cat "$log.client" >>"$log" 2>/dev/null || true
         check "time-before-build [$accel]" "$log" "$status" \
             "date at boot: unix 15[0-9]+ is before this image was built" \
             "tls: connection refused" "NOT:handshake ACCEPTED" "$NO_FAULT"
@@ -257,15 +288,14 @@ time_before_build() {
 # M11: QEMU is killed while the kernel commits transactions in a loop;
 # the next boot must pass quick_check and hold every committed row.
 db_crash() {
-    local crash="$OUT/db-crash.iso" verify="$OUT/db-verify.iso"
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$crash" --cmdline "smoke test=db-crash" >/dev/null
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$verify" --cmdline "smoke test=db-verify" >/dev/null
+    local crash="$OUT/db-crash.raw" verify="$OUT/db-verify.raw"
+    mkimg "$crash" "smoke test=db-crash"
+    mkimg "$verify" "smoke test=db-verify"
     for accel in $ACCELS; do
         local data="$OUT/db-crash-$accel.img" log1="$OUT/db-crash-$accel.log" log2="$OUT/db-verify-$accel.log"
         local status=0
-        rm -f "$data"
-        truncate -s 64m "$data"
-        start_vm "$log1" --iso "$crash" --accel "$accel" --data "$data" --fwd none
+        fresh_disk "$crash" "$data"
+        start_vm "$log1" --disk "$data" --accel "$accel" --fwd none
         wait_log "$log1" "db-crash: committed [0-9]+" 5 || status=$?
         # Kill at an arbitrary point inside the write stream.
         sleep "0.$((RANDOM % 5))"
@@ -274,7 +304,8 @@ db_crash() {
         last=$(clean "$log1" | grep -Eo 'db-crash: committed [0-9]+' | tail -1 | awk '{print $3}')
         check "db-crash-writer [$accel]" "$log1" "$status" "db-crash: writing from row 1" "db-crash: committed [0-9]+" "$NO_FAULT"
         status=0
-        boot "$log2" --iso "$verify" --accel "$accel" --headless --data "$data" --fwd none || status=$?
+        set_esp "$data" "$verify"
+        boot "$log2" --disk "$data" --accel "$accel" --headless --fwd none || status=$?
         check "db-crash-recovery [$accel]" "$log2" "$status" "storage: data disk opened" \
             "quick_check ok" "db-verify: [0-9]+ rows consistent" "^URMQTT READY$" "NOT:INCONSISTENT" "$NO_FAULT"
         local found
@@ -293,17 +324,16 @@ db_crash() {
 # once at least a million are durable. The next boot must recover every
 # flushed record (contiguous per core) and truncate a torn tail if any.
 log_crash() {
-    local crash="$OUT/log-crash.iso" verify="$OUT/log-verify.iso"
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$crash" --cmdline "smoke test=log-crash" >/dev/null
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$verify" --cmdline "smoke test=log-verify" >/dev/null
+    local crash="$OUT/log-crash.raw" verify="$OUT/log-verify.raw"
+    mkimg "$crash" "smoke test=log-crash"
+    mkimg "$verify" "smoke test=log-verify"
     for accel in $ACCELS; do
         local data="$OUT/log-crash-$accel.img" log1="$OUT/log-crash-$accel.log" log2="$OUT/log-verify-$accel.log"
         local status=0
-        rm -f "$data"
         # 1 GiB sparse: the 8 log partitions hold ~55 MiB each, so a million
         # records from three cores never wrap.
-        truncate -s 1g "$data"
-        start_vm "$log1" --iso "$crash" --accel "$accel" --data "$data" --fwd none
+        fresh_disk "$crash" "$data" 1g
+        start_vm "$log1" --disk "$data" --accel "$accel" --fwd none
         wait_log "$log1" "log-crash: durable (1[0-9]{6}|[2-9][0-9]{6})" || status=$?
         sleep "0.$((RANDOM % 4))"
         kill_vm
@@ -312,7 +342,8 @@ log_crash() {
         check "log-crash-writers [$accel]" "$log1" "$status" "log-crash: core 0 writing" "log-crash: core 1 writing" \
             "log-crash: core 2 writing" "log-crash: durable [0-9]+" "$NO_FAULT"
         status=0
-        boot "$log2" --iso "$verify" --accel "$accel" --headless --data "$data" --fwd none || status=$?
+        set_esp "$data" "$verify"
+        boot "$log2" --disk "$data" --accel "$accel" --headless --fwd none || status=$?
         check "log-crash-recovery [$accel]" "$log2" "$status" \
             "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in [0-9]+ segment\(s\), [0-9]+ torn tail\(s\) truncated" \
             "log-verify: [0-9]+ records, every core's sequence contiguous" "^URMQTT READY$" "NOT:INCONSISTENT" "$NO_FAULT"
@@ -332,18 +363,18 @@ log_crash() {
 # M12: a torn record written on purpose must be truncated on the next boot,
 # keeping every complete record before it.
 log_tear() {
-    local tear="$OUT/log-tear.iso" verify="$OUT/log-verify.iso"
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$tear" --cmdline "smoke test=log-tear" >/dev/null
-    [[ -f "$verify" ]] || "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$verify" --cmdline "smoke test=log-verify" >/dev/null
+    local tear="$OUT/log-tear.raw" verify="$OUT/log-verify.raw"
+    mkimg "$tear" "smoke test=log-tear"
+    mkimg "$verify" "smoke test=log-verify"
     for accel in $ACCELS; do
         local data="$OUT/log-tear-$accel.img" log1="$OUT/log-tear-$accel.log" log2="$OUT/log-tear-verify-$accel.log"
         local status=0
-        rm -f "$data"
-        truncate -s 64m "$data"
-        boot "$log1" --iso "$tear" --accel "$accel" --headless --data "$data" --fwd none || status=$?
+        fresh_disk "$tear" "$data"
+        boot "$log1" --disk "$data" --accel "$accel" --headless --fwd none || status=$?
         check "log-tear-write [$accel]" "$log1" "$status" "log-tear: 10000 records durable, then a torn write" "$NO_FAULT"
         status=0
-        boot "$log2" --iso "$verify" --accel "$accel" --headless --data "$data" --fwd none || status=$?
+        set_esp "$data" "$verify"
+        boot "$log2" --disk "$data" --accel "$accel" --headless --fwd none || status=$?
         check "log-tear-truncated [$accel]" "$log2" "$status" \
             "telemetry: log recovered in [0-9]+ ms: 10500 record\(s\) in [0-9]+ segment\(s\), 1 torn tail\(s\) truncated" \
             "log-verify: 10500 records, every core's sequence contiguous" "^URMQTT READY$" "$NO_FAULT"
@@ -353,15 +384,14 @@ log_tear() {
 # M11: broker state across a restart: retained message and a QoS 1 command
 # queued for an offline persistent session, over mTLS.
 mqtt_persist() {
-    local iso="$OUT/mqtt-persist.iso"
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve" >/dev/null
+    local iso="$OUT/mqtt-persist.raw"
+    mkimg "$iso" "serve"
     for accel in $ACCELS; do
         local data="$OUT/mqtt-persist-$accel.img"
-        rm -f "$data"
-        truncate -s 64m "$data"
+        fresh_disk "$iso" "$data"
         for phase in 1 2; do
             local log="$OUT/mqtt-persist-$accel-$phase.log" status=0
-            start_vm "$log" --iso "$iso" --accel "$accel" --data "$data" --fwd "18883:8883"
+            start_vm "$log" --disk "$data" --accel "$accel" --fwd "18883:8883"
             if wait_log "$log" "TLS 1.3 listener on port 8883"; then
                 python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$ROOT/deploy/dev" --phase "$phase" \
                     >"$log.client" 2>&1 || status=$?
@@ -393,13 +423,12 @@ storm() {
     if [[ ! -x "$loadgen" ]]; then
         (cd "$ROOT" && cargo build --release -q -p urmqtt-loadgen) || return 0
     fi
-    local iso="$OUT/storm.iso"
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve log=info heap_limit_mb=8" >/dev/null
+    local iso="$OUT/storm.raw"
+    mkimg "$iso" "serve log=info heap_limit_mb=8"
     for accel in $ACCELS; do
         local log="$OUT/storm-$accel.log" data="$OUT/storm-$accel.img" status=0
-        rm -f "$data"
-        truncate -s 64m "$data"
-        start_vm "$log" --iso "$iso" --accel "$accel" --data "$data" --fwd "18883:8883"
+        fresh_disk "$iso" "$data"
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "18883:8883"
         if wait_log "$log" "TLS 1.3 listener on port 8883"; then
             (cd "$ROOT" && "$loadgen" storm --port 18883 --clients 3000 --threads 8 --rounds 3 \
                 --retry-s 30 --subscribe 1 --min-connected 500) >"$log.client" 2>&1 || status=$?
@@ -419,12 +448,12 @@ storm() {
 # M16: the dev configuration sends syslog to 10.0.2.2:5514 and statsd to
 # 10.0.2.2:8125, which QEMU user networking delivers to the host.
 observability() {
-    local iso="$OUT/ops.iso"
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve" >/dev/null
+    local iso="$OUT/ops.raw"
+    mkimg "$iso" "serve"
     for accel in $ACCELS; do
         local log="$OUT/ops-$accel.log" data="$OUT/ops-$accel.img" status=0
-        rm -f "$data" "$log.udp"
-        truncate -s 64m "$data"
+        rm -f "$log.udp"
+        fresh_disk "$iso" "$data"
         python3 -I - "$log.udp" 45 <<'PY' &
 import select, socket, sys, time
 out, end = open(sys.argv[1], "w"), time.time() + int(sys.argv[2])
@@ -442,7 +471,7 @@ while time.time() < end:
 PY
         local collector=$!
         sleep 0.5
-        start_vm "$log" --iso "$iso" --accel "$accel" --data "$data" --fwd "18883:8883"
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "18883:8883"
         if wait_log "$log" "TLS 1.3 listener on port 8883"; then
             # Metrics go out every 10 s.
             sleep 22
@@ -461,58 +490,223 @@ PY
     done
 }
 
-# M17: the raw GPT image boots from a virtio-blk disk, as on a KVM host or
-# a cloud server; the kernel must leave that disk alone and use the blank
-# second disk for data.
-raw_disk() {
-    local esp="$OUT/raw-esp.img" raw="$OUT/raw.img"
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$OUT/raw.iso" --cmdline "smoke" --esp-out "$esp" >/dev/null
-    python3 -I "$ROOT/scripts/mkraw.py" "$esp" "$raw" >/dev/null
+# S1 (STORAGE-PLAN §2a): the first boot of the image on a larger disk
+# moves the backup GPT, gives the disk its own GUID and creates the data
+# partition; a second disk attached to the same VM stays byte for byte as
+# it was, and the second boot finds the partition again.
+first_boot() {
+    local img="$OUT/first-boot.raw"
+    mkimg "$img" "smoke"
     for accel in $ACCELS; do
-        local log="$OUT/raw-disk-$accel.log" data="$OUT/raw-disk-$accel.img" boot="$OUT/raw-boot-$accel.img" status=0
-        rm -f "$data"
-        truncate -s 64m "$data"
-        cp "$raw" "$boot"
-        boot "$log" --disk "$boot" --accel "$accel" --headless --data "$data" || status=$?
-        if ! cmp -s "$raw" "$boot"; then
-            echo "BOOT DISK MODIFIED" >>"$log"
-        fi
-        check "raw-disk [$accel]" "$log" "$status" "blk: 00:0[0-9a-f]\.0 skipped: partitioned \(a boot disk\)" \
-            "storage: data disk formatted \(was blank\)" "^URMQTT READY$" "NOT:BOOT DISK MODIFIED" "$NO_FAULT"
+        local disk="$OUT/first-boot-$accel.img" other="$OUT/first-boot-other-$accel.img" status=0
+        local log1="$OUT/first-boot-$accel.log" log2="$OUT/first-boot-again-$accel.log"
+        fresh_disk "$img" "$disk"
+        # The second disk holds data that must survive (random bytes).
+        head -c 16777216 /dev/urandom >"$other"
+        local before
+        before=$(shasum -a 256 "$other" | cut -d' ' -f1)
+        boot "$log1" --disk "$disk" --accel "$accel" --headless --no-net \
+            -- -drive "if=none,id=other0,file=$other,format=raw,cache=none" \
+            -device virtio-blk-pci,drive=other0,romfile= || status=$?
+        [[ $(shasum -a 256 "$other" | cut -d' ' -f1) == "$before" ]] || echo "SECOND DISK MODIFIED" >>"$log1"
+        check "first-boot [$accel]" "$log1" "$status" "boot: from a GPT disk, disk GUID" \
+            "disk: virtio-blk 00:0[0-9a-f]\.0 \(16 MiB\) is not the boot disk, left untouched" \
+            "gpt: backup table moved to the end of the 64 MiB disk" \
+            "gpt: data partition [0-9a-f-]+ at LBA [0-9]+\.\.[0-9]+ \([0-9]+ MiB\), created now, new disk GUID" \
+            "inside the data partition" "storage: data disk formatted \(was blank\)" "^URMQTT READY$" \
+            "NOT:SECOND DISK MODIFIED" "$NO_FAULT"
+        status=0
+        boot "$log2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "first-boot-again [$accel]" "$log2" "$status" "gpt: data partition [0-9a-f-]+ at LBA" \
+            "NOT:created now" "NOT:backup table moved" "storage: data disk opened" "^URMQTT READY$" "$NO_FAULT"
     done
 }
 
-# Both disks behind virtio-scsi, as clouds attach them (Hetzner, Oracle):
-# the raw image boots from LUN 0 and is left alone; LUN 1 becomes the data
-# disk, is formatted and benchmarked, and is opened again on the next boot.
-scsi_disks() {
-    local esp="$OUT/scsi-esp.img" raw="$OUT/scsi.img"
-    for phase in 1 2; do
-        local cmdline="smoke test=db-bench"
-        [[ $phase == 2 ]] && cmdline="smoke"
-        "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$OUT/scsi.iso" --cmdline "$cmdline" --esp-out "$esp" >/dev/null
-        python3 -I "$ROOT/scripts/mkraw.py" "$esp" "$raw-$phase" >/dev/null
+# S1: a power cut at a write of the first boot (injected with
+# test=disk-fault, dev only); the next boot finishes the job. The host test
+# `first_boot_survives_a_crash_at_every_write` covers every write; these
+# cover the kernel path at the backup move, the head clearing, the new
+# backup copy and a torn primary.
+first_boot_crash() {
+    local good="$OUT/first-boot-crash-ok.raw" spec
+    mkimg "$good" "smoke"
+    for spec in stop-after-write=2 stop-after-write=6 stop-after-write=8 tear-write=9:4; do
+        local img="$OUT/first-boot-crash-${spec//[=:]/-}.raw"
+        mkimg "$img" "smoke test=disk-fault:$spec"
+        for accel in $ACCELS; do
+            local disk="$OUT/first-boot-crash-$accel.img" status=0
+            local log1="$OUT/first-boot-crash-${spec//[=:]/-}-$accel.log" log2="$OUT/first-boot-crash-${spec//[=:]/-}-$accel-2.log"
+            fresh_disk "$img" "$disk"
+            boot "$log1" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+            check "first-boot-crash $spec [$accel]" "$log1" "$status" \
+                "disk-fault: power cut injected during the first boot" "NOT:URMQTT READY" "$NO_FAULT"
+            status=0
+            set_esp "$disk" "$good"
+            boot "$log2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+            check "first-boot-crash $spec recovered [$accel]" "$log2" "$status" \
+                "gpt: data partition [0-9a-f-]+ at LBA" "storage: data disk (formatted|opened)" \
+                "^URMQTT READY$" "$NO_FAULT"
+        done
     done
+}
+
+# The boot disk as a virtio-scsi LUN (Hetzner, Oracle), with a second LUN
+# that must stay untouched: formatted and benchmarked, then reopened.
+scsi_boot() {
+    local bench="$OUT/scsi-bench.raw" plain="$OUT/scsi-plain.raw"
+    mkimg "$bench" "smoke test=db-bench"
+    mkimg "$plain" "smoke"
     for accel in $ACCELS; do
-        local data="$OUT/scsi-data-$accel.img"
-        rm -f "$data"
-        truncate -s 64m "$data"
+        local disk="$OUT/scsi-boot-$accel.img" other="$OUT/scsi-other-$accel.img"
+        fresh_disk "$bench" "$disk"
+        head -c 16777216 /dev/urandom >"$other"
+        local before
+        before=$(shasum -a 256 "$other" | cut -d' ' -f1)
         for phase in 1 2; do
-            local log="$OUT/scsi-disks-$accel-$phase.log" boot="$OUT/scsi-boot-$accel.img" status=0
-            cp "$raw-$phase" "$boot"
-            boot "$log" --disk "$boot" --bus scsi --accel "$accel" --headless --data "$data" || status=$?
-            cmp -s "$raw-$phase" "$boot" || echo "BOOT DISK MODIFIED" >>"$log"
+            local log="$OUT/scsi-boot-$accel-$phase.log" status=0
+            [[ $phase == 2 ]] && set_esp "$disk" "$plain"
+            boot "$log" --disk "$disk" --bus scsi --accel "$accel" --headless --no-net \
+                -- -drive "if=none,id=other0,file=$other,format=raw,cache=none" \
+                -device scsi-hd,drive=other0,bus=scsi0.0,scsi-id=1,lun=0 || status=$?
+            [[ $(shasum -a 256 "$other" | cut -d' ' -f1) == "$before" ]] || echo "SECOND DISK MODIFIED" >>"$log"
             if [[ $phase == 1 ]]; then
-                check "scsi-disks-format [$accel]" "$log" "$status" \
-                    "scsi: target 0 lun 0: [0-9]+ MiB, partitioned \(a boot disk\), skipped" \
-                    "blk: data disk is scsi target 1 lun 0" "blk: self-test ok" \
+                check "scsi-boot-format [$accel]" "$log" "$status" \
+                    "scsi: target 0 lun 0: [0-9]+ MiB, the boot disk" \
+                    "scsi: target 1 lun 0: 16 MiB, not the boot disk, left untouched" \
+                    "blk: boot disk is scsi target 0 lun 0" "blk: self-test ok" \
                     "storage: data disk formatted \(was blank\)" "db-bench: .* 5100 rows verified" \
-                    "^URMQTT READY$" "NOT:BOOT DISK MODIFIED" "$NO_FAULT"
+                    "^URMQTT READY$" "NOT:SECOND DISK MODIFIED" "$NO_FAULT"
             else
-                check "scsi-disks-reopen [$accel]" "$log" "$status" "storage: data disk opened" \
-                    "quick_check ok" "^URMQTT READY$" "NOT:BOOT DISK MODIFIED" "$NO_FAULT"
+                check "scsi-boot-reopen [$accel]" "$log" "$status" "storage: data disk opened" \
+                    "quick_check ok" "^URMQTT READY$" "NOT:SECOND DISK MODIFIED" "$NO_FAULT"
             fi
         done
+    done
+}
+
+# The ISO as a CD: read-only media cannot hold a data partition. A dev
+# image runs memory-only and says why; production refuses (the policy is
+# `storage.require_data_disk`, host-tested in config-schema).
+iso_as_cd() {
+    local iso="$OUT/iso-as-cd.iso"
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "smoke" >/dev/null
+    for accel in $ACCELS; do
+        local log="$OUT/iso-as-cd-$accel.log" status=0
+        boot "$log" --iso "$iso" --accel "$accel" --headless --no-net || status=$?
+        check "iso-as-cd [$accel]" "$log" "$status" "boot: from optical media \(CD/ISO\)" \
+            "storage: no data partition: booted from read-only media \(CD/ISO\): write the image to the machine's disk" \
+            "running WITHOUT persistence \(dev configuration\)" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
+# S1: urMQTT's own data partition, damaged, is refused and left exactly as
+# it is: never formatted again (S5 restores it from a backup).
+own_damaged() {
+    local img="$OUT/own-damaged.raw"
+    mkimg "$img" "smoke"
+    for accel in $ACCELS; do
+        local disk="$OUT/own-damaged-$accel.img" log1="$OUT/own-damaged-$accel-1.log"
+        local log2="$OUT/own-damaged-$accel-2.log" status=0
+        fresh_disk "$img" "$disk"
+        boot "$log1" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        local first
+        first=$(clean "$log1" | grep -Eo 'data partition [0-9a-f-]+ at LBA [0-9]+' | awk '{print $NF}')
+        if [[ $status -ne 0 || -z "$first" ]]; then
+            check "own-damaged [$accel]" "$log1" 1 "gpt: data partition"
+            continue
+        fi
+        # Flip one byte inside the superblock's region table.
+        printf '\xff' | dd of="$disk" bs=1 seek=$((first * 512 + 100)) conv=notrunc status=none
+        local before
+        before=$(dd if="$disk" bs=512 skip="$first" count=64 status=none | shasum -a 256)
+        boot "$log2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        [[ $(dd if="$disk" bs=512 skip="$first" count=64 status=none | shasum -a 256) == "$before" ]] \
+            || echo "DAMAGED PARTITION REWRITTEN" >>"$log2"
+        # storage.refuse_on_corruption is on in dev too: the VM stops.
+        check "own-damaged-refused [$accel]" "$log2" "$status" \
+            "storage: data partition is damaged, left as it is: BadChecksum; refusing to serve" \
+            "NOT:storage: data disk formatted" "NOT:DAMAGED PARTITION REWRITTEN" "NOT:URMQTT READY"
+    done
+}
+
+# S1: the offline tool against a disk the broker used. Phase 1 serves
+# devices (retained message, persistent session, queued command, telemetry);
+# QEMU is killed. Then `urmqtt-disk` verifies, exports the database (opened
+# by the host's sqlite3) and the telemetry, and imports an allowlisted
+# device. Phase 2 boots in allowlist mode: the import is in force.
+disk_tool() {
+    local tool="$ROOT/target/release/urmqtt-disk" d="$ROOT/deploy/dev"
+    (cd "$ROOT" && cargo build --release --locked -q -p urmqtt-disk-tool) || tool=""
+    if [[ -z "$tool" ]] || ! command -v sqlite3 >/dev/null || ! command -v mosquitto_pub >/dev/null; then
+        echo "  ✗ disk-tool needs urmqtt-disk, sqlite3 and mosquitto clients"
+        FAILED=$((FAILED + 1))
+        return
+    fi
+    local serve="$OUT/disk-tool.raw" allow="$OUT/disk-tool-allow.raw"
+    mkimg "$serve" "serve"
+    mkimg "$allow" "serve registry=allowlist"
+    for accel in $ACCELS; do
+        local disk="$OUT/disk-tool-$accel.img" log1="$OUT/disk-tool-$accel-1.log"
+        local log2="$OUT/disk-tool-$accel-2.log" out="$OUT/disk-tool-$accel.out" status=0
+        fresh_disk "$serve" "$disk"
+        start_vm "$log1" --disk "$disk" --accel "$accel" --fwd 18883:8883
+        # Client output goes to its own file: QEMU writes the serial log at
+        # its own offset, so appending there while it runs loses lines.
+        rm -f "$log1.client" "$log2.client"
+        if wait_log "$log1" "TLS 1.3 listener on port 8883"; then
+            python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$d" --phase 1 >>"$log1.client" 2>&1 || status=1
+            for v in 11 22 33; do
+                mosquitto_pub -h 127.0.0.1 -p 18883 -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
+                    --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" -q 1 \
+                    -t devices/device-001/telemetry/disk-tool -m "v$v" >>"$log1.client" 2>&1 || status=1
+            done
+            sleep 1
+        else
+            status=124
+        fi
+        kill_vm
+        cat "$log1.client" >>"$log1" 2>/dev/null || true
+        local before
+        before=$(shasum -a 256 "$disk" | cut -d' ' -f1)
+        {
+            "$tool" info "$disk" && "$tool" verify "$disk" && echo "tool: verify exit 0"
+            "$tool" export-db "$disk" "$out.sqlite" &&
+                echo "tool: sqlite3 $(sqlite3 "$out.sqlite" "PRAGMA integrity_check; SELECT count(*) FROM retained; SELECT count(*) FROM sessions;" | tr '\n' ' ')"
+            "$tool" export-telemetry "$disk" --format jsonl --topic 'devices/+/telemetry/disk-tool'
+            [[ $(shasum -a 256 "$disk" | cut -d' ' -f1) == "$before" ]] && echo "tool: read-only commands left the disk unchanged"
+            printf 'device-002\n' >"$out.ids"
+            "$tool" import-devices "$disk" "$out.ids" && echo "tool: import without --write refused"
+            "$tool" import-devices "$disk" "$out.ids" --allowlist --write
+        } >>"$log1" 2>&1
+        check "disk-tool-offline [$accel]" "$log1" "$status" "client: persist-phase1 ok" \
+            "urMQTT data \"urMQTT data\" LBA" "verify: ok" "tool: verify exit 0" \
+            "tool: sqlite3 ok 1 1 " \
+            '"topic":"devices/device-001/telemetry/disk-tool","payload":"v11"' \
+            '"payload":"v22"' '"payload":"v33"' "export-telemetry: 3 record\(s\)" \
+            "tool: read-only commands left the disk unchanged" "NOT:tool: import without --write refused" \
+            "import-devices: 1 device\(s\) imported and allowlisted" "$NO_FAULT"
+        status=0
+        set_esp "$disk" "$allow"
+        start_vm "$log2" --disk "$disk" --accel "$accel" --fwd 18883:8883
+        if wait_log "$log2" "TLS 1.3 listener on port 8883"; then
+            for id in device-002 device-003; do
+                if mosquitto_pub -h 127.0.0.1 -p 18883 -V mqttv311 -i "$id" --cafile "$d/ca.pem" \
+                    --cert "$d/devices/$id.pem" --key "$d/devices/$id.key" -q 1 \
+                    -t "devices/$id/x" -m x >/dev/null 2>&1; then
+                    echo "client: $id admitted" >>"$log2.client"
+                else
+                    echo "client: $id refused" >>"$log2.client"
+                fi
+            done
+            sleep 0.5
+        else
+            status=124
+        fi
+        kill_vm
+        cat "$log2.client" >>"$log2" 2>/dev/null || true
+        check "disk-tool-import-in-force [$accel]" "$log2" "$status" \
+            "registry allowlist, 1 allowlisted identity" "client: device-002 admitted" \
+            "client: device-003 refused" "$NO_FAULT"
     done
 }
 
@@ -521,14 +715,13 @@ scsi_disks() {
 # BTI; HVF's host CPU has no RNDR either). The jitter fallback must pass its
 # health tests, and every CPU must come online.
 no_hw_rng() {
-    local iso="$OUT/no-rng.iso"
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "smoke" >/dev/null
+    local iso="$OUT/no-rng.raw"
+    mkimg "$iso" "smoke"
     for accel in $ACCELS; do
         local log="$OUT/no-rng-$accel.log" data="$OUT/no-rng-$accel.img" status=0 cpu=()
         [[ $accel == tcg ]] && cpu=(--cpu neoverse-n1)
-        rm -f "$data"
-        truncate -s 64m "$data"
-        boot "$log" --iso "$iso" --accel "$accel" ${cpu[@]+"${cpu[@]}"} --no-rng --headless --data "$data" || status=$?
+        fresh_disk "$iso" "$data"
+        boot "$log" --disk "$data" --accel "$accel" ${cpu[@]+"${cpu[@]}"} --no-rng --headless || status=$?
         check "no-hw-rng [$accel]" "$log" "$status" "NOT:entropy: [0-9]+ bytes from" \
             "entropy: no hardware source \(virtio-rng, RNDR\): CPU jitter fallback .* health tests passed" \
             "entropy: ChaCha20 CSPRNG seeded" "smp: 4/4 cpus online" "^URMQTT READY$" "$NO_FAULT"
@@ -543,13 +736,12 @@ gicv2() {
         echo "  - gicv2 skipped (needs tcg in --accels)"
         return
     fi
-    local iso="$OUT/gicv2.iso" acpi
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "smoke" >/dev/null
+    local iso="$OUT/gicv2.raw" acpi
+    mkimg "$iso" "smoke"
     for acpi in on off; do
         local log="$OUT/gicv2-$acpi.log" data="$OUT/gicv2-$acpi.img" status=0
-        rm -f "$data"
-        truncate -s 64m "$data"
-        boot "$log" --iso "$iso" --accel tcg --gic 2 --acpi "$acpi" --headless --data "$data" || status=$?
+        fresh_disk "$iso" "$data"
+        boot "$log" --disk "$data" --accel tcg --gic 2 --acpi "$acpi" --headless || status=$?
         check "gicv2 boot acpi=$acpi [tcg]" "$log" "$status" \
             "platform summary: .* gicv2 gicd=0x8000000 gicc=0x8010000 msi=v2m@0x8020000" \
             "gic: v2 at gicd=0x8000000 gicc=0x8010000, [0-9]+ lines, msi via GICv2m frame" \
@@ -558,12 +750,11 @@ gicv2() {
             "^URMQTT READY$" "$NO_FAULT"
     done
     command -v mosquitto_pub >/dev/null || return 0
-    iso="$OUT/gicv2-serve.iso"
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve" >/dev/null
+    iso="$OUT/gicv2-serve.raw"
+    mkimg "$iso" "serve"
     local log="$OUT/gicv2-mqtt-tls.log" data="$OUT/gicv2-mqtt-tls.img" status=0
-    rm -f "$data"
-    truncate -s 64m "$data"
-    start_vm "$log" --iso "$iso" --accel tcg --gic 2 --data "$data" --fwd "18883:8883"
+    fresh_disk "$iso" "$data"
+    start_vm "$log" --disk "$data" --accel tcg --gic 2 --fwd "18883:8883"
     if wait_log "$log" "TLS 1.3 listener on port 8883"; then
         python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" 18883 >"$log.client" 2>&1 || status=$?
     else
@@ -577,7 +768,7 @@ gicv2() {
 }
 
 [[ -f "$KERNEL" ]] || { echo "error: $KERNEL not found (make build)" >&2; exit 1; }
-rm -f "$OUT"/*.iso
+rm -f "$OUT"/*.iso "$OUT"/*.raw "$OUT"/*.raw.esp
 echo "smoke: accelerators: $ACCELS"
 
 BOOT_LINE='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$'
@@ -740,8 +931,12 @@ if command -v mosquitto_pub >/dev/null; then
 fi
 storm
 observability
-raw_disk
-scsi_disks
+first_boot
+first_boot_crash
+scsi_boot
+iso_as_cd
+own_damaged
+disk_tool
 no_hw_rng
 gicv2
 

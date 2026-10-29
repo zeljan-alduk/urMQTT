@@ -8,10 +8,15 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use alloc::boxed::Box;
+
 use urmqtt_arch::{msi, time};
 use urmqtt_log::{info, warn};
 use urmqtt_pci::{self as pci, Bar, Bdf, ConfigSpace};
 use urmqtt_platform::{Pcie, PlatformInfo};
+use urmqtt_store::fault::{FaultDevice, FaultSpec};
+use urmqtt_store::gpt::{self, DataPartition, Guid};
+use urmqtt_store::{BlockDevice, IoError};
 use urmqtt_sync::sync::SpinLock;
 use urmqtt_tls::rng::{Csprng, EntropyPool, Source};
 use urmqtt_virtio::blk::VirtioBlk;
@@ -130,12 +135,71 @@ impl DataDisk {
     }
 }
 
+/// The boot disk as a block device: the driver, and whether its flushes
+/// are real (`storage.require_flush = false` allows none, dev only).
+pub struct KernelBlk {
+    pub blk: DataDisk,
+    pub flush: bool,
+}
+
+// SAFETY: the wrapper owns the device exclusively; it is used by one core
+// at a time (the boot CPU at boot, then the DB core).
+unsafe impl Send for KernelBlk {}
+
+impl BlockDevice for KernelBlk {
+    fn sectors(&self) -> u64 {
+        self.blk.capacity_sectors()
+    }
+
+    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), IoError> {
+        self.blk.read(lba, buf).map_err(|_| IoError::Device)
+    }
+
+    fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
+        self.blk.write(lba, buf).map_err(|_| IoError::Device)
+    }
+
+    fn flush(&mut self) -> Result<(), IoError> {
+        if !self.flush {
+            // Only reachable with storage.require_flush = false (dev).
+            return Ok(());
+        }
+        self.blk.flush().map_err(|_| IoError::Device)
+    }
+
+    fn max_io(&self) -> usize {
+        self.blk.max_io()
+    }
+}
+
+/// Where Limine loaded the kernel from (STORAGE-PLAN §2a).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BootMedium {
+    /// A CD or DVD (an ISO): read-only, no data partition possible.
+    pub optical: bool,
+    /// The GPT disk GUID of the boot disk, if it has a GPT.
+    pub disk_guid: Option<Guid>,
+}
+
+/// The boot disk with its data partition, ready for the store.
+pub struct BootDisk {
+    pub dev: Box<dyn BlockDevice>,
+    pub partition: DataPartition,
+    /// Fault injection is active (dev `test=disk-fault:`).
+    pub faulty: bool,
+}
+
 /// Initialised devices, kept for later milestones (network stack, storage).
 pub struct Devices {
     pub net: Option<VirtioNet>,
+    /// The disk Limine booted from (the only disk ever written).
     pub blk: Option<DataDisk>,
     pub rng: Option<VirtioRng>,
     pub blk_msix_spi: Option<u32>,
+    /// Disks driven but left alone (not the boot disk).
+    pub other_disks: u32,
+    /// The boot disk after [`prepare_boot_disk`].
+    pub boot: Option<BootDisk>,
 }
 
 pub static DEVICES: SpinLock<Devices> = SpinLock::new(Devices {
@@ -143,7 +207,34 @@ pub static DEVICES: SpinLock<Devices> = SpinLock::new(Devices {
     blk: None,
     rng: None,
     blk_msix_spi: None,
+    other_disks: 0,
+    boot: None,
 });
+
+static BOOT_MEDIUM: SpinLock<BootMedium> = SpinLock::new(BootMedium {
+    optical: false,
+    disk_guid: None,
+});
+
+/// Records where the kernel was loaded from (before [`probe`]).
+pub fn set_boot_medium(m: BootMedium) {
+    *BOOT_MEDIUM.lock() = m;
+}
+
+pub fn boot_medium() -> BootMedium {
+    *BOOT_MEDIUM.lock()
+}
+
+/// The disk GUID of a disk whose sectors 1..=33 are `head`.
+fn guid_of(head: &[u8], sectors: u64) -> Option<Guid> {
+    urmqtt_store::gpt::primary_guid(head, sectors)
+}
+
+/// Whether a disk with GPT GUID `g` is the boot disk.
+fn is_boot_disk(g: Option<Guid>) -> bool {
+    let m = boot_medium();
+    !m.optical && g.is_some() && g == m.disk_guid
+}
 
 /// Network controllers found without a driver: (vendor, device).
 pub static OTHER_NICS: SpinLock<alloc::vec::Vec<(u16, u16)>> =
@@ -248,6 +339,8 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
         blk: None,
         rng: None,
         blk_msix_spi: None,
+        other_disks: 0,
+        boot: None,
     };
 
     if let Some(pcie) = platform.pcie {
@@ -364,22 +457,28 @@ fn probe_pci(
             DeviceType::Entropy if devs.rng.is_none() => {
                 devs.rng = Some(VirtioRng::new(transport(&ecam, f.bdf)?, env)?);
             }
-            DeviceType::Block if devs.blk.is_none() => {
+            DeviceType::Block => {
                 let spi = v2m.as_mut().and_then(|v| setup_msix(&mut ecam, f.bdf, v));
                 let t = transport(&ecam, f.bdf)?;
                 let mut blk = VirtioBlk::new_with_msix(t, env, spi.map(|_| 0))?;
-                // A partitioned disk is a boot disk (the raw image, M17),
-                // never the data disk: the self-test would write its last
-                // sectors (the backup GPT) and storage would refuse it.
-                let mut head = [0u8; 1024];
-                if blk.capacity_sectors >= 2
-                    && blk.read(env, 0, &mut head).is_ok()
-                    && is_partitioned(&head)
-                {
+                // Only the disk Limine booted from is used (single-disk
+                // model, STORAGE-PLAN §2a); every other disk is only read
+                // here, to compare its GPT disk GUID, and never written.
+                let mut head = alloc::vec![0u8; (gpt::HEAD_SECTORS * 512) as usize];
+                let g = if blk.capacity_sectors > gpt::HEAD_SECTORS {
+                    blk.read(env, 1, &mut head)
+                        .ok()
+                        .and(guid_of(&head, blk.capacity_sectors))
+                } else {
+                    None
+                };
+                if devs.blk.is_some() || !is_boot_disk(g) {
                     info!(
-                        "blk: {} skipped: partitioned (a boot disk), not a data disk",
-                        f.bdf
+                        "disk: virtio-blk {} ({} MiB) is not the boot disk, left untouched",
+                        f.bdf,
+                        (blk.capacity_sectors * 512) >> 20
                     );
+                    devs.other_disks += 1;
                     continue;
                 }
                 if let Some(spi) = spi {
@@ -387,7 +486,8 @@ fn probe_pci(
                     irq::enable_spi(spi, 0);
                 }
                 info!(
-                    "blk: {} MiB, block size {}, flush={}, read-only={}, msi-x={}",
+                    "blk: boot disk is virtio-blk {}: {} MiB, block size {}, flush={}, read-only={}, msi-x={}",
+                    f.bdf,
                     (blk.capacity_sectors * 512) >> 20,
                     blk.block_size,
                     blk.has_flush,
@@ -397,34 +497,41 @@ fn probe_pci(
                 devs.blk_msix_spi = spi;
                 devs.blk = Some(DataDisk::Blk(blk));
             }
-            DeviceType::Scsi if devs.blk.is_none() => {
+            DeviceType::Scsi => {
                 let mut hba = VirtioScsi::new(transport(&ecam, f.bdf)?, env)?;
                 let (disks, n) = hba.scan(env);
                 info!("scsi: {} {n} disk(s) with 512-byte blocks", f.bdf);
                 let mut chosen = None;
                 for d in disks.iter().take(n).flatten() {
-                    let mut head = [0u8; 1024];
-                    let partitioned = d.sectors >= 2
-                        && hba.read(env, *d, 0, &mut head).is_ok()
-                        && is_partitioned(&head);
+                    let mut head = alloc::vec![0u8; (gpt::HEAD_SECTORS * 512) as usize];
+                    let g = if d.sectors > gpt::HEAD_SECTORS {
+                        hba.read(env, *d, 1, &mut head)
+                            .ok()
+                            .and(guid_of(&head, d.sectors))
+                    } else {
+                        None
+                    };
+                    let boot = devs.blk.is_none() && chosen.is_none() && is_boot_disk(g);
                     info!(
                         "scsi: target {} lun {}: {} MiB{}",
                         d.target,
                         d.lun,
                         (d.sectors * 512) >> 20,
-                        if partitioned {
-                            ", partitioned (a boot disk), skipped"
+                        if boot {
+                            ", the boot disk"
                         } else {
-                            ""
+                            ", not the boot disk, left untouched"
                         }
                     );
-                    if !partitioned && chosen.is_none() {
+                    if boot {
                         chosen = Some(*d);
+                    } else {
+                        devs.other_disks += 1;
                     }
                 }
                 if let Some(d) = chosen {
                     info!(
-                        "blk: data disk is scsi target {} lun {} ({} MiB, polled)",
+                        "blk: boot disk is scsi target {} lun {} ({} MiB, polled)",
                         d.target,
                         d.lun,
                         (d.sectors * 512) >> 20
@@ -453,46 +560,139 @@ fn probe_pci(
     Ok(())
 }
 
-/// Sectors at the end of the data disk reserved for the self-test
+/// Why the boot disk cannot hold a data partition, if it cannot (for the
+/// storage refusal message).
+pub fn no_boot_disk_reason() -> &'static str {
+    let m = boot_medium();
+    if m.optical {
+        "booted from read-only media (CD/ISO): write the image to the machine's disk (docs/DEPLOY.md)"
+    } else if m.disk_guid.is_none() {
+        "the bootloader did not report a GPT boot disk"
+    } else {
+        "the boot disk is not among the disks this kernel drives"
+    }
+}
+
+/// Brings the boot disk to its single-disk form (STORAGE-PLAN §2a): the
+/// GPT first-boot steps and the data partition. Runs before the self-test
+/// and the store. `fault` (dev `test=disk-fault:`) wraps the disk so a
+/// power cut can be injected at any write; when it fires, the VM powers
+/// off as if the power went.
+pub fn prepare_boot_disk(fault: Option<FaultSpec>) -> Result<(), &'static str> {
+    let mut devs = DEVICES.lock();
+    let Some(blk) = devs.blk.take() else {
+        return Ok(());
+    };
+    let cfg = &urmqtt_config::CONFIG.storage;
+    if !blk.has_flush() {
+        if cfg.require_flush {
+            return Err("the boot disk lacks VIRTIO_BLK_F_FLUSH (storage.require_flush)");
+        }
+        warn!("storage: boot disk lacks VIRTIO_BLK_F_FLUSH: writes are NOT durable (dev only)");
+    }
+    if blk.read_only() {
+        warn!("storage: the boot disk is read-only: no data partition");
+        return Ok(());
+    }
+    let flush = blk.has_flush();
+    let raw: Box<dyn BlockDevice> = Box::new(KernelBlk { blk, flush });
+    let mut dev: Box<dyn BlockDevice> = match fault {
+        Some(spec) => {
+            warn!("disk-fault: injecting {spec:?} (dev test)");
+            Box::new(FaultDevice::new(raw, spec))
+        }
+        None => raw,
+    };
+    let random = || {
+        let mut b = [0u8; 16];
+        if let Some(r) = RNG.lock().as_mut() {
+            r.fill(&mut b);
+        }
+        b
+    };
+    let total = dev.sectors();
+    match gpt::prepare(dev.as_mut(), random) {
+        Ok((part, steps)) => {
+            if steps.repaired_primary {
+                warn!("gpt: primary table was damaged, restored from the backup");
+            }
+            if steps.moved_backup {
+                info!(
+                    "gpt: backup table moved to the end of the {} MiB disk",
+                    (total * 512) >> 20
+                );
+            }
+            let guid = gpt::disk_guid(dev.as_mut()).ok().flatten();
+            info!(
+                "gpt: data partition {} at LBA {}..{} ({} MiB){}",
+                part.unique_guid,
+                part.first_lba,
+                part.last_lba,
+                (part.sectors() * 512) >> 20,
+                match (steps.created_partition, guid) {
+                    (true, Some(g)) => alloc::format!(", created now, new disk GUID {g}"),
+                    _ => alloc::string::String::new(),
+                }
+            );
+            devs.boot = Some(BootDisk {
+                dev,
+                partition: part,
+                faulty: fault.is_some(),
+            });
+            Ok(())
+        }
+        Err(e) if fault.is_some() => {
+            warn!("disk-fault: power cut injected during the first boot ({e:?}), powering off");
+            crate::power::off()
+        }
+        Err(gpt::GptError::NoGpt) => Err("the boot disk has no valid GPT"),
+        Err(gpt::GptError::TooSmall) => Err(
+            "the boot disk has no room for a data partition (at least 16 MiB after the EFI partition)",
+        ),
+        Err(gpt::GptError::Shrunk) => Err("the boot disk is smaller than its partition table"),
+        Err(gpt::GptError::TableFull) => Err("the boot disk's partition table is full"),
+        Err(gpt::GptError::Inconsistent) => Err("the boot disk's partition table is inconsistent"),
+        Err(gpt::GptError::Io(_)) => Err("the boot disk failed during the first-boot steps"),
+    }
+}
+
+/// Sectors at the end of the data partition reserved for the self-test
 /// (the M11 disk layout keeps them out of every region).
 pub const BLK_SCRATCH_SECTORS: u64 = 8;
 
-/// Writes a random pattern to the scratch sectors, flushes, reads it back.
-/// An MBR boot signature or a GPT header in the first two sectors. Our
-/// own data disks start with the urMQTT superblock (no 0x55AA at 510) or
-/// are blank.
-fn is_partitioned(head: &[u8; 1024]) -> bool {
-    if head.get(..8) == Some(&urmqtt_store::layout::MAGIC[..]) {
-        return false;
-    }
-    head.get(510..512) == Some(&[0x55, 0xaa][..]) || head.get(512..520) == Some(&b"EFI PART"[..])
-}
-
+/// Writes a random pattern to the scratch sectors at the end of the data
+/// partition, flushes, reads it back. Nothing outside the partition is
+/// ever written.
 pub fn blk_selftest() -> Result<(), &'static str> {
     let mut devs = DEVICES.lock();
     let msix = devs.blk_msix_spi.is_some();
-    let Some(blk) = devs.blk.as_mut() else {
-        warn!("blk: no data disk attached, self-test skipped");
+    let Some(boot) = devs.boot.as_mut() else {
+        warn!("blk: no data partition, self-test skipped");
         return Ok(());
     };
-    if blk.capacity_sectors() < BLK_SCRATCH_SECTORS * 2 {
-        return Err("data disk too small");
+    let part = boot.partition;
+    if part.sectors() < BLK_SCRATCH_SECTORS * 2 {
+        return Err("data partition too small");
     }
-    let sector = blk.capacity_sectors() - BLK_SCRATCH_SECTORS;
+    let sector = part.last_lba + 1 - BLK_SCRATCH_SECTORS;
     let mut pattern = [0u8; 4096];
     RNG.lock().as_mut().ok_or("no CSPRNG")?.fill(&mut pattern);
     let irqs_before = BLK_IRQS.load(Ordering::Relaxed);
-    blk.write(sector, &pattern)
+    boot.dev
+        .write(sector, &pattern)
         .map_err(|_| "blk write failed")?;
-    blk.flush()
+    boot.dev
+        .flush()
         .map_err(|_| "blk flush failed (VIRTIO_BLK_F_FLUSH missing?)")?;
     let mut back = [0u8; 4096];
-    blk.read(sector, &mut back).map_err(|_| "blk read failed")?;
+    boot.dev
+        .read(sector, &mut back)
+        .map_err(|_| "blk read failed")?;
     if back != pattern {
         return Err("blk read-back mismatch");
     }
     info!(
-        "blk: self-test ok (4 KiB random pattern written, flushed, read back at sector {sector})"
+        "blk: self-test ok (4 KiB random pattern written, flushed, read back at sector {sector}, inside the data partition)"
     );
     if msix {
         let irqs = BLK_IRQS.load(Ordering::Relaxed) - irqs_before;
@@ -500,10 +700,8 @@ pub fn blk_selftest() -> Result<(), &'static str> {
         if irqs == 0 {
             return Err("no MSI-X interrupt arrived for blk completions");
         }
-    } else if matches!(blk, DataDisk::Scsi(_)) {
-        info!("msi-x: data disk on virtio-scsi, polled");
     } else {
-        info!("msi-x: not available on this machine (ITS support arrives in M13), blk polled");
+        info!("msi-x: boot disk polled (virtio-scsi, or no MSI-X frame)");
     }
     Ok(())
 }

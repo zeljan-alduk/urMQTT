@@ -97,14 +97,28 @@ zeljan-alduk/urMQTT`), and a minisign signature when the repository secret
 | Firmware | UEFI (AAVMF/OVMF for aarch64), ACPI or device tree |
 | Interrupts | GICv3, or GICv2 (at most 8 vCPUs; what KVM offers on a GIC-400 host such as the Raspberry Pi); MSI-X through GICv2m frames when present (QEMU `virt`), polling otherwise |
 | NIC | one virtio-net (PCI); DHCP unless `network.mode = "static"` |
-| Data disk | one virtio-blk disk or virtio-scsi LUN (PCI), 512-byte blocks, blank on first boot, ≥ 64 MiB; with `storage.require_data_disk = true` the broker refuses to serve without it |
+| Disk | **one** virtio-blk disk or virtio-scsi LUN (PCI), 512-byte blocks: the raw image written to it, the disk at least 16 MiB larger than the image (8 GiB or more in production, STORAGE-PLAN sizing); with `storage.require_data_disk = true` the broker refuses to serve without its data partition |
 | Entropy | virtio-rng, or `RNDR` on the CPU; otherwise health-tested CPU jitter (`entropy.fallback`), else no boot |
-| Boot medium | the ISO (virtio-scsi CD) or the raw image (virtio-blk or virtio-scsi disk) |
+| Boot medium | the raw image on the VM's disk; the ISO only for trying it out (a CD is read-only: no data partition, so production refuses to serve) |
 
-The kernel uses the first disk (virtio-blk, or a virtio-scsi LUN) that is not
-partitioned as its data disk (blank: formatted; urMQTT: opened; anything else: refused). A partitioned disk (MBR or GPT, such as the raw boot image) is never touched:
-the `raw-disk` smoke scenario boots that way and checks that the boot disk is
-byte-identical afterwards.
+**Single-disk model (S1, STORAGE-PLAN §2a).** The disk the VM boots from is
+the only one urMQTT writes:
+- It finds that disk by the GPT disk GUID the bootloader reports.
+- On the first boot it:
+  - moves the backup GPT to the end of the larger disk;
+  - gives the disk its own GUID (every copy of an image starts with the same one);
+  - creates the urMQTT data partition (type `58D3F720-BDF5-4DB7-99EC-DE26C8B8850F`) over the free space and formats it.
+
+  Every step survives a power cut.
+- Later boots open the partition again. A damaged data partition is refused
+  and left exactly as it is, never formatted again.
+- Any other attached disk is only read once (its GPT GUID compared) and never
+  written (smoke `first-boot`, `scsi-boot`). Do not attach a separate data
+  disk: it would not be used.
+
+Inspect a stopped VM's disk with `urmqtt-disk info|verify DISK`
+(`tools/disk`); replace the kernel and keep the data with
+`urmqtt-disk update-boot DISK --esp ESP --write`.
 
 Only TCP 8883 is served. Allow it inbound. Allow UDP from the VM to your syslog
 and statsd collectors (`observability.*`) if configured, plus DHCP. Nothing else
@@ -112,15 +126,15 @@ is needed.
 
 ## 5. Generic KVM / Proxmox (aarch64 host)
 
-**libvirt / virt-install** (the raw image as the boot disk, a separate data disk):
+**libvirt / virt-install** (the raw image on the VM's only disk, grown to its
+final size; the first boot creates the data partition):
 
 ```bash
-sudo cp build/dist/urmqtt-prod-*.img /var/lib/libvirt/images/urmqtt-boot.img
-sudo qemu-img create -f raw /var/lib/libvirt/images/urmqtt-data.img 8G
+sudo cp build/dist/urmqtt-prod-*.img /var/lib/libvirt/images/urmqtt.img
+sudo truncate -s 8G /var/lib/libvirt/images/urmqtt.img
 virt-install --name urmqtt --arch aarch64 --machine virt --boot uefi \
   --cpu host-passthrough --vcpus 4 --memory 2048 \
-  --disk path=/var/lib/libvirt/images/urmqtt-boot.img,bus=virtio,format=raw \
-  --disk path=/var/lib/libvirt/images/urmqtt-data.img,bus=virtio,format=raw,cache=none \
+  --disk path=/var/lib/libvirt/images/urmqtt.img,bus=virtio,format=raw,cache=none \
   --network network=default,model=virtio \
   --rng /dev/urandom --graphics none --console pty,target_type=serial \
   --noautoconsole
@@ -132,25 +146,27 @@ upstream Proxmox):
 
 1. Create a VM: BIOS `OVMF (UEFI)`, machine `virt`, no EFI disk needed, SCSI
    controller left at its default, CPU type `host`, 2+ cores.
-2. Import the raw image as the boot disk:
-   `qm importdisk <vmid> urmqtt-prod-<version>.img <storage>`, then attach it as
-   `virtio0` and make it first in the boot order.
-3. Add a second disk as `virtio1` (blank, ≥ 64 MiB, `cache=none`), a `virtio`
-   network device and a VirtIO RNG (`/dev/urandom`).
+2. Import the raw image as the VM's disk:
+   `qm importdisk <vmid> urmqtt-prod-<version>.img <storage>`. Attach it as
+   `virtio0` (`cache=none`), grow it (`qm resize <vmid> virtio0 8G`) and make it
+   first in the boot order.
+3. Add a `virtio` network device and a VirtIO RNG (`/dev/urandom`). No second
+   disk: the data lives in a partition of `virtio0`.
 4. Add a serial port (`serial0: socket`) to read the log with `qm terminal <vmid>`.
 
-To use the ISO instead, attach it as a CD-ROM and boot from it, with the data
-disk on virtio-blk as above.
-
-Update by replacing the boot disk (or ISO) with a new image and rebooting. The
-data disk carries over: SQLite migrations are append-only, and the telemetry log
-format is versioned.
+**Updating** replaces only the kernel and keeps the data partition. With the
+VM stopped, run `urmqtt-disk update-boot <disk> --esp <the new image's ESP>
+--write` on the disk image or volume, or copy MiB 1 to 9 of the new raw image
+(its EFI system partition) over the same bytes of the disk:
+`dd if=new.img of=<disk> bs=1M skip=1 seek=1 count=8 conv=notrunc`. The
+ISO's self-installer (S1b) will do the same from a boot menu.
 
 ## 6. Hetzner Cloud CAX and Oracle Cloud A1 (Ampere Altra)
 
 Both are aarch64 KVM clouds that attach disks through virtio-scsi; urMQTT drives
-virtio-scsi disks as well as virtio-blk (the `scsi-disks` smoke scenario boots
-the raw image from SCSI LUN 0 and uses LUN 1 as the data disk). Neither has been
+virtio-scsi disks as well as virtio-blk (the `scsi-boot` smoke scenario boots
+the raw image from a SCSI LUN, keeps its data there, and leaves a second LUN
+untouched). Neither has been
 tried on the real service from here. Check two things before relying on one,
 from a Linux rescue system or any Linux VM of the same shape:
 
@@ -166,19 +182,19 @@ from a Linux rescue system or any Linux VM of the same shape:
 ### Hetzner Cloud CAX
 
 Hetzner does not import custom images, and ISOs are mounted only on request.
-Write the raw image onto the server's disk from the rescue system, and attach a
-Volume as the data disk:
+Write the raw image onto the server's disk from the rescue system. The rest
+of that disk becomes the data partition on the first boot:
 
 ```bash
-# 1. Create a CAX server, attach a (blank) Volume, enable the rescue system, reboot into it.
+# 1. Create a CAX server, enable the rescue system, reboot into it.
 scp build/dist/urmqtt-prod-<version>.img root@<server-ip>:/tmp/
 # 2. In the rescue system (the server disk is usually /dev/sda; check with lsblk):
 dd if=/tmp/urmqtt-prod-<version>.img of=/dev/sda bs=1M conv=fsync
 # 3. Leave rescue mode and reboot. The web console shows the serial log.
 ```
 
-Do not format the Volume: urMQTT formats a blank disk itself and never touches
-the partitioned boot disk. Open TCP 8883 in the Hetzner firewall.
+The server's own disk (40 GB and up) holds both the image and the data. A
+Volume is not used. Open TCP 8883 in the Hetzner firewall.
 
 ### Oracle Cloud Always Free (VM.Standard.A1.Flex)
 
@@ -194,8 +210,9 @@ oci compute image import from-object --compartment-id <ocid> --namespace <ns> \
 # Add VM.Standard.A1.Flex to the image's compatible shapes (console: Edit details).
 ```
 
-Then launch an A1.Flex instance from the image, attach a blank paravirtualized
-block volume as the data disk, and allow TCP 8883 in the subnet's security list.
+Then launch an A1.Flex instance from the image with a boot volume of the size
+you want (the data partition fills it), and allow TCP 8883 in the subnet's
+security list.
 The serial console (`oci compute instance-console-connection`) shows the log.
 
 ## 7. Raspberry Pi 4/5 and other aarch64 Linux boards (KVM)
@@ -213,16 +230,17 @@ or Ubuntu (`ls /dev/kvm` must show the device), wired Ethernet.
 # On the Pi, in a checkout of this repository, with your prod image (make dist ENV=prod)
 # and its SHA256SUMS(.minisig) copied over (scp); the image holds the server key:
 minisign -Vm SHA256SUMS -p minisign.pub && sha256sum -c SHA256SUMS --ignore-missing
-sudo scripts/kvm-host/install.sh urmqtt-prod-<version>.img     # --data-size 8G --cpus 4 --mem 2G
+sudo scripts/kvm-host/install.sh urmqtt-prod-<version>.img     # --disk-size 8G --cpus 4 --mem 2G
 journalctl -u urmqtt -f          # the serial log: boot report, DHCP lease, listener
 ```
 
 `install.sh` installs QEMU and the UEFI firmware (`qemu-system-arm`,
-`qemu-efi-aarch64`), copies the image to `/var/lib/urmqtt/boot.img`, creates a
-blank sparse data disk once (`data.img`, never overwritten), writes
-`/etc/urmqtt/vm.conf` and enables `urmqtt.service`. The service runs
-`scripts/kvm-host/urmqtt-vm.sh`: `virt,gic-version=host` with KVM, virtio-rng,
-virtio-blk boot and data disks, virtio-net. `urmqtt-vm.sh --dry-run` prints the
+`qemu-efi-aarch64`). It copies the image onto the VM's only disk,
+`/var/lib/urmqtt/disk.img`, sparse at `--disk-size`, whose first boot creates
+the data partition. It writes `/etc/urmqtt/vm.conf` and enables
+`urmqtt.service`. The service runs `scripts/kvm-host/urmqtt-vm.sh`:
+`virt,gic-version=host` with KVM, virtio-rng, one virtio-blk disk,
+virtio-net. `urmqtt-vm.sh --dry-run` prints the
 QEMU command line. The same script works on any aarch64 Linux KVM host, with a
 GICv2 or a GICv3.
 
@@ -234,8 +252,9 @@ together. With a Linux bridge on the Pi's Ethernet (`nmcli con add type bridge
 ifname br0` and the Ethernet connection as its port), `--net bridge:br0` puts
 the VM on the LAN with its own DHCP address and real client addresses.
 
-**Updating:** run `install.sh` again with the new image. It replaces the boot
-image, keeps the data disk and restarts the service.
+**Updating:** run `install.sh` again with the new image. It replaces only the
+EFI system partition (the kernel) on the disk, keeps the data partition and
+restarts the service.
 
 ## 8. Operating
 
@@ -253,8 +272,8 @@ image, keeps the data disk and restarts the service.
   `urmqtt-control revoke` from a control identity (`control.service_ids`).
   - The device's live connections are closed at once, and it is refused at
     every later handshake or resumption.
-  - The change is stored on the data disk and survives reboots.
-  - For a revocation that must survive even a lost data disk, also add the
+  - The change is stored in the data partition and survives reboots.
+  - For a revocation that must survive even a lost disk, also add the
     serial to the image's revocation list at the next build.
   - Watch `urmqtt.control.applied` and `urmqtt.control.rejected.*`.
 - **Allowlist mode:** with `registry.mode = "allowlist"`, admit devices with
@@ -268,6 +287,11 @@ image, keeps the data disk and restarts the service.
   `tls.min_server_cert_days` left.
 - **Rotating the server key:** a new image. Old session tickets become invalid
   with the new key.
-- **Backups:** the data disk holds SQLite (registry, retained messages,
-  sessions) and the telemetry log. Snapshot it while the VM is stopped, or rely
-  on the export path of your backend service.
+- **Backups:** the data partition holds SQLite (registry, retained messages,
+  sessions, control state) and the telemetry log. With the VM stopped:
+  - snapshot the whole disk;
+  - or export with `urmqtt-disk export-db DISK out.sqlite` (the WAL applied; opens in any `sqlite3`);
+  - or export with `urmqtt-disk export-telemetry DISK --format csv|jsonl`.
+- **Seeding devices offline:** `urmqtt-disk import-devices DISK ids.txt
+  [--allowlist] --write` adds device ids to the registry and, for allowlist
+  mode, to the allowlist.
