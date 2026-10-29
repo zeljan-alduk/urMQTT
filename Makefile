@@ -148,6 +148,10 @@ sign: ## Sign build/dist/SHA256SUMS with minisign (MINISIGN_KEY=path to the secr
 repro: ## Build HEAD twice in separate worktrees and compare ELF and ISO (ENV=prod by default)
 	scripts/repro.sh $(if $(filter command line,$(origin ENV)),$(ENV),prod)
 
+.PHONY: audit
+audit: ## Regenerate the TCB and unsafe inventory (docs/audit/, referenced by docs/AUDIT.md)
+	scripts/audit-inventory.py
+
 .PHONY: clean
 clean: ## Remove build outputs (keeps certificates and data.img)
 	$(CARGO) clean

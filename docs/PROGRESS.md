@@ -745,3 +745,51 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 
 - Not yet run on a real Raspberry Pi with KVM.
 - The launcher's QEMU command line was checked under TCG on macOS, not with KVM.
+
+## H0 — Security baseline and inventory (2026-10-29)
+
+PROMPT-security.md, plan in docs/SECURITY-PLAN.md. No behaviour change.
+
+**Done**
+
+- `docs/AUDIT.md` contains:
+  - the TCB summary;
+  - every external input with its parser, bound and fuzz target;
+  - the mitigation matrix (protection, implementation, proving test);
+  - the nine H0 questions answered from the code with file references;
+  - 14 weaknesses.
+- `scripts/audit-inventory.py` (`make audit`) generates `docs/audit/inventory.md` (crates, vendored code, the kernel's third-party crates by kind, fuzz targets) and `docs/audit/unsafe.md` (every `unsafe` site in non-test code, with or without a written justification). It is deterministic; CI fails when it is out of date (`--check` in the lint job).
+- `urmqtt-store` now denies `unsafe_code` except in its FFI modules. Before, nothing enforced the boundary its docs described (H0-W7).
+
+**Measured**
+
+| Part | Size |
+|---|---|
+| Own Rust | 30 773 lines in 17 crates |
+| Third-party Rust linked into the kernel | 65 crates, 290 278 lines |
+| SQLite | 254 268 lines of C |
+| `unsafe` in non-test code | 308 sites, 278 with a written justification |
+
+**Answers to the H0 questions:** gaps in 1 (no runtime revocation), 2 (open registry), 3 (no lower time bound), 4 (no KASLR), 5 (0-RTT is off, but untested), 6 (captured traffic secrets are not wiped), 7 (the cookie/ISN key never rotates), 8 (retained messages unbounded) and 9 (no expiry checks).
+
+**Weaknesses** (AUDIT.md §5; each has a planned milestone):
+
+- **High:**
+  - H0-W1: retained messages are unbounded per device (authenticated DoS on memory and DB).
+  - H0-W4: the ticket key is derived from the image's server key, so tickets can be forged from a copy of the image.
+  - H0-W5: no lower bound on the wall clock.
+  - H0-W13: a whole-disk filesystem can be taken for a blank disk on bare metal.
+- **Medium:**
+  - H0-W2: captured TLS traffic secrets are not wiped.
+  - H0-W8: SQLite parses a volume-controlled database without fuzzing.
+  - H0-W9: no fuzzing of PCI and virtio parsing.
+  - H0-W12: the boot self-test writes to unidentified disks.
+- **Low:**
+  - H0-W3: cookie key rotation.
+  - H0-W6: random-number failures ignored in two places.
+  - H0-W10: no proof that the page tables are read-only.
+  - H0-W11: no test that prod ignores the command line.
+  - H0-W14: 30 unjustified `unsafe` sites.
+- **Fixed:** H0-W7.
+
+**Correction to SECURITY-PLAN §1:** revocation on resumption is tested (`tls/tests/handshake.rs` `revoked_device_cannot_resume`).

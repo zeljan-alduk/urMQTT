@@ -889,7 +889,7 @@ Security is the first priority and wins conflicts with the other tracks.
 
 | | Milestone | Acceptance |
 |---|---|---|
-| 📋 | **H0** Baseline & inventory | `docs/AUDIT.md`: TCB and `unsafe` inventory, parser list, mitigation matrix with tests, 9 questions answered from the code |
+| ✅ | **H0** Baseline & inventory | `docs/AUDIT.md`: TCB and `unsafe` inventory, parser list, mitigation matrix with tests, 9 questions answered from the code |
 | 📋 | **H1** Identity lifecycle | runtime revocation over a signed (Ed25519, offline key) control channel; live connections of a revoked device closed; allowlist mode; CA roles and rotation; build fails on expiring certificates |
 | 📋 | **H2** TLS assurance | 0-RTT refused (tested); record layer equal to a reference under differential fuzzing; constant-time checks; tlsfuzzer; interop matrix; rotating ticket keys |
 | 📋 | **H3** TCP/IP & DoS | RFC 5961/6528 with key rotation; scripted and model-based TCP tests; adversarial suite with bounded memory and CPU |

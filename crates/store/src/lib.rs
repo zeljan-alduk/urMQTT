@@ -7,6 +7,8 @@
 //! and `init` below); layout, CRC, disk and store logic are safe Rust.
 
 #![cfg_attr(not(test), no_std)]
+// Unsafe code is allowed only in the modules named below (AUDIT.md H0-W7).
+#![deny(unsafe_code)]
 #![deny(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -21,15 +23,19 @@
 extern crate alloc;
 
 pub mod crc;
+#[allow(unsafe_code)] // SQLite C API wrappers
 pub mod db;
 pub mod disk;
+#[allow(unsafe_code)] // SQLite FFI declarations
 mod ffi;
 pub mod layout;
 #[cfg(target_os = "none")]
+#[allow(unsafe_code)] // libc functions SQLite links against
 mod libc;
 pub mod schema;
 pub mod store;
 pub mod telemetry;
+#[allow(unsafe_code)] // the VFS SQLite calls back into
 pub mod vfs;
 
 use core::ffi::{CStr, c_char, c_int, c_void};
@@ -44,6 +50,7 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Installs `disk` as the VFS backing store and, on first use, gives SQLite
 /// its fixed `memsys5` heap and initialises the library. Later calls (host
 /// tests) only swap the disk; the heap of the first call stays in use.
+#[allow(unsafe_code)] // SQLite configuration calls
 pub fn init(heap: &'static mut [u8], disk: Disk, platform: Platform) -> Result<(), StoreError> {
     vfs::install(disk, platform);
     // Relaxed: initialisation happens on one core before any other use.
@@ -85,6 +92,7 @@ pub fn init(heap: &'static mut [u8], disk: Disk, platform: Platform) -> Result<(
     Ok(())
 }
 
+#[allow(unsafe_code)] // called by SQLite
 unsafe extern "C" fn log_callback(_ctx: *mut c_void, code: c_int, msg: *const c_char) {
     if msg.is_null() {
         return;
