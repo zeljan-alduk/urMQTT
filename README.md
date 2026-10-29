@@ -11,7 +11,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M7)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M8)-red)
 
 </div>
 
@@ -25,6 +25,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M5**: hardware discovery from DTB or ACPI into one description, with identical results from both
 > - **M6**: PCIe and virtio drivers (rng, blk, net), MSI-X, and a CSPRNG seeded from hardware entropy
 > - **M7**: DHCP, ICMP and a TCP echo service on smoltcp
+> - **M8**: complete MQTT 3.1.1 codec, fuzzed and tested against real mosquitto clients
 >
 > The kernel boots under QEMU with HVF and TCG. MQTT over TLS arrives in **M10**. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
@@ -92,7 +93,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | **TLS** | TLS 1.3 only, **mutual TLS**, device id from CN or SAN URI | 📋 M10 |
 | | rustls handshake, then own record layer (AES-128-GCM, ChaCha20-Poly1305) | 📋 M10 |
 | | Session resumption (PSK tickets), handshake admission control | 📋 M10 |
-| **MQTT** | Zero-copy 3.1.1 codec, fuzzed, `forbid(unsafe_code)` | 📋 M8 |
+| **MQTT** | Zero-copy 3.1.1 codec, fuzzed, `forbid(unsafe_code)` | ✅ M8 |
 | | QoS 0/1, wildcards, retained, LWT, persistent sessions, keepalive | 📋 M9 |
 | | ACL (`devices/{id}/#` by default), per-device rate limits | 📋 M9 |
 | | MQTT 5.0, QoS 2 | 📋 later |
@@ -598,7 +599,8 @@ python3 scripts/echo-client.py 7007        # client: echo 1 ok / 3000 ok / 60000
 
 ```bash
 make fuzz T=config_parse FUZZ_TIME=60     # every parser gets a target as it lands
-cargo fuzz list                            # config_parse, fdt_parse, acpi_parse; mqtt_decode (M8); tcp, tls later
+cargo fuzz list                            # config_parse, fdt_parse, acpi_parse, mqtt_decode; tcp, tls later
+make fuzz T=mqtt_decode FUZZ_TIME=600      # the M8 acceptance run
 ```
 
 ## Deployment
@@ -689,7 +691,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M5** Platform discovery | `acpi=on` and `acpi=off` give identical summaries |
 | ✅ | **M6** PCIe & virtio | blk write/flush/read-back; gratuitous ARP in a pcap |
 | ✅ | **M7** Network prototype | DHCP lease, ping, TCP echo through hostfwd |
-| 📋 | **M8** MQTT codec | spec tests, property tests, 10 minutes of fuzzing with no crash |
+| ✅ | **M8** MQTT codec | spec tests, property tests, 10 minutes of fuzzing with no crash |
 | 📋 | **M9** Broker over TCP (dev) | pub/sub, wildcards, retained, LWT, QoS 1 redelivery with mosquitto |
 | 📋 | **M10** TLS 1.3 + mTLS | mosquitto over mTLS; wrong CA, expired, client-id mismatch and revoked all rejected |
 | 📋 | **M11** SQLite in the kernel | data survives restarts and `kill -9` |

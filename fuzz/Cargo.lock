@@ -230,8 +230,13 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "urmqtt-config-schema",
+ "urmqtt-mqtt",
  "urmqtt-platform",
 ]
+
+[[package]]
+name = "urmqtt-mqtt"
+version = "0.0.1"
 
 [[package]]
 name = "urmqtt-platform"

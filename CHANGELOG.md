@@ -11,6 +11,7 @@ All notable changes to this project are documented here. The format follows
 - M0: Cargo workspace with all crates, pinned nightly toolchain and Makefile.
 - M0: Validated build-time configuration (`deploy/<env>/config.toml`) compiled into typed constants.
 - M0: Dev certificate generator, including negative-test certificates.
+- M8: Zero-copy MQTT 3.1.1 codec (no_std, no unsafe, streaming, bounded), property tests, mosquitto interop tests, mqtt_decode fuzz target.
 - M7: smoltcp network prototype: DHCPv4, ARP, ICMP echo to the gateway, dev TCP echo service; service-style smoke tests.
 - M6: PCIe enumeration, virtio-pci (rng, blk, net), MSI-X via GICv2m, ChaCha20 CSPRNG with hardware-entropy requirement, blk/net self-tests.
 - M5: Unified platform description from DTB or ACPI (CPUs, GIC, timer, UART, PSCI, PCIe ECAM); DTB/ACPI fuzz targets.

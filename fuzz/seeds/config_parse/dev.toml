@@ -27,6 +27,10 @@ handshakes_per_core_per_sec = 2000
 [acl]
 device_publish = ["devices/{id}/#"]
 device_subscribe = ["devices/{id}/cmd/#"]
+# Backend identities (exact id or prefix*) with wider rights; no DB lookup.
+service_ids = ["backend"]
+service_publish = ["devices/+/cmd/#", "fleet/#"]
+service_subscribe = ["devices/#", "fleet/#"]
 
 [storage]
 sqlite_heap_mb = 32

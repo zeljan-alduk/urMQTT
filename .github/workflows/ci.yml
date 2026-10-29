@@ -70,6 +70,14 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: test
+      - name: Install mosquitto clients (MQTT interop tests)
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends mosquitto-clients
+          else
+            brew install mosquitto
+          fi
+          mosquitto_pub --help | head -1
       - run: make certs
       - run: cargo test --locked --workspace
 

@@ -268,3 +268,24 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 
 - No RX interrupts (still polled), one core, one queue: by design for this phase (PROMPT §5.1).
 - The prototype stack is not fuzzed; the own stack gets fuzz targets in M14.
+
+## M8 — MQTT 3.1.1 codec (2026-10-29)
+
+**Done**
+
+- `crates/mqtt`: complete MQTT 3.1.1 decoder and encoder covering all 14 packet types (ADR-027).
+  - `no_std`, `forbid(unsafe_code)`, clippy-denied unwrap/indexing/panic, no allocation.
+  - Zero-copy: packets borrow from the input; SUBSCRIBE/UNSUBSCRIBE keep validated raw payloads with iterators.
+  - Streaming: `Incomplete(n)` gives the exact total size needed.
+  - Limits: packet size (checked before the body arrives), topic length and levels, client-id length, topics per packet.
+  - `topic_matches` implements §4.7 including the `$`-topic rule.
+- Tests:
+  - 20 unit tests built from spec byte vectors and edge cases. Every prefix of a valid packet returns `Incomplete`, and back-to-back packets are split correctly.
+  - Property tests: PUBLISH/CONNECT/SUBSCRIBE/UNSUBSCRIBE round trips, plus arbitrary and mutated bytes never panicking.
+  - Interop tests (`tests/interop.rs`) run real `mosquitto_pub` and `mosquitto_sub` against an in-test server built only on this crate: CONNECT with will, credentials and keepalive; PUBLISH QoS 1 with retain → PUBACK; SUBSCRIBE with two filters → SUBACK; server PUBLISH QoS 1 → client PUBACK and the message printed. CI installs the mosquitto clients on Linux and macOS.
+- Fuzz target `mqtt_decode` with seeds: stream decoding plus a round-trip assertion.
+
+**Measured**
+
+- `make fuzz T=mqtt_decode FUZZ_TIME=600`: **33 621 279 runs in 601 s** (about 56 k/s), coverage 678 edges, corpus 448 inputs. No crash.
+- Host tests: 128.
