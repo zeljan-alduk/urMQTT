@@ -30,6 +30,8 @@ mod db;
 #[cfg(target_os = "none")]
 mod devices;
 #[cfg(target_os = "none")]
+mod dpbench;
+#[cfg(target_os = "none")]
 mod irq;
 #[cfg(target_os = "none")]
 mod layout;

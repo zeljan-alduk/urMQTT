@@ -238,3 +238,56 @@ fn garbage_is_not_tls() {
     );
     assert_eq!(r, Err(TlsError::NotTls), "plain MQTT on the TLS port");
 }
+
+/// Our own sans-IO client (used by in-kernel self-tests) against our
+/// server, entirely in memory.
+#[test]
+fn own_client_against_own_server() {
+    let Some(d) = dev() else { return };
+    setup_globals();
+    let srv = server(&d, IdentityField::Cn, &[]);
+    let (ca, cert, key) = (
+        read(&d.join("ca.pem")),
+        read(&d.join("devices/device-001.pem")),
+        read(&d.join("devices/device-001.key")),
+    );
+    let cli = urmqtt_tls::client::TlsClient::new(&urmqtt_tls::client::ClientSetup {
+        ca_pem: &ca,
+        cert_pem: &cert,
+        key_pem: &key,
+    })
+    .unwrap();
+    for _ in 0..3 {
+        let mut c = cli.connect().unwrap();
+        let mut s = srv.accept().unwrap();
+        c.send(b"hello");
+        let (mut to_s, mut to_c, mut app_s, mut app_c) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        c.input(&[], &mut to_s, &mut app_c).unwrap();
+        let mut ident = None;
+        for _ in 0..10 {
+            if !to_s.is_empty() {
+                let data = std::mem::take(&mut to_s);
+                if let Event::Established { identity, .. } =
+                    s.input(&data, &mut to_c, &mut app_s).unwrap()
+                {
+                    ident = Some(identity);
+                }
+            }
+            if !to_c.is_empty() {
+                let data = std::mem::take(&mut to_c);
+                c.input(&data, &mut to_s, &mut app_c).unwrap();
+            }
+            if app_s == b"hello" {
+                break;
+            }
+        }
+        assert_eq!(ident.as_deref(), Some("device-001"));
+        assert_eq!(app_s, b"hello");
+        s.send(b"world", &mut to_c).unwrap();
+        let data = std::mem::take(&mut to_c);
+        c.input(&data, &mut to_s, &mut app_c).unwrap();
+        assert!(app_c.ends_with(b"world"), "{app_c:?}");
+        assert!(c.is_established());
+    }
+}

@@ -237,6 +237,12 @@ pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
     }
 }
 
+/// The TLS server as configured (build-time revocation list), for
+/// `test=dp-bench`.
+pub fn tls_server_for_bench() -> Option<TlsServer> {
+    tls_server(CONFIG.tls.revoked_serials)
+}
+
 fn tls_server(revoked: &[&str]) -> Option<TlsServer> {
     let setup = ServerSetup {
         ca_pem: urmqtt_config::CA_PEM,

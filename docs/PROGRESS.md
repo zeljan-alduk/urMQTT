@@ -455,3 +455,55 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - No export/read API (M16).
 - Age retention hides expired records but does not erase them before their segment is reused.
 - With more than 8 cores, cores share partitions (the DB core still serialises the writes).
+
+## M13 — Multicore data plane (2026-10-29)
+
+**Done**
+
+- `kernel/dataplane` + `netproto` (ADR-032):
+  - Per-core smoltcp stacks, TLS servers and MQTT services.
+  - Core 0 dispatches frames by Toeplitz hash to workers 1..n over SPSC frame rings (buffers move, no copy after the DMA ring), copies ARP replies to every core, and forwards the DHCP lease.
+  - Adaptive polling with WFI and wake SGIs.
+- `kernel/mqtt_service`:
+  - Broker shards with sessions on their home core (`fnv1a(client id)`).
+  - Relayed connections with credit flow control and generation-tagged ids.
+  - Fan-out of every routed message to the other shards (retained replicas, origin persists).
+  - Restore distributes sessions to their homes.
+  - Sessions end when we close (not after smoltcp's CLOSING/TIME_WAIT); TIME_WAIT/CLOSING sockets are replaced.
+- `crates/broker`: `fanout`, `drain_routes`, `route_remote` (+ shard test).
+- `crates/net`: `classify` and `rss::ipv4_tcp` (Microsoft RSS verification suite).
+- `crates/arch-aarch64::spsc::new_boxed`: large rings built on the heap.
+- `crates/mm::CachedHeap`: per-CPU size-class caches in front of the buddy heap.
+- `crates/virtio::net`: asynchronous TX (256 descriptors with own buffers), batched kicks with notification suppression, `rx_pending`.
+- `kernel/db`: one request/response ring pair per data core.
+- `crates/tls::client`: an unbuffered TLS 1.3 client with a client certificate (host test against our server), used by `test=dp-bench`.
+- `tools/loadgen` (real now):
+  - `handshake` mode: full TLS 1.3 + mTLS + CONNECT churn, device certificates generated from the dev CA, no resumption.
+  - `hold` mode: N connections with PINGREQ and optional QoS 0 publishes.
+  - `make loadtest ARGS=…`; `make bench` / `scripts/bench.sh` prints the table below.
+- Logging: per-connection events at `debug`; dev-only `log=<level>` boot switch.
+- Smoke: `dp-bench` (SMP 6) with a ≥ 3.0× check on 4 workers under HVF. All MQTT scenarios now run across 3 data cores, with sessions relayed between cores.
+
+**Measured** (`make bench`, Apple M4 Pro, HVF)
+
+| Worker cores | dp-bench (handshakes/s, in guest) | scaling | network via QEMU user net (conn/s, 32 clients) | scaling |
+|---|---|---|---|---|
+| 1 | 862 | 1.00x | 789 | 1.00x |
+| 2 | 1 724 | 2.00x | 636 | 0.81x |
+| 4 | 3 438 | 3.99x | 536 | 0.68x |
+
+- **The shared-nothing data plane scales linearly** in the guest (TCG: 163 → 341 → 681, 4.18×).
+- Through QEMU user networking the rate is capped by the host side: single-threaded slirp and the userspace GIC, with a best of 1 265 conn/s on one core. It falls as more vCPUs compete for host CPUs. Inside the guest the TLS cost per handshake stays constant (0.58 ms) and the workers are 20–40 % busy. A host with KVM, an in-kernel vGIC and a tap or vhost backend is needed for a network-level scaling number.
+- Fixes found on the way, all measured:
+  - Synchronous virtio TX (2 VM exits per frame): 1 → 1.27 k conn/s on one core.
+  - UART logging per connection: about 2× on the network benchmark.
+  - Clean disconnects took 1 s (smoltcp simultaneous close); now 1–4 ms.
+  - TIME_WAIT slots capped churn at ~400 conn/s.
+- `make smoke`: **62/62**. Kernel ELF 2 227 176 bytes; the TLS client for the dev self-test is still linked in prod (M15/M17: gate it).
+
+**Known gaps**
+
+- **virtio-net multiqueue/RSS not implemented**: dispatcher mode only, so "fallback tested by disabling mq" does not apply. QEMU user networking has no multiqueue; it needs tap/vhost and root (CI could do it later).
+- No RX interrupt for core 0 (idle → first packet waits ≤ 10 ms).
+- Fan-out goes to every shard rather than to the shards with subscribers.
+- Relayed connections cost one extra copy per message between cores.

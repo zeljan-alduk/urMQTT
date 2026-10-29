@@ -45,6 +45,8 @@ pub enum DbTest {
     /// Write telemetry records, then a deliberately torn one (the next
     /// boot must truncate it), then continue booting.
     LogTear,
+    /// In-guest data-plane scaling benchmark on the worker cores.
+    DpBench,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -90,6 +92,7 @@ impl BootOptions {
                 "test=log-crash" => o.db_test = Some(DbTest::LogCrash),
                 "test=log-verify" => o.db_test = Some(DbTest::LogVerify),
                 "test=log-tear" => o.db_test = Some(DbTest::LogTear),
+                "test=dp-bench" => o.db_test = Some(DbTest::DpBench),
                 "log=error" => o.log_level = Some(urmqtt_config::LogLevel::Error),
                 "log=warn" => o.log_level = Some(urmqtt_config::LogLevel::Warn),
                 "log=info" => o.log_level = Some(urmqtt_config::LogLevel::Info),

@@ -101,8 +101,12 @@ smoke: ## Boot headless (HVF+TCG on macOS, TCG elsewhere) and check the serial l
 	scripts/smoke.sh $(if $(ACCELS),--accels "$(ACCELS)")
 
 .PHONY: loadtest
-loadtest: ## Run the host-side load generator
-	$(call not_yet,M10/M13)
+loadtest: certs ## Host-side load generator, e.g. ARGS="handshake --port 18883 --threads 32 --duration 10"
+	$(CARGO) run $(CARGO_FLAGS) --release -p urmqtt-loadgen -- $(ARGS)
+
+.PHONY: bench
+bench: build certs ## Multicore benchmarks (in-guest dp-bench + network handshakes), table to stdout
+	scripts/bench.sh
 
 .PHONY: dist
 dist: iso ## Collect release artifacts and SHA256SUMS into build/dist/

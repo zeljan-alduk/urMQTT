@@ -440,6 +440,12 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         crate::db::start_log_crash(cpus);
     }
     crate::dataplane::init(data_cores);
+    if s.options.db_test == Some(crate::cmdline::DbTest::DpBench) {
+        if data_cores < 2 {
+            fatal("dp-bench needs at least one worker core besides core 0 (3+ CPUs with storage)");
+        }
+        crate::dpbench::run(data_cores - 1, s.options.smoke);
+    }
     crate::netproto::prepare(restored.map(alloc::sync::Arc::new));
     for cpu in 1..data_cores {
         smp::start_data_core(cpu);

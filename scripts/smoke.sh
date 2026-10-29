@@ -397,6 +397,24 @@ scenario db-bench "smoke test=db-bench" on \
 db_crash
 log_crash
 log_tear
+# M13: shared-nothing scaling, in the guest (no host network in the way).
+SMP=6 scenario dp-bench "smoke test=dp-bench" on \
+    "dp-bench: 1 worker core\(s\): [0-9]+ handshakes/s" "dp-bench: 4 worker core\(s\): [0-9]+ handshakes/s" \
+    "dp-bench: done, 0 failure\(s\)" "^URMQTT READY$" "$NO_FAULT"
+for accel in $ACCELS; do
+    x=$(clean "$OUT/dp-bench-$accel.log" | grep -Eo 'scaling 4 core\(s\): [0-9.]+x' | grep -Eo '[0-9.]+x' | tr -d x)
+    # TCG on a small CI runner has fewer host CPUs than vCPUs: report only.
+    if [[ $accel == tcg ]]; then
+        echo "  ✓ dp-bench scaling with 4 worker cores: ${x:-?}x (reported only under TCG) [$accel]"
+        PASSED=$((PASSED + 1))
+    elif [[ -n "$x" ]] && awk -v x="$x" 'BEGIN { exit !(x >= 3.0) }'; then
+        echo "  ✓ dp-bench scales near-linearly: ${x}x with 4 worker cores [$accel]"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ dp-bench scaling with 4 worker cores is ${x:-?}x (< 3.0x) [$accel]"
+        FAILED=$((FAILED + 1))
+    fi
+done
 if command -v mosquitto_pub >/dev/null; then
     mqtt_persist
 fi

@@ -71,6 +71,7 @@ const WORK_DONE: usize = 2;
 const WORK_DB: usize = 3;
 const WORK_LOG_WRITER: usize = 4;
 const WORK_DATAPLANE: usize = 5;
+const WORK_DP_BENCH: usize = 6;
 
 /// Logical index of the executing CPU.
 pub fn current() -> usize {
@@ -286,6 +287,7 @@ pub fn idle_loop(me: &'static PerCpu) -> ! {
             WORK_DB => crate::db::run_core(),
             WORK_LOG_WRITER => crate::db::log_writer(current()),
             WORK_DATAPLANE => crate::netproto::run_ap(current()),
+            WORK_DP_BENCH => crate::dpbench::worker(current()),
             _ => {}
         }
         // Relaxed: only selects between sleeping and spinning.
@@ -310,6 +312,11 @@ pub fn start_log_writer(cpu: usize) {
 /// Makes `cpu` a data core (its own network loop and broker shard).
 pub fn start_data_core(cpu: usize) {
     start_work(cpu, WORK_DATAPLANE);
+}
+
+/// Makes `cpu` a `test=dp-bench` worker.
+pub fn start_dp_bench(cpu: usize) {
+    start_work(cpu, WORK_DP_BENCH);
 }
 
 fn start_work(cpu: usize, work: usize) {

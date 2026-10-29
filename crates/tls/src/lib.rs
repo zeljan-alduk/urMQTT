@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+pub mod client;
 pub mod identity;
 pub mod provider;
 pub mod record;

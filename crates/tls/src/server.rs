@@ -62,7 +62,7 @@ pub fn set_clock(now_unix: WallClock) {
 }
 
 #[derive(Debug)]
-struct KernelTime;
+pub(crate) struct KernelTime;
 
 impl TimeProvider for KernelTime {
     fn current_time(&self) -> Option<UnixTime> {

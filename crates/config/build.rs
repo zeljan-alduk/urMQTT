@@ -75,7 +75,30 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap_or_else(|_| fail("OUT_DIR not set")));
     let out = out_dir.join("generated.rs");
-    fs::write(&out, render(&cfg, &files))
+    let mut generated = render(&cfg, &files);
+    // Dev builds only: a device certificate for in-kernel self-tests that
+    // need a TLS client (`test=dp-bench`). Production images carry none.
+    let (client_cert, client_key) = if env_name == "dev" {
+        (
+            format!(
+                "include_bytes!({:?})",
+                embed("devices/device-001.pem", PemKind::Certificate)
+            ),
+            format!(
+                "include_bytes!({:?})",
+                embed("devices/device-001.key", PemKind::PrivateKey)
+            ),
+        )
+    } else {
+        ("&[]".to_owned(), "&[]".to_owned())
+    };
+    generated.push_str(&format!(
+        "\n/// Dev builds: device-001's certificate for self-tests (empty otherwise).\n\
+         pub static SELFTEST_CLIENT_CERT_PEM: &[u8] = {client_cert};\n\
+         /// Dev builds: device-001's key for self-tests (empty otherwise).\n\
+         pub static SELFTEST_CLIENT_KEY_PEM: &[u8] = {client_key};\n"
+    ));
+    fs::write(&out, generated)
         .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", out.display())));
 }
 

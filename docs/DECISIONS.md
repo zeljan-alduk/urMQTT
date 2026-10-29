@@ -332,3 +332,32 @@ verified in the named milestone before it becomes Accepted).
   - Host tests on `MemDisk`: reopen, torn tail, ring wrap without resurrection of old generations, age retention, power loss mid-flush with an arbitrary subset of writes surviving, foreign data refused.
   - Smoke `log-crash`: three cores write until at least 1 M records are durable, then SIGKILL. The next boot must recover every durable record, with each core's sequence contiguous.
   - Smoke `log-tear`: a deliberately torn record is written through the real disk path. The next boot must truncate it, keep the 10 500 complete records, and report one torn tail.
+
+## ADR-032 — Multicore data plane: dispatcher, worker cores, home shards
+
+- **Status:** Accepted (M13)
+- **Topology:** with storage and ≥ 2 CPUs the last CPU is the DB core (ADR-030). The others are **data cores** `0..n`. With one data core, core 0 does everything. Otherwise core 0 runs the NIC, the dispatcher, DHCP, ICMP and the dev echo port, and cores `1..n` are the **MQTT workers**. Running TLS handshakes on the dispatcher delayed the other cores' frames by milliseconds.
+- **NIC: dispatcher mode only (v1).** Core 0 owns the single virtio-net queue pair.
+  - It classifies each frame (`urmqtt-net::classify`). IPv4 TCP to an MQTT port goes to the worker given by the **Toeplitz hash** of the 4-tuple (Microsoft RSS key, verified against the RSS verification suite), so a later NIC with RSS and the same key would agree. ARP replies go to every core's stack; everything else stays on core 0.
+  - Frames move as owned buffers through 0→c and c→0 SPSC rings: one copy out of the DMA ring, none after. Buffers circulate (RX buffers are reused for TX), so the steady state does not allocate.
+  - virtio-net multiqueue + RSS is **not implemented**: QEMU user networking (the only backend on macOS without root) has no multiqueue, so the path could not be tested. That is a known gap; the hash already matches RSS.
+- **Per-core stacks:** every data core runs its own smoltcp interface with the same MAC and IP (core 0 forwards the DHCP lease as a control message), its own sockets, TLS server and MQTT service.
+- **Sessions: home shards.** A session lives on the worker given by `fnv1a(client id) % workers`, stable across boots, so restored sessions find their shard. Takeover, wills, keepalive and persistence therefore stay core-local.
+  - The TCP + TLS connection stays on its *transport* core (the flow's core).
+  - If home ≠ transport, plaintext MQTT bytes are relayed: `Open`/`Input`/`Closed` one way, `Output`/`Close` back. The home core sends replies only within a **credit** (32 KiB) that the transport returns as it encrypts them. The transport stops reading the socket while its backlog to the home core is long, so TCP flow control pushes back on the client.
+  - Relay ids carry a slot generation, so late messages never reach a reused slot.
+  - Dev plaintext connections are held until their CONNECT names the client.
+- **Fan-out:** every message a shard routes (PUBLISH, will) is offered to every other worker (`Broker::drain_routes` → `route_remote`). Each shard keeps a replica of the retained messages; only the origin persists them. QoS 0 fan-out to a peer whose backlog exceeds 16 384 messages is dropped and counted; QoS 1 is never dropped.
+- **Per-CPU heap caches:** `urmqtt-mm::CachedHeap` keeps 7 size classes (32 B – 2 KiB, the buddy orders) per CPU, IRQs masked while touching them, and refills or drains 16 blocks per global-lock acquisition (≤ 32 KiB kept per class per CPU). That reduces the ticket-lock traffic (unfair to descheduled vCPUs) on the TLS-heavy path.
+- **Adaptive polling:** a core busy-polls while it has work and for 100 µs after, then sleeps in **WFI**. Producers wake a sleeping peer with an SGI. A Dekker-style handshake (flag store + SeqCst fence on the sleeper, ring push + SeqCst fence + flag load on the producer) avoids lost wake-ups.
+  - WFE is not used: under HVF, QEMU treats WFE as a no-op, so WFE-based idle loops spun at 100 % of a host CPU and made every added vCPU *slower*.
+  - Core 0 has no RX interrupt yet (MSI-X for virtio-net is a later item), so the first packet after an idle period waits for the 10 ms tick.
+- **virtio-net transmit** is asynchronous: 256 descriptors with their own bounce buffers, lazy reclaim, one kick per loop pass and only if the device asks for one (`VIRTQ_USED_F_NO_NOTIFY`). Received buffers are recycled with one kick per burst. Before, every frame cost two VM exits and a synchronous wait.
+- **smoltcp findings:**
+  - In a simultaneous close smoltcp ignores the ACK carried by the peer's FIN and waits a full RTO (1 s) in CLOSING. TIME_WAIT lasts 10 s.
+  - The session therefore now ends when we close our side, which also makes persistence snapshots timely. Sockets in TIME_WAIT/CLOSING are replaced by fresh listening sockets: no RST, so a late duplicate just gets a RST from the stack.
+  - Both become moot with the own TCP stack (M14).
+- **Logging at scale:** per-connection lines are `debug`. Every character on the emulated PL011 is a VM exit taken under QEMU's big lock, which serialised all vCPUs. The dev-only `log=` boot switch lowers the level for benchmarks.
+- **Measuring scaling:**
+  - `test=dp-bench` runs full TLS 1.3 + mTLS handshakes with CONNECT/CONNACK, client and server in the guest, on 1, 2 and 4 workers in parallel. It isolates the data plane from the host. Smoke requires ≥ 3.0× on 4 workers under HVF/KVM (measured 4.00×).
+  - The network benchmark (`urmqtt-loadgen` through QEMU user networking) is capped by QEMU's single-threaded slirp and the userspace GIC: about 0.8–1.25 k conn/s whatever the worker count, falling as spinning vCPUs compete for host CPUs. Inside the guest the TLS cost per handshake stays constant (≈ 0.58 ms HVF, ≈ 3.3 ms TCG) and the workers are not saturated.

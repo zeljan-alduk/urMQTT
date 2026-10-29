@@ -11,7 +11,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M12)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M13)-red)
 
 </div>
 
@@ -31,6 +31,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M10**: TLS 1.3 with mutual TLS: rustls handshake, own crypto provider and record layer, revocation list, resumption, admission control
 > - **M11**: SQLite inside the kernel on a raw-disk VFS (WAL, exclusive), with a DB core fed by SPSC rings. State survives restarts and `kill -9`
 > - **M12**: per-core telemetry log with CRC per record, batched writes, crash recovery and torn-tail truncation, verified with a million records
+> - **M13**: multicore data plane: per-core stacks and broker shards, Toeplitz dispatcher, relayed sessions, cross-core fan-out, per-CPU heap caches; linear scaling to 4 worker cores in-guest
 >
 > The kernel boots under QEMU with HVF and TCG. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
@@ -91,7 +92,8 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | Hardware discovery via **DTB and ACPI** (MADT, GTDT, MCFG, SPCR) | ✅ M5 |
 | **Devices** | PL011 UART, Limine framebuffer text log | ✅ M1 |
 | | PCIe ECAM, virtio-pci modern: net, blk, rng | ✅ M6 |
-| | virtio-net multiqueue + RSS, fallback software dispatcher | 📋 M13 |
+| | Software dispatcher (Toeplitz/RSS hash) on one virtio-net queue pair | ✅ M13 |
+| | virtio-net multiqueue + RSS | 📋 later (needs tap/vhost to test) |
 | **Network** | DHCPv4, ARP, ICMP echo (smoltcp prototype) | ✅ M7 |
 | | Own server-only TCP: SYN cookies, timing wheel, NewReno, ACK coalescing | 📋 M14 |
 | | IPv6 + SLAAC | 📋 later |
@@ -105,7 +107,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | **Storage** | SQLite in the kernel over a raw virtio-blk VFS (WAL, exclusive), quick_check at boot | ✅ M11 |
 | | Device registry, revocations, retained messages, persistent sessions with offline queues | ✅ M11 |
 | | Per-core append-only telemetry log with CRC and crash recovery | ✅ M12 |
-| **Scale** | Per-core event loops, slabs, buffer pools, cross-core fan-out | 📋 M13 |
+| **Scale** | Per-core event loops and broker shards, per-CPU heap caches, frame pools, cross-core fan-out | ✅ M13 |
 | | ≤ 512 B per idle TLS connection, measured at 10k/100k/1M | 📋 M15 |
 | **Ops** | Watchdog, rate limits, UDP syslog/statsd to a private collector | 📋 M16 |
 
@@ -143,10 +145,17 @@ flowchart TB
 
 ### Execution model: thread-per-core, shared-nothing
 
-Every CPU runs its own loop with its own NIC queue pair, TCP table, TLS states, sessions, topic
-trie, timer wheel, allocators and log segment. Cores share no mutable state, only bounded
+Every data core runs its own loop with its own TCP stack, TLS states, broker shard (sessions,
+topic trie), heap caches and telemetry partition. Cores share no mutable state, only bounded
 lock-free **SPSC rings**, one per ordered pair of cores. The highest-numbered core runs SQLite and
 nothing else.
+
+Today (M13) the NIC has one queue pair, owned by **core 0**, which steers every MQTT flow by the
+Toeplitz (RSS) hash of its 4-tuple to a **worker core** (1 … N-2) and transmits what the workers
+send back. A session lives on its **home** worker (`fnv1a(client id)`), so takeover, wills and
+persistence never cross cores. A connection that lands on another worker keeps its TCP and TLS
+there and relays plaintext MQTT to the home core, with credit-based flow control. Every routed
+message is fanned out to the other shards, each of which keeps a replica of the retained messages.
 
 ```mermaid
 flowchart LR
@@ -641,11 +650,28 @@ against single-row commits, and `test=db-crash` followed by `test=db-verify` is 
 that `make smoke` runs. For the telemetry log, `test=log-crash` (every core but the DB core
 writes until the VM is killed) and `test=log-tear` are each followed by `test=log-verify`.
 
-### 9. Load testing (M13)
+### 9. Load testing and the multicore benchmark (M13)
 
 ```bash
-make loadtest ARGS="--connections 50000 --rate 2000/s --keepalive 60 --publish 1/30s"
+# full TLS 1.3 + mTLS + CONNECT churn against a running VM (port forward 18883 -> 8883)
+make loadtest ARGS="handshake --port 18883 --threads 32 --duration 10"
+# N long-lived connections with PINGREQ, each publishing telemetry every second
+make loadtest ARGS="hold --port 18883 --clients 500 --duration 60 --publish-ms 1000"
+# both benchmarks on 1, 2 and 4 worker cores, as a Markdown table
+make bench
 ```
+
+`make bench` on an Apple M4 Pro (HVF):
+
+| Worker cores | in-guest handshakes/s | scaling | through QEMU user net (conn/s) |
+|---|---|---|---|
+| 1 | 862 | 1.00x | 789 |
+| 2 | 1 724 | 2.00x | 636 |
+| 4 | 3 438 | 3.99x | 536 |
+
+The in-guest number (`test=dp-bench`: client and server inside the VM, each worker on its own)
+shows the data plane scaling linearly. The network number is capped by QEMU's single-threaded
+user networking, not by the guest (see ADR-032).
 
 QEMU user networking (slirp) tops out far below a million connections. For ≥ 100k use
 `vmnet-shared` on macOS (needs sudo) or a Linux host with KVM, tap and several client IPs.
@@ -704,7 +730,8 @@ shasum -a 256 build/urmqtt-prod-*.iso
 | `make smoke` | Headless boot and fault scenarios under HVF + TCG (TCG only in CI), serial-log checks |
 | `make data-img` | Blank sparse data disk (formatted by the kernel on first boot) |
 | `make fuzz T=<target>` | Bounded cargo-fuzz run (`FUZZ_TIME`, default 600 s) |
-| `make loadtest` | Host-side load generator (M13) |
+| `make loadtest` | Host-side load generator (`handshake` / `hold` modes) |
+| `make bench` | Multicore benchmark table (in-guest and network) |
 | `make dist` | Release artifacts plus `SHA256SUMS` in `build/dist/` |
 | `make certs` | Development certificates (idempotent; `scripts/gen-dev-certs.sh --force` regenerates) |
 
@@ -760,7 +787,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M10** TLS 1.3 + mTLS | mosquitto over mTLS; wrong CA, expired, client-id mismatch and revoked all rejected |
 | ✅ | **M11** SQLite in the kernel | data survives restarts and `kill -9` |
 | ✅ | **M12** Telemetry log | 1M messages; torn tail truncated on recovery |
-| 📋 | **M13** Multicore data plane | near-linear scaling 1 → 2 → 4 cores |
+| ✅ | **M13** Multicore data plane | near-linear scaling 1 → 2 → 4 cores |
 | 📋 | **M14** Own TCP stack | smoltcp replaced; loss simulation tests; segment fuzzing |
 | 📋 | **M15** Memory per connection | measured bytes per idle TLS connection ≤ 512 B |
 | 📋 | **M16** Hardening & ops | threat model; a 100k-client reconnect storm survives |

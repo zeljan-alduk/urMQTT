@@ -9,3 +9,5 @@ INDX = "INDX"
 # rustls API names (MessageEncrypter, encrypter())
 Encrypter = "Encrypter"
 encrypter = "encrypter"
+# TCP retransmission timeout
+RTO = "RTO"
