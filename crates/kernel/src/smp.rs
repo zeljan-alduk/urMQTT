@@ -68,6 +68,7 @@ static POLL: AtomicBool = AtomicBool::new(false);
 const WORK_NONE: usize = 0;
 const WORK_PING_ALL: usize = 1;
 const WORK_DONE: usize = 2;
+const WORK_DB: usize = 3;
 
 /// Logical index of the executing CPU.
 pub fn current() -> usize {
@@ -274,10 +275,14 @@ extern "C" fn ap_main(id: u64) -> ! {
 pub fn idle_loop(me: &'static PerCpu) -> ! {
     loop {
         // Acquire: pairs with the Release in `request`.
-        if me.work.load(Ordering::Acquire) == WORK_PING_ALL {
-            ping_all();
-            // Release: results above are visible to the boot CPU.
-            me.work.store(WORK_DONE, Ordering::Release);
+        match me.work.load(Ordering::Acquire) {
+            WORK_PING_ALL => {
+                ping_all();
+                // Release: results above are visible to the boot CPU.
+                me.work.store(WORK_DONE, Ordering::Release);
+            }
+            WORK_DB => crate::db::run_core(),
+            _ => {}
         }
         // Relaxed: only selects between sleeping and spinning.
         if POLL.load(Ordering::Relaxed) {
@@ -286,6 +291,14 @@ pub fn idle_loop(me: &'static PerCpu) -> ! {
             cpu::wfi();
         }
     }
+}
+
+/// Turns `cpu` (an idle application processor) into the DB core.
+pub fn start_db_core(cpu: usize) {
+    let Some(pc) = CPUS.get(cpu) else { return };
+    // Release: the DB worker handed over by `db::init` is visible to it.
+    pc.work.store(WORK_DB, Ordering::Release);
+    gic::send_sgi(SGI_WAKE, mpidr_of(cpu));
 }
 
 fn mpidr_of(cpu: usize) -> u64 {

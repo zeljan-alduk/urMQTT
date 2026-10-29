@@ -1,5 +1,4 @@
-* text=auto eol=lf
-*.iso binary
-*.img binary
-*.fd binary
-vendor/** -diff linguist-vendored
+# Third-party code: excluded from language statistics and diffs.
+vendor/** linguist-vendored
+vendor/sqlite/sqlite3.c -diff
+vendor/sqlite/sqlite3.h -diff

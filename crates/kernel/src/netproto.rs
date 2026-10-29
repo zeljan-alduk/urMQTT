@@ -96,7 +96,7 @@ struct Echo {
 }
 
 /// Runs the network service on this CPU forever.
-pub fn run(echo: bool) -> ! {
+pub fn run(echo: bool, restored: Option<crate::db::Restored>) -> ! {
     let Some(net) = devices::DEVICES.lock().net.take() else {
         warn!("net: no network device, idling");
         loop {
@@ -144,7 +144,10 @@ pub fn run(echo: bool) -> ! {
         warn!("net: icmp bind failed");
     }
 
-    let mut mqtt = Some(crate::mqtt_service::MqttService::new(&mut sockets));
+    let mut mqtt = Some(crate::mqtt_service::MqttService::new(
+        &mut sockets,
+        restored,
+    ));
 
     let mut router: Option<Ipv4Address> = None;
     let mut ping_sent: Option<Instant> = None;
@@ -242,6 +245,8 @@ pub fn run(echo: bool) -> ! {
         }
 
         let mut activity = activity;
+        // One CPU: the DB worker runs here between iterations.
+        crate::db::poll();
         if let Some(m) = mqtt.as_mut() {
             activity |= m.poll(&mut sockets, timer::uptime_ns() / 1_000_000);
             if activity {

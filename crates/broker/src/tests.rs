@@ -28,6 +28,7 @@ fn cfg() -> Config {
         rate_period_ms: 1000,
         max_outbound_bytes: 64 * 1024,
         acl: ACL,
+        persist: false,
     }
 }
 
@@ -692,4 +693,186 @@ fn client_id_must_match_certificate_identity() {
         0,
     );
     assert_eq!(cl.recv(&mut b), vec![Got::ConnAck(false, 0)]);
+}
+
+/// Stored sessions: subscriptions and queued (topic, payload) messages.
+type StoredSessions =
+    std::collections::BTreeMap<String, (Vec<(String, QoS)>, Vec<(String, Vec<u8>)>)>;
+
+/// A model of the durable store: applies persist ops like the SQLite store.
+#[derive(Default, Debug)]
+struct Model {
+    retained: std::collections::BTreeMap<String, (Vec<u8>, QoS)>,
+    sessions: StoredSessions,
+}
+
+impl Model {
+    fn apply(&mut self, b: &mut Broker) {
+        for op in b.drain_persist() {
+            match op {
+                PersistOp::Retain { msg, qos } => {
+                    if msg.payload.is_empty() {
+                        self.retained.remove(&*msg.topic);
+                    } else {
+                        self.retained
+                            .insert(msg.topic.to_string(), (msg.payload.to_vec(), qos));
+                    }
+                }
+                PersistOp::SessionUpsert { client_id } => {
+                    self.sessions.entry(client_id.to_string()).or_default();
+                }
+                PersistOp::SessionDelete { client_id } => {
+                    self.sessions.remove(&*client_id);
+                }
+                PersistOp::Subscribe {
+                    client_id,
+                    filter,
+                    qos,
+                } => {
+                    let s = self
+                        .sessions
+                        .get_mut(&*client_id)
+                        .expect("FK: session first");
+                    s.0.retain(|(f, _)| *f != *filter);
+                    s.0.push((filter.to_string(), qos));
+                }
+                PersistOp::Unsubscribe { client_id, filter } => {
+                    if let Some(s) = self.sessions.get_mut(&*client_id) {
+                        s.0.retain(|(f, _)| *f != *filter);
+                    }
+                }
+                PersistOp::QueuePush { client_id, msg } => {
+                    let s = self
+                        .sessions
+                        .get_mut(&*client_id)
+                        .expect("FK: session first");
+                    s.1.push((msg.topic.to_string(), msg.payload.to_vec()));
+                }
+                PersistOp::QueueClear { client_id } => {
+                    if let Some(s) = self.sessions.get_mut(&*client_id) {
+                        s.1.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    fn restore(&self) -> Broker {
+        let mut b = Broker::new(Config {
+            persist: true,
+            ..cfg()
+        });
+        for (t, (p, q)) in &self.retained {
+            b.restore_retained(t, p, *q);
+        }
+        for (id, (subs, queue)) in &self.sessions {
+            b.restore_session(
+                id,
+                subs.iter().map(|(f, q)| (f.as_str(), *q)),
+                queue.iter().map(|(t, p)| (t.as_str(), p.as_slice())),
+            );
+        }
+        b
+    }
+}
+
+#[test]
+fn persisted_state_survives_a_restart() {
+    let mut m = Model::default();
+    let mut b = Broker::new(Config {
+        persist: true,
+        ..cfg()
+    });
+    // A retained message, set then replaced, and one set then cleared.
+    let (mut d1, _) = Client::connect(&mut b, "d1", true, None, 0);
+    d1.publish(&mut b, "devices/d1/fw", b"1.0", QoS::AtLeastOnce, true, 0);
+    d1.publish(&mut b, "devices/d1/fw", b"1.1", QoS::AtLeastOnce, true, 0);
+    d1.publish(&mut b, "devices/d1/tmp", b"x", QoS::AtMostOnce, true, 0);
+    d1.publish(&mut b, "devices/d1/tmp", b"", QoS::AtMostOnce, true, 0);
+    // A persistent device with a command subscription goes offline with one
+    // command unacknowledged; another arrives while it is away.
+    let (mut d2, ack) = Client::connect(&mut b, "d2", false, None, 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    d2.subscribe(&mut b, 1, &[("devices/d2/cmd/#", QoS::AtLeastOnce)], 0);
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    svc.publish(&mut b, "devices/d2/cmd/a", b"1", QoS::AtLeastOnce, false, 0);
+    d2.recv(&mut b);
+    d2.kill(&mut b, 0);
+    svc.publish(&mut b, "devices/d2/cmd/b", b"2", QoS::AtLeastOnce, false, 0);
+    // Clean sessions are never stored.
+    let (mut d3, _) = Client::connect(&mut b, "d3", true, None, 0);
+    d3.subscribe(&mut b, 1, &[("devices/d3/cmd/#", QoS::AtLeastOnce)], 0);
+    m.apply(&mut b);
+    assert_eq!(m.retained.len(), 1);
+    assert_eq!(m.sessions.len(), 1);
+    assert_eq!(m.sessions["d2"].1.len(), 2);
+
+    // "Reboot": a fresh broker restored from the model.
+    let mut b = m.restore();
+    assert!(b.drain_persist().next().is_none(), "restore writes nothing");
+    let (mut d2, ack) = Client::connect(&mut b, "d2", false, None, 0);
+    assert_eq!(ack, Got::ConnAck(true, 0));
+    let got = d2.recv(&mut b);
+    assert_eq!(
+        got,
+        vec![
+            publish("devices/d2/cmd/a", b"1", 1, Some(1), false),
+            publish("devices/d2/cmd/b", b"2", 1, Some(2), false),
+        ]
+    );
+    m.apply(&mut b);
+    assert!(
+        m.sessions["d2"].1.is_empty(),
+        "queue back in RAM after reconnect"
+    );
+    // The restored subscription routes live traffic.
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    svc.publish(&mut b, "devices/d2/cmd/c", b"3", QoS::AtMostOnce, false, 0);
+    assert_eq!(
+        d2.recv(&mut b),
+        vec![publish("devices/d2/cmd/c", b"3", 0, None, false)]
+    );
+    // Retained message restored for a new subscriber.
+    let got = svc.subscribe(&mut b, 2, &[("devices/+/fw", QoS::AtLeastOnce)], 0);
+    assert!(
+        got.contains(&publish("devices/d1/fw", b"1.1", 1, Some(1), true)),
+        "{got:?}"
+    );
+    // Reconnecting with a clean session deletes the stored session.
+    // d2 never acknowledged a and b: the disconnect snapshot keeps them.
+    d2.disconnect(&mut b, 0);
+    m.apply(&mut b);
+    assert_eq!(m.sessions["d2"].1.len(), 2);
+    let _ = Client::connect(&mut b, "d2", true, None, 0);
+    m.apply(&mut b);
+    assert!(m.sessions.is_empty());
+}
+
+#[test]
+fn restore_drops_what_the_policy_no_longer_allows() {
+    let mut m = Model::default();
+    m.sessions.insert(
+        "d1".into(),
+        (
+            vec![
+                ("devices/d1/cmd/#".into(), QoS::AtLeastOnce),
+                ("devices/d2/cmd/#".into(), QoS::AtLeastOnce),
+            ],
+            vec![("devices/d1/cmd/x".into(), b"q".to_vec())],
+        ),
+    );
+    m.sessions.insert("bad/id".into(), (vec![], vec![]));
+    let mut b = m.restore();
+    m.apply(&mut b);
+    assert_eq!(
+        m.sessions["d1"].0,
+        vec![("devices/d1/cmd/#".into(), QoS::AtLeastOnce)]
+    );
+    assert!(!m.sessions.contains_key("bad/id"));
+    let (mut d1, ack) = Client::connect(&mut b, "d1", false, None, 0);
+    assert_eq!(ack, Got::ConnAck(true, 0));
+    assert_eq!(
+        d1.recv(&mut b),
+        vec![publish("devices/d1/cmd/x", b"q", 1, Some(1), false)]
+    );
 }

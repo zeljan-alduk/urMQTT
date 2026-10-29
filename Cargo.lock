@@ -1303,6 +1303,11 @@ version = "0.0.1"
 [[package]]
 name = "urmqtt-store"
 version = "0.0.1"
+dependencies = [
+ "cc",
+ "sha2",
+ "urmqtt-arch-aarch64",
+]
 
 [[package]]
 name = "urmqtt-tcp"

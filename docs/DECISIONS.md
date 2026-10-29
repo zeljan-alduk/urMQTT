@@ -253,3 +253,59 @@ verified in the named milestone before it becomes Accepted).
   - OpenSSL clients (mosquitto) report `unexpected eof` (exit 4) unless the server sends `close_notify` before FIN. We now send it whenever the socket can still send, which includes `CloseWait`.
   - Aborting a socket in `TimeWait` sends an RST that some clients report as an error; we simply let it expire.
 - **Known gaps** (tracked in PROGRESS): the kernel ELF is about 1.10 MB (target < 1 MB, M15/M17). Record-layer state is about 170 B per connection (two directions with expanded AES/ChaCha keys) against the 128 B target (M15: keep raw keys and expand per record, or share key schedules).
+
+## ADR-030 — SQLite in the kernel: raw-disk VFS, DB core, persistence model
+
+- **Status:** Accepted (M11)
+- **Build:** the official 3.54.1 amalgamation is vendored in `vendor/sqlite`. `crates/store/build.rs` checks it against `CHECKSUMS` (SHA-256; the upstream zip's SHA3-256 is recorded) before compiling, so a modified file is never linked.
+  - For `aarch64-unknown-none` it is built freestanding with clang (Homebrew LLVM if present, else `clang`/`clang-18`; override with `URMQTT_CLANG`) and archived with `llvm-ar` (`URMQTT_AR`). Apple's `ar` writes BSD archives with an empty symbol table for ELF members.
+  - Flags match the kernel ABI: hard float (ADR-003; no `-mgeneral-regs-only`, SQLite uses FP), `-mbranch-protection=pac-ret+bti` (text pages are BTI-guarded, ADR-016), `-mstrict-align`, no PIC, no stack protector, `-Os`, and `-ffile-prefix-map` (no build paths in the objects).
+  - Host builds (tests) use the host compiler and libc.
+- **Compile options:** every option was verified against 3.54.1:
+  - `OS_OTHER`, `THREADSAFE=0`, `ENABLE_MEMSYS5` + `ZERO_MALLOC` (no system allocator at all), `TEMP_STORE=3`, `DEFAULT_MEMSTATUS=0`, `DQS=0`.
+  - Omitted: `LOAD_EXTENSION`, `SHARED_CACHE`, `DEPRECATED`, `LOCALTIME`, `PROGRESS_CALLBACK`, `AUTHORIZATION`, `AUTOINIT`, `JSON`, `UTF16`, `TRACE`, `COMPLETE`, `GET_TABLE`, `TCL_VARIABLE`, `DECLTYPE`.
+  - Also: `UNTESTABLE`, `MAX_MMAP_SIZE=0`, page size 4096, exclusive locking and `synchronous=FULL` as defaults, foreign keys on, no worker threads.
+  - `SQLITE_OMIT_ATTACH` does **not** work with the amalgamation (the generated parser still references `sqlite3Attach`, `sqlite3Detach` and `sqlite3Vacuum`), so `SQLITE_MAX_ATTACHED=0` is used instead.
+  - `SQLITE_OMIT_DATETIME_FUNCS` is not used: its fallback needs `gmtime`/`strftime`.
+  - Memory statistics are enabled at run time (`SQLITE_CONFIG_MEMSTATUS`) for the boot log and M15.
+  - `SQLITE_USE_ALLOCA` is not used.
+- **libc:**
+  - The amalgamation's undefined symbols are exactly `memcmp`, `memcpy`, `memmove` and `memset` (from `compiler_builtins`), plus `strchr`, `strcmp`, `strcspn`, `strlen`, `strncmp`, `strrchr` and `strspn`. The `str*` functions are small Rust implementations in `crates/store/src/libc.rs`.
+  - Minimal headers in `crates/store/csrc/include` declare only these. `assert` is a no-op, and `math.h` maps to compiler builtins.
+- **Data disk:** no filesystem.
+  - A 4 KiB superblock with magic, version, uuid, region table and CRC-32C, then a double-buffered *file-size table*, then 4 KiB-aligned regions: main DB (½), WAL (⅛, 2–64 MiB), rollback journal (1 MiB) and telemetry (the rest, M12). The last 8 sectors stay scratch for the boot self-test.
+  - A blank (all-zero) disk is formatted at boot: size table first, superblock last. Anything else without our magic, with a bad CRC or with an inconsistent region table is **never formatted over**.
+- **VFS (`urmqtt`):**
+  - Three fixed files map onto the regions: `urmqtt.db`, `-wal` and `-journal`. Reads and writes are bounds-checked, with read-modify-write for partial sectors.
+  - Logical file sizes live in the size table. `xSync` flushes the data, then writes the next size slot and flushes again, so a size never covers data that is not durable.
+  - `xDelete` zeroes the logical size. Locks always succeed (single owner). `xRandomness` uses the kernel CSPRNG, `xCurrentTimeInt64` the boot wall clock, and the sector size is 512.
+  - `xDeviceCharacteristics` = 0: no atomic writes and no powersafe overwrite, so SQLite assumes a torn sector can damage its neighbours and pads WAL commits accordingly. That is the right assumption for our read-modify-write.
+  - `io_methods` is version 1 (no shared memory): WAL works because `PRAGMA locking_mode=EXCLUSIVE` is set *before* `journal_mode=WAL`. This is verified at open (`journal_mode` must return `wal`); failure refuses to start.
+  - `wal_autocheckpoint` is sized to half the WAL region.
+- **Durability policy:**
+  - `synchronous=FULL`, so a commit is durable when it returns.
+  - A device without `VIRTIO_BLK_F_FLUSH` is refused (`storage.require_flush`).
+  - `PRAGMA quick_check` runs at every boot. On failure the kernel refuses to serve (`storage.refuse_on_corruption`).
+  - No data disk means refusing to serve (`storage.require_data_disk`).
+  - All three may be false only in `dev`, where the broker then runs memory-only with a loud log line.
+  - `DBCONFIG_DEFENSIVE` is on and `TRUSTED_SCHEMA` off. All SQL is fixed and prepared once at open. Schema migrations are embedded and append-only, versioned by `user_version`, and a database from a newer build is refused.
+- **Heap:** `storage.sqlite_heap_mb` of physically contiguous frames (HHDM, RW, NX) is given to `memsys5` once (`SQLITE_CONFIG_HEAP`). SQLite never touches the kernel heap.
+- **DB core:**
+  - With ≥ 2 CPUs the highest-numbered CPU becomes the DB core after SMP bring-up and runs only the worker. With one CPU the network loop runs it between iterations.
+  - Data plane and DB core share only two SPSC rings, requests (4096) and responses (256), whose orderings are documented in `arch-aarch64/src/spsc.rs`. The data plane never blocks: a full ring spills into a local backlog that keeps order.
+  - The DB core sleeps in `wfe`. It is woken by `sev` after pushes and by the generic-timer event stream (about every 0.5–1 ms), which bounds the batch delay.
+  - Writes are grouped into one transaction per 5 ms or 512 operations. Each commit is reported on the response ring.
+  - The store is opened, checked and loaded on the boot CPU *before* the other cores start, then handed over under a lock.
+- **What is persisted:**
+  - Retained messages (set or cleared on every retained PUBLISH and will).
+  - Persistent sessions: the row is created when a `clean_session=0` session attaches, subscriptions on SUBSCRIBE/UNSUBSCRIBE, and the session is deleted on a clean reconnect.
+  - Queued QoS 1 messages while the session is offline: a snapshot of in-flight + queue at disconnect, then one row per new message, cleared when the session reconnects.
+  - The device registry (first and last seen, connect count), written when a TLS identity authenticates.
+  - Revoked serials, seeded from `tls.revocation_list` at every boot.
+  - The broker emits these as `PersistOp`s (sans-IO). On restore, stored subscriptions and topics are re-checked against the current ACL and limits, and whatever fails is dropped from the store.
+- **Not persisted (v1):** in-flight state of *online* sessions. A broker crash loses unacknowledged QoS 1 deliveries to connected devices, though the publisher has already been acknowledged. Mosquitto has the same window between autosaves. Closing it means writing every QoS 1 delivery before sending it, which is a later trade-off. Persistent sessions never expire (MQTT 3.1.1 has no expiry), so their number is bounded only by the disk and the ACL.
+- **Revocations at run time:** the TLS server reads the list from the store at boot. Revoking without a rebuild needs an operator path (M16) and the refresh control message from the DB core (PROMPT §6).
+- **Testing:**
+  - Host tests run real SQLite through the VFS on a `MemDisk` with a volatile write cache. Power loss is simulated by applying an arbitrary subset of the unflushed writes. They check: the store round-trip; uncommitted work rolled back; 12 crash rounds that must leave `integrity_check` = ok and keep every acknowledged commit; and foreign or damaged superblocks refused.
+  - The smoke test kills QEMU with SIGKILL while the kernel commits in a loop and verifies on the next boot. The host page cache survives that, so this proves VM-crash consistency, not host power loss; the `MemDisk` tests cover reordering and loss.
+  - `disk_layout` fuzz target.

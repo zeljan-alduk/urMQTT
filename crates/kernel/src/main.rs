@@ -24,6 +24,8 @@ mod boot;
 #[cfg(target_os = "none")]
 mod console;
 #[cfg(target_os = "none")]
+mod db;
+#[cfg(target_os = "none")]
 mod devices;
 #[cfg(target_os = "none")]
 mod irq;

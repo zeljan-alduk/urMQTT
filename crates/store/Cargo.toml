@@ -7,9 +7,18 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
+links = "sqlite3"
 
 [lib]
 bench = false
 
 [lints]
 workspace = true
+
+[dependencies]
+urmqtt-arch-aarch64 = { path = "../arch-aarch64" }
+
+[build-dependencies]
+# Compiles the vendored SQLite amalgamation (ADR-030).
+cc = "1.2"
+sha2 = { version = "0.11", default-features = false }

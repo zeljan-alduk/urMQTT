@@ -13,6 +13,7 @@ libfuzzer-sys = "0.4"
 urmqtt-config-schema = { path = "../crates/config-schema" }
 urmqtt-mqtt = { path = "../crates/mqtt" }
 urmqtt-platform = { path = "../crates/platform" }
+urmqtt-store = { path = "../crates/store" }
 
 # Standalone workspace: fuzz builds need sanitizer RUSTFLAGS.
 [workspace]
@@ -42,6 +43,13 @@ bench = false
 [[bin]]
 name = "mqtt_decode"
 path = "fuzz_targets/mqtt_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "disk_layout"
+path = "fuzz_targets/disk_layout.rs"
 test = false
 doc = false
 bench = false

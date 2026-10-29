@@ -156,6 +156,8 @@ struct RawStorage {
     telemetry_topics: Vec<String>,
     retention_days: u32,
     require_flush: bool,
+    require_data_disk: bool,
+    refuse_on_corruption: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -242,6 +244,11 @@ pub struct Storage {
     pub telemetry_topics: Vec<String>,
     pub retention_days: u32,
     pub require_flush: bool,
+    /// Without a data disk: refuse to serve (true) or run in memory only.
+    pub require_data_disk: bool,
+    /// `PRAGMA quick_check` failure: refuse to serve (true) or run without
+    /// persistence.
+    pub refuse_on_corruption: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,7 +304,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
     let tls = validate_tls(&raw.tls, &mut errors);
     let limits = validate_limits(&raw.limits, &mut errors);
     let acl = validate_acl(&raw.acl, &limits, &mut errors);
-    let storage = validate_storage(&raw.storage, &limits, &mut errors);
+    let storage = validate_storage(env, &raw.storage, &limits, &mut errors);
     let observability = validate_observability(&raw.observability, &mut errors);
     let watchdog = validate_watchdog(&raw.watchdog, &mut errors);
     let memory = validate_memory(&raw.memory, &mut errors);
@@ -681,7 +688,24 @@ pub fn check_identity_pattern(p: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_storage(raw: &RawStorage, limits: &Limits, errors: &mut Vec<ConfigError>) -> Storage {
+fn validate_storage(
+    env: &str,
+    raw: &RawStorage,
+    limits: &Limits,
+    errors: &mut Vec<ConfigError>,
+) -> Storage {
+    // Durability shortcuts are for development only (ADR-030).
+    if env != "dev" {
+        for (key, on) in [
+            ("storage.require_flush", raw.require_flush),
+            ("storage.require_data_disk", raw.require_data_disk),
+            ("storage.refuse_on_corruption", raw.refuse_on_corruption),
+        ] {
+            if !on {
+                errors.push(err(key, "may only be false in [\"dev\"]"));
+            }
+        }
+    }
     if !(1..=4096).contains(&raw.sqlite_heap_mb) {
         errors.push(err("storage.sqlite_heap_mb", "must be in 1..=4096"));
     }
@@ -700,6 +724,8 @@ fn validate_storage(raw: &RawStorage, limits: &Limits, errors: &mut Vec<ConfigEr
         telemetry_topics: raw.telemetry_topics.clone(),
         retention_days: raw.retention_days,
         require_flush: raw.require_flush,
+        require_data_disk: raw.require_data_disk,
+        refuse_on_corruption: raw.refuse_on_corruption,
     }
 }
 
@@ -874,6 +900,8 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         telemetry_topics: {tt},
         retention_days: {rd},
         require_flush: {rf},
+        require_data_disk: {rdd},
+        refuse_on_corruption: {roc},
     }},
     observability: Observability {{
         log_level: LogLevel::{ll:?},
@@ -920,6 +948,8 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         tt = render_strs(&cfg.storage.telemetry_topics),
         rd = cfg.storage.retention_days,
         rf = cfg.storage.require_flush,
+        rdd = cfg.storage.require_data_disk,
+        roc = cfg.storage.refuse_on_corruption,
         ll = cfg.observability.log_level,
         syslog = render_addr(cfg.observability.syslog_udp),
         metrics = render_addr(cfg.observability.metrics_udp),

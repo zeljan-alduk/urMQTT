@@ -30,6 +30,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: lint
+          bare-metal-c: "true"
       - run: make certs
       - name: rustfmt
         run: |
@@ -95,6 +96,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: kernel
+          bare-metal-c: "true"
       - run: make certs
       - name: Stage throwaway certificates for the prod build check
         if: matrix.env == 'prod'
@@ -123,6 +125,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: kernel
+          bare-metal-c: "true"
       - name: Install QEMU, UEFI firmware and ISO tools
         run: |
           sudo apt-get update -qq

@@ -422,7 +422,11 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     if let Err(msg) = devices::net_selftest() {
         fatal(msg);
     }
+    // Durable storage (M11) opens before the other cores start; the DB
+    // core takes the store over afterwards.
+    let restored = crate::db::init(s.options.db_test);
     smp_bringup(&mut s);
+    crate::db::start(smp::count());
 
     urmqtt_log::raw(format_args!("URMQTT READY\n"));
     if s.options.smoke && !s.options.serve {
@@ -430,7 +434,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
     // The boot CPU runs the network (M7 prototype: one core, one queue);
     // the other cores idle until the data plane spreads out (M13).
-    crate::netproto::run(urmqtt_config::CONFIG.env == "dev")
+    crate::netproto::run(urmqtt_config::CONFIG.env == "dev", restored)
 }
 
 const AP_TIMEOUT_NS: u64 = 2_000_000_000;
@@ -529,12 +533,12 @@ fn tick_selftest(timer_intid: u32) {
     }
 }
 
-fn fatal(msg: &str) -> ! {
+pub(crate) fn fatal(msg: &str) -> ! {
     error!("fatal: {msg}");
     power::fatal()
 }
 
-fn fatal_fmt(args: core::fmt::Arguments<'_>) -> ! {
+pub(crate) fn fatal_fmt(args: core::fmt::Arguments<'_>) -> ! {
     error!("fatal: {args}");
     power::fatal()
 }
@@ -543,11 +547,20 @@ fn fatal_fmt(args: core::fmt::Arguments<'_>) -> ! {
 static BOOT_UNIX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Wall clock for certificate validity: date at boot plus uptime.
-fn now_unix() -> Option<u64> {
+pub(crate) fn now_unix() -> Option<u64> {
     // Relaxed: written once before the clock is installed.
     match BOOT_UNIX.load(core::sync::atomic::Ordering::Relaxed) {
         0 => None,
         t => Some(t + uptime_ns() / 1_000_000_000),
+    }
+}
+
+/// Wall clock in Unix milliseconds (SQLite's `current_timestamp`).
+pub(crate) fn now_unix_ms() -> Option<u64> {
+    // Relaxed: written once before the clock is used.
+    match BOOT_UNIX.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        t => Some(t * 1000 + uptime_ns() / 1_000_000),
     }
 }
 

@@ -11,13 +11,13 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M10)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M11)-red)
 
 </div>
 
 > [!WARNING]
 > **urMQTT is pre-alpha.** It serves MQTT 3.1.1 over TLS 1.3 with mutual TLS (and, in dev builds
-> only, over plain TCP). Durable storage arrives in **M11**. These milestones are complete:
+> only, over plain TCP), and keeps its state in SQLite on a raw data disk. These milestones are complete:
 > - **M0**: tooling and CI
 > - **M1**: UEFI boot, console, exception reports
 > - **M2**: own page tables with enforced W^X, guard pages, locked tables, PAC and BTI
@@ -29,6 +29,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M8**: complete MQTT 3.1.1 codec, fuzzed and tested against real mosquitto clients
 > - **M9**: broker core with QoS 0/1, wildcards, retained messages, LWT, persistent sessions and ACL, verified with mosquitto clients
 > - **M10**: TLS 1.3 with mutual TLS: rustls handshake, own crypto provider and record layer, revocation list, resumption, admission control
+> - **M11**: SQLite inside the kernel on a raw-disk VFS (WAL, exclusive), with a DB core fed by SPSC rings. State survives restarts and `kill -9`
 >
 > The kernel boots under QEMU with HVF and TCG. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
@@ -100,8 +101,8 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | QoS 0/1, wildcards, retained, LWT, persistent sessions, keepalive | ✅ M9 |
 | | ACL (`devices/{id}/#` by default), service identities, per-device rate limits | ✅ M9 |
 | | MQTT 5.0, QoS 2 | 📋 later |
-| **Storage** | SQLite in the kernel over a raw virtio-blk VFS (WAL, exclusive) | 📋 M11 |
-| | Device registry, revocations, retained messages, sessions | 📋 M11 |
+| **Storage** | SQLite in the kernel over a raw virtio-blk VFS (WAL, exclusive), quick_check at boot | ✅ M11 |
+| | Device registry, revocations, retained messages, persistent sessions with offline queues | ✅ M11 |
 | | Per-core append-only telemetry log with CRC and crash recovery | 📋 M12 |
 | **Scale** | Per-core event loops, slabs, buffer pools, cross-core fan-out | 📋 M13 |
 | | ≤ 512 B per idle TLS connection, measured at 10k/100k/1M | 📋 M15 |
@@ -229,11 +230,14 @@ The threat model is in [docs/SECURITY.md](docs/SECURITY.md).
 The data lives on a separate virtio-blk disk with no filesystem:
 
 ```
-[ superblock: magic · layout version · uuid · region table · CRC ]
-[ SQLite main DB ][ SQLite WAL ][ telemetry log core 0 ][ core 1 ] … [ core N ]
+LBA 0      [ superblock: magic · layout version · uuid · region table · CRC-32C ]
+LBA 8, 16  [ file-size table, slots A/B (newest valid wins) ]
+LBA 64     [ SQLite main DB ½ ][ SQLite WAL ⅛ ][ journal 1 MiB ][ telemetry log (M12) … ]
+last 4 KiB [ scratch for the boot block-device self-test ]
 ```
 
-- **SQLite** is compiled into the kernel, with a raw-disk VFS, WAL mode and `locking_mode=EXCLUSIVE`. It holds the device registry, revocations, retained messages and persistent sessions.
+- **SQLite** (vendored 3.54.1, checksum-verified at build time) is compiled into the kernel with clang, freestanding, and uses a fixed `memsys5` heap. Its VFS maps three fixed files onto disk regions; there is no filesystem. It runs in WAL mode with `locking_mode=EXCLUSIVE` (so no shared-memory index) and `synchronous=FULL`, and the boot fails safe on `quick_check` errors. It holds the device registry, revocations, retained messages and persistent sessions with their offline QoS 1 queues.
+- **The DB core** (the highest-numbered CPU) runs SQLite and nothing else. The data plane sends it state changes over a lock-free SPSC ring; it batches them into one transaction per 5 ms or 512 operations and reports commits on a second ring. A blank disk is formatted on first boot; anything else is never formatted over.
 - **Telemetry** goes to per-core append-only segments with a CRC per record. On boot, recovery truncates a torn tail.
 
 ## Repository layout
@@ -275,14 +279,14 @@ urMQTT/
 # Rust (https://rustup.rs). The pinned toolchain installs itself from rust-toolchain.toml.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-brew install qemu xorriso llvm mosquitto openssl@3   # OpenSSL >= 3 (LibreSSL is not enough)
+brew install qemu xorriso llvm mosquitto openssl@3   # llvm: clang + llvm-ar for SQLite; OpenSSL >= 3
 cargo install cargo-fuzz --locked      # optional, for make fuzz
 ```
 
 **Linux (aarch64 or x86_64 host)**:
 
 ```bash
-sudo apt install qemu-system-arm qemu-efi-aarch64 xorriso clang lld mosquitto-clients openssl
+sudo apt install qemu-system-arm qemu-efi-aarch64 xorriso clang llvm mosquitto-clients openssl
 ```
 
 ### Build and check
@@ -420,7 +424,9 @@ error: invalid configuration deploy/bad/config.toml:
 | `storage.sqlite_heap_mb` | 1–4096 | Fixed SQLite `memsys5` heap |
 | `storage.telemetry_topics` | topic filters | PUBLISHes appended to the telemetry log |
 | `storage.retention_days` | > 0 | Telemetry retention |
-| `storage.require_flush` | bool | Refuse disks without `VIRTIO_BLK_F_FLUSH` |
+| `storage.require_flush` | bool | Refuse disks without `VIRTIO_BLK_F_FLUSH` (false only in `dev`) |
+| `storage.require_data_disk` | bool | Refuse to serve without a data disk (false only in `dev`: memory-only) |
+| `storage.refuse_on_corruption` | bool | Refuse to serve when `PRAGMA quick_check` fails (false only in `dev`) |
 | `observability.log_level` | `error`…`trace` | |
 | `observability.syslog_udp`, `metrics_udp` | `""` or `"a.b.c.d:port"` | Private syslog and statsd collectors |
 | `watchdog.handler_budget_ms` | 1–10 000 | Per-handler time budget |
@@ -609,7 +615,31 @@ scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img --pcap buil
 tcpdump -nn -r build/net.pcap          # gratuitous ARP + ARP exchange with the slirp gateway
 ```
 
-### 8. Load testing (M13)
+### 8. State survives a restart and `kill -9` (M11)
+
+```bash
+make certs iso data-img
+scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img &   # first boot formats the disk
+D=deploy/dev
+mosquitto_pub -h localhost -p 8883 --cafile $D/ca.pem --cert $D/devices/device-001.pem --key $D/devices/device-001.key \
+  -i device-001 -q 1 -r -t devices/device-001/fw -m 2.0.0
+mosquitto_sub -h localhost -p 8883 --cafile $D/ca.pem --cert $D/devices/device-002.pem --key $D/devices/device-002.key \
+  -i device-002 -c -q 1 -t 'devices/device-002/cmd/#' -E        # persistent session, then offline
+mosquitto_pub -h localhost -p 8883 --cafile $D/ca.pem --cert $D/services/backend.pem --key $D/services/backend.key \
+  -i backend -q 1 -t devices/device-002/cmd/reboot -m now      # queued for the offline device
+
+pkill -9 qemu-system-aarch64                                     # pull the plug
+scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img &
+# boot log: "db: restored 1 retained message(s), 1 persistent session(s) with 1 queued message(s) ..."
+mosquitto_sub -h localhost -p 8883 --cafile $D/ca.pem --cert $D/devices/device-002.pem --key $D/devices/device-002.key \
+  -i device-002 -c -q 1 -v -t 'devices/device-002/cmd/#' -C 1    # prints "devices/device-002/cmd/reboot now"
+```
+
+The storage self-tests run from the command line of a dev image: `test=db-bench` measures batched
+against single-row commits, and `test=db-crash` followed by `test=db-verify` is the kill -9 test
+that `make smoke` runs.
+
+### 9. Load testing (M13)
 
 ```bash
 make loadtest ARGS="--connections 50000 --rate 2000/s --keepalive 60 --publish 1/30s"
@@ -618,7 +648,7 @@ make loadtest ARGS="--connections 50000 --rate 2000/s --keepalive 60 --publish 1
 QEMU user networking (slirp) tops out far below a million connections. For ≥ 100k use
 `vmnet-shared` on macOS (needs sudo) or a Linux host with KVM, tap and several client IPs.
 
-### 9. TCP echo through the port forward (dev, works today)
+### 10. TCP echo through the port forward (dev, works today)
 
 ```bash
 make iso data-img
@@ -627,11 +657,11 @@ scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img --fwd 7007:
 python3 scripts/echo-client.py 7007        # client: echo 1 ok / 3000 ok / 60000 ok
 ```
 
-### 10. Fuzzing (works today)
+### 11. Fuzzing (works today)
 
 ```bash
 make fuzz T=config_parse FUZZ_TIME=60     # every parser gets a target as it lands
-cargo fuzz list                            # config_parse, fdt_parse, acpi_parse, mqtt_decode; tcp, tls later
+cargo fuzz list                            # config_parse, fdt_parse, acpi_parse, mqtt_decode, disk_layout
 make fuzz T=mqtt_decode FUZZ_TIME=600      # the M8 acceptance run
 ```
 
@@ -670,7 +700,7 @@ shasum -a 256 build/urmqtt-prod-*.iso
 | `make iso ENV=…` | Bootable UEFI ISO |
 | `make run` / `run-tcg` / `run-smp N=8` / `debug` | QEMU variants (M1, M4) |
 | `make smoke` | Headless boot and fault scenarios under HVF + TCG (TCG only in CI), serial-log checks |
-| `make data-img` | Blank sparse data disk (layout initialised from M11) |
+| `make data-img` | Blank sparse data disk (formatted by the kernel on first boot) |
 | `make fuzz T=<target>` | Bounded cargo-fuzz run (`FUZZ_TIME`, default 600 s) |
 | `make loadtest` | Host-side load generator (M13) |
 | `make dist` | Release artifacts plus `SHA256SUMS` in `build/dist/` |
@@ -726,7 +756,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M8** MQTT codec | spec tests, property tests, 10 minutes of fuzzing with no crash |
 | ✅ | **M9** Broker over TCP (dev) | pub/sub, wildcards, retained, LWT, QoS 1 redelivery with mosquitto |
 | ✅ | **M10** TLS 1.3 + mTLS | mosquitto over mTLS; wrong CA, expired, client-id mismatch and revoked all rejected |
-| 📋 | **M11** SQLite in the kernel | data survives restarts and `kill -9` |
+| ✅ | **M11** SQLite in the kernel | data survives restarts and `kill -9` |
 | 📋 | **M12** Telemetry log | 1M messages; torn tail truncated on recovery |
 | 📋 | **M13** Multicore data plane | near-linear scaling 1 → 2 → 4 cores |
 | 📋 | **M14** Own TCP stack | smoltcp replaced; loss simulation tests; segment fuzzing |

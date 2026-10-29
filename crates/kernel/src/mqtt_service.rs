@@ -3,17 +3,22 @@
 //! plaintext listener. Both feed one sans-IO broker.
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use smoltcp::iface::{SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
+use urmqtt_arch_aarch64::spsc::{Consumer, Producer};
 use urmqtt_broker::{Acl, Broker, CloseReason, Config, ConnId};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{info, warn};
 use urmqtt_mqtt::Limits;
+use urmqtt_mqtt::QoS;
 use urmqtt_tls::{Event, IdentityField, ServerSetup, TlsServer, TlsSession};
+
+use crate::db::{self, DbReq, DbResp, Restored};
 
 const TLS_SOCKETS: usize = 32;
 /// Plaintext connections (dev only).
@@ -49,6 +54,52 @@ pub struct MqttService {
     app: Vec<u8>,
     admission: Admission,
     refused: u64,
+    db: Option<DbLink>,
+}
+
+/// The data plane's side of the DB rings.
+struct DbLink {
+    tx: Producer<'static, DbReq, 4096>,
+    rx: Consumer<'static, DbResp, 256>,
+    /// Requests waiting for room in the ring (never dropped).
+    backlog: VecDeque<DbReq>,
+    committed_ops: u64,
+    failed_ops: u64,
+    max_commit_us: u32,
+}
+
+impl DbLink {
+    fn send(&mut self, req: DbReq) {
+        // Keep order: nothing overtakes the backlog.
+        let rejected = if self.backlog.is_empty() {
+            self.tx.push(req).err()
+        } else {
+            Some(req)
+        };
+        if let Some(r) = rejected {
+            self.backlog.push_back(r);
+        }
+    }
+
+    /// Moves the backlog into the ring, collects responses, wakes the DB.
+    fn pump(&mut self) {
+        while let Some(r) = self.backlog.pop_front() {
+            if let Err(r) = self.tx.push(r) {
+                self.backlog.push_front(r);
+                break;
+            }
+        }
+        while let Some(resp) = self.rx.pop() {
+            match resp {
+                DbResp::Committed { ops, us } => {
+                    self.committed_ops += u64::from(ops);
+                    self.max_commit_us = self.max_commit_us.max(us);
+                }
+                DbResp::Failed { ops } => self.failed_ops += u64::from(ops),
+            }
+        }
+        db::notify();
+    }
 }
 
 pub fn broker_config(max_connections: usize) -> Config {
@@ -76,10 +127,11 @@ pub fn broker_config(max_connections: usize) -> Config {
             service_publish: CONFIG.acl.service_publish,
             service_subscribe: CONFIG.acl.service_subscribe,
         },
+        persist: db::active(),
     }
 }
 
-fn tls_server() -> Option<TlsServer> {
+fn tls_server(revoked: &[&str]) -> Option<TlsServer> {
     let setup = ServerSetup {
         ca_pem: urmqtt_config::CA_PEM,
         cert_pem: urmqtt_config::SERVER_CERT_PEM,
@@ -89,7 +141,7 @@ fn tls_server() -> Option<TlsServer> {
             urmqtt_config::IdentityField::SanUri => IdentityField::SanUri,
         },
         resumption: CONFIG.tls.resumption,
-        revoked_hex: CONFIG.tls.revoked_serials,
+        revoked_hex: revoked,
         version: crate::VERSION,
     };
     match TlsServer::new(&setup) {
@@ -120,9 +172,15 @@ fn add_slots(sockets: &mut SocketSet<'_>, slots: &mut Vec<Slot>, n: usize, port:
 }
 
 impl MqttService {
-    pub fn new(sockets: &mut SocketSet<'_>) -> Self {
+    pub fn new(sockets: &mut SocketSet<'_>, restored: Option<Restored>) -> Self {
         let mut slots = Vec::new();
-        let tls = tls_server();
+        // The revocation list comes from the store (seeded from the
+        // build-time list) or, without storage, from the build directly.
+        let revoked: Vec<&str> = match &restored {
+            Some(r) => r.revoked.iter().map(String::as_str).collect(),
+            None => CONFIG.tls.revoked_serials.to_vec(),
+        };
+        let tls = tls_server(&revoked);
         if tls.is_some() {
             add_slots(
                 sockets,
@@ -135,15 +193,54 @@ impl MqttService {
                 "mqtt: TLS 1.3 listener on port {} (mutual TLS, identity = certificate {:?}, {} revoked serial(s))",
                 CONFIG.network.mqtt_tls_port,
                 CONFIG.tls.identity_field,
-                CONFIG.tls.revoked_serials.len()
+                revoked.len()
             );
         }
         if let Some(port) = CONFIG.network.mqtt_plain_port {
             add_slots(sockets, &mut slots, PLAIN_SOCKETS, port, false);
             warn!("mqtt: PLAINTEXT listener on port {port} (dev build only, identity = client id)");
         }
+        let mut broker = Broker::new(broker_config(TLS_SOCKETS + PLAIN_SOCKETS));
+        if let Some(r) = &restored {
+            for m in &r.retained {
+                let qos = if m.qos == 1 {
+                    QoS::AtLeastOnce
+                } else {
+                    QoS::AtMostOnce
+                };
+                broker.restore_retained(&m.topic, &m.payload, qos);
+            }
+            for sess in &r.sessions {
+                broker.restore_session(
+                    &sess.client_id,
+                    sess.subscriptions.iter().map(|(f, q)| {
+                        (
+                            f.as_str(),
+                            if *q == 1 {
+                                QoS::AtLeastOnce
+                            } else {
+                                QoS::AtMostOnce
+                            },
+                        )
+                    }),
+                    sess.queued
+                        .iter()
+                        .map(|q| (q.topic.as_str(), q.payload.as_slice())),
+                );
+            }
+        }
+        let db = db::endpoints()
+            .filter(|_| db::active())
+            .map(|(tx, rx)| DbLink {
+                tx,
+                rx,
+                backlog: VecDeque::new(),
+                committed_ops: 0,
+                failed_ops: 0,
+                max_commit_us: 0,
+            });
         Self {
-            broker: Broker::new(broker_config(TLS_SOCKETS + PLAIN_SOCKETS)),
+            broker,
             tls,
             slots,
             buf: vec![0; RX_BUF],
@@ -153,6 +250,7 @@ impl MqttService {
                 last_ms: 0,
             },
             refused: 0,
+            db,
         }
     }
 
@@ -162,6 +260,12 @@ impl MqttService {
         self.broker.tick(now_ms);
         for i in 0..self.slots.len() {
             activity |= self.poll_slot(i, sockets, now_ms);
+        }
+        if let Some(link) = self.db.as_mut() {
+            for op in self.broker.drain_persist() {
+                link.send(DbReq::Persist(op));
+            }
+            link.pump();
         }
         activity
     }
@@ -256,6 +360,12 @@ impl MqttService {
                         Some(c) => {
                             self.broker.set_identity(c, &identity);
                             slot.conn = Some(c);
+                            if let Some(link) = self.db.as_mut() {
+                                link.send(DbReq::DeviceSeen {
+                                    id: identity.as_str().into(),
+                                    unix: crate::boot::now_unix().unwrap_or(0) as i64,
+                                });
+                            }
                             info!(
                                 "tls: {identity} authenticated ({suite}{})",
                                 if resumed { ", resumed" } else { "" }

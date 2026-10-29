@@ -23,6 +23,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: release
+          bare-metal-c: "true"
       - run: make certs
       # Only the dev image is published: prod images embed private keys and are
       # built by the operator from their own deploy/prod/ (docs/DEPLOY.md).

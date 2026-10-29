@@ -38,6 +38,8 @@ sqlite_heap_mb = 8                # sized for a 64 MB VM; raise with RAM (ADR-00
 telemetry_topics = ["devices/+/telemetry/#"]
 retention_days = 30
 require_flush = true
+require_data_disk = true
+refuse_on_corruption = true
 
 [observability]
 log_level = "info"

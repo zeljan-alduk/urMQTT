@@ -106,6 +106,8 @@ pub struct Storage {
     pub telemetry_topics: &'static [&'static str],
     pub retention_days: u32,
     pub require_flush: bool,
+    pub require_data_disk: bool,
+    pub refuse_on_corruption: bool,
 }
 
 #[derive(Debug, Clone, Copy)]

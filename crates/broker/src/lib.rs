@@ -31,7 +31,8 @@ use alloc::vec::Vec;
 
 use urmqtt_mqtt::{
     ConnAck, Connect, ConnectReturnCode, Error as CodecError, Limits, Packet, Publish, QoS,
-    SUBACK_FAILURE, SubAck, decode, encode, encoded_len,
+    SUBACK_FAILURE, SubAck, decode, encode, encoded_len, is_valid_topic_filter,
+    is_valid_topic_name,
 };
 
 pub use acl::{Acl, Role};
@@ -64,6 +65,46 @@ pub struct Config {
     /// QoS 1 is queued instead.
     pub max_outbound_bytes: usize,
     pub acl: Acl,
+    /// Record state changes for the durable store ([`Broker::drain_persist`]).
+    pub persist: bool,
+}
+
+/// A change to durable broker state, for the DB core (ADR-030).
+///
+/// Persistent sessions are stored with their subscriptions; their queued
+/// QoS 1 messages are stored while they are offline (a snapshot at
+/// disconnect, then each new message). While a session is online its
+/// in-flight state lives in RAM only.
+#[derive(Debug, Clone)]
+pub enum PersistOp {
+    /// Set a retained message; an empty payload clears it.
+    Retain {
+        msg: Msg,
+        qos: QoS,
+    },
+    SessionUpsert {
+        client_id: Box<str>,
+    },
+    /// Deletes the session with its subscriptions and queue.
+    SessionDelete {
+        client_id: Box<str>,
+    },
+    Subscribe {
+        client_id: Box<str>,
+        filter: Box<str>,
+        qos: QoS,
+    },
+    Unsubscribe {
+        client_id: Box<str>,
+        filter: Box<str>,
+    },
+    QueuePush {
+        client_id: Box<str>,
+        msg: Msg,
+    },
+    QueueClear {
+        client_id: Box<str>,
+    },
 }
 
 /// Why a connection is (being) closed.
@@ -127,6 +168,8 @@ struct Session {
     queue: VecDeque<Msg>,
     next_pid: u16,
     bucket: Bucket,
+    /// The session exists in the durable store.
+    persisted: bool,
 }
 
 pub struct Broker {
@@ -137,6 +180,15 @@ pub struct Broker {
     topics: Topics,
     stats: Stats,
     scratch: Vec<(SessionId, QoS)>,
+    ops: Vec<PersistOp>,
+}
+
+/// Stored topics are re-checked on restore: limits may have changed.
+fn within_limits(t: &str, limits: &Limits, valid: fn(&str) -> bool) -> bool {
+    valid(t)
+        && !t.contains('\0')
+        && t.len() <= usize::from(limits.max_topic_len)
+        && t.split('/').count() <= usize::from(limits.max_topic_levels)
 }
 
 /// Bytes kept per connection for an incomplete inbound packet beyond the
@@ -153,7 +205,84 @@ impl Broker {
             topics: Topics::new(),
             stats: Stats::default(),
             scratch: Vec::new(),
+            ops: Vec::new(),
         }
+    }
+
+    /// Takes the state changes recorded since the last call (in order).
+    pub fn drain_persist(&mut self) -> alloc::vec::Drain<'_, PersistOp> {
+        self.ops.drain(..)
+    }
+
+    fn emit(&mut self, op: PersistOp) {
+        if self.cfg.persist {
+            self.ops.push(op);
+        }
+    }
+
+    /// Restores a retained message from the store (no persist op).
+    pub fn restore_retained(&mut self, topic: &str, payload: &[u8], qos: QoS) {
+        if payload.is_empty() || !within_limits(topic, &self.cfg.limits, is_valid_topic_name) {
+            return;
+        }
+        let msg = Arc::new(MsgInner {
+            topic: topic.into(),
+            payload: payload.into(),
+        });
+        self.topics
+            .set_retained(topic, msg, qos.min(QoS::AtLeastOnce));
+    }
+
+    /// Restores an offline persistent session from the store. Subscriptions
+    /// the current ACL no longer allows are dropped (and removed from the
+    /// store); limits apply as for live sessions. Returns false if the
+    /// client id is not acceptable any more (the session is deleted).
+    pub fn restore_session<'a>(
+        &mut self,
+        client_id: &str,
+        subs: impl IntoIterator<Item = (&'a str, QoS)>,
+        queued: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+    ) -> bool {
+        if !Self::valid_identity(client_id) || self.by_client.contains_key(client_id) {
+            self.emit(PersistOp::SessionDelete {
+                client_id: client_id.into(),
+            });
+            return false;
+        }
+        let role = self.cfg.acl.role(client_id);
+        let sid = self.insert_session(client_id, role, false, 0);
+        let (max_subs, max_queued) = (self.cfg.max_subscriptions_per_session, self.cfg.max_queued);
+        for (filter, qos) in subs {
+            let ok = within_limits(filter, &self.cfg.limits, is_valid_topic_filter)
+                && self.cfg.acl.may_subscribe(role, client_id, filter)
+                && self.session(sid).is_some_and(|s| s.subs.len() < max_subs);
+            if !ok {
+                self.emit(PersistOp::Unsubscribe {
+                    client_id: client_id.into(),
+                    filter: filter.into(),
+                });
+                continue;
+            }
+            let qos = qos.min(QoS::AtLeastOnce);
+            let node = self.topics.intern(filter);
+            self.topics.subscribe(node, sid, qos);
+            if let Some(s) = self.session(sid) {
+                s.subs.push((filter.into(), node, qos));
+            }
+        }
+        if let Some(s) = self.session(sid) {
+            s.persisted = true;
+            for (topic, payload) in queued {
+                if s.queue.len() >= max_queued {
+                    break;
+                }
+                s.queue.push_back(Arc::new(MsgInner {
+                    topic: topic.into(),
+                    payload: payload.into(),
+                }));
+            }
+        }
+        true
     }
 
     pub fn stats(&self) -> Stats {
@@ -318,6 +447,26 @@ impl Broker {
                     self.remove_session(sid);
                 } else if let Some(s) = self.session(sid) {
                     s.conn = None;
+                    // Snapshot what the device has not acknowledged yet:
+                    // in-flight first (older), then the queue.
+                    if s.persisted {
+                        let cid = s.client_id.clone();
+                        let msgs: Vec<Msg> = s
+                            .inflight
+                            .iter()
+                            .map(|(_, m)| m.clone())
+                            .chain(s.queue.iter().cloned())
+                            .collect();
+                        self.emit(PersistOp::QueueClear {
+                            client_id: cid.clone(),
+                        });
+                        for msg in msgs {
+                            self.emit(PersistOp::QueuePush {
+                                client_id: cid.clone(),
+                                msg,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -466,9 +615,37 @@ impl Broker {
             Some(sid) => sid,
             None => self.create_session(p.client_id, role, p.clean_session, now_ms),
         };
+        let mut newly_persistent = None;
         if let Some(s) = self.session(sid) {
             s.conn = Some(c);
             s.clean = p.clean_session;
+            if !s.clean && !s.persisted {
+                s.persisted = true;
+                newly_persistent = Some((
+                    s.client_id.clone(),
+                    s.subs
+                        .iter()
+                        .map(|(f, _, q)| (f.clone(), *q))
+                        .collect::<Vec<_>>(),
+                ));
+            }
+        }
+        if let Some((cid, subs)) = newly_persistent {
+            self.emit(PersistOp::SessionUpsert {
+                client_id: cid.clone(),
+            });
+            for (filter, qos) in subs {
+                self.emit(PersistOp::Subscribe {
+                    client_id: cid.clone(),
+                    filter,
+                    qos,
+                });
+            }
+        } else if session_present {
+            // The stored queue is back in RAM (delivered or in flight).
+            self.emit(PersistOp::QueueClear {
+                client_id: p.client_id.into(),
+            });
         }
         if let Some(k) = self.conn(c) {
             k.session = Some(sid);
@@ -489,6 +666,12 @@ impl Broker {
     }
 
     fn create_session(&mut self, id: &str, role: Role, clean: bool, now_ms: u64) -> SessionId {
+        // Persistence of a new persistent session is recorded by the
+        // caller (`on_connect`) once the session is attached.
+        self.insert_session(id, role, clean, now_ms)
+    }
+
+    fn insert_session(&mut self, id: &str, role: Role, clean: bool, now_ms: u64) -> SessionId {
         let s = Session {
             client_id: id.into(),
             role,
@@ -502,6 +685,7 @@ impl Broker {
                 tokens: self.cfg.rate_tokens,
                 last_ms: now_ms,
             },
+            persisted: false,
         };
         let sid = match self.sessions.iter().position(Option::is_none) {
             Some(i) => {
@@ -527,6 +711,11 @@ impl Broker {
             self.topics.unsubscribe(*node, sid);
         }
         self.by_client.remove(&s.client_id);
+        if s.persisted {
+            self.emit(PersistOp::SessionDelete {
+                client_id: s.client_id,
+            });
+        }
     }
 
     fn take_token(&mut self, sid: SessionId, now_ms: u64) -> bool {
@@ -585,6 +774,10 @@ impl Broker {
     fn route(&mut self, msg: &Msg, qos: QoS, retain: bool) {
         if retain {
             self.topics.set_retained(&msg.topic, msg.clone(), qos);
+            self.emit(PersistOp::Retain {
+                msg: msg.clone(),
+                qos: qos.min(QoS::AtLeastOnce),
+            });
         }
         let mut subs = core::mem::take(&mut self.scratch);
         self.topics.subscribers(&msg.topic, &mut subs);
@@ -645,12 +838,23 @@ impl Broker {
                 self.send_publish(c, msg, QoS::AtLeastOnce, Some(pid), retain, false)
             }
             Action::Queue => {
+                let mut stored = None;
                 if let Some(s) = self.session(sid) {
                     if s.queue.len() >= max_queued {
                         self.stats.dropped_queue_full += 1;
                     } else {
                         s.queue.push_back(msg.clone());
+                        // Offline: the store holds the queue (see PersistOp).
+                        if s.conn.is_none() && s.persisted {
+                            stored = Some(s.client_id.clone());
+                        }
                     }
+                }
+                if let Some(client_id) = stored {
+                    self.emit(PersistOp::QueuePush {
+                        client_id,
+                        msg: msg.clone(),
+                    });
                 }
             }
             Action::Drop => self.stats.dropped_backpressure += 1,
@@ -760,6 +964,16 @@ impl Broker {
             }
             codes.push(qos as u8);
             granted.push((filter, qos));
+            if let Some(s) = self.session(sid)
+                && s.persisted
+            {
+                let client_id = s.client_id.clone();
+                self.emit(PersistOp::Subscribe {
+                    client_id,
+                    filter: filter.into(),
+                    qos,
+                });
+            }
         }
         self.send(
             c,
@@ -789,8 +1003,18 @@ impl Broker {
                 .and_then(|s| s.subs.iter().find(|(x, _, _)| &**x == *f).map(|e| e.1));
             if let Some(node) = node {
                 self.topics.unsubscribe(node, sid);
+                let mut stored = None;
                 if let Some(s) = self.session(sid) {
                     s.subs.retain(|(x, _, _)| &**x != *f);
+                    if s.persisted {
+                        stored = Some(s.client_id.clone());
+                    }
+                }
+                if let Some(client_id) = stored {
+                    self.emit(PersistOp::Unsubscribe {
+                        client_id,
+                        filter: (*f).into(),
+                    });
                 }
             }
         }

@@ -11,6 +11,7 @@
 pub mod esr;
 pub mod features;
 pub mod paging;
+pub mod spsc;
 pub mod sync;
 
 #[cfg(target_os = "none")]

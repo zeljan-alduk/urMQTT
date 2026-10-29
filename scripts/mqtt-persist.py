@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Broker state across a VM restart (M11), with the real mosquitto clients.
+
+    scripts/mqtt-persist.py PORT --tls CERTDIR --phase 1|2
+
+Phase 1 (fresh disk): a retained message, a persistent session with a
+command subscription, and a QoS 1 command queued while that device is
+offline. The smoke test then kills QEMU (SIGKILL) and boots again on the
+same disk. Phase 2: the retained message and the queued command must be
+delivered.
+"""
+import os
+import subprocess
+import sys
+import time
+
+args = sys.argv[1:]
+TLS = args[args.index("--tls") + 1]
+PHASE = args[args.index("--phase") + 1]
+PORT = args[0]
+TIMEOUT = 15
+results = []
+
+
+def base(client_id):
+    cert = "services/backend" if client_id == "backend" else f"devices/{client_id}"
+    certfile = os.path.join(TLS, f"{cert}.pem")
+    return ["-h", "127.0.0.1", "-p", PORT, "-V", "mqttv311", "-i", client_id,
+            "--cafile", os.path.join(TLS, "ca.pem"), "--cert", certfile, "--key", certfile[:-4] + ".key"]
+
+
+def run(cmd, *a):
+    r = subprocess.run([cmd, *a], capture_output=True, text=True, timeout=TIMEOUT)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+def report(name, ok, detail=""):
+    results.append(ok)
+    print(f"client: {name} {'ok' if ok else 'FAILED'} {detail}".rstrip(), flush=True)
+
+
+if PHASE == "1":
+    rc1, _, e1 = run("mosquitto_pub", *base("device-001"), "-t", "devices/device-001/fw",
+                     "-m", "2.0.0-persist", "-q", "1", "-r")
+    rc2, _, e2 = run("mosquitto_sub", *base("device-002"), "-c", "-q", "1",
+                     "-t", "devices/device-002/cmd/#", "-E")
+    rc3, _, e3 = run("mosquitto_pub", *base("backend"), "-t", "devices/device-002/cmd/persist",
+                     "-m", "queued-while-offline", "-q", "1")
+    # Far longer than one DB batch (5 ms).
+    time.sleep(0.5)
+    report("persist-phase1", rc1 == rc2 == rc3 == 0, f"{e1} {e2} {e3}")
+else:
+    rc, out, err = run("mosquitto_sub", *base("backend"), "-t", "devices/+/fw", "-v", "-C", "1", "-W", "10")
+    report("persist-retained", rc == 0 and out == "devices/device-001/fw 2.0.0-persist", f"{out!r} {err}")
+    rc, out, err = run("mosquitto_sub", *base("device-002"), "-c", "-q", "1", "-v",
+                       "-t", "devices/device-002/cmd/#", "-C", "1", "-W", "10")
+    report("persist-queued", rc == 0 and out == "devices/device-002/cmd/persist queued-while-offline",
+           f"{out!r} {err}")
+
+sys.exit(0 if all(results) else 1)

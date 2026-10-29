@@ -409,3 +409,22 @@ fn render_contains_validated_values() {
     assert!(out.contains("kernel_heap_mb: 32"));
     assert!(out.contains(r#"revoked_serials: &["0a1b"]"#));
 }
+
+#[test]
+fn durability_shortcuts_are_dev_only() {
+    for key in ["require_flush", "require_data_disk", "refuse_on_corruption"] {
+        let prod = PROD
+            .lines()
+            .map(|l| {
+                if l.starts_with(&format!("{key} =")) {
+                    format!("{key} = false")
+                } else {
+                    l.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_rejected("prod", &prod, &format!("storage.{key}"));
+        assert!(parse("dev", &dev_with(key, &format!("{key} = false"))).is_ok());
+    }
+}

@@ -148,6 +148,102 @@ service() {
     done
 }
 
+# start_vm <log> <qemu args...>: boots in the background; sets VM_PID.
+start_vm() {
+    local log=$1
+    shift
+    rm -f "$log"
+    "$ROOT/scripts/run-qemu.sh" --serial "$log" --headless "$@" >"$log.qemu" 2>&1 &
+    VM_PID=$!
+}
+
+# wait_log <log> <pattern> [count]: waits until the pattern occurs <count>
+# times (default 1). Fails on timeout or if QEMU exits first.
+wait_log() {
+    local log=$1 pat=$2 count=${3:-1} waited=0
+    until (( $(clean "$log" 2>/dev/null | grep -Ec -- "$pat" || true) >= count )); do
+        if ! kill -0 "$VM_PID" 2>/dev/null || (( waited >= TIMEOUT * 10 )); then
+            return 124
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+}
+
+# kill_vm: SIGKILL, like pulling the power cord (host page cache survives,
+# which matches a VM crash rather than a host power loss).
+kill_vm() {
+    kill -9 "$VM_PID" 2>/dev/null || true
+    wait "$VM_PID" 2>/dev/null || true
+}
+
+# M11: QEMU is killed while the kernel commits transactions in a loop;
+# the next boot must pass quick_check and hold every committed row.
+db_crash() {
+    local crash="$OUT/db-crash.iso" verify="$OUT/db-verify.iso"
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$crash" --cmdline "smoke test=db-crash" >/dev/null
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$verify" --cmdline "smoke test=db-verify" >/dev/null
+    for accel in $ACCELS; do
+        local data="$OUT/db-crash-$accel.img" log1="$OUT/db-crash-$accel.log" log2="$OUT/db-verify-$accel.log"
+        local status=0
+        rm -f "$data"
+        truncate -s 64m "$data"
+        start_vm "$log1" --iso "$crash" --accel "$accel" --data "$data" --fwd none
+        wait_log "$log1" "db-crash: committed [0-9]+" 5 || status=$?
+        # Kill at an arbitrary point inside the write stream.
+        sleep "0.$((RANDOM % 5))"
+        kill_vm
+        local last
+        last=$(clean "$log1" | grep -Eo 'db-crash: committed [0-9]+' | tail -1 | awk '{print $3}')
+        check "db-crash-writer [$accel]" "$log1" "$status" "db-crash: writing from row 1" "db-crash: committed [0-9]+" "$NO_FAULT"
+        status=0
+        boot "$log2" --iso "$verify" --accel "$accel" --headless --data "$data" --fwd none || status=$?
+        check "db-crash-recovery [$accel]" "$log2" "$status" "storage: data disk opened" \
+            "quick_check ok" "db-verify: [0-9]+ rows consistent" "^URMQTT READY$" "NOT:INCONSISTENT" "$NO_FAULT"
+        local found
+        found=$(clean "$log2" | grep -Eo 'db-verify: [0-9]+ rows' | awk '{print $2}')
+        if [[ -n "$last" && -n "$found" ]] && (( found >= last )); then
+            echo "  ✓ every acknowledged commit survived SIGKILL: $found rows >= $last logged [$accel]"
+            PASSED=$((PASSED + 1))
+        else
+            echo "  ✗ committed rows lost after SIGKILL: found '${found:-?}', last logged '${last:-?}' [$accel]"
+            FAILED=$((FAILED + 1))
+        fi
+    done
+}
+
+# M11: broker state across a restart: retained message and a QoS 1 command
+# queued for an offline persistent session, over mTLS.
+mqtt_persist() {
+    local iso="$OUT/mqtt-persist.iso"
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve" >/dev/null
+    for accel in $ACCELS; do
+        local data="$OUT/mqtt-persist-$accel.img"
+        rm -f "$data"
+        truncate -s 64m "$data"
+        for phase in 1 2; do
+            local log="$OUT/mqtt-persist-$accel-$phase.log" status=0
+            start_vm "$log" --iso "$iso" --accel "$accel" --data "$data" --fwd "18883:8883"
+            if wait_log "$log" "TLS 1.3 listener on port 8883"; then
+                python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$ROOT/deploy/dev" --phase "$phase" \
+                    >"$log.client" 2>&1 || status=$?
+            else
+                status=124
+            fi
+            kill_vm
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            if [[ $phase == 1 ]]; then
+                check "mqtt-persist-before-kill [$accel]" "$log" "$status" "storage: data disk formatted" \
+                    "client: persist-phase1 ok" "NOT:FAILED" "$NO_FAULT"
+            else
+                check "mqtt-persist-after-restart [$accel]" "$log" "$status" "storage: data disk opened" \
+                    "db: restored 1 retained message\(s\), 1 persistent session\(s\) with 1 queued message\(s\), 1 revoked serial\(s\), 3 known device\(s\)" \
+                    "client: persist-retained ok" "client: persist-queued ok" "NOT:FAILED" "$NO_FAULT"
+            fi
+        done
+    done
+}
+
 [[ -f "$KERNEL" ]] || { echo "error: $KERNEL not found (make build)" >&2; exit 1; }
 rm -f "$OUT"/*.iso
 echo "smoke: accelerators: $ACCELS"
@@ -163,12 +259,14 @@ DEV_OK=("pci: ECAM 0x4010000000 buses 0-255" "virtio-blk" "virtio-net" "virtio-r
     "entropy: [0-9]+ bytes from virtio-rng" "entropy: ChaCha20 CSPRNG seeded"
     "blk: self-test ok \(4 KiB random pattern written, flushed, read back" "net: gratuitous ARP sent"
     "net: rx ok, ARP reply from 52:55:0a:00:02:02")
+DB_OK=("storage: data disk formatted \(was blank\)" "db: sqlite 3\.[0-9]+\.[0-9]+ on the data disk: WAL, exclusive locking, quick_check ok"
+    "db: restored 0 retained" "db: DB core is cpu 3" "db: worker running on cpu 3")
 SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordered pairs ping-pong ok"
     "smp: 4/4 cpus ticking on their own timer")
 
 scenario boot-acpi "smoke" on \
     "$BOOT_LINE" "platform: discovered via Acpi" "console: pl011 at 0x9000000" "psci 1\.[0-9]+ via hvc" \
-    "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${DEV_OK[@]}" "${SMP4_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
+    "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${DEV_OK[@]}" "${SMP4_OK[@]}" "${DB_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 scenario boot-dtb "smoke" off \
     "$BOOT_LINE" "platform: discovered via DeviceTree" "console: pl011 at 0x9000000" "${MEMORY_OK[@]}" \
     "${TIME_OK[@]}" "${DEV_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
@@ -227,6 +325,15 @@ if command -v mosquitto_pub >/dev/null && command -v mosquitto_sub >/dev/null; t
 else
     echo "  ✗ mosquitto clients not installed (brew install mosquitto / apt install mosquitto-clients)"
     FAILED=$((FAILED + 1))
+fi
+
+# M11: SQLite on the data disk: batched write throughput, crash
+# consistency after SIGKILL, broker state across a restart.
+scenario db-bench "smoke test=db-bench" on \
+    "db-bench: 5000 inserts in 50 transactions: [0-9]+ ops/s" "5100 rows verified" "^URMQTT READY$" "$NO_FAULT"
+db_crash
+if command -v mosquitto_pub >/dev/null; then
+    mqtt_persist
 fi
 
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).

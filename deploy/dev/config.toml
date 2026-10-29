@@ -38,6 +38,8 @@ sqlite_heap_mb = 32
 telemetry_topics = ["devices/+/telemetry/#"]
 retention_days = 30
 require_flush = true
+require_data_disk = false           # dev: boots without a disk, memory only
+refuse_on_corruption = true
 
 [observability]
 log_level = "debug"

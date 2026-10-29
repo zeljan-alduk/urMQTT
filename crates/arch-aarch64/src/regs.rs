@@ -58,6 +58,7 @@ read_sysreg!(id_aa64pfr0_el1, "id_aa64pfr0_el1");
 read_sysreg!(id_aa64pfr1_el1, "id_aa64pfr1_el1");
 read_sysreg!(id_aa64mmfr0_el1, "id_aa64mmfr0_el1");
 read_sysreg!(tpidr_el1, "tpidr_el1");
+read_sysreg!(cntkctl_el1, "cntkctl_el1");
 
 write_sysreg!(set_vbar_el1, "vbar_el1");
 write_sysreg!(set_mair_el1, "mair_el1");
@@ -67,6 +68,7 @@ write_sysreg!(set_ttbr1_el1, "ttbr1_el1");
 write_sysreg!(set_sctlr_el1, "sctlr_el1");
 write_sysreg!(set_cpacr_el1, "cpacr_el1");
 write_sysreg!(set_tpidr_el1, "tpidr_el1");
+write_sysreg!(set_cntkctl_el1, "cntkctl_el1");
 
 /// Current exception level (1 or 2).
 pub fn current_el() -> u8 {

@@ -362,3 +362,57 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - Revocation is build-time only until the SQLite table (M11). Resumed sessions are not re-checked against revocations made after the ticket was issued.
 - One handshake timeout instead of one per phase (M14).
 - Handshakes run on the boot core only (M13).
+
+## M11 — SQLite in the kernel (2026-10-29)
+
+**Done**
+
+- `vendor/sqlite`: SQLite 3.54.1 amalgamation. Checksums are verified by the build, and the upstream SHA3-256 is recorded.
+- `crates/store` (ADR-030):
+  - `build.rs`: the freestanding clang build matching the kernel ABI (FP, BTI/PAC, strict alignment) with the option set of ADR-030.
+  - `libc.rs`: the seven `str*` symbols SQLite needs, in Rust.
+  - `layout`: superblock + region table + double-buffered file-size table, CRC-32C (`crc`).
+  - `disk`: byte-addressed region I/O with read-modify-write; sizes persisted at sync. `MemDisk` is a test device with a volatile cache and power-loss simulation.
+  - `vfs`: the `urmqtt` VFS (three fixed files, no shared memory, conservative device characteristics).
+  - `db`: a safe `Db`/`Stmt` wrapper.
+  - `schema`: embedded migrations, now v1 with devices, revoked, retained, sessions, subscriptions, queued and selftest tables.
+  - `store`: exclusive + WAL, verified; defensive mode; quick_check; migrations; and the prepared statements for the broker state.
+- `crates/broker`: `PersistOp` events (retained, persistent sessions, subscriptions, offline queue) and `restore_retained` / `restore_session` with ACL and limit re-checks.
+- `crates/arch-aarch64::spsc`: bounded lock-free SPSC ring with documented orderings, tested across two threads.
+- `kernel/db`:
+  - The store opens on the boot CPU before SMP (format if blank, quick_check, migrations), seeds revocations from the config, and loads the state for the broker and the TLS revocation set.
+  - After SMP bring-up the worker moves to the DB core (the highest CPU) and batches into one transaction per 5 ms or 512 ops. It sleeps in `wfe` with `sev` and the generic-timer event stream, and reports to the data plane over the response ring.
+  - Self-tests: `test=db-bench`, `test=db-crash`, `test=db-verify`.
+- `kernel/mqtt_service`:
+  - Restores the broker at boot and forwards `PersistOp`s and device sightings over the request ring, with a backlog that keeps order when the ring is full.
+  - The TLS revocation set now comes from the store.
+- Config: `storage.require_data_disk` and `storage.refuse_on_corruption`. They (and `require_flush`) may be false only in dev.
+- CI: clang and llvm are installed for every job that builds the kernel. New fuzz target `disk_layout`.
+
+**Measured**
+
+- `make smoke`: **48/48**. New checks, under HVF and TCG:
+  - `db-bench`.
+  - `db-crash-writer` → SIGKILL → `db-crash-recovery`: quick_check ok, every row consistent, and **every acknowledged commit present** (HVF 15 900 rows ≥ 15 000 logged; TCG 8 000 ≥ 7 000).
+  - `mqtt-persist`: mosquitto over mTLS. A retained message and a QoS 1 command queued for an offline persistent session are delivered after SIGKILL and reboot; 3 devices are in the registry.
+- Batched writes (`db-bench`, 200-byte rows, `synchronous=FULL`, 64 MiB data disk):
+
+  | | 100 inserts per transaction | 1 insert per transaction |
+  |---|---|---|
+  | HVF (Apple M4) | **49 431 ops/s** (2.0 ms per commit) | 1 844 ops/s |
+  | TCG | 40 221 ops/s (2.5 ms per commit) | 1 679 ops/s |
+
+- `quick_check` at boot on the fresh or small database: 1–4 ms (HVF), 42 ms (TCG).
+- Host crash tests: 12 rounds with an arbitrary subset of unflushed writes applied, then `integrity_check` = ok and no acknowledged commit lost.
+- `make fuzz T=disk_layout FUZZ_TIME=30`: 4.57 M runs, no crash.
+- SQLite object code: 654 KB text (`-Os`). Kernel ELF 1 938 432 bytes (M10: 1 101 008).
+- Host tests: 180.
+
+**Known gaps**
+
+- In-flight QoS 1 state of online sessions is RAM-only (ADR-030).
+- No session expiry.
+- Runtime revocation (M16).
+- Partial-sector writes cost a read per WAL frame (a VFS write cache would remove it; M15).
+- The telemetry region is reserved but unused until M12.
+- SQLite runs at EL1 (EL0 isolation is a later item).

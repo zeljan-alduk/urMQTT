@@ -29,6 +29,17 @@ pub enum TestFault {
     Bti,
 }
 
+/// Storage self-tests (M11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbTest {
+    /// Measure batched vs unbatched commits, then continue booting.
+    Bench,
+    /// Write committed transactions forever (the host kills the VM).
+    Crash,
+    /// Check the rows written by `Crash`, then continue booting.
+    Verify,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BootOptions {
     /// Power off (instead of reset) on panic, and after `URMQTT READY`
@@ -37,6 +48,7 @@ pub struct BootOptions {
     /// Keep serving after `URMQTT READY` even in smoke mode (client tests).
     pub serve: bool,
     pub test_fault: Option<TestFault>,
+    pub db_test: Option<DbTest>,
     /// Options that were present but rejected or unknown.
     pub ignored: usize,
 }
@@ -62,6 +74,9 @@ impl BootOptions {
                 "test=null" => o.test_fault = Some(TestFault::NullDeref),
                 "test=pac" => o.test_fault = Some(TestFault::Pac),
                 "test=bti" => o.test_fault = Some(TestFault::Bti),
+                "test=db-bench" => o.db_test = Some(DbTest::Bench),
+                "test=db-crash" => o.db_test = Some(DbTest::Crash),
+                "test=db-verify" => o.db_test = Some(DbTest::Verify),
                 _ => o.ignored += 1,
             }
         }
