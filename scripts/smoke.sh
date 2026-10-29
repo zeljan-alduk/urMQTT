@@ -408,6 +408,40 @@ raw_disk() {
     done
 }
 
+# Both disks behind virtio-scsi, as clouds attach them (Hetzner, Oracle):
+# the raw image boots from LUN 0 and is left alone; LUN 1 becomes the data
+# disk, is formatted and benchmarked, and is opened again on the next boot.
+scsi_disks() {
+    local esp="$OUT/scsi-esp.img" raw="$OUT/scsi.img"
+    for phase in 1 2; do
+        local cmdline="smoke test=db-bench"
+        [[ $phase == 2 ]] && cmdline="smoke"
+        "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$OUT/scsi.iso" --cmdline "$cmdline" --esp-out "$esp" >/dev/null
+        python3 -I "$ROOT/scripts/mkraw.py" "$esp" "$raw-$phase" >/dev/null
+    done
+    for accel in $ACCELS; do
+        local data="$OUT/scsi-data-$accel.img"
+        rm -f "$data"
+        truncate -s 64m "$data"
+        for phase in 1 2; do
+            local log="$OUT/scsi-disks-$accel-$phase.log" boot="$OUT/scsi-boot-$accel.img" status=0
+            cp "$raw-$phase" "$boot"
+            boot "$log" --disk "$boot" --bus scsi --accel "$accel" --headless --data "$data" || status=$?
+            cmp -s "$raw-$phase" "$boot" || echo "BOOT DISK MODIFIED" >>"$log"
+            if [[ $phase == 1 ]]; then
+                check "scsi-disks-format [$accel]" "$log" "$status" \
+                    "scsi: target 0 lun 0: [0-9]+ MiB, partitioned \(a boot disk\), skipped" \
+                    "blk: data disk is scsi target 1 lun 0" "blk: self-test ok" \
+                    "storage: data disk formatted \(was blank\)" "db-bench: .* 5100 rows verified" \
+                    "^URMQTT READY$" "NOT:BOOT DISK MODIFIED" "$NO_FAULT"
+            else
+                check "scsi-disks-reopen [$accel]" "$log" "$status" "storage: data disk opened" \
+                    "quick_check ok" "^URMQTT READY$" "NOT:BOOT DISK MODIFIED" "$NO_FAULT"
+            fi
+        done
+    done
+}
+
 [[ -f "$KERNEL" ]] || { echo "error: $KERNEL not found (make build)" >&2; exit 1; }
 rm -f "$OUT"/*.iso
 echo "smoke: accelerators: $ACCELS"
@@ -527,6 +561,7 @@ fi
 storm
 observability
 raw_disk
+scsi_disks
 
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
 pcap_has_garp() {

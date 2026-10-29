@@ -683,3 +683,21 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
   - plaintext, a foreign CA, a client id that differs from the CN, and subscriptions outside the ACL are all refused.
 - The ISO and the raw image are identical only for the same xorriso and mtools versions; macOS (Homebrew) and Ubuntu builds differ there. The ELF does not.
 - Oracle Cloud and ACPI-only validation on real ARM servers remain future work.
+
+## After M17 — virtio-scsi disks (2026-10-29)
+
+**Done** (ADR-037)
+
+- virtio-scsi host adapter driver: INQUIRY/READ CAPACITY scan, READ/WRITE 10/16, SYNCHRONIZE CACHE, unit-attention retry. Only 512-byte direct-access disks are used.
+- Kernel: a `DataDisk` type covers virtio-blk and SCSI LUNs. The first non-partitioned disk becomes the data disk.
+- `run-qemu.sh --bus scsi`: the boot disk and the data disk become scsi-hd LUNs, as on clouds.
+- docs/DEPLOY.md: Hetzner CAX and Oracle Cloud Always Free A1 steps (QCOW2 import), and what to check first (virtio-rng, virtio NIC).
+
+**Measured**
+
+- `scsi-disks` smoke (HVF, TCG): the boot disk on LUN 0 is skipped and byte-identical afterwards; the data disk on LUN 1 is formatted and passes its self-test; db-bench shows 43 524 ops/s batched and 2 021 ops/s with one insert per transaction; a second boot reopens the disk.
+
+**Known gaps**
+
+- Still not tried on Hetzner or Oracle hardware.
+- Both need virtio-rng: Ampere Altra has no `RNDR`, and the kernel will not boot without a hardware entropy source.

@@ -96,12 +96,12 @@ zeljan-alduk/urMQTT`), and a minisign signature when the repository secret
 | Firmware | UEFI (AAVMF/OVMF for aarch64), ACPI or device tree |
 | Interrupts | GICv3; MSI-X through GICv2m frames when present (QEMU `virt`), polling otherwise |
 | NIC | one virtio-net (PCI); DHCP unless `network.mode = "static"` |
-| Data disk | one virtio-blk disk (PCI), blank on first boot, ≥ 64 MiB; with `storage.require_data_disk = true` the broker refuses to serve without it |
+| Data disk | one virtio-blk disk or virtio-scsi LUN (PCI), 512-byte blocks, blank on first boot, ≥ 64 MiB; with `storage.require_data_disk = true` the broker refuses to serve without it |
 | Entropy | virtio-rng, or `RNDR` on the CPU; the kernel will not boot without entropy |
-| Boot medium | the ISO (virtio-scsi CD) or the raw image (virtio-blk) |
+| Boot medium | the ISO (virtio-scsi CD) or the raw image (virtio-blk or virtio-scsi disk) |
 
-The kernel uses the first virtio-blk disk that is not partitioned as its data
-disk (blank: formatted; urMQTT: opened; anything else: refused). A partitioned disk (MBR or GPT, such as the raw boot image) is never touched:
+The kernel uses the first disk (virtio-blk, or a virtio-scsi LUN) that is not
+partitioned as its data disk (blank: formatted; urMQTT: opened; anything else: refused). A partitioned disk (MBR or GPT, such as the raw boot image) is never touched:
 the `raw-disk` smoke scenario boots that way and checks that the boot disk is
 byte-identical afterwards.
 
@@ -145,37 +145,54 @@ Update by replacing the boot disk (or ISO) with a new image and rebooting. The
 data disk carries over: SQLite migrations are append-only, and the telemetry log
 format is versioned.
 
-## 6. Hetzner Cloud CAX (Ampere Altra)
+## 6. Hetzner Cloud CAX and Oracle Cloud A1 (Ampere Altra)
 
-Hetzner Cloud does not import custom images directly, and custom ISOs are
-mounted only through a support request. The practical path is the raw image,
-written onto the server's disk from the rescue system:
+Both are aarch64 KVM clouds that attach disks through virtio-scsi; urMQTT drives
+virtio-scsi disks as well as virtio-blk (the `scsi-disks` smoke scenario boots
+the raw image from SCSI LUN 0 and uses LUN 1 as the data disk). Neither has been
+tried on the real service from here. Check two things before relying on one,
+from a Linux rescue system or any Linux VM of the same shape:
+
+- **Entropy:** `cat /sys/devices/virtual/misc/hw_random/rng_available` must list
+  `virtio_rng`. Ampere Altra has no `RNDR`, and urMQTT refuses to boot without a
+  hardware entropy source.
+- **NIC:** `ls /sys/bus/virtio/drivers/virtio_net/` must show a device (the
+  "paravirtualized" or virtio NIC, not a VFIO/SR-IOV one).
+
+### Hetzner Cloud CAX
+
+Hetzner does not import custom images, and ISOs are mounted only on request.
+Write the raw image onto the server's disk from the rescue system, and attach a
+Volume as the data disk:
 
 ```bash
-# 1. Create a CAX server (any image), enable the rescue system, reboot into it.
-# 2. From your machine:
+# 1. Create a CAX server, attach a (blank) Volume, enable the rescue system, reboot into it.
 scp build/dist/urmqtt-prod-<version>.img root@<server-ip>:/tmp/
-# 3. In the rescue system:
-lsblk                                   # the server disk, usually /dev/sda
+# 2. In the rescue system (the server disk is usually /dev/sda; check with lsblk):
 dd if=/tmp/urmqtt-prod-<version>.img of=/dev/sda bs=1M conv=fsync
-# 4. Leave rescue mode and reboot. Optionally snapshot the server to clone it.
+# 3. Leave rescue mode and reboot. The web console shows the serial log.
 ```
 
-**Check before relying on it:** urMQTT drives only virtio-**blk** disks. Several
-clouds, Hetzner among them, attach the boot disk and volumes through
-virtio-**scsi**. Look in the rescue system: `ls /sys/bus/virtio/drivers/` shows
-`virtio_blk` or `virtio_scsi`, and `lsblk` names virtio-blk disks `vd*`.
+Do not format the Volume: urMQTT formats a blank disk itself and never touches
+the partitioned boot disk. Open TCP 8883 in the Hetzner firewall.
 
-- If the server disk is virtio-scsi, UEFI still boots the image (the firmware has
-  the driver), but the kernel finds no data disk.
-- With `storage.require_data_disk = true` it then refuses to serve and says so
-  on the console (Hetzner's web console shows it).
-- `require_data_disk = false` is accepted only in dev builds. A memory-only
-  production mode, or a virtio-scsi driver, is future work.
+### Oracle Cloud Always Free (VM.Standard.A1.Flex)
 
-Until then, a KVM/Proxmox host (section 5) is the supported production target.
-Networking on Hetzner (DHCP, a public IPv4 address) needs nothing special. Open
-TCP 8883 in the Hetzner firewall.
+The free tier includes up to 4 Ampere cores and 24 GB of RAM. Import the image
+as a custom image:
+
+```bash
+qemu-img convert -f raw -O qcow2 build/dist/urmqtt-prod-<version>.img urmqtt.qcow2
+oci os object put --bucket-name <bucket> --file urmqtt.qcow2
+oci compute image import from-object --compartment-id <ocid> --namespace <ns> \
+  --bucket-name <bucket> --name urmqtt.qcow2 --display-name urmqtt \
+  --launch-mode PARAVIRTUALIZED --source-image-type QCOW2 --operating-system Linux
+# Add VM.Standard.A1.Flex to the image's compatible shapes (console: Edit details).
+```
+
+Then launch an A1.Flex instance from the image, attach a blank paravirtualized
+block volume as the data disk, and allow TCP 8883 in the subnet's security list.
+The serial console (`oci compute instance-console-connection`) shows the log.
 
 ## 7. Operating
 

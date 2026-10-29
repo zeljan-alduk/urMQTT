@@ -17,6 +17,7 @@ use urmqtt_tls::rng::{Csprng, EntropyPool, Source};
 use urmqtt_virtio::blk::VirtioBlk;
 use urmqtt_virtio::net::VirtioNet;
 use urmqtt_virtio::rng::VirtioRng;
+use urmqtt_virtio::scsi::{ScsiDisk, VirtioScsi};
 use urmqtt_virtio::transport::CapLoc;
 use urmqtt_virtio::{DeviceType, DmaRegion, Env, Region, Transport, VirtioError, find_caps};
 
@@ -68,10 +69,71 @@ impl Env for KernelEnv {
     }
 }
 
+/// The data disk: a virtio-blk device, or one LUN behind virtio-scsi (the
+/// way many clouds attach disks).
+pub enum DataDisk {
+    Blk(VirtioBlk),
+    Scsi(ScsiDisk),
+}
+
+impl DataDisk {
+    pub fn capacity_sectors(&self) -> u64 {
+        match self {
+            Self::Blk(b) => b.capacity_sectors,
+            Self::Scsi(s) => s.capacity_sectors,
+        }
+    }
+
+    /// Whether writes can be made durable (virtio-blk needs
+    /// `VIRTIO_BLK_F_FLUSH`; SCSI disks take SYNCHRONIZE CACHE).
+    pub fn has_flush(&self) -> bool {
+        match self {
+            Self::Blk(b) => b.has_flush,
+            Self::Scsi(_) => true,
+        }
+    }
+
+    pub fn read_only(&self) -> bool {
+        match self {
+            Self::Blk(b) => b.read_only,
+            // A write-protected LUN fails its writes (the self-test).
+            Self::Scsi(_) => false,
+        }
+    }
+
+    pub fn max_io(&self) -> usize {
+        match self {
+            Self::Blk(_) => urmqtt_virtio::blk::MAX_IO,
+            Self::Scsi(s) => s.max_io(),
+        }
+    }
+
+    pub fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), urmqtt_virtio::VirtioError> {
+        match self {
+            Self::Blk(b) => b.read(&KernelEnv, sector, buf),
+            Self::Scsi(s) => s.read(&KernelEnv, sector, buf),
+        }
+    }
+
+    pub fn write(&mut self, sector: u64, data: &[u8]) -> Result<(), urmqtt_virtio::VirtioError> {
+        match self {
+            Self::Blk(b) => b.write(&KernelEnv, sector, data),
+            Self::Scsi(s) => s.write(&KernelEnv, sector, data),
+        }
+    }
+
+    pub fn flush(&mut self) -> Result<(), urmqtt_virtio::VirtioError> {
+        match self {
+            Self::Blk(b) => b.flush(&KernelEnv),
+            Self::Scsi(s) => s.flush(&KernelEnv),
+        }
+    }
+}
+
 /// Initialised devices, kept for later milestones (network stack, storage).
 pub struct Devices {
     pub net: Option<VirtioNet>,
-    pub blk: Option<VirtioBlk>,
+    pub blk: Option<DataDisk>,
     pub rng: Option<VirtioRng>,
     pub blk_msix_spi: Option<u32>,
 }
@@ -263,6 +325,7 @@ fn probe_pci(
                 Some(DeviceType::Net) => " virtio-net",
                 Some(DeviceType::Block) => " virtio-blk",
                 Some(DeviceType::Entropy) => " virtio-rng",
+                Some(DeviceType::Scsi) => " virtio-scsi",
                 Some(DeviceType::Other(_)) => " virtio (unused)",
                 None => "",
             }
@@ -307,7 +370,42 @@ fn probe_pci(
                     spi.map_or("no (polling)", |_| "yes")
                 );
                 devs.blk_msix_spi = spi;
-                devs.blk = Some(blk);
+                devs.blk = Some(DataDisk::Blk(blk));
+            }
+            DeviceType::Scsi if devs.blk.is_none() => {
+                let mut hba = VirtioScsi::new(transport(&ecam, f.bdf)?, env)?;
+                let (disks, n) = hba.scan(env);
+                info!("scsi: {} {n} disk(s) with 512-byte blocks", f.bdf);
+                let mut chosen = None;
+                for d in disks.iter().take(n).flatten() {
+                    let mut head = [0u8; 1024];
+                    let partitioned = d.sectors >= 2
+                        && hba.read(env, *d, 0, &mut head).is_ok()
+                        && is_partitioned(&head);
+                    info!(
+                        "scsi: target {} lun {}: {} MiB{}",
+                        d.target,
+                        d.lun,
+                        (d.sectors * 512) >> 20,
+                        if partitioned {
+                            ", partitioned (a boot disk), skipped"
+                        } else {
+                            ""
+                        }
+                    );
+                    if !partitioned && chosen.is_none() {
+                        chosen = Some(*d);
+                    }
+                }
+                if let Some(d) = chosen {
+                    info!(
+                        "blk: data disk is scsi target {} lun {} ({} MiB, polled)",
+                        d.target,
+                        d.lun,
+                        (d.sectors * 512) >> 20
+                    );
+                    devs.blk = Some(DataDisk::Scsi(hba.into_disk(d)));
+                }
             }
             DeviceType::Net if devs.net.is_none() => {
                 let net = VirtioNet::new(transport(&ecam, f.bdf)?, env)?;
@@ -372,38 +470,39 @@ fn is_partitioned(head: &[u8; 1024]) -> bool {
 }
 
 pub fn blk_selftest() -> Result<(), &'static str> {
-    let env = KernelEnv;
     let mut devs = DEVICES.lock();
+    let msix = devs.blk_msix_spi.is_some();
     let Some(blk) = devs.blk.as_mut() else {
         warn!("blk: no data disk attached, self-test skipped");
         return Ok(());
     };
-    if blk.capacity_sectors < BLK_SCRATCH_SECTORS * 2 {
+    if blk.capacity_sectors() < BLK_SCRATCH_SECTORS * 2 {
         return Err("data disk too small");
     }
-    let sector = blk.capacity_sectors - BLK_SCRATCH_SECTORS;
+    let sector = blk.capacity_sectors() - BLK_SCRATCH_SECTORS;
     let mut pattern = [0u8; 4096];
     RNG.lock().as_mut().ok_or("no CSPRNG")?.fill(&mut pattern);
     let irqs_before = BLK_IRQS.load(Ordering::Relaxed);
-    blk.write(&env, sector, &pattern)
+    blk.write(sector, &pattern)
         .map_err(|_| "blk write failed")?;
-    blk.flush(&env)
+    blk.flush()
         .map_err(|_| "blk flush failed (VIRTIO_BLK_F_FLUSH missing?)")?;
     let mut back = [0u8; 4096];
-    blk.read(&env, sector, &mut back)
-        .map_err(|_| "blk read failed")?;
+    blk.read(sector, &mut back).map_err(|_| "blk read failed")?;
     if back != pattern {
         return Err("blk read-back mismatch");
     }
     info!(
         "blk: self-test ok (4 KiB random pattern written, flushed, read back at sector {sector})"
     );
-    if devs.blk_msix_spi.is_some() {
+    if msix {
         let irqs = BLK_IRQS.load(Ordering::Relaxed) - irqs_before;
         info!("msi-x: {irqs} blk completion interrupt(s) via GICv2m");
         if irqs == 0 {
             return Err("no MSI-X interrupt arrived for blk completions");
         }
+    } else if matches!(blk, DataDisk::Scsi(_)) {
+        info!("msi-x: data disk on virtio-scsi, polled");
     } else {
         info!("msi-x: not available on this machine (ITS support arrives in M13), blk polled");
     }

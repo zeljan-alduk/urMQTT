@@ -21,6 +21,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use crate::devices::DataDisk;
 use urmqtt_arch_aarch64::spsc::{Consumer, Producer, Spsc};
 use urmqtt_arch_aarch64::sync::SpinLock;
 use urmqtt_arch_aarch64::{cpu, timer};
@@ -32,10 +33,9 @@ use urmqtt_store::{
     BlockDevice, Disk, DiskError, IoError, Opened, Platform, Retained, SessionRecord, Store,
     StoreError,
 };
-use urmqtt_virtio::blk::VirtioBlk;
 
 use crate::cmdline::DbTest;
-use crate::devices::{self, KernelEnv};
+use crate::devices;
 use crate::{smp, vm};
 
 /// Longest a write waits for its transaction to commit.
@@ -124,7 +124,7 @@ pub fn notify() {
 }
 
 struct KernelBlk {
-    blk: VirtioBlk,
+    blk: DataDisk,
     flush: bool,
 }
 
@@ -134,19 +134,15 @@ unsafe impl Send for KernelBlk {}
 
 impl BlockDevice for KernelBlk {
     fn sectors(&self) -> u64 {
-        self.blk.capacity_sectors
+        self.blk.capacity_sectors()
     }
 
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        self.blk
-            .read(&KernelEnv, lba, buf)
-            .map_err(|_| IoError::Device)
+        self.blk.read(lba, buf).map_err(|_| IoError::Device)
     }
 
     fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
-        self.blk
-            .write(&KernelEnv, lba, buf)
-            .map_err(|_| IoError::Device)
+        self.blk.write(lba, buf).map_err(|_| IoError::Device)
     }
 
     fn flush(&mut self) -> Result<(), IoError> {
@@ -154,11 +150,11 @@ impl BlockDevice for KernelBlk {
             // Only reachable with storage.require_flush = false (dev).
             return Ok(());
         }
-        self.blk.flush(&KernelEnv).map_err(|_| IoError::Device)
+        self.blk.flush().map_err(|_| IoError::Device)
     }
 
     fn max_io(&self) -> usize {
-        urmqtt_virtio::blk::MAX_IO
+        self.blk.max_io()
     }
 }
 
@@ -219,7 +215,7 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
             format_args!("no data disk attached"),
         );
     };
-    if !blk.has_flush {
+    if !blk.has_flush() {
         if cfg.require_flush {
             crate::boot::fatal(
                 "storage: data disk lacks VIRTIO_BLK_F_FLUSH (storage.require_flush); refusing to run",
@@ -227,13 +223,13 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
         }
         warn!("storage: data disk lacks VIRTIO_BLK_F_FLUSH: writes are NOT durable (dev only)");
     }
-    if blk.read_only {
+    if blk.read_only() {
         return refuse_or_degrade(
             !cfg.require_data_disk,
             format_args!("data disk is read-only"),
         );
     }
-    let flush = blk.has_flush;
+    let flush = blk.has_flush();
     let dev = Box::new(KernelBlk { blk, flush });
     let uuid = || {
         let mut u = [0u8; 16];

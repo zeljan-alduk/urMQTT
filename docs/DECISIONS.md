@@ -482,6 +482,20 @@ verified in the named milestone before it becomes Accepted).
   - The dev certificates for self-tests were already empty in prod. Dev-only command-line switches were already ignored there.
   - The prod ELF is 2 214 352 bytes, against 2 399 120 for dev.
 - **Production defaults changed:** `memory.kernel_heap_mb = 1024` (it was 8, which holds about ten thousand connections) and `min_free_mb = 64`.
-- **Hetzner CAX:** the documented path is the raw image written from the rescue system.
-  - It is not validated on real hardware here. It is likely blocked by virtio-scsi disks, for which urMQTT has no driver.
-  - KVM/Proxmox with virtio-blk is the supported target. The guide says how to check the disk type first.
+- **Hetzner CAX:** the documented path is the raw image written from the rescue system. Until a virtio-scsi driver existed (ADR-037), it was likely blocked by the virtio-scsi disks.
+
+## ADR-037 — virtio-scsi disks
+
+- **Status:** Accepted (after M17).
+- **Why:** aarch64 clouds (Hetzner CAX, Oracle A1 in paravirtualized mode) attach disks through virtio-scsi. Without a driver the kernel found no data disk there, and a production image would refuse to serve.
+- **Design (`urmqtt-virtio::scsi`):**
+  - A polled host adapter on the request queue only (the control and event queues stay unconfigured), with one command in flight and a 64 KiB bounce buffer, like virtio-blk.
+  - A scan sends INQUIRY to targets 0–15 and LUNs 0–7. A bad-target response ends a target. Only direct-access devices (type 0) with 512-byte logical blocks count, so CD-ROMs (the ISO is one) and 4Kn disks are skipped.
+  - Capacity comes from READ CAPACITY (10), or (16) beyond 2 TiB.
+  - I/O uses READ/WRITE (10), or (16) when the LBA or the length needs it, and flush is SYNCHRONIZE CACHE (10). Unit attentions (after a reset) are retried up to 3 times.
+  - The device's `max_sectors` caps the transfer size.
+- **Selection:** the data disk is the first non-partitioned disk, whether virtio-blk or a SCSI LUN. A partitioned disk is a boot disk (ADR-036). The kernel sees both behind one `DataDisk` type, so the store and the self-test are unchanged.
+- **Testing:**
+  - Host tests for LUN addressing, CDBs, INQUIRY and capacity parsing, and sense keys.
+  - The `scsi-disks` smoke scenario (HVF and TCG) boots the raw image from SCSI LUN 0 with the data disk on LUN 1. It checks the boot-disk skip, the self-test, formatting, a SQLite benchmark, the boot disk byte-identical afterwards, and reopening on a second boot.
+- **Not done:** multiple queues, interrupts (polling suffices for the DB core's batched writes), hot-plug events, write-protect detection (a write-protected LUN fails the boot-time self-test instead).

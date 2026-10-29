@@ -108,7 +108,8 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | QoS 0/1, wildcards, retained, LWT, persistent sessions, keepalive | ✅ M9 |
 | | ACL (`devices/{id}/#` by default), service identities, per-device rate limits | ✅ M9 |
 | | MQTT 5.0, QoS 2 | 📋 later |
-| **Storage** | SQLite in the kernel over a raw virtio-blk VFS (WAL, exclusive), quick_check at boot | ✅ M11 |
+| **Storage** | SQLite in the kernel over a raw-disk VFS (WAL, exclusive), quick_check at boot | ✅ M11 |
+| | Data disk on virtio-blk or a virtio-scsi LUN (as clouds attach disks) | ✅ after M17 |
 | | Device registry, revocations, retained messages, persistent sessions with offline queues | ✅ M11 |
 | | Per-core append-only telemetry log with CRC and crash recovery | ✅ M12 |
 | **Scale** | Per-core event loops and broker shards, per-CPU heap caches, frame pools, cross-core fan-out | ✅ M13 |
@@ -146,7 +147,7 @@ flowchart TB
         platform --> arch
     end
     fw["UEFI firmware + Limine"] --> image
-    hv["Hypervisor: QEMU/KVM/HVF<br/>virtio-net · virtio-blk · virtio-rng"] --- drivers
+    hv["Hypervisor: QEMU/KVM/HVF<br/>virtio-net · virtio-blk/scsi · virtio-rng"] --- drivers
 ```
 
 ### Execution model: thread-per-core, shared-nothing
@@ -259,7 +260,7 @@ The threat model is in [docs/SECURITY.md](docs/SECURITY.md).
 
 ### Persistence
 
-The data lives on a separate virtio-blk disk with no filesystem:
+The data lives on a separate disk (virtio-blk or virtio-scsi) with no filesystem:
 
 ```
 LBA 0      [ superblock: magic · layout version · uuid · region table · CRC-32C ]
@@ -753,15 +754,15 @@ Production images set `observability.syslog_udp` and `metrics_udp` to collectors
 ## Deployment
 
 An image is the entire deployment: the code, configuration, CA and server key are all inside it.
-Persistent data lives on a separate virtio-blk disk, so upgrading means booting a new image
+Persistent data lives on a separate disk (virtio-blk or virtio-scsi), so upgrading means booting a new image
 against the same data disk.
 
 | Target | Path | Status |
 |---|---|---|
 | QEMU (macOS HVF / Linux KVM / TCG) | `make run`, `make run-tcg` | ✅ M1 |
 | Generic KVM / Proxmox (aarch64) | UEFI VM, raw image (or ISO) + blank data disk, virtio-net/blk/rng | ✅ M17 (raw-disk boot tested in QEMU) |
-| Hetzner Cloud CAX (Ampere) | raw image written from the rescue system | 📖 documented, not validated (virtio-scsi disks likely need a driver) |
-| Oracle Cloud Always Free (Ampere A1) | custom image import, paravirtualized (virtio) | 📋 after M5 + M17 |
+| Hetzner Cloud CAX (Ampere) | raw image written from the rescue system, Volume as data disk | 📖 documented; virtio-scsi supported, not tried on the real service |
+| Oracle Cloud Always Free (Ampere A1) | QCOW2 custom image, paravirtualized | 📖 documented; virtio-scsi supported, not tried on the real service |
 
 Platforms that expose only non-virtio devices (AWS ENA/NVMe, Azure MANA) are not supported.
 Details are in [docs/DEPLOY.md](docs/DEPLOY.md).
