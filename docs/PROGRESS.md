@@ -186,3 +186,26 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 
 - The per-CPU log rings described in §4.2 are not in yet; all cores share the IRQ-safe global logger. The per-core loop arrives with the data plane (M13).
 - APs only idle. Data-plane work starts in M13; the DB core assignment (highest-numbered CPU) lands with SQLite in M11.
+
+## M5 — Platform discovery (2026-10-29)
+
+**Done**
+
+- `platform::PlatformInfo` (ADR-024): UART, PSCI, GICv3 (GICD, GICR, ITS / GICv2m), timer PPIs, CPU list (MPIDR, up to 64) and PCIe ECAM (segment, bus range).
+  - DTB path: `/cpus` nodes, `pci-host-ecam-generic` with `bus-range`.
+  - ACPI path: MADT GICC MPIDRs (enabled and online-capable only), MCFG.
+- Source-independent `Display` summary, logged at boot as `platform summary: …`. The kernel warns if the firmware's CPU list and the bootloader's MP list disagree.
+- Fuzz targets `fdt_parse` and `acpi_parse` (ACPI over an arbitrary memory blob). The first found an integer overflow, now fixed and kept as a regression seed.
+- Smoke compares the acpi=on and acpi=off summaries for every accelerator.
+
+**Measured**
+
+- Summary under both HVF and TCG, identical for acpi=on and acpi=off:
+  `uart=0x9000000 psci=hvc gicd=0x8000000 gicr=0x80a0000 msi=v2m@0x8020000 timer=27/30 cpus=4[0x0,0x1,0x2,0x3] pcie=0x4010000000/0:0-255` (under TCG `msi=its@0x8080000`).
+- Fuzzing after the fix: `fdt_parse` 2.6 M runs in 2 min, `acpi_parse` 100 M runs in 1 min, no crash.
+- `make smoke`: 28/28.
+
+**Known gaps**
+
+- ACPI-only cloud validation (Hetzner, Oracle) is deferred (PROMPT §9 "later").
+- PCI BAR windows are not discovered by design (ADR-024).

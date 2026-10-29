@@ -184,12 +184,16 @@ extern "C" fn urmqtt_kmain() -> ! {
         BOOTLOADER.response().map_or("?", |r| r.version()),
     );
     match early {
-        Some(e) => info!(
-            "platform: {:?}, uart={:#x}, psci={:?}",
-            e.source,
-            e.uart.map_or(0, |u| u.base),
-            e.psci
-        ),
+        Some(e) => {
+            info!("platform: discovered via {:?}", e.source);
+            info!("platform summary: {e}");
+            if e.cpus.len() != cpus {
+                warn!(
+                    "platform: firmware lists {} CPUs, bootloader started {cpus}",
+                    e.cpus.len()
+                );
+            }
+        }
         None => warn!("platform: neither DTB nor ACPI usable"),
     }
     if let Some(va) = uart_va {

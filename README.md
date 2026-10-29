@@ -11,7 +11,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M4)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M5)-red)
 
 </div>
 
@@ -22,6 +22,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M2**: own page tables with enforced W^X, guard pages, locked tables, PAC and BTI
 > - **M3**: GICv3, generic timer, periodic tick with measured IRQ latency
 > - **M4**: SMP bring-up on up to 64 cores, with IPIs checked between every pair of cores
+> - **M5**: hardware discovery from DTB or ACPI into one description, with identical results from both
 >
 > The kernel boots under QEMU with HVF and TCG. MQTT over TLS arrives in **M10**. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
@@ -79,7 +80,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | Own page tables with W^X, guard pages, PAC/BTI when present | ✅ M2 |
 | | GICv3, generic timer, monotonic clock | ✅ M3 |
 | | SMP bring-up, per-CPU data (`TPIDR_EL1`), SGI IPIs | ✅ M4 |
-| | Hardware discovery via **DTB and ACPI** (MADT, GTDT, MCFG, SPCR) | 📋 M5 |
+| | Hardware discovery via **DTB and ACPI** (MADT, GTDT, MCFG, SPCR) | ✅ M5 |
 | **Devices** | PL011 UART, Limine framebuffer text log | ✅ M1 |
 | | PCIe ECAM, virtio-pci modern: net, blk, rng | 📋 M6 |
 | | virtio-net multiqueue + RSS, fallback software dispatcher | 📋 M13 |
@@ -571,7 +572,7 @@ QEMU user networking (slirp) tops out far below a million connections. For ≥ 1
 
 ```bash
 make fuzz T=config_parse FUZZ_TIME=60     # every parser gets a target as it lands
-cargo fuzz list                            # config_parse (M0); mqtt_decode (M8); tcp, tls, dtb, acpi later
+cargo fuzz list                            # config_parse, fdt_parse, acpi_parse; mqtt_decode (M8); tcp, tls later
 ```
 
 ## Deployment
@@ -659,7 +660,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M2** Memory | W^X verified by deliberate faults; PAC/BTI detection logged |
 | ✅ | **M3** Interrupts & time | GICv3, periodic tick, IRQ latency measured |
 | ✅ | **M4** SMP | `run-smp N=8`, IPI ping-pong between all core pairs |
-| 📋 | **M5** Platform discovery | `acpi=on` and `acpi=off` give identical summaries |
+| ✅ | **M5** Platform discovery | `acpi=on` and `acpi=off` give identical summaries |
 | 📋 | **M6** PCIe & virtio | blk write/flush/read-back; gratuitous ARP in a pcap |
 | 📋 | **M7** Network prototype | DHCP lease, ping, TCP echo through hostfwd |
 | 📋 | **M8** MQTT codec | spec tests, property tests, 10 minutes of fuzzing with no crash |

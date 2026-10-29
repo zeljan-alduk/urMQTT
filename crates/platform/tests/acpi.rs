@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use urmqtt_platform::acpi::{Acpi, AcpiError, PhysMemory, parse_fadt_arm_boot_arch, parse_spcr};
-use urmqtt_platform::{Gic, PsciMethod, Source, TimerIrqs, Uart, early_from_acpi};
+use urmqtt_platform::fdt::Fdt;
+use urmqtt_platform::{Gic, PsciMethod, Source, TimerIrqs, Uart, early_from_acpi, early_from_fdt};
 
 /// Sparse fake physical memory made of regions.
 #[derive(Default)]
@@ -252,4 +253,63 @@ fn malformed_madt_entries_stop_cleanly() {
     let mem = machine(vec![madt(&[bad]), gtdt(30, 27)]);
     let acpi = Acpi::new(&mem, 0x2000_0000).unwrap();
     assert_eq!(early_from_acpi(&acpi).unwrap().interrupts, None);
+}
+
+fn mcfg(base: u64, seg: u16, start: u8, end: u8) -> Vec<u8> {
+    let mut body = vec![0u8; 8];
+    body.extend_from_slice(&base.to_le_bytes());
+    body.extend_from_slice(&seg.to_le_bytes());
+    body.push(start);
+    body.push(end);
+    body.extend_from_slice(&[0; 4]);
+    sdt(b"MCFG", &body)
+}
+
+fn msi_frame(base: u64) -> Vec<u8> {
+    let mut e = vec![0u8; 24];
+    e[0] = 0x0d;
+    e[1] = 24;
+    e[8..16].copy_from_slice(&base.to_le_bytes());
+    e[20..22].copy_from_slice(&64u16.to_le_bytes());
+    e[22..24].copy_from_slice(&80u16.to_le_bytes());
+    e
+}
+
+/// ACPI tables describing the same machine as the HVF DTB fixture must
+/// produce the identical platform summary (M5 acceptance, host side).
+#[test]
+fn acpi_and_dtb_summaries_match() {
+    let mem = machine(vec![
+        fadt(0b11),
+        madt(&[
+            gicd(0x0800_0000),
+            gicc(0, 0),
+            gicc(0, 1),
+            gicc(0, 2),
+            gicc(0, 3),
+            gicr_range(0x080a_0000, 0x80000),
+            msi_frame(0x0802_0000),
+        ]),
+        gtdt(30, 27),
+        spcr(0x03, 0x0900_0000),
+        mcfg(0x40_1000_0000, 0, 0, 255),
+    ]);
+    let acpi = Acpi::new(&mem, 0x2000_0000).unwrap();
+    let from_acpi = early_from_acpi(&acpi).unwrap();
+    let dtb = include_bytes!("fixtures/qemu-virt-hvf-gic3.dtb");
+    let from_dtb = early_from_fdt(&Fdt::new(dtb).unwrap()).unwrap();
+    assert_eq!(from_acpi.to_string(), from_dtb.to_string());
+    assert_eq!(from_acpi.cpus.as_slice(), &[0, 1, 2, 3]);
+}
+
+#[test]
+fn disabled_cpus_are_skipped() {
+    let mut off = gicc(0, 7);
+    off[12..16].copy_from_slice(&0u32.to_le_bytes());
+    let mem = machine(vec![
+        madt(&[gicd(0x0800_0000), gicc(0, 0), off]),
+        gtdt(30, 27),
+    ]);
+    let acpi = Acpi::new(&mem, 0x2000_0000).unwrap();
+    assert_eq!(early_from_acpi(&acpi).unwrap().cpus.as_slice(), &[0]);
 }

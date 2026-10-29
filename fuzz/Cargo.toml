@@ -11,6 +11,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 urmqtt-config-schema = { path = "../crates/config-schema" }
+urmqtt-platform = { path = "../crates/platform" }
 
 # Standalone workspace: fuzz builds need sanitizer RUSTFLAGS.
 [workspace]
@@ -19,6 +20,20 @@ members = ["."]
 [[bin]]
 name = "config_parse"
 path = "fuzz_targets/config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fdt_parse"
+path = "fuzz_targets/fdt_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "acpi_parse"
+path = "fuzz_targets/acpi_parse.rs"
 test = false
 doc = false
 bench = false

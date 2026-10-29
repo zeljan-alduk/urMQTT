@@ -118,10 +118,10 @@ SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordere
     "smp: 4/4 cpus ticking on their own timer")
 
 scenario boot-acpi "smoke" on \
-    "$BOOT_LINE" "platform: Acpi" "console: pl011 at 0x9000000" "psci 1\.[0-9]+ via hvc" \
+    "$BOOT_LINE" "platform: discovered via Acpi" "console: pl011 at 0x9000000" "psci 1\.[0-9]+ via hvc" \
     "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${SMP4_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 scenario boot-dtb "smoke" off \
-    "$BOOT_LINE" "platform: DeviceTree" "console: pl011 at 0x9000000" "${MEMORY_OK[@]}" \
+    "$BOOT_LINE" "platform: discovered via DeviceTree" "console: pl011 at 0x9000000" "${MEMORY_OK[@]}" \
     "${TIME_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 scenario fault-data-abort "smoke test=data-abort" on \
     "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
@@ -152,6 +152,21 @@ scenario pac-forgery "smoke test=pac" on \
     "pointer authentication failure|instruction abort" "NOT:was NOT detected" "NOT:URMQTT READY"
 scenario bti-violation "smoke test=bti" on \
     "branch target exception \(BTI\)" "NOT:was NOT detected" "NOT:URMQTT READY"
+
+# M5: DTB and ACPI must describe the same machine identically.
+for accel in $ACCELS; do
+    a=$(clean "$OUT/boot-acpi-$accel.log" | grep -o 'platform summary: .*' || true)
+    d=$(clean "$OUT/boot-dtb-$accel.log" | grep -o 'platform summary: .*' || true)
+    if [[ -n "$a" && "$a" == "$d" ]]; then
+        echo "  ✓ platform summary identical for acpi=on/off [$accel]"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ platform summaries differ [$accel]"
+        echo "    acpi=on:  ${a:-<missing>}"
+        echo "    acpi=off: ${d:-<missing>}"
+        FAILED=$((FAILED + 1))
+    fi
+done
 
 echo "smoke: $PASSED passed, $FAILED failed"
 [[ $FAILED -eq 0 ]]

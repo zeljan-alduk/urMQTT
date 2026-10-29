@@ -121,3 +121,14 @@ fn gic_and_timer_from_qemu_dtbs() {
         None
     );
 }
+
+#[test]
+fn full_summary_of_qemu_virt_hvf() {
+    let p = early_from_fdt(&Fdt::new(HVF_GIC3).unwrap()).unwrap();
+    assert_eq!(
+        p.to_string(),
+        "uart=0x9000000 psci=hvc gicd=0x8000000 gicr=0x80a0000 msi=v2m@0x8020000 timer=27/30 \
+         cpus=4[0x0,0x1,0x2,0x3] pcie=0x4010000000/0:0-255"
+    );
+    assert_eq!(p.pcie.unwrap().ecam_size(), 256 << 20);
+}

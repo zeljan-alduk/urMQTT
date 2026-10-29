@@ -230,7 +230,12 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "urmqtt-config-schema",
+ "urmqtt-platform",
 ]
+
+[[package]]
+name = "urmqtt-platform"
+version = "0.0.1"
 
 [[package]]
 name = "winnow"

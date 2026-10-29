@@ -232,6 +232,47 @@ pub fn madt_entries<'a>(t: &Sdt<'a>) -> impl Iterator<Item = (u8, &'a [u8])> + '
     })
 }
 
+/// MPIDRs of the enabled (or online-capable) CPUs in the MADT, in order.
+pub fn madt_cpus<'a>(t: &Sdt<'a>) -> impl Iterator<Item = u64> + 'a {
+    madt_entries(t).filter_map(|(ty, e)| {
+        if ty != MADT_GICC {
+            return None;
+        }
+        let flags = u32_at(e, 12)?;
+        if flags & (GICC_ENABLED | GICC_ONLINE_CAPABLE) == 0 {
+            return None;
+        }
+        u64_at(e, 68).map(|m| m & 0xff_00ff_ffff)
+    })
+}
+
+/// One PCIe ECAM region from the MCFG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McfgEntry {
+    pub base: u64,
+    pub segment: u16,
+    pub bus_start: u8,
+    pub bus_end: u8,
+}
+
+/// Iterates the MCFG allocation entries (16 bytes each after 8 reserved).
+pub fn mcfg_entries<'a>(t: &Sdt<'a>) -> impl Iterator<Item = McfgEntry> + 'a {
+    t.data
+        .get(44..)
+        .unwrap_or(&[])
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .filter_map(|c| {
+            Some(McfgEntry {
+                base: u64_at(c, 0)?,
+                segment: u16_at(c, 8)?,
+                bus_start: u8_at(c, 10)?,
+                bus_end: u8_at(c, 11)?,
+            })
+        })
+}
+
 pub fn parse_madt(t: &Sdt<'_>) -> MadtGic {
     let mut g = MadtGic::default();
     for (ty, e) in madt_entries(t) {
