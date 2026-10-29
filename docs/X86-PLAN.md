@@ -369,7 +369,7 @@ real hardware stay marked experimental.
   - disks with model, serial and size, plus the partition and signature scan.
 
   This is the first thing run on any new machine.
-- **One disk** (F10, STORAGE-PLAN S1 §2a): on the PC, the image is written to the internal disk, which then holds both the boot partition and the data partition. Booting from a USB stick is for trying it out only: the stick would be the boot disk and the data would go on it. X12 documents how to get the image onto the internal disk (from a Linux live USB with `dd`, or with the disk in another machine) and tests first boot, crash during first boot, and reboot on the PC.
+- **One disk** (F10, STORAGE-PLAN §2a), and **the ISO installs itself** (§2b, S1b). On the PC: boot the USB stick, choose *Install urMQTT on this machine's disk*, wait out the countdown, remove the stick, boot from the internal disk. X12 accepts this on the PC by UEFI and BIOS (once X13 drives its disk), plus first boot, a crash during first boot, and reboot. `dd` from another system remains documented as the fallback.
 - **More CPUs.** MAX_CPUS goes from 64 to 256 (x2APIC; desktop SMT and hybrid P/E-core CPUs report many threads). Topology is logged; NUMA is logged and ignored for now.
 - **Power.** ACPI reset and S5 (D5) become essential on real hardware.
 

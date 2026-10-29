@@ -66,7 +66,7 @@ bare metal comes before optimisation.
 |---|---|---|
 | 1. Baseline | **H0**, **S0** | inventory, gaps and the byte-level disk spec; no behaviour change |
 | 2. Foundation | **X0** | arch facade and dispatch, so later work is architecture-neutral |
-| 3. Close the biggest gaps | **H1** (+ H7 lower bound), **S1** | runtime revocation, allowlist, expiry checks; host disk tool, fault injection, disk safety |
+| 3. Close the biggest gaps | **H1** (+ H7 lower bound), **S1**, **S1b** | runtime revocation, allowlist, expiry checks; host disk tool, fault injection, single-disk model; the self-installing ISO (VM-tested here, bare metal in X12) |
 | 4. Quick win | **X0b** | ARMv8 hardware crypto on aarch64 (today all software) |
 | 5. Prove the custom code | **H2**, **H3**, **H5** | TLS and TCP assurance, Miri, Kani, sanitizers |
 | 6. Disk format v2 and features | **S2**, **S3**, **S4**, **S5**, **S6** | settled before x86 shares the format |
@@ -103,5 +103,13 @@ The user accepted every proposal ("everything as proposed, following best practi
    - **One artifact:** the multi-platform ISO is hybrid, so the same file is booted as a CD for a quick look, or written (`dd`, cloud image import) to the machine's disk for real use. Booted from read-only optical media there is nowhere to persist, so a production image refuses to serve and says so; a dev image may run from RAM.
    - **Kernel updates** replace the contents of the ESP and keep the data partition (`urmqtt-disk update-boot`, offline; A/B boot entries with rollback as a later step).
    - **urMQTT's own state is never lost silently:** a damaged data partition is refused or restored (S5), never re-formatted as new.
+
+7. **The ISO installs itself** (user decision 2026-10-29: it must be able to install itself and be properly bootable). Design in STORAGE-PLAN §2b, milestone **S1b**:
+   - The boot menu (Limine) has two entries: *urMQTT* (the default after a short timeout) and *Install urMQTT on this machine's disk*. Choosing the install entry at the console is the explicit, destructive operator action. There is no other input, and the kernel adds none.
+   - **Target:** the machine's single installable disk (not the boot medium, not optical, not removable). Several candidates mean refusal with a list, or a configured serial number. Before writing, the target (model, serial, size) is shown for 30 s; power off cancels.
+   - **What is written:** the installer writes exactly what `dd` of the image would write: protective MBR, GPT and the ESP, byte-identical to the raw image, and checks that by reading it back. The data partition then comes from the normal first boot, so installing and `dd` share one code path.
+   - **Afterwards:** a power-off with "remove the installation medium". The installed disk boots by UEFI (removable-media path `\EFI\BOOT\BOOT*.EFI`, so no firmware variables are needed) and, on x86, by BIOS.
+   - **Production:** the kernel still ignores its command line, except the single word `install`, which only the hash-pinned install entry passes. An ADR records this narrow exception and SECURITY.md gets a threat-model entry: physical access to the boot menu can erase the target disk, which an attacker with physical access can do anyway.
+   - **This is the one exception** to "never touch another disk" (decision 6): it applies only when booted from the installer entry.
 
 Still open: the Intel test PC's hardware inventory (TODO.md), which decides the order of X13/X14.

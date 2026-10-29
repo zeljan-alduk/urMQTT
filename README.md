@@ -42,7 +42,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 
 > [!NOTE]
 > **Where this is going** ([roadmap](#next-one-multi-platform-iso-raw-disk-demonstrably-secure), planned, not yet built):
-> - **One multi-platform ISO** that boots on aarch64 and x86_64, by UEFI or legacy BIOS, in VMs and on bare-metal hardware.
+> - **One multi-platform ISO** that boots on aarch64 and x86_64, by UEFI or legacy BIOS, in VMs and on bare-metal hardware, and **installs itself** onto the machine's disk from its boot menu.
 > - **One disk, no filesystem:** the data lives in a raw partition of the disk urMQTT boots from, with its own minimal, specified layout. No other disk is touched.
 > - **Security work aimed at an external audit.**
 
@@ -907,6 +907,7 @@ Security is the first priority and wins conflicts with the other tracks.
 |---|---|---|
 | ✅ | **S0** Disk format spec | `docs/DISK-FORMAT.md` byte-level and cross-checked against the code; golden v1 images |
 | 📋 | **S1** `urmqtt-disk` & safety | single-disk model: data in a partition of the boot disk, created on first boot (crash-safe), no other disk touched; host tool sharing the kernel's parsers (info, verify, export, import); fault injection |
+| 📋 | **S1b** Self-installing ISO | boot menu entry *Install urMQTT on this machine's disk*: target shown with a countdown, image written byte-identical to the raw image and verified; installed disk boots by UEFI and BIOS |
 | 📋 | **S2** Layout v2 | regions aligned to 1 MiB and the device topology, zero misaligned writes; migration from v1 |
 | 📋 | **S3** Growing the disk | 1 → 4 → 64 GiB with data present, crash-safe at every write |
 | 📋 | **S4** Discard | thin-provisioned volumes shrink after retention; no throughput loss |
@@ -943,7 +944,7 @@ Security is the first priority and wins conflicts with the other tracks.
 
 1. Baseline: H0, S0.
 2. Arch facade: X0.
-3. The biggest gaps: H1, S1.
+3. The biggest gaps: H1, S1, S1b.
 4. aarch64 hardware crypto: X0b.
 5. TLS/TCP assurance and verification tooling: H2, H3, H5.
 6. Disk format v2 and its features: S2–S6.

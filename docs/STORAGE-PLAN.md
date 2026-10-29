@@ -79,6 +79,56 @@ last 33    backup GPT
   - that a second attached disk is byte-identical afterwards;
   - booting the ISO as a CD (prod refuses).
 
+## 2b. Self-installing ISO (PLAN.md decision 7)
+
+**Boot menu** (`limine.conf`, hash-pinned like today, config hash enrolled by H8, editor off):
+
+```
+timeout: 5
+default_entry: 1
+/urMQTT                                        kernel: urmqtt-${ARCH}.elf#<blake2b>
+/Install urMQTT on this machine's disk         kernel: urmqtt-${ARCH}.elf#<blake2b>
+                                               cmdline: install
+                                               module_path: boot():/esp.img#<blake2b>
+```
+
+- **Target selection.** Every disk the kernel drives, minus:
+  - the boot medium (identified as in §2a);
+  - optical devices (SCSI type 5);
+  - write-protected devices;
+  - disks smaller than the minimum (ESP plus 16 MiB of data).
+
+  Exactly one disk left: that disk. Several: refuse and list them, unless `storage.install_target = { serial = "…" }` names one. On bare metal the USB stick the installer runs from is not even visible (there is no USB storage driver), which leaves the internal disk.
+- **Confirmation without input.** The framebuffer and serial console show the target (bus, model, serial, size) and whether it holds a urMQTT data partition. Then a 30 s countdown follows, and the screen tells the operator to power off to cancel. A config option can shorten the countdown for automated VM tests only (dev builds).
+- **Writing.** The module `esp.img`, loaded by Limine into memory and pinned by its hash, is the ESP. The kernel builds the protective MBR and GPT with the same rules as `scripts/mkraw.py` (shared specification, deterministic GUIDs), so the first 1 MiB plus the ESP are **byte-identical to the raw image**. The steps:
+  1. Write the ESP.
+  2. Write the GPT (backup at the image's end, as in the raw image).
+  3. Write the MBR last.
+  4. Flush, then read everything back and compare the blake2b hash.
+
+  On x86 the BIOS stage of Limine is part of what the raw image contains (X10), so a BIOS boot of the installed disk works as well. A crash during writing leaves a disk that does not boot (no valid MBR or GPT yet), and the operator installs again.
+- **Existing data partition.** The installer overwrites the target from the start; a previous urMQTT data partition is not kept. Reinstalling with data kept is `urmqtt-disk update-boot` (offline) and, later, an *Update* menu entry that replaces only the ESP.
+- **Finish.** Log `install: done, remove the installation medium`, then power off. On the next boot from the disk, the single-disk first boot (§2a) moves the backup GPT, assigns a disk GUID, creates the data partition and formats it.
+- **Production command line.** Still ignored, except the exact word `install` (ADR). A threat-model entry in SECURITY.md covers it.
+
+### S1b — Self-installing ISO · M
+
+**Work**
+- The menu and `esp.img` module in `mkiso.sh`.
+- `install` mode in the kernel: target selection, countdown, writing, read-back verification, power-off.
+- A shared GPT writer used by first boot and install, specified in DISK-FORMAT.md, with a test that the installer's bytes equal `mkraw.py`'s for the same ESP.
+- DEPLOY.md: install from CD/ISO in Proxmox or KVM, and from a USB stick on bare metal (UEFI, and BIOS on x86).
+
+**Tests**
+- Host: GPT writer against `mkraw.py` output (byte-identical); target selection rules.
+- Smoke:
+  - `install-vm`: the ISO as a CD plus an empty virtio-blk disk. Install, power-off, then boot from the disk alone: first boot, `URMQTT READY`, and the CD untouched;
+  - `install-two-disks-refused`: nothing written, both listed;
+  - `install-scsi`: the target is a virtio-scsi LUN;
+  - `install-crash`: power cut while writing, so the disk does not boot, then a reinstall succeeds;
+  - `install-prod-cmdline`: a prod image honours `install` and ignores every other word.
+- **Bare metal (X12):** a USB stick on the Intel PC, by UEFI and by BIOS, onto its internal NVMe or SATA disk (after X13), followed by a boot from the internal disk.
+
 ---
 
 ## 3. Milestones

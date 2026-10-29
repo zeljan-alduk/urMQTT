@@ -229,6 +229,10 @@ Every milestone ends with:
   - the EFI loaders are signed with a project key (`sbsign`);
   - enrollment documented for OVMF/QEMU, Proxmox and **the Intel test PC** (own keys in `db`, or MOK via shim; ADR);
   - a CI test boots OVMF with Secure Boot enabled.
+- **Installer entry** (PLAN.md decision 7, STORAGE-PLAN S1b):
+  - The prod kernel accepts exactly one command-line word, `install`, and only together with the hash-pinned `esp.img` module.
+  - The threat-model entry: whoever can use the boot menu can erase the target disk. That requires physical or console access, which already allows that.
+  - The menu editor stays disabled, and the enrolled config hash (above) prevents adding entries or arguments.
 - **Image secrecy:**
   - a loud build warning when a prod image is built outside CI;
   - secrets never appear in logs, panics or the repro comparison artifacts (a test greps them for key bytes).
