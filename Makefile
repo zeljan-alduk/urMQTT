@@ -81,8 +81,9 @@ fmt: ## Format all Rust code
 	cd fuzz && $(CARGO) fmt
 
 .PHONY: check
-check: certs ## fmt --check, clippy -D warnings (host + bare metal), host tests
+check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host tests
 	$(CARGO) fmt --all --check
+	@if command -v typos >/dev/null; then typos; else echo "check: typos not installed, skipped (CI runs it)"; fi
 	cd fuzz && $(CARGO) fmt --check
 	$(CARGO) clippy $(CARGO_FLAGS) --workspace --all-targets -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-kernel --target $(TARGET) -- -D warnings

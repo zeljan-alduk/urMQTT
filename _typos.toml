@@ -6,3 +6,6 @@ mosquitto = "mosquitto"
 Mosquitto = "Mosquitto"
 BA = "BA"
 INDX = "INDX"
+# rustls API names (MessageEncrypter, encrypter())
+Encrypter = "Encrypter"
+encrypter = "encrypter"
