@@ -98,7 +98,7 @@ scenario() {
     [[ -f "$iso" ]] || "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "$cmdline" >/dev/null
     for accel in $ACCELS; do
         local log="$OUT/$name-$accel.log" status=0
-        boot "$log" --iso "$iso" --accel "$accel" --acpi "$acpi" --headless --no-net || status=$?
+        boot "$log" --iso "$iso" --accel "$accel" --acpi "$acpi" --smp "${SMP:-4}" --headless --no-net || status=$?
         check "$name [$accel]" "$log" "$status" "$@"
     done
 }
@@ -114,10 +114,12 @@ MEMORY_OK=("vm: switched to kernel tables" "selftest: frames ok" "page tables lo
 TIME_OK=("gic: v3 at gicd=0x8000000" "timer: counter [0-9]+ Hz, virtual timer PPI 27" "tick 10$"
     "irq latency \(busy-poll, 25 samples\) min=[0-9]+" "irq latency \(wfi, 25 samples\) min=[0-9]+"
     "timer: 5[0-9] ticks in [0-9]+ ms")
+SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordered pairs ping-pong ok"
+    "smp: 4/4 cpus ticking on their own timer")
 
 scenario boot-acpi "smoke" on \
     "$BOOT_LINE" "platform: Acpi" "console: pl011 at 0x9000000" "psci 1\.[0-9]+ via hvc" \
-    "${MEMORY_OK[@]}" "${TIME_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
+    "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${SMP4_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 scenario boot-dtb "smoke" off \
     "$BOOT_LINE" "platform: DeviceTree" "console: pl011 at 0x9000000" "${MEMORY_OK[@]}" \
     "${TIME_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
@@ -131,6 +133,11 @@ scenario brk-resume "smoke test=brk" on \
     "resumable brk at 0x" "test: resumed after brk" "^URMQTT READY$" "NOT:fatal exception"
 scenario panic "smoke test=panic" on \
     "PANIC: panicked at" "test panic requested on the command line" "NOT:URMQTT READY"
+# M4: eight CPUs, all 56 ordered IPI pairs.
+SMP=8 scenario smp8 "smoke" on \
+    "cpu=8 mem=" "cpu 7 online" "smp: 8/8 cpus online" "ipi: 56/56 ordered pairs ping-pong ok" \
+    "smp: 8/8 cpus ticking on their own timer" "^URMQTT READY$" "$NO_FAULT"
+
 # M2: W^X, guard pages, lower half, PAC, BTI.
 scenario wx-write-text "smoke test=write-text" on \
     "${MEMORY_OK[@]}" "data abort \(same EL\), write, permission fault, level 3" "NOT:URMQTT READY"

@@ -37,6 +37,8 @@ mod power;
 #[cfg(target_os = "none")]
 mod selftest;
 #[cfg(target_os = "none")]
+mod smp;
+#[cfg(target_os = "none")]
 mod tick;
 #[cfg(target_os = "none")]
 mod trap;

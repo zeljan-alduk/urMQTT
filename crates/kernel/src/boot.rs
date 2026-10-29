@@ -17,7 +17,7 @@ use urmqtt_log::{error, info, warn};
 use urmqtt_platform::{EarlyPlatform, PsciMethod, Uart};
 
 use crate::cmdline::{BootOptions, TestFault};
-use crate::{VERSION, console, irq, layout, memory, power, selftest, tick, trap, vm};
+use crate::{VERSION, console, irq, layout, memory, power, selftest, smp, tick, trap, vm};
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
@@ -110,6 +110,7 @@ const DEV_FALLBACK_UART: u64 = 0x0900_0000;
 /// State carried across the stack switch into [`kmain_stage2`].
 struct Stage2 {
     options: BootOptions,
+    pac_key: Option<(u64, u64)>,
     interrupts: Option<urmqtt_platform::Interrupts>,
     cpus: u64,
     built: vm::Built,
@@ -258,12 +259,14 @@ extern "C" fn urmqtt_kmain() -> ! {
         (built.free_frames as u64 * 4096) >> 20
     );
 
-    let pac_on = features.pauth && set_pac_key();
+    let pac_key = if features.pauth { set_pac_key() } else { None };
+    let pac_on = pac_key.is_some();
     vm::activate();
     info!("vm: switched to kernel tables (TTBR1), lower half disabled, WXN on");
     let (main_top, exc_top) = (built.main_top, built.exc_top);
     *STAGE2.lock() = Some(Stage2 {
         options,
+        pac_key,
         interrupts: early.and_then(|e| e.interrupts),
         cpus: cpus as u64,
         built,
@@ -275,8 +278,9 @@ extern "C" fn urmqtt_kmain() -> ! {
     unsafe { pac::switch_to(main_top, exc_top, 0, kmain_stage2, pac_on) }
 }
 
-/// Seeds the IA key from bootloader entropy (and RNDR if present).
-fn set_pac_key() -> bool {
+/// Seeds the IA key from bootloader entropy. Returns the key so the
+/// application processors can be given the same one.
+fn set_pac_key() -> Option<(u64, u64)> {
     let mut key = [0u64; 2];
     let from_limine = ENTROPY.response().and_then(|r| {
         let n = usize::try_from(r.value_count)
@@ -290,7 +294,7 @@ fn set_pac_key() -> bool {
     });
     let Some(values) = from_limine else {
         warn!("pac: no bootloader entropy, leaving pointer authentication off");
-        return false;
+        return None;
     };
     for (i, v) in values.iter().enumerate() {
         if let Some(k) = key.get_mut(i % 2) {
@@ -299,14 +303,15 @@ fn set_pac_key() -> bool {
     }
     // SAFETY: PAC is not enabled yet, no signed pointers exist.
     unsafe { pac::set_ia_key(key[0], key[1]) };
-    true
+    Some((key[0], key[1]))
 }
 
 /// Runs on the kernel's main stack (SP_EL0) with exceptions on SP_EL1.
 extern "C" fn kmain_stage2(_arg: u64) -> ! {
-    let Some(s) = STAGE2.lock().take() else {
+    let Some(mut s) = STAGE2.lock().take() else {
         fatal("stage 2 entered without state");
     };
+    smp::init_boot_cpu();
     vm::retire_early_frames(s.early_frames);
     if let Err(e) = vm::init_heap(s.built.heap_order, s.built.heap_meta_words) {
         fatal_fmt(format_args!("heap init failed: {e:?}"));
@@ -346,6 +351,14 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         ),
         Err(e) => fatal_fmt(format_args!("gic init failed: {e:?}")),
     }
+    // Application processors need their stacks mapped before the lock.
+    smp::register_ipis();
+    let ap_count = (s.cpus as usize).clamp(1, smp::MAX_CPUS) - 1;
+    for cpu in 1..=ap_count as u64 {
+        if let Err(e) = vm::map_stacks(cpu) {
+            fatal_fmt(format_args!("mapping stacks of cpu {cpu} failed: {e:?}"));
+        }
+    }
     match vm::lock() {
         Ok(bytes) => info!(
             "vm: page tables locked ({} KiB read-only, no writable alias)",
@@ -362,13 +375,59 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
 
     tick_selftest(intr.timer.virt);
+    smp_bringup(&mut s);
 
     urmqtt_log::raw(format_args!("URMQTT READY\n"));
     if s.options.smoke {
         power::off();
     }
-    // SAFETY: vectors and the GIC are initialised; the tick keeps running.
-    unsafe { cpu::idle() }
+    smp::idle_loop(smp::this())
+}
+
+const AP_TIMEOUT_NS: u64 = 2_000_000_000;
+
+/// Starts every application processor, checks IPIs between all pairs and
+/// that every core runs its own tick.
+fn smp_bringup(s: &mut Stage2) {
+    let Some(mp) = MP.response() else {
+        info!("smp: no MP response, running on one CPU");
+        return;
+    };
+    let started = smp::start_aps(mp.cpus(), mp.bsp_mpidr, s.pac_key.unwrap_or((0, 0)));
+    // The key is now in every core's registers; drop the copies in memory.
+    s.pac_key = None;
+    let n = smp::count();
+    let up = smp::wait_online(n, AP_TIMEOUT_NS);
+    info!("smp: {up}/{n} cpus online ({started} application processors started)");
+    if up != n {
+        fatal("not every CPU came online");
+    }
+    let (ok, total) = smp::ipi_selftest();
+    if ok != total {
+        fatal("IPI ping-pong failed for some CPU pairs");
+    }
+    // Every core must be ticking on its own timer.
+    let before: [u64; smp::MAX_CPUS] = core::array::from_fn(|i| {
+        smp::CPUS[i]
+            .ticks
+            .load(core::sync::atomic::Ordering::Relaxed)
+    });
+    let until = urmqtt_arch_aarch64::timer::uptime_ns() + 5 * TICK_NS;
+    while urmqtt_arch_aarch64::timer::uptime_ns() < until {
+        cpu::wfi();
+    }
+    let ticking = (0..n)
+        .filter(|&i| {
+            smp::CPUS[i]
+                .ticks
+                .load(core::sync::atomic::Ordering::Relaxed)
+                > before[i]
+        })
+        .count();
+    info!("smp: {ticking}/{n} cpus ticking on their own timer");
+    if ticking != n {
+        fatal("a CPU's local timer is not ticking");
+    }
 }
 
 /// Tick period (also the watchdog granularity, PROMPT §4.1).

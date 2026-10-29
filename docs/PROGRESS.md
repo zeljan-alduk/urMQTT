@@ -157,3 +157,32 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - Only the boot CPU's redistributor is initialised; the other CPUs join in M4.
 - SPIs and MSIs are not used yet (M6, M13).
 - The tick is not yet used by the watchdog (M16).
+
+## M4 — SMP (2026-10-29)
+
+**Done**
+
+- `kernel/smp`:
+  - Per-CPU data indexed by `TPIDR_EL1`.
+  - AP bring-up through Limine MP with an assembly entry that mirrors the boot CPU's MMU, PAC, vector and stack configuration (ADR-023).
+  - Per-core redistributor and CPU interface.
+  - Per-core tick on each core's own virtual timer.
+  - Per-core idle loop (WFI, or busy-poll during tests) that runs work posted by the boot CPU.
+- SGI IPIs (ping, pong, wake) and an IPI self-test. Every core pings every other core and waits for the pong, covering all ordered pairs, with round-trip times measured.
+- `gic::send_sgi` targets a single MPIDR (with the range selector), and `dsb ishst` orders data before the IPI.
+- `vm::map_stacks` maps every AP's stacks (with guard pages) before the page tables lock.
+- `make run-smp N=8` boots eight cores. Smoke covers 4 CPUs in every boot scenario plus a dedicated 8-CPU scenario.
+
+**Measured**
+
+- HVF, 8 vCPUs: 8/8 online, **56/56 ordered pairs ok**, IPI round trip avg 12–13 µs (max 29–66 µs).
+- TCG, 8 vCPUs: 56/56, avg 23 µs.
+- HVF, 4 vCPUs: 12/12, avg 11 µs.
+- Every core ticks on its own timer (checked over 5 ticks).
+- `make smoke`: 26/26.
+- Kernel ELF: **144 400 bytes**.
+
+**Known gaps**
+
+- The per-CPU log rings described in §4.2 are not in yet; all cores share the IRQ-safe global logger. The per-core loop arrives with the data plane (M13).
+- APs only idle. Data-plane work starts in M13; the DB core assignment (highest-numbered CPU) lands with SQLite in M11.

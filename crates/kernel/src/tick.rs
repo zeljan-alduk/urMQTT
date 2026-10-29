@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use urmqtt_arch_aarch64::timer;
 
 static PERIOD_TICKS: AtomicU64 = AtomicU64::new(0);
+static INTID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static TICKS: AtomicU64 = AtomicU64::new(0);
 static LAT_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
 static LAT_MAX: AtomicU64 = AtomicU64::new(0);
@@ -39,12 +40,24 @@ fn on_tick(_intid: u32) {
     }
     timer::set_deadline(next);
     TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::smp::this().ticks.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Starts the tick with `period_ns` on this core, delivered as `intid`.
 pub fn start(intid: u32, period_ns: u64) {
     PERIOD_TICKS.store(timer::ns_to_ticks(period_ns).max(1), Ordering::Relaxed);
+    INTID.store(intid, Ordering::Relaxed);
     crate::irq::register(intid, on_tick);
+    crate::irq::enable_private(intid);
+    timer::set_deadline(timer::now() + PERIOD_TICKS.load(Ordering::Relaxed));
+}
+
+/// Starts this (secondary) core's own tick with the boot CPU's settings.
+pub fn start_secondary() {
+    let intid = INTID.load(Ordering::Relaxed);
+    if intid == 0 {
+        return;
+    }
     crate::irq::enable_private(intid);
     timer::set_deadline(timer::now() + PERIOD_TICKS.load(Ordering::Relaxed));
 }

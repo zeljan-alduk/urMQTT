@@ -376,6 +376,28 @@ pub fn map_device(va: u64, pa: u64, len: u64) -> Result<(), MapError> {
     Ok(())
 }
 
+/// Maps the stacks of CPU `cpu` (before `lock`).
+pub fn map_stacks(cpu: u64) -> Result<(), MapError> {
+    if LOCKED.load(Ordering::Acquire) {
+        return Err(MapError::AlreadyMapped);
+    }
+    let mut guard = SPACE.lock();
+    let s = guard.as_mut().ok_or(MapError::OutOfFrames)?;
+    let mut tables = s.tables();
+    let mut m = Mapper::new(&mut tables, s.root);
+    let ((exc_lo, exc_hi), (main_lo, main_hi)) = layout::stacks(cpu);
+    for va in (exc_lo..exc_hi)
+        .step_by(PAGE_SIZE as usize)
+        .chain((main_lo..main_hi).step_by(PAGE_SIZE as usize))
+    {
+        let frame = data_frame().map_err(|_| MapError::OutOfFrames)?;
+        m.map_page(va, frame, PageAttrs::data(), &mut s.pool_frames)?;
+    }
+    cpu::dsb_ishst();
+    cpu::isb();
+    Ok(())
+}
+
 /// Returns the frames lent to the bootloader-table extensions.
 pub fn retire_early_frames(range: (u64, u64)) {
     if let Some(fa) = FRAMES.lock().as_mut() {

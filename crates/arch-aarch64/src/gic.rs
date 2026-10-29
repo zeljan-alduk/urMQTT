@@ -255,14 +255,23 @@ pub fn eoi(intid: u32) {
     };
 }
 
-/// Sends SGI `intid` (0-15) to the CPUs in `target_list` (bit n = Aff0 = n)
-/// of cluster `aff1`/`aff2`/`aff3`, or to all other CPUs if `all_others`.
-pub fn send_sgi(intid: u32, aff3: u8, aff2: u8, aff1: u8, target_list: u16, all_others: bool) {
-    let mut v = (u64::from(intid & 0xf) << 24) | u64::from(target_list);
-    v |= (u64::from(aff1) << 16) | (u64::from(aff2) << 32) | (u64::from(aff3) << 48);
-    if all_others {
-        v = (u64::from(intid & 0xf) << 24) | (1 << 40);
-    }
-    // SAFETY: generating an SGI only signals other cores' interrupt state.
+/// Sends SGI `intid` (0-15) to the single CPU with affinity `mpidr_aff`.
+///
+/// The `dsb ishst` makes prior stores visible to the target before the
+/// interrupt is generated, so a handler may read data written before the call.
+pub fn send_sgi(intid: u32, mpidr_aff: u64) {
+    let aff0 = mpidr_aff & 0xff;
+    let aff1 = (mpidr_aff >> 8) & 0xff;
+    let aff2 = (mpidr_aff >> 16) & 0xff;
+    let aff3 = (mpidr_aff >> 32) & 0xff;
+    // Target list covers Aff0 = RS*16 + bit (ICC_SGI1R_EL1.RS, bits [47:44]).
+    let rs = aff0 / 16;
+    let v = (u64::from(intid & 0xf) << 24)
+        | (1u64 << (aff0 % 16))
+        | (aff1 << 16)
+        | (aff2 << 32)
+        | (rs << 44)
+        | (aff3 << 48);
+    // SAFETY: generating an SGI only changes the target's pending state.
     unsafe { asm!("dsb ishst", "msr S3_0_C12_C11_5, {}", "isb", in(reg) v, options(nostack)) };
 }

@@ -11,6 +11,7 @@ All notable changes to this project are documented here. The format follows
 - M0: Cargo workspace with all crates, pinned nightly toolchain and Makefile.
 - M0: Validated build-time configuration (`deploy/<env>/config.toml`) compiled into typed constants.
 - M0: Dev certificate generator, including negative-test certificates.
+- M4: SMP bring-up (Limine MP), per-CPU data, per-core GIC + timer, SGI IPIs with all-pairs ping-pong test.
 - M3: GICv3 driver, generic timer, 10 ms tick, IRQ dispatch, measured IRQ latency (busy-poll vs WFI).
 - M2: Kernel page tables with enforced W^X, locked tables, guard pages, frame allocator, buddy heap, PAC/BTI.
 - M1: Bootable UEFI ISO, console, decoded exception reports, PSCI, `make run`/`smoke`, CI smoke job.

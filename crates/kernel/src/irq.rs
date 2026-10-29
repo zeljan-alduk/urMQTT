@@ -7,12 +7,12 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use urmqtt_arch_aarch64::gic::{self, GicError, Gicv3, Redistributor, SPURIOUS};
+use urmqtt_arch_aarch64::gic::{self, GicError, Gicv3, SPURIOUS};
 use urmqtt_arch_aarch64::regs;
 use urmqtt_arch_aarch64::sync::OnceCell;
 use urmqtt_platform::Gic;
 
-use crate::memory;
+use crate::{memory, smp};
 
 /// An IRQ handler: receives the INTID.
 pub type Handler = fn(u32);
@@ -20,7 +20,6 @@ pub type Handler = fn(u32);
 const MAX_INTID: usize = 1020;
 static HANDLERS: [AtomicUsize; MAX_INTID] = [const { AtomicUsize::new(0) }; MAX_INTID];
 static GIC: OnceCell<Gicv3> = OnceCell::new();
-static BOOT_RD: OnceCell<Redistributor> = OnceCell::new();
 static SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
 static UNHANDLED_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -50,8 +49,29 @@ pub fn init(gic_info: &Gic, cpus: u64) -> Result<u32, IrqError> {
     gic::init_cpu_interface();
     let lines = g.lines();
     GIC.set(g).map_err(|_| IrqError::AlreadyInitialised)?;
-    BOOT_RD.set(rd).map_err(|_| IrqError::AlreadyInitialised)?;
+    smp::this()
+        .rd
+        .set(rd)
+        .map_err(|_| IrqError::AlreadyInitialised)?;
+    for sgi in [smp::SGI_PING, smp::SGI_PONG, smp::SGI_WAKE] {
+        g.enable_private(rd, sgi);
+    }
     Ok(lines)
+}
+
+/// Per-CPU part on an application processor: its redistributor, the CPU
+/// interface and the IPI SGIs.
+pub fn init_secondary(me: &smp::PerCpu) -> Result<(), IrqError> {
+    let g = GIC.get().ok_or(IrqError::Map)?;
+    let rd = g
+        .redistributor(regs::mpidr_affinity())
+        .map_err(IrqError::Gic)?;
+    g.init_redistributor(rd).map_err(IrqError::Gic)?;
+    gic::init_cpu_interface();
+    for sgi in [smp::SGI_PING, smp::SGI_PONG, smp::SGI_WAKE] {
+        g.enable_private(rd, sgi);
+    }
+    me.rd.set(rd).map_err(|_| IrqError::AlreadyInitialised)
 }
 
 pub fn register(intid: u32, h: Handler) {
@@ -61,9 +81,9 @@ pub fn register(intid: u32, h: Handler) {
     }
 }
 
-/// Enables a private interrupt (SGI/PPI) on the boot CPU.
+/// Enables a private interrupt (SGI/PPI) on the executing CPU.
 pub fn enable_private(intid: u32) {
-    if let (Some(g), Some(rd)) = (GIC.get(), BOOT_RD.get()) {
+    if let (Some(g), Some(rd)) = (GIC.get(), smp::this().rd.get()) {
         g.enable_private(*rd, intid);
     }
 }
