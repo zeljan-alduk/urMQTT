@@ -33,6 +33,8 @@ mod dpbench;
 #[cfg(target_os = "none")]
 mod irq;
 #[cfg(target_os = "none")]
+mod jitter;
+#[cfg(target_os = "none")]
 mod layout;
 #[cfg(target_os = "none")]
 mod memory;

@@ -145,6 +145,23 @@ pub static DEVICES: SpinLock<Devices> = SpinLock::new(Devices {
     blk_msix_spi: None,
 });
 
+/// Network controllers found without a driver: (vendor, device).
+pub static OTHER_NICS: SpinLock<alloc::vec::Vec<(u16, u16)>> =
+    SpinLock::new(alloc::vec::Vec::new());
+
+/// A name for a NIC vendor, for the missing-driver message.
+pub fn nic_vendor(v: u16) -> &'static str {
+    match v {
+        0x15b3 => "Mellanox/NVIDIA (ConnectX, SR-IOV)",
+        0x8086 => "Intel",
+        0x14e4 => "Broadcom",
+        0x1d0f => "Amazon (ENA)",
+        0x1414 => "Microsoft (MANA)",
+        0x1af4 => "virtio (transitional/unknown)",
+        _ => "unknown vendor",
+    }
+}
+
 /// The boot CPU's CSPRNG (per-core generators are forked from it).
 pub static RNG: SpinLock<Option<Csprng>> = SpinLock::new(None);
 
@@ -268,7 +285,27 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
         info!("entropy: 64 bytes from RNDR");
     }
     pool.add(Source::Jitter, &timer::now().to_le_bytes());
-    let mut rng = pool.finish().map_err(|_| ProbeError::NoEntropy)?;
+    let fallback = urmqtt_config::CONFIG.entropy.jitter_fallback;
+    if !pool.has_hardware() && fallback {
+        let t0 = timer::uptime_ns();
+        let r = crate::jitter::collect(&mut pool);
+        warn!(
+            "entropy: no hardware source (virtio-rng, RNDR): CPU jitter fallback via the {} (granularity 2^{}): \
+             {} samples of {} steps, {} bit(s)/sample estimated, {} bit(s) credited (1/{}), health tests {}, {} ms",
+            r.clock,
+            r.shift,
+            r.samples,
+            r.iters,
+            r.bits_per_sample,
+            r.credited,
+            urmqtt_tls::rng::JITTER_SAFETY,
+            if r.failed { "FAILED" } else { "passed" },
+            (timer::uptime_ns() - t0) / 1_000_000
+        );
+    }
+    let mut rng = pool
+        .finish_with(fallback)
+        .map_err(|_| ProbeError::NoEntropy)?;
     urmqtt_tls::rng::install(rng.fork());
     *RNG.lock() = Some(rng);
     info!("entropy: ChaCha20 CSPRNG seeded");
@@ -314,6 +351,14 @@ fn probe_pci(
     );
     for f in functions.iter() {
         let kind = DeviceType::from_pci(f.vendor, f.device, f.subsystem);
+        // A network controller we have no driver for (e.g. an SR-IOV
+        // virtual function): remembered for the error if no virtio-net exists.
+        if f.class == 0x02 && kind.is_none() {
+            let mut list = OTHER_NICS.lock();
+            if list.len() < 4 {
+                list.push((f.vendor, f.device));
+            }
+        }
         info!(
             "pci {} {:04x}:{:04x} class {:02x}.{:02x}{}",
             f.bdf,

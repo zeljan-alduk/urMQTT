@@ -136,6 +136,13 @@ pub struct Memory {
     pub min_free_mb: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Entropy {
+    /// No virtio-rng and no `RNDR`: seed from CPU timing jitter (health-
+    /// tested, conservatively estimated) instead of refusing to boot.
+    pub jitter_fallback: bool,
+}
+
 /// The complete build-time configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildConfig {
@@ -149,6 +156,7 @@ pub struct BuildConfig {
     pub observability: Observability,
     pub watchdog: Watchdog,
     pub memory: Memory,
+    pub entropy: Entropy,
 }
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));

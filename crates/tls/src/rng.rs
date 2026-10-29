@@ -1,8 +1,12 @@
 //! Kernel CSPRNG: ChaCha20 seeded from a SHA-256 pool of entropy sources.
 //!
-//! PROMPT §6: never run without entropy. The pool only yields a generator
-//! once at least one *hardware* source (virtio-rng, `RNDR`) contributed;
-//! bootloader-provided values are mixed in but do not count on their own.
+//! PROMPT §6: never run without entropy. The pool yields a generator once a
+//! *hardware* source (virtio-rng, `RNDR`) contributed 32 bytes. Clouds whose
+//! CPUs lack `RNDR` and that offer no virtio-rng (possible on Ampere Altra)
+//! may opt into a CPU-jitter fallback (`entropy.fallback = "jitter"`): timing
+//! samples pass health tests ([`JitterEstimator`]) and count only with a
+//! conservative min-entropy estimate of at least [`JITTER_MIN_BITS`].
+//! Bootloader-provided values are mixed in but never count on their own.
 
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
@@ -11,6 +15,109 @@ use urmqtt_arch_aarch64::sync::SpinLock;
 
 /// Minimum bytes a hardware source must deliver to count.
 pub const MIN_HW_BYTES: usize = 32;
+/// Estimated min-entropy (after the safety factor) jitter must deliver.
+pub const JITTER_MIN_BITS: u64 = 256;
+/// Only a quarter of the estimated min-entropy is credited.
+pub const JITTER_SAFETY: u64 = 4;
+/// Repetition count test: this many equal samples in a row fail.
+pub const RCT_CUTOFF: u32 = 32;
+/// Adaptive proportion test: in a window of `APT_WINDOW` samples, one value
+/// seen more than `APT_CUTOFF` times fails.
+pub const APT_WINDOW: u32 = 512;
+pub const APT_CUTOFF: u32 = 410;
+
+/// Health tests and a min-entropy estimate for timing samples (after
+/// NIST SP 800-90B: repetition count, adaptive proportion and the
+/// most-common-value estimate, in integer arithmetic). The low byte of each
+/// timing delta is the sample.
+pub struct JitterEstimator {
+    counts: [u32; 256],
+    n: u32,
+    last: Option<u8>,
+    run: u32,
+    window: [u32; 256],
+    window_n: u32,
+    failed: bool,
+}
+
+impl Default for JitterEstimator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl JitterEstimator {
+    pub const fn new() -> Self {
+        Self {
+            counts: [0; 256],
+            n: 0,
+            last: None,
+            run: 0,
+            window: [0; 256],
+            window_n: 0,
+            failed: false,
+        }
+    }
+
+    pub fn add(&mut self, delta: u64) {
+        let v = delta as u8;
+        if self.last == Some(v) {
+            self.run += 1;
+            if self.run >= RCT_CUTOFF {
+                self.failed = true;
+            }
+        } else {
+            self.last = Some(v);
+            self.run = 1;
+        }
+        if let Some(w) = self.window.get_mut(usize::from(v)) {
+            *w += 1;
+            if *w > APT_CUTOFF {
+                self.failed = true;
+            }
+        }
+        self.window_n += 1;
+        if self.window_n == APT_WINDOW {
+            self.window = [0; 256];
+            self.window_n = 0;
+        }
+        if let Some(c) = self.counts.get_mut(usize::from(v)) {
+            *c += 1;
+        }
+        self.n += 1;
+    }
+
+    /// A health test failed (a stuck or too coarse timer).
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+
+    pub fn samples(&self) -> u32 {
+        self.n
+    }
+
+    /// Whole bits of min-entropy per sample: floor(-log2(p_u)), where
+    /// p_u bounds the most common value's probability from above (its count
+    /// plus 3 standard deviations).
+    pub fn bits_per_sample(&self) -> u32 {
+        let n = u64::from(self.n);
+        let k = u64::from(self.counts.iter().copied().max().unwrap_or(0));
+        if n == 0 || k == 0 {
+            return 0;
+        }
+        let upper = (k + 3 * k.isqrt() + 1).min(n);
+        (n / upper).ilog2().min(8)
+    }
+
+    /// Credited bits so far: the estimate over all samples, divided by
+    /// [`JITTER_SAFETY`]; zero once a health test failed.
+    pub fn credited_bits(&self) -> u64 {
+        if self.failed {
+            return 0;
+        }
+        u64::from(self.n) * u64::from(self.bits_per_sample()) / JITTER_SAFETY
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -46,6 +153,7 @@ pub struct NoHardwareEntropy;
 pub struct EntropyPool {
     hash: Sha256,
     hw_bytes: usize,
+    jitter_bits: u64,
     sources: u8,
 }
 
@@ -56,6 +164,7 @@ impl EntropyPool {
         Self {
             hash,
             hw_bytes: 0,
+            jitter_bits: 0,
             sources: 0,
         }
     }
@@ -74,6 +183,29 @@ impl EntropyPool {
     /// Bitmask of contributing sources (bit = `Source` tag).
     pub fn sources(&self) -> u8 {
         self.sources
+    }
+
+    /// Whether a hardware source delivered enough to seed on its own.
+    pub fn has_hardware(&self) -> bool {
+        self.hw_bytes >= MIN_HW_BYTES
+    }
+
+    /// Credits jitter whose health tests passed (see [`JitterEstimator`]).
+    pub fn credit_jitter(&mut self, bits: u64) {
+        self.jitter_bits = self.jitter_bits.saturating_add(bits);
+    }
+
+    /// The generator, if a hardware source delivered enough (or, with
+    /// `allow_jitter`, credited jitter reached [`JITTER_MIN_BITS`]).
+    pub fn finish_with(self, allow_jitter: bool) -> Result<Csprng, NoHardwareEntropy> {
+        let jitter_ok = allow_jitter && self.jitter_bits >= JITTER_MIN_BITS;
+        if !self.has_hardware() && !jitter_ok {
+            return Err(NoHardwareEntropy);
+        }
+        let seed: [u8; 32] = self.hash.finalize().into();
+        Ok(Csprng {
+            inner: ChaCha20Rng::from_seed(seed),
+        })
     }
 
     pub fn finish(self) -> Result<Csprng, NoHardwareEntropy> {
@@ -233,5 +365,59 @@ mod tests {
         let before = parent.next_u64();
         parent.reseed(Source::VirtioRng, &[0; 32]);
         assert_ne!(parent.next_u64(), before);
+    }
+
+    #[test]
+    fn jitter_estimator_health_and_credit() {
+        // A stuck timer fails the repetition count test.
+        let mut e = JitterEstimator::new();
+        for _ in 0..100 {
+            e.add(48);
+        }
+        assert!(e.failed());
+        assert_eq!(e.credited_bits(), 0);
+        // A coarse timer alternating between two values: about 1 bit per
+        // sample estimated, but credited only with the safety factor; and
+        // no health failure.
+        let mut e = JitterEstimator::new();
+        for i in 0..4096u64 {
+            e.add(48 + (i * 7919 % 3 == 0) as u64);
+        }
+        assert!(!e.failed());
+        assert!(e.bits_per_sample() <= 1, "{}", e.bits_per_sample());
+        // Well-spread samples: several bits per sample, enough credit.
+        let mut e = JitterEstimator::new();
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..2048 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            e.add(x);
+        }
+        assert!(!e.failed());
+        assert!(e.bits_per_sample() >= 6, "{}", e.bits_per_sample());
+        assert!(e.credited_bits() >= JITTER_MIN_BITS);
+        // One dominant value within a window fails the proportion test.
+        let mut e = JitterEstimator::new();
+        for i in 0..512u64 {
+            e.add(if i % 10 == 0 { i } else { 5 + (i % 2) * 256 });
+        }
+        assert!(e.failed());
+    }
+
+    #[test]
+    fn pool_needs_hardware_or_credited_jitter() {
+        let mut p = EntropyPool::new();
+        p.add(Source::Jitter, &[1; 64]);
+        p.credit_jitter(JITTER_MIN_BITS);
+        assert!(EntropyPool::new().finish_with(true).is_err());
+        let mut q = EntropyPool::new();
+        q.add(Source::Jitter, &[1; 64]);
+        q.credit_jitter(JITTER_MIN_BITS - 1);
+        assert!(q.finish_with(true).is_err());
+        let mut r = EntropyPool::new();
+        r.credit_jitter(JITTER_MIN_BITS);
+        assert!(r.finish_with(false).is_err(), "not without opting in");
+        assert!(p.finish_with(true).is_ok());
     }
 }

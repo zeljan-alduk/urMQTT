@@ -157,6 +157,7 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 | DHCP and ARP are unauthenticated. | IPv4 on a shared L2 segment has no defence against on-link spoofing. | Static addressing (`network.mode = "static"`) and a private network for the VM. |
 | Many source addresses defeat the per-address handshake limit. | A botnet can use the per-core in-flight and rate limits up. | Upstream filtering; the limits keep the broker alive for connected devices. |
 | Syslog and statsd are plain UDP. | No TLS sink in the kernel. | Collectors on a private network only. |
+| No hardware RNG on the cloud (Ampere Altra has no `RNDR`; virtio-rng may be absent). | Then the CSPRNG is seeded from CPU timing jitter, which is weaker evidence than a hardware source. | Health tests and a conservative estimate gate it (ADR-038), and it is logged at boot. Prefer clouds with virtio-rng; `entropy.fallback = "none"` refuses to boot without one. |
 | Side channels in the crypto. | RustCrypto implementations are designed to be constant-time; that is not verified here. | ChaCha20-Poly1305 is offered alongside AES-128-GCM. |
 | The hypervisor sees everything. | Out of scope. | Choose the host. |
 | 100k and 1M connections are not measured on the development host. | QEMU user networking on macOS stops near 10 240 sockets. | The per-connection footprint is flat from 1k to 10k (ADR-034); the storm test scales the heap down instead of the clients up. |

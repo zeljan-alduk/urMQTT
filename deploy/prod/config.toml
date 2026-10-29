@@ -55,3 +55,9 @@ action = "drop"                # "log" | "drop" | "reset"; a stuck core (100 bud
 [memory]
 kernel_heap_mb = 1024             # power of two; ~500 B per idle connection (1M ≈ 500 MiB) plus handshakes
 min_free_mb = 64                  # refuse new connections below this much free heap
+
+[entropy]
+# Without virtio-rng and without RNDR (Ampere Altra has none), "jitter" seeds
+# the CSPRNG from health-tested CPU timing jitter instead of refusing to boot.
+# "none": refuse to boot without a hardware source.
+fallback = "jitter"

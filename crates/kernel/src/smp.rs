@@ -115,6 +115,10 @@ struct ApBoot {
     main_top: u64,
     cpu: u64,
     entry: u64,
+    /// Non-zero if the CPU has pointer authentication: only then may the
+    /// key registers be written (they are UNDEFINED otherwise, e.g. on
+    /// Neoverse N1 / Ampere Altra).
+    pac: u64,
 }
 
 struct ApBootCell(core::cell::UnsafeCell<[ApBoot; MAX_CPUS]>);
@@ -136,6 +140,7 @@ static AP_BOOT: ApBootCell = ApBootCell(core::cell::UnsafeCell::new(
             main_top: 0,
             cpu: 0,
             entry: 0,
+            pac: 0,
         }
     }; MAX_CPUS],
 ));
@@ -165,10 +170,13 @@ core::arch::global_asm!(
     "tlbi vmalle1",
     "dsb nsh",
     "isb",
+    "ldr x2, [x1, #88]",
+    "cbz x2, 2f", // no FEAT_PAuth: the key registers do not exist
     "ldr x2, [x1, #40]",
     "msr S3_0_C2_C1_0, x2", // APIAKeyLo_EL1
     "ldr x2, [x1, #48]",
     "msr S3_0_C2_C1_1, x2", // APIAKeyHi_EL1
+    "2:",
     "ldr x2, [x1, #32]",
     "msr vbar_el1, x2",
     "ldr x2, [x1, #24]",
@@ -194,6 +202,7 @@ const _: () = {
     assert!(core::mem::offset_of!(ApBoot, key_lo) == 40);
     assert!(core::mem::offset_of!(ApBoot, exc_top) == 56);
     assert!(core::mem::offset_of!(ApBoot, entry) == 80);
+    assert!(core::mem::offset_of!(ApBoot, pac) == 88);
 };
 
 fn sysreg_vbar() -> u64 {
@@ -202,7 +211,8 @@ fn sysreg_vbar() -> u64 {
 
 /// Releases every AP in `cpus` (the Limine MP response). Their stacks must
 /// already be mapped (`vm::map_stacks`). Returns the number started.
-pub fn start_aps(cpus: &[&MpInfo], bsp_mpidr: u64, pac_key: (u64, u64)) -> usize {
+pub fn start_aps(cpus: &[&MpInfo], bsp_mpidr: u64, pac_key: Option<(u64, u64)>) -> usize {
+    let (pac, (key_lo, key_hi)) = (pac_key.is_some(), pac_key.unwrap_or((0, 0)));
     let mut next = 1usize;
     for info in cpus.iter().filter(|c| c.mpidr != bsp_mpidr) {
         if next >= MAX_CPUS {
@@ -222,12 +232,13 @@ pub fn start_aps(cpus: &[&MpInfo], bsp_mpidr: u64, pac_key: (u64, u64)) -> usize
             ttbr1: regs::ttbr1_el1(),
             sctlr: regs::sctlr_el1(),
             vbar: sysreg_vbar(),
-            key_lo: pac_key.0,
-            key_hi: pac_key.1,
+            key_lo,
+            key_hi,
             exc_top,
             main_top,
             cpu: id as u64,
             entry: ap_main as *const () as u64,
+            pac: u64::from(pac),
         };
         info.bootstrap(urmqtt_ap_entry, core::ptr::from_ref(slot) as u64);
     }

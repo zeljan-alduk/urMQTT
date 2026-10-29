@@ -390,9 +390,9 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     if let Some(p) = s.platform.as_ref() {
         match devices::probe(p, &s.boot_entropy) {
             Ok(()) => {}
-            Err(devices::ProbeError::NoEntropy) => {
-                fatal("no hardware entropy source (virtio-rng or RNDR): refusing to run")
-            }
+            Err(devices::ProbeError::NoEntropy) => fatal(
+                "no entropy source (virtio-rng, RNDR, or a jitter fallback that passes its health tests): refusing to run",
+            ),
             Err(e) => fatal_fmt(format_args!("device probe failed: {e:?}")),
         }
     }
@@ -494,7 +494,7 @@ fn smp_bringup(s: &mut Stage2) {
         info!("smp: no MP response, running on one CPU");
         return;
     };
-    let started = smp::start_aps(mp.cpus(), mp.bsp_mpidr, s.pac_key.unwrap_or((0, 0)));
+    let started = smp::start_aps(mp.cpus(), mp.bsp_mpidr, s.pac_key);
     // The key is now in every core's registers; drop the copies in memory.
     s.pac_key = None;
     let n = smp::count();

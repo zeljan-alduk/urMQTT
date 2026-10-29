@@ -370,10 +370,23 @@ enum Ping {
 
 fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     let Some(mut net) = NIC.lock().take() else {
-        warn!("net: no network device, idling");
-        loop {
-            cpu::wfi();
+        // urMQTT drives virtio-net only (no SR-IOV/VFIO NICs): say exactly
+        // what is there and what to change.
+        for &(v, d) in crate::devices::OTHER_NICS.lock().iter() {
+            urmqtt_log::error!(
+                "net: network controller {v:04x}:{d:04x} ({}) has no driver; urMQTT needs virtio-net",
+                crate::devices::nic_vendor(v)
+            );
         }
+        let hint = "net: no virtio-net NIC. Attach one (QEMU/KVM: virtio-net-pci; Oracle Cloud: import the \
+                    image with launch mode PARAVIRTUALIZED; Hetzner: the default NIC)";
+        if urmqtt_config::CONFIG.env == "dev" {
+            warn!("{hint}; idling (dev)");
+            loop {
+                cpu::wfi();
+            }
+        }
+        crate::boot::fatal(hint);
     };
     let n = link.n;
     let mac = net.mac;

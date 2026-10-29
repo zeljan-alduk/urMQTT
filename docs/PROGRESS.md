@@ -700,4 +700,29 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 **Known gaps**
 
 - Still not tried on Hetzner or Oracle hardware.
-- Both need virtio-rng: Ampere Altra has no `RNDR`, and the kernel will not boot without a hardware entropy source.
+- Both need virtio-rng: Ampere Altra has no `RNDR`, and the kernel will not boot without a hardware entropy source. (Resolved by the jitter fallback below.)
+
+## After M17 — entropy fallback, CPUs without PAC (2026-10-29)
+
+**Done** (ADR-038)
+
+- CPU-jitter entropy fallback (`entropy.fallback = "jitter"`):
+  - PMU cycle counter or generic timer, granularity learned, workload calibrated;
+  - SP 800-90B-style health tests and a conservative min-entropy estimate (1/4 credited, 256 bits required).
+- **Bug fix:** the APs wrote PAC key registers that CPUs without PAuth do not have. On Cortex-A72 and Neoverse N1 (Ampere Altra) SMP failed, with 1 of 4 CPUs online. Found by booting `-cpu neoverse-n1`.
+- Missing virtio-net: every unsupported NIC is named with its vendor plus the fix; production stops instead of idling silently.
+- `run-qemu.sh --cpu MODEL --no-rng`; smoke scenario `no-hw-rng` (HVF host CPU; TCG Neoverse N1).
+
+**Measured**
+
+- Jitter fallback:
+  - HVF cycle counter (steps of 128): 512 bits credited in 85–166 ms.
+  - TCG Neoverse N1: 618 bits in 275 ms.
+  - TCG N1 without a PMU (generic timer): 512 bits in 112 ms.
+- Health tests passed in all three cases.
+- SMP: 4/4 CPUs online on Cortex-A72, Neoverse N1 and `max` (TCG).
+
+**Known gaps**
+
+- The jitter source has only been measured under QEMU, not on Altra hardware. Its warning line reports the figures, so the first cloud boot shows them.
+- No driver for SR-IOV NICs.

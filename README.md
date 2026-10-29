@@ -457,6 +457,7 @@ error: invalid configuration deploy/bad/config.toml:
 | `acl.service_publish`, `acl.service_subscribe` | topic filters | Service rights |
 | `memory.kernel_heap_mb` | power of two, 1–1024 | Kernel heap (buddy allocator); ~500 B per idle connection |
 | `memory.min_free_mb` | > 0, < heap | New connections are refused below this much free heap |
+| `entropy.fallback` | `jitter` \| `none` | Without virtio-rng and `RNDR`: seed from health-tested CPU jitter, or refuse to boot |
 | `storage.sqlite_heap_mb` | 1–4096 | Fixed SQLite `memsys5` heap |
 | `storage.telemetry_topics` | topic filters | PUBLISHes appended to the telemetry log |
 | `storage.retention_days` | > 0 | Telemetry retention |

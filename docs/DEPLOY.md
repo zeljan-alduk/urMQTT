@@ -97,7 +97,7 @@ zeljan-alduk/urMQTT`), and a minisign signature when the repository secret
 | Interrupts | GICv3; MSI-X through GICv2m frames when present (QEMU `virt`), polling otherwise |
 | NIC | one virtio-net (PCI); DHCP unless `network.mode = "static"` |
 | Data disk | one virtio-blk disk or virtio-scsi LUN (PCI), 512-byte blocks, blank on first boot, ≥ 64 MiB; with `storage.require_data_disk = true` the broker refuses to serve without it |
-| Entropy | virtio-rng, or `RNDR` on the CPU; the kernel will not boot without entropy |
+| Entropy | virtio-rng, or `RNDR` on the CPU; otherwise health-tested CPU jitter (`entropy.fallback`), else no boot |
 | Boot medium | the ISO (virtio-scsi CD) or the raw image (virtio-blk or virtio-scsi disk) |
 
 The kernel uses the first disk (virtio-blk, or a virtio-scsi LUN) that is not
@@ -153,11 +153,14 @@ the raw image from SCSI LUN 0 and uses LUN 1 as the data disk). Neither has been
 tried on the real service from here. Check two things before relying on one,
 from a Linux rescue system or any Linux VM of the same shape:
 
-- **Entropy:** `cat /sys/devices/virtual/misc/hw_random/rng_available` must list
-  `virtio_rng`. Ampere Altra has no `RNDR`, and urMQTT refuses to boot without a
-  hardware entropy source.
+- **Entropy:** `cat /sys/devices/virtual/misc/hw_random/rng_available` lists
+  `virtio_rng` if the cloud offers one. Ampere Altra has no `RNDR`. Without
+  virtio-rng, urMQTT seeds from health-tested CPU jitter
+  (`entropy.fallback = "jitter"`, ADR-038) and says so in a warning at boot.
+  Set `fallback = "none"` to refuse to boot instead.
 - **NIC:** `ls /sys/bus/virtio/drivers/virtio_net/` must show a device (the
-  "paravirtualized" or virtio NIC, not a VFIO/SR-IOV one).
+  "paravirtualized" or virtio NIC, not a VFIO/SR-IOV one). If there is none,
+  the serial console names the NIC that was found and stops.
 
 ### Hetzner Cloud CAX
 

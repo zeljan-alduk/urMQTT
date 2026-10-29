@@ -55,3 +55,9 @@ action = "log"                 # "log" | "drop" | "reset"
 [memory]
 kernel_heap_mb = 32               # power of two; boot-time structures and TLS handshakes
 min_free_mb = 4                   # refuse new connections below this much free heap
+
+[entropy]
+# Without virtio-rng and without RNDR (Ampere Altra has none), "jitter" seeds
+# the CSPRNG from health-tested CPU timing jitter instead of refusing to boot.
+# "none": refuse to boot without a hardware source.
+fallback = "jitter"

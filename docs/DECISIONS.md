@@ -499,3 +499,27 @@ verified in the named milestone before it becomes Accepted).
   - Host tests for LUN addressing, CDBs, INQUIRY and capacity parsing, and sense keys.
   - The `scsi-disks` smoke scenario (HVF and TCG) boots the raw image from SCSI LUN 0 with the data disk on LUN 1. It checks the boot-disk skip, the self-test, formatting, a SQLite benchmark, the boot disk byte-identical afterwards, and reopening on a second boot.
 - **Not done:** multiple queues, interrupts (polling suffices for the DB core's batched writes), hot-plug events, write-protect detection (a write-protected LUN fails the boot-time self-test instead).
+
+## ADR-038 — Entropy without a hardware RNG; CPUs without PAC
+
+- **Status:** Accepted (after M17).
+- **Problem:** Ampere Altra (Neoverse N1, used by Hetzner CAX and Oracle A1) has no `RNDR`, and a cloud may offer no virtio-rng. The kernel refused to boot without a hardware source (PROMPT §6).
+- **Fallback (`entropy.fallback = "jitter"`, the default in dev and prod; `"none"` keeps the strict refusal):**
+  - With no hardware source, the boot CPU times a data-dependent read-modify-write walk over 32 KiB, as jitterentropy does. The duration varies with cache, TLB, predictor and pipeline state and with host interference.
+  - The clock is the PMU cycle counter when the hypervisor exposes a PMU and it advances, else the generic timer.
+  - The clock's granularity is learned (HVF's virtual cycle counter counts in steps of 128) and divided out.
+  - The workload grows until a 256-sample probe shows at least 2 bits per sample.
+  - Every delta goes into the SHA-256 pool. What is *credited* is decided by `JitterEstimator`, after NIST SP 800-90B and in integer arithmetic:
+    - a repetition count test (32 equal samples fail);
+    - an adaptive proportion test (more than 410 of 512 fail);
+    - the most-common-value min-entropy estimate with a 3-sigma upper bound, rounded down to whole bits.
+  - Only a quarter of the estimate is credited. Seeding needs 256 credited bits; otherwise the boot is refused as before.
+  - Measured:
+    - HVF (cycle counter, granularity 2^7): 1 024 samples, 512 bits credited, 85–166 ms.
+    - TCG Neoverse N1: 618 bits in 275 ms.
+    - TCG N1 without a PMU (generic timer): 512 bits in 112 ms.
+  - The warning line records clock, granularity, samples, estimate, credit and the health-test result.
+- **Why acceptable:** Linux has seeded from CPU jitter since 5.4 on machines without a hardware RNG. The pool still mixes the bootloader's (EFI RNG) values. The estimate is deliberately conservative (whole bits, upper bound, 1/4 credit). The kernel still refuses rather than run unseeded.
+- **Found on the way: SMP did not start on CPUs without pointer authentication.** The AP trampoline wrote `APIAKey*_EL1` unconditionally; on Cortex-A72 and Neoverse N1 those registers are undefined and the APs died silently. The writes are now skipped when the CPU has no PAuth. Ampere Altra would have run on one core.
+- **NIC:** urMQTT drives virtio-net only, and SR-IOV NICs (Mellanox ConnectX VFs on Oracle's native mode) would each need a large driver. Instead, at boot every network controller without a driver is named with its vendor, the fix is stated (Oracle: launch mode PARAVIRTUALIZED), and a production image stops (a dev image idles).
+- **Testing:** the `no-hw-rng` smoke scenario boots with no virtio-rng: on HVF with the host CPU, and on TCG with `-cpu neoverse-n1` (no RNDR, no PAC/BTI). It checks the fallback's health tests, seeding and 4/4 CPUs online. Host tests cover the estimator and the pool policy.

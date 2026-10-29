@@ -442,6 +442,25 @@ scsi_disks() {
     done
 }
 
+# A cloud without a hardware RNG: no virtio-rng, and a CPU without RNDR
+# (TCG models the Ampere Altra core, Neoverse N1, which also has no PAC or
+# BTI; HVF's host CPU has no RNDR either). The jitter fallback must pass its
+# health tests, and every CPU must come online.
+no_hw_rng() {
+    local iso="$OUT/no-rng.iso"
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "smoke" >/dev/null
+    for accel in $ACCELS; do
+        local log="$OUT/no-rng-$accel.log" data="$OUT/no-rng-$accel.img" status=0 cpu=()
+        [[ $accel == tcg ]] && cpu=(--cpu neoverse-n1)
+        rm -f "$data"
+        truncate -s 64m "$data"
+        boot "$log" --iso "$iso" --accel "$accel" ${cpu[@]+"${cpu[@]}"} --no-rng --headless --data "$data" || status=$?
+        check "no-hw-rng [$accel]" "$log" "$status" "NOT:entropy: [0-9]+ bytes from" \
+            "entropy: no hardware source \(virtio-rng, RNDR\): CPU jitter fallback .* health tests passed" \
+            "entropy: ChaCha20 CSPRNG seeded" "smp: 4/4 cpus online" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
 [[ -f "$KERNEL" ]] || { echo "error: $KERNEL not found (make build)" >&2; exit 1; }
 rm -f "$OUT"/*.iso
 echo "smoke: accelerators: $ACCELS"
@@ -562,6 +581,7 @@ storm
 observability
 raw_disk
 scsi_disks
+no_hw_rng
 
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
 pcap_has_garp() {

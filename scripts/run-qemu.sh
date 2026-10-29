@@ -3,7 +3,7 @@
 # Boots an urMQTT ISO (or raw disk image) in QEMU (aarch64 virt, GICv3, UEFI).
 #
 #   scripts/run-qemu.sh --iso ISO | --disk RAW [--accel hvf|tcg|kvm] [--smp N] [--mem 512M]
-#                       [--data IMG] [--bus blk|scsi] [--acpi on|off] [--serial FILE] [--headless]
+#                       [--data IMG] [--bus blk|scsi] [--cpu MODEL] [--no-rng] [--acpi on|off] [--serial FILE] [--headless]
 #                       [--pcap FILE] [--gdb] [--no-net] [--fwd HOST:GUEST,...]
 #                       [-- extra qemu args]
 #
@@ -18,7 +18,7 @@
 # Option ROMs are disabled (romfile=): no iPXE in the firmware, faster boot.
 set -euo pipefail
 
-ISO="" DISK="" BUS=blk ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
+ISO="" DISK="" BUS=blk CPU_MODEL="" RNG=1 ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
 FWD="1883:1883,8883:8883"
 EXTRA=()
 while [[ $# -gt 0 ]]; do
@@ -26,6 +26,8 @@ while [[ $# -gt 0 ]]; do
         --iso) ISO=$2; shift 2 ;;
         --disk) DISK=$2; shift 2 ;;
         --bus) BUS=$2; shift 2 ;;
+        --cpu) CPU_MODEL=$2; shift 2 ;;
+        --no-rng) RNG=0; shift ;;
         --accel) ACCEL=$2; shift 2 ;;
         --smp) SMP=$2; shift 2 ;;
         --mem) MEM=$2; shift 2 ;;
@@ -59,6 +61,8 @@ case $ACCEL in
     tcg) CPU=max ;;
     *) echo "error: unknown accelerator $ACCEL" >&2; exit 2 ;;
 esac
+# e.g. --cpu neoverse-n1 (TCG): the Ampere Altra core, no RNDR, no PAC/BTI.
+[[ -n "$CPU_MODEL" ]] && CPU=$CPU_MODEL
 
 firmware() {
     local c
@@ -79,10 +83,12 @@ ARGS=(
     -machine "virt,gic-version=3,acpi=$ACPI"
     -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
     -bios "$FW"
-    -device virtio-rng-pci,romfile=
     -device ramfb
     -display none -no-reboot
 )
+if [[ $RNG -eq 1 ]]; then
+    ARGS+=(-device virtio-rng-pci,romfile=)
+fi
 [[ $BUS == blk || $BUS == scsi ]] || { echo "error: --bus blk|scsi" >&2; exit 2; }
 if [[ -z "$DISK" || $BUS == scsi ]]; then
     ARGS+=(-device virtio-scsi-pci,id=scsi0,romfile=)

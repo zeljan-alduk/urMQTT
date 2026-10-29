@@ -96,6 +96,13 @@ struct RawConfig {
     observability: RawObservability,
     watchdog: RawWatchdog,
     memory: RawMemory,
+    entropy: RawEntropy,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEntropy {
+    fallback: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -287,6 +294,13 @@ pub struct Config {
     pub observability: Observability,
     pub watchdog: Watchdog,
     pub memory: Memory,
+    pub entropy: Entropy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entropy {
+    /// Seed from CPU timing jitter when no hardware source exists.
+    pub jitter_fallback: bool,
 }
 
 /// Environments allowed to open the plaintext MQTT port.
@@ -314,6 +328,14 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
     let observability = validate_observability(&raw.observability, &mut errors);
     let watchdog = validate_watchdog(&raw.watchdog, &mut errors);
     let memory = validate_memory(&raw.memory, &mut errors);
+    let jitter_fallback = match raw.entropy.fallback.as_str() {
+        "jitter" => true,
+        "none" => false,
+        _ => {
+            errors.push(err("entropy.fallback", "must be \"jitter\" or \"none\""));
+            false
+        }
+    };
 
     if !errors.is_empty() {
         return Err(errors);
@@ -328,6 +350,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         observability,
         watchdog,
         memory,
+        entropy: Entropy { jitter_fallback },
     })
 }
 
@@ -941,6 +964,9 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         handler_budget_ms: {hb},
         action: WatchdogAction::{wa:?},
     }},
+    entropy: Entropy {{
+        jitter_fallback: {jitter},
+    }},
     memory: Memory {{
         kernel_heap_mb: {heap_kernel},
         min_free_mb: {min_free},
@@ -989,6 +1015,7 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         wa = cfg.watchdog.action,
         heap_kernel = cfg.memory.kernel_heap_mb,
         min_free = cfg.memory.min_free_mb,
+        jitter = cfg.entropy.jitter_fallback,
         ca = files.ca,
         cert = files.cert,
         key = files.key,

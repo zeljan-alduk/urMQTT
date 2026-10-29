@@ -455,3 +455,13 @@ fn durability_shortcuts_are_dev_only() {
         assert!(parse("dev", &dev_with(key, &format!("{key} = false"))).is_ok());
     }
 }
+
+#[test]
+fn entropy_fallback_is_jitter_or_none() {
+    assert!(parse("dev", DEV).unwrap().entropy.jitter_fallback);
+    assert!(parse("prod", PROD).unwrap().entropy.jitter_fallback);
+    let none = DEV.replace("fallback = \"jitter\"", "fallback = \"none\"");
+    assert!(!parse("dev", &none).unwrap().entropy.jitter_fallback);
+    let bad = DEV.replace("fallback = \"jitter\"", "fallback = \"rdrand\"");
+    assert_rejected("dev", &bad, "entropy.fallback");
+}
