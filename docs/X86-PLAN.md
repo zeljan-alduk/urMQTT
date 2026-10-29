@@ -29,7 +29,7 @@ contradict assumptions in PROMPT-x86_64.md.
 | F6 | Arch coupling outside `arch-aarch64` is small and mostly arch-neutral. | `mm`, `log`, `store` and `tls` use only `sync::{SpinLock, OnceCell}`, `paging::{FrameSource, PAGE_SIZE}` and `cpu::irq_save/restore`. Only `kernel` has assembly: `smp.rs` 15 sites, `boot.rs` 14, `vm.rs` 9, `jitter.rs` 8, `dataplane.rs` 6, `netproto`/`devices`/`db` 5 each, `trap.rs` 4, and others ≤ 3. | X0 is a contained refactor: about 20 kernel files plus 4 crates. |
 | F7 | CRC-32C is a byte-wise table; Toeplitz is bit-serial. | `crates/store/src/crc.rs:29`, `crates/net/src/rss.rs`. | Both are dispatch candidates on both architectures. |
 | F8 | The struct-size asserts are `const` asserts. | 10 `size_of` assertions in the crates. | They hold on x86_64 automatically if layouts match; X8 checks it by compiling, not by trust. |
-| F10 | **The data disk is chosen by "not partitioned", not by identity.** | `kernel::devices::is_partitioned`. | On a PC the boot USB stick is partitioned and therefore safe, but the rule is accidental. Under whole-disk ownership (PLAN.md decision 6) the data disk is chosen explicitly and the boot disk is identified exactly (STORAGE-PLAN S1). |
+| F10 | **The data disk is a separate disk today, chosen by "not partitioned".** | `kernel::devices::is_partitioned`. | Single-disk model (PLAN.md decision 6): data lives in a partition of the boot disk and no other disk is touched (STORAGE-PLAN S1, §2a). On the PC that means the image is on the internal disk, not on a USB stick next to it. |
 | F11 | **GICv3 ITS (MSI on ARM servers) is not implemented.** Only GICv2m frames are driven. | `kernel/src/devices.rs:552` ("msi-x: not available … blk polled"). | ARM bare metal (Ampere servers) needs an ITS driver (X15). |
 | F12 | **Only virtio devices have drivers.** | `crates/virtio`: net, blk, scsi, rng. | Bare metal needs native NIC and storage drivers (X13, X14) and a hardware inventory first (X12). |
 | F9 | Local x86 tooling is present. | `qemu-system-x86_64` 11.1.2, `edk2-x86_64-code.fd`, SeaBIOS `bios-256k.bin`, CPU models `EPYC-Milan/Genoa`, `Icelake-Server`; Homebrew LLVM clang. | Bring-up and smoke can start on the M4 under TCG. |
@@ -355,7 +355,7 @@ real hardware stay marked experimental.
 ### X12 — Bare-metal foundation · M
 
 **Work**
-- **Boot media.** The universal ISO (X10) is made hybrid, so `dd` onto a USB stick boots by UEFI and, on x86, BIOS (Limine `bios-install`, `xorriso -isohybrid-gpt-basdat`, **to verify**).
+- **Boot media.** The universal ISO (X10) is hybrid, so the same file boots as a CD and, written with `dd` to a disk, by UEFI and, on x86, BIOS (Limine `bios-install`, `xorriso -isohybrid-gpt-basdat`, **to verify**). Written to a disk, the ISO is also the disk image: the GPT it carries gets the data partition on first boot (STORAGE-PLAN §2a), so there is one artifact for CD, USB, VM disk, cloud image and bare-metal disk.
 - **Secure Boot.** Most PCs ship with it on and Limine is not Microsoft-signed. The signing and enrollment work is SECURITY-PLAN **H8**. X12 documents the interim path (turn Secure Boot off) and tests H8's signed loaders on the PC once they exist.
 - **Console without serial.** Most PCs have no serial port, so the framebuffer is the primary console. It needs:
   - readable fonts at high resolutions;
@@ -369,13 +369,13 @@ real hardware stay marked experimental.
   - disks with model, serial and size, plus the partition and signature scan.
 
   This is the first thing run on any new machine.
-- **Data-disk choice** (F10) is owned by STORAGE-PLAN **S1**, which comes earlier: the boot USB stick identified exactly and never touched, and the PC's internal disk claimed entirely (it belongs to urMQTT, PLAN.md decision 6). X12 tests it on the PC.
+- **One disk** (F10, STORAGE-PLAN S1 §2a): on the PC, the image is written to the internal disk, which then holds both the boot partition and the data partition. Booting from a USB stick is for trying it out only: the stick would be the boot disk and the data would go on it. X12 documents how to get the image onto the internal disk (from a Linux live USB with `dd`, or with the disk in another machine) and tests first boot, crash during first boot, and reboot on the PC.
 - **More CPUs.** MAX_CPUS goes from 64 to 256 (x2APIC; desktop SMT and hybrid P/E-core CPUs report many threads). Topology is logged; NUMA is logged and ignored for now.
 - **Power.** ACPI reset and S5 (D5) become essential on real hardware.
 
 **Tests**
 - Smoke `hwreport` under QEMU (q35 and pc, aarch64 virt).
-- S1's disk-choice scenarios (`claim-foreign`, `boot-disk-untouched`, `select-by-serial`) also run with the bare-metal config.
+- S1's single-disk scenarios (`first-boot`, `first-boot-crash-N`, `second-disk-untouched`) also run with the bare-metal config.
 
 **Real hardware (Intel PC)**
 1. Boot from USB by UEFI (and BIOS if the firmware has CSM).

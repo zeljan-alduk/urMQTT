@@ -18,7 +18,7 @@ Written 2026-10-29 against commit `8186a61`. Nothing here is implemented yet.
    - x86_64 legacy BIOS.
 
    It runs in VMs (KVM, Proxmox, clouds, QEMU) **and on bare-metal hardware** (first target: an Intel PC with 16 GB). The image stays an appliance: kernel, configuration and certificates are inside, nothing is configured after boot, and there is no way to log in. Builds stay bit-for-bit reproducible and signed.
-2. **No filesystem: raw disk access.** Persistent data lives on a separate disk that the kernel accesses raw. It holds a superblock, a region table, fixed regions for SQLite (DB, WAL, journal) and a per-core telemetry log. There is no filesystem code to attack or corrupt.
+2. **No filesystem: raw disk access, on one disk.** Persistent data lives in a raw partition of the disk urMQTT boots from, after the boot partition, accessed directly by the kernel. It holds a superblock, a region table, fixed regions for SQLite (DB, WAL, journal) and a per-core telemetry log. There is no filesystem code to attack or corrupt.
 
    The storage track adds what a filesystem would otherwise give:
    - offline tooling (`urmqtt-disk`);
@@ -36,7 +36,7 @@ Written 2026-10-29 against commit `8186a61`. Nothing here is implemented yet.
 
 - **Security first.** Where the plans conflict, PROMPT-security wins unless the user approves otherwise in an ADR.
 - **aarch64 must not regress.** After every milestone: all smoke scenarios, `make bench`, bytes per idle connection and reproducibility.
-- **The data disk belongs to urMQTT** (user decision 2026-10-29). Whatever was on it before does not matter and is overwritten. What must never happen is picking the *wrong* disk: never the boot medium, never a guess between several disks. urMQTT's own state is never lost silently: a damaged urMQTT disk is refused or restored (S5), not reformatted. Every on-disk change is proven crash-safe by fault injection.
+- **One disk, and it is ours** (decision 6). urMQTT keeps its data on the disk it booted from, after the boot partition, and never touches any other disk. Previous content of that disk does not matter. urMQTT's own state is never lost silently. Every on-disk change is proven crash-safe by fault injection.
 - **Verify, don't assume.** Every claim in README and docs points to a measurement or a test. Bare-metal claims are only made for machines in `docs/HARDWARE.md`.
 - **One shared mechanism per concern:**
   - CPU feature detection and dispatch (X0) serves the crypto optimisations (X0b, X9) and disk encryption (S7);
@@ -91,10 +91,17 @@ The user accepted every proposal ("everything as proposed, following best practi
 4. **S2 migration: offline.** The kernel reads only the current layout and refuses an older one with a clear message naming the fix. `urmqtt-disk migrate` converts offline, with the safeguards listed in STORAGE-PLAN S2.
 5. **H2 session tickets: random keys that rotate.** A new key comes from the CSPRNG every 12 h and the previous key is still accepted for 12 h more. Tickets live at most 12 h, so none outlives its key. The keys exist only in memory: never on disk or in the image, and zeroised when retired. Tickets do not survive a broker restart; the reconnect after a restart is a full handshake, which admission control absorbs (M16).
 
-6. **Whole-disk ownership.** The data disk is urMQTT's entirely; previous content does not matter. This overrides PROMPT-storage §0 ("never format over a non-blank disk"). The safeguards that remain are about choosing the disk, not its contents (STORAGE-PLAN S1):
-   - the boot disk is identified exactly and is never used;
-   - with `storage.data_disk = "auto"`, exactly one other disk must exist, otherwise urMQTT refuses and lists the candidates;
-   - an explicit selector (`{ serial = "…" }` or `{ model, size }`) picks one disk among several;
-   - claiming a disk with foreign content is logged with model, serial and size.
+6. **One disk: the boot disk is the data disk** (user decision 2026-10-29, refined the same day). urMQTT uses only the disk it booted from, and that whole disk is its own: what was on it before does not matter. **No other disk is ever read for data or written.** This overrides PROMPT-storage §0 ("never format over a non-blank disk") and replaces today's separate data disk. Design, following common appliance practice (STORAGE-PLAN §2a):
+   - **Layout:** GPT with the EFI system partition first, then one urMQTT data partition (its own partition type GUID) up to the end of the disk. The data layout of DISK-FORMAT.md lives inside that partition.
+   - **First boot:** the image carries only the ESP. On the first boot the kernel:
+     - moves the backup GPT to the real end of the disk (the image is smaller than the disk);
+     - assigns a fresh random disk GUID (every copy of the image starts with the same one);
+     - adds the data partition and formats it.
+
+     Each step is crash-safe and idempotent.
+   - **The boot disk is identified exactly** from Limine's boot-volume information (GPT disk UUID / MBR id), never guessed.
+   - **One artifact:** the multi-platform ISO is hybrid, so the same file is booted as a CD for a quick look, or written (`dd`, cloud image import) to the machine's disk for real use. Booted from read-only optical media there is nowhere to persist, so a production image refuses to serve and says so; a dev image may run from RAM.
+   - **Kernel updates** replace the contents of the ESP and keep the data partition (`urmqtt-disk update-boot`, offline; A/B boot entries with rollback as a later step).
+   - **urMQTT's own state is never lost silently:** a damaged data partition is refused or restored (S5), never re-formatted as new.
 
 Still open: the Intel test PC's hardware inventory (TODO.md), which decides the order of X13/X14.

@@ -240,11 +240,11 @@ A crash before step 3 leaves a disk whose superblock is still zero, so it is
 formatted again on the next boot. The telemetry header is written separately
 when the log is first opened (§5.2).
 
-Today a disk counts as blank when its first 4 KiB are zero, and the kernel
-skips disks with an MBR or GPT. Since 2026-10-29 the data disk belongs to
-urMQTT entirely, so previous content does not matter (PLAN.md decision 6).
-S1 replaces the "skip partitioned disks" rule with an exact boot-disk
-identification and an explicit disk choice (G1, G2).
+In v1 the data disk is a separate disk: blank when its first 4 KiB are zero,
+and disks with an MBR or GPT are skipped. From S1 on, the data lives in a
+partition of the boot disk instead, and no other disk is touched (PLAN.md
+decision 6, STORAGE-PLAN §2a). This layout then starts at the partition's
+first sector.
 
 ## 7. Invariants
 
@@ -258,7 +258,7 @@ identification and an explicit disk choice (G1, G2).
 
 | Gap | Description | Fixed in |
 |---|---|---|
-| G1 | the data disk is chosen by "not partitioned" instead of by identity | S1 |
+| G1 | the data is on a separate disk chosen by "not partitioned"; the single-disk model puts it in a partition of the boot disk | S1 |
 | G2 | a damaged urMQTT disk must not be taken for a blank one | S1 |
 | G3 | regions are aligned to 4 KiB, not 1 MiB or the device topology; telemetry writes are 512 B granular, which causes read-modify-write on 4 KiB-physical devices | S2 |
 | G4 | the telemetry partition count is fixed at 8 | S2 |

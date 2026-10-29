@@ -5,9 +5,11 @@ against commit `8186a61`. It is part of the overall plan in
 [PLAN.md](PLAN.md), next to [X86-PLAN.md](X86-PLAN.md) and
 [SECURITY-PLAN.md](SECURITY-PLAN.md).
 
-**The principle stays: no filesystem.** The data disk is accessed raw. It
-holds a superblock, a region table and fixed regions, and SQLite sees three
-fixed "files" mapped onto regions by its own VFS. There is no filesystem code
+**The principle stays: no filesystem.** The data is accessed raw: a
+superblock, a region table and fixed regions, and SQLite sees three fixed
+"files" mapped onto regions by its own VFS. Since 2026-10-29 it lives on
+**the disk urMQTT boots from**, in a partition after the boot partition, and
+no other disk is used (PLAN.md decision 6, §2a below). There is no filesystem code
 to attack or to corrupt, and the layout fits on one page of specification.
 This work removes the practical downsides of a raw disk (tooling, resize,
 discard, backup, scrubbing, encryption) without adding a filesystem.
@@ -38,7 +40,7 @@ with exclusive locking, `synchronous=FULL`, `quick_check` at boot and
 
 | # | Finding | Consequence |
 |---|---|---|
-| G1 | **The disk choice relies on "partitioned means boot disk".** The boot block self-test and the store skip every disk with an MBR or GPT, and use the first other one (`kernel/src/devices.rs:387-400`). Under whole-disk ownership (PLAN.md decision 6), a previously used disk with partitions (an old system disk on the bare-metal PC) should be claimable. Meanwhile a disk without partitions that is *not* meant for urMQTT would be taken, because nothing asks which disk is intended. | **S1:** identify the boot disk exactly (Limine reports the boot volume's GPT disk UUID / MBR id; match it against each disk's GPT or MBR), never touch it, and choose the data disk by the rule in PLAN.md decision 6 instead of by its contents. |
+| G1 | **The data disk is a separate disk, chosen by "not partitioned".** The boot block self-test and the store skip every disk with an MBR or GPT and use the first other one (`kernel/src/devices.rs:387-400`). That contradicts the single-disk model (PLAN.md decision 6): data must live on the boot disk, and no other disk may be touched. | **S1:** the single-disk model (§2a). |
 | G2 | **Blank detection checks only the first 4 KiB.** With whole-disk ownership this is no longer a data-safety question: foreign content is overwritten on purpose (PLAN.md decision 6). It still matters for *our own* disk: a urMQTT disk whose superblock was destroyed but whose regions still hold data must not be silently re-formatted as if new. | **S1:** classify each candidate as urMQTT (valid superblock), urMQTT-damaged (our magic or our size-table/telemetry magics present, superblock invalid: refuse, or restore in S5), or foreign/blank (claim, logged). |
 | G3 | Regions are 4 KiB aligned from LBA 64 (32 KiB), not 1 MiB or the device's optimal I/O size. virtio-blk negotiates only `RO | BLK_SIZE | FLUSH`: no `TOPOLOGY`, `DISCARD` or `WRITE_ZEROES`. | S2 and S4. |
 | G4 | Telemetry has a fixed `PARTITIONS = 8`. | With more than 8 cores (bare metal, X12 raises MAX_CPUS), cores have to share partitions. That is a format question for **S2** (partition count in the layout, not a constant). |
@@ -46,6 +48,36 @@ with exclusive locking, `synchronous=FULL`, `quick_check` at boot and
 | G6 | The cross-architecture disk test (X86-PLAN X8) needs a stable format. | **S2 comes before X8**, so the cross-arch tests are written against v2 and golden v1 images, and the two efforts do not diverge. |
 | G7 | **A disk whose size is not a multiple of 4 KiB cannot be formatted**: the scratch region would start unaligned and `validate` refuses the plan (found during S0, tested in `disk_format_spec.rs`). | S2: round the formatted size down to 4 KiB (the `total_sectors` field already allows a device larger than the layout). |
 | G8 | **Boot time grows with the telemetry region.** Recovery scans every record of every valid segment of every partition at boot (`telemetry.rs` `recover_partition` → `scan_segment` per segment), so it reads the whole region. That takes about 2 min for 250 GB on a fast NVMe and 15–40 min on a typical cloud volume (100–250 MB/s). | **S2:** only the newest segment per partition needs a full scan; record counts come from a per-segment summary written when a segment is closed, and full verification moves to the background scrubber (S6). Until then, keep data disks to tens of GB. |
+
+## 2a. The single-disk model (PLAN.md decision 6)
+
+```
+LBA 0      protective MBR
+LBA 1-33   primary GPT (header, 128 entries)
+1 MiB      EFI system partition (Limine, kernels, limine.conf), from the image
+…          urMQTT data partition, type GUID urmqtt-data, created on first boot,
+           aligned to 1 MiB, up to the backup GPT
+last 33    backup GPT
+```
+
+- **Finding the disk.** Limine reports the boot volume (media type, GPT disk UUID or MBR signature, partition index). The kernel reads LBA 1 of each disk it drives and picks the one whose GPT disk GUID (or MBR id) matches. No match, or more than one match: refuse to serve, listing what was found. Other disks are never written; the boot self-test and the store run only on the boot disk's data partition.
+- **First boot, crash-safe and idempotent.** Each step re-checks the state, so a crash at any point resumes or repeats on the next boot:
+  1. If the backup GPT is not at the last LBA (the image was written to a larger disk), write a new backup header and entries at the end, then rewrite the primary header with the new `AlternateLBA` and `LastUsableLBA`.
+  2. Assign a random disk GUID, primary and backup. Every copy of the image starts with the same GUID.
+  3. Add the data partition entry over the free space, 1 MiB aligned. This is primary and backup, entries CRC then header CRC.
+  4. Zero the stale backup GPT the image left inside the new partition.
+  5. Format the data layout inside the partition.
+
+  Fault injection (§4) at every write of 1–5.
+- **Contents of the data partition.** DISK-FORMAT.md's layout, with every LBA relative to the partition start. That is part of layout v2 (S2), together with 1 MiB alignment.
+- **Growing** (S3) means the cloud volume got bigger: move the backup GPT to the new end, extend the partition entry, then grow the layout. These are the same primitives as the first boot.
+- **Read-only boot media** (the ISO as a CD, or a write-protected disk): no data partition can exist. Production refuses to serve with `booted from read-only media: write the image to the machine's disk (DEPLOY.md)`; dev may run with an in-memory store.
+- **Updating the kernel.** `urmqtt-disk update-boot <disk> <new image>` (offline) replaces the ESP contents and keeps the data partition. The next step, recorded but not planned yet: two boot entries (A/B) with automatic rollback when the new kernel does not reach `URMQTT READY`.
+- **Testing** uses one disk everywhere. Smoke copies the image, extends it with `truncate`, and boots it as the only disk: virtio-blk, virtio-scsi and, from X13, NVMe and AHCI. Scenarios check:
+  - first boot, and a crash at each first-boot step;
+  - reboot, and growing the disk;
+  - that a second attached disk is byte-identical afterwards;
+  - booting the ISO as a CD (prod refuses).
 
 ---
 
@@ -100,20 +132,12 @@ Each milestone ends with:
 
   `--key` arrives with S7.
 - **Fault-injection framework (§4)**, built here and used everywhere afterwards.
-- **Disk choice (G1, G2), under whole-disk ownership (PLAN.md decision 6):**
-  - **Boot disk:** identified from Limine's boot-volume info (GPT disk UUID or MBR signature) and never used, written or self-tested.
-  - **Candidates:** every other disk, whatever it contains (partitions included).
-  - **`storage.data_disk = "auto"`** (default): exactly one candidate is claimed; zero or several refuse to serve, with each candidate listed (model, serial, size).
-  - **`{ serial = "…" }` or `{ model = "…", size_gb = … }`:** picks one among several (bare-metal PCs with two drives, VMs with extra volumes).
-  - **Classification:**
-
-    | Candidate | Action |
-    |---|---|
-    | a valid urMQTT disk | opened |
-    | urMQTT-damaged | refused, or restored by S5 |
-    | blank or foreign | claimed: a loud log line names model, serial, size and that previous content is discarded; optionally a whole-disk discard first (S4) |
-  - **The self-test** runs on the chosen disk only, after the choice.
-  - `urmqtt-disk info` shows what the kernel would decide for a given disk.
+- **Single-disk model, part 1 (§2a):**
+  - boot-disk identification;
+  - the first-boot GPT steps and the data partition (layout v1 inside the partition; v2 follows in S2);
+  - classification of the data partition: valid, damaged (refused; S5 restores), or new (formatted);
+  - the self-test only inside the data partition;
+  - `urmqtt-disk info` shows the GPT, the partition and the layout.
 
 **Tests**
 - **Round trip:**
@@ -121,12 +145,13 @@ Each milestone ends with:
   2. `verify` is clean, and `export-db` opens in the host `sqlite3`.
   3. `export-telemetry` matches what was published.
   4. `import-devices`, then boot: the devices are present.
-- **Disk choice:**
-  - smoke `claim-foreign`: a disk holding ext4, and one with a GPT and old partitions, are each claimed and formatted (logged);
-  - `boot-disk-untouched`: the boot disk (raw image on virtio-blk, and the ISO on SCSI) is byte-identical afterwards, even when it is the only other disk;
-  - `two-candidates-refused` with `auto`: nothing written, both listed;
-  - `select-by-serial`: two disks, only the configured one is used;
-  - `own-damaged-refused`: a urMQTT disk with a destroyed superblock is not reformatted.
+- **Single disk:**
+  - smoke `first-boot` (image on a larger disk: backup GPT moved, GUID changed, partition created, formatted);
+  - `first-boot-crash-N` (a crash after each write, then a clean recovery);
+  - `second-disk-untouched` (an extra disk is byte-identical afterwards);
+  - `iso-as-cd-refused` (prod, read-only media);
+  - `own-damaged-refused`.
+- A GPT fuzz target (headers and entries, primary/backup disagreement).
 - Fuzz targets for the scanner and the host-side parsers (shared code, so the existing targets cover most of it).
 
 ### S2 — Layout v2: alignment, topology, partition count · M

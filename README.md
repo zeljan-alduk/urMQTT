@@ -43,7 +43,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > [!NOTE]
 > **Where this is going** ([roadmap](#next-one-multi-platform-iso-raw-disk-demonstrably-secure), planned, not yet built):
 > - **One multi-platform ISO** that boots on aarch64 and x86_64, by UEFI or legacy BIOS, in VMs and on bare-metal hardware.
-> - **No filesystem:** the data stays on a raw disk with its own minimal, specified layout.
+> - **One disk, no filesystem:** the data lives in a raw partition of the disk urMQTT boots from, with its own minimal, specified layout. No other disk is touched.
 > - **Security work aimed at an external audit.**
 
 ---
@@ -877,8 +877,8 @@ and each track has a detailed implementation and test plan. **Nothing below is i
 - **One multi-platform ISO.** A single `urmqtt-<env>-<version>.iso` (and one raw GPT disk image) that boots on
   aarch64 UEFI, x86_64 UEFI and x86_64 legacy BIOS. It runs in VMs (KVM, Proxmox, clouds) **and on bare-metal
   hardware**, starting with an Intel PC. It stays an appliance with everything inside, reproducible and signed.
-- **No filesystem: raw disk access.** The data disk keeps its own minimal layout: a superblock, a region table,
-  fixed SQLite regions and a per-core telemetry log. There is no filesystem code to attack or corrupt. The storage
+- **One disk, no filesystem: raw disk access.** The disk urMQTT boots from also holds its data, in a raw partition after
+  the boot partition: a superblock, a region table, fixed SQLite regions and a per-core telemetry log. No other disk is touched. There is no filesystem code to attack or corrupt. The storage
   track adds tooling, growth, discard, backup, scrubbing and optional encryption, still without a filesystem.
 - **Demonstrably secure.** Runtime revocation and an allowlist without new images, differential and conformance
   testing of the custom TLS and TCP code, exploit mitigations, SQLite isolated at EL0, Secure Boot, SBOM, and an
@@ -906,7 +906,7 @@ Security is the first priority and wins conflicts with the other tracks.
 | | Milestone | Acceptance |
 |---|---|---|
 | ✅ | **S0** Disk format spec | `docs/DISK-FORMAT.md` byte-level and cross-checked against the code; golden v1 images |
-| 📋 | **S1** `urmqtt-disk` & safety | host tool sharing the kernel's parsers (info, verify, export, import); fault injection; the data disk is claimed whole (previous content is overwritten), the boot disk is identified exactly and never touched |
+| 📋 | **S1** `urmqtt-disk` & safety | single-disk model: data in a partition of the boot disk, created on first boot (crash-safe), no other disk touched; host tool sharing the kernel's parsers (info, verify, export, import); fault injection |
 | 📋 | **S2** Layout v2 | regions aligned to 1 MiB and the device topology, zero misaligned writes; migration from v1 |
 | 📋 | **S3** Growing the disk | 1 → 4 → 64 GiB with data present, crash-safe at every write |
 | 📋 | **S4** Discard | thin-provisioned volumes shrink after retention; no throughput loss |

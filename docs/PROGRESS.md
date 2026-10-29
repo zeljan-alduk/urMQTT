@@ -828,7 +828,13 @@ PROMPT-storage.md, plan in docs/STORAGE-PLAN.md. No format or behaviour change; 
 | G7 | a disk whose size is not a multiple of 4 KiB cannot be formatted |
 | G8 | recovery reads the whole telemetry region at boot, so boot time grows with the disk |
 
-**Decision (user, 2026-10-29): the data disk belongs to urMQTT entirely,** and previous content does not matter. That turns G1/G2 from "never overwrite foreign data" into "pick exactly the right disk, never the boot medium, and never re-format our own damaged disk" (PLAN.md decision 6).
+**Decisions (user, 2026-10-29):**
+- **The data disk belongs to urMQTT entirely**, and previous content does not matter.
+- Refined the same day: **there is one disk, the one urMQTT boots from.** The data moves into a partition of the boot disk, created on first boot, and no other disk is ever touched (PLAN.md decision 6, STORAGE-PLAN §2a, implemented in S1).
+
+This turns G1/G2 into:
+- identify the boot disk exactly;
+- never re-format our own damaged partition.
 
 **Corrections to earlier planning text, found while writing the spec:**
 - Blank detection reads the whole first 4 KiB, so ext4, XFS, LVM, LUKS and swap disks are refused today. The formats at risk are the ones with an empty first 4 KiB (fixed in X86-PLAN, STORAGE-PLAN, SECURITY-PLAN and AUDIT.md).
