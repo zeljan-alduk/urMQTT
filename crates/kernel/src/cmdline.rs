@@ -47,6 +47,8 @@ pub enum DbTest {
     LogTear,
     /// In-guest data-plane scaling benchmark on the worker cores.
     DpBench,
+    /// A handler overruns the watchdog budget on purpose (M16).
+    Watchdog,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -61,6 +63,9 @@ pub struct BootOptions {
     /// `log=error|warn|info|debug|trace`: lower the log level at run time
     /// (benchmarks: the emulated UART is slow).
     pub log_level: Option<urmqtt_config::LogLevel>,
+    /// `heap_limit_mb=N`: admission behaves as if the heap had only N MiB
+    /// (reconnect-storm tests on a host that cannot open enough sockets).
+    pub heap_limit_mb: Option<u32>,
     /// Options that were present but rejected or unknown.
     pub ignored: usize,
 }
@@ -93,12 +98,19 @@ impl BootOptions {
                 "test=log-verify" => o.db_test = Some(DbTest::LogVerify),
                 "test=log-tear" => o.db_test = Some(DbTest::LogTear),
                 "test=dp-bench" => o.db_test = Some(DbTest::DpBench),
+                "test=watchdog" => o.db_test = Some(DbTest::Watchdog),
                 "log=error" => o.log_level = Some(urmqtt_config::LogLevel::Error),
                 "log=warn" => o.log_level = Some(urmqtt_config::LogLevel::Warn),
                 "log=info" => o.log_level = Some(urmqtt_config::LogLevel::Info),
                 "log=debug" => o.log_level = Some(urmqtt_config::LogLevel::Debug),
                 "log=trace" => o.log_level = Some(urmqtt_config::LogLevel::Trace),
-                _ => o.ignored += 1,
+                w => match w
+                    .strip_prefix("heap_limit_mb=")
+                    .and_then(|v| v.parse().ok())
+                {
+                    Some(mb) => o.heap_limit_mb = Some(mb),
+                    None => o.ignored += 1,
+                },
             }
         }
         o

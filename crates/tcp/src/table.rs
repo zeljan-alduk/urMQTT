@@ -140,6 +140,16 @@ impl Table {
         None
     }
 
+    /// Halves the table (repeatedly) while it is less than 1/8 full, down
+    /// to the initial size, so a past peak does not keep its slots (M16).
+    pub fn shrink(&mut self, key_of: impl Fn(u32) -> Option<Key>) {
+        let n = (self.len * 4).next_power_of_two().max(1024);
+        if n < self.slots.len() && self.len * 8 < self.slots.len() {
+            self.rebuild(n, &key_of);
+            self.slots.shrink_to_fit();
+        }
+    }
+
     fn rebuild(&mut self, n: usize, key_of: &impl Fn(u32) -> Option<Key>) {
         let old: Vec<u32> = self
             .slots

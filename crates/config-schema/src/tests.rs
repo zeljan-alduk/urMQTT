@@ -56,14 +56,20 @@ fn shipped_dev_config_is_valid() {
         }
     );
     assert_eq!(cfg.acl.device_publish, vec!["devices/{id}/#".to_owned()]);
-    assert_eq!(cfg.observability.syslog_udp, None);
+    // Dev sends to the QEMU host, where the smoke test listens.
+    assert_eq!(
+        cfg.observability.syslog_udp,
+        Some(SocketAddrV4::new([10, 0, 2, 2].into(), 5514))
+    );
+    assert_eq!(parse("prod", PROD).unwrap().observability.syslog_udp, None);
 }
 
 #[test]
 fn shipped_prod_config_is_valid_and_has_no_plaintext() {
     let cfg = parse("prod", PROD).unwrap();
     assert_eq!(cfg.network.mqtt_plain_port, None);
-    assert_eq!(cfg.watchdog.action, WatchdogAction::Reset);
+    // A slow handler costs its connection; a stuck core always resets.
+    assert_eq!(cfg.watchdog.action, WatchdogAction::Drop);
 }
 
 #[test]
@@ -326,6 +332,23 @@ fn kernel_heap_must_be_power_of_two() {
 }
 
 #[test]
+fn free_heap_reserve_must_fit_the_heap() {
+    for line in ["min_free_mb = 0", "min_free_mb = 32", "min_free_mb = 64"] {
+        assert_rejected("dev", &dev_with("min_free_mb", line), "memory.min_free_mb");
+    }
+    assert_rejected(
+        "dev",
+        &dev_with(
+            "max_handshakes_in_flight_per_core",
+            "max_handshakes_in_flight_per_core = 0",
+        ),
+        "limits.max_handshakes_in_flight_per_core",
+    );
+    assert_eq!(parse("dev", DEV).unwrap().memory.min_free_mb, 4);
+    assert_eq!(parse("prod", PROD).unwrap().memory.kernel_heap_mb, 1024);
+}
+
+#[test]
 fn revocation_lists() {
     assert_eq!(
         parse_revocation_list("# c\nAA:BB\n\n0a1b # x\n").unwrap(),
@@ -388,7 +411,11 @@ fn render_contains_validated_values() {
         "mode",
         "mode = \"static\"\naddress = \"10.0.0.10/24\"\ngateway = \"10.0.0.1\"",
     )
-    .replace("syslog_udp = \"\"", "syslog_udp = \"10.0.0.5:514\"");
+    .replace(
+        "syslog_udp = \"10.0.2.2:5514\"",
+        "syslog_udp = \"10.0.0.5:514\"",
+    )
+    .replace("metrics_udp = \"10.0.2.2:8125\"", "metrics_udp = \"\"");
     let cfg = parse("dev", &text).unwrap();
     let files = EmbeddedFiles {
         ca: "/abs/ca.pem".into(),

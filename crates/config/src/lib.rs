@@ -87,6 +87,11 @@ pub struct Limits {
     pub max_queued_per_offline_session: u32,
     pub publish_rate_per_device: Rate,
     pub handshakes_per_core_per_sec: u32,
+    /// TLS handshakes a core runs at once; more are refused (M16).
+    pub max_handshakes_in_flight_per_core: u32,
+    /// Of those, from one source address (an unauthenticated peer cannot
+    /// take every slot; devices behind one NAT share it).
+    pub max_handshakes_in_flight_per_ip: u32,
 }
 
 /// Topic filter patterns; `{id}` expands to the session's device id.
@@ -127,6 +132,8 @@ pub struct Watchdog {
 pub struct Memory {
     /// Kernel heap (buddy allocator), a power of two.
     pub kernel_heap_mb: u32,
+    /// New connections are refused while less heap than this is free.
+    pub min_free_mb: u32,
 }
 
 /// The complete build-time configuration.

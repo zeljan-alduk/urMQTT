@@ -163,6 +163,11 @@ extern "C" fn urmqtt_kmain() -> ! {
         console::init_uart(va);
     }
     urmqtt_log::set_clock(uptime_ns);
+    urmqtt_log::set_cpu(crate::smp::current);
+    if urmqtt_config::CONFIG.observability.syslog_udp.is_some() {
+        // Kept from the start; sent once the network is up (M16).
+        urmqtt_log::enable_records();
+    }
     if let Some(fb) = FRAMEBUFFER
         .response()
         .and_then(|r| r.framebuffers().first().copied())
@@ -440,6 +445,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         crate::db::start_log_crash(cpus);
     }
     crate::dataplane::init(data_cores);
+    crate::dataplane::set_heap_reserve(s.options.heap_limit_mb);
     if s.options.db_test == Some(crate::cmdline::DbTest::DpBench) {
         if data_cores < 2 {
             fatal("dp-bench needs at least one worker core besides core 0 (3+ CPUs with storage)");
@@ -454,6 +460,9 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         "dataplane: {data_cores} data core(s), each with its own network stack, TLS and broker shard"
     );
 
+    if s.options.db_test == Some(crate::cmdline::DbTest::Watchdog) {
+        crate::watchdog::self_test();
+    }
     urmqtt_log::raw(format_args!("URMQTT READY\n"));
     if let Some(level) = s.options.log_level {
         info!("log: level {level:?} from the command line");

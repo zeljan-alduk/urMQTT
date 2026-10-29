@@ -306,6 +306,84 @@ mqtt_persist() {
     done
 }
 
+# M16: reconnect storms. Admission pretends the heap has 8 MiB, so 3000
+# devices do not all fit: each round all connect at once (retrying, like
+# devices with backoff), then all drop without DISCONNECT. The kernel must
+# refuse what does not fit, never run out of memory, and give the memory
+# back between rounds.
+storm() {
+    local loadgen="$ROOT/target/release/urmqtt-loadgen"
+    if [[ ! -x "$loadgen" ]]; then
+        (cd "$ROOT" && cargo build --release -q -p urmqtt-loadgen) || return 0
+    fi
+    local iso="$OUT/storm.iso"
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve log=info heap_limit_mb=8" >/dev/null
+    for accel in $ACCELS; do
+        local log="$OUT/storm-$accel.log" data="$OUT/storm-$accel.img" status=0
+        rm -f "$data"
+        truncate -s 64m "$data"
+        start_vm "$log" --iso "$iso" --accel "$accel" --data "$data" --fwd "18883:8883"
+        if wait_log "$log" "TLS 1.3 listener on port 8883"; then
+            (cd "$ROOT" && "$loadgen" storm --port 18883 --clients 3000 --threads 8 --rounds 3 \
+                --retry-s 30 --subscribe 1 --min-connected 500) >"$log.client" 2>&1 || status=$?
+            # Memory left by the last round is returned within 10 s.
+            sleep 12
+        else
+            status=124
+        fi
+        kill_vm
+        grep -v '^loadgen: bench-' "$log.client" >>"$log" 2>/dev/null || true
+        check "storm [$accel]" "$log" "$status" "loadgen: storm round 3: [0-9]+ of 3000 connected" \
+            "admission: [0-9]+ connection\(s\) refused: heap below the free reserve" \
+            "mem: 0 connection\(s\)" "NOT:memory allocation of" "$NO_FAULT"
+    done
+}
+
+# M16: the dev configuration sends syslog to 10.0.2.2:5514 and statsd to
+# 10.0.2.2:8125, which QEMU user networking delivers to the host.
+observability() {
+    local iso="$OUT/ops.iso"
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve" >/dev/null
+    for accel in $ACCELS; do
+        local log="$OUT/ops-$accel.log" data="$OUT/ops-$accel.img" status=0
+        rm -f "$data" "$log.udp"
+        truncate -s 64m "$data"
+        python3 -I - "$log.udp" 45 <<'PY' &
+import select, socket, sys, time
+out, end = open(sys.argv[1], "w"), time.time() + int(sys.argv[2])
+socks = []
+for port in (5514, 8125):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", port))
+    socks.append(s)
+while time.time() < end:
+    r, _, _ = select.select(socks, [], [], 0.5)
+    for s in r:
+        data = s.recv(65535).decode("utf-8", "replace")
+        out.write(f"udp:{s.getsockname()[1]}: " + data.replace("\n", f"\nudp:{s.getsockname()[1]}: ") + "\n")
+        out.flush()
+PY
+        local collector=$!
+        sleep 0.5
+        start_vm "$log" --iso "$iso" --accel "$accel" --data "$data" --fwd "18883:8883"
+        if wait_log "$log" "TLS 1.3 listener on port 8883"; then
+            # Metrics go out every 10 s.
+            sleep 22
+        else
+            status=124
+        fi
+        kill_vm
+        kill "$collector" 2>/dev/null || true
+        wait "$collector" 2>/dev/null || true
+        cat "$log.udp" >>"$log" 2>/dev/null || true
+        check "observability [$accel]" "$log" "$status" "ops: syslog 10\.0\.2\.2:5514, statsd 10\.0\.2\.2:8125" \
+            "^udp:5514: <13[0-9]>1 [0-9T:.Z-]+ 10\.0\.2\.15 urmqtt cpu[0-9]+ [a-z0-9-]+ \[meta sysUpTime=\"[0-9]+\"\] " \
+            "^udp:5514: .* mqtt: TLS 1\.3 listener on port 8883" \
+            "^udp:8125: urmqtt\.connections:0\|g" "^udp:8125: urmqtt\.health:1\|g" \
+            "^udp:8125: urmqtt\.refused\.memory:0\|c" "$NO_FAULT"
+    done
+}
+
 [[ -f "$KERNEL" ]] || { echo "error: $KERNEL not found (make build)" >&2; exit 1; }
 rm -f "$OUT"/*.iso
 echo "smoke: accelerators: $ACCELS"
@@ -394,6 +472,10 @@ fi
 # consistency after SIGKILL, broker state across a restart.
 scenario db-bench "smoke test=db-bench" on \
     "db-bench: 5000 inserts in 50 transactions: [0-9]+ ops/s" "5100 rows verified" "^URMQTT READY$" "$NO_FAULT"
+# M16: a handler overrunning its budget is reported from the tick.
+scenario watchdog "smoke test=watchdog" on \
+    "watchdog: core 0 self-test handler for conn 42 over budget: [0-9]+ ms > 10 ms \(action: Log\)" \
+    "^URMQTT READY$" "$NO_FAULT"
 db_crash
 log_crash
 log_tear
@@ -418,6 +500,8 @@ done
 if command -v mosquitto_pub >/dev/null; then
     mqtt_persist
 fi
+storm
+observability
 
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
 pcap_has_garp() {

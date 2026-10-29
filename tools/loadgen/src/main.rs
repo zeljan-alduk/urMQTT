@@ -13,9 +13,17 @@
 //!   With `--subscribe 1` every device subscribes to its own command tree
 //!   (`devices/<id>/cmd/#`, QoS 1) like a real device.
 //!
+//! - `storm`: `--rounds` reconnect storms. Every round all `--clients`
+//!   connect at once (retrying refused connections for up to `--retry-s`
+//!   seconds, like devices with backoff), then all drop their connections
+//!   at once without DISCONNECT. Reports per round how many connected, how
+//!   many attempts were refused and how long the round took; fails if a
+//!   round connects fewer than `--min-connected`.
+//!
 //! ```text
 //! urmqtt-loadgen handshake --port 18883 --threads 64 --duration 10
 //! urmqtt-loadgen hold --port 18883 --clients 500 --duration 30 --publish-ms 1000
+//! urmqtt-loadgen storm --port 18883 --clients 2000 --rounds 3 --retry-s 60
 //! ```
 
 use std::io::{Read, Write};
@@ -37,6 +45,9 @@ struct Opts {
     duration: u64,
     publish_ms: u64,
     subscribe: bool,
+    rounds: u64,
+    retry_s: u64,
+    min_connected: u64,
     prefix: String,
 }
 
@@ -44,7 +55,7 @@ fn parse() -> Result<Opts, String> {
     let mut a = std::env::args().skip(1);
     let mode = a
         .next()
-        .ok_or("usage: urmqtt-loadgen handshake|hold [options]")?;
+        .ok_or("usage: urmqtt-loadgen handshake|hold|storm [options]")?;
     let mut o = Opts {
         mode,
         host: "127.0.0.1".into(),
@@ -55,6 +66,9 @@ fn parse() -> Result<Opts, String> {
         duration: 10,
         publish_ms: 0,
         subscribe: false,
+        rounds: 3,
+        retry_s: 60,
+        min_connected: 0,
         prefix: "bench".into(),
     };
     while let Some(k) = a.next() {
@@ -69,6 +83,9 @@ fn parse() -> Result<Opts, String> {
             "--duration" => o.duration = num(&v)?,
             "--publish-ms" => o.publish_ms = num(&v)?,
             "--subscribe" => o.subscribe = num(&v)? != 0,
+            "--rounds" => o.rounds = num(&v)?,
+            "--retry-s" => o.retry_s = num(&v)?,
+            "--min-connected" => o.min_connected = num(&v)?,
             "--prefix" => o.prefix = v,
             _ => return Err(format!("unknown option {k}")),
         }
@@ -155,6 +172,8 @@ fn publish_packet(topic: &str, payload: &[u8]) -> Vec<u8> {
 }
 
 type Tls = StreamOwned<ClientConnection, TcpStream>;
+/// A simulated device: its client id and TLS configuration.
+type Identity = (String, Arc<ClientConfig>);
 
 /// TCP + TLS + CONNECT/CONNACK.
 fn open(o: &Opts, id: &str, cfg: &Arc<ClientConfig>) -> Result<Tls, String> {
@@ -348,11 +367,97 @@ fn hold(o: &Opts) -> Result<(), String> {
     Ok(())
 }
 
+fn storm(o: &Opts) -> Result<(), String> {
+    let ids = identities(o, o.clients)?;
+    let threads = o.threads.clamp(1, ids.len().max(1));
+    let shares: Vec<Arc<Vec<Identity>>> = (0..threads)
+        .map(|t| Arc::new(ids.iter().skip(t).step_by(threads).cloned().collect()))
+        .collect();
+    let mut failed_rounds = 0;
+    for round in 1..=o.rounds {
+        let t0 = Instant::now();
+        let deadline = t0 + Duration::from_secs(o.retry_s);
+        let refused = Arc::new(AtomicU64::new(0));
+        let handles: Vec<_> = shares
+            .iter()
+            .map(|share| {
+                let share = share.clone();
+                let refused = refused.clone();
+                let o = Opts {
+                    mode: String::new(),
+                    host: o.host.clone(),
+                    certs: String::new(),
+                    prefix: String::new(),
+                    ..*o
+                };
+                std::thread::spawn(move || {
+                    let mut conns = Vec::new();
+                    let mut todo: Vec<usize> = (0..share.len()).collect();
+                    let mut backoff = Duration::from_millis(100);
+                    while !todo.is_empty() && Instant::now() < deadline {
+                        let mut again = Vec::new();
+                        for i in todo {
+                            let Some((id, cfg)) = share.get(i) else {
+                                continue;
+                            };
+                            match open(&o, id, cfg) {
+                                Ok(t) => conns.push(t),
+                                Err(e) => {
+                                    if std::env::var_os("LOADGEN_VERBOSE").is_some() {
+                                        eprintln!("loadgen: {id}: {e}");
+                                    }
+                                    refused.fetch_add(1, Ordering::Relaxed);
+                                    again.push(i);
+                                }
+                            }
+                        }
+                        todo = again;
+                        if !todo.is_empty() {
+                            std::thread::sleep(backoff);
+                            backoff = (backoff * 2).min(Duration::from_secs(2));
+                        }
+                    }
+                    conns
+                })
+            })
+            .collect();
+        let conns: Vec<Tls> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect();
+        let n = conns.len();
+        println!(
+            "loadgen: storm round {round}: {n} of {} connected in {:.1} s, {} attempt(s) refused",
+            ids.len(),
+            t0.elapsed().as_secs_f64(),
+            refused.load(Ordering::Relaxed)
+        );
+        if n < ids.len() {
+            failed_rounds += 1;
+        }
+        if (n as u64) < o.min_connected {
+            return Err(format!(
+                "storm round {round}: only {n} connected (< {})",
+                o.min_connected
+            ));
+        }
+        // Everyone drops at once, without DISCONNECT.
+        drop(conns);
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    println!(
+        "loadgen: storm: {} round(s), {failed_rounds} incomplete",
+        o.rounds
+    );
+    Ok(())
+}
+
 fn main() {
     let r = parse().and_then(|o| match o.mode.as_str() {
         "handshake" => handshake(&o),
         "hold" => hold(&o),
-        m => Err(format!("unknown mode {m:?} (handshake|hold)")),
+        "storm" => storm(&o),
+        m => Err(format!("unknown mode {m:?} (handshake|hold|storm)")),
     });
     if let Err(e) = r {
         eprintln!("urmqtt-loadgen: {e}");

@@ -41,6 +41,7 @@ fn on_tick(_intid: u32) {
     timer::set_deadline(next);
     TICKS.fetch_add(1, Ordering::Relaxed);
     crate::smp::this().ticks.fetch_add(1, Ordering::Relaxed);
+    crate::watchdog::check();
 }
 
 /// Starts the tick with `period_ns` on this core, delivered as `intid`.

@@ -417,3 +417,42 @@ verified in the named milestone before it becomes Accepted).
 - **Not done:**
   - Trie nodes for ordinary filters and retained topics are never freed (a node is 80 B).
   - The cold tier (compressing idle sessions) is not implemented: the measurement does not call for it.
+
+## ADR-035 — Hardening and operations: admission, watchdog, health, syslog and statsd
+
+- **Status:** Accepted (M16).
+- **Admission (OOM protection):** a new connection is refused, before any crypto work, for the first reason that applies:
+  1. free heap below `memory.min_free_mb`;
+  2. the DB core more than 16 384 requests behind (durable changes are never dropped, so admission is the backpressure);
+  3. `limits.max_handshakes_in_flight_per_core` handshakes in flight, or `limits.max_handshakes_in_flight_per_ip` from the same source address (a slow, unauthenticated peer cannot hold every slot);
+  4. no handshake token (`limits.handshakes_per_core_per_sec`).
+
+  Refusals are counted per reason (logged at 1, 2, 4, 8, … and pushed as statsd counters). Device-registry updates are skipped beyond 4 096 waiting DB requests: they are statistics.
+- **Memory after a peak:** slabs hand out the lowest free id, so after a storm the remaining entries gather at the front. Every 10 s each core frees empty chunks at the end of its slabs and halves tables (TCP, client index) that are less than 1/8 full. Without this, the free-heap check would keep refusing after a storm that reached the limit, because the peak's chunks stay allocated. Measured: each worker returned about 1.1 MiB within 10 s of a 5 000-connection round.
+- **Testing a storm on a small host:** `heap_limit_mb=N` (dev only) makes admission treat the heap as N MiB. The `storm` smoke scenario uses 8 MiB: 3 000 devices reconnect at once, 3 rounds; about 1 100–1 400 fit per round and the rest are refused. The checks are no allocation failure, no fault, memory refusals logged, and the memory back at 0 connections. On this host QEMU user networking cannot hold the 100k sockets the spec mentions (it stops near 10 240), so the heap is scaled down instead of the clients up.
+- **Watchdog (PROMPT §4.1):**
+  - Handlers mark their core with a phase and a connection (`watchdog::enter`, nested marks restore the outer one).
+  - The per-core 10 ms tick checks the mark from its interrupt. Past `watchdog.handler_budget_ms` it logs core, phase and connection once, then applies `watchdog.action`: `log`, `drop` (abort the connection when the handler returns) or `reset`.
+  - A handler still running after 100 budgets (at least 1 s) means a stuck core: the VM resets whatever the action.
+  - Production uses `drop` with 20 ms: one slow handshake under steal time should cost one connection, not a million.
+  - The DB core is not watched this way (a large commit can take hundreds of milliseconds); the health check covers it.
+- **Health check (core 0, every 10 s):**
+  - Every other core's loop-pass counter must advance; two checks without progress (a core spinning with interrupts masked, which its own watchdog cannot see) reset the VM.
+  - A heap below the reserve marks the state degraded. State changes are logged, and the state goes to statsd as `urmqtt.health`.
+- **Logging:**
+  - Lines are rate-limited to 100/s with a burst of 300; what is suppressed is reported with the next line.
+  - With `observability.syslog_udp` set, every line is also kept in a fixed ring (128 records × 200 bytes, no allocation, oldest overwritten and counted), from the first line of the boot on.
+  - Core 0 sends one RFC 5424 message per datagram (RFC 5426) every 100 ms, once the collector's next hop is resolved: facility local0, the line's level as severity, wall-clock timestamp, our address as host, `cpuN` as PROCID, the subsystem prefix (`tls`, `mem`, …) as MSGID and `[meta sysUpTime=…]`.
+- **Metrics:** with `observability.metrics_udp` set, core 0 pushes statsd lines every 10 s in datagrams of at most 1 400 bytes.
+  - Gauges: connections, heap capacity/used/live bytes, frame buffers, health.
+  - Counters: accepted connections, refusals by reason, watchdog reports, dropped frames, lost log records, unsent datagrams.
+  - The dev configuration points both at the QEMU host (10.0.2.2:5514 and :8125), where the `observability` smoke scenario listens.
+- **Revocation and resumption:** a resumption ticket outlives a revocation. Prod revocation lists are not in git, so a rebuilt image can carry the same version and hence the same ticket key. Resumed sessions therefore check the ticket's certificate against the list again.
+- **Fuzzing:** 11 targets, each run for 60 s in CI.
+  - New in M16: `net_frame`, `tls_record` (with a round-trip and tamper oracle), `x509_identity`, `broker_input` and `telemetry_recover`.
+  - Earlier: `config_parse`, `fdt_parse`, `acpi_parse`, `mqtt_decode`, `disk_layout`, `tcp_segment`.
+- **Not done:**
+  - TLS for the observability sinks.
+  - Limits on established connections per source address.
+  - Revocation without a new image.
+  - Per-core metrics.

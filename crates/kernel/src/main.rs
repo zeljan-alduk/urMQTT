@@ -41,6 +41,8 @@ mod mqtt_service;
 #[cfg(target_os = "none")]
 mod netproto;
 #[cfg(target_os = "none")]
+mod ops;
+#[cfg(target_os = "none")]
 mod power;
 #[cfg(target_os = "none")]
 mod selftest;
@@ -52,6 +54,8 @@ mod tick;
 mod trap;
 #[cfg(target_os = "none")]
 mod vm;
+#[cfg(target_os = "none")]
+mod watchdog;
 
 /// Image version: `git describe` passed in by the Makefile, else the crate version.
 pub const VERSION: &str = match option_env!("URMQTT_VERSION") {

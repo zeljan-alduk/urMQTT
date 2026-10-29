@@ -24,6 +24,8 @@ max_inflight_qos1 = 16
 max_queued_per_offline_session = 64
 publish_rate_per_device = "10/s"
 handshakes_per_core_per_sec = 2000
+max_handshakes_in_flight_per_core = 256   # concurrent TLS handshakes per core; more are refused
+max_handshakes_in_flight_per_ip = 32      # of those, from one source address
 
 [acl]
 device_publish = ["devices/{id}/#"]
@@ -47,8 +49,9 @@ syslog_udp = ""                # "10.0.0.5:514" for a private collector
 metrics_udp = ""               # statsd
 
 [watchdog]
-handler_budget_ms = 10
-action = "reset"                # "log" | "drop" | "reset"
+handler_budget_ms = 20         # a full P-256 handshake takes ~0.6 ms; leaves room for steal time
+action = "drop"                # "log" | "drop" | "reset"; a stuck core (100 budgets, >= 1 s) always resets
 
 [memory]
-kernel_heap_mb = 8                # power of two; boot-time structures and TLS handshakes
+kernel_heap_mb = 1024             # power of two; ~500 B per idle connection (1M ≈ 500 MiB) plus handshakes
+min_free_mb = 64                  # refuse new connections below this much free heap

@@ -174,6 +174,16 @@ impl Index {
         None
     }
 
+    /// Halves the table (repeatedly) while it is less than 1/8 full, so a
+    /// past peak does not keep its slots (M16).
+    pub fn shrink<'a>(&mut self, name_of: impl Fn(u32) -> Option<&'a str>) {
+        let n = (self.len * 4).next_power_of_two().max(16);
+        if n < self.slots.len() && self.len * 8 < self.slots.len() {
+            self.rebuild(n, &name_of);
+            self.slots.shrink_to_fit();
+        }
+    }
+
     fn rebuild<'a>(&mut self, n: usize, name_of: &impl Fn(u32) -> Option<&'a str>) {
         let old: Vec<u32> = self
             .slots

@@ -102,6 +102,7 @@ struct RawConfig {
 #[serde(deny_unknown_fields)]
 struct RawMemory {
     kernel_heap_mb: u32,
+    min_free_mb: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -137,6 +138,8 @@ struct RawLimits {
     max_queued_per_offline_session: u32,
     publish_rate_per_device: String,
     handshakes_per_core_per_sec: u32,
+    max_handshakes_in_flight_per_core: u32,
+    max_handshakes_in_flight_per_ip: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -227,6 +230,8 @@ pub struct Limits {
     pub max_queued_per_offline_session: u32,
     pub publish_rate_per_device: Rate,
     pub handshakes_per_core_per_sec: u32,
+    pub max_handshakes_in_flight_per_core: u32,
+    pub max_handshakes_in_flight_per_ip: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +266,7 @@ pub struct Observability {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Memory {
     pub kernel_heap_mb: u32,
+    pub min_free_mb: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -502,6 +508,14 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
             "limits.handshakes_per_core_per_sec",
             raw.handshakes_per_core_per_sec,
         ),
+        (
+            "limits.max_handshakes_in_flight_per_core",
+            raw.max_handshakes_in_flight_per_core,
+        ),
+        (
+            "limits.max_handshakes_in_flight_per_ip",
+            raw.max_handshakes_in_flight_per_ip,
+        ),
     ];
     for (key, v) in positive {
         if v == 0 {
@@ -542,6 +556,8 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
         max_queued_per_offline_session: raw.max_queued_per_offline_session,
         publish_rate_per_device,
         handshakes_per_core_per_sec: raw.handshakes_per_core_per_sec,
+        max_handshakes_in_flight_per_core: raw.max_handshakes_in_flight_per_core,
+        max_handshakes_in_flight_per_ip: raw.max_handshakes_in_flight_per_ip,
     }
 }
 
@@ -768,7 +784,18 @@ fn validate_memory(raw: &RawMemory, errors: &mut Vec<ConfigError>) -> Memory {
             "must be a power of two in 1..=1024 (the heap is one buddy region)",
         ));
     }
-    Memory { kernel_heap_mb: mb }
+    // New connections are refused below this much free heap, so a
+    // reconnect storm cannot exhaust it (M16).
+    if raw.min_free_mb == 0 || raw.min_free_mb >= mb {
+        errors.push(err(
+            "memory.min_free_mb",
+            "must be greater than 0 and smaller than memory.kernel_heap_mb",
+        ));
+    }
+    Memory {
+        kernel_heap_mb: mb,
+        min_free_mb: raw.min_free_mb,
+    }
 }
 
 /// Kind of PEM object expected in an embedded file.
@@ -887,6 +914,8 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         max_queued_per_offline_session: {mqos},
         publish_rate_per_device: Rate {{ tokens: {rt}, per_ms: {rp} }},
         handshakes_per_core_per_sec: {hpc},
+        max_handshakes_in_flight_per_core: {hif},
+        max_handshakes_in_flight_per_ip: {hip},
     }},
     acl: Acl {{
         device_publish: {dp},
@@ -914,6 +943,7 @@ pub const CONFIG: BuildConfig = BuildConfig {{
     }},
     memory: Memory {{
         kernel_heap_mb: {heap_kernel},
+        min_free_mb: {min_free},
     }},
 }};
 
@@ -939,6 +969,8 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         rt = l.publish_rate_per_device.tokens,
         rp = l.publish_rate_per_device.per_ms,
         hpc = l.handshakes_per_core_per_sec,
+        hif = l.max_handshakes_in_flight_per_core,
+        hip = l.max_handshakes_in_flight_per_ip,
         dp = render_strs(&cfg.acl.device_publish),
         ds = render_strs(&cfg.acl.device_subscribe),
         sid = render_strs(&cfg.acl.service_ids),
@@ -956,6 +988,7 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         hb = cfg.watchdog.handler_budget_ms,
         wa = cfg.watchdog.action,
         heap_kernel = cfg.memory.kernel_heap_mb,
+        min_free = cfg.memory.min_free_mb,
         ca = files.ca,
         cert = files.cert,
         key = files.key,

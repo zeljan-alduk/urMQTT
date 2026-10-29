@@ -291,3 +291,27 @@ fn own_client_against_own_server() {
         assert!(c.is_established());
     }
 }
+
+/// A ticket issued before a revocation must not resume afterwards: the new
+/// image may carry the same version (M16).
+#[test]
+fn revoked_device_cannot_resume() {
+    let Some(d) = dev() else { return };
+    setup_globals();
+    let cfg = client_config(&d, "devices/device-002");
+    let (_, _, r) = connect(&server(&d, IdentityField::Cn, &[]), cfg.clone());
+    assert!(r.is_ok());
+    let der = CertificateDer::from_pem_file(d.join("devices/device-002.pem")).unwrap();
+    let serial: String = urmqtt_tls::identity::serial(&der)
+        .unwrap()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let srv = server(&d, IdentityField::Cn, &[&serial]);
+    let (_, _, r) = connect(&srv, cfg);
+    let e = format!("{:?}", r.unwrap_err());
+    assert!(
+        e.contains("resumed session of a revoked certificate"),
+        "{e}"
+    );
+}

@@ -292,6 +292,19 @@ impl MemDisk {
         }
     }
 
+    /// A disk whose medium holds `image` (fuzzing recovery from damaged
+    /// images; the length should be a multiple of the sector size).
+    pub fn from_image(image: Vec<u8>) -> Self {
+        Self {
+            inner: Arc::new(SpinLock::new(MemInner {
+                durable: image,
+                cache: Vec::new(),
+                writes: 0,
+                fail_after_writes: None,
+            })),
+        }
+    }
+
     /// Simulates power loss: unflushed writes whose index `keep(i)` returns
     /// false are lost, the others reach the medium (in any real order).
     pub fn crash(&self, mut keep: impl FnMut(usize) -> bool) {

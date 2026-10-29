@@ -4,16 +4,25 @@
 //! are (a doubling `Vec` wastes up to half). A chunk holds as many entries
 //! as fit one 8 KiB heap block, so the buddy heap's power-of-two rounding
 //! costs well under 1 % instead of up to a third.
+//!
+//! Free ids are handed out lowest first, so after a peak (a reconnect
+//! storm) the entries left gather at the front and [`Slab::shrink`] can
+//! return the empty chunks at the end to the heap (M16).
 
 use alloc::boxed::Box;
+use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 
 /// Bytes per chunk: one buddy block.
 pub const CHUNK_BYTES: usize = 8192;
 
 pub struct Slab<T> {
     chunks: Vec<Box<[Option<T>]>>,
-    free: Vec<u32>,
+    /// Entries per chunk, so empty chunks are found without a scan.
+    counts: Vec<u16>,
+    /// Free ids of `insert`, lowest first.
+    free: BinaryHeap<Reverse<u32>>,
     len: usize,
 }
 
@@ -37,7 +46,8 @@ impl<T> Slab<T> {
     pub const fn new() -> Self {
         Self {
             chunks: Vec::new(),
-            free: Vec::new(),
+            counts: Vec::new(),
+            free: BinaryHeap::new(),
             len: 0,
         }
     }
@@ -62,11 +72,43 @@ impl<T> Slab<T> {
             .get_mut(k % Self::CHUNK)
     }
 
+    fn add_chunk(&mut self) {
+        self.chunks.push((0..Self::CHUNK).map(|_| None).collect());
+        self.counts.push(0);
+    }
+
     fn grow(&mut self) {
         let base = (self.chunks.len() * Self::CHUNK) as u32;
-        self.chunks.push((0..Self::CHUNK).map(|_| None).collect());
-        // Lowest ids first.
-        self.free.extend((base..base + Self::CHUNK as u32).rev());
+        self.add_chunk();
+        self.free
+            .extend((base..base + Self::CHUNK as u32).map(Reverse));
+    }
+
+    fn count(&mut self, k: u32, delta: i32) {
+        if let Some(c) = self.counts.get_mut(k as usize / Self::CHUNK) {
+            *c = (i32::from(*c) + delta) as u16;
+        }
+    }
+
+    /// Returns the empty chunks at the end to the heap; the number freed.
+    /// Callers run it periodically (it is O(free ids) when it frees).
+    pub fn shrink(&mut self) -> usize {
+        let before = self.chunks.len();
+        while self.counts.last() == Some(&0) {
+            self.chunks.pop();
+            self.counts.pop();
+        }
+        let freed = before - self.chunks.len();
+        if freed > 0 {
+            let limit = (self.chunks.len() * Self::CHUNK) as u32;
+            let mut ids = core::mem::take(&mut self.free).into_vec();
+            ids.retain(|Reverse(k)| *k < limit);
+            ids.shrink_to_fit();
+            self.free = BinaryHeap::from(ids);
+            self.chunks.shrink_to_fit();
+            self.counts.shrink_to_fit();
+        }
+        freed
     }
 
     pub fn get(&self, k: u32) -> Option<&T> {
@@ -87,12 +129,15 @@ impl<T> Slab<T> {
             if self.free.is_empty() {
                 self.grow();
             }
-            let Some(k) = self.free.pop() else { continue };
+            let Some(Reverse(k)) = self.free.pop() else {
+                continue;
+            };
             if let Some(slot) = self.slot_mut(k)
                 && slot.is_none()
             {
                 *slot = Some(v);
                 self.len += 1;
+                self.count(k, 1);
                 return k;
             }
         }
@@ -102,7 +147,7 @@ impl<T> Slab<T> {
     /// id); replaces what was there.
     pub fn insert_at(&mut self, k: u32, v: T) {
         while (k as usize) >= self.chunks.len() * Self::CHUNK {
-            self.chunks.push((0..Self::CHUNK).map(|_| None).collect());
+            self.add_chunk();
         }
         let mut added = false;
         if let Some(slot) = self.slot_mut(k) {
@@ -111,13 +156,15 @@ impl<T> Slab<T> {
         }
         if added {
             self.len += 1;
+            self.count(k, 1);
         }
     }
 
     pub fn remove(&mut self, k: u32) -> Option<T> {
         let v = self.slot_mut(k)?.take()?;
         self.len -= 1;
-        self.free.push(k);
+        self.count(k, -1);
+        self.free.push(Reverse(k));
         Some(v)
     }
 
@@ -126,6 +173,7 @@ impl<T> Slab<T> {
     pub fn take_at(&mut self, k: u32) -> Option<T> {
         let v = self.slot_mut(k)?.take()?;
         self.len -= 1;
+        self.count(k, -1);
         Some(v)
     }
 
@@ -178,6 +226,35 @@ mod tests {
         s.insert_at(1000, 7);
         assert_eq!(s.get(1000), Some(&7));
         assert_eq!(s.take_at(1000), Some(7));
+    }
+
+    #[test]
+    fn ids_lowest_first_and_tail_chunks_freed() {
+        let mut s: Slab<u64> = Slab::new();
+        let per = Slab::<u64>::CHUNK as u32;
+        let ids: Vec<u32> = (0..per * 5).map(|i| s.insert(u64::from(i))).collect();
+        assert_eq!(ids, (0..per * 5).collect::<Vec<_>>());
+        // A storm leaves a few scattered entries; the rest go.
+        for k in 0..per * 5 {
+            if k % 7 != 0 || k >= per * 2 {
+                s.remove(k);
+            }
+        }
+        assert_eq!(s.shrink(), 3, "the three empty chunks at the end");
+        assert_eq!(s.chunks.len(), 2);
+        // New entries fill the holes at the front first.
+        assert_eq!(s.insert(1), 1);
+        s.insert_at(per * 4, 9);
+        assert_eq!(s.get(per * 4), Some(&9));
+        assert_eq!(s.shrink(), 0);
+        assert_eq!(s.take_at(per * 4), Some(9));
+        assert_eq!(s.shrink(), 3);
+        for (k, _) in s.iter().map(|(k, v)| (k, *v)).collect::<Vec<_>>() {
+            s.remove(k);
+        }
+        assert_eq!(s.shrink(), 2);
+        assert!(s.is_empty());
+        assert_eq!(s.insert(5), 0);
     }
 
     #[test]

@@ -11,7 +11,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M15)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M16)-red)
 
 </div>
 
@@ -34,6 +34,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M13**: multicore data plane: per-core stacks and broker shards, Toeplitz dispatcher, relayed sessions, cross-core fan-out, per-CPU heap caches; linear scaling to 4 worker cores in-guest
 > - **M14**: own server-only TCP/IP stack (SYN cookies, timing wheel, NewReno, ACK coalescing) and DHCP client; smoltcp removed
 > - **M15**: 494 B per idle mTLS connection at 10k (heap blocks, allocator rounding included): compact state, per-record TLS key derivation, device-scoped subscriptions without per-device trie nodes
+> - **M16**: admission that survives reconnect storms (free-heap reserve, in-flight limits per core and per source address, DB backpressure), handler watchdog, health check, rate-limited logs, syslog (RFC 5424) and statsd over UDP, 11 fuzz targets in CI, threat model
 >
 > The kernel boots under QEMU with HVF and TCG. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
@@ -111,7 +112,9 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | Per-core append-only telemetry log with CRC and crash recovery | ✅ M12 |
 | **Scale** | Per-core event loops and broker shards, per-CPU heap caches, frame pools, cross-core fan-out | ✅ M13 |
 | | ≤ 512 B per idle TLS connection (494 B measured at 10k), no per-device trie nodes | ✅ M15 |
-| **Ops** | Watchdog, rate limits, UDP syslog/statsd to a private collector | 📋 M16 |
+| **Ops** | Handler watchdog (log / drop / reset), health check, rate-limited logs | ✅ M16 |
+| | Syslog (RFC 5424) and statsd metrics over UDP to private collectors | ✅ M16 |
+| | Admission that survives reconnect storms: free-heap reserve, in-flight limits per core and per source address | ✅ M16 |
 
 ## Architecture
 
@@ -248,7 +251,7 @@ falls as fixed slab chunks amortize, so it does not grow with the connection cou
   - The lower half of the address space is disabled.
   - Every stack has guard pages, and exceptions run on a separate stack.
   - PAC (`pac-ret`) and BTI are enabled when the CPU supports them, and verified by the smoke tests.
-- **Abuse resistance.** SYN cookies, per-core handshake admission control, per-device rate limits, bounded queues, and a TCP window tied to broker backpressure.
+- **Abuse resistance.** SYN cookies; admission refuses new connections (before any crypto) on a low heap, a DB core that is behind, too many handshakes in flight per core or per source address, or the handshake rate. Per-device rate limits, bounded queues, a TCP window tied to broker backpressure, rate-limited logs, a handler watchdog and a health check.
 - **Immutable.** Configuration, CA and server key are baked into the image, and changing anything means a new image.
 
 The threat model is in [docs/SECURITY.md](docs/SECURITY.md).
@@ -445,10 +448,13 @@ error: invalid configuration deploy/bad/config.toml:
 | `limits.max_queued_per_offline_session` | ≥ 0 | Bounded offline queue |
 | `limits.publish_rate_per_device` | `"N/s"`, `"N/m"`, `"N/h"` | Token bucket per device |
 | `limits.handshakes_per_core_per_sec` | > 0 | Handshake admission control (reconnect storms) |
+| `limits.max_handshakes_in_flight_per_core` | > 0 | Concurrent handshakes per core; more are refused |
+| `limits.max_handshakes_in_flight_per_ip` | > 0 | Of those, from one source address |
 | `acl.device_publish`, `acl.device_subscribe` | topic filters, `{id}` = device id | Default device rights |
 | `acl.service_ids` | ids or `prefix*` | Identities with service rights (backends) |
 | `acl.service_publish`, `acl.service_subscribe` | topic filters | Service rights |
-| `memory.kernel_heap_mb` | power of two, 1–1024 | Kernel heap (buddy allocator) |
+| `memory.kernel_heap_mb` | power of two, 1–1024 | Kernel heap (buddy allocator); ~500 B per idle connection |
+| `memory.min_free_mb` | > 0, < heap | New connections are refused below this much free heap |
 | `storage.sqlite_heap_mb` | 1–4096 | Fixed SQLite `memsys5` heap |
 | `storage.telemetry_topics` | topic filters | PUBLISHes appended to the telemetry log |
 | `storage.retention_days` | > 0 | Telemetry retention |
@@ -458,7 +464,7 @@ error: invalid configuration deploy/bad/config.toml:
 | `observability.log_level` | `error`…`trace` | |
 | `observability.syslog_udp`, `metrics_udp` | `""` or `"a.b.c.d:port"` | Private syslog and statsd collectors |
 | `watchdog.handler_budget_ms` | 1–10 000 | Per-handler time budget |
-| `watchdog.action` | `log` \| `drop` \| `reset` | What happens on overrun (ADR-013) |
+| `watchdog.action` | `log` \| `drop` \| `reset` | What happens on overrun (ADR-035); a core stuck for 100 budgets always resets |
 
 ### Configuration examples
 
@@ -691,8 +697,21 @@ The in-guest number (`test=dp-bench`: client and server inside the VM, each work
 shows the data plane scaling linearly. The network number is capped by QEMU's single-threaded
 user networking, not by the guest (see ADR-032).
 
-QEMU user networking (slirp) tops out far below a million connections. For ≥ 100k use
-`vmnet-shared` on macOS (needs sudo) or a Linux host with KVM, tap and several client IPs.
+QEMU user networking (slirp) tops out far below a million connections (on macOS near 10 240
+sockets). For ≥ 100k use `vmnet-shared` on macOS (needs sudo) or a Linux host with KVM, tap and
+several client IPs.
+
+Reconnect storms (M16): every round all devices connect at once, retrying refused attempts with
+backoff, then all drop without DISCONNECT. `heap_limit_mb=` (dev command line) makes admission treat
+the heap as smaller, so a storm larger than the heap can be tested with few sockets:
+
+```bash
+make loadtest ARGS="storm --port 18883 --clients 3000 --rounds 3 --threads 8 --retry-s 30 --subscribe 1"
+# loadgen: storm round 1: 1368 of 3000 connected in 36.3 s, 5619 attempt(s) refused   (8 MiB limit)
+```
+
+Use 4–8 client threads: QEMU's port forward listens with a backlog of one, so many parallel
+connectors mostly wait for SYN retransmissions.
 
 ### 10. TCP echo through the port forward (dev, works today)
 
@@ -706,10 +725,29 @@ python3 scripts/echo-client.py 7007        # client: echo 1 ok / 3000 ok / 60000
 ### 11. Fuzzing (works today)
 
 ```bash
-make fuzz T=config_parse FUZZ_TIME=60     # every parser gets a target as it lands
-cargo fuzz list                            # config_parse, fdt_parse, acpi_parse, mqtt_decode, disk_layout
+make fuzz T=config_parse FUZZ_TIME=60     # every parser has a target; CI runs each for 60 s
+cargo fuzz list                            # 11 targets: config_parse, fdt_parse, acpi_parse, mqtt_decode,
+                                           # disk_layout, tcp_segment, net_frame, tls_record, x509_identity,
+                                           # broker_input, telemetry_recover
 make fuzz T=mqtt_decode FUZZ_TIME=600      # the M8 acceptance run
 ```
+
+### 12. Syslog and metrics (M16)
+
+The dev configuration sends syslog to `10.0.2.2:5514` and statsd to `10.0.2.2:8125`, which QEMU user
+networking delivers to the host's loopback:
+
+```bash
+nc -ul 127.0.0.1 5514 &      # RFC 5424, one message per datagram
+nc -ul 127.0.0.1 8125 &      # statsd, every 10 s
+make run
+# <134>1 2026-10-29T07:00:23.158Z 10.0.2.15 urmqtt cpu0 mqtt [meta sysUpTime="560"] mqtt: TLS 1.3 listener on port 8883 ...
+# urmqtt.connections:0|g
+# urmqtt.heap.used_bytes:1372160|g
+# urmqtt.refused.memory:0|c
+```
+
+Production images set `observability.syslog_udp` and `metrics_udp` to collectors on a private network.
 
 ## Deployment
 
@@ -808,7 +846,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M13** Multicore data plane | near-linear scaling 1 → 2 → 4 cores |
 | ✅ | **M14** Own TCP stack | smoltcp replaced; loss simulation tests; segment fuzzing |
 | ✅ | **M15** Memory per connection | 494 B per idle mTLS connection at 10k, allocator rounding included |
-| 📋 | **M16** Hardening & ops | threat model; a 100k-client reconnect storm survives |
+| ✅ | **M16** Hardening & ops | threat model; reconnect storms beyond the heap refused cleanly, memory returned |
 | 📋 | **M17** Deployment | bit-identical ISO rebuilds, signatures, cloud guides |
 
 Later: MQTT 5.0, QoS 2, IPv6, cold-session compression, SQLite isolation at EL0, an export bridge,

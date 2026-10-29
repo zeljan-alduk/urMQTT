@@ -422,6 +422,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     let mut idle = dataplane::Idle::new();
     let (mut mem_last, mut mem_conns) = (now_ms(), 0u64);
     dataplane::set_baseline();
+    let mut ops = crate::ops::Ops::new(now_ms());
     loop {
         let now = now_ms();
         if let Some(c) = dataplane::CONNECTIONS.first() {
@@ -467,6 +468,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             if let Some(e) = iface.poll(now, &mut emit) {
                 events.push(e);
             }
+            ops.poll(&mut iface, now, &mut emit);
             for e in events {
                 match e {
                     Event::Dhcp(dhcp::Event::Bound(l) | dhcp::Event::Renewed(l)) => {

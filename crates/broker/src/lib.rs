@@ -756,6 +756,21 @@ impl Broker {
         }
     }
 
+    /// Returns memory a past peak left behind (empty slab chunks, index
+    /// slots, scratch capacity; M16). Callers run it every few seconds.
+    pub fn shrink(&mut self) {
+        self.conns.shrink();
+        self.sessions.shrink();
+        let sessions = &self.sessions;
+        self.by_client.shrink(|x| session_name(sessions, x));
+        if self.ready.is_empty() {
+            self.ready.shrink_to_fit();
+        }
+        if self.scratch.is_empty() {
+            self.scratch.shrink_to_fit();
+        }
+    }
+
     /// Enforces keepalive (1.5 × the client's interval, §3.1.2.10).
     /// Callers run this periodically (every 100 ms is plenty); it scans the
     /// connections, so it is kept off the per-packet path.

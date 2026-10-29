@@ -346,6 +346,50 @@ impl Iface {
         }
     }
 
+    /// The neighbour a datagram to `dst` goes to: `dst` itself on the
+    /// local subnet, otherwise the router.
+    pub fn next_hop(&self, dst: Ip) -> Option<Ip> {
+        if self.same_subnet(dst) {
+            Some(dst)
+        } else {
+            self.router
+        }
+    }
+
+    /// Whether a datagram to `dst` can go out now (address and next-hop
+    /// MAC known).
+    pub fn can_reach(&self, dst: Ip) -> bool {
+        self.addr.is_some() && self.neighbour(dst).is_some()
+    }
+
+    /// Sends one UDP datagram (syslog, statsd: M16). False if we have no
+    /// address yet or the next hop's MAC is unknown; the caller asks for it
+    /// with [`Iface::resolve`] on [`Iface::next_hop`] and drops or retries.
+    pub fn send_udp(
+        &mut self,
+        dst: Ip,
+        sport: u16,
+        dport: u16,
+        payload: &[u8],
+        out: &mut impl FnMut(&[u8]),
+    ) -> bool {
+        if self.addr.is_none() {
+            return false;
+        }
+        let Some(mac) = self.neighbour(dst) else {
+            self.stats.no_neighbour += 1;
+            return false;
+        };
+        self.send_ip(
+            dst,
+            mac,
+            PROTO_UDP,
+            |b, src| ipv4::push_udp(b, src, dst, sport, dport, payload),
+            out,
+        );
+        true
+    }
+
     /// Asks for `ip`'s MAC (ARP request), e.g. the router before a ping.
     pub fn resolve(&mut self, ip: Ip, out: &mut impl FnMut(&[u8])) {
         let req = Arp {
@@ -483,5 +527,37 @@ mod tests {
         }
         assert_eq!(n, ICMP_PER_SEC as usize);
         assert_eq!(i.stats.icmp_limited, 400);
+    }
+
+    #[test]
+    fn udp_to_a_collector_needs_its_next_hop() {
+        let mut i = Iface::new(MAC, true, None, 0);
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        assert!(!i.send_udp([10, 0, 2, 2], 40514, 514, b"x", &mut |f| {
+            out.push(f.to_vec())
+        }));
+        i.set_addr(Some(([10, 0, 2, 15], 24)), Some([10, 0, 2, 2]));
+        assert_eq!(i.next_hop([10, 0, 2, 9]), Some([10, 0, 2, 9]));
+        assert_eq!(i.next_hop([192, 168, 1, 5]), Some([10, 0, 2, 2]));
+        // Unknown neighbour: nothing sent.
+        assert!(!i.send_udp([10, 0, 2, 2], 40514, 514, b"x", &mut |f| {
+            out.push(f.to_vec())
+        }));
+        assert!(out.is_empty());
+        // Learned from any frame of the router.
+        let f = frame([10, 0, 2, 2], [10, 0, 2, 15], PROTO_TCP, &[0; 20]);
+        i.receive(1, &f, &mut |_| {});
+        assert!(
+            i.send_udp([192, 168, 1, 5], 40514, 8125, b"m:1|c", &mut |f| out
+                .push(f.to_vec()))
+        );
+        let eth = ipv4::parse_eth(&out[0]).unwrap();
+        assert_eq!(eth.dst, GW);
+        let ip = ipv4::parse_ipv4(eth.payload).unwrap();
+        assert_eq!(
+            (ip.src, ip.dst, ip.proto),
+            ([10, 0, 2, 15], [192, 168, 1, 5], PROTO_UDP)
+        );
+        assert_eq!(ip.payload.get(8..), Some(&b"m:1|c"[..]));
     }
 }

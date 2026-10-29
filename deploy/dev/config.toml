@@ -24,6 +24,8 @@ max_inflight_qos1 = 16
 max_queued_per_offline_session = 64
 publish_rate_per_device = "10/s"
 handshakes_per_core_per_sec = 2000
+max_handshakes_in_flight_per_core = 256   # concurrent TLS handshakes per core; more are refused
+max_handshakes_in_flight_per_ip = 32      # of those, from one source address
 
 [acl]
 device_publish = ["devices/{id}/#"]
@@ -43,8 +45,8 @@ refuse_on_corruption = true
 
 [observability]
 log_level = "debug"
-syslog_udp = ""                # "10.0.0.5:514" for a private collector
-metrics_udp = ""               # statsd
+syslog_udp = "10.0.2.2:5514"   # dev: the QEMU host (smoke listens there); "" = off
+metrics_udp = "10.0.2.2:8125"  # statsd; "" = off
 
 [watchdog]
 handler_budget_ms = 10
@@ -52,3 +54,4 @@ action = "log"                 # "log" | "drop" | "reset"
 
 [memory]
 kernel_heap_mb = 32               # power of two; boot-time structures and TLS handshakes
+min_free_mb = 4                   # refuse new connections below this much free heap

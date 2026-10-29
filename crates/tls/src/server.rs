@@ -157,7 +157,13 @@ fn drop_secrets(client_random: &[u8; 32]) {
 struct RevocationAware {
     inner: Arc<dyn ClientCertVerifier>,
     /// Revoked serial numbers (DER integer bytes), sorted.
-    revoked: Vec<Vec<u8>>,
+    revoked: Arc<Vec<Vec<u8>>>,
+}
+
+/// Whether `cert`'s serial is in the sorted revocation list (a certificate
+/// without a readable serial counts as revoked).
+fn is_revoked(revoked: &[Vec<u8>], cert: &[u8]) -> bool {
+    identity::serial(cert).is_none_or(|s| revoked.binary_search(&normalize_serial(&s)).is_ok())
 }
 
 impl ClientCertVerifier for RevocationAware {
@@ -174,14 +180,12 @@ impl ClientCertVerifier for RevocationAware {
         let ok = self
             .inner
             .verify_client_cert(end_entity, intermediates, now)?;
-        let serial = identity::serial(end_entity).ok_or(rustls::Error::InvalidCertificate(
-            CertificateError::BadEncoding,
-        ))?;
-        if self
-            .revoked
-            .binary_search(&normalize_serial(&serial))
-            .is_ok()
-        {
+        if identity::serial(end_entity).is_none() {
+            return Err(rustls::Error::InvalidCertificate(
+                CertificateError::BadEncoding,
+            ));
+        }
+        if is_revoked(&self.revoked, end_entity) {
             return Err(rustls::Error::InvalidCertificate(CertificateError::Revoked));
         }
         Ok(ok)
@@ -276,6 +280,7 @@ pub struct ServerSetup<'a> {
 pub struct TlsServer {
     config: Arc<ServerConfig>,
     identity_field: IdentityField,
+    revoked: Arc<Vec<Vec<u8>>>,
 }
 
 /// Serial numbers compare without the DER sign byte / leading zeros
@@ -321,9 +326,10 @@ impl TlsServer {
             .map(|b| normalize_serial(&b))
             .collect();
         revoked.sort();
+        let revoked = Arc::new(revoked);
         let verifier = Arc::new(RevocationAware {
             inner: webpki,
-            revoked,
+            revoked: revoked.clone(),
         });
         let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(setup.cert_pem)
             .collect::<Result<_, _>>()
@@ -352,6 +358,7 @@ impl TlsServer {
         Ok(Self {
             config: Arc::new(config),
             identity_field: setup.identity_field,
+            revoked,
         })
     }
 
@@ -362,6 +369,7 @@ impl TlsServer {
                 conn,
                 inbuf: Vec::new(),
                 random: None,
+                revoked: self.revoked.clone(),
             })),
             identity_field: self.identity_field,
         })
@@ -385,6 +393,9 @@ struct Hs {
     conn: UnbufferedServerConnection,
     inbuf: Vec<u8>,
     random: Option<[u8; 32]>,
+    /// For resumed sessions: no certificate is verified then, so the one
+    /// in the ticket is checked against the list here.
+    revoked: Arc<Vec<Vec<u8>>>,
 }
 
 struct Open {
@@ -557,9 +568,23 @@ impl TlsSession {
             conn,
             inbuf,
             random,
+            revoked,
         } = *hs;
         let random = random.ok_or(TlsError::NotTls)?;
         let resumed = conn.handshake_kind() == Some(HandshakeKind::Resumed);
+        // A ticket outlives a revocation (it is issued before, and the list
+        // changes with a new image of possibly the same version): resumed
+        // sessions are checked again (M16).
+        if resumed
+            && conn
+                .peer_certificates()
+                .and_then(|c| c.first())
+                .is_none_or(|c| is_revoked(&revoked, c))
+        {
+            return Err(TlsError::Handshake(
+                "resumed session of a revoked certificate".into(),
+            ));
+        }
         let ident = conn
             .peer_certificates()
             .and_then(|c| c.first())

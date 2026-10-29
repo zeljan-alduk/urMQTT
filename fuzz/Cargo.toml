@@ -15,6 +15,9 @@ urmqtt-mqtt = { path = "../crates/mqtt" }
 urmqtt-platform = { path = "../crates/platform" }
 urmqtt-store = { path = "../crates/store" }
 urmqtt-tcp = { path = "../crates/tcp" }
+urmqtt-net = { path = "../crates/net" }
+urmqtt-tls = { path = "../crates/tls" }
+urmqtt-broker = { path = "../crates/broker" }
 
 # Standalone workspace: fuzz builds need sanitizer RUSTFLAGS.
 [workspace]
@@ -58,6 +61,41 @@ bench = false
 [[bin]]
 name = "tcp_segment"
 path = "fuzz_targets/tcp_segment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "net_frame"
+path = "fuzz_targets/net_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_record"
+path = "fuzz_targets/tls_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "x509_identity"
+path = "fuzz_targets/x509_identity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "broker_input"
+path = "fuzz_targets/broker_input.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "telemetry_recover"
+path = "fuzz_targets/telemetry_recover.rs"
 test = false
 doc = false
 bench = false

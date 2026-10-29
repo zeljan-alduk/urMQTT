@@ -194,6 +194,10 @@ impl Idle {
     /// while and `pending()` (re-checked after announcing the sleep) finds
     /// none. The 10 ms tick and wake SGIs end the sleep.
     pub fn pass(&mut self, worked: bool, pending: impl Fn() -> bool) {
+        if let Some(l) = LOOPS.get(crate::smp::current()) {
+            // Relaxed: a progress counter for the health check.
+            l.fetch_add(1, Ordering::Relaxed);
+        }
         let now = urmqtt_arch_aarch64::timer::uptime_ns();
         self.stats(now);
         if worked {
@@ -224,6 +228,10 @@ impl Default for Idle {
     }
 }
 
+/// Loop passes per core: the health check's evidence of progress (M16).
+pub static LOOPS: [AtomicU64; crate::smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::smp::MAX_CPUS];
+
 /// TCP connections per core (for the memory report).
 pub static CONNECTIONS: [AtomicU64; crate::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::smp::MAX_CPUS];
@@ -250,6 +258,45 @@ fn frame_usage() -> [i64; 2] {
         n * layout.size() as i64,
         n * urmqtt_mm::cached::block_size(layout) as i64,
     ]
+}
+
+/// Free heap bytes below which new connections are refused
+/// (`memory.min_free_mb`, M16).
+static HEAP_RESERVE: AtomicU64 = AtomicU64::new(0);
+
+/// Sets the free-heap reserve; a dev `heap_limit_mb=` pretends the heap is
+/// only that large (the rest counts as reserved).
+pub fn set_heap_reserve(limit_mb: Option<u32>) {
+    let min_free = u64::from(urmqtt_config::CONFIG.memory.min_free_mb) << 20;
+    let capacity = crate::vm::HEAP.stats().map_or(0, |(_, c)| c as u64);
+    let hidden = limit_mb.map_or(0, |mb| capacity.saturating_sub(u64::from(mb) << 20));
+    // Relaxed: set once before the data cores start (their start is the
+    // synchronising event), read as a plain threshold afterwards.
+    HEAP_RESERVE.store(min_free + hidden, Ordering::Relaxed);
+    let used = crate::vm::HEAP
+        .stats()
+        .map_or(0, |(free, cap)| (cap - free) as u64);
+    urmqtt_log::info!(
+        "mem: heap {} MiB, {} KiB in use; new connections refused below {} MiB free{}",
+        capacity >> 20,
+        used >> 10,
+        (min_free + hidden) >> 20,
+        if limit_mb.is_some() {
+            " (dev heap_limit_mb)"
+        } else {
+            ""
+        }
+    );
+}
+
+/// Whether the heap can take another connection: free bytes (the global
+/// heap; blocks cached per CPU count as used) above the reserve.
+pub fn heap_has_room() -> bool {
+    // Relaxed: see `set_heap_reserve`.
+    let reserve = HEAP_RESERVE.load(Ordering::Relaxed);
+    crate::vm::HEAP
+        .stats()
+        .is_none_or(|(free, _)| free as u64 >= reserve)
 }
 
 /// Records the idle heap the next reports are measured against.
@@ -302,6 +349,17 @@ pub fn mem_report(now_ms: u64, last: &mut u64, last_conns: &mut u64) {
         per(1),
         per(0)
     );
+}
+
+/// Connections refused by admission, by `mqtt_service::Refusal`
+/// (statistics, all cores).
+pub static REFUSED: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+pub fn count_refusal(kind: usize) {
+    if let Some(r) = REFUSED.get(kind) {
+        // Relaxed: statistics.
+        r.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Counts an accepted connection on `core` (statistics).

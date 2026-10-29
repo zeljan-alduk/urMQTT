@@ -1099,6 +1099,14 @@ impl TcpStack {
     }
 
     /// Whether `flush` has work.
+    /// Returns memory a past peak left behind: empty connection chunks and
+    /// table slots (M16). Callers run it every few seconds.
+    pub fn shrink(&mut self) {
+        self.conns.shrink();
+        let conns = &self.conns;
+        self.table.shrink(|c| conns.get(c).map(|k| k.key));
+    }
+
     pub fn has_pending(&self) -> bool {
         !self.dirty.is_empty()
     }

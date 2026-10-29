@@ -584,3 +584,62 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - Trie nodes of ordinary filters and retained topics are never freed.
 - Under a 10k connect storm the DB core's commits slowed from 15 ms to 600 ms on average (device-registry `DeviceSeen` upserts, about 10 ms each). Not a correctness problem, but M16's reconnect-storm test must look at it.
 - The loadgen's first ~80 connects time out (QEMU's listen backlog under 48 parallel connectors).
+
+## M16 — Hardening and operations (2026-10-29)
+
+**Done** (ADR-035, threat model in [SECURITY.md](SECURITY.md))
+
+- **Admission:** new connections are refused before any crypto work when one of these holds:
+  - free heap is below `memory.min_free_mb` (new key);
+  - the DB core is more than 16 384 requests behind;
+  - too many handshakes are in flight per core or per source address (`limits.max_handshakes_in_flight_per_core` / `_per_ip`, new keys);
+  - the handshake rate is exceeded.
+
+  Refusals are counted per reason and logged rate-limited. Device-registry updates are skipped when the DB core is far behind (the backlog was unbounded before).
+- **Memory after peaks:**
+  - Slabs hand out the lowest free id and free empty tail chunks.
+  - TCP and client-id tables shrink.
+  - Every core does this every 10 s. Without it, admission would have kept refusing forever after a storm that reached the limit (found by the storm test).
+- **Watchdog:**
+  - Handlers on the data path mark core, phase and connection.
+  - The 10 ms tick reports overruns and applies log / drop / reset.
+  - A core stuck for 100 budgets (≥ 1 s) resets the VM.
+  - Production now uses `drop` with a 20 ms budget.
+- **Health check** every 10 s on core 0:
+  - every core's loop must progress, or the VM resets after 20 s;
+  - a heap below the reserve marks the state degraded.
+- **Logs:** rate-limited (100/s, burst 300; suppressions counted). A fixed ring keeps records from the first boot line for syslog.
+- **Syslog** (RFC 5424 over UDP) and **statsd** metrics go to the configured collectors from core 0.
+  - Gauges: connections, heap, frames, health.
+  - Counters: accepts, refusals by reason, watchdog, drops, lost logs.
+  - Dev points both at the QEMU host.
+- **Security fix:** resumed TLS sessions are checked against the revocation list. Before this, a ticket issued before a revocation still resumed: prod revocation lists are not in git, so a rebuilt image can keep the version and the ticket key.
+- **Fuzzing:** 5 new targets (`net_frame`, `tls_record` with a round-trip and tamper oracle, `x509_identity`, `broker_input`, `telemetry_recover`), 11 in all, each run for 60 s in CI.
+- **Load generator:** `storm` mode (rounds of simultaneous reconnects with retry and backoff, `--min-connected`). Dev command line `heap_limit_mb=`.
+- **docs/SECURITY.md:** a full threat model with assets, trust boundaries, attackers, the input surface (each parser with its verification), a limits table and residual risks.
+
+**Measured**
+
+- `make smoke`: **68/68**. New scenarios:
+  - `watchdog`: a 50 ms self-test handler is reported at 14 ms.
+  - `storm`: 3 × 3 000 devices against an 8 MiB admission heap.
+    - HVF: 1 378 / 1 163 / 1 068 connected per round.
+    - TCG: 1 283 / 1 078 / 1 158.
+    - Every other attempt was refused cleanly; no allocation failure; memory back at 0 connections.
+  - `observability`: the full boot log arrives as RFC 5424 records, and statsd gauges and counters arrive every 10 s.
+- Without the heap limit, storms of 8 000 devices × 3 rounds all connected (HVF). The limit there was QEMU's ~10 240 sockets, not the guest.
+- Fuzzing, 30–60 s each, no findings after one harness fix:
+  - `net_frame`: 3.0 M runs;
+  - `tls_record`: 1.4 M;
+  - `x509_identity`: 4.0 M;
+  - `broker_input`: 1.9 M;
+  - `telemetry_recover`: 14 k (each run clones a 16 MiB image).
+- Host tests: 232 across the workspace. Kernel ELF 2 399 352 bytes (M15: 2 294 992).
+
+**Known gaps**
+
+- 100k-client storms cannot be generated on this host (QEMU user networking stops near 10 240 sockets), so the heap is scaled down instead.
+- Syslog and statsd are plain UDP (private collectors only).
+- There is no limit on established connections per source address.
+- Revocations still need a new image (now enforced for resumed sessions too).
+- M14's CI run failed on `cargo fmt` (an import order in `kernel/src/main.rs`); fixed in the M15 commit.
