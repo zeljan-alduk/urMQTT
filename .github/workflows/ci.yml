@@ -44,6 +44,10 @@ jobs:
           cargo clippy --locked -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --features selftest -p urmqtt-kernel --target aarch64-unknown-none -- -D warnings
       - name: TCB inventory up to date (docs/audit, AUDIT.md)
         run: python3 scripts/audit-inventory.py --check
+      - name: No architecture-specific code outside crates/arch-* (ADR-040)
+        run: |
+          scripts/check-arch-leaks.sh --self-test
+          scripts/check-arch-leaks.sh
       - uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:

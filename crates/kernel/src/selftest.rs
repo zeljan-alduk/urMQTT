@@ -5,7 +5,8 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use urmqtt_arch_aarch64::paging::PAGE_SIZE;
+use urmqtt_arch::paging::PAGE_SIZE;
+use urmqtt_arch::trap;
 use urmqtt_log::info;
 
 use crate::{layout, vm};
@@ -118,9 +119,9 @@ pub fn write_text() {
 
 /// Branches into a heap buffer holding `ret`: must fault (PXN).
 pub fn exec_heap() {
-    let code: Box<[u32; 4]> = Box::new([0xd65f_03c0; 4]); // ret
+    let code: Box<[u32; 4]> = Box::new([trap::RET_INSN; 4]);
     // SAFETY: deliberately faulting branch (test mode only); the code is a
-    // valid AArch64 `ret` should the mapping ever be executable.
+    // valid `ret` should the mapping ever be executable.
     let f: extern "C" fn() = unsafe { core::mem::transmute(code.as_ptr()) };
     f();
     core::hint::black_box(code);
@@ -137,43 +138,14 @@ pub fn stack_overflow() {
     core::hint::black_box(recurse(0));
 }
 
-unsafe extern "C" {
-    fn urmqtt_pac_violation() -> u64;
-    fn urmqtt_bti_violation() -> u64;
-}
-
-core::arch::global_asm!(
-    ".text",
-    // Authenticates an unsigned return address: FEAT_FPAC traps on
-    // `autiasp`, otherwise the poisoned address faults on `ret`.
-    ".global urmqtt_pac_violation",
-    "urmqtt_pac_violation:",
-    "mov x9, x30",
-    "adr x30, 1f",
-    "hint #29", // autiasp
-    "ret",
-    "1: mov x30, x9",
-    "mov x0, #1",
-    "ret",
-    // Indirect branch to an instruction that is not a BTI landing pad.
-    ".global urmqtt_bti_violation",
-    "urmqtt_bti_violation:",
-    "adr x16, 2f",
-    "br x16",
-    "2: mov x0, #1",
-    "ret",
-);
-
 pub fn pac_violation() {
-    // SAFETY: test mode; returns only if PAC failed to detect the forgery.
-    if unsafe { urmqtt_pac_violation() } == 1 {
+    if trap::forged_return() {
         urmqtt_log::error!("test: forged return address was NOT detected");
     }
 }
 
 pub fn bti_violation() {
-    // SAFETY: test mode; returns only if BTI did not fire.
-    if unsafe { urmqtt_bti_violation() } == 1 {
+    if trap::branch_to_non_landing_pad() {
         urmqtt_log::error!("test: branch to non-landing-pad was NOT detected");
     }
 }

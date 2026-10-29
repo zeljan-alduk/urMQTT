@@ -1,0 +1,21 @@
+[package]
+name = "urmqtt-arch"
+description = "Architecture facade: one module list (cpu, irq, percpu, time, ipi, msi, paging, trap, barrier, entropy, power, features) over the per-architecture crate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+urmqtt-dispatch = { path = "../dispatch" }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+urmqtt-arch-aarch64 = { path = "../arch-aarch64" }

@@ -9,7 +9,7 @@
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int, c_void};
 
-use urmqtt_arch_aarch64::sync::SpinLock;
+use urmqtt_sync::sync::SpinLock;
 
 use crate::disk::{Disk, DiskError, DiskStats};
 use crate::ffi::*;

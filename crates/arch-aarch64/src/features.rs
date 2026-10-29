@@ -38,6 +38,16 @@ const fn field(reg: u64, shift: u32) -> u64 {
 }
 
 impl Features {
+    /// The features that select code paths, for `urmqtt-dispatch`.
+    pub const fn dispatch(&self) -> urmqtt_dispatch::CpuFeatures {
+        use urmqtt_dispatch::{CpuFeatures, Feature};
+        CpuFeatures::NONE
+            .with(Feature::Aes, self.aes)
+            .with(Feature::Pmull, self.pmull)
+            .with(Feature::Sha2, self.sha2)
+            .with(Feature::Crc32, self.crc32)
+    }
+
     pub const fn decode(r: IdRegs) -> Self {
         let apa = field(r.isar1, 4);
         let api = field(r.isar1, 8);

@@ -5,33 +5,28 @@
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use urmqtt_arch_aarch64::esr::{ExceptionClass, Vector};
-use urmqtt_arch_aarch64::exception::TrapFrame;
+use urmqtt_arch::trap::{self, Event, TrapFrame, Vector};
 use urmqtt_log::emergency;
 
 use crate::power;
 
-/// `brk` immediate the handler treats as "report and resume" (test mode).
-const BRK_RESUME: u16 = 0x5155;
-
 static IN_FATAL: AtomicBool = AtomicBool::new(false);
 
 pub fn handle(frame: &mut TrapFrame, vector: Vector) {
-    if matches!(vector, Vector::CurrentSp0Irq | Vector::CurrentSpxIrq) {
-        crate::irq::dispatch();
-        return;
-    }
-    let esr = frame.esr();
-    if vector.is_synchronous()
-        && esr.class() == ExceptionClass::Brk64
-        && esr.imm16() == Some(BRK_RESUME)
-    {
-        emergency(format_args!(
-            "exception: resumable brk at {:#x}, continuing\n",
-            frame.elr
-        ));
-        frame.elr += 4;
-        return;
+    match frame.classify(vector) {
+        Event::Irq => {
+            crate::irq::dispatch();
+            return;
+        }
+        Event::ResumableBreakpoint => {
+            emergency(format_args!(
+                "exception: resumable brk at {:#x}, continuing\n",
+                frame.pc()
+            ));
+            frame.skip_breakpoint();
+            return;
+        }
+        Event::Fatal => {}
     }
     // Relaxed swap: single flag, only detects re-entry on this core.
     if IN_FATAL.swap(true, Ordering::Relaxed) {
@@ -39,25 +34,16 @@ pub fn handle(frame: &mut TrapFrame, vector: Vector) {
         power::fatal();
     }
     emergency(format_args!("\n!!! EXCEPTION: {}\n", vector.name()));
-    if vector.is_synchronous() {
-        emergency(format_args!("    {esr}\n"));
-        if esr.class().is_abort()
-            && let Some((what, cpu)) = crate::layout::describe(frame.far)
-        {
-            emergency(format_args!("    FAR is in: {what} (cpu {cpu})\n"));
-        }
+    if let Some(cause) = frame.cause(vector) {
+        emergency(format_args!("    {cause}\n"));
     }
-    emergency(format_args!(
-        "    ESR={:#018x} ELR={:#018x} FAR={:#018x} SPSR={:#010x}\n",
-        frame.esr, frame.elr, frame.far, frame.spsr
-    ));
-    for (i, pair) in frame.x.chunks(4).enumerate() {
-        emergency(format_args!("   "));
-        for (j, r) in pair.iter().enumerate() {
-            emergency(format_args!(" x{:<2}={r:#018x}", i * 4 + j));
-        }
-        emergency(format_args!("\n"));
+    if let Some((what, cpu)) = frame
+        .fault_address(vector)
+        .and_then(crate::layout::describe)
+    {
+        emergency(format_args!("    FAR is in: {what} (cpu {cpu})\n"));
     }
+    emergency(format_args!("{}", frame.registers()));
     emergency(format_args!("!!! fatal exception, stopping\n"));
     power::fatal();
 }
@@ -79,14 +65,12 @@ pub fn probe_read(va: u64) {
     core::hint::black_box(v);
 }
 
-/// Executes the resumable `brk`.
+/// Executes the resumable breakpoint.
 pub fn brk_resume() {
-    // SAFETY: the handler recognises this immediate and skips it.
-    unsafe { core::arch::asm!("brk #0x5155", options(nomem, nostack)) };
+    trap::breakpoint();
 }
 
 /// Executes a permanently undefined instruction (test mode).
 pub fn undefined_instruction() {
-    // SAFETY: deliberately faulting instruction in test mode.
-    unsafe { core::arch::asm!("udf #0", options(nomem, nostack)) };
+    trap::undefined_instruction();
 }

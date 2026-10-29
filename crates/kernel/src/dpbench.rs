@@ -11,7 +11,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use urmqtt_arch_aarch64::{cpu, timer};
+use urmqtt_arch::{cpu, time};
 use urmqtt_broker::Broker;
 use urmqtt_log::{error, info};
 use urmqtt_tls::Event;
@@ -114,8 +114,8 @@ pub fn worker(me: usize) -> ! {
         }
         let deadline = DEADLINE_NS.load(Ordering::Relaxed);
         let mut n = 0u64;
-        while timer::uptime_ns() < deadline {
-            match one(&srv, &cli, &mut broker, timer::uptime_ns() / 1_000_000) {
+        while time::uptime_ns() < deadline {
+            match one(&srv, &cli, &mut broker, time::uptime_ns() / 1_000_000) {
                 Ok(()) => n += 1,
                 Err(e) => {
                     if FAILED.fetch_add(1, Ordering::Relaxed) < 3 {
@@ -135,8 +135,8 @@ pub fn run(workers: usize, smoke: bool) -> ! {
         crate::smp::start_dp_bench(c);
     }
     // Let the workers build their TLS state.
-    let t = timer::uptime_ns() + 200_000_000;
-    while timer::uptime_ns() < t {
+    let t = time::uptime_ns() + 200_000_000;
+    while time::uptime_ns() < t {
         core::hint::spin_loop();
     }
     let mut results: Vec<(usize, u64)> = Vec::new();
@@ -146,11 +146,11 @@ pub fn run(workers: usize, smoke: bool) -> ! {
             d.store(0, Ordering::Relaxed);
         }
         ACTIVE.store(k, Ordering::Relaxed);
-        DEADLINE_NS.store(timer::uptime_ns() + PHASE_NS, Ordering::Relaxed);
+        DEADLINE_NS.store(time::uptime_ns() + PHASE_NS, Ordering::Relaxed);
         // Release: publishes ACTIVE and DEADLINE with the new phase.
         PHASE.fetch_add(1, Ordering::Release);
-        let end = timer::uptime_ns() + PHASE_NS + 300_000_000;
-        while timer::uptime_ns() < end {
+        let end = time::uptime_ns() + PHASE_NS + 300_000_000;
+        while time::uptime_ns() < end {
             core::hint::spin_loop();
         }
         // Acquire: pairs with the workers' Release of their counts.
@@ -183,6 +183,6 @@ pub fn run(workers: usize, smoke: bool) -> ! {
         crate::power::off();
     }
     loop {
-        cpu::wfi();
+        cpu::wait_for_interrupt();
     }
 }

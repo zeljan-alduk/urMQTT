@@ -1,0 +1,18 @@
+[package]
+name = "urmqtt-dispatch"
+description = "CPU feature set, the [cpu] disable opt-out, and the sealed choice of crypto and checksum backends (pure logic)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+urmqtt-sync = { path = "../sync" }

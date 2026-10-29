@@ -6,7 +6,7 @@
 //! scan linearly. Double frees and foreign addresses are reported, never
 //! silently accepted.
 
-use urmqtt_arch_aarch64::paging::{FrameSource, PAGE_SIZE};
+use urmqtt_sync::frame::{FrameSource, PAGE_SIZE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameError {

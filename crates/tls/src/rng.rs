@@ -11,7 +11,7 @@
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
-use urmqtt_arch_aarch64::sync::SpinLock;
+use urmqtt_sync::sync::SpinLock;
 
 /// Minimum bytes a hardware source must deliver to count.
 pub const MIN_HW_BYTES: usize = 32;

@@ -97,6 +97,15 @@ struct RawConfig {
     watchdog: RawWatchdog,
     memory: RawMemory,
     entropy: RawEntropy,
+    /// Optional: without it nothing is disabled.
+    #[serde(default)]
+    cpu: RawCpu,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCpu {
+    disable: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -295,6 +304,14 @@ pub struct Config {
     pub watchdog: Watchdog,
     pub memory: Memory,
     pub entropy: Entropy,
+    pub cpu: Cpu,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cpu {
+    /// CPU features the dispatch must not use (`urmqtt_dispatch::Feature`
+    /// names, validated).
+    pub disable: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,6 +354,8 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         }
     };
 
+    let cpu = validate_cpu(&raw.cpu, &mut errors);
+
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -351,7 +370,34 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         watchdog,
         memory,
         entropy: Entropy { jitter_fallback },
+        cpu,
     })
+}
+
+fn validate_cpu(raw: &RawCpu, errors: &mut Vec<ConfigError>) -> Cpu {
+    let names: Vec<&str> = raw.disable.iter().map(String::as_str).collect();
+    match urmqtt_dispatch::parse_disable(&names) {
+        Ok(_) => {}
+        Err(urmqtt_dispatch::DisableError::Unknown) => {
+            let known: Vec<&str> = urmqtt_dispatch::Feature::ALL
+                .iter()
+                .map(|f| f.name())
+                .collect();
+            errors.push(err(
+                "cpu.disable",
+                format!(
+                    "unknown feature; switchable features are {}",
+                    known.join(", ")
+                ),
+            ));
+        }
+        Err(urmqtt_dispatch::DisableError::Duplicate) => {
+            errors.push(err("cpu.disable", "a feature is listed twice"));
+        }
+    }
+    Cpu {
+        disable: raw.disable.clone(),
+    }
 }
 
 fn is_valid_env_name(env: &str) -> bool {
@@ -967,6 +1013,9 @@ pub const CONFIG: BuildConfig = BuildConfig {{
     entropy: Entropy {{
         jitter_fallback: {jitter},
     }},
+    cpu: Cpu {{
+        disable: {cpu_disable},
+    }},
     memory: Memory {{
         kernel_heap_mb: {heap_kernel},
         min_free_mb: {min_free},
@@ -1016,6 +1065,7 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         heap_kernel = cfg.memory.kernel_heap_mb,
         min_free = cfg.memory.min_free_mb,
         jitter = cfg.entropy.jitter_fallback,
+        cpu_disable = render_strs(&cfg.cpu.disable),
         ca = files.ca,
         cert = files.cert,
         key = files.key,

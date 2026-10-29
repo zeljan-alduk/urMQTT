@@ -17,7 +17,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
-use urmqtt_arch_aarch64::timer;
+use urmqtt_arch::time;
 use urmqtt_config::{CONFIG, WatchdogAction};
 use urmqtt_log::{error, warn};
 
@@ -108,7 +108,7 @@ pub fn enter(phase: Phase, conn: Option<u64>) -> Option<Guard> {
     slot.conn.store(conn.unwrap_or(NO_CONN), Ordering::Relaxed);
     slot.phase.store(phase as u8, Ordering::Relaxed);
     slot.fired.store(false, Ordering::Relaxed);
-    slot.since.store(timer::now().max(1), Ordering::Relaxed);
+    slot.since.store(time::now().max(1), Ordering::Relaxed);
     Some(guard)
 }
 
@@ -128,7 +128,7 @@ pub fn check() {
     if since == 0 {
         return;
     }
-    let ms = timer::ticks_to_ns(timer::now().saturating_sub(since)) / 1_000_000;
+    let ms = time::ticks_to_ns(time::now().saturating_sub(since)) / 1_000_000;
     let budget = u64::from(CONFIG.watchdog.handler_budget_ms);
     let conn = slot.conn.load(Ordering::Relaxed);
     let phase = Phase::name(slot.phase.load(Ordering::Relaxed));
@@ -173,8 +173,8 @@ impl core::fmt::Display for ConnName {
 /// `test=watchdog`: a handler that overruns its budget on purpose.
 pub fn self_test() {
     let _g = enter(Phase::SelfTest, Some(42));
-    let end = timer::now() + timer::ns_to_ticks(50_000_000);
-    while timer::now() < end {
+    let end = time::now() + time::ns_to_ticks(50_000_000);
+    while time::now() < end {
         core::hint::spin_loop();
     }
 }

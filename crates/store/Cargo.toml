@@ -16,7 +16,7 @@ bench = false
 workspace = true
 
 [dependencies]
-urmqtt-arch-aarch64 = { path = "../arch-aarch64" }
+urmqtt-sync = { path = "../sync" }
 
 [build-dependencies]
 # Compiles the vendored SQLite amalgamation (ADR-030).

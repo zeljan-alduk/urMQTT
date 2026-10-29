@@ -61,3 +61,9 @@ min_free_mb = 64                  # refuse new connections below this much free 
 # the CSPRNG from health-tested CPU timing jitter instead of refusing to boot.
 # "none": refuse to boot without a hardware source.
 fallback = "jitter"
+
+[cpu]
+# CPU features the crypto and checksum code must not use, e.g. to work around
+# a slow or faulty accelerator: "aes", "pmull", "sha2", "crc32". Security
+# features (PAC, BTI) cannot be switched off. Empty: use what the CPU has.
+disable = []

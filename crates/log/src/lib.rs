@@ -18,8 +18,8 @@ pub mod pl011;
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-use urmqtt_arch_aarch64::sync::SpinLock;
 pub use urmqtt_config::LogLevel as Level;
+use urmqtt_sync::sync::SpinLock;
 
 use fbcon::FbConsole;
 use pl011::Pl011;
@@ -198,17 +198,17 @@ pub fn has_uart() -> bool {
 /// handler can never spin on a lock its own core holds.
 struct Locked {
     #[cfg(target_os = "none")]
-    daif: u64,
-    guard: Option<urmqtt_arch_aarch64::sync::SpinGuard<'static, Sinks>>,
+    irq_state: u64,
+    guard: Option<urmqtt_sync::sync::SpinGuard<'static, Sinks>>,
 }
 
 impl Locked {
     fn acquire() -> Self {
         #[cfg(target_os = "none")]
-        let daif = urmqtt_arch_aarch64::cpu::irq_save();
+        let irq_state = urmqtt_arch::cpu::irq_save();
         Self {
             #[cfg(target_os = "none")]
-            daif,
+            irq_state,
             guard: Some(SINKS.lock()),
         }
     }
@@ -233,7 +233,7 @@ impl Drop for Locked {
     fn drop(&mut self) {
         drop(self.guard.take());
         #[cfg(target_os = "none")]
-        urmqtt_arch_aarch64::cpu::irq_restore(self.daif);
+        urmqtt_arch::cpu::irq_restore(self.irq_state);
     }
 }
 

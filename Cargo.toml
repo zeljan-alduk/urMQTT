@@ -1,10 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/arch",
     "crates/arch-aarch64",
     "crates/broker",
     "crates/config",
     "crates/config-schema",
+    "crates/dispatch",
     "crates/kernel",
     "crates/log",
     "crates/mm",
@@ -13,6 +15,7 @@ members = [
     "crates/pci",
     "crates/platform",
     "crates/store",
+    "crates/sync",
     "crates/tcp",
     "crates/timer-wheel",
     "crates/tls",

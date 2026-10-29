@@ -20,38 +20,41 @@ out of date (`--check`).
 
 The full tables are generated: [audit/inventory.md](audit/inventory.md)
 (crates, vendored code, dependencies) and [audit/unsafe.md](audit/unsafe.md)
-(every `unsafe` site). The summary below is taken from them at the H0 commit.
+(every `unsafe` site). The summary below is taken from them at the X0 commit (the H0 numbers
+were 30 773 lines and 308 sites, 278 justified).
 
 | Part | Size | Notes |
 |---|---|---|
-| Own Rust (17 workspace crates, `src/` incl. inline tests) | 30 773 lines | `tools/loadgen` (452 lines) is a host tool, not in the image |
+| Own Rust (20 workspace crates, `src/` incl. inline tests) | 31 905 lines | `tools/loadgen` (452 lines) is a host tool, not in the image |
 | Third-party Rust linked into the kernel | 65 crates, 290 278 lines | RustCrypto, rustls, webpki, p256, x25519-dalek, … ([list](audit/inventory.md)) |
 | Third-party Rust at build time only | proc-macros and build scripts (syn, toml, cc, …) | they run on the build host, so they are a supply-chain risk (H9), not runtime TCB |
 | SQLite 3.54.1 (C), linked | 254 268 lines | the largest component; runs at EL1 with full kernel rights (H6) |
 | Own C headers for SQLite | 53 lines in 7 headers | the libc surface SQLite sees (functions implemented in Rust, `store/src/libc.rs`) |
 | Limine v12.9.4 (binary) | `BOOTAA64.EFI`, 331 776 bytes | pre-kernel; integrity is H8 |
 
-**`unsafe` in non-test code:** 308 sites; 278 have a `// SAFETY:` comment or a `# Safety` section.
+**`unsafe` in non-test code:** 316 sites; 289 have a `// SAFETY:` comment or a `# Safety` section.
 
 | Crate | Sites (justified) | Crate lint |
 |---|---|---|
 | `urmqtt-store` | 118 (106) | deny, with `allow` on the FFI modules (since H0, was none) |
-| `urmqtt-arch-aarch64` | 67 (66) | deny |
-| `urmqtt-kernel` | 63 (46) | deny |
+| `urmqtt-arch-aarch64` | 72 (72) | deny; all assembly and system registers since X0 |
+| `urmqtt-kernel` | 51 (36) | deny |
 | `urmqtt-mm` | 35 (35) | deny |
-| `urmqtt-virtio` | 20 (20) | deny |
+| `urmqtt-virtio` | 19 (19) | deny |
+| `urmqtt-sync` | 16 (16) | deny; spinlock, once-cell, SPSC ring (moved out of the arch crate in X0) |
 | `urmqtt-log` | 5 (5) | deny |
 
 The protocol crates (`mqtt`, `broker`, `tls`, `timer-wheel`, `config`,
-`config-schema`) are `forbid(unsafe_code)`. `tcp`, `net`, `pci` and `platform`
-are `deny` and contain none. The 30 unjustified sites:
+`config-schema`, `dispatch`) are `forbid(unsafe_code)`. `tcp`, `net`, `pci`,
+`platform` and the `arch` facade are `deny` and contain none. The 27
+unjustified sites:
 
 | Where | Sites |
 |---|---|
 | `kernel/src/boot.rs`: `#[unsafe(link_section)]` on Limine requests | 14 |
 | `store/src/vfs.rs`: SQLite VFS callbacks | 9 |
 | `store/src/libc.rs` | 2 |
-| `unsafe extern` blocks in `kernel/src/{vm,smp,selftest}.rs`, `store/src/ffi.rs`, `arch-aarch64/src/pac.rs` | 5 |
+| `unsafe extern` blocks in `kernel/src/vm.rs`, `store/src/ffi.rs` | 2 |
 
 ---
 

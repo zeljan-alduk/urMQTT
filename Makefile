@@ -96,6 +96,7 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	$(CARGO) fmt --all --check
 	@if command -v typos >/dev/null; then typos; else echo "check: typos not installed, skipped (CI runs it)"; fi
 	cd fuzz && $(CARGO) fmt --check
+	scripts/check-arch-leaks.sh
 	$(CARGO) clippy $(CARGO_FLAGS) --workspace --all-targets -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-kernel --target $(TARGET) -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-kernel --target $(TARGET) -- -D warnings

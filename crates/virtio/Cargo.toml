@@ -16,3 +16,4 @@ workspace = true
 
 [dependencies]
 urmqtt-pci = { path = "../pci" }
+urmqtt-arch = { path = "../arch" }

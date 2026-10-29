@@ -839,3 +839,43 @@ This turns G1/G2 into:
 **Corrections to earlier planning text, found while writing the spec:**
 - Blank detection reads the whole first 4 KiB, so ext4, XFS, LVM, LUKS and swap disks are refused today. The formats at risk are the ones with an empty first 4 KiB (fixed in X86-PLAN, STORAGE-PLAN, SECURITY-PLAN and AUDIT.md).
 - SQLite already builds and runs on the host over `MemDisk`, which has crash primitives (G5).
+
+## X0 — Architecture facade and CPU dispatch (2026-10-29)
+
+PROMPT-x86_64.md, plan in docs/X86-PLAN.md. AArch64 only; no behaviour change (ADR-040, ADR-041).
+
+**Done**
+
+- **`urmqtt-sync`:** the spinlock, once-cell, SPSC ring and the frame-source trait moved out of the arch crate. `mm`, `store` and `tls` depend only on it now. `log` uses the facade, and only on bare metal.
+- **`urmqtt-arch` facade:** 12 modules (`cpu`, `irq`, `ipi`, `msi`, `percpu`, `time`, `paging`, `trap`, `barrier`, `entropy`, `power`, `features`). `contract.rs` binds 63 items to explicit signatures.
+- **All assembly and system-register code is now in `arch-aarch64`.** That covers the boot entry, the AP trampoline with `ApBoot`, per-CPU id, MMU activation, the GIC v3/v2 controller, the GICv2m MSI frame (now host-tested), PSCI conduit, RNDR, the PMU clock, the test faults, and trap classification with the register dump. The kernel went from 63 to 51 `unsafe` sites. The virtio doorbell barrier goes through `arch::barrier`.
+- **`scripts/check-arch-leaks.sh`** runs in CI and `make check`. It has 10 rules for AArch64 and future x86 code, plus `--self-test`. The tree is clean.
+- **`urmqtt-dispatch`:**
+  - `CpuFeatures`, the per-primitive backend table and `select`;
+  - the optional `[cpu] disable = [...]` config key, validated by the schema against the same names, with security features not switchable;
+  - a write-once seal (a second seal is refused).
+- **Boot log:** `cpu dispatch: detected aes pmull sha2 crc32, disabled by config none` (HVF, M4 Pro) and `crypto: aes-gcm=soft ghash=soft chacha=soft sha256=soft crc32c=table toeplitz=bitwise`. That is F1, stated honestly: no hardware backend is built before X0b.
+- **Tests:**
+  - 7 dispatch host tests (selection by mask, opt-out before selection, double seal, name validation, every row ends in portable code), a schema test and 2 MSI tests;
+  - the boot-acpi and boot-dtb smoke scenarios check both dispatch lines.
+- `docs/audit/` regenerated, and AUDIT.md updated: 20 crates, 31 905 lines, 316 `unsafe` sites with 289 justified (was 308/278). Three extern blocks got their missing justification.
+
+**aarch64 non-regression** (Apple M4 Pro, HVF)
+
+- `make check` green (257 host tests). `make smoke`: **79/79** (HVF and TCG, including GICv2 and all fault scenarios), both after the facade step and after dispatch.
+- `make bench`, before → after:
+
+| Worker cores | dp-bench handshakes/s | network conn/s (32 clients) |
+|---:|---:|---:|
+| 1 | 865 → 877 | 658 → 638 |
+| 2 | 1 730 → 1 724 | 815 → 846 |
+| 4 | 3 431 → 3 452 | 896 → 864 |
+
+  The differences are within run-to-run noise. The network column moves by a few percent between runs in both directions.
+- **Bytes per idle connection** (dev image, 32 MiB heap, 4 vCPU, `urmqtt-loadgen hold --clients 10000 --subscribe 1`, mTLS with one subscription each), steady state: **512 B → 511 B** in heap blocks (487 → 486 B requested) at 9 936 / 9 937 connections. Both images were measured back to back under the same conditions.
+- **Kernel ELF size:** dev 2 417 968 → 2 423 608 B (+5 640), prod 2 249 504 → 2 255 192 B (+5 688). The facade step alone added 176 B; the rest is the dispatch table, its formatting and the seal.
+- `make repro`: see the commit's CI run (both builds identical).
+
+**Deviations from the plan** (X86-PLAN X0 status):
+- The paging builder stays the AArch64 `Mapper` behind `arch::paging`. A neutral one is designed in X1 against the x86 format.
+- The sealed dispatch state is write-once but not yet on a read-only page. That is moved to X0b, where it starts choosing code.

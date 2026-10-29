@@ -6,11 +6,13 @@
 
 | Crate | Path | src lines | tests/ lines | unsafe sites (justified) | `unsafe_code` lint |
 |---|---|---:|---:|---:|---|
-| `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 2547 | 0 | 67 (66) | deny |
+| `urmqtt-arch` | `crates/arch` | 228 | 0 | 0 (0) | deny |
+| `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 2857 | 0 | 72 (72) | deny |
 | `urmqtt-broker` | `crates/broker` | 3015 | 0 | 0 (0) | forbid |
-| `urmqtt-config` | `crates/config` | 143 | 0 | 0 (0) | forbid |
-| `urmqtt-config-schema` | `crates/config-schema` | 1387 | 0 | 0 (0) | forbid |
-| `urmqtt-kernel` | `crates/kernel` | 7159 | 0 | 63 (46) | deny |
+| `urmqtt-config` | `crates/config` | 150 | 0 | 0 (0) | forbid |
+| `urmqtt-config-schema` | `crates/config-schema` | 1452 | 0 | 0 (0) | forbid |
+| `urmqtt-dispatch` | `crates/dispatch` | 441 | 0 | 0 (0) | forbid |
+| `urmqtt-kernel` | `crates/kernel` | 6803 | 0 | 51 (36) | deny |
 | `urmqtt-loadgen` | `tools/loadgen` | 452 | 0 | 0 (0) | default |
 | `urmqtt-log` | `crates/log` | 646 | 0 | 5 (5) | deny |
 | `urmqtt-mm` | `crates/mm` | 1219 | 0 | 35 (35) | deny |
@@ -19,11 +21,12 @@
 | `urmqtt-pci` | `crates/pci` | 439 | 0 | 0 (0) | deny |
 | `urmqtt-platform` | `crates/platform` | 1017 | 453 | 0 (0) | deny |
 | `urmqtt-store` | `crates/store` | 3253 | 652 | 118 (106) | deny |
+| `urmqtt-sync` | `crates/sync` | 435 | 0 | 16 (16) | deny |
 | `urmqtt-tcp` | `crates/tcp` | 2452 | 0 | 0 (0) | deny |
 | `urmqtt-timer-wheel` | `crates/timer-wheel` | 395 | 0 | 0 (0) | forbid |
 | `urmqtt-tls` | `crates/tls` | 2236 | 298 | 0 (0) | forbid |
-| `urmqtt-virtio` | `crates/virtio` | 1687 | 0 | 20 (20) | deny |
-| **total** | | **30781** | | **308 (278)** | |
+| `urmqtt-virtio` | `crates/virtio` | 1681 | 0 | 19 (19) | deny |
+| **total** | | **31905** | | **316 (289)** | |
 
 ## Vendored components
 

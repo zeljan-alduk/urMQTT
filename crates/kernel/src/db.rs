@@ -22,9 +22,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::devices::DataDisk;
-use urmqtt_arch_aarch64::spsc::{Consumer, Producer, Spsc};
-use urmqtt_arch_aarch64::sync::SpinLock;
-use urmqtt_arch_aarch64::{cpu, timer};
+use urmqtt_arch::{cpu, time};
 use urmqtt_broker::{Msg, MsgInner, PersistOp};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{error, info, warn};
@@ -33,6 +31,8 @@ use urmqtt_store::{
     BlockDevice, Disk, DiskError, IoError, Opened, Platform, Retained, SessionRecord, Store,
     StoreError,
 };
+use urmqtt_sync::spsc::{Consumer, Producer, Spsc};
+use urmqtt_sync::sync::SpinLock;
 
 use crate::cmdline::DbTest;
 use crate::devices;
@@ -76,8 +76,7 @@ struct Rings {
     resp: Vec<Box<Spsc<DbResp, 256>>>,
 }
 
-static RINGS: urmqtt_arch_aarch64::sync::OnceCell<Rings> =
-    urmqtt_arch_aarch64::sync::OnceCell::new();
+static RINGS: urmqtt_sync::sync::OnceCell<Rings> = urmqtt_sync::sync::OnceCell::new();
 
 /// The DB worker, handed from the boot CPU to whichever core runs it.
 static WORKER: SpinLock<Option<Worker>> = SpinLock::new(None);
@@ -159,7 +158,7 @@ impl BlockDevice for KernelBlk {
 }
 
 fn now_ms() -> u64 {
-    timer::uptime_ns() / 1_000_000
+    time::uptime_ns() / 1_000_000
 }
 
 fn now_unix() -> i64 {
@@ -178,8 +177,8 @@ fn platform() -> Platform {
         },
         now_unix_ms: crate::boot::now_unix_ms,
         delay_us: |us| {
-            let until = timer::uptime_ns() + u64::from(us) * 1000;
-            while timer::uptime_ns() < until {
+            let until = time::uptime_ns() + u64::from(us) * 1000;
+            while time::uptime_ns() < until {
                 core::hint::spin_loop();
             }
         },
@@ -262,7 +261,7 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
     if let Err(e) = urmqtt_store::init(heap, disk, platform()) {
         return refuse_or_degrade(false, format_args!("{e}"));
     }
-    let t0 = timer::uptime_ns();
+    let t0 = time::uptime_ns();
     let (mut store, info) = match urmqtt_store::open() {
         Ok(s) => s,
         Err(e @ StoreError::Corrupt(_)) => {
@@ -274,7 +273,7 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
         "db: sqlite {} on the data disk: WAL, exclusive locking, quick_check ok in {} ms, \
          schema v{} (from v{}), {} page(s), heap {} MiB",
         urmqtt_store::db::version(),
-        (timer::uptime_ns() - t0) / 1_000_000,
+        (time::uptime_ns() - t0) / 1_000_000,
         info.schema_to,
         info.schema_from,
         info.pages,
@@ -283,10 +282,10 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
 
     let retention_ms = u64::from(cfg.retention_days) * 86_400_000;
     let now_s = crate::boot::now_unix().unwrap_or(0);
-    let t1 = timer::uptime_ns();
+    let t1 = time::uptime_ns();
     let log = match urmqtt_store::vfs::with_disk(|d| TelemetryLog::open(d, now_s, retention_ms)) {
         Some(Ok((log, rec))) => {
-            log_recovery(&rec, &log, (timer::uptime_ns() - t1) / 1_000_000);
+            log_recovery(&rec, &log, (time::uptime_ns() - t1) / 1_000_000);
             Some(log)
         }
         Some(Err(e)) => {
@@ -486,7 +485,7 @@ fn bench(store: &mut Store) {
     const SINGLE: i64 = 100;
     let r = (|| {
         store.selftest_clear()?;
-        let t0 = timer::uptime_ns();
+        let t0 = time::uptime_ns();
         for t in 0..ROWS / PER_TXN {
             store.begin()?;
             for i in 0..PER_TXN {
@@ -494,14 +493,14 @@ fn bench(store: &mut Store) {
             }
             store.commit()?;
         }
-        let batched = timer::uptime_ns() - t0;
-        let t1 = timer::uptime_ns();
+        let batched = time::uptime_ns() - t0;
+        let t1 = time::uptime_ns();
         for i in 0..SINGLE {
             store.begin()?;
             store.selftest_insert(ROWS + i + 1, 200)?;
             store.commit()?;
         }
-        let single = timer::uptime_ns() - t1;
+        let single = time::uptime_ns() - t1;
         let n = store.selftest_verify()?.map_err(StoreError::Corrupt)?;
         store.begin()?;
         store.selftest_clear()?;
@@ -716,12 +715,12 @@ impl Worker {
     }
 
     fn commit(&mut self) {
-        let t0 = timer::uptime_ns();
+        let t0 = time::uptime_ns();
         let ops = self.txn_ops;
         self.txn_ops = 0;
         let resp = match self.store.commit() {
             Ok(()) => {
-                let us = (timer::uptime_ns() - t0) / 1000;
+                let us = (time::uptime_ns() - t0) / 1000;
                 self.stats.ops += u64::from(ops);
                 self.stats.commits += 1;
                 self.stats.commit_us_total += us;
@@ -806,7 +805,7 @@ pub fn run_core() -> ! {
     let Some(mut w) = WORKER.lock().take() else {
         warn!("db: DB core started without a worker");
         loop {
-            cpu::wfi();
+            cpu::wait_for_interrupt();
         }
     };
     info!("db: worker running on cpu {}", smp::current());

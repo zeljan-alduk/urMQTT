@@ -8,11 +8,11 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use urmqtt_arch_aarch64::sync::SpinLock;
-use urmqtt_arch_aarch64::timer;
+use urmqtt_arch::{msi, time};
 use urmqtt_log::{info, warn};
 use urmqtt_pci::{self as pci, Bar, Bdf, ConfigSpace};
 use urmqtt_platform::{Pcie, PlatformInfo};
+use urmqtt_sync::sync::SpinLock;
 use urmqtt_tls::rng::{Csprng, EntropyPool, Source};
 use urmqtt_virtio::blk::VirtioBlk;
 use urmqtt_virtio::net::VirtioNet;
@@ -65,7 +65,7 @@ impl Env for KernelEnv {
     }
 
     fn now_ns(&self) -> u64 {
-        timer::uptime_ns()
+        time::uptime_ns()
     }
 }
 
@@ -172,16 +172,6 @@ fn on_blk_irq(_intid: u32) {
     BLK_IRQS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// A GICv2m MSI frame: MSIs are writes of an SPI number to SETSPI_NS.
-struct V2m {
-    pa: u64,
-    next_spi: u32,
-    end_spi: u32,
-}
-
-const V2M_TYPER: usize = 0x008;
-const V2M_SETSPI_NS: u64 = 0x040;
-
 #[derive(Debug, Clone, Copy)]
 pub enum ProbeError {
     Map,
@@ -223,22 +213,19 @@ fn transport<C: ConfigSpace>(cfg: &C, bdf: Bdf) -> Result<Transport, ProbeError>
 }
 
 /// Points MSI-X vector 0 of `bdf` at a fresh GICv2m SPI and enables MSI-X.
-fn setup_msix<C: ConfigSpace>(cfg: &mut C, bdf: Bdf, v2m: &mut V2m) -> Option<u32> {
+fn setup_msix<C: ConfigSpace>(cfg: &mut C, bdf: Bdf, frame: &mut msi::Frame) -> Option<u32> {
     let info = pci::msix(cfg, bdf)?;
     let Some(Bar::Memory { base, .. }) = pci::bar(cfg, bdf, info.table_bar) else {
         return None;
     };
-    if v2m.next_spi >= v2m.end_spi {
-        return None;
-    }
-    let spi = v2m.next_spi;
-    v2m.next_spi += 1;
+    let spi = frame.alloc()?;
     let table = map(
         base + u64::from(info.table_offset),
         u64::from(info.table_size) * 16,
     )
     .ok()?;
-    let entry = pci::msix_entry(v2m.pa + V2M_SETSPI_NS, spi, false);
+    let (address, data) = frame.compose(spi);
+    let entry = pci::msix_entry(address, data, false);
     for (i, w) in entry.iter().enumerate() {
         // SAFETY: entry 0 of the just-mapped MSI-X table.
         unsafe { ((table + 4 * i) as *mut u32).write_volatile(*w) };
@@ -280,14 +267,14 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
             Err(e) => warn!("entropy: virtio-rng failed: {e:?}"),
         }
     }
-    if let Some(r) = rndr_bytes() {
+    if let Some(r) = urmqtt_arch::entropy::hw_random() {
         pool.add(Source::Rndr, &r);
         info!("entropy: 64 bytes from RNDR");
     }
-    pool.add(Source::Jitter, &timer::now().to_le_bytes());
+    pool.add(Source::Jitter, &time::now().to_le_bytes());
     let fallback = urmqtt_config::CONFIG.entropy.jitter_fallback;
     if !pool.has_hardware() && fallback {
-        let t0 = timer::uptime_ns();
+        let t0 = time::uptime_ns();
         let r = crate::jitter::collect(&mut pool);
         warn!(
             "entropy: no hardware source (virtio-rng, RNDR): CPU jitter fallback via the {} (granularity 2^{}): \
@@ -300,7 +287,7 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
             r.credited,
             urmqtt_tls::rng::JITTER_SAFETY,
             if r.failed { "FAILED" } else { "passed" },
-            (timer::uptime_ns() - t0) / 1_000_000
+            (time::uptime_ns() - t0) / 1_000_000
         );
     }
     let mut rng = pool
@@ -328,18 +315,11 @@ fn probe_pci(
     let mut v2m = platform.interrupts.and_then(|i| i.gic.v2m).and_then(|pa| {
         let va = map(pa, 0x1000).ok()?;
         // SAFETY: MSI_TYPER of the just-mapped v2m frame.
-        let typer = unsafe { ((va + V2M_TYPER) as *const u32).read_volatile() };
-        let base = (typer >> 16) & 0x3ff;
-        let count = typer & 0x3ff;
-        info!(
-            "msi: GICv2m frame at {pa:#x}, SPIs {base}..{}",
-            base + count
-        );
-        Some(V2m {
-            pa,
-            next_spi: base,
-            end_spi: base + count,
-        })
+        let typer = unsafe { ((va + msi::TYPER) as *const u32).read_volatile() };
+        let frame = msi::Frame::from_typer(pa, typer);
+        let (start, end) = frame.spis();
+        info!("msi: GICv2m frame at {pa:#x}, SPIs {start}..{end}");
+        Some(frame)
     });
     let functions = pci::enumerate(&ecam, pcie.bus_start, pcie.bus_end);
     info!(
@@ -473,32 +453,6 @@ fn probe_pci(
     Ok(())
 }
 
-/// 64 bytes from `RNDR` if the CPU implements FEAT_RNG and it succeeds.
-fn rndr_bytes() -> Option<[u8; 64]> {
-    let f = urmqtt_arch_aarch64::features::Features::decode(urmqtt_arch_aarch64::pac::id_regs());
-    if !f.rndr {
-        return None;
-    }
-    let mut out = [0u8; 64];
-    for chunk in out.as_chunks_mut::<8>().0 {
-        let (v, ok): (u64, u64);
-        // SAFETY: RNDR (S3_3_C2_C4_0) exists (FEAT_RNG); it sets Z on failure.
-        unsafe {
-            core::arch::asm!(
-                "mrs {v}, S3_3_C2_C4_0",
-                "cset {ok}, ne",
-                v = out(reg) v, ok = out(reg) ok,
-                options(nomem, nostack)
-            )
-        };
-        if ok == 0 {
-            return None;
-        }
-        chunk.copy_from_slice(&v.to_le_bytes());
-    }
-    Some(out)
-}
-
 /// Sectors at the end of the data disk reserved for the self-test
 /// (the M11 disk layout keeps them out of every region).
 pub const BLK_SCRATCH_SECTORS: u64 = 8;
@@ -585,9 +539,9 @@ pub fn net_selftest() -> Result<(), &'static str> {
     info!("net: gratuitous ARP sent");
     net.send(&env, &arp_frame(mac, 1, [10, 0, 2, 15], [10, 0, 2, 2]))
         .map_err(|_| "net tx failed")?;
-    let deadline = timer::uptime_ns() + 500_000_000;
+    let deadline = time::uptime_ns() + 500_000_000;
     let mut buf = [0u8; 1514];
-    while timer::uptime_ns() < deadline {
+    while time::uptime_ns() < deadline {
         net.flush();
         if let Ok(Some(n)) = net.recv(&mut buf)
             && n >= 42

@@ -143,6 +143,13 @@ pub struct Entropy {
     pub jitter_fallback: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Cpu {
+    /// CPU features the crypto and checksum dispatch must not use, by
+    /// `urmqtt_dispatch::Feature` name (validated at build time).
+    pub disable: &'static [&'static str],
+}
+
 /// The complete build-time configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildConfig {
@@ -157,6 +164,7 @@ pub struct BuildConfig {
     pub watchdog: Watchdog,
     pub memory: Memory,
     pub entropy: Entropy,
+    pub cpu: Cpu,
 }
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));

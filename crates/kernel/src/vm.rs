@@ -17,14 +17,13 @@ use limine::memmap::{
     MEMMAP_ACPI_NVS, MEMMAP_ACPI_RECLAIMABLE, MEMMAP_BOOTLOADER_RECLAIMABLE,
     MEMMAP_EXECUTABLE_AND_MODULES, MEMMAP_FRAMEBUFFER, MEMMAP_MAPPED_RESERVED, MEMMAP_USABLE,
 };
-use urmqtt_arch_aarch64::paging::{
-    Access, BLOCK_2M, Leaf, MapError, Mapper, MemType, PAGE_SIZE, PageAttrs,
+use urmqtt_arch::paging::{
+    self, Access, BLOCK_2M, Leaf, MapError, Mapper, MemType, PAGE_SIZE, PageAttrs,
 };
-use urmqtt_arch_aarch64::sync::SpinLock;
-use urmqtt_arch_aarch64::{cpu, regs};
 use urmqtt_mm::BumpFrames;
 use urmqtt_mm::buddy::{self, BuddyHeap};
 use urmqtt_mm::frames::{self, FrameAllocator};
+use urmqtt_sync::sync::SpinLock;
 
 use crate::layout;
 use crate::memory::{BootMemory, HhdmTables, is_ram};
@@ -202,10 +201,9 @@ pub fn build(
     *FRAMES.lock() = Some(fa);
 
     let mut tables = HhdmTables { hhdm };
-    let root =
-        urmqtt_arch_aarch64::paging::FrameSource::alloc_frame(&mut pt).ok_or(BuildError::NoPool)?;
+    let root = paging::FrameSource::alloc_frame(&mut pt).ok_or(BuildError::NoPool)?;
     for i in 0..512 {
-        urmqtt_arch_aarch64::paging::TableMemory::write(&mut tables, root, i, 0);
+        paging::TableMemory::write(&mut tables, root, i, 0);
     }
     let mut m = Mapper::new(&mut tables, root);
 
@@ -332,27 +330,16 @@ fn map_hhdm_range(
     Ok(())
 }
 
-const TCR_EPD0: u64 = 1 << 7;
-const SCTLR_WXN: u64 = 1 << 19;
-
 /// Switches TTBR1 to the kernel tables, disables the lower half and turns
 /// on WXN. The current stack (bootloader memory) stays mapped.
 pub fn activate() {
     let Some(root) = SPACE.lock().as_ref().map(|s| s.root) else {
         return;
     };
-    cpu::dsb_ishst();
     // SAFETY: the new tables map the kernel image, the HHDM (including the
-    // current stack) and all MMIO at the same addresses as before.
-    unsafe { regs::set_ttbr1_el1(root) };
-    // SAFETY: nothing uses the lower half (TTBR0) once the bootloader's
-    // identity assumptions are gone; walks there now fault.
-    unsafe { regs::set_tcr_el1(regs::tcr_el1() | TCR_EPD0) };
-    // SAFETY: no mapping is both writable and executable (audited later),
-    // so enforcing WXN changes nothing for valid code.
-    unsafe { regs::set_sctlr_el1(regs::sctlr_el1() | SCTLR_WXN) };
-    cpu::isb();
-    cpu::tlb_flush_all();
+    // current stack) and all MMIO at the same addresses as before, and no
+    // mapping is both writable and executable (audited later).
+    unsafe { paging::activate(root) };
     crate::memory::retire_early_mmio();
 }
 
@@ -371,8 +358,7 @@ pub fn map_device(va: u64, pa: u64, len: u64) -> Result<(), MapError> {
         PageAttrs::mmio(),
         &mut s.pool_frames,
     )?;
-    cpu::dsb_ishst();
-    cpu::isb();
+    paging::publish();
     Ok(())
 }
 
@@ -393,8 +379,7 @@ pub fn map_stacks(cpu: u64) -> Result<(), MapError> {
         let frame = data_frame().map_err(|_| MapError::OutOfFrames)?;
         m.map_page(va, frame, PageAttrs::data(), &mut s.pool_frames)?;
     }
-    cpu::dsb_ishst();
-    cpu::isb();
+    paging::publish();
     Ok(())
 }
 
@@ -439,7 +424,7 @@ pub fn lock() -> Result<u64, MapError> {
         writer.unmap(b);
     }
     writer.unmap(own);
-    cpu::tlb_flush_all();
+    paging::tlb_flush_all();
     Ok(s.pool.1)
 }
 
@@ -451,9 +436,9 @@ struct AliasWriter {
 
 impl AliasWriter {
     fn unmap(&mut self, block: u64) {
-        let idx = urmqtt_arch_aarch64::paging::index(layout::PT_ALIAS_BASE + block * BLOCK_2M, 2);
-        urmqtt_arch_aarch64::paging::TableMemory::write(&mut self.tables, self.l2, idx, 0);
-        cpu::tlb_flush_va(layout::PT_ALIAS_BASE + block * BLOCK_2M);
+        let idx = paging::index(layout::PT_ALIAS_BASE + block * BLOCK_2M, 2);
+        paging::TableMemory::write(&mut self.tables, self.l2, idx, 0);
+        paging::tlb_flush_va(layout::PT_ALIAS_BASE + block * BLOCK_2M);
     }
 }
 
@@ -552,7 +537,7 @@ pub fn init_heap(order: u32, meta_words: usize) -> Result<(), buddy::HeapError> 
 pub fn enable_heap_caches() {
     HEAP.enable(urmqtt_mm::cached::Hooks {
         cpu: crate::smp::current,
-        irq_save: urmqtt_arch_aarch64::cpu::irq_save,
-        irq_restore: urmqtt_arch_aarch64::cpu::irq_restore,
+        irq_save: urmqtt_arch::cpu::irq_save,
+        irq_restore: urmqtt_arch::cpu::irq_restore,
     });
 }

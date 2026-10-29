@@ -22,6 +22,14 @@ pub fn dsb_ishst() {
     unsafe { asm!("dsb ishst", options(nostack, preserves_flags)) };
 }
 
+/// Orders earlier stores (to normal memory) before later ones, including
+/// device writes: what a doorbell write needs after ring updates.
+#[inline(always)]
+pub fn dsb_st() {
+    // SAFETY: a barrier has no effect besides ordering.
+    unsafe { asm!("dsb st", options(nostack, preserves_flags)) };
+}
+
 #[inline(always)]
 pub fn dsb_sy() {
     // SAFETY: a barrier has no effect besides ordering.

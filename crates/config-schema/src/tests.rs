@@ -465,3 +465,23 @@ fn entropy_fallback_is_jitter_or_none() {
     let bad = DEV.replace("fallback = \"jitter\"", "fallback = \"rdrand\"");
     assert_rejected("dev", &bad, "entropy.fallback");
 }
+
+#[test]
+fn cpu_disable_is_validated_against_the_dispatch_features() {
+    assert!(parse("dev", DEV).unwrap().cpu.disable.is_empty());
+    let some = dev_with("disable", r#"disable = ["aes", "crc32"]"#);
+    assert_eq!(parse("dev", &some).unwrap().cpu.disable, ["aes", "crc32"]);
+    assert_rejected(
+        "dev",
+        &dev_with("disable", r#"disable = ["bti"]"#),
+        "cpu.disable",
+    );
+    assert_rejected(
+        "dev",
+        &dev_with("disable", r#"disable = ["aes", "aes"]"#),
+        "cpu.disable",
+    );
+    // The section is optional: without it nothing is disabled.
+    let without = DEV.replace("[cpu]", "").replace("disable = []", "");
+    assert!(parse("dev", &without).unwrap().cpu.disable.is_empty());
+}

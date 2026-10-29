@@ -25,11 +25,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
 
-use urmqtt_arch_aarch64::cpu;
-use urmqtt_arch_aarch64::spsc::{Consumer, Producer, Spsc};
-use urmqtt_arch_aarch64::sync::OnceCell;
+use urmqtt_arch::{cpu, time};
 use urmqtt_broker::Msg;
 use urmqtt_mqtt::QoS;
+use urmqtt_sync::spsc::{Consumer, Producer, Spsc};
+use urmqtt_sync::sync::OnceCell;
 use urmqtt_virtio::net::MTU_FRAME;
 
 pub const MSG_RING: usize = 512;
@@ -154,7 +154,7 @@ impl Idle {
         Self {
             last_work_ns: 0,
             slept_ns: 0,
-            window_start_ns: urmqtt_arch_aarch64::timer::uptime_ns(),
+            window_start_ns: time::uptime_ns(),
             passes: 0,
         }
     }
@@ -198,7 +198,7 @@ impl Idle {
             // Relaxed: a progress counter for the health check.
             l.fetch_add(1, Ordering::Relaxed);
         }
-        let now = urmqtt_arch_aarch64::timer::uptime_ns();
+        let now = time::uptime_ns();
         self.stats(now);
         if worked {
             self.last_work_ns = now;
@@ -214,10 +214,10 @@ impl Idle {
         flag.store(true, Ordering::Relaxed);
         fence(Ordering::SeqCst);
         if !pending() {
-            cpu::wfi();
+            cpu::wait_for_interrupt();
         }
         flag.store(false, Ordering::Relaxed);
-        self.last_work_ns = urmqtt_arch_aarch64::timer::uptime_ns();
+        self.last_work_ns = time::uptime_ns();
         self.slept_ns += self.last_work_ns.saturating_sub(now);
     }
 }

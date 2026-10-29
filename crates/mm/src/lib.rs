@@ -27,8 +27,8 @@ pub use cached::CachedHeap;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
 
-use urmqtt_arch_aarch64::paging::{FrameSource, PAGE_SIZE};
-use urmqtt_arch_aarch64::sync::SpinLock;
+use urmqtt_sync::frame::{FrameSource, PAGE_SIZE};
+use urmqtt_sync::sync::SpinLock;
 
 /// Hands out frames downwards from the top of one physical range. Frames are
 /// never freed; the range is retired when the real allocator takes over.

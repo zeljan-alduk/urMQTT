@@ -31,7 +31,7 @@ der = { version = "0.8", default-features = false, features = ["alloc", "oid"] }
 rand_core = { version = "0.6", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
 zeroize = { version = "1.8", default-features = false }
-urmqtt-arch-aarch64 = { path = "../arch-aarch64" }
+urmqtt-sync = { path = "../sync" }
 
 [features]
 # The sans-IO TLS client, for in-kernel self-tests (dev images only, M17).

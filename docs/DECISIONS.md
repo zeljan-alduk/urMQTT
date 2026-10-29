@@ -543,3 +543,44 @@ verified in the named milestone before it becomes Accepted).
     - boot with ACPI and with DT, checking the tick, IRQ latency, 4/4 CPUs, 12/12 IPI pairs, MSI-X blk completions, virtio-net and SQLite;
     - the TLS broker scenarios against the GICv2 guest.
 - **Not done:** more than 8 CPUs on a GICv2 (the architecture's limit); the GICv2 virtualization extensions (not needed by a guest); running directly on the Pi without Linux (no drivers for its Ethernet or SD card). Not yet tried on a real Pi.
+
+## ADR-040 — Architecture facade (`urmqtt-arch`) and the arch-leak check
+
+- **Status:** Accepted (X0).
+- **Problem:** the x86-64 port (docs/X86-PLAN.md) needs one kernel over two architecture crates. Before X0 the kernel called `urmqtt-arch-aarch64` directly and held about 70 lines of AArch64 assembly and system-register code itself (boot entry, AP trampoline, PMU, RNDR, `brk`/`udf`, TTBR/TCR/SCTLR writes, GICv2m). Four library crates depended on the arch crate only for its spinlock.
+- **Design:**
+  - **`urmqtt-sync`:** the arch-neutral parts moved out of `arch-aarch64`: `sync` (spinlock, once-cell), `spsc`, and `frame` (`PAGE_SIZE`, `FrameSource`). `mm`, `store` and `tls` now depend only on it; `log` uses the facade only on bare metal (IRQ masking around the sink lock).
+  - **`urmqtt-arch`:** one module list, `cpu`, `irq`, `ipi`, `msi`, `percpu`, `time`, `paging`, `trap`, `barrier`, `entropy`, `power`, `features`. Each module re-exports the target architecture's items under neutral names (for example `cpu::wait_for_interrupt`, `cpu::privilege_level`, `percpu::current`, `time::finest_clock`, `paging::activate`). Hardware items exist only for `target_os = "none"`; host builds get the pure parts, and `barrier::doorbell` falls back to a fence there.
+  - **Contract:** `crates/arch/src/contract.rs` binds every item to an explicit function-pointer type or constant. An architecture that lacks an item or changes its shape fails to compile. Dispatch is static: no traits, no generics, no cost.
+  - **Moved into `arch-aarch64`:**
+    - `boot` (`_start`);
+    - `percpu` (TPIDR index, MPIDR, `ApBoot` and the trampoline);
+    - `mmu` (MAIR merge, TTBR1 root, activation with EPD0 and WXN);
+    - `irq` (the v3/v2 `Controller` with `Local` and `Ack`; the kernel keeps the handler table and statistics);
+    - `msi` (GICv2m frame: TYPER decode, SPI allocation, address/data composition; host-tested);
+    - `power` (PSCI conduit state);
+    - `entropy` (RNDR), `pmu` (cycle-counter clock), `faults` (test-mode `brk`, `udf`, PAC and BTI violations);
+    - trap classification and the register dump (`TrapFrame::classify`, `cause`, `fault_address`, `registers`).
+  - **`scripts/check-arch-leaks.sh`** (CI lint job and `make check`) fails on `asm!`, `global_asm!`, `mrs`/`msr`, `*_EL0..3` names, `daif` and `tpidr` outside `crates/arch-aarch64`, and on `rdmsr`/`wrmsr`, `cr0..4`, port I/O and `cpuid` outside `crates/arch-x86_64`. Comments are skipped. `--self-test` proves that each of its 10 rules fires on a sample, ignores the sample as a comment, and accepts it inside the arch crate.
+- **Deliberate limits:**
+  - The paging *builder* API stays the AArch64 `Mapper` with `PageAttrs`, re-exported as `arch::paging`. A neutral builder is designed in X1 against the x86 page-table format rather than guessed from one implementation.
+  - Some facade items are AArch64 concepts with no x86 counterpart yet: the PAC key (`cpu::set_return_address_key`), the PSCI conduit, the GIC version, the exception level. X1 decides per item whether x86 gets an equivalent or the kernel call site becomes architecture-conditional.
+- **Behaviour:** unchanged. The boot log, every smoke scenario and the benchmarks are the same. The trap path prints the register dump through one `emergency` call instead of one per field, with the same text.
+- **Testing:** every host test, the contract (compiles for the kernel target), the leak check and its self-test, `msi` host tests, all smoke scenarios under HVF and TCG, `make repro`, and bench before and after (docs/PROGRESS.md, X0).
+
+## ADR-041 — CPU feature dispatch (`urmqtt-dispatch`) and `[cpu] disable`
+
+- **Status:** Accepted (X0); the hardware backends follow in X0b (AArch64) and X9 (x86).
+- **Problem:** finding F1 (docs/X86-PLAN.md): AES-GCM, GHASH and SHA-256 run the portable code on AArch64 today, because RustCrypto's `cpufeatures` answers "no" on `target_os = "none"` and the `aes_armv8`/`polyval_armv8` cfgs are unset. Two architectures with several accelerators each need one place that decides what runs, and an operator needs a way to switch a faulty or slow accelerator off without a rebuild of the code.
+- **Design:**
+  - `CpuFeatures` is a set of `Feature`s that select code paths (AArch64 today: `aes`, `pmull`, `sha2`, `crc32`). `arch::features::Features::dispatch()` maps the decoded ID registers onto it.
+  - `TABLE` lists, per primitive (`aes-gcm`, `ghash`, `chacha`, `sha256`, `crc32c`, `toeplitz`), its backends in preference order. Each has the features it needs and whether it is compiled into this image. The last backend of each row is the portable one and needs nothing (tested).
+  - `select` takes the first built backend whose features are all usable.
+  - **Opt-out:** `[cpu] disable = [...]` in `deploy/<env>/config.toml` (optional section; empty by default). The schema validates the names against `Feature::name` and rejects unknown names and duplicates. Security features (PAC, BTI, W^X, RNDR as an entropy source) are not in the list, so they cannot be switched off.
+  - **Seal:** at boot, before any crypto runs, `CPU.seal(TABLE, detected, disable)` computes detected minus disabled, selects, and stores the result once. A second seal is refused and keeps the first result (tested). A failed seal stops the boot (fail closed).
+  - **Boot log:** `cpu dispatch: detected <features>, disabled by config <features>` and `crypto: aes-gcm=soft ghash=soft chacha=soft sha256=soft crc32c=table toeplitz=bitwise`. Every hardware backend is listed in `TABLE` as not built, so the line reports F1 honestly whatever the CPU offers.
+- **Not yet (X0b):**
+  - the vendored `cpufeatures` patch that makes RustCrypto ask the sealed set (`urmqtt_cpu_has`);
+  - the `aes_armv8`/`polyval_armv8` cfgs;
+  - mapping the sealed state read-only once the page tables lock. The seal is write-once in X0, but its page is ordinary kernel data. Nothing reads it to choose code yet.
+- **Testing:** host tests for selection by feature mask, opt-out before selection, double seal, name validation and the row invariant; schema tests for `[cpu] disable`; the smoke boot scenarios check both log lines.

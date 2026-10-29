@@ -16,5 +16,9 @@ workspace = true
 
 [dependencies]
 font8x8 = { version = "0.3.1", default-features = false }
-urmqtt-arch-aarch64 = { path = "../arch-aarch64" }
 urmqtt-config = { path = "../config" }
+urmqtt-sync = { path = "../sync" }
+
+# Interrupt masking around the sink lock exists only on bare metal.
+[target.'cfg(target_os = "none")'.dependencies]
+urmqtt-arch = { path = "../arch" }

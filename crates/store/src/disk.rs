@@ -6,7 +6,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use urmqtt_arch_aarch64::sync::SpinLock;
+use urmqtt_sync::sync::SpinLock;
 
 use crate::layout::{
     BLOCK, FileKind, Layout, LayoutError, Region, RegionKind, SECTOR, SIZE_SLOT_LBA, SizeTable,

@@ -13,3 +13,7 @@ bench = false
 
 [lints]
 workspace = true
+
+[dependencies]
+urmqtt-dispatch = { path = "../dispatch" }
+urmqtt-sync = { path = "../sync" }

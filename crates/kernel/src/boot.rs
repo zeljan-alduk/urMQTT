@@ -10,11 +10,11 @@ use limine::request::{
 };
 use limine::{RequestsEndMarker, RequestsStartMarker};
 
-use urmqtt_arch_aarch64::features::Features;
-use urmqtt_arch_aarch64::sync::SpinLock;
-use urmqtt_arch_aarch64::{cpu, exception, pac, regs};
+use urmqtt_arch::features::{self, Features};
+use urmqtt_arch::{cpu, time, trap as arch_trap};
 use urmqtt_log::{error, info, warn};
 use urmqtt_platform::{EarlyPlatform, PsciMethod, Uart};
+use urmqtt_sync::sync::SpinLock;
 
 use crate::cmdline::{BootOptions, TestFault};
 use crate::{VERSION, console, devices, irq, layout, memory, power, selftest, smp, tick, trap, vm};
@@ -79,29 +79,8 @@ static ENTROPY: Request<EntropyRespData, u64> = unsafe {
 #[unsafe(link_section = ".requests_end_marker")]
 static REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
 
-// Entry from Limine: MMU on, interrupts masked, FP/SIMD disabled (base
-// revision 6), SPSel = 0. Enable FP before any compiled code can use SIMD
-// registers (ADR-003) and switch to SP_ELx so exceptions to this EL share the
-// boot stack.
-core::arch::global_asm!(
-    ".section .text.boot, \"ax\"",
-    ".global _start",
-    "_start:",
-    "hint #34", // bti c
-    "mrs x9, cpacr_el1",
-    "orr x9, x9, #(3 << 20)",
-    "msr cpacr_el1, x9",
-    "isb",
-    "mov x9, sp",
-    "msr spsel, #1",
-    "mov sp, x9",
-    "mov x29, xzr",
-    "mov x30, xzr",
-    "bl urmqtt_kmain",
-    "1: wfi",
-    "b 1b",
-    ".text",
-);
+// Limine enters at the architecture's `_start` (`arch-aarch64::boot`),
+// which enables FP/SIMD, sets up the stack and calls `urmqtt_kmain`.
 
 /// Physical address of the default QEMU `virt` PL011, used only in dev
 /// builds when neither the DTB nor SPCR describe a UART.
@@ -124,8 +103,8 @@ static STAGE2: SpinLock<Option<Stage2>> = SpinLock::new(None);
 
 #[unsafe(no_mangle)]
 extern "C" fn urmqtt_kmain() -> ! {
-    exception::set_handler(trap::handle);
-    exception::install();
+    arch_trap::set_handler(trap::handle);
+    arch_trap::install();
 
     if !BASE_REVISION.is_supported() {
         // No console yet; nothing better to do than stop.
@@ -148,7 +127,7 @@ extern "C" fn urmqtt_kmain() -> ! {
     };
     // At EL2 (VHE entry, base revision 6) an HVC would trap to ourselves:
     // only an SMC conduit can reach firmware from there.
-    let el2 = regs::current_el() == 2;
+    let el2 = cpu::privilege_level() == 2;
     match early.and_then(|e| e.psci) {
         Some(PsciMethod::Hvc) if el2 => {}
         Some(psci) => power::set_conduit(psci),
@@ -186,7 +165,7 @@ extern "C" fn urmqtt_kmain() -> ! {
     info!(
         "env={} el={} bootloader={} {}",
         urmqtt_config::CONFIG.env,
-        regs::current_el(),
+        cpu::privilege_level(),
         BOOTLOADER.response().map_or("?", |r| r.name()),
         BOOTLOADER.response().map_or("?", |r| r.version()),
     );
@@ -212,13 +191,10 @@ extern "C" fn urmqtt_kmain() -> ! {
     if el2 {
         warn!("entered at EL2 (VHE): untested configuration, PSCI only via SMC");
     }
-    match power::psci_version() {
+    match urmqtt_arch::power::firmware_version() {
         Some((maj, min)) => info!(
             "psci {maj}.{min} via {}",
-            power::conduit().map_or("?", |c| match c {
-                urmqtt_arch_aarch64::psci::Conduit::Hvc => "hvc",
-                urmqtt_arch_aarch64::psci::Conduit::Smc => "smc",
-            })
+            urmqtt_arch::power::conduit_name()
         ),
         None => warn!("psci unavailable: power-off and reset will halt instead"),
     }
@@ -239,7 +215,7 @@ extern "C" fn urmqtt_kmain() -> ! {
     }
 
     // Memory management (M2): kernel page tables, frames, stacks, heap.
-    let features = Features::decode(pac::id_regs());
+    let features = features::detect();
     info!(
         "cpu features: pauth={} fpac={} bti={} rndr={} aes={} pmull={} sha2={} lse={} mte={} sve={}",
         features.pauth,
@@ -253,6 +229,22 @@ extern "C" fn urmqtt_kmain() -> ! {
         features.mte,
         features.sve
     );
+    // Crypto and checksum backends (ADR-041): detection minus the
+    // configured opt-out, sealed before any of them runs.
+    match urmqtt_dispatch::CPU.seal(
+        &urmqtt_dispatch::TABLE,
+        features.dispatch(),
+        urmqtt_config::CONFIG.cpu.disable,
+    ) {
+        Ok(d) => {
+            info!(
+                "cpu dispatch: detected {}, disabled by config {}",
+                d.detected, d.disabled
+            );
+            info!("crypto: {}", d.selection);
+        }
+        Err(e) => fatal_fmt(format_args!("cpu dispatch: {e:?}")),
+    }
     let Some(exe) = EXECUTABLE_ADDRESS.response() else {
         fatal("no executable address response from the bootloader");
     };
@@ -293,7 +285,7 @@ extern "C" fn urmqtt_kmain() -> ! {
     });
     // SAFETY: both stacks were mapped by `vm::build` and are 16-byte aligned
     // at the top; this frame (on the bootloader's stack) is abandoned.
-    unsafe { pac::switch_to(main_top, exc_top, 0, kmain_stage2, pac_on) }
+    unsafe { cpu::switch_to(main_top, exc_top, 0, kmain_stage2, pac_on) }
 }
 
 /// The bootloader's entropy values (zero if none), for the CSPRNG pool.
@@ -336,7 +328,7 @@ fn set_pac_key() -> Option<(u64, u64)> {
         }
     }
     // SAFETY: PAC is not enabled yet, no signed pointers exist.
-    unsafe { pac::set_ia_key(key[0], key[1]) };
+    unsafe { cpu::set_return_address_key(key[0], key[1]) };
     Some((key[0], key[1]))
 }
 
@@ -500,11 +492,7 @@ fn smp_bringup(s: &mut Stage2) {
         return;
     };
     // A GICv2 routes by an 8-bit CPU mask.
-    let max = if irq::is_v2() {
-        irq::GICV2_MAX_CPUS
-    } else {
-        smp::MAX_CPUS
-    };
+    let max = irq::max_cpus().min(smp::MAX_CPUS);
     let started = smp::start_aps(mp.cpus(), mp.bsp_mpidr, s.pac_key, max);
     // The key is now in every core's registers; drop the copies in memory.
     s.pac_key = None;
@@ -524,9 +512,9 @@ fn smp_bringup(s: &mut Stage2) {
             .ticks
             .load(core::sync::atomic::Ordering::Relaxed)
     });
-    let until = urmqtt_arch_aarch64::timer::uptime_ns() + 5 * TICK_NS;
-    while urmqtt_arch_aarch64::timer::uptime_ns() < until {
-        cpu::wfi();
+    let until = time::uptime_ns() + 5 * TICK_NS;
+    while time::uptime_ns() < until {
+        cpu::wait_for_interrupt();
     }
     let ticking = (0..n)
         .filter(|&i| {
@@ -549,22 +537,22 @@ const TICK_SELFTEST: u64 = 50;
 /// Runs the periodic tick and reports interrupt latency twice: while the
 /// core busy-polls and while it sleeps in `wfi` (ADR-022).
 fn tick_selftest(timer_intid: u32) {
-    let freq = urmqtt_arch_aarch64::timer::frequency();
+    let freq = time::frequency();
     info!(
         "timer: counter {freq} Hz, virtual timer PPI {timer_intid}, tick {} ms",
         TICK_NS / 1_000_000
     );
     tick::start(timer_intid, TICK_NS);
-    let t0 = urmqtt_arch_aarch64::timer::uptime_ns();
+    let t0 = time::uptime_ns();
     // SAFETY: vectors, GIC and the tick handler are ready.
-    unsafe { cpu::unmask_irq() };
+    unsafe { cpu::enable_interrupts() };
     for (mode, sleep) in [("busy-poll", false), ("wfi", true)] {
         tick::reset_stats();
         let start = tick::ticks();
         let mut reported = start;
         while tick::ticks() < start + TICK_SELFTEST / 2 {
             if sleep {
-                cpu::wfi();
+                cpu::wait_for_interrupt();
             } else {
                 core::hint::spin_loop();
             }
@@ -580,7 +568,7 @@ fn tick_selftest(timer_intid: u32) {
             l.samples, l.min_ns, l.avg_ns, l.p99_ns, l.max_ns
         );
     }
-    let elapsed = urmqtt_arch_aarch64::timer::uptime_ns() - t0;
+    let elapsed = time::uptime_ns() - t0;
     info!(
         "timer: {} ticks in {} ms",
         tick::ticks(),
@@ -623,11 +611,9 @@ pub(crate) fn now_unix_ms() -> Option<u64> {
     }
 }
 
-/// Nanoseconds since the counter started (boot), from the generic timer.
+/// Nanoseconds since the counter started (boot).
 fn uptime_ns() -> u64 {
-    let freq = regs::cntfrq_el0().max(1);
-    let ticks = regs::cntvct_el0();
-    ((u128::from(ticks) * 1_000_000_000) / u128::from(freq)) as u64
+    time::uptime_ns()
 }
 
 fn discover(mem: &memory::BootMemory) -> Option<EarlyPlatform> {

@@ -12,7 +12,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use urmqtt_arch_aarch64::{cpu, timer};
+use urmqtt_arch::{cpu, time};
 use urmqtt_config::{CONFIG, NetworkMode};
 use urmqtt_log::{info, warn};
 use urmqtt_net::Class;
@@ -36,7 +36,7 @@ const RX_BURST: usize = 64;
 const MSG_BURST: usize = 256;
 
 fn now_ms() -> u64 {
-    timer::uptime_ns() / 1_000_000
+    time::uptime_ns() / 1_000_000
 }
 
 fn is_mqtt_port(port: u16) -> bool {
@@ -159,10 +159,9 @@ fn drain_mesh(
 /// The NIC's MAC for the other cores' interfaces (set by core 0).
 static MAC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// State handed from the boot CPU to the other data cores.
-static RESTORED: urmqtt_arch_aarch64::sync::SpinLock<Option<Arc<Restored>>> =
-    urmqtt_arch_aarch64::sync::SpinLock::new(None);
-static NIC: urmqtt_arch_aarch64::sync::SpinLock<Option<VirtioNet>> =
-    urmqtt_arch_aarch64::sync::SpinLock::new(None);
+static RESTORED: urmqtt_sync::sync::SpinLock<Option<Arc<Restored>>> =
+    urmqtt_sync::sync::SpinLock::new(None);
+static NIC: urmqtt_sync::sync::SpinLock<Option<VirtioNet>> = urmqtt_sync::sync::SpinLock::new(None);
 
 /// Boot CPU, before the other data cores start: takes the NIC (core 0
 /// owns it) and publishes the restored broker state for every shard.
@@ -202,7 +201,7 @@ pub fn run(me: usize, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     let Some(link) = Link::take(me) else {
         warn!("net: core {me} has no data-plane rings, idling");
         loop {
-            cpu::wfi();
+            cpu::wait_for_interrupt();
         }
     };
     if me == 0 {
@@ -216,7 +215,7 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
     let (Some(mut rx), Some(mut tx)) = (link.frames_in.take(), link.frames_out.take()) else {
         warn!("net: core {me} has no frame rings, idling");
         loop {
-            cpu::wfi();
+            cpu::wait_for_interrupt();
         }
     };
     let mut iface = Iface::new(mac(), false, None, now_ms());
@@ -383,7 +382,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         if urmqtt_config::CONFIG.env == "dev" {
             warn!("{hint}; idling (dev)");
             loop {
-                cpu::wfi();
+                cpu::wait_for_interrupt();
             }
         }
         crate::boot::fatal(hint);

@@ -8,15 +8,12 @@ use limine::memmap::{
     Entry, MEMMAP_ACPI_NVS, MEMMAP_ACPI_RECLAIMABLE, MEMMAP_BOOTLOADER_RECLAIMABLE,
     MEMMAP_EXECUTABLE_AND_MODULES, MEMMAP_FRAMEBUFFER, MEMMAP_MAPPED_RESERVED, MEMMAP_USABLE,
 };
-use urmqtt_arch_aarch64::paging::{
-    self, MapError, Mapper, MemType, PAGE_SIZE, PageAttrs, TableMemory,
-};
-use urmqtt_arch_aarch64::sync::SpinLock;
-use urmqtt_arch_aarch64::{cpu, regs};
+use urmqtt_arch::paging::{self, MapError, Mapper, PAGE_SIZE, PageAttrs, TableMemory};
 use urmqtt_log::info;
 use urmqtt_mm::BumpFrames;
 use urmqtt_platform::acpi::PhysMemory;
 use urmqtt_platform::fdt::Fdt;
+use urmqtt_sync::sync::SpinLock;
 
 use crate::layout::{MMIO_BASE, MMIO_SIZE};
 
@@ -195,11 +192,8 @@ static MMIO: SpinLock<Option<Mmio>> = SpinLock::new(None);
 /// Prepares device mappings in the bootloader's tables. Returns false if the
 /// MMIO slot is taken or no frames are available.
 pub fn init_early_mmio(mem: &BootMemory) -> bool {
-    // SAFETY: MAIR indices 0 and 1 (used by the bootloader's mappings) are
-    // preserved; the kernel's indices were unused until now.
-    unsafe { regs::set_mair_el1(MemType::merge_into_mair(regs::mair_el1())) };
-    cpu::isb();
-    let root = regs::ttbr1_el1() & 0x0000_ffff_ffff_fffe;
+    paging::merge_memory_attributes();
+    let root = paging::kernel_root();
     let mut tables = HhdmTables { hhdm: mem.hhdm };
     let slot = paging::index(MMIO_BASE, 0);
     if Mapper::new(&mut tables, root)
@@ -236,7 +230,7 @@ pub fn map_mmio(pa: u64, len: u64) -> Result<u64, MapError> {
     let size = (page_off + len).div_ceil(PAGE_SIZE) * PAGE_SIZE;
     // Large, block-aligned regions (PCIe ECAM) get a block-aligned VA so
     // they can be mapped with 2 MiB blocks instead of thousands of pages.
-    let block = urmqtt_arch_aarch64::paging::BLOCK_2M;
+    let block = paging::BLOCK_2M;
     let va = if size >= block && base.is_multiple_of(block) {
         m.next.next_multiple_of(block)
     } else {
@@ -256,8 +250,7 @@ pub fn map_mmio(pa: u64, len: u64) -> Result<u64, MapError> {
                 PageAttrs::mmio(),
                 frames,
             )?;
-            cpu::dsb_ishst();
-            cpu::isb();
+            paging::publish();
         }
         None => crate::vm::map_device(va, base, size)?,
     }

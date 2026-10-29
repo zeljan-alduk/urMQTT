@@ -19,7 +19,7 @@ use core::cell::UnsafeCell;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicI64, Ordering};
 
-use urmqtt_arch_aarch64::sync::OnceCell;
+use urmqtt_sync::sync::OnceCell;
 
 use crate::LockedHeap;
 

@@ -44,6 +44,8 @@ pub unsafe fn set_ia_key(lo: u64, hi: u64) {
 /// Entry point run on the new stack. Must never return.
 pub type Continuation = extern "C" fn(u64) -> !;
 
+// SAFETY: defined by the assembly below with this C signature (arguments
+// in x0..x4, never returns).
 unsafe extern "C" {
     fn urmqtt_switch_to(
         main_top: u64,

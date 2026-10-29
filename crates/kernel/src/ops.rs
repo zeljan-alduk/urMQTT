@@ -330,7 +330,7 @@ fn syslog_line(out: &mut String, r: &Record, host: Option<[u8; 4]>) {
     let pri = FACILITY * 8 + severity(r.level);
     let _ = write!(out, "<{pri}>1 ");
     // The record's time: wall clock now minus its age.
-    let now_ns = urmqtt_arch_aarch64::timer::uptime_ns();
+    let now_ns = urmqtt_arch::time::uptime_ns();
     match crate::boot::now_unix_ms() {
         Some(ms) => rfc3339(
             out,

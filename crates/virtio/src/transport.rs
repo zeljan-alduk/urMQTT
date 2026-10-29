@@ -273,13 +273,7 @@ impl Transport {
     pub fn notify(&self, off: usize, idx: u16) {
         // Ring updates (normal memory) must be visible before the device
         // sees the doorbell (device memory).
-        #[cfg(target_os = "none")]
-        // SAFETY: a barrier has no other effect.
-        unsafe {
-            core::arch::asm!("dsb st", options(nostack, preserves_flags))
-        };
-        #[cfg(not(target_os = "none"))]
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        urmqtt_arch::barrier::doorbell();
         self.notify.write16(off, idx);
     }
 }

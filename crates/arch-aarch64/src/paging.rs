@@ -4,8 +4,8 @@
 //! [`TableMemory`] abstraction so they can be tested on the host; the kernel
 //! supplies an implementation that reaches table frames through the HHDM.
 
-/// Size of a translation granule / page.
-pub const PAGE_SIZE: u64 = 4096;
+pub use urmqtt_sync::frame::{FrameSource, PAGE_SIZE};
+
 /// Entries per table.
 pub const ENTRIES: usize = 512;
 
@@ -175,12 +175,6 @@ pub const fn index(va: u64, level: u8) -> usize {
 pub trait TableMemory {
     fn read(&self, table_pa: u64, idx: usize) -> u64;
     fn write(&mut self, table_pa: u64, idx: usize, value: u64);
-}
-
-/// Source of zeroed frames for new tables.
-pub trait FrameSource {
-    /// Physical address of a fresh, page-aligned frame, or `None` if exhausted.
-    fn alloc_frame(&mut self) -> Option<u64>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

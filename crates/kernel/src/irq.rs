@@ -8,12 +8,13 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use urmqtt_arch_aarch64::gic::{self, GicError, Gicv2, Gicv3, Redistributor, SPURIOUS};
-use urmqtt_arch_aarch64::regs;
-use urmqtt_arch_aarch64::sync::OnceCell;
+use urmqtt_arch::irq::{Controller, Error as GicError};
 use urmqtt_platform::{Gic, GicCpu};
+use urmqtt_sync::sync::OnceCell;
 
 use crate::{memory, smp};
+
+pub use urmqtt_arch::irq::Local;
 
 /// An IRQ handler: receives the INTID.
 pub type Handler = fn(u32);
@@ -22,22 +23,6 @@ const MAX_INTID: usize = 1020;
 static HANDLERS: [AtomicUsize; MAX_INTID] = [const { AtomicUsize::new(0) }; MAX_INTID];
 static GIC: OnceCell<Controller> = OnceCell::new();
 
-#[derive(Clone, Copy)]
-enum Controller {
-    V3(Gicv3),
-    V2(Gicv2),
-}
-
-/// A CPU's handle on the GIC: its redistributor (v3) or its target mask
-/// (v2, the bit SPIs and SGIs are routed to).
-#[derive(Debug, Clone, Copy)]
-pub enum Local {
-    V3(Redistributor),
-    V2(u8),
-}
-
-/// GICv2 addresses at most 8 CPUs by target mask.
-pub const GICV2_MAX_CPUS: usize = 8;
 static SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
 static UNHANDLED_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -61,22 +46,16 @@ pub fn init(gic_info: &Gic, cpus: u64) -> Result<u32, IrqError> {
             let len = gicr.1.min(cpus.max(1) * 0x4_0000);
             let va = memory::map_mmio(gicr.0, len).map_err(|_| IrqError::Map)?;
             // SAFETY: both ranges were just mapped as device memory for good.
-            let g = unsafe { Gicv3::new(gicd as usize, va as usize, len as usize) };
-            g.init_distributor().map_err(IrqError::Gic)?;
-            Controller::V3(g)
+            unsafe { Controller::v3(gicd as usize, va as usize, len as usize) }
+                .map_err(IrqError::Gic)?
         }
         GicCpu::V2 { gicc } => {
             let va = memory::map_mmio(gicc, 0x2000).map_err(|_| IrqError::Map)?;
             // SAFETY: both ranges were just mapped as device memory for good.
-            let g = unsafe { Gicv2::new(gicd as usize, va as usize) };
-            g.init_distributor();
-            Controller::V2(g)
+            unsafe { Controller::v2(gicd as usize, va as usize) }
         }
     };
-    let lines = match g {
-        Controller::V3(g) => g.lines(),
-        Controller::V2(g) => g.lines(),
-    };
+    let lines = g.lines();
     GIC.set(g).map_err(|_| IrqError::AlreadyInitialised)?;
     init_local(smp::this())?;
     Ok(lines)
@@ -90,17 +69,11 @@ pub fn init_secondary(me: &smp::PerCpu) -> Result<(), IrqError> {
 /// This CPU's redistributor or banked registers, its CPU interface and the
 /// IPI SGIs.
 fn init_local(me: &smp::PerCpu) -> Result<(), IrqError> {
-    let local = match GIC.get().ok_or(IrqError::Map)? {
-        Controller::V3(g) => {
-            let rd = g
-                .redistributor(regs::mpidr_affinity())
-                .map_err(IrqError::Gic)?;
-            g.init_redistributor(rd).map_err(IrqError::Gic)?;
-            gic::init_cpu_interface();
-            Local::V3(rd)
-        }
-        Controller::V2(g) => Local::V2(g.init_cpu()),
-    };
+    let local = GIC
+        .get()
+        .ok_or(IrqError::Map)?
+        .init_local()
+        .map_err(IrqError::Gic)?;
     me.gic
         .set(local)
         .map_err(|_| IrqError::AlreadyInitialised)?;
@@ -110,9 +83,14 @@ fn init_local(me: &smp::PerCpu) -> Result<(), IrqError> {
     Ok(())
 }
 
-/// True on a GICv2, which caps the usable CPUs at `GICV2_MAX_CPUS`.
+/// True on a GICv2.
 pub fn is_v2() -> bool {
-    matches!(GIC.get(), Some(Controller::V2(_)))
+    GIC.get().is_some_and(Controller::is_v2)
+}
+
+/// CPUs the controller can route interrupts to (8 on a GICv2).
+pub fn max_cpus() -> usize {
+    GIC.get().map_or(usize::MAX, Controller::max_cpus)
 }
 
 pub fn register(intid: u32, h: Handler) {
@@ -124,70 +102,44 @@ pub fn register(intid: u32, h: Handler) {
 
 /// Enables a private interrupt (SGI/PPI) on the executing CPU.
 pub fn enable_private(intid: u32) {
-    match (GIC.get(), smp::this().gic.get()) {
-        (Some(Controller::V3(g)), Some(Local::V3(rd))) => g.enable_private(*rd, intid),
-        (Some(Controller::V2(g)), _) => g.enable_private(intid),
-        _ => {}
+    if let Some(g) = GIC.get() {
+        g.enable_private(smp::this().gic.get(), intid);
     }
 }
 
 /// Routes SPI `intid` (edge-triggered, as MSIs are) to logical CPU `cpu`.
 pub fn enable_spi(intid: u32, cpu: usize) {
-    let Some(pc) = smp::CPUS.get(cpu) else { return };
-    match GIC.get() {
-        // Relaxed: written before the CPU was started.
-        Some(Controller::V3(g)) => g.enable_spi(intid, pc.mpidr.load(Ordering::Relaxed), true),
-        Some(Controller::V2(g)) => {
-            if let Some(Local::V2(mask)) = pc.gic.get() {
-                g.enable_spi(intid, *mask, true);
-            }
-        }
-        None => {}
-    }
+    let (Some(g), Some(pc)) = (GIC.get(), smp::CPUS.get(cpu)) else {
+        return;
+    };
+    // Relaxed: written before the CPU was started.
+    g.enable_spi(intid, pc.mpidr.load(Ordering::Relaxed), pc.gic.get());
 }
 
 /// Sends SGI `intid` to logical CPU `cpu`; prior stores are visible to its
 /// handler. A CPU whose GIC setup has not run yet is not reachable on a
 /// GICv2 and the SGI is dropped.
 pub fn send_sgi(intid: u32, cpu: usize) {
-    let Some(pc) = smp::CPUS.get(cpu) else { return };
-    match GIC.get() {
-        // Relaxed: written before the CPU was started.
-        Some(Controller::V3(_)) => gic::send_sgi(intid, pc.mpidr.load(Ordering::Relaxed)),
-        Some(Controller::V2(g)) => {
-            if let Some(Local::V2(mask)) = pc.gic.get() {
-                g.send_sgi(intid, *mask);
-            }
-        }
-        None => {}
-    }
+    let (Some(g), Some(pc)) = (GIC.get(), smp::CPUS.get(cpu)) else {
+        return;
+    };
+    // Relaxed: written before the CPU was started.
+    g.send_ipi(intid, pc.mpidr.load(Ordering::Relaxed), pc.gic.get());
 }
 
 /// Handles every pending interrupt. Called from the IRQ vector.
 pub fn dispatch() {
-    let v2 = match GIC.get() {
-        Some(Controller::V2(g)) => Some(*g),
-        _ => None,
-    };
+    let Some(g) = GIC.get() else { return };
     loop {
-        // GICv2 needs the raw IAR value (with the SGI source) back in EOIR.
-        let (iar, intid) = match v2 {
-            Some(g) => {
-                let iar = g.ack();
-                (iar, iar & 0x3ff)
-            }
-            None => {
-                let intid = gic::ack();
-                (intid, intid)
-            }
-        };
-        if intid >= SPURIOUS {
-            if intid == 1023 {
+        let ack = g.ack();
+        if ack.is_none() {
+            if ack.is_spurious() {
                 // Relaxed: statistics only.
                 SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
             }
             return;
         }
+        let intid = ack.intid;
         // Acquire: pairs with the Release in `register`.
         let raw = HANDLERS
             .get(intid as usize)
@@ -200,10 +152,7 @@ pub fn dispatch() {
             let h: Handler = unsafe { core::mem::transmute::<usize, Handler>(raw) };
             h(intid);
         }
-        match v2 {
-            Some(g) => g.eoi(iar),
-            None => gic::eoi(intid),
-        }
+        g.eoi(ack);
     }
 }
 

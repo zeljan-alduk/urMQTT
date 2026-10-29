@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use urmqtt_arch_aarch64::timer;
+use urmqtt_arch::time;
 
 static PERIOD_TICKS: AtomicU64 = AtomicU64::new(0);
 static INTID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -22,9 +22,9 @@ static LAT_HIST: [AtomicU64; 40] = [const { AtomicU64::new(0) }; 40];
 // are statistics, never used to synchronise other memory.
 
 fn on_tick(_intid: u32) {
-    let now = timer::now();
-    let deadline = timer::deadline();
-    let ns = timer::ticks_to_ns(now.saturating_sub(deadline));
+    let now = time::now();
+    let deadline = time::deadline();
+    let ns = time::ticks_to_ns(now.saturating_sub(deadline));
     LAT_MIN.fetch_min(ns, Ordering::Relaxed);
     LAT_MAX.fetch_max(ns, Ordering::Relaxed);
     LAT_SUM.fetch_add(ns, Ordering::Relaxed);
@@ -38,7 +38,7 @@ fn on_tick(_intid: u32) {
         // We fell behind (e.g. a long-masked section): skip, don't burst.
         next = now + period;
     }
-    timer::set_deadline(next);
+    time::set_deadline(next);
     TICKS.fetch_add(1, Ordering::Relaxed);
     crate::smp::this().ticks.fetch_add(1, Ordering::Relaxed);
     crate::watchdog::check();
@@ -46,11 +46,11 @@ fn on_tick(_intid: u32) {
 
 /// Starts the tick with `period_ns` on this core, delivered as `intid`.
 pub fn start(intid: u32, period_ns: u64) {
-    PERIOD_TICKS.store(timer::ns_to_ticks(period_ns).max(1), Ordering::Relaxed);
+    PERIOD_TICKS.store(time::ns_to_ticks(period_ns).max(1), Ordering::Relaxed);
     INTID.store(intid, Ordering::Relaxed);
     crate::irq::register(intid, on_tick);
     crate::irq::enable_private(intid);
-    timer::set_deadline(timer::now() + PERIOD_TICKS.load(Ordering::Relaxed));
+    time::set_deadline(time::now() + PERIOD_TICKS.load(Ordering::Relaxed));
 }
 
 /// Starts this (secondary) core's own tick with the boot CPU's settings.
@@ -60,7 +60,7 @@ pub fn start_secondary() {
         return;
     }
     crate::irq::enable_private(intid);
-    timer::set_deadline(timer::now() + PERIOD_TICKS.load(Ordering::Relaxed));
+    time::set_deadline(time::now() + PERIOD_TICKS.load(Ordering::Relaxed));
 }
 
 /// Clears the latency statistics (the tick keeps running).

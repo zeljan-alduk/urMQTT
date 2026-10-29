@@ -892,10 +892,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
-name = "urmqtt-arch-aarch64"
-version = "0.0.1"
-
-[[package]]
 name = "urmqtt-broker"
 version = "0.0.1"
 dependencies = [
@@ -909,6 +905,14 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "toml",
+ "urmqtt-dispatch",
+]
+
+[[package]]
+name = "urmqtt-dispatch"
+version = "0.0.1"
+dependencies = [
+ "urmqtt-sync",
 ]
 
 [[package]]
@@ -930,7 +934,7 @@ dependencies = [
 name = "urmqtt-mm"
 version = "0.0.1"
 dependencies = [
- "urmqtt-arch-aarch64",
+ "urmqtt-sync",
 ]
 
 [[package]]
@@ -951,8 +955,12 @@ version = "0.0.1"
 dependencies = [
  "cc",
  "sha2",
- "urmqtt-arch-aarch64",
+ "urmqtt-sync",
 ]
+
+[[package]]
+name = "urmqtt-sync"
+version = "0.0.1"
 
 [[package]]
 name = "urmqtt-tcp"
@@ -982,7 +990,7 @@ dependencies = [
  "rustls-pki-types",
  "rustls-webpki",
  "sha2",
- "urmqtt-arch-aarch64",
+ "urmqtt-sync",
  "x25519-dalek",
  "x509-cert",
  "zeroize",

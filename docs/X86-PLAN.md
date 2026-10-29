@@ -135,10 +135,15 @@ Relative size: S = a few days of work, M = a typical M-milestone, L = larger.
 - Smoke, bench, bytes per connection and reproducibility are unchanged, except that the ELF size changes by a reported amount.
 - The leak check is green.
 
+**Status: done** (docs/PROGRESS.md, X0; ADR-040, ADR-041). Two deviations from the work list above:
+- The paging builder stays the AArch64 `Mapper` behind `arch::paging`. A neutral builder is designed in X1 against the x86 format.
+- The sealed dispatch state is write-once but not yet on a read-only page. That moves to X0b, where it starts choosing code.
+
 ### X0b — aarch64 hardware crypto (new; proposed because of F1) · S–M
 
 **Work**
 - Vendor the patched `cpufeatures` (D2) and enable `--cfg aes_armv8 --cfg polyval_armv8` for the kernel target.
+- Put the sealed dispatch state (`urmqtt_dispatch::CPU`) on its own page and map it read-only when the page tables lock (deferred from X0).
 - Add the `crc32c` dispatch: ARMv8 `crc32c{b,h,w,x}` when FEAT_CRC32 is present (Cortex-A72 and Neoverse N1 have it), with an optional PMULL folding for long buffers.
 - Log line: `crypto: aes-gcm=armv8-aes+pmull sha256=armv8-sha2 crc32c=armv8-crc …`.
 

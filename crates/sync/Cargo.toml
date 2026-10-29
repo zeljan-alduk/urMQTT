@@ -1,0 +1,15 @@
+[package]
+name = "urmqtt-sync"
+description = "Architecture-neutral building blocks: spinlock, once-cell, SPSC ring, frame-source trait."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true

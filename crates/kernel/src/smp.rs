@@ -1,29 +1,31 @@
 //! Symmetric multiprocessing: per-CPU data, application-processor bring-up
-//! through the Limine MP feature, and SGI-based inter-processor interrupts.
+//! through the Limine MP feature, and inter-processor interrupts.
 //!
-//! `TPIDR_EL1` holds the logical CPU index (0 = boot CPU). An AP enters
-//! `urmqtt_ap_entry` in the bootloader's tables; the assembly stub switches
-//! it to the kernel's tables, keys, vector table and stacks before any
-//! compiled code runs, exactly mirroring the boot CPU's configuration.
+//! The architecture keeps the logical CPU index (0 = boot CPU) in a per-CPU
+//! register (`arch::percpu`). An AP enters the architecture's trampoline
+//! in the bootloader's tables; it switches the AP to the kernel's tables,
+//! keys, vector table and stacks before any compiled code runs, exactly
+//! mirroring the boot CPU's configuration, and calls `ap_main`.
 
 #![allow(unsafe_code)]
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use limine::mp::MpInfo;
-use urmqtt_arch_aarch64::sync::OnceCell;
-use urmqtt_arch_aarch64::{cpu, regs, timer};
+use urmqtt_arch::percpu::ApBoot;
+use urmqtt_arch::{cpu, ipi, percpu, time};
 use urmqtt_log::{info, warn};
+use urmqtt_sync::sync::OnceCell;
 
 use crate::{irq, layout, tick};
 
 /// Upper bound on CPUs (stack slots and per-CPU array).
 pub const MAX_CPUS: usize = 64;
 
-/// SGI numbers.
-pub const SGI_PING: u32 = 1;
-pub const SGI_PONG: u32 = 2;
-pub const SGI_WAKE: u32 = 3;
+/// Inter-processor interrupt numbers.
+pub const SGI_PING: u32 = ipi::PING;
+pub const SGI_PONG: u32 = ipi::PONG;
+pub const SGI_WAKE: u32 = ipi::WAKE;
 
 pub struct PerCpu {
     pub mpidr: AtomicU64,
@@ -75,7 +77,7 @@ const WORK_DP_BENCH: usize = 6;
 
 /// Logical index of the executing CPU.
 pub fn current() -> usize {
-    (regs::tpidr_el1() as usize).min(MAX_CPUS - 1)
+    percpu::current().min(MAX_CPUS - 1)
 }
 
 pub fn this() -> &'static PerCpu {
@@ -90,34 +92,11 @@ pub fn count() -> usize {
 
 /// Registers the boot CPU as logical CPU 0.
 pub fn init_boot_cpu() {
-    // SAFETY: TPIDR_EL1 is reserved for the per-CPU index.
-    unsafe { regs::set_tpidr_el1(0) };
+    // SAFETY: the per-CPU index register is reserved for this.
+    unsafe { percpu::set_current(0) };
     // Relaxed: boot CPU only, before any other CPU runs.
-    CPUS[0]
-        .mpidr
-        .store(regs::mpidr_affinity(), Ordering::Relaxed);
+    CPUS[0].mpidr.store(percpu::hw_id(), Ordering::Relaxed);
     CPUS[0].online.store(true, Ordering::Release);
-}
-
-/// Everything an AP needs to join, read by `urmqtt_ap_entry`.
-/// Field offsets are hard-coded in the assembly below.
-#[repr(C)]
-struct ApBoot {
-    mair: u64,
-    tcr: u64,
-    ttbr1: u64,
-    sctlr: u64,
-    vbar: u64,
-    key_lo: u64,
-    key_hi: u64,
-    exc_top: u64,
-    main_top: u64,
-    cpu: u64,
-    entry: u64,
-    /// Non-zero if the CPU has pointer authentication: only then may the
-    /// key registers be written (they are UNDEFINED otherwise, e.g. on
-    /// Neoverse N1 / Ampere Altra).
-    pac: u64,
 }
 
 struct ApBootCell(core::cell::UnsafeCell<[ApBoot; MAX_CPUS]>);
@@ -126,86 +105,15 @@ struct ApBootCell(core::cell::UnsafeCell<[ApBoot; MAX_CPUS]>);
 unsafe impl Sync for ApBootCell {}
 
 static AP_BOOT: ApBootCell = ApBootCell(core::cell::UnsafeCell::new(
-    [const {
-        ApBoot {
-            mair: 0,
-            tcr: 0,
-            ttbr1: 0,
-            sctlr: 0,
-            vbar: 0,
-            key_lo: 0,
-            key_hi: 0,
-            exc_top: 0,
-            main_top: 0,
-            cpu: 0,
-            entry: 0,
-            pac: 0,
-        }
-    }; MAX_CPUS],
+    [const { ApBoot::empty() }; MAX_CPUS],
 ));
 
+// SAFETY: defined by the architecture's assembly (`arch::percpu`) with
+// this C signature; Limine calls it with the AP's MP info in x0.
 unsafe extern "C" {
+    /// The architecture's AP trampoline (`arch::percpu`): reads the
+    /// `ApBoot` passed as the MP info's extra argument.
     fn urmqtt_ap_entry(info: &MpInfo) -> !;
-}
-
-core::arch::global_asm!(
-    ".text",
-    ".global urmqtt_ap_entry",
-    "urmqtt_ap_entry:",
-    "hint #34", // bti c
-    "mrs x9, cpacr_el1",
-    "orr x9, x9, #(3 << 20)", // FP/SIMD on before any compiled code
-    "msr cpacr_el1, x9",
-    "isb",
-    "ldr x1, [x0, #32]", // MpInfo.extra_argument -> &ApBoot
-    "ldr x2, [x1, #0]",
-    "msr mair_el1, x2",
-    "ldr x2, [x1, #8]",
-    "msr tcr_el1, x2",
-    "isb",
-    "ldr x2, [x1, #16]",
-    "msr ttbr1_el1, x2", // same VAs for kernel text: execution continues
-    "isb",
-    "tlbi vmalle1",
-    "dsb nsh",
-    "isb",
-    "ldr x2, [x1, #88]",
-    "cbz x2, 2f", // no FEAT_PAuth: the key registers do not exist
-    "ldr x2, [x1, #40]",
-    "msr S3_0_C2_C1_0, x2", // APIAKeyLo_EL1
-    "ldr x2, [x1, #48]",
-    "msr S3_0_C2_C1_1, x2", // APIAKeyHi_EL1
-    "2:",
-    "ldr x2, [x1, #32]",
-    "msr vbar_el1, x2",
-    "ldr x2, [x1, #24]",
-    "msr sctlr_el1, x2", // WXN, EnIA as on the boot CPU
-    "isb",
-    "msr spsel, #1",
-    "ldr x2, [x1, #56]",
-    "mov sp, x2", // SP_EL1: exception stack
-    "ldr x2, [x1, #64]",
-    "msr sp_el0, x2", // SP_EL0: main stack
-    "msr spsel, #0",
-    "ldr x0, [x1, #72]",
-    "ldr x3, [x1, #80]",
-    "mov x29, xzr",
-    "mov x30, xzr",
-    "blr x3",
-    "1: wfi",
-    "b 1b",
-);
-
-const _: () = {
-    assert!(core::mem::offset_of!(ApBoot, sctlr) == 24);
-    assert!(core::mem::offset_of!(ApBoot, key_lo) == 40);
-    assert!(core::mem::offset_of!(ApBoot, exc_top) == 56);
-    assert!(core::mem::offset_of!(ApBoot, entry) == 80);
-    assert!(core::mem::offset_of!(ApBoot, pac) == 88);
-};
-
-fn sysreg_vbar() -> u64 {
-    regs::vbar_el1()
 }
 
 /// Releases every AP in `cpus` (the Limine MP response), up to `max` CPUs
@@ -217,7 +125,6 @@ pub fn start_aps(
     pac_key: Option<(u64, u64)>,
     max: usize,
 ) -> usize {
-    let (pac, (key_lo, key_hi)) = (pac_key.is_some(), pac_key.unwrap_or((0, 0)));
     let max = max.min(MAX_CPUS);
     let mut next = 1usize;
     for info in cpus.iter().filter(|c| c.mpidr != bsp_mpidr) {
@@ -232,20 +139,7 @@ pub fn start_aps(
         // SAFETY: slot `id` is not yet visible to any AP; the Release store in
         // `bootstrap` publishes it before AP `id` reads it.
         let slot = unsafe { &mut (*AP_BOOT.0.get())[id] };
-        *slot = ApBoot {
-            mair: regs::mair_el1(),
-            tcr: regs::tcr_el1(),
-            ttbr1: regs::ttbr1_el1(),
-            sctlr: regs::sctlr_el1(),
-            vbar: sysreg_vbar(),
-            key_lo,
-            key_hi,
-            exc_top,
-            main_top,
-            cpu: id as u64,
-            entry: ap_main as *const () as u64,
-            pac: u64::from(pac),
-        };
+        slot.capture(id, exc_top, main_top, ap_main, pac_key);
         info.bootstrap(urmqtt_ap_entry, core::ptr::from_ref(slot) as u64);
     }
     // Relaxed: APs only read COUNT after reporting online, which the boot
@@ -256,7 +150,7 @@ pub fn start_aps(
 
 /// Waits (bounded) until `n` CPUs are online.
 pub fn wait_online(n: usize, timeout_ns: u64) -> usize {
-    let deadline = timer::uptime_ns() + timeout_ns;
+    let deadline = time::uptime_ns() + timeout_ns;
     loop {
         // Acquire: pairs with each AP's Release store of `online`.
         let up = CPUS
@@ -264,7 +158,7 @@ pub fn wait_online(n: usize, timeout_ns: u64) -> usize {
             .take(n)
             .filter(|c| c.online.load(Ordering::Acquire))
             .count();
-        if up == n || timer::uptime_ns() > deadline {
+        if up == n || time::uptime_ns() > deadline {
             return up;
         }
         core::hint::spin_loop();
@@ -272,8 +166,8 @@ pub fn wait_online(n: usize, timeout_ns: u64) -> usize {
 }
 
 extern "C" fn ap_main(id: u64) -> ! {
-    // SAFETY: TPIDR_EL1 is reserved for the per-CPU index.
-    unsafe { regs::set_tpidr_el1(id) };
+    // SAFETY: the per-CPU index register is reserved for this.
+    unsafe { percpu::set_current(id as usize) };
     let me = this();
     if let Err(e) = irq::init_secondary(me) {
         warn!("cpu {id}: interrupt setup failed: {e:?}");
@@ -285,10 +179,10 @@ extern "C" fn ap_main(id: u64) -> ! {
     info!(
         "cpu {id} online (mpidr={:#x}, el={})",
         me.mpidr.load(Ordering::Relaxed),
-        regs::current_el()
+        cpu::privilege_level()
     );
     // SAFETY: vectors, GIC CPU interface and tick are set up on this core.
-    unsafe { cpu::unmask_irq() };
+    unsafe { cpu::enable_interrupts() };
     idle_loop(me)
 }
 
@@ -313,7 +207,7 @@ pub fn idle_loop(me: &'static PerCpu) -> ! {
         if POLL.load(Ordering::Relaxed) {
             core::hint::spin_loop();
         } else {
-            cpu::wfi();
+            cpu::wait_for_interrupt();
         }
     }
 }
@@ -388,18 +282,18 @@ fn ping_all() {
         let before = me.pongs.load(Ordering::Acquire);
         // Release: `on_ping` on the target reads it with Acquire.
         CPUS[target].ping_from.store(me_id, Ordering::Release);
-        let t0 = timer::now();
+        let t0 = time::now();
         irq::send_sgi(SGI_PING, target);
-        let deadline = timer::uptime_ns() + PING_TIMEOUT_NS;
+        let deadline = time::uptime_ns() + PING_TIMEOUT_NS;
         // Acquire: pairs with the Release increment in `on_pong`.
         while me.pongs.load(Ordering::Acquire) == before {
-            if timer::uptime_ns() > deadline {
+            if time::uptime_ns() > deadline {
                 break;
             }
             core::hint::spin_loop();
         }
         if me.pongs.load(Ordering::Acquire) != before {
-            let ns = timer::ticks_to_ns(timer::now() - t0);
+            let ns = time::ticks_to_ns(time::now() - t0);
             ok += 1;
             sum += ns;
             max = max.max(ns);
@@ -425,10 +319,10 @@ pub fn ipi_selftest() -> (u64, u64) {
             // Release: pairs with the Acquire in `idle_loop`.
             pc.work.store(WORK_PING_ALL, Ordering::Release);
             irq::send_sgi(SGI_WAKE, c);
-            let deadline = timer::uptime_ns() + PING_TIMEOUT_NS * n as u64;
+            let deadline = time::uptime_ns() + PING_TIMEOUT_NS * n as u64;
             // Acquire: pairs with the Release of WORK_DONE.
             while pc.work.load(Ordering::Acquire) != WORK_DONE {
-                if timer::uptime_ns() > deadline {
+                if time::uptime_ns() > deadline {
                     break;
                 }
                 core::hint::spin_loop();

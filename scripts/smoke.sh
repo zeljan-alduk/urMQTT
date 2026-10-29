@@ -520,15 +520,19 @@ DEV_OK=("pci: ECAM 0x4010000000 buses 0-255" "virtio-blk" "virtio-net" "virtio-r
 DB_OK=("storage: data disk formatted \(was blank\)" "db: sqlite 3\.[0-9]+\.[0-9]+ on the data disk: WAL, exclusive locking, quick_check ok"
     "telemetry: log recovered in [0-9]+ ms: 0 record\(s\)"
     "db: restored 0 retained" "db: DB core is cpu 3" "db: worker running on cpu 3")
+# ADR-041: the dispatch is sealed with nothing disabled and, before X0b,
+# selects portable code whatever the CPU offers.
+DISPATCH_OK=("cpu dispatch: detected [a-z0-9 ]+, disabled by config none"
+    "crypto: aes-gcm=soft ghash=soft chacha=soft sha256=soft crc32c=table toeplitz=bitwise")
 SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordered pairs ping-pong ok"
     "smp: 4/4 cpus ticking on their own timer")
 
 scenario boot-acpi "smoke" on \
     "$BOOT_LINE" "platform: discovered via Acpi" "console: pl011 at 0x9000000" "psci 1\.[0-9]+ via hvc" \
-    "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${DEV_OK[@]}" "${SMP4_OK[@]}" "${DB_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
+    "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${DEV_OK[@]}" "${SMP4_OK[@]}" "${DB_OK[@]}" "${DISPATCH_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 scenario boot-dtb "smoke" off \
     "$BOOT_LINE" "platform: discovered via DeviceTree" "console: pl011 at 0x9000000" "${MEMORY_OK[@]}" \
-    "${TIME_OK[@]}" "${DEV_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
+    "${TIME_OK[@]}" "${DEV_OK[@]}" "${DISPATCH_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 scenario fault-data-abort "smoke test=data-abort" on \
     "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
     "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \

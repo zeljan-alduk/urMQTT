@@ -10,7 +10,7 @@
 use core::mem::offset_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::esr::{Esr, Vector};
+use crate::esr::{Esr, ExceptionClass, Vector};
 
 /// Register state at the moment of the exception.
 #[repr(C)]
@@ -38,6 +38,80 @@ const _: () = {
 impl TrapFrame {
     pub fn esr(&self) -> Esr {
         Esr(self.esr)
+    }
+
+    /// What the kernel must do with this exception.
+    pub fn classify(&self, vector: Vector) -> Event {
+        if matches!(vector, Vector::CurrentSp0Irq | Vector::CurrentSpxIrq) {
+            return Event::Irq;
+        }
+        let esr = self.esr();
+        if vector.is_synchronous()
+            && esr.class() == ExceptionClass::Brk64
+            && esr.imm16() == Some(crate::faults::BRK_RESUME)
+        {
+            return Event::ResumableBreakpoint;
+        }
+        Event::Fatal
+    }
+
+    /// Address of the instruction that trapped (or is resumed).
+    pub fn pc(&self) -> u64 {
+        self.elr
+    }
+
+    /// Resumes after the breakpoint instead of re-executing it.
+    pub fn skip_breakpoint(&mut self) {
+        self.elr += crate::faults::BRK_LEN;
+    }
+
+    /// The decoded cause of a synchronous exception, printable.
+    pub fn cause(&self, vector: Vector) -> Option<Esr> {
+        vector.is_synchronous().then(|| self.esr())
+    }
+
+    /// The faulting data or instruction address of an abort.
+    pub fn fault_address(&self, vector: Vector) -> Option<u64> {
+        (vector.is_synchronous() && self.esr().class().is_abort()).then_some(self.far)
+    }
+
+    /// The syndrome and general-purpose registers, printable (one line of
+    /// syndrome, then four registers per line).
+    pub fn registers(&self) -> Registers<'_> {
+        Registers(self)
+    }
+}
+
+/// How the kernel's handler treats an exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    /// An interrupt: dispatch it and return.
+    Irq,
+    /// The test-mode breakpoint: report, skip it and return.
+    ResumableBreakpoint,
+    /// Anything else: report and stop.
+    Fatal,
+}
+
+/// Register dump of a [`TrapFrame`].
+pub struct Registers<'a>(&'a TrapFrame);
+
+impl core::fmt::Display for Registers<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let t = self.0;
+        writeln!(
+            f,
+            "    ESR={:#018x} ELR={:#018x} FAR={:#018x} SPSR={:#010x}",
+            t.esr, t.elr, t.far, t.spsr
+        )?;
+        for (i, quad) in t.x.chunks(4).enumerate() {
+            f.write_str("   ")?;
+            for (j, r) in quad.iter().enumerate() {
+                write!(f, " x{:<2}={r:#018x}", i * 4 + j)?;
+            }
+            f.write_str("\n")?;
+        }
+        Ok(())
     }
 }
 

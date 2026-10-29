@@ -15,7 +15,7 @@ bench = false
 workspace = true
 
 [dependencies]
-urmqtt-arch-aarch64 = { path = "../arch-aarch64" }
+urmqtt-sync = { path = "../sync" }
 
 [dev-dependencies]
 proptest = "1.12"

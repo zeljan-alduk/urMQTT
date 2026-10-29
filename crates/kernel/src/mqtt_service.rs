@@ -13,11 +13,11 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use urmqtt_arch_aarch64::spsc::{Consumer, Producer};
 use urmqtt_broker::{Acl, Broker, Buf, CloseReason, Config, ConnId};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{debug, info, warn};
 use urmqtt_mqtt::{Limits, QoS};
+use urmqtt_sync::spsc::{Consumer, Producer};
 use urmqtt_tcp::{Endpoint, TcpStack};
 use urmqtt_tls::{Event, IdentityField, ServerSetup, TlsServer, TlsSession};
 
@@ -651,9 +651,9 @@ impl MqttService {
             return;
         };
         self.app.clear();
-        let t0 = urmqtt_arch_aarch64::timer::uptime_ns();
+        let t0 = urmqtt_arch::time::uptime_ns();
         let r = sess.input(data, k.pending.vec_mut(), &mut self.app);
-        dataplane::tls_time(self.me, urmqtt_arch_aarch64::timer::uptime_ns() - t0);
+        dataplane::tls_time(self.me, urmqtt_arch::time::uptime_ns() - t0);
         match r {
             Ok(Event::Established {
                 identity,

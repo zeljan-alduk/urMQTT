@@ -19,7 +19,7 @@ use rustls::{
     CertificateError, ConnectionTrafficSecrets, DigitallySignedStruct, DistinguishedName,
     HandshakeKind, KeyLog, RootCertStore, ServerConfig, SignatureScheme,
 };
-use urmqtt_arch_aarch64::sync::SpinLock;
+use urmqtt_sync::sync::SpinLock;
 
 use crate::identity::{self, IdentityField};
 use crate::record::{self, Opened, RecordError, RecordLayer, Suite};
