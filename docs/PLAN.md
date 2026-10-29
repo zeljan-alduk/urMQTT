@@ -81,11 +81,14 @@ About 38 milestones in all. Each ends as before: tests green, commit, PROGRESS
 entry, ADRs, and a report. The work stops after each milestone for the user's
 go-ahead.
 
-## Open decisions for the user
+## Decisions taken (user, 2026-10-29)
 
-1. The proposed order above: in particular, bare metal (phase 10) before the x86 optimisations, and storage v2 (phase 6) before the x86 port.
-2. X0b: ARMv8 hardware crypto on aarch64 early (it changes aarch64 numbers upwards).
-3. Vendoring x86 Limine binaries and building the `limine` host tool from source (overrides PROMPT.md §2).
-4. S2 migration: an offline `urmqtt-disk migrate` with the kernel refusing v1 (proposed), or in-place migration at boot.
-5. H2: random, rotating session-ticket keys (tickets no longer survive a reboot) instead of keys derived from the server key.
-6. The Intel test PC's hardware inventory (TODO.md), which decides the order of X13/X14.
+The user accepted every proposal ("everything as proposed, following best practice"):
+
+1. **Order:** the phases above, as written. Bare metal (phase 10) comes before the x86 optimisations, and storage v2 (phase 6) before the x86 port.
+2. **X0b:** ARMv8 hardware crypto on aarch64 early, right after X0. It changes aarch64 numbers upwards.
+3. **Limine:** vendor the x86 Limine binaries and build the `limine` host tool from its checksummed C source. ADR-043 records that this overrides PROMPT.md §2.
+4. **S2 migration: offline.** The kernel reads only the current layout and refuses an older one with a clear message naming the fix. `urmqtt-disk migrate` converts offline, with the safeguards listed in STORAGE-PLAN S2.
+5. **H2 session tickets: random keys that rotate.** A new key comes from the CSPRNG every 12 h and the previous key is still accepted for 12 h more. Tickets live at most 12 h, so none outlives its key. The keys exist only in memory: never on disk or in the image, and zeroised when retired. Tickets do not survive a broker restart; the reconnect after a restart is a full handshake, which admission control absorbs (M16).
+
+Still open: the Intel test PC's hardware inventory (TODO.md), which decides the order of X13/X14.

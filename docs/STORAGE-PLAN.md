@@ -124,7 +124,22 @@ Each milestone ends with:
   - for bare metal (X13): NVMe LBA format and NPWG/NOWS, ATA IDENTIFY logical and physical sector.
 - **Alignment:** every region to 1 MiB and to the optimal I/O size; telemetry writes to the physical block (at least 4 KiB). Unavoidable exceptions are documented, and a debug counter `misaligned_writes` is checked by smoke.
 - **Format v2:** the partition count becomes part of the layout (G4).
-- **Migration (ADR).** Proposal: since the project is pre-alpha, the kernel refuses v1 with a clear message and `urmqtt-disk migrate` converts offline, with a rollback copy of the changed metadata. The alternative, migrating in place at boot, is the more convenient but riskier path, and the ADR records why it was not chosen.
+- **Migration: offline** (decided 2026-10-29, PLAN.md decision 4).
+  - **Kernel side:** the kernel reads only the current layout. An older one is refused before anything is written, with the message `data disk is layout v1; this image needs v2: run urmqtt-disk migrate (docs/DEPLOY.md)` and a statsd reason. The kernel keeps only one parser in the TCB, and it never copies gigabytes at boot unattended.
+  - **`urmqtt-disk migrate`, following the usual practice for offline format conversion:**
+    - **Plan first:** `--dry-run` is the default. It prints the plan (old and new regions, bytes to copy, free space needed) and changes nothing; `--write` executes.
+    - **Preconditions:** a clean last shutdown, or a successful `verify` (WAL checkpointed, telemetry recovered); the tool refuses otherwise.
+    - **Order of writes:**
+      1. Back up every metadata block it will change into a rollback area on the same disk, and into a file next to the tool (`--rollback-file`).
+      2. Copy data into the new regions (copy-then-switch, in an order where a source is never overwritten before its copy is verified by CRC or hash).
+      3. Write the new superblock last, in a single atomic block write.
+    - **Recovery:** an interrupted run either leaves the old v1 disk valid, or can be finished or rolled back with `migrate --resume` or `--rollback`.
+    - **Verification:** a full `verify` of the result, plus a comparison of the row counts of every SQLite table and of the telemetry record count with the source.
+  - **Tests:**
+    - every golden v1 image migrated and verified;
+    - fault injection at every write of `migrate` (§4): each case ends in a valid v1 or a valid v2 disk, never a corrupt one;
+    - the kernel's refusal of v1 as a smoke scenario (`layout-v1-refused`, nothing written, checked by hashing the disk before and after).
+  - DEPLOY.md documents the procedure per platform: a VM image file on the host, a cloud volume attached to a helper VM, and bare metal via a Linux live USB.
 
 **Tests**
 - QEMU `logical_block_size=512,physical_block_size=4096`, and 4096/4096: zero misaligned writes.

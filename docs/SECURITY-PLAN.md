@@ -111,13 +111,17 @@ Every milestone ends with:
 **Work**
 - 0-RTT: config refusal (H1) plus a test with an early-data ClientHello (rustls client with `enable_early_data`), which the server must refuse.
 - `docs/CRYPTO.md`: traffic-secret storage, per-record key/IV derivation (M15), nonce, sequence numbers, KeyUpdate, limits, padding, alerts, `close_notify`, with RFC 8448 vectors.
-- Ticket keys:
-  - random at boot from the CSPRNG instead of derived from the server key;
-  - rotation interval with a previous key accepted for one interval;
-  - maximum lifetime;
-  - zeroisation.
-
-  An ADR covers the trade-off: tickets no longer survive a reboot.
+- **Session-ticket keys** (decided 2026-10-29, PLAN.md decision 5). Today the key is derived from the server key, which is inside the image, so anyone with a copy of the image could forge a ticket for any device identity and bypass mTLS. The new scheme:
+  - **Keys:** random (CSPRNG at boot), never derived from anything in the image, never written to disk. They live in the key slab, zeroised when retired.
+  - **Rotation:** a new key every 12 h; the previous key decrypts for 12 h more; tickets get `lifetime = 12 h`. Every ticket therefore expires before its key is dropped (RFC 8446 §4.6.1 allows up to 7 days; short-lived keys follow common practice for STEK rotation).
+  - **Ticket format:** the ticket carries a key id; an unknown or retired key id is a quiet full handshake, counted (`urmqtt.tls.resume_refused.{expired,unknown_key}`). Encryption stays AEAD (ChaCha20-Poly1305), with a fresh random nonce per ticket and the key id as associated data.
+  - **Cores:** all cores share the current and previous key through one sealed, read-mostly structure, swapped atomically at rotation.
+  - **Kept as today:** revocation is re-checked on resumption, 0-RTT stays off, and resumption keeps (EC)DHE (`psk_dhe_ke`), so resumed sessions keep forward secrecy.
+  - **Cost:** after a broker restart every device does one full handshake. A test measures this: the M16 storm scenario after a restart, refused and retried within the admission limits.
+  - **Tests:**
+    - host: rotation boundaries (issue just before rotation, resume just before and after the previous key expires), forged tickets (wrong key, flipped bit, foreign key id), zeroisation of retired keys;
+    - smoke `ticket-rotation` with a dev-only short interval (`test=ticket-rotate:60s`);
+    - smoke `ticket-forged`: a ticket made with the old image-derived key is refused.
 - **Differential testing:** for random secrets, sequence numbers, content types and lengths, our record layer must produce byte-identical records to rustls's own record layer (a host dev-dependency), and accept exactly what it accepts. Fuzz target `diff_tls_record`; OpenSSL via a host-only test is optional.
 - **Constant time:**
   - dudect-style timing tests (host) for tag verification, decryption failure paths and comparisons;
