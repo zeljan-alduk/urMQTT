@@ -20,6 +20,19 @@ in [docs/PROGRESS.md](docs/PROGRESS.md).
   - virtio-scsi disks;
   - the virtio-net NIC.
 
+## x86_64 and bare metal
+
+- [ ] Hardware inventory of the Intel test PC (16 GB), from a Linux live USB:
+  - `lscpu`;
+  - `lspci -nn`;
+  - `lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE`;
+  - `ls /sys/firmware/efi`;
+  - `mokutil --sb-state`;
+  - does it have a serial port?
+
+  This decides which NIC and storage drivers come first (docs/X86-PLAN.md, X12–X14).
+- [ ] Milestones X0 to X16 as in docs/X86-PLAN.md; the README roadmap shows their status.
+
 ## Before a real release
 
 - [ ] Replace the test minisign key (`minisign.pub`, CI secret `MINISIGN_SECRET_KEY`) with an offline, password-protected key.

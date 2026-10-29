@@ -1,7 +1,10 @@
 # x86_64 port: implementation and test plan
 
-Plan for [`PROMPT-x86_64.md`](../PROMPT-x86_64.md) (milestones X0–X11). Written
-2026-10-29 against commit `2c34019`, before any x86 code exists. Every
+Plan for [`PROMPT-x86_64.md`](../PROMPT-x86_64.md) (milestones X0–X11), plus
+a bare-metal track (X12–X16). The ISO must also boot and serve **on real
+hardware without a hypervisor**, a requirement the user added on 2026-10-29.
+The first bare-metal target is the user's Intel x86_64 PC with 16 GB of RAM.
+Written 2026-10-29 against commit `2c34019`, before any x86 code exists. Every
 "verified" statement below was checked in this repository or its pinned
 dependencies on that date. Everything else is marked **to verify** and has a
 step in the milestone that needs it.
@@ -23,6 +26,9 @@ contradict assumptions in PROMPT-x86_64.md.
 | F6 | Arch coupling outside `arch-aarch64` is small and mostly arch-neutral. | `mm`, `log`, `store` and `tls` use only `sync::{SpinLock, OnceCell}`, `paging::{FrameSource, PAGE_SIZE}` and `cpu::irq_save/restore`. Only `kernel` has assembly: `smp.rs` 15 sites, `boot.rs` 14, `vm.rs` 9, `jitter.rs` 8, `dataplane.rs` 6, `netproto`/`devices`/`db` 5 each, `trap.rs` 4, and others ≤ 3. | X0 is a contained refactor: about 20 kernel files plus 4 crates. |
 | F7 | CRC-32C is a byte-wise table; Toeplitz is bit-serial. | `crates/store/src/crc.rs:29`, `crates/net/src/rss.rs`. | Both are dispatch candidates on both architectures. |
 | F8 | The struct-size asserts are `const` asserts. | 10 `size_of` assertions in the crates. | They hold on x86_64 automatically if layouts match; X8 checks it by compiling, not by trust. |
+| F10 | **"Blank" disk detection is only safe inside a VM.** A data disk is formatted when its urMQTT superblock area is all zeros and it has no MBR/GPT. | `store::layout::Superblock::decode` (`Ok(None)` = all zero) and `kernel::devices::is_partitioned`. | A whole-disk filesystem without a partition table can look blank. ext4, for one, leaves its first 1024 bytes zero, so it would be formatted. On bare metal this is data loss. X12 adds signature checks and an explicit disk selection. |
+| F11 | **GICv3 ITS (MSI on ARM servers) is not implemented.** Only GICv2m frames are driven. | `kernel/src/devices.rs:552` ("msi-x: not available … blk polled"). | ARM bare metal (Ampere servers) needs an ITS driver (X15). |
+| F12 | **Only virtio devices have drivers.** | `crates/virtio`: net, blk, scsi, rng. | Bare metal needs native NIC and storage drivers (X13, X14) and a hardware inventory first (X12). |
 | F9 | Local x86 tooling is present. | `qemu-system-x86_64` 11.1.2, `edk2-x86_64-code.fd`, SeaBIOS `bios-256k.bin`, CPU models `EPYC-Milan/Genoa`, `Icelake-Server`; Homebrew LLVM clang. | Bring-up and smoke can start on the M4 under TCG. |
 
 ---
@@ -334,6 +340,116 @@ Then update README, DEPLOY (VM CPU types: Proxmox `host` / `x86-64-v2-AES` / `x8
 
 ---
 
+## 3b. Bare-metal track (X12–X16)
+
+The VM milestones above give a kernel that runs on x86_64 and aarch64 with
+virtio devices. On real hardware the firmware, console, storage and NIC are
+different, and a mistake can destroy data on a real disk. Each step is first
+built against a QEMU device model where one exists, then accepted only on real
+hardware, starting with the user's Intel PC. Code paths that have never run on
+real hardware stay marked experimental.
+
+### X12 — Bare-metal foundation · M
+
+**Work**
+- **Boot media.** The universal ISO (X10) is made hybrid, so `dd` onto a USB stick boots by UEFI and, on x86, BIOS (Limine `bios-install`, `xorriso -isohybrid-gpt-basdat`, **to verify**).
+- **Secure Boot.** Most PCs ship with it on and Limine is not Microsoft-signed. Document both paths: turn Secure Boot off, or sign `BOOTX64.EFI` with an own key enrolled in the firmware `db` (`sbsign`), with the config pinned by `limine enroll-config`.
+- **Console without serial.** Most PCs have no serial port, so the framebuffer is the primary console. It needs:
+  - readable fonts at high resolutions;
+  - a persistent last-screen summary (IP address, listener, errors) after the scrolling log;
+  - syslog over UDP once the network is up.
+- **`hwreport` boot mode** (`cmdline: hwreport`, safe: it reads only). On screen and over syslog it shows:
+  - CPU and CPUID;
+  - the firmware memory map;
+  - the ACPI table list;
+  - every PCI function with vendor:device, class and driver status (`driver: yes/no`);
+  - disks with model, serial and size, plus the partition and signature scan.
+
+  This is the first thing run on any new machine.
+- **Data-disk safety** (F10):
+  - Detect signatures before calling a disk blank: MBR/GPT, ext2/3/4, XFS, btrfs, NTFS, FAT, exFAT, LVM, mdraid, LUKS, ZFS labels, swap, ISO 9660. Any match: never format.
+  - A blank check reads the first and last 1 MiB, not one block.
+  - Prod on bare metal formats only a disk named in config: `storage.data_disk = { serial = "…" }` or `{ model = "…", size_gb = … }`, plus `storage.allow_format = true`. A VM keeps today's behaviour, chosen by an explicit config key, never by guessing.
+- **More CPUs.** MAX_CPUS goes from 64 to 256 (x2APIC; desktop SMT and hybrid P/E-core CPUs report many threads). Topology is logged; NUMA is logged and ignored for now.
+- **Power.** ACPI reset and S5 (D5) become essential on real hardware.
+
+**Tests**
+- Host tests: signature detection against a fixture per filesystem (images made with `mkfs.*` in CI on Linux and stored as small sparse fixtures), and the selection logic.
+- A new fuzz target, `disk_probe`.
+- Smoke scenarios:
+  - `baremetal-refuse-ext4`: a QEMU data disk holding a whole-disk ext4 must not be formatted;
+  - `baremetal-select-serial`: two disks, and only the one with the configured serial is used;
+  - `hwreport` under QEMU (q35 and pc, aarch64 virt).
+
+**Real hardware (Intel PC)**
+1. Boot from USB by UEFI (and BIOS if the firmware has CSM).
+2. Run `hwreport` and record its output in `docs/HARDWARE.md`.
+3. Confirm that no disk was written (hashes of the first and last MiB before and after, taken from a Linux live USB).
+
+### X13 — Storage drivers: NVMe and AHCI · M
+
+**Work**
+- **NVMe:** admin queue plus one I/O queue pair, polled first and then MSI-X. Identify, namespace 1, Read/Write/Flush, and FUA for the telemetry log's sector writes. Controller reset and timeouts.
+- **AHCI/SATA:** one port at a time, NCQ off at first, FLUSH CACHE EXT.
+- Both plug in behind the existing `DataDisk` abstraction, next to virtio-blk and virtio-scsi.
+- Write-cache semantics are checked against what the crash tests assume (flush = durable).
+
+**Tests**
+- QEMU `-device nvme` and `ich9-ahci` with the full storage set from the smoke suite: blk self-test, db-bench, db-crash and verify, log-crash, log-tear.
+- A fuzz target for NVMe completion parsing (a malicious device must not corrupt memory).
+- **Real hardware:** the Intel PC's NVMe or SATA disk, the one named in config. Run db-bench and the crash tests with a real power cut (pull the cable during telemetry writes, then verify on the next boot).
+
+### X14 — NIC drivers for x86 hardware · L
+
+Which drivers, and in what order, follows the Intel PC's `hwreport`; its
+onboard NIC comes first.
+
+| Family | Typical hardware | QEMU model | Plan |
+|---|---|---|---|
+| Intel `e1000e` | I217/I218/I219 onboard (desktops, laptops), 82574L | `e1000e` (82574L only) | first if the PC has an I219: develop on QEMU's 82574L, then adapt to the I219 PHY on the PC |
+| Intel `igb` | I210/I211/I350 (mini PCs, servers) | `igb` (82576) | QEMU-testable end to end |
+| Intel `igc` | I225/I226 2.5G (newer boards) | none | hardware only |
+| Realtek `r8169`/`r8125` | RTL8111/8168, RTL8125 (very common on consumer boards) | none (QEMU's rtl8139 is a different chip) | hardware only; written from public datasheets and register documentation, not copied from GPL code |
+| Intel `ixgbe`, Mellanox `mlx5` | 10/25G servers | none | later |
+
+**Each driver:** RX/TX descriptor rings, MSI-X (MSI fallback), link state, MAC from EEPROM/NVM, checksum offload off at first. It sits behind the same NIC interface the data plane uses for virtio-net.
+
+**Tests**
+- QEMU models: every network and MQTT smoke scenario (net-echo, mqtt-plain, mqtt-tls, storm), with `e1000e` and `igb` instead of virtio-net.
+- A fuzz target for RX descriptor handling.
+- **Real hardware:** the Intel PC on the LAN: DHCP lease; the mqtt-scenarios set from the Mac; loadgen at 10k connections (bytes per connection); a 24 h soak with link down/up.
+
+### X15 — aarch64 bare metal · L (optional, needs hardware)
+
+**Work**
+- **GICv3 ITS for MSI-X.** QEMU `virt` under TCG has an ITS, so this is testable now.
+- **Ampere servers (Altra, AmpereOne):** UEFI and ACPI, the PCIe quirks, and the server NICs from X14 (Intel; Mellanox later).
+- **Raspberry Pi 4 on bare metal** through the community UEFI firmware. It needs:
+  - the GIC-400, already supported (ADR-039);
+  - a GENET Ethernet driver;
+  - SDHCI (EMMC2) for the SD card.
+
+  The Pi 5 (RP1 behind PCIe) only after that.
+
+**Tests:** the ITS under TCG with the full smoke suite; real hardware only if the user has a machine.
+
+### X16 — Hardware validation and compatibility list · S (continuous)
+
+**Work**
+- `docs/HARDWARE.md` lists every machine tried with:
+  - firmware version;
+  - boot mode and Secure Boot state;
+  - `hwreport` summary;
+  - drivers used;
+  - which scenarios passed;
+  - measured numbers (bytes per connection, handshakes/s, db-bench).
+- A written procedure for testing a new machine, so others can add rows.
+- A `test=hw-acceptance` boot mode runs the in-guest self-tests that are safe on real hardware: crypto KATs, `simd-irq`, IPI pairs, timer, NIC loopback where supported, and blk self-test **only** on the configured data disk.
+
+**Accept:** the Intel PC row is complete, every claim in the README about bare metal points to a row there, and anything not on the list is described as untested.
+
+---
+
 ## 4. Test matrix
 
 **x86 smoke matrix** (PROMPT §7; `make smoke ARCH=both`):
@@ -359,20 +475,34 @@ Then update README, DEPLOY (VM CPU types: Proxmox `host` / `x86-64-v2-AES` / `x8
 
 aarch64 keeps all 79 scenarios at every milestone.
 
+**Bare metal** (X12–X16). The QEMU device models listed below run in CI, and each driver is also accepted on real hardware:
+
+| Hardware | QEMU model in CI | Real machine |
+|---|---|---|
+| NVMe, AHCI | `nvme`, `ich9-ahci` | Intel PC |
+| NIC | `e1000e`, `igb` | Intel PC onboard NIC |
+| GICv3 ITS | `virt` (TCG) | Ampere, if available |
+| USB boot, framebuffer console, Secure Boot | — | Intel PC only |
+
 ---
 
 ## 5. Order and dependencies
 
 ```
 X0 ─► X0b ─► X1 ─► X2 ─► X3 ─┐
-                   │         ├─► X5 ─► X6 ─► X7 ─► X8 ─► X9 ─► X11
-                   │   X4 ───┘                       │
-                   └─(spike)────────────────────────► X10
+                   │         ├─► X5 ─► X6 ─► X7 ─► X8 ─► X10 ─► X12 ─► X13 ─► X14 ─► X9 ─► X11
+                   │   X4 ───┘                       ▲                                 │
+                   └─(spike)─────────────────────────┘                    X15 (optional, after X12)
+                                                         X16 runs alongside from X12 on
 ```
 
 - X3 and X4 can be swapped; X5 needs X4 (IPIs, timer).
 - Platform parsing for x86 ACPI (part of X6) is pulled forward into X2 as far as needed (MADT for the CPU count, SPCR for the UART).
 - X10's boot-config spike happens in X2, so the riskiest image question is answered early.
+- Proposed change to PROMPT-x86_64.md's order, because bare metal is a requirement:
+  - X10 (the universal ISO) and the bare-metal track come **before** X9 (optimisations). A fast kernel that cannot drive the PC's NIC is not useful.
+  - X9 measurements on the Intel PC then come from real hardware, not only from a VM.
+- `hwreport` (part of X12) is useful as early as X7 and can be pulled forward. The Intel PC's NIC and disk models decide what X13/X14 build first.
 
 ---
 
@@ -388,13 +518,24 @@ X0 ─► X0b ─► X1 ─► X2 ─► X3 ─┐
 | BIOS boot on the GPT raw image | the universal raw image may not boot on BIOS | verify early (X2 spike); fall back to a hybrid MBR or document UEFI-only for the raw image |
 | Reproducibility of `limine bios-install` and two kernels | repro job fails | run the step under `SOURCE_DATE_EPOCH`; compare bytes; remove any nondeterminism before X10 is accepted |
 | The refactor regresses aarch64 | the primary platform breaks | X0 changes behaviour nowhere; full smoke, bench and bytes-per-connection checks at every milestone |
-| No Intel hardware for measurements | X11 Intel numbers missing | report AMD only, clearly labelled; Intel as an open item |
+| No Intel hardware for measurements | X11 Intel numbers missing | resolved: the user's Intel PC (16 GB) is the bare-metal and measurement machine; AMD numbers come from the CI runner if it has KVM |
+| A real disk gets formatted by mistake | data loss on the test PC or a user's machine | F10: signature scan, two-ended blank check, format only the disk named in config; `hwreport` never writes; the X12 hardware test checks hashes |
+| The PC's NIC has no QEMU model (I219, Realtek, I225) | driver developed blind | `hwreport` first; register-level logging; develop against QEMU's 82574L where the family matches; the user runs test images and sends logs |
+| Firmware quirks (ACPI tables, MSI-X, Secure Boot, no serial) | boot fails silently on hardware | framebuffer console with a persistent summary; ACPI parser fuzzed against real dumps; Secure Boot paths documented |
 | Total size: roughly 10–12 milestone-sized steps | long project | stop and report after every milestone, as required |
 
 ---
 
 ## 7. Open questions for the user
 
-1. Is there a Linux x86_64 host with KVM (Intel, AMD, or both) for X9/X11? Without one, the GitHub runner (AMD EPYC, if D7 holds) is the only real-hardware source.
+1. **Answered:** an Intel x86_64 PC with 16 GB of RAM is the bare-metal test machine. Before X12, its inventory helps. From a Linux live USB (e.g. Ubuntu), send:
+   - `lscpu`;
+   - `lspci -nn`;
+   - `lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE`;
+   - `ls /sys/firmware/efi` (does it exist?);
+   - `mokutil --sb-state`;
+   - whether it has a serial port.
+
+   The same machine, booted into that live Linux, can also serve as the KVM host for the X9/X11 measurements.
 2. X0b: enable ARMv8 hardware crypto on aarch64 now (it changes aarch64 numbers, upwards) rather than in X9?
 3. Is it OK to vendor x86 Limine binaries and build the `limine` host tool from its C source (overriding PROMPT.md §2, via ADR)?

@@ -861,6 +861,37 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M16** Hardening & ops | threat model; reconnect storms beyond the heap refused cleanly, memory returned |
 | ✅ | **M17** Deployment | bit-identical rebuilds checked in CI, raw disk image, minisign, KVM/Proxmox/Hetzner guide |
 
+### Next: x86_64, one multi-arch ISO, bare metal
+
+Planned in [PROMPT-x86_64.md](PROMPT-x86_64.md). The detailed implementation and test plan, with findings,
+decisions, risks and the per-milestone scenarios, is in [docs/X86-PLAN.md](docs/X86-PLAN.md). The goal is one ISO
+that boots on aarch64 and x86_64, in VMs **and on bare-metal hardware**. The first bare-metal target is an Intel PC.
+Nothing below is implemented yet.
+
+| | Milestone | Acceptance |
+|---|---|---|
+| 📋 | **X0** Arch facade & dispatch | aarch64 unchanged (smoke, bench, bytes/connection, repro); no aarch64 assembly outside `arch-aarch64` |
+| 📋 | **X0b** aarch64 hardware crypto | ARMv8 AES/PMULL/SHA2/CRC32 selected at boot (today all software), KATs + differential fuzzing equal, measured faster |
+| 📋 | **X1** x86_64 builds | `make build ARCH=x86_64`, clippy on both targets, FP/SIMD policy decided, CI KVM probe |
+| 📋 | **X2** x86 boot & exceptions | q35+OVMF and pc+SeaBIOS boot; decoded fault reports; x86-64-v2 check refuses old CPUs with a clear message |
+| 📋 | **X3** x86 memory protection | NX, W^X, WP, SMEP/SMAP/UMIP, locked tables, guard pages; CET when available |
+| 📋 | **X4** x86 interrupts & time | x2APIC, TSC-deadline, kvmclock, measured IRQ latency, clock monotonic across cores |
+| 📋 | **X5** x86 SMP | `run-smp ARCH=x86_64 N=8`, IPI ping-pong between all pairs |
+| 📋 | **X6** x86 platform discovery | ACPI (MADT, MCFG, FADT, HPET, SPCR) summaries on q35 and pc; fuzzed |
+| 📋 | **X7** x86 PCI & virtio | ECAM and port-I/O config; blk/scsi/net/rng self-tests on q35 and pc |
+| 📋 | **X8** x86 feature parity | all MQTT, TLS, DB, telemetry, crash and storm scenarios on x86_64; data disks portable across architectures |
+| 📋 | **X10** One multi-arch ISO | the same ISO boots on aarch64 UEFI, x86_64 UEFI and BIOS; bit-identical rebuilds |
+| 📋 | **X12** Bare-metal foundation | hybrid ISO boots from a USB stick; `hwreport` mode; disks with existing data never formatted; framebuffer console |
+| 📋 | **X13** NVMe & AHCI | storage and crash scenarios on QEMU models and on the test PC, including a real power cut |
+| 📋 | **X14** Hardware NICs | e1000e/igb (QEMU-tested), then the test PC's onboard NIC (Intel I219/I225 or Realtek); MQTT and storm on the LAN |
+| 📋 | **X15** aarch64 bare metal (optional) | GICv3 ITS for MSI-X; Ampere servers; Raspberry Pi 4 via UEFI firmware |
+| 📋 | **X16** Hardware compatibility list | `docs/HARDWARE.md` (to be created) with a row per machine; bare-metal claims only for listed machines |
+| 📋 | **X9** x86 CPU optimisations | AES-NI, SHA-NI, CRC32, AVX2, VAES chosen at boot; KATs + differential fuzzing; on by default only if faster on real hardware |
+| 📋 | **X11** Measurements & docs | bytes/connection, handshakes/s and scaling on real x86 hardware; every documented number backed by a PROGRESS entry |
+
+The order puts the universal ISO and bare metal before the x86 optimisations: a fast kernel that cannot drive the
+machine's NIC is not useful. riscv64 is a later, separate step (PROMPT-x86_64.md §9).
+
 Later: MQTT 5.0, QoS 2, IPv6, cold-session compression, SQLite isolation at EL0, an export bridge,
 and ACPI-only validation on real ARM clouds.
 
