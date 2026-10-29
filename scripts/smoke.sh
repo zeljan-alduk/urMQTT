@@ -60,18 +60,21 @@ clean() { LC_ALL=C sed -e $'s/\x1b\\[[0-9;?=]*[A-Za-z]//g' -e $'s/\r//g' "$1"; }
 check() {
     local name=$1 log=$2 status=$3
     shift 3
-    local ok=1 pat
+    local ok=1 pat text="$log.clean"
     if [[ $status -ne 0 ]]; then
         echo "  ✗ QEMU exit status $status (124 = timeout after ${TIMEOUT}s)"
         ok=0
     fi
+    # Grep a file, not `clean | grep -q`: with pipefail, grep -q quitting at
+    # the first match can SIGPIPE the writer and turn a match into a miss.
+    clean "$log" >"$text"
     for pat in "$@"; do
         if [[ $pat == NOT:* ]]; then
-            if clean "$log" | grep -Eq -- "${pat:4}"; then
+            if grep -Eq -- "${pat:4}" "$text"; then
                 echo "  ✗ unexpected: ${pat:4}"
                 ok=0
             fi
-        elif ! clean "$log" | grep -Eq -- "$pat"; then
+        elif ! grep -Eq -- "$pat" "$text"; then
             echo "  ✗ missing: $pat"
             ok=0
         fi
