@@ -874,7 +874,7 @@ PROMPT-x86_64.md, plan in docs/X86-PLAN.md. AArch64 only; no behaviour change (A
   The differences are within run-to-run noise. The network column moves by a few percent between runs in both directions.
 - **Bytes per idle connection** (dev image, 32 MiB heap, 4 vCPU, `urmqtt-loadgen hold --clients 10000 --subscribe 1`, mTLS with one subscription each), steady state: **512 B → 511 B** in heap blocks (487 → 486 B requested) at 9 936 / 9 937 connections. Both images were measured back to back under the same conditions.
 - **Kernel ELF size:** dev 2 417 968 → 2 423 608 B (+5 640), prod 2 249 504 → 2 255 192 B (+5 688). The facade step alone added 176 B; the rest is the dispatch table, its formatting and the seal.
-- `make repro`: see the commit's CI run (both builds identical).
+- `make repro` (prod, c92b912): kernel ELF, ISO and raw image identical across two builds (ELF sha256 `203a8ef9…`).
 
 **Deviations from the plan** (X86-PLAN X0 status):
 - The paging builder stays the AArch64 `Mapper` behind `arch::paging`. A neutral one is designed in X1 against the x86 format.
