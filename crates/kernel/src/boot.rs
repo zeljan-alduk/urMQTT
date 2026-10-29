@@ -363,6 +363,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     if let Err(msg) = selftest::memory() {
         fatal(msg);
     }
+    vm::enable_heap_caches();
     // Interrupts and time (M3). Device mappings must precede the lock.
     let Some(intr) = s.interrupts else {
         fatal("no GICv3/timer description in DTB or ACPI");
@@ -426,18 +427,40 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     // core takes the store over afterwards.
     let restored = crate::db::init(s.options.db_test);
     smp_bringup(&mut s);
-    crate::db::start(smp::count());
+    // With durable storage and two or more CPUs, the last CPU is the DB
+    // core; every other CPU is a data core (M13, ADR-032).
+    let cpus = smp::count().max(1);
+    let data_cores = if crate::db::active() && cpus >= 2 {
+        cpus - 1
+    } else {
+        cpus
+    };
+    crate::db::start(cpus, data_cores);
     if s.options.db_test == Some(crate::cmdline::DbTest::LogCrash) {
-        crate::db::start_log_crash(smp::count());
+        crate::db::start_log_crash(cpus);
     }
+    crate::dataplane::init(data_cores);
+    crate::netproto::prepare(restored.map(alloc::sync::Arc::new));
+    for cpu in 1..data_cores {
+        smp::start_data_core(cpu);
+    }
+    info!(
+        "dataplane: {data_cores} data core(s), each with its own network stack, TLS and broker shard"
+    );
 
     urmqtt_log::raw(format_args!("URMQTT READY\n"));
+    if let Some(level) = s.options.log_level {
+        info!("log: level {level:?} from the command line");
+        urmqtt_log::set_level(level);
+    }
     if s.options.smoke && !s.options.serve {
         power::off();
     }
-    // The boot CPU runs the network (M7 prototype: one core, one queue);
-    // the other cores idle until the data plane spreads out (M13).
-    crate::netproto::run(urmqtt_config::CONFIG.env == "dev", restored)
+    crate::netproto::run(
+        0,
+        urmqtt_config::CONFIG.env == "dev",
+        crate::netproto::take_restored(),
+    )
 }
 
 const AP_TIMEOUT_NS: u64 = 2_000_000_000;

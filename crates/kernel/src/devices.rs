@@ -420,6 +420,7 @@ pub fn net_selftest() -> Result<(), &'static str> {
     let deadline = timer::uptime_ns() + 500_000_000;
     let mut buf = [0u8; 1514];
     while timer::uptime_ns() < deadline {
+        net.flush();
         if let Ok(Some(n)) = net.recv(&mut buf)
             && n >= 42
             && buf.get(12..14) == Some(&ETH_ARP[..])

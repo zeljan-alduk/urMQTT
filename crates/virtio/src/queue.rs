@@ -192,6 +192,28 @@ impl SplitQueue {
         Ok(head)
     }
 
+    /// Whether the device has completed a chain not yet popped.
+    pub fn has_used(&self) -> bool {
+        let used_idx: u16 = self.load(self.layout.used + 2);
+        used_idx != self.last_used
+    }
+
+    /// The descriptor `add` will use next for a one-descriptor chain, so a
+    /// driver can fill the buffer that belongs to it first.
+    pub fn next_free(&self) -> Option<u16> {
+        (self.num_free > 0).then_some(self.free_head)
+    }
+
+    /// Whether the device wants a notification for newly available buffers
+    /// (`VIRTQ_USED_F_NO_NOTIFY` clear, virtio 1.x §2.7.10).
+    pub fn device_wants_notify(&self) -> bool {
+        // The new available index must be visible before reading the flag
+        // the device sets while it is already processing.
+        fence(Ordering::SeqCst);
+        let flags: u16 = self.load(self.layout.used);
+        flags & 1 == 0
+    }
+
     /// Returns the next completed chain as (head id, bytes written by the
     /// device), freeing its descriptors.
     pub fn pop_used(&mut self) -> Result<Option<(u16, u32)>, QueueError> {

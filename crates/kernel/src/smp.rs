@@ -70,6 +70,7 @@ const WORK_PING_ALL: usize = 1;
 const WORK_DONE: usize = 2;
 const WORK_DB: usize = 3;
 const WORK_LOG_WRITER: usize = 4;
+const WORK_DATAPLANE: usize = 5;
 
 /// Logical index of the executing CPU.
 pub fn current() -> usize {
@@ -284,6 +285,7 @@ pub fn idle_loop(me: &'static PerCpu) -> ! {
             }
             WORK_DB => crate::db::run_core(),
             WORK_LOG_WRITER => crate::db::log_writer(current()),
+            WORK_DATAPLANE => crate::netproto::run_ap(current()),
             _ => {}
         }
         // Relaxed: only selects between sleeping and spinning.
@@ -305,11 +307,24 @@ pub fn start_log_writer(cpu: usize) {
     start_work(cpu, WORK_LOG_WRITER);
 }
 
+/// Makes `cpu` a data core (its own network loop and broker shard).
+pub fn start_data_core(cpu: usize) {
+    start_work(cpu, WORK_DATAPLANE);
+}
+
 fn start_work(cpu: usize, work: usize) {
     let Some(pc) = CPUS.get(cpu) else { return };
     // Release: everything prepared for the work item is visible to it.
     pc.work.store(work, Ordering::Release);
     gic::send_sgi(SGI_WAKE, mpidr_of(cpu));
+}
+
+/// Sends the wake-up SGI to `cpu` (its handler does nothing; leaving WFI
+/// is the point).
+pub fn send_wake(cpu: usize) {
+    if cpu < MAX_CPUS {
+        gic::send_sgi(SGI_WAKE, mpidr_of(cpu));
+    }
 }
 
 fn mpidr_of(cpu: usize) -> u64 {

@@ -4,7 +4,7 @@
 //! - [`frames::FrameAllocator`]: bitmap allocator for all physical RAM.
 //! - [`buddy::BuddyHeap`] behind [`LockedHeap`]: the kernel `GlobalAlloc`.
 //!
-//! **Status:** per-CPU slabs and packet pools arrive in M13.
+//! - [`CachedHeap`]: per-CPU caches of small blocks in front of it (M13).
 
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_code)]
@@ -16,7 +16,10 @@
 )]
 
 pub mod buddy;
+pub mod cached;
 pub mod frames;
+
+pub use cached::CachedHeap;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;

@@ -14,5 +14,9 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[dependencies]
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"] }
+
 [lints]
 workspace = true

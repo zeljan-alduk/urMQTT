@@ -70,6 +70,9 @@ pub struct Config {
     /// Accepted PUBLISHes on these topic filters go to the telemetry log
     /// ([`Broker::drain_telemetry`]).
     pub telemetry: &'static [&'static str],
+    /// Other broker shards exist: every message routed from here is also
+    /// handed out for them ([`Broker::drain_routes`], M13).
+    pub fanout: bool,
 }
 
 /// A change to durable broker state, for the DB core (ADR-030).
@@ -185,6 +188,7 @@ pub struct Broker {
     scratch: Vec<(SessionId, QoS)>,
     ops: Vec<PersistOp>,
     telemetry: Vec<Msg>,
+    routes: Vec<(Msg, QoS, bool)>,
 }
 
 /// Stored topics are re-checked on restore: limits may have changed.
@@ -211,7 +215,21 @@ impl Broker {
             scratch: Vec::new(),
             ops: Vec::new(),
             telemetry: Vec::new(),
+            routes: Vec::new(),
         }
+    }
+
+    /// Takes the messages routed here since the last call, for the other
+    /// shards: (message, publish QoS, retain).
+    pub fn drain_routes(&mut self) -> alloc::vec::Drain<'_, (Msg, QoS, bool)> {
+        self.routes.drain(..)
+    }
+
+    /// Routes a message accepted by another shard to this shard's
+    /// subscribers. A retained message updates this shard's replica; the
+    /// originating shard alone persists it.
+    pub fn route_remote(&mut self, msg: &Msg, qos: QoS, retain: bool) {
+        self.route_local(msg, qos, retain, false);
     }
 
     /// Takes the accepted telemetry PUBLISHes since the last call (in order).
@@ -790,12 +808,21 @@ impl Broker {
 
     /// Delivers `msg` to every matching subscriber; retains it if asked.
     fn route(&mut self, msg: &Msg, qos: QoS, retain: bool) {
+        if self.cfg.fanout {
+            self.routes.push((msg.clone(), qos, retain));
+        }
+        self.route_local(msg, qos, retain, true);
+    }
+
+    fn route_local(&mut self, msg: &Msg, qos: QoS, retain: bool, origin: bool) {
         if retain {
             self.topics.set_retained(&msg.topic, msg.clone(), qos);
-            self.emit(PersistOp::Retain {
-                msg: msg.clone(),
-                qos: qos.min(QoS::AtLeastOnce),
-            });
+            if origin {
+                self.emit(PersistOp::Retain {
+                    msg: msg.clone(),
+                    qos: qos.min(QoS::AtLeastOnce),
+                });
+            }
         }
         let mut subs = core::mem::take(&mut self.scratch);
         self.topics.subscribers(&msg.topic, &mut subs);

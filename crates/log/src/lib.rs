@@ -11,7 +11,7 @@ pub mod fbcon;
 pub mod pl011;
 
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use urmqtt_arch_aarch64::sync::SpinLock;
 pub use urmqtt_config::LogLevel as Level;
@@ -36,6 +36,23 @@ static EMERGENCY_UART: AtomicUsize = AtomicUsize::new(0);
 
 /// Most verbose level that is emitted, from the build-time configuration.
 pub const MAX_LEVEL: Level = urmqtt_config::CONFIG.observability.log_level;
+
+/// Run-time level (`log=` on a dev command line); never above `MAX_LEVEL`.
+static LEVEL: AtomicU8 = AtomicU8::new(MAX_LEVEL as u8);
+
+/// Lowers (never raises past the build-time maximum) the emitted level.
+pub fn set_level(level: Level) {
+    let l = level.min(MAX_LEVEL);
+    // Relaxed: a filter; a line logged at the old level during the switch
+    // is harmless.
+    LEVEL.store(l as u8, Ordering::Relaxed);
+}
+
+/// Whether `level` is currently emitted.
+pub fn enabled(level: Level) -> bool {
+    // Relaxed: see `set_level`.
+    level <= MAX_LEVEL && (level as u8) <= LEVEL.load(Ordering::Relaxed)
+}
 
 pub fn set_uart(uart: Pl011, base: usize) {
     SINKS.lock().uart = Some(uart);
@@ -125,7 +142,7 @@ const fn tag(level: Level) -> &'static str {
 
 /// Writes one log line if `level` is enabled.
 pub fn log(level: Level, args: fmt::Arguments<'_>) {
-    if level > MAX_LEVEL {
+    if !enabled(level) {
         return;
     }
     let mut locked = Locked::acquire();

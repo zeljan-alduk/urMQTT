@@ -30,6 +30,7 @@ fn cfg() -> Config {
         acl: ACL,
         persist: false,
         telemetry: &["devices/+/telemetry/#"],
+        fanout: false,
     }
 }
 
@@ -912,4 +913,54 @@ fn telemetry_topics_are_handed_to_the_log() {
     assert_eq!(&*got[0].topic, "devices/d1/telemetry/temp");
     assert_eq!(&*got[0].payload, b"21.5");
     assert!(b.drain_telemetry().next().is_none());
+}
+
+/// Two shards connected the way the kernel connects them: whatever one
+/// routes, the other routes too (subscribers, retained replica).
+#[test]
+fn shards_fan_out_publishes_and_retained_messages() {
+    let shard = || {
+        Broker::new(Config {
+            fanout: true,
+            persist: true,
+            ..cfg()
+        })
+    };
+    let (mut a, mut b) = (shard(), shard());
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    svc.subscribe(&mut b, 1, &[("devices/+/telemetry/#", QoS::AtLeastOnce)], 0);
+    let (mut d1, _) = Client::connect(&mut a, "d1", true, None, 0);
+    d1.publish(
+        &mut a,
+        "devices/d1/telemetry/t",
+        b"1",
+        QoS::AtLeastOnce,
+        false,
+        0,
+    );
+    d1.publish(&mut a, "devices/d1/fw", b"9", QoS::AtLeastOnce, true, 0);
+    for (m, q, r) in a.drain_routes().collect::<Vec<_>>() {
+        b.route_remote(&m, q, r);
+    }
+    assert_eq!(
+        svc.recv(&mut b),
+        vec![publish("devices/d1/telemetry/t", b"1", 1, Some(1), false)]
+    );
+    // The retained replica on shard b serves new subscribers there; only
+    // shard a (the origin) persists it.
+    let got = svc.subscribe(&mut b, 2, &[("devices/+/fw", QoS::AtLeastOnce)], 0);
+    assert!(
+        got.contains(&publish("devices/d1/fw", b"9", 1, Some(2), true)),
+        "{got:?}"
+    );
+    assert!(
+        a.drain_persist()
+            .any(|op| matches!(op, PersistOp::Retain { .. }))
+    );
+    assert!(
+        !b.drain_persist()
+            .any(|op| matches!(op, PersistOp::Retain { .. }))
+    );
+    // Remote routes are not fanned out again.
+    assert!(b.drain_routes().next().is_none());
 }

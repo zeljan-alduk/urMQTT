@@ -1,8 +1,14 @@
 //! virtio-net (virtio 1.x §5.1), one RX/TX queue pair, no offloads.
+//!
+//! Transmit is asynchronous: each TX descriptor has its own bounce buffer,
+//! completed ones are reclaimed lazily, and the device is kicked once per
+//! batch ([`VirtioNet::queue`] + [`VirtioNet::flush`]) and only when it asks
+//! for notifications. Received buffers are recycled the same way (M13:
+//! one VM exit per batch instead of two per frame).
 
 use crate::queue::{Buf, DmaRegion, SplitQueue};
 use crate::transport::Transport;
-use crate::{Env, F_VERSION_1, VirtioError, wait_used};
+use crate::{Env, F_VERSION_1, VirtioError};
 
 pub const F_MAC: u64 = 1 << 5;
 pub const F_STATUS: u64 = 1 << 16;
@@ -16,8 +22,8 @@ pub const BUF_LEN: usize = 2048;
 pub const MTU_FRAME: usize = 1514;
 const RX_QUEUE: u16 = 0;
 const TX_QUEUE: u16 = 1;
-const RX_BUFFERS: u16 = 64;
-const TX_TIMEOUT_NS: u64 = 1_000_000_000;
+const RX_BUFFERS: u16 = 256;
+const TX_BUFFERS: u16 = 256;
 
 pub struct VirtioNet {
     t: Transport,
@@ -26,16 +32,21 @@ pub struct VirtioNet {
     rx_notify: usize,
     tx_notify: usize,
     rx_bufs: DmaRegion,
-    tx_buf: DmaRegion,
+    tx_bufs: DmaRegion,
+    /// Buffers made available since the last kick.
+    rx_unkicked: bool,
+    tx_unkicked: bool,
     pub mac: [u8; 6],
     pub features: u64,
+    /// Frames dropped because every TX descriptor was in flight.
+    pub tx_full: u64,
 }
 
 impl VirtioNet {
     pub fn new<E: Env>(t: Transport, env: &E) -> Result<Self, VirtioError> {
         let features = t.init(env, F_MAC | F_STATUS, F_VERSION_1)?;
         let rx_size = RX_BUFFERS.min(t.queue_max(RX_QUEUE));
-        let tx_size = 16.min(t.queue_max(TX_QUEUE));
+        let tx_size = TX_BUFFERS.min(t.queue_max(TX_QUEUE));
         let alloc_q = |size: u16| -> Result<SplitQueue, VirtioError> {
             let mem = env
                 .dma_alloc(crate::queue::Layout::new(size).total)
@@ -52,7 +63,9 @@ impl VirtioNet {
         let rx_bufs = env
             .dma_alloc(BUF_LEN * usize::from(rx_size))
             .ok_or(VirtioError::NoDma)?;
-        let tx_buf = env.dma_alloc(BUF_LEN).ok_or(VirtioError::NoDma)?;
+        let tx_bufs = env
+            .dma_alloc(BUF_LEN * usize::from(tx_size))
+            .ok_or(VirtioError::NoDma)?;
         let mut mac = [0u8; 6];
         if features & F_MAC != 0 {
             for (i, b) in mac.iter_mut().enumerate() {
@@ -75,9 +88,12 @@ impl VirtioNet {
             rx_notify,
             tx_notify,
             rx_bufs,
-            tx_buf,
+            tx_bufs,
+            rx_unkicked: false,
+            tx_unkicked: false,
             mac,
             features,
+            tx_full: 0,
         })
     }
 
@@ -86,15 +102,32 @@ impl VirtioNet {
         self.features & F_STATUS == 0 || self.t.device.read16(6) & 1 != 0
     }
 
-    /// Sends one Ethernet frame (without FCS) and waits for the device to
-    /// take it.
+    /// Sends one Ethernet frame (without FCS) right away.
     pub fn send<E: Env>(&mut self, env: &E, frame: &[u8]) -> Result<(), VirtioError> {
+        let _ = env;
+        self.queue(frame)?;
+        self.flush();
+        Ok(())
+    }
+
+    /// Queues one frame for transmission without kicking the device. Fails
+    /// with `NoDescriptors` when every TX buffer is in flight.
+    pub fn queue(&mut self, frame: &[u8]) -> Result<(), VirtioError> {
         if frame.len() > MTU_FRAME {
             return Err(VirtioError::OutOfRange);
         }
+        // Reclaim what the device has finished with.
+        while self.tx.pop_used()?.is_some() {}
+        let Some(id) = self.tx.next_free() else {
+            self.tx_full += 1;
+            return Err(VirtioError::Queue(crate::queue::QueueError::NoDescriptors));
+        };
+        let off = usize::from(id) * BUF_LEN;
         #[allow(unsafe_code)]
-        // SAFETY: our TX bounce buffer (BUF_LEN bytes); no send is in flight.
-        let buf = unsafe { core::slice::from_raw_parts_mut(self.tx_buf.va as *mut u8, BUF_LEN) };
+        // SAFETY: descriptor `id` is free, so its bounce buffer (BUF_LEN bytes
+        // at `off`, inside `tx_bufs`) is not owned by the device.
+        let buf =
+            unsafe { core::slice::from_raw_parts_mut((self.tx_bufs.va + off) as *mut u8, BUF_LEN) };
         if let Some(h) = buf.get_mut(..HDR_LEN) {
             h.fill(0);
         }
@@ -102,13 +135,33 @@ impl VirtioNet {
             d.copy_from_slice(frame);
         }
         self.tx.add(&[Buf {
-            pa: self.tx_buf.pa,
+            pa: self.tx_bufs.pa + off as u64,
             len: (HDR_LEN + frame.len()) as u32,
             device_writes: false,
         }])?;
-        self.t.notify(self.tx_notify, TX_QUEUE);
-        wait_used(env, &mut self.tx, TX_TIMEOUT_NS, "net tx")?;
+        self.tx_unkicked = true;
         Ok(())
+    }
+
+    /// Kicks the device for queued TX frames and recycled RX buffers.
+    pub fn flush(&mut self) {
+        if self.tx_unkicked {
+            self.tx_unkicked = false;
+            if self.tx.device_wants_notify() {
+                self.t.notify(self.tx_notify, TX_QUEUE);
+            }
+        }
+        if self.rx_unkicked {
+            self.rx_unkicked = false;
+            if self.rx.device_wants_notify() {
+                self.t.notify(self.rx_notify, RX_QUEUE);
+            }
+        }
+    }
+
+    /// Whether a received frame is waiting (cheap: one ring index read).
+    pub fn rx_pending(&self) -> bool {
+        self.rx.has_used()
     }
 
     /// Copies one received frame into `out` and recycles its buffer.
@@ -136,7 +189,8 @@ impl VirtioNet {
             len: BUF_LEN as u32,
             device_writes: true,
         }])?;
-        self.t.notify(self.rx_notify, RX_QUEUE);
+        // Kicked with the next `flush`.
+        self.rx_unkicked = true;
         Ok(Some(n))
     }
 }

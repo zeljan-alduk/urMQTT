@@ -528,7 +528,7 @@ pub fn audit() -> Option<Audit> {
 
 /// The kernel heap allocator.
 #[global_allocator]
-pub static HEAP: urmqtt_mm::LockedHeap = urmqtt_mm::LockedHeap::new();
+pub static HEAP: urmqtt_mm::CachedHeap = urmqtt_mm::CachedHeap::new();
 
 /// Initialises the heap mapped by `build`.
 pub fn init_heap(order: u32, meta_words: usize) -> Result<(), buddy::HeapError> {
@@ -545,4 +545,14 @@ pub fn init_heap(order: u32, meta_words: usize) -> Result<(), buddy::HeapError> 
     }?;
     HEAP.init(heap);
     Ok(())
+}
+
+/// Turns on the per-CPU heap caches (after the boot-time heap self-test,
+/// which compares global free bytes before and after).
+pub fn enable_heap_caches() {
+    HEAP.enable(urmqtt_mm::cached::Hooks {
+        cpu: crate::smp::current,
+        irq_save: urmqtt_arch_aarch64::cpu::irq_save,
+        irq_restore: urmqtt_arch_aarch64::cpu::irq_restore,
+    });
 }

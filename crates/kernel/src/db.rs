@@ -23,7 +23,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use urmqtt_arch_aarch64::spsc::{Consumer, Producer, Spsc};
 use urmqtt_arch_aarch64::sync::SpinLock;
-use urmqtt_arch_aarch64::{cpu, regs, timer};
+use urmqtt_arch_aarch64::{cpu, timer};
 use urmqtt_broker::{Msg, MsgInner, PersistOp};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{error, info, warn};
@@ -69,8 +69,15 @@ pub enum DbResp {
     LogDurable { records: u64 },
 }
 
-static REQ: Spsc<DbReq, 4096> = Spsc::new();
-static RESP: Spsc<DbResp, 256> = Spsc::new();
+/// Per data core: requests to the DB core and its responses (built in
+/// [`start`], once the number of cores is known).
+struct Rings {
+    req: Vec<Box<Spsc<DbReq, 4096>>>,
+    resp: Vec<Box<Spsc<DbResp, 256>>>,
+}
+
+static RINGS: urmqtt_arch_aarch64::sync::OnceCell<Rings> =
+    urmqtt_arch_aarch64::sync::OnceCell::new();
 
 /// The DB worker, handed from the boot CPU to whichever core runs it.
 static WORKER: SpinLock<Option<Worker>> = SpinLock::new(None);
@@ -91,12 +98,15 @@ pub fn active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }
 
-/// The data plane's ends of the rings (taken once by the MQTT service).
-pub fn endpoints() -> Option<(
+/// Data core `core`'s ends of its DB rings (taken once by its MQTT service).
+pub fn endpoints(
+    core: usize,
+) -> Option<(
     Producer<'static, DbReq, 4096>,
     Consumer<'static, DbResp, 256>,
 )> {
-    Some((REQ.producer()?, RESP.consumer()?))
+    let r = RINGS.get()?;
+    Some((r.req.get(core)?.producer()?, r.resp.get(core)?.consumer()?))
 }
 
 /// The telemetry ring of `core` (its producer end, taken once).
@@ -106,9 +116,10 @@ pub fn log_producer(core: usize) -> Option<Producer<'static, LogBatch, LOG_RING>
 
 /// Wakes the DB core after requests were queued.
 pub fn notify() {
-    // Relaxed: only selects the wake-up mechanism; the ring orders data.
-    if DB_CPU.load(Ordering::Relaxed) != usize::MAX {
-        cpu::sev();
+    // Relaxed: set once in `start`; the ring orders the data itself.
+    let cpu = DB_CPU.load(Ordering::Relaxed);
+    if cpu != usize::MAX {
+        crate::dataplane::wake(cpu);
     }
 }
 
@@ -330,15 +341,11 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
             .sum::<usize>(),
         restored.revoked.len()
     );
-    let (rx, tx) = (REQ.consumer(), RESP.producer());
-    let (Some(rx), Some(tx)) = (rx, tx) else {
-        return refuse_or_degrade(false, format_args!("DB rings already taken"));
-    };
     let log_rx = LOG_RINGS.iter().filter_map(Spsc::consumer).collect();
     *WORKER.lock() = Some(Worker {
         store,
-        rx,
-        tx,
+        rx: Vec::new(),
+        tx: Vec::new(),
         txn_start_ms: 0,
         txn_ops: 0,
         stats: Stats::default(),
@@ -567,8 +574,9 @@ struct Stats {
 
 struct Worker {
     store: Store,
-    rx: Consumer<'static, DbReq, 4096>,
-    tx: Producer<'static, DbResp, 256>,
+    /// One request ring and one response ring per data core.
+    rx: Vec<Consumer<'static, DbReq, 4096>>,
+    tx: Vec<Producer<'static, DbResp, 256>>,
     txn_start_ms: u64,
     txn_ops: u32,
     stats: Stats,
@@ -586,8 +594,17 @@ impl Worker {
     /// whether there was any work.
     fn step(&mut self, now_ms: u64) -> bool {
         let mut did = false;
-        while self.txn_ops < BATCH_OPS {
-            let Some(req) = self.rx.pop() else { break };
+        let mut core = 0;
+        let mut idle_rings = 0;
+        while self.txn_ops < BATCH_OPS && idle_rings < self.rx.len() {
+            // Round-robin over the data cores' rings.
+            let req = self.rx.get_mut(core).and_then(Consumer::pop);
+            core = (core + 1) % self.rx.len().max(1);
+            let Some(req) = req else {
+                idle_rings += 1;
+                continue;
+            };
+            idle_rings = 0;
             did = true;
             if !self.store.in_transaction() {
                 if let Err(e) = self.store.begin() {
@@ -651,7 +668,9 @@ impl Worker {
             log.set_now(unix_ms / 1000);
             match urmqtt_store::vfs::with_disk(|d| log.flush(d)) {
                 Some(Ok(n)) => {
-                    let _ = self.tx.push(DbResp::LogDurable { records: n });
+                    for tx in &mut self.tx {
+                        let _ = tx.push(DbResp::LogDurable { records: n });
+                    }
                     // Relaxed: a test-mode flag set once at boot.
                     if LOG_CRASH.load(Ordering::Relaxed)
                         && log.durable_records / 100_000 > self.log_reported / 100_000
@@ -671,6 +690,11 @@ impl Worker {
             did = true;
         }
         did
+    }
+
+    /// Whether any data core has queued work for the DB core.
+    fn pending(&self) -> bool {
+        self.rx.iter().any(|c| !c.is_empty()) || self.log_rx.iter().any(|c| !c.is_empty())
     }
 
     fn apply(&mut self, req: DbReq) -> Result<(), StoreError> {
@@ -716,8 +740,15 @@ impl Worker {
                 DbResp::Failed { ops }
             }
         };
-        // A full response ring only loses statistics.
-        let _ = self.tx.push(resp);
+        // A full response ring only loses statistics. Commits mix all
+        // cores' work, so every core gets the report.
+        for tx in &mut self.tx {
+            let _ = tx.push(match &resp {
+                DbResp::Committed { ops, us } => DbResp::Committed { ops: *ops, us: *us },
+                DbResp::Failed { ops } => DbResp::Failed { ops: *ops },
+                DbResp::LogDurable { records } => DbResp::LogDurable { records: *records },
+            });
+        }
     }
 
     fn fail(&mut self, e: &StoreError) {
@@ -746,10 +777,22 @@ impl Worker {
 }
 
 /// The DB core picks `cpu` (highest index) when there are two or more
-/// CPUs; with one CPU the network loop runs the worker inline.
-pub fn start(cpus: usize) {
+/// CPUs; with one CPU the network loop runs the worker inline. Builds the
+/// rings for `data_cores` data cores and hands the worker its ends.
+pub fn start(cpus: usize, data_cores: usize) {
     if !active() {
         return;
+    }
+    let rings = Rings {
+        req: (0..data_cores).map(|_| Spsc::new_boxed()).collect(),
+        resp: (0..data_cores).map(|_| Spsc::new_boxed()).collect(),
+    };
+    if RINGS.set(rings).is_err() {
+        return;
+    }
+    if let (Some(r), Some(w)) = (RINGS.get(), WORKER.lock().as_mut()) {
+        w.rx = r.req.iter().filter_map(|q| q.consumer()).collect();
+        w.tx = r.resp.iter().filter_map(|q| q.producer()).collect();
     }
     if cpus >= 2 {
         let cpu = cpus - 1;
@@ -770,14 +813,14 @@ pub fn run_core() -> ! {
             cpu::wfi();
         }
     };
-    enable_event_stream();
     info!("db: worker running on cpu {}", smp::current());
+    let mut idle = crate::dataplane::Idle::new();
     loop {
-        if !w.step(now_ms()) {
-            // Woken by `sev` from the data plane, the event stream
-            // (~0.5-1 ms, bounds the batch delay) or an interrupt.
-            cpu::wfe();
-        }
+        let worked = w.step(now_ms());
+        // An open transaction or pending telemetry must commit within its
+        // batch delay: keep polling until then (the tick is 10 ms).
+        let due = w.store.in_transaction() || w.log_since_ms.is_some();
+        idle.pass(worked || due, || w.pending());
     }
 }
 
@@ -790,21 +833,6 @@ pub fn poll() {
     if let Some(w) = WORKER.lock().as_mut() {
         w.step(now_ms());
     }
-}
-
-/// Generic-timer event stream (CNTKCTL_EL1.EVNTEN): wakes `wfe` roughly
-/// every millisecond.
-fn enable_event_stream() {
-    let freq = regs::cntfrq_el0().max(1000);
-    // Period is 2^(EVNTI+1) ticks; pick the largest that is <= 1 ms.
-    let per_ms = freq / 1000;
-    let evnti = (63 - per_ms.leading_zeros() as u64)
-        .saturating_sub(1)
-        .min(15);
-    let v = (regs::cntkctl_el1() & !(0xf << 4)) | (evnti << 4) | (1 << 2);
-    // SAFETY: only enables the event stream on this core; EL0 access bits
-    // are preserved.
-    unsafe { regs::set_cntkctl_el1(v) };
 }
 
 /// `test=log-crash` writer: appends numbered records to this core's

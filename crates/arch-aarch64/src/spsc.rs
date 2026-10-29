@@ -16,6 +16,9 @@
 
 #![allow(unsafe_code)]
 
+extern crate alloc;
+
+use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -50,6 +53,22 @@ impl<T, const N: usize> Spsc<T, N> {
             producer_taken: AtomicBool::new(false),
             consumer_taken: AtomicBool::new(false),
         }
+    }
+
+    /// A ring on the heap, built in place: large rings would not fit on a
+    /// 128 KiB kernel stack as a temporary.
+    pub fn new_boxed() -> Box<Self> {
+        let () = Self::CHECK;
+        let layout = core::alloc::Layout::new::<Self>();
+        // SAFETY: `Self` is not zero-sized (N >= 2 slots plus indexes).
+        let p = unsafe { alloc::alloc::alloc_zeroed(layout) }.cast::<Self>();
+        if p.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        // SAFETY: all-zero bytes are a valid empty ring: indexes 0, flags
+        // false, and slots are `MaybeUninit` (no initialisation needed).
+        // The pointer comes from the global allocator with `Self`'s layout.
+        unsafe { Box::from_raw(p) }
     }
 
     /// The producer end, once.
@@ -192,6 +211,16 @@ mod tests {
             [1, 2, 3, 4]
         );
         assert_eq!(c.pop(), None);
+    }
+
+    #[test]
+    fn boxed_ring_starts_empty() {
+        let r: Box<Spsc<u64, 1024>> = Spsc::new_boxed();
+        let mut p = r.producer().unwrap();
+        let mut c = r.consumer().unwrap();
+        assert!(c.pop().is_none());
+        p.push(5).unwrap();
+        assert_eq!(c.pop(), Some(5));
     }
 
     #[test]

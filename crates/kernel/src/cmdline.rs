@@ -56,6 +56,9 @@ pub struct BootOptions {
     pub serve: bool,
     pub test_fault: Option<TestFault>,
     pub db_test: Option<DbTest>,
+    /// `log=error|warn|info|debug|trace`: lower the log level at run time
+    /// (benchmarks: the emulated UART is slow).
+    pub log_level: Option<urmqtt_config::LogLevel>,
     /// Options that were present but rejected or unknown.
     pub ignored: usize,
 }
@@ -87,6 +90,11 @@ impl BootOptions {
                 "test=log-crash" => o.db_test = Some(DbTest::LogCrash),
                 "test=log-verify" => o.db_test = Some(DbTest::LogVerify),
                 "test=log-tear" => o.db_test = Some(DbTest::LogTear),
+                "log=error" => o.log_level = Some(urmqtt_config::LogLevel::Error),
+                "log=warn" => o.log_level = Some(urmqtt_config::LogLevel::Warn),
+                "log=info" => o.log_level = Some(urmqtt_config::LogLevel::Info),
+                "log=debug" => o.log_level = Some(urmqtt_config::LogLevel::Debug),
+                "log=trace" => o.log_level = Some(urmqtt_config::LogLevel::Trace),
                 _ => o.ignored += 1,
             }
         }
