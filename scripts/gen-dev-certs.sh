@@ -7,6 +7,9 @@
 #   deploy/dev/negative/                 certificates that MUST be rejected:
 #     rogue-ca.pem, rogue-device.{pem,key}   device signed by an unknown CA
 #     expired-device.{pem,key}               valid chain, notAfter in the past
+#     revoked-device.{pem,key}               valid, but its serial is in revoked.txt
+#   deploy/dev/services/backend.{pem,key}  service identity "backend"
+#   deploy/dev/revoked.txt                 revoked serials (tls.revocation_list)
 #
 # Never use these for anything but local testing. They are git-ignored (ADR-004).
 # Usage: scripts/gen-dev-certs.sh [--force]
@@ -43,7 +46,7 @@ fi
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$OUT/devices" "$OUT/negative"
+mkdir -p "$OUT/devices" "$OUT/negative" "$OUT/services"
 umask 077
 
 key() { "$OPENSSL" genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$1" 2>/dev/null; }
@@ -107,6 +110,17 @@ subjectAltName=DNS:localhost,DNS:urmqtt.local,IP:127.0.0.1
 authorityKeyIdentifier=keyid
 EOF
 
+service_ext() {
+    cat > "$TMP/service.ext" <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=clientAuth
+subjectAltName=URI:urn:urmqtt:service:$1
+authorityKeyIdentifier=keyid
+EOF
+    echo "$TMP/service.ext"
+}
+
 device_ext() {
     cat > "$TMP/device.ext" <<EOF
 basicConstraints=critical,CA:FALSE
@@ -129,15 +143,20 @@ for id in device-001 device-002 device-003; do
     leaf "$OUT/ca" "$OUT/devices/$id" "$id" "$(device_ext "$id")" -days 825
 done
 
+echo "generating service certificate (backend)"
+leaf "$OUT/ca" "$OUT/services/backend" "backend" "$(service_ext backend)" -days 825
+
 echo "generating negative-test certificates"
 ca rogue "/O=urMQTT rogue/CN=Rogue CA" "$TMP/rogue-ca"
 cp "$TMP/rogue-ca.pem" "$OUT/negative/rogue-ca.pem"
 leaf "$TMP/rogue-ca" "$OUT/negative/rogue-device" "device-001" "$(device_ext device-001)" -days 825
 expired_leaf "$OUT/ca" "$OUT/negative/expired-device" "device-002" "$(device_ext device-002)"
+leaf "$OUT/ca" "$OUT/negative/revoked-device" "device-004" "$(device_ext device-004)" -days 825
+"$OPENSSL" x509 -in "$OUT/negative/revoked-device.pem" -noout -serial | cut -d= -f2 | tr 'A-F' 'a-f' > "$OUT/revoked.txt"
 
 echo "verifying with $("$OPENSSL" version)"
 # Sanity checks: the chain verifies, the negatives fail as intended.
-"$OPENSSL" verify -CAfile "$OUT/ca.pem" "$OUT/server.pem" "$OUT"/devices/*.pem >/dev/null
+"$OPENSSL" verify -CAfile "$OUT/ca.pem" "$OUT/server.pem" "$OUT"/devices/*.pem "$OUT/services/backend.pem" >/dev/null
 if "$OPENSSL" verify -CAfile "$OUT/ca.pem" "$OUT/negative/rogue-device.pem" >/dev/null 2>&1; then
     echo "error: rogue device unexpectedly verifies" >&2; exit 1
 fi

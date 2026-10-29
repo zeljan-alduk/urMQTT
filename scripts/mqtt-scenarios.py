@@ -13,28 +13,32 @@ import subprocess
 import sys
 import time
 
-PORT = sys.argv[1]
+args = sys.argv[1:]
 TLS = None
-if "--tls" in sys.argv:
-    TLS = sys.argv[sys.argv.index("--tls") + 1]
+if "--tls" in args:
+    i = args.index("--tls")
+    TLS = args[i + 1]
+    del args[i : i + 2]
+PORT = args[0]
 TIMEOUT = 15
 results = []
 
 
 def base(client_id, cert=None):
+    """Connection arguments; `cert` overrides the certificate (path relative
+    to the TLS directory without extension, e.g. "negative/rogue-device")."""
     args = ["-h", "127.0.0.1", "-p", PORT, "-V", "mqttv311", "-i", client_id]
     if TLS:
-        cert = cert or client_id
+        if cert is None:
+            cert = "services/backend" if client_id == "backend" else f"devices/{client_id}"
         args += ["--cafile", os.path.join(TLS, "ca.pem")]
-        certfile = os.path.join(TLS, "devices", f"{cert}.pem")
-        if cert == "backend":
-            certfile = os.path.join(TLS, "services", "backend.pem")
+        certfile = os.path.join(TLS, f"{cert}.pem")
         args += ["--cert", certfile, "--key", certfile[:-4] + ".key"]
     return args
 
 
-def pub(client_id, topic, message, *extra):
-    r = subprocess.run(["mosquitto_pub", *base(client_id), "-t", topic, "-m", message, *extra],
+def pub(client_id, topic, message, *extra, cert=None):
+    r = subprocess.run(["mosquitto_pub", *base(client_id, cert), "-t", topic, "-m", message, *extra],
                        capture_output=True, text=True, timeout=TIMEOUT)
     return r.returncode, r.stderr.strip()
 
@@ -103,5 +107,16 @@ r = subprocess.run(["mosquitto_sub", *base("device-001"), "-t", "devices/device-
                    capture_output=True, text=True, timeout=TIMEOUT)
 denied = "denied" in (r.stdout + r.stderr).lower()
 report("acl-subscribe-denied", denied, (r.stdout + r.stderr).strip())
+
+if TLS:
+    # 6-9. Each of these must be refused (PROMPT M10 acceptance).
+    for name, cid, cert in [
+        ("tls-wrong-ca-rejected", "device-001", "negative/rogue-device"),
+        ("tls-expired-rejected", "device-002", "negative/expired-device"),
+        ("tls-client-id-mismatch-rejected", "device-002", "devices/device-001"),
+        ("tls-revoked-rejected", "device-004", "negative/revoked-device"),
+    ]:
+        rc, err = pub(cid, f"devices/{cid}/telemetry/t", "x", "-q", "1", cert=cert)
+        report(name, rc != 0, err)
 
 sys.exit(0 if all(results) else 1)

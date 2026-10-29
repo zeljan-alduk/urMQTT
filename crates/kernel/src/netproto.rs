@@ -144,10 +144,7 @@ pub fn run(echo: bool) -> ! {
         warn!("net: icmp bind failed");
     }
 
-    let mut mqtt = urmqtt_config::CONFIG
-        .network
-        .mqtt_plain_port
-        .map(|port| crate::mqtt_plain::PlainMqtt::new(port, &mut sockets));
+    let mut mqtt = Some(crate::mqtt_service::MqttService::new(&mut sockets));
 
     let mut router: Option<Ipv4Address> = None;
     let mut ping_sent: Option<Instant> = None;

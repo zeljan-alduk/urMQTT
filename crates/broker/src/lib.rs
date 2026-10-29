@@ -101,6 +101,9 @@ struct Will {
 
 struct Conn {
     session: Option<SessionId>,
+    /// Authenticated identity (TLS client certificate); the client id must
+    /// equal it. `None` only for the dev plaintext listener.
+    identity: Option<Box<str>>,
     inbuf: Vec<u8>,
     outbuf: Vec<u8>,
     keepalive_ms: u64,
@@ -174,6 +177,7 @@ impl Broker {
         }
         let conn = Conn {
             session: None,
+            identity: None,
             inbuf: Vec::new(),
             outbuf: Vec::new(),
             keepalive_ms: 0,
@@ -194,6 +198,13 @@ impl Broker {
                 (self.conns.len() - 1) as ConnId
             }
         })
+    }
+
+    /// Binds the authenticated identity of `c` (before its CONNECT).
+    pub fn set_identity(&mut self, c: ConnId, identity: &str) {
+        if let Some(k) = self.conn(c) {
+            k.identity = Some(identity.into());
+        }
     }
 
     fn conn(&mut self, c: ConnId) -> Option<&mut Conn> {
@@ -404,6 +415,16 @@ impl Broker {
 
     fn on_connect(&mut self, c: ConnId, p: &Connect<'_>, now_ms: u64) {
         if !Self::valid_identity(p.client_id) {
+            return self.reject(c, ConnectReturnCode::IdentifierRejected);
+        }
+        // PROMPT §7.1: the client id must equal the certificate identity.
+        let mismatch = self
+            .conns
+            .get(c as usize)
+            .and_then(Option::as_ref)
+            .and_then(|k| k.identity.as_deref())
+            .is_some_and(|id| id != p.client_id);
+        if mismatch {
             return self.reject(c, ConnectReturnCode::IdentifierRejected);
         }
         let role = self.cfg.acl.role(p.client_id);

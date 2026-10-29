@@ -219,6 +219,11 @@ extern "C" fn urmqtt_kmain() -> ! {
     }
     if let Some(d) = DATE_AT_BOOT.response() {
         info!("date at boot: unix {}", d.timestamp);
+        BOOT_UNIX.store(
+            d.timestamp.max(0) as u64,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        urmqtt_tls::set_clock(now_unix);
     } else {
         warn!("no date at boot: certificate validity checks will be refused (ADR-009)");
     }
@@ -532,6 +537,18 @@ fn fatal(msg: &str) -> ! {
 fn fatal_fmt(args: core::fmt::Arguments<'_>) -> ! {
     error!("fatal: {args}");
     power::fatal()
+}
+
+/// Unix time at boot from the firmware RTC via Limine (ADR-009).
+static BOOT_UNIX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Wall clock for certificate validity: date at boot plus uptime.
+fn now_unix() -> Option<u64> {
+    // Relaxed: written once before the clock is installed.
+    match BOOT_UNIX.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        t => Some(t + uptime_ns() / 1_000_000_000),
+    }
 }
 
 /// Nanoseconds since the counter started (boot), from the generic timer.

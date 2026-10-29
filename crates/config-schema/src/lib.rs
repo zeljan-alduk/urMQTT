@@ -122,6 +122,7 @@ struct RawTls {
     key: String,
     identity_field: IdentityField,
     resumption: bool,
+    revocation_list: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -209,6 +210,8 @@ pub struct Tls {
     pub key: String,
     pub identity_field: IdentityField,
     pub resumption: bool,
+    /// File of revoked certificate serials (hex, one per line), or empty.
+    pub revocation_list: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -421,13 +424,44 @@ fn validate_tls(raw: &RawTls, errors: &mut Vec<ConfigError>) -> Tls {
             errors.push(err(key, m));
         }
     }
+    if !raw.revocation_list.is_empty()
+        && let Err(m) = check_file_name(&raw.revocation_list)
+    {
+        errors.push(err("tls.revocation_list", m));
+    }
     Tls {
         ca: raw.ca.clone(),
         cert: raw.cert.clone(),
         key: raw.key.clone(),
         identity_field: raw.identity_field,
         resumption: raw.resumption,
+        revocation_list: raw.revocation_list.clone(),
     }
+}
+
+/// Parses a revocation list: one hex serial per line, `#` comments allowed.
+pub fn parse_revocation_list(text: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let l = line
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .replace(':', "")
+            .to_ascii_lowercase();
+        if l.is_empty() {
+            continue;
+        }
+        if l.len() % 2 != 0 || l.len() > 40 || !l.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!(
+                "line {}: {line:?} is not a hex certificate serial",
+                i + 1
+            ));
+        }
+        out.push(l);
+    }
+    Ok(out)
 }
 
 /// Embedded files must be plain names inside `deploy/<env>/`.
@@ -755,6 +789,8 @@ pub struct EmbeddedFiles {
     pub ca: String,
     pub cert: String,
     pub key: String,
+    /// Normalised revoked serials (already parsed from the list file).
+    pub revoked: Vec<String>,
 }
 
 fn render_ipv4(a: Ipv4Addr) -> String {
@@ -813,6 +849,7 @@ pub const CONFIG: BuildConfig = BuildConfig {{
     tls: Tls {{
         identity_field: IdentityField::{identity:?},
         resumption: {resumption},
+        revoked_serials: {revoked},
     }},
     limits: Limits {{
         max_connections_per_core: {mcpc},
@@ -863,6 +900,7 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         tls_port = cfg.network.mqtt_tls_port,
         identity = cfg.tls.identity_field,
         resumption = cfg.tls.resumption,
+        revoked = render_strs(&files.revoked),
         mcpc = l.max_connections_per_core,
         mps = l.max_packet_size,
         mtl = l.max_topic_len,

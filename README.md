@@ -11,13 +11,13 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M9)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M10)-red)
 
 </div>
 
 > [!WARNING]
-> **urMQTT is pre-alpha.** It serves MQTT 3.1.1 over plain TCP in dev builds; MQTT over TLS 1.3
-> (the only transport in production) arrives in **M10**. These milestones are complete:
+> **urMQTT is pre-alpha.** It serves MQTT 3.1.1 over TLS 1.3 with mutual TLS (and, in dev builds
+> only, over plain TCP). Durable storage arrives in **M11**. These milestones are complete:
 > - **M0**: tooling and CI
 > - **M1**: UEFI boot, console, exception reports
 > - **M2**: own page tables with enforced W^X, guard pages, locked tables, PAC and BTI
@@ -28,6 +28,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M7**: DHCP, ICMP and a TCP echo service on smoltcp
 > - **M8**: complete MQTT 3.1.1 codec, fuzzed and tested against real mosquitto clients
 > - **M9**: broker core with QoS 0/1, wildcards, retained messages, LWT, persistent sessions and ACL, verified with mosquitto clients
+> - **M10**: TLS 1.3 with mutual TLS: rustls handshake, own crypto provider and record layer, revocation list, resumption, admission control
 >
 > The kernel boots under QEMU with HVF and TCG. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
@@ -92,9 +93,9 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | **Network** | DHCPv4, ARP, ICMP echo (smoltcp prototype) | ✅ M7 |
 | | Own server-only TCP: SYN cookies, timing wheel, NewReno, ACK coalescing | 📋 M14 |
 | | IPv6 + SLAAC | 📋 later |
-| **TLS** | TLS 1.3 only, **mutual TLS**, device id from CN or SAN URI | 📋 M10 |
-| | rustls handshake, then own record layer (AES-128-GCM, ChaCha20-Poly1305) | 📋 M10 |
-| | Session resumption (PSK tickets), handshake admission control | 📋 M10 |
+| **TLS** | TLS 1.3 only, **mutual TLS**, device id from CN or SAN URI | ✅ M10 |
+| | rustls handshake, then own record layer (AES-128-GCM, ChaCha20-Poly1305, KeyUpdate) | ✅ M10 |
+| | Session resumption (PSK tickets), handshake admission control, revocation list | ✅ M10 |
 | **MQTT** | Zero-copy 3.1.1 codec, fuzzed, `forbid(unsafe_code)` | ✅ M8 |
 | | QoS 0/1, wildcards, retained, LWT, persistent sessions, keepalive | ✅ M9 |
 | | ACL (`devices/{id}/#` by default), service identities, per-device rate limits | ✅ M9 |
@@ -403,6 +404,7 @@ error: invalid configuration deploy/bad/config.toml:
 | `tls.ca`, `tls.cert`, `tls.key` | file names in `deploy/<env>/` | Embedded PEMs; encrypted keys are rejected |
 | `tls.identity_field` | `"cn"` \| `"san_uri"` | Certificate field that becomes the `device_id` |
 | `tls.resumption` | bool | TLS 1.3 PSK session resumption |
+| `tls.revocation_list` | file name or `""` | Revoked client-certificate serials (hex, one per line) |
 | `limits.max_connections_per_core` | > 0 | Admission limit per core |
 | `limits.max_packet_size` | 64 – 268 435 455 | Largest accepted MQTT packet |
 | `limits.max_topic_len`, `max_topic_levels` | ≤ 65 535, > 0 | Topic bounds, checked before any allocation |
@@ -509,18 +511,22 @@ offline are queued (up to `max_queued_per_offline_session`) and delivered on rec
 ### 3. A device reports its status with a retained message and Last Will (M10)
 
 ```bash
+# announce "online" (retained), then stay connected with an "offline" will
+mosquitto_pub -h localhost -p 8883 \
+  --cafile deploy/dev/ca.pem \
+  --cert deploy/dev/devices/device-003.pem --key deploy/dev/devices/device-003.key \
+  -i device-003 -r -q 1 -t devices/device-003/status -m online
+
 mosquitto_sub -h localhost -p 8883 \
   --cafile deploy/dev/ca.pem \
   --cert deploy/dev/devices/device-003.pem --key deploy/dev/devices/device-003.key \
   -i device-003 -k 30 -q 1 \
   --will-topic devices/device-003/status --will-payload offline --will-retain --will-qos 1 \
   -t 'devices/device-003/cmd/#' &
-
-mosquitto_pub -h localhost -p 8883 \
-  --cafile deploy/dev/ca.pem \
-  --cert deploy/dev/devices/device-003.pem --key deploy/dev/devices/device-003.key \
-  -i device-003 -r -q 1 -t devices/device-003/status -m online
 ```
+
+Run the two commands one after the other: a second connection with the same client id takes over
+the first session, and takeover fires the will.
 
 If the device vanishes (the process is killed, or the network drops for longer than 1.5 × keepalive),
 the broker publishes the retained `offline` will on its behalf.
@@ -538,6 +544,11 @@ mosquitto_pub -h localhost -p 8883 --cafile deploy/dev/ca.pem \
   --cert deploy/dev/negative/expired-device.pem --key deploy/dev/negative/expired-device.key \
   -i device-002 -t devices/device-002/x -m hi
 
+# Revoked certificate (serial in deploy/dev/revoked.txt) → TLS handshake fails
+mosquitto_pub -h localhost -p 8883 --cafile deploy/dev/ca.pem \
+  --cert deploy/dev/negative/revoked-device.pem --key deploy/dev/negative/revoked-device.key \
+  -i device-004 -t devices/device-004/x -m hi
+
 # Client id ≠ certificate identity → CONNACK "not authorized"
 mosquitto_pub -h localhost -p 8883 --cafile deploy/dev/ca.pem \
   --cert deploy/dev/devices/device-001.pem --key deploy/dev/devices/device-001.key \
@@ -547,6 +558,14 @@ mosquitto_pub -h localhost -p 8883 --cafile deploy/dev/ca.pem \
 mosquitto_pub -h localhost -p 8883 --cafile deploy/dev/ca.pem \
   --cert deploy/dev/devices/device-001.pem --key deploy/dev/devices/device-001.key \
   -i device-001 -t devices/device-002/cmd/reboot -m pwned
+```
+
+The whole TLS acceptance set (the five broker scenarios over mTLS, then the four rejections) runs with:
+
+```bash
+make certs iso data-img
+scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img &
+python3 scripts/mqtt-scenarios.py 8883 --tls deploy/dev
 ```
 
 ### 5. Plain TCP in dev builds only (works today)
@@ -653,7 +672,7 @@ shasum -a 256 build/urmqtt-prod-*.iso
 | `make smoke` | Headless boot and fault scenarios under HVF + TCG (TCG only in CI), serial-log checks |
 | `make data-img` | Blank sparse data disk (layout initialised from M11) |
 | `make fuzz T=<target>` | Bounded cargo-fuzz run (`FUZZ_TIME`, default 600 s) |
-| `make loadtest` | Host-side load generator (M10/M13) |
+| `make loadtest` | Host-side load generator (M13) |
 | `make dist` | Release artifacts plus `SHA256SUMS` in `build/dist/` |
 | `make certs` | Development certificates (idempotent; `scripts/gen-dev-certs.sh --force` regenerates) |
 
@@ -706,7 +725,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M7** Network prototype | DHCP lease, ping, TCP echo through hostfwd |
 | ✅ | **M8** MQTT codec | spec tests, property tests, 10 minutes of fuzzing with no crash |
 | ✅ | **M9** Broker over TCP (dev) | pub/sub, wildcards, retained, LWT, QoS 1 redelivery with mosquitto |
-| 📋 | **M10** TLS 1.3 + mTLS | mosquitto over mTLS; wrong CA, expired, client-id mismatch and revoked all rejected |
+| ✅ | **M10** TLS 1.3 + mTLS | mosquitto over mTLS; wrong CA, expired, client-id mismatch and revoked all rejected |
 | 📋 | **M11** SQLite in the kernel | data survives restarts and `kill -9` |
 | 📋 | **M12** Telemetry log | 1M messages; torn tail truncated on recovery |
 | 📋 | **M13** Multicore data plane | near-linear scaling 1 → 2 → 4 cores |

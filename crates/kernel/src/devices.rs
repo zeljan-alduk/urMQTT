@@ -206,7 +206,8 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
         info!("entropy: 64 bytes from RNDR");
     }
     pool.add(Source::Jitter, &timer::now().to_le_bytes());
-    let rng = pool.finish().map_err(|_| ProbeError::NoEntropy)?;
+    let mut rng = pool.finish().map_err(|_| ProbeError::NoEntropy)?;
+    urmqtt_tls::rng::install(rng.fork());
     *RNG.lock() = Some(rng);
     info!("entropy: ChaCha20 CSPRNG seeded");
     *DEVICES.lock() = devs;

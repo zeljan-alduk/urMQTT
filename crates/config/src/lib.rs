@@ -71,6 +71,9 @@ pub struct Network {
 pub struct Tls {
     pub identity_field: IdentityField,
     pub resumption: bool,
+    /// Revoked client certificate serials (lowercase hex, no leading zeros
+    /// guaranteed only after normalisation by the TLS layer).
+    pub revoked_serials: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Copy)]

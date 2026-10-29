@@ -15,6 +15,24 @@ bench = false
 workspace = true
 
 [dependencies]
-rand_chacha = { version = "0.10", default-features = false }
-rand_core = { version = "0.10", default-features = false }
+# TLS 1.3 handshake only; the crypto comes from our own provider (ADR-029).
+rustls = { version = "=0.23.46", default-features = false }
+pki-types = { package = "rustls-pki-types", version = "1.12", default-features = false, features = ["alloc"] }
+webpki = { package = "rustls-webpki", version = "0.103.14", default-features = false, features = ["alloc"] }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "ecdh", "pkcs8", "alloc"] }
+x25519-dalek = { version = "2", default-features = false }
 sha2 = { version = "0.11", default-features = false }
+hmac = { version = "0.13", default-features = false }
+hkdf = { version = "0.13", default-features = false }
+x509-cert = { version = "0.3", default-features = false }
+der = { version = "0.8", default-features = false, features = ["alloc", "oid"] }
+rand_core = { version = "0.6", default-features = false }
+rand_chacha = { version = "0.3", default-features = false }
+zeroize = { version = "1.8", default-features = false }
+urmqtt-arch-aarch64 = { path = "../arch-aarch64" }
+
+[dev-dependencies]
+# A real rustls client (std) drives our server in the host tests.
+rustls = { version = "=0.23.46", default-features = false, features = ["std"] }

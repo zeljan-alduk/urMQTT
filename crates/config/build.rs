@@ -56,10 +56,21 @@ fn main() {
             .unwrap_or_else(|| fail(&format!("{} is not valid UTF-8", path.display())))
             .to_owned()
     };
+    let revoked = if cfg.tls.revocation_list.is_empty() {
+        Vec::new()
+    } else {
+        let path = dir.join(&cfg.tls.revocation_list);
+        println!("cargo::rerun-if-changed={}", path.display());
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|e| fail(&missing_file_hint(&env_name, &path, &e)));
+        urmqtt_config_schema::parse_revocation_list(&text)
+            .unwrap_or_else(|m| fail(&format!("{}: {m}", path.display())))
+    };
     let files = EmbeddedFiles {
         ca: embed(&cfg.tls.ca, PemKind::Certificate),
         cert: embed(&cfg.tls.cert, PemKind::Certificate),
         key: embed(&cfg.tls.key, PemKind::PrivateKey),
+        revoked,
     };
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap_or_else(|_| fail("OUT_DIR not set")));

@@ -214,6 +214,16 @@ if command -v mosquitto_pub >/dev/null && command -v mosquitto_sub >/dev/null; t
         python3 -I "$ROOT/scripts/mqtt-scenarios.py" -- \
         "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
         "client: qos1-after-reconnect ok" "client: acl-subscribe-denied ok" "NOT:FAILED" "$NO_FAULT"
+    # M10: the same scenarios over TLS 1.3 with mutual TLS, plus the four
+    # handshakes/CONNECTs that must be refused.
+    SERVICE_PORT=8883 service mqtt-tls "serve" 18883 "TLS 1.3 listener on port 8883" \
+        python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" -- \
+        "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
+        "client: qos1-after-reconnect ok" "client: acl-subscribe-denied ok" \
+        "client: tls-wrong-ca-rejected ok" "client: tls-expired-rejected ok" \
+        "client: tls-client-id-mismatch-rejected ok" "client: tls-revoked-rejected ok" \
+        "tls: device-001 authenticated \(TLS13_" "invalid peer certificate: UnknownIssuer" \
+        "certificate expired" "invalid peer certificate: Revoked" "NOT:FAILED" "$NO_FAULT"
 else
     echo "  ✗ mosquitto clients not installed (brew install mosquitto / apt install mosquitto-clients)"
     FAILED=$((FAILED + 1))

@@ -326,6 +326,21 @@ fn kernel_heap_must_be_power_of_two() {
 }
 
 #[test]
+fn revocation_lists() {
+    assert_eq!(
+        parse_revocation_list("# c\nAA:BB\n\n0a1b # x\n").unwrap(),
+        vec!["aabb", "0a1b"]
+    );
+    assert!(parse_revocation_list("xyz").is_err());
+    assert!(parse_revocation_list("abc").is_err());
+    assert_rejected(
+        "dev",
+        &dev_with("revocation_list", "revocation_list = \"../r.txt\""),
+        "tls.revocation_list",
+    );
+}
+
+#[test]
 fn file_names_must_stay_in_env_dir() {
     for bad in ["", ".", "..", "../x.pem", "a/b.pem", ".hidden", "c:\\x"] {
         assert!(check_file_name(bad).is_err(), "{bad:?} must be rejected");
@@ -379,6 +394,7 @@ fn render_contains_validated_values() {
         ca: "/abs/ca.pem".into(),
         cert: "/abs/server.pem".into(),
         key: "/abs/server.key".into(),
+        revoked: vec!["0a1b".into()],
     };
     let out = render(&cfg, &files);
     assert!(out.contains("addr: [10, 0, 0, 10], prefix_len: 24"));
@@ -391,4 +407,5 @@ fn render_contains_validated_values() {
     assert!(out.contains("LogLevel::Debug"));
     assert!(out.contains(r#"include_bytes!("/abs/server.key")"#));
     assert!(out.contains("kernel_heap_mb: 32"));
+    assert!(out.contains(r#"revoked_serials: &["0a1b"]"#));
 }

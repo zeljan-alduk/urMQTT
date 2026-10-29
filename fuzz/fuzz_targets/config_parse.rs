@@ -15,6 +15,7 @@ fuzz_target!(|data: &[u8]| {
                 ca: "/ca.pem".into(),
                 cert: "/server.pem".into(),
                 key: "/server.key".into(),
+                revoked: Vec::new(),
             };
             let _ = render(&cfg, &files);
         }

@@ -5,8 +5,9 @@
 //! bootloader-provided values are mixed in but do not count on their own.
 
 use rand_chacha::ChaCha20Rng;
-use rand_core::{Rng, SeedableRng};
+use rand_core::{CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
+use urmqtt_arch_aarch64::sync::SpinLock;
 
 /// Minimum bytes a hardware source must deliver to count.
 pub const MIN_HW_BYTES: usize = 32;
@@ -129,6 +130,61 @@ impl Csprng {
         self.inner = ChaCha20Rng::from_seed(seed);
     }
 }
+
+/// The generator used by TLS (installed once by the kernel after seeding).
+static GLOBAL: SpinLock<Option<Csprng>> = SpinLock::new(None);
+
+/// Makes `rng` the generator behind [`SystemRng`].
+pub fn install(rng: Csprng) {
+    *GLOBAL.lock() = Some(rng);
+}
+
+pub fn is_installed() -> bool {
+    GLOBAL.lock().is_some()
+}
+
+/// Fills `out` from the installed generator. Fails (rather than returning
+/// weak bytes) if none is installed.
+pub fn fill_global(out: &mut [u8]) -> Result<(), NoHardwareEntropy> {
+    match GLOBAL.lock().as_mut() {
+        Some(r) => {
+            r.fill(out);
+            Ok(())
+        }
+        None => Err(NoHardwareEntropy),
+    }
+}
+
+/// `rand_core` view of the installed generator, for RustCrypto APIs.
+/// Callers check [`is_installed`] first; without a generator it refuses to
+/// produce output by never returning (it cannot fail in this trait).
+pub struct SystemRng;
+
+impl RngCore for SystemRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut b = [0u8; 4];
+        self.fill_bytes(&mut b);
+        u32::from_le_bytes(b)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut b = [0u8; 8];
+        self.fill_bytes(&mut b);
+        u64::from_le_bytes(b)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        while fill_global(dest).is_err() {
+            core::hint::spin_loop();
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        fill_global(dest).map_err(|_| rand_core::Error::from(core::num::NonZeroU32::MIN))
+    }
+}
+
+impl CryptoRng for SystemRng {}
 
 #[cfg(test)]
 mod tests {

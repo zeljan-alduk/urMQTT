@@ -646,3 +646,50 @@ fn many_sessions_route_correctly() {
     assert_eq!(svc.recv(&mut b).len(), 200);
     assert_eq!(b.stats().sessions, 201);
 }
+
+#[test]
+fn client_id_must_match_certificate_identity() {
+    let mut b = Broker::new(cfg());
+    let c = b.open(0).unwrap();
+    b.set_identity(c, "device-001");
+    let mut cl = Client {
+        c,
+        rx: Vec::new(),
+        pending: Vec::new(),
+    };
+    cl.send(
+        &mut b,
+        &Packet::Connect(Connect {
+            protocol_level: 4,
+            clean_session: true,
+            keep_alive: 0,
+            client_id: "device-002",
+            will: None,
+            username: None,
+            password: None,
+        }),
+        0,
+    );
+    assert_eq!(cl.recv(&mut b), vec![Got::ConnAck(false, 2)]);
+    let c = b.open(0).unwrap();
+    b.set_identity(c, "device-001");
+    let mut cl = Client {
+        c,
+        rx: Vec::new(),
+        pending: Vec::new(),
+    };
+    cl.send(
+        &mut b,
+        &Packet::Connect(Connect {
+            protocol_level: 4,
+            clean_session: true,
+            keep_alive: 0,
+            client_id: "device-001",
+            will: None,
+            username: None,
+            password: None,
+        }),
+        0,
+    );
+    assert_eq!(cl.recv(&mut b), vec![Got::ConnAck(false, 0)]);
+}

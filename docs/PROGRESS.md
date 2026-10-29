@@ -316,3 +316,49 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - Topic nodes are never pruned (memory grows with distinct topics; M15).
 - Retained messages and persistent sessions live in RAM only until SQLite arrives (M11).
 - One core (M13).
+
+## M10 — TLS 1.3 with mutual TLS (2026-10-29)
+
+**Done**
+
+- `crates/tls` (`no_std` + `alloc`, ADR-029):
+  - rustls 0.23 unbuffered server handshake with our own RustCrypto provider (X25519/P-256 key exchange, AES-128-GCM and ChaCha20-Poly1305, ECDSA P-256 signatures). All randomness comes from the kernel CSPRNG.
+  - Traffic secrets captured through `KeyLog`, then the rustls connection is dropped.
+  - Own record layer with sequence numbers, KeyUpdate in both directions and `close_notify`.
+  - Client certificates verified against the embedded CA, plus a build-time revocation list (`tls.revocation_list`) and expiry against the boot wall clock.
+  - Identity from CN or SAN URI (`urn:urmqtt:device:` / `urn:urmqtt:service:`).
+  - Stateless resumption tickets; key derived from the server key and version.
+- `kernel/mqtt_service` (replaces `mqtt_plain`):
+  - 32 TLS slots on `network.mqtt_tls_port`, plus 16 plaintext slots in dev builds only.
+  - Handshake admission control (token bucket), a 10 s handshake timeout, and the identity handed to the broker before CONNECT.
+  - Clean `close_notify` + FIN.
+  - Logs `tls: <id> authenticated (<suite>[, resumed])` and `tls: connection refused: <reason>`.
+- Config:
+  - `tls.revocation_list` (dev: `revoked.txt` from `make certs`, prod: empty).
+  - Validation of the identity pattern.
+  - The plaintext port stays build-time forbidden outside dev.
+- `scripts/gen-dev-certs.sh`:
+  - SAN URIs on device and service certificates, and a `services/backend` certificate.
+  - A revoked device (`device-004`) whose serial goes to `revoked.txt`.
+  - Requires OpenSSL ≥ 3, since LibreSSL cannot verify `urn:` SANs.
+- Tests:
+  - Unit: record layer against RFC 8448, identity extraction, serial normalisation.
+  - Host interop (`tests/handshake.rs`), where a real rustls client drives our server:
+    - mTLS, application data both ways, KeyUpdate and resumption all work.
+    - The rogue CA, expired and revoked certificates are rejected, and garbage is rejected as not-TLS.
+- Smoke scenario `mqtt-tls` (HVF and TCG). The real `mosquitto_pub` and `mosquitto_sub` (OpenSSL) run all five broker scenarios over mTLS. Then the four required rejections are each tested: wrong CA, expired certificate, client-id ≠ certificate identity, and revoked certificate.
+
+**Measured**
+
+- `make smoke`: **36/36** (new: `mqtt-tls` under HVF and TCG).
+- 50 sequential `mosquitto_pub -q 1` runs over mTLS (process start, TCP, full handshake with client certificate, CONNECT, PUBLISH/PUBACK, close) under HVF on Apple silicon: **≈ 50 ms each**, end to end and single core. Negotiated suite: TLS13_CHACHA20_POLY1305_SHA256 (OpenSSL prefers it without AES hardware detection in the guest).
+- Kernel ELF: **1 101 008 bytes** (M9: 358 400). Nearly all of the growth is rustls, webpki and the crypto crates.
+- `cargo deny`: clean after moving to `p256` 0.14 (RUSTSEC-2026-0387 in `crypto-bigint` 0.5).
+
+**Known gaps**
+
+- Kernel ELF > 1 MB target (M15/M17: `opt-level = "s"` for crypto crates, dropping unused rustls paths).
+- Record state ≈ 170 B per connection against the 128 B target (M15).
+- Revocation is build-time only until the SQLite table (M11). Resumed sessions are not re-checked against revocations made after the ticket was issued.
+- One handshake timeout instead of one per phase (M14).
+- Handshakes run on the boot core only (M13).

@@ -32,7 +32,7 @@ mod layout;
 #[cfg(target_os = "none")]
 mod memory;
 #[cfg(target_os = "none")]
-mod mqtt_plain;
+mod mqtt_service;
 #[cfg(target_os = "none")]
 mod netproto;
 #[cfg(target_os = "none")]
