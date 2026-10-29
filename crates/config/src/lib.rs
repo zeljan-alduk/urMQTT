@@ -74,6 +74,29 @@ pub struct Tls {
     /// Revoked client certificate serials (lowercase hex, no leading zeros
     /// guaranteed only after normalisation by the TLS layer).
     pub revoked_serials: &'static [&'static str],
+    /// Warnings start this many days before the server certificate
+    /// expires (the build refuses a certificate closer than this).
+    pub min_server_cert_days: u32,
+    /// The server certificate's notAfter, Unix seconds (read at build time).
+    pub server_cert_not_after: u64,
+}
+
+/// Who may connect besides holding a valid certificate (H1).
+#[derive(Debug, Clone, Copy)]
+pub struct Registry {
+    /// Only identities on the allowlist (control channel) are admitted;
+    /// otherwise every valid certificate is.
+    pub allowlist: bool,
+}
+
+/// The control channel (H1).
+#[derive(Debug, Clone, Copy)]
+pub struct Control {
+    /// Operational identities that may publish control messages (empty:
+    /// the channel is off).
+    pub service_ids: &'static [&'static str],
+    pub allow_unrevoke: bool,
+    pub max_message_age_s: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -165,6 +188,8 @@ pub struct BuildConfig {
     pub memory: Memory,
     pub entropy: Entropy,
     pub cpu: Cpu,
+    pub registry: Registry,
+    pub control: Control,
 }
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));

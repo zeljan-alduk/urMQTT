@@ -151,24 +151,163 @@ fn drop_secrets(client_random: &[u8; 32]) {
     let _ = take_secrets(client_random);
 }
 
-// --- client certificate verification with revocation ----------------------
+// --- client certificate verification: roles and revocation ----------------
 
-#[derive(Debug)]
-struct RevocationAware {
-    inner: Arc<dyn ClientCertVerifier>,
-    /// Revoked serial numbers (DER integer bytes), sorted.
-    revoked: Arc<Vec<Vec<u8>>>,
+/// Which trust anchor role validated a client certificate (H1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertRole {
+    /// Normal device or service rights.
+    Operational,
+    /// Provisioning only: the broker restricts it to `provision/{id}/#`.
+    Bootstrap,
 }
 
-/// Whether `cert`'s serial is in the sorted revocation list (a certificate
-/// without a readable serial counts as revoked).
-fn is_revoked(revoked: &[Vec<u8>], cert: &[u8]) -> bool {
-    identity::serial(cert).is_none_or(|s| revoked.binary_search(&normalize_serial(&s)).is_ok())
+/// The revoked serials, shared by every core's server and replaced at
+/// runtime by the control channel (H1). Serials are normalised (no sign
+/// byte, no leading zeros) and kept sorted.
+pub struct RevocationList {
+    list: SpinLock<Arc<Vec<Vec<u8>>>>,
+}
+
+impl RevocationList {
+    pub fn new(serials: Vec<Vec<u8>>) -> Self {
+        let mut serials: Vec<Vec<u8>> = serials.iter().map(|s| normalize_serial(s)).collect();
+        serials.sort();
+        serials.dedup();
+        Self {
+            list: SpinLock::new(Arc::new(serials)),
+        }
+    }
+
+    /// From hex strings (the configuration's form); invalid entries are
+    /// skipped (the build already rejected them).
+    pub fn from_hex(hex: &[&str]) -> Self {
+        Self::new(hex.iter().filter_map(|h| decode_hex(h)).collect())
+    }
+
+    /// Replaces the whole list.
+    pub fn replace(&self, serials: Vec<Vec<u8>>) {
+        let fresh = Self::new(serials);
+        let list = fresh.snapshot();
+        *self.list.lock() = list;
+    }
+
+    /// The current list (cheap: one reference count).
+    pub fn snapshot(&self) -> Arc<Vec<Vec<u8>>> {
+        self.list.lock().clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.list.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether `cert`'s serial is listed (a certificate without a readable
+    /// serial counts as revoked).
+    pub fn is_revoked(&self, cert: &[u8]) -> bool {
+        let list = self.snapshot();
+        identity::serial(cert).is_none_or(|s| list.binary_search(&normalize_serial(&s)).is_ok())
+    }
+}
+
+/// A short, stable tag of a serial number, kept per connection so a newly
+/// revoked serial finds its live connections without storing the serial
+/// itself (8 bytes instead of up to 20). Equal serials give equal tags; a
+/// collision only closes an unrelated connection, which then reconnects
+/// and is verified in full.
+pub fn serial_tag(serial: &[u8]) -> u64 {
+    use sha2::Digest;
+    let d = sha2::Sha256::digest(normalize_serial(serial));
+    let mut b = [0u8; 8];
+    for (o, i) in b.iter_mut().zip(d.iter()) {
+        *o = *i;
+    }
+    u64::from_le_bytes(b)
+}
+
+/// Roles of recently verified end-entity certificates, by SHA-256 of the
+/// DER, from verification until the handshake completes. Bounded like the
+/// captured secrets.
+static ROLES: SpinLock<Vec<([u8; 32], CertRole)>> = SpinLock::new(Vec::new());
+
+fn cert_hash(der: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let d = sha2::Sha256::digest(der);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&d);
+    out
+}
+
+fn record_role(der: &[u8], role: CertRole) {
+    let h = cert_hash(der);
+    let mut g = ROLES.lock();
+    if let Some(e) = g.iter_mut().find(|e| e.0 == h) {
+        e.1 = role;
+        return;
+    }
+    if g.len() >= MAX_CAPTURED {
+        g.remove(0);
+    }
+    g.push((h, role));
+}
+
+fn take_role(der: &[u8]) -> Option<CertRole> {
+    let h = cert_hash(der);
+    let mut g = ROLES.lock();
+    let i = g.iter().position(|e| e.0 == h)?;
+    Some(g.swap_remove(i).1)
+}
+
+#[derive(Debug)]
+struct RoleVerifiers {
+    operational: Arc<dyn ClientCertVerifier>,
+    bootstrap: Option<Arc<dyn ClientCertVerifier>>,
+    hints: Vec<DistinguishedName>,
+}
+
+impl RoleVerifiers {
+    /// Verifies the chain against the operational anchors, then the
+    /// bootstrap anchors. The first that accepts decides the role.
+    fn verify(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<(ClientCertVerified, CertRole), rustls::Error> {
+        match self
+            .operational
+            .verify_client_cert(end_entity, intermediates, now)
+        {
+            Ok(v) => Ok((v, CertRole::Operational)),
+            Err(e) => match &self.bootstrap {
+                Some(b) => b
+                    .verify_client_cert(end_entity, intermediates, now)
+                    .map(|v| (v, CertRole::Bootstrap))
+                    // The operational error is the more useful one to log.
+                    .map_err(|_| e),
+                None => Err(e),
+            },
+        }
+    }
+}
+
+struct RevocationAware {
+    roles: Arc<RoleVerifiers>,
+    revoked: Arc<RevocationList>,
+}
+
+impl fmt::Debug for RevocationAware {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RevocationAware")
+    }
 }
 
 impl ClientCertVerifier for RevocationAware {
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        self.inner.root_hint_subjects()
+        &self.roles.hints
     }
 
     fn verify_client_cert(
@@ -177,17 +316,16 @@ impl ClientCertVerifier for RevocationAware {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        let ok = self
-            .inner
-            .verify_client_cert(end_entity, intermediates, now)?;
+        let (ok, role) = self.roles.verify(end_entity, intermediates, now)?;
         if identity::serial(end_entity).is_none() {
             return Err(rustls::Error::InvalidCertificate(
                 CertificateError::BadEncoding,
             ));
         }
-        if is_revoked(&self.revoked, end_entity) {
+        if self.revoked.is_revoked(end_entity) {
             return Err(rustls::Error::InvalidCertificate(CertificateError::Revoked));
         }
+        record_role(end_entity, role);
         Ok(ok)
     }
 
@@ -197,7 +335,7 @@ impl ClientCertVerifier for RevocationAware {
         c: &CertificateDer<'_>,
         d: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner.verify_tls12_signature(m, c, d)
+        self.roles.operational.verify_tls12_signature(m, c, d)
     }
 
     fn verify_tls13_signature(
@@ -206,11 +344,11 @@ impl ClientCertVerifier for RevocationAware {
         c: &CertificateDer<'_>,
         d: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner.verify_tls13_signature(m, c, d)
+        self.roles.operational.verify_tls13_signature(m, c, d)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.inner.supported_verify_schemes()
+        self.roles.operational.supported_verify_schemes()
     }
 }
 
@@ -266,13 +404,17 @@ impl ProducesTickets for Ticketer {
 
 /// Everything needed to build the server, typically from the build config.
 pub struct ServerSetup<'a> {
-    pub ca_pem: &'a [u8],
+    /// CA certificates (PEM, each may hold several) granting operational
+    /// rights. At least one certificate in all.
+    pub operational_ca_pems: &'a [&'a [u8]],
+    /// CA certificates granting only the bootstrap role (may be empty).
+    pub bootstrap_ca_pems: &'a [&'a [u8]],
     pub cert_pem: &'a [u8],
     pub key_pem: &'a [u8],
     pub identity_field: IdentityField,
     pub resumption: bool,
-    /// Revoked certificate serials as hex strings.
-    pub revoked_hex: &'a [&'a str],
+    /// Revoked serials, shared with the control channel.
+    pub revocations: Arc<RevocationList>,
     /// Mixed into the ticket key so a new image invalidates old tickets.
     pub version: &'a str,
 }
@@ -280,7 +422,22 @@ pub struct ServerSetup<'a> {
 pub struct TlsServer {
     config: Arc<ServerConfig>,
     identity_field: IdentityField,
-    revoked: Arc<Vec<Vec<u8>>>,
+    revoked: Arc<RevocationList>,
+    roles: Arc<RoleVerifiers>,
+}
+
+/// Every certificate in `pems`, into one root store.
+fn roots(pems: &[&[u8]]) -> Result<RootCertStore, TlsError> {
+    let mut roots = RootCertStore::empty();
+    for pem in pems {
+        for c in CertificateDer::pem_slice_iter(pem) {
+            let c = c.map_err(|_| TlsError::Config("CA PEM is invalid"))?;
+            roots
+                .add(c)
+                .map_err(|_| TlsError::Config("CA certificate rejected"))?;
+        }
+    }
+    Ok(roots)
 }
 
 /// Serial numbers compare without the DER sign byte / leading zeros
@@ -306,29 +463,30 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 impl TlsServer {
     pub fn new(setup: &ServerSetup<'_>) -> Result<Self, TlsError> {
         let provider = Arc::new(crate::provider::provider());
-        let mut roots = RootCertStore::empty();
-        for c in CertificateDer::pem_slice_iter(setup.ca_pem) {
-            let c = c.map_err(|_| TlsError::Config("CA PEM is invalid"))?;
-            roots
-                .add(c)
-                .map_err(|_| TlsError::Config("CA certificate rejected"))?;
+        let operational = roots(setup.operational_ca_pems)?;
+        if operational.is_empty() {
+            return Err(TlsError::Config("no operational CA certificate"));
         }
-        if roots.is_empty() {
-            return Err(TlsError::Config("no CA certificate"));
-        }
-        let webpki = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
-            .build()
-            .map_err(|_| TlsError::Config("client verifier"))?;
-        let mut revoked: Vec<Vec<u8>> = setup
-            .revoked_hex
-            .iter()
-            .filter_map(|h| decode_hex(h))
-            .map(|b| normalize_serial(&b))
-            .collect();
-        revoked.sort();
-        let revoked = Arc::new(revoked);
+        let bootstrap = roots(setup.bootstrap_ca_pems)?;
+        let mut hints: Vec<DistinguishedName> = operational.subjects();
+        hints.extend(bootstrap.subjects());
+        let verifier_of = |r: RootCertStore| {
+            WebPkiClientVerifier::builder_with_provider(Arc::new(r), provider.clone())
+                .build()
+                .map_err(|_| TlsError::Config("client verifier"))
+        };
+        let roles = Arc::new(RoleVerifiers {
+            operational: verifier_of(operational)?,
+            bootstrap: if bootstrap.is_empty() {
+                None
+            } else {
+                Some(verifier_of(bootstrap)?)
+            },
+            hints,
+        });
+        let revoked = setup.revocations.clone();
         let verifier = Arc::new(RevocationAware {
-            inner: webpki,
+            roles: roles.clone(),
             revoked: revoked.clone(),
         });
         let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(setup.cert_pem)
@@ -359,6 +517,7 @@ impl TlsServer {
             config: Arc::new(config),
             identity_field: setup.identity_field,
             revoked,
+            roles,
         })
     }
 
@@ -370,6 +529,7 @@ impl TlsServer {
                 inbuf: Vec::new(),
                 random: None,
                 revoked: self.revoked.clone(),
+                roles: self.roles.clone(),
             })),
             identity_field: self.identity_field,
         })
@@ -395,7 +555,9 @@ struct Hs {
     random: Option<[u8; 32]>,
     /// For resumed sessions: no certificate is verified then, so the one
     /// in the ticket is checked against the list here.
-    revoked: Arc<Vec<Vec<u8>>>,
+    revoked: Arc<RevocationList>,
+    /// For resumed sessions: the role is decided again.
+    roles: Arc<RoleVerifiers>,
 }
 
 struct Open {
@@ -424,6 +586,9 @@ pub enum Event {
         identity: String,
         suite: &'static str,
         resumed: bool,
+        role: CertRole,
+        /// [`serial_tag`] of the client certificate's serial.
+        serial_tag: u64,
     },
     /// The peer closed the TLS session (close_notify).
     PeerClosed,
@@ -569,26 +734,39 @@ impl TlsSession {
             inbuf,
             random,
             revoked,
+            roles,
         } = *hs;
         let random = random.ok_or(TlsError::NotTls)?;
         let resumed = conn.handshake_kind() == Some(HandshakeKind::Resumed);
         // A ticket outlives a revocation (it is issued before, and the list
         // changes with a new image of possibly the same version): resumed
         // sessions are checked again (M16).
-        if resumed
-            && conn
-                .peer_certificates()
-                .and_then(|c| c.first())
-                .is_none_or(|c| is_revoked(&revoked, c))
-        {
+        let peer = conn.peer_certificates().unwrap_or(&[]);
+        let Some(ee) = peer.first() else {
+            return Err(TlsError::NoIdentity);
+        };
+        if resumed && revoked.is_revoked(ee) {
             return Err(TlsError::Handshake(
                 "resumed session of a revoked certificate".into(),
             ));
         }
-        let ident = conn
-            .peer_certificates()
-            .and_then(|c| c.first())
-            .and_then(|c| identity::identity(c, self.identity_field));
+        // A full handshake recorded the role during verification. A resumed
+        // one verified nothing: the chain from the ticket is checked again
+        // now, which also refuses a certificate that has expired since or
+        // whose CA was removed from this image.
+        let role = match take_role(ee) {
+            Some(r) if !resumed => r,
+            _ => {
+                let now = KernelTime
+                    .current_time()
+                    .ok_or_else(|| TlsError::Handshake("no wall clock".into()))?;
+                roles
+                    .verify(ee, peer.get(1..).unwrap_or(&[]), now)
+                    .map(|(_, r)| r)?
+            }
+        };
+        let serial_tag = identity::serial(ee).map_or(0, |s| serial_tag(&s));
+        let ident = identity::identity(ee, self.identity_field);
         let (secrets, kernel) = conn.dangerous_into_kernel_connection()?;
         drop(kernel);
         let (rx_secret, tx_secret) =
@@ -639,6 +817,8 @@ impl TlsSession {
             identity,
             suite: suite.name(),
             resumed,
+            role,
+            serial_tag,
         })
     }
 

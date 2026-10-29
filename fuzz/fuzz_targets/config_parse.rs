@@ -12,10 +12,13 @@ fuzz_target!(|data: &[u8]| {
     for env in ["dev", "prod"] {
         if let Ok(cfg) = parse(env, text) {
             let files = EmbeddedFiles {
-                ca: "/ca.pem".into(),
+                operational: vec!["/ca.pem".into()],
+                bootstrap: Vec::new(),
                 cert: "/server.pem".into(),
                 key: "/server.key".into(),
                 revoked: Vec::new(),
+                control_public_key: [0; 32],
+                server_cert_not_after: 0,
             };
             let _ = render(&cfg, &files);
         }

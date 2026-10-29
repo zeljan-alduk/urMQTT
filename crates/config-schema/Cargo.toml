@@ -14,7 +14,11 @@ bench = false
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
+urmqtt-control = { path = "../control" }
 urmqtt-dispatch = { path = "../dispatch" }
+# Expiry checks of the embedded certificates (host only: this crate runs
+# in build scripts).
+x509-cert = { version = "0.3", features = ["pem", "std"] }
 
 [lints]
 workspace = true

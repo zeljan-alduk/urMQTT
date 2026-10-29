@@ -100,6 +100,41 @@ struct RawConfig {
     /// Optional: without it nothing is disabled.
     #[serde(default)]
     cpu: RawCpu,
+    trust: RawTrust,
+    registry: RawRegistry,
+    control: RawControl,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTrust {
+    operational: Vec<String>,
+    bootstrap: Vec<String>,
+    min_anchor_days: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRegistry {
+    mode: RegistryMode,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawControl {
+    public_key: String,
+    service_ids: Vec<String>,
+    allow_unrevoke: bool,
+    max_message_age_s: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryMode {
+    /// Every identity with a valid certificate may connect.
+    Open,
+    /// Only identities on the allowlist (control channel, H1).
+    Allowlist,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -134,12 +169,13 @@ struct RawNetwork {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawTls {
-    ca: String,
     cert: String,
     key: String,
     identity_field: IdentityField,
     resumption: bool,
     revocation_list: String,
+    min_server_cert_days: u32,
+    early_data: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -226,13 +262,36 @@ pub struct Network {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tls {
-    pub ca: String,
     pub cert: String,
     pub key: String,
     pub identity_field: IdentityField,
     pub resumption: bool,
     /// File of revoked certificate serials (hex, one per line), or empty.
     pub revocation_list: String,
+    /// The build fails if the server certificate expires sooner.
+    pub min_server_cert_days: u32,
+}
+
+/// Trust anchors by role (H1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trust {
+    /// CA files granting device and service rights (at least one).
+    pub operational: Vec<String>,
+    /// CA files granting only `provision/{id}/#` (may be empty).
+    pub bootstrap: Vec<String>,
+    /// The build fails if any anchor expires sooner.
+    pub min_anchor_days: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Control {
+    /// Ed25519 public key file (`BEGIN PUBLIC KEY`).
+    pub public_key: String,
+    /// Operational identities that may publish control messages; empty
+    /// disables the control channel.
+    pub service_ids: Vec<String>,
+    pub allow_unrevoke: bool,
+    pub max_message_age_s: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,6 +364,9 @@ pub struct Config {
     pub memory: Memory,
     pub entropy: Entropy,
     pub cpu: Cpu,
+    pub trust: Trust,
+    pub registry: RegistryMode,
+    pub control: Control,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,6 +417,8 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
     };
 
     let cpu = validate_cpu(&raw.cpu, &mut errors);
+    let trust = validate_trust(&raw.trust, &mut errors);
+    let control = validate_control(&raw.control, &mut errors);
 
     if !errors.is_empty() {
         return Err(errors);
@@ -371,7 +435,64 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         memory,
         entropy: Entropy { jitter_fallback },
         cpu,
+        trust,
+        registry: raw.registry.mode,
+        control,
     })
+}
+
+fn validate_trust(raw: &RawTrust, errors: &mut Vec<ConfigError>) -> Trust {
+    if raw.operational.is_empty() {
+        errors.push(err("trust.operational", "at least one CA file is required"));
+    }
+    for (key, list) in [
+        ("trust.operational", &raw.operational),
+        ("trust.bootstrap", &raw.bootstrap),
+    ] {
+        for (i, name) in list.iter().enumerate() {
+            if let Err(m) = check_file_name(name) {
+                errors.push(err(&format!("{key}[{i}]"), m));
+            }
+        }
+    }
+    if raw.bootstrap.iter().any(|b| raw.operational.contains(b)) {
+        errors.push(err(
+            "trust.bootstrap",
+            "a CA file cannot be both operational and bootstrap",
+        ));
+    }
+    if raw.min_anchor_days == 0 {
+        errors.push(err("trust.min_anchor_days", "must be at least 1"));
+    }
+    Trust {
+        operational: raw.operational.clone(),
+        bootstrap: raw.bootstrap.clone(),
+        min_anchor_days: raw.min_anchor_days,
+    }
+}
+
+fn validate_control(raw: &RawControl, errors: &mut Vec<ConfigError>) -> Control {
+    if let Err(m) = check_file_name(&raw.public_key) {
+        errors.push(err("control.public_key", m));
+    }
+    for (i, id) in raw.service_ids.iter().enumerate() {
+        // Exact identities only: a control right is never granted by prefix.
+        if id.ends_with('*') || check_identity_pattern(id).is_err() {
+            errors.push(err(
+                &format!("control.service_ids[{i}]"),
+                "must be an exact identity ([A-Za-z0-9-_.:]+, no wildcard)",
+            ));
+        }
+    }
+    if !(1..=86_400).contains(&raw.max_message_age_s) {
+        errors.push(err("control.max_message_age_s", "must be 1..=86400"));
+    }
+    Control {
+        public_key: raw.public_key.clone(),
+        service_ids: raw.service_ids.clone(),
+        allow_unrevoke: raw.allow_unrevoke,
+        max_message_age_s: raw.max_message_age_s,
+    }
 }
 
 fn validate_cpu(raw: &RawCpu, errors: &mut Vec<ConfigError>) -> Cpu {
@@ -497,11 +618,16 @@ fn parse_cidr(s: &str) -> Result<Ipv4Cidr, String> {
 }
 
 fn validate_tls(raw: &RawTls, errors: &mut Vec<ConfigError>) -> Tls {
-    for (key, name) in [
-        ("tls.ca", &raw.ca),
-        ("tls.cert", &raw.cert),
-        ("tls.key", &raw.key),
-    ] {
+    if raw.early_data {
+        errors.push(err(
+            "tls.early_data",
+            "must be false: 0-RTT data is replayable (PROMPT-security §2)",
+        ));
+    }
+    if raw.min_server_cert_days == 0 {
+        errors.push(err("tls.min_server_cert_days", "must be at least 1"));
+    }
+    for (key, name) in [("tls.cert", &raw.cert), ("tls.key", &raw.key)] {
         if let Err(m) = check_file_name(name) {
             errors.push(err(key, m));
         }
@@ -512,12 +638,12 @@ fn validate_tls(raw: &RawTls, errors: &mut Vec<ConfigError>) -> Tls {
         errors.push(err("tls.revocation_list", m));
     }
     Tls {
-        ca: raw.ca.clone(),
         cert: raw.cert.clone(),
         key: raw.key.clone(),
         identity_field: raw.identity_field,
         resumption: raw.resumption,
         revocation_list: raw.revocation_list.clone(),
+        min_server_cert_days: raw.min_server_cert_days,
     }
 }
 
@@ -717,6 +843,12 @@ fn validate_filters(
     for (i, f) in filters.iter().enumerate() {
         if let Err(m) = check_topic_filter(f, limits, placeholder) {
             errors.push(err(&format!("{key}[{i}]"), m));
+        } else if f.split('/').next() == Some("$urmqtt") {
+            // The broker ignores such patterns anyway (H1); say so here.
+            errors.push(err(
+                &format!("{key}[{i}]"),
+                "the $urmqtt/ namespace is reserved for the control channel",
+            ));
         }
     }
 }
@@ -905,14 +1037,65 @@ pub fn check_pem(bytes: &[u8], kind: PemKind) -> Result<(), String> {
     Ok(())
 }
 
-/// Absolute paths of the files the kernel embeds with `include_bytes!`.
+/// Absolute paths of the files the kernel embeds with `include_bytes!`,
+/// and values derived from them at build time.
 #[derive(Debug, Clone)]
 pub struct EmbeddedFiles {
-    pub ca: String,
+    pub operational: Vec<String>,
+    pub bootstrap: Vec<String>,
     pub cert: String,
     pub key: String,
     /// Normalised revoked serials (already parsed from the list file).
     pub revoked: Vec<String>,
+    /// The control channel's Ed25519 public key.
+    pub control_public_key: [u8; 32],
+    /// The server certificate's notAfter (Unix seconds).
+    pub server_cert_not_after: u64,
+}
+
+/// One certificate's subject and notAfter (Unix seconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertValidity {
+    pub subject: String,
+    pub not_before: u64,
+    pub not_after: u64,
+}
+
+/// Validity of every certificate in a PEM file.
+pub fn cert_validity(pem: &[u8]) -> Result<Vec<CertValidity>, String> {
+    use x509_cert::Certificate;
+    let certs = Certificate::load_pem_chain(pem).map_err(|e| format!("cannot parse: {e}"))?;
+    if certs.is_empty() {
+        return Err("no certificate".into());
+    }
+    Ok(certs
+        .iter()
+        .map(|c| {
+            let v = c.tbs_certificate().validity();
+            CertValidity {
+                subject: c.tbs_certificate().subject().to_string(),
+                not_before: v.not_before.to_unix_duration().as_secs(),
+                not_after: v.not_after.to_unix_duration().as_secs(),
+            }
+        })
+        .collect())
+}
+
+/// Fails if any certificate in `pem` expires within `min_days` of
+/// `now_unix` (H1 expiry safety). Returns the earliest notAfter.
+pub fn check_expiry(pem: &[u8], now_unix: u64, min_days: u32) -> Result<u64, String> {
+    let certs = cert_validity(pem)?;
+    let limit = now_unix + u64::from(min_days) * 86_400;
+    for c in &certs {
+        if c.not_after < limit {
+            let days = (c.not_after as i64 - now_unix as i64).div_euclid(86_400);
+            return Err(format!(
+                "{} expires in {days} day(s), fewer than the required {min_days}",
+                c.subject
+            ));
+        }
+    }
+    Ok(certs.iter().map(|c| c.not_after).min().unwrap_or(0))
 }
 
 fn render_ipv4(a: Ipv4Addr) -> String {
@@ -929,6 +1112,14 @@ fn render_addr(a: Option<SocketAddrV4>) -> String {
             a.port()
         ),
     }
+}
+
+fn render_includes(paths: &[String]) -> String {
+    let items: Vec<String> = paths
+        .iter()
+        .map(|p| format!("include_bytes!({p:?})"))
+        .collect();
+    items.join(", ")
 }
 
 fn render_strs(v: &[String]) -> String {
@@ -972,6 +1163,8 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         identity_field: IdentityField::{identity:?},
         resumption: {resumption},
         revoked_serials: {revoked},
+        min_server_cert_days: {min_cert_days},
+        server_cert_not_after: {cert_not_after},
     }},
     limits: Limits {{
         max_connections_per_core: {mcpc},
@@ -1013,6 +1206,14 @@ pub const CONFIG: BuildConfig = BuildConfig {{
     entropy: Entropy {{
         jitter_fallback: {jitter},
     }},
+    registry: Registry {{
+        allowlist: {allowlist},
+    }},
+    control: Control {{
+        service_ids: {control_ids},
+        allow_unrevoke: {allow_unrevoke},
+        max_message_age_s: {max_age},
+    }},
     cpu: Cpu {{
         disable: {cpu_disable},
     }},
@@ -1022,8 +1223,12 @@ pub const CONFIG: BuildConfig = BuildConfig {{
     }},
 }};
 
-/// CA certificate (PEM) that device certificates must chain to.
-pub static CA_PEM: &[u8] = include_bytes!({ca:?});
+/// Operational trust anchors (PEM): device and service rights.
+pub static OPERATIONAL_CA_PEMS: &[&[u8]] = &[{operational}];
+/// Bootstrap trust anchors (PEM): `provision/{{id}}/#` only.
+pub static BOOTSTRAP_CA_PEMS: &[&[u8]] = &[{bootstrap}];
+/// Ed25519 public key that verifies control messages (H1).
+pub const CONTROL_PUBLIC_KEY: [u8; 32] = {control_key:?};
 /// Server certificate chain (PEM).
 pub static SERVER_CERT_PEM: &[u8] = include_bytes!({cert:?});
 /// Server private key (PEM).
@@ -1066,7 +1271,15 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         min_free = cfg.memory.min_free_mb,
         jitter = cfg.entropy.jitter_fallback,
         cpu_disable = render_strs(&cfg.cpu.disable),
-        ca = files.ca,
+        operational = render_includes(&files.operational),
+        bootstrap = render_includes(&files.bootstrap),
+        control_key = files.control_public_key,
+        min_cert_days = cfg.tls.min_server_cert_days,
+        cert_not_after = files.server_cert_not_after,
+        allowlist = cfg.registry == RegistryMode::Allowlist,
+        control_ids = render_strs(&cfg.control.service_ids),
+        allow_unrevoke = cfg.control.allow_unrevoke,
+        max_age = cfg.control.max_message_age_s,
         cert = files.cert,
         key = files.key,
     );

@@ -31,6 +31,7 @@ fn cfg() -> Config {
         persist: false,
         telemetry: &["devices/+/telemetry/#"],
         fanout: false,
+        control_ids: &["operator"],
     }
 }
 
@@ -654,7 +655,7 @@ fn many_sessions_route_correctly() {
 fn client_id_must_match_certificate_identity() {
     let mut b = Broker::new(cfg());
     let c = b.open(0).unwrap();
-    b.set_identity(c, "device-001");
+    b.set_identity(c, "device-001", false);
     let mut cl = Client {
         c,
         rx: Vec::new(),
@@ -675,7 +676,7 @@ fn client_id_must_match_certificate_identity() {
     );
     assert_eq!(cl.recv(&mut b), vec![Got::ConnAck(false, 2)]);
     let c = b.open(0).unwrap();
-    b.set_identity(c, "device-001");
+    b.set_identity(c, "device-001", false);
     let mut cl = Client {
         c,
         rx: Vec::new(),
@@ -1132,4 +1133,216 @@ fn hot_state_stays_small() {
         core::mem::size_of::<Session>()
     );
     assert_eq!(core::mem::size_of::<Sub>(), 8);
+}
+
+/// Connects `id` over a "TLS" connection whose certificate came from a
+/// bootstrap anchor (`bootstrap`) or an operational one.
+fn tls_connect(b: &mut Broker, id: &str, bootstrap: bool, clean: bool, now: u64) -> (Client, Got) {
+    let c = Client {
+        c: b.open(now).unwrap(),
+        rx: Vec::new(),
+        pending: Vec::new(),
+    };
+    b.set_identity(c.c, id, bootstrap);
+    c.send(
+        b,
+        &Packet::Connect(Connect {
+            protocol_level: 4,
+            clean_session: clean,
+            keep_alive: 10,
+            client_id: id,
+            will: None,
+            username: None,
+            password: None,
+        }),
+        now,
+    );
+    let mut c = c;
+    let mut got = c.recv(b);
+    let ack = got.remove(0);
+    c.pending = got;
+    (c, ack)
+}
+
+/// H1: publishes to the reserved namespace are never routed. Only a
+/// control identity's publish to the exact control topic reaches the
+/// control handler.
+#[test]
+fn reserved_namespace_reaches_only_the_control_handler() {
+    let mut b = Broker::new(cfg());
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    // Even a wildcard over everything does not see `$` topics.
+    svc.subscribe(&mut b, 1, &[("#", QoS::AtLeastOnce)], 0);
+    let (mut op, ack) = Client::connect(&mut b, "operator", true, None, 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    let (mut dev, _) = Client::connect(&mut b, "device-001", true, None, 0);
+
+    let dropped = [
+        dev.publish(&mut b, CONTROL_TOPIC, b"x", QoS::AtLeastOnce, true, 1),
+        svc.publish(&mut b, CONTROL_TOPIC, b"x", QoS::AtLeastOnce, true, 1),
+        op.publish(&mut b, "$urmqtt/other", b"x", QoS::AtLeastOnce, true, 1),
+        op.publish(&mut b, "$urmqtt", b"x", QoS::AtLeastOnce, true, 1),
+    ];
+    for got in dropped {
+        assert_eq!(got, vec![Got::PubAck(7)], "acknowledged and dropped");
+    }
+    assert_eq!(b.stats().dropped_control, 4);
+    assert_eq!(b.drain_control().count(), 0);
+
+    op.publish(&mut b, CONTROL_TOPIC, b"signed", QoS::AtLeastOnce, false, 2);
+    let msgs: Vec<ControlMsg> = b.drain_control().collect();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(
+        (&*msgs[0].from, &*msgs[0].payload),
+        ("operator", &b"signed"[..])
+    );
+    assert_eq!(b.stats().control_received, 1);
+    // Nothing was routed or retained anywhere.
+    assert!(svc.recv(&mut b).is_empty());
+    assert_eq!(b.stats().retained, 0);
+
+    // Nobody may subscribe to the namespace.
+    let refused = vec![Got::SubAck(3, vec![SUBACK_FAILURE])];
+    assert_eq!(
+        svc.subscribe(&mut b, 3, &[("$urmqtt/#", QoS::AtMostOnce)], 3),
+        refused
+    );
+    assert_eq!(
+        op.subscribe(&mut b, 3, &[(CONTROL_TOPIC, QoS::AtMostOnce)], 3),
+        refused
+    );
+    assert_eq!(
+        dev.subscribe(&mut b, 3, &[("$urmqtt/+", QoS::AtMostOnce)], 3),
+        refused
+    );
+}
+
+/// H1: a bootstrap certificate named like a control service gets no
+/// control rights; the backlog is bounded.
+#[test]
+fn control_rights_need_an_operational_certificate() {
+    let mut b = Broker::new(cfg());
+    let (mut fake, ack) = tls_connect(&mut b, "operator", true, true, 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    fake.publish(&mut b, CONTROL_TOPIC, b"x", QoS::AtLeastOnce, false, 1);
+    assert_eq!(b.drain_control().count(), 0);
+    assert_eq!(b.stats().dropped_control, 1);
+
+    let (mut op, _) = tls_connect(&mut b, "operator", false, true, 2);
+    for _ in 0..100 {
+        op.publish(&mut b, CONTROL_TOPIC, b"x", QoS::AtMostOnce, false, 3);
+    }
+    assert_eq!(b.drain_control().count(), 64);
+    assert_eq!(b.stats().dropped_control, 1 + 36);
+}
+
+/// H1: a bootstrap identity lives in its own session namespace: it can
+/// neither take over nor read the operational session of the same id, must
+/// use a clean session, and only reaches `provision/{id}/#`.
+#[test]
+fn bootstrap_sessions_are_isolated_and_provisioning_only() {
+    let mut b = Broker::new(cfg());
+    // The operational device-001 has a persistent session with a queued
+    // command.
+    let (mut d, _) = tls_connect(&mut b, "device-001", false, false, 0);
+    d.subscribe(
+        &mut b,
+        1,
+        &[("devices/device-001/cmd/#", QoS::AtLeastOnce)],
+        0,
+    );
+    d.kill(&mut b, 1);
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 1);
+    svc.publish(
+        &mut b,
+        "devices/device-001/cmd/x",
+        b"secret",
+        QoS::AtLeastOnce,
+        false,
+        2,
+    );
+
+    // A bootstrap identity with the same id: a persistent session is
+    // refused, a clean one gets no session_present and nothing queued.
+    let (_, ack) = tls_connect(&mut b, "device-001", true, false, 3);
+    assert_eq!(
+        ack,
+        Got::ConnAck(false, ConnectReturnCode::NotAuthorized as u8)
+    );
+    let (mut boot, ack) = tls_connect(&mut b, "device-001", true, true, 4);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    assert!(boot.recv(&mut b).is_empty(), "queued command leaked");
+    assert_eq!(
+        boot.subscribe(
+            &mut b,
+            2,
+            &[("devices/device-001/cmd/#", QoS::AtLeastOnce)],
+            4
+        ),
+        vec![Got::SubAck(2, vec![SUBACK_FAILURE])]
+    );
+    assert_eq!(
+        boot.subscribe(
+            &mut b,
+            3,
+            &[("provision/device-001/#", QoS::AtLeastOnce)],
+            4
+        ),
+        vec![Got::SubAck(3, vec![1])]
+    );
+    boot.publish(
+        &mut b,
+        "devices/device-001/telemetry/t",
+        b"x",
+        QoS::AtMostOnce,
+        false,
+        5,
+    );
+    assert_eq!(b.stats().dropped_acl, 1);
+
+    // The operational device comes back and still has its session and
+    // command: the bootstrap connection did not touch them.
+    let (mut d, ack) = tls_connect(&mut b, "device-001", false, false, 6);
+    assert_eq!(ack, Got::ConnAck(true, 0));
+    let got = d.recv(&mut b);
+    assert!(
+        got.iter()
+            .any(|g| matches!(g, Got::Publish { payload, .. } if payload == b"secret")),
+        "{got:?}"
+    );
+    // Both are online at once; neither was taken over.
+    assert!(b.close_requested(boot.c).is_none());
+}
+
+/// H1: an identity leaving the allowlist loses its live connection.
+#[test]
+fn disconnect_identity_closes_operational_and_bootstrap_sessions() {
+    let mut b = Broker::new(cfg());
+    let (d, _) = tls_connect(&mut b, "device-002", false, true, 0);
+    let (bt, _) = tls_connect(&mut b, "device-002", true, true, 0);
+    let (other, _) = tls_connect(&mut b, "device-003", false, true, 0);
+    assert!(b.disconnect_identity("device-002", CloseReason::Disallowed));
+    assert_eq!(b.close_requested(d.c), Some(CloseReason::Disallowed));
+    assert_eq!(b.close_requested(bt.c), Some(CloseReason::Disallowed));
+    assert_eq!(b.close_requested(other.c), None);
+    assert!(!b.disconnect_identity("device-009", CloseReason::Disallowed));
+}
+
+/// H1: an allowlist change closes exactly the sessions it no longer admits.
+#[test]
+fn disconnect_unless_applies_a_predicate_to_online_sessions() {
+    let mut b = Broker::new(cfg());
+    let (keep, _) = tls_connect(&mut b, "device-001", false, true, 0);
+    let (gone, _) = tls_connect(&mut b, "device-002", false, true, 0);
+    let (svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    let (boot, _) = tls_connect(&mut b, "device-002", true, true, 0);
+    let n = b.disconnect_unless(
+        |id, role| role != Role::Device || id == "device-001",
+        CloseReason::Disallowed,
+    );
+    assert_eq!(n, 1);
+    assert_eq!(b.close_requested(gone.c), Some(CloseReason::Disallowed));
+    for c in [&keep, &svc, &boot] {
+        assert_eq!(b.close_requested(c.c), None);
+    }
 }

@@ -11,7 +11,9 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 use urmqtt_tls::rng::{EntropyPool, Source};
-use urmqtt_tls::{Event, IdentityField, ServerSetup, TlsError, TlsServer, TlsSession};
+use urmqtt_tls::{
+    CertRole, Event, IdentityField, RevocationList, ServerSetup, TlsError, TlsServer, TlsSession,
+};
 
 fn dev() -> Option<PathBuf> {
     let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../deploy/dev");
@@ -43,12 +45,13 @@ fn server(d: &Path, field: IdentityField, revoked: &[&str]) -> TlsServer {
     let cert = read(&d.join("server.pem"));
     let key = read(&d.join("server.key"));
     TlsServer::new(&ServerSetup {
-        ca_pem: &ca,
+        operational_ca_pems: &[&ca],
+        bootstrap_ca_pems: &[],
         cert_pem: &cert,
         key_pem: &key,
         identity_field: field,
         resumption: true,
-        revoked_hex: revoked,
+        revocations: Arc::new(RevocationList::from_hex(revoked)),
         version: "test",
     })
     .unwrap()
@@ -314,4 +317,137 @@ fn revoked_device_cannot_resume() {
         e.contains("resumed session of a revoked certificate"),
         "{e}"
     );
+}
+
+fn server_with(
+    d: &Path,
+    operational: &[&str],
+    bootstrap: &[&str],
+    revocations: Arc<RevocationList>,
+) -> TlsServer {
+    let ops: Vec<Vec<u8>> = operational.iter().map(|f| read(&d.join(f))).collect();
+    let boots: Vec<Vec<u8>> = bootstrap.iter().map(|f| read(&d.join(f))).collect();
+    let ops: Vec<&[u8]> = ops.iter().map(Vec::as_slice).collect();
+    let boots: Vec<&[u8]> = boots.iter().map(Vec::as_slice).collect();
+    let cert = read(&d.join("server.pem"));
+    let key = read(&d.join("server.key"));
+    TlsServer::new(&ServerSetup {
+        operational_ca_pems: &ops,
+        bootstrap_ca_pems: &boots,
+        cert_pem: &cert,
+        key_pem: &key,
+        identity_field: IdentityField::Cn,
+        resumption: true,
+        revocations,
+        version: "test",
+    })
+    .unwrap()
+}
+
+/// The client trusts the server's CA; its own certificate may come from
+/// any CA.
+fn client_for(d: &Path, cert: &str) -> Arc<ClientConfig> {
+    client_config(d, cert)
+}
+
+fn established(r: &Result<Vec<Event>, TlsError>) -> Option<(String, CertRole, u64, bool)> {
+    r.as_ref().ok()?.iter().find_map(|e| match e {
+        Event::Established {
+            identity,
+            role,
+            serial_tag,
+            resumed,
+            ..
+        } => Some((identity.clone(), *role, *serial_tag, *resumed)),
+        _ => None,
+    })
+}
+
+fn serial_of(d: &Path, cert: &str) -> Vec<u8> {
+    let der = CertificateDer::from_pem_file(d.join(format!("{cert}.pem"))).unwrap();
+    urmqtt_tls::identity::serial(&der).unwrap()
+}
+
+fn has(d: &Path, f: &str) -> bool {
+    d.join(f).exists()
+}
+
+/// H1: a serial revoked at runtime is refused at the next full handshake
+/// and at the next resumption, on the same server.
+#[test]
+fn runtime_revocation_applies_to_handshakes_and_resumption() {
+    let Some(d) = dev() else { return };
+    setup_globals();
+    let list = Arc::new(RevocationList::new(Vec::new()));
+    let srv = server_with(&d, &["ca.pem"], &[], list.clone());
+    let cfg = client_for(&d, "devices/device-003");
+    let (_, _, r) = connect(&srv, cfg.clone());
+    let (_, _, tag, _) = established(&r).expect("first handshake");
+    let serial = serial_of(&d, "devices/device-003");
+    assert_eq!(tag, urmqtt_tls::serial_tag(&serial));
+    // A leading zero (DER sign byte) does not change the tag.
+    let mut padded = vec![0u8];
+    padded.extend_from_slice(&serial);
+    assert_eq!(tag, urmqtt_tls::serial_tag(&padded));
+
+    list.replace(vec![serial]);
+    // The client still holds a ticket: resumption must fail too.
+    let (_, _, r) = connect(&srv, cfg);
+    let e = format!("{:?}", r.unwrap_err());
+    assert!(e.contains("revoked"), "{e}");
+    let (_, _, r) = connect(&srv, client_for(&d, "devices/device-003"));
+    let e = format!("{:?}", r.unwrap_err());
+    assert!(e.to_lowercase().contains("revoked"), "{e}");
+
+    list.replace(Vec::new());
+    let (_, _, r) = connect(&srv, client_for(&d, "devices/device-003"));
+    assert!(established(&r).is_some(), "unrevoked again: {r:?}");
+}
+
+/// H1: two operational CAs (rotation with overlap) and a bootstrap CA.
+/// Each chain gets its role; a CA that is not configured is refused.
+#[test]
+fn trust_roles_and_ca_rotation() {
+    let Some(d) = dev() else { return };
+    if !has(&d, "ca-2.pem") || !has(&d, "ca-bootstrap.pem") {
+        return;
+    }
+    setup_globals();
+    let none = || Arc::new(RevocationList::new(Vec::new()));
+    let srv = server_with(&d, &["ca.pem", "ca-2.pem"], &["ca-bootstrap.pem"], none());
+    for (cert, id, role) in [
+        ("devices/device-001", "device-001", CertRole::Operational),
+        ("devices/device-005", "device-005", CertRole::Operational),
+        ("bootstrap/device-006", "device-006", CertRole::Bootstrap),
+    ] {
+        let cfg = client_for(&d, cert);
+        let (_, _, r) = connect(&srv, cfg.clone());
+        let got = established(&r).unwrap_or_else(|| panic!("{cert}: {r:?}"));
+        assert_eq!((got.0.as_str(), got.1, got.3), (id, role, false), "{cert}");
+        // A resumed session keeps the role.
+        let (_, _, r) = connect(&srv, cfg);
+        let got = established(&r).unwrap_or_else(|| panic!("{cert} resumed: {r:?}"));
+        assert_eq!((got.1, got.3), (role, true), "{cert} resumed");
+    }
+    // After the rotation the old CA is gone: its devices are refused, also
+    // with a ticket from before.
+    let rotated = server_with(&d, &["ca-2.pem"], &[], none());
+    let (_, _, r) = connect(&rotated, client_for(&d, "devices/device-001"));
+    assert!(r.is_err(), "removed CA still accepted");
+    // Same ticket key (same server key and version): the ticket itself
+    // would be accepted, so this checks that resumption re-verifies.
+    let with_ticket = client_for(&d, "devices/device-001");
+    let (_, _, r) = connect(&srv, with_ticket.clone());
+    assert!(established(&r).is_some());
+    let (_, _, r) = connect(&rotated, with_ticket);
+    assert!(
+        r.is_err(),
+        "resumed with a ticket after its CA was removed: {r:?}"
+    );
+    let (_, _, r) = connect(&rotated, client_for(&d, "devices/device-005"));
+    assert!(established(&r).is_some(), "{r:?}");
+    // Without a bootstrap role the bootstrap identity is unknown.
+    let ops_only = server_with(&d, &["ca.pem"], &[], none());
+    let (_, _, r) = connect(&ops_only, client_for(&d, "bootstrap/device-006"));
+    assert!(r.is_err(), "bootstrap accepted without a bootstrap anchor");
 }

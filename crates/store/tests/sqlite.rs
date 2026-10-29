@@ -221,3 +221,65 @@ fn foreign_data_is_not_formatted() {
     ));
     let _ = StoreError::Init(0);
 }
+
+/// H1: the control sequence number, runtime revocations and the allowlist
+/// survive power loss; the sequence number never goes down; image-listed
+/// revocations cannot be removed; a v1 database is migrated in place.
+#[test]
+fn control_state_survives_and_migrates() {
+    let _g = lock();
+    let m = MemDisk::new(32 << 20);
+    {
+        let (mut s, _) = mount(&m);
+        assert_eq!(s.control_seq().unwrap(), 0);
+        s.begin().unwrap();
+        s.revoke("0c", "config", 1).unwrap();
+        s.revoke("0d", "control", 1).unwrap();
+        s.set_control_seq(5).unwrap();
+        s.allow("device-001", 5, 1).unwrap();
+        s.allow("device-002", 5, 1).unwrap();
+        s.commit().unwrap();
+        // Lower and equal values do not move it.
+        s.begin().unwrap();
+        s.set_control_seq(3).unwrap();
+        s.set_control_seq(5).unwrap();
+        s.commit().unwrap();
+        assert_eq!(s.control_seq().unwrap(), 5);
+        // A rolled-back message leaves no trace.
+        s.begin().unwrap();
+        s.set_control_seq(9).unwrap();
+        s.disallow("device-001").unwrap();
+        s.rollback();
+        assert_eq!(s.control_seq().unwrap(), 5);
+        s.begin().unwrap();
+        s.unrevoke("0c").unwrap();
+        s.unrevoke("0d").unwrap();
+        s.disallow("device-002").unwrap();
+        s.set_control_seq(6).unwrap();
+        s.commit().unwrap();
+    }
+    m.crash(|_| false);
+    {
+        let (mut s, _) = mount(&m);
+        assert_eq!(s.control_seq().unwrap(), 6);
+        assert_eq!(
+            s.revoked().unwrap(),
+            vec!["0c".to_string()],
+            "image-listed stays"
+        );
+        assert_eq!(s.allowlist().unwrap(), vec!["device-001".to_string()]);
+        // Turn it back into a v1 database (as an M17 image left it).
+        s.db()
+            .exec("DROP TABLE control_state; DROP TABLE allowlist; PRAGMA user_version = 1;")
+            .unwrap();
+    }
+    let (mut s, _) = mount(&m);
+    assert_eq!(
+        s.control_seq().unwrap(),
+        0,
+        "fresh control state after migration"
+    );
+    assert!(s.allowlist().unwrap().is_empty());
+    assert_eq!(s.revoked().unwrap(), vec!["0c".to_string()], "v1 data kept");
+    assert_eq!(s.db().query_i64("PRAGMA user_version").unwrap(), 2);
+}

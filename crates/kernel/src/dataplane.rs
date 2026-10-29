@@ -76,6 +76,8 @@ pub enum CoreMsg {
     Open {
         tconn: Tconn,
         identity: Option<Box<str>>,
+        /// The certificate came from a bootstrap anchor (H1).
+        bootstrap: bool,
     },
     /// Transport → home: plaintext MQTT bytes from the client.
     Input { tconn: Tconn, data: Vec<u8> },

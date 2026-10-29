@@ -11,7 +11,8 @@ publish = false
 [[bin]]
 name = "urmqtt"
 path = "src/main.rs"
-test = false
+# Host tests cover the parts that compile on the host (cmdline.rs).
+test = true
 bench = false
 
 [dependencies]
@@ -26,6 +27,7 @@ urmqtt-tcp = { path = "../tcp" }
 [target.'cfg(target_os = "none")'.dependencies]
 limine = "0.6.5"
 urmqtt-arch = { path = "../arch" }
+urmqtt-control = { path = "../control" }
 urmqtt-dispatch = { path = "../dispatch" }
 urmqtt-sync = { path = "../sync" }
 urmqtt-log = { path = "../log" }

@@ -23,6 +23,8 @@ mod boot;
 #[cfg(target_os = "none")]
 mod console;
 #[cfg(target_os = "none")]
+mod control;
+#[cfg(target_os = "none")]
 mod dataplane;
 #[cfg(target_os = "none")]
 mod db;

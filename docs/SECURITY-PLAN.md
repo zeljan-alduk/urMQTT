@@ -106,6 +106,14 @@ Every milestone ends with:
   - `ca-rotation`: devices from both operational CAs work, and an old CA removed in a new image is refused;
   - `expiry-build-check` (in `make check`).
 
+**Status: done** (docs/PROGRESS.md, H1; ADR-048, ADR-049, ADR-050). Deviations from the work list above:
+- **Fixed binary encoding instead of CBOR:** the plan allowed either.
+- **Signing hook:** the tool offers the generic `--sign-cmd` hook (HSM through `pkcs11-tool`, cloud KMS CLIs) instead of a linked PKCS#11 library behind `--pkcs11-uri`.
+- **Broadcast:** propagation to the cores is an epoch counter plus a wake-up IPI rather than ring messages. Each core rescans its own connections, so nothing extra is queued per change.
+- **Serial index:** the per-connection serial index is a 32-bit tag in existing padding (bytes per connection unchanged).
+- **CA removal:** removing an old CA "in a new image" is proven by a host test that runs two servers with different anchors, including a resumption attempt with a valid ticket. The smoke `ca-rotation` scenario covers the overlap phase.
+- **Fixed on the way:** H0-W5 (clock lower bound), H0-W6 (random failures fatal) and H0-W11 (command-line host test).
+
 ### H2 — TLS assurance · L
 
 **Work**

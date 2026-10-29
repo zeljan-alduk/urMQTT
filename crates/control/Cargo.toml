@@ -1,0 +1,22 @@
+[package]
+name = "urmqtt-control"
+description = "Signed control messages (H1): fixed binary encoding, Ed25519 verification, freshness and replay rules (pure logic, shared by the kernel, the host tool and the fuzzer)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# Verification only in the kernel; strict (RFC 8032 + no small-order keys).
+ed25519-dalek = { version = "2.2", default-features = false }
+
+[dev-dependencies]
+ed25519-dalek = { version = "2.2", default-features = false, features = ["alloc"] }

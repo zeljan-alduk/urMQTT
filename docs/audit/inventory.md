@@ -8,11 +8,13 @@
 |---|---|---:|---:|---:|---|
 | `urmqtt-arch` | `crates/arch` | 228 | 0 | 0 (0) | deny |
 | `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 2857 | 0 | 72 (72) | deny |
-| `urmqtt-broker` | `crates/broker` | 3015 | 0 | 0 (0) | forbid |
-| `urmqtt-config` | `crates/config` | 150 | 0 | 0 (0) | forbid |
-| `urmqtt-config-schema` | `crates/config-schema` | 1452 | 0 | 0 (0) | forbid |
+| `urmqtt-broker` | `crates/broker` | 3404 | 0 | 0 (0) | forbid |
+| `urmqtt-config` | `crates/config` | 173 | 0 | 0 (0) | forbid |
+| `urmqtt-config-schema` | `crates/config-schema` | 1794 | 0 | 0 (0) | forbid |
+| `urmqtt-control` | `crates/control` | 609 | 0 | 0 (0) | forbid |
+| `urmqtt-control-tool` | `tools/control` | 416 | 0 | 0 (0) | default |
 | `urmqtt-dispatch` | `crates/dispatch` | 441 | 0 | 0 (0) | forbid |
-| `urmqtt-kernel` | `crates/kernel` | 6803 | 0 | 51 (36) | deny |
+| `urmqtt-kernel` | `crates/kernel` | 7404 | 0 | 51 (36) | deny |
 | `urmqtt-loadgen` | `tools/loadgen` | 452 | 0 | 0 (0) | default |
 | `urmqtt-log` | `crates/log` | 646 | 0 | 5 (5) | deny |
 | `urmqtt-mm` | `crates/mm` | 1219 | 0 | 35 (35) | deny |
@@ -20,13 +22,13 @@
 | `urmqtt-net` | `crates/net` | 1380 | 0 | 0 (0) | deny |
 | `urmqtt-pci` | `crates/pci` | 439 | 0 | 0 (0) | deny |
 | `urmqtt-platform` | `crates/platform` | 1017 | 453 | 0 (0) | deny |
-| `urmqtt-store` | `crates/store` | 3253 | 652 | 118 (106) | deny |
+| `urmqtt-store` | `crates/store` | 3340 | 713 | 118 (106) | deny |
 | `urmqtt-sync` | `crates/sync` | 435 | 0 | 16 (16) | deny |
 | `urmqtt-tcp` | `crates/tcp` | 2452 | 0 | 0 (0) | deny |
 | `urmqtt-timer-wheel` | `crates/timer-wheel` | 395 | 0 | 0 (0) | forbid |
-| `urmqtt-tls` | `crates/tls` | 2236 | 298 | 0 (0) | forbid |
+| `urmqtt-tls` | `crates/tls` | 2402 | 425 | 0 (0) | forbid |
 | `urmqtt-virtio` | `crates/virtio` | 1681 | 0 | 19 (19) | deny |
-| **total** | | **31905** | | **316 (289)** | |
+| **total** | | **34538** | | **316 (289)** | |
 
 ## Vendored components
 
@@ -45,6 +47,8 @@
 | `aes-gcm` | 0.10.3 | 326 | linked |
 | `autocfg` | 1.5.1 | 830 | build script (build time) |
 | `base16ct` | 1.0.0 | 331 | linked |
+| `base64ct` | 1.8.3 | 1762 | build script (build time) |
+| `block-buffer` | 0.10.4 | 375 | linked |
 | `block-buffer` | 0.12.1 | 656 | linked |
 | `cc` | 1.10.0 | 10492 | build script (build time) |
 | `cfg-if` | 1.0.5 | 201 | linked |
@@ -64,8 +68,11 @@
 | `curve25519-dalek` | 4.1.3 | 30423 | linked |
 | `der` | 0.8.3 | 12806 | linked |
 | `der_derive` | 0.8.0 | 3037 | proc-macro (build time) |
+| `digest` | 0.10.7 | 1915 | linked |
 | `digest` | 0.11.3 | 2490 | linked |
 | `ecdsa` | 0.17.0 | 2987 | linked |
+| `ed25519` | 2.2.3 | 856 | linked |
+| `ed25519-dalek` | 2.2.0 | 2771 | linked |
 | `elliptic-curve` | 0.14.3 | 4561 | linked |
 | `ff` | 0.14.0 | 679 | linked |
 | `find-msvc-tools` | 0.1.15 | 2511 | build script (build time) |
@@ -84,6 +91,7 @@
 | `once_cell` | 1.21.4 | 2381 | linked |
 | `opaque-debug` | 0.3.1 | 78 | linked |
 | `p256` | 0.14.0 | 3090 | linked |
+| `pem-rfc7468` | 1.0.0 | 919 | build script (build time) |
 | `pkcs8` | 0.11.0 | 1021 | linked |
 | `poly1305` | 0.8.0 | 2677 | linked |
 | `polyval` | 0.6.2 | 1202 | linked |
@@ -106,8 +114,10 @@
 | `serde_core` | 1.0.229 | 10994 | build script (build time) |
 | `serde_derive` | 1.0.229 | 8138 | build script (build time) |
 | `serde_spanned` | 1.1.2 | 337 | build script (build time) |
+| `sha2` | 0.10.9 | 2089 | linked |
 | `sha2` | 0.11.1 | 2610 | linked |
 | `shlex` | 2.0.1 | 771 | build script (build time) |
+| `signature` | 2.2.0 | 532 | linked |
 | `signature` | 3.0.0 | 723 | linked |
 | `spki` | 0.8.1 | 768 | linked |
 | `subtle` | 2.6.1 | 931 | linked |
@@ -128,8 +138,8 @@
 | `x509-cert` | 0.3.0 | 5623 | linked |
 | `zerocopy` | 0.8.63 | 31068 | linked |
 | `zeroize` | 1.9.1 | 973 | linked |
-| **total** | | **629684** (linked: 290278) | |
+| **total** | | **640903** (linked: 298816) | |
 
 ## Fuzz targets
 
-`acpi_parse`, `broker_input`, `config_parse`, `disk_layout`, `fdt_parse`, `mqtt_decode`, `net_frame`, `tcp_segment`, `telemetry_recover`, `tls_record`, `x509_identity`
+`acpi_parse`, `broker_input`, `config_parse`, `control_message`, `disk_layout`, `fdt_parse`, `mqtt_decode`, `net_frame`, `tcp_segment`, `telemetry_recover`, `tls_record`, `x509_identity`

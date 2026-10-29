@@ -18,6 +18,8 @@ urmqtt-tcp = { path = "../crates/tcp" }
 urmqtt-net = { path = "../crates/net" }
 urmqtt-tls = { path = "../crates/tls" }
 urmqtt-broker = { path = "../crates/broker" }
+urmqtt-control = { path = "../crates/control" }
+ed25519-dalek = { version = "2.2", default-features = false }
 
 # Standalone workspace: fuzz builds need sanitizer RUSTFLAGS.
 [workspace]
@@ -96,6 +98,13 @@ bench = false
 [[bin]]
 name = "telemetry_recover"
 path = "fuzz_targets/telemetry_recover.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_message"
+path = "fuzz_targets/control_message.rs"
 test = false
 doc = false
 bench = false

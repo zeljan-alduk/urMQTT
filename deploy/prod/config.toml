@@ -1,5 +1,6 @@
 # Production configuration template. Certificates and keys are NOT committed:
-# place ca.pem, server.pem and server.key in deploy/prod/ before `make iso ENV=prod`.
+# place ca.pem, server.pem, server.key and control.pub (the public half of the
+# offline control signing key) in deploy/prod/ before `make iso ENV=prod`.
 
 [network]
 mode = "dhcp"                  # "dhcp" | "static" (static needs address + gateway)
@@ -7,12 +8,13 @@ mqtt_tls_port = 8883
 mqtt_plain_port = 0            # plaintext is rejected outside dev
 
 [tls]
-ca = "ca.pem"                  # files are read from deploy/<env>/
-cert = "server.pem"
+cert = "server.pem"            # files are read from deploy/<env>/
 key = "server.key"
 identity_field = "cn"          # "cn" | "san_uri"
 resumption = true
 revocation_list = ""              # file of hex serials in deploy/prod/, or "" for none
+min_server_cert_days = 60      # the build fails if server.pem expires sooner
+early_data = false             # must stay false (0-RTT is replayable); true fails the build
 
 [limits]
 max_connections_per_core = 2000000
@@ -67,3 +69,21 @@ fallback = "jitter"
 # a slow or faulty accelerator: "aes", "pmull", "sha2", "crc32". Security
 # features (PAC, BTI) cannot be switched off. Empty: use what the CPU has.
 disable = []
+
+[trust]
+# CA files by role, in deploy/<env>/. Two operational CAs allow rotation with
+# overlap: add the new CA, re-issue devices, then remove the old one.
+operational = ["ca.pem"]
+bootstrap = []                # provisioning only: provision/{id}/#
+min_anchor_days = 365          # the build fails if a CA expires sooner
+
+[registry]
+mode = "open"                  # "open" | "allowlist" (only allowlisted ids connect)
+
+[control]
+# Signed control messages on $urmqtt/control (docs/SECURITY.md, "Control
+# channel"): runtime revocation and allowlist changes without a new image.
+public_key = "control.pub"     # Ed25519; the private key stays offline
+service_ids = []               # empty: the control channel is off
+allow_unrevoke = false
+max_message_age_s = 600        # longest validity window a message may have

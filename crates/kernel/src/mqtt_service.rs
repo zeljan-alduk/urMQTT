@@ -19,7 +19,7 @@ use urmqtt_log::{debug, info, warn};
 use urmqtt_mqtt::{Limits, QoS};
 use urmqtt_sync::spsc::{Consumer, Producer};
 use urmqtt_tcp::{Endpoint, TcpStack};
-use urmqtt_tls::{Event, IdentityField, ServerSetup, TlsServer, TlsSession};
+use urmqtt_tls::{CertRole, Event, IdentityField, ServerSetup, TlsServer, TlsSession};
 
 use crate::dataplane::{self, CoreMsg, Link, Tconn};
 use crate::db::{self, DbReq, DbResp, LogBatch, Restored};
@@ -111,6 +111,13 @@ struct Conn {
     /// We are closing: close_notify and FIN after `pending`.
     closing: bool,
     fin_sent: bool,
+    /// The low 32 bits of `urmqtt_tls::serial_tag` of the client
+    /// certificate (0: none yet, or plaintext), to find the live
+    /// connections of a revoked serial (H1). 32 bits fit the struct's
+    /// padding, so a connection costs nothing more; a collision only
+    /// closes an unrelated connection, which reconnects and is verified in
+    /// full.
+    serial_tag: u32,
 }
 
 // Per-connection budget (M15, ADR-034), checked at compile time: the
@@ -205,6 +212,10 @@ pub struct MqttService {
     ready: Vec<ConnId>,
     /// Connections to reset (handshake timeouts), for the network loop.
     aborts: Vec<u32>,
+    /// The control epoch this core last acted on (H1).
+    control_epoch: u64,
+    /// The broker's unauthorized-control counter at the last report.
+    dropped_control_seen: u64,
 }
 
 /// This core's telemetry ring to the DB core.
@@ -351,6 +362,7 @@ pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
         persist: db::active(),
         telemetry: CONFIG.storage.telemetry_topics,
         fanout,
+        control_ids: CONFIG.control.service_ids,
     }
 }
 
@@ -358,12 +370,15 @@ pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
 /// The TLS server as configured (build-time revocation list), for
 /// `test=dp-bench`.
 pub fn tls_server_for_bench() -> Option<TlsServer> {
-    tls_server(CONFIG.tls.revoked_serials)
+    tls_server()
 }
 
-fn tls_server(revoked: &[&str]) -> Option<TlsServer> {
+/// This core's TLS server: the image's trust anchors by role and the
+/// revocation list shared with the control channel (H1).
+fn tls_server() -> Option<TlsServer> {
     let setup = ServerSetup {
-        ca_pem: urmqtt_config::CA_PEM,
+        operational_ca_pems: urmqtt_config::OPERATIONAL_CA_PEMS,
+        bootstrap_ca_pems: urmqtt_config::BOOTSTRAP_CA_PEMS,
         cert_pem: urmqtt_config::SERVER_CERT_PEM,
         key_pem: urmqtt_config::SERVER_KEY_PEM,
         identity_field: match CONFIG.tls.identity_field {
@@ -371,7 +386,7 @@ fn tls_server(revoked: &[&str]) -> Option<TlsServer> {
             urmqtt_config::IdentityField::SanUri => IdentityField::SanUri,
         },
         resumption: CONFIG.tls.resumption,
-        revoked_hex: revoked,
+        revocations: crate::control::revocations(),
         version: crate::VERSION,
     };
     match TlsServer::new(&setup) {
@@ -396,20 +411,18 @@ impl MqttService {
     /// the sessions whose home is `me`, and the connections TCP accepts on
     /// this core's stack.
     pub fn new(restored: Option<&Restored>, me: usize, n: usize) -> Self {
-        // The revocation list comes from the store (seeded from the
-        // build-time list) or, without storage, from the build directly.
-        let revoked: Vec<&str> = match restored {
-            Some(r) => r.revoked.iter().map(String::as_str).collect(),
-            None => CONFIG.tls.revoked_serials.to_vec(),
-        };
-        let tls = tls_server(&revoked);
+        // The revocation list is shared with the control channel; it was
+        // filled from the store (seeded from the image) or the image.
+        let tls = tls_server();
         if me == dataplane::workers(n).start {
             if tls.is_some() {
                 info!(
-                    "mqtt: TLS 1.3 listener on port {} (mutual TLS, identity = certificate {:?}, {} revoked serial(s))",
+                    "mqtt: TLS 1.3 listener on port {} (mutual TLS, identity = certificate {:?}, {} revoked serial(s), {} operational and {} bootstrap CA file(s))",
                     CONFIG.network.mqtt_tls_port,
                     CONFIG.tls.identity_field,
-                    revoked.len()
+                    crate::control::revocations().len(),
+                    urmqtt_config::OPERATIONAL_CA_PEMS.len(),
+                    urmqtt_config::BOOTSTRAP_CA_PEMS.len()
                 );
             }
             if let Some(port) = CONFIG.network.mqtt_plain_port {
@@ -501,6 +514,8 @@ impl MqttService {
             last_shrink_ms: 0,
             ready: Vec::new(),
             aborts: Vec::new(),
+            control_epoch: crate::control::epoch(),
+            dropped_control_seen: 0,
         }
     }
 
@@ -622,6 +637,7 @@ impl MqttService {
                 remote_close: false,
                 closing: false,
                 fin_sent: false,
+                serial_tag: 0,
             },
         );
         self.handshakes.push_back(Pending {
@@ -659,17 +675,38 @@ impl MqttService {
                 identity,
                 suite,
                 resumed,
+                role,
+                serial_tag,
             }) => {
+                k.serial_tag = crate::control::tag32(serial_tag);
+                let bootstrap = role == CertRole::Bootstrap;
+                // Registry (H1): in allowlist mode an unknown operational
+                // identity is refused once it has proven who it is.
+                // Bootstrap identities exist to become known.
+                if !bootstrap && !crate::control::admitted(&identity) {
+                    let n = crate::control::REGISTRY_REFUSED
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                        + 1;
+                    if n.is_power_of_two() {
+                        warn!("registry: {identity} is not on the allowlist, refused ({n} so far)");
+                    }
+                    self.start_close(c);
+                    self.mark_blocked(c);
+                    return;
+                }
                 let home = dataplane::home_of(&identity, self.n);
-                if let Some(dbl) = self.db.as_mut() {
+                if let Some(dbl) = self.db.as_mut()
+                    && !bootstrap
+                {
                     dbl.seen(&identity);
                 }
                 debug!(
-                    "tls: {identity} authenticated ({suite}{}) on core {}, session on core {home}",
+                    "tls: {identity} authenticated ({suite}{}{}) on core {}, session on core {home}",
                     if resumed { ", resumed" } else { "" },
+                    if bootstrap { ", bootstrap role" } else { "" },
                     self.me
                 );
-                if !self.attach(c, home, Some(&identity), link, now_ms) {
+                if !self.attach(c, home, Some(&identity), bootstrap, link, now_ms) {
                     self.start_close(c);
                 }
             }
@@ -709,6 +746,7 @@ impl MqttService {
         c: u32,
         home: usize,
         identity: Option<&str>,
+        bootstrap: bool,
         link: &mut Link,
         now_ms: u64,
     ) -> bool {
@@ -720,7 +758,7 @@ impl MqttService {
                 return false;
             };
             if let Some(id) = identity {
-                self.broker.set_identity(b, id);
+                self.broker.set_identity(b, id, bootstrap);
             }
             k.peer = Some(Peer::Local(b));
             self.by_broker.insert(b, c);
@@ -730,6 +768,7 @@ impl MqttService {
                 CoreMsg::Open {
                     tconn: k.tconn,
                     identity: identity.map(Into::into),
+                    bootstrap,
                 },
             );
             k.peer = Some(Peer::Remote { home: home as u16 });
@@ -780,7 +819,7 @@ impl MqttService {
             return;
         };
         let early = k.early.take();
-        if self.attach(c, home, None, link, now_ms) {
+        if self.attach(c, home, None, false, link, now_ms) {
             self.deliver(c, &early, link, now_ms);
         } else {
             self.start_close(c);
@@ -830,10 +869,14 @@ impl MqttService {
     /// Handles a message from data core `peer` (everything but IpConfig).
     pub fn on_msg(&mut self, peer: usize, msg: CoreMsg, link: &mut Link, now_ms: u64) {
         match msg {
-            CoreMsg::Open { tconn, identity } => match self.broker.open(now_ms) {
+            CoreMsg::Open {
+                tconn,
+                identity,
+                bootstrap,
+            } => match self.broker.open(now_ms) {
                 Some(b) => {
                     if let Some(id) = &identity {
-                        self.broker.set_identity(b, id);
+                        self.broker.set_identity(b, id, bootstrap);
                     }
                     self.remote.insert(
                         b,
@@ -1008,6 +1051,39 @@ impl MqttService {
                 );
             }
         }
+        // Control messages go to the DB core unchanged; it authenticates
+        // them. Without durable storage they are refused (H1).
+        for m in self.broker.drain_control() {
+            match self.db.as_mut() {
+                Some(dbl) => dbl.send(DbReq::Control {
+                    from: m.from,
+                    payload: m.payload,
+                }),
+                None => crate::control::refuse_without_storage(&m.from),
+            }
+        }
+        let dropped = self.broker.dropped_control();
+        if dropped > self.dropped_control_seen {
+            crate::control::REJECTED
+                .get(urmqtt_control::Reject::Unauthorized.index())
+                .map(|c| {
+                    c.fetch_add(
+                        dropped - self.dropped_control_seen,
+                        core::sync::atomic::Ordering::Relaxed,
+                    )
+                });
+            if dropped.is_power_of_two() {
+                warn!(
+                    "control: {dropped} publish(es) to $urmqtt/ by identities without control rights dropped on core {}",
+                    self.me
+                );
+            }
+            self.dropped_control_seen = dropped;
+        }
+        if crate::control::epoch() != self.control_epoch {
+            activity = true;
+            self.apply_control(now_ms);
+        }
         if let Some(dbl) = self.db.as_mut() {
             for op in self.broker.drain_persist() {
                 dbl.send(DbReq::Persist(op));
@@ -1024,6 +1100,43 @@ impl MqttService {
             None => self.broker.drain_telemetry().for_each(drop),
         }
         activity
+    }
+
+    /// A control change was applied (H1): closes this core's live
+    /// connections whose certificate serial is now revoked (transport
+    /// side) and the sessions homed here whose identity left the allowlist.
+    fn apply_control(&mut self, _now_ms: u64) {
+        self.control_epoch = crate::control::epoch();
+        let tags = crate::control::revoked_tags();
+        let revoked: Vec<u32> = self
+            .conns
+            .0
+            .iter()
+            .filter(|(_, k)| {
+                k.tls
+                    && !k.closing
+                    && k.serial_tag != 0
+                    && tags.binary_search(&k.serial_tag).is_ok()
+            })
+            .map(|(c, _)| c)
+            .collect();
+        let mut closed = revoked.len() as u64;
+        for c in revoked {
+            self.start_close(c);
+        }
+        if crate::control::allowlist_mode() {
+            closed += self.broker.disconnect_unless(
+                |id, role| role != urmqtt_broker::Role::Device || crate::control::admitted(id),
+                CloseReason::Disallowed,
+            ) as u64;
+        }
+        if closed > 0 {
+            crate::control::LIVE_CLOSED.fetch_add(closed, core::sync::atomic::Ordering::Relaxed);
+            info!(
+                "control: core {}: {closed} live connection(s) closed (revoked or no longer allowed)",
+                self.me
+            );
+        }
     }
 
     /// Broker output of a local session → TLS → `pending`.
@@ -1214,6 +1327,7 @@ fn finish(broker: &mut Broker, c: ConnId, now_ms: u64) {
             Some(CloseReason::ProtocolError) => "protocol error",
             Some(CloseReason::Rejected) => "rejected",
             Some(CloseReason::Unsupported) => "unsupported",
+            Some(CloseReason::Disallowed) => "no longer on the allowlist",
             None => "network closed, will published if set",
         },
         st.sessions,

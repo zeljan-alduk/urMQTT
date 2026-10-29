@@ -198,16 +198,27 @@ extern "C" fn urmqtt_kmain() -> ! {
         ),
         None => warn!("psci unavailable: power-off and reset will halt instead"),
     }
-    if let Some(d) = DATE_AT_BOOT.response() {
-        info!("date at boot: unix {}", d.timestamp);
-        BOOT_UNIX.store(
-            d.timestamp.max(0) as u64,
-            core::sync::atomic::Ordering::Relaxed,
-        );
-        urmqtt_tls::set_clock(now_unix);
-    } else {
-        warn!("no date at boot: certificate validity checks will be refused (ADR-009)");
+    // H7 lower bound: the image cannot run before it was built, so an
+    // earlier clock (an empty CMOS battery, a broken RTC) is unknown time,
+    // and everything that needs the time fails closed.
+    match DATE_AT_BOOT.response().map(|d| d.timestamp.max(0) as u64) {
+        // `black_box`: a build without SOURCE_DATE_EPOCH has a bound of 0.
+        Some(t) if t >= core::hint::black_box(BUILD_UNIX) => {
+            info!("date at boot: unix {t} (image built at unix {BUILD_UNIX})");
+            BOOT_UNIX.store(t, core::sync::atomic::Ordering::Relaxed);
+        }
+        Some(t) => warn!(
+            "date at boot: unix {t} is before this image was built (unix {BUILD_UNIX}): \
+             wall clock unknown, certificate checks and control messages refused \
+             (check the RTC battery or the hypervisor clock)"
+        ),
+        None => warn!("no date at boot: certificate validity checks will be refused (ADR-009)"),
     }
+    if BUILD_UNIX == 0 {
+        warn!("no build time in this image (SOURCE_DATE_EPOCH unset): no lower bound on the clock");
+    }
+    // Installed in every case: without a date it answers "unknown".
+    urmqtt_tls::set_clock(now_unix);
     console::log_framebuffer();
     mem.log_summary();
     if options.ignored > 0 {
@@ -428,6 +439,24 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     // Durable storage (M11) opens before the other cores start; the DB
     // core takes the store over afterwards.
     let restored = crate::db::init(s.options.db_test);
+    // The identity lifecycle's sets (H1): from the store, or from the image
+    // when there is no durable storage (then the control channel refuses).
+    let image_revoked: alloc::vec::Vec<alloc::string::String> = urmqtt_config::CONFIG
+        .tls
+        .revoked_serials
+        .iter()
+        .map(|s| (*s).into())
+        .collect();
+    let allowlist_mode = urmqtt_config::CONFIG.registry.allowlist || s.options.allowlist;
+    match restored.as_ref() {
+        Some(r) => crate::control::init(&r.revoked, &r.allowlist, allowlist_mode),
+        None => crate::control::init(&image_revoked, &[], allowlist_mode),
+    }
+    if allowlist_mode && restored.is_none() {
+        warn!(
+            "registry: allowlist mode without durable storage: the allowlist is empty and cannot change"
+        );
+    }
     smp_bringup(&mut s);
     // With durable storage and two or more CPUs, the last CPU is the DB
     // core; every other CPU is a data core (M13, ADR-032).
@@ -588,6 +617,28 @@ pub(crate) fn fatal(msg: &str) -> ! {
 pub(crate) fn fatal_fmt(args: core::fmt::Arguments<'_>) -> ! {
     error!("fatal: {args}");
     power::fatal()
+}
+
+/// The image's build time (`SOURCE_DATE_EPOCH`, the commit time): the
+/// wall clock's lower bound (H7). 0 if the build did not set it.
+const BUILD_UNIX: u64 = match option_env!("SOURCE_DATE_EPOCH") {
+    Some(s) => parse_u64(s),
+    None => 0,
+};
+
+const fn parse_u64(s: &str) -> u64 {
+    let b = s.as_bytes();
+    let mut v: u64 = 0;
+    let mut i = 0;
+    while i < b.len() {
+        let d = b[i];
+        if d < b'0' || d > b'9' {
+            return 0;
+        }
+        v = v * 10 + (d - b'0') as u64;
+        i += 1;
+    }
+    v
 }
 
 /// Unix time at boot from the firmware RTC via Limine (ADR-009).

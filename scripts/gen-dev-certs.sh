@@ -11,6 +11,15 @@
 #   deploy/dev/services/backend.{pem,key}  service identity "backend"
 #   deploy/dev/revoked.txt                 revoked serials (tls.revocation_list)
 #
+# H1 additions (each generated on its own if missing, so an existing
+# deploy/dev/ keeps its CA and only gains what is new):
+#   deploy/dev/ca-2.pem, ca-2.key          second operational CA (rotation with overlap)
+#   deploy/dev/devices/device-005.{pem,key}  device signed by ca-2
+#   deploy/dev/ca-bootstrap.pem, .key      bootstrap CA (provisioning role only)
+#   deploy/dev/bootstrap/device-006.{pem,key}  bootstrap identity "device-006"
+#   deploy/dev/services/operator.{pem,key}  control-channel service identity
+#   deploy/dev/control.key, control.pub    Ed25519 control signing key (offline in prod)
+#
 # Never use these for anything but local testing. They are git-ignored (ADR-004).
 # Usage: scripts/gen-dev-certs.sh [--force]
 set -euo pipefail
@@ -20,7 +29,14 @@ OUT=deploy/dev
 FORCE=0
 [[ "${1:-}" == "--force" ]] && FORCE=1
 
+BASE=1
 if [[ -f "$OUT/ca.pem" && $FORCE -eq 0 ]]; then
+    BASE=0
+fi
+# need <file>: true if <file> must be (re)generated.
+need() { [[ $FORCE -eq 1 || ! -f "$1" ]]; }
+if [[ $BASE -eq 0 ]] && ! need "$OUT/ca-2.pem" && ! need "$OUT/ca-bootstrap.pem" \
+    && ! need "$OUT/services/operator.pem" && ! need "$OUT/control.pub"; then
     echo "dev certificates already exist in $OUT (use --force to regenerate)"
     exit 0
 fi
@@ -46,7 +62,7 @@ fi
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$OUT/devices" "$OUT/negative" "$OUT/services"
+mkdir -p "$OUT/devices" "$OUT/negative" "$OUT/services" "$OUT/bootstrap"
 umask 077
 
 key() { "$OPENSSL" genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$1" 2>/dev/null; }
@@ -132,31 +148,63 @@ EOF
     echo "$TMP/device.ext"
 }
 
-echo "generating dev CA"
-ca dev "/O=urMQTT dev/CN=urMQTT Dev CA" "$OUT/ca"
+if [[ $BASE -eq 1 ]]; then
+    echo "generating dev CA"
+    ca dev "/O=urMQTT dev/CN=urMQTT Dev CA" "$OUT/ca"
 
-echo "generating server certificate"
-leaf "$OUT/ca" "$OUT/server" "localhost" "$TMP/server.ext" -days 825
+    echo "generating server certificate"
+    leaf "$OUT/ca" "$OUT/server" "localhost" "$TMP/server.ext" -days 825
 
-for id in device-001 device-002 device-003; do
-    echo "generating $id"
-    leaf "$OUT/ca" "$OUT/devices/$id" "$id" "$(device_ext "$id")" -days 825
-done
+    for id in device-001 device-002 device-003; do
+        echo "generating $id"
+        leaf "$OUT/ca" "$OUT/devices/$id" "$id" "$(device_ext "$id")" -days 825
+    done
 
-echo "generating service certificate (backend)"
-leaf "$OUT/ca" "$OUT/services/backend" "backend" "$(service_ext backend)" -days 825
+    echo "generating service certificate (backend)"
+    leaf "$OUT/ca" "$OUT/services/backend" "backend" "$(service_ext backend)" -days 825
 
-echo "generating negative-test certificates"
-ca rogue "/O=urMQTT rogue/CN=Rogue CA" "$TMP/rogue-ca"
-cp "$TMP/rogue-ca.pem" "$OUT/negative/rogue-ca.pem"
-leaf "$TMP/rogue-ca" "$OUT/negative/rogue-device" "device-001" "$(device_ext device-001)" -days 825
-expired_leaf "$OUT/ca" "$OUT/negative/expired-device" "device-002" "$(device_ext device-002)"
-leaf "$OUT/ca" "$OUT/negative/revoked-device" "device-004" "$(device_ext device-004)" -days 825
-"$OPENSSL" x509 -in "$OUT/negative/revoked-device.pem" -noout -serial | cut -d= -f2 | tr 'A-F' 'a-f' > "$OUT/revoked.txt"
+    echo "generating negative-test certificates"
+    ca rogue "/O=urMQTT rogue/CN=Rogue CA" "$TMP/rogue-ca"
+    cp "$TMP/rogue-ca.pem" "$OUT/negative/rogue-ca.pem"
+    leaf "$TMP/rogue-ca" "$OUT/negative/rogue-device" "device-001" "$(device_ext device-001)" -days 825
+    expired_leaf "$OUT/ca" "$OUT/negative/expired-device" "device-002" "$(device_ext device-002)"
+    leaf "$OUT/ca" "$OUT/negative/revoked-device" "device-004" "$(device_ext device-004)" -days 825
+    "$OPENSSL" x509 -in "$OUT/negative/revoked-device.pem" -noout -serial | cut -d= -f2 | tr 'A-F' 'a-f' > "$OUT/revoked.txt"
+
+fi
+
+if need "$OUT/ca-2.pem"; then
+    echo "generating second operational CA and device-005 (CA rotation)"
+    ca dev2 "/O=urMQTT dev/CN=urMQTT Dev CA 2" "$OUT/ca-2"
+    leaf "$OUT/ca-2" "$OUT/devices/device-005" "device-005" "$(device_ext device-005)" -days 825
+fi
+
+if need "$OUT/ca-bootstrap.pem"; then
+    echo "generating bootstrap CA and bootstrap identity device-006"
+    ca boot "/O=urMQTT dev/CN=urMQTT Dev Bootstrap CA" "$OUT/ca-bootstrap"
+    leaf "$OUT/ca-bootstrap" "$OUT/bootstrap/device-006" "device-006" "$(device_ext device-006)" -days 825
+fi
+
+if need "$OUT/services/operator.pem"; then
+    echo "generating control service identity (operator)"
+    leaf "$OUT/ca" "$OUT/services/operator" "operator" "$(service_ext operator)" -days 825
+fi
+
+if need "$OUT/control.pub"; then
+    echo "generating Ed25519 control signing key"
+    "$OPENSSL" genpkey -algorithm ed25519 -out "$OUT/control.key"
+    "$OPENSSL" pkey -in "$OUT/control.key" -pubout -out "$OUT/control.pub"
+fi
 
 echo "verifying with $("$OPENSSL" version)"
 # Sanity checks: the chain verifies, the negatives fail as intended.
-"$OPENSSL" verify -CAfile "$OUT/ca.pem" "$OUT/server.pem" "$OUT"/devices/*.pem "$OUT/services/backend.pem" >/dev/null
+"$OPENSSL" verify -CAfile "$OUT/ca.pem" "$OUT/server.pem" "$OUT"/devices/device-00[1-3].pem \
+    "$OUT/services/backend.pem" "$OUT/services/operator.pem" >/dev/null
+"$OPENSSL" verify -CAfile "$OUT/ca-2.pem" "$OUT/devices/device-005.pem" >/dev/null
+"$OPENSSL" verify -CAfile "$OUT/ca-bootstrap.pem" "$OUT/bootstrap/device-006.pem" >/dev/null
+if "$OPENSSL" verify -CAfile "$OUT/ca.pem" "$OUT/bootstrap/device-006.pem" >/dev/null 2>&1; then
+    echo "error: bootstrap identity unexpectedly verifies against the operational CA" >&2; exit 1
+fi
 if "$OPENSSL" verify -CAfile "$OUT/ca.pem" "$OUT/negative/rogue-device.pem" >/dev/null 2>&1; then
     echo "error: rogue device unexpectedly verifies" >&2; exit 1
 fi

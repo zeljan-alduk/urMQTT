@@ -14,9 +14,10 @@ next to it. They are ignored by git (`.gitignore`) and must never be committed:
 | File | Content |
 |---|---|
 | `config.toml` | committed; review every key (README, "Configuration") |
-| `ca.pem` | the CA that signs device certificates |
-| `server.pem` | broker certificate chain (leaf first) |
+| `ca.pem` (and more) | the operational CAs named by `trust.operational`; bootstrap CAs by `trust.bootstrap` ([PROVISIONING.md](PROVISIONING.md)) |
+| `server.pem` | broker certificate chain (leaf first); the build fails if it expires within `tls.min_server_cert_days` |
 | `server.key` | unencrypted PEM private key (the VM cannot prompt for a passphrase) |
+| `control.pub` | the Ed25519 public key of the offline control signing key (`openssl pkey -pubout`); required even if `control.service_ids` is empty |
 | revocation list | optional: a file of hex serials named by `tls.revocation_list` |
 
 Sizing: `memory.kernel_heap_mb` (1024 in the template) must fit the VM's RAM
@@ -248,11 +249,25 @@ image, keeps the data disk and restarts the service.
   `SYSTEM_RESET`); it comes back by itself, devices reconnect, and admission
   control absorbs the storm. Configure the hypervisor to reboot rather than stop
   the VM on reset.
-- **Revoking a device:** add its serial to the revocation list, rebuild, deploy.
-  Resumed sessions are checked too, so the device is refused as soon as the new
-  image runs.
-- **Rotating the server key or CA:** a new image. Old session tickets become
-  invalid with the new key.
+- **Revoking a device at runtime (H1):** send a signed control message with
+  `urmqtt-control revoke` from a control identity (`control.service_ids`).
+  - The device's live connections are closed at once, and it is refused at
+    every later handshake or resumption.
+  - The change is stored on the data disk and survives reboots.
+  - For a revocation that must survive even a lost data disk, also add the
+    serial to the image's revocation list at the next build.
+  - Watch `urmqtt.control.applied` and `urmqtt.control.rejected.*`.
+- **Allowlist mode:** with `registry.mode = "allowlist"`, admit devices with
+  `urmqtt-control allow --id …` and remove them with `disallow`
+  ([PROVISIONING.md](PROVISIONING.md)).
+- **Rotating a CA:** add the new CA to `trust.operational` next to the old one,
+  deploy, re-issue devices, then remove the old CA and deploy again. Devices of
+  a removed CA are refused, also on resumption.
+- **Server certificate expiry:** `urmqtt.tls.server_cert_days` and warnings at
+  60, 30, 7 and 1 days. The build refuses a certificate with less than
+  `tls.min_server_cert_days` left.
+- **Rotating the server key:** a new image. Old session tickets become invalid
+  with the new key.
 - **Backups:** the data disk holds SQLite (registry, retained messages,
   sessions) and the telemetry log. Snapshot it while the VM is stopped, or rely
   on the export path of your backend service.

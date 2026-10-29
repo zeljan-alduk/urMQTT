@@ -49,8 +49,11 @@ fn ip_str(a: [u8; 4]) -> alloc::string::String {
 
 fn new_tcp(addr: [u8; 4], ports: Vec<u16>) -> TcpStack {
     let mut key = [0u8; 16];
-    // Entropy is required to run at all (boot refuses otherwise).
-    let _ = urmqtt_tls::rng::fill_global(&mut key);
+    // Fail closed (H0-W6): a zero cookie key would make ISNs predictable.
+    // Boot refuses to get here without a generator, so this never fires.
+    if urmqtt_tls::rng::fill_global(&mut key).is_err() {
+        crate::boot::fatal("tcp: no random generator for the SYN-cookie key");
+    }
     TcpStack::new(
         urmqtt_tcp::Config {
             local_addr: addr,
@@ -396,7 +399,10 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         );
     }
     let mut xid = [0u8; 4];
-    let _ = urmqtt_tls::rng::fill_global(&mut xid);
+    // Fail closed (H0-W6), as for the cookie key.
+    if urmqtt_tls::rng::fill_global(&mut xid).is_err() {
+        crate::boot::fatal("dhcp: no random generator for the transaction id");
+    }
     let mut iface = match CONFIG.network.mode {
         NetworkMode::Dhcp => Iface::new(mac, true, Some(u32::from_be_bytes(xid)), now_ms()),
         NetworkMode::Static { address, gateway } => {

@@ -59,7 +59,15 @@ static LOG_CRASH: AtomicBool = AtomicBool::new(false);
 /// A request from the data plane.
 pub enum DbReq {
     Persist(PersistOp),
-    DeviceSeen { id: Box<str>, unix: i64 },
+    DeviceSeen {
+        id: Box<str>,
+        unix: i64,
+    },
+    /// A control message as published (H1), authenticated by the worker.
+    Control {
+        from: Box<str>,
+        payload: Box<[u8]>,
+    },
 }
 
 /// A response to the data plane.
@@ -87,6 +95,8 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// State restored from the store at boot.
 pub struct Restored {
     pub revoked: Vec<String>,
+    /// The device allowlist (H1).
+    pub allowlist: Vec<String>,
     pub retained: Vec<Retained>,
     pub sessions: Vec<SessionRecord>,
 }
@@ -324,9 +334,15 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
         Err(e) => return refuse_or_degrade(false, format_args!("loading state failed: {e}")),
     };
     let devices = store.device_count().unwrap_or(0);
+    let control_seq = match store.control_seq() {
+        Ok(s) => s,
+        Err(e) => {
+            return refuse_or_degrade(false, format_args!("loading control state failed: {e}"));
+        }
+    };
     info!(
         "db: restored {} retained message(s), {} persistent session(s) with {} queued message(s), \
-         {} revoked serial(s), {devices} known device(s)",
+         {} revoked serial(s), {devices} known device(s), control seq {control_seq}",
         restored.retained.len(),
         restored.sessions.len(),
         restored
@@ -349,6 +365,7 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
         log_rx,
         log_since_ms: None,
         log_reported: 0,
+        control_seq,
     });
     // Relaxed: read only after the data plane starts (later in boot).
     ACTIVE.store(true, Ordering::Relaxed);
@@ -472,6 +489,7 @@ fn load(store: &mut Store) -> Result<Restored, StoreError> {
     store.commit()?;
     Ok(Restored {
         revoked: store.revoked()?,
+        allowlist: store.allowlist()?,
         retained: store.retained()?,
         sessions: store.sessions()?,
     })
@@ -582,6 +600,8 @@ struct Worker {
     /// When the oldest unflushed telemetry record arrived.
     log_since_ms: Option<u64>,
     log_reported: u64,
+    /// The last accepted control sequence number (H1).
+    control_seq: u64,
 }
 
 impl Worker {
@@ -601,6 +621,16 @@ impl Worker {
             };
             idle_rings = 0;
             did = true;
+            // A control message gets a transaction of its own: its effect
+            // and sequence number commit together, before anything acts
+            // on them (H1).
+            if let DbReq::Control { from, payload } = req {
+                if self.store.in_transaction() {
+                    self.commit();
+                }
+                crate::control::handle(&mut self.store, &mut self.control_seq, &from, &payload);
+                continue;
+            }
             if !self.store.in_transaction() {
                 if let Err(e) = self.store.begin() {
                     self.fail(&e);
@@ -696,6 +726,8 @@ impl Worker {
         let s = &mut self.store;
         match req {
             DbReq::DeviceSeen { id, unix } => s.device_seen(&id, unix),
+            // Handled in `step`, never batched.
+            DbReq::Control { .. } => Ok(()),
             DbReq::Persist(op) => match op {
                 PersistOp::Retain { msg, qos } => s.retain(&msg.topic, &msg.payload, qos as u8),
                 PersistOp::SessionUpsert { client_id } => s.session_upsert(&client_id, now_unix()),

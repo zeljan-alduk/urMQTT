@@ -16,6 +16,8 @@
 deploy/*/devices/
 deploy/*/negative/
 deploy/*/services/
+deploy/*/bootstrap/
+deploy/*/control.pub
 deploy/*/revoked.txt
 
 .DS_Store

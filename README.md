@@ -261,7 +261,7 @@ falls as fixed slab chunks amortize, so it does not grow with the connection cou
   - Every stack has guard pages, and exceptions run on a separate stack.
   - PAC (`pac-ret`) and BTI are enabled when the CPU supports them, and verified by the smoke tests.
 - **Abuse resistance.** SYN cookies; admission refuses new connections (before any crypto) on a low heap, a DB core that is behind, too many handshakes in flight per core or per source address, or the handshake rate. Per-device rate limits, bounded queues, a TCP window tied to broker backpressure, rate-limited logs, a handler watchdog and a health check.
-- **Immutable.** Configuration, CA and server key are baked into the image, and changing anything means a new image.
+- **Immutable, except who may connect.** Configuration, trust anchors and server key are baked into the image, and changing them means a new image. Revocations and the device allowlist change at runtime through control messages that need a control identity's mTLS certificate **and** an offline Ed25519 signature (H1, [docs/SECURITY.md](docs/SECURITY.md#control-channel-h1)).
 
 The threat model is in [docs/SECURITY.md](docs/SECURITY.md).
 
@@ -445,10 +445,20 @@ error: invalid configuration deploy/bad/config.toml:
 | `network.address`, `network.gateway` | `"a.b.c.d/len"`, `"a.b.c.d"` | Required for `static`, forbidden for `dhcp` |
 | `network.mqtt_tls_port` | 1–65535 | MQTT over TLS listener (8883) |
 | `network.mqtt_plain_port` | 0 or port | Plaintext MQTT; **non-zero only in `dev`** |
-| `tls.ca`, `tls.cert`, `tls.key` | file names in `deploy/<env>/` | Embedded PEMs; encrypted keys are rejected |
+| `tls.cert`, `tls.key` | file names in `deploy/<env>/` | Embedded server PEMs; encrypted keys are rejected |
+| `tls.min_server_cert_days` | ≥ 1 (60) | The build fails if `server.pem` expires sooner; runtime warnings from this many days |
+| `tls.early_data` | `false` | 0-RTT is replayable: `true` fails the build |
+| `trust.operational` | CA file names (≥ 1) | Anchors granting device and service rights; two side by side = CA rotation with overlap |
+| `trust.bootstrap` | CA file names | Anchors granting only `provision/{id}/#` ([docs/PROVISIONING.md](docs/PROVISIONING.md)) |
+| `trust.min_anchor_days` | ≥ 1 (365) | The build fails if an anchor expires sooner |
+| `registry.mode` | `"open"` \| `"allowlist"` | `allowlist`: only device ids on the runtime allowlist connect |
+| `control.public_key` | file name | Ed25519 public key verifying control messages; the private key stays offline |
+| `control.service_ids` | exact ids (or `[]` = off) | Operational identities that may publish to `$urmqtt/control` |
+| `control.allow_unrevoke` | bool | Whether `unrevoke` is accepted (keep `false` in production) |
+| `control.max_message_age_s` | 1–86 400 | Longest validity window of a control message |
 | `tls.identity_field` | `"cn"` \| `"san_uri"` | Certificate field that becomes the `device_id` |
 | `tls.resumption` | bool | TLS 1.3 PSK session resumption |
-| `tls.revocation_list` | file name or `""` | Revoked client-certificate serials (hex, one per line) |
+| `tls.revocation_list` | file name or `""` | Revoked client-certificate serials (hex, one per line); runtime revocations come on top (H1) |
 | `limits.max_connections_per_core` | > 0 | Admission limit per core |
 | `limits.max_packet_size` | 64 – 268 435 455 | Largest accepted MQTT packet |
 | `limits.max_topic_len`, `max_topic_levels` | ≤ 65 535, > 0 | Topic bounds, checked before any allocation |
@@ -736,13 +746,30 @@ python3 scripts/echo-client.py 7007        # client: echo 1 ok / 3000 ok / 60000
 
 ```bash
 make fuzz T=config_parse FUZZ_TIME=60     # every parser has a target; CI runs each for 60 s
-cargo fuzz list                            # 11 targets: config_parse, fdt_parse, acpi_parse, mqtt_decode,
+cargo fuzz list                            # 12 targets: config_parse, fdt_parse, acpi_parse, mqtt_decode,
                                            # disk_layout, tcp_segment, net_frame, tls_record, x509_identity,
-                                           # broker_input, telemetry_recover
+                                           # broker_input, telemetry_recover, control_message
 make fuzz T=mqtt_decode FUZZ_TIME=600      # the M8 acceptance run
 ```
 
-### 12. Syslog and metrics (M16)
+### 12. Revoking a device at runtime (H1)
+
+```bash
+make run                                    # in one terminal; dev images accept the dev operator
+cargo build --release -p urmqtt-control-tool
+D=deploy/dev
+target/release/urmqtt-control revoke --cert $D/devices/device-003.pem --env dev --key $D/control.key \
+    --ca $D/ca.pem --client-cert $D/services/operator.pem --client-key $D/services/operator.key
+# broker: control: seq 1793308378708 from operator: revoke of 1 item(s) applied
+# broker: control: core 1: 1 live connection(s) closed (revoked or no longer allowed)
+# broker: tls: connection refused: Handshake("invalid peer certificate: Revoked")    (on reconnect)
+```
+
+In production the key never leaves an HSM or KMS; `--sign-cmd` hands it the bytes to sign
+([docs/PROVISIONING.md](docs/PROVISIONING.md)). A forged, replayed or expired message, or one published by a
+device, is ignored and counted (`urmqtt.control.rejected.<reason>`).
+
+### 13. Syslog and metrics (M16)
 
 The dev configuration sends syslog to `10.0.2.2:5514` and statsd to `10.0.2.2:8125`, which QEMU user
 networking delivers to the host's loopback:
@@ -890,7 +917,7 @@ Security is the first priority and wins conflicts with the other tracks.
 | | Milestone | Acceptance |
 |---|---|---|
 | ✅ | **H0** Baseline & inventory | `docs/AUDIT.md`: TCB and `unsafe` inventory, parser list, mitigation matrix with tests, 9 questions answered from the code |
-| 📋 | **H1** Identity lifecycle | runtime revocation over a signed (Ed25519, offline key) control channel; live connections of a revoked device closed; allowlist mode; CA roles and rotation; build fails on expiring certificates |
+| ✅ | **H1** Identity lifecycle | runtime revocation over a signed (Ed25519, offline key) control channel; live connections of a revoked device closed; allowlist mode; CA roles and rotation; build fails on expiring certificates |
 | 📋 | **H2** TLS assurance | 0-RTT refused (tested); record layer equal to a reference under differential fuzzing; constant-time checks; tlsfuzzer; interop matrix; rotating ticket keys |
 | 📋 | **H3** TCP/IP & DoS | RFC 5961/6528 with key rotation; scripted and model-based TCP tests; adversarial suite with bounded memory and CPU |
 | 📋 | **H4** Exploit mitigations | KASLR, stack protector, kCFI, MTE, hardened allocator, zeroization; IOMMU on bare metal |

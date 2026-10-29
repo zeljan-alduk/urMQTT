@@ -66,6 +66,9 @@ pub struct BootOptions {
     /// `heap_limit_mb=N`: admission behaves as if the heap had only N MiB
     /// (reconnect-storm tests on a host that cannot open enough sockets).
     pub heap_limit_mb: Option<u32>,
+    /// `registry=allowlist`: allowlist mode even if the configuration says
+    /// "open" (stricter only, for tests of one image in both modes).
+    pub allowlist: bool,
     /// Options that were present but rejected or unknown.
     pub ignored: usize,
 }
@@ -104,6 +107,7 @@ impl BootOptions {
                 "log=info" => o.log_level = Some(urmqtt_config::LogLevel::Info),
                 "log=debug" => o.log_level = Some(urmqtt_config::LogLevel::Debug),
                 "log=trace" => o.log_level = Some(urmqtt_config::LogLevel::Trace),
+                "registry=allowlist" => o.allowlist = true,
                 w => match w
                     .strip_prefix("heap_limit_mb=")
                     .and_then(|v| v.parse().ok())
@@ -114,5 +118,39 @@ impl BootOptions {
             }
         }
         o
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EVERYTHING: &str = "smoke serve test=panic test=db-crash log=trace heap_limit_mb=1 \
+                              registry=allowlist test=pac bogus";
+
+    /// H0-W11: a production image ignores the whole command line, test
+    /// switches included; every word is counted as ignored.
+    #[test]
+    fn production_ignores_every_option() {
+        let o = BootOptions::parse(EVERYTHING, false);
+        assert_eq!(
+            o,
+            BootOptions {
+                ignored: 9,
+                ..BootOptions::default()
+            }
+        );
+    }
+
+    #[test]
+    fn dev_honours_known_options_and_counts_the_rest() {
+        let o = BootOptions::parse(EVERYTHING, true);
+        assert!(o.smoke && o.serve && o.allowlist);
+        assert_eq!(o.test_fault, Some(TestFault::Pac), "the last fault wins");
+        assert_eq!(o.db_test, Some(DbTest::Crash));
+        assert_eq!(o.log_level, Some(urmqtt_config::LogLevel::Trace));
+        assert_eq!(o.heap_limit_mb, Some(1));
+        assert_eq!(o.ignored, 1);
+        assert_eq!(BootOptions::parse("heap_limit_mb=x", true).ignored, 1);
     }
 }

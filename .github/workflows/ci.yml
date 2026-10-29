@@ -109,7 +109,7 @@ jobs:
       - name: Stage throwaway certificates for the prod build check
         if: matrix.env == 'prod'
         # Real prod secrets never touch CI; this only proves deploy/prod/config.toml builds.
-        run: cp deploy/dev/{ca.pem,server.pem,server.key} deploy/prod/
+        run: cp deploy/dev/{ca.pem,server.pem,server.key,control.pub} deploy/prod/
       - run: make build ENV=${{ matrix.env }}
       - name: Report kernel size
         run: |
@@ -139,7 +139,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends xorriso mtools
       - run: make certs
       - name: Stage throwaway certificates as prod inputs
-        run: cp deploy/dev/{ca.pem,server.pem,server.key} deploy/prod/
+        run: cp deploy/dev/{ca.pem,server.pem,server.key,control.pub} deploy/prod/
       - name: Build twice and compare
         run: |
           set -o pipefail

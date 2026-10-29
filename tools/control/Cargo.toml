@@ -1,0 +1,24 @@
+[package]
+name = "urmqtt-control-tool"
+description = "Builds, signs and publishes urMQTT control messages (runtime revocation and allowlist, H1)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "urmqtt-control"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+urmqtt-control = { path = "../../crates/control" }
+ed25519-dalek = { version = "2.2", default-features = false }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+x509-cert = { version = "0.3", features = ["pem", "std"] }
+
+[lints]
+workspace = true

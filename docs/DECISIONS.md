@@ -584,3 +584,81 @@ verified in the named milestone before it becomes Accepted).
   - the `aes_armv8`/`polyval_armv8` cfgs;
   - mapping the sealed state read-only once the page tables lock. The seal is write-once in X0, but its page is ordinary kernel data. Nothing reads it to choose code yet.
 - **Testing:** host tests for selection by feature mask, opt-out before selection, double seal, name validation and the row invariant; schema tests for `[cpu] disable`; the smoke boot scenarios check both log lines.
+
+## ADR-048 — Control channel: signed messages on `$urmqtt/control` (H1)
+
+- **Status:** Accepted (H1). Threat model written first (docs/SECURITY.md, "Control channel").
+- **Problem:** revoking a device needed a new image (M16 residual risk). PROMPT-security H1 requires runtime revocation and an allowlist, over the existing port, with no remote admin API, authenticated twice.
+- **Design:**
+  - **Transport:** a reserved topic namespace `$urmqtt/`.
+    - The broker checks it before the ACL. Nobody may subscribe there, and MQTT's `$` rule keeps `#` from matching it.
+    - Only an *operational* identity listed in `control.service_ids` may publish, and only to `$urmqtt/control`. Bootstrap certificates never qualify.
+    - Such messages are never routed or retained. Everything else in the namespace is dropped and counted.
+    - The schema rejects ACL patterns in the namespace.
+  - **Message:** a fixed little-endian binary layout (`crates/control`), chosen over CBOR so the decoder stays tiny and exact.
+    - Fields: magic, `seq`, `not_before`, `not_after`, command, and 1–64 length-prefixed unique items. Items are serials (1–20 bytes) or device ids (valid MQTT identities). Nothing may trail the 64-byte Ed25519 signature.
+    - The signature covers `"urMQTT control message v1\0" || env || 0x00 || body`, so a message for one deployment never verifies in another.
+    - Verification is `ed25519-dalek` 2.2 `verify_strict`. It rejects non-canonical encodings and small-order keys, and shares `curve25519-dalek` 4 with x25519.
+  - **Processing on the DB core:** the data core forwards the payload unchanged.
+    - The DB core re-checks the publisher, verifies, and checks the window (at most `control.max_message_age_s`), `seq > last` and the command policy.
+    - Unrevoke must be allowed by `control.allow_unrevoke` (off in prod) and may not name an image-listed serial. Allow and disallow need `registry.mode = "allowlist"`.
+    - The effect and the new `seq` commit in one SQLite transaction (schema v2: `control_state`, `allowlist`). Only then are the in-memory sets replaced, an epoch bumped and every core woken with an IPI.
+  - **Live effect:** each data core compares the epoch on its next loop pass.
+    - Transport cores close TLS connections whose certificate serial is now revoked. The per-connection tag is 32 bits and fits existing padding, so `Conn` stays at 152 B. A collision only closes an unrelated connection, which then reconnects and is verified in full.
+    - Home shards close sessions whose identity left the allowlist.
+    - Measured: 3–10 ms from commit to close under HVF and TCG.
+  - **Fail closed:**
+    - no wall clock, or a clock before the image's build time (ADR-050);
+    - no durable storage: a revocation must not vanish at reboot;
+    - malformed input, a bad signature, replay or an expired window.
+
+    Every rejection has a statsd counter `urmqtt.control.rejected.<reason>` and a rate-limited log line naming only the publisher and the reason.
+  - **Tool:** `tools/urmqtt-control` builds, signs (key file, or `--sign-cmd` for an HSM or KMS) and publishes, and can store and replay messages for tests. `seq` defaults to Unix milliseconds.
+- **Alternatives rejected:**
+  - A separate admin port or API: PROMPT forbids new ports.
+  - CRL or OCSP fetching: the broker makes no outbound connections, and a fetch path would be new attack surface.
+  - Signing with the mTLS key alone: one compromised service would then suffice.
+- **Not done / limits:**
+  - No acknowledgement channel back to the publisher; the outcome is in the log and the metrics.
+  - No native PKCS#11 in the tool; the hook covers it.
+  - An old data-disk snapshot restores old state (residual risk in SECURITY.md).
+- **Testing:**
+  - Host: RFC 8032 vectors; round trips; every flipped byte fails; environment and key binding; malformed bodies; the freshness, replay and permission rules; the store across power loss and the v1→v2 migration; broker tests for the namespace, control rights and the backlog bound (64).
+  - Fuzz target `control_message`.
+  - Smoke: `control` (revoke-live, unrevoke, forged, replay, expired, from-device), `control-persist` (a replay after a reboot is still rejected and the device still refused).
+
+## ADR-049 — Trust anchors by role, bootstrap identities, registry modes, expiry safety (H1)
+
+- **Status:** Accepted (H1).
+- **Trust roles:** `[trust] operational = [...]` and `bootstrap = [...]` replace `tls.ca`.
+  - The server builds one webpki verifier per role. Operational is tried first; the first that accepts decides the role.
+  - The role is recorded during verification, keyed by the SHA-256 of the end-entity certificate, and bounded like the captured secrets.
+  - A resumed session verified nothing, so its chain from the ticket is verified again against the *current* anchors. A CA removed from the image also ends resumption.
+  - Two operational CAs side by side give rotation with overlap (procedure in docs/PROVISIONING.md). The schema forbids the same file in both roles.
+- **Bootstrap identities** get the fixed ACL `provision/{id}/#`, for publishing and subscribing.
+  - Their session key is `$bootstrap/<id>`, which no real client id can be, so they can neither take over nor read the operational session of the same id.
+  - A persistent session is refused (CONNACK not authorised), and the registry does not record them.
+- **Registry:** `registry.mode = "open" | "allowlist"`.
+  - In allowlist mode an operational *device* identity that is not on the stored allowlist is refused right after the handshake (counter `urmqtt.registry.refused`, rate-limited log).
+  - Identities named in the image (`acl.service_ids`, `control.service_ids`) and bootstrap identities are exempt.
+  - The dev command line may switch an image to allowlist mode (`registry=allowlist`): it can only make the image stricter.
+- **Expiry safety:**
+  - The build fails if the server certificate expires within `tls.min_server_cert_days` (60) or any anchor within `trust.min_anchor_days` (365). The reference is the build machine's clock, never earlier than `SOURCE_DATE_EPOCH`.
+  - The server certificate's notAfter is compiled in. At runtime there is a statsd gauge `urmqtt.tls.server_cert_days`, a boot line, and warnings at 60, 30, 7 and 1 days, plus an error once expired.
+  - `tls.early_data = true` fails the build.
+- **Limit:** cargo caches build-script results, so the expiry check runs again only when the configuration or certificates change and in every clean build (CI, `make repro`, releases). A long-lived local build directory can carry a stale "pass".
+- **Testing:**
+  - TLS host tests: roles with two operational CAs and a bootstrap CA, the resumed role, a removed CA refused even with a valid ticket, the bootstrap identity unknown without its anchor, and runtime revocation for full handshakes and resumption.
+  - Broker tests for bootstrap isolation.
+  - Schema tests for every new key and the `expiry_build_check`.
+  - Smoke: `bootstrap-role`, `ca-rotation`, `registry-allowlist` (unknown refused; allowed then admitted; disallowed then disconnected live and refused).
+
+## ADR-050 — The image's build time is the wall clock's lower bound (H7, moved into H1)
+
+- **Status:** Accepted (H1). The rest of H7 (SNTP, NTS, jump handling) is still open.
+- **Problem (H0-W5):** a dead CMOS battery or a restored VM snapshot gives a date in the past. Expired certificates would pass, and control-message windows would mean nothing.
+- **Design:**
+  - The Makefile exports `SOURCE_DATE_EPOCH`, the commit time, which is reproducible (M17), and the kernel embeds it.
+  - A boot date before it means the time is unknown. The kernel logs "check the RTC battery or the hypervisor clock" and sets no wall clock. Every certificate check and control message then fails closed.
+  - A build without the variable has no bound and says so at boot.
+- **Testing:** smoke `time-before-build` boots with `-rtc base=2020-01-01`. It checks the warning and that a valid device's handshake is refused.

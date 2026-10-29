@@ -6,6 +6,7 @@ members = [
     "crates/broker",
     "crates/config",
     "crates/config-schema",
+    "crates/control",
     "crates/dispatch",
     "crates/kernel",
     "crates/log",
@@ -20,6 +21,7 @@ members = [
     "crates/timer-wheel",
     "crates/tls",
     "crates/virtio",
+    "tools/control",
     "tools/loadgen",
 ]
 # cargo-fuzz targets need sanitizer flags and live in their own workspace.

@@ -20,13 +20,13 @@ out of date (`--check`).
 
 The full tables are generated: [audit/inventory.md](audit/inventory.md)
 (crates, vendored code, dependencies) and [audit/unsafe.md](audit/unsafe.md)
-(every `unsafe` site). The summary below is taken from them at the X0 commit (the H0 numbers
-were 30 773 lines and 308 sites, 278 justified).
+(every `unsafe` site). The summary below is taken from them at the H1 commit (H0: 30 773 lines,
+65 linked crates, 308 `unsafe` sites with 278 justified; X0: 31 905 lines).
 
 | Part | Size | Notes |
 |---|---|---|
-| Own Rust (20 workspace crates, `src/` incl. inline tests) | 31 905 lines | `tools/loadgen` (452 lines) is a host tool, not in the image |
-| Third-party Rust linked into the kernel | 65 crates, 290 278 lines | RustCrypto, rustls, webpki, p256, x25519-dalek, … ([list](audit/inventory.md)) |
+| Own Rust (22 workspace crates, `src/` incl. inline tests) | 34 538 lines | `tools/loadgen` and `tools/control` are host tools, not in the image |
+| Third-party Rust linked into the kernel | 71 crates, 298 816 lines | RustCrypto, rustls, webpki, p256, x25519-dalek, ed25519-dalek (H1), … ([list](audit/inventory.md)). `ed25519-dalek` 2.2 brings `sha2` 0.10, `digest` 0.10 and `signature` 2 alongside the 0.11/3 versions (about 4 500 duplicate lines, H9) |
 | Third-party Rust at build time only | proc-macros and build scripts (syn, toml, cc, …) | they run on the build host, so they are a supply-chain risk (H9), not runtime TCB |
 | SQLite 3.54.1 (C), linked | 254 268 lines | the largest component; runs at EL1 with full kernel rights (H6) |
 | Own C headers for SQLite | 53 lines in 7 headers | the libc surface SQLite sees (functions implemented in Rust, `store/src/libc.rs`) |
@@ -157,16 +157,25 @@ mutual TLS devices, and the image treated as a secret.
 | H0-W2 | **Captured TLS traffic secrets are not wiped** (global `Vec`, `remove`/`swap_remove`, reallocation copies) | medium (needs a memory disclosure to exploit) | `tls/src/server.rs:84-150` | H4 (or earlier): fixed-capacity array, explicit wipe on take and on eviction, test |
 | H0-W3 | **The SYN-cookie/ISN key never rotates** | low | `netproto.rs:50-62` | H3: two keys, rotation |
 | H0-W4 | **Session-ticket key derived from the server key** (in the image): a copy of the image lets anyone forge tickets for any device identity | **high** if the image leaks | `tls/src/server.rs:217-260, 339` | H2 (decided: random, rotating, memory-only keys) |
-| H0-W5 | **No lower bound on the wall clock**: an RTC in the past accepts expired certificates | **high** on bare metal (dead CMOS battery) and after VM snapshot restores | `boot.rs:226-233, 608-625` | H7 lower bound, done with H1 |
-| H0-W6 | **Random-number failures ignored** in two places: `let _ = fill_global(...)` for the cookie key and the DHCP xid. Today the generator always exists by then (boot refuses without it), so it is not exploitable, but it is not fail-closed: a zero key would be used silently | low | `netproto.rs:53, 400` | H1/H3: make both fatal; a test that removes the generator |
+| H0-W5 | ~~**No lower bound on the wall clock**: an RTC in the past accepts expired certificates~~ | **high** on bare metal (dead CMOS battery) and after VM snapshot restores | `boot.rs` | **fixed in H1** (ADR-050): build time is the lower bound; smoke `time-before-build` |
+| H0-W6 | ~~**Random-number failures ignored** in two places: `let _ = fill_global(...)` for the cookie key and the DHCP xid~~ | low | `netproto.rs` | **fixed in H1:** both are fatal now. The generator's `Err` without a source is already host-tested; the kernel paths cannot be reached in a test because boot refuses earlier |
 | H0-W7 | ~~`urmqtt-store` had no `unsafe_code` lint.~~ Its docs confined unsafe to the FFI modules, but nothing enforced it | low | `store/src/lib.rs` | **fixed in H0:** `#![deny(unsafe_code)]`, `allow` only on `db`, `ffi`, `libc`, `vfs`, `init` and the log callback |
 | H0-W8 | **SQLite parses a database from the volume without fuzzing** | medium (a crafted volume reaches 254k lines of C at EL1) | SQLite | H5 (fuzz the VFS with crafted images under ASan), H6 (EL0) |
 | H0-W9 | **No fuzzing of PCI and virtio parsing** (hostile or buggy devices: on bare metal, and virtio under a hostile hypervisor) | medium on bare metal | `pci`, `virtio` | H5: fuzz targets with a fake config space and rings; H4b IOMMU |
 | H0-W10 | **No test proves page tables are read-only after the lock** | low (the lock exists; the proof is missing) | `vm::lock` | H4: `test=write-table` must fault |
-| H0-W11 | **No test for "prod ignores the command line"**: the kernel crate has no unit tests for `cmdline.rs` | low | `cmdline.rs` | H1: a host-testable parser with a `dev_build = false` test |
+| H0-W11 | ~~**No test for "prod ignores the command line"**~~ | low | `cmdline.rs` | **fixed in H1:** the kernel binary runs host tests; `production_ignores_every_option` |
 | H0-W12 | **The data disk is chosen by "not partitioned" instead of by identity**, and it is a separate disk. Under the single-disk model (PLAN.md decision 6) the only disk used is the boot disk, identified from Limine's boot-volume info; any other disk must stay untouched | medium on bare metal | `kernel/src/devices.rs:387-400` | STORAGE-PLAN S1 (§2a) |
 | H0-W13 | ~~Foreign disks taken for blank~~: **no longer applicable** (PLAN.md decision 6): the only disk used is the boot disk, which belongs to urMQTT entirely. What remains is not re-formatting a damaged urMQTT data partition as new | low | `store/src/layout.rs` | STORAGE-PLAN S1 (G2) |
 | H0-W14 | **30 `unsafe` sites have no written justification** (§1) | low | [audit/unsafe.md](audit/unsafe.md) | H10 review; the CI inventory keeps the count visible |
+
+Found while doing H1 (kept here so the list stays in one place):
+
+| Id | Weakness | Severity | Where | Plan |
+|---|---|---|---|---|
+| H1-W1 | **A publisher learns nothing about the outcome** of a control message. A PUBACK only means "received"; the result is in the broker's log and metrics | low (operations) | `control.rs` | later: a signed status topic readable only by control identities, with its own threat-model entry |
+| H1-W2 | **Rolling back the data disk** to an old snapshot restores old revocations and an old `seq` | medium (needs disk access) | store | documented residual risk; image-listed revocations are re-applied at every boot |
+| H1-W3 | **The build's expiry check is cached** by cargo until the configuration or certificates change | low | `config/build.rs` | clean builds (CI, repro, release) always run it; optional: a `make` target that forces it |
+| H1-W4 | **Allowlist mode without durable storage** means an empty, frozen allowlist: every device is refused | low (fails closed, logged at boot) | `boot.rs` | intended; documented |
 
 Untested protections (from §3) count as gaps as well: FP-state save, 0-RTT,
 the page-table lock, no secrets in logs, the SQLite flags, the kernel hash in

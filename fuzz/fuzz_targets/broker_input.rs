@@ -36,6 +36,7 @@ fn cfg() -> Config {
         persist: true,
         telemetry: &["devices/+/telemetry/#"],
         fanout: true,
+        control_ids: &["svc"],
     }
 }
 
@@ -68,7 +69,8 @@ fuzz_target!(|data: &[u8]| {
                     if let Some(c) = *entry
                         && op & 0x40 != 0
                     {
-                        b.set_identity(c, IDS[slot % IDS.len()]);
+                        // Bit 5: a bootstrap certificate (H1).
+                        b.set_identity(c, IDS[slot % IDS.len()], op & 0x20 != 0);
                     }
                 }
                 if let Some(c) = *entry {

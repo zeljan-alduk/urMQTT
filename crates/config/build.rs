@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::{env, fs, process};
 
-use urmqtt_config_schema::{EmbeddedFiles, PemKind, check_pem, parse, render};
+use urmqtt_config_schema::{EmbeddedFiles, PemKind, check_expiry, check_pem, parse, render};
 
 fn fail(msg: &str) -> ! {
     eprintln!("error: {msg}");
@@ -66,11 +66,58 @@ fn main() {
         urmqtt_config_schema::parse_revocation_list(&text)
             .unwrap_or_else(|m| fail(&format!("{}: {m}", path.display())))
     };
+    // Expiry safety (H1): the build fails before a certificate runs out
+    // in the field. The build machine's clock is the reference, and never
+    // earlier than the commit time (SOURCE_DATE_EPOCH).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        .max(source_date_epoch());
+    let expiry = |name: &str, min_days: u32, key: &str| -> u64 {
+        let path = dir.join(name);
+        let bytes =
+            fs::read(&path).unwrap_or_else(|e| fail(&missing_file_hint(&env_name, &path, &e)));
+        check_expiry(&bytes, now, min_days)
+            .unwrap_or_else(|m| fail(&format!("{} ({key}): {m}", path.display())))
+    };
+    let server_cert_not_after = expiry(
+        &cfg.tls.cert,
+        cfg.tls.min_server_cert_days,
+        "tls.min_server_cert_days",
+    );
+    for name in cfg.trust.operational.iter().chain(&cfg.trust.bootstrap) {
+        expiry(name, cfg.trust.min_anchor_days, "trust.min_anchor_days");
+    }
+    let control_public_key = {
+        let path = dir.join(&cfg.control.public_key);
+        println!("cargo::rerun-if-changed={}", path.display());
+        let bytes =
+            fs::read(&path).unwrap_or_else(|e| fail(&missing_file_hint(&env_name, &path, &e)));
+        urmqtt_control::parse_public_key(&bytes).unwrap_or_else(|| {
+            fail(&format!(
+                "{}: expected an Ed25519 public key (BEGIN PUBLIC KEY, `openssl pkey -pubout`)",
+                path.display()
+            ))
+        })
+    };
     let files = EmbeddedFiles {
-        ca: embed(&cfg.tls.ca, PemKind::Certificate),
+        operational: cfg
+            .trust
+            .operational
+            .iter()
+            .map(|n| embed(n, PemKind::Certificate))
+            .collect(),
+        bootstrap: cfg
+            .trust
+            .bootstrap
+            .iter()
+            .map(|n| embed(n, PemKind::Certificate))
+            .collect(),
         cert: embed(&cfg.tls.cert, PemKind::Certificate),
         key: embed(&cfg.tls.key, PemKind::PrivateKey),
         revoked,
+        control_public_key,
+        server_cert_not_after,
     };
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap_or_else(|_| fail("OUT_DIR not set")));
@@ -100,6 +147,15 @@ fn main() {
     ));
     fs::write(&out, generated)
         .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", out.display())));
+}
+
+/// The commit time the build is pinned to, if any (0 otherwise).
+fn source_date_epoch() -> u64 {
+    println!("cargo::rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 fn missing_file_hint(env_name: &str, path: &Path, e: &std::io::Error) -> String {

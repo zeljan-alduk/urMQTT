@@ -18,14 +18,15 @@ fn assert_rejected(env: &str, text: &str, needle: &str) {
     );
 }
 
-/// Replaces exactly one line starting with `key =` in the dev config.
+/// Replaces the first line starting with `key =` in the dev config (keys
+/// that occur in several sections, like `mode`, hit the first one).
 fn dev_with(key: &str, line: &str) -> String {
     let prefix = format!("{key} =");
     let mut replaced = 0;
     let out: Vec<String> = DEV
         .lines()
         .map(|l| {
-            if l.starts_with(&prefix) {
+            if replaced == 0 && l.starts_with(&prefix) {
                 replaced += 1;
                 line.to_owned()
             } else {
@@ -33,7 +34,31 @@ fn dev_with(key: &str, line: &str) -> String {
             }
         })
         .collect();
-    assert_eq!(replaced, 1, "key {key} must appear exactly once");
+    assert_eq!(replaced, 1, "key {key} must appear");
+    out.join("\n")
+}
+
+/// Replaces the line starting with `key =` inside `[section]`.
+fn dev_in(section: &str, key: &str, line: &str) -> String {
+    let header = format!("[{section}]");
+    let prefix = format!("{key} =");
+    let mut inside = false;
+    let mut replaced = 0;
+    let out: Vec<String> = DEV
+        .lines()
+        .map(|l| {
+            if l.starts_with('[') {
+                inside = l.trim() == header;
+            }
+            if inside && l.starts_with(&prefix) {
+                replaced += 1;
+                line.to_owned()
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect();
+    assert_eq!(replaced, 1, "[{section}] {key} must appear once");
     out.join("\n")
 }
 
@@ -371,8 +396,13 @@ fn file_names_must_stay_in_env_dir() {
     assert!(check_file_name("server.pem").is_ok());
     assert_rejected(
         "dev",
-        &dev_with("ca", "ca = \"../../etc/ca.pem\""),
-        "tls.ca",
+        &dev_with("cert", "cert = \"../../etc/server.pem\""),
+        "tls.cert",
+    );
+    assert_rejected(
+        "dev",
+        &dev_with("operational", r#"operational = ["../ca.pem"]"#),
+        "trust.operational[0]",
     );
 }
 
@@ -418,10 +448,13 @@ fn render_contains_validated_values() {
     .replace("metrics_udp = \"10.0.2.2:8125\"", "metrics_udp = \"\"");
     let cfg = parse("dev", &text).unwrap();
     let files = EmbeddedFiles {
-        ca: "/abs/ca.pem".into(),
+        operational: vec!["/abs/ca.pem".into(), "/abs/ca-2.pem".into()],
+        bootstrap: vec![],
         cert: "/abs/server.pem".into(),
         key: "/abs/server.key".into(),
         revoked: vec!["0a1b".into()],
+        control_public_key: [7; 32],
+        server_cert_not_after: 1_900_000_000,
     };
     let out = render(&cfg, &files);
     assert!(out.contains("addr: [10, 0, 0, 10], prefix_len: 24"));
@@ -435,6 +468,14 @@ fn render_contains_validated_values() {
     assert!(out.contains(r#"include_bytes!("/abs/server.key")"#));
     assert!(out.contains("kernel_heap_mb: 32"));
     assert!(out.contains(r#"revoked_serials: &["0a1b"]"#));
+    assert!(out.contains(
+        r#"OPERATIONAL_CA_PEMS: &[&[u8]] = &[include_bytes!("/abs/ca.pem"), include_bytes!("/abs/ca-2.pem")]"#
+    ));
+    assert!(out.contains("BOOTSTRAP_CA_PEMS: &[&[u8]] = &[];"));
+    assert!(out.contains("CONTROL_PUBLIC_KEY: [u8; 32] = [7, 7,"));
+    assert!(out.contains("server_cert_not_after: 1900000000"));
+    assert!(out.contains(r#"service_ids: &["operator"]"#));
+    assert!(out.contains("allowlist: false"));
 }
 
 #[test]
@@ -484,4 +525,110 @@ fn cpu_disable_is_validated_against_the_dispatch_features() {
     // The section is optional: without it nothing is disabled.
     let without = DEV.replace("[cpu]", "").replace("disable = []", "");
     assert!(parse("dev", &without).unwrap().cpu.disable.is_empty());
+}
+
+#[test]
+fn trust_registry_and_control_keys() {
+    let cfg = parse("dev", DEV).unwrap();
+    assert_eq!(cfg.trust.operational, ["ca.pem", "ca-2.pem"]);
+    assert_eq!(cfg.trust.bootstrap, ["ca-bootstrap.pem"]);
+    assert_eq!(cfg.registry, RegistryMode::Open);
+    assert_eq!(cfg.control.service_ids, ["operator"]);
+    let prod = parse("prod", PROD).unwrap();
+    assert!(
+        !prod.control.allow_unrevoke,
+        "prod must not allow unrevoke by default"
+    );
+    assert!(prod.control.service_ids.is_empty());
+
+    let allow = dev_in("registry", "mode", r#"mode = "allowlist""#);
+    assert_eq!(
+        parse("dev", &allow).unwrap().registry,
+        RegistryMode::Allowlist
+    );
+    assert_rejected("dev", &dev_in("registry", "mode", r#"mode = "closed""#), "");
+    assert_rejected(
+        "dev",
+        &dev_with("operational", "operational = []"),
+        "trust.operational",
+    );
+    assert_rejected(
+        "dev",
+        &dev_with("bootstrap", r#"bootstrap = ["ca.pem"]"#),
+        "trust.bootstrap",
+    );
+    assert_rejected(
+        "dev",
+        &dev_with("min_anchor_days", "min_anchor_days = 0"),
+        "trust.min_anchor_days",
+    );
+    for bad in [r#"["svc-*"]"#, r#"["a/b"]"#, r#"[""]"#, r#"["$x"]"#] {
+        assert_rejected(
+            "dev",
+            &dev_in("control", "service_ids", &format!("service_ids = {bad}")),
+            "control.service_ids[0]",
+        );
+    }
+    for bad in ["0", "86401"] {
+        assert_rejected(
+            "dev",
+            &dev_with("max_message_age_s", &format!("max_message_age_s = {bad}")),
+            "control.max_message_age_s",
+        );
+    }
+    assert_rejected(
+        "dev",
+        &dev_with("public_key", r#"public_key = "../k.pub""#),
+        "control.public_key",
+    );
+}
+
+/// PROMPT-security §2: early data must stay off; the build fails otherwise.
+#[test]
+fn early_data_fails_the_build() {
+    assert_rejected(
+        "dev",
+        &dev_with("early_data", "early_data = true"),
+        "tls.early_data",
+    );
+    assert_rejected(
+        "dev",
+        &dev_with("min_server_cert_days", "min_server_cert_days = 0"),
+        "tls.min_server_cert_days",
+    );
+}
+
+/// H1: ACL patterns may not name the reserved control namespace.
+#[test]
+fn acl_cannot_reach_the_reserved_namespace() {
+    assert_rejected(
+        "dev",
+        &dev_with("service_subscribe", r#"service_subscribe = ["$urmqtt/#"]"#),
+        "the $urmqtt/ namespace is reserved",
+    );
+}
+
+/// H1 `expiry-build-check`: the build refuses certificates that expire too
+/// soon, measured from the build time.
+#[test]
+fn expiry_build_check() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/dev");
+    let Ok(pem) = std::fs::read(dir.join("server.pem")) else {
+        return; // `make certs` not run
+    };
+    let v = cert_validity(&pem).unwrap();
+    let not_after = v[0].not_after;
+    let day = 86_400;
+    // 61 days left: passes a 60-day minimum and returns notAfter.
+    assert_eq!(check_expiry(&pem, not_after - 61 * day, 60), Ok(not_after));
+    // 59 days left, or already expired: refused, with the subject named.
+    let e = check_expiry(&pem, not_after - 59 * day, 60).unwrap_err();
+    assert!(e.contains("CN=localhost") && e.contains("59 day"), "{e}");
+    assert!(check_expiry(&pem, not_after + day, 60).is_err());
+    // The CA, with the anchor minimum.
+    let ca = std::fs::read(dir.join("ca.pem")).unwrap();
+    let ca_after = cert_validity(&ca).unwrap()[0].not_after;
+    assert!(check_expiry(&ca, ca_after - 364 * day, 365).is_err());
+    assert!(check_expiry(&ca, ca_after - 366 * day, 365).is_ok());
+    assert!(cert_validity(b"not a pem").is_err());
 }

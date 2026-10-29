@@ -97,7 +97,13 @@ struct Stmts {
     device_seen: Stmt,
     device_count: Stmt,
     revoked_add: Stmt,
+    revoked_del: Stmt,
     revoked_all: Stmt,
+    control_seq: Stmt,
+    control_seq_set: Stmt,
+    allow_add: Stmt,
+    allow_del: Stmt,
+    allow_all: Stmt,
     retained_set: Stmt,
     retained_del: Stmt,
     retained_all: Stmt,
@@ -183,6 +189,17 @@ pub fn open() -> Result<(Store, OpenInfo)> {
              ON CONFLICT (serial) DO NOTHING",
         )?,
         revoked_all: db.prepare("SELECT serial FROM revoked ORDER BY serial")?,
+        // Serials the image lists are re-seeded at every boot; they are
+        // never removed here.
+        revoked_del: db.prepare("DELETE FROM revoked WHERE serial = ?1 AND source <> 'config'")?,
+        control_seq: db.prepare("SELECT seq FROM control_state WHERE id = 1")?,
+        control_seq_set: db.prepare("UPDATE control_state SET seq = ?1 WHERE id = 1 AND seq < ?1")?,
+        allow_add: db.prepare(
+            "INSERT INTO allowlist (id, added_at, seq) VALUES (?1, ?2, ?3)
+             ON CONFLICT (id) DO UPDATE SET seq = excluded.seq",
+        )?,
+        allow_del: db.prepare("DELETE FROM allowlist WHERE id = ?1")?,
+        allow_all: db.prepare("SELECT id FROM allowlist ORDER BY id")?,
         retained_set: db.prepare(
             "INSERT INTO retained (topic, payload, qos) VALUES (?1, ?2, ?3)
              ON CONFLICT (topic) DO UPDATE SET payload = excluded.payload, qos = excluded.qos",
@@ -277,6 +294,68 @@ impl Store {
         s.bind_text(2, source)?;
         s.bind_i64(3, now_unix)?;
         Ok(s.run()?)
+    }
+
+    /// Removes a runtime revocation (one the image does not list).
+    pub fn unrevoke(&mut self, serial_hex: &str) -> Result<()> {
+        let s = &mut self.s.revoked_del;
+        s.bind_text(1, serial_hex)?;
+        Ok(s.run()?)
+    }
+
+    /// The last accepted control sequence number (0: none yet).
+    pub fn control_seq(&mut self) -> Result<u64> {
+        let s = &mut self.s.control_seq;
+        let n = match s.step()? {
+            Step::Row => s.i64(0),
+            Step::Done => 0,
+        };
+        s.reset();
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
+    /// Raises the control sequence number (never lowers it). Call inside
+    /// the transaction that applies the message's effect.
+    pub fn set_control_seq(&mut self, seq: u64) -> Result<()> {
+        let s = &mut self.s.control_seq_set;
+        s.bind_i64(1, i64::try_from(seq).unwrap_or(i64::MAX))?;
+        Ok(s.run()?)
+    }
+
+    pub fn allow(&mut self, id: &str, seq: u64, now_unix: i64) -> Result<()> {
+        let s = &mut self.s.allow_add;
+        s.bind_text(1, id)?;
+        s.bind_i64(2, now_unix)?;
+        s.bind_i64(3, i64::try_from(seq).unwrap_or(i64::MAX))?;
+        Ok(s.run()?)
+    }
+
+    pub fn disallow(&mut self, id: &str) -> Result<()> {
+        let s = &mut self.s.allow_del;
+        s.bind_text(1, id)?;
+        Ok(s.run()?)
+    }
+
+    pub fn allowlist(&mut self) -> Result<Vec<String>> {
+        let s = &mut self.s.allow_all;
+        let mut out = Vec::new();
+        let r = (|| {
+            while s.step()? == Step::Row {
+                out.push(String::from(s.text(0)));
+            }
+            Ok::<(), Error>(())
+        })();
+        s.reset();
+        r?;
+        Ok(out)
+    }
+
+    /// Discards the open transaction.
+    pub fn rollback(&mut self) {
+        if self.in_txn {
+            self.in_txn = false;
+            let _ = self.s.rollback.run();
+        }
     }
 
     pub fn revoked(&mut self) -> Result<Vec<String>> {

@@ -80,6 +80,29 @@ pub struct Config {
     /// Other broker shards exist: every message routed from here is also
     /// handed out for them ([`Broker::drain_routes`], M13).
     pub fanout: bool,
+    /// Operational identities that may publish control messages to
+    /// `$urmqtt/control` ([`Broker::drain_control`], H1).
+    pub control_ids: &'static [&'static str],
+}
+
+/// Session-key prefix of bootstrap identities (H1). A real client id can
+/// never start with `$` or contain `/`, so a bootstrap session never meets
+/// an operational session of the same id: it can neither take it over nor
+/// read its queue.
+const BOOTSTRAP_KEY: &str = "$bootstrap/";
+
+/// The control topic (H1); see `urmqtt_control::TOPIC`.
+pub const CONTROL_TOPIC: &str = "$urmqtt/control";
+
+/// Control messages held between drains; beyond this they are dropped
+/// (counted), so a flooding control service costs bounded work.
+const MAX_CONTROL_BACKLOG: usize = 64;
+
+/// A control message as received: the publisher's identity and the
+/// payload, unauthenticated until the control handler verifies it.
+pub struct ControlMsg {
+    pub from: Box<str>,
+    pub payload: Box<[u8]>,
 }
 
 /// A change to durable broker state, for the DB core (ADR-030).
@@ -129,6 +152,8 @@ pub enum CloseReason {
     TakenOver,
     Rejected,
     Unsupported,
+    /// Its identity left the allowlist (H1).
+    Disallowed,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +170,11 @@ pub struct Stats {
     pub dropped_queue_full: u64,
     pub dropped_backpressure: u64,
     pub wills_published: u64,
+    /// Publishes to the reserved namespace by identities without control
+    /// rights, dropped (H1).
+    pub dropped_control: u64,
+    /// Control messages handed to the control handler.
+    pub control_received: u64,
 }
 
 struct Will {
@@ -174,6 +204,8 @@ struct Extra {
     /// checks the client id against it. Never set on the dev plaintext
     /// listener.
     identity: Option<Box<str>>,
+    /// The identity comes from a bootstrap trust anchor (H1).
+    bootstrap: bool,
     will: Option<Will>,
 }
 
@@ -258,6 +290,18 @@ struct Session {
 }
 
 impl Session {
+    /// The identity the ACL's `{id}` stands for (the client id without the
+    /// bootstrap session prefix).
+    fn acl_id(&self) -> &str {
+        if self.role == Role::Bootstrap {
+            self.client_id
+                .strip_prefix(BOOTSTRAP_KEY)
+                .unwrap_or_default()
+        } else {
+            &self.client_id
+        }
+    }
+
     fn conn(&self) -> Option<ConnId> {
         self.conn.map(|c| c.get() - 1)
     }
@@ -284,6 +328,7 @@ pub struct Broker {
     ops: Vec<PersistOp>,
     telemetry: Vec<Msg>,
     routes: Vec<(Msg, QoS, bool)>,
+    control: Vec<ControlMsg>,
     /// Connections with new output or a close request.
     ready: Vec<ConnId>,
 }
@@ -360,8 +405,51 @@ impl Broker {
             ops: Vec::new(),
             telemetry: Vec::new(),
             routes: Vec::new(),
+            control: Vec::new(),
             ready: Vec::new(),
         }
+    }
+
+    /// Takes the control messages received since the last call (H1).
+    pub fn drain_control(&mut self) -> alloc::vec::Drain<'_, ControlMsg> {
+        self.control.drain(..)
+    }
+
+    /// Closes every online session whose identity and role `keep` rejects
+    /// (an allowlist change, H1). Returns how many were closed.
+    pub fn disconnect_unless(
+        &mut self,
+        keep: impl Fn(&str, Role) -> bool,
+        why: CloseReason,
+    ) -> usize {
+        let doomed: Vec<ConnId> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| !keep(s.acl_id(), s.role))
+            .filter_map(|(_, s)| s.conn())
+            .collect();
+        for &c in &doomed {
+            self.mark_close(c, why);
+        }
+        doomed.len()
+    }
+
+    /// Closes the connection of the session named `id` (operational or
+    /// bootstrap), if one is online. Returns whether one was.
+    pub fn disconnect_identity(&mut self, id: &str, why: CloseReason) -> bool {
+        let boot = alloc::format!("{BOOTSTRAP_KEY}{id}");
+        let mut any = false;
+        for key in [id, boot.as_str()] {
+            if let Some(c) = self
+                .find_session(key)
+                .and_then(|sid| self.sessions.get(sid))
+                .and_then(Session::conn)
+            {
+                self.mark_close(c, why);
+                any = true;
+            }
+        }
+        any
     }
 
     /// Connections that got output or a close request since the last call,
@@ -586,6 +674,12 @@ impl Broker {
         out.len() > before
     }
 
+    /// Publishes to the reserved namespace dropped so far (H1). Cheap,
+    /// unlike [`Self::stats`], which walks every session.
+    pub fn dropped_control(&self) -> u64 {
+        self.stats.dropped_control
+    }
+
     pub fn stats(&self) -> Stats {
         Stats {
             connections: self.conns.len(),
@@ -619,9 +713,13 @@ impl Broker {
     }
 
     /// Binds the authenticated identity of `c` (before its CONNECT).
-    pub fn set_identity(&mut self, c: ConnId, identity: &str) {
+    /// `bootstrap`: the certificate comes from a bootstrap trust anchor, so
+    /// the session gets the bootstrap role (H1).
+    pub fn set_identity(&mut self, c: ConnId, identity: &str, bootstrap: bool) {
         if let Some(k) = self.conn(c) {
-            k.extra_mut().identity = Some(identity.into());
+            let e = k.extra_mut();
+            e.identity = Some(identity.into());
+            e.bootstrap = bootstrap;
         }
     }
 
@@ -886,15 +984,37 @@ impl Broker {
         if mismatch {
             return self.reject(c, ConnectReturnCode::IdentifierRejected);
         }
+        let bootstrap = self
+            .conns
+            .get(c)
+            .and_then(|k| k.extra.as_ref())
+            .is_some_and(|e| e.bootstrap);
         // Checked: the session keeps the (equal) client id, so the
         // connection's copy is freed (M15).
         if let Some(k) = self.conn(c)
             && let Some(e) = &mut k.extra
         {
             e.identity = None;
+            e.bootstrap = false;
             k.release_extra();
         }
-        let role = self.cfg.acl.role(p.client_id);
+        // A bootstrap session is never persistent: it holds nothing worth
+        // keeping and must not leave state behind (H1).
+        if bootstrap && !p.clean_session {
+            return self.reject(c, ConnectReturnCode::NotAuthorized);
+        }
+        let role = if bootstrap {
+            Role::Bootstrap
+        } else {
+            self.cfg.acl.role(p.client_id)
+        };
+        let boot_key;
+        let key: &str = if bootstrap {
+            boot_key = alloc::format!("{BOOTSTRAP_KEY}{}", p.client_id);
+            &boot_key
+        } else {
+            p.client_id
+        };
         let will = match &p.will {
             Some(w) if !self.cfg.acl.may_publish(role, p.client_id, w.topic) => {
                 return self.reject(c, ConnectReturnCode::NotAuthorized);
@@ -911,7 +1031,7 @@ impl Broker {
         };
 
         // Session takeover (§3.1.4): the existing connection is closed.
-        let existing = self.find_session(p.client_id);
+        let existing = self.find_session(key);
         if let Some(sid) = existing
             && let Some(old) = self.session(sid).and_then(|s| s.conn())
             && old != c
@@ -929,9 +1049,9 @@ impl Broker {
             Some(_) => true,
             None => false,
         };
-        let sid = match self.find_session(p.client_id) {
+        let sid = match self.find_session(key) {
             Some(sid) => sid,
-            None => self.create_session(p.client_id, role, p.clean_session, now_ms),
+            None => self.create_session(key, role, p.clean_session, now_ms),
         };
         let mut newly_persistent = None;
         if let Some(s) = self.sessions.get(sid)
@@ -1064,9 +1184,30 @@ impl Broker {
         if let Some(id) = p.packet_id {
             self.send(c, &Packet::PubAck(id));
         }
-        let Some((role, allowed)) = self.session(sid).map(|s| (s.role, s.client_id.clone())) else {
+        let Some((role, allowed)) = self
+            .session(sid)
+            .map(|s| (s.role, Box::<str>::from(s.acl_id())))
+        else {
             return;
         };
+        // H1: the reserved namespace bypasses routing entirely. Only an
+        // operational control identity reaches the control handler, and
+        // only on the exact control topic; everything else is dropped.
+        if acl::reserved(p.topic) {
+            let control = role != Role::Bootstrap
+                && p.topic == CONTROL_TOPIC
+                && self.cfg.control_ids.iter().any(|id| **id == *allowed);
+            if control && self.control.len() < MAX_CONTROL_BACKLOG {
+                self.stats.control_received += 1;
+                self.control.push(ControlMsg {
+                    from: allowed,
+                    payload: p.payload.into(),
+                });
+            } else {
+                self.stats.dropped_control += 1;
+            }
+            return;
+        }
         if !self.cfg.acl.may_publish(role, &allowed, p.topic) {
             self.stats.dropped_acl += 1;
             return;
@@ -1277,7 +1418,7 @@ impl Broker {
             };
             // QoS 2 is granted as 1 (§3.9.3 permits a lower grant).
             let qos = want.min(QoS::AtLeastOnce);
-            if !acl.may_subscribe(s.role, &s.client_id, filter) || !self.add_sub(sid, filter, qos) {
+            if !acl.may_subscribe(s.role, s.acl_id(), filter) || !self.add_sub(sid, filter, qos) {
                 codes.push(SUBACK_FAILURE);
                 continue;
             }

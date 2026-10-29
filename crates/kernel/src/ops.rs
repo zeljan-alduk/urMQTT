@@ -52,6 +52,10 @@ struct Counters {
     dropped_frames: u64,
     lost: u64,
     unsent: u64,
+    control_rejected: [u64; urmqtt_control::Reject::ALL.len()],
+    control_applied: u64,
+    registry_refused: u64,
+    live_closed: u64,
 }
 
 fn counters(lost: u64, unsent: u64) -> Counters {
@@ -68,6 +72,46 @@ fn counters(lost: u64, unsent: u64) -> Counters {
         dropped_frames: dataplane::DROPPED_FRAMES.load(Ordering::Relaxed),
         lost,
         unsent,
+        control_rejected: crate::control::REJECTED
+            .each_ref()
+            .map(|r| r.load(Ordering::Relaxed)),
+        control_applied: crate::control::APPLIED.load(Ordering::Relaxed),
+        registry_refused: crate::control::REGISTRY_REFUSED.load(Ordering::Relaxed),
+        live_closed: crate::control::LIVE_CLOSED.load(Ordering::Relaxed),
+    }
+}
+
+/// Days until the server certificate expires (negative: expired), if the
+/// wall clock is known.
+fn server_cert_days() -> Option<i64> {
+    let now = crate::boot::now_unix()?;
+    let after = urmqtt_config::CONFIG.tls.server_cert_not_after;
+    Some((after as i64 - now as i64).div_euclid(86_400))
+}
+
+/// The warning thresholds (H1): a warning each time the remaining days
+/// fall to or below the next one, and once more when expired.
+const CERT_WARN_DAYS: [i64; 4] = [60, 30, 7, 1];
+static CERT_WARNED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+fn check_server_cert() {
+    let Some(days) = server_cert_days() else {
+        return;
+    };
+    let level = CERT_WARN_DAYS.iter().filter(|&&t| days <= t).count() + usize::from(days < 0);
+    // Relaxed: only core 0's ops loop uses it.
+    if level > CERT_WARNED.load(Ordering::Relaxed) {
+        CERT_WARNED.store(level, Ordering::Relaxed);
+        if days < 0 {
+            error!(
+                "tls: the server certificate EXPIRED {} day(s) ago: devices will refuse the broker; deploy an image with a new certificate",
+                -days
+            );
+        } else {
+            warn!(
+                "tls: the server certificate expires in {days} day(s): deploy an image with a new certificate"
+            );
+        }
     }
 }
 
@@ -80,6 +124,14 @@ impl Ops {
             Addr(o.metrics_udp),
             HEALTH_EVERY_MS / 1000
         );
+        match server_cert_days() {
+            Some(d) => info!(
+                "tls: server certificate valid for {d} more day(s) (warnings from {} days)",
+                CERT_WARN_DAYS[0]
+            ),
+            None => warn!("tls: server certificate lifetime unknown (no wall clock)"),
+        }
+        check_server_cert();
         Self {
             syslog: o.syslog_udp,
             metrics: o.metrics_udp,
@@ -101,6 +153,7 @@ impl Ops {
         if now_ms.saturating_sub(self.last_health_ms) >= HEALTH_EVERY_MS {
             self.last_health_ms = now_ms;
             self.health();
+            check_server_cert();
         }
         if let Some(dst) = self.syslog
             && now_ms.saturating_sub(self.last_syslog_ms) >= SYSLOG_EVERY_MS
@@ -185,6 +238,35 @@ impl Ops {
             "g",
         );
         add("health", u64::from(self.healthy), "g");
+        if let Some(days) = server_cert_days() {
+            add("tls.server_cert_days", days.max(0) as u64, "g");
+        }
+        add(
+            "control.applied",
+            d(now.control_applied, prev.control_applied),
+            "c",
+        );
+        for (r, (a, b)) in urmqtt_control::Reject::ALL.iter().zip(
+            now.control_rejected
+                .iter()
+                .zip(prev.control_rejected.iter()),
+        ) {
+            add(
+                &alloc::format!("control.rejected.{}", r.reason()),
+                d(*a, *b),
+                "c",
+            );
+        }
+        add(
+            "registry.refused",
+            d(now.registry_refused, prev.registry_refused),
+            "c",
+        );
+        add(
+            "revocation.live_closed",
+            d(now.live_closed, prev.live_closed),
+            "c",
+        );
         add("accepted", d(now.accepted, prev.accepted), "c");
         for (i, name) in ["rate", "in_flight", "memory", "storage"]
             .iter()

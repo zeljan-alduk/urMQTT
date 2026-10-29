@@ -879,3 +879,84 @@ PROMPT-x86_64.md, plan in docs/X86-PLAN.md. AArch64 only; no behaviour change (A
 **Deviations from the plan** (X86-PLAN X0 status):
 - The paging builder stays the AArch64 `Mapper` behind `arch::paging`. A neutral one is designed in X1 against the x86 format.
 - The sealed dispatch state is write-once but not yet on a read-only page. That is moved to X0b, where it starts choosing code.
+
+## H1 — Identity lifecycle without new images (2026-10-29)
+
+PROMPT-security.md H1, plan in docs/SECURITY-PLAN.md (status and deviations there). ADR-048, ADR-049, ADR-050. The threat model of the control channel came first (docs/SECURITY.md, "Control channel").
+
+**Done**
+
+- **Control channel** (`crates/control`, kernel `control.rs`):
+  - signed messages on `$urmqtt/control`, accepted only from an operational identity in `control.service_ids` and only with a valid Ed25519 signature by the offline key (`control.pub` in the image);
+  - a fixed, bounded binary layout, domain-separated and bound to the environment, verified with `verify_strict`;
+  - checks: `seq` strictly increasing, a validity window of at most `control.max_message_age_s`, and fail closed without a trustworthy clock or without durable storage;
+  - commands: revoke and unrevoke serials (unrevoke only with `control.allow_unrevoke`, never an image-listed serial), and allow and disallow device ids;
+  - processing on the DB core: the effect and the new `seq` commit in one transaction (schema v2), then the shared sets are replaced, an epoch is bumped and every core is woken;
+  - each core closes its live connections whose serial is now revoked or whose identity left the allowlist.
+- **Reserved namespace in the broker:** no subscriptions, nothing routed or retained, unauthorised publishes dropped and counted, backlog bounded at 64. The schema refuses ACL patterns there.
+- **Trust anchors by role** (`[trust]` replaces `tls.ca`):
+  - operational CAs, two side by side for rotation with overlap;
+  - bootstrap CAs, which give only `provision/{id}/#`, in a separate session namespace and never persistently;
+  - the role is decided at verification; a resumed session re-verifies against the current anchors.
+- **Registry:** `registry.mode = "open" | "allowlist"`. In allowlist mode an unknown device identity is refused after the handshake and counted. Image-named services and bootstrap identities are exempt. The dev command line can switch an image to allowlist mode (stricter only).
+- **Expiry safety:**
+  - the build fails below `tls.min_server_cert_days` (60) and `trust.min_anchor_days` (365);
+  - at runtime: a boot line, the gauge `urmqtt.tls.server_cert_days`, and warnings at 60, 30, 7 and 1 days;
+  - `tls.early_data = true` fails the build.
+- **Clock lower bound (H7 part, ADR-050):** the image's `SOURCE_DATE_EPOCH` is embedded. An earlier boot date means unknown time, so every certificate check and control message is refused.
+- **`tools/urmqtt-control`:** revoke, unrevoke, allow, disallow (by `--cert`, `--serial` or `--id`), `publish-file`, `show`. Signing with a key file or `--sign-cmd` (HSM/KMS hook); `seq` defaults to Unix milliseconds.
+- **Metrics:**
+  - `urmqtt.control.applied`;
+  - `urmqtt.control.rejected.<reason>` (13 reasons);
+  - `urmqtt.registry.refused`;
+  - `urmqtt.revocation.live_closed`;
+  - `urmqtt.tls.server_cert_days`.
+
+  Every rejection is also logged rate-limited, with the reason and the publisher only.
+- `docs/PROVISIONING.md`: keys born on the device, enrollment outside the broker with the CAs in an HSM/KMS, CA rotation, runtime revocation, the signing hook.
+- `make certs` adds, without touching an existing dev CA:
+  - a second operational CA with device-005;
+  - a bootstrap CA with bootstrap/device-006;
+  - the control service identity `operator`;
+  - the Ed25519 control key pair.
+- **Fixed from H0:** W5 (clock lower bound); W6 (random-number failures for the SYN-cookie key and the DHCP xid are fatal); W11 (the kernel binary has host tests; `production_ignores_every_option`).
+
+**Tests**
+
+- **Host:**
+  - control crate: 9 tests (RFC 8032 vectors, round trip, every flipped byte, environment and key binding, malformed input, freshness/replay/permission rules, PEM keys);
+  - TLS: runtime revocation for full handshakes and resumption; roles with two operational CAs and a bootstrap CA, including resumed roles and a removed CA refused even with a valid ticket;
+  - broker: 5 new tests (namespace, control rights, bootstrap isolation, disconnects);
+  - store: control state across power loss and the v1→v2 migration;
+  - schema: 4 new tests, including `expiry_build_check`; kernel: 2 command-line tests.
+
+  282 host tests in all.
+- **Fuzz:** new target `control_message` (structured and raw; 238k runs in 60 s, coverage 929). `broker_input` now also drives bootstrap identities.
+- **Smoke: 87/87** (HVF and TCG). New scenarios:
+  - `control`: control-revoke-live (closed 8–10 ms after the commit, refused on reconnect), unrevoke, forged, replay, expired, from-device, bootstrap-role, ca-rotation;
+  - `registry-allowlist`: unknown refused, allowed then admitted, disallowed then closed live in 3–4 ms and refused;
+  - `control-persist`: after a power cut the revocation and `seq` remain; the replayed message is rejected and the device is still refused;
+  - `time-before-build`: RTC in 2020; the date is refused and the handshake fails.
+
+**Measurements** (M4 Pro, HVF)
+
+- **Bytes per idle connection** (10k mTLS connections with one subscription each, dev image, 32 MiB heap), with the pre-X0 kernel measured again back to back:
+  - idle phase: **476–477 B before and after**;
+  - keepalive phase: 516–527 B before and 516–550 B after, overlapping and noisy.
+
+  `Conn` stays at 152 B: the 32-bit serial tag fits its padding.
+- **`make bench` dp-bench** (handshakes/s, 1/2/4 workers): 872 / 1 716 / 3 385, against 877 / 1 724 / 3 452 at X0, so −1.9 % at 4 workers, near noise. Each full handshake now hashes the client certificate twice and takes a global lock to record the role.
+- **Found and fixed while measuring:** the first version read the broker's full `stats()` (a walk over every session) on every loop pass. It now reads a single counter.
+- Dev ELF 2 403 536 B (X0: 2 423 608 B).
+
+**Weaknesses found** (AUDIT.md, H1-W1 to W4):
+- W1: the publisher gets no outcome back.
+- W2: a data-disk rollback restores old revocations and `seq`.
+- W3: the build's expiry check is cached until the inputs change.
+- W4: allowlist mode without storage refuses every device.
+
+**Deviations** (SECURITY-PLAN H1 status):
+- a fixed binary layout instead of CBOR;
+- the `--sign-cmd` hook instead of a linked PKCS#11 library;
+- an epoch plus IPI instead of ring messages;
+- removal of an old CA proven by a host test with two servers instead of a second image in smoke.

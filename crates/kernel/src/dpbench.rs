@@ -56,7 +56,7 @@ fn one(
                 .map_err(|_| "server")?
             {
                 let k = broker.open(now_ms).ok_or("broker full")?;
-                broker.set_identity(k, &identity);
+                broker.set_identity(k, &identity, false);
                 conn = Some(k);
             }
             if let Some(k) = conn
@@ -91,7 +91,11 @@ fn one(
 pub fn worker(me: usize) -> ! {
     let srv = crate::mqtt_service::tls_server_for_bench();
     let cli = TlsClient::new(&ClientSetup {
-        ca_pem: urmqtt_config::CA_PEM,
+        // The server certificate is issued by the first operational CA.
+        ca_pem: urmqtt_config::OPERATIONAL_CA_PEMS
+            .first()
+            .copied()
+            .unwrap_or_default(),
         cert_pem: urmqtt_config::SELFTEST_CLIENT_CERT_PEM,
         key_pem: urmqtt_config::SELFTEST_CLIENT_KEY_PEM,
     });

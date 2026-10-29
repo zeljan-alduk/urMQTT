@@ -37,6 +37,9 @@ export CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS := \
 KERNEL_FEATURES := $(if $(filter dev,$(ENV)),--features selftest)
 export URMQTT_ENV := $(ENV)
 export URMQTT_VERSION := $(VERSION)
+# The commit time: reproducible (M17) and the kernel's lower bound for the
+# wall clock (H7). The ISO tools use the same value.
+export SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
 ACCEL ?=
 QEMU_ARGS ?=
 

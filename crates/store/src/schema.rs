@@ -53,6 +53,22 @@ pub const MIGRATIONS: &[&str] = &[
         crc INTEGER NOT NULL
     ) STRICT;
     ",
+    // 2 (H1): the control channel's last accepted sequence number (anti-
+    // replay, updated in the same transaction as each effect) and the
+    // device allowlist.
+    "
+    CREATE TABLE control_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        seq INTEGER NOT NULL CHECK (seq >= 0)
+    ) STRICT;
+    INSERT INTO control_state (id, seq) VALUES (1, 0);
+
+    CREATE TABLE allowlist (
+        id TEXT PRIMARY KEY,
+        added_at INTEGER NOT NULL,
+        seq INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID;
+    ",
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;

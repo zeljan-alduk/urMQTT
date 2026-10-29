@@ -22,4 +22,7 @@ pub mod rng;
 pub mod server;
 
 pub use identity::IdentityField;
-pub use server::{Event, ServerSetup, TlsError, TlsServer, TlsSession, set_clock};
+pub use server::{
+    CertRole, Event, RevocationList, ServerSetup, TlsError, TlsServer, TlsSession, serial_tag,
+    set_clock,
+};

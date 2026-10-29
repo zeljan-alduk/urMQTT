@@ -180,6 +180,80 @@ kill_vm() {
     wait "$VM_PID" 2>/dev/null || true
 }
 
+# H1: a revocation and the control sequence number survive a reboot (the
+# VM is killed, as by a power cut, after the message was applied): the same
+# message replayed to the new boot is rejected, the device stays refused.
+control_persist() {
+    local iso="$OUT/control-persist.iso" msg="$OUT/control-persist.bin"
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve" >/dev/null
+    local d="$ROOT/deploy/dev"
+    local tls=(--port 18883 --ca "$d/ca.pem" --client-cert "$d/services/operator.pem" --client-key "$d/services/operator.key")
+    for accel in $ACCELS; do
+        local log1="$OUT/control-persist-$accel-1.log" log2="$OUT/control-persist-$accel-2.log"
+        local data="$OUT/control-persist-$accel.img" status=0
+        rm -f "$data" "$msg"
+        truncate -s 64m "$data"
+        start_vm "$log1" --iso "$iso" --accel "$accel" --data "$data" --fwd 18883:8883
+        if wait_log "$log1" "TLS 1.3 listener"; then
+            "$CONTROL_TOOL" revoke --cert "$d/devices/device-002.pem" --env dev --key "$d/control.key" \
+                --out "$msg" "${tls[@]}" >>"$log1.client" 2>&1 || status=1
+            wait_log "$log1" "revoke of 1 item\(s\) applied" || status=124
+        else
+            status=124
+        fi
+        kill_vm
+        if [[ $status -eq 0 ]]; then
+            start_vm "$log2" --iso "$iso" --accel "$accel" --data "$data" --fwd 18883:8883
+            if wait_log "$log2" "TLS 1.3 listener"; then
+                "$CONTROL_TOOL" publish-file "$msg" "${tls[@]}" >>"$log2" 2>&1 || status=1
+                wait_log "$log2" "rejected: replay" || status=124
+                if mosquitto_pub -h 127.0.0.1 -p 18883 -V mqttv311 -i device-002 --cafile "$d/ca.pem" \
+                    --cert "$d/devices/device-002.pem" --key "$d/devices/device-002.key" \
+                    -t devices/device-002/x -m x >/dev/null 2>&1; then
+                    echo "client: revoked device admitted after reboot" >>"$log2"
+                fi
+                sleep 0.5
+            else
+                status=124
+            fi
+            kill_vm
+        fi
+        check "control-persist [$accel]" "${log2}" "$status" \
+            "db: restored .* 2 revoked serial\(s\), .* control seq [1-9][0-9]*" \
+            "control: message from operator rejected: replay" "invalid peer certificate: Revoked" \
+            "NOT:revoked device admitted" "$NO_FAULT"
+    done
+}
+
+# H7: boots with the RTC before the build time; the date is refused and a
+# device handshake fails for want of a trustworthy clock.
+time_before_build() {
+    local iso="$OUT/time-before-build.iso"
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve" >/dev/null
+    local d="$ROOT/deploy/dev"
+    for accel in $ACCELS; do
+        local log="$OUT/time-before-build-$accel.log" data="$OUT/time-before-build-$accel.img" status=0
+        rm -f "$data"
+        truncate -s 64m "$data"
+        start_vm "$log" --iso "$iso" --accel "$accel" --data "$data" --fwd 18883:8883 \
+            -- -rtc base=2020-01-01T00:00:00
+        if wait_log "$log" "TLS 1.3 listener"; then
+            if mosquitto_pub -h 127.0.0.1 -p 18883 -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
+                --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" \
+                -t devices/device-001/x -m x >/dev/null 2>&1; then
+                echo "client: handshake ACCEPTED without a trustworthy clock" >>"$log"
+            fi
+            sleep 0.5
+        else
+            status=124
+        fi
+        kill_vm
+        check "time-before-build [$accel]" "$log" "$status" \
+            "date at boot: unix 15[0-9]+ is before this image was built" \
+            "tls: connection refused" "NOT:handshake ACCEPTED" "$NO_FAULT"
+    done
+}
+
 # M11: QEMU is killed while the kernel commits transactions in a loop;
 # the next boot must pass quick_check and hold every committed row.
 db_crash() {
@@ -589,6 +663,48 @@ else
     echo "  ✗ mosquitto clients not installed (brew install mosquitto / apt install mosquitto-clients)"
     FAILED=$((FAILED + 1))
 fi
+
+# H1: the control channel, the registry and the trust roles, with the
+# real `urmqtt-control` tool and mosquitto clients.
+CONTROL_TOOL="$ROOT/target/release/urmqtt-control"
+(cd "$ROOT" && cargo build --release --locked -q -p urmqtt-control-tool) || CONTROL_TOOL=""
+# Ed25519 keys need OpenSSL >= 3 (macOS's LibreSSL has none).
+for c in "$(brew --prefix openssl@3 2>/dev/null)/bin/openssl" openssl; do
+    if command -v "$c" >/dev/null && "$c" version | grep -q '^OpenSSL [3-9]'; then
+        export OPENSSL=$c
+        break
+    fi
+done
+if [[ -n "$CONTROL_TOOL" ]] && command -v mosquitto_pub >/dev/null && [[ -n "${OPENSSL:-}" ]]; then
+    SERVICE_PORT=8883 service control "serve" 18883 "TLS 1.3 listener on port 8883" \
+        python3 -I "$ROOT/scripts/control-scenarios.py" "$ROOT/deploy/dev" "$CONTROL_TOOL" -- \
+        "client: control-revoke-live ok" "client: control-unrevoke ok" "client: control-forged ok" \
+        "client: control-replay ok" "client: control-expired ok" "client: control-from-device ok" \
+        "client: bootstrap-role ok" "client: ca-rotation ok" \
+        "control: seq [0-9]+ from operator: revoke of 1 item\(s\) applied" \
+        "control: core [0-9]+: 1 live connection\(s\) closed" "invalid peer certificate: Revoked" \
+        "control: seq [0-9]+ from operator: unrevoke of 1 item\(s\) applied" \
+        "control: message from operator rejected: bad_signature" \
+        "control: message from operator rejected: replay" \
+        "control: message from operator rejected: expired" \
+        "publish\(es\) to \\\$urmqtt/ by identities without control rights dropped" \
+        "tls: device-006 authenticated \(TLS13_[A-Z0-9_]+, bootstrap role\)" \
+        "tls: device-005 authenticated" "NOT:FAILED" "$NO_FAULT"
+    SERVICE_PORT=8883 service registry-allowlist "serve registry=allowlist" 18883 "TLS 1.3 listener on port 8883" \
+        python3 -I "$ROOT/scripts/control-scenarios.py" "$ROOT/deploy/dev" "$CONTROL_TOOL" --allowlist -- \
+        "client: registry-allowlist ok" "registry allowlist, 0 allowlisted identities" \
+        "registry: device-001 is not on the allowlist, refused" \
+        "control: seq [0-9]+ from operator: allow of 1 item\(s\) applied" \
+        "control: seq [0-9]+ from operator: disallow of 1 item\(s\) applied" \
+        "control: core [0-9]+: 1 live connection\(s\) closed" "NOT:FAILED" "$NO_FAULT"
+    control_persist
+else
+    echo "  ✗ control scenarios need urmqtt-control, mosquitto clients and OpenSSL >= 3"
+    FAILED=$((FAILED + 1))
+fi
+# H7 lower bound: a clock before the image's build time is unknown time;
+# certificate checks then refuse every handshake.
+time_before_build
 
 # M11: SQLite on the data disk: batched write throughput, crash
 # consistency after SIGKILL, broker state across a restart.
