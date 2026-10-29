@@ -540,3 +540,47 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - In-order receive only.
 - No IPv6 (a later item).
 - One timer per connection: a connection waiting in FIN-WAIT-2 has no retransmission timer to restart.
+
+## M15 — Memory per connection (2026-10-29)
+
+**Done** (ADR-034)
+
+- **Exact accounting:** the per-CPU heap counts requested bytes and the buddy blocks they occupy. Core 0 reports every 10 s: heap above the idle baseline per open connection, frame-buffer pool apart. The block figure, allocator rounding included, is the one quoted.
+- **TCP:**
+  - `Conn` 112 → 96 B: one flags byte, 16-bit RTT/RTO, a 32-bit wrapping RTT start.
+  - The table stores 4-byte connection indices and compares keys through the connections (24 → 4 B per slot).
+- **TLS:**
+  - Per direction only the traffic secret and sequence number (56 → 40 B): the AEAD key *and* IV are derived per record and wiped.
+  - The record state lives inline in the connection's slab entry (no separate 128-byte block).
+- **Broker:**
+  - `Conn` 80 → 48 B: identity and Will in an optional box.
+  - `Session` 80 → 64 B (PROMPT §7.3 target): one subscription inline, flattened token bucket, `NonZeroU32` connection id.
+  - Subscriptions are 8-byte interned node ids; filters are kept once, in the trie node.
+- **Device-scoped subscriptions:** `devices/<own id>/…` filters are stored relative to the session's id and shared by all devices, so devices add no trie nodes. Matching, retained delivery, persistence, restore and unsubscribe are covered by a new test.
+- **Slab:** chunks are sized to one 8 KiB heap block (less than 1 % slack instead of up to a third).
+- **Kernel:** relay entry 32 → 16 B.
+- **Regression guards:** `size_of` assertions as host tests (TCP, TLS, broker) and as compile-time asserts in the kernel.
+- **Load generator:** `--subscribe 1` makes every simulated device subscribe to `devices/<id>/cmd/#` at QoS 1.
+
+**Measured** (HVF, 4 vCPU, 3 worker cores, 1 GiB; `urmqtt-loadgen hold --subscribe 1`; each device holds an mTLS connection with one subscription)
+
+| Connections | Heap blocks per connection | Requested bytes per connection |
+|---:|---:|---:|
+| 960 | 531 B | 504 B |
+| 9 922 | **494 B** | 469 B |
+| 10 197 | **474 B** | 449 B |
+
+- Before M15: 762 B with frame buffers and 604–610 B requested without them, at 10k without subscriptions (4 099 B at the start of the work). With honest block accounting, the M14 layout was 682 B.
+- Frame-buffer pool: a fixed ~2 MiB, reported apart (≈ 200 B per connection at 10k, ≈ 2 B at 1M).
+- **100k / 1M not measurable on this host:**
+  - QEMU user networking on macOS stopped accepting at 10 197 connections (about the 10 240-descriptor `OPEN_MAX` of the QEMU process); the rest were reset by QEMU.
+  - The loopback address also has only 16 384 ephemeral ports, and adding addresses needs root.
+  - The per-connection figure falls with the count (fixed chunks amortize), and none of the structures grows superlinearly.
+- `make check` green; `make smoke`: **62/62**. Host tests: 75 in tcp/broker/tls/mm. Kernel ELF 2 294 992 bytes.
+
+**Known gaps**
+
+- 100k / 1M measurements need a Linux/KVM host with tap networking (M16/M17 tooling).
+- Trie nodes of ordinary filters and retained topics are never freed.
+- Under a 10k connect storm the DB core's commits slowed from 15 ms to 600 ms on average (device-registry `DeviceSeen` upserts, about 10 ms each). Not a correctness problem, but M16's reconnect-storm test must look at it.
+- The loadgen's first ~80 connects time out (QEMU's listen backlog under 48 parallel connectors).

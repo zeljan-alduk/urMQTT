@@ -9,12 +9,12 @@
 //! on the per-packet path scans all connections.
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use urmqtt_arch_aarch64::spsc::{Consumer, Producer};
-use urmqtt_broker::{Acl, Broker, CloseReason, Config, ConnId};
+use urmqtt_broker::{Acl, Broker, Buf, CloseReason, Config, ConnId};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{debug, info, warn};
 use urmqtt_mqtt::{Limits, QoS};
@@ -40,7 +40,7 @@ const TX_BUF: usize = 32 * 1024;
 /// A handshake (or, on the dev port, the CONNECT) must arrive within this.
 const HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
 /// Connections per core (TLS and plaintext together).
-pub const MAX_CONNS: usize = 4096;
+pub const MAX_CONNS: usize = 1 << 20;
 
 /// Where a connection's MQTT session lives.
 #[derive(Clone, Copy)]
@@ -48,28 +48,65 @@ enum Peer {
     /// In this core's broker shard.
     Local(ConnId),
     /// In another core's shard, relayed over the mesh.
-    Remote { home: usize },
+    Remote { home: u16 },
+}
+
+/// A dense map from ids chosen elsewhere (TCP or broker connection ids)
+/// to values, on the chunked slab: no tree nodes, slack under one chunk
+/// (M15).
+struct Slab<T>(urmqtt_mm::slab::Slab<T>);
+
+impl<T> Slab<T> {
+    const fn new() -> Self {
+        Self(urmqtt_mm::slab::Slab::new())
+    }
+
+    fn get(&self, k: &u32) -> Option<&T> {
+        self.0.get(*k)
+    }
+
+    fn get_mut(&mut self, k: &u32) -> Option<&mut T> {
+        self.0.get_mut(*k)
+    }
+
+    fn insert(&mut self, k: u32, v: T) {
+        self.0.insert_at(k, v);
+    }
+
+    fn remove(&mut self, k: &u32) -> Option<T> {
+        self.0.take_at(*k)
+    }
+
+    fn contains_key(&self, k: &u32) -> bool {
+        self.0.contains(*k)
+    }
 }
 
 /// One TCP connection on this core (its transport side).
 struct Conn {
     tls: bool,
-    session: Option<Box<TlsSession>>,
+    session: Option<TlsSession>,
     peer: Option<Peer>,
     tconn: Tconn,
     /// Bytes for TCP (ciphertext, or plaintext on the dev port) that the
     /// stack has not taken yet.
-    pending: Vec<u8>,
+    pending: Buf,
     /// Dev plaintext port: bytes held until the CONNECT names the client.
-    early: Vec<u8>,
-    /// Relayed replies waiting for room in `pending`.
-    outq: VecDeque<Vec<u8>>,
+    early: Buf,
+    /// Relayed replies waiting for room in `pending` (relayed connections).
+    #[allow(clippy::box_collection)]
+    outq: Option<Box<VecDeque<Vec<u8>>>>,
     /// The home core asked to close after its replies.
     remote_close: bool,
     /// We are closing: close_notify and FIN after `pending`.
     closing: bool,
     fin_sent: bool,
 }
+
+// Per-connection budget (M15, ADR-034), checked at compile time: the
+// kernel crate has no host tests.
+const _: () = assert!(core::mem::size_of::<Conn>() <= 152);
+const _: () = assert!(core::mem::size_of::<Remote>() <= 16);
 
 /// Per-core handshake admission (token bucket, PROMPT §6).
 struct Admission {
@@ -79,10 +116,11 @@ struct Admission {
 
 /// A connection relayed from another core's transport (home side).
 struct Remote {
-    from: usize,
     tconn: Tconn,
     /// Reply bytes the transport core will still accept.
-    credit: usize,
+    credit: u32,
+    /// The transport core.
+    from: u16,
     close_sent: bool,
 }
 
@@ -95,9 +133,9 @@ pub struct MqttService {
     tls: Option<TlsServer>,
     tls_port: u16,
     plain_port: Option<u16>,
-    conns: BTreeMap<u32, Conn>,
+    conns: Slab<Conn>,
     /// Broker connection → TCP connection (local sessions).
-    by_broker: BTreeMap<ConnId, u32>,
+    by_broker: Slab<u32>,
     /// Connections whose `pending` could not all be handed to TCP.
     blocked: Vec<u32>,
     /// Accepted connections not yet attached to a session, oldest first.
@@ -108,8 +146,9 @@ pub struct MqttService {
     db: Option<DbLink>,
     log: Option<LogLink>,
     /// Home side: connections relayed from transport cores.
-    remote: BTreeMap<ConnId, Remote>,
-    by_tconn: BTreeMap<(usize, Tconn), ConnId>,
+    remote: Slab<Remote>,
+    /// Per transport core: its connection id → (relay id, broker connection).
+    by_tconn: Vec<Slab<(Tconn, ConnId)>>,
     slot_gen: u32,
     dropped_routes: u64,
     last_tick_ms: u64,
@@ -370,8 +409,8 @@ impl MqttService {
             tls,
             tls_port: CONFIG.network.mqtt_tls_port,
             plain_port: CONFIG.network.mqtt_plain_port,
-            conns: BTreeMap::new(),
-            by_broker: BTreeMap::new(),
+            conns: Slab::new(),
+            by_broker: Slab::new(),
             blocked: Vec::new(),
             handshakes: VecDeque::new(),
             app: Vec::new(),
@@ -382,8 +421,8 @@ impl MqttService {
             refused: 0,
             db,
             log,
-            remote: BTreeMap::new(),
-            by_tconn: BTreeMap::new(),
+            remote: Slab::new(),
+            by_tconn: (0..n).map(|_| Slab::new()).collect(),
             slot_gen: 0,
             dropped_routes: 0,
             last_tick_ms: 0,
@@ -441,7 +480,7 @@ impl MqttService {
                 return false;
             }
             match self.tls.as_ref().and_then(|t| t.accept().ok()) {
-                Some(s) => Some(Box::new(s)),
+                Some(s) => Some(s),
                 None => return false,
             }
         } else {
@@ -456,9 +495,9 @@ impl MqttService {
                 session,
                 peer: None,
                 tconn,
-                pending: Vec::new(),
-                early: Vec::new(),
-                outq: VecDeque::new(),
+                pending: Buf::default(),
+                early: Buf::default(),
+                outq: None,
                 remote_close: false,
                 closing: false,
                 fin_sent: false,
@@ -487,7 +526,7 @@ impl MqttService {
         };
         self.app.clear();
         let t0 = urmqtt_arch_aarch64::timer::uptime_ns();
-        let r = sess.input(data, &mut k.pending, &mut self.app);
+        let r = sess.input(data, k.pending.vec_mut(), &mut self.app);
         dataplane::tls_time(self.me, urmqtt_arch_aarch64::timer::uptime_ns() - t0);
         match r {
             Ok(Event::Established {
@@ -570,7 +609,7 @@ impl MqttService {
                     identity: identity.map(Into::into),
                 },
             );
-            k.peer = Some(Peer::Remote { home });
+            k.peer = Some(Peer::Remote { home: home as u16 });
         }
         true
     }
@@ -581,7 +620,7 @@ impl MqttService {
         match k.peer {
             Some(Peer::Local(b)) => self.broker.input(b, data, now_ms),
             Some(Peer::Remote { home }) => link.send(
-                home,
+                usize::from(home),
                 CoreMsg::Input {
                     tconn: k.tconn,
                     data: data.to_vec(),
@@ -600,7 +639,8 @@ impl MqttService {
         };
         k.early.extend_from_slice(data);
         let limit = CONFIG.limits.max_packet_size as usize + 5;
-        let home = match urmqtt_mqtt::decode(&k.early, &urmqtt_mqtt::Limits::PROTOCOL_MAX) {
+        let home = match urmqtt_mqtt::decode(k.early.as_slice(), &urmqtt_mqtt::Limits::PROTOCOL_MAX)
+        {
             Ok((urmqtt_mqtt::Packet::Connect(p), _)) => {
                 Some(dataplane::home_of(p.client_id, self.n))
             }
@@ -616,7 +656,7 @@ impl MqttService {
         }) else {
             return;
         };
-        let early = core::mem::take(&mut k.early);
+        let early = k.early.take();
         if self.attach(c, home, None, link, now_ms) {
             self.deliver(c, &early, link, now_ms);
         } else {
@@ -635,7 +675,9 @@ impl MqttService {
                 self.by_broker.remove(&b);
                 finish(&mut self.broker, b, now_ms);
             }
-            Some(Peer::Remote { home }) => link.send(home, CoreMsg::Closed { tconn: k.tconn }),
+            Some(Peer::Remote { home }) => {
+                link.send(usize::from(home), CoreMsg::Closed { tconn: k.tconn })
+            }
             None => {}
         }
     }
@@ -646,7 +688,7 @@ impl MqttService {
         {
             k.closing = true;
             if let Some(sess) = k.session.as_mut() {
-                sess.close(&mut k.pending);
+                sess.close(k.pending.vec_mut());
             }
             self.blocked.push(c);
         }
@@ -673,31 +715,36 @@ impl MqttService {
                     self.remote.insert(
                         b,
                         Remote {
-                            from: peer,
+                            from: peer as u16,
                             tconn,
-                            credit: RELAY_CREDIT,
+                            credit: RELAY_CREDIT as u32,
                             close_sent: false,
                         },
                     );
-                    self.by_tconn.insert((peer, tconn), b);
+                    if let Some(t) = self.by_tconn.get_mut(peer) {
+                        t.insert(tconn as u32, (tconn, b));
+                    }
                 }
                 None => link.send(peer, CoreMsg::Close { tconn }),
             },
             CoreMsg::Input { tconn, data } => {
-                if let Some(&b) = self.by_tconn.get(&(peer, tconn)) {
+                if let Some(b) = self.relay_of(peer, tconn) {
                     self.broker.input(b, &data, now_ms);
                 }
             }
             CoreMsg::Closed { tconn } => {
-                if let Some(b) = self.by_tconn.remove(&(peer, tconn)) {
+                if let Some(b) = self.relay_of(peer, tconn) {
+                    if let Some(t) = self.by_tconn.get_mut(peer) {
+                        t.remove(&(tconn as u32));
+                    }
                     self.remote.remove(&b);
                     finish(&mut self.broker, b, now_ms);
                 }
             }
             CoreMsg::Credit { tconn, bytes } => {
-                if let Some(&b) = self.by_tconn.get(&(peer, tconn)) {
+                if let Some(b) = self.relay_of(peer, tconn) {
                     if let Some(r) = self.remote.get_mut(&b) {
-                        r.credit += bytes as usize;
+                        r.credit = r.credit.saturating_add(bytes);
                     }
                     // More may be waiting for the credit.
                     self.ready.push(b);
@@ -706,7 +753,7 @@ impl MqttService {
             CoreMsg::Output { tconn, data } => {
                 if let Some(c) = self.conn_of(tconn) {
                     if let Some(k) = self.conns.get_mut(&c) {
-                        k.outq.push_back(data);
+                        k.outq.get_or_insert_with(Default::default).push_back(data);
                     }
                     self.blocked.push(c);
                 }
@@ -722,6 +769,12 @@ impl MqttService {
             CoreMsg::Route { msg, qos, retain } => self.broker.route_remote(&msg, qos, retain),
             CoreMsg::IpConfig { .. } => {}
         }
+    }
+
+    /// The broker connection relaying `tconn` from transport core `peer`.
+    fn relay_of(&self, peer: usize, tconn: Tconn) -> Option<ConnId> {
+        let (t, b) = *self.by_tconn.get(peer)?.get(&(tconn as u32))?;
+        (t == tconn).then_some(b)
     }
 
     fn conn_of(&self, tconn: Tconn) -> Option<u32> {
@@ -815,7 +868,7 @@ impl MqttService {
                 let n = out.len();
                 match k.session.as_mut() {
                     Some(sess) => {
-                        if sess.send(out, &mut k.pending).is_err() {
+                        if sess.send(out, k.pending.vec_mut()).is_err() {
                             k.closing = true;
                         }
                     }
@@ -843,12 +896,12 @@ impl MqttService {
         };
         let out = self.broker.output(b);
         if !out.is_empty() && r.credit > 0 {
-            let n = out.len().min(r.credit).min(RELAY_CHUNK);
+            let n = out.len().min(r.credit as usize).min(RELAY_CHUNK);
             let data = out.get(..n).unwrap_or(&[]).to_vec();
             self.broker.consumed(b, n);
-            r.credit -= n;
+            r.credit -= n as u32;
             link.send(
-                r.from,
+                usize::from(r.from),
                 CoreMsg::Output {
                     tconn: r.tconn,
                     data,
@@ -863,7 +916,7 @@ impl MqttService {
             && self.broker.output(b).is_empty()
         {
             r.close_sent = true;
-            link.send(r.from, CoreMsg::Close { tconn: r.tconn });
+            link.send(usize::from(r.from), CoreMsg::Close { tconn: r.tconn });
         }
     }
 
@@ -875,41 +928,44 @@ impl MqttService {
         };
         if let Some(Peer::Remote { home }) = k.peer {
             while k.pending.len() < TX_BUF {
-                let Some(data) = k.outq.pop_front() else {
+                let Some(data) = k.outq.as_mut().and_then(|q| q.pop_front()) else {
+                    k.outq = None;
                     break;
                 };
                 match k.session.as_mut() {
                     Some(sess) => {
-                        if sess.send(&data, &mut k.pending).is_err() {
+                        if sess.send(&data, k.pending.vec_mut()).is_err() {
                             k.closing = true;
                         }
                     }
                     None => k.pending.extend_from_slice(&data),
                 }
                 link.send(
-                    home,
+                    usize::from(home),
                     CoreMsg::Credit {
                         tconn: k.tconn,
                         bytes: data.len() as u32,
                     },
                 );
             }
-            if k.remote_close && k.outq.is_empty() && !k.closing {
+            if k.remote_close && k.outq.is_none() && !k.closing {
                 k.closing = true;
                 if let Some(sess) = k.session.as_mut() {
-                    sess.close(&mut k.pending);
+                    sess.close(k.pending.vec_mut());
                 }
             }
         }
         if !k.pending.is_empty() {
-            let n = tcp.send(c, &k.pending);
-            k.pending.drain(..n);
+            let n = tcp.send(c, k.pending.as_slice());
+            // Idle connections keep no buffer (M15).
+            k.pending.consume(n);
         }
+        k.pending.release();
         if k.closing && k.pending.is_empty() && !k.fin_sent {
             k.fin_sent = true;
             tcp.close(c);
         }
-        !k.pending.is_empty() || !k.outq.is_empty()
+        !k.pending.is_empty() || k.outq.is_some()
     }
 
     /// Closes connections that never finished their handshake (or, on the

@@ -964,3 +964,172 @@ fn shards_fan_out_publishes_and_retained_messages() {
     // Remote routes are not fanned out again.
     assert!(b.drain_routes().next().is_none());
 }
+
+/// Device-scoped subscriptions (PROMPT §7.3) behave like ordinary ones but
+/// add no trie nodes per device, survive a restart and unsubscribe cleanly.
+#[test]
+fn device_scoped_subscriptions_share_one_filter() {
+    let acl = Acl {
+        device_subscribe: &["devices/{id}/#"],
+        ..ACL
+    };
+    let mut b = Broker::new(Config {
+        max_connections: 300,
+        persist: true,
+        acl,
+        ..cfg()
+    });
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    let mut devs: Vec<Client> = (0..100)
+        .map(|i| Client::connect(&mut b, &format!("dev{i}"), false, None, 0).0)
+        .collect();
+    let nodes = b.stats().topic_nodes;
+    for (i, d) in devs.iter_mut().enumerate() {
+        assert_eq!(
+            d.subscribe(
+                &mut b,
+                1,
+                &[(&format!("devices/dev{i}/cmd/#"), QoS::AtLeastOnce)],
+                0
+            ),
+            vec![Got::SubAck(1, vec![1])]
+        );
+    }
+    assert_eq!(b.stats().topic_nodes, nodes, "no per-device trie nodes");
+    assert_eq!(b.stats().subscriptions, 100);
+    // Stored with the full filter.
+    let stored: Vec<String> = b
+        .drain_persist()
+        .filter_map(|op| match op {
+            PersistOp::Subscribe {
+                client_id, filter, ..
+            } if &*client_id == "dev7" => Some(filter.into()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stored, vec!["devices/dev7/cmd/#".to_string()]);
+    // Delivery: only the named device, the parent level matches `#`.
+    svc.publish(
+        &mut b,
+        "devices/dev7/cmd/reboot",
+        b"r",
+        QoS::AtLeastOnce,
+        false,
+        0,
+    );
+    svc.publish(&mut b, "devices/dev7/cmd", b"c", QoS::AtMostOnce, false, 0);
+    svc.publish(
+        &mut b,
+        "devices/dev7/cmdx",
+        b"no",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(
+        devs[7].recv(&mut b),
+        vec![
+            publish("devices/dev7/cmd/reboot", b"r", 1, Some(1), false),
+            publish("devices/dev7/cmd", b"c", 0, None, false),
+        ]
+    );
+    assert_eq!(devs[8].recv(&mut b), vec![]);
+    // A scoped filter and an ordinary one matching the same message: one
+    // delivery at the higher QoS.
+    assert_eq!(
+        devs[8].subscribe(&mut b, 2, &[("devices/dev8/+/x", QoS::AtMostOnce)], 0),
+        vec![Got::SubAck(2, vec![0])]
+    );
+    svc.publish(
+        &mut b,
+        "devices/dev8/cmd/x",
+        b"once",
+        QoS::AtLeastOnce,
+        false,
+        0,
+    );
+    assert_eq!(
+        devs[8].recv(&mut b),
+        vec![publish("devices/dev8/cmd/x", b"once", 1, Some(1), false)]
+    );
+    // Retained messages reach a new scoped subscription (the device also
+    // gets the live copy through its `cmd/#`).
+    svc.publish(
+        &mut b,
+        "devices/dev9/cmd/cfg",
+        b"v1",
+        QoS::AtMostOnce,
+        true,
+        0,
+    );
+    assert_eq!(
+        devs[9].recv(&mut b),
+        vec![publish("devices/dev9/cmd/cfg", b"v1", 0, None, false)]
+    );
+    assert_eq!(
+        devs[9].subscribe(&mut b, 3, &[("devices/dev9/cmd/cfg", QoS::AtMostOnce)], 0),
+        vec![
+            Got::SubAck(3, vec![0]),
+            publish("devices/dev9/cmd/cfg", b"v1", 0, None, true)
+        ]
+    );
+    // Unsubscribe by the full filter.
+    devs[7].send(
+        &mut b,
+        &Packet::Unsubscribe(Unsubscribe {
+            packet_id: 4,
+            topics: UnsubscribeTopics::List(&["devices/dev7/cmd/#"]),
+        }),
+        0,
+    );
+    assert_eq!(devs[7].recv(&mut b), vec![Got::UnsubAck(4)]);
+    svc.publish(
+        &mut b,
+        "devices/dev7/cmd/reboot",
+        b"r",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(devs[7].recv(&mut b), vec![]);
+    // Restored from the store as scoped again.
+    let mut r = Broker::new(Config {
+        max_connections: 300,
+        persist: true,
+        acl,
+        ..cfg()
+    });
+    let nodes = r.stats().topic_nodes;
+    assert!(r.restore_session("dev3", [("devices/dev3/cmd/#", QoS::AtLeastOnce)], []));
+    assert_eq!(r.stats().topic_nodes, nodes);
+    let (mut s2, _) = Client::connect(&mut r, "backend", true, None, 0);
+    let (mut d3, _) = Client::connect(&mut r, "dev3", false, None, 0);
+    s2.publish(
+        &mut r,
+        "devices/dev3/cmd/a",
+        b"a",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(
+        d3.recv(&mut r),
+        vec![publish("devices/dev3/cmd/a", b"a", 0, None, false)]
+    );
+}
+
+/// Per-connection budget (M15, ADR-034).
+#[test]
+fn hot_state_stays_small() {
+    assert!(
+        core::mem::size_of::<Conn>() <= 48,
+        "{}",
+        core::mem::size_of::<Conn>()
+    );
+    assert!(
+        core::mem::size_of::<Session>() <= 64,
+        "{}",
+        core::mem::size_of::<Session>()
+    );
+    assert_eq!(core::mem::size_of::<Sub>(), 8);
+}

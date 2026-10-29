@@ -17,6 +17,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::ptr::null_mut;
+use core::sync::atomic::{AtomicI64, Ordering};
 
 use urmqtt_arch_aarch64::sync::OnceCell;
 
@@ -52,6 +53,11 @@ pub struct CachedHeap {
     global: LockedHeap,
     caches: [UnsafeCell<Cache>; MAX_CPUS],
     hooks: OnceCell<Hooks>,
+    /// Bytes requested and not yet freed, per CPU (a block freed on another
+    /// CPU makes that CPU's counter go negative; the sum is exact).
+    live: [AtomicI64; MAX_CPUS],
+    /// The same in heap blocks: what those requests really occupy.
+    blocks: [AtomicI64; MAX_CPUS],
 }
 
 // SAFETY: each `caches[i]` is only touched by CPU `i` with IRQs masked
@@ -69,6 +75,17 @@ pub fn class_of(layout: Layout) -> Option<usize> {
     CLASSES.iter().position(|&c| c == need)
 }
 
+/// Bytes the buddy heap hands out for `layout` (its rounding, as
+/// `buddy::BuddyHeap::order_for`).
+pub fn block_size(layout: Layout) -> usize {
+    layout
+        .size()
+        .max(layout.align())
+        .max(CLASSES[0])
+        .checked_next_power_of_two()
+        .unwrap_or(usize::MAX)
+}
+
 impl CachedHeap {
     pub const fn new() -> Self {
         Self {
@@ -82,6 +99,32 @@ impl CachedHeap {
                 })
             }; MAX_CPUS],
             hooks: OnceCell::new(),
+            live: [const { AtomicI64::new(0) }; MAX_CPUS],
+            blocks: [const { AtomicI64::new(0) }; MAX_CPUS],
+        }
+    }
+
+    /// Bytes currently allocated by callers (requested sizes, exact), for
+    /// the per-connection memory report (M15).
+    pub fn live_bytes(&self) -> i64 {
+        // Relaxed: a statistic; each CPU's counter is exact on its own.
+        self.live.iter().map(|c| c.load(Ordering::Relaxed)).sum()
+    }
+
+    /// Heap occupied by the live allocations (block sizes, so including the
+    /// rounding of every request to its buddy block).
+    pub fn block_bytes(&self) -> i64 {
+        // Relaxed: as `live_bytes`.
+        self.blocks.iter().map(|c| c.load(Ordering::Relaxed)).sum()
+    }
+
+    fn account(&self, layout: Layout, sign: i64) {
+        let cpu = self.hooks.get().map_or(0, |h| (h.cpu)());
+        if let (Some(l), Some(b)) = (self.live.get(cpu), self.blocks.get(cpu)) {
+            // Relaxed: only this CPU writes its own counters (or CPU 0
+            // before the hooks exist, also single-threaded).
+            l.fetch_add(sign * layout.size() as i64, Ordering::Relaxed);
+            b.fetch_add(sign * block_size(layout) as i64, Ordering::Relaxed);
         }
     }
 
@@ -159,6 +202,7 @@ impl Default for CachedHeap {
 // any CPU's list and finally to the global heap with the class layout.
 unsafe impl GlobalAlloc for CachedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        self.account(layout, 1);
         if let Some(c) = class_of(layout) {
             let size = CLASSES.get(c).copied().unwrap_or(0);
             let r = self.with_cache(|cache| {
@@ -184,6 +228,7 @@ unsafe impl GlobalAlloc for CachedHeap {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        self.account(layout, -1);
         if let Some(c) = class_of(layout) {
             let size = CLASSES.get(c).copied().unwrap_or(0);
             let done = self.with_cache(|cache| {

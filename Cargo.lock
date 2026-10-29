@@ -1360,6 +1360,7 @@ version = "0.0.1"
 name = "urmqtt-broker"
 version = "0.0.1"
 dependencies = [
+ "urmqtt-mm",
  "urmqtt-mqtt",
 ]
 
@@ -1455,6 +1456,7 @@ dependencies = [
 name = "urmqtt-tcp"
 version = "0.0.1"
 dependencies = [
+ "urmqtt-mm",
  "urmqtt-timer-wheel",
 ]
 

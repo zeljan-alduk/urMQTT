@@ -278,6 +278,13 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
         link.flush();
         pool.append(&mut done);
         pool.truncate(POOL_MAX);
+        if let Some(c) = dataplane::CONNECTIONS.get(me) {
+            // Relaxed: statistics.
+            c.store(
+                tcp.connections() as u64,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
         if sent {
             dataplane::wake(0);
         }
@@ -413,8 +420,18 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     let mut local: VecDeque<Frame> = VecDeque::new();
     let mut ping = Ping::Waiting;
     let mut idle = dataplane::Idle::new();
+    let (mut mem_last, mut mem_conns) = (now_ms(), 0u64);
+    dataplane::set_baseline();
     loop {
         let now = now_ms();
+        if let Some(c) = dataplane::CONNECTIONS.first() {
+            // Relaxed: statistics.
+            c.store(
+                tcp.connections() as u64,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        dataplane::mem_report(now, &mut mem_last, &mut mem_conns);
         let mut activity = dispatch(&mut net, &mut link, &mut pool, &mut local);
         activity |= drain_mesh(&mut link, &mut mqtt, &mut iface, &mut tcp, now);
         let mut events: Vec<Event> = Vec::new();

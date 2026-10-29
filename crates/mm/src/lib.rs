@@ -15,9 +15,12 @@
     clippy::panic
 )]
 
+extern crate alloc;
+
 pub mod buddy;
 pub mod cached;
 pub mod frames;
+pub mod slab;
 
 pub use cached::CachedHeap;
 

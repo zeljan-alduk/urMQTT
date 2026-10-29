@@ -10,6 +10,8 @@
 //!   DISCONNECT → close. Reports completed connections per second.
 //! - `hold`: opens `--clients` connections, keeps them alive with PINGREQ,
 //!   optionally publishes QoS 0 every `--publish-ms`, until `--duration`.
+//!   With `--subscribe 1` every device subscribes to its own command tree
+//!   (`devices/<id>/cmd/#`, QoS 1) like a real device.
 //!
 //! ```text
 //! urmqtt-loadgen handshake --port 18883 --threads 64 --duration 10
@@ -34,6 +36,7 @@ struct Opts {
     clients: usize,
     duration: u64,
     publish_ms: u64,
+    subscribe: bool,
     prefix: String,
 }
 
@@ -51,6 +54,7 @@ fn parse() -> Result<Opts, String> {
         clients: 64,
         duration: 10,
         publish_ms: 0,
+        subscribe: false,
         prefix: "bench".into(),
     };
     while let Some(k) = a.next() {
@@ -64,6 +68,7 @@ fn parse() -> Result<Opts, String> {
             "--clients" => o.clients = num(&v)? as usize,
             "--duration" => o.duration = num(&v)?,
             "--publish-ms" => o.publish_ms = num(&v)?,
+            "--subscribe" => o.subscribe = num(&v)? != 0,
             "--prefix" => o.prefix = v,
             _ => return Err(format!("unknown option {k}")),
         }
@@ -167,6 +172,20 @@ fn open(o: &Opts, id: &str, cfg: &Arc<ClientConfig>) -> Result<Tls, String> {
     if ack[0] != 0x20 || ack[3] != 0 {
         return Err(format!("CONNACK refused: {ack:02x?}"));
     }
+    if o.subscribe {
+        let filter = format!("devices/{id}/cmd/#");
+        let mut p = vec![0x82, (2 + 2 + filter.len() + 1) as u8, 0, 1];
+        p.extend_from_slice(&(filter.len() as u16).to_be_bytes());
+        p.extend_from_slice(filter.as_bytes());
+        p.push(1);
+        tls.write_all(&p).map_err(|e| format!("subscribe: {e}"))?;
+        let mut ack = [0u8; 5];
+        tls.read_exact(&mut ack)
+            .map_err(|e| format!("suback: {e}"))?;
+        if ack != [0x90, 3, 0, 1, 1] {
+            return Err(format!("SUBACK refused: {ack:02x?}"));
+        }
+    }
     Ok(tls)
 }
 
@@ -258,14 +277,38 @@ fn handshake(o: &Opts) -> Result<(), String> {
 
 fn hold(o: &Opts) -> Result<(), String> {
     let ids = identities(o, o.clients)?;
-    let mut conns = Vec::with_capacity(ids.len());
     let t0 = Instant::now();
-    for (id, cfg) in &ids {
-        match open(o, id, cfg) {
-            Ok(t) => conns.push((id.clone(), t)),
-            Err(e) => eprintln!("loadgen: {id}: {e}"),
-        }
-    }
+    // Open in parallel: `--threads` workers each take a share.
+    let threads = o.threads.clamp(1, ids.len().max(1));
+    let shares: Vec<Vec<(String, Arc<ClientConfig>)>> = (0..threads)
+        .map(|t| ids.iter().skip(t).step_by(threads).cloned().collect())
+        .collect();
+    let opened: Vec<_> = shares
+        .into_iter()
+        .map(|share| {
+            let o = Opts {
+                mode: String::new(),
+                host: o.host.clone(),
+                certs: String::new(),
+                prefix: String::new(),
+                ..*o
+            };
+            std::thread::spawn(move || {
+                let mut conns = Vec::new();
+                for (id, cfg) in share {
+                    match open(&o, &id, &cfg) {
+                        Ok(t) => conns.push((id, t)),
+                        Err(e) => eprintln!("loadgen: {id}: {e}"),
+                    }
+                }
+                conns
+            })
+        })
+        .collect();
+    let mut conns: Vec<(String, Tls)> = opened
+        .into_iter()
+        .flat_map(|h| h.join().unwrap_or_default())
+        .collect();
     println!(
         "loadgen: hold: {} of {} connections established in {:.1} s",
         conns.len(),

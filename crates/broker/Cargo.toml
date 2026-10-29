@@ -16,3 +16,4 @@ workspace = true
 
 [dependencies]
 urmqtt-mqtt = { path = "../mqtt" }
+urmqtt-mm = { path = "../mm" }

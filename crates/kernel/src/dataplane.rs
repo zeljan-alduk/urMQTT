@@ -45,11 +45,24 @@ pub struct FrameBuf {
 
 pub type Frame = Box<FrameBuf>;
 
+/// Frame buffers alive (in rings, pools or in use): a bounded, load-
+/// dependent amount reported apart from per-connection memory.
+pub static FRAMES: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+
 pub fn new_frame() -> Frame {
+    // Relaxed: statistics.
+    FRAMES.fetch_add(1, Ordering::Relaxed);
     Box::new(FrameBuf {
         len: 0,
         data: [0; MTU_FRAME],
     })
+}
+
+impl Drop for FrameBuf {
+    fn drop(&mut self) {
+        // Relaxed: statistics.
+        FRAMES.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// A connection relayed between a transport core and a home core is named
@@ -209,6 +222,86 @@ impl Default for Idle {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// TCP connections per core (for the memory report).
+pub static CONNECTIONS: [AtomicU64; crate::smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::smp::MAX_CPUS];
+/// Frame-buffer bytes (requested, in heap blocks) at the baseline.
+static FRAMES_AT_BASELINE: [core::sync::atomic::AtomicI64; 2] =
+    [const { core::sync::atomic::AtomicI64::new(0) }; 2];
+/// Live heap bytes (requested, in heap blocks) when the data plane started
+/// or was last idle.
+pub static BASELINE: [core::sync::atomic::AtomicI64; 2] =
+    [const { core::sync::atomic::AtomicI64::new(0) }; 2];
+const MEM_REPORT_MS: u64 = 10_000;
+
+/// Heap in use now: (requested bytes, bytes in heap blocks).
+fn heap_usage() -> [i64; 2] {
+    [crate::vm::HEAP.live_bytes(), crate::vm::HEAP.block_bytes()]
+}
+
+/// Frame buffers alive: (requested bytes, bytes in heap blocks).
+fn frame_usage() -> [i64; 2] {
+    let layout = core::alloc::Layout::new::<FrameBuf>();
+    // Relaxed: statistics.
+    let n = FRAMES.load(Ordering::Relaxed);
+    [
+        n * layout.size() as i64,
+        n * urmqtt_mm::cached::block_size(layout) as i64,
+    ]
+}
+
+/// Records the idle heap the next reports are measured against.
+pub fn set_baseline() {
+    for (b, v) in BASELINE.iter().zip(heap_usage()) {
+        // Relaxed: read only by `mem_report` on core 0.
+        b.store(v, Ordering::Relaxed);
+    }
+    for (b, v) in FRAMES_AT_BASELINE.iter().zip(frame_usage()) {
+        // Relaxed: as above.
+        b.store(v, Ordering::Relaxed);
+    }
+}
+
+/// Core 0, every 10 s while connections exist: heap above the idle
+/// baseline, divided by the connections across all cores (PROMPT M15).
+/// Reported as requested bytes and as the heap blocks they occupy (the
+/// honest figure: allocator rounding included); frame buffers are a
+/// bounded pool, reported apart.
+pub fn mem_report(now_ms: u64, last: &mut u64, last_conns: &mut u64) {
+    if now_ms.saturating_sub(*last) < MEM_REPORT_MS {
+        return;
+    }
+    *last = now_ms;
+    // Relaxed: statistics written by each core for itself.
+    let conns: u64 = CONNECTIONS.iter().map(|c| c.load(Ordering::Relaxed)).sum();
+    if conns == 0 {
+        set_baseline();
+        if *last_conns == 0 {
+            return;
+        }
+    }
+    *last_conns = conns;
+    let (heap, frames) = (heap_usage(), frame_usage());
+    // Relaxed: written by this core only.
+    let base = BASELINE.each_ref().map(|b| b.load(Ordering::Relaxed));
+    let fbase = FRAMES_AT_BASELINE
+        .each_ref()
+        .map(|b| b.load(Ordering::Relaxed));
+    let per = |i: usize| {
+        let b = (heap[i] - base[i]) - (frames[i] - fbase[i]);
+        if conns > 0 { b / conns as i64 } else { 0 }
+    };
+    urmqtt_log::info!(
+        "mem: {conns} connection(s), heap {} KiB in blocks ({} KiB requested), frame buffers {} KiB: \
+         {} B per connection in heap blocks ({} B requested), frame buffers excluded",
+        heap[1] / 1024,
+        heap[0] / 1024,
+        frames[1] / 1024,
+        per(1),
+        per(0)
+    );
 }
 
 /// Counts an accepted connection on `core` (statistics).

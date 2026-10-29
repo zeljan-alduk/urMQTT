@@ -1,9 +1,10 @@
 //! In-house TLS 1.3 record layer used after the handshake (PROMPT §6).
 //!
-//! State per direction is the traffic secret (needed for KeyUpdate), the
-//! derived key and IV, and the sequence number. Records are decrypted in
-//! place; the AEAD is instantiated per record from the stored key so no
-//! expanded key schedule is kept per connection.
+//! State per direction is the traffic secret (needed for KeyUpdate) and
+//! the sequence number: 40 bytes. The AEAD key and IV are derived from the
+//! secret for every record (two HKDF-Expand-Labels) and the cipher
+//! instantiated on the stack, so an idle connection keeps neither keys nor
+//! an expanded key schedule (M15: memory over a few µs of CPU per record).
 
 use alloc::vec::Vec;
 
@@ -96,44 +97,43 @@ pub fn expand_label(secret: &[u8; 32], label: &[u8], out: &mut [u8]) -> bool {
     hk.expand(info.get(..n).unwrap_or(&[]), out).is_ok()
 }
 
-/// One direction's keys.
+/// One direction's secrets.
 pub struct Direction {
     secret: [u8; 32],
-    key: [u8; 32],
-    iv: [u8; 12],
     seq: u64,
 }
 
 impl Drop for Direction {
     fn drop(&mut self) {
         self.secret.zeroize();
-        self.key.zeroize();
-        self.iv.zeroize();
+    }
+}
+
+/// A record key derived on the stack, wiped when dropped.
+pub struct Key {
+    bytes: [u8; 32],
+    len: usize,
+}
+
+impl Key {
+    pub fn as_slice(&self) -> &[u8] {
+        self.bytes.get(..self.len).unwrap_or(&[])
+    }
+}
+
+impl Drop for Key {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
     }
 }
 
 impl Direction {
-    fn new(suite: Suite, secret: [u8; 32], seq: u64) -> Option<Self> {
-        let mut d = Self {
-            secret,
-            key: [0; 32],
-            iv: [0; 12],
-            seq,
-        };
-        d.derive(suite).then_some(d)
-    }
-
-    fn derive(&mut self, suite: Suite) -> bool {
-        let n = suite.key_len();
-        let ok_key = self
-            .key
-            .get_mut(..n)
-            .is_some_and(|k| expand_label(&self.secret, b"key", k));
-        ok_key && expand_label(&self.secret, b"iv", &mut self.iv)
+    fn new(secret: [u8; 32], seq: u64) -> Self {
+        Self { secret, seq }
     }
 
     /// Next generation (RFC 8446 §7.2) with the sequence reset.
-    fn update(&mut self, suite: Suite) -> bool {
+    fn update(&mut self) -> bool {
         let mut next = [0u8; 32];
         if !expand_label(&self.secret, b"traffic upd", &mut next) {
             return false;
@@ -141,23 +141,38 @@ impl Direction {
         self.secret = next;
         next.zeroize();
         self.seq = 0;
-        self.derive(suite)
+        true
     }
 
-    fn nonce(&self) -> [u8; 12] {
-        let mut n = self.iv;
+    /// The per-record nonce (RFC 8446 §5.3): the IV, derived afresh, XOR
+    /// the sequence number. None only if HKDF fails (it cannot for 12 B).
+    fn nonce(&self) -> Option<[u8; 12]> {
+        let mut n = self.iv()?;
         for (b, s) in n.iter_mut().skip(4).zip(self.seq.to_be_bytes()) {
             *b ^= s;
         }
-        n
+        Some(n)
     }
 
-    pub fn key(&self, suite: Suite) -> &[u8] {
-        self.key.get(..suite.key_len()).unwrap_or(&[])
+    /// The record key for `suite`, derived from the traffic secret.
+    pub fn key(&self, suite: Suite) -> Key {
+        let mut k = Key {
+            bytes: [0; 32],
+            len: suite.key_len(),
+        };
+        let ok = k
+            .bytes
+            .get_mut(..suite.key_len())
+            .is_some_and(|b| expand_label(&self.secret, b"key", b));
+        if !ok {
+            k.len = 0;
+        }
+        k
     }
 
-    pub fn iv(&self) -> &[u8; 12] {
-        &self.iv
+    pub fn iv(&self) -> Option<[u8; 12]> {
+        let mut iv = [0u8; 12];
+        expand_label(&self.secret, b"iv", &mut iv).then_some(iv)
     }
 
     pub fn seq(&self) -> u64 {
@@ -237,8 +252,8 @@ impl RecordLayer {
     ) -> Option<Self> {
         Some(Self {
             suite,
-            rx: Direction::new(suite, rx_secret, rx_seq)?,
-            tx: Direction::new(suite, tx_secret, tx_seq)?,
+            rx: Direction::new(rx_secret, rx_seq),
+            tx: Direction::new(tx_secret, tx_seq),
         })
     }
 
@@ -269,8 +284,9 @@ impl RecordLayer {
         if self.rx.seq == u64::MAX {
             return Err(RecordError::SequenceExhausted);
         }
-        let nonce = self.rx.nonce();
-        let pt_len = open_in_place(self.suite, self.rx.key(self.suite), &nonce, header, body)
+        let nonce = self.rx.nonce().ok_or(RecordError::BadRecord)?;
+        let key = self.rx.key(self.suite);
+        let pt_len = open_in_place(self.suite, key.as_slice(), &nonce, header, body)
             .ok_or(RecordError::BadRecord)?;
         self.rx.seq += 1;
         // Strip zero padding; the last non-zero byte is the content type.
@@ -296,7 +312,7 @@ impl RecordLayer {
             CT_HANDSHAKE => match content {
                 [HS_KEY_UPDATE, 0, 0, 1, req @ (0 | 1)] => {
                     let respond = *req == 1;
-                    if !self.rx.update(self.suite) {
+                    if !self.rx.update() {
                         return Err(RecordError::BadRecord);
                     }
                     if respond {
@@ -320,10 +336,10 @@ impl RecordLayer {
         let mut buf = Vec::with_capacity(len);
         buf.extend_from_slice(data);
         buf.push(ctype);
-        let nonce = self.tx.nonce();
+        let nonce = self.tx.nonce().ok_or(RecordError::BadRecord)?;
         if !seal_in_place(
             self.suite,
-            self.tx.key(self.suite),
+            self.tx.key(self.suite).as_slice(),
             &nonce,
             &header,
             &mut buf,
@@ -342,10 +358,10 @@ impl RecordLayer {
         let len = 5 + 1 + TAG;
         let header = [CT_APP_DATA, 3, 3, 0, len as u8];
         let mut buf = alloc::vec![HS_KEY_UPDATE, 0, 0, 1, 0, CT_HANDSHAKE];
-        let nonce = self.tx.nonce();
+        let nonce = self.tx.nonce().ok_or(RecordError::BadRecord)?;
         if !seal_in_place(
             self.suite,
-            self.tx.key(self.suite),
+            self.tx.key(self.suite).as_slice(),
             &nonce,
             &header,
             &mut buf,
@@ -354,7 +370,7 @@ impl RecordLayer {
         }
         out.extend_from_slice(&header);
         out.extend_from_slice(&buf);
-        if self.tx.update(self.suite) {
+        if self.tx.update() {
             Ok(())
         } else {
             Err(RecordError::BadRecord)
@@ -478,7 +494,7 @@ mod tests {
         let mut wire = Vec::new();
         c.seal(CT_HANDSHAKE, &[HS_KEY_UPDATE, 0, 0, 1, 1], &mut wire)
             .unwrap();
-        assert!(c.tx.update(c.suite));
+        assert!(c.tx.update());
         let mut reply = Vec::new();
         assert_eq!(
             s.open(&mut wire, &mut reply).unwrap(),

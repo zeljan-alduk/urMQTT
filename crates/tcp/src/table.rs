@@ -1,6 +1,8 @@
 //! Per-core connection table: open addressing with linear probing on the
 //! 4-tuple (remote address and port, local port), O(1) expected lookup,
-//! tombstones on removal, rebuilt when tombstones accumulate.
+//! tombstones on removal. Slots hold only the connection index (4 bytes);
+//! the key lives in the connection and is read back through `key_of`
+//! (M15: 8 bytes per connection at the half-full limit instead of 24).
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -18,10 +20,11 @@ const TOMB: u32 = u32::MAX - 1;
 pub struct Table {
     /// Connection indices, `EMPTY` or `TOMB`.
     slots: Vec<u32>,
-    keys: Vec<Key>,
     len: usize,
     tombs: usize,
     seed: u64,
+    /// Most entries ever allowed.
+    max: usize,
 }
 
 fn mix(k: &Key, seed: u64) -> u64 {
@@ -38,18 +41,13 @@ fn mix(k: &Key, seed: u64) -> u64 {
 
 impl Table {
     /// A table for up to `capacity` connections (kept at most half full).
+    /// It starts small and doubles as connections arrive, so an idle stack
+    /// costs a few KiB however large `capacity` is.
     pub fn new(capacity: usize, seed: u64) -> Self {
-        let n = (capacity.max(8) * 2).next_power_of_two();
+        let n = (capacity.max(8) * 2).next_power_of_two().min(1024);
         Self {
+            max: capacity.max(8),
             slots: vec![EMPTY; n],
-            keys: vec![
-                Key {
-                    addr: [0; 4],
-                    rport: 0,
-                    lport: 0
-                };
-                n
-            ],
             len: 0,
             tombs: 0,
             seed,
@@ -64,23 +62,23 @@ impl Table {
         self.len == 0
     }
 
-    /// Whether another entry fits (half-full limit).
+    /// Whether another entry fits.
     pub fn has_room(&self) -> bool {
-        (self.len + 1) * 2 <= self.slots.len()
+        self.len < self.max
     }
 
     fn mask(&self) -> usize {
         self.slots.len() - 1
     }
 
-    pub fn get(&self, k: &Key) -> Option<u32> {
+    pub fn get(&self, k: &Key, key_of: impl Fn(u32) -> Option<Key>) -> Option<u32> {
         let mut i = (mix(k, self.seed) as usize) & self.mask();
         for _ in 0..self.slots.len() {
             match self.slots.get(i).copied()? {
                 EMPTY => return None,
                 TOMB => {}
                 v => {
-                    if self.keys.get(i) == Some(k) {
+                    if key_of(v).as_ref() == Some(k) {
                         return Some(v);
                     }
                 }
@@ -90,13 +88,16 @@ impl Table {
         None
     }
 
-    /// Inserts a new key (callers check `get` first). False if full.
-    pub fn insert(&mut self, k: Key, v: u32) -> bool {
+    /// Inserts connection `v` (whose key `key_of(v)` must already return
+    /// `k`; callers check `get` first). False if full.
+    pub fn insert(&mut self, k: Key, v: u32, key_of: impl Fn(u32) -> Option<Key>) -> bool {
         if !self.has_room() {
             return false;
         }
-        if (self.len + self.tombs + 1) * 4 > self.slots.len() * 3 {
-            self.rebuild();
+        if (self.len + 1) * 2 > self.slots.len() {
+            self.rebuild(self.slots.len() * 2, &key_of);
+        } else if (self.len + self.tombs + 1) * 4 > self.slots.len() * 3 {
+            self.rebuild(self.slots.len(), &key_of);
         }
         let mut i = (mix(&k, self.seed) as usize) & self.mask();
         loop {
@@ -105,9 +106,8 @@ impl Table {
                     if self.slots.get(i) == Some(&TOMB) {
                         self.tombs -= 1;
                     }
-                    if let (Some(s), Some(key)) = (self.slots.get_mut(i), self.keys.get_mut(i)) {
+                    if let Some(s) = self.slots.get_mut(i) {
                         *s = v;
-                        *key = k;
                     }
                     self.len += 1;
                     return true;
@@ -118,14 +118,14 @@ impl Table {
         }
     }
 
-    pub fn remove(&mut self, k: &Key) -> Option<u32> {
+    pub fn remove(&mut self, k: &Key, key_of: impl Fn(u32) -> Option<Key>) -> Option<u32> {
         let mut i = (mix(k, self.seed) as usize) & self.mask();
         for _ in 0..self.slots.len() {
             match self.slots.get(i).copied()? {
                 EMPTY => return None,
                 TOMB => {}
                 v => {
-                    if self.keys.get(i) == Some(k) {
+                    if key_of(v).as_ref() == Some(k) {
                         if let Some(s) = self.slots.get_mut(i) {
                             *s = TOMB;
                         }
@@ -140,25 +140,24 @@ impl Table {
         None
     }
 
-    fn rebuild(&mut self) {
-        let old: Vec<(Key, u32)> = self
+    fn rebuild(&mut self, n: usize, key_of: &impl Fn(u32) -> Option<Key>) {
+        let old: Vec<u32> = self
             .slots
             .iter()
-            .zip(&self.keys)
-            .filter(|(s, _)| **s != EMPTY && **s != TOMB)
-            .map(|(s, k)| (*k, *s))
+            .copied()
+            .filter(|&s| s != EMPTY && s != TOMB)
             .collect();
-        self.slots.fill(EMPTY);
+        self.slots = vec![EMPTY; n];
         self.len = 0;
         self.tombs = 0;
-        for (k, v) in old {
+        for v in old {
+            let Some(k) = key_of(v) else { continue };
             let mut i = (mix(&k, self.seed) as usize) & self.mask();
             while self.slots.get(i).is_some_and(|s| *s != EMPTY) {
                 i = (i + 1) & self.mask();
             }
-            if let (Some(s), Some(key)) = (self.slots.get_mut(i), self.keys.get_mut(i)) {
+            if let Some(s) = self.slots.get_mut(i) {
                 *s = v;
-                *key = k;
             }
             self.len += 1;
         }
@@ -174,6 +173,8 @@ mod tests {
     fn behaves_like_a_map_under_churn() {
         let mut t = Table::new(1000, 42);
         let mut m: HashMap<Key, u32> = HashMap::new();
+        // The connections' keys, as the stack keeps them.
+        let mut keys: HashMap<u32, Key> = HashMap::new();
         let mut x = 1u64;
         for i in 0..200_000u32 {
             x ^= x << 13;
@@ -185,16 +186,21 @@ mod tests {
                 lport: 8883,
             };
             if x % 3 == 0 || m.len() >= 1000 {
-                assert_eq!(t.remove(&k), m.remove(&k));
+                let snap = keys.clone();
+                let got = t.remove(&k, |v| snap.get(&v).copied());
+                assert_eq!(got, m.remove(&k));
+                if let Some(v) = got {
+                    keys.remove(&v);
+                }
             } else if let std::collections::hash_map::Entry::Vacant(e) = m.entry(k) {
-                assert!(t.insert(k, i));
+                keys.insert(i, k);
+                let snap = keys.clone();
+                assert!(t.insert(k, i, |v| snap.get(&v).copied()));
                 e.insert(i);
             }
-            assert_eq!(t.get(&k), m.get(&k).copied());
+            let snap = keys.clone();
+            assert_eq!(t.get(&k, |v| snap.get(&v).copied()), m.get(&k).copied());
             assert_eq!(t.len(), m.len());
-        }
-        for (k, v) in &m {
-            assert_eq!(t.get(k), Some(*v));
         }
     }
 }

@@ -6,9 +6,10 @@
 //! That keeps it host-testable end to end over an in-memory transport and
 //! independent of the TCP stack (smoltcp now, the own stack in M14).
 //!
-//! **Status:** M9 is single-core and favours correctness. Compact per-core
-//! structures (≤ 64 B hot session state, interned device-scoped topics) are
-//! M15; cross-core fan-out is M13.
+//! Per-connection state is compact (M15, ADR-034): 48 B per connection and
+//! 64 B per session inline, rare fields boxed, buffers released when empty,
+//! subscriptions as interned node ids and device-scoped filters without
+//! per-device trie nodes. Cross-core fan-out is M13.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -22,12 +23,14 @@
 extern crate alloc;
 
 pub mod acl;
+mod compact;
 mod topics;
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
 use urmqtt_mqtt::{
     ConnAck, Connect, ConnectReturnCode, Error as CodecError, Limits, Packet, Publish, QoS,
@@ -37,6 +40,10 @@ use urmqtt_mqtt::{
 
 pub use acl::{Acl, Role};
 pub use topics::{NodeId, Topics};
+
+pub use compact::Buf;
+use compact::{Index, Small};
+use urmqtt_mm::slab::Slab;
 
 pub type ConnId = u32;
 pub type SessionId = u32;
@@ -148,44 +155,130 @@ struct Will {
 
 struct Conn {
     session: Option<SessionId>,
-    /// Authenticated identity (TLS client certificate); the client id must
-    /// equal it. `None` only for the dev plaintext listener.
-    identity: Option<Box<str>>,
-    inbuf: Vec<u8>,
-    outbuf: Vec<u8>,
-    keepalive_ms: u64,
+    /// Rarely present state, boxed so the common connection does not pay
+    /// for it (M15).
+    extra: Option<Box<Extra>>,
+    inbuf: Buf,
+    outbuf: Buf,
     last_rx_ms: u64,
-    will: Option<Will>,
+    /// The client's keepalive (≤ 65 535 s, so 32 bits of ms suffice).
+    keepalive_ms: u32,
     close: Option<CloseReason>,
     /// Listed in `ready` since the last `drain_ready`.
     ready: bool,
 }
 
-struct Bucket {
-    tokens: u32,
-    last_ms: u64,
+#[derive(Default)]
+struct Extra {
+    /// Authenticated identity (TLS client certificate) until CONNECT
+    /// checks the client id against it. Never set on the dev plaintext
+    /// listener.
+    identity: Option<Box<str>>,
+    will: Option<Will>,
+}
+
+impl Conn {
+    fn extra_mut(&mut self) -> &mut Extra {
+        self.extra.get_or_insert_with(Default::default)
+    }
+
+    /// Frees the box once nothing is left in it.
+    fn release_extra(&mut self) {
+        if self
+            .extra
+            .as_ref()
+            .is_some_and(|e| e.identity.is_none() && e.will.is_none())
+        {
+            self.extra = None;
+        }
+    }
+}
+
+#[derive(Default)]
+struct Pending {
+    inflight: Vec<(u16, Msg)>,
+    queue: VecDeque<Msg>,
+}
+
+impl Session {
+    fn inflight(&self) -> &[(u16, Msg)] {
+        self.pending
+            .as_deref()
+            .map_or(&[], |p| p.inflight.as_slice())
+    }
+
+    fn queue_len(&self) -> usize {
+        self.pending.as_ref().map_or(0, |p| p.queue.len())
+    }
+
+    fn pending_mut(&mut self) -> &mut Pending {
+        self.pending.get_or_insert_with(Default::default)
+    }
+
+    /// Frees the queues once both are empty.
+    fn release_pending(&mut self) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.inflight.is_empty() && p.queue.is_empty())
+        {
+            self.pending = None;
+        }
+    }
+}
+
+/// One subscription: an interned filter. A device-scoped filter
+/// (`<scope>/<own client id>/<rest>`, PROMPT §7.3) is stored as `rest`,
+/// interned once for all devices in `Broker::scoped`, so devices cost no
+/// trie nodes of their own; the scope is implied by the session's id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sub {
+    node: NodeId,
+    qos: QoS,
+    scoped: bool,
 }
 
 struct Session {
     client_id: Box<str>,
+    /// One subscription inline, more exactly sized on the heap.
+    subs: Small<Sub>,
+    /// Unacknowledged and queued QoS 1 messages; absent while there are none
+    /// (an idle session pays 8 bytes, M15).
+    pending: Option<Box<Pending>>,
+    /// Publish token bucket: tokens left and when it was last refilled.
+    refilled_ms: u64,
+    tokens: u32,
+    /// The attached connection, as id + 1 (`None` while offline).
+    conn: Option<NonZeroU32>,
+    next_pid: u16,
     role: Role,
     clean: bool,
-    conn: Option<ConnId>,
-    subs: Vec<(Box<str>, NodeId, QoS)>,
-    inflight: Vec<(u16, Msg)>,
-    queue: VecDeque<Msg>,
-    next_pid: u16,
-    bucket: Bucket,
     /// The session exists in the durable store.
     persisted: bool,
 }
 
+impl Session {
+    fn conn(&self) -> Option<ConnId> {
+        self.conn.map(|c| c.get() - 1)
+    }
+
+    fn set_conn(&mut self, c: Option<ConnId>) {
+        self.conn = c.and_then(|c| NonZeroU32::new(c.wrapping_add(1)));
+    }
+}
+
 pub struct Broker {
     cfg: Config,
-    conns: Vec<Option<Conn>>,
-    sessions: Vec<Option<Session>>,
-    by_client: BTreeMap<Box<str>, SessionId>,
+    conns: Slab<Conn>,
+    sessions: Slab<Session>,
+    /// Client id → session (the id itself lives in the session).
+    by_client: Index,
     topics: Topics,
+    /// First topic level of device-scoped topics (`<scope>/<id>/…`), from
+    /// the device ACL; empty if the ACL has none.
+    scope: &'static str,
+    /// Relative device-scoped filters, shared by every device.
+    scoped: Topics,
     stats: Stats,
     scratch: Vec<(SessionId, QoS)>,
     ops: Vec<PersistOp>,
@@ -193,6 +286,51 @@ pub struct Broker {
     routes: Vec<(Msg, QoS, bool)>,
     /// Connections with new output or a close request.
     ready: Vec<ConnId>,
+}
+
+/// The scope level of the device ACL: the first level of a device
+/// subscribe pattern of the form `<scope>/{id}/…` (`devices` by default).
+fn device_scope(acl: &Acl) -> &'static str {
+    acl.device_subscribe
+        .iter()
+        .chain(acl.device_publish)
+        .find_map(|p| {
+            let mut l = p.split('/');
+            let first = l.next()?;
+            let ok =
+                l.next() == Some(acl::ID) && !first.is_empty() && !first.contains(['+', '#', '{']);
+            ok.then_some(first)
+        })
+        .unwrap_or("")
+}
+
+/// `filter` relative to `id`'s scope: `<scope>/<id>/<rest>` → `rest`.
+fn scoped_part<'a>(scope: &str, id: &str, filter: &'a str) -> Option<&'a str> {
+    if scope.is_empty() {
+        return None;
+    }
+    filter
+        .strip_prefix(scope)?
+        .strip_prefix('/')?
+        .strip_prefix(id)?
+        .strip_prefix('/')
+}
+
+/// The device id and remainder of a topic under the scope (`None` for
+/// `<scope>/<id>` itself).
+fn scoped_topic<'a>(scope: &str, topic: &'a str) -> Option<(&'a str, Option<&'a str>)> {
+    if scope.is_empty() {
+        return None;
+    }
+    let rest = topic.strip_prefix(scope)?.strip_prefix('/')?;
+    Some(match rest.split_once('/') {
+        Some((id, r)) => (id, Some(r)),
+        None => (rest, None),
+    })
+}
+
+fn session_name(sessions: &Slab<Session>, sid: SessionId) -> Option<&str> {
+    sessions.get(sid).map(|s| &*s.client_id)
 }
 
 /// Stored topics are re-checked on restore: limits may have changed.
@@ -211,10 +349,12 @@ impl Broker {
     pub fn new(cfg: Config) -> Self {
         Self {
             cfg,
-            conns: Vec::new(),
-            sessions: Vec::new(),
-            by_client: BTreeMap::new(),
+            conns: Slab::new(),
+            sessions: Slab::new(),
+            by_client: Index::default(),
             topics: Topics::new(),
+            scope: device_scope(&cfg.acl),
+            scoped: Topics::new(),
             stats: Stats::default(),
             scratch: Vec::new(),
             ops: Vec::new(),
@@ -228,7 +368,7 @@ impl Broker {
     /// so the transport never has to scan every connection.
     pub fn drain_ready(&mut self, out: &mut Vec<ConnId>) {
         for &c in &self.ready {
-            if let Some(k) = self.conns.get_mut(c as usize).and_then(Option::as_mut) {
+            if let Some(k) = self.conns.get_mut(c) {
                 k.ready = false;
                 out.push(c);
             }
@@ -237,7 +377,7 @@ impl Broker {
     }
 
     fn make_ready(&mut self, c: ConnId) {
-        if let Some(k) = self.conns.get_mut(c as usize).and_then(Option::as_mut)
+        if let Some(k) = self.conns.get_mut(c)
             && !k.ready
         {
             k.ready = true;
@@ -261,6 +401,11 @@ impl Broker {
     /// Takes the accepted telemetry PUBLISHes since the last call (in order).
     pub fn drain_telemetry(&mut self) -> alloc::vec::Drain<'_, Msg> {
         self.telemetry.drain(..)
+    }
+
+    fn find_session(&self, client_id: &str) -> Option<SessionId> {
+        let sessions = &self.sessions;
+        self.by_client.get(client_id, |x| session_name(sessions, x))
     }
 
     /// Takes the state changes recorded since the last call (in order).
@@ -297,7 +442,7 @@ impl Broker {
         subs: impl IntoIterator<Item = (&'a str, QoS)>,
         queued: impl IntoIterator<Item = (&'a str, &'a [u8])>,
     ) -> bool {
-        if !Self::valid_identity(client_id) || self.by_client.contains_key(client_id) {
+        if !Self::valid_identity(client_id) || self.find_session(client_id).is_some() {
             self.emit(PersistOp::SessionDelete {
                 client_id: client_id.into(),
             });
@@ -305,32 +450,25 @@ impl Broker {
         }
         let role = self.cfg.acl.role(client_id);
         let sid = self.insert_session(client_id, role, false, 0);
-        let (max_subs, max_queued) = (self.cfg.max_subscriptions_per_session, self.cfg.max_queued);
+        let max_queued = self.cfg.max_queued;
         for (filter, qos) in subs {
             let ok = within_limits(filter, &self.cfg.limits, is_valid_topic_filter)
                 && self.cfg.acl.may_subscribe(role, client_id, filter)
-                && self.session(sid).is_some_and(|s| s.subs.len() < max_subs);
+                && self.add_sub(sid, filter, qos.min(QoS::AtLeastOnce));
             if !ok {
                 self.emit(PersistOp::Unsubscribe {
                     client_id: client_id.into(),
                     filter: filter.into(),
                 });
-                continue;
-            }
-            let qos = qos.min(QoS::AtLeastOnce);
-            let node = self.topics.intern(filter);
-            self.topics.subscribe(node, sid, qos);
-            if let Some(s) = self.session(sid) {
-                s.subs.push((filter.into(), node, qos));
             }
         }
         if let Some(s) = self.session(sid) {
             s.persisted = true;
             for (topic, payload) in queued {
-                if s.queue.len() >= max_queued {
+                if s.queue_len() >= max_queued {
                     break;
                 }
-                s.queue.push_back(Arc::new(MsgInner {
+                s.pending_mut().queue.push_back(Arc::new(MsgInner {
                     topic: topic.into(),
                     payload: payload.into(),
                 }));
@@ -339,11 +477,120 @@ impl Broker {
         true
     }
 
+    /// Index of `filter` among the subscriptions of `sid`.
+    fn sub_index(&self, sid: SessionId, filter: &str) -> Option<usize> {
+        let s = self.sessions.get(sid)?;
+        let (trie, f, scoped) = match scoped_part(self.scope, &s.client_id, filter) {
+            Some(rel) => (&self.scoped, rel, true),
+            None => (&self.topics, filter, false),
+        };
+        s.subs
+            .as_slice()
+            .iter()
+            .position(|x| x.scoped == scoped && trie.path(x.node) == Some(f))
+    }
+
+    /// Subscribes `sid` to `filter` or updates the granted QoS. False if
+    /// the session is at its subscription limit.
+    fn add_sub(&mut self, sid: SessionId, filter: &str, qos: QoS) -> bool {
+        let existing = self.sub_index(sid, filter);
+        let max = self.cfg.max_subscriptions_per_session;
+        let Some(s) = self.sessions.get_mut(sid) else {
+            return false;
+        };
+        if let Some(e) = existing.and_then(|i| s.subs.as_mut_slice().get_mut(i)) {
+            e.qos = qos;
+            if !e.scoped {
+                self.topics.subscribe(e.node, sid, qos);
+            }
+            return true;
+        }
+        if s.subs.len() >= max {
+            return false;
+        }
+        let sub = match scoped_part(self.scope, &s.client_id, filter) {
+            Some(rel) => Sub {
+                node: self.scoped.intern_filter(rel),
+                qos,
+                scoped: true,
+            },
+            None => {
+                let node = self.topics.intern_filter(filter);
+                self.topics.subscribe(node, sid, qos);
+                Sub {
+                    node,
+                    qos,
+                    scoped: false,
+                }
+            }
+        };
+        s.subs.push(sub);
+        true
+    }
+
+    /// Removes `filter` from `sid`; false if it was not subscribed.
+    fn remove_sub(&mut self, sid: SessionId, filter: &str) -> bool {
+        let Some(i) = self.sub_index(sid, filter) else {
+            return false;
+        };
+        let Some(s) = self.sessions.get_mut(sid) else {
+            return false;
+        };
+        if let Some(sub) = s.subs.remove(i)
+            && !sub.scoped
+        {
+            self.topics.unsubscribe(sub.node, sid);
+        }
+        true
+    }
+
+    /// Every filter of session `s` with its QoS, as the client sent it.
+    fn filters_of(&self, s: &Session) -> Vec<(Box<str>, QoS)> {
+        s.subs
+            .as_slice()
+            .iter()
+            .filter_map(|x| {
+                let f: Box<str> = if x.scoped {
+                    let rel = self.scoped.path(x.node)?;
+                    alloc::format!("{}/{}/{rel}", self.scope, s.client_id).into()
+                } else {
+                    self.topics.path(x.node)?.into()
+                };
+                Some((f, x.qos))
+            })
+            .collect()
+    }
+
+    /// Adds the device-scoped subscribers of `topic` to `out` (the device
+    /// named by the topic, if its session lives here). True if any.
+    fn scoped_subscribers(&self, topic: &str, out: &mut Vec<(SessionId, QoS)>) -> bool {
+        let Some((id, rest)) = scoped_topic(self.scope, topic) else {
+            return false;
+        };
+        let Some(sid) = self.find_session(id) else {
+            return false;
+        };
+        let Some(s) = self.sessions.get(sid).filter(|s| !s.subs.is_empty()) else {
+            return false;
+        };
+        let before = out.len();
+        for x in s.subs.as_slice().iter().filter(|x| x.scoped) {
+            if self
+                .scoped
+                .path(x.node)
+                .is_some_and(|f| topics::filter_matches(f, rest))
+            {
+                out.push((sid, x.qos));
+            }
+        }
+        out.len() > before
+    }
+
     pub fn stats(&self) -> Stats {
         Stats {
-            connections: self.conns.iter().flatten().count(),
-            sessions: self.sessions.iter().flatten().count(),
-            subscriptions: self.sessions.iter().flatten().map(|s| s.subs.len()).sum(),
+            connections: self.conns.len(),
+            sessions: self.sessions.len(),
+            subscriptions: self.sessions.iter().map(|(_, s)| s.subs.len()).sum(),
             retained: self.topics.retained_count(),
             topic_nodes: self.topics.node_count(),
             ..self.stats
@@ -355,48 +602,35 @@ impl Broker {
     /// A new network connection. `None` when the connection limit is hit
     /// (the transport should refuse or reset it).
     pub fn open(&mut self, now_ms: u64) -> Option<ConnId> {
-        if self.conns.iter().flatten().count() >= self.cfg.max_connections {
+        if self.conns.len() >= self.cfg.max_connections {
             return None;
         }
         let conn = Conn {
             session: None,
-            identity: None,
-            inbuf: Vec::new(),
-            outbuf: Vec::new(),
-            keepalive_ms: 0,
+            extra: None,
+            inbuf: Buf::default(),
+            outbuf: Buf::default(),
             last_rx_ms: now_ms,
-            will: None,
+            keepalive_ms: 0,
             close: None,
             ready: false,
         };
-        let slot = self.conns.iter().position(Option::is_none);
-        Some(match slot {
-            Some(i) => {
-                if let Some(s) = self.conns.get_mut(i) {
-                    *s = Some(conn);
-                }
-                i as ConnId
-            }
-            None => {
-                self.conns.push(Some(conn));
-                (self.conns.len() - 1) as ConnId
-            }
-        })
+        Some(self.conns.insert(conn))
     }
 
     /// Binds the authenticated identity of `c` (before its CONNECT).
     pub fn set_identity(&mut self, c: ConnId, identity: &str) {
         if let Some(k) = self.conn(c) {
-            k.identity = Some(identity.into());
+            k.extra_mut().identity = Some(identity.into());
         }
     }
 
     fn conn(&mut self, c: ConnId) -> Option<&mut Conn> {
-        self.conns.get_mut(c as usize).and_then(Option::as_mut)
+        self.conns.get_mut(c)
     }
 
     fn session(&mut self, s: SessionId) -> Option<&mut Session> {
-        self.sessions.get_mut(s as usize).and_then(Option::as_mut)
+        self.sessions.get_mut(s)
     }
 
     /// Bytes received on `c`. Processes every complete packet.
@@ -413,20 +647,22 @@ impl Broker {
             if conn.close.is_some() {
                 return;
             }
-            let buf = core::mem::take(&mut conn.inbuf);
+            let buf = conn.inbuf.take();
             let limits = self.cfg.limits;
             match decode(&buf, &limits) {
                 Ok((packet, used)) => {
                     self.handle(c, packet, now_ms);
                     if let Some(conn) = self.conn(c) {
-                        conn.inbuf = buf;
-                        conn.inbuf.drain(..used.min(conn.inbuf.len()));
+                        let mut buf = buf;
+                        buf.drain(..used.min(buf.len()));
+                        // Idle connections keep no buffer (M15).
+                        conn.inbuf.set(buf);
                     }
                 }
                 Err(CodecError::Incomplete(_)) => {
                     let too_big = buf.len() > limit;
                     if let Some(conn) = self.conn(c) {
-                        conn.inbuf = buf;
+                        conn.inbuf.set(buf);
                         if too_big {
                             conn.close = Some(CloseReason::ProtocolError);
                         }
@@ -454,17 +690,13 @@ impl Broker {
 
     /// Bytes waiting to be sent on `c`.
     pub fn output(&self, c: ConnId) -> &[u8] {
-        self.conns
-            .get(c as usize)
-            .and_then(Option::as_ref)
-            .map_or(&[], |k| k.outbuf.as_slice())
+        self.conns.get(c).map_or(&[], |k| k.outbuf.as_slice())
     }
 
     /// The transport sent the first `n` bytes of [`output`](Self::output).
     pub fn consumed(&mut self, c: ConnId, n: usize) {
         if let Some(conn) = self.conn(c) {
-            let n = n.min(conn.outbuf.len());
-            conn.outbuf.drain(..n);
+            conn.outbuf.consume(n);
         }
         // Space freed: move queued QoS 1 messages into flight.
         if let Some(s) = self.conn(c).and_then(|k| k.session) {
@@ -474,43 +706,40 @@ impl Broker {
 
     /// Whether the broker wants `c` closed (after flushing `output`).
     pub fn close_requested(&self, c: ConnId) -> Option<CloseReason> {
-        self.conns
-            .get(c as usize)
-            .and_then(Option::as_ref)
-            .and_then(|k| k.close)
+        self.conns.get(c).and_then(|k| k.close)
     }
 
     /// The network connection is gone. Publishes the Last Will unless the
     /// client sent DISCONNECT (§3.1.2.5).
     pub fn closed(&mut self, c: ConnId, _now_ms: u64) {
-        let Some(conn) = self.conns.get_mut(c as usize).and_then(Option::take) else {
+        let Some(conn) = self.conns.remove(c) else {
             return;
         };
         if conn.close != Some(CloseReason::ClientDisconnect)
-            && let Some(w) = conn.will
+            && let Some(w) = conn.extra.and_then(|e| e.will)
         {
             self.stats.wills_published += 1;
             self.route(&w.msg, w.qos, w.retain);
         }
         if let Some(sid) = conn.session {
             let (detach, clean) = match self.session(sid) {
-                Some(s) if s.conn == Some(c) => (true, s.clean),
+                Some(s) if s.conn() == Some(c) => (true, s.clean),
                 _ => (false, false),
             };
             if detach {
                 if clean {
                     self.remove_session(sid);
                 } else if let Some(s) = self.session(sid) {
-                    s.conn = None;
+                    s.set_conn(None);
                     // Snapshot what the device has not acknowledged yet:
                     // in-flight first (older), then the queue.
                     if s.persisted {
                         let cid = s.client_id.clone();
                         let msgs: Vec<Msg> = s
-                            .inflight
+                            .inflight()
                             .iter()
                             .map(|(_, m)| m.clone())
-                            .chain(s.queue.iter().cloned())
+                            .chain(s.pending.iter().flat_map(|p| p.queue.iter().cloned()))
                             .collect();
                         self.emit(PersistOp::QueueClear {
                             client_id: cid.clone(),
@@ -531,16 +760,15 @@ impl Broker {
     /// Callers run this periodically (every 100 ms is plenty); it scans the
     /// connections, so it is kept off the per-packet path.
     pub fn tick(&mut self, now_ms: u64) {
-        for (i, k) in self.conns.iter_mut().enumerate() {
-            if let Some(k) = k
-                && k.close.is_none()
+        for (i, k) in self.conns.iter_mut() {
+            if k.close.is_none()
                 && k.keepalive_ms > 0
-                && now_ms.saturating_sub(k.last_rx_ms) > k.keepalive_ms * 3 / 2
+                && now_ms.saturating_sub(k.last_rx_ms) > u64::from(k.keepalive_ms) * 3 / 2
             {
                 k.close = Some(CloseReason::KeepAliveTimeout);
                 if !k.ready {
                     k.ready = true;
-                    self.ready.push(i as ConnId);
+                    self.ready.push(i);
                 }
             }
         }
@@ -560,15 +788,16 @@ impl Broker {
     fn send(&mut self, c: ConnId, p: &Packet<'_>) {
         let n = encoded_len(p);
         if let Some(conn) = self.conn(c) {
-            let start = conn.outbuf.len();
-            conn.outbuf.resize(start + n, 0);
-            let ok = conn
-                .outbuf
+            let out = conn.outbuf.vec_mut();
+            let start = out.len();
+            out.resize(start + n, 0);
+            let ok = out
                 .get_mut(start..)
                 .is_some_and(|dst| encode(p, dst).is_ok());
             if !ok {
-                conn.outbuf.truncate(start);
+                out.truncate(start);
             }
+            conn.outbuf.release();
         }
         self.make_ready(c);
     }
@@ -592,8 +821,11 @@ impl Broker {
             }
             Packet::PingReq => self.send(c, &Packet::PingResp),
             Packet::Disconnect => {
-                if let Some(k) = self.conn(c) {
-                    k.will = None;
+                if let Some(k) = self.conn(c)
+                    && let Some(e) = &mut k.extra
+                {
+                    e.will = None;
+                    k.release_extra();
                 }
                 self.mark_close(c, CloseReason::ClientDisconnect);
             }
@@ -633,12 +865,19 @@ impl Broker {
         // PROMPT §7.1: the client id must equal the certificate identity.
         let mismatch = self
             .conns
-            .get(c as usize)
-            .and_then(Option::as_ref)
-            .and_then(|k| k.identity.as_deref())
+            .get(c)
+            .and_then(|k| k.extra.as_ref()?.identity.as_deref())
             .is_some_and(|id| id != p.client_id);
         if mismatch {
             return self.reject(c, ConnectReturnCode::IdentifierRejected);
+        }
+        // Checked: the session keeps the (equal) client id, so the
+        // connection's copy is freed (M15).
+        if let Some(k) = self.conn(c)
+            && let Some(e) = &mut k.extra
+        {
+            e.identity = None;
+            k.release_extra();
         }
         let role = self.cfg.acl.role(p.client_id);
         let will = match &p.will {
@@ -657,14 +896,14 @@ impl Broker {
         };
 
         // Session takeover (§3.1.4): the existing connection is closed.
-        let existing = self.by_client.get(p.client_id).copied();
+        let existing = self.find_session(p.client_id);
         if let Some(sid) = existing
-            && let Some(old) = self.session(sid).and_then(|s| s.conn)
+            && let Some(old) = self.session(sid).and_then(|s| s.conn())
             && old != c
         {
             self.mark_close(old, CloseReason::TakenOver);
             if let Some(s) = self.session(sid) {
-                s.conn = None;
+                s.set_conn(None);
             }
         }
         let session_present = match existing {
@@ -675,24 +914,21 @@ impl Broker {
             Some(_) => true,
             None => false,
         };
-        let sid = match self.by_client.get(p.client_id).copied() {
+        let sid = match self.find_session(p.client_id) {
             Some(sid) => sid,
             None => self.create_session(p.client_id, role, p.clean_session, now_ms),
         };
         let mut newly_persistent = None;
+        if let Some(s) = self.sessions.get(sid)
+            && !p.clean_session
+            && !s.persisted
+        {
+            newly_persistent = Some((s.client_id.clone(), self.filters_of(s)));
+        }
         if let Some(s) = self.session(sid) {
-            s.conn = Some(c);
+            s.set_conn(Some(c));
             s.clean = p.clean_session;
-            if !s.clean && !s.persisted {
-                s.persisted = true;
-                newly_persistent = Some((
-                    s.client_id.clone(),
-                    s.subs
-                        .iter()
-                        .map(|(f, _, q)| (f.clone(), *q))
-                        .collect::<Vec<_>>(),
-                ));
-            }
+            s.persisted |= newly_persistent.is_some();
         }
         if let Some((cid, subs)) = newly_persistent {
             self.emit(PersistOp::SessionUpsert {
@@ -713,8 +949,10 @@ impl Broker {
         }
         if let Some(k) = self.conn(c) {
             k.session = Some(sid);
-            k.keepalive_ms = u64::from(p.keep_alive) * 1000;
-            k.will = will;
+            k.keepalive_ms = u32::from(p.keep_alive) * 1000;
+            if will.is_some() {
+                k.extra_mut().will = will;
+            }
         }
         self.send(
             c,
@@ -741,40 +979,36 @@ impl Broker {
             role,
             clean,
             conn: None,
-            subs: Vec::new(),
-            inflight: Vec::new(),
-            queue: VecDeque::new(),
+            subs: Small::default(),
+            pending: None,
+            refilled_ms: now_ms,
+            tokens: self.cfg.rate_tokens,
             next_pid: 1,
-            bucket: Bucket {
-                tokens: self.cfg.rate_tokens,
-                last_ms: now_ms,
-            },
             persisted: false,
         };
-        let sid = match self.sessions.iter().position(Option::is_none) {
-            Some(i) => {
-                if let Some(slot) = self.sessions.get_mut(i) {
-                    *slot = Some(s);
-                }
-                i as SessionId
-            }
-            None => {
-                self.sessions.push(Some(s));
-                (self.sessions.len() - 1) as SessionId
-            }
-        };
-        self.by_client.insert(id.into(), sid);
+        let sid = self.sessions.insert(s);
+        let sessions = &self.sessions;
+        self.by_client
+            .insert(id, sid, |x| session_name(sessions, x));
         sid
     }
 
     fn remove_session(&mut self, sid: SessionId) {
-        let Some(s) = self.sessions.get_mut(sid as usize).and_then(Option::take) else {
+        let Some(s) = self.sessions.remove(sid) else {
             return;
         };
-        for (_, node, _) in &s.subs {
-            self.topics.unsubscribe(*node, sid);
+        for x in s.subs.as_slice().iter().filter(|x| !x.scoped) {
+            self.topics.unsubscribe(x.node, sid);
         }
-        self.by_client.remove(&s.client_id);
+        let sessions = &self.sessions;
+        let gone: &str = &s.client_id;
+        self.by_client.remove(gone, |x| {
+            if x == sid {
+                Some(gone)
+            } else {
+                session_name(sessions, x)
+            }
+        });
         if s.persisted {
             self.emit(PersistOp::SessionDelete {
                 client_id: s.client_id,
@@ -790,16 +1024,16 @@ impl Broker {
         let Some(s) = self.session(sid) else {
             return false;
         };
-        let elapsed = now_ms.saturating_sub(s.bucket.last_ms);
+        let elapsed = now_ms.saturating_sub(s.refilled_ms);
         let refill = (elapsed * u64::from(rate) / period) as u32;
         if refill > 0 {
-            s.bucket.tokens = s.bucket.tokens.saturating_add(refill).min(rate);
-            s.bucket.last_ms = now_ms;
+            s.tokens = s.tokens.saturating_add(refill).min(rate);
+            s.refilled_ms = now_ms;
         }
-        if s.bucket.tokens == 0 {
+        if s.tokens == 0 {
             return false;
         }
-        s.bucket.tokens -= 1;
+        s.tokens -= 1;
         true
     }
 
@@ -862,6 +1096,11 @@ impl Broker {
         }
         let mut subs = core::mem::take(&mut self.scratch);
         self.topics.subscribers(&msg.topic, &mut subs);
+        if self.scoped_subscribers(&msg.topic, &mut subs) {
+            // One delivery per session at the highest QoS, as in the trie.
+            subs.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+            subs.dedup_by_key(|e| e.0);
+        }
         for &(sid, sub_qos) in &subs {
             self.deliver(sid, msg, qos.min(sub_qos), false);
         }
@@ -872,7 +1111,7 @@ impl Broker {
         loop {
             let id = s.next_pid;
             s.next_pid = s.next_pid.checked_add(1).unwrap_or(1);
-            if !s.inflight.iter().any(|(p, _)| *p == id) {
+            if !s.inflight().iter().any(|(p, _)| *p == id) {
                 return id;
             }
         }
@@ -888,24 +1127,19 @@ impl Broker {
         let max_inflight = self.cfg.max_inflight;
         let max_queued = self.cfg.max_queued;
         let max_out = self.cfg.max_outbound_bytes;
-        let Some(conn) = self
-            .sessions
-            .get(sid as usize)
-            .and_then(Option::as_ref)
-            .map(|s| s.conn)
-        else {
+        let Some(conn) = self.sessions.get(sid).map(|s| s.conn()) else {
             return;
         };
         let room = conn
-            .and_then(|c| self.conns.get(c as usize).and_then(Option::as_ref))
+            .and_then(|c| self.conns.get(c))
             .is_some_and(|k| k.close.is_none() && k.outbuf.len() < max_out);
         let Some(s) = self.session(sid) else { return };
         let action = match (qos, conn) {
             (QoS::AtMostOnce, Some(c)) if room => Action::Send0(c),
             (QoS::AtMostOnce, _) => Action::Drop,
-            (_, Some(c)) if room && s.inflight.len() < max_inflight && s.queue.is_empty() => {
+            (_, Some(c)) if room && s.inflight().len() < max_inflight && (s.queue_len() == 0) => {
                 let pid = Self::alloc_pid(s);
-                s.inflight.push((pid, msg.clone()));
+                s.pending_mut().inflight.push((pid, msg.clone()));
                 Action::Send1(c, pid)
             }
             // Offline persistent session, full window or backpressure.
@@ -921,12 +1155,12 @@ impl Broker {
             Action::Queue => {
                 let mut stored = None;
                 if let Some(s) = self.session(sid) {
-                    if s.queue.len() >= max_queued {
+                    if s.queue_len() >= max_queued {
                         self.stats.dropped_queue_full += 1;
                     } else {
-                        s.queue.push_back(msg.clone());
+                        s.pending_mut().queue.push_back(msg.clone());
                         // Offline: the store holds the queue (see PersistOp).
-                        if s.conn.is_none() && s.persisted {
+                        if s.conn().is_none() && s.persisted {
                             stored = Some(s.client_id.clone());
                         }
                     }
@@ -968,8 +1202,8 @@ impl Broker {
     /// Re-sends unacknowledged QoS 1 messages with DUP set (§4.4).
     fn resend_inflight(&mut self, sid: SessionId) {
         let Some(s) = self.session(sid) else { return };
-        let Some(c) = s.conn else { return };
-        let pending: Vec<(u16, Msg)> = s.inflight.clone();
+        let Some(c) = s.conn() else { return };
+        let pending: Vec<(u16, Msg)> = s.inflight().to_vec();
         for (pid, msg) in pending {
             self.send_publish(c, &msg, QoS::AtLeastOnce, Some(pid), false, true);
         }
@@ -981,24 +1215,23 @@ impl Broker {
         let max_out = self.cfg.max_outbound_bytes;
         loop {
             let Some(s) = self.session(sid) else { return };
-            let Some(c) = s.conn else { return };
-            if s.inflight.len() >= max_inflight || s.queue.is_empty() {
+            let Some(c) = s.conn() else { return };
+            if s.inflight().len() >= max_inflight || (s.queue_len() == 0) {
                 return;
             }
             let room = self
                 .conns
-                .get(c as usize)
-                .and_then(Option::as_ref)
+                .get(c)
                 .is_some_and(|k| k.close.is_none() && k.outbuf.len() < max_out);
             if !room {
                 return;
             }
             let Some(s) = self.session(sid) else { return };
-            let Some(msg) = s.queue.pop_front() else {
+            let Some(msg) = s.pending.as_mut().and_then(|p| p.queue.pop_front()) else {
                 return;
             };
             let pid = Self::alloc_pid(s);
-            s.inflight.push((pid, msg.clone()));
+            s.pending_mut().inflight.push((pid, msg.clone()));
             self.send_publish(c, &msg, QoS::AtLeastOnce, Some(pid), false, false);
         }
     }
@@ -1008,7 +1241,10 @@ impl Broker {
             return;
         };
         if let Some(s) = self.session(sid) {
-            s.inflight.retain(|(p, _)| *p != pid);
+            if let Some(p) = s.pending.as_mut() {
+                p.inflight.retain(|(x, _)| *x != pid);
+            }
+            s.release_pending();
         }
         self.pump(sid);
     }
@@ -1017,31 +1253,18 @@ impl Broker {
         let Some(sid) = self.conn(c).and_then(|k| k.session) else {
             return;
         };
-        let max_subs = self.cfg.max_subscriptions_per_session;
         let acl = self.cfg.acl;
         let mut codes: Vec<u8> = Vec::with_capacity(topics.len());
         let mut granted: Vec<(&str, QoS)> = Vec::new();
         for &(filter, want) in topics {
-            let Some(s) = self.session(sid) else { return };
-            let existing = s.subs.iter().position(|(f, _, _)| &**f == filter);
-            let allowed = acl.may_subscribe(s.role, &s.client_id, filter);
-            if !allowed || (existing.is_none() && s.subs.len() >= max_subs) {
-                codes.push(SUBACK_FAILURE);
-                continue;
-            }
+            let Some(s) = self.sessions.get(sid) else {
+                return;
+            };
             // QoS 2 is granted as 1 (§3.9.3 permits a lower grant).
             let qos = want.min(QoS::AtLeastOnce);
-            let node = self.topics.intern(filter);
-            self.topics.subscribe(node, sid, qos);
-            if let Some(s) = self.session(sid) {
-                match existing {
-                    Some(i) => {
-                        if let Some(e) = s.subs.get_mut(i) {
-                            e.2 = qos;
-                        }
-                    }
-                    None => s.subs.push((filter.into(), node, qos)),
-                }
+            if !acl.may_subscribe(s.role, &s.client_id, filter) || !self.add_sub(sid, filter, qos) {
+                codes.push(SUBACK_FAILURE);
+                continue;
             }
             codes.push(qos as u8);
             granted.push((filter, qos));
@@ -1079,18 +1302,12 @@ impl Broker {
             return;
         };
         for f in topics {
-            let node = self
-                .session(sid)
-                .and_then(|s| s.subs.iter().find(|(x, _, _)| &**x == *f).map(|e| e.1));
-            if let Some(node) = node {
-                self.topics.unsubscribe(node, sid);
-                let mut stored = None;
-                if let Some(s) = self.session(sid) {
-                    s.subs.retain(|(x, _, _)| &**x != *f);
-                    if s.persisted {
-                        stored = Some(s.client_id.clone());
-                    }
-                }
+            if self.remove_sub(sid, f) {
+                let stored = self
+                    .sessions
+                    .get(sid)
+                    .filter(|s| s.persisted)
+                    .map(|s| s.client_id.clone());
                 if let Some(client_id) = stored {
                     self.emit(PersistOp::Unsubscribe {
                         client_id,
@@ -1104,8 +1321,8 @@ impl Broker {
 
     /// Client ID of the session attached to `c` (for logs).
     pub fn client_id(&self, c: ConnId) -> Option<&str> {
-        let sid = self.conns.get(c as usize)?.as_ref()?.session?;
-        Some(&self.sessions.get(sid as usize)?.as_ref()?.client_id)
+        let sid = self.conns.get(c)?.session?;
+        Some(&self.sessions.get(sid)?.client_id)
     }
 }
 

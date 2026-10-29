@@ -389,12 +389,19 @@ struct Hs {
 
 struct Open {
     rec: RecordLayer,
-    inbuf: Vec<u8>,
+    /// An incomplete record, if any (absent on an idle connection).
+    #[allow(clippy::box_collection)]
+    inbuf: Option<Box<Vec<u8>>>,
 }
 
+/// The record state of an established session lives inline (M15): the
+/// session sits in its owner's slab entry, so it costs its exact size
+/// instead of a separate heap block rounded up to 128 bytes. Handshakes are
+/// transient and stay boxed.
+#[allow(clippy::large_enum_variant)]
 enum State {
     Handshake(Box<Hs>),
-    Open(Box<Open>),
+    Open(Open),
     Closed,
 }
 
@@ -438,7 +445,7 @@ impl TlsSession {
     pub fn buffered(&self) -> usize {
         match &self.state {
             State::Handshake(h) => h.inbuf.len(),
-            State::Open(o) => o.inbuf.len(),
+            State::Open(o) => o.inbuf.as_ref().map_or(0, |b| b.len()),
             State::Closed => 0,
         }
     }
@@ -467,7 +474,9 @@ impl TlsSession {
                 self.drive_handshake(tx, app)
             }
             State::Open(o) => {
-                o.inbuf.extend_from_slice(data);
+                o.inbuf
+                    .get_or_insert_with(Default::default)
+                    .extend_from_slice(data);
                 let ev = drain_records(o, tx, app)?;
                 if ev == Event::PeerClosed {
                     self.state = State::Closed;
@@ -585,15 +594,16 @@ impl TlsSession {
         let rec = RecordLayer::new(suite, rx_secret, secrets.rx.0, tx_secret, secrets.tx.0)
             .ok_or(TlsError::Internal("key derivation"))?;
         // The captured secrets must reproduce rustls's keys exactly.
-        if rec.rx().key(suite) != rx_key
-            || rec.rx().iv().as_slice() != rx_iv
-            || rec.tx().key(suite) != tx_key
-            || rec.tx().iv().as_slice() != tx_iv
+        if rec.rx().key(suite).as_slice() != rx_key
+            || rec.rx().iv().as_ref().map(|v| v.as_slice()) != Some(rx_iv)
+            || rec.tx().key(suite).as_slice() != tx_key
+            || rec.tx().iv().as_ref().map(|v| v.as_slice()) != Some(tx_iv)
         {
             return Err(TlsError::Internal("captured secrets do not match"));
         }
         let identity = ident.ok_or(TlsError::NoIdentity)?;
-        let mut open = Box::new(Open { rec, inbuf });
+        let inbuf = (!inbuf.is_empty()).then(|| Box::new(inbuf));
+        let mut open = Open { rec, inbuf };
         let ev = drain_records(&mut open, tx, app)?;
         self.state = if ev == Event::PeerClosed {
             State::Closed
@@ -630,29 +640,54 @@ impl TlsSession {
 }
 
 fn drain_records(o: &mut Open, tx: &mut Vec<u8>, app: &mut Vec<u8>) -> Result<Event, TlsError> {
+    let Some(mut buf) = o.inbuf.take() else {
+        return Ok(Event::None);
+    };
     let mut off = 0usize;
     let mut ev = Event::None;
-    while let Some(rest) = o.inbuf.get(off..) {
-        let Some(n) = record::record_len(rest) else {
-            break;
-        };
-        if n > record::HEADER + record::MAX_CIPHERTEXT {
-            return Err(TlsError::Record(RecordError::BadHeader));
-        }
-        let Some(rec) = o.inbuf.get_mut(off..off + n) else {
-            break;
-        };
-        match o.rec.open(rec, tx)? {
-            Opened::Data(r) => app.extend_from_slice(rec.get(r).unwrap_or(&[])),
-            Opened::Closed => {
-                ev = Event::PeerClosed;
-                off += n;
+    let r = (|| {
+        while let Some(rest) = buf.get(off..) {
+            let Some(n) = record::record_len(rest) else {
                 break;
+            };
+            if n > record::HEADER + record::MAX_CIPHERTEXT {
+                return Err(TlsError::Record(RecordError::BadHeader));
             }
-            Opened::KeyUpdated { .. } => {}
+            let Some(rec) = buf.get_mut(off..off + n) else {
+                break;
+            };
+            match o.rec.open(rec, tx)? {
+                Opened::Data(r) => app.extend_from_slice(rec.get(r).unwrap_or(&[])),
+                Opened::Closed => {
+                    ev = Event::PeerClosed;
+                    off += n;
+                    break;
+                }
+                Opened::KeyUpdated { .. } => {}
+            }
+            off += n;
         }
-        off += n;
+        Ok(())
+    })();
+    buf.drain(..off.min(buf.len()));
+    // An idle connection keeps no buffer (M15).
+    if !buf.is_empty() {
+        o.inbuf = Some(buf);
     }
-    o.inbuf.drain(..off.min(o.inbuf.len()));
-    Ok(ev)
+    r.map(|()| ev)
+}
+
+#[cfg(test)]
+mod size_tests {
+    /// An established session costs its inline size and nothing else
+    /// while idle (M15, ADR-034; PROMPT §6 target ≤ 128 B).
+    #[test]
+    fn established_state_stays_small() {
+        assert!(core::mem::size_of::<super::Open>() <= 96);
+        assert!(
+            core::mem::size_of::<super::TlsSession>() <= 104,
+            "{}",
+            core::mem::size_of::<super::TlsSession>()
+        );
+    }
 }

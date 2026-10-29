@@ -377,7 +377,7 @@ verified in the named milestone before it becomes Accepted).
     - Like Linux without timestamps, cookies cannot carry window scaling or SACK, so neither is negotiated: the window is at most 64 KiB, which is plenty for MQTT.
     - A data segment that fails the cookie check is dropped instead of reset: it may have overtaken a lost final ACK, and the client retransmits from its first byte.
   - **Table:** open addressing with linear probing on (remote address, remote port, local port), at most half full, with tombstones rebuilt when they pile up.
-  - **Per-connection state:** about 120 bytes, with the send buffer separate. **No buffers while idle:** received data goes to the application straight from the segment, and the send buffer exists only while data is queued or unacknowledged.
+  - **Per-connection state:** about 120 bytes (96 since M15, ADR-034), with the send buffer separate. **No buffers while idle:** received data goes to the application straight from the segment, and the send buffer exists only while data is queued or unacknowledged.
   - **Timers:** one per connection (retransmission, persist or FIN-WAIT-2) in a 4-level × 64-slot hierarchical wheel (`urmqtt-timer-wheel`). Insert and cancel are O(1) with generation-tagged ids, and empty stretches are skipped.
   - **RTO** per RFC 6298 (initial 1 s, 200 ms – 60 s, Karn) with exponential backoff, giving up after 8 retries. **NewReno** (RFC 5681/6582, initial window 10 segments) sits behind a `Congestion` trait.
   - Go-back-N after a timeout, with `snd_max` so ACKs for data sent before the rollback stay valid. The simulated-loss tests found this deadlock.
@@ -392,3 +392,28 @@ verified in the named milestone before it becomes Accepted).
   - Unit tests per module: the cookie window and binding, the table against a HashMap under 200 k operations, SipHash reference vectors, checksum and option parsing, the timer wheel against a model.
   - Stack tests against a scripted client over a simulated link: lossless echo of 100 KB; 8 seeds with 10 % loss and 5 % duplication, including sequence-number wrap; 25 % loss; SYN floods holding no state; forged and expired cookies; RFC 5961 RST/SYN rules; retransmission timeout with backoff; zero window and persist probes; out-of-order data; ACK coalescing; refused connections.
   - The `tcp_segment` fuzz target drives segments relative to a live connection.
+
+## ADR-034 — Memory per connection: exact accounting, compact state, no per-device trie nodes
+
+- **Status:** Accepted (M15).
+- **What is measured:** the heap keeps two exact counters per CPU, the bytes callers requested and the buddy blocks those requests occupy (each request rounded to its power-of-two block, as the heap really hands it out). Core 0 logs every 10 s while connections exist: heap above the idle baseline, minus the change in frame buffers, divided by the open connections. **The block figure is the one reported as "bytes per connection"**: it includes allocator rounding and slab slack. Frame buffers are a bounded pool (RX rings and per-core pools, about 2 MiB), independent of the connection count, and logged separately.
+- **Layout of an idle mTLS connection** (inline sizes, all asserted in tests or at compile time):
+
+  | Where | Size | How |
+  |---|---:|---|
+  | TCP `Conn` (`urmqtt-tcp`) | 96 B | flags in one byte, RTT/RTO in 16 bits (≤ 60 s), wrapping 32-bit RTT start, send buffer boxed and absent while idle |
+  | TCP table | 4 B per slot | connection indices only; keys are compared through the connections, at most half full |
+  | Service `Conn` (kernel) incl. TLS | 152 B | TLS record state inline (104 B): per direction only the traffic secret and sequence number (40 B) |
+  | Broker `Conn` | 48 B | identity (until CONNECT) and Will in an optional box; buffers absent while empty |
+  | Broker `Session` | 64 B | one subscription inline (`Small<Sub>`), token bucket flattened, connection id as `NonZeroU32` |
+  | Subscription | 8 B | interned node id + QoS + scoped flag |
+  | Client id | 1 block | the only per-device string; the index stores session ids, not strings |
+  | Relay (sessions homed on another core) | 16 B + 16 B | `Remote` and the transport-id map entry |
+
+- **Slabs sized to the heap:** the chunked slab (64 entries per chunk before) now fills one 8 KiB buddy block per chunk (`CHUNK_BYTES / size_of::<Option<T>>()` entries), so a 96-byte entry wastes under 1 % instead of a third (6 KiB rounded to 8 KiB).
+- **TLS keys derived per record:** the AEAD key and IV are expanded from the traffic secret (HKDF-Expand-Label) for every record, on the stack, wiped after use. An idle connection holds 2 × 40 bytes of secrets and no expanded key schedule. The record state lives inline in the connection's slab entry instead of a separate heap block (this is the "key slab" of PROMPT §6: slab-resident, exactly sized, zeroized on drop). The cost is two HKDF expansions per record, a few microseconds; idle connections dominate the target workload.
+- **Device-scoped subscriptions (PROMPT §7.3):** a filter `<scope>/<own client id>/<rest>` is stored as `rest`, interned once in a second trie shared by all devices. The scope is the first level of the device ACL's `<scope>/{id}/…` patterns (`devices` by default). A publish under `<scope>/<id>/…` looks up session `<id>` (one hash lookup) and matches its scoped filters against the remainder. Results are merged with the trie's, one delivery per session at the highest QoS. Devices therefore create no trie nodes of their own: 100 devices subscribing to `devices/<id>/cmd/#` leave the node count unchanged (tested). The full filter is rebuilt for the store and for unsubscribe matching, and restored sessions are scoped again.
+- **Trade-offs:** subscription changes reallocate the list (rare by design); scoped matching is a linear scan of the session's few scoped filters.
+- **Not done:**
+  - Trie nodes for ordinary filters and retained topics are never freed (a node is 80 B).
+  - The cold tier (compressing idle sessions) is not implemented: the measurement does not call for it.

@@ -11,7 +11,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M14)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M15)-red)
 
 </div>
 
@@ -33,6 +33,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M12**: per-core telemetry log with CRC per record, batched writes, crash recovery and torn-tail truncation, verified with a million records
 > - **M13**: multicore data plane: per-core stacks and broker shards, Toeplitz dispatcher, relayed sessions, cross-core fan-out, per-CPU heap caches; linear scaling to 4 worker cores in-guest
 > - **M14**: own server-only TCP/IP stack (SYN cookies, timing wheel, NewReno, ACK coalescing) and DHCP client; smoltcp removed
+> - **M15**: 494 B per idle mTLS connection at 10k (heap blocks, allocator rounding included): compact state, per-record TLS key derivation, device-scoped subscriptions without per-device trie nodes
 >
 > The kernel boots under QEMU with HVF and TCG. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
@@ -109,7 +110,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | Device registry, revocations, retained messages, persistent sessions with offline queues | ✅ M11 |
 | | Per-core append-only telemetry log with CRC and crash recovery | ✅ M12 |
 | **Scale** | Per-core event loops and broker shards, per-CPU heap caches, frame pools, cross-core fan-out | ✅ M13 |
-| | ≤ 512 B per idle TLS connection, measured at 10k/100k/1M | 📋 M15 |
+| | ≤ 512 B per idle TLS connection (494 B measured at 10k), no per-device trie nodes | ✅ M15 |
 | **Ops** | Watchdog, rate limits, UDP syslog/statsd to a private collector | 📋 M16 |
 
 ## Architecture
@@ -206,19 +207,35 @@ sequenceDiagram
 
 ### Memory per connection
 
-The target is **≤ 512 B per idle TLS connection** (stretch goal ~256 B). The design never keeps a
-per-connection buffer while a connection is idle: buffers are pooled and attached only while a
-frame or record is incomplete or data is unacknowledged. The budget below is the plan M15 measures
-against:
+The target is **≤ 512 B per idle TLS connection** (stretch goal ~256 B). Nothing per connection is
+buffered while it is idle: receive data is processed straight from the frame, and send, record and
+MQTT buffers exist only while something is incomplete or unacknowledged. The kernel measures it
+itself (ADR-034): exact heap counters in requested bytes and in the buddy blocks they occupy, logged
+every 10 s as heap above the idle baseline per open connection.
 
-| Part | Budget |
-|---|---:|
-| TCP control block (32-bit indices, packed flags, wheel slots) | 64–96 B |
-| TLS 1.3 record state (keys, IVs, sequence numbers; zeroized key slab) | ≤ 128 B |
-| MQTT session, hot form (interned ids) | ≤ 64 B |
-| Subscriptions (1–2 × 32-bit topic-node ids) | ~16 B |
-| Connection-table slot + timer entries | ~48 B |
-| **Total** | **~300–400 B** |
+| Part | Size | How |
+|---|---:|---|
+| TCP control block | 96 B | packed flags, 16-bit RTT/RTO, wheel timer slot, no idle buffers |
+| TCP table slot | 4–8 B | connection index only, ≤ half full |
+| Connection + TLS 1.3 record state | 152 B | secret + sequence per direction (40 B); key and IV derived per record |
+| MQTT connection | 48 B | identity and Will boxed only while present |
+| MQTT session, hot form | 64 B | one subscription inline, interned node ids |
+| Subscription `devices/<id>/cmd/#` | 0 trie nodes | stored relative to the session's own id, shared by all devices |
+
+**Measured** (HVF, 4 vCPU, 3 worker cores; every device holds an mTLS connection and one QoS 1
+subscription; heap blocks including allocator rounding, frame-buffer pool excluded):
+
+| Connections | Bytes per connection |
+|---:|---:|
+| 960 | 531 B |
+| 9 922 | 494 B |
+| 10 197 | 474 B |
+
+The frame-buffer pool is a fixed ~2 MiB (≈ 200 B per connection at 10k, ≈ 2 B at 1M). 100k and 1M
+connections could not be generated on the development host. QEMU user networking on macOS stopped
+accepting at 10 197 connections, about the 10 240-descriptor `OPEN_MAX` of the QEMU process. One
+loopback address also has only 16 384 ephemeral ports, and adding addresses needs root. The figure
+falls as fixed slab chunks amortize, so it does not grow with the connection count.
 
 ### Security model
 
@@ -790,7 +807,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M12** Telemetry log | 1M messages; torn tail truncated on recovery |
 | ✅ | **M13** Multicore data plane | near-linear scaling 1 → 2 → 4 cores |
 | ✅ | **M14** Own TCP stack | smoltcp replaced; loss simulation tests; segment fuzzing |
-| 📋 | **M15** Memory per connection | measured bytes per idle TLS connection ≤ 512 B |
+| ✅ | **M15** Memory per connection | 494 B per idle mTLS connection at 10k, allocator rounding included |
 | 📋 | **M16** Hardening & ops | threat model; a 100k-client reconnect storm survives |
 | 📋 | **M17** Deployment | bit-identical ISO rebuilds, signatures, cloud guides |
 

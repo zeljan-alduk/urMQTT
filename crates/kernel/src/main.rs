@@ -13,8 +13,8 @@ extern crate alloc;
 use urmqtt_broker as _;
 use urmqtt_mqtt as _;
 use urmqtt_net as _;
-use urmqtt_tcp as _;
 use urmqtt_store as _;
+use urmqtt_tcp as _;
 
 mod cmdline;
 

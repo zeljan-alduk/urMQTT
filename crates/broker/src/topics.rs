@@ -16,6 +16,9 @@ struct Node {
     children: BTreeMap<Box<str>, NodeId>,
     subs: Vec<(SessionId, QoS)>,
     retained: Option<(Msg, QoS)>,
+    /// The full filter, once the node is used as a subscription filter:
+    /// sessions keep only the node id (PROMPT §7.3).
+    path: Option<Box<str>>,
 }
 
 pub struct Topics {
@@ -66,6 +69,22 @@ impl Topics {
             };
         }
         n
+    }
+
+    /// Node for the subscription filter `filter`, which it remembers.
+    pub fn intern_filter(&mut self, filter: &str) -> NodeId {
+        let n = self.intern(filter);
+        if let Some(node) = self.nodes.get_mut(n as usize)
+            && node.path.is_none()
+        {
+            node.path = Some(filter.into());
+        }
+        n
+    }
+
+    /// The filter interned as `n` by [`Topics::intern_filter`].
+    pub fn path(&self, n: NodeId) -> Option<&str> {
+        self.nodes.get(n as usize)?.path.as_deref()
     }
 
     pub fn subscribe(&mut self, node: NodeId, s: SessionId, qos: QoS) {
@@ -193,6 +212,27 @@ impl Topics {
                     self.walk_retained(c, levels, i + 1, out);
                 }
             }
+        }
+    }
+}
+
+/// Topic name `topic` matches filter `filter` (`+`, `#`). `None` is the
+/// empty remainder below a scope (`a/b` against relative filters under
+/// `a/b/`), which only `#` matches (§4.7.1.2). The `$` rule does not apply:
+/// relative topics never start at the first level.
+pub fn filter_matches(filter: &str, topic: Option<&str>) -> bool {
+    let Some(topic) = topic else {
+        return filter == "#";
+    };
+    let mut f = filter.split('/');
+    let mut t = topic.split('/');
+    loop {
+        match (f.next(), t.next()) {
+            (Some("#"), _) => return true,
+            (Some("+"), Some(_)) => {}
+            (Some(a), Some(b)) if a == b => {}
+            (None, None) => return true,
+            _ => return false,
         }
     }
 }

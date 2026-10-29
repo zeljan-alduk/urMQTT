@@ -719,3 +719,14 @@ fn survives_heavy_loss() {
         assert_eq!(s.connections(), 0, "seed {seed}");
     }
 }
+
+/// The per-connection budget (M15, ADR-034): an idle connection costs
+/// its `Conn` plus two 4-byte table slots.
+#[test]
+fn connection_state_stays_small() {
+    assert!(
+        core::mem::size_of::<Conn>() <= 96,
+        "{}",
+        core::mem::size_of::<Conn>()
+    );
+}

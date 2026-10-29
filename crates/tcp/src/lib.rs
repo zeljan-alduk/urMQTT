@@ -64,6 +64,7 @@ use cc::{Congestion, NewReno};
 use cookie::Cookies;
 use seq::{ge, gt, le, lt};
 use table::{Key, Table};
+use urmqtt_mm::slab::Slab;
 use urmqtt_timer_wheel::{TimerId, Wheel};
 use wire::{ACK, FIN, Header, Out, PSH, RST, SYN};
 
@@ -154,9 +155,9 @@ enum TimerKind {
     FinWait2,
 }
 
-const RTO_INIT_MS: u32 = 1000;
+const RTO_INIT_MS: u16 = 1000;
 const RTO_MIN_MS: u32 = 200;
-const RTO_MAX_MS: u32 = 60_000;
+const RTO_MAX_MS: u16 = 60_000;
 const MAX_RETRIES: u8 = 8;
 const FIN_WAIT2_MS: u64 = 60_000;
 
@@ -165,14 +166,8 @@ const FIN_WAIT2_MS: u64 = 60_000;
 struct Conn {
     key: Key,
     state: State,
-    /// FIN queued by the application (sent after the data).
-    fin_queued: bool,
-    fin_sent: bool,
-    /// An ACK is owed; sent by `flush` unless data carries it first.
-    ack_pending: bool,
-    in_dirty: bool,
-    in_recovery: bool,
-    rtt_timing: bool,
+    /// `FIN_QUEUED`, `FIN_SENT`, `ACK_PENDING`, … (one byte, M15).
+    flags: u8,
     dupacks: u8,
     retries: u8,
     mss: u16,
@@ -191,10 +186,12 @@ struct Conn {
     /// Right edge we last advertised (never moved left).
     rcv_adv: u32,
     rtt_seq: u32,
-    rtt_start: u64,
-    srtt: u32,
-    rttvar: u32,
-    rto: u32,
+    /// When the timed segment was sent (ms, wrapping).
+    rtt_start: u32,
+    /// RTT estimates and timeout in ms (≤ `RTO_MAX_MS`, so 16 bits).
+    srtt: u16,
+    rttvar: u16,
+    rto: u16,
     cc: NewReno,
     timer: Option<(TimerId, TimerKind)>,
     /// Bytes from `snd_una` on: unacknowledged, then unsent. Boxed so an
@@ -203,7 +200,28 @@ struct Conn {
     tx: Option<Box<VecDeque<u8>>>,
 }
 
+/// FIN queued by the application (sent after the data).
+const FIN_QUEUED: u8 = 1;
+const FIN_SENT: u8 = 2;
+/// An ACK is owed; sent by `flush` unless data carries it first.
+const ACK_PENDING: u8 = 4;
+const IN_DIRTY: u8 = 8;
+const IN_RECOVERY: u8 = 16;
+const RTT_TIMING: u8 = 32;
+
 impl Conn {
+    fn has(&self, f: u8) -> bool {
+        self.flags & f != 0
+    }
+
+    fn set(&mut self, f: u8, on: bool) {
+        if on {
+            self.flags |= f;
+        } else {
+            self.flags &= !f;
+        }
+    }
+
     fn tx_len(&self) -> usize {
         self.tx.as_ref().map_or(0, |b| b.len())
     }
@@ -235,8 +253,7 @@ impl Conn {
 pub struct TcpStack {
     cfg: Config,
     cookies: Cookies,
-    conns: Vec<Option<Conn>>,
-    free: Vec<u32>,
+    conns: Slab<Conn>,
     table: Table,
     wheel: Wheel<u32>,
     /// Connections owing an ACK or with new data to send.
@@ -263,8 +280,7 @@ impl TcpStack {
             cookies: Cookies::new(cfg.cookie_key),
             table: Table::new(cfg.max_conns, seed),
             wheel: Wheel::new(now_ms),
-            conns: Vec::new(),
-            free: Vec::new(),
+            conns: Slab::new(),
             dirty: Vec::new(),
             rst_tokens: cfg.rst_per_sec,
             rst_last_ms: now_ms,
@@ -306,18 +322,18 @@ impl TcpStack {
     }
 
     fn conn(&self, c: ConnId) -> Option<&Conn> {
-        self.conns.get(c as usize).and_then(Option::as_ref)
+        self.conns.get(c)
     }
 
     fn conn_mut(&mut self, c: ConnId) -> Option<&mut Conn> {
-        self.conns.get_mut(c as usize).and_then(Option::as_mut)
+        self.conns.get_mut(c)
     }
 
     fn mark_dirty(&mut self, c: ConnId) {
         if let Some(k) = self.conn_mut(c)
-            && !k.in_dirty
+            && !k.has(IN_DIRTY)
         {
-            k.in_dirty = true;
+            k.set(IN_DIRTY, true);
             self.dirty.push(c);
         }
     }
@@ -332,7 +348,7 @@ impl TcpStack {
             let after = k.window();
             // Announce a reopened window (at least one MSS more, or from 0).
             if after > before && (before == 0 || u32::from(after - before) >= u32::from(k.mss)) {
-                k.ack_pending = true;
+                k.set(ACK_PENDING, true);
                 update = true;
             }
         }
@@ -345,7 +361,7 @@ impl TcpStack {
     pub fn send(&mut self, c: ConnId, data: &[u8]) -> usize {
         let max = self.cfg.tx_max;
         let Some(k) = self.conn_mut(c) else { return 0 };
-        if k.fin_queued || !matches!(k.state, State::Established | State::CloseWait) {
+        if k.has(FIN_QUEUED) || !matches!(k.state, State::Established | State::CloseWait) {
             return 0;
         }
         let n = data.len().min(max.saturating_sub(k.tx_len()));
@@ -360,10 +376,10 @@ impl TcpStack {
     /// Closes our side after the queued data (FIN).
     pub fn close(&mut self, c: ConnId) {
         if let Some(k) = self.conn_mut(c)
-            && !k.fin_queued
+            && !k.has(FIN_QUEUED)
             && matches!(k.state, State::Established | State::CloseWait)
         {
-            k.fin_queued = true;
+            k.set(FIN_QUEUED, true);
             self.mark_dirty(c);
         }
     }
@@ -387,14 +403,21 @@ impl TcpStack {
     }
 
     fn remove(&mut self, c: ConnId) {
-        let Some(k) = self.conns.get_mut(c as usize).and_then(Option::take) else {
+        let Some(k) = self.conns.remove(c) else {
             return;
         };
         if let Some((t, _)) = k.timer {
             self.wheel.cancel(t);
         }
-        self.table.remove(&k.key);
-        self.free.push(c);
+        let conns = &self.conns;
+        let gone = k.key;
+        self.table.remove(&gone, |x| {
+            if x == c {
+                Some(gone)
+            } else {
+                conns.get(x).map(|k| k.key)
+            }
+        });
     }
 
     fn close_with(&mut self, c: ConnId, why: CloseReason, app: &mut impl App) {
@@ -487,7 +510,8 @@ impl TcpStack {
             rport: h.sport,
             lport: h.dport,
         };
-        match self.table.get(&key) {
+        let conns = &self.conns;
+        match self.table.get(&key, |c| conns.get(c).map(|k| k.key)) {
             Some(c) => self.segment(now_ms, c, &h, payload, app, out),
             None => self.listen(now_ms, src, key, &h, payload, app, out),
         }
@@ -566,12 +590,7 @@ impl TcpStack {
         let conn = Conn {
             key,
             state: State::Established,
-            fin_queued: false,
-            fin_sent: false,
-            ack_pending: false,
-            in_dirty: false,
-            in_recovery: false,
-            rtt_timing: false,
+            flags: 0,
             dupacks: 0,
             retries: 0,
             mss,
@@ -594,19 +613,9 @@ impl TcpStack {
             timer: None,
             tx: None,
         };
-        let c = match self.free.pop() {
-            Some(c) => {
-                if let Some(slot) = self.conns.get_mut(c as usize) {
-                    *slot = Some(conn);
-                }
-                c
-            }
-            None => {
-                self.conns.push(Some(conn));
-                (self.conns.len() - 1) as u32
-            }
-        };
-        self.table.insert(key, c);
+        let c = self.conns.insert(conn);
+        let conns = &self.conns;
+        self.table.insert(key, c, |x| conns.get(x).map(|k| k.key));
         self.stats.accepted += 1;
         if !app.accept(
             c,
@@ -627,7 +636,7 @@ impl TcpStack {
 
     fn send_ack_now(&mut self, c: ConnId, out: &mut impl FnMut([u8; 4], &[u8])) {
         let Some(k) = self.conn_mut(c) else { return };
-        k.ack_pending = false;
+        k.set(ACK_PENDING, false);
         let o = Out {
             sport: k.key.lport,
             dport: k.key.rport,
@@ -643,7 +652,7 @@ impl TcpStack {
     }
 
     fn arm(&mut self, c: ConnId, now_ms: u64, kind: TimerKind, after_ms: u64) {
-        let Some(k) = self.conns.get_mut(c as usize).and_then(Option::as_mut) else {
+        let Some(k) = self.conns.get_mut(c) else {
             return;
         };
         if let Some((t, _)) = k.timer.take() {
@@ -654,7 +663,7 @@ impl TcpStack {
     }
 
     fn disarm(&mut self, c: ConnId) {
-        if let Some(k) = self.conns.get_mut(c as usize).and_then(Option::as_mut)
+        if let Some(k) = self.conns.get_mut(c)
             && let Some((t, _)) = k.timer.take()
         {
             self.wheel.cancel(t);
@@ -663,15 +672,19 @@ impl TcpStack {
 
     fn rtt_sample(k: &mut Conn, rtt_ms: u32) {
         // RFC 6298 §2 (srtt in ms, rttvar in ms).
-        if k.srtt == 0 {
-            k.srtt = rtt_ms.max(1);
-            k.rttvar = rtt_ms / 2;
+        let rtt_ms = rtt_ms.min(u32::from(RTO_MAX_MS));
+        let (mut srtt, mut rttvar) = (u32::from(k.srtt), u32::from(k.rttvar));
+        if srtt == 0 {
+            srtt = rtt_ms.max(1);
+            rttvar = rtt_ms / 2;
         } else {
-            let err = k.srtt.abs_diff(rtt_ms);
-            k.rttvar = (3 * k.rttvar + err) / 4;
-            k.srtt = (7 * k.srtt + rtt_ms) / 8;
+            let err = srtt.abs_diff(rtt_ms);
+            rttvar = (3 * rttvar + err) / 4;
+            srtt = (7 * srtt + rtt_ms) / 8;
         }
-        k.rto = (k.srtt + (4 * k.rttvar).max(10)).clamp(RTO_MIN_MS, RTO_MAX_MS);
+        let rto = (srtt + (4 * rttvar).max(10)).clamp(RTO_MIN_MS, u32::from(RTO_MAX_MS));
+        // All three are at most `RTO_MAX_MS` (rttvar ≤ the clamped sample).
+        (k.srtt, k.rttvar, k.rto) = (srtt as u16, rttvar as u16, rto as u16);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -749,7 +762,7 @@ impl TcpStack {
             k.rcv_nxt = k.rcv_nxt.wrapping_add(n as u32);
             // Even a segment that did not fit (a zero-window probe) is
             // answered, with the current window.
-            k.ack_pending = true;
+            k.set(ACK_PENDING, true);
             if fin {
                 k.rcv_nxt = k.rcv_nxt.wrapping_add(1);
                 k.state = match k.state {
@@ -813,16 +826,16 @@ impl TcpStack {
             let acked = h.ack.wrapping_sub(k.snd_una);
             let data_acked = (acked as usize).min(k.tx_len());
             // Our FIN sits one past the last data byte.
-            let fin_acked = k.fin_sent && acked as usize == k.tx_len() + 1;
+            let fin_acked = k.has(FIN_SENT) && acked as usize == k.tx_len() + 1;
             if let Some(tx) = k.tx.as_mut() {
                 tx.drain(..data_acked.min(tx.len()));
                 if tx.is_empty() {
                     k.tx = None;
                 }
             }
-            if k.rtt_timing && ge(h.ack, k.rtt_seq) {
-                k.rtt_timing = false;
-                let rtt = now_ms.saturating_sub(k.rtt_start) as u32;
+            if k.has(RTT_TIMING) && ge(h.ack, k.rtt_seq) {
+                k.set(RTT_TIMING, false);
+                let rtt = (now_ms as u32).wrapping_sub(k.rtt_start);
                 Self::rtt_sample(k, rtt);
             }
             k.snd_una = h.ack;
@@ -830,11 +843,11 @@ impl TcpStack {
                 k.snd_nxt = k.snd_una;
             }
             k.retries = 0;
-            if k.in_recovery {
+            if k.has(IN_RECOVERY) {
                 let full = ge(h.ack, k.recover);
                 k.cc.on_recovery_ack(acked, mss, full);
                 if full {
-                    k.in_recovery = false;
+                    k.set(IN_RECOVERY, false);
                     k.dupacks = 0;
                 } else {
                     // Partial ACK: retransmit the next hole (RFC 6582).
@@ -871,15 +884,15 @@ impl TcpStack {
         } else if h.ack == k.snd_una && pure && !window_changed && k.snd_max != k.snd_una {
             // Duplicate ACK.
             k.dupacks = k.dupacks.saturating_add(1);
-            if k.in_recovery {
+            if k.has(IN_RECOVERY) {
                 k.cc.on_dupack_in_recovery(mss);
                 self.mark_dirty(c);
             } else if k.dupacks == 3 {
                 let flight = k.flight();
                 k.cc.on_fast_retransmit(flight, mss);
-                k.in_recovery = true;
+                k.set(IN_RECOVERY, true);
                 k.recover = k.snd_max;
-                k.rtt_timing = false;
+                k.set(RTT_TIMING, false);
                 let una = k.snd_una;
                 self.stats.fast_retransmits += 1;
                 self.retransmit_one(c, una, out);
@@ -906,7 +919,7 @@ impl TcpStack {
             avail
         });
         // Our FIN follows the last data byte.
-        let fin = k.fin_sent && off + n == k.tx_len();
+        let fin = k.has(FIN_SENT) && off + n == k.tx_len();
         if n == 0 && !fin {
             return;
         }
@@ -923,7 +936,7 @@ impl TcpStack {
         self.emit(dst, &o, payload.get(..n).unwrap_or(&[]), out);
         self.stats.retransmits += 1;
         if let Some(k) = self.conn_mut(c) {
-            k.ack_pending = false;
+            k.set(ACK_PENDING, false);
         }
     }
 
@@ -944,7 +957,7 @@ impl TcpStack {
             let wnd = k.snd_wnd.min(k.cc.window()) as usize;
             let room = wnd.saturating_sub(off.min(data_len));
             let n = unsent.min(room).min(mss);
-            let fin = k.fin_queued && off <= data_len && off + n == data_len;
+            let fin = k.has(FIN_QUEUED) && off <= data_len && off + n == data_len;
             if n == 0 && !fin {
                 // Zero window with data waiting: probe later.
                 let persist = unsent > 0 && k.snd_wnd == 0 && k.timer.is_none();
@@ -977,19 +990,19 @@ impl TcpStack {
             let Some(k) = self.conn_mut(c) else {
                 return true;
             };
-            k.ack_pending = false;
+            k.set(ACK_PENDING, false);
             k.rcv_adv = k.rcv_nxt.wrapping_add(u32::from(o.window));
             k.snd_nxt = k.snd_nxt.wrapping_add(n as u32 + u32::from(fin));
             if gt(k.snd_nxt, k.snd_max) {
                 k.snd_max = k.snd_nxt;
             }
-            if !k.rtt_timing && n > 0 && k.snd_nxt == k.snd_max {
-                k.rtt_timing = true;
+            if !k.has(RTT_TIMING) && n > 0 && k.snd_nxt == k.snd_max {
+                k.set(RTT_TIMING, true);
                 k.rtt_seq = k.snd_nxt;
-                k.rtt_start = now_ms;
+                k.rtt_start = now_ms as u32;
             }
-            if fin && !k.fin_sent {
-                k.fin_sent = true;
+            if fin && !k.has(FIN_SENT) {
+                k.set(FIN_SENT, true);
                 k.state = match k.state {
                     State::Established => State::FinWait1,
                     State::CloseWait => State::LastAck,
@@ -1012,10 +1025,10 @@ impl TcpStack {
         let dirty = core::mem::take(&mut self.dirty);
         for &c in &dirty {
             if let Some(k) = self.conn_mut(c) {
-                k.in_dirty = false;
+                k.set(IN_DIRTY, false);
             }
             let sent = self.transmit(now_ms, c, out);
-            if !sent && self.conn(c).is_some_and(|k| k.ack_pending) {
+            if !sent && self.conn(c).is_some_and(|k| k.has(ACK_PENDING)) {
                 self.send_ack_now(c, out);
             }
         }
@@ -1040,7 +1053,7 @@ impl TcpStack {
                 TimerKind::Persist => {
                     if k.snd_wnd == 0 && k.tx_len() > 0 {
                         // Window probe: one byte beyond the window.
-                        k.rto = (k.rto * 2).min(RTO_MAX_MS);
+                        k.rto = k.rto.saturating_mul(2).min(RTO_MAX_MS);
                         let rto = u64::from(k.rto);
                         let saved = k.snd_wnd;
                         k.snd_wnd = 1;
@@ -1064,10 +1077,10 @@ impl TcpStack {
                     let mss = u32::from(k.mss);
                     let flight = k.flight();
                     k.cc.on_timeout(flight, mss);
-                    k.in_recovery = false;
+                    k.set(IN_RECOVERY, false);
                     k.dupacks = 0;
-                    k.rtt_timing = false;
-                    k.rto = (k.rto * 2).min(RTO_MAX_MS);
+                    k.set(RTT_TIMING, false);
+                    k.rto = k.rto.saturating_mul(2).min(RTO_MAX_MS);
                     // Go back to the first unacknowledged byte (Karn: no RTT
                     // sample from retransmitted data).
                     k.snd_nxt = k.snd_una;
