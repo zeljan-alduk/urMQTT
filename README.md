@@ -11,7 +11,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M5)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M6)-red)
 
 </div>
 
@@ -23,6 +23,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M3**: GICv3, generic timer, periodic tick with measured IRQ latency
 > - **M4**: SMP bring-up on up to 64 cores, with IPIs checked between every pair of cores
 > - **M5**: hardware discovery from DTB or ACPI into one description, with identical results from both
+> - **M6**: PCIe and virtio drivers (rng, blk, net), MSI-X, and a CSPRNG seeded from hardware entropy
 >
 > The kernel boots under QEMU with HVF and TCG. MQTT over TLS arrives in **M10**. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
@@ -82,7 +83,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | SMP bring-up, per-CPU data (`TPIDR_EL1`), SGI IPIs | ✅ M4 |
 | | Hardware discovery via **DTB and ACPI** (MADT, GTDT, MCFG, SPCR) | ✅ M5 |
 | **Devices** | PL011 UART, Limine framebuffer text log | ✅ M1 |
-| | PCIe ECAM, virtio-pci modern: net, blk, rng | 📋 M6 |
+| | PCIe ECAM, virtio-pci modern: net, blk, rng | ✅ M6 |
 | | virtio-net multiqueue + RSS, fallback software dispatcher | 📋 M13 |
 | **Network** | DHCPv4, ARP, ICMP echo (smoltcp prototype) | 📋 M7 |
 | | Own server-only TCP: SYN cookies, timing wheel, NewReno, ACK coalescing | 📋 M14 |
@@ -338,6 +339,21 @@ With `make run-smp N=8` every core comes online and every pair of cores exchange
 [    5.739] INFO  smp: 8/8 cpus ticking on their own timer
 ```
 
+Devices are enumerated and tested on every boot:
+
+```text
+[    5.185] INFO  pci: ECAM 0x4010000000 buses 0-255, 5 function(s)
+[    5.186] INFO  pci 00:03.0 1af4:1001 class 01.00 virtio-blk
+[    5.187] INFO  blk: 64 MiB, block size 512, flush=true, read-only=false, msi-x=yes
+[    5.188] INFO  net: mac 52:54:00:12:34:56, link up
+[    5.189] INFO  entropy: 64 bytes from virtio-rng
+[    5.189] INFO  entropy: ChaCha20 CSPRNG seeded
+[    5.695] INFO  blk: self-test ok (4 KiB random pattern written, flushed, read back at sector 131064)
+[    5.696] INFO  msi-x: 3 blk completion interrupt(s) via GICv2m
+[    5.696] INFO  net: gratuitous ARP sent
+[    5.696] INFO  net: rx ok, ARP reply from 52:55:0a:00:02:02
+```
+
 Under HVF an IRQ reaches a busy-polling core in about 4 µs, while a core asleep in `wfi` wakes
 after about 2 ms. That gap is why the data plane busy-polls under load and sleeps only when idle
 ([ADR-022](docs/DECISIONS.md)).
@@ -551,12 +567,12 @@ make debug                   # QEMU halted with -s -S; then in another terminal:
 lldb target/aarch64-unknown-none/release/urmqtt -o 'gdb-remote localhost:1234'
 ```
 
-### 7. Inspecting network traffic (M6+)
+### 7. Inspecting network traffic (works today)
 
 ```bash
-# scripts/run-qemu.sh adds a filter-dump when PCAP is set
-make run PCAP=build/net.pcap
-tshark -r build/net.pcap -Y 'arp || tcp.port == 8883'
+make iso data-img
+scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img --pcap build/net.pcap
+tcpdump -nn -r build/net.pcap          # gratuitous ARP + ARP exchange with the slirp gateway
 ```
 
 ### 8. Load testing (M13)
@@ -661,7 +677,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M3** Interrupts & time | GICv3, periodic tick, IRQ latency measured |
 | ✅ | **M4** SMP | `run-smp N=8`, IPI ping-pong between all core pairs |
 | ✅ | **M5** Platform discovery | `acpi=on` and `acpi=off` give identical summaries |
-| 📋 | **M6** PCIe & virtio | blk write/flush/read-back; gratuitous ARP in a pcap |
+| ✅ | **M6** PCIe & virtio | blk write/flush/read-back; gratuitous ARP in a pcap |
 | 📋 | **M7** Network prototype | DHCP lease, ping, TCP echo through hostfwd |
 | 📋 | **M8** MQTT codec | spec tests, property tests, 10 minutes of fuzzing with no crash |
 | 📋 | **M9** Broker over TCP (dev) | pub/sub, wildcards, retained, LWT, QoS 1 redelivery with mosquitto |

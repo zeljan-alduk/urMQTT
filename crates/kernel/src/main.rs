@@ -13,12 +13,9 @@ extern crate alloc;
 use urmqtt_broker as _;
 use urmqtt_mqtt as _;
 use urmqtt_net as _;
-use urmqtt_pci as _;
 use urmqtt_store as _;
 use urmqtt_tcp as _;
 use urmqtt_timer_wheel as _;
-use urmqtt_tls as _;
-use urmqtt_virtio as _;
 
 mod cmdline;
 
@@ -26,6 +23,8 @@ mod cmdline;
 mod boot;
 #[cfg(target_os = "none")]
 mod console;
+#[cfg(target_os = "none")]
+mod devices;
 #[cfg(target_os = "none")]
 mod irq;
 #[cfg(target_os = "none")]

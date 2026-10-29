@@ -364,7 +364,7 @@ pub fn map_device(va: u64, pa: u64, len: u64) -> Result<(), MapError> {
     let mut guard = SPACE.lock();
     let s = guard.as_mut().ok_or(MapError::OutOfFrames)?;
     let mut tables = s.tables();
-    Mapper::new(&mut tables, s.root).map_range(
+    Mapper::new(&mut tables, s.root).map_range_auto(
         va,
         pa,
         len,
@@ -396,6 +396,18 @@ pub fn map_stacks(cpu: u64) -> Result<(), MapError> {
     cpu::dsb_ishst();
     cpu::isb();
     Ok(())
+}
+
+/// Zeroed, physically contiguous frames for device DMA, reached through
+/// the HHDM: (virtual address, physical address, bytes).
+pub fn dma_alloc(bytes: usize) -> Option<(usize, u64, usize)> {
+    let pages = bytes.div_ceil(PAGE_SIZE as usize).max(1);
+    let pa = FRAMES.lock().as_mut()?.alloc_contiguous(pages, 1)?;
+    let va = (hhdm() + pa) as usize;
+    let len = pages * PAGE_SIZE as usize;
+    // SAFETY: freshly allocated RAM, mapped RW in the HHDM, owned by the caller.
+    unsafe { core::ptr::write_bytes(va as *mut u8, 0, len) };
+    Some((va, pa, len))
 }
 
 /// Returns the frames lent to the bootloader-table extensions.

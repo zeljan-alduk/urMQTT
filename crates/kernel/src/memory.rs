@@ -234,7 +234,14 @@ pub fn map_mmio(pa: u64, len: u64) -> Result<u64, MapError> {
     let page_off = pa % PAGE_SIZE;
     let base = pa - page_off;
     let size = (page_off + len).div_ceil(PAGE_SIZE) * PAGE_SIZE;
-    let va = m.next;
+    // Large, block-aligned regions (PCIe ECAM) get a block-aligned VA so
+    // they can be mapped with 2 MiB blocks instead of thousands of pages.
+    let block = urmqtt_arch_aarch64::paging::BLOCK_2M;
+    let va = if size >= block && base.is_multiple_of(block) {
+        m.next.next_multiple_of(block)
+    } else {
+        m.next
+    };
     if va + size > MMIO_BASE + MMIO_SIZE - PAGE_SIZE || m.count >= MAX_MMIO_MAPPINGS {
         return Err(MapError::OutOfFrames);
     }
@@ -242,7 +249,13 @@ pub fn map_mmio(pa: u64, len: u64) -> Result<u64, MapError> {
     match m.early.as_mut() {
         Some((root, frames)) => {
             let mut tables = HhdmTables { hhdm };
-            Mapper::new(&mut tables, *root).map_range(va, base, size, PageAttrs::mmio(), frames)?;
+            Mapper::new(&mut tables, *root).map_range_auto(
+                va,
+                base,
+                size,
+                PageAttrs::mmio(),
+                frames,
+            )?;
             cpu::dsb_ishst();
             cpu::isb();
         }
@@ -257,7 +270,7 @@ pub fn map_mmio(pa: u64, len: u64) -> Result<u64, MapError> {
     }
     m.count += 1;
     // Leave an unmapped page between mappings to catch overruns.
-    m.next += size + PAGE_SIZE;
+    m.next = va + size + PAGE_SIZE;
     Ok(va + page_off)
 }
 
@@ -271,7 +284,7 @@ pub fn replay_mmio<M: TableMemory, F: paging::FrameSource>(
         return Ok(());
     };
     for map in m.maps.iter().take(m.count) {
-        mapper.map_range(map.va, map.pa, map.len, PageAttrs::mmio(), frames)?;
+        mapper.map_range_auto(map.va, map.pa, map.len, PageAttrs::mmio(), frames)?;
     }
     Ok(())
 }

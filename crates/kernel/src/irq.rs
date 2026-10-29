@@ -88,6 +88,13 @@ pub fn enable_private(intid: u32) {
     }
 }
 
+/// Routes SPI `intid` (edge-triggered, as MSIs are) to the CPU `mpidr`.
+pub fn enable_spi(intid: u32, mpidr: u64) {
+    if let Some(g) = GIC.get() {
+        g.enable_spi(intid, mpidr, true);
+    }
+}
+
 /// Handles every pending interrupt. Called from the IRQ vector.
 pub fn dispatch() {
     loop {

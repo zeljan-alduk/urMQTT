@@ -209,3 +209,39 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 
 - ACPI-only cloud validation (Hetzner, Oracle) is deferred (PROMPT §9 "later").
 - PCI BAR windows are not discovered by design (ADR-024).
+
+## M6 — PCIe and virtio (2026-10-29)
+
+**Done**
+
+- `pci` (host-tested against a simulated bus):
+  - ECAM addressing, enumeration through bridges (bounded, loop-safe), multifunction devices, BAR decoding (32/64-bit, I/O).
+  - Bounded capability-list walk, MSI-X table location, enable and entries.
+- `virtio` (host-tested, including a simulated device and hostile used-ring values):
+  - Modern virtio-pci capability discovery, feature negotiation, queue setup and notification with `dsb st`.
+  - Split virtqueue with bounds-checked ring access.
+  - Drivers: virtio-rng, virtio-blk (read/write/flush, FLUSH, RO and BLK_SIZE features), virtio-net (one queue pair, MAC, link status).
+- `tls::rng`: ChaCha20 CSPRNG behind a SHA-256 entropy pool that requires a hardware source (ADR-025).
+- `kernel/devices`:
+  - The 256 MiB ECAM is mapped with 2 MiB device blocks; enumeration is logged per function.
+  - Virtio regions mapped from firmware-assigned BARs; DMA from contiguous frames.
+  - GICv2m MSI-X for virtio-blk.
+  - Entropy pool fed from virtio-rng, RNDR and the bootloader.
+  - Boot self-tests:
+    - blk: 4 KiB random pattern written, flushed, read back, compared.
+    - net: gratuitous ARP, plus an ARP request for 10.0.2.2 whose reply must arrive.
+- `run-qemu.sh --fwd`. Every smoke boot gets a fresh 64 MiB data disk and a pcap, and a Python pcap check looks for the gratuitous ARP from 52:54:00:12:34:56.
+
+**Measured**
+
+- QEMU `virt` enumerates 5 functions (host bridge, virtio-scsi CD, rng, blk, net), identically under HVF and TCG.
+- Under HVF: MSI-X via GICv2m SPIs 80..144, 3 blk completion interrupts per self-test. Under TCG (ITS only) blk is polled.
+- Under TCG both virtio-rng and RNDR contribute; under HVF only virtio-rng.
+- `make smoke`: 30/30 (13 scenarios × 2 accelerators + pcap ARP check + summary comparison, each per accelerator).
+- Kernel ELF: about **212 KB**: sha2, ChaCha, pci, virtio and the drivers.
+
+**Known gaps**
+
+- No ITS driver yet, so no MSI-X on KVM or TCG (M13).
+- virtio-net has one queue pair and no interrupts; multiqueue and RSS come in M13.
+- Requests are synchronous. Batched, asynchronous blk I/O for SQLite and the telemetry log comes in M11/M12.

@@ -13,3 +13,8 @@ bench = false
 
 [lints]
 workspace = true
+
+[dependencies]
+rand_chacha = { version = "0.10", default-features = false }
+rand_core = { version = "0.10", default-features = false }
+sha2 = { version = "0.11", default-features = false }

@@ -17,7 +17,7 @@ use urmqtt_log::{error, info, warn};
 use urmqtt_platform::{EarlyPlatform, PsciMethod, Uart};
 
 use crate::cmdline::{BootOptions, TestFault};
-use crate::{VERSION, console, irq, layout, memory, power, selftest, smp, tick, trap, vm};
+use crate::{VERSION, console, devices, irq, layout, memory, power, selftest, smp, tick, trap, vm};
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
@@ -110,6 +110,8 @@ const DEV_FALLBACK_UART: u64 = 0x0900_0000;
 /// State carried across the stack switch into [`kmain_stage2`].
 struct Stage2 {
     options: BootOptions,
+    platform: Option<urmqtt_platform::PlatformInfo>,
+    boot_entropy: [u64; ENTROPY_VALUES as usize],
     pac_key: Option<(u64, u64)>,
     interrupts: Option<urmqtt_platform::Interrupts>,
     cpus: u64,
@@ -270,6 +272,8 @@ extern "C" fn urmqtt_kmain() -> ! {
     let (main_top, exc_top) = (built.main_top, built.exc_top);
     *STAGE2.lock() = Some(Stage2 {
         options,
+        platform: early,
+        boot_entropy: bootloader_entropy(),
         pac_key,
         interrupts: early.and_then(|e| e.interrupts),
         cpus: cpus as u64,
@@ -280,6 +284,22 @@ extern "C" fn urmqtt_kmain() -> ! {
     // SAFETY: both stacks were mapped by `vm::build` and are 16-byte aligned
     // at the top; this frame (on the bootloader's stack) is abandoned.
     unsafe { pac::switch_to(main_top, exc_top, 0, kmain_stage2, pac_on) }
+}
+
+/// The bootloader's entropy values (zero if none), for the CSPRNG pool.
+fn bootloader_entropy() -> [u64; ENTROPY_VALUES as usize] {
+    let mut out = [0u64; ENTROPY_VALUES as usize];
+    if let Some(r) = ENTROPY.response()
+        && !r.values.is_null()
+    {
+        let n = usize::try_from(r.value_count).unwrap_or(0).min(out.len());
+        // SAFETY: Limine provides `value_count` u64s at `values` (HHDM).
+        let vals = unsafe { core::slice::from_raw_parts(r.values, n) };
+        for (o, v) in out.iter_mut().zip(vals) {
+            *o = *v;
+        }
+    }
+    out
 }
 
 /// Seeds the IA key from bootloader entropy. Returns the key so the
@@ -355,6 +375,18 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         ),
         Err(e) => fatal_fmt(format_args!("gic init failed: {e:?}")),
     }
+    // PCIe and virtio (M6): all device MMIO must be mapped before the lock.
+    if let Some(p) = s.platform.as_ref() {
+        match devices::probe(p, &s.boot_entropy) {
+            Ok(()) => {}
+            Err(devices::ProbeError::NoEntropy) => {
+                fatal("no hardware entropy source (virtio-rng or RNDR): refusing to run")
+            }
+            Err(e) => fatal_fmt(format_args!("device probe failed: {e:?}")),
+        }
+    }
+    s.boot_entropy = [0; ENTROPY_VALUES as usize];
+
     // Application processors need their stacks mapped before the lock.
     smp::register_ipis();
     let ap_count = (s.cpus as usize).clamp(1, smp::MAX_CPUS) - 1;
@@ -379,6 +411,12 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
 
     tick_selftest(intr.timer.virt);
+    if let Err(msg) = devices::blk_selftest() {
+        fatal(msg);
+    }
+    if let Err(msg) = devices::net_selftest() {
+        fatal(msg);
+    }
     smp_bringup(&mut s);
 
     urmqtt_log::raw(format_args!("URMQTT READY\n"));

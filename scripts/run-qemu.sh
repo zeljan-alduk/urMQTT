@@ -4,13 +4,18 @@
 #
 #   scripts/run-qemu.sh --iso ISO [--accel hvf|tcg|kvm] [--smp N] [--mem 512M]
 #                       [--data IMG] [--acpi on|off] [--serial FILE] [--headless]
-#                       [--pcap FILE] [--gdb] [--no-net] [-- extra qemu args]
+#                       [--pcap FILE] [--gdb] [--no-net] [--fwd HOST:GUEST,...]
+#                       [-- extra qemu args]
+#
+# --fwd replaces the default port forwards (1883 and 8883 on 127.0.0.1);
+# --fwd none disables them.
 #
 # Without --serial the serial console is on stdio. Ctrl-A X quits QEMU.
 # Option ROMs are disabled (romfile=): no iPXE in the firmware, faster boot.
 set -euo pipefail
 
 ISO="" ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
+FWD="1883:1883,8883:8883"
 EXTRA=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -25,6 +30,7 @@ while [[ $# -gt 0 ]]; do
         --pcap) PCAP=$2; shift 2 ;;
         --gdb) GDB=1; shift ;;
         --no-net) NET=0; shift ;;
+        --fwd) FWD=$2; shift 2 ;;
         --) shift; EXTRA=("$@"); break ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -73,8 +79,14 @@ if [[ -n "$DATA" ]]; then
     ARGS+=(-drive "if=none,id=data0,file=$DATA,format=raw,cache=none" -device virtio-blk-pci,drive=data0,romfile=)
 fi
 if [[ $NET -eq 1 ]]; then
-    ARGS+=(-netdev "user,id=n0,hostfwd=tcp:127.0.0.1:1883-:1883,hostfwd=tcp:127.0.0.1:8883-:8883"
-           -device virtio-net-pci,netdev=n0,romfile=)
+    NETDEV="user,id=n0"
+    if [[ "$FWD" != none ]]; then
+        IFS=, read -r -a pairs <<< "$FWD"
+        for p in "${pairs[@]}"; do
+            NETDEV+=",hostfwd=tcp:127.0.0.1:${p%%:*}-:${p##*:}"
+        done
+    fi
+    ARGS+=(-netdev "$NETDEV" -device virtio-net-pci,netdev=n0,romfile=)
     [[ -n "$PCAP" ]] && ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
 else
     # Without this QEMU adds a default NIC (with an iPXE option ROM).

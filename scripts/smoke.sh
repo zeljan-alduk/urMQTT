@@ -98,7 +98,11 @@ scenario() {
     [[ -f "$iso" ]] || "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "$cmdline" >/dev/null
     for accel in $ACCELS; do
         local log="$OUT/$name-$accel.log" status=0
-        boot "$log" --iso "$iso" --accel "$accel" --acpi "$acpi" --smp "${SMP:-4}" --headless --no-net || status=$?
+        local data="$OUT/$name-$accel.img"
+        rm -f "$data" "$log.pcap"
+        truncate -s 64m "$data"
+        boot "$log" --iso "$iso" --accel "$accel" --acpi "$acpi" --smp "${SMP:-4}" --headless \
+            --data "$data" --pcap "$log.pcap" --fwd "${FWD:-none}" || status=$?
         check "$name [$accel]" "$log" "$status" "$@"
     done
 }
@@ -114,15 +118,19 @@ MEMORY_OK=("vm: switched to kernel tables" "selftest: frames ok" "page tables lo
 TIME_OK=("gic: v3 at gicd=0x8000000" "timer: counter [0-9]+ Hz, virtual timer PPI 27" "tick 10$"
     "irq latency \(busy-poll, 25 samples\) min=[0-9]+" "irq latency \(wfi, 25 samples\) min=[0-9]+"
     "timer: 5[0-9] ticks in [0-9]+ ms")
+DEV_OK=("pci: ECAM 0x4010000000 buses 0-255" "virtio-blk" "virtio-net" "virtio-rng"
+    "entropy: [0-9]+ bytes from virtio-rng" "entropy: ChaCha20 CSPRNG seeded"
+    "blk: self-test ok \(4 KiB random pattern written, flushed, read back" "net: gratuitous ARP sent"
+    "net: rx ok, ARP reply from 52:55:0a:00:02:02")
 SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordered pairs ping-pong ok"
     "smp: 4/4 cpus ticking on their own timer")
 
 scenario boot-acpi "smoke" on \
     "$BOOT_LINE" "platform: discovered via Acpi" "console: pl011 at 0x9000000" "psci 1\.[0-9]+ via hvc" \
-    "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${SMP4_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
+    "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${DEV_OK[@]}" "${SMP4_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 scenario boot-dtb "smoke" off \
     "$BOOT_LINE" "platform: discovered via DeviceTree" "console: pl011 at 0x9000000" "${MEMORY_OK[@]}" \
-    "${TIME_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
+    "${TIME_OK[@]}" "${DEV_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 scenario fault-data-abort "smoke test=data-abort" on \
     "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
     "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \
@@ -152,6 +160,32 @@ scenario pac-forgery "smoke test=pac" on \
     "pointer authentication failure|instruction abort" "NOT:was NOT detected" "NOT:URMQTT READY"
 scenario bti-violation "smoke test=bti" on \
     "branch target exception \(BTI\)" "NOT:was NOT detected" "NOT:URMQTT READY"
+
+# M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
+pcap_has_garp() {
+    python3 -I - "$1" <<'PY'
+import struct, sys
+data = open(sys.argv[1], "rb").read()
+off, found = 24, False
+while off + 16 <= len(data):
+    incl = struct.unpack_from("<I", data, off + 8)[0]
+    pkt = data[off + 16 : off + 16 + incl]
+    off += 16 + incl
+    if len(pkt) >= 42 and pkt[12:14] == b"\x08\x06" and pkt[6:12] == bytes.fromhex("525400123456") \
+            and pkt[20:22] == b"\x00\x01" and pkt[28:32] == bytes(4) and pkt[38:42] == bytes(4):
+        found = True
+sys.exit(0 if found else 1)
+PY
+}
+for accel in $ACCELS; do
+    if pcap_has_garp "$OUT/boot-acpi-$accel.log.pcap"; then
+        echo "  ✓ gratuitous ARP from 52:54:00:12:34:56 found in pcap [$accel]"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ gratuitous ARP missing from $OUT/boot-acpi-$accel.log.pcap"
+        FAILED=$((FAILED + 1))
+    fi
+done
 
 # M5: DTB and ACPI must describe the same machine identically.
 for accel in $ACCELS; do
