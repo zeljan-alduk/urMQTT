@@ -384,6 +384,27 @@ PY
     done
 }
 
+# M17: the raw GPT image boots from a virtio-blk disk, as on a KVM host or
+# a cloud server; the kernel must leave that disk alone and use the blank
+# second disk for data.
+raw_disk() {
+    local esp="$OUT/raw-esp.img" raw="$OUT/raw.img"
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$OUT/raw.iso" --cmdline "smoke" --esp-out "$esp" >/dev/null
+    python3 -I "$ROOT/scripts/mkraw.py" "$esp" "$raw" >/dev/null
+    for accel in $ACCELS; do
+        local log="$OUT/raw-disk-$accel.log" data="$OUT/raw-disk-$accel.img" boot="$OUT/raw-boot-$accel.img" status=0
+        rm -f "$data"
+        truncate -s 64m "$data"
+        cp "$raw" "$boot"
+        boot "$log" --disk "$boot" --accel "$accel" --headless --data "$data" || status=$?
+        if ! cmp -s "$raw" "$boot"; then
+            echo "BOOT DISK MODIFIED" >>"$log"
+        fi
+        check "raw-disk [$accel]" "$log" "$status" "blk: 00:0[0-9a-f]\.0 skipped: partitioned \(a boot disk\)" \
+            "storage: data disk formatted \(was blank\)" "^URMQTT READY$" "NOT:BOOT DISK MODIFIED" "$NO_FAULT"
+    done
+}
+
 [[ -f "$KERNEL" ]] || { echo "error: $KERNEL not found (make build)" >&2; exit 1; }
 rm -f "$OUT"/*.iso
 echo "smoke: accelerators: $ACCELS"
@@ -502,6 +523,7 @@ if command -v mosquitto_pub >/dev/null; then
 fi
 storm
 observability
+raw_disk
 
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
 pcap_has_garp() {

@@ -24,6 +24,17 @@ KERNEL_ELF  := target/$(TARGET)/release/urmqtt
 ISO         := $(BUILD_DIR)/urmqtt-$(ENV)-$(VERSION).iso
 DATA_IMG    := $(BUILD_DIR)/data.img
 
+# Reproducible images (M17): paths of the toolchain, the crate cache and the
+# checkout are remapped, so neither the home directory nor the checkout
+# location ends up in the kernel. Cargo merges this with the rustflags of
+# .cargo/config.toml (branch protection).
+SYSROOT     := $(shell rustc --print sysroot 2>/dev/null)
+CARGO_DIR   := $(or $(CARGO_HOME),$(HOME)/.cargo)
+export CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS := \
+	--remap-path-prefix=$(SYSROOT)=/rustc --remap-path-prefix=$(CARGO_DIR)=/cargo \
+	--remap-path-prefix=$(CURDIR)=/urmqtt
+# Dev images carry the in-guest benchmark and its TLS client; others do not.
+KERNEL_FEATURES := $(if $(filter dev,$(ENV)),--features selftest)
 export URMQTT_ENV := $(ENV)
 export URMQTT_VERSION := $(VERSION)
 ACCEL ?=
@@ -45,7 +56,7 @@ certs: ## Generate development certificates into deploy/dev/ (idempotent)
 
 .PHONY: build
 build: $(if $(filter dev,$(ENV)),certs) ## Build the kernel ELF (release, LTO, panic=abort)
-	$(CARGO) build $(CARGO_FLAGS) $(KERNEL_FLAGS) --release -p urmqtt-kernel --target $(TARGET)
+	$(CARGO) build $(CARGO_FLAGS) $(KERNEL_FLAGS) $(KERNEL_FEATURES) --release -p urmqtt-kernel --target $(TARGET)
 	@printf 'kernel: %s (%s bytes)\n' "$(KERNEL_ELF)" "$$(wc -c < $(KERNEL_ELF) | tr -d ' ')"
 
 .PHONY: iso
@@ -87,6 +98,7 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	cd fuzz && $(CARGO) fmt --check
 	$(CARGO) clippy $(CARGO_FLAGS) --workspace --all-targets -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-kernel --target $(TARGET) -- -D warnings
+	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-kernel --target $(TARGET) -- -D warnings
 	$(CARGO) test $(CARGO_FLAGS) --workspace
 
 .PHONY: fuzz
@@ -108,12 +120,33 @@ loadtest: certs ## Host-side load generator, e.g. ARGS="handshake --port 18883 -
 bench: build certs ## Multicore benchmarks (in-guest dp-bench + network handshakes), table to stdout
 	scripts/bench.sh
 
+RAW := $(BUILD_DIR)/urmqtt-$(ENV)-$(VERSION).img
+
+.PHONY: raw
+raw: build ## Build a raw GPT disk image (EFI system partition) for KVM/Proxmox/cloud disks
+	@mkdir -p $(BUILD_DIR)
+	scripts/mkiso.sh --kernel $(KERNEL_ELF) --out $(BUILD_DIR)/.raw-tmp.iso --esp-out $(BUILD_DIR)/.esp.img >/dev/null
+	scripts/mkraw.py $(BUILD_DIR)/.esp.img $(RAW)
+	@rm -f $(BUILD_DIR)/.raw-tmp.iso $(BUILD_DIR)/.esp.img
+
 .PHONY: dist
-dist: iso ## Collect release artifacts and SHA256SUMS into build/dist/
+dist: iso raw ## Release artifacts (ELF, ISO, raw image) and SHA256SUMS in build/dist/
 	@rm -rf $(BUILD_DIR)/dist && mkdir -p $(BUILD_DIR)/dist
 	cp $(KERNEL_ELF) $(BUILD_DIR)/dist/urmqtt-$(ENV)-$(VERSION).elf
-	cp $(ISO) $(BUILD_DIR)/dist/
+	cp $(ISO) $(RAW) $(BUILD_DIR)/dist/
 	cd $(BUILD_DIR)/dist && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
+
+.PHONY: sign
+sign: ## Sign build/dist/SHA256SUMS with minisign (MINISIGN_KEY=path to the secret key)
+	@test -s $(BUILD_DIR)/dist/SHA256SUMS || { echo "make sign: run make dist first" >&2; exit 1; }
+	@command -v minisign >/dev/null || { echo "make sign: install minisign" >&2; exit 1; }
+	minisign -S -s "$(or $(MINISIGN_KEY),$(HOME)/.minisign/minisign.key)" -m $(BUILD_DIR)/dist/SHA256SUMS \
+		-t "urMQTT $(VERSION) $(ENV) $$(git rev-parse HEAD)"
+	@echo "verify: minisign -Vm SHA256SUMS -p minisign.pub && shasum -a 256 -c SHA256SUMS"
+
+.PHONY: repro
+repro: ## Build HEAD twice in separate worktrees and compare ELF and ISO (ENV=prod by default)
+	scripts/repro.sh $(if $(filter command line,$(origin ENV)),$(ENV),prod)
 
 .PHONY: clean
 clean: ## Remove build outputs (keeps certificates and data.img)

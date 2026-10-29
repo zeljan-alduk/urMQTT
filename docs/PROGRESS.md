@@ -643,3 +643,37 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - There is no limit on established connections per source address.
 - Revocations still need a new image (now enforced for resumed sessions too).
 - M14's CI run failed on `cargo fmt` (an import order in `kernel/src/main.rs`); fixed in the M15 commit.
+
+## M17 — Deployment (2026-10-29)
+
+**Done** (ADR-036, [DEPLOY.md](DEPLOY.md))
+
+- **Reproducible images:**
+  - Toolchain, crate-cache and checkout paths are remapped in kernel builds. The ELF used to contain 76 strings with the builder's home directory; it now contains none.
+  - `scripts/repro.sh` / `make repro` builds HEAD twice, in two fresh worktrees at paths of different depth with separate target directories, and compares the kernel ELF, the ISO and the raw image.
+  - A new CI job runs it for prod with throwaway certificates.
+- **Raw GPT disk image** (`make raw`, `scripts/mkraw.py`) with the EFI system partition from `mkiso.sh`; GUIDs derived from content, size in whole MiBs. `run-qemu.sh --disk` boots it from virtio-blk.
+- **Data-disk selection fix:** disks with an MBR or GPT are never used as the data disk. Before, the first virtio-blk disk was taken, and its self-test overwrote the last sectors of what would be the boot disk.
+- **Signing:**
+  - `make sign` (minisign over `SHA256SUMS`, trusted comment with version, environment and commit).
+  - The release workflow signs when `MINISIGN_SECRET_KEY` is set, and keeps its SLSA provenance.
+  - `make dist` now ships ELF, ISO and raw image.
+- **Dev code out of prod:** the dp-bench and the TLS client sit behind the `selftest` feature, which only dev builds enable. CI lints both variants.
+- **Production defaults:**
+  - heap 1024 MiB (it was 8 MiB, about ten thousand connections), `min_free_mb = 64`;
+  - watchdog `drop` at 20 ms (since M16).
+- **docs/DEPLOY.md:** inputs and sizing, build, verification (repro and minisign), virtual hardware requirements, libvirt/virt-install and Proxmox steps, the Hetzner CAX path with its caveat, operations (logs, metrics, failure handling, revocation, key rotation, backups).
+
+**Measured**
+
+- `make repro` (prod, commit 06bc1e2): ELF `7c5d50c2…`, ISO `0ce0eddb…` and raw image `798b1f27…` identical in both builds (47 s).
+- `make smoke`: **70/70**, including `raw-disk` (HVF and TCG): the boot disk is skipped, the data disk is formatted, the boot disk is byte-identical afterwards.
+- `make dist` + `make sign` + `minisign -Vm` + `shasum -c` checked end to end with a throwaway key.
+- Kernel ELF: prod 2 214 352 bytes, dev 2 399 120 bytes.
+
+**Known gaps**
+
+- Not validated on real cloud hardware. Hetzner CAX likely exposes virtio-scsi disks, and urMQTT drives only virtio-blk.
+- No project signing key is created here: the key holder generates it and sets `MINISIGN_SECRET_KEY`.
+- Identical images across different host operating systems are not tested (the same host platform is).
+- Oracle Cloud and ACPI-only validation on real ARM servers remain future work.

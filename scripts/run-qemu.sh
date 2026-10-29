@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2054  # QEMU option syntax uses commas inside one argument
-# Boots an urMQTT ISO in QEMU (aarch64 virt, GICv3, UEFI).
+# Boots an urMQTT ISO (or raw disk image) in QEMU (aarch64 virt, GICv3, UEFI).
 #
-#   scripts/run-qemu.sh --iso ISO [--accel hvf|tcg|kvm] [--smp N] [--mem 512M]
+#   scripts/run-qemu.sh --iso ISO | --disk RAW [--accel hvf|tcg|kvm] [--smp N] [--mem 512M]
 #                       [--data IMG] [--acpi on|off] [--serial FILE] [--headless]
 #                       [--pcap FILE] [--gdb] [--no-net] [--fwd HOST:GUEST,...]
 #                       [-- extra qemu args]
 #
+# --disk boots the raw GPT image (mkraw.py) as a virtio-blk disk, like a
+# KVM host or a cloud server would; the data disk is a second virtio-blk.
 # --fwd replaces the default port forwards (1883 and 8883 on 127.0.0.1);
 # --fwd none disables them.
 #
@@ -14,12 +16,13 @@
 # Option ROMs are disabled (romfile=): no iPXE in the firmware, faster boot.
 set -euo pipefail
 
-ISO="" ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
+ISO="" DISK="" ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
 FWD="1883:1883,8883:8883"
 EXTRA=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --iso) ISO=$2; shift 2 ;;
+        --disk) DISK=$2; shift 2 ;;
         --accel) ACCEL=$2; shift 2 ;;
         --smp) SMP=$2; shift 2 ;;
         --mem) MEM=$2; shift 2 ;;
@@ -35,7 +38,11 @@ while [[ $# -gt 0 ]]; do
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
-[[ -f "$ISO" ]] || { echo "error: ISO '$ISO' not found (run make iso)" >&2; exit 1; }
+if [[ -n "$DISK" ]]; then
+    [[ -f "$DISK" ]] || { echo "error: disk image '$DISK' not found (run make raw)" >&2; exit 1; }
+else
+    [[ -f "$ISO" ]] || { echo "error: ISO '$ISO' not found (run make iso)" >&2; exit 1; }
+fi
 
 if [[ -z "$ACCEL" ]]; then
     case "$(uname -s)-$(uname -m)" in
@@ -69,12 +76,16 @@ ARGS=(
     -machine "virt,gic-version=3,acpi=$ACPI"
     -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
     -bios "$FW"
-    -drive "if=none,id=cd0,file=$ISO,format=raw,readonly=on,media=cdrom"
-    -device virtio-scsi-pci,id=scsi0,romfile= -device scsi-cd,drive=cd0,bus=scsi0.0,bootindex=0
     -device virtio-rng-pci,romfile=
     -device ramfb
     -display none -no-reboot
 )
+if [[ -n "$DISK" ]]; then
+    ARGS+=(-drive "if=none,id=boot0,file=$DISK,format=raw,cache=none" -device virtio-blk-pci,drive=boot0,bootindex=0,romfile=)
+else
+    ARGS+=(-drive "if=none,id=cd0,file=$ISO,format=raw,readonly=on,media=cdrom"
+        -device virtio-scsi-pci,id=scsi0,romfile= -device scsi-cd,drive=cd0,bus=scsi0.0,bootindex=0)
+fi
 if [[ -n "$DATA" ]]; then
     ARGS+=(-drive "if=none,id=data0,file=$DATA,format=raw,cache=none" -device virtio-blk-pci,drive=data0,romfile=)
 fi

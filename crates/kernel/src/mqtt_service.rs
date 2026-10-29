@@ -354,6 +354,7 @@ pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
     }
 }
 
+#[cfg(feature = "selftest")]
 /// The TLS server as configured (build-time revocation list), for
 /// `test=dp-bench`.
 pub fn tls_server_for_bench() -> Option<TlsServer> {

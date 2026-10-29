@@ -33,6 +33,12 @@ rand_chacha = { version = "0.3", default-features = false }
 zeroize = { version = "1.8", default-features = false }
 urmqtt-arch-aarch64 = { path = "../arch-aarch64" }
 
+[features]
+# The sans-IO TLS client, for in-kernel self-tests (dev images only, M17).
+client = []
+
 [dev-dependencies]
+# The host tests use our own client as well.
+urmqtt-tls = { path = ".", features = ["client"] }
 # A real rustls client (std) drives our server in the host tests.
 rustls = { version = "=0.23.46", default-features = false, features = ["std"] }

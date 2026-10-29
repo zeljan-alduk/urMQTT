@@ -11,7 +11,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M16)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M17)-red)
 
 </div>
 
@@ -35,6 +35,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M14**: own server-only TCP/IP stack (SYN cookies, timing wheel, NewReno, ACK coalescing) and DHCP client; smoltcp removed
 > - **M15**: 494 B per idle mTLS connection at 10k (heap blocks, allocator rounding included): compact state, per-record TLS key derivation, device-scoped subscriptions without per-device trie nodes
 > - **M16**: admission that survives reconnect storms (free-heap reserve, in-flight limits per core and per source address, DB backpressure), handler watchdog, health check, rate-limited logs, syslog (RFC 5424) and statsd over UDP, 11 fuzz targets in CI, threat model
+> - **M17**: bit-identical rebuilds (checked in CI), raw GPT disk image next to the ISO, minisign signatures, dev-only code out of production images, deployment guide for KVM/Proxmox and Hetzner
 >
 > The kernel boots under QEMU with HVF and TCG. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
@@ -87,7 +88,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | **Build** | Reproducible workspace, pinned toolchain, `--locked` everywhere | ✅ M0 |
 | | Build-time configuration, validated, compiled to constants | ✅ M0 |
 | | Bootable UEFI ISO (Limine) for aarch64 | ✅ M1 |
-| | Bit-for-bit reproducible, signed images; raw disk image | 📋 M17 |
+| | Bit-for-bit reproducible (checked in CI), minisign-signed images; ISO and raw GPT disk image | ✅ M17 |
 | **Kernel** | EL1 exception vectors with decoded ESR/ELR/FAR reports | ✅ M1 |
 | | Own page tables with W^X, guard pages, PAC/BTI when present | ✅ M2 |
 | | GICv3, generic timer, monotonic clock | ✅ M3 |
@@ -758,8 +759,8 @@ against the same data disk.
 | Target | Path | Status |
 |---|---|---|
 | QEMU (macOS HVF / Linux KVM / TCG) | `make run`, `make run-tcg` | ✅ M1 |
-| Generic KVM / Proxmox (aarch64) | UEFI VM, ISO or raw image, virtio-net/blk/rng | 📋 M17 |
-| Hetzner Cloud CAX (Ampere) | raw image via rescue system and snapshot | 📋 M17 |
+| Generic KVM / Proxmox (aarch64) | UEFI VM, raw image (or ISO) + blank data disk, virtio-net/blk/rng | ✅ M17 (raw-disk boot tested in QEMU) |
+| Hetzner Cloud CAX (Ampere) | raw image written from the rescue system | 📖 documented, not validated (virtio-scsi disks likely need a driver) |
 | Oracle Cloud Always Free (Ampere A1) | custom image import, paravirtualized (virtio) | 📋 after M5 + M17 |
 
 Platforms that expose only non-virtio devices (AWS ENA/NVMe, Azure MANA) are not supported.
@@ -767,8 +768,9 @@ Details are in [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ```bash
 # Production build: put your own ca.pem, server.pem and server.key in deploy/prod/ (never commit them)
-make iso ENV=prod
-shasum -a 256 build/urmqtt-prod-*.iso
+make dist ENV=prod       # build/dist/: .elf, .iso, .img (raw GPT disk) + SHA256SUMS
+make repro               # rebuild HEAD twice in fresh worktrees: ELF, ISO and raw image must be identical
+make sign                # minisign signature over SHA256SUMS (MINISIGN_KEY=... for another key)
 ```
 
 > [!CAUTION]
@@ -786,9 +788,12 @@ shasum -a 256 build/urmqtt-prod-*.iso
 | `make smoke` | Headless boot and fault scenarios under HVF + TCG (TCG only in CI), serial-log checks |
 | `make data-img` | Blank sparse data disk (formatted by the kernel on first boot) |
 | `make fuzz T=<target>` | Bounded cargo-fuzz run (`FUZZ_TIME`, default 600 s) |
-| `make loadtest` | Host-side load generator (`handshake` / `hold` modes) |
+| `make loadtest` | Host-side load generator (`handshake` / `hold` / `storm` modes) |
 | `make bench` | Multicore benchmark table (in-guest and network) |
-| `make dist` | Release artifacts plus `SHA256SUMS` in `build/dist/` |
+| `make raw ENV=…` | Raw GPT disk image (EFI system partition) for KVM/Proxmox/cloud disks |
+| `make dist` | Release artifacts (ELF, ISO, raw image) plus `SHA256SUMS` in `build/dist/` |
+| `make repro` | Reproducibility check: HEAD built twice in separate worktrees, compared byte for byte |
+| `make sign` | minisign signature over `build/dist/SHA256SUMS` |
 | `make certs` | Development certificates (idempotent; `scripts/gen-dev-certs.sh --force` regenerates) |
 
 Ground rules (details in [CONTRIBUTING.md](CONTRIBUTING.md)):
@@ -847,7 +852,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M14** Own TCP stack | smoltcp replaced; loss simulation tests; segment fuzzing |
 | ✅ | **M15** Memory per connection | 494 B per idle mTLS connection at 10k, allocator rounding included |
 | ✅ | **M16** Hardening & ops | threat model; reconnect storms beyond the heap refused cleanly, memory returned |
-| 📋 | **M17** Deployment | bit-identical ISO rebuilds, signatures, cloud guides |
+| ✅ | **M17** Deployment | bit-identical rebuilds checked in CI, raw disk image, minisign, KVM/Proxmox/Hetzner guide |
 
 Later: MQTT 5.0, QoS 2, IPv6, cold-session compression, SQLite isolation at EL0, an export bridge,
 and ACPI-only validation on real ARM clouds.

@@ -39,7 +39,9 @@ jobs:
       - name: clippy (host)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: clippy (aarch64-unknown-none)
-        run: cargo clippy --locked -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem -p urmqtt-kernel --target aarch64-unknown-none -- -D warnings
+        run: |
+          cargo clippy --locked -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem -p urmqtt-kernel --target aarch64-unknown-none -- -D warnings
+          cargo clippy --locked -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --features selftest -p urmqtt-kernel --target aarch64-unknown-none -- -D warnings
       - uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
@@ -113,6 +115,26 @@ jobs:
           path: target/aarch64-unknown-none/release/urmqtt
           if-no-files-found: error
           retention-days: 14
+
+  repro:
+    name: Reproducible prod image (built twice)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: repro
+          bare-metal-c: "true"
+      - name: Install ISO tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends xorriso mtools
+      - run: make certs
+      - name: Stage throwaway certificates as prod inputs
+        run: cp deploy/dev/{ca.pem,server.pem,server.key} deploy/prod/
+      - run: scripts/repro.sh prod | tee -a "$GITHUB_STEP_SUMMARY"
 
   smoke:
     name: Smoke (QEMU TCG boot + fault reports)

@@ -15,6 +15,10 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+    env:
+      # Optional: a passwordless minisign secret key (minisign -G -W) in the
+      # repository secret MINISIGN_SECRET_KEY signs SHA256SUMS (M17).
+      HAS_MINISIGN: ${{ secrets.MINISIGN_SECRET_KEY != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -30,6 +34,16 @@ jobs:
       - name: Install ISO tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends xorriso mtools
       - run: make dist ENV=dev
+      - name: Sign SHA256SUMS with minisign
+        if: env.HAS_MINISIGN == 'true'
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          sudo apt-get install -y -qq --no-install-recommends minisign
+          key="$RUNNER_TEMP/minisign.key"
+          (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
+          minisign -S -s "$key" -m build/dist/SHA256SUMS -t "urMQTT $GITHUB_REF_NAME dev $GITHUB_SHA" </dev/null
+          rm -f "$key"
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: build/dist/*

@@ -279,7 +279,21 @@ fn probe_pci(
             DeviceType::Block if devs.blk.is_none() => {
                 let spi = v2m.as_mut().and_then(|v| setup_msix(&mut ecam, f.bdf, v));
                 let t = transport(&ecam, f.bdf)?;
-                let blk = VirtioBlk::new_with_msix(t, env, spi.map(|_| 0))?;
+                let mut blk = VirtioBlk::new_with_msix(t, env, spi.map(|_| 0))?;
+                // A partitioned disk is a boot disk (the raw image, M17),
+                // never the data disk: the self-test would write its last
+                // sectors (the backup GPT) and storage would refuse it.
+                let mut head = [0u8; 1024];
+                if blk.capacity_sectors >= 2
+                    && blk.read(env, 0, &mut head).is_ok()
+                    && is_partitioned(&head)
+                {
+                    info!(
+                        "blk: {} skipped: partitioned (a boot disk), not a data disk",
+                        f.bdf
+                    );
+                    continue;
+                }
                 if let Some(spi) = spi {
                     irq::register(spi, on_blk_irq);
                     irq::enable_spi(spi, smp::CPUS[0].mpidr.load(Ordering::Relaxed));
@@ -347,6 +361,16 @@ fn rndr_bytes() -> Option<[u8; 64]> {
 pub const BLK_SCRATCH_SECTORS: u64 = 8;
 
 /// Writes a random pattern to the scratch sectors, flushes, reads it back.
+/// An MBR boot signature or a GPT header in the first two sectors. Our
+/// own data disks start with the urMQTT superblock (no 0x55AA at 510) or
+/// are blank.
+fn is_partitioned(head: &[u8; 1024]) -> bool {
+    if head.get(..8) == Some(&urmqtt_store::layout::MAGIC[..]) {
+        return false;
+    }
+    head.get(510..512) == Some(&[0x55, 0xaa][..]) || head.get(512..520) == Some(&b"EFI PART"[..])
+}
+
 pub fn blk_selftest() -> Result<(), &'static str> {
     let env = KernelEnv;
     let mut devs = DEVICES.lock();

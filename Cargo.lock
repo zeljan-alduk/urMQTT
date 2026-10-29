@@ -1481,6 +1481,7 @@ dependencies = [
  "rustls-webpki",
  "sha2",
  "urmqtt-arch-aarch64",
+ "urmqtt-tls",
  "x25519-dalek",
  "x509-cert",
  "zeroize",

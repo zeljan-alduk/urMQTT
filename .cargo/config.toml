@@ -1,5 +1,6 @@
 # Kernel (bare-metal) builds are instrumented for PAC and BTI (ADR-002).
 # They also need -Zbuild-std, which the Makefile passes (KERNEL_FLAGS);
-# host builds and tests are unaffected.
+# host builds and tests are unaffected. The Makefile adds path
+# remapping through CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS (M17).
 [target.aarch64-unknown-none]
 rustflags = ["-Zbranch-protection=bti,pac-ret"]

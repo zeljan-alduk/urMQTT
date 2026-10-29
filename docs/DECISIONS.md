@@ -456,3 +456,30 @@ verified in the named milestone before it becomes Accepted).
   - Limits on established connections per source address.
   - Revocation without a new image.
   - Per-core metrics.
+
+## ADR-036 — Deployment: reproducible images, raw disk, minisign, dev code out of prod
+
+- **Status:** Accepted (M17).
+- **Reproducibility:**
+  - All inputs are pinned (toolchain, `Cargo.lock`, vendored Limine and SQLite with checksums).
+  - `SOURCE_DATE_EPOCH` is the commit time (ISO and FAT dates), and the FAT serial and the GPT GUIDs are derived from content.
+  - Rust paths are remapped through `CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS`: the sysroot to `/rustc`, the cargo home to `/cargo`, the checkout to `/urmqtt`. Cargo merges these with the branch-protection flags of `.cargo/config.toml`.
+  - C uses `-ffile-prefix-map`.
+  - Before the remap, the kernel contained 76 strings with the builder's home directory (and so the user name). Now it contains none.
+  - `scripts/repro.sh` (`make repro`) builds HEAD twice, in two worktrees at paths of different depth with separate target directories, and compares ELF, ISO and raw image. CI runs it for prod with throwaway certificates.
+  - The claim is the same commit, inputs and toolchain → bit-identical images. Identical images across different host operating systems are expected, but not tested.
+- **Raw disk image:**
+  - `scripts/mkraw.py` wraps the ESP that `mkiso.sh` already builds in a GPT disk: protective MBR, one EFI system partition at 1 MiB, backup GPT, size rounded to whole MiBs (O_DIRECT hosts reject unaligned sizes).
+  - Limine finds its config and the kernel on the ESP, as on the ISO.
+  - Booting from a disk exposed a real hazard: the first virtio-blk device used to become the data disk, and the block self-test writes its last sectors (the backup GPT). Disks with an MBR signature or a GPT header are now skipped (`raw-disk` smoke scenario: the boot disk is byte-identical after boot).
+- **Signatures:** minisign over `SHA256SUMS`, with version, environment and commit in the trusted comment (`make sign`).
+  - The release workflow signs when the repository secret `MINISIGN_SECRET_KEY` holds a passwordless key, and keeps its SLSA provenance attestation.
+  - No project key is generated here: the key holder creates it (`docs/DEPLOY.md`).
+- **Dev code out of prod:**
+  - The in-guest benchmark and the sans-IO TLS client sit behind the `selftest` kernel feature (`urmqtt-tls/client`), which the Makefile enables only for `ENV=dev`. CI lints both variants.
+  - The dev certificates for self-tests were already empty in prod. Dev-only command-line switches were already ignored there.
+  - The prod ELF is 2 214 352 bytes, against 2 399 120 for dev.
+- **Production defaults changed:** `memory.kernel_heap_mb = 1024` (it was 8, which holds about ten thousand connections) and `min_free_mb = 64`.
+- **Hetzner CAX:** the documented path is the raw image written from the rescue system.
+  - It is not validated on real hardware here. It is likely blocked by virtio-scsi disks, for which urMQTT has no driver.
+  - KVM/Proxmox with virtio-blk is the supported target. The guide says how to check the disk type first.

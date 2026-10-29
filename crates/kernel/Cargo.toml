@@ -33,5 +33,10 @@ urmqtt-platform = { path = "../platform" }
 urmqtt-tls = { path = "../tls" }
 urmqtt-virtio = { path = "../virtio" }
 
+[features]
+# Dev images: in-guest benchmarks and self-tests that need a TLS client.
+# Production images are built without it (M17).
+selftest = ["urmqtt-tls/client"]
+
 [lints]
 workspace = true
