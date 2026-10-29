@@ -40,6 +40,12 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > The kernel boots under QEMU with HVF and TCG. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
 
+> [!NOTE]
+> **Where this is going** ([roadmap](#next-one-multi-platform-iso-raw-disk-demonstrably-secure), planned, not yet built):
+> - **One multi-platform ISO** that boots on aarch64 and x86_64, by UEFI or legacy BIOS, in VMs and on bare-metal hardware.
+> - **No filesystem:** the data stays on a raw disk with its own minimal, specified layout.
+> - **Security work aimed at an external audit.**
+
 ---
 
 ## Contents
@@ -861,17 +867,61 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M16** Hardening & ops | threat model; reconnect storms beyond the heap refused cleanly, memory returned |
 | ✅ | **M17** Deployment | bit-identical rebuilds checked in CI, raw disk image, minisign, KVM/Proxmox/Hetzner guide |
 
-### Next: x86_64, one multi-arch ISO, bare metal
+### Next: one multi-platform ISO, raw disk, demonstrably secure
 
-Planned in [PROMPT-x86_64.md](PROMPT-x86_64.md). The detailed implementation and test plan, with findings,
-decisions, risks and the per-milestone scenarios, is in [docs/X86-PLAN.md](docs/X86-PLAN.md). The goal is one ISO
-that boots on aarch64 and x86_64, in VMs **and on bare-metal hardware**. The first bare-metal target is an Intel PC.
-Nothing below is implemented yet.
+The work after M17 is planned in three tracks. The order across them is set in [docs/PLAN.md](docs/PLAN.md),
+and each track has a detailed implementation and test plan. **Nothing below is implemented yet.**
+
+**The result:**
+
+- **One multi-platform ISO.** A single `urmqtt-<env>-<version>.iso` (and one raw GPT disk image) that boots on
+  aarch64 UEFI, x86_64 UEFI and x86_64 legacy BIOS. It runs in VMs (KVM, Proxmox, clouds) **and on bare-metal
+  hardware**, starting with an Intel PC. It stays an appliance with everything inside, reproducible and signed.
+- **No filesystem: raw disk access.** The data disk keeps its own minimal layout: a superblock, a region table,
+  fixed SQLite regions and a per-core telemetry log. There is no filesystem code to attack or corrupt. The storage
+  track adds tooling, growth, discard, backup, scrubbing and optional encryption, still without a filesystem.
+- **Demonstrably secure.** Runtime revocation and an allowlist without new images, differential and conformance
+  testing of the custom TLS and TCP code, exploit mitigations, SQLite isolated at EL0, Secure Boot, SBOM, and an
+  audit package for an external review.
+
+**Security assurance**: [PROMPT-security.md](PROMPT-security.md), plan in [docs/SECURITY-PLAN.md](docs/SECURITY-PLAN.md).
+Security is the first priority and wins conflicts with the other tracks.
+
+| | Milestone | Acceptance |
+|---|---|---|
+| 📋 | **H0** Baseline & inventory | `docs/AUDIT.md`: TCB and `unsafe` inventory, parser list, mitigation matrix with tests, 9 questions answered from the code |
+| 📋 | **H1** Identity lifecycle | runtime revocation over a signed (Ed25519, offline key) control channel; live connections of a revoked device closed; allowlist mode; CA roles and rotation; build fails on expiring certificates |
+| 📋 | **H2** TLS assurance | 0-RTT refused (tested); record layer equal to a reference under differential fuzzing; constant-time checks; tlsfuzzer; interop matrix; rotating ticket keys |
+| 📋 | **H3** TCP/IP & DoS | RFC 5961/6528 with key rotation; scripted and model-based TCP tests; adversarial suite with bounded memory and CPU |
+| 📋 | **H4** Exploit mitigations | KASLR, stack protector, kCFI, MTE, hardened allocator, zeroization; IOMMU on bare metal |
+| 📋 | **H5** Verification tooling | Miri, Kani proofs, ASan/UBSan, stateful ACL fuzzing in CI |
+| 📋 | **H6** SQLite isolation | SQLite at EL0 on the DB core; an out-of-bounds write from SQLite cannot touch kernel memory |
+| 📋 | **H7** Time security | build time as a hard lower bound; optional SNTP with sanity limits; fail closed |
+| 📋 | **H8** Boot integrity | Limine config hash enrolled; Secure Boot with signed loaders (CI test and the Intel PC) |
+| 📋 | **H9** Supply chain | SBOM per release, cargo-vet audits, vulnerability-handling process |
+| 📋 | **H10** Audit package | everything an external auditor needs, with a prioritised audit scope |
+
+**Storage, raw disk without a filesystem**: [PROMPT-storage.md](PROMPT-storage.md), plan in [docs/STORAGE-PLAN.md](docs/STORAGE-PLAN.md).
+
+| | Milestone | Acceptance |
+|---|---|---|
+| 📋 | **S0** Disk format spec | `docs/DISK-FORMAT.md` byte-level and cross-checked against the code; golden v1 images |
+| 📋 | **S1** `urmqtt-disk` & safety | host tool sharing the kernel's parsers (info, verify, export, import); fault injection; never formats a disk with existing data |
+| 📋 | **S2** Layout v2 | regions aligned to 1 MiB and the device topology, zero misaligned writes; migration from v1 |
+| 📋 | **S3** Growing the disk | 1 → 4 → 64 GiB with data present, crash-safe at every write |
+| 📋 | **S4** Discard | thin-provisioned volumes shrink after retention; no throughput loss |
+| 📋 | **S5** In-disk backup | A/B database snapshots; optional restore on corruption |
+| 📋 | **S6** Scrubbing | bit flips found and reported within an I/O budget |
+| 📋 | **S7** Encryption at rest | optional AES-256-XTS with hardware AES, ≤ 5 % measured overhead |
+| 📋 | **S8** Docs & hardening | final format spec, fuzz targets and golden images for every version |
+
+**Platforms: x86_64, the multi-platform ISO and bare metal**: [PROMPT-x86_64.md](PROMPT-x86_64.md), plan in
+[docs/X86-PLAN.md](docs/X86-PLAN.md).
 
 | | Milestone | Acceptance |
 |---|---|---|
 | 📋 | **X0** Arch facade & dispatch | aarch64 unchanged (smoke, bench, bytes/connection, repro); no aarch64 assembly outside `arch-aarch64` |
-| 📋 | **X0b** aarch64 hardware crypto | ARMv8 AES/PMULL/SHA2/CRC32 selected at boot (today all software), KATs + differential fuzzing equal, measured faster |
+| 📋 | **X0b** aarch64 hardware crypto | ARMv8 AES/PMULL/SHA2/CRC32 selected at boot (today all software); KATs and differential fuzzing equal; measured faster |
 | 📋 | **X1** x86_64 builds | `make build ARCH=x86_64`, clippy on both targets, FP/SIMD policy decided, CI KVM probe |
 | 📋 | **X2** x86 boot & exceptions | q35+OVMF and pc+SeaBIOS boot; decoded fault reports; x86-64-v2 check refuses old CPUs with a clear message |
 | 📋 | **X3** x86 memory protection | NX, W^X, WP, SMEP/SMAP/UMIP, locked tables, guard pages; CET when available |
@@ -880,17 +930,31 @@ Nothing below is implemented yet.
 | 📋 | **X6** x86 platform discovery | ACPI (MADT, MCFG, FADT, HPET, SPCR) summaries on q35 and pc; fuzzed |
 | 📋 | **X7** x86 PCI & virtio | ECAM and port-I/O config; blk/scsi/net/rng self-tests on q35 and pc |
 | 📋 | **X8** x86 feature parity | all MQTT, TLS, DB, telemetry, crash and storm scenarios on x86_64; data disks portable across architectures |
-| 📋 | **X10** One multi-arch ISO | the same ISO boots on aarch64 UEFI, x86_64 UEFI and BIOS; bit-identical rebuilds |
-| 📋 | **X12** Bare-metal foundation | hybrid ISO boots from a USB stick; `hwreport` mode; disks with existing data never formatted; framebuffer console |
+| 📋 | **X10** One multi-platform ISO | the same ISO file boots on aarch64 UEFI, x86_64 UEFI and BIOS; bit-identical rebuilds |
+| 📋 | **X12** Bare-metal foundation | hybrid ISO boots from a USB stick; read-only `hwreport` mode; framebuffer console |
 | 📋 | **X13** NVMe & AHCI | storage and crash scenarios on QEMU models and on the test PC, including a real power cut |
-| 📋 | **X14** Hardware NICs | e1000e/igb (QEMU-tested), then the test PC's onboard NIC (Intel I219/I225 or Realtek); MQTT and storm on the LAN |
+| 📋 | **X14** Hardware NICs | e1000e/igb (QEMU-tested), then the test PC's onboard NIC; MQTT and storm on the LAN |
 | 📋 | **X15** aarch64 bare metal (optional) | GICv3 ITS for MSI-X; Ampere servers; Raspberry Pi 4 via UEFI firmware |
 | 📋 | **X16** Hardware compatibility list | `docs/HARDWARE.md` (to be created) with a row per machine; bare-metal claims only for listed machines |
-| 📋 | **X9** x86 CPU optimisations | AES-NI, SHA-NI, CRC32, AVX2, VAES chosen at boot; KATs + differential fuzzing; on by default only if faster on real hardware |
-| 📋 | **X11** Measurements & docs | bytes/connection, handshakes/s and scaling on real x86 hardware; every documented number backed by a PROGRESS entry |
+| 📋 | **X9** x86 CPU optimisations | AES-NI, SHA-NI, CRC32, AVX2, VAES chosen at boot; on by default only if faster on real hardware |
+| 📋 | **X11** Measurements & docs | bytes/connection, handshakes/s and scaling on real x86 hardware, every number backed by PROGRESS |
 
-The order puts the universal ISO and bare metal before the x86 optimisations: a fast kernel that cannot drive the
-machine's NIC is not useful. riscv64 is a later, separate step (PROMPT-x86_64.md §9).
+**Order** ([docs/PLAN.md](docs/PLAN.md)):
+
+1. Baseline: H0, S0.
+2. Arch facade: X0.
+3. The biggest gaps: H1, S1.
+4. aarch64 hardware crypto: X0b.
+5. TLS/TCP assurance and verification tooling: H2, H3, H5.
+6. Disk format v2 and its features: S2–S6.
+7. The x86 port: X1–X8.
+8. Mitigations on both architectures: H4, H6, H7.
+9. The multi-platform ISO and trusted boot: X10, H8.
+10. Bare metal: X12–X16.
+11. Optimisations, encryption and release readiness: X9, S7, H9, X11, S8.
+12. The audit package: H10.
+
+riscv64 is a later, separate step (PROMPT-x86_64.md §9).
 
 Later: MQTT 5.0, QoS 2, IPv6, cold-session compression, SQLite isolation at EL0, an export bridge,
 and ACPI-only validation on real ARM clouds.

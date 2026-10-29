@@ -4,7 +4,10 @@ Plan for [`PROMPT-x86_64.md`](../PROMPT-x86_64.md) (milestones X0–X11), plus
 a bare-metal track (X12–X16). The ISO must also boot and serve **on real
 hardware without a hypervisor**, a requirement the user added on 2026-10-29.
 The first bare-metal target is the user's Intel x86_64 PC with 16 GB of RAM.
-Written 2026-10-29 against commit `2c34019`, before any x86 code exists. Every
+Written 2026-10-29 against commit `2c34019`, before any x86 code exists. It is
+part of the overall plan in [PLAN.md](PLAN.md), next to
+[SECURITY-PLAN.md](SECURITY-PLAN.md) and [STORAGE-PLAN.md](STORAGE-PLAN.md),
+which also sets the order across the three tracks. Every
 "verified" statement below was checked in this repository or its pinned
 dependencies on that date. Everything else is marked **to verify** and has a
 step in the milestone that needs it.
@@ -353,7 +356,7 @@ real hardware stay marked experimental.
 
 **Work**
 - **Boot media.** The universal ISO (X10) is made hybrid, so `dd` onto a USB stick boots by UEFI and, on x86, BIOS (Limine `bios-install`, `xorriso -isohybrid-gpt-basdat`, **to verify**).
-- **Secure Boot.** Most PCs ship with it on and Limine is not Microsoft-signed. Document both paths: turn Secure Boot off, or sign `BOOTX64.EFI` with an own key enrolled in the firmware `db` (`sbsign`), with the config pinned by `limine enroll-config`.
+- **Secure Boot.** Most PCs ship with it on and Limine is not Microsoft-signed. The signing and enrollment work is SECURITY-PLAN **H8**. X12 documents the interim path (turn Secure Boot off) and tests H8's signed loaders on the PC once they exist.
 - **Console without serial.** Most PCs have no serial port, so the framebuffer is the primary console. It needs:
   - readable fonts at high resolutions;
   - a persistent last-screen summary (IP address, listener, errors) after the scrolling log;
@@ -366,20 +369,13 @@ real hardware stay marked experimental.
   - disks with model, serial and size, plus the partition and signature scan.
 
   This is the first thing run on any new machine.
-- **Data-disk safety** (F10):
-  - Detect signatures before calling a disk blank: MBR/GPT, ext2/3/4, XFS, btrfs, NTFS, FAT, exFAT, LVM, mdraid, LUKS, ZFS labels, swap, ISO 9660. Any match: never format.
-  - A blank check reads the first and last 1 MiB, not one block.
-  - Prod on bare metal formats only a disk named in config: `storage.data_disk = { serial = "…" }` or `{ model = "…", size_gb = … }`, plus `storage.allow_format = true`. A VM keeps today's behaviour, chosen by an explicit config key, never by guessing.
+- **Data-disk safety** (F10) is owned by STORAGE-PLAN **S1**, which comes earlier: signature scan, two-ended blank check, the boot self-test only on an identified disk, and formatting only the disk named in config. X12 depends on it and tests it on the PC.
 - **More CPUs.** MAX_CPUS goes from 64 to 256 (x2APIC; desktop SMT and hybrid P/E-core CPUs report many threads). Topology is logged; NUMA is logged and ignored for now.
 - **Power.** ACPI reset and S5 (D5) become essential on real hardware.
 
 **Tests**
-- Host tests: signature detection against a fixture per filesystem (images made with `mkfs.*` in CI on Linux and stored as small sparse fixtures), and the selection logic.
-- A new fuzz target, `disk_probe`.
-- Smoke scenarios:
-  - `baremetal-refuse-ext4`: a QEMU data disk holding a whole-disk ext4 must not be formatted;
-  - `baremetal-select-serial`: two disks, and only the one with the configured serial is used;
-  - `hwreport` under QEMU (q35 and pc, aarch64 virt).
+- Smoke `hwreport` under QEMU (q35 and pc, aarch64 virt).
+- S1's disk-safety scenarios (`refuse-foreign-ext4`, `select-by-serial`) also run with the bare-metal config.
 
 **Real hardware (Intel PC)**
 1. Boot from USB by UEFI (and BIOS if the firmware has CSM).
@@ -487,6 +483,8 @@ aarch64 keeps all 79 scenarios at every milestone.
 ---
 
 ## 5. Order and dependencies
+
+This section covers the platform track only. The order across all three tracks (security, storage, platforms) is set in [PLAN.md](PLAN.md); there, S2 (disk format v2) comes before X8, and H4/H6/H8 sit between X8 and the bare-metal milestones.
 
 ```
 X0 ─► X0b ─► X1 ─► X2 ─► X3 ─┐

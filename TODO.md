@@ -31,7 +31,7 @@ in [docs/PROGRESS.md](docs/PROGRESS.md).
   - does it have a serial port?
 
   This decides which NIC and storage drivers come first (docs/X86-PLAN.md, X12–X14).
-- [ ] Milestones X0 to X16 as in docs/X86-PLAN.md; the README roadmap shows their status.
+- [ ] Milestones H0–H10, S0–S8 and X0–X16 in the order of docs/PLAN.md; the README roadmap shows their status.
 
 ## Before a real release
 
