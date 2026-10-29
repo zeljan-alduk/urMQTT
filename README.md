@@ -11,7 +11,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M11)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M12)-red)
 
 </div>
 
@@ -30,6 +30,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M9**: broker core with QoS 0/1, wildcards, retained messages, LWT, persistent sessions and ACL, verified with mosquitto clients
 > - **M10**: TLS 1.3 with mutual TLS: rustls handshake, own crypto provider and record layer, revocation list, resumption, admission control
 > - **M11**: SQLite inside the kernel on a raw-disk VFS (WAL, exclusive), with a DB core fed by SPSC rings. State survives restarts and `kill -9`
+> - **M12**: per-core telemetry log with CRC per record, batched writes, crash recovery and torn-tail truncation, verified with a million records
 >
 > The kernel boots under QEMU with HVF and TCG. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
@@ -103,7 +104,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | MQTT 5.0, QoS 2 | 📋 later |
 | **Storage** | SQLite in the kernel over a raw virtio-blk VFS (WAL, exclusive), quick_check at boot | ✅ M11 |
 | | Device registry, revocations, retained messages, persistent sessions with offline queues | ✅ M11 |
-| | Per-core append-only telemetry log with CRC and crash recovery | 📋 M12 |
+| | Per-core append-only telemetry log with CRC and crash recovery | ✅ M12 |
 | **Scale** | Per-core event loops, slabs, buffer pools, cross-core fan-out | 📋 M13 |
 | | ≤ 512 B per idle TLS connection, measured at 10k/100k/1M | 📋 M15 |
 | **Ops** | Watchdog, rate limits, UDP syslog/statsd to a private collector | 📋 M16 |
@@ -232,13 +233,13 @@ The data lives on a separate virtio-blk disk with no filesystem:
 ```
 LBA 0      [ superblock: magic · layout version · uuid · region table · CRC-32C ]
 LBA 8, 16  [ file-size table, slots A/B (newest valid wins) ]
-LBA 64     [ SQLite main DB ½ ][ SQLite WAL ⅛ ][ journal 1 MiB ][ telemetry log (M12) … ]
+LBA 64     [ SQLite main DB ½ ][ SQLite WAL ⅛ ][ journal 1 MiB ][ telemetry log: 8 partitions … ]
 last 4 KiB [ scratch for the boot block-device self-test ]
 ```
 
 - **SQLite** (vendored 3.54.1, checksum-verified at build time) is compiled into the kernel with clang, freestanding, and uses a fixed `memsys5` heap. Its VFS maps three fixed files onto disk regions; there is no filesystem. It runs in WAL mode with `locking_mode=EXCLUSIVE` (so no shared-memory index) and `synchronous=FULL`, and the boot fails safe on `quick_check` errors. It holds the device registry, revocations, retained messages and persistent sessions with their offline QoS 1 queues.
 - **The DB core** (the highest-numbered CPU) runs SQLite and nothing else. The data plane sends it state changes over a lock-free SPSC ring; it batches them into one transaction per 5 ms or 512 operations and reports commits on a second ring. A blank disk is formatted on first boot; anything else is never formatted over.
-- **Telemetry** goes to per-core append-only segments with a CRC per record. On boot, recovery truncates a torn tail.
+- **Telemetry**: every accepted PUBLISH on `storage.telemetry_topics` goes to its core's partition of the telemetry log, a ring of segments with a CRC per record (salted with the segment sequence, so old ring passes never reappear). Cores hand records to the DB core over their own SPSC ring without copying. The DB core flushes every 5 ms or 256 KiB. On boot, recovery keeps every flushed record, truncates a torn tail and continues in a fresh segment. Retention is by size (the ring) and by age (`retention_days`).
 
 ## Repository layout
 
@@ -637,7 +638,8 @@ mosquitto_sub -h localhost -p 8883 --cafile $D/ca.pem --cert $D/devices/device-0
 
 The storage self-tests run from the command line of a dev image: `test=db-bench` measures batched
 against single-row commits, and `test=db-crash` followed by `test=db-verify` is the kill -9 test
-that `make smoke` runs.
+that `make smoke` runs. For the telemetry log, `test=log-crash` (every core but the DB core
+writes until the VM is killed) and `test=log-tear` are each followed by `test=log-verify`.
 
 ### 9. Load testing (M13)
 
@@ -757,7 +759,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M9** Broker over TCP (dev) | pub/sub, wildcards, retained, LWT, QoS 1 redelivery with mosquitto |
 | ✅ | **M10** TLS 1.3 + mTLS | mosquitto over mTLS; wrong CA, expired, client-id mismatch and revoked all rejected |
 | ✅ | **M11** SQLite in the kernel | data survives restarts and `kill -9` |
-| 📋 | **M12** Telemetry log | 1M messages; torn tail truncated on recovery |
+| ✅ | **M12** Telemetry log | 1M messages; torn tail truncated on recovery |
 | 📋 | **M13** Multicore data plane | near-linear scaling 1 → 2 → 4 cores |
 | 📋 | **M14** Own TCP stack | smoltcp replaced; loss simulation tests; segment fuzzing |
 | 📋 | **M15** Memory per connection | measured bytes per idle TLS connection ≤ 512 B |

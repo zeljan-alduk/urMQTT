@@ -29,6 +29,7 @@ pub mod layout;
 mod libc;
 pub mod schema;
 pub mod store;
+pub mod telemetry;
 pub mod vfs;
 
 use core::ffi::{CStr, c_char, c_int, c_void};

@@ -4,10 +4,10 @@
     scripts/mqtt-persist.py PORT --tls CERTDIR --phase 1|2
 
 Phase 1 (fresh disk): a retained message, a persistent session with a
-command subscription, and a QoS 1 command queued while that device is
-offline. The smoke test then kills QEMU (SIGKILL) and boots again on the
+command subscription, a QoS 1 command queued while that device is
+offline, and one telemetry PUBLISH. The smoke test then kills QEMU (SIGKILL) and boots again on the
 same disk. Phase 2: the retained message and the queued command must be
-delivered.
+delivered (the smoke test checks the telemetry record in the boot log).
 """
 import os
 import subprocess
@@ -46,9 +46,12 @@ if PHASE == "1":
                      "-t", "devices/device-002/cmd/#", "-E")
     rc3, _, e3 = run("mosquitto_pub", *base("backend"), "-t", "devices/device-002/cmd/persist",
                      "-m", "queued-while-offline", "-q", "1")
+    # One record for the telemetry log (storage.telemetry_topics).
+    rc4, _, e4 = run("mosquitto_pub", *base("device-001"), "-t", "devices/device-001/telemetry/temp",
+                     "-m", "21.5", "-q", "1")
     # Far longer than one DB batch (5 ms).
     time.sleep(0.5)
-    report("persist-phase1", rc1 == rc2 == rc3 == 0, f"{e1} {e2} {e3}")
+    report("persist-phase1", rc1 == rc2 == rc3 == rc4 == 0, f"{e1} {e2} {e3} {e4}")
 else:
     rc, out, err = run("mosquitto_sub", *base("backend"), "-t", "devices/+/fw", "-v", "-C", "1", "-W", "10")
     report("persist-retained", rc == 0 and out == "devices/device-001/fw 2.0.0-persist", f"{out!r} {err}")

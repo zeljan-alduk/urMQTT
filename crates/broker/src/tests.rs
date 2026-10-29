@@ -29,6 +29,7 @@ fn cfg() -> Config {
         max_outbound_bytes: 64 * 1024,
         acl: ACL,
         persist: false,
+        telemetry: &["devices/+/telemetry/#"],
     }
 }
 
@@ -875,4 +876,40 @@ fn restore_drops_what_the_policy_no_longer_allows() {
         d1.recv(&mut b),
         vec![publish("devices/d1/cmd/x", b"q", 1, Some(1), false)]
     );
+}
+
+#[test]
+fn telemetry_topics_are_handed_to_the_log() {
+    let mut b = Broker::new(cfg());
+    let (mut d1, _) = Client::connect(&mut b, "d1", true, None, 0);
+    d1.publish(
+        &mut b,
+        "devices/d1/telemetry/temp",
+        b"21.5",
+        QoS::AtLeastOnce,
+        false,
+        0,
+    );
+    d1.publish(
+        &mut b,
+        "devices/d1/status",
+        b"up",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    // Outside the ACL: never accepted, never logged.
+    d1.publish(
+        &mut b,
+        "devices/d2/telemetry/temp",
+        b"x",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    let got: Vec<_> = b.drain_telemetry().collect();
+    assert_eq!(got.len(), 1);
+    assert_eq!(&*got[0].topic, "devices/d1/telemetry/temp");
+    assert_eq!(&*got[0].payload, b"21.5");
+    assert!(b.drain_telemetry().next().is_none());
 }

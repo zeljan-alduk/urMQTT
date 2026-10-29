@@ -69,6 +69,7 @@ const WORK_NONE: usize = 0;
 const WORK_PING_ALL: usize = 1;
 const WORK_DONE: usize = 2;
 const WORK_DB: usize = 3;
+const WORK_LOG_WRITER: usize = 4;
 
 /// Logical index of the executing CPU.
 pub fn current() -> usize {
@@ -282,6 +283,7 @@ pub fn idle_loop(me: &'static PerCpu) -> ! {
                 me.work.store(WORK_DONE, Ordering::Release);
             }
             WORK_DB => crate::db::run_core(),
+            WORK_LOG_WRITER => crate::db::log_writer(current()),
             _ => {}
         }
         // Relaxed: only selects between sleeping and spinning.
@@ -295,9 +297,18 @@ pub fn idle_loop(me: &'static PerCpu) -> ! {
 
 /// Turns `cpu` (an idle application processor) into the DB core.
 pub fn start_db_core(cpu: usize) {
+    start_work(cpu, WORK_DB);
+}
+
+/// Makes `cpu` run the telemetry-log crash-test writer (`test=log-crash`).
+pub fn start_log_writer(cpu: usize) {
+    start_work(cpu, WORK_LOG_WRITER);
+}
+
+fn start_work(cpu: usize, work: usize) {
     let Some(pc) = CPUS.get(cpu) else { return };
-    // Release: the DB worker handed over by `db::init` is visible to it.
-    pc.work.store(WORK_DB, Ordering::Release);
+    // Release: everything prepared for the work item is visible to it.
+    pc.work.store(work, Ordering::Release);
     gic::send_sgi(SGI_WAKE, mpidr_of(cpu));
 }
 

@@ -7,9 +7,12 @@
 //! highest-numbered CPU when there are at least two, which runs nothing
 //! else. With one CPU the network loop calls [`poll`] between iterations.
 //!
-//! The data plane talks to the DB core only through two SPSC rings
-//! (requests and responses). Writes are batched into one transaction per
-//! [`BATCH_MS`] or [`BATCH_OPS`] operations, whichever comes first.
+//! The data plane talks to the DB core only through SPSC rings: requests
+//! and responses, plus one telemetry ring per source core. Writes are
+//! batched into one transaction per [`BATCH_MS`] or [`BATCH_OPS`]
+//! operations, whichever comes first. Telemetry records go to the source
+//! core's partition of the telemetry log (M12, ADR-031) and are flushed
+//! every [`LOG_FLUSH_MS`] or [`LOG_FLUSH_BYTES`].
 
 #![allow(unsafe_code)]
 
@@ -21,9 +24,10 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use urmqtt_arch_aarch64::spsc::{Consumer, Producer, Spsc};
 use urmqtt_arch_aarch64::sync::SpinLock;
 use urmqtt_arch_aarch64::{cpu, regs, timer};
-use urmqtt_broker::PersistOp;
+use urmqtt_broker::{Msg, MsgInner, PersistOp};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{error, info, warn};
+use urmqtt_store::telemetry::{Recovery, TelemetryLog};
 use urmqtt_store::{
     BlockDevice, Disk, DiskError, IoError, Opened, Platform, Retained, SessionRecord, Store,
     StoreError,
@@ -39,6 +43,18 @@ pub const BATCH_MS: u64 = 5;
 /// Most operations per transaction.
 pub const BATCH_OPS: u32 = 512;
 const STATS_EVERY_MS: u64 = 10_000;
+/// Longest a telemetry record waits to become durable.
+pub const LOG_FLUSH_MS: u64 = 5;
+/// Flush the telemetry log once this much is pending.
+pub const LOG_FLUSH_BYTES: usize = 256 * 1024;
+
+/// Telemetry records from one core: (Unix ms, message).
+pub type LogBatch = Vec<(u64, Msg)>;
+const LOG_RING: usize = 64;
+static LOG_RINGS: [Spsc<LogBatch, LOG_RING>; smp::MAX_CPUS] =
+    [const { Spsc::new() }; smp::MAX_CPUS];
+/// `test=log-crash`: report durable totals.
+static LOG_CRASH: AtomicBool = AtomicBool::new(false);
 
 /// A request from the data plane.
 pub enum DbReq {
@@ -50,6 +66,7 @@ pub enum DbReq {
 pub enum DbResp {
     Committed { ops: u32, us: u32 },
     Failed { ops: u32 },
+    LogDurable { records: u64 },
 }
 
 static REQ: Spsc<DbReq, 4096> = Spsc::new();
@@ -80,6 +97,11 @@ pub fn endpoints() -> Option<(
     Consumer<'static, DbResp, 256>,
 )> {
     Some((REQ.producer()?, RESP.consumer()?))
+}
+
+/// The telemetry ring of `core` (its producer end, taken once).
+pub fn log_producer(core: usize) -> Option<Producer<'static, LogBatch, LOG_RING>> {
+    LOG_RINGS.get(core)?.producer()
 }
 
 /// Wakes the DB core after requests were queued.
@@ -252,6 +274,34 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
         cfg.sqlite_heap_mb
     );
 
+    let retention_ms = u64::from(cfg.retention_days) * 86_400_000;
+    let now_s = crate::boot::now_unix().unwrap_or(0);
+    let t1 = timer::uptime_ns();
+    let log = match urmqtt_store::vfs::with_disk(|d| TelemetryLog::open(d, now_s, retention_ms)) {
+        Some(Ok((log, rec))) => {
+            log_recovery(&rec, &log, (timer::uptime_ns() - t1) / 1_000_000);
+            Some(log)
+        }
+        Some(Err(e)) => {
+            return refuse_or_degrade(
+                !cfg.refuse_on_corruption,
+                format_args!("telemetry log rejected: {e:?}"),
+            );
+        }
+        None => None,
+    };
+    let mut log = log;
+    match (test, log.as_mut()) {
+        (Some(DbTest::LogVerify), Some(l)) => log_verify(l, retention_ms),
+        (Some(DbTest::LogTear), Some(l)) => {
+            log_tear(l);
+            // The torn write is on disk; the in-memory log is stale.
+            log = None;
+        }
+        _ => {}
+    }
+    LOG_CRASH.store(test == Some(DbTest::LogCrash), Ordering::Relaxed);
+
     match test {
         Some(DbTest::Bench) => bench(&mut store),
         Some(DbTest::Crash) => crash_writer(&mut store),
@@ -260,7 +310,7 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
             Ok(Err(e)) => error!("db-verify: INCONSISTENT: {e}"),
             Err(e) => error!("db-verify: failed: {e}"),
         },
-        None => {}
+        _ => {}
     }
 
     let restored = match load(&mut store) {
@@ -284,6 +334,7 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
     let (Some(rx), Some(tx)) = (rx, tx) else {
         return refuse_or_degrade(false, format_args!("DB rings already taken"));
     };
+    let log_rx = LOG_RINGS.iter().filter_map(Spsc::consumer).collect();
     *WORKER.lock() = Some(Worker {
         store,
         rx,
@@ -292,10 +343,99 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
         txn_ops: 0,
         stats: Stats::default(),
         last_stats_ms: now_ms(),
+        log,
+        log_rx,
+        log_since_ms: None,
+        log_reported: 0,
     });
     // Relaxed: read only after the data plane starts (later in boot).
     ACTIVE.store(true, Ordering::Relaxed);
     Some(restored)
+}
+
+fn log_recovery(rec: &Recovery, log: &TelemetryLog, ms: u64) {
+    info!(
+        "telemetry: log recovered in {ms} ms: {} record(s) in {} segment(s), {} torn tail(s) truncated, \
+         {} expired; {} partitions of {} MiB",
+        rec.records,
+        rec.segments,
+        rec.torn_tails,
+        rec.expired,
+        urmqtt_store::telemetry::PARTITIONS,
+        log.capacity_bytes() >> 20
+    );
+}
+
+/// `test=log-tear`: 10 000 durable records on core 0's partition, then
+/// 1000 more of which only half the bytes reach the disk.
+fn log_tear(log: &mut TelemetryLog) {
+    let topic = "selftest/core-0";
+    let ts = crate::boot::now_unix_ms().unwrap_or(0);
+    let payload = |seq: u64| {
+        let mut p = [0u8; 16];
+        p[..8].copy_from_slice(&seq.to_le_bytes());
+        p
+    };
+    let r = urmqtt_store::vfs::with_disk(|d| {
+        for seq in 1..=10_000u64 {
+            log.append(d, 0, ts, topic, &payload(seq))?;
+        }
+        let durable = log.flush(d)?;
+        for seq in 10_001..=11_000u64 {
+            log.append(d, 0, ts, topic, &payload(seq))?;
+        }
+        let half = urmqtt_store::telemetry::record_size(topic, &payload(0)) * 500 + 7;
+        log.simulate_torn_flush(d, 0, half)?;
+        Ok::<u64, urmqtt_store::telemetry::LogError>(durable)
+    });
+    match r {
+        Some(Ok(n)) => {
+            info!("log-tear: {n} records durable, then a torn write cutting record 10501 in half")
+        }
+        other => error!("log-tear: failed: {:?}", other.map(|x| x.err())),
+    }
+}
+
+/// `test=log-verify`: every core's self-test records must form one
+/// contiguous sequence 1..=n (nothing lost in the middle, no duplicates).
+fn log_verify(log: &TelemetryLog, retention_ms: u64) {
+    let mut next = [1u64; smp::MAX_CPUS];
+    let mut bad: Option<(usize, u64, u64)> = None;
+    let mut total = 0u64;
+    let r = urmqtt_store::vfs::with_disk(|d| {
+        for p in 0..urmqtt_store::telemetry::PARTITIONS {
+            log.scan(d, p, retention_ms, |rec| {
+                let (Some(core), Some(seq)) = (
+                    rec.topic
+                        .strip_prefix("selftest/core-")
+                        .and_then(|c| c.parse::<usize>().ok()),
+                    rec.payload
+                        .get(..8)
+                        .and_then(|b| b.try_into().ok())
+                        .map(u64::from_le_bytes),
+                ) else {
+                    return;
+                };
+                total += 1;
+                if let Some(n) = next.get_mut(core) {
+                    if seq != *n && bad.is_none() {
+                        bad = Some((core, *n, seq));
+                    }
+                    *n = seq + 1;
+                }
+            })?;
+        }
+        Ok::<(), urmqtt_store::telemetry::LogError>(())
+    });
+    match (r, bad) {
+        (Some(Ok(())), None) => {
+            info!("log-verify: {total} records, every core's sequence contiguous")
+        }
+        (Some(Ok(())), Some((c, want, got))) => {
+            error!("log-verify: INCONSISTENT: core {c} expected record {want}, found {got}")
+        }
+        (other, _) => error!("log-verify: scan failed: {:?}", other.map(|x| x.err())),
+    }
 }
 
 fn log_layout(disk: &Disk, how: Opened) {
@@ -433,6 +573,12 @@ struct Worker {
     txn_ops: u32,
     stats: Stats,
     last_stats_ms: u64,
+    log: Option<TelemetryLog>,
+    /// Consumers of every core's telemetry ring, in core order.
+    log_rx: Vec<Consumer<'static, LogBatch, LOG_RING>>,
+    /// When the oldest unflushed telemetry record arrived.
+    log_since_ms: Option<u64>,
+    log_reported: u64,
 }
 
 impl Worker {
@@ -461,8 +607,68 @@ impl Worker {
             self.commit();
             did = true;
         }
+        did |= self.step_log(now_ms);
         if now_ms.saturating_sub(self.last_stats_ms) >= STATS_EVERY_MS {
             self.log_stats(now_ms);
+        }
+        did
+    }
+
+    /// Appends queued telemetry and flushes when due.
+    fn step_log(&mut self, now_ms: u64) -> bool {
+        let Some(log) = self.log.as_mut() else {
+            // No log: drop batches so producers never stall.
+            for rx in &mut self.log_rx {
+                while rx.pop().is_some() {}
+            }
+            return false;
+        };
+        let mut did = false;
+        let unix_ms = crate::boot::now_unix_ms().unwrap_or(0);
+        for (core, rx) in self.log_rx.iter_mut().enumerate() {
+            // Bounded per step so SQLite work is not starved.
+            for _ in 0..8 {
+                let Some(batch) = rx.pop() else { break };
+                did = true;
+                let p = TelemetryLog::partition_of(core);
+                let r = urmqtt_store::vfs::with_disk(|d| {
+                    for (ts, m) in &batch {
+                        log.append(d, p, *ts, &m.topic, &m.payload)?;
+                    }
+                    Ok::<(), urmqtt_store::telemetry::LogError>(())
+                });
+                if let Some(Err(e)) = r {
+                    self.stats.errors += 1;
+                    error!("telemetry: append failed: {e:?}");
+                }
+                self.log_since_ms.get_or_insert(now_ms);
+            }
+        }
+        let due = self.log_since_ms.is_some_and(|t| {
+            now_ms.saturating_sub(t) >= LOG_FLUSH_MS || log.pending_bytes() >= LOG_FLUSH_BYTES
+        });
+        if due {
+            log.set_now(unix_ms / 1000);
+            match urmqtt_store::vfs::with_disk(|d| log.flush(d)) {
+                Some(Ok(n)) => {
+                    let _ = self.tx.push(DbResp::LogDurable { records: n });
+                    // Relaxed: a test-mode flag set once at boot.
+                    if LOG_CRASH.load(Ordering::Relaxed)
+                        && log.durable_records / 100_000 > self.log_reported / 100_000
+                    {
+                        // Logged only after the flush returned (durable).
+                        info!("log-crash: durable {}", log.durable_records);
+                        self.log_reported = log.durable_records;
+                    }
+                }
+                Some(Err(e)) => {
+                    self.stats.errors += 1;
+                    error!("telemetry: flush failed: {e:?}");
+                }
+                None => {}
+            }
+            self.log_since_ms = None;
+            did = true;
         }
         did
     }
@@ -599,4 +805,54 @@ fn enable_event_stream() {
     // SAFETY: only enables the event stream on this core; EL0 access bits
     // are preserved.
     unsafe { regs::set_cntkctl_el1(v) };
+}
+
+/// `test=log-crash` writer: appends numbered records to this core's
+/// telemetry ring forever (the host kills the VM).
+pub fn log_writer(core: usize) -> ! {
+    let Some(mut tx) = log_producer(core) else {
+        crate::boot::fatal("log-crash: telemetry ring already taken");
+    };
+    let topic: Box<str> = alloc::format!("selftest/core-{core}").into();
+    info!("log-crash: core {core} writing");
+    let mut seq = 1u64;
+    loop {
+        let ts = crate::boot::now_unix_ms().unwrap_or(0);
+        let mut batch: LogBatch = Vec::with_capacity(256);
+        for _ in 0..256 {
+            let mut payload = [0u8; 16];
+            payload[..8].copy_from_slice(&seq.to_le_bytes());
+            payload[8..].copy_from_slice(&(core as u64).to_le_bytes());
+            batch.push((
+                ts,
+                alloc::sync::Arc::new(MsgInner {
+                    topic: topic.clone(),
+                    payload: Box::new(payload),
+                }),
+            ));
+            seq += 1;
+        }
+        while let Err(b) = tx.push(batch) {
+            batch = b;
+            notify();
+            core::hint::spin_loop();
+        }
+        notify();
+    }
+}
+
+/// Starts the `test=log-crash` writers on every core but the DB core; the
+/// calling (boot) CPU becomes one of them.
+pub fn start_log_crash(cpus: usize) -> ! {
+    // Relaxed: set once in `start`.
+    let db = DB_CPU.load(Ordering::Relaxed);
+    if db == usize::MAX {
+        crate::boot::fatal("log-crash needs at least two CPUs (one for the DB core)");
+    }
+    for c in 1..cpus {
+        if c != db {
+            smp::start_log_writer(c);
+        }
+    }
+    log_writer(smp::current())
 }

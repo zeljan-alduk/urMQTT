@@ -416,3 +416,42 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - Partial-sector writes cost a read per WAL frame (a VFS write cache would remove it; M15).
 - The telemetry region is reserved but unused until M12.
 - SQLite runs at EL1 (EL0 isolation is a later item).
+
+## M12 — Telemetry log (2026-10-29)
+
+**Done**
+
+- `crates/store/telemetry` (ADR-031):
+  - Header and 8 partitions of segment rings in the telemetry region.
+  - Records with a CRC-32C salted by the segment sequence.
+  - Batched, sector-aligned, zero-padded writes without read-modify-write.
+  - Recovery with torn-tail truncation and a roll-over to a fresh segment.
+  - Retention by size (ring) and age (`retention_days`).
+  - `scan` for readers.
+- `crates/broker`: PUBLISHes matching `storage.telemetry_topics` are handed out as `Arc` messages (`drain_telemetry`), after ACL and rate limits.
+- `kernel/db`:
+  - One telemetry SPSC ring per core to the DB core, which appends to the source core's partition and flushes every 5 ms or 256 KiB.
+  - Durability reported on the response ring.
+  - Self-tests: `test=log-crash` (every core but the DB core writes forever), `test=log-verify`, `test=log-tear`.
+- `kernel/mqtt_service`: batches telemetry (256 records or 1 ms) into its core's ring and never blocks (bounded backlog, counted drops).
+- Smoke:
+  - `log-crash`: a 1 GiB sparse disk; SIGKILL after ≥ 1 M durable records.
+  - `log-tear`.
+  - `mqtt-persist` now also checks that a telemetry PUBLISH over mTLS is in the log after the restart.
+
+**Measured**
+
+- `make smoke`: **58/58**.
+- `log-crash`, 3 writer cores + DB core, 42-byte records:
+  - HVF: about **2.4 M records/s** (1.5 M durable 0.6 s after the writers started). Recovery found 1 480 704 ≥ 1 400 832 durable, in 0.14 s for about 1.6 M records.
+  - TCG: 1 005 568 ≥ 1 005 568 durable.
+  - Every core's sequence was contiguous.
+  - No torn tail in the SIGKILL runs so far: the kill fell between flushes. Torn-tail truncation is shown by `log-tear` (10 500 complete records kept, 1 torn tail truncated, under HVF and TCG) and by the host tests.
+- Kernel ELF: 1 976 424 bytes.
+
+**Known gaps**
+
+- No time-series or zstd encoding.
+- No export/read API (M16).
+- Age retention hides expired records but does not erase them before their segment is reused.
+- With more than 8 cores, cores share partitions (the DB core still serialises the writes).

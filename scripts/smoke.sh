@@ -212,6 +212,67 @@ db_crash() {
     done
 }
 
+# M12: every core but the DB core appends telemetry records; QEMU is killed
+# once at least a million are durable. The next boot must recover every
+# flushed record (contiguous per core) and truncate a torn tail if any.
+log_crash() {
+    local crash="$OUT/log-crash.iso" verify="$OUT/log-verify.iso"
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$crash" --cmdline "smoke test=log-crash" >/dev/null
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$verify" --cmdline "smoke test=log-verify" >/dev/null
+    for accel in $ACCELS; do
+        local data="$OUT/log-crash-$accel.img" log1="$OUT/log-crash-$accel.log" log2="$OUT/log-verify-$accel.log"
+        local status=0
+        rm -f "$data"
+        # 1 GiB sparse: the 8 log partitions hold ~55 MiB each, so a million
+        # records from three cores never wrap.
+        truncate -s 1g "$data"
+        start_vm "$log1" --iso "$crash" --accel "$accel" --data "$data" --fwd none
+        wait_log "$log1" "log-crash: durable (1[0-9]{6}|[2-9][0-9]{6})" || status=$?
+        sleep "0.$((RANDOM % 4))"
+        kill_vm
+        local last
+        last=$(clean "$log1" | grep -Eo 'log-crash: durable [0-9]+' | tail -1 | awk '{print $3}')
+        check "log-crash-writers [$accel]" "$log1" "$status" "log-crash: core 0 writing" "log-crash: core 1 writing" \
+            "log-crash: core 2 writing" "log-crash: durable [0-9]+" "$NO_FAULT"
+        status=0
+        boot "$log2" --iso "$verify" --accel "$accel" --headless --data "$data" --fwd none || status=$?
+        check "log-crash-recovery [$accel]" "$log2" "$status" \
+            "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in [0-9]+ segment\(s\), [0-9]+ torn tail\(s\) truncated" \
+            "log-verify: [0-9]+ records, every core's sequence contiguous" "^URMQTT READY$" "NOT:INCONSISTENT" "$NO_FAULT"
+        local found torn
+        found=$(clean "$log2" | grep -Eo 'log-verify: [0-9]+ records' | awk '{print $2}')
+        torn=$(clean "$log2" | grep -Eo '[0-9]+ torn tail' | awk '{print $1}')
+        if [[ -n "$last" && -n "$found" ]] && (( found >= last && last >= 1000000 )); then
+            echo "  ✓ every flushed telemetry record recovered: $found >= $last durable, ${torn:-?} torn tail(s) truncated [$accel]"
+            PASSED=$((PASSED + 1))
+        else
+            echo "  ✗ telemetry records lost: recovered '${found:-?}', durable before the kill '${last:-?}' [$accel]"
+            FAILED=$((FAILED + 1))
+        fi
+    done
+}
+
+# M12: a torn record written on purpose must be truncated on the next boot,
+# keeping every complete record before it.
+log_tear() {
+    local tear="$OUT/log-tear.iso" verify="$OUT/log-verify.iso"
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$tear" --cmdline "smoke test=log-tear" >/dev/null
+    [[ -f "$verify" ]] || "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$verify" --cmdline "smoke test=log-verify" >/dev/null
+    for accel in $ACCELS; do
+        local data="$OUT/log-tear-$accel.img" log1="$OUT/log-tear-$accel.log" log2="$OUT/log-tear-verify-$accel.log"
+        local status=0
+        rm -f "$data"
+        truncate -s 64m "$data"
+        boot "$log1" --iso "$tear" --accel "$accel" --headless --data "$data" --fwd none || status=$?
+        check "log-tear-write [$accel]" "$log1" "$status" "log-tear: 10000 records durable, then a torn write" "$NO_FAULT"
+        status=0
+        boot "$log2" --iso "$verify" --accel "$accel" --headless --data "$data" --fwd none || status=$?
+        check "log-tear-truncated [$accel]" "$log2" "$status" \
+            "telemetry: log recovered in [0-9]+ ms: 10500 record\(s\) in [0-9]+ segment\(s\), 1 torn tail\(s\) truncated" \
+            "log-verify: 10500 records, every core's sequence contiguous" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
 # M11: broker state across a restart: retained message and a QoS 1 command
 # queued for an offline persistent session, over mTLS.
 mqtt_persist() {
@@ -238,6 +299,7 @@ mqtt_persist() {
             else
                 check "mqtt-persist-after-restart [$accel]" "$log" "$status" "storage: data disk opened" \
                     "db: restored 1 retained message\(s\), 1 persistent session\(s\) with 1 queued message\(s\), 1 revoked serial\(s\), 3 known device\(s\)" \
+                    "telemetry: log recovered in [0-9]+ ms: 1 record\(s\)" \
                     "client: persist-retained ok" "client: persist-queued ok" "NOT:FAILED" "$NO_FAULT"
             fi
         done
@@ -260,6 +322,7 @@ DEV_OK=("pci: ECAM 0x4010000000 buses 0-255" "virtio-blk" "virtio-net" "virtio-r
     "blk: self-test ok \(4 KiB random pattern written, flushed, read back" "net: gratuitous ARP sent"
     "net: rx ok, ARP reply from 52:55:0a:00:02:02")
 DB_OK=("storage: data disk formatted \(was blank\)" "db: sqlite 3\.[0-9]+\.[0-9]+ on the data disk: WAL, exclusive locking, quick_check ok"
+    "telemetry: log recovered in [0-9]+ ms: 0 record\(s\)"
     "db: restored 0 retained" "db: DB core is cpu 3" "db: worker running on cpu 3")
 SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordered pairs ping-pong ok"
     "smp: 4/4 cpus ticking on their own timer")
@@ -332,6 +395,8 @@ fi
 scenario db-bench "smoke test=db-bench" on \
     "db-bench: 5000 inserts in 50 transactions: [0-9]+ ops/s" "5100 rows verified" "^URMQTT READY$" "$NO_FAULT"
 db_crash
+log_crash
+log_tear
 if command -v mosquitto_pub >/dev/null; then
     mqtt_persist
 fi

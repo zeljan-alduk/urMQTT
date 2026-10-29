@@ -38,6 +38,13 @@ pub enum DbTest {
     Crash,
     /// Check the rows written by `Crash`, then continue booting.
     Verify,
+    /// Telemetry log: every core but the DB core appends records forever.
+    LogCrash,
+    /// Check the records written by `LogCrash`, then continue booting.
+    LogVerify,
+    /// Write telemetry records, then a deliberately torn one (the next
+    /// boot must truncate it), then continue booting.
+    LogTear,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -77,6 +84,9 @@ impl BootOptions {
                 "test=db-bench" => o.db_test = Some(DbTest::Bench),
                 "test=db-crash" => o.db_test = Some(DbTest::Crash),
                 "test=db-verify" => o.db_test = Some(DbTest::Verify),
+                "test=log-crash" => o.db_test = Some(DbTest::LogCrash),
+                "test=log-verify" => o.db_test = Some(DbTest::LogVerify),
+                "test=log-tear" => o.db_test = Some(DbTest::LogTear),
                 _ => o.ignored += 1,
             }
         }

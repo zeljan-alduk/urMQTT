@@ -427,6 +427,9 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     let restored = crate::db::init(s.options.db_test);
     smp_bringup(&mut s);
     crate::db::start(smp::count());
+    if s.options.db_test == Some(crate::cmdline::DbTest::LogCrash) {
+        crate::db::start_log_crash(smp::count());
+    }
 
     urmqtt_log::raw(format_args!("URMQTT READY\n"));
     if s.options.smoke && !s.options.serve {

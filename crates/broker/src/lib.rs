@@ -67,6 +67,9 @@ pub struct Config {
     pub acl: Acl,
     /// Record state changes for the durable store ([`Broker::drain_persist`]).
     pub persist: bool,
+    /// Accepted PUBLISHes on these topic filters go to the telemetry log
+    /// ([`Broker::drain_telemetry`]).
+    pub telemetry: &'static [&'static str],
 }
 
 /// A change to durable broker state, for the DB core (ADR-030).
@@ -181,6 +184,7 @@ pub struct Broker {
     stats: Stats,
     scratch: Vec<(SessionId, QoS)>,
     ops: Vec<PersistOp>,
+    telemetry: Vec<Msg>,
 }
 
 /// Stored topics are re-checked on restore: limits may have changed.
@@ -206,7 +210,13 @@ impl Broker {
             stats: Stats::default(),
             scratch: Vec::new(),
             ops: Vec::new(),
+            telemetry: Vec::new(),
         }
+    }
+
+    /// Takes the accepted telemetry PUBLISHes since the last call (in order).
+    pub fn drain_telemetry(&mut self) -> alloc::vec::Drain<'_, Msg> {
+        self.telemetry.drain(..)
     }
 
     /// Takes the state changes recorded since the last call (in order).
@@ -767,6 +777,14 @@ impl Broker {
             topic: p.topic.into(),
             payload: p.payload.into(),
         });
+        if self
+            .cfg
+            .telemetry
+            .iter()
+            .any(|f| urmqtt_mqtt::topic_matches(f, p.topic))
+        {
+            self.telemetry.push(msg.clone());
+        }
         self.route(&msg, p.qos, p.retain);
     }
 

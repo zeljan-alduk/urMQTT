@@ -18,7 +18,14 @@ use urmqtt_mqtt::Limits;
 use urmqtt_mqtt::QoS;
 use urmqtt_tls::{Event, IdentityField, ServerSetup, TlsServer, TlsSession};
 
-use crate::db::{self, DbReq, DbResp, Restored};
+use crate::db::{self, DbReq, DbResp, LogBatch, Restored};
+
+/// Telemetry records held back while the log ring is full; beyond this
+/// they are dropped and counted (the data plane never blocks).
+const LOG_BACKLOG_MAX: usize = 65_536;
+/// Hand a telemetry batch to the DB core at this size or age.
+const LOG_BATCH: usize = 256;
+const LOG_BATCH_MS: u64 = 1;
 
 const TLS_SOCKETS: usize = 32;
 /// Plaintext connections (dev only).
@@ -55,6 +62,49 @@ pub struct MqttService {
     admission: Admission,
     refused: u64,
     db: Option<DbLink>,
+    log: Option<LogLink>,
+}
+
+/// This core's telemetry ring to the DB core.
+struct LogLink {
+    tx: Producer<'static, LogBatch, 64>,
+    batch: LogBatch,
+    since_ms: u64,
+    dropped: u64,
+}
+
+impl LogLink {
+    fn add(&mut self, msg: urmqtt_broker::Msg, now_ms: u64) {
+        if self.batch.len() >= LOG_BACKLOG_MAX {
+            self.dropped += 1;
+            if self.dropped.is_power_of_two() {
+                warn!(
+                    "telemetry: log backlog full, {} record(s) dropped",
+                    self.dropped
+                );
+            }
+            return;
+        }
+        if self.batch.is_empty() {
+            self.since_ms = now_ms;
+        }
+        let unix_ms = crate::boot::now_unix_ms().unwrap_or(0);
+        self.batch.push((unix_ms, msg));
+    }
+
+    fn pump(&mut self, now_ms: u64) {
+        if self.batch.is_empty()
+            || (self.batch.len() < LOG_BATCH && now_ms.saturating_sub(self.since_ms) < LOG_BATCH_MS)
+        {
+            return;
+        }
+        let batch = core::mem::take(&mut self.batch);
+        if let Err(b) = self.tx.push(batch) {
+            // Ring full: keep accumulating and retry on the next pass.
+            self.batch = b;
+        }
+        db::notify();
+    }
 }
 
 /// The data plane's side of the DB rings.
@@ -66,6 +116,7 @@ struct DbLink {
     committed_ops: u64,
     failed_ops: u64,
     max_commit_us: u32,
+    log_durable: u64,
 }
 
 impl DbLink {
@@ -96,6 +147,7 @@ impl DbLink {
                     self.max_commit_us = self.max_commit_us.max(us);
                 }
                 DbResp::Failed { ops } => self.failed_ops += u64::from(ops),
+                DbResp::LogDurable { records } => self.log_durable += records,
             }
         }
         db::notify();
@@ -128,6 +180,7 @@ pub fn broker_config(max_connections: usize) -> Config {
             service_subscribe: CONFIG.acl.service_subscribe,
         },
         persist: db::active(),
+        telemetry: CONFIG.storage.telemetry_topics,
     }
 }
 
@@ -238,7 +291,24 @@ impl MqttService {
                 committed_ops: 0,
                 failed_ops: 0,
                 max_commit_us: 0,
+                log_durable: 0,
             });
+        let log = db::log_producer(crate::smp::current())
+            .filter(|_| db::active() && !CONFIG.storage.telemetry_topics.is_empty())
+            .map(|tx| LogLink {
+                tx,
+                batch: Vec::new(),
+                since_ms: 0,
+                dropped: 0,
+            });
+        if log.is_some() {
+            info!(
+                "telemetry: logging PUBLISHes on {:?} to partition {} (retention {} days)",
+                CONFIG.storage.telemetry_topics,
+                urmqtt_store::telemetry::TelemetryLog::partition_of(crate::smp::current()),
+                CONFIG.storage.retention_days
+            );
+        }
         Self {
             broker,
             tls,
@@ -251,6 +321,7 @@ impl MqttService {
             },
             refused: 0,
             db,
+            log,
         }
     }
 
@@ -266,6 +337,15 @@ impl MqttService {
                 link.send(DbReq::Persist(op));
             }
             link.pump();
+        }
+        match self.log.as_mut() {
+            Some(log) => {
+                for msg in self.broker.drain_telemetry() {
+                    log.add(msg, now_ms);
+                }
+                log.pump(now_ms);
+            }
+            None => self.broker.drain_telemetry().for_each(drop),
         }
         activity
     }

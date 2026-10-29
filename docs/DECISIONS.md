@@ -309,3 +309,26 @@ verified in the named milestone before it becomes Accepted).
   - Host tests run real SQLite through the VFS on a `MemDisk` with a volatile write cache. Power loss is simulated by applying an arbitrary subset of the unflushed writes. They check: the store round-trip; uncommitted work rolled back; 12 crash rounds that must leave `integrity_check` = ok and keep every acknowledged commit; and foreign or damaged superblocks refused.
   - The smoke test kills QEMU with SIGKILL while the kernel commits in a loop and verifies on the next boot. The host page cache survives that, so this proves VM-crash consistency, not host power loss; the `MemDisk` tests cover reordering and loss.
   - `disk_layout` fuzz target.
+
+## ADR-031 — Telemetry log: per-core partitions written by the DB core
+
+- **Status:** Accepted (M12)
+- **Placement:** inside the telemetry region of the data disk (ADR-030). A 4 KiB header (magic, version, geometry, CRC-32C) is followed by **8 partitions**; source core `c` uses partition `c % 8`.
+  - Each partition is a ring of fixed-size segments (⅛ of the partition, 64 KiB – 8 MiB, 4 KiB aligned).
+  - Each segment starts with a 512-byte header (magic, partition, sequence number, creation time, CRC), followed by records `len · crc · ts_ms · topic_len · topic · payload`.
+  - A blank region is formatted on first use. Foreign data in it is refused (never formatted over).
+- **Who writes:** the cores keep their own partitions, but the **DB core performs all disk I/O** (the virtio-blk device has one queue and one owner: ADR-030). The data plane hands batches of `(Unix ms, Arc<message>)` to the DB core over **one SPSC ring per source core**: zero copies before the final encoding, and no lock between cores. That is the "one ring per ordered core pair" of PROMPT §7.2.
+  - The data plane batches 256 records or 1 ms. If the ring is full it keeps accumulating (up to 65 536 records, then drops and counts them), so it never blocks.
+  - The DB core flushes every 5 ms or 256 KiB of pending records. A flush writes whole sectors, zero-padded after the last record, then syncs. A sector tail is kept in memory, so no read-modify-write is needed.
+- **Record integrity:** each record's CRC-32C covers the **segment sequence number** and its bytes. Records left over from an earlier pass of the ring therefore never validate in a reused segment, so stale data needs no erasing. Records never span segments.
+- **Recovery:** read every segment header and order the valid ones by sequence number. Scan each segment until the first `len == 0` (clean end) or the first record that fails its checks (a **torn tail**: counted and truncated).
+  - After recovery, writing always continues in a **new segment**. Bytes after a recovered segment's last valid record may be valid records of an unacknowledged batch whose earlier sectors were lost (writes reach the medium in any order). Extending that segment could make them reappear behind newer records. The host test `lost_middle_of_a_batch_is_never_resurrected` covers this.
+  - The cost is the unused rest of one segment per partition per boot.
+- **Retention:**
+  - By size: the ring reclaims the oldest segment when the newest is full.
+  - By age (`storage.retention_days`): readers skip expired records, and recovery counts them. Expired data stays on disk until its segment is reused, so this is a visibility rule and not erasure. Erasure on demand belongs with ops (M16).
+- **Not done (v1):** the time-series encodings and zstd dictionaries of PROMPT §7.4 (raw records only); an export/read API for operators (M16); per-core I/O queues (M13, with multiqueue virtio-blk).
+- **Testing:**
+  - Host tests on `MemDisk`: reopen, torn tail, ring wrap without resurrection of old generations, age retention, power loss mid-flush with an arbitrary subset of writes surviving, foreign data refused.
+  - Smoke `log-crash`: three cores write until at least 1 M records are durable, then SIGKILL. The next boot must recover every durable record, with each core's sequence contiguous.
+  - Smoke `log-tear`: a deliberately torn record is written through the real disk path. The next boot must truncate it, keep the 10 500 complete records, and report one torn tail.
