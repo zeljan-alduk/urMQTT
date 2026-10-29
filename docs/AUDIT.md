@@ -161,8 +161,8 @@ mutual TLS devices, and the image treated as a secret.
 | H0-W9 | **No fuzzing of PCI and virtio parsing** (hostile or buggy devices: on bare metal, and virtio under a hostile hypervisor) | medium on bare metal | `pci`, `virtio` | H5: fuzz targets with a fake config space and rings; H4b IOMMU |
 | H0-W10 | **No test proves page tables are read-only after the lock** | low (the lock exists; the proof is missing) | `vm::lock` | H4: `test=write-table` must fault |
 | H0-W11 | **No test for "prod ignores the command line"**: the kernel crate has no unit tests for `cmdline.rs` | low | `cmdline.rs` | H1: a host-testable parser with a `dev_build = false` test |
-| H0-W12 | **The boot block self-test writes the last sectors of any non-partitioned disk** before it is identified | medium on bare metal (data loss on a foreign disk) | `kernel/src/devices.rs:387-400` | STORAGE-PLAN S1 (G1) |
-| H0-W13 | **A whole-disk filesystem can be taken for a blank disk and formatted** (formats with nothing in their first 4 KiB: btrfs, mdraid 1.2, ZFS, ISO 9660; ext4/XFS/LVM/LUKS/swap are refused today) | **high** on bare metal (data loss) | `store/src/layout.rs` (`decode` → blank) | STORAGE-PLAN S1 (G2) |
+| H0-W12 | **The data disk is chosen by "not partitioned" instead of by identity**: the boot medium is protected only because it happens to be partitioned, and with several unpartitioned disks the first is taken without asking | medium on bare metal (wrong disk claimed) | `kernel/src/devices.rs:387-400` | STORAGE-PLAN S1 (G1): exact boot-disk identification, `auto` claims only a single candidate |
+| H0-W13 | ~~Foreign disks taken for blank~~: **no longer a weakness** under whole-disk ownership (PLAN.md decision 6, 2026-10-29); foreign content is overwritten on purpose. What remains is not re-formatting a *damaged urMQTT* disk as new | low | `store/src/layout.rs` | STORAGE-PLAN S1 (G2) |
 | H0-W14 | **30 `unsafe` sites have no written justification** (§1) | low | [audit/unsafe.md](audit/unsafe.md) | H10 review; the CI inventory keeps the count visible |
 
 Untested protections (from §3) count as gaps as well: FP-state save, 0-RTT,

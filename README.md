@@ -905,8 +905,8 @@ Security is the first priority and wins conflicts with the other tracks.
 
 | | Milestone | Acceptance |
 |---|---|---|
-| 📋 | **S0** Disk format spec | `docs/DISK-FORMAT.md` byte-level and cross-checked against the code; golden v1 images |
-| 📋 | **S1** `urmqtt-disk` & safety | host tool sharing the kernel's parsers (info, verify, export, import); fault injection; never formats a disk with existing data |
+| ✅ | **S0** Disk format spec | `docs/DISK-FORMAT.md` byte-level and cross-checked against the code; golden v1 images |
+| 📋 | **S1** `urmqtt-disk` & safety | host tool sharing the kernel's parsers (info, verify, export, import); fault injection; the data disk is claimed whole (previous content is overwritten), the boot disk is identified exactly and never touched |
 | 📋 | **S2** Layout v2 | regions aligned to 1 MiB and the device topology, zero misaligned writes; migration from v1 |
 | 📋 | **S3** Growing the disk | 1 → 4 → 64 GiB with data present, crash-safe at every write |
 | 📋 | **S4** Discard | thin-provisioned volumes shrink after retention; no throughput loss |

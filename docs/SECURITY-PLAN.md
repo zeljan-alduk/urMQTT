@@ -30,7 +30,7 @@ Further findings while reading:
   - DMA from real devices: a malicious or buggy NIC or NVMe controller can write anywhere without an IOMMU;
   - firmware state left behind;
   - Secure Boot. **New item H4b** (IOMMU) and H8 (Secure Boot, here not optional).
-- **The data disk can be mistaken for blank** (X86-PLAN F10, ext4 without a partition table). That is a data-loss bug on bare metal, not a security bug, and it is handled by STORAGE-PLAN S1.
+- **The data disk can be mistaken for blank** (X86-PLAN F10: e.g. btrfs or mdraid 1.2 without a partition table). That is a data-loss bug on bare metal, not a security bug, and it is handled by STORAGE-PLAN S1.
 
 ---
 

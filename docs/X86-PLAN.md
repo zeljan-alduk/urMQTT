@@ -29,7 +29,7 @@ contradict assumptions in PROMPT-x86_64.md.
 | F6 | Arch coupling outside `arch-aarch64` is small and mostly arch-neutral. | `mm`, `log`, `store` and `tls` use only `sync::{SpinLock, OnceCell}`, `paging::{FrameSource, PAGE_SIZE}` and `cpu::irq_save/restore`. Only `kernel` has assembly: `smp.rs` 15 sites, `boot.rs` 14, `vm.rs` 9, `jitter.rs` 8, `dataplane.rs` 6, `netproto`/`devices`/`db` 5 each, `trap.rs` 4, and others ≤ 3. | X0 is a contained refactor: about 20 kernel files plus 4 crates. |
 | F7 | CRC-32C is a byte-wise table; Toeplitz is bit-serial. | `crates/store/src/crc.rs:29`, `crates/net/src/rss.rs`. | Both are dispatch candidates on both architectures. |
 | F8 | The struct-size asserts are `const` asserts. | 10 `size_of` assertions in the crates. | They hold on x86_64 automatically if layouts match; X8 checks it by compiling, not by trust. |
-| F10 | **"Blank" disk detection is only safe inside a VM.** A data disk is formatted when its urMQTT superblock area is all zeros and it has no MBR/GPT. | `store::layout::Superblock::decode` (`Ok(None)` = all zero) and `kernel::devices::is_partitioned`. | A whole-disk filesystem without a partition table can look blank. ext4, for one, leaves its first 1024 bytes zero, so it would be formatted. On bare metal this is data loss. X12 adds signature checks and an explicit disk selection. |
+| F10 | **The data disk is chosen by "not partitioned", not by identity.** | `kernel::devices::is_partitioned`. | On a PC the boot USB stick is partitioned and therefore safe, but the rule is accidental. Under whole-disk ownership (PLAN.md decision 6) the data disk is chosen explicitly and the boot disk is identified exactly (STORAGE-PLAN S1). |
 | F11 | **GICv3 ITS (MSI on ARM servers) is not implemented.** Only GICv2m frames are driven. | `kernel/src/devices.rs:552` ("msi-x: not available … blk polled"). | ARM bare metal (Ampere servers) needs an ITS driver (X15). |
 | F12 | **Only virtio devices have drivers.** | `crates/virtio`: net, blk, scsi, rng. | Bare metal needs native NIC and storage drivers (X13, X14) and a hardware inventory first (X12). |
 | F9 | Local x86 tooling is present. | `qemu-system-x86_64` 11.1.2, `edk2-x86_64-code.fd`, SeaBIOS `bios-256k.bin`, CPU models `EPYC-Milan/Genoa`, `Icelake-Server`; Homebrew LLVM clang. | Bring-up and smoke can start on the M4 under TCG. |
@@ -369,13 +369,13 @@ real hardware stay marked experimental.
   - disks with model, serial and size, plus the partition and signature scan.
 
   This is the first thing run on any new machine.
-- **Data-disk safety** (F10) is owned by STORAGE-PLAN **S1**, which comes earlier: signature scan, two-ended blank check, the boot self-test only on an identified disk, and formatting only the disk named in config. X12 depends on it and tests it on the PC.
+- **Data-disk choice** (F10) is owned by STORAGE-PLAN **S1**, which comes earlier: the boot USB stick identified exactly and never touched, and the PC's internal disk claimed entirely (it belongs to urMQTT, PLAN.md decision 6). X12 tests it on the PC.
 - **More CPUs.** MAX_CPUS goes from 64 to 256 (x2APIC; desktop SMT and hybrid P/E-core CPUs report many threads). Topology is logged; NUMA is logged and ignored for now.
 - **Power.** ACPI reset and S5 (D5) become essential on real hardware.
 
 **Tests**
 - Smoke `hwreport` under QEMU (q35 and pc, aarch64 virt).
-- S1's disk-safety scenarios (`refuse-foreign-ext4`, `select-by-serial`) also run with the bare-metal config.
+- S1's disk-choice scenarios (`claim-foreign`, `boot-disk-untouched`, `select-by-serial`) also run with the bare-metal config.
 
 **Real hardware (Intel PC)**
 1. Boot from USB by UEFI (and BIOS if the firmware has CSM).

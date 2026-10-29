@@ -18,7 +18,7 @@
 | `urmqtt-net` | `crates/net` | 1380 | 0 | 0 (0) | deny |
 | `urmqtt-pci` | `crates/pci` | 439 | 0 | 0 (0) | deny |
 | `urmqtt-platform` | `crates/platform` | 1017 | 453 | 0 (0) | deny |
-| `urmqtt-store` | `crates/store` | 3253 | 213 | 118 (106) | deny |
+| `urmqtt-store` | `crates/store` | 3253 | 652 | 118 (106) | deny |
 | `urmqtt-tcp` | `crates/tcp` | 2452 | 0 | 0 (0) | deny |
 | `urmqtt-timer-wheel` | `crates/timer-wheel` | 395 | 0 | 0 (0) | forbid |
 | `urmqtt-tls` | `crates/tls` | 2236 | 298 | 0 (0) | forbid |

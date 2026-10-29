@@ -793,3 +793,43 @@ PROMPT-security.md, plan in docs/SECURITY-PLAN.md. No behaviour change.
 - **Fixed:** H0-W7.
 
 **Correction to SECURITY-PLAN §1:** revocation on resumption is tested (`tls/tests/handshake.rs` `revoked_device_cannot_resume`).
+
+## S0 — Disk format specification (2026-10-29)
+
+PROMPT-storage.md, plan in docs/STORAGE-PLAN.md. No format or behaviour change; the disk stays raw, without a filesystem.
+
+**Done**
+
+- `docs/DISK-FORMAT.md`: the byte-level specification of layout v1. It covers:
+  - conventions (little-endian, CRC-32C with its check value);
+  - the disk map and the region-sizing formula;
+  - the superblock and region entries, the A/B size table and its ordering rules;
+  - the SQLite regions and their settings;
+  - the telemetry log (header, geometry formula, segment header, record, write and recovery rules, why stale data never resurrects, retention);
+  - scratch, the format procedure, invariants and known gaps.
+- `crates/store/tests/disk_format_spec.rs` reads the spec's field tables and checks them against the real encoders in both directions. Every listed field must be at its offset with the expected bytes, and every byte the code writes must belong to a listed field. It also checks the region-sizing formula on four disk sizes, the telemetry geometry formula, the size-table slot rules and the CRC check value. Mutation check: moving a field or deleting one from the spec makes it fail.
+- `crates/store/tests/golden_v1.rs` and `tests/golden/v1-{fresh,telemetry,torn}.txt` freeze the bytes of three deterministic 16 MiB v1 disks (non-zero sectors only, 6–18 KB each):
+  - a fresh format;
+  - 40 telemetry records in three partitions plus a size-table update;
+  - a torn tail.
+
+  Each is also recovered: 0, 40 and 40 records, with 0, 0 and 1 torn tails. These are the inputs of S2's migration tests. SQLite's own files are checked semantically by `tests/sqlite.rs`, not frozen.
+
+**Gaps found** (STORAGE-PLAN §2):
+
+| Gap | Description |
+|---|---|
+| G1 | the data disk is chosen by "not partitioned" instead of by identity |
+| G2 | a damaged urMQTT disk must not be taken for a blank one |
+| G3 | 4 KiB region alignment and 512 B telemetry writes |
+| G4 | 8 fixed telemetry partitions |
+| G5 | no host-file VFS backend yet |
+| G6 | the cross-arch test must use v2 |
+| G7 | a disk whose size is not a multiple of 4 KiB cannot be formatted |
+| G8 | recovery reads the whole telemetry region at boot, so boot time grows with the disk |
+
+**Decision (user, 2026-10-29): the data disk belongs to urMQTT entirely,** and previous content does not matter. That turns G1/G2 from "never overwrite foreign data" into "pick exactly the right disk, never the boot medium, and never re-format our own damaged disk" (PLAN.md decision 6).
+
+**Corrections to earlier planning text, found while writing the spec:**
+- Blank detection reads the whole first 4 KiB, so ext4, XFS, LVM, LUKS and swap disks are refused today. The formats at risk are the ones with an empty first 4 KiB (fixed in X86-PLAN, STORAGE-PLAN, SECURITY-PLAN and AUDIT.md).
+- SQLite already builds and runs on the host over `MemDisk`, which has crash primitives (G5).

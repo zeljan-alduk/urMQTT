@@ -36,7 +36,7 @@ Written 2026-10-29 against commit `8186a61`. Nothing here is implemented yet.
 
 - **Security first.** Where the plans conflict, PROMPT-security wins unless the user approves otherwise in an ADR.
 - **aarch64 must not regress.** After every milestone: all smoke scenarios, `make bench`, bytes per idle connection and reproducibility.
-- **Never lose data.** Never format a disk that is not blank or named in config, and never format silently. Every on-disk change is proven crash-safe by fault injection.
+- **The data disk belongs to urMQTT** (user decision 2026-10-29). Whatever was on it before does not matter and is overwritten. What must never happen is picking the *wrong* disk: never the boot medium, never a guess between several disks. urMQTT's own state is never lost silently: a damaged urMQTT disk is refused or restored (S5), not reformatted. Every on-disk change is proven crash-safe by fault injection.
 - **Verify, don't assume.** Every claim in README and docs points to a measurement or a test. Bare-metal claims are only made for machines in `docs/HARDWARE.md`.
 - **One shared mechanism per concern:**
   - CPU feature detection and dispatch (X0) serves the crypto optimisations (X0b, X9) and disk encryption (S7);
@@ -90,5 +90,11 @@ The user accepted every proposal ("everything as proposed, following best practi
 3. **Limine:** vendor the x86 Limine binaries and build the `limine` host tool from its checksummed C source. ADR-043 records that this overrides PROMPT.md §2.
 4. **S2 migration: offline.** The kernel reads only the current layout and refuses an older one with a clear message naming the fix. `urmqtt-disk migrate` converts offline, with the safeguards listed in STORAGE-PLAN S2.
 5. **H2 session tickets: random keys that rotate.** A new key comes from the CSPRNG every 12 h and the previous key is still accepted for 12 h more. Tickets live at most 12 h, so none outlives its key. The keys exist only in memory: never on disk or in the image, and zeroised when retired. Tickets do not survive a broker restart; the reconnect after a restart is a full handshake, which admission control absorbs (M16).
+
+6. **Whole-disk ownership.** The data disk is urMQTT's entirely; previous content does not matter. This overrides PROMPT-storage §0 ("never format over a non-blank disk"). The safeguards that remain are about choosing the disk, not its contents (STORAGE-PLAN S1):
+   - the boot disk is identified exactly and is never used;
+   - with `storage.data_disk = "auto"`, exactly one other disk must exist, otherwise urMQTT refuses and lists the candidates;
+   - an explicit selector (`{ serial = "…" }` or `{ model, size }`) picks one disk among several;
+   - claiming a disk with foreign content is logged with model, serial and size.
 
 Still open: the Intel test PC's hardware inventory (TODO.md), which decides the order of X13/X14.
