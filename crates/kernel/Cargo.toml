@@ -26,6 +26,7 @@ urmqtt-timer-wheel = { path = "../timer-wheel" }
 # Only the bare-metal kernel uses these; the host stub links none of them.
 [target.'cfg(target_os = "none")'.dependencies]
 limine = "0.6.5"
+smoltcp = { version = "0.14", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-tcp", "socket-dhcpv4", "socket-icmp"] }
 urmqtt-arch-aarch64 = { path = "../arch-aarch64" }
 urmqtt-log = { path = "../log" }
 urmqtt-mm = { path = "../mm" }

@@ -107,6 +107,47 @@ scenario() {
     done
 }
 
+# service <name> <cmdline> <port> <ready-pattern> <client...> -- <patterns...>
+# Boots a long-running image, waits for <ready-pattern> in the serial log,
+# runs the host-side client against 127.0.0.1:<port>, then stops QEMU and
+# checks the serial log plus the client's output.
+service() {
+    local name=$1 cmdline=$2 port=$3 ready=$4
+    shift 4
+    local client=()
+    while [[ $# -gt 0 && $1 != -- ]]; do
+        client+=("$1")
+        shift
+    done
+    shift
+    local iso="$OUT/$name.iso"
+    [[ -f "$iso" ]] || "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "$cmdline" >/dev/null
+    for accel in $ACCELS; do
+        local log="$OUT/$name-$accel.log" data="$OUT/$name-$accel.img" status=0 waited=0
+        rm -f "$log" "$data"
+        truncate -s 64m "$data"
+        "$ROOT/scripts/run-qemu.sh" --serial "$log" --iso "$iso" --accel "$accel" --headless \
+            --data "$data" --fwd "$port:${SERVICE_PORT:-$port}" >"$log.qemu" 2>&1 &
+        local pid=$!
+        until clean "$log" 2>/dev/null | grep -Eq -- "$ready"; do
+            if ! kill -0 "$pid" 2>/dev/null || (( waited >= TIMEOUT * 10 )); then
+                status=124
+                break
+            fi
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+        if [[ $status -eq 0 ]]; then
+            "${client[@]}" "$port" >"$log.client" 2>&1 || status=$?
+            sleep 0.5
+        fi
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        cat "$log.client" >>"$log" 2>/dev/null || true
+        check "$name [$accel]" "$log" "$status" "$@"
+    done
+}
+
 [[ -f "$KERNEL" ]] || { echo "error: $KERNEL not found (make build)" >&2; exit 1; }
 rm -f "$OUT"/*.iso
 echo "smoke: accelerators: $ACCELS"
@@ -160,6 +201,12 @@ scenario pac-forgery "smoke test=pac" on \
     "pointer authentication failure|instruction abort" "NOT:was NOT detected" "NOT:URMQTT READY"
 scenario bti-violation "smoke test=bti" on \
     "branch target exception \(BTI\)" "NOT:was NOT detected" "NOT:URMQTT READY"
+
+# M7: DHCP lease, ICMP to the gateway, TCP echo through the QEMU port forward.
+SERVICE_PORT=7 service net-echo "serve" 17007 "net: dhcp lease" python3 -I "$ROOT/scripts/echo-client.py" -- \
+    "net: dhcp lease 10\.0\.2\.15/24 router 10\.0\.2\.2" "net: icmp echo reply from 10\.0\.2\.2" \
+    "net: tcp echo service on port 7" "client: echo 1 ok" "client: echo 3000 ok" "client: echo 60000 ok" \
+    "net: echo connection closed after 60000 byte" "NOT:dhcp lease lost" "$NO_FAULT"
 
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
 pcap_has_garp() {

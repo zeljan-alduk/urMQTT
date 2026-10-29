@@ -245,3 +245,26 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - No ITS driver yet, so no MSI-X on KVM or TCG (M13).
 - virtio-net has one queue pair and no interrupts; multiqueue and RSS come in M13.
 - Requests are synchronous. Batched, asynchronous blk I/O for SQLite and the telemetry log comes in M11/M12.
+
+## M7 — Network prototype on smoltcp (2026-10-29)
+
+**Done**
+
+- `kernel/netproto`: smoltcp interface over virtio-net (ADR-026).
+  - DHCPv4 client: lease, router and DNS are logged; a lost lease is handled.
+  - ARP and ICMP: an echo request goes to the router and the reply round trip is logged.
+  - TCP echo service on port 7 (dev only, 4 sockets), closing cleanly when the peer half-closes.
+- `smoke.sh` `service` scenarios: boot without powering off, wait for a ready pattern, run a host client through the QEMU port forward, stop QEMU, check the serial log plus the client output. `scripts/echo-client.py` echoes 1, 3000 and 60 000 random bytes.
+
+**Measured**
+
+- DHCP lease `10.0.2.15/24 router 10.0.2.2 dns [10.0.2.3]` about 10 ms after the service starts.
+- ICMP RTT to the slirp gateway: about 9 ms under HVF. That is dominated by the polled RX path while the core sleeps in WFI (ADR-022).
+- Echo of 1, 3000 and 60 000 bytes byte-exact under HVF and TCG.
+- `make smoke`: 32/32.
+- Kernel ELF: **294 000 bytes** (smoltcp adds about 80 KB).
+
+**Known gaps**
+
+- No RX interrupts (still polled), one core, one queue: by design for this phase (PROMPT §5.1).
+- The prototype stack is not fuzzed; the own stack gets fuzz targets in M14.

@@ -11,7 +11,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M6)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M7)-red)
 
 </div>
 
@@ -24,6 +24,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > - **M4**: SMP bring-up on up to 64 cores, with IPIs checked between every pair of cores
 > - **M5**: hardware discovery from DTB or ACPI into one description, with identical results from both
 > - **M6**: PCIe and virtio drivers (rng, blk, net), MSI-X, and a CSPRNG seeded from hardware entropy
+> - **M7**: DHCP, ICMP and a TCP echo service on smoltcp
 >
 > The kernel boots under QEMU with HVF and TCG. MQTT over TLS arrives in **M10**. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
@@ -85,7 +86,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | **Devices** | PL011 UART, Limine framebuffer text log | ✅ M1 |
 | | PCIe ECAM, virtio-pci modern: net, blk, rng | ✅ M6 |
 | | virtio-net multiqueue + RSS, fallback software dispatcher | 📋 M13 |
-| **Network** | DHCPv4, ARP, ICMP echo (smoltcp prototype) | 📋 M7 |
+| **Network** | DHCPv4, ARP, ICMP echo (smoltcp prototype) | ✅ M7 |
 | | Own server-only TCP: SYN cookies, timing wheel, NewReno, ACK coalescing | 📋 M14 |
 | | IPv6 + SLAAC | 📋 later |
 | **TLS** | TLS 1.3 only, **mutual TLS**, device id from CN or SAN URI | 📋 M10 |
@@ -584,7 +585,16 @@ make loadtest ARGS="--connections 50000 --rate 2000/s --keepalive 60 --publish 1
 QEMU user networking (slirp) tops out far below a million connections. For ≥ 100k use
 `vmnet-shared` on macOS (needs sudo) or a Linux host with KVM, tap and several client IPs.
 
-### 9. Fuzzing (works today)
+### 9. TCP echo through the port forward (dev, works today)
+
+```bash
+make iso data-img
+scripts/run-qemu.sh --iso build/urmqtt-dev.iso --data build/data.img --fwd 7007:7 &
+# wait for "net: dhcp lease 10.0.2.15/24 router 10.0.2.2" on the console, then:
+python3 scripts/echo-client.py 7007        # client: echo 1 ok / 3000 ok / 60000 ok
+```
+
+### 10. Fuzzing (works today)
 
 ```bash
 make fuzz T=config_parse FUZZ_TIME=60     # every parser gets a target as it lands
@@ -678,7 +688,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M4** SMP | `run-smp N=8`, IPI ping-pong between all core pairs |
 | ✅ | **M5** Platform discovery | `acpi=on` and `acpi=off` give identical summaries |
 | ✅ | **M6** PCIe & virtio | blk write/flush/read-back; gratuitous ARP in a pcap |
-| 📋 | **M7** Network prototype | DHCP lease, ping, TCP echo through hostfwd |
+| ✅ | **M7** Network prototype | DHCP lease, ping, TCP echo through hostfwd |
 | 📋 | **M8** MQTT codec | spec tests, property tests, 10 minutes of fuzzing with no crash |
 | 📋 | **M9** Broker over TCP (dev) | pub/sub, wildcards, retained, LWT, QoS 1 redelivery with mosquitto |
 | 📋 | **M10** TLS 1.3 + mTLS | mosquitto over mTLS; wrong CA, expired, client-id mismatch and revoked all rejected |

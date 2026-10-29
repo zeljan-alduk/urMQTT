@@ -420,10 +420,12 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     smp_bringup(&mut s);
 
     urmqtt_log::raw(format_args!("URMQTT READY\n"));
-    if s.options.smoke {
+    if s.options.smoke && !s.options.serve {
         power::off();
     }
-    smp::idle_loop(smp::this())
+    // The boot CPU runs the network (M7 prototype: one core, one queue);
+    // the other cores idle until the data plane spreads out (M13).
+    crate::netproto::run(urmqtt_config::CONFIG.env == "dev")
 }
 
 const AP_TIMEOUT_NS: u64 = 2_000_000_000;

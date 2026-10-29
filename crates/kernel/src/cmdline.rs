@@ -31,8 +31,11 @@ pub enum TestFault {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BootOptions {
-    /// Power off (instead of reset) on panic, and after `URMQTT READY`.
+    /// Power off (instead of reset) on panic, and after `URMQTT READY`
+    /// unless `serve` is also given.
     pub smoke: bool,
+    /// Keep serving after `URMQTT READY` even in smoke mode (client tests).
+    pub serve: bool,
     pub test_fault: Option<TestFault>,
     /// Options that were present but rejected or unknown.
     pub ignored: usize,
@@ -48,6 +51,7 @@ impl BootOptions {
             }
             match word {
                 "smoke" => o.smoke = true,
+                "serve" => o.serve = true,
                 "test=data-abort" => o.test_fault = Some(TestFault::DataAbort),
                 "test=brk" => o.test_fault = Some(TestFault::BrkResume),
                 "test=undef" => o.test_fault = Some(TestFault::Undefined),
