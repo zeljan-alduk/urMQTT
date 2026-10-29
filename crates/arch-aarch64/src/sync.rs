@@ -90,6 +90,67 @@ impl<T> Drop for SpinGuard<'_, T> {
     }
 }
 
+/// A value set once (at boot) and then read without locking.
+pub struct OnceCell<T> {
+    state: core::sync::atomic::AtomicU8,
+    value: UnsafeCell<core::mem::MaybeUninit<T>>,
+}
+
+const EMPTY: u8 = 0;
+const WRITING: u8 = 1;
+const READY: u8 = 2;
+
+// SAFETY: the value is written exactly once before READY is published and
+// only read afterwards, so sharing it requires `T: Sync` (and `Send` to move
+// it in).
+unsafe impl<T: Send + Sync> Sync for OnceCell<T> {}
+
+impl<T> OnceCell<T> {
+    pub const fn new() -> Self {
+        Self {
+            state: core::sync::atomic::AtomicU8::new(EMPTY),
+            value: UnsafeCell::new(core::mem::MaybeUninit::uninit()),
+        }
+    }
+
+    /// Stores `v` if the cell is empty; returns it back otherwise.
+    pub fn set(&self, v: T) -> Result<(), T> {
+        // Acquire on success: nothing to observe yet, but keeps the write
+        // below ordered after winning the race. Relaxed on failure.
+        if self
+            .state
+            .compare_exchange(EMPTY, WRITING, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(v);
+        }
+        // SAFETY: we won the EMPTY -> WRITING transition; no reader looks at
+        // the value until READY is stored.
+        unsafe { (*self.value.get()).write(v) };
+        // Release: publishes the initialised value to `get`'s Acquire load.
+        self.state.store(READY, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn get(&self) -> Option<&T> {
+        // Acquire: pairs with the Release in `set`.
+        if self.state.load(Ordering::Acquire) == READY {
+            // SAFETY: after READY nobody writes the cell again.
+            let slot = unsafe { &*self.value.get() };
+            // SAFETY: READY means the value was fully initialised by `set`.
+            Some(unsafe { slot.assume_init_ref() })
+        } else {
+            None
+        }
+    }
+}
+
+impl<T> Default for OnceCell<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +173,15 @@ mod tests {
             t.join().unwrap();
         }
         assert_eq!(*lock.lock(), 80_000);
+    }
+
+    #[test]
+    fn once_cell_sets_once() {
+        let c = OnceCell::new();
+        assert!(c.get().is_none());
+        assert_eq!(c.set(5), Ok(()));
+        assert_eq!(c.set(6), Err(6));
+        assert_eq!(c.get(), Some(&5));
     }
 
     #[test]

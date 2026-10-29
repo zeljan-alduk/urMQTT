@@ -1,5 +1,5 @@
 use urmqtt_platform::fdt::{Fdt, FdtError, Visit};
-use urmqtt_platform::{PsciMethod, Source, Uart, early_from_fdt};
+use urmqtt_platform::{Gic, Interrupts, PsciMethod, Source, TimerIrqs, Uart, early_from_fdt};
 
 const HVF_GIC3: &[u8] = include_bytes!("fixtures/qemu-virt-hvf-gic3.dtb");
 const TCG_GIC3: &[u8] = include_bytes!("fixtures/qemu-virt-tcg-gic3.dtb");
@@ -94,4 +94,30 @@ fn every_truncation_and_bitflip_is_handled() {
         }
         b[i] = orig;
     }
+}
+
+#[test]
+fn gic_and_timer_from_qemu_dtbs() {
+    let hvf = early_from_fdt(&Fdt::new(HVF_GIC3).unwrap()).unwrap();
+    assert_eq!(
+        hvf.interrupts,
+        Some(Interrupts {
+            gic: Gic {
+                gicd: 0x0800_0000,
+                gicr: (0x080a_0000, 0x00f6_0000),
+                its: None,
+                v2m: Some(0x0802_0000),
+            },
+            timer: TimerIrqs { virt: 27, phys: 30 },
+        })
+    );
+    let tcg = early_from_fdt(&Fdt::new(TCG_GIC3).unwrap()).unwrap();
+    assert_eq!(tcg.interrupts.unwrap().gic.its, Some(0x0808_0000));
+    // GICv2 machines have no GICv3 description.
+    assert_eq!(
+        early_from_fdt(&Fdt::new(TCG_GIC2).unwrap())
+            .unwrap()
+            .interrupts,
+        None
+    );
 }

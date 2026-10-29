@@ -17,7 +17,7 @@ use urmqtt_log::{error, info, warn};
 use urmqtt_platform::{EarlyPlatform, PsciMethod, Uart};
 
 use crate::cmdline::{BootOptions, TestFault};
-use crate::{VERSION, console, layout, memory, power, selftest, trap, vm};
+use crate::{VERSION, console, irq, layout, memory, power, selftest, tick, trap, vm};
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
@@ -110,6 +110,8 @@ const DEV_FALLBACK_UART: u64 = 0x0900_0000;
 /// State carried across the stack switch into [`kmain_stage2`].
 struct Stage2 {
     options: BootOptions,
+    interrupts: Option<urmqtt_platform::Interrupts>,
+    cpus: u64,
     built: vm::Built,
     early_frames: (u64, u64),
     features: Features,
@@ -262,6 +264,8 @@ extern "C" fn urmqtt_kmain() -> ! {
     let (main_top, exc_top) = (built.main_top, built.exc_top);
     *STAGE2.lock() = Some(Stage2 {
         options,
+        interrupts: early.and_then(|e| e.interrupts),
+        cpus: cpus as u64,
         built,
         early_frames: mem.early_frames_range().unwrap_or((0, 0)),
         features,
@@ -325,6 +329,23 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     if let Err(msg) = selftest::memory() {
         fatal(msg);
     }
+    // Interrupts and time (M3). Device mappings must precede the lock.
+    let Some(intr) = s.interrupts else {
+        fatal("no GICv3/timer description in DTB or ACPI");
+    };
+    match irq::init(&intr.gic, s.cpus) {
+        Ok(lines) => info!(
+            "gic: v3 at gicd={:#x} gicr={:#x}, {lines} lines, msi via {}",
+            intr.gic.gicd,
+            intr.gic.gicr.0,
+            match (intr.gic.its, intr.gic.v2m) {
+                (Some(_), _) => "ITS",
+                (None, Some(_)) => "GICv2m frame",
+                (None, None) => "none",
+            }
+        ),
+        Err(e) => fatal_fmt(format_args!("gic init failed: {e:?}")),
+    }
     match vm::lock() {
         Ok(bytes) => info!(
             "vm: page tables locked ({} KiB read-only, no writable alias)",
@@ -340,11 +361,64 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         run_test_fault(fault, s.features);
     }
 
+    tick_selftest(intr.timer.virt);
+
     urmqtt_log::raw(format_args!("URMQTT READY\n"));
     if s.options.smoke {
         power::off();
     }
-    cpu::halt();
+    // SAFETY: vectors and the GIC are initialised; the tick keeps running.
+    unsafe { cpu::idle() }
+}
+
+/// Tick period (also the watchdog granularity, PROMPT §4.1).
+const TICK_NS: u64 = 10_000_000;
+const TICK_SELFTEST: u64 = 50;
+
+/// Runs the periodic tick and reports interrupt latency twice: while the
+/// core busy-polls and while it sleeps in `wfi` (ADR-022).
+fn tick_selftest(timer_intid: u32) {
+    let freq = urmqtt_arch_aarch64::timer::frequency();
+    info!(
+        "timer: counter {freq} Hz, virtual timer PPI {timer_intid}, tick {} ms",
+        TICK_NS / 1_000_000
+    );
+    tick::start(timer_intid, TICK_NS);
+    let t0 = urmqtt_arch_aarch64::timer::uptime_ns();
+    // SAFETY: vectors, GIC and the tick handler are ready.
+    unsafe { cpu::unmask_irq() };
+    for (mode, sleep) in [("busy-poll", false), ("wfi", true)] {
+        tick::reset_stats();
+        let start = tick::ticks();
+        let mut reported = start;
+        while tick::ticks() < start + TICK_SELFTEST / 2 {
+            if sleep {
+                cpu::wfi();
+            } else {
+                core::hint::spin_loop();
+            }
+            let t = tick::ticks();
+            if t >= reported + 10 {
+                reported = t - t % 10;
+                info!("tick {reported}");
+            }
+        }
+        let l = tick::latency();
+        info!(
+            "timer: irq latency ({mode}, {} samples) min={} avg={} p99<={} max={} ns",
+            l.samples, l.min_ns, l.avg_ns, l.p99_ns, l.max_ns
+        );
+    }
+    let elapsed = urmqtt_arch_aarch64::timer::uptime_ns() - t0;
+    info!(
+        "timer: {} ticks in {} ms",
+        tick::ticks(),
+        elapsed / 1_000_000
+    );
+    let (spurious, unhandled) = irq::stats();
+    if unhandled > 0 {
+        warn!("irq: {unhandled} interrupt(s) without handler, {spurious} spurious");
+    }
 }
 
 fn fatal(msg: &str) -> ! {

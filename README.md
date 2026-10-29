@@ -11,15 +11,18 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M2)-red)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M3)-red)
 
 </div>
 
 > [!WARNING]
-> **urMQTT is pre-alpha and does not serve MQTT yet.** **M0** (tooling, CI), **M1** (UEFI boot,
-> console, exception reports) and **M2** (own page tables with enforced W^X, guard pages, locked
-> tables, PAC and BTI) are complete. The kernel boots under QEMU with HVF and TCG. MQTT over TLS
-> arrives in **M10**. Every feature and example below is tagged with the milestone that delivers it, and
+> **urMQTT is pre-alpha and does not serve MQTT yet.** These milestones are complete:
+> - **M0**: tooling and CI
+> - **M1**: UEFI boot, console, exception reports
+> - **M2**: own page tables with enforced W^X, guard pages, locked tables, PAC and BTI
+> - **M3**: GICv3, generic timer, periodic tick with measured IRQ latency
+>
+> The kernel boots under QEMU with HVF and TCG. MQTT over TLS arrives in **M10**. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
 
 ---
@@ -73,7 +76,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | Bit-for-bit reproducible, signed images; raw disk image | 📋 M17 |
 | **Kernel** | EL1 exception vectors with decoded ESR/ELR/FAR reports | ✅ M1 |
 | | Own page tables with W^X, guard pages, PAC/BTI when present | ✅ M2 |
-| | GICv3, generic timer, monotonic clock | 📋 M3 |
+| | GICv3, generic timer, monotonic clock | ✅ M3 |
 | | SMP bring-up, per-CPU data (`TPIDR_EL1`), SGI IPIs | 📋 M4 |
 | | Hardware discovery via **DTB and ACPI** (MADT, GTDT, MCFG, SPCR) | 📋 M5 |
 | **Devices** | PL011 UART, Limine framebuffer text log | ✅ M1 |
@@ -319,7 +322,14 @@ Boot also builds the kernel's own address space and audits it before announcing 
 [    5.165] INFO  vm: running on kernel stacks (main 128 KiB ...), pac=on bti=on
 [    5.166] INFO  vm: page tables locked (2048 KiB read-only, no writable alias)
 [    5.167] INFO  selftest: W^X ok (13385 leaf mappings audited, 0 W+X, text-only execute, ...)
+[    5.186] INFO  gic: v3 at gicd=0x8000000 gicr=0x80a0000, 1020 lines, msi via GICv2m frame
+[    5.423] INFO  timer: irq latency (busy-poll, 25 samples) min=1916 avg=3869 p99<=8192 max=7750 ns
+[    5.675] INFO  timer: irq latency (wfi, 25 samples) min=110000 avg=1810114 ... ns
 ```
+
+Under HVF an IRQ reaches a busy-polling core in about 4 µs, while a core asleep in `wfi` wakes
+after about 2 ms. That gap is why the data plane busy-polls under load and sleeps only when idle
+([ADR-022](docs/DECISIONS.md)).
 
 `make smoke` boots twelve scenarios under HVF and TCG and checks the decoded reports:
 - ACPI and device-tree discovery
@@ -637,7 +647,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M0** Workspace & tooling | `make check` green on macOS |
 | ✅ | **M1** Boot | Limine ISO boots under HVF and TCG; a test fault prints a decoded exception |
 | ✅ | **M2** Memory | W^X verified by deliberate faults; PAC/BTI detection logged |
-| 📋 | **M3** Interrupts & time | GICv3, periodic tick, IRQ latency measured |
+| ✅ | **M3** Interrupts & time | GICv3, periodic tick, IRQ latency measured |
 | 📋 | **M4** SMP | `run-smp N=8`, IPI ping-pong between all core pairs |
 | 📋 | **M5** Platform discovery | `acpi=on` and `acpi=off` give identical summaries |
 | 📋 | **M6** PCIe & virtio | blk write/flush/read-back; gratuitous ARP in a pcap |

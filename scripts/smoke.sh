@@ -111,13 +111,16 @@ BOOT_LINE='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$'
 NO_FAULT='NOT:EXCEPTION|PANIC'
 
 MEMORY_OK=("vm: switched to kernel tables" "selftest: frames ok" "page tables locked" "selftest: W\^X ok \([0-9]+ leaf mappings audited, 0 W\+X")
+TIME_OK=("gic: v3 at gicd=0x8000000" "timer: counter [0-9]+ Hz, virtual timer PPI 27" "tick 10$"
+    "irq latency \(busy-poll, 25 samples\) min=[0-9]+" "irq latency \(wfi, 25 samples\) min=[0-9]+"
+    "timer: 5[0-9] ticks in [0-9]+ ms")
 
 scenario boot-acpi "smoke" on \
     "$BOOT_LINE" "platform: Acpi" "console: pl011 at 0x9000000" "psci 1\.[0-9]+ via hvc" \
-    "${MEMORY_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
+    "${MEMORY_OK[@]}" "${TIME_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 scenario boot-dtb "smoke" off \
     "$BOOT_LINE" "platform: DeviceTree" "console: pl011 at 0x9000000" "${MEMORY_OK[@]}" \
-    "^URMQTT READY$" "$NO_FAULT"
+    "${TIME_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 scenario fault-data-abort "smoke test=data-abort" on \
     "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
     "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \

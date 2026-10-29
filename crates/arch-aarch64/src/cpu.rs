@@ -73,6 +73,36 @@ pub unsafe fn unmask_irq() {
     };
 }
 
+/// Masks IRQs and returns the previous DAIF value for [`irq_restore`].
+#[inline(always)]
+pub fn irq_save() -> u64 {
+    let daif: u64;
+    // SAFETY: reads and sets PSTATE.DAIF only.
+    unsafe {
+        asm!("mrs {}, daif", "msr daifset, #0x2", out(reg) daif, options(nomem, nostack, preserves_flags))
+    };
+    daif
+}
+
+/// Restores the DAIF value returned by [`irq_save`].
+#[inline(always)]
+pub fn irq_restore(daif: u64) {
+    // SAFETY: restores a previously valid PSTATE.DAIF.
+    unsafe { asm!("msr daif, {}", in(reg) daif, options(nomem, nostack, preserves_flags)) };
+}
+
+/// Sleeps with interrupts enabled until one arrives, forever.
+///
+/// # Safety
+/// The vector table and interrupt controller must be ready for IRQs.
+pub unsafe fn idle() -> ! {
+    // SAFETY: forwarded to the caller.
+    unsafe { unmask_irq() };
+    loop {
+        wfi();
+    }
+}
+
 /// Stops this core forever with interrupts masked.
 pub fn halt() -> ! {
     mask_all_interrupts();

@@ -27,6 +27,8 @@ mod boot;
 #[cfg(target_os = "none")]
 mod console;
 #[cfg(target_os = "none")]
+mod irq;
+#[cfg(target_os = "none")]
 mod layout;
 #[cfg(target_os = "none")]
 mod memory;
@@ -34,6 +36,8 @@ mod memory;
 mod power;
 #[cfg(target_os = "none")]
 mod selftest;
+#[cfg(target_os = "none")]
+mod tick;
 #[cfg(target_os = "none")]
 mod trap;
 #[cfg(target_os = "none")]

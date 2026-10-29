@@ -17,6 +17,10 @@ const BRK_RESUME: u16 = 0x5155;
 static IN_FATAL: AtomicBool = AtomicBool::new(false);
 
 pub fn handle(frame: &mut TrapFrame, vector: Vector) {
+    if matches!(vector, Vector::CurrentSp0Irq | Vector::CurrentSpxIrq) {
+        crate::irq::dispatch();
+        return;
+    }
     let esr = frame.esr();
     if vector.is_synchronous()
         && esr.class() == ExceptionClass::Brk64

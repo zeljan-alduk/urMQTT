@@ -190,3 +190,95 @@ pub fn parse_fadt_arm_boot_arch(t: &Sdt<'_>) -> Option<ArmBootArch> {
         psci_use_hvc: flags & 2 != 0,
     })
 }
+
+/// GIC description from the MADT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MadtGic {
+    pub version: u8,
+    pub gicd: u64,
+    /// First GICR discovery range (base, length), if the MADT has one.
+    pub gicr_range: Option<(u64, u64)>,
+    /// GICR base of the first GICC entry (used when no GICR range exists).
+    pub gicc_gicr_base: Option<u64>,
+    /// Number of enabled GICC (CPU interface) entries.
+    pub cpus: usize,
+    /// GICv3 ITS base, if present.
+    pub its: Option<u64>,
+    /// GICv2m MSI frame (base, first SPI, SPI count), if present.
+    pub msi_frame: Option<(u64, u16, u16)>,
+}
+
+const MADT_GICC: u8 = 0x0b;
+const MADT_GICD: u8 = 0x0c;
+const MADT_MSI_FRAME: u8 = 0x0d;
+const MADT_GICR: u8 = 0x0e;
+const MADT_ITS: u8 = 0x0f;
+const GICC_ENABLED: u32 = 1;
+const GICC_ONLINE_CAPABLE: u32 = 1 << 3;
+
+/// Iterates MADT interrupt-controller structures as (type, bytes).
+pub fn madt_entries<'a>(t: &Sdt<'a>) -> impl Iterator<Item = (u8, &'a [u8])> + 'a {
+    let body = t.data.get(44..).unwrap_or(&[]);
+    let mut off = 0usize;
+    core::iter::from_fn(move || {
+        let ty = *body.get(off)?;
+        let len = usize::from(*body.get(off + 1)?);
+        if len < 2 {
+            return None;
+        }
+        let entry = body.get(off..off + len)?;
+        off += len;
+        Some((ty, entry))
+    })
+}
+
+pub fn parse_madt(t: &Sdt<'_>) -> MadtGic {
+    let mut g = MadtGic::default();
+    for (ty, e) in madt_entries(t) {
+        match ty {
+            MADT_GICC => {
+                let flags = u32_at(e, 12).unwrap_or(0);
+                if flags & (GICC_ENABLED | GICC_ONLINE_CAPABLE) != 0 {
+                    g.cpus += 1;
+                    if g.gicc_gicr_base.is_none() {
+                        g.gicc_gicr_base = u64_at(e, 60).filter(|&b| b != 0);
+                    }
+                }
+            }
+            MADT_GICD => {
+                g.gicd = u64_at(e, 8).unwrap_or(0);
+                g.version = u8_at(e, 20).unwrap_or(0);
+            }
+            MADT_GICR if g.gicr_range.is_none() => {
+                if let (Some(b), Some(l)) = (u64_at(e, 4), u32_at(e, 12)) {
+                    g.gicr_range = Some((b, u64::from(l)));
+                }
+            }
+            MADT_ITS if g.its.is_none() => g.its = u64_at(e, 8),
+            MADT_MSI_FRAME if g.msi_frame.is_none() => {
+                if let (Some(b), Some(base), Some(n)) = (u64_at(e, 8), u16_at(e, 22), u16_at(e, 20))
+                {
+                    g.msi_frame = Some((b, base, n));
+                }
+            }
+            _ => {}
+        }
+    }
+    g
+}
+
+/// Generic timer interrupts (GSIVs, i.e. INTIDs) from the GTDT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GtdtTimers {
+    pub el1_phys: u32,
+    pub el1_virt: u32,
+    pub el2_phys: u32,
+}
+
+pub fn parse_gtdt(t: &Sdt<'_>) -> Option<GtdtTimers> {
+    Some(GtdtTimers {
+        el1_phys: u32_at(t.data, 56)?,
+        el1_virt: u32_at(t.data, 64)?,
+        el2_phys: u32_at(t.data, 72)?,
+    })
+}

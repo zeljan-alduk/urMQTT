@@ -56,6 +56,49 @@ pub fn has_uart() -> bool {
     SINKS.lock().uart.is_some()
 }
 
+/// Holds the sink lock with IRQs masked on this core, so an interrupt
+/// handler can never spin on a lock its own core holds.
+struct Locked {
+    #[cfg(target_os = "none")]
+    daif: u64,
+    guard: Option<urmqtt_arch_aarch64::sync::SpinGuard<'static, Sinks>>,
+}
+
+impl Locked {
+    fn acquire() -> Self {
+        #[cfg(target_os = "none")]
+        let daif = urmqtt_arch_aarch64::cpu::irq_save();
+        Self {
+            #[cfg(target_os = "none")]
+            daif,
+            guard: Some(SINKS.lock()),
+        }
+    }
+
+    fn sinks(&mut self) -> &mut Sinks {
+        // The guard is only taken out in `drop`.
+        match self.guard.as_mut() {
+            Some(g) => g,
+            None => unreachable_sinks(),
+        }
+    }
+}
+
+#[cold]
+fn unreachable_sinks() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+impl Drop for Locked {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        #[cfg(target_os = "none")]
+        urmqtt_arch_aarch64::cpu::irq_restore(self.daif);
+    }
+}
+
 struct Tee<'a>(&'a mut Sinks);
 
 impl Write for Tee<'_> {
@@ -85,9 +128,10 @@ pub fn log(level: Level, args: fmt::Arguments<'_>) {
     if level > MAX_LEVEL {
         return;
     }
-    let mut sinks = SINKS.lock();
+    let mut locked = Locked::acquire();
+    let sinks = locked.sinks();
     let ns = sinks.clock_ns.map_or(0, |c| c());
-    let mut out = Tee(&mut sinks);
+    let mut out = Tee(sinks);
     // Sinks never fail; a formatting error just truncates the line.
     let _ = writeln!(
         out,
@@ -102,8 +146,8 @@ pub fn log(level: Level, args: fmt::Arguments<'_>) {
 /// Writes raw text (no prefix) regardless of level, e.g. boot markers that
 /// test harnesses wait for.
 pub fn raw(args: fmt::Arguments<'_>) {
-    let mut sinks = SINKS.lock();
-    let _ = Tee(&mut sinks).write_fmt(args);
+    let mut locked = Locked::acquire();
+    let _ = Tee(locked.sinks()).write_fmt(args);
 }
 
 /// Last-resort output for exception and panic reports. Uses the normal sinks

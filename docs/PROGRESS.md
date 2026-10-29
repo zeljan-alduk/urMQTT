@@ -129,3 +129,31 @@ Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptan
 - The page-table pool rounds up to 2 MiB (about 1.8 MB unused at 512 MB RAM).
 - Only the boot CPU's stacks exist; M4 maps the others before the lock.
 - MTE is not used (HVF does not expose it).
+
+## M3 — Interrupts and time (2026-10-29)
+
+**Done**
+
+- `platform`: GICv3 and generic-timer discovery from the DTB (`arm,gic-v3`, ITS / GICv2m frames, `arm,armv8-timer` PPIs) and from ACPI (MADT GICD/GICC/GICR/ITS/MSI-frame, GTDT), with host tests on QEMU DTBs and synthetic tables (including zero-length MADT entries).
+- `arch-aarch64`:
+  - GICv3 driver: distributor, redistributor lookup by affinity (with VLPI stride), wake-up, SGI/PPI/SPI enable and routing, and the system-register CPU interface (IAR1/EOIR1/PMR/IGRPEN1/SGI1R).
+  - Generic timer (CNTVCT with `isb`, CNTV deadline programming).
+  - `OnceCell`; IRQ save/restore; `idle()` (WFI with IRQs on).
+- `kernel`:
+  - IRQ dispatch table (handlers only acknowledge and mark).
+  - 10 ms periodic tick that re-arms from the previous deadline (no drift), with min/avg/max and log-histogram latency statistics.
+  - The logger masks IRQs while it holds its lock, so a handler can never deadlock on it.
+  - After `URMQTT READY` the boot CPU idles in WFI with the tick running.
+
+**Measured**
+
+- Under HVF, IRQ latency is 1.9 / 3.9 / 7.8 µs (min/avg/max) while busy-polling and about 1.8 ms average in WFI. Under TCG it is about 2.2 ms in both modes (ADR-022).
+- `make smoke`: 24/24, with the boot scenarios checking GIC init, the tick and both latency reports.
+- Kernel ELF: **127 784 bytes**.
+- Host tests: 85.
+
+**Known gaps**
+
+- Only the boot CPU's redistributor is initialised; the other CPUs join in M4.
+- SPIs and MSIs are not used yet (M6, M13).
+- The tick is not yet used by the watchdog (M16).

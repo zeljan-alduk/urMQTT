@@ -18,8 +18,12 @@ pub mod cpu;
 #[cfg(target_os = "none")]
 pub mod exception;
 #[cfg(target_os = "none")]
+pub mod gic;
+#[cfg(target_os = "none")]
 pub mod pac;
 #[cfg(target_os = "none")]
 pub mod psci;
 #[cfg(target_os = "none")]
 pub mod regs;
+#[cfg(target_os = "none")]
+pub mod timer;
