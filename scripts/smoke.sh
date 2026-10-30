@@ -36,6 +36,8 @@ if [[ $ARCH == x86_64 ]]; then
 elif [[ $ARCH != aarch64 ]]; then
     echo "error: --arch aarch64|x86_64" >&2; exit 2
 fi
+# run-qemu.sh and mkiso.sh take their architecture from here.
+export URMQTT_ARCH=$ARCH
 if [[ -z "$ACCELS" ]]; then
     case "$(uname -s)-$(uname -m)" in
         Darwin-arm64) ACCELS="hvf tcg" ;;
@@ -982,12 +984,14 @@ no_hw_rng() {
     local iso="$OUT/no-rng.raw"
     mkimg "$iso" "smoke"
     for accel in $ACCELS; do
-        local log="$OUT/no-rng-$accel.log" data="$OUT/no-rng-$accel.img" status=0 cpu=()
-        [[ $accel == tcg ]] && cpu=(--cpu neoverse-n1)
+        local log="$OUT/no-rng-$accel.log" data="$OUT/no-rng-$accel.img" status=0 cpu=() rng="RNDR"
+        [[ $accel == tcg && $ARCH == aarch64 ]] && cpu=(--cpu neoverse-n1)
+        # x86: no RDRAND/RDSEED either (the CPU model says so).
+        [[ $ARCH == x86_64 ]] && { cpu=(--cpu "max,-rdrand,-rdseed"); rng="RDRAND/RDSEED"; }
         fresh_disk "$iso" "$data"
         boot "$log" --disk "$data" --accel "$accel" ${cpu[@]+"${cpu[@]}"} --no-rng --headless || status=$?
         check "no-hw-rng [$accel]" "$log" "$status" "NOT:entropy: [0-9]+ bytes from" \
-            "entropy: no hardware source \(virtio-rng, RNDR\): CPU jitter fallback .* health tests passed" \
+            "entropy: no hardware source \(virtio-rng, $rng\): CPU jitter fallback .* health tests passed" \
             "entropy: ChaCha20 CSPRNG seeded" "smp: 4/4 cpus online" "^URMQTT READY$" "$NO_FAULT"
     done
 }
@@ -1059,6 +1063,7 @@ x86_scenario() {
 }
 
 if [[ $ARCH == x86_64 ]]; then
+    # X2: the ISO-based boot and exception scenarios.
     X86_BOOT=('^URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$'
         'cpu: vendor=[A-Za-z]+ family=[0-9]+ model=0x[0-9a-f]+ stepping=[0-9]+ hypervisor=[A-Za-z]+'
         'cpu features: .*xcr0=0x[0-9a-f]+' 'bootloader=Limine' 'framebuffer: [0-9]+x[0-9]+ text console'
@@ -1087,10 +1092,72 @@ if [[ $ARCH == x86_64 ]]; then
         "resumable brk at 0x" "test: resumed after brk" "^URMQTT READY$" "NOT:fatal exception"
     x86_scenario x86-panic q35 uefi - "smoke test=panic" \
         "PANIC: panicked at" "test panic requested on the command line" "NOT:URMQTT READY"
-    echo "smoke: $PASSED passed, $FAILED failed"
-    exit $(( FAILED > 0 ))
 fi
 
+# X8: the disk-based scenarios on x86_64 (q35, OVMF, the raw GPT image).
+if [[ $ARCH == x86_64 ]]; then
+BOOT_LINE='^URMQTT BOOT [^ ]+ arch=x86_64 cpu=4 mem=[0-9]+$'
+
+MEMORY_OK=("vm: switched to kernel tables" "selftest: frames ok" "page tables locked" "selftest: W\^X ok \([0-9]+ leaf mappings audited, 0 W\+X"
+    "mm: protections nx=on wp=on smep=on smap=on umip=on")
+TIME_OK=("apic: x2APIC mode, lapic at 0xfee00000, 1 I/O APIC\(s\)"
+    "timer: tsc [0-9]+ Hz, local APIC timer vector 0x20 \((one-shot, calibrated|TSC-deadline)\), tick 10 ms"
+    "tick 10$" "irq latency \(busy-poll, 25 samples\) min=[0-9]+" "irq latency \(wfi, 25 samples\) min=[0-9]+"
+    "timer: 5[0-9] ticks in [0-9]+ ms")
+DEV_OK=("pci: ECAM 0xe0000000 buses 0-255" "virtio-blk" "virtio-net" "virtio-rng"
+    "entropy: [0-9]+ bytes from virtio-rng" "entropy: ChaCha20 CSPRNG seeded"
+    "blk: self-test ok \(4 KiB random pattern written, flushed, read back" "net: gratuitous ARP sent"
+    "net: rx ok, ARP reply from 52:55:0a:00:02:02")
+DB_OK=("storage: data disk formatted \(was blank\)" "db: sqlite 3\.[0-9]+\.[0-9]+ on the data disk: WAL, exclusive locking, quick_check ok"
+    "telemetry: log recovered in [0-9]+ ms: 0 record\(s\)"
+    "db: restored 0 retained" "db: DB core is cpu 3" "db: worker running on cpu 3")
+# No hardware backends are built for x86 yet (X9): the portable code runs.
+DISPATCH_OK=("cpu dispatch: detected .*, disabled none"
+    "crypto: aes-gcm=soft ghash=soft chacha=soft sha256=soft crc32c=table toeplitz=bitwise"
+    "crypto: known-answer tests passed \(AES-128-GCM, ChaCha20-Poly1305, SHA-256, HMAC-SHA-256, CRC-32C\)")
+SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordered pairs ping-pong ok"
+    "smp: 4/4 cpus ticking on their own timer")
+
+scenario x86-disk-q35 "smoke" on \
+    "$BOOT_LINE" "platform: discovered via Acpi" "acpi: lapic=0xfee00000 ioapic=1\[0@0xfec00000\+0\]" \
+    "time: tsc [0-9]+ Hz from " "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${DEV_OK[@]}" "${SMP4_OK[@]}" "${DB_OK[@]}" \
+    "${DISPATCH_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
+scenario x86-fault-unmapped-mmio "smoke test=data-abort" on \
+    "EXCEPTION: #PF page fault" "page not present, read, supervisor mode" "NOT:URMQTT READY"
+SMP=8 scenario x86-smp8 "smoke" on \
+    "cpu=8 mem=" "cpu 7 online" "smp: 8/8 cpus online" "ipi: 56/56 ordered pairs ping-pong ok" \
+    "smp: 8/8 cpus ticking on their own timer" "^URMQTT READY$" "$NO_FAULT"
+
+# X3: W^X, NX, guard pages and the sealed page, through the locked tables.
+scenario x86-wx-write-text "smoke test=write-text" on \
+    "${MEMORY_OK[@]}" "page fault error code 0x3: protection violation, write, supervisor mode" "NOT:URMQTT READY"
+scenario x86-nx-exec-heap "smoke test=exec-heap" on \
+    "protection violation, read, supervisor mode, instruction fetch" "NOT:URMQTT READY"
+scenario x86-guard-overflow "smoke test=stack-overflow" on \
+    "page not present, write, supervisor mode" "FAR is in: main stack guard page \(stack overflow\)" \
+    "NOT:URMQTT READY"
+scenario x86-sealed-write "smoke test=sealed-write" on \
+    "test: writing the sealed cpu dispatch at 0x" "protection violation, write, supervisor mode" \
+    "NOT:URMQTT READY"
+for accel in $ACCELS; do
+    log="$OUT/x86-sealed-write-$accel.log"
+    at=$(clean "$log" | grep -Eo 'sealed cpu dispatch at 0x[0-9a-f]+' | grep -Eo '0x[0-9a-f]+$')
+    far=$(clean "$log" | grep -Eo 'CR2=0x[0-9a-f]+' | head -1 | cut -d= -f2)
+    if [[ -n "$at" && $((at)) -eq $((far)) ]]; then
+        echo "  ✓ sealed-write faulted on the sealed page itself ($far) [$accel]"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ sealed-write: CR2 ${far:-?} is not the sealed address ${at:-?} [$accel]"
+        FAILED=$((FAILED + 1))
+    fi
+done
+scenario x86-crypto-soft "smoke cpu-disable=aes,pmull,sha2,crc32" on \
+    "disabled aes pmull sha2 crc32" "crypto: aes-gcm=soft ghash=soft chacha=soft sha256=soft crc32c=table" \
+    "crypto: known-answer tests passed" "^URMQTT READY$" "$NO_FAULT"
+scenario x86-simd-irq "smoke test=simd-irq" on \
+    "simd-irq: [0-9]+ known-answer rounds on 4 cores in 10 s with [0-9]+ IPIs and the tick: 0 mismatches" \
+    "^URMQTT READY$" "$NO_FAULT"
+else
 BOOT_LINE='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$'
 
 MEMORY_OK=("vm: switched to kernel tables" "selftest: frames ok" "page tables locked" "selftest: W\^X ok \([0-9]+ leaf mappings audited, 0 W\+X")
@@ -1176,6 +1243,8 @@ scenario simd-irq "smoke test=simd-irq" on \
 scenario crypto-bench "smoke test=crypto-bench" on \
     "crypto-bench: AES-128-GCM [0-9]+ MiB/s, ChaCha20-Poly1305 [0-9]+ MiB/s, SHA-256 [0-9]+ MiB/s, CRC-32C [0-9]+ MiB/s" \
     "^URMQTT READY$" "$NO_FAULT"
+
+fi
 
 # M7: DHCP lease, ICMP to the gateway, TCP echo through the QEMU port forward.
 SERVICE_PORT=7 service net-echo "serve" 17007 "net: dhcp lease" python3 -I "$ROOT/scripts/echo-client.py" -- \
@@ -1299,9 +1368,9 @@ scsi_boot
 iso_as_cd
 own_damaged
 disk_tool
-install_iso
+[[ $ARCH == aarch64 ]] && install_iso
 no_hw_rng
-gicv2
+[[ $ARCH == aarch64 ]] && gicv2
 
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
 pcap_has_garp() {
@@ -1319,18 +1388,21 @@ while off + 16 <= len(data):
 sys.exit(0 if found else 1)
 PY
 }
+BOOT_SCENARIO=boot-acpi
+[[ $ARCH == x86_64 ]] && BOOT_SCENARIO=x86-disk-q35
 for accel in $ACCELS; do
-    if pcap_has_garp "$OUT/boot-acpi-$accel.log.pcap"; then
+    if pcap_has_garp "$OUT/$BOOT_SCENARIO-$accel.log.pcap"; then
         echo "  ✓ gratuitous ARP from 52:54:00:12:34:56 found in pcap [$accel]"
         PASSED=$((PASSED + 1))
     else
-        echo "  ✗ gratuitous ARP missing from $OUT/boot-acpi-$accel.log.pcap"
+        echo "  ✗ gratuitous ARP missing from $OUT/$BOOT_SCENARIO-$accel.log.pcap"
         FAILED=$((FAILED + 1))
     fi
 done
 
 # M5: DTB and ACPI must describe the same machine identically.
 for accel in $ACCELS; do
+    [[ $ARCH == aarch64 ]] || break
     a=$(clean "$OUT/boot-acpi-$accel.log" | grep -o 'platform summary: .*' || true)
     d=$(clean "$OUT/boot-dtb-$accel.log" | grep -o 'platform summary: .*' || true)
     if [[ -n "$a" && "$a" == "$d" ]]; then

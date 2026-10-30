@@ -31,7 +31,7 @@
 # Option ROMs are disabled (romfile=): no iPXE in the firmware, faster boot.
 set -euo pipefail
 
-ARCH=aarch64 MACHINE=q35 FIRMWARE=uefi
+ARCH=${URMQTT_ARCH:-aarch64} MACHINE=q35 FIRMWARE=uefi
 ISO="" DISK="" BUS=blk CPU_MODEL="" GIC=3 RNG=1 ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
 FWD="1883:1883,8883:8883"
 DGRAM=""

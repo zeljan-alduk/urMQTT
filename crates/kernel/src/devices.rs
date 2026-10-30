@@ -482,7 +482,7 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
     }
     if let Some(r) = urmqtt_arch::entropy::hw_random() {
         pool.add(Source::Rndr, &r);
-        info!("entropy: 64 bytes from RNDR");
+        info!("entropy: 64 bytes from {HW_RNG}");
     }
     pool.add(Source::Jitter, &time::now().to_le_bytes());
     let fallback = urmqtt_config::CONFIG.entropy.jitter_fallback;
@@ -490,7 +490,7 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
         let t0 = time::uptime_ns();
         let r = crate::jitter::collect(&mut pool);
         warn!(
-            "entropy: no hardware source (virtio-rng, RNDR): CPU jitter fallback via the {} (granularity 2^{}): \
+            "entropy: no hardware source (virtio-rng, {HW_RNG}): CPU jitter fallback via the {} (granularity 2^{}): \
              {} samples of {} steps, {} bit(s)/sample estimated, {} bit(s) credited (1/{}), health tests {}, {} ms",
             r.clock,
             r.shift,
@@ -954,6 +954,12 @@ pub fn blk_selftest() -> Result<(), &'static str> {
     }
     Ok(())
 }
+
+/// The CPU's own random number instructions, for the boot log.
+#[cfg(target_arch = "aarch64")]
+const HW_RNG: &str = "RNDR";
+#[cfg(target_arch = "x86_64")]
+const HW_RNG: &str = "RDRAND/RDSEED";
 
 #[cfg(target_arch = "aarch64")]
 const MSI_SOURCE: &str = "GICv2m";

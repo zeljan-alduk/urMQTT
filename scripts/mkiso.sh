@@ -30,7 +30,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-ARCH=aarch64
+ARCH=${URMQTT_ARCH:-aarch64}
 KERNEL="" OUT="" CMDLINE="" ESP_OUT="" INSTALL_CMDLINE="install" INSTALL_DEFAULT=0
 while [[ $# -gt 0 ]]; do
     case $1 in

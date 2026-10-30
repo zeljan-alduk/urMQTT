@@ -53,6 +53,19 @@ fn under_hypervisor() -> bool {
     crate::features::cpuid(1, 0).ecx & (1 << 31) != 0
 }
 
+/// Waits about 200 ms (by the TSC once it is calibrated, else a bounded
+/// number of spins) for a power-off request to take effect.
+fn settle() {
+    let hz = crate::time::frequency();
+    let start = crate::time::now();
+    for _ in 0..200_000_000u32 {
+        if hz > 1 && crate::time::now().wrapping_sub(start) > hz / 5 {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+}
+
 /// Powers off; halts if nothing took effect.
 pub fn off() -> ! {
     crate::serial::flush();
@@ -64,6 +77,9 @@ pub fn off() -> ! {
         }
         // Relaxed: see DEBUG_EXIT.
         if DEBUG_EXIT.load(Ordering::Relaxed) {
+            // QEMU handles the power-off request in its main loop: give it
+            // time, or the exit below wins the race and the status is 1.
+            settle();
             // SAFETY: the dev-only debug-exit device; unclaimed otherwise.
             unsafe { outl(DEBUG_EXIT_PORT, 0) };
         }
