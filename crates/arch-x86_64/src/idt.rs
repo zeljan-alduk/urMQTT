@@ -81,7 +81,7 @@ pub const fn ist_for(vector: u64) -> u8 {
 }
 
 #[cfg(target_os = "none")]
-pub use boot::{init, set_present};
+pub use boot::{init, load, set_present};
 
 #[cfg(target_os = "none")]
 #[allow(unsafe_code)]
@@ -119,9 +119,21 @@ mod boot {
         for (v, gate) in table.0.iter_mut().enumerate() {
             *gate = Gate::interrupt(base + 16 * v as u64, KERNEL_CS, ist_for(v as u64));
         }
+        // SAFETY: the table was just filled; the GDT is loaded (contract).
+        unsafe { load() };
+    }
+
+    /// Loads the table [`init`] built on this CPU (application processors
+    /// share the boot CPU's table: the gates are the same everywhere).
+    ///
+    /// # Safety
+    /// [`init`] must have run, and this CPU's GDT with the kernel code
+    /// segment must be loaded.
+    pub unsafe fn load() {
+        let base = IDT.0.get() as u64;
         let idtr = [
-            (core::mem::size_of::<Table>() as u64 - 1) | (table.0.as_ptr() as u64) << 16,
-            (table.0.as_ptr() as u64) >> 48,
+            (core::mem::size_of::<Table>() as u64 - 1) | base << 16,
+            base >> 48,
         ];
         // SAFETY: `idtr` describes the static table, whose gates point at
         // the stubs; the code segment they name is loaded.

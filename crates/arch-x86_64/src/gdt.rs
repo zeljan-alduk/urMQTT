@@ -82,53 +82,71 @@ impl Default for Tss {
 }
 
 #[cfg(target_os = "none")]
-pub use boot::{init, ist_stack, which_ist};
+pub use boot::{IST_REGION_SIZE, init, init_ap, which_ist};
 
 #[cfg(target_os = "none")]
 #[allow(unsafe_code)]
 mod boot {
     use core::cell::UnsafeCell;
+    use core::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+    use crate::percpu::MAX_CPUS;
 
     /// Bytes of each IST stack. The report formatting is the deepest user.
     const IST_STACK_SIZE: usize = 16 * 1024;
     const IST_COUNT: usize = 4;
+    /// Bytes of the four IST stacks together: the boot CPU's static
+    /// region, and the part of an application processor's exception stack
+    /// (`kernel::layout`) that holds its own.
+    pub const IST_REGION_SIZE: usize = IST_STACK_SIZE * IST_COUNT;
 
     #[repr(C, align(16))]
     struct IstStacks([[u8; IST_STACK_SIZE]; IST_COUNT]);
 
     #[repr(C, align(16))]
+    #[derive(Clone, Copy)]
     struct Tables {
         gdt: [u64; 5],
         tss: Tss,
     }
 
-    /// Boot-CPU-only state, written once by [`init`] before interrupts or
-    /// other CPUs exist.
+    /// Per-CPU state, written once by [`init`] / [`init_ap`] on the CPU it
+    /// belongs to before that CPU takes an interrupt.
     struct Boot<T>(UnsafeCell<T>);
-    // SAFETY: written only by `init` on the boot CPU before anything else
-    // runs; afterwards only the CPU (through GDTR/TR) reads the tables.
+    // SAFETY: each element is written only by its own CPU before it loads
+    // the tables; afterwards only that CPU (through GDTR/TR) reads them.
     unsafe impl<T> Sync for Boot<T> {}
 
     static STACKS: Boot<IstStacks> =
         Boot(UnsafeCell::new(IstStacks([[0; IST_STACK_SIZE]; IST_COUNT])));
-    static TABLES: Boot<Tables> = Boot(UnsafeCell::new(Tables {
-        gdt: [0; 5],
-        tss: Tss::new(),
-    }));
+    static TABLES: Boot<[Tables; MAX_CPUS]> = Boot(UnsafeCell::new(
+        [Tables {
+            gdt: [0; 5],
+            tss: Tss::new(),
+        }; MAX_CPUS],
+    ));
+    /// Lowest address of each CPU's IST region (0: not set up).
+    static IST_BASES: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
-    /// The top of IST stack `slot` (1-based), 16-byte aligned.
-    pub fn ist_stack(slot: u8) -> u64 {
-        let i = usize::from(slot).saturating_sub(1).min(IST_COUNT - 1);
-        STACKS.0.get() as u64 + ((i + 1) * IST_STACK_SIZE) as u64
+    /// The top of IST stack `slot` (1-based) of the region at `base`,
+    /// 16-byte aligned.
+    const fn slot_top(base: u64, slot: u8) -> u64 {
+        base + slot as u64 * IST_STACK_SIZE as u64
     }
 
-    /// Which IST stack (1-based) `addr` lies in, if any.
+    /// Which IST stack (1-based) `addr` lies in, on any CPU.
     pub fn which_ist(addr: u64) -> Option<u8> {
-        (1..=IST_COUNT as u8).find(|&slot| {
-            let top = ist_stack(slot);
-            (top - IST_STACK_SIZE as u64..top).contains(&addr)
+        IST_BASES.iter().find_map(|b| {
+            // Relaxed: set before the CPU can fault; read while reporting.
+            let base = b.load(Ordering::Relaxed);
+            if base == 0 {
+                return None;
+            }
+            (1..=IST_COUNT as u8).find(|&slot| {
+                let top = slot_top(base, slot);
+                (top - IST_STACK_SIZE as u64..top).contains(&addr)
+            })
         })
     }
 
@@ -138,15 +156,37 @@ mod boot {
     /// # Safety
     /// Call once, on the boot CPU, before interrupts are enabled.
     pub unsafe fn init() {
-        // SAFETY: the caller guarantees exclusive access (boot CPU, no
-        // interrupts); the tables live in statics.
-        let tables = unsafe { &mut *TABLES.0.get() };
+        // SAFETY: forwarded; the region is a static of this module.
+        unsafe { load(0, STACKS.0.get() as u64) }
+    }
+
+    /// The same for application processor `cpu`, with its IST stacks in
+    /// the `IST_REGION_SIZE` bytes ending at `ist_top`.
+    ///
+    /// # Safety
+    /// Call once per CPU, on that CPU, before it enables interrupts. The
+    /// region must be mapped, writable, and used by nothing else. Reloading
+    /// GS clears its base: set the per-CPU pointer afterwards.
+    pub unsafe fn init_ap(cpu: usize, ist_top: u64) {
+        // SAFETY: forwarded.
+        unsafe { load(cpu, ist_top - IST_REGION_SIZE as u64) }
+    }
+
+    /// # Safety
+    /// See [`init`] and [`init_ap`].
+    unsafe fn load(cpu: usize, ist_base: u64) {
+        let cpu = cpu.min(MAX_CPUS - 1);
+        // SAFETY: the caller guarantees exclusive access (this CPU's own
+        // entry, before it can take an interrupt).
+        let tables = unsafe { &mut (*TABLES.0.get())[cpu] };
         // Whole-array store: the field is unaligned inside the packed TSS.
         let mut ist = [0u64; 7];
         for (i, slot) in ist.iter_mut().take(IST_COUNT).enumerate() {
-            *slot = ist_stack(i as u8 + 1);
+            *slot = slot_top(ist_base, i as u8 + 1);
         }
         tables.tss.ist = ist;
+        // Relaxed: see `which_ist`.
+        IST_BASES[cpu].store(ist_base, Ordering::Relaxed);
         let desc = tss(
             core::ptr::addr_of!(tables.tss) as u64,
             (Tss::SIZE - 1) as u32,

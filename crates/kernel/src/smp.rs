@@ -202,8 +202,9 @@ extern "C" fn ap_main(id: u64) -> ! {
     // Release: publishes this CPU's per-CPU setup to the boot CPU.
     me.online.store(true, Ordering::Release);
     info!(
-        "cpu {id} online (mpidr={:#x}, el={})",
+        "cpu {id} online (hw id={:#x}, {}={})",
         me.mpidr.load(Ordering::Relaxed),
+        crate::boot::PRIVILEGE_LABEL,
         cpu::privilege_level()
     );
     // SAFETY: vectors, GIC CPU interface and tick are set up on this core.

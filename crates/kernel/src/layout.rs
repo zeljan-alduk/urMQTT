@@ -25,7 +25,13 @@ const PAGE: u64 = 4096;
 /// Per-CPU stack slot:
 /// `[guard][exception stack][guard][main stack][unmapped rest]`.
 pub const STACK_STRIDE: u64 = 1 << 20;
-pub const EXC_STACK_SIZE: u64 = 32 << 10;
+/// AArch64 runs every exception on this stack; on x86 it holds the four
+/// IST stacks of an application processor (`arch-x86_64::gdt`).
+pub const EXC_STACK_SIZE: u64 = if cfg!(target_arch = "x86_64") {
+    64 << 10
+} else {
+    32 << 10
+};
 pub const MAIN_STACK_SIZE: u64 = 128 << 10;
 
 /// Address ranges of CPU `cpu`'s stacks: (exception, main) as `[lo, hi)`.

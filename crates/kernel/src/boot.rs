@@ -20,6 +20,7 @@ use urmqtt_sync::sync::SpinLock;
 use crate::boot_aarch64 as arch;
 #[cfg(target_arch = "x86_64")]
 use crate::boot_x86 as arch;
+pub(crate) use arch::PRIVILEGE_LABEL;
 use crate::cmdline::{BootOptions, TestFault};
 use crate::{VERSION, console, devices, irq, layout, memory, power, selftest, smp, tick, trap, vm};
 
@@ -38,9 +39,14 @@ pub(crate) static HHDM: HhdmRequest = HhdmRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 pub(crate) static MEMMAP: MemmapRequest = MemmapRequest::new();
+/// Ask Limine for x2APIC on x86 (all CPUs, if the CPU has it).
+#[cfg(target_arch = "x86_64")]
+const MP_FLAGS: u64 = limine::mp::MP_FLAG_X2APIC;
+#[cfg(target_arch = "aarch64")]
+const MP_FLAGS: u64 = 0;
 #[used]
 #[unsafe(link_section = ".requests")]
-pub(crate) static MP: MpRequest = MpRequest::new(0);
+pub(crate) static MP: MpRequest = MpRequest::new(MP_FLAGS);
 #[used]
 #[unsafe(link_section = ".requests")]
 static DTB: DtbRequest = DtbRequest::new();
