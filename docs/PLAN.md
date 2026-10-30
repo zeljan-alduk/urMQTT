@@ -76,6 +76,8 @@ bare metal comes before optimisation.
 | 10. Bare metal | **X12**, **X13**, **X14**, X15 (optional), **X16** (continuous) | the Intel PC: USB boot, `hwreport`, NVMe/AHCI, its NIC |
 | 11. Speed, encryption, release readiness | **X9**, **S7**, **H9**, **X11**, **S8** | optimisations measured on real hardware; encryption with measured overhead; SBOM; numbers and docs |
 | 11b. Remote operation (user request 2026-10-30) | **O1**, **O2** | `$SYS` introspection and a console over MQTT, so a VNC session is no longer needed; done before the rest of phase 11 |
+| 11c. Live mode (user request 2026-10-30) | **O3** | the ISO's first entry runs from RAM with no disk, as an opt-in ephemeral mode |
+| 11d. Diagnostic (user request 2026-10-30) | **O4** | the third boot entry: hardware detection and RAM/disk benchmarks |
 | 12. Audit | **H10** | the audit package covers everything above |
 
 About 38 milestones in all. Each ends as before: tests green, commit, PROGRESS
@@ -134,3 +136,30 @@ limited, every command audit-logged.
 
 Both need an ACL role for operator identities and a ready MQTTX connection
 profile (client certificate, subscribed to the topics above).
+
+## O3 — Live mode in RAM (user request, 2026-10-30)
+
+The boot menu has two entries: *live* and *install*. Live must not need a disk:
+the kernel reserves a configurable share of RAM (`storage.ram_percent`, default
+10, with a floor and a ceiling) as an in-memory block device and builds the
+data partition, SQLite and the telemetry log on it through the same block
+interface as a disk. It is explicit and loud: a banner and `$SYS` flag say
+*EPHEMERAL, data is lost on reboot*; the reserved share is subtracted from the
+connection budget; prod refuses it unless the config says
+`storage.mode = "ram"`. Installing to a disk stays the way to persist.
+
+## O4 — Diagnostic boot entry (user request, 2026-10-30)
+
+A third menu entry, *diagnostic*, that shows what the system detects (CPU model,
+cores, features and crypto units, RAM, PCI devices, disks, NICs, time source) and
+measures RAM (read/write MB/s, access latency) and disk (sequential read/write,
+random 4 KiB IOPS, latency), drawn on the framebuffer as panels and bars, with
+the same numbers as JSON on the serial port. Safe by default: read tests only.
+The write test touches only unallocated space (a scratch region the installer
+leaves at the end of the disk, found through the region table); with no free
+space, or an uninstalled disk, it asks for an explicit `WIPE` confirmation.
+Never writes from the end of a disk blindly: the data partition ends at the end
+of the disk and its backup GPT lives there. No fragmentation work is needed: the
+disk has fixed regions and no filesystem, an SSD's controller owns placement,
+RAM is mapped virtually and large contiguous blocks are reserved at boot. TRIM
+(UNMAP) is left for freed regions as a later option.
