@@ -258,7 +258,10 @@ pub fn half_records(host: &str, tls_port: u16, certs: &str) -> Result<(), String
     if ack.len() >= 4 && ack[0] == 0x20 && ack[3] == 0 {
         println!("attack: half-records CONNECT completed in fragments, CONNACK ok");
     } else {
-        println!("attack: half-records CONNACK not received ({} byte(s): {ack:02x?})", ack.len());
+        println!(
+            "attack: half-records CONNACK not received ({} byte(s): {ack:02x?})",
+            ack.len()
+        );
     }
     Ok(())
 }
