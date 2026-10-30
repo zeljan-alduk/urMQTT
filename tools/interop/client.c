@@ -58,6 +58,7 @@ static const char *tls_library(void);
 #include <wolfssl/ssl.h>
 #define LIB(x) wolfSSL_##x
 #else
+#include <openssl/err.h>
 #include <openssl/ssl.h>
 #define LIB(x) SSL_##x
 #endif
@@ -114,6 +115,13 @@ static struct conn *tls_open(void *session) {
     LIB(set_fd)(c->ssl, c->fd);
     if (session) LIB(set_session)(c->ssl, session);
     if (LIB(connect)(c->ssl) != 1) {
+#ifdef USE_WOLFSSL
+        char e[WOLFSSL_MAX_ERROR_SZ];
+        fprintf(stderr, "wolfSSL connect: %s\n",
+                wolfSSL_ERR_error_string((unsigned long)wolfSSL_get_error(c->ssl, 0), e));
+#else
+        ERR_print_errors_fp(stderr);
+#endif
         tls_close(c);
         return NULL;
     }
@@ -198,7 +206,10 @@ static struct conn *tls_open(void *session) {
     if (session && mbedtls_ssl_set_session(&c->ssl, session) != 0) goto fail;
     int r;
     while ((r = mbedtls_ssl_handshake(&c->ssl)) != 0)
-        if (r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE) goto fail;
+        if (r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE) {
+            fprintf(stderr, "mbedtls handshake: -0x%04x\n", (unsigned)-r);
+            goto fail;
+        }
     /* mbedTLS has no public "was this resumed" query: the server log
      * decides (scripts/interop.sh). */
     c->resumed = -1;

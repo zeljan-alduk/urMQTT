@@ -103,7 +103,10 @@ for l in ${LIBS[@]+"${LIBS[@]}"}; do
     fi
     row="| ${lib:-$l} | $(cell handshake "$OUT/$l.txt") | $res | $(cell key-update "$OUT/$l.txt") | $(cell records-1-byte "$OUT/$l.txt") | $(cell records-max "$OUT/$l.txt") |"
     echo "$row"
-    [[ $row == *❌* || -z $lib ]] && FAIL=1
+    if [[ $row == *❌* || -z $lib ]]; then
+        FAIL=1
+        sed "s/^/    $l: /" "$OUT/$l.txt" >&2
+    fi
 done
 for s in ${SKIPPED[@]+"${SKIPPED[@]}"}; do
     echo "| $s | | | | | |"

@@ -160,16 +160,26 @@ Tests:
 | Ticket key id lookup | not secret (sent in the clear) | review |
 
 `make ct` runs dudect-style tests (Welch's t-test on interleaved, randomly
-ordered classes, release build). A negative control, a byte-wise comparison
-with early exit, must be detected by the same harness. Measured on an M4 Pro:
+ordered classes, release build). The method:
+- Inputs are prepared outside the timed region, in **one** buffer for both
+  classes, and both classes write the same bytes; only the values differ.
+  The first version used one buffer per class. On the CI arm64 runner that
+  showed |t| = 8 to 16 for `ct_eq` and the AES-GCM tag check, which was cache
+  and alignment, not the code.
+- A case fails only if three runs all exceed the bound. A real leak is there
+  every time; noise on a shared machine is not.
+- A negative control, a byte-wise comparison with early exit, must be
+  detected by the same harness.
+
+Measured on an M4 Pro (six runs, range):
 
 | Case | |t| |
 |---|---:|
-| byte-wise comparison with early exit (control) | 6728 |
-| `ct_eq` | 0.7 |
-| AES-128-GCM bad tag | 1.1 |
-| ChaCha20-Poly1305 bad tag | 2.6 |
-| ticket bad tag | 0.0 |
+| byte-wise comparison with early exit (control) | 4352–5601 |
+| `ct_eq` | 0.3–4.0 |
+| AES-128-GCM bad tag | 0.3–2.2 |
+| ChaCha20-Poly1305 bad tag | 0.7–2.1 |
+| ticket bad tag | 0.6–4.3 |
 
 The bound is 7 (dudect: < 4.5 "probably constant time", > 10 "definitely
 not"). CI runs `make ct` on the arm64 runner.

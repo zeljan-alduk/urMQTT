@@ -197,7 +197,10 @@ jobs:
       - name: tlsfuzzer probes
         run: scripts/conformance.sh --accel tcg
       - name: Interop matrix
-        run: scripts/interop.sh --accel tcg | tee -a "$GITHUB_STEP_SUMMARY"
+        shell: bash
+        run: |
+          set -o pipefail
+          scripts/interop.sh --accel tcg | tee -a "$GITHUB_STEP_SUMMARY"
 
   deny:
     name: Dependencies (cargo-deny)

@@ -1175,7 +1175,8 @@ PROMPT-security.md §H2 and PLAN.md decision 5; plan in SECURITY-PLAN (H2 status
   - `ticket_from_another_boot_means_full_handshake`, `zero_rtt_is_never_offered`, `fatal_alerts_reach_the_peer`;
   - `inner_plaintext_over_the_limit_is_record_overflow`, `errors_map_to_their_alerts`;
   - the `test=ticket-rotate` command line.
-- `make ct` (M4 Pro, release): the control (early-exit comparison) at |t| = 6728. `ct_eq` 0.7, AES-128-GCM bad tag 1.1, ChaCha20-Poly1305 bad tag 2.6, ticket bad tag 0.0 (bound 7).
+- `make ct` (M4 Pro, release, six runs): the control (early-exit comparison) at |t| = 4352–5601; `ct_eq` 0.3–4.0, AES-128-GCM bad tag 0.3–2.2, ChaCha20-Poly1305 0.7–2.1, ticket 0.6–4.3 (bound 7).
+  - **CI found a flaw in the first harness:** on the arm64 runner `ct_eq` showed |t| = 8.1 and AES-GCM 16. Each class had its own input buffer, and the input copy was timed. Now the inputs are prepared untimed in one buffer, both classes write the same bytes, and a case fails only if three runs all exceed the bound. Locally `ct_eq` went from 5–10 to 0.3–4.
 - `diff_tls_record`: **10 min, 24 552 413 runs, clean** (aarch64, M4).
 - tlsfuzzer: **23/23** (HVF).
 - Interop (HVF): OpenSSL 3.6.3 and 4.1.0, wolfSSL 5.9.4 all ✅. Mbed TLS 4.2.0 ✅, except KeyUpdate: Mbed TLS has no API for it.
