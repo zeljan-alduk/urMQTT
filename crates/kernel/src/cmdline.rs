@@ -70,6 +70,12 @@ pub struct BootOptions {
     /// (`urmqtt_store::fault::FaultSpec`), e.g. a power cut after the N-th
     /// write of the first boot.
     pub disk_fault: Option<urmqtt_store::fault::FaultSpec>,
+    /// `install`: the self-installing ISO's install entry (S1b). The only
+    /// word a production image honours (ADR-052).
+    pub install: bool,
+    /// `install-countdown=S` (dev only): the installer's countdown instead
+    /// of 30 s, for unattended tests.
+    pub install_countdown_s: Option<u64>,
     /// `registry=allowlist`: allowlist mode even if the configuration says
     /// "open" (stricter only, for tests of one image in both modes).
     pub allowlist: bool,
@@ -81,6 +87,12 @@ impl BootOptions {
     pub fn parse(cmdline: &str, dev_build: bool) -> Self {
         let mut o = Self::default();
         for word in cmdline.split_ascii_whitespace() {
+            // The installer entry of the ISO menu: honoured everywhere (it
+            // only runs with the hash-pinned installation image, S1b).
+            if word == "install" {
+                o.install = true;
+                continue;
+            }
             if !dev_build {
                 o.ignored += 1;
                 continue;
@@ -118,6 +130,11 @@ impl BootOptions {
                         .and_then(|v| v.parse().ok())
                     {
                         o.heap_limit_mb = Some(mb);
+                    } else if let Some(s) = w
+                        .strip_prefix("install-countdown=")
+                        .and_then(|v| v.parse().ok())
+                    {
+                        o.install_countdown_s = Some(s);
                     } else if let Some(f) = w
                         .strip_prefix("test=disk-fault:")
                         .and_then(urmqtt_store::fault::FaultSpec::parse)
@@ -151,6 +168,25 @@ mod tests {
                 ignored: 10,
                 ..BootOptions::default()
             }
+        );
+    }
+
+    /// ADR-052: `install` is the one word production honours; every other
+    /// word, the dev countdown included, is still ignored.
+    #[test]
+    fn production_honours_install_and_nothing_else() {
+        let o = BootOptions::parse("install install-countdown=0 smoke serve", false);
+        assert!(o.install);
+        assert_eq!(o.install_countdown_s, None);
+        assert!(!o.smoke && !o.serve);
+        assert_eq!(o.ignored, 3);
+        // Only the exact word.
+        for w in ["Install", "install=1", "installx", "--install"] {
+            assert!(!BootOptions::parse(w, false).install, "{w}");
+        }
+        assert_eq!(
+            BootOptions::parse("install install-countdown=2", true).install_countdown_s,
+            Some(2)
         );
     }
 

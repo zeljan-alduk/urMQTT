@@ -710,6 +710,101 @@ disk_tool() {
     done
 }
 
+# S1b (STORAGE-PLAN §2b): the ISO installs itself. Its install entry is the
+# default here (no timeout, a 1 s countdown: dev test options), with an
+# empty disk attached; the installed disk then boots on its own, through the
+# ordinary first boot.
+# mkinstall <iso> <install cmdline>: an ISO whose default entry installs.
+mkinstall() {
+    [[ -f "$1" ]] && return 0
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$1" --cmdline "smoke" \
+        --install-cmdline "$2" --install-default >/dev/null
+}
+
+install_iso() {
+    local iso="$OUT/install.iso" crash="$OUT/install-crash.iso" tool="$ROOT/target/release/urmqtt-disk"
+    mkinstall "$iso" "install install-countdown=1"
+    mkinstall "$crash" "install install-countdown=0 test=disk-fault:stop-after-write=4"
+    (cd "$ROOT" && cargo build --release --locked -q -p urmqtt-disk-tool) || tool=""
+    local iso_sum
+    iso_sum=$(shasum -a 256 "$iso" | cut -d' ' -f1)
+    for accel in $ACCELS; do
+        local t="$OUT/install-target-$accel.img" t2="$OUT/install-second-$accel.img" status=0
+        local log1="$OUT/install-vm-$accel.log" log2="$OUT/install-vm-boot-$accel.log"
+        rm -f "$t" "$t2"
+        truncate -s 64m "$t"
+        boot "$log1" --iso "$iso" --accel "$accel" --headless --no-net \
+            -- -drive "if=none,id=t0,file=$t,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile= \
+            || status=$?
+        [[ $(shasum -a 256 "$iso" | cut -d' ' -f1) == "$iso_sum" ]] || echo "ISO MODIFIED" >>"$log1"
+        check "install-vm [$accel]" "$log1" "$status" "boot: from optical media" \
+            "install: disk virtio-blk 00:0[0-9a-f]\.0: 64 MiB$" "install: ALL DATA ON virtio-blk" \
+            "install: writing to virtio-blk 00:0[0-9a-f]\.0 in 1 s; power off now to cancel" \
+            "install: done: 10 MiB written and verified" "NOT:URMQTT READY" "NOT:ISO MODIFIED" "$NO_FAULT"
+        status=0
+        boot "$log2" --disk "$t" --accel "$accel" --headless --no-net || status=$?
+        check "install-vm-boots [$accel]" "$log2" "$status" "boot: from a GPT disk" \
+            "gpt: backup table moved to the end of the 64 MiB disk" "created now, new disk GUID" \
+            "storage: data disk formatted \(was blank\)" "^URMQTT READY$" "$NO_FAULT"
+
+        # Two possible targets: refused, nothing written to either.
+        local log="$OUT/install-two-disks-$accel.log" zero="$OUT/install-zero.img"
+        rm -f "$t" "$t2" "$zero"
+        truncate -s 64m "$t" "$t2" "$zero"
+        local z
+        z=$(shasum -a 256 "$zero" | cut -d' ' -f1)
+        status=0
+        boot "$log" --iso "$iso" --accel "$accel" --headless --no-net \
+            -- -drive "if=none,id=t0,file=$t,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile= \
+            -drive "if=none,id=t1,file=$t2,format=raw,cache=none" -device virtio-blk-pci,drive=t1,romfile= \
+            || status=$?
+        for f in "$t" "$t2"; do
+            [[ $(shasum -a 256 "$f" | cut -d' ' -f1) == "$z" ]] || echo "A DISK WAS WRITTEN" >>"$log"
+        done
+        check "install-two-disks-refused [$accel]" "$log" "$status" \
+            "install: 2 disks could be the target \(virtio-blk 00:0[0-9a-f]\.0, virtio-blk 00:0[0-9a-f]\.0\): refusing to guess" \
+            "NOT:install: writing" "NOT:A DISK WAS WRITTEN" "$NO_FAULT"
+
+        # The target as a virtio-scsi LUN next to the CD.
+        log="$OUT/install-scsi-$accel.log"
+        rm -f "$t"
+        truncate -s 64m "$t"
+        status=0
+        boot "$log" --iso "$iso" --accel "$accel" --headless --no-net \
+            -- -drive "if=none,id=t0,file=$t,format=raw,cache=none" \
+            -device scsi-hd,drive=t0,bus=scsi0.0,scsi-id=1,lun=0 || status=$?
+        check "install-scsi [$accel]" "$log" "$status" \
+            "install: disk virtio-scsi 00:0[0-9a-f]\.0 target 1 lun 0: 64 MiB" \
+            "install: done: 10 MiB written and verified" "$NO_FAULT"
+        status=0
+        boot "$log.boot" --disk "$t" --bus scsi --accel "$accel" --headless --no-net || status=$?
+        check "install-scsi-boots [$accel]" "$log.boot" "$status" "blk: boot disk is scsi target 0 lun 0" \
+            "storage: data disk formatted" "^URMQTT READY$" "$NO_FAULT"
+
+        # A power cut during the installation: the disk does not boot (no
+        # valid GPT); installing again works.
+        log="$OUT/install-crash-$accel.log"
+        rm -f "$t"
+        truncate -s 64m "$t"
+        status=0
+        boot "$log" --iso "$crash" --accel "$accel" --headless --no-net \
+            -- -drive "if=none,id=t0,file=$t,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile= \
+            || status=$?
+        if [[ -n "$tool" ]]; then
+            "$tool" info "$t" >>"$log" 2>&1 || true
+        fi
+        check "install-crash [$accel]" "$log" "$status" \
+            "disk-fault: power cut injected during the installation" "gpt: none \(not a urMQTT boot disk\)" \
+            "NOT:install: done" "$NO_FAULT"
+        status=0
+        boot "$log.again" --iso "$iso" --accel "$accel" --headless --no-net \
+            -- -drive "if=none,id=t0,file=$t,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile= \
+            || status=$?
+        check "install-crash-reinstalled [$accel]" "$log.again" "$status" \
+            "install: done: 10 MiB written and verified" "$NO_FAULT"
+    done
+}
+
 # A cloud without a hardware RNG: no virtio-rng, and a CPU without RNDR
 # (TCG models the Ampere Altra core, Neoverse N1, which also has no PAC or
 # BTI; HVF's host CPU has no RNDR either). The jitter fallback must pass its
@@ -937,6 +1032,7 @@ scsi_boot
 iso_as_cd
 own_damaged
 disk_tool
+install_iso
 no_hw_rng
 gicv2
 

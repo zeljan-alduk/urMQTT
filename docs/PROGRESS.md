@@ -1028,3 +1028,55 @@ PROMPT-storage.md S1, plan in docs/STORAGE-PLAN.md (status and deviations there)
 - `scripts/fault-loop.sh`, which comes with its first procedure, the S2 migration.
 
 **Not re-measured:** `make bench` and bytes per connection. S1 changed only the storage path and boot-time disk handling, not the data plane.
+
+## S1b — Self-installing ISO (2026-10-30)
+
+PROMPT-storage.md and PLAN.md decision 7; plan in STORAGE-PLAN §2b (status and deviations there). ADR-052; threat model "Installer entry" in docs/SECURITY.md.
+
+**Done**
+
+- **ISO menu** (`scripts/mkiso.sh`): the ISO9660 `limine.conf` lists *urMQTT* (the default, after 5 s) and *Install urMQTT on this machine's disk*. The second entry passes `cmdline: install` and loads the ESP as `module_path: boot():/esp.img#<blake2b>`. The editor is off. The ESP's own config, used by the installed disk, stays menu-less. The options `--install-cmdline` and `--install-default` serve the tests.
+- **Install mode in the kernel** (`install.rs`):
+  - every driven disk becomes a candidate (virtio-blk, and virtio-scsi LUNs, also next to the CD on the same bus);
+  - exactly one qualifies: writable, not the installation medium, at least the image plus 17 MiB;
+  - the screen shows each disk and the warning, then counts down 30 s ("power off now to cancel");
+  - the image is written (mkraw-identical), read back with a streaming SHA-256, and the machine powers off with "remove the installation medium".
+- **The write order** (`urmqtt_store::install`) leaves an interrupted install either untouched or unbootable, never half-new:
+  1. clear the backup at the end, then the primary;
+  2. write the ESP and the image's backup;
+  3. write the entries and the MBR;
+  4. write the primary header last.
+
+  The S1 first boot now also rewrites a missing or damaged backup.
+- **Production command line:** still ignored, except the exact word `install`.
+- **Fixed on the way:**
+  - the read-back first used a second 10 MiB buffer and panicked on the 32 MiB dev heap after the image was written;
+  - a power-off cut off the last log line: `power::off` and the reset path now flush the UART first.
+- DEPLOY.md "Installing from the ISO"; the README feature and roadmap rows.
+
+**Tests**
+
+- **Host:**
+  - target selection;
+  - the installed disk equals the raw image and first-boots;
+  - too-small and bad images;
+  - a power cut at every write of a reinstall (with and without the cache surviving) leaves the old install untouched or a non-booting disk, and installing again works;
+  - backup repair;
+  - the production command line (`production_honours_install_and_nothing_else`).
+
+  305 host tests pass.
+- **Smoke: 127/127** (HVF and TCG). New, each on both:
+  - `install-vm`: the ISO itself unchanged afterwards;
+  - `install-vm-boots`: first boot, data partition, `URMQTT READY` from the disk alone;
+  - `install-two-disks-refused`: both disks still all zero;
+  - `install-scsi` and `install-scsi-boots`;
+  - `install-crash`: `urmqtt-disk info` finds no GPT on the target;
+  - `install-crash-reinstalled`.
+
+  Installing 10 MiB takes 70 ms under HVF.
+
+**Not done:**
+- an *Update* menu entry (ESP only, data kept);
+- selecting a target by serial (`storage.install_target`);
+- BIOS boot of the installed disk (x86, X10);
+- the real USB stick on the Intel PC (X12).

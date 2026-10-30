@@ -141,6 +141,39 @@ changes state without a new image, so it gets its own model.
 - **Dead service.** Revocation is only as timely as the service that publishes
   it.
 
+## Installer entry (S1b)
+
+Written with the implementation. The ISO's boot menu has a second entry,
+"Install urMQTT on this machine's disk". It boots the same hash-pinned kernel
+with the command-line word `install` and the ESP as a hash-pinned module, and
+writes the raw boot image onto the machine's disk.
+
+- **What it can do:**
+  - erase exactly one disk (the only writable disk large enough that is not
+    the installation medium) and write the release image onto it;
+  - with several candidates it refuses and writes nothing.
+- **Who can trigger it:** anyone at the console of a machine booting the ISO
+  (keyboard at the Limine menu), or who can set the VM's boot medium. That
+  attacker already has physical or hypervisor access and could erase the
+  disk anyway.
+- **Mitigations:**
+  - the menu editor is off;
+  - the kernel and the image are pinned by blake2b in the menu file
+    (`hash_mismatch_panic`), H8 will add the config hash to the enrolled loader;
+  - the target, its size and a warning are on screen, followed by a 30 s
+    countdown during which a power-off cancels; dev tests may shorten it,
+    production cannot;
+  - the write leaves a non-booting disk if interrupted, never a half-new one
+    that boots (host test `an_interrupted_install_never_boots_and_can_be_redone`,
+    smoke `install-crash`);
+  - the result is verified by reading it back.
+- **Production command line:** still ignored, except the exact word `install`
+  (ADR-052; test `production_honours_install_and_nothing_else`). Without the
+  installation module, `install` only prints a message and powers off.
+- **Residual risk:** the installer erases the previous data partition. There
+  is no "keep data" mode yet; an offline kernel update keeps data
+  (`urmqtt-disk update-boot`).
+
 ## Mitigations
 
 ### Code execution

@@ -30,6 +30,7 @@ pub mod fault;
 #[allow(unsafe_code)] // SQLite FFI declarations
 mod ffi;
 pub mod gpt;
+pub mod install;
 pub mod layout;
 #[cfg(target_os = "none")]
 #[allow(unsafe_code)] // libc functions SQLite links against

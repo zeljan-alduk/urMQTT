@@ -33,6 +33,8 @@ mod devices;
 #[cfg(all(target_os = "none", feature = "selftest"))]
 mod dpbench;
 #[cfg(target_os = "none")]
+mod install;
+#[cfg(target_os = "none")]
 mod irq;
 #[cfg(target_os = "none")]
 mod jitter;

@@ -48,6 +48,7 @@ fn raw_image_is_a_valid_gpt_disk() {
     let e = esp(3000);
     let img = raw_image(&e).unwrap();
     assert_eq!(img.len() % MIB, 0);
+    assert_eq!(raw_image_len(e.len() as u64), img.len() as u64);
     let m = MemDisk::from_image(img.clone());
     let mut d = m.device();
     let p = read_table(d.as_mut(), 1).unwrap().unwrap();
@@ -77,6 +78,7 @@ fn first_boot_moves_backup_creates_partition_and_is_idempotent() {
         Steps {
             repaired_primary: false,
             moved_backup: true,
+            repaired_backup: false,
             created_partition: true
         }
     );
@@ -303,4 +305,22 @@ fn the_new_partition_formats_and_reopens() {
         let (_, how) = Disk::open(Box::new(p), || [8; 16]).unwrap();
         assert_eq!(how, Opened::Existing, "{size}");
     }
+}
+
+/// A valid primary whose backup at the end is gone (an interrupted
+/// reinstall clears it first) gets its backup back.
+#[test]
+fn a_missing_backup_is_rewritten_from_the_primary() {
+    let m = disk(&esp(3000), 64 * MIB);
+    let (part, _) = prepare(m.device().as_mut(), counter()).unwrap();
+    let mut img = m.raw(0, 64 * MIB);
+    let end = img.len();
+    img[end - 33 * 512..].fill(0);
+    let m = MemDisk::from_image(img);
+    let (again, steps) = prepare(m.device().as_mut(), counter()).unwrap();
+    assert!(steps.repaired_backup && !steps.created_partition);
+    assert_eq!(again, part);
+    let last = (64 * MIB / 512 - 1) as u64;
+    let b = read_table(m.device().as_mut(), last).unwrap().unwrap();
+    assert_eq!(b.data_partition().unwrap().first_lba, part.first_lba);
 }

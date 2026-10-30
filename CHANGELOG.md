@@ -6,7 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-30
+
+The first release: urMQTT as an aarch64 VM image, pre-alpha. The release
+assets are a **dev** build with throwaway certificates, for evaluation only;
+production images embed the operator's own keys and are built with
+`make dist ENV=prod` (docs/DEPLOY.md).
+
 ### Added
+
+- S1b: the ISO installs itself. A boot menu entry *Install urMQTT on this machine's disk* writes the raw image (mkraw-identical) onto the one qualifying disk after a 30 s on-screen countdown, verifies it and powers off. An interrupted install never leaves a disk that boots half-written. `install` is the only command-line word production honours (ADR-052).
+- S1: single-disk model (ADR-051). The data lives in a partition of the boot disk, which is found by its GPT disk GUID and created crash-safely on the first boot; no other disk is ever written, and a damaged data partition is refused, never reformatted. Also new: `tools/urmqtt-disk` (info, verify, export-db, export-telemetry, import-devices, create, update-boot); fault injection (`test=disk-fault:`); fuzz target `gpt_parse`.
+- H1: identity lifecycle without new images (ADR-048–050). Ed25519-signed control messages on `$urmqtt/control` (offline key, persisted sequence numbers, validity windows) revoke and unrevoke certificates and maintain an allowlist at runtime; live connections of a revoked or disallowed identity close within milliseconds. Also new:
+  - trust anchors by role: operational, with CA rotation; bootstrap, limited to `provision/{id}/#`;
+  - `registry.mode = "allowlist"`;
+  - expiry checks at build time and at runtime;
+  - the image's build time as the clock's lower bound;
+  - `tools/urmqtt-control`; fuzz target `control_message`.
+- X0: architecture facade `urmqtt-arch` with an API contract, all assembly confined to `arch-aarch64` (checked by `scripts/check-arch-leaks.sh`), CPU feature dispatch with a `[cpu] disable` opt-out (ADR-040, ADR-041).
+- S0: byte-level specification of the data disk format (docs/DISK-FORMAT.md) with a spec-vs-code test and frozen golden images.
+- H0: security baseline: TCB and `unsafe` inventory (docs/AUDIT.md, `make audit`), parser and mitigation tables, weaknesses list.
 
 - M0: Cargo workspace with all crates, pinned nightly toolchain and Makefile.
 - M0: Validated build-time configuration (`deploy/<env>/config.toml`) compiled into typed constants.
@@ -32,3 +51,6 @@ All notable changes to this project are documented here. The format follows
 - M2: Kernel page tables with enforced W^X, locked tables, guard pages, frame allocator, buddy heap, PAC/BTI.
 - M1: Bootable UEFI ISO, console, decoded exception reports, PSCI, `make run`/`smoke`, CI smoke job.
 - M0: CI and CD: lint, host tests, kernel build, cargo-deny, fuzzing, CodeQL, Scorecard, Dependabot and a release workflow with provenance.
+
+[Unreleased]: https://github.com/zeljan-alduk/urMQTT/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.1.0

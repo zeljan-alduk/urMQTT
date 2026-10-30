@@ -409,6 +409,8 @@ pub struct Steps {
     pub repaired_primary: bool,
     /// The backup copy was moved to the end of a larger disk.
     pub moved_backup: bool,
+    /// The backup copy was invalid and rewritten from the primary.
+    pub repaired_backup: bool,
     /// The data partition was created (and a fresh disk GUID assigned).
     pub created_partition: bool,
 }
@@ -496,6 +498,18 @@ pub fn prepare(
         }
         steps.moved_backup = true;
     }
+    // A valid primary with a missing or damaged backup at the end (an
+    // interrupted reinstall cleared it, or the sector went bad): rewrite it.
+    if !steps.moved_backup && read_table(dev, last)?.is_none() {
+        let backup = Header {
+            current_lba: last,
+            backup_lba: 1,
+            entries_lba: backup_entries,
+            ..t.header
+        };
+        write_copy(dev, &backup, &t.raw_entries)?;
+        steps.repaired_backup = true;
+    }
     if let Some(e) = t.data_partition() {
         return Ok((
             DataPartition {
@@ -570,6 +584,14 @@ pub fn derived_guid(seed: &[u8; 32], label: &str) -> Guid {
     let mut b = [0u8; 16];
     b.copy_from_slice(d.get(..16).unwrap_or(&[0; 16]));
     Guid::random(b)
+}
+
+/// Bytes of the raw boot image around an ESP of `esp_bytes` (see
+/// [`raw_image`]): whole MiBs with the tables and at least 1 MiB after the
+/// ESP.
+pub fn raw_image_len(esp_bytes: u64) -> u64 {
+    let esp_sectors = esp_bytes.div_ceil(SECTOR);
+    (ALIGN + esp_sectors + ALIGN).div_ceil(ALIGN) * ALIGN * SECTOR
 }
 
 /// The raw boot image around an EFI system partition, byte for byte what

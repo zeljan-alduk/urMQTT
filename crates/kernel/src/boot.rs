@@ -6,7 +6,7 @@ use limine::BaseRevision;
 use limine::request::{
     BootloaderInfoRequest, DateAtBootRequest, DtbRequest, ExecutableAddressRequest,
     ExecutableCmdlineRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest,
-    MemmapRequest, MpRequest, Request, RsdpRequest,
+    MemmapRequest, ModulesRequest, MpRequest, Request, RsdpRequest,
 };
 use limine::{RequestsEndMarker, RequestsStartMarker};
 
@@ -55,6 +55,10 @@ static DATE_AT_BOOT: DateAtBootRequest = DateAtBootRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static EXECUTABLE_ADDRESS: ExecutableAddressRequest = ExecutableAddressRequest::new();
+/// The installation image (the ESP), loaded by the ISO's install entry (S1b).
+#[used]
+#[unsafe(link_section = ".requests")]
+static MODULES: ModulesRequest = ModulesRequest::new();
 /// Where the kernel was loaded from: identifies the boot disk (S1).
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -103,6 +107,8 @@ struct Stage2 {
     features: Features,
     /// Read before the bootloader's memory is reclaimed.
     medium: devices::BootMedium,
+    /// The installation image, if the bootloader loaded one.
+    install_image: Option<&'static [u8]>,
 }
 
 static STAGE2: SpinLock<Option<Stage2>> = SpinLock::new(None);
@@ -300,6 +306,7 @@ extern "C" fn urmqtt_kmain() -> ! {
         early_frames: mem.early_frames_range().unwrap_or((0, 0)),
         features,
         medium: boot_medium(),
+        install_image: install_image(),
     });
     // SAFETY: both stacks were mapped by `vm::build` and are 16-byte aligned
     // at the top; this frame (on the bootloader's stack) is abandoned.
@@ -409,6 +416,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         (false, None) => warn!("boot: the bootloader reported no GPT boot disk"),
     }
     devices::set_boot_medium(medium);
+    devices::set_install_mode(s.options.install);
     // PCIe and virtio (M6): all device MMIO must be mapped before the lock.
     if let Some(p) = s.platform.as_ref() {
         match devices::probe(p, &s.boot_entropy) {
@@ -445,6 +453,15 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
 
     tick_selftest(intr.timer.virt);
+    if s.options.install {
+        crate::install::run(
+            s.install_image,
+            s.options
+                .install_countdown_s
+                .unwrap_or(crate::install::COUNTDOWN_S),
+            s.options.disk_fault,
+        );
+    }
     if let Err(msg) = devices::prepare_boot_disk(s.options.disk_fault) {
         if urmqtt_config::CONFIG.storage.require_data_disk {
             fatal_fmt(format_args!("storage: {msg}; refusing to serve"));
@@ -686,6 +703,18 @@ pub(crate) fn now_unix_ms() -> Option<u64> {
 /// Nanoseconds since the counter started (boot).
 fn uptime_ns() -> u64 {
     time::uptime_ns()
+}
+
+/// The module whose path ends in `/esp.img` (the ISO's install entry).
+/// Its contents live in module memory, which stays mapped; only the
+/// descriptor is in reclaimable memory, so this runs in stage 1.
+fn install_image() -> Option<&'static [u8]> {
+    let r = MODULES.response()?;
+    r.modules()
+        .iter()
+        .find(|m| m.path().ends_with("/esp.img"))
+        .map(|m| m.data())
+        .filter(|d| !d.is_empty())
 }
 
 /// Offsets in Limine's `struct limine_file` (protocol: `media_type` u32,

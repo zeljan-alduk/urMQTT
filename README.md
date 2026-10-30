@@ -94,6 +94,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | **Build** | Reproducible workspace, pinned toolchain, `--locked` everywhere | ✅ M0 |
 | | Build-time configuration, validated, compiled to constants | ✅ M0 |
 | | Bootable UEFI ISO (Limine) for aarch64 | ✅ M1 |
+| | The ISO installs itself onto the machine's disk (boot menu, countdown, verified write) | ✅ S1b |
 | | Bit-for-bit reproducible (checked in CI), minisign-signed images; ISO and raw GPT disk image | ✅ M17 |
 | **Kernel** | EL1 exception vectors with decoded ESR/ELR/FAR reports | ✅ M1 |
 | | Own page tables with W^X, guard pages, PAC/BTI when present | ✅ M2 |
@@ -945,7 +946,7 @@ Security is the first priority and wins conflicts with the other tracks.
 |---|---|---|
 | ✅ | **S0** Disk format spec | `docs/DISK-FORMAT.md` byte-level and cross-checked against the code; golden v1 images |
 | ✅ | **S1** `urmqtt-disk` & safety | single-disk model: data in a partition of the boot disk, created on first boot (crash-safe), no other disk touched; host tool sharing the kernel's parsers (info, verify, export, import); fault injection |
-| 📋 | **S1b** Self-installing ISO | boot menu entry *Install urMQTT on this machine's disk*: target shown with a countdown, image written byte-identical to the raw image and verified; installed disk boots by UEFI and BIOS |
+| ✅ | **S1b** Self-installing ISO | boot menu entry *Install urMQTT on this machine's disk*: target shown with a countdown, image written byte-identical to the raw image and verified; the installed disk boots by UEFI (BIOS on x86 with X10) |
 | 📋 | **S2** Layout v2 | regions aligned to 1 MiB and the device topology, zero misaligned writes; migration from v1 |
 | 📋 | **S3** Growing the disk | 1 → 4 → 64 GiB with data present, crash-safe at every write |
 | 📋 | **S4** Discard | thin-provisioned volumes shrink after retention; no throughput loss |

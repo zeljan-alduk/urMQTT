@@ -99,7 +99,7 @@ zeljan-alduk/urMQTT`), and a minisign signature when the repository secret
 | NIC | one virtio-net (PCI); DHCP unless `network.mode = "static"` |
 | Disk | **one** virtio-blk disk or virtio-scsi LUN (PCI), 512-byte blocks: the raw image written to it, the disk at least 16 MiB larger than the image (8 GiB or more in production, STORAGE-PLAN sizing); with `storage.require_data_disk = true` the broker refuses to serve without its data partition |
 | Entropy | virtio-rng, or `RNDR` on the CPU; otherwise health-tested CPU jitter (`entropy.fallback`), else no boot |
-| Boot medium | the raw image on the VM's disk; the ISO only for trying it out (a CD is read-only: no data partition, so production refuses to serve) |
+| Boot medium | the raw image on the VM's disk, or the ISO's installer, which writes that image onto the disk (below); booted as a CD the ISO holds no data, so production refuses to serve from it |
 
 **Single-disk model (S1, STORAGE-PLAN §2a).** The disk the VM boots from is
 the only one urMQTT writes:
@@ -119,6 +119,30 @@ the only one urMQTT writes:
 Inspect a stopped VM's disk with `urmqtt-disk info|verify DISK`
 (`tools/disk`); replace the kernel and keep the data with
 `urmqtt-disk update-boot DISK --esp ESP --write`.
+
+### Installing from the ISO (S1b)
+
+Wherever writing a raw image is awkward (a hypervisor UI that only mounts
+ISOs, a bare-metal machine with a USB stick), the ISO installs itself:
+
+1. Give the machine one empty (or expendable) disk and the ISO as a CD (or a
+   USB stick written with `dd`).
+2. Boot it. The menu shows **urMQTT** (the default, after 5 s: runs from the
+   CD without persistence, and production refuses) and **Install urMQTT on
+   this machine's disk**. Choose the second.
+3. The console names the target disk and its size, warns that its data will
+   be erased, and counts down 30 seconds. Power off now to cancel.
+4. The image is written, read back and verified. Then the machine powers off
+   with "remove the installation medium".
+5. Remove the CD or stick and boot from the disk. The first boot creates the
+   data partition.
+
+The installer writes only when exactly one disk qualifies (writable, not the
+installation medium, at least the image plus 17 MiB). With several it lists
+them, writes nothing and powers off: detach the others and run it again.
+Installing over an existing urMQTT disk erases its data. To update the
+kernel and keep the data, use `urmqtt-disk update-boot` or
+`scripts/kvm-host/install.sh` instead.
 
 Only TCP 8883 is served. Allow it inbound. Allow UDP from the VM to your syslog
 and statsd collectors (`observability.*`) if configured, plus DHCP. Nothing else

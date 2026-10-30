@@ -22,7 +22,7 @@ use urmqtt_tls::rng::{Csprng, EntropyPool, Source};
 use urmqtt_virtio::blk::VirtioBlk;
 use urmqtt_virtio::net::VirtioNet;
 use urmqtt_virtio::rng::VirtioRng;
-use urmqtt_virtio::scsi::{ScsiDisk, VirtioScsi};
+use urmqtt_virtio::scsi::{DiskInfo, ScsiDisk, VirtioScsi};
 use urmqtt_virtio::transport::CapLoc;
 use urmqtt_virtio::{DeviceType, DmaRegion, Env, Region, Transport, VirtioError, find_caps};
 
@@ -200,6 +200,59 @@ pub struct Devices {
     pub other_disks: u32,
     /// The boot disk after [`prepare_boot_disk`].
     pub boot: Option<BootDisk>,
+    /// Install mode (S1b): every disk, for the installer to choose from.
+    pub install: alloc::vec::Vec<InstallDisk>,
+    /// Install mode: the virtio-scsi HBAs whose LUNs are candidates.
+    pub hbas: alloc::vec::Vec<Option<VirtioScsi>>,
+}
+
+/// A disk the installer may write (install mode only).
+pub struct InstallDisk {
+    pub name: alloc::string::String,
+    pub sectors: u64,
+    pub read_only: bool,
+    /// The installer's own boot medium (a disk with the boot GPT GUID).
+    pub boot_medium: bool,
+    pub source: InstallSource,
+}
+
+pub enum InstallSource {
+    Blk(Box<VirtioBlk>),
+    /// A LUN behind HBA `hba` of [`Devices::hbas`].
+    Scsi {
+        hba: usize,
+        info: DiskInfo,
+    },
+}
+
+static INSTALL_MODE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Install mode: [`probe`] keeps every disk as a candidate (written by
+/// nothing but the installer) instead of choosing the boot disk.
+pub fn set_install_mode(on: bool) {
+    // Relaxed: set before probe, on the boot CPU.
+    INSTALL_MODE.store(on, Ordering::Relaxed);
+}
+
+fn install_mode() -> bool {
+    INSTALL_MODE.load(Ordering::Relaxed)
+}
+
+/// Takes candidate `i` out as a usable disk.
+pub fn take_install_disk(i: usize) -> Option<DataDisk> {
+    let mut devs = DEVICES.lock();
+    if i >= devs.install.len() {
+        return None;
+    }
+    let d = devs.install.swap_remove(i);
+    match d.source {
+        InstallSource::Blk(b) => Some(DataDisk::Blk(*b)),
+        InstallSource::Scsi { hba, info } => devs
+            .hbas
+            .get_mut(hba)
+            .and_then(Option::take)
+            .map(|h| DataDisk::Scsi(h.into_disk(info))),
+    }
 }
 
 pub static DEVICES: SpinLock<Devices> = SpinLock::new(Devices {
@@ -209,6 +262,8 @@ pub static DEVICES: SpinLock<Devices> = SpinLock::new(Devices {
     blk_msix_spi: None,
     other_disks: 0,
     boot: None,
+    install: alloc::vec::Vec::new(),
+    hbas: alloc::vec::Vec::new(),
 });
 
 static BOOT_MEDIUM: SpinLock<BootMedium> = SpinLock::new(BootMedium {
@@ -341,6 +396,8 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
         blk_msix_spi: None,
         other_disks: 0,
         boot: None,
+        install: alloc::vec::Vec::new(),
+        hbas: alloc::vec::Vec::new(),
     };
 
     if let Some(pcie) = platform.pcie {
@@ -472,6 +529,16 @@ fn probe_pci(
                 } else {
                     None
                 };
+                if install_mode() {
+                    devs.install.push(InstallDisk {
+                        name: alloc::format!("virtio-blk {}", f.bdf),
+                        sectors: blk.capacity_sectors,
+                        read_only: blk.read_only,
+                        boot_medium: is_boot_disk(g),
+                        source: InstallSource::Blk(Box::new(blk)),
+                    });
+                    continue;
+                }
                 if devs.blk.is_some() || !is_boot_disk(g) {
                     info!(
                         "disk: virtio-blk {} ({} MiB) is not the boot disk, left untouched",
@@ -501,6 +568,33 @@ fn probe_pci(
                 let mut hba = VirtioScsi::new(transport(&ecam, f.bdf)?, env)?;
                 let (disks, n) = hba.scan(env);
                 info!("scsi: {} {n} disk(s) with 512-byte blocks", f.bdf);
+                if install_mode() {
+                    let idx = devs.hbas.len();
+                    for d in disks.iter().take(n).flatten() {
+                        let mut head = alloc::vec![0u8; (gpt::HEAD_SECTORS * 512) as usize];
+                        let g = if d.sectors > gpt::HEAD_SECTORS {
+                            hba.read(env, *d, 1, &mut head)
+                                .ok()
+                                .and(guid_of(&head, d.sectors))
+                        } else {
+                            None
+                        };
+                        devs.install.push(InstallDisk {
+                            name: alloc::format!(
+                                "virtio-scsi {} target {} lun {}",
+                                f.bdf,
+                                d.target,
+                                d.lun
+                            ),
+                            sectors: d.sectors,
+                            read_only: false,
+                            boot_medium: is_boot_disk(g),
+                            source: InstallSource::Scsi { hba: idx, info: *d },
+                        });
+                    }
+                    devs.hbas.push(Some(hba));
+                    continue;
+                }
                 let mut chosen = None;
                 for d in disks.iter().take(n).flatten() {
                     let mut head = alloc::vec![0u8; (gpt::HEAD_SECTORS * 512) as usize];

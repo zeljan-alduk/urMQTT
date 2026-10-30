@@ -212,6 +212,13 @@ Each milestone ends with:
 - **Host fault runner:** `scripts/fault-loop.sh` waits for its first procedure, the S2 migration. The fault device and a Rust test that cuts every first-boot write exist now.
 - **Read-only media:** `iso-as-cd-refused` runs as `iso-as-cd`. A dev image runs memory-only and says why; the production refusal is the existing `storage.require_data_disk` rule.
 
+**S1b status: done** (docs/PROGRESS.md, S1b; ADR-052). Deviations:
+- **No `storage.install_target`:** with several candidates the installer refuses and lists them. Detach the others.
+- **Write order hardened:** the backup at the disk's end is cleared first, and the primary header is written last. The first boot repairs a missing backup.
+- **The SCSI target is tested next to the CD on the same virtio-scsi bus.**
+- **Production command line:** a host test covers it instead of a separate production smoke image.
+- **Bare metal:** UEFI and BIOS on the Intel PC remain X12.
+
 ### S2 — Layout v2: alignment, topology, partition count · M
 
 **Work**

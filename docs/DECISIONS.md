@@ -702,3 +702,39 @@ verified in the named milestone before it becomes Accepted).
     - `disk-tool-offline` and `disk-tool-import-in-force` (the tool's round trip, with the host `sqlite3`).
 
     Every older scenario now boots the single-disk image as well.
+
+## ADR-052 — The self-installing ISO; `install` is the one honoured production word (S1b)
+
+- **Status:** Accepted (S1b). It implements PLAN.md decision 7 and STORAGE-PLAN §2b. The threat-model entry is "Installer entry" in docs/SECURITY.md.
+- **Problem:** bare metal and many hypervisors boot an ISO or a USB stick, not a pre-written disk. Under the single-disk model (ADR-051) a CD cannot hold the data. The ISO must therefore put urMQTT onto the machine's disk itself, with no other tool.
+- **Design:**
+  - **Menu** (the ISO9660 `limine.conf`; the ESP's own config, used by the installed disk, stays menu-less):
+    - `/urMQTT`: the default, after 5 s;
+    - `/Install urMQTT on this machine's disk`: `cmdline: install`, `module_path: boot():/esp.img#<blake2b>`.
+
+    The editor is off and kernel and module are hash-pinned.
+  - **Target** (`urmqtt_store::install::choose`): every disk driven in install mode, minus the installation medium (a disk whose GPT GUID is the boot GUID), read-only disks, and disks smaller than the image plus 17 MiB.
+    - Exactly one remains: that disk.
+    - None remain, or several: refuse, list them, write nothing.
+    - `storage.install_target` (by serial) is **not** implemented: leave only the target attached. Bare metal sees no USB sticks anyway (no USB storage driver).
+  - **Confirmation without input:** the target with its size, "ALL DATA … WILL BE ERASED" (naming an existing urMQTT data partition), and a 30 s countdown with "power off now to cancel" every 5 s. The dev-only `install-countdown=S` shortens it for tests.
+  - **Writing** (`urmqtt_store::install::write_image`), the image built by `gpt::raw_image`, mkraw-identical:
+    1. clear the disk's last 33 sectors, then LBA 0..33;
+    2. the ESP and the image's backup table;
+    3. the primary entries and the protective MBR;
+    4. the primary header last.
+
+    Then flush and a streaming SHA-256 read-back, so no second copy of the image is held: the dev heap is 32 MiB. Finally "remove the installation medium", flush the UART, power off.
+  - **First boot from the disk** is the ordinary S1 first boot. It now also rewrites a missing or damaged backup from the primary, which an interrupted reinstall leaves.
+  - **Production command line:** ignored as before, except the exact word `install`. A production ISO's install entry must work, and the word is harmless without the hash-pinned module.
+- **Found on the way:**
+  - The first version read the image back into a second 10 MiB buffer and panicked on the dev heap after the image was written. It is now streamed.
+  - A power-off right after a log line cut that line off: `power::off` and the reset path now flush the UART first.
+- **Not done:**
+  - an *Update* entry (replace the ESP, keep the data) is planned;
+  - BIOS boot of the installed disk comes with x86 (X10);
+  - bare metal is X12.
+- **Testing:**
+  - Host: target selection; the installed disk equals the raw image and then first-boots; too small and bad images; a power cut at every write of a reinstall (cut, with and without the cache surviving) leaves the old install untouched or a disk that does not boot, never a mix, and installing again works; backup repair.
+  - Kernel host tests for the production command line.
+  - Smoke (HVF and TCG): `install-vm` and `install-vm-boots` (the ISO unchanged), `install-two-disks-refused` (both disks still all zero), `install-scsi` and `install-scsi-boots`, `install-crash` (the disk has no GPT afterwards, per `urmqtt-disk info`) and `install-crash-reinstalled`.

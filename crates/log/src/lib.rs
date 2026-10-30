@@ -337,6 +337,16 @@ pub fn raw(args: fmt::Arguments<'_>) {
     let _ = Tee(locked.sinks()).write_fmt(args);
 }
 
+/// Waits until the UART has sent everything written so far (before a
+/// power-off or reset, which would cut off the last lines).
+pub fn flush() {
+    if let Some(sinks) = SINKS.try_lock()
+        && let Some(u) = sinks.uart
+    {
+        u.flush();
+    }
+}
+
 /// Last-resort output for exception and panic reports. Uses the normal sinks
 /// if the lock is free, otherwise writes straight to the UART so a fault
 /// while logging cannot deadlock the report.

@@ -22,6 +22,7 @@ pub fn set_smoke(smoke: bool) {
 
 /// Powers off; halts if the firmware is unavailable or refuses.
 pub fn off() -> ! {
+    urmqtt_log::flush();
     arch_power::off()
 }
 
@@ -31,6 +32,7 @@ pub fn fatal() -> ! {
     if SMOKE.load(Ordering::Relaxed) {
         off()
     } else {
+        urmqtt_log::flush();
         arch_power::reset()
     }
 }
