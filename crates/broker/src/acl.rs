@@ -11,12 +11,18 @@ pub struct Acl {
     pub service_ids: &'static [&'static str],
     pub service_publish: &'static [&'static str],
     pub service_subscribe: &'static [&'static str],
+    /// Operator identities (exact ids, O1/O2): the only ones that reach
+    /// `$SYS/` (see [`OPERATOR_PUBLISH`] and [`OPERATOR_SUBSCRIBE`]). Their
+    /// role needs an authenticated (TLS) identity; see the broker.
+    pub operator_ids: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Device,
     Service,
+    /// May use the `$SYS/` namespace and nothing else (O1, O2).
+    Operator,
     /// A certificate from a bootstrap trust anchor (H1): provisioning only.
     Bootstrap,
 }
@@ -34,8 +40,28 @@ pub fn reserved(topic: &str) -> bool {
     topic.split('/').next() == Some(RESERVED)
 }
 
+/// The system namespace (O1, O2): broker statistics, the console and the
+/// query topics. Closed to every role but [`Role::Operator`], whatever the
+/// configured patterns say.
+pub const SYS: &str = "$SYS";
+
+/// `topic` (or a filter) lies in the system namespace.
+pub fn sys(topic: &str) -> bool {
+    topic.split('/').next() == Some(SYS)
+}
+
+/// What an operator may publish: the console's input and the info query.
+/// Both are handled by the broker and never routed or retained.
+pub const OPERATOR_PUBLISH: &[&str] = &["$SYS/console/in", "$SYS/query/info"];
+
+/// What an operator may subscribe to.
+pub const OPERATOR_SUBSCRIBE: &[&str] = &["$SYS/#"];
+
 impl Acl {
     pub fn role(&self, id: &str) -> Role {
+        if self.operator_ids.contains(&id) {
+            return Role::Operator;
+        }
         let service = self.service_ids.iter().any(|p| match p.strip_suffix('*') {
             Some(prefix) => id.starts_with(prefix),
             None => *p == id,
@@ -50,27 +76,32 @@ impl Acl {
             (Role::Service, true) => self.service_publish,
             (Role::Service, false) => self.service_subscribe,
             (Role::Bootstrap, _) => BOOTSTRAP_RULES,
+            (Role::Operator, true) => OPERATOR_PUBLISH,
+            (Role::Operator, false) => OPERATOR_SUBSCRIBE,
         }
     }
 
-    /// May `id` publish to topic `topic`? Never in the reserved namespace.
+    /// May `id` publish to topic `topic`? Never in the reserved namespace;
+    /// in `$SYS/` only an operator, and only the topics it may publish.
     pub fn may_publish(&self, role: Role, id: &str, topic: &str) -> bool {
-        !reserved(topic)
-            && self
-                .rules(role, true)
-                .iter()
-                .any(|p| matches_topic(p, id, topic))
+        if reserved(topic) || (sys(topic) && role != Role::Operator) {
+            return false;
+        }
+        self.rules(role, true)
+            .iter()
+            .any(|p| matches_topic(p, id, topic))
     }
 
     /// May `id` subscribe to `filter`? Every topic the filter can match must
     /// be allowed by one pattern. Never in the reserved namespace, whatever
-    /// the configuration says.
+    /// the configuration says; in `$SYS/` only an operator.
     pub fn may_subscribe(&self, role: Role, id: &str, filter: &str) -> bool {
-        !reserved(filter)
-            && self
-                .rules(role, false)
-                .iter()
-                .any(|p| covers(p, id, filter))
+        if reserved(filter) || (sys(filter) && role != Role::Operator) {
+            return false;
+        }
+        self.rules(role, false)
+            .iter()
+            .any(|p| covers(p, id, filter))
     }
 }
 
@@ -124,10 +155,13 @@ mod tests {
         service_ids: &["backend", "svc-*"],
         service_publish: &["devices/+/cmd/#"],
         service_subscribe: &["devices/#"],
+        operator_ids: &["ops"],
     };
 
     #[test]
     fn roles() {
+        assert_eq!(ACL.role("ops"), Role::Operator);
+        assert_eq!(ACL.role("ops2"), Role::Device);
         assert_eq!(ACL.role("backend"), Role::Service);
         assert_eq!(ACL.role("svc-export"), Role::Service);
         assert_eq!(ACL.role("backend2"), Role::Device);
@@ -176,6 +210,7 @@ mod tests {
             service_ids: &["backend"],
             service_publish: &["#", "$urmqtt/#", "+/#"],
             service_subscribe: &["#", "$urmqtt/#"],
+            operator_ids: &[],
         };
         for role in [Role::Device, Role::Service, Role::Bootstrap] {
             for t in ["$urmqtt/control", "$urmqtt", "$urmqtt/x/y"] {
@@ -204,6 +239,45 @@ mod tests {
         assert!(!ACL.may_subscribe(b, "d9", "devices/d9/cmd/#"));
         // A bootstrap certificate named like a service gets no service rights.
         assert!(!ACL.may_publish(b, "backend", "devices/d7/cmd/x"));
+    }
+
+    /// O1, O2: `$SYS/` belongs to operators alone. No other role reaches it,
+    /// however permissive its patterns; an operator reaches nothing else and
+    /// publishes only the two request topics.
+    #[test]
+    fn sys_namespace_is_for_operators() {
+        const OPEN: Acl = Acl {
+            device_publish: &["#", "$SYS/#"],
+            device_subscribe: &["#", "$SYS/#"],
+            service_ids: &["backend"],
+            service_publish: &["#", "$SYS/#"],
+            service_subscribe: &["#", "$SYS/#"],
+            operator_ids: &["ops"],
+        };
+        for role in [Role::Device, Role::Service, Role::Bootstrap] {
+            for t in ["$SYS/console/in", "$SYS/broker/uptime", "$SYS"] {
+                assert!(!OPEN.may_publish(role, "x", t), "{role:?} {t}");
+                assert!(!OPEN.may_subscribe(role, "x", t), "{role:?} {t}");
+            }
+            for f in ["$SYS/#", "$SYS/+", "$SYS/broker/#", "$SYS/console/out"] {
+                assert!(!OPEN.may_subscribe(role, "x", f), "{role:?} {f}");
+            }
+        }
+        let op = Role::Operator;
+        for f in ["$SYS/#", "$SYS/broker/#", "$SYS/console/out", "$SYS/+/x"] {
+            assert!(OPEN.may_subscribe(op, "ops", f), "{f}");
+        }
+        for t in ["$SYS/console/in", "$SYS/query/info"] {
+            assert!(OPEN.may_publish(op, "ops", t), "{t}");
+        }
+        // Not outside `$SYS/`, not elsewhere in it, never the control topic.
+        assert!(!OPEN.may_publish(op, "ops", "$SYS/broker/uptime"));
+        assert!(!OPEN.may_publish(op, "ops", "$SYS/console/out"));
+        assert!(!OPEN.may_publish(op, "ops", "devices/ops/x"));
+        assert!(!OPEN.may_subscribe(op, "ops", "#"));
+        assert!(!OPEN.may_subscribe(op, "ops", "devices/#"));
+        assert!(!OPEN.may_subscribe(op, "ops", "$urmqtt/#"));
+        assert!(sys("$SYS/x") && sys("$SYS") && !sys("$SYSx/x") && !sys("a/$SYS"));
     }
 
     #[test]

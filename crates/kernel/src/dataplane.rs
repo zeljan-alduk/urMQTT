@@ -177,11 +177,15 @@ impl Idle {
         } else {
             0
         };
+        let busy = 100 - (self.slept_ns * 100 / window.max(1)).min(100);
+        // Relaxed: statistics, for `$SYS/broker/cpu/busy/<core>` (O1).
+        if let Some(b) = crate::sys::BUSY.get(me) {
+            b.store(busy as u8, Ordering::Relaxed);
+        }
         if acc > 0 || tls > 0 || frames > 0 {
             urmqtt_log::info!(
-                "dataplane: core {me}: busy {}%, tls {}%, {acc} connection(s) accepted, {frames} frame(s) dispatched, \
+                "dataplane: core {me}: busy {busy}%, tls {}%, {acc} connection(s) accepted, {frames} frame(s) dispatched, \
                  {} loop passes in {} ms",
-                100 - (self.slept_ns * 100 / window.max(1)).min(100),
                 tls * 100 / window.max(1),
                 self.passes,
                 window / 1_000_000

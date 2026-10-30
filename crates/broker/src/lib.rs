@@ -24,6 +24,7 @@ extern crate alloc;
 
 pub mod acl;
 mod compact;
+pub mod sys;
 mod topics;
 
 use alloc::boxed::Box;
@@ -102,6 +103,22 @@ pub const CONTROL_TOPIC: &str = "$urmqtt/control";
 /// Control messages held between drains; beyond this they are dropped
 /// (counted), so a flooding control service costs bounded work.
 const MAX_CONTROL_BACKLOG: usize = 64;
+
+/// What an operator asked for on a `$SYS/` request topic (O1, O2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SysKind {
+    /// One console command ([`sys::CONSOLE_IN`]).
+    Console,
+    /// The info query ([`sys::QUERY_INFO`]).
+    Query,
+}
+
+/// An operator's request, for the kernel to answer ([`Broker::drain_sys_requests`]).
+pub struct SysRequest {
+    pub kind: SysKind,
+    pub from: Box<str>,
+    pub payload: Box<[u8]>,
+}
 
 /// A control message as received: the publisher's identity and the
 /// payload, unauthenticated until the control handler verifies it.
@@ -185,6 +202,12 @@ pub struct Stats {
     /// Retained messages not retained: the shard's byte budget (H3).
     pub retained_refused_bytes: u64,
     pub retained_bytes: usize,
+    /// Connections with a session (CONNECT accepted), not those still
+    /// handshaking.
+    pub online: usize,
+    /// Operator requests dropped: the backlog was full or the session's
+    /// publish rate was exceeded (O1, O2).
+    pub dropped_sys: u64,
 }
 
 struct Will {
@@ -345,6 +368,20 @@ pub struct Broker {
     retained_by: BTreeMap<Box<str>, u32>,
     /// Connections with new output or a close request.
     ready: Vec<ConnId>,
+    /// Subscriptions over all sessions, kept up to date so that
+    /// [`Broker::stats`] stays O(1).
+    subs_total: usize,
+    /// Connections with a session.
+    online: usize,
+    /// The `$SYS/` topics this shard holds retained (injected by the
+    /// kernel, never stored or counted against the device budgets), with
+    /// their cost.
+    sys_topics: BTreeMap<Box<str>, usize>,
+    sys_bytes: usize,
+    /// The last console lines, replayed to a new `$SYS/console/out`
+    /// subscriber.
+    console: VecDeque<Msg>,
+    sys_in: Vec<SysRequest>,
 }
 
 /// The scope level of the device ACL: the first level of a device
@@ -422,7 +459,73 @@ impl Broker {
             control: Vec::new(),
             retained_by: BTreeMap::new(),
             ready: Vec::new(),
+            subs_total: 0,
+            online: 0,
+            sys_topics: BTreeMap::new(),
+            sys_bytes: 0,
+            console: VecDeque::new(),
+            sys_in: Vec::new(),
         }
+    }
+
+    /// Retained bytes of devices (the budget applies to these, not to the
+    /// few `$SYS/` topics the kernel injects).
+    fn device_retained_bytes(&self) -> usize {
+        self.topics.retained_bytes().saturating_sub(self.sys_bytes)
+    }
+
+    /// Sets a retained `$SYS/` topic on this shard and delivers it to the
+    /// matching subscribers (QoS 0). Not stored, not counted against the
+    /// device budgets, not offered to other shards: every shard publishes
+    /// its own copy (O1). `payload` must not be empty.
+    pub fn sys_publish_retained(&mut self, topic: &str, payload: &[u8]) {
+        if payload.is_empty() || !acl::sys(topic) {
+            return;
+        }
+        let msg = Arc::new(MsgInner {
+            topic: topic.into(),
+            payload: payload.into(),
+        });
+        let cost = topics::retained_cost(topic, payload.len());
+        if let Some(old) = self.sys_topics.insert(topic.into(), cost) {
+            self.sys_bytes -= old;
+        }
+        self.sys_bytes += cost;
+        self.store_retained(&msg, QoS::AtMostOnce, None);
+        self.route_local(&msg, QoS::AtMostOnce, false, true);
+    }
+
+    /// Delivers a `$SYS/` message that is not retained (a query reply).
+    pub fn sys_publish(&mut self, topic: &str, payload: &[u8]) {
+        if !acl::sys(topic) {
+            return;
+        }
+        let msg = Arc::new(MsgInner {
+            topic: topic.into(),
+            payload: payload.into(),
+        });
+        self.route_local(&msg, QoS::AtMostOnce, false, true);
+    }
+
+    /// Publishes one console line on [`sys::CONSOLE_OUT`] and keeps it in
+    /// the replay ring (the oldest line makes room). Never blocks: a
+    /// subscriber that cannot take it loses it (QoS 0, counted by
+    /// `dropped_backpressure`).
+    pub fn console_line(&mut self, text: &str) {
+        let msg = Arc::new(MsgInner {
+            topic: sys::CONSOLE_OUT.into(),
+            payload: text.as_bytes().into(),
+        });
+        if self.console.len() >= sys::CONSOLE_RING {
+            self.console.pop_front();
+        }
+        self.console.push_back(msg.clone());
+        self.route_local(&msg, QoS::AtMostOnce, false, true);
+    }
+
+    /// Takes the operators' requests received since the last call.
+    pub fn drain_sys_requests(&mut self) -> alloc::vec::Drain<'_, SysRequest> {
+        self.sys_in.drain(..)
     }
 
     /// Takes the control messages received since the last call (H1).
@@ -533,7 +636,7 @@ impl Broker {
         });
         // No owner: counts start empty after a restart; the byte budget
         // still applies to what comes back.
-        if self.topics.retained_bytes() + topics::retained_cost(topic, payload.len())
+        if self.device_retained_bytes() + topics::retained_cost(topic, payload.len())
             > self.cfg.max_retained_bytes
         {
             self.stats.retained_refused_bytes += 1;
@@ -636,6 +739,7 @@ impl Broker {
             }
         };
         s.subs.push(sub);
+        self.subs_total += 1;
         true
     }
 
@@ -647,10 +751,11 @@ impl Broker {
         let Some(s) = self.sessions.get_mut(sid) else {
             return false;
         };
-        if let Some(sub) = s.subs.remove(i)
-            && !sub.scoped
-        {
-            self.topics.unsubscribe(sub.node, sid);
+        if let Some(sub) = s.subs.remove(i) {
+            self.subs_total = self.subs_total.saturating_sub(1);
+            if !sub.scoped {
+                self.topics.unsubscribe(sub.node, sid);
+            }
         }
         true
     }
@@ -709,7 +814,7 @@ impl Broker {
         (
             self.stats.retained_refused_device,
             self.stats.retained_refused_bytes,
-            self.topics.retained_bytes(),
+            self.device_retained_bytes(),
         )
     }
 
@@ -717,9 +822,13 @@ impl Broker {
         Stats {
             connections: self.conns.len(),
             sessions: self.sessions.len(),
-            subscriptions: self.sessions.iter().map(|(_, s)| s.subs.len()).sum(),
-            retained: self.topics.retained_count(),
-            retained_bytes: self.topics.retained_bytes(),
+            subscriptions: self.subs_total,
+            retained: self
+                .topics
+                .retained_count()
+                .saturating_sub(self.sys_topics.len()),
+            retained_bytes: self.device_retained_bytes(),
+            online: self.online,
             topic_nodes: self.topics.node_count(),
             ..self.stats
         }
@@ -847,6 +956,9 @@ impl Broker {
         let Some(conn) = self.conns.remove(c) else {
             return;
         };
+        if conn.session.is_some() {
+            self.online = self.online.saturating_sub(1);
+        }
         if conn.close != Some(CloseReason::ClientDisconnect)
             && let Some(w) = conn.extra.and_then(|e| e.will)
         {
@@ -1023,6 +1135,13 @@ impl Broker {
             .get(c)
             .and_then(|k| k.extra.as_ref())
             .is_some_and(|e| e.bootstrap);
+        // The operator role needs a certificate: a client id alone (the dev
+        // plaintext port) never earns it (O1, O2).
+        let authenticated = self
+            .conns
+            .get(c)
+            .and_then(|k| k.extra.as_ref())
+            .is_some_and(|e| e.identity.is_some());
         // Checked: the session keeps the (equal) client id, so the
         // connection's copy is freed (M15).
         if let Some(k) = self.conn(c)
@@ -1040,7 +1159,10 @@ impl Broker {
         let role = if bootstrap {
             Role::Bootstrap
         } else {
-            self.cfg.acl.role(p.client_id)
+            match self.cfg.acl.role(p.client_id) {
+                Role::Operator if !authenticated => Role::Device,
+                r => r,
+            }
         };
         let boot_key;
         let key: &str = if bootstrap {
@@ -1050,7 +1172,11 @@ impl Broker {
             p.client_id
         };
         let will = match &p.will {
-            Some(w) if !self.cfg.acl.may_publish(role, p.client_id, w.topic) => {
+            // A will is published by the broker on the client's behalf: it
+            // must never be a way into `$SYS/` (the console input).
+            Some(w)
+                if acl::sys(w.topic) || !self.cfg.acl.may_publish(role, p.client_id, w.topic) =>
+            {
                 return self.reject(c, ConnectReturnCode::NotAuthorized);
             }
             Some(w) => Some(Will {
@@ -1099,6 +1225,8 @@ impl Broker {
             s.set_conn(Some(c));
             s.clean = p.clean_session;
             s.persisted |= newly_persistent.is_some();
+            // A restored session was created without the certificate.
+            s.role = role;
         }
         if let Some((cid, subs)) = newly_persistent {
             self.emit(PersistOp::SessionUpsert {
@@ -1123,6 +1251,7 @@ impl Broker {
             if will.is_some() {
                 k.extra_mut().will = will;
             }
+            self.online += 1;
         }
         self.send(
             c,
@@ -1167,6 +1296,7 @@ impl Broker {
         let Some(s) = self.sessions.remove(sid) else {
             return;
         };
+        self.subs_total = self.subs_total.saturating_sub(s.subs.len());
         for x in s.subs.as_slice().iter().filter(|x| !x.scoped) {
             self.topics.unsubscribe(x.node, sid);
         }
@@ -1243,6 +1373,27 @@ impl Broker {
             }
             return;
         }
+        // O1, O2: `$SYS/` belongs to operators. What they publish there is
+        // a request to the kernel, never routed and never retained.
+        if acl::sys(p.topic) {
+            if !self.cfg.acl.may_publish(role, &allowed, p.topic) {
+                self.stats.dropped_acl += 1;
+            } else if !self.take_token(sid, now_ms) || self.sys_in.len() >= sys::MAX_REQUESTS {
+                self.stats.dropped_sys += 1;
+            } else {
+                let kind = if p.topic == sys::QUERY_INFO {
+                    SysKind::Query
+                } else {
+                    SysKind::Console
+                };
+                self.sys_in.push(SysRequest {
+                    kind,
+                    from: allowed,
+                    payload: p.payload.into(),
+                });
+            }
+            return;
+        }
         if !self.cfg.acl.may_publish(role, &allowed, p.topic) {
             self.stats.dropped_acl += 1;
             return;
@@ -1292,7 +1443,7 @@ impl Broker {
                 return false;
             }
             let cost = topics::retained_cost(&msg.topic, msg.payload.len());
-            if self.topics.retained_bytes() - old_cost + cost > self.cfg.max_retained_bytes {
+            if self.device_retained_bytes() - old_cost + cost > self.cfg.max_retained_bytes {
                 self.stats.retained_refused_bytes += 1;
                 return false;
             }
@@ -1531,6 +1682,13 @@ impl Broker {
             self.topics.retained_matching(filter, &mut retained);
             for (msg, rq) in retained.drain(..) {
                 self.deliver(sid, &msg, rq.min(qos), true);
+            }
+            // The console's last lines (O2), as live messages.
+            if acl::sys(filter) && urmqtt_mqtt::topic_matches(filter, sys::CONSOLE_OUT) {
+                let lines: Vec<Msg> = self.console.iter().cloned().collect();
+                for msg in lines {
+                    self.deliver(sid, &msg, QoS::AtMostOnce, false);
+                }
             }
         }
     }

@@ -33,6 +33,14 @@ pub fn off() -> ! {
     arch_power::off()
 }
 
+/// A requested reboot (the console's `reboot`, O2): the log is flushed and
+/// the machine resets. Durable state is crash-safe, so nothing else is
+/// needed; the caller waits a moment for its reply to leave first.
+pub fn reboot() -> ! {
+    urmqtt_log::flush();
+    arch_power::reset()
+}
+
 // Relaxed: written once on the boot CPU after the boot medium is known.
 static HALT_ON_FATAL: AtomicBool = AtomicBool::new(false);
 

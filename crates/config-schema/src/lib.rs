@@ -204,6 +204,7 @@ struct RawAcl {
     service_ids: Vec<String>,
     service_publish: Vec<String>,
     service_subscribe: Vec<String>,
+    operator_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -322,6 +323,9 @@ pub struct Acl {
     pub service_ids: Vec<String>,
     pub service_publish: Vec<String>,
     pub service_subscribe: Vec<String>,
+    /// Identities with the operator role (O1, O2): the only ones that read
+    /// `$SYS/` and publish to the console. Exact ids; empty: no operator.
+    pub operator_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -869,6 +873,12 @@ fn validate_filters(
                 &format!("{key}[{i}]"),
                 "the $urmqtt/ namespace is reserved for the control channel",
             ));
+        } else if f.split('/').next() == Some("$SYS") {
+            // Likewise (O1, O2): `$SYS/` is for operators, by role.
+            errors.push(err(
+                &format!("{key}[{i}]"),
+                "the $SYS/ namespace belongs to acl.operator_ids; no pattern grants it",
+            ));
         }
     }
 }
@@ -899,12 +909,32 @@ fn validate_acl(raw: &RawAcl, limits: &Limits, errors: &mut Vec<ConfigError>) ->
     ] {
         validate_filters(key, list, limits, Placeholder::Allowed, errors);
     }
+    for (i, id) in raw.operator_ids.iter().enumerate() {
+        // Exact identities only: the operator role is never granted by prefix.
+        if id.ends_with('*') || check_identity_pattern(id).is_err() {
+            errors.push(err(
+                &format!("acl.operator_ids[{i}]"),
+                "must be an exact identity ([A-Za-z0-9-_.:]+, no wildcard)",
+            ));
+        } else if raw.service_ids.iter().any(|p| match p.strip_suffix('*') {
+            Some(prefix) => id.starts_with(prefix),
+            None => p == id,
+        }) {
+            errors.push(err(
+                &format!("acl.operator_ids[{i}]"),
+                "also matches acl.service_ids: an identity has one role",
+            ));
+        } else if raw.operator_ids.iter().take(i).any(|o| o == id) {
+            errors.push(err(&format!("acl.operator_ids[{i}]"), "listed twice"));
+        }
+    }
     Acl {
         device_publish: raw.device_publish.clone(),
         device_subscribe: raw.device_subscribe.clone(),
         service_ids: raw.service_ids.clone(),
         service_publish: raw.service_publish.clone(),
         service_subscribe: raw.service_subscribe.clone(),
+        operator_ids: raw.operator_ids.clone(),
     }
 }
 
@@ -1207,6 +1237,7 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         service_ids: {sid},
         service_publish: {sp},
         service_subscribe: {ss},
+        operator_ids: {oid},
     }},
     storage: Storage {{
         sqlite_heap_mb: {heap},
@@ -1280,6 +1311,7 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         sid = render_strs(&cfg.acl.service_ids),
         sp = render_strs(&cfg.acl.service_publish),
         ss = render_strs(&cfg.acl.service_subscribe),
+        oid = render_strs(&cfg.acl.operator_ids),
         heap = cfg.storage.sqlite_heap_mb,
         tt = render_strs(&cfg.storage.telemetry_topics),
         rd = cfg.storage.retention_days,

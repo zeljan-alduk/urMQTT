@@ -128,6 +128,8 @@ pub struct Acl {
     pub service_ids: &'static [&'static str],
     pub service_publish: &'static [&'static str],
     pub service_subscribe: &'static [&'static str],
+    /// Operator identities (exact): `$SYS/` and the console (O1, O2).
+    pub operator_ids: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Copy)]

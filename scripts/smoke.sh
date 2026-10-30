@@ -1451,6 +1451,60 @@ else
     FAILED=$((FAILED + 1))
 fi
 
+# O2: `reboot` resets the machine (QEMU runs with -no-reboot, so the reset
+# ends the VM) after the command was accepted and audit-logged.
+sys_reboot() {
+    local iso="$OUT/sys-reboot.raw"
+    mkimg "$iso" "serve"
+    for accel in $ACCELS; do
+        local log="$OUT/sys-reboot-$accel.log" data="$OUT/sys-reboot-$accel.img" status=0 waited=0
+        fresh_disk "$iso" "$data"
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd 18883:8883
+        if wait_log "$log" "TLS 1.3 listener"; then
+            python3 -I "$ROOT/scripts/sys-scenarios.py" "$ROOT/deploy/dev" 18883 reboot >"$log.client" 2>&1 || status=1
+            until ! kill -0 "$VM_PID" 2>/dev/null; do
+                if (( waited >= 300 )); then
+                    echo "client: the VM did not reset within 30 s" >>"$log.client"
+                    status=124
+                    break
+                fi
+                sleep 0.1
+                waited=$((waited + 1))
+            done
+        else
+            status=124
+        fi
+        kill_vm
+        cat "$log.client" >>"$log" 2>/dev/null || true
+        check "sys-reboot [$accel]" "$log" "$status" "client: console-reboot-accepted ok" \
+            "console: operator ran \"reboot\"" "console: rebooting at the request of operator" \
+            "NOT:the VM did not reset" "NOT:FAILED" "$NO_FAULT"
+    done
+}
+
+# O1, O2: an operator with mutual TLS reads `$SYS/broker/#` (retained, every
+# 10 s), asks `$SYS/query/info`, reads the console and runs the fixed command
+# set; devices and the backend service cannot reach any of it. Every command
+# is audit-logged on the serial console.
+if command -v mosquitto_pub >/dev/null && command -v mosquitto_sub >/dev/null; then
+    SERVICE_PORT=8883 service sys-operator "serve" 18883 "TLS 1.3 listener on port 8883" \
+        python3 -I "$ROOT/scripts/sys-scenarios.py" "$ROOT/deploy/dev" -- \
+        "client: sys-broker-topics ok" "client: sys-refresh ok" "client: sys-cpu-busy-per-core ok" \
+        "client: sys-retained-flag ok" "client: sys-query-info ok" "client: console-replays-the-log ok" \
+        "client: console-help ok" "client: console-status ok" "client: console-log-level ok" \
+        "client: console-refuses-unknown-and-malformed ok" "client: console-audit-on-the-console ok" \
+        "client: console-rate-limited ok" "client: console-no-command-chaining ok" \
+        "client: console-restores-log-level ok" "client: sys-denied-to-device-001 ok" \
+        "client: sys-denied-to-backend ok" "client: console-out-denied-to-device-001 ok" \
+        "client: console-out-denied-to-backend ok" "client: console-unaffected-by-others ok" \
+        "client: sys-topics-cannot-be-forged ok" \
+        "console: operator ran \"status\"" "console: operator ran \"log level info\"" \
+        "console: operator command refused \(unknown command\): \"bogus\"" \
+        "console: operator command refused: rate limit" \
+        "NOT:console: rebooting" "NOT:FAILED" "$NO_FAULT"
+    sys_reboot
+fi
+
 # H2: session tickets under random per-boot keys. With a 20 s rotation, a
 # ticket issued late in the first interval resumes after the rotation (the
 # previous key), and a ticket from before a reboot does not.

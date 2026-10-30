@@ -89,7 +89,7 @@ fn counters(lost: u64, unsent: u64) -> Counters {
 
 /// Days until the server certificate expires (negative: expired), if the
 /// wall clock is known.
-fn server_cert_days() -> Option<i64> {
+pub(crate) fn server_cert_days() -> Option<i64> {
     let now = crate::boot::now_unix()?;
     let after = urmqtt_config::CONFIG.tls.server_cert_not_after;
     Some((after as i64 - now as i64).div_euclid(86_400))

@@ -65,6 +65,8 @@ mod simd_irq;
 #[cfg(target_os = "none")]
 mod smp;
 #[cfg(target_os = "none")]
+mod sys;
+#[cfg(target_os = "none")]
 mod tick;
 #[cfg(target_os = "none")]
 mod trap;

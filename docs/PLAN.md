@@ -137,6 +137,8 @@ limited, every command audit-logged.
 Both need an ACL role for operator identities and a ready MQTTX connection
 profile (client certificate, subscribed to the topics above).
 
+**Status (2026-10-30): implemented**, see ADR-060, PROGRESS.md "O1, O2" and docs/OPERATE.md.
+
 ## O3 — Live mode in RAM (user request, 2026-10-30)
 
 The boot menu has two entries: *live* and *install*. Live must not need a disk:

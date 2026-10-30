@@ -223,6 +223,8 @@ pub struct MqttService {
     /// Refused tickets already logged (first worker core only).
     tickets_refused_seen: u64,
     ticket_rotations_seen: u64,
+    /// `$SYS/` topics, the console and the operator's commands (O1, O2).
+    sys: crate::sys::Sys,
 }
 
 /// This core's telemetry ring to the DB core.
@@ -367,6 +369,7 @@ pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
             service_ids: CONFIG.acl.service_ids,
             service_publish: CONFIG.acl.service_publish,
             service_subscribe: CONFIG.acl.service_subscribe,
+            operator_ids: CONFIG.acl.operator_ids,
         },
         persist: db::active(),
         telemetry: CONFIG.storage.telemetry_topics,
@@ -567,6 +570,7 @@ impl MqttService {
             retained_refused_seen: (0, 0),
             tickets_refused_seen: 0,
             ticket_rotations_seen: 0,
+            sys: crate::sys::Sys::new(me, n),
         }
     }
 
@@ -1116,6 +1120,7 @@ impl MqttService {
             self.last_shrink_ms = now_ms;
             self.shrink(tcp);
         }
+        self.sys.poll(&mut self.broker, now_ms);
         let mut ready = core::mem::take(&mut self.ready);
         self.broker.drain_ready(&mut ready);
         for b in ready.drain(..) {

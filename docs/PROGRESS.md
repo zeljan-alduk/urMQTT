@@ -1342,3 +1342,47 @@ X86-PLAN §X10; ADR-043. **QEMU only: aarch64 UEFI under HVF and TCG, x86_64 q35
 - A BIOS-boot scenario with a CD **and** a disk under SeaBIOS at once beyond the installer scenarios.
 
 **Try it on a VPS** (docs/DEPLOY.md §5b): `make universal ENV=prod`, upload `build/urmqtt-prod-<version>-universal.iso`, boot the VPS from it, pick *Install urMQTT on this machine's disk*, detach the ISO, boot again. On the VNC console look for `URMQTT BOOT ... arch=x86_64`, `cpu: ... hypervisor=KVMKVMKVM`, `pci:`, `blk: boot disk is virtio-...`, `net: mac ..., link up`, `URMQTT READY`.
+
+## O1 — `$SYS/` introspection and the operator role (2026-10-30)
+
+PLAN.md "O1, O2"; ADR-060. **QEMU only (aarch64 under HVF and TCG, x86_64 under TCG); not run on KVM or real hardware.**
+
+**Done**
+
+- **The operator role.** `acl.operator_ids` (exact identities, a required key, empty means none) in the config schema, validated at build time: exact ids only, no duplicates, never also a service id, and no ACL pattern may name `$SYS/` (the build says so). Dev lists `operator` (the existing `make certs` identity), `deploy/prod/config.toml` lists `operator` too. `urmqtt_broker::acl` has `Role::Operator`: only it subscribes to `$SYS/#` and publishes `$SYS/console/in` and `$SYS/query/info`; devices, services and bootstrap identities are refused whatever their patterns say. The role needs an authenticated (TLS) identity: an operator id on the dev plaintext port is a device. Operators are exempt from the registry allowlist, like services.
+- **What an operator publishes is a request.** Not routed, not retained, not persisted, not offered to other shards; bounded queue of 16; any other `$SYS/` topic is dropped, also for the operator; a will naming `$SYS/` refuses the CONNECT.
+- **Retained `$SYS/broker/...` every 10 s**, from each data core into its own shard: `version`, `uptime`, `arch`, `cpu/cores`, `cpu/busy/<core>`, `memory/{total,used}`, `disk/{total,used}`, `clients/{connected,total}`, `subscriptions`, `retained`, `messages/{received,sent}`, `connections/refused`, `tls/server_cert_days`, `console/dropped`. They are in memory only and outside the device retained budgets. The numbers are relaxed counters each shard (and the DB core, for the disk) keeps for itself; `Broker::stats` is O(1) now (counters for subscriptions and online connections), and `Idle` keeps the per-core busy percentage.
+- **`$SYS/query/info`:** any payload, answered with one JSON document on `$SYS/query/info/response`. **Deviation:** the plan said MQTT 5 Response Topic; the broker speaks 3.1.1 only, so the reply topic is fixed (ADR-060).
+- `scripts/gen-operator-cert.sh DIR [ID] [DAYS]` issues an operator certificate from a deploy directory's CA (subject CN and `URI:urn:urmqtt:service:<id>`, like the dev operator and the production device-001). `deploy/prod/services/operator.{pem,key}` was issued with it from the production test CA; the key is git-ignored.
+
+**Tests**
+
+- Host: broker (the role in `acl.rs`; an operator with a certificate subscribes, a device, the service and a plaintext "operator" are refused; retained `$SYS/` topics outside the budgets and not stored or replicated; requests reach the kernel and nothing else; bounded; wills; counters), `sys.rs` (the fixed topic list, the JSON), config-schema (`operator_ids` rules, `$SYS/` patterns).
+- Smoke `sys-operator` (mutual TLS, the real operator certificate): every topic of the list arrives and is plausible, uptime refreshes, per-core busy, retained flag, the query's JSON, a device and the backend service are refused `$SYS/#`, the operator cannot forge a `$SYS/` topic.
+
+**Not done**
+
+- MQTT 5 Response Topic, a per-operator reply topic.
+- `memory` is the kernel heap, not the machine's RAM; `disk/used` counts SQLite's files, not the telemetry ring.
+
+## O2 — The console over MQTT (2026-10-30)
+
+PLAN.md "O1, O2"; ADR-060; docs/OPERATE.md. **QEMU only (aarch64 under HVF and TCG, x86_64 under TCG); not run on KVM or real hardware.**
+
+**Done**
+
+- **`$SYS/console/out`:** every kernel log line, `[time] LEVEL text`, QoS 0. The log crate keeps a numbered ring of the last 128 lines (a fixed array under the sink lock, no allocation) that every data core reads with its own cursor, 16 lines per pass; a shard keeps the last 64 and replays them to a new subscriber. Nothing waits for a reader: a slow subscriber loses lines (the broker's QoS 0 backpressure), a core that falls more than the ring behind loses the oldest; both are counted (`$SYS/broker/console/dropped`, and a line on the console).
+- **`$SYS/console/in`:** one command per message, a closed set: `help`, `status`, `log level <error|warn|info|debug|trace>` (never above the build-time maximum), `reboot` (reply, 1 s, reset). The parser accepts one line of printable ASCII up to 64 bytes; `status; reboot` is an unknown command. No shell, no code, no data. **Rate limit:** a burst of 5, then one per 2 s per shard, on top of the session's publish rate. **Audit:** every command, accepted or refused, is logged with identity and text (`console: operator ran "status"`), whatever the log level (`urmqtt_log::audit`).
+- Replies go to the console of the shard the operator is on; the audit line goes through the log and so reaches every shard's console.
+- docs/OPERATE.md: how an operator connects (certificate, client id, MQTTX and mosquitto settings), the topics, the commands, issuing and revoking certificates. ADR-060, a SECURITY.md entry (threat model).
+
+**Tests**
+
+- Host: log crate (independent readers, bounded reads, lost count, the audit line at level `error`), `sys.rs` (the closed command set with refusals, the status text, the limiter), broker (replay from the bounded ring, a reader that never reads cannot block).
+- Smoke `sys-operator` (adds to O1's): the ring is replayed to a new subscriber, `help`, `status`, `log level` (and the level is restored), refusal of unknown and malformed commands, no command chaining, the audit lines on the console and on the serial log, the rate limit (9 of 12 refused in the burst), a device and the backend service refused `$SYS/console/out` and unable to run `reboot` or lower the level, the operator cannot publish to `$SYS/console/out`. `sys-reboot` runs `reboot` as the operator and checks that the VM resets (QEMU runs with `-no-reboot`, so the reset ends it) and that the command was audit-logged: aarch64 under HVF and TCG, x86_64 under TCG.
+
+**Not done**
+
+- MQTT 5, a streaming console input (a command per message only), an operator reply topic of its own.
+
+**Final runs (both milestones):** `cargo test --workspace` green (broker 53, config-schema 41, log 6 tests); the steps of `make check` run by hand (fmt, typos, check-arch-leaks, clippy for the host and both kernels with and without `selftest`); the full `scripts/smoke.sh`: **151 passed, 0 failed** (aarch64, HVF and TCG); the full `scripts/smoke.sh --arch x86_64`: **68 passed, 0 failed** (TCG). `sys-reboot` was run on all three accelerator and architecture pairs after those runs. (Building from a worktree under the main checkout needs `RUSTFLAGS` set explicitly: cargo also reads the parent's `.cargo/config.toml` and the duplicated `-Zbranch-protection` breaks rustc.)

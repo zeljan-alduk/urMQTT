@@ -21,6 +21,9 @@ use crate::cmdline::TestFault;
 use crate::memory;
 use crate::{console, irq, trap};
 
+/// The architecture's name, for `$SYS/broker/arch` (O1).
+pub(crate) const ARCH: &str = "x86_64";
+
 /// Appended to the `URMQTT BOOT` line.
 pub(crate) const BOOT_TAG: &str = " arch=x86_64";
 

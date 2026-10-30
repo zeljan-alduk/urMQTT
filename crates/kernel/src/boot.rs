@@ -22,7 +22,7 @@ use crate::boot_aarch64 as arch;
 use crate::boot_x86 as arch;
 use crate::cmdline::{BootOptions, TestFault};
 use crate::{VERSION, console, devices, irq, layout, memory, power, selftest, smp, tick, trap, vm};
-pub(crate) use arch::PRIVILEGE_LABEL;
+pub(crate) use arch::{ARCH, PRIVILEGE_LABEL};
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
@@ -154,6 +154,9 @@ extern "C" fn urmqtt_kmain() -> ! {
         // Kept from the start; sent once the network is up (M16).
         urmqtt_log::enable_records();
     }
+    // Kept from the start for the MQTT console (O2): a subscriber sees the
+    // boot log, up to the ring's size.
+    urmqtt_log::enable_console();
     if let Some(fb) = FRAMEBUFFER
         .response()
         .and_then(|r| r.framebuffers().first().copied())

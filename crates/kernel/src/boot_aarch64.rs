@@ -15,6 +15,9 @@ use crate::boot::{ENTROPY, ENTROPY_VALUES, fatal, fatal_fmt};
 use crate::cmdline::TestFault;
 use crate::{console, irq, memory, power, selftest, trap};
 
+/// The architecture's name, for `$SYS/broker/arch` (O1).
+pub(crate) const ARCH: &str = "aarch64";
+
 /// Appended to the `URMQTT BOOT` line.
 pub(crate) const BOOT_TAG: &str = "";
 

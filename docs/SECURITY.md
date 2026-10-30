@@ -141,6 +141,40 @@ changes state without a new image, so it gets its own model.
 - **Dead service.** Revocation is only as timely as the service that publishes
   it.
 
+## Operator role: `$SYS/` and the console (O1, O2)
+
+Written with the implementation (ADR-060). It adds the one path by which a
+remote party can read the kernel log and reset the machine.
+
+**What it is.**
+- The namespace `$SYS/`. Only an identity listed in `acl.operator_ids`,
+  authenticated by a TLS client certificate from an operational CA, subscribes
+  to `$SYS/#` and publishes to `$SYS/console/in` and `$SYS/query/info`.
+- The console runs four commands: `help`, `status`, `log level <level>` and
+  `reboot`. No shell, no code from the operator, no data access, no change of
+  configuration, no way to raise the log level above the build-time maximum.
+
+**What stands in the way.**
+1. *Role by certificate:* an operator id on a connection without an
+   authenticated identity is an ordinary device; devices, services and
+   bootstrap identities are refused `$SYS/` whatever their ACL patterns say,
+   and the build rejects such patterns.
+2. *Requests are not messages:* what an operator publishes is queued for the
+   kernel (bounded), never routed, retained or stored; a will cannot name
+   `$SYS/`; any other `$SYS/` topic is dropped, also for operators.
+3. *Closed command set, bounded input:* one line of printable ASCII, 64
+   bytes, no chaining; refusals are answered and logged.
+4. *Rate limit:* 5 commands, then one per 2 s per shard, and the session's
+   publish rate.
+5. *Audit:* every command, accepted or refused, is logged with the identity
+   and text whatever the log level.
+
+**Residual risk.** A stolen operator certificate allows a reboot loop and a
+read of the log (which never holds secrets or payloads). Revoke it through
+the control channel; keep operator certificates short-lived and on the
+operator's machine only. The console is on in every build; with an empty
+`acl.operator_ids` nobody can use it.
+
 ## Installer entry (S1b)
 
 Written with the implementation. The ISO's boot menu has a second entry,
