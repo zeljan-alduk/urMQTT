@@ -11,6 +11,8 @@ All notable changes to this project are documented here. The format follows
 - X2–X8: x86_64. The same kernel boots and serves on x86_64 under QEMU TCG (q35 with OVMF, pc with SeaBIOS): boot and decoded exceptions, 4-level paging with NX/WP/SMEP/SMAP/UMIP and the same W^X audit, ACPI platform discovery, x2APIC/I/O APIC/HPET-calibrated TSC, SMP (8 CPUs tested), PCI by ECAM or port I/O, virtio with MSI-X, RDSEED/RDRAND entropy, ACPI power-off. `scripts/smoke.sh --arch x86_64` runs the MQTT, TLS, storage, crash, storm and attack scenarios. **Not run on KVM or real hardware.** The crypto backends are the portable ones until X9 (ADR-042, ADR-045, ADR-056–059).
 - X10: one universal ISO (`make universal`) that boots on aarch64 UEFI, x86_64 UEFI and x86_64 legacy BIOS, installs itself on the machine's disk, and whose installed disk boots by all three paths; data disks are portable between the architectures. The x86_64 refusal message for a CPU below x86-64-v2 is also drawn on the framebuffer (ADR-043).
 
+- O3: **live mode.** The ISO's first menu entry runs the broker from RAM with no disk: the data layout, SQLite and the telemetry log sit on an in-memory block device (`storage.ram_percent` of RAM, default 10), loudly ephemeral (`EPHEMERAL: data is lost on reboot`, banner, `urmqtt.storage.ephemeral`). `storage.mode = "disk" | "auto" | "ram"` is required outside dev; the committed production template stays `"disk"` (live refused). The install entry and disk boots are unchanged (ADR-060, ADR-061).
+
 ### Changed
 
 - The boot sequence is shared by both architectures (`boot.rs`; ADR-059). The aarch64 boot log is unchanged.

@@ -49,6 +49,8 @@ mod jitter;
 #[cfg(target_os = "none")]
 mod layout;
 #[cfg(target_os = "none")]
+mod live;
+#[cfg(target_os = "none")]
 mod memory;
 #[cfg(target_os = "none")]
 mod mqtt_service;

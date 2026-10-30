@@ -79,6 +79,9 @@ pub struct BootOptions {
     /// `install`: the self-installing ISO's install entry (S1b). The only
     /// word a production image honours (ADR-052).
     pub install: bool,
+    /// `live`: the ISO live entry (O3, ADR-054). Honoured everywhere, but
+    /// the baked `storage.mode` still has to allow it ("auto" or "ram").
+    pub live: bool,
     /// `install-countdown=S` (dev only): the installer's countdown instead
     /// of 30 s, for unattended tests.
     pub install_countdown_s: Option<u64>,
@@ -109,6 +112,13 @@ impl BootOptions {
             // only runs with the hash-pinned installation image, S1b).
             if word == "install" {
                 o.install = true;
+                continue;
+            }
+            // The live entry: RAM-backed, ephemeral. A production image
+            // honours the word only if its configuration allows live
+            // mode (`storage.mode`), checked at boot.
+            if word == "live" {
+                o.live = true;
                 continue;
             }
             if !dev_build {
@@ -222,6 +232,22 @@ mod tests {
             BootOptions::parse("install install-countdown=2", true).install_countdown_s,
             Some(2)
         );
+    }
+
+    /// ADR-054: `live` is the second word production honours, and only the
+    /// exact word.
+    #[test]
+    fn production_honours_live_and_nothing_else() {
+        let o = BootOptions::parse("live smoke serve", false);
+        assert!(o.live && !o.install && !o.smoke && !o.serve);
+        assert_eq!(o.ignored, 2);
+        for w in ["Live", "live=1", "liver", "--live", "test=live"] {
+            assert!(!BootOptions::parse(w, true).live, "{w}");
+            assert!(!BootOptions::parse(w, false).live, "{w}");
+        }
+        let both = BootOptions::parse("live install", false);
+        assert!(both.live && both.install, "install wins in the kernel");
+        assert!(BootOptions::parse("live smoke", true).smoke);
     }
 
     #[test]

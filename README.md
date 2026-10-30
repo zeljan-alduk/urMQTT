@@ -490,6 +490,8 @@ error: invalid configuration deploy/bad/config.toml:
 | `memory.kernel_heap_mb` | power of two, 1–1024 | Kernel heap (buddy allocator); ~500 B per idle connection |
 | `memory.min_free_mb` | > 0, < heap | New connections are refused below this much free heap |
 | `entropy.fallback` | `jitter` \| `none` | Without virtio-rng and `RNDR`: seed from health-tested CPU jitter, or refuse to boot |
+| `storage.mode` | `disk` \| `auto` \| `ram` | Where the data lives (required outside dev). `auto`: the disk, but the ISO's live entry runs from RAM, ephemeral; `ram`: always RAM; `disk`: the live entry is refused (docs/DEPLOY.md, ADR-060) |
+| `storage.ram_percent` | 2–50, default 10 | Live/RAM mode: share of RAM for the in-memory data store, subtracted from the connection budget (ADR-061) |
 | `storage.sqlite_heap_mb` | 1–4096 | Fixed SQLite `memsys5` heap |
 | `storage.telemetry_topics` | topic filters | PUBLISHes appended to the telemetry log |
 | `storage.retention_days` | > 0 | Telemetry retention |

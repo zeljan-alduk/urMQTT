@@ -914,6 +914,29 @@ pub fn prepare_boot_disk(fault: Option<FaultSpec>) -> Result<(), &'static str> {
     }
 }
 
+/// Live mode (O3): the data partition is a RAM block device. Disks the
+/// kernel found are dropped untouched: nothing is read from or written to
+/// them.
+pub fn prepare_ram_disk(bytes: u64) -> Result<(), &'static str> {
+    let dev = crate::live::reserve(bytes)?;
+    let mut devs = DEVICES.lock();
+    if devs.blk.take().is_some() {
+        info!("live: the boot disk is not used (the store is RAM; nothing is written to any disk)");
+    }
+    let sectors = dev.sectors();
+    devs.boot = Some(BootDisk {
+        dev,
+        partition: DataPartition {
+            first_lba: 0,
+            last_lba: sectors - 1,
+            unique_guid: Guid([0; 16]),
+        },
+        faulty: false,
+    });
+    info!("live: RAM store of {} MiB ready", (sectors * 512) >> 20);
+    Ok(())
+}
+
 /// Sectors at the end of the data partition reserved for the self-test
 /// (the M11 disk layout keeps them out of every region).
 pub const BLK_SCRATCH_SECTORS: u64 = 8;
@@ -948,6 +971,12 @@ pub fn blk_selftest() -> Result<(), &'static str> {
         .map_err(|_| "blk read failed")?;
     if back != pattern {
         return Err("blk read-back mismatch");
+    }
+    if crate::live::ephemeral() {
+        info!(
+            "blk: self-test ok on the RAM store (4 KiB random pattern written, read back at sector {sector})"
+        );
+        return Ok(());
     }
     info!(
         "blk: self-test ok (4 KiB random pattern written, flushed, read back at sector {sector}, inside the data partition)"

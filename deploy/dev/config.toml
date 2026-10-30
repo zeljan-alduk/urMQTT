@@ -39,6 +39,8 @@ service_publish = ["devices/+/cmd/#", "fleet/#"]
 service_subscribe = ["devices/#", "fleet/#"]
 
 [storage]
+mode = "auto"                       # "disk" | "auto" | "ram": auto = the disk, but the ISO's live entry runs from RAM
+ram_percent = 10                    # live/ram: share of RAM for the in-memory data store (2..=50)
 sqlite_heap_mb = 32
 telemetry_topics = ["devices/+/telemetry/#"]
 retention_days = 30

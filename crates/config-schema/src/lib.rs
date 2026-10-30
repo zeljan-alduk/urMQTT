@@ -206,9 +206,38 @@ struct RawAcl {
     service_subscribe: Vec<String>,
 }
 
+/// Where the data partition lives (O3, ADR-054).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageMode {
+    /// The boot disk's data partition; the live entry is refused.
+    Disk,
+    /// The disk, except in the ISO's live entry (`live` on the kernel
+    /// command line), which runs from RAM.
+    Auto,
+    /// Always RAM: ephemeral, whatever the boot medium.
+    Ram,
+}
+
+/// Bounds of `storage.ram_percent`: the floor keeps the RAM store above
+/// the data layout's 16 MiB minimum on ordinary machines, the ceiling
+/// leaves most of RAM to the connections.
+pub const RAM_PERCENT_MIN: u32 = 2;
+pub const RAM_PERCENT_MAX: u32 = 50;
+pub const RAM_PERCENT_DEFAULT: u32 = 10;
+
+const fn default_ram_percent() -> u32 {
+    RAM_PERCENT_DEFAULT
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawStorage {
+    /// Required outside dev: the choice is explicit in the baked config.
+    #[serde(default)]
+    mode: Option<StorageMode>,
+    #[serde(default = "default_ram_percent")]
+    ram_percent: u32,
     sqlite_heap_mb: u32,
     telemetry_topics: Vec<String>,
     retention_days: u32,
@@ -326,6 +355,9 @@ pub struct Acl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Storage {
+    pub mode: StorageMode,
+    /// Share of RAM reserved for the in-memory data store (live mode).
+    pub ram_percent: u32,
     pub sqlite_heap_mb: u32,
     pub telemetry_topics: Vec<String>,
     pub retention_days: u32,
@@ -943,6 +975,20 @@ fn validate_storage(
             }
         }
     }
+    // The medium is chosen in the configuration, never by a fallback at
+    // run time: a production image must say which (O3).
+    if env != "dev" && raw.mode.is_none() {
+        errors.push(err(
+            "storage.mode",
+            "required outside [\"dev\"]: \"disk\", \"auto\" (the ISO's live entry runs from RAM) or \"ram\"",
+        ));
+    }
+    if !(RAM_PERCENT_MIN..=RAM_PERCENT_MAX).contains(&raw.ram_percent) {
+        errors.push(err(
+            "storage.ram_percent",
+            format!("must be in {RAM_PERCENT_MIN}..={RAM_PERCENT_MAX}"),
+        ));
+    }
     if !(1..=4096).contains(&raw.sqlite_heap_mb) {
         errors.push(err("storage.sqlite_heap_mb", "must be in 1..=4096"));
     }
@@ -957,6 +1003,8 @@ fn validate_storage(
         errors,
     );
     Storage {
+        mode: raw.mode.unwrap_or(StorageMode::Disk),
+        ram_percent: raw.ram_percent,
         sqlite_heap_mb: raw.sqlite_heap_mb,
         telemetry_topics: raw.telemetry_topics.clone(),
         retention_days: raw.retention_days,
@@ -1209,6 +1257,8 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         service_subscribe: {ss},
     }},
     storage: Storage {{
+        mode: StorageMode::{smode:?},
+        ram_percent: {rampct},
         sqlite_heap_mb: {heap},
         telemetry_topics: {tt},
         retention_days: {rd},
@@ -1280,6 +1330,8 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         sid = render_strs(&cfg.acl.service_ids),
         sp = render_strs(&cfg.acl.service_publish),
         ss = render_strs(&cfg.acl.service_subscribe),
+        smode = cfg.storage.mode,
+        rampct = cfg.storage.ram_percent,
         heap = cfg.storage.sqlite_heap_mb,
         tt = render_strs(&cfg.storage.telemetry_topics),
         rd = cfg.storage.retention_days,

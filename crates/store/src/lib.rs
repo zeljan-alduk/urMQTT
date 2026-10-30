@@ -36,6 +36,7 @@ pub mod layout;
 #[allow(unsafe_code)] // libc functions SQLite links against
 mod libc;
 pub mod part;
+pub mod ram;
 pub mod schema;
 pub mod store;
 pub mod telemetry;
@@ -46,6 +47,7 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 pub use disk::{BlockDevice, Disk, DiskError, IoError, MemDisk, Opened};
+pub use ram::RamDisk;
 pub use store::{OpenInfo, Queued, Retained, SessionRecord, Store, StoreError, open};
 pub use vfs::Platform;
 

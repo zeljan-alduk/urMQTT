@@ -243,9 +243,14 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
         Err(e) => return refuse_or_degrade(false, format_args!("{e}")),
     };
     info!(
-        "db: sqlite {} on the data disk: WAL, exclusive locking, quick_check ok in {} ms, \
+        "db: sqlite {} on the {}: WAL, exclusive locking, quick_check ok in {} ms, \
          schema v{} (from v{}), {} page(s), heap {} MiB",
         urmqtt_store::db::version(),
+        if crate::live::ephemeral() {
+            "RAM store (EPHEMERAL)"
+        } else {
+            "data disk"
+        },
         (time::uptime_ns() - t0) / 1_000_000,
         info.schema_to,
         info.schema_from,
@@ -424,8 +429,13 @@ fn log_layout(disk: &Disk, how: Opened) {
     let l = disk.layout();
     let mib = |k| disk.region(k).map_or(0, |r| r.bytes() >> 20);
     use urmqtt_store::layout::RegionKind as K;
+    let medium = if crate::live::ephemeral() {
+        "RAM store (EPHEMERAL: lost on reboot)"
+    } else {
+        "data disk"
+    };
     info!(
-        "storage: data disk {} ({} MiB, uuid {:02x}{:02x}{:02x}{:02x}…): db {} MiB, wal {} MiB, \
+        "storage: {medium} {} ({} MiB, uuid {:02x}{:02x}{:02x}{:02x}…): db {} MiB, wal {} MiB, \
          journal {} MiB, telemetry {} MiB",
         match how {
             Opened::Existing => "opened",

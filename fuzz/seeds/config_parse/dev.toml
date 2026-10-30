@@ -36,6 +36,8 @@ service_publish = ["devices/+/cmd/#", "fleet/#"]
 service_subscribe = ["devices/#", "fleet/#"]
 
 [storage]
+mode = "auto"
+ram_percent = 10
 sqlite_heap_mb = 32
 telemetry_topics = ["devices/+/telemetry/#"]
 retention_days = 30

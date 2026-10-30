@@ -130,8 +130,49 @@ pub struct Acl {
     pub service_subscribe: &'static [&'static str],
 }
 
+/// Where the data partition lives (O3, ADR-054).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageMode {
+    /// The boot disk's data partition; the live entry is refused.
+    Disk,
+    /// The disk, except in the ISO's live entry (`live` on the kernel
+    /// command line), which runs from RAM.
+    Auto,
+    /// Always RAM: ephemeral, whatever the boot medium.
+    Ram,
+}
+
+/// Where the data store ends up for this boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backing {
+    Disk,
+    /// An in-memory block device: lost on reboot.
+    Ram,
+}
+
+impl StorageMode {
+    /// What `live` (the ISO live entry's kernel command-line word) and the
+    /// configuration make of the store. `Err`: live was asked for but the
+    /// image's configuration does not allow it (`storage.mode = "disk"`);
+    /// there is no silent fallback in either direction.
+    pub const fn backing(self, live: bool) -> Result<Backing, LiveRefused> {
+        match (self, live) {
+            (Self::Ram, _) | (Self::Auto, true) => Ok(Backing::Ram),
+            (Self::Auto, false) | (Self::Disk, false) => Ok(Backing::Disk),
+            (Self::Disk, true) => Err(LiveRefused),
+        }
+    }
+}
+
+/// `live` was requested but `storage.mode = "disk"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveRefused;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Storage {
+    pub mode: StorageMode,
+    /// Share of RAM reserved for the in-memory store (live mode), percent.
+    pub ram_percent: u32,
     pub sqlite_heap_mb: u32,
     pub telemetry_topics: &'static [&'static str],
     pub retention_days: u32,
@@ -195,3 +236,21 @@ pub struct BuildConfig {
 }
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// O3 (ADR-054): the whole decision table of `storage.mode` x `live`.
+    #[test]
+    fn mode_and_live_word_decide_the_backing() {
+        use Backing::{Disk, Ram};
+        use StorageMode as M;
+        assert_eq!(M::Disk.backing(false), Ok(Disk));
+        assert_eq!(M::Disk.backing(true), Err(LiveRefused));
+        assert_eq!(M::Auto.backing(false), Ok(Disk));
+        assert_eq!(M::Auto.backing(true), Ok(Ram));
+        assert_eq!(M::Ram.backing(false), Ok(Ram));
+        assert_eq!(M::Ram.backing(true), Ok(Ram));
+    }
+}
