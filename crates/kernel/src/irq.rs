@@ -1,5 +1,5 @@
-//! Interrupt routing: GIC setup (v3, or v2 on GIC-400 hosts) and the IRQ
-//! dispatch table.
+//! Interrupt routing: GIC setup (v3, or v2 on GIC-400 hosts; on x86 the
+//! local APIC and I/O APIC) and the IRQ dispatch table.
 //!
 //! Handlers run with IRQs masked on the exception stack and must only
 //! acknowledge and mark work (PROMPT §4.1); they never log or allocate.
@@ -9,6 +9,7 @@
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use urmqtt_arch::irq::{Controller, Error as GicError};
+#[cfg(target_arch = "aarch64")]
 use urmqtt_platform::{Gic, GicCpu};
 use urmqtt_sync::sync::OnceCell;
 
@@ -21,6 +22,7 @@ pub type Handler = fn(u32);
 
 const MAX_INTID: usize = 1020;
 static HANDLERS: [AtomicUsize; MAX_INTID] = [const { AtomicUsize::new(0) }; MAX_INTID];
+/// The platform's interrupt controller (a GIC, or the local and I/O APICs).
 static GIC: OnceCell<Controller> = OnceCell::new();
 
 static SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -34,6 +36,7 @@ pub enum IrqError {
     AlreadyInitialised,
 }
 
+#[cfg(target_arch = "aarch64")]
 /// Maps the GIC frames, initialises the distributor and this CPU's
 /// redistributor (v3) or banked registers (v2) and CPU interface. Must run
 /// before the page tables lock. Returns the number of interrupt lines.
@@ -83,7 +86,41 @@ fn init_local(me: &smp::PerCpu) -> Result<(), IrqError> {
     Ok(())
 }
 
+/// Maps the local and I/O APIC windows, masks the 8259s and brings up the
+/// boot CPU's local APIC. Must run before the page tables lock. Returns the
+/// boot log description.
+#[cfg(target_arch = "x86_64")]
+pub fn init_apic(
+    x86: &urmqtt_platform::x86::X86Info,
+    _cpus: u64,
+) -> Result<alloc::string::String, IrqError> {
+    use urmqtt_arch::irq::Config;
+    let lapic = memory::map_mmio(x86.lapic_addr, 0x1000).map_err(|_| IrqError::Map)?;
+    let mut ioapics = [(0usize, 0u32); 8];
+    let mut n = 0;
+    for (slot, io) in ioapics.iter_mut().zip(x86.ioapics.as_slice()) {
+        let va = memory::map_mmio(u64::from(io.address), 0x1000).map_err(|_| IrqError::Map)?;
+        *slot = (va as usize, io.gsi_base);
+        n += 1;
+    }
+    let cfg = Config {
+        lapic_mmio: Some(lapic as usize),
+        ioapics: ioapics.get(..n).unwrap_or(&[]),
+        prefer_x2apic: true,
+    };
+    let c = Controller::apic(&cfg).map_err(IrqError::Gic)?;
+    GIC.set(c).map_err(|_| IrqError::AlreadyInitialised)?;
+    init_local(smp::this())?;
+    Ok(alloc::format!(
+        "apic: {} mode, lapic at {:#x}, {} I/O APIC(s), msi to the local APIC",
+        urmqtt_arch::irq::mode_name(),
+        x86.lapic_addr,
+        n
+    ))
+}
+
 /// True on a GICv2.
+#[cfg(target_arch = "aarch64")]
 pub fn is_v2() -> bool {
     GIC.get().is_some_and(Controller::is_v2)
 }

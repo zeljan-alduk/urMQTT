@@ -1,119 +1,171 @@
-//! The x86_64 boot sequence of the bootstrap CPU (X2).
+//! The x86_64 side of the boot sequence (`boot.rs` calls these seams).
 //!
 //! `_start` (`arch-x86_64::entry`) has already checked the x86-64-v2
-//! baseline and enabled the x87/SSE state; this takes over in
-//! `urmqtt_kmain`. It brings up the console (COM1 and the Limine
-//! framebuffer), the GDT/IDT with the fault reports, and the CPU summary,
-//! then runs the requested test fault or stops. Paging (X3), time and
-//! interrupts (X4), SMP (X5), ACPI (X6) and the devices follow in later
-//! milestones; what the AArch64 sequence does after the CPU summary is not
-//! done here yet.
+//! baseline and enabled the x87/SSE state; the shared sequence takes over
+//! in `urmqtt_kmain`. What differs from AArch64 lives here: COM1 is the
+//! console from the first instruction, ACPI is the only platform
+//! description, the time base is the TSC (calibrated against the HPET or
+//! the ACPI PM timer), and interrupts go through the APICs.
 
 #![allow(unsafe_code)]
 
-use urmqtt_arch::features::{self, Census, Identity};
-use urmqtt_arch::{cpu, power as arch_power, serial, trap as arch_trap};
-use urmqtt_log::{error, info, warn};
+use urmqtt_arch::features::{self, Census, Features, Identity};
+use urmqtt_arch::time::{PmTimer, Sources};
+use urmqtt_arch::{cpu, serial, time};
+use urmqtt_log::{info, warn};
+use urmqtt_platform::PlatformInfo;
 
-use crate::boot::{BASE_REVISION, BOOTLOADER, CMDLINE, FRAMEBUFFER, HHDM, MEMMAP, MP};
-use crate::cmdline::{BootOptions, TestFault};
-use crate::{VERSION, console, memory, power, trap};
+use crate::boot::{EXECUTABLE_ADDRESS, fatal_fmt};
+use crate::cmdline::TestFault;
+use crate::memory;
+use crate::{console, irq, trap};
 
-#[unsafe(no_mangle)]
-extern "C" fn urmqtt_kmain() -> ! {
-    // The console first, so that every later failure can say why.
+/// Appended to the `URMQTT BOOT` line.
+pub(crate) const BOOT_TAG: &str = " arch=x86_64";
+
+/// The boot log's name for the privilege level.
+pub(crate) const PRIVILEGE_LABEL: &str = "cpl";
+
+/// The text after `vm: switched to kernel tables`.
+pub(crate) const ACTIVATED: &str = "(CR3), lower half unmapped, NX and WP on";
+
+/// COM1 and the framebuffer take the log before anything else runs.
+pub(crate) fn early_console() {
     if serial::init() {
         console::init_serial();
     }
-    arch_trap::set_handler(trap::handle);
-    arch_trap::install();
+}
 
-    if !BASE_REVISION.is_supported() {
-        error!("the bootloader does not implement Limine base revision 6");
-        cpu::halt();
-    }
-    let Some(hhdm) = HHDM.response().map(|r| r.offset) else {
-        error!("no HHDM response from the bootloader");
-        cpu::halt();
+/// What the early hardware setup found, for the boot log.
+pub(crate) struct EarlyHw {
+    time: Option<time::Info>,
+}
+
+/// Starts the clock: the TSC frequency from the hypervisor, CPUID, the HPET
+/// or the PM timer. Device mappings are made in the bootloader's tables and
+/// replayed into the kernel's.
+pub(crate) fn early_hw(platform: Option<&PlatformInfo>, mmio_ok: bool, _dev: bool) -> EarlyHw {
+    let x86 = platform.and_then(|p| p.x86);
+    let hpet_mmio = x86
+        .and_then(|x| x.hpet)
+        .filter(|_| mmio_ok)
+        .and_then(|h| memory::map_mmio(h.address, 0x1000).ok())
+        .map(|va| va as usize);
+    let pm_timer = x86.and_then(|x| x.fadt).and_then(|f| {
+        f.pm_tmr.map(|port| PmTimer {
+            port,
+            wide: f.pm_tmr_32bit,
+        })
+    });
+    let src = Sources {
+        hpet_mmio,
+        pm_timer,
+        virt_to_phys: Some(kernel_virt_to_phys),
     };
-    let memmap = MEMMAP.response().map_or(&[][..], |r| r.entries());
-    let mem = memory::BootMemory::new(hhdm, memmap);
-    if let Some(fb) = FRAMEBUFFER
-        .response()
-        .and_then(|r| r.framebuffers().first().copied())
-    {
-        console::init_framebuffer(fb);
+    let time = match time::init(&src) {
+        Ok(i) => Some(i),
+        Err(e) => fatal_fmt(format_args!(
+            "no usable time base ({e:?}): the platform offers no HPET, PM timer or TSC frequency"
+        )),
+    };
+    EarlyHw { time }
+}
+
+/// Physical address of a kernel image address (for the paravirtual clock
+/// page, a static).
+fn kernel_virt_to_phys(va: usize) -> u64 {
+    EXECUTABLE_ADDRESS.response().map_or(0, |e| {
+        (va as u64).wrapping_sub(e.virtual_base) + e.physical_base
+    })
+}
+
+impl EarlyHw {
+    pub(crate) fn log(&self, platform: Option<&PlatformInfo>) {
+        if let Some(i) = self.time {
+            info!(
+                "time: tsc {} Hz from {:?}, invariant={}, deadline timer={}",
+                i.tsc_hz, i.source, i.invariant_tsc, i.tsc_deadline
+            );
+            if !i.invariant_tsc {
+                warn!("time: the TSC is not invariant: it may stop in deep C-states");
+            }
+        }
+        if let Some(x) = platform.and_then(|p| p.x86) {
+            info!("acpi: {x}");
+        }
     }
+}
 
-    let dev = urmqtt_config::CONFIG.env == "dev";
-    let options = BootOptions::parse(CMDLINE.response().map_or("", |r| r.cmdline()), dev);
-    power::set_smoke(options.smoke);
-    // Only a dev image in smoke mode may write QEMU's debug-exit port.
-    arch_power::set_debug_exit(dev && options.smoke);
-
+/// XSAVE state, CPUID summary and the features the dispatch looks at.
+pub(crate) fn cpu_summary() -> Features {
     // XSAVE state before CPUID is read: the census reports XCR0.
     let xcr0 = cpu::enable_extended_state();
     let id = features::read_id_regs();
-    let cpus = MP.response().map_or(1, |r| r.cpus().len());
-    urmqtt_log::raw(format_args!(
-        "URMQTT BOOT {VERSION} arch=x86_64 cpu={cpus} mem={}\n",
-        mem.ram_bytes() >> 20
-    ));
-    info!(
-        "env={} cpl={} bootloader={} {}",
-        urmqtt_config::CONFIG.env,
-        cpu::privilege_level(),
-        BOOTLOADER.response().map_or("?", |r| r.name()),
-        BOOTLOADER.response().map_or("?", |r| r.version()),
-    );
     info!("cpu: {}", Identity(&id));
     info!("cpu features: {}", Census(&id));
     if xcr0 == 0 {
         warn!("cpu: no XSAVE, x87/SSE state only");
     }
-    let f = features::detect();
+    let f = Features::decode(id);
     info!(
         "cpu dispatch inputs: aes={} pclmul={} sha={} sse4.2={} avx2={} rdrand={} rdseed={}",
         f.aes, f.pclmul, f.sha, f.sse42, f.avx2, f.rdrand, f.rdseed
     );
-    console::log_framebuffer();
-    mem.log_summary();
-    if options.ignored > 0 {
-        warn!("ignored {} kernel command line option(s)", options.ignored);
-    }
-
-    if let Some(fault) = options.test_fault {
-        run_test_fault(fault);
-    }
-
-    // Paging, time, interrupts, SMP, ACPI and the devices are the next
-    // milestones' work.
-    warn!("x86_64: bring-up only (X2): paging, time, devices and the broker are not started");
-    urmqtt_log::raw(format_args!("URMQTT READY\n"));
-    if options.smoke {
-        power::off();
-    }
-    cpu::halt()
+    f
 }
 
-fn run_test_fault(fault: TestFault) {
-    warn!("test mode: triggering {fault:?}");
-    match fault {
-        TestFault::NullDeref => trap::probe_read(0x8),
-        TestFault::Undefined => trap::undefined_instruction(),
-        TestFault::GeneralProtection => arch_trap::general_protection(),
-        TestFault::DoubleFault => arch_trap::double_fault(),
-        TestFault::BrkResume => {
-            trap::brk_resume();
-            info!("test: resumed after brk");
-        }
-        TestFault::Panic => panic!("test panic requested on the command line"),
-        TestFault::DataAbort
-        | TestFault::WriteText
-        | TestFault::ExecHeap
-        | TestFault::StackOverflow
-        | TestFault::SealedWrite
-        | TestFault::Pac
-        | TestFault::Bti => info!("test: {fault:?} skipped, needs the x86_64 paging of X3"),
+/// No branch-target identification here (CET is a later step).
+pub(crate) fn bti(_f: &Features) -> bool {
+    false
+}
+
+/// No pointer authentication on x86.
+pub(crate) fn pac_key(_f: &Features) -> Option<(u64, u64)> {
+    None
+}
+
+pub(crate) fn protection_summary(_f: &Features) -> &'static str {
+    "nx+wp"
+}
+
+/// Brings up the APICs. Returns the timer's interrupt number (its vector)
+/// and a description for the boot log.
+pub(crate) fn init_interrupts(
+    platform: Option<&PlatformInfo>,
+    cpus: u64,
+) -> (u32, alloc::string::String) {
+    let Some(x86) = platform.and_then(|p| p.x86) else {
+        fatal_fmt(format_args!("no MADT: the APICs are not described"))
+    };
+    match irq::init_apic(&x86, cpus) {
+        Ok(d) => (urmqtt_arch::vectors::TIMER, d),
+        Err(e) => fatal_fmt(format_args!("apic init failed: {e:?}")),
     }
+}
+
+/// The tick's log description.
+pub(crate) fn timer_log(vector: u32) -> alloc::string::String {
+    alloc::format!(
+        "timer: tsc {} Hz, local APIC timer vector {vector:#x} ({}), tick",
+        time::frequency(),
+        if time::timer_is_fallback() {
+            "one-shot, calibrated"
+        } else {
+            "TSC-deadline"
+        }
+    )
+}
+
+/// Faults that only exist on x86.
+pub(crate) fn run_fault(fault: TestFault, _f: &Features) -> bool {
+    match fault {
+        TestFault::GeneralProtection => urmqtt_arch::trap::general_protection(),
+        TestFault::DoubleFault => urmqtt_arch::trap::double_fault(),
+        TestFault::DataAbort => trap::probe_read(memory::unmapped_mmio_probe()),
+        TestFault::Pac | TestFault::Bti => {
+            info!("test: {fault:?} skipped, aarch64 only")
+        }
+        _ => return false,
+    }
+    true
 }

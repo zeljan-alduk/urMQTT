@@ -23,8 +23,9 @@
 # q35), --firmware uefi|bios (default uefi; bios = SeaBIOS), --cpu MODEL
 # (default max under TCG, host under KVM). Accelerators: tcg (default off
 # Linux x86_64 with /dev/kvm) or kvm. The isa-debug-exit device is always
-# attached (dev images use it as a fallback power-off). --gic, --acpi,
-# --bus scsi and --data are aarch64-only for now.
+# attached (dev images use it as a fallback power-off). --gic and --acpi
+# are aarch64-only; --bus, --data, --fwd, --pcap and --dgram work as on
+# aarch64.
 #
 # Without --serial the serial console is on stdio. Ctrl-A X quits QEMU.
 # Option ROMs are disabled (romfile=): no iPXE in the firmware, faster boot.
@@ -104,16 +105,45 @@ if [[ $ARCH == x86_64 ]]; then
             X86ARGS+=(-bios "$FW")
         fi
     fi
+    [[ $BUS == blk || $BUS == scsi ]] || { echo "error: --bus blk|scsi" >&2; exit 2; }
+    if [[ -z "$DISK" || $BUS == scsi ]]; then
+        X86ARGS+=(-device virtio-scsi-pci,id=scsi0,romfile=)
+    fi
     if [[ -n "$DISK" ]]; then
-        X86ARGS+=(-drive "if=none,id=boot0,file=$DISK,format=raw,cache=none"
-            -device virtio-blk-pci,drive=boot0,bootindex=0,romfile=)
+        X86ARGS+=(-drive "if=none,id=boot0,file=$DISK,format=raw,cache=none")
+        if [[ $BUS == scsi ]]; then
+            X86ARGS+=(-device scsi-hd,drive=boot0,bus=scsi0.0,scsi-id=0,lun=0,bootindex=0)
+        else
+            X86ARGS+=(-device virtio-blk-pci,drive=boot0,bootindex=0,romfile=)
+        fi
     else
         X86ARGS+=(-drive "if=none,id=cd0,file=$ISO,format=raw,readonly=on,media=cdrom"
             -device ide-cd,drive=cd0,bootindex=0)
     fi
+    if [[ -n "$DATA" ]]; then
+        X86ARGS+=(-drive "if=none,id=data0,file=$DATA,format=raw,cache=none")
+        if [[ $BUS == scsi ]]; then
+            X86ARGS+=(-device scsi-hd,drive=data0,bus=scsi0.0,scsi-id=1,lun=0)
+        else
+            X86ARGS+=(-device virtio-blk-pci,drive=data0,romfile=)
+        fi
+    fi
     [[ $RNG -eq 1 ]] && X86ARGS+=(-device virtio-rng-pci,romfile=)
     if [[ $NET -eq 1 ]]; then
-        X86ARGS+=(-netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=)
+        if [[ -n "$DGRAM" ]]; then
+            NETDEV="dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port=${DGRAM%%:*}"
+            NETDEV+=",remote.type=inet,remote.host=127.0.0.1,remote.port=${DGRAM##*:}"
+        else
+            NETDEV="user,id=n0"
+            if [[ "$FWD" != none ]]; then
+                IFS=, read -r -a pairs <<< "$FWD"
+                for p in "${pairs[@]}"; do
+                    NETDEV+=",hostfwd=tcp:127.0.0.1:${p%%:*}-:${p##*:}"
+                done
+            fi
+        fi
+        X86ARGS+=(-netdev "$NETDEV" -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=)
+        [[ -n "$PCAP" ]] && X86ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
     else
         X86ARGS+=(-nic none)
     fi

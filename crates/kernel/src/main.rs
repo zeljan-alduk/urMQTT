@@ -20,6 +20,8 @@ mod cmdline;
 
 #[cfg(target_os = "none")]
 mod boot;
+#[cfg(all(target_os = "none", target_arch = "aarch64"))]
+mod boot_aarch64;
 #[cfg(all(target_os = "none", target_arch = "x86_64"))]
 mod boot_x86;
 #[cfg(target_os = "none")]

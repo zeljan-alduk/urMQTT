@@ -10,12 +10,16 @@ use limine::request::{
 };
 use limine::{RequestsEndMarker, RequestsStartMarker};
 
-use urmqtt_arch::features::{self, Features};
+use urmqtt_arch::features::Features;
 use urmqtt_arch::{cpu, time, trap as arch_trap};
 use urmqtt_log::{error, info, warn};
-use urmqtt_platform::{EarlyPlatform, PsciMethod, Uart};
+use urmqtt_platform::EarlyPlatform;
 use urmqtt_sync::sync::SpinLock;
 
+#[cfg(target_arch = "aarch64")]
+use crate::boot_aarch64 as arch;
+#[cfg(target_arch = "x86_64")]
+use crate::boot_x86 as arch;
 use crate::cmdline::{BootOptions, TestFault};
 use crate::{VERSION, console, devices, irq, layout, memory, power, selftest, smp, tick, trap, vm};
 
@@ -54,7 +58,7 @@ pub(crate) static CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::
 static DATE_AT_BOOT: DateAtBootRequest = DateAtBootRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
-static EXECUTABLE_ADDRESS: ExecutableAddressRequest = ExecutableAddressRequest::new();
+pub(crate) static EXECUTABLE_ADDRESS: ExecutableAddressRequest = ExecutableAddressRequest::new();
 /// The installation image (the ESP), loaded by the ISO's install entry (S1b).
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -67,15 +71,15 @@ static EXECUTABLE_FILE: ExecutableFileRequest = ExecutableFileRequest::new();
 /// Limine "Entropy" response (not yet wrapped by the `limine` crate).
 #[repr(C)]
 pub struct EntropyRespData {
-    value_count: u64,
-    values: *const u64,
+    pub(crate) value_count: u64,
+    pub(crate) values: *const u64,
 }
 /// Random 64-bit values from the bootloader's best source (EFI RNG, RNDR).
-const ENTROPY_VALUES: u64 = 8;
+pub(crate) const ENTROPY_VALUES: u64 = 8;
 #[used]
 #[unsafe(link_section = ".requests")]
 // SAFETY: id and response layout follow the Limine protocol's Entropy feature.
-static ENTROPY: Request<EntropyRespData, u64> = unsafe {
+pub(crate) static ENTROPY: Request<EntropyRespData, u64> = unsafe {
     Request::new_raw(
         [0x65ea_8025_5d56_82c5, 0x9117_2407_23f4_93eb],
         0,
@@ -87,12 +91,10 @@ static ENTROPY: Request<EntropyRespData, u64> = unsafe {
 #[unsafe(link_section = ".requests_end_marker")]
 static REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
 
-// Limine enters at the architecture's `_start` (`arch-aarch64::boot`),
-// which enables FP/SIMD, sets up the stack and calls `urmqtt_kmain`.
-
-/// Physical address of the default QEMU `virt` PL011, used only in dev
-/// builds when neither the DTB nor SPCR describe a UART.
-const DEV_FALLBACK_UART: u64 = 0x0900_0000;
+// Limine enters at the architecture's `_start` (`arch-aarch64::boot`,
+// `arch-x86_64::entry`), which enables FP/SIMD, sets up the stack and calls
+// `urmqtt_kmain`. What differs per architecture is behind `arch` (the
+// `boot_aarch64.rs` / `boot_x86.rs` seams).
 
 /// State carried across the stack switch into [`kmain_stage2`].
 struct Stage2 {
@@ -100,7 +102,6 @@ struct Stage2 {
     platform: Option<urmqtt_platform::PlatformInfo>,
     boot_entropy: [u64; ENTROPY_VALUES as usize],
     pac_key: Option<(u64, u64)>,
-    interrupts: Option<urmqtt_platform::Interrupts>,
     cpus: u64,
     built: vm::Built,
     early_frames: (u64, u64),
@@ -113,21 +114,20 @@ struct Stage2 {
 
 static STAGE2: SpinLock<Option<Stage2>> = SpinLock::new(None);
 
-// The x86_64 build has its own entry (`boot_x86.rs`); this sequence is
-// AArch64's. It stays compiled there, exported under another name so that
-// it is a root for the dead-code analysis, until X3 gives the shared
-// modules x86 users. Only the Limine requests above are shared.
-#[cfg_attr(target_arch = "aarch64", unsafe(no_mangle))]
-#[cfg_attr(target_arch = "x86_64", unsafe(export_name = "urmqtt_kmain_aarch64"))]
+#[unsafe(no_mangle)]
 extern "C" fn urmqtt_kmain() -> ! {
+    // The console first on x86, so that every later failure can say why.
+    arch::early_console();
     arch_trap::set_handler(trap::handle);
     arch_trap::install();
 
     if !BASE_REVISION.is_supported() {
-        // No console yet; nothing better to do than stop.
+        // No console yet on AArch64; nothing better to do than stop.
+        error!("the bootloader does not implement Limine base revision 6");
         cpu::halt();
     }
     let Some(hhdm) = HHDM.response().map(|r| r.offset) else {
+        error!("no HHDM response from the bootloader");
         cpu::halt();
     };
     let memmap = MEMMAP.response().map_or(&[][..], |r| r.entries());
@@ -135,29 +135,10 @@ extern "C" fn urmqtt_kmain() -> ! {
 
     let dev = urmqtt_config::CONFIG.env == "dev";
     let early = discover(&mem);
-    let uart = match early.and_then(|e| e.uart) {
-        Some(u) => Some(u),
-        None if dev => Some(Uart {
-            base: DEV_FALLBACK_UART,
-        }),
-        None => None,
-    };
-    // At EL2 (VHE entry, base revision 6) an HVC would trap to ourselves:
-    // only an SMC conduit can reach firmware from there.
-    let el2 = cpu::privilege_level() == 2;
-    match early.and_then(|e| e.psci) {
-        Some(PsciMethod::Hvc) if el2 => {}
-        Some(psci) => power::set_conduit(psci),
-        None => {}
-    }
-
     let mmio_ok = memory::init_early_mmio(&mem);
-    let uart_va = uart
-        .filter(|_| mmio_ok)
-        .and_then(|u| memory::map_mmio(u.base, 0x1000).ok());
-    if let Some(va) = uart_va {
-        console::init_uart(va);
-    }
+    // The UART (AArch64) or the time base (x86), mapped in the bootloader's
+    // tables; both are replayed into the kernel's.
+    let hw = arch::early_hw(early.as_ref(), mmio_ok, dev);
     urmqtt_log::set_clock(uptime_ns);
     urmqtt_log::set_cpu(crate::smp::current);
     if urmqtt_config::CONFIG.observability.syslog_udp.is_some() {
@@ -176,12 +157,14 @@ extern "C" fn urmqtt_kmain() -> ! {
 
     let cpus = MP.response().map_or(1, |r| r.cpus().len());
     urmqtt_log::raw(format_args!(
-        "URMQTT BOOT {VERSION} cpu={cpus} mem={}\n",
+        "URMQTT BOOT {VERSION}{} cpu={cpus} mem={}\n",
+        arch::BOOT_TAG,
         mem.ram_bytes() >> 20
     ));
     info!(
-        "env={} el={} bootloader={} {}",
+        "env={} {}={} bootloader={} {}",
         urmqtt_config::CONFIG.env,
+        arch::PRIVILEGE_LABEL,
         cpu::privilege_level(),
         BOOTLOADER.response().map_or("?", |r| r.name()),
         BOOTLOADER.response().map_or("?", |r| r.version()),
@@ -199,22 +182,7 @@ extern "C" fn urmqtt_kmain() -> ! {
         }
         None => warn!("platform: neither DTB nor ACPI usable"),
     }
-    if let Some(va) = uart_va {
-        info!(
-            "console: pl011 at {:#x} mapped at {va:#x}",
-            uart.map_or(0, |u| u.base)
-        );
-    }
-    if el2 {
-        warn!("entered at EL2 (VHE): untested configuration, PSCI only via SMC");
-    }
-    match urmqtt_arch::power::firmware_version() {
-        Some((maj, min)) => info!(
-            "psci {maj}.{min} via {}",
-            urmqtt_arch::power::conduit_name()
-        ),
-        None => warn!("psci unavailable: power-off and reset will halt instead"),
-    }
+    hw.log(early.as_ref());
     // H7 lower bound: the image cannot run before it was built, so an
     // earlier clock (an empty CMOS battery, a broken RTC) is unknown time,
     // and everything that needs the time fails closed.
@@ -243,20 +211,7 @@ extern "C" fn urmqtt_kmain() -> ! {
     }
 
     // Memory management (M2): kernel page tables, frames, stacks, heap.
-    let features = features::detect();
-    info!(
-        "cpu features: pauth={} fpac={} bti={} rndr={} aes={} pmull={} sha2={} lse={} mte={} sve={}",
-        features.pauth,
-        features.fpac,
-        features.bti,
-        features.rndr,
-        features.aes,
-        features.pmull,
-        features.sha2,
-        features.lse,
-        features.mte,
-        features.sve
-    );
+    let features = arch::cpu_summary();
     // Crypto and checksum backends (ADR-041): detection minus the
     // configured opt-out, sealed before any of them runs.
     // The configuration was validated at build time; a dev command line
@@ -282,7 +237,7 @@ extern "C" fn urmqtt_kmain() -> ! {
         &mem,
         exe.physical_base,
         exe.virtual_base,
-        features.bti,
+        arch::bti(&features),
         heap_mb,
     ) {
         Ok(b) => b,
@@ -296,17 +251,16 @@ extern "C" fn urmqtt_kmain() -> ! {
         (built.free_frames as u64 * 4096) >> 20
     );
 
-    let pac_key = if features.pauth { set_pac_key() } else { None };
+    let pac_key = arch::pac_key(&features);
     let pac_on = pac_key.is_some();
     vm::activate();
-    info!("vm: switched to kernel tables (TTBR1), lower half disabled, WXN on");
+    info!("vm: switched to kernel tables {}", arch::ACTIVATED);
     let (main_top, exc_top) = (built.main_top, built.exc_top);
     *STAGE2.lock() = Some(Stage2 {
         options,
         platform: early,
         boot_entropy: bootloader_entropy(),
         pac_key,
-        interrupts: early.and_then(|e| e.interrupts),
         cpus: cpus as u64,
         built,
         early_frames: mem.early_frames_range().unwrap_or((0, 0)),
@@ -335,34 +289,6 @@ fn bootloader_entropy() -> [u64; ENTROPY_VALUES as usize] {
     out
 }
 
-/// Seeds the IA key from bootloader entropy. Returns the key so the
-/// application processors can be given the same one.
-fn set_pac_key() -> Option<(u64, u64)> {
-    let mut key = [0u64; 2];
-    let from_limine = ENTROPY.response().and_then(|r| {
-        let n = usize::try_from(r.value_count)
-            .ok()?
-            .min(ENTROPY_VALUES as usize);
-        if n < 2 || r.values.is_null() {
-            return None;
-        }
-        // SAFETY: Limine provides `value_count` u64s at `values` (HHDM).
-        Some(unsafe { core::slice::from_raw_parts(r.values, n) })
-    });
-    let Some(values) = from_limine else {
-        warn!("pac: no bootloader entropy, leaving pointer authentication off");
-        return None;
-    };
-    for (i, v) in values.iter().enumerate() {
-        if let Some(k) = key.get_mut(i % 2) {
-            *k ^= v.rotate_left((i as u32) * 17);
-        }
-    }
-    // SAFETY: PAC is not enabled yet, no signed pointers exist.
-    unsafe { cpu::set_return_address_key(key[0], key[1]) };
-    Some((key[0], key[1]))
-}
-
 /// Runs on the kernel's main stack (SP_EL0) with exceptions on SP_EL1.
 extern "C" fn kmain_stage2(_arg: u64) -> ! {
     let Some(mut s) = STAGE2.lock().take() else {
@@ -374,16 +300,11 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         fatal_fmt(format_args!("heap init failed: {e:?}"));
     }
     info!(
-        "vm: running on kernel stacks (main {} KiB at {:#x}, exception {} KiB), pac={} bti={}",
+        "vm: running on kernel stacks (main {} KiB at {:#x}, exception {} KiB), {}",
         layout::MAIN_STACK_SIZE >> 10,
         s.built.main_top,
         layout::EXC_STACK_SIZE >> 10,
-        if s.features.pauth {
-            "on"
-        } else {
-            "unsupported"
-        },
-        if s.features.bti { "on" } else { "unsupported" },
+        arch::protection_summary(&s.features),
     );
 
     let (mmio_maps, mmio_bytes) = memory::mmio_stats();
@@ -402,27 +323,8 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         Err(name) => fatal_fmt(format_args!("crypto: {name} known-answer test failed")),
     }
     // Interrupts and time (M3). Device mappings must precede the lock.
-    let Some(intr) = s.interrupts else {
-        fatal("no GIC/timer description in DTB or ACPI");
-    };
-    match irq::init(&intr.gic, s.cpus) {
-        Ok(lines) => info!(
-            "gic: {} at gicd={:#x} {}={:#x}, {lines} lines, msi via {}",
-            if irq::is_v2() { "v2" } else { "v3" },
-            intr.gic.gicd,
-            if irq::is_v2() { "gicc" } else { "gicr" },
-            match intr.gic.cpu {
-                urmqtt_platform::GicCpu::V3 { gicr } => gicr.0,
-                urmqtt_platform::GicCpu::V2 { gicc } => gicc,
-            },
-            match (intr.gic.its, intr.gic.v2m) {
-                (Some(_), _) => "ITS",
-                (None, Some(_)) => "GICv2m frame",
-                (None, None) => "none",
-            }
-        ),
-        Err(e) => fatal_fmt(format_args!("gic init failed: {e:?}")),
-    }
+    let (timer_line, controller) = arch::init_interrupts(s.platform.as_ref(), s.cpus);
+    info!("{controller}");
     // The boot volume, for the single-disk model (S1, STORAGE-PLAN §2a).
     let medium = s.medium;
     match (medium.optical, medium.disk_guid) {
@@ -473,7 +375,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         warn!("crypto-bench: not in this image (built without the selftest feature)");
     }
 
-    tick_selftest(intr.timer.virt);
+    tick_selftest(timer_line);
     if s.options.install {
         crate::install::run(
             s.install_image,
@@ -588,7 +490,7 @@ fn smp_bringup(s: &mut Stage2) {
         info!("smp: no MP response, running on one CPU");
         return;
     };
-    // A GICv2 routes by an 8-bit CPU mask.
+    // A GICv2 routes by an 8-bit CPU mask; an xAPIC by an 8-bit ID.
     let max = irq::max_cpus().min(smp::MAX_CPUS);
     let started = smp::start_aps(mp.cpus(), smp::bsp_hw_id(mp), s.pac_key, max);
     // The key is now in every core's registers; drop the copies in memory.
@@ -634,11 +536,7 @@ const TICK_SELFTEST: u64 = 50;
 /// Runs the periodic tick and reports interrupt latency twice: while the
 /// core busy-polls and while it sleeps in `wfi` (ADR-022).
 fn tick_selftest(timer_intid: u32) {
-    let freq = time::frequency();
-    info!(
-        "timer: counter {freq} Hz, virtual timer PPI {timer_intid}, tick {} ms",
-        TICK_NS / 1_000_000
-    );
+    info!("{} {} ms", arch::timer_log(timer_intid), TICK_NS / 1_000_000);
     tick::start(timer_intid, TICK_NS);
     let t0 = time::uptime_ns();
     // SAFETY: vectors, GIC and the tick handler are ready.
@@ -798,8 +696,10 @@ fn discover(mem: &memory::BootMemory) -> Option<EarlyPlatform> {
 
 fn run_test_fault(fault: TestFault, features: Features) {
     warn!("test mode: triggering {fault:?}");
+    if arch::run_fault(fault, &features) {
+        return;
+    }
     match fault {
-        TestFault::DataAbort => trap::probe_read(memory::unmapped_mmio_probe()),
         TestFault::BrkResume => {
             trap::brk_resume();
             info!("test: resumed after brk");
@@ -811,11 +711,11 @@ fn run_test_fault(fault: TestFault, features: Features) {
         TestFault::ExecHeap => selftest::exec_heap(),
         TestFault::StackOverflow => selftest::stack_overflow(),
         TestFault::NullDeref => trap::probe_read(0x8),
-        TestFault::Pac if features.pauth => selftest::pac_violation(),
-        TestFault::Bti if features.bti => selftest::bti_violation(),
-        TestFault::Pac | TestFault::Bti => info!("test: {fault:?} skipped, CPU lacks the feature"),
-        TestFault::GeneralProtection | TestFault::DoubleFault => {
-            info!("test: {fault:?} skipped, x86_64 only")
-        }
+        // Handled by the architecture's `run_fault`.
+        TestFault::DataAbort
+        | TestFault::Pac
+        | TestFault::Bti
+        | TestFault::GeneralProtection
+        | TestFault::DoubleFault => {}
     }
 }

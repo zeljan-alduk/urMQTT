@@ -17,12 +17,22 @@ pub fn halt() -> ! {
 }
 
 /// Waits for an interrupt: `sti; hlt` (the instruction after `sti` runs
-/// before any interrupt is taken, so a wake-up cannot be missed), then
-/// masks again. With interrupts masked on entry this still returns on the
+/// before any interrupt is taken, so a wake-up cannot be missed). The
+/// interrupt flag is left as the caller had it: kernel code runs with
+/// interrupts enabled once the tick is up, and the wait must not turn them
+/// off for good. With interrupts masked on entry this still returns on the
 /// first one that fires, like `wfi`.
 pub fn wait_for_interrupt() {
-    // SAFETY: only changes IF and halts until an interrupt arrives.
-    unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+    let flags: u64;
+    // SAFETY: reads RFLAGS through the stack, then only changes IF and
+    // halts until an interrupt arrives.
+    unsafe { asm!("pushfq", "pop {}", out(reg) flags) };
+    // SAFETY: as above; IF is restored below if it was clear.
+    unsafe { asm!("sti", "hlt", options(nomem, nostack)) };
+    if flags & IF == 0 {
+        // SAFETY: restores the caller's masked state.
+        unsafe { asm!("cli", options(nomem, nostack)) };
+    }
 }
 
 /// Enables interrupts (`sti`).
@@ -68,14 +78,16 @@ pub unsafe fn set_return_address_key(_lo: u64, _hi: u64) {}
 /// Where [`switch_to`] continues (a never-returning entry).
 pub type Continuation = extern "C" fn(u64) -> !;
 
-/// Switches to a fresh stack and calls `entry(arg)`.
+/// Switches to a fresh stack and calls `entry(arg)`. The exception stack
+/// of the AArch64 signature has no x86 counterpart (exceptions run on the
+/// interrupted stack, or on an IST stack of the GDT's TSS).
 ///
 /// # Safety
 /// `stack_top` must be a valid, mapped, 16-byte-aligned stack top.
 pub unsafe fn switch_to(
     stack_top: u64,
+    _exc_top: u64,
     arg: u64,
-    _unused: u64,
     entry: Continuation,
     _pac: bool,
 ) -> ! {

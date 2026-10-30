@@ -16,7 +16,9 @@ pub mod cpu {
 /// The interrupt controller (local APIC and I/O APIC).
 #[cfg(target_os = "none")]
 pub mod irq {
-    pub use super::imp::irq::{Ack, Controller, Error, GICV2_MAX_CPUS, Local};
+    pub use super::imp::irq::{
+        Ack, Config, Controller, Error, GICV2_MAX_CPUS, Local, mode_name,
+    };
 }
 
 /// Inter-processor interrupt vectors.
@@ -46,7 +48,8 @@ pub mod percpu {
 #[cfg(target_os = "none")]
 pub mod time {
     pub use super::imp::time::{
-        deadline, finest_clock, frequency, now, ns_to_ticks, set_deadline, ticks_to_ns, uptime_ns,
+        Error, Info, PmTimer, Sources, deadline, finest_clock, frequency, init, now, ns_to_ticks,
+        set_deadline, ticks_to_ns, timer_is_fallback, uptime_ns,
     };
 }
 
@@ -73,6 +76,11 @@ pub mod trap {
 #[cfg(target_os = "none")]
 pub mod entropy {
     pub use super::imp::entropy::hw_random;
+}
+
+/// The interrupt vector map (x86 only, so not part of the contract).
+pub mod vectors {
+    pub use super::imp::vectors::*;
 }
 
 /// Port I/O and CPU identity for PCI bring-up (x86 only, so not part of

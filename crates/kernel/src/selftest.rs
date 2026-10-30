@@ -151,12 +151,14 @@ pub fn stack_overflow() {
     core::hint::black_box(recurse(0));
 }
 
+#[cfg(target_arch = "aarch64")]
 pub fn pac_violation() {
     if trap::forged_return() {
         urmqtt_log::error!("test: forged return address was NOT detected");
     }
 }
 
+#[cfg(target_arch = "aarch64")]
 pub fn bti_violation() {
     if trap::branch_to_non_landing_pad() {
         urmqtt_log::error!("test: branch to non-landing-pad was NOT detected");

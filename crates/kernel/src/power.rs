@@ -2,7 +2,10 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use urmqtt_arch::power::{self as arch_power, Conduit};
+use urmqtt_arch::power as arch_power;
+#[cfg(target_arch = "aarch64")]
+use urmqtt_arch::power::Conduit;
+#[cfg(target_arch = "aarch64")]
 use urmqtt_platform::PsciMethod;
 
 // Relaxed: written once on the boot CPU before anything reads it from an
@@ -17,14 +20,11 @@ pub fn set_conduit(m: PsciMethod) {
     });
 }
 
-/// x86 has no PSCI: power control goes through ACPI (X2).
-#[cfg(target_arch = "x86_64")]
-pub fn set_conduit(_m: PsciMethod) {
-    arch_power::set_conduit(Conduit::Acpi);
-}
-
 pub fn set_smoke(smoke: bool) {
     SMOKE.store(smoke, Ordering::Relaxed);
+    // Only a dev image in smoke mode may write QEMU's debug-exit port.
+    #[cfg(target_arch = "x86_64")]
+    arch_power::set_debug_exit(urmqtt_config::CONFIG.env == "dev" && smoke);
 }
 
 /// Powers off; halts if the firmware is unavailable or refuses.

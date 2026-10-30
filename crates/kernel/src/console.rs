@@ -6,12 +6,14 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use limine::framebuffer::Framebuffer;
 use urmqtt_log::fbcon::{FbConsole, PixelFormat};
+#[cfg(target_arch = "aarch64")]
 use urmqtt_log::pl011::Pl011;
 use urmqtt_log::{info, warn};
 
 /// Framebuffer geometry for the boot log: width << 32 | height.
 static FB_GEOMETRY: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_arch = "aarch64")]
 pub fn init_uart(va: u64) {
     // SAFETY: `va` was just mapped as device memory covering the PL011
     // register block and stays mapped for the kernel's lifetime.

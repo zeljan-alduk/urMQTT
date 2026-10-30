@@ -206,6 +206,15 @@ impl Controller {
     }
 }
 
+/// The local APIC's register interface in use, for the boot log.
+pub fn mode_name() -> &'static str {
+    match apic::mode() {
+        Mode::X2Apic => "x2APIC",
+        Mode::XApic => "xAPIC",
+        Mode::Off => "off",
+    }
+}
+
 /// Programs the I/O APIC pin for `gsi` to deliver `0x21 + gsi` to the CPU
 /// with APIC ID `dest`, unmasked. Returns the vector, or `None` if no I/O
 /// APIC serves the GSI, the vector range is exhausted, or the destination
