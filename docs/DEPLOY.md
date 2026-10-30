@@ -127,7 +127,7 @@ ISOs, a bare-metal machine with a USB stick), the ISO installs itself:
 
 1. Give the machine one empty (or expendable) disk and the ISO as a CD (or a
    USB stick written with `dd`).
-2. Boot it. The menu shows **urMQTT** (the default, after 5 s: runs from the
+2. Boot it. The menu shows **urMQTT** (the default, after 10 s: runs from the
    CD without persistence, and production refuses) and **Install urMQTT on
    this machine's disk**. Choose the second.
 3. The console names the target disk and its size, warns that its data will
@@ -207,7 +207,7 @@ by the other.
 for; the provider-specific upload and CD-attach steps are the provider's):
 
 1. Upload the universal ISO and boot the VPS from it. Both firmware types work.
-2. The framebuffer shows Limine's menu, **urMQTT** (default after 5 s: runs from
+2. The framebuffer shows Limine's menu, **urMQTT** (default after 10 s: runs from
    the ISO without persistence; production refuses to serve) and **Install urMQTT
    on this machine's disk**. Press the arrow key, choose the second.
 3. The console names the target disk, warns that its data will be erased and

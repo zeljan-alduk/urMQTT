@@ -342,6 +342,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         (false, None) => warn!("boot: the bootloader reported no GPT boot disk"),
     }
     devices::set_boot_medium(medium);
+    power::set_halt_on_fatal(medium.optical);
     devices::set_install_mode(s.options.install);
     // PCIe and virtio (M6): all device MMIO must be mapped before the lock.
     if let Some(p) = s.platform.as_ref() {
