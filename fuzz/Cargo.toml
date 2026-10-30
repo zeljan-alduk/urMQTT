@@ -56,6 +56,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "aml_s5"
+path = "fuzz_targets/aml_s5.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "mqtt_decode"
 path = "fuzz_targets/mqtt_decode.rs"
 test = false

@@ -24,15 +24,15 @@ pub enum AcpiError {
 const MAX_TABLE: usize = 1 << 20;
 const HEADER_LEN: usize = 36;
 
-fn u8_at(b: &[u8], off: usize) -> Option<u8> {
+pub(crate) fn u8_at(b: &[u8], off: usize) -> Option<u8> {
     b.get(off).copied()
 }
 
-fn u16_at(b: &[u8], off: usize) -> Option<u16> {
+pub(crate) fn u16_at(b: &[u8], off: usize) -> Option<u16> {
     Some(u16::from_le_bytes([*b.get(off)?, *b.get(off + 1)?]))
 }
 
-fn u32_at(b: &[u8], off: usize) -> Option<u32> {
+pub(crate) fn u32_at(b: &[u8], off: usize) -> Option<u32> {
     let s = b.get(off..off.checked_add(4)?)?;
     Some(u32::from_le_bytes([
         *s.first()?,
@@ -42,7 +42,7 @@ fn u32_at(b: &[u8], off: usize) -> Option<u32> {
     ]))
 }
 
-fn u64_at(b: &[u8], off: usize) -> Option<u64> {
+pub(crate) fn u64_at(b: &[u8], off: usize) -> Option<u64> {
     let lo = u32_at(b, off)?;
     let hi = u32_at(b, off.checked_add(4)?)?;
     Some(u64::from(lo) | (u64::from(hi) << 32))
@@ -73,6 +73,8 @@ pub struct Acpi<'m, M: PhysMemory> {
     mem: &'m M,
     /// (address of XSDT or RSDT, entry width in bytes)
     root: (u64, usize),
+    /// The RSDT of a revision 2+ RSDP, used when the XSDT is unusable.
+    fallback: Option<(u64, usize)>,
 }
 
 impl<'m, M: PhysMemory> Acpi<'m, M> {
@@ -85,16 +87,25 @@ impl<'m, M: PhysMemory> Acpi<'m, M> {
             return Err(AcpiError::BadChecksum(*b"RSDP"));
         }
         let revision = u8_at(v1, 15).ok_or(AcpiError::BadLength)?;
-        let root = if revision >= 2 {
+        let rsdt = (u64::from(u32_at(v1, 16).ok_or(AcpiError::BadLength)?), 4);
+        let (root, fallback) = if revision >= 2 {
             let v2 = mem.bytes(rsdp_pa, 36).ok_or(AcpiError::Unmapped(rsdp_pa))?;
             if !checksum_ok(v2) {
                 return Err(AcpiError::BadChecksum(*b"RSDP"));
             }
-            (u64_at(v2, 24).ok_or(AcpiError::BadLength)?, 8)
+            match u64_at(v2, 24).ok_or(AcpiError::BadLength)? {
+                // Some firmware leaves the XSDT pointer empty.
+                0 => (rsdt, None),
+                xsdt => ((xsdt, 8), Some(rsdt)),
+            }
         } else {
-            (u64::from(u32_at(v1, 16).ok_or(AcpiError::BadLength)?), 4)
+            (rsdt, None)
         };
-        Ok(Self { mem, root })
+        Ok(Self {
+            mem,
+            root,
+            fallback,
+        })
     }
 
     /// Validates and returns the table at `pa`.
@@ -120,10 +131,25 @@ impl<'m, M: PhysMemory> Acpi<'m, M> {
         })
     }
 
+    /// The XSDT/RSDT at `(pa, width)`, with its signature checked.
+    fn root_table(&self, (pa, width): (u64, usize)) -> Result<(Sdt<'m>, usize), AcpiError> {
+        let t = self.table_at(pa)?;
+        let want = if width == 8 { b"XSDT" } else { b"RSDT" };
+        if &t.signature != want {
+            return Err(AcpiError::BadSignature);
+        }
+        Ok((t, width))
+    }
+
     /// Physical addresses listed in the XSDT/RSDT.
     pub fn table_addresses(&self) -> Result<impl Iterator<Item = u64> + 'm, AcpiError> {
-        let root = self.table_at(self.root.0)?;
-        let width = self.root.1;
+        let (root, width) = match self.root_table(self.root) {
+            Ok(r) => r,
+            Err(e) => match self.fallback {
+                Some(f) => self.root_table(f)?,
+                None => return Err(e),
+            },
+        };
         let body = root.body();
         Ok(body.chunks_exact(width).map(move |c| {
             if width == 8 {

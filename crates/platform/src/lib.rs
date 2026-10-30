@@ -15,7 +15,9 @@
 )]
 
 pub mod acpi;
+pub mod aml;
 pub mod fdt;
+pub mod x86;
 
 use acpi::{Acpi, PhysMemory};
 use fdt::Fdt;
@@ -158,6 +160,9 @@ pub struct PlatformInfo {
     pub interrupts: Option<Interrupts>,
     pub cpus: CpuList,
     pub pcie: Option<Pcie>,
+    /// The x86 half (APICs, power management, HPET, `_S5`), present only when
+    /// ACPI describes an x86 machine. On x86 `cpus` holds APIC IDs.
+    pub x86: Option<x86::X86Info>,
 }
 
 /// Early discovery used to be a subset; it is now the full description.
@@ -209,8 +214,12 @@ impl core::fmt::Display for PlatformInfo {
                 f,
                 " pcie={:#x}/{}:{}-{}",
                 p.ecam, p.segment, p.bus_start, p.bus_end
-            ),
-            None => f.write_str(" pcie=none"),
+            )?,
+            None => f.write_str(" pcie=none")?,
+        }
+        match &self.x86 {
+            Some(x) => write!(f, " {x}"),
+            None => Ok(()),
         }
     }
 }
@@ -392,6 +401,7 @@ pub fn early_from_fdt(fdt: &Fdt<'_>) -> Result<EarlyPlatform, fdt::FdtError> {
         interrupts: interrupts_from_fdt(fdt)?,
         cpus: cpus_from_fdt(fdt)?,
         pcie: pcie_from_fdt(fdt)?,
+        x86: None,
     })
 }
 
@@ -417,8 +427,14 @@ pub fn early_from_acpi<M: PhysMemory>(
                 PsciMethod::Smc
             }
         });
+    let x86 = x86::discover(acpi)?;
     let mut cpus = CpuList::new();
-    if let Some(madt) = acpi.find(b"APIC")? {
+    if let Some(x) = &x86 {
+        for c in x.lapics.as_slice() {
+            cpus.push(u64::from(c.apic_id));
+        }
+        cpus.dropped += x.lapics.dropped;
+    } else if let Some(madt) = acpi.find(b"APIC")? {
         for m in acpi::madt_cpus(&madt) {
             cpus.push(m);
         }
@@ -438,5 +454,6 @@ pub fn early_from_acpi<M: PhysMemory>(
         interrupts: interrupts_from_acpi(acpi)?,
         cpus,
         pcie,
+        x86,
     })
 }
