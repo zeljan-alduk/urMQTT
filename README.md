@@ -16,7 +16,8 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 </div>
 
 > [!WARNING]
-> **urMQTT is pre-alpha.** It serves MQTT 3.1.1 over TLS 1.3 with mutual TLS (and, in dev builds
+> **urMQTT is pre-alpha** ([v0.1.0](https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.1.0): an aarch64
+> VM image; its release assets are dev builds with throwaway keys). It serves MQTT 3.1.1 over TLS 1.3 with mutual TLS (and, in dev builds
 > only, over plain TCP), and keeps its state in SQLite in a raw partition of the disk it boots from. These milestones are complete:
 > - **M0**: tooling and CI
 > - **M1**: UEFI boot, console, exception reports

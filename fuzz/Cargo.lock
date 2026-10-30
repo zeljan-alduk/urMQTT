@@ -982,7 +982,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "urmqtt-broker"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "urmqtt-mm",
  "urmqtt-mqtt",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-config-schema"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "toml",
@@ -1001,14 +1001,14 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-control"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
 ]
 
 [[package]]
 name = "urmqtt-dispatch"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "urmqtt-sync",
 ]
@@ -1032,26 +1032,26 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-mm"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "urmqtt-sync",
 ]
 
 [[package]]
 name = "urmqtt-mqtt"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "urmqtt-net"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "urmqtt-platform"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "urmqtt-store"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "cc",
  "sha2 0.11.1",
@@ -1060,11 +1060,11 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-sync"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "urmqtt-tcp"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "urmqtt-mm",
  "urmqtt-timer-wheel",
@@ -1072,11 +1072,11 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-timer-wheel"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "urmqtt-tls"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "chacha20poly1305",
