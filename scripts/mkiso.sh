@@ -68,6 +68,9 @@ hash_mismatch_panic: yes
     protocol: limine
     path: boot():/boot/urmqtt#$HASH
 EOF
+if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then
+    printf '    resolution: %s\n' "$URMQTT_RESOLUTION" >> "$TMP/limine.conf"
+fi
 if [[ -n "$CMDLINE" ]]; then
     printf '    cmdline: %s\n' "$CMDLINE" >> "$TMP/limine.conf"
 fi
@@ -110,6 +113,9 @@ fi
     echo "/urMQTT"
     echo "    protocol: limine"
     echo "    path: boot():/boot/urmqtt#$HASH"
+    if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then
+        printf '    resolution: %s\n' "$URMQTT_RESOLUTION"
+    fi
     if [[ -n "$CMDLINE" ]]; then
         printf '    cmdline: %s\n' "$CMDLINE"
     fi
