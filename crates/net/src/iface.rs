@@ -50,6 +50,10 @@ pub struct Iface {
     addr: Option<Ip>,
     prefix: u8,
     router: Option<Ip>,
+    /// The router's MAC as seen on frames from off-subnet sources: those
+    /// arrive through the router, so their Ethernet source is its MAC. A
+    /// static address never gets a DHCP frame or an ARP reply from it.
+    router_mac: Option<Mac>,
     neighbours: [(Ip, Mac, u64); NEIGHBOURS],
     dhcp: Option<dhcp::Client>,
     ip_id: u16,
@@ -70,6 +74,7 @@ impl Iface {
             addr: None,
             prefix: 0,
             router: None,
+            router_mac: None,
             neighbours: [([0; 4], [0; 6], 0); NEIGHBOURS],
             dhcp: dhcp_xid
                 .filter(|_| owner)
@@ -94,6 +99,9 @@ impl Iface {
     pub fn set_addr(&mut self, addr: Option<(Ip, u8)>, router: Option<Ip>) {
         self.addr = addr.map(|a| a.0);
         self.prefix = addr.map_or(0, |a| a.1);
+        if self.router != router {
+            self.router_mac = None;
+        }
         self.router = router;
     }
 
@@ -130,6 +138,7 @@ impl Iface {
             .iter()
             .find(|e| e.0 == hop && e.0 != [0; 4])
             .map(|e| e.1)
+            .or_else(|| self.router_mac.filter(|_| Some(hop) == self.router))
     }
 
     fn send_ip(
@@ -220,6 +229,9 @@ impl Iface {
                 let for_us = Some(ip.dst) == self.addr;
                 if for_us {
                     self.learn(ip.src, eth.src, now_ms);
+                    if self.router.is_some() && !self.same_subnet(ip.src) {
+                        self.router_mac = Some(eth.src);
+                    }
                 }
                 match ip.proto {
                     PROTO_TCP if for_us => Rx::Tcp {
@@ -527,6 +539,36 @@ mod tests {
         }
         assert_eq!(n, ICMP_PER_SEC as usize);
         assert_eq!(i.stats.icmp_limited, 400);
+    }
+
+    #[test]
+    fn static_address_learns_the_router_from_off_subnet_traffic() {
+        // A static address never sees a DHCP frame or an ARP reply from the
+        // router, yet every client on the Internet is reached through it.
+        let mut i = Iface::new(MAC, true, None, 0);
+        i.set_addr(Some(([10, 0, 2, 15], 24)), Some([10, 0, 2, 2]));
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        let client = [203, 0, 113, 9];
+        i.send_tcp(client, &[0; 20], &mut |f| out.push(f.to_vec()));
+        assert!(out.is_empty());
+        assert_eq!(i.stats.no_neighbour, 1);
+        // The client's SYN arrives from the router's MAC.
+        let f = frame(client, [10, 0, 2, 15], PROTO_TCP, &[0; 20]);
+        i.receive(1, &f, &mut |_| {});
+        i.send_tcp(client, &[0; 20], &mut |f| out.push(f.to_vec()));
+        assert_eq!(ipv4::parse_eth(&out[0]).unwrap().dst, GW);
+        // An on-link neighbour must not be taken for the router.
+        let mut j = Iface::new(MAC, true, None, 0);
+        j.set_addr(Some(([10, 0, 2, 15], 24)), Some([10, 0, 2, 2]));
+        let f = frame([10, 0, 2, 77], [10, 0, 2, 15], PROTO_TCP, &[0; 20]);
+        j.receive(1, &f, &mut |_| {});
+        out.clear();
+        j.send_tcp(client, &[0; 20], &mut |f| out.push(f.to_vec()));
+        assert!(out.is_empty());
+        // A new gateway forgets the old MAC.
+        i.set_addr(Some(([10, 0, 2, 15], 24)), Some([10, 0, 2, 3]));
+        i.send_tcp(client, &[0; 20], &mut |f| out.push(f.to_vec()));
+        assert!(out.is_empty());
     }
 
     #[test]

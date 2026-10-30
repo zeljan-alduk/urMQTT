@@ -75,6 +75,7 @@ bare metal comes before optimisation.
 | 9. One ISO, trusted boot | **X10**, **H8** | the multi-platform ISO; Secure Boot and signed loaders |
 | 10. Bare metal | **X12**, **X13**, **X14**, X15 (optional), **X16** (continuous) | the Intel PC: USB boot, `hwreport`, NVMe/AHCI, its NIC |
 | 11. Speed, encryption, release readiness | **X9**, **S7**, **H9**, **X11**, **S8** | optimisations measured on real hardware; encryption with measured overhead; SBOM; numbers and docs |
+| 11b. Remote operation (user request 2026-10-30) | **O1**, **O2** | `$SYS` introspection and a console over MQTT, so a VNC session is no longer needed; done before the rest of phase 11 |
 | 12. Audit | **H10** | the audit package covers everything above |
 
 About 38 milestones in all. Each ends as before: tests green, commit, PROGRESS
@@ -113,3 +114,23 @@ The user accepted every proposal ("everything as proposed, following best practi
    - **This is the one exception** to "never touch another disk" (decision 6): it applies only when booted from the installer entry.
 
 Still open: the Intel test PC's hardware inventory (TODO.md), which decides the order of X13/X14.
+
+## O1, O2 — Remote operation over MQTT (user request, 2026-10-30)
+
+**O1, `$SYS` introspection.** Retained topics under `$SYS/broker/` refreshed every
+10 s: `version`, `uptime`, `arch`, `cpu/cores`, `cpu/busy/<core>`,
+`memory/{total,used}`, `disk/{total,used}`, `clients/{connected,total}`,
+`subscriptions`, `retained`, `messages/{received,sent}`, `connections/refused`,
+`tls/server_cert_days`. A request/response form (`$SYS/query/info` with an MQTT 5
+Response Topic) returns the same as one JSON document. Readable only by
+identities with the `operator` role (ACL); ordinary devices still cannot
+subscribe to `$SYS`.
+
+**O2, console over MQTT.** A virtual serial port: kernel log lines are published
+to `$SYS/console/out` (a bounded ring, replayed to a new subscriber); lines
+published to `$SYS/console/in` go to a small command set (`status`, `log level`,
+`reboot`, `help`), operator role only. No shell and no arbitrary code. Rate
+limited, every command audit-logged.
+
+Both need an ACL role for operator identities and a ready MQTTX connection
+profile (client certificate, subscribed to the topics above).

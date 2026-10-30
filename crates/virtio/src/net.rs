@@ -20,6 +20,8 @@ pub const HDR_LEN: usize = 12;
 /// Ethernet frame without FCS, plus header.
 pub const BUF_LEN: usize = 2048;
 pub const MTU_FRAME: usize = 1514;
+/// Shortest Ethernet frame without the FCS; shorter ones are zero-padded.
+pub const MIN_FRAME: usize = 60;
 const RX_QUEUE: u16 = 0;
 const TX_QUEUE: u16 = 1;
 const RX_BUFFERS: u16 = 256;
@@ -134,9 +136,15 @@ impl VirtioNet {
         if let Some(d) = buf.get_mut(HDR_LEN..HDR_LEN + frame.len()) {
             d.copy_from_slice(frame);
         }
+        // Ethernet's 60-byte minimum (without FCS): a hardware NIC pads for us,
+        // but a hypervisor bridge may drop runts (ARP, bare TCP ACKs/RSTs).
+        let len = frame.len().max(MIN_FRAME);
+        if let Some(pad) = buf.get_mut(HDR_LEN + frame.len()..HDR_LEN + len) {
+            pad.fill(0);
+        }
         self.tx.add(&[Buf {
             pa: self.tx_bufs.pa + off as u64,
-            len: (HDR_LEN + frame.len()) as u32,
+            len: (HDR_LEN + len) as u32,
             device_writes: false,
         }])?;
         self.tx_unkicked = true;
