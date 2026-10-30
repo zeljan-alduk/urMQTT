@@ -74,6 +74,8 @@ const WORK_LOG_WRITER: usize = 4;
 const WORK_DATAPLANE: usize = 5;
 #[cfg(feature = "selftest")]
 const WORK_DP_BENCH: usize = 6;
+#[cfg(feature = "selftest")]
+const WORK_SIMD_IRQ: usize = 7;
 
 /// Logical index of the executing CPU.
 pub fn current() -> usize {
@@ -201,6 +203,11 @@ pub fn idle_loop(me: &'static PerCpu) -> ! {
             WORK_DATAPLANE => crate::netproto::run_ap(current()),
             #[cfg(feature = "selftest")]
             WORK_DP_BENCH => crate::dpbench::worker(current()),
+            #[cfg(feature = "selftest")]
+            WORK_SIMD_IRQ => {
+                crate::simd_irq::worker(current());
+                me.work.store(WORK_NONE, Ordering::Release);
+            }
             _ => {}
         }
         // Relaxed: only selects between sleeping and spinning.
@@ -231,6 +238,12 @@ pub fn start_data_core(cpu: usize) {
 #[cfg(feature = "selftest")]
 pub fn start_dp_bench(cpu: usize) {
     start_work(cpu, WORK_DP_BENCH);
+}
+
+/// Makes `cpu` a `test=simd-irq` worker (returns to idle afterwards).
+#[cfg(feature = "selftest")]
+pub fn start_simd_irq(cpu: usize) {
+    start_work(cpu, WORK_SIMD_IRQ);
 }
 
 fn start_work(cpu: usize, work: usize) {

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Multicore benchmarks (M13): prints a Markdown table.
 #
-#   scripts/bench.sh [--accel hvf|tcg|kvm] [--threads N] [--duration S]
+#   scripts/bench.sh [--accel hvf|tcg|kvm] [--threads N] [--duration S] [--cmdline WORDS]
+#
+# --cmdline appends dev command-line words to both images, e.g.
+# "cpu-disable=aes,pmull,sha2,crc32" to measure the portable crypto (X0b).
 #
 # 1. dp-bench: full TLS 1.3 + mTLS handshakes with CONNECT/CONNACK on 1, 2
 #    and 4 worker cores, client and server inside the guest (shows how the
@@ -15,11 +18,13 @@ OUT="$ROOT/build/bench"
 ACCEL=""
 THREADS=32
 DURATION=10
+EXTRA=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --accel) ACCEL=$2; shift 2 ;;
         --threads) THREADS=$2; shift 2 ;;
         --duration) DURATION=$2; shift 2 ;;
+        --cmdline) EXTRA=" $2"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -41,8 +46,8 @@ mkimg() {
     python3 -I "$ROOT/scripts/mkraw.py" "$1.esp" "$1" >/dev/null
     rm -f "$1.iso" "$1.esp"
 }
-mkimg "$OUT/dp.raw" "smoke test=dp-bench"
-mkimg "$OUT/net.raw" "serve log=info"
+mkimg "$OUT/dp.raw" "smoke test=dp-bench$EXTRA"
+mkimg "$OUT/net.raw" "serve log=info$EXTRA"
 
 cp "$OUT/dp.raw" "$OUT/dp.img"
 truncate -s 64m "$OUT/dp.img"
@@ -75,4 +80,4 @@ echo "| 1 | $d1 | 1.00x | $n1 | 1.00x |"
 echo "| 2 | $d2 | $(ratio "$d2" "$d1") | $n2 | $(ratio "$n2" "$n1") |"
 echo "| 4 | $d4 | $(ratio "$d4" "$d1") | $n4 | $(ratio "$n4" "$n1") |"
 echo
-echo "accelerator: $ACCEL; serial logs in $OUT"
+echo "accelerator: $ACCEL${EXTRA:+; command line:$EXTRA}; serial logs in $OUT"

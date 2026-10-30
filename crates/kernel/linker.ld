@@ -30,6 +30,15 @@ SECTIONS
     . = ALIGN(4096);
     __rodata_end = .;
 
+    /* The sealed CPU dispatch (ADR-041): a page of its own, written by the
+     * boot CPU through the bootloader's mapping, read-only in the kernel's. */
+    .sealed : {
+        __sealed_start = .;
+        KEEP(*(.data.sealed))
+        . = ALIGN(4096);
+        __sealed_end = .;
+    } :data
+
     .data : {
         __data_start = .;
         /* Limine requests: the bootloader writes response pointers here. */

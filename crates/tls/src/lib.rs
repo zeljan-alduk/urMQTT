@@ -16,6 +16,7 @@ extern crate alloc;
 #[cfg(feature = "client")]
 pub mod client;
 pub mod identity;
+pub mod kat;
 pub mod provider;
 pub mod record;
 pub mod rng;

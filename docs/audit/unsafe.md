@@ -25,6 +25,7 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-arch-aarch64` | `crates/arch-aarch64/src/cpu.rs:108` | block | yes |
 | `urmqtt-arch-aarch64` | `crates/arch-aarch64/src/cpu.rs:127` | block | yes |
 | `urmqtt-arch-aarch64` | `crates/arch-aarch64/src/cpu.rs:136` | block | yes |
+| `urmqtt-arch-aarch64` | `crates/arch-aarch64/src/crc.rs:14` | fn | yes |
 | `urmqtt-arch-aarch64` | `crates/arch-aarch64/src/entropy.rs:17` | block | yes |
 | `urmqtt-arch-aarch64` | `crates/arch-aarch64/src/exception.rs:135` | block | yes |
 | `urmqtt-arch-aarch64` | `crates/arch-aarch64/src/exception.rs:141` | extern block | yes |
@@ -98,14 +99,18 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:78` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:87` | attribute | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:116` | attribute | **no** |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:313` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:324` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:344` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:356` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:615` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:739` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:314` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:325` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:345` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:357` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:639` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:763` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/console.rs:18` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/console.rs:30` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/cpu_dispatch.rs:18` | attribute | yes |
+| `urmqtt-kernel` | `crates/kernel/src/cpu_dispatch.rs:39` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/cpu_dispatch.rs:50` | attribute | yes |
+| `urmqtt-kernel` | `crates/kernel/src/cpu_dispatch.rs:57` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/db.rs:233` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/devices.rs:51` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/devices.rs:59` | block | yes |
@@ -119,21 +124,22 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-kernel` | `crates/kernel/src/memory.rs:143` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/memory.rs:164` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/memory.rs:170` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/selftest.rs:117` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/selftest.rs:125` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/smp.rs:96` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/smp.rs:105` | impl | yes |
-| `urmqtt-kernel` | `crates/kernel/src/smp.rs:113` | extern block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/smp.rs:141` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/smp.rs:170` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/smp.rs:185` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/selftest.rs:118` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/selftest.rs:127` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/selftest.rs:135` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/smp.rs:98` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/smp.rs:107` | impl | yes |
+| `urmqtt-kernel` | `crates/kernel/src/smp.rs:115` | extern block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/smp.rs:143` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/smp.rs:172` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/smp.rs:187` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/trap.rs:64` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/vm.rs:61` | extern block | **no** |
-| `urmqtt-kernel` | `crates/kernel/src/vm.rs:77` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/vm.rs:177` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/vm.rs:342` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/vm.rs:394` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/vm.rs:523` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/vm.rs:80` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/vm.rs:183` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/vm.rs:348` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/vm.rs:400` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/vm.rs:529` | block | yes |
 | `urmqtt-log` | `crates/log/src/lib.rs:367` | block | yes |
 | `urmqtt-log` | `crates/log/src/pl011.rs:23` | fn | yes |
 | `urmqtt-log` | `crates/log/src/pl011.rs:34` | block | yes |
@@ -174,6 +180,7 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-mm` | `crates/mm/src/lib.rs:109` | fn | yes |
 | `urmqtt-mm` | `crates/mm/src/lib.rs:117` | fn | yes |
 | `urmqtt-mm` | `crates/mm/src/lib.rs:121` | block | yes |
+| `urmqtt-store` | `crates/store/src/crc.rs:54` | block | yes |
 | `urmqtt-store` | `crates/store/src/db.rs:28` | block | yes |
 | `urmqtt-store` | `crates/store/src/db.rs:30` | block | yes |
 | `urmqtt-store` | `crates/store/src/db.rs:45` | impl | yes |

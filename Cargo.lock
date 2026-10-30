@@ -283,8 +283,6 @@ checksum = "15b85f9c39137c3a891689859392b1bd49812121d0d61c9caf00d46ed5ce06ae"
 [[package]]
 name = "cpufeatures"
 version = "0.2.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
 dependencies = [
  "libc",
 ]
@@ -292,8 +290,6 @@ dependencies = [
 [[package]]
 name = "cpufeatures"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
 ]
@@ -1559,7 +1555,10 @@ dependencies = [
 name = "urmqtt-kernel"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
+ "chacha20poly1305",
  "limine",
+ "sha2 0.11.1",
  "urmqtt-arch",
  "urmqtt-broker",
  "urmqtt-config",

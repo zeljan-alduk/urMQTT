@@ -1080,3 +1080,66 @@ PROMPT-storage.md and PLAN.md decision 7; plan in STORAGE-PLAN §2b (status and 
 - selecting a target by serial (`storage.install_target`);
 - BIOS boot of the installed disk (x86, X10);
 - the real USB stick on the Intel PC (X12).
+
+## X0b — aarch64 hardware crypto (2026-10-30)
+
+PROMPT-x86_64.md and PLAN.md phase 4; plan in docs/X86-PLAN.md (X0b status there). ADR-053, ADR-041 updated. Closes finding F1 on AArch64.
+
+**Done**
+
+- **Build:** `--cfg aes_armv8 --cfg polyval_armv8 --cfg chacha20_force_neon` for every target (`.cargo/config.toml`, workspace `check-cfg`).
+- **`cpufeatures` vendored** (0.2.17 and 0.3.1, vendor/README.md): on `target_os = "none"` RustCrypto asks the kernel's `urmqtt_cpu_has`, which answers from the sealed dispatch and says "no" before the seal. On the hosts the code is the upstream code.
+- **Dispatch table:** `aes-gcm=armv8-aes`, `ghash=armv8-pmull`, `chacha=neon`, `sha256=armv8-sha2`, `crc32c=armv8-crc` on the AArch64 kernel, with the portable backends last. `"aes"` is granted only with AES and PMULL together.
+- **CRC-32C:** the ARMv8 `crc32c` instructions in `arch-aarch64` (`arch::crc`), installed into `urmqtt_store::crc` through a new backend hook only when selected. The table stays as the reference and in the host tool.
+- **Read-only seal:** the dispatch state lives in `.data.sealed`, a page of its own, mapped read-only by the kernel's tables. The W^X audit checks it.
+- **Known-answer tests on every boot, fail closed** (`urmqtt_tls::kat`), right after the heap is up: AES-128-GCM, ChaCha20-Poly1305, SHA-256 (one-shot and streamed), HMAC-SHA-256, CRC-32C. Log: `crypto: known-answer tests passed (…)`.
+- **Dev tools:**
+  - `cpu-disable=aes,pmull,sha2,crc32` takes features out on the command line;
+  - `test=crypto-bench` reports throughput;
+  - `test=simd-irq` runs 10 s of KATs on every core under the tick and a storm of IPIs;
+  - `test=sealed-write` writes the sealed page;
+  - `scripts/bench.sh --cmdline WORDS`.
+- **Fuzz:** `diff_aes_gcm`, `diff_chacha20poly1305`, `diff_sha256` (both `sha2` versions, one-shot and chunked) against `ring`, and `diff_crc32c` (hardware against the table). `make fuzz` builds with the kernel's cfgs, so CI's fuzz smoke compares the backends the kernel runs.
+
+**Tests**
+
+- `make check` green: **308 host tests**, plus the new ones for the `cpufeatures` answers, the opt-out CSV, ARMv8 CRC against a bitwise reference, and the KAT vectors.
+- Fuzz on the M4 (20 s each, before CI's 60 s): `diff_aes_gcm` 3.55 M runs, `diff_chacha20poly1305` 3.39 M, `diff_sha256` 3.43 M, `diff_crc32c` 17.6 M. **No differences.**
+- **Smoke: 137/137** (HVF and TCG). The boot scenarios now expect the ARMv8 selection and the KAT line. New, each on both accelerators:
+  - `crypto-soft`: the portable selection, with the KATs passing on it;
+  - `sealed-write`: a level-3 write permission fault, whose FAR equals the logged sealed address (`0xffffffff801f2000`);
+  - `simd-irq`: HVF 1 854 758 rounds with 5 564 274 IPIs, TCG 497 686 rounds with 1 493 058 IPIs, **0 mismatches**;
+  - `crypto-bench`.
+
+**Measured** (Apple M4 Pro, QEMU HVF)
+
+`test=crypto-bench`, 64 KiB buffers, MiB/s. The portable column comes from `cpu-disable=aes,pmull,sha2,crc32`. ChaCha20's portable figure needs a build without `chacha20_force_neon`; it was measured once and the build was then restored.
+
+| Primitive | Portable | ARMv8 | Factor |
+|---|---:|---:|---:|
+| AES-128-GCM | 228 | 553–559 | 2.4× |
+| ChaCha20-Poly1305 | 596 | 758–763 | 1.3× |
+| SHA-256 | 586 | 2 632–2 663 | 4.5× |
+| CRC-32C | 497 | 9 793 | 20× |
+
+Under TCG (smoke) the ARMv8 figures are 106 / 148 / 224 / 429 MiB/s. That is emulation, so it is not a basis for any decision.
+
+`make bench` with the portable crypto (`--cmdline cpu-disable=…`) → the ARMv8 crypto, back to back:
+
+| Worker cores | dp-bench handshakes/s | network conn/s (32 clients) |
+|---:|---:|---:|
+| 1 | 853 → 894 | 628 → 632 |
+| 2 | 1 700 → 1 774 | 845 → 836 |
+| 4 | 3 381 → 3 532 | 769 → 823 |
+
+Handshakes gain about 4–5 %. A full mTLS handshake is dominated by ECDSA P-256 and X25519, which X0b does not touch. The symmetric part gets much faster, so records/s and the store's checksums gain more than handshakes. The network column moves by a few percent from run to run, as in X0. Every backend is faster on the M4, so each is on by default (the X0b acceptance rule).
+
+- **Kernel ELF (dev):** 2 462 624 → 2 520 232 B (+57 608). The ARMv8 code paths are compiled in next to the portable ones, along with the KAT vectors and the selftest tools.
+
+**Deviations and not done** (X86-PLAN X0b status):
+- The KATs run on every boot, not only under a dev `test=crypto-kat`.
+- No PMULL folding for CRC-32C.
+- TCG `cortex-a72` (the Raspberry Pi 4 core) and `neoverse-n1` (Ampere Altra) were booted by hand, not in the smoke. Both select all ARMv8 backends, pass the KATs and reach `URMQTT READY`.
+- Records/s are not measured separately yet; `make bench` measures handshakes only.
+- Bytes per connection were not re-measured: X0b changes no data structures.
+- The real Raspberry Pi (Cortex-A72 has AES, PMULL, SHA2 and CRC32) is still open.

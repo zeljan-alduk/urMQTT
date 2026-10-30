@@ -109,11 +109,15 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-kernel --target $(TARGET) -- -D warnings
 	$(CARGO) test $(CARGO_FLAGS) --workspace
 
+# The RustCrypto backends the kernel uses (X0b), so the differential fuzz
+# targets compare them, not the portable code.
+FUZZ_RUSTFLAGS := --cfg aes_armv8 --cfg polyval_armv8 --cfg chacha20_force_neon
+
 .PHONY: fuzz
 fuzz: ## Run fuzz target T for FUZZ_TIME seconds (default 600)
 	@command -v cargo-fuzz >/dev/null || { echo "install cargo-fuzz: cargo install cargo-fuzz --locked" >&2; exit 1; }
 	@mkdir -p fuzz/corpus/$(T)
-	$(CARGO) fuzz run $(T) fuzz/corpus/$(T) $(wildcard fuzz/seeds/$(T)) -- -max_total_time=$(FUZZ_TIME)
+	RUSTFLAGS="$(FUZZ_RUSTFLAGS)" $(CARGO) fuzz run $(T) fuzz/corpus/$(T) $(wildcard fuzz/seeds/$(T)) -- -max_total_time=$(FUZZ_TIME)
 
 .PHONY: smoke
 smoke: ## Boot headless (HVF+TCG on macOS, TCG elsewhere) and check the serial log

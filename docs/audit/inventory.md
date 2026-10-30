@@ -6,16 +6,16 @@
 
 | Crate | Path | src lines | tests/ lines | unsafe sites (justified) | `unsafe_code` lint |
 |---|---|---:|---:|---:|---|
-| `urmqtt-arch` | `crates/arch` | 228 | 0 | 0 (0) | deny |
-| `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 2857 | 0 | 72 (72) | deny |
+| `urmqtt-arch` | `crates/arch` | 237 | 0 | 0 (0) | deny |
+| `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 2922 | 0 | 73 (73) | deny |
 | `urmqtt-broker` | `crates/broker` | 3404 | 0 | 0 (0) | forbid |
 | `urmqtt-config` | `crates/config` | 173 | 0 | 0 (0) | forbid |
 | `urmqtt-config-schema` | `crates/config-schema` | 1794 | 0 | 0 (0) | forbid |
 | `urmqtt-control` | `crates/control` | 609 | 0 | 0 (0) | forbid |
 | `urmqtt-control-tool` | `tools/control` | 416 | 0 | 0 (0) | default |
 | `urmqtt-disk-tool` | `tools/disk` | 679 | 0 | 0 (0) | default |
-| `urmqtt-dispatch` | `crates/dispatch` | 441 | 0 | 0 (0) | forbid |
-| `urmqtt-kernel` | `crates/kernel` | 7936 | 0 | 54 (37) | deny |
+| `urmqtt-dispatch` | `crates/dispatch` | 522 | 0 | 0 (0) | forbid |
+| `urmqtt-kernel` | `crates/kernel` | 8194 | 0 | 59 (42) | deny |
 | `urmqtt-loadgen` | `tools/loadgen` | 452 | 0 | 0 (0) | default |
 | `urmqtt-log` | `crates/log` | 655 | 0 | 5 (5) | deny |
 | `urmqtt-mm` | `crates/mm` | 1219 | 0 | 35 (35) | deny |
@@ -23,13 +23,13 @@
 | `urmqtt-net` | `crates/net` | 1380 | 0 | 0 (0) | deny |
 | `urmqtt-pci` | `crates/pci` | 439 | 0 | 0 (0) | deny |
 | `urmqtt-platform` | `crates/platform` | 1017 | 453 | 0 (0) | deny |
-| `urmqtt-store` | `crates/store` | 4822 | 752 | 118 (106) | deny |
+| `urmqtt-store` | `crates/store` | 4849 | 752 | 119 (107) | deny |
 | `urmqtt-sync` | `crates/sync` | 435 | 0 | 16 (16) | deny |
 | `urmqtt-tcp` | `crates/tcp` | 2452 | 0 | 0 (0) | deny |
 | `urmqtt-timer-wheel` | `crates/timer-wheel` | 395 | 0 | 0 (0) | forbid |
-| `urmqtt-tls` | `crates/tls` | 2402 | 425 | 0 (0) | forbid |
+| `urmqtt-tls` | `crates/tls` | 2511 | 425 | 0 (0) | forbid |
 | `urmqtt-virtio` | `crates/virtio` | 1681 | 0 | 19 (19) | deny |
-| **total** | | **37240** | | **319 (290)** | |
+| **total** | | **37789** | | **326 (297)** | |
 
 ## Vendored components
 
@@ -37,6 +37,8 @@
 |---|---|---|
 | SQLite amalgamation (C) | 3.54.1 | 254268 lines (sqlite3.c) |
 | libc headers for SQLite (C) | own | 53 lines in 7 headers |
+| RustCrypto cpufeatures, patched (vendor/README.md) | 0.2.17 | 642 lines |
+| RustCrypto cpufeatures, patched (vendor/README.md) | 0.3.1 | 565 lines |
 | Limine bootloader (binary) | v12.9.4 | BOOTAA64.EFI, 331776 bytes |
 
 ## Third-party crates in the kernel (`aarch64-unknown-none`, normal and build dependencies)
@@ -59,8 +61,6 @@
 | `cmov` | 0.5.4 | 1504 | linked |
 | `const-oid` | 0.10.2 | 6640 | linked |
 | `cpubits` | 0.1.1 | 436 | linked |
-| `cpufeatures` | 0.2.17 | 609 | linked |
-| `cpufeatures` | 0.3.1 | 532 | linked |
 | `crypto-bigint` | 0.7.10 | 40758 | linked |
 | `crypto-common` | 0.1.7 | 265 | linked |
 | `crypto-common` | 0.2.2 | 757 | linked |
@@ -139,8 +139,8 @@
 | `x509-cert` | 0.3.0 | 5623 | linked |
 | `zerocopy` | 0.8.63 | 31068 | linked |
 | `zeroize` | 1.9.1 | 973 | linked |
-| **total** | | **640903** (linked: 298816) | |
+| **total** | | **639762** (linked: 297675) | |
 
 ## Fuzz targets
 
-`acpi_parse`, `broker_input`, `config_parse`, `control_message`, `disk_layout`, `fdt_parse`, `gpt_parse`, `mqtt_decode`, `net_frame`, `tcp_segment`, `telemetry_recover`, `tls_record`, `x509_identity`
+`acpi_parse`, `broker_input`, `config_parse`, `control_message`, `diff_aes_gcm`, `diff_chacha20poly1305`, `diff_crc32c`, `diff_sha256`, `disk_layout`, `fdt_parse`, `gpt_parse`, `mqtt_decode`, `net_frame`, `tcp_segment`, `telemetry_recover`, `tls_record`, `x509_identity`

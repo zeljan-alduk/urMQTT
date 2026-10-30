@@ -77,9 +77,10 @@ pub fn wx_audit() -> Result<(), &'static str> {
         return Err("executable mapping outside kernel text");
     }
     let text = write_text as *const () as u64;
-    let [_, _, (data_start, _, _, _)] = vm::kernel_sections();
-    let checks: [(&str, u64, bool, bool); 4] = [
+    let [_, _, (sealed_start, _, _, _), (data_start, _, _, _)] = vm::kernel_sections();
+    let checks: [(&str, u64, bool, bool); 5] = [
         ("text", text, false, true),
+        ("sealed", sealed_start, false, false),
         ("data", data_start, true, false),
         ("heap", layout::HEAP_BASE, true, false),
         ("stack", layout::stacks(0).1.0, true, false),
@@ -113,6 +114,15 @@ pub fn wx_audit() -> Result<(), &'static str> {
 /// Stores into kernel text: must fault with a permission fault.
 pub fn write_text() {
     let p = write_text as *const () as *mut u32;
+    // SAFETY: deliberately faulting store (test mode only).
+    unsafe { p.write_volatile(0) };
+}
+
+/// Stores into the sealed CPU dispatch page: must fault with a permission
+/// fault (X0b, ADR-041).
+pub fn write_sealed() {
+    let p = crate::cpu_dispatch::sealed_addr() as *mut u64;
+    info!("test: writing the sealed cpu dispatch at {:#x}", p as u64);
     // SAFETY: deliberately faulting store (test mode only).
     unsafe { p.write_volatile(0) };
 }

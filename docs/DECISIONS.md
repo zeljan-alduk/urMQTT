@@ -570,7 +570,7 @@ verified in the named milestone before it becomes Accepted).
 
 ## ADR-041 — CPU feature dispatch (`urmqtt-dispatch`) and `[cpu] disable`
 
-- **Status:** Accepted (X0); the hardware backends follow in X0b (AArch64) and X9 (x86).
+- **Status:** Accepted (X0). The AArch64 hardware backends, the `cpufeatures` patch and the read-only seal came in X0b (ADR-053); x86 follows in X9. The boot log line is now `cpu dispatch: detected <features>, disabled <features>` (configured plus dev command line).
 - **Problem:** finding F1 (docs/X86-PLAN.md): AES-GCM, GHASH and SHA-256 run the portable code on AArch64 today, because RustCrypto's `cpufeatures` answers "no" on `target_os = "none"` and the `aes_armv8`/`polyval_armv8` cfgs are unset. Two architectures with several accelerators each need one place that decides what runs, and an operator needs a way to switch a faulty or slow accelerator off without a rebuild of the code.
 - **Design:**
   - `CpuFeatures` is a set of `Feature`s that select code paths (AArch64 today: `aes`, `pmull`, `sha2`, `crc32`). `arch::features::Features::dispatch()` maps the decoded ID registers onto it.
@@ -738,3 +738,36 @@ verified in the named milestone before it becomes Accepted).
   - Host: target selection; the installed disk equals the raw image and then first-boots; too small and bad images; a power cut at every write of a reinstall (cut, with and without the cache surviving) leaves the old install untouched or a disk that does not boot, never a mix, and installing again works; backup repair.
   - Kernel host tests for the production command line.
   - Smoke (HVF and TCG): `install-vm` and `install-vm-boots` (the ISO unchanged), `install-two-disks-refused` (both disks still all zero), `install-scsi` and `install-scsi-boots`, `install-crash` (the disk has no GPT afterwards, per `urmqtt-disk info`) and `install-crash-reinstalled`.
+
+## ADR-053 — ARMv8 hardware crypto on AArch64; the sealed dispatch on a read-only page (X0b)
+
+- **Status:** Accepted (X0b). Closes finding F1 (docs/X86-PLAN.md) on AArch64.
+- **Problem:** RustCrypto compiles its ARMv8 AES and POLYVAL backends only with `--cfg aes_armv8` / `--cfg polyval_armv8`, and its runtime detection (`cpufeatures`) answers "no" on `target_os = "none"`. So the kernel ran portable AES-GCM, GHASH and SHA-256, and a table CRC-32C, on CPUs that have the instructions. The X0 dispatch (ADR-041) recorded the choice but nothing read it.
+- **Design:**
+  - **Build:** `.cargo/config.toml` sets `--cfg aes_armv8 --cfg polyval_armv8 --cfg chacha20_force_neon` (workspace `check-cfg` lists them). NEON is part of the AArch64 baseline, so ChaCha20 needs no detection.
+  - **Detection hook:** `vendor/cpufeatures-{0.2.17,0.3.1}` (vendor/README.md) call the kernel's `urmqtt_cpu_has(name, len)` on `target_os = "none"`. It answers from the sealed dispatch (`Sealed::cpufeatures`):
+    - `"aes"` means AES **and** PMULL, because `aes` and `polyval` both ask for `"aes"` and the kernel only runs them together;
+    - `"sha2"` means SHA2;
+    - every other name, and every name before the seal, gets "no".
+
+    `cpufeatures` caches its first answer. A query before the seal therefore latches the portable code (safe), never a backend the opt-out would have refused.
+  - **Table:** `aes-gcm=armv8-aes` (needs AES+PMULL), `ghash=armv8-pmull`, `chacha=neon`, `sha256=armv8-sha2`, `crc32c=armv8-crc` are built on the AArch64 kernel target. The portable rows stay last.
+  - **CRC-32C:** `urmqtt_store::crc` gets a backend hook (`set_backend`). The kernel installs `arch::crc::crc32c_update` (the ARMv8 `crc32c{x,b}` instructions) only when the sealed selection says `armv8-crc`. The store and the host tool keep the table, which stays the reference.
+  - **Read-only seal:** the `SealCell` lives in `.data.sealed`, a page-aligned section of its own (`linker.ld`). The boot CPU seals it through the bootloader's mapping. The kernel's own tables map that page read-only, and the W^X audit checks that. A later write faults (`test=sealed-write`).
+  - **Known answers at boot, fail closed**, in every image right after the heap exists and before any TLS or storage work: AES-128-GCM (McGrew–Viega test case 4), ChaCha20-Poly1305 (RFC 8439 §2.8.2), SHA-256 (FIPS 180-2 "abc" and the 448-bit message, also streamed), HMAC-SHA-256 (RFC 4231 test case 2) and CRC-32C (`123456789`). A mismatch stops the boot. This covers whichever backend the dispatch chose.
+  - **Opt-out:** `[cpu] disable` and, in dev images, `cpu-disable=aes,pmull,sha2,crc32` on the command line, to compare backends on the same machine.
+- **Measured (QEMU HVF on an M4 Pro, `test=crypto-bench`, 64 KiB buffers, MiB/s):**
+
+  | Primitive | Portable | ARMv8 |
+  |---|---|---|
+  | AES-128-GCM | 228 | 553 |
+  | ChaCha20-Poly1305 | 596 | 763 (NEON) |
+  | SHA-256 | 586 | 2663 |
+  | CRC-32C | 497 | 9793 |
+
+  Every hardware backend is faster, so each is on by default (the X0b acceptance rule).
+- **Testing:**
+  - Host: the `cpufeatures` answers follow the usable set; CSV parsing of the opt-out; the ARMv8 CRC against a bitwise reference; the KAT vectors.
+  - Fuzz (aarch64 hosts, built with the kernel's cfgs): `diff_aes_gcm` and `diff_chacha20poly1305` against `ring` (ciphertext, tag, both directions open), `diff_sha256` (both `sha2` versions, one-shot and chunked) against `ring`, `diff_crc32c` hardware against the table.
+  - Smoke (HVF and TCG): the boot scenarios expect the ARMv8 line and the KAT line; `crypto-soft`, `sealed-write` (a permission fault whose FAR is the sealed address), `simd-irq` (10 s of KATs on four cores under the tick and IPIs, 0 mismatches) and `crypto-bench`.
+- **Not done:** PMULL folding for long CRC buffers (the plain instruction already gives ~10 GiB/s), and AES-GCM with the ARMv8.2 SHA3/EOR3 extensions. The x86 backends are X9.

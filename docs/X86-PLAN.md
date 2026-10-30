@@ -155,6 +155,12 @@ Relative size: S = a few days of work, M = a typical M-milestone, L = larger.
 
 **Accept:** each backend is on by default only if it is faster on HVF/M4 (real hardware) and every known-answer and differential test is equal. This step deliberately changes aarch64 numbers (upwards), which is why it is separate from X0.
 
+**Status: done** (docs/PROGRESS.md, X0b; ADR-053). Deviations from the work list above:
+- The known-answer tests run on every boot, in every image (fail closed), not only under a dev `test=crypto-kat`.
+- `chacha20_force_neon` was added: NEON is baseline on AArch64 and was faster.
+- No PMULL CRC folding: the plain `crc32c` instructions already reach ~9.8 GiB/s under HVF.
+- TCG `neoverse-n1`/`cortex-a72` were run by hand, not in the smoke: both boot to `URMQTT READY` with the ARMv8 selection and the KATs passing. The smoke runs `max` under TCG and the host CPU under HVF.
+
 ### X1 — x86_64 builds · M
 
 **Work**

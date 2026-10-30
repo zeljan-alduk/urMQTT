@@ -880,10 +880,12 @@ DEV_OK=("pci: ECAM 0x4010000000 buses 0-255" "virtio-blk" "virtio-net" "virtio-r
 DB_OK=("storage: data disk formatted \(was blank\)" "db: sqlite 3\.[0-9]+\.[0-9]+ on the data disk: WAL, exclusive locking, quick_check ok"
     "telemetry: log recovered in [0-9]+ ms: 0 record\(s\)"
     "db: restored 0 retained" "db: DB core is cpu 3" "db: worker running on cpu 3")
-# ADR-041: the dispatch is sealed with nothing disabled and, before X0b,
-# selects portable code whatever the CPU offers.
-DISPATCH_OK=("cpu dispatch: detected [a-z0-9 ]+, disabled by config none"
-    "crypto: aes-gcm=soft ghash=soft chacha=soft sha256=soft crc32c=table toeplitz=bitwise")
+# ADR-041/X0b: the dispatch is sealed with nothing disabled and picks the
+# ARMv8 backends (QEMU's `max` and HVF's host CPU offer all of them); the
+# known-answer tests pass on the chosen backends before anything uses them.
+DISPATCH_OK=("cpu dispatch: detected [a-z0-9 ]*aes pmull[a-z0-9 ]*, disabled none"
+    "crypto: aes-gcm=armv8-aes ghash=armv8-pmull chacha=neon sha256=armv8-sha2 crc32c=armv8-crc toeplitz=bitwise"
+    "crypto: known-answer tests passed \(AES-128-GCM, ChaCha20-Poly1305, SHA-256, HMAC-SHA-256, CRC-32C\)")
 SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordered pairs ping-pong ok"
     "smp: 4/4 cpus ticking on their own timer")
 
@@ -922,6 +924,34 @@ scenario pac-forgery "smoke test=pac" on \
     "pointer authentication failure|instruction abort" "NOT:was NOT detected" "NOT:URMQTT READY"
 scenario bti-violation "smoke test=bti" on \
     "branch target exception \(BTI\)" "NOT:was NOT detected" "NOT:URMQTT READY"
+
+# X0b: the portable backends when the features are taken out, the sealed
+# choice is read-only, and FP/SIMD state survives interrupts on every core.
+scenario crypto-soft "smoke cpu-disable=aes,pmull,sha2,crc32" on \
+    "disabled aes pmull sha2 crc32" \
+    "crypto: aes-gcm=soft ghash=soft chacha=neon sha256=soft crc32c=table toeplitz=bitwise" \
+    "crypto: known-answer tests passed" "^URMQTT READY$" "$NO_FAULT"
+scenario sealed-write "smoke test=sealed-write" on \
+    "test: writing the sealed cpu dispatch at 0x" "data abort \(same EL\), write, permission fault, level 3" \
+    "NOT:URMQTT READY"
+for accel in $ACCELS; do
+    log="$OUT/sealed-write-$accel.log"
+    at=$(clean "$log" | grep -Eo 'sealed cpu dispatch at 0x[0-9a-f]+' | grep -Eo '0x[0-9a-f]+$')
+    far=$(clean "$log" | grep -Eo 'FAR=0x[0-9a-f]+' | head -1 | cut -d= -f2)
+    if [[ -n "$at" && $((at)) -eq $((far)) ]]; then
+        echo "  ✓ sealed-write faulted on the sealed page itself ($far) [$accel]"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ sealed-write: FAR ${far:-?} is not the sealed address ${at:-?} [$accel]"
+        FAILED=$((FAILED + 1))
+    fi
+done
+scenario simd-irq "smoke test=simd-irq" on \
+    "simd-irq: [0-9]+ known-answer rounds on 4 cores in 10 s with [0-9]+ IPIs and the tick: 0 mismatches" \
+    "^URMQTT READY$" "$NO_FAULT"
+scenario crypto-bench "smoke test=crypto-bench" on \
+    "crypto-bench: AES-128-GCM [0-9]+ MiB/s, ChaCha20-Poly1305 [0-9]+ MiB/s, SHA-256 [0-9]+ MiB/s, CRC-32C [0-9]+ MiB/s" \
+    "^URMQTT READY$" "$NO_FAULT"
 
 # M7: DHCP lease, ICMP to the gateway, TCP echo through the QEMU port forward.
 SERVICE_PORT=7 service net-echo "serve" 17007 "net: dhcp lease" python3 -I "$ROOT/scripts/echo-client.py" -- \

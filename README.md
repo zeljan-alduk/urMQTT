@@ -962,7 +962,7 @@ Security is the first priority and wins conflicts with the other tracks.
 | | Milestone | Acceptance |
 |---|---|---|
 | ✅ | **X0** Arch facade & dispatch | aarch64 unchanged (smoke, bench, bytes/connection, repro); no aarch64 assembly outside `arch-aarch64` |
-| 📋 | **X0b** aarch64 hardware crypto | ARMv8 AES/PMULL/SHA2/CRC32 selected at boot (today all software); KATs and differential fuzzing equal; measured faster |
+| ✅ | **X0b** aarch64 hardware crypto | ARMv8 AES/PMULL/SHA2/CRC32 and NEON ChaCha20 selected at boot; known-answer tests on every boot and differential fuzzing equal; measured faster (AES-GCM 2.4×, SHA-256 4.5×, CRC-32C 20×) |
 | 📋 | **X1** x86_64 builds | `make build ARCH=x86_64`, clippy on both targets, FP/SIMD policy decided, CI KVM probe |
 | 📋 | **X2** x86 boot & exceptions | q35+OVMF and pc+SeaBIOS boot; decoded fault reports; x86-64-v2 check refuses old CPUs with a clear message |
 | 📋 | **X3** x86 memory protection | NX, W^X, WP, SMEP/SMAP/UMIP, locked tables, guard pages; CET when available |

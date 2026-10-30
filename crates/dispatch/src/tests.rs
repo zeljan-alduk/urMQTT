@@ -58,7 +58,7 @@ const BUILT: Table = [
 
 #[test]
 fn this_image_selects_portable_code_whatever_the_cpu_has() {
-    // Finding F1: no hardware backend is compiled in before X0b.
+    // Host builds list every hardware backend as not built.
     for cpu in [CpuFeatures::NONE, ALL] {
         assert_eq!(
             select(&TABLE, cpu).to_string(),
@@ -125,6 +125,13 @@ fn disable_list_is_validated() {
     assert_eq!(parse_disable(&["aesni"]), Err(DisableError::Unknown));
     assert_eq!(parse_disable(&["AES"]), Err(DisableError::Unknown));
     assert_eq!(parse_disable(&["aes", "aes"]), Err(DisableError::Duplicate));
+    assert_eq!(
+        parse_disable_csv("aes,crc32")
+            .map(|s| s.to_string())
+            .as_deref(),
+        Ok("aes crc32")
+    );
+    assert_eq!(parse_disable_csv("aes,"), Err(DisableError::Unknown));
     // A failed seal leaves the cell empty.
     let cell = SealCell::new();
     assert_eq!(
@@ -143,4 +150,27 @@ fn feature_names_round_trip() {
     for name in ["pauth", "bti", "pac", "wxn", "rndr"] {
         assert_eq!(Feature::from_name(name), None);
     }
+}
+
+/// The answers RustCrypto gets: "aes" needs AES and PMULL (POLYVAL uses
+/// PMULL under that name), disabled features are refused, unknown names
+/// are refused.
+#[test]
+fn cpufeatures_answers_follow_the_usable_set() {
+    let cell = SealCell::new();
+    let s = cell.seal(&BUILT, ALL, &[]).unwrap();
+    assert!(s.cpufeatures("aes") && s.cpufeatures("sha2"));
+    assert!(!s.cpufeatures("sha3") && !s.cpufeatures("dit") && !s.cpufeatures("sm4"));
+    let cell = SealCell::new();
+    let s = cell.seal(&BUILT, ALL, &["pmull"]).unwrap();
+    assert!(
+        !s.cpufeatures("aes"),
+        "AES without PMULL would let POLYVAL fault"
+    );
+    let cell = SealCell::new();
+    let s = cell.seal(&BUILT, ALL, &["sha2"]).unwrap();
+    assert!(!s.cpufeatures("sha2"));
+    let none = CpuFeatures::NONE.with(Feature::Aes, true);
+    let cell = SealCell::new();
+    assert!(!cell.seal(&BUILT, none, &[]).unwrap().cpufeatures("aes"));
 }

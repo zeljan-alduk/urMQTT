@@ -153,8 +153,6 @@ checksum = "15b85f9c39137c3a891689859392b1bd49812121d0d61c9caf00d46ed5ce06ae"
 [[package]]
 name = "cpufeatures"
 version = "0.2.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
 dependencies = [
  "libc",
 ]
@@ -162,8 +160,6 @@ dependencies = [
 [[package]]
 name = "cpufeatures"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
 ]
@@ -981,6 +977,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "urmqtt-arch-aarch64"
+version = "0.1.0"
+dependencies = [
+ "urmqtt-dispatch",
+ "urmqtt-sync",
+]
+
+[[package]]
 name = "urmqtt-broker"
 version = "0.1.0"
 dependencies = [
@@ -1017,8 +1021,14 @@ dependencies = [
 name = "urmqtt-fuzz"
 version = "0.0.0"
 dependencies = [
+ "aes-gcm",
+ "chacha20poly1305",
  "ed25519-dalek",
  "libfuzzer-sys",
+ "ring",
+ "sha2 0.10.9",
+ "sha2 0.11.1",
+ "urmqtt-arch-aarch64",
  "urmqtt-broker",
  "urmqtt-config-schema",
  "urmqtt-control",

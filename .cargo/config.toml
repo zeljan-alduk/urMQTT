@@ -3,4 +3,12 @@
 # host builds and tests are unaffected. The Makefile adds path
 # remapping through CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS (M17).
 [target.aarch64-unknown-none]
-rustflags = ["-Zbranch-protection=bti,pac-ret"]
+# --cfg: compile the ARMv8 AES, PMULL (POLYVAL) and NEON (ChaCha20) backends
+# of RustCrypto (X0b); AES and PMULL are then chosen at runtime through the
+# vendored cpufeatures and the kernel's sealed dispatch (ADR-041).
+rustflags = [
+    "-Zbranch-protection=bti,pac-ret",
+    "--cfg", "aes_armv8",
+    "--cfg", "polyval_armv8",
+    "--cfg", "chacha20_force_neon",
+]

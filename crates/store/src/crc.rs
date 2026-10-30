@@ -1,6 +1,23 @@
-//! CRC-32C (Castagnoli), table driven, for on-disk metadata and log records.
+//! CRC-32C (Castagnoli), for on-disk metadata and log records: table
+//! driven, or a hardware backend chosen once at boot (X0b, ADR-041).
+
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 const POLY: u32 = 0x82f6_3b78;
+
+/// A CRC-32C implementation with [`update`]'s contract.
+pub type Backend = fn(u32, &[u8]) -> u32;
+
+/// The installed backend as a function address (0: the table).
+static BACKEND: AtomicUsize = AtomicUsize::new(0);
+
+/// Installs a faster implementation (the kernel's CPU dispatch, before the
+/// store is opened). It must equal [`table_update`] for every input; the
+/// kernel checks it against the known answers first.
+pub fn set_backend(f: Backend) {
+    // Release: a core that sees the pointer sees the function's code.
+    BACKEND.store(f as usize, Ordering::Release);
+}
 
 // Indexing is checked at compile time in a const block.
 #[allow(clippy::indexing_slicing)]
@@ -27,6 +44,21 @@ pub fn crc32c(data: &[u8]) -> u32 {
 
 /// Continues a CRC-32C computation (`crc` is a previous result, or 0).
 pub fn update(crc: u32, data: &[u8]) -> u32 {
+    // Acquire: pairs with the Release in `set_backend`.
+    match BACKEND.load(Ordering::Acquire) {
+        0 => table_update(crc, data),
+        f => {
+            // SAFETY: only `set_backend` stores here, always a `Backend`
+            // (function pointers round-trip through usize on every target).
+            #[allow(unsafe_code)]
+            let f: Backend = unsafe { core::mem::transmute::<usize, Backend>(f) };
+            f(crc, data)
+        }
+    }
+}
+
+/// The portable table-driven implementation.
+pub fn table_update(crc: u32, data: &[u8]) -> u32 {
     let mut c = !crc;
     for &b in data {
         let i = ((c ^ u32::from(b)) & 0xff) as usize;

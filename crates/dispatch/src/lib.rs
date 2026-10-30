@@ -11,9 +11,10 @@
 //! authentication, BTI, W^X) are never switchable: the opt-out exists to
 //! work around a slow or broken accelerator, not to weaken the kernel.
 //!
-//! X0 state (finding F1 of `docs/X86-PLAN.md`): no hardware backend is
-//! compiled in yet, so every primitive selects its portable code whatever
-//! the CPU offers. X0b adds the ARMv8 backends; X9 the x86 ones.
+//! Since X0b the kernel image builds the ARMv8 backends in (`--cfg
+//! aes_armv8 --cfg polyval_armv8`, the vendored `cpufeatures` asking
+//! [`Sealed::cpufeatures`], the CRC32 instructions); host builds list them
+//! as not built. X9 adds the x86 ones.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -72,6 +73,11 @@ impl CpuFeatures {
         } else {
             self
         }
+    }
+
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 
     #[must_use]
@@ -161,16 +167,21 @@ const fn soft(name: &'static str) -> Backend {
     }
 }
 
-/// The backends of this image (X0: hardware paths are listed but not
-/// built, see F1).
+/// The bare-metal aarch64 kernel (the host builds none of the hardware
+/// backends: it has its own RustCrypto detection).
+const KERNEL_AARCH64: bool = cfg!(all(target_os = "none", target_arch = "aarch64"));
+
+/// The backends of this image. RustCrypto's AES and POLYVAL ask
+/// `cpufeatures` for "aes", which covers AES *and* PMULL, so both AES-GCM
+/// halves need both features.
 pub const TABLE: Table = [
     (
         Primitive::AesGcm,
         &[
             Backend {
                 name: "armv8-aes",
-                needs: &[Feature::Aes],
-                built: false,
+                needs: &[Feature::Aes, Feature::Pmull],
+                built: KERNEL_AARCH64 && cfg!(aes_armv8),
             },
             soft("soft"),
         ],
@@ -180,20 +191,32 @@ pub const TABLE: Table = [
         &[
             Backend {
                 name: "armv8-pmull",
-                needs: &[Feature::Pmull],
-                built: false,
+                needs: &[Feature::Aes, Feature::Pmull],
+                built: KERNEL_AARCH64 && cfg!(polyval_armv8),
             },
             soft("soft"),
         ],
     ),
-    (Primitive::ChaCha20Poly1305, &[soft("soft")]),
+    (
+        Primitive::ChaCha20Poly1305,
+        &[
+            // NEON (Advanced SIMD) is part of every ARMv8-A CPU: forced at
+            // build time, nothing to detect.
+            Backend {
+                name: "neon",
+                needs: &[],
+                built: KERNEL_AARCH64 && cfg!(chacha20_force_neon),
+            },
+            soft("soft"),
+        ],
+    ),
     (
         Primitive::Sha256,
         &[
             Backend {
                 name: "armv8-sha2",
                 needs: &[Feature::Sha2],
-                built: false,
+                built: KERNEL_AARCH64,
             },
             soft("soft"),
         ],
@@ -204,7 +227,7 @@ pub const TABLE: Table = [
             Backend {
                 name: "armv8-crc",
                 needs: &[Feature::Crc32],
-                built: false,
+                built: KERNEL_AARCH64,
             },
             soft("table"),
         ],
@@ -264,6 +287,15 @@ pub enum DisableError {
 
 /// Parses the `[cpu] disable` list.
 pub fn parse_disable(names: &[&str]) -> Result<CpuFeatures, DisableError> {
+    parse_names(names.iter().copied())
+}
+
+/// Parses a comma-separated list of feature names (`aes,pmull`).
+pub fn parse_disable_csv(csv: &str) -> Result<CpuFeatures, DisableError> {
+    parse_names(csv.split(','))
+}
+
+fn parse_names<'a>(names: impl Iterator<Item = &'a str>) -> Result<CpuFeatures, DisableError> {
     let mut set = CpuFeatures::NONE;
     for name in names {
         let f = Feature::from_name(name).ok_or(DisableError::Unknown)?;
@@ -294,6 +326,23 @@ pub enum SealError {
     AlreadySealed,
 }
 
+impl Sealed {
+    /// The answer for RustCrypto's `cpufeatures` (the vendored patch asks
+    /// through the kernel's `urmqtt_cpu_has`): may target feature `name` be
+    /// used? Only features this image dispatches on; anything else is
+    /// refused, so an unknown request falls back to portable code.
+    pub fn cpufeatures(&self, name: &str) -> bool {
+        let u = self.usable;
+        match name {
+            // LLVM's "aes" implies PMULL (and RustCrypto's POLYVAL uses it
+            // that way).
+            "aes" => u.has(Feature::Aes) && u.has(Feature::Pmull),
+            "sha2" => u.has(Feature::Sha2),
+            _ => false,
+        }
+    }
+}
+
 /// Holds the [`Sealed`] result, written exactly once.
 pub struct SealCell(OnceCell<Sealed>);
 
@@ -311,6 +360,17 @@ impl SealCell {
         disable: &[&str],
     ) -> Result<&Sealed, SealError> {
         let disabled = parse_disable(disable).map_err(SealError::Disable)?;
+        self.seal_mask(table, detected, disabled)
+    }
+
+    /// As [`Self::seal`], with the opt-out already parsed (the kernel joins
+    /// the configuration's list and a dev command-line list).
+    pub fn seal_mask(
+        &self,
+        table: &Table,
+        detected: CpuFeatures,
+        disabled: CpuFeatures,
+    ) -> Result<&Sealed, SealError> {
         let usable = detected.without(disabled);
         let sealed = Sealed {
             detected,
@@ -333,9 +393,6 @@ impl Default for SealCell {
         Self::new()
     }
 }
-
-/// The kernel's sealed CPU dispatch state.
-pub static CPU: SealCell = SealCell::new();
 
 #[cfg(test)]
 mod tests;

@@ -27,6 +27,8 @@ pub enum TestFault {
     Pac,
     /// Indirect branch to an instruction without a BTI landing pad.
     Bti,
+    /// Store into the sealed CPU dispatch page (must be a permission fault).
+    SealedWrite,
 }
 
 /// Storage self-tests (M11).
@@ -76,6 +78,15 @@ pub struct BootOptions {
     /// `install-countdown=S` (dev only): the installer's countdown instead
     /// of 30 s, for unattended tests.
     pub install_countdown_s: Option<u64>,
+    /// `cpu-disable=aes,pmull,...` (dev only): features taken out of the
+    /// CPU dispatch on top of `[cpu] disable`, to compare backends.
+    pub cpu_disable: urmqtt_dispatch::CpuFeatures,
+    /// `test=crypto-bench` (dev only): throughput of the dispatched
+    /// primitives, then continue booting.
+    pub crypto_bench: bool,
+    /// `test=simd-irq` (dev only): crypto known answers on every core under
+    /// an IPI storm for 10 s.
+    pub simd_irq: bool,
     /// `registry=allowlist`: allowlist mode even if the configuration says
     /// "open" (stricter only, for tests of one image in both modes).
     pub allowlist: bool,
@@ -124,12 +135,20 @@ impl BootOptions {
                 "log=debug" => o.log_level = Some(urmqtt_config::LogLevel::Debug),
                 "log=trace" => o.log_level = Some(urmqtt_config::LogLevel::Trace),
                 "registry=allowlist" => o.allowlist = true,
+                "test=sealed-write" => o.test_fault = Some(TestFault::SealedWrite),
+                "test=crypto-bench" => o.crypto_bench = true,
+                "test=simd-irq" => o.simd_irq = true,
                 w => {
                     if let Some(mb) = w
                         .strip_prefix("heap_limit_mb=")
                         .and_then(|v| v.parse().ok())
                     {
                         o.heap_limit_mb = Some(mb);
+                    } else if let Some(Ok(d)) = w
+                        .strip_prefix("cpu-disable=")
+                        .map(urmqtt_dispatch::parse_disable_csv)
+                    {
+                        o.cpu_disable = d;
                     } else if let Some(s) = w
                         .strip_prefix("install-countdown=")
                         .and_then(|v| v.parse().ok())

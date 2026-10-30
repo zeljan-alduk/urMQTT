@@ -179,6 +179,9 @@ def vendored():
     shims = sorted((ROOT / "crates/store/csrc").rglob("*.h"))
     rows.append(("libc headers for SQLite (C)", "own",
                  f"{sum(nonblank(p) for p in shims)} lines in {len(shims)} headers"))
+    for d in sorted((ROOT / "vendor").glob("cpufeatures-*")):
+        rows.append(("RustCrypto cpufeatures, patched (vendor/README.md)", d.name.split("-", 1)[1],
+                     f"{sum(nonblank(f) for f in rust_files(d / 'src'))} lines"))
     first = (ROOT / "vendor/limine/CHECKSUMS").read_text().splitlines()[0]
     lim = re.search(r"Limine (v\S+)", first)
     efi = ROOT / "vendor/limine/BOOTAA64.EFI"

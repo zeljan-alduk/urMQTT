@@ -10,7 +10,9 @@
 // The signatures are spelled out on purpose: they are the contract.
 #![allow(clippy::type_complexity)]
 
-use crate::{barrier, cpu, entropy, features, ipi, irq, msi, paging, percpu, power, time, trap};
+use crate::{
+    barrier, cpu, crc, entropy, features, ipi, irq, msi, paging, percpu, power, time, trap,
+};
 
 // barrier
 const BARRIER_DOORBELL: fn() = barrier::doorbell;
@@ -42,6 +44,9 @@ const IRQ_ACK_SPURIOUS: fn(&irq::Ack) -> bool = irq::Ack::is_spurious;
 
 // ipi
 const IPI_VECTORS: [u32; 3] = [ipi::PING, ipi::PONG, ipi::WAKE];
+
+// crc (checksum backends; unsafe: the caller checked the CPU feature)
+const CRC_CRC32C: unsafe fn(u32, &[u8]) -> u32 = crc::crc32c_update;
 
 // msi
 const MSI_FROM_TYPER: fn(u64, u32) -> msi::Frame = msi::Frame::from_typer;

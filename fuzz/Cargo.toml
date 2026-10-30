@@ -19,6 +19,13 @@ urmqtt-net = { path = "../crates/net" }
 urmqtt-tls = { path = "../crates/tls" }
 urmqtt-broker = { path = "../crates/broker" }
 urmqtt-control = { path = "../crates/control" }
+urmqtt-arch-aarch64 = { path = "../crates/arch-aarch64" }
+# X0b differential targets: the crates the kernel uses, against ring.
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.11", default-features = false }
+sha2_010 = { package = "sha2", version = "0.10", default-features = false }
+ring = "0.17"
 ed25519-dalek = { version = "2.2", default-features = false }
 
 # Standalone workspace: fuzz builds need sanitizer RUSTFLAGS.
@@ -115,3 +122,36 @@ path = "fuzz_targets/gpt_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "diff_aes_gcm"
+path = "fuzz_targets/diff_aes_gcm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diff_chacha20poly1305"
+path = "fuzz_targets/diff_chacha20poly1305.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diff_sha256"
+path = "fuzz_targets/diff_sha256.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diff_crc32c"
+path = "fuzz_targets/diff_crc32c.rs"
+test = false
+doc = false
+bench = false
+
+# The kernel's patched cpufeatures (behaves as upstream on the host).
+[patch.crates-io]
+cpufeatures = { path = "../vendor/cpufeatures-0.3.1" }
+cpufeatures-02 = { package = "cpufeatures", path = "../vendor/cpufeatures-0.2.17" }

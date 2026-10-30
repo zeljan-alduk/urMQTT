@@ -25,6 +25,10 @@ mod console;
 #[cfg(target_os = "none")]
 mod control;
 #[cfg(target_os = "none")]
+mod cpu_dispatch;
+#[cfg(all(target_os = "none", feature = "selftest"))]
+mod crypto_bench;
+#[cfg(target_os = "none")]
 mod dataplane;
 #[cfg(target_os = "none")]
 mod db;
@@ -52,6 +56,8 @@ mod ops;
 mod power;
 #[cfg(target_os = "none")]
 mod selftest;
+#[cfg(all(target_os = "none", feature = "selftest"))]
+mod simd_irq;
 #[cfg(target_os = "none")]
 mod smp;
 #[cfg(target_os = "none")]

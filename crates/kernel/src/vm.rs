@@ -63,6 +63,8 @@ unsafe extern "C" {
     static __text_end: u8;
     static __rodata_start: u8;
     static __rodata_end: u8;
+    static __sealed_start: u8;
+    static __sealed_end: u8;
     static __data_start: u8;
     static __kernel_end: u8;
 }
@@ -71,15 +73,18 @@ fn sym(s: &'static u8) -> u64 {
     core::ptr::from_ref(s) as u64
 }
 
-/// Kernel image sections as `[start, end)` virtual addresses.
-pub fn kernel_sections() -> [(u64, u64, PageAttrs, &'static str); 3] {
+/// Kernel image sections as `[start, end)` virtual addresses. The sealed
+/// dispatch page is read-only (and never executable) in the kernel's tables.
+pub fn kernel_sections() -> [(u64, u64, PageAttrs, &'static str); 4] {
     // SAFETY: linker-defined symbols; only their addresses are taken.
-    let (ts, te, rs, re, ds, ke) = unsafe {
+    let (ts, te, rs, re, ss, se, ds, ke) = unsafe {
         (
             sym(&__text_start),
             sym(&__text_end),
             sym(&__rodata_start),
             sym(&__rodata_end),
+            sym(&__sealed_start),
+            sym(&__sealed_end),
             sym(&__data_start),
             sym(&__kernel_end),
         )
@@ -87,6 +92,7 @@ pub fn kernel_sections() -> [(u64, u64, PageAttrs, &'static str); 3] {
     [
         (ts, te, PageAttrs::text(false), "text"),
         (rs, re, PageAttrs::rodata(), "rodata"),
+        (ss, se, PageAttrs::rodata(), "sealed"),
         (ds, ke, PageAttrs::data(), "data"),
     ]
 }
@@ -463,7 +469,7 @@ pub fn leaf_at(va: u64) -> Option<Leaf> {
 
 /// Whether any page of the kernel image is writable through the HHDM.
 pub fn kernel_alias_writable() -> bool {
-    let [(ts, _, _, _), _, (_, ke, _, _)] = kernel_sections();
+    let [(ts, _, _, _), _, _, (_, ke, _, _)] = kernel_sections();
     let Some(text_pa) = phys_of(ts) else {
         return true;
     };

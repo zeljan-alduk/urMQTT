@@ -13,6 +13,7 @@
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_code)]
 
+pub mod crc;
 pub mod esr;
 pub mod features;
 pub mod msi;

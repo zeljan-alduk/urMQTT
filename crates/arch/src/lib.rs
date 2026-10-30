@@ -70,6 +70,12 @@ pub mod ipi {
     pub const WAKE: u32 = 3;
 }
 
+/// Checksums with CPU instructions (dispatched, X0b).
+#[cfg(target_arch = "aarch64")]
+pub mod crc {
+    pub use super::imp::crc::crc32c_update;
+}
+
 /// Message-signalled interrupts.
 #[cfg(target_arch = "aarch64")]
 pub mod msi {

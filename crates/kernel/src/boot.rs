@@ -254,14 +254,15 @@ extern "C" fn urmqtt_kmain() -> ! {
     );
     // Crypto and checksum backends (ADR-041): detection minus the
     // configured opt-out, sealed before any of them runs.
-    match urmqtt_dispatch::CPU.seal(
-        &urmqtt_dispatch::TABLE,
-        features.dispatch(),
-        urmqtt_config::CONFIG.cpu.disable,
-    ) {
+    // The configuration was validated at build time; a dev command line
+    // may take more features out (to compare backends).
+    let disabled = urmqtt_dispatch::parse_disable(urmqtt_config::CONFIG.cpu.disable)
+        .unwrap_or_default()
+        .union(options.cpu_disable);
+    match crate::cpu_dispatch::seal(features.dispatch(), disabled) {
         Ok(d) => {
             info!(
-                "cpu dispatch: detected {}, disabled by config {}",
+                "cpu dispatch: detected {}, disabled {}",
                 d.detected, d.disabled
             );
             info!("crypto: {}", d.selection);
@@ -386,6 +387,15 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         fatal(msg);
     }
     vm::enable_heap_caches();
+    // Power-on self-test of the backends sealed in stage 1 (X0b), before
+    // anything uses them: fail closed.
+    match urmqtt_tls::kat::run() {
+        Ok(()) if urmqtt_store::crc::crc32c(b"123456789") == 0xe306_9283 => info!(
+            "crypto: known-answer tests passed (AES-128-GCM, ChaCha20-Poly1305, SHA-256, HMAC-SHA-256, CRC-32C)"
+        ),
+        Ok(()) => fatal("crypto: CRC-32C known-answer test failed"),
+        Err(name) => fatal_fmt(format_args!("crypto: {name} known-answer test failed")),
+    }
     // Interrupts and time (M3). Device mappings must precede the lock.
     let Some(intr) = s.interrupts else {
         fatal("no GIC/timer description in DTB or ACPI");
@@ -451,6 +461,12 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     if let Some(fault) = s.options.test_fault {
         run_test_fault(fault, s.features);
     }
+    if s.options.crypto_bench {
+        #[cfg(feature = "selftest")]
+        crate::crypto_bench::run();
+        #[cfg(not(feature = "selftest"))]
+        warn!("crypto-bench: not in this image (built without the selftest feature)");
+    }
 
     tick_selftest(intr.timer.virt);
     if s.options.install {
@@ -496,6 +512,14 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         );
     }
     smp_bringup(&mut s);
+    if s.options.simd_irq {
+        #[cfg(feature = "selftest")]
+        if !crate::simd_irq::run() {
+            fatal("simd-irq: FP/SIMD state corrupted by interrupts");
+        }
+        #[cfg(not(feature = "selftest"))]
+        warn!("simd-irq: not in this image (built without the selftest feature)");
+    }
     // With durable storage and two or more CPUs, the last CPU is the DB
     // core; every other CPU is a data core (M13, ADR-032).
     let cpus = smp::count().max(1);
@@ -777,6 +801,7 @@ fn run_test_fault(fault: TestFault, features: Features) {
         TestFault::Undefined => trap::undefined_instruction(),
         TestFault::Panic => panic!("test panic requested on the command line"),
         TestFault::WriteText => selftest::write_text(),
+        TestFault::SealedWrite => selftest::write_sealed(),
         TestFault::ExecHeap => selftest::exec_heap(),
         TestFault::StackOverflow => selftest::stack_overflow(),
         TestFault::NullDeref => trap::probe_read(0x8),
