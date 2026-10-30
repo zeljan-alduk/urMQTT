@@ -28,7 +28,9 @@ PATTERNS=(
     '\b(in|out)[bwl]?\s+(%?[ad]x|%al|\$?0x)'
     '\bcpuid\b'
 )
-ALLOWED=("$ANY_ARCH" "$ANY_ARCH" "$AARCH64" "$AARCH64" "$AARCH64" "$AARCH64" "$X86" "$X86" "$X86" "$X86")
+# `msr` is also a plain identifier in x86 code (an MSR number), so the
+# AArch64 system-register rule only polices code outside both arch crates.
+ALLOWED=("$ANY_ARCH" "$ANY_ARCH" "$ANY_ARCH" "$AARCH64" "$AARCH64" "$AARCH64" "$X86" "$X86" "$X86" "$X86")
 WHAT=(
     'inline assembly'
     'global assembly'
