@@ -70,6 +70,7 @@ pub const SUBSYSTEM_ID: u16 = 0x2e;
 pub const CAP_PTR: u16 = 0x34;
 pub const SECONDARY_BUS: u16 = 0x19;
 
+pub const CMD_IO: u16 = 1 << 0;
 pub const CMD_MEMORY: u16 = 1 << 1;
 pub const CMD_BUS_MASTER: u16 = 1 << 2;
 pub const CMD_INTX_DISABLE: u16 = 1 << 10;
@@ -313,6 +314,115 @@ pub const fn msix_entry(address: u64, data: u32, masked: bool) -> [u32; 4] {
     [address as u32, (address >> 32) as u32, data, masked as u32]
 }
 
+/// Size in bytes of BAR `index` of a type-0 header, or `None` if it is
+/// unimplemented. Probes by writing all ones (PCI spec 6.2.5.1) with
+/// memory and I/O decoding off, and restores the BAR (and both halves of a
+/// 64-bit one) and the command register afterwards. Call it before the
+/// function is in use.
+pub fn bar_size<C: ConfigSpace>(cfg: &mut C, bdf: Bdf, index: u8) -> Option<u64> {
+    if index > 5 {
+        return None;
+    }
+    let off = BAR0 + u16::from(index) * 4;
+    let cmd = cfg.read16(bdf, COMMAND);
+    cfg.write16(bdf, COMMAND, cmd & !(CMD_MEMORY | CMD_IO));
+    let orig_lo = cfg.read32(bdf, off);
+    let is_io = orig_lo & 1 == 1;
+    let is64 = !is_io && (orig_lo >> 1) & 0x3 == 0x2 && index < 5;
+    cfg.write32(bdf, off, u32::MAX);
+    let lo = cfg.read32(bdf, off);
+    cfg.write32(bdf, off, orig_lo);
+    let hi = if is64 {
+        let orig_hi = cfg.read32(bdf, off + 4);
+        cfg.write32(bdf, off + 4, u32::MAX);
+        let hi = cfg.read32(bdf, off + 4);
+        cfg.write32(bdf, off + 4, orig_hi);
+        hi
+    } else {
+        0
+    };
+    cfg.write16(bdf, COMMAND, cmd);
+    let size = bar_size_from_masks(lo, hi, is_io, is64);
+    (size != 0).then_some(size)
+}
+
+/// Decodes the read-back of an all-ones write into a size (0 = none).
+pub fn bar_size_from_masks(lo: u32, hi: u32, is_io: bool, is64: bool) -> u64 {
+    if is_io {
+        let mut mask = lo & !0x3;
+        if mask == 0 {
+            return 0;
+        }
+        // Many devices implement only 16 address bits.
+        if mask >> 16 == 0 {
+            mask |= 0xffff_0000;
+        }
+        return u64::from((!mask).wrapping_add(1));
+    }
+    let mask = lo & !0xf;
+    if is64 {
+        let m = (u64::from(hi) << 32) | u64::from(mask);
+        (!m).wrapping_add(1)
+    } else {
+        u64::from((!mask).wrapping_add(1))
+    }
+}
+
+/// Port-mapped I/O, for configuration mechanism #1.
+pub trait PortIo {
+    fn outl(&self, port: u16, value: u32);
+    fn inl(&self, port: u16) -> u32;
+}
+
+pub const CONFIG_ADDRESS: u16 = 0xcf8;
+pub const CONFIG_DATA: u16 = 0xcfc;
+
+/// The value written to `CONFIG_ADDRESS` to select dword `offset & !3` of
+/// `bdf` (PCI 3.0 §3.2.2.3.2).
+pub const fn mech1_address(bdf: Bdf, offset: u16) -> u32 {
+    0x8000_0000
+        | ((bdf.bus as u32) << 16)
+        | ((bdf.dev as u32 & 0x1f) << 11)
+        | ((bdf.func as u32 & 0x7) << 8)
+        | (offset as u32 & 0xfc)
+}
+
+/// Configuration mechanism #1 (0xCF8/0xCFC): legacy PCs and VMs without an
+/// MCFG table. Reaches bus 0..=255 and offsets below 256 only. The
+/// address/data pair is not atomic, so use it from one CPU at a time (boot).
+pub struct PortConfig<P: PortIo> {
+    ports: P,
+}
+
+impl<P: PortIo> PortConfig<P> {
+    /// Checks that the address register latches (the test Linux uses to
+    /// detect mechanism #1) and returns the accessor.
+    pub fn detect(ports: P) -> Option<Self> {
+        let probe = 0x8000_0000;
+        ports.outl(CONFIG_ADDRESS, probe);
+        let ok = ports.inl(CONFIG_ADDRESS) == probe;
+        ports.outl(CONFIG_ADDRESS, 0);
+        ok.then_some(Self { ports })
+    }
+}
+
+impl<P: PortIo> ConfigSpace for PortConfig<P> {
+    fn read32(&self, bdf: Bdf, offset: u16) -> u32 {
+        if offset >= 256 {
+            return u32::MAX;
+        }
+        self.ports.outl(CONFIG_ADDRESS, mech1_address(bdf, offset));
+        self.ports.inl(CONFIG_DATA)
+    }
+
+    fn write32(&mut self, bdf: Bdf, offset: u16, value: u32) {
+        if offset < 256 {
+            self.ports.outl(CONFIG_ADDRESS, mech1_address(bdf, offset));
+            self.ports.outl(CONFIG_DATA, value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +586,172 @@ mod tests {
             [0x0802_0040, 1, 80, 0]
         );
         assert_eq!(msix_entry(0, 0, true)[3], 1);
+    }
+
+    /// Adds BAR size masks to a [`Sim`]: writes to a masked BAR keep only
+    /// the address bits the "device" implements.
+    struct Masked {
+        sim: Sim,
+        masks: BTreeMap<u16, u32>,
+    }
+
+    impl ConfigSpace for Masked {
+        fn read32(&self, b: Bdf, off: u16) -> u32 {
+            self.sim.read32(b, off)
+        }
+        fn write32(&mut self, b: Bdf, off: u16, v: u32) {
+            let v = match self.masks.get(&off) {
+                Some(m) => (v & m) | (self.sim.read32(b, off) & !m),
+                None => v,
+            };
+            self.sim.write32(b, off, v);
+        }
+    }
+
+    #[test]
+    fn bar_sizing_32_64_io_and_restore() {
+        let b = bdf(0, 5, 0);
+        let mut sim = Sim::default();
+        let r = sim.add(b, 0x1af4, 0x1041, 0, 0);
+        r[1] = 0x0000_0007; // command: io, memory, bus master
+        r[4] = 0xfebf_1000; // BAR0: 4 KiB, 32-bit
+        r[5] = 0x0000_c041; // BAR1: I/O, 64 bytes
+        r[6] = 0x0000_000c; // BAR2: 64-bit prefetchable, 16 MiB at 0x8_0000_0000...
+        r[7] = 0x0000_0008; // ...hi half
+        let mut m = Masked {
+            sim,
+            masks: BTreeMap::from([
+                (0x10, 0xffff_f000),
+                (0x14, 0x0000_ffc0),
+                (0x18, 0xff00_0000),
+                (0x1c, 0xffff_ffff),
+                (0x20, 0),
+            ]),
+        };
+        assert_eq!(bar_size(&mut m, b, 0), Some(0x1000));
+        assert_eq!(bar_size(&mut m, b, 1), Some(0x40));
+        assert_eq!(bar_size(&mut m, b, 2), Some(0x100_0000));
+        assert_eq!(bar_size(&mut m, b, 4), None, "unimplemented BAR reads 0");
+        assert_eq!(bar_size(&mut m, b, 6), None);
+        // BARs and the command register are restored.
+        assert_eq!(m.sim.read32(b, 0x10), 0xfebf_1000);
+        assert_eq!(m.sim.read32(b, 0x18), 0x0000_000c);
+        assert_eq!(m.sim.read32(b, 0x1c), 0x0000_0008);
+        assert_eq!(m.sim.read16(b, COMMAND), 7);
+    }
+
+    #[test]
+    fn bar_size_masks() {
+        assert_eq!(bar_size_from_masks(0xffff_f000, 0, false, false), 0x1000);
+        assert_eq!(
+            bar_size_from_masks(0xffff_c00c, 0xffff_ffff, false, true),
+            0x4000
+        );
+        // 4 GiB window: only the high half has bits.
+        assert_eq!(
+            bar_size_from_masks(0x0000_000c, 0xffff_ff00, false, true),
+            1 << 40
+        );
+        assert_eq!(bar_size_from_masks(0, 0, false, false), 0);
+        assert_eq!(bar_size_from_masks(0x0000_fff1, 0, true, false), 0x10);
+        assert_eq!(bar_size_from_masks(0xffff_ff01, 0, true, false), 0x100);
+    }
+
+    #[test]
+    fn mech1_address_encoding() {
+        assert_eq!(mech1_address(bdf(0, 0, 0), 0), 0x8000_0000);
+        assert_eq!(mech1_address(bdf(1, 2, 3), 0x44), 0x8001_1344);
+        assert_eq!(mech1_address(bdf(255, 31, 7), 0xfe), 0x80ff_ffbc | 0x40);
+        // offset low bits are dropped, dev/func are masked
+        assert_eq!(mech1_address(bdf(0, 0x21, 9), 3), 0x8000_0900);
+    }
+
+    use std::cell::{Cell, RefCell};
+
+    /// A fake CF8/CFC port pair in front of a [`Sim`].
+    struct FakePorts {
+        latch: Cell<u32>,
+        sim: RefCell<Sim>,
+        latches: bool,
+    }
+
+    impl FakePorts {
+        fn target(&self) -> (Bdf, u16) {
+            let a = self.latch.get();
+            (
+                bdf(
+                    (a >> 16) as u8,
+                    ((a >> 11) & 0x1f) as u8,
+                    ((a >> 8) & 7) as u8,
+                ),
+                (a & 0xfc) as u16,
+            )
+        }
+    }
+
+    impl PortIo for FakePorts {
+        fn outl(&self, port: u16, v: u32) {
+            match port {
+                CONFIG_ADDRESS if self.latches => self.latch.set(v),
+                CONFIG_DATA if self.latch.get() & 0x8000_0000 != 0 => {
+                    let (b, o) = self.target();
+                    self.sim.borrow_mut().write32(b, o, v);
+                }
+                _ => {}
+            }
+        }
+        fn inl(&self, port: u16) -> u32 {
+            match port {
+                CONFIG_ADDRESS => {
+                    if self.latches {
+                        self.latch.get()
+                    } else {
+                        u32::MAX
+                    }
+                }
+                CONFIG_DATA if self.latch.get() & 0x8000_0000 != 0 => {
+                    let (b, o) = self.target();
+                    self.sim.borrow().read32(b, o)
+                }
+                _ => u32::MAX,
+            }
+        }
+    }
+
+    #[test]
+    fn port_config_reads_writes_and_enumerates() {
+        let mut sim = Sim::default();
+        sim.add(bdf(0, 0, 0), 0x8086, 0x1237, 0x06_00_00, 0);
+        let r = sim.add(bdf(0, 3, 0), 0x1af4, 0x1000, 0x02_00_00, 0);
+        r[11] = 0x0001_0000; // subsystem id 1 at 0x2e
+        let ports = FakePorts {
+            latch: Cell::new(0),
+            sim: RefCell::new(sim),
+            latches: true,
+        };
+        let mut cfg = PortConfig::detect(ports).expect("mechanism 1");
+        assert_eq!(cfg.read32(bdf(0, 3, 0), 0), 0x1000_1af4);
+        assert_eq!(cfg.read32(bdf(0, 4, 0), 0), u32::MAX, "empty slot");
+        assert_eq!(
+            cfg.read32(bdf(0, 3, 0), 0x100),
+            u32::MAX,
+            "no extended space"
+        );
+        cfg.write16(bdf(0, 3, 0), COMMAND, 6);
+        assert_eq!(cfg.read16(bdf(0, 3, 0), COMMAND), 6);
+        let fs = enumerate(&cfg, 0, 255);
+        let ids: Vec<_> = fs.iter().map(|f| (f.bdf, f.device)).collect();
+        assert_eq!(ids, vec![(bdf(0, 0, 0), 0x1237), (bdf(0, 3, 0), 0x1000)]);
+        assert_eq!(fs.iter().nth(1).map(|f| f.subsystem), Some(1));
+    }
+
+    #[test]
+    fn port_config_absent_when_address_does_not_latch() {
+        let ports = FakePorts {
+            latch: Cell::new(0),
+            sim: RefCell::new(Sim::default()),
+            latches: false,
+        };
+        assert!(PortConfig::detect(ports).is_none());
     }
 }

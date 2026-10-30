@@ -50,6 +50,8 @@ pub mod percpu;
 #[cfg(target_os = "none")]
 pub mod pic;
 #[cfg(target_os = "none")]
+pub mod pio;
+#[cfg(target_os = "none")]
 mod port;
 #[cfg(target_os = "none")]
 pub mod power;
