@@ -21,6 +21,7 @@ pub mod crc;
 pub mod features;
 pub mod msi;
 pub mod paging;
+pub mod pat;
 pub mod trap;
 
 #[cfg(target_os = "none")]

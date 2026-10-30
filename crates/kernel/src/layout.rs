@@ -1,4 +1,5 @@
-//! Kernel virtual address layout (TTBR1, 48-bit upper half).
+//! Kernel virtual address layout (TTBR1 / the upper half of CR3's tree,
+//! 48-bit canonical addresses; every base below is canonical on both).
 //!
 //! ```text
 //! 0xffff_0000_0000_0000  HHDM (offset chosen by Limine, kept as is)
@@ -9,7 +10,9 @@
 //! 0xffff_f000_0000_0000  page-table alias   (RW view of the table pool, removed at lock)
 //! 0xffff_ffff_8000_0000  kernel image       (RX text, R rodata, RW data/bss; linker.ld)
 //! ```
-//! The lower half (TTBR0) is disabled with `TCR_EL1.EPD0`.
+//! The lower half (TTBR0) is disabled with `TCR_EL1.EPD0`; on x86_64 the
+//! root simply has no lower-half entries. Limine's x86_64 HHDM starts at
+//! `0xffff_8000_0000_0000` (the first canonical upper-half address).
 
 pub const MMIO_BASE: u64 = 0xffff_c000_0000_0000;
 pub const MMIO_SIZE: u64 = 1 << 30;
@@ -52,7 +55,11 @@ pub fn describe(far: u64) -> Option<(&'static str, u64)> {
     }
     if far < 0x1_0000_0000_0000 {
         return Some((
-            "lower half (TTBR0 disabled, likely a null or user pointer)",
+            if cfg!(target_arch = "x86_64") {
+                "lower half (no mappings, likely a null or user pointer)"
+            } else {
+                "lower half (TTBR0 disabled, likely a null or user pointer)"
+            },
             0,
         ));
     }

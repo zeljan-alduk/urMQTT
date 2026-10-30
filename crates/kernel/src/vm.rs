@@ -1,10 +1,12 @@
 //! The kernel's own address space (M2).
 //!
 //! Built once on the boot CPU from the Limine memory map, then activated by
-//! switching TTBR1. Guarantees:
-//! - W^X: text RX, rodata R, everything else RW-NX, plus `SCTLR_EL1.WXN`.
-//!   The HHDM alias of the kernel image is read-only.
-//! - The lower half is disabled (`TCR_EL1.EPD0`): null and user pointers fault.
+//! switching TTBR1 (aarch64) or CR3 (x86_64). Guarantees:
+//! - W^X: text RX, rodata R, everything else RW-NX, plus `SCTLR_EL1.WXN`
+//!   (x86: NX via `EFER.NXE` and `CR0.WP`, with SMEP/SMAP/UMIP where the CPU
+//!   has them). The HHDM alias of the kernel image is read-only.
+//! - The lower half is disabled (`TCR_EL1.EPD0`; x86: the root has no
+//!   lower-half entries): null and user pointers fault.
 //! - Every stack has unmapped guard pages; exceptions run on a separate stack.
 //! - After [`lock`], page-table frames are read-only in the HHDM and every
 //!   mapping request fails: nothing is ever remapped at runtime.
@@ -336,8 +338,9 @@ fn map_hhdm_range(
     Ok(())
 }
 
-/// Switches TTBR1 to the kernel tables, disables the lower half and turns
-/// on WXN. The current stack (bootloader memory) stays mapped.
+/// Switches TTBR1 (x86: CR3) to the kernel tables, disables the lower half
+/// and turns on WXN (x86: WP, SMEP, SMAP, UMIP). The current stack
+/// (bootloader memory) stays mapped.
 pub fn activate() {
     let Some(root) = SPACE.lock().as_ref().map(|s| s.root) else {
         return;
@@ -346,6 +349,19 @@ pub fn activate() {
     // current stack) and all MMIO at the same addresses as before, and no
     // mapping is both writable and executable (audited later).
     unsafe { paging::activate(root) };
+    #[cfg(target_arch = "x86_64")]
+    {
+        let p = paging::protections();
+        let on = |b: bool| if b { "on" } else { "unavailable" };
+        urmqtt_log::info!(
+            "mm: protections nx={} wp={} smep={} smap={} umip={}",
+            on(p.nx),
+            on(p.wp),
+            on(p.smep),
+            on(p.smap),
+            on(p.umip)
+        );
+    }
     crate::memory::retire_early_mmio();
 }
 
@@ -489,6 +505,10 @@ pub struct Audit {
     pub leaves: u64,
     pub writable_and_executable: u64,
     pub executable_outside_text: u64,
+    /// Leaves in the lower half of the address space (x86 only: a single
+    /// root covers both halves; aarch64's lower half is a separate, disabled
+    /// register). Must be zero.
+    pub lower_half_leaves: u64,
 }
 
 /// Walks every leaf and checks W^X and that only kernel text is executable.
@@ -503,6 +523,7 @@ pub fn audit() -> Option<Audit> {
         leaves: 0,
         writable_and_executable: 0,
         executable_outside_text: 0,
+        lower_half_leaves: 0,
     };
     m.for_each_leaf(true, |va, desc, _| {
         let leaf = Leaf::decode(desc);
@@ -514,6 +535,8 @@ pub fn audit() -> Option<Audit> {
             a.executable_outside_text += 1;
         }
     });
+    #[cfg(target_arch = "x86_64")]
+    m.for_each_leaf(false, |_, _, _| a.lower_half_leaves += 1);
     Some(a)
 }
 

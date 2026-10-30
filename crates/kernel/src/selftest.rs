@@ -76,6 +76,9 @@ pub fn wx_audit() -> Result<(), &'static str> {
     if a.executable_outside_text != 0 {
         return Err("executable mapping outside kernel text");
     }
+    if a.lower_half_leaves != 0 {
+        return Err("lower-half mapping present (null/user pointers must fault)");
+    }
     let text = write_text as *const () as u64;
     let [_, _, (sealed_start, _, _, _), (data_start, _, _, _)] = vm::kernel_sections();
     let checks: [(&str, u64, bool, bool); 5] = [
