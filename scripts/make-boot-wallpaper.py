@@ -2,9 +2,9 @@
 """Draws the boot-menu wallpaper: the ALDO TECH mark with the site URL below it.
 
 The mark is assets/boot/aldotech-logo-mark.svg, the colours are those of
-aldo.tech (navy background, light mark, amber URL). The mark sits in the
-lower half so Limine's menu entries (centred around y = 290 at 800x600) stay
-clear of it. Run it only when the artwork changes and commit the PNG: the ISO
+aldo.tech (navy background, light mark, amber URL). The mark and the URL sit in
+the upper half, above Limine's menu entries (centred around y = 290 whatever
+the screen size, because the image and the menu are both centred). Run it only when the artwork changes and commit the PNG: the ISO
 build reads assets/boot/wallpaper.png and needs neither Pillow nor the font.
 
     scripts/make-boot-wallpaper.py FONT.ttf [OUT.png]
@@ -31,16 +31,17 @@ def main() -> None:
     img = Image.new("RGB", (W * SS, H * SS), NAVY)
     d = ImageDraw.Draw(img)
 
-    mark_w = 170
+    mark_w = 130
     s = mark_w * SS / BOX[2]
-    left, top = (W - mark_w) / 2 * SS, 330 * SS
+    top_y = 70
+    left, top = (W - mark_w) / 2 * SS, top_y * SS
     for poly in (MARK_A, MARK_B):
         d.polygon([(left + (x - BOX[0]) * s, top + (y - BOX[1]) * s) for x, y in poly], fill=TEXT)
     img = img.resize((W, H), Image.LANCZOS)
 
     d = ImageDraw.Draw(img)
-    font = ImageFont.truetype(font_path, 24)
-    y = 330 + mark_w * BOX[3] / BOX[2] + 28
+    font = ImageFont.truetype(font_path, 22)
+    y = top_y + mark_w * BOX[3] / BOX[2] + 26
     d.text(((W - d.textlength(URL, font=font)) / 2, y), URL, font=font, fill=AMBER)
     img.save(out, optimize=True)
 
