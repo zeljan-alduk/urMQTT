@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/arch",
     "crates/arch-aarch64",
+    "crates/arch-x86_64",
     "crates/broker",
     "crates/config",
     "crates/config-schema",

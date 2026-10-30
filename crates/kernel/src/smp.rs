@@ -118,6 +118,29 @@ unsafe extern "C" {
     fn urmqtt_ap_entry(info: &MpInfo) -> !;
 }
 
+/// The hardware identity Limine reports for `info`: the MPIDR affinity on
+/// AArch64, the local APIC ID on x86.
+#[cfg(target_arch = "aarch64")]
+fn hw_id_of(info: &MpInfo) -> u64 {
+    info.mpidr
+}
+
+#[cfg(target_arch = "x86_64")]
+fn hw_id_of(info: &MpInfo) -> u64 {
+    u64::from(info.lapic_id)
+}
+
+/// The boot CPU's hardware identity from the MP response.
+#[cfg(target_arch = "aarch64")]
+pub fn bsp_hw_id(mp: &limine::request::MpResponse) -> u64 {
+    mp.bsp_mpidr
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn bsp_hw_id(mp: &limine::request::MpResponse) -> u64 {
+    u64::from(mp.bsp_lapic_id)
+}
+
 /// Releases every AP in `cpus` (the Limine MP response), up to `max` CPUs
 /// in all. Their stacks must already be mapped (`vm::map_stacks`). Returns
 /// the number started.
@@ -129,14 +152,14 @@ pub fn start_aps(
 ) -> usize {
     let max = max.min(MAX_CPUS);
     let mut next = 1usize;
-    for info in cpus.iter().filter(|c| c.mpidr != bsp_mpidr) {
+    for info in cpus.iter().filter(|c| hw_id_of(c) != bsp_mpidr) {
         if next >= max {
             warn!("smp: more than {max} CPUs usable, ignoring the rest");
             break;
         }
         let id = next;
         next += 1;
-        CPUS[id].mpidr.store(info.mpidr, Ordering::Relaxed);
+        CPUS[id].mpidr.store(hw_id_of(info), Ordering::Relaxed);
         let ((_, exc_top), (_, main_top)) = layout::stacks(id as u64);
         // SAFETY: slot `id` is not yet visible to any AP; the Release store in
         // `bootstrap` publishes it before AP `id` reads it.

@@ -9,11 +9,18 @@ use urmqtt_platform::PsciMethod;
 // exception path on the same CPU.
 static SMOKE: AtomicBool = AtomicBool::new(false);
 
+#[cfg(target_arch = "aarch64")]
 pub fn set_conduit(m: PsciMethod) {
     arch_power::set_conduit(match m {
         PsciMethod::Hvc => Conduit::Hvc,
         PsciMethod::Smc => Conduit::Smc,
     });
+}
+
+/// x86 has no PSCI: power control goes through ACPI (X2).
+#[cfg(target_arch = "x86_64")]
+pub fn set_conduit(_m: PsciMethod) {
+    arch_power::set_conduit(Conduit::Acpi);
 }
 
 pub fn set_smoke(smoke: bool) {

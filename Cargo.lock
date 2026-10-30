@@ -1491,11 +1491,20 @@ name = "urmqtt-arch"
 version = "0.1.0"
 dependencies = [
  "urmqtt-arch-aarch64",
+ "urmqtt-arch-x86_64",
  "urmqtt-dispatch",
 ]
 
 [[package]]
 name = "urmqtt-arch-aarch64"
+version = "0.1.0"
+dependencies = [
+ "urmqtt-dispatch",
+ "urmqtt-sync",
+]
+
+[[package]]
+name = "urmqtt-arch-x86_64"
 version = "0.1.0"
 dependencies = [
  "urmqtt-dispatch",

@@ -1226,3 +1226,22 @@ PROMPT-security.md §H3 and PLAN.md decision 5; plan and status in SECURITY-PLAN
 - Reconnect storms stay in `tools/loadgen` (the `storm` scenario, M16); not duplicated here.
 - The raw-L2 floods exercise the aarch64 VM only; the x86 half follows the X-track port.
 - The full unbounded-work audit table is written up under H10, not re-listed here.
+
+## X1 — x86_64 builds (2026-10-30)
+
+X86-PLAN §X1. `make build ARCH=x86_64` links an ELF; `make check` is green on both targets.
+
+**Done**
+
+- **`crates/arch-x86_64`:** every facade item exists with the contract's signature and stops with "not implemented until X<n>" when called. Pure parts already work and are tested: CPUID decoding (`features`), MSI composition (`msi`).
+- **Facade split:** `crates/arch/src/{aarch64,x86_64}.rs` re-export the per-architecture crate under the same module names; `contract.rs` now binds both.
+- **Target:** `targets/x86_64-urmqtt-none.json` — hard-float, x86-64-v2 (`sse4.2,popcnt,cx16`), no red zone, kernel code model, static relocation. Needs `-Zjson-target-spec` with `-Zbuild-std`. **D3 decided: option (a), the custom target** — spike: an `f64` multiply compiles to `mulsd`.
+- **SQLite:** `crates/store/build.rs` picks clang flags per architecture (`-march=x86-64-v2 -mcmodel=kernel -mno-red-zone` on x86).
+- **Linker:** `crates/kernel/linker-x86_64.ld`; the entry `_start` is a stub that calls `urmqtt_kmain` and halts.
+- **Kernel:** Limine MP identity (`mpidr` / `lapic_id`) behind `smp::hw_id_of`; PSCI conduit only on aarch64.
+- **Makefile:** `ARCH=aarch64|x86_64`, `make check-x86` (clippy for the x86 kernel) inside `make check`.
+
+**Not done**
+
+- CI jobs (x86 build, KVM probe, x86 host tests): follow with X2's smoke jobs.
+- The reproducibility double-build of the x86 ELF, and the `xmm` audit: meaningful once the ELF contains the kernel (X2).

@@ -62,7 +62,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=URMQTT_AR");
     verify_checksums(&vendor);
 
-    let target = std::env::var("TARGET").unwrap_or_default();
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let mut b = cc::Build::new();
     b.file(vendor.join("sqlite3.c"))
         .include(&vendor)
@@ -71,7 +71,7 @@ fn main() {
     for (k, v) in DEFINES {
         b.define(k, Some(*v));
     }
-    if target.ends_with("-none") {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("none") {
         let clang = tool(
             "URMQTT_CLANG",
             &[
@@ -96,23 +96,37 @@ fn main() {
             .archiver(ar)
             .no_default_flags(true)
             .include(Path::new(env!("CARGO_MANIFEST_DIR")).join("csrc/include"));
-        for flag in [
-            "--target=aarch64-unknown-none-elf",
+        // The kernel ABI per architecture: aarch64 is strict-alignment with
+        // PAC and BTI (ADR-016); x86_64 is hard-float SSE at the x86-64-v2
+        // baseline, no red zone, kernel code model (ADR-042).
+        let arch_flags: &[&str] = match arch.as_str() {
+            "aarch64" => &[
+                "--target=aarch64-unknown-none-elf",
+                "-mcmodel=small",
+                "-mstrict-align",
+                "-mbranch-protection=pac-ret+bti",
+            ],
+            "x86_64" => &[
+                "--target=x86_64-unknown-none-elf",
+                "-mcmodel=kernel",
+                "-mno-red-zone",
+                "-march=x86-64-v2",
+            ],
+            other => panic!("unsupported kernel architecture {other}"),
+        };
+        for flag in arch_flags.iter().chain(&[
             "-ffreestanding",
             "-nostdlibinc",
             "-fno-builtin",
             "-fno-stack-protector",
             "-fno-pic",
             "-fno-pie",
-            "-mcmodel=small",
-            "-mstrict-align",
-            "-mbranch-protection=pac-ret+bti",
             "-ffunction-sections",
             "-fdata-sections",
             "-fno-asynchronous-unwind-tables",
             "-fno-unwind-tables",
             "-Os",
-        ] {
+        ]) {
             b.flag(flag);
         }
     }

@@ -13,14 +13,26 @@ T         ?= config_parse
 FUZZ_TIME ?= 600
 DATA_SIZE ?= 1G
 
+# ARCH=aarch64 (default) or x86_64. The x86_64 kernel is built for the custom
+# target targets/x86_64-urmqtt-none.json (hard-float, x86-64-v2; ADR-042).
+ARCH        ?= aarch64
+ifeq ($(ARCH),aarch64)
 TARGET      := aarch64-unknown-none
+TARGET_FLAGS :=
+else ifeq ($(ARCH),x86_64)
+TARGET      := targets/x86_64-urmqtt-none.json
+TARGET_FLAGS := -Zjson-target-spec
+else
+$(error ARCH must be aarch64 or x86_64)
+endif
+TARGET_DIR  := $(basename $(notdir $(TARGET)))
 CARGO       := cargo
 CARGO_FLAGS := --locked
 # core/alloc rebuilt with the kernel's branch protection (ADR-002).
-KERNEL_FLAGS := -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+KERNEL_FLAGS := -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem $(TARGET_FLAGS)
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
 BUILD_DIR   := build
-KERNEL_ELF  := target/$(TARGET)/release/urmqtt
+KERNEL_ELF  := target/$(TARGET_DIR)/release/urmqtt
 ISO         := $(BUILD_DIR)/urmqtt-$(ENV)-$(VERSION).iso
 DISK_IMG    := $(BUILD_DIR)/disk-$(ENV).img
 
@@ -30,9 +42,10 @@ DISK_IMG    := $(BUILD_DIR)/disk-$(ENV).img
 # .cargo/config.toml (branch protection).
 SYSROOT     := $(shell rustc --print sysroot 2>/dev/null)
 CARGO_DIR   := $(or $(CARGO_HOME),$(HOME)/.cargo)
-export CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS := \
-	--remap-path-prefix=$(SYSROOT)=/rustc --remap-path-prefix=$(CARGO_DIR)=/cargo \
+REMAP       := --remap-path-prefix=$(SYSROOT)=/rustc --remap-path-prefix=$(CARGO_DIR)=/cargo \
 	--remap-path-prefix=$(CURDIR)=/urmqtt
+export CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS := $(REMAP)
+export CARGO_TARGET_X86_64_URMQTT_NONE_RUSTFLAGS := $(REMAP)
 # Dev images carry the in-guest benchmark and its TLS client; others do not.
 KERNEL_FEATURES := $(if $(filter dev,$(ENV)),--features selftest)
 export URMQTT_ENV := $(ENV)
@@ -107,7 +120,17 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	$(CARGO) clippy $(CARGO_FLAGS) --workspace --all-targets -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-kernel --target $(TARGET) -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-kernel --target $(TARGET) -- -D warnings
+	$(MAKE) --no-print-directory check-x86
 	$(CARGO) test $(CARGO_FLAGS) --workspace
+
+.PHONY: check-x86
+check-x86: ## clippy -D warnings for the x86_64 kernel (X1)
+	$(MAKE) --no-print-directory ARCH=x86_64 clippy-kernel
+
+.PHONY: clippy-kernel
+clippy-kernel:
+	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-kernel --target $(TARGET) -- -D warnings
+	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-kernel --target $(TARGET) -- -D warnings
 
 .PHONY: conformance interop
 conformance: build certs ## tlsfuzzer TLS 1.3 conformance probes against a dev VM (H2)

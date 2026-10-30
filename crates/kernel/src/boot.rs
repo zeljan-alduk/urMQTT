@@ -585,7 +585,7 @@ fn smp_bringup(s: &mut Stage2) {
     };
     // A GICv2 routes by an 8-bit CPU mask.
     let max = irq::max_cpus().min(smp::MAX_CPUS);
-    let started = smp::start_aps(mp.cpus(), mp.bsp_mpidr, s.pac_key, max);
+    let started = smp::start_aps(mp.cpus(), smp::bsp_hw_id(mp), s.pac_key, max);
     // The key is now in every core's registers; drop the copies in memory.
     s.pac_key = None;
     let n = smp::count();
