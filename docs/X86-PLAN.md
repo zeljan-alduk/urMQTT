@@ -197,6 +197,8 @@ Relative size: S = a few days of work, M = a typical M-milestone, L = larger.
 
 **Accept:** q35+OVMF and pc+SeaBIOS boot under TCG; the deliberate faults print decoded reports; the census is recorded.
 
+**Status: done** (ADR-044, ADR-055; PROGRESS entry by the orchestrator). Differences from the work list: the smoke exit goes through QEMU's ACPI power-off port, with `isa-debug-exit` only as a fallback (ADR-044); the `${ARCH}` single-ISO spike is not done (X10; the X2 ISO is x86-only); the census is in ADR-044 and should move next to ADR-046; the baseline refusal prints on COM1 only.
+
 ### X3 — Memory protection · M
 
 **Work**
