@@ -24,6 +24,8 @@ fn cfg() -> Config {
         max_subscriptions_per_session: 4,
         max_inflight: 2,
         max_queued: 3,
+        max_retained_per_device: 4,
+        max_retained_bytes: 4096,
         rate_tokens: 100,
         rate_period_ms: 1000,
         max_outbound_bytes: 64 * 1024,
@@ -1345,4 +1347,191 @@ fn disconnect_unless_applies_a_predicate_to_online_sessions() {
     for c in [&keep, &svc, &boot] {
         assert_eq!(b.close_requested(c.c), None);
     }
+}
+
+/// H3 (H0-W1): an identity holds at most `max_retained_per_device`
+/// retained messages. Replacing or clearing its own always works; a
+/// refused one is still delivered, just not retained.
+#[test]
+fn retained_per_device_limit_at_the_bound() {
+    let mut b = Broker::new(cfg()); // 4 per device
+    let (mut d1, _) = Client::connect(&mut b, "d1", true, None, 0);
+    for i in 0..4 {
+        d1.publish(
+            &mut b,
+            &format!("devices/d1/r{i}"),
+            b"x",
+            QoS::AtMostOnce,
+            true,
+            0,
+        );
+    }
+    assert_eq!(b.stats().retained, 4);
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    svc.subscribe(&mut b, 1, &[("devices/d1/#", QoS::AtMostOnce)], 0);
+    svc.recv(&mut b);
+    // The fifth is refused for retention but delivered live.
+    d1.publish(&mut b, "devices/d1/r4", b"x", QoS::AtMostOnce, true, 0);
+    assert_eq!(b.stats().retained, 4);
+    assert_eq!(b.stats().retained_refused_device, 1);
+    assert_eq!(
+        svc.recv(&mut b),
+        vec![publish("devices/d1/r4", b"x", 0, None, false)]
+    );
+    // Replacing one of its own is not a new one.
+    d1.publish(&mut b, "devices/d1/r0", b"y", QoS::AtMostOnce, true, 0);
+    assert_eq!(b.stats().retained_refused_device, 1);
+    // Clearing frees a slot.
+    d1.publish(&mut b, "devices/d1/r1", b"", QoS::AtMostOnce, true, 0);
+    d1.publish(&mut b, "devices/d1/r4", b"x", QoS::AtMostOnce, true, 0);
+    assert_eq!(b.stats().retained, 4);
+    assert_eq!(b.stats().retained_refused_device, 1);
+    // Another identity has its own allowance; a service overwriting a
+    // device's retained topic takes it over.
+    let (mut d2, _) = Client::connect(&mut b, "d2", true, None, 0);
+    d2.publish(&mut b, "devices/d2/r", b"z", QoS::AtMostOnce, true, 0);
+    assert_eq!(b.stats().retained, 5);
+    svc.publish(&mut b, "devices/d1/cmd/r", b"c", QoS::AtMostOnce, true, 0);
+    assert_eq!(b.stats().retained, 6);
+}
+
+/// The shard's byte budget bounds retained memory whatever the number of
+/// identities: many devices cannot exhaust the heap together.
+#[test]
+fn retained_byte_budget_at_the_bound() {
+    let mut b = Broker::new(Config {
+        max_retained_per_device: 1000,
+        max_retained_bytes: 4 * crate::topics::retained_cost("devices/d1/rX", 100),
+        ..cfg()
+    });
+    let (mut d1, _) = Client::connect(&mut b, "d1", true, None, 0);
+    for i in 0..4 {
+        d1.publish(
+            &mut b,
+            &format!("devices/d1/r{i}"),
+            &[1; 100],
+            QoS::AtMostOnce,
+            true,
+            0,
+        );
+    }
+    assert_eq!(b.stats().retained, 4);
+    d1.publish(&mut b, "devices/d1/r9", &[1; 100], QoS::AtMostOnce, true, 0);
+    assert_eq!(
+        (b.stats().retained, b.stats().retained_refused_bytes),
+        (4, 1)
+    );
+    // A replacement that grows past the budget is refused and the old
+    // message stays; one that shrinks is fine.
+    d1.publish(&mut b, "devices/d1/r0", &[1; 101], QoS::AtMostOnce, true, 0);
+    assert_eq!(b.stats().retained_refused_bytes, 2);
+    d1.publish(&mut b, "devices/d1/r0", &[1; 10], QoS::AtMostOnce, true, 0);
+    assert_eq!(b.stats().retained_refused_bytes, 2);
+    assert!(b.stats().retained_bytes <= 4 * crate::topics::retained_cost("devices/d1/rX", 100));
+}
+
+/// Clearing a topic that holds nothing creates no trie nodes, and clearing
+/// what was retained gives its nodes back (H0-W1: "even clearing creates
+/// its trie nodes first").
+#[test]
+fn clearing_retained_messages_leaves_no_nodes_behind() {
+    let mut b = Broker::new(Config {
+        max_retained_per_device: 1000,
+        max_retained_bytes: 1 << 20,
+        rate_tokens: 1_000_000,
+        ..cfg()
+    });
+    let (mut d1, _) = Client::connect(&mut b, "d1", true, None, 0);
+    let base = b.stats().topic_nodes;
+    for i in 0..500 {
+        d1.publish(
+            &mut b,
+            &format!("devices/d1/a/{i}/b"),
+            b"",
+            QoS::AtMostOnce,
+            true,
+            0,
+        );
+    }
+    assert_eq!(
+        b.stats().topic_nodes,
+        base,
+        "clearing nothing created nodes"
+    );
+    for round in 0..3 {
+        for i in 0..200 {
+            d1.publish(
+                &mut b,
+                &format!("devices/d1/x{round}/{i}"),
+                b"v",
+                QoS::AtMostOnce,
+                true,
+                0,
+            );
+        }
+        assert!(b.stats().topic_nodes > base);
+        for i in 0..200 {
+            d1.publish(
+                &mut b,
+                &format!("devices/d1/x{round}/{i}"),
+                b"",
+                QoS::AtMostOnce,
+                true,
+                0,
+            );
+        }
+        assert_eq!(b.stats().topic_nodes, base, "round {round}");
+        assert_eq!((b.stats().retained, b.stats().retained_bytes), (0, 0));
+    }
+}
+
+/// Subscribing to ever new filters and unsubscribing again does not grow
+/// the trie either.
+#[test]
+fn unsubscribed_filters_leave_no_nodes_behind() {
+    let mut b = Broker::new(cfg());
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    let base = b.stats().topic_nodes;
+    for i in 0..300u16 {
+        let f = format!("fleet/{i}/x/#");
+        svc.subscribe(&mut b, i + 1, &[(&f, QoS::AtMostOnce)], 0);
+        svc.send(
+            &mut b,
+            &Packet::Unsubscribe(urmqtt_mqtt::Unsubscribe {
+                packet_id: i + 1,
+                topics: urmqtt_mqtt::UnsubscribeTopics::List(&[&f]),
+            }),
+            0,
+        );
+        svc.recv(&mut b);
+    }
+    assert_eq!(b.stats().topic_nodes, base);
+}
+
+/// Replicas: a shard retains a remote message only if the origin did, so
+/// limits refused at the origin are not undone elsewhere.
+#[test]
+fn refused_retained_messages_are_not_replicated() {
+    let shard = || {
+        Broker::new(Config {
+            fanout: true,
+            ..cfg()
+        })
+    };
+    let (mut a, mut b) = (shard(), shard());
+    let (mut d1, _) = Client::connect(&mut a, "d1", true, None, 0);
+    for i in 0..5 {
+        d1.publish(
+            &mut a,
+            &format!("devices/d1/r{i}"),
+            b"x",
+            QoS::AtMostOnce,
+            true,
+            0,
+        );
+    }
+    for (m, q, r) in a.drain_routes().collect::<Vec<_>>() {
+        b.route_remote(&m, q, r);
+    }
+    assert_eq!((a.stats().retained, b.stats().retained), (4, 4));
 }

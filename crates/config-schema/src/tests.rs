@@ -632,3 +632,23 @@ fn expiry_build_check() {
     assert!(check_expiry(&ca, ca_after - 366 * day, 365).is_ok());
     assert!(cert_validity(b"not a pem").is_err());
 }
+
+/// H3: the retained byte budget fits a replica per data core in the heap.
+#[test]
+fn retained_byte_budget_is_bounded_by_the_heap() {
+    // dev heap: 32 MiB, so at most 4 MiB.
+    assert!(
+        parse(
+            "dev",
+            &dev_with("max_retained_bytes", "max_retained_bytes = 4194304")
+        )
+        .is_ok()
+    );
+    for bad in ["0", "4194305"] {
+        assert_rejected(
+            "dev",
+            &dev_with("max_retained_bytes", &format!("max_retained_bytes = {bad}")),
+            "limits.max_retained_bytes",
+        );
+    }
+}

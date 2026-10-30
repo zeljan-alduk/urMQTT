@@ -477,6 +477,8 @@ error: invalid configuration deploy/bad/config.toml:
 | `limits.max_subscriptions_per_session` | > 0 | |
 | `limits.max_inflight_qos1` | > 0 | Unacknowledged QoS 1 per session |
 | `limits.max_queued_per_offline_session` | ≥ 0 | Bounded offline queue |
+| `limits.max_retained_per_device` | ≥ 0 | Retained messages one identity may hold; more are delivered but not retained (H3) |
+| `limits.max_retained_bytes` | 1 – heap/8 | Retained topics and payloads per data core (each core holds a replica), plus 128 B each |
 | `limits.publish_rate_per_device` | `"N/s"`, `"N/m"`, `"N/h"` | Token bucket per device |
 | `limits.handshakes_per_core_per_sec` | > 0 | Handshake admission control (reconnect storms) |
 | `limits.max_handshakes_in_flight_per_core` | > 0 | Concurrent handshakes per core; more are refused |

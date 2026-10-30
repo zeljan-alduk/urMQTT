@@ -188,6 +188,8 @@ struct RawLimits {
     max_subscriptions_per_session: u32,
     max_inflight_qos1: u32,
     max_queued_per_offline_session: u32,
+    max_retained_per_device: u32,
+    max_retained_bytes: u64,
     publish_rate_per_device: String,
     handshakes_per_core_per_sec: u32,
     max_handshakes_in_flight_per_core: u32,
@@ -303,6 +305,10 @@ pub struct Limits {
     pub max_subscriptions_per_session: u32,
     pub max_inflight_qos1: u32,
     pub max_queued_per_offline_session: u32,
+    /// Retained messages one identity may hold (H3).
+    pub max_retained_per_device: u32,
+    /// Retained bytes per data core (each core holds a replica).
+    pub max_retained_bytes: u64,
     pub publish_rate_per_device: Rate,
     pub handshakes_per_core_per_sec: u32,
     pub max_handshakes_in_flight_per_core: u32,
@@ -407,6 +413,18 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
     let observability = validate_observability(&raw.observability, &mut errors);
     let watchdog = validate_watchdog(&raw.watchdog, &mut errors);
     let memory = validate_memory(&raw.memory, &mut errors);
+    // Every data core keeps a replica of the retained messages (M13): with
+    // up to eight of them the budget may take an eighth of the heap.
+    let heap = u64::from(memory.kernel_heap_mb) << 20;
+    if limits.max_retained_bytes == 0 || limits.max_retained_bytes > heap / 8 {
+        errors.push(err(
+            "limits.max_retained_bytes",
+            format!(
+                "must be in 1..={} (an eighth of memory.kernel_heap_mb: one replica per data core)",
+                heap / 8
+            ),
+        ));
+    }
     let jitter_fallback = match raw.entropy.fallback.as_str() {
         "jitter" => true,
         "none" => false,
@@ -749,6 +767,8 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
         max_subscriptions_per_session: raw.max_subscriptions_per_session,
         max_inflight_qos1: raw.max_inflight_qos1,
         max_queued_per_offline_session: raw.max_queued_per_offline_session,
+        max_retained_per_device: raw.max_retained_per_device,
+        max_retained_bytes: raw.max_retained_bytes,
         publish_rate_per_device,
         handshakes_per_core_per_sec: raw.handshakes_per_core_per_sec,
         max_handshakes_in_flight_per_core: raw.max_handshakes_in_flight_per_core,
@@ -1174,6 +1194,8 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         max_subscriptions_per_session: {msps},
         max_inflight_qos1: {miq},
         max_queued_per_offline_session: {mqos},
+        max_retained_per_device: {mrpd},
+        max_retained_bytes: {mrb},
         publish_rate_per_device: Rate {{ tokens: {rt}, per_ms: {rp} }},
         handshakes_per_core_per_sec: {hpc},
         max_handshakes_in_flight_per_core: {hif},
@@ -1246,6 +1268,8 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         msps = l.max_subscriptions_per_session,
         miq = l.max_inflight_qos1,
         mqos = l.max_queued_per_offline_session,
+        mrpd = l.max_retained_per_device,
+        mrb = l.max_retained_bytes,
         rt = l.publish_rate_per_device.tokens,
         rp = l.publish_rate_per_device.per_ms,
         hpc = l.handshakes_per_core_per_sec,

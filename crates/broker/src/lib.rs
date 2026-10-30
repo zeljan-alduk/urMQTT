@@ -27,7 +27,7 @@ mod compact;
 mod topics;
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
@@ -65,6 +65,11 @@ pub struct Config {
     pub max_subscriptions_per_session: usize,
     pub max_inflight: usize,
     pub max_queued: usize,
+    /// Retained messages one identity may hold (H3, H0-W1). 0: none.
+    pub max_retained_per_device: usize,
+    /// Retained bytes this shard may hold in all
+    /// ([`topics::retained_cost`]: topic, payload and a fixed overhead).
+    pub max_retained_bytes: usize,
     /// Token bucket per session: `rate_tokens` per `rate_period_ms`.
     pub rate_tokens: u32,
     pub rate_period_ms: u32,
@@ -175,12 +180,19 @@ pub struct Stats {
     pub dropped_control: u64,
     /// Control messages handed to the control handler.
     pub control_received: u64,
+    /// Retained messages not retained: the identity's limit (H3).
+    pub retained_refused_device: u64,
+    /// Retained messages not retained: the shard's byte budget (H3).
+    pub retained_refused_bytes: u64,
+    pub retained_bytes: usize,
 }
 
 struct Will {
     msg: Msg,
     qos: QoS,
     retain: bool,
+    /// The identity whose will it is (charged for a retained will).
+    owner: Box<str>,
 }
 
 struct Conn {
@@ -329,6 +341,8 @@ pub struct Broker {
     telemetry: Vec<Msg>,
     routes: Vec<(Msg, QoS, bool)>,
     control: Vec<ControlMsg>,
+    /// Retained messages held per identity, for identities homed here.
+    retained_by: BTreeMap<Box<str>, u32>,
     /// Connections with new output or a close request.
     ready: Vec<ConnId>,
 }
@@ -406,6 +420,7 @@ impl Broker {
             telemetry: Vec::new(),
             routes: Vec::new(),
             control: Vec::new(),
+            retained_by: BTreeMap::new(),
             ready: Vec::new(),
         }
     }
@@ -516,8 +531,16 @@ impl Broker {
             topic: topic.into(),
             payload: payload.into(),
         });
+        // No owner: counts start empty after a restart; the byte budget
+        // still applies to what comes back.
+        if self.topics.retained_bytes() + topics::retained_cost(topic, payload.len())
+            > self.cfg.max_retained_bytes
+        {
+            self.stats.retained_refused_bytes += 1;
+            return;
+        }
         self.topics
-            .set_retained(topic, msg, qos.min(QoS::AtLeastOnce));
+            .set_retained(topic, msg, qos.min(QoS::AtLeastOnce), None);
     }
 
     /// Restores an offline persistent session from the store. Subscriptions
@@ -680,12 +703,23 @@ impl Broker {
         self.stats.dropped_control
     }
 
+    /// Retained messages refused for retention so far: (identity limit,
+    /// byte budget), and the bytes held. Cheap, unlike [`Broker::stats`].
+    pub fn retained_refused(&self) -> (u64, u64, usize) {
+        (
+            self.stats.retained_refused_device,
+            self.stats.retained_refused_bytes,
+            self.topics.retained_bytes(),
+        )
+    }
+
     pub fn stats(&self) -> Stats {
         Stats {
             connections: self.conns.len(),
             sessions: self.sessions.len(),
             subscriptions: self.sessions.iter().map(|(_, s)| s.subs.len()).sum(),
             retained: self.topics.retained_count(),
+            retained_bytes: self.topics.retained_bytes(),
             topic_nodes: self.topics.node_count(),
             ..self.stats
         }
@@ -817,7 +851,7 @@ impl Broker {
             && let Some(w) = conn.extra.and_then(|e| e.will)
         {
             self.stats.wills_published += 1;
-            self.route(&w.msg, w.qos, w.retain);
+            self.route(&w.msg, w.qos, w.retain.then_some(&*w.owner));
         }
         if let Some(sid) = conn.session {
             let (detach, clean) = match self.session(sid) {
@@ -1026,6 +1060,7 @@ impl Broker {
                 }),
                 qos: w.qos.min(QoS::AtLeastOnce),
                 retain: w.retain,
+                owner: p.client_id.into(),
             }),
             None => None,
         };
@@ -1229,26 +1264,73 @@ impl Broker {
         {
             self.telemetry.push(msg.clone());
         }
-        self.route(&msg, p.qos, p.retain);
+        self.route(&msg, p.qos, p.retain.then_some(&*allowed));
     }
 
-    /// Delivers `msg` to every matching subscriber; retains it if asked.
-    fn route(&mut self, msg: &Msg, qos: QoS, retain: bool) {
+    /// Delivers `msg` to every matching subscriber; retains it for `owner`
+    /// if asked and within the limits. Other shards retain it only if this
+    /// one did.
+    fn route(&mut self, msg: &Msg, qos: QoS, retain_for: Option<&str>) {
+        let retain = retain_for.is_some_and(|o| self.retain(msg, qos, o));
         if self.cfg.fanout {
             self.routes.push((msg.clone(), qos, retain));
         }
         self.route_local(msg, qos, retain, true);
     }
 
-    fn route_local(&mut self, msg: &Msg, qos: QoS, retain: bool, origin: bool) {
-        if retain {
-            self.topics.set_retained(&msg.topic, msg.clone(), qos);
-            if origin {
-                self.emit(PersistOp::Retain {
-                    msg: msg.clone(),
-                    qos: qos.min(QoS::AtLeastOnce),
-                });
+    /// Retains `msg` for `owner` here, within the per-identity limit and
+    /// the byte budget (H3, H0-W1). A refused message is still delivered,
+    /// just not retained: MQTT 3.1.1 has no way to refuse it.
+    fn retain(&mut self, msg: &Msg, qos: QoS, owner: &str) -> bool {
+        let old = self.topics.retained_at(&msg.topic);
+        let old_cost = old.map_or(0, |(c, _)| c);
+        let replaces_own = old.and_then(|(_, o)| o) == Some(owner);
+        if !msg.payload.is_empty() {
+            let held = self.retained_by.get(owner).copied().unwrap_or(0) as usize;
+            if !replaces_own && held >= self.cfg.max_retained_per_device {
+                self.stats.retained_refused_device += 1;
+                return false;
             }
+            let cost = topics::retained_cost(&msg.topic, msg.payload.len());
+            if self.topics.retained_bytes() - old_cost + cost > self.cfg.max_retained_bytes {
+                self.stats.retained_refused_bytes += 1;
+                return false;
+            }
+        }
+        self.store_retained(msg, qos, Some(owner));
+        self.emit(PersistOp::Retain {
+            msg: msg.clone(),
+            qos: qos.min(QoS::AtLeastOnce),
+        });
+        true
+    }
+
+    /// Sets or clears the retained message, keeping the per-identity
+    /// counts of this shard right (a replica from another shard clears the
+    /// local owner of what it replaces).
+    fn store_retained(&mut self, msg: &Msg, qos: QoS, owner: Option<&str>) {
+        let new_owner = (!msg.payload.is_empty()).then_some(owner).flatten();
+        let old = self
+            .topics
+            .set_retained(&msg.topic, msg.clone(), qos, new_owner);
+        if let Some(Some(o)) = old
+            && let Some(n) = self.retained_by.get_mut(&o)
+        {
+            *n -= 1;
+            if *n == 0 {
+                self.retained_by.remove(&o);
+            }
+        }
+        if let Some(o) = new_owner {
+            *self.retained_by.entry(o.into()).or_insert(0) += 1;
+        }
+    }
+
+    fn route_local(&mut self, msg: &Msg, qos: QoS, retain: bool, origin: bool) {
+        if retain && !origin {
+            // A replica of what another shard accepted (it checked the
+            // limits; the shards hold the same set).
+            self.store_retained(msg, qos, None);
         }
         let mut subs = core::mem::take(&mut self.scratch);
         self.topics.subscribers(&msg.topic, &mut subs);

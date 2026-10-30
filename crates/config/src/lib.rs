@@ -108,6 +108,8 @@ pub struct Limits {
     pub max_subscriptions_per_session: u32,
     pub max_inflight_qos1: u32,
     pub max_queued_per_offline_session: u32,
+    pub max_retained_per_device: u32,
+    pub max_retained_bytes: u64,
     pub publish_rate_per_device: Rate,
     pub handshakes_per_core_per_sec: u32,
     /// TLS handshakes a core runs at once; more are refused (M16).

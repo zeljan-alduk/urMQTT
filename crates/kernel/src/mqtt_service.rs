@@ -218,6 +218,8 @@ pub struct MqttService {
     control_epoch: u64,
     /// The broker's unauthorized-control counter at the last report.
     dropped_control_seen: u64,
+    /// Retained refusals already counted: (identity limit, byte budget).
+    retained_refused_seen: (u64, u64),
     /// Refused tickets already logged (first worker core only).
     tickets_refused_seen: u64,
     ticket_rotations_seen: u64,
@@ -354,6 +356,8 @@ pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
         max_subscriptions_per_session: l.max_subscriptions_per_session as usize,
         max_inflight: l.max_inflight_qos1 as usize,
         max_queued: l.max_queued_per_offline_session as usize,
+        max_retained_per_device: l.max_retained_per_device as usize,
+        max_retained_bytes: l.max_retained_bytes as usize,
         rate_tokens: l.publish_rate_per_device.tokens,
         rate_period_ms: l.publish_rate_per_device.per_ms,
         max_outbound_bytes: TX_BUF,
@@ -377,6 +381,11 @@ pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
 pub fn tls_server_for_bench() -> Option<TlsServer> {
     tls_server()
 }
+
+/// Retained messages refused for retention, all cores: (identity limit,
+/// byte budget), for the metrics (H3).
+pub static RETAINED_REFUSED: [core::sync::atomic::AtomicU64; 2] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 2];
 
 /// The session-ticket keys every core's server shares (H2, ADR-054).
 static TICKETS: OnceCell<Arc<TicketKeys>> = OnceCell::new();
@@ -555,9 +564,42 @@ impl MqttService {
             aborts: Vec::new(),
             control_epoch: crate::control::epoch(),
             dropped_control_seen: 0,
+            retained_refused_seen: (0, 0),
             tickets_refused_seen: 0,
             ticket_rotations_seen: 0,
         }
+    }
+
+    /// Retained messages delivered but not retained (H3): counted for the
+    /// metrics, logged at powers of two per core.
+    fn count_retained_refusals(&mut self) {
+        let (dev, bytes, held) = self.broker.retained_refused();
+        let now = (dev, bytes);
+        if now == self.retained_refused_seen {
+            return;
+        }
+        let (d, b) = (
+            now.0 - self.retained_refused_seen.0,
+            now.1 - self.retained_refused_seen.1,
+        );
+        // Relaxed: statistics.
+        RETAINED_REFUSED[0].fetch_add(d, core::sync::atomic::Ordering::Relaxed);
+        RETAINED_REFUSED[1].fetch_add(b, core::sync::atomic::Ordering::Relaxed);
+        let total = now.0 + now.1;
+        if (self.retained_refused_seen.0 + self.retained_refused_seen.1 + 1..=total)
+            .any(u64::is_power_of_two)
+        {
+            warn!(
+                "broker: {total} retained message(s) not retained on core {} ({} over an identity's limit of {}, {} over the {} B budget; {} B held)",
+                self.me,
+                now.0,
+                CONFIG.limits.max_retained_per_device,
+                now.1,
+                CONFIG.limits.max_retained_bytes,
+                held
+            );
+        }
+        self.retained_refused_seen = now;
     }
 
     /// Key rotations, and refused session tickets (full handshakes
@@ -1131,6 +1173,7 @@ impl MqttService {
             }
         }
         self.log_ticket_refusals();
+        self.count_retained_refusals();
         let dropped = self.broker.dropped_control();
         if dropped > self.dropped_control_seen {
             crate::control::REJECTED

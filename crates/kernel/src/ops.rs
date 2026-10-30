@@ -57,6 +57,7 @@ struct Counters {
     registry_refused: u64,
     live_closed: u64,
     tickets: urmqtt_tls::ticket::TicketStats,
+    retained_refused: [u64; 2],
 }
 
 fn counters(lost: u64, unsent: u64) -> Counters {
@@ -80,6 +81,9 @@ fn counters(lost: u64, unsent: u64) -> Counters {
         registry_refused: crate::control::REGISTRY_REFUSED.load(Ordering::Relaxed),
         live_closed: crate::control::LIVE_CLOSED.load(Ordering::Relaxed),
         tickets: crate::mqtt_service::ticket_stats(),
+        retained_refused: crate::mqtt_service::RETAINED_REFUSED
+            .each_ref()
+            .map(|r| r.load(Ordering::Relaxed)),
     }
 }
 
@@ -285,6 +289,14 @@ impl Ops {
             add(
                 &alloc::format!("tls.resume_refused.{}", r.reason()),
                 d(*a, *b),
+                "c",
+            );
+        }
+        for (i, why) in ["device_limit", "byte_budget"].iter().enumerate() {
+            let (a, b) = (now.retained_refused.get(i), prev.retained_refused.get(i));
+            add(
+                &alloc::format!("broker.retained_refused.{why}"),
+                d(a.copied().unwrap_or(0), b.copied().unwrap_or(0)),
                 "c",
             );
         }

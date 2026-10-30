@@ -108,8 +108,19 @@ r = subprocess.run(["mosquitto_sub", *base("device-001"), "-t", "devices/device-
 denied = "denied" in (r.stdout + r.stderr).lower()
 report("acl-subscribe-denied", denied, (r.stdout + r.stderr).strip())
 
+# 6. H3: an identity keeps at most limits.max_retained_per_device (32 in
+#    dev) retained messages; the 33rd is delivered but not retained.
+for i in range(33):
+    pub("device-005", f"devices/device-005/r/{i}", "v", "-r", "-q", "1")
+s = sub_start("backend", "-t", "devices/device-005/r/#", "-W", "4")
+out, serr = sub_wait(s)
+held = [line for line in out.splitlines() if line.startswith("devices/device-005/r/")]
+report("retained-limit", len(held) == 32, f"{len(held)} retained {serr}")
+for i in range(33):
+    pub("device-005", f"devices/device-005/r/{i}", "", "-r", "-n")
+
 if TLS:
-    # 6-9. Each of these must be refused (PROMPT M10 acceptance).
+    # 7-10. Each of these must be refused (PROMPT M10 acceptance).
     for name, cid, cert in [
         ("tls-wrong-ca-rejected", "device-001", "negative/rogue-device"),
         ("tls-expired-rejected", "device-002", "negative/expired-device"),

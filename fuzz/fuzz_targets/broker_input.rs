@@ -29,6 +29,8 @@ fn cfg() -> Config {
         max_subscriptions_per_session: 4,
         max_inflight: 2,
         max_queued: 3,
+        max_retained_per_device: 4,
+        max_retained_bytes: 4096,
         rate_tokens: 50,
         rate_period_ms: 1000,
         max_outbound_bytes: 16 * 1024,
