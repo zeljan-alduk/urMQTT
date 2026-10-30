@@ -15,7 +15,7 @@
 | `urmqtt-control-tool` | `tools/control` | 416 | 0 | 0 (0) | default |
 | `urmqtt-disk-tool` | `tools/disk` | 679 | 0 | 0 (0) | default |
 | `urmqtt-dispatch` | `crates/dispatch` | 522 | 0 | 0 (0) | forbid |
-| `urmqtt-kernel` | `crates/kernel` | 8350 | 0 | 59 (42) | deny |
+| `urmqtt-kernel` | `crates/kernel` | 8379 | 0 | 59 (42) | deny |
 | `urmqtt-loadgen` | `tools/loadgen` | 452 | 0 | 0 (0) | default |
 | `urmqtt-log` | `crates/log` | 655 | 0 | 5 (5) | deny |
 | `urmqtt-mm` | `crates/mm` | 1219 | 0 | 35 (35) | deny |
@@ -25,11 +25,11 @@
 | `urmqtt-platform` | `crates/platform` | 1017 | 453 | 0 (0) | deny |
 | `urmqtt-store` | `crates/store` | 4849 | 752 | 119 (107) | deny |
 | `urmqtt-sync` | `crates/sync` | 435 | 0 | 16 (16) | deny |
-| `urmqtt-tcp` | `crates/tcp` | 2452 | 0 | 0 (0) | deny |
+| `urmqtt-tcp` | `crates/tcp` | 3605 | 0 | 0 (0) | deny |
 | `urmqtt-timer-wheel` | `crates/timer-wheel` | 395 | 0 | 0 (0) | forbid |
 | `urmqtt-tls` | `crates/tls` | 3107 | 805 | 0 (0) | forbid |
 | `urmqtt-virtio` | `crates/virtio` | 1681 | 0 | 19 (19) | deny |
-| **total** | | **38952** | | **326 (297)** | |
+| **total** | | **40134** | | **326 (297)** | |
 
 ## Vendored components
 

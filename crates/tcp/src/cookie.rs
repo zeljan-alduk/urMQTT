@@ -14,8 +14,16 @@ pub const MSS_TABLE: [u16; 8] = [536, 1024, 1200, 1300, 1360, 1400, 1440, 1460];
 /// current and the previous period (64–128 s).
 pub const PERIOD_S: u64 = 64;
 
+/// How long the previous key still validates after a rotation: the
+/// longest a cookie can be valid (two periods).
+pub const PREVIOUS_KEY_S: u64 = 2 * PERIOD_S;
+
 pub struct Cookies {
     key: [u8; 16],
+    /// The key before the last rotation, accepted until `previous_until_s`
+    /// (H3): a handshake in flight across a rotation still completes.
+    previous: Option<[u8; 16]>,
+    previous_until_s: u64,
 }
 
 /// The connection a cookie is bound to (as seen by the server).
@@ -29,11 +37,25 @@ pub struct Flow {
 
 impl Cookies {
     pub fn new(key: [u8; 16]) -> Self {
-        Self { key }
+        Self {
+            key,
+            previous: None,
+            previous_until_s: 0,
+        }
+    }
+
+    /// Replaces the key; the old one validates for [`PREVIOUS_KEY_S`] more.
+    pub fn rotate(&mut self, key: [u8; 16], now_s: u64) {
+        self.previous = Some(core::mem::replace(&mut self.key, key));
+        self.previous_until_s = now_s + PREVIOUS_KEY_S;
     }
 
     fn mac(&self, t: u32, f: &Flow, client_isn: u32) -> u32 {
-        let mut h = SipHasher::new(&self.key);
+        Self::mac_with(&self.key, t, f, client_isn)
+    }
+
+    fn mac_with(key: &[u8; 16], t: u32, f: &Flow, client_isn: u32) -> u32 {
+        let mut h = SipHasher::new(key);
         h.write(&f.src);
         h.write(&f.sport.to_be_bytes());
         h.write(&f.dst);
@@ -62,7 +84,14 @@ impl Cookies {
         if t != now_t && t != (now_t + 31) & 0x1f {
             return None;
         }
-        if our_isn & 0x00ff_ffff != self.mac(t, f, client_isn) {
+        let mac = our_isn & 0x00ff_ffff;
+        let current = mac == self.mac(t, f, client_isn);
+        let previous = !current
+            && now_s < self.previous_until_s
+            && self
+                .previous
+                .is_some_and(|k| mac == Self::mac_with(&k, t, f, client_isn));
+        if !current && !previous {
             return None;
         }
         MSS_TABLE.get(((our_isn >> 24) & 7) as usize).copied()
@@ -97,5 +126,33 @@ mod tests {
             Cookies::new([8; 16]).check(1000, &fl(40000), 12345, isn),
             None
         );
+    }
+
+    /// H3 (H0-W3): after a rotation new cookies use the new key, cookies
+    /// made just before still validate for their lifetime, and never after.
+    #[test]
+    fn rotation_keeps_cookies_in_flight_valid() {
+        let mut c = Cookies::new([7; 16]);
+        let f = Flow {
+            src: [10, 0, 2, 2],
+            sport: 40000,
+            dst: [10, 0, 2, 15],
+            dport: 8883,
+        };
+        let before = c.make(1000, &f, 1, 1460);
+        c.rotate([9; 16], 1001);
+        let after = c.make(1001, &f, 1, 1460);
+        assert_ne!(before, after, "new cookies come from the new key");
+        assert_eq!(c.check(1001, &f, 1, before), Some(1460));
+        assert_eq!(c.check(1001 + 63, &f, 1, before), Some(1460));
+        assert_eq!(c.check(1001, &f, 1, after), Some(1460));
+        // The window outlasts every cookie the old key made (rotation
+        // comes after `make`, the window is a cookie's longest life), so
+        // the old key never cuts a valid cookie short; after it, nothing.
+        assert_eq!(c.check(1001 + PREVIOUS_KEY_S, &f, 1, before), None);
+        // Two rotations: only the latest previous key is kept.
+        c.rotate([11; 16], 1010);
+        assert_eq!(c.check(1010, &f, 1, before), None);
+        assert_eq!(c.check(1010, &f, 1, after), Some(1460));
     }
 }

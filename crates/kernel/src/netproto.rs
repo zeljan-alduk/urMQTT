@@ -69,6 +69,35 @@ fn new_tcp(addr: [u8; 4], ports: Vec<u16>) -> TcpStack {
     )
 }
 
+/// The SYN-cookie key is replaced every 10 minutes (H3, H0-W3); the old one
+/// still validates the cookies it issued for their lifetime (128 s).
+const COOKIE_ROTATE_MS: u64 = 600_000;
+
+struct CookieRotation {
+    next_ms: u64,
+}
+
+impl CookieRotation {
+    fn new(now: u64) -> Self {
+        Self {
+            next_ms: now + COOKIE_ROTATE_MS,
+        }
+    }
+
+    fn tick(&mut self, tcp: &mut TcpStack, now: u64) {
+        if now < self.next_ms {
+            return;
+        }
+        self.next_ms = now + COOKIE_ROTATE_MS;
+        let mut key = [0u8; 16];
+        // Fail closed as at boot: never a predictable key.
+        if urmqtt_tls::rng::fill_global(&mut key).is_err() {
+            crate::boot::fatal("tcp: no random generator for the SYN-cookie key");
+        }
+        tcp.rotate_cookie_key(key, now);
+    }
+}
+
 /// The dev echo service (RFC 862) on core 0.
 #[derive(Default)]
 struct EchoSvc {
@@ -226,8 +255,10 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
     let mut tcp = new_tcp([0; 4], mqtt.ports());
     let mut pool: Vec<Frame> = Vec::new();
     let mut idle = dataplane::Idle::new();
+    let mut cookies = CookieRotation::new(now_ms());
     loop {
         let now = now_ms();
+        cookies.tick(&mut tcp, now);
         let mut activity = drain_mesh(&mut link, &mut mqtt, &mut iface, &mut tcp, now);
         let mut sent = false;
         let mut done: Vec<Frame> = Vec::new();
@@ -441,8 +472,10 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     let (mut mem_last, mut mem_conns) = (now_ms(), 0u64);
     dataplane::set_baseline();
     let mut ops = crate::ops::Ops::new(now_ms());
+    let mut cookies = CookieRotation::new(now_ms());
     loop {
         let now = now_ms();
+        cookies.tick(&mut tcp, now);
         if let Some(c) = dataplane::CONNECTIONS.first() {
             // Relaxed: statistics.
             c.store(

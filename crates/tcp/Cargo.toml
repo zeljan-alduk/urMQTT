@@ -17,3 +17,8 @@ workspace = true
 [dependencies]
 urmqtt-timer-wheel = { path = "../timer-wheel" }
 urmqtt-mm = { path = "../mm" }
+
+[dev-dependencies]
+# H3: the stateful model test (src/model.rs).
+proptest = "1.12"
+proptest-state-machine = "0.9"

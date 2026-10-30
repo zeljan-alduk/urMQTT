@@ -54,6 +54,12 @@ pub mod table;
 pub mod wire;
 
 #[cfg(test)]
+mod model;
+#[cfg(test)]
+mod script;
+#[cfg(test)]
+mod scripts;
+#[cfg(test)]
 mod tests;
 
 use alloc::boxed::Box;
@@ -123,6 +129,9 @@ pub struct Stats {
     pub cookies_sent: u64,
     pub cookies_ok: u64,
     pub cookies_bad: u64,
+    pub cookie_rotations: u64,
+    /// SYNs with an MSS below 536, dropped.
+    pub refused_small_mss: u64,
     pub retransmits: u64,
     pub fast_retransmits: u64,
     pub timeouts: u64,
@@ -535,6 +544,13 @@ impl TcpStack {
         let now_s = now_ms / 1000;
         let local = self.cfg.local_addr;
         if h.flags & SYN != 0 && h.flags & ACK == 0 {
+            // A peer asking for segments under 536 bytes cannot be served:
+            // a cookie encodes nothing smaller, and sending more than the
+            // peer's MSS breaks RFC 9293 §3.7.1 (H3). Refused.
+            if h.mss.is_some_and(|m| m < cookie::MSS_TABLE[0]) {
+                self.stats.refused_small_mss += 1;
+                return;
+            }
             // Stateless SYN-ACK: the cookie is our ISN.
             let flow = cookie::Flow {
                 src,
@@ -1021,6 +1037,13 @@ impl TcpStack {
 
     /// End of an event-loop pass: sends queued data and FINs, and the ACKs
     /// no reply has carried (coalescing).
+    /// Rotates the SYN-cookie key (H3); the old key still validates the
+    /// cookies it issued for their lifetime.
+    pub fn rotate_cookie_key(&mut self, key: [u8; 16], now_ms: u64) {
+        self.cookies.rotate(key, now_ms / 1000);
+        self.stats.cookie_rotations += 1;
+    }
+
     pub fn flush(&mut self, now_ms: u64, out: &mut impl FnMut([u8; 4], &[u8])) {
         let dirty = core::mem::take(&mut self.dirty);
         for &c in &dirty {
@@ -1052,9 +1075,14 @@ impl TcpStack {
                 TimerKind::FinWait2 => self.close_with(c, CloseReason::Timeout, app),
                 TimerKind::Persist => {
                     if k.snd_wnd == 0 && k.tx_len() > 0 {
-                        // Window probe: one byte beyond the window.
+                        // Window probe: one byte beyond the window. Every
+                        // probe is that same first unacknowledged byte: a
+                        // probe the peer did not take is sent again, so a
+                        // lost window update cannot stall the connection
+                        // (H3; before, the second probe sent nothing).
                         k.rto = k.rto.saturating_mul(2).min(RTO_MAX_MS);
                         let rto = u64::from(k.rto);
+                        k.snd_nxt = k.snd_una;
                         let saved = k.snd_wnd;
                         k.snd_wnd = 1;
                         self.transmit(now_ms, c, out);

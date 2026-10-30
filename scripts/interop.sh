@@ -106,6 +106,8 @@ for l in ${LIBS[@]+"${LIBS[@]}"}; do
     if [[ $row == *❌* || -z $lib ]]; then
         FAIL=1
         sed "s/^/    $l: /" "$OUT/$l.txt" >&2
+        # Why the server refused (its side of the story).
+        clean "$OUT/vm.log" | grep -E "tls: connection refused|WARN" | tail -5 | sed "s/^/    $l (server): /" >&2
     fi
 done
 for s in ${SKIPPED[@]+"${SKIPPED[@]}"}; do
