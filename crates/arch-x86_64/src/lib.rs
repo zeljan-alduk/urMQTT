@@ -17,22 +17,30 @@ macro_rules! unimplemented_until {
     };
 }
 
+pub mod apic;
 pub mod crc;
+pub mod entropy;
 pub mod features;
+pub mod hpet;
+pub mod ioapic;
 pub mod msi;
 pub mod paging;
 pub mod trap;
+pub mod tsc;
+pub mod vectors;
 
 #[cfg(target_os = "none")]
 pub mod cpu;
-#[cfg(target_os = "none")]
-pub mod entropy;
 #[cfg(target_os = "none")]
 pub mod irq;
 #[cfg(target_os = "none")]
 pub mod percpu;
 #[cfg(target_os = "none")]
+pub mod pic;
+#[cfg(target_os = "none")]
 pub mod power;
+#[cfg(target_os = "none")]
+pub mod prim;
 #[cfg(target_os = "none")]
 pub mod time;
 
