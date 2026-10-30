@@ -78,6 +78,7 @@ bare metal comes before optimisation.
 | 11b. Remote operation (user request 2026-10-30) | **O1**, **O2** | `$SYS` introspection and a console over MQTT, so a VNC session is no longer needed; done before the rest of phase 11 |
 | 11c. Live mode (user request 2026-10-30) | **O3** | the ISO's first entry runs from RAM with no disk, as an opt-in ephemeral mode |
 | 11d. Diagnostic (user request 2026-10-30) | **O4** | the third boot entry: hardware detection and RAM/disk benchmarks |
+| 11e. Time (user request 2026-10-31) | **T1** | SNTP: a wall clock that is corrected, not only read once from the RTC |
 | 12. Audit | **H10** | the audit package covers everything above |
 
 About 38 milestones in all. Each ends as before: tests green, commit, PROGRESS
@@ -165,3 +166,20 @@ of the disk and its backup GPT lives there. No fragmentation work is needed: the
 disk has fixed regions and no filesystem, an SSD's controller owns placement,
 RAM is mapped virtually and large contiguous blocks are reserved at boot. TRIM
 (UNMAP) is left for freed regions as a later option.
+
+## T1 — SNTP wall clock (user request, 2026-10-31)
+
+Today the wall clock is the firmware RTC read once at boot plus uptime, floored
+at the image's build time (ADR-009, H7): never corrected, and unknown (so
+certificate checks and control messages are refused) when the RTC is wrong.
+T1 adds an SNTP client (RFC 4330, UDP 123, over the existing UDP path): one
+query at boot and then periodically (`time.servers`, `time.interval`, default
+1 h, none by default in dev), several servers with a majority/median so one bad
+server cannot move the clock. Rules: the clock never goes below the build-time
+floor or backwards by more than a bound (`time.max_step`), a large forward step
+is applied once at boot only, small drift is slewed; NTP responses are
+rate-limited and checked (origin timestamp, stratum, leap indicator). The time
+source (RTC, SNTP, or unknown) and the last offset are logged and published as
+`$SYS/broker/time/{source,offset_ms}`. A wrong RTC no longer means "refuse
+everything" when a server answers. NTS is out of scope (plain SNTP is
+unauthenticated, so the bounds above are the defence).
