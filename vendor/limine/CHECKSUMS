@@ -1,8 +1,21 @@
-# Limine v12.9.4 (2026-10-19), aarch64 UEFI only.
+# Limine v12.9.4 (2026-10-19): aarch64 UEFI and, since X2 (ADR-055), x86_64
+# (UEFI and BIOS).
 # Source: https://github.com/limine-bootloader/limine/releases/download/v12.9.4/limine-binary.tar.gz
 # Upstream tarball sha256 847334bc4bc142de996fbd132806b89ed73ac9ab34dbc1e90cfebf1fcc68c2b1,
-# GPG signature verified 2026-10-29: "Good signature from Mintsuki <mintsuki@protonmail.com>",
+# GPG signature verified 2026-10-29 and again 2026-10-30 (X2): "Good signature from Mintsuki <mintsuki@protonmail.com>",
 # key 05D29860D0A0668AAEFB9D691F3C021BECA23821.
-# Only BOOTAA64.EFI and LICENSE are vendored (no x86 binaries, PROMPT.md §2).
+# Vendored from that tarball, unmodified:
+#   BOOTAA64.EFI, BOOTX64.EFI   the UEFI loaders
+#   limine-bios.sys             the BIOS stage 2
+#   limine-bios-cd.bin          the El Torito BIOS boot image (stage 1 for CDs)
+#   limine.c, limine-bios-hdd.h  the host tool's source (`limine bios-install`),
+#                               built by scripts/mkiso.sh with the host cc
+# Not vendored: BOOTIA32.EFI, BOOTRISCV64.EFI, BOOTLOONGARCH64.EFI, limine-uefi-cd.bin
+# (the images use their own FAT ESP), limine-bios-pxe.bin.
 82d5dfc9f46d1f1a96728fa165579e18e1da02449a5bfb78cae667ac23aee6f4  BOOTAA64.EFI
+8a7214bfd8b9a044b780f1e71b2752dc12ecc25c06b9cf39ac6a0a341c802282  BOOTX64.EFI
+80468d0c0485447dc790d8be4c2834af3f581d3829867f66a273256ba91b65f8  limine-bios.sys
+05efcd37e04e18dc3e66ecc79c698aa95791f8bcd77abc2e0e994ef5e19a8b14  limine-bios-cd.bin
+81de9d2c1bf5e2da08bb215a055de79686cd46a6bfa4dc2a5c6585726e4aad2c  limine.c
+b0f41ac5daf94939bad133afe1eb798a2c3ce976ba93c225b452ba21fcc59aee  limine-bios-hdd.h
 5372ada69c825812b93b9e3f222253be3919bed3489372e797c9a85cd4e37fbc  LICENSE

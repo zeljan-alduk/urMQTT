@@ -16,6 +16,8 @@ pub mod fbcon;
 pub mod pl011;
 
 use core::fmt::{self, Write};
+#[cfg(all(target_os = "none", target_arch = "x86_64"))]
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 pub use urmqtt_config::LogLevel as Level;
@@ -83,8 +85,41 @@ struct Records {
     lost: u64,
 }
 
+/// The serial sink: a memory-mapped PL011, or COM1 through port I/O (x86).
+#[derive(Clone, Copy)]
+enum Uart {
+    Pl011(Pl011),
+    #[cfg(all(target_os = "none", target_arch = "x86_64"))]
+    Com1,
+}
+
+impl Uart {
+    fn write_bytes(&self, s: &[u8]) {
+        match self {
+            Self::Pl011(u) => u.write_bytes(s),
+            #[cfg(all(target_os = "none", target_arch = "x86_64"))]
+            Self::Com1 => urmqtt_arch::serial::write_bytes(s),
+        }
+    }
+
+    fn flush(&self) {
+        match self {
+            Self::Pl011(u) => u.flush(),
+            #[cfg(all(target_os = "none", target_arch = "x86_64"))]
+            Self::Com1 => urmqtt_arch::serial::flush(),
+        }
+    }
+}
+
+impl Write for Uart {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.write_bytes(s.as_bytes());
+        Ok(())
+    }
+}
+
 struct Sinks {
-    uart: Option<Pl011>,
+    uart: Option<Uart>,
     fb: Option<FbConsole<'static>>,
     clock_ns: Option<fn() -> u64>,
     cpu: Option<fn() -> usize>,
@@ -114,6 +149,9 @@ static SINKS: SpinLock<Sinks> = SpinLock::new(Sinks {
 
 /// UART base kept outside the lock for [`emergency`] output.
 static EMERGENCY_UART: AtomicUsize = AtomicUsize::new(0);
+/// Whether the serial sink is COM1 (no base address to keep).
+#[cfg(all(target_os = "none", target_arch = "x86_64"))]
+static EMERGENCY_COM1: AtomicBool = AtomicBool::new(false);
 
 /// Most verbose level that is emitted, from the build-time configuration.
 pub const MAX_LEVEL: Level = urmqtt_config::CONFIG.observability.log_level;
@@ -136,9 +174,17 @@ pub fn enabled(level: Level) -> bool {
 }
 
 pub fn set_uart(uart: Pl011, base: usize) {
-    SINKS.lock().uart = Some(uart);
+    SINKS.lock().uart = Some(Uart::Pl011(uart));
     // Relaxed: only an address; `emergency` tolerates seeing it late.
     EMERGENCY_UART.store(base, Ordering::Relaxed);
+}
+
+/// Uses COM1 (initialised by `urmqtt_arch::serial::init`) as the serial sink.
+#[cfg(all(target_os = "none", target_arch = "x86_64"))]
+pub fn set_com1() {
+    SINKS.lock().uart = Some(Uart::Com1);
+    // Relaxed: see `set_uart`.
+    EMERGENCY_COM1.store(true, Ordering::Relaxed);
 }
 
 pub fn set_framebuffer(fb: FbConsole<'static>) {
@@ -359,6 +405,12 @@ pub fn emergency(args: fmt::Arguments<'_>) {
         return;
     }
     // Relaxed: see `set_uart`.
+    #[cfg(all(target_os = "none", target_arch = "x86_64"))]
+    if EMERGENCY_COM1.load(Ordering::Relaxed) {
+        let _ = Uart::Com1.write_fmt(args);
+        Uart::Com1.flush();
+        return;
+    }
     let base = EMERGENCY_UART.load(Ordering::Relaxed);
     if base != 0 {
         #[allow(unsafe_code)]
