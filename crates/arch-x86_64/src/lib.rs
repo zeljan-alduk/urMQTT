@@ -28,6 +28,7 @@ pub mod gdt;
 pub mod idt;
 pub mod msi;
 pub mod paging;
+pub mod pat;
 pub mod trap;
 
 #[cfg(target_os = "none")]
