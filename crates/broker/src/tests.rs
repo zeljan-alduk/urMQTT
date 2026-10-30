@@ -8,7 +8,9 @@ const ACL: Acl = Acl {
     device_subscribe: &["devices/{id}/cmd/#"],
     service_ids: &["backend"],
     service_publish: &["devices/+/cmd/#", "fleet/#"],
+    // `$SYS/#` here is ignored: only an operator reaches `$SYS/` (O1, O2).
     service_subscribe: &["devices/#", "fleet/#", "$SYS/#"],
+    operator_ids: &["ops"],
 };
 
 fn cfg() -> Config {
@@ -106,6 +108,34 @@ impl Client {
                 keep_alive: 10,
                 client_id: id,
                 will,
+                username: None,
+                password: None,
+            }),
+            now,
+        );
+        let mut c = c;
+        let mut got = c.recv(b);
+        let ack = got.remove(0);
+        c.pending = got;
+        (c, ack)
+    }
+
+    /// Like `connect`, with the identity a TLS client certificate gives.
+    fn connect_tls(b: &mut Broker, id: &str, now: u64) -> (Client, Got) {
+        let c = Client {
+            c: b.open(now).unwrap(),
+            rx: Vec::new(),
+            pending: Vec::new(),
+        };
+        b.set_identity(c.c, id, false);
+        c.send(
+            b,
+            &Packet::Connect(Connect {
+                protocol_level: 4,
+                clean_session: true,
+                keep_alive: 10,
+                client_id: id,
+                will: None,
                 username: None,
                 password: None,
             }),
@@ -1534,4 +1564,282 @@ fn refused_retained_messages_are_not_replicated() {
         b.route_remote(&m, q, r);
     }
     assert_eq!((a.stats().retained, b.stats().retained), (4, 4));
+}
+
+// ---- O1, O2: the `$SYS/` namespace -----------------------------------------
+
+#[test]
+fn only_an_operator_with_a_certificate_reaches_sys() {
+    let mut b = Broker::new(cfg());
+    let (mut op, ack) = Client::connect_tls(&mut b, "ops", 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    assert_eq!(
+        op.subscribe(
+            &mut b,
+            1,
+            &[
+                ("$SYS/#", QoS::AtMostOnce),
+                ("$SYS/broker/cpu/#", QoS::AtMostOnce),
+                ("$SYS/console/out", QoS::AtMostOnce),
+                ("#", QoS::AtMostOnce),
+                ("devices/#", QoS::AtMostOnce),
+            ],
+            0
+        ),
+        vec![Got::SubAck(1, vec![0, 0, 0, 0x80, 0x80])]
+    );
+    // The existing backend service and a device: refused, even though the
+    // test ACL lists `$SYS/#` for services.
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    assert_eq!(
+        svc.subscribe(
+            &mut b,
+            1,
+            &[
+                ("$SYS/#", QoS::AtMostOnce),
+                ("$SYS/broker/uptime", QoS::AtMostOnce),
+                ("devices/#", QoS::AtMostOnce)
+            ],
+            0
+        ),
+        vec![Got::SubAck(1, vec![0x80, 0x80, 0])]
+    );
+    let (mut dev, _) = Client::connect(&mut b, "d1", true, None, 0);
+    assert_eq!(
+        dev.subscribe(&mut b, 1, &[("$SYS/#", QoS::AtMostOnce)], 0),
+        vec![Got::SubAck(1, vec![0x80])]
+    );
+    // An operator id on a connection without a certificate (the dev
+    // plaintext port) is an ordinary device.
+    let (mut plain, ack) = Client::connect(&mut b, "ops", true, None, 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    assert_eq!(
+        plain.subscribe(&mut b, 1, &[("$SYS/#", QoS::AtMostOnce)], 0),
+        vec![Got::SubAck(1, vec![0x80])]
+    );
+    plain.publish(
+        &mut b,
+        "$SYS/console/in",
+        b"reboot",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(b.drain_sys_requests().count(), 0);
+}
+
+#[test]
+fn sys_topics_are_retained_per_shard_and_outside_the_budgets() {
+    let mut b = Broker::new(cfg());
+    let (mut d1, _) = Client::connect(&mut b, "d1", true, None, 0);
+    d1.publish(&mut b, "devices/d1/fw", b"1", QoS::AtMostOnce, true, 0);
+    let before = b.stats();
+    assert_eq!(before.retained, 1);
+    for i in 0..50 {
+        b.sys_publish_retained(&format!("$SYS/broker/t{i}"), &[b'x'; 200]);
+    }
+    // 50 * (200 B + overhead) is far over the 4096 B device budget.
+    let after = b.stats();
+    assert_eq!(after.retained, 1, "not counted as device retained messages");
+    assert_eq!(after.retained_bytes, before.retained_bytes);
+    d1.publish(&mut b, "devices/d1/fw2", b"2", QoS::AtMostOnce, true, 0);
+    assert_eq!(b.stats().retained, 2, "the device budget is untouched");
+    assert_eq!(b.retained_refused(), (0, 0, b.stats().retained_bytes));
+    // Not persisted, not offered to other shards.
+    assert!(
+        !b.drain_persist()
+            .any(|op| matches!(op, PersistOp::Retain { msg, .. } if msg.topic.starts_with("$SYS")))
+    );
+    assert!(b.drain_routes().next().is_none());
+    // A late operator gets them as retained messages; `#` does not match.
+    let (mut op, _) = Client::connect_tls(&mut b, "ops", 0);
+    let got = op.subscribe(&mut b, 1, &[("$SYS/broker/#", QoS::AtMostOnce)], 0);
+    assert_eq!(got.len(), 1 + 50);
+    assert!(got[1..].iter().all(|g| matches!(
+        g,
+        Got::Publish {
+            retain: true,
+            qos: 0,
+            ..
+        }
+    )));
+    // A refresh replaces the value and reaches a live subscriber.
+    b.sys_publish_retained("$SYS/broker/t0", b"new");
+    assert_eq!(
+        op.recv(&mut b),
+        vec![publish("$SYS/broker/t0", b"new", 0, None, false)]
+    );
+    // Never a topic outside the namespace.
+    b.sys_publish_retained("devices/d1/x", b"no");
+    assert_eq!(b.stats().retained, 2);
+}
+
+#[test]
+fn console_lines_are_replayed_from_a_bounded_ring() {
+    let mut b = Broker::new(cfg());
+    for i in 0..(sys::CONSOLE_RING + 10) {
+        b.console_line(&format!("line {i}"));
+    }
+    let (mut op, _) = Client::connect_tls(&mut b, "ops", 0);
+    let got = op.subscribe(&mut b, 1, &[("$SYS/console/out", QoS::AtMostOnce)], 0);
+    assert_eq!(
+        got.len(),
+        1 + sys::CONSOLE_RING,
+        "only the ring is replayed"
+    );
+    assert_eq!(
+        got[1],
+        publish("$SYS/console/out", b"line 10", 0, None, false)
+    );
+    let last = format!("line {}", sys::CONSOLE_RING + 9);
+    assert_eq!(
+        got.last().unwrap(),
+        &publish("$SYS/console/out", last.as_bytes(), 0, None, false)
+    );
+    // A live line goes straight to the subscriber.
+    b.console_line("live");
+    assert_eq!(
+        op.recv(&mut b),
+        vec![publish("$SYS/console/out", b"live", 0, None, false)]
+    );
+    // A subscriber that is not reading loses lines instead of blocking the
+    // broker (QoS 0 backpressure, counted).
+    let before = b.stats().dropped_backpressure;
+    for _ in 0..10_000 {
+        b.console_line(&"x".repeat(200));
+    }
+    assert!(b.stats().dropped_backpressure > before);
+    // Nobody else sees the console.
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    assert_eq!(
+        svc.subscribe(&mut b, 1, &[("$SYS/console/out", QoS::AtMostOnce)], 0),
+        vec![Got::SubAck(1, vec![0x80])]
+    );
+}
+
+#[test]
+fn operator_requests_reach_the_kernel_and_nothing_else() {
+    let mut b = Broker::new(cfg());
+    let (mut op, _) = Client::connect_tls(&mut b, "ops", 0);
+    op.subscribe(&mut b, 1, &[("$SYS/#", QoS::AtMostOnce)], 0);
+    // Retain is ignored: nothing is stored, nothing is routed.
+    assert!(
+        op.publish(
+            &mut b,
+            "$SYS/console/in",
+            b"status",
+            QoS::AtLeastOnce,
+            true,
+            0
+        )
+        .iter()
+        .all(|g| matches!(g, Got::PubAck(_)))
+    );
+    op.publish(&mut b, "$SYS/query/info", b"1", QoS::AtMostOnce, false, 0);
+    let reqs: Vec<_> = b.drain_sys_requests().collect();
+    assert_eq!(reqs.len(), 2);
+    assert_eq!(
+        (reqs[0].kind, &*reqs[0].from, &*reqs[0].payload),
+        (SysKind::Console, "ops", &b"status"[..])
+    );
+    assert_eq!(reqs[1].kind, SysKind::Query);
+    assert_eq!(b.stats().retained, 0);
+    assert_eq!(b.stats().published, 0);
+    assert!(op.recv(&mut b).is_empty(), "requests are not routed");
+    // Any other `$SYS/` topic is refused, also for the operator.
+    op.publish(&mut b, "$SYS/broker/uptime", b"1", QoS::AtMostOnce, true, 0);
+    op.publish(
+        &mut b,
+        "$SYS/console/out",
+        b"forged",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(b.drain_sys_requests().count(), 0);
+    assert_eq!(b.stats().dropped_acl, 2);
+    assert!(op.recv(&mut b).is_empty());
+    // Devices and services cannot send requests.
+    let (mut dev, _) = Client::connect(&mut b, "d1", true, None, 0);
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    dev.publish(
+        &mut b,
+        "$SYS/console/in",
+        b"reboot",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    svc.publish(
+        &mut b,
+        "$SYS/console/in",
+        b"reboot",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(b.drain_sys_requests().count(), 0);
+    // The request backlog is bounded.
+    for _ in 0..(sys::MAX_REQUESTS + 5) {
+        op.publish(
+            &mut b,
+            "$SYS/console/in",
+            b"status",
+            QoS::AtMostOnce,
+            false,
+            0,
+        );
+    }
+    assert_eq!(b.drain_sys_requests().count(), sys::MAX_REQUESTS);
+    assert_eq!(b.stats().dropped_sys, 5);
+    // A will can never be a request: the CONNECT is refused.
+    let will = MqttWill {
+        topic: "$SYS/console/in",
+        payload: b"reboot",
+        qos: QoS::AtMostOnce,
+        retain: false,
+    };
+    let (_, ack) = Client::connect(&mut b, "ops2", true, Some(will), 0);
+    assert_eq!(ack, Got::ConnAck(false, 5));
+}
+
+#[test]
+fn stats_track_subscriptions_and_online_connections() {
+    let mut b = Broker::new(cfg());
+    assert_eq!((b.stats().subscriptions, b.stats().online), (0, 0));
+    let (mut a, _) = Client::connect(&mut b, "backend", true, None, 0);
+    let (mut d, _) = Client::connect(&mut b, "d1", false, None, 0);
+    let _half = b.open(0).unwrap();
+    assert_eq!(b.stats().online, 2);
+    assert_eq!(b.stats().connections, 3);
+    a.subscribe(
+        &mut b,
+        1,
+        &[("devices/#", QoS::AtMostOnce), ("fleet/#", QoS::AtMostOnce)],
+        0,
+    );
+    d.subscribe(&mut b, 1, &[("devices/d1/cmd/#", QoS::AtMostOnce)], 0);
+    assert_eq!(b.stats().subscriptions, 3);
+    a.subscribe(&mut b, 2, &[("devices/#", QoS::AtLeastOnce)], 0);
+    assert_eq!(
+        b.stats().subscriptions,
+        3,
+        "a re-subscribe is not a new one"
+    );
+    a.send(
+        &mut b,
+        &Packet::Unsubscribe(Unsubscribe {
+            packet_id: 3,
+            topics: UnsubscribeTopics::List(&["fleet/#"]),
+        }),
+        0,
+    );
+    assert_eq!(b.stats().subscriptions, 2);
+    // A clean session goes with its connection; a persistent one stays.
+    a.kill(&mut b, 0);
+    assert_eq!(b.stats().subscriptions, 1);
+    assert_eq!(b.stats().online, 1);
+    d.kill(&mut b, 0);
+    assert_eq!((b.stats().subscriptions, b.stats().online), (1, 0));
+    assert_eq!(b.stats().sessions, 1);
 }

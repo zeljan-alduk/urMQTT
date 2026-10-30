@@ -220,6 +220,8 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
         }
     };
     log_layout(&disk, how);
+    // Relaxed: statistics for `$SYS/broker/disk/total` (O1).
+    crate::sys::DISK_TOTAL.store(disk.layout().total_sectors * 512, Ordering::Relaxed);
 
     let heap_bytes = (cfg.sqlite_heap_mb as usize) << 20;
     let Some((va, _pa, len)) = vm::dma_alloc(heap_bytes) else {
@@ -614,6 +616,7 @@ impl Worker {
         }
         did |= self.step_log(now_ms);
         if now_ms.saturating_sub(self.last_stats_ms) >= STATS_EVERY_MS {
+            self.refresh_disk_used();
             self.log_stats(now_ms);
         }
         did
@@ -745,6 +748,23 @@ impl Worker {
         self.stats.errors += 1;
         if self.stats.errors <= 10 || self.stats.errors.is_power_of_two() {
             error!("db: {e} ({} error(s) so far)", self.stats.errors);
+        }
+    }
+
+    /// What SQLite uses of the data partition (its database, WAL and
+    /// journal), for `$SYS/broker/disk/used`. The telemetry log is a ring
+    /// of fixed size that overwrites itself and is not counted.
+    fn refresh_disk_used(&self) {
+        use urmqtt_store::layout::FileKind;
+        let used = urmqtt_store::vfs::with_disk(|d| {
+            [FileKind::Db, FileKind::Wal, FileKind::Journal]
+                .iter()
+                .map(|&k| d.file_size(k))
+                .sum::<u64>()
+        });
+        if let Some(u) = used {
+            // Relaxed: statistics.
+            crate::sys::DISK_USED.store(u, Ordering::Relaxed);
         }
     }
 

@@ -174,10 +174,11 @@ pub fn allowlist_mode() -> bool {
     ALLOWLIST_MODE.load(Ordering::Relaxed)
 }
 
-/// Identities the allowlist never applies to: the configured services and
-/// control identities (they are named in the image already).
+/// Identities the allowlist never applies to: the configured services,
+/// operators and control identities (they are named in the image already).
 fn exempt(id: &str) -> bool {
     CONFIG.control.service_ids.contains(&id)
+        || CONFIG.acl.operator_ids.contains(&id)
         || CONFIG
             .acl
             .service_ids

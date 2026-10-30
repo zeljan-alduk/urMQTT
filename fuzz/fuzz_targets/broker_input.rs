@@ -14,6 +14,7 @@ const ACL: Acl = Acl {
     service_ids: &["svc"],
     service_publish: &["devices/+/cmd/#", "fleet/#"],
     service_subscribe: &["devices/#", "fleet/#"],
+    operator_ids: &["operator"],
 };
 
 fn cfg() -> Config {

@@ -22,7 +22,7 @@ use crate::boot_aarch64 as arch;
 use crate::boot_x86 as arch;
 use crate::cmdline::{BootOptions, TestFault};
 use crate::{VERSION, console, devices, irq, layout, memory, power, selftest, smp, tick, trap, vm};
-pub(crate) use arch::PRIVILEGE_LABEL;
+pub(crate) use arch::{ARCH, PRIVILEGE_LABEL};
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]

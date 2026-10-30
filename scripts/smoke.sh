@@ -1451,6 +1451,18 @@ else
     FAILED=$((FAILED + 1))
 fi
 
+# O1: an operator with mutual TLS reads `$SYS/broker/#` (retained, every
+# 10 s) and asks `$SYS/query/info`; devices and the backend service cannot
+# reach `$SYS/` at all.
+if command -v mosquitto_pub >/dev/null && command -v mosquitto_sub >/dev/null; then
+    SERVICE_PORT=8883 service sys-operator "serve" 18883 "TLS 1.3 listener on port 8883" \
+        python3 -I "$ROOT/scripts/sys-scenarios.py" "$ROOT/deploy/dev" -- \
+        "client: sys-broker-topics ok" "client: sys-refresh ok" "client: sys-cpu-busy-per-core ok" \
+        "client: sys-retained-flag ok" "client: sys-query-info ok" "client: sys-denied-to-device-001 ok" \
+        "client: sys-denied-to-backend ok" "client: sys-topics-cannot-be-forged ok" \
+        "NOT:FAILED" "$NO_FAULT"
+fi
+
 # H2: session tickets under random per-boot keys. With a 20 s rotation, a
 # ticket issued late in the first interval resumes after the rotation (the
 # previous key), and a ticket from before a reboot does not.

@@ -37,6 +37,7 @@ device_subscribe = ["devices/{id}/cmd/#"]
 service_ids = ["backend"]
 service_publish = ["devices/+/cmd/#", "fleet/#"]
 service_subscribe = ["devices/#", "fleet/#"]
+operator_ids = ["operator"]       # the only identities that read $SYS/ and use the console (mTLS only); exact ids
 
 [storage]
 sqlite_heap_mb = 32

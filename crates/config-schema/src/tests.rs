@@ -652,3 +652,75 @@ fn retained_byte_budget_is_bounded_by_the_heap() {
         );
     }
 }
+
+/// O1, O2: the operator role is a build-time list of exact identities,
+/// checked like the control identities and never overlapping a service.
+#[test]
+fn operator_ids_are_validated() {
+    let cfg = parse("dev", DEV).unwrap();
+    assert_eq!(cfg.acl.operator_ids, ["operator"]);
+    assert!(parse("prod", PROD).is_ok());
+    assert!(
+        parse("dev", &dev_with("operator_ids", "operator_ids = []"))
+            .unwrap()
+            .acl
+            .operator_ids
+            .is_empty()
+    );
+    for bad in [
+        r#"["ops*"]"#,
+        r#"["a/b"]"#,
+        r#"[""]"#,
+        r#"["a+"]"#,
+        r#"["$SYS"]"#,
+    ] {
+        assert_rejected(
+            "dev",
+            &dev_with("operator_ids", &format!("operator_ids = {bad}")),
+            "acl.operator_ids[0]",
+        );
+    }
+    // One role per identity: not also a service (exact or by prefix).
+    assert_rejected(
+        "dev",
+        &dev_with("operator_ids", r#"operator_ids = ["backend"]"#),
+        "also matches acl.service_ids",
+    );
+    assert_rejected(
+        "dev",
+        &dev_with("service_ids", r#"service_ids = ["svc-*"]"#).replace(
+            "operator_ids = [\"operator\"]",
+            "operator_ids = [\"svc-ops\"]",
+        ),
+        "also matches acl.service_ids",
+    );
+    assert_rejected(
+        "dev",
+        &dev_with("operator_ids", r#"operator_ids = ["a", "a"]"#),
+        "listed twice",
+    );
+    // The key is required, like every other.
+    let without: String = DEV
+        .lines()
+        .filter(|l| !l.starts_with("operator_ids"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_rejected("dev", &without, "operator_ids");
+}
+
+/// O1, O2: no ACL pattern grants `$SYS/`; the role does.
+#[test]
+fn acl_cannot_grant_the_system_namespace() {
+    for key in [
+        "device_publish",
+        "device_subscribe",
+        "service_publish",
+        "service_subscribe",
+    ] {
+        assert_rejected(
+            "dev",
+            &dev_with(key, &format!(r#"{key} = ["$SYS/#"]"#)),
+            "the $SYS/ namespace belongs to acl.operator_ids",
+        );
+    }
+}

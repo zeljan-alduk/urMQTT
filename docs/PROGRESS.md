@@ -1342,3 +1342,25 @@ X86-PLAN §X10; ADR-043. **QEMU only: aarch64 UEFI under HVF and TCG, x86_64 q35
 - A BIOS-boot scenario with a CD **and** a disk under SeaBIOS at once beyond the installer scenarios.
 
 **Try it on a VPS** (docs/DEPLOY.md §5b): `make universal ENV=prod`, upload `build/urmqtt-prod-<version>-universal.iso`, boot the VPS from it, pick *Install urMQTT on this machine's disk*, detach the ISO, boot again. On the VNC console look for `URMQTT BOOT ... arch=x86_64`, `cpu: ... hypervisor=KVMKVMKVM`, `pci:`, `blk: boot disk is virtio-...`, `net: mac ..., link up`, `URMQTT READY`.
+
+## O1 — `$SYS/` introspection and the operator role (2026-10-30)
+
+PLAN.md "O1, O2"; ADR-060. **QEMU only (aarch64 under HVF and TCG, x86_64 under TCG); not run on KVM or real hardware.**
+
+**Done**
+
+- **The operator role.** `acl.operator_ids` (exact identities, a required key, empty means none) in the config schema, validated at build time: exact ids only, no duplicates, never also a service id, and no ACL pattern may name `$SYS/` (the build says so). Dev lists `operator` (the existing `make certs` identity), `deploy/prod/config.toml` lists `operator` too. `urmqtt_broker::acl` has `Role::Operator`: only it subscribes to `$SYS/#` and publishes `$SYS/console/in` and `$SYS/query/info`; devices, services and bootstrap identities are refused whatever their patterns say. The role needs an authenticated (TLS) identity: an operator id on the dev plaintext port is a device. Operators are exempt from the registry allowlist, like services.
+- **What an operator publishes is a request.** Not routed, not retained, not persisted, not offered to other shards; bounded queue of 16; any other `$SYS/` topic is dropped, also for the operator; a will naming `$SYS/` refuses the CONNECT.
+- **Retained `$SYS/broker/...` every 10 s**, from each data core into its own shard: `version`, `uptime`, `arch`, `cpu/cores`, `cpu/busy/<core>`, `memory/{total,used}`, `disk/{total,used}`, `clients/{connected,total}`, `subscriptions`, `retained`, `messages/{received,sent}`, `connections/refused`, `tls/server_cert_days`, `console/dropped`. They are in memory only and outside the device retained budgets. The numbers are relaxed counters each shard (and the DB core, for the disk) keeps for itself; `Broker::stats` is O(1) now (counters for subscriptions and online connections), and `Idle` keeps the per-core busy percentage.
+- **`$SYS/query/info`:** any payload, answered with one JSON document on `$SYS/query/info/response`. **Deviation:** the plan said MQTT 5 Response Topic; the broker speaks 3.1.1 only, so the reply topic is fixed (ADR-060).
+- `scripts/gen-operator-cert.sh DIR [ID] [DAYS]` issues an operator certificate from a deploy directory's CA (subject CN and `URI:urn:urmqtt:service:<id>`, like the dev operator and the production device-001). `deploy/prod/services/operator.{pem,key}` was issued with it from the production test CA; the key is git-ignored.
+
+**Tests**
+
+- Host: broker (the role in `acl.rs`; an operator with a certificate subscribes, a device, the service and a plaintext "operator" are refused; retained `$SYS/` topics outside the budgets and not stored or replicated; requests reach the kernel and nothing else; bounded; wills; counters), `sys.rs` (the fixed topic list, the JSON), config-schema (`operator_ids` rules, `$SYS/` patterns).
+- Smoke `sys-operator` (mutual TLS, the real operator certificate): every topic of the list arrives and is plausible, uptime refreshes, per-core busy, retained flag, the query's JSON, a device and the backend service are refused `$SYS/#`, the operator cannot forge a `$SYS/` topic.
+
+**Not done**
+
+- MQTT 5 Response Topic, a per-operator reply topic.
+- `memory` is the kernel heap, not the machine's RAM; `disk/used` counts SQLite's files, not the telemetry ring.
