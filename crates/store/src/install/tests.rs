@@ -161,3 +161,47 @@ fn an_interrupted_install_never_boots_and_can_be_redone() {
         }
     }
 }
+
+/// The universal ISO's install module (X10) is a finished disk image: boot
+/// code in sector 0 and data in the gap before the ESP must arrive byte for
+/// byte, and an image that is not a GPT disk is refused before anything is
+/// written.
+#[test]
+fn a_prebuilt_boot_image_is_written_verbatim_and_checked() {
+    let mut img = gpt::raw_image(&esp()[..2 * MIB]).unwrap();
+    // Boot code in the MBR (the partition table at 446.. stays) and a stage
+    // in the gap between the tables and the ESP.
+    for (i, b) in img.iter_mut().take(446).enumerate() {
+        *b = (i % 253) as u8 + 1;
+    }
+    for (i, b) in img[34 * 512..2048 * 512].iter_mut().enumerate() {
+        *b = (i % 249) as u8;
+    }
+    let m = MemDisk::new(64 * MIB);
+    let n = write_boot_image(m.device().as_mut(), &img).unwrap();
+    assert_eq!(n as usize, img.len());
+    assert_eq!(m.raw(0, img.len()), img);
+
+    let blank = MemDisk::new(64 * MIB);
+    let mut no_header = img.clone();
+    no_header[512] = b'X';
+    let mut wrong_backup = img.clone();
+    wrong_backup[512 + 32] ^= 1;
+    let mut no_signature = img.clone();
+    no_signature[510] = 0;
+    for bad in [
+        no_header,
+        wrong_backup,
+        no_signature,
+        img[..img.len() - 512].to_vec(),
+    ] {
+        assert_eq!(
+            write_boot_image(blank.device().as_mut(), &bad),
+            Err(InstallError::BadImage)
+        );
+    }
+    assert!(
+        blank.raw(0, 64 * MIB).iter().all(|&b| b == 0),
+        "nothing written"
+    );
+}

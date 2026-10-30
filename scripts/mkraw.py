@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Wraps the EFI system partition image from mkiso.sh in a GPT disk (M17).
 
-    scripts/mkraw.py ESP.img OUT.img
+    scripts/mkraw.py [--bios-boot] ESP.img OUT.img
 
 The result is a raw disk image for hosts that boot disks rather than ISOs
 (KVM/Proxmox, a cloud server's disk written from a rescue system). Layout:
@@ -22,6 +22,11 @@ ENTRY_SIZE = 128
 ENTRY_SECTORS = ENTRIES * ENTRY_SIZE // SECTOR  # 32
 FIRST = 2048  # 1 MiB alignment
 ESP_TYPE = uuid.UUID("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
+# --bios-boot (the universal image, X10): a BIOS boot partition in the gap
+# before the ESP, where `limine bios-install` puts Limine's second stage.
+BIOS_TYPE = uuid.UUID("21686148-6449-6E6F-744E-656564454649")
+BIOS_FIRST, BIOS_LAST = 64, FIRST - 1
+GPT_FIRST_USABLE = 34
 
 
 def guid(seed: bytes, label: str) -> bytes:
@@ -55,9 +60,12 @@ def header(current: int, backup: int, first: int, last: int, disk: bytes, entrie
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    bios = "--bios-boot" in args
+    args = [a for a in args if a != "--bios-boot"]
+    if len(args) != 2:
         sys.exit(__doc__)
-    esp = open(sys.argv[1], "rb").read()
+    esp = open(args[0], "rb").read()
     if len(esp) % SECTOR:
         sys.exit("error: ESP size is not a multiple of 512")
     seed = hashlib.sha256(esp).digest()
@@ -77,6 +85,18 @@ def main() -> None:
         0,
         "EFI system partition".encode("utf-16-le"),
     )
+    first_usable = FIRST
+    if bios:
+        first_usable = GPT_FIRST_USABLE
+        entry += struct.pack(
+            "<16s16sQQQ72s",
+            BIOS_TYPE.bytes_le,
+            guid(seed, "bios"),
+            BIOS_FIRST,
+            BIOS_LAST,
+            0,
+            "BIOS boot partition".encode("utf-16-le"),
+        )
     table = entry.ljust(ENTRIES * ENTRY_SIZE, b"\0")
     table_crc = zlib.crc32(table)
 
@@ -87,15 +107,15 @@ def main() -> None:
 
     img = bytearray(total * SECTOR)
     img[0:SECTOR] = mbr
-    img[SECTOR : 2 * SECTOR] = header(1, total - 1, FIRST, last_usable, disk_guid, 2, table_crc)
+    img[SECTOR : 2 * SECTOR] = header(1, total - 1, first_usable, last_usable, disk_guid, 2, table_crc)
     img[2 * SECTOR : (2 + ENTRY_SECTORS) * SECTOR] = table
     img[FIRST * SECTOR : (FIRST + esp_sectors) * SECTOR] = esp
     backup_entries = total - 1 - ENTRY_SECTORS
     img[backup_entries * SECTOR : (total - 1) * SECTOR] = table
-    img[(total - 1) * SECTOR :] = header(total - 1, 1, FIRST, last_usable, disk_guid, backup_entries, table_crc)
-    with open(sys.argv[2], "wb") as f:
+    img[(total - 1) * SECTOR :] = header(total - 1, 1, first_usable, last_usable, disk_guid, backup_entries, table_crc)
+    with open(args[1], "wb") as f:
         f.write(img)
-    print(f"raw: {sys.argv[2]} ({len(img)} bytes, GPT, EFI system partition of {len(esp)} bytes)")
+    print(f"raw: {args[1]} ({len(img)} bytes, GPT, EFI system partition of {len(esp)} bytes)")
 
 
 if __name__ == "__main__":

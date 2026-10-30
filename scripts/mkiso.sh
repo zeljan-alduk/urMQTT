@@ -3,6 +3,14 @@
 #
 #   scripts/mkiso.sh --kernel ELF --out ISO [--cmdline "smoke test=brk"] [--esp-out IMG]
 #                    [--arch aarch64|x86_64]
+#   scripts/mkiso.sh --universal --kernel-aarch64 ELF --kernel-x86_64 ELF --out ISO
+#                    [--cmdline STR] [--esp-out IMG] [--disk-out IMG]
+#                    [--install-cmdline STR] [--install-default]
+#
+# --universal (X10, ADR-043) builds ONE hybrid ISO for aarch64 UEFI, x86_64
+# UEFI and x86_64 BIOS: both kernels (urmqtt-<arch>.elf, ${ARCH} spelling of
+# Limine: aarch64, x86-64), both UEFI loaders, one limine.conf whose entries
+# each carry `if_arch`. See the universal section below.
 #
 # --arch x86_64 (X2) builds a hybrid ISO that boots on x86 BIOS (El Torito,
 # Limine stage 1) and UEFI (BOOTX64.EFI in the ESP image): one entry, no
@@ -32,10 +40,15 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 ARCH=${URMQTT_ARCH:-aarch64}
 KERNEL="" OUT="" CMDLINE="" ESP_OUT="" INSTALL_CMDLINE="install" INSTALL_DEFAULT=0
+UNIVERSAL=0 KERNEL_A64="" KERNEL_X86="" DISK_OUT=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --arch) ARCH=$2; shift 2 ;;
         --kernel) KERNEL=$2; shift 2 ;;
+        --universal) UNIVERSAL=1; shift ;;
+        --kernel-aarch64) KERNEL_A64=$2; shift 2 ;;
+        --kernel-x86_64) KERNEL_X86=$2; shift 2 ;;
+        --disk-out) DISK_OUT=$2; shift 2 ;;
         --out) OUT=$2; shift 2 ;;
         --cmdline) CMDLINE=$2; shift 2 ;;
         --esp-out) ESP_OUT=$2; shift 2 ;;
@@ -44,8 +57,16 @@ while [[ $# -gt 0 ]]; do
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
-[[ -n "$KERNEL" && -n "$OUT" ]] || { echo "usage: $0 --kernel ELF --out ISO [--cmdline STR] [--esp-out IMG]" >&2; exit 2; }
-[[ -f "$KERNEL" ]] || { echo "error: kernel $KERNEL not found (run make build)" >&2; exit 1; }
+if [[ $UNIVERSAL -eq 1 ]]; then
+    [[ -n "$KERNEL_A64" && -n "$KERNEL_X86" && -n "$OUT" ]] \
+        || { echo "usage: $0 --universal --kernel-aarch64 ELF --kernel-x86_64 ELF --out ISO [--cmdline STR]" >&2; exit 2; }
+    for k in "$KERNEL_A64" "$KERNEL_X86"; do
+        [[ -f "$k" ]] || { echo "error: kernel $k not found (make build ARCH=aarch64 and ARCH=x86_64)" >&2; exit 1; }
+    done
+else
+    [[ -n "$KERNEL" && -n "$OUT" ]] || { echo "usage: $0 --kernel ELF --out ISO [--cmdline STR] [--esp-out IMG]" >&2; exit 2; }
+    [[ -f "$KERNEL" ]] || { echo "error: kernel $KERNEL not found (run make build)" >&2; exit 1; }
+fi
 for tool in mformat mmd mcopy xorriso python3; do
     command -v "$tool" >/dev/null || { echo "error: $tool not found (brew install mtools xorriso / apt install mtools xorriso)" >&2; exit 1; }
 done
@@ -63,7 +84,117 @@ STAMP=$(python3 -I -c 'import sys,time; print(time.strftime("%Y%m%d%H%M.%S", tim
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-HASH=$(python3 -I -c 'import hashlib,sys; print(hashlib.blake2b(open(sys.argv[1],"rb").read()).hexdigest())' "$KERNEL")
+blake2b() { python3 -I -c 'import hashlib,sys; print(hashlib.blake2b(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
+
+if [[ $UNIVERSAL -eq 1 ]]; then
+    # One ISO for aarch64 UEFI, x86_64 UEFI and x86_64 BIOS. Every artifact
+    # exists once per architecture; Limine's `if_arch` shows each machine
+    # only its own entries, and each entry pins its own kernel by blake2b.
+    #
+    #   ESP image (FAT; El Torito UEFI image, GPT partition of the hybrid ISO,
+    #   and the installed disk's EFI system partition):
+    #     /EFI/BOOT/BOOTAA64.EFI, BOOTX64.EFI   the loaders
+    #     /EFI/BOOT/limine.conf, /boot/limine/limine.conf   no menu
+    #     /boot/limine/limine-bios.sys           BIOS stage 2 (installed disk)
+    #     /boot/urmqtt-aarch64.elf, /boot/urmqtt-x86-64.elf
+    #   disk image (the install module): GPT with a BIOS boot partition and
+    #   the ESP, `limine bios-install` applied, so the installed disk boots
+    #   by UEFI and by BIOS.
+    #   ISO9660 tree: the same loaders, kernels and stage 2, the menu config,
+    #   /esp.img and /disk.img; El Torito: BIOS (limine-bios-cd.bin), UEFI.
+    LCC=${CC:-cc}
+    command -v "$LCC" >/dev/null || { echo "error: no C compiler ($LCC) to build the limine tool" >&2; exit 1; }
+    "$LCC" -O2 -std=c99 -D_FILE_OFFSET_BITS=64 -o "$TMP/limine" "$ROOT/vendor/limine/limine.c"
+    HASH_A64=$(blake2b "$KERNEL_A64")
+    HASH_X86=$(blake2b "$KERNEL_X86")
+    # entry <title> <extra lines...>: one entry per architecture.
+    entries() {
+        local title=$1 cmd=$2 module=$3 arch hash
+        for arch in aarch64 x86-64; do
+            if [[ $arch == aarch64 ]]; then hash=$HASH_A64; else hash=$HASH_X86; fi
+            echo
+            echo "/$title"
+            echo "    if_arch: $arch"
+            echo "    protocol: limine"
+            # shellcheck disable=SC2016 # ${ARCH} is Limine's macro
+            echo "    path: boot():/boot/urmqtt-"'${ARCH}'".elf#$hash"
+            if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then printf '    resolution: %s\n' "$URMQTT_RESOLUTION"; fi
+            if [[ -n "$cmd" ]]; then printf '    cmdline: %s\n' "$cmd"; fi
+            if [[ -n "$module" ]]; then echo "    module_path: $module"; fi
+        done
+    }
+    {
+        echo "# Generated by scripts/mkiso.sh --universal. No menu and no editor."
+        echo "timeout: 0"
+        echo "quiet: yes"
+        echo "editor_enabled: no"
+        echo "hash_mismatch_panic: yes"
+        entries urMQTT "$CMDLINE" ""
+    } > "$TMP/limine.conf"
+    for f in BOOTAA64.EFI BOOTX64.EFI limine-bios.sys limine-bios-cd.bin; do cp "$ROOT/vendor/limine/$f" "$TMP/$f"; done
+    cp "$KERNEL_A64" "$TMP/urmqtt-aarch64.elf"
+    cp "$KERNEL_X86" "$TMP/urmqtt-x86-64.elf"
+    TZ=UTC touch -t "$STAMP" "$TMP"/*.EFI "$TMP"/*.elf "$TMP"/limine.conf "$TMP"/limine-bios.sys "$TMP"/limine-bios-cd.bin
+    payload=0
+    for f in BOOTAA64.EFI BOOTX64.EFI limine-bios.sys urmqtt-aarch64.elf urmqtt-x86-64.elf; do
+        payload=$(( payload + $(wc -c < "$TMP/$f") ))
+    done
+    mib=$(( (payload * 2 / 1048576) + 1 ))
+    (( mib < 8 )) && mib=8
+    ESP="$TMP/esp.img"
+    export MTOOLS_SKIP_CHECK=1
+    mformat -i "$ESP" -C -T $(( mib * 2048 )) -h 64 -s 32 -N 55524d51 -v URMQTT ::
+    mmd -i "$ESP" ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
+    mcopy -m -i "$ESP" "$TMP/BOOTAA64.EFI" "$TMP/BOOTX64.EFI" ::/EFI/BOOT/
+    mcopy -m -i "$ESP" "$TMP/limine.conf" ::/EFI/BOOT/limine.conf
+    mcopy -m -i "$ESP" "$TMP/limine.conf" ::/boot/limine/limine.conf
+    mcopy -m -i "$ESP" "$TMP/limine-bios.sys" ::/boot/limine/limine-bios.sys
+    mcopy -m -i "$ESP" "$TMP/urmqtt-aarch64.elf" "$TMP/urmqtt-x86-64.elf" ::/boot/
+    python3 -I "$ROOT/scripts/fat-stamp.py" "$ESP" "$SOURCE_DATE_EPOCH" >/dev/null
+    # The installed disk: GPT, BIOS boot partition, ESP; Limine's BIOS stage 1
+    # and stage 1.5 applied (the tool is deterministic: checked by `make repro`).
+    python3 -I "$ROOT/scripts/mkraw.py" --bios-boot "$ESP" "$TMP/disk.img" >/dev/null
+    "$TMP/limine" bios-install "$TMP/disk.img" >/dev/null 2>&1 || { echo "error: limine bios-install failed on the disk image" >&2; exit 1; }
+    ESP_HASH=$(blake2b "$ESP")
+    DISK_HASH=$(blake2b "$TMP/disk.img")
+    if [[ $INSTALL_DEFAULT -eq 1 ]]; then
+        MENU_TIMEOUT=0 DEFAULT_ENTRY=2
+    else
+        MENU_TIMEOUT=5 DEFAULT_ENTRY=1
+    fi
+    {
+        echo "# Generated by scripts/mkiso.sh --universal: the ISO's menu (S1b, X10). No editor;"
+        echo "# kernels and the installation image pinned by blake2b."
+        echo "timeout: $MENU_TIMEOUT"
+        echo "default_entry: $DEFAULT_ENTRY"
+        echo "editor_enabled: no"
+        echo "hash_mismatch_panic: yes"
+        entries urMQTT "$CMDLINE" ""
+        entries "Install urMQTT on this machine's disk" "$INSTALL_CMDLINE" "boot():/disk.img#$DISK_HASH"
+    } >"$TMP/iso-limine.conf"
+    mkdir -p "$TMP/iso/EFI/BOOT" "$TMP/iso/boot/limine" "$(dirname "$OUT")"
+    cp "$ESP" "$TMP/iso/esp.img"
+    cp "$TMP/disk.img" "$TMP/iso/disk.img"
+    cp "$TMP/BOOTAA64.EFI" "$TMP/BOOTX64.EFI" "$TMP/iso/EFI/BOOT/"
+    cp "$TMP/iso-limine.conf" "$TMP/iso/EFI/BOOT/limine.conf"
+    cp "$TMP/iso-limine.conf" "$TMP/iso/boot/limine/limine.conf"
+    cp "$TMP/limine-bios.sys" "$TMP/limine-bios-cd.bin" "$TMP/iso/boot/limine/"
+    cp "$TMP/urmqtt-aarch64.elf" "$TMP/urmqtt-x86-64.elf" "$TMP/iso/boot/"
+    find "$TMP/iso" -exec env TZ=UTC touch -t "$STAMP" {} +
+    xorriso -as mkisofs -quiet -iso-level 3 -R -V URMQTT \
+        --set_all_file_dates "=$SOURCE_DATE_EPOCH" \
+        -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table \
+        --efi-boot esp.img -efi-boot-part --efi-boot-image --protective-msdos-label \
+        -o "$OUT" "$TMP/iso" 2>&1 | grep -vE '^(xorriso : NOTE|GNU xorriso|$)' >&2 || true
+    [[ -s "$OUT" ]] || { echo "error: xorriso produced no image" >&2; exit 1; }
+    "$TMP/limine" bios-install "$OUT" >/dev/null 2>&1 || { echo "error: limine bios-install failed" >&2; exit 1; }
+    if [[ -n "$ESP_OUT" ]]; then cp "$ESP" "$ESP_OUT"; fi
+    if [[ -n "$DISK_OUT" ]]; then cp "$TMP/disk.img" "$DISK_OUT"; fi
+    echo "iso: $OUT ($(wc -c < "$OUT" | tr -d ' ') bytes, universal: aarch64 ${HASH_A64:0:16}…, x86-64 ${HASH_X86:0:16}…)"
+    exit 0
+fi
+
+HASH=$(blake2b "$KERNEL")
 if [[ $ARCH == x86_64 ]]; then
     # X2: the minimal x86 boot image. The self-installing menu (S1b) and the
     # raw GPT image are X10's. The ESP image carries the UEFI loader, the

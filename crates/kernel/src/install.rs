@@ -33,20 +33,41 @@ fn sleep_s(s: u64) {
     }
 }
 
+/// What the bootloader loaded as the installation image.
+#[derive(Clone, Copy)]
+pub enum Image {
+    /// An EFI system partition; the boot disk is built around it.
+    Esp(&'static [u8]),
+    /// A finished boot disk image (GPT, BIOS boot partition, ESP).
+    Disk(&'static [u8]),
+}
+
 /// Runs the installer; never returns (the machine powers off).
-pub fn run(esp: Option<&'static [u8]>, countdown_s: u64, fault: Option<FaultSpec>) -> ! {
-    let Some(esp) = esp else {
+pub fn run(source: Option<Image>, countdown_s: u64, fault: Option<FaultSpec>) -> ! {
+    let Some(source) = source else {
         error!(
             "install: no installation image: boot the ISO's \"Install urMQTT on this machine's disk\" entry"
         );
         power::off()
     };
-    let image = urmqtt_store::gpt::raw_image_len(esp.len() as u64);
-    info!(
-        "install: installation image: EFI system partition of {} KiB (blake2b checked by the bootloader), boot image {} MiB",
-        esp.len() >> 10,
-        image >> 20
-    );
+    let image = match source {
+        Image::Esp(esp) => {
+            let image = urmqtt_store::gpt::raw_image_len(esp.len() as u64);
+            info!(
+                "install: installation image: EFI system partition of {} KiB (blake2b checked by the bootloader), boot image {} MiB",
+                esp.len() >> 10,
+                image >> 20
+            );
+            image
+        }
+        Image::Disk(img) => {
+            info!(
+                "install: installation image: boot disk image of {} KiB for UEFI and BIOS (blake2b checked by the bootloader)",
+                img.len() >> 10
+            );
+            img.len() as u64
+        }
+    };
     let (cands, names): (Vec<Candidate>, Vec<String>) = {
         let devs = devices::DEVICES.lock();
         devs.install
@@ -141,7 +162,11 @@ pub fn run(esp: Option<&'static [u8]>, countdown_s: u64, fault: Option<FaultSpec
     }
     info!("install: writing {} MiB to {name}", image >> 20);
     let t0 = time::uptime_ns();
-    match install::write_image(dev.as_mut(), esp) {
+    let written = match source {
+        Image::Esp(esp) => install::write_image(dev.as_mut(), esp),
+        Image::Disk(img) => install::write_boot_image(dev.as_mut(), img),
+    };
+    match written {
         Ok(n) => {
             info!(
                 "install: done: {} MiB written and verified in {} ms; remove the installation medium, then boot from {name}",

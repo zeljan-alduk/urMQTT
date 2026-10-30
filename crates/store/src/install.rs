@@ -98,6 +98,37 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 /// Returns the image's length in bytes.
 pub fn write_image(dev: &mut dyn BlockDevice, esp: &[u8]) -> Result<u64, InstallError> {
     let img = gpt::raw_image(esp).ok_or(InstallError::BadImage)?;
+    write_boot_image(dev, &img)
+}
+
+/// Whether `img` is a whole disk image the installer can write: a multiple
+/// of 512 bytes, a protective MBR, a primary GPT header whose backup copy
+/// is the image's last sector. Anything else would not be a boot disk.
+fn is_boot_image(img: &[u8]) -> bool {
+    let s = SECTOR as usize;
+    let head = (2 + ENTRY_SECTORS) as usize;
+    if !img.len().is_multiple_of(s)
+        || img.len() < (head + 1) * s
+        || img.get(510..512) != Some(&[0x55, 0xaa])
+    {
+        return false;
+    }
+    let header = img.get(s..2 * s).unwrap_or(&[]);
+    let backup = header
+        .get(32..40)
+        .and_then(|b| <[u8; 8]>::try_from(b).ok())
+        .map(u64::from_le_bytes);
+    header.get(..8) == Some(b"EFI PART") && backup == Some((img.len() / s) as u64 - 1)
+}
+
+/// Writes the finished disk image `img` onto `dev` (module docs). The
+/// universal ISO's install module is such an image: besides the GPT and the
+/// ESP it carries the BIOS boot code in sector 0 and the gap before the
+/// ESP (X10). Returns the image's length in bytes.
+pub fn write_boot_image(dev: &mut dyn BlockDevice, img: &[u8]) -> Result<u64, InstallError> {
+    if !is_boot_image(img) {
+        return Err(InstallError::BadImage);
+    }
     let s = SECTOR as usize;
     let total = dev.sectors();
     let img_sectors = (img.len() / s) as u64;
@@ -145,7 +176,7 @@ pub fn write_image(dev: &mut dyn BlockDevice, esp: &[u8]) -> Result<u64, Install
     }
     let mut back = [0u8; 32];
     back.copy_from_slice(&h.finalize());
-    if back != sha256(&img) {
+    if back != sha256(img) {
         return Err(InstallError::Verify);
     }
     Ok(img_sectors * SECTOR)

@@ -20,9 +20,9 @@ use urmqtt_sync::sync::SpinLock;
 use crate::boot_aarch64 as arch;
 #[cfg(target_arch = "x86_64")]
 use crate::boot_x86 as arch;
-pub(crate) use arch::PRIVILEGE_LABEL;
 use crate::cmdline::{BootOptions, TestFault};
 use crate::{VERSION, console, devices, irq, layout, memory, power, selftest, smp, tick, trap, vm};
+pub(crate) use arch::PRIVILEGE_LABEL;
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
@@ -115,7 +115,7 @@ struct Stage2 {
     /// Read before the bootloader's memory is reclaimed.
     medium: devices::BootMedium,
     /// The installation image, if the bootloader loaded one.
-    install_image: Option<&'static [u8]>,
+    install_image: Option<crate::install::Image>,
 }
 
 static STAGE2: SpinLock<Option<Stage2>> = SpinLock::new(None);
@@ -542,7 +542,11 @@ const TICK_SELFTEST: u64 = 50;
 /// Runs the periodic tick and reports interrupt latency twice: while the
 /// core busy-polls and while it sleeps in `wfi` (ADR-022).
 fn tick_selftest(timer_intid: u32) {
-    info!("{} {} ms", arch::timer_log(timer_intid), TICK_NS / 1_000_000);
+    info!(
+        "{} {} ms",
+        arch::timer_log(timer_intid),
+        TICK_NS / 1_000_000
+    );
     tick::start(timer_intid, TICK_NS);
     let t0 = time::uptime_ns();
     // SAFETY: vectors, GIC and the tick handler are ready.
@@ -639,16 +643,27 @@ fn uptime_ns() -> u64 {
     time::uptime_ns()
 }
 
-/// The module whose path ends in `/esp.img` (the ISO's install entry).
-/// Its contents live in module memory, which stays mapped; only the
-/// descriptor is in reclaimable memory, so this runs in stage 1.
-fn install_image() -> Option<&'static [u8]> {
+/// The module of the ISO's install entry: `/esp.img` (the EFI system
+/// partition; the aarch64 ISO) or `/disk.img` (a finished boot disk image;
+/// the universal ISO). Its contents live in module memory, which stays
+/// mapped; only the descriptor is in reclaimable memory, so this runs in
+/// stage 1.
+fn install_image() -> Option<crate::install::Image> {
+    use crate::install::Image;
     let r = MODULES.response()?;
-    r.modules()
-        .iter()
-        .find(|m| m.path().ends_with("/esp.img"))
-        .map(|m| m.data())
-        .filter(|d| !d.is_empty())
+    r.modules().iter().find_map(|m| {
+        let data = m.data();
+        let path = m.path();
+        if data.is_empty() {
+            None
+        } else if path.ends_with("/esp.img") {
+            Some(Image::Esp(data))
+        } else if path.ends_with("/disk.img") {
+            Some(Image::Disk(data))
+        } else {
+            None
+        }
+    })
 }
 
 /// Offsets in Limine's `struct limine_file` (protocol: `media_type` u32,

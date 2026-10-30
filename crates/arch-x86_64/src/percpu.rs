@@ -98,23 +98,25 @@ const MSR_EFER: u32 = 0xc000_0080;
 const MSR_PAT: u32 = 0x277;
 const EFER_NXE: u64 = 1 << 11;
 
-fn read_cr(which: Cr) -> u64 {
+fn read_cr0() -> u64 {
     let v: u64;
     // SAFETY: reading a control register has no side effect.
-    unsafe {
-        match which {
-            Cr::Cr0 => asm!("mov {}, cr0", out(reg) v, options(nomem, nostack, preserves_flags)),
-            Cr::Cr3 => asm!("mov {}, cr3", out(reg) v, options(nomem, nostack, preserves_flags)),
-            Cr::Cr4 => asm!("mov {}, cr4", out(reg) v, options(nomem, nostack, preserves_flags)),
-        }
-    }
+    unsafe { asm!("mov {}, cr0", out(reg) v, options(nomem, nostack, preserves_flags)) };
     v
 }
 
-enum Cr {
-    Cr0,
-    Cr3,
-    Cr4,
+fn read_cr3() -> u64 {
+    let v: u64;
+    // SAFETY: as for `read_cr0`.
+    unsafe { asm!("mov {}, cr3", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+fn read_cr4() -> u64 {
+    let v: u64;
+    // SAFETY: as for `read_cr0`.
+    unsafe { asm!("mov {}, cr4", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
 }
 
 impl ApBoot {
@@ -143,9 +145,9 @@ impl ApBoot {
         _pac_key: Option<(u64, u64)>,
     ) {
         *self = Self {
-            cr0: read_cr(Cr::Cr0),
-            cr3: read_cr(Cr::Cr3),
-            cr4: read_cr(Cr::Cr4),
+            cr0: read_cr0(),
+            cr3: read_cr3(),
+            cr4: read_cr4(),
             efer: prim::rdmsr(MSR_EFER),
             pat: prim::rdmsr(MSR_PAT),
             stack: main_top,

@@ -16,9 +16,7 @@ pub mod cpu {
 /// The interrupt controller (local APIC and I/O APIC).
 #[cfg(target_os = "none")]
 pub mod irq {
-    pub use super::imp::irq::{
-        Ack, Config, Controller, Error, GICV2_MAX_CPUS, Local, mode_name,
-    };
+    pub use super::imp::irq::{Ack, Config, Controller, Error, GICV2_MAX_CPUS, Local, mode_name};
 }
 
 /// Inter-processor interrupt vectors.
