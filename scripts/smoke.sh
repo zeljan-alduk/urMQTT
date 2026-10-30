@@ -2,6 +2,7 @@
 # Boots urMQTT headless and checks the serial log. Non-zero exit on any failure.
 #
 #   scripts/smoke.sh [--kernel ELF] [--accels "hvf tcg"] [--out build/smoke]
+#   scripts/smoke.sh --arch x86_64 [--accels "tcg"]       (the x86 scenarios only, X2)
 #
 # Each scenario builds an ISO with a dev-only kernel command line, boots it,
 # waits for QEMU to exit (the kernel powers off via PSCI in smoke mode) and
@@ -12,15 +13,29 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 KERNEL="$ROOT/target/aarch64-unknown-none/release/urmqtt"
 OUT="$ROOT/build/smoke"
 ACCELS=""
+ARCH=aarch64
 TIMEOUT=${SMOKE_TIMEOUT:-120}
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --arch) ARCH=$2; shift 2 ;;
         --kernel) KERNEL=$2; shift 2 ;;
         --accels) ACCELS=$2; shift 2 ;;
         --out) OUT=$2; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+if [[ $ARCH == x86_64 ]]; then
+    [[ $KERNEL == "$ROOT/target/aarch64-unknown-none/release/urmqtt" ]] \
+        && KERNEL="$ROOT/target/x86_64-urmqtt-none/release/urmqtt"
+    if [[ -z "$ACCELS" ]]; then
+        case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) [[ -w /dev/kvm ]] && ACCELS="kvm tcg" || ACCELS="tcg" ;;
+            *) ACCELS="tcg" ;;
+        esac
+    fi
+elif [[ $ARCH != aarch64 ]]; then
+    echo "error: --arch aarch64|x86_64" >&2; exit 2
+fi
 if [[ -z "$ACCELS" ]]; then
     case "$(uname -s)-$(uname -m)" in
         Darwin-arm64) ACCELS="hvf tcg" ;;
@@ -1020,8 +1035,63 @@ gicv2() {
 rm -f "$OUT"/*.iso "$OUT"/*.raw "$OUT"/*.raw.esp
 echo "smoke: accelerators: $ACCELS"
 
-BOOT_LINE='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$'
 NO_FAULT='NOT:EXCEPTION|PANIC'
+
+# X2: the x86_64 boot and exception scenarios (TCG, or KVM on an x86 host).
+# Each boots an ISO built by mkiso.sh --arch x86_64 (BIOS and UEFI capable)
+# on the given machine and firmware, with the CPU model "-" for the
+# accelerator's default (max under TCG, host under KVM).
+#
+# x86_scenario <name> <machine> <firmware> <cpu|-> <cmdline> <patterns...>
+x86_scenario() {
+    local name=$1 machine=$2 fw=$3 cpu=$4 cmdline=$5
+    shift 5
+    local iso="$OUT/$name.iso"
+    "$ROOT/scripts/mkiso.sh" --arch x86_64 --kernel "$KERNEL" --out "$iso" --cmdline "$cmdline" >/dev/null
+    for accel in $ACCELS; do
+        local log="$OUT/$name-$accel.log" status=0
+        local cpuargs=()
+        [[ $cpu != - ]] && cpuargs=(--cpu "$cpu")
+        boot "$log" --arch x86_64 --iso "$iso" --accel "$accel" --machine "$machine" --firmware "$fw" \
+            ${cpuargs[@]+"${cpuargs[@]}"} --smp 2 --headless --no-net || status=$?
+        check "$name [$accel]" "$log" "$status" "$@"
+    done
+}
+
+if [[ $ARCH == x86_64 ]]; then
+    X86_BOOT=('^URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$'
+        'cpu: vendor=[A-Za-z]+ family=[0-9]+ model=0x[0-9a-f]+ stepping=[0-9]+ hypervisor=[A-Za-z]+'
+        'cpu features: .*xcr0=0x[0-9a-f]+' 'bootloader=Limine' 'framebuffer: [0-9]+x[0-9]+ text console'
+        'memmap 0x' '^URMQTT READY$')
+    x86_scenario x86-boot-q35-uefi q35 uefi - "smoke" "${X86_BOOT[@]}" "$NO_FAULT"
+    x86_scenario x86-boot-pc-bios pc bios - "smoke" "${X86_BOOT[@]}" "$NO_FAULT"
+    # The smallest CPU that is still x86-64-v2: no AES-NI, no AVX.
+    x86_scenario x86-boot-v2-minimal q35 uefi "qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt,+cx16" "smoke" \
+        "${X86_BOOT[@]}" "NOT:cpu features: .*(aes|avx2)" "$NO_FAULT"
+    x86_scenario x86-baseline-refuse q35 uefi qemu64 "smoke" \
+        "Missing: ssse3 sse4.1 sse4.2 popcnt" \
+        'VM CPU type too old: use `host`, `x86-64-v2-AES` or newer in Proxmox/QEMU' \
+        "NOT:URMQTT BOOT" "NOT:URMQTT READY"
+    x86_scenario x86-fault-pf-null q35 uefi - "smoke test=null" \
+        "EXCEPTION: #PF page fault" "page not present, read, supervisor mode" \
+        "CR2=0x0000000000000008" "RIP=0xffffffff8" "RAX=0x[0-9a-f]+ RBX=" "R15=0x" \
+        "on IST stack 4" "FAR is in: lower half" "fatal exception, stopping" "NOT:URMQTT READY"
+    x86_scenario x86-fault-ud pc bios - "smoke test=undef" \
+        "EXCEPTION: #UD invalid opcode" "vector=6" "on the interrupted stack" "NOT:URMQTT READY"
+    x86_scenario x86-fault-gp q35 uefi - "smoke test=gp" \
+        "EXCEPTION: #GP general protection" "no selector \(non-canonical address" \
+        "RAX=0x8000000000000000" "NOT:URMQTT READY"
+    x86_scenario x86-fault-df q35 uefi - "smoke test=df" \
+        "EXCEPTION: #DF double fault" "vector=8" "on IST stack 1" "NOT:URMQTT READY"
+    x86_scenario x86-brk-resume q35 uefi - "smoke test=brk" \
+        "resumable brk at 0x" "test: resumed after brk" "^URMQTT READY$" "NOT:fatal exception"
+    x86_scenario x86-panic q35 uefi - "smoke test=panic" \
+        "PANIC: panicked at" "test panic requested on the command line" "NOT:URMQTT READY"
+    echo "smoke: $PASSED passed, $FAILED failed"
+    exit $(( FAILED > 0 ))
+fi
+
+BOOT_LINE='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$'
 
 MEMORY_OK=("vm: switched to kernel tables" "selftest: frames ok" "page tables locked" "selftest: W\^X ok \([0-9]+ leaf mappings audited, 0 W\+X")
 TIME_OK=("gic: v3 at gicd=0x8000000" "timer: counter [0-9]+ Hz, virtual timer PPI 27" "tick 10$"

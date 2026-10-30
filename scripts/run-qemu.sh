@@ -19,16 +19,27 @@
 # socket (QEMU binds UDP LOCAL, sends to REMOTE): a host process is then the
 # whole network and can inject arbitrary frames (H3 adversarial tests).
 #
+# --arch x86_64 boots an x86 ISO or raw image (X2): --machine q35|pc (default
+# q35), --firmware uefi|bios (default uefi; bios = SeaBIOS), --cpu MODEL
+# (default max under TCG, host under KVM). Accelerators: tcg (default off
+# Linux x86_64 with /dev/kvm) or kvm. The isa-debug-exit device is always
+# attached (dev images use it as a fallback power-off). --gic, --acpi,
+# --bus scsi and --data are aarch64-only for now.
+#
 # Without --serial the serial console is on stdio. Ctrl-A X quits QEMU.
 # Option ROMs are disabled (romfile=): no iPXE in the firmware, faster boot.
 set -euo pipefail
 
+ARCH=aarch64 MACHINE=q35 FIRMWARE=uefi
 ISO="" DISK="" BUS=blk CPU_MODEL="" GIC=3 RNG=1 ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
 FWD="1883:1883,8883:8883"
 DGRAM=""
 EXTRA=()
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --arch) ARCH=$2; shift 2 ;;
+        --machine) MACHINE=$2; shift 2 ;;
+        --firmware) FIRMWARE=$2; shift 2 ;;
         --iso) ISO=$2; shift 2 ;;
         --disk) DISK=$2; shift 2 ;;
         --bus) BUS=$2; shift 2 ;;
@@ -55,6 +66,66 @@ if [[ -n "$DISK" ]]; then
     [[ -f "$DISK" ]] || { echo "error: disk image '$DISK' not found (run make raw)" >&2; exit 1; }
 else
     [[ -f "$ISO" ]] || { echo "error: ISO '$ISO' not found (run make iso)" >&2; exit 1; }
+fi
+
+if [[ $ARCH == x86_64 ]]; then
+    case $MACHINE in q35|pc) ;; *) echo "error: --machine q35|pc" >&2; exit 2 ;; esac
+    case $FIRMWARE in uefi|bios) ;; *) echo "error: --firmware uefi|bios" >&2; exit 2 ;; esac
+    if [[ -z "$ACCEL" ]]; then
+        case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) [[ -w /dev/kvm ]] && ACCEL=kvm || ACCEL=tcg ;;
+            *) ACCEL=tcg ;;
+        esac
+    fi
+    case $ACCEL in kvm) CPU=host ;; tcg) CPU=max ;; *) echo "error: x86_64 needs --accel tcg|kvm" >&2; exit 2 ;; esac
+    [[ -n "$CPU_MODEL" ]] && CPU=$CPU_MODEL
+    X86ARGS=(-machine "$MACHINE" -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
+        -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04)
+    if [[ $FIRMWARE == uefi ]]; then
+        FW=""
+        for c in "${URMQTT_FIRMWARE:-}" "$(brew --prefix qemu 2>/dev/null)/share/qemu/edk2-x86_64-code.fd" \
+            /usr/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd; do
+            [[ -n "$c" && -f "$c" ]] && { FW=$c; break; }
+        done
+        [[ -n "$FW" ]] || { echo "error: no x86_64 UEFI firmware found; set URMQTT_FIRMWARE" >&2; exit 1; }
+        # The code image goes in as the first pflash unit and a variable store
+        # (next to it, or URMQTT_FIRMWARE_VARS) as the second, never written
+        # back (snapshot=on): every boot starts from a clean NVRAM. A combined
+        # OVMF build with no separate store loads with -bios instead.
+        VARS=""
+        for c in "${URMQTT_FIRMWARE_VARS:-}" "$(dirname "$FW")/edk2-i386-vars.fd" "$(dirname "$FW")/OVMF_VARS.fd" \
+            /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2/ovmf/OVMF_VARS.fd; do
+            [[ -n "$c" && -f "$c" ]] && { VARS=$c; break; }
+        done
+        if [[ -n "$VARS" ]]; then
+            X86ARGS+=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$FW"
+                -drive "if=pflash,format=raw,unit=1,snapshot=on,file=$VARS")
+        else
+            X86ARGS+=(-bios "$FW")
+        fi
+    fi
+    if [[ -n "$DISK" ]]; then
+        X86ARGS+=(-drive "if=none,id=boot0,file=$DISK,format=raw,cache=none"
+            -device virtio-blk-pci,drive=boot0,bootindex=0,romfile=)
+    else
+        X86ARGS+=(-drive "if=none,id=cd0,file=$ISO,format=raw,readonly=on,media=cdrom"
+            -device ide-cd,drive=cd0,bootindex=0)
+    fi
+    [[ $RNG -eq 1 ]] && X86ARGS+=(-device virtio-rng-pci,romfile=)
+    if [[ $NET -eq 1 ]]; then
+        X86ARGS+=(-netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=)
+    else
+        X86ARGS+=(-nic none)
+    fi
+    if [[ -n "$SERIAL" ]]; then
+        X86ARGS+=(-serial "file:$SERIAL" -monitor none)
+    elif [[ $HEADLESS -eq 1 ]]; then
+        X86ARGS+=(-serial stdio -monitor none)
+    else
+        X86ARGS+=(-serial mon:stdio)
+    fi
+    [[ $GDB -eq 1 ]] && X86ARGS+=(-s -S)
+    exec qemu-system-x86_64 "${X86ARGS[@]}" ${EXTRA[@]+"${EXTRA[@]}"}
 fi
 
 if [[ -z "$ACCEL" ]]; then

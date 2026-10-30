@@ -52,7 +52,7 @@ pub fn describe(far: u64) -> Option<(&'static str, u64)> {
     }
     if far < 0x1_0000_0000_0000 {
         return Some((
-            "lower half (TTBR0 disabled, likely a null or user pointer)",
+            "lower half (no kernel mappings, likely a null or user pointer)",
             0,
         ));
     }

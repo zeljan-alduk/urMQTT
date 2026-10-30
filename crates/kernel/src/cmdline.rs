@@ -29,6 +29,10 @@ pub enum TestFault {
     Bti,
     /// Store into the sealed CPU dispatch page (must be a permission fault).
     SealedWrite,
+    /// x86_64: load from a non-canonical address (#GP).
+    GeneralProtection,
+    /// x86_64: a fault while delivering a fault (#DF, on its IST stack).
+    DoubleFault,
 }
 
 /// Storage self-tests (M11).
@@ -139,6 +143,8 @@ impl BootOptions {
                 "log=trace" => o.log_level = Some(urmqtt_config::LogLevel::Trace),
                 "registry=allowlist" => o.allowlist = true,
                 "test=sealed-write" => o.test_fault = Some(TestFault::SealedWrite),
+                "test=gp" => o.test_fault = Some(TestFault::GeneralProtection),
+                "test=df" => o.test_fault = Some(TestFault::DoubleFault),
                 "test=crypto-bench" => o.crypto_bench = true,
                 "test=simd-irq" => o.simd_irq = true,
                 w => {
@@ -216,6 +222,16 @@ mod tests {
             BootOptions::parse("install install-countdown=2", true).install_countdown_s,
             Some(2)
         );
+    }
+
+    #[test]
+    fn x86_fault_words_are_dev_only() {
+        let gp = BootOptions::parse("smoke test=gp", true);
+        assert_eq!(gp.test_fault, Some(TestFault::GeneralProtection));
+        let df = BootOptions::parse("smoke test=df", true);
+        assert_eq!(df.test_fault, Some(TestFault::DoubleFault));
+        let prod = BootOptions::parse("test=df", false);
+        assert_eq!((prod.test_fault, prod.ignored), (None, 1));
     }
 
     #[test]

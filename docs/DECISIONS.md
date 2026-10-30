@@ -814,3 +814,48 @@ verified in the named milestone before it becomes Accepted).
   - 23 tlsfuzzer probes;
   - the interop table.
 
+
+## ADR-044 — x86_64 boot, exceptions and power control (X2, D5)
+
+- **Status:** Accepted (X2). ACPI S5 and the FADT reset register come with X6; they are not built yet.
+- **Boot contract:** Limine enters in long mode, ring 0, interrupts off, with the kernel, the memory map and the framebuffer in its page tables (HHDM). `_start` (`crates/arch-x86_64/src/entry.rs`) runs before any Rust code:
+  1. switches to a 128 KiB stack of the kernel's own (`.bss.boot_stack`, no guard page until X3), because the bootloader's memory is reclaimed later;
+  2. checks the x86-64-v2 baseline (CPUID.1:ECX SSE3, SSSE3, CX16, SSE4.1, SSE4.2, POPCNT) **in assembly**, because the kernel is compiled for v2 and may fault anywhere on a CPU without it. A failing CPU gets the message of PROMPT-x86_64 section 1 on COM1, including which features are missing, then the QEMU/KVM power-off ports, then `hlt`. The refusal does not reach the framebuffer: only Rust can draw there, and it is compiled for the baseline;
+  3. enables the hard-float kernel's state: CR0.MP/NE/WP set and EM clear, CR4.OSFXSR/OSXMMEXCPT, `fninit`, MXCSR default;
+  4. calls the kernel's `urmqtt_kmain` (`crates/kernel/src/boot_x86.rs`).
+  Rust then turns on XSAVE and sets XCR0 to x87 | SSE | AVX (AVX-512 only when a dispatched kernel needs it, ADR-042), reads CPUID and XGETBV (`features::detect()`), and logs `URMQTT BOOT <ver> arch=x86_64 cpu=<n> mem=<MB>`, the CPU identity (vendor, family, model, stepping, hypervisor signature, brand string) and the feature census.
+- **Console:** COM1 (16550, 115200 8N1, FIFO on, polling, bounded waits, no input) and the Limine framebuffer through the existing `FbConsole`. The UART is found by writing the scratch register; without one only the framebuffer logs. SPCR/ACPI discovery of other ports is X6. `urmqtt-log` gained a `Uart` enum so the sink can be COM1 (port I/O in `arch-x86_64`) instead of a PL011; the emergency path uses it without the log lock.
+- **Tables:** GDT with kernel code and data and the 16-byte TSS descriptor, loaded with `lgdt`, a far return and `ltr`. The IDT has 256 interrupt gates (IF cleared on entry) into 16-byte stubs; the TSS gives #DF, NMI, #MC and #PF their own 16 KiB IST stacks. All of this is boot-CPU-only static state for now; X5 (SMP) makes it per CPU. The legacy 8259 PICs are masked.
+- **Exception path:** each stub pushes the error code (or a zero) and the vector; the common path saves CR2 and 15 GPRs (the `TrapFrame`, layout checked by a host test), runs FXSAVE (the handler is hard-float Rust; `int3` resumes), and calls the kernel's handler on the stack the exception arrived on. The report prints the vector name, the decoded error code (#PF: P/W/U/RSVD/I/PK/SS/SGX; #GP, #TS, #NP, #SS: selector index, table, EXT; #DF), RIP, RSP, RFLAGS, CR2, CS/SS, all GPRs, and which stack the frame sits on (`IST stack n` or `the interrupted stack`), so a #DF report shows that it ran on its own stack. XSAVE-sized state (AVX and later) is not saved on entry: v2-compiled kernel code never touches the upper halves, and X4 saves it when interrupts can reach dispatched AVX functions.
+- **#PF has an IST stack** so that a stack overflow into a guard page (X3) is reported as a #PF with the faulting RSP in the guard, instead of escalating to a #DF with less information. The `test=df` self-test therefore does not overflow a stack: it marks the #GP gate not present and executes a non-canonical load, which delivers #GP, fails with #NP, and becomes #DF (two contributory exceptions).
+- **Power (D5):**
+  - reset: the PCI reset-control port 0xCF9 (0x02, then 0x06), then the 8042 pulse (0x64 <- 0xFE), then a triple fault (empty IDT, `int3`);
+  - power-off: only under a hypervisor (CPUID.1:ECX bit 31), QEMU's ACPI PM1a control at 0x604 and 0xB004 (`0x2000`); on bare metal, until X6 reads `\_S5`, it halts. Writing unknown I/O ports on real hardware is not something to do blindly;
+  - `isa-debug-exit` (port 0xF4): dev images in smoke mode only, as a last resort **after** the ACPI ports. D5 said smoke would use it for the exit code; it does not, because QEMU's debug-exit status is `(value << 1) | 1`, never 0, and the smoke harness (shared with aarch64) treats a non-zero QEMU status as a failure. The ACPI port exits with 0, as PSCI does. `run-qemu.sh` attaches the device on x86 anyway, for a machine type without the PM device (microvm). A production image never writes port 0xF4.
+  - fatal errors: smoke mode powers off, otherwise reset (`power::fatal`, shared with aarch64).
+- **Limine for x86 (lifts PROMPT.md section 2's "aarch64 only", see ADR-055).**
+- **Not done here:** paging beyond what Limine hands over (X3); FP/SIMD save for interrupts, time, LAPIC (X4); APs (X5); ACPI, S5, SPCR (X6); devices (X7+). `URMQTT READY` on x86 currently means "the bring-up sequence finished", and a warning line says so.
+- **Feature census** (`cpu features:` line, QEMU 11.1.2 under TCG; `-` = not exposed):
+
+  | feature | `max` | EPYC-Milan | Icelake-Server | Skylake-Server | Haswell |
+  |---|---|---|---|---|---|
+  | AES-NI, PCLMULQDQ | yes | yes | yes | yes | yes |
+  | SHA-NI | yes | yes | - | - | - |
+  | AVX, AVX2 (XCR0=0x7) | yes | yes | yes | yes | yes |
+  | VAES | yes | - | yes | - | - |
+  | VPCLMULQDQ, GFNI, AVX-512*, WAITPKG, CET | - | - | - | - | - |
+  | RDRAND, RDSEED | yes | yes | yes | yes | RDRAND only |
+  | FSGSBASE | yes | yes | yes | yes | yes |
+  | x2APIC | yes | - | yes | yes | yes |
+  | TSC-deadline, invariant TSC | - | - | - | - | - |
+
+  TCG implements no AVX-512, no CET and no WAITPKG, and does not offer TSC-deadline or an invariant TSC on any of these models (X4 must work without them under TCG). KVM on real CPUs will show more. The table belongs next to the CI/KVM decision (ADR-046).
+- **Testing:** host tests for descriptor and gate encoding, the `TrapFrame` layout, vector and error-code decoding, the baseline mask and names, CPUID identity and census formatting. Smoke scenarios (TCG): `x86-boot-q35-uefi`, `x86-boot-pc-bios`, `x86-boot-v2-minimal`, `x86-baseline-refuse`, `x86-fault-pf-null`, `x86-fault-ud`, `x86-fault-gp`, `x86-fault-df`, `x86-brk-resume`, `x86-panic`. Not covered: KVM, real hardware, a CPU that really lacks the baseline other than `qemu64`.
+
+## ADR-055 — Limine for x86_64: vendored binaries and the host tool
+
+- **Status:** Accepted (X2). Lifts the "aarch64 only" rule of PROMPT.md section 2 for the bootloader, as PROMPT-x86_64.md requires.
+- **Vendored** (`vendor/limine`, checksummed in `CHECKSUMS`, from the signed v12.9.4 binary release, tarball sha256 and GPG signature re-verified on 2026-10-30): `BOOTX64.EFI` (UEFI), `limine-bios.sys` and `limine-bios-cd.bin` (BIOS stage 2 and the El Torito boot image), and `limine.c` with `limine-bios-hdd.h` (the host tool's source). Not vendored: the 32-bit, RISC-V and LoongArch loaders, `limine-uefi-cd.bin` (3 MiB; the images carry their own FAT ESP), the PXE image.
+- **The host tool is built, not vendored as a binary:** `scripts/mkiso.sh --arch x86_64` compiles `limine.c` with the host C compiler (`$CC`, default `cc`) into the temporary directory and runs `limine bios-install` on the finished ISO. This keeps a prebuilt executable out of the repository and the tool's source reviewable.
+- **Image (X2, minimal):** a hybrid ISO. El Torito entry 1 is `limine-bios-cd.bin` (BIOS), entry 2 the FAT ESP image with `EFI/BOOT/BOOTX64.EFI` (UEFI); `limine.conf` has one entry and no menu; the kernel is pinned by blake2b as on aarch64. The ISO9660 tree repeats the loader, config and kernel because Limine reads the CD itself on a CD boot. The universal image (both architectures, the install menu, the raw GPT image) is X10. The aarch64 output of `mkiso.sh` is unchanged.
+- **Verified:** the ISO boots under QEMU q35 with edk2 (UEFI) and pc with SeaBIOS (BIOS). Not verified: real hardware, other firmware, Secure Boot (Limine's binary is not signed for it).

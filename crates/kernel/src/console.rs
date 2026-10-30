@@ -19,6 +19,12 @@ pub fn init_uart(va: u64) {
     urmqtt_log::set_uart(uart, va as usize);
 }
 
+/// Logs to COM1 (already initialised by `urmqtt_arch::serial::init`).
+#[cfg(target_arch = "x86_64")]
+pub fn init_serial() {
+    urmqtt_log::set_com1();
+}
+
 pub fn init_framebuffer(fb: &Framebuffer) {
     if fb.bpp != 32 || fb.memory_model != limine::framebuffer::FRAMEBUFFER_RGB {
         return;

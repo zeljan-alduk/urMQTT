@@ -1,11 +1,16 @@
-//! x86_64 support: the facade's items for X1.
+//! x86_64 support: the facade's items.
 //!
 //! Every item the kernel reaches through `urmqtt-arch` exists here with the
 //! signature the contract (`crates/arch/src/contract.rs`) demands, and
 //! calling one that is not implemented yet stops with a message naming the
 //! milestone that provides it, rather than doing something plausible. The
 //! module layout mirrors `urmqtt-arch-aarch64` so the facade re-exports both
-//! the same way. Pure parts (feature decoding, MSI composition) already work.
+//! the same way. Pure parts (feature decoding, MSI composition, descriptor
+//! encoding, fault decoding) work on the host and are unit tested there.
+//!
+//! X2 brought up the boot path: `entry` (the ELF entry and the baseline
+//! check), `serial` (COM1), `gdt`/`idt`/`isr` (descriptor tables and the
+//! exception entry), `cpu`, `power` and the CPUID probing in `features`.
 
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_code)]
@@ -19,6 +24,8 @@ macro_rules! unimplemented_until {
 
 pub mod crc;
 pub mod features;
+pub mod gdt;
+pub mod idt;
 pub mod msi;
 pub mod paging;
 pub mod trap;
@@ -28,26 +35,18 @@ pub mod cpu;
 #[cfg(target_os = "none")]
 pub mod entropy;
 #[cfg(target_os = "none")]
+mod entry;
+#[cfg(target_os = "none")]
 pub mod irq;
+#[cfg(target_os = "none")]
+mod isr;
 #[cfg(target_os = "none")]
 pub mod percpu;
 #[cfg(target_os = "none")]
+mod port;
+#[cfg(target_os = "none")]
 pub mod power;
 #[cfg(target_os = "none")]
-pub mod time;
-
-// The ELF entry until X2 brings up the real boot path: stop, visibly (the
-// debug-exit port is a dev-only QEMU device, X2).
+pub mod serial;
 #[cfg(target_os = "none")]
-#[allow(unsafe_code)]
-mod entry {
-    core::arch::global_asm!(
-        ".section .text.boot, \"ax\"",
-        ".global _start",
-        "_start:",
-        "    cli",
-        "    call urmqtt_kmain",
-        "1:  hlt",
-        "    jmp 1b",
-    );
-}
+pub mod time;

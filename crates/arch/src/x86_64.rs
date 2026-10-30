@@ -8,8 +8,8 @@ use urmqtt_arch_x86_64 as imp;
 #[cfg(target_os = "none")]
 pub mod cpu {
     pub use super::imp::cpu::{
-        Continuation, enable_interrupts, halt, irq_restore, irq_save, privilege_level,
-        set_return_address_key, switch_to, wait_for_interrupt,
+        Continuation, enable_extended_state, enable_interrupts, halt, irq_restore, irq_save,
+        privilege_level, set_return_address_key, switch_to, wait_for_interrupt,
     };
 }
 
@@ -64,8 +64,8 @@ pub mod trap {
     pub use super::imp::trap::{Event, Registers, TrapFrame, Vector};
     #[cfg(target_os = "none")]
     pub use super::imp::trap::{
-        RET_INSN, branch_to_non_landing_pad, breakpoint, forged_return, install, set_handler,
-        undefined_instruction,
+        RET_INSN, branch_to_non_landing_pad, breakpoint, double_fault, forged_return,
+        general_protection, install, set_handler, undefined_instruction,
     };
 }
 
@@ -78,16 +78,31 @@ pub mod entropy {
 /// System power control.
 #[cfg(target_os = "none")]
 pub mod power {
-    pub use super::imp::power::{Conduit, conduit_name, firmware_version, off, reset, set_conduit};
+    pub use super::imp::power::{
+        Conduit, conduit_name, firmware_version, off, reset, set_conduit, set_debug_exit,
+    };
+}
+
+/// The 16550 UART at COM1 (x86 only).
+#[cfg(target_os = "none")]
+pub mod serial {
+    pub use super::imp::serial::{COM1, flush, init, write_byte, write_bytes};
 }
 
 /// CPU features.
 pub mod features {
-    pub use super::imp::features::{Features, IdRegs};
+    pub use super::imp::features::{
+        BASELINE_ECX, Census, Features, IdRegs, Identity, Missing, baseline_missing,
+    };
 
-    /// Reads and decodes the executing CPU's features (CPUID, X2).
+    /// Reads the executing CPU's CPUID leaves and XCR0 (after
+    /// `cpu::enable_extended_state`).
+    #[cfg(target_os = "none")]
+    pub use super::imp::features::read as read_id_regs;
+
+    /// Reads and decodes the executing CPU's features (CPUID, XGETBV).
     #[cfg(target_os = "none")]
     pub fn detect() -> Features {
-        unimplemented!("x86_64: not implemented until X2 (CPUID)")
+        Features::decode(read_id_regs())
     }
 }

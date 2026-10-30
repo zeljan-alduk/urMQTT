@@ -24,19 +24,19 @@ use crate::{VERSION, console, devices, irq, layout, memory, power, selftest, smp
 static REQUESTS_START: RequestsStartMarker = RequestsStartMarker::new();
 #[used]
 #[unsafe(link_section = ".requests")]
-static BASE_REVISION: BaseRevision = BaseRevision::with_revision(6);
+pub(crate) static BASE_REVISION: BaseRevision = BaseRevision::with_revision(6);
 #[used]
 #[unsafe(link_section = ".requests")]
-static BOOTLOADER: BootloaderInfoRequest = BootloaderInfoRequest::new();
+pub(crate) static BOOTLOADER: BootloaderInfoRequest = BootloaderInfoRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
-static HHDM: HhdmRequest = HhdmRequest::new();
+pub(crate) static HHDM: HhdmRequest = HhdmRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
-static MEMMAP: MemmapRequest = MemmapRequest::new();
+pub(crate) static MEMMAP: MemmapRequest = MemmapRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
-static MP: MpRequest = MpRequest::new(0);
+pub(crate) static MP: MpRequest = MpRequest::new(0);
 #[used]
 #[unsafe(link_section = ".requests")]
 static DTB: DtbRequest = DtbRequest::new();
@@ -45,10 +45,10 @@ static DTB: DtbRequest = DtbRequest::new();
 static RSDP: RsdpRequest = RsdpRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
-static FRAMEBUFFER: FramebufferRequest = FramebufferRequest::new();
+pub(crate) static FRAMEBUFFER: FramebufferRequest = FramebufferRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
-static CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
+pub(crate) static CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static DATE_AT_BOOT: DateAtBootRequest = DateAtBootRequest::new();
@@ -113,7 +113,12 @@ struct Stage2 {
 
 static STAGE2: SpinLock<Option<Stage2>> = SpinLock::new(None);
 
-#[unsafe(no_mangle)]
+// The x86_64 build has its own entry (`boot_x86.rs`); this sequence is
+// AArch64's. It stays compiled there, exported under another name so that
+// it is a root for the dead-code analysis, until X3 gives the shared
+// modules x86 users. Only the Limine requests above are shared.
+#[cfg_attr(target_arch = "aarch64", unsafe(no_mangle))]
+#[cfg_attr(target_arch = "x86_64", unsafe(export_name = "urmqtt_kmain_aarch64"))]
 extern "C" fn urmqtt_kmain() -> ! {
     arch_trap::set_handler(trap::handle);
     arch_trap::install();
@@ -809,5 +814,8 @@ fn run_test_fault(fault: TestFault, features: Features) {
         TestFault::Pac if features.pauth => selftest::pac_violation(),
         TestFault::Bti if features.bti => selftest::bti_violation(),
         TestFault::Pac | TestFault::Bti => info!("test: {fault:?} skipped, CPU lacks the feature"),
+        TestFault::GeneralProtection | TestFault::DoubleFault => {
+            info!("test: {fault:?} skipped, x86_64 only")
+        }
     }
 }
