@@ -98,6 +98,53 @@ impl CookieRotation {
     }
 }
 
+/// Logs the TCP stack's counters every 5 s while they move. This is the
+/// kernel-side evidence for the H3 flood tests (`tools/attack`): SYN cookies
+/// issued without per-connection state, the RST/challenge rate cap holding,
+/// malformed and full-table segments refused.
+struct TcpStatsLog {
+    next_ms: u64,
+    last: urmqtt_tcp::Stats,
+}
+
+impl TcpStatsLog {
+    const EVERY_MS: u64 = 5_000;
+
+    fn new(now: u64) -> Self {
+        Self {
+            next_ms: now + Self::EVERY_MS,
+            last: urmqtt_tcp::Stats::default(),
+        }
+    }
+
+    fn tick(&mut self, s: &urmqtt_tcp::Stats, conns: usize, now: u64) {
+        if now < self.next_ms {
+            return;
+        }
+        self.next_ms = now + Self::EVERY_MS;
+        if s.segs_in == self.last.segs_in {
+            self.last = *s;
+            return;
+        }
+        let d = |a: u64, b: u64| a.saturating_sub(b);
+        info!(
+            "tcp: core {}: {} seg(s) in, cookies {} sent/{} ok/{} bad, {} refused(full table), \
+             RST {} sent ({} rate-limited), {} bad segment(s), {} connection(s)",
+            crate::smp::current(),
+            d(s.segs_in, self.last.segs_in),
+            d(s.cookies_sent, self.last.cookies_sent),
+            d(s.cookies_ok, self.last.cookies_ok),
+            d(s.cookies_bad, self.last.cookies_bad),
+            d(s.refused_full, self.last.refused_full),
+            d(s.rst_sent, self.last.rst_sent),
+            d(s.rst_limited, self.last.rst_limited),
+            d(s.bad_segments, self.last.bad_segments),
+            conns,
+        );
+        self.last = *s;
+    }
+}
+
 /// The dev echo service (RFC 862) on core 0.
 #[derive(Default)]
 struct EchoSvc {
@@ -256,9 +303,11 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
     let mut pool: Vec<Frame> = Vec::new();
     let mut idle = dataplane::Idle::new();
     let mut cookies = CookieRotation::new(now_ms());
+    let mut tcpstats = TcpStatsLog::new(now_ms());
     loop {
         let now = now_ms();
         cookies.tick(&mut tcp, now);
+        tcpstats.tick(&tcp.stats, tcp.connections(), now);
         let mut activity = drain_mesh(&mut link, &mut mqtt, &mut iface, &mut tcp, now);
         let mut sent = false;
         let mut done: Vec<Frame> = Vec::new();
@@ -473,9 +522,11 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     dataplane::set_baseline();
     let mut ops = crate::ops::Ops::new(now_ms());
     let mut cookies = CookieRotation::new(now_ms());
+    let mut tcpstats = TcpStatsLog::new(now_ms());
     loop {
         let now = now_ms();
         cookies.tick(&mut tcp, now);
+        tcpstats.tick(&tcp.stats, tcp.connections(), now);
         if let Some(c) = dataplane::CONNECTIONS.first() {
             // Relaxed: statistics.
             c.store(

@@ -1,0 +1,22 @@
+[package]
+name = "urmqtt-attack"
+description = "Host-side adversarial clients for urMQTT (H3); dev only, never shipped."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "urmqtt-attack"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"] }
+
+[lints]
+workspace = true

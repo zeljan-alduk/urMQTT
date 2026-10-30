@@ -1503,6 +1503,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "urmqtt-attack"
+version = "0.1.0"
+dependencies = [
+ "rcgen",
+ "rustls",
+]
+
+[[package]]
 name = "urmqtt-broker"
 version = "0.1.0"
 dependencies = [

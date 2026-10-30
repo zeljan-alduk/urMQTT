@@ -172,6 +172,17 @@ Every milestone ends with:
 
 **Accept:** all scripted and adversarial tests pass; memory stays within configured limits; findings are documented.
 
+**H3 status (2026-10-30, parts 1–3)**
+- Parts 1–2 (committed earlier): bounded retained messages and freed trie nodes (H0-W1); SYN-cookie key rotation every 10 min with the previous key valid for the cookie lifetime (H0-W3); the packetdrill-style scripted tests (`tcp/src/script.rs`, `scripts.rs`) and the stateful model test (`tcp/src/model.rs`).
+- Part 3 (this entry): `tools/attack/` — host-side adversarial clients, dev only, never shipped. Two transports: the usernet TCP port forward (application attacks) and a raw layer-2 datagram socket (`scripts/run-qemu.sh --dgram`, where the tool is the guest's whole network and injects crafted segments). Every attack's expected outcome is asserted in `scripts/smoke.sh` against the kernel's serial log, now including a per-core TCP-stats line (`tcp: core N: … cookies … sent/ok/bad, RST … sent (… rate-limited), … connection(s)`). All of: SYN flood, ACK flood, RST injection, slowloris (TCP/TLS/MQTT stages), fragmented TLS records, maximum-size packets, topic and subscription explosion, keepalive abuse, many identities.
+- **Observed** (M4 Pro, HVF; mirrored under TCG in CI): a 20 000-segment SYN flood → ~20 000 cookies issued, **0 connections** (no per-connection state), heap flat; ACK flood → the RFC 5961 cap holds visibly (`RST 600 sent (9402 rate-limited)` per core at 8 000 ACK/s), 0 connections; RST flood → dropped, 0 RSTs back, 0 state. Slowloris trips the per-IP in-flight cap (`admission: … too many handshakes in flight`), connections ceil at the cap and return to 0 after the drop. An oversize packet is a protocol-error close; the retained store caps at 32/identity; an over-long SUBSCRIBE closes the session; fragmented records still complete the CONNECT.
+
+**H3 not done / deviations**
+- Reconnect storms stay in `tools/loadgen` (the `storm` smoke scenario, M16); not duplicated in `tools/attack`.
+- The raw-L2 floods exercise the aarch64 VM only; the x86 half follows the X-track port.
+- The unbounded-work audit table (every network-reachable loop/allocation with its config bound and a test at the bound) is written up in the audit docs under H10, not re-listed here.
+- A paced topic flood is used to reach the retained cap deliberately; an unpaced flood is instead absorbed by the per-device publish-rate limiter (the two bounds are independent).
+
 ### H4 — Exploit mitigations · L
 
 **KASLR**

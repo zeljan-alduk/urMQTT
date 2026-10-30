@@ -495,6 +495,110 @@ storm() {
     done
 }
 
+# H3 (tools/attack): raw layer-2 TCP floods. The attack tool is the guest's
+# whole network over a QEMU dgram netdev — it serves one DHCP lease, then
+# injects 20 000 crafted segments. The broker must absorb them: SYN cookies
+# issued without per-connection state, the RFC 5961 RST/challenge rate cap
+# holding, RSTs for unknown connections dropped, and the heap never growing.
+attack_raw() {
+    local attack="$ROOT/target/release/urmqtt-attack"
+    if [[ ! -x "$attack" ]]; then
+        (cd "$ROOT" && cargo build --release -q -p urmqtt-attack) || {
+            echo "  ✗ urmqtt-attack build failed"; FAILED=$((FAILED + 1)); return 0; }
+    fi
+    local iso="$OUT/attack-raw.raw"
+    mkimg "$iso" "serve log=info"
+    # mode|extra checks (beyond the common ones) ...
+    local specs=(
+        "syn-flood|cookies [1-9][0-9]* sent/[0-9]+ ok/0 bad|attack: syn-flood sent 20000"
+        "ack-flood|RST [0-9]+ sent \([1-9][0-9]* rate-limited\)|attack: ack-flood sent 20000"
+        "rst-flood|RST 0 sent \(0 rate-limited\)|attack: rst-flood sent 20000"
+    )
+    local n=0
+    for accel in $ACCELS; do
+        for spec in "${specs[@]}"; do
+            IFS='|' read -r mode p_counter p_client <<<"$spec"
+            local log="$OUT/attack-$mode-$accel.log" data="$OUT/attack-$mode-$accel.img" status=0
+            local lp=$((45000 + n * 2)) rp=$((45001 + n * 2)); n=$((n + 1))
+            fresh_disk "$iso" "$data"
+            # Start the tool first: it binds the socket and serves DHCP, then
+            # blocks until the guest's boot-time lease, floods, and exits.
+            ("$attack" "$mode" --dgram "$lp:$rp" --port 8883 --count 20000 --pps 8000) \
+                >"$log.client" 2>&1 &
+            local apid=$!
+            start_vm "$log" --disk "$data" --accel "$accel" --dgram "$lp:$rp"
+            local waited=0
+            while kill -0 "$apid" 2>/dev/null; do
+                if ! kill -0 "$VM_PID" 2>/dev/null || (( waited >= TIMEOUT * 10 )); then
+                    status=124; kill "$apid" 2>/dev/null || true; break
+                fi
+                sleep 0.1; waited=$((waited + 1))
+            done
+            local rc=0; wait "$apid" 2>/dev/null || rc=$?
+            (( status == 0 )) && status=$rc
+            # Let the per-core TCP-stats and memory reports emit.
+            sleep 6
+            kill_vm
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            check "attack-$mode [$accel]" "$log" "$status" \
+                "net: dhcp lease 10\.0\.2\.15" "$p_counter" "$p_client" \
+                "tcp: core [0-9]+: [0-9]+ seg\(s\) in,.* 0 connection\(s\)" \
+                "NOT:memory allocation of" "$NO_FAULT"
+        done
+    done
+}
+
+# H3 (tools/attack): application-level adversaries over the TLS port, run in
+# sequence against one broker. Each must be bounded: slowloris trips the
+# per-IP in-flight cap, fragmented records still complete, an oversize packet
+# is a protocol error, the retained store and subscriptions are capped,
+# keepalive and identity floods are absorbed — all with a flat heap.
+attack_app() {
+    local attack="$ROOT/target/release/urmqtt-attack"
+    if [[ ! -x "$attack" ]]; then
+        (cd "$ROOT" && cargo build --release -q -p urmqtt-attack) || {
+            echo "  ✗ urmqtt-attack build failed"; FAILED=$((FAILED + 1)); return 0; }
+    fi
+    local iso="$OUT/attack-app.raw"
+    mkimg "$iso" "serve log=info"
+    for accel in $ACCELS; do
+        local log="$OUT/attack-app-$accel.log" data="$OUT/attack-app-$accel.img" status=0
+        fresh_disk "$iso" "$data"
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "18883:8883"
+        if wait_log "$log" "TLS 1.3 listener on port 8883"; then
+            local c=(--port 18883 --certs "$ROOT/deploy/dev")
+            {
+                "$attack" slowloris --stage tcp "${c[@]}" --clients 200 --duration 1
+                "$attack" slowloris --stage tls "${c[@]}" --clients 200 --duration 1
+                "$attack" slowloris --stage mqtt "${c[@]}" --clients 60 --duration 1
+                "$attack" half-records "${c[@]}"
+                "$attack" max-packets "${c[@]}" --max-packet 4096 --count 30
+                "$attack" topic-flood "${c[@]}" --topics 60 --pace-ms 60
+                "$attack" sub-flood "${c[@]}" --filters 64
+                "$attack" keepalive-abuse "${c[@]}" --pings 5000
+                "$attack" identities "${c[@]}" --clients 200
+            } >"$log.client" 2>&1 || status=$?
+            sleep 2
+        else
+            status=124
+        fi
+        kill_vm
+        cat "$log.client" >>"$log" 2>/dev/null || true
+        check "attack-app [$accel]" "$log" "$status" \
+            "attack: slowloris-tcp opened" "attack: slowloris-tls opened" \
+            "attack: slowloris-mqtt opened" \
+            "admission: [0-9]+ connection\(s\) refused: too many handshakes in flight" \
+            "attack: half-records CONNECT completed in fragments, CONNACK ok" \
+            "attack: max-packets .* oversize packet closed the connection" \
+            "attack: topic-flood retained 60 distinct topic" \
+            "broker: [0-9]+ retained message\(s\) not retained .* over an identity's limit of 32" \
+            "attack: sub-flood .* server closed the session" \
+            "attack: keepalive-abuse sent 5000 PINGREQ" \
+            "attack: identities [0-9]+ connected" \
+            "NOT:memory allocation of" "$NO_FAULT"
+    done
+}
+
 # M16: the dev configuration sends syslog to 10.0.2.2:5514 and statsd to
 # 10.0.2.2:8125, which QEMU user networking delivers to the host.
 observability() {
@@ -1116,6 +1220,8 @@ if command -v mosquitto_pub >/dev/null; then
     mqtt_persist
 fi
 storm
+attack_raw
+attack_app
 observability
 first_boot
 first_boot_crash

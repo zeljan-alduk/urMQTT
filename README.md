@@ -317,6 +317,7 @@ urMQTT/
 ├── tools/loadgen/          host-side MQTT/TLS load generator
 ├── tools/control/          urmqtt-control: sign and publish control messages (H1)
 ├── tools/disk/             urmqtt-disk: offline disk info, verify, export, import, update (S1)
+├── tools/attack/           host-side adversarial clients: TCP floods, slowloris, … (H3, dev only)
 ├── vendor/                 pinned Limine and SQLite, with checksums
 └── docs/                   ARCHITECTURE, DECISIONS (ADRs), PROGRESS, DEPLOY, SECURITY
 ```

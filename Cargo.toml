@@ -21,6 +21,7 @@ members = [
     "crates/timer-wheel",
     "crates/tls",
     "crates/virtio",
+    "tools/attack",
     "tools/control",
     "tools/disk",
     "tools/loadgen",

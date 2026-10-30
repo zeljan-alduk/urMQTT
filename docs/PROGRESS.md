@@ -1189,3 +1189,40 @@ PROMPT-security.md §H2 and PLAN.md decision 5; plan in SECURITY-PLAN (H2 status
 - an embedded MQTT client on firmware;
 - tlsfuzzer's stock HTTP scripts;
 - the ticket keys in a key slab, which does not exist yet (H4).
+
+## H3 — TCP/IP assurance and DoS resistance (2026-10-30)
+
+PROMPT-security.md §H3 and PLAN.md decision 5; plan and status in SECURITY-PLAN (H3). ADRs for the rotation and bounds live with parts 1–2. This entry is **part 3**: the adversarial attack tool. Parts 1–2 (earlier commits) added bounded retained messages with freed trie nodes (H0-W1), SYN-cookie key rotation (H0-W3), the packetdrill-style scripted tests and the stateful RFC 9293 model test.
+
+**Done (part 3)**
+
+- **`tools/attack/`** — host-side adversarial clients, dev only, `publish = false`, never shipped. It drives a running dev VM and prints what it sent and saw; the *expected* outcome (memory within limits, per-core CPU bounded, counters correct) is asserted in `scripts/smoke.sh` against the kernel's own serial log. Two transports:
+  - the usernet TCP port forward, for application-level attacks;
+  - a **raw layer-2 datagram socket** (`scripts/run-qemu.sh --dgram LOCAL:REMOTE`, a QEMU `dgram` netdev): the tool becomes the guest's entire network — a tiny ARP responder and fixed DHCP lease bring the broker up, then it injects crafted Ethernet/IPv4/TCP frames. `tools/attack/src/wire.rs` re-states just enough wire format to be an adversary, so a bug there cannot flatter the broker.
+- **TCP floods** (raw L2): `syn-flood`, `ack-flood`, `rst-flood`, each 20 000 segments from pseudo-random on-subnet sources at a paced rate.
+- **Application attacks** (TLS port): `slowloris` at three stages (`--stage tcp|tls|mqtt`); `half-records` (TLS flights and the CONNECT delivered in 4-byte fragments with gaps, so each record spans many TCP segments); `max-packets` (PUBLISHes at the size limit, then one well over it); `topic-flood` (retained messages on many distinct topics, paced under the device rate to reach the retained cap); `sub-flood` (one over-long SUBSCRIBE); `keepalive-abuse` (a PINGREQ flood); `identities` (many distinct device certificates from one address).
+- **Kernel-side evidence:** a per-core TCP-stats log line every 5 s while counters move (`crates/kernel/src/netproto.rs`): segments in, SYN cookies sent/ok/bad, full-table refusals, RSTs sent and rate-limited, bad segments, live connections. This is what the smoke scenarios grep.
+- **Smoke scenarios** `attack_raw` (one dgram boot per flood) and `attack_app` (one usernet boot, all application attacks in sequence).
+
+**Observed** (M4 Pro, HVF; mirrored under TCG in CI)
+
+- **SYN flood:** 20 000 SYNs → ~20 000 SYN cookies issued across the worker cores, `0 connection(s)` — no per-connection state — `0 bad`, heap flat, `NOT:memory allocation of`.
+- **ACK flood:** bare ACKs for unknown connections → `cookies … bad` and the RFC 5961 rate cap plainly visible: `RST 600 sent (9402 rate-limited)` per core at 8 000 ACK/s (`rst_per_sec = 200` × the ~3 s window), `0 connection(s)`.
+- **RST flood:** RSTs for unknown connections dropped — `RST 0 sent (0 rate-limited)`, 0 RSTs back, 0 state.
+- **slowloris:** `admission: … refused: too many handshakes in flight` climbs by powers of two; per-core live connections ceil at the per-IP in-flight cap (32) and fall back to 0 once the attacker drops. (On loopback the attacker and any probe share one source address, so the per-IP cap is what bounds them — exactly the intended behaviour.)
+- **half-records:** the fragmented handshake and CONNECT complete, CONNACK received (≈0.3 s), proving record reassembly without unbounded buffering.
+- **max-packets:** the oversize packet is a `ProtocolError` close.
+- **topic-flood:** `broker: … retained message(s) not retained … over an identity's limit of 32`.
+- **sub-flood:** the over-long SUBSCRIBE closes the session.
+- **keepalive-abuse / identities:** absorbed, heap flat.
+
+**Tests**
+
+- `make check` green (host + bare-metal clippy, host tests).
+- `make smoke` green (HVF and TCG): new `attack-syn-flood`, `attack-ack-flood`, `attack-rst-flood` and `attack-app` scenarios pass alongside the existing suite.
+
+**Not done / deviations** (SECURITY-PLAN H3 status)
+
+- Reconnect storms stay in `tools/loadgen` (the `storm` scenario, M16); not duplicated here.
+- The raw-L2 floods exercise the aarch64 VM only; the x86 half follows the X-track port.
+- The full unbounded-work audit table is written up under H10, not re-listed here.

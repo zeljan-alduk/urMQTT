@@ -5,7 +5,7 @@
 #   scripts/run-qemu.sh --iso ISO | --disk RAW [--accel hvf|tcg|kvm] [--smp N] [--mem 512M]
 #                       [--data IMG] [--bus blk|scsi] [--cpu MODEL] [--gic 3|2] [--no-rng] [--acpi on|off] [--serial FILE] [--headless]
 #                       [--pcap FILE] [--gdb] [--no-net] [--fwd HOST:GUEST,...]
-#                       [-- extra qemu args]
+#                       [--dgram LOCAL:REMOTE] [-- extra qemu args]
 #
 # --disk boots the raw GPT image (mkraw.py) as a virtio-blk disk, like a
 # KVM host or a cloud server would; the data disk is a second virtio-blk.
@@ -15,6 +15,9 @@
 # the Raspberry Pi 4 and 5 (at most 8 CPUs).
 # --fwd replaces the default port forwards (1883 and 8883 on 127.0.0.1);
 # --fwd none disables them.
+# --dgram LOCAL:REMOTE replaces user networking with a raw L2 datagram
+# socket (QEMU binds UDP LOCAL, sends to REMOTE): a host process is then the
+# whole network and can inject arbitrary frames (H3 adversarial tests).
 #
 # Without --serial the serial console is on stdio. Ctrl-A X quits QEMU.
 # Option ROMs are disabled (romfile=): no iPXE in the firmware, faster boot.
@@ -22,6 +25,7 @@ set -euo pipefail
 
 ISO="" DISK="" BUS=blk CPU_MODEL="" GIC=3 RNG=1 ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
 FWD="1883:1883,8883:8883"
+DGRAM=""
 EXTRA=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -42,6 +46,7 @@ while [[ $# -gt 0 ]]; do
         --gdb) GDB=1; shift ;;
         --no-net) NET=0; shift ;;
         --fwd) FWD=$2; shift 2 ;;
+        --dgram) DGRAM=$2; shift 2 ;;
         --) shift; EXTRA=("$@"); break ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -117,14 +122,22 @@ if [[ -n "$DATA" ]]; then
     fi
 fi
 if [[ $NET -eq 1 ]]; then
-    NETDEV="user,id=n0"
-    if [[ "$FWD" != none ]]; then
-        IFS=, read -r -a pairs <<< "$FWD"
-        for p in "${pairs[@]}"; do
-            NETDEV+=",hostfwd=tcp:127.0.0.1:${p%%:*}-:${p##*:}"
-        done
+    if [[ -n "$DGRAM" ]]; then
+        # Raw L2: the guest's single virtio-net NIC talks to a host process
+        # over a UDP datagram socket pair, one Ethernet frame per datagram
+        # (H3, tools/attack). QEMU binds LOCAL and sends to REMOTE.
+        NETDEV="dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port=${DGRAM%%:*}"
+        NETDEV+=",remote.type=inet,remote.host=127.0.0.1,remote.port=${DGRAM##*:}"
+    else
+        NETDEV="user,id=n0"
+        if [[ "$FWD" != none ]]; then
+            IFS=, read -r -a pairs <<< "$FWD"
+            for p in "${pairs[@]}"; do
+                NETDEV+=",hostfwd=tcp:127.0.0.1:${p%%:*}-:${p##*:}"
+            done
+        fi
     fi
-    ARGS+=(-netdev "$NETDEV" -device virtio-net-pci,netdev=n0,romfile=)
+    ARGS+=(-netdev "$NETDEV" -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=)
     [[ -n "$PCAP" ]] && ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
 else
     # Without this QEMU adds a default NIC (with an iPXE option ROM).
