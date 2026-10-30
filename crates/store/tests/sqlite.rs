@@ -283,3 +283,36 @@ fn control_state_survives_and_migrates() {
     assert_eq!(s.revoked().unwrap(), vec!["0c".to_string()], "v1 data kept");
     assert_eq!(s.db().query_i64("PRAGMA user_version").unwrap(), 2);
 }
+
+/// O3: SQLite and the broker store run unchanged on the RAM block device
+/// of the live mode; a new RAM device (a reboot) is blank again.
+#[test]
+fn store_runs_on_a_ram_disk_and_a_reboot_forgets() {
+    use urmqtt_store::RamDisk;
+    let _g = lock();
+    let ram = |mib: usize| {
+        // 2 MiB chunks, like the kernel's.
+        let chunks = (0..mib / 2)
+            .map(|_| &mut *Box::leak(vec![0u8; 2 << 20].into_boxed_slice()))
+            .collect();
+        Box::new(RamDisk::new(chunks).unwrap())
+    };
+    let (disk, how) = Disk::open(ram(32), || [3; 16]).unwrap();
+    assert_eq!(how, Opened::Formatted);
+    urmqtt_store::init(heap(), disk, platform()).unwrap();
+    let (mut s, _) = open().unwrap();
+    s.begin().unwrap();
+    s.retain("devices/live-1/state", b"on", 1).unwrap();
+    s.device_seen("live-1", 100).unwrap();
+    s.commit().unwrap();
+    assert_eq!(s.retained().unwrap().len(), 1);
+    drop(s);
+    // "Reboot": the RAM is new and empty; the layout is formatted again
+    // and nothing of the earlier boot is there.
+    let (disk, how) = Disk::open(ram(32), || [4; 16]).unwrap();
+    assert_eq!(how, Opened::Formatted);
+    urmqtt_store::init(heap(), disk, platform()).unwrap();
+    let (mut s, _) = open().unwrap();
+    assert!(s.retained().unwrap().is_empty());
+    assert_eq!(s.device_count().unwrap(), 0);
+}

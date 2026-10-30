@@ -244,6 +244,13 @@ impl Ops {
             "g",
         );
         add("health", u64::from(self.healthy), "g");
+        // Live mode (O3): 1 while the data lives in RAM and is lost at a reboot.
+        add(
+            "storage.ephemeral",
+            u64::from(crate::live::ephemeral()),
+            "g",
+        );
+        add("storage.ram_bytes", crate::live::store_bytes(), "g");
         if let Some(days) = server_cert_days() {
             add("tls.server_cert_days", days.max(0) as u64, "g");
         }

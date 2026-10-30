@@ -1386,3 +1386,24 @@ PLAN.md "O1, O2"; ADR-060; docs/OPERATE.md. **QEMU only (aarch64 under HVF and T
 - MQTT 5, a streaming console input (a command per message only), an operator reply topic of its own.
 
 **Final runs (both milestones):** `cargo test --workspace` green (broker 53, config-schema 41, log 6 tests); the steps of `make check` run by hand (fmt, typos, check-arch-leaks, clippy for the host and both kernels with and without `selftest`); the full `scripts/smoke.sh`: **151 passed, 0 failed** (aarch64, HVF and TCG); the full `scripts/smoke.sh --arch x86_64`: **68 passed, 0 failed** (TCG). `sys-reboot` was run on all three accelerator and architecture pairs after those runs. (Building from a worktree under the main checkout needs `RUSTFLAGS` set explicitly: cargo also reads the parent's `.cargo/config.toml` and the duplicated `-Zbranch-protection` breaks rustc.)
+
+## O3 — Live mode in RAM (2026-10-31)
+
+PLAN §O3; ADR-061 (selection), ADR-062 (the RAM store). **QEMU only: aarch64 under HVF, x86_64 q35+OVMF and pc+SeaBIOS under TCG. Not run on KVM, on the Contabo VPS or on hardware.**
+
+**Done**
+
+- **The ISO's first entry runs with no disk.** The menu entry passes `live` on the kernel command line (honoured by production images like `install`); the baked `storage.mode` must allow it (`"auto"` or `"ram"`). `"disk"` (the committed production template) refuses it with a fatal message that says why. `storage.mode` is required outside dev (build error otherwise). The disk path never falls back to RAM.
+- **`urmqtt_store::ram::RamDisk`**: a `BlockDevice` over 2 MiB runs of zeroed frames; the data layout, SQLite and the telemetry log run on it unchanged. No disk is read, written or formatted in live mode.
+- **`storage.ram_percent`** (default 10, 2..=50, store at least 16 MiB). The store is subtracted from the heap budget by `ram::plan` before the heap is sized (the heap shrinks to a power of two if needed; the log gives both figures).
+- **Loud:** framed banner and `EPHEMERAL: data is lost on reboot` log line, storage/SQLite lines say `RAM store (EPHEMERAL ...)`, statsd gauges `urmqtt.storage.ephemeral` and `urmqtt.storage.ram_bytes`, a warning that control-channel revocations and replay protection do not survive a reboot. There is no `$SYS` tree, so no topic.
+- `mkiso.sh`: `--no-live`, `--live` (x86_64-only ISO). Dev config: `mode = "auto"`.
+
+**Tests**
+
+- Host: `RamDisk` (chunk boundaries, bounds), reservation math (`ram::plan`), SQLite end to end on a RAM disk with a "reboot" that forgets, config rules (mode required outside dev, ram_percent bounds), the mode x `live` table, the `live` command-line word. `make check` pieces: fmt, clippy (host, aarch64 and x86_64 kernels, with and without selftest), `check-arch-leaks`, `cargo test --workspace` all pass. (aarch64 kernel clippy was run with RUSTFLAGS set by hand because this worktree sits inside the main checkout and cargo merges two `.cargo/config.toml` files.)
+- Smoke (`SMOKE_ONLY=live scripts/smoke.sh [--arch x86_64]`): live entry boots from the ISO with no disk, serves mTLS, a retained message round-trips and is gone after the next boot, and an attached disk stays byte-identical: x86_64 UEFI and BIOS (TCG) and aarch64 (HVF), all passing. Install entry once: `SMOKE_ONLY=install SMOKE_INSTALLER=x86-uefi --arch universal` (installs, the installed disk boots on aarch64, x86 UEFI, x86 BIOS and creates its data partition).
+
+**Skipped (scope cut for this deploy; the nightly full run covers them)**
+
+- The full aarch64, x86_64 and universal smoke suites with the live changes (a first full run was stopped), the fault/W^X/db/crypto scenarios, the mqtt-persist retained-across-restart check on a disk boot after this change, aarch64 under TCG, `make dist`, `make repro`. `universal_iso` and `iso_as_cd` expectations were updated (first entry is live now; `iso_as_cd` uses `--no-live`) but not re-run.

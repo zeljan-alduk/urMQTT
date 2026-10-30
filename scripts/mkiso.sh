@@ -26,12 +26,20 @@
 # The ISO9660 filesystem (what Limine reads on a CD boot) has the same
 # loader and kernel, plus the ESP itself as /esp.img, and its own
 # limine.conf with a menu (S1b, STORAGE-PLAN §2b):
-#   1. urMQTT                                   (default, after 5 s)
+#   1. urMQTT                                   cmdline "live" (O3, RAM-backed;
+#                                               default, after 10 s)
 #   2. Install urMQTT on this machine's disk    cmdline "install", module esp.img
 # Both the kernel and the module are pinned by blake2b, the editor is off.
 # --install-cmdline replaces the install entry's command line (dev tests add
 # options after "install"); --install-default makes it the default entry
 # with no timeout (unattended smoke tests).
+#
+# The menu's first entry boots with the word `live` on its command line (O3,
+# ADR-054): the kernel then keeps its data in RAM and needs no disk, if the
+# baked configuration allows it (storage.mode = "auto" or "ram"; otherwise it
+# refuses loudly). --no-live leaves the word out (tests of the read-only-media
+# refusal); the x86_64-only ISO has no menu and takes the word with --live.
+# The no-menu configuration of the installed disk never carries it.
 #
 # Timestamps and the FAT volume serial are fixed (SOURCE_DATE_EPOCH, default:
 # last commit time) so identical inputs produce an identical image.
@@ -40,7 +48,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 ARCH=${URMQTT_ARCH:-aarch64}
 KERNEL="" OUT="" CMDLINE="" ESP_OUT="" INSTALL_CMDLINE="install" INSTALL_DEFAULT=0
-UNIVERSAL=0 KERNEL_A64="" KERNEL_X86="" DISK_OUT=""
+UNIVERSAL=0 KERNEL_A64="" KERNEL_X86="" DISK_OUT="" LIVE=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --arch) ARCH=$2; shift 2 ;;
@@ -54,6 +62,8 @@ while [[ $# -gt 0 ]]; do
         --esp-out) ESP_OUT=$2; shift 2 ;;
         --install-cmdline) INSTALL_CMDLINE=$2; shift 2 ;;
         --install-default) INSTALL_DEFAULT=1; shift ;;
+        --live) LIVE=1; shift ;;
+        --no-live) LIVE=0; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -73,6 +83,10 @@ done
 if [[ "$CMDLINE$INSTALL_CMDLINE" == *$'\n'* ]]; then
     echo "error: command line must be a single line" >&2; exit 2
 fi
+
+# The live entry's command line: `live`, then whatever --cmdline adds.
+LIVE_CMDLINE="live${CMDLINE:+ $CMDLINE}"
+[[ ${LIVE:-1} == 0 ]] && LIVE_CMDLINE=$CMDLINE
 
 # Verify the vendored bootloader before using it.
 (cd "$ROOT/vendor/limine" && grep -v '^#' CHECKSUMS | shasum -a 256 -c --quiet -) \
@@ -184,7 +198,7 @@ if [[ $UNIVERSAL -eq 1 ]]; then
         echo "editor_enabled: no"
         echo "hash_mismatch_panic: yes"
         menu_style
-        entries urMQTT "$CMDLINE" ""
+        entries urMQTT "$LIVE_CMDLINE" ""
         entries "Install urMQTT on this machine's disk" "$INSTALL_CMDLINE" "boot():/disk.img#$DISK_HASH"
     } >"$TMP/iso-limine.conf"
     # The ISO's own EFI system partition (El Torito, and the GPT partition of
@@ -251,7 +265,9 @@ if [[ $ARCH == x86_64 ]]; then
         echo "    protocol: limine"
         echo "    path: boot():/boot/urmqtt#$HASH"
         if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then printf '    resolution: %s\n' "$URMQTT_RESOLUTION"; fi
-        if [[ -n "$CMDLINE" ]]; then printf '    cmdline: %s\n' "$CMDLINE"; fi
+        X86_CMDLINE=$CMDLINE
+        [[ ${LIVE:-0} == 1 ]] && X86_CMDLINE=$LIVE_CMDLINE
+        if [[ -n "$X86_CMDLINE" ]]; then printf '    cmdline: %s\n' "$X86_CMDLINE"; fi
     } > "$TMP/limine.conf"
     cp "$ROOT/vendor/limine/BOOTX64.EFI" "$TMP/BOOTX64.EFI"
     cp "$KERNEL" "$TMP/urmqtt"
@@ -348,8 +364,8 @@ fi
     if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then
         printf '    resolution: %s\n' "$URMQTT_RESOLUTION"
     fi
-    if [[ -n "$CMDLINE" ]]; then
-        printf '    cmdline: %s\n' "$CMDLINE"
+    if [[ -n "$LIVE_CMDLINE" ]]; then
+        printf '    cmdline: %s\n' "$LIVE_CMDLINE"
     fi
     echo
     echo "/Install urMQTT on this machine's disk"

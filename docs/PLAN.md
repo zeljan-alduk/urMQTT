@@ -76,7 +76,7 @@ bare metal comes before optimisation.
 | 10. Bare metal | **X12**, **X13**, **X14**, X15 (optional), **X16** (continuous) | the Intel PC: USB boot, `hwreport`, NVMe/AHCI, its NIC |
 | 11. Speed, encryption, release readiness | **X9**, **S7**, **H9**, **X11**, **S8** | optimisations measured on real hardware; encryption with measured overhead; SBOM; numbers and docs |
 | 11b. Remote operation (user request 2026-10-30) | **O1**, **O2** | `$SYS` introspection and a console over MQTT, so a VNC session is no longer needed; done before the rest of phase 11 |
-| 11c. Live mode (user request 2026-10-30) | **O3** | the ISO's first entry runs from RAM with no disk, as an opt-in ephemeral mode |
+| 11c. Live mode (user request 2026-10-30) | **O3** (done, ADR-061, ADR-062) | the ISO's first entry runs from RAM with no disk, as an opt-in ephemeral mode |
 | 11d. Diagnostic (user request 2026-10-30) | **O4** | the third boot entry: hardware detection and RAM/disk benchmarks |
 | 11e. Time (user request 2026-10-31) | **T1** | SNTP: a wall clock that is corrected, not only read once from the RTC |
 | 12. Audit | **H10** | the audit package covers everything above |

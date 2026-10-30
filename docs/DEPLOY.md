@@ -99,7 +99,7 @@ zeljan-alduk/urMQTT`), and a minisign signature when the repository secret
 | NIC | one virtio-net (PCI); DHCP unless `network.mode = "static"` |
 | Disk | **one** virtio-blk disk or virtio-scsi LUN (PCI), 512-byte blocks: the raw image written to it, the disk at least 16 MiB larger than the image (8 GiB or more in production, STORAGE-PLAN sizing); with `storage.require_data_disk = true` the broker refuses to serve without its data partition |
 | Entropy | virtio-rng, or `RNDR` on the CPU; otherwise health-tested CPU jitter (`entropy.fallback`), else no boot |
-| Boot medium | the raw image on the VM's disk, or the ISO's installer, which writes that image onto the disk (below); booted as a CD the ISO holds no data, so production refuses to serve from it |
+| Boot medium | the raw image on the VM's disk, or the ISO's installer, which writes that image onto the disk (below); booted as a CD the ISO's **live** entry runs from RAM, no disk needed and nothing kept (below), if `storage.mode` allows it; without the live word a CD holds no data and production refuses to serve from it |
 
 **Single-disk model (S1, STORAGE-PLAN §2a).** The disk the VM boots from is
 the only one urMQTT writes:
@@ -120,6 +120,44 @@ Inspect a stopped VM's disk with `urmqtt-disk info|verify DISK`
 (`tools/disk`); replace the kernel and keep the data with
 `urmqtt-disk update-boot DISK --esp ESP --write`.
 
+### Live mode: the ISO's first entry, from RAM (O3, ADR-061, ADR-062)
+
+The ISO's first menu entry, **urMQTT**, runs the broker with **no disk at
+all**: the kernel keeps its data in a block device made of RAM, with the same
+data layout, SQLite and telemetry log as on a disk. It is for trying the
+broker, for diskless appliances and for machines that have nothing to
+install on. **Nothing survives a reboot or a power loss**: retained messages,
+persistent sessions and their queues, the telemetry log, device history and
+revocations applied at run time. The console says so in a framed banner and
+the log has `EPHEMERAL: data is lost on reboot`; the statsd gauge
+`urmqtt.storage.ephemeral` is 1. Install to a disk for persistence.
+
+Configuration (`deploy/<env>/config.toml`, `[storage]`):
+
+| Key | Values | Meaning |
+|---|---|---|
+| `mode` | `"disk"` \| `"auto"` \| `"ram"` | required outside dev. `"disk"`: data on the disk; the live entry is refused (a halted screen that says why). `"auto"`: the disk, except the ISO's live entry, which runs from RAM. `"ram"`: always RAM, even when booted from a disk |
+| `ram_percent` | 2 to 50, default 10 | share of RAM for the store; the result must be at least 16 MiB |
+
+The committed production template says `mode = "disk"`: the live entry is
+off until you write `auto`. A production image is never ephemeral by default
+and never falls back to RAM when a disk is missing (that stays a fatal
+"no data partition"). Booting a disk image or the installed disk behaves as
+before; the install entry is unchanged.
+
+Memory: the store is `ram_percent` of the machine's RAM (10 % of 4 GiB is 409
+MiB). It is subtracted from the connection budget: the kernel heap (about 500
+B per idle connection, `memory.kernel_heap_mb`) keeps its configured size when
+heap, store, the SQLite heap and 128 MiB of kernel overhead fit, and
+otherwise shrinks to the largest power of two that does. The boot log gives
+both figures (`live: RAM store ...`, `live: kernel heap ...` with the
+connection count). A VPS with 1 GiB and `ram_percent = 10` runs a 512 MiB heap
+(about a million connections) next to a 102 MiB store.
+
+If the control channel is on, revocations applied through it and its replay
+protection are lost at a reboot: only the revocation list baked into the image
+is applied again. Keep that in mind before using live mode for production.
+
 ### Installing from the ISO (S1b)
 
 Wherever writing a raw image is awkward (a hypervisor UI that only mounts
@@ -127,9 +165,9 @@ ISOs, a bare-metal machine with a USB stick), the ISO installs itself:
 
 1. Give the machine one empty (or expendable) disk and the ISO as a CD (or a
    USB stick written with `dd`).
-2. Boot it. The menu shows **urMQTT** (the default, after 10 s: runs from the
-   CD without persistence, and production refuses) and **Install urMQTT on
-   this machine's disk**. Choose the second.
+2. Boot it. The menu shows **urMQTT** (the default, after 10 s: the live
+   entry, from RAM without a disk, see below) and **Install urMQTT on this
+   machine's disk**. Choose the second.
 3. The console names the target disk and its size, warns that its data will
    be erased, and counts down 30 seconds. Power off now to cancel.
 4. The image is written, read back and verified. Then the machine powers off
@@ -207,9 +245,10 @@ by the other.
 for; the provider-specific upload and CD-attach steps are the provider's):
 
 1. Upload the universal ISO and boot the VPS from it. Both firmware types work.
-2. The framebuffer shows Limine's menu, **urMQTT** (default after 10 s: runs from
-   the ISO without persistence; production refuses to serve) and **Install urMQTT
-   on this machine's disk**. Press the arrow key, choose the second.
+2. The framebuffer shows Limine's menu, **urMQTT** (default after 10 s: the live
+   entry, from RAM with nothing kept, when `storage.mode` is `"auto"` or `"ram"`;
+   with `"disk"` it stops with the reason) and **Install urMQTT on this machine's
+   disk**. Press the arrow key, choose the second to persist.
 3. The console names the target disk, warns that its data will be erased and
    counts down 30 s (power the VPS off to cancel). It then writes, verifies and
    powers off with "remove the installation medium". The installer refuses
@@ -238,7 +277,9 @@ is drawn on the framebuffer from the first line on):
 | `unsupported legacy virtio device ... attach it as a modern device (disable-legacy=on)` | the hypervisor exposes pre-1.0 virtio only; there is no legacy driver |
 | `net: network controller <vendor>:<device> (...) has no driver; urMQTT needs virtio-net` and `net: no virtio-net NIC. Attach one ...` | the NIC is an e1000, Realtek or similar; no driver yet (X14). A dev image idles, a production image stops |
 | `fatal: no entropy source (virtio-rng, RDRAND/RDSEED, or a jitter fallback that passes its health tests): refusing to run` | no hardware randomness and the jitter fallback is off or failed its health tests |
-| `storage: no data partition: booted from read-only media` | you booted the ISO as a CD: use the installer |
+| `storage: no data partition: booted from read-only media` | you booted the ISO as a CD without the live word: use the installer |
+| `fatal: live mode (RAM, ephemeral) was requested by the boot menu, but this image's storage.mode is "disk"` | the image forbids live mode: set `storage.mode = "auto"` and rebuild, or use the installer |
+| `EPHEMERAL: data is lost on reboot` | the live entry is running: the broker works, nothing is kept |
 
 The virtual hardware is the one of section 4 (one virtio-blk or virtio-scsi
 disk, one virtio-net, virtio-rng or a CPU with RDRAND/RDSEED) with an

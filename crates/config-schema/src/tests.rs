@@ -336,6 +336,72 @@ fn storage_bounds() {
     );
 }
 
+/// O3 (ADR-054): `storage.mode` and `storage.ram_percent`.
+#[test]
+fn storage_mode_and_ram_percent() {
+    let cfg = parse("dev", DEV).unwrap();
+    assert_eq!(cfg.storage.mode, StorageMode::Auto);
+    assert_eq!(cfg.storage.ram_percent, RAM_PERCENT_DEFAULT);
+    // Floor and ceiling.
+    for bad in [0, RAM_PERCENT_MIN - 1, RAM_PERCENT_MAX + 1, 100] {
+        assert_rejected(
+            "dev",
+            &dev_with("ram_percent", &format!("ram_percent = {bad}")),
+            "storage.ram_percent",
+        );
+    }
+    for ok in [RAM_PERCENT_MIN, 10, RAM_PERCENT_MAX] {
+        let t = dev_with("ram_percent", &format!("ram_percent = {ok}"));
+        assert_eq!(parse("dev", &t).unwrap().storage.ram_percent, ok);
+    }
+    // All three modes parse; anything else does not.
+    for (word, mode) in [
+        ("disk", StorageMode::Disk),
+        ("auto", StorageMode::Auto),
+        ("ram", StorageMode::Ram),
+    ] {
+        let t = dev_in("storage", "mode", &format!("mode = \"{word}\""));
+        assert_eq!(parse("dev", &t).unwrap().storage.mode, mode);
+    }
+    assert_rejected(
+        "dev",
+        &dev_in("storage", "mode", "mode = \"memory\""),
+        "mode",
+    );
+}
+
+/// O3: a production configuration must choose the medium explicitly (no
+/// silent default), while dev and old configs keep the disk as the default.
+#[test]
+fn storage_mode_is_explicit_outside_dev() {
+    let without: String = PROD
+        .lines()
+        .filter(|l| !l.starts_with("mode = \"disk\""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_rejected("prod", &without, "storage.mode");
+    // The committed template says "disk": prod is safe by default.
+    assert_eq!(parse("prod", PROD).unwrap().storage.mode, StorageMode::Disk);
+    // Dev may omit it: the disk.
+    let dev_without: String = DEV
+        .lines()
+        .filter(|l| !l.starts_with("mode = \"auto\""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        parse("dev", &dev_without).unwrap().storage.mode,
+        StorageMode::Disk
+    );
+    // Live-capable prod still needs every durability rule for the disk path.
+    let live = PROD.replace("mode = \"disk\"", "mode = \"auto\"");
+    assert_eq!(
+        parse("prod", &live).unwrap().storage.mode,
+        StorageMode::Auto
+    );
+    let live_nodisk = live.replace("require_data_disk = true", "require_data_disk = false");
+    assert_rejected("prod", &live_nodisk, "storage.require_data_disk");
+}
+
 #[test]
 fn kernel_heap_must_be_power_of_two() {
     assert_rejected(

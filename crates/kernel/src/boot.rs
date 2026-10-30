@@ -119,6 +119,20 @@ struct Stage2 {
     medium: devices::BootMedium,
     /// The installation image, if the bootloader loaded one.
     install_image: Option<crate::install::Image>,
+    /// Where the data lives this boot (`storage.mode` and the `live` word),
+    /// and, for RAM, the memory plan made before the heap was sized (O3).
+    storage: StoragePlan,
+    ram_bytes: u64,
+}
+
+/// The storage decision of stage 1.
+enum StoragePlan {
+    Disk,
+    Ram(urmqtt_store::ram::Reservation),
+    /// `live` on a `storage.mode = "disk"` image.
+    LiveRefused,
+    /// The RAM store does not fit this machine.
+    RamFails(urmqtt_store::ram::ReserveError),
 }
 
 static STAGE2: SpinLock<Option<Stage2>> = SpinLock::new(None);
@@ -244,7 +258,31 @@ extern "C" fn urmqtt_kmain() -> ! {
     let Some(exe) = EXECUTABLE_ADDRESS.response() else {
         fatal("no executable address response from the bootloader");
     };
-    let heap_mb = urmqtt_config::CONFIG.memory.kernel_heap_mb;
+    let configured_heap_mb = urmqtt_config::CONFIG.memory.kernel_heap_mb;
+    // Live mode (O3): the RAM store comes out of the same RAM as the heap, so
+    // the heap shrinks (to a power of two) if both do not fit.
+    let ram_bytes = mem.ram_bytes();
+    let storage = match urmqtt_config::CONFIG.storage.mode.backing(options.live) {
+        Ok(urmqtt_config::Backing::Disk) => StoragePlan::Disk,
+        Ok(urmqtt_config::Backing::Ram) => {
+            let cfg = &urmqtt_config::CONFIG;
+            match urmqtt_store::ram::plan(
+                ram_bytes,
+                cfg.storage.ram_percent,
+                configured_heap_mb,
+                cfg.storage.sqlite_heap_mb,
+                (cfg.memory.min_free_mb * 2).max(8),
+            ) {
+                Ok(p) => StoragePlan::Ram(p),
+                Err(e) => StoragePlan::RamFails(e),
+            }
+        }
+        Err(urmqtt_config::LiveRefused) => StoragePlan::LiveRefused,
+    };
+    let heap_mb = match &storage {
+        StoragePlan::Ram(p) => p.heap_mb,
+        _ => configured_heap_mb,
+    };
     let built = match vm::build(
         &mem,
         exe.physical_base,
@@ -279,6 +317,8 @@ extern "C" fn urmqtt_kmain() -> ! {
         features,
         medium: boot_medium(),
         install_image: install_image(),
+        storage,
+        ram_bytes,
     });
     // SAFETY: both stacks were mapped by `vm::build` and are 16-byte aligned
     // at the top; this frame (on the bootloader's stack) is abandoned.
@@ -346,6 +386,26 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
     devices::set_boot_medium(medium);
     power::set_halt_on_fatal(medium.optical);
+    // Live mode (O3): decided in stage 1, announced and enforced here.
+    let live = match &s.storage {
+        StoragePlan::Disk => false,
+        StoragePlan::Ram(p) => {
+            crate::live::announce_plan(s.ram_bytes, p, urmqtt_config::CONFIG.memory.kernel_heap_mb);
+            // A fatal error in live mode is cured by a reset (the menu comes
+            // back and boots live again), unlike on the install entry.
+            power::set_halt_on_fatal(false);
+            true
+        }
+        StoragePlan::LiveRefused => fatal(
+            "live mode (RAM, ephemeral) was requested by the boot menu, but this image's storage.mode is \"disk\": \
+             rebuild with storage.mode = \"auto\" or \"ram\" in deploy/<env>/config.toml, or choose the Install entry",
+        ),
+        StoragePlan::RamFails(e) => fatal_fmt(format_args!(
+            "live mode: the RAM store does not fit this machine ({e:?}; storage.ram_percent = {}, {} MiB RAM)",
+            urmqtt_config::CONFIG.storage.ram_percent,
+            s.ram_bytes >> 20
+        )),
+    };
     devices::set_install_mode(s.options.install);
     // PCIe and virtio (M6): all device MMIO must be mapped before the lock.
     if let Some(p) = s.platform.as_ref() {
@@ -399,7 +459,14 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
             s.options.disk_fault,
         );
     }
-    if let Err(msg) = devices::prepare_boot_disk(s.options.disk_fault) {
+    if live {
+        // No disk is used, written or even opened: the store is RAM.
+        if let StoragePlan::Ram(p) = &s.storage
+            && let Err(msg) = devices::prepare_ram_disk(p.ram_bytes)
+        {
+            fatal_fmt(format_args!("storage: {msg}; refusing to serve"));
+        }
+    } else if let Err(msg) = devices::prepare_boot_disk(s.options.disk_fault) {
         if urmqtt_config::CONFIG.storage.require_data_disk {
             fatal_fmt(format_args!("storage: {msg}; refusing to serve"));
         }
@@ -479,6 +546,15 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
 
     if s.options.db_test == Some(crate::cmdline::DbTest::Watchdog) {
         crate::watchdog::self_test();
+    }
+    if live {
+        crate::live::banner();
+        if !urmqtt_config::CONFIG.control.service_ids.is_empty() {
+            warn!(
+                "live: the control channel is on, but its replay protection and the revocations it applies \
+                 are lost at a reboot (only the image's revocation list is seeded again)"
+            );
+        }
     }
     urmqtt_log::raw(format_args!("URMQTT READY\n"));
     if let Some(level) = s.options.log_level {

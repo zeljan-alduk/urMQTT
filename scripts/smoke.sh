@@ -5,6 +5,9 @@
 #   scripts/smoke.sh --arch x86_64 [--accels "tcg"]       (the x86_64 suite: X2 boot/fault, X8 parity)
 #   scripts/smoke.sh --arch universal                     (the universal ISO on both architectures, X10)
 #
+# The live scenarios (O3, ADR-054) boot the ISO's first entry with NO disk:
+# the broker runs from RAM, serves mTLS, and a reboot loses what it held.
+#
 # Each scenario builds an ISO with a dev-only kernel command line, boots it,
 # waits for QEMU to exit (the kernel powers off via PSCI in smoke mode) and
 # greps the serial log. Scenarios grow with each milestone.
@@ -770,7 +773,7 @@ scsi_boot() {
 # `storage.require_data_disk`, host-tested in config-schema).
 iso_as_cd() {
     local iso="$OUT/iso-as-cd.iso"
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "smoke" >/dev/null
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "smoke" --no-live >/dev/null
     for accel in $ACCELS; do
         local log="$OUT/iso-as-cd-$accel.log" status=0
         boot "$log" --iso "$iso" --accel "$accel" --headless --no-net || status=$?
@@ -1110,7 +1113,8 @@ universal_iso() {
         u_run "$kind" "$accel" "$log" iso "$iso" || status=$?
         [[ $(shasum -a 256 "$iso" | cut -d' ' -f1) == "$sum" ]] || echo "ISO MODIFIED" >>"$log"
         check "universal-iso-$name (sha256 ${sum:0:12}…)" "$log" "$status" "$boot_line" "bootloader=Limine" \
-            "boot: from optical media \(CD/ISO\)" "storage: no data partition: booted from read-only media" \
+            "boot: from optical media \(CD/ISO\)" "live: RAM store of [0-9]+ MiB ready" \
+            "EPHEMERAL: data is lost on reboot" "NOT:storage: no data partition" \
             "^URMQTT READY$" "NOT:ISO MODIFIED" "$NO_FAULT"
     done
 }
@@ -1144,6 +1148,7 @@ universal_install() {
     local installer
     for installer in "${rows[@]}"; do
         IFS='|' read -r iname ikind iaccel _ <<<"$installer"
+        [[ -z "${SMOKE_INSTALLER:-}" || $iname == "$SMOKE_INSTALLER" ]] || continue
         [[ $ikind == aa64 && " $ACCELS " != *" $iaccel "* ]] && continue
         local t="$OUT/universal-install-$iname.img" status=0 log="$OUT/universal-install-$iname.log"
         rm -f "$t"
@@ -1216,10 +1221,137 @@ start_vm_kind() {
     esac
 }
 
+# O3 (ADR-054): the ISO's first ("live") entry runs the broker from RAM with
+# no disk at all, serves MQTT over mTLS, and a reboot loses what it held.
+# start_vm_iso <kind> <accel> <log> <iso> [run-qemu args]: a serving VM
+# booted from the ISO (a CD) alone, TLS port forwarded to 18883.
+start_vm_iso() {
+    local kind=$1 accel=$2 log=$3 iso=$4
+    shift 4
+    case $kind in
+        aa64) start_vm "$log" --iso "$iso" --accel "$accel" --fwd 18883:8883 "$@" ;;
+        x86-uefi) start_vm "$log" --arch x86_64 --iso "$iso" --accel "$accel" --smp 2 --fwd 18883:8883 "$@" ;;
+        x86-bios) start_vm "$log" --arch x86_64 --machine pc --firmware bios --iso "$iso" --accel "$accel" --smp 2 --fwd 18883:8883 "$@" ;;
+    esac
+}
+
+LIVE_BOOT=("boot: from optical media \(CD/ISO\)" "live: RAM store [0-9]+ MiB = 10% of [0-9]+ MiB RAM"
+    "live: RAM store of [0-9]+ MiB ready" "blk: self-test ok on the RAM store"
+    "storage: RAM store \(EPHEMERAL: lost on reboot\) formatted \(was blank\)"
+    "db: sqlite 3\.[0-9]+\.[0-9]+ on the RAM store \(EPHEMERAL\)"
+    "^EPHEMERAL: data is lost on reboot$" "EPHEMERAL: data is lost on reboot \(live mode, [0-9]+ MiB RAM store\)"
+    "^URMQTT READY$" "NOT:storage: no data partition" "NOT:WITHOUT persistence" "NOT:data disk" "NOT:FAILED" "$NO_FAULT")
+
+# live_serve <name> <kind> <accel> <iso>: boot 1 stores a retained message
+# and reads it back; boot 2 of the same ISO (new RAM) has none of it.
+live_serve() {
+    local name=$1 kind=$2 accel=$3 iso=$4
+    local l1="$OUT/$name-$kind-$accel-1.log" l2="$OUT/$name-$kind-$accel-2.log" status=0
+    start_vm_iso "$kind" "$accel" "$l1" "$iso"
+    if wait_log "$l1" "TLS 1.3 listener on port 8883"; then
+        python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$ROOT/deploy/dev" --phase live1 \
+            >"$l1.client" 2>&1 || status=$?
+    else
+        status=124
+    fi
+    kill_vm
+    cat "$l1.client" >>"$l1" 2>/dev/null || true
+    check "$name: live entry serves from RAM, no disk [$kind $accel]" "$l1" "$status" "${LIVE_BOOT[@]}" \
+        "db: restored 0 retained message\(s\)" "client: live-retained ok"
+    status=0
+    start_vm_iso "$kind" "$accel" "$l2" "$iso"
+    if wait_log "$l2" "TLS 1.3 listener on port 8883"; then
+        python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$ROOT/deploy/dev" --phase gone \
+            >"$l2.client" 2>&1 || status=$?
+    else
+        status=124
+    fi
+    kill_vm
+    cat "$l2.client" >>"$l2" 2>/dev/null || true
+    check "$name: a reboot loses the data [$kind $accel]" "$l2" "$status" "${LIVE_BOOT[@]}" \
+        "db: restored 0 retained message\(s\), 0 persistent session\(s\) with 0 queued message\(s\)" \
+        "telemetry: log recovered in [0-9]+ ms: 0 record\(s\)" "client: live-gone ok"
+}
+
+# live_leaves_disks_alone <name> <kind> <accel> <iso>: with a writable disk
+# attached, the live entry neither writes nor formats it.
+live_leaves_disks_alone() {
+    local name=$1 kind=$2 accel=$3 iso=$4
+    local t="$OUT/$name-$kind-$accel-disk.img" log="$OUT/$name-$kind-$accel.log" status=0 z
+    rm -f "$t"
+    truncate -s 64m "$t"
+    z=$(shasum -a 256 "$t" | cut -d' ' -f1)
+    local extra=(-- -drive "if=none,id=t0,file=$t,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile=)
+    case $kind in
+        aa64) boot "$log" --iso "$iso" --accel "$accel" --headless --no-net "${extra[@]}" || status=$? ;;
+        x86-uefi) boot "$log" --arch x86_64 --iso "$iso" --accel "$accel" --smp 2 --headless --no-net "${extra[@]}" || status=$? ;;
+        x86-bios) boot "$log" --arch x86_64 --machine pc --firmware bios --iso "$iso" --accel "$accel" --smp 2 --headless --no-net "${extra[@]}" || status=$? ;;
+    esac
+    [[ $(shasum -a 256 "$t" | cut -d' ' -f1) == "$z" ]] || echo "A DISK WAS WRITTEN" >>"$log"
+    check "$name: live entry leaves an attached disk untouched [$kind $accel]" "$log" "$status" \
+        "is not the boot disk, left untouched" "^URMQTT READY$" "NOT:gpt:" "NOT:data disk" \
+        "NOT:A DISK WAS WRITTEN" "$NO_FAULT"
+}
+
+# live_suite: the live entry of this architecture's ISO (aarch64 menu ISO, or
+# the x86_64-only ISO built with --live), with and without a disk attached.
+live_suite() {
+    local serve="$OUT/live-serve.iso" smk="$OUT/live-smoke.iso" accel
+    if [[ $ARCH == x86_64 ]]; then
+        "$ROOT/scripts/mkiso.sh" --arch x86_64 --live --kernel "$KERNEL" --out "$serve" --cmdline "serve" >/dev/null
+        "$ROOT/scripts/mkiso.sh" --arch x86_64 --live --kernel "$KERNEL" --out "$smk" --cmdline "smoke" >/dev/null
+        for accel in $ACCELS; do
+            live_serve live x86-uefi "$accel" "$serve"
+            live_serve live x86-bios "$accel" "$serve"
+            live_leaves_disks_alone live x86-uefi "$accel" "$smk"
+        done
+    else
+        URMQTT_MENU_TIMEOUT=0 "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$serve" --cmdline "serve" >/dev/null
+        URMQTT_MENU_TIMEOUT=0 "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$smk" --cmdline "smoke" >/dev/null
+        for accel in $ACCELS; do
+            live_serve live aa64 "$accel" "$serve"
+            live_leaves_disks_alone live aa64 "$accel" "$smk"
+        done
+    fi
+}
+
+# SMOKE_ONLY=live: just the live-mode scenarios of this architecture.
+if [[ ${SMOKE_ONLY:-} == live && $ARCH != universal ]]; then
+    live_suite
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=install (universal): only the installer scenarios; SMOKE_INSTALLER=<aa64|x86-uefi|x86-bios>
+# limits which machine runs the installer.
+if [[ ${SMOKE_ONLY:-} == install && $ARCH == universal ]]; then
+    universal_install
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 if [[ $ARCH == universal ]]; then
     universal_iso
     universal_raw
     universal_install
+    if command -v mosquitto_pub >/dev/null; then
+        # One ISO, three machines, no disk.
+        URMQTT_MENU_TIMEOUT=0 mkuniversal "$OUT/universal-live.iso" "serve"
+        live_serve universal-live x86-uefi tcg "$OUT/universal-live.iso"
+        live_serve universal-live x86-bios tcg "$OUT/universal-live.iso"
+        for accel in $ACCELS; do
+            live_serve universal-live aa64 "$accel" "$OUT/universal-live.iso"
+        done
+        URMQTT_MENU_TIMEOUT=0 mkuniversal "$OUT/universal-live-smoke.iso" "smoke"
+        live_leaves_disks_alone universal-live x86-uefi tcg "$OUT/universal-live-smoke.iso"
+        live_leaves_disks_alone universal-live x86-bios tcg "$OUT/universal-live-smoke.iso"
+        live_leaves_disks_alone universal-live aa64 "${ACCELS%% *}" "$OUT/universal-live-smoke.iso"
+    else
+        echo "  ✗ live-mode scenarios need the mosquitto clients"
+        FAILED=$((FAILED + 1))
+    fi
     if command -v mosquitto_pub >/dev/null; then
         if [[ " $ACCELS " == *" hvf "* ]]; then
             cross_arch aa64 x86-uefi hvf tcg
@@ -1597,6 +1729,12 @@ first_boot
 first_boot_crash
 scsi_boot
 iso_as_cd
+if command -v mosquitto_pub >/dev/null; then
+    live_suite
+else
+    echo "  ✗ live-mode scenarios need the mosquitto clients"
+    FAILED=$((FAILED + 1))
+fi
 own_damaged
 disk_tool
 [[ $ARCH == aarch64 ]] && install_iso

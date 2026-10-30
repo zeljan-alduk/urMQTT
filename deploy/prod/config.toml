@@ -41,6 +41,13 @@ service_subscribe = ["devices/#", "fleet/#"]
 operator_ids = ["operator"]       # the only identities that read $SYS/ and use the console (mTLS only); exact ids
 
 [storage]
+# Where the data partition lives; required, never a run-time fallback:
+#   "disk"  the boot disk's data partition. The ISO's live entry is refused.
+#   "auto"  the disk, except the ISO's first ("live") entry, which keeps its data
+#           in RAM only (EPHEMERAL: lost on reboot) and needs no disk.
+#   "ram"   always RAM, whatever the boot medium (a diskless appliance).
+mode = "disk"
+ram_percent = 10                  # auto/ram: share of RAM for the in-memory data store (2..=50)
 sqlite_heap_mb = 8                # sized for a 64 MB VM; raise with RAM (ADR-008)
 telemetry_topics = ["devices/+/telemetry/#"]
 retention_days = 30
