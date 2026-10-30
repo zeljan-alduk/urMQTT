@@ -75,6 +75,13 @@ pub mod entropy {
     pub use super::imp::entropy::hw_random;
 }
 
+/// Port I/O and CPU identity for PCI bring-up (x86 only, so not part of
+/// the contract).
+#[cfg(target_os = "none")]
+pub mod pio {
+    pub use super::imp::pio::{initial_apic_id, inl, outl};
+}
+
 /// System power control.
 #[cfg(target_os = "none")]
 pub mod power {

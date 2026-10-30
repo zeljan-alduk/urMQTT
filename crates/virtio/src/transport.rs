@@ -61,6 +61,40 @@ pub fn find_caps<C: ConfigSpace>(cfg: &C, bdf: Bdf) -> VirtioCaps {
     caps
 }
 
+/// What a virtio PCI function offers this driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Support {
+    /// Common, notify and device configuration capabilities are present
+    /// (also true for transitional devices, which expose both interfaces).
+    Modern,
+    /// A legacy-only (pre-1.0) device: transitional device ID and no virtio
+    /// capabilities, only an I/O-port register block in BAR0. Not driven.
+    LegacyOnly,
+    /// Anything else: the capabilities needed are missing.
+    Incomplete,
+}
+
+impl VirtioCaps {
+    /// Classifies a function from its PCI device ID and capabilities.
+    /// `needs_device_cfg` is false for devices without a device-specific
+    /// configuration structure (virtio-rng).
+    pub fn support(&self, pci_device: u16, needs_device_cfg: bool) -> Support {
+        if self.common.is_some()
+            && self.notify.is_some()
+            && (self.device.is_some() || !needs_device_cfg)
+        {
+            Support::Modern
+        } else if (0x1000..=0x103f).contains(&pci_device)
+            && self.common.is_none()
+            && self.notify.is_none()
+        {
+            Support::LegacyOnly
+        } else {
+            Support::Incomplete
+        }
+    }
+}
+
 /// A mapped MMIO window with bounds-checked volatile access.
 #[derive(Debug, Clone, Copy)]
 pub struct Region {
@@ -294,6 +328,110 @@ mod tests {
             negotiate_features(1 << 5, 0, F_VERSION_1),
             Err(VirtioError::MissingFeatures(F_VERSION_1))
         );
+    }
+
+    /// A flat 4 KiB configuration space for capability tests.
+    struct Flat([u32; 1024]);
+
+    impl ConfigSpace for Flat {
+        fn read32(&self, _: Bdf, off: u16) -> u32 {
+            self.0
+                .get(usize::from(off / 4))
+                .copied()
+                .unwrap_or(u32::MAX)
+        }
+        fn write32(&mut self, _: Bdf, off: u16, v: u32) {
+            if let Some(w) = self.0.get_mut(usize::from(off / 4)) {
+                *w = v;
+            }
+        }
+    }
+
+    /// A modern device: common (BAR4+0), notify (BAR4+0x3000, mult 4),
+    /// device cfg (BAR4+0x2000); capabilities chained from 0x40.
+    fn modern_device() -> Flat {
+        let mut f = Flat([0; 1024]);
+        f.0[1] = 0x0010_0000; // status: capability list
+        f.0[0x34 / 4] = 0x40;
+        let mut cap = |at: usize, next: u32, kind: u32, bar: u32, off: u32, len: u32| {
+            let i = at / 4;
+            f.0[i] = 0x09 | (next << 8) | (20 << 16) | (kind << 24);
+            f.0[i + 1] = bar;
+            f.0[i + 2] = off;
+            f.0[i + 3] = len;
+        };
+        cap(0x40, 0x54, 1, 4, 0, 0x38);
+        cap(0x54, 0x68, 2, 4, 0x3000, 0x1000);
+        cap(0x68, 0, 4, 4, 0x2000, 0x1000);
+        f.0[0x54 / 4 + 4] = 4; // notify_off_multiplier
+        f
+    }
+
+    #[test]
+    fn finds_modern_capabilities() {
+        let bdf = Bdf {
+            bus: 0,
+            dev: 3,
+            func: 0,
+        };
+        let caps = find_caps(&modern_device(), bdf);
+        assert_eq!(
+            caps.common,
+            Some(CapLoc {
+                bar: 4,
+                offset: 0,
+                length: 0x38
+            })
+        );
+        assert_eq!(caps.notify.map(|c| c.offset), Some(0x3000));
+        assert_eq!(caps.notify_multiplier, 4);
+        assert_eq!(caps.device.map(|c| c.offset), Some(0x2000));
+        assert_eq!(caps.isr, None);
+        assert_eq!(caps.support(0x1041, true), Support::Modern);
+        // Transitional ID with modern capabilities is driven as modern.
+        assert_eq!(caps.support(0x1000, true), Support::Modern);
+    }
+
+    #[test]
+    fn bar_index_out_of_range_is_ignored() {
+        let bdf = Bdf {
+            bus: 0,
+            dev: 3,
+            func: 0,
+        };
+        let mut dev = modern_device();
+        dev.0[0x41 / 4 + 1] = 7; // common cap names BAR 7
+        let caps = find_caps(&dev, bdf);
+        assert_eq!(caps.common, None);
+        assert_eq!(caps.support(0x1041, true), Support::Incomplete);
+    }
+
+    #[test]
+    fn legacy_only_device_is_classified() {
+        let bdf = Bdf {
+            bus: 0,
+            dev: 4,
+            func: 0,
+        };
+        let caps = find_caps(&Flat([0; 1024]), bdf);
+        assert_eq!(caps.support(0x1000, true), Support::LegacyOnly);
+        assert_eq!(caps.support(0x1005, false), Support::LegacyOnly);
+        assert_eq!(caps.support(0x1041, true), Support::Incomplete);
+    }
+
+    #[test]
+    fn rng_does_not_need_device_cfg() {
+        let bdf = Bdf {
+            bus: 0,
+            dev: 3,
+            func: 0,
+        };
+        let mut dev = modern_device();
+        dev.0[0x54 / 4] &= !0xff00; // end the list after notify
+        let caps = find_caps(&dev, bdf);
+        assert_eq!(caps.device, None);
+        assert_eq!(caps.support(0x1044, true), Support::Incomplete);
+        assert_eq!(caps.support(0x1044, false), Support::Modern);
     }
 
     #[test]

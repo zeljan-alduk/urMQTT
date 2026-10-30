@@ -32,6 +32,8 @@ pub mod irq;
 #[cfg(target_os = "none")]
 pub mod percpu;
 #[cfg(target_os = "none")]
+pub mod pio;
+#[cfg(target_os = "none")]
 pub mod power;
 #[cfg(target_os = "none")]
 pub mod time;

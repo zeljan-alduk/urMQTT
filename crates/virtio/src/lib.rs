@@ -22,7 +22,7 @@ pub mod scsi;
 pub mod transport;
 
 pub use queue::{Buf, DmaRegion, QueueError, SplitQueue};
-pub use transport::{Region, Transport, VirtioCaps, find_caps};
+pub use transport::{Region, Support, Transport, VirtioCaps, find_caps};
 
 pub const VENDOR: u16 = 0x1af4;
 pub const F_VERSION_1: u64 = 1 << 32;

@@ -1,5 +1,7 @@
-//! PCIe and virtio bring-up (M6): ECAM enumeration, device initialisation,
-//! entropy seeding, MSI-X through a GICv2m frame, and device self-tests.
+//! PCIe and virtio bring-up (M6, X7): configuration access (ECAM, or the
+//! 0xCF8/0xCFC ports on x86 without an MCFG table), device initialisation,
+//! entropy seeding, MSI-X through an `arch::msi` frame (a GICv2m frame on
+//! aarch64, the local APIC window on x86), and device self-tests.
 //!
 //! All MMIO mappings happen in [`probe`], before the page tables lock;
 //! the self-tests afterwards only use DMA memory and registers.
@@ -13,7 +15,7 @@ use alloc::boxed::Box;
 use urmqtt_arch::{msi, time};
 use urmqtt_log::{info, warn};
 use urmqtt_pci::{self as pci, Bar, Bdf, ConfigSpace};
-use urmqtt_platform::{Pcie, PlatformInfo};
+use urmqtt_platform::PlatformInfo;
 use urmqtt_store::fault::{FaultDevice, FaultSpec};
 use urmqtt_store::gpt::{self, DataPartition, Guid};
 use urmqtt_store::{BlockDevice, IoError};
@@ -24,7 +26,9 @@ use urmqtt_virtio::net::VirtioNet;
 use urmqtt_virtio::rng::VirtioRng;
 use urmqtt_virtio::scsi::{DiskInfo, ScsiDisk, VirtioScsi};
 use urmqtt_virtio::transport::CapLoc;
-use urmqtt_virtio::{DeviceType, DmaRegion, Env, Region, Transport, VirtioError, find_caps};
+use urmqtt_virtio::{
+    DeviceType, DmaRegion, Env, Region, Support, Transport, VirtioCaps, VirtioError, find_caps,
+};
 
 use crate::{irq, memory, vm};
 
@@ -57,6 +61,46 @@ impl ConfigSpace for Ecam {
         if let Some(a) = self.addr(bdf, off) {
             // SAFETY: as in `read32`.
             unsafe { (a as *mut u32).write_volatile(v) }
+        }
+    }
+}
+
+/// x86 port I/O, the transport of configuration mechanism #1.
+#[cfg(target_arch = "x86_64")]
+pub struct Ports;
+
+#[cfg(target_arch = "x86_64")]
+impl pci::PortIo for Ports {
+    fn outl(&self, port: u16, value: u32) {
+        urmqtt_arch::pio::outl(port, value);
+    }
+
+    fn inl(&self, port: u16) -> u32 {
+        urmqtt_arch::pio::inl(port)
+    }
+}
+
+/// The configuration-space backend in use.
+pub enum Cfg {
+    Ecam(Ecam),
+    #[cfg(target_arch = "x86_64")]
+    Ports(pci::PortConfig<Ports>),
+}
+
+impl ConfigSpace for Cfg {
+    fn read32(&self, bdf: Bdf, off: u16) -> u32 {
+        match self {
+            Self::Ecam(e) => e.read32(bdf, off),
+            #[cfg(target_arch = "x86_64")]
+            Self::Ports(p) => p.read32(bdf, off),
+        }
+    }
+
+    fn write32(&mut self, bdf: Bdf, off: u16, v: u32) {
+        match self {
+            Self::Ecam(e) => e.write32(bdf, off, v),
+            #[cfg(target_arch = "x86_64")]
+            Self::Ports(p) => p.write32(bdf, off, v),
         }
     }
 }
@@ -338,27 +382,50 @@ fn map(pa: u64, len: u64) -> Result<usize, ProbeError> {
         .map_err(|_| ProbeError::Map)
 }
 
-fn region<C: ConfigSpace>(cfg: &C, bdf: Bdf, loc: Option<CapLoc>) -> Result<Region, ProbeError> {
-    let loc = loc.ok_or(ProbeError::Map)?;
+/// Maps one virtio structure. `loc == None` gives an empty region when
+/// `optional` (virtio-rng has no device configuration), else an error. The
+/// structure must lie inside its memory BAR (sized by probing).
+fn region<C: ConfigSpace>(
+    cfg: &mut C,
+    bdf: Bdf,
+    loc: Option<CapLoc>,
+    optional: bool,
+) -> Result<Region, ProbeError> {
+    let Some(loc) = loc else {
+        if !optional {
+            return Err(ProbeError::Map);
+        }
+        // SAFETY: a zero-length region is never dereferenced.
+        return Ok(unsafe { Region::new(0, 0) });
+    };
     let Some(Bar::Memory { base, .. }) = pci::bar(cfg, bdf, loc.bar) else {
         return Err(ProbeError::Map);
     };
+    let end = u64::from(loc.offset) + u64::from(loc.length);
+    if pci::bar_size(cfg, bdf, loc.bar).is_none_or(|size| end > size) {
+        return Err(ProbeError::Map);
+    }
     let va = map(base + u64::from(loc.offset), u64::from(loc.length.max(4)))?;
     // SAFETY: just mapped as device memory for the kernel's lifetime.
     Ok(unsafe { Region::new(va, loc.length as usize) })
 }
 
-fn transport<C: ConfigSpace>(cfg: &C, bdf: Bdf) -> Result<Transport, ProbeError> {
-    let caps = find_caps(cfg, bdf);
+fn transport<C: ConfigSpace>(
+    cfg: &mut C,
+    bdf: Bdf,
+    caps: &VirtioCaps,
+    device_optional: bool,
+) -> Result<Transport, ProbeError> {
     Ok(Transport {
-        common: region(cfg, bdf, caps.common)?,
-        notify: region(cfg, bdf, caps.notify)?,
+        common: region(cfg, bdf, caps.common, false)?,
+        notify: region(cfg, bdf, caps.notify, false)?,
         notify_multiplier: caps.notify_multiplier,
-        device: region(cfg, bdf, caps.device)?,
+        device: region(cfg, bdf, caps.device, device_optional)?,
     })
 }
 
-/// Points MSI-X vector 0 of `bdf` at a fresh GICv2m SPI and enables MSI-X.
+/// Points MSI-X vector 0 of `bdf` at a fresh GICv2m SPI (aarch64) or CPU
+/// vector (x86) and enables MSI-X.
 fn setup_msix<C: ConfigSpace>(cfg: &mut C, bdf: Bdf, frame: &mut msi::Frame) -> Option<u32> {
     let info = pci::msix(cfg, bdf)?;
     let Some(Bar::Memory { base, .. }) = pci::bar(cfg, bdf, info.table_bar) else {
@@ -400,11 +467,7 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
         hbas: alloc::vec::Vec::new(),
     };
 
-    if let Some(pcie) = platform.pcie {
-        probe_pci(&pcie, platform, &env, &mut devs)?;
-    } else {
-        warn!("pci: no ECAM described, no devices");
-    }
+    probe_pci(platform, &env, &mut devs)?;
 
     // Entropy: virtio-rng and RNDR are hardware sources (PROMPT §6).
     let mut hw = [0u8; 64];
@@ -450,19 +513,10 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
     Ok(())
 }
 
-fn probe_pci(
-    pcie: &Pcie,
-    platform: &PlatformInfo,
-    env: &KernelEnv,
-    devs: &mut Devices,
-) -> Result<(), ProbeError> {
-    let va = map(pcie.ecam, pcie.ecam_size())?;
-    let mut ecam = Ecam {
-        va,
-        bus_start: pcie.bus_start,
-        bus_end: pcie.bus_end,
-    };
-    let mut v2m = platform.interrupts.and_then(|i| i.gic.v2m).and_then(|pa| {
+/// The MSI source: the platform's GICv2m frame on aarch64.
+#[cfg(target_arch = "aarch64")]
+fn msi_frame(platform: &PlatformInfo) -> Option<msi::Frame> {
+    platform.interrupts.and_then(|i| i.gic.v2m).and_then(|pa| {
         let va = map(pa, 0x1000).ok()?;
         // SAFETY: MSI_TYPER of the just-mapped v2m frame.
         let typer = unsafe { ((va + msi::TYPER) as *const u32).read_volatile() };
@@ -470,15 +524,78 @@ fn probe_pci(
         let (start, end) = frame.spis();
         info!("msi: GICv2m frame at {pa:#x}, SPIs {start}..{end}");
         Some(frame)
-    });
-    let functions = pci::enumerate(&ecam, pcie.bus_start, pcie.bus_end);
-    info!(
-        "pci: ECAM {:#x} buses {}-{}, {} function(s)",
-        pcie.ecam,
-        pcie.bus_start,
-        pcie.bus_end,
-        functions.len()
-    );
+    })
+}
+
+/// The MSI source on x86: vectors delivered to the boot CPU's local APIC.
+#[cfg(target_arch = "x86_64")]
+fn msi_frame(_platform: &PlatformInfo) -> Option<msi::Frame> {
+    // MSI addresses carry an 8-bit destination.
+    let apic_id = urmqtt_arch::pio::initial_apic_id();
+    let frame = msi::Frame::from_typer(u64::from(apic_id), 0);
+    let (start, end) = frame.spis();
+    info!("msi: local APIC {apic_id}, vectors {start}..{end}");
+    Some(frame)
+}
+
+/// A configuration backend, the bus range to scan and a log description.
+type Opened = (Cfg, u8, u8, alloc::string::String);
+
+/// Opens configuration space: ECAM as described by the platform, or (x86)
+/// mechanism #1 when there is no usable MCFG region.
+fn open_config(platform: &PlatformInfo) -> Result<Option<Opened>, ProbeError> {
+    let mut ecam = None;
+    if let Some(pcie) = platform.pcie {
+        let va = map(pcie.ecam, pcie.ecam_size())?;
+        let e = Ecam {
+            va,
+            bus_start: pcie.bus_start,
+            bus_end: pcie.bus_end,
+        };
+        // Some firmware lists an MCFG whose window decodes nothing; the
+        // host bridge at 00:00.0 must answer (x86 only: aarch64 trusts it).
+        let host = e.read32(
+            Bdf {
+                bus: pcie.bus_start,
+                dev: 0,
+                func: 0,
+            },
+            0,
+        );
+        let alive = cfg!(target_arch = "aarch64") || !matches!(host as u16, 0xffff | 0);
+        let desc = alloc::format!(
+            "ECAM {:#x} buses {}-{}",
+            pcie.ecam,
+            pcie.bus_start,
+            pcie.bus_end
+        );
+        if alive {
+            return Ok(Some((Cfg::Ecam(e), pcie.bus_start, pcie.bus_end, desc)));
+        }
+        warn!("pci: {desc} does not decode (00:00.0 reads {host:#010x})");
+        ecam = Some((e, pcie, desc));
+    }
+    #[cfg(target_arch = "x86_64")]
+    if let Some(p) = pci::PortConfig::detect(Ports) {
+        let desc = alloc::string::String::from("ports 0xcf8/0xcfc (mechanism #1) buses 0-255");
+        return Ok(Some((Cfg::Ports(p), 0, 255, desc)));
+    }
+    // Nothing better: scan the (silent) ECAM anyway so the log shows it.
+    Ok(ecam.map(|(e, p, d)| (Cfg::Ecam(e), p.bus_start, p.bus_end, d)))
+}
+
+fn probe_pci(
+    platform: &PlatformInfo,
+    env: &KernelEnv,
+    devs: &mut Devices,
+) -> Result<(), ProbeError> {
+    let Some((mut ecam, bus_start, bus_end, how)) = open_config(platform)? else {
+        warn!("pci: no ECAM described and no legacy config ports, no devices");
+        return Ok(());
+    };
+    let mut v2m = msi_frame(platform);
+    let functions = pci::enumerate(&ecam, bus_start, bus_end);
+    info!("pci: {how}, {} function(s)", functions.len());
     for f in functions.iter() {
         let kind = DeviceType::from_pci(f.vendor, f.device, f.subsystem);
         // A network controller we have no driver for (e.g. an SR-IOV
@@ -509,14 +626,50 @@ fn probe_pci(
         if matches!(kind, DeviceType::Other(_)) {
             continue;
         }
+        let caps = find_caps(&ecam, f.bdf);
+        let rng = matches!(kind, DeviceType::Entropy);
+        match caps.support(f.device, !rng) {
+            Support::Modern => {}
+            Support::LegacyOnly => {
+                // Pre-1.0 register block in an I/O-port BAR: no legacy driver (X7).
+                let io = match pci::bar(&ecam, f.bdf, 0) {
+                    Some(Bar::Io { base }) => alloc::format!("I/O BAR0 at {base:#x}"),
+                    _ => alloc::string::String::from("no I/O BAR0"),
+                };
+                warn!(
+                    "pci {}: unsupported legacy virtio device {:04x}:{:04x} ({io}, no virtio 1.0 capabilities): ignored; \
+                     attach it as a modern device (disable-legacy=on)",
+                    f.bdf, f.vendor, f.device
+                );
+                if matches!(kind, DeviceType::Net) {
+                    let mut list = OTHER_NICS.lock();
+                    if list.len() < 4 {
+                        list.push((f.vendor, f.device));
+                    }
+                }
+                continue;
+            }
+            Support::Incomplete => {
+                warn!(
+                    "pci {}: virtio {:04x}:{:04x} lacks the required virtio 1.0 capabilities, ignored",
+                    f.bdf, f.vendor, f.device
+                );
+                continue;
+            }
+        }
         pci::enable(&mut ecam, f.bdf, pci::CMD_MEMORY | pci::CMD_BUS_MASTER);
         match kind {
             DeviceType::Entropy if devs.rng.is_none() => {
-                devs.rng = Some(VirtioRng::new(transport(&ecam, f.bdf)?, env)?);
+                devs.rng = Some(VirtioRng::new(
+                    transport(&mut ecam, f.bdf, &caps, true)?,
+                    env,
+                )?);
             }
             DeviceType::Block => {
+                // Sizing the BARs (in `transport`) briefly turns decoding
+                // off, so it comes before MSI-X is enabled.
+                let t = transport(&mut ecam, f.bdf, &caps, false)?;
                 let spi = v2m.as_mut().and_then(|v| setup_msix(&mut ecam, f.bdf, v));
-                let t = transport(&ecam, f.bdf)?;
                 let mut blk = VirtioBlk::new_with_msix(t, env, spi.map(|_| 0))?;
                 // Only the disk Limine booted from is used (single-disk
                 // model, STORAGE-PLAN §2a); every other disk is only read
@@ -550,6 +703,8 @@ fn probe_pci(
                 }
                 if let Some(spi) = spi {
                     irq::register(spi, on_blk_irq);
+                    // x86: routing is in the MSI address; X4's irq module
+                    // decides what enabling a vector means there.
                     irq::enable_spi(spi, 0);
                 }
                 info!(
@@ -565,7 +720,7 @@ fn probe_pci(
                 devs.blk = Some(DataDisk::Blk(blk));
             }
             DeviceType::Scsi => {
-                let mut hba = VirtioScsi::new(transport(&ecam, f.bdf)?, env)?;
+                let mut hba = VirtioScsi::new(transport(&mut ecam, f.bdf, &caps, false)?, env)?;
                 let (disks, n) = hba.scan(env);
                 info!("scsi: {} {n} disk(s) with 512-byte blocks", f.bdf);
                 if install_mode() {
@@ -634,7 +789,7 @@ fn probe_pci(
                 }
             }
             DeviceType::Net if devs.net.is_none() => {
-                let net = VirtioNet::new(transport(&ecam, f.bdf)?, env)?;
+                let net = VirtioNet::new(transport(&mut ecam, f.bdf, &caps, false)?, env)?;
                 let m = net.mac;
                 info!(
                     "net: mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, link {}",
@@ -790,7 +945,7 @@ pub fn blk_selftest() -> Result<(), &'static str> {
     );
     if msix {
         let irqs = BLK_IRQS.load(Ordering::Relaxed) - irqs_before;
-        info!("msi-x: {irqs} blk completion interrupt(s) via GICv2m");
+        info!("msi-x: {irqs} blk completion interrupt(s) via {MSI_SOURCE}");
         if irqs == 0 {
             return Err("no MSI-X interrupt arrived for blk completions");
         }
@@ -799,6 +954,11 @@ pub fn blk_selftest() -> Result<(), &'static str> {
     }
     Ok(())
 }
+
+#[cfg(target_arch = "aarch64")]
+const MSI_SOURCE: &str = "GICv2m";
+#[cfg(target_arch = "x86_64")]
+const MSI_SOURCE: &str = "the local APIC";
 
 const ETH_ARP: [u8; 2] = [0x08, 0x06];
 
