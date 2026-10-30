@@ -103,8 +103,8 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:325` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:345` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:357` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:639` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:763` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:640` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:764` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/console.rs:18` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/console.rs:30` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/cpu_dispatch.rs:18` | attribute | yes |

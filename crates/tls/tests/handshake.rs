@@ -12,7 +12,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 use urmqtt_tls::rng::{EntropyPool, Source};
 use urmqtt_tls::{
-    CertRole, Event, IdentityField, RevocationList, ServerSetup, TlsError, TlsServer, TlsSession,
+    CertRole, Event, IdentityField, RevocationList, ServerSetup, TicketKeys, TlsError, TlsServer,
+    TlsSession,
 };
 
 fn dev() -> Option<PathBuf> {
@@ -36,11 +37,36 @@ fn setup_globals() {
     });
 }
 
+/// One set of ticket keys for the process, as the kernel shares one set
+/// between its cores.
+fn tickets() -> Arc<TicketKeys> {
+    static T: std::sync::OnceLock<Arc<TicketKeys>> = std::sync::OnceLock::new();
+    T.get_or_init(|| Arc::new(TicketKeys::new(urmqtt_tls::ticket::INTERVAL_S, uptime)))
+        .clone()
+}
+
+fn uptime() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs()
+}
+
 fn read(p: &Path) -> Vec<u8> {
     std::fs::read(p).unwrap()
 }
 
 fn server(d: &Path, field: IdentityField, revoked: &[&str]) -> TlsServer {
+    server_with_tickets(d, field, revoked, tickets())
+}
+
+fn server_with_tickets(
+    d: &Path,
+    field: IdentityField,
+    revoked: &[&str],
+    tickets: Arc<TicketKeys>,
+) -> TlsServer {
     let ca = read(&d.join("ca.pem"));
     let cert = read(&d.join("server.pem"));
     let key = read(&d.join("server.key"));
@@ -52,7 +78,7 @@ fn server(d: &Path, field: IdentityField, revoked: &[&str]) -> TlsServer {
         identity_field: field,
         resumption: true,
         revocations: Arc::new(RevocationList::from_hex(revoked)),
-        version: "test",
+        tickets,
     })
     .unwrap()
 }
@@ -339,7 +365,7 @@ fn server_with(
         identity_field: IdentityField::Cn,
         resumption: true,
         revocations,
-        version: "test",
+        tickets: tickets(),
     })
     .unwrap()
 }
@@ -450,4 +476,158 @@ fn trust_roles_and_ca_rotation() {
     let ops_only = server_with(&d, &["ca.pem"], &[], none());
     let (_, _, r) = connect(&ops_only, client_for(&d, "bootstrap/device-006"));
     assert!(r.is_err(), "bootstrap accepted without a bootstrap anchor");
+}
+
+fn resumed(events: &[Event]) -> Option<bool> {
+    events.iter().find_map(|e| match e {
+        Event::Established { resumed, .. } => Some(*resumed),
+        _ => None,
+    })
+}
+
+/// H2: ticket keys are per boot. A ticket from before a restart (or from
+/// another replica of the same image) names no key: a full handshake,
+/// counted as `unknown_key`.
+#[test]
+fn ticket_from_another_boot_means_full_handshake() {
+    let Some(d) = dev() else { return };
+    setup_globals();
+    let before = server_with_tickets(&d, IdentityField::Cn, &[], new_keys());
+    let cfg = client_config(&d, "devices/device-001");
+    let (_, _, r) = connect(&before, cfg.clone());
+    assert_eq!(resumed(&r.unwrap()), Some(false));
+    let (_, _, r) = connect(&before, cfg.clone());
+    assert_eq!(resumed(&r.unwrap()), Some(true), "same boot resumes");
+    let keys = new_keys();
+    let after = server_with_tickets(&d, IdentityField::Cn, &[], keys.clone());
+    let (_, _, r) = connect(&after, cfg);
+    assert_eq!(
+        resumed(&r.unwrap()),
+        Some(false),
+        "a new boot must not resume"
+    );
+    let unknown = urmqtt_tls::ticket::Refused::UnknownKey;
+    let idx = urmqtt_tls::ticket::Refused::ALL
+        .iter()
+        .position(|&x| x == unknown)
+        .unwrap();
+    assert_eq!(keys.stats().refused[idx], 1, "{:?}", keys.stats());
+}
+
+fn new_keys() -> Arc<TicketKeys> {
+    Arc::new(TicketKeys::new(urmqtt_tls::ticket::INTERVAL_S, uptime))
+}
+
+/// H2: 0-RTT stays off. A client that wants early data gets tickets that do
+/// not allow it, so it never sends any, and resumption is a 1-RTT handshake.
+#[test]
+fn zero_rtt_is_never_offered() {
+    let Some(d) = dev() else { return };
+    setup_globals();
+    let srv = server_with_tickets(&d, IdentityField::Cn, &[], new_keys());
+    let mut cfg = (*client_config(&d, "devices/device-001")).clone();
+    cfg.enable_early_data = true;
+    let cfg = Arc::new(cfg);
+    let (_, _, r) = connect(&srv, cfg.clone());
+    assert_eq!(resumed(&r.unwrap()), Some(false));
+    let mut client =
+        ClientConnection::new(cfg, ServerName::try_from("localhost").unwrap()).unwrap();
+    assert!(
+        client.early_data().is_none(),
+        "the ticket allowed early data (max_early_data_size must stay 0)"
+    );
+    let mut session = srv.accept().unwrap();
+    let mut app = Vec::new();
+    let ev = pump(&mut client, &mut session, &mut app).unwrap();
+    assert_eq!(resumed(&ev), Some(true));
+    assert!(!client.is_early_data_accepted());
+    assert!(app.is_empty());
+}
+
+/// Like `pump`, but delivers what the server sent even when it fails, and
+/// returns the client's error: the alert the server sent, if any.
+fn pump_to_failure(
+    client: &mut ClientConnection,
+    server: &mut TlsSession,
+) -> Option<rustls::Error> {
+    let mut app = Vec::new();
+    for _ in 0..50 {
+        let mut c2s = Vec::new();
+        while client.wants_write() {
+            client.write_tls(&mut c2s).unwrap();
+        }
+        let mut s2c = Vec::new();
+        let failed = !c2s.is_empty() && server.input(&c2s, &mut s2c, &mut app).is_err();
+        let mut rd = &s2c[..];
+        while !rd.is_empty() {
+            client.read_tls(&mut rd).unwrap();
+            if let Err(e) = client.process_new_packets() {
+                return Some(e);
+            }
+        }
+        if failed || (s2c.is_empty() && c2s.is_empty()) {
+            return None;
+        }
+    }
+    None
+}
+
+/// H2 (RFC 8446 §6): failures are announced with a fatal alert, both in
+/// the handshake (rustls's alert, which rustls only emits on a second
+/// call) and on established connections (our record layer).
+#[test]
+fn fatal_alerts_reach_the_peer() {
+    use rustls::AlertDescription as A;
+    let Some(d) = dev() else { return };
+    setup_globals();
+    let srv = server_with_tickets(&d, IdentityField::Cn, &[], new_keys());
+    // A handshake the server refuses: an expired client certificate.
+    let mut client = ClientConnection::new(
+        client_config(&d, "negative/expired-device"),
+        ServerName::try_from("localhost").unwrap(),
+    )
+    .unwrap();
+    let mut session = srv.accept().unwrap();
+    let e = pump_to_failure(&mut client, &mut session);
+    assert!(
+        matches!(
+            e,
+            Some(rustls::Error::AlertReceived(
+                A::CertificateExpired | A::BadCertificate
+            ))
+        ),
+        "{e:?}"
+    );
+
+    // An established connection that receives a tampered record.
+    let mut client = ClientConnection::new(
+        client_config(&d, "devices/device-001"),
+        ServerName::try_from("localhost").unwrap(),
+    )
+    .unwrap();
+    let mut session = srv.accept().unwrap();
+    let mut app = Vec::new();
+    pump(&mut client, &mut session, &mut app).unwrap();
+    assert!(session.is_established());
+    client.writer().write_all(b"tamper me").unwrap();
+    let mut c2s = Vec::new();
+    while client.wants_write() {
+        client.write_tls(&mut c2s).unwrap();
+    }
+    let last = c2s.len() - 1;
+    c2s[last] ^= 1;
+    let mut s2c = Vec::new();
+    assert!(session.input(&c2s, &mut s2c, &mut app).is_err());
+    let mut rd = &s2c[..];
+    client.read_tls(&mut rd).unwrap();
+    let e = client.process_new_packets().unwrap_err();
+    assert_eq!(e, rustls::Error::AlertReceived(A::BadRecordMac));
+    // Nothing more after the fatal alert, not even close_notify.
+    let mut more = Vec::new();
+    session.close(&mut more);
+    assert!(
+        more.is_empty(),
+        "{} bytes after the fatal alert",
+        more.len()
+    );
 }

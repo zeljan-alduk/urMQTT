@@ -112,7 +112,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | IPv6 + SLAAC | 📋 later |
 | **TLS** | TLS 1.3 only, **mutual TLS**, device id from CN or SAN URI | ✅ M10 |
 | | rustls handshake, then own record layer (AES-128-GCM, ChaCha20-Poly1305, KeyUpdate) | ✅ M10 |
-| | Session resumption (PSK tickets), handshake admission control, revocation list | ✅ M10 |
+| | Session resumption (PSK tickets under random keys rotated every 12 h), handshake admission control, revocation list | ✅ M10, H2 |
 | **MQTT** | Zero-copy 3.1.1 codec, fuzzed, `forbid(unsafe_code)` | ✅ M8 |
 | | QoS 0/1, wildcards, retained, LWT, persistent sessions, keepalive | ✅ M9 |
 | | ACL (`devices/{id}/#` by default), service identities, per-device rate limits | ✅ M9 |
@@ -266,7 +266,7 @@ falls as fixed slab chunks amortize, so it does not grow with the connection cou
 - **Abuse resistance.** SYN cookies; admission refuses new connections (before any crypto) on a low heap, a DB core that is behind, too many handshakes in flight per core or per source address, or the handshake rate. Per-device rate limits, bounded queues, a TCP window tied to broker backpressure, rate-limited logs, a handler watchdog and a health check.
 - **Immutable, except who may connect.** Configuration, trust anchors and server key are baked into the image, and changing them means a new image. Revocations and the device allowlist change at runtime through control messages that need a control identity's mTLS certificate **and** an offline Ed25519 signature (H1, [docs/SECURITY.md](docs/SECURITY.md#control-channel-h1)).
 
-The threat model is in [docs/SECURITY.md](docs/SECURITY.md).
+The threat model is in [docs/SECURITY.md](docs/SECURITY.md); the cryptography (keys, record layer, tickets, constant-time and conformance results) in [docs/CRYPTO.md](docs/CRYPTO.md).
 
 ### Persistence
 
@@ -931,7 +931,7 @@ Security is the first priority and wins conflicts with the other tracks.
 |---|---|---|
 | ✅ | **H0** Baseline & inventory | `docs/AUDIT.md`: TCB and `unsafe` inventory, parser list, mitigation matrix with tests, 9 questions answered from the code |
 | ✅ | **H1** Identity lifecycle | runtime revocation over a signed (Ed25519, offline key) control channel; live connections of a revoked device closed; allowlist mode; CA roles and rotation; build fails on expiring certificates |
-| 📋 | **H2** TLS assurance | 0-RTT refused (tested); record layer equal to a reference under differential fuzzing; constant-time checks; tlsfuzzer; interop matrix; rotating ticket keys |
+| ✅ | **H2** TLS assurance | random per-boot ticket keys rotated every 12 h; 0-RTT refused (tested); fatal alerts per RFC 8446; record layer byte-identical to rustls under differential fuzzing; dudect-style constant-time tests; 23 tlsfuzzer probes; interop with OpenSSL 3/4, wolfSSL, Mbed TLS ([CRYPTO.md](docs/CRYPTO.md)) |
 | 📋 | **H3** TCP/IP & DoS | RFC 5961/6528 with key rotation; scripted and model-based TCP tests; adversarial suite with bounded memory and CPU |
 | 📋 | **H4** Exploit mitigations | KASLR, stack protector, kCFI, MTE, hardened allocator, zeroization; IOMMU on bare metal |
 | 📋 | **H5** Verification tooling | Miri, Kani proofs, ASan/UBSan, stateful ACL fuzzing in CI |

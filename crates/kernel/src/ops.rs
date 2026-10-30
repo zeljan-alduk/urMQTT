@@ -56,6 +56,7 @@ struct Counters {
     control_applied: u64,
     registry_refused: u64,
     live_closed: u64,
+    tickets: urmqtt_tls::ticket::TicketStats,
 }
 
 fn counters(lost: u64, unsent: u64) -> Counters {
@@ -78,6 +79,7 @@ fn counters(lost: u64, unsent: u64) -> Counters {
         control_applied: crate::control::APPLIED.load(Ordering::Relaxed),
         registry_refused: crate::control::REGISTRY_REFUSED.load(Ordering::Relaxed),
         live_closed: crate::control::LIVE_CLOSED.load(Ordering::Relaxed),
+        tickets: crate::mqtt_service::ticket_stats(),
     }
 }
 
@@ -267,6 +269,25 @@ impl Ops {
             d(now.live_closed, prev.live_closed),
             "c",
         );
+        let (t, pt) = (&now.tickets, &prev.tickets);
+        add("tls.tickets_issued", d(t.issued, pt.issued), "c");
+        add("tls.resumed", d(t.opened, pt.opened), "c");
+        add("tls.ticket_keys_rotated", d(t.rotations, pt.rotations), "c");
+        add(
+            "tls.tickets_not_issued",
+            d(t.not_issued, pt.not_issued),
+            "c",
+        );
+        for (r, (a, b)) in urmqtt_tls::ticket::Refused::ALL
+            .iter()
+            .zip(t.refused.iter().zip(pt.refused.iter()))
+        {
+            add(
+                &alloc::format!("tls.resume_refused.{}", r.reason()),
+                d(*a, *b),
+                "c",
+            );
+        }
         add("accepted", d(now.accepted, prev.accepted), "c");
         for (i, name) in ["rate", "in_flight", "memory", "storage"]
             .iter()

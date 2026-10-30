@@ -20,13 +20,13 @@ out of date (`--check`).
 
 The full tables are generated: [audit/inventory.md](audit/inventory.md)
 (crates, vendored code, dependencies) and [audit/unsafe.md](audit/unsafe.md)
-(every `unsafe` site). The summary below is taken from them at the X0b commit (H0: 30 773 lines,
+(every `unsafe` site). The summary below is taken from them at the H2 commit (H0: 30 773 lines,
 65 linked crates, 308 `unsafe` sites with 278 justified; X0: 31 905 lines;
-H1: 34 538 lines, 316/289; S1: 36 573 lines, 318/290; S1b: 37 240 lines, 319/290).
+H1: 34 538 lines, 316/289; S1: 36 573 lines, 318/290; S1b: 37 240 lines, 319/290; X0b: 37 789 lines, 326/297).
 
 | Part | Size | Notes |
 |---|---|---|
-| Own Rust (23 workspace crates, `src/` incl. inline tests) | 37 789 lines | `tools/loadgen`, `tools/control` and `tools/disk` are host tools, not in the image |
+| Own Rust (23 workspace crates, `src/` incl. inline tests) | 38 488 lines | `tools/loadgen`, `tools/control` and `tools/disk` are host tools, not in the image |
 | Third-party Rust linked into the kernel | 69 crates from crates.io, 297 675 lines, plus the two vendored `cpufeatures` below | RustCrypto, rustls, webpki, p256, x25519-dalek, ed25519-dalek (H1), … ([list](audit/inventory.md)). `ed25519-dalek` 2.2 brings `sha2` 0.10, `digest` 0.10 and `signature` 2 alongside the 0.11/3 versions (about 4 500 duplicate lines, H9) |
 | Third-party Rust at build time only | proc-macros and build scripts (syn, toml, cc, …) | they run on the build host, so they are a supply-chain risk (H9), not runtime TCB |
 | SQLite 3.54.1 (C), linked | 254 268 lines | the largest component; runs at EL1 with full kernel rights (H6) |
@@ -73,7 +73,8 @@ not on bare metal for devices (DMA, see H4b).
 | Ethernet, ARP, IPv4 (no fragments), ICMP, UDP | network/LAN | `net/src/iface.rs`, `net/src/ipv4.rs` | frame size; ARP cache size | `net_frame` |
 | DHCP replies | LAN | `net/src/dhcp.rs` | packet size; xid match | `net_frame` (via `Iface`) |
 | TCP segments and the state machine | network | `tcp/src/wire.rs`, `tcp/src/lib.rs` | `max_conns`, `tx_max`, window, SYN cookies, `rst_per_sec` | `tcp_segment` (wire + stack) |
-| TLS records (application, KeyUpdate, alerts) | network | `tls/src/record.rs` (own) | 2^14+256 ciphertext limit | `tls_record` |
+| TLS records (application, KeyUpdate, alerts) | network | `tls/src/record.rs` (own) | 2^14+256 ciphertext, 2^14+1 inner plaintext | `tls_record`; `diff_tls_record` against rustls + ring (H2); 23 tlsfuzzer probes |
+| Session tickets (on resumption) | network | `tls/src/ticket.rs` (own) | AEAD under per-boot keys; length checked first | host tests (every bit flipped) |
 | TLS handshake messages | network | rustls 0.23.46 (third party) | handshake timeout 10 s; in-flight limits | none of our own (upstream fuzzes rustls) |
 | Client X.509 certificates | network (signed by the CA) | rustls-webpki (third party), `tls/src/identity.rs` (own: CN/SAN URI) | certificate size from rustls | `x509_identity` |
 | MQTT 3.1.1 packets | network (authenticated devices) | `mqtt/src/decode.rs`, `validate.rs` | `max_packet_size` 4096, topic length 256 and levels 16 | `mqtt_decode` |
@@ -104,12 +105,15 @@ scenario (`scripts/smoke.sh`), a host test or a CI job. "**none**" is a gap.
 | Lower half unmapped, null page unmapped | TCR EPD0, `vm.rs` | `null-deref` | aarch64 |
 | PAC (return addresses) | `-Zbranch-protection=pac-ret`, `arch-aarch64/src/pac.rs` | `pac-forgery` | aarch64 (when the CPU has PAuth) |
 | BTI (indirect branch targets) | `-Zbranch-protection=bti`, guarded pages | `bti-violation` | aarch64 (when the CPU has BTI) |
-| FP/SIMD state saved on exceptions | ADR-003, exception entry | **none** (gap; `simd-irq` planned in X86-PLAN D3) | aarch64 |
+| FP/SIMD state saved on exceptions | ADR-003, exception entry | smoke `simd-irq` (X0b: 10 s of crypto known answers on four cores under the tick and an IPI storm, 0 mismatches) | aarch64 |
 | Boot refuses without a seeded CSPRNG | `tls/src/rng.rs`, `kernel/src/devices.rs` | host tests (pool policy); `no-hw-rng` (jitter fallback with health tests) | aarch64 |
 | TLS 1.3 only, mutual TLS, identity from the certificate | `tls/src/server.rs` | `mqtt-tls`: `tls-wrong-ca-rejected`, `tls-expired-rejected`, `tls-client-id-mismatch-rejected` | all |
 | Revocation (build-time list, persisted in SQLite) | `server.rs` (verifier wrapper), `db.rs:470` | `tls-revoked-rejected`; `mqtt-persist` (1 revoked serial restored) | all |
 | Revocation re-checked on resumption | `server.rs:574-585` | `tls/tests/handshake.rs` `revoked_device_cannot_resume` | all |
-| 0-RTT off | `server.rs:348` (`max_early_data_size = 0`) | **none** (gap, H2) | all |
+| 0-RTT off | `server.rs` (`max_early_data_size = 0`; rustls refuses early data with stateless tickets) and config-schema (`tls.early_data` fails the build) | `zero_rtt_is_never_offered`, `early_data_fails_the_build`; tlsfuzzer `early_data offered without a PSK` (H2) | all |
+| Session tickets under random, rotating, per-boot keys | `tls/src/ticket.rs` (ADR-054) | `ticket::tests` (11), `ticket_from_another_boot_means_full_handshake`; smoke `ticket-rotation`, `ticket-restart` | all |
+| Fatal alerts on TLS errors; inner plaintext ≤ 2^14 + 1 | `tls/src/record.rs`, `server.rs` (`flush_alert`) | `fatal_alerts_reach_the_peer`, `inner_plaintext_over_the_limit_is_record_overflow`; 23 tlsfuzzer probes (`make conformance`) | all |
+| Constant-time tag checks and secret comparison | RustCrypto (`subtle`), `server::ct_eq` | `make ct` (dudect-style, with a negative control) | all |
 | Handshake admission (rate, in flight per core and per IP, heap reserve, DB backlog) | `kernel/src/mqtt_service.rs` (`admit`) | `storm` (3 × 3000 devices against an 8 MiB heap) | all |
 | MQTT limits (packet, topic, subscriptions, inflight, queue, publish rate) | `mqtt/src/validate.rs`, `broker/src/lib.rs` | broker host tests; `broker_input` fuzzing | all |
 | ACL (device and service rights, device-scoped subscriptions) | `broker/src/lib.rs` | `mqtt-plain`/`mqtt-tls`: `acl-subscribe-denied`; broker host tests | all |
@@ -136,7 +140,7 @@ scenario (`scripts/smoke.sh`), a host test or a CI job. "**none**" is a gap.
 2. **Is the registry an allowlist?** **No.** It is a record filled on first connect: `DbReq::DeviceSeen` is an upsert (`mqtt_service.rs:281`, `db.rs:699`). Any certificate from the CA connects. Gap → H1 (`registry.mode`).
 3. **Where does wall-clock time come from, and what if it is wrong?** From the firmware RTC through Limine, plus uptime (`boot.rs:226-233`, `now_unix` at `boot.rs:608-625`). An unknown date refuses every handshake (fail closed, ADR-009). A **wrong** date is believed: there is no lower bound, so an RTC in the past makes expired certificates look valid. Gap → H7 (lower bound with H1).
 4. **KASLR?** **No.** The kernel is linked statically at a fixed address (`crates/kernel/linker.ld`); the heap, stacks and per-CPU regions are at fixed virtual addresses (`kernel/src/layout.rs`). Gap → H4.
-5. **0-RTT disabled?** **Yes** (`tls/src/server.rs:348`), but untested and not refused by config. Gap (test) → H2.
+5. **0-RTT disabled?** **Yes** (`tls/src/server.rs:348`), but untested and not refused by config. Gap (test) → H2. *H2: tested (`zero_rtt_is_never_offered`, tlsfuzzer); the config refusal already existed (`early_data_fails_the_build`).*
 6. **Secrets zeroised?** **Partly:**
    - Per-direction record secrets and per-record keys are wiped on drop (`tls/src/record.rs:106-128`).
    - The X25519 scalar is in `Zeroizing` (`provider/kx.rs:80`).
@@ -158,7 +162,7 @@ mutual TLS devices, and the image treated as a secret.
 | H0-W1 | **Retained messages are unbounded per device**, in count and in total bytes. An authenticated device can exhaust memory on every core (each core keeps a replica) and fill the database. Even clearing a retained topic (empty payload) creates its trie nodes first | **high** (authenticated DoS) | `broker/src/lib.rs:1102-1110`, `broker/src/topics.rs:147-162` (`set_retained` → `intern`), `db.rs` | H3: `limits.max_retained_per_device` and a global byte budget, refusal counted; tested at the bound |
 | H0-W2 | **Captured TLS traffic secrets are not wiped** (global `Vec`, `remove`/`swap_remove`, reallocation copies) | medium (needs a memory disclosure to exploit) | `tls/src/server.rs:84-150` | H4 (or earlier): fixed-capacity array, explicit wipe on take and on eviction, test |
 | H0-W3 | **The SYN-cookie/ISN key never rotates** | low | `netproto.rs:50-62` | H3: two keys, rotation |
-| H0-W4 | **Session-ticket key derived from the server key** (in the image): a copy of the image lets anyone forge tickets for any device identity | **high** if the image leaks | `tls/src/server.rs:217-260, 339` | H2 (decided: random, rotating, memory-only keys) |
+| H0-W4 | ~~**Session-ticket key derived from the server key** (in the image): a copy of the image lets anyone forge tickets for any device identity~~ | **high** if the image leaks | `tls/src/server.rs` | **fixed in H2** (ADR-054): random per-boot keys, rotated by uptime, zeroised; smoke `ticket-restart` |
 | H0-W5 | ~~**No lower bound on the wall clock**: an RTC in the past accepts expired certificates~~ | **high** on bare metal (dead CMOS battery) and after VM snapshot restores | `boot.rs` | **fixed in H1** (ADR-050): build time is the lower bound; smoke `time-before-build` |
 | H0-W6 | ~~**Random-number failures ignored** in two places: `let _ = fill_global(...)` for the cookie key and the DHCP xid~~ | low | `netproto.rs` | **fixed in H1:** both are fatal now. The generator's `Err` without a source is already host-tested; the kernel paths cannot be reached in a test because boot refuses earlier |
 | H0-W7 | ~~`urmqtt-store` had no `unsafe_code` lint.~~ Its docs confined unsafe to the FFI modules, but nothing enforced it | low | `store/src/lib.rs` | **fixed in H0:** `#![deny(unsafe_code)]`, `allow` only on `db`, `ffi`, `libc`, `vfs`, `init` and the log callback |

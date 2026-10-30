@@ -532,6 +532,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     if s.options.db_test == Some(crate::cmdline::DbTest::LogCrash) {
         crate::db::start_log_crash(cpus);
     }
+    crate::mqtt_service::init_tickets(s.options.ticket_rotate_s);
     crate::dataplane::init(data_cores);
     crate::dataplane::set_heap_reserve(s.options.heap_limit_mb);
     if s.options.db_test == Some(crate::cmdline::DbTest::DpBench) {

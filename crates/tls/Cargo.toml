@@ -31,6 +31,8 @@ der = { version = "0.8", default-features = false, features = ["alloc", "oid"] }
 rand_core = { version = "0.6", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
 zeroize = { version = "1.8", default-features = false }
+# Constant-time comparison of secrets (H2).
+subtle = { version = "2.6", default-features = false }
 urmqtt-sync = { path = "../sync" }
 
 [features]

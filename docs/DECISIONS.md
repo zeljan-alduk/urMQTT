@@ -771,3 +771,46 @@ verified in the named milestone before it becomes Accepted).
   - Fuzz (aarch64 hosts, built with the kernel's cfgs): `diff_aes_gcm` and `diff_chacha20poly1305` against `ring` (ciphertext, tag, both directions open), `diff_sha256` (both `sha2` versions, one-shot and chunked) against `ring`, `diff_crc32c` hardware against the table.
   - Smoke (HVF and TCG): the boot scenarios expect the ARMv8 line and the KAT line; `crypto-soft`, `sealed-write` (a permission fault whose FAR is the sealed address), `simd-irq` (10 s of KATs on four cores under the tick and IPIs, 0 mismatches) and `crypto-bench`.
 - **Not done:** PMULL folding for long CRC buffers (the plain instruction already gives ~10 GiB/s), and AES-GCM with the ARMv8.2 SHA3/EOR3 extensions. The x86 backends are X9.
+
+## ADR-054 — Random, rotating session-ticket keys; fatal alerts; TLS assurance tooling (H2)
+
+- **Status:** Accepted (H2). Implements PLAN.md decision 5; closes H0-W4. Details in docs/CRYPTO.md.
+- **Problem:**
+  - The ticket key was HKDF(server key, image version). Anyone with a copy of the image could forge a ticket for any device identity and resume as that device. Resumption re-checks revocation, but not possession of the device key.
+  - The keys never rotated.
+  - 0-RTT being off had no test.
+  - The record layer had been checked only against itself.
+  - Failures ended connections without an alert.
+- **Design:**
+  - **Ticket keys** (`urmqtt_tls::ticket::TicketKeys`, one instance shared by every core's server):
+    - drawn from the CSPRNG when the first ticket is issued;
+    - current for 12 h of uptime, previous for 12 h more, then zeroised in place. Two fixed slots, an index for "current", so a key is never moved or copied;
+    - ticket lifetime 12 h;
+    - ticket format `id (4) || nonce (12) || ChaCha20-Poly1305(state)`, with the id in the associated data;
+    - the rotation is lazy: it runs at seal or open, under one spinlock. Handshakes are rare next to records, so the lock is not contended;
+    - refusals are counted by reason (`expired`, `unknown_key`, `invalid`, `malformed`), logged at powers of two, and exported to statsd;
+    - a CSPRNG failure issues no ticket;
+    - dev `test=ticket-rotate:S` shortens the interval.
+  - **Why uptime and not the wall clock:** rotation must work before and without a clock (H7), and a wrong clock must not stretch a key's life.
+  - **0-RTT:** two independent locks. `max_early_data_size = 0`, with the build refusing `tls.early_data`. And rustls refuses early data with any stateless ticketer (RFC 8446 §8.1). A mutation test (setting `max_early_data_size` to 16 KiB) showed that the second lock alone keeps 0-RTT off. The test therefore asserts the outcome: no ticket allows early data, and none is accepted.
+  - **Alerts** (RFC 8446 §6):
+    - record-layer errors send a fatal alert under the current keys (`RecordError::alert`), then nothing more;
+    - rustls's handshake alert, which the unbuffered API emits only on a second call, is now flushed;
+    - close_notify is answered with close_notify;
+    - the inner plaintext limit of 2^14 + 1 bytes is now enforced (`record_overflow`). Before, only the ciphertext length was checked, which let 2^14 + 2 … 2^14 + 240 bytes of inner plaintext through.
+  - **Constant time:** `server::ct_eq` (`subtle`) for the one secret comparison of our own, plus dudect-style tests with a negative control (`make ct`, in CI).
+  - **Differential fuzzing:** `diff_tls_record` compares our records with rustls's record layer, using rustls's key schedule and `ring`.
+  - **Conformance:** tlsfuzzer probes for mutual TLS and MQTT (`make conformance`, in CI), and an interop matrix with OpenSSL 3/4, wolfSSL and Mbed TLS (`make interop`, in CI with the libraries Ubuntu ships).
+- **Cost:** after a restart every device does one full handshake, the load the M16 storm scenario measures. A ticket open or seal is one ChaCha20-Poly1305 over about 200 bytes under a spinlock.
+- **Not done:**
+  - the plan put the keys "in the key slab": no key slab exists yet (H4). They live in a static, zeroised in place;
+  - an embedded MQTT client on firmware;
+  - tlsfuzzer's stock HTTP scripts (not applicable to an MQTT server with mutual TLS).
+- **Testing:** see docs/CRYPTO.md. In short:
+  - host tests for every rotation boundary, forgery, zeroisation, RNG failure, alerts and record overflow;
+  - `ticket_from_another_boot_means_full_handshake`, `zero_rtt_is_never_offered`, `fatal_alerts_reach_the_peer`;
+  - smoke `ticket-rotation` and `ticket-restart`;
+  - fuzz `diff_tls_record`, 10 min clean;
+  - 23 tlsfuzzer probes;
+  - the interop table.
+

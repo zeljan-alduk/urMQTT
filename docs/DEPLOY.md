@@ -287,7 +287,9 @@ restarts the service.
   and `db:` lines.
 - **Metrics:** statsd to `observability.metrics_udp` every 10 s
   (`urmqtt.connections`, `urmqtt.heap.*`, `urmqtt.refused.*`, `urmqtt.health`,
-  …; see ADR-035).
+  `urmqtt.tls.resume_refused.*`, `urmqtt.tls.tickets_issued`, …; see ADR-035
+  and docs/CRYPTO.md). After a restart every device does one full handshake
+  (session-ticket keys are per boot); `resume_refused.unknown_key` counts them.
 - **Failure handling:** a stuck core or a fatal error resets the VM (PSCI
   `SYSTEM_RESET`); it comes back by itself, devices reconnect, and admission
   control absorbs the storm. Configure the hypervisor to reboot rather than stop

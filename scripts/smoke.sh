@@ -208,6 +208,56 @@ kill_vm() {
     wait "$VM_PID" 2>/dev/null || true
 }
 
+# H2: session-ticket keys are per boot. A ticket taken before a reboot is
+# offered to the new boot: a full handshake, counted as an unknown key.
+ticket_restart() {
+    local iso="$OUT/ticket-restart.raw"
+    mkimg "$iso" "serve"
+    for accel in $ACCELS; do
+        local log1="$OUT/ticket-restart-$accel-1.log" log2="$OUT/ticket-restart-$accel-2.log"
+        local data="$OUT/ticket-restart-$accel.img" go="$OUT/ticket-restart-$accel.go" status=0 cpid=""
+        rm -f "$go" "$log2.client"
+        fresh_disk "$iso" "$data"
+        start_vm "$log1" --disk "$data" --accel "$accel" --fwd 18883:8883
+        if wait_log "$log1" "TLS 1.3 listener"; then
+            python3 -I "$ROOT/scripts/ticket-scenarios.py" "$ROOT/deploy/dev" restart "$go" 18883 \
+                >"$log2.client" 2>&1 &
+            cpid=$!
+            local waited=0
+            until grep -q "client: ticket held" "$log2.client" 2>/dev/null; do
+                if ! kill -0 "$cpid" 2>/dev/null || (( waited >= TIMEOUT * 10 )); then
+                    status=124
+                    break
+                fi
+                sleep 0.1
+                waited=$((waited + 1))
+            done
+        else
+            status=124
+        fi
+        kill_vm
+        if [[ $status -eq 0 ]]; then
+            start_vm "$log2" --disk "$data" --accel "$accel" --fwd 18883:8883
+            if wait_log "$log2" "TLS 1.3 listener"; then
+                touch "$go"
+                wait "$cpid" || status=1
+                wait_log "$log2" "session ticket\(s\) refused" || status=124
+                sleep 0.5
+            else
+                status=124
+            fi
+            kill_vm
+        fi
+        [[ -n "$cpid" ]] && { kill "$cpid" 2>/dev/null || true; wait "$cpid" 2>/dev/null || true; }
+        # Appended only now: QEMU writes the serial log at its own offset.
+        cat "$log2.client" >>"$log2" 2>/dev/null || true
+        check "ticket-restart [$accel]" "$log2" "$status" \
+            "client: ticket-resume-before-restart ok" "client: ticket-after-restart ok" \
+            "tls: 1 session ticket\(s\) refused, full handshake instead \(expired 0, unknown key 1, invalid 0, malformed 0\)" \
+            "NOT:FAILED" "$NO_FAULT"
+    done
+}
+
 # H1: a revocation and the control sequence number survive a reboot (the
 # VM is killed, as by a power cut, after the message was applied): the same
 # message replayed to the new boot is rejected, the device stays refused.
@@ -979,6 +1029,16 @@ else
     echo "  ✗ mosquitto clients not installed (brew install mosquitto / apt install mosquitto-clients)"
     FAILED=$((FAILED + 1))
 fi
+
+# H2: session tickets under random per-boot keys. With a 20 s rotation, a
+# ticket issued late in the first interval resumes after the rotation (the
+# previous key), and a ticket from before a reboot does not.
+SERVICE_PORT=8883 service ticket-rotation "serve test=ticket-rotate:20" 18883 "TLS 1.3 listener on port 8883" \
+    python3 -I "$ROOT/scripts/ticket-scenarios.py" "$ROOT/deploy/dev" rotation 20 -- \
+    "tls: session tickets under random per-boot keys, rotated every 20 s of uptime \(ticket lifetime 20 s\)" \
+    "client: ticket-resume ok" "client: ticket-previous-key ok" \
+    "tls: session-ticket keys rotated \(1 key change\(s\) since boot\)" "NOT:FAILED" "$NO_FAULT"
+ticket_restart
 
 # H1: the control channel, the registry and the trust roles, with the
 # real `urmqtt-control` tool and mosquitto clients.

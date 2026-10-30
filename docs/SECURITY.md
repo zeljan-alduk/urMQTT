@@ -17,7 +17,7 @@ runtime through signed control messages on the same MQTT/TLS port. See
 | Asset | Where it lives | Why it matters |
 |---|---|---|
 | Server TLS private key | Embedded in the image (`include_bytes!`) | Impersonating the broker; decrypting nothing (TLS 1.3 is forward secret), but accepting devices. |
-| Session-ticket key | Derived at boot: HKDF(server key, image version) | Forging resumption tickets. Never stored. |
+| Session-ticket keys | Random per boot (CSPRNG), in RAM only; current for 12 h, previous for 12 h, then zeroised (H2, ADR-054) | Forging resumption tickets. Never stored, never derived from the image: a copy of the image or disk forges nothing. |
 | Traffic secrets | Per connection, in RAM, zeroized on drop | Reading or injecting one device's traffic. |
 | Device identities and the revocation list | CA embedded; revocations embedded and in SQLite | Who may connect. |
 | Control signing key (Ed25519) | **Offline**, never in the image: a file on an operator machine (dev) or an HSM/KMS behind `urmqtt-control --sign-cmd` (prod). The image holds only the public key (`deploy/<env>/control.pub`). | Revoking, unrevoking and allowlisting devices at runtime. |
@@ -287,6 +287,6 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 | Many source addresses defeat the per-address handshake limit. | A botnet can use the per-core in-flight and rate limits up. | Upstream filtering; the limits keep the broker alive for connected devices. |
 | Syslog and statsd are plain UDP. | No TLS sink in the kernel. | Collectors on a private network only. |
 | No hardware RNG on the cloud (Ampere Altra has no `RNDR`; virtio-rng may be absent). | Then the CSPRNG is seeded from CPU timing jitter, which is weaker evidence than a hardware source. | Health tests and a conservative estimate gate it (ADR-038), and it is logged at boot. Prefer clouds with virtio-rng; `entropy.fallback = "none"` refuses to boot without one. |
-| Side channels in the crypto. | RustCrypto implementations are designed to be constant-time; that is not verified here. | ChaCha20-Poly1305 is offered alongside AES-128-GCM. |
+| Side channels in the crypto. | RustCrypto implementations are designed to be constant-time. The tag checks and our one secret comparison are checked by dudect-style timing tests (`make ct`, H2), but the asymmetric code (P-256, X25519, Ed25519) is not measured here. | ChaCha20-Poly1305 is offered alongside AES-128-GCM; docs/CRYPTO.md lists what is checked. |
 | The hypervisor sees everything. | Out of scope. | Choose the host. |
 | 100k and 1M connections are not measured on the development host. | QEMU user networking on macOS stops near 10 240 sockets. | The per-connection footprint is flat from 1k to 10k (ADR-034); the storm test scales the heap down instead of the clients up. |

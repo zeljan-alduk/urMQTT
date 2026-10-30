@@ -89,6 +89,8 @@ jobs:
           mosquitto_pub --help | head -1
       - run: make certs
       - run: cargo test --locked --workspace
+      - name: Constant-time tests (H2)
+        run: make ct
 
   kernel:
     name: Kernel (aarch64-unknown-none, ${{ matrix.env }})
@@ -172,6 +174,30 @@ jobs:
           name: smoke-serial-logs
           path: build/smoke/*.log*
           if-no-files-found: ignore
+
+  tls:
+    name: TLS conformance (tlsfuzzer) and interop
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: kernel
+          bare-metal-c: "true"
+      - name: Install QEMU, UEFI firmware, ISO tools and TLS libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-arm qemu-efi-aarch64 xorriso mtools \
+            python3-venv libssl-dev libwolfssl-dev
+      - run: make certs
+      - run: make build
+      - name: tlsfuzzer probes
+        run: scripts/conformance.sh --accel tcg
+      - name: Interop matrix
+        run: scripts/interop.sh --accel tcg | tee -a "$GITHUB_STEP_SUMMARY"
 
   deny:
     name: Dependencies (cargo-deny)

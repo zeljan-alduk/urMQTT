@@ -6,6 +6,7 @@
 //! - [`record`]: post-handshake record layer with KeyUpdate.
 //! - [`identity`]: device identity from the client certificate.
 //! - [`rng`]: the kernel CSPRNG.
+//! - [`ticket`]: rotating session-ticket keys (H2).
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -21,9 +22,11 @@ pub mod provider;
 pub mod record;
 pub mod rng;
 pub mod server;
+pub mod ticket;
 
 pub use identity::IdentityField;
 pub use server::{
     CertRole, Event, RevocationList, ServerSetup, TlsError, TlsServer, TlsSession, serial_tag,
     set_clock,
 };
+pub use ticket::TicketKeys;

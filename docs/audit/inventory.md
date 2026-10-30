@@ -15,7 +15,7 @@
 | `urmqtt-control-tool` | `tools/control` | 416 | 0 | 0 (0) | default |
 | `urmqtt-disk-tool` | `tools/disk` | 679 | 0 | 0 (0) | default |
 | `urmqtt-dispatch` | `crates/dispatch` | 522 | 0 | 0 (0) | forbid |
-| `urmqtt-kernel` | `crates/kernel` | 8194 | 0 | 59 (42) | deny |
+| `urmqtt-kernel` | `crates/kernel` | 8297 | 0 | 59 (42) | deny |
 | `urmqtt-loadgen` | `tools/loadgen` | 452 | 0 | 0 (0) | default |
 | `urmqtt-log` | `crates/log` | 655 | 0 | 5 (5) | deny |
 | `urmqtt-mm` | `crates/mm` | 1219 | 0 | 35 (35) | deny |
@@ -27,9 +27,9 @@
 | `urmqtt-sync` | `crates/sync` | 435 | 0 | 16 (16) | deny |
 | `urmqtt-tcp` | `crates/tcp` | 2452 | 0 | 0 (0) | deny |
 | `urmqtt-timer-wheel` | `crates/timer-wheel` | 395 | 0 | 0 (0) | forbid |
-| `urmqtt-tls` | `crates/tls` | 2511 | 425 | 0 (0) | forbid |
+| `urmqtt-tls` | `crates/tls` | 3107 | 772 | 0 (0) | forbid |
 | `urmqtt-virtio` | `crates/virtio` | 1681 | 0 | 19 (19) | deny |
-| **total** | | **37789** | | **326 (297)** | |
+| **total** | | **38488** | | **326 (297)** | |
 
 ## Vendored components
 
@@ -143,4 +143,4 @@
 
 ## Fuzz targets
 
-`acpi_parse`, `broker_input`, `config_parse`, `control_message`, `diff_aes_gcm`, `diff_chacha20poly1305`, `diff_crc32c`, `diff_sha256`, `disk_layout`, `fdt_parse`, `gpt_parse`, `mqtt_decode`, `net_frame`, `tcp_segment`, `telemetry_recover`, `tls_record`, `x509_identity`
+`acpi_parse`, `broker_input`, `config_parse`, `control_message`, `diff_aes_gcm`, `diff_chacha20poly1305`, `diff_crc32c`, `diff_sha256`, `diff_tls_record`, `disk_layout`, `fdt_parse`, `gpt_parse`, `mqtt_decode`, `net_frame`, `tcp_segment`, `telemetry_recover`, `tls_record`, `x509_identity`

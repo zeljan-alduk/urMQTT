@@ -57,8 +57,10 @@ impl Suite {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordError {
-    /// Outer header not `application_data` / TLS 1.2, or bad length.
+    /// Outer header not `application_data` / TLS 1.2.
     BadHeader,
+    /// Ciphertext over 2^14 + 256 or inner plaintext over 2^14 + 1 bytes.
+    Overflow,
     /// Authentication failed (bad key, tampering, wrong order).
     BadRecord,
     /// Inner content type unknown or message not allowed here.
@@ -68,6 +70,25 @@ pub enum RecordError {
     /// Sequence number exhausted without a key update.
     SequenceExhausted,
 }
+
+impl RecordError {
+    /// The fatal alert we send for it (RFC 8446 §6.2), if any: none for
+    /// the peer's own alert.
+    pub fn alert(self) -> Option<u8> {
+        match self {
+            Self::BadHeader | Self::UnexpectedMessage => Some(ALERT_UNEXPECTED_MESSAGE),
+            Self::Overflow => Some(ALERT_RECORD_OVERFLOW),
+            Self::BadRecord => Some(ALERT_BAD_RECORD_MAC),
+            Self::SequenceExhausted => Some(ALERT_INTERNAL_ERROR),
+            Self::PeerAlert(_) => None,
+        }
+    }
+}
+
+const ALERT_UNEXPECTED_MESSAGE: u8 = 10;
+const ALERT_BAD_RECORD_MAC: u8 = 20;
+const ALERT_RECORD_OVERFLOW: u8 = 22;
+const ALERT_INTERNAL_ERROR: u8 = 80;
 
 /// HKDF-Expand-Label (RFC 8446 §7.1) with an empty context.
 pub fn expand_label(secret: &[u8; 32], label: &[u8], out: &mut [u8]) -> bool {
@@ -274,12 +295,15 @@ impl RecordLayer {
         let (header, body) = rec
             .split_at_mut_checked(HEADER)
             .ok_or(RecordError::BadHeader)?;
-        if header.first() != Some(&CT_APP_DATA)
-            || header.get(1..3) != Some(&[3, 3][..])
-            || body.len() > MAX_CIPHERTEXT
-            || body.len() < TAG + 1
-        {
+        if header.first() != Some(&CT_APP_DATA) || header.get(1..3) != Some(&[3, 3][..]) {
             return Err(RecordError::BadHeader);
+        }
+        if body.len() > MAX_CIPHERTEXT {
+            return Err(RecordError::Overflow);
+        }
+        if body.len() < TAG + 1 {
+            // Too short to hold a tag and a content type: cannot verify.
+            return Err(RecordError::BadRecord);
         }
         if self.rx.seq == u64::MAX {
             return Err(RecordError::SequenceExhausted);
@@ -289,6 +313,10 @@ impl RecordLayer {
         let pt_len = open_in_place(self.suite, key.as_slice(), &nonce, header, body)
             .ok_or(RecordError::BadRecord)?;
         self.rx.seq += 1;
+        if pt_len > MAX_PLAINTEXT + 1 {
+            // TLSInnerPlaintext over 2^14 + 1 bytes (RFC 8446 §5.4).
+            return Err(RecordError::Overflow);
+        }
         // Strip zero padding; the last non-zero byte is the content type.
         let inner = body.get(..pt_len).ok_or(RecordError::BadRecord)?;
         let type_at = inner
@@ -388,6 +416,11 @@ impl RecordLayer {
     /// Queues close_notify.
     pub fn close(&mut self, out: &mut Vec<u8>) -> Result<(), RecordError> {
         self.seal(CT_ALERT, &[1, 0], out)
+    }
+
+    /// Queues the fatal alert `desc` (the connection ends after it).
+    pub fn alert(&mut self, desc: u8, out: &mut Vec<u8>) -> Result<(), RecordError> {
+        self.seal(CT_ALERT, &[2, desc], out)
     }
 
     /// Initiates a key update of our sending keys (tests, long sessions).
@@ -529,5 +562,49 @@ mod tests {
             s.open(&mut wire, &mut Vec::new()),
             Err(RecordError::UnexpectedMessage)
         );
+    }
+
+    /// RFC 8446 §5.4: an inner plaintext of 2^14 + 1 bytes (content, type
+    /// and padding) is the most a record may carry; one byte more is a
+    /// record_overflow, even if the ciphertext still fits.
+    #[test]
+    fn inner_plaintext_over_the_limit_is_record_overflow() {
+        for suite in [Suite::Aes128Gcm, Suite::ChaCha20Poly1305] {
+            for (pad, want_ok) in [(0usize, true), (1, false)] {
+                let (mut client, mut server) = pair(suite);
+                // content 2^14 - 1 || type || zeros
+                let mut inner = alloc::vec![0x41u8; MAX_PLAINTEXT - 1 + pad];
+                inner.push(CT_APP_DATA);
+                inner.push(0);
+                let len = inner.len() + TAG;
+                let header = [CT_APP_DATA, 3, 3, (len >> 8) as u8, len as u8];
+                let nonce = client.tx.nonce().unwrap();
+                assert!(seal_in_place(
+                    suite,
+                    client.tx.key(suite).as_slice(),
+                    &nonce,
+                    &header,
+                    &mut inner
+                ));
+                client.tx.seq += 1;
+                let mut wire = header.to_vec();
+                wire.extend_from_slice(&inner);
+                let r = server.open(&mut wire, &mut Vec::new());
+                if want_ok {
+                    assert!(matches!(r, Ok(Opened::Data(_))), "{suite:?}: {r:?}");
+                } else {
+                    assert_eq!(r, Err(RecordError::Overflow), "{suite:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn errors_map_to_their_alerts() {
+        assert_eq!(RecordError::BadRecord.alert(), Some(20));
+        assert_eq!(RecordError::Overflow.alert(), Some(22));
+        assert_eq!(RecordError::UnexpectedMessage.alert(), Some(10));
+        assert_eq!(RecordError::BadHeader.alert(), Some(10));
+        assert_eq!(RecordError::PeerAlert(40).alert(), None);
     }
 }

@@ -87,6 +87,9 @@ pub struct BootOptions {
     /// `test=simd-irq` (dev only): crypto known answers on every core under
     /// an IPI storm for 10 s.
     pub simd_irq: bool,
+    /// `test=ticket-rotate:S` (dev only): rotate the session-ticket keys
+    /// every S seconds instead of 12 h (H2 rotation tests).
+    pub ticket_rotate_s: Option<u64>,
     /// `registry=allowlist`: allowlist mode even if the configuration says
     /// "open" (stricter only, for tests of one image in both modes).
     pub allowlist: bool,
@@ -150,6 +153,12 @@ impl BootOptions {
                     {
                         o.cpu_disable = d;
                     } else if let Some(s) = w
+                        .strip_prefix("test=ticket-rotate:")
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .filter(|&s| s > 0)
+                    {
+                        o.ticket_rotate_s = Some(s);
+                    } else if let Some(s) = w
                         .strip_prefix("install-countdown=")
                         .and_then(|v| v.parse().ok())
                     {
@@ -174,7 +183,7 @@ mod tests {
     use super::*;
 
     const EVERYTHING: &str = "smoke serve test=panic test=db-crash log=trace heap_limit_mb=1 \
-                              registry=allowlist test=pac test=disk-fault:stop-after-write=3 bogus";
+                              registry=allowlist test=ticket-rotate:60 test=pac test=disk-fault:stop-after-write=3 bogus";
 
     /// H0-W11: a production image ignores the whole command line, test
     /// switches included; every word is counted as ignored.
@@ -184,7 +193,7 @@ mod tests {
         assert_eq!(
             o,
             BootOptions {
-                ignored: 10,
+                ignored: 11,
                 ..BootOptions::default()
             }
         );
@@ -220,5 +229,14 @@ mod tests {
         assert_eq!(o.disk_fault.and_then(|f| f.stop_after_writes), Some(3));
         assert_eq!(o.ignored, 1);
         assert_eq!(BootOptions::parse("heap_limit_mb=x", true).ignored, 1);
+        assert_eq!(o.ticket_rotate_s, Some(60));
+        for w in [
+            "test=ticket-rotate:0",
+            "test=ticket-rotate:x",
+            "test=ticket-rotate:",
+        ] {
+            let o = BootOptions::parse(w, true);
+            assert_eq!((o.ticket_rotate_s, o.ignored), (None, 1), "{w}");
+        }
     }
 }

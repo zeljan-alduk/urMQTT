@@ -17,14 +17,14 @@ the user says otherwise.
 | 2 | Is the device registry an allowlist? | **No.** It is a record filled on first connect (`DbReq::DeviceSeen` upsert); any certificate from the CA connects. | `mqtt_service.rs:281`, `db.rs:699` | **yes** (H1, `registry.mode`) |
 | 3 | Where does wall-clock time come from? | Firmware RTC via Limine plus uptime. No date means every handshake is refused (fail closed, ADR-009). There is **no lower bound**: an RTC set in the past is believed, so an expired certificate looks valid. | `boot.rs:226-233, 608-625` | **yes** (H7: build time as the lower bound) |
 | 4 | KASLR? Heap, slab, stack placement randomised? | **No.** The kernel is linked statically (`linker.ld`) and the regions sit at fixed virtual addresses (`layout.rs`). | `crates/kernel/linker.ld`, `layout.rs` | **yes** (H4) |
-| 5 | 0-RTT disabled? | **Yes.** `config.max_early_data_size = 0`. There is not yet a regression test or a config refusal. | `tls/src/server.rs:348` | test missing (H2) |
+| 5 | 0-RTT disabled? | **Yes.** `config.max_early_data_size = 0`. There is not yet a regression test or a config refusal. | `tls/src/server.rs:348` | test missing (H2) → **tested in H2** (the config refusal existed) |
 | 6 | Secrets zeroised? | **Partly.** `zeroize` is used in 6 places. Whether the key slab is zero-on-free, and what happens to traffic secrets after KeyUpdate and to CSPRNG state, has not been checked across the board. | `grep zeroize` | **to verify** (H0/H4) |
 | 7 | RFC 5961 and RFC 6528? | RFC 5961 checks are implemented (M14, tested). ISNs come from SipHash SYN cookies under `cookie_key`, which is effectively a keyed ISN. **No key rotation** was found. | `tcp/src/lib.rs`, `siphash.rs` | rotation (H3) |
 | 8 | Network-reachable unbounded memory or loops? | Bounded by design (limits, admission, M16 storms), but there is **no documented bound per loop and allocation**. | M16 | audit (H3) |
 | 9 | Build refuses a soon-to-expire server certificate? Runtime expiry monitoring? | **No** and **no.** `config-schema` has no expiry check. | `crates/config-schema` | **yes** (H1) |
 
 Further findings while reading:
-- **Session-ticket keys are derived from the server key** (`ticket_key(&key, setup.version)`), so they never rotate while an image runs. They are the same on every boot and every replica of the image. Not insecure by itself (resumption re-checks revocation, ADR-034), but against PROMPT-security §H2 (rotation, lifetime limits). **Gap (H2).**
+- **Session-ticket keys are derived from the server key** (`ticket_key(&key, setup.version)`), so they never rotate while an image runs. They are the same on every boot and every replica of the image. Not insecure by itself (resumption re-checks revocation, ADR-034), but against PROMPT-security §H2 (rotation, lifetime limits). **Gap (H2)** → **fixed in H2** (ADR-054).
 - **Bare metal adds attack surface the hypervisor used to absorb** (see X86-PLAN §3b):
   - physical access;
   - DMA from real devices: a malicious or buggy NIC or NVMe controller can write anywhere without an IOMMU;
@@ -141,6 +141,17 @@ Every milestone ends with:
   - for each: resumption, KeyUpdate, minimum and maximum record sizes.
 
 **Accept:** the differential fuzz target runs 10 min clean per architecture; tlsfuzzer and interop tables are in docs; no non-constant-time secret comparison is left.
+
+**Status: done for aarch64** (docs/PROGRESS.md, H2; ADR-054; docs/CRYPTO.md). The x86 half of "10 min per architecture" comes with X1–X8. Deviations from the work list above:
+- The 0-RTT config refusal already existed (`tls.early_data`); H2 added the tests.
+- The ticket keys live in a static with two fixed slots, zeroised in place, because there is no key slab yet (H4). Rotation runs on uptime.
+- `ticket-forged` is a host test (`image_derived_tickets_are_refused`, plus every flipped bit), not a smoke scenario: the old format can only be produced with internals of the old code. The smoke `ticket-restart` covers the real-world case, a valid ticket from another boot.
+- tlsfuzzer: its stock scripts expect an HTTP server without client authentication. 23 probes were written on tlsfuzzer's machinery for mutual TLS and MQTT instead. The list and results are in docs/CRYPTO.md.
+- Interop: OpenSSL 3 and 4, wolfSSL and Mbed TLS via one C client. No embedded MQTT client on firmware yet. Mbed TLS has no KeyUpdate API.
+- Found and fixed on the way:
+  - no fatal alerts were sent (record layer and handshake);
+  - close_notify was not answered;
+  - the inner-plaintext limit (2^14 + 1) was not enforced.
 
 ### H3 — TCP/IP assurance and DoS resistance · L
 

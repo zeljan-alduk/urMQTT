@@ -1663,6 +1663,7 @@ dependencies = [
  "rustls-pki-types",
  "rustls-webpki",
  "sha2 0.11.1",
+ "subtle",
  "urmqtt-sync",
  "urmqtt-tls",
  "x25519-dalek",

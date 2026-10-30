@@ -109,6 +109,17 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-kernel --target $(TARGET) -- -D warnings
 	$(CARGO) test $(CARGO_FLAGS) --workspace
 
+.PHONY: conformance interop
+conformance: build certs ## tlsfuzzer TLS 1.3 conformance probes against a dev VM (H2)
+	scripts/conformance.sh
+
+interop: build certs ## Interop matrix: OpenSSL, wolfSSL, mbedTLS clients against a dev VM (H2)
+	scripts/interop.sh
+
+.PHONY: ct
+ct: ## Constant-time (dudect-style) timing tests, release build (H2)
+	$(CARGO) test $(CARGO_FLAGS) --release -p urmqtt-tls --test constant_time -- --ignored --test-threads=1 --nocapture
+
 # The RustCrypto backends the kernel uses (X0b), so the differential fuzz
 # targets compare them, not the portable code.
 FUZZ_RUSTFLAGS := --cfg aes_armv8 --cfg polyval_armv8 --cfg chacha20_force_neon

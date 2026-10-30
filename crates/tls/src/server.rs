@@ -12,7 +12,7 @@ use pki_types::pem::PemObject;
 use pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::client::danger::HandshakeSignatureValid;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::server::{ProducesTickets, UnbufferedServerConnection, WebPkiClientVerifier};
+use rustls::server::{UnbufferedServerConnection, WebPkiClientVerifier};
 use rustls::time_provider::TimeProvider;
 use rustls::unbuffered::{ConnectionState, EncodeError, UnbufferedStatus};
 use rustls::{
@@ -352,52 +352,11 @@ impl ClientCertVerifier for RevocationAware {
     }
 }
 
-// --- session tickets --------------------------------------------------------
-
-/// Stateless TLS 1.3 tickets: ChaCha20-Poly1305 under a key derived from the
-/// embedded server key and the image version (rotates with every image).
-struct Ticketer {
-    key: [u8; 32],
-    lifetime: u32,
-}
-
-impl fmt::Debug for Ticketer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Ticketer")
-    }
-}
-
-impl ProducesTickets for Ticketer {
-    fn enabled(&self) -> bool {
-        true
-    }
-
-    fn lifetime(&self) -> u32 {
-        self.lifetime
-    }
-
-    fn encrypt(&self, plain: &[u8]) -> Option<Vec<u8>> {
-        use chacha20poly1305::aead::{AeadInPlace, KeyInit};
-        let mut nonce = [0u8; 12];
-        crate::rng::fill_global(&mut nonce).ok()?;
-        let c = chacha20poly1305::ChaCha20Poly1305::new_from_slice(&self.key).ok()?;
-        let mut body = plain.to_vec();
-        c.encrypt_in_place((&nonce).into(), b"urmqtt ticket", &mut body)
-            .ok()?;
-        let mut out = nonce.to_vec();
-        out.extend_from_slice(&body);
-        Some(out)
-    }
-
-    fn decrypt(&self, cipher: &[u8]) -> Option<Vec<u8>> {
-        use chacha20poly1305::aead::{AeadInPlace, KeyInit};
-        let (nonce, body) = cipher.split_at_checked(12)?;
-        let c = chacha20poly1305::ChaCha20Poly1305::new_from_slice(&self.key).ok()?;
-        let mut body = body.to_vec();
-        c.decrypt_in_place(nonce.into(), b"urmqtt ticket", &mut body)
-            .ok()?;
-        Some(body)
-    }
+/// Constant-time equality for secrets (H2): the time depends only on the
+/// lengths, never on where the inputs differ.
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 // --- server ------------------------------------------------------------------
@@ -415,8 +374,8 @@ pub struct ServerSetup<'a> {
     pub resumption: bool,
     /// Revoked serials, shared with the control channel.
     pub revocations: Arc<RevocationList>,
-    /// Mixed into the ticket key so a new image invalidates old tickets.
-    pub version: &'a str,
+    /// Session-ticket keys, shared by every core's server (H2).
+    pub tickets: Arc<crate::ticket::TicketKeys>,
 }
 
 pub struct TlsServer {
@@ -494,7 +453,6 @@ impl TlsServer {
             .map_err(|_| TlsError::Config("server certificate PEM is invalid"))?;
         let key = PrivateKeyDer::from_pem_slice(setup.key_pem)
             .map_err(|_| TlsError::Config("server key PEM is invalid"))?;
-        let ticket_key = ticket_key(&key, setup.version);
         let mut config = ServerConfig::builder_with_details(provider, Arc::new(KernelTime))
             .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(|_| TlsError::Config("protocol versions"))?
@@ -505,10 +463,7 @@ impl TlsServer {
         config.key_log = Arc::new(SecretCapture);
         config.max_early_data_size = 0;
         if setup.resumption {
-            config.ticketer = Arc::new(Ticketer {
-                key: ticket_key,
-                lifetime: 24 * 3600,
-            });
+            config.ticketer = Arc::new(crate::ticket::Ticketer(setup.tickets.clone()));
             config.send_tls13_tickets = 1;
         } else {
             config.send_tls13_tickets = 0;
@@ -536,17 +491,22 @@ impl TlsServer {
     }
 }
 
-fn ticket_key(key: &PrivateKeyDer<'_>, version: &str) -> [u8; 32] {
-    let ikm: &[u8] = match key {
-        PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der(),
-        PrivateKeyDer::Sec1(k) => k.secret_sec1_der(),
-        PrivateKeyDer::Pkcs1(k) => k.secret_pkcs1_der(),
-        _ => &[],
-    };
-    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(version.as_bytes()), ikm);
-    let mut out = [0u8; 32];
-    let _ = hk.expand(b"urmqtt session ticket key v1", &mut out);
-    out
+/// Emits what rustls queued after a handshake error (its fatal alert).
+fn flush_alert(conn: &mut UnbufferedServerConnection, inbuf: &mut Vec<u8>, tx: &mut Vec<u8>) {
+    for _ in 0..4 {
+        let UnbufferedStatus { discard, state } = conn.process_tls_records(inbuf);
+        let Ok(ConnectionState::EncodeTlsData(mut s)) = state else {
+            return;
+        };
+        let mut buf = [0u8; 64];
+        let n = s.encode(&mut buf).ok();
+        drop(s);
+        inbuf.drain(..discard.min(inbuf.len()));
+        match n {
+            Some(n) => tx.extend_from_slice(buf.get(..n).unwrap_or(&[])),
+            None => return,
+        }
+    }
 }
 
 struct Hs {
@@ -653,10 +613,22 @@ impl TlsSession {
                 o.inbuf
                     .get_or_insert_with(Default::default)
                     .extend_from_slice(data);
-                let ev = drain_records(o, tx, app)?;
-                if ev == Event::PeerClosed {
-                    self.state = State::Closed;
-                }
+                let ev = match drain_records(o, tx, app) {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        // A fatal alert naming the error (RFC 8446 §5, §6),
+                        // then nothing more: `close` sends no close_notify.
+                        if let TlsError::Record(r) = &e
+                            && let Some(desc) = r.alert()
+                        {
+                            let _ = o.rec.alert(desc, tx);
+                        }
+                        self.state = State::Closed;
+                        return Err(e);
+                    }
+                };
+                // On close_notify the state stays open until `close`, which
+                // answers with our own close_notify (RFC 8446 §6.1).
                 Ok(ev)
             }
             State::Closed => Ok(Event::PeerClosed),
@@ -677,6 +649,11 @@ impl TlsSession {
                     if let Some(r) = hs.random {
                         drop_secrets(&r);
                     }
+                    // rustls queued its fatal alert; it comes out on the
+                    // next call (RFC 8446 §6: the peer learns why). The
+                    // consumed input goes first, as rustls expects.
+                    hs.inbuf.drain(..discard.min(hs.inbuf.len()));
+                    flush_alert(&mut hs.conn, &mut hs.inbuf, tx);
                     return Err(e.into());
                 }
             };
@@ -797,11 +774,13 @@ impl TlsSession {
         let rec = RecordLayer::new(suite, rx_secret, secrets.rx.0, tx_secret, secrets.tx.0)
             .ok_or(TlsError::Internal("key derivation"))?;
         // The captured secrets must reproduce rustls's keys exactly.
-        if rec.rx().key(suite).as_slice() != rx_key
-            || rec.rx().iv().as_ref().map(|v| v.as_slice()) != Some(rx_iv)
-            || rec.tx().key(suite).as_slice() != tx_key
-            || rec.tx().iv().as_ref().map(|v| v.as_slice()) != Some(tx_iv)
-        {
+        // Constant time (H2): every operand is a secret.
+        let iv_eq = |iv: Option<[u8; 12]>, want: &[u8]| iv.is_some_and(|v| ct_eq(&v, want));
+        let same = ct_eq(rec.rx().key(suite).as_slice(), rx_key)
+            & iv_eq(rec.rx().iv(), rx_iv)
+            & ct_eq(rec.tx().key(suite).as_slice(), tx_key)
+            & iv_eq(rec.tx().iv(), tx_iv);
+        if !same {
             return Err(TlsError::Internal("captured secrets do not match"));
         }
         let identity = ident.ok_or(TlsError::NoIdentity)?;
@@ -856,7 +835,7 @@ fn drain_records(o: &mut Open, tx: &mut Vec<u8>, app: &mut Vec<u8>) -> Result<Ev
                 break;
             };
             if n > record::HEADER + record::MAX_CIPHERTEXT {
-                return Err(TlsError::Record(RecordError::BadHeader));
+                return Err(TlsError::Record(RecordError::Overflow));
             }
             let Some(rec) = buf.get_mut(off..off + n) else {
                 break;

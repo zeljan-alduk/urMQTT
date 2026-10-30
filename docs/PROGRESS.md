@@ -1143,3 +1143,48 @@ Handshakes gain about 4–5 %. A full mTLS handshake is dominated by ECDSA P-256
 - Records/s are not measured separately yet; `make bench` measures handshakes only.
 - Bytes per connection were not re-measured: X0b changes no data structures.
 - The real Raspberry Pi (Cortex-A72 has AES, PMULL, SHA2 and CRC32) is still open.
+
+## H2 — TLS assurance (2026-10-30)
+
+PROMPT-security.md §H2 and PLAN.md decision 5; plan in SECURITY-PLAN (H2 status and deviations there). ADR-054; the cryptography as a whole in the new docs/CRYPTO.md.
+
+**Done**
+
+- **Session-ticket keys** (`urmqtt_tls::ticket`) replace the key derived from the server key (H0-W4, high if an image leaks):
+  - random per boot, current for 12 h of uptime, previous for 12 h more, then zeroised in place (two fixed slots, never moved);
+  - ticket lifetime 12 h;
+  - format `key id || nonce || ChaCha20-Poly1305` with the id in the associated data;
+  - one set shared by every core's server;
+  - refusals are counted by reason (statsd `urmqtt.tls.resume_refused.*`, plus issued, resumed, rotated, not issued) and logged at powers of two; key rotations are logged;
+  - dev `test=ticket-rotate:S`.
+- **0-RTT:** `zero_rtt_is_never_offered` (a client that wants early data gets tickets without it). The `tls.early_data` build refusal already existed. A mutation (16 KiB early data configured) showed that rustls alone already refuses early data with stateless tickets (RFC 8446 §8.1), so 0-RTT is locked twice. The test checks the outcome.
+- **Found and fixed (conformance):**
+  - **No fatal alerts were sent.** Record-layer errors now send `bad_record_mac`, `record_overflow`, `unexpected_message` or `internal_error` under the current keys. rustls's handshake alert, which its unbuffered API emits only on a second call, is now flushed. Before, peers saw only a close.
+  - **close_notify was not answered;** now it is (RFC 8446 §6.1).
+  - **The inner-plaintext limit of 2^14 + 1 bytes was not enforced.** Only the ciphertext length was, which let up to 239 extra bytes through (an inner plaintext of up to 2^14 + 240). Now it is `record_overflow`.
+- **Constant time:** the one secret comparison of our own (captured vs rustls record keys) goes through `subtle` (`server::ct_eq`). `make ct` runs dudect-style tests with a negative control, also in CI. The review list is in docs/CRYPTO.md.
+- **Differential fuzzing:** `diff_tls_record` against rustls's record layer, with rustls's key schedule and `ring`'s AEAD: sealing byte-identical, and opening of padded or tampered records of every content type agreeing.
+- **Conformance:** `scripts/tlsfuzzer/urmqtt_tls13.py`, 23 probes on tlsfuzzer's machinery for mutual TLS and MQTT (`make conformance`; tlsfuzzer and tlslite-ng pinned by commit). The stock scripts expect HTTP without client authentication (the reasons are in CRYPTO.md).
+- **Interop:** `tools/interop/client.c` built against OpenSSL, wolfSSL and Mbed TLS (`make interop`). It covers handshake, resumption, KeyUpdate, 1-byte records and one 16 KiB record. Resumption is also confirmed in the server log.
+- **CI:** a new job "TLS conformance (tlsfuzzer) and interop" (TCG, Ubuntu's OpenSSL and wolfSSL); `make ct` in the host-test job.
+
+**Tests**
+
+- `make check` green: **324 host tests**. New:
+  - 11 ticket tests;
+  - `ticket_from_another_boot_means_full_handshake`, `zero_rtt_is_never_offered`, `fatal_alerts_reach_the_peer`;
+  - `inner_plaintext_over_the_limit_is_record_overflow`, `errors_map_to_their_alerts`;
+  - the `test=ticket-rotate` command line.
+- `make ct` (M4 Pro, release): the control (early-exit comparison) at |t| = 6728. `ct_eq` 0.7, AES-128-GCM bad tag 1.1, ChaCha20-Poly1305 bad tag 2.6, ticket bad tag 0.0 (bound 7).
+- `diff_tls_record`: **10 min, 24 552 413 runs, clean** (aarch64, M4).
+- tlsfuzzer: **23/23** (HVF).
+- Interop (HVF): OpenSSL 3.6.3 and 4.1.0, wolfSSL 5.9.4 all ✅. Mbed TLS 4.2.0 ✅, except KeyUpdate: Mbed TLS has no API for it.
+- **Smoke: 141/141** (HVF and TCG). New:
+  - `ticket-rotation`: 20 s keys; a ticket issued late in the first interval resumes after the rotation;
+  - `ticket-restart`: a ticket from before a reboot gives a full handshake, logged as `unknown key 1`.
+
+**Not done** (SECURITY-PLAN H2 status):
+- the x86 half of the 10-minute differential run (with X1–X8);
+- an embedded MQTT client on firmware;
+- tlsfuzzer's stock HTTP scripts;
+- the ticket keys in a key slab, which does not exist yet (H4).

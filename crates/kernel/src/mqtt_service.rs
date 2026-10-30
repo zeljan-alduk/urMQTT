@@ -11,6 +11,7 @@
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use urmqtt_broker::{Acl, Broker, Buf, CloseReason, Config, ConnId};
@@ -18,8 +19,9 @@ use urmqtt_config::CONFIG;
 use urmqtt_log::{debug, info, warn};
 use urmqtt_mqtt::{Limits, QoS};
 use urmqtt_sync::spsc::{Consumer, Producer};
+use urmqtt_sync::sync::OnceCell;
 use urmqtt_tcp::{Endpoint, TcpStack};
-use urmqtt_tls::{CertRole, Event, IdentityField, ServerSetup, TlsServer, TlsSession};
+use urmqtt_tls::{CertRole, Event, IdentityField, ServerSetup, TicketKeys, TlsServer, TlsSession};
 
 use crate::dataplane::{self, CoreMsg, Link, Tconn};
 use crate::db::{self, DbReq, DbResp, LogBatch, Restored};
@@ -216,6 +218,9 @@ pub struct MqttService {
     control_epoch: u64,
     /// The broker's unauthorized-control counter at the last report.
     dropped_control_seen: u64,
+    /// Refused tickets already logged (first worker core only).
+    tickets_refused_seen: u64,
+    ticket_rotations_seen: u64,
 }
 
 /// This core's telemetry ring to the DB core.
@@ -373,6 +378,33 @@ pub fn tls_server_for_bench() -> Option<TlsServer> {
     tls_server()
 }
 
+/// The session-ticket keys every core's server shares (H2, ADR-054).
+static TICKETS: OnceCell<Arc<TicketKeys>> = OnceCell::new();
+
+fn uptime_s() -> u64 {
+    urmqtt_arch::time::uptime_ns() / 1_000_000_000
+}
+
+/// Creates the shared ticket keys: rotation every 12 h, or `rotate_s`
+/// (dev `test=ticket-rotate:S`). Called once, before the data cores start.
+pub fn init_tickets(rotate_s: Option<u64>) {
+    let interval = rotate_s.unwrap_or(urmqtt_tls::ticket::INTERVAL_S);
+    let _ = TICKETS.set(Arc::new(TicketKeys::new(interval, uptime_s)));
+}
+
+fn tickets() -> Arc<TicketKeys> {
+    match TICKETS.get() {
+        Some(t) => t.clone(),
+        // Only before `init_tickets` (self-tests): keys of their own.
+        None => Arc::new(TicketKeys::new(urmqtt_tls::ticket::INTERVAL_S, uptime_s)),
+    }
+}
+
+/// Session-ticket counters for the metrics (`ops`).
+pub fn ticket_stats() -> urmqtt_tls::ticket::TicketStats {
+    TICKETS.get().map(|t| t.stats()).unwrap_or_default()
+}
+
 /// This core's TLS server: the image's trust anchors by role and the
 /// revocation list shared with the control channel (H1).
 fn tls_server() -> Option<TlsServer> {
@@ -387,7 +419,7 @@ fn tls_server() -> Option<TlsServer> {
         },
         resumption: CONFIG.tls.resumption,
         revocations: crate::control::revocations(),
-        version: crate::VERSION,
+        tickets: tickets(),
     };
     match TlsServer::new(&setup) {
         Ok(s) => Some(s),
@@ -424,6 +456,13 @@ impl MqttService {
                     urmqtt_config::OPERATIONAL_CA_PEMS.len(),
                     urmqtt_config::BOOTSTRAP_CA_PEMS.len()
                 );
+                if CONFIG.tls.resumption {
+                    let iv = tickets().interval();
+                    info!(
+                        "tls: session tickets under random per-boot keys, rotated every {} s of uptime (ticket lifetime {} s)",
+                        iv, iv
+                    );
+                }
             }
             if let Some(port) = CONFIG.network.mqtt_plain_port {
                 warn!(
@@ -516,6 +555,35 @@ impl MqttService {
             aborts: Vec::new(),
             control_epoch: crate::control::epoch(),
             dropped_control_seen: 0,
+            tickets_refused_seen: 0,
+            ticket_rotations_seen: 0,
+        }
+    }
+
+    /// Key rotations, and refused session tickets (full handshakes
+    /// instead) at powers of two by reason; from one core, as the keys are
+    /// shared.
+    fn log_ticket_refusals(&mut self) {
+        if self.me != dataplane::workers(self.n).start {
+            return;
+        }
+        let s = ticket_stats();
+        if s.rotations > self.ticket_rotations_seen {
+            self.ticket_rotations_seen = s.rotations;
+            info!(
+                "tls: session-ticket keys rotated ({} key change(s) since boot)",
+                s.rotations
+            );
+        }
+        let total: u64 = s.refused.iter().sum();
+        if total > self.tickets_refused_seen {
+            self.tickets_refused_seen = total;
+            if total.is_power_of_two() {
+                let [expired, unknown, invalid, malformed] = s.refused;
+                info!(
+                    "tls: {total} session ticket(s) refused, full handshake instead (expired {expired}, unknown key {unknown}, invalid {invalid}, malformed {malformed})"
+                );
+            }
         }
     }
 
@@ -1062,6 +1130,7 @@ impl MqttService {
                 None => crate::control::refuse_without_storage(&m.from),
             }
         }
+        self.log_ticket_refusals();
         let dropped = self.broker.dropped_control();
         if dropped > self.dropped_control_seen {
             crate::control::REJECTED
