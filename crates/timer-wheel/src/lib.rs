@@ -381,7 +381,9 @@ mod tests {
         let mut w: Wheel<u64> = Wheel::new(1000);
         let mut model: BTreeMap<u64, (u64, TimerId)> = BTreeMap::new();
         let mut now = 1000u64;
-        for key in 0..20_000u64 {
+        // Miri is for the memory model; the full run stays in the normal suite.
+        let ops = if cfg!(miri) { 500 } else { 20_000u64 };
+        for key in 0..ops {
             match next() % 10 {
                 0..=5 => {
                     let span = [10, 100, 5_000, 300_000, 20_000_000][(next() % 5) as usize];

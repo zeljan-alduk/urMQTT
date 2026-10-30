@@ -488,7 +488,8 @@ impl StateMachineTest for TcpModelTest {
 
 prop_state_machine! {
     #![proptest_config(ProptestConfig {
-        cases: 256,
+        // Miri is for the memory model; the full run stays in the normal suite.
+        cases: if cfg!(miri) { 3 } else { 256 },
         failure_persistence: None,
         .. ProptestConfig::default()
     })]
