@@ -1364,3 +1364,25 @@ PLAN.md "O1, O2"; ADR-060. **QEMU only (aarch64 under HVF and TCG, x86_64 under 
 
 - MQTT 5 Response Topic, a per-operator reply topic.
 - `memory` is the kernel heap, not the machine's RAM; `disk/used` counts SQLite's files, not the telemetry ring.
+
+## O2 — The console over MQTT (2026-10-30)
+
+PLAN.md "O1, O2"; ADR-060; docs/OPERATE.md. **QEMU only (aarch64 under HVF and TCG, x86_64 under TCG); not run on KVM or real hardware.**
+
+**Done**
+
+- **`$SYS/console/out`:** every kernel log line, `[time] LEVEL text`, QoS 0. The log crate keeps a numbered ring of the last 128 lines (a fixed array under the sink lock, no allocation) that every data core reads with its own cursor, 16 lines per pass; a shard keeps the last 64 and replays them to a new subscriber. Nothing waits for a reader: a slow subscriber loses lines (the broker's QoS 0 backpressure), a core that falls more than the ring behind loses the oldest; both are counted (`$SYS/broker/console/dropped`, and a line on the console).
+- **`$SYS/console/in`:** one command per message, a closed set: `help`, `status`, `log level <error|warn|info|debug|trace>` (never above the build-time maximum), `reboot` (reply, 1 s, reset). The parser accepts one line of printable ASCII up to 64 bytes; `status; reboot` is an unknown command. No shell, no code, no data. **Rate limit:** a burst of 5, then one per 2 s per shard, on top of the session's publish rate. **Audit:** every command, accepted or refused, is logged with identity and text (`console: operator ran "status"`), whatever the log level (`urmqtt_log::audit`).
+- Replies go to the console of the shard the operator is on; the audit line goes through the log and so reaches every shard's console.
+- docs/OPERATE.md: how an operator connects (certificate, client id, MQTTX and mosquitto settings), the topics, the commands, issuing and revoking certificates. ADR-060, a SECURITY.md entry (threat model).
+
+**Tests**
+
+- Host: log crate (independent readers, bounded reads, lost count, the audit line at level `error`), `sys.rs` (the closed command set with refusals, the status text, the limiter), broker (replay from the bounded ring, a reader that never reads cannot block).
+- Smoke `sys-operator` (adds to O1's): the ring is replayed to a new subscriber, `help`, `status`, `log level` (and the level is restored), refusal of unknown and malformed commands, no command chaining, the audit lines on the console and on the serial log, the rate limit (9 of 12 refused in the burst), a device and the backend service refused `$SYS/console/out` and unable to run `reboot` or lower the level, the operator cannot publish to `$SYS/console/out`. `sys-reboot` runs `reboot` as the operator and checks that the VM resets (QEMU runs with `-no-reboot`, so the reset ends it) and that the command was audit-logged: aarch64 under HVF and TCG, x86_64 under TCG.
+
+**Not done**
+
+- MQTT 5, a streaming console input (a command per message only), an operator reply topic of its own.
+
+**Final runs (both milestones):** `cargo test --workspace` green (broker 53, config-schema 41, log 6 tests); the steps of `make check` run by hand (fmt, typos, check-arch-leaks, clippy for the host and both kernels with and without `selftest`); the full `scripts/smoke.sh`: **151 passed, 0 failed** (aarch64, HVF and TCG); the full `scripts/smoke.sh --arch x86_64`: **68 passed, 0 failed** (TCG). `sys-reboot` was run on all three accelerator and architecture pairs after those runs. (Building from a worktree under the main checkout needs `RUSTFLAGS` set explicitly: cargo also reads the parent's `.cargo/config.toml` and the duplicated `-Zbranch-protection` breaks rustc.)

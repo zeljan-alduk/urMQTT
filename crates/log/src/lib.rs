@@ -7,7 +7,9 @@
 //! suppressed is counted and reported with the next line. With a syslog
 //! collector configured, every line is also kept as a [`Record`] in a fixed
 //! ring (no allocation) that the network core drains ([`drain_records`]).
-//! Logs must never contain secrets or payloads.
+//! A second ring serves the MQTT console (O2): readers keep their own cursor
+//! ([`console_read`]), so a slow or absent reader never blocks a writer and
+//! loses lines instead, counted. Logs must never contain secrets or payloads.
 
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_code)]
@@ -18,7 +20,7 @@ pub mod pl011;
 use core::fmt::{self, Write};
 #[cfg(all(target_os = "none", target_arch = "x86_64"))]
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 pub use urmqtt_config::LogLevel as Level;
 use urmqtt_sync::sync::SpinLock;
@@ -32,6 +34,8 @@ pub const BURST: u64 = 300;
 /// Records kept for the syslog sink, and bytes of text per record.
 pub const RECORDS: usize = 128;
 pub const RECORD_TEXT: usize = 200;
+/// Lines the console ring keeps for readers that are behind.
+pub const CONSOLE_LINES: usize = 128;
 
 /// One line for the syslog sink.
 #[derive(Clone, Copy)]
@@ -85,6 +89,19 @@ struct Records {
     lost: u64,
 }
 
+/// The console ring: every line since the console was enabled, numbered.
+struct Console {
+    on: bool,
+    ring: [Record; CONSOLE_LINES],
+    /// The number the next line gets; the ring holds the last
+    /// `min(next, CONSOLE_LINES)` lines.
+    next: u64,
+}
+
+/// [`Console::next`] outside the lock, so a reader with nothing new to read
+/// (every network loop pass) does not touch the lock the writers use.
+static CONSOLE_NEXT: AtomicU64 = AtomicU64::new(0);
+
 /// The serial sink: a memory-mapped PL011, or COM1 through port I/O (x86).
 #[derive(Clone, Copy)]
 enum Uart {
@@ -128,6 +145,7 @@ struct Sinks {
     refilled_ns: u64,
     suppressed: u64,
     records: Records,
+    console: Console,
 }
 
 static SINKS: SpinLock<Sinks> = SpinLock::new(Sinks {
@@ -144,6 +162,11 @@ static SINKS: SpinLock<Sinks> = SpinLock::new(Sinks {
         head: 0,
         len: 0,
         lost: 0,
+    },
+    console: Console {
+        on: false,
+        ring: [Record::EMPTY; CONSOLE_LINES],
+        next: 0,
     },
 });
 
@@ -165,6 +188,18 @@ pub fn set_level(level: Level) {
     // Relaxed: a filter; a line logged at the old level during the switch
     // is harmless.
     LEVEL.store(l as u8, Ordering::Relaxed);
+}
+
+/// The level currently emitted (never above [`MAX_LEVEL`]).
+pub fn level() -> Level {
+    // Relaxed: see `set_level`.
+    match LEVEL.load(Ordering::Relaxed) {
+        0 => Level::Error,
+        1 => Level::Warn,
+        2 => Level::Info,
+        3 => Level::Debug,
+        _ => Level::Trace,
+    }
 }
 
 /// Whether `level` is currently emitted.
@@ -204,6 +239,59 @@ pub fn set_cpu(cpu: fn() -> usize) {
 /// Starts keeping records for a syslog collector.
 pub fn enable_records() {
     Locked::acquire().sinks().records.on = true;
+}
+
+/// Starts keeping lines for the MQTT console (O2).
+pub fn enable_console() {
+    Locked::acquire().sinks().console.on = true;
+}
+
+/// The number the next console line will get: a reader whose cursor is
+/// equal has nothing to read. Lock-free.
+pub fn console_next() -> u64 {
+    // Relaxed: a hint; a reader that misses the newest line sees it on its
+    // next pass.
+    CONSOLE_NEXT.load(Ordering::Relaxed)
+}
+
+/// Hands up to `max` console lines from `*cursor` on to `f`, oldest first,
+/// and advances the cursor. Returns how many lines the reader missed because
+/// they were overwritten before it came. Start a new reader at
+/// [`console_next`] (or 0 for the whole ring).
+pub fn console_read(cursor: &mut u64, max: usize, mut f: impl FnMut(&Record)) -> u64 {
+    let mut batch = [Record::EMPTY; 8];
+    let mut lost = 0;
+    let mut left = max;
+    while left > 0 {
+        let mut n = 0;
+        {
+            let mut locked = Locked::acquire();
+            let c = &locked.sinks().console;
+            let oldest = c.next.saturating_sub(CONSOLE_LINES as u64);
+            if *cursor < oldest {
+                lost += oldest - *cursor;
+                *cursor = oldest;
+            }
+            while n < batch.len().min(left) && *cursor < c.next {
+                if let (Some(dst), Some(src)) = (
+                    batch.get_mut(n),
+                    c.ring.get((*cursor % CONSOLE_LINES as u64) as usize),
+                ) {
+                    *dst = *src;
+                }
+                *cursor += 1;
+                n += 1;
+            }
+        }
+        for rec in batch.get(..n).unwrap_or(&[]) {
+            f(rec);
+        }
+        left -= n;
+        if n < batch.len() {
+            break;
+        }
+    }
+    lost
 }
 
 /// Hands the kept records to `f`, oldest first, and returns how many were
@@ -331,7 +419,7 @@ fn line(sinks: &mut Sinks, ns: u64, level: Level, args: fmt::Arguments<'_>) {
         tag(level),
         args
     );
-    if sinks.records.on {
+    if sinks.records.on || sinks.console.on {
         let mut rec = Record {
             level,
             cpu: sinks.cpu.map_or(0, |c| c()) as u8,
@@ -339,15 +427,26 @@ fn line(sinks: &mut Sinks, ns: u64, level: Level, args: fmt::Arguments<'_>) {
             ..Record::EMPTY
         };
         let _ = rec.write_fmt(args);
-        let r = &mut sinks.records;
-        if let Some(slot) = r.ring.get_mut(r.head) {
-            *slot = rec;
+        if sinks.console.on {
+            let c = &mut sinks.console;
+            if let Some(slot) = c.ring.get_mut((c.next % CONSOLE_LINES as u64) as usize) {
+                *slot = rec;
+            }
+            c.next += 1;
+            // Relaxed: see `console_next`.
+            CONSOLE_NEXT.store(c.next, Ordering::Relaxed);
         }
-        r.head = (r.head + 1) % RECORDS;
-        if r.len == RECORDS {
-            r.lost += 1;
-        } else {
-            r.len += 1;
+        if sinks.records.on {
+            let r = &mut sinks.records;
+            if let Some(slot) = r.ring.get_mut(r.head) {
+                *slot = rec;
+            }
+            r.head = (r.head + 1) % RECORDS;
+            if r.len == RECORDS {
+                r.lost += 1;
+            } else {
+                r.len += 1;
+            }
         }
     }
 }
@@ -357,6 +456,17 @@ pub fn log(level: Level, args: fmt::Arguments<'_>) {
     if !enabled(level) {
         return;
     }
+    log_line(level, args);
+}
+
+/// An audit line (every console command, O2): written whatever the level
+/// is set to, so lowering the level cannot hide what an operator did. The
+/// rate limit still applies.
+pub fn audit(args: fmt::Arguments<'_>) {
+    log_line(Level::Warn, args);
+}
+
+fn log_line(level: Level, args: fmt::Arguments<'_>) {
     let mut locked = Locked::acquire();
     let sinks = locked.sinks();
     let ns = sinks.clock_ns.map_or(0, |c| c());
@@ -446,6 +556,52 @@ mod tests {
         assert!(r.text().chars().all(|c| c == 'é'));
     }
 
+    /// O2: the console ring numbers lines, readers keep their own cursor and
+    /// count what they missed; writers never wait for them.
+    #[test]
+    fn console_ring_serves_independent_readers() {
+        enable_console();
+        let mut early = console_next();
+        let mut late = console_next();
+        for i in 0..5 {
+            log(Level::Info, format_args!("console test line {i}"));
+        }
+        let mut got = std::vec::Vec::new();
+        assert_eq!(
+            console_read(&mut early, 100, |r| got.push(r.text().to_owned())),
+            0
+        );
+        assert_eq!(got.len(), 5);
+        assert!(got[0].ends_with("console test line 0"));
+        assert_eq!(early, console_next());
+        // Nothing new: nothing read.
+        assert_eq!(console_read(&mut early, 100, |_| panic!("no new line")), 0);
+        // A bounded read leaves the rest for the next call.
+        let mut n = 0;
+        console_read(&mut late, 2, |_| n += 1);
+        assert_eq!(n, 2);
+        console_read(&mut late, 100, |_| n += 1);
+        assert_eq!(n, 5);
+        // A reader that falls more than a ring behind loses the oldest and
+        // is told how many.
+        let mut slow = early;
+        for i in 0..(CONSOLE_LINES + 10) {
+            log(Level::Info, format_args!("flood {i}"));
+        }
+        let mut seen = 0;
+        let lost = console_read(&mut slow, usize::MAX, |_| seen += 1);
+        assert_eq!((lost, seen), (10, CONSOLE_LINES));
+        // The audit line is kept whatever the level.
+        set_level(Level::Error);
+        let mut c = console_next();
+        audit(format_args!("audited"));
+        log(Level::Info, format_args!("hidden"));
+        let mut lines = std::vec::Vec::new();
+        console_read(&mut c, 10, |r| lines.push(r.text().to_owned()));
+        set_level(MAX_LEVEL);
+        assert_eq!(lines, ["audited"]);
+    }
+
     #[test]
     fn rate_limit_allows_a_burst_then_the_rate() {
         let mut s = Sinks {
@@ -462,6 +618,11 @@ mod tests {
                 head: 0,
                 len: 0,
                 lost: 0,
+            },
+            console: Console {
+                on: false,
+                ring: [Record::EMPTY; CONSOLE_LINES],
+                next: 0,
             },
         };
         let passed = (0..1000).filter(|_| take_token(&mut s, 1)).count() as u64;

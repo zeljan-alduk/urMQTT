@@ -154,6 +154,9 @@ extern "C" fn urmqtt_kmain() -> ! {
         // Kept from the start; sent once the network is up (M16).
         urmqtt_log::enable_records();
     }
+    // Kept from the start for the MQTT console (O2): a subscriber sees the
+    // boot log, up to the ring's size.
+    urmqtt_log::enable_console();
     if let Some(fb) = FRAMEBUFFER
         .response()
         .and_then(|r| r.framebuffers().first().copied())

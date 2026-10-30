@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Operator scenarios: `$SYS/` over MQTT (O1).
+"""Operator scenarios: `$SYS/` and the console over MQTT (O1, O2).
 
     scripts/sys-scenarios.py CERTDIR PORT [reboot]
 
@@ -139,6 +139,19 @@ class Operator:
         return got
 
 
+def console(commands, listen=4.0, gap=0.3):
+    """Subscribes to the console output, sends `commands`, returns the lines."""
+    op = Operator()
+    op.subscribe("$SYS/console/out")
+    op.listen(1.0)  # let the replayed ring pass
+    for c in commands:
+        op.publish("$SYS/console/in", c)
+        time.sleep(gap)
+    lines = [p for t, p, _ in op.listen(listen) if t == "$SYS/console/out"]
+    op.close()
+    return lines
+
+
 # ---- mosquitto clients for the identities that must be refused ---------------------
 
 
@@ -231,15 +244,56 @@ except (IndexError, ValueError, KeyError, TypeError) as e:
     got = [f"{e!r}: {got!r}"]
 report("sys-query-info", good, "" if good else got[0][:120])
 
-# 3. Nobody else gets in, and nothing they publish does anything.
+# 3. The console: the ring is replayed to a new subscriber, commands run.
+op = Operator()
+op.subscribe("$SYS/console/out")
+replay = [p for t, p, _ in op.listen(2)]
+op.close()
+report("console-replays-the-log", len(replay) >= 5 and any("INFO" in l or "DEBUG" in l for l in replay),
+       f"{len(replay)} line(s)")
+
+lines = console(["help", "status", "log level info", "bogus", "log level"])
+text = "\n".join(lines)
+report("console-help", "commands: help | status | log level" in text)
+report("console-status", "urmqtt " in text and " core(s), busy %" in text and "clients " in text
+       and "log level " in text)
+report("console-log-level", "log level is now info" in text)
+report("console-refuses-unknown-and-malformed",
+       "error: unknown command" in text and "error: wrong arguments" in text and "rebooting" not in text)
+# The audit lines are in the log, and the log is the console.
+report("console-audit-on-the-console", 'console: operator ran "status"' in text
+       and "command refused (unknown command)" in text)
+
+# Rate limit: a burst of commands, then refusals (the bucket refills slowly).
+lines = console(["help"] * 12, listen=3, gap=0.02)
+refused = sum("rate limit" in l and l.startswith("error") for l in lines)
+report("console-rate-limited", refused >= 3, f"{refused} refusal(s) of 12")
+time.sleep(12)
+# No shell: a second command in the same message is not a command at all.
+lines = console(["status; reboot", "log level debug"], listen=3)
+report("console-no-command-chaining", any("error: unknown command" in l for l in lines)
+       and not any("rebooting" in l for l in lines))
+report("console-restores-log-level", any("log level is now debug" in l for l in lines))
+
+# 4. Nobody else gets in, and nothing they publish does anything.
 for who, cert in (("device-001", "devices/device-001"), ("backend", "services/backend")):
     ok, out = sub_denied(who, cert, "$SYS/#")
     report(f"sys-denied-to-{who}", ok, repr(out))
+    ok, out = sub_denied(who, cert, "$SYS/console/out")
+    report(f"console-out-denied-to-{who}", ok, repr(out))
+    pub(who, cert, "$SYS/console/in", "reboot")
+    pub(who, cert, "$SYS/console/in", "log level error")
     pub(who, cert, "$SYS/broker/uptime", "forged", "-r")
+time.sleep(2)
+lines = console(["status"], listen=3)
+report("console-unaffected-by-others", any(l.startswith("urmqtt ") for l in lines)
+       and any("log level debug" in l for l in lines),
+       "still up, and a device did not lower the log level")
 # The operator itself may not forge a `$SYS/` topic either.
 op = Operator()
 op.publish("$SYS/broker/uptime", "forged", retain=True)
-op.subscribe("$SYS/broker/uptime")
+op.publish("$SYS/console/out", "forged")
+op.subscribe("$SYS/broker/uptime", "$SYS/console/out")
 got = op.listen(3)
 op.close()
 report("sys-topics-cannot-be-forged", got and all("forged" not in p for _, p, _ in got), f"{len(got)} message(s)")

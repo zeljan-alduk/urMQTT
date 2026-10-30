@@ -116,7 +116,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | **MQTT** | Zero-copy 3.1.1 codec, fuzzed, `forbid(unsafe_code)` | ✅ M8 |
 | | QoS 0/1, wildcards, retained, LWT, persistent sessions, keepalive | ✅ M9 |
 | | ACL (`devices/{id}/#` by default), service identities, per-device rate limits | ✅ M9 |
-| | Operator role (mTLS only): retained `$SYS/broker/#` statistics every 10 s and `$SYS/query/info` | ✅ O1 |
+| | Operator role: retained `$SYS/broker/#` statistics every 10 s, `$SYS/query/info`, a console over MQTT (`$SYS/console/{out,in}`: log lines, `help`, `status`, `log level`, `reboot`), mTLS only, audit-logged | ✅ O1, O2 |
 | | MQTT 5.0, QoS 2 | 📋 later |
 | **Storage** | SQLite in the kernel over a raw-disk VFS (WAL, exclusive), quick_check at boot | ✅ M11 |
 | | One disk: data in a partition of the boot disk (virtio-blk or virtio-scsi), created on the first boot, crash-safe; other disks never touched | ✅ S1 |
@@ -488,7 +488,7 @@ error: invalid configuration deploy/bad/config.toml:
 | `acl.device_publish`, `acl.device_subscribe` | topic filters, `{id}` = device id | Default device rights |
 | `acl.service_ids` | ids or `prefix*` | Identities with service rights (backends) |
 | `acl.service_publish`, `acl.service_subscribe` | topic filters | Service rights |
-| `acl.operator_ids` | exact ids (required, may be empty) | Operator identities: the only ones that read `$SYS/` statistics (ADR-060) |
+| `acl.operator_ids` | exact ids (required, may be empty) | Operator identities: the only ones that read `$SYS/` statistics and use the MQTT console ([docs/OPERATE.md](docs/OPERATE.md)) |
 | `memory.kernel_heap_mb` | power of two, 1–1024 | Kernel heap (buddy allocator); ~500 B per idle connection |
 | `memory.min_free_mb` | > 0, < heap | New connections are refused below this much free heap |
 | `entropy.fallback` | `jitter` \| `none` | Without virtio-rng and `RNDR`: seed from health-tested CPU jitter, or refuse to boot |
