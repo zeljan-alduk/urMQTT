@@ -87,7 +87,7 @@ The user accepted every proposal ("everything as proposed, following best practi
 
 1. **Order:** the phases above, as written. Bare metal (phase 10) comes before the x86 optimisations, and storage v2 (phase 6) before the x86 port.
 2. **X0b:** ARMv8 hardware crypto on aarch64 early, right after X0. It changes aarch64 numbers upwards.
-3. **Limine:** vendor the x86 Limine binaries and build the `limine` host tool from its checksummed C source. ADR-043 records that this overrides PROMPT.md §2.
+3. **Limine:** vendor the x86 Limine binaries and build the `limine` host tool from its checksummed C source. ADR-055 records that this overrides PROMPT.md §2 (ADR-043 is the universal image layout).
 4. **S2 migration: offline.** The kernel reads only the current layout and refuses an older one with a clear message naming the fix. `urmqtt-disk migrate` converts offline, with the safeguards listed in STORAGE-PLAN S2.
 5. **H2 session tickets: random keys that rotate.** A new key comes from the CSPRNG every 12 h and the previous key is still accepted for 12 h more. Tickets live at most 12 h, so none outlives its key. The keys exist only in memory: never on disk or in the image, and zeroised when retired. Tickets do not survive a broker restart; the reconnect after a restart is a full handshake, which admission control absorbs (M16).
 

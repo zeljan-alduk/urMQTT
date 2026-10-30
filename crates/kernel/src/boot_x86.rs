@@ -39,7 +39,7 @@ pub(crate) fn early_console() {
 
 /// What the early hardware setup found, for the boot log.
 pub(crate) struct EarlyHw {
-    time: Option<time::Info>,
+    time: time::Info,
 }
 
 /// Starts the clock: the TSC frequency from the hypervisor, CPUID, the HPET
@@ -78,13 +78,12 @@ pub(crate) fn early_hw(platform: Option<&PlatformInfo>, mmio_ok: bool, _dev: boo
                 .and_then(|r| Some((io(r.space, r.address)?, r.value))),
         });
     }
-    let time = match time::init(&src) {
-        Ok(i) => Some(i),
+    match time::init(&src) {
+        Ok(time) => EarlyHw { time },
         Err(e) => fatal_fmt(format_args!(
             "no usable time base ({e:?}): the platform offers no HPET, PM timer or TSC frequency"
         )),
-    };
-    EarlyHw { time }
+    }
 }
 
 /// Physical address of a kernel image address (for the paravirtual clock
@@ -97,14 +96,13 @@ fn kernel_virt_to_phys(va: usize) -> u64 {
 
 impl EarlyHw {
     pub(crate) fn log(&self, platform: Option<&PlatformInfo>) {
-        if let Some(i) = self.time {
-            info!(
-                "time: tsc {} Hz from {:?}, invariant={}, deadline timer={}",
-                i.tsc_hz, i.source, i.invariant_tsc, i.tsc_deadline
-            );
-            if !i.invariant_tsc {
-                warn!("time: the TSC is not invariant: it may stop in deep C-states");
-            }
+        let i = self.time;
+        info!(
+            "time: tsc {} Hz from {:?}, invariant={}, deadline timer={}",
+            i.tsc_hz, i.source, i.invariant_tsc, i.tsc_deadline
+        );
+        if !i.invariant_tsc {
+            warn!("time: the TSC is not invariant: it may stop in deep C-states");
         }
         if let Some(x) = platform.and_then(|p| p.x86) {
             info!("acpi: {x}");

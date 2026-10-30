@@ -966,15 +966,15 @@ Security is the first priority and wins conflicts with the other tracks.
 |---|---|---|
 | ✅ | **X0** Arch facade & dispatch | aarch64 unchanged (smoke, bench, bytes/connection, repro); no aarch64 assembly outside `arch-aarch64` |
 | ✅ | **X0b** aarch64 hardware crypto | ARMv8 AES/PMULL/SHA2/CRC32 and NEON ChaCha20 selected at boot; known-answer tests on every boot and differential fuzzing equal; measured faster (AES-GCM 2.4×, SHA-256 4.5×, CRC-32C 20×) |
-| 📋 | **X1** x86_64 builds | `make build ARCH=x86_64`, clippy on both targets, FP/SIMD policy decided, CI KVM probe |
-| 📋 | **X2** x86 boot & exceptions | q35+OVMF and pc+SeaBIOS boot; decoded fault reports; x86-64-v2 check refuses old CPUs with a clear message |
-| 📋 | **X3** x86 memory protection | NX, W^X, WP, SMEP/SMAP/UMIP, locked tables, guard pages; CET when available |
-| 📋 | **X4** x86 interrupts & time | x2APIC, TSC-deadline, kvmclock, measured IRQ latency, clock monotonic across cores |
-| 📋 | **X5** x86 SMP | `run-smp ARCH=x86_64 N=8`, IPI ping-pong between all pairs |
-| 📋 | **X6** x86 platform discovery | ACPI (MADT, MCFG, FADT, HPET, SPCR) summaries on q35 and pc; fuzzed |
-| 📋 | **X7** x86 PCI & virtio | ECAM and port-I/O config; blk/scsi/net/rng self-tests on q35 and pc |
-| 📋 | **X8** x86 feature parity | all MQTT, TLS, DB, telemetry, crash and storm scenarios on x86_64; data disks portable across architectures |
-| 📋 | **X10** One multi-platform ISO | the same ISO file boots on aarch64 UEFI, x86_64 UEFI and BIOS; bit-identical rebuilds |
+| ✅ | **X1** x86_64 builds | `make build ARCH=x86_64`, clippy on both targets, FP/SIMD policy decided (ADR-042); CI KVM probe not done |
+| ✅ | **X2** x86 boot & exceptions | q35+OVMF and pc+SeaBIOS boot (TCG); decoded fault reports; x86-64-v2 check refuses old CPUs with a clear message, on COM1 and on the framebuffer |
+| ✅ | **X3** x86 memory protection | NX, W^X, WP, SMEP/SMAP/UMIP, locked tables, guard pages, the aarch64 audit line; CET deferred (ADR-047) |
+| ✅ | **X4** x86 interrupts & time | x2APIC, HPET-calibrated TSC, LAPIC timer, MSI-X, per-core tick (TCG); TSC-deadline, kvmclock and PV EOI written but not run |
+| ✅ | **X5** x86 SMP | 8 CPUs, 56/56 IPI pairs, every core ticking (TCG) |
+| ✅ | **X6** x86 platform discovery | ACPI (MADT, MCFG, FADT, HPET, SPCR, `_S5`) from QEMU q35 and pc tables; fuzzed |
+| ✅ | **X7** x86 PCI & virtio | ECAM and port-I/O config; blk/scsi/net/rng on q35 and pc (TCG); legacy-only virtio is refused with a message |
+| ✅ | **X8** x86 feature parity | the MQTT, TLS, DB, telemetry, crash, storm and attack scenarios on x86_64 under TCG; data disks portable across architectures (`cross-arch-*`) |
+| ✅ | **X10** One multi-platform ISO | the same ISO file boots on aarch64 UEFI (HVF, TCG), x86_64 UEFI and BIOS (TCG), installs itself, rebuilds bit for bit (`make universal`); KVM, real hardware and Secure Boot untested |
 | 📋 | **X12** Bare-metal foundation | hybrid ISO boots from a USB stick; read-only `hwreport` mode; framebuffer console |
 | 📋 | **X13** NVMe & AHCI | storage and crash scenarios on QEMU models and on the test PC, including a real power cut |
 | 📋 | **X14** Hardware NICs | e1000e/igb (QEMU-tested), then the test PC's onboard NIC; MQTT and storm on the LAN |

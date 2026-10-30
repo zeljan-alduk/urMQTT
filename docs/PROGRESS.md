@@ -1245,3 +1245,99 @@ X86-PLAN §X1. `make build ARCH=x86_64` links an ELF; `make check` is green on b
 
 - CI jobs (x86 build, KVM probe, x86 host tests): follow with X2's smoke jobs.
 - The reproducibility double-build of the x86 ELF, and the `xmm` audit: meaningful once the ELF contains the kernel (X2).
+
+## X2–X7 — x86_64 bring-up, written as separate pieces and first booted in X8 (2026-10-30)
+
+X2 (boot, exceptions), X3 (paging), X4 (interrupts, time), X6 (ACPI) and X7 (PCI, virtio) were written by separate agents against the facade contract. Only X2 had ever booted when they merged; X3, X4, X6 and X7 existed as compiled, host-tested code. The first complete boot happened in X8 (below), so this entry records what each piece looks like **now that it runs**, under **QEMU 11.1.2 TCG on an Apple M-series host**. Nothing here ran on KVM or on real hardware. ADRs: 042, 044–047, 055–058.
+
+**X2 — boot and exceptions.** Limine x86 (UEFI and BIOS), COM1 and framebuffer log, GDT/TSS/IDT with IST stacks, decoded fault reports, power-off by QEMU's ACPI port, the x86-64-v2 baseline refusal. Smoke (TCG): `x86-boot-q35-uefi`, `x86-boot-pc-bios`, `x86-boot-v2-minimal`, `x86-baseline-refuse`, `x86-fault-{pf-null,ud,gp,df}`, `x86-brk-resume`, `x86-panic`: all pass. Added in X10: the refusal message is also drawn on the framebuffer (below).
+
+**X3 — memory protection.** 4-level tables, PAT, EFER.NXE, CR0.WP, CR4.SMEP/SMAP/UMIP (`mm: protections nx=on wp=on smep=on smap=on umip=on` under `-cpu max`), locked page tables, the aarch64 W^X audit line (`selftest: W^X ok (15 729 leaf mappings audited, 0 W+X, ...)`). Smoke: `x86-wx-write-text`, `x86-nx-exec-heap`, `x86-guard-overflow`, `x86-sealed-write` (CR2 equals the sealed address), `x86-fault-unmapped-mmio`. **Not done:** CET (ADR-047), `x86-smap-user-access` (there is no user mapping to test with).
+
+**X4 — interrupts and time.** x2APIC, I/O APIC, 8259 masked, TSC frequency from the HPET under TCG (`time: tsc 999 850 000 Hz from Hpet`), one-shot LAPIC timer calibrated against the TSC (TCG has no TSC-deadline), 10 ms tick on every CPU, MSI-X completions through the local APIC (`msi-x: 3 blk completion interrupt(s) via the local APIC`). **Not verified:** kvmclock, KVM PV EOI, the TSC-deadline timer, an invariant TSC (all absent under TCG). The IRQ latency lines under TCG (`avg` about 2 ms) measure TCG's timer, not hardware. `x86-time`'s "clock monotonic across cores" check was not written.
+
+**X6 — platform discovery.** MADT, FADT, HPET, MCFG and `\_S5` parsed from the real tables of QEMU q35 (`acpi: lapic=0xfee00000 ioapic=1[0@0xfec00000+0] ovr=5 hpet=0xfed00000 pmtmr=0x608 reset=io:0xcf9=0xf s5=0/0 sci=9`). The kernel now also uses the FADT for power control (PM1a_CNT with the `_S5` type, the reset register; X10).
+
+**X7 — PCI and virtio.** ECAM on q35, configuration mechanism #1 on pc (`pci: ports 0xcf8/0xcfc (mechanism #1) buses 0-255`), virtio-blk, -scsi, -net and -rng with MSI-X, RDSEED/RDRAND mixed into the entropy pool. Smoke: `x86-disk-q35`, `scsi-boot-*`, `first-boot*`, `no-hw-rng` (`-cpu max,-rdrand,-rdseed`, no virtio-rng: the jitter fallback seeds the CSPRNG and its health tests pass), and the pc machine through the universal-image scenarios.
+
+**Bugs found while booting this code** (all fixed in X8/X5):
+
+- `cpu::wait_for_interrupt` was `sti; hlt; cli`: after the first idle wait interrupts stayed off for the rest of the boot (no MSI-X completion ever arrived, the blk self-test failed). It now keeps the caller's interrupt flag.
+- `cpu::switch_to` took its arguments in a different order from the contract (the AArch64 shape: main stack, exception stack, argument), which handed the exception stack top to the continuation as its argument. Harmless by luck.
+- The power-off in smoke mode raced QEMU's handling of the ACPI request against the `isa-debug-exit` fallback, which always exits with status 1: `scsi-boot-reopen` failed once in 68. It waits 200 ms now.
+- `ApBoot::capture` and the AP entry were `unimplemented!`, and the GDT/TSS/IDT were boot-CPU statics: both are X5's work and are done below.
+
+## X5 — x86_64 SMP (2026-10-30)
+
+X86-PLAN §X5; ADR-059. QEMU TCG only.
+
+**Done**
+
+- Limine's MP request with the x2APIC flag. Each AP enters `urmqtt_ap_entry` (assembly) in the bootloader's tables, copies the boot CPU's EFER.NXE, PAT, CR4, CR3 and CR0, sets up x87/SSE, switches to its kernel stack and calls `urmqtt_ap_prepare`: its own GDT and TSS, the shared IDT, GS base, XSAVE state, then the kernel's `ap_main`.
+- Per-CPU GDT/TSS (a TSS can be loaded once). The IST stacks of an AP are the top of its mapped exception stack, 64 KiB on x86; `which_ist` covers every CPU.
+- IPIs through the ICR (x2APIC MSR; xAPIC two-write path), `hlt` idle, the same bring-up checks as aarch64.
+- **No TLB shootdown** is implemented, on purpose (ADR-056): after the tables lock nothing is remapped.
+
+**Tests**
+
+- `make check` green; smoke `x86-disk-q35` (4 CPUs: `smp: 4/4 cpus online (3 application processors started)`, `ipi: 12/12 ordered pairs ping-pong ok`, `smp: 4/4 cpus ticking on their own timer`) and `x86-smp8` (`ipi: 56/56 ordered pairs ping-pong ok`).
+- `dp-bench` and `log-crash` run on 3 to 5 CPUs on x86 and pass.
+
+**Not done**
+
+- `make run-smp ARCH=x86_64`: `run-qemu.sh --smp N` works, the Makefile target is aarch64-shaped.
+- KVM PV IPI, more than 64 CPUs, hot-plug.
+- Not run on KVM or hardware: AP start timing, x2APIC IDs above 255 and AMD or hybrid-core topologies are untested.
+
+## X8 — x86_64 feature parity (2026-10-30)
+
+X86-PLAN §X8; ADR-059 and the entries above. **QEMU 11.1.2 under TCG on an Apple M-series host. Never run on KVM or real hardware.**
+
+**Done**
+
+- **One boot sequence for both architectures** (`crates/kernel/src/boot.rs`). The x86 path used to stop after the CPU summary, and the aarch64 sequence was compiled on x86 as a dead copy. Now the sequence (platform discovery, memory and `vm::build`/`activate`, time, interrupts, PCI and devices, entropy, crypto dispatch, storage, SQLite, SMP, the MQTT service, the data plane) is one code path with seams in `boot_aarch64.rs` and `boot_x86.rs`: console, time base, privilege label, feature detection, BTI/PAC, the interrupt controller and its timer vector, the stack-switch log text, and the faults that exist on one architecture only. The aarch64 boot log is unchanged, and `make iso` and `make raw` produce the same bytes as before for the same kernel (compared against the pre-X10 scripts).
+- **Everything the earlier agents wrote booted on the first attempt, after one bug fix** (`wait_for_interrupt`, see X2–X7). The first full boot to `URMQTT READY` on one CPU, then SMP (X5).
+- **Shared code changes** (small): `irq::init_apic` next to the GIC path; the `Image` of the installer; the log line `irq: N interrupt(s) without handler (last: V)` names the vector; the entropy log lines name RDRAND/RDSEED on x86; unused virtio-blk disks get a no-op MSI-X handler.
+- **`scripts/run-qemu.sh --arch x86_64`** now takes `--disk`, `--bus scsi`, `--data`, `--fwd`, `--pcap`, `--dgram` like the aarch64 path; `URMQTT_ARCH` selects the architecture for the scripts that call it (`smoke.sh` sets it).
+- **`scripts/smoke.sh --arch x86_64`** (disk-based, q35+OVMF, 4 CPUs unless stated): `x86-disk-q35`, `x86-smp8`, the memory-protection faults, `x86-crypto-soft`, `x86-simd-irq`, `net-echo`, `mqtt-plain`, `mqtt-tls` (all four rejections), `ticket-rotation`, `ticket-restart`, `control`, `registry-allowlist`, `control-persist`, `time-before-build`, `db-bench`, `watchdog`, `db-crash` (every acknowledged commit survived SIGKILL), `log-crash` (1 114 112 flushed records recovered), `log-tear`, `dp-bench`, `mqtt-persist`, `storm`, `attack-{syn,ack,rst}-flood`, `attack-app`, `observability`, `first-boot`, `first-boot-crash` (four fault points), `scsi-boot`, `iso-as-cd`, `own-damaged`, `disk-tool`, `no-hw-rng`, and the gratuitous-ARP pcap check. Together with the X2 scenarios the run is **68 scenarios; 67 passed and 1 failed** before the power-off race was fixed (`scsi-boot-reopen`); see the rerun below.
+- **Cross-architecture data disks** (`scripts/smoke.sh --arch universal`, with the universal raw disk, X10): a VM of one architecture writes a retained message, a persistent session with a queued command and a telemetry record, is killed, and a VM of the other architecture on the same disk prints `db: restored 1 retained message(s), 1 persistent session(s) with 1 queued message(s), 1 revoked serial(s), 3 known device(s)` and `telemetry: log recovered ... 1 record(s)` and serves both messages to the real mosquitto clients. All four directions pass: aarch64 (HVF) to and from x86 UEFI (TCG), aarch64 to and from x86 BIOS.
+
+**Observed under TCG** (not hardware numbers): `dp-bench` scaling with 4 worker cores 4.39x (reported only under TCG); `smp: 8/8 cpus online`, `ipi: 56/56 ordered pairs ping-pong ok` (round trip about 76 µs); interrupt latency in the milliseconds (TCG's timer).
+
+**Not done**
+
+- The x86 `install-iso` scenario inside `--arch x86_64` (the installer is covered by `--arch universal`), `gicv2` (no GIC on x86), the `x86-time` scenario, `x86-smap-user-access`, `x86-cet-*`, `x86-devices-*`/`x86-scsi` as separate scenarios.
+- Struct sizes compared across architectures by a host test (only the `const` asserts compile).
+- `make bench ARCH=x86_64`, bytes per idle connection on x86, ELF size table: not measured.
+- The aarch64 non-regression numbers (`make bench`, bytes per connection) were not re-measured; the aarch64 smoke, the host tests and the byte-identical images are the evidence.
+- KVM, real hardware, hybrid-core or AMD topologies.
+
+## X10 — One multi-platform ISO (2026-10-30)
+
+X86-PLAN §X10; ADR-043. **QEMU only: aarch64 UEFI under HVF and TCG, x86_64 q35+OVMF and pc+SeaBIOS under TCG. Not run on KVM, on a real VPS or on real hardware; Secure Boot is not supported.**
+
+**Done**
+
+- **`scripts/mkiso.sh --universal`** (`make universal ENV=...`) builds both kernels' ISO and a raw disk image (`...-universal.iso`, 48 MiB; `...-universal.img`, 14 MiB). Layout, Limine 12.9.4 findings and alternatives in ADR-043. In short: `if_arch` entries pin each architecture's kernel by blake2b, an ESP with both UEFI loaders and both kernels, a BIOS boot partition with `limine bios-install`, an ISO whose own ESP carries the menu and `/disk.img`, El Torito BIOS and UEFI entries and a hybrid GPT.
+- **The installer writes a finished disk image** (`urmqtt_store::install::write_boot_image`, host-tested, including refusal of malformed images before any write); the aarch64-only ISO's ESP module path is unchanged.
+- **`make iso`, `make raw` unchanged**, byte for byte (ISO, ESP and raw image compared against the pre-X10 `mkiso.sh` and `mkraw.py` for the same kernel); `mkraw.py` gained `--bios-boot` and is unchanged without it.
+- **Reproducible:** two builds, and one a second later, give identical ISO and raw image bytes. `scripts/repro.sh prod --universal` builds from two worktrees and compares both ELFs, the ISO and the raw image (result in the rerun below).
+- **`make dist-universal`:** both ELFs, ISO, raw image, `SHA256SUMS`.
+- **Framebuffer console on x86:** the boot log was already drawn on the Limine framebuffer; the baseline-refusal message (a CPU below x86-64-v2, `-cpu qemu64`) was COM1 only, and is now also drawn there: white text on black, doubled 8x8 font, from assembly without SSE (the CPU is below the baseline the compiler assumes). Checked by screenshot (`screendump`) under UEFI and under BIOS. Missing hardware is named in the log, which the framebuffer shows: legacy-only virtio, NICs without a driver, no entropy source (ADR-058; table in docs/DEPLOY.md §5b).
+- **x86 power control from ACPI** (FADT PM1 control blocks with the DSDT's `_S5` type, the FADT reset register) before QEMU's ports.
+
+**Smoke** (`scripts/smoke.sh --arch universal`: 27 scenarios, 0 failed)
+
+- `universal-iso-{aa64-hvf,aa64-tcg,x86-q35-uefi,x86-pc-bios}`: **the same file** (its sha256 is in the scenario name and re-checked after every boot) boots on all four machines.
+- `universal-raw-{aa64,x86-uefi,x86-bios}`: the raw image boots on all three paths and creates its data partition.
+- `universal-install via {aa64,x86-uefi,x86-bios}`: the installer entry runs on each machine, writes 14 MiB and verifies it; **each installed disk then boots on all three paths** (9 combinations).
+- `cross-arch-*`: four directions (X8).
+- By hand: the ISO written to a 64 MiB "disk" boots under q35+OVMF and pc+SeaBIOS (it runs the broker without persistence; the hybrid ISO is not a supported data layout, ADR-043).
+
+**Not done**
+
+- The release workflow and SLSA provenance for both architectures; `make dist` (aarch64) is unchanged and does not include the universal files.
+- Secure Boot (H8), KVM, a real VPS (Contabo or another), real firmware, USB sticks.
+- A BIOS-boot scenario with a CD **and** a disk under SeaBIOS at once beyond the installer scenarios.
+
+**Try it on a VPS** (docs/DEPLOY.md §5b): `make universal ENV=prod`, upload `build/urmqtt-prod-<version>-universal.iso`, boot the VPS from it, pick *Install urMQTT on this machine's disk*, detach the ISO, boot again. On the VNC console look for `URMQTT BOOT ... arch=x86_64`, `cpu: ... hypervisor=KVMKVMKVM`, `pci:`, `blk: boot disk is virtio-...`, `net: mac ..., link up`, `URMQTT READY`.

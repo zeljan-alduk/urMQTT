@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- X2–X8: x86_64. The same kernel boots and serves on x86_64 under QEMU TCG (q35 with OVMF, pc with SeaBIOS): boot and decoded exceptions, 4-level paging with NX/WP/SMEP/SMAP/UMIP and the same W^X audit, ACPI platform discovery, x2APIC/I/O APIC/HPET-calibrated TSC, SMP (8 CPUs tested), PCI by ECAM or port I/O, virtio with MSI-X, RDSEED/RDRAND entropy, ACPI power-off. `scripts/smoke.sh --arch x86_64` runs the MQTT, TLS, storage, crash, storm and attack scenarios. **Not run on KVM or real hardware.** The crypto backends are the portable ones until X9 (ADR-042, ADR-045, ADR-056–059).
+- X10: one universal ISO (`make universal`) that boots on aarch64 UEFI, x86_64 UEFI and x86_64 legacy BIOS, installs itself on the machine's disk, and whose installed disk boots by all three paths; data disks are portable between the architectures. The x86_64 refusal message for a CPU below x86-64-v2 is also drawn on the framebuffer (ADR-043).
+
+### Changed
+
+- The boot sequence is shared by both architectures (`boot.rs`; ADR-059). The aarch64 boot log is unchanged.
+
 ## [0.1.0] - 2026-10-30
 
 The first release: urMQTT as an aarch64 VM image, pre-alpha. The release

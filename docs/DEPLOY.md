@@ -93,8 +93,8 @@ zeljan-alduk/urMQTT`), and a minisign signature when the repository secret
 
 | Device | Requirement |
 |---|---|
-| CPU | aarch64 (ARMv8.0+; PAC/BTI used when present), 2+ vCPUs (with storage the last CPU is the DB core) |
-| Firmware | UEFI (AAVMF/OVMF for aarch64), ACPI or device tree |
+| CPU | aarch64 (ARMv8.0+; PAC/BTI used when present) or x86_64 (x86-64-v2: SSE4.2, POPCNT, CX16; section 5b), 2+ vCPUs (with storage the last CPU is the DB core) |
+| Firmware | UEFI (AAVMF/OVMF), ACPI or device tree; x86_64 also legacy BIOS (ACPI required) |
 | Interrupts | GICv3, or GICv2 (at most 8 vCPUs; what KVM offers on a GIC-400 host such as the Raspberry Pi); MSI-X through GICv2m frames when present (QEMU `virt`), polling otherwise |
 | NIC | one virtio-net (PCI); DHCP unless `network.mode = "static"` |
 | Disk | **one** virtio-blk disk or virtio-scsi LUN (PCI), 512-byte blocks: the raw image written to it, the disk at least 16 MiB larger than the image (8 GiB or more in production, STORAGE-PLAN sizing); with `storage.require_data_disk = true` the broker refuses to serve without its data partition |
@@ -184,6 +184,70 @@ VM stopped, run `urmqtt-disk update-boot <disk> --esp <the new image's ESP>
 (its EFI system partition) over the same bytes of the disk:
 `dd if=new.img of=<disk> bs=1M skip=1 seek=1 count=8 conv=notrunc`. The
 ISO's self-installer (S1b) will do the same from a boot menu.
+
+## 5b. x86_64 (a KVM VPS, Proxmox) and the universal ISO
+
+> **Verified:** QEMU 11.1.2 under TCG (q35 with OVMF, pc with SeaBIOS) on an
+> Apple M-series host, and the aarch64 side under HVF and TCG. **Not
+> verified:** KVM, any real VPS provider, real hardware, Secure Boot. Treat a
+> first boot on a provider as an experiment and read the console.
+
+**One ISO for everything.** `make universal ENV=prod` (builds both kernels)
+writes `build/urmqtt-prod-<version>-universal.iso` (about 48 MiB) and the
+matching raw disk image `...-universal.img` (14 MiB). The ISO boots on
+aarch64 UEFI, x86_64 UEFI and x86_64 legacy BIOS; its boot menu shows each
+machine only its own entries. `make dist-universal` collects both kernels,
+both images and `SHA256SUMS`; `scripts/repro.sh prod --universal` builds twice
+and compares them byte for byte. `make iso` and `make raw` are unchanged and
+aarch64-only. The raw image also boots by all three paths; the installed disk
+is the same image, so a data disk written under one architecture is restored
+by the other.
+
+**VPS with a VNC console and a custom-ISO feature** (the case this was built
+for; the provider-specific upload and CD-attach steps are the provider's):
+
+1. Upload the universal ISO and boot the VPS from it. Both firmware types work.
+2. The framebuffer shows Limine's menu, **urMQTT** (default after 5 s: runs from
+   the ISO without persistence; production refuses to serve) and **Install urMQTT
+   on this machine's disk**. Press the arrow key, choose the second.
+3. The console names the target disk, warns that its data will be erased and
+   counts down 30 s (power the VPS off to cancel). It then writes, verifies and
+   powers off with "remove the installation medium". The installer refuses
+   when more than one disk qualifies.
+4. Detach the ISO and boot from the disk, by BIOS or UEFI. The first boot
+   creates the data partition.
+
+**What to look at on the VNC console** (the same lines are on COM1; the log
+is drawn on the framebuffer from the first line on):
+
+- `URMQTT BOOT <version> arch=x86_64 cpu=<n> mem=<MiB>` and
+  `cpu: vendor=... hypervisor=KVMKVMKVM ...`: the CPU is at least x86-64-v2.
+- `time: tsc <Hz> from <source>`, `apic: x2APIC mode ...`, `acpi: ...`,
+  `power: ACPI S5 through PM1a_CNT ...`.
+- `pci: ECAM ...` or `pci: ports 0xcf8/0xcfc (mechanism #1)`, then the devices:
+  `virtio-blk`, `virtio-net`, `virtio-rng`.
+- `blk: boot disk is virtio-blk ...`, `msi-x: ...`, `net: mac ..., link up`,
+  `entropy: ...`, `smp: n/n cpus online`, and finally `URMQTT READY` and the
+  `TLS 1.3 listener` line.
+
+**Messages for what is missing:**
+
+| Console says | Meaning |
+|---|---|
+| `URMQTT: this CPU does not implement the x86-64-v2 baseline. Missing: ...` (white text on black, before anything else) | the VPS CPU model is too old (a `qemu64` or `kvm64` default); use `host` or `x86-64-v2-AES` |
+| `unsupported legacy virtio device ... attach it as a modern device (disable-legacy=on)` | the hypervisor exposes pre-1.0 virtio only; there is no legacy driver |
+| `net: network controller <vendor>:<device> (...) has no driver; urMQTT needs virtio-net` and `net: no virtio-net NIC. Attach one ...` | the NIC is an e1000, Realtek or similar; no driver yet (X14). A dev image idles, a production image stops |
+| `fatal: no entropy source (virtio-rng, RDRAND/RDSEED, or a jitter fallback that passes its health tests): refusing to run` | no hardware randomness and the jitter fallback is off or failed its health tests |
+| `storage: no data partition: booted from read-only media` | you booted the ISO as a CD: use the installer |
+
+The virtual hardware is the one of section 4 (one virtio-blk or virtio-scsi
+disk, one virtio-net, virtio-rng or a CPU with RDRAND/RDSEED) with an
+x86-64-v2 CPU (`host` on KVM). Up to 64 CPUs. Without ACPI HPET and PM timer
+and without a hypervisor timing leaf the boot stops (`no usable time base`).
+
+**Power:** power-off and reset use ACPI (the FADT's PM1 control blocks with the
+DSDT's `_S5` sleep type, and the reset register) and then QEMU's ports under a
+hypervisor. On real hardware this path has never run.
 
 ## 6. Hetzner Cloud CAX and Oracle Cloud A1 (Ampere Altra)
 

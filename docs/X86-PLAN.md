@@ -197,7 +197,7 @@ Relative size: S = a few days of work, M = a typical M-milestone, L = larger.
 
 **Accept:** q35+OVMF and pc+SeaBIOS boot under TCG; the deliberate faults print decoded reports; the census is recorded.
 
-**Status: done** (ADR-044, ADR-055; PROGRESS entry by the orchestrator). Differences from the work list: the smoke exit goes through QEMU's ACPI power-off port, with `isa-debug-exit` only as a fallback (ADR-044); the `${ARCH}` single-ISO spike is not done (X10; the X2 ISO is x86-only); the census is in ADR-044 and should move next to ADR-046; the baseline refusal prints on COM1 only.
+**Status: done** (ADR-044, ADR-055; PROGRESS entry by the orchestrator). Differences from the work list: the smoke exit goes through QEMU's ACPI power-off port, with `isa-debug-exit` only as a fallback (ADR-044); the `${ARCH}` single-ISO spike was done in X10 (ADR-043); the census is in ADR-044 and should move next to ADR-046; the baseline refusal prints on COM1 only in X2 and also on the framebuffer since X10.
 
 ### X3 — Memory protection · M
 
@@ -212,6 +212,8 @@ Relative size: S = a few days of work, M = a typical M-milestone, L = larger.
 - `x86-cet-ibt` and `x86-cet-shstk` ("skipped (no CET)" under TCG).
 
 **Accept:** every scenario gives the expected decoded report; skipped ones are counted as skipped, never as passed.
+
+**Status: done except CET** (docs/PROGRESS.md, X2–X7; ADR-056, ADR-047). Under QEMU TCG: `x86-wx-write-text`, `x86-nx-exec-heap`, `x86-guard-overflow`, `x86-sealed-write`, `x86-fault-unmapped-mmio` and the aarch64 audit line. Not done: `x86-smap-user-access` (no user mapping exists), the CET scenarios (CET is deferred, ADR-047; TCG has none).
 
 ### X4 — Interrupts and time · M
 
@@ -240,6 +242,8 @@ Relative size: S = a few days of work, M = a typical M-milestone, L = larger.
 
 **Accept:** per-core tick, measured latency logged, the monotonic test green, the XSAVE cost recorded.
 
+**Status: done for TCG, partly** (docs/PROGRESS.md, X2–X7; ADR-045). Verified: x2APIC, the HPET-calibrated TSC, the one-shot LAPIC timer, the 10 ms tick on every core, MSI-X, IPIs. Not done: the monotonic-across-cores scenario, the XSAVE cost measurement (the exception entry uses FXSAVE, ADR-042), `x86-time`. Written but never run: kvmclock, PV EOI, the TSC-deadline timer (TCG offers none).
+
 ### X5 — SMP · S–M
 
 **Work:** Limine MP (with its x2APIC flag), per-CPU data via GS base (`wrgsbase` with FSGSBASE, else the MSR), IPIs through the ICR (or the KVM PV IPI hypercall when offered), `hlt` idle, ping-pong over every ordered pair, up to 64 CPUs.
@@ -247,6 +251,8 @@ Relative size: S = a few days of work, M = a typical M-milestone, L = larger.
 **Tests:** smoke `x86-smp4` and `x86-smp8` (`make run-smp ARCH=x86_64 N=8`): the same output lines as aarch64 (`smp: 8/8 cpus online`, `ipi: 56/56 ordered pairs …`, `ticking on their own timer`).
 
 **Accept:** output format identical to aarch64.
+
+**Status: done** (docs/PROGRESS.md, X5; ADR-059). `x86-smp8`: `smp: 8/8 cpus online`, `ipi: 56/56 ordered pairs ping-pong ok`, `smp: 8/8 cpus ticking on their own timer`. Deviations: no TLB shootdown IPIs (nothing is remapped after the tables lock, ADR-056); no `make run-smp ARCH=x86_64`; no KVM PV IPI.
 
 ### X6 — Platform discovery (ACPI only on x86) · M
 
@@ -261,6 +267,8 @@ Relative size: S = a few days of work, M = a typical M-milestone, L = larger.
 - Smoke: platform summary on q35 and pc, compared against the expected text.
 
 **Accept:** summaries printed on q35 and pc; fuzz targets green in CI.
+
+**Status: done** (docs/PROGRESS.md, X2–X7; ADR-057). Summaries are printed on q35 (`x86-disk-q35`) and pc (the universal-image scenarios); `aml_s5` and the seeded `acpi_parse` exist. Not verified: fuzz targets in CI, real firmware tables. The kernel uses the FADT and `_S5` for power control since X10.
 
 ### X7 — PCI and virtio · M
 
@@ -277,6 +285,8 @@ Relative size: S = a few days of work, M = a typical M-milestone, L = larger.
 - `x86-no-hw-rng` (`-cpu …,-rdrand,-rdseed` and no virtio-rng: jitter fallback).
 
 **Accept:** all green on q35 and pc.
+
+**Status: done** (docs/PROGRESS.md, X2–X7; ADR-058). `x86-disk-q35` (ECAM, blk self-test, gratuitous ARP in the pcap, MSI-X completions), `scsi-boot-*`, `no-hw-rng` (`-cpu max,-rdrand,-rdseed`), and pc+SeaBIOS (mechanism #1) through the universal-image scenarios, including net, TLS and persistence. Deviations: `x86-devices-{q35,pc}` are the generic boot scenarios; there is no separate `x86-scsi`.
 
 ### X8 — Feature parity · L
 
@@ -300,6 +310,8 @@ Relative size: S = a few days of work, M = a typical M-milestone, L = larger.
 - **Struct sizes:** the `const` asserts compile for x86, and a host test prints `size_of` for every connection and session struct on both architectures; the CI diff must be empty.
 
 **Accept:** the full mqtt-scenarios set, the crash tests, storm and the cross-arch tests pass on x86_64.
+
+**Status: done for TCG** (docs/PROGRESS.md, X8). `scripts/smoke.sh --arch x86_64` runs net-echo, mqtt-plain, mqtt-tls (every rejection), the ticket, control and registry scenarios, mqtt-persist, db-bench, db-crash, log-crash, log-tear, watchdog, dp-bench, storm, the four attack scenarios, observability, first-boot (and crash variants), scsi-boot, iso-as-cd, own-damaged, disk-tool and no-hw-rng; `--arch universal` runs the cross-arch data-disk scenarios in both directions. Deviations: `install-iso` and `gicv2` are not run in the x86 suite (the installer runs in `--arch universal`; there is no GIC on x86). The struct-size comparison between architectures was not written (the `const` asserts compile on both).
 
 ### X9 — x86 optimisations · L
 
@@ -340,6 +352,8 @@ The cipher-preference rule (PROMPT §1): without AES-NI the server orders ChaCha
 - The repro CI job runs on both architectures' images.
 
 **Accept:** one ISO boots everywhere; repro green.
+
+**Status: done for the ISO, not for the release pipeline** (docs/PROGRESS.md, X10; ADR-043). `make universal` / `make dist-universal` / `scripts/repro.sh --universal`; smoke `--arch universal` runs `universal-iso-{aa64-hvf,aa64-tcg,x86-q35-uefi,x86-pc-bios}` on one file (hash-checked), `universal-raw-*`, the installer on each machine and the installed disk on all three boot paths. Not done: the release workflow and SLSA provenance for both architectures, `make dist` itself (aarch64-only; `dist-universal` is separate), KVM and real hardware.
 
 ### X11 — Measurements and docs · M
 

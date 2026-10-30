@@ -357,6 +357,10 @@ pub static RNG: SpinLock<Option<Csprng>> = SpinLock::new(None);
 
 static BLK_IRQS: AtomicU64 = AtomicU64::new(0);
 
+/// The handler of a disk's vector until (unless) the disk becomes the boot
+/// disk: its completions are polled, the interrupt only needs its EOI.
+fn ignore_irq(_intid: u32) {}
+
 fn on_blk_irq(_intid: u32) {
     // Relaxed: statistics read by the boot CPU after the self-test.
     BLK_IRQS.fetch_add(1, Ordering::Relaxed);
@@ -682,6 +686,11 @@ fn probe_pci(
                 } else {
                     None
                 };
+                // Its completions arrive on the vector set up above whether or
+                // not the disk is used: the boot disk's handler replaces this.
+                if let Some(spi) = spi {
+                    irq::register(spi, ignore_irq);
+                }
                 if install_mode() {
                     devs.install.push(InstallDisk {
                         name: alloc::format!("virtio-blk {}", f.bdf),
@@ -957,9 +966,9 @@ pub fn blk_selftest() -> Result<(), &'static str> {
 
 /// The CPU's own random number instructions, for the boot log.
 #[cfg(target_arch = "aarch64")]
-const HW_RNG: &str = "RNDR";
+pub(crate) const HW_RNG: &str = "RNDR";
 #[cfg(target_arch = "x86_64")]
-const HW_RNG: &str = "RDRAND/RDSEED";
+pub(crate) const HW_RNG: &str = "RDRAND/RDSEED";
 
 #[cfg(target_arch = "aarch64")]
 const MSI_SOURCE: &str = "GICv2m";

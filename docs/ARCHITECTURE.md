@@ -43,6 +43,20 @@ builds only, enforced at build time).
 10. **Network.** DHCPv4 (or static), then the TLS listener on 8883.
 11. The kernel prints `URMQTT READY`.
 
+**Two architectures, one sequence.** The sequence above is `crates/kernel/src/boot.rs`
+for aarch64 *and* x86_64; the differences are small seams in `boot_aarch64.rs`
+and `boot_x86.rs` (ADR-059). On x86_64 (QEMU-verified only):
+
+- step 2: COM1 is the console from the first instruction, then the framebuffer;
+- step 3: a GDT/TSS/IDT with IST stacks for #DF, NMI, #MC and #PF, and the same decoded report;
+- step 4: 4-level tables with NX, WP and SMEP/SMAP/UMIP where the CPU has them, the same W^X audit and locked tables (ADR-056);
+- step 5: ACPI only (MADT, FADT, HPET, MCFG, SPCR, `_S5`), ADR-057;
+- step 6: the TSC (calibrated against the HPET or the PM timer) and the local APIC timer, x2APIC, I/O APIC, MSI-X through the local APIC (ADR-045); entropy from virtio-rng, RDSEED/RDRAND and the jitter fallback;
+- step 7: Limine's MP request, an AP stub that mirrors the boot CPU's control state, per-CPU GDT/TSS (ADR-059);
+- step 8: ECAM or configuration mechanism #1 (ADR-058).
+
+One universal ISO boots both architectures (ADR-043); the crypto runs the portable backends on x86 until X9.
+
 ## 3. Execution model: thread-per-core, shared-nothing
 
 ```
