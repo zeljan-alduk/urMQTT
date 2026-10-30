@@ -53,8 +53,11 @@ static DTB: DtbRequest = DtbRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static RSDP: RsdpRequest = RsdpRequest::new();
+/// Also read by the x86 entry stub when the CPU is below the baseline
+/// (`arch-x86_64::entry`), by this symbol: no Rust has run yet then.
 #[used]
 #[unsafe(link_section = ".requests")]
+#[unsafe(export_name = "urmqtt_limine_framebuffer_request")]
 pub(crate) static FRAMEBUFFER: FramebufferRequest = FramebufferRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -579,9 +582,9 @@ fn tick_selftest(timer_intid: u32) {
         tick::ticks(),
         elapsed / 1_000_000
     );
-    let (spurious, unhandled) = irq::stats();
+    let (spurious, unhandled, last) = irq::stats();
     if unhandled > 0 {
-        warn!("irq: {unhandled} interrupt(s) without handler, {spurious} spurious");
+        warn!("irq: {unhandled} interrupt(s) without handler (last: {last}), {spurious} spurious");
     }
 }
 

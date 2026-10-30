@@ -14,6 +14,7 @@ use urmqtt_arch::time::{PmTimer, Sources};
 use urmqtt_arch::{cpu, serial, time};
 use urmqtt_log::{info, warn};
 use urmqtt_platform::PlatformInfo;
+use urmqtt_platform::x86::AddrSpace;
 
 use crate::boot::{EXECUTABLE_ADDRESS, fatal_fmt};
 use crate::cmdline::TestFault;
@@ -62,6 +63,21 @@ pub(crate) fn early_hw(platform: Option<&PlatformInfo>, mmio_ok: bool, _dev: boo
         pm_timer,
         virt_to_phys: Some(kernel_virt_to_phys),
     };
+    if let Some(x) = x86 {
+        let io = |s: AddrSpace, a: u64| match s {
+            AddrSpace::Io => u16::try_from(a).ok(),
+            _ => None,
+        };
+        let f = x.fadt;
+        urmqtt_arch::power::set_acpi(&urmqtt_arch::power::Acpi {
+            pm1a_cnt: f.and_then(|f| f.pm1a_cnt),
+            pm1b_cnt: f.and_then(|f| f.pm1b_cnt),
+            s5: x.s5.map(|s| (s.a, s.b)),
+            reset_port: f
+                .and_then(|f| f.reset)
+                .and_then(|r| Some((io(r.space, r.address)?, r.value))),
+        });
+    }
     let time = match time::init(&src) {
         Ok(i) => Some(i),
         Err(e) => fatal_fmt(format_args!(
@@ -92,6 +108,15 @@ impl EarlyHw {
         }
         if let Some(x) = platform.and_then(|p| p.x86) {
             info!("acpi: {x}");
+            match (x.fadt.and_then(|f| f.pm1a_cnt), x.s5) {
+                (Some(port), Some(s)) => info!(
+                    "power: ACPI S5 through PM1a_CNT {port:#x} (SLP_TYP {}/{}), then the hypervisor's ports",
+                    s.a, s.b
+                ),
+                _ => info!(
+                    "power: no ACPI S5 (no PM1a_CNT or no \\_S5 in the DSDT): hypervisor ports only"
+                ),
+            }
         }
     }
 }

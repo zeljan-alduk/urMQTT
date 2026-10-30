@@ -27,6 +27,8 @@ static GIC: OnceCell<Controller> = OnceCell::new();
 
 static SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
 static UNHANDLED_COUNT: AtomicU64 = AtomicU64::new(0);
+/// The last interrupt number that had no handler (for the boot warning).
+static UNHANDLED_LAST: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy)]
 pub enum IrqError {
@@ -184,6 +186,7 @@ pub fn dispatch() {
         if raw == 0 {
             // Relaxed: statistics only.
             UNHANDLED_COUNT.fetch_add(1, Ordering::Relaxed);
+            UNHANDLED_LAST.store(u64::from(intid), Ordering::Relaxed);
         } else {
             // SAFETY: only `register` stores into the table, always a `Handler`.
             let h: Handler = unsafe { core::mem::transmute::<usize, Handler>(raw) };
@@ -193,11 +196,12 @@ pub fn dispatch() {
     }
 }
 
-/// (spurious, unhandled) interrupt counts.
-pub fn stats() -> (u64, u64) {
+/// (spurious, unhandled, last unhandled interrupt number) counts.
+pub fn stats() -> (u64, u64, u64) {
     // Relaxed: statistics only.
     (
         SPURIOUS_COUNT.load(Ordering::Relaxed),
         UNHANDLED_COUNT.load(Ordering::Relaxed),
+        UNHANDLED_LAST.load(Ordering::Relaxed),
     )
 }

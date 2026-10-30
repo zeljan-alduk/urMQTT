@@ -1507,6 +1507,7 @@ dependencies = [
 name = "urmqtt-arch-x86_64"
 version = "0.1.0"
 dependencies = [
+ "font8x8",
  "urmqtt-dispatch",
  "urmqtt-sync",
 ]

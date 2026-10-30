@@ -2,7 +2,8 @@
 # Boots urMQTT headless and checks the serial log. Non-zero exit on any failure.
 #
 #   scripts/smoke.sh [--kernel ELF] [--accels "hvf tcg"] [--out build/smoke]
-#   scripts/smoke.sh --arch x86_64 [--accels "tcg"]       (the x86 scenarios only, X2)
+#   scripts/smoke.sh --arch x86_64 [--accels "tcg"]       (the x86_64 suite: X2 boot/fault, X8 parity)
+#   scripts/smoke.sh --arch universal                     (the universal ISO on both architectures, X10)
 #
 # Each scenario builds an ISO with a dev-only kernel command line, boots it,
 # waits for QEMU to exit (the kernel powers off via PSCI in smoke mode) and
@@ -33,11 +34,20 @@ if [[ $ARCH == x86_64 ]]; then
             *) ACCELS="tcg" ;;
         esac
     fi
+elif [[ $ARCH == universal ]]; then
+    # One ISO, four machines: aarch64 under HVF and TCG, x86_64 UEFI and BIOS under TCG.
+    KERNEL_A64="$ROOT/target/aarch64-unknown-none/release/urmqtt"
+    KERNEL_X86="$ROOT/target/x86_64-urmqtt-none/release/urmqtt"
+    KERNEL=$KERNEL_A64
+    [[ -n "$ACCELS" ]] || case "$(uname -s)-$(uname -m)" in
+        Darwin-arm64) ACCELS="hvf tcg" ;;
+        *) ACCELS="tcg" ;;
+    esac
 elif [[ $ARCH != aarch64 ]]; then
-    echo "error: --arch aarch64|x86_64" >&2; exit 2
+    echo "error: --arch aarch64|x86_64|universal" >&2; exit 2
 fi
 # run-qemu.sh and mkiso.sh take their architecture from here.
-export URMQTT_ARCH=$ARCH
+[[ $ARCH == universal ]] || export URMQTT_ARCH=$ARCH
 if [[ -z "$ACCELS" ]]; then
     case "$(uname -s)-$(uname -m)" in
         Darwin-arm64) ACCELS="hvf tcg" ;;
@@ -1036,7 +1046,8 @@ gicv2() {
 }
 
 [[ -f "$KERNEL" ]] || { echo "error: $KERNEL not found (make build)" >&2; exit 1; }
-rm -f "$OUT"/*.iso "$OUT"/*.raw "$OUT"/*.raw.esp
+rm -f "$OUT"/*.iso "$OUT"/*.iso.disk "$OUT"/*.raw "$OUT"/*.raw.esp
+[[ $ARCH != universal || -f "$KERNEL_X86" ]] || { echo "error: $KERNEL_X86 not found (make build ARCH=x86_64)" >&2; exit 1; }
 echo "smoke: accelerators: $ACCELS"
 
 NO_FAULT='NOT:EXCEPTION|PANIC'
@@ -1061,6 +1072,172 @@ x86_scenario() {
         check "$name [$accel]" "$log" "$status" "$@"
     done
 }
+
+# X10: the universal ISO. mkuniversal <out> <cmdline> [mkiso args]: the ISO and
+# its raw disk image <out>.disk, built from both kernels (the kernels' names
+# in the ISO are urmqtt-aarch64.elf and urmqtt-x86-64.elf).
+mkuniversal() {
+    local out=$1 cmdline=$2
+    shift 2
+    [[ -f "$out" ]] && return 0
+    "$ROOT/scripts/mkiso.sh" --universal --kernel-aarch64 "$KERNEL_A64" --kernel-x86_64 "$KERNEL_X86" \
+        --out "$out" --cmdline "$cmdline" --disk-out "$out.disk" "$@" >/dev/null
+}
+
+# machines: name -> run-qemu.sh arguments (the same ISO or disk goes to each).
+u_run() { # u_run <aa64|x86-uefi|x86-bios> <accel> <log> <iso|disk> <file> [qemu args]
+    local kind=$1 accel=$2 log=$3 how=$4 file=$5
+    shift 5
+    case $kind in
+        aa64) boot "$log" "--$how" "$file" --accel "$accel" --headless --no-net --smp 4 "$@" ;;
+        x86-uefi) boot "$log" --arch x86_64 "--$how" "$file" --accel tcg --headless --no-net --smp 2 "$@" ;;
+        x86-bios) boot "$log" --arch x86_64 --machine pc --firmware bios "--$how" "$file" --accel tcg --headless --no-net --smp 2 "$@" ;;
+    esac
+}
+
+universal_iso() {
+    local iso="$OUT/universal.iso"
+    mkuniversal "$iso" "smoke"
+    local sum
+    sum=$(shasum -a 256 "$iso" | cut -d' ' -f1)
+    local aa64='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$' x86='^URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$'
+    local rows=("aa64-hvf|aa64|hvf|$aa64" "aa64-tcg|aa64|tcg|$aa64" "x86-q35-uefi|x86-uefi|tcg|$x86" "x86-pc-bios|x86-bios|tcg|$x86")
+    local row
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name kind accel boot_line <<<"$row"
+        [[ $kind == aa64 && " $ACCELS " != *" $accel "* ]] && continue
+        local log="$OUT/universal-iso-$name.log" status=0
+        u_run "$kind" "$accel" "$log" iso "$iso" || status=$?
+        [[ $(shasum -a 256 "$iso" | cut -d' ' -f1) == "$sum" ]] || echo "ISO MODIFIED" >>"$log"
+        check "universal-iso-$name (sha256 ${sum:0:12}…)" "$log" "$status" "$boot_line" "bootloader=Limine" \
+            "boot: from optical media \(CD/ISO\)" "storage: no data partition: booted from read-only media" \
+            "^URMQTT READY$" "NOT:ISO MODIFIED" "$NO_FAULT"
+    done
+}
+
+# The raw disk image of the same build: the data partition is created on the
+# first boot, whichever machine boots it.
+universal_raw() {
+    local iso="$OUT/universal.iso" row
+    mkuniversal "$iso" "smoke"
+    local aa64='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$' x86='^URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$'
+    local rows=("aa64|aa64|hvf|$aa64" "x86-uefi|x86-uefi|tcg|$x86" "x86-bios|x86-bios|tcg|$x86")
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name kind accel boot_line <<<"$row"
+        [[ $kind == aa64 && " $ACCELS " != *" $accel "* ]] && continue
+        local log="$OUT/universal-raw-$name.log" data="$OUT/universal-raw-$name.img" status=0
+        fresh_disk "$iso.disk" "$data"
+        u_run "$kind" "$accel" "$log" disk "$data" || status=$?
+        check "universal-raw-$name" "$log" "$status" "$boot_line" "boot: from a GPT disk, disk GUID" \
+            "gpt: backup table moved to the end of the 64 MiB disk" "created now, new disk GUID" \
+            "storage: data disk formatted \(was blank\)" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
+# The installer of the universal ISO on each machine, then the installed
+# disk booted by all three boot paths (aarch64 UEFI, x86 UEFI, x86 BIOS).
+universal_install() {
+    local iso="$OUT/universal-install.iso" row
+    mkuniversal "$iso" "smoke" --install-cmdline "install install-countdown=1" --install-default
+    local aa64='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$' x86='^URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$'
+    local rows=("aa64|aa64|hvf|$aa64" "x86-uefi|x86-uefi|tcg|$x86" "x86-bios|x86-bios|tcg|$x86")
+    local installer
+    for installer in "${rows[@]}"; do
+        IFS='|' read -r iname ikind iaccel _ <<<"$installer"
+        [[ $ikind == aa64 && " $ACCELS " != *" $iaccel "* ]] && continue
+        local t="$OUT/universal-install-$iname.img" status=0 log="$OUT/universal-install-$iname.log"
+        rm -f "$t"
+        truncate -s 64m "$t"
+        u_run "$ikind" "$iaccel" "$log" iso "$iso" \
+            -- -drive "if=none,id=t0,file=$t,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile= || status=$?
+        check "universal-install via $iname" "$log" "$status" "boot: from optical media" \
+            "install: installation image: boot disk image of [0-9]+ KiB for UEFI and BIOS" \
+            "install: disk virtio-blk 00:0[0-9a-f]\.0: 64 MiB$" "install: ALL DATA ON virtio-blk" \
+            "install: done: [0-9]+ MiB written and verified" "NOT:URMQTT READY" "$NO_FAULT"
+        # Every boot path starts the disk the installer wrote.
+        for row in "${rows[@]}"; do
+            IFS='|' read -r name kind accel boot_line <<<"$row"
+            [[ $kind == aa64 && " $ACCELS " != *" $accel "* ]] && continue
+            local copy="$OUT/universal-install-$iname-on-$name.img" blog="$OUT/universal-install-$iname-on-$name.log"
+            cp "$t" "$copy"
+            status=0
+            u_run "$kind" "$accel" "$blog" disk "$copy" || status=$?
+            check "universal-install: disk written via $iname boots on $name" "$blog" "$status" "$boot_line" \
+                "boot: from a GPT disk" "gpt: backup table moved to the end of the 64 MiB disk" \
+                "storage: data disk formatted \(was blank\)" "^URMQTT READY$" "$NO_FAULT"
+        done
+    done
+}
+
+# Cross-architecture data disk: broker state written by a VM of one
+# architecture is restored by a VM of the other on the same disk (retained
+# message, persistent session with a queued command, one telemetry record).
+# <from>/<to> are run-qemu kinds: aa64, x86-uefi, x86-bios.
+cross_arch() {
+    local from=$1 to=$2 faccel=$3 taccel=$4
+    local iso="$OUT/universal-serve.iso"
+    mkuniversal "$iso" "serve"
+    local data="$OUT/cross-arch-$from-to-$to.img" status=0
+    local l1="$OUT/cross-arch-$from-to-$to-1.log" l2="$OUT/cross-arch-$from-to-$to-2.log"
+    fresh_disk "$iso.disk" "$data"
+    # Phase 1 on <from>: the broker with the dev certificates, forwarded to 18883.
+    start_vm_kind "$from" "$faccel" "$l1" "$data"
+    if wait_log "$l1" "TLS 1.3 listener on port 8883"; then
+        python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$ROOT/deploy/dev" --phase 1 >"$l1.client" 2>&1 || status=$?
+    else
+        status=124
+    fi
+    kill_vm
+    cat "$l1.client" >>"$l1" 2>/dev/null || true
+    check "cross-arch $from -> $to: written by $from" "$l1" "$status" "storage: data disk formatted" \
+        "client: persist-phase1 ok" "NOT:FAILED" "$NO_FAULT"
+    status=0
+    start_vm_kind "$to" "$taccel" "$l2" "$data"
+    if wait_log "$l2" "TLS 1.3 listener on port 8883"; then
+        python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$ROOT/deploy/dev" --phase 2 >"$l2.client" 2>&1 || status=$?
+    else
+        status=124
+    fi
+    kill_vm
+    cat "$l2.client" >>"$l2" 2>/dev/null || true
+    check "cross-arch $from -> $to: restored by $to" "$l2" "$status" "storage: data disk opened" \
+        "db: restored 1 retained message\(s\), 1 persistent session\(s\) with 1 queued message\(s\), 1 revoked serial\(s\), 3 known device\(s\)" \
+        "telemetry: log recovered in [0-9]+ ms: 1 record\(s\)" \
+        "client: persist-retained ok" "client: persist-queued ok" "NOT:FAILED" "$NO_FAULT"
+}
+
+# start_vm_kind <aa64|x86-uefi|x86-bios> <accel> <log> <disk>: a serving VM with the TLS port forwarded.
+start_vm_kind() {
+    local kind=$1 accel=$2 log=$3 disk=$4
+    case $kind in
+        aa64) start_vm "$log" --disk "$disk" --accel "$accel" --fwd 18883:8883 ;;
+        x86-uefi) start_vm "$log" --arch x86_64 --disk "$disk" --accel tcg --fwd 18883:8883 ;;
+        x86-bios) start_vm "$log" --arch x86_64 --machine pc --firmware bios --disk "$disk" --accel tcg --fwd 18883:8883 ;;
+    esac
+}
+
+if [[ $ARCH == universal ]]; then
+    universal_iso
+    universal_raw
+    universal_install
+    if command -v mosquitto_pub >/dev/null; then
+        if [[ " $ACCELS " == *" hvf "* ]]; then
+            cross_arch aa64 x86-uefi hvf tcg
+            cross_arch x86-uefi aa64 tcg hvf
+            cross_arch aa64 x86-bios hvf tcg
+            cross_arch x86-bios aa64 tcg hvf
+        else
+            cross_arch aa64 x86-uefi tcg tcg
+            cross_arch x86-uefi aa64 tcg tcg
+        fi
+    else
+        echo "  ✗ cross-arch scenarios need the mosquitto clients"
+        FAILED=$((FAILED + 1))
+    fi
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
 
 if [[ $ARCH == x86_64 ]]; then
     # X2: the ISO-based boot and exception scenarios.

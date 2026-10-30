@@ -80,6 +80,21 @@ iso: build ## Build the bootable UEFI ISO for deploy/<ENV>/
 	scripts/mkiso.sh --kernel $(KERNEL_ELF) --out $(ISO)
 	@ln -sf $(notdir $(ISO)) $(BUILD_DIR)/urmqtt-$(ENV).iso
 
+# One ISO for aarch64 UEFI, x86_64 UEFI and x86_64 BIOS, and the matching
+# raw disk image (X10, ADR-043). Builds both kernels. `make iso` and
+# `make raw` stay the aarch64-only artifacts.
+UNIVERSAL_KERNELS := --kernel-aarch64 target/aarch64-unknown-none/release/urmqtt \
+	--kernel-x86_64 target/x86_64-urmqtt-none/release/urmqtt
+UNIVERSAL_ISO := $(BUILD_DIR)/urmqtt-$(ENV)-$(VERSION)-universal.iso
+UNIVERSAL_RAW := $(BUILD_DIR)/urmqtt-$(ENV)-$(VERSION)-universal.img
+
+.PHONY: universal
+universal: ## One ISO (and raw image) that boots on aarch64 UEFI, x86_64 UEFI and x86_64 BIOS
+	$(MAKE) --no-print-directory build ARCH=aarch64
+	$(MAKE) --no-print-directory build ARCH=x86_64
+	scripts/mkiso.sh --universal $(UNIVERSAL_KERNELS) --out $(UNIVERSAL_ISO) --disk-out $(UNIVERSAL_RAW)
+	@ln -sf $(notdir $(UNIVERSAL_ISO)) $(BUILD_DIR)/urmqtt-$(ENV)-universal.iso
+
 .PHONY: run
 run: disk ## Boot the dev disk in QEMU (HVF on macOS), 4 vCPU, 512 MB, serial on stdio
 	scripts/run-qemu.sh --disk $(DISK_IMG) $(if $(ACCEL),--accel $(ACCEL)) -- $(QEMU_ARGS)
@@ -181,6 +196,14 @@ dist: iso raw ## Release artifacts (ELF, ISO, raw image) and SHA256SUMS in build
 	cp $(KERNEL_ELF) $(BUILD_DIR)/dist/urmqtt-$(ENV)-$(VERSION).elf
 	cp $(ISO) $(RAW) $(BUILD_DIR)/dist/
 	cd $(BUILD_DIR)/dist && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
+
+.PHONY: dist-universal
+dist-universal: universal ## Both ELFs, the universal ISO and raw image, SHA256SUMS in build/dist-universal/
+	@rm -rf $(BUILD_DIR)/dist-universal && mkdir -p $(BUILD_DIR)/dist-universal
+	cp target/aarch64-unknown-none/release/urmqtt $(BUILD_DIR)/dist-universal/urmqtt-$(ENV)-$(VERSION)-aarch64.elf
+	cp target/x86_64-urmqtt-none/release/urmqtt $(BUILD_DIR)/dist-universal/urmqtt-$(ENV)-$(VERSION)-x86_64.elf
+	cp $(UNIVERSAL_ISO) $(UNIVERSAL_RAW) $(BUILD_DIR)/dist-universal/
+	cd $(BUILD_DIR)/dist-universal && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
 
 .PHONY: sign
 sign: ## Sign build/dist/SHA256SUMS with minisign (MINISIGN_KEY=path to the secret key)

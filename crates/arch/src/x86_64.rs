@@ -92,7 +92,8 @@ pub mod pio {
 #[cfg(target_os = "none")]
 pub mod power {
     pub use super::imp::power::{
-        Conduit, conduit_name, firmware_version, off, reset, set_conduit, set_debug_exit,
+        Acpi, Conduit, conduit_name, firmware_version, off, reset, set_acpi, set_conduit,
+        set_debug_exit,
     };
 }
 

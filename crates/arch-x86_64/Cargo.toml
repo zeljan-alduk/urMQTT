@@ -17,3 +17,7 @@ workspace = true
 [dependencies]
 urmqtt-dispatch = { path = "../dispatch" }
 urmqtt-sync = { path = "../sync" }
+
+# The refusal message on the framebuffer (`entry.rs`, bare metal only).
+[target.'cfg(target_os = "none")'.dependencies]
+font8x8 = { version = "0.3.1", default-features = false }

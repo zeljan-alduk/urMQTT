@@ -4,7 +4,10 @@
 # directories, and compares the kernel ELF, the ISO and the raw disk image
 # byte for byte.
 #
-#   scripts/repro.sh [ENV]        # default: prod
+#   scripts/repro.sh [ENV] [--universal]   # default: prod
+#
+# --universal builds `make universal` instead (both kernels, the universal
+# ISO and raw image: X10) and compares those.
 #
 # The untracked inputs of deploy/<ENV>/ (certificates, keys, revocation
 # list) are copied into both worktrees: they are inputs, not build products.
@@ -12,7 +15,12 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-ENV=${1:-prod}
+UNIVERSAL=0
+ARGS=()
+for a in "$@"; do
+    if [[ $a == --universal ]]; then UNIVERSAL=1; else ARGS+=("$a"); fi
+done
+ENV=${ARGS[0]:-prod}
 [[ -d "$ROOT/deploy/$ENV" ]] || { echo "error: deploy/$ENV not found" >&2; exit 2; }
 WORK=$(mktemp -d)
 # shellcheck disable=SC2329 # invoked by the EXIT trap
@@ -39,7 +47,9 @@ for d in a b; do
     done
     # Same version string as the original checkout (a worktree has no tags
     # of its own to differ on, but keep it explicit).
-    (cd "$dir" && make --no-print-directory iso raw ENV="$ENV" VERSION="$(git -C "$ROOT" describe --tags --always)" \
+    targets="iso raw"
+    [[ $UNIVERSAL -eq 1 ]] && targets="universal"
+    (cd "$dir" && make --no-print-directory $targets ENV="$ENV" VERSION="$(git -C "$ROOT" describe --tags --always)" \
         >"$WORK/$d.log" 2>&1) || { tail -30 "$WORK/$d.log"; echo "repro: build $d failed" >&2; exit 1; }
     eval "DIR_$d=\$dir"
 done
@@ -61,6 +71,12 @@ compare() {
 compare "kernel ELF" "$DIR_a/target/aarch64-unknown-none/release/urmqtt" "$DIR_b/target/aarch64-unknown-none/release/urmqtt"
 # The versioned files (not the urmqtt-<env>.iso symlink).
 v=$(git -C "$ROOT" describe --tags --always)
-compare "ISO" "$DIR_a/build/urmqtt-$ENV-$v.iso" "$DIR_b/build/urmqtt-$ENV-$v.iso"
-compare "raw disk image" "$DIR_a/build/urmqtt-$ENV-$v.img" "$DIR_b/build/urmqtt-$ENV-$v.img"
+if [[ $UNIVERSAL -eq 1 ]]; then
+    compare "x86_64 kernel ELF" "$DIR_a/target/x86_64-urmqtt-none/release/urmqtt" "$DIR_b/target/x86_64-urmqtt-none/release/urmqtt"
+    compare "universal ISO" "$DIR_a/build/urmqtt-$ENV-$v-universal.iso" "$DIR_b/build/urmqtt-$ENV-$v-universal.iso"
+    compare "universal raw disk image" "$DIR_a/build/urmqtt-$ENV-$v-universal.img" "$DIR_b/build/urmqtt-$ENV-$v-universal.img"
+else
+    compare "ISO" "$DIR_a/build/urmqtt-$ENV-$v.iso" "$DIR_b/build/urmqtt-$ENV-$v.iso"
+    compare "raw disk image" "$DIR_a/build/urmqtt-$ENV-$v.img" "$DIR_b/build/urmqtt-$ENV-$v.img"
+fi
 exit $status

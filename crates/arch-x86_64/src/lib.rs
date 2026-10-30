@@ -33,6 +33,7 @@ pub mod ioapic;
 pub mod msi;
 pub mod paging;
 pub mod pat;
+pub mod pm;
 pub mod trap;
 pub mod tsc;
 pub mod vectors;
