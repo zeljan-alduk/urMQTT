@@ -218,6 +218,42 @@ jobs:
       - name: Miri
         run: scripts/miri.sh
 
+  kani:
+    name: Kani proofs (parsers, timer wheel, H5)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    # Four harnesses (mqtt, config) are NOT PROVEN yet (docs/VERIFICATION.md):
+    # the job reports but does not block until they are reformulated.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: kani
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier --version 0.68.0
+          cargo kani setup
+      - name: Kani
+        run: scripts/kani.sh
+
+  sanitize:
+    name: AddressSanitizer and UBSan (host, SQLite and VFS, H5)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: sanitize
+          bare-metal-c: "true"
+      - name: Sanitizers
+        run: scripts/sanitize.sh
+
   deny:
     name: Dependencies (cargo-deny)
     runs-on: ubuntu-24.04

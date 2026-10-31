@@ -32,3 +32,6 @@ pub use server::{
     set_clock,
 };
 pub use ticket::TicketKeys;
+
+#[cfg(kani)]
+mod proofs;

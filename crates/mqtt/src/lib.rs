@@ -272,3 +272,6 @@ pub enum Packet<'a> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(kani)]
+mod proofs;

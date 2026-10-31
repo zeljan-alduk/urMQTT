@@ -1192,3 +1192,6 @@ impl TcpStack {
         !self.dirty.is_empty()
     }
 }
+
+#[cfg(kani)]
+mod proofs;

@@ -158,6 +158,29 @@ interop: build certs ## Interop matrix: OpenSSL, wolfSSL, mbedTLS clients agains
 ct: ## Constant-time (dudect-style) timing tests, release build (H2)
 	$(CARGO) test $(CARGO_FLAGS) --release -p urmqtt-tls --test constant_time -- --ignored --test-threads=1 --nocapture
 
+# Verification tooling (H5): docs/VERIFICATION.md says what each one covers.
+ACL_FUZZ_SECS ?= 600
+
+.PHONY: miri
+miri: ## Miri on the host crates (scripts/miri.sh [crate...])
+	scripts/miri.sh
+
+.PHONY: kani
+kani: ## Kani proofs: parsers and timer wheel (cargo install --locked kani-verifier)
+	scripts/kani.sh
+
+.PHONY: sanitize
+sanitize: ## ASan (Rust and C) and trapping UBSan (C) host test runs, incl. SQLite and the VFS
+	scripts/sanitize.sh
+
+.PHONY: acl-fuzz
+acl-fuzz: ## Stateful ACL fuzzer for ACL_FUZZ_SECS seconds (default 600)
+	ACL_FUZZ_SECS=$(ACL_FUZZ_SECS) $(CARGO) test $(CARGO_FLAGS) --release -p urmqtt-broker --test acl_model -- --nocapture
+
+.PHONY: coverage
+coverage: ## Line coverage of the fuzz targets over corpus and seeds (scripts/fuzz-coverage.sh)
+	scripts/fuzz-coverage.sh
+
 # The RustCrypto backends the kernel uses (X0b), so the differential fuzz
 # targets compare them, not the portable code.
 FUZZ_RUSTFLAGS := --cfg aes_armv8 --cfg polyval_armv8 --cfg chacha20_force_neon

@@ -1543,3 +1543,6 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(kani)]
+mod proofs;

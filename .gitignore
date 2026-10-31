@@ -1,6 +1,7 @@
 /target/
 /fuzz/target/
 /fuzz/corpus/
+/fuzz/coverage/
 /fuzz/artifacts/
 /build/
 *.img
