@@ -69,6 +69,8 @@ retention_days = 30
 discard = "auto"                    # "auto" | "off": release retired telemetry segments, truncated file tails and grown space to the device (virtio-blk discard, SCSI UNMAP)
 backup_interval_min = 0             # minutes between in-disk database backups (S5); 0 = off (bench: no backups, so the measurements are not disturbed)
 auto_restore = true                 # restore the newest intact backup when the database is corrupt at boot (logged loudly); false = refuse to serve
+scrub_interval_h = 0                # hours between scrub passes: re-read the telemetry ring and check the database and the backups (S6); 0 = off (bench: not while measuring)
+scrub_io_budget_mb_s = 8            # megabytes per second a scrub pass may read
 require_flush = true
 require_data_disk = true
 refuse_on_corruption = true

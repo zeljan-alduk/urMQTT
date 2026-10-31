@@ -177,13 +177,16 @@ fn grow_1_gib_to_4_gib_to_64_gib_with_data_present() {
         assert_eq!(s.retained().unwrap().len(), 1);
         assert_eq!(s.db().query_text("PRAGMA integrity_check").unwrap(), "ok");
         let (n, per_part_cap) = urmqtt_store::vfs::with_disk(|d| {
-            let (mut log, rec) = TelemetryLog::open(d, NOW, RET).unwrap();
+            let (mut log, _) = TelemetryLog::open(d, NOW, RET).unwrap();
+            // Boot reads only the newest segment per partition (G8): the
+            // total is the scan's.
+            let total = total_records(d, &log);
             let cap = log.capacity_bytes();
             // The grown ring takes new records too.
             log.append(d, 0, NOW * 1000 + 9_000_000, "devices/d/t", b"after-grow")
                 .unwrap();
             log.flush(d).unwrap();
-            (rec.records, cap)
+            (total, cap)
         })
         .unwrap();
         assert_eq!(
@@ -231,6 +234,14 @@ struct Seen {
 
 const PATTERN_AT: u64 = 7_777;
 
+/// Every record of the ring, by a full scan (boot reads the newest segment
+/// of each partition only).
+fn total_records(d: &mut Disk, log: &TelemetryLog) -> u64 {
+    (0..log.partitions())
+        .map(|p| log.scan(d, p, u64::MAX / 4, |_| {}).unwrap())
+        .sum()
+}
+
 fn pattern() -> Vec<u8> {
     (0..90_000u32).map(|i| (i % 251) as u8 ^ 0x5a).collect()
 }
@@ -257,10 +268,11 @@ fn look(m: &MemDisk) -> Result<Seen, String> {
     let mut back = vec![0u8; pattern().len()];
     disk.read_at(RegionKind::Wal, PATTERN_AT, &mut back)
         .map_err(|err| format!("{err:?}"))?;
-    let (_, rec) = TelemetryLog::open(&mut disk, NOW, RET).map_err(|err| format!("{err:?}"))?;
+    let (log, _) = TelemetryLog::open(&mut disk, NOW, RET).map_err(|err| format!("{err:?}"))?;
+    let records = total_records(&mut disk, &log);
     Ok(Seen {
         layout: disk.layout().clone(),
-        records: rec.records,
+        records,
         pattern_ok: back == pattern(),
     })
 }

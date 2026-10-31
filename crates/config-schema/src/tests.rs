@@ -505,6 +505,59 @@ fn backup_settings_default_and_are_bounded() {
     );
 }
 
+/// S6: `storage.scrub_interval_h` (24) and `storage.scrub_io_budget_mb_s` (8)
+/// are optional; production, which does not list them, gets the defaults.
+#[test]
+fn scrub_settings_default_and_are_bounded() {
+    let dev = parse("dev", DEV).unwrap();
+    assert_eq!(dev.storage.scrub_interval_h, 24);
+    assert_eq!(dev.storage.scrub_io_budget_mb_s, 8);
+    let prod = parse("prod", PROD).unwrap();
+    assert_eq!(prod.storage.scrub_interval_h, SCRUB_INTERVAL_DEFAULT_H);
+    assert_eq!(prod.storage.scrub_io_budget_mb_s, SCRUB_BUDGET_DEFAULT_MB_S);
+    // The bench template does not scrub while measuring.
+    let bench = include_str!("../../../deploy/bench/config.toml");
+    assert_eq!(parse("bench", bench).unwrap().storage.scrub_interval_h, 0);
+    for ok in [0, 1, 24, SCRUB_INTERVAL_MAX_H] {
+        let t = dev_in(
+            "storage",
+            "scrub_interval_h",
+            &format!("scrub_interval_h = {ok}"),
+        );
+        assert_eq!(parse("dev", &t).unwrap().storage.scrub_interval_h, ok);
+    }
+    for bad in [
+        format!("scrub_interval_h = {}", SCRUB_INTERVAL_MAX_H + 1),
+        "scrub_interval_h = -1".to_string(),
+        "scrub_interval_h = \"24\"".to_string(),
+    ] {
+        assert_rejected(
+            "dev",
+            &dev_in("storage", "scrub_interval_h", &bad),
+            "scrub_interval_h",
+        );
+    }
+    for ok in [1, 8, SCRUB_BUDGET_MAX_MB_S] {
+        let t = dev_in(
+            "storage",
+            "scrub_io_budget_mb_s",
+            &format!("scrub_io_budget_mb_s = {ok}"),
+        );
+        assert_eq!(parse("dev", &t).unwrap().storage.scrub_io_budget_mb_s, ok);
+    }
+    for bad in [
+        "scrub_io_budget_mb_s = 0".to_string(),
+        format!("scrub_io_budget_mb_s = {}", SCRUB_BUDGET_MAX_MB_S + 1),
+        "scrub_io_budget_mb_s = 0.5".to_string(),
+    ] {
+        assert_rejected(
+            "dev",
+            &dev_in("storage", "scrub_io_budget_mb_s", &bad),
+            "scrub_io_budget_mb_s",
+        );
+    }
+}
+
 /// O3: a production configuration must choose the medium explicitly (no
 /// silent default), while dev and old configs keep the disk as the default.
 #[test]

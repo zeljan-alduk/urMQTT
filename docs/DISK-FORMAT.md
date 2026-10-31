@@ -1,10 +1,10 @@
 # Data disk format, layout version 2 (minor 1)
 
-The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0, S2, S3, S5).
+The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0, S2, S3, S5, S6).
 Since S1 the "data disk" is the **data partition of the boot disk** (§0);
 everything below §0 is relative to that partition's first sector. Layout v2
 (S2) adds alignment, the partition count and an A/B superblock; S3 adds the
-grow (§9); S5 adds minor version 1 and the backup region (§12). Layout v1 (S0/S1) is described only as far as `urmqtt-disk migrate`
+grow (§9); S5 adds minor version 1 and the backup region (§12); S6 reads without writing (§13). Layout v1 (S0/S1) is described only as far as `urmqtt-disk migrate`
 reads it (§10). The data has **no
 filesystem**: the kernel accesses it raw, as a superblock, a region table and
 fixed regions. The code is in `crates/store`
@@ -355,10 +355,13 @@ record never spans segments.
   - for the first record of a partition, which goes to segment 0 with seq 1;
   - after recovery: a recovered segment is never extended.
 
-**Recovery** (`TelemetryLog::open`). For each partition:
-1. Read every segment header and order the valid segments by `seq`.
-2. Scan each segment's records until `len == 0` (a clean end) or the first record that fails its CRC, its length bounds or UTF-8 (a torn tail; the rest of the segment is ignored).
+**Recovery** (`TelemetryLog::open`, bounded since S6, ADR-165). For each partition:
+1. Read every segment header (one device block each) and order the valid segments by `seq`.
+2. Scan the records of **the segment with the highest `seq` only**, until `len == 0` (a clean end) or the first record that fails its CRC, its length bounds or UTF-8 (a torn tail; the rest of the segment is ignored). Only the newest segment can hold a torn tail or take new records, because a segment is only left when the next one is created. The older segments are known by their headers.
 3. The segment with the highest `seq` is the partition's active segment. New records go to a new segment, the next ring index after it.
+4. For retention, an older segment's age is taken as the creation time of the segment that followed it (its newest record cannot be younger), until the scrubber (section 13) has read it and made the age exact.
+
+Boot therefore reads `segments x one block + partitions x one segment`, not the ring.
 
 **Why stale data never resurrects:** the CRC is salted with the segment's
 `seq`. Records from an earlier pass of the ring therefore fail in a reused
@@ -423,7 +426,7 @@ slot B's, which the first-boot head clearing also zeroes).
 | ~~G3~~ | ~~regions are aligned to 4 KiB, not 1 MiB or the device topology; telemetry writes are 512 B granular~~ | **fixed in S2** for virtio-blk and virtio-scsi (§2a). Open: NVMe/ATA topology (X13); 4Kn devices cannot boot (the GPT code is 512-byte based), the store layer is tested on a 4096/4096 device |
 | ~~G4~~ | ~~the telemetry partition count is fixed at 8~~ | **fixed in S2**: `partitions` in the superblock |
 | ~~G7~~ | ~~disks whose size is not a multiple of 4 KiB are refused~~ | **fixed in S2**: the formatted size is rounded down |
-| G8 | recovery reads the whole telemetry region at boot, so boot time grows with the disk | **not done in S2**: only the newest segment per partition needs a full scan, with a per-segment summary; moves to S6 with the scrubber |
+| ~~G8~~ | ~~recovery reads the whole telemetry region at boot, so boot time grows with the disk~~ | **fixed in S6** (ADR-165): only the newest segment of each partition is read at boot, the others by header (no format change: no summary is needed); the scrubber (section 13) reads and checks the rest in the background |
 
 ## 9. Growing (S3, ADR-142)
 
@@ -622,3 +625,32 @@ boot repeats the restore from step 1 or 2. The lost time window is `now - create
 - A header never becomes valid before its payload is complete and read back.
 - The database's logical size never exceeds its (shortened) region: the carve leaves it twice its size.
 - Released space (§11) cannot reach the backup region: the region is no longer part of the database's extents, and the carve cancels queued discards over it.
+
+## 13. Scrubbing (S6, ADR-164, ADR-165)
+
+Not a format change: the scrubber only reads, and writes nothing to the disk.
+It is described here because it defines which of the structures above are
+checked by what. A pass visits, in order:
+
+| What | How | Found |
+|---|---|---|
+| each table of the database | `PRAGMA quick_check(table)` (with its indexes), after the page cache is released so the disk is read | structural damage: a broken tree, a bad page header, a bad cell pointer. **Not** a flipped bit inside a value: SQLite pages carry no checksum in this build |
+| the backup control block | magic present, CRC fails | a damaged block (treated as idle by the broker) |
+| each backup slot | header: magic present, checks fail; payload: CRC-32C against the header | a damaged header, a payload that no longer matches |
+| each telemetry segment with a valid header | every record: length bounds, topic length, CRC salted by the segment's `seq` | see below |
+
+A telemetry segment ends in exactly one of three ways. **Clean:** valid
+records to a zero length or the segment's last byte. **Damaged:** a record
+fails and a valid record follows it in the same segment (found by trying every
+byte offset after the bad record whose length field is plausible; at most 64
+KiB per record and 4 MiB of CRC work per segment): a torn write cannot do this,
+a flipped bit or a bad sector can. **Bad tail:** a record fails and nothing
+valid follows: what a crash during a flush leaves, and also what a flip in the
+last record looks like; reported as a warning, not as damage. A **bad header**
+is a 512-byte block with the segment magic that fails its checks: recovery
+treats it as an unused slot, the scrubber says what it is. A segment that was
+reused or retired while it was being read (its header, read again at the end,
+changed) is not judged.
+
+A bit flipped in a segment's magic, or in a block that is not a segment,
+cannot be told from a never-used slot and is not found.

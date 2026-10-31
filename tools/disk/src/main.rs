@@ -28,6 +28,9 @@
 //!                                                the whole run happens on an in-memory overlay
 //! urmqtt-disk backup-extract DISK OUT [--slot N] write the newest intact snapshot (or slot N) as an
 //!                                                SQLite file; the disk is not changed
+//! urmqtt-disk scrub DISK                         one scrub pass (S6) over the database, the backups and
+//!                                                the telemetry ring, as the broker's idle scrubber does
+//!                                                it; non-zero exit if it finds damage. Read-only
 //! urmqtt-disk backup-restore DISK --write        replace the database by the newest intact snapshot
 //!                                                (the kernel does the same at boot when the database
 //!                                                is corrupt and storage.auto_restore is on)
@@ -257,6 +260,15 @@ fn info(path: &str) -> Result<(), String> {
                 let mut disk = disk;
                 for line in backup_report(&mut disk).0 {
                     println!("  {line}");
+                }
+                if let Ok((log, _)) = TelemetryLog::open(&mut disk, now_unix(), u64::MAX / 4) {
+                    let seg = log.segment_bytes();
+                    println!(
+                        "  telemetry ring: {} partition(s) of {} segment(s) of {} KiB each (the ring's first byte is 4 KiB into the telemetry region)",
+                        log.partitions(),
+                        log.capacity_bytes() / seg.saturating_sub(512).max(1),
+                        seg >> 10
+                    );
                 }
             }
             Err(e) => println!("data: partition at LBA {}: {e}", d.first_lba),
@@ -788,6 +800,49 @@ fn grow_cmd(path: &str, ratio: u32, write: bool, fault: Option<&str>) -> Result<
     Ok(())
 }
 
+// --- scrub (S6) -----------------------------------------------------------------------
+
+fn scrub_cmd(path: &str) -> Result<(), String> {
+    use urmqtt_store::scrub::{Finding, Scrubber};
+    let (dev, f) = overlay(path)?;
+    let mut disk = open_layout(data_part(path, Box::new(dev.view()), &f)?)?;
+    // The telemetry log is opened the way the kernel does (recovery included)
+    // on the overlay, so the disk is not changed.
+    let (mut log, _) = TelemetryLog::open(&mut disk, now_unix(), u64::MAX / 4)
+        .map_err(|e| format!("telemetry: {e:?}"))?;
+    let store = open_store(disk)?;
+    let mut scrubber = Scrubber::new();
+    let mut findings: Vec<Finding> = Vec::new();
+    while !scrubber
+        .step(store.db(), Some(&mut log), 256 * 1024, &mut findings)
+        .done
+    {}
+    let r = scrubber.report;
+    for f in &findings {
+        println!("scrub: {f:?}");
+    }
+    println!(
+        "scrub: {} KiB read; database {} object(s), {} problem(s); backup {} slot(s) intact, {} bad; \
+         telemetry {} segment(s), {} record(s), {} damaged, {} bad tail(s), {} bad header(s)",
+        r.bytes_read / 1024,
+        r.db_objects,
+        r.db_errors,
+        r.backup_slots_ok,
+        r.backup_slots_bad,
+        r.telemetry_segments,
+        r.telemetry_records,
+        r.telemetry_damaged,
+        r.telemetry_bad_tails,
+        r.telemetry_bad_headers
+    );
+    if r.errors() > 0 {
+        Err(format!("scrub: {} problem(s) found", r.errors()))
+    } else {
+        println!("scrub: ok");
+        Ok(())
+    }
+}
+
 // --- backup (S5) ----------------------------------------------------------------------
 
 /// The backup region of a disk as text lines, and the problems found: a
@@ -1087,6 +1142,7 @@ fn run(args: &[String]) -> Result<(), String> {
             flag("--write"),
             opt("--fault").as_deref(),
         ),
+        Some("scrub") => scrub_cmd(arg(1, "DISK")?),
         Some("backup") => backup_cmd(arg(1, "DISK")?, flag("--write"), opt("--fault").as_deref()),
         Some("backup-extract") => backup_extract(
             arg(1, "DISK")?,

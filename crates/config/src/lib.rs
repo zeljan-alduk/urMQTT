@@ -200,6 +200,10 @@ pub struct Storage {
     /// Restore the newest intact backup when the database fails its
     /// integrity check at boot (S5).
     pub auto_restore: bool,
+    /// Hours between scrub passes (S6); 0: none.
+    pub scrub_interval_h: u32,
+    /// Megabytes per second a scrub pass may read (S6).
+    pub scrub_io_budget_mb_s: u32,
     pub require_flush: bool,
     pub require_data_disk: bool,
     pub refuse_on_corruption: bool,

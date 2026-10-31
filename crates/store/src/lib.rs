@@ -40,6 +40,7 @@ pub mod mig;
 pub mod part;
 pub mod ram;
 pub mod schema;
+pub mod scrub;
 pub mod store;
 pub mod telemetry;
 #[allow(unsafe_code)] // the VFS SQLite calls back into

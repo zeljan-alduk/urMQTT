@@ -259,6 +259,42 @@ impl Ops {
             "g",
         );
         add("storage.ram_bytes", crate::live::store_bytes(), "g");
+        // Scrubbing (S6): the last finished pass as gauges, so one lost
+        // datagram costs nothing. `errors` is what an alert wants: problems
+        // that pass found (damaged telemetry or database objects, bad backup
+        // slots; torn tails are `bad_tails` and expected after a crash).
+        {
+            let m = &crate::db::SCRUB;
+            if m.enabled.load(Ordering::Relaxed) != 0 {
+                for (name, v) in [
+                    ("running", &m.running),
+                    ("passes", &m.passes),
+                    ("last_ms", &m.last_ms),
+                    ("errors", &m.last_errors),
+                    ("errors_total", &m.errors_total),
+                    ("bytes_read", &m.bytes_read),
+                    ("telemetry_segments", &m.telemetry_segments),
+                    ("telemetry_records", &m.telemetry_records),
+                    ("telemetry_damaged", &m.telemetry_damaged),
+                    ("telemetry_bad_tails", &m.telemetry_bad_tails),
+                    ("telemetry_bad_headers", &m.telemetry_bad_headers),
+                    ("db_objects", &m.db_objects),
+                    ("db_errors", &m.db_errors),
+                    ("backup_slots_ok", &m.backup_slots_ok),
+                    ("backup_slots_bad", &m.backup_slots_bad),
+                ] {
+                    add(
+                        &alloc::format!("scrub.{name}"),
+                        v.load(Ordering::Relaxed),
+                        "g",
+                    );
+                }
+                let last = m.last_unix.load(Ordering::Relaxed);
+                if let (true, Some(now)) = (last > 0, crate::boot::now_unix()) {
+                    add("scrub.age_s", now.saturating_sub(last), "g");
+                }
+            }
+        }
         // In-disk database backup (S5): gauges, so a missed datagram costs
         // nothing. `age_s` is what an alert wants: seconds since the newest
         // snapshot on the disk (absent while there is none or the clock is

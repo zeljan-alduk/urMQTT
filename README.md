@@ -125,6 +125,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | The disk grows with the volume, at boot or online, crash-safe, never shrinks (`storage.grow_ratio_db`) | ✅ S3 |
 | | Expired telemetry, truncated file tails and grown space are released to the disk (virtio-blk discard, virtio-scsi UNMAP), within the device's limits, rate limited, never in front of a commit (`storage.discard`) | ✅ S4 |
 | | The database is copied into a backup region of the data partition (two slots, written alternately by SQLite's online backup API in bounded steps, the previous good one never touched) and restored at boot, logged loudly, if it is found corrupt (`storage.backup_interval_min`, `storage.auto_restore`) | ✅ S5 |
+| | A background scrubber re-reads the database (`quick_check` per table, from the disk), the backups and the whole telemetry ring within an I/O budget, and reports bit rot with its position (`storage.scrub_interval_h`, `storage.scrub_io_budget_mb_s`); boot reads only the newest telemetry segment of each partition, not the ring | ✅ S6 |
 | | Device registry, revocations, retained messages, persistent sessions with offline queues | ✅ M11 |
 | | Per-core append-only telemetry log with CRC and crash recovery | ✅ M12 |
 | **Scale** | Per-core event loops and broker shards, per-CPU heap caches, frame pools, cross-core fan-out | ✅ M13 |
@@ -505,6 +506,8 @@ error: invalid configuration deploy/bad/config.toml:
 | `storage.discard` | `"auto"` (default) or `"off"` | Release expired telemetry segments, truncated file tails and grown space to the disk (virtio-blk DISCARD, virtio-scsi UNMAP). `"off"` never sends a command (S4) |
 | `storage.backup_interval_min` | 0 to 10080, default 60 | Minutes between in-disk database backups; `0` turns them (and the backup region) off (S5) |
 | `storage.auto_restore` | bool, default `true` | When the database is corrupt at boot, replace it from the newest intact in-disk backup and log the lost window; `false` refuses to serve, as before (S5) |
+| `storage.scrub_interval_h` | 0 to 2160, default 24 | Hours between scrub passes over the database, the backups and the telemetry ring; `0` turns scrubbing off (S6) |
+| `storage.scrub_io_budget_mb_s` | 1 to 1024, default 8 | Megabytes per second a scrub pass may read (S6) |
 | `storage.require_flush` | bool | Refuse disks without `VIRTIO_BLK_F_FLUSH` (false only in `dev`) |
 | `storage.require_data_disk` | bool | Refuse to serve without a data disk (false only in `dev`: memory-only) |
 | `storage.refuse_on_corruption` | bool | Refuse to serve when `PRAGMA quick_check` fails (false only in `dev`) |
@@ -968,7 +971,7 @@ Security is the first priority and wins conflicts with the other tracks.
 | ✅ | **S3** Growing the disk | the new space is used at boot and, on virtio-blk, while running (config-change interrupt); 1 → 4 → 64 GiB with data present, a power cut at every write leaves the old or the new layout; never shrinks |
 | ✅ | **S4** Discard | expired telemetry, truncated file tails and grown space are released (virtio-blk DISCARD, virtio-scsi UNMAP), within the device's limits, rate limited, never in front of a commit; a qcow2 with `discard=unmap` shrinks after retention (62 → 15 MiB mapped); recovery never trusts a released range; db-bench unchanged (NVMe/AHCI come with X13) |
 | ✅ | **S5** In-disk backup | layout v2.1 backup region carved from the database's tail with one superblock write (v2.0 disks keep working); A/B snapshots by SQLite's online backup API in 16-page steps (commits do not slow down: max 2.4 ms against 2.2 ms alone, the single-call copy would stall 445 ms); restore at boot when `quick_check` fails, a cut mid-restore is finished by the next boot; a power cut at every write of a backup leaves the previous slot intact |
-| 📋 | **S6** Scrubbing | bit flips found and reported within an I/O budget |
+| ✅ | **S6** Scrubbing | idle scrub of the database, the backups and every telemetry record; injected bit flips are found, classified (damage, bad tail, bad header) and reported with their position; the I/O stays within the budget under load (measured); G8: boot reads the newest segment of each partition, not the ring (1.1 MiB for 5.8 MiB of records in the test) |
 | 📋 | **S7** Encryption at rest | optional AES-256-XTS with hardware AES, ≤ 5 % measured overhead |
 | 📋 | **S8** Docs & hardening | final format spec, fuzz targets and golden images for every version |
 

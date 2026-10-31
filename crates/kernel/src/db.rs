@@ -28,6 +28,7 @@ use urmqtt_log::{error, info, warn};
 use urmqtt_store::backup::{BackupError, BackupJob, Progress};
 use urmqtt_store::disk::BackupRegion;
 use urmqtt_store::layout::LayoutError;
+use urmqtt_store::scrub::{Finding, Pacer, Scrubber};
 use urmqtt_store::telemetry::{Recovery, TelemetryLog};
 use urmqtt_store::{Disk, DiskError, Opened, Platform, Retained, SessionRecord, Store, StoreError};
 use urmqtt_sync::spsc::{Consumer, Producer, Spsc};
@@ -82,6 +83,64 @@ pub static BACKUP: BackupMetrics = BackupMetrics {
     last_bytes: AtomicU64::new(0),
     restored: AtomicU64::new(0),
     enabled: AtomicU64::new(0),
+};
+
+/// The first scrub pass of a boot starts this long after the DB core does
+/// (later ones every `storage.scrub_interval_h`).
+const SCRUB_FIRST_MS: u64 = 600_000;
+/// While the broker is busy, a scrub pass is let through at most this often
+/// (so a pass always finishes: a step of at most 256 KiB every 100 ms, 2.5
+/// MB/s whatever the budget).
+const SCRUB_BUSY_EVERY_MS: u64 = 100;
+/// Findings logged in full per pass; the rest are counted.
+const SCRUB_LOG_LIMIT: u32 = 24;
+
+/// Scrub state for statsd (`urmqtt.scrub.*`): the last finished pass, plus
+/// running totals. Updated by the DB core.
+pub struct ScrubMetrics {
+    pub enabled: AtomicU64,
+    /// 1 while a pass is running.
+    pub running: AtomicU64,
+    /// Passes finished this boot.
+    pub passes: AtomicU64,
+    /// Unix seconds when the last pass finished (0: none).
+    pub last_unix: AtomicU64,
+    pub last_ms: AtomicU64,
+    /// Problems the last pass found (data at risk; bad tails excluded).
+    pub last_errors: AtomicU64,
+    pub telemetry_segments: AtomicU64,
+    pub telemetry_records: AtomicU64,
+    pub telemetry_damaged: AtomicU64,
+    pub telemetry_bad_tails: AtomicU64,
+    pub telemetry_bad_headers: AtomicU64,
+    pub db_objects: AtomicU64,
+    pub db_errors: AtomicU64,
+    pub backup_slots_ok: AtomicU64,
+    pub backup_slots_bad: AtomicU64,
+    /// Bytes read by scrubbing this boot, all passes.
+    pub bytes_read: AtomicU64,
+    /// Problems found this boot, all passes.
+    pub errors_total: AtomicU64,
+}
+
+pub static SCRUB: ScrubMetrics = ScrubMetrics {
+    enabled: AtomicU64::new(0),
+    running: AtomicU64::new(0),
+    passes: AtomicU64::new(0),
+    last_unix: AtomicU64::new(0),
+    last_ms: AtomicU64::new(0),
+    last_errors: AtomicU64::new(0),
+    telemetry_segments: AtomicU64::new(0),
+    telemetry_records: AtomicU64::new(0),
+    telemetry_damaged: AtomicU64::new(0),
+    telemetry_bad_tails: AtomicU64::new(0),
+    telemetry_bad_headers: AtomicU64::new(0),
+    db_objects: AtomicU64::new(0),
+    db_errors: AtomicU64::new(0),
+    backup_slots_ok: AtomicU64::new(0),
+    backup_slots_bad: AtomicU64::new(0),
+    bytes_read: AtomicU64::new(0),
+    errors_total: AtomicU64::new(0),
 };
 
 /// Telemetry records from one core: (Unix ms, message).
@@ -406,7 +465,8 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
     let mut log = log;
     match (test, log.as_mut()) {
         (Some(DbTest::LogVerify), Some(l)) => log_verify(l, retention_ms),
-        (Some(DbTest::DiscardFill), Some(l)) => discard_fill(l),
+        (Some(DbTest::DiscardFill), Some(l)) => discard_fill(l, 40),
+        (Some(DbTest::LogFill), Some(l)) => discard_fill(l, 0),
         (Some(DbTest::LogTear), Some(l)) => {
             log_tear(l);
             // The torn write is on disk; the in-memory log is stale.
@@ -484,6 +544,7 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
         log_reported: 0,
         control_seq,
         backup: backup_start(cfg, test),
+        scrub: scrub_start(cfg, test),
     });
     // Relaxed: read only after the data plane starts (later in boot).
     ACTIVE.store(true, Ordering::Relaxed);
@@ -492,9 +553,10 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
 
 fn log_recovery(rec: &Recovery, log: &TelemetryLog, ms: u64) {
     info!(
-        "telemetry: log recovered in {ms} ms: {} record(s) in {} segment(s), {} torn tail(s) truncated, \
-         {} expired; {} partitions of {} MiB",
+        "telemetry: log recovered in {ms} ms: {} record(s) in the {} newest segment(s) read of {}, {} torn tail(s) truncated, \
+         {} expired (the other segments are known by their headers and checked by the scrubber); {} partitions of {} MiB",
         rec.records,
+        rec.scanned,
         rec.segments,
         rec.torn_tails,
         rec.expired,
@@ -753,6 +815,101 @@ struct Worker {
     discard_logged: u64,
     /// The in-disk backup schedule and the job in progress (S5).
     backup: BackupState,
+    /// The scrubber's schedule and the pass in progress (S6).
+    scrub: ScrubState,
+}
+
+/// The scrub schedule (S6, ADR-164).
+struct ScrubState {
+    on: bool,
+    interval_ms: u64,
+    budget_mb_s: u32,
+    next_ms: u64,
+    run: Option<ScrubRun>,
+    passes: u64,
+}
+
+/// One scrub pass in progress.
+struct ScrubRun {
+    scrubber: Scrubber,
+    pacer: Pacer,
+    started_ms: u64,
+    last_busy_ms: u64,
+    logged: u32,
+    steps: u32,
+}
+
+/// Opens the scrub schedule: the first pass ten minutes after boot (the dev
+/// hooks `test=scrub` and `test=scrub-load` start it at once), then every
+/// `storage.scrub_interval_h`.
+fn scrub_start(cfg: &urmqtt_config::Storage, test: Option<DbTest>) -> ScrubState {
+    let interval_ms = u64::from(cfg.scrub_interval_h) * 3_600_000;
+    let on = cfg.scrub_interval_h > 0;
+    let first = match test {
+        Some(DbTest::Scrub) => 3_000,
+        Some(DbTest::ScrubLoad) => 6_000,
+        _ => SCRUB_FIRST_MS.min(interval_ms),
+    };
+    if on {
+        // Relaxed: statistics.
+        SCRUB.enabled.store(1, Ordering::Relaxed);
+        info!(
+            "scrub: every {} h, at most {} MB/s; the first pass {} s after boot",
+            cfg.scrub_interval_h,
+            cfg.scrub_io_budget_mb_s,
+            first / 1000
+        );
+    } else {
+        info!("scrub: off (storage.scrub_interval_h = 0)");
+    }
+    ScrubState {
+        on,
+        interval_ms,
+        budget_mb_s: cfg.scrub_io_budget_mb_s,
+        next_ms: now_ms() + first,
+        run: None,
+        passes: 0,
+    }
+}
+
+fn run_budget_kib(mb_s: u32) -> u64 {
+    u64::from(mb_s) * 1024
+}
+
+/// One finding, in the log (and so on the console and in syslog).
+fn log_finding(f: &Finding) {
+    match f {
+        Finding::TelemetryDamaged {
+            partition,
+            index,
+            seq,
+            at,
+            resumes_at,
+        } => error!(
+            "scrub: telemetry partition {partition} segment {index} (seq {seq}): DAMAGED record at byte {at}, valid records resume at byte {resumes_at}: bit rot or a bad sector; what lies between is unreadable"
+        ),
+        Finding::TelemetryBadTail {
+            partition,
+            index,
+            seq,
+            at,
+        } => warn!(
+            "scrub: telemetry partition {partition} segment {index} (seq {seq}): bad tail at byte {at}, nothing valid after it: a torn write from a crash, or damage to the last record"
+        ),
+        Finding::TelemetryBadHeader { partition, index } => error!(
+            "scrub: telemetry partition {partition} segment {index}: segment header DAMAGED (it has the magic and fails its checks): recovery cannot see this segment"
+        ),
+        Finding::Database { object, message } => {
+            error!("scrub: database object {object}: DAMAGED: {message}")
+        }
+        Finding::BackupSlot { slot, seq, why } => {
+            error!("scrub: backup slot {slot} (seq {seq}): DAMAGED: {why}")
+        }
+        Finding::BackupControl => error!(
+            "scrub: backup control block DAMAGED (it has its magic and fails its checks); treated as idle"
+        ),
+        Finding::ReadError { what } => error!("scrub: reading the {what} failed"),
+    }
 }
 
 /// The backup schedule (S5, ADR-162).
@@ -1160,14 +1317,15 @@ fn log_discard_stats(s: &urmqtt_store::disk::DiscardStats) {
 
 /// `test=discard-fill`: telemetry dated 40 days ago, about 2.5 segments
 /// into every partition, so that the next boot's retention finds whole
-/// expired segments to release.
-fn discard_fill(log: &mut TelemetryLog) {
+/// expired segments to release. `test=log-fill` is the same dated now
+/// (`age_days` 0): a ring for the scrub tests.
+fn discard_fill(log: &mut TelemetryLog, age_days: u64) {
     let Some(now) = crate::boot::now_unix() else {
         error!("discard-fill: no wall clock, cannot date the records");
         return;
     };
-    let old_ms = now.saturating_sub(40 * 86_400) * 1000;
-    log.set_now(now.saturating_sub(40 * 86_400));
+    let old_ms = now.saturating_sub(age_days * 86_400) * 1000;
+    log.set_now(now.saturating_sub(age_days * 86_400));
     let payload = [0xd5u8; 1000];
     let per_partition = log.segment_bytes() * 5 / 2 / 1040;
     let r = urmqtt_store::vfs::with_disk(|d| {
@@ -1183,6 +1341,12 @@ fn discard_fill(log: &mut TelemetryLog) {
     });
     log.set_now(now);
     match r {
+        Some(Ok(_)) if age_days == 0 => info!(
+            "log-fill: {} record(s) dated now durable in {} partition(s), {} KiB each",
+            per_partition * log.partitions() as u64,
+            log.partitions(),
+            (per_partition * 1040) >> 10
+        ),
         Some(Ok(_)) => info!(
             "discard-fill: {} record(s) dated 40 days ago durable in {} partition(s), {} KiB each",
             per_partition * log.partitions() as u64,
@@ -1297,6 +1461,7 @@ impl Worker {
         did |= self.check_online_grow(now_ms);
         did |= self.step_discard(now_ms);
         did |= self.step_backup(now_ms);
+        did |= self.step_scrub(now_ms);
         if now_ms.saturating_sub(self.last_stats_ms) >= STATS_EVERY_MS {
             self.refresh_disk_used();
             self.log_stats(now_ms);
@@ -1434,6 +1599,152 @@ impl Worker {
                 );
             }
             Err(e) => self.backup_failed(now_ms, &e),
+        }
+        true
+    }
+
+    /// Scrubbing (S6, ADR-164): when the interval is over a pass starts and
+    /// then advances in steps of at most 256 KiB, paced to
+    /// `storage.scrub_io_budget_mb_s` by a token bucket charged with the
+    /// bytes each step really read (SQLite's included). A step runs only
+    /// between transactions, never while a backup job runs (it may be
+    /// rewriting the slot the scrub is reading), and, when the broker is
+    /// busy (requests queued, telemetry pending), only every 100 ms.
+    fn step_scrub(&mut self, now_ms: u64) -> bool {
+        let busy = self.pending() || self.log.as_ref().is_some_and(|l| l.pending_bytes() > 0);
+        let Self {
+            scrub,
+            store,
+            log,
+            backup,
+            stats,
+            ..
+        } = self;
+        if !scrub.on {
+            return false;
+        }
+        if scrub.run.is_none() {
+            if now_ms < scrub.next_ms {
+                return false;
+            }
+            scrub.run = Some(ScrubRun {
+                scrubber: Scrubber::new(),
+                pacer: Pacer::new(scrub.budget_mb_s, now_ms),
+                started_ms: now_ms,
+                last_busy_ms: 0,
+                logged: 0,
+                steps: 0,
+            });
+            // Relaxed: statistics.
+            SCRUB.running.store(1, Ordering::Relaxed);
+            info!(
+                "scrub: pass {} started (budget {} MB/s)",
+                scrub.passes + 1,
+                scrub.budget_mb_s
+            );
+        }
+        let Some(run) = scrub.run.as_mut() else {
+            return false;
+        };
+        if backup.job.is_some() {
+            run.scrubber.restart_backup_part();
+            return false;
+        }
+        if store.in_transaction() {
+            return false;
+        }
+        if busy && now_ms.saturating_sub(run.last_busy_ms) < SCRUB_BUSY_EVERY_MS {
+            return false;
+        }
+        let grant = run.pacer.grant(now_ms);
+        if grant == 0 {
+            return false;
+        }
+        if busy {
+            run.last_busy_ms = now_ms;
+        }
+        let mut findings = Vec::new();
+        let out = run
+            .scrubber
+            .step(store.db(), log.as_mut(), grant, &mut findings);
+        run.pacer.spend(out.bytes);
+        run.steps += 1;
+        for f in &findings {
+            if f.is_error() {
+                stats.errors += 1;
+                // Relaxed: statistics.
+                SCRUB.errors_total.fetch_add(1, Ordering::Relaxed);
+            }
+            run.logged += 1;
+            if run.logged <= SCRUB_LOG_LIMIT {
+                log_finding(f);
+            } else if run.logged == SCRUB_LOG_LIMIT + 1 {
+                warn!(
+                    "scrub: more than {SCRUB_LOG_LIMIT} findings in this pass; the rest are only counted"
+                );
+            }
+        }
+        if !out.done {
+            return true;
+        }
+        let r = run.scrubber.report;
+        let ms = now_ms.saturating_sub(run.started_ms);
+        let steps = run.steps;
+        scrub.run = None;
+        scrub.passes += 1;
+        scrub.next_ms = now_ms + scrub.interval_ms;
+        let kib_s = r.bytes_read / 1024 * 1000 / ms.max(1);
+        // Relaxed: statistics.
+        let m = &SCRUB;
+        m.running.store(0, Ordering::Relaxed);
+        m.passes.store(scrub.passes, Ordering::Relaxed);
+        m.last_unix
+            .store(crate::boot::now_unix().unwrap_or(0), Ordering::Relaxed);
+        m.last_ms.store(ms, Ordering::Relaxed);
+        m.last_errors.store(r.errors(), Ordering::Relaxed);
+        m.telemetry_segments
+            .store(r.telemetry_segments, Ordering::Relaxed);
+        m.telemetry_records
+            .store(r.telemetry_records, Ordering::Relaxed);
+        m.telemetry_damaged
+            .store(r.telemetry_damaged, Ordering::Relaxed);
+        m.telemetry_bad_tails
+            .store(r.telemetry_bad_tails, Ordering::Relaxed);
+        m.telemetry_bad_headers
+            .store(r.telemetry_bad_headers, Ordering::Relaxed);
+        m.db_objects.store(r.db_objects, Ordering::Relaxed);
+        m.db_errors.store(r.db_errors, Ordering::Relaxed);
+        m.backup_slots_ok
+            .store(r.backup_slots_ok, Ordering::Relaxed);
+        m.backup_slots_bad
+            .store(r.backup_slots_bad, Ordering::Relaxed);
+        m.bytes_read.fetch_add(r.bytes_read, Ordering::Relaxed);
+        info!(
+            "scrub: pass {} done in {ms} ms ({steps} step(s)): {} KiB read, {kib_s} KiB/s against a budget of {} KiB/s",
+            scrub.passes,
+            r.bytes_read / 1024,
+            run_budget_kib(scrub.budget_mb_s)
+        );
+        info!(
+            "scrub: pass {}: database {} table(s) checked, {} problem(s); backup {} slot(s) intact, {} bad",
+            scrub.passes, r.db_objects, r.db_errors, r.backup_slots_ok, r.backup_slots_bad
+        );
+        info!(
+            "scrub: pass {}: telemetry {} segment(s), {} record(s) checked, {} damaged, {} bad tail(s), {} bad header(s), {} reused meanwhile",
+            scrub.passes,
+            r.telemetry_segments,
+            r.telemetry_records,
+            r.telemetry_damaged,
+            r.telemetry_bad_tails,
+            r.telemetry_bad_headers,
+            r.telemetry_recycled
+        );
+        if r.errors() > 0 {
+            error!(
+                "scrub: pass {} FOUND {} problem(s): data on the disk is damaged; see the lines above",
+                scrub.passes,
+                r.errors()
+            );
         }
         true
     }

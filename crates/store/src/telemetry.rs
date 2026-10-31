@@ -72,8 +72,14 @@ pub struct Record<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Recovery {
+    /// Records in the segments that were read (the newest of each
+    /// partition); not the total, which only a full scan or the scrubber
+    /// knows (G8).
     pub records: u64,
+    /// Valid segments found by their headers, all partitions.
     pub segments: u32,
+    /// Of those, the ones whose records were read: the newest per partition.
+    pub scanned: u32,
     /// Partitions whose active segment ended in a damaged record.
     pub torn_tails: u32,
     /// Records older than the retention period (still on disk until their
@@ -500,29 +506,48 @@ impl TelemetryLog {
             roll: false,
         };
         let newest = order.last().copied();
-        for &(seq, idx) in &order {
-            let scan = self.scan_segment(disk, p, idx, seq, cutoff_ms, &mut |_| {})?;
-            rec.segments += 1;
-            rec.records += scan.records;
-            rec.expired += scan.expired;
-            let created = headers
+        let created_ms = |idx: u64| {
+            headers
                 .get(idx as usize)
                 .copied()
                 .flatten()
-                .map_or(0, |(_, c)| c.saturating_mul(1000));
-            let max_ts = scan.max_ts.max(created);
+                .map_or(0, |(_, c)| c.saturating_mul(1000))
+        };
+        for (k, &(seq, idx)) in order.iter().enumerate() {
+            rec.segments += 1;
+            if Some((seq, idx)) != newest {
+                // Bounded boot (G8, ADR-165): only the newest segment of a
+                // partition can hold a torn tail or take new records, so
+                // only it is read. An older segment is known by its header
+                // alone; the newest record in it is no younger than the
+                // creation of the segment that followed it (the one with the
+                // next sequence number), which is all retention needs. The
+                // scrubber reads the rest in the background and makes this
+                // exact.
+                let bound = order.get(k + 1).map_or(0, |&(_, next)| created_ms(next));
+                if let Some(info) = part.segs.get_mut(idx as usize) {
+                    *info = SegInfo {
+                        live: true,
+                        max_ts: bound,
+                    };
+                }
+                continue;
+            }
+            let scan = self.scan_segment(disk, p, idx, seq, cutoff_ms, &mut |_| {})?;
+            rec.scanned += 1;
+            rec.records += scan.records;
+            rec.expired += scan.expired;
+            let max_ts = scan.max_ts.max(created_ms(idx));
             if let Some(info) = part.segs.get_mut(idx as usize) {
                 *info = SegInfo { live: true, max_ts };
             }
-            if Some((seq, idx)) == newest {
-                part.active_max_ts = max_ts;
-                if scan.torn {
-                    rec.torn_tails += 1;
-                }
-                part.active = idx;
-                part.seq = seq;
-                part.pos = scan.end;
+            part.active_max_ts = max_ts;
+            if scan.torn {
+                rec.torn_tails += 1;
             }
+            part.active = idx;
+            part.seq = seq;
+            part.pos = scan.end;
         }
         // Empty partitions start their first segment with the first record;
         // recovered ones continue in a new segment (see `Partition::roll`).
@@ -813,6 +838,290 @@ impl TelemetryLog {
     }
 }
 
+// ---- scrubbing (S6, ADR-164) -------------------------------------------------
+
+/// How a scrubbed segment's records ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentEnd {
+    /// Every record valid up to a clean end (zero padding, or the segment's
+    /// last byte).
+    Clean,
+    /// A record that fails its checks and no valid record after it, at this
+    /// byte offset of the segment: a torn write (a crash during a flush
+    /// leaves exactly this) or damage to the last record. The two cannot be
+    /// told apart.
+    BadTail { at: u32 },
+    /// A record that fails its checks with valid records after it: damage
+    /// inside the segment (a flipped bit, a bad sector), not a torn write.
+    /// `resumes_at` is the next valid record.
+    Damaged { at: u32, resumes_at: u32 },
+}
+
+/// What the telemetry scrub found, one event per segment looked at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryEvent {
+    /// A segment read completely.
+    Segment {
+        partition: usize,
+        /// Ring index in the partition.
+        index: u64,
+        seq: u64,
+        /// Valid records up to the first bad one.
+        records: u64,
+        /// Bytes covered by valid records (and the header).
+        bytes: u64,
+        end: SegmentEnd,
+    },
+    /// The block has the segment magic and no valid header (a flipped bit,
+    /// or a torn header write): the segment is invisible to recovery.
+    BadHeader { partition: usize, index: u64 },
+    /// The segment was reused or retired while it was being read; nothing
+    /// is concluded about it.
+    Recycled { partition: usize, index: u64 },
+}
+
+/// A segment being read in steps.
+#[derive(Debug, Clone)]
+struct ScrubSeg {
+    partition: usize,
+    index: u64,
+    seq: u64,
+    created_ms: u64,
+    buf: Vec<u8>,
+    have: usize,
+    /// Parse position: records before it are valid.
+    pos: usize,
+    records: u64,
+    max_ts: u64,
+    /// The first bad record, once seen (the rest of the segment is then
+    /// read to look for valid records after it).
+    bad_at: Option<usize>,
+    clean: bool,
+}
+
+/// The cursor of a telemetry scrub pass: which segment is next and how far
+/// the current one is read. Create it with `Default`; pass the same value to
+/// every [`TelemetryLog::scrub_step`] of the pass.
+#[derive(Debug, Clone, Default)]
+pub struct TelemetryScrub {
+    partition: usize,
+    index: u64,
+    cur: Option<ScrubSeg>,
+    finished: bool,
+    /// Segments with a valid header looked at so far.
+    pub segments: u64,
+}
+
+impl TelemetryScrub {
+    pub fn finished(&self) -> bool {
+        self.finished
+    }
+}
+
+/// Positions of a valid record at or after `from`, found by trying every
+/// byte offset whose length field is plausible. Bounded: at most
+/// `MAX_RESYNC_CRC` bytes of CRC work.
+fn find_valid_record(buf: &[u8], from: usize, seq: u64) -> Option<usize> {
+    const MAX_LEN: usize = 64 * 1024;
+    const MAX_RESYNC_CRC: usize = 4 * 1024 * 1024;
+    let mut work = 0usize;
+    let mut pos = from;
+    while pos + RECORD_HEADER + RECORD_FIXED <= buf.len() {
+        let len = u32_at(buf, pos).map_or(0, |l| l as usize);
+        if (RECORD_FIXED..=MAX_LEN).contains(&len) && pos + RECORD_HEADER + len <= buf.len() {
+            let body = buf.get(pos + RECORD_HEADER..pos + RECORD_HEADER + len)?;
+            let tl = body
+                .get(8..10)
+                .and_then(|b| b.try_into().ok())
+                .map_or(usize::MAX, |b| usize::from(u16::from_le_bytes(b)));
+            if RECORD_FIXED.saturating_add(tl) <= len {
+                work += len;
+                if work > MAX_RESYNC_CRC {
+                    return None;
+                }
+                if u32_at(buf, pos + 4) == Some(record_crc(seq, body)) {
+                    return Some(pos);
+                }
+            }
+        }
+        pos += 1;
+    }
+    None
+}
+
+impl TelemetryLog {
+    /// Reads telemetry segments for the scrubber, at most about `max_bytes`
+    /// per call, and appends what it finds to `out`. A segment is read in
+    /// chunks over several calls; its records are checked as they arrive.
+    /// Returns `true` when the pass is over (every partition and ring index
+    /// visited). Only the DB core calls this, between its other work, so the
+    /// log is not being written while a chunk is read, but it may have been
+    /// written between two calls: a segment reused in between is noticed
+    /// (the header is read again at the end) and reported as `Recycled`.
+    pub fn scrub_step(
+        &mut self,
+        disk: &mut Disk,
+        st: &mut TelemetryScrub,
+        max_bytes: usize,
+        out: &mut Vec<TelemetryEvent>,
+    ) -> Result<bool, LogError> {
+        const CHUNK: usize = 256 * 1024;
+        let gran = (self.gran as usize).max(SECTOR as usize);
+        let mut budget = max_bytes.max(gran);
+        let seg_bytes = self.geo.seg_bytes as usize;
+        while budget > 0 && !st.finished {
+            let Some(cur) = st.cur.as_mut() else {
+                // The next segment slot.
+                if st.partition >= self.geo.parts as usize {
+                    st.finished = true;
+                    break;
+                }
+                let (p, s) = (st.partition, st.index);
+                st.index += 1;
+                if st.index >= self.geo.total {
+                    st.index = 0;
+                    st.partition += 1;
+                }
+                let at = self.geo.segment_offset(p, s);
+                let mut sec = [0u8; SECTOR as usize];
+                disk.read_at(RegionKind::Telemetry, at, &mut sec)?;
+                budget = budget.saturating_sub(gran);
+                let zero_ok = self.zero_ok_band0 && self.geo.band_of(s) == 0;
+                if let Some((seq, created)) = parse_segment_header(&sec, p, &self.uuid, zero_ok) {
+                    st.segments += 1;
+                    let mut buf = vec![0u8; seg_bytes];
+                    if let Some(h) = buf.get_mut(..sec.len()) {
+                        h.copy_from_slice(&sec);
+                    }
+                    st.cur = Some(ScrubSeg {
+                        partition: p,
+                        index: s,
+                        seq,
+                        created_ms: created.saturating_mul(1000),
+                        buf,
+                        have: sec.len(),
+                        pos: SEGMENT_HEADER as usize,
+                        records: 0,
+                        max_ts: 0,
+                        bad_at: None,
+                        clean: false,
+                    });
+                } else if sec.get(..8) == Some(&SEGMENT_MAGIC[..]) {
+                    // The magic, but not a valid header.
+                    out.push(TelemetryEvent::BadHeader {
+                        partition: p,
+                        index: s,
+                    });
+                }
+                continue;
+            };
+            let (p, s) = (cur.partition, cur.index);
+            // Read more of it.
+            if cur.have < seg_bytes && !cur.clean {
+                let want = (seg_bytes - cur.have).min(CHUNK).min(budget.max(gran));
+                let want = want.div_ceil(gran) * gran;
+                let want = want.min(seg_bytes - cur.have);
+                let base = self.geo.segment_offset(p, s);
+                let range = cur.have..cur.have + want;
+                let part = cur.buf.get_mut(range).ok_or(LogError::BadHeader)?;
+                disk.read_at(RegionKind::Telemetry, base + cur.have as u64, part)?;
+                cur.have += want;
+                budget = budget.saturating_sub(want);
+            }
+            // Check the records that are complete in what has been read.
+            while cur.bad_at.is_none() && !cur.clean {
+                let Some(len) = u32_at(&cur.buf, cur.pos).filter(|_| cur.pos + 4 <= cur.have)
+                else {
+                    // Fewer than four bytes left: the end of the segment.
+                    if cur.have >= seg_bytes {
+                        cur.clean = true;
+                    }
+                    break;
+                };
+                if len == 0 {
+                    cur.clean = true;
+                    break;
+                }
+                let end = cur.pos + RECORD_HEADER + len as usize;
+                if end > seg_bytes || (len as usize) < RECORD_FIXED {
+                    cur.bad_at = Some(cur.pos);
+                    break;
+                }
+                if end > cur.have {
+                    break; // wait for more data
+                }
+                let body = cur.buf.get(cur.pos + RECORD_HEADER..end);
+                let ok = body.is_some_and(|b| {
+                    u32_at(&cur.buf, cur.pos + 4) == Some(record_crc(cur.seq, b))
+                        && b.get(8..10)
+                            .and_then(|t| t.try_into().ok())
+                            .map(u16::from_le_bytes)
+                            .is_some_and(|tl| RECORD_FIXED + tl as usize <= b.len())
+                });
+                if !ok {
+                    cur.bad_at = Some(cur.pos);
+                    break;
+                }
+                if let Some(ts) = body.and_then(|b| u64_at(b, 0)) {
+                    cur.max_ts = cur.max_ts.max(ts);
+                }
+                cur.records += 1;
+                cur.pos = end;
+            }
+            let all_read = cur.have >= seg_bytes;
+            if !(cur.clean || (cur.bad_at.is_some() && all_read)) {
+                continue;
+            }
+            // The segment is done: look at its header again, then conclude.
+            let Some(cur) = st.cur.take() else { continue };
+            let at = self.geo.segment_offset(p, s);
+            let mut sec = [0u8; SECTOR as usize];
+            disk.read_at(RegionKind::Telemetry, at, &mut sec)?;
+            budget = budget.saturating_sub(gran);
+            let zero_ok = self.zero_ok_band0 && self.geo.band_of(s) == 0;
+            let same = parse_segment_header(&sec, p, &self.uuid, zero_ok)
+                .is_some_and(|(seq, _)| seq == cur.seq);
+            if !same {
+                out.push(TelemetryEvent::Recycled {
+                    partition: p,
+                    index: s,
+                });
+                continue;
+            }
+            let end = match cur.bad_at {
+                None => SegmentEnd::Clean,
+                Some(at) => match find_valid_record(&cur.buf, at + 1, cur.seq) {
+                    Some(r) => SegmentEnd::Damaged {
+                        at: at as u32,
+                        resumes_at: r as u32,
+                    },
+                    None => SegmentEnd::BadTail { at: at as u32 },
+                },
+            };
+            // The newest record's age is now exact, not an upper bound (the
+            // active segment keeps its own bookkeeping).
+            if let Some(part) = self.parts.get_mut(p) {
+                let active = part.seq != 0 && part.active == s;
+                if !active
+                    && let Some(info) = part.segs.get_mut(s as usize)
+                    && info.live
+                {
+                    info.max_ts = cur.max_ts.max(cur.created_ms);
+                }
+            }
+            out.push(TelemetryEvent::Segment {
+                partition: p,
+                index: s,
+                seq: cur.seq,
+                records: cur.records,
+                bytes: cur.pos as u64,
+                end,
+            });
+        }
+        Ok(st.finished)
+    }
+}
+
 impl TelemetryLog {
     /// Test hook: writes pending records without the final sync.
     #[cfg(test)]
@@ -985,9 +1294,13 @@ mod tests {
         log.append(&mut d, 0, 999, "t", b"after").unwrap();
         log.flush(&mut d).unwrap();
         let (log, rec) = TelemetryLog::open(&mut d, 0, u64::MAX).unwrap();
-        assert_eq!(rec.records, 201);
+        // Only the newest segment (the one "after" opened) is read at boot
+        // (G8); the full count is the scan's.
+        assert_eq!((rec.records, rec.scanned, rec.segments), (1, 1, 2));
         assert_eq!(rec.torn_tails, 0);
-        assert_eq!(all(&log, &mut d, 0).last().unwrap().2, b"after");
+        let got = all(&log, &mut d, 0);
+        assert_eq!(got.len(), 201);
+        assert_eq!(got.last().unwrap().2, b"after");
     }
 
     #[test]
@@ -1008,7 +1321,9 @@ mod tests {
         log.flush(&mut d).unwrap();
         let (log, rec) = TelemetryLog::open(&mut d, 0, u64::MAX).unwrap();
         let got = all(&log, &mut d, 0);
-        assert_eq!(got.len() as u64, rec.records);
+        // Boot read the newest segment only; the scan finds all of them.
+        assert_eq!(rec.scanned, 1);
+        assert!(rec.records <= got.len() as u64 && rec.segments > 2);
         // Only the newest records survive, contiguous and in order.
         assert!(got.len() as u64 > cap / per / 2);
         assert_eq!(got.last().unwrap().0, total - 1);

@@ -335,6 +335,13 @@ Each milestone ends with:
 
 **Tests:** injected bit flips (fault injector, read flip) in telemetry and the DB are found and reported; scrubbing I/O stays within budget during a load test.
 
+**Status: done** (docs/PROGRESS.md, S6; ADR-164, ADR-165). Deviations from the work list:
+- **G8 needs no per-segment summary:** only the newest segment per partition is read at boot; older segments are known by their headers, with the age bound of ADR-165 for retention, made exact by the scrubber. No format change.
+- **`quick_check` is bounded per table** (`PRAGMA quick_check(table)`), not by page: SQLite offers no progress hook in this build. The free list and orphan pages are checked at boot only.
+- **SQLite pages have no checksum**, so a flipped bit inside a value is not found by the database part; telemetry records and backup payloads (which have CRCs) are.
+- **Busy broker:** a pass is let through at one 256 KiB step per 100 ms (2.5 MB/s at most) so it always finishes; idle, the budget is the limit.
+- **Not covered by a smoke scenario:** a flipped bit in the DB or in a backup slot in a VM (host tests only; the kernel code is the same); the ring is damaged in the VM by flipping bits in the disk image on the host.
+
 ### S7 — Encryption at rest (optional, off by default) · L
 
 **Work**

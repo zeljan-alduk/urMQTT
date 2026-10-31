@@ -571,7 +571,10 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         cpus
     };
     crate::db::start(cpus, data_cores);
-    if s.options.db_test == Some(crate::cmdline::DbTest::LogCrash) {
+    if matches!(
+        s.options.db_test,
+        Some(crate::cmdline::DbTest::LogCrash | crate::cmdline::DbTest::ScrubLoad)
+    ) {
         crate::db::start_log_crash(cpus);
     }
     crate::mqtt_service::init_tickets(s.options.ticket_rotate_s);
@@ -600,7 +603,11 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     let queue = !s.options.log_sync
         && !matches!(
             s.options.db_test,
-            Some(crate::cmdline::DbTest::LogCrash | crate::cmdline::DbTest::DpBench)
+            Some(
+                crate::cmdline::DbTest::LogCrash
+                    | crate::cmdline::DbTest::ScrubLoad
+                    | crate::cmdline::DbTest::DpBench
+            )
         );
     urmqtt_log::start(cpus - 1, queue);
     if queue {

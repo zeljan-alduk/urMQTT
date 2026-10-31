@@ -62,6 +62,16 @@ pub enum DbTest {
     /// Damage the database file before opening it (S5): the boot must
     /// restore the newest backup, log it, and continue booting.
     Corrupt,
+    /// Telemetry records dated now, about 2.5 segments into every partition,
+    /// then continue booting (S6: a ring for the scrub tests to damage).
+    LogFill,
+    /// Scrub (S6): the first pass starts 3 s after the DB core does,
+    /// then the boot continues.
+    Scrub,
+    /// Scrub under load (S6): the telemetry writers of `LogCrash` keep every
+    /// data core busy while the first pass runs (6 s in); its I/O is
+    /// reported against the budget.
+    ScrubLoad,
     /// Backup under load: a database of some tens of MiB, a backup taken in
     /// bounded steps while a writer keeps committing, the commit latency and
     /// the longest step reported (ADR-164), then continue booting.
@@ -200,6 +210,9 @@ impl BootOptions {
                 "test=discard-fill" => o.db_test = Some(DbTest::DiscardFill),
                 "test=db-backup" => o.db_test = Some(DbTest::BackupFill),
                 "test=db-corrupt" => o.db_test = Some(DbTest::Corrupt),
+                "test=log-fill" => o.db_test = Some(DbTest::LogFill),
+                "test=scrub" => o.db_test = Some(DbTest::Scrub),
+                "test=scrub-load" => o.db_test = Some(DbTest::ScrubLoad),
                 "test=db-backup-bench" => o.db_test = Some(DbTest::BackupBench),
                 "test=dp-bench" => o.db_test = Some(DbTest::DpBench),
                 "test=watchdog" => o.db_test = Some(DbTest::Watchdog),
@@ -432,6 +445,9 @@ mod tests {
             ("test=db-backup", DbTest::BackupFill),
             ("test=db-corrupt", DbTest::Corrupt),
             ("test=db-backup-bench", DbTest::BackupBench),
+            ("test=log-fill", DbTest::LogFill),
+            ("test=scrub", DbTest::Scrub),
+            ("test=scrub-load", DbTest::ScrubLoad),
         ] {
             assert_eq!(BootOptions::parse(w, true).db_test, Some(t), "{w}");
             let prod = BootOptions::parse(w, false);

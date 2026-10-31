@@ -186,6 +186,14 @@ syslog). Procedures are in [DEPLOY.md](DEPLOY.md) section 9.
 | `backup: FAILED: …; the previous good snapshot is untouched; trying again in M min` | a backup failed (often: the database no longer fits a slot); `urmqtt.backup.failed` counts them |
 | `storage: DATABASE RESTORED FROM BACKUP: snapshot seq N from slot S (…); T s of changes (since unix U) are LOST; reason: …` | the database was corrupt at boot and was replaced by the newest intact snapshot. Read the reason and the window; check the disk |
 | `storage: the database is corrupt and storage.auto_restore is off …` / `restoring from a backup failed: …` | corruption that was not (or could not be) restored; the broker refuses to serve unless `storage.refuse_on_corruption = false` |
+| `scrub: every N h, at most M MB/s; the first pass S s after boot` / `scrub: off (storage.scrub_interval_h = 0)` | the scrub schedule |
+| `scrub: pass N done in T ms (S step(s)): K KiB read, R KiB/s against a budget of B KiB/s`, then `scrub: pass N: database …` and `scrub: pass N: telemetry …` | a pass finished; `R` stays at or under `B` (the budget is a rate over the pass; a busy broker is let through at 2.5 MB/s at most) |
+| `scrub: telemetry partition P segment S (seq N): DAMAGED record at byte B, valid records resume at byte R …` | bit rot or a bad sector inside a telemetry segment; the records between `B` and `R` are unreadable. Check the disk |
+| `scrub: telemetry partition P segment S: segment header DAMAGED …` | a segment that recovery cannot see; check the disk |
+| `scrub: telemetry … bad tail at byte B, nothing valid after it …` (warning) | a torn write from a crash, or damage to the last record; expected after a power loss |
+| `scrub: database object T: DAMAGED: …`, `scrub: backup slot S …: DAMAGED: …`, `scrub: backup control block DAMAGED …` | structural damage to a table (restart restores from the backup if `quick_check` fails), a snapshot that no longer matches its checksum (the next backup replaces it), a damaged control block |
+| `scrub: pass N FOUND K problem(s): data on the disk is damaged …` | the pass found damage (not counting bad tails); alert on `urmqtt.scrub.errors` |
+| `telemetry: log recovered in N ms: R record(s) in the K newest segment(s) read of S …` | the boot read the newest segment of each telemetry partition (bounded boot); `R` counts those only |
 
 `storage.grow_ratio_db` sets how the new space is shared (default 50: half to
 the SQLite database, half to the telemetry ring).
@@ -203,3 +211,11 @@ corrupt database from the newest intact copy at boot. statsd gauges:
 `urmqtt.backup.enabled`, `snapshots_done`, `failed`, `restored`, `last_bytes`
 and `age_s` (seconds since the newest snapshot: alert on it). Details and the
 provider-snapshot question are in [DEPLOY.md](DEPLOY.md) section 9.
+
+`storage.scrub_interval_h` (default 24; `0` = off) and
+`storage.scrub_io_budget_mb_s` (default 8) set how often the broker re-reads
+its database, backups and telemetry ring to look for damage, and how fast.
+statsd gauges `urmqtt.scrub.*`: `errors` (problems in the last pass, the one to
+alert on), `errors_total`, `passes`, `last_ms`, `age_s` (since the last pass),
+`bytes_read`, `running`, and the per-kind counts. See
+[DEPLOY.md](DEPLOY.md) section 9.

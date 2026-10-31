@@ -105,14 +105,16 @@ pub fn telemetry_digest(disk: &mut Disk) -> Result<TelemetryDigest, String> {
             })
             .map_err(|e| format!("telemetry partition {p}: {e:?}"))?;
     }
-    if scanned != rec.records {
+    // Boot recovery reads only the newest segment of each partition (G8);
+    // the scan above read them all, so the total is the scan's.
+    if scanned < rec.records {
         return Err(format!(
             "telemetry: scan found {scanned} record(s), recovery counted {}",
             rec.records
         ));
     }
     Ok(TelemetryDigest {
-        records: rec.records,
+        records: scanned,
         segments: rec.segments,
         torn_tails: rec.torn_tails,
         digest: crc32c(&crc.to_le_bytes()),

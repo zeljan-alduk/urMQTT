@@ -501,7 +501,7 @@ log_crash() {
         set_esp "$data" "$verify"
         boot "$log2" --disk "$data" --accel "$accel" --headless --fwd none || status=$?
         check "log-crash-recovery [$accel]" "$log2" "$status" \
-            "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in [0-9]+ segment\(s\), [0-9]+ torn tail\(s\) truncated" \
+            "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in the [0-9]+ newest segment\(s\) read of [0-9]+, [0-9]+ torn tail\(s\) truncated" \
             "log-verify: [0-9]+ records, every core's sequence contiguous" "^URMQTT READY$" "NOT:INCONSISTENT" "$NO_FAULT"
         local found torn
         found=$(clean "$log2" | grep -Eo 'log-verify: [0-9]+ records' | awk '{print $2}')
@@ -532,7 +532,7 @@ log_tear() {
         set_esp "$data" "$verify"
         boot "$log2" --disk "$data" --accel "$accel" --headless --fwd none || status=$?
         check "log-tear-truncated [$accel]" "$log2" "$status" \
-            "telemetry: log recovered in [0-9]+ ms: 10500 record\(s\) in [0-9]+ segment\(s\), 1 torn tail\(s\) truncated" \
+            "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in the 1 newest segment\(s\) read of [0-9]+, 1 torn tail\(s\) truncated" \
             "log-verify: 10500 records, every core's sequence contiguous" "^URMQTT READY$" "$NO_FAULT"
     done
 }
@@ -1286,7 +1286,7 @@ PY
                 echo "discard-qcow2: host file blocks before $blocks_before B, after $blocks_after B"
             } >>"$l2"
             check "discard-retention [$bus, $accel]" "$l2" "$status" \
-                "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in 24 segment\(s\)" \
+                "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in the [0-9]+ newest segment\(s\) read of 24" \
                 "telemetry: 16 segment\(s\) past retention \(30 days\) retired, 8 still in use" \
                 "storage: discard: requests=[1-9][0-9]* ranges=[1-9][0-9]* released=[1-9][0-9]* KiB \(queued: telemetry [1-9][0-9]* KiB, truncate [0-9]+ KiB, grow [0-9]+ KiB\) cancelled=0 KiB dropped=0 KiB failed=0" \
                 "NOT:discard failed" "NOT:discard stopped" "^URMQTT READY$" "$NO_FAULT"
@@ -1306,7 +1306,7 @@ PY
             set_esp "$raw" "$ver"
             boot "$l3" --disk "$raw" --bus "$bus" --accel "$accel" --headless --no-net || status=$?
             check "discard-recovered [$bus, $accel]" "$l3" "$status" \
-                "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in 8 segment\(s\), 0 torn tail\(s\) truncated" \
+                "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in the [0-9]+ newest segment\(s\) read of 8, 0 torn tail\(s\) truncated" \
                 "storage: data disk opened" "quick_check ok" "^URMQTT READY$" "NOT:telemetry log rejected" "$NO_FAULT"
         done
     done
@@ -1528,6 +1528,128 @@ backup_bench() {
             PASSED=$((PASSED + 1))
         else
             echo "  ✗ the longest bounded step (${step:-?} us) is not well under the single-call copy (${one:-?} us) [$accel]"
+            FAILED=$((FAILED + 1))
+        fi
+    done
+}
+
+# flip_bit <file> <byte offset> <mask>: inverts bits of one byte of a file.
+flip_bit() {
+    python3 -I - "$1" "$2" "$3" <<'PY'
+import sys
+path, off, mask = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+with open(path, "r+b") as f:
+    f.seek(off)
+    b = f.read(1)
+    f.seek(off)
+    f.write(bytes([b[0] ^ mask]))
+PY
+}
+
+# S6 (ADR-164, ADR-165): the scrubber finds rot. A ring written by
+# `test=log-fill` (about 2.5 segments in each of 8 partitions) gets two bits
+# flipped on the host, as a failing medium would do it: one inside a record of
+# partition 0's first segment (the records after it are fine), one in the
+# header of partition 1's second segment. A kernel with `test=scrub` reports
+# both, with where they are; the host tool finds the same on the same bytes;
+# before the flips the tool finds nothing. The recovery line of the scrub
+# boot shows the bounded boot (G8): the newest segment of each partition is
+# read, the others are known by their headers.
+scrub_flip() {
+    build_disk_tool || {
+        echo "  ✗ scrub-flip needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local ud=$DISK_TOOL fill="$OUT/scrub-fill.raw" run="$OUT/scrub-run.raw"
+    mkimg "$fill" "smoke test=log-fill"
+    mkimg "$run" "smoke serve test=scrub"
+    for accel in $ACCELS; do
+        local disk="$OUT/scrub-flip-$accel.img" l1="$OUT/scrub-flip-$accel-1.log" l2="$OUT/scrub-flip-$accel-2.log"
+        local tl="$OUT/scrub-flip-$accel.tool" status=0
+        fresh_disk "$fill" "$disk"
+        boot "$l1" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "scrub-fill [$accel]" "$l1" "$status" \
+            "log-fill: [0-9]+ record\(s\) dated now durable in 8 partition\(s\)" \
+            "scrub: every 24 h, at most 8 MB/s; the first pass 600 s after boot" "^URMQTT READY$" "NOT:scrub: pass" "$NO_FAULT"
+        # Where the ring is, from the tool.
+        local info first tel parts segs kib base segb
+        info=$("$ud" info "$disk" 2>&1)
+        first=$(sed -n 's/.*urMQTT data "urMQTT data" LBA \([0-9]*\)\.\..*/\1/p' <<<"$info" | head -1)
+        tel=$(sed -n 's/.*region Telemetry: LBA \([0-9]*\)\.\..*/\1/p' <<<"$info" | head -1)
+        read -r parts segs kib < <(sed -n 's/.*telemetry ring: \([0-9]*\) partition(s) of \([0-9]*\) segment(s) of \([0-9]*\) KiB.*/\1 \2 \3/p' <<<"$info" | head -1)
+        if [[ -z $first || -z $tel || -z $kib ]]; then
+            echo "  ✗ scrub-flip: could not read the ring geometry from the tool [$accel]"
+            echo "$info" | sed 's/^/    | /'
+            FAILED=$((FAILED + 1))
+            continue
+        fi
+        base=$(((first + tel) * 512 + 4096))
+        segb=$((kib * 1024))
+        {
+            "$ud" scrub "$disk" && echo "tool: clean disk exit 0"
+        } >"$tl" 2>&1
+        check "scrub-tool-clean [$accel]" "$tl" 0 "scrub: ok" "tool: clean disk exit 0" "telemetry [0-9]+ segment\(s\), [0-9]+ record\(s\), 0 damaged, 0 bad tail\(s\), 0 bad header\(s\)"
+        # Partition 0, segment 0: a bit of record 0's payload. Partition 1,
+        # segment 1: a bit of the header's sequence number.
+        flip_bit "$disk" $((base + 0 * segb * segs + 512 + 300)) 8
+        flip_bit "$disk" $((base + (1 * segs + 1) * segb + 17)) 4
+        status=0
+        set_esp "$disk" "$run"
+        start_vm "$l2" --disk "$disk" --accel "$accel" --fwd none
+        wait_log "$l2" "scrub: pass 1 done" || status=$?
+        sleep 0.3
+        kill_vm
+        check "scrub-finds-the-flips [$accel]" "$l2" "$status" \
+            "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in the 8 newest segment\(s\) read of 23, 0 torn tail\(s\) truncated" \
+            "scrub: pass 1 started \(budget 8 MB/s\)" \
+            "scrub: telemetry partition 0 segment 0 \(seq 1\): DAMAGED record at byte 512, valid records resume at byte [0-9]+" \
+            "scrub: telemetry partition 1 segment 1: segment header DAMAGED" \
+            "scrub: pass 1 done in [0-9]+ ms \([0-9]+ step\(s\)\): [0-9]+ KiB read, [0-9]+ KiB/s against a budget of 8192 KiB/s" \
+            "scrub: pass 1: database [0-9]+ table\(s\) checked, 0 problem\(s\); backup [01] slot\(s\) intact, 0 bad" \
+            "scrub: pass 1: telemetry 23 segment\(s\), [0-9]+ record\(s\) checked, 1 damaged, 0 bad tail\(s\), 1 bad header\(s\)" \
+            "scrub: pass 1 FOUND 2 problem\(s\)" "$NO_FAULT"
+        status=0
+        "$ud" scrub "$disk" >"$tl.2" 2>&1 || status=$?
+        [[ $status -ne 0 ]] && echo "tool: found damage, exit $status" >>"$tl.2"
+        check "scrub-tool-finds-the-flips [$accel]" "$tl.2" 0 "TelemetryDamaged \{ partition: 0, index: 0" \
+            "TelemetryBadHeader \{ partition: 1, index: 1 \}" "tool: found damage, exit 1" "NOT:^scrub: ok"
+    done
+}
+
+# S6 (ADR-164): the scrub's I/O against its budget under load. The telemetry
+# writers of `log-crash` keep every data core appending while the first pass
+# runs (6 s in). The pass reads the ring the writers have made so far; the
+# bytes it reads over its duration, as the kernel measures them, stay within
+# the budget of 8192 KiB/s (the busy-mode floor of one 256 KiB step per
+# 100 ms is lower still).
+scrub_load() {
+    local img="$OUT/scrub-load.raw"
+    mkimg "$img" "smoke serve test=scrub-load"
+    for accel in $ACCELS; do
+        local disk="$OUT/scrub-load-$accel.img" log="$OUT/scrub-load-$accel.log" status=0
+        fresh_disk "$img" "$disk"
+        start_vm "$log" --disk "$disk" --accel "$accel" --fwd none
+        wait_log "$log" "scrub: pass 1 done" || status=$?
+        local last
+        last=$(clean "$log" | grep -E 'log-crash: core [0-9]+ writing' | wc -l | tr -d ' ')
+        kill_vm
+        check "scrub-under-load [$accel]" "$log" "$status" "log-crash: core 0 writing" \
+            "scrub: pass 1 started \(budget 8 MB/s\)" \
+            "scrub: pass 1 done in [0-9]+ ms \([0-9]+ step\(s\)\): [0-9]+ KiB read, [0-9]+ KiB/s against a budget of 8192 KiB/s" \
+            "NOT:FOUND" "$NO_FAULT"
+        local line ms kib rate
+        line=$(clean "$log" | grep 'scrub: pass 1 done' | tail -1)
+        ms=$(sed -n 's/.*done in \([0-9]*\) ms.*/\1/p' <<<"$line")
+        kib=$(sed -n 's/.*): \([0-9]*\) KiB read.*/\1/p' <<<"$line")
+        rate=$(sed -n 's/.* \([0-9]*\) KiB\/s against.*/\1/p' <<<"$line")
+        echo "  scrub-load [$accel]: ${kib:-?} KiB in ${ms:-?} ms = ${rate:-?} KiB/s with $last writer core(s) running; ${line#*scrub: }" | cut -c1-260
+        # The budget plus the 256 KiB burst, over the pass: rate <= 8192 + 256 * 1000 / ms.
+        if [[ -n $ms && -n $kib && -n $rate ]] && (( kib * 1000 <= 8192 * ms + 256 * 1000 )) && (( kib >= 1024 )); then
+            echo "  ✓ scrub I/O within its budget under load: $kib KiB in $ms ms ($rate KiB/s against 8192) [$accel]"
+            PASSED=$((PASSED + 1))
+        else
+            echo "  ✗ scrub I/O outside its budget (or nothing read): ${kib:-?} KiB in ${ms:-?} ms [$accel]"
             FAILED=$((FAILED + 1))
         fi
     done
@@ -2096,6 +2218,8 @@ if [[ ${SMOKE_ONLY:-} == storage && $ARCH != universal ]]; then
     want backup_upgrade && backup_upgrade
     want backup_scheduled && backup_scheduled
     want backup_bench && backup_bench
+    want scrub_flip && scrub_flip
+    want scrub_load && scrub_load
     if ! want disk_tool; then
         :
     elif command -v mosquitto_pub >/dev/null && command -v sqlite3 >/dev/null; then
@@ -2594,6 +2718,8 @@ want db_backup && db_backup
 want backup_upgrade && backup_upgrade
 want backup_scheduled && backup_scheduled
 want backup_bench && backup_bench
+want scrub_flip && scrub_flip
+want scrub_load && scrub_load
 want disk_tool && disk_tool
 [[ $ARCH == aarch64 ]] && want install_iso && install_iso
 want no_hw_rng && no_hw_rng

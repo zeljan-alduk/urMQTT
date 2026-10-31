@@ -298,6 +298,14 @@ struct RawStorage {
     /// refused (or the dev fallback applies), as before S5.
     #[serde(default = "default_auto_restore")]
     auto_restore: bool,
+    /// Hours between two scrub passes (re-reading the telemetry ring,
+    /// checking the database and the backups); 0 turns scrubbing off
+    /// (S6, ADR-164).
+    #[serde(default = "default_scrub_interval_h")]
+    scrub_interval_h: u32,
+    /// Megabytes per second a scrub pass may read (S6).
+    #[serde(default = "default_scrub_io_budget_mb_s")]
+    scrub_io_budget_mb_s: u32,
     require_flush: bool,
     require_data_disk: bool,
     refuse_on_corruption: bool,
@@ -322,6 +330,23 @@ const fn default_backup_interval_min() -> u32 {
 
 const fn default_auto_restore() -> bool {
     true
+}
+
+/// One scrub pass a day by default.
+pub const SCRUB_INTERVAL_DEFAULT_H: u32 = 24;
+/// Longest interval: 90 days.
+pub const SCRUB_INTERVAL_MAX_H: u32 = 90 * 24;
+/// Default read budget of a scrub pass, MB/s.
+pub const SCRUB_BUDGET_DEFAULT_MB_S: u32 = 8;
+/// Largest read budget accepted, MB/s.
+pub const SCRUB_BUDGET_MAX_MB_S: u32 = 1024;
+
+const fn default_scrub_interval_h() -> u32 {
+    SCRUB_INTERVAL_DEFAULT_H
+}
+
+const fn default_scrub_io_budget_mb_s() -> u32 {
+    SCRUB_BUDGET_DEFAULT_MB_S
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -458,6 +483,10 @@ pub struct Storage {
     /// Restore the newest intact backup when the database is corrupt at
     /// boot (S5); `false`: refuse, as before.
     pub auto_restore: bool,
+    /// Hours between scrub passes (S6); 0: none.
+    pub scrub_interval_h: u32,
+    /// Megabytes per second a scrub pass may read (S6).
+    pub scrub_io_budget_mb_s: u32,
     pub require_flush: bool,
     /// Without a data disk: refuse to serve (true) or run in memory only.
     pub require_data_disk: bool,
@@ -1204,6 +1233,18 @@ fn validate_storage(
             format!("must be in 0..={BACKUP_INTERVAL_MAX_MIN} (minutes; 0 turns the backups off)"),
         ));
     }
+    if raw.scrub_interval_h > SCRUB_INTERVAL_MAX_H {
+        errors.push(err(
+            "storage.scrub_interval_h",
+            format!("must be in 0..={SCRUB_INTERVAL_MAX_H} (hours; 0 turns scrubbing off)"),
+        ));
+    }
+    if !(1..=SCRUB_BUDGET_MAX_MB_S).contains(&raw.scrub_io_budget_mb_s) {
+        errors.push(err(
+            "storage.scrub_io_budget_mb_s",
+            format!("must be in 1..={SCRUB_BUDGET_MAX_MB_S} (megabytes per second)"),
+        ));
+    }
     if raw.grow_ratio_db > 100 {
         errors.push(err("storage.grow_ratio_db", "must be in 0..=100 (percent)"));
     }
@@ -1225,6 +1266,8 @@ fn validate_storage(
         discard: raw.discard,
         backup_interval_min: raw.backup_interval_min,
         auto_restore: raw.auto_restore,
+        scrub_interval_h: raw.scrub_interval_h,
+        scrub_io_budget_mb_s: raw.scrub_io_budget_mb_s,
         require_flush: raw.require_flush,
         require_data_disk: raw.require_data_disk,
         refuse_on_corruption: raw.refuse_on_corruption,
@@ -1498,6 +1541,8 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         discard: DiscardMode::{disc:?},
         backup_interval_min: {bim},
         auto_restore: {ar},
+        scrub_interval_h: {sih},
+        scrub_io_budget_mb_s: {sib},
         require_flush: {rf},
         require_data_disk: {rdd},
         refuse_on_corruption: {roc},
@@ -1584,6 +1629,8 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         disc = cfg.storage.discard,
         bim = cfg.storage.backup_interval_min,
         ar = cfg.storage.auto_restore,
+        sih = cfg.storage.scrub_interval_h,
+        sib = cfg.storage.scrub_io_budget_mb_s,
         rf = cfg.storage.require_flush,
         rdd = cfg.storage.require_data_disk,
         roc = cfg.storage.refuse_on_corruption,

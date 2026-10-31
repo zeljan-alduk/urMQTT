@@ -651,6 +651,47 @@ ring of records with a checksum each and is not part of it.
   slots with their sequence, time, size and whether the payload matches its
   CRC.
 
+### Scrubbing (S6)
+
+Every `storage.scrub_interval_h` hours (default 24, `0` turns it off; the first
+pass ten minutes after boot) the broker re-reads what is on its disk and checks
+it, so that rot is found while a good copy may still exist:
+- **the database**, table by table, with SQLite's `quick_check` straight from
+  the disk (not from its cache);
+- **the in-disk backups**: both slot headers and the checksum of every
+  snapshot's contents;
+- **the telemetry ring**, every segment, every record against its checksum.
+
+It reads at most `storage.scrub_io_budget_mb_s` megabytes per second (default
+8), measured on what it really reads, and only a sliver (one 256 KiB step per
+100 ms, 2.5 MB/s at most) while the broker is busy, so a pass always ends and
+never competes for the disk. A pass over a few hundred megabytes of telemetry
+takes under a minute at the default.
+- **What it reports.** `scrub: telemetry partition P segment S (seq N): DAMAGED
+  record at byte B, valid records resume at byte R` (a flipped bit or a bad
+  sector inside a segment), `… segment header DAMAGED …`, `scrub: database
+  object T: DAMAGED …`, `scrub: backup slot S …: DAMAGED …`, and at the end
+  `scrub: pass N done …` with the numbers, plus `scrub: pass N FOUND K
+  problem(s)` at error level when it found any. Everything reaches the serial
+  console, `$SYS/console/out` and syslog. A `bad tail` is a warning: it is what
+  a crash leaves, and also what damage to the very last record looks like.
+  statsd: `urmqtt.scrub.errors` (problems in the last pass: alert on it),
+  `errors_total`, `age_s`, and the per-kind counts.
+- **What it does about it:** nothing by itself. A damaged telemetry segment is
+  reported, not rewritten (its other records stay readable); a damaged backup
+  slot is replaced by the next scheduled backup; a damaged database is repaired
+  by the restore at the next boot, if `quick_check` fails there. Use the report
+  to decide: replace the disk, restore from your own copy, or note it.
+- **What it cannot find:** a flipped bit inside a database row's value (SQLite
+  pages carry no checksum here) and a flip in a segment's magic bytes.
+- **Offline:** `urmqtt-disk scrub DISK` runs one pass on the host without
+  changing the disk and exits non-zero on any damage; handy on a disk image
+  copied from a server you suspect.
+- **Boot time.** Since S6 a boot reads the segment headers and the newest
+  segment of each telemetry partition, not the whole ring (`telemetry: log
+  recovered … in the K newest segment(s) read of S`): seconds for hundreds of
+  gigabytes instead of minutes. The rest is the scrubber's.
+
 ### Disk safety, as before
 
 Only the disk Limine booted from is written, and only inside its data
