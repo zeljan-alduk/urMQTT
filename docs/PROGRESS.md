@@ -1611,3 +1611,16 @@ aarch64 (QEMU/HVF on the M4 Pro, `dp-bench`, client and server in the guest, thr
 **Dropped / not done**, with numbers: a 4x64 X25519 on aarch64 (18.8 us dalek vs 29.3 us); per-device tables for CertificateVerify keys (cost of ten verifications); OpenSSL's AVX2 selection (no AVX state in the kernel); a wNAF for unknown-key verification (est. 3-5 us of 60); Bernstein-Yang inversion (est. 9 us off sign, 4 us off verify); a fused X25519 ladder step. Sign remains 8 % behind OpenSSL on the minimum because of two Fermat inversions.
 
 **Risks**: about 4600 lines of third-party assembly are trusted on the strength of the differential tests and the provenance, not an audit; the new code is not covered by the dudect harness; 148 KiB of heap per registered trust anchor (at most 8); Zen 1/2 behaviour of ADCX/ADOX is correct by the ISA but unmeasured.
+
+## Disk-mode load on the Contabo VPS (storage.mode = "disk", installed from the ISO), 2026-10-31
+
+Installed through the ISO's install entry (default entry via `--install-default`); the installer powers the VM off, `cntb start` boots from disk. Load: `urmqtt-loadgen hold --publish-ms 100` from the build server (QoS 0 telemetry on `devices/<id>/telemetry/load`), `$SYS` read with an operator certificate. Disk: 100 GiB virtio-scsi (diagnostic: 78-110 MiB/s sequential read, 104 MiB/s sequential write, ~1550 random 4K read IOPS, p99 8-9 ms).
+
+| Clients | Published (client side) | Worker busy (cores 1,2) | DB core 3 busy | Core 0 |
+|---|---|---|---|---|
+| 995 | ~8.3k/s (limited by the client loop) | 11-18% | 63-83% | 8% |
+| 3996 | ~28k/s attempted, 1.1M+ received while sampled | 64-65% | 100% | 21-42% |
+
+- Nothing dropped on the console, no watchdog problem seen, heap use 8.7 MB, data partition use 4.2 MB for ~1.5M telemetry messages (the log is compact).
+- The DB core (telemetry log + SQLite writes, one core) is the ceiling for persisted telemetry, well before the workers (~25k msg/s at 100% on a Zen1/2 vCPU). Next lever: batching/format of the telemetry writes, or a second DB core.
+- Not measured: QoS 1 persistence, fsync-bound latency, retained/session writes.
