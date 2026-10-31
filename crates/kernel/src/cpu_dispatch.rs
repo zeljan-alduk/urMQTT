@@ -28,14 +28,18 @@ pub fn sealed() -> Option<&'static Sealed> {
 /// kernel-side backends (CRC-32C).
 pub fn seal(detected: CpuFeatures, disabled: CpuFeatures) -> Result<&'static Sealed, SealError> {
     let s = CPU.seal_mask(&TABLE, detected, disabled)?;
-    if s.selection.backend(Primitive::Crc32c) == "armv8-crc" {
+    if matches!(
+        s.selection.backend(Primitive::Crc32c),
+        "armv8-crc" | "sse4.2"
+    ) {
         urmqtt_store::crc::set_backend(crc32c_hw);
     }
     Ok(s)
 }
 
 fn crc32c_hw(crc: u32, data: &[u8]) -> u32 {
-    // SAFETY: installed only when the sealed set has FEAT_CRC32.
+    // SAFETY: installed only when the sealed set has FEAT_CRC32 (AArch64)
+    // or SSE4.2 (x86_64).
     unsafe { urmqtt_arch::crc::crc32c_update(crc, data) }
 }
 

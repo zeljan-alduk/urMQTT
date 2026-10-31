@@ -67,8 +67,34 @@ pub fn table_update(crc: u32, data: &[u8]) -> u32 {
     !c
 }
 
+/// Known-answer test of the installed backend (RFC 3720 B.4 vectors, the
+/// usual check value, a split computation and a 37-byte unaligned tail).
+/// The kernel runs it at every boot and under `simd-irq`.
+pub fn kat() -> bool {
+    let mut inc = [0u8; 32];
+    let mut dec = [0u8; 32];
+    for (i, (a, b)) in inc.iter_mut().zip(dec.iter_mut()).enumerate() {
+        *a = i as u8;
+        *b = 31 - i as u8;
+    }
+    let long: [u8; 37] = core::array::from_fn(|i| (i * 7 + 3) as u8);
+    crc32c(b"123456789") == 0xe306_9283
+        && crc32c(&[0u8; 32]) == 0x8a91_36aa
+        && crc32c(&[0xffu8; 32]) == 0x62a8_ab43
+        && crc32c(&inc) == 0x46dd_794e
+        && crc32c(&dec) == 0x113f_db5c
+        && update(crc32c(b"1234"), b"56789") == 0xe306_9283
+        && update(0, &long[1..]) == table_update(0, &long[1..])
+        && crc32c(&long) == table_update(0, &long)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kat_passes_with_the_table() {
+        assert!(super::kat());
+    }
+
     use super::*;
 
     #[test]

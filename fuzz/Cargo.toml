@@ -20,6 +20,7 @@ urmqtt-tls = { path = "../crates/tls" }
 urmqtt-broker = { path = "../crates/broker" }
 urmqtt-control = { path = "../crates/control" }
 urmqtt-arch-aarch64 = { path = "../crates/arch-aarch64" }
+urmqtt-arch-x86_64 = { path = "../crates/arch-x86_64" }
 # X0b differential targets: the crates the kernel uses, against ring.
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }

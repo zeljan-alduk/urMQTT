@@ -92,9 +92,53 @@ fn hmac_sha256() -> bool {
         == hex("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
 }
 
+/// The pattern the long vectors use.
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i * 7 + 3) as u8).collect()
+}
+
+/// A 1000-byte message with 37 bytes of additional data: more than eight
+/// blocks, so the wide AES-NI/PCLMULQDQ (and ARMv8) paths run, with a partial
+/// last block. Vectors from OpenSSL's AES-CTR plus an independent GHASH
+/// (scripted outside the repository), not from this code.
+fn aes_gcm_long() -> bool {
+    use aes_gcm::aead::{AeadInPlace, KeyInit};
+    use sha2::Digest;
+    let key: Vec<u8> = (0..16).collect();
+    let nonce: Vec<u8> = (0..12).collect();
+    let aad: Vec<u8> = (0..37).collect();
+    let Ok(c) = aes_gcm::Aes128Gcm::new_from_slice(&key) else {
+        return false;
+    };
+    let mut buf = pattern(1000);
+    let Ok(t) = c.encrypt_in_place_detached(nonce.as_slice().into(), &aad, &mut buf) else {
+        return false;
+    };
+    sha2::Sha256::digest(&buf).as_slice()
+        == hex("7cd600c64abaaa58cad3701a1e0c6a0dd498030173cf8057d4a08e3c6ff3e85d")
+        && t.as_slice() == hex("7aecc0781a8875af85359aa4e87c3654")
+        && c.decrypt_in_place_detached(nonce.as_slice().into(), &aad, &mut buf, &t)
+            .is_ok()
+        && buf == pattern(1000)
+}
+
+/// SHA-256 over 64, 128 and 1000 bytes: whole blocks and a tail.
+fn sha256_long() -> bool {
+    use sha2::Digest;
+    let d = pattern(1000);
+    sha2::Sha256::digest(&d[..64]).as_slice()
+        == hex("39e3d7b6b5d075d37d053ad89b24b41bef4f3c29760c84447cab3f3be1882241")
+        && sha2::Sha256::digest(&d[..128]).as_slice()
+            == hex("d2742f1f4ac6bb7ca2b239ee18402ba8b3f9f8e652d2a72973c2b9ba11c08cf6")
+        && sha2::Sha256::digest(&d).as_slice()
+            == hex("1e9bc38cbf860b9ec31918b065f9b52476c549a782e0e7990bed8ce3868d2371")
+}
+
 /// Runs every known-answer test; the name of the first failure.
 pub fn run() -> Result<(), &'static str> {
     for (name, ok) in [
+        ("AES-128-GCM (long)", aes_gcm_long as fn() -> bool),
+        ("SHA-256 (long)", sha256_long),
         ("AES-128-GCM", aes_gcm as fn() -> bool),
         ("ChaCha20-Poly1305", chacha20_poly1305),
         ("SHA-256", sha256),

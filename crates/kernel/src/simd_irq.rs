@@ -21,8 +21,7 @@ static IPIS: AtomicU64 = AtomicU64::new(0);
 static DONE: AtomicU64 = AtomicU64::new(0);
 
 fn round() {
-    let ok =
-        urmqtt_tls::kat::run().is_ok() && urmqtt_store::crc::crc32c(b"123456789") == 0xe306_9283;
+    let ok = urmqtt_tls::kat::run().is_ok() && urmqtt_store::crc::kat();
     // Relaxed: counters read after every core has finished.
     if !ok {
         FAILURES.fetch_add(1, Ordering::Relaxed);

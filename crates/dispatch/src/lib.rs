@@ -171,6 +171,13 @@ const fn soft(name: &'static str) -> Backend {
 /// backends: it has its own RustCrypto detection).
 const KERNEL_AARCH64: bool = cfg!(all(target_os = "none", target_arch = "aarch64"));
 
+/// The bare-metal x86_64 kernel (X9). It is built for x86-64-v2, so SSE2 to
+/// SSE4.2 are always there; AES-NI, PCLMULQDQ, SHA-NI and SSE4.2's CRC32 are
+/// detected. The features keep the AArch64 names (`aes`, `pmull`, `sha2`,
+/// `crc32`) in `[cpu] disable` and in the log: AES-NI, PCLMULQDQ, SHA
+/// extensions and SSE4.2.
+const KERNEL_X86: bool = cfg!(all(target_os = "none", target_arch = "x86_64"));
+
 /// The backends of this image. RustCrypto's AES and POLYVAL ask
 /// `cpufeatures` for "aes", which covers AES *and* PMULL, so both AES-GCM
 /// halves need both features.
@@ -183,6 +190,11 @@ pub const TABLE: Table = [
                 needs: &[Feature::Aes, Feature::Pmull],
                 built: KERNEL_AARCH64 && cfg!(aes_armv8),
             },
+            Backend {
+                name: "aesni",
+                needs: &[Feature::Aes, Feature::Pmull],
+                built: KERNEL_X86,
+            },
             soft("soft"),
         ],
     ),
@@ -193,6 +205,11 @@ pub const TABLE: Table = [
                 name: "armv8-pmull",
                 needs: &[Feature::Aes, Feature::Pmull],
                 built: KERNEL_AARCH64 && cfg!(polyval_armv8),
+            },
+            Backend {
+                name: "pclmulqdq",
+                needs: &[Feature::Pmull],
+                built: KERNEL_X86,
             },
             soft("soft"),
         ],
@@ -207,6 +224,13 @@ pub const TABLE: Table = [
                 needs: &[],
                 built: KERNEL_AARCH64 && cfg!(chacha20_force_neon),
             },
+            // The x86 kernel keeps no AVX state (ADR-042): ChaCha20 runs the
+            // SSE2 backend, the baseline. "avx2" is never granted.
+            Backend {
+                name: "sse2",
+                needs: &[],
+                built: KERNEL_X86,
+            },
             soft("soft"),
         ],
     ),
@@ -218,6 +242,11 @@ pub const TABLE: Table = [
                 needs: &[Feature::Sha2],
                 built: KERNEL_AARCH64,
             },
+            Backend {
+                name: "sha-ni",
+                needs: &[Feature::Sha2],
+                built: KERNEL_X86,
+            },
             soft("soft"),
         ],
     ),
@@ -228,6 +257,11 @@ pub const TABLE: Table = [
                 name: "armv8-crc",
                 needs: &[Feature::Crc32],
                 built: KERNEL_AARCH64,
+            },
+            Backend {
+                name: "sse4.2",
+                needs: &[Feature::Crc32],
+                built: KERNEL_X86,
             },
             soft("table"),
         ],
@@ -338,6 +372,11 @@ impl Sealed {
             // that way).
             "aes" => u.has(Feature::Aes) && u.has(Feature::Pmull),
             "sha2" => u.has(Feature::Sha2),
+            // The x86 names (X9): POLYVAL asks for "pclmulqdq", SHA-256 for
+            // "sha". Everything else (avx2, avx512*, bmi2, ...) is refused:
+            // the kernel keeps no AVX state.
+            "pclmulqdq" => u.has(Feature::Pmull),
+            "sha" => u.has(Feature::Sha2),
             _ => false,
         }
     }

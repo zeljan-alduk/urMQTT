@@ -9,7 +9,9 @@ Every artifact here is pinned to an exact version and verified against
 | `sqlite/` | Official SQLite amalgamation (`sqlite3.c`, `sqlite3.h`) | M11 |
 | `cpufeatures-0.2.17/`, `cpufeatures-0.3.1/` | RustCrypto `cpufeatures`, patched for `target_os = "none"` (below) | X0b |
 
-## `cpufeatures` (X0b, ADR-041 and ADR-053)
+## `cpufeatures` (X0b, X9; ADR-041, ADR-053, ADR-070)
+
+X9 adds the same patch for x86 (`src/x86.rs`, `src/lib.rs`): on `target_os = "none"` the detection macro takes the runtime path and answers from the kernel (`urmqtt_cpu_has`), except for features the target enables at build time, which are true. `mod x86` is `pub` so the macros can reach `x86::urmqtt`.
 
 RustCrypto's `aes`, `polyval` and `sha2` ask `cpufeatures` whether a CPU
 feature may be used. Upstream answers "no" on every target it cannot query

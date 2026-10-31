@@ -49,6 +49,7 @@ struct Counters {
     accepted: u64,
     refused: [u64; 4],
     watchdog: u64,
+    verify_hits: u64,
     dropped_frames: u64,
     lost: u64,
     unsent: u64,
@@ -71,6 +72,7 @@ fn counters(lost: u64, unsent: u64) -> Counters {
             .each_ref()
             .map(|r| r.load(Ordering::Relaxed)),
         watchdog: crate::watchdog::FIRED.load(Ordering::Relaxed),
+        verify_hits: urmqtt_tls::provider::verify_cache_hits(),
         dropped_frames: dataplane::DROPPED_FRAMES.load(Ordering::Relaxed),
         lost,
         unsent,
@@ -320,6 +322,12 @@ impl Ops {
             );
         }
         add("watchdog.fired", d(now.watchdog, prev.watchdog), "c");
+        // Certificate signatures not verified again (X9, verify memo).
+        add(
+            "tls.verify_memo_hits",
+            d(now.verify_hits, prev.verify_hits),
+            "c",
+        );
         add(
             "frames.dropped",
             d(now.dropped_frames, prev.dropped_frames),

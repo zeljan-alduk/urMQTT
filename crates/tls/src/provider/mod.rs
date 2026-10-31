@@ -18,6 +18,13 @@ mod kx;
 pub mod sign;
 mod verify;
 
+pub use verify::cache_stats as verify_cache_stats;
+
+/// Certificate signatures answered from the verification memo (statistics).
+pub fn verify_cache_hits() -> u64 {
+    verify::cache_stats().0
+}
+
 /// AES-GCM may encrypt 2^24.5 records per key (RFC 8446 §5.5).
 pub const AES_GCM_RECORD_LIMIT: u64 = 1 << 24;
 

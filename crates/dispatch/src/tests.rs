@@ -170,6 +170,25 @@ fn cpufeatures_answers_follow_the_usable_set() {
     let cell = SealCell::new();
     let s = cell.seal(&BUILT, ALL, &["sha2"]).unwrap();
     assert!(!s.cpufeatures("sha2"));
+    // The x86 names (X9): "pclmulqdq" follows PMULL, "sha" follows SHA-NI;
+    // the AVX family is never granted.
+    let cell = SealCell::new();
+    let s = cell.seal(&BUILT, ALL, &[]).unwrap();
+    assert!(s.cpufeatures("pclmulqdq") && s.cpufeatures("sha"));
+    for avx in [
+        "avx",
+        "avx2",
+        "avx512f",
+        "bmi2",
+        "adx",
+        "vaes",
+        "vpclmulqdq",
+    ] {
+        assert!(!s.cpufeatures(avx), "{avx}");
+    }
+    let cell = SealCell::new();
+    let s = cell.seal(&BUILT, ALL, &["pmull", "sha2"]).unwrap();
+    assert!(!s.cpufeatures("pclmulqdq") && !s.cpufeatures("sha"));
     let none = CpuFeatures::NONE.with(Feature::Aes, true);
     let cell = SealCell::new();
     assert!(!cell.seal(&BUILT, none, &[]).unwrap().cpufeatures("aes"));

@@ -382,6 +382,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 
 [[package]]
+name = "font8x8"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -986,6 +992,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "urmqtt-arch-x86_64"
+version = "0.1.0"
+dependencies = [
+ "font8x8",
+ "urmqtt-dispatch",
+ "urmqtt-sync",
+]
+
+[[package]]
 name = "urmqtt-broker"
 version = "0.1.0"
 dependencies = [
@@ -1031,6 +1046,7 @@ dependencies = [
  "sha2 0.10.9",
  "sha2 0.11.1",
  "urmqtt-arch-aarch64",
+ "urmqtt-arch-x86_64",
  "urmqtt-broker",
  "urmqtt-config-schema",
  "urmqtt-control",

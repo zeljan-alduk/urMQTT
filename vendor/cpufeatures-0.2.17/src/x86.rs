@@ -14,12 +14,15 @@ macro_rules! __unless_target_features {
     ($($tf:tt),+ => $body:expr ) => {{
         #[cfg(not(all($(target_feature=$tf,)*)))]
         {
-            #[cfg(not(any(target_env = "sgx", target_os = "none", target_os = "uefi")))]
+            // urMQTT patch: the freestanding kernel (`target_os = "none"`)
+            // takes the same path; its detection asks the sealed dispatch
+            // (`__detect_target_features` below).
+            #[cfg(not(any(target_env = "sgx", target_os = "uefi")))]
             $body
 
-            // CPUID is not available on SGX. Freestanding and UEFI targets
-            // do not support SIMD features with default compilation flags.
-            #[cfg(any(target_env = "sgx", target_os = "none", target_os = "uefi"))]
+            // CPUID is not available on SGX. UEFI targets do not support
+            // SIMD features with default compilation flags.
+            #[cfg(any(target_env = "sgx", target_os = "uefi"))]
             false
         }
 
@@ -28,7 +31,39 @@ macro_rules! __unless_target_features {
     }};
 }
 
+/// urMQTT patch: on the freestanding kernel the answer comes from the sealed
+/// CPU dispatch (honours `[cpu] disable`, "no" before the seal). Features the
+/// target enables at build time (the x86-64-v2 baseline) are always there.
+#[cfg(target_os = "none")]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __detect_target_features {
+    ($($tf:tt),+) => {{
+        $((cfg!(target_feature = $tf) || $crate::x86::urmqtt::has($tf)) & )+ true
+    }};
+}
+
+/// urMQTT patch: the kernel's answer to "may this feature be used?".
+#[cfg(target_os = "none")]
+#[doc(hidden)]
+pub mod urmqtt {
+    unsafe extern "C" {
+        /// Defined by the urMQTT kernel. `name` is a target-feature name
+        /// such as `"aes"`, `"pclmulqdq"` or `"sha"`.
+        fn urmqtt_cpu_has(name: *const u8, len: usize) -> bool;
+    }
+
+    /// Whether the kernel's sealed feature set allows `name`.
+    #[inline]
+    pub fn has(name: &str) -> bool {
+        // SAFETY: the kernel defines this symbol with this signature and
+        // only reads the `len` bytes of the string slice.
+        unsafe { urmqtt_cpu_has(name.as_ptr(), name.len()) }
+    }
+}
+
 /// Use CPUID to detect the presence of all supplied target features.
+#[cfg(not(target_os = "none"))]
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __detect_target_features {
