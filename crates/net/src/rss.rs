@@ -46,6 +46,32 @@ pub fn ipv4_tcp(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16) -> u32 {
 mod tests {
     use super::*;
 
+    /// One source address (a load generator, a NAT gateway) must still
+    /// spread over the worker cores: only the source port varies, and the
+    /// hash modulo the worker count must be even for the port ranges
+    /// operating systems use (PERF, ADR-080).
+    #[test]
+    fn one_source_address_spreads_over_the_workers() {
+        for (lo, hi) in [(32768u16, 60999u16), (49152, 65535), (1024, 65535)] {
+            for workers in 2usize..=8 {
+                let mut count = alloc::vec![0usize; workers];
+                for sport in lo..=hi {
+                    let h = ipv4_tcp([10, 0, 2, 2], [169, 58, 184, 193], sport, 8883);
+                    count[h as usize % workers] += 1;
+                }
+                let total = usize::from(hi - lo) + 1;
+                let fair = total / workers;
+                for (core, &n) in count.iter().enumerate() {
+                    // Within 4 % of a fair share.
+                    assert!(
+                        n.abs_diff(fair) * 100 <= fair * 4,
+                        "ports {lo}..={hi}, {workers} workers: core {core} got {n} of {total}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Verification suite from the Microsoft RSS specification (IPv4 with
     /// TCP ports).
     #[test]

@@ -13,6 +13,7 @@
 *.pem
 *.srl
 *.csr
+deploy/bench-local/
 deploy/*/devices/
 deploy/*/negative/
 deploy/*/services/

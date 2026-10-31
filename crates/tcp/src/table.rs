@@ -27,7 +27,7 @@ pub struct Table {
     max: usize,
 }
 
-fn mix(k: &Key, seed: u64) -> u64 {
+pub(crate) fn mix(k: &Key, seed: u64) -> u64 {
     let mut h = seed ^ 0x9e37_79b9_7f4a_7c15;
     let v = u64::from(u32::from_be_bytes(k.addr))
         | (u64::from(k.rport) << 32)

@@ -120,6 +120,11 @@ pub struct BootOptions {
     /// `test=log-flood:MS` (dev only): every data core logs one line every
     /// MS milliseconds from inside a watched handler (ADR-090).
     pub log_flood_ms: Option<u32>,
+    /// `limits=bench` (dev only): the handshake limits are relaxed so one
+    /// source address can load the server (`make bench`, ADR-082). A
+    /// production image ignores the word; its bench counterpart is the
+    /// `deploy/bench` configuration.
+    pub bench_limits: bool,
     /// `registry=allowlist`: allowlist mode even if the configuration says
     /// "open" (stricter only, for tests of one image in both modes).
     pub allowlist: bool,
@@ -188,6 +193,7 @@ impl BootOptions {
                 "test=crypto-bench" => o.crypto_bench = true,
                 "test=simd-irq" => o.simd_irq = true,
                 "diag-confirm=WIPE" => o.diag_auto_confirm = true,
+                "limits=bench" => o.bench_limits = true,
                 w => {
                     if let Some(mb) = w
                         .strip_prefix("heap_limit_mb=")
@@ -355,6 +361,15 @@ mod tests {
         assert_eq!(df.test_fault, Some(TestFault::DoubleFault));
         let prod = BootOptions::parse("test=df", false);
         assert_eq!((prod.test_fault, prod.ignored), (None, 1));
+    }
+
+    /// The relaxed bench limits exist in dev builds only.
+    #[test]
+    fn bench_limits_are_a_dev_word() {
+        assert!(BootOptions::parse("serve limits=bench", true).bench_limits);
+        let prod = BootOptions::parse("limits=bench", false);
+        assert!(!prod.bench_limits);
+        assert_eq!(prod.ignored, 1);
     }
 
     #[test]

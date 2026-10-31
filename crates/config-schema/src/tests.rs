@@ -614,6 +614,20 @@ fn cpu_disable_is_validated_against_the_dispatch_features() {
 }
 
 #[test]
+fn the_dispatcher_serves_no_connections_unless_asked() {
+    // The default, in both shipped templates and without the key.
+    assert!(!parse("dev", DEV).unwrap().cpu.dispatcher_serves);
+    assert!(!parse("prod", PROD).unwrap().cpu.dispatcher_serves);
+    let on = DEV.replace("disable = []", "disable = []\ndispatcher_serves = true");
+    assert!(parse("dev", &on).unwrap().cpu.dispatcher_serves);
+    assert_rejected(
+        "dev",
+        &DEV.replace("disable = []", "disable = []\ndispatcher_serves = \"yes\""),
+        "",
+    );
+}
+
+#[test]
 fn trust_registry_and_control_keys() {
     let cfg = parse("dev", DEV).unwrap();
     assert_eq!(cfg.trust.operational, ["ca.pem", "ca-2.pem"]);

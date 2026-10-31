@@ -214,6 +214,10 @@ service() {
     done
 }
 
+# want <function>: with SMOKE_SCENARIOS=<regex> the groups of scenarios that
+# are functions (storm, attack_app, ...) run only if their name matches too.
+want() { [[ -z ${SMOKE_SCENARIOS:-} || $1 =~ $SMOKE_SCENARIOS ]]; }
+
 # start_vm <log> <qemu args...>: boots in the background; sets VM_PID.
 start_vm() {
     local log=$1
@@ -525,7 +529,7 @@ storm() {
         kill_vm
         grep -v '^loadgen: bench-' "$log.client" >>"$log" 2>/dev/null || true
         check "storm [$accel]" "$log" "$status" "loadgen: storm round 3: [0-9]+ of 3000 connected" \
-            "admission: [0-9]+ connection\(s\) refused: heap below the free reserve" \
+            "admission: [0-9]+ (connection\(s\) refused|SYN\(s\) dropped without an answer on core [0-9]+): heap below the free reserve" \
             "mem: 0 connection\(s\)" "NOT:memory allocation of" "$NO_FAULT"
     done
 }
@@ -622,7 +626,7 @@ attack_app() {
         check "attack-app [$accel]" "$log" "$status" \
             "attack: slowloris-tcp opened" "attack: slowloris-tls opened" \
             "attack: slowloris-mqtt opened" \
-            "admission: [0-9]+ connection\(s\) refused: too many handshakes in flight" \
+            "admission: [0-9]+ (connection\(s\) refused|SYN\(s\) dropped without an answer on core [0-9]+): too many handshakes in flight" \
             "attack: half-records CONNECT completed in fragments, CONNACK ok" \
             "attack: max-packets .* oversize packet closed the connection" \
             "attack: topic-flood retained 60 distinct topic" \
@@ -1840,27 +1844,27 @@ for accel in $ACCELS; do
     fi
 done
 if command -v mosquitto_pub >/dev/null; then
-    mqtt_persist
+    want mqtt_persist && mqtt_persist
 fi
-storm
-attack_raw
-attack_app
-observability
-first_boot
-first_boot_crash
-scsi_boot
-iso_as_cd
+want storm && storm
+want attack_raw && attack_raw
+want attack_app && attack_app
+want observability && observability
+want first_boot && first_boot
+want first_boot_crash && first_boot_crash
+want scsi_boot && scsi_boot
+want iso_as_cd && iso_as_cd
 if command -v mosquitto_pub >/dev/null; then
-    live_suite
+    want live_suite && live_suite
 else
     echo "  ✗ live-mode scenarios need the mosquitto clients"
     FAILED=$((FAILED + 1))
 fi
-own_damaged
-disk_tool
-[[ $ARCH == aarch64 ]] && install_iso
-no_hw_rng
-[[ $ARCH == aarch64 ]] && gicv2
+want own_damaged && own_damaged
+want disk_tool && disk_tool
+[[ $ARCH == aarch64 ]] && want install_iso && install_iso
+want no_hw_rng && no_hw_rng
+[[ $ARCH == aarch64 ]] && want gicv2 && gicv2
 
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
 pcap_has_garp() {

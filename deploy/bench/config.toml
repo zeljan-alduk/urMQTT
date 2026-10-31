@@ -1,0 +1,119 @@
+# BENCHMARK configuration (PERF, ADR-082): the production template with the
+# handshake limits relaxed so that ONE source address (a load generator on a
+# laptop) can load the server. NEVER deploy this to serve devices: the limits
+# below are the protection against a slow or abusive client; production keeps
+# the defaults of deploy/prod/config.toml.
+#
+# Differences from deploy/prod/config.toml (nothing else differs):
+#   [limits]  handshakes_per_core_per_sec, max_handshakes_in_flight_per_core,
+#             max_handshakes_in_flight_per_ip: relaxed (see below);
+#   [storage] mode = "auto" (an ISO live boot needs no disk);
+#   [cpu]     dispatcher_serves: the switch to compare, see ADR-081.
+#
+# Build: scripts/mkbench.sh --certs deploy/prod [--static ADDR/LEN GATEWAY]
+# (copies the certificates and keys next to this file, builds the universal
+# ISO with ENV=bench). Certificates and keys are NOT committed.
+
+[network]
+mode = "dhcp"                  # "dhcp" | "static" (static needs address + gateway)
+mqtt_tls_port = 8883
+mqtt_plain_port = 0            # plaintext is rejected outside dev
+
+[tls]
+cert = "server.pem"            # files are read from deploy/<env>/
+key = "server.key"
+identity_field = "cn"          # "cn" | "san_uri"
+resumption = true
+revocation_list = ""              # file of hex serials in deploy/prod/, or "" for none
+min_server_cert_days = 60      # the build fails if server.pem expires sooner
+early_data = false             # must stay false (0-RTT is replayable); true fails the build
+
+[limits]
+max_connections_per_core = 2000000
+max_packet_size = 4096
+max_topic_len = 256
+max_topic_levels = 16
+max_subscriptions_per_session = 8
+max_inflight_qos1 = 16
+max_queued_per_offline_session = 64
+max_retained_per_device = 32      # retained messages one identity may hold; more are delivered but not retained
+max_retained_bytes = 16777216   # 16 MiB of retained topics and payloads per data core (each holds a replica)
+publish_rate_per_device = "10/s"
+# BENCH values (production: 2000, 256, 32). One source address is one "IP",
+# so the per-address limit is as large as the per-core one.
+handshakes_per_core_per_sec = 100000
+max_handshakes_in_flight_per_core = 4096  # concurrent TLS handshakes per core; more are refused
+max_handshakes_in_flight_per_ip = 4096    # of those, from one source address
+
+[acl]
+device_publish = ["devices/{id}/#"]
+device_subscribe = ["devices/{id}/cmd/#"]
+# Backend identities (exact id or prefix*) with wider rights; no DB lookup.
+service_ids = ["backend"]
+service_publish = ["devices/+/cmd/#", "fleet/#"]
+service_subscribe = ["devices/#", "fleet/#"]
+operator_ids = ["operator"]       # the only identities that read $SYS/ and use the console (mTLS only); exact ids
+
+[storage]
+# Where the data partition lives; required, never a run-time fallback:
+#   "disk"  the boot disk's data partition. The ISO's live entry is refused.
+#   "auto"  the disk, except the ISO's first ("live") entry, which keeps its data
+#           in RAM only (EPHEMERAL: lost on reboot) and needs no disk.
+#   "ram"   always RAM, whatever the boot medium (a diskless appliance).
+mode = "auto"
+ram_percent = 10                  # auto/ram: share of RAM for the in-memory data store (2..=50)
+diagnostic = false                 # true: the ISO's Diagnostic entry may run (hardware detection and benchmarks; disk writes only in unallocated space after a typed confirmation)
+sqlite_heap_mb = 8                # sized for a 64 MB VM; raise with RAM (ADR-008)
+telemetry_topics = ["devices/+/telemetry/#"]
+retention_days = 30
+require_flush = true
+require_data_disk = true
+refuse_on_corruption = true
+
+[observability]
+log_level = "info"
+syslog_udp = ""                # "10.0.0.5:514" for a private collector
+metrics_udp = ""               # statsd
+
+[watchdog]
+handler_budget_ms = 20         # ordinary handlers (MQTT packets, output, timers)
+# handshake_budget_ms = 0      # TLS handshake steps: 0 (default) = calibrated at boot (10x the measured
+#                              # handshake cost, 50..500 ms, ADR-071); 1..=900 pins it
+action = "drop"                # "log" | "drop" | "reset"; a stuck core (100 budgets, >= 1 s) always resets
+
+[memory]
+kernel_heap_mb = 1024             # power of two; ~500 B per idle connection (1M ≈ 500 MiB) plus handshakes
+min_free_mb = 64                  # refuse new connections below this much free heap
+
+[entropy]
+# Without virtio-rng and without RNDR (Ampere Altra has none), "jitter" seeds
+# the CSPRNG from health-tested CPU timing jitter instead of refusing to boot.
+# "none": refuse to boot without a hardware source.
+fallback = "jitter"
+
+[cpu]
+# CPU features the crypto and checksum code must not use, e.g. to work around
+# a slow or faulty accelerator: "aes", "pmull", "sha2", "crc32". Security
+# features (PAC, BTI) cannot be switched off. Empty: use what the CPU has.
+disable = []
+# false (default): core 0 only owns the NIC and steers flows. true: it serves
+# its share of the connections too, in slices (ADR-081). Measure both.
+dispatcher_serves = false
+
+[trust]
+# CA files by role, in deploy/<env>/. Two operational CAs allow rotation with
+# overlap: add the new CA, re-issue devices, then remove the old one.
+operational = ["ca.pem"]
+bootstrap = []                # provisioning only: provision/{id}/#
+min_anchor_days = 365          # the build fails if a CA expires sooner
+
+[registry]
+mode = "open"                  # "open" | "allowlist" (only allowlisted ids connect)
+
+[control]
+# Signed control messages on $urmqtt/control (docs/SECURITY.md, "Control
+# channel"): runtime revocation and allowlist changes without a new image.
+public_key = "control.pub"     # Ed25519; the private key stays offline
+service_ids = []               # empty: the control channel is off
+allow_unrevoke = false
+max_message_age_s = 600        # longest validity window a message may have

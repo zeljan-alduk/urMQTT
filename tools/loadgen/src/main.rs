@@ -20,6 +20,17 @@
 //!   many attempts were refused and how long the round took; fails if a
 //!   round connects fewer than `--min-connected`.
 //!
+//! The `handshake` report (PERF, ADR-080) counts the rate over the
+//! measurement window only (not the drain of the last connections), gives
+//! the latency percentiles of a whole connection (TCP connect, TLS, CONNECT,
+//! close), of the TCP connect alone and of the TLS + CONNECT part, and
+//! sorts errors by where they happened. `--error-sleep-ms` is the pause
+//! after a failed attempt (default 50 ms: an aggressive client; a device
+//! with backoff waits seconds) and `--connect-timeout-s` bounds a connect.
+//! `--close server` (default) lets the server close first, so the client keeps
+//! no TIME_WAIT; `--close client` is the old order and is limited by the
+//! client's ephemeral ports (about 550 connections/s on macOS).
+//!
 //! ```text
 //! urmqtt-loadgen handshake --port 18883 --threads 64 --duration 10
 //! urmqtt-loadgen hold --port 18883 --clients 500 --duration 30 --publish-ms 1000
@@ -49,6 +60,12 @@ struct Opts {
     retry_s: u64,
     min_connected: u64,
     prefix: String,
+    /// Pause after a failed attempt, ms.
+    error_sleep_ms: u64,
+    /// Connect timeout, seconds (0: the operating system's).
+    connect_timeout_s: u64,
+    /// The client sends its FIN first (and keeps the TIME_WAIT).
+    close_first: bool,
 }
 
 fn parse() -> Result<Opts, String> {
@@ -70,6 +87,9 @@ fn parse() -> Result<Opts, String> {
         retry_s: 60,
         min_connected: 0,
         prefix: "bench".into(),
+        error_sleep_ms: 50,
+        connect_timeout_s: 0,
+        close_first: false,
     };
     while let Some(k) = a.next() {
         let v = a.next().ok_or(format!("{k} needs a value"))?;
@@ -87,8 +107,21 @@ fn parse() -> Result<Opts, String> {
             "--retry-s" => o.retry_s = num(&v)?,
             "--min-connected" => o.min_connected = num(&v)?,
             "--prefix" => o.prefix = v,
+            "--error-sleep-ms" => o.error_sleep_ms = num(&v)?,
+            "--connect-timeout-s" => o.connect_timeout_s = num(&v)?,
+            "--close" => match v.as_str() {
+                "client" => o.close_first = true,
+                "server" => o.close_first = false,
+                _ => return Err("--close: client|server".into()),
+            },
             _ => return Err(format!("unknown option {k}")),
         }
+    }
+    // A device gives up on a connect that gets no answer and tries again
+    // later; a server that drops SYNs when it is full (ADR-080) must not
+    // leave the storm threads in the operating system's 75 s connect.
+    if o.mode == "storm" && o.connect_timeout_s == 0 {
+        o.connect_timeout_s = 3;
     }
     Ok(o)
 }
@@ -175,9 +208,31 @@ type Tls = StreamOwned<ClientConnection, TcpStream>;
 /// A simulated device: its client id and TLS configuration.
 type Identity = (String, Arc<ClientConfig>);
 
+/// TCP connect, with the `--connect-timeout-s` bound if given.
+fn connect(o: &Opts) -> Result<TcpStream, String> {
+    use std::net::ToSocketAddrs;
+    if o.connect_timeout_s == 0 {
+        return TcpStream::connect((o.host.as_str(), o.port)).map_err(|e| format!("connect: {e}"));
+    }
+    let addr = (o.host.as_str(), o.port)
+        .to_socket_addrs()
+        .map_err(|e| format!("connect: {e}"))?
+        .next()
+        .ok_or("connect: no address")?;
+    TcpStream::connect_timeout(&addr, Duration::from_secs(o.connect_timeout_s))
+        .map_err(|e| format!("connect: {e}"))
+}
+
 /// TCP + TLS + CONNECT/CONNACK.
 fn open(o: &Opts, id: &str, cfg: &Arc<ClientConfig>) -> Result<Tls, String> {
-    let tcp = TcpStream::connect((o.host.as_str(), o.port)).map_err(|e| format!("connect: {e}"))?;
+    open_timed(o, id, cfg).map(|(t, _)| t)
+}
+
+/// [`open`], also returning how long the TCP connect took.
+fn open_timed(o: &Opts, id: &str, cfg: &Arc<ClientConfig>) -> Result<(Tls, Duration), String> {
+    let t_connect = Instant::now();
+    let tcp = connect(o)?;
+    let connect_time = t_connect.elapsed();
     tcp.set_nodelay(true).ok();
     tcp.set_read_timeout(Some(Duration::from_secs(10))).ok();
     let name = ServerName::try_from("localhost").map_err(|e| e.to_string())?;
@@ -205,14 +260,24 @@ fn open(o: &Opts, id: &str, cfg: &Arc<ClientConfig>) -> Result<Tls, String> {
             return Err(format!("SUBACK refused: {ack:02x?}"));
         }
     }
-    Ok(tls)
+    Ok((tls, connect_time))
 }
 
-fn close(mut tls: Tls) {
+/// DISCONNECT, close_notify and the end of the TCP connection.
+///
+/// `client_first`: the client sends its FIN before the server does (the
+/// old behaviour). The side that closes first keeps the TIME_WAIT: 30 s on
+/// macOS (2 x 15 s) against 16 384 ephemeral ports, which caps a single
+/// source at about 550 connections per second, whatever the server does.
+/// By default the server closes first (urMQTT keeps no TIME_WAIT) and the
+/// client only answers its FIN, so the client's port is free at once.
+fn close(mut tls: Tls, client_first: bool) {
     let _ = tls.write_all(&[0xe0, 0x00]);
     tls.conn.send_close_notify();
     let _ = tls.flush();
-    let _ = tls.sock.shutdown(std::net::Shutdown::Write);
+    if client_first {
+        let _ = tls.sock.shutdown(std::net::Shutdown::Write);
+    }
     // Wait for the server's FIN on the TCP socket itself (rustls would keep
     // waiting for more records), so the server's session has ended before
     // this identity connects again.
@@ -221,12 +286,57 @@ fn close(mut tls: Tls) {
     while matches!(tls.sock.read(&mut sink), Ok(n) if n > 0) {}
 }
 
+/// Where a failed attempt failed (the prefix of `open`'s error text).
+fn error_kind(e: &str) -> usize {
+    if e.contains("os error 49") || e.contains("os error 99") {
+        // EADDRNOTAVAIL (macOS, Linux): no free ephemeral port left.
+        4
+    } else if e.starts_with("connect") {
+        0
+    } else if e.starts_with("tls/connect") {
+        1
+    } else if e.starts_with("connack") {
+        2
+    } else {
+        3
+    }
+}
+
+const ERROR_KINDS: [&str; 5] = [
+    "connect (no SYN-ACK or refused)",
+    "TLS or CONNECT write (reset or alert)",
+    "CONNACK (reset or timeout)",
+    "other",
+    "the client ran out of ephemeral ports (TIME_WAIT: this is the load generator, not the server)",
+];
+
+/// The `p`-th percentile (0..=100) of sorted microsecond samples, in ms.
+fn percentile_ms(sorted: &[u32], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let i = (((sorted.len() - 1) as f64) * p / 100.0).round() as usize;
+    f64::from(sorted[i.min(sorted.len() - 1)]) / 1000.0
+}
+
+fn latency_line(name: &str, samples: &mut [u32]) -> String {
+    samples.sort_unstable();
+    let mean = samples.iter().map(|&x| f64::from(x)).sum::<f64>() / samples.len().max(1) as f64;
+    format!(
+        "loadgen: {name}: mean {:.1} ms, p50 {:.1}, p90 {:.1}, p99 {:.1}, max {:.1} ms",
+        mean / 1000.0,
+        percentile_ms(samples, 50.0),
+        percentile_ms(samples, 90.0),
+        percentile_ms(samples, 99.0),
+        percentile_ms(samples, 100.0)
+    )
+}
+
 fn handshake(o: &Opts) -> Result<(), String> {
     let ids = Arc::new(identities(o, o.threads)?);
     let done = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
-    let lat_us = Arc::new(AtomicU64::new(0));
     eprintln!(
         "loadgen: {} worker(s), {} identities, {} s",
         o.threads,
@@ -236,13 +346,8 @@ fn handshake(o: &Opts) -> Result<(), String> {
     let start = Instant::now();
     let workers: Vec<_> = (0..o.threads)
         .map(|t| {
-            let (ids, done, errors, stop, lat) = (
-                ids.clone(),
-                done.clone(),
-                errors.clone(),
-                stop.clone(),
-                lat_us.clone(),
-            );
+            let (ids, done, errors, stop) =
+                (ids.clone(), done.clone(), errors.clone(), stop.clone());
             let o = Opts {
                 mode: String::new(),
                 host: o.host.clone(),
@@ -250,47 +355,91 @@ fn handshake(o: &Opts) -> Result<(), String> {
                 prefix: String::new(),
                 ..*o
             };
+            // Per thread: whole-connection, connect-only and TLS+CONNECT
+            // times in microseconds, completions after the window closed
+            // (not counted), and failures by kind.
             std::thread::spawn(move || {
                 let (id, cfg) = &ids[t % ids.len()];
+                let (mut total, mut conn, mut tls_t) = (Vec::new(), Vec::new(), Vec::new());
+                let mut kinds = [0u64; 5];
                 while !stop.load(Ordering::Relaxed) {
                     let t0 = Instant::now();
-                    match open(&o, id, cfg) {
-                        Ok(tls) => {
-                            close(tls);
+                    match open_timed(&o, id, cfg) {
+                        Ok((tls, connect_time)) => {
+                            let established = t0.elapsed();
+                            close(tls, o.close_first);
+                            if stop.load(Ordering::Relaxed) {
+                                break;
+                            }
                             done.fetch_add(1, Ordering::Relaxed);
-                            lat.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+                            total.push(t0.elapsed().as_micros() as u32);
+                            conn.push(connect_time.as_micros() as u32);
+                            tls_t.push(established.saturating_sub(connect_time).as_micros() as u32);
                         }
                         Err(e) => {
+                            if stop.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            kinds[error_kind(&e)] += 1;
                             if errors.fetch_add(1, Ordering::Relaxed) < 5 {
                                 eprintln!("loadgen: {id}: {e}");
                             }
-                            std::thread::sleep(Duration::from_millis(50));
+                            std::thread::sleep(Duration::from_millis(o.error_sleep_ms));
                         }
                     }
                 }
+                (total, conn, tls_t, kinds)
             })
         })
         .collect();
-    let mut last = 0;
+    let mut last = (0, 0);
     for s in 1..=o.duration {
         std::thread::sleep(Duration::from_secs(1));
-        let d = done.load(Ordering::Relaxed);
-        eprintln!("loadgen: t={s:3}s {:6} conn/s", d - last);
-        last = d;
+        let (d, e) = (done.load(Ordering::Relaxed), errors.load(Ordering::Relaxed));
+        eprintln!(
+            "loadgen: t={s:3}s {:6} conn/s {:6} error(s)",
+            d - last.0,
+            e - last.1
+        );
+        last = (d, e);
     }
+    // The window closes here; attempts still running are drained and left
+    // out of the figures.
     stop.store(true, Ordering::Relaxed);
-    let secs = start.elapsed().as_secs_f64();
+    let window = start.elapsed().as_secs_f64();
+    let (d, e) = (done.load(Ordering::Relaxed), errors.load(Ordering::Relaxed));
+    let (mut total, mut conn, mut tls_t) = (Vec::new(), Vec::new(), Vec::new());
+    let mut kinds = [0u64; 5];
     for w in workers {
-        let _ = w.join();
+        if let Ok((a, b, c, k)) = w.join() {
+            total.extend(a);
+            conn.extend(b);
+            tls_t.extend(c);
+            for (x, y) in kinds.iter_mut().zip(k) {
+                *x += y;
+            }
+        }
     }
-    let d = done.load(Ordering::Relaxed);
+    let drained = start.elapsed().as_secs_f64() - window;
     println!(
-        "loadgen: handshake: {d} connections in {secs:.1} s = {:.0} conn/s (full TLS 1.3 + mTLS + CONNECT), \
-         mean latency {:.1} ms, {} error(s)",
-        d as f64 / secs,
-        lat_us.load(Ordering::Relaxed) as f64 / d.max(1) as f64 / 1000.0,
-        errors.load(Ordering::Relaxed)
+        "loadgen: handshake: {d} connections in {window:.1} s = {:.0} conn/s (full TLS 1.3 + mTLS + CONNECT), \
+         mean latency {:.1} ms, {e} error(s)",
+        d as f64 / window,
+        total.iter().map(|&x| f64::from(x)).sum::<f64>() / total.len().max(1) as f64 / 1000.0,
     );
+    println!("{}", latency_line("whole connection", &mut total));
+    println!("{}", latency_line("tcp connect", &mut conn));
+    println!("{}", latency_line("tls + connect/connack", &mut tls_t));
+    if e > 0 {
+        let by: Vec<String> = ERROR_KINDS
+            .iter()
+            .zip(kinds)
+            .filter(|(_, n)| *n > 0)
+            .map(|(name, n)| format!("{n} {name}"))
+            .collect();
+        println!("loadgen: errors by kind: {}", by.join(", "));
+    }
+    println!("loadgen: drained the last attempts in {drained:.1} s (not counted)");
     Ok(())
 }
 
@@ -362,7 +511,7 @@ fn hold(o: &Opts) -> Result<(), String> {
         o.duration
     );
     for (_, t) in conns {
-        close(t);
+        close(t, true);
     }
     Ok(())
 }

@@ -1519,3 +1519,35 @@ At 25 ms (four cores, 160 lines/s against a 250 lines/s sink): rings wrote all 2
 **Tests.** Host: `ring`/`Hub` in `urmqtt-log` (merge by timestamp over four cores with no loss, overflow accounting exact, three-quarter limit for info, per-core limiter and audit exemption, a busy producer end refuses instead of corrupting, **six producer threads and a drain thread: every line delivered exactly once in its core's order or counted as dropped**, cut lines end in `...`), integration test `tests/async_mode.rs` (the global mode in its own process: nothing reaches the sinks from `log()`, only the consumer's `service()` drains, per-core order, drop note, audit written synchronously from a full ring, `emergency`/`raw`/`flush` drain first, syslog records fed from the same lines), command-line words. Smoke: new `log-slow-flood` (4 ms sinks, every core logging at a steady rate: no `over budget`, no line lost or reordered within its core, merged timestamps in order, `scripts/log-flood-check.py`); `sys-slow-log`, `sys-operator`, `watchdog`, `watchdog-handshake`, `sealed-write`, `db-crash-*`, `log-crash-*` pass on aarch64 HVF; `log-slow-flood` on x86_64 TCG and aarch64 HVF. `make check` pieces: fmt, typos, clippy host `--all-targets`, clippy both kernels with and without `selftest` (aarch64 with RUSTFLAGS by hand), `check-arch-leaks`, `cargo test --workspace`.
 
 **Skipped / open.** The VPS itself (that is what the ISO is for: look for `log: cost:` lines with `test=log-cost`, and any `watchdog: ... over budget` after boot and under load). The full smoke suites. Port 18883 was held by another run on this machine, so `sys-operator` and `sys-slow-log` ran from a copy of `smoke.sh` on another host port (both pass on aarch64 HVF, console feed and audit lines included; `sys-query-info` failed once on `clients.connected` and passed on the rerun). A consumer that is also a data core (no storage / live mode) still spends up to 2 ms per pass on the sinks. A 64-line ring drops the tail of a 300-line burst (counted). No IPI wakes a sleeping consumer: a line is written within about one tick (10 ms) of being queued.
+
+## PERF — TLS handshake throughput and overload (ADR-080, ADR-081, ADR-082; 2026-10-31)
+
+Motivation: a real KVM VPS (Contabo, AMD EPYC, 4 vCPU, live RAM mode) loaded from one Mac with `urmqtt-loadgen handshake` (mTLS, one source address, RTT 35 ms): 128 clients 618 handshakes/s (87 errors, mean 207 ms, cores 1..3 about 50 % busy, core 0 about 5 %), 256 clients 393/s (3 565 errors), 512 clients 67/s (1 345 errors, mean 12.8 s). **QEMU/HVF only; nothing here was run on the VPS or on KVM**, and the overload regime of the report (35 ms RTT, 96 handshakes in flight) cannot be made in QEMU, whose slirp answers in microseconds: the logic was tested on the host and the mechanisms were exercised in QEMU with the limits shrunk to 4 per address.
+
+**Causes** (details and evidence in ADR-080):
+
+1. The 618/s plateau is the per-address limit, not CPU: 32 in flight per worker core x 3 workers, each held about 150 ms by two round trips, is about 640/s with the cores half idle.
+2. A flow refused at its final ACK was admitted again by its own next segment (the ClientHello behind the ACK carries a valid SYN cookie): in an overload a growing share of the free slots went to sockets the client had already closed, plus about 0.5 ms of ECDHE and signature each.
+3. A RST told the client to retry at once; a load generator (50 ms) turns 400 refused clients into 3 000+ attempts per second. Linux drops instead, so that the client's TCP backs off.
+4. Admission cost O(queue) (up to 256 slab lookups, twice) and the allocator's global lock per attempt, paid by exactly the refused ones; a dead peer held a slot for 10 s.
+5. **Probably the largest part of the 12.8 s and the 67/s, and not the server:** the load generator closed first and kept the TIME_WAIT (30 s on macOS) against 16 384 ephemeral ports: about 550 connections/s sustained at most, and the 128, 256, 512 runs followed one another. To check on the Mac: `netstat -an | grep -c TIME_WAIT` near 16 000 and `Can't assign requested address (os error 49)` in the errors. The loadgen now lets the server close first by default and reports that error kind separately.
+
+**Changes**
+
+- `urmqtt-tcp`: `App::syn_ok` (a full application drops the SYN without SYN-ACK: no state, the client's TCP backs off), `RefusedFlows` (512 tags, 1 s: a refused flow is not admitted again, at most one more RST, then silence), counters `syn_dropped`, `refused_app`, `refused_repeat`.
+- `urmqtt-net::admission` (new, pure, 9 host tests): token bucket, in-flight total and per address in O(1), SYN check without side effects, handshake outcomes and latency histogram.
+- Kernel: SYN gate, in-flight accounting at the transitions, heap check cached for 1 ms, 3 s handshake timeout under pressure, timeout log at powers of two, `Prof` (where the core's time goes), longest stall, frames dropped by site, `$SYS/broker/handshakes/*` and `cpu/accepted/<core>`, statsd `handshakes.*`, `syn_dropped.*`, `refused.per_ip`, `frames.dropped.*`, three log lines per core every 5 s (`handshakes:`, `tcp:`, `dataplane:`; docs/OPERATE.md).
+- `cpu.dispatcher_serves` (ADR-081), default false.
+- Bench profile (ADR-082): `deploy/bench`, `scripts/mkbench.sh` / `make bench-iso`, dev word `limits=bench`, `scripts/bench.sh --relaxed` / `make bench BENCH_ARGS=--relaxed`, docs/DEPLOY.md 5c.
+- `urmqtt-loadgen`: rate over the window (the drain of the last attempts is not counted), percentiles of the whole connection, of the TCP connect and of TLS + CONNECT, errors by kind, `--close server|client` (server first by default), `--error-sleep-ms`, `--connect-timeout-s` (3 s in `storm`).
+- `smoke.sh`: `SMOKE_SCENARIOS` also filters the function groups (`storm`, `attack_app`, ...); the `storm` and `attack-app` checks accept the SYN-drop log form.
+
+**Where a handshake's time goes** (HVF, native aarch64 speed, 2 workers, 128 clients; `dataplane:` line): see ADR-080.
+
+**Receiving side distribution (RSS).** One source address, ports 32768-60999, 49152-65535 and 1024-65535, 2 to 8 workers: each core within 4 % of a fair share (host test `one_source_address_spreads_over_the_workers`; the exact shares for 3 workers 33.5/33.6/33.0 %). The per-core `accepted` counters in the log and in `$SYS` verify it on the VPS.
+
+**Tests:** `cargo test --workspace` green (tcp 39, net 19, config-schema 46, broker 53 ...); `make check` pieces by hand (fmt, typos, check-arch-leaks, clippy host `--all-targets`, clippy for both kernels with and without `selftest`; aarch64 with RUSTFLAGS set by hand because the worktree sits inside the main checkout); targeted smoke on HVF (see the final report of this entry).
+
+**Skipped**
+
+- Anything on the VPS; a simulation of the WAN path (35 ms RTT) that would reproduce the overload in QEMU (needs a delaying L2 relay); the full smoke suites (by instruction); x86_64 runs (clippy and build only); a weighted share for core 0; a CPU-time based admission.

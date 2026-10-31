@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Multicore benchmarks (M13): prints a Markdown table.
 #
-#   scripts/bench.sh [--accel hvf|tcg|kvm] [--threads N] [--duration S] [--cmdline WORDS]
+#   scripts/bench.sh [--accel hvf|tcg|kvm] [--threads N] [--duration S] [--cmdline WORDS] [--relaxed]
+#
+# --relaxed adds the dev word `limits=bench` to the network image: the
+# handshake limits (per address, per core, per second) are lifted, because
+# every client of this benchmark has the address of QEMU's user network and
+# --threads above 32 would otherwise measure the per-address limit
+# (ADR-082). Never the default; a production image ignores the word.
 #
 # --cmdline appends dev command-line words to both images, e.g.
 # "cpu-disable=aes,pmull,sha2,crc32" to measure the portable crypto (X0b).
@@ -18,13 +24,14 @@ OUT="$ROOT/build/bench"
 ACCEL=""
 THREADS=32
 DURATION=10
-EXTRA=""
+EXTRA="" RELAXED=0
 while [[ $# -gt 0 ]]; do
     case $1 in
         --accel) ACCEL=$2; shift 2 ;;
         --threads) THREADS=$2; shift 2 ;;
         --duration) DURATION=$2; shift 2 ;;
         --cmdline) EXTRA=" $2"; shift 2 ;;
+        --relaxed) RELAXED=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -47,7 +54,7 @@ mkimg() {
     rm -f "$1.iso" "$1.esp"
 }
 mkimg "$OUT/dp.raw" "smoke test=dp-bench$EXTRA"
-mkimg "$OUT/net.raw" "serve log=info$EXTRA"
+mkimg "$OUT/net.raw" "serve log=info$EXTRA$([[ $RELAXED == 1 ]] && echo ' limits=bench')"
 
 cp "$OUT/dp.raw" "$OUT/dp.img"
 truncate -s 64m "$OUT/dp.img"
@@ -80,4 +87,4 @@ echo "| 1 | $d1 | 1.00x | $n1 | 1.00x |"
 echo "| 2 | $d2 | $(ratio "$d2" "$d1") | $n2 | $(ratio "$n2" "$n1") |"
 echo "| 4 | $d4 | $(ratio "$d4" "$d1") | $n4 | $(ratio "$n4" "$n1") |"
 echo
-echo "accelerator: $ACCEL${EXTRA:+; command line:$EXTRA}; serial logs in $OUT"
+echo "accelerator: $ACCEL${EXTRA:+; command line:$EXTRA}$([[ $RELAXED == 1 ]] && echo '; RELAXED handshake limits (limits=bench)'); serial logs in $OUT"

@@ -291,6 +291,38 @@ and without a hypervisor timing leaf the boot stops (`no usable time base`).
 DSDT's `_S5` sleep type, and the reset register) and then QEMU's ports under a
 hypervisor. On real hardware this path has never run.
 
+## 5c. Load testing a server from one address: the bench profile (PERF, ADR-082)
+
+The production limits protect the server from one slow or abusive source:
+`max_handshakes_in_flight_per_ip = 32` (per data core), `max_handshakes_in_flight_per_core = 256`
+and `handshakes_per_core_per_sec = 2000`. A load generator on a laptop is one source
+address, so against the production defaults it measures the per-address limit
+(about 32 handshakes in flight on each worker core), not the server. For that,
+and only for that, there is a bench profile:
+
+- **A VPS or any machine:** `deploy/bench/config.toml` is the production template
+  with `[limits]` raised to 100000 handshakes/s, 4096 in flight per core and 4096
+  per address, `storage.mode = "auto"` and a switch for `cpu.dispatcher_serves`.
+  `scripts/mkbench.sh --certs deploy/prod --static 169.58.184.193/17 169.58.128.1`
+  copies the certificates, writes `deploy/bench-local/config.toml` (the repository
+  ignores that directory) and runs `make universal ENV=bench-local`. Without
+  `--static` the address comes from DHCP; `--serve-dispatcher` sets
+  `dispatcher_serves = true` (ADR-081, compare both). The image is named
+  `urmqtt-bench-local-*-universal.iso`. Never serve devices from it. (Building from
+  a worktree inside another checkout: set `RUSTFLAGS` by hand, cargo merges both
+  `.cargo/config.toml` files.)
+- **QEMU:** the dev word `limits=bench` on the kernel command line relaxes the same
+  limits in a dev image only (a production image ignores it); the kernel logs
+  `limits: BENCH LIMITS on` when it is on. `scripts/bench.sh --relaxed` uses it for
+  the network part.
+
+Drive it with `urmqtt-loadgen handshake --host VPS --port 8883 --certs deploy/bench-local
+--threads 256 --duration 30` (add `--error-sleep-ms 1000` to look like devices with
+a backoff). The report gives the rate over the window, the latency percentiles of the whole
+connection, of the TCP connect and of TLS + CONNECT, and the errors by kind. The server
+side is in the kernel log every 5 s (`handshakes:`, `tcp:` and `dataplane:` lines) and in
+`$SYS/broker/handshakes/#` and `cpu/accepted/<core>` (docs/OPERATE.md).
+
 ## 6. Hetzner Cloud CAX and Oracle Cloud A1 (Ampere Altra)
 
 Both are aarch64 KVM clouds that attach disks through virtio-scsi; urMQTT drives

@@ -178,8 +178,12 @@ loadtest: certs ## Host-side load generator, e.g. ARGS="handshake --port 18883 -
 	$(CARGO) run $(CARGO_FLAGS) --release -p urmqtt-loadgen -- $(ARGS)
 
 .PHONY: bench
-bench: build certs ## Multicore benchmarks (in-guest dp-bench + network handshakes), table to stdout
-	scripts/bench.sh
+bench: build certs ## Multicore benchmarks (in-guest dp-bench + network handshakes), table to stdout; BENCH_ARGS=--relaxed lifts the handshake limits (dev only)
+	scripts/bench.sh $(BENCH_ARGS)
+
+.PHONY: bench-iso
+bench-iso: ## BENCHMARK universal ISO with relaxed handshake limits (deploy/bench), e.g. BENCH_ISO_ARGS='--static 10.0.0.5/24 10.0.0.1'. Never for devices.
+	scripts/mkbench.sh $(BENCH_ISO_ARGS)
 
 RAW := $(BUILD_DIR)/urmqtt-$(ENV)-$(VERSION).img
 

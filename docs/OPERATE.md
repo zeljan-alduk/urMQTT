@@ -70,6 +70,13 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/connections/refused` | refused by admission control |
 | `$SYS/broker/tls/server_cert_days` | days until the server certificate expires (`unknown` without a wall clock) |
 | `$SYS/broker/console/dropped` | console lines lost to a slow reader |
+| `$SYS/broker/handshakes/started` | connections admitted (TCP established, admission said yes) |
+| `$SYS/broker/handshakes/done`, `failed`, `timed_out` | TLS handshakes completed, ended before completing, not finished within 10 s |
+| `$SYS/broker/handshakes/refused`, `syn_dropped` | refused at the final ACK (RST sent), SYNs dropped without an answer (the client's TCP retries after its backoff) |
+| `$SYS/broker/handshakes/in_flight`, `in_flight_max` | handshakes in flight now, and the most on one core in the last 5 s |
+| `$SYS/broker/handshakes/slow` | completed handshakes that took more than 250 ms from accept to done |
+| `$SYS/broker/handshakes/latency_sum_ms`, `latency_max_ms` | sum of accept-to-done times (divide the change by the change of `done` for the mean), longest in the last 5 s |
+| `$SYS/broker/cpu/accepted/<core>` | connections accepted per core since boot: how evenly the flows spread |
 
 **Query.** Publish anything (an empty payload will do) to `$SYS/query/info`;
 the answer is one JSON document on `$SYS/query/info/response` (subscribe
@@ -80,8 +87,26 @@ first). MQTT 3.1.1 has no Response Topic property, so the reply topic is fixed:
  "memory":{"total":33554432,"used":1503744},"disk":{"total":57651200,"used":78288},
  "clients":{"connected":1,"total":1},"subscriptions":1,"retained":0,
  "messages":{"received":0,"sent":21},"connections_refused":0,
- "tls":{"server_cert_days":824},"console_dropped":0}
+ "tls":{"server_cert_days":824},"console_dropped":0,
+ "handshakes":{"started":0,"done":0,"failed":0,"timed_out":0,"refused":0,"syn_dropped":0,
+ "in_flight":0,"in_flight_max":0,"slow":0,"latency_sum_ms":0,"latency_max_ms":0},
+ "accepted":[0,0,0,0]}
 ```
+
+**Reading the handshake numbers (PERF, ADR-080).** Admission has three stages
+and each counts for itself: a SYN may be dropped without an answer
+(`syn_dropped`, by reason in statsd as `syn_dropped.<reason>`), the final ACK
+may be refused with a RST (`refused`, `refused.<reason>`), and an admitted
+connection ends as `done`, `failed` or `timed_out`. Reasons: `rate` (token
+bucket), `in_flight` (per core), `per_ip` (per source address), `memory`,
+`storage`. The same numbers are in the kernel log every 5 s, one
+`handshakes: core N:` line per core, next to `tcp: core N:` (cookies, SYNs
+dropped, refused flows, retransmissions) and `dataplane: core N:` (busy, work
+by category, microseconds of work per accepted connection, longest stall of
+the core). The statsd names are `handshakes.{started,done,failed,timed_out,slow,latency_ms_sum}`
+(counters), `handshakes.{in_flight,in_flight_max,latency_max_ms}` (gauges) and
+`frames.dropped.{steer,worker_tx,nic_tx,nic_tx_local}` (a frame lost to a full ring
+or NIC queue is retransmitted by TCP a second or more later).
 
 ## The console (O2)
 
