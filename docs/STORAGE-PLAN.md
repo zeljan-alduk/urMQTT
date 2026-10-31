@@ -268,6 +268,11 @@ Each milestone ends with:
 
 **Tests:** grow 1 GiB → 4 GiB → 64 GiB with data present; fault injection at every write of the grow procedure always yields the old or the new layout, never a corrupt one.
 
+**Status: done** (docs/PROGRESS.md, S3; ADR-142, ADR-143). Deviations:
+- **Online grow works** on virtio-blk: QEMU's `block_resize` raises the configuration-change interrupt (verified on HVF and TCG, both architectures). A virtio-scsi LUN is not notified and is taken up at the next boot.
+- **Crash safety** is the A/B superblock pair (ADR-142): the layout part of a grow is one block write; the partition table steps are the S1 primitives plus the extension of the data partition.
+- Telemetry grows by **bands** (one per extent), the database by extents; nothing moves.
+
 ### S4 — Discard and write-zeroes · M
 
 **Work**

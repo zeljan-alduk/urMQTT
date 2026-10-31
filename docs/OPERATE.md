@@ -61,7 +61,7 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/cpu/cores` | CPUs |
 | `$SYS/broker/cpu/busy/<core>` | percent busy over the last 5 s, per core |
 | `$SYS/broker/memory/total`, `used` | kernel heap, bytes |
-| `$SYS/broker/disk/total`, `used` | data partition, and what SQLite uses of it, bytes (0 without a data disk) |
+| `$SYS/broker/disk/total`, `used` | the data layout (it grows with the disk, S3: `storage: grew the layout` in the console), and what SQLite uses of it, bytes (0 without a data disk) |
 | `$SYS/broker/clients/connected` | sessions attached to a connection |
 | `$SYS/broker/clients/total` | sessions, offline persistent ones included |
 | `$SYS/broker/subscriptions` | all subscriptions |
@@ -159,3 +159,21 @@ scripts/gen-operator-cert.sh deploy/prod alice 365  # another identity, 365 days
 Never commit the key (`deploy/*/services/` is git-ignored). A stolen operator
 certificate is revoked like any other, with the control channel
 (`urmqtt-control revoke`), which also closes its live session.
+
+## The data disk in the console (S2, S3)
+
+These lines appear in `$SYS/console/out` (and on the serial port, and in
+syslog). Procedures are in [DEPLOY.md](DEPLOY.md) section 9.
+
+| Line | Meaning |
+|---|---|
+| `blk: topology: logical 512 B, physical 4096 B, … optimal I/O … B` | what the disk reports; the layout is aligned to it |
+| `storage: misaligned_writes=0 of N device writes …` | the store sent no write that is not a whole physical block (anything else is a bug: report it) |
+| `storage: data disk opened (… MiB …): … N telemetry partition(s), aligned to … KiB, generation G` | the layout in force; the generation counts superblock writes (grow, migration) |
+| `data disk is layout v1; this image needs v2: run urmqtt-disk migrate` with `storage: refused reason=layout-v1` | the disk predates layout v2; the VM resets every 60 s. Migrate it offline |
+| `gpt: data partition extended to the end of the … MiB disk`, `storage: grew the layout from … to … MiB` | the volume was enlarged; the new space is in use. `… grew the layout online …` is the same without a reboot |
+| `blk: resize notification (configuration-change interrupt): armed (online grow)` or `not available …` | whether the disk tells the guest when it is resized; if not, an enlarged disk is taken up at the next reboot |
+| `storage: growing the layout failed …` / `online grow failed …` | the old layout stays in force (the update is one block write); check the disk and reboot |
+
+`storage.grow_ratio_db` sets how the new space is shared (default 50: half to
+the SQLite database, half to the telemetry ring).

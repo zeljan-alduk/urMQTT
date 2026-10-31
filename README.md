@@ -121,6 +121,8 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | **Storage** | SQLite in the kernel over a raw-disk VFS (WAL, exclusive), quick_check at boot | ✅ M11 |
 | | One disk: data in a partition of the boot disk (virtio-blk or virtio-scsi), created on the first boot, crash-safe; other disks never touched | ✅ S1 |
 | | `urmqtt-disk`: offline info, verify, export (SQLite, telemetry), import devices, kernel update | ✅ S1 |
+| | Layout v2: regions aligned to 1 MiB and the device's optimal I/O size, writes in whole physical blocks, A/B superblock; `urmqtt-disk migrate` (dry run, verify, rollback) from v1 | ✅ S2 |
+| | The disk grows with the volume, at boot or online, crash-safe, never shrinks (`storage.grow_ratio_db`) | ✅ S3 |
 | | Device registry, revocations, retained messages, persistent sessions with offline queues | ✅ M11 |
 | | Per-core append-only telemetry log with CRC and crash recovery | ✅ M12 |
 | **Scale** | Per-core event loops and broker shards, per-CPU heap caches, frame pools, cross-core fan-out | ✅ M13 |
@@ -497,6 +499,7 @@ error: invalid configuration deploy/bad/config.toml:
 | `storage.sqlite_heap_mb` | 1–4096 | Fixed SQLite `memsys5` heap |
 | `storage.telemetry_topics` | topic filters | PUBLISHes appended to the telemetry log |
 | `storage.retention_days` | > 0 | Telemetry retention |
+| `storage.grow_ratio_db` | 0 to 100, default 50 | When the disk grows, the percentage of the new space that goes to the SQLite database; the rest goes to the telemetry ring (S3) |
 | `storage.require_flush` | bool | Refuse disks without `VIRTIO_BLK_F_FLUSH` (false only in `dev`) |
 | `storage.require_data_disk` | bool | Refuse to serve without a data disk (false only in `dev`: memory-only) |
 | `storage.refuse_on_corruption` | bool | Refuse to serve when `PRAGMA quick_check` fails (false only in `dev`) |
@@ -956,8 +959,8 @@ Security is the first priority and wins conflicts with the other tracks.
 | ✅ | **S0** Disk format spec | `docs/DISK-FORMAT.md` byte-level and cross-checked against the code; golden v1 images |
 | ✅ | **S1** `urmqtt-disk` & safety | single-disk model: data in a partition of the boot disk, created on first boot (crash-safe), no other disk touched; host tool sharing the kernel's parsers (info, verify, export, import); fault injection |
 | ✅ | **S1b** Self-installing ISO | boot menu entry *Install urMQTT on this machine's disk*: target shown with a countdown, image written byte-identical to the raw image and verified; the installed disk boots by UEFI (BIOS on x86 with X10) |
-| 📋 | **S2** Layout v2 | regions aligned to 1 MiB and the device topology, zero misaligned writes; migration from v1 |
-| 📋 | **S3** Growing the disk | 1 → 4 → 64 GiB with data present, crash-safe at every write |
+| ✅ | **S2** Layout v2 | regions aligned to 1 MiB and the device topology (virtio-blk, virtio-scsi), zero misaligned writes; partition count in the layout; A/B superblock; the kernel refuses v1, `urmqtt-disk migrate` converts offline with a rollback (NVMe/ATA topology comes with X13) |
+| ✅ | **S3** Growing the disk | the new space is used at boot and, on virtio-blk, while running (config-change interrupt); 1 → 4 → 64 GiB with data present, a power cut at every write leaves the old or the new layout; never shrinks |
 | 📋 | **S4** Discard | thin-provisioned volumes shrink after retention; no throughput loss |
 | 📋 | **S5** In-disk backup | A/B database snapshots; optional restore on corruption |
 | 📋 | **S6** Scrubbing | bit flips found and reported within an I/O budget |

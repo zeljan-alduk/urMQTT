@@ -1683,3 +1683,29 @@ PROMPT-storage.md S2, plan in docs/STORAGE-PLAN.md (status and deviations there)
 - **G8** (boot time grows with the telemetry region): not done, S6.
 - **The golden v1 images contain no SQLite content** (a declared database of zeros): the migration of the golden images runs with the database check off (a library option, not a command-line one); the SQLite round trip is tested on a separate real fixture.
 - **No second smoke cycle** over the whole suite; only the storage, disk, install and cross-architecture groups were run (see S3).
+
+## S3 — Growing the disk (2026-10-31)
+
+PROMPT-storage.md S3, plan in docs/STORAGE-PLAN.md. ADR-142 (crash-safe grow: A/B superblock pair), ADR-143 (online grow).
+
+**Done**
+
+- **Boot-time grow.** `gpt::prepare` now also moves the backup table to the new end and extends the data partition (the last one) to the last whole 4 KiB block, backup copy before primary; then the layout grows with **one superblock write** to the slot not in force. The new space goes to the database and the telemetry ring by `storage.grow_ratio_db` (percent, default 50, validated 0..=100); WAL and journal keep their size; the scratch area moves to the new end. Nothing that exists moves: the database gains extents (a touching one is merged), the telemetry ring gains a **band** per extent. A device that is not larger by a whole alignment unit changes nothing; a smaller one is never adopted.
+- **Online grow.** virtio-blk raises a configuration-change interrupt when the volume is resized. The device config vector is set to the queue's MSI-X vector; the DB core, at most every 250 ms and only when the interrupt count moved, asks the device for its size (read under the config generation), runs the same steps through the window's whole disk, and the telemetry log takes up the new band. Verified on QEMU `block_resize` over QMP, aarch64 HVF and x86_64 TCG (`storage: grew the layout online from 54 MiB to 182 MiB`, about a second after the resize). virtio-scsi has no such notification and is taken up at the next boot; the boot log says which case applies.
+- **Never shrinks.** A device smaller than the layout is refused (`Inconsistent` superblock, `Shrunk` partition table).
+- **`urmqtt-disk grow DISK [--ratio N] [--write]`** (dry run by default).
+
+**Tests**
+
+- **Host** (`crates/store/tests/grow.rs`, 7 tests): 1 GiB -> 4 GiB -> 64 GiB with SQLite state and a 3 000-record telemetry log present (every row, retained message and record survives, the generations and regions are as expected, the database is writable across its old end); **a power cut at every write of the whole procedure** (GPT and superblock, cut cleanly or torn, with the cache dropped or applied: 44 cases over 10 writes, 39 left the old layout and 5 the new, none corrupt, and the next boot always ends in the new one); the same for the **online** grow (24 cases over writes 1..12); the telemetry ring across a grow, with another UUID's ring planted where the new band lies; slot alternation. `scripts/fault-loop.sh grow` through the real binary: 20 cases, ok.
+- **Smoke, aarch64 HVF:** `grow-boot` (backup moved, partition extended, layout grown, restored data identical), `grow-again-noop` (a second boot does nothing), `grow-tool-verify`, `grow-crash` at eight kernel writes (the nine of the GPT steps cut after 3, 5, 8, 9 or torn at 9; the self-test write; the superblock write cut after 11 or torn at 11), each followed by a normal boot that ends in the grown layout with 2 retained messages, the session, 40 devices and 600 telemetry records; `grow-online` (QMP `block_resize` of a serving VM), `grow-online-disk` (`urmqtt-disk verify` and `info`: generation 3, the partition extended) and `grow-online-reboot`.
+- **Smoke, x86_64 TCG:** the same, all passing.
+- **Final runs on the committed kernels** (`SMOKE_ONLY=storage`, ports 28983/28984): aarch64 HVF **45 passed, 0 failed**; x86_64 TCG **45 passed, 0 failed**. The group is first-boot, first-boot-crash, scsi-boot, iso-as-cd, own-damaged, topology, layout-v1, grow, grow-online and disk-tool. The universal ISO, HVF for aarch64 and TCG for x86: `universal-migrated` (x86 UEFI grows a migrated disk, aarch64 and x86 BIOS read it from the same bytes) 4/4, the installer group (S1b, all nine machine pairs) 12/12, the diagnostic group (reads both superblock slots now) 12/12.
+- **Also run:** `fmt --check`, `typos`, `scripts/check-arch-leaks.sh`, `clippy --workspace --all-targets -D warnings`, clippy for both kernels with and without `selftest`, `cargo test --workspace` (630 passed, 7 ignored), fuzz `disk_layout` 26 s (687 317 runs); the aarch64 kernel builds with `RUSTFLAGS` set by hand (the nested worktree has two cargo configs that both set `-Zbranch-protection`).
+- **Not run:** the full smoke cycle (the MQTT, TLS, attack, crypto, load and live scenarios were not repeated; the storage changes touch only the disk path), KVM, real hardware, the other fuzz targets, `make miri|kani|sanitize` (the store crate is not in Miri; the sanitizer run was not repeated for the new tests).
+
+**Not done**
+
+- Online grow for virtio-scsi (no notification); for a LUN, `urmqtt-disk grow` or a reboot.
+- The window of the data partition is widened only by the DB core between two of its jobs; the data cores are not paused (they never touch the disk).
+- The ring after a grow overwrites the oldest segments next to its active one before it reaches the new band (correct; the new space is used from the next wrap).

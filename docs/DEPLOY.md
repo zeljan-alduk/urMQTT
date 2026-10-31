@@ -533,6 +533,35 @@ Per platform:
   release), `urmqtt-disk migrate /dev/nvme0n1`, power off, remove the stick.
   On macOS use `/dev/rdiskN`.
 
+### Growing the disk
+
+When the disk is larger than the layout, urMQTT uses the new space. Nothing to
+configure except how it is shared, and nothing is ever moved or shrunk:
+- **At boot:** if the volume was enlarged, the first boot afterwards moves the
+  backup partition table to the new end, extends the data partition to it, and
+  grows the layout with one superblock write. The boot log says `gpt: data
+  partition extended to the end of the … MiB disk` and `storage: grew the
+  layout from … MiB to … MiB (generation N): database +… MiB, telemetry +… MiB`.
+  A power cut anywhere leaves the old or the new size and the next boot
+  finishes.
+- **While running:** a virtio-blk disk tells the guest when it is resized
+  (a configuration-change interrupt: QEMU/KVM, Proxmox, libvirt's
+  `virsh blockresize`, most clouds that use virtio-blk). The server logs
+  `storage: grew the layout online from … MiB to … MiB` about a second later
+  and goes on serving; no reboot. A virtio-scsi disk is not notified (reboot
+  to take it up), and the boot log's `blk: resize notification …` line says
+  which case you have.
+- **The split:** `storage.grow_ratio_db` (default 50) is the percentage of the
+  new space that goes to the SQLite database; the rest goes to the telemetry
+  ring. The WAL and journal keep their size.
+- **Offline:** `urmqtt-disk grow DISK [--ratio N]` shows what would change;
+  with `--write` it does the same as the boot (partition table, then layout).
+- To enlarge the volume, use your platform's tool (`qemu-img resize` or
+  `virsh blockresize` for libvirt, `qm resize <vmid> virtio0 +10G` for
+  Proxmox, the volume or server-type resize in a cloud console; check the
+  provider's documentation for what it allows). **Shrinking is never done by
+  urMQTT**: a disk smaller than its layout is refused at boot.
+
 ### Disk safety, as before
 
 Only the disk Limine booted from is written, and only inside its data
