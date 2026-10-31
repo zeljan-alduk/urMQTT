@@ -56,6 +56,10 @@ Written 2026-10-29 against commit `8186a61`. Nothing here is implemented yet.
 | DMA isolation on bare metal (IOMMU) | **H4b** | X12–X14 |
 | Crypto dispatch | **X0** | X0b, X9, S7 |
 
+## First release scope (user, 2026-10-31)
+
+The first release targets **VPS (KVM) only**. Phase 10 (X12, X13, X14, X15, X16: bare metal) and the hardware-only part of H8 (Secure Boot on real machines) move after the release; no bare-metal claim is made in it. Release path: S2-S6, H4, H5, H6, H7, S7 (optional, off by default), H9, X11 (with a Linux/Mosquitto comparison on the same VPS), S8, H10.
+
 ## Order
 
 The order is chosen so that analysis comes before change, safety gaps close
