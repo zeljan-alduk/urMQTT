@@ -516,14 +516,14 @@ fn crypto(run: &mut Run) {
     });
     let verify = per_x10(n, dt);
     // One server-side mutual-TLS handshake: two X25519 operations (the key
-    // share and the shared secret), one signature (CertificateVerify) and
+    // share, fixed-base, and the shared secret, ladder), one signature (CertificateVerify) and
     // two verifications (the client's CertificateVerify and its chain).
     let clock = run.clock;
     let (mut ticks, mut ns, mut reps) = (0u64, 0u64, 0u64);
     let t_end = now() + 120_000_000;
     while reps < 3 || now() < t_end {
         let (a, t0) = (clock(), now());
-        black_box(p.x25519(2));
+        black_box(p.x25519_base(2));
         black_box(p.x25519(3));
         black_box(p.sign());
         black_box(p.verify());

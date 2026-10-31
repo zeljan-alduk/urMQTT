@@ -12,12 +12,16 @@ use rustls::crypto::{
 use rustls::{CipherSuite, SupportedCipherSuite, Tls13CipherSuite};
 
 mod aead;
+pub mod fastec;
 mod hash;
 mod hmac;
 mod kx;
 pub mod sign;
 mod verify;
 
+pub use fastec::backend as ecc_backend;
+pub use fastec::kx_kat;
+pub(crate) use kx::{x25519, x25519_public};
 pub use verify::MeasuredIssuer;
 pub use verify::cache_stats as verify_cache_stats;
 pub use verify::kat as p256_tables_kat;

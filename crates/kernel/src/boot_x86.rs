@@ -137,8 +137,8 @@ pub(crate) fn cpu_summary() -> Features {
     }
     let f = Features::decode(id);
     info!(
-        "cpu dispatch inputs: aes={} pclmul={} sha={} sse4.2={} avx2={} rdrand={} rdseed={}",
-        f.aes, f.pclmul, f.sha, f.sse42, f.avx2, f.rdrand, f.rdseed
+        "cpu dispatch inputs: aes={} pclmul={} sha={} sse4.2={} avx2={} bmi2+adx={} rdrand={} rdseed={}",
+        f.aes, f.pclmul, f.sha, f.sse42, f.avx2, f.bmi2_adx, f.rdrand, f.rdseed
     );
     f
 }

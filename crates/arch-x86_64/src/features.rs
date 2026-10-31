@@ -81,6 +81,8 @@ pub struct Features {
     pub sha: bool,
     pub sse42: bool,
     pub avx2: bool,
+    /// BMI2 and ADX (MULX, ADCX, ADOX): general-purpose registers only.
+    pub bmi2_adx: bool,
     pub rdrand: bool,
     pub rdseed: bool,
     pub tsc_deadline: bool,
@@ -112,6 +114,7 @@ impl Features {
             .with(Feature::Pmull, self.pclmul)
             .with(Feature::Sha2, self.sha)
             .with(Feature::Crc32, self.sse42)
+            .with(Feature::Bmi2Adx, self.bmi2_adx)
     }
 
     pub const fn decode(r: IdRegs) -> Self {
@@ -123,6 +126,7 @@ impl Features {
             sha: bit(r.l7_ebx, 29),
             sse42: bit(r.l1_ecx, 20),
             avx2: bit(r.l7_ebx, 5) && ymm,
+            bmi2_adx: bit(r.l7_ebx, 8) && bit(r.l7_ebx, 19),
             rdrand: bit(r.l1_ecx, 30),
             rdseed: bit(r.l7_ebx, 18),
             tsc_deadline: bit(r.l1_ecx, 24),

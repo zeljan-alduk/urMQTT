@@ -4,13 +4,13 @@
 //! here is secret and nothing is used by the server.
 
 use aes_gcm::aead::{AeadInPlace, KeyInit};
-use p256::ecdsa::signature::{Signer as _, Verifier as _};
+use p256::ecdsa::signature::Signer as _;
 
 /// Prepared keys and a signature to verify.
 pub struct Probe {
     key: p256::ecdsa::SigningKey,
-    public: p256::ecdsa::VerifyingKey,
-    sig: p256::ecdsa::Signature,
+    public_sec1: alloc::vec::Vec<u8>,
+    peer_share: [u8; 32],
     der: alloc::vec::Vec<u8>,
     issuer: crate::provider::MeasuredIssuer,
 }
@@ -26,30 +26,38 @@ impl Probe {
         let issuer = crate::provider::MeasuredIssuer::new(&public);
         Some(Self {
             key,
-            public,
-            sig,
+            public_sec1: public.to_sec1_bytes().to_vec(),
+            peer_share: crate::provider::x25519_public(&[0x17u8; 32]),
             der,
             issuer,
         })
     }
 
-    /// One X25519 scalar multiplication (a key share or the shared secret).
+    /// One X25519 shared-secret computation (the variable-base ladder, as in
+    /// a handshake).
     pub fn x25519(&self, round: u8) -> u8 {
         let mut k = [0x11u8; 32];
         k[5] = round;
-        let out = x25519_dalek::x25519(k, x25519_dalek::X25519_BASEPOINT_BYTES);
+        let out = crate::provider::x25519(&k, &self.peer_share);
         out[0]
     }
 
-    /// One ECDSA P-256 signature.
-    pub fn sign(&self) -> bool {
-        let s: Result<p256::ecdsa::Signature, _> = self.key.try_sign(MSG);
-        s.is_ok_and(|s| s == self.sig)
+    /// One X25519 key share (fixed-base multiplication).
+    pub fn x25519_base(&self, round: u8) -> u8 {
+        let mut k = [0x11u8; 32];
+        k[5] = round;
+        crate::provider::x25519_public(&k)[0]
     }
 
-    /// One ECDSA P-256 verification.
+    /// One ECDSA P-256 signature (the production signing path).
+    pub fn sign(&self) -> bool {
+        crate::provider::fastec::ecdsa_sign(&self.key, MSG).is_ok_and(|s| s == self.der)
+    }
+
+    /// One ECDSA P-256 verification by a key without a table (the client's
+    /// CertificateVerify).
     pub fn verify(&self) -> bool {
-        self.public.verify(MSG, &self.sig).is_ok()
+        crate::provider::fastec::ecdsa_verify(&self.public_sec1, MSG, &self.der).is_ok()
     }
 
     /// One verification of a certificate signature by a registered trust
@@ -93,6 +101,7 @@ mod tests {
         assert!(p.sign());
         assert!(p.verify() && p.verify_ca());
         assert_ne!(p.x25519(1), p.x25519(2));
+        assert_ne!(p.x25519_base(1), p.x25519_base(2));
         let mut b = [0u8; 256];
         assert!(aes_gcm(&mut b) && chacha(&mut b));
         let _ = sha256(&b);

@@ -1,0 +1,25 @@
+[package]
+name = "urmqtt-nistz256"
+description = "P-256 ECDSA and ECDH on the OpenSSL/Intel nistz256 x86_64 assembly (Montgomery 4x64, MULX/ADX), ADR-130."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+cpufeatures = { version = "0.3", default-features = false }
+zeroize = { version = "1.8", default-features = false }
+
+[dev-dependencies]
+ecdsa = { version = "0.17", default-features = false, features = ["algorithm"] }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "ecdh", "pkcs8", "alloc"] }
+rand_chacha = { version = "0.3", default-features = false }
+rand_core = { version = "0.6", default-features = false }

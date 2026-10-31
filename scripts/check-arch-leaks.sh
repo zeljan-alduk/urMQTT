@@ -16,6 +16,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 AARCH64='^crates/arch-aarch64/'
 X86='^crates/arch-x86_64/'
 ANY_ARCH='^crates/arch-(aarch64|x86_64)/'
+# Pure-computation assembly (no privileged or system instruction) may also
+# live in its own leaf crates, cfg-gated by target_arch (ADR-130, ADR-131).
+ASM_OK='^crates/(arch-(aarch64|x86_64)|nistz256|x25519)/'
 PATTERNS=(
     '\basm!'
     '\bglobal_asm!'
@@ -30,7 +33,7 @@ PATTERNS=(
 )
 # `msr` is also a plain identifier in x86 code (an MSR number), so the
 # AArch64 system-register rule only polices code outside both arch crates.
-ALLOWED=("$ANY_ARCH" "$ANY_ARCH" "$ANY_ARCH" "$AARCH64" "$AARCH64" "$AARCH64" "$X86" "$X86" "$X86" "$X86")
+ALLOWED=("$ASM_OK" "$ASM_OK" "$ANY_ARCH" "$AARCH64" "$AARCH64" "$AARCH64" "$X86" "$X86" "$X86" "$X86")
 WHAT=(
     'inline assembly'
     'global assembly'

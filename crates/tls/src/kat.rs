@@ -147,6 +147,10 @@ pub fn run() -> Result<(), &'static str> {
             "ECDSA P-256 (RFC 6979, fixed-base tables)",
             crate::provider::p256_tables_kat,
         ),
+        (
+            "ECDH P-256 (RFC 5903) and X25519 (RFC 7748)",
+            crate::provider::kx_kat,
+        ),
     ] {
         if !ok() {
             return Err(name);
