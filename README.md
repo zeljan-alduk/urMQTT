@@ -845,6 +845,37 @@ make sign                # minisign signature over SHA256SUMS (MINISIGN_KEY=... 
 Releases are signed with the (test) key in [`minisign.pub`](minisign.pub):
 `minisign -Vm SHA256SUMS -P RWSOH9BSUuApkkBWq/AZJ03Rn63oOYq+yXzC/vgI1PZ/i5yaE+SVzOWS`.
 
+### Configuring the network of a VPS (static address)
+
+Most VPS providers (Contabo, for example) do not run DHCP for a custom ISO, so the image needs
+the address, prefix length and gateway the provider assigned. They go into `[network]` of
+`deploy/<env>/config.toml` before the image is built; the image is the whole configuration.
+
+```toml
+[network]
+mode = "static"                # "dhcp" | "static"
+address = "169.58.184.193/17"  # the server's public IPv4 and the prefix length from the provider's panel
+gateway = "169.58.128.1"       # the provider's gateway, as shown in its panel
+mqtt_tls_port = 8883
+mqtt_plain_port = 0            # plaintext is rejected outside dev
+
+[storage]
+mode = "auto"                  # the ISO's live entry runs from RAM (ephemeral); an installed disk is used
+```
+
+1. Read the address, prefix and gateway from the provider's panel (or its `ip addr` / `ip route` output
+   from the rescue system).
+2. Edit `deploy/prod/config.toml` and build: `make dist-universal ENV=prod` (the certificates stay
+   in `deploy/prod/`, never committed).
+3. Boot the ISO. The log (serial or VNC) shows `net: static address ...`; check with
+   `mosquitto_pub -h <address> -p 8883 ...` or `urmqtt-loadgen`.
+4. For DHCP networks use `mode = "dhcp"` and leave `address` and `gateway` out: they are rejected
+   in DHCP mode. One image then serves many VMs.
+
+`storage.mode = "disk"` refuses to start from the ISO's live entry, `"auto"` allows it with data in RAM,
+`"ram"` is always diskless. The checked-in file holds the author's test VPS; replace the address and
+gateway with yours. IPv6 is not supported. See [docs/DEPLOY.md](docs/DEPLOY.md) for provider notes.
+
 > [!CAUTION]
 > A prod image embeds your server private key, so treat the ISO itself as a secret. The images
 > attached to GitHub releases are **dev** builds with throwaway keys, for evaluation only.

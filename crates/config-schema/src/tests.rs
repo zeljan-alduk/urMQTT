@@ -564,12 +564,16 @@ fn scrub_settings_default_and_are_bounded() {
 fn storage_mode_is_explicit_outside_dev() {
     let without: String = PROD
         .lines()
-        .filter(|l| !l.starts_with("mode = \"disk\""))
+        .filter(|l| !l.starts_with("mode = \"disk\"") && !l.starts_with("mode = \"auto\""))
         .collect::<Vec<_>>()
         .join("\n");
     assert_rejected("prod", &without, "storage.mode");
-    // The committed template says "disk": prod is safe by default.
-    assert_eq!(parse("prod", PROD).unwrap().storage.mode, StorageMode::Disk);
+    // The committed template names the medium itself ("disk", or "auto" on the
+    // author's VPS); it is never the silent default.
+    assert!(matches!(
+        parse("prod", PROD).unwrap().storage.mode,
+        StorageMode::Disk | StorageMode::Auto
+    ));
     // Dev may omit it: the disk.
     let dev_without: String = DEV
         .lines()
