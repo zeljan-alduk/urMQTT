@@ -17,7 +17,6 @@ use alloc::vec::Vec;
 
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use hmac::{KeyInit as _, Mac};
-use p256::ecdsa::signature::{Signer, Verifier};
 use sha2::Digest;
 
 /// Each measurement runs for about this long (at least [`MIN_ITERS`] times).
@@ -125,44 +124,44 @@ fn time(now: fn() -> u64, f: &mut dyn FnMut()) -> u64 {
 pub fn run(now: fn() -> u64) -> Profile {
     let mut p = Profile::default();
     let k = [0x42u8; 32];
-    let base = x25519_dalek::X25519_BASEPOINT_BYTES;
     p.x25519_base = time(now, &mut || {
-        core::hint::black_box(x25519_dalek::x25519(core::hint::black_box(k), base));
+        core::hint::black_box(crate::provider::x25519_public(core::hint::black_box(&k)));
     });
-    let other = x25519_dalek::x25519([0x17u8; 32], base);
+    let other = crate::provider::x25519_public(&[0x17u8; 32]);
     p.x25519_dh = time(now, &mut || {
-        core::hint::black_box(x25519_dalek::x25519(core::hint::black_box(k), other));
+        core::hint::black_box(crate::provider::x25519(core::hint::black_box(&k), &other));
     });
 
     if let (Ok(sk), Ok(sk2)) = (
         p256::SecretKey::from_slice(&[0x11u8; 32]),
         p256::SecretKey::from_slice(&[0x23u8; 32]),
     ) {
+        use crate::provider::fastec;
         p.p256_base = time(now, &mut || {
-            core::hint::black_box(sk.public_key());
+            core::hint::black_box(fastec::p256_public(&sk));
         });
-        let pk2 = sk2.public_key();
+        let pk2 = fastec::p256_public(&sk2);
         p.p256_dh = time(now, &mut || {
-            core::hint::black_box(sk.diffie_hellman(&pk2).raw_secret_bytes());
+            core::hint::black_box(fastec::p256_dh(&sk, &pk2).is_ok());
         });
     }
 
     if let Ok(sk) = p256::ecdsa::SigningKey::from_slice(&[0x33u8; 32]) {
+        use crate::provider::fastec;
         let msg = [0xa5u8; 130]; // TLS 1.3 CertificateVerify content
         let vk = *sk.verifying_key();
-        let sig: Result<p256::ecdsa::Signature, _> = sk.try_sign(&msg);
+        let pk = vk.to_sec1_bytes();
+        let sig = fastec::ecdsa_sign(&sk, &msg);
         p.ecdsa_sign = time(now, &mut || {
-            let s: Result<p256::ecdsa::Signature, _> = sk.try_sign(&msg);
-            core::hint::black_box(s.is_ok());
+            core::hint::black_box(fastec::ecdsa_sign(&sk, &msg).is_ok());
         });
-        if let Ok(sig) = sig {
+        if let Ok(der) = sig {
             p.ecdsa_verify = time(now, &mut || {
-                core::hint::black_box(vk.verify(&msg, &sig).is_ok());
+                core::hint::black_box(fastec::ecdsa_verify(&pk, &msg, &der).is_ok());
             });
             let issuer = crate::provider::MeasuredIssuer::new(&vk);
-            let der = sig.to_der();
             p.ecdsa_verify_ca = time(now, &mut || {
-                core::hint::black_box(issuer.verify(&msg, der.as_bytes()));
+                core::hint::black_box(issuer.verify(&msg, &der));
             });
         }
     }

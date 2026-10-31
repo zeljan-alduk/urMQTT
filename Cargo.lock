@@ -1646,6 +1646,18 @@ name = "urmqtt-net"
 version = "0.1.0"
 
 [[package]]
+name = "urmqtt-nistz256"
+version = "0.1.0"
+dependencies = [
+ "cpufeatures 0.3.1",
+ "ecdsa",
+ "p256",
+ "rand_chacha",
+ "rand_core 0.6.4",
+ "zeroize",
+]
+
+[[package]]
 name = "urmqtt-pci"
 version = "0.1.0"
 
@@ -1690,6 +1702,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "chacha20poly1305",
+ "curve25519-dalek",
  "der 0.8.3",
  "hkdf",
  "hmac",
@@ -1697,14 +1710,16 @@ dependencies = [
  "primeorder",
  "rand_chacha",
  "rand_core 0.6.4",
+ "rfc6979",
  "rustls",
  "rustls-pki-types",
  "rustls-webpki",
  "sha2 0.11.1",
  "subtle",
+ "urmqtt-nistz256",
  "urmqtt-sync",
  "urmqtt-tls",
- "x25519-dalek",
+ "urmqtt-x25519",
  "x509-cert",
  "zeroize",
 ]
@@ -1715,6 +1730,16 @@ version = "0.1.0"
 dependencies = [
  "urmqtt-arch",
  "urmqtt-pci",
+]
+
+[[package]]
+name = "urmqtt-x25519"
+version = "0.1.0"
+dependencies = [
+ "cpufeatures 0.3.1",
+ "rand_chacha",
+ "rand_core 0.6.4",
+ "x25519-dalek",
 ]
 
 [[package]]

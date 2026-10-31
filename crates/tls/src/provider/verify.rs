@@ -14,7 +14,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use p256::ecdsa::signature::Verifier;
 use pki_types::{AlgorithmIdentifier, InvalidSignature, SignatureVerificationAlgorithm, alg_id};
 use rustls::SignatureScheme;
 use rustls::crypto::WebPkiSupportedAlgorithms;
@@ -48,7 +47,7 @@ pub fn cache_stats() -> (u64, u64) {
 /// Trust anchors with a fixed-base table (ADR-111), at most this many.
 const MAX_ISSUERS: usize = 8;
 
-type IssuerTable = primeorder::BasepointTable<p256::ProjectivePoint, 33>;
+use super::fastec::IssuerTable;
 
 struct Issuer {
     /// SEC1 uncompressed point, as webpki hands it to `verify_signature`.
@@ -81,7 +80,7 @@ pub fn register_issuer(spki: &[u8]) -> bool {
         return true;
     }
     // Built outside the lock: a concurrent duplicate is harmless.
-    let table = IssuerTable::from_point(key.to_projective());
+    let table = IssuerTable::from_key(key.as_affine());
     let mut all = ISSUERS.lock();
     if all.iter().any(|i| i.point == point) {
         return true;
@@ -99,12 +98,12 @@ pub struct MeasuredIssuer(IssuerTable);
 
 impl MeasuredIssuer {
     pub fn new(key: &p256::ecdsa::VerifyingKey) -> Self {
-        Self(IssuerTable::from_point(key.as_affine().into()))
+        Self(IssuerTable::from_key(key.as_affine()))
     }
 
     /// The table-based verification of a DER signature over `message`.
     pub fn verify(&self, message: &[u8], der: &[u8]) -> bool {
-        verify_with_tables(&self.0, message, der).is_ok()
+        self.0.verify(message, der).is_ok()
     }
 }
 
@@ -116,46 +115,11 @@ fn issuer(public_key: &[u8]) -> Option<Arc<Issuer>> {
         .cloned()
 }
 
-/// ECDSA verification (SEC 1 §4.1.4, variable time: every input is public)
-/// with `u2 * Q` taken from the issuer's table and `u1 * G` from the
-/// generator's.
-fn verify_with_table(
-    issuer: &Issuer,
-    message: &[u8],
-    signature: &[u8],
-) -> Result<(), InvalidSignature> {
-    verify_with_tables(&issuer.table, message, signature)
-}
-
-fn verify_with_tables(
-    table: &IssuerTable,
-    message: &[u8],
-    signature: &[u8],
-) -> Result<(), InvalidSignature> {
-    use p256::elliptic_curve::ops::{MulByGeneratorVartime, Reduce};
-    use p256::elliptic_curve::point::AffineCoordinates;
-
-    let sig = p256::ecdsa::Signature::from_der(signature).map_err(|_| InvalidSignature)?;
-    let (r, s) = sig.split_scalars();
-    let z = <p256::Scalar as Reduce<p256::FieldBytes>>::reduce(&sha2::Sha256::digest(message));
-    let s_inv: p256::Scalar = Option::from(s.invert_vartime()).ok_or(InvalidSignature)?;
-    let u1 = z * s_inv;
-    let u2 = *r * s_inv;
-    let big_r = p256::ProjectivePoint::mul_by_generator_vartime(&u1) + table.mul_vartime(&u2);
-    let x = big_r.to_affine().x();
-    if <p256::Scalar as Reduce<p256::FieldBytes>>::reduce(&x) == *r {
-        Ok(())
-    } else {
-        Err(InvalidSignature)
-    }
-}
-
 /// Boot known-answer test of the table paths: RFC 6979 A.2.5 (P-256,
 /// SHA-256, message "sample"): public key from the generator table, the
 /// deterministic signature (fixed-base signing), and its verification through
 /// an issuer table, plus a rejected tampered message.
 pub fn kat() -> bool {
-    use p256::ecdsa::signature::Signer as _;
     use p256::elliptic_curve::sec1::ToSec1Point;
     let hex = |s: &str| -> Vec<u8> {
         (0..s.len() / 2)
@@ -171,11 +135,20 @@ pub fn kat() -> bool {
     want_pk.extend(hex(
         "60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299",
     ));
+    // The production paths: public key and signature through `fastec` (the
+    // assembly on x86_64), the stock key encoding as a cross-check.
     let pk = sk.verifying_key().as_affine().to_sec1_point(false);
-    if pk.as_bytes() != want_pk.as_slice() {
+    if pk.as_bytes() != want_pk.as_slice()
+        || super::fastec::p256_public(&p256::SecretKey::from(&sk))[..] != want_pk[..]
+    {
         return false;
     }
-    let sig: p256::ecdsa::Signature = sk.sign(b"sample");
+    let Ok(der_bytes) = super::fastec::ecdsa_sign(&sk, b"sample") else {
+        return false;
+    };
+    let Ok(sig) = p256::ecdsa::Signature::from_der(&der_bytes) else {
+        return false;
+    };
     let mut want_sig = hex("efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716");
     want_sig.extend(hex(
         "f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8",
@@ -183,10 +156,10 @@ pub fn kat() -> bool {
     if sig.to_bytes().as_slice() != want_sig.as_slice() {
         return false;
     }
-    let table = IssuerTable::from_point(sk.verifying_key().as_affine().into());
+    let table = IssuerTable::from_key(sk.verifying_key().as_affine());
     let der = sig.to_der();
-    verify_with_tables(&table, b"sample", der.as_bytes()).is_ok()
-        && verify_with_tables(&table, b"sample!", der.as_bytes()).is_err()
+    table.verify(b"sample", der.as_bytes()).is_ok()
+        && table.verify(b"sample!", der.as_bytes()).is_err()
 }
 
 /// TLS 1.3 CertificateVerify signs 64 spaces first (RFC 8446 §4.4.3).
@@ -235,14 +208,8 @@ impl SignatureVerificationAlgorithm for EcdsaP256Sha256 {
             return Ok(());
         }
         match issuer(public_key) {
-            Some(table) => verify_with_table(&table, message, signature)?,
-            None => {
-                let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(public_key)
-                    .map_err(|_| InvalidSignature)?;
-                let sig =
-                    p256::ecdsa::DerSignature::try_from(signature).map_err(|_| InvalidSignature)?;
-                key.verify(message, &sig).map_err(|_| InvalidSignature)?;
-            }
+            Some(issuer) => issuer.table.verify(message, signature)?,
+            None => super::fastec::ecdsa_verify(public_key, message, signature)?,
         }
         if let Some(d) = d {
             // Relaxed: statistics.
@@ -258,7 +225,7 @@ impl SignatureVerificationAlgorithm for EcdsaP256Sha256 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p256::ecdsa::signature::Signer;
+    use p256::ecdsa::signature::{Signer, Verifier};
 
     /// The counters are global: the tests that read them run one at a time.
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -317,7 +284,7 @@ mod tests {
             rng.fill_bytes(&mut kb);
             let sk = p256::ecdsa::SigningKey::from_slice(&kb).unwrap();
             let vk = sk.verifying_key();
-            let table = IssuerTable::from_point(vk.as_affine().into());
+            let table = IssuerTable::from_key(vk.as_affine());
             for _ in 0..5 {
                 let mut msg = alloc::vec![0u8; (rng.next_u32() % 300) as usize];
                 rng.fill_bytes(&mut msg);
@@ -343,7 +310,7 @@ mod tests {
                         Ok(sig) => vk.verify(&m, &sig).is_ok(),
                         Err(_) => false,
                     };
-                    let fast = verify_with_tables(&table, &m, &s).is_ok();
+                    let fast = table.verify(&m, &s).is_ok();
                     assert_eq!(stock, fast, "disagreement");
                     agreed += 1;
                 }

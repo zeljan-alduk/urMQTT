@@ -34,10 +34,20 @@ pub enum Feature {
     Sha2,
     /// AArch64 CRC-32 and CRC-32C instructions (FEAT_CRC32).
     Crc32,
+    /// x86_64 BMI2 (MULX) and ADX (ADCX/ADOX): the P-256 and X25519 field
+    /// arithmetic (ADR-130, ADR-131). Both are needed, so one switch.
+    Bmi2Adx,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 4] = [Self::Aes, Self::Pmull, Self::Sha2, Self::Crc32];
+    // `Bmi2Adx` first: the boot log lists `adx aes pmull sha2 crc32`.
+    pub const ALL: [Feature; 5] = [
+        Self::Bmi2Adx,
+        Self::Aes,
+        Self::Pmull,
+        Self::Sha2,
+        Self::Crc32,
+    ];
 
     /// The name used in `[cpu] disable` and in the boot log.
     pub const fn name(self) -> &'static str {
@@ -46,6 +56,7 @@ impl Feature {
             Self::Pmull => "pmull",
             Self::Sha2 => "sha2",
             Self::Crc32 => "crc32",
+            Self::Bmi2Adx => "adx",
         }
     }
 
@@ -373,10 +384,14 @@ impl Sealed {
             "aes" => u.has(Feature::Aes) && u.has(Feature::Pmull),
             "sha2" => u.has(Feature::Sha2),
             // The x86 names (X9): POLYVAL asks for "pclmulqdq", SHA-256 for
-            // "sha". Everything else (avx2, avx512*, bmi2, ...) is refused:
-            // the kernel keeps no AVX state.
+            // "sha". Everything else (avx2, avx512*, ...) is refused: the
+            // kernel keeps no AVX state. bmi2 and adx (general-purpose
+            // registers only) are granted together.
             "pclmulqdq" => u.has(Feature::Pmull),
             "sha" => u.has(Feature::Sha2),
+            // The P-256 and X25519 assembly asks for both (MULX and
+            // ADCX/ADOX); `[cpu] disable = ["adx"]` takes both away.
+            "bmi2" | "adx" => u.has(Feature::Bmi2Adx),
             _ => false,
         }
     }

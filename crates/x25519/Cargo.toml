@@ -1,0 +1,23 @@
+[package]
+name = "urmqtt-x25519"
+description = "X25519 on 4x64-bit limbs: portable code, and MULX/ADX assembly on x86_64 (ADR-131)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+cpufeatures = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+x25519-dalek = { version = "2", default-features = false }
+rand_chacha = { version = "0.3", default-features = false }
+rand_core = { version = "0.6", default-features = false }

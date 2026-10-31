@@ -1577,3 +1577,37 @@ Bench ISO (`make bench-iso`, static address), loadgen from the Mac (35 ms RTT) a
 
 - NTS and authenticated SNTP; DHCP option 42; frequency discipline; DNS names; x86_64 boot run of the smoke scenario (clippy only).
 - With a single configured server that server decides the time (within the bounds); use two or three.
+
+## PERF — x86_64 handshake: nistz256 and MULX/ADX X25519 (ADR-130, ADR-131, ADR-132; 2026-10-31)
+
+Goal: close, and if possible reverse, the gap to OpenSSL on the same machine. All numbers are native x86_64 on the build server (AMD EPYC 9354P, Zen 4, 4 shared cores, load average 11-16 from the web server and others), pinned to one core with `taskset -c 2`; "min / median of 11" runs; the host is noisy, so read the minimum as the capability and the median as what a loaded machine shows. The VPS (Zen 1/2-class) was not measured: expect the same shape, not these figures.
+
+**Before / after** (`cargo run --release --example profile -p urmqtt-tls`, microseconds; OpenSSL 3.5.5 `openssl speed -seconds 2`, three runs, same core)
+
+| operation | before (9a5b19c) | after | OpenSSL | after vs OpenSSL |
+|---|---|---|---|---|
+| X25519 key share | 56.9 / 79.3 | 20.0 / 24.2 | 38.7 | 1.9x faster (fixed-base table; OpenSSL has none) |
+| X25519 shared secret | 64.3 / 76.2 | 34.2 / 40.6 | 38.7 | 1.13x faster |
+| ECDSA P-256 sign | 80.4 / 89.7 | 25.3 / 28.3 | 23.4 | 8 % slower |
+| ECDSA verify, unknown key | 289.9 / 318.8 | 60.5 / 72.5 | 72.5 | 1.2x faster |
+| ECDSA verify, registered CA | 117.6 / 143.5 | 19.5 / 23.4 | 72.5 | 3.7x faster (per-issuer comb) |
+| ECDH P-256 (dh / key gen) | 262.5 / 68.3 | 53.0 / 15.9 | 54-58 | parity |
+| public-key part of one handshake (key share + secret + sign + 2 verifications) | 609 / 708 (sum of the rows above) | 160 / 189 | 246 | 1.54x / 1.30x faster (before: 2.5x / 2.9x slower) |
+| estimate with hashing and records (`profile`) | 676 / 740 | 195 / 219 | | |
+| server side of a real full mTLS handshake, in process (CA signature memoised) | min 440-495, median 497-566 | min 150-162, median 194-206 | | 2.9x / 2.6x |
+
+OpenSSL's "handshake" figure is the sum of its single operations the same way (two X25519, one sign, two verifications), since it has no fixed-base or per-issuer tables; it is a comparison of public-key cost, not of whole-library handshakes.
+
+aarch64 (QEMU/HVF on the M4 Pro, `dp-bench`, client and server in the guest, three runs each, handshakes/s): 1 core 1810-1827 -> 1939-1957, 2 cores 3568-3588 -> 3824-3833, 4 cores 6863-6973 -> 7371-7447 (+7 %, scaling kept at 3.8x). Nothing regressed; the gain is the X25519 key-share table (guest profile: 20.7 -> 8.7 us). The P-256 assembly is x86_64 only.
+
+**Done**
+
+- `crates/nistz256`: OpenSSL/Intel `nistz256` assembly (Apache-2.0, via ring 0.17.14's pregenerated output; `vendor/nistz256`, provenance and hashes in `vendor/README.md`) with ECDSA sign/verify, ECDH, key generation and per-issuer comb tables around it; MULX/ADX or plain `mul` chosen through the sealed kernel dispatch (new `adx` feature, `[cpu] disable = ["adx"]`).
+- `crates/x25519`: 4x64 X25519 with hand-written MULX/ADCX/ADOX multiplication and squaring, portable fallback.
+- `provider/fastec.rs`, `kx.rs`, `verify.rs`, `sign.rs`: production paths; identical results to the stock code (signatures bit for bit). Light DER serial reader (no more 4 full certificate decodes per handshake).
+- Boot: `crypto: ecc=...` line, `adx` in the dispatch inputs, KATs for P-256 ECDH (RFC 5903), X25519 (RFC 7748) and ECDSA (RFC 6979) through the production paths in `kat::run`. Probe, profile and diagnostic estimate measure the production routines.
+- Verification: differential tests against RustCrypto/dalek (see the ADRs), `cargo test --workspace`, clippy for the host, both kernels with and without `selftest`, x86_64 kernel boot (`x86-disk-q35` under QEMU TCG), aarch64 `dp-bench`.
+
+**Dropped / not done**, with numbers: a 4x64 X25519 on aarch64 (18.8 us dalek vs 29.3 us); per-device tables for CertificateVerify keys (cost of ten verifications); OpenSSL's AVX2 selection (no AVX state in the kernel); a wNAF for unknown-key verification (est. 3-5 us of 60); Bernstein-Yang inversion (est. 9 us off sign, 4 us off verify); a fused X25519 ladder step. Sign remains 8 % behind OpenSSL on the minimum because of two Fermat inversions.
+
+**Risks**: about 4600 lines of third-party assembly are trusted on the strength of the differential tests and the provenance, not an audit; the new code is not covered by the dudect harness; 148 KiB of heap per registered trust anchor (at most 8); Zen 1/2 behaviour of ADCX/ADOX is correct by the ISA but unmeasured.

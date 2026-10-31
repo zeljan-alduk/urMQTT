@@ -631,3 +631,63 @@ fn fatal_alerts_reach_the_peer() {
         more.len()
     );
 }
+
+/// Server-side CPU time of full mTLS handshakes (no resumption), the time
+/// spent inside `TlsSession::input` plus `accept`: what the broker's worker
+/// core pays per accepted connection, apart from the TCP stack.
+/// `cargo test --release -p urmqtt-tls --test handshake -- --ignored --nocapture server_side`
+#[test]
+#[ignore = "timing only"]
+fn server_side_handshake_cost() {
+    let Some(d) = dev() else { return };
+    setup_globals();
+    let srv = server(&d, IdentityField::Cn, &[]);
+    let mut samples = Vec::new();
+    let rounds: usize = std::env::var("ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    for round in 0..rounds {
+        let cfg = client_config(&d, "devices/device-001");
+        let mut client =
+            ClientConnection::new(cfg, ServerName::try_from("localhost").unwrap()).unwrap();
+        let mut spent = std::time::Duration::ZERO;
+        let t = std::time::Instant::now();
+        let mut session = srv.accept().unwrap();
+        spent += t.elapsed();
+        let mut app = Vec::new();
+        let mut established = false;
+        for _ in 0..50 {
+            let mut c2s = Vec::new();
+            while client.wants_write() {
+                client.write_tls(&mut c2s).unwrap();
+            }
+            let mut s2c = Vec::new();
+            if !c2s.is_empty() {
+                let t = std::time::Instant::now();
+                let ev = session.input(&c2s, &mut s2c, &mut app).unwrap();
+                spent += t.elapsed();
+                established |= matches!(ev, Event::Established { .. });
+            }
+            if s2c.is_empty() && c2s.is_empty() {
+                break;
+            }
+            let mut rd = &s2c[..];
+            while !rd.is_empty() {
+                client.read_tls(&mut rd).unwrap();
+                client.process_new_packets().unwrap();
+            }
+        }
+        assert!(established);
+        if round >= 10 {
+            samples.push(spent.as_nanos() as u64);
+        }
+    }
+    samples.sort_unstable();
+    println!(
+        "server-side full handshake: min {} us, median {} us ({} samples)",
+        samples[0] / 1000,
+        samples[samples.len() / 2] / 1000,
+        samples.len()
+    );
+}

@@ -1072,6 +1072,14 @@ name = "urmqtt-net"
 version = "0.1.0"
 
 [[package]]
+name = "urmqtt-nistz256"
+version = "0.1.0"
+dependencies = [
+ "cpufeatures 0.3.1",
+ "zeroize",
+]
+
+[[package]]
 name = "urmqtt-platform"
 version = "0.1.0"
 
@@ -1106,6 +1114,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "chacha20poly1305",
+ "curve25519-dalek",
  "der",
  "hkdf",
  "hmac",
@@ -1113,15 +1122,24 @@ dependencies = [
  "primeorder",
  "rand_chacha",
  "rand_core 0.6.4",
+ "rfc6979",
  "rustls",
  "rustls-pki-types",
  "rustls-webpki",
  "sha2 0.11.1",
  "subtle",
+ "urmqtt-nistz256",
  "urmqtt-sync",
- "x25519-dalek",
+ "urmqtt-x25519",
  "x509-cert",
  "zeroize",
+]
+
+[[package]]
+name = "urmqtt-x25519"
+version = "0.1.0"
+dependencies = [
+ "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -1225,16 +1243,6 @@ dependencies = [
  "group",
  "hybrid-array",
  "primefield",
-]
-
-[[package]]
-name = "x25519-dalek"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
-dependencies = [
- "curve25519-dalek",
- "rand_core 0.6.4",
 ]
 
 [[package]]
