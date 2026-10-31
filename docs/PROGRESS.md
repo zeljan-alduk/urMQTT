@@ -1551,3 +1551,14 @@ Motivation: a real KVM VPS (Contabo, AMD EPYC, 4 vCPU, live RAM mode) loaded fro
 **Skipped**
 
 - Anything on the VPS; a simulation of the WAN path (35 ms RTT) that would reproduce the overload in QEMU (needs a delaying L2 relay); the full smoke suites (by instruction); x86_64 runs (clippy and build only); a weighted share for core 0; a CPU-time based admission.
+
+## PERF measurements on the Contabo VPS (4 vCPU, KVM), 2026-10-31
+
+Bench ISO (`make bench-iso`, static address), loadgen from the Mac (35 ms RTT) and from the build server (19 ms RTT, 4 shared cores).
+
+- No overload collapse any more: 512 clients from the Mac gave ~440 conn/s with 1.1 s mean latency (before: 67/s, 12.8 s).
+- Workers were only ~45% busy at ~450 conn/s: the load generator, not the server, was the limit. Per handshake the VPS spends ~1.85 ms of core time (1.7 ms TLS); QEMU/HVF on an M-series Mac ~0.4 ms. Ceiling ~540/s per worker, two workers (cores 1, 2; core 0 dispatches, core 3 is the DB core).
+- `cpu.dispatcher_serves = true` (core 0 as third worker): boots and serves on the VPS; from the build server 708–729 conn/s vs 706–942 without it (noise larger than the difference). Left off.
+- Open: ~28–40% of SYN-cookie ACKs count as "bad" (also reproduced in QEMU x86). They are most likely pure ACK/FIN segments after the server closed first (the connection is gone, the segment is checked as a cookie and answered with RST, `crates/tcp/src/lib.rs`); not yet confirmed, not harmful so far.
+- Open: "longest stall" of a worker is 55–60 ms on the VPS (6–7 ms in QEMU/TCG). Probably vCPU preemption by the hypervisor; not proven (no per-step maximum next to it).
+- The Mac stopped reaching the VPS during these tests (ping and TCP refused from the Mac, fine from the build server): a Mac-side filter, not the broker.
