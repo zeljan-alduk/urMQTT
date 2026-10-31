@@ -369,9 +369,12 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     let Some(mut s) = STAGE2.lock().take() else {
         fatal("stage 2 entered without state");
     };
+    // First thing: a stack canary that is not the build-time constant. Safe
+    // here because this function never returns (ADR-171).
+    let seed = hardening::Seed::new(&s.boot_entropy);
+    hardening::stack_guard::renew(seed.key(hardening::domain::GUARD));
     smp::init_boot_cpu();
     vm::retire_early_frames(s.early_frames);
-    let seed = hardening::Seed::new(&s.boot_entropy);
     if let Err(e) = vm::init_heap(
         s.built.heap_order,
         s.built.heap_meta_words,
@@ -460,6 +463,14 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         }
     }
     s.boot_entropy = [0; ENTROPY_VALUES as usize];
+    // The CSPRNG exists: renew the stack canary from it. Still safe: nothing
+    // that returns is on the stack below this function.
+    let mut canary = [0u8; 8];
+    if urmqtt_tls::rng::fill_global(&mut canary).is_ok() {
+        hardening::stack_guard::renew(u64::from_le_bytes(canary));
+        info!("hardening: stack canary renewed from the CSPRNG (56 bits)");
+    }
+    urmqtt_mm::keyslab::wipe(&mut canary);
 
     // Application processors need their stacks mapped before the lock.
     smp::register_ipis();

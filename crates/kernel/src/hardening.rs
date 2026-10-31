@@ -8,6 +8,8 @@
 //! and from virtio-rng; where a mitigation can wait for it (the stack
 //! guard is renewed then), it does.
 
+#![allow(unsafe_code)]
+
 use urmqtt_log::info;
 
 /// SplitMix64's finalizer: a bijective mixer, good enough to spread seed
@@ -93,6 +95,59 @@ impl Seed {
 
 /// Domain separators for [`Seed::key`].
 pub mod domain {
+    pub const GUARD: u64 = 0x4755_4152_4400_0003;
     pub const BUDDY: u64 = 0x4255_4444_5900_0001;
     pub const CACHE: u64 = 0x4341_4348_4500_0002;
+}
+
+/// Stack protector (H4, ADR-171).
+///
+/// The compiler (`-Zstack-protector=strong` for Rust, `-fstack-protector-strong`
+/// for SQLite) puts a canary below the saved registers of every function
+/// with an array or an address-taken local and compares it with this word
+/// before returning. The word is replaced twice while only the boot CPU runs
+/// and only `kmain_stage2` (which never returns) is on its stack: first from
+/// the boot seed, then from the CSPRNG as soon as it exists. A function that
+/// returned after the change would find a different canary and stop the
+/// machine, so the change is never made inside a function that returns.
+pub mod stack_guard {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    /// What the first instructions run with, until the seed exists. A
+    /// terminator canary (a zero byte stops string copies); not secret.
+    const BUILD_TIME: usize = 0x0000_0aff_0d0a_0000;
+
+    /// The symbol the compiler's prologue and epilogue read.
+    #[unsafe(no_mangle)]
+    #[allow(non_upper_case_globals)]
+    pub static __stack_chk_guard: AtomicUsize = AtomicUsize::new(BUILD_TIME);
+
+    /// Called by every protected epilogue whose canary does not match.
+    /// Nothing about the frame is printed (ADR-172).
+    #[unsafe(no_mangle)]
+    #[cold]
+    #[inline(never)]
+    pub extern "C" fn __stack_chk_fail() -> ! {
+        urmqtt_log::emergency(format_args!(
+            "\n!!! STACK SMASHING DETECTED: a stack canary was overwritten, stopping\n"
+        ));
+        crate::power::fatal()
+    }
+
+    /// Installs a new canary: 56 random bits and a zero low byte.
+    ///
+    /// Only from a function that never returns (see the module comment).
+    pub fn renew(random: u64) {
+        let v = (random & !0xff) as usize;
+        // Relaxed: only the boot CPU runs; the other cores start later and
+        // synchronise with the boot CPU before they use any protected code.
+        __stack_chk_guard.store(v, Ordering::Relaxed);
+    }
+
+    /// Whether the canary is still the build-time constant (a test: it must
+    /// not be once the kernel runs).
+    pub fn is_default() -> bool {
+        // Relaxed: a plain read.
+        __stack_chk_guard.load(Ordering::Relaxed) == BUILD_TIME
+    }
 }

@@ -2203,6 +2203,14 @@ hardening_suite() {
         "PANIC: panicked at" "^heap: write after free" "NOT:was NOT detected" "NOT:URMQTT READY"
     scenario heap-overflow "smoke test=heap-overflow" on \
         "PANIC: panicked at" "^heap: heap overflow" "NOT:was NOT detected" "NOT:URMQTT READY"
+    # Stack protector (ADR-171): the canary is renewed twice at boot, and an
+    # overrun of a local buffer stops the machine at the function's return.
+    scenario stack-guard-boot "smoke" on \
+        "hardening: boot seed of [0-9]+ bit\(s\)" "hardening: stack canary renewed from the CSPRNG \(56 bits\)" \
+        "^URMQTT READY$" "$NO_FAULT" "NOT:STACK SMASHING"
+    scenario stack-smash "smoke test=stack-smash" on \
+        "test mode: triggering StackSmash" "test: the stack canary is not the build-time constant: true" \
+        "!!! STACK SMASHING DETECTED" "NOT:was NOT detected" "NOT:URMQTT READY"
     scenario keyslab-zero "smoke test=keyslab-zero" on \
         "keyslab-zero: 8 key\(s\) stored and read back in place \(true\), freed; 16 free slot\(s\) all zero \(true\); stale handles refused \(true\): ok" \
         "keyslab-zero: a freed 1000-byte heap block reads back as poison 0xdf \(true\), no byte of the old contents left \(true\): ok" \

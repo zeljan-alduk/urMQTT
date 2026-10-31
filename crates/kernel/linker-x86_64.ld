@@ -46,6 +46,8 @@ SECTIONS
         KEEP(*(.requests))
         KEEP(*(.requests_end_marker))
         *(.data .data.*)
+        /* GOT entries: the stack protector reaches __stack_chk_guard through one (ADR-171). */
+        *(.got .got.*)
     } :data
 
     .bss (NOLOAD) : {

@@ -45,7 +45,7 @@ CARGO_DIR   := $(or $(CARGO_HOME),$(HOME)/.cargo)
 REMAP       := --remap-path-prefix=$(SYSROOT)=/rustc --remap-path-prefix=$(CARGO_DIR)=/cargo \
 	--remap-path-prefix=$(CURDIR)=/urmqtt
 # Exploit mitigations compiled into the kernel (H4, ADR-171).
-HARDEN      :=
+HARDEN      := -Zstack-protector=strong
 export CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS := $(REMAP) $(HARDEN)
 export CARGO_TARGET_X86_64_URMQTT_NONE_RUSTFLAGS := $(REMAP) $(HARDEN)
 # Dev images carry the in-guest benchmark and its TLS client; others do not.

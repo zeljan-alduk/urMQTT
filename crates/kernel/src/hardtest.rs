@@ -26,6 +26,7 @@ pub fn run(fault: TestFault) {
         TestFault::HeapDoubleFree => heap_double_free(),
         TestFault::HeapUaf => heap_uaf(),
         TestFault::HeapOverflow => heap_overflow(),
+        TestFault::StackSmash => stack_smash(),
         _ => warn!("test: {fault:?} is not implemented in this image"),
     }
 }
@@ -127,4 +128,29 @@ pub fn keyslab_zero() {
         !leaked,
         if poisoned && !leaked { "ok" } else { "FAILED" }
     );
+}
+
+/// A function with a 16-byte buffer that the loop below overruns by 48
+/// bytes: the canary above the buffer is overwritten, and the check before
+/// the return stops the machine. Kept out of line, and the writes volatile,
+/// so the compiler can neither fold the loop nor drop the buffer.
+#[inline(never)]
+fn smash(n: usize) {
+    let mut buf = [0u8; 16];
+    // The pointer is recomputed from the frame on every write: held in a
+    // spilled local it would sit above the buffer and be overwritten first.
+    for i in 0..n {
+        // SAFETY: deliberately wrong: writes `n - 16` bytes past the buffer.
+        unsafe { buf.as_mut_ptr().wrapping_add(i).write_volatile(0x41) };
+    }
+    black_box(&buf);
+}
+
+fn stack_smash() {
+    info!(
+        "test: the stack canary is not the build-time constant: {}",
+        !crate::hardening::stack_guard::is_default()
+    );
+    smash(black_box(64));
+    error!("test: the stack smash was NOT detected");
 }

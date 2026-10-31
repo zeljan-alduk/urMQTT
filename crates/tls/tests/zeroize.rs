@@ -34,7 +34,8 @@ fn a_dropped_generator_is_overwritten_in_place() {
     // Drop it in place and look at the memory it occupied.
     let p: *mut Csprng = &mut *g;
     unsafe { core::ptr::drop_in_place(p) };
-    let after = unsafe { core::slice::from_raw_parts(p.cast::<u8>(), size_of::<Csprng>()) }.to_vec();
+    let after =
+        unsafe { core::slice::from_raw_parts(p.cast::<u8>(), size_of::<Csprng>()) }.to_vec();
     assert_eq!(
         after,
         image(&ChaCha20Rng::from_seed([0; 32])),
