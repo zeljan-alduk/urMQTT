@@ -77,7 +77,7 @@ bare metal comes before optimisation.
 | 11. Speed, encryption, release readiness | **X9**, **S7**, **H9**, **X11**, **S8** | optimisations measured on real hardware; encryption with measured overhead; SBOM; numbers and docs |
 | 11b. Remote operation (user request 2026-10-30) | **O1**, **O2** | `$SYS` introspection and a console over MQTT, so a VNC session is no longer needed; done before the rest of phase 11 |
 | 11c. Live mode (user request 2026-10-30) | **O3** (done, ADR-061, ADR-062) | the ISO's first entry runs from RAM with no disk, as an opt-in ephemeral mode |
-| 11d. Diagnostic (user request 2026-10-30) | **O4** | the third boot entry: hardware detection and RAM/disk benchmarks |
+| 11d. Diagnostic (user request 2026-10-30) | **O4** (done, ADR-063) | the third boot entry: hardware detection and RAM/disk benchmarks |
 | 11e. Time (user request 2026-10-31) | **T1** | SNTP: a wall clock that is corrected, not only read once from the RTC |
 | 12. Audit | **H10** | the audit package covers everything above |
 
@@ -152,6 +152,8 @@ connection budget; prod refuses it unless the config says
 `storage.mode = "ram"`. Installing to a disk stays the way to persist.
 
 ## O4 — Diagnostic boot entry (user request, 2026-10-30)
+
+**Status (2026-10-31): implemented**, see ADR-063 and PROGRESS.md "O4". Deviation: the installer leaves no scratch region at the end of the disk (the data partition runs to the end and the backup GPT lives there), so an installed disk has no free space and its write test is skipped with the reason.
 
 A third menu entry, *diagnostic*, that shows what the system detects (CPU model,
 cores, features and crypto units, RAM, PCI devices, disks, NICs, time source) and

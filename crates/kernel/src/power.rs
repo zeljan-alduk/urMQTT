@@ -27,6 +27,11 @@ pub fn set_smoke(smoke: bool) {
     arch_power::set_debug_exit(urmqtt_config::CONFIG.env == "dev" && smoke);
 }
 
+/// Whether this is a dev image booted in smoke mode (tests end the run).
+pub fn smoke() -> bool {
+    SMOKE.load(Ordering::Relaxed)
+}
+
 /// Powers off; halts if the firmware is unavailable or refuses.
 pub fn off() -> ! {
     urmqtt_log::flush();

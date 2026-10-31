@@ -97,6 +97,12 @@ pub mod power {
 pub mod features {
     pub use super::imp::features::{Features, IdRegs};
 
+    /// MIDR_EL1: implementer, variant, architecture, part and revision.
+    #[cfg(target_os = "none")]
+    pub fn midr() -> u64 {
+        super::imp::features::midr()
+    }
+
     /// Reads and decodes the executing CPU's features.
     #[cfg(target_os = "none")]
     pub fn detect() -> Features {

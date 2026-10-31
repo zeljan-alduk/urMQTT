@@ -33,6 +33,12 @@ pub struct Features {
     pub sve: bool,
 }
 
+/// The CPU's MIDR (implementer, variant, architecture, part, revision).
+#[cfg(target_os = "none")]
+pub fn midr() -> u64 {
+    crate::regs::midr_el1()
+}
+
 const fn field(reg: u64, shift: u32) -> u64 {
     (reg >> shift) & 0xf
 }

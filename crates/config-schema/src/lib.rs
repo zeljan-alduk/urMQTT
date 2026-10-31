@@ -239,6 +239,10 @@ struct RawStorage {
     mode: Option<StorageMode>,
     #[serde(default = "default_ram_percent")]
     ram_percent: u32,
+    /// Whether the ISO's diagnostic entry may run on this image (O4).
+    /// Off unless the configuration says so.
+    #[serde(default)]
+    diagnostic: bool,
     sqlite_heap_mb: u32,
     telemetry_topics: Vec<String>,
     retention_days: u32,
@@ -362,6 +366,8 @@ pub struct Storage {
     pub mode: StorageMode,
     /// Share of RAM reserved for the in-memory data store (live mode).
     pub ram_percent: u32,
+    /// The ISO's diagnostic boot entry is allowed (O4, ADR-063).
+    pub diagnostic: bool,
     pub sqlite_heap_mb: u32,
     pub telemetry_topics: Vec<String>,
     pub retention_days: u32,
@@ -1035,6 +1041,7 @@ fn validate_storage(
     Storage {
         mode: raw.mode.unwrap_or(StorageMode::Disk),
         ram_percent: raw.ram_percent,
+        diagnostic: raw.diagnostic,
         sqlite_heap_mb: raw.sqlite_heap_mb,
         telemetry_topics: raw.telemetry_topics.clone(),
         retention_days: raw.retention_days,
@@ -1290,6 +1297,7 @@ pub const CONFIG: BuildConfig = BuildConfig {{
     storage: Storage {{
         mode: StorageMode::{smode:?},
         ram_percent: {rampct},
+        diagnostic: {diag},
         sqlite_heap_mb: {heap},
         telemetry_topics: {tt},
         retention_days: {rd},
@@ -1364,6 +1372,7 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         oid = render_strs(&cfg.acl.operator_ids),
         smode = cfg.storage.mode,
         rampct = cfg.storage.ram_percent,
+        diag = cfg.storage.diagnostic,
         heap = cfg.storage.sqlite_heap_mb,
         tt = render_strs(&cfg.storage.telemetry_topics),
         rd = cfg.storage.retention_days,

@@ -18,6 +18,7 @@ extern crate alloc;
 pub mod client;
 pub mod identity;
 pub mod kat;
+pub mod probe;
 pub mod provider;
 pub mod record;
 pub mod rng;

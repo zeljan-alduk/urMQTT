@@ -1,5 +1,5 @@
-//! The 16550 UART at COM1 (X2). Output only, like the PL011 driver: the
-//! console takes no input by design. SPCR/ACPI discovery of other ports
+//! The 16550 UART at COM1 (X2). Output for the log; input is polled and used
+//! only by the diagnostic entry's confirmation prompt (O4). SPCR/ACPI discovery of other ports
 //! comes with X6; COM1 is where QEMU, KVM guests and most PCs have it.
 
 #![allow(unsafe_code)]
@@ -18,6 +18,7 @@ const LCR: u16 = 3;
 const MCR: u16 = 4;
 const LSR: u16 = 5;
 const SCR: u16 = 7;
+const LSR_RX_READY: u8 = 1 << 0;
 const LSR_TX_EMPTY: u8 = 1 << 5;
 const LSR_IDLE: u8 = 1 << 6;
 /// Bounded wait so a wedged or absent UART can never hang the kernel.
@@ -69,6 +70,15 @@ pub fn write_byte(b: u8) {
         core::hint::spin_loop();
     }
     out(TX, b);
+}
+
+/// One received byte, if any is waiting (never blocks).
+pub fn read_byte() -> Option<u8> {
+    // Relaxed: see PRESENT.
+    if !PRESENT.load(Ordering::Relaxed) || read(LSR) & LSR_RX_READY == 0 {
+        return None;
+    }
+    Some(read(TX))
 }
 
 /// Writes `s`, turning every `\n` into `\r\n` as the terminal expects.

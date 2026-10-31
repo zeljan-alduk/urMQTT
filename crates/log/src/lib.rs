@@ -119,6 +119,14 @@ impl Uart {
         }
     }
 
+    fn read_byte(&self) -> Option<u8> {
+        match self {
+            Self::Pl011(u) => u.read_byte(),
+            #[cfg(all(target_os = "none", target_arch = "x86_64"))]
+            Self::Com1 => urmqtt_arch::serial::read_byte(),
+        }
+    }
+
     fn flush(&self) {
         match self {
             Self::Pl011(u) => u.flush(),
@@ -138,6 +146,8 @@ impl Write for Uart {
 struct Sinks {
     uart: Option<Uart>,
     fb: Option<FbConsole<'static>>,
+    /// Log lines go to the framebuffer (off while the diagnostic dashboard owns it).
+    fb_log: bool,
     clock_ns: Option<fn() -> u64>,
     cpu: Option<fn() -> usize>,
     /// Rate limit: tokens (lines) and when they were last refilled.
@@ -151,6 +161,7 @@ struct Sinks {
 static SINKS: SpinLock<Sinks> = SpinLock::new(Sinks {
     uart: None,
     fb: None,
+    fb_log: true,
     clock_ns: None,
     cpu: None,
     tokens: BURST,
@@ -224,6 +235,26 @@ pub fn set_com1() {
 
 pub fn set_framebuffer(fb: FbConsole<'static>) {
     SINKS.lock().fb = Some(fb);
+}
+
+/// Runs `f` on the framebuffer console with the log sinks locked (IRQs
+/// masked meanwhile); `None` if there is no framebuffer. For the diagnostic
+/// dashboard (O4).
+pub fn with_framebuffer<R>(f: impl FnOnce(&mut FbConsole<'static>) -> R) -> Option<R> {
+    let mut locked = Locked::acquire();
+    locked.sinks().fb.as_mut().map(f)
+}
+
+/// Whether log lines are also written to the framebuffer (default yes).
+pub fn set_framebuffer_logging(on: bool) {
+    Locked::acquire().sinks().fb_log = on;
+}
+
+/// One byte received on the serial port, if any (never blocks). Only the
+/// diagnostic prompt reads input (O4).
+pub fn read_serial_byte() -> Option<u8> {
+    let uart = SINKS.lock().uart;
+    uart.and_then(|u| u.read_byte())
 }
 
 /// Installs the monotonic clock used for timestamps (nanoseconds since boot).
@@ -378,7 +409,9 @@ impl Write for Tee<'_> {
         if let Some(u) = self.0.uart.as_mut() {
             u.write_str(s)?;
         }
-        if let Some(fb) = self.0.fb.as_mut() {
+        if self.0.fb_log
+            && let Some(fb) = self.0.fb.as_mut()
+        {
             fb.write_str(s)?;
         }
         Ok(())
@@ -607,6 +640,7 @@ mod tests {
         let mut s = Sinks {
             uart: None,
             fb: None,
+            fb_log: true,
             clock_ns: None,
             cpu: None,
             tokens: BURST,

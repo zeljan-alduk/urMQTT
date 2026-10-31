@@ -1,4 +1,5 @@
-//! Output-only PL011 UART driver (no receive path by design: no console input).
+//! PL011 UART driver. Output for the log; the receive side is polled and
+//! used only by the diagnostic entry's confirmation prompt (O4).
 
 #![allow(unsafe_code)]
 
@@ -6,6 +7,7 @@ const DR: usize = 0x000;
 const FR: usize = 0x018;
 const FR_TXFF: u32 = 1 << 5;
 const FR_BUSY: u32 = 1 << 3;
+const FR_RXFE: u32 = 1 << 4;
 /// Bounded wait so a wedged UART can never hang the kernel.
 const SPIN_LIMIT: u32 = 1_000_000;
 
@@ -47,6 +49,16 @@ impl Pl011 {
             }
             self.write_byte(b);
         }
+    }
+
+    /// One received byte, if any is waiting (never blocks).
+    pub fn read_byte(&self) -> Option<u8> {
+        // SAFETY: FR is a read-only status register inside the mapped block.
+        if unsafe { self.reg(FR).read_volatile() } & FR_RXFE != 0 {
+            return None;
+        }
+        // SAFETY: DR holds the received byte when the FIFO is not empty.
+        Some((unsafe { self.reg(DR).read_volatile() } & 0xff) as u8)
     }
 
     /// Waits until everything queued has left the shift register.

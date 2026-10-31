@@ -269,6 +269,58 @@ pub enum InstallSource {
     },
 }
 
+/// A PCI function the enumeration saw, kept for the diagnostic (O4).
+pub struct PciSeen {
+    pub bdf: alloc::string::String,
+    pub vendor: u16,
+    pub device: u16,
+    pub class: u8,
+    pub subclass: u8,
+    pub driver: Option<&'static str>,
+}
+
+pub static PCI_SEEN: SpinLock<alloc::vec::Vec<PciSeen>> = SpinLock::new(alloc::vec::Vec::new());
+
+/// A disk handed to the diagnostic; `disk` is `None` when the controller
+/// was already given to another LUN (one LUN per virtio-scsi HBA).
+pub struct DiagDisk {
+    pub name: alloc::string::String,
+    pub bus: &'static str,
+    pub sectors: u64,
+    pub read_only: bool,
+    pub boot_medium: bool,
+    pub disk: Option<DataDisk>,
+}
+
+/// Takes every candidate disk (install mode, which the diagnostic shares:
+/// no disk is chosen or written by the probe).
+pub fn take_diag_disks() -> alloc::vec::Vec<DiagDisk> {
+    let mut devs = DEVICES.lock();
+    let list = core::mem::take(&mut devs.install);
+    let mut out = alloc::vec::Vec::new();
+    for d in list {
+        let (bus, disk) = match d.source {
+            InstallSource::Blk(b) => ("virtio-blk", Some(DataDisk::Blk(*b))),
+            InstallSource::Scsi { hba, info } => (
+                "virtio-scsi",
+                devs.hbas
+                    .get_mut(hba)
+                    .and_then(Option::take)
+                    .map(|h| DataDisk::Scsi(h.into_disk(info))),
+            ),
+        };
+        out.push(DiagDisk {
+            name: d.name,
+            bus,
+            sectors: d.sectors,
+            read_only: d.read_only,
+            boot_medium: d.boot_medium,
+            disk,
+        });
+    }
+    out
+}
+
 static INSTALL_MODE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Install mode: [`probe`] keeps every disk as a candidate (written by
@@ -626,6 +678,20 @@ fn probe_pci(
                 None => "",
             }
         );
+        PCI_SEEN.lock().push(PciSeen {
+            bdf: alloc::format!("{}", f.bdf),
+            vendor: f.vendor,
+            device: f.device,
+            class: f.class,
+            subclass: f.subclass,
+            driver: match kind {
+                Some(DeviceType::Net) => Some("virtio-net"),
+                Some(DeviceType::Block) => Some("virtio-blk"),
+                Some(DeviceType::Entropy) => Some("virtio-rng"),
+                Some(DeviceType::Scsi) => Some("virtio-scsi"),
+                _ => None,
+            },
+        });
         let Some(kind) = kind else { continue };
         if matches!(kind, DeviceType::Other(_)) {
             continue;

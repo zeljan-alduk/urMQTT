@@ -138,6 +138,7 @@ Configuration (`deploy/<env>/config.toml`, `[storage]`):
 |---|---|---|
 | `mode` | `"disk"` \| `"auto"` \| `"ram"` | required outside dev. `"disk"`: data on the disk; the live entry is refused (a halted screen that says why). `"auto"`: the disk, except the ISO's live entry, which runs from RAM. `"ram"`: always RAM, even when booted from a disk |
 | `ram_percent` | 2 to 50, default 10 | share of RAM for the store; the result must be at least 16 MiB |
+| `diagnostic` | `true` \| `false`, default `false` | allows the ISO's third entry, *Diagnostic: hardware detection and benchmarks* (ADR-063): CPU, RAM, PCI, disk and NIC detection, RAM, crypto and disk measurements on screen and as one JSON line on the serial port. Reads only, except a write test in unallocated space (after typing `WIPE` on a blank disk). With `false` the entry stops with the reason |
 
 The committed production template says `mode = "disk"`: the live entry is
 off until you write `auto`. A production image is never ephemeral by default

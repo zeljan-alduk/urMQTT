@@ -107,6 +107,70 @@ pub(crate) fn cpu_summary() -> Features {
     features
 }
 
+/// CPU identity for the diagnostic (O4): MIDR_EL1 and the feature bits.
+pub(crate) fn diag_cpu() -> crate::diag::CpuFacts {
+    use alloc::string::String;
+    let midr = features::midr();
+    let implementer = (midr >> 24) as u8;
+    let part = ((midr >> 4) & 0xfff) as u16;
+    let (variant, rev) = ((midr >> 20) & 0xf, midr & 0xf);
+    let f = features::detect();
+    let mut toks: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    let mut crypto: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    for (name, on, is_crypto) in [
+        ("aes", f.aes, true),
+        ("pmull", f.pmull, true),
+        ("sha2", f.sha2, true),
+        ("crc32", f.crc32, true),
+        ("rndr", f.rndr, true),
+        ("lse", f.lse, false),
+        ("pauth", f.pauth, false),
+        ("fpac", f.fpac, false),
+        ("bti", f.bti, false),
+        ("mte", f.mte, false),
+        ("sve", f.sve, false),
+    ] {
+        if on {
+            toks.push(name.into());
+            if is_crypto {
+                crypto.push(name.into());
+            }
+        }
+    }
+    crate::diag::CpuFacts {
+        vendor: String::from(urmqtt_diag::names::arm_implementer(implementer)),
+        model: String::from(urmqtt_diag::names::arm_part(implementer, part)),
+        identity: alloc::format!(
+            "MIDR {midr:#x} implementer {implementer:#x} part {part:#x} r{variant}p{rev}"
+        ),
+        features: toks,
+        crypto_units: crypto,
+        hypervisor: alloc::format!(
+            "not detectable from the CPU on Arm; PSCI conduit {}",
+            urmqtt_arch::power::conduit_name()
+        ),
+    }
+}
+
+/// The time base for the diagnostic (O4): the generic counter.
+pub(crate) fn diag_time() -> urmqtt_diag::report::TimeInfo {
+    urmqtt_diag::report::TimeInfo {
+        source: "generic counter (CNTFRQ)".into(),
+        counter_hz: time::frequency(),
+        ..Default::default()
+    }
+}
+
+/// No keyboard on this platform: confirmation comes from the serial port.
+pub(crate) fn poll_scancode() -> Option<u8> {
+    None
+}
+
+/// The firmware type Limine reports (UEFI on Arm).
+pub(crate) fn firmware_kind(_t: u64) -> &'static str {
+    "UEFI (aarch64)"
+}
+
 pub(crate) fn bti(f: &Features) -> bool {
     f.bti
 }

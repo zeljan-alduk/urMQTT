@@ -82,7 +82,10 @@ pub(crate) fn early_hw(platform: Option<&PlatformInfo>, mmio_ok: bool, _dev: boo
         });
     }
     match time::init(&src) {
-        Ok(time) => EarlyHw { time },
+        Ok(time) => {
+            *TIME_INFO.lock() = Some(time);
+            EarlyHw { time }
+        }
         Err(e) => fatal_fmt(format_args!(
             "no usable time base ({e:?}): the platform offers no HPET, PM timer or TSC frequency"
         )),
@@ -138,6 +141,93 @@ pub(crate) fn cpu_summary() -> Features {
         f.aes, f.pclmul, f.sha, f.sse42, f.avx2, f.rdrand, f.rdseed
     );
     f
+}
+
+/// What `time::init` found, kept for the diagnostic (O4).
+static TIME_INFO: urmqtt_sync::sync::SpinLock<Option<time::Info>> =
+    urmqtt_sync::sync::SpinLock::new(None);
+
+/// CPU identity for the diagnostic (O4).
+pub(crate) fn diag_cpu() -> crate::diag::CpuFacts {
+    let id = features::read_id_regs();
+    let (fam, model, step) = features::family_model_stepping(id.l1_eax);
+    let census = alloc::format!("{}", Census(&id));
+    let toks: alloc::vec::Vec<alloc::string::String> = census
+        .split_whitespace()
+        .filter(|t| !t.starts_with("xcr0="))
+        .map(alloc::string::String::from)
+        .collect();
+    const CRYPTO: [&str; 8] = [
+        "aes",
+        "pclmulqdq",
+        "sha",
+        "vaes",
+        "vpclmulqdq",
+        "gfni",
+        "rdrand",
+        "rdseed",
+    ];
+    let crypto_units = toks
+        .iter()
+        .filter(|t| CRYPTO.contains(&t.as_str()))
+        .cloned()
+        .collect();
+    let ascii = |b: &[u8]| {
+        alloc::string::String::from(
+            core::str::from_utf8(b)
+                .unwrap_or("?")
+                .trim_matches(|c: char| c == '\0' || c == ' '),
+        )
+    };
+    let brand = id.brand.as_flattened();
+    let hv = if id.l1_ecx & (1 << 31) != 0 {
+        let sig = ascii(&id.hypervisor);
+        alloc::format!("{} ({sig})", urmqtt_diag::names::hypervisor(&sig))
+    } else {
+        alloc::string::String::new()
+    };
+    crate::diag::CpuFacts {
+        vendor: ascii(&id.vendor),
+        model: ascii(brand),
+        identity: alloc::format!("family {fam} model {model:#x} stepping {step}"),
+        features: toks,
+        crypto_units,
+        hypervisor: hv,
+    }
+}
+
+/// The time base for the diagnostic (O4).
+pub(crate) fn diag_time() -> urmqtt_diag::report::TimeInfo {
+    let info = *TIME_INFO.lock();
+    match info {
+        Some(i) => {
+            let source = alloc::format!("{:?}", i.source);
+            urmqtt_diag::report::TimeInfo {
+                kvmclock: Some(source == "Kvmclock"),
+                source,
+                invariant_tsc: Some(i.invariant_tsc),
+                counter_hz: i.tsc_hz,
+                deadline_timer: Some(i.tsc_deadline),
+                ..Default::default()
+            }
+        }
+        None => urmqtt_diag::report::TimeInfo::default(),
+    }
+}
+
+/// A scancode from the PS/2 keyboard, if one is waiting.
+pub(crate) fn poll_scancode() -> Option<u8> {
+    urmqtt_arch::ps2::poll()
+}
+
+/// The firmware type Limine reports.
+pub(crate) fn firmware_kind(t: u64) -> &'static str {
+    match t {
+        0 => "BIOS",
+        1 => "UEFI (32-bit)",
+        2 => "UEFI (x86-64)",
+        _ => "unknown",
+    }
 }
 
 /// No branch-target identification here (CET is a later step).

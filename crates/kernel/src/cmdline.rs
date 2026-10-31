@@ -82,6 +82,14 @@ pub struct BootOptions {
     /// `live`: the ISO live entry (O3, ADR-054). Honoured everywhere, but
     /// the baked `storage.mode` still has to allow it ("auto" or "ram").
     pub live: bool,
+    /// `diag`: the ISO's Diagnostic entry (O4, ADR-063). Honoured everywhere
+    /// like `install`, but the baked `storage.diagnostic` must allow it.
+    pub diag: bool,
+    /// `diag-confirm=WIPE` (dev only): answers the write confirmation, so
+    /// the smoke test can exercise the write path without a keyboard.
+    pub diag_auto_confirm: bool,
+    /// `diag-confirm-timeout=S` (dev only): how long the prompt waits.
+    pub diag_confirm_timeout_s: Option<u64>,
     /// `install-countdown=S` (dev only): the installer's countdown instead
     /// of 30 s, for unattended tests.
     pub install_countdown_s: Option<u64>,
@@ -121,6 +129,12 @@ impl BootOptions {
                 o.live = true;
                 continue;
             }
+            // The diagnostic entry: detection and measurements; honoured
+            // only if the configuration allows it (`storage.diagnostic`).
+            if word == "diag" {
+                o.diag = true;
+                continue;
+            }
             if !dev_build {
                 o.ignored += 1;
                 continue;
@@ -157,6 +171,7 @@ impl BootOptions {
                 "test=df" => o.test_fault = Some(TestFault::DoubleFault),
                 "test=crypto-bench" => o.crypto_bench = true,
                 "test=simd-irq" => o.simd_irq = true,
+                "diag-confirm=WIPE" => o.diag_auto_confirm = true,
                 w => {
                     if let Some(mb) = w
                         .strip_prefix("heap_limit_mb=")
@@ -174,6 +189,11 @@ impl BootOptions {
                         .filter(|&s| s > 0)
                     {
                         o.ticket_rotate_s = Some(s);
+                    } else if let Some(s) = w
+                        .strip_prefix("diag-confirm-timeout=")
+                        .and_then(|v| v.parse().ok())
+                    {
+                        o.diag_confirm_timeout_s = Some(s);
                     } else if let Some(s) = w
                         .strip_prefix("install-countdown=")
                         .and_then(|v| v.parse().ok())
@@ -248,6 +268,28 @@ mod tests {
         let both = BootOptions::parse("live install", false);
         assert!(both.live && both.install, "install wins in the kernel");
         assert!(BootOptions::parse("live smoke", true).smoke);
+    }
+
+    /// ADR-063: `diag` is honoured by production (the configuration decides
+    /// at boot); its test helpers are dev only.
+    #[test]
+    fn production_honours_diag_and_its_helpers_are_dev_only() {
+        let o = BootOptions::parse("diag diag-confirm=WIPE diag-confirm-timeout=3 smoke", false);
+        assert!(o.diag && !o.diag_auto_confirm && !o.smoke);
+        assert_eq!((o.diag_confirm_timeout_s, o.ignored), (None, 3));
+        let d = BootOptions::parse("diag diag-confirm=WIPE diag-confirm-timeout=3", true);
+        assert!(d.diag && d.diag_auto_confirm);
+        assert_eq!((d.diag_confirm_timeout_s, d.ignored), (Some(3), 0));
+        for w in [
+            "Diag",
+            "diag=1",
+            "diagnostic",
+            "--diag",
+            "diag-confirm=wipe",
+        ] {
+            assert!(!BootOptions::parse(w, true).diag, "{w}");
+            assert!(!BootOptions::parse(w, true).diag_auto_confirm, "{w}");
+        }
     }
 
     #[test]

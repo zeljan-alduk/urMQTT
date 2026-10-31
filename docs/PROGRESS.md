@@ -1407,3 +1407,24 @@ PLAN §O3; ADR-061 (selection), ADR-062 (the RAM store). **QEMU only: aarch64 un
 **Skipped (scope cut for this deploy; the nightly full run covers them)**
 
 - The full aarch64, x86_64 and universal smoke suites with the live changes (a first full run was stopped), the fault/W^X/db/crypto scenarios, the mqtt-persist retained-across-restart check on a disk boot after this change, aarch64 under TCG, `make dist`, `make repro`. `universal_iso` and `iso_as_cd` expectations were updated (first entry is live now; `iso_as_cd` uses `--no-live`) but not re-run.
+
+## O4 — Diagnostic boot entry (2026-10-31)
+
+PLAN §O4; ADR-063. **QEMU only: aarch64 under HVF, x86_64 q35+OVMF and pc+SeaBIOS under TCG. Not run on KVM, on the Contabo VPS or on hardware.**
+
+**Done**
+
+- **A third ISO menu entry**, *Diagnostic: hardware detection and benchmarks* (`diag` on the command line; `mkiso.sh --diag-cmdline/--diag-default/--no-diag`), honoured only if `storage.diagnostic = true` (off by default; the dev template says true).
+- **Detection screen** (CPU, crypto units and the active backend, RAM, PCI, disks, NICs, time source, RTC, firmware, hypervisor) and **measurements** (RAM MiB/s and the pointer-chase latency curve, crypto and a TLS handshake estimate, disk sequential read and random 4 KiB IOPS with percentiles, and a guarded sequential write), drawn as an ALDO TECH dashboard on the framebuffer with a progress footer, and as one `URMQTT-DIAG-JSON` line on the serial port. The screen stays; a key reboots.
+- **Write guard:** only unallocated space (partitions and the data layout's region table subtracted), never the first or last MiB, a typed `WIPE` for a blank or foreign disk, every request re-checked against the free extents, the area zeroed afterwards. An installed disk has no free space under the installer's layout, so its write test is skipped and says why.
+- New crate `urmqtt-diag` (pure, no dependencies), `urmqtt_tls::probe`, framebuffer drawing primitives, polled serial and PS/2 input, `storage.diagnostic`.
+
+**Tests**
+
+- Host (`cargo test --workspace`): 42 in `urmqtt-diag` (percentiles, rates, formatting, bar scaling, the free-space computation including a sweep proving no free extent overlaps a partition or leaves the guards, the write-guard decision table, JSON escaping and shape, PS/2 decoding, the line editor, the dashboard drawn inside the screen at nine sizes), the command-line words, `storage.diagnostic`, the framebuffer primitives, the TLS probes.
+- Smoke (`SMOKE_ONLY=diag scripts/smoke.sh --arch universal`, 12 checks): on aarch64 (HVF), x86_64 UEFI and BIOS (TCG), format a disk, boot the diagnostic with it attached, check the JSON (`scripts/diag-check.py`) and that the installed disk is byte-identical; a blank disk without a confirmation stays untouched; with the dev confirmation word the write test runs, verifies and leaves the disk zeroed.
+- Looked at on x86_64 UEFI (a QEMU screendump at 1280x800): panels, bars and the confirmation prompt render as designed.
+
+**Skipped**
+
+- The full smoke suites (by instruction), a screendump on aarch64, the PS/2 path (the typed confirmation was exercised through the dev switch, not through QEMU's keyboard), KVM and hardware.

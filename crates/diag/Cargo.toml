@@ -1,0 +1,15 @@
+[package]
+name = "urmqtt-diag"
+description = "The diagnostic boot entry's pure parts (O4): statistics, formatting, bar scaling, free-space and write-guard decisions, JSON, the dashboard layout."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
