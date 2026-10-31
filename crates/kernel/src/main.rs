@@ -60,6 +60,8 @@ mod live;
 mod logtest;
 #[cfg(target_os = "none")]
 mod memory;
+#[cfg(all(target_os = "none", feature = "memprof", target_arch = "x86_64"))]
+mod memprof;
 #[cfg(target_os = "none")]
 mod mqtt_service;
 #[cfg(target_os = "none")]

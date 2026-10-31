@@ -22,6 +22,33 @@ SECURITY-PLAN H4, in the order of the plan, one commit and one ADR per step. Fir
 - HHDM base randomisation; hardware heap guard pages; asynchronous MTE and a production switch; tagging of the SQLite arena and DMA buffers; kCFI; H4b. `make bench`'s network half, KVM and real hardware were not run.
 - The nested worktree needs `RUSTFLAGS` set by hand to build the aarch64 kernel (two cargo configs); `make print-rustflags` prints the flags to add.
 
+## PERF - memcpy/memmove/memset on x86_64 (2026-10-31)
+
+Diagnostic re-run on the Contabo VPS (169.58.184.193, KVM, AMD EPYC family 23 model 1), ADR-200 for the rest.
+
+**Diagnostic, main at f0c1908 (nistz256, MULX/ADX X25519), against the first run (g4ecb512)**
+
+| | g4ecb512 | f0c1908 run 1 | run 2 | run 3 |
+|---|---|---|---|---|
+| mutual-TLS handshake | 1.2 ms | 236.7 us | 224.7 us | 242.8 us |
+| X25519 | 146 us | 47.3 us | 49.4 us | 44.1 us |
+| ECDSA sign | 673 us | 35.0 us | 33.6 us | 33.9 us |
+| ECDSA verify | 309 us | 89.1 us | 90.3 us | 85.4 us |
+| AES-GCM | 930 MiB/s | 844 | 813 | 927 |
+| memory copy / read / write MiB/s | 5380 / 10.9k / 8789 | 4387 / 9079 / 6884 | 537 / 7093 / 1221 | 2193 / 5713 / 5983 |
+
+The memory figures vary by up to 10x between runs on this shared host and say nothing about the code; the crypto figures are stable to about 10%. A fourth run with the ADR-200 code: handshake 237.3 us, X25519 48.3, sign 33.7, verify 90.0, AES-GCM 915 MiB/s, copy 4649, read 9967, write 7228 MiB/s. The disk benchmark was skipped at the WIPE prompt each time (nothing typed). Video of a run: scratchpad `vps-diag.mkv` (1280x800, 20 fps, lossless H.264, 72 s; the VNC server sends an update only when the screen changes, so the 1440 frames hold 4 distinct pictures; the first seconds of boot are not in it, the VNC port refuses connections while Contabo reinstalls).
+
+**Where memcpy/memset time went (before)**: see ADR-200. Server side, share of the time: handshake 7.1%, TLS records (rx+tx) 39% (64 B) to 13% (4 KiB), fan-out 17 to 34%.
+
+**Done**: assembly `memcpy`/`memmove`/`memset` (`crates/arch-x86_64/src/mem.rs`), `memprof` build (`crates/kernel/src/memprof.rs`, `--features memprof`, `test=dp-bench`), differential tests.
+
+**After (same boot, best of 15, old to new)**: handshake -17.7% (278.8 to 229.4 us server side); records 64/256/1024/4096 B -26/-20/-16/-7%; fan-out -7% to -34%. Per call, 1 to 64 bytes 55-75 cycles to 7-12.
+
+**Tests**: `cargo test -p urmqtt-arch-x86_64 mem::` 3 passed on Rosetta (x86_64-apple-darwin) and on an AMD EPYC 9354P (Linux); `make check` rc=0 (fmt, typos, arch-leaks, clippy host + aarch64 + x86_64 kernels with and without selftest, `cargo test --workspace`), run in an out-of-tree copy because the aarch64 kernel does not build inside this nested worktree (two cargo configs both set `-Zbranch-protection`); the `memprof` feature itself is not linted. aarch64 untouched (the module is `cfg(target_arch = "x86_64")`).
+
+**Not done**: non-temporal stores (no evidence they help; ADR-200); `make bench`/dp-bench throughput before and after (the memprof A/B stands in for it: the in-guest handshakes/s was not rerun); the aarch64 build was only compiled and linted, not run; the x86 smoke suite was not rerun; Miri cannot run the assembly.
+
 ## H9 — Supply chain and compliance readiness (2026-10-31)
 
 docs/SECURITY-PLAN.md H9. ADR-190 (SBOM), ADR-191 (cargo-vet), ADR-192 (cargo-deny and the scheduled job), ADR-193 (vulnerability handling). No kernel or crate code touched; `deploy/prod/config.toml` untouched.

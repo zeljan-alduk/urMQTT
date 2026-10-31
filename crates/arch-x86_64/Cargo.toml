@@ -14,6 +14,13 @@ bench = false
 [lints]
 workspace = true
 
+[features]
+# Leave `memcpy`/`memmove`/`memset` undefined: the memprof kernel (ADR-200)
+# defines counting ones that call `mem::copy` and `mem::set`.
+no-mem-symbols = []
+# The pre-ADR-200 `rep movs` code, for the memprof A/B.
+mem-baseline = []
+
 [dependencies]
 urmqtt-dispatch = { path = "../dispatch" }
 urmqtt-sync = { path = "../sync" }
