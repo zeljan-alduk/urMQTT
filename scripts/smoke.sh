@@ -1136,6 +1136,12 @@ grow_online() {
     telemetry='telemetry: log recovered in [0-9]+ ms: 600 record\(s\)'
     mkimg "$serve" "serve"
     for accel in $ACCELS; do
+        # aarch64 TCG gives the guest a GICv3 with an ITS, which the kernel does not use
+        # for MSI-X (HVF has the GICv2m frame): the disk is polled, no resize notification.
+        if [[ $ARCH == aarch64 && $accel == tcg ]]; then
+            echo "  - grow-online [tcg] skipped: no MSI-X (ITS) on aarch64 TCG, the grown disk is taken up at the next boot"
+            continue
+        fi
         local base="$OUT/layout-v2-base-$accel.img" disk="$OUT/grow-online-$accel.img"
         local log="$OUT/grow-online-$accel.log" log2="$OUT/grow-online-again-$accel.log" status=0
         if [[ ! -f $base ]]; then
