@@ -33,6 +33,35 @@ pub enum TestFault {
     GeneralProtection,
     /// x86_64: a fault while delivering a fault (#DF, on its IST stack).
     DoubleFault,
+    /// Free a heap block twice (H4: the allocator must refuse and stop).
+    #[cfg(feature = "selftest")]
+    HeapDoubleFree,
+    /// Write to a heap block after freeing it, then reuse it (H4).
+    #[cfg(feature = "selftest")]
+    HeapUaf,
+    /// Write one byte past a heap allocation, then free it (H4).
+    #[cfg(feature = "selftest")]
+    HeapOverflow,
+    /// Overflow a stack buffer into its canary and return (H4).
+    #[cfg(feature = "selftest")]
+    StackSmash,
+    /// A fault with known key bytes in registers and memory, reported under
+    /// the production policy (H4: they must not appear).
+    #[cfg(feature = "selftest")]
+    FaultSecrets,
+    /// The same fault reported unredacted: the control that proves the
+    /// check can see the bytes.
+    #[cfg(feature = "selftest")]
+    FaultSecretsOpen,
+    /// A panic whose message is formatted from known key bytes.
+    #[cfg(feature = "selftest")]
+    PanicSecret,
+    /// Read a heap block through a stale pointer (H4 memory tagging).
+    #[cfg(feature = "selftest")]
+    MteUaf,
+    /// Write one granule past a heap allocation (H4 memory tagging).
+    #[cfg(feature = "selftest")]
+    MteOverflow,
 }
 
 /// Storage self-tests (M11).
@@ -126,6 +155,11 @@ pub struct BootOptions {
     /// `test=crypto-bench` (dev only): throughput of the dispatched
     /// primitives, then continue booting.
     pub crypto_bench: bool,
+    /// `test=keyslab-zero` (dev only, H4): the key slab and the heap poison
+    /// are checked in the guest.
+    pub keyslab_zero: bool,
+    /// `redact` (dev only, H4): apply the production fault policy.
+    pub redact: bool,
     /// `test=simd-irq` (dev only): crypto known answers on every core under
     /// an IPI storm for 10 s.
     pub simd_irq: bool,
@@ -227,6 +261,28 @@ impl BootOptions {
                 "test=gp" => o.test_fault = Some(TestFault::GeneralProtection),
                 "test=df" => o.test_fault = Some(TestFault::DoubleFault),
                 "test=crypto-bench" => o.crypto_bench = true,
+                #[cfg(feature = "selftest")]
+                "test=keyslab-zero" => o.keyslab_zero = true,
+                #[cfg(feature = "selftest")]
+                "test=double-free" => o.test_fault = Some(TestFault::HeapDoubleFree),
+                #[cfg(feature = "selftest")]
+                "test=heap-uaf" => o.test_fault = Some(TestFault::HeapUaf),
+                #[cfg(feature = "selftest")]
+                "test=heap-overflow" => o.test_fault = Some(TestFault::HeapOverflow),
+                #[cfg(feature = "selftest")]
+                "test=stack-smash" => o.test_fault = Some(TestFault::StackSmash),
+                #[cfg(feature = "selftest")]
+                "test=fault-secrets" => o.test_fault = Some(TestFault::FaultSecrets),
+                #[cfg(feature = "selftest")]
+                "test=fault-secrets-open" => o.test_fault = Some(TestFault::FaultSecretsOpen),
+                #[cfg(feature = "selftest")]
+                "test=panic-secret" => o.test_fault = Some(TestFault::PanicSecret),
+                #[cfg(feature = "selftest")]
+                "test=mte-uaf" => o.test_fault = Some(TestFault::MteUaf),
+                #[cfg(feature = "selftest")]
+                "test=mte-overflow" => o.test_fault = Some(TestFault::MteOverflow),
+                #[cfg(feature = "selftest")]
+                "redact" => o.redact = true,
                 "test=simd-irq" => o.simd_irq = true,
                 "diag-confirm=WIPE" => o.diag_auto_confirm = true,
                 "limits=bench" => o.bench_limits = true,

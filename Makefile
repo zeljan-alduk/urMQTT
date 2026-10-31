@@ -44,8 +44,13 @@ SYSROOT     := $(shell rustc --print sysroot 2>/dev/null)
 CARGO_DIR   := $(or $(CARGO_HOME),$(HOME)/.cargo)
 REMAP       := --remap-path-prefix=$(SYSROOT)=/rustc --remap-path-prefix=$(CARGO_DIR)=/cargo \
 	--remap-path-prefix=$(CURDIR)=/urmqtt
-export CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS := $(REMAP)
-export CARGO_TARGET_X86_64_URMQTT_NONE_RUSTFLAGS := $(REMAP)
+# Exploit mitigations compiled into the kernel (H4, ADR-171).
+HARDEN      := -Zstack-protector=strong
+# A position-independent kernel, so that Limine can slide it (KASLR, ADR-173).
+PIE_AARCH64 := -Crelocation-model=pie -Clink-arg=-pie
+PIE_X86_64  := -Crelocation-model=pie -Clink-arg=-pie
+export CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS := $(REMAP) $(HARDEN) $(PIE_AARCH64)
+export CARGO_TARGET_X86_64_URMQTT_NONE_RUSTFLAGS := $(REMAP) $(HARDEN) $(PIE_X86_64)
 # Dev images carry the in-guest benchmark and its TLS client; others do not.
 KERNEL_FEATURES := $(if $(filter dev,$(ENV)),--features selftest)
 export URMQTT_ENV := $(ENV)
@@ -69,6 +74,13 @@ help: ## Show this help
 .PHONY: certs
 certs: ## Generate development certificates into deploy/dev/ (idempotent)
 	@scripts/gen-dev-certs.sh
+
+# The flags the kernel is built with beyond .cargo/config.toml, for builds
+# run from a nested checkout where cargo sees two config files and merges
+# the same rustflags twice (use as RUSTFLAGS="<config flags> $(make -s print-rustflags)").
+.PHONY: print-rustflags
+print-rustflags:
+	@echo '$(REMAP) $(HARDEN) $(if $(filter aarch64,$(ARCH)),$(PIE_AARCH64),$(PIE_X86_64))'
 
 .PHONY: build
 build: $(if $(filter dev,$(ENV)),certs) ## Build the kernel ELF (release, LTO, panic=abort)

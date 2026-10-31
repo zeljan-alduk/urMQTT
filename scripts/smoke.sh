@@ -2191,6 +2191,134 @@ universal_diag() {
     done
 }
 
+# H4 KASLR (ADR-173): the same image booted three times must place every
+# region somewhere else each time. A dev image logs the addresses on one line
+# ("kaslr (dev only): image X (slide S), heap H, bookkeeping B, stacks K,
+# page-table alias A, mmio M"); a region passes if at least two of the three
+# boots differ (the narrowest placement has 9 bits, so three equal boots by
+# chance are 1 in 262144). The line is dev only: no other line may carry a
+# kernel address of those regions.
+kaslr_differs() {
+    local iso="$OUT/kaslr-differs.raw" n=3 accel i
+    mkimg "$iso" "smoke"
+    for accel in $ACCELS; do
+        local data="$OUT/kaslr-differs-$accel.img" ok=1 why=""
+        for i in $(seq "$n"); do
+            local log="$OUT/kaslr-differs-$accel-$i.log" status=0
+            fresh_disk "$iso" "$data"
+            boot "$log" --disk "$data" --accel "$accel" --smp 2 --headless --no-net || status=$?
+            clean "$log" >"$log.clean"
+            if [[ $status -ne 0 ]] || ! grep -q "^URMQTT READY$" "$log.clean"; then
+                ok=0; why="$why boot $i did not reach READY (status $status);"
+            fi
+            grep -E "kaslr \(dev only\): image " "$log.clean" | head -1 \
+                | sed -E 's/.*image (0x[0-9a-f]+) \(slide (0x[0-9a-f]+)\), heap (0x[0-9a-f]+), bookkeeping (0x[0-9a-f]+), stacks (0x[0-9a-f]+), page-table alias (0x[0-9a-f]+), mmio (0x[0-9a-f]+).*/\1 \3 \4 \5 \6 \7/' \
+                >"$OUT/kaslr-differs-$accel-$i.vals"
+            if ! grep -Eq "^(0x[0-9a-f]+ ){5}0x[0-9a-f]+$" "$OUT/kaslr-differs-$accel-$i.vals"; then
+                ok=0; why="$why boot $i printed no placement line;"
+            fi
+        done
+        local names=(image heap bookkeeping stacks alias mmio) f
+        for f in 1 2 3 4 5 6; do
+            local distinct
+            distinct=$(for i in $(seq "$n"); do cut -d' ' -f"$f" "$OUT/kaslr-differs-$accel-$i.vals"; done | sort -u | wc -l | tr -d ' ')
+            # The image slides where the kernel is position independent and the
+            # bootloader applies KASLR: both architectures (ADR-173).
+            if [[ $distinct -lt 2 ]]; then
+                ok=0; why="$why ${names[$((f - 1))]} was the same in all $n boots;"
+            fi
+        done
+        # The production line has bit counts and no addresses.
+        grep -Eq "kaslr: heap [0-9]+ bit\(s\), heap bookkeeping [0-9]+, stacks [0-9]+, page-table alias [0-9]+, mmio [0-9]+; kernel image slid by the bootloader \(seed [0-9]+ bit\(s\)\)" \
+            "$OUT/kaslr-differs-$accel-1.log.clean" || { ok=0; why="$why no entropy line;"; }
+        if [[ $ok -eq 1 ]]; then
+            echo "  ✓ kaslr-differs [$accel]: $n boots, six regions placed differently ($(tr '\n' '|' <"$OUT/kaslr-differs-$accel-1.vals" | cut -d' ' -f1) ...)"
+            PASSED=$((PASSED + 1))
+        else
+            echo "  ✗ kaslr-differs [$accel]:$why"
+            FAILED=$((FAILED + 1))
+        fi
+    done
+}
+
+# H4 (exploit mitigations, ADR-170..175): one suite for both architectures.
+# The hooks are dev-image only (`selftest` feature); the scenarios boot the
+# raw dev image with a test word and read the serial log.
+hardening_suite() {
+    kaslr_differs
+    # Allocator (ADR-170): the allocator stops the VM on each of these.
+    scenario double-free "smoke test=double-free" on \
+        "test mode: triggering HeapDoubleFree" "PANIC: panicked at" "^heap: double free" \
+        "NOT:was NOT detected" "NOT:URMQTT READY"
+    scenario heap-uaf "smoke test=heap-uaf" on \
+        "PANIC: panicked at" "^heap: write after free" "NOT:was NOT detected" "NOT:URMQTT READY"
+    scenario heap-overflow "smoke test=heap-overflow" on \
+        "PANIC: panicked at" "^heap: heap overflow" "NOT:was NOT detected" "NOT:URMQTT READY"
+    # Stack protector (ADR-171): the canary is renewed twice at boot, and an
+    # overrun of a local buffer stops the machine at the function's return.
+    scenario stack-guard-boot "smoke" on \
+        "hardening: boot seed of [0-9]+ bit\(s\)" "hardening: stack canary renewed from the CSPRNG \(56 bits\)" \
+        "^URMQTT READY$" "$NO_FAULT" "NOT:STACK SMASHING"
+    scenario stack-smash "smoke test=stack-smash" on \
+        "test mode: triggering StackSmash" "test: the stack canary is not the build-time constant: true" \
+        "!!! STACK SMASHING DETECTED" "NOT:was NOT detected" "NOT:URMQTT READY"
+    # Fault policy (ADR-172): under the production policy a fault report has no
+    # register, no stack or heap content and no absolute address; the open
+    # twin of each test proves the grep can see the key when it is printed.
+    scenario fault-secrets "smoke redact test=fault-secrets" on \
+        "test mode: triggering FaultSecrets" "!!! EXCEPTION: " \
+        "pc = kernel\+0x[0-9a-f]+; registers, stack and memory withheld \(production policy\)" \
+        "NOT:5345435245544b45|595f544553545f31|SECRETKE|Y_TEST_" "NOT:(x[0-9]+|R[A-Z0-9]+)=0x[0-9a-f]{16}" \
+        "NOT:FAR=0x|CR2=0x|ESR=0x|RIP=0x|RSP=0x" "NOT:URMQTT READY"
+    scenario fault-secrets-open "smoke test=fault-secrets-open" on \
+        "test mode: triggering FaultSecretsOpen" "!!! EXCEPTION: " \
+        "0x5345435245544b45" "0x595f544553545f31" "0x5345435245544b33" "0x595f544553545f33" "NOT:URMQTT READY"
+    scenario panic-secret "smoke redact test=panic-secret" on \
+        "!!! PANIC: panicked at " "hardtest.rs" "message withheld: it has formatted arguments" \
+        "NOT:5345435245544b45|595f544553545f31|SECRETKE|test panic carrying a key" "NOT:URMQTT READY"
+    scenario panic-secret-open "smoke test=panic-secret" on \
+        "!!! PANIC: panicked at " "test panic carrying a key: .*5345435245544b45" "NOT:URMQTT READY"
+    scenario double-free-prod "smoke redact test=double-free" on \
+        "!!! PANIC: panicked at " "^heap: double free" "NOT:message withheld" "NOT:URMQTT READY"
+    scenario keyslab-zero "smoke test=keyslab-zero" on \
+        "keyslab-zero: 8 key\(s\) stored and read back in place \(true\), freed; 16 free slot\(s\) all zero \(true\); stale handles refused \(true\): ok" \
+        "keyslab-zero: a freed 1000-byte heap block reads back as poison 0xdf \(true\), no byte of the old contents left \(true\): ok" \
+        "NOT:FAILED" "^URMQTT READY$" "$NO_FAULT"
+    # Memory tagging (ADR-174): aarch64 under TCG only (QEMU's virt machine
+    # with mte=on; HVF does not implement FEAT_MTE).
+    if [[ $ARCH == aarch64 && " $ACCELS " == *" tcg "* ]]; then
+        local MTE_ON='mte: synchronous tag checking on; live heap allocations up to [0-9]+ KiB carry a random tag'
+        ACCELS=tcg URMQTT_MTE=1 scenario mte-boot "smoke" on \
+            "cpu features: .* mte=true" "$MTE_ON" "selftest: frames ok" \
+            "^URMQTT READY$" "$NO_FAULT" "NOT:tag check fault"
+        ACCELS=tcg URMQTT_MTE=1 scenario mte-uaf "smoke test=mte-uaf" on \
+            "$MTE_ON" "test mode: triggering MteUaf" \
+            "EC=0x25 data abort \(same EL\), read, synchronous tag check fault" \
+            "NOT:was NOT detected" "NOT:URMQTT READY"
+        ACCELS=tcg URMQTT_MTE=1 scenario mte-overflow "smoke test=mte-overflow" on \
+            "write inside the last granule was accepted" \
+            "EC=0x25 data abort \(same EL\), write, synchronous tag check fault" \
+            "NOT:was NOT detected" "NOT:URMQTT READY"
+        # The whole broker under tag checking: TLS handshakes, MQTT, the
+        # database. A false positive anywhere would be a tag check fault.
+        ACCELS=tcg URMQTT_MTE=1 SERVICE_PORT=8883 service mte-mqtt-tls "serve" $PORT "TLS 1.3 listener on port 8883" \
+            python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" -- \
+            "$MTE_ON" "client: pubsub-wildcard ok" "client: retained ok" "client: qos1-after-reconnect ok" \
+            "client: tls-wrong-ca-rejected ok" "tls: device-001 authenticated \(TLS13_" \
+            "NOT:FAILED" "NOT:tag check fault" "$NO_FAULT"
+    else
+        echo "  - mte-*: skipped (needs aarch64 under TCG; HVF and x86_64 have no FEAT_MTE)"
+    fi
+}
+
+# SMOKE_ONLY=hardening: the H4 scenarios of this architecture.
+if [[ ${SMOKE_ONLY:-} == hardening && $ARCH != universal ]]; then
+    hardening_suite
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=time: just the wall-clock scenarios (H7, T1).
 if [[ ${SMOKE_ONLY:-} == time && $ARCH != universal ]]; then
     time_before_build
@@ -2326,7 +2454,7 @@ if [[ $ARCH == x86_64 ]]; then
         "NOT:URMQTT BOOT" "NOT:URMQTT READY"
     x86_scenario x86-fault-pf-null q35 uefi - "smoke test=null" \
         "EXCEPTION: #PF page fault" "page not present, read, supervisor mode" \
-        "CR2=0x0000000000000008" "RIP=0xffffffff8" "RAX=0x[0-9a-f]+ RBX=" "R15=0x" \
+        "CR2=0x0000000000000008" "RIP=0xffffffff[89a-f]" "RAX=0x[0-9a-f]+ RBX=" "R15=0x" \
         "on IST stack 4" "FAR is in: lower half" "fatal exception, stopping" "NOT:URMQTT READY"
     x86_scenario x86-fault-ud pc bios - "smoke test=undef" \
         "EXCEPTION: #UD invalid opcode" "vector=6" "on the interrupted stack" "NOT:URMQTT READY"
@@ -2463,7 +2591,7 @@ scenario wx-write-text "smoke test=write-text" on \
 scenario wx-exec-heap "smoke test=exec-heap" on \
     "instruction abort \(same EL\), permission fault, level 3" "NOT:URMQTT READY"
 scenario stack-overflow "smoke test=stack-overflow" on \
-    "EXCEPTION: synchronous, current EL, SP0" "data abort \(same EL\), write, translation fault" \
+    "EXCEPTION: synchronous, current EL, SP0" "data abort \(same EL\), (read|write), translation fault" \
     "FAR is in: main stack guard page \(stack overflow\)" "NOT:URMQTT READY"
 scenario null-deref "smoke test=null" on \
     "translation fault, level 0" "FAR is in: lower half" "NOT:URMQTT READY"

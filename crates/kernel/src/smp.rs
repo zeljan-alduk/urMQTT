@@ -199,6 +199,11 @@ extern "C" fn ap_main(id: u64) -> ! {
         cpu::halt();
     }
     tick::start_secondary();
+    // Memory tagging: this CPU's tag generator (the checking registers were
+    // copied from the boot CPU).
+    if crate::hardening::mte_active() {
+        crate::boot::arch_mte_init_cpu(id);
+    }
     // Release: publishes this CPU's per-CPU setup to the boot CPU.
     me.online.store(true, Ordering::Release);
     info!(

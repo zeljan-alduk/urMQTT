@@ -21,7 +21,9 @@ use crate::boot_aarch64 as arch;
 #[cfg(target_arch = "x86_64")]
 use crate::boot_x86 as arch;
 use crate::cmdline::{BootOptions, TestFault};
-use crate::{VERSION, console, devices, irq, layout, memory, power, selftest, smp, tick, trap, vm};
+use crate::{
+    VERSION, console, devices, hardening, irq, layout, memory, power, selftest, smp, tick, trap, vm,
+};
 pub(crate) use arch::{ARCH, PRIVILEGE_LABEL};
 
 #[used]
@@ -114,6 +116,8 @@ struct Stage2 {
     options: BootOptions,
     platform: Option<urmqtt_platform::PlatformInfo>,
     boot_entropy: [u64; ENTROPY_VALUES as usize],
+    /// Key material derived from `boot_entropy` (wiped after use).
+    seed: hardening::Seed,
     pac_key: Option<(u64, u64)>,
     cpus: u64,
     built: vm::Built,
@@ -162,6 +166,16 @@ extern "C" fn urmqtt_kmain() -> ! {
 
     let dev = urmqtt_config::CONFIG.env == "dev";
     let early = discover(&mem);
+    // Where every region of the kernel's address space goes this boot
+    // (ADR-173), before anything is mapped. The seed also keys the allocator
+    // and the stack canary in stage 2.
+    let boot_entropy = bootloader_entropy();
+    let seed = hardening::Seed::new(&boot_entropy);
+    let mut draw = 0u64;
+    let placement = layout::randomise(1 << 30, || {
+        draw += 1;
+        seed.key(hardening::domain::LAYOUT.wrapping_add(draw))
+    });
     let mmio_ok = memory::init_early_mmio(&mem);
     // The UART (AArch64) or the time base (x86), mapped in the bootloader's
     // tables; both are replayed into the kernel's.
@@ -184,6 +198,9 @@ extern "C" fn urmqtt_kmain() -> ! {
 
     let options = BootOptions::parse(CMDLINE.response().map_or("", |r| r.cmdline()), dev);
     power::set_smoke(options.smoke);
+    if options.redact {
+        hardening::fault_policy::force();
+    }
     if let Some(us) = options.slow_log_us {
         urmqtt_log::set_sink_delay_us(us);
     }
@@ -310,6 +327,7 @@ extern "C" fn urmqtt_kmain() -> ! {
         exe.virtual_base,
         arch::bti(&features),
         heap_mb,
+        arch::heap_tagged(&features),
     ) {
         Ok(b) => b,
         Err(e) => fatal_fmt(format_args!(
@@ -322,6 +340,7 @@ extern "C" fn urmqtt_kmain() -> ! {
         (built.free_frames as u64 * 4096) >> 20
     );
 
+    hardening::log_placement(&placement, &seed, exe.virtual_base, dev);
     let pac_key = arch::pac_key(&features);
     let pac_on = pac_key.is_some();
     vm::activate();
@@ -330,7 +349,8 @@ extern "C" fn urmqtt_kmain() -> ! {
     *STAGE2.lock() = Some(Stage2 {
         options,
         platform: early,
-        boot_entropy: bootloader_entropy(),
+        boot_entropy,
+        seed,
         pac_key,
         cpus: cpus as u64,
         built,
@@ -344,6 +364,16 @@ extern "C" fn urmqtt_kmain() -> ! {
     // SAFETY: both stacks were mapped by `vm::build` and are 16-byte aligned
     // at the top; this frame (on the bootloader's stack) is abandoned.
     unsafe { cpu::switch_to(main_top, exc_top, 0, kmain_stage2, pac_on) }
+}
+
+/// The memory-tag generator of application processor `id` (ADR-174).
+pub(crate) fn arch_mte_init_cpu(id: u64) {
+    arch::mte_init_cpu(mte_seed(id));
+}
+
+/// A 16-bit seed for a CPU's memory-tag generator.
+pub(crate) fn mte_seed(cpu: u64) -> u16 {
+    (hardening::mix(time::uptime_ns() ^ cpu.rotate_left(32) ^ 0x4d54_4500) & 0xffff) as u16
 }
 
 /// The bootloader's entropy values (zero if none), for the CSPRNG pool.
@@ -367,15 +397,36 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     let Some(mut s) = STAGE2.lock().take() else {
         fatal("stage 2 entered without state");
     };
+    // First thing: a stack canary that is not the build-time constant. Safe
+    // here because this function never returns (ADR-171).
+    let mut seed = s.seed;
+    hardening::stack_guard::renew(seed.key(hardening::domain::GUARD));
     smp::init_boot_cpu();
     vm::retire_early_frames(s.early_frames);
-    if let Err(e) = vm::init_heap(s.built.heap_order, s.built.heap_meta_words) {
+    if let Err(e) = vm::init_heap(
+        s.built.heap_order,
+        s.built.heap_meta_words,
+        seed.key(hardening::domain::BUDDY),
+        seed.key(hardening::domain::CACHE),
+    ) {
         fatal_fmt(format_args!("heap init failed: {e:?}"));
     }
+    seed.log();
+    // Every key is derived: the seed words do not stay in memory.
+    seed.wipe();
+    s.seed.wipe();
     info!(
-        "vm: running on kernel stacks (main {} KiB at {:#x}, exception {} KiB), {}",
+        "hardening: heap poison-on-free, double/invalid-free checks, obfuscated free lists, canary gaps"
+    );
+    info!(
+        "vm: running on kernel stacks (main {} KiB{}, exception {} KiB), {}",
         layout::MAIN_STACK_SIZE >> 10,
-        s.built.main_top,
+        // Where the stacks are is what KASLR hides (ADR-173): dev only.
+        if urmqtt_config::CONFIG.env == "dev" {
+            alloc::format!(" at {:#x}", s.built.main_top)
+        } else {
+            alloc::string::String::new()
+        },
         layout::EXC_STACK_SIZE >> 10,
         arch::protection_summary(&s.features),
     );
@@ -386,6 +437,13 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         fatal(msg);
     }
     vm::enable_heap_caches();
+    // Memory tagging (ADR-174): checking on for this CPU (the others copy
+    // its registers when they start), then live allocations are tagged.
+    if arch::enable_mte(&s.features, mte_seed(0)) {
+        hardening::mte_on();
+        #[cfg(target_arch = "aarch64")]
+        vm::enable_heap_tagging();
+    }
     // Power-on self-test of the backends sealed in stage 1 (X0b), before
     // anything uses them: fail closed.
     match urmqtt_tls::kat::run() {
@@ -448,6 +506,14 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         }
     }
     s.boot_entropy = [0; ENTROPY_VALUES as usize];
+    // The CSPRNG exists: renew the stack canary from it. Still safe: nothing
+    // that returns is on the stack below this function.
+    let mut canary = [0u8; 8];
+    if urmqtt_tls::rng::fill_global(&mut canary).is_ok() {
+        hardening::stack_guard::renew(u64::from_le_bytes(canary));
+        info!("hardening: stack canary renewed from the CSPRNG (56 bits)");
+    }
+    urmqtt_mm::keyslab::wipe(&mut canary);
 
     // Application processors need their stacks mapped before the lock.
     smp::register_ipis();
@@ -470,6 +536,10 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
 
     if let Some(fault) = s.options.test_fault {
         run_test_fault(fault, s.features);
+    }
+    #[cfg(feature = "selftest")]
+    if s.options.keyslab_zero {
+        crate::hardtest::keyslab_zero();
     }
     if s.options.crypto_bench {
         #[cfg(feature = "selftest")]
@@ -668,7 +738,14 @@ fn smp_bringup(s: &mut Stage2) {
     // A GICv2 routes by an 8-bit CPU mask; an xAPIC by an 8-bit ID.
     let max = irq::max_cpus().min(smp::MAX_CPUS);
     let started = smp::start_aps(mp.cpus(), smp::bsp_hw_id(mp), s.pac_key, max);
-    // The key is now in every core's registers; drop the copies in memory.
+    // The key is now in every core's registers; wipe the copies in memory
+    // (volatile: a plain `= None` would only change the discriminant).
+    if let Some(k) = s.pac_key.as_mut() {
+        // SAFETY: valid, exclusive references to the two key words.
+        unsafe { core::ptr::write_volatile(&mut k.0, 0) };
+        // SAFETY: as above.
+        unsafe { core::ptr::write_volatile(&mut k.1, 0) };
+    }
     s.pac_key = None;
     let n = smp::count();
     let up = smp::wait_online(n, AP_TIMEOUT_NS);
@@ -959,6 +1036,16 @@ fn run_test_fault(fault: TestFault, features: Features) {
         TestFault::ExecHeap => selftest::exec_heap(),
         TestFault::StackOverflow => selftest::stack_overflow(),
         TestFault::NullDeref => trap::probe_read(0x8),
+        #[cfg(feature = "selftest")]
+        TestFault::HeapDoubleFree
+        | TestFault::HeapUaf
+        | TestFault::HeapOverflow
+        | TestFault::StackSmash
+        | TestFault::FaultSecrets
+        | TestFault::FaultSecretsOpen
+        | TestFault::PanicSecret
+        | TestFault::MteUaf
+        | TestFault::MteOverflow => crate::hardtest::run(fault),
         // Handled by the architecture's `run_fault`.
         TestFault::DataAbort
         | TestFault::Pac

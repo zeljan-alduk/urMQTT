@@ -66,3 +66,20 @@ pub fn branch_to_non_landing_pad() -> bool {
     // SAFETY: test mode; returns only if BTI did not fire.
     unsafe { urmqtt_bti_violation() == 1 }
 }
+
+/// Loads from `addr` (an address that faults) with six general-purpose
+/// registers holding `regs`, so the fault report can be checked for them
+/// (H4 fault policy, dev tests only).
+pub fn load_with_registers(addr: u64, regs: &[u64; 6]) {
+    // SAFETY: deliberately faulting load in test mode; the exception
+    // handler reports it and does not return here.
+    unsafe {
+        core::arch::asm!(
+            "ldr xzr, [{p}]",
+            p = in(reg) addr,
+            in("x20") regs[0], in("x21") regs[1], in("x22") regs[2],
+            in("x23") regs[3], in("x24") regs[4], in("x25") regs[5],
+            options(nostack, readonly)
+        );
+    }
+}

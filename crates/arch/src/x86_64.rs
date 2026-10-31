@@ -66,7 +66,7 @@ pub mod trap {
     #[cfg(target_os = "none")]
     pub use super::imp::trap::{
         RET_INSN, branch_to_non_landing_pad, breakpoint, double_fault, forged_return,
-        general_protection, install, set_handler, undefined_instruction,
+        general_protection, install, load_with_registers, set_handler, undefined_instruction,
     };
 }
 

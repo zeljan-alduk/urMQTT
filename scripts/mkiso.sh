@@ -156,6 +156,7 @@ if [[ $UNIVERSAL -eq 1 ]]; then
             echo "/$title"
             echo "    if_arch: $arch"
             echo "    protocol: limine"
+            echo "    kaslr: yes"
             # shellcheck disable=SC2016 # ${ARCH} is Limine's macro
             echo "    path: boot():/boot/urmqtt-"'${ARCH}'".elf#$hash"
             if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then printf '    resolution: %s\n' "$URMQTT_RESOLUTION"; fi
@@ -281,6 +282,7 @@ if [[ $ARCH == x86_64 ]]; then
         echo
         echo "/urMQTT"
         echo "    protocol: limine"
+        echo "    kaslr: yes"
         echo "    path: boot():/boot/urmqtt#$HASH"
         if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then printf '    resolution: %s\n' "$URMQTT_RESOLUTION"; fi
         X86_CMDLINE=$CMDLINE
@@ -331,6 +333,7 @@ hash_mismatch_panic: yes
 
 /urMQTT
     protocol: limine
+    kaslr: yes
     path: boot():/boot/urmqtt#$HASH
 EOF
 if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then
@@ -380,6 +383,7 @@ fi
     echo
     echo "/urMQTT"
     echo "    protocol: limine"
+    echo "    kaslr: yes"
     echo "    path: boot():/boot/urmqtt#$HASH"
     if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then
         printf '    resolution: %s\n' "$URMQTT_RESOLUTION"
@@ -390,6 +394,7 @@ fi
     echo
     echo "/Install urMQTT on this machine's disk"
     echo "    protocol: limine"
+    echo "    kaslr: yes"
     echo "    path: boot():/boot/urmqtt#$HASH"
     printf '    cmdline: %s\n' "$INSTALL_CMDLINE"
     echo "    module_path: boot():/esp.img#$ESP_HASH"
@@ -397,6 +402,7 @@ fi
         echo
         echo "/Diagnostic: hardware detection and benchmarks"
         echo "    protocol: limine"
+        echo "    kaslr: yes"
         echo "    path: boot():/boot/urmqtt#$HASH"
         if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then
             printf '    resolution: %s\n' "$URMQTT_RESOLUTION"

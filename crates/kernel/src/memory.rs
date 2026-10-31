@@ -15,7 +15,7 @@ use urmqtt_platform::acpi::PhysMemory;
 use urmqtt_platform::fdt::Fdt;
 use urmqtt_sync::sync::SpinLock;
 
-use crate::layout::{MMIO_BASE, MMIO_SIZE};
+use crate::layout::{MMIO_SIZE, mmio_base};
 
 /// Frames for page tables extending the bootloader's tables before the
 /// frame allocator exists (MMIO mappings only).
@@ -195,7 +195,7 @@ pub fn init_early_mmio(mem: &BootMemory) -> bool {
     paging::merge_memory_attributes();
     let root = paging::kernel_root();
     let mut tables = HhdmTables { hhdm: mem.hhdm };
-    let slot = paging::index(MMIO_BASE, 0);
+    let slot = paging::index(mmio_base(), 0);
     if Mapper::new(&mut tables, root)
         .free_l0_slot(slot..slot + 1)
         .is_none()
@@ -212,7 +212,7 @@ pub fn init_early_mmio(mem: &BootMemory) -> bool {
             len: 0,
         }; MAX_MMIO_MAPPINGS],
         count: 0,
-        next: MMIO_BASE,
+        next: mmio_base(),
         hhdm: mem.hhdm,
         early: Some((root, BumpFrames::new(base, len))),
     });
@@ -236,7 +236,7 @@ pub fn map_mmio(pa: u64, len: u64) -> Result<u64, MapError> {
     } else {
         m.next
     };
-    if va + size > MMIO_BASE + MMIO_SIZE - PAGE_SIZE || m.count >= MAX_MMIO_MAPPINGS {
+    if va + size > mmio_base() + MMIO_SIZE - PAGE_SIZE || m.count >= MAX_MMIO_MAPPINGS {
         return Err(MapError::OutOfFrames);
     }
     let hhdm = m.hhdm;
@@ -291,7 +291,7 @@ pub fn retire_early_mmio() {
 
 /// An address in the MMIO window that is never mapped (for fault tests).
 pub fn unmapped_mmio_probe() -> u64 {
-    MMIO_BASE + MMIO_SIZE - PAGE_SIZE
+    mmio_base() + MMIO_SIZE - PAGE_SIZE
 }
 
 /// Number of MMIO mappings and bytes mapped.

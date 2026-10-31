@@ -70,10 +70,13 @@ pub(crate) fn early_hw(platform: Option<&PlatformInfo>, mmio_ok: bool, dev: bool
 impl EarlyHw {
     pub(crate) fn log(&self, _platform: Option<&PlatformInfo>) {
         if let Some(va) = self.uart_va {
-            info!(
-                "console: pl011 at {:#x} mapped at {va:#x}",
-                self.uart.map_or(0, |u| u.base)
-            );
+            let base = self.uart.map_or(0, |u| u.base);
+            // The virtual address says where the MMIO window is (ADR-173).
+            if urmqtt_config::CONFIG.env == "dev" {
+                info!("console: pl011 at {base:#x} mapped at {va:#x}");
+            } else {
+                info!("console: pl011 at {base:#x}");
+            }
         }
         if self.el2 {
             warn!("entered at EL2 (VHE): untested configuration, PSCI only via SMC");
@@ -169,6 +172,37 @@ pub(crate) fn poll_scancode() -> Option<u8> {
 /// The firmware type Limine reports (UEFI on Arm).
 pub(crate) fn firmware_kind(_t: u64) -> &'static str {
     "UEFI (aarch64)"
+}
+
+/// Whether the heap is mapped as tagged memory (ADR-174): the CPU has
+/// FEAT_MTE2.
+pub(crate) fn heap_tagged(f: &Features) -> bool {
+    f.mte2
+}
+
+/// Turns tag checking on for the boot CPU. Returns whether it is on.
+pub(crate) fn enable_mte(f: &Features, seed: u16) -> bool {
+    if !f.mte2 {
+        info!("mte: not available (the CPU lacks FEAT_MTE2): heap allocations are not tagged");
+        return false;
+    }
+    // SAFETY: FEAT_MTE2 is implemented, and the heap was mapped Normal
+    // Tagged by `vm::build` (`heap_tagged`).
+    unsafe { urmqtt_arch::mte::enable_checking(urmqtt_arch::mte::Mode::Sync) };
+    // SAFETY: as above.
+    unsafe { urmqtt_arch::mte::init_cpu(seed) };
+    info!(
+        "mte: synchronous tag checking on; live heap allocations up to {} KiB carry a random tag (1..14), free memory tag 0",
+        urmqtt_mm::cached::TAG_MAX >> 10
+    );
+    true
+}
+
+/// The tag generator of an application processor.
+pub(crate) fn mte_init_cpu(seed: u16) {
+    // SAFETY: only called when the boot CPU found FEAT_MTE2 and turned
+    // checking on.
+    unsafe { urmqtt_arch::mte::init_cpu(seed) };
 }
 
 pub(crate) fn bti(f: &Features) -> bool {

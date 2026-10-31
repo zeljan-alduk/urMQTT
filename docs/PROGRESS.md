@@ -1,4 +1,26 @@
+## H4 — Exploit mitigations (2026-10-31)
 
+SECURITY-PLAN H4, in the order of the plan, one commit and one ADR per step. First release is VPS (KVM) only: **H4b (IOMMU) is deferred** (bare metal), recorded in ADR-176.
+
+**Steps (one commit, one ADR each; steps 4 and 5 share a commit)**
+
+1. Allocator hardening, key slab, zeroisation (ADR-170): poison on free (used part, up to 16 KiB in the buddy heap), checked on reuse; double/invalid-free detection (allocation bitmap, ancestor free bits, per-block tags in the per-CPU caches); XOR-obfuscated free-list links with safe unlinking; canary gap behind large allocations; `KeySlab` (volatile zero on free, generation-checked handles); `Csprng` wiped on drop; PAC key copy wiped. Boot seed from the bootloader's entropy, the CPU's RNG and the counter.
+2. Stack protector (ADR-171): `-Zstack-protector=strong` (1315 protected functions), `-fstack-protector-strong` for SQLite, one `__stack_chk_guard` renewed from the seed and then from the CSPRNG inside `kmain_stage2`, `.got` placed in the data segment.
+3. Fault policy (ADR-172): production reports have no registers, memory, absolute addresses or formatted panic messages; dev unchanged; `redact` word and open controls; hooks `selftest`-only, `scripts/check-prod-hooks.sh`.
+4. KASLR (ADR-173): PIE kernel on both architectures slid by Limine (30/30 and 16/16 distinct slides, about 19 bits), random places for heap (12 bits), bookkeeping, stacks, page-table alias (21 each) and MMIO window (9); logs show bits, addresses in dev only.
+5. MTE (ADR-174): heap mapped Normal Tagged, synchronous checking, random tags 1..14, free = tag 0; tested under TCG `mte=on` (`URMQTT_MTE=1`).
+6. kCFI (ADR-175): evaluated, not adopted (rustc ICE on `der`/`spki`). H4b IOMMU deferred (ADR-176).
+
+**Tests**
+
+- `cargo test -p urmqtt-mm` 40 (was 12), `crates/tls/tests/zeroize.rs`.
+- Smoke `SMOKE_ONLY=hardening` (see SECURITY-PLAN H4 status): aarch64 HVF and x86_64 TCG; MTE scenarios aarch64 TCG. The default suite ran on the PIE kernel: aarch64 HVF 43 passed and 1 stale pattern (`stack-overflow` faults on a read now; pattern fixed), x86_64 TCG 23 passed before it was stopped (TCG TLS scenarios take ~15 min each) and 1 stale pattern (`RIP=0xffffffff8`; fixed).
+- Handshake path (`dp-bench`, aarch64 HVF, 1/2/4 cores): base 1941/3854/7620; allocator 1898/3768/7429; plus stack protector 1845/3672/7243; with PIE and the tagging code (loaded machine, noisy) about 1800/3480/6750.
+
+**Not done**
+
+- HHDM base randomisation; hardware heap guard pages; asynchronous MTE and a production switch; tagging of the SQLite arena and DMA buffers; kCFI; H4b. `make bench`'s network half, KVM and real hardware were not run.
+- The nested worktree needs `RUSTFLAGS` set by hand to build the aarch64 kernel (two cargo configs); `make print-rustflags` prints the flags to add.
 
 ## H9 — Supply chain and compliance readiness (2026-10-31)
 

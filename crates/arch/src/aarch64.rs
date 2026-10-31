@@ -36,6 +36,12 @@ pub mod msi {
     pub use super::imp::msi::{Frame, TYPER};
 }
 
+/// Memory tagging (FEAT_MTE2; ADR-174).
+#[cfg(target_os = "none")]
+pub mod mte {
+    pub use super::imp::mte::{Mode, clear, enable_checking, init_cpu, retag};
+}
+
 /// Per-CPU identity and secondary-CPU start.
 #[cfg(target_os = "none")]
 pub mod percpu {
@@ -76,7 +82,8 @@ pub mod trap {
     pub use super::imp::esr::Vector;
     pub use super::imp::exception::{Event, Registers, TrapFrame, install, set_handler};
     pub use super::imp::faults::{
-        RET_INSN, branch_to_non_landing_pad, breakpoint, forged_return, undefined_instruction,
+        RET_INSN, branch_to_non_landing_pad, breakpoint, forged_return, load_with_registers,
+        undefined_instruction,
     };
 }
 

@@ -282,7 +282,8 @@ pub const RET_INSN: u32 = 0xc3;
 
 #[cfg(target_os = "none")]
 pub use crate::isr::{
-    breakpoint, double_fault, general_protection, install, set_handler, undefined_instruction,
+    breakpoint, double_fault, general_protection, install, load_with_registers, set_handler,
+    undefined_instruction,
 };
 
 #[cfg(target_os = "none")]

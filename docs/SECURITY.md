@@ -221,6 +221,16 @@ writes the raw boot image onto the machine's disk.
 - W^X with locked page tables, guard pages, PAC and BTI when the CPU has them,
   no dynamic code (smoke: `wx-write-text`, `wx-exec-heap`, `stack-overflow`,
   `pac-forgery`, `bti-violation`, `null-deref`).
+- Exploit mitigations (H4, ADR-170 to ADR-176): the heap poisons what it frees,
+  refuses double and invalid frees, hides its free lists behind a per-boot key
+  and puts a canary behind large allocations; secrets live in a key slab that
+  wipes on free; every function with an array or a taken address has a stack
+  canary (Rust and SQLite) from the CSPRNG; the kernel image (both
+  architectures) and every region of the address space get a random place at
+  every boot, and logs show bit counts, never addresses; a production fault or
+  panic report has no register, memory or formatted message; on aarch64 with
+  FEAT_MTE2 heap allocations are tagged. The test hooks are compiled out of
+  production images (`scripts/check-prod-hooks.sh`). Smoke: `SMOKE_ONLY=hardening`.
 - SQLite: statements are fixed at compile time; defensive mode on; extensions
   and ATTACH compiled out. There is no network-reachable SQL.
 
@@ -322,5 +332,9 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 | Syslog and statsd are plain UDP. | No TLS sink in the kernel. | Collectors on a private network only. |
 | No hardware RNG on the cloud (Ampere Altra has no `RNDR`; virtio-rng may be absent). | Then the CSPRNG is seeded from CPU timing jitter, which is weaker evidence than a hardware source. | Health tests and a conservative estimate gate it (ADR-038), and it is logged at boot. Prefer clouds with virtio-rng; `entropy.fallback = "none"` refuses to boot without one. |
 | Side channels in the crypto. | RustCrypto implementations are designed to be constant-time. The tag checks and our one secret comparison are checked by dudect-style timing tests (`make ct`, H2), but the asymmetric code (P-256, X25519, Ed25519) is not measured here. | ChaCha20-Poly1305 is offered alongside AES-128-GCM; docs/CRYPTO.md lists what is checked. |
+| The HHDM (direct map of all RAM) has a fixed base, so memory reachable through it (the heap's frames, packet buffers, the SQLite arena) is at a known address. | Randomising it means placing the kernel's windows around it (ADR-173). | The kernel image, the heap, the stacks and the page-table alias are randomised; the allocator checks of ADR-170 stay. |
+| No forward-edge control-flow integrity on the Rust and C indirect calls. | kCFI crashes the pinned compiler on the dependency graph (ADR-175). | BTI on aarch64, W^X, PAC, KASLR. |
+| No memory tagging on x86_64, on HVF or on most clouds; the SQLite arena and DMA buffers are never tagged. | FEAT_MTE2 is rare in VPS hardware (ADR-174). | The software checks of ADR-170. |
+| No DMA isolation (IOMMU) on bare metal. | Deferred with bare metal (ADR-176); irrelevant to a VPS, whose devices are the hypervisor's. | None needed for a VM. |
 | The hypervisor sees everything. | Out of scope. | Choose the host. |
 | 100k and 1M connections are not measured on the development host. | QEMU user networking on macOS stops near 10 240 sockets. | The per-connection footprint is flat from 1k to 10k (ADR-034); the storm test scales the heap down instead of the clients up. |

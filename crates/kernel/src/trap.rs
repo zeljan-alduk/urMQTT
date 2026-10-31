@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use urmqtt_arch::trap::{self, Event, TrapFrame, Vector};
 use urmqtt_log::emergency;
 
-use crate::power;
+use crate::{hardening, power};
 
 static IN_FATAL: AtomicBool = AtomicBool::new(false);
 
@@ -43,7 +43,14 @@ pub fn handle(frame: &mut TrapFrame, vector: Vector) {
     {
         emergency(format_args!("    FAR is in: {what} (cpu {cpu})\n"));
     }
-    emergency(format_args!("{}", frame.registers()));
+    if hardening::fault_policy::redact() {
+        emergency(format_args!(
+            "    pc = {}; registers, stack and memory withheld (production policy)\n",
+            hardening::fault_policy::ImageOffset(frame.pc())
+        ));
+    } else {
+        emergency(format_args!("{}", frame.registers()));
+    }
     emergency(format_args!("!!! fatal exception, stopping\n"));
     power::fatal();
 }
@@ -52,7 +59,22 @@ pub fn handle(frame: &mut TrapFrame, vector: Vector) {
 fn panic(info: &PanicInfo<'_>) -> ! {
     // Relaxed: see `handle`.
     if !IN_FATAL.swap(true, Ordering::Relaxed) {
-        emergency(format_args!("\n!!! PANIC: {info}\n"));
+        if hardening::fault_policy::redact() {
+            // The location, and the message only if it is a fixed string:
+            // a formatted one carries whatever its caller formatted.
+            match info.location() {
+                Some(l) => emergency(format_args!("\n!!! PANIC: panicked at {l}:\n")),
+                None => emergency(format_args!("\n!!! PANIC: panicked at (unknown):\n")),
+            }
+            match info.message().as_str() {
+                Some(m) => emergency(format_args!("{m}\n")),
+                None => emergency(format_args!(
+                    "(message withheld: it has formatted arguments; production policy)\n"
+                )),
+            }
+        } else {
+            emergency(format_args!("\n!!! PANIC: {info}\n"));
+        }
     }
     power::fatal()
 }

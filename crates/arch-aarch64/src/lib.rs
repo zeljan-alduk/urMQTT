@@ -36,6 +36,8 @@ pub mod irq;
 #[cfg(target_os = "none")]
 pub mod mmu;
 #[cfg(target_os = "none")]
+pub mod mte;
+#[cfg(target_os = "none")]
 pub mod pac;
 #[cfg(target_os = "none")]
 pub mod percpu;

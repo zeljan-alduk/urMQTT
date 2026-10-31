@@ -20,6 +20,7 @@ extern crate alloc;
 pub mod buddy;
 pub mod cached;
 pub mod frames;
+pub mod keyslab;
 pub mod slab;
 
 pub use cached::CachedHeap;
@@ -76,6 +77,27 @@ pub struct LockedHeap {
     inner: SpinLock<Option<buddy::BuddyHeap>>,
 }
 
+/// A hardening check failed (ADR-170): the heap is damaged or was misused.
+/// Raised after the heap lock is released, so the panic handler can print.
+#[cold]
+#[inline(never)]
+#[allow(clippy::panic)]
+pub fn heap_fault(f: buddy::HeapFault) -> ! {
+    // Fixed strings, one per fault: a formatted message would be withheld
+    // by the production fault policy (ADR-172), and these name no data.
+    match f {
+        buddy::HeapFault::DoubleFree => panic!("heap: double free"),
+        buddy::HeapFault::InvalidFree => {
+            panic!("heap: invalid free (not the start of a live allocation of that size)")
+        }
+        buddy::HeapFault::FreeListCorrupted => panic!("heap: free list corrupted"),
+        buddy::HeapFault::WriteAfterFree => panic!("heap: write after free (poison overwritten)"),
+        buddy::HeapFault::RedZoneDamaged => {
+            panic!("heap: heap overflow (red zone behind a large allocation damaged)")
+        }
+    }
+}
+
 impl LockedHeap {
     pub const fn new() -> Self {
         Self {
@@ -94,6 +116,27 @@ impl LockedHeap {
             .as_ref()
             .map(|h| (h.free_bytes(), h.capacity()))
     }
+
+    /// Frees a block the caller may already have poisoned (see
+    /// [`buddy::BuddyHeap::dealloc_ex`]).
+    ///
+    /// # Safety
+    /// As `GlobalAlloc::dealloc`.
+    #[allow(unsafe_code)]
+    pub unsafe fn dealloc_ex(&self, ptr: *mut u8, layout: Layout, poisoned: bool) {
+        let fault = {
+            let mut g = self.inner.lock();
+            match (g.as_mut(), NonNull::new(ptr)) {
+                // SAFETY: GlobalAlloc's contract: `ptr` came from `alloc`
+                // with this `layout`; violations are detected, not UB.
+                (Some(h), Some(p)) => unsafe { h.dealloc_ex(p, layout, poisoned) }.err(),
+                _ => None,
+            }
+        };
+        if let Some(f) = fault {
+            heap_fault(f);
+        }
+    }
 }
 
 impl Default for LockedHeap {
@@ -107,19 +150,25 @@ impl Default for LockedHeap {
 // spinlock serializes all access to it.
 unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.inner
-            .lock()
-            .as_mut()
-            .and_then(|h| h.alloc(layout))
-            .map_or(core::ptr::null_mut(), NonNull::as_ptr)
+        let (p, fault) = {
+            let mut g = self.inner.lock();
+            match g.as_mut() {
+                Some(h) => {
+                    let p = h.alloc(layout);
+                    (p, h.take_fault())
+                }
+                None => (None, None),
+            }
+        };
+        if let Some(f) = fault {
+            heap_fault(f);
+        }
+        p.map_or(core::ptr::null_mut(), NonNull::as_ptr)
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if let (Some(h), Some(p)) = (self.inner.lock().as_mut(), NonNull::new(ptr)) {
-            // SAFETY: GlobalAlloc's contract: `ptr` came from `alloc` with
-            // this `layout`.
-            unsafe { h.dealloc(p, layout) };
-        }
+        // SAFETY: forwarded GlobalAlloc contract.
+        unsafe { self.dealloc_ex(ptr, layout, false) }
     }
 }
 

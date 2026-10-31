@@ -3,8 +3,9 @@
 //! The source is verified against `vendor/sqlite/CHECKSUMS` first, so a
 //! modified amalgamation never gets linked. For the bare-metal target it is
 //! built freestanding with clang, using the kernel ABI: hard float (ADR-003),
-//! BTI + PAC return addresses (ADR-016), strict alignment, no PIC, no stack
-//! protector. Host builds (tests) use the host C compiler and libc.
+//! BTI + PAC return addresses (ADR-016), strict alignment, no PIC, the strong
+//! stack protector with the kernel global guard (ADR-171). Host builds (tests)
+//! use the host C compiler and libc.
 
 use std::path::Path;
 
@@ -105,12 +106,16 @@ fn main() {
                 "-mcmodel=small",
                 "-mstrict-align",
                 "-mbranch-protection=pac-ret+bti",
+                // Position independent, so the kernel can be slid (ADR-173).
+                "-fPIE",
             ],
             "x86_64" => &[
                 "--target=x86_64-unknown-none-elf",
                 "-mcmodel=kernel",
                 "-mno-red-zone",
                 "-march=x86-64-v2",
+                // Position independent, so the kernel can be slid (ADR-173).
+                "-fPIE",
             ],
             other => panic!("unsupported kernel architecture {other}"),
         };
@@ -118,9 +123,8 @@ fn main() {
             "-ffreestanding",
             "-nostdlibinc",
             "-fno-builtin",
-            "-fno-stack-protector",
-            "-fno-pic",
-            "-fno-pie",
+            "-fstack-protector-strong",
+            "-mstack-protector-guard=global",
             "-ffunction-sections",
             "-fdata-sections",
             "-fno-asynchronous-unwind-tables",

@@ -37,6 +37,8 @@ pub enum MemType {
     DeviceStrict = 3,
     /// Normal non-cacheable (`0x44`).
     NonCacheable = 4,
+    /// Normal, write-back, with allocation tags (`0xf0`, FEAT_MTE2 only).
+    NormalTagged = 5,
 }
 
 impl MemType {
@@ -45,6 +47,13 @@ impl MemType {
     pub const MAIR_DEVICE_STRICT: u64 = 0x00;
     pub const MAIR_NON_CACHEABLE: u64 = 0x44;
     pub const MAIR_NORMAL_WB: u64 = 0xff;
+    /// Reserved without FEAT_MTE2: only written when it is implemented.
+    pub const MAIR_NORMAL_TAGGED: u64 = 0xf0;
+
+    /// [`merge_into_mair`](Self::merge_into_mair) plus index 5, Normal Tagged.
+    pub const fn merge_into_mair_tagged(mair: u64) -> u64 {
+        Self::merge_into_mair(mair) | (Self::MAIR_NORMAL_TAGGED << 40)
+    }
 
     /// Returns `mair` with indices 2..=4 set to the kernel's attributes,
     /// keeping indices 0 and 1 (owned by the bootloader) untouched.
@@ -89,6 +98,16 @@ impl PageAttrs {
         Self {
             access: Access::ReadWrite,
             mem: MemType::Normal,
+            bti_guarded: false,
+        }
+    }
+
+    /// Read/write Normal Tagged memory: the kernel heap when memory tagging
+    /// is on (ADR-174).
+    pub const fn data_tagged() -> Self {
+        Self {
+            access: Access::ReadWrite,
+            mem: MemType::NormalTagged,
             bti_guarded: false,
         }
     }
