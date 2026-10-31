@@ -33,6 +33,20 @@ pub enum TestFault {
     GeneralProtection,
     /// x86_64: a fault while delivering a fault (#DF, on its IST stack).
     DoubleFault,
+    /// Free a heap block twice (H4: the allocator must refuse and stop).
+    HeapDoubleFree,
+    /// Write to a heap block after freeing it, then reuse it (H4).
+    HeapUaf,
+    /// Write one byte past a heap allocation, then free it (H4).
+    HeapOverflow,
+    /// Overflow a stack buffer into its canary and return (H4).
+    StackSmash,
+    /// A fault with known key bytes in registers and memory, reported under
+    /// the production policy (H4: they must not appear).
+    FaultSecrets,
+    /// The same fault reported unredacted: the control that proves the
+    /// check can see the bytes.
+    FaultSecretsOpen,
 }
 
 /// Storage self-tests (M11).
@@ -126,6 +140,9 @@ pub struct BootOptions {
     /// `test=crypto-bench` (dev only): throughput of the dispatched
     /// primitives, then continue booting.
     pub crypto_bench: bool,
+    /// `test=keyslab-zero` (dev only, H4): the key slab and the heap poison
+    /// are checked in the guest.
+    pub keyslab_zero: bool,
     /// `test=simd-irq` (dev only): crypto known answers on every core under
     /// an IPI storm for 10 s.
     pub simd_irq: bool,
@@ -227,6 +244,13 @@ impl BootOptions {
                 "test=gp" => o.test_fault = Some(TestFault::GeneralProtection),
                 "test=df" => o.test_fault = Some(TestFault::DoubleFault),
                 "test=crypto-bench" => o.crypto_bench = true,
+                "test=keyslab-zero" => o.keyslab_zero = true,
+                "test=double-free" => o.test_fault = Some(TestFault::HeapDoubleFree),
+                "test=heap-uaf" => o.test_fault = Some(TestFault::HeapUaf),
+                "test=heap-overflow" => o.test_fault = Some(TestFault::HeapOverflow),
+                "test=stack-smash" => o.test_fault = Some(TestFault::StackSmash),
+                "test=fault-secrets" => o.test_fault = Some(TestFault::FaultSecrets),
+                "test=fault-secrets-open" => o.test_fault = Some(TestFault::FaultSecretsOpen),
                 "test=simd-irq" => o.simd_irq = true,
                 "diag-confirm=WIPE" => o.diag_auto_confirm = true,
                 "limits=bench" => o.bench_limits = true,

@@ -545,7 +545,15 @@ pub fn audit() -> Option<Audit> {
 pub static HEAP: urmqtt_mm::CachedHeap = urmqtt_mm::CachedHeap::new();
 
 /// Initialises the heap mapped by `build`.
-pub fn init_heap(order: u32, meta_words: usize) -> Result<(), buddy::HeapError> {
+///
+/// `buddy_key` and `cache_key` obfuscate the free lists of the heap and of
+/// the per-CPU caches (H4, ADR-170).
+pub fn init_heap(
+    order: u32,
+    meta_words: usize,
+    buddy_key: u64,
+    cache_key: u64,
+) -> Result<(), buddy::HeapError> {
     // SAFETY: `build` mapped `2^order` bytes at HEAP_BASE and `meta_words`
     // words at HEAP_META_BASE, RW and used by nothing else; HEAP_BASE is
     // aligned far beyond `2^order`.
@@ -555,9 +563,10 @@ pub fn init_heap(order: u32, meta_words: usize) -> Result<(), buddy::HeapError> 
             order,
             layout::HEAP_META_BASE as *mut u64,
             meta_words,
+            buddy_key,
         )
     }?;
-    HEAP.init(heap);
+    HEAP.init(heap, cache_key);
     Ok(())
 }
 

@@ -21,7 +21,9 @@ use crate::boot_aarch64 as arch;
 #[cfg(target_arch = "x86_64")]
 use crate::boot_x86 as arch;
 use crate::cmdline::{BootOptions, TestFault};
-use crate::{VERSION, console, devices, irq, layout, memory, power, selftest, smp, tick, trap, vm};
+use crate::{
+    VERSION, console, devices, hardening, irq, layout, memory, power, selftest, smp, tick, trap, vm,
+};
 pub(crate) use arch::{ARCH, PRIVILEGE_LABEL};
 
 #[used]
@@ -369,9 +371,19 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     };
     smp::init_boot_cpu();
     vm::retire_early_frames(s.early_frames);
-    if let Err(e) = vm::init_heap(s.built.heap_order, s.built.heap_meta_words) {
+    let seed = hardening::Seed::new(&s.boot_entropy);
+    if let Err(e) = vm::init_heap(
+        s.built.heap_order,
+        s.built.heap_meta_words,
+        seed.key(hardening::domain::BUDDY),
+        seed.key(hardening::domain::CACHE),
+    ) {
         fatal_fmt(format_args!("heap init failed: {e:?}"));
     }
+    seed.log();
+    info!(
+        "hardening: heap poison-on-free, double/invalid-free checks, obfuscated free lists, canary gaps"
+    );
     info!(
         "vm: running on kernel stacks (main {} KiB at {:#x}, exception {} KiB), {}",
         layout::MAIN_STACK_SIZE >> 10,
@@ -470,6 +482,12 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
 
     if let Some(fault) = s.options.test_fault {
         run_test_fault(fault, s.features);
+    }
+    if s.options.keyslab_zero {
+        #[cfg(feature = "selftest")]
+        crate::hardtest::keyslab_zero();
+        #[cfg(not(feature = "selftest"))]
+        warn!("keyslab-zero: not in this image (built without the selftest feature)");
     }
     if s.options.crypto_bench {
         #[cfg(feature = "selftest")]
@@ -668,7 +686,14 @@ fn smp_bringup(s: &mut Stage2) {
     // A GICv2 routes by an 8-bit CPU mask; an xAPIC by an 8-bit ID.
     let max = irq::max_cpus().min(smp::MAX_CPUS);
     let started = smp::start_aps(mp.cpus(), smp::bsp_hw_id(mp), s.pac_key, max);
-    // The key is now in every core's registers; drop the copies in memory.
+    // The key is now in every core's registers; wipe the copies in memory
+    // (volatile: a plain `= None` would only change the discriminant).
+    if let Some(k) = s.pac_key.as_mut() {
+        // SAFETY: valid, exclusive references to the two key words.
+        unsafe { core::ptr::write_volatile(&mut k.0, 0) };
+        // SAFETY: as above.
+        unsafe { core::ptr::write_volatile(&mut k.1, 0) };
+    }
     s.pac_key = None;
     let n = smp::count();
     let up = smp::wait_online(n, AP_TIMEOUT_NS);
@@ -959,6 +984,17 @@ fn run_test_fault(fault: TestFault, features: Features) {
         TestFault::ExecHeap => selftest::exec_heap(),
         TestFault::StackOverflow => selftest::stack_overflow(),
         TestFault::NullDeref => trap::probe_read(0x8),
+        TestFault::HeapDoubleFree
+        | TestFault::HeapUaf
+        | TestFault::HeapOverflow
+        | TestFault::StackSmash
+        | TestFault::FaultSecrets
+        | TestFault::FaultSecretsOpen => {
+            #[cfg(feature = "selftest")]
+            crate::hardtest::run(fault);
+            #[cfg(not(feature = "selftest"))]
+            warn!("test: {fault:?} is not in this image (built without the selftest feature)");
+        }
         // Handled by the architecture's `run_fault`.
         TestFault::DataAbort
         | TestFault::Pac

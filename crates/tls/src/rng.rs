@@ -230,6 +230,17 @@ pub struct Csprng {
     inner: ChaCha20Rng,
 }
 
+impl Drop for Csprng {
+    /// The generator's state is the key of every random value it made: a
+    /// dropped generator (a fork that is done, a replaced one) leaves none
+    /// of it behind (H4, ADR-170).
+    fn drop(&mut self) {
+        self.inner = ChaCha20Rng::from_seed([0; 32]);
+        // The overwritten state is read, so the store is not dead.
+        core::hint::black_box(&self.inner);
+    }
+}
+
 impl Csprng {
     pub fn fill(&mut self, out: &mut [u8]) {
         self.inner.fill_bytes(out);

@@ -2191,6 +2191,32 @@ universal_diag() {
     done
 }
 
+# H4 (exploit mitigations, ADR-170..175): one suite for both architectures.
+# The hooks are dev-image only (`selftest` feature); the scenarios boot the
+# raw dev image with a test word and read the serial log.
+hardening_suite() {
+    # Allocator (ADR-170): the allocator stops the VM on each of these.
+    scenario double-free "smoke test=double-free" on \
+        "test mode: triggering HeapDoubleFree" "PANIC: panicked at" "^heap: double free" \
+        "NOT:was NOT detected" "NOT:URMQTT READY"
+    scenario heap-uaf "smoke test=heap-uaf" on \
+        "PANIC: panicked at" "^heap: write after free" "NOT:was NOT detected" "NOT:URMQTT READY"
+    scenario heap-overflow "smoke test=heap-overflow" on \
+        "PANIC: panicked at" "^heap: heap overflow" "NOT:was NOT detected" "NOT:URMQTT READY"
+    scenario keyslab-zero "smoke test=keyslab-zero" on \
+        "keyslab-zero: 8 key\(s\) stored and read back in place \(true\), freed; 16 free slot\(s\) all zero \(true\); stale handles refused \(true\): ok" \
+        "keyslab-zero: a freed 1000-byte heap block reads back as poison 0xdf \(true\), no byte of the old contents left \(true\): ok" \
+        "NOT:FAILED" "^URMQTT READY$" "$NO_FAULT"
+}
+
+# SMOKE_ONLY=hardening: the H4 scenarios of this architecture.
+if [[ ${SMOKE_ONLY:-} == hardening && $ARCH != universal ]]; then
+    hardening_suite
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=time: just the wall-clock scenarios (H7, T1).
 if [[ ${SMOKE_ONLY:-} == time && $ARCH != universal ]]; then
     time_before_build

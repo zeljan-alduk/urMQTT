@@ -1,3 +1,15 @@
+## H4 — Exploit mitigations (2026-10-31)
+
+SECURITY-PLAN H4, in the order of the plan, one commit and one ADR per step. First release is VPS (KVM) only: **H4b (IOMMU) is deferred** (bare metal), recorded in ADR-176.
+
+**Step 1: allocator hardening (ADR-170)**
+
+- Heap: poison on free (what the owner used, up to 16 KiB in the buddy heap), poison checked on reuse (write after free), double-free and invalid-free detection (allocation bitmap, ancestor free bits, per-block tags in the per-CPU caches), XOR-obfuscated free-list links and tags with a per-boot key, safe unlinking, canary gap behind large allocations. A fault panics with a message that names it and nothing else.
+- `urmqtt_mm::keyslab::KeySlab`: fixed slots outside the heap, in-place access, generation-checked handles, volatile zero on free. `Csprng` is wiped when dropped (`crates/tls/tests/zeroize.rs`); the PAC key copy in the boot state is wiped.
+- Boot seed (`hardening::Seed`) from the bootloader's entropy values, the CPU's random instruction and the counter, before the heap exists; the log reports the credited bits, never a key.
+- Tests: `urmqtt-mm` 39 host tests (was 12). Smoke `SMOKE_ONLY=hardening`: `double-free`, `heap-uaf`, `heap-overflow`, `keyslab-zero` on aarch64 HVF and x86_64 TCG.
+- Cost: handshake path -2.2% to -2.5% (`dp-bench`, 1 to 4 cores, aarch64 HVF); the first version was -6.3%.
+
 
 
 ## S6 — Scrubbing, and G8 (2026-10-31)
