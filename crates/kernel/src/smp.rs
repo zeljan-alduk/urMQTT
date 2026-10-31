@@ -234,6 +234,10 @@ pub fn idle_loop(me: &'static PerCpu) -> ! {
             }
             _ => {}
         }
+        // The log's consumer core, if nothing else runs here (ADR-090).
+        if urmqtt_log::service() {
+            continue;
+        }
         // Relaxed: only selects between sleeping and spinning.
         if POLL.load(Ordering::Relaxed) {
             core::hint::spin_loop();

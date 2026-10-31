@@ -203,7 +203,8 @@ service() {
             waited=$((waited + 1))
         done
         if [[ $status -eq 0 ]]; then
-            "${client[@]}" "$port" >"$log.client" 2>&1 || status=$?
+            # The clients that check the serial log itself read it from here.
+            SMOKE_LOG="$log" "${client[@]}" "$port" >"$log.client" 2>&1 || status=$?
             sleep 0.5
         fi
         kill "$pid" 2>/dev/null || true
@@ -1718,6 +1719,16 @@ if command -v mosquitto_pub >/dev/null; then
         python3 -I "$ROOT/scripts/sys-scenarios.py" watch "$ROOT/deploy/dev" -- \
         "client: sys-watch ok" "NOT:\(step sys\)" "NOT:FAILED" "$NO_FAULT"
 fi
+
+# ADR-090: the log never stalls the data path. Every core logs one numbered
+# line every 25 ms from inside a watched handler while each line takes 4 ms
+# to reach the sinks (a hypervisor's serial port and screen). No handler may
+# be reported over budget; no line may be lost or reordered within its core,
+# and the timestamps of the merged log are in order.
+SERVICE_PORT=8883 service log-slow-flood "serve test=slow-log:4000 test=log-flood:25 ${LOG_FLOOD_EXTRA:-}" 18893 \
+    "TLS 1.3 listener on port 8883" python3 -I "$ROOT/scripts/log-flood-check.py" -- \
+    "client: log-flood ok" "log: asynchronous: cores queue their lines" "log: cost: [0-9]+ call" \
+    "NOT:over budget" "NOT:FAILED" "$NO_FAULT"
 
 # O1, O2: an operator with mutual TLS reads `$SYS/broker/#` (retained, every
 # 10 s), asks `$SYS/query/info`, reads the console and runs the fixed command

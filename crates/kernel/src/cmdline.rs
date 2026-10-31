@@ -111,6 +111,15 @@ pub struct BootOptions {
     /// microseconds longer, like a trapped serial port or a scrolling
     /// framebuffer on a VPS (ADR-072).
     pub slow_log_us: Option<u32>,
+    /// `test=log-sync` (dev only): keep the synchronous log path (the
+    /// "before" of ADR-090), for comparison.
+    pub log_sync: bool,
+    /// `test=log-cost` (dev only): measure every log call and report the
+    /// mean and worst every 5 s (`log: cost ...`). `slow-log` implies it.
+    pub log_cost: bool,
+    /// `test=log-flood:MS` (dev only): every data core logs one line every
+    /// MS milliseconds from inside a watched handler (ADR-090).
+    pub log_flood_ms: Option<u32>,
     /// `registry=allowlist`: allowlist mode even if the configuration says
     /// "open" (stricter only, for tests of one image in both modes).
     pub allowlist: bool,
@@ -201,6 +210,16 @@ impl BootOptions {
                         .and_then(|v| v.parse::<u32>().ok())
                     {
                         o.slow_log_us = Some(us);
+                    } else if w == "test=log-sync" {
+                        o.log_sync = true;
+                    } else if w == "test=log-cost" {
+                        o.log_cost = true;
+                    } else if let Some(ms) = w
+                        .strip_prefix("test=log-flood:")
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .filter(|&ms| ms > 0)
+                    {
+                        o.log_flood_ms = Some(ms);
                     } else if let Some(s) = w
                         .strip_prefix("diag-confirm-timeout=")
                         .and_then(|v| v.parse().ok())
@@ -314,6 +333,18 @@ mod tests {
         assert_eq!(BootOptions::parse("test=slow-log:x", true).ignored, 1);
         let p = BootOptions::parse("test=slow-log:4000", false);
         assert_eq!((p.slow_log_us, p.ignored), (None, 1));
+    }
+
+    /// ADR-090: the log test words are dev switches too.
+    #[test]
+    fn log_test_words_are_dev_only() {
+        let o = BootOptions::parse("test=log-sync test=log-cost test=log-flood:20", true);
+        assert!(o.log_sync && o.log_cost);
+        assert_eq!(o.log_flood_ms, Some(20));
+        assert_eq!(BootOptions::parse("test=log-flood:0", true).ignored, 1);
+        let p = BootOptions::parse("test=log-sync test=log-cost test=log-flood:20", false);
+        assert!(!p.log_sync && !p.log_cost && p.log_flood_ms.is_none());
+        assert_eq!(p.ignored, 3);
     }
 
     #[test]

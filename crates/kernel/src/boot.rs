@@ -187,6 +187,9 @@ extern "C" fn urmqtt_kmain() -> ! {
     if let Some(us) = options.slow_log_us {
         urmqtt_log::set_sink_delay_us(us);
     }
+    if options.slow_log_us.is_some() || options.log_cost {
+        urmqtt_log::set_measure(true);
+    }
 
     let cpus = MP.response().map_or(1, |r| r.cpus().len());
     urmqtt_log::raw(format_args!(
@@ -584,6 +587,25 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         warn!("dp-bench: not in this image (built without the selftest feature)");
     }
     crate::netproto::prepare(restored.map(alloc::sync::Arc::new));
+    // From here on a log call only queues a line in its core's ring; the
+    // last CPU (the DB core when there is one, else the last data core)
+    // writes the sinks between its handlers (ADR-090). The two test modes
+    // whose cores never reach an idle pass keep the synchronous path.
+    let queue = !s.options.log_sync
+        && !matches!(
+            s.options.db_test,
+            Some(crate::cmdline::DbTest::LogCrash | crate::cmdline::DbTest::DpBench)
+        );
+    urmqtt_log::start(cpus - 1, queue);
+    if queue {
+        info!(
+            "log: asynchronous: cores queue their lines, cpu {} writes the serial port and the screen",
+            cpus - 1
+        );
+    }
+    if let Some(ms) = s.options.log_flood_ms {
+        crate::logtest::start(ms);
+    }
     for cpu in 1..data_cores {
         smp::start_data_core(cpu);
     }

@@ -1,8 +1,17 @@
 //! Kernel logging: lines to the UART and framebuffer sinks, and records for
 //! the UDP syslog sink.
 //!
-//! One lock-protected writer (IRQs masked while it is held). Lines are
-//! rate-limited ([`RATE_PER_S`], burst [`BURST`]): a flood, e.g. a warning
+//! Before the cores run (boot) one lock-protected writer writes each line
+//! to the sinks directly. Once [`start`] switched to the asynchronous mode
+//! (ADR-090) a log call only formats into its own core's ring
+//! ([`ring::Ring`], single producer, never waits for a sink or a lock
+//! another core can hold) and one designated core drains all rings in
+//! timestamp order into the sinks ([`service`]); overflow drops the newest
+//! line and is counted and reported (`log: N line(s) dropped`). Audit lines
+//! never wait in a full ring: they fall back to a synchronous write. The
+//! panic and fatal paths ([`emergency`], [`flush`], [`raw`]) drain first and
+//! write synchronously. Lines are rate-limited per core
+//! ([`RATE_PER_S`], burst [`BURST`]): a flood, e.g. a warning
 //! per refused connection, cannot stall a core on the UART. What is
 //! suppressed is counted and reported with the next line. With a syslog
 //! collector configured, every line is also kept as a [`Record`] in a fixed
@@ -19,13 +28,14 @@
 
 pub mod fbcon;
 pub mod pl011;
+pub mod ring;
 
 use core::fmt::{self, Write};
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 pub use urmqtt_config::LogLevel as Level;
-use urmqtt_sync::sync::SpinLock;
+use urmqtt_sync::sync::{OnceCell, SpinLock};
 
 use fbcon::FbConsole;
 use pl011::Pl011;
@@ -35,7 +45,11 @@ pub const RATE_PER_S: u64 = 100;
 pub const BURST: u64 = 300;
 /// Records kept for the syslog sink, and bytes of text per record.
 pub const RECORDS: usize = 128;
-pub const RECORD_TEXT: usize = 200;
+pub const RECORD_TEXT: usize = 254;
+/// Cores with a ring of their own (the kernel's `MAX_CPUS`).
+pub const LOG_CPUS: usize = 64;
+/// Lines one core can have queued before the drain catches up.
+pub const RING_LINES: usize = 64;
 /// Lines the console ring keeps for readers that are behind.
 pub const CONSOLE_LINES: usize = 128;
 
@@ -47,17 +61,36 @@ pub struct Record {
     /// Nanoseconds since boot.
     pub ns: u64,
     len: u8,
+    /// Text was cut at [`RECORD_TEXT`] bytes.
+    cut: bool,
     text: [u8; RECORD_TEXT],
 }
 
 impl Record {
-    const EMPTY: Self = Self {
-        level: Level::Info,
+    pub(crate) const EMPTY: Self = Self {
+        // `Error` is the all-zero level: an empty record is all zeros.
+        level: Level::Error,
         cpu: 0,
         ns: 0,
         len: 0,
+        cut: false,
         text: [0; RECORD_TEXT],
     };
+
+    /// Marks a cut line with `...` at its end (at a char boundary).
+    fn finish(&mut self) {
+        if !self.cut {
+            return;
+        }
+        let mut at = usize::from(self.len).min(RECORD_TEXT - 3);
+        while at > 0 && !self.text.get(at).is_none_or(|b| (b & 0xC0) != 0x80) {
+            at -= 1;
+        }
+        if let Some(dst) = self.text.get_mut(at..at + 3) {
+            dst.copy_from_slice(b"...");
+            self.len = (at + 3) as u8;
+        }
+    }
 
     /// The message (truncated to [`RECORD_TEXT`] bytes at a char boundary).
     pub fn text(&self) -> &str {
@@ -74,7 +107,10 @@ impl Write for Record {
             let at = usize::from(self.len);
             match self.text.get_mut(at..at + enc.len()) {
                 Some(dst) => dst.copy_from_slice(enc),
-                None => return Ok(()),
+                None => {
+                    self.cut = true;
+                    return Ok(());
+                }
             }
             self.len += enc.len() as u8;
         }
@@ -158,32 +194,41 @@ struct Sinks {
     fb: Option<FbConsole<'static>>,
     /// Log lines go to the framebuffer (off while the diagnostic dashboard owns it).
     fb_log: bool,
-    clock_ns: Option<fn() -> u64>,
-    cpu: Option<fn() -> usize>,
-    /// Rate limit: tokens (lines) and when they were last refilled.
-    tokens: u64,
-    refilled_ns: u64,
-    suppressed: u64,
-    records: Records,
+    /// Rate limit of the synchronous mode (the asynchronous mode has one
+    /// per core, in its ring).
+    limiter: ring::Limiter,
 }
 
 static SINKS: SpinLock<Sinks> = SpinLock::new(Sinks {
     uart: None,
     fb: None,
     fb_log: true,
-    clock_ns: None,
-    cpu: None,
-    tokens: BURST,
-    refilled_ns: 0,
-    suppressed: 0,
-    records: Records {
-        on: false,
-        ring: [Record::EMPTY; RECORDS],
-        head: 0,
-        len: 0,
-        lost: 0,
-    },
+    limiter: ring::Limiter::new(),
 });
+
+/// The syslog records, under a lock of their own for the same reason as the
+/// console ring: the network core drains them and must never queue behind
+/// a sink (ADR-072, ADR-090). Nested inside `SINKS` by writers, taken alone
+/// (IRQs masked) by the reader.
+static RECORDS_RING: SpinLock<Records> = SpinLock::new(Records {
+    on: false,
+    ring: [Record::EMPTY; RECORDS],
+    head: 0,
+    len: 0,
+    lost: 0,
+});
+
+/// The monotonic clock and the current-CPU query, readable without a lock.
+static CLOCK: OnceCell<fn() -> u64> = OnceCell::new();
+static CPU: OnceCell<fn() -> usize> = OnceCell::new();
+
+fn now_ns() -> u64 {
+    CLOCK.get().map_or(0, |c| c())
+}
+
+fn current_cpu() -> usize {
+    CPU.get().map_or(0, |c| c())
+}
 
 /// UART base kept outside the lock for [`emergency`] output.
 static EMERGENCY_UART: AtomicUsize = AtomicUsize::new(0);
@@ -263,17 +308,17 @@ pub fn read_serial_byte() -> Option<u8> {
 
 /// Installs the monotonic clock used for timestamps (nanoseconds since boot).
 pub fn set_clock(clock_ns: fn() -> u64) {
-    SINKS.lock().clock_ns = Some(clock_ns);
+    let _ = CLOCK.set(clock_ns);
 }
 
 /// Installs the current-CPU query used in records.
 pub fn set_cpu(cpu: fn() -> usize) {
-    SINKS.lock().cpu = Some(cpu);
+    let _ = CPU.set(cpu);
 }
 
 /// Starts keeping records for a syslog collector.
 pub fn enable_records() {
-    Locked::acquire().sinks().records.on = true;
+    RECORDS_RING.lock().on = true;
 }
 
 /// Starts keeping lines for the MQTT console (O2).
@@ -345,8 +390,11 @@ pub fn drain_records(mut f: impl FnMut(&Record)) -> u64 {
     loop {
         let mut n = 0;
         {
-            let mut locked = Locked::acquire();
-            let r = &mut locked.sinks().records;
+            // IRQs masked: the tick's report logs, and a drain pass in this
+            // core's interrupt would spin on a lock its own core holds.
+            #[cfg(target_os = "none")]
+            let irq_state = urmqtt_arch::cpu::irq_save();
+            let mut r = RECORDS_RING.lock();
             lost += core::mem::take(&mut r.lost);
             while n < batch.len() && r.len > 0 {
                 let at = (r.head + RECORDS - r.len) % RECORDS;
@@ -356,6 +404,9 @@ pub fn drain_records(mut f: impl FnMut(&Record)) -> u64 {
                 r.len -= 1;
                 n += 1;
             }
+            drop(r);
+            #[cfg(target_os = "none")]
+            urmqtt_arch::cpu::irq_restore(irq_state);
         }
         for rec in batch.get(..n).unwrap_or(&[]) {
             f(rec);
@@ -440,16 +491,20 @@ const fn tag(level: Level) -> &'static str {
 }
 
 /// Takes a rate-limit token at `ns`.
-fn take_token(sinks: &mut Sinks, ns: u64) -> bool {
-    let refill = ns.saturating_sub(sinks.refilled_ns) * RATE_PER_S / 1_000_000_000;
-    if refill > 0 {
-        sinks.tokens = (sinks.tokens + refill).min(BURST);
-        sinks.refilled_ns = ns;
+fn take_token(l: &mut ring::Limiter, ns: u64) -> bool {
+    if !l.primed {
+        l.primed = true;
+        l.tokens = BURST;
     }
-    if sinks.tokens == 0 {
+    let refill = ns.saturating_sub(l.refilled_ns) * RATE_PER_S / 1_000_000_000;
+    if refill > 0 {
+        l.tokens = (l.tokens + refill).min(BURST);
+        l.refilled_ns = ns;
+    }
+    if l.tokens == 0 {
         return false;
     }
-    sinks.tokens -= 1;
+    l.tokens -= 1;
     true
 }
 
@@ -458,27 +513,41 @@ fn take_token(sinks: &mut Sinks, ns: u64) -> bool {
 /// real line cost milliseconds; this reproduces that in the emulator.
 static SINK_DELAY_US: AtomicU32 = AtomicU32::new(0);
 
-/// Makes every log line take at least `us` more while the sink lock is held
-/// (tests only).
+/// Makes every log line take at least `us` more while it is written to the
+/// sinks (tests only).
 pub fn set_sink_delay_us(us: u32) {
     // Relaxed: a test switch set once at boot.
     SINK_DELAY_US.store(us, Ordering::Relaxed);
 }
 
-fn line(sinks: &mut Sinks, ns: u64, level: Level, args: fmt::Arguments<'_>) {
+/// Writes one finished record to the sinks, the console ring and the
+/// syslog records. The only place a line reaches them.
+fn emit_record(sinks: &mut Sinks, rec: &Record, full: Option<fmt::Arguments<'_>>) {
     // Sinks never fail; a formatting error just truncates the line.
-    let _ = writeln!(
-        Tee(sinks),
-        "[{:>5}.{:06}] {} {}",
-        ns / 1_000_000_000,
-        (ns / 1_000) % 1_000_000,
-        tag(level),
-        args
-    );
+    let _ = match full {
+        // The synchronous path still has the arguments: the sinks get the
+        // whole line however long it is, as before the rings.
+        Some(args) => writeln!(
+            Tee(sinks),
+            "[{:>5}.{:06}] {} {}",
+            rec.ns / 1_000_000_000,
+            (rec.ns / 1_000) % 1_000_000,
+            tag(rec.level),
+            args
+        ),
+        None => writeln!(
+            Tee(sinks),
+            "[{:>5}.{:06}] {} {}",
+            rec.ns / 1_000_000_000,
+            (rec.ns / 1_000) % 1_000_000,
+            tag(rec.level),
+            rec.text()
+        ),
+    };
     // Relaxed: see `set_sink_delay_us`.
     let delay_us = SINK_DELAY_US.load(Ordering::Relaxed);
     if delay_us > 0
-        && let Some(clock) = sinks.clock_ns
+        && let Some(clock) = CLOCK.get()
     {
         let until = clock().saturating_add(u64::from(delay_us) * 1_000);
         while clock() < until {
@@ -486,39 +555,44 @@ fn line(sinks: &mut Sinks, ns: u64, level: Level, args: fmt::Arguments<'_>) {
         }
     }
     // Relaxed: see `enable_console`.
-    let console_on = CONSOLE_ON.load(Ordering::Relaxed);
-    if sinks.records.on || console_on {
-        let mut rec = Record {
-            level,
-            cpu: sinks.cpu.map_or(0, |c| c()) as u8,
-            ns,
-            ..Record::EMPTY
-        };
-        let _ = rec.write_fmt(args);
-        if console_on {
-            let mut c = CONSOLE.lock();
-            let at = (c.next % CONSOLE_LINES as u64) as usize;
-            if let Some(slot) = c.ring.get_mut(at) {
-                *slot = rec;
-            }
-            c.next += 1;
-            // Relaxed: see `console_next`.
-            CONSOLE_NEXT.store(c.next, Ordering::Relaxed);
-            drop(c);
+    if CONSOLE_ON.load(Ordering::Relaxed) {
+        let mut c = CONSOLE.lock();
+        let at = (c.next % CONSOLE_LINES as u64) as usize;
+        if let Some(slot) = c.ring.get_mut(at) {
+            *slot = *rec;
         }
-        if sinks.records.on {
-            let r = &mut sinks.records;
-            if let Some(slot) = r.ring.get_mut(r.head) {
-                *slot = rec;
-            }
-            r.head = (r.head + 1) % RECORDS;
-            if r.len == RECORDS {
-                r.lost += 1;
-            } else {
-                r.len += 1;
-            }
+        c.next += 1;
+        // Relaxed: see `console_next`.
+        CONSOLE_NEXT.store(c.next, Ordering::Relaxed);
+        drop(c);
+    }
+    let mut r = RECORDS_RING.lock();
+    if r.on {
+        let head = r.head;
+        if let Some(slot) = r.ring.get_mut(head) {
+            *slot = *rec;
+        }
+        r.head = (head + 1) % RECORDS;
+        if r.len == RECORDS {
+            r.lost += 1;
+        } else {
+            r.len += 1;
         }
     }
+    drop(r);
+}
+
+/// Builds a record from format arguments.
+fn make_record(cpu: usize, ns: u64, level: Level, args: fmt::Arguments<'_>) -> Record {
+    let mut rec = Record {
+        level,
+        cpu: cpu.min(255) as u8,
+        ns,
+        ..Record::EMPTY
+    };
+    let _ = rec.write_fmt(args);
+    rec.finish();
+    rec
 }
 
 /// Writes one log line if `level` is enabled and the rate limit allows.
@@ -526,46 +600,440 @@ pub fn log(level: Level, args: fmt::Arguments<'_>) {
     if !enabled(level) {
         return;
     }
-    log_line(level, args);
+    log_line(level, args, false);
 }
 
 /// An audit line (every console command, O2): written whatever the level
-/// is set to, so lowering the level cannot hide what an operator did. The
-/// rate limit still applies.
+/// is set to, so lowering the level cannot hide what an operator did. It is
+/// exempt from the rate limit and never dropped from a full ring: it is
+/// then written synchronously.
 pub fn audit(args: fmt::Arguments<'_>) {
-    log_line(Level::Warn, args);
+    log_line(Level::Warn, args, true);
 }
 
-fn log_line(level: Level, args: fmt::Arguments<'_>) {
+fn log_line(level: Level, args: fmt::Arguments<'_>, audit: bool) {
+    // Relaxed: a dev switch.
+    let measure = MEASURE.load(Ordering::Relaxed);
+    let t0 = if measure { now_ns() } else { 0 };
+    // Acquire: pairs with the Release in `start`.
+    if ASYNC.load(Ordering::Acquire) {
+        let cpu = current_cpu();
+        // IRQs masked: the tick's watchdog report logs too, and the ring's
+        // producer end is not re-entrant.
+        #[cfg(target_os = "none")]
+        let irq_state = urmqtt_arch::cpu::irq_save();
+        let pushed = HUB.push(cpu, now_ns(), level, args, audit);
+        #[cfg(target_os = "none")]
+        urmqtt_arch::cpu::irq_restore(irq_state);
+        if pushed == Push::Dropped && audit {
+            log_sync(level, args, true);
+        }
+    } else {
+        log_sync(level, args, audit);
+    }
+    if measure {
+        let dt = now_ns().saturating_sub(t0);
+        // Relaxed: statistics.
+        COST_CALLS.fetch_add(1, Ordering::Relaxed);
+        COST_NS.fetch_add(dt, Ordering::Relaxed);
+        COST_MAX.fetch_max(dt, Ordering::Relaxed);
+    }
+}
+
+/// The synchronous path: the line goes to the sinks now, under their lock.
+fn log_sync(level: Level, args: fmt::Arguments<'_>, audit: bool) {
     let mut locked = Locked::acquire();
     let sinks = locked.sinks();
-    let ns = sinks.clock_ns.map_or(0, |c| c());
-    if !take_token(sinks, ns) {
-        sinks.suppressed += 1;
+    let ns = now_ns();
+    let cpu = current_cpu();
+    if !audit && !take_token(&mut sinks.limiter, ns) {
+        sinks.limiter.suppressed += 1;
         return;
     }
-    let suppressed = core::mem::take(&mut sinks.suppressed);
+    let suppressed = core::mem::take(&mut sinks.limiter.suppressed);
     if suppressed > 0 {
-        line(
-            sinks,
+        let rec = make_record(
+            cpu,
             ns,
             Level::Warn,
             format_args!("log: {suppressed} line(s) suppressed by the rate limit"),
         );
+        emit_record(sinks, &rec, None);
     }
-    line(sinks, ns, level, args);
+    emit_record(sinks, &make_record(cpu, ns, level, args), Some(args));
+}
+
+/// What became of a line given to [`Hub::push`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Push {
+    Queued,
+    /// Refused by the rate limit (counted, reported with the next line).
+    Suppressed,
+    /// The ring was full or busy (counted, reported by the drain).
+    Dropped,
+}
+
+/// What the drain hands to the sinks.
+pub enum Item<'a> {
+    Line(&'a Record),
+    /// `n` lines of `cpu` were dropped since the last note.
+    Dropped {
+        cpu: usize,
+        n: u64,
+    },
+}
+
+struct CoreLog {
+    ring: ring::Ring<RING_LINES>,
+}
+
+/// Every core's ring and the masks that tell the drain where to look.
+pub struct Hub {
+    cores: [CoreLog; LOG_CPUS],
+    /// Bit `c`: ring `c` may hold lines.
+    nonempty: AtomicU64,
+    /// Bit `c`: ring `c` dropped lines not yet reported.
+    dropmask: AtomicU64,
+}
+
+impl Hub {
+    pub const fn new() -> Self {
+        Self {
+            cores: [const {
+                CoreLog {
+                    ring: ring::Ring::new(),
+                }
+            }; LOG_CPUS],
+            nonempty: AtomicU64::new(0),
+            dropmask: AtomicU64::new(0),
+        }
+    }
+
+    /// Formats a line into `cpu`'s ring. Never waits: a full ring, or a
+    /// producer end in use, drops the line and counts it. Lines below
+    /// warning level may fill only three quarters of the ring, so a
+    /// flood of information cannot push out a warning.
+    pub fn push(
+        &self,
+        cpu: usize,
+        ns: u64,
+        level: Level,
+        args: fmt::Arguments<'_>,
+        audit: bool,
+    ) -> Push {
+        let idx = cpu.min(LOG_CPUS - 1);
+        let bit = 1u64 << idx;
+        let Some(core) = self.cores.get(idx) else {
+            return Push::Dropped;
+        };
+        let out = core.ring.produce(|lim, q| {
+            if !audit && !take_token(lim, ns) {
+                lim.suppressed += 1;
+                return Push::Suppressed;
+            }
+            let suppressed = core::mem::take(&mut lim.suppressed);
+            if suppressed > 0 {
+                q.push(RING_LINES, true, |r| {
+                    r.level = Level::Warn;
+                    r.cpu = cpu.min(255) as u8;
+                    r.ns = ns;
+                    let _ = write!(r, "log: {suppressed} line(s) suppressed by the rate limit");
+                });
+            }
+            let limit = if audit || level <= Level::Warn {
+                RING_LINES
+            } else {
+                RING_LINES * 3 / 4
+            };
+            let queued = q.push(limit, !audit, |r| {
+                r.level = level;
+                r.cpu = cpu.min(255) as u8;
+                r.ns = ns;
+                let _ = r.write_fmt(args);
+                r.finish();
+            });
+            if queued { Push::Queued } else { Push::Dropped }
+        });
+        match out {
+            Some(Push::Queued) => {
+                // Release: the drain that sees the bit sees the line.
+                self.nonempty.fetch_or(bit, Ordering::Release);
+                Push::Queued
+            }
+            Some(p @ Push::Suppressed) => p,
+            Some(Push::Dropped) | None => {
+                // An audit line is not counted: its caller writes it
+                // synchronously instead.
+                if !audit {
+                    if out.is_none() {
+                        core.ring.count_dropped();
+                    }
+                    self.dropmask.fetch_or(bit, Ordering::Release);
+                }
+                Push::Dropped
+            }
+        }
+    }
+
+    /// Whether anything waits for the drain.
+    pub fn pending(&self) -> bool {
+        self.nonempty.load(Ordering::Acquire) != 0 || self.dropmask.load(Ordering::Acquire) != 0
+    }
+
+    /// Hands up to `max` items to `emit`: drop notes first, then lines,
+    /// oldest timestamp first across all rings. Single consumer at a time
+    /// (the caller arbitrates); returns how many items were handed over.
+    pub fn drain(&self, max: usize, emit: &mut dyn FnMut(Item<'_>)) -> usize {
+        let mut n = 0;
+        let mut drops = self.dropmask.swap(0, Ordering::AcqRel);
+        while drops != 0 && n < max {
+            let idx = drops.trailing_zeros() as usize;
+            drops &= drops - 1;
+            if let Some(c) = self.cores.get(idx) {
+                let lost = c.ring.take_dropped();
+                if lost > 0 {
+                    emit(Item::Dropped { cpu: idx, n: lost });
+                    n += 1;
+                }
+            }
+        }
+        if drops != 0 {
+            // Not reported yet (`max` reached): keep them for the next call.
+            self.dropmask.fetch_or(drops, Ordering::Release);
+        }
+        while n < max {
+            let mask = self.nonempty.load(Ordering::Acquire);
+            let mut best: Option<(usize, u64)> = None;
+            let mut m = mask;
+            while m != 0 {
+                let idx = m.trailing_zeros() as usize;
+                let bit = 1u64 << idx;
+                m &= m - 1;
+                let Some(c) = self.cores.get(idx) else {
+                    continue;
+                };
+                match c.ring.head_ns() {
+                    Some(ns) if best.is_none_or(|(_, b)| ns < b) => best = Some((idx, ns)),
+                    Some(_) => {}
+                    None => {
+                        if c.ring.is_empty() {
+                            self.nonempty.fetch_and(!bit, Ordering::AcqRel);
+                            // A push between the check and the clear
+                            // would have set the bit before the clear.
+                            if !c.ring.is_empty() {
+                                self.nonempty.fetch_or(bit, Ordering::Release);
+                            }
+                        }
+                    }
+                }
+            }
+            let Some((idx, _)) = best else { break };
+            let Some(c) = self.cores.get(idx) else { break };
+            if c.ring.pop(|rec| emit(Item::Line(rec))).is_none() {
+                break;
+            }
+            n += 1;
+        }
+        n
+    }
+}
+
+impl Default for Hub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static HUB: Hub = Hub::new();
+/// Lines go through the rings (set by [`start`]).
+static ASYNC: AtomicBool = AtomicBool::new(false);
+/// The core that drains (`usize::MAX`: none yet).
+static CONSUMER: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// A drain is running (only one at a time).
+static DRAINING: AtomicBool = AtomicBool::new(false);
+
+/// Lines a drain pass hands over at most, and the time after which it
+/// stops (at least one line is always written).
+const PASS_LINES: usize = 16;
+const PASS_NS: u64 = 2_000_000;
+/// Lines the panic, flush and raw paths write out of the rings at most.
+const SYNC_DRAIN_LINES: usize = 512;
+/// How long [`raw`] waits for a drain pass in progress.
+const RAW_WAIT_NS: u64 = 100_000_000;
+
+/// Switches to the asynchronous mode: log calls only queue, and `consumer`
+/// (a core that calls [`service`] between its handlers) writes the sinks.
+/// `queue = false` keeps the synchronous mode but still names the consumer
+/// core for the cost report (dev `test=log-sync`).
+pub fn start(consumer: usize, queue: bool) {
+    // Relaxed: ordered by the Release store of `ASYNC`.
+    CONSUMER.store(consumer, Ordering::Relaxed);
+    // The cost window starts here: boot-time calls (synchronous, all cores
+    // in the same lock) are not what the report is about.
+    COST_CALLS.store(0, Ordering::Relaxed);
+    COST_NS.store(0, Ordering::Relaxed);
+    COST_MAX.store(0, Ordering::Relaxed);
+    // Release: pairs with the Acquire load in `log_line`.
+    ASYNC.store(queue, Ordering::Release);
+}
+
+/// Whether log calls queue (the asynchronous mode).
+pub fn is_async() -> bool {
+    ASYNC.load(Ordering::Acquire)
+}
+
+fn emit_item(sinks: &mut Sinks, item: Item<'_>) {
+    match item {
+        Item::Line(rec) => emit_record(sinks, rec, None),
+        Item::Dropped { cpu, n } => {
+            let rec = make_record(
+                cpu,
+                now_ns(),
+                Level::Warn,
+                format_args!("log: {n} line(s) dropped on cpu {cpu} (log ring full)"),
+            );
+            emit_record(sinks, &rec, None);
+        }
+    }
+}
+
+/// Drains up to `max` items into the sinks, stopping after `budget_ns`
+/// (checked after each line). With `held` the caller already holds the
+/// sinks; otherwise each line takes them on its own. Returns the number of
+/// items written, 0 if another drain is running.
+fn drain(max: usize, budget_ns: u64, held: Option<&mut Sinks>) -> usize {
+    if DRAINING.swap(true, Ordering::Acquire) {
+        return 0;
+    }
+    let total = drain_claimed(max, budget_ns, held);
+    DRAINING.store(false, Ordering::Release);
+    total
+}
+
+/// [`drain`] with the drain claim already taken by the caller.
+fn drain_claimed(max: usize, budget_ns: u64, mut held: Option<&mut Sinks>) -> usize {
+    let start = now_ns();
+    let mut total = 0;
+    loop {
+        let mut one = |item: Item<'_>| match held.as_deref_mut() {
+            Some(s) => emit_item(s, item),
+            None => {
+                let mut l = Locked::acquire();
+                emit_item(l.sinks(), item);
+            }
+        };
+        let n = HUB.drain(1, &mut one);
+        total += n;
+        if n == 0 || total >= max || now_ns().saturating_sub(start) >= budget_ns {
+            break;
+        }
+    }
+    total
+}
+
+/// Called by the consumer core between handlers (the idle pass): writes
+/// some queued lines to the sinks and, with the dev measurement on, reports
+/// the cost of log calls. Returns whether it wrote anything (the core
+/// should not sleep then). Does nothing on other cores.
+pub fn service() -> bool {
+    // Relaxed: set once at boot.
+    let consumer = CONSUMER.load(Ordering::Relaxed);
+    if consumer == usize::MAX || current_cpu() != consumer {
+        return false;
+    }
+    if MEASURE.load(Ordering::Relaxed) {
+        cost_report();
+    }
+    if !ASYNC.load(Ordering::Acquire) || !HUB.pending() {
+        return false;
+    }
+    drain(PASS_LINES, PASS_NS, None) > 0
+}
+
+/// Whether lines wait for the drain (the consumer must not sleep).
+pub fn pending() -> bool {
+    HUB.pending()
+}
+
+/// Writes out everything queued (bounded), for the paths that are about to
+/// stop or reset the machine.
+pub fn drain_all() {
+    if ASYNC.load(Ordering::Acquire) {
+        drain(SYNC_DRAIN_LINES, u64::MAX, None);
+    }
+}
+
+/// Dev measurement of the cost of a log call (`test=slow-log`, `log-sync`).
+static MEASURE: AtomicBool = AtomicBool::new(false);
+static COST_CALLS: AtomicU64 = AtomicU64::new(0);
+static COST_NS: AtomicU64 = AtomicU64::new(0);
+static COST_MAX: AtomicU64 = AtomicU64::new(0);
+static COST_NEXT_NS: AtomicU64 = AtomicU64::new(0);
+const COST_WINDOW_NS: u64 = 5_000_000_000;
+
+/// Measures the cost of every log call (dev only) and has the consumer
+/// report it every 5 s as `log: cost ...`.
+pub fn set_measure(on: bool) {
+    // Relaxed: a dev switch set once at boot.
+    MEASURE.store(on, Ordering::Relaxed);
+}
+
+fn cost_report() {
+    let now = now_ns();
+    // Relaxed: statistics.
+    if now < COST_NEXT_NS.load(Ordering::Relaxed) {
+        return;
+    }
+    COST_NEXT_NS.store(now + COST_WINDOW_NS, Ordering::Relaxed);
+    let calls = COST_CALLS.swap(0, Ordering::Relaxed);
+    let total = COST_NS.swap(0, Ordering::Relaxed);
+    let max = COST_MAX.swap(0, Ordering::Relaxed);
+    if let Some(mean) = total.checked_div(calls) {
+        log(
+            Level::Info,
+            format_args!(
+                "log: cost: {calls} call(s) in 5 s, mean {} ns, worst {} ns ({} mode)",
+                mean,
+                max,
+                if is_async() { "async" } else { "sync" }
+            ),
+        );
+    }
 }
 
 /// Writes raw text (no prefix) regardless of level, e.g. boot markers that
-/// test harnesses wait for.
+/// test harnesses wait for. Lines queued before it are written first.
 pub fn raw(args: fmt::Arguments<'_>) {
+    // Wait (bounded, and before taking the sinks, which the running drain
+    // needs) for a drain in progress, so the marker follows the lines that
+    // were logged before it.
+    let mut claimed = false;
+    if ASYNC.load(Ordering::Acquire) {
+        let give_up = now_ns().saturating_add(RAW_WAIT_NS);
+        // Bounded by passes too, in case the clock does not advance.
+        for _ in 0..50_000_000u32 {
+            if !DRAINING.swap(true, Ordering::Acquire) {
+                claimed = true;
+                break;
+            }
+            if now_ns() >= give_up {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
     let mut locked = Locked::acquire();
+    if claimed {
+        drain_claimed(SYNC_DRAIN_LINES, u64::MAX, Some(locked.sinks()));
+        DRAINING.store(false, Ordering::Release);
+    }
     let _ = Tee(locked.sinks()).write_fmt(args);
 }
 
 /// Waits until the UART has sent everything written so far (before a
 /// power-off or reset, which would cut off the last lines).
 pub fn flush() {
+    drain_all();
     if let Some(sinks) = SINKS.try_lock()
         && let Some(u) = sinks.uart
     {
@@ -574,10 +1042,13 @@ pub fn flush() {
 }
 
 /// Last-resort output for exception and panic reports. Uses the normal sinks
-/// if the lock is free, otherwise writes straight to the UART so a fault
-/// while logging cannot deadlock the report.
+/// if the lock is free (queued lines first), otherwise writes straight to
+/// the UART so a fault while logging cannot deadlock the report.
 pub fn emergency(args: fmt::Arguments<'_>) {
     if let Some(mut sinks) = SINKS.try_lock() {
+        if ASYNC.load(Ordering::Acquire) {
+            drain(SYNC_DRAIN_LINES, u64::MAX, Some(&mut *sinks));
+        }
         let _ = Tee(&mut sinks).write_fmt(args);
         if let Some(u) = sinks.uart {
             u.flush();
@@ -622,7 +1093,7 @@ mod tests {
         let mut r = Record::EMPTY;
         let long = "é".repeat(RECORD_TEXT);
         let _ = write!(r, "{long}");
-        assert_eq!(r.text().len(), RECORD_TEXT);
+        assert!(r.text().len() >= RECORD_TEXT - 1);
         assert!(r.text().chars().all(|c| c == 'é'));
     }
 
@@ -691,23 +1162,7 @@ mod tests {
 
     #[test]
     fn rate_limit_allows_a_burst_then_the_rate() {
-        let mut s = Sinks {
-            uart: None,
-            fb: None,
-            fb_log: true,
-            clock_ns: None,
-            cpu: None,
-            tokens: BURST,
-            refilled_ns: 0,
-            suppressed: 0,
-            records: Records {
-                on: false,
-                ring: [Record::EMPTY; RECORDS],
-                head: 0,
-                len: 0,
-                lost: 0,
-            },
-        };
+        let mut s = ring::Limiter::new();
         let passed = (0..1000).filter(|_| take_token(&mut s, 1)).count() as u64;
         assert_eq!(passed, BURST);
         // One second later: RATE_PER_S more.
@@ -715,5 +1170,258 @@ mod tests {
             .filter(|_| take_token(&mut s, 1_000_000_001))
             .count() as u64;
         assert_eq!(passed, RATE_PER_S);
+    }
+
+    #[test]
+    fn cut_lines_end_in_dots_at_a_char_boundary() {
+        let long = "é".repeat(RECORD_TEXT);
+        let r = make_record(0, 0, Level::Info, format_args!("{long}"));
+        assert!(r.text().len() <= RECORD_TEXT);
+        assert!(r.text().ends_with("..."));
+        let body = r.text().trim_end_matches("...");
+        assert!(body.chars().all(|c| c == 'é'));
+        let short = make_record(0, 0, Level::Info, format_args!("short"));
+        assert_eq!(short.text(), "short");
+    }
+
+    /// A hub is a megabyte: build it on a thread with room for it.
+    fn big(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn drain_all_items(
+        h: &Hub,
+        max: usize,
+    ) -> (std::vec::Vec<(u8, u64, std::string::String)>, u64) {
+        let mut lines = std::vec::Vec::new();
+        let mut dropped = 0;
+        while h.drain(max, &mut |it| match it {
+            Item::Line(r) => lines.push((r.cpu, r.ns, r.text().to_owned())),
+            Item::Dropped { n, .. } => dropped += n,
+        }) > 0
+        {}
+        (lines, dropped)
+    }
+
+    /// ADR-090: lines of several cores come out in timestamp order, none
+    /// lost while the rings are not overrun.
+    #[test]
+    fn hub_merges_rings_by_timestamp_and_loses_nothing() {
+        big(|| {
+            let h = Hub::new();
+            // Interleaved timestamps over four cores, pushed core by core.
+            for cpu in 0..4usize {
+                for i in 0..40u64 {
+                    let ns = i * 4 + cpu as u64 + 1;
+                    assert_eq!(
+                        h.push(
+                            cpu,
+                            ns * 1_000,
+                            Level::Info,
+                            format_args!("c{cpu} l{i}"),
+                            true
+                        ),
+                        Push::Queued
+                    );
+                }
+            }
+            assert!(h.pending());
+            let (lines, dropped) = drain_all_items(&h, 7);
+            assert_eq!(dropped, 0);
+            assert_eq!(lines.len(), 160);
+            assert!(lines.windows(2).all(|w| w[0].1 < w[1].1), "timestamp order");
+            assert!(!h.pending());
+            // Per core the order of emission is kept.
+            for cpu in 0..4u8 {
+                let mine: std::vec::Vec<_> = lines.iter().filter(|l| l.0 == cpu).collect();
+                assert_eq!(mine.len(), 40);
+                assert!(mine.windows(2).all(|w| w[0].1 < w[1].1));
+            }
+        });
+    }
+
+    /// An overrun ring drops the newest lines and says how many; what was
+    /// queued stays in order.
+    #[test]
+    fn hub_overflow_is_counted() {
+        big(|| {
+            let h = Hub::new();
+            let total = RING_LINES + 25;
+            let mut queued = 0;
+            for i in 0..total {
+                let r = h.push(
+                    2,
+                    (i as u64 + 1) * 10_000_000,
+                    Level::Warn,
+                    format_args!("w{i}"),
+                    false,
+                );
+                if r == Push::Queued {
+                    queued += 1;
+                }
+            }
+            assert_eq!(queued, RING_LINES);
+            let (lines, dropped) = drain_all_items(&h, 100);
+            assert_eq!(lines.len(), RING_LINES);
+            assert_eq!(dropped, 25);
+            assert_eq!(lines[0].2, "w0");
+            assert_eq!(lines[RING_LINES - 1].2, format!("w{}", RING_LINES - 1));
+            // Reported once.
+            let (_, again) = drain_all_items(&h, 100);
+            assert_eq!(again, 0);
+        });
+    }
+
+    /// Information may fill three quarters of a ring; warnings still find
+    /// room after that, and an audit line is refused only by a full ring
+    /// (its caller then writes it synchronously).
+    #[test]
+    fn hub_keeps_room_for_warnings() {
+        big(|| {
+            let h = Hub::new();
+            let mut info_in = 0;
+            for i in 0..RING_LINES {
+                // Fresh timestamps far apart: the limiter always has a token.
+                let ns = (i as u64 + 1) * 1_000_000_000;
+                if h.push(1, ns, Level::Info, format_args!("i{i}"), false) == Push::Queued {
+                    info_in += 1;
+                }
+            }
+            assert_eq!(info_in, RING_LINES * 3 / 4);
+            assert_eq!(
+                h.push(1, 100_000_000_000, Level::Warn, format_args!("warn"), false),
+                Push::Queued
+            );
+            let (lines, dropped) = drain_all_items(&h, 1000);
+            assert_eq!(dropped, (RING_LINES - RING_LINES * 3 / 4) as u64);
+            assert_eq!(lines.len(), RING_LINES * 3 / 4 + 1);
+        });
+    }
+
+    /// The per-core rate limit suppresses a flood and says so; audit lines
+    /// are exempt.
+    #[test]
+    fn hub_rate_limits_per_core_and_exempts_audit() {
+        big(|| {
+            let h = Hub::new();
+            let mut queued = 0;
+            let mut drained = 0;
+            for i in 0..(BURST * 3) {
+                // All at the same instant: only the burst passes.
+                if h.push(0, 5, Level::Warn, format_args!("flood {i}"), false) == Push::Queued {
+                    queued += 1;
+                }
+                if i % 32 == 31 {
+                    drained += drain_all_items(&h, 1000).0.len() as u64;
+                }
+            }
+            assert_eq!(queued, BURST);
+            assert_eq!(drained + drain_all_items(&h, 1000).0.len() as u64, BURST);
+            // Another core has its own bucket.
+            assert_eq!(
+                h.push(1, 5, Level::Warn, format_args!("other core"), false),
+                Push::Queued
+            );
+            // An audit line passes with the bucket empty, and it carries the
+            // count of what the limiter swallowed.
+            assert_eq!(
+                h.push(0, 5, Level::Warn, format_args!("audited"), true),
+                Push::Queued
+            );
+            let (lines, _) = drain_all_items(&h, 1000);
+            let texts: std::vec::Vec<_> = lines.iter().map(|l| l.2.as_str()).collect();
+            assert!(texts.contains(&"audited"));
+            assert!(
+                texts
+                    .iter()
+                    .any(|t| t.contains("suppressed by the rate limit"))
+            );
+        });
+    }
+
+    /// Several producer threads (one ring each) and one draining thread:
+    /// every line is either delivered exactly once, in its core's order, or
+    /// counted as dropped.
+    #[test]
+    fn hub_concurrent_producers_and_a_drain_lose_nothing_uncounted() {
+        big(|| {
+            use std::sync::Arc;
+            use std::sync::atomic::AtomicBool as Flag;
+            let h = Arc::new(Hub::new());
+            let done = Arc::new(Flag::new(false));
+            let per = 20_000u64;
+            let producers: std::vec::Vec<_> = (0..6usize)
+                .map(|cpu| {
+                    let h = Arc::clone(&h);
+                    std::thread::spawn(move || {
+                        let mut queued = 0u64;
+                        for i in 0..per {
+                            if h.push(
+                                cpu,
+                                (i + 1) * 10_000_000,
+                                Level::Warn,
+                                format_args!("{i}"),
+                                false,
+                            ) == Push::Queued
+                            {
+                                queued += 1;
+                            }
+                            if i % 64 == 0 {
+                                std::thread::yield_now();
+                            }
+                        }
+                        queued
+                    })
+                })
+                .collect();
+            let drainer = {
+                let h = Arc::clone(&h);
+                let done = Arc::clone(&done);
+                std::thread::spawn(move || {
+                    let mut last = [None::<u64>; 6];
+                    let (mut got, mut dropped) = (0u64, 0u64);
+                    loop {
+                        let finished = done.load(Ordering::Acquire);
+                        h.drain(32, &mut |it| match it {
+                            Item::Line(r) => {
+                                let v: u64 = r.text().parse().unwrap();
+                                let slot = &mut last[usize::from(r.cpu)];
+                                assert!(slot.is_none_or(|p| v > p), "per-core order");
+                                *slot = Some(v);
+                                got += 1;
+                            }
+                            Item::Dropped { n, .. } => dropped += n,
+                        });
+                        if finished && !h.pending() {
+                            break;
+                        }
+                    }
+                    (got, dropped)
+                })
+            };
+            let queued: u64 = producers.into_iter().map(|t| t.join().unwrap()).sum();
+            done.store(true, Ordering::Release);
+            let (got, dropped) = drainer.join().unwrap();
+            assert_eq!(got, queued, "every queued line delivered once");
+            assert_eq!(
+                got + dropped,
+                per * 6,
+                "every other line counted as dropped"
+            );
+        });
+    }
+
+    /// A producer end that is already in use (an interrupt that was not
+    /// masked) loses the line instead of corrupting a slot.
+    #[test]
+    fn a_busy_producer_end_refuses_without_waiting() {
+        let r: ring::Ring<4> = ring::Ring::new();
+        let inner = r.produce(|_, _| r.produce(|_, _| ()));
+        assert_eq!(inner, Some(None));
     }
 }

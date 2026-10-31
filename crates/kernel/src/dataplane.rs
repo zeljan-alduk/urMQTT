@@ -206,6 +206,9 @@ impl Idle {
         }
         let now = time::uptime_ns();
         self.stats(now);
+        // Between handlers: the log's consumer core writes the sinks here
+        // (nothing on the other cores), and the dev flood logs (ADR-090).
+        let worked = crate::logtest::flood() | urmqtt_log::service() | worked;
         if worked {
             self.last_work_ns = now;
             return;
