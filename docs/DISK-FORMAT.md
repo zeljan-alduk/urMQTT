@@ -258,7 +258,10 @@ format), version 3.54.1, with:
 
 The VFS reports a 512-byte sector size and no device characteristics, so
 SQLite assumes a torn sector can damage its neighbours. Truncation
-(`xTruncate`) only changes the logical size; the bytes stay on disk.
+(`xTruncate`) changes the logical size; the bytes beyond it are free (§11:
+they may be released to the device, and what they hold is never read). A write
+beyond the logical end, or a truncate to a larger size, first fills the gap
+with zeros.
 
 ### 5.2 Telemetry log (kind 4)
 
@@ -403,6 +406,7 @@ slot B's, which the first-boot head clearing also zeroes).
 - The format has no pointers into memory and no host-endian fields.
 - **Superblock updates are single block writes to the slot not in force**, then a flush. A torn write leaves the slot invalid and the other slot in force.
 - A layout update never moves existing data (grow), or switches only after the copy is verified (migrate).
+- **Nothing reads the content of a range the store released** (§11): a byte beyond a file's logical size is never returned, a telemetry segment exists only by its header and record checksums, and the superblocks, size table and telemetry header are never inside a released range.
 
 ## 8. Known gaps (STORAGE-PLAN)
 
@@ -478,3 +482,23 @@ A cut anywhere leaves a valid v1 disk (before step 3) or a valid v2 disk (after
 it). `migrate --resume` finishes from the recorded state, `migrate --rollback`
 returns to v1 (it restores LBA 0 from the saved copy or the rollback file,
 zeroes slot B, clears the state blocks).
+
+## 11. Released space (S4, ADR-150, ADR-151)
+
+Not a format change: no field is added and a v2 disk written before S4 is read
+as it was. The store may tell the device that a range holds no data
+(virtio-blk DISCARD, SCSI UNMAP, or zeroing that may unmap; NVMe and AHCI in
+X13), for three kinds of range, always inside a region extent and shrunk
+inwards to the device's granule and the physical block:
+
+| Range | When |
+|---|---|
+| a telemetry segment | its newest record is older than `storage.retention_days` and it is not the active segment of its partition; its first block (the header) is zeroed first |
+| the logical tail of a file | `xTruncate` or `xDelete` made the file shorter (after the size table is durable) |
+| space added by a grow | the new extents, after the superblock that references them |
+
+What such a range reads back as afterwards is undefined: zeros, the old bytes,
+or garbage. Every reader therefore treats it as unwritten, which is already how
+the format works: file bytes beyond the logical size are not read, a segment is
+valid only with the magic, this layout's UUID and a valid CRC, and a record only
+with its CRC. `storage.discard = "off"` stops all of it.

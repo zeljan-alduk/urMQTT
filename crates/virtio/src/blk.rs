@@ -3,17 +3,27 @@
 
 use crate::queue::{Buf, DmaRegion, SplitQueue};
 use crate::transport::Transport;
-use crate::{BlockTopology, Env, F_VERSION_1, VirtioError, wait_used};
+use crate::{BlockTopology, Env, F_VERSION_1, UnmapLimits, VirtioError, wait_used};
 
 pub const F_RO: u64 = 1 << 5;
 pub const F_BLK_SIZE: u64 = 1 << 6;
 pub const F_FLUSH: u64 = 1 << 9;
 pub const F_TOPOLOGY: u64 = 1 << 10;
+pub const F_DISCARD: u64 = 1 << 13;
+pub const F_WRITE_ZEROES: u64 = 1 << 14;
 
 pub const SECTOR: u64 = 512;
 const T_IN: u32 = 0;
 const T_OUT: u32 = 1;
 const T_FLUSH: u32 = 4;
+const T_DISCARD: u32 = 11;
+const T_WRITE_ZEROES: u32 = 13;
+/// Status of a request the device does not support.
+pub const S_UNSUPP: u8 = 2;
+/// `unmap` flag of a write-zeroes segment.
+const FLAG_UNMAP: u32 = 1;
+/// One discard or write-zeroes segment (virtio 1.x §5.2.6.1).
+const SEG: usize = 16;
 const S_OK: u8 = 0;
 
 const QUEUE_SIZE: u16 = 16;
@@ -37,6 +47,8 @@ pub struct VirtioBlk {
     /// The device signals configuration changes (a resize) on the queue's
     /// MSI-X vector.
     pub config_irq: bool,
+    /// What the device can discard or zero, with its limits (S4).
+    pub unmap: UnmapLimits,
 }
 
 const HDR: usize = 0;
@@ -55,7 +67,11 @@ impl VirtioBlk {
         env: &E,
         msix: Option<u16>,
     ) -> Result<Self, VirtioError> {
-        let features = t.init(env, F_RO | F_BLK_SIZE | F_FLUSH | F_TOPOLOGY, F_VERSION_1)?;
+        let features = t.init(
+            env,
+            F_RO | F_BLK_SIZE | F_FLUSH | F_TOPOLOGY | F_DISCARD | F_WRITE_ZEROES,
+            F_VERSION_1,
+        )?;
         let size = QUEUE_SIZE.min(t.queue_max(0));
         let mem = env
             .dma_alloc(crate::queue::Layout::new(size).total)
@@ -91,6 +107,26 @@ impl VirtioBlk {
                 ..BlockTopology::default()
             }
         };
+        // max_discard_sectors (36), max_discard_seg (40),
+        // discard_sector_alignment (44), max_write_zeroes_sectors (48),
+        // max_write_zeroes_seg (52), write_zeroes_may_unmap (56).
+        let (f_discard, f_zeroes) = (features & F_DISCARD != 0, features & F_WRITE_ZEROES != 0);
+        let unmap = if f_discard || f_zeroes {
+            UnmapLimits::from_blk(
+                f_discard,
+                f_zeroes,
+                [
+                    t.device.read32(36),
+                    t.device.read32(40),
+                    t.device.read32(44),
+                    t.device.read32(48),
+                    t.device.read32(52),
+                ],
+                t.device.read32(56) & 0xff != 0,
+            )
+        } else {
+            UnmapLimits::default()
+        };
         // A resize of the backing volume is announced as a configuration
         // change; with MSI-X it uses the queue's vector (S3, ADR-143).
         let config_irq = msix.is_some_and(|v| t.set_config_vector(v));
@@ -106,6 +142,7 @@ impl VirtioBlk {
             read_only: features & F_RO != 0,
             topology,
             config_irq,
+            unmap,
         })
     }
 
@@ -230,5 +267,77 @@ impl VirtioBlk {
             return Err(VirtioError::MissingFeatures(F_FLUSH));
         }
         self.submit(env, T_FLUSH, 0, 0)
+    }
+
+    /// Checks a batch of (sector, sectors) ranges against the device's
+    /// limits for one request.
+    fn check_ranges(
+        &self,
+        ranges: &[(u64, u32)],
+        max_sectors: u32,
+        max_ranges: u32,
+    ) -> Result<(), VirtioError> {
+        if self.read_only
+            || ranges.is_empty()
+            || ranges.len() > max_ranges as usize
+            || ranges.len() * SEG > MAX_IO
+        {
+            return Err(VirtioError::OutOfRange);
+        }
+        for &(sector, n) in ranges {
+            if n == 0
+                || n > max_sectors
+                || sector.saturating_add(u64::from(n)) > self.capacity_sectors
+            {
+                return Err(VirtioError::OutOfRange);
+            }
+        }
+        Ok(())
+    }
+
+    fn put_ranges(&mut self, ranges: &[(u64, u32)], flags: u32) {
+        let buf = self.io_bytes(DATA, ranges.len() * SEG);
+        for (chunk, &(sector, n)) in buf.as_chunks_mut::<SEG>().0.iter_mut().zip(ranges) {
+            chunk[0..8].copy_from_slice(&sector.to_le_bytes());
+            chunk[8..12].copy_from_slice(&n.to_le_bytes());
+            chunk[12..16].copy_from_slice(&flags.to_le_bytes());
+        }
+    }
+
+    /// Tells the device the sector ranges (start, count) no longer hold
+    /// data (`VIRTIO_BLK_T_DISCARD`). At most `unmap.max_discard_ranges`
+    /// ranges of at most `unmap.max_discard_sectors` each; the caller keeps
+    /// them aligned. What a discarded sector reads back as is undefined.
+    pub fn discard<E: Env>(&mut self, env: &E, ranges: &[(u64, u32)]) -> Result<(), VirtioError> {
+        if !self.unmap.discard {
+            return Err(VirtioError::MissingFeatures(F_DISCARD));
+        }
+        self.check_ranges(
+            ranges,
+            self.unmap.max_discard_sectors,
+            self.unmap.max_discard_ranges,
+        )?;
+        self.put_ranges(ranges, 0);
+        self.submit(env, T_DISCARD, 0, ranges.len() * SEG)
+    }
+
+    /// Writes zeros to the ranges with the `unmap` flag, which lets the
+    /// device deallocate them (`VIRTIO_BLK_T_WRITE_ZEROES`, only used when
+    /// the device says it may unmap). The sectors read back as zeros.
+    pub fn write_zeroes<E: Env>(
+        &mut self,
+        env: &E,
+        ranges: &[(u64, u32)],
+    ) -> Result<(), VirtioError> {
+        if !self.unmap.zeroes {
+            return Err(VirtioError::MissingFeatures(F_WRITE_ZEROES));
+        }
+        self.check_ranges(
+            ranges,
+            self.unmap.max_zeroes_sectors,
+            self.unmap.max_zeroes_ranges,
+        )?;
+        self.put_ranges(ranges, FLAG_UNMAP);
+        self.submit(env, T_WRITE_ZEROES, 0, ranges.len() * SEG)
     }
 }

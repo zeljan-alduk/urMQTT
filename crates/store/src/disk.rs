@@ -1,6 +1,7 @@
 //! Byte-addressed access to the regions of a sector device, with logical
 //! file sizes persisted in the double-buffered size table (ADR-030), the
-//! topology-aware write path (ADR-140) and the crash-safe grow (ADR-142).
+//! topology-aware write path (ADR-140), the crash-safe grow (ADR-142) and
+//! the discard queue (ADR-150).
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -50,6 +51,146 @@ pub trait BlockDevice: Send {
     }
     /// A partition window follows the partition table: now `sectors` long.
     fn resize_window(&mut self, _sectors: u64) {}
+    /// What the device can unmap, and its limits (S4). `None`: nothing.
+    fn discard_caps(&self) -> Option<DiscardCaps> {
+        None
+    }
+    /// Tells the device the ranges (first sector, sectors) hold no data any
+    /// more. The caller has split them to the limits of
+    /// [`discard_caps`](Self::discard_caps). What the sectors read back as
+    /// afterwards is up to the device (zeros, the old data or anything).
+    fn discard(&mut self, _ranges: &[(u64, u64)]) -> Result<(), IoError> {
+        Err(IoError::Unsupported)
+    }
+}
+
+/// How a device releases space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardKind {
+    /// DISCARD (virtio-blk), UNMAP (SCSI), TRIM, Deallocate.
+    Discard,
+    /// WRITE ZEROES with the unmap flag (WRITE SAME with UNMAP): the
+    /// sectors read back as zeros.
+    WriteZeroes,
+}
+
+/// The limits of a device's discard command (STORAGE-PLAN S4). Sizes in
+/// 512-byte sectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiscardCaps {
+    pub kind: DiscardKind,
+    /// Largest single range.
+    pub max_sectors: u64,
+    /// Ranges per request.
+    pub max_ranges: u32,
+    /// Start and length of a range are multiples of this (at least 1).
+    pub granularity: u64,
+}
+
+/// Why space is released; counted separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardSource {
+    /// A retired telemetry segment.
+    Telemetry,
+    /// The logical tail of a file the VFS truncated.
+    Truncate,
+    /// Space a grow added to the layout.
+    Grow,
+}
+
+/// Counters of the discard path, all in bytes except the request counts.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DiscardStats {
+    pub queued_telemetry: u64,
+    pub queued_truncate: u64,
+    pub queued_grow: u64,
+    /// Requests sent to the device and descriptors in them.
+    pub requests: u64,
+    pub ranges: u64,
+    /// Bytes the device was told to release.
+    pub bytes: u64,
+    /// Queued bytes a later write took back before they were sent.
+    pub cancelled: u64,
+    /// Bytes not queued because the queue was full (space is merely not
+    /// released).
+    pub dropped: u64,
+    /// Requests the device failed.
+    pub failed: u64,
+    /// The device said it does not support the command: discards stopped.
+    pub unsupported: bool,
+}
+
+/// A range of device sectors, `[start, end)`.
+type Span = (u64, u64);
+
+/// Longest list of waiting ranges; further ones are dropped.
+const MAX_SPANS: usize = 512;
+/// Largest range sent in one descriptor (16 MiB): a long discard blocks
+/// the device for a while, so the work is cut into pieces.
+const MAX_CHUNK_SECTORS: u64 = 32_768;
+/// After this many failed requests in a row discards stop for the boot.
+const MAX_FAILURES: u32 = 3;
+
+struct DiscardState {
+    caps: DiscardCaps,
+    /// Ranges queued since the last sync: they may still be referenced by
+    /// state that is not durable (a size table not yet written).
+    staged: Vec<Span>,
+    /// Ranges released by a sync: the next `run_discards` sends them.
+    ready: Vec<Span>,
+    stats: DiscardStats,
+    failures: u32,
+    stopped: bool,
+}
+
+/// Adds `[s, e)` to a sorted list of disjoint spans, merging neighbours.
+/// `false` if the list is full (nothing added).
+fn span_add(list: &mut Vec<Span>, s: u64, e: u64) -> bool {
+    if s >= e {
+        return true;
+    }
+    let (mut s, mut e) = (s, e);
+    let mut keep = Vec::with_capacity(list.len() + 1);
+    for &(a, b) in list.iter() {
+        if b < s || a > e {
+            keep.push((a, b));
+        } else {
+            s = s.min(a);
+            e = e.max(b);
+        }
+    }
+    keep.push((s, e));
+    keep.sort_unstable();
+    if keep.len() > MAX_SPANS {
+        return false;
+    }
+    *list = keep;
+    true
+}
+
+/// Removes `[s, e)` from the list; returns the sectors removed.
+fn span_cut(list: &mut Vec<Span>, s: u64, e: u64) -> u64 {
+    let mut cut = 0;
+    let mut out = Vec::with_capacity(list.len() + 1);
+    for &(a, b) in list.iter() {
+        if b <= s || a >= e {
+            out.push((a, b));
+            continue;
+        }
+        cut += b.min(e) - a.max(s);
+        if a < s {
+            out.push((a, s));
+        }
+        if b > e {
+            out.push((e, b));
+        }
+    }
+    *list = out;
+    cut
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +198,8 @@ pub enum IoError {
     Device,
     OutOfRange,
     NoFlush,
+    /// The device does not implement the command.
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +249,10 @@ pub struct Disk {
     /// the logical block. Every device write is a multiple of it.
     gran: usize,
     topo: Topology,
+    /// Written since the last flush.
+    unsynced: bool,
+    /// The discard queue (S4); `None` while discards are off.
+    discard: Option<DiscardState>,
     pub stats: DiskStats,
 }
 
@@ -220,8 +367,208 @@ impl Disk {
             sb_slot,
             gran,
             topo,
+            unsynced: false,
+            discard: None,
             stats: DiskStats::default(),
         }
+    }
+
+    /// Turns the discard queue on (`storage.discard = "auto"`) or off. On
+    /// only if the device offers a command. Returns the device's limits
+    /// when discards are on. Calling it with `false` drops what is queued.
+    pub fn set_discard(&mut self, on: bool) -> Option<DiscardCaps> {
+        self.discard = None;
+        if !on {
+            return None;
+        }
+        let mut caps = self.dev.discard_caps()?;
+        caps.granularity = caps.granularity.max(1);
+        caps.max_ranges = caps.max_ranges.max(1);
+        if caps.max_sectors < caps.granularity {
+            return None;
+        }
+        self.discard = Some(DiscardState {
+            caps,
+            staged: Vec::new(),
+            ready: Vec::new(),
+            stats: DiscardStats::default(),
+            failures: 0,
+            stopped: false,
+        });
+        Some(caps)
+    }
+
+    /// Whether discards are on and have not been stopped by the device.
+    pub fn discard_active(&self) -> bool {
+        self.discard.as_ref().is_some_and(|d| !d.stopped)
+    }
+
+    pub fn discard_stats(&self) -> Option<DiscardStats> {
+        self.discard.as_ref().map(|d| d.stats)
+    }
+
+    /// Whether ranges wait to be sent (staged ranges wait for a sync).
+    pub fn discard_pending(&self) -> bool {
+        self.discard
+            .as_ref()
+            .is_some_and(|d| !d.stopped && !(d.ready.is_empty() && d.staged.is_empty()))
+    }
+
+    /// Whether ranges are ready to be sent now.
+    pub fn discard_ready(&self) -> bool {
+        self.discard
+            .as_ref()
+            .is_some_and(|d| !d.stopped && !d.ready.is_empty())
+    }
+
+    /// Queues the byte range `[offset, offset + len)` of region `kind` to
+    /// be released (a retired telemetry segment). Nothing is sent now: the
+    /// range waits for the next [`sync`](Self::sync) (what retired it is
+    /// durable by then) and for [`run_discards`](Self::run_discards), and a
+    /// write to it in the meantime takes it back. The range is shrunk to
+    /// the device's granularity and to whole physical blocks.
+    pub fn discard_region(
+        &mut self,
+        kind: RegionKind,
+        offset: u64,
+        len: u64,
+        source: DiscardSource,
+    ) {
+        if self.discard.is_none() || len == 0 {
+            return;
+        }
+        let Ok(len_us) = usize::try_from(len) else {
+            return;
+        };
+        let Ok(pieces) = self.pieces(kind, offset, len_us) else {
+            return;
+        };
+        for (lba0, off, n) in pieces {
+            let s = lba0 + off.div_ceil(SECTOR);
+            let e = lba0 + (off + n as u64) / SECTOR;
+            self.discard_sectors(s, e, source);
+        }
+    }
+
+    /// Queues the device sectors `[start, end)` (relative to this device)
+    /// as [`discard_region`](Self::discard_region) does.
+    fn discard_sectors(&mut self, start: u64, end: u64, source: DiscardSource) {
+        let base = self.dev.base_lba();
+        let total = self.dev.sectors();
+        // With nothing waiting to become durable there is nothing the
+        // retirement could still depend on: the range is ready at once.
+        let durable = !self.unsynced && !self.dirty;
+        let Some(d) = self.discard.as_mut() else {
+            return;
+        };
+        if d.stopped {
+            return;
+        }
+        // Inward to the granule, judged on the physical disk, and to the
+        // write granularity: a partial physical block is never released.
+        let g = d.caps.granularity;
+        let wg = (self.gran as u64 / SECTOR).max(1);
+        let unit = g / gcd(g, wg) * wg;
+        let a = (base + start).div_ceil(unit) * unit;
+        let b = (base + end.min(total)) / unit * unit;
+        let (Some(a), Some(b)) = (a.checked_sub(base), b.checked_sub(base)) else {
+            return;
+        };
+        if b <= a {
+            return;
+        }
+        let bytes = (b - a) * SECTOR;
+        let list = if durable { &mut d.ready } else { &mut d.staged };
+        if span_add(list, a, b) {
+            match source {
+                DiscardSource::Telemetry => d.stats.queued_telemetry += bytes,
+                DiscardSource::Truncate => d.stats.queued_truncate += bytes,
+                DiscardSource::Grow => d.stats.queued_grow += bytes,
+            }
+        } else {
+            d.stats.dropped += bytes;
+        }
+    }
+
+    /// A write to `[lba, lba + sectors)` takes back queued ranges there.
+    fn discard_cancel(&mut self, lba: u64, sectors: u64) {
+        let Some(d) = self.discard.as_mut() else {
+            return;
+        };
+        if d.staged.is_empty() && d.ready.is_empty() {
+            return;
+        }
+        let e = lba + sectors;
+        let cut = span_cut(&mut d.staged, lba, e) + span_cut(&mut d.ready, lba, e);
+        d.stats.cancelled += cut * SECTOR;
+    }
+
+    /// Sends at most `max_requests` discard requests for ranges a sync has
+    /// released, each within the device's limits. Called by the owner of
+    /// the disk when it is idle: never between a write and the flush that
+    /// makes it durable, and never in front of a commit. Returns the bytes
+    /// the device was told to release. A failing device is given up on
+    /// after a few errors (counted in the stats).
+    pub fn run_discards(&mut self, max_requests: usize) -> Result<u64, DiskError> {
+        let mut sent = 0u64;
+        for _ in 0..max_requests {
+            let Some(d) = self.discard.as_mut().filter(|d| !d.stopped) else {
+                break;
+            };
+            let caps = d.caps;
+            let chunk = caps
+                .max_sectors
+                .min(MAX_CHUNK_SECTORS)
+                .max(caps.granularity);
+            let chunk = chunk / caps.granularity * caps.granularity;
+            let mut batch: Vec<(u64, u64)> = Vec::new();
+            while batch.len() < caps.max_ranges as usize {
+                let Some(first) = d.ready.first_mut() else {
+                    break;
+                };
+                let n = (first.1 - first.0).min(chunk);
+                batch.push((first.0, n));
+                first.0 += n;
+                if first.0 >= first.1 {
+                    d.ready.remove(0);
+                }
+            }
+            if batch.is_empty() {
+                break;
+            }
+            let bytes: u64 = batch.iter().map(|b| b.1 * SECTOR).sum();
+            let ranges = batch.len() as u64;
+            match self.dev.discard(&batch) {
+                Ok(()) => {
+                    if let Some(d) = self.discard.as_mut() {
+                        d.stats.requests += 1;
+                        d.stats.ranges += ranges;
+                        d.stats.bytes += bytes;
+                        d.failures = 0;
+                    }
+                    sent += bytes;
+                }
+                Err(e) => {
+                    if let Some(d) = self.discard.as_mut() {
+                        d.stats.failed += 1;
+                        d.failures += 1;
+                        if e == IoError::Unsupported {
+                            d.stats.unsupported = true;
+                            d.stopped = true;
+                        }
+                        if d.failures >= MAX_FAILURES {
+                            d.stopped = true;
+                        }
+                        if d.stopped {
+                            d.ready.clear();
+                            d.staged.clear();
+                        }
+                    }
+                    return Err(DiskError::Io(e));
+                }
+            }
+        }
+        Ok(sent)
     }
 
     pub fn layout(&self) -> &Layout {
@@ -261,11 +608,23 @@ impl Disk {
     }
 
     pub fn set_file_size(&mut self, f: FileKind, size: u64) {
-        if let Some(s) = self.sizes.sizes.get_mut(f as usize)
-            && *s != size
-        {
-            *s = size;
-            self.dirty = true;
+        let Some(s) = self.sizes.sizes.get_mut(f as usize) else {
+            return;
+        };
+        if *s == size {
+            return;
+        }
+        let old = *s;
+        *s = size;
+        self.dirty = true;
+        // The logical tail of a truncated file is free (xTruncate, ADR-150).
+        if size < old {
+            self.discard_region(
+                RegionKind::of_file(f),
+                size,
+                old - size,
+                DiscardSource::Truncate,
+            );
         }
     }
 
@@ -289,6 +648,8 @@ impl Disk {
         if !abs.wrapping_sub(shift).is_multiple_of(g) || !(buf.len() as u64).is_multiple_of(g) {
             self.stats.misaligned_writes += 1;
         }
+        self.discard_cancel(lba, (buf.len() as u64).div_ceil(SECTOR));
+        self.unsynced = true;
         self.dev.write(lba, buf)
     }
 
@@ -312,6 +673,15 @@ impl Disk {
             self.stats.size_table_writes += 1;
             self.sizes = next;
             self.dirty = false;
+        }
+        // Everything that retired the staged ranges is durable now.
+        self.unsynced = false;
+        if let Some(d) = self.discard.as_mut() {
+            for (a, b) in core::mem::take(&mut d.staged) {
+                if !span_add(&mut d.ready, a, b) {
+                    d.stats.dropped += (b - a) * SECTOR;
+                }
+            }
         }
         Ok(())
     }
@@ -353,9 +723,37 @@ impl Disk {
                 .saturating_sub(self.layout.bytes(RegionKind::Telemetry))
                 / SECTOR,
         };
+        // The added space may hold what an earlier life of the volume left
+        // there: release it (nothing references it yet).
+        let top = |l: &Layout| {
+            l.regions
+                .iter()
+                .filter(|r| r.kind != RegionKind::Scratch)
+                .map(Region::end)
+                .max()
+                .unwrap_or(0)
+        };
+        let (from, to) = (top(&self.layout), top(&next));
         self.layout = next;
         self.sb_slot = slot;
+        self.discard_sectors(from, to, DiscardSource::Grow);
         Ok(Some(info))
+    }
+
+    /// Writes zeros over the bytes `[from, to)` of region `kind`: a file
+    /// that grows without being written (a write past its end, a truncate
+    /// to a larger size) must read as zeros there, and the device may hold
+    /// anything after a discard (ADR-150).
+    pub fn zero_fill(&mut self, kind: RegionKind, from: u64, to: u64) -> Result<(), DiskError> {
+        const STEP: u64 = 64 * 1024;
+        let zeros = vec![0u8; STEP as usize];
+        let mut at = from;
+        while at < to {
+            let n = (to - at).min(STEP) as usize;
+            self.write_at(kind, at, zeros.get(..n).unwrap_or(&[]))?;
+            at += n as u64;
+        }
+        Ok(())
     }
 
     /// Online grow (S3, ADR-143), after a configuration-change notification
@@ -541,6 +939,37 @@ fn read_sizes(dev: &mut dyn BlockDevice) -> Result<SizeTable, DiskError> {
     )
 }
 
+/// What a [`MemDisk`] returns for sectors it was told to discard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Released {
+    /// Zeros (a thin-provisioned disk, WRITE ZEROES).
+    Zeros,
+    /// Pseudo-random bytes: the contents are undefined, and recovery must
+    /// not trust them.
+    Garbage,
+    /// The old data: the device ignored the command.
+    Keep,
+}
+
+/// A discard-capable [`MemDisk`]: strict about the limits it advertises.
+struct MemDiscard {
+    caps: DiscardCaps,
+    released: Released,
+    /// Every range accepted, in order.
+    log: Vec<(u64, u64)>,
+    requests: u64,
+    /// Requests that broke the advertised limits (and were refused).
+    violations: u64,
+    /// Fail the request that would be this number (1-based), once.
+    fail_request: Option<u64>,
+}
+
+/// One unflushed operation of the volatile cache.
+enum CacheOp {
+    Write(u64, Vec<u8>),
+    Discard(u64, u64),
+}
+
 /// In-memory block device for host tests, with a volatile write cache:
 /// writes become durable only on `flush`, and [`MemDisk::crash`] throws
 /// the cache away (or keeps a chosen subset) like a power loss. The medium
@@ -554,8 +983,9 @@ pub struct MemDisk {
 struct MemInner {
     bytes: u64,
     durable: BTreeMap<u64, Box<[u8; BLOCK]>>,
-    /// Completed but unflushed writes, in order.
-    cache: Vec<(u64, Vec<u8>)>,
+    /// Completed but unflushed writes and discards, in order.
+    cache: Vec<CacheOp>,
+    discard: Option<MemDiscard>,
     writes: u64,
     fail_after_writes: Option<u64>,
     topo: Topology,
@@ -581,6 +1011,7 @@ impl MemDisk {
                 bytes,
                 durable: BTreeMap::new(),
                 cache: Vec::new(),
+                discard: None,
                 writes: 0,
                 fail_after_writes: None,
                 topo: Topology::default(),
@@ -632,6 +1063,14 @@ impl MemDisk {
                 bytes: g.bytes,
                 durable: g.durable.clone(),
                 cache: Vec::new(),
+                discard: g.discard.as_ref().map(|d| MemDiscard {
+                    caps: d.caps,
+                    released: d.released,
+                    log: Vec::new(),
+                    requests: 0,
+                    violations: 0,
+                    fail_request: None,
+                }),
                 writes: 0,
                 fail_after_writes: None,
                 topo: g.topo,
@@ -648,9 +1087,10 @@ impl MemDisk {
     pub fn crash(&self, mut keep: impl FnMut(usize) -> bool) {
         let mut g = self.inner.lock();
         let cache = core::mem::take(&mut g.cache);
-        for (i, (lba, data)) in cache.into_iter().enumerate() {
+        let released = g.discard.as_ref().map(|d| d.released);
+        for (i, op) in cache.into_iter().enumerate() {
             if keep(i) {
-                apply(&mut g.durable, lba, &data);
+                apply_op(&mut g.durable, op, released);
             }
         }
         g.fail_after_writes = None;
@@ -703,6 +1143,118 @@ impl MemDisk {
     pub fn device(&self) -> Box<dyn BlockDevice> {
         Box::new(self.clone())
     }
+
+    /// Makes the disk accept discards within `caps`, returning `released`
+    /// for what it discarded. Requests outside the limits are refused and
+    /// counted by [`discard_violations`](Self::discard_violations).
+    #[must_use]
+    pub fn with_discard(self, caps: DiscardCaps, released: Released) -> Self {
+        self.inner.lock().discard = Some(MemDiscard {
+            caps,
+            released,
+            log: Vec::new(),
+            requests: 0,
+            violations: 0,
+            fail_request: None,
+        });
+        self
+    }
+
+    /// Every range the disk accepted to discard (first sector, sectors).
+    pub fn discard_log(&self) -> Vec<(u64, u64)> {
+        self.inner
+            .lock()
+            .discard
+            .as_ref()
+            .map(|d| d.log.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn discard_requests(&self) -> u64 {
+        self.inner.lock().discard.as_ref().map_or(0, |d| d.requests)
+    }
+
+    /// Requests that broke the advertised limits.
+    pub fn discard_violations(&self) -> u64 {
+        self.inner
+            .lock()
+            .discard
+            .as_ref()
+            .map_or(0, |d| d.violations)
+    }
+
+    /// Fails the n-th discard request from now (1-based), once.
+    pub fn fail_discard(&self, n: u64) {
+        if let Some(d) = self.inner.lock().discard.as_mut() {
+            d.fail_request = Some(d.requests + n);
+        }
+    }
+
+    /// Bytes of the medium that hold anything (4 KiB blocks present): what
+    /// a thin-provisioned volume would have allocated.
+    pub fn allocated_bytes(&self) -> u64 {
+        self.inner.lock().durable.len() as u64 * BLOCK as u64
+    }
+
+    /// Overwrites sectors of the durable medium with pseudo-random bytes
+    /// (what an unmapped range may read back as).
+    pub fn scribble(&self, lba: u64, sectors: u64, seed: u64) {
+        let mut g = self.inner.lock();
+        garbage(&mut g.durable, lba, sectors, seed);
+    }
+}
+
+const GARBAGE_SEED: u64 = 0x0d15_ca2d;
+
+/// Pseudo-random bytes (xorshift) into `[lba, lba + sectors)`.
+fn garbage(durable: &mut BTreeMap<u64, Box<[u8; BLOCK]>>, lba: u64, sectors: u64, seed: u64) {
+    // Each sector's bytes depend only on its number, so a read of part of a
+    // discarded range sees what the flush will write.
+    let mut buf = vec![0u8; (sectors * SECTOR) as usize];
+    for (i, sector) in buf.chunks_mut(SECTOR as usize).enumerate() {
+        let mut x = (seed ^ (lba + i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)) | 1;
+        for b in sector {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = (x >> 24) as u8;
+        }
+    }
+    apply(durable, lba, &buf);
+}
+
+/// Zeros into `[lba, lba + sectors)`; whole blocks leave the map.
+fn zero_range(durable: &mut BTreeMap<u64, Box<[u8; BLOCK]>>, lba: u64, sectors: u64) {
+    let (mut at, end) = (lba * SECTOR, (lba + sectors) * SECTOR);
+    let bs = BLOCK as u64;
+    while at < end {
+        let idx = at / bs;
+        let off = (at % bs) as usize;
+        let n = (bs - off as u64).min(end - at) as usize;
+        if off == 0 && n == BLOCK {
+            durable.remove(&idx);
+        } else if let Some(blk) = durable.get_mut(&idx)
+            && let Some(d) = blk.get_mut(off..off + n)
+        {
+            d.fill(0);
+        }
+        at += n as u64;
+    }
+}
+
+fn apply_op(
+    durable: &mut BTreeMap<u64, Box<[u8; BLOCK]>>,
+    op: CacheOp,
+    released: Option<Released>,
+) {
+    match op {
+        CacheOp::Write(lba, data) => apply(durable, lba, &data),
+        CacheOp::Discard(lba, n) => match released {
+            Some(Released::Zeros) => zero_range(durable, lba, n),
+            Some(Released::Garbage) => garbage(durable, lba, n, GARBAGE_SEED),
+            Some(Released::Keep) | None => {}
+        },
+    }
 }
 
 fn read_blocks(m: &BTreeMap<u64, Box<[u8; BLOCK]>>, mut at: u64, out: &mut [u8]) {
@@ -753,16 +1305,42 @@ impl BlockDevice for MemDisk {
             return Err(IoError::Device);
         }
         read_blocks(&g.durable, at, buf);
-        // Reads see cached writes, newest last.
-        for (wlba, data) in &g.cache {
-            let (ws, we) = (*wlba * SECTOR, *wlba * SECTOR + data.len() as u64);
+        // Reads see cached writes and discards, newest last.
+        let released = g.discard.as_ref().map(|d| d.released);
+        for op in &g.cache {
             let (rs, re) = (lba * SECTOR, lba * SECTOR + buf.len() as u64);
-            let (s, e) = (ws.max(rs), we.min(re));
-            if s < e {
-                let dst = buf.get_mut((s - rs) as usize..(e - rs) as usize);
-                let src = data.get((s - ws) as usize..(e - ws) as usize);
-                if let (Some(d), Some(x)) = (dst, src) {
-                    d.copy_from_slice(x);
+            match op {
+                CacheOp::Write(wlba, data) => {
+                    let (ws, we) = (*wlba * SECTOR, *wlba * SECTOR + data.len() as u64);
+                    let (s, e) = (ws.max(rs), we.min(re));
+                    if s < e {
+                        let dst = buf.get_mut((s - rs) as usize..(e - rs) as usize);
+                        let src = data.get((s - ws) as usize..(e - ws) as usize);
+                        if let (Some(d), Some(x)) = (dst, src) {
+                            d.copy_from_slice(x);
+                        }
+                    }
+                }
+                CacheOp::Discard(dlba, n) => {
+                    let (ds, de) = (*dlba * SECTOR, (*dlba + *n) * SECTOR);
+                    let (s, e) = (ds.max(rs), de.min(re));
+                    if s < e && released != Some(Released::Keep) {
+                        // Evaluate on a scratch map so reads and the
+                        // eventual flush agree byte for byte.
+                        let mut tmp = BTreeMap::new();
+                        let first = s / SECTOR;
+                        let cnt = (e - s).div_ceil(SECTOR);
+                        if released == Some(Released::Garbage) {
+                            garbage(&mut tmp, first, cnt, GARBAGE_SEED);
+                        }
+                        let mut out = vec![0u8; (cnt * SECTOR) as usize];
+                        read_blocks(&tmp, first * SECTOR, &mut out);
+                        let dst = buf.get_mut((s - rs) as usize..(e - rs) as usize);
+                        if let Some(d) = dst {
+                            let from = (s - first * SECTOR) as usize;
+                            d.copy_from_slice(out.get(from..from + d.len()).unwrap_or(&[]));
+                        }
+                    }
                 }
             }
         }
@@ -787,7 +1365,7 @@ impl BlockDevice for MemDisk {
             g.misaligned += 1;
         }
         g.writes += 1;
-        g.cache.push((lba, buf.to_vec()));
+        g.cache.push(CacheOp::Write(lba, buf.to_vec()));
         Ok(())
     }
 
@@ -795,8 +1373,50 @@ impl BlockDevice for MemDisk {
         let mut g = self.inner.lock();
         let cache = core::mem::take(&mut g.cache);
         g.flushes += 1;
-        for (lba, data) in cache {
-            apply(&mut g.durable, lba, &data);
+        let released = g.discard.as_ref().map(|d| d.released);
+        for op in cache {
+            apply_op(&mut g.durable, op, released);
+        }
+        Ok(())
+    }
+
+    fn discard_caps(&self) -> Option<DiscardCaps> {
+        self.inner.lock().discard.as_ref().map(|d| d.caps)
+    }
+
+    fn discard(&mut self, ranges: &[(u64, u64)]) -> Result<(), IoError> {
+        let mut g = self.inner.lock();
+        let total = g.bytes / SECTOR;
+        let cut = g.fail_after_writes.is_some_and(|n| g.writes >= n);
+        let Some(d) = g.discard.as_mut() else {
+            return Err(IoError::Unsupported);
+        };
+        d.requests += 1;
+        let c = d.caps;
+        let ok = !ranges.is_empty()
+            && ranges.len() <= c.max_ranges as usize
+            && ranges.iter().all(|&(s, n)| {
+                n > 0
+                    && n <= c.max_sectors
+                    && s.is_multiple_of(c.granularity)
+                    && n.is_multiple_of(c.granularity)
+                    && s + n <= total
+            });
+        if !ok {
+            d.violations += 1;
+            return Err(IoError::Device);
+        }
+        if d.fail_request == Some(d.requests) {
+            d.fail_request = None;
+            return Err(IoError::Device);
+        }
+        if cut {
+            return Err(IoError::Device);
+        }
+        d.log.extend_from_slice(ranges);
+        g.writes += 1;
+        for &(s, n) in ranges {
+            g.cache.push(CacheOp::Discard(s, n));
         }
         Ok(())
     }

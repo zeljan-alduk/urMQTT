@@ -287,6 +287,12 @@ unsafe extern "C" fn x_write(
     let data = unsafe { core::slice::from_raw_parts(buf.cast::<u8>(), amt as usize) };
     let off = off as u64;
     let r = with(|v| {
+        // A write past the end leaves a gap that reads as zeros, whatever
+        // the disk holds there (stale data, or anything after a discard).
+        let size = v.disk.file_size(kind);
+        if off > size {
+            v.disk.zero_fill(RegionKind::of_file(kind), size, off)?;
+        }
         v.disk.write_at(RegionKind::of_file(kind), off, data)?;
         let end = off + data.len() as u64;
         if end > v.disk.file_size(kind) {
@@ -307,9 +313,20 @@ unsafe extern "C" fn x_truncate(f: *mut sqlite3_file, size: sqlite3_int64) -> c_
     if size < 0 {
         return SQLITE_IOERR_TRUNCATE;
     }
-    match with(|v| v.disk.set_file_size(kind, size as u64)) {
-        Some(()) => SQLITE_OK,
-        None => SQLITE_IOERR_TRUNCATE,
+    let size = size as u64;
+    let r = with(|v| {
+        // Growing by truncate exposes zeros, not what the disk held.
+        let cur = v.disk.file_size(kind);
+        if size > cur {
+            v.disk.zero_fill(RegionKind::of_file(kind), cur, size)?;
+        }
+        v.disk.set_file_size(kind, size);
+        Ok::<(), DiskError>(())
+    });
+    match r {
+        Some(Ok(())) => SQLITE_OK,
+        Some(Err(DiskError::Full)) => SQLITE_FULL,
+        _ => SQLITE_IOERR_TRUNCATE,
     }
 }
 

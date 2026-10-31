@@ -412,6 +412,47 @@ fn storage_mode_and_ram_percent() {
     );
 }
 
+/// S4: `storage.discard` is optional ("auto"), and takes "auto" or "off".
+#[test]
+fn discard_defaults_to_auto_and_takes_auto_or_off() {
+    // The committed dev and bench templates say so; prod leaves it out and
+    // gets the default.
+    assert_eq!(
+        parse("dev", DEV).unwrap().storage.discard,
+        DiscardMode::Auto
+    );
+    assert_eq!(
+        parse("prod", PROD).unwrap().storage.discard,
+        DiscardMode::Auto
+    );
+    let without: String = DEV
+        .lines()
+        .filter(|l| !l.starts_with("discard ="))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        parse("dev", &without).unwrap().storage.discard,
+        DiscardMode::Auto
+    );
+    for (word, mode) in [("auto", DiscardMode::Auto), ("off", DiscardMode::Off)] {
+        let t = dev_in("storage", "discard", &format!("discard = \"{word}\""));
+        assert_eq!(parse("dev", &t).unwrap().storage.discard, mode);
+        let t = PROD.replace(
+            "retention_days = 30",
+            &format!("retention_days = 30\ndiscard = \"{word}\""),
+        );
+        assert_eq!(parse("prod", &t).unwrap().storage.discard, mode);
+    }
+    for bad in [
+        "discard = \"on\"",
+        "discard = true",
+        "discard = \"Auto\"",
+        "discard = 1",
+    ] {
+        assert_rejected("dev", &dev_in("storage", "discard", bad), "discard");
+    }
+}
+
 /// O3: a production configuration must choose the medium explicitly (no
 /// silent default), while dev and old configs keep the disk as the default.
 #[test]

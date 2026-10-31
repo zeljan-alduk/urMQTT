@@ -1709,3 +1709,27 @@ PROMPT-storage.md S3, plan in docs/STORAGE-PLAN.md. ADR-142 (crash-safe grow: A/
 - Online grow for virtio-scsi (no notification); for a LUN, `urmqtt-disk grow` or a reboot.
 - The window of the data partition is widened only by the DB core between two of its jobs; the data cores are not paused (they never touch the disk).
 - The ring after a grow overwrites the oldest segments next to its active one before it reaches the new band (correct; the new space is used from the next wrap).
+
+## S4 — Discard and write-zeroes (2026-10-31)
+
+PROMPT-storage.md S4, plan in docs/STORAGE-PLAN.md (status and deviations there). ADR-150 (the discard queue, commands, limits, ordering), ADR-151 (recovery never trusts a released range).
+
+**Done**
+
+- **Commands.** virtio-blk `F_DISCARD` / `F_WRITE_ZEROES` (limits from config offsets 36..56) and virtio-scsi UNMAP and WRITE SAME (16) with UNMAP (LBPME, Block Limits B0h, Logical Block Provisioning B2h). DISCARD preferred; zeroing that may unmap is the fallback. NVMe and AHCI: X13 (`BlockDevice::discard_caps` / `discard` are the seam).
+- **Store.** A discard queue in `Disk`: ranges inside region extents, shrunk inwards to the device granule and the physical block, staged until a sync, cancelled by a later write, sent by the DB core one request at a time every 25 ms, only with no transaction open, nothing queued by the data cores and no telemetry pending. Three users: retired telemetry segments (new: retention now retires whole expired segments once a minute; the header is zeroed first), the logical tail of `xTruncate`/`xDelete`, space a grow adds. The VFS now zero-fills a gap (write past the end, truncate to larger).
+- **Config** `storage.discard = "auto" | "off"` (schema, config crate, dev and bench templates, schema tests, README, OPERATE, DEPLOY). `deploy/prod/config.toml` untouched (the default applies).
+- **Host side.** `MemDisk::with_discard` (strict about its advertised limits; zeros / garbage / keep behaviours; volatile cache), `FaultDevice` counts discards as writes and can tear them; `run-qemu.sh --disk-format qcow2 --discard unmap`.
+- **Counters** logged (`storage: discard: requests=… released=… KiB (queued: …) cancelled=… dropped=… failed=…`) and checked by smoke.
+
+**Tests**
+
+- `cargo test --workspace`: 653 passed, 7 ignored, 0 failed. New: `crates/store/tests/discard.rs` (18: limits, ordering, cancellation, failure handling, write-zeroes, truncate, grow, telemetry retirement for three device behaviours, a power cut at every write and discard of a retirement, and the garbage test: discarded ranges, file tails and scratch filled with garbage / zeros / left alone, SQLite and telemetry recover exactly the committed data), virtio limit decoding and SCSI CDBs, fault device, config schema.
+- Smoke `SMOKE_ONLY=storage`: aarch64 HVF 53 passed, 0 failed; x86_64 TCG 53 passed, 0 failed. New: `discard-qcow2` (virtio-blk and virtio-scsi): 16 expired segments (48 MiB) released, qcow2 maps 62 MiB before and 15-16 MiB after, host file 62 -> 16 MiB; a third boot recovers 8 segments. `grow-online` now also checks the grow discard counters. After a last log-only change the `discard-qcow2` scenario was rerun on both architectures (8 passed each).
+- `db-bench` (HVF, virtio-blk, five alternating runs against the commit before S4): batched 53.3 k inserts/s both, single-insert 1819 vs 1766, identical 1572 device writes and 319 flushes. Not measured on x86_64.
+- fmt, typos, arch-leaks, `clippy --workspace --all-targets -D warnings`, both kernels with and without `selftest`.
+
+**Not done**
+
+- NVMe and AHCI (X13). `storage.discard = "off"` in a VM (host and schema tests only). A Linux host (the qcow2 shrink was measured on macOS/APFS). Real hardware, KVM. The full smoke cycle beyond the storage group. Fuzz and Miri not rerun. No trimming of free pages inside the SQLite file.
+- The aarch64 kernel builds in this nested worktree only with `RUSTFLAGS` set by hand (two cargo configs), as in S3.

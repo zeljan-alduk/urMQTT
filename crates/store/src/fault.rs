@@ -155,6 +155,47 @@ impl BlockDevice for FaultDevice {
     fn refresh_size(&mut self) -> Option<u64> {
         self.inner.refresh_size()
     }
+
+    fn discard_caps(&self) -> Option<crate::disk::DiscardCaps> {
+        self.inner.discard_caps()
+    }
+
+    /// A discard is a mutation of the medium: it counts as a write, so
+    /// `stop-after-write` can fall between two discards and `tear-write`
+    /// can apply only the first sectors of one.
+    fn discard(&mut self, ranges: &[(u64, u64)]) -> Result<(), IoError> {
+        if self.dead {
+            return Err(IoError::Device);
+        }
+        let n = self.writes + 1;
+        if let Some((at, sectors)) = self.spec.tear_write
+            && at == n
+        {
+            // Only the first `sectors` sectors of the request reach the
+            // medium, then the device dies.
+            let mut left = sectors;
+            let mut part = alloc::vec::Vec::new();
+            for &(s, c) in ranges {
+                let take = c.min(left);
+                if take > 0 {
+                    part.push((s, take));
+                }
+                left -= take;
+            }
+            if !part.is_empty() {
+                self.inner.discard(&part)?;
+                self.inner.flush()?;
+            }
+            self.dead = true;
+            return Err(IoError::Device);
+        }
+        self.inner.discard(ranges)?;
+        self.writes = n;
+        if self.spec.stop_after_writes.is_some_and(|s| n >= s) {
+            self.dead = true;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -206,5 +247,38 @@ mod tests {
         let mut b = [0u8; 512];
         d.read(0, &mut b).unwrap();
         assert_eq!(b[0], 5, "bit 0 flipped");
+    }
+
+    #[test]
+    fn discards_count_as_writes_and_can_be_torn() {
+        use crate::disk::{DiscardCaps, DiscardKind, Released};
+        let caps = DiscardCaps {
+            kind: DiscardKind::Discard,
+            max_sectors: 64,
+            max_ranges: 4,
+            granularity: 1,
+        };
+        let fresh = || {
+            let m = MemDisk::new(256 * 512).with_discard(caps, Released::Zeros);
+            let mut d = m.device();
+            d.write(0, &[9u8; 32 * 512]).unwrap();
+            d.flush().unwrap();
+            m
+        };
+        // The device dies after the second mutation: a write, then a discard.
+        let m = fresh();
+        let mut d = FaultDevice::new(m.device(), FaultSpec::parse("stop-after-write=2").unwrap());
+        assert_eq!(d.discard_caps(), Some(caps));
+        d.write(40, &[1u8; 512]).unwrap();
+        d.discard(&[(0, 8)]).unwrap();
+        assert!(d.dead());
+        assert_eq!(d.discard(&[(8, 8)]), Err(IoError::Device));
+        // Torn: only the first 3 sectors of the request reach the medium.
+        let m = fresh();
+        let mut d = FaultDevice::new(m.device(), FaultSpec::parse("tear-write=1:3").unwrap());
+        assert!(d.discard(&[(0, 2), (10, 4)]).is_err());
+        assert_eq!(m.raw(0, 1024), vec![0u8; 1024]);
+        assert_eq!(m.raw(10 * 512, 512), vec![0u8; 512], "third sector");
+        assert_eq!(m.raw(11 * 512, 512), vec![9u8; 512], "not reached");
     }
 }

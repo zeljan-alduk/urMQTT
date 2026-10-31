@@ -174,6 +174,17 @@ syslog). Procedures are in [DEPLOY.md](DEPLOY.md) section 9.
 | `gpt: data partition extended to the end of the … MiB disk`, `storage: grew the layout from … to … MiB` | the volume was enlarged; the new space is in use. `… grew the layout online …` is the same without a reboot |
 | `blk: resize notification (configuration-change interrupt): armed (online grow)` or `not available …` | whether the disk tells the guest when it is resized; if not, an enlarged disk is taken up at the next reboot |
 | `storage: growing the layout failed …` / `online grow failed …` | the old layout stays in force (the update is one block write); check the disk and reboot |
+| `storage: discard: auto, device discard (… per range at most, … range(s) per request, granularity … B)` | the disk accepts discards (virtio-blk DISCARD, SCSI UNMAP; or `write-zeroes with unmap`); expired telemetry, truncated file tails and grown space go back to the host |
+| `storage: discard: auto, but the device offers neither …` / `storage: discard: off (storage.discard = "off")` | nothing is released: the disk does not take discards, or you turned it off |
+| `telemetry: N segment(s) past retention (30 days) retired, M still in use` | retention found whole segments older than `storage.retention_days` and queued their space for release |
+| `storage: discard: requests=… ranges=… released=… KiB (queued: …) cancelled=… dropped=… failed=…` | the counters, once the queue is idle. `cancelled`: space a later write took back; `dropped`: queue overflow (space merely not released); `failed` must be 0 |
+| `storage: discard failed …`, `storage: discard stopped for this boot` | the disk failed discards (three in a row stop them); nothing is lost, space is not released until the next boot |
 
 `storage.grow_ratio_db` sets how the new space is shared (default 50: half to
 the SQLite database, half to the telemetry ring).
+
+`storage.discard` (`"auto"`, the default, or `"off"`) controls whether space
+the store no longer uses is released to the disk. Discards are sent one at a
+time, a few per second, only while the broker has nothing waiting for the disk,
+and never destroy data in use (a write to a queued range takes it back). Turn it
+off if a storage backend misbehaves under discards; nothing else changes.

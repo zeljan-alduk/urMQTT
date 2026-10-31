@@ -181,6 +181,54 @@ impl DataDisk {
         }
     }
 
+    /// What the device can discard and its limits (S4, ADR-150): DISCARD or
+    /// UNMAP, else WRITE ZEROES that may unmap. `None` for a read-only disk
+    /// or a device with neither.
+    pub fn discard_caps(&self) -> Option<urmqtt_store::disk::DiscardCaps> {
+        use urmqtt_store::disk::{DiscardCaps, DiscardKind};
+        let (u, ro) = match self {
+            Self::Blk(b) => (b.unmap, b.read_only),
+            Self::Scsi(s) => (s.unmap, false),
+        };
+        if ro {
+            return None;
+        }
+        if u.discard {
+            Some(DiscardCaps {
+                kind: DiscardKind::Discard,
+                max_sectors: u64::from(u.max_discard_sectors),
+                max_ranges: u.max_discard_ranges,
+                granularity: u64::from(u.discard_align),
+            })
+        } else if u.zeroes {
+            Some(DiscardCaps {
+                kind: DiscardKind::WriteZeroes,
+                max_sectors: u64::from(u.max_zeroes_sectors),
+                max_ranges: u.max_zeroes_ranges,
+                granularity: u64::from(u.discard_align),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Releases the (first sector, sectors) ranges, within the limits of
+    /// [`discard_caps`](Self::discard_caps).
+    pub fn discard(&mut self, ranges: &[(u64, u64)]) -> Result<(), urmqtt_virtio::VirtioError> {
+        let mut v: alloc::vec::Vec<(u64, u32)> = alloc::vec::Vec::with_capacity(ranges.len());
+        for &(s, n) in ranges {
+            let n = u32::try_from(n).map_err(|_| urmqtt_virtio::VirtioError::OutOfRange)?;
+            v.push((s, n));
+        }
+        let r = v.as_slice();
+        match self {
+            Self::Blk(b) if b.unmap.discard => b.discard(&KernelEnv, r),
+            Self::Blk(b) => b.write_zeroes(&KernelEnv, r),
+            Self::Scsi(s) if s.unmap.discard => s.discard(&KernelEnv, r),
+            Self::Scsi(s) => s.write_zeroes(&KernelEnv, r),
+        }
+    }
+
     pub fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), urmqtt_virtio::VirtioError> {
         match self {
             Self::Blk(b) => b.read(&KernelEnv, sector, buf),
@@ -245,6 +293,19 @@ impl BlockDevice for KernelBlk {
 
     fn refresh_size(&mut self) -> Option<u64> {
         self.blk.refresh_capacity()
+    }
+
+    fn discard_caps(&self) -> Option<urmqtt_store::disk::DiscardCaps> {
+        self.blk.discard_caps()
+    }
+
+    fn discard(&mut self, ranges: &[(u64, u64)]) -> Result<(), IoError> {
+        self.blk.discard(ranges).map_err(|e| match e {
+            // The device said it does not implement the command.
+            urmqtt_virtio::VirtioError::Io(urmqtt_virtio::blk::S_UNSUPP)
+            | urmqtt_virtio::VirtioError::MissingFeatures(_) => IoError::Unsupported,
+            _ => IoError::Device,
+        })
     }
 }
 

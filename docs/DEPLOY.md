@@ -562,6 +562,34 @@ configure except how it is shared, and nothing is ever moved or shrunk:
   provider's documentation for what it allows). **Shrinking is never done by
   urMQTT**: a disk smaller than its layout is refused at boot.
 
+### Releasing space: discard (S4)
+
+With `storage.discard = "auto"` (the default) urMQTT tells the disk which space
+it no longer uses, so that a thin-provisioned volume shrinks again: telemetry
+segments older than `storage.retention_days`, the tail of a database or WAL
+file that SQLite truncated, and the space a grow added. It uses virtio-blk
+DISCARD or virtio-scsi UNMAP, within the limits the device reports, a few
+requests per second and only when the broker is idle. The boot log says what the
+disk offers (`storage: discard: auto, device discard (…)`), the counters follow
+(`storage: discard: requests=… released=… KiB`).
+- **KVM, libvirt, Proxmox, QEMU:** the host must pass the guest's discards on.
+  For a qcow2 or a sparse raw file attach the disk with `discard=unmap`
+  (QEMU `-drive …,discard=unmap`; libvirt `<driver … discard='unmap'/>`;
+  Proxmox: tick "Discard" on the disk). Without it the commands are accepted and
+  ignored, and the image only grows. On Linux the file shrinks as holes; on
+  macOS (APFS) too.
+- **Clouds:** most network volumes are provisioned in full and ignore it; where
+  the provider thin-provisions or bills by allocation, it works through virtio-scsi
+  UNMAP or virtio-blk DISCARD if the volume type supports it. Nothing breaks
+  when it does not.
+- **What it does not do:** it does not shrink a disk or its partition (never
+  automatic), and it does not trim free pages inside the SQLite database file.
+  `storage.discard = "off"` disables all of it. NVMe and SATA (bare metal) come
+  with X13.
+- **Safety:** a released range is never read as data, so a device that ignores
+  the command, zeroes the range, or returns garbage changes nothing
+  (docs/DISK-FORMAT.md section 11).
+
 ### Disk safety, as before
 
 Only the disk Limine booted from is written, and only inside its data

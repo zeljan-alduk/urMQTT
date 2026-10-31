@@ -144,6 +144,15 @@ pub enum StorageMode {
     Ram,
 }
 
+/// What the store tells the disk about space it no longer uses (S4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardMode {
+    /// Use the device's discard (or write-zeroes with unmap) when it has one.
+    Auto,
+    /// Never.
+    Off,
+}
+
 /// Where the data store ends up for this boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backing {
@@ -183,6 +192,9 @@ pub struct Storage {
     /// Percent of new disk space that goes to the SQLite database when the
     /// volume grows; the rest goes to the telemetry ring (S3).
     pub grow_ratio_db: u32,
+    /// Release retired telemetry segments, the tail of truncated files and
+    /// space a grow added (S4).
+    pub discard: DiscardMode,
     pub require_flush: bool,
     pub require_data_disk: bool,
     pub refuse_on_corruption: bool,

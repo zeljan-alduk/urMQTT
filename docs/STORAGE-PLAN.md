@@ -293,6 +293,17 @@ Each milestone ends with:
 - smoke `discard-qcow2`: a qcow2 with `discard=unmap` shrinks on the host after retention runs, checked by the file's allocated size;
 - db-bench without regression.
 
+**Status: done** (docs/PROGRESS.md, S4; ADR-150, ADR-151). Deviations from the work list:
+- **Commands:**
+  - virtio-blk `F_DISCARD` and `F_WRITE_ZEROES`, and virtio-scsi UNMAP and WRITE SAME (16), are implemented. NVMe and AHCI stay with X13: the store's `BlockDevice::discard_caps` and `discard` are the seam.
+  - DISCARD is used when present. Zeroing that may unmap is the fallback; zeroing that would write is never used.
+- **"Space freed by rebalance"** does not exist (there is no rebalance); the three uses are retired telemetry segments, the logical tail of a truncated or deleted VFS file, and the space a grow adds.
+- **Retention** did not free anything before S4 (expired records were only skipped on restore, the ring reused the oldest segment). It now retires whole expired segments (once a minute), which needs a wall clock.
+- **Retirement zeroes the segment header first** (found by the smoke test: a qcow2 releases whole clusters only, so the first cluster of a range kept the old header).
+- **The VFS zero-fills a gap** (a write past the end, a truncate to a larger size), so a file never exposes what the disk held there.
+- **The check "by the file's allocated size"** is done on what the qcow2 maps as data (`qemu-img map`) and on the host file's allocated blocks (`st_blocks`): both shrink on aarch64 HVF and x86_64 TCG, with virtio-blk and virtio-scsi, on this macOS host (QEMU punches holes on APFS). A Linux host was not run.
+- **Not covered by a smoke scenario:** `storage.discard = "off"` in a VM (the baked configuration is the dev one; the schema and the host tests cover "off").
+
 ### S5 — In-disk database backup · M
 
 **Work**

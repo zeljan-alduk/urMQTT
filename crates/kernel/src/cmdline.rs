@@ -51,6 +51,10 @@ pub enum DbTest {
     /// Write telemetry records, then a deliberately torn one (the next
     /// boot must truncate it), then continue booting.
     LogTear,
+    /// Telemetry records dated 40 days ago into every partition, enough to
+    /// fill several segments each, then continue booting (S4: the next
+    /// boot retires them and releases their space).
+    DiscardFill,
     /// In-guest data-plane scaling benchmark on the worker cores.
     DpBench,
     /// A handler overruns the watchdog budget on purpose (M16).
@@ -182,6 +186,7 @@ impl BootOptions {
                 "test=log-crash" => o.db_test = Some(DbTest::LogCrash),
                 "test=log-verify" => o.db_test = Some(DbTest::LogVerify),
                 "test=log-tear" => o.db_test = Some(DbTest::LogTear),
+                "test=discard-fill" => o.db_test = Some(DbTest::DiscardFill),
                 "test=dp-bench" => o.db_test = Some(DbTest::DpBench),
                 "test=watchdog" => o.db_test = Some(DbTest::Watchdog),
                 "test=watchdog-handshake" => o.db_test = Some(DbTest::WatchdogHandshake),

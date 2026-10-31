@@ -244,6 +244,17 @@ pub enum StorageMode {
     Ram,
 }
 
+/// What the store tells the disk about space it no longer uses (S4,
+/// ADR-150).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscardMode {
+    /// Use the device's discard (or write-zeroes with unmap) when it has one.
+    Auto,
+    /// Never.
+    Off,
+}
+
 /// Bounds of `storage.ram_percent`: the floor keeps the RAM store above
 /// the data layout's 16 MiB minimum on ordinary machines, the ceiling
 /// leaves most of RAM to the connections.
@@ -274,6 +285,10 @@ struct RawStorage {
     /// SQLite database; the rest goes to the telemetry ring (S3).
     #[serde(default = "default_grow_ratio_db")]
     grow_ratio_db: u32,
+    /// Release retired telemetry segments, the tail of truncated files and
+    /// space a grow added to the device (S4).
+    #[serde(default = "default_discard")]
+    discard: DiscardMode,
     require_flush: bool,
     require_data_disk: bool,
     refuse_on_corruption: bool,
@@ -281,6 +296,10 @@ struct RawStorage {
 
 fn default_grow_ratio_db() -> u32 {
     50
+}
+
+const fn default_discard() -> DiscardMode {
+    DiscardMode::Auto
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -409,6 +428,9 @@ pub struct Storage {
     /// Percent of new disk space that goes to the SQLite database when the
     /// volume grows; the rest goes to the telemetry ring (S3).
     pub grow_ratio_db: u32,
+    /// `"auto"` (default) or `"off"`: release retired telemetry segments,
+    /// the tail of truncated files and space a grow added (S4).
+    pub discard: DiscardMode,
     pub require_flush: bool,
     /// Without a data disk: refuse to serve (true) or run in memory only.
     pub require_data_disk: bool,
@@ -1167,6 +1189,7 @@ fn validate_storage(
         telemetry_topics: raw.telemetry_topics.clone(),
         retention_days: raw.retention_days,
         grow_ratio_db: raw.grow_ratio_db,
+        discard: raw.discard,
         require_flush: raw.require_flush,
         require_data_disk: raw.require_data_disk,
         refuse_on_corruption: raw.refuse_on_corruption,
@@ -1437,6 +1460,7 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         telemetry_topics: {tt},
         retention_days: {rd},
         grow_ratio_db: {grd},
+        discard: DiscardMode::{disc:?},
         require_flush: {rf},
         require_data_disk: {rdd},
         refuse_on_corruption: {roc},
@@ -1520,6 +1544,7 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         tt = render_strs(&cfg.storage.telemetry_topics),
         rd = cfg.storage.retention_days,
         grd = cfg.storage.grow_ratio_db,
+        disc = cfg.storage.discard,
         rf = cfg.storage.require_flush,
         rdd = cfg.storage.require_data_disk,
         roc = cfg.storage.refuse_on_corruption,

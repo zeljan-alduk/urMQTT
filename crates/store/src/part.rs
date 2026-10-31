@@ -72,6 +72,22 @@ impl BlockDevice for Partition {
         self.inner.refresh_size()
     }
 
+    fn discard_caps(&self) -> Option<crate::disk::DiscardCaps> {
+        self.inner.discard_caps()
+    }
+
+    fn discard(&mut self, ranges: &[(u64, u64)]) -> Result<(), IoError> {
+        // Nothing outside the window is ever released.
+        let mut abs = alloc::vec::Vec::with_capacity(ranges.len());
+        for &(lba, n) in ranges {
+            match lba.checked_add(n) {
+                Some(end) if end <= self.sectors => abs.push((self.first + lba, n)),
+                _ => return Err(IoError::OutOfRange),
+            }
+        }
+        self.inner.discard(&abs)
+    }
+
     fn whole_disk(&mut self) -> Option<&mut dyn BlockDevice> {
         Some(self.inner.as_mut())
     }
@@ -103,6 +119,9 @@ mod tests {
         assert_eq!(p.write(19, &[0u8; 1024]), Err(IoError::OutOfRange));
         assert_eq!(p.read(u64::MAX, &mut [0u8; 512]), Err(IoError::OutOfRange));
         assert!(Partition::new(m.device(), 60, 5).is_none());
+        // Discards stay inside the window too.
+        assert_eq!(p.discard(&[(19, 2)]), Err(IoError::OutOfRange));
+        assert_eq!(p.discard_caps(), None);
         assert!(Partition::new(m.device(), 0, 0).is_none());
     }
 }

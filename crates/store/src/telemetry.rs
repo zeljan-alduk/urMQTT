@@ -29,7 +29,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::crc::{crc32c, update};
-use crate::disk::{Disk, DiskError};
+use crate::disk::{DiscardSource, Disk, DiskError};
 use crate::layout::{BLOCK, Layout, RegionKind, SECTOR};
 
 pub const MAGIC: [u8; 8] = *b"URMQTLH1";
@@ -169,8 +169,23 @@ impl Geometry {
     }
 }
 
+/// What the log knows of one ring segment of a partition (not stored on
+/// the disk: rebuilt by recovery).
+#[derive(Debug, Clone, Copy, Default)]
+struct SegInfo {
+    /// Holds a valid segment (not blank, not retired).
+    live: bool,
+    /// Timestamp of its newest record, or of its creation if it has none
+    /// (milliseconds, 0: unknown).
+    max_ts: u64,
+}
+
 #[derive(Debug, Clone)]
 struct Partition {
+    /// One entry per ring index.
+    segs: Vec<SegInfo>,
+    /// Newest record timestamp in the active segment.
+    active_max_ts: u64,
     /// Ring index of the active segment and its sequence number (0: none).
     active: u64,
     seq: u64,
@@ -349,6 +364,8 @@ struct SegmentScan {
     end: u64,
     records: u64,
     expired: u64,
+    /// Newest timestamp among its valid records (0: none).
+    max_ts: u64,
     /// Stopped at a damaged record rather than a clean end.
     torn: bool,
 }
@@ -416,8 +433,18 @@ impl TelemetryLog {
         if g.total < self.geo.total {
             return Err(LogError::BadHeader);
         }
+        // New bands hold nothing the log knows of (their bytes are not
+        // trusted: segment headers carry the layout UUID).
+        for part in &mut self.parts {
+            part.segs.resize(g.total as usize, SegInfo::default());
+        }
         self.geo = g;
         Ok(())
+    }
+
+    /// Bytes of one segment.
+    pub fn segment_bytes(&self) -> u64 {
+        self.geo.seg_bytes
     }
 
     /// Number of partitions.
@@ -459,6 +486,8 @@ impl TelemetryLog {
             .collect();
         order.sort_unstable();
         let mut part = Partition {
+            segs: vec![SegInfo::default(); self.geo.total as usize],
+            active_max_ts: 0,
             active: 0,
             seq: 0,
             pos: SEGMENT_HEADER,
@@ -476,7 +505,17 @@ impl TelemetryLog {
             rec.segments += 1;
             rec.records += scan.records;
             rec.expired += scan.expired;
+            let created = headers
+                .get(idx as usize)
+                .copied()
+                .flatten()
+                .map_or(0, |(_, c)| c.saturating_mul(1000));
+            let max_ts = scan.max_ts.max(created);
+            if let Some(info) = part.segs.get_mut(idx as usize) {
+                *info = SegInfo { live: true, max_ts };
+            }
             if Some((seq, idx)) == newest {
+                part.active_max_ts = max_ts;
                 if scan.torn {
                     rec.torn_tails += 1;
                 }
@@ -505,6 +544,7 @@ impl TelemetryLog {
         disk.read_at(RegionKind::Telemetry, base, &mut data)?;
         let mut pos = SEGMENT_HEADER as usize;
         let (mut records, mut expired, mut torn) = (0u64, 0u64, false);
+        let mut max_ts = 0u64;
         // `len == 0` (zero padding) is the clean end of the segment.
         while let Some(len) = u32_at(&data, pos).filter(|&l| l != 0) {
             let len = len as usize;
@@ -528,6 +568,7 @@ impl TelemetryLog {
                 torn = true;
                 break;
             };
+            max_ts = max_ts.max(r.ts_ms);
             if r.ts_ms < cutoff_ms {
                 expired += 1;
             } else {
@@ -540,6 +581,7 @@ impl TelemetryLog {
             end: pos as u64,
             records,
             expired,
+            max_ts,
             torn,
         })
     }
@@ -612,6 +654,27 @@ impl TelemetryLog {
             } else {
                 (part.active + 1) % self.geo.total
             };
+            // The segment left behind is complete: remember how old its
+            // newest record is.
+            if part.seq != 0 {
+                let old = part.active as usize;
+                let ts = part.active_max_ts;
+                if let Some(info) = part.segs.get_mut(old) {
+                    *info = SegInfo {
+                        live: true,
+                        max_ts: ts,
+                    };
+                }
+            }
+            // The new active segment counts as live (and is never retired
+            // while it is the active one).
+            part.active_max_ts = now.saturating_mul(1000);
+            if let Some(info) = part.segs.get_mut(next as usize) {
+                *info = SegInfo {
+                    live: true,
+                    max_ts: part.active_max_ts,
+                };
+            }
             part.roll = false;
             part.seq += 1;
             part.active = next;
@@ -620,6 +683,7 @@ impl TelemetryLog {
             part.tail.clear();
             part.pending_header = Some((next, segment_header(p, part.seq, now, &uuid)));
         }
+        part.active_max_ts = part.active_max_ts.max(ts_ms);
         let seq = part.seq;
         let start = part.pending.len();
         part.pending.resize(start + size as usize, 0);
@@ -636,6 +700,56 @@ impl TelemetryLog {
         put(rec, 4, &crc.to_le_bytes());
         part.pending_records += 1;
         Ok(())
+    }
+
+    /// Retires the segments whose newest record is older than the
+    /// retention period. Each one's first block (the segment header) is
+    /// overwritten with zeros, so that whatever the device keeps of the rest
+    /// (a thin disk releases only whole clusters; a device may ignore the
+    /// command) can never be taken for a segment again, and its space is
+    /// queued for the disk to release (`Disk::discard_region`; nothing is
+    /// sent here). The active segment, a segment of unknown age (no usable
+    /// timestamp) and one already retired are left alone. Recovery accepts a
+    /// segment only by its header and record checksums, so what the disk
+    /// holds afterwards is never trusted. Returns the number of segments
+    /// retired. Needs a known wall clock (`now_unix` 0: nothing).
+    pub fn retire_expired(&mut self, disk: &mut Disk, now_unix: u64, retention_ms: u64) -> u32 {
+        if now_unix == 0 {
+            return 0;
+        }
+        let cutoff = now_unix.saturating_mul(1000).saturating_sub(retention_ms);
+        let zeros = [0u8; BLOCK];
+        let mut n = 0;
+        for (p, part) in self.parts.iter_mut().enumerate() {
+            let active = (part.seq != 0).then_some(part.active as usize);
+            for (s, info) in part.segs.iter_mut().enumerate() {
+                if !info.live || info.max_ts == 0 || info.max_ts >= cutoff || Some(s) == active {
+                    continue;
+                }
+                let at = self.geo.segment_offset(p, s as u64);
+                if disk.write_at(RegionKind::Telemetry, at, &zeros).is_err() {
+                    // The disk is failing: leave the segment as it is.
+                    return n;
+                }
+                info.live = false;
+                disk.discard_region(
+                    RegionKind::Telemetry,
+                    at,
+                    self.geo.seg_bytes,
+                    DiscardSource::Telemetry,
+                );
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Segments the log still counts as holding data, over all partitions.
+    pub fn live_segments(&self) -> u32 {
+        self.parts
+            .iter()
+            .map(|p| p.segs.iter().filter(|s| s.live).count() as u32)
+            .sum()
     }
 
     /// Records appended but not yet durable.

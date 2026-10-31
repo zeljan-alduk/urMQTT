@@ -1181,7 +1181,9 @@ PY
             "blk: resize notification \(configuration-change interrupt\): armed" \
             "qmp: block_resize \{'return': \{\}\}" \
             "storage: grew the layout online from [0-9]+ MiB to 1[0-9]{2} MiB \(generation 3\)" \
-            "grow-online: 1 online grow\(s\) logged" "NOT:online grow failed" "NOT:taking up the grown layout failed" "$NO_FAULT"
+            "grow-online: 1 online grow\(s\) logged" "NOT:online grow failed" "NOT:taking up the grown layout failed" \
+            "storage: discard: requests=[1-9][0-9]* ranges=[1-9][0-9]* released=[1-9][0-9]* KiB \(queued: telemetry 0 KiB, truncate [0-9]+ KiB, grow [1-9][0-9]* KiB\)" \
+            "NOT:storage: discard failed" "$NO_FAULT"
         "$ud" verify "$disk" >"$log.verify" 2>&1 && echo "tool: verify exit 0" >>"$log.verify"
         "$ud" info "$disk" >>"$log.verify" 2>&1
         check "grow-online-disk [$accel]" "$log.verify" 0 "verify: ok" "tool: verify exit 0" \
@@ -1193,6 +1195,116 @@ PY
         boot "$log2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
         check "grow-online-reboot [$accel]" "$log2" "$status" "storage: data disk opened \(1[0-9]{2} MiB" \
             "$restored" "$telemetry" "generation 3" "NOT:storage: grew" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
+# qcow2_alloc <file>: "<bytes the qcow2 maps as data> <bytes the host file
+# occupies>" (st_blocks), of an image no VM has open.
+qcow2_alloc() {
+    python3 -I - "$1" <<'PY'
+import json, os, subprocess, sys
+f = sys.argv[1]
+m = json.loads(subprocess.check_output(["qemu-img", "map", "--output=json", f]))
+data = sum(e["length"] for e in m if e.get("data") and not e.get("zero"))
+print(data, os.stat(f).st_blocks * 512)
+PY
+}
+
+# S4 (ADR-150): the guest releases space and the host image shrinks. A qcow2
+# disk attached with discard=unmap holds 16 telemetry segments (2 per
+# partition) that are 40 days old, written by `test=discard-fill`. The next
+# boot's retention retires them, the kernel sends the device's discard (virtio-blk
+# DISCARD, or SCSI UNMAP on the scsi bus) and then flushes; the host measures
+# what the qcow2 maps as data (and the file's allocated blocks) before and
+# after, once QEMU has quit cleanly. A third boot recovers: the retired segments
+# are gone, the active ones remain, whatever the device holds in the freed
+# ranges. Also: discard = "off" in a boot of its own does nothing.
+discard_qcow2() {
+    command -v qemu-img >/dev/null || { echo "  ✗ discard-qcow2 needs qemu-img"; FAILED=$((FAILED + 1)); return; }
+    local fill="$OUT/discard-fill.raw" ret="$OUT/discard-retire.raw" ver="$OUT/discard-verify.raw" bus
+    mkimg "$fill" "smoke test=discard-fill"
+    mkimg "$ret" "smoke serve"
+    mkimg "$ver" "smoke"
+    for accel in $ACCELS; do
+        for bus in blk scsi; do
+            local tag="discard-qcow2-$bus-$accel" disk="$OUT/discard-qcow2-$bus-$accel.qcow2" raw="$OUT/discard-qcow2-$bus-$accel.img"
+            local l1="$OUT/$tag-1.log" l2="$OUT/$tag-2.log" l3="$OUT/$tag-3.log" status=0
+            # The first boot writes the old records to a raw (sparse) disk.
+            fresh_disk "$fill" "$raw" 512m
+            boot "$l1" --disk "$raw" --bus "$bus" --accel "$accel" --headless --no-net || status=$?
+            check "discard-fill [$bus, $accel]" "$l1" "$status" \
+                "storage: discard: auto, (device discard|write-zeroes with unmap) \([0-9]+ KiB per range at most" \
+                "discard-fill: [0-9]+ record\(s\) dated 40 days ago durable in 8 partition\(s\)" \
+                "NOT:segment\(s\) past retention" "NOT:storage: discard: requests=" "^URMQTT READY$" "$NO_FAULT"
+            # The same disk as a qcow2 (only the data is allocated), measured.
+            set_esp "$raw" "$ret"
+            rm -f "$disk"
+            qemu-img convert -f raw -O qcow2 "$raw" "$disk"
+            local qopts=(--disk "$disk" --disk-format qcow2 --discard unmap --bus "$bus" --accel "$accel")
+            local before blocks_before after blocks_after
+            read -r before blocks_before < <(qcow2_alloc "$disk")
+
+            # Retention: the next boot retires and releases. QEMU is quit
+            # through QMP so the qcow2 is closed and flushed.
+            status=0
+            local qdir sock
+            qdir=$(mktemp -d "${TMPDIR:-/tmp}/urmqtt-qmp.XXXXXX") || continue
+            sock="$qdir/q.sock"
+            start_vm "$l2" "${qopts[@]}" --fwd none -- -qmp "unix:$sock,server=on,wait=off"
+            if wait_log "$l2" 'storage: discard: requests=[1-9][0-9]* ranges='; then
+                sleep 0.5
+            else
+                status=124
+            fi
+            python3 -I - "$sock" >"$l2.qmp" 2>&1 <<'PY' || true
+import json, socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+for _ in range(50):
+    try:
+        s.connect(sys.argv[1]); break
+    except OSError:
+        time.sleep(0.1)
+f = s.makefile("rw")
+f.readline()
+f.write(json.dumps({"execute": "qmp_capabilities"}) + "\n"); f.flush(); f.readline()
+f.write(json.dumps({"execute": "quit"}) + "\n"); f.flush()
+print("qmp: quit")
+PY
+            local waited=0
+            while kill -0 "$VM_PID" 2>/dev/null && (( waited < 100 )); do sleep 0.1; waited=$((waited + 1)); done
+            kill_vm
+            rm -rf "$qdir"
+            read -r after blocks_after < <(qcow2_alloc "$disk")
+            local released
+            released=$(clean "$l2" | grep -Eo 'released=[0-9]+ KiB' | tail -1 | grep -Eo '[0-9]+')
+            {
+                echo "discard-qcow2: mapped data before $before B, after $after B (guest reported ${released:-0} KiB released)"
+                echo "discard-qcow2: host file blocks before $blocks_before B, after $blocks_after B"
+            } >>"$l2"
+            check "discard-retention [$bus, $accel]" "$l2" "$status" \
+                "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in 24 segment\(s\)" \
+                "telemetry: 16 segment\(s\) past retention \(30 days\) retired, 8 still in use" \
+                "storage: discard: requests=[1-9][0-9]* ranges=[1-9][0-9]* released=[1-9][0-9]* KiB \(queued: telemetry [1-9][0-9]* KiB, truncate [0-9]+ KiB, grow [0-9]+ KiB\) cancelled=0 KiB dropped=0 KiB failed=0" \
+                "NOT:discard failed" "NOT:discard stopped" "^URMQTT READY$" "$NO_FAULT"
+            # 16 segments of 2.9 MiB are released; the image must shrink by
+            # nearly that much (the qcow2 clusters are freed).
+            if [[ -n $before && -n $after && -n $released ]] && (( before - after >= released * 1024 * 8 / 10 )); then
+                echo "  ✓ qcow2 allocation shrank: $((before >> 20)) MiB -> $((after >> 20)) MiB mapped, host file $((blocks_before >> 20)) MiB -> $((blocks_after >> 20)) MiB [$bus, $accel]"
+                PASSED=$((PASSED + 1))
+            else
+                echo "  ✗ qcow2 allocation did not shrink as reported: mapped ${before:-?} -> ${after:-?}, released ${released:-?} KiB [$bus, $accel]"
+                FAILED=$((FAILED + 1))
+            fi
+
+            status=0
+            rm -f "$raw"
+            qemu-img convert -f qcow2 -O raw "$disk" "$raw"
+            set_esp "$raw" "$ver"
+            boot "$l3" --disk "$raw" --bus "$bus" --accel "$accel" --headless --no-net || status=$?
+            check "discard-recovered [$bus, $accel]" "$l3" "$status" \
+                "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in 8 segment\(s\), 0 torn tail\(s\) truncated" \
+                "storage: data disk opened" "quick_check ok" "^URMQTT READY$" "NOT:telemetry log rejected" "$NO_FAULT"
+        done
     done
 }
 
@@ -1754,6 +1866,7 @@ if [[ ${SMOKE_ONLY:-} == storage && $ARCH != universal ]]; then
     want storage_topology && storage_topology
     want layout_v1 && layout_v1
     want grow_online && grow_online
+    want discard_qcow2 && discard_qcow2
     if ! want disk_tool; then
         :
     elif command -v mosquitto_pub >/dev/null && command -v sqlite3 >/dev/null; then

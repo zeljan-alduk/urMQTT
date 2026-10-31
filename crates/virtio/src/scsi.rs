@@ -11,7 +11,7 @@
 
 use crate::queue::{Buf, DmaRegion, SplitQueue};
 use crate::transport::Transport;
-use crate::{BlockTopology, Env, F_VERSION_1, VirtioError, wait_used};
+use crate::{BlockTopology, Env, F_VERSION_1, UnmapLimits, VirtioError, wait_used};
 
 pub const SECTOR: u64 = 512;
 /// Largest single transfer (bounce buffer size).
@@ -71,6 +71,52 @@ pub fn rw_cdb(write: bool, lba: u64, blocks: u32) -> ([u8; 16], usize) {
     }
 }
 
+/// UNMAP parameter list (SBC-4 5.30) for the ranges (LBA, blocks): an
+/// 8-byte header and one 16-byte descriptor per range. Returns the length
+/// written to `out`, or `None` if it does not fit.
+pub fn unmap_list(ranges: &[(u64, u32)], out: &mut [u8]) -> Option<usize> {
+    let len = 8 + ranges.len() * 16;
+    let list = out.get_mut(..len)?;
+    list.fill(0);
+    // UNMAP DATA LENGTH counts the bytes after itself; BLOCK DESCRIPTOR
+    // DATA LENGTH the descriptors.
+    list.get_mut(0..2)?
+        .copy_from_slice(&u16::try_from(len - 2).ok()?.to_be_bytes());
+    list.get_mut(2..4)?
+        .copy_from_slice(&u16::try_from(len - 8).ok()?.to_be_bytes());
+    for (d, &(lba, n)) in list
+        .get_mut(8..)?
+        .as_chunks_mut::<16>()
+        .0
+        .iter_mut()
+        .zip(ranges)
+    {
+        let (a, b) = d.split_at_mut(8);
+        a.copy_from_slice(&lba.to_be_bytes());
+        b.get_mut(..4)?.copy_from_slice(&n.to_be_bytes());
+    }
+    Some(len)
+}
+
+/// UNMAP CDB with a parameter list of `len` bytes.
+pub fn unmap_cdb(len: u16) -> [u8; 10] {
+    let mut c = [0u8; 10];
+    c[0] = 0x42;
+    c[7..9].copy_from_slice(&len.to_be_bytes());
+    c
+}
+
+/// WRITE SAME (16) with UNMAP set, `blocks` blocks from `lba`: the data-out
+/// buffer is one block of zeros.
+pub fn write_same_unmap_cdb(lba: u64, blocks: u32) -> [u8; 16] {
+    let mut c = [0u8; 16];
+    c[0] = 0x93;
+    c[1] = 0x08; // UNMAP
+    c[2..10].copy_from_slice(&lba.to_be_bytes());
+    c[10..14].copy_from_slice(&blocks.to_be_bytes());
+    c
+}
+
 /// Peripheral device type of a connected LUN from standard INQUIRY data
 /// (`None`: no device at this LUN).
 pub fn inquiry_type(data: &[u8]) -> Option<u8> {
@@ -110,6 +156,8 @@ pub struct DiskInfo {
     /// Physical block size and I/O hints (READ CAPACITY (16), Block Limits
     /// VPD page), or the defaults of a plain 512-byte disk.
     pub topology: BlockTopology,
+    /// UNMAP and WRITE SAME (16) support and limits (S4).
+    pub unmap: UnmapLimits,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +195,7 @@ pub struct ScsiDisk {
     pub lun_id: u32,
     pub capacity_sectors: u64,
     pub topology: BlockTopology,
+    pub unmap: UnmapLimits,
 }
 
 impl VirtioScsi {
@@ -307,13 +356,14 @@ impl VirtioScsi {
                 let Some(sectors) = self.capacity(env, addr) else {
                     continue;
                 };
-                let topology = self.topology(env, addr);
+                let (topology, unmap) = self.topology(env, addr);
                 if let Some(slot) = out.get_mut(n) {
                     *slot = Some(DiskInfo {
                         target,
                         lun,
                         sectors,
                         topology,
+                        unmap,
                     });
                     n += 1;
                 }
@@ -322,9 +372,11 @@ impl VirtioScsi {
         (out, n)
     }
 
-    /// Physical block size and I/O hints of a 512-byte-block disk; what the
-    /// device does not answer stays at the defaults.
-    fn topology<E: Env>(&mut self, env: &E, lun: [u8; 8]) -> BlockTopology {
+    /// Physical block size and I/O hints of a 512-byte-block disk, and what
+    /// it can unmap (READ CAPACITY (16), Block Limits B0h, Logical Block
+    /// Provisioning B2h); what the device does not answer stays at the
+    /// defaults.
+    fn topology<E: Env>(&mut self, env: &E, lun: [u8; 8]) -> (BlockTopology, UnmapLimits) {
         let mut c = [0u8; 16];
         c[0] = 0x9e;
         c[1] = 0x10;
@@ -343,10 +395,25 @@ impl VirtioScsi {
                 d.copy_from_slice(self.io_bytes(DATA, 64));
                 d
             });
-        BlockTopology::from_scsi(
-            SECTOR as u32,
-            cap16.as_ref().map(|d| &d[..]),
-            b0.as_ref().map(|d| &d[..]),
+        let b2 = self
+            .checked(env, lun, &[0x12, 1, 0xb2, 0, 8, 0], Dir::In, 8)
+            .ok()
+            .map(|()| {
+                let mut d = [0u8; 8];
+                d.copy_from_slice(self.io_bytes(DATA, 8));
+                d
+            });
+        (
+            BlockTopology::from_scsi(
+                SECTOR as u32,
+                cap16.as_ref().map(|d| &d[..]),
+                b0.as_ref().map(|d| &d[..]),
+            ),
+            UnmapLimits::from_scsi(
+                cap16.as_ref().map(|d| &d[..]),
+                b0.as_ref().map(|d| &d[..]),
+                b2.as_ref().map(|d| &d[..]),
+            ),
         )
     }
 
@@ -377,6 +444,7 @@ impl VirtioScsi {
             lun_id: disk.lun,
             capacity_sectors: disk.sectors,
             topology: disk.topology,
+            unmap: disk.unmap,
         }
     }
 
@@ -449,6 +517,68 @@ impl ScsiDisk {
         self.hba.rw(env, lun, cap, true, sector, data.len())
     }
 
+    fn check_unmap(
+        &self,
+        ranges: &[(u64, u32)],
+        max_sectors: u32,
+        max_ranges: u32,
+    ) -> Result<(), VirtioError> {
+        if ranges.is_empty() || ranges.len() > max_ranges as usize || 8 + ranges.len() * 16 > MAX_IO
+        {
+            return Err(VirtioError::OutOfRange);
+        }
+        for &(lba, n) in ranges {
+            if n == 0 || n > max_sectors || lba.saturating_add(u64::from(n)) > self.capacity_sectors
+            {
+                return Err(VirtioError::OutOfRange);
+            }
+        }
+        Ok(())
+    }
+
+    /// UNMAP of the (LBA, blocks) ranges, within the device's limits. What
+    /// an unmapped block reads back as is up to the device.
+    pub fn discard<E: Env>(&mut self, env: &E, ranges: &[(u64, u32)]) -> Result<(), VirtioError> {
+        if !self.unmap.discard {
+            return Err(VirtioError::OutOfRange);
+        }
+        self.check_unmap(
+            ranges,
+            self.unmap.max_discard_sectors,
+            self.unmap.max_discard_ranges,
+        )?;
+        let lun = self.lun;
+        let n =
+            unmap_list(ranges, self.hba.io_bytes(DATA, MAX_IO)).ok_or(VirtioError::OutOfRange)?;
+        let cdb = unmap_cdb(u16::try_from(n).map_err(|_| VirtioError::OutOfRange)?);
+        self.hba.checked(env, lun, &cdb, Dir::Out, n)
+    }
+
+    /// WRITE SAME (16) with UNMAP of one range: the blocks read back as
+    /// zeros and the device may deallocate them.
+    pub fn write_zeroes<E: Env>(
+        &mut self,
+        env: &E,
+        ranges: &[(u64, u32)],
+    ) -> Result<(), VirtioError> {
+        if !self.unmap.zeroes {
+            return Err(VirtioError::OutOfRange);
+        }
+        self.check_unmap(
+            ranges,
+            self.unmap.max_zeroes_sectors,
+            self.unmap.max_zeroes_ranges,
+        )?;
+        let lun = self.lun;
+        for &(lba, n) in ranges {
+            self.hba.io_bytes(DATA, SECTOR as usize).fill(0);
+            let cdb = write_same_unmap_cdb(lba, n);
+            self.hba
+                .checked(env, lun, &cdb, Dir::Out, SECTOR as usize)?;
+        }
+        Ok(())
+    }
+
     /// SYNCHRONIZE CACHE (10) over the whole disk: previous writes durable.
     pub fn flush<E: Env>(&mut self, env: &E) -> Result<(), VirtioError> {
         let lun = self.lun;
@@ -479,6 +609,29 @@ mod tests {
         assert_eq!(c[0], 0x8a);
         assert_eq!(&c[2..10], &(1u64 << 33).to_be_bytes());
         assert_eq!(&c[10..14], &8u32.to_be_bytes());
+    }
+
+    #[test]
+    fn unmap_commands() {
+        let mut buf = [0xffu8; 64];
+        let n = unmap_list(&[(0x1000, 8), (1 << 33, 0x100)], &mut buf).unwrap();
+        assert_eq!(n, 8 + 32);
+        assert_eq!(&buf[0..4], &[0, 38, 0, 32]);
+        assert_eq!(&buf[4..8], &[0; 4], "reserved bytes are zero");
+        assert_eq!(&buf[8..16], &0x1000u64.to_be_bytes());
+        assert_eq!(&buf[16..20], &8u32.to_be_bytes());
+        assert_eq!(&buf[20..24], &[0; 4]);
+        assert_eq!(&buf[24..32], &(1u64 << 33).to_be_bytes());
+        assert_eq!(
+            unmap_list(&[(0, 1); 4], &mut [0u8; 40]),
+            None,
+            "does not fit"
+        );
+        assert_eq!(unmap_cdb(40), [0x42, 0, 0, 0, 0, 0, 0, 0, 40, 0]);
+        let c = write_same_unmap_cdb(0x1234, 16);
+        assert_eq!((c[0], c[1]), (0x93, 0x08));
+        assert_eq!(&c[2..10], &0x1234u64.to_be_bytes());
+        assert_eq!(&c[10..14], &16u32.to_be_bytes());
     }
 
     #[test]

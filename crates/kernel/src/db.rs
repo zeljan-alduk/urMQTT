@@ -242,6 +242,9 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
             return refuse_or_degrade(false, format_args!("data partition unreadable: {e:?}"));
         }
     };
+    // S4: release space the store no longer uses, if the device can and the
+    // configuration allows it (before the grow, which queues the new space).
+    log_discard_mode(&mut disk);
     // S3: a larger device than the layout covers (the cloud volume grew, the
     // GPT step has extended the partition): the new space goes to the
     // database and the telemetry ring by `storage.grow_ratio_db`. One
@@ -327,6 +330,7 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
     let mut log = log;
     match (test, log.as_mut()) {
         (Some(DbTest::LogVerify), Some(l)) => log_verify(l, retention_ms),
+        (Some(DbTest::DiscardFill), Some(l)) => discard_fill(l),
         (Some(DbTest::LogTear), Some(l)) => {
             log_tear(l);
             // The torn write is on disk; the in-memory log is stale.
@@ -382,6 +386,13 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
         last_stats_ms: now_ms(),
         grow_irqs_seen: devices::blk_irqs(),
         grow_looked_ms: now_ms(),
+        // `test=discard-fill` leaves its expired records alone this boot:
+        // the next boot's retention releases them.
+        discard_on: test != Some(DbTest::DiscardFill)
+            && urmqtt_store::vfs::with_disk(|d| d.discard_active()).unwrap_or(false),
+        discard_next_ms: 0,
+        retire_next_ms: now_ms(),
+        discard_logged: 0,
         log,
         log_rx,
         log_since_ms: None,
@@ -647,6 +658,100 @@ struct Worker {
     /// and when that was.
     grow_irqs_seen: u64,
     grow_looked_ms: u64,
+    /// Discards (S4): when the next request may go out, when retention next
+    /// looks for expired telemetry segments, and the request count at the
+    /// last counter line.
+    discard_on: bool,
+    discard_next_ms: u64,
+    retire_next_ms: u64,
+    discard_logged: u64,
+}
+
+/// Pause between two discard requests (rate limit, S4).
+const DISCARD_EVERY_MS: u64 = 25;
+/// How often retention looks for telemetry segments to retire.
+const RETIRE_EVERY_MS: u64 = 60_000;
+
+/// Turns the discard queue on according to `storage.discard`, and says what
+/// the device offers.
+fn log_discard_mode(disk: &mut Disk) {
+    use urmqtt_config::DiscardMode;
+    use urmqtt_store::disk::DiscardKind;
+    if crate::live::ephemeral() {
+        disk.set_discard(false);
+        info!("storage: discard: not applicable (the store is in RAM)");
+        return;
+    }
+    if CONFIG.storage.discard == DiscardMode::Off {
+        disk.set_discard(false);
+        info!("storage: discard: off (storage.discard = \"off\")");
+        return;
+    }
+    match disk.set_discard(true) {
+        Some(c) => info!(
+            "storage: discard: auto, {} ({} KiB per range at most, {} range(s) per request, granularity {} B)",
+            match c.kind {
+                DiscardKind::Discard => "device discard",
+                DiscardKind::WriteZeroes => "write-zeroes with unmap",
+            },
+            (c.max_sectors * 512) >> 10,
+            c.max_ranges,
+            c.granularity * 512
+        ),
+        None => info!(
+            "storage: discard: auto, but the device offers neither discard nor write-zeroes with unmap: space is not released"
+        ),
+    }
+}
+
+fn log_discard_stats(s: &urmqtt_store::disk::DiscardStats) {
+    info!(
+        "storage: discard: requests={} ranges={} released={} KiB (queued: telemetry {} KiB, truncate {} KiB, grow {} KiB) cancelled={} KiB dropped={} KiB failed={}",
+        s.requests,
+        s.ranges,
+        s.bytes >> 10,
+        s.queued_telemetry >> 10,
+        s.queued_truncate >> 10,
+        s.queued_grow >> 10,
+        s.cancelled >> 10,
+        s.dropped >> 10,
+        s.failed
+    );
+}
+
+/// `test=discard-fill`: telemetry dated 40 days ago, about 2.5 segments
+/// into every partition, so that the next boot's retention finds whole
+/// expired segments to release.
+fn discard_fill(log: &mut TelemetryLog) {
+    let Some(now) = crate::boot::now_unix() else {
+        error!("discard-fill: no wall clock, cannot date the records");
+        return;
+    };
+    let old_ms = now.saturating_sub(40 * 86_400) * 1000;
+    log.set_now(now.saturating_sub(40 * 86_400));
+    let payload = [0xd5u8; 1000];
+    let per_partition = log.segment_bytes() * 5 / 2 / 1040;
+    let r = urmqtt_store::vfs::with_disk(|d| {
+        for p in 0..log.partitions() {
+            for i in 0..per_partition {
+                log.append(d, p, old_ms + i, "selftest/old", &payload)?;
+                if i % 1000 == 999 {
+                    log.flush(d)?;
+                }
+            }
+        }
+        log.flush(d)
+    });
+    log.set_now(now);
+    match r {
+        Some(Ok(_)) => info!(
+            "discard-fill: {} record(s) dated 40 days ago durable in {} partition(s), {} KiB each",
+            per_partition * log.partitions() as u64,
+            log.partitions(),
+            (per_partition * 1040) >> 10
+        ),
+        other => error!("discard-fill: failed: {:?}", other.map(|x| x.err())),
+    }
 }
 
 /// Logs what a grow did (at boot or online).
@@ -751,11 +856,107 @@ impl Worker {
         }
         did |= self.step_log(now_ms);
         did |= self.check_online_grow(now_ms);
+        did |= self.step_discard(now_ms);
         if now_ms.saturating_sub(self.last_stats_ms) >= STATS_EVERY_MS {
             self.refresh_disk_used();
             self.log_stats(now_ms);
         }
         did
+    }
+
+    /// Space the store no longer uses goes back to the device (S4,
+    /// ADR-150). Retention looks for expired telemetry segments once a
+    /// minute; the queued ranges are sent one request at a time, a few per
+    /// second, and only while nothing waits for the disk: no open
+    /// transaction, no request from a data core, no telemetry pending. A
+    /// range is queued behind a sync, so what retired it is already durable,
+    /// and a write to it takes it back: a discard is never in front of a
+    /// commit and never destroys anything live.
+    fn step_discard(&mut self, now_ms: u64) -> bool {
+        if !self.discard_on {
+            return false;
+        }
+        if now_ms >= self.retire_next_ms {
+            self.retire_next_ms = now_ms + RETIRE_EVERY_MS;
+            self.retire_telemetry();
+        }
+        if now_ms < self.discard_next_ms
+            || self.store.in_transaction()
+            || self.pending()
+            || self.log.as_ref().is_some_and(|l| l.pending_bytes() > 0)
+        {
+            return false;
+        }
+        let r = urmqtt_store::vfs::with_disk(|d| {
+            if !d.discard_pending() {
+                return Ok(None);
+            }
+            let sent = d.run_discards(1)?;
+            // Waiting ranges are released by a sync; with nothing else to
+            // write, this is the sync that does it. When the queue is empty,
+            // the device's discards are made durable (a thin disk records
+            // them on flush).
+            if sent == 0 || !d.discard_ready() {
+                d.sync()?;
+            }
+            Ok::<_, DiskError>(Some(sent))
+        });
+        match r {
+            Some(Ok(Some(_))) => {
+                self.discard_next_ms = now_ms + DISCARD_EVERY_MS;
+                self.log_discard_counters(false);
+                true
+            }
+            Some(Ok(None)) | None => false,
+            Some(Err(e)) => {
+                self.stats.errors += 1;
+                self.discard_next_ms = now_ms + DISCARD_EVERY_MS;
+                warn!("storage: discard failed: {e:?}");
+                self.log_discard_counters(true);
+                // A device that keeps failing is given up on by the disk.
+                self.discard_on =
+                    urmqtt_store::vfs::with_disk(|d| d.discard_active()).unwrap_or(false);
+                if !self.discard_on {
+                    warn!("storage: discard stopped for this boot");
+                }
+                true
+            }
+        }
+    }
+
+    /// Retention (S4): telemetry segments whose newest record is older than
+    /// `storage.retention_days` are queued for release.
+    fn retire_telemetry(&mut self) {
+        let (Some(log), Some(now)) = (self.log.as_mut(), crate::boot::now_unix()) else {
+            return;
+        };
+        let retention_ms = u64::from(CONFIG.storage.retention_days) * 86_400_000;
+        let n = urmqtt_store::vfs::with_disk(|d| log.retire_expired(d, now, retention_ms));
+        if let Some(n) = n.filter(|&n| n > 0) {
+            info!(
+                "telemetry: {n} segment(s) past retention ({} days) retired, {} still in use",
+                CONFIG.storage.retention_days,
+                log.live_segments()
+            );
+        }
+    }
+
+    /// The discard counters, once a batch of requests is through (or on a
+    /// failure): smoke checks them.
+    fn log_discard_counters(&mut self, force: bool) {
+        let Some(st) = urmqtt_store::vfs::with_disk(|d| {
+            let idle = !d.discard_pending();
+            d.discard_stats().map(|s| (s, idle))
+        })
+        .flatten() else {
+            return;
+        };
+        let (st, idle) = st;
+        if st.requests == self.discard_logged || !(idle || force) {
+            return;
+        }
+        self.discard_logged = st.requests;
+        log_discard_stats(&st);
     }
 
     /// Appends queued telemetry and flushes when due.
