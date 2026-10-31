@@ -132,6 +132,7 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	@if command -v typos >/dev/null; then typos; else echo "check: typos not installed, skipped (CI runs it)"; fi
 	cd fuzz && $(CARGO) fmt --check
 	scripts/check-arch-leaks.sh
+	@if command -v cargo-vet >/dev/null; then $(CARGO) vet --locked; else echo "check: cargo-vet not installed, skipped (CI runs it)"; fi
 	$(CARGO) clippy $(CARGO_FLAGS) --workspace --all-targets -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-kernel --target $(TARGET) -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-kernel --target $(TARGET) -- -D warnings
@@ -222,6 +223,7 @@ dist: iso raw ## Release artifacts (ELF, ISO, raw image) and SHA256SUMS in build
 	@rm -rf $(BUILD_DIR)/dist && mkdir -p $(BUILD_DIR)/dist
 	cp $(KERNEL_ELF) $(BUILD_DIR)/dist/urmqtt-$(ENV)-$(VERSION).elf
 	cp $(ISO) $(RAW) $(BUILD_DIR)/dist/
+	scripts/sbom.py --strict --version $(VERSION) --out $(BUILD_DIR)/dist/urmqtt-$(ENV)-$(VERSION).cdx.json
 	cd $(BUILD_DIR)/dist && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
 
 .PHONY: dist-universal
@@ -230,6 +232,7 @@ dist-universal: universal ## Both ELFs, the universal ISO and raw image, SHA256S
 	cp target/aarch64-unknown-none/release/urmqtt $(BUILD_DIR)/dist-universal/urmqtt-$(ENV)-$(VERSION)-aarch64.elf
 	cp target/x86_64-urmqtt-none/release/urmqtt $(BUILD_DIR)/dist-universal/urmqtt-$(ENV)-$(VERSION)-x86_64.elf
 	cp $(UNIVERSAL_ISO) $(UNIVERSAL_RAW) $(BUILD_DIR)/dist-universal/
+	scripts/sbom.py --strict --version $(VERSION) --out $(BUILD_DIR)/dist-universal/urmqtt-$(ENV)-$(VERSION).cdx.json
 	cd $(BUILD_DIR)/dist-universal && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
 
 .PHONY: sign
@@ -247,6 +250,18 @@ repro: ## Build HEAD twice in separate worktrees and compare ELF and ISO (ENV=pr
 .PHONY: audit
 audit: ## Regenerate the TCB and unsafe inventory (docs/audit/, referenced by docs/AUDIT.md)
 	scripts/audit-inventory.py
+
+.PHONY: sbom
+sbom: ## CycloneDX SBOM (Rust crates, SQLite, Limine, nistz256, patched crates) to build/urmqtt-VERSION.cdx.json; needs cargo fetch once, then works offline
+	scripts/sbom.py --version $(VERSION) --out $(BUILD_DIR)/urmqtt-$(VERSION).cdx.json
+
+.PHONY: supply-chain
+supply-chain: ## cargo-vet, cargo-deny (advisories, bans, licenses, sources) and the SBOM check; the deny database is fetched
+	$(CARGO) vet --locked
+	scripts/vet-exemptions.py --check
+	$(CARGO) deny check advisories bans licenses sources
+	$(CARGO) deny --manifest-path fuzz/Cargo.toml check advisories
+	scripts/sbom.py --check
 
 .PHONY: clean
 clean: ## Remove build outputs (keeps certificates and data.img)

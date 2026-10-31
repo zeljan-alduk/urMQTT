@@ -264,6 +264,35 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories bans licenses sources
+      # The fuzz workspace has its own lockfile (advisories only: it is not shipped).
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: fuzz/Cargo.toml
+          command: check advisories
+
+  supply-chain:
+    name: Supply chain (cargo-vet, SBOM)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: supply-chain
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-vet
+      # Every dependency is audited, covered by an imported audit or listed as
+      # an exemption (docs/SUPPLY-CHAIN.md); --locked fails on stale imports.
+      - run: cargo vet --locked
+      - name: Exemption list up to date (docs/audit/vet-exemptions.md)
+        run: python3 scripts/vet-exemptions.py --check
+      - name: SBOM builds and validates, vendored hashes match their files
+        run: |
+          cargo fetch --locked
+          python3 scripts/sbom.py --strict --check
 
   fuzz-smoke:
     name: Fuzz smoke (60 s per target)

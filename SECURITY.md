@@ -9,7 +9,9 @@ Please **do not open a public issue**. Report it privately through
 Include the affected commit, a reproducer (a fuzz input is ideal) and the impact
 you expect.
 
-You can expect an acknowledgement within 7 days. Fixes are released as a new
+You can expect an acknowledgement within 7 days. The whole process (triage, fix
+targets, disclosure, supported versions) is in
+[docs/VULNERABILITY-HANDLING.md](docs/VULNERABILITY-HANDLING.md). Fixes are released as a new
 image, because urMQTT has no in-place update mechanism by design.
 
 ## Scope

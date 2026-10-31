@@ -87,7 +87,10 @@ key for this pre-alpha: its secret half sits passwordless in the CI secret
 offline, password-protected key before any real release. Published dev
 releases carry SLSA build provenance (`gh attestation verify <file> -R
 zeljan-alduk/urMQTT`), and a minisign signature when the repository secret
-`MINISIGN_SECRET_KEY` holds a passwordless key (`minisign -G -W`).
+`MINISIGN_SECRET_KEY` holds a passwordless key (`minisign -G -W`). Each
+release also carries a CycloneDX SBOM (`urmqtt-dev-VERSION.cdx.json`, in
+`SHA256SUMS`, with an SBOM attestation: docs/SUPPLY-CHAIN.md), which an operator
+can feed to a vulnerability scanner.
 
 ## 4. Virtual hardware
 

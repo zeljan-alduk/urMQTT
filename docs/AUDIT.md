@@ -28,7 +28,7 @@ H1: 34 538 lines, 316/289; S1: 36 573 lines, 318/290; S1b: 37 240 lines, 319/290
 |---|---|---|
 | Own Rust (23 workspace crates, `src/` incl. inline tests) | 38 488 lines | `tools/loadgen`, `tools/control` and `tools/disk` are host tools, not in the image |
 | Third-party Rust linked into the kernel | 69 crates from crates.io, 297 675 lines, plus the two vendored `cpufeatures` below | RustCrypto, rustls, webpki, p256, x25519-dalek, ed25519-dalek (H1), … ([list](audit/inventory.md)). `ed25519-dalek` 2.2 brings `sha2` 0.10, `digest` 0.10 and `signature` 2 alongside the 0.11/3 versions (about 4 500 duplicate lines, H9) |
-| Third-party Rust at build time only | proc-macros and build scripts (syn, toml, cc, …) | they run on the build host, so they are a supply-chain risk (H9), not runtime TCB |
+| Third-party Rust at build time only | proc-macros and build scripts (syn, toml, cc, …) | they run on the build host, so they are a supply-chain risk, not runtime TCB; cargo-vet exemptions, SBOM and advisory checks: [SUPPLY-CHAIN.md](SUPPLY-CHAIN.md), [vet-exemptions](audit/vet-exemptions.md) (H9) |
 | SQLite 3.54.1 (C), linked | 254 268 lines | the largest component; runs at EL1 with full kernel rights (H6) |
 | Own C headers for SQLite | 53 lines in 7 headers | the libc surface SQLite sees (functions implemented in Rust, `store/src/libc.rs`) |
 | RustCrypto `cpufeatures` 0.2.17 and 0.3.1, vendored (X0b) | 642 + 565 lines | upstream sources plus one hunk each: on bare metal they ask the kernel's sealed dispatch (`urmqtt_cpu_has`). Reviewable with `diff -r` against the crates.io files ([vendor/README.md](../vendor/README.md)) |

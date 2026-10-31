@@ -44,6 +44,16 @@ jobs:
           (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
           minisign -S -s "$key" -m build/dist/SHA256SUMS -t "urMQTT $GITHUB_REF_NAME dev $GITHUB_SHA" </dev/null
           rm -f "$key"
+      # The SBOM (CycloneDX, scripts/sbom.py) is built by make dist and listed
+      # in SHA256SUMS; this binds it to the images as an SBOM attestation next
+      # to the provenance below (H9, ADR-190).
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: |
+            build/dist/*.elf
+            build/dist/*.iso
+            build/dist/*.img
+          sbom-path: build/dist/urmqtt-dev-${{ github.ref_name }}.cdx.json
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: build/dist/*

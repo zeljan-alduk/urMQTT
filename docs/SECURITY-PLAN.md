@@ -279,6 +279,8 @@ Every milestone ends with:
 
 **Accept:** the SBOM is in the release workflow; vet audits are complete; the process document exists.
 
+**Status: done, with one honest gap** (docs/PROGRESS.md, H9; ADR-190 to ADR-193; docs/SUPPLY-CHAIN.md). The SBOM, the vet setup, the advisory job and the process document exist. "Vet audits are complete" holds as "`cargo vet` passes and every TCB crate is an imported audit or a listed exemption": 53 of 67 kernel-linked crate versions are **exemptions**, not audits (docs/audit/vet-exemptions.md). The RustCrypto and rustls families are the input to the H10 external audit.
+
 ### H10 — Audit package · M (last)
 
 **Work:** finalise `docs/AUDIT.md` with:

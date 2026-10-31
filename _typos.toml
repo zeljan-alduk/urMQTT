@@ -15,3 +15,5 @@ RTO = "RTO"
 IST = "IST"
 # ARP field names (RFC 826): sender/target hardware and protocol address
 tha = "tha"
+# CVE Numbering Authority
+CNA = "CNA"

@@ -957,7 +957,7 @@ Security is the first priority and wins conflicts with the other tracks.
 | 📋 | **H6** SQLite isolation | SQLite at EL0 on the DB core; an out-of-bounds write from SQLite cannot touch kernel memory |
 | 📋 | **H7** Time security | build time as a hard lower bound; optional SNTP with sanity limits; fail closed |
 | 📋 | **H8** Boot integrity | Limine config hash enrolled; Secure Boot with signed loaders (CI test and the Intel PC) |
-| 📋 | **H9** Supply chain | SBOM per release, cargo-vet audits, vulnerability-handling process |
+| ✅ | **H9** Supply chain | CycloneDX SBOM per release (with the vendored C and binaries), cargo-vet with imported audits and listed exemptions (the TCB is not audited yet), advisories fail CI plus a daily job, [vulnerability-handling process](docs/VULNERABILITY-HANDLING.md) |
 | 📋 | **H10** Audit package | everything an external auditor needs, with a prioritised audit scope |
 
 **Storage, raw disk without a filesystem**: [PROMPT-storage.md](PROMPT-storage.md), plan in [docs/STORAGE-PLAN.md](docs/STORAGE-PLAN.md).

@@ -1,0 +1,49 @@
+name: Advisories
+
+# A new RustSec advisory can land at any time, with no change to this
+# repository. This job re-checks the lockfiles against the current database
+# every day and fails (and opens an issue) when one applies, so a
+# vulnerability in a dependency reaches us in a day, not at the next push
+# (docs/VULNERABILITY-HANDLING.md).
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: cargo-deny advisories (scheduled)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: main
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
+      - id: fuzz
+        if: ${{ !cancelled() }}
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: fuzz/Cargo.toml
+          command: check advisories
+      - name: Open an issue (once) when an advisory applies
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Dependency advisory: scheduled check failed"
+          open="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number --jq length)"
+          if [ "$open" = "0" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --body "The scheduled cargo-deny advisory check failed: $RUN_URL. Triage under docs/VULNERABILITY-HANDLING.md (target: triage within 3 working days)."
+          fi
