@@ -146,8 +146,57 @@ pub mod stack_guard {
 
     /// Whether the canary is still the build-time constant (a test: it must
     /// not be once the kernel runs).
+    #[cfg(feature = "selftest")]
     pub fn is_default() -> bool {
         // Relaxed: a plain read.
         __stack_chk_guard.load(Ordering::Relaxed) == BUILD_TIME
+    }
+}
+
+/// What a fault or panic report may contain (H4, ADR-172).
+///
+/// A report is read by whoever has the console (the VPS provider's VNC, a
+/// serial log, a screen recording) and, if it outlives the VM, by anyone
+/// they pass it to. It must not carry secrets, and it must not carry the
+/// layout of the running kernel. In a production image a fault report
+/// therefore has: the exception and its decoded cause, the class of the
+/// faulting address (guard page, lower half, ...), the program counter as
+/// an offset into the kernel image, and, for a panic, the location and a
+/// message only if it is a fixed string. It does not have: register values,
+/// stack or memory dumps, absolute addresses, formatted panic messages
+/// (their arguments are whatever the caller formatted). A dev image prints
+/// everything, as before, unless the `redact` test word asks for the
+/// production policy (the tests that prove it).
+pub mod fault_policy {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static FORCED: AtomicBool = AtomicBool::new(false);
+
+    /// Applies the production policy even in a dev image (test word).
+    pub fn force() {
+        // Relaxed: set once on the boot CPU before any test fault.
+        FORCED.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether reports are redacted.
+    pub fn redact() -> bool {
+        // Relaxed: see `force`.
+        FORCED.load(Ordering::Relaxed) || urmqtt_config::CONFIG.env != "dev"
+    }
+
+    /// `pc` as `kernel+0xOFFSET` when it is inside the image, else a fixed
+    /// phrase: an offset reads against the build's symbols, an address
+    /// would tell where a randomised kernel sits.
+    pub struct ImageOffset(pub u64);
+
+    impl core::fmt::Display for ImageOffset {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            let (lo, hi) = crate::vm::image_range();
+            if (lo..hi).contains(&self.0) {
+                write!(f, "kernel+{:#x}", self.0 - lo)
+            } else {
+                f.write_str("outside the kernel image")
+            }
+        }
     }
 }

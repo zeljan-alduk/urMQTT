@@ -27,6 +27,8 @@ pub fn run(fault: TestFault) {
         TestFault::HeapUaf => heap_uaf(),
         TestFault::HeapOverflow => heap_overflow(),
         TestFault::StackSmash => stack_smash(),
+        TestFault::FaultSecrets | TestFault::FaultSecretsOpen => fault_with_secrets(),
+        TestFault::PanicSecret => panic_with_secret(),
         _ => warn!("test: {fault:?} is not implemented in this image"),
     }
 }
@@ -153,4 +155,67 @@ fn stack_smash() {
     );
     smash(black_box(64));
     error!("test: the stack smash was NOT detected");
+}
+
+/// A known test key: eight words that spell "SECRETKE" and friends, so a
+/// grep for the hex or for the text finds them anywhere they leak.
+pub const TEST_KEY: [u64; 6] = [
+    0x5345_4352_4554_4b45, // "SECRETKE"
+    0x595f_5445_5354_5f31, // "Y_TEST_1"
+    0x5345_4352_4554_4b32, // "SECRETK2"
+    0x595f_5445_5354_5f32, // "Y_TEST_2"
+    0x5345_4352_4554_4b33, // "SECRETK3"
+    0x595f_5445_5354_5f33, // "Y_TEST_3"
+];
+
+/// `test=fault-secrets`: the key is in registers and on the stack and the
+/// heap when the CPU faults. Under the production policy (`redact`, or any
+/// production image) the report must not show it; `fault-secrets-open`
+/// prints the registers, which proves the check is able to see the bytes.
+#[inline(never)]
+fn fault_with_secrets() {
+    let on_heap = alloc::boxed::Box::new(TEST_KEY);
+    let on_stack = black_box(TEST_KEY);
+    black_box(&on_heap);
+    black_box(&on_stack);
+    let unmapped = crate::memory::unmapped_mmio_probe();
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: deliberately faulting load from an unmapped address; the
+    // exception handler reports it and does not return.
+    unsafe {
+        core::arch::asm!(
+            "ldr xzr, [{p}]",
+            p = in(reg) unmapped,
+            in("x20") TEST_KEY[0], in("x21") TEST_KEY[1], in("x22") TEST_KEY[2],
+            in("x23") TEST_KEY[3], in("x24") TEST_KEY[4], in("x25") TEST_KEY[5],
+            options(nostack, readonly)
+        );
+    }
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: as above.
+    unsafe {
+        core::arch::asm!(
+            "mov rax, [{p}]",
+            p = in(reg) unmapped,
+            out("rax") _,
+            in("r10") TEST_KEY[0], in("r11") TEST_KEY[1], in("r12") TEST_KEY[2],
+            in("r13") TEST_KEY[3], in("r14") TEST_KEY[4], in("r15") TEST_KEY[5],
+            options(nostack, readonly)
+        );
+    }
+    error!("test: the fault with secrets did not happen");
+}
+
+/// `test=panic-secret`: a panic whose message is formatted from the key.
+#[inline(never)]
+fn panic_with_secret() {
+    let key = black_box(TEST_KEY);
+    #[allow(clippy::panic)]
+    {
+        panic!(
+            "test panic carrying a key: {:02x?} {:#x}",
+            key.as_slice(),
+            key[0]
+        );
+    }
 }

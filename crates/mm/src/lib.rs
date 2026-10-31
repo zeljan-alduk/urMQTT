@@ -83,7 +83,19 @@ pub struct LockedHeap {
 #[inline(never)]
 #[allow(clippy::panic)]
 pub fn heap_fault(f: buddy::HeapFault) -> ! {
-    panic!("heap: {f}")
+    // Fixed strings, one per fault: a formatted message would be withheld
+    // by the production fault policy (ADR-172), and these name no data.
+    match f {
+        buddy::HeapFault::DoubleFree => panic!("heap: double free"),
+        buddy::HeapFault::InvalidFree => {
+            panic!("heap: invalid free (not the start of a live allocation of that size)")
+        }
+        buddy::HeapFault::FreeListCorrupted => panic!("heap: free list corrupted"),
+        buddy::HeapFault::WriteAfterFree => panic!("heap: write after free (poison overwritten)"),
+        buddy::HeapFault::RedZoneDamaged => {
+            panic!("heap: heap overflow (red zone behind a large allocation damaged)")
+        }
+    }
 }
 
 impl LockedHeap {

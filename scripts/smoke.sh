@@ -2211,6 +2211,24 @@ hardening_suite() {
     scenario stack-smash "smoke test=stack-smash" on \
         "test mode: triggering StackSmash" "test: the stack canary is not the build-time constant: true" \
         "!!! STACK SMASHING DETECTED" "NOT:was NOT detected" "NOT:URMQTT READY"
+    # Fault policy (ADR-172): under the production policy a fault report has no
+    # register, no stack or heap content and no absolute address; the open
+    # twin of each test proves the grep can see the key when it is printed.
+    scenario fault-secrets "smoke redact test=fault-secrets" on \
+        "test mode: triggering FaultSecrets" "!!! EXCEPTION: " \
+        "pc = kernel\+0x[0-9a-f]+; registers, stack and memory withheld \(production policy\)" \
+        "NOT:5345435245544b45|595f544553545f31|SECRETKE|Y_TEST_" "NOT:(x[0-9]+|R[A-Z0-9]+)=0x[0-9a-f]{16}" \
+        "NOT:FAR=0x|CR2=0x|ESR=0x|RIP=0x|RSP=0x" "NOT:URMQTT READY"
+    scenario fault-secrets-open "smoke test=fault-secrets-open" on \
+        "test mode: triggering FaultSecretsOpen" "!!! EXCEPTION: " \
+        "0x5345435245544b45" "0x595f544553545f31" "0x5345435245544b33" "0x595f544553545f33" "NOT:URMQTT READY"
+    scenario panic-secret "smoke redact test=panic-secret" on \
+        "!!! PANIC: panicked at " "hardtest.rs" "message withheld: it has formatted arguments" \
+        "NOT:5345435245544b45|595f544553545f31|SECRETKE|test panic carrying a key" "NOT:URMQTT READY"
+    scenario panic-secret-open "smoke test=panic-secret" on \
+        "!!! PANIC: panicked at " "test panic carrying a key: .*5345435245544b45" "NOT:URMQTT READY"
+    scenario double-free-prod "smoke redact test=double-free" on \
+        "!!! PANIC: panicked at " "^heap: double free" "NOT:message withheld" "NOT:URMQTT READY"
     scenario keyslab-zero "smoke test=keyslab-zero" on \
         "keyslab-zero: 8 key\(s\) stored and read back in place \(true\), freed; 16 free slot\(s\) all zero \(true\); stale handles refused \(true\): ok" \
         "keyslab-zero: a freed 1000-byte heap block reads back as poison 0xdf \(true\), no byte of the old contents left \(true\): ok" \

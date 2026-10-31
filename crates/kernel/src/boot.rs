@@ -186,6 +186,9 @@ extern "C" fn urmqtt_kmain() -> ! {
 
     let options = BootOptions::parse(CMDLINE.response().map_or("", |r| r.cmdline()), dev);
     power::set_smoke(options.smoke);
+    if options.redact {
+        hardening::fault_policy::force();
+    }
     if let Some(us) = options.slow_log_us {
         urmqtt_log::set_sink_delay_us(us);
     }
@@ -494,11 +497,9 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     if let Some(fault) = s.options.test_fault {
         run_test_fault(fault, s.features);
     }
+    #[cfg(feature = "selftest")]
     if s.options.keyslab_zero {
-        #[cfg(feature = "selftest")]
         crate::hardtest::keyslab_zero();
-        #[cfg(not(feature = "selftest"))]
-        warn!("keyslab-zero: not in this image (built without the selftest feature)");
     }
     if s.options.crypto_bench {
         #[cfg(feature = "selftest")]
@@ -995,17 +996,14 @@ fn run_test_fault(fault: TestFault, features: Features) {
         TestFault::ExecHeap => selftest::exec_heap(),
         TestFault::StackOverflow => selftest::stack_overflow(),
         TestFault::NullDeref => trap::probe_read(0x8),
+        #[cfg(feature = "selftest")]
         TestFault::HeapDoubleFree
         | TestFault::HeapUaf
         | TestFault::HeapOverflow
         | TestFault::StackSmash
         | TestFault::FaultSecrets
-        | TestFault::FaultSecretsOpen => {
-            #[cfg(feature = "selftest")]
-            crate::hardtest::run(fault);
-            #[cfg(not(feature = "selftest"))]
-            warn!("test: {fault:?} is not in this image (built without the selftest feature)");
-        }
+        | TestFault::FaultSecretsOpen
+        | TestFault::PanicSecret => crate::hardtest::run(fault),
         // Handled by the architecture's `run_fault`.
         TestFault::DataAbort
         | TestFault::Pac

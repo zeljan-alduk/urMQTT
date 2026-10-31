@@ -99,6 +99,15 @@ pub fn kernel_sections() -> [(u64, u64, PageAttrs, &'static str); 4] {
     ]
 }
 
+/// The kernel image as `[start, end)` virtual addresses.
+pub fn image_range() -> (u64, u64) {
+    let sections = kernel_sections();
+    (
+        sections.first().map_or(0, |s| s.0),
+        sections.last().map_or(0, |s| s.1),
+    )
+}
+
 /// What `build` produced for the boot CPU.
 pub struct Built {
     pub main_top: u64,
