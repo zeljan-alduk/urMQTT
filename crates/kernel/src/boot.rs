@@ -230,7 +230,7 @@ extern "C" fn urmqtt_kmain() -> ! {
         // `black_box`: a build without SOURCE_DATE_EPOCH has a bound of 0.
         Some(t) if t >= core::hint::black_box(BUILD_UNIX) => {
             info!("date at boot: unix {t} (image built at unix {BUILD_UNIX})");
-            BOOT_UNIX.store(t, core::sync::atomic::Ordering::Relaxed);
+            set_clock_base(t.saturating_mul(1000), Source::Rtc);
         }
         Some(t) => warn!(
             "date at boot: unix {t} is before this image was built (unix {BUILD_UNIX}): \
@@ -574,6 +574,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     crate::dataplane::init(data_cores);
     crate::dataplane::set_heap_reserve(s.options.heap_limit_mb);
     crate::dataplane::set_bench_limits(s.options.bench_limits);
+    crate::time_sync::set_dev_server(s.options.sntp_server);
     if s.options.db_test == Some(crate::cmdline::DbTest::DpBench) {
         #[cfg(feature = "selftest")]
         {
@@ -774,24 +775,82 @@ const fn parse_u64(s: &str) -> u64 {
     v
 }
 
-/// Unix time at boot from the firmware RTC via Limine (ADR-009).
-static BOOT_UNIX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
+pub(crate) use urmqtt_sntp::Source;
 
-/// Wall clock for certificate validity: date at boot plus uptime.
-pub(crate) fn now_unix() -> Option<u64> {
-    // Relaxed: written once before the clock is installed.
-    match BOOT_UNIX.load(core::sync::atomic::Ordering::Relaxed) {
-        0 => None,
-        t => Some(t + uptime_ns() / 1_000_000_000),
+/// The wall clock is `CLOCK_BASE_MS` plus the uptime (T1, ADR-100). The base
+/// starts as the firmware RTC at boot via Limine (ADR-009, 0 when that is
+/// missing or before the build time) and SNTP corrects it.
+static CLOCK_BASE_MS: AtomicI64 = AtomicI64::new(0);
+/// 0 unknown, 1 rtc, 2 sntp. Written by core 0 only, read by every core.
+static CLOCK_SOURCE: AtomicU8 = AtomicU8::new(0);
+/// The last SNTP offset against the clock as it was, ms (valid when
+/// `OFFSET_VALID`).
+static OFFSET_MS: AtomicI64 = AtomicI64::new(0);
+static OFFSET_VALID: AtomicBool = AtomicBool::new(false);
+
+fn set_clock_base(base_ms: u64, source: Source) {
+    // Relaxed: a reader that sees the new base with the old source, or the
+    // other way round, is off by one update for a moment; the source is
+    // stored last so "known" never precedes a base.
+    CLOCK_BASE_MS.store(
+        i64::try_from(base_ms).unwrap_or(i64::MAX),
+        Ordering::Relaxed,
+    );
+    CLOCK_SOURCE.store(source as u8, Ordering::Release);
+}
+
+/// Where the wall clock comes from.
+pub(crate) fn clock_source() -> Source {
+    match CLOCK_SOURCE.load(Ordering::Acquire) {
+        1 => Source::Rtc,
+        2 => Source::Sntp,
+        _ => Source::Unknown,
     }
+}
+
+/// The clock's reading in Unix ms whether or not it is known (uptime when
+/// it is not): what SNTP measures against.
+pub(crate) fn clock_raw_ms() -> i64 {
+    let up = i64::try_from(uptime_ns() / 1_000_000).unwrap_or(i64::MAX);
+    CLOCK_BASE_MS.load(Ordering::Relaxed).saturating_add(up)
+}
+
+/// Moves the clock by `adjust_ms` (core 0, after SNTP agreed and the bounds
+/// allowed it) and makes SNTP its source.
+pub(crate) fn apply_clock_adjust(adjust_ms: i64) {
+    let base = CLOCK_BASE_MS
+        .load(Ordering::Relaxed)
+        .saturating_add(adjust_ms);
+    CLOCK_BASE_MS.store(base, Ordering::Relaxed);
+    CLOCK_SOURCE.store(Source::Sntp as u8, Ordering::Release);
+}
+
+/// The last SNTP offset measured against a known clock, ms (applied or
+/// refused).
+pub(crate) fn clock_offset_ms() -> Option<i64> {
+    OFFSET_VALID
+        .load(Ordering::Acquire)
+        .then(|| OFFSET_MS.load(Ordering::Relaxed))
+}
+
+/// Records the offset SNTP measured against the clock as it was.
+pub(crate) fn note_offset(offset_ms: i64) {
+    OFFSET_MS.store(offset_ms, Ordering::Relaxed);
+    OFFSET_VALID.store(true, Ordering::Release);
+}
+
+/// Wall clock for certificate validity: the RTC at boot plus uptime, as
+/// corrected by SNTP.
+pub(crate) fn now_unix() -> Option<u64> {
+    now_unix_ms().map(|ms| ms / 1000)
 }
 
 /// Wall clock in Unix milliseconds (SQLite's `current_timestamp`).
 pub(crate) fn now_unix_ms() -> Option<u64> {
-    // Relaxed: written once before the clock is used.
-    match BOOT_UNIX.load(core::sync::atomic::Ordering::Relaxed) {
-        0 => None,
-        t => Some(t * 1000 + uptime_ns() / 1_000_000),
+    match clock_source() {
+        Source::Unknown => None,
+        _ => u64::try_from(clock_raw_ms()).ok(),
     }
 }
 

@@ -1602,6 +1602,7 @@ dependencies = [
  "urmqtt-net",
  "urmqtt-pci",
  "urmqtt-platform",
+ "urmqtt-sntp",
  "urmqtt-store",
  "urmqtt-sync",
  "urmqtt-tcp",
@@ -1652,6 +1653,10 @@ version = "0.1.0"
 
 [[package]]
 name = "urmqtt-platform"
+version = "0.1.0"
+
+[[package]]
+name = "urmqtt-sntp"
 version = "0.1.0"
 
 [[package]]

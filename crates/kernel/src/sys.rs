@@ -287,6 +287,8 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
         messages_sent: delivered,
         connections_refused: dataplane::refused_total(),
         server_cert_days: crate::ops::server_cert_days(),
+        time_source: crate::boot::clock_source().name(),
+        time_offset_ms: crate::boot::clock_offset_ms(),
         console_dropped: CONSOLE_DROPPED.load(Ordering::Relaxed),
         handshakes: {
             let t = dataplane::handshake_totals();

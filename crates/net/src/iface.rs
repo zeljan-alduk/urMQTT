@@ -28,6 +28,14 @@ pub enum Rx<'a> {
         src: Ip,
         seg: &'a [u8],
     },
+    /// A UDP datagram for us that is not DHCP (SNTP answers, T1). Only the
+    /// NIC owner sees these; the checksum is verified.
+    Udp {
+        src: Ip,
+        sport: u16,
+        dport: u16,
+        payload: &'a [u8],
+    },
     Event(Event),
     None,
 }
@@ -37,6 +45,8 @@ pub struct Stats {
     pub frames_in: u64,
     pub frames_out: u64,
     pub dropped: u64,
+    /// UDP datagrams to us that were not DHCP, handed to the caller.
+    pub udp_in: u64,
     pub arp_replies: u64,
     pub icmp_replies: u64,
     pub icmp_limited: u64,
@@ -241,7 +251,7 @@ impl Iface {
                     PROTO_ICMP if for_us && self.owner => {
                         self.icmp(now_ms, ip.src, eth.src, ip.payload, out)
                     }
-                    PROTO_UDP if self.owner => self.udp(now_ms, ip.src, ip.dst, ip.payload),
+                    PROTO_UDP if self.owner => self.udp(now_ms, ip.src, ip.dst, for_us, ip.payload),
                     _ => {
                         self.stats.dropped += 1;
                         Rx::None
@@ -304,12 +314,21 @@ impl Iface {
         Rx::None
     }
 
-    fn udp<'a>(&mut self, now_ms: u64, src: Ip, dst: Ip, p: &[u8]) -> Rx<'a> {
+    fn udp<'a>(&mut self, now_ms: u64, src: Ip, dst: Ip, for_us: bool, p: &'a [u8]) -> Rx<'a> {
         let Some(u) = ipv4::parse_udp(src, dst, p) else {
             self.stats.dropped += 1;
             return Rx::None;
         };
         if u.dport != dhcp::CLIENT_PORT || u.sport != dhcp::SERVER_PORT {
+            if for_us {
+                self.stats.udp_in += 1;
+                return Rx::Udp {
+                    src,
+                    sport: u.sport,
+                    dport: u.dport,
+                    payload: u.payload,
+                };
+            }
             self.stats.dropped += 1;
             return Rx::None;
         }
@@ -569,6 +588,39 @@ mod tests {
         i.set_addr(Some(([10, 0, 2, 15], 24)), Some([10, 0, 2, 3]));
         i.send_tcp(client, &[0; 20], &mut |f| out.push(f.to_vec()));
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn udp_for_us_is_handed_out_but_not_other_peoples() {
+        let mut i = Iface::new(MAC, true, None, 0);
+        i.set_addr(Some(([10, 0, 2, 15], 24)), Some([10, 0, 2, 2]));
+        let mut d = Vec::new();
+        ipv4::push_udp(&mut d, [192, 0, 2, 1], [10, 0, 2, 15], 123, 40123, b"ntp");
+        // push_udp wrote the whole datagram with its pseudo-header checksum.
+        let f = frame([192, 0, 2, 1], [10, 0, 2, 15], PROTO_UDP, &d);
+        match i.receive(0, &f, &mut |_| {}) {
+            Rx::Udp {
+                src,
+                sport,
+                dport,
+                payload,
+            } => assert_eq!(
+                (src, sport, dport, payload),
+                ([192, 0, 2, 1], 123, 40123, &b"ntp"[..])
+            ),
+            _ => panic!("not handed out"),
+        }
+        assert_eq!(i.stats.udp_in, 1);
+        // To someone else: dropped. A corrupted checksum: dropped.
+        let mut o = Vec::new();
+        ipv4::push_udp(&mut o, [192, 0, 2, 1], [10, 0, 2, 99], 123, 40123, b"ntp");
+        let f = frame([192, 0, 2, 1], [10, 0, 2, 99], PROTO_UDP, &o);
+        assert!(matches!(i.receive(0, &f, &mut |_| {}), Rx::None));
+        let mut bad = d.clone();
+        bad[6] ^= 0xff;
+        let f = frame([192, 0, 2, 1], [10, 0, 2, 15], PROTO_UDP, &bad);
+        assert!(matches!(i.receive(0, &f, &mut |_| {}), Rx::None));
+        assert_eq!(i.stats.udp_in, 1);
     }
 
     #[test]

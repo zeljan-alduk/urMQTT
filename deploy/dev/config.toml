@@ -76,6 +76,15 @@ fallback = "jitter"
 # features (PAC, BTI) cannot be switched off. Empty: use what the CPU has.
 disable = []
 
+[time]
+# SNTP (T1, ADR-100): NTP servers as IPv4 literals ("a.b.c.d" or "a.b.c.d:port";
+# the broker has no DNS resolver), at most four. Empty: no SNTP, the wall clock
+# is the firmware RTC. With two or more, a majority must agree (median), so one
+# bad server cannot move the clock.
+servers = []
+interval_s = 3600     # seconds between queries (60..=86400)
+max_step_s = 600      # largest correction after the first, and in total (1..=86400)
+
 [trust]
 # CA files by role, in deploy/<env>/. Two operational CAs allow rotation with
 # overlap: add the new CA, re-issue devices, then remove the old one.

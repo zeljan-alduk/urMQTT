@@ -21,6 +21,7 @@ urmqtt-config.workspace = true
 urmqtt-dispatch = { path = "../dispatch" }
 urmqtt-mqtt = { path = "../mqtt" }
 urmqtt-net = { path = "../net" }
+urmqtt-sntp = { path = "../sntp" }
 urmqtt-store = { path = "../store" }
 urmqtt-tcp = { path = "../tcp" }
 

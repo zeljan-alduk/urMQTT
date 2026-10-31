@@ -75,6 +75,8 @@ mod sys;
 #[cfg(target_os = "none")]
 mod tick;
 #[cfg(target_os = "none")]
+mod time_sync;
+#[cfg(target_os = "none")]
 mod trap;
 #[cfg(target_os = "none")]
 mod vm;

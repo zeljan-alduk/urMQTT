@@ -1562,3 +1562,18 @@ Bench ISO (`make bench-iso`, static address), loadgen from the Mac (35 ms RTT) a
 - Open: ~28–40% of SYN-cookie ACKs count as "bad" (also reproduced in QEMU x86). They are most likely pure ACK/FIN segments after the server closed first (the connection is gone, the segment is checked as a cookie and answered with RST, `crates/tcp/src/lib.rs`); not yet confirmed, not harmful so far.
 - Open: "longest stall" of a worker is 55–60 ms on the VPS (6–7 ms in QEMU/TCG). Probably vCPU preemption by the hypervisor; not proven (no per-step maximum next to it).
 - The Mac stopped reaching the VPS during these tests (ping and TCP refused from the Mac, fine from the build server): a Mac-side filter, not the broker.
+
+## T1 — SNTP wall clock (ADR-100, 2026-10-31)
+
+**Done**
+
+- New crate `urmqtt-sntp` (pure, host-tested): RFC 4330 packets, response checks (origin, mode/version, LI, stratum, kiss-of-death, root dispersion, timestamps, delay), median with majority over up to four servers, the `Discipline` bounds (build-time floor, one large boot step, `max_step` per correction and in total) and the round scheduler (boot, interval, retry back-off, 10 s minimum gap).
+- Config `[time] servers/interval_s/max_step_s` (optional section, IPv4 literals; no DNS resolver exists, so names are refused with that explanation). `deploy/dev/config.toml` carries the section with no servers; `deploy/prod` untouched.
+- Net: `Rx::Udp` for UDP to the owner core that is not DHCP. Kernel: `time_sync.rs` on core 0, `boot.rs` clock = base + uptime with a source (`unknown|rtc|sntp`), dev word `sntp=`.
+- `$SYS/broker/time/{source,offset_ms}`, JSON query, `status`, `time:` log lines; `docs/OPERATE.md` section "Time".
+- Smoke `time-sntp-{ok,past,kod,wrongorigin}` with `scripts/sntp-responder.py` (`SMOKE_ONLY=time`, ports `SNTP_PORT` UDP and `SNTP_FWD` TCP).
+
+**Skipped / open**
+
+- NTS and authenticated SNTP; DHCP option 42; frequency discipline; DNS names; x86_64 boot run of the smoke scenario (clippy only).
+- With a single configured server that server decides the time (within the bounds); use two or three.

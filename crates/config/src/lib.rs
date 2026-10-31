@@ -224,6 +224,15 @@ pub struct Cpu {
     pub dispatcher_serves: bool,
 }
 
+/// The SNTP wall clock (T1, ADR-100).
+#[derive(Debug, Clone, Copy)]
+pub struct Time {
+    /// NTP servers (IPv4 literals); empty: no SNTP.
+    pub servers: &'static [SocketAddrV4],
+    pub interval_s: u32,
+    pub max_step_s: u32,
+}
+
 /// The complete build-time configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildConfig {
@@ -239,6 +248,7 @@ pub struct BuildConfig {
     pub memory: Memory,
     pub entropy: Entropy,
     pub cpu: Cpu,
+    pub time: Time,
     pub registry: Registry,
     pub control: Control,
 }

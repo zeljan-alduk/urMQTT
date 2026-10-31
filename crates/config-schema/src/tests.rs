@@ -834,3 +834,59 @@ fn diagnostic_entry_is_off_by_default() {
     let bad = DEV.replace("diagnostic = true", "diagnostic = \"yes\"");
     assert!(parse("dev", &bad).is_err());
 }
+
+#[test]
+fn time_servers_are_ipv4_literals_and_off_by_default() {
+    let t = parse("dev", DEV).unwrap().time;
+    assert!(t.servers.is_empty());
+    assert_eq!((t.interval_s, t.max_step_s), (3600, 600));
+    // Prod ships without a [time] section: the same defaults.
+    let t = parse("prod", PROD).unwrap().time;
+    assert!(t.servers.is_empty());
+    let on = DEV.replace(
+        "servers = []\ninterval_s = 3600",
+        "servers = [\"192.0.2.1\", \"198.51.100.7:12300\"]\ninterval_s = 900",
+    );
+    let t = parse("dev", &on).unwrap().time;
+    assert_eq!(t.servers.len(), 2);
+    assert_eq!((t.servers[0].port(), t.servers[1].port()), (123, 12300));
+    assert_eq!(t.interval_s, 900);
+}
+
+#[test]
+fn time_rejects_names_bad_addresses_and_bad_numbers() {
+    let with = |servers: &str| {
+        DEV.replace(
+            "servers = []\ninterval_s",
+            &format!("servers = {servers}\ninterval_s"),
+        )
+    };
+    for bad in [
+        "[\"pool.ntp.org\"]",
+        "[\"0.0.0.0\"]",
+        "[\"127.0.0.1\"]",
+        "[\"224.0.0.1\"]",
+        "[\"255.255.255.255\"]",
+        "[\"192.0.2.1:0\"]",
+        "[\"192.0.2.1\", \"192.0.2.1\"]",
+        "[\"192.0.2.1\", \"192.0.2.2\", \"192.0.2.3\", \"192.0.2.4\", \"192.0.2.5\"]",
+    ] {
+        assert_rejected("dev", &with(bad), "time.servers");
+    }
+    assert_rejected(
+        "dev",
+        &DEV.replace("interval_s = 3600", "interval_s = 5"),
+        "time.interval_s",
+    );
+    assert_rejected(
+        "dev",
+        &DEV.replace("max_step_s = 600", "max_step_s = 0"),
+        "time.max_step_s",
+    );
+    assert_rejected(
+        "dev",
+        &DEV.replace("max_step_s = 600", "max_step_s = 86401"),
+        "time.max_step_s",
+    );
+    assert_rejected("dev", &DEV.replace("max_step_s = 600", "step = 600"), "");
+}

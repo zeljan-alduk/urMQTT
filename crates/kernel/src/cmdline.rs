@@ -125,6 +125,10 @@ pub struct BootOptions {
     /// production image ignores the word; its bench counterpart is the
     /// `deploy/bench` configuration.
     pub bench_limits: bool,
+    /// `sntp=a.b.c.d[:port]` (dev only): one more SNTP server on top of
+    /// `[time] servers`, for the smoke test (a responder on the host,
+    /// reached through QEMU's user network at 10.0.2.2).
+    pub sntp_server: Option<([u8; 4], u16)>,
     /// `registry=allowlist`: allowlist mode even if the configuration says
     /// "open" (stricter only, for tests of one image in both modes).
     pub allowlist: bool,
@@ -236,6 +240,8 @@ impl BootOptions {
                         .and_then(|v| v.parse().ok())
                     {
                         o.install_countdown_s = Some(s);
+                    } else if let Some(a) = w.strip_prefix("sntp=").and_then(parse_server) {
+                        o.sntp_server = Some(a);
                     } else if let Some(f) = w
                         .strip_prefix("test=disk-fault:")
                         .and_then(urmqtt_store::fault::FaultSpec::parse)
@@ -249,6 +255,20 @@ impl BootOptions {
         }
         o
     }
+}
+
+/// `a.b.c.d` or `a.b.c.d:port` (port 123 by default).
+fn parse_server(s: &str) -> Option<([u8; 4], u16)> {
+    let (ip, port) = match s.split_once(':') {
+        Some((ip, p)) => (ip, p.parse::<u16>().ok().filter(|&p| p != 0)?),
+        None => (s, urmqtt_sntp::PORT),
+    };
+    let mut o = [0u8; 4];
+    let mut parts = ip.split('.');
+    for b in &mut o {
+        *b = parts.next()?.parse().ok()?;
+    }
+    parts.next().is_none().then_some((o, port))
 }
 
 #[cfg(test)]
@@ -364,6 +384,29 @@ mod tests {
     }
 
     /// The relaxed bench limits exist in dev builds only.
+    #[test]
+    fn sntp_server_is_a_dev_word() {
+        let d = BootOptions::parse("sntp=10.0.2.2:12300", true);
+        assert_eq!(d.sntp_server, Some(([10, 0, 2, 2], 12300)));
+        assert_eq!(
+            BootOptions::parse("sntp=192.0.2.1", true).sntp_server,
+            Some(([192, 0, 2, 1], 123))
+        );
+        for bad in [
+            "sntp=",
+            "sntp=1.2.3",
+            "sntp=1.2.3.4.5",
+            "sntp=1.2.3.4:0",
+            "sntp=a.b.c.d",
+            "sntp=1.2.3.256",
+        ] {
+            let o = BootOptions::parse(bad, true);
+            assert_eq!((o.sntp_server, o.ignored), (None, 1), "{bad}");
+        }
+        let p = BootOptions::parse("sntp=10.0.2.2:12300", false);
+        assert_eq!((p.sntp_server, p.ignored), (None, 1));
+    }
+
     #[test]
     fn bench_limits_are_a_dev_word() {
         assert!(BootOptions::parse("serve limits=bench", true).bench_limits);

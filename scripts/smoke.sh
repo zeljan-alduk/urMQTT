@@ -354,10 +354,10 @@ time_before_build() {
         local log="$OUT/time-before-build-$accel.log" data="$OUT/time-before-build-$accel.img" status=0
         rm -f "$log.client"
         fresh_disk "$iso" "$data"
-        start_vm "$log" --disk "$data" --accel "$accel" --fwd 18883:8883 \
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "${SNTP_FWD:-18883}:8883" \
             -- -rtc base=2020-01-01T00:00:00
         if wait_log "$log" "TLS 1.3 listener"; then
-            if mosquitto_pub -h 127.0.0.1 -p 18883 -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
+            if mosquitto_pub -h 127.0.0.1 -p "${SNTP_FWD:-18883}" -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
                 --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" \
                 -t devices/device-001/x -m x >/dev/null 2>&1; then
                 echo "client: handshake ACCEPTED without a trustworthy clock" >>"$log.client"
@@ -371,6 +371,70 @@ time_before_build() {
         check "time-before-build [$accel]" "$log" "$status" \
             "date at boot: unix 15[0-9]+ is before this image was built" \
             "tls: connection refused" "NOT:handshake ACCEPTED" "$NO_FAULT"
+    done
+}
+
+# T1 (ADR-100): SNTP against a responder on the host (QEMU user net, 10.0.2.2),
+# dev only. (1) The RTC is before the build time (unknown clock): the
+# responder's answer sets the clock once, and a device handshake then
+# succeeds. (2) The responder claims 1970: refused, the clock stays unknown
+# and the handshake is refused. (3) The responder sends a kiss-of-death.
+# (4) Unsolicited / forged answers (a wrong origin) never set the clock.
+# SNTP_PORT (UDP, host) and SNTP_FWD (TCP, host) pick the host ports.
+time_sntp() {
+    local port=${SNTP_PORT:-12123} fwd=${SNTP_FWD:-28883}
+    local iso="$OUT/time-sntp.raw"
+    mkimg "$iso" "serve sntp=10.0.2.2:$port"
+    local d="$ROOT/deploy/dev"
+    for accel in $ACCELS; do
+        local mode
+        for mode in ok past kod wrongorigin; do
+            local log="$OUT/time-sntp-$mode-$accel.log" data="$OUT/time-sntp-$mode-$accel.img" status=0
+            rm -f "$log.client" "$log.sntp"
+            fresh_disk "$iso" "$data"
+            python3 -I "$ROOT/scripts/sntp-responder.py" "$port" "$mode" 60 "$log.sntp" &
+            local responder=$!
+            sleep 0.5
+            start_vm "$log" --disk "$data" --accel "$accel" --fwd "$fwd:8883" \
+                -- -rtc base=2020-01-01T00:00:00
+            local want_log="time: sntp (set|stepped|adjusted)"
+            [[ $mode == ok ]] || want_log="time: sntp round failed|time: sntp offset .* refused"
+            if wait_log "$log" "$want_log" && wait_log "$log" "TLS 1.3 listener"; then
+                local ok=0
+                mosquitto_pub -h 127.0.0.1 -p "$fwd" -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
+                    --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" \
+                    -t devices/device-001/x -m x >/dev/null 2>&1 && ok=1
+                if [[ $mode == ok && $ok -eq 1 ]]; then
+                    echo "client: handshake accepted with the SNTP clock" >>"$log.client"
+                elif [[ $mode != ok && $ok -eq 1 ]]; then
+                    echo "client: handshake ACCEPTED without a trustworthy clock" >>"$log.client"
+                fi
+                sleep 0.5
+            else
+                status=124
+            fi
+            kill_vm
+            kill "$responder" 2>/dev/null || true
+            wait "$responder" 2>/dev/null || true
+            cat "$log.client" "$log.sntp" >>"$log" 2>/dev/null || true
+            case $mode in
+                ok) check "time-sntp-ok [$accel]" "$log" "$status" \
+                    "date at boot: unix 15[0-9]+ is before this image was built" \
+                    "time: sntp servers \[10\.0\.2\.2:$port\]" \
+                    "time: sntp set \(first synchronisation\) the clock \(it was unknown\) \(1 of 1 server" \
+                    "client: handshake accepted with the SNTP clock" "sntp-responder: request" \
+                    "NOT:handshake ACCEPTED" "$NO_FAULT" ;;
+                past) check "time-sntp-past [$accel]" "$log" "$status" \
+                    "time: sntp offset -?[0-9]+ ms refused: result below the image build time" \
+                    "tls: connection refused" "NOT:handshake ACCEPTED" "NOT:sntp set" "$NO_FAULT" ;;
+                kod) check "time-sntp-kod [$accel]" "$log" "$status" \
+                    "time: sntp round failed: 0 of 1" "tls: connection refused" \
+                    "NOT:handshake ACCEPTED" "NOT:sntp set" "$NO_FAULT" ;;
+                wrongorigin) check "time-sntp-wrongorigin [$accel]" "$log" "$status" \
+                    "time: sntp round failed: 0 of 1" "tls: connection refused" \
+                    "NOT:handshake ACCEPTED" "NOT:sntp set" "$NO_FAULT" ;;
+            esac
+        done
     done
 }
 
@@ -1396,6 +1460,15 @@ universal_diag() {
     done
 }
 
+# SMOKE_ONLY=time: just the wall-clock scenarios (H7, T1).
+if [[ ${SMOKE_ONLY:-} == time && $ARCH != universal ]]; then
+    time_before_build
+    time_sntp
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=live: just the live-mode scenarios of this architecture.
 if [[ ${SMOKE_ONLY:-} == live && $ARCH != universal ]]; then
     live_suite
@@ -1808,6 +1881,9 @@ fi
 # H7 lower bound: a clock before the image's build time is unknown time;
 # certificate checks then refuse every handshake.
 time_before_build
+if command -v mosquitto_pub >/dev/null; then
+    time_sntp
+fi
 
 # M11: SQLite on the data disk: batched write throughput, crash
 # consistency after SIGKILL, broker state across a restart.

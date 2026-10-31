@@ -69,6 +69,8 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/messages/received`, `sent` | accepted publishes, deliveries |
 | `$SYS/broker/connections/refused` | refused by admission control |
 | `$SYS/broker/tls/server_cert_days` | days until the server certificate expires (`unknown` without a wall clock) |
+| `$SYS/broker/time/source` | where the wall clock comes from: `rtc` (firmware clock at boot), `sntp` (corrected by SNTP, ADR-100) or `unknown` (no usable clock: certificate checks and control messages are refused) |
+| `$SYS/broker/time/offset_ms` | the last SNTP offset against the clock as it was, in ms (`unknown` until one was measured against a known clock; a refused offset is shown too, and logged) |
 | `$SYS/broker/console/dropped` | console lines lost to a slow reader |
 | `$SYS/broker/handshakes/started` | connections admitted (TCP established, admission said yes) |
 | `$SYS/broker/handshakes/done`, `failed`, `timed_out` | TLS handshakes completed, ended before completing, not finished within 10 s |
@@ -77,6 +79,24 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/handshakes/slow` | completed handshakes that took more than 250 ms from accept to done |
 | `$SYS/broker/handshakes/latency_sum_ms`, `latency_max_ms` | sum of accept-to-done times (divide the change by the change of `done` for the mean), longest in the last 5 s |
 | `$SYS/broker/cpu/accepted/<core>` | connections accepted per core since boot: how evenly the flows spread |
+
+**Time (T1, ADR-100).** The wall clock is the firmware RTC read at boot, plus
+uptime. With `[time] servers = ["a.b.c.d", ...]` in `deploy/<env>/config.toml`
+(IPv4 literals, at most four: the broker has no DNS) the kernel asks them with
+SNTP once at boot and then every `interval_s` (default 3600) and corrects the
+clock. Look for the `time:` lines on the console or in syslog: `sntp servers`,
+`sntp set|stepped|adjusted the clock`, `sntp round failed`, `sntp offset ...
+refused`. Rules: use two or three servers (the median of a majority is taken,
+one wrong server cannot move the clock; with one server you trust it);
+the clock never goes below the image's build time; a large forward step (a
+dead RTC battery) happens once, at the first synchronisation; afterwards one
+correction and the sum of all of them stay within `max_step_s` (default 600 s)
+and a larger offset is refused and logged, not applied. SNTP is not
+authenticated: on a network where the path to the servers is not trusted,
+keep the list short and local and watch `time/offset_ms`. Without servers the
+clock is the RTC, as before (`source` is `rtc`, or `unknown` if the RTC is
+before the build time). UDP port 123 (or the one given) must be reachable
+outward.
 
 **Query.** Publish anything (an empty payload will do) to `$SYS/query/info`;
 the answer is one JSON document on `$SYS/query/info/response` (subscribe
@@ -87,7 +107,7 @@ first). MQTT 3.1.1 has no Response Topic property, so the reply topic is fixed:
  "memory":{"total":33554432,"used":1503744},"disk":{"total":57651200,"used":78288},
  "clients":{"connected":1,"total":1},"subscriptions":1,"retained":0,
  "messages":{"received":0,"sent":21},"connections_refused":0,
- "tls":{"server_cert_days":824},"console_dropped":0,
+ "tls":{"server_cert_days":824},"time":{"source":"sntp","offset_ms":-12},"console_dropped":0,
  "handshakes":{"started":0,"done":0,"failed":0,"timed_out":0,"refused":0,"syn_dropped":0,
  "in_flight":0,"in_flight_max":0,"slow":0,"latency_sum_ms":0,"latency_max_ms":0},
  "accepted":[0,0,0,0]}

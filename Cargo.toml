@@ -17,6 +17,7 @@ members = [
     "crates/net",
     "crates/pci",
     "crates/platform",
+    "crates/sntp",
     "crates/store",
     "crates/sync",
     "crates/tcp",

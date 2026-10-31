@@ -100,6 +100,9 @@ struct RawConfig {
     /// Optional: without it nothing is disabled.
     #[serde(default)]
     cpu: RawCpu,
+    /// Optional: without it there is no SNTP (T1, ADR-100).
+    #[serde(default)]
+    time: RawTime,
     trust: RawTrust,
     registry: RawRegistry,
     control: RawControl,
@@ -135,6 +138,24 @@ pub enum RegistryMode {
     Open,
     /// Only identities on the allowlist (control channel, H1).
     Allowlist,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawTime {
+    servers: Vec<String>,
+    interval_s: u32,
+    max_step_s: u32,
+}
+
+impl Default for RawTime {
+    fn default() -> Self {
+        Self {
+            servers: Vec::new(),
+            interval_s: 3600,
+            max_step_s: 600,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -420,9 +441,23 @@ pub struct Config {
     pub memory: Memory,
     pub entropy: Entropy,
     pub cpu: Cpu,
+    pub time: Time,
     pub trust: Trust,
     pub registry: RegistryMode,
     pub control: Control,
+}
+
+/// The SNTP wall clock (T1, ADR-100).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Time {
+    /// NTP servers as IPv4 literals (there is no DNS resolver), at most
+    /// four, port 123 unless given. Empty: no SNTP, the clock is the RTC.
+    pub servers: Vec<SocketAddrV4>,
+    /// Seconds between queries.
+    pub interval_s: u32,
+    /// The most one correction may move the clock after the first, and all
+    /// of them together, seconds.
+    pub max_step_s: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -491,6 +526,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
     };
 
     let cpu = validate_cpu(&raw.cpu, &mut errors);
+    let time = validate_time(&raw.time, &mut errors);
     let trust = validate_trust(&raw.trust, &mut errors);
     let control = validate_control(&raw.control, &mut errors);
 
@@ -509,6 +545,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         memory,
         entropy: Entropy { jitter_fallback },
         cpu,
+        time,
         trust,
         registry: raw.registry.mode,
         control,
@@ -593,6 +630,61 @@ fn validate_cpu(raw: &RawCpu, errors: &mut Vec<ConfigError>) -> Cpu {
     Cpu {
         disable: raw.disable.clone(),
         dispatcher_serves: raw.dispatcher_serves,
+    }
+}
+
+/// Most servers a round asks (`urmqtt_sntp::MAX_SERVERS`).
+const MAX_TIME_SERVERS: usize = 4;
+
+fn validate_time(raw: &RawTime, errors: &mut Vec<ConfigError>) -> Time {
+    let mut servers: Vec<SocketAddrV4> = Vec::new();
+    if raw.servers.len() > MAX_TIME_SERVERS {
+        errors.push(err(
+            "time.servers",
+            format!("at most {MAX_TIME_SERVERS} servers"),
+        ));
+    }
+    for s in &raw.servers {
+        // "a.b.c.d" or "a.b.c.d:port". A name would need DNS, which the
+        // broker does not have.
+        let parsed = s.parse::<SocketAddrV4>().ok().or_else(|| {
+            s.parse::<Ipv4Addr>()
+                .ok()
+                .map(|a| SocketAddrV4::new(a, 123))
+        });
+        match parsed {
+            Some(a)
+                if a.port() != 0
+                    && !a.ip().is_unspecified()
+                    && !a.ip().is_broadcast()
+                    && !a.ip().is_multicast()
+                    && !a.ip().is_loopback() =>
+            {
+                if servers.contains(&a) {
+                    errors.push(err("time.servers", format!("{s:?} is listed twice")));
+                } else {
+                    servers.push(a);
+                }
+            }
+            _ => errors.push(err(
+                "time.servers",
+                format!(
+                    "{s:?} must be an IPv4 address \"a.b.c.d\" or \"a.b.c.d:port\" (there is no DNS resolver; \
+                     not 0.0.0.0, loopback, multicast or broadcast)"
+                ),
+            )),
+        }
+    }
+    if !(60..=86_400).contains(&raw.interval_s) {
+        errors.push(err("time.interval_s", "must be in 60..=86400"));
+    }
+    if !(1..=86_400).contains(&raw.max_step_s) {
+        errors.push(err("time.max_step_s", "must be in 1..=86400"));
+    }
+    Time {
+        servers,
+        interval_s: raw.interval_s,
+        max_step_s: raw.max_step_s,
     }
 }
 
@@ -1232,14 +1324,18 @@ fn render_ipv4(a: Ipv4Addr) -> String {
     format!("[{a}, {b}, {c}, {d}]")
 }
 
+fn render_addr_bare(a: SocketAddrV4) -> String {
+    format!(
+        "SocketAddrV4 {{ addr: {}, port: {} }}",
+        render_ipv4(*a.ip()),
+        a.port()
+    )
+}
+
 fn render_addr(a: Option<SocketAddrV4>) -> String {
     match a {
         None => "None".into(),
-        Some(a) => format!(
-            "Some(SocketAddrV4 {{ addr: {}, port: {} }})",
-            render_ipv4(*a.ip()),
-            a.port()
-        ),
+        Some(a) => format!("Some({})", render_addr_bare(a)),
     }
 }
 
@@ -1354,6 +1450,11 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         disable: {cpu_disable},
         dispatcher_serves: {cpu_dispatcher},
     }},
+    time: Time {{
+        servers: &[{time_servers}],
+        interval_s: {time_interval},
+        max_step_s: {time_max_step},
+    }},
     memory: Memory {{
         kernel_heap_mb: {heap_kernel},
         min_free_mb: {min_free},
@@ -1416,6 +1517,15 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         jitter = cfg.entropy.jitter_fallback,
         cpu_disable = render_strs(&cfg.cpu.disable),
         cpu_dispatcher = cfg.cpu.dispatcher_serves,
+        time_servers = cfg
+            .time
+            .servers
+            .iter()
+            .map(|a| render_addr_bare(*a))
+            .collect::<Vec<_>>()
+            .join(", "),
+        time_interval = cfg.time.interval_s,
+        time_max_step = cfg.time.max_step_s,
         operational = render_includes(&files.operational),
         bootstrap = render_includes(&files.bootstrap),
         control_key = files.control_public_key,

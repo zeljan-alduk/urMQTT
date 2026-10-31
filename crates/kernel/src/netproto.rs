@@ -550,6 +550,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     let (mut mem_last, mut mem_conns) = (now_ms(), 0u64);
     dataplane::set_baseline();
     let mut ops = crate::ops::Ops::new(now_ms());
+    let mut sntp = crate::time_sync::TimeSync::new(now_ms());
     let mut cookies = CookieRotation::new(now_ms());
     let mut tcpstats = TcpStatsLog::new(now_ms());
     loop {
@@ -595,6 +596,12 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
                             iface.send_tcp(dst, s, &mut emit)
                         });
                     }
+                    Rx::Udp {
+                        src,
+                        sport,
+                        dport,
+                        payload,
+                    } => sntp.input(now, src, sport, dport, payload),
                     Rx::Event(e) => events.push(e),
                     Rx::None => {}
                 }
@@ -614,6 +621,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
                 events.push(e);
             }
             ops.poll(&mut iface, now, &mut emit);
+            sntp.poll(&mut iface, now, &mut emit);
             for e in events {
                 match e {
                     Event::Dhcp(dhcp::Event::Bound(l) | dhcp::Event::Renewed(l)) => {

@@ -77,6 +77,11 @@ pub struct Info<'a> {
     pub connections_refused: u64,
     /// Days until the server certificate expires; `None`: no wall clock.
     pub server_cert_days: Option<i64>,
+    /// Where the wall clock comes from: `rtc`, `sntp` or `unknown` (T1).
+    pub time_source: &'a str,
+    /// The last SNTP offset against the clock as it was, ms; `None`: none
+    /// measured against a known clock yet.
+    pub time_offset_ms: Option<i64>,
     /// Console lines lost because a reader fell behind.
     pub console_dropped: u64,
     pub handshakes: Handshakes,
@@ -115,6 +120,11 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
     match i.server_cert_days {
         Some(d) => put("tls/server_cert_days", &d),
         None => put("tls/server_cert_days", &"unknown"),
+    }
+    put("time/source", &i.time_source);
+    match i.time_offset_ms {
+        Some(o) => put("time/offset_ms", &o),
+        None => put("time/offset_ms", &"unknown"),
     }
     put("console/dropped", &i.console_dropped);
     let h = &i.handshakes;
@@ -155,6 +165,8 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
         messages_sent: 0,
         connections_refused: 0,
         server_cert_days: None,
+        time_source: "",
+        time_offset_ms: None,
         console_dropped: 0,
         handshakes: Handshakes::default(),
         accepted: &accepted,
@@ -209,6 +221,15 @@ pub fn json(i: &Info<'_>) -> String {
         i.connections_refused
     );
     match i.server_cert_days {
+        Some(d) => {
+            let _ = write!(o, "{d}");
+        }
+        None => o.push_str("null"),
+    }
+    o.push_str("},\"time\":{\"source\":");
+    json_str(&mut o, i.time_source);
+    o.push_str(",\"offset_ms\":");
+    match i.time_offset_ms {
         Some(d) => {
             let _ = write!(o, "{d}");
         }
@@ -283,6 +304,13 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
             "tls server certificate valid for {d} day(s)"
         )),
         None => out.push("tls server certificate lifetime unknown (no wall clock)".into()),
+    }
+    match i.time_offset_ms {
+        Some(o) => out.push(alloc::format!(
+            "time source {}, last sntp offset {o} ms",
+            i.time_source
+        )),
+        None => out.push(alloc::format!("time source {}", i.time_source)),
     }
     out.push(alloc::format!(
         "log level {level} (build maximum {max_level}), {} console line(s) dropped",
@@ -437,6 +465,8 @@ mod tests {
             messages_sent: 250,
             connections_refused: 1,
             server_cert_days: Some(90),
+            time_source: "sntp",
+            time_offset_ms: Some(-12),
             console_dropped: 0,
             handshakes: Handshakes {
                 started: 9,
@@ -475,6 +505,8 @@ mod tests {
                 "$SYS/broker/messages/sent",
                 "$SYS/broker/connections/refused",
                 "$SYS/broker/tls/server_cert_days",
+                "$SYS/broker/time/source",
+                "$SYS/broker/time/offset_ms",
                 "$SYS/broker/console/dropped",
                 "$SYS/broker/handshakes/started",
                 "$SYS/broker/handshakes/done",
@@ -496,6 +528,8 @@ mod tests {
         assert_eq!(val("$SYS/broker/cpu/busy/1"), Some("20"));
         assert_eq!(val("$SYS/broker/memory/used"), Some("400"));
         assert_eq!(val("$SYS/broker/tls/server_cert_days"), Some("90"));
+        assert_eq!(val("$SYS/broker/time/source"), Some("sntp"));
+        assert_eq!(val("$SYS/broker/time/offset_ms"), Some("-12"));
         assert_eq!(val("$SYS/broker/handshakes/done"), Some("8"));
         assert_eq!(val("$SYS/broker/cpu/accepted/1"), Some("5"));
         // No payload is empty: an empty retained payload would clear it.
@@ -512,7 +546,7 @@ mod tests {
              \"cpu\":{\"cores\":2,\"busy\":[10,20]},\"memory\":{\"total\":1000,\"used\":400},\
              \"disk\":{\"total\":0,\"used\":0},\"clients\":{\"connected\":3,\"total\":5},\
              \"subscriptions\":7,\"retained\":2,\"messages\":{\"received\":100,\"sent\":250},\
-             \"connections_refused\":1,\"tls\":{\"server_cert_days\":90},\"console_dropped\":0,\
+             \"connections_refused\":1,\"tls\":{\"server_cert_days\":90},\"time\":{\"source\":\"sntp\",\"offset_ms\":-12},\"console_dropped\":0,\
              \"handshakes\":{\"started\":9,\"done\":8,\"failed\":0,\"timed_out\":0,\"refused\":0,\
              \"syn_dropped\":0,\"in_flight\":0,\"in_flight_max\":0,\"slow\":0,\"latency_sum_ms\":0,\
              \"latency_max_ms\":0},\"accepted\":[4,5]}"
@@ -565,11 +599,12 @@ mod tests {
     #[test]
     fn status_is_a_few_short_lines() {
         let lines = status_lines(&info(&[10, 20]), "info", "debug");
-        assert_eq!(lines.len(), 7);
+        assert_eq!(lines.len(), 8);
         assert_eq!(lines[0], "urmqtt 0.1.0 aarch64 up 12 s");
         assert_eq!(lines[1], "cpu 2 core(s), busy % 10/20");
         assert!(lines[3].starts_with("clients 3 connected, 5 sessions"));
-        assert!(lines[6].starts_with("log level info (build maximum debug)"));
+        assert_eq!(lines[6], "time source sntp, last sntp offset -12 ms");
+        assert!(lines[7].starts_with("log level info (build maximum debug)"));
         assert!(lines.iter().all(|l| l.len() < 120 && !l.contains('\n')));
     }
 
