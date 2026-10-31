@@ -18,7 +18,10 @@ mod kx;
 pub mod sign;
 mod verify;
 
+pub use verify::MeasuredIssuer;
 pub use verify::cache_stats as verify_cache_stats;
+pub use verify::kat as p256_tables_kat;
+pub use verify::register_issuer;
 
 /// Certificate signatures answered from the verification memo (statistics).
 pub fn verify_cache_hits() -> u64 {

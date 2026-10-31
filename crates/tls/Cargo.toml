@@ -21,8 +21,10 @@ pki-types = { package = "rustls-pki-types", version = "1.12", default-features =
 webpki = { package = "rustls-webpki", version = "0.103.14", default-features = false, features = ["alloc"] }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
-p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "ecdh", "pkcs8", "alloc"] }
-x25519-dalek = { version = "2", default-features = false }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "ecdh", "pkcs8", "alloc", "precomputed-tables"] }
+# Vendored and patched (ADR-110/111): fixed-base tables without std.
+primeorder = { version = "0.14.0", default-features = false, features = ["basepoint-table"] }
+x25519-dalek ={ version = "2", default-features = false }
 sha2 = { version = "0.11", default-features = false }
 hmac = { version = "0.13", default-features = false }
 hkdf = { version = "0.13", default-features = false }

@@ -527,7 +527,7 @@ fn crypto(run: &mut Run) {
         black_box(p.x25519(3));
         black_box(p.sign());
         black_box(p.verify());
-        black_box(p.verify());
+        black_box(p.verify_ca());
         ticks += clock().wrapping_sub(a);
         ns += now().saturating_sub(t0);
         reps += 1;

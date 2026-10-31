@@ -68,3 +68,5 @@ debug = false
 [patch.crates-io]
 cpufeatures = { path = "vendor/cpufeatures-0.3.1" }
 cpufeatures-02 = { package = "cpufeatures", path = "vendor/cpufeatures-0.2.17" }
+# Fixed-base P-256 table without std (ADR-110).
+primeorder = { path = "vendor/primeorder-0.14.0" }

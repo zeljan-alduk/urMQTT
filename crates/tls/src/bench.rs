@@ -42,6 +42,9 @@ pub struct Profile {
     pub p256_dh: u64,
     pub ecdsa_sign: u64,
     pub ecdsa_verify: u64,
+    /// Verification of a certificate signature by a registered trust anchor
+    /// (fixed-base tables, ADR-111).
+    pub ecdsa_verify_ca: u64,
     pub hmac_sha256: u64,
     pub sha256_block: u64,
     /// AES-128-GCM seal of 1 KiB.
@@ -54,7 +57,11 @@ impl Profile {
     /// Public-key part of one server-side handshake (X25519 key share,
     /// one signature, two verifications).
     pub fn public_key_ns(&self) -> u64 {
-        self.x25519_base + self.x25519_dh + self.ecdsa_sign + 2 * self.ecdsa_verify
+        self.x25519_base
+            + self.x25519_dh
+            + self.ecdsa_sign
+            + self.ecdsa_verify
+            + self.ecdsa_verify_ca
     }
 
     /// Hashing and record part of one server-side handshake.
@@ -152,6 +159,11 @@ pub fn run(now: fn() -> u64) -> Profile {
             p.ecdsa_verify = time(now, &mut || {
                 core::hint::black_box(vk.verify(&msg, &sig).is_ok());
             });
+            let issuer = crate::provider::MeasuredIssuer::new(&vk);
+            let der = sig.to_der();
+            p.ecdsa_verify_ca = time(now, &mut || {
+                core::hint::black_box(issuer.verify(&msg, der.as_bytes()));
+            });
         }
     }
 
@@ -196,6 +208,7 @@ impl core::fmt::Display for Profile {
             ("p256-dh", self.p256_dh),
             ("ecdsa-sign", self.ecdsa_sign),
             ("ecdsa-verify", self.ecdsa_verify),
+            ("ecdsa-verify-ca", self.ecdsa_verify_ca),
             ("hmac-sha256", self.hmac_sha256),
             ("sha256-block", self.sha256_block),
             ("aes-gcm-1k", self.aes_gcm_kib),

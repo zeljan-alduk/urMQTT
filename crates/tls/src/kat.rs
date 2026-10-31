@@ -143,6 +143,10 @@ pub fn run() -> Result<(), &'static str> {
         ("ChaCha20-Poly1305", chacha20_poly1305),
         ("SHA-256", sha256),
         ("HMAC-SHA-256", hmac_sha256),
+        (
+            "ECDSA P-256 (RFC 6979, fixed-base tables)",
+            crate::provider::p256_tables_kat,
+        ),
     ] {
         if !ok() {
             return Err(name);

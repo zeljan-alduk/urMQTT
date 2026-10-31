@@ -396,6 +396,11 @@ fn roots(pems: &[&[u8]]) -> Result<RootCertStore, TlsError> {
                 .map_err(|_| TlsError::Config("CA certificate rejected"))?;
         }
     }
+    // Certificates signed by a trust anchor are verified against a fixed-base
+    // table of its key (ADR-111); an anchor that is not P-256 just has none.
+    for anchor in &roots.roots {
+        crate::provider::register_issuer(anchor.subject_public_key_info.as_ref());
+    }
     Ok(roots)
 }
 

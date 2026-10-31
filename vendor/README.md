@@ -8,6 +8,7 @@ Every artifact here is pinned to an exact version and verified against
 | `limine/` | Limine bootloader binaries for aarch64 UEFI (`BOOTAA64.EFI`) | M1 |
 | `sqlite/` | Official SQLite amalgamation (`sqlite3.c`, `sqlite3.h`) | M11 |
 | `cpufeatures-0.2.17/`, `cpufeatures-0.3.1/` | RustCrypto `cpufeatures`, patched for `target_os = "none"` (below) | X0b |
+| `primeorder-0.14.0/` | RustCrypto `primeorder`, fixed-base table without `std` (below) | PERF |
 
 ## `cpufeatures` (X0b, X9; ADR-041, ADR-053, ADR-070)
 
@@ -41,3 +42,7 @@ the two hunks (the `target_os = "none"` macro and `mod urmqtt`, and the
 exclusion of `target_os = "none"` from the "other targets" fallback), and
 rerun the boot KATs and the `diff_*` fuzz targets.
 
+
+## `primeorder` 0.14.0 (PERF; ADR-110, ADR-111)
+
+`vendor/primeorder-0.14.0` is the crates.io source with one file changed, `src/tables/basepoint.rs`: the basepoint table's lazy cell is an atomics-only once-cell instead of `std::sync::LazyLock` / `once_cell` + `critical-section` (the `compile_error!` that required one of them is removed), and `BasepointTable::from_point` builds the table of an arbitrary point eagerly (trust-anchor keys). No arithmetic changed. `Cargo.toml.orig`, `.cargo-ok`, `.cargo_vcs_info.json` and `Cargo.lock` are not copied. Wired in with `[patch.crates-io]` in the root and `fuzz/` manifests. Upstream `.crate` SHA-256: `5c9f42978c78a00e3d68f69fc03e57a234debae69da4020a4fb588fcdcd07b06`. To review: unpack the upstream crate and `diff -r` against the directory. To update: copy the new version and reapply the two hunks, then rerun the boot KATs and `cargo test -p urmqtt-tls`.

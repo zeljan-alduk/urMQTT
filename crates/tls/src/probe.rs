@@ -11,6 +11,8 @@ pub struct Probe {
     key: p256::ecdsa::SigningKey,
     public: p256::ecdsa::VerifyingKey,
     sig: p256::ecdsa::Signature,
+    der: alloc::vec::Vec<u8>,
+    issuer: crate::provider::MeasuredIssuer,
 }
 
 const MSG: &[u8] = b"urMQTT diagnostic: TLS 1.3 CertificateVerify stand-in";
@@ -20,7 +22,15 @@ impl Probe {
         let key = p256::ecdsa::SigningKey::from_slice(&[0x42; 32]).ok()?;
         let public = *key.verifying_key();
         let sig: p256::ecdsa::Signature = key.try_sign(MSG).ok()?;
-        Some(Self { key, public, sig })
+        let der = sig.to_der().as_bytes().to_vec();
+        let issuer = crate::provider::MeasuredIssuer::new(&public);
+        Some(Self {
+            key,
+            public,
+            sig,
+            der,
+            issuer,
+        })
     }
 
     /// One X25519 scalar multiplication (a key share or the shared secret).
@@ -40,6 +50,12 @@ impl Probe {
     /// One ECDSA P-256 verification.
     pub fn verify(&self) -> bool {
         self.public.verify(MSG, &self.sig).is_ok()
+    }
+
+    /// One verification of a certificate signature by a registered trust
+    /// anchor (fixed-base tables, ADR-111).
+    pub fn verify_ca(&self) -> bool {
+        self.issuer.verify(MSG, &self.der)
     }
 }
 
@@ -75,7 +91,7 @@ mod tests {
     fn the_probes_work() {
         let p = Probe::new().unwrap();
         assert!(p.sign());
-        assert!(p.verify());
+        assert!(p.verify() && p.verify_ca());
         assert_ne!(p.x25519(1), p.x25519(2));
         let mut b = [0u8; 256];
         assert!(aes_gcm(&mut b) && chacha(&mut b));
