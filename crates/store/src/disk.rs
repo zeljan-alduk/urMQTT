@@ -1,7 +1,9 @@
 //! Byte-addressed access to the regions of a sector device, with logical
-//! file sizes persisted in the double-buffered size table (ADR-030).
+//! file sizes persisted in the double-buffered size table (ADR-030), the
+//! topology-aware write path (ADR-140) and the crash-safe grow (ADR-142).
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -9,7 +11,8 @@ use alloc::vec::Vec;
 use urmqtt_sync::sync::SpinLock;
 
 use crate::layout::{
-    BLOCK, FileKind, Layout, LayoutError, Region, RegionKind, SECTOR, SIZE_SLOT_LBA, SizeTable,
+    BLOCK, FileKind, Layout, LayoutError, Params, Region, RegionKind, SB_SLOT_LBA, SECTOR,
+    SIZE_SLOT_LBA, SizeTable, Topology,
 };
 
 /// A 512-byte-sector block device (virtio-blk in the kernel, memory in tests).
@@ -25,6 +28,28 @@ pub trait BlockDevice: Send {
     fn max_io(&self) -> usize {
         64 * 1024
     }
+    /// Block sizes and I/O hints of the underlying device.
+    fn topology(&self) -> Topology {
+        Topology::default()
+    }
+    /// Where sector 0 of this device lies on the physical disk (a partition
+    /// window's first sector), so alignment is judged on the real disk.
+    fn base_lba(&self) -> u64 {
+        0
+    }
+    /// Asks the device for its current size (after a configuration-change
+    /// notification). `Some(sectors)` if it grew since the last answer; the
+    /// device never reports a shrink.
+    fn refresh_size(&mut self) -> Option<u64> {
+        None
+    }
+    /// The whole disk behind a partition window, for the partition table
+    /// steps of an online grow. `None` where there is no such disk.
+    fn whole_disk(&mut self) -> Option<&mut dyn BlockDevice> {
+        None
+    }
+    /// A partition window follows the partition table: now `sectors` long.
+    fn resize_window(&mut self, _sectors: u64) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +87,11 @@ pub struct DiskStats {
     pub bytes_read: u64,
     pub bytes_written: u64,
     pub size_table_writes: u64,
+    /// Requests the store sent to the device, including its own metadata.
+    pub device_writes: u64,
+    /// Of those, writes that did not start and end on a physical block of
+    /// the device (STORAGE-PLAN S2: must stay 0 on the data partition).
+    pub misaligned_writes: u64,
 }
 
 pub struct Disk {
@@ -70,6 +100,12 @@ pub struct Disk {
     sizes: SizeTable,
     /// Sizes changed since the table was last persisted.
     dirty: bool,
+    /// Superblock slot holding `layout`.
+    sb_slot: usize,
+    /// I/O granularity in bytes: the physical block (512..4096), at least
+    /// the logical block. Every device write is a multiple of it.
+    gran: usize,
+    topo: Topology,
     pub stats: DiskStats,
 }
 
@@ -80,51 +116,111 @@ pub enum Opened {
     Formatted,
 }
 
+/// What [`Disk::grow`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Grown {
+    pub old_total: u64,
+    pub new_total: u64,
+    pub generation: u64,
+    /// Sectors added to the database and to the telemetry ring.
+    pub db_sectors: u64,
+    pub telemetry_sectors: u64,
+}
+
 impl Disk {
-    /// Opens the data disk, formatting it if (and only if) it is blank.
+    /// Opens the data disk with the default 8 telemetry partitions,
+    /// formatting it if (and only if) it is blank.
     pub fn open(
-        mut dev: Box<dyn BlockDevice>,
+        dev: Box<dyn BlockDevice>,
         uuid: impl FnOnce() -> [u8; 16],
     ) -> Result<(Self, Opened), DiskError> {
+        Self::open_with(dev, uuid, Params::default().partitions)
+    }
+
+    /// Like [`open`](Self::open), with the telemetry partition count a blank
+    /// disk is formatted with (an existing layout keeps its own).
+    ///
+    /// A disk of an older layout version is refused (`OldVersion`) before
+    /// anything is written.
+    pub fn open_with(
+        mut dev: Box<dyn BlockDevice>,
+        uuid: impl FnOnce() -> [u8; 16],
+        partitions: u32,
+    ) -> Result<(Self, Opened), DiskError> {
         let total = dev.sectors();
-        let mut sb = [0u8; BLOCK];
-        dev.read(0, &mut sb)?;
-        match Layout::decode(&sb, total)? {
-            Some(layout) => {
-                let mut a = [0u8; BLOCK];
-                let mut b = [0u8; BLOCK];
-                dev.read(SIZE_SLOT_LBA[0], &mut a)?;
-                dev.read(SIZE_SLOT_LBA[1], &mut b)?;
-                let sizes = SizeTable::newest(SizeTable::decode(&a), SizeTable::decode(&b))
-                    .ok_or(LayoutError::SizeTableLost)?;
-                let disk = Self {
-                    dev,
-                    layout,
-                    sizes,
-                    dirty: false,
-                    stats: DiskStats::default(),
-                };
+        let topo = dev.topology();
+        let gran = gran_of(&topo);
+        let (a, b) = read_slots(dev.as_mut())?;
+        match Layout::select(&a, &b, total)? {
+            Some((layout, slot)) => {
+                let sizes = read_sizes(dev.as_mut())?;
+                let disk = Self::assemble(dev, layout, sizes, slot, gran, topo);
                 Ok((disk, Opened::Existing))
             }
             None => {
-                let layout = Layout::plan(total, uuid())?;
+                let params = Params {
+                    partitions,
+                    align_sectors: topo.layout_align_sectors(),
+                };
+                let layout = Layout::plan(total, uuid(), params)?;
+                let sizes = SizeTable::default();
+                let mut disk = Self::assemble(dev, layout, sizes, 0, gran, topo);
                 // Size table first, superblock last: a crash in between
                 // leaves a blank-looking disk that is formatted again.
-                let sizes = SizeTable::default();
-                dev.write(SIZE_SLOT_LBA[0], &sizes.encode())?;
-                dev.write(SIZE_SLOT_LBA[1], &[0u8; BLOCK])?;
-                dev.flush()?;
-                dev.write(0, &layout.encode())?;
-                dev.flush()?;
-                let disk = Self {
-                    dev,
-                    layout,
-                    sizes,
-                    dirty: false,
-                    stats: DiskStats::default(),
-                };
+                let size_a = disk.sizes.encode();
+                disk.write_dev(SIZE_SLOT_LBA[0], &size_a)?;
+                disk.write_dev(SIZE_SLOT_LBA[1], &[0u8; BLOCK])?;
+                disk.dev.flush()?;
+                let sb = disk.layout.encode();
+                disk.write_dev(SB_SLOT_LBA[0], &sb)?;
+                disk.dev.flush()?;
                 Ok((disk, Opened::Formatted))
             }
+        }
+    }
+
+    /// The read-only view of a layout-v1 disk, for the offline migration
+    /// tool. The kernel never calls this.
+    pub fn open_v1(mut dev: Box<dyn BlockDevice>) -> Result<Self, DiskError> {
+        let total = dev.sectors();
+        let topo = dev.topology();
+        let mut sb = [0u8; BLOCK];
+        dev.read(SB_SLOT_LBA[0], &mut sb)?;
+        let layout = crate::layout::v1::decode(&sb, total)?.ok_or(LayoutError::UnknownData)?;
+        let sizes = read_sizes(dev.as_mut())?;
+        Ok(Self::assemble(dev, layout, sizes, 0, gran_of(&topo), topo))
+    }
+
+    /// A disk over `dev` with the given layout and sizes, nothing read or
+    /// written. For tools that stage a layout before it is switched on.
+    pub fn with_layout(
+        dev: Box<dyn BlockDevice>,
+        layout: Layout,
+        sizes: SizeTable,
+        sb_slot: usize,
+    ) -> Self {
+        let topo = dev.topology();
+        let gran = gran_of(&topo);
+        Self::assemble(dev, layout, sizes, sb_slot, gran, topo)
+    }
+
+    fn assemble(
+        dev: Box<dyn BlockDevice>,
+        layout: Layout,
+        sizes: SizeTable,
+        sb_slot: usize,
+        gran: usize,
+        topo: Topology,
+    ) -> Self {
+        Self {
+            dev,
+            layout,
+            sizes,
+            dirty: false,
+            sb_slot,
+            gran,
+            topo,
+            stats: DiskStats::default(),
         }
     }
 
@@ -132,8 +228,32 @@ impl Disk {
         &self.layout
     }
 
+    pub fn sizes(&self) -> SizeTable {
+        self.sizes
+    }
+
+    pub fn topology(&self) -> Topology {
+        self.topo
+    }
+
+    /// The superblock slot (0 = A at LBA 0, 1 = B at LBA 24) in force.
+    pub fn sb_slot(&self) -> usize {
+        self.sb_slot
+    }
+
+    /// Granularity of device writes (and reads), bytes.
+    pub fn write_gran(&self) -> usize {
+        self.gran
+    }
+
+    /// The first extent of `kind`.
     pub fn region(&self, kind: RegionKind) -> Option<Region> {
         self.layout.region(kind)
+    }
+
+    /// Logical size in bytes of all extents of `kind`.
+    pub fn bytes(&self, kind: RegionKind) -> u64 {
+        self.layout.bytes(kind)
     }
 
     pub fn file_size(&self, f: FileKind) -> u64 {
@@ -147,6 +267,29 @@ impl Disk {
             *s = size;
             self.dirty = true;
         }
+    }
+
+    /// The device sectors beyond the formatted layout: what a grow would
+    /// add (0 when the device is not larger).
+    pub fn spare_sectors(&self) -> u64 {
+        self.dev.sectors().saturating_sub(self.layout.total_sectors)
+    }
+
+    pub fn device_sectors(&self) -> u64 {
+        self.dev.sectors()
+    }
+
+    /// Writes to the device, counting requests that are not whole physical
+    /// blocks on the real disk.
+    fn write_dev(&mut self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
+        let g = self.gran as u64;
+        let abs = (self.dev.base_lba() + lba) * SECTOR;
+        let shift = u64::from(self.topo.align_offset) % g;
+        self.stats.device_writes += 1;
+        if !abs.wrapping_sub(shift).is_multiple_of(g) || !(buf.len() as u64).is_multiple_of(g) {
+            self.stats.misaligned_writes += 1;
+        }
+        self.dev.write(lba, buf)
     }
 
     /// Flushes data, then persists changed file sizes and flushes again, so
@@ -163,7 +306,7 @@ impl Disk {
                 .get(self.sizes.next_slot())
                 .copied()
                 .unwrap_or(SIZE_SLOT_LBA[0]);
-            self.dev.write(lba, &next.encode())?;
+            self.write_dev(lba, &next.encode())?;
             self.dev.flush()?;
             self.stats.flushes += 1;
             self.stats.size_table_writes += 1;
@@ -173,6 +316,102 @@ impl Disk {
         Ok(())
     }
 
+    /// Grows the layout into the space a larger device offers (S3). The new
+    /// space is split by `ratio_db_pct` between the database and the
+    /// telemetry ring as new extents; nothing that exists moves. The whole
+    /// update is one write of the superblock slot not in force, then a
+    /// flush: a crash leaves the old layout (slot torn or not yet written)
+    /// or the new one, never a mixture (ADR-142). `Ok(None)`: nothing to add.
+    pub fn grow(&mut self, ratio_db_pct: u32) -> Result<Option<Grown>, DiskError> {
+        if self.layout.is_v1_view() {
+            return Err(LayoutError::OldVersion(1).into());
+        }
+        let unit = crate::telemetry::band_unit(self)?;
+        let Some(next) = self.layout.grown(self.dev.sectors(), ratio_db_pct, unit)? else {
+            return Ok(None);
+        };
+        // Everything written so far is durable before the layout that may
+        // reference new space; the new space itself holds nothing yet.
+        self.dev.flush()?;
+        let slot = 1 - self.sb_slot;
+        let sb = next.encode();
+        self.write_dev(
+            SB_SLOT_LBA.get(slot).copied().unwrap_or(SB_SLOT_LBA[0]),
+            &sb,
+        )?;
+        self.dev.flush()?;
+        let info = Grown {
+            old_total: self.layout.total_sectors,
+            new_total: next.total_sectors,
+            generation: next.generation,
+            db_sectors: next
+                .bytes(RegionKind::Db)
+                .saturating_sub(self.layout.bytes(RegionKind::Db))
+                / SECTOR,
+            telemetry_sectors: next
+                .bytes(RegionKind::Telemetry)
+                .saturating_sub(self.layout.bytes(RegionKind::Telemetry))
+                / SECTOR,
+        };
+        self.layout = next;
+        self.sb_slot = slot;
+        Ok(Some(info))
+    }
+
+    /// Online grow (S3, ADR-143), after a configuration-change notification
+    /// said the device may have grown: the partition table steps on the
+    /// whole disk (backup table to the new end, data partition extended), the
+    /// window follows, then [`grow`](Self::grow). Nothing else touches the
+    /// disk meanwhile (the caller owns it). `Ok(None)`: the device did not
+    /// get larger, or the layout has nothing to add.
+    pub fn grow_online(
+        &mut self,
+        ratio_db_pct: u32,
+        random: impl FnMut() -> [u8; 16],
+    ) -> Result<Option<Grown>, DiskError> {
+        if self.dev.refresh_size().is_none() {
+            return Ok(None);
+        }
+        let part = {
+            let whole = self.dev.whole_disk().ok_or(IoError::Device)?;
+            crate::gpt::prepare(whole, random)
+                .map_err(|_| IoError::Device)?
+                .0
+        };
+        self.dev.resize_window(part.sectors());
+        self.grow(ratio_db_pct)
+    }
+
+    /// Splits the byte range `[offset, offset + len)` of the logical region
+    /// `kind` (all its extents back to back) into pieces inside one extent:
+    /// (first sector of the extent, offset inside it, bytes).
+    fn pieces(
+        &self,
+        kind: RegionKind,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<(u64, u64, usize)>, DiskError> {
+        let end = offset.checked_add(len as u64).ok_or(DiskError::Full)?;
+        if self.layout.region(kind).is_none() {
+            return Err(LayoutError::Inconsistent.into());
+        }
+        let mut out = Vec::new();
+        let mut base = 0u64;
+        for r in self.layout.extents(kind) {
+            let top = base + r.bytes();
+            if offset < top && end > base {
+                let from = offset.max(base);
+                let to = end.min(top);
+                out.push((r.start, from - base, (to - from) as usize));
+            }
+            base = top;
+        }
+        if base < end {
+            return Err(DiskError::Full);
+        }
+        Ok(out)
+    }
+
     /// Reads `buf.len()` bytes at byte `offset` of region `kind`.
     pub fn read_at(
         &mut self,
@@ -180,23 +419,27 @@ impl Disk {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<(), DiskError> {
-        let r = self.region(kind).ok_or(LayoutError::Inconsistent)?;
-        let end = offset
-            .checked_add(buf.len() as u64)
-            .ok_or(DiskError::Full)?;
-        if end > r.bytes() {
-            return Err(DiskError::Full);
+        let mut done = 0usize;
+        for (lba0, off, n) in self.pieces(kind, offset, buf.len())? {
+            let dst = buf.get_mut(done..done + n).ok_or(DiskError::Full)?;
+            self.read_extent(lba0, off, dst)?;
+            done += n;
         }
-        let chunk = self.chunk_bytes();
+        Ok(())
+    }
+
+    fn read_extent(&mut self, lba0: u64, offset: u64, buf: &mut [u8]) -> Result<(), DiskError> {
+        let g = self.gran as u64;
+        let chunk = self.chunk_bytes() as u64;
         let mut done = 0usize;
         while done < buf.len() {
             let pos = offset + done as u64;
-            let first = pos / SECTOR;
-            let skip = (pos % SECTOR) as usize;
-            let want = (buf.len() - done).min(chunk - skip);
-            let span = (skip + want).div_ceil(SECTOR as usize) * SECTOR as usize;
+            let blk = pos - pos % g;
+            let skip = (pos - blk) as usize;
+            let want = ((buf.len() - done) as u64).min(chunk - (pos - blk)) as usize;
+            let span = (skip + want).div_ceil(self.gran) * self.gran;
             let mut bounce = vec![0u8; span];
-            self.dev.read(r.start + first, &mut bounce)?;
+            self.dev.read(lba0 + blk / SECTOR, &mut bounce)?;
             self.stats.reads += 1;
             self.stats.bytes_read += span as u64;
             let src = bounce.get(skip..skip + want).ok_or(DiskError::Full)?;
@@ -208,41 +451,47 @@ impl Disk {
         Ok(())
     }
 
-    /// Writes `data` at byte `offset` of region `kind` (read-modify-write
-    /// for partial sectors).
+    /// Writes `data` at byte `offset` of region `kind`. Every device write
+    /// covers whole physical blocks: the partial blocks at the edges are
+    /// read first (read-modify-write).
     pub fn write_at(
         &mut self,
         kind: RegionKind,
         offset: u64,
         data: &[u8],
     ) -> Result<(), DiskError> {
-        let r = self.region(kind).ok_or(LayoutError::Inconsistent)?;
-        let end = offset
-            .checked_add(data.len() as u64)
-            .ok_or(DiskError::Full)?;
-        if end > r.bytes() {
-            return Err(DiskError::Full);
+        let mut done = 0usize;
+        for (lba0, off, n) in self.pieces(kind, offset, data.len())? {
+            let src = data.get(done..done + n).ok_or(DiskError::Full)?;
+            self.write_extent(lba0, off, src)?;
+            done += n;
         }
-        let chunk = self.chunk_bytes();
-        let sector = SECTOR as usize;
+        Ok(())
+    }
+
+    fn write_extent(&mut self, lba0: u64, offset: u64, data: &[u8]) -> Result<(), DiskError> {
+        let g = self.gran;
+        let gu = g as u64;
+        let max_span = (self.chunk_bytes() / g).max(1) as u64 * gu;
         let mut done = 0usize;
         while done < data.len() {
             let pos = offset + done as u64;
-            let first = pos / SECTOR;
-            let skip = (pos % SECTOR) as usize;
-            let want = (data.len() - done).min(chunk - skip);
-            let span = (skip + want).div_ceil(sector) * sector;
+            let blk = pos - pos % gu;
+            let skip = (pos - blk) as usize;
+            let want = ((data.len() - done) as u64).min(max_span - (pos - blk)) as usize;
+            let end = pos + want as u64;
+            let span_end = end.div_ceil(gu) * gu;
+            let span = (span_end - blk) as usize;
             let mut bounce = vec![0u8; span];
             if skip != 0 {
-                let head = bounce.get_mut(..sector).ok_or(DiskError::Full)?;
-                self.dev.read(r.start + first, head)?;
+                let head = bounce.get_mut(..g).ok_or(DiskError::Full)?;
+                self.dev.read(lba0 + blk / SECTOR, head)?;
                 self.stats.reads += 1;
             }
-            let tail_partial = !(skip + want).is_multiple_of(sector);
-            if tail_partial && (span > sector || skip == 0) {
-                let last = (span / sector - 1) as u64;
-                let tail = bounce.get_mut(span - sector..).ok_or(DiskError::Full)?;
-                self.dev.read(r.start + first + last, tail)?;
+            let tail_partial = !end.is_multiple_of(gu);
+            if tail_partial && !(skip != 0 && span == g) {
+                let tail = bounce.get_mut(span - g..).ok_or(DiskError::Full)?;
+                self.dev.read(lba0 + (span_end - gu) / SECTOR, tail)?;
                 self.stats.reads += 1;
             }
             let src = data.get(done..done + want).ok_or(DiskError::Full)?;
@@ -250,7 +499,7 @@ impl Disk {
                 .get_mut(skip..skip + want)
                 .ok_or(DiskError::Full)?
                 .copy_from_slice(src);
-            self.dev.write(r.start + first, &bounce)?;
+            self.write_dev(lba0 + blk / SECTOR, &bounce)?;
             self.stats.writes += 1;
             self.stats.bytes_written += span as u64;
             done += want;
@@ -260,47 +509,136 @@ impl Disk {
 
     fn chunk_bytes(&self) -> usize {
         let s = SECTOR as usize;
-        (self.dev.max_io() / s).max(2) * s
+        ((self.dev.max_io() / s).max(2) * s).max(self.gran)
     }
+
+    /// The device, for the offline tools that stage their own writes.
+    pub fn device_mut(&mut self) -> &mut dyn BlockDevice {
+        self.dev.as_mut()
+    }
+}
+
+fn gran_of(t: &Topology) -> usize {
+    t.write_gran().max(t.logical as usize)
+}
+
+fn read_slots(dev: &mut dyn BlockDevice) -> Result<([u8; BLOCK], [u8; BLOCK]), DiskError> {
+    let mut a = [0u8; BLOCK];
+    let mut b = [0u8; BLOCK];
+    dev.read(SB_SLOT_LBA[0], &mut a)?;
+    dev.read(SB_SLOT_LBA[1], &mut b)?;
+    Ok((a, b))
+}
+
+fn read_sizes(dev: &mut dyn BlockDevice) -> Result<SizeTable, DiskError> {
+    let mut a = [0u8; BLOCK];
+    let mut b = [0u8; BLOCK];
+    dev.read(SIZE_SLOT_LBA[0], &mut a)?;
+    dev.read(SIZE_SLOT_LBA[1], &mut b)?;
+    Ok(
+        SizeTable::newest(SizeTable::decode(&a), SizeTable::decode(&b))
+            .ok_or(LayoutError::SizeTableLost)?,
+    )
 }
 
 /// In-memory block device for host tests, with a volatile write cache:
 /// writes become durable only on `flush`, and [`MemDisk::crash`] throws
-/// the cache away (or keeps a chosen subset) like a power loss.
+/// the cache away (or keeps a chosen subset) like a power loss. The medium
+/// is sparse (4 KiB blocks, zero until written), so a 64 GiB disk costs
+/// only what is written to it.
 #[derive(Clone)]
 pub struct MemDisk {
     inner: Arc<SpinLock<MemInner>>,
 }
 
 struct MemInner {
-    durable: Vec<u8>,
+    bytes: u64,
+    durable: BTreeMap<u64, Box<[u8; BLOCK]>>,
     /// Completed but unflushed writes, in order.
     cache: Vec<(u64, Vec<u8>)>,
     writes: u64,
     fail_after_writes: Option<u64>,
+    topo: Topology,
+    /// The size `refresh_size` last reported.
+    seen_bytes: u64,
+    /// Reject requests that are not whole logical blocks (a 4Kn disk).
+    strict: bool,
+    /// Writes that were not whole physical blocks, seen by the medium (an
+    /// oracle independent of the store's own counter).
+    misaligned: u64,
+    flushes: u64,
 }
 
 impl MemDisk {
     pub fn new(bytes: usize) -> Self {
+        Self::sparse(bytes as u64)
+    }
+
+    /// A disk of `bytes` (which may be far larger than memory).
+    pub fn sparse(bytes: u64) -> Self {
         Self {
             inner: Arc::new(SpinLock::new(MemInner {
-                durable: vec![0u8; bytes],
+                bytes,
+                durable: BTreeMap::new(),
                 cache: Vec::new(),
                 writes: 0,
                 fail_after_writes: None,
+                topo: Topology::default(),
+                seen_bytes: bytes,
+                strict: false,
+                misaligned: 0,
+                flushes: 0,
             })),
         }
+    }
+
+    /// A disk with the given topology; `strict` rejects reads and writes
+    /// that are not whole logical blocks (as a 4Kn device does).
+    pub fn with_topology(bytes: u64, topo: Topology, strict: bool) -> Self {
+        let d = Self::sparse(bytes);
+        {
+            let mut g = d.inner.lock();
+            g.topo = topo;
+            g.strict = strict;
+        }
+        d
     }
 
     /// A disk whose medium holds `image` (fuzzing recovery from damaged
     /// images; the length should be a multiple of the sector size).
     pub fn from_image(image: Vec<u8>) -> Self {
+        let d = Self::sparse(image.len() as u64);
+        {
+            let mut g = d.inner.lock();
+            for (i, chunk) in image.chunks(BLOCK).enumerate() {
+                if chunk.iter().any(|&b| b != 0) {
+                    let mut blk = Box::new([0u8; BLOCK]);
+                    if let Some(dst) = blk.get_mut(..chunk.len()) {
+                        dst.copy_from_slice(chunk);
+                    }
+                    g.durable.insert(i as u64, blk);
+                }
+            }
+        }
+        d
+    }
+
+    /// An independent disk holding what is durable now (unflushed writes
+    /// are not copied), with the same topology.
+    pub fn fork(&self) -> Self {
+        let g = self.inner.lock();
         Self {
             inner: Arc::new(SpinLock::new(MemInner {
-                durable: image,
+                bytes: g.bytes,
+                durable: g.durable.clone(),
                 cache: Vec::new(),
                 writes: 0,
                 fail_after_writes: None,
+                topo: g.topo,
+                seen_bytes: g.bytes,
+                strict: g.strict,
+                misaligned: 0,
+                flushes: 0,
             })),
         }
     }
@@ -328,12 +666,38 @@ impl MemDisk {
         self.inner.lock().cache.len()
     }
 
+    /// Writes the medium has accepted so far.
+    pub fn write_count(&self) -> u64 {
+        self.inner.lock().writes
+    }
+
+    /// Writes the medium saw that were not whole physical blocks.
+    pub fn misaligned_writes(&self) -> u64 {
+        self.inner.lock().misaligned
+    }
+
+    /// The durable bytes at `offset` (what a reboot would see, ignoring
+    /// the cache).
     pub fn raw(&self, offset: usize, len: usize) -> Vec<u8> {
         let g = self.inner.lock();
-        g.durable
-            .get(offset..offset + len)
-            .map(<[u8]>::to_vec)
-            .unwrap_or_default()
+        let mut out = vec![0u8; len];
+        read_blocks(&g.durable, offset as u64, &mut out);
+        out
+    }
+
+    pub fn len(&self) -> u64 {
+        self.inner.lock().bytes
+    }
+
+    /// Makes the disk larger (a cloud volume that was enlarged). Opened
+    /// disks see the new size at once. Never smaller.
+    pub fn grow_to(&self, bytes: u64) {
+        let mut g = self.inner.lock();
+        g.bytes = g.bytes.max(bytes);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn device(&self) -> Box<dyn BlockDevice> {
@@ -341,26 +705,54 @@ impl MemDisk {
     }
 }
 
-fn apply(durable: &mut [u8], lba: u64, data: &[u8]) {
-    let at = (lba * SECTOR) as usize;
-    if let Some(d) = durable.get_mut(at..at + data.len()) {
-        d.copy_from_slice(data);
+fn read_blocks(m: &BTreeMap<u64, Box<[u8; BLOCK]>>, mut at: u64, out: &mut [u8]) {
+    let mut done = 0usize;
+    while done < out.len() {
+        let idx = at / BLOCK as u64;
+        let off = (at % BLOCK as u64) as usize;
+        let n = (BLOCK - off).min(out.len() - done);
+        if let (Some(blk), Some(dst)) = (m.get(&idx), out.get_mut(done..done + n))
+            && let Some(src) = blk.get(off..off + n)
+        {
+            dst.copy_from_slice(src);
+        }
+        done += n;
+        at += n as u64;
+    }
+}
+
+fn apply(durable: &mut BTreeMap<u64, Box<[u8; BLOCK]>>, lba: u64, data: &[u8]) {
+    let mut at = lba * SECTOR;
+    let mut done = 0usize;
+    while done < data.len() {
+        let idx = at / BLOCK as u64;
+        let off = (at % BLOCK as u64) as usize;
+        let n = (BLOCK - off).min(data.len() - done);
+        let blk = durable.entry(idx).or_insert_with(|| Box::new([0u8; BLOCK]));
+        if let (Some(dst), Some(src)) = (blk.get_mut(off..off + n), data.get(done..done + n)) {
+            dst.copy_from_slice(src);
+        }
+        done += n;
+        at += n as u64;
     }
 }
 
 impl BlockDevice for MemDisk {
     fn sectors(&self) -> u64 {
-        self.inner.lock().durable.len() as u64 / SECTOR
+        self.inner.lock().bytes / SECTOR
     }
 
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), IoError> {
         let g = self.inner.lock();
-        let at = (lba * SECTOR) as usize;
-        let src = g
-            .durable
-            .get(at..at + buf.len())
-            .ok_or(IoError::OutOfRange)?;
-        buf.copy_from_slice(src);
+        let at = lba * SECTOR;
+        if at + buf.len() as u64 > g.bytes {
+            return Err(IoError::OutOfRange);
+        }
+        let lb = u64::from(g.topo.logical);
+        if g.strict && (!at.is_multiple_of(lb) || !(buf.len() as u64).is_multiple_of(lb)) {
+            return Err(IoError::Device);
+        }
+        read_blocks(&g.durable, at, buf);
         // Reads see cached writes, newest last.
         for (wlba, data) in &g.cache {
             let (ws, we) = (*wlba * SECTOR, *wlba * SECTOR + data.len() as u64);
@@ -379,11 +771,20 @@ impl BlockDevice for MemDisk {
 
     fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
         let mut g = self.inner.lock();
-        if (lba * SECTOR) as usize + buf.len() > g.durable.len() {
+        let at = lba * SECTOR;
+        if at + buf.len() as u64 > g.bytes {
             return Err(IoError::OutOfRange);
+        }
+        let lb = u64::from(g.topo.logical);
+        if g.strict && (!at.is_multiple_of(lb) || !(buf.len() as u64).is_multiple_of(lb)) {
+            return Err(IoError::Device);
         }
         if g.fail_after_writes.is_some_and(|n| g.writes >= n) {
             return Err(IoError::Device);
+        }
+        let ph = u64::from(g.topo.physical).clamp(SECTOR, BLOCK as u64);
+        if !at.is_multiple_of(ph) || !(buf.len() as u64).is_multiple_of(ph) {
+            g.misaligned += 1;
         }
         g.writes += 1;
         g.cache.push((lba, buf.to_vec()));
@@ -393,6 +794,7 @@ impl BlockDevice for MemDisk {
     fn flush(&mut self) -> Result<(), IoError> {
         let mut g = self.inner.lock();
         let cache = core::mem::take(&mut g.cache);
+        g.flushes += 1;
         for (lba, data) in cache {
             apply(&mut g.durable, lba, &data);
         }
@@ -403,11 +805,24 @@ impl BlockDevice for MemDisk {
         // Small, so tests exercise chunking.
         8 * 1024
     }
+
+    fn topology(&self) -> Topology {
+        self.inner.lock().topo
+    }
+
+    fn refresh_size(&mut self) -> Option<u64> {
+        let mut g = self.inner.lock();
+        (g.bytes > g.seen_bytes).then(|| {
+            g.seen_bytes = g.bytes;
+            g.bytes / SECTOR
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::MIB_SECTORS;
 
     fn disk() -> (MemDisk, Disk) {
         let m = MemDisk::new(16 << 20);
@@ -509,5 +924,146 @@ mod tests {
             Some(DiskError::Layout(LayoutError::UnknownData))
         );
         assert_eq!(m.raw(0, 1), [0xeb]);
+        // Junk in the second slot is foreign data as well.
+        let m = MemDisk::new(16 << 20);
+        let mut dev = m.device();
+        dev.write(SB_SLOT_LBA[1], &junk).unwrap();
+        dev.flush().unwrap();
+        assert_eq!(
+            Disk::open(m.device(), || [0; 16]).err(),
+            Some(DiskError::Layout(LayoutError::UnknownData))
+        );
+    }
+
+    #[test]
+    fn a_v1_disk_is_refused_and_nothing_is_written() {
+        let m = MemDisk::new(16 << 20);
+        let mut dev = m.device();
+        let l = crate::layout::v1::plan(32 * 1024, [9; 16]).unwrap();
+        dev.write(0, &crate::layout::v1::encode(&l)).unwrap();
+        dev.write(SIZE_SLOT_LBA[0], &SizeTable::default().encode())
+            .unwrap();
+        dev.flush().unwrap();
+        let before = m.raw(0, 16 << 20);
+        let writes = m.write_count();
+        assert_eq!(
+            Disk::open(m.device(), || [0; 16]).err(),
+            Some(DiskError::Layout(LayoutError::OldVersion(1)))
+        );
+        assert_eq!(m.write_count(), writes, "no write attempted");
+        assert_eq!(m.unflushed(), 0);
+        assert!(m.raw(0, 16 << 20) == before, "the disk is unchanged");
+        // The tool's view reads it.
+        let d = Disk::open_v1(m.device()).unwrap();
+        assert!(d.layout().is_v1_view());
+    }
+
+    #[test]
+    fn grow_is_one_superblock_write_and_keeps_the_data() {
+        let m = MemDisk::sparse(1 << 30);
+        let (mut d, _) = Disk::open(m.device(), || [4; 16]).unwrap();
+        let pat: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8).collect();
+        d.write_at(RegionKind::Db, 12_345, &pat).unwrap();
+        d.set_file_size(FileKind::Db, 100_000);
+        d.sync().unwrap();
+        assert_eq!(d.grow(50).unwrap(), None, "nothing to add yet");
+        drop(d);
+        // The device becomes 4 GiB (the same sparse medium, larger).
+        let big = MemDisk::sparse(4 << 30);
+        copy_durable(&m, &big);
+        let (mut d, _) = Disk::open(big.device(), || [0; 16]).unwrap();
+        assert_eq!(d.layout().total_sectors, (1 << 30) / SECTOR);
+        let before = big.write_count();
+        let g = d.grow(50).unwrap().expect("grows");
+        assert_eq!(big.write_count() - before, 1, "one device write");
+        assert_eq!(g.new_total, (4u64 << 30) / SECTOR);
+        assert_eq!(d.sb_slot(), 1);
+        let mut back = vec![0u8; pat.len()];
+        d.read_at(RegionKind::Db, 12_345, &mut back).unwrap();
+        assert_eq!(back, pat);
+        assert!(d.bytes(RegionKind::Db) > 1 << 30);
+        // The new database space is writable across the extent boundary.
+        let old_db = Layout::plan((1 << 30) / SECTOR, [0; 16], Params::default())
+            .unwrap()
+            .bytes(RegionKind::Db);
+        d.write_at(RegionKind::Db, old_db - 100, &[7u8; 300])
+            .unwrap();
+        let mut x = [0u8; 300];
+        d.read_at(RegionKind::Db, old_db - 100, &mut x).unwrap();
+        assert_eq!(x, [7u8; 300]);
+        drop(d);
+        let (d2, _) = Disk::open(big.device(), || [0; 16]).unwrap();
+        assert_eq!(d2.layout().generation, 2);
+        assert_eq!(d2.sb_slot(), 1);
+        assert_eq!(d2.file_size(FileKind::Db), 100_000);
+    }
+
+    fn copy_durable(from: &MemDisk, to: &MemDisk) {
+        let src = from.inner.lock();
+        to.inner.lock().durable = src.durable.clone();
+    }
+
+    #[test]
+    fn writes_cover_whole_physical_blocks() {
+        for (logical, physical, strict) in
+            [(512, 512, false), (512, 4096, false), (4096, 4096, true)]
+        {
+            let topo = Topology {
+                logical,
+                physical,
+                align_offset: 0,
+                min_io: physical,
+                opt_io: 0,
+            };
+            let m = MemDisk::with_topology(64 << 20, topo, strict);
+            let (mut d, _) = Disk::open(m.device(), || [5; 16]).unwrap();
+            let data: Vec<u8> = (0..30_000u32).map(|i| (i * 7 + 3) as u8).collect();
+            for off in [0u64, 1, 511, 512, 4095, 9000, 100_003] {
+                d.write_at(RegionKind::Wal, off, &data).unwrap();
+                let mut back = vec![0u8; data.len()];
+                d.read_at(RegionKind::Wal, off, &mut back).unwrap();
+                assert_eq!(back, data, "{logical}/{physical} offset {off}");
+            }
+            d.set_file_size(FileKind::Db, 777);
+            d.sync().unwrap();
+            assert_eq!(d.stats.misaligned_writes, 0, "{logical}/{physical}");
+            assert_eq!(
+                m.misaligned_writes(),
+                0,
+                "{logical}/{physical}: the medium agrees"
+            );
+            assert!(d.stats.device_writes > 10);
+        }
+        // The counter does count: a 512-byte write on a 4 KiB device.
+        let topo = Topology {
+            logical: 512,
+            physical: 4096,
+            align_offset: 0,
+            min_io: 4096,
+            opt_io: 0,
+        };
+        let m = MemDisk::with_topology(64 << 20, topo, false);
+        let mut dev = m.device();
+        dev.write(1, &[0u8; 512]).unwrap();
+        assert_eq!(m.misaligned_writes(), 1);
+    }
+
+    #[test]
+    fn regions_follow_the_optimal_io_size() {
+        let topo = Topology {
+            logical: 512,
+            physical: 4096,
+            align_offset: 0,
+            min_io: 4096,
+            opt_io: 2 << 20,
+        };
+        let m = MemDisk::with_topology(256 << 20, topo, false);
+        let (d, _) = Disk::open(m.device(), || [6; 16]).unwrap();
+        assert_eq!(u64::from(d.layout().align_sectors), 2 * MIB_SECTORS);
+        for r in &d.layout().regions {
+            if r.kind != RegionKind::Scratch {
+                assert_eq!(r.start % (2 * MIB_SECTORS), 0);
+            }
+        }
     }
 }

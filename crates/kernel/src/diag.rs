@@ -644,12 +644,19 @@ fn survey(blk: DataDisk, sectors: u64, scratch: &mut [u8]) -> (DataDisk, Survey)
         .as_ref()
         .and_then(|t| t.data_partition())
         .and_then(|e| {
-            let mut sb = [0u8; layout::BLOCK];
-            kb.read(e.first_lba, &mut sb).ok()?;
-            let l = Layout::decode(&sb, e.sectors()).ok().flatten()?;
+            // Both superblock slots; the one in force names the regions. An
+            // older layout or a damaged one is unreadable here, so the whole
+            // partition counts as taken (the safe answer).
+            let mut a = [0u8; layout::BLOCK];
+            let mut b = [0u8; layout::BLOCK];
+            kb.read(e.first_lba + layout::SB_SLOT_LBA[0], &mut a).ok()?;
+            kb.read(e.first_lba + layout::SB_SLOT_LBA[1], &mut b).ok()?;
+            let (l, _) = Layout::select(&a, &b, e.sectors()).ok().flatten()?;
             Some(DataLayout {
                 partition: Extent::new(e.first_lba, e.last_lba + 1),
-                header_sectors: layout::HEADER_SECTORS,
+                // The header area: both superblock slots, the size tables,
+                // the migration blocks and the rest of the first alignment unit.
+                header_sectors: u64::from(l.align_sectors).max(layout::HEADER_SECTORS),
                 regions: l.regions.iter().map(|r| (r.start, r.sectors)).collect(),
             })
         });

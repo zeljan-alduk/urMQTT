@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[lib]
+name = "urmqtt_disk"
+path = "src/lib.rs"
+bench = false
+
 [[bin]]
 name = "urmqtt-disk"
 path = "src/main.rs"

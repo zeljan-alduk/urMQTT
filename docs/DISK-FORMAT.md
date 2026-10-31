@@ -1,8 +1,11 @@
-# Data disk format, layout version 1
+# Data disk format, layout version 2
 
-The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0). Since
-S1 the "data disk" is the **data partition of the boot disk** (§0); everything
-below §0 is relative to that partition's first sector. The data has **no
+The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0, S2, S3).
+Since S1 the "data disk" is the **data partition of the boot disk** (§0);
+everything below §0 is relative to that partition's first sector. Layout v2
+(S2) adds alignment, the partition count and an A/B superblock; S3 adds the
+grow (§9). Layout v1 (S0/S1) is described only as far as `urmqtt-disk migrate`
+reads it (§10). The data has **no
 filesystem**: the kernel accesses it raw, as a superblock, a region table and
 fixed regions. The code is in `crates/store`
 (`layout.rs`, `disk.rs`, `vfs.rs`, `telemetry.rs`); ADR-030 and ADR-031 give
@@ -51,8 +54,8 @@ it drives and uses the one whose valid primary header carries that GUID. Every
 other disk is only read, never written. Booting from optical media (the ISO)
 gives no data partition.
 
-**First boot** (`gpt::prepare`), checked again at every boot, each step
-idempotent:
+**First boot and growth** (`gpt::prepare`), checked again at every boot, each
+step idempotent:
 1. If the primary copy is invalid, it is restored from a valid backup at the
    last LBA.
 2. If the backup is not at the last LBA (the image on a larger disk), the
@@ -65,6 +68,11 @@ idempotent:
    - the entry is added with a fresh random partition GUID and a fresh random
      disk GUID;
    - the backup copy is written before the primary.
+4. If there is a data partition, it is the last one on the disk and at least
+   1 MiB of free space follows it (the cloud volume was enlarged): its entry
+   is extended to the new last usable sector, a whole number of 4 KiB blocks.
+   The backup copy is written before the primary, so a cut leaves the old
+   partition size or the new one (and the next boot repeats the step).
 
 Within one copy, the entry array is always written before its header, and
 every copy ends with a flush. A power cut after any write therefore leaves
@@ -80,85 +88,136 @@ cut cleanly or torn, with and without the volatile cache surviving. Smoke
 
 **Classification of the data partition** (`Disk::open` on the partition):
 - blank → formatted (§6);
-- a valid superblock → opened;
+- a valid v2 superblock → opened (and grown if the partition is larger, §9);
+- a valid v1 superblock → **refused, nothing written** (§10), message `data disk is layout v1; this image needs v2: run urmqtt-disk migrate (docs/DEPLOY.md)`;
 - anything else → **damaged**: refused and never written. Dev images then run
   memory-only (smoke `own-damaged-refused`); a backup restore is S5.
 
 ## 1. Conventions
 
 - All integers are **little-endian**, fixed width, independent of the CPU architecture. A disk written on aarch64 is valid on x86_64.
-- **Sector:** 512 bytes. Addresses on the device are in sectors (LBA). The device must have 512-byte logical blocks; 4Kn devices are not supported in v1 (G3).
-- **Block:** 4096 bytes (8 sectors). The superblock, the size-table slots and the telemetry header are one block each.
+- **Sector:** 512 bytes. Addresses on the device are in sectors (LBA). The device must have 512-byte logical blocks; 4Kn devices are not supported by the boot path (G3 below). The store layer itself writes whole physical blocks and is tested against a strict 4096/4096 device.
+- **Block:** 4096 bytes (8 sectors). The superblock slots, the size-table slots and the telemetry header are one block each.
+- **Physical block / I/O granularity:** the device's physical block size, within 512 B and 4 KiB (§2a). Every write the store sends to the device starts and ends on that boundary; the partial blocks at the edges of a smaller write are read first.
 - **CRC:** CRC-32C (Castagnoli, reflected polynomial `0x82F63B78`, initial value and final XOR `0xFFFFFFFF`; `crc32c("123456789") = 0xE3069283`), stored as `u32`. Unless stated otherwise it covers bytes `0 .. size-4` of its structure and is stored in the last four bytes.
-- **Unlisted bytes** inside a structure are written as zero and are covered by its CRC. Readers do not interpret them; a future version may use them only together with a version bump.
+- **Unlisted bytes** inside a structure are written as zero and are covered by its CRC. Readers do not interpret them, except that a v2 superblock with a non-zero reserved field is refused; a future version may use them only together with a version bump.
 - **Magics** are 8 ASCII bytes without a terminator.
 
 ## 2. Disk map
 
 ```
-LBA 0          superblock                    1 block
+LBA 0          superblock slot A             1 block
 LBA 8          size table slot A             1 block
 LBA 16         size table slot B             1 block
-LBA 24 .. 63   unused (zero)                 20 KiB
-LBA 64 ..      regions (from the region table), each a multiple of 8 sectors and 8-sector aligned:
-               SQLite main database, WAL, rollback journal, telemetry log
+LBA 24         superblock slot B             1 block
+LBA 32 .. 63   reserved: the migration record (§10), zero on a fresh disk
+LBA 64 .. align-1  unused (zero), the rest of the first alignment unit
+LBA align ..   regions (from the region table), each starting on an alignment boundary
+               and a multiple of 8 sectors long:
+               SQLite main database (one or more extents), WAL, rollback journal,
+               telemetry log (one or more extents)
 last 8 sectors scratch (the boot block-device self-test writes here)
 ```
 
-The **formatter** (`Layout::plan`, used only on a blank disk, §6) places the
-regions in the order database, WAL, journal, telemetry, scratch, and sizes
-them as follows (all in sectors, rounded down to a multiple of 8):
+The **formatter** (`Layout::plan`, used only on a blank disk, §6) rounds the
+disk size down to a multiple of 8 sectors, places the regions in the order
+database, WAL, journal, telemetry, scratch, and sizes them as follows (all in
+sectors; `A` = `align_sectors`):
 
-| Region | Size |
+| Region | Start | Size |
+|---|---|---|
+| `end` | | `floor_A(total - 8)` |
+| `usable` | | `end - A` |
+| database | `A` | `floor_A(usable / 2)` |
+| WAL | after the database | `max(A, floor_A(clamp(usable / 8, 2 MiB, 64 MiB)))` |
+| journal | after the WAL | `ceil_A(1 MiB)` |
+| telemetry | after the journal | `usable - database - WAL - journal` (at least `A`) |
+| scratch | `total - 8` | 8 sectors |
+
+The smallest disk is 16 MiB (32 768 sectors).
+
+### 2a. Alignment and topology (S2, ADR-140)
+
+`A` is the least common multiple of 1 MiB, the device's physical block size
+and its optimal I/O size, in sectors, a multiple of 2048 and at most 64 MiB;
+an optimal I/O size that would push it past 64 MiB is ignored. The partition
+starts on a 1 MiB boundary (§0), so a region start that is a multiple of `A`
+is aligned on the disk as well. The topology comes from:
+
+| Device | Source |
 |---|---|
-| `usable` | `align8(total_sectors - 8 - 64)` |
-| journal | 1 MiB (2048 sectors) |
-| WAL | `align8(clamp(usable / 8, 2 MiB, 64 MiB))` |
-| database | `align8(usable / 2)` |
-| telemetry | `usable - journal - WAL - database` |
-| scratch | `total_sectors - 8`, 8 sectors |
+| virtio-blk | `VIRTIO_BLK_F_TOPOLOGY`: `physical_block_exp`, `alignment_offset`, `min_io_size`, `opt_io_size` (units of `blk_size`) |
+| virtio-scsi | READ CAPACITY (16): logical blocks per physical block exponent and lowest aligned LBA; the Block Limits VPD page (B0h): optimal transfer length granularity and optimal transfer length |
+| NVMe, ATA | deferred to X13 (namespace LBA format and NPWG/NOWS; IDENTIFY logical/physical sector size) |
 
-The smallest disk is 16 MiB (32 768 sectors). A disk whose size is not a
-multiple of 4 KiB is refused at format time, because its scratch region would
-not be 8-sector aligned (G7).
+A device that reports nothing is a plain 512-byte device and `A` is 1 MiB.
+The superblock stores `A` (`align_sectors`); a disk keeps it for life, so a
+disk moved to a device with other hints is not re-laid-out.
 
-## 3. Superblock (LBA 0)
+**Writes.** Telemetry flushes, and every other write through `Disk::write_at`,
+cover whole physical blocks. The debug counter `misaligned_writes` counts the
+device requests that start or end off a physical block on the real disk; it
+stays 0 on the data partition and the kernel logs it (smoke checks it). The
+unavoidable exceptions, which are not counted because they are not store
+writes through a partition: the GPT and the MBR at the first boot and the
+installer (512-byte sectors by definition of GPT), and the boot self-test
+(one 4 KiB write at the last 8 sectors of the partition, which is 4 KiB
+aligned). A **migrated** disk keeps its telemetry ring where it was (§10): its
+segments are 4 KiB aligned, but not 1 MiB aligned.
+
+## 3. Superblock (LBA 0 = slot A, LBA 24 = slot B)
 
 <!-- struct: superblock size=4096 -->
 | Offset | Size | Type | Field | Description |
 |---|---|---|---|---|
 | 0 | 8 | magic | magic | `URMQTTDK` |
-| 8 | 4 | u32 | version | layout version, `1` |
-| 12 | 4 | u32 | region_count | number of region entries, at most 16 |
-| 16 | 16 | bytes | uuid | random at format time; identifies the disk |
-| 32 | 8 | u64 | total_sectors | disk size in sectors **when formatted**; at most the device's current size |
-| 40 | 24 | region[] | regions | `region_count` entries of §3.1, back to back (up to offset 424) |
+| 8 | 4 | u32 | version | layout version, `2` |
+| 12 | 4 | u32 | region_count | number of region entries, at most 128 |
+| 16 | 16 | bytes | uuid | random at format time; identifies the disk and its telemetry segments |
+| 32 | 8 | u64 | total_sectors | formatted size in sectors, a multiple of 8; at most the device's current size |
+| 40 | 8 | u64 | generation | 1 at format, plus 1 with every superblock write |
+| 48 | 4 | u32 | partitions | telemetry partitions, 1 to 64 |
+| 52 | 4 | u32 | align_sectors | alignment unit `A` in sectors: a multiple of 2048, at most 131072 |
+| 56 | 4 | u32 | flags | bit 0: the telemetry ring is a v1 ring kept in place (§5.2); other bits must be 0 |
+| 64 | 24 | region[] | regions | `region_count` entries of §3.1, back to back (up to offset 3136) |
 | 4092 | 4 | crc32c | crc | over bytes 0..4092 |
 
-### 3.1 Region entry (24 bytes, at 40 + 24·i)
+Bytes 60..64 are reserved and must be zero.
+
+### 3.1 Region entry (24 bytes, at 64 + 24·i)
 
 <!-- struct: region size=24 -->
 | Offset | Size | Type | Field | Description |
 |---|---|---|---|---|
 | 0 | 4 | u32 | kind | 1 database, 2 WAL, 3 journal, 4 telemetry, 5 scratch |
-| 8 | 8 | u64 | start | first sector (LBA), a multiple of 8 |
+| 8 | 8 | u64 | start | first sector (LBA), a multiple of 8 and of `align_sectors` |
 | 16 | 8 | u64 | sectors | length in sectors, a multiple of 8 |
 
 Bytes 4..8 are zero.
 
-**Validity** (`Layout::decode`; any failure refuses the disk, nothing is written):
-1. The 4096 bytes are all zero: the disk is **blank** (§6).
+The kinds 1 (database) and 4 (telemetry) may appear several times: each entry
+is an **extent**, and the logical region is the extents back to back in table
+order (§9). The other kinds appear once.
+
+**Choosing the superblock** (`Layout::select`): both slots are decoded.
+- Both all zero: the disk is **blank** (§6).
+- One valid: that one. Both valid: the higher `generation`; slot A on a tie.
+- A valid v2 slot beats a v1 superblock in the other slot (a finished migration, §10).
+- None valid: the error names the first of: a valid v1 superblock (`OldVersion`, refused as in §0), a damaged v2 superblock (bad CRC, inconsistent), foreign data (`UnknownData`, never formatted over).
+
+**Validity of one slot** (`Layout::decode`):
+1. The 4096 bytes are all zero: the slot is **blank**.
 2. Otherwise the magic must match, or the result is `UnknownData`: foreign data, never formatted over.
-3. The CRC must match; `version` must be 1; `region_count` ≤ 16; every `kind` must be known.
-4. `total_sectors` ≤ the device size.
-5. Regions are non-empty, 8-sector aligned, start at or after LBA 64, do not overlap and end within `total_sectors`.
-6. Database, WAL and journal regions exist. Telemetry and scratch are optional for the reader.
+3. The CRC must match; `version` must be 2 (1 is `OldVersion`); `region_count` ≤ 128; every `kind` must be known; `flags` has only bit 0, the reserved word is 0.
+4. `total_sectors` ≤ the device size and a multiple of 8; `partitions` and `align_sectors` in range.
+5. Regions are non-empty, a multiple of 8 sectors long, start at or after `align_sectors`, do not overlap and end within `total_sectors`. Every region except scratch starts on a multiple of `align_sectors`; the first telemetry extent is exempt when flag bit 0 is set.
+6. Database, WAL and journal regions exist; WAL, journal and scratch have one extent. Telemetry and scratch are optional for the reader.
 
 ## 4. Size table (LBA 8 = slot A, LBA 16 = slot B)
 
 The logical sizes of the three SQLite "files", which the VFS maps onto the
 database, WAL and journal regions. Two slots make updates atomic: a write goes
-to the slot that does not hold the newest valid copy.
+to the slot that does not hold the newest valid copy. The same in v1 and v2.
 
 <!-- struct: size_table size=4096 -->
 | Offset | Size | Type | Field | Description |
@@ -185,9 +244,10 @@ write loses only the update in flight.
 
 ### 5.1 SQLite database, WAL, journal (kinds 1–3)
 
-Each region holds one SQLite file as a flat byte range starting at the
-region's first byte. Its logical length is in the size table, and growth
-beyond the region fails with `SQLITE_FULL`.
+Each file is one flat byte range starting at the first byte of its region
+(for the database: the first byte of its first extent, continuing in the next
+extent). Its logical length is in the size table, and growth beyond the region
+fails with `SQLITE_FULL`.
 
 The file contents are SQLite's own formats (database file format, WAL
 format), version 3.54.1, with:
@@ -203,19 +263,30 @@ SQLite assumes a torn sector can damage its neighbours. Truncation
 ### 5.2 Telemetry log (kind 4)
 
 ```
-region     [ log header 4 KiB ][ partition 0 ] … [ partition 7 ]
-partition  [ segment 0 ] … [ segment S-1 ]        a ring
+region     [ log header 4 KiB ][ band 0 ] [ band 1 ] …        (all telemetry extents back to back)
+band       [ partition 0 ] … [ partition P-1 ]                 one band per extent
+partition  [ segment 0 ] … [ segment n-1 ]                     n segments of this band
 segment    [ segment header 512 B ][ records … ][ zero padding ]
 ```
 
-**Geometry,** chosen at format time (`Geometry::plan`) and stored in the log header:
-- `part = (region_bytes - 4096) / 8`;
-- `segment_bytes = floor4K(clamp(part / 8, 64 KiB, 8 MiB))`;
-- `segments = part / segment_bytes`, at least 2.
+A partition is a ring over its segments in all bands: ring index `s` is in
+band 0 for `s < n0`, in band 1 for `n0 <= s < n0 + n1`, and so on.
 
-The segment `s` of partition `p` starts at region offset
-`4096 + p·segments·segment_bytes + s·segment_bytes`. Source core `c` writes
-partition `c mod 8`.
+**Geometry,** chosen at format time (`Geometry::plan`) and stored in the log
+header: with `P` the superblock's `partitions` and `E0` the first extent's
+bytes,
+- `part = (E0 - 4096) / P`;
+- `segment_bytes = floor4K(clamp(part / 8, 64 KiB, 8 MiB))`;
+- band 0 has `n0 = (E0 - 4096) / (P · segment_bytes)` segments per partition, at least 2.
+
+Band `e` (extent `e`, `e > 0`) has `ne = bytes(e) / (P · segment_bytes)`
+segments per partition; an extent too small for one is skipped. Segment `s` of
+partition `p` in band `e` starts at the band's first byte plus
+`(p · ne + j) · segment_bytes`, `j` the index inside the band; band 0 starts at
+region offset 4096. Source core `c` writes partition `c mod P`.
+
+No segment that exists ever changes position when the disk grows (§9): a new
+extent only adds a band.
 
 #### Log header (region offset 0)
 
@@ -223,16 +294,16 @@ partition `c mod 8`.
 | Offset | Size | Type | Field | Description |
 |---|---|---|---|---|
 | 0 | 8 | magic | magic | `URMQTLH1` |
-| 8 | 4 | u32 | version | `1` |
-| 12 | 4 | u32 | partitions | `8` |
-| 16 | 8 | u64 | segment_bytes | a multiple of 4096, at least 64 KiB |
-| 24 | 8 | u64 | segments | segments per partition, at least 2 |
+| 8 | 4 | u32 | version | `2`; `1` only on a ring kept from layout v1 (flag bit 0) |
+| 12 | 4 | u32 | partitions | equal to the superblock's `partitions` |
+| 16 | 8 | u64 | segment_bytes | a multiple of 4096, 64 KiB to 8 MiB |
+| 24 | 8 | u64 | segments | segments per partition in band 0, at least 2, equal to `n0` |
 | 4092 | 4 | crc32c | crc | over bytes 0..4092 |
 
 An all-zero header means a blank log, formatted at open. Non-zero data without
 the magic is `UnknownData`, never formatted over. A bad CRC or version, a
-partition count other than 8, or a geometry that does not fit the region is
-`BadHeader`, and the disk is refused.
+partition count other than the layout's, or a geometry that does not match the
+first extent is `BadHeader`, and the disk is refused.
 
 #### Segment header (first sector of a segment)
 
@@ -243,9 +314,15 @@ partition count other than 8, or a geometry that does not fit the region is
 | 8 | 4 | u32 | partition | the partition this segment belongs to |
 | 16 | 8 | u64 | seq | per-partition segment sequence, starting at 1; 0 is invalid |
 | 24 | 8 | u64 | created | Unix seconds when the segment was started |
+| 32 | 16 | bytes | uuid | the superblock's `uuid`; all zero in a segment written by layout v1 |
 | 508 | 4 | crc32c | crc | over bytes 0..508 |
 
-A segment is valid if its magic, CRC and partition match and `seq` > 0.
+A segment is valid if its magic, CRC and partition match, `seq` > 0 and the
+`uuid` equals the layout's. A segment of an earlier incarnation of the disk,
+or stale bytes in space a grow just claimed, therefore never counts. The one
+exception: when the superblock's flag bit 0 is set (a ring kept from layout
+v1), an all-zero `uuid` is also accepted in **band 0** only. New segments
+always carry the `uuid`.
 
 #### Record
 
@@ -263,64 +340,69 @@ record never spans segments.
 | 18+topic_len | len-10-topic_len | bytes | payload | the message payload |
 
 **Writing:**
-- Records are batched and written as whole sectors, zero-padded after the last record, followed by a flush.
+- Records are batched and written as whole physical blocks, zero-padded after the last record, followed by a flush. A new segment's header goes out in the same write as its first records.
 - A new segment (the next ring index, `seq + 1`) starts:
   - when the next record does not fit;
   - for the first record of a partition, which goes to segment 0 with seq 1;
   - after recovery: a recovered segment is never extended.
-- Its header is written with the first batch.
 
 **Recovery** (`TelemetryLog::open`). For each partition:
 1. Read every segment header and order the valid segments by `seq`.
 2. Scan each segment's records until `len == 0` (a clean end) or the first record that fails its CRC, its length bounds or UTF-8 (a torn tail; the rest of the segment is ignored).
-3. The segment with the highest `seq` is the partition's active segment. New records go to a new segment.
+3. The segment with the highest `seq` is the partition's active segment. New records go to a new segment, the next ring index after it.
 
 **Why stale data never resurrects:** the CRC is salted with the segment's
 `seq`. Records from an earlier pass of the ring therefore fail in a reused
-segment. When a batch ends exactly on a sector boundary, the next sector may
+segment. When a batch ends exactly on a block boundary, the next block may
 still hold such stale bytes. They are read as a torn tail (counted, harmless),
 never as records.
 
 **Retention:** by size, as the ring overwrites the oldest segment. Age
-(`storage.retention_days`) only hides expired records from reads.
+(`storage.retention_days`) only hides expired records from reads. After a
+grow, a ring whose active segment is not the last one keeps overwriting the
+oldest segments next to it before it reaches the new bands (correct, and the
+new space is used from the next wrap).
 
 ### 5.3 Scratch (kind 5)
 
 Eight sectors that the boot block-device self-test overwrites with a random
-pattern, then reads back. They hold no data. Today the self-test runs on the
-first disk without partitions, before the store looks at it (G1).
+pattern, then reads back. They hold no data. The self-test runs inside the
+data partition, at its last 8 sectors, before the store opens; after a grow
+the scratch area is at the new end of the layout, which is the same place.
 
 ## 6. Blank disks and formatting
 
-`Disk::open` reads the superblock:
+`Disk::open` reads both superblock slots (`Layout::select`):
 
-| Superblock | Result |
+| Superblocks | Result |
 |---|---|
-| all zero | **blank**: formatted (below) |
-| a valid v1 superblock | opened |
+| both all zero | **blank**: formatted (below) |
+| a valid v2 superblock | opened |
+| a valid v1 superblock only | refused (`OldVersion`), nothing is written |
 | anything else | refused, nothing is written |
 
 **Formatting:**
-1. Plan the regions (§2).
+1. Plan the regions (§2) from the device's topology (§2a) and the partition count.
 2. Write size-table slot A with `seq = 0`, all sizes 0, and write slot B as zeros; flush.
-3. Write the superblock; flush.
+3. Write superblock slot A with `generation = 1`; flush.
 
-A crash before step 3 leaves a disk whose superblock is still zero, so it is
+A crash before step 3 leaves a disk whose superblocks are still zero, so it is
 formatted again on the next boot. The telemetry header is written separately
 when the log is first opened (§5.2).
 
 Since S1 this layout starts at the first sector of the boot disk's data
-partition (§0), and "blank" means the partition's first 4 KiB are zero. Until
-M17 the data lived on a separate disk chosen as "not partitioned"; no image
-was released with that model, so there is no migration from it.
+partition (§0), and "blank" means the partition's first 4 KiB are zero (and
+slot B's, which the first-boot head clearing also zeroes).
 
 ## 7. Invariants
 
-- No region overlaps another or the header area (LBA 0–63).
-- A size in the size table never exceeds its region, and never covers data written after the last flush.
+- No region overlaps another or the header area (LBA 0 up to `align_sectors`).
+- A size in the size table never exceeds its (summed) region, and never covers data written after the last flush.
 - Every on-disk structure except SQLite's own files and record payloads has a CRC-32C, so a torn or stale structure is detected, never trusted.
-- A disk is only ever formatted when its superblock is all zero.
+- A disk is only ever formatted when both superblock slots are all zero.
 - The format has no pointers into memory and no host-endian fields.
+- **Superblock updates are single block writes to the slot not in force**, then a flush. A torn write leaves the slot invalid and the other slot in force.
+- A layout update never moves existing data (grow), or switches only after the copy is verified (migrate).
 
 ## 8. Known gaps (STORAGE-PLAN)
 
@@ -328,7 +410,71 @@ was released with that model, so there is no migration from it.
 |---|---|---|
 | ~~G1~~ | ~~the data is on a separate disk chosen by "not partitioned"~~ | **fixed in S1**: the boot disk's data partition, found by GPT disk GUID (§0) |
 | ~~G2~~ | ~~a damaged urMQTT disk must not be taken for a blank one~~ | **fixed in S1**: damaged partitions are refused and left unwritten (smoke `own-damaged-refused`) |
-| G3 | regions are aligned to 4 KiB, not 1 MiB or the device topology; telemetry writes are 512 B granular, which causes read-modify-write on 4 KiB-physical devices | S2 |
-| G4 | the telemetry partition count is fixed at 8 | S2 |
-| G7 | disks whose size is not a multiple of 4 KiB are refused instead of rounded down; the data partition is created as whole 4 KiB blocks, so it does not arise for it | S2 |
-| G8 | recovery reads the whole telemetry region at boot, so boot time grows with the disk | S2 |
+| ~~G3~~ | ~~regions are aligned to 4 KiB, not 1 MiB or the device topology; telemetry writes are 512 B granular~~ | **fixed in S2** for virtio-blk and virtio-scsi (§2a). Open: NVMe/ATA topology (X13); 4Kn devices cannot boot (the GPT code is 512-byte based), the store layer is tested on a 4096/4096 device |
+| ~~G4~~ | ~~the telemetry partition count is fixed at 8~~ | **fixed in S2**: `partitions` in the superblock |
+| ~~G7~~ | ~~disks whose size is not a multiple of 4 KiB are refused~~ | **fixed in S2**: the formatted size is rounded down |
+| G8 | recovery reads the whole telemetry region at boot, so boot time grows with the disk | **not done in S2**: only the newest segment per partition needs a full scan, with a per-segment summary; moves to S6 with the scrubber |
+
+## 9. Growing (S3, ADR-142)
+
+Boot-time, after `gpt::prepare` has extended the data partition (§0, step 4) and
+before the store opens. When the device holds more sectors than the layout's
+`total_sectors` (`spare`):
+
+1. `new_end = floor_A(device - 8)`; the new space is `[ceil_A(end of the last data region), new_end)`. If it is shorter than `A`, nothing happens.
+2. It is split by `storage.grow_ratio_db` (percent, default 50) between the database and the telemetry ring, as new extents after the existing ones. The region that already ends the layout gets its share first, and a database extent that touches the previous database extent is merged into it. A telemetry share smaller than one segment row (`P · segment_bytes`) goes to the database instead. WAL and journal keep their size.
+3. The scratch area moves to `new_total - 8`. `total_sectors` becomes the device size rounded down, `generation` is incremented.
+4. The new superblock is written to the slot **not** in force, then flushed. This is the only write of the layout part of the grow.
+
+A cut before the write completes leaves the old slot in force; a torn write
+leaves an invalid slot and the old one in force; a completed write puts the new
+layout in force. No byte moves. The disk never shrinks automatically: a device
+smaller than the layout's `total_sectors` is refused by the superblock checks
+(§3, rule 4) and by `gpt::prepare` (`Shrunk`).
+
+## 10. Layout v1 and the migration (S2, ADR-141)
+
+**Layout v1** (S0/S1) had one superblock at LBA 0 (version 1, at most 16 regions, no partition count, no alignment), the same size table, regions from LBA 64 and one telemetry extent in a fixed 8-partition ring with segment headers without a UUID.
+
+<!-- struct: superblock_v1 size=4096 -->
+| Offset | Size | Type | Field | Description |
+|---|---|---|---|---|
+| 0 | 8 | magic | magic | `URMQTTDK` |
+| 8 | 4 | u32 | version | `1` |
+| 12 | 4 | u32 | region_count | at most 16 |
+| 16 | 16 | bytes | uuid | |
+| 32 | 8 | u64 | total_sectors | |
+| 40 | 24 | region[] | regions | `region_count` entries of §3.1 (offsets from 40) |
+| 4092 | 4 | crc32c | crc | over bytes 0..4092 |
+
+The kernel recognises a valid v1 superblock and refuses it. Only
+`urmqtt-disk migrate` reads and converts it. The conversion keeps the
+telemetry ring where it is (no copy of up to hundreds of GB), moves the small
+live files (database, WAL, journal) into aligned regions carved out of the
+dead tail of the old database region, and makes the rest of the old space
+database extents:
+
+**Migration record** (header sectors 32..63; the kernel ignores it): a copy of
+the v1 superblock at LBA 32 and two state blocks at LBA 40 and 48, the higher
+valid `seq` winning.
+
+<!-- struct: migration_record size=4096 -->
+| Offset | Size | Type | Field | Description |
+|---|---|---|---|---|
+| 0 | 8 | magic | magic | `URMQMIG1` |
+| 8 | 8 | u64 | seq | incremented by one with every state write |
+| 16 | 4 | u32 | state | 1 planned, 2 copied and verified, 3 switched (v2 in slot B), 4 done (v2 in slot A as well) |
+| 20 | 4 | u32 | v1_crc | CRC-32C of the saved v1 superblock block |
+| 24 | 4 | u32 | v2_crc | CRC-32C of the planned v2 superblock block (generation 1) |
+| 4092 | 4 | crc32c | crc | over bytes 0..4092 |
+
+**Order of writes** (each followed by a flush):
+1. The rollback file (host) and the saved v1 superblock at LBA 32; then state `planned`.
+2. The live bytes of the database, WAL and journal into the new regions; read back and compared; state `copied`.
+3. **Superblock slot B := v2, generation 1.** This single block write is the switch: v1 stays in force (slot A still holds it) until it is complete and valid.
+4. State `switched`; then slot A := v2, generation 2 (so no v1 reader can open the disk any more); state `done`.
+
+A cut anywhere leaves a valid v1 disk (before step 3) or a valid v2 disk (after
+it). `migrate --resume` finishes from the recorded state, `migrate --rollback`
+returns to v1 (it restores LBA 0 from the saved copy or the rollback file,
+zeroes slot B, clears the state blocks).

@@ -544,7 +544,7 @@ impl MqttService {
             info!(
                 "mqtt: shard {me}/{n} ready: {homed} persistent session(s) homed here, telemetry partition {}",
                 if log.is_some() {
-                    urmqtt_store::telemetry::TelemetryLog::partition_of(me) as isize
+                    db::partition_of(me) as isize
                 } else {
                     -1
                 }

@@ -180,6 +180,9 @@ pub struct Storage {
     pub sqlite_heap_mb: u32,
     pub telemetry_topics: &'static [&'static str],
     pub retention_days: u32,
+    /// Percent of new disk space that goes to the SQLite database when the
+    /// volume grows; the rest goes to the telemetry ring (S3).
+    pub grow_ratio_db: u32,
     pub require_flush: bool,
     pub require_data_disk: bool,
     pub refuse_on_corruption: bool,

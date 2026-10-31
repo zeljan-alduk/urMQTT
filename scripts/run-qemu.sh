@@ -5,12 +5,15 @@
 #   scripts/run-qemu.sh --iso ISO | --disk RAW [--accel hvf|tcg|kvm] [--smp N] [--mem 512M]
 #                       [--data IMG] [--bus blk|scsi] [--cpu MODEL] [--gic 3|2] [--no-rng] [--acpi on|off] [--serial FILE] [--headless]
 #                       [--pcap FILE] [--gdb] [--no-net] [--fwd HOST:GUEST,...]
+#                       [--blk-props 'physical_block_size=4096,opt_io_size=65536,...']
 #                       [--dgram LOCAL:REMOTE] [-- extra qemu args]
 #
 # --disk boots the raw GPT image (mkraw.py) as a virtio-blk disk, like a
 # KVM host or a cloud server would; the data disk is a second virtio-blk.
 # --bus scsi attaches the boot disk and the data disk as scsi-hd LUNs on a
 # virtio-scsi controller instead, as many clouds do.
+# --blk-props appends QEMU device properties to the boot disk's device
+# (virtio-blk-pci or scsi-hd): the block topology the S2 tests exercise.
 # --gic 2 gives the guest a GICv2, as KVM does on a GIC-400 host such as
 # the Raspberry Pi 4 and 5 (at most 8 CPUs).
 # --fwd replaces the default port forwards (1883 and 8883 on 127.0.0.1);
@@ -32,6 +35,7 @@
 set -euo pipefail
 
 ARCH=${URMQTT_ARCH:-aarch64} MACHINE=q35 FIRMWARE=uefi
+BLKPROPS=""
 ISO="" DISK="" BUS=blk CPU_MODEL="" GIC=3 RNG=1 ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
 FWD="1883:1883,8883:8883"
 DGRAM=""
@@ -44,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         --iso) ISO=$2; shift 2 ;;
         --disk) DISK=$2; shift 2 ;;
         --bus) BUS=$2; shift 2 ;;
+        --blk-props) BLKPROPS=",$2"; shift 2 ;;
         --cpu) CPU_MODEL=$2; shift 2 ;;
         --gic) GIC=$2; shift 2 ;;
         --no-rng) RNG=0; shift ;;
@@ -112,9 +117,9 @@ if [[ $ARCH == x86_64 ]]; then
     if [[ -n "$DISK" ]]; then
         X86ARGS+=(-drive "if=none,id=boot0,file=$DISK,format=raw,cache=none")
         if [[ $BUS == scsi ]]; then
-            X86ARGS+=(-device scsi-hd,drive=boot0,bus=scsi0.0,scsi-id=0,lun=0,bootindex=0)
+            X86ARGS+=(-device "scsi-hd,drive=boot0,bus=scsi0.0,scsi-id=0,lun=0,bootindex=0$BLKPROPS")
         else
-            X86ARGS+=(-device virtio-blk-pci,drive=boot0,bootindex=0,romfile=)
+            X86ARGS+=(-device "virtio-blk-pci,drive=boot0,bootindex=0,romfile=$BLKPROPS")
         fi
     else
         X86ARGS+=(-drive "if=none,id=cd0,file=$ISO,format=raw,readonly=on,media=cdrom"
@@ -206,9 +211,9 @@ fi
 if [[ -n "$DISK" ]]; then
     ARGS+=(-drive "if=none,id=boot0,file=$DISK,format=raw,cache=none")
     if [[ $BUS == scsi ]]; then
-        ARGS+=(-device scsi-hd,drive=boot0,bus=scsi0.0,scsi-id=0,lun=0,bootindex=0)
+        ARGS+=(-device "scsi-hd,drive=boot0,bus=scsi0.0,scsi-id=0,lun=0,bootindex=0$BLKPROPS")
     else
-        ARGS+=(-device virtio-blk-pci,drive=boot0,bootindex=0,romfile=)
+        ARGS+=(-device "virtio-blk-pci,drive=boot0,bootindex=0,romfile=$BLKPROPS")
     fi
 else
     ARGS+=(-drive "if=none,id=cd0,file=$ISO,format=raw,readonly=on,media=cdrom"

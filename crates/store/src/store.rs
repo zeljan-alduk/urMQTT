@@ -147,8 +147,7 @@ pub fn open() -> Result<(Store, OpenInfo)> {
     db.exec("PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA cell_size_check = ON;")?;
     // Checkpoint while the WAL is at most half its region (frames are a
     // 24-byte header plus one 4 KiB page), so a large transaction still fits.
-    let wal_bytes =
-        crate::vfs::with_disk(|d| d.region(RegionKind::Wal).map_or(0, |r| r.bytes())).unwrap_or(0);
+    let wal_bytes = crate::vfs::with_disk(|d| d.bytes(RegionKind::Wal)).unwrap_or(0);
     let frames = (wal_bytes / (4096 + 24) / 2).clamp(32, 1000);
     db.exec(&format!("PRAGMA wal_autocheckpoint = {frames}"))?;
     let qc = db.query_text("PRAGMA quick_check")?;

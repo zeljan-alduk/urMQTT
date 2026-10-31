@@ -3,11 +3,12 @@
 
 use crate::queue::{Buf, DmaRegion, SplitQueue};
 use crate::transport::Transport;
-use crate::{Env, F_VERSION_1, VirtioError, wait_used};
+use crate::{BlockTopology, Env, F_VERSION_1, VirtioError, wait_used};
 
 pub const F_RO: u64 = 1 << 5;
 pub const F_BLK_SIZE: u64 = 1 << 6;
 pub const F_FLUSH: u64 = 1 << 9;
+pub const F_TOPOLOGY: u64 = 1 << 10;
 
 pub const SECTOR: u64 = 512;
 const T_IN: u32 = 0;
@@ -30,6 +31,12 @@ pub struct VirtioBlk {
     pub block_size: u32,
     pub has_flush: bool,
     pub read_only: bool,
+    /// Block sizes and I/O hints (`VIRTIO_BLK_F_TOPOLOGY`), or the plain
+    /// defaults of a 512-byte device.
+    pub topology: BlockTopology,
+    /// The device signals configuration changes (a resize) on the queue's
+    /// MSI-X vector.
+    pub config_irq: bool,
 }
 
 const HDR: usize = 0;
@@ -48,7 +55,7 @@ impl VirtioBlk {
         env: &E,
         msix: Option<u16>,
     ) -> Result<Self, VirtioError> {
-        let features = t.init(env, F_RO | F_BLK_SIZE | F_FLUSH, F_VERSION_1)?;
+        let features = t.init(env, F_RO | F_BLK_SIZE | F_FLUSH | F_TOPOLOGY, F_VERSION_1)?;
         let size = QUEUE_SIZE.min(t.queue_max(0));
         let mem = env
             .dma_alloc(crate::queue::Layout::new(size).total)
@@ -65,6 +72,28 @@ impl VirtioBlk {
         } else {
             512
         };
+        // Config space (virtio 1.x §5.2.4): physical_block_exp (u8) at 24,
+        // alignment_offset (u8) at 25, min_io_size (u16) at 26, opt_io_size
+        // (u32) at 28.
+        let topology = if features & F_TOPOLOGY != 0 {
+            let w = t.device.read32(24);
+            BlockTopology::from_blk(
+                block_size,
+                (w & 0xff) as u8,
+                ((w >> 8) & 0xff) as u8,
+                (w >> 16) as u16,
+                t.device.read32(28),
+            )
+        } else {
+            BlockTopology {
+                logical: block_size,
+                physical: block_size,
+                ..BlockTopology::default()
+            }
+        };
+        // A resize of the backing volume is announced as a configuration
+        // change; with MSI-X it uses the queue's vector (S3, ADR-143).
+        let config_irq = msix.is_some_and(|v| t.set_config_vector(v));
         t.driver_ok()?;
         Ok(Self {
             t,
@@ -75,7 +104,35 @@ impl VirtioBlk {
             block_size,
             has_flush: features & F_FLUSH != 0,
             read_only: features & F_RO != 0,
+            topology,
+            config_irq,
         })
+    }
+
+    /// The capacity the device reports now, in sectors, read consistently
+    /// (the configuration generation must not change under the read).
+    pub fn device_capacity(&self) -> u64 {
+        for _ in 0..4 {
+            let g = self.t.config_generation();
+            let c = u64::from(self.t.device.read32(0)) | (u64::from(self.t.device.read32(4)) << 32);
+            if self.t.config_generation() == g {
+                return c;
+            }
+        }
+        self.capacity_sectors
+    }
+
+    /// Re-reads the capacity (after a configuration-change interrupt).
+    /// `Some(new)` if the disk got larger; a smaller capacity is reported
+    /// but never adopted (`None`), the store never shrinks.
+    pub fn refresh_capacity(&mut self) -> Option<u64> {
+        let c = self.device_capacity();
+        if c > self.capacity_sectors {
+            self.capacity_sectors = c;
+            Some(c)
+        } else {
+            None
+        }
     }
 
     #[allow(unsafe_code)]

@@ -25,6 +25,7 @@ use urmqtt_arch::{cpu, time};
 use urmqtt_broker::{Msg, MsgInner, PersistOp};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{error, info, warn};
+use urmqtt_store::layout::LayoutError;
 use urmqtt_store::telemetry::{Recovery, TelemetryLog};
 use urmqtt_store::{Disk, DiskError, Opened, Platform, Retained, SessionRecord, Store, StoreError};
 use urmqtt_sync::spsc::{Consumer, Producer, Spsc};
@@ -51,6 +52,19 @@ static LOG_RINGS: [Spsc<LogBatch, LOG_RING>; smp::MAX_CPUS] =
     [const { Spsc::new() }; smp::MAX_CPUS];
 /// `test=log-crash`: report durable totals.
 static LOG_CRASH: AtomicBool = AtomicBool::new(false);
+/// Telemetry partitions of the opened layout (source core `c` writes
+/// partition `c % PARTS`).
+static PARTS: AtomicUsize = AtomicUsize::new(8);
+
+/// The telemetry partition source core `core` writes.
+pub fn partition_of(core: usize) -> usize {
+    // Relaxed: set once at boot before the data cores start.
+    core % PARTS.load(Ordering::Relaxed).max(1)
+}
+
+/// The message a v1 data disk is refused with (STORAGE-PLAN S2).
+const V1_REFUSAL: &str =
+    "data disk is layout v1; this image needs v2: run urmqtt-disk migrate (docs/DEPLOY.md)";
 
 /// A request from the data plane.
 pub enum DbReq {
@@ -177,7 +191,7 @@ fn refuse_or_degrade(allowed: bool, what: core::fmt::Arguments<'_>) -> Option<Re
 
 /// Opens the store and loads the broker state. `None` means memory-only
 /// operation (only where the configuration allows it).
-pub fn init(test: Option<DbTest>) -> Option<Restored> {
+pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
     let cfg = &CONFIG.storage;
     // The data partition of the boot disk (single-disk model, STORAGE-PLAN
     // §2a), prepared by `devices::prepare_boot_disk`.
@@ -199,8 +213,17 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
         let _ = urmqtt_tls::rng::fill_global(&mut u);
         u
     };
-    let (disk, how) = match Disk::open(dev, uuid) {
+    // Telemetry partitions of a disk formatted now: one per core, at least
+    // 8 (G4); an existing layout keeps its own.
+    let partitions = cpus.next_power_of_two().clamp(8, 64) as u32;
+    let (mut disk, how) = match Disk::open_with(dev, uuid, partitions) {
         Ok(d) => d,
+        Err(DiskError::Layout(LayoutError::OldVersion(v))) => {
+            // An older layout is never converted at boot: refused before
+            // anything is written (the migration is offline and explicit).
+            error!("storage: refused reason=layout-v{v}: {V1_REFUSAL}");
+            return refuse_or_degrade(false, format_args!("{V1_REFUSAL}"));
+        }
         Err(DiskError::Layout(e)) => {
             // Never format over data we do not recognise: a damaged data
             // partition is refused, never re-formatted (S5 restores it).
@@ -219,7 +242,32 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
             return refuse_or_degrade(false, format_args!("data partition unreadable: {e:?}"));
         }
     };
+    // S3: a larger device than the layout covers (the cloud volume grew, the
+    // GPT step has extended the partition): the new space goes to the
+    // database and the telemetry ring by `storage.grow_ratio_db`. One
+    // superblock write; a cut leaves the old layout or the new one.
+    let spare = disk.spare_sectors();
+    match disk.grow(cfg.grow_ratio_db) {
+        Ok(Some(g)) => log_grown(&g, ""),
+        Ok(None) => {
+            if spare * 512 >= 1 << 20 {
+                info!(
+                    "storage: {} MiB of the device are not in the layout (less than one alignment unit of new space, not grown)",
+                    (spare * 512) >> 20
+                );
+            }
+        }
+        Err(e) if faulty => {
+            warn!("disk-fault: power cut injected during the grow ({e:?}), powering off");
+            crate::power::off()
+        }
+        Err(e) => {
+            // The old layout is intact (the update is one block write).
+            warn!("storage: growing the layout failed ({e:?}); running on the old layout");
+        }
+    }
     log_layout(&disk, how);
+    PARTS.store(disk.layout().partitions as usize, Ordering::Relaxed);
     // Relaxed: statistics for `$SYS/broker/disk/total` (O1).
     crate::sys::DISK_TOTAL.store(disk.layout().total_sectors * 512, Ordering::Relaxed);
 
@@ -287,6 +335,7 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
         _ => {}
     }
     LOG_CRASH.store(test == Some(DbTest::LogCrash), Ordering::Relaxed);
+    log_io_stats("after startup");
 
     match test {
         Some(DbTest::Bench) => bench(&mut store),
@@ -331,6 +380,8 @@ pub fn init(test: Option<DbTest>) -> Option<Restored> {
         txn_ops: 0,
         stats: Stats::default(),
         last_stats_ms: now_ms(),
+        grow_irqs_seen: devices::blk_irqs(),
+        grow_looked_ms: now_ms(),
         log,
         log_rx,
         log_since_ms: None,
@@ -350,7 +401,7 @@ fn log_recovery(rec: &Recovery, log: &TelemetryLog, ms: u64) {
         rec.segments,
         rec.torn_tails,
         rec.expired,
-        urmqtt_store::telemetry::PARTITIONS,
+        log.partitions(),
         log.capacity_bytes() >> 20
     );
 }
@@ -392,7 +443,7 @@ fn log_verify(log: &TelemetryLog, retention_ms: u64) {
     let mut bad: Option<(usize, u64, u64)> = None;
     let mut total = 0u64;
     let r = urmqtt_store::vfs::with_disk(|d| {
-        for p in 0..urmqtt_store::telemetry::PARTITIONS {
+        for p in 0..log.partitions() {
             log.scan(d, p, retention_ms, |rec| {
                 let (Some(core), Some(seq)) = (
                     rec.topic
@@ -429,7 +480,7 @@ fn log_verify(log: &TelemetryLog, retention_ms: u64) {
 
 fn log_layout(disk: &Disk, how: Opened) {
     let l = disk.layout();
-    let mib = |k| disk.region(k).map_or(0, |r| r.bytes() >> 20);
+    let mib = |k| disk.bytes(k) >> 20;
     use urmqtt_store::layout::RegionKind as K;
     let medium = if crate::live::ephemeral() {
         "RAM store (EPHEMERAL: lost on reboot)"
@@ -438,7 +489,7 @@ fn log_layout(disk: &Disk, how: Opened) {
     };
     info!(
         "storage: {medium} {} ({} MiB, uuid {:02x}{:02x}{:02x}{:02x}…): db {} MiB, wal {} MiB, \
-         journal {} MiB, telemetry {} MiB",
+         journal {} MiB, telemetry {} MiB; {} telemetry partition(s), aligned to {} KiB, generation {}",
         match how {
             Opened::Existing => "opened",
             Opened::Formatted => "formatted (was blank)",
@@ -451,7 +502,21 @@ fn log_layout(disk: &Disk, how: Opened) {
         mib(K::Db),
         mib(K::Wal),
         mib(K::Journal),
-        mib(K::Telemetry)
+        mib(K::Telemetry),
+        l.partitions,
+        l.align_sectors / 2,
+        l.generation
+    );
+}
+
+/// The write path's alignment counter (S2): device requests that did not
+/// start and end on a physical block. Smoke requires 0.
+pub fn log_io_stats(when: &str) {
+    let s = urmqtt_store::vfs::disk_stats();
+    let t = urmqtt_store::vfs::with_disk(|d| (d.topology(), d.write_gran())).unwrap_or_default();
+    info!(
+        "storage: misaligned_writes={} of {} device writes {when} (physical block {} B, write granularity {} B, optimal I/O {} B)",
+        s.misaligned_writes, s.device_writes, t.0.physical, t.1, t.0.opt_io
     );
 }
 
@@ -517,6 +582,7 @@ fn bench(store: &mut Store) {
         }
         Err(e) => error!("db-bench: failed: {e}"),
     }
+    log_io_stats("after db-bench");
 }
 
 /// Commits transactions of 100 rows forever; the host kills the VM at an
@@ -577,9 +643,68 @@ struct Worker {
     log_reported: u64,
     /// The last accepted control sequence number (H1).
     control_seq: u64,
+    /// Online grow (S3): the boot disk's interrupt count at the last look,
+    /// and when that was.
+    grow_irqs_seen: u64,
+    grow_looked_ms: u64,
+}
+
+/// Logs what a grow did (at boot or online).
+fn log_grown(g: &urmqtt_store::disk::Grown, how: &str) {
+    info!(
+        "storage: grew the layout{how} from {} MiB to {} MiB (generation {}): database +{} MiB, telemetry +{} MiB, split {}% database",
+        (g.old_total * 512) >> 20,
+        (g.new_total * 512) >> 20,
+        g.generation,
+        (g.db_sectors * 512) >> 20,
+        (g.telemetry_sectors * 512) >> 20,
+        CONFIG.storage.grow_ratio_db
+    );
 }
 
 impl Worker {
+    /// Online grow (S3, ADR-143): the disk raised an interrupt that no
+    /// request of ours explains, or just a completion; at most every 250 ms
+    /// and only when the interrupt count moved, ask the device whether it got
+    /// larger. If so, the partition table steps, the layout grow and the
+    /// telemetry ring's new band, one after the other on this core.
+    fn check_online_grow(&mut self, now_ms: u64) -> bool {
+        if now_ms.saturating_sub(self.grow_looked_ms) < 250 {
+            return false;
+        }
+        let irqs = devices::blk_irqs();
+        if irqs == self.grow_irqs_seen {
+            return false;
+        }
+        self.grow_looked_ms = now_ms;
+        self.grow_irqs_seen = irqs;
+        let ratio = CONFIG.storage.grow_ratio_db;
+        let random = || {
+            let mut u = [0u8; 16];
+            let _ = urmqtt_tls::rng::fill_global(&mut u);
+            u
+        };
+        match urmqtt_store::vfs::with_disk(|d| d.grow_online(ratio, random)) {
+            Some(Ok(Some(g))) => {
+                log_grown(&g, " online");
+                let log = self.log.as_mut();
+                let r = urmqtt_store::vfs::with_disk(|d| {
+                    crate::sys::DISK_TOTAL.store(d.layout().total_sectors * 512, Ordering::Relaxed);
+                    log.map(|l| l.refresh_geometry(d)).transpose()
+                });
+                if let Some(Err(e)) = r {
+                    error!("telemetry: taking up the grown layout failed: {e:?}");
+                }
+                true
+            }
+            Some(Err(e)) => {
+                warn!("storage: online grow failed ({e:?}); the old layout stays in force");
+                false
+            }
+            _ => false,
+        }
+    }
+
     /// Applies queued requests and commits when the batch is due. Returns
     /// whether there was any work.
     fn step(&mut self, now_ms: u64) -> bool {
@@ -625,6 +750,7 @@ impl Worker {
             did = true;
         }
         did |= self.step_log(now_ms);
+        did |= self.check_online_grow(now_ms);
         if now_ms.saturating_sub(self.last_stats_ms) >= STATS_EVERY_MS {
             self.refresh_disk_used();
             self.log_stats(now_ms);
@@ -648,7 +774,7 @@ impl Worker {
             for _ in 0..8 {
                 let Some(batch) = rx.pop() else { break };
                 did = true;
-                let p = TelemetryLog::partition_of(core);
+                let p = log.partition_of(core);
                 let r = urmqtt_store::vfs::with_disk(|d| {
                     for (ts, m) in &batch {
                         log.append(d, p, *ts, &m.topic, &m.payload)?;

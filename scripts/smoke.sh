@@ -19,6 +19,9 @@ OUT="$ROOT/build/smoke"
 ACCELS=""
 ARCH=aarch64
 TIMEOUT=${SMOKE_TIMEOUT:-120}
+# Host port the scenarios forward the broker's TLS port to (SMOKE_PORT picks
+# another one when other QEMU jobs run on this machine).
+PORT=${SMOKE_PORT:-18883}
 while [[ $# -gt 0 ]]; do
     case $1 in
         --arch) ARCH=$2; shift 2 ;;
@@ -257,9 +260,9 @@ ticket_restart() {
         local data="$OUT/ticket-restart-$accel.img" go="$OUT/ticket-restart-$accel.go" status=0 cpid=""
         rm -f "$go" "$log2.client"
         fresh_disk "$iso" "$data"
-        start_vm "$log1" --disk "$data" --accel "$accel" --fwd 18883:8883
+        start_vm "$log1" --disk "$data" --accel "$accel" --fwd $PORT:8883
         if wait_log "$log1" "TLS 1.3 listener"; then
-            python3 -I "$ROOT/scripts/ticket-scenarios.py" "$ROOT/deploy/dev" restart "$go" 18883 \
+            python3 -I "$ROOT/scripts/ticket-scenarios.py" "$ROOT/deploy/dev" restart "$go" $PORT \
                 >"$log2.client" 2>&1 &
             cpid=$!
             local waited=0
@@ -276,7 +279,7 @@ ticket_restart() {
         fi
         kill_vm
         if [[ $status -eq 0 ]]; then
-            start_vm "$log2" --disk "$data" --accel "$accel" --fwd 18883:8883
+            start_vm "$log2" --disk "$data" --accel "$accel" --fwd $PORT:8883
             if wait_log "$log2" "TLS 1.3 listener"; then
                 touch "$go"
                 wait "$cpid" || status=1
@@ -304,13 +307,13 @@ control_persist() {
     local iso="$OUT/control-persist.raw" msg="$OUT/control-persist.bin"
     mkimg "$iso" "serve"
     local d="$ROOT/deploy/dev"
-    local tls=(--port 18883 --ca "$d/ca.pem" --client-cert "$d/services/operator.pem" --client-key "$d/services/operator.key")
+    local tls=(--port "$PORT" --ca "$d/ca.pem" --client-cert "$d/services/operator.pem" --client-key "$d/services/operator.key")
     for accel in $ACCELS; do
         local log1="$OUT/control-persist-$accel-1.log" log2="$OUT/control-persist-$accel-2.log"
         local data="$OUT/control-persist-$accel.img" status=0
         rm -f "$msg" "$log2.client"
         fresh_disk "$iso" "$data"
-        start_vm "$log1" --disk "$data" --accel "$accel" --fwd 18883:8883
+        start_vm "$log1" --disk "$data" --accel "$accel" --fwd $PORT:8883
         if wait_log "$log1" "TLS 1.3 listener"; then
             "$CONTROL_TOOL" revoke --cert "$d/devices/device-002.pem" --env dev --key "$d/control.key" \
                 --out "$msg" "${tls[@]}" >>"$log1.client" 2>&1 || status=1
@@ -320,11 +323,11 @@ control_persist() {
         fi
         kill_vm
         if [[ $status -eq 0 ]]; then
-            start_vm "$log2" --disk "$data" --accel "$accel" --fwd 18883:8883
+            start_vm "$log2" --disk "$data" --accel "$accel" --fwd $PORT:8883
             if wait_log "$log2" "TLS 1.3 listener"; then
                 "$CONTROL_TOOL" publish-file "$msg" "${tls[@]}" >>"$log2.client" 2>&1 || status=1
                 wait_log "$log2" "rejected: replay" || status=124
-                if mosquitto_pub -h 127.0.0.1 -p 18883 -V mqttv311 -i device-002 --cafile "$d/ca.pem" \
+                if mosquitto_pub -h 127.0.0.1 -p $PORT -V mqttv311 -i device-002 --cafile "$d/ca.pem" \
                     --cert "$d/devices/device-002.pem" --key "$d/devices/device-002.key" \
                     -t devices/device-002/x -m x >/dev/null 2>&1; then
                     echo "client: revoked device admitted after reboot" >>"$log2.client"
@@ -354,10 +357,10 @@ time_before_build() {
         local log="$OUT/time-before-build-$accel.log" data="$OUT/time-before-build-$accel.img" status=0
         rm -f "$log.client"
         fresh_disk "$iso" "$data"
-        start_vm "$log" --disk "$data" --accel "$accel" --fwd "${SNTP_FWD:-18883}:8883" \
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "${SNTP_FWD:-$PORT}:8883" \
             -- -rtc base=2020-01-01T00:00:00
         if wait_log "$log" "TLS 1.3 listener"; then
-            if mosquitto_pub -h 127.0.0.1 -p "${SNTP_FWD:-18883}" -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
+            if mosquitto_pub -h 127.0.0.1 -p "${SNTP_FWD:-$PORT}" -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
                 --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" \
                 -t devices/device-001/x -m x >/dev/null 2>&1; then
                 echo "client: handshake ACCEPTED without a trustworthy clock" >>"$log.client"
@@ -544,9 +547,9 @@ mqtt_persist() {
         fresh_disk "$iso" "$data"
         for phase in 1 2; do
             local log="$OUT/mqtt-persist-$accel-$phase.log" status=0
-            start_vm "$log" --disk "$data" --accel "$accel" --fwd "18883:8883"
+            start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
             if wait_log "$log" "TLS 1.3 listener on port 8883"; then
-                python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$ROOT/deploy/dev" --phase "$phase" \
+                python3 -I "$ROOT/scripts/mqtt-persist.py" $PORT --tls "$ROOT/deploy/dev" --phase "$phase" \
                     >"$log.client" 2>&1 || status=$?
             else
                 status=124
@@ -581,9 +584,9 @@ storm() {
     for accel in $ACCELS; do
         local log="$OUT/storm-$accel.log" data="$OUT/storm-$accel.img" status=0
         fresh_disk "$iso" "$data"
-        start_vm "$log" --disk "$data" --accel "$accel" --fwd "18883:8883"
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
         if wait_log "$log" "TLS 1.3 listener on port 8883"; then
-            (cd "$ROOT" && "$loadgen" storm --port 18883 --clients 3000 --threads 8 --rounds 3 \
+            (cd "$ROOT" && "$loadgen" storm --port $PORT --clients 3000 --threads 8 --rounds 3 \
                 --retry-s 30 --subscribe 1 --min-connected 500) >"$log.client" 2>&1 || status=$?
             # Memory left by the last round is returned within 10 s.
             sleep 12
@@ -667,9 +670,9 @@ attack_app() {
     for accel in $ACCELS; do
         local log="$OUT/attack-app-$accel.log" data="$OUT/attack-app-$accel.img" status=0
         fresh_disk "$iso" "$data"
-        start_vm "$log" --disk "$data" --accel "$accel" --fwd "18883:8883"
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
         if wait_log "$log" "TLS 1.3 listener on port 8883"; then
-            local c=(--port 18883 --certs "$ROOT/deploy/dev")
+            local c=(--port "$PORT" --certs "$ROOT/deploy/dev")
             {
                 "$attack" slowloris --stage tcp "${c[@]}" --clients 200 --duration 1
                 "$attack" slowloris --stage tls "${c[@]}" --clients 200 --duration 1
@@ -728,7 +731,7 @@ while time.time() < end:
 PY
         local collector=$!
         sleep 0.5
-        start_vm "$log" --disk "$data" --accel "$accel" --fwd "18883:8883"
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
         if wait_log "$log" "TLS 1.3 listener on port 8883"; then
             # Metrics go out every 10 s.
             sleep 22
@@ -906,14 +909,14 @@ disk_tool() {
         local disk="$OUT/disk-tool-$accel.img" log1="$OUT/disk-tool-$accel-1.log"
         local log2="$OUT/disk-tool-$accel-2.log" out="$OUT/disk-tool-$accel.out" status=0
         fresh_disk "$serve" "$disk"
-        start_vm "$log1" --disk "$disk" --accel "$accel" --fwd 18883:8883
+        start_vm "$log1" --disk "$disk" --accel "$accel" --fwd $PORT:8883
         # Client output goes to its own file: QEMU writes the serial log at
         # its own offset, so appending there while it runs loses lines.
         rm -f "$log1.client" "$log2.client"
         if wait_log "$log1" "TLS 1.3 listener on port 8883"; then
-            python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$d" --phase 1 >>"$log1.client" 2>&1 || status=1
+            python3 -I "$ROOT/scripts/mqtt-persist.py" $PORT --tls "$d" --phase 1 >>"$log1.client" 2>&1 || status=1
             for v in 11 22 33; do
-                mosquitto_pub -h 127.0.0.1 -p 18883 -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
+                mosquitto_pub -h 127.0.0.1 -p $PORT -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
                     --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" -q 1 \
                     -t devices/device-001/telemetry/disk-tool -m "v$v" >>"$log1.client" 2>&1 || status=1
             done
@@ -944,10 +947,10 @@ disk_tool() {
             "import-devices: 1 device\(s\) imported and allowlisted" "$NO_FAULT"
         status=0
         set_esp "$disk" "$allow"
-        start_vm "$log2" --disk "$disk" --accel "$accel" --fwd 18883:8883
+        start_vm "$log2" --disk "$disk" --accel "$accel" --fwd $PORT:8883
         if wait_log "$log2" "TLS 1.3 listener on port 8883"; then
             for id in device-002 device-003; do
-                if mosquitto_pub -h 127.0.0.1 -p 18883 -V mqttv311 -i "$id" --cafile "$d/ca.pem" \
+                if mosquitto_pub -h 127.0.0.1 -p $PORT -V mqttv311 -i "$id" --cafile "$d/ca.pem" \
                     --cert "$d/devices/$id.pem" --key "$d/devices/$id.key" -q 1 \
                     -t "devices/$id/x" -m x >/dev/null 2>&1; then
                     echo "client: $id admitted" >>"$log2.client"
@@ -964,6 +967,232 @@ disk_tool() {
         check "disk-tool-import-in-force [$accel]" "$log2" "$status" \
             "registry allowlist, 1 allowlisted identity" "client: device-002 admitted" \
             "client: device-003 refused" "$NO_FAULT"
+    done
+}
+
+# S2 (STORAGE-PLAN, ADR-140): the block topology a disk reports shapes the
+# layout and every write: QEMU is given a 4 KiB physical block and optimal I/O
+# sizes; the kernel must read them (virtio-blk F_TOPOLOGY, virtio-scsi READ
+# CAPACITY (16) and the Block Limits VPD page), align its regions, and send no
+# write that is not a whole physical block (the debug counter misaligned_writes,
+# checked after the in-guest database benchmark). 4096-byte logical blocks (4Kn)
+# cannot boot an image whose GPT is in 512-byte sectors, so that case is a host
+# test on a strict device (crates/store, writes_cover_whole_physical_blocks).
+storage_topology() {
+    local img="$OUT/topology.raw" row
+    mkimg "$img" "smoke test=db-bench"
+    for accel in $ACCELS; do
+        # bus | QEMU properties | physical | optimal I/O | alignment unit (KiB)
+        for row in "blk||512|0|1024" \
+            "blk|physical_block_size=4096,min_io_size=4096,opt_io_size=262144|4096|262144|1024" \
+            "blk|physical_block_size=4096,opt_io_size=2097152|4096|2097152|2048" \
+            "scsi|physical_block_size=4096,min_io_size=4096,opt_io_size=1048576|4096|1048576|1024"; do
+            IFS='|' read -r bus props phys opt align <<<"$row"
+            local tag="$bus-${phys}-${opt}" disk="$OUT/topology-$accel.img" log status=0
+            log="$OUT/topology-$tag-$accel.log"
+            fresh_disk "$img" "$disk"
+            boot "$log" --disk "$disk" --bus "$bus" ${props:+--blk-props "$props"} --accel "$accel" --headless --no-net || status=$?
+            check "topology $bus phys=$phys opt=$opt [$accel]" "$log" "$status" \
+                "blk: topology: logical 512 B, physical $phys B, alignment offset 0 B, minimum I/O [0-9]+ B, optimal I/O $opt B" \
+                "storage: data disk formatted \(was blank\)" "telemetry partition\(s\), aligned to $align KiB, generation 1" \
+                "storage: misaligned_writes=0 of [0-9]+ device writes after startup \(physical block $phys B, write granularity $phys B, optimal I/O $opt B\)" \
+                "db-bench: .* 5100 rows verified" \
+                "storage: misaligned_writes=0 of [0-9]+ device writes after db-bench \(physical block $phys B" \
+                "NOT:misaligned_writes=[1-9]" "^URMQTT READY$" "$NO_FAULT"
+        done
+    done
+}
+
+# The host tool, built once (also by disk_tool).
+DISK_TOOL=""
+build_disk_tool() {
+    [[ -n $DISK_TOOL ]] && return 0
+    (cd "$ROOT" && cargo build --release --locked -q -p urmqtt-disk-tool) || return 1
+    DISK_TOOL="$ROOT/target/release/urmqtt-disk"
+}
+
+# S2 + S3 end to end (ADR-141, ADR-142). A layout-v1 data partition holding
+# real broker state (the host tool builds it: no v1 kernel exists any more):
+#   1. the kernel refuses it and writes nothing (the disk's hash is the same
+#      before and after, the self-test is skipped);
+#   2. urmqtt-disk migrate: dry run first (nothing written), then --write, the
+#      tool's own verification (integrity, row counts, telemetry records);
+#   3. the kernel boots the migrated disk and restores the same state;
+#   4. the disk file is made larger: the next boot extends the partition and
+#      grows the layout, data intact; the boot after that does nothing;
+#   5. a power cut at five writes of that grow, each followed by a normal boot
+#      that ends in the grown layout with all the data.
+layout_v1() {
+    build_disk_tool || {
+        echo "  ✗ layout-v1 needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local ud=$DISK_TOOL img="$OUT/layout-v1.raw" good="$OUT/layout-v1-ok.raw" spec
+    mkimg "$img" "smoke"
+    mkimg "$good" "smoke"
+    local restored='db: restored 2 retained message\(s\), 1 persistent session\(s\) with 1 queued message\(s\), [0-9]+ revoked serial\(s\), 40 known device\(s\)'
+    local telemetry='telemetry: log recovered in [0-9]+ ms: 600 record\(s\)'
+    for accel in $ACCELS; do
+        local disk="$OUT/layout-v1-$accel.img" rb="$OUT/layout-v1-$accel.rollback"
+        local l1="$OUT/layout-v1-refused-$accel.log" tl="$OUT/layout-v1-tool-$accel.log"
+        local l2="$OUT/layout-v1-migrated-$accel.log" l3="$OUT/layout-v1-grown-$accel.log"
+        local l4="$OUT/layout-v1-grown-again-$accel.log" status=0 before after
+        fresh_disk "$img" "$disk"
+        rm -f "$rb"
+        "$ud" fixture-v1 "$disk" --populate --write >"$tl.fixture" 2>&1 || { echo "  ✗ fixture-v1 failed"; cat "$tl.fixture"; FAILED=$((FAILED + 1)); continue; }
+        before=$(shasum -a 256 "$disk" | cut -d' ' -f1)
+        boot "$l1" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        after=$(shasum -a 256 "$disk" | cut -d' ' -f1)
+        [[ $before == "$after" ]] || echo "THE DISK WAS WRITTEN" >>"$l1"
+        check "layout-v1-refused [$accel]" "$l1" "$status" \
+            "data disk is layout v1; this image needs v2: run urmqtt-disk migrate \(docs/DEPLOY.md\)" \
+            "storage: refused reason=layout-v1" "blk: self-test skipped" \
+            "NOT:storage: data disk formatted" "NOT:URMQTT READY" "NOT:THE DISK WAS WRITTEN" "$NO_FAULT"
+
+        status=0
+        {
+            "$ud" info "$disk"
+            "$ud" migrate "$disk" && echo "tool: dry run exit 0"
+            [[ $(shasum -a 256 "$disk" | cut -d' ' -f1) == "$before" ]] && echo "tool: the dry run left the disk unchanged"
+            "$ud" migrate "$disk" --write --rollback-file "$rb" || echo "tool: MIGRATE FAILED"
+            [[ -s $rb ]] && echo "tool: rollback file written"
+            "$ud" verify "$disk" && echo "tool: verify exit 0"
+            "$ud" info "$disk"
+        } >"$tl" 2>&1
+        check "layout-v1-migrate-tool [$accel]" "$tl" "$status" \
+            "data: layout v1 \(the kernel refuses it" "layout v1 -> v2" "new regions:" \
+            "dry run: nothing was written" "tool: the dry run left the disk unchanged" \
+            "migrate: v1 superblock saved, state planned" "migrate: v2 superblock written to slot B: the disk is v2" \
+            "verify: telemetry identical \(600 record" "verify: sqlite integrity_check ok; row counts identical" \
+            "migrate: done" "tool: rollback file written" "tool: verify exit 0" "verify: ok" \
+            "data: layout v2 generation 2" "NOT:MIGRATE FAILED"
+
+        status=0
+        boot "$l2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "layout-v1-migrated-boots [$accel]" "$l2" "$status" "storage: data disk opened" \
+            "8 telemetry partition\(s\), aligned to 1024 KiB, generation 2" "$restored" "$telemetry" \
+            "storage: misaligned_writes=0 of" "^URMQTT READY$" "NOT:storage: grew" "$NO_FAULT"
+
+        # S3: the disk gets larger (a cloud volume resize). The next boot
+        # moves the backup table, extends the data partition, grows the layout.
+        cp "$disk" "$OUT/layout-v2-base-$accel.img"
+        truncate -s 192m "$disk"
+        status=0
+        boot "$l3" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "grow-boot [$accel]" "$l3" "$status" \
+            "gpt: backup table moved to the end of the 192 MiB disk" \
+            "gpt: data partition extended to the end of the 192 MiB disk" \
+            "storage: grew the layout from [0-9]+ MiB to [0-9]+ MiB \(generation 3\): database \+[0-9]+ MiB, telemetry \+[0-9]+ MiB, split 50% database" \
+            "storage: data disk opened" "$restored" "$telemetry" "^URMQTT READY$" "NOT:THE DISK" "$NO_FAULT"
+        status=0
+        boot "$l4" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "grow-again-noop [$accel]" "$l4" "$status" "storage: data disk opened" "$restored" "$telemetry" \
+            "generation 3" "NOT:storage: grew" "NOT:gpt: data partition extended" "NOT:gpt: backup table moved" \
+            "^URMQTT READY$" "$NO_FAULT"
+        "$ud" verify "$disk" >"$tl.final" 2>&1 && echo "tool: final verify exit 0" >>"$tl.final"
+        check "grow-tool-verify [$accel]" "$tl.final" 0 "verify: ok" "tool: final verify exit 0" "layout: ok"
+
+        # A power cut at writes of the grow: the kernel's writes are the nine
+        # of the GPT steps (backup moved, partition extended), the one of the
+        # boot self-test, then the superblock write (the 11th). Each cut is
+        # followed by an ordinary boot that must end in the grown layout with
+        # all the data.
+        for spec in stop-after-write=3 stop-after-write=5 stop-after-write=8 stop-after-write=9 \
+            stop-after-write=10 stop-after-write=11 tear-write=9:1 tear-write=11:1; do
+            local fimg="$OUT/grow-crash-${spec//[=:]/-}.raw" fdisk="$OUT/grow-crash-$accel.img"
+            local lf="$OUT/grow-crash-${spec//[=:]/-}-$accel.log" lr="$OUT/grow-crash-${spec//[=:]/-}-$accel-2.log"
+            mkimg "$fimg" "smoke test=disk-fault:$spec"
+            cp "$OUT/layout-v2-base-$accel.img" "$fdisk"
+            truncate -s 192m "$fdisk"
+            set_esp "$fdisk" "$fimg"
+            status=0
+            boot "$lf" --disk "$fdisk" --accel "$accel" --headless --no-net || status=$?
+            check "grow-crash $spec [$accel]" "$lf" "$status" \
+                "disk-fault: power cut injected|fatal: blk (write|flush) failed" "NOT:URMQTT READY" "NOT:PANIC|EXCEPTION"
+            set_esp "$fdisk" "$good"
+            status=0
+            boot "$lr" --disk "$fdisk" --accel "$accel" --headless --no-net || status=$?
+            check "grow-crash $spec recovered [$accel]" "$lr" "$status" \
+                "storage: data disk opened \([0-9]{3} MiB" "$restored" "$telemetry" "^URMQTT READY$" "$NO_FAULT"
+        done
+    done
+}
+
+# S3 (ADR-143): online grow. A serving VM on a layout-v2 disk that holds data;
+# the host enlarges the disk with QEMU's block_resize over QMP while it runs.
+# virtio-blk raises a configuration-change interrupt, the DB core asks the
+# device for its size, extends the partition, grows the layout and takes up the
+# new telemetry band, without a reboot. Needs layout_v1 to have built the base
+# disk. The QMP socket lives in a short path (a Unix socket name is limited).
+grow_online() {
+    build_disk_tool || return 0
+    local ud=$DISK_TOOL serve="$OUT/grow-online-serve.raw" restored telemetry
+    restored='db: restored 2 retained message\(s\), 1 persistent session\(s\) with 1 queued message\(s\), [0-9]+ revoked serial\(s\), 40 known device\(s\)'
+    telemetry='telemetry: log recovered in [0-9]+ ms: 600 record\(s\)'
+    mkimg "$serve" "serve"
+    for accel in $ACCELS; do
+        local base="$OUT/layout-v2-base-$accel.img" disk="$OUT/grow-online-$accel.img"
+        local log="$OUT/grow-online-$accel.log" log2="$OUT/grow-online-again-$accel.log" status=0
+        if [[ ! -f $base ]]; then
+            echo "  ✗ grow-online needs the layout_v1 scenario to run first (no $base)"
+            FAILED=$((FAILED + 1))
+            continue
+        fi
+        cp "$base" "$disk"
+        set_esp "$disk" "$serve"
+        local qdir sock
+        qdir=$(mktemp -d "${TMPDIR:-/tmp}/urmqtt-qmp.XXXXXX") || continue
+        sock="$qdir/q.sock"
+        start_vm "$log" --disk "$disk" --accel "$accel" --fwd none -- -qmp "unix:$sock,server=on,wait=off"
+        if wait_log "$log" '^URMQTT READY$'; then
+            local after
+            python3 -I - "$sock" $((192 * 1048576)) >"$log.qmp" 2>&1 <<'PY' || status=1
+import json, socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+for _ in range(50):
+    try:
+        s.connect(sys.argv[1]); break
+    except OSError:
+        time.sleep(0.1)
+f = s.makefile("rw")
+f.readline()
+def cmd(c):
+    f.write(json.dumps(c) + "\n"); f.flush()
+    while True:
+        r = json.loads(f.readline())
+        if "return" in r or "error" in r:
+            return r
+cmd({"execute": "qmp_capabilities"})
+print("qmp: block_resize", cmd({"execute": "block_resize", "arguments": {"device": "boot0", "size": int(sys.argv[2])}}))
+PY
+            wait_log "$log" 'storage: grew the layout online' || status=124
+            sleep 1
+            after=$(clean "$log" | grep -c 'storage: grew the layout online' || true)
+            echo "grow-online: $after online grow(s) logged" >>"$log"
+        else
+            status=124
+        fi
+        kill_vm
+        rm -rf "$qdir"
+        # The client's output is added after QEMU stopped writing the log.
+        cat "$log.qmp" >>"$log" 2>/dev/null || true
+        check "grow-online [$accel]" "$log" "$status" \
+            "blk: resize notification \(configuration-change interrupt\): armed" \
+            "qmp: block_resize \{'return': \{\}\}" \
+            "storage: grew the layout online from [0-9]+ MiB to 1[0-9]{2} MiB \(generation 3\)" \
+            "grow-online: 1 online grow\(s\) logged" "NOT:online grow failed" "NOT:taking up the grown layout failed" "$NO_FAULT"
+        "$ud" verify "$disk" >"$log.verify" 2>&1 && echo "tool: verify exit 0" >>"$log.verify"
+        "$ud" info "$disk" >>"$log.verify" 2>&1
+        check "grow-online-disk [$accel]" "$log.verify" 0 "verify: ok" "tool: verify exit 0" \
+            "data: layout v2 generation 3" "telemetry: ok, 600 record\(s\)" \
+            "urMQTT data \"urMQTT data\" LBA [0-9]+\.\.[0-9]+ \(1[0-9]{2} MiB\)"
+        # An ordinary reboot sees the grown layout and all the data.
+        set_esp "$disk" "$OUT/layout-v1-ok.raw"
+        status=0
+        boot "$log2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "grow-online-reboot [$accel]" "$log2" "$status" "storage: data disk opened \(1[0-9]{2} MiB" \
+            "$restored" "$telemetry" "generation 3" "NOT:storage: grew" "^URMQTT READY$" "$NO_FAULT"
     done
 }
 
@@ -1108,9 +1337,9 @@ gicv2() {
     mkimg "$iso" "serve"
     local log="$OUT/gicv2-mqtt-tls.log" data="$OUT/gicv2-mqtt-tls.img" status=0
     fresh_disk "$iso" "$data"
-    start_vm "$log" --disk "$data" --accel tcg --gic 2 --fwd "18883:8883"
+    start_vm "$log" --disk "$data" --accel tcg --gic 2 --fwd "$PORT:8883"
     if wait_log "$log" "TLS 1.3 listener on port 8883"; then
-        python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" 18883 >"$log.client" 2>&1 || status=$?
+        python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" $PORT >"$log.client" 2>&1 || status=$?
     else
         status=124
     fi
@@ -1211,6 +1440,49 @@ universal_raw() {
     done
 }
 
+# S2 and X8: a migrated layout-v1 disk is architecture independent. The host
+# tool builds a v1 disk with real broker state and migrates it; then the
+# universal image's disk is booted by x86_64 UEFI (the first boot there grows
+# it: the disk file was made larger), then aarch64, then x86_64 BIOS. Each one
+# restores the same retained messages, session, devices and 600 telemetry
+# records from the same bytes, and no one grows it again.
+universal_migrated() {
+    build_disk_tool || {
+        echo "  ✗ universal-migrated needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local ud=$DISK_TOOL iso="$OUT/universal.iso" row first=1
+    mkuniversal "$iso" "smoke"
+    local disk="$OUT/universal-migrated.img" rb="$OUT/universal-migrated.rollback" tl="$OUT/universal-migrated-tool.log"
+    local restored='db: restored 2 retained message\(s\), 1 persistent session\(s\) with 1 queued message\(s\), [0-9]+ revoked serial\(s\), 40 known device\(s\)'
+    local telemetry='telemetry: log recovered in [0-9]+ ms: 600 record\(s\)'
+    fresh_disk "$iso.disk" "$disk"
+    rm -f "$rb"
+    {
+        "$ud" fixture-v1 "$disk" --populate --write &&
+            "$ud" migrate "$disk" --write --rollback-file "$rb" || echo "tool: FAILED"
+    } >"$tl" 2>&1
+    check "universal-migrated-tool" "$tl" 0 "migrate: done" "verify: telemetry identical \(600 record" "NOT:tool: FAILED"
+    truncate -s 128m "$disk"
+    local rows=("x86-uefi|x86-uefi|tcg" "aa64|aa64|hvf" "x86-bios|x86-bios|tcg")
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name kind accel <<<"$row"
+        [[ $kind == aa64 && " $ACCELS " != *" $accel "* ]] && continue
+        local log="$OUT/universal-migrated-$name.log" status=0
+        u_run "$kind" "$accel" "$log" disk "$disk" || status=$?
+        if [[ $first -eq 1 ]]; then
+            check "universal-migrated: first boot on $name grows the disk" "$log" "$status" \
+                "storage: grew the layout from [0-9]+ MiB to [0-9]+ MiB \(generation 3\)" "storage: data disk opened" \
+                "$restored" "$telemetry" "^URMQTT READY$" "$NO_FAULT"
+            first=0
+        else
+            check "universal-migrated: $name reads it" "$log" "$status" "storage: data disk opened \(1[0-9]{2} MiB" \
+                "generation 3" "$restored" "$telemetry" "NOT:storage: grew" "^URMQTT READY$" "$NO_FAULT"
+        fi
+    done
+}
+
 # The installer of the universal ISO on each machine, then the installed
 # disk booted by all three boot paths (aarch64 UEFI, x86 UEFI, x86 BIOS).
 universal_install() {
@@ -1258,10 +1530,10 @@ cross_arch() {
     local data="$OUT/cross-arch-$from-to-$to.img" status=0
     local l1="$OUT/cross-arch-$from-to-$to-1.log" l2="$OUT/cross-arch-$from-to-$to-2.log"
     fresh_disk "$iso.disk" "$data"
-    # Phase 1 on <from>: the broker with the dev certificates, forwarded to 18883.
+    # Phase 1 on <from>: the broker with the dev certificates, forwarded to $PORT.
     start_vm_kind "$from" "$faccel" "$l1" "$data"
     if wait_log "$l1" "TLS 1.3 listener on port 8883"; then
-        python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$ROOT/deploy/dev" --phase 1 >"$l1.client" 2>&1 || status=$?
+        python3 -I "$ROOT/scripts/mqtt-persist.py" $PORT --tls "$ROOT/deploy/dev" --phase 1 >"$l1.client" 2>&1 || status=$?
     else
         status=124
     fi
@@ -1272,7 +1544,7 @@ cross_arch() {
     status=0
     start_vm_kind "$to" "$taccel" "$l2" "$data"
     if wait_log "$l2" "TLS 1.3 listener on port 8883"; then
-        python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$ROOT/deploy/dev" --phase 2 >"$l2.client" 2>&1 || status=$?
+        python3 -I "$ROOT/scripts/mqtt-persist.py" $PORT --tls "$ROOT/deploy/dev" --phase 2 >"$l2.client" 2>&1 || status=$?
     else
         status=124
     fi
@@ -1288,23 +1560,23 @@ cross_arch() {
 start_vm_kind() {
     local kind=$1 accel=$2 log=$3 disk=$4
     case $kind in
-        aa64) start_vm "$log" --disk "$disk" --accel "$accel" --fwd 18883:8883 ;;
-        x86-uefi) start_vm "$log" --arch x86_64 --disk "$disk" --accel tcg --fwd 18883:8883 ;;
-        x86-bios) start_vm "$log" --arch x86_64 --machine pc --firmware bios --disk "$disk" --accel tcg --fwd 18883:8883 ;;
+        aa64) start_vm "$log" --disk "$disk" --accel "$accel" --fwd $PORT:8883 ;;
+        x86-uefi) start_vm "$log" --arch x86_64 --disk "$disk" --accel tcg --fwd $PORT:8883 ;;
+        x86-bios) start_vm "$log" --arch x86_64 --machine pc --firmware bios --disk "$disk" --accel tcg --fwd $PORT:8883 ;;
     esac
 }
 
 # O3 (ADR-054): the ISO's first ("live") entry runs the broker from RAM with
 # no disk at all, serves MQTT over mTLS, and a reboot loses what it held.
 # start_vm_iso <kind> <accel> <log> <iso> [run-qemu args]: a serving VM
-# booted from the ISO (a CD) alone, TLS port forwarded to 18883.
+# booted from the ISO (a CD) alone, TLS port forwarded to $PORT.
 start_vm_iso() {
     local kind=$1 accel=$2 log=$3 iso=$4
     shift 4
     case $kind in
-        aa64) start_vm "$log" --iso "$iso" --accel "$accel" --fwd 18883:8883 "$@" ;;
-        x86-uefi) start_vm "$log" --arch x86_64 --iso "$iso" --accel "$accel" --smp 2 --fwd 18883:8883 "$@" ;;
-        x86-bios) start_vm "$log" --arch x86_64 --machine pc --firmware bios --iso "$iso" --accel "$accel" --smp 2 --fwd 18883:8883 "$@" ;;
+        aa64) start_vm "$log" --iso "$iso" --accel "$accel" --fwd $PORT:8883 "$@" ;;
+        x86-uefi) start_vm "$log" --arch x86_64 --iso "$iso" --accel "$accel" --smp 2 --fwd $PORT:8883 "$@" ;;
+        x86-bios) start_vm "$log" --arch x86_64 --machine pc --firmware bios --iso "$iso" --accel "$accel" --smp 2 --fwd $PORT:8883 "$@" ;;
     esac
 }
 
@@ -1322,7 +1594,7 @@ live_serve() {
     local l1="$OUT/$name-$kind-$accel-1.log" l2="$OUT/$name-$kind-$accel-2.log" status=0
     start_vm_iso "$kind" "$accel" "$l1" "$iso"
     if wait_log "$l1" "TLS 1.3 listener on port 8883"; then
-        python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$ROOT/deploy/dev" --phase live1 \
+        python3 -I "$ROOT/scripts/mqtt-persist.py" $PORT --tls "$ROOT/deploy/dev" --phase live1 \
             >"$l1.client" 2>&1 || status=$?
     else
         status=124
@@ -1334,7 +1606,7 @@ live_serve() {
     status=0
     start_vm_iso "$kind" "$accel" "$l2" "$iso"
     if wait_log "$l2" "TLS 1.3 listener on port 8883"; then
-        python3 -I "$ROOT/scripts/mqtt-persist.py" 18883 --tls "$ROOT/deploy/dev" --phase gone \
+        python3 -I "$ROOT/scripts/mqtt-persist.py" $PORT --tls "$ROOT/deploy/dev" --phase gone \
             >"$l2.client" 2>&1 || status=$?
     else
         status=124
@@ -1469,6 +1741,32 @@ if [[ ${SMOKE_ONLY:-} == time && $ARCH != universal ]]; then
     exit
 fi
 
+# SMOKE_ONLY=storage: the disk scenarios of this architecture (SMOKE_SCENARIOS=<regex>
+# picks groups by function name; first boot and
+# its power cuts, the SCSI boot, the CD, a damaged partition, the host tool,
+# the topology, layout v1 refusal, migration and growing); no network service.
+if [[ ${SMOKE_ONLY:-} == storage && $ARCH != universal ]]; then
+    want first_boot && first_boot
+    want first_boot_crash && first_boot_crash
+    want scsi_boot && scsi_boot
+    want iso_as_cd && iso_as_cd
+    want own_damaged && own_damaged
+    want storage_topology && storage_topology
+    want layout_v1 && layout_v1
+    want grow_online && grow_online
+    if ! want disk_tool; then
+        :
+    elif command -v mosquitto_pub >/dev/null && command -v sqlite3 >/dev/null; then
+        disk_tool
+    else
+        echo "  ✗ disk-tool needs sqlite3 and the mosquitto clients"
+        FAILED=$((FAILED + 1))
+    fi
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=live: just the live-mode scenarios of this architecture.
 if [[ ${SMOKE_ONLY:-} == live && $ARCH != universal ]]; then
     live_suite
@@ -1486,6 +1784,15 @@ if [[ ${SMOKE_ONLY:-} == diag && $ARCH == universal ]]; then
     exit
 fi
 
+# SMOKE_ONLY=migrated (universal): a migrated v1 disk, grown by one machine and
+# read by the other two (S2, X8).
+if [[ ${SMOKE_ONLY:-} == migrated && $ARCH == universal ]]; then
+    universal_migrated
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=install (universal): only the installer scenarios; SMOKE_INSTALLER=<aa64|x86-uefi|x86-bios>
 # limits which machine runs the installer.
 if [[ ${SMOKE_ONLY:-} == install && $ARCH == universal ]]; then
@@ -1498,6 +1805,7 @@ fi
 if [[ $ARCH == universal ]]; then
     universal_iso
     universal_raw
+    universal_migrated
     universal_install
     universal_diag
     if command -v mosquitto_pub >/dev/null; then
@@ -1743,7 +2051,7 @@ if command -v mosquitto_pub >/dev/null && command -v mosquitto_sub >/dev/null; t
         "broker: 1 retained message\(s\) not retained on core [0-9]+ \(1 over an identity's limit of 32" "NOT:FAILED" "$NO_FAULT"
     # M10: the same scenarios over TLS 1.3 with mutual TLS, plus the four
     # handshakes/CONNECTs that must be refused.
-    SERVICE_PORT=8883 service mqtt-tls "serve" 18883 "TLS 1.3 listener on port 8883" \
+    SERVICE_PORT=8883 service mqtt-tls "serve" $PORT "TLS 1.3 listener on port 8883" \
         python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" -- \
         "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
         "client: qos1-after-reconnect ok" "client: acl-subscribe-denied ok" "client: retained-limit ok" \
@@ -1764,9 +2072,9 @@ sys_reboot() {
     for accel in $ACCELS; do
         local log="$OUT/sys-reboot-$accel.log" data="$OUT/sys-reboot-$accel.img" status=0 waited=0
         fresh_disk "$iso" "$data"
-        start_vm "$log" --disk "$data" --accel "$accel" --fwd 18883:8883
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd $PORT:8883
         if wait_log "$log" "TLS 1.3 listener"; then
-            python3 -I "$ROOT/scripts/sys-scenarios.py" reboot "$ROOT/deploy/dev" 18883 >"$log.client" 2>&1 || status=1
+            python3 -I "$ROOT/scripts/sys-scenarios.py" reboot "$ROOT/deploy/dev" $PORT >"$log.client" 2>&1 || status=1
             until ! kill -0 "$VM_PID" 2>/dev/null; do
                 if (( waited >= 300 )); then
                     echo "client: the VM did not reset within 30 s" >>"$log.client"
@@ -1792,7 +2100,7 @@ sys_reboot() {
 # framebuffer) and an operator subscribed, no output handler may be reported
 # over budget in step `sys`.
 if command -v mosquitto_pub >/dev/null; then
-    SERVICE_PORT=8883 service sys-slow-log "serve test=slow-log:4000" 18883 "TLS 1.3 listener on port 8883" \
+    SERVICE_PORT=8883 service sys-slow-log "serve test=slow-log:4000" $PORT "TLS 1.3 listener on port 8883" \
         python3 -I "$ROOT/scripts/sys-scenarios.py" watch "$ROOT/deploy/dev" -- \
         "client: sys-watch ok" "NOT:\(step sys\)" "NOT:FAILED" "$NO_FAULT"
 fi
@@ -1812,7 +2120,7 @@ SERVICE_PORT=8883 service log-slow-flood "serve test=slow-log:4000 test=log-floo
 # set; devices and the backend service cannot reach any of it. Every command
 # is audit-logged on the serial console.
 if command -v mosquitto_pub >/dev/null && command -v mosquitto_sub >/dev/null; then
-    SERVICE_PORT=8883 service sys-operator "serve" 18883 "TLS 1.3 listener on port 8883" \
+    SERVICE_PORT=8883 service sys-operator "serve" $PORT "TLS 1.3 listener on port 8883" \
         python3 -I "$ROOT/scripts/sys-scenarios.py" "$ROOT/deploy/dev" -- \
         "client: sys-broker-topics ok" "client: sys-refresh ok" "client: sys-cpu-busy-per-core ok" \
         "client: sys-retained-flag ok" "client: sys-query-info ok" "client: console-replays-the-log ok" \
@@ -1833,7 +2141,7 @@ fi
 # H2: session tickets under random per-boot keys. With a 20 s rotation, a
 # ticket issued late in the first interval resumes after the rotation (the
 # previous key), and a ticket from before a reboot does not.
-SERVICE_PORT=8883 service ticket-rotation "serve test=ticket-rotate:20" 18883 "TLS 1.3 listener on port 8883" \
+SERVICE_PORT=8883 service ticket-rotation "serve test=ticket-rotate:20" $PORT "TLS 1.3 listener on port 8883" \
     python3 -I "$ROOT/scripts/ticket-scenarios.py" "$ROOT/deploy/dev" rotation 20 -- \
     "tls: session tickets under random per-boot keys, rotated every 20 s of uptime \(ticket lifetime 20 s\)" \
     "client: ticket-resume ok" "client: ticket-previous-key ok" \
@@ -1852,7 +2160,7 @@ for c in "$(brew --prefix openssl@3 2>/dev/null)/bin/openssl" openssl; do
     fi
 done
 if [[ -n "$CONTROL_TOOL" ]] && command -v mosquitto_pub >/dev/null && [[ -n "${OPENSSL:-}" ]]; then
-    SERVICE_PORT=8883 service control "serve" 18883 "TLS 1.3 listener on port 8883" \
+    SERVICE_PORT=8883 service control "serve" $PORT "TLS 1.3 listener on port 8883" \
         python3 -I "$ROOT/scripts/control-scenarios.py" "$ROOT/deploy/dev" "$CONTROL_TOOL" -- \
         "client: control-revoke-live ok" "client: control-unrevoke ok" "client: control-forged ok" \
         "client: control-replay ok" "client: control-expired ok" "client: control-from-device ok" \
@@ -1866,7 +2174,7 @@ if [[ -n "$CONTROL_TOOL" ]] && command -v mosquitto_pub >/dev/null && [[ -n "${O
         "publish\(es\) to \\\$urmqtt/ by identities without control rights dropped" \
         "tls: device-006 authenticated \(TLS13_[A-Z0-9_]+, bootstrap role\)" \
         "tls: device-005 authenticated" "NOT:FAILED" "$NO_FAULT"
-    SERVICE_PORT=8883 service registry-allowlist "serve registry=allowlist" 18883 "TLS 1.3 listener on port 8883" \
+    SERVICE_PORT=8883 service registry-allowlist "serve registry=allowlist" $PORT "TLS 1.3 listener on port 8883" \
         python3 -I "$ROOT/scripts/control-scenarios.py" "$ROOT/deploy/dev" "$CONTROL_TOOL" --allowlist -- \
         "client: registry-allowlist ok" "registry allowlist, 0 allowlisted identities" \
         "registry: device-001 is not on the allowlist, refused" \
@@ -1937,6 +2245,9 @@ else
     FAILED=$((FAILED + 1))
 fi
 want own_damaged && own_damaged
+want storage_topology && storage_topology
+want layout_v1 && layout_v1
+want grow_online && grow_online
 want disk_tool && disk_tool
 [[ $ARCH == aarch64 ]] && want install_iso && install_iso
 want no_hw_rng && no_hw_rng

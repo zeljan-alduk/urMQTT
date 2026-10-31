@@ -356,6 +356,28 @@ fn storage_bounds() {
     );
 }
 
+/// S3: `storage.grow_ratio_db` is optional (50), a percentage.
+#[test]
+fn grow_ratio_db_defaults_and_bounds() {
+    let cfg = parse("dev", DEV).unwrap();
+    assert_eq!(cfg.storage.grow_ratio_db, 50);
+    let text = DEV.replace(
+        "retention_days = 30",
+        "retention_days = 30\ngrow_ratio_db = 80",
+    );
+    assert_eq!(parse("dev", &text).unwrap().storage.grow_ratio_db, 80);
+    let text = DEV.replace(
+        "retention_days = 30",
+        "retention_days = 30\ngrow_ratio_db = 101",
+    );
+    assert_rejected("dev", &text, "storage.grow_ratio_db");
+    let text = DEV.replace(
+        "retention_days = 30",
+        "retention_days = 30\ngrow_ratio_db = 0",
+    );
+    assert_eq!(parse("dev", &text).unwrap().storage.grow_ratio_db, 0);
+}
+
 /// O3 (ADR-054): `storage.mode` and `storage.ram_percent`.
 #[test]
 fn storage_mode_and_ram_percent() {

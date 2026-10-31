@@ -35,6 +35,7 @@ pub mod layout;
 #[cfg(target_os = "none")]
 #[allow(unsafe_code)] // libc functions SQLite links against
 mod libc;
+pub mod mig;
 pub mod part;
 pub mod ram;
 pub mod schema;

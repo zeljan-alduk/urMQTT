@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use urmqtt_store::crc::{crc32c, update};
-use urmqtt_store::layout::{BLOCK, Layout, RegionKind, SECTOR, SizeTable};
+use urmqtt_store::layout::{BLOCK, Layout, Params, RegionKind, SECTOR, SizeTable, v1};
 use urmqtt_store::telemetry::TelemetryLog;
 use urmqtt_store::{Disk, MemDisk};
 
@@ -169,8 +169,49 @@ fn superblock_and_region_entries() {
         0x01,
     ];
     let total = 4 * 1024 * 1024 * 1024 / SECTOR; // 4 GiB
-    let l = Layout::plan(total, uuid).unwrap();
+    let params = Params {
+        partitions: 12,
+        align_sectors: 4096,
+    };
+    let mut l = Layout::plan(total, uuid, params).unwrap();
+    // A grown disk has extra extents and a higher generation; the legacy
+    // flag is set by migration only. Exercise every field.
+    l = l.grown(total + 40960, 50, 0).unwrap().unwrap();
+    l.flags = urmqtt_store::layout::FLAG_LEGACY_TELEMETRY;
     let b = l.encode();
+    let mut regions = Vec::new();
+    for (i, r) in l.regions.iter().enumerate() {
+        let entry = b[64 + 24 * i..64 + 24 * (i + 1)].to_vec();
+        let mut e = BTreeMap::new();
+        e.insert("kind", le32(r.kind as u32));
+        e.insert("start", le64(r.start));
+        e.insert("sectors", le64(r.sectors));
+        check("region", &entry, &e, &BTreeMap::new());
+        regions.extend(entry);
+    }
+    let mut e = BTreeMap::new();
+    e.insert("magic", b"URMQTTDK".to_vec());
+    e.insert("version", le32(2));
+    e.insert("region_count", le32(l.regions.len() as u32));
+    e.insert("uuid", uuid.to_vec());
+    e.insert("total_sectors", le64(l.total_sectors));
+    e.insert("generation", le64(l.generation));
+    e.insert("partitions", le32(12));
+    e.insert("align_sectors", le32(4096));
+    e.insert("flags", le32(1));
+    e.insert("regions", regions);
+    e.insert("crc", crc_of(&b, BLOCK));
+    check("superblock", &b, &e, &BTreeMap::new());
+    assert_eq!(Layout::decode(&b, l.total_sectors).unwrap(), Some(l));
+}
+
+/// The frozen layout-v1 superblock (read by `urmqtt-disk migrate` only).
+#[test]
+fn superblock_v1() {
+    let uuid = [7u8; 16];
+    let total = 4 * 1024 * 1024 * 1024 / SECTOR;
+    let l = v1::plan(total, uuid).unwrap();
+    let b = v1::encode(&l);
     let mut regions = Vec::new();
     for (i, r) in l.regions.iter().enumerate() {
         let entry = b[40 + 24 * i..40 + 24 * (i + 1)].to_vec();
@@ -189,36 +230,49 @@ fn superblock_and_region_entries() {
     e.insert("total_sectors", le64(total));
     e.insert("regions", regions);
     e.insert("crc", crc_of(&b, BLOCK));
-    check("superblock", &b, &e, &BTreeMap::new());
+    check("superblock_v1", &b, &e, &BTreeMap::new());
 }
 
 #[test]
 fn region_plan_follows_the_spec_formula() {
     const MIB: u64 = 1024 * 1024 / SECTOR;
-    let align8 = |x: u64| x - x % 8;
-    for total in [32 * 1024, 64 * MIB, 16 * 1024 * MIB, 1024 * 1024 * MIB] {
-        let l = Layout::plan(total, [7; 16]).unwrap();
-        let usable = align8(total - 8 - 64);
-        let journal = MIB;
-        let wal = align8((usable / 8).clamp(2 * MIB, 64 * MIB));
-        let db = align8(usable / 2);
-        let tel = usable - journal - wal - db;
-        let want = [
-            (RegionKind::Db, 64, db),
-            (RegionKind::Wal, 64 + db, wal),
-            (RegionKind::Journal, 64 + db + wal, journal),
-            (RegionKind::Telemetry, 64 + db + wal + journal, tel),
-            (RegionKind::Scratch, total - 8, 8),
-        ];
-        let got: Vec<_> = l
-            .regions
-            .iter()
-            .map(|r| (r.kind, r.start, r.sectors))
-            .collect();
-        assert_eq!(got, want, "total {total}");
+    let align_down = |x: u64, a: u64| x - x % a;
+    for (a, parts) in [(MIB, 8), (4 * MIB, 8), (MIB, 24)] {
+        for total in [32 * 1024, 64 * MIB, 16 * 1024 * MIB, 1024 * 1024 * MIB] {
+            if a > MIB && total < 64 * MIB {
+                continue;
+            }
+            let p = Params {
+                partitions: parts,
+                align_sectors: a as u32,
+            };
+            let l = Layout::plan(total, [7; 16], p).unwrap();
+            let end = align_down(total - 8, a);
+            let usable = end - a;
+            let journal = a.max(MIB.div_ceil(a) * a);
+            let wal = align_down((usable / 8).clamp(2 * MIB, 64 * MIB), a).max(a);
+            let db = align_down(usable / 2, a);
+            let tel = usable - journal - wal - db;
+            let want = [
+                (RegionKind::Db, a, db),
+                (RegionKind::Wal, a + db, wal),
+                (RegionKind::Journal, a + db + wal, journal),
+                (RegionKind::Telemetry, a + db + wal + journal, tel),
+                (RegionKind::Scratch, total - 8, 8),
+            ];
+            let got: Vec<_> = l
+                .regions
+                .iter()
+                .map(|r| (r.kind, r.start, r.sectors))
+                .collect();
+            assert_eq!(got, want, "total {total} align {a}");
+            assert_eq!(l.partitions, parts);
+            assert_eq!(l.generation, 1);
+        }
     }
-    // A size that is not a multiple of 4 KiB is refused (spec §2, G7).
-    assert!(Layout::plan(32 * 1024 + 1, [7; 16]).is_err());
+    // A size that is not a multiple of 4 KiB is rounded down (spec §2, G7).
+    let r = Layout::plan(32 * 1024 + 5, [7; 16], Params::default()).unwrap();
+    assert_eq!(r.total_sectors, 32 * 1024);
 }
 
 #[test]
@@ -258,6 +312,30 @@ fn size_table() {
 }
 
 #[test]
+fn migration_record() {
+    let r = urmqtt_store::mig::Record {
+        seq: 0x0102_0304_0506_0708,
+        state: urmqtt_store::mig::COPIED,
+        v1_crc: 0xaabb_ccdd,
+        v2_crc: 0x1122_3344,
+    };
+    let b = r.encode();
+    let mut e = BTreeMap::new();
+    e.insert("magic", b"URMQMIG1".to_vec());
+    e.insert("seq", le64(r.seq));
+    e.insert("state", le32(2));
+    e.insert("v1_crc", le32(r.v1_crc));
+    e.insert("v2_crc", le32(r.v2_crc));
+    e.insert("crc", crc_of(&b, BLOCK));
+    check("migration_record", &b, &e, &BTreeMap::new());
+    // The fixed places the spec names.
+    assert_eq!(urmqtt_store::mig::BACKUP_LBA, 32);
+    assert_eq!(urmqtt_store::mig::STATE_LBA, [40, 48]);
+    assert_eq!(urmqtt_store::layout::SB_SLOT_LBA, [0, 24]);
+    assert_eq!(urmqtt_store::layout::SIZE_SLOT_LBA, [8, 16]);
+}
+
+#[test]
 fn telemetry_header_segment_header_and_record() {
     let m = MemDisk::new(64 << 20);
     let (mut disk, _) = Disk::open(m.device(), || [3; 16]).unwrap();
@@ -282,7 +360,7 @@ fn telemetry_header_segment_header_and_record() {
     let h = m.raw(base, BLOCK);
     let mut e = BTreeMap::new();
     e.insert("magic", b"URMQTLH1".to_vec());
-    e.insert("version", le32(1));
+    e.insert("version", le32(2));
     e.insert("partitions", le32(8));
     e.insert("segment_bytes", le64(seg));
     e.insert("segments", le64(segments));
@@ -297,6 +375,7 @@ fn telemetry_header_segment_header_and_record() {
     e.insert("partition", le32(0));
     e.insert("seq", le64(1));
     e.insert("created", le64(now));
+    e.insert("uuid", disk.layout().uuid.to_vec());
     e.insert("crc", crc_of(&sh, SECTOR as usize));
     check("segment_header", &sh, &e, &BTreeMap::new());
 
@@ -319,4 +398,37 @@ fn telemetry_header_segment_header_and_record() {
             .iter()
             .all(|&b| b == 0)
     );
+}
+
+/// Regenerates the seeds of the `disk_layout` fuzz target
+/// (`WRITE_FUZZ_SEEDS=1 cargo test -p urmqtt-store --test disk_format_spec -- --ignored`).
+/// Each seed is the disk size (8 bytes), then the first slot, then a second slot.
+#[test]
+#[ignore = "writes files under fuzz/seeds"]
+fn fuzz_seeds_for_disk_layout() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/seeds/disk_layout");
+    let total = 64 * 1024 * 1024 / SECTOR;
+    let a = Layout::plan(total, [3; 16], Params::default()).unwrap();
+    let grown = a.grown(total * 4, 50, 0).unwrap().unwrap();
+    let old = v1::encode(&v1::plan(total, [4; 16]).unwrap());
+    let seed = |first: &[u8], second: &[u8]| {
+        let mut s = (total * 4).to_le_bytes().to_vec();
+        s.extend_from_slice(first);
+        s.extend_from_slice(second);
+        s
+    };
+    let files = [
+        ("superblock-v2-64m", seed(&a.encode(), &[0u8; BLOCK])),
+        (
+            "superblock-v2-grown-pair",
+            seed(&a.encode(), &grown.encode()),
+        ),
+        ("superblock-v1-64m", seed(&old, &grown.encode())),
+    ];
+    if std::env::var_os("WRITE_FUZZ_SEEDS").is_none() {
+        panic!("set WRITE_FUZZ_SEEDS=1 to write the seeds");
+    }
+    for (name, bytes) in files {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
 }

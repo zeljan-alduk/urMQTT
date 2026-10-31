@@ -13,6 +13,8 @@ All notable changes to this project are documented here. The format follows
 
 - O3: **live mode.** The ISO's first menu entry runs the broker from RAM with no disk: the data layout, SQLite and the telemetry log sit on an in-memory block device (`storage.ram_percent` of RAM, default 10), loudly ephemeral (`EPHEMERAL: data is lost on reboot`, banner, `urmqtt.storage.ephemeral`). `storage.mode = "disk" | "auto" | "ram"` is required outside dev; the committed production template stays `"disk"` (live refused). The install entry and disk boots are unchanged (ADR-061, ADR-062).
 
+- S2: layout v2 (ADR-140). Regions aligned to 1 MiB and the device's optimal I/O size (virtio-blk topology, virtio-scsi block limits), every write a whole physical block (`misaligned_writes` counter, 0 in smoke), the telemetry partition count in the layout, an A/B superblock, segment headers bound to the layout UUID. **A layout-v1 disk is refused by the kernel before anything is written; `urmqtt-disk migrate` converts it offline** (dry run by default, copy-then-switch, `--resume`, `--rollback`, verification of row counts and telemetry; ADR-141). The telemetry ring of a migrated disk stays 4 KiB aligned.
+
 ### Changed
 
 - The boot sequence is shared by both architectures (`boot.rs`; ADR-059). The aarch64 boot log is unchanged.

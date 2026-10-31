@@ -143,6 +143,18 @@ impl BlockDevice for FaultDevice {
     fn max_io(&self) -> usize {
         self.inner.max_io()
     }
+
+    fn topology(&self) -> crate::layout::Topology {
+        self.inner.topology()
+    }
+
+    fn base_lba(&self) -> u64 {
+        self.inner.base_lba()
+    }
+
+    fn refresh_size(&mut self) -> Option<u64> {
+        self.inner.refresh_size()
+    }
 }
 
 #[cfg(test)]

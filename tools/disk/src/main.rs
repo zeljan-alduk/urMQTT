@@ -1,8 +1,9 @@
-//! `urmqtt-disk`: offline work on a urMQTT boot disk (STORAGE-PLAN S1):
-//! an image file or a block device, on macOS or Linux, with the VM stopped.
+//! `urmqtt-disk`: offline work on a urMQTT boot disk (STORAGE-PLAN S1, S2,
+//! S3): an image file or a block device, on macOS or Linux, with the VM
+//! stopped.
 //!
 //! ```text
-//! urmqtt-disk info DISK                          GPT, data partition, layout, file sizes
+//! urmqtt-disk info DISK                          GPT, data partition, layout, file sizes, migration record
 //! urmqtt-disk verify DISK                        every check; non-zero exit on any error
 //! urmqtt-disk export-db DISK OUT.sqlite          the database with its WAL applied
 //! urmqtt-disk export-telemetry DISK [--format csv|jsonl] [--since MS] [--until MS] [--topic FILTER]
@@ -13,138 +14,41 @@
 //!                                                a boot image (byte for byte mkraw.py), optionally
 //!                                                on a larger disk; the first boot formats the data
 //! urmqtt-disk update-boot DISK --esp ESP --write replace the kernel (ESP), keep the data
+//! urmqtt-disk migrate DISK [--write] [--resume | --rollback [--force]]
+//!                    [--rollback-file FILE] [--align-mib N]
+//!                                                layout v1 -> v2. Without --write: the plan and the
+//!                                                preconditions, nothing is changed. --resume finishes
+//!                                                an interrupted run, --rollback returns to v1
+//! urmqtt-disk grow DISK [--ratio PERCENT] [--write]
+//!                                                use the space a larger disk offers (the kernel does
+//!                                                the same at boot): partition table, then layout.
+//!                                                Without --write: what would change
 //! ```
+//!
+//! Test hooks (images only): `fixture-v1 DISK [--populate] --write` builds a
+//! layout-v1 data partition (the kernel only reads v2), and `--fault SPEC`
+//! on a writing command stops the device after the N-th write
+//! (`stop-after-write=N`, `tear-write=N:K`, see `urmqtt_store::fault`).
 //!
 //! Everything is read-only unless `--write` is given. Commands that only
 //! read but need SQLite or the telemetry recovery to run (`verify`,
 //! `export-*`) work on an in-memory copy-on-write overlay, so the disk is
 //! never changed.
 
-use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, Read, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io::{BufRead, Read, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
 
+use urmqtt_disk::dev::{FileDisk, Overlay, S, Shared};
+use urmqtt_disk::host::{self, mib, now_unix, open_store};
+use urmqtt_disk::migrate;
+use urmqtt_store::fault::{FaultDevice, FaultSpec};
 use urmqtt_store::gpt::{self, DataPartition, Table};
-use urmqtt_store::layout::{FileKind, Layout, RegionKind, SECTOR};
+use urmqtt_store::layout::{FileKind, Layout, LayoutError, RegionKind, SECTOR, v1};
 use urmqtt_store::part::Partition;
 use urmqtt_store::telemetry::TelemetryLog;
-use urmqtt_store::{BlockDevice, Disk, IoError, Opened, Platform};
-
-const S: usize = SECTOR as usize;
-
-// --- block devices ---------------------------------------------------------
-
-/// An image file or block device. Writes need `--write`.
-struct FileDisk {
-    f: Arc<Mutex<File>>,
-    sectors: u64,
-    writable: bool,
-}
-
-impl FileDisk {
-    fn open(path: &str, writable: bool) -> Result<Self, String> {
-        let mut f = OpenOptions::new()
-            .read(true)
-            .write(writable)
-            .open(path)
-            .map_err(|e| format!("{path}: {e}"))?;
-        let bytes = f
-            .seek(SeekFrom::End(0))
-            .map_err(|e| format!("{path}: {e}"))?;
-        if bytes == 0 || bytes % SECTOR != 0 {
-            return Err(format!(
-                "{path}: {bytes} bytes is not a whole number of 512-byte sectors (on macOS use /dev/rdiskN)"
-            ));
-        }
-        Ok(Self {
-            f: Arc::new(Mutex::new(f)),
-            sectors: bytes / SECTOR,
-            writable,
-        })
-    }
-}
-
-impl BlockDevice for FileDisk {
-    fn sectors(&self) -> u64 {
-        self.sectors
-    }
-
-    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        if lba + (buf.len() / S) as u64 > self.sectors {
-            return Err(IoError::OutOfRange);
-        }
-        let mut f = self.f.lock().map_err(|_| IoError::Device)?;
-        f.seek(SeekFrom::Start(lba * SECTOR))
-            .and_then(|_| f.read_exact(buf))
-            .map_err(|_| IoError::Device)
-    }
-
-    fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
-        if !self.writable {
-            return Err(IoError::Device);
-        }
-        if lba + (buf.len() / S) as u64 > self.sectors {
-            return Err(IoError::OutOfRange);
-        }
-        let mut f = self.f.lock().map_err(|_| IoError::Device)?;
-        f.seek(SeekFrom::Start(lba * SECTOR))
-            .and_then(|_| f.write_all(buf))
-            .map_err(|_| IoError::Device)
-    }
-
-    fn flush(&mut self) -> Result<(), IoError> {
-        if !self.writable {
-            return Ok(());
-        }
-        self.f
-            .lock()
-            .map_err(|_| IoError::Device)?
-            .sync_all()
-            .map_err(|_| IoError::Device)
-    }
-}
-
-/// Copy-on-write over a read-only device: writes stay in memory.
-struct Overlay {
-    base: FileDisk,
-    dirty: Arc<Mutex<BTreeMap<u64, Box<[u8; S]>>>>,
-}
-
-impl BlockDevice for Overlay {
-    fn sectors(&self) -> u64 {
-        self.base.sectors
-    }
-
-    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        self.base.read(lba, buf)?;
-        let d = self.dirty.lock().map_err(|_| IoError::Device)?;
-        for (i, chunk) in buf.chunks_mut(S).enumerate() {
-            if let Some(s) = d.get(&(lba + i as u64)) {
-                chunk.copy_from_slice(&s[..]);
-            }
-        }
-        Ok(())
-    }
-
-    fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
-        if lba + (buf.len() / S) as u64 > self.base.sectors {
-            return Err(IoError::OutOfRange);
-        }
-        let mut d = self.dirty.lock().map_err(|_| IoError::Device)?;
-        for (i, chunk) in buf.chunks(S).enumerate() {
-            let mut s = Box::new([0u8; S]);
-            s.copy_from_slice(chunk);
-            d.insert(lba + i as u64, s);
-        }
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<(), IoError> {
-        Ok(())
-    }
-}
+use urmqtt_store::{BlockDevice, Disk, DiskError, IoError, Opened};
 
 // --- the disk's structure ----------------------------------------------------
 
@@ -177,10 +81,6 @@ fn inspect(dev: &mut dyn BlockDevice) -> Result<Found, String> {
     })
 }
 
-fn mib(sectors: u64) -> u64 {
-    (sectors * SECTOR) >> 20
-}
-
 fn name(e: &gpt::Entry) -> String {
     let u: Vec<u16> = e
         .name
@@ -191,10 +91,13 @@ fn name(e: &gpt::Entry) -> String {
     String::from_utf16_lossy(&u)
 }
 
+const V1_HINT: &str = "the data partition is layout v1; this tool and the kernel need v2: run `urmqtt-disk migrate DISK` (docs/DEPLOY.md)";
+
 fn open_layout(part: Partition) -> Result<Disk, String> {
     match Disk::open(Box::new(part), || [0; 16]) {
         Ok((d, Opened::Existing)) => Ok(d),
         Ok((_, Opened::Formatted)) => Err("the data partition is blank (never booted)".into()),
+        Err(DiskError::Layout(LayoutError::OldVersion(_))) => Err(V1_HINT.into()),
         Err(e) => Err(format!("data partition layout: {e:?}")),
     }
 }
@@ -210,57 +113,48 @@ fn data_part(path: &str, dev: Box<dyn BlockDevice>, f: &Found) -> Result<Partiti
 fn overlay(path: &str) -> Result<(Overlay, Found), String> {
     let mut base = FileDisk::open(path, false)?;
     let found = inspect(&mut base)?;
-    Ok((
-        Overlay {
-            base,
-            dirty: Arc::default(),
-        },
-        found,
-    ))
+    Ok((Overlay::new(Box::new(base)), found))
 }
 
-// --- SQLite on the host --------------------------------------------------------
-
-fn platform() -> Platform {
-    Platform {
-        random: |b| {
-            if let Ok(mut f) = File::open("/dev/urandom") {
-                let _ = f.read_exact(b);
-            }
-        },
-        now_unix_ms: || {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_millis() as u64)
-        },
-        delay_us: |us| std::thread::sleep(std::time::Duration::from_micros(u64::from(us))),
-        log: |code, msg| {
-            if code & 0xff != 27 && code & 0xff != 28 {
-                eprintln!("sqlite ({code}): {msg}");
-            }
-        },
+/// A device for a writing command: the file or block device, wrapped in the
+/// fault injector when `--fault` is given.
+fn writable(path: &str, fault: Option<&str>) -> Result<Box<dyn BlockDevice>, String> {
+    let f = FileDisk::open(path, true)?;
+    match fault {
+        None => Ok(Box::new(f)),
+        Some(spec) => {
+            let spec =
+                FaultSpec::parse(spec).ok_or("--fault: see urmqtt_store::fault::FaultSpec")?;
+            eprintln!("urmqtt-disk: injecting {spec:?} (test hook)");
+            Ok(Box::new(FaultDevice::new(Box::new(f), spec)))
+        }
     }
 }
 
-fn open_store(disk: Disk) -> Result<urmqtt_store::Store, String> {
-    let heap: &'static mut [u8] = Box::leak(vec![0u8; 256 << 20].into_boxed_slice());
-    urmqtt_store::init(heap, disk, platform()).map_err(|e| e.to_string())?;
-    urmqtt_store::open()
-        .map(|(s, _)| s)
-        .map_err(|e| e.to_string())
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+fn random() -> [u8; 16] {
+    let mut b = [0u8; 16];
+    if let Ok(mut f) = File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut b);
+    }
+    b
 }
 
 // --- commands ------------------------------------------------------------------
 
+fn print_regions(l: &Layout) {
+    for r in &l.regions {
+        println!(
+            "  region {:?}: LBA {}..{} of the partition ({} MiB)",
+            r.kind,
+            r.start,
+            r.start + r.sectors - 1,
+            mib(r.sectors)
+        );
+    }
+}
+
 fn info(path: &str) -> Result<(), String> {
-    let (mut dev, f) = overlay(path)?;
+    let (dev, f) = overlay(path)?;
     let total = dev.sectors();
     println!("disk: {path}, {} MiB ({total} sectors)", mib(total));
     let Some(t) = f.primary.as_ref().or(f.backup.as_ref()) else {
@@ -304,50 +198,66 @@ fn info(path: &str) -> Result<(), String> {
         println!("data: no data partition yet (created on the first boot)");
         return Ok(());
     };
-    let part = data_part(path, Box::new(dev.clone_ro()?), &f)?;
-    match open_layout(part) {
-        Ok(disk) => {
-            let l: &Layout = disk.layout();
-            println!(
-                "data: layout v{} uuid {}, formatted {} sectors",
-                urmqtt_store::layout::VERSION,
-                l.uuid
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>(),
-                l.total_sectors
-            );
-            for r in &l.regions {
-                println!(
-                    "  region {:?}: LBA {}..{} of the partition ({} MiB)",
-                    r.kind,
-                    r.start,
-                    r.start + r.sectors - 1,
-                    mib(r.sectors)
-                );
-            }
-            for k in [FileKind::Db, FileKind::Wal, FileKind::Journal] {
-                println!("  file {k:?}: {} bytes", disk.file_size(k));
+    let mut part = data_part(path, Box::new(dev.view()), &f)?;
+    match migrate::classify(&mut part) {
+        Ok(migrate::Found::V1) => {
+            let sb = migrate::read_block(&mut part, 0)?;
+            match v1::decode(&sb, part.sectors()) {
+                Ok(Some(l)) => {
+                    println!(
+                        "data: layout v1 (the kernel refuses it; run `urmqtt-disk migrate`), uuid {}, formatted {} sectors",
+                        hex(&l.uuid),
+                        l.total_sectors
+                    );
+                    print_regions(&l);
+                }
+                other => println!("data: layout v1, unreadable: {other:?}"),
             }
         }
-        Err(e) => println!("data: partition at LBA {}: {e}", d.first_lba),
+        _ => match open_layout(data_part(path, Box::new(dev.view()), &f)?) {
+            Ok(disk) => {
+                let l: &Layout = disk.layout();
+                println!(
+                    "data: layout v{} generation {} (superblock slot {}), uuid {}, formatted {} sectors of {} in the partition",
+                    urmqtt_store::layout::VERSION,
+                    l.generation,
+                    if disk.sb_slot() == 0 { "A" } else { "B" },
+                    hex(&l.uuid),
+                    l.total_sectors,
+                    d.sectors()
+                );
+                println!(
+                    "  {} telemetry partition(s), regions aligned to {} KiB{}",
+                    l.partitions,
+                    l.align_sectors / 2,
+                    if l.legacy_telemetry() {
+                        " (the telemetry ring is a migrated v1 ring: 4 KiB aligned)"
+                    } else {
+                        ""
+                    }
+                );
+                print_regions(l);
+                for k in [FileKind::Db, FileKind::Wal, FileKind::Journal] {
+                    println!("  file {k:?}: {} bytes", disk.file_size(k));
+                }
+                if disk.spare_sectors() >= 2048 {
+                    println!(
+                        "  {} MiB of the partition are not in the layout (the next boot, or `grow`, adds them)",
+                        mib(disk.spare_sectors())
+                    );
+                }
+            }
+            Err(e) => println!("data: partition at LBA {}: {e}", d.first_lba),
+        },
     }
-    let _ = &mut dev;
+    if let Ok(Some(r)) = migrate::read_record(&mut part) {
+        println!("migration record: state {} (seq {})", r.state, r.seq);
+    }
     Ok(())
 }
 
-impl Overlay {
-    /// A second read-only view of the same file (for a partition window).
-    fn clone_ro(&self) -> Result<Overlay, String> {
-        Ok(Overlay {
-            base: FileDisk {
-                f: self.base.f.clone(),
-                sectors: self.base.sectors,
-                writable: false,
-            },
-            dirty: self.dirty.clone(),
-        })
-    }
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn verify(path: &str) -> Result<(), String> {
@@ -364,24 +274,36 @@ fn verify(path: &str) -> Result<(), String> {
         (None, None) => return Err("gpt: no valid table: not a urMQTT boot disk".into()),
     }
     println!("gpt: ok");
-    let part = data_part(path, Box::new(dev.clone_ro()?), &f)?;
-    let mut disk = open_layout(part)?;
-    println!("layout: ok ({} regions)", disk.layout().regions.len());
-    let retention_ms = u64::MAX / 4;
-    match TelemetryLog::open(&mut disk, now_unix(), retention_ms) {
-        Ok((_, rec)) => {
+    let mut raw = data_part(path, Box::new(dev.view()), &f)?;
+    let mut disk = match migrate::classify(&mut raw)? {
+        migrate::Found::V1 => {
+            // Checked as far as the old layout allows, but the kernel
+            // refuses it: that is a problem too.
+            problems.push(V1_HINT.to_string());
+            let part = data_part(path, Box::new(dev.view()), &f)?;
+            Disk::open_v1(Box::new(part)).map_err(|e| format!("layout v1: {e:?}"))?
+        }
+        _ => open_layout(data_part(path, Box::new(dev.view()), &f)?)?,
+    };
+    println!(
+        "layout: ok ({} regions, generation {})",
+        disk.layout().regions.len(),
+        disk.layout().generation
+    );
+    match host::telemetry_digest(&mut disk) {
+        Ok(t) => {
             println!(
                 "telemetry: ok, {} record(s) in {} segment(s), {} torn tail(s)",
-                rec.records, rec.segments, rec.torn_tails
+                t.records, t.segments, t.torn_tails
             );
-            if rec.torn_tails > 0 {
+            if t.torn_tails > 0 {
                 problems.push(format!(
                     "telemetry: {} torn tail(s) (the next boot truncates them)",
-                    rec.torn_tails
+                    t.torn_tails
                 ));
             }
         }
-        Err(e) => problems.push(format!("telemetry: {e:?}")),
+        Err(e) => problems.push(e),
     }
     let store = open_store(disk)?;
     let qc = store
@@ -403,7 +325,7 @@ fn verify(path: &str) -> Result<(), String> {
 
 fn export_db(path: &str, out: &str) -> Result<(), String> {
     let (dev, f) = overlay(path)?;
-    let part = data_part(path, Box::new(dev.clone_ro()?), &f)?;
+    let part = data_part(path, Box::new(dev.view()), &f)?;
     let store = open_store(open_layout(part)?)?;
     store
         .db()
@@ -482,13 +404,13 @@ fn export_telemetry(path: &str, args: &[String]) -> Result<(), String> {
         return Err("--format csv|jsonl".into());
     }
     let (dev, f) = overlay(path)?;
-    let part = data_part(path, Box::new(dev.clone_ro()?), &f)?;
+    let part = data_part(path, Box::new(dev.view()), &f)?;
     let mut disk = open_layout(part)?;
     let retention = u64::MAX / 4;
     let (log, _) = TelemetryLog::open(&mut disk, now_unix(), retention)
         .map_err(|e| format!("telemetry: {e:?}"))?;
     let mut rows: Vec<(u64, usize, String, Vec<u8>)> = Vec::new();
-    for p in 0..urmqtt_store::telemetry::PARTITIONS {
+    for p in 0..log.partitions() {
         log.scan(&mut disk, p, retention, |r| {
             let keep = r.ts_ms >= since
                 && r.ts_ms < until
@@ -637,6 +559,248 @@ fn update_boot(path: &str, esp: &str, write: bool) -> Result<(), String> {
     Ok(())
 }
 
+// --- migrate (S2) ------------------------------------------------------------------
+
+struct MigrateArgs {
+    write: bool,
+    resume: bool,
+    rollback: bool,
+    force: bool,
+    rollback_file: Option<PathBuf>,
+    align_mib: u32,
+    fault: Option<String>,
+}
+
+fn migrate_cmd(path: &str, a: &MigrateArgs) -> Result<(), String> {
+    let opts = migrate::Options {
+        align_sectors: a.align_mib * 2048,
+        check_db: true,
+        force: a.force,
+    };
+    if !a.write {
+        // The plan and the preconditions, on a read-only view.
+        if a.resume || a.rollback {
+            return Err("--resume and --rollback change the disk: add --write".into());
+        }
+        let (dev, f) = overlay(path)?;
+        let mut raw = data_part(path, Box::new(dev.view()), &f)?;
+        match migrate::classify(&mut raw)? {
+            migrate::Found::V1 => {}
+            migrate::Found::V2 { .. } => {
+                return Err("the data partition is layout v2 already".into());
+            }
+            other => return Err(format!("not a layout-v1 data partition: {other:?}")),
+        }
+        if let Some(r) = migrate::read_record(&mut raw)? {
+            return Err(format!(
+                "an earlier migration was interrupted (state {}): use --resume --write or --rollback --write",
+                r.state
+            ));
+        }
+        let sb = migrate::read_block(&mut raw, 0)?;
+        let plan = migrate::plan(&mut raw, &sb, &opts)?;
+        print!("{}", plan.describe());
+        let shared = Shared::new(Box::new(data_part(path, Box::new(dev.view()), &f)?));
+        for n in migrate::preconditions(&shared, &plan, &opts)? {
+            println!("precondition: {n}");
+        }
+        println!("dry run: nothing was written. Stop the VM, then add --write to migrate.");
+        return Ok(());
+    }
+    let mut dev = writable(path, a.fault.as_deref())?;
+    let f = inspect(dev.as_mut())?;
+    let d = f.data.ok_or("no urMQTT data partition")?;
+    let part =
+        Partition::new(dev, d.first_lba, d.sectors()).ok_or("data partition beyond the end")?;
+    let shared = Shared::new(Box::new(part));
+    let rb = a
+        .rollback_file
+        .clone()
+        .or_else(|| Some(PathBuf::from(format!("{path}.urmqtt-migrate-rollback"))));
+    let rep = if a.rollback {
+        migrate::rollback(&shared, &opts, rb.as_deref())?
+    } else if a.resume {
+        migrate::resume(&shared, &opts)?
+    } else {
+        migrate::run(&shared, &opts, rb.as_deref())?
+    };
+    for s in &rep.steps {
+        println!("migrate: {s}");
+    }
+    if a.rollback {
+        println!("migrate: rolled back: the data partition is layout v1 again");
+        return Ok(());
+    }
+    // Verification of the result on a read-only view: layout, integrity,
+    // row counts and the telemetry against the source.
+    verify_migrated(path)?;
+    println!("migrate: done");
+    Ok(())
+}
+
+/// Compares the migrated disk with the v1 state saved in the migration
+/// blocks: same database bytes, same row count in every table, same
+/// telemetry records.
+fn verify_migrated(path: &str) -> Result<(), String> {
+    let (dev, f) = overlay(path)?;
+    let mut raw = data_part(path, Box::new(dev.view()), &f)?;
+    let saved = migrate::read_block(&mut raw, urmqtt_store::mig::BACKUP_LBA)?;
+    let st = migrate::read_sizes(&mut raw)?;
+    let l1 = v1::decode(&saved, raw.sectors())
+        .ok()
+        .flatten()
+        .ok_or("the saved v1 superblock is gone: cannot compare")?;
+    // Source: the old regions are untouched; read through the data
+    // partition's window, with the saved v1 superblock.
+    let window = || data_part(path, Box::new(dev.view()), &f);
+    let src = || -> Result<Disk, String> {
+        Ok(Disk::with_layout(Box::new(window()?), l1.clone(), st, 0))
+    };
+    let mut s = src()?;
+    let src_tel = host::telemetry_digest(&mut s)?;
+    let src_db = host::file_digest(&mut s, RegionKind::Db, st.sizes[0])?;
+    let src_wal = host::file_digest(&mut s, RegionKind::Wal, st.sizes[1])?;
+    let src_counts = if st.sizes[0] > 0 {
+        Some(host::table_counts(&open_store(src()?)?)?)
+    } else {
+        None
+    };
+    let mut d2 = open_layout(data_part(path, Box::new(dev.view()), &f)?)?;
+    println!(
+        "verify: layout v2 ok ({} regions)",
+        d2.layout().regions.len()
+    );
+    let dst_tel = host::telemetry_digest(&mut d2)?;
+    if src_tel.records != dst_tel.records || src_tel.digest != dst_tel.digest {
+        return Err(format!(
+            "verify: telemetry differs: {src_tel:?} against {dst_tel:?}"
+        ));
+    }
+    println!(
+        "verify: telemetry identical ({} record(s), digest {:08x})",
+        dst_tel.records, dst_tel.digest
+    );
+    if host::file_digest(&mut d2, RegionKind::Db, st.sizes[0])? != src_db
+        || host::file_digest(&mut d2, RegionKind::Wal, st.sizes[1])? != src_wal
+    {
+        return Err("verify: the database or WAL bytes differ from the source".into());
+    }
+    if let Some(want) = src_counts {
+        let store = open_store(open_layout(data_part(path, Box::new(dev.view()), &f)?)?)?;
+        let ic = store
+            .db()
+            .query_text("PRAGMA integrity_check")
+            .map_err(|e| e.to_string())?;
+        if ic != "ok" {
+            return Err(format!("verify: integrity_check: {ic}"));
+        }
+        let got = host::table_counts(&store)?;
+        if got != want {
+            return Err(format!(
+                "verify: row counts differ: {want:?} against {got:?}"
+            ));
+        }
+        println!(
+            "verify: sqlite integrity_check ok; row counts identical in {} table(s): {}",
+            got.len(),
+            got.iter()
+                .map(|(n, c)| format!("{n}={c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
+}
+
+// --- grow (S3) ----------------------------------------------------------------------
+
+fn grow_cmd(path: &str, ratio: u32, write: bool, fault: Option<&str>) -> Result<(), String> {
+    let mut dev: Box<dyn BlockDevice> = if write {
+        writable(path, fault)?
+    } else {
+        Box::new(Overlay::new(Box::new(FileDisk::open(path, false)?)))
+    };
+    // `gpt::prepare` would create a data partition on a disk that has none
+    // (the first-boot step): growing only ever works on a disk urMQTT booted.
+    let found = inspect(dev.as_mut())?;
+    if found.data.is_none() {
+        return Err(format!(
+            "{path}: no urMQTT data partition: nothing to grow (the first boot creates it)"
+        ));
+    }
+    let (part, steps) = gpt::prepare(dev.as_mut(), random).map_err(|e| format!("gpt: {e:?}"))?;
+    if steps.moved_backup {
+        println!(
+            "grow: the backup partition table {}to the end of the disk",
+            if write { "moved " } else { "would move " }
+        );
+    }
+    if steps.extended_partition {
+        println!(
+            "grow: the data partition {} to {} MiB",
+            if write { "extended" } else { "would extend" },
+            mib(part.sectors())
+        );
+    }
+    let window = Partition::new(dev, part.first_lba, part.sectors())
+        .ok_or("data partition beyond the end")?;
+    let (mut disk, _) = Disk::open_with(Box::new(window), random, 8).map_err(|e| match e {
+        DiskError::Layout(LayoutError::OldVersion(_)) => V1_HINT.to_string(),
+        e => format!("data partition layout: {e:?}"),
+    })?;
+    match disk.grow(ratio).map_err(|e| format!("grow: {e:?}"))? {
+        Some(g) => println!(
+            "grow: layout {} MiB -> {} MiB, generation {}: database +{} MiB, telemetry +{} MiB ({}% database){}",
+            mib(g.old_total),
+            mib(g.new_total),
+            g.generation,
+            mib(g.db_sectors),
+            mib(g.telemetry_sectors),
+            ratio,
+            if write {
+                ""
+            } else {
+                " (dry run: nothing was written; add --write)"
+            }
+        ),
+        None => println!(
+            "grow: nothing to add ({} MiB of the device are not in the layout)",
+            mib(disk.spare_sectors())
+        ),
+    }
+    Ok(())
+}
+
+// --- fixture (test hook) ------------------------------------------------------------
+
+/// A layout-v1 data partition on an image: the kernel only reads v2, so the
+/// migration tests and the `layout-v1-refused` smoke scenario need this.
+fn fixture_v1(path: &str, populate: bool, fault: Option<&str>) -> Result<(), String> {
+    let mut dev = writable(path, fault)?;
+    let (part, _) = gpt::prepare(dev.as_mut(), random).map_err(|e| format!("gpt: {e:?}"))?;
+    let mut window = Partition::new(dev, part.first_lba, part.sectors()).ok_or("window")?;
+    // Never over anything: the head of the data partition must be blank.
+    let mut head = vec![0u8; 64 * S];
+    window
+        .read(0, &mut head)
+        .map_err(|e| format!("read: {e:?}"))?;
+    if head.iter().any(|&b| b != 0) {
+        return Err(format!(
+            "{path}: the data partition is not blank: fixture-v1 only formats a blank one"
+        ));
+    }
+    host::format_v1(&mut window, random())?;
+    eprintln!("fixture-v1: {path}: data partition formatted as layout v1");
+    if populate {
+        let disk = Disk::open_v1(Box::new(window)).map_err(|e| format!("{e:?}"))?;
+        host::populate(disk)?;
+        eprintln!(
+            "fixture-v1: populated: 40 devices, 2 retained messages, 1 session with 1 queued message, 600 telemetry records"
+        );
+    }
+    Ok(())
+}
+
 fn run(args: &[String]) -> Result<(), String> {
     let flag = |f: &str| args.iter().any(|a| a == f);
     let opt = |f: &str| {
@@ -653,7 +817,15 @@ fn run(args: &[String]) -> Result<(), String> {
                 continue;
             }
             if a.starts_with("--") {
-                skip = !matches!(a.as_str(), "--write" | "--allowlist");
+                skip = !matches!(
+                    a.as_str(),
+                    "--write"
+                        | "--allowlist"
+                        | "--resume"
+                        | "--rollback"
+                        | "--force"
+                        | "--populate"
+                );
                 continue;
             }
             v.push(a);
@@ -692,6 +864,41 @@ fn run(args: &[String]) -> Result<(), String> {
             &opt("--esp").ok_or("--esp ESP is required")?,
             flag("--write"),
         ),
+        Some("migrate") => migrate_cmd(
+            arg(1, "DISK")?,
+            &MigrateArgs {
+                write: flag("--write"),
+                resume: flag("--resume"),
+                rollback: flag("--rollback"),
+                force: flag("--force"),
+                rollback_file: opt("--rollback-file").map(PathBuf::from),
+                align_mib: opt("--align-mib")
+                    .map(|s| s.parse::<u32>().map_err(|e| format!("--align-mib: {e}")))
+                    .transpose()?
+                    .unwrap_or(1),
+                fault: opt("--fault"),
+            },
+        ),
+        Some("grow") => grow_cmd(
+            arg(1, "DISK")?,
+            opt("--ratio")
+                .map(|s| s.parse::<u32>().map_err(|e| format!("--ratio: {e}")))
+                .transpose()?
+                .unwrap_or(50)
+                .min(100),
+            flag("--write"),
+            opt("--fault").as_deref(),
+        ),
+        Some("fixture-v1") => {
+            if !flag("--write") {
+                return Err("fixture-v1 writes the image: add --write".into());
+            }
+            fixture_v1(
+                arg(1, "DISK")?,
+                flag("--populate"),
+                opt("--fault").as_deref(),
+            )
+        }
         _ => {
             print!(
                 "{}",

@@ -270,9 +270,17 @@ struct RawStorage {
     sqlite_heap_mb: u32,
     telemetry_topics: Vec<String>,
     retention_days: u32,
+    /// Percent of new disk space (after the volume grew) that goes to the
+    /// SQLite database; the rest goes to the telemetry ring (S3).
+    #[serde(default = "default_grow_ratio_db")]
+    grow_ratio_db: u32,
     require_flush: bool,
     require_data_disk: bool,
     refuse_on_corruption: bool,
+}
+
+fn default_grow_ratio_db() -> u32 {
+    50
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -398,6 +406,9 @@ pub struct Storage {
     pub sqlite_heap_mb: u32,
     pub telemetry_topics: Vec<String>,
     pub retention_days: u32,
+    /// Percent of new disk space that goes to the SQLite database when the
+    /// volume grows; the rest goes to the telemetry ring (S3).
+    pub grow_ratio_db: u32,
     pub require_flush: bool,
     /// Without a data disk: refuse to serve (true) or run in memory only.
     pub require_data_disk: bool,
@@ -1138,6 +1149,9 @@ fn validate_storage(
     if raw.retention_days == 0 {
         errors.push(err("storage.retention_days", "must be greater than 0"));
     }
+    if raw.grow_ratio_db > 100 {
+        errors.push(err("storage.grow_ratio_db", "must be in 0..=100 (percent)"));
+    }
     validate_filters(
         "storage.telemetry_topics",
         &raw.telemetry_topics,
@@ -1152,6 +1166,7 @@ fn validate_storage(
         sqlite_heap_mb: raw.sqlite_heap_mb,
         telemetry_topics: raw.telemetry_topics.clone(),
         retention_days: raw.retention_days,
+        grow_ratio_db: raw.grow_ratio_db,
         require_flush: raw.require_flush,
         require_data_disk: raw.require_data_disk,
         refuse_on_corruption: raw.refuse_on_corruption,
@@ -1421,6 +1436,7 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         sqlite_heap_mb: {heap},
         telemetry_topics: {tt},
         retention_days: {rd},
+        grow_ratio_db: {grd},
         require_flush: {rf},
         require_data_disk: {rdd},
         refuse_on_corruption: {roc},
@@ -1503,6 +1519,7 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         heap = cfg.storage.sqlite_heap_mb,
         tt = render_strs(&cfg.storage.telemetry_topics),
         rd = cfg.storage.retention_days,
+        grd = cfg.storage.grow_ratio_db,
         rf = cfg.storage.require_flush,
         rdd = cfg.storage.require_data_disk,
         roc = cfg.storage.refuse_on_corruption,

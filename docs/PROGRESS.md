@@ -1639,3 +1639,47 @@ Host-only change; no kernel, no smoke cycle. Details and exclusions: `docs/VERIF
 **Coverage** (`make coverage`, 20 s fuzz per target from `fuzz/seeds`, `llvm-cov`, lines of the target's source files): mqtt_decode 98.1 % (261/266), tcp_segment 95.3 % (82/86), tls_record 67.0 % (179/267), net_frame 30.7 % (268/873, the whole net crate), broker_input 12.4 % (173/1397, `lib.rs`, `acl.rs`, `topics.rs`), config_parse 1.2 % (10/819, the whole schema crate). Low numbers are mostly structural: the target feeds raw text or bytes, and the denominator is the full crate (config_parse rejects at the TOML stage without a seed; broker_input rarely produces a valid CONNECT without seeds). **Seeds not added** (no time): the cheap wins are valid config TOML (`deploy/dev/config.toml`) for config_parse, and CONNECT/SUBSCRIBE/PUBLISH sequences in the `broker_input` chunk format.
 
 **Other.** `cfg(kani)` added to the workspace `check-cfg`. `fuzz/coverage/` ignored. fmt, `clippy --workspace --all-targets -D warnings` and `cargo test --workspace` pass (after `make certs`).
+
+## S2 — Layout v2: alignment, topology, partition count, offline migration (2026-10-31)
+
+PROMPT-storage.md S2, plan in docs/STORAGE-PLAN.md (status and deviations there). ADR-140 (layout v2), ADR-141 (migration). Specification: DISK-FORMAT.md (rewritten for v2, still machine-checked).
+
+**Done**
+
+- **Topology.** virtio-blk `F_TOPOLOGY`; virtio-scsi READ CAPACITY (16) and the Block Limits VPD page B0h. The kernel logs `blk: topology: logical … physical … optimal I/O …`. NVMe and ATA topology are deferred to X13; the store's `Topology` already carries the same five numbers.
+- **Layout v2.**
+  - Every region starts on `lcm(1 MiB, physical block, optimal I/O)` (capped at 64 MiB); the alignment is stored and kept for life.
+  - The telemetry partition count is in the superblock (G4); the kernel formats with the CPU count rounded up to a power of two, at least 8.
+  - Two superblock slots (LBA 0 and 24) with a generation: one 4 KiB write to the slot not in force per update.
+  - Region entries may repeat for the database and the telemetry ring (extents), up to 128.
+  - The formatted size is rounded down to 4 KiB (G7).
+  - Segment headers carry the layout UUID, so a reformatted or newly claimed area cannot surface an older ring (a latent v1 problem).
+- **Writes in whole physical blocks.** `Disk` reads the edges of a smaller write first; telemetry flushes pad to the block; a new segment's header goes out with its first records. The debug counter `misaligned_writes` is in `DiskStats` and logged after startup and after `db-bench`.
+- **The kernel refuses v1** with `data disk is layout v1; this image needs v2: run urmqtt-disk migrate (docs/DEPLOY.md)` and the token `storage: refused reason=layout-v1`, before anything is written: the boot self-test skips any partition the store will refuse. A 4Kn boot disk is refused with a message.
+- **`urmqtt-disk migrate`** (dry run by default; `--write`, `--resume`, `--rollback [--force]`, `--rollback-file`, `--align-mib`): preconditions, plan, copy-then-switch into regions carved from the old database region's dead tail, read-back compare, the switch as one superblock write, a state record with a saved v1 superblock and a rollback file, and a verification that compares integrity, every table's row count, the database and WAL bytes and the telemetry records (count and content digest) with the source.
+- **Also:** `urmqtt-disk info|verify` understand v1, v2, extents and the migration record; `fixture-v1 [--populate]` builds a v1 disk with real state (test hook, no v1 kernel is left); `--fault SPEC` on writing commands; `scripts/fault-loop.sh migrate|grow`; `scripts/run-qemu.sh --blk-props`; smoke `SMOKE_PORT` (the scenarios no longer hard-code host port 18883) and `SMOKE_ONLY=storage`; the diagnostic's free-space survey reads both superblock slots; fuzz `disk_layout` covers slot selection, the v1 view and the migration record, with new seeds.
+
+**Tests**
+
+- **Host** (`cargo test --workspace`: 630 passed, 7 ignored, 0 failed; the earlier count was 308 at X0b):
+  - layout: plan, alignment to 3 MiB optimal I/O, slot selection (torn, old version, stale v1 beside a finished v2), grown layouts;
+  - disk: a v1 disk is refused with no write attempted; sizes, torn size table, alignment on 512/512, 512/4096 and a strict 4096/4096 device (`misaligned_writes` 0, and the medium's own counter agrees);
+  - spec: every v2 field, the v1 superblock, the migration record against DISK-FORMAT.md;
+  - golden: the three frozen v1 images are reproduced **byte for byte** by the v1 code paths (`golden_v1`), so nothing in the shared write path changed v1 bytes;
+  - virtio: topology decoding (hostile values tamed) for blk and SCSI pages.
+- **Migration** (`tools/disk/tests/migrate.rs`): each golden image migrated and verified; a real SQLite fixture compared table by table; preconditions refuse a hot journal, an oversized file, no room, a non-database, an existing rollback file; **a power cut at every write, clean and torn, cache dropped or applied** (golden images: 30, 50 and 50 cases over 7, 12 and 12 writes; the SQLite fixture: 54 cases over 13 writes): always a valid v1 or v2 disk with the same data, `--resume` always finishes it, `--rollback` always returns to the byte-identical LBA 0 and the same data. `scripts/fault-loop.sh migrate` through the real binary: 16 cases, ok.
+- **Smoke, aarch64 HVF** (new, all passing): `topology` for virtio-blk 512/512, 4096 with 256 KiB and 2 MiB optimal I/O, and virtio-scsi 4096 with 1 MiB: topology line, alignment unit 1024/2048/1024 KiB, `misaligned_writes=0` at startup and after `db-bench`; `layout-v1-refused` (the disk's SHA-256 is the same before and after, the self-test skipped); `layout-v1-migrate-tool` (info, dry run unchanged, `--write`, the tool's own verification, `verify`); `layout-v1-migrated-boots` (the kernel restores 2 retained messages, 1 session with 1 queued message, 40 devices and 600 telemetry records from the migrated disk).
+- **Smoke, x86_64 TCG:** the same scenarios, plus first-boot, first-boot-crash, scsi-boot, iso-as-cd, own-damaged.
+- **Fuzz** `disk_layout`: 687 317 runs in 26 s, no failure.
+
+**Measured.** `db-bench` on HVF, virtio-blk, 512/512: 45 020 inserts/s batched, 2 108 with one insert per transaction (S1 baseline on the same kind of run: 56 696 and 2 094). With a 4096-byte physical block: 51 172 and 1 454. The extra reads of the edge blocks cost on a device that has no physical-block penalty (QEMU), which is the price of never writing a partial physical block; real 512e and 4Kn media gain from it. Measured again, old kernel (the commit before S2) against the new one, four runs each, same machine, virtio-blk 512/512, HVF: batched 51.8, 47.9, 55.5, 54.0 k inserts/s before and 45.7, 49.4, 59.7, 53.0 k after; one insert per transaction 2 051, 1 585, 1 796, 1 854 before and 1 569, 1 738, 1 979, 1 636 after. The runs vary by more than the difference: no measurable regression at 512/512.
+
+**Not done / deviations**
+
+- **NVMe and ATA topology:** X13.
+- **QEMU `logical_block_size=4096`:** cannot boot the 512-byte-GPT image (the firmware reads the GPT in 4096-byte blocks); the 4096/4096 "no misaligned writes" test is a host test on a strict device. The kernel refuses a 4Kn boot disk with a message (not exercised under QEMU).
+- **Statsd reason for the v1 refusal:** the network is not up when the boot refuses; the reason is the log token on the serial console. A datagram would need a network bring-up in the failure path.
+- **A migrated disk's telemetry ring is 4 KiB aligned, not 1 MiB** (ADR-141): it is not moved. Everything else of a migrated disk, and a freshly formatted disk entirely, is aligned.
+- **G8** (boot time grows with the telemetry region): not done, S6.
+- **The golden v1 images contain no SQLite content** (a declared database of zeros): the migration of the golden images runs with the database check off (a library option, not a command-line one); the SQLite round trip is tested on a separate real fixture.
+- **No second smoke cycle** over the whole suite; only the storage, disk, install and cross-architecture groups were run (see S3).

@@ -534,7 +534,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
     // Durable storage (M11) opens before the other cores start; the DB
     // core takes the store over afterwards.
-    let restored = crate::db::init(s.options.db_test);
+    let restored = crate::db::init(s.options.db_test, s.cpus as usize);
     // The identity lifecycle's sets (H1): from the store, or from the image
     // when there is no durable storage (then the control channel refuses).
     let image_revoked: alloc::vec::Vec<alloc::string::String> = urmqtt_config::CONFIG

@@ -11,7 +11,7 @@
 
 use crate::queue::{Buf, DmaRegion, SplitQueue};
 use crate::transport::Transport;
-use crate::{Env, F_VERSION_1, VirtioError, wait_used};
+use crate::{BlockTopology, Env, F_VERSION_1, VirtioError, wait_used};
 
 pub const SECTOR: u64 = 512;
 /// Largest single transfer (bounce buffer size).
@@ -107,6 +107,9 @@ pub struct DiskInfo {
     pub target: u16,
     pub lun: u32,
     pub sectors: u64,
+    /// Physical block size and I/O hints (READ CAPACITY (16), Block Limits
+    /// VPD page), or the defaults of a plain 512-byte disk.
+    pub topology: BlockTopology,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +146,7 @@ pub struct ScsiDisk {
     pub target: u16,
     pub lun_id: u32,
     pub capacity_sectors: u64,
+    pub topology: BlockTopology,
 }
 
 impl VirtioScsi {
@@ -303,17 +307,47 @@ impl VirtioScsi {
                 let Some(sectors) = self.capacity(env, addr) else {
                     continue;
                 };
+                let topology = self.topology(env, addr);
                 if let Some(slot) = out.get_mut(n) {
                     *slot = Some(DiskInfo {
                         target,
                         lun,
                         sectors,
+                        topology,
                     });
                     n += 1;
                 }
             }
         }
         (out, n)
+    }
+
+    /// Physical block size and I/O hints of a 512-byte-block disk; what the
+    /// device does not answer stays at the defaults.
+    fn topology<E: Env>(&mut self, env: &E, lun: [u8; 8]) -> BlockTopology {
+        let mut c = [0u8; 16];
+        c[0] = 0x9e;
+        c[1] = 0x10;
+        c[13] = 32;
+        let cap16 = self.checked(env, lun, &c, Dir::In, 32).ok().map(|()| {
+            let mut d = [0u8; 32];
+            d.copy_from_slice(self.io_bytes(DATA, 32));
+            d
+        });
+        // INQUIRY, EVPD, page B0h (Block Limits), 64 bytes.
+        let b0 = self
+            .checked(env, lun, &[0x12, 1, 0xb0, 0, 64, 0], Dir::In, 64)
+            .ok()
+            .map(|()| {
+                let mut d = [0u8; 64];
+                d.copy_from_slice(self.io_bytes(DATA, 64));
+                d
+            });
+        BlockTopology::from_scsi(
+            SECTOR as u32,
+            cap16.as_ref().map(|d| &d[..]),
+            b0.as_ref().map(|d| &d[..]),
+        )
     }
 
     /// Size in 512-byte sectors; `None` for other block sizes.
@@ -342,6 +376,7 @@ impl VirtioScsi {
             target: disk.target,
             lun_id: disk.lun,
             capacity_sectors: disk.sectors,
+            topology: disk.topology,
         }
     }
 

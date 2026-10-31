@@ -459,3 +459,84 @@ restarts the service.
 - **Seeding devices offline:** `urmqtt-disk import-devices DISK ids.txt
   [--allowlist] --write` adds device ids to the registry and, for allowlist
   mode, to the allowlist.
+
+## 9. The data disk: layout v2, migrating a v1 disk, growing (S2, S3)
+
+The data partition has a **layout version**. Images built from S2 on use
+**layout v2** (1 MiB and optimal-I/O alignment, a telemetry partition count
+chosen at format time, two superblock slots; byte-level spec in
+[DISK-FORMAT.md](DISK-FORMAT.md)). A disk written by an earlier image has
+layout v1. The kernel does **not** convert it at boot. It stops, before it
+writes anything, with:
+
+```
+data disk is layout v1; this image needs v2: run urmqtt-disk migrate (docs/DEPLOY.md)
+```
+
+and the line `storage: refused reason=layout-v1` on the serial console. The
+VM resets every 60 s until the disk is migrated or the old image is put back.
+A new disk (a first boot) is formatted as v2 and needs nothing. Check a disk
+with `urmqtt-disk info DISK`.
+
+### Migrating a v1 disk
+
+`urmqtt-disk migrate` runs **offline**, on the stopped VM's disk (an image file
+or a block device), and does nothing without `--write`:
+
+```
+urmqtt-disk migrate DISK                  # the plan and the checks: old and new regions, bytes to copy,
+                                          # free space needed, SQLite and telemetry verified; nothing written
+urmqtt-disk migrate DISK --write [--rollback-file FILE] [--align-mib N]
+urmqtt-disk migrate DISK --resume --write       # finish an interrupted run
+urmqtt-disk migrate DISK --rollback --write     # back to v1 (after the switch also --force)
+```
+
+What it does and why it is safe:
+- It refuses unless the disk is a valid v1 disk, `integrity_check` of the
+  database passes on an in-memory copy, the telemetry opens, and the rollback
+  journal is empty (if it is not, boot the old image once and power it off
+  cleanly first). A non-empty WAL is fine: it is copied and replayed by the
+  next boot.
+- The database, WAL and journal (megabytes) are **copied** into new aligned
+  regions made from the unused tail of the old database region. Nothing the
+  old layout uses is overwritten before the new superblock is written, which
+  is one 4 KiB write. A power cut at any write leaves a valid v1 disk or a
+  valid v2 disk, never a corrupt one; `--resume` finishes, `--rollback` undoes.
+- The **telemetry ring stays where it is**. It is not realigned (its writes
+  are still whole 4 KiB blocks), so a migrated disk has an unaligned ring
+  until the disk is reinstalled.
+- A copy of the v1 superblock is kept on the disk (LBA 32) and in the
+  rollback file next to the disk (`DISK.urmqtt-migrate-rollback` by default;
+  an existing file is never overwritten). Keep it until the migrated disk
+  has run well. After the switch, `--rollback --force` returns to the
+  old files and **loses every change made since**.
+- After the run the tool verifies the result from a read-only view: the v2
+  layout opens, the database and WAL bytes are identical, `integrity_check`
+  passes, every table has the same number of rows as before, and the
+  telemetry has the same records (count and content digest).
+- "not enough free space for the new regions" means the live database is
+  almost as large as its region. Grow the volume first (below), then migrate.
+
+Per platform:
+- **A VM image file on the host** (QEMU, libvirt, Proxmox raw/qcow2 converted
+  to raw): shut the VM down, `urmqtt-disk migrate disk.img`, review, then
+  `--write`, then start it with the new image's ESP
+  (`urmqtt-disk update-boot disk.img --esp esp.img --write`).
+- **A cloud volume**: power the server off, attach its boot volume to a small
+  Linux helper VM in the same region as an extra disk (do not mount it), run
+  `urmqtt-disk migrate /dev/vdb` (the device name the helper shows; `info`
+  first), detach the volume and reattach it to the original server. If the
+  provider cannot move a boot volume, snapshot it, create a volume from the
+  snapshot, migrate that one and attach it as the boot disk of a new server.
+- **Bare metal**: boot a Linux live USB stick, copy the `urmqtt-disk`
+  binary (built with `cargo build --release -p urmqtt-disk-tool`, or from the
+  release), `urmqtt-disk migrate /dev/nvme0n1`, power off, remove the stick.
+  On macOS use `/dev/rdiskN`.
+
+### Disk safety, as before
+
+Only the disk Limine booted from is written, and only inside its data
+partition (and the partition table at the first boot and when growing). The
+offline tool writes only with `--write`. `scripts/fault-loop.sh migrate|grow`
+runs the procedures on an image with a power cut after every write and checks
+that each case ends in a valid disk that finishes.

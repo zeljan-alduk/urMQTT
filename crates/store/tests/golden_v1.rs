@@ -1,10 +1,12 @@
 //! Golden layout-v1 disk images (STORAGE-PLAN S0).
 //!
-//! Each scenario builds a small disk with the real code, deterministically,
-//! and compares every non-zero sector with the frozen copy in
-//! `tests/golden/<name>.txt`. A change to any on-disk structure therefore
-//! fails here until the format version is bumped and a migration exists.
-//! The frozen v1 images are also the inputs of S2's migration tests.
+//! Each scenario builds a small disk with the real code in its layout-v1
+//! mode (`layout::v1`, `Disk::open_v1`, the telemetry log over a v1 view),
+//! deterministically, and compares every non-zero sector with the frozen
+//! copy in `tests/golden/<name>.txt`. A change to the v1 structures, or to
+//! the code paths that must keep reading and writing them byte for byte,
+//! fails here. The frozen files are the inputs of S2's migration tests
+//! (`tools/disk/tests/migrate.rs`) and were not changed by S2.
 //!
 //! Only urMQTT's own structures are frozen (superblock, size tables,
 //! telemetry). SQLite's files are SQLite's format, checked semantically by
@@ -16,9 +18,9 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use urmqtt_store::layout::{FileKind, SECTOR};
+use urmqtt_store::layout::{FileKind, Layout, LayoutError, SECTOR, SizeTable, v1};
 use urmqtt_store::telemetry::TelemetryLog;
-use urmqtt_store::{Disk, MemDisk, Opened};
+use urmqtt_store::{Disk, MemDisk};
 
 /// The smallest supported disk (16 MiB), so the files stay small.
 const DISK_BYTES: usize = 16 << 20;
@@ -71,11 +73,28 @@ fn compare(name: &str, m: &MemDisk) {
     }
 }
 
+/// Formats a v1 disk the way layout v1's `Disk::open` did: size table slot
+/// A, slot B zeros, flush, then the superblock, flush.
+fn format_v1(m: &MemDisk) {
+    let l = v1::plan(DISK_BYTES as u64 / SECTOR, UUID).unwrap();
+    let mut dev = m.device();
+    dev.write(8, &SizeTable::default().encode()).unwrap();
+    dev.write(16, &[0u8; 4096]).unwrap();
+    dev.flush().unwrap();
+    dev.write(0, &v1::encode(&l)).unwrap();
+    dev.flush().unwrap();
+}
+
 /// A freshly formatted disk with an opened (formatted) telemetry log.
 fn fresh() -> (MemDisk, Disk, TelemetryLog) {
     let m = MemDisk::new(DISK_BYTES);
-    let (mut disk, how) = Disk::open(m.device(), || UUID).unwrap();
-    assert_eq!(how, Opened::Formatted);
+    format_v1(&m);
+    // The kernel refuses it; the tool's view reads it.
+    assert_eq!(
+        Disk::open(m.device(), || UUID).err(),
+        Some(urmqtt_store::DiskError::Layout(LayoutError::OldVersion(1)))
+    );
+    let mut disk = Disk::open_v1(m.device()).unwrap();
     let (log, rec) = TelemetryLog::open(&mut disk, NOW, RETENTION_MS).unwrap();
     assert_eq!(rec.records, 0);
     (m, disk, log)
@@ -97,8 +116,7 @@ fn publish(disk: &mut Disk, log: &mut TelemetryLog) {
 }
 
 fn reopen(m: &MemDisk) -> urmqtt_store::telemetry::Recovery {
-    let (mut disk, how) = Disk::open(m.device(), || [0xff; 16]).unwrap();
-    assert_eq!(how, Opened::Existing);
+    let mut disk = Disk::open_v1(m.device()).unwrap();
     TelemetryLog::open(&mut disk, NOW + 60, RETENTION_MS)
         .unwrap()
         .1
@@ -116,7 +134,7 @@ fn v1_with_telemetry() {
     let (m, mut disk, mut log) = fresh();
     publish(&mut disk, &mut log);
     compare("v1-telemetry", &m);
-    let (disk2, _) = Disk::open(m.device(), || [0; 16]).unwrap();
+    let disk2 = Disk::open_v1(m.device()).unwrap();
     assert_eq!(disk2.file_size(FileKind::Db), 8 * 4096);
     let rec = reopen(&m);
     assert_eq!((rec.records, rec.torn_tails), (40, 0));
@@ -142,4 +160,50 @@ fn v1_torn_tail() {
     compare("v1-torn", &m);
     let rec = reopen(&m);
     assert_eq!((rec.records, rec.torn_tails), (40, 1));
+}
+
+/// The frozen files themselves are valid layout-v1 disks that the v2 parser
+/// names as such (and never writes to).
+#[test]
+fn the_frozen_files_are_v1_disks() {
+    for name in ["v1-fresh", "v1-telemetry", "v1-torn"] {
+        let m = load(name);
+        let mut sb = [0u8; 4096];
+        m.device().read(0, &mut sb).unwrap();
+        assert_eq!(
+            Layout::decode(&sb, DISK_BYTES as u64 / SECTOR),
+            Err(LayoutError::OldVersion(1)),
+            "{name}"
+        );
+        assert!(
+            v1::decode(&sb, DISK_BYTES as u64 / SECTOR)
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+/// Loads a frozen golden file into a disk.
+fn load(name: &str) -> MemDisk {
+    let path: PathBuf = [
+        env!("CARGO_MANIFEST_DIR"),
+        "tests",
+        "golden",
+        &format!("{name}.txt"),
+    ]
+    .iter()
+    .collect();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut img = vec![0u8; DISK_BYTES];
+    for line in text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.starts_with("size"))
+    {
+        let (lba, hex) = line.split_once(' ').unwrap();
+        let at = lba.parse::<usize>().unwrap() * SECTOR as usize;
+        for (i, b) in img[at..at + SECTOR as usize].iter_mut().enumerate() {
+            *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
+        }
+    }
+    MemDisk::from_image(img)
 }

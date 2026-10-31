@@ -59,6 +59,29 @@ impl BlockDevice for Partition {
     fn max_io(&self) -> usize {
         self.inner.max_io()
     }
+
+    fn topology(&self) -> crate::layout::Topology {
+        self.inner.topology()
+    }
+
+    fn base_lba(&self) -> u64 {
+        self.inner.base_lba() + self.first
+    }
+
+    fn refresh_size(&mut self) -> Option<u64> {
+        self.inner.refresh_size()
+    }
+
+    fn whole_disk(&mut self) -> Option<&mut dyn BlockDevice> {
+        Some(self.inner.as_mut())
+    }
+
+    fn resize_window(&mut self, sectors: u64) {
+        // Never smaller, never beyond the disk.
+        if sectors > self.sectors && self.first + sectors <= self.inner.sectors() {
+            self.sectors = sectors;
+        }
+    }
 }
 
 #[cfg(test)]

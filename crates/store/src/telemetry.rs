@@ -1,35 +1,42 @@
-//! Telemetry log (PROMPT §7.4, M12, ADR-031): append-only segments in the
-//! telemetry region of the data disk, one partition per source core, a
-//! CRC per record, batched writes, recovery with torn-tail truncation,
-//! and size- plus age-based retention.
+//! Telemetry log (PROMPT §7.4, M12, ADR-031, ADR-140): append-only segments
+//! in the telemetry region of the data disk, one partition per source core
+//! group, a CRC per record, batched writes padded to the physical block,
+//! recovery with torn-tail truncation, and size- plus age-based retention.
 //!
 //! ```text
-//! region   [ header 4 KiB ][ partition 0 ][ partition 1 ] … [ partition P-1 ]
-//! partition [ segment 0 ][ segment 1 ] … [ segment S-1 ]   (a ring)
-//! segment  [ header 512 B: magic, partition, seq, created, CRC ][ records … ][ zeros ]
-//! record   [ len u32 ][ crc u32 ][ ts_ms u64 ][ topic_len u16 ][ topic ][ payload ]
+//! region    [ header 4 KiB ][ band 0 ][ band 1 ] …           (one band per extent)
+//! band      [ partition 0 ][ partition 1 ] … [ partition P-1 ]
+//! partition [ segment 0 ][ segment 1 ] … [ segment n-1 ]     (n segments in this band)
+//! segment   [ header 512 B: magic, partition, seq, created, layout UUID, CRC ][ records … ][ zeros ]
+//! record    [ len u32 ][ crc u32 ][ ts_ms u64 ][ topic_len u16 ][ topic ][ payload ]
 //! ```
 //!
-//! `len` counts the bytes after the `crc` field. The CRC-32C covers the
-//! segment's sequence number followed by those bytes. Records left over
-//! from an earlier pass of the ring therefore never validate in a reused
-//! segment. A record never spans segments. Every flush writes whole
-//! sectors, zero-padded after the last record, so recovery stops at the
-//! first `len == 0` (clean end) or at the first record that does not
-//! check out (a torn tail, which is truncated).
+//! A partition is a ring over its segments in all bands, band 0 first. A
+//! disk that grew (S3) got another band per telemetry extent, so no segment
+//! that exists changes position. `len` counts the bytes after the `crc`
+//! field. The CRC-32C covers the segment's sequence number followed by
+//! those bytes. Records left over from an earlier pass of the ring
+//! therefore never validate in a reused segment. A segment header carries
+//! the layout's UUID, so segments of an earlier incarnation of the disk (or
+//! stale bytes in space a grow just claimed) are not mistaken for ours; only
+//! a ring that came from layout v1 accepts all-zero UUIDs, in band 0. A
+//! record never spans segments. Every flush writes whole physical blocks,
+//! zero-padded after the last record, so recovery stops at the first
+//! `len == 0` (clean end) or at the first record that does not check out
+//! (a torn tail, which is truncated).
 
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::crc::{crc32c, update};
 use crate::disk::{Disk, DiskError};
-use crate::layout::{BLOCK, RegionKind, SECTOR};
+use crate::layout::{BLOCK, Layout, RegionKind, SECTOR};
 
 pub const MAGIC: [u8; 8] = *b"URMQTLH1";
 pub const SEGMENT_MAGIC: [u8; 8] = *b"URMQTSG1";
-pub const VERSION: u32 = 1;
-/// Partitions per log: source core `c` writes partition `c % PARTITIONS`.
-pub const PARTITIONS: usize = 8;
+pub const VERSION: u32 = 2;
+/// Header version of a ring written by layout v1.
+pub const VERSION_V1: u32 = 1;
 const SEGMENT_HEADER: u64 = SECTOR;
 const RECORD_HEADER: usize = 8;
 /// Fixed record fields after `crc`: timestamp and topic length.
@@ -74,31 +81,91 @@ pub struct Recovery {
     pub expired: u64,
 }
 
+/// The segments of one telemetry extent: `segs` per partition, partition
+/// `p` starting `p * segs * seg_bytes` after `start` (a byte offset in the
+/// telemetry region, all extents back to back).
 #[derive(Debug, Clone, Copy)]
+struct Band {
+    start: u64,
+    segs: u64,
+}
+
+#[derive(Debug, Clone)]
 struct Geometry {
     seg_bytes: u64,
-    segments: u64,
-    part_bytes: u64,
+    parts: u64,
+    bands: Vec<Band>,
+    /// Segments per partition, over all bands.
+    total: u64,
 }
 
 impl Geometry {
-    fn plan(region_bytes: u64) -> Result<Self, LogError> {
-        let usable = region_bytes.saturating_sub(BLOCK as u64);
-        let part = usable / PARTITIONS as u64;
+    /// Geometry of a fresh log: the segment size follows the first extent.
+    fn plan(extents: &[u64], parts: u32) -> Result<Self, LogError> {
+        let first = extents.first().copied().ok_or(LogError::TooSmall)?;
+        let usable = first.saturating_sub(BLOCK as u64);
+        let part = usable / u64::from(parts.max(1));
         let seg = ((part / 8).clamp(MIN_SEGMENT, MAX_SEGMENT) / BLOCK as u64) * BLOCK as u64;
-        let segments = part / seg.max(1);
-        if segments < 2 {
+        let g = Self::from_extents(extents, parts, seg)?;
+        if g.bands.first().is_none_or(|b| b.segs < 2) {
             return Err(LogError::TooSmall);
+        }
+        Ok(g)
+    }
+
+    /// The bands of a log with segments of `seg` bytes in extents of the
+    /// given sizes.
+    fn from_extents(extents: &[u64], parts: u32, seg: u64) -> Result<Self, LogError> {
+        let parts = u64::from(parts.max(1));
+        let row = seg
+            .checked_mul(parts)
+            .filter(|&r| r > 0)
+            .ok_or(LogError::BadHeader)?;
+        let mut bands = Vec::new();
+        let mut at = 0u64;
+        let mut total = 0u64;
+        for (i, &bytes) in extents.iter().enumerate() {
+            let head = if i == 0 { BLOCK as u64 } else { 0 };
+            let segs = bytes.saturating_sub(head) / row;
+            if segs > 0 {
+                bands.push(Band {
+                    start: at + head,
+                    segs,
+                });
+                total += segs;
+            }
+            at += bytes;
         }
         Ok(Self {
             seg_bytes: seg,
-            segments,
-            part_bytes: seg * segments,
+            parts,
+            bands,
+            total,
         })
     }
 
     fn segment_offset(&self, p: usize, s: u64) -> u64 {
-        BLOCK as u64 + p as u64 * self.part_bytes + s * self.seg_bytes
+        let mut rem = s;
+        for b in &self.bands {
+            if rem < b.segs {
+                return b.start + (p as u64 * b.segs + rem) * self.seg_bytes;
+            }
+            rem -= b.segs;
+        }
+        // Unreachable for s < total; stay inside the first band.
+        self.bands.first().map_or(0, |b| b.start)
+    }
+
+    /// Band holding ring index `s` of every partition.
+    fn band_of(&self, s: u64) -> usize {
+        let mut rem = s;
+        for (i, b) in self.bands.iter().enumerate() {
+            if rem < b.segs {
+                return i;
+            }
+            rem -= b.segs;
+        }
+        0
     }
 }
 
@@ -109,8 +176,8 @@ struct Partition {
     seq: u64,
     /// Byte offset of the next record inside the active segment.
     pos: u64,
-    /// Bytes of the active segment from the last sector boundary before
-    /// `pos` (kept so a flush writes whole sectors without reading).
+    /// Bytes of the active segment from the last physical-block boundary
+    /// before `pos` (kept so a flush writes whole blocks without reading).
     tail: Vec<u8>,
     /// Encoded records waiting for the next flush.
     pending: Vec<u8>,
@@ -133,6 +200,14 @@ pub struct TelemetryLog {
     parts: Vec<Partition>,
     now_unix: u64,
     pub durable_records: u64,
+    /// UUID new segment headers carry (all zero when writing a v1 ring).
+    write_uuid: [u8; 16],
+    /// The layout's UUID: a valid header carries it.
+    uuid: [u8; 16],
+    /// Band 0 may hold segments without a UUID (a ring from layout v1).
+    zero_ok_band0: bool,
+    /// Device write granularity, bytes.
+    gran: u64,
 }
 
 fn put(b: &mut [u8], at: usize, v: &[u8]) {
@@ -149,19 +224,30 @@ fn u64_at(b: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(b.get(at..at + 8)?.try_into().ok()?))
 }
 
-fn encode_header(geo: &Geometry) -> [u8; BLOCK] {
+fn encode_header(geo: &Geometry, version: u32) -> [u8; BLOCK] {
     let mut b = [0u8; BLOCK];
     put(&mut b, 0, &MAGIC);
-    put(&mut b, 8, &VERSION.to_le_bytes());
-    put(&mut b, 12, &(PARTITIONS as u32).to_le_bytes());
+    put(&mut b, 8, &version.to_le_bytes());
+    put(&mut b, 12, &(geo.parts as u32).to_le_bytes());
     put(&mut b, 16, &geo.seg_bytes.to_le_bytes());
-    put(&mut b, 24, &geo.segments.to_le_bytes());
+    put(
+        &mut b,
+        24,
+        &geo.bands.first().map_or(0, |x| x.segs).to_le_bytes(),
+    );
     let crc = crc32c(b.get(..BLOCK - 4).unwrap_or(&[]));
     put(&mut b, BLOCK - 4, &crc.to_le_bytes());
     b
 }
 
-fn decode_header(b: &[u8; BLOCK], region_bytes: u64) -> Result<Option<Geometry>, LogError> {
+/// The log header against the layout: `Ok(None)` for a blank block, else
+/// the segment size. The partition count must be the layout's and the
+/// first band's segment count what the first extent holds.
+fn decode_header(
+    b: &[u8; BLOCK],
+    layout: &Layout,
+    extents: &[u64],
+) -> Result<Option<u64>, LogError> {
     if b.iter().all(|&x| x == 0) {
         return Ok(None);
     }
@@ -174,43 +260,74 @@ fn decode_header(b: &[u8; BLOCK], region_bytes: u64) -> Result<Option<Geometry>,
     else {
         return Err(LogError::BadHeader);
     };
-    if !crc_ok || ver != VERSION || parts as usize != PARTITIONS || seg < MIN_SEGMENT || segs < 2 {
+    let version_ok = ver == VERSION || (ver == VERSION_V1 && layout.legacy_telemetry());
+    if !crc_ok
+        || !version_ok
+        || parts != layout.partitions
+        || !(MIN_SEGMENT..=MAX_SEGMENT).contains(&seg)
+        || !seg.is_multiple_of(BLOCK as u64)
+        || segs < 2
+    {
         return Err(LogError::BadHeader);
     }
-    let geo = Geometry {
-        seg_bytes: seg,
-        segments: segs,
-        part_bytes: seg.checked_mul(segs).ok_or(LogError::BadHeader)?,
-    };
-    let need = geo
-        .part_bytes
-        .checked_mul(PARTITIONS as u64)
-        .and_then(|x| x.checked_add(BLOCK as u64))
-        .ok_or(LogError::BadHeader)?;
-    if need > region_bytes || !seg.is_multiple_of(BLOCK as u64) {
+    let geo = Geometry::from_extents(extents, parts, seg)?;
+    if geo.bands.first().map(|x| x.segs) != Some(segs) {
         return Err(LogError::BadHeader);
     }
-    Ok(Some(geo))
+    Ok(Some(seg))
 }
 
-fn segment_header(p: usize, seq: u64, created: u64) -> [u8; SECTOR as usize] {
+/// Bytes of one segment in every partition of a telemetry extent (the
+/// smallest extent worth adding when the disk grows): the partition count
+/// times the log's segment size, planned from the first extent when the
+/// log has not been formatted yet. `u64::MAX` if there is no telemetry.
+pub fn band_unit(disk: &mut Disk) -> Result<u64, DiskError> {
+    let extents: Vec<u64> = disk
+        .layout()
+        .extents(RegionKind::Telemetry)
+        .map(|r| r.bytes())
+        .collect();
+    if extents.is_empty() {
+        return Ok(u64::MAX);
+    }
+    let layout = disk.layout().clone();
+    let mut hb = [0u8; BLOCK];
+    disk.read_at(RegionKind::Telemetry, 0, &mut hb)?;
+    let seg = match decode_header(&hb, &layout, &extents) {
+        Ok(Some(seg)) => seg,
+        Ok(None) => match Geometry::plan(&extents, layout.partitions) {
+            Ok(g) => g.seg_bytes,
+            Err(_) => return Ok(u64::MAX),
+        },
+        Err(_) => return Ok(u64::MAX),
+    };
+    Ok(seg * u64::from(layout.partitions))
+}
+
+fn segment_header(p: usize, seq: u64, created: u64, uuid: &[u8; 16]) -> [u8; SECTOR as usize] {
     let mut b = [0u8; SECTOR as usize];
     put(&mut b, 0, &SEGMENT_MAGIC);
     put(&mut b, 8, &(p as u32).to_le_bytes());
     put(&mut b, 16, &seq.to_le_bytes());
     put(&mut b, 24, &created.to_le_bytes());
+    put(&mut b, 32, uuid);
     let crc = crc32c(b.get(..SECTOR as usize - 4).unwrap_or(&[]));
     put(&mut b, SECTOR as usize - 4, &crc.to_le_bytes());
     b
 }
 
-/// (seq, created) of a valid segment header for partition `p`.
-fn parse_segment_header(b: &[u8], p: usize) -> Option<(u64, u64)> {
+/// (seq, created) of a valid segment header for partition `p`. Its UUID
+/// must be `uuid`, or all zero where `zero_ok`.
+fn parse_segment_header(b: &[u8], p: usize, uuid: &[u8; 16], zero_ok: bool) -> Option<(u64, u64)> {
     let n = SECTOR as usize;
     if b.get(..8) != Some(&SEGMENT_MAGIC[..])
         || crc32c(b.get(..n - 4)?) != u32_at(b, n - 4)?
         || u32_at(b, 8)? as usize != p
     {
+        return None;
+    }
+    let found = b.get(32..48)?;
+    if found != &uuid[..] && !(zero_ok && found.iter().all(|&x| x == 0)) {
         return None;
     }
     let seq = u64_at(b, 16)?;
@@ -245,29 +362,40 @@ impl TelemetryLog {
         now_unix: u64,
         retention_ms: u64,
     ) -> Result<(Self, Recovery), LogError> {
-        let region = disk
-            .region(RegionKind::Telemetry)
-            .ok_or(LogError::TooSmall)?;
+        let layout = disk.layout().clone();
+        let extents: Vec<u64> = layout
+            .extents(RegionKind::Telemetry)
+            .map(|r| r.bytes())
+            .collect();
+        if extents.is_empty() {
+            return Err(LogError::TooSmall);
+        }
         let mut hb = [0u8; BLOCK];
         disk.read_at(RegionKind::Telemetry, 0, &mut hb)?;
-        let geo = match decode_header(&hb, region.bytes())? {
-            Some(g) => g,
+        let v1_ring = layout.is_v1_view();
+        let geo = match decode_header(&hb, &layout, &extents)? {
+            Some(seg) => Geometry::from_extents(&extents, layout.partitions, seg)?,
             None => {
-                let g = Geometry::plan(region.bytes())?;
-                disk.write_at(RegionKind::Telemetry, 0, &encode_header(&g))?;
+                let g = Geometry::plan(&extents, layout.partitions)?;
+                let v = if v1_ring { VERSION_V1 } else { VERSION };
+                disk.write_at(RegionKind::Telemetry, 0, &encode_header(&g, v))?;
                 disk.sync()?;
                 g
             }
         };
         let mut log = Self {
+            parts: Vec::with_capacity(geo.parts as usize),
             geo,
-            parts: Vec::with_capacity(PARTITIONS),
             now_unix,
             durable_records: 0,
+            write_uuid: if v1_ring { [0; 16] } else { layout.uuid },
+            uuid: layout.uuid,
+            zero_ok_band0: layout.legacy_telemetry(),
+            gran: disk.write_gran() as u64,
         };
         let cutoff = (now_unix * 1000).saturating_sub(retention_ms);
         let mut rec = Recovery::default();
-        for p in 0..PARTITIONS {
+        for p in 0..log.geo.parts as usize {
             let part = log.recover_partition(disk, p, cutoff, &mut rec)?;
             log.parts.push(part);
         }
@@ -275,20 +403,43 @@ impl TelemetryLog {
         Ok((log, rec))
     }
 
+    /// After the layout grew (S3): takes up the telemetry extents added
+    /// since the log was opened. Existing segments keep their positions, so
+    /// the rings continue where they were.
+    pub fn refresh_geometry(&mut self, disk: &Disk) -> Result<(), LogError> {
+        let extents: Vec<u64> = disk
+            .layout()
+            .extents(RegionKind::Telemetry)
+            .map(|r| r.bytes())
+            .collect();
+        let g = Geometry::from_extents(&extents, self.geo.parts as u32, self.geo.seg_bytes)?;
+        if g.total < self.geo.total {
+            return Err(LogError::BadHeader);
+        }
+        self.geo = g;
+        Ok(())
+    }
+
+    /// Number of partitions.
+    pub fn partitions(&self) -> usize {
+        self.geo.parts as usize
+    }
+
     fn read_segment_headers(
         &self,
         disk: &mut Disk,
         p: usize,
     ) -> Result<Vec<Option<(u64, u64)>>, LogError> {
-        let mut out = Vec::with_capacity(self.geo.segments as usize);
+        let mut out = Vec::with_capacity(self.geo.total as usize);
         let mut sec = [0u8; SECTOR as usize];
-        for s in 0..self.geo.segments {
+        for s in 0..self.geo.total {
             disk.read_at(
                 RegionKind::Telemetry,
                 self.geo.segment_offset(p, s),
                 &mut sec,
             )?;
-            out.push(parse_segment_header(&sec, p));
+            let zero_ok = self.zero_ok_band0 && self.geo.band_of(s) == 0;
+            out.push(parse_segment_header(&sec, p, &self.uuid, zero_ok));
         }
         Ok(out)
     }
@@ -418,8 +569,9 @@ impl TelemetryLog {
         Ok(n)
     }
 
-    pub fn partition_of(core: usize) -> usize {
-        core % PARTITIONS
+    /// The partition source core `core` writes.
+    pub fn partition_of(&self, core: usize) -> usize {
+        core % self.geo.parts as usize
     }
 
     pub fn set_now(&mut self, now_unix: u64) {
@@ -428,7 +580,7 @@ impl TelemetryLog {
 
     /// Bytes a partition can hold (all segments, minus headers).
     pub fn capacity_bytes(&self) -> u64 {
-        (self.geo.seg_bytes - SEGMENT_HEADER) * self.geo.segments
+        (self.geo.seg_bytes - SEGMENT_HEADER) * self.geo.total
     }
 
     /// Queues a record for partition `p`. It is written by [`Self::flush`]
@@ -445,20 +597,20 @@ impl TelemetryLog {
         if size + SEGMENT_HEADER > self.geo.seg_bytes || topic.len() > usize::from(u16::MAX) {
             return Err(LogError::RecordTooLarge);
         }
-        let geo = self.geo;
         let now = self.now_unix;
-        let p = p % PARTITIONS;
+        let p = p % self.geo.parts as usize;
+        let (gran, uuid) = (self.gran, self.write_uuid);
         let part = self.parts.get_mut(p).ok_or(LogError::BadHeader)?;
         let used = part.pending_at + part.pending.len() as u64;
-        if part.seq == 0 || part.roll || used + size > geo.seg_bytes {
+        if part.seq == 0 || part.roll || used + size > self.geo.seg_bytes {
             // Roll over to the next segment of the ring, reclaiming the
             // oldest one. What is pending for the old segment goes first.
-            let n = write_pending(part, disk, &geo, p)?;
+            let n = write_pending(part, disk, &self.geo, p, gran)?;
             part.unsynced += n;
             let next = if part.seq == 0 {
                 0
             } else {
-                (part.active + 1) % geo.segments
+                (part.active + 1) % self.geo.total
             };
             part.roll = false;
             part.seq += 1;
@@ -466,7 +618,7 @@ impl TelemetryLog {
             part.pos = SEGMENT_HEADER;
             part.pending_at = SEGMENT_HEADER;
             part.tail.clear();
-            part.pending_header = Some((next, segment_header(p, part.seq, now)));
+            part.pending_header = Some((next, segment_header(p, part.seq, now, &uuid)));
         }
         let seq = part.seq;
         let start = part.pending.len();
@@ -499,13 +651,12 @@ impl TelemetryLog {
         self.parts.iter().map(|p| p.pending.len()).sum()
     }
 
-    /// Writes every pending record (whole, zero-padded sectors) and makes
+    /// Writes every pending record (whole, zero-padded blocks) and makes
     /// them durable. Returns how many records became durable.
     pub fn flush(&mut self, disk: &mut Disk) -> Result<u64, LogError> {
-        let geo = self.geo;
         let mut wrote = 0u64;
         for (p, part) in self.parts.iter_mut().enumerate() {
-            let n = write_pending(part, disk, &geo, p)?;
+            let n = write_pending(part, disk, &self.geo, p, self.gran)?;
             wrote += n + part.unsynced;
         }
         disk.sync()?;
@@ -529,19 +680,16 @@ impl TelemetryLog {
         p: usize,
         keep: usize,
     ) -> Result<(), LogError> {
-        let geo = self.geo;
-        let part = self
-            .parts
-            .get_mut(p % PARTITIONS)
-            .ok_or(LogError::BadHeader)?;
+        let p = p % self.geo.parts as usize;
+        let part = self.parts.get_mut(p).ok_or(LogError::BadHeader)?;
         if let Some((seg, hdr)) = part.pending_header.take() {
-            disk.write_at(RegionKind::Telemetry, geo.segment_offset(p, seg), &hdr)?;
+            disk.write_at(RegionKind::Telemetry, self.geo.segment_offset(p, seg), &hdr)?;
         }
         let keep = keep.min(part.pending.len());
         let torn = part.pending.get(..keep).unwrap_or(&[]).to_vec();
         disk.write_at(
             RegionKind::Telemetry,
-            geo.segment_offset(p, part.active) + part.pending_at,
+            self.geo.segment_offset(p, part.active) + part.pending_at,
             &torn,
         )?;
         disk.sync()?;
@@ -555,41 +703,53 @@ impl TelemetryLog {
     /// Test hook: writes pending records without the final sync.
     #[cfg(test)]
     fn write_all_without_sync(&mut self, disk: &mut Disk) -> Result<(), LogError> {
-        let geo = self.geo;
         for (p, part) in self.parts.iter_mut().enumerate() {
-            write_pending(part, disk, &geo, p)?;
+            write_pending(part, disk, &self.geo, p, self.gran)?;
         }
         Ok(())
     }
 }
 
-/// Writes a partition's pending header and records (no sync). Returns the
-/// number of records written.
+/// Writes a partition's pending header and records (no sync), padded with
+/// zeros to the end of the physical block. A new segment's header goes out
+/// in the same write as its first records. Returns the number of records
+/// written.
 fn write_pending(
     part: &mut Partition,
     disk: &mut Disk,
     geo: &Geometry,
     p: usize,
+    gran: u64,
 ) -> Result<u64, LogError> {
-    if let Some((seg, hdr)) = part.pending_header.take() {
-        disk.write_at(RegionKind::Telemetry, geo.segment_offset(p, seg), &hdr)?;
-    }
-    if part.pending.is_empty() {
+    let header = part.pending_header.take();
+    if part.pending.is_empty() && header.is_none() {
         return Ok(0);
     }
-    let start = part.pending_at - part.tail.len() as u64;
-    let mut buf = core::mem::take(&mut part.tail);
-    buf.extend_from_slice(&part.pending);
+    let (start, mut buf) = match header {
+        Some((_, hdr)) => {
+            let mut b = Vec::with_capacity(hdr.len() + part.pending.len());
+            b.extend_from_slice(&hdr);
+            b.extend_from_slice(&part.pending);
+            part.tail.clear();
+            (0u64, b)
+        }
+        None => {
+            let start = part.pending_at - part.tail.len() as u64;
+            let mut b = core::mem::take(&mut part.tail);
+            b.extend_from_slice(&part.pending);
+            (start, b)
+        }
+    };
     let end = start + buf.len() as u64;
-    let padded = end.div_ceil(SECTOR) * SECTOR;
+    let padded = end.div_ceil(gran) * gran;
     buf.resize((padded - start) as usize, 0);
     disk.write_at(
         RegionKind::Telemetry,
         geo.segment_offset(p, part.active) + start,
         &buf,
     )?;
-    // Keep the bytes after the last sector boundary for the next write.
-    let keep_from = (end - end % SECTOR - start) as usize;
+    // Keep the bytes after the last block boundary for the next write.
+    let keep_from = (end - end % gran - start) as usize;
     buf.truncate((end - start) as usize);
     part.tail = buf.split_off(keep_from);
     part.pos = end;
@@ -691,7 +851,7 @@ mod tests {
         for i in 200..300u64 {
             log.append(&mut d, 0, i, "t", &[7u8; 50]).unwrap();
         }
-        let geo = log.geo;
+        let geo = log.geo.clone();
         let pos = log.parts[0].pending_at;
         drop(log);
         let base = geo.segment_offset(0, 0);

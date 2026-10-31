@@ -175,6 +175,7 @@ const DRIVER_FEATURE: usize = 0x0c;
 const CONFIG_MSIX_VECTOR: usize = 0x10;
 const NUM_QUEUES: usize = 0x12;
 const DEVICE_STATUS: usize = 0x14;
+const CONFIG_GENERATION: usize = 0x15;
 const QUEUE_SELECT: usize = 0x16;
 const QUEUE_SIZE: usize = 0x18;
 const QUEUE_MSIX_VECTOR: usize = 0x1a;
@@ -293,6 +294,19 @@ impl Transport {
             usize::from(self.common.read16(QUEUE_NOTIFY_OFF)) * self.notify_multiplier as usize;
         self.common.write16(QUEUE_ENABLE, 1);
         Ok(off)
+    }
+
+    /// Signals configuration-space changes on MSI-X vector `v` (virtio 1.x
+    /// §4.1.4.3). `false`: the device has no vector to give.
+    pub fn set_config_vector(&self, v: u16) -> bool {
+        self.common.write16(CONFIG_MSIX_VECTOR, v);
+        self.common.read16(CONFIG_MSIX_VECTOR) == v
+    }
+
+    /// Counts changes of the device-specific configuration (§4.1.4.5): a
+    /// multi-field read is consistent if it is the same before and after.
+    pub fn config_generation(&self) -> u8 {
+        self.common.read8(CONFIG_GENERATION)
     }
 
     pub fn driver_ok(&self) -> Result<(), VirtioError> {

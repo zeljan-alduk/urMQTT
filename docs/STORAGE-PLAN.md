@@ -250,6 +250,15 @@ Each milestone ends with:
 - Migration of every golden v1 image, with fault injection at every write of `migrate`.
 - The X8 cross-arch test is written against v2.
 
+**Status: done** (docs/PROGRESS.md, S2; ADR-140, ADR-141). Deviations from the work list:
+- **Topology:** virtio-blk `F_TOPOLOGY` and the virtio-scsi READ CAPACITY (16) and Block Limits VPD are read. NVMe and ATA are deferred to X13.
+- **4096/4096:** QEMU cannot boot the 512-byte GPT image through 4096-byte blocks, so that case is a host test on a strict 4Kn device; the kernel refuses a 4Kn boot disk with a message.
+- **Migration:** the telemetry ring stays in place (4 KiB aligned, not 1 MiB) instead of being copied; the small live files move into aligned regions carved from the old database region's dead tail, so no free space beyond the old layout is needed (ADR-141).
+- **Statsd reason:** the v1 refusal happens before the network is up; the reason is the log token `storage: refused reason=layout-v1`, not a datagram.
+- **G8** (boot time grows with the telemetry region) is not done; it moves to S6.
+- **Telemetry segments carry the layout UUID** (not in the plan; fixes stale segments surfacing after a reformat or a grow).
+- **`scripts/fault-loop.sh`** exists now (`migrate` and `grow`), with `urmqtt-disk --fault` as its hook.
+
 ### S3 — Growing the disk · M
 
 **Work**

@@ -413,6 +413,9 @@ pub struct Steps {
     pub repaired_backup: bool,
     /// The data partition was created (and a fresh disk GUID assigned).
     pub created_partition: bool,
+    /// The data partition was extended over free space at the end of a
+    /// larger disk (STORAGE-PLAN S3).
+    pub extended_partition: bool,
 }
 
 /// The data partition, as LBAs of the whole disk.
@@ -511,10 +514,50 @@ pub fn prepare(
         steps.repaired_backup = true;
     }
     if let Some(e) = t.data_partition() {
+        let mut last_lba = e.last_lba;
+        // S3: the disk grew and the data partition is the last one: extend
+        // it to the end, a whole number of 4 KiB blocks. The backup copy is
+        // written before the primary, entries before their header, so a cut
+        // at any write leaves the old table or the new one; the next boot
+        // repeats whatever is missing.
+        let last_block =
+            e.first_lba + (last_usable + 1 - e.first_lba) / BLOCK_SECTORS * BLOCK_SECTORS - 1;
+        let is_last = t.entries.iter().all(|o| o.first_lba <= e.first_lba);
+        if is_last && last_block >= e.last_lba + ALIGN {
+            let entries: Vec<Entry> = t
+                .entries
+                .iter()
+                .map(|o| {
+                    if o.unique_guid == e.unique_guid {
+                        Entry {
+                            last_lba: last_block,
+                            ..*o
+                        }
+                    } else {
+                        *o
+                    }
+                })
+                .collect();
+            let raw = encode_entries(&entries);
+            let header = Header {
+                entries_crc: crc32(&raw),
+                ..t.header
+            };
+            let backup = Header {
+                current_lba: last,
+                backup_lba: 1,
+                entries_lba: backup_entries,
+                ..header
+            };
+            write_copy(dev, &backup, &raw)?;
+            write_copy(dev, &header, &raw)?;
+            last_lba = last_block;
+            steps.extended_partition = true;
+        }
         return Ok((
             DataPartition {
                 first_lba: e.first_lba,
-                last_lba: e.last_lba,
+                last_lba,
                 unique_guid: e.unique_guid,
             },
             steps,

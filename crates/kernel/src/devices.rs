@@ -142,6 +142,30 @@ impl DataDisk {
         }
     }
 
+    /// Block sizes and I/O hints, as the store's topology (S2).
+    pub fn topology(&self) -> urmqtt_store::layout::Topology {
+        let t = match self {
+            Self::Blk(b) => b.topology,
+            Self::Scsi(s) => s.topology,
+        };
+        urmqtt_store::layout::Topology {
+            logical: t.logical,
+            physical: t.physical,
+            align_offset: t.align_offset,
+            min_io: t.min_io,
+            opt_io: t.opt_io,
+        }
+    }
+
+    /// The capacity after a configuration-change notification: `Some` if
+    /// the disk got larger (virtio-blk only; a SCSI LUN is not notified).
+    pub fn refresh_capacity(&mut self) -> Option<u64> {
+        match self {
+            Self::Blk(b) => b.refresh_capacity(),
+            Self::Scsi(_) => None,
+        }
+    }
+
     pub fn read_only(&self) -> bool {
         match self {
             Self::Blk(b) => b.read_only,
@@ -213,6 +237,28 @@ impl BlockDevice for KernelBlk {
 
     fn max_io(&self) -> usize {
         self.blk.max_io()
+    }
+
+    fn topology(&self) -> urmqtt_store::layout::Topology {
+        self.blk.topology()
+    }
+
+    fn refresh_size(&mut self) -> Option<u64> {
+        self.blk.refresh_capacity()
+    }
+}
+
+/// A device's block sizes and I/O hints, for the boot log (S2).
+struct TopologyText(urmqtt_virtio::BlockTopology);
+
+impl core::fmt::Display for TopologyText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let t = &self.0;
+        write!(
+            f,
+            "logical {} B, physical {} B, alignment offset {} B, minimum I/O {} B, optimal I/O {} B",
+            t.logical, t.physical, t.align_offset, t.min_io, t.opt_io
+        )
     }
 }
 
@@ -408,6 +454,14 @@ pub fn nic_vendor(v: u16) -> &'static str {
 pub static RNG: SpinLock<Option<Csprng>> = SpinLock::new(None);
 
 static BLK_IRQS: AtomicU64 = AtomicU64::new(0);
+
+/// Interrupts the boot disk's vector has raised: completions of its
+/// requests, and the configuration-change notification of a resize (S3,
+/// ADR-143), which has no request behind it.
+pub fn blk_irqs() -> u64 {
+    // Relaxed: a counter compared with an earlier reading.
+    BLK_IRQS.load(Ordering::Relaxed)
+}
 
 /// The handler of a disk's vector until (unless) the disk becomes the boot
 /// disk: its completions are polled, the interrupt only needs its EOI.
@@ -791,6 +845,15 @@ fn probe_pci(
                     blk.read_only,
                     spi.map_or("no (polling)", |_| "yes")
                 );
+                info!("blk: topology: {}", TopologyText(blk.topology));
+                info!(
+                    "blk: resize notification (configuration-change interrupt): {}",
+                    if blk.config_irq {
+                        "armed (online grow)"
+                    } else {
+                        "not available (a larger disk is taken up at the next boot)"
+                    }
+                );
                 devs.blk_msix_spi = spi;
                 devs.blk = Some(DataDisk::Blk(blk));
             }
@@ -860,6 +923,7 @@ fn probe_pci(
                         d.lun,
                         (d.sectors * 512) >> 20
                     );
+                    info!("blk: topology: {}", TopologyText(d.topology));
                     devs.blk = Some(DataDisk::Scsi(hba.into_disk(d)));
                 }
             }
@@ -918,6 +982,11 @@ pub fn prepare_boot_disk(fault: Option<FaultSpec>) -> Result<(), &'static str> {
         warn!("storage: the boot disk is read-only: no data partition");
         return Ok(());
     }
+    if blk.topology().logical != 512 {
+        return Err(
+            "the boot disk has a logical block size other than 512 bytes (4Kn): only 512-byte logical blocks are supported (docs/DISK-FORMAT.md)",
+        );
+    }
     let flush = blk.has_flush();
     let raw: Box<dyn BlockDevice> = Box::new(KernelBlk { blk, flush });
     let mut dev: Box<dyn BlockDevice> = match fault {
@@ -944,6 +1013,13 @@ pub fn prepare_boot_disk(fault: Option<FaultSpec>) -> Result<(), &'static str> {
                 info!(
                     "gpt: backup table moved to the end of the {} MiB disk",
                     (total * 512) >> 20
+                );
+            }
+            if steps.extended_partition {
+                info!(
+                    "gpt: data partition extended to the end of the {} MiB disk ({} MiB)",
+                    (total * 512) >> 20,
+                    (part.sectors() * 512) >> 20
                 );
             }
             let guid = gpt::disk_guid(dev.as_mut()).ok().flatten();
@@ -1020,6 +1096,32 @@ pub fn blk_selftest() -> Result<(), &'static str> {
     let part = boot.partition;
     if part.sectors() < BLK_SCRATCH_SECTORS * 2 {
         return Err("data partition too small");
+    }
+    // Nothing is written to a data partition the store will refuse (an
+    // older layout, or damaged): the self-test pattern goes to the scratch
+    // sectors only of a partition that is blank or a v2 layout (S2).
+    {
+        use urmqtt_store::layout::{BLOCK, Layout, SB_SLOT_LBA};
+        let mut a = [0u8; BLOCK];
+        let mut b = [0u8; BLOCK];
+        let ok = boot
+            .dev
+            .read(part.first_lba + SB_SLOT_LBA[0], &mut a)
+            .is_ok()
+            && boot
+                .dev
+                .read(part.first_lba + SB_SLOT_LBA[1], &mut b)
+                .is_ok();
+        match Layout::select(&a, &b, part.sectors()) {
+            Ok(_) if ok => {}
+            Err(e) if ok => {
+                info!(
+                    "blk: self-test skipped: the data partition is not a v2 layout ({e:?}); nothing is written"
+                );
+                return Ok(());
+            }
+            _ => return Err("blk read failed"),
+        }
     }
     let sector = part.last_lba + 1 - BLK_SCRATCH_SECTORS;
     let mut pattern = [0u8; 4096];
