@@ -14,10 +14,12 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use core::sync::atomic::Ordering;
 use urmqtt_broker::{Acl, Broker, Buf, CloseReason, Config, ConnId};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{debug, info, warn};
 use urmqtt_mqtt::{Limits, QoS};
+use urmqtt_net::admission::{Admission, Outcome};
 use urmqtt_sync::spsc::{Consumer, Producer};
 use urmqtt_sync::sync::OnceCell;
 use urmqtt_tcp::{Endpoint, TcpStack};
@@ -49,6 +51,11 @@ const SEEN_BACKLOG_MAX: usize = 4_096;
 const DB_BACKLOG_REFUSE: usize = 16_384;
 /// A handshake (or, on the dev port, the CONNECT) must arrive within this.
 const HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
+/// ... or within this while the core is under pressure (three quarters of
+/// its in-flight limit are taken): a handshake that has not finished in 3 s
+/// then is almost surely a dead peer, and its slot is worth more to a
+/// client that is there (ADR-080).
+const HANDSHAKE_TIMEOUT_PRESSURE_MS: u64 = 3_000;
 /// How often memory left by a past peak is returned (M16).
 const SHRINK_MS: u64 = 10_000;
 /// Connections per core (TLS and plaintext together).
@@ -122,6 +129,16 @@ struct Conn {
     serial_tag: u32,
 }
 
+/// A connection counted by [`Admission`] as a handshake in flight. Kept
+/// beside the connection, not in it: only a few exist at a time and `Conn`
+/// has a byte budget (ADR-034).
+struct Flight {
+    /// The peer's address, for the per-address limit.
+    ip: [u8; 4],
+    /// When the connection was accepted (ms, wrapping), for the latency.
+    t0_ms: u32,
+}
+
 // Per-connection budget (M15, ADR-034), checked at compile time: the
 // kernel crate has no host tests.
 const _: () = assert!(core::mem::size_of::<Conn>() <= 152);
@@ -133,7 +150,6 @@ struct Pending {
     at_ms: u64,
     c: u32,
     tconn: Tconn,
-    ip: [u8; 4],
 }
 
 impl Pending {
@@ -145,31 +161,16 @@ impl Pending {
     }
 }
 
-/// Why a new connection was refused.
-#[derive(Debug, Clone, Copy)]
-pub enum Refusal {
-    Rate = 0,
-    InFlight = 1,
-    Memory = 2,
-    Storage = 3,
+/// How a connection stops being a handshake in flight.
+#[derive(Clone, Copy)]
+enum Leave {
+    Done,
+    Failed,
+    TimedOut,
 }
 
-impl Refusal {
-    fn reason(self) -> &'static str {
-        match self {
-            Self::Rate => "handshake rate limit",
-            Self::InFlight => "too many handshakes in flight",
-            Self::Memory => "heap below the free reserve",
-            Self::Storage => "the DB core is behind",
-        }
-    }
-}
-
-/// Per-core handshake admission (token bucket, PROMPT §6).
-struct Admission {
-    tokens: u32,
-    last_ms: u64,
-}
+/// How often admission's numbers are reported.
+const REPORT_MS: u64 = 5_000;
 
 /// A connection relayed from another core's transport (home side).
 struct Remote {
@@ -198,9 +199,20 @@ pub struct MqttService {
     /// Accepted connections not yet attached to a session, oldest first.
     handshakes: VecDeque<Pending>,
     app: Vec<u8>,
-    admission: Admission,
-    /// New connections refused, by [`Refusal`].
-    refused: [u64; 4],
+    /// Handshake admission: limits, in-flight counts, statistics (ADR-080).
+    adm: Admission,
+    /// The connections `adm` counts as in flight.
+    flights: Slab<Flight>,
+    /// Refusals and dropped SYNs already logged, by [`Reason`]: the log
+    /// lines come at powers of two.
+    logged: [u64; 5],
+    logged_syn: [u64; 5],
+    /// The heap check takes the allocator's global lock; once per
+    /// millisecond is enough for a reserve of megabytes.
+    heap_ok: bool,
+    heap_checked_ms: u64,
+    last_report_ms: u64,
+    report_prev: urmqtt_net::admission::Stats,
     db: Option<DbLink>,
     log: Option<LogLink>,
     /// Home side: connections relayed from transport cores.
@@ -550,11 +562,14 @@ impl MqttService {
             blocked: Vec::new(),
             handshakes: VecDeque::new(),
             app: Vec::new(),
-            admission: Admission {
-                tokens: CONFIG.limits.handshakes_per_core_per_sec,
-                last_ms: 0,
-            },
-            refused: [0; 4],
+            flights: Slab::new(),
+            adm: Admission::new(dataplane::admission_limits()),
+            logged: [0; 5],
+            logged_syn: [0; 5],
+            heap_ok: true,
+            heap_checked_ms: u64::MAX,
+            last_report_ms: 0,
+            report_prev: urmqtt_net::admission::Stats::default(),
             db,
             log,
             remote: Slab::new(),
@@ -650,75 +665,165 @@ impl MqttService {
         p
     }
 
-    /// A handshake token (`limits.handshakes_per_core_per_sec`).
-    fn take_token(&mut self, now_ms: u64) -> bool {
-        let rate = CONFIG.limits.handshakes_per_core_per_sec;
-        let elapsed = now_ms.saturating_sub(self.admission.last_ms);
-        let refill = (elapsed * u64::from(rate) / 1000) as u32;
-        if refill > 0 {
-            self.admission.tokens = self.admission.tokens.saturating_add(refill).min(rate);
-            self.admission.last_ms = now_ms;
-        }
-        if self.admission.tokens == 0 {
-            return false;
-        }
-        self.admission.tokens -= 1;
-        true
+    /// Whether the DB core is so far behind that new connections wait.
+    fn db_behind(&self) -> bool {
+        self.db
+            .as_ref()
+            .is_some_and(|d| d.backlog.len() >= DB_BACKLOG_REFUSE)
     }
 
-    /// Connections accepted and not yet attached to a session. The queue
-    /// keeps attached entries until they reach its front, so it is pruned
-    /// first when it looks full.
-    fn in_flight(&mut self) -> usize {
-        let cap = CONFIG.limits.max_handshakes_in_flight_per_core as usize;
-        if self.handshakes.len() >= cap {
-            let conns = &self.conns;
-            self.handshakes.retain(|p| p.pending(conns));
+    /// Free heap above the reserve, looked up at most once per millisecond.
+    fn heap_ok(&mut self, now_ms: u64) -> bool {
+        if now_ms != self.heap_checked_ms {
+            self.heap_checked_ms = now_ms;
+            self.heap_ok = dataplane::heap_has_room();
         }
-        self.handshakes.len()
+        self.heap_ok
     }
 
-    /// Of the connections in flight, those from `ip` (the queue holds at
-    /// most the per-core limit, so the scan is short).
-    fn in_flight_from(&self, ip: [u8; 4]) -> usize {
-        self.handshakes
-            .iter()
-            .filter(|p| p.ip == ip && p.pending(&self.conns))
-            .count()
+    /// A SYN: answer it only if a connection from `ip` would be admitted
+    /// now (PERF, ADR-080). A refusal here costs no state and no packet,
+    /// and the client's TCP retries after its backoff instead of at once.
+    pub fn syn_ok(&mut self, port: u16, ip: [u8; 4], now_ms: u64) -> bool {
+        let tls = Some(port) != self.plain_port;
+        let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
+        let Err(r) = self.adm.syn_check(ip, tls, now_ms, heap_ok, behind) else {
+            return true;
+        };
+        let n = self
+            .adm
+            .stats()
+            .syn_dropped
+            .get(r as usize)
+            .copied()
+            .unwrap_or(0);
+        if let Some(l) = self.logged_syn.get_mut(r as usize)
+            && n.is_power_of_two()
+            && n > *l
+        {
+            *l = n;
+            warn!(
+                "admission: {n} SYN(s) dropped without an answer on core {}: {}",
+                self.me,
+                r.text()
+            );
+        }
+        false
     }
 
     /// Admission for a new connection (PROMPT §6, M16): free heap above the
-    /// reserve, fewer than the in-flight limit, and for TLS a handshake
+    /// reserve, fewer than the in-flight limits, and for TLS a handshake
     /// token. Refusals cost no crypto work and are logged rate-limited.
     fn admit(&mut self, tls: bool, ip: [u8; 4], now_ms: u64) -> bool {
-        let cap = CONFIG.limits.max_handshakes_in_flight_per_core as usize;
-        let per_ip = CONFIG.limits.max_handshakes_in_flight_per_ip as usize;
-        let db_behind = self
-            .db
-            .as_ref()
-            .is_some_and(|d| d.backlog.len() >= DB_BACKLOG_REFUSE);
-        let refusal = if !dataplane::heap_has_room() {
-            Some(Refusal::Memory)
-        } else if db_behind {
-            Some(Refusal::Storage)
-        } else if self.in_flight() >= cap || self.in_flight_from(ip) >= per_ip {
-            Some(Refusal::InFlight)
-        } else if tls && !self.take_token(now_ms) {
-            Some(Refusal::Rate)
-        } else {
-            None
+        let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
+        let Err(r) = self.adm.admit(ip, tls, now_ms, heap_ok, behind) else {
+            return true;
         };
-        let Some(r) = refusal else { return true };
-        let n = self.refused.get_mut(r as usize).map_or(0, |n| {
-            *n += 1;
-            *n
-        });
+        let n = self
+            .adm
+            .stats()
+            .refused
+            .get(r as usize)
+            .copied()
+            .unwrap_or(0);
         // Rate-limited log: 1st, 2nd, 4th, 8th, ... refusal of each kind.
-        if n.is_power_of_two() {
-            warn!("admission: {n} connection(s) refused: {}", r.reason());
+        if let Some(l) = self.logged.get_mut(r as usize)
+            && n.is_power_of_two()
+            && n > *l
+        {
+            *l = n;
+            warn!("admission: {n} connection(s) refused: {}", r.text());
         }
-        dataplane::count_refusal(r as usize);
         false
+    }
+
+    /// The connection `c` stops counting as a handshake in flight (once).
+    fn leave_flight(&mut self, c: u32, how: Leave, now_ms: u64) {
+        if let Some(f) = self.flights.remove(&c) {
+            let outcome = match how {
+                Leave::Done => Outcome::Done {
+                    latency_ms: (now_ms as u32).wrapping_sub(f.t0_ms),
+                },
+                Leave::Failed => Outcome::Failed,
+                Leave::TimedOut => Outcome::TimedOut,
+            };
+            self.adm.leave(f.ip, outcome);
+        }
+    }
+
+    /// Mirrors this core's admission counters into the shared statistics
+    /// (every 100 ms) and, every 5 s, says what admission did.
+    fn publish_admission(&mut self, now_ms: u64) {
+        let me = self.me;
+        let Some(h) = dataplane::HS.get(me) else {
+            return;
+        };
+        let s = *self.adm.stats();
+        // Relaxed: statistics.
+        let st = |a: &core::sync::atomic::AtomicU64, v: u64| a.store(v, Ordering::Relaxed);
+        st(&h.started, s.started);
+        st(&h.done, s.done);
+        st(&h.failed, s.failed);
+        st(&h.timed_out, s.timed_out);
+        for (a, v) in h.refused.iter().zip(s.refused) {
+            st(a, v);
+        }
+        for (a, v) in h.syn_dropped.iter().zip(s.syn_dropped) {
+            st(a, v);
+        }
+        st(&h.latency_sum_ms, s.latency_sum_ms);
+        st(&h.slow, s.slower_than(3));
+        h.in_flight.store(self.adm.in_flight(), Ordering::Relaxed);
+        if now_ms.saturating_sub(self.last_report_ms) < REPORT_MS {
+            return;
+        }
+        self.last_report_ms = now_ms;
+        let w = self.adm.take_window();
+        let prev = core::mem::replace(&mut self.report_prev, w);
+        h.latency_max_ms
+            .store(w.window_latency_max_ms, Ordering::Relaxed);
+        h.in_flight_max
+            .store(w.window_in_flight_max, Ordering::Relaxed);
+        let d = |a: u64, b: u64| a.saturating_sub(b);
+        let done = d(w.done, prev.done);
+        let started = d(w.started, prev.started);
+        let syn = d(w.syn_dropped_total(), prev.syn_dropped_total());
+        let refused = d(w.refused_total(), prev.refused_total());
+        if started
+            + done
+            + syn
+            + refused
+            + d(w.failed, prev.failed)
+            + d(w.timed_out, prev.timed_out)
+            == 0
+        {
+            return;
+        }
+        let by = |a: &[u64; 5], b: &[u64; 5]| {
+            let g = |i: usize| {
+                a.get(i)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(b.get(i).copied().unwrap_or(0))
+            };
+            (g(0), g(1), g(4), g(2), g(3))
+        };
+        let (r, c, i, m, db) = by(&w.refused, &prev.refused);
+        let (sr, sc, si, sm, sdb) = by(&w.syn_dropped, &prev.syn_dropped);
+        info!(
+            "handshakes: core {me}: {started} started, {done} done, {} failed, {} timed out; \
+             {refused} refused at the ACK (rate {r}, core {c}, address {i}, memory {m}, storage {db}); \
+             {syn} SYN(s) dropped (rate {sr}, core {sc}, address {si}, memory {sm}, storage {sdb}); \
+             in flight {} now / {} at most; accept to done: mean {} ms, max {} ms, {} over 250 ms, {} over 1 s",
+            d(w.failed, prev.failed),
+            d(w.timed_out, prev.timed_out),
+            self.adm.in_flight(),
+            w.window_in_flight_max,
+            d(w.latency_sum_ms, prev.latency_sum_ms) / done.max(1),
+            w.window_latency_max_ms,
+            d(w.slower_than(3), prev.slower_than(3)),
+            d(w.slower_than(4), prev.slower_than(4)),
+        );
     }
 
     // ---- TCP events (called from the stack, see `TcpEvents`) -------------
@@ -731,7 +836,11 @@ impl MqttService {
         let session = if tls {
             match self.tls.as_ref().and_then(|t| t.accept().ok()) {
                 Some(s) => Some(s),
-                None => return false,
+                None => {
+                    // Admitted but no session could be built: give the slot back.
+                    self.adm.leave(ip, Outcome::Failed);
+                    return false;
+                }
             }
         } else {
             None
@@ -754,11 +863,23 @@ impl MqttService {
                 serial_tag: 0,
             },
         );
+        self.flights.insert(
+            c,
+            Flight {
+                ip,
+                t0_ms: now_ms as u32,
+            },
+        );
+        // The queue only serves the timeout; entries of connections that
+        // left it are dropped here when they pile up behind an old one.
+        if self.handshakes.len() > 2 * self.adm.limits().per_core as usize + 16 {
+            let conns = &self.conns;
+            self.handshakes.retain(|p| p.pending(conns));
+        }
         self.handshakes.push_back(Pending {
             at_ms: now_ms,
             c,
             tconn,
-            ip,
         });
         dataplane::count_accept(self.me);
         true
@@ -828,7 +949,9 @@ impl MqttService {
                     if bootstrap { ", bootstrap role" } else { "" },
                     self.me
                 );
-                if !self.attach(c, home, Some(&identity), bootstrap, link, now_ms) {
+                if self.attach(c, home, Some(&identity), bootstrap, link, now_ms) {
+                    self.leave_flight(c, Leave::Done, now_ms);
+                } else {
                     self.start_close(c);
                 }
             }
@@ -857,6 +980,7 @@ impl MqttService {
     /// TCP is done with the connection (normal close, reset or timeout).
     fn on_closed(&mut self, c: u32, link: &mut Link, now_ms: u64) {
         self.detach(c, link, now_ms);
+        self.leave_flight(c, Leave::Failed, now_ms);
         self.conns.remove(&c);
     }
 
@@ -942,6 +1066,7 @@ impl MqttService {
         };
         let early = k.early.take();
         if self.attach(c, home, None, false, link, now_ms) {
+            self.leave_flight(c, Leave::Done, now_ms);
             self.deliver(c, &early, link, now_ms);
         } else {
             self.start_close(c);
@@ -976,6 +1101,8 @@ impl MqttService {
             }
             self.blocked.push(c);
         }
+        // Closing before the handshake finished: no longer in flight.
+        self.leave_flight(c, Leave::Failed, 0);
     }
 
     fn mark_blocked(&mut self, c: u32) {
@@ -1096,6 +1223,7 @@ impl MqttService {
         self.broker.shrink();
         self.conns.0.shrink();
         self.by_broker.0.shrink();
+        self.flights.0.shrink();
         self.remote.0.shrink();
         for t in &mut self.by_tconn {
             t.0.shrink();
@@ -1116,6 +1244,7 @@ impl MqttService {
         {
             warn!("watchdog: aborting connection {c}");
             self.detach(c, link, now_ms);
+            self.leave_flight(c, Leave::Failed, now_ms);
             self.conns.remove(&c);
             self.aborts.push(c);
         }
@@ -1124,6 +1253,7 @@ impl MqttService {
             self.last_tick_ms = now_ms;
             self.broker.tick(now_ms);
             self.expire_handshakes(link, now_ms);
+            self.publish_admission(now_ms);
         }
         watchdog::step(watchdog::Step::Shrink);
         if now_ms.saturating_sub(self.last_shrink_ms) >= SHRINK_MS {
@@ -1402,16 +1532,36 @@ impl MqttService {
                 self.handshakes.pop_front();
                 continue;
             }
-            if now_ms.saturating_sub(at) <= HANDSHAKE_TIMEOUT_MS {
+            let pressure =
+                u64::from(self.adm.in_flight()) * 4 >= u64::from(self.adm.limits().per_core) * 3;
+            let limit = if pressure {
+                HANDSHAKE_TIMEOUT_PRESSURE_MS
+            } else {
+                HANDSHAKE_TIMEOUT_MS
+            };
+            if now_ms.saturating_sub(at) <= limit {
                 break;
             }
             self.handshakes.pop_front();
-            if self.conns.get(&c).is_some_and(|k| k.tls) {
-                warn!("tls: handshake timed out");
-            } else {
-                warn!("mqtt: no CONNECT within {} s", HANDSHAKE_TIMEOUT_MS / 1000);
+            // Logged at powers of two: a storm of dead peers must not turn
+            // into a storm of log lines (each one is a serial-port write).
+            let n = self.adm.stats().timed_out + 1;
+            if n.is_power_of_two() {
+                if self.conns.get(&c).is_some_and(|k| k.tls) {
+                    warn!(
+                        "tls: handshake timed out on core {} ({n} so far, limit {} ms)",
+                        self.me, limit
+                    );
+                } else {
+                    warn!(
+                        "mqtt: no CONNECT within {} s on core {} ({n} so far)",
+                        limit / 1000,
+                        self.me
+                    );
+                }
             }
             self.detach(c, link, now_ms);
+            self.leave_flight(c, Leave::TimedOut, now_ms);
             self.conns.remove(&c);
             self.aborts.push(c);
         }
@@ -1426,6 +1576,10 @@ pub struct TcpEvents<'a> {
 }
 
 impl urmqtt_tcp::App for TcpEvents<'_> {
+    fn syn_ok(&mut self, port: u16, remote: [u8; 4]) -> bool {
+        self.mqtt.syn_ok(port, remote, self.now_ms)
+    }
+
     fn accept(&mut self, c: urmqtt_tcp::ConnId, port: u16, remote: Endpoint) -> bool {
         self.mqtt.on_accept(c, port, remote.addr, self.now_ms)
     }

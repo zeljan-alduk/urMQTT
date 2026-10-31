@@ -220,6 +220,8 @@ pub struct Cpu {
     /// CPU features the crypto and checksum dispatch must not use, by
     /// `urmqtt_dispatch::Feature` name (validated at build time).
     pub disable: &'static [&'static str],
+    /// Core 0 also serves connections next to the NIC work (ADR-081).
+    pub dispatcher_serves: bool,
 }
 
 /// The complete build-time configuration.

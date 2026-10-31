@@ -141,6 +141,9 @@ pub enum RegistryMode {
 #[serde(deny_unknown_fields)]
 struct RawCpu {
     disable: Vec<String>,
+    /// Core 0 also serves MQTT connections (default false, ADR-081).
+    #[serde(default)]
+    dispatcher_serves: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -427,6 +430,12 @@ pub struct Cpu {
     /// CPU features the dispatch must not use (`urmqtt_dispatch::Feature`
     /// names, validated).
     pub disable: Vec<String>,
+    /// With two or more data cores, core 0 owns the NIC and steers frames;
+    /// by default it serves no connections. `true`: it takes its share of
+    /// the flows too, with its connection work cut into slices so the NIC
+    /// is served in between (ADR-081). For benchmarking on a VPS; the
+    /// production default stays `false`.
+    pub dispatcher_serves: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -583,6 +592,7 @@ fn validate_cpu(raw: &RawCpu, errors: &mut Vec<ConfigError>) -> Cpu {
     }
     Cpu {
         disable: raw.disable.clone(),
+        dispatcher_serves: raw.dispatcher_serves,
     }
 }
 
@@ -1342,6 +1352,7 @@ pub const CONFIG: BuildConfig = BuildConfig {{
     }},
     cpu: Cpu {{
         disable: {cpu_disable},
+        dispatcher_serves: {cpu_dispatcher},
     }},
     memory: Memory {{
         kernel_heap_mb: {heap_kernel},
@@ -1404,6 +1415,7 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         min_free = cfg.memory.min_free_mb,
         jitter = cfg.entropy.jitter_fallback,
         cpu_disable = render_strs(&cfg.cpu.disable),
+        cpu_dispatcher = cfg.cpu.dispatcher_serves,
         operational = render_includes(&files.operational),
         bootstrap = render_includes(&files.bootstrap),
         control_key = files.control_public_key,

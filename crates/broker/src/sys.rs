@@ -28,6 +28,34 @@ pub const MAX_COMMAND: usize = 64;
 /// Operator requests held between drains; beyond this they are dropped.
 pub const MAX_REQUESTS: usize = 16;
 
+/// What connection admission did (all cores, since boot; PERF, ADR-080).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Handshakes {
+    /// Connections admitted (their TCP handshake completed and admission
+    /// let them in).
+    pub started: u64,
+    /// TLS handshakes completed.
+    pub done: u64,
+    /// Ended before completing.
+    pub failed: u64,
+    /// Not finished within the handshake timeout.
+    pub timed_out: u64,
+    /// Refused at the final ACK (a RST was sent).
+    pub refused: u64,
+    /// SYNs dropped without an answer.
+    pub syn_dropped: u64,
+    /// In flight now.
+    pub in_flight: u64,
+    /// The most in flight on one core in the last 5 s.
+    pub in_flight_max: u64,
+    /// Completed handshakes slower than 250 ms.
+    pub slow: u64,
+    /// Sum of accept-to-done times of completed handshakes, ms.
+    pub latency_sum_ms: u64,
+    /// The longest accept-to-done time on one core in the last 5 s, ms.
+    pub latency_max_ms: u64,
+}
+
 /// Everything `$SYS/broker/...` and the info query report.
 #[derive(Debug, Clone, Copy)]
 pub struct Info<'a> {
@@ -51,6 +79,10 @@ pub struct Info<'a> {
     pub server_cert_days: Option<i64>,
     /// Console lines lost because a reader fell behind.
     pub console_dropped: u64,
+    pub handshakes: Handshakes,
+    /// Connections accepted per core since boot (how evenly the flows
+    /// spread over the cores).
+    pub accepted: &'a [u64],
 }
 
 /// Calls `f(topic, payload)` for every retained topic, in a fixed order.
@@ -85,11 +117,27 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
         None => put("tls/server_cert_days", &"unknown"),
     }
     put("console/dropped", &i.console_dropped);
+    let h = &i.handshakes;
+    put("handshakes/started", &h.started);
+    put("handshakes/done", &h.done);
+    put("handshakes/failed", &h.failed);
+    put("handshakes/timed_out", &h.timed_out);
+    put("handshakes/refused", &h.refused);
+    put("handshakes/syn_dropped", &h.syn_dropped);
+    put("handshakes/in_flight", &h.in_flight);
+    put("handshakes/in_flight_max", &h.in_flight_max);
+    put("handshakes/slow", &h.slow);
+    put("handshakes/latency_sum_ms", &h.latency_sum_ms);
+    put("handshakes/latency_max_ms", &h.latency_max_ms);
+    for (core, a) in i.accepted.iter().enumerate() {
+        put(&alloc::format!("cpu/accepted/{core}"), a);
+    }
 }
 
 /// The topics of [`topics`] as a list, for tests and the docs.
 pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
     let busy = alloc::vec![0u8; cores];
+    let accepted = alloc::vec![0u64; cores];
     let info = Info {
         version: "",
         uptime_s: 0,
@@ -108,6 +156,8 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
         connections_refused: 0,
         server_cert_days: None,
         console_dropped: 0,
+        handshakes: Handshakes::default(),
+        accepted: &accepted,
     };
     let mut v = alloc::vec::Vec::new();
     topics(&info, |t, _| v.push(t.into()));
@@ -164,7 +214,29 @@ pub fn json(i: &Info<'_>) -> String {
         }
         None => o.push_str("null"),
     }
-    let _ = write!(o, "}},\"console_dropped\":{}}}", i.console_dropped);
+    let h = &i.handshakes;
+    let _ = write!(
+        o,
+        "}},\"console_dropped\":{},\"handshakes\":{{\"started\":{},\"done\":{},\"failed\":{},\
+         \"timed_out\":{},\"refused\":{},\"syn_dropped\":{},\"in_flight\":{},\"in_flight_max\":{},\
+         \"slow\":{},\"latency_sum_ms\":{},\"latency_max_ms\":{}}},\"accepted\":[",
+        i.console_dropped,
+        h.started,
+        h.done,
+        h.failed,
+        h.timed_out,
+        h.refused,
+        h.syn_dropped,
+        h.in_flight,
+        h.in_flight_max,
+        h.slow,
+        h.latency_sum_ms,
+        h.latency_max_ms
+    );
+    for (n, a) in i.accepted.iter().enumerate() {
+        let _ = write!(o, "{}{a}", if n == 0 { "" } else { "," });
+    }
+    o.push_str("]}");
     o
 }
 
@@ -366,6 +438,12 @@ mod tests {
             connections_refused: 1,
             server_cert_days: Some(90),
             console_dropped: 0,
+            handshakes: Handshakes {
+                started: 9,
+                done: 8,
+                ..Handshakes::default()
+            },
+            accepted: &[4, 5],
         }
     }
 
@@ -398,6 +476,19 @@ mod tests {
                 "$SYS/broker/connections/refused",
                 "$SYS/broker/tls/server_cert_days",
                 "$SYS/broker/console/dropped",
+                "$SYS/broker/handshakes/started",
+                "$SYS/broker/handshakes/done",
+                "$SYS/broker/handshakes/failed",
+                "$SYS/broker/handshakes/timed_out",
+                "$SYS/broker/handshakes/refused",
+                "$SYS/broker/handshakes/syn_dropped",
+                "$SYS/broker/handshakes/in_flight",
+                "$SYS/broker/handshakes/in_flight_max",
+                "$SYS/broker/handshakes/slow",
+                "$SYS/broker/handshakes/latency_sum_ms",
+                "$SYS/broker/handshakes/latency_max_ms",
+                "$SYS/broker/cpu/accepted/0",
+                "$SYS/broker/cpu/accepted/1",
             ]
         );
         let val = |t: &str| got.iter().find(|(k, _)| k == t).map(|(_, v)| v.as_str());
@@ -405,6 +496,8 @@ mod tests {
         assert_eq!(val("$SYS/broker/cpu/busy/1"), Some("20"));
         assert_eq!(val("$SYS/broker/memory/used"), Some("400"));
         assert_eq!(val("$SYS/broker/tls/server_cert_days"), Some("90"));
+        assert_eq!(val("$SYS/broker/handshakes/done"), Some("8"));
+        assert_eq!(val("$SYS/broker/cpu/accepted/1"), Some("5"));
         // No payload is empty: an empty retained payload would clear it.
         assert!(got.iter().all(|(_, v)| !v.is_empty()));
         assert_eq!(topic_names(2).len(), got.len());
@@ -419,7 +512,10 @@ mod tests {
              \"cpu\":{\"cores\":2,\"busy\":[10,20]},\"memory\":{\"total\":1000,\"used\":400},\
              \"disk\":{\"total\":0,\"used\":0},\"clients\":{\"connected\":3,\"total\":5},\
              \"subscriptions\":7,\"retained\":2,\"messages\":{\"received\":100,\"sent\":250},\
-             \"connections_refused\":1,\"tls\":{\"server_cert_days\":90},\"console_dropped\":0}"
+             \"connections_refused\":1,\"tls\":{\"server_cert_days\":90},\"console_dropped\":0,\
+             \"handshakes\":{\"started\":9,\"done\":8,\"failed\":0,\"timed_out\":0,\"refused\":0,\
+             \"syn_dropped\":0,\"in_flight\":0,\"in_flight_max\":0,\"slow\":0,\"latency_sum_ms\":0,\
+             \"latency_max_ms\":0},\"accepted\":[4,5]}"
         );
         let mut unknown = info(&[]);
         unknown.server_cert_days = None;

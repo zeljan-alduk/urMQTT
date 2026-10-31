@@ -31,9 +31,14 @@ struct Echo {
     peer_closed: Vec<ConnId>,
     closed: Vec<(ConnId, CloseReason)>,
     refuse: bool,
+    /// `syn_ok` answers false (the application is full).
+    shed_syns: bool,
 }
 
 impl App for Echo {
+    fn syn_ok(&mut self, _port: u16, _r: [u8; 4]) -> bool {
+        !self.shed_syns
+    }
     fn accept(&mut self, c: ConnId, port: u16, _r: Endpoint) -> bool {
         assert_eq!(port, PORT);
         self.accepted.push(c);
@@ -729,4 +734,84 @@ fn connection_state_stays_small() {
         "{}",
         core::mem::size_of::<Conn>()
     );
+}
+
+#[test]
+fn syns_are_dropped_without_state_when_the_application_is_full() {
+    let mut s = TcpStack::new(cfg(), 0);
+    let mut app = Echo {
+        shed_syns: true,
+        ..Echo::default()
+    };
+    let mut out = Vec::new();
+    let c = Client::new(42000, 1, Vec::new());
+    for _ in 0..3 {
+        s.input(0, CLIENT, &c.seg(c.isn, SYN, &[]), &mut app, &mut |_, b| {
+            out.push(b.to_vec())
+        });
+    }
+    // No SYN-ACK, no state, no RST: the client's TCP retransmits.
+    assert!(out.is_empty());
+    assert_eq!((s.connections(), s.stats.syn_dropped), (0, 3));
+    assert_eq!(s.stats.cookies_sent, 0);
+    // Room again: the retransmitted SYN is answered.
+    app.shed_syns = false;
+    s.input(
+        1000,
+        CLIENT,
+        &c.seg(c.isn, SYN, &[]),
+        &mut app,
+        &mut |_, b| out.push(b.to_vec()),
+    );
+    assert_eq!(out.len(), 1);
+    assert_eq!(s.stats.cookies_sent, 1);
+}
+
+/// A refused flow's ClientHello follows its refused ACK: the application is
+/// not asked again (it might have a free slot by now), the peer gets one
+/// more RST and then silence, and the flow is forgotten after a second.
+#[test]
+fn a_refused_flow_is_not_admitted_by_its_next_segment() {
+    let mut s = TcpStack::new(cfg(), 0);
+    let mut app = Echo {
+        refuse: true,
+        ..Echo::default()
+    };
+    let mut c = Client::new(42000, 1, Vec::new());
+    let mut out = Vec::new();
+    s.input(0, CLIENT, &c.seg(c.isn, SYN, &[]), &mut app, &mut |_, b| {
+        out.push(b.to_vec())
+    });
+    let ack = c.input(0, &out[0]).unwrap();
+    out.clear();
+    s.input(0, CLIENT, &ack, &mut app, &mut |_, b| out.push(b.to_vec()));
+    assert_eq!((app.accepted.len(), s.stats.refused_app), (1, 1));
+    assert_eq!(out.len(), 1);
+    // The slot frees up; the ClientHello arrives behind the ACK.
+    app.refuse = false;
+    let hello = c.seg(c.snd_una, ACK | PSH, b"client hello");
+    out.clear();
+    s.input(1, CLIENT, &hello, &mut app, &mut |_, b| {
+        out.push(b.to_vec())
+    });
+    assert_eq!(app.accepted.len(), 1, "the application was asked again");
+    assert_eq!(s.connections(), 0);
+    assert_eq!(out.len(), 1, "one more RST");
+    assert_eq!(
+        wire::parse(SERVER, CLIENT, &out[0]).unwrap().flags & RST,
+        RST
+    );
+    // A retransmission is dropped without an answer.
+    out.clear();
+    s.input(300, CLIENT, &hello, &mut app, &mut |_, b| {
+        out.push(b.to_vec())
+    });
+    assert!(out.is_empty());
+    assert_eq!((app.accepted.len(), s.stats.refused_repeat), (1, 2));
+    // After the memory expires the same segment is a fresh attempt.
+    s.input(1200, CLIENT, &hello, &mut app, &mut |_, b| {
+        out.push(b.to_vec())
+    });
+    assert_eq!(app.accepted.len(), 2);
+    assert_eq!(s.connections(), 1);
 }

@@ -263,10 +263,10 @@ Every resource is bounded. What happens at the limit is part of the design:
 | Half-open connections | none kept: SYN cookies always | — |
 | RSTs to unknown connections | 200/s | not sent |
 | ICMP echo replies | 100/s | not sent |
-| New TLS handshakes per core | `limits.handshakes_per_core_per_sec` | refused before any crypto |
-| Handshakes in flight per core | `limits.max_handshakes_in_flight_per_core` | refused |
+| New TLS handshakes per core | `limits.handshakes_per_core_per_sec` | SYN dropped without an answer, or refused (RST) at the ACK, before any crypto (ADR-080) |
+| Handshakes in flight per core | `limits.max_handshakes_in_flight_per_core` | SYN dropped, or refused at the ACK; a flow refused at the ACK is remembered for 1 s and not admitted again by its next segment |
 | … of those from one source address | `limits.max_handshakes_in_flight_per_ip` | refused (an unauthenticated peer cannot take every slot) |
-| Time to finish a handshake and CONNECT | 10 s | connection aborted |
+| Time to finish a handshake and CONNECT | 10 s (3 s while three quarters of the in-flight limit are taken) | connection aborted |
 | Free heap | `memory.min_free_mb` | new connections refused (smoke: `storm`) |
 | DB core backlog | 16 384 requests | new connections refused; registry updates skipped beyond 4 096 |
 | Connections per core | `limits.max_connections_per_core` | refused |

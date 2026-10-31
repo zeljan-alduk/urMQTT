@@ -30,7 +30,8 @@ TOPICS = [
     "version", "uptime", "arch", "cpu/cores", "cpu/busy/0", "memory/total", "memory/used",
     "disk/total", "disk/used", "clients/connected", "clients/total", "subscriptions", "retained",
     "messages/received", "messages/sent", "connections/refused", "tls/server_cert_days",
-    "console/dropped",
+    "console/dropped", "handshakes/started", "handshakes/done", "handshakes/refused",
+    "handshakes/latency_max_ms", "cpu/accepted/0",
 ]
 
 

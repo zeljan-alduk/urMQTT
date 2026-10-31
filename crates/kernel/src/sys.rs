@@ -110,8 +110,8 @@ impl Sys {
         }
         if now_ms >= self.next_refresh_ms {
             self.next_refresh_ms = now_ms + REFRESH_MS;
-            let mut busy = [0u8; MAX_CPUS];
-            let info = collect(&mut busy);
+            let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
+            let info = collect(&mut busy, &mut accepted);
             sys::topics(&info, |t, v| broker.sys_publish_retained(t, v.as_bytes()));
         }
         self.console(broker);
@@ -177,8 +177,8 @@ impl Sys {
             return;
         }
         debug!("console: {} queried $SYS/query/info", r.from);
-        let mut busy = [0u8; MAX_CPUS];
-        let info = collect(&mut busy);
+        let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
+        let info = collect(&mut busy, &mut accepted);
         broker.sys_publish(sys::QUERY_INFO_RESPONSE, sys::json(&info).as_bytes());
     }
 
@@ -216,8 +216,8 @@ impl Sys {
                 }
             }
             Command::Status => {
-                let mut busy = [0u8; MAX_CPUS];
-                let info = collect(&mut busy);
+                let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
+                let info = collect(&mut busy, &mut accepted);
                 for l in sys::status_lines(
                     &info,
                     level_name(urmqtt_log::level()),
@@ -250,9 +250,12 @@ impl Sys {
 
 /// The numbers of all cores: what `$SYS/broker/...`, `status` and the query
 /// report. `busy` holds the per-core percentages (and bounds the core count).
-pub fn collect(busy: &mut [u8; MAX_CPUS]) -> Info<'_> {
+pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPUS]) -> Info<'a> {
     let cores = crate::smp::count().clamp(1, MAX_CPUS);
     for (b, a) in busy.iter_mut().zip(BUSY.iter()) {
+        *b = a.load(Ordering::Relaxed);
+    }
+    for (b, a) in accepted.iter_mut().zip(dataplane::ACCEPTED_TOTAL.iter()) {
         *b = a.load(Ordering::Relaxed);
     }
     let (mut online, mut sessions, mut subs, mut published, mut delivered) = (0, 0, 0, 0, 0);
@@ -282,12 +285,26 @@ pub fn collect(busy: &mut [u8; MAX_CPUS]) -> Info<'_> {
         retained,
         messages_received: published,
         messages_sent: delivered,
-        connections_refused: dataplane::REFUSED
-            .iter()
-            .map(|r| r.load(Ordering::Relaxed))
-            .sum(),
+        connections_refused: dataplane::refused_total(),
         server_cert_days: crate::ops::server_cert_days(),
         console_dropped: CONSOLE_DROPPED.load(Ordering::Relaxed),
+        handshakes: {
+            let t = dataplane::handshake_totals();
+            urmqtt_broker::sys::Handshakes {
+                started: t.started,
+                done: t.done,
+                failed: t.failed,
+                timed_out: t.timed_out,
+                refused: t.refused,
+                syn_dropped: t.syn_dropped,
+                in_flight: t.in_flight,
+                in_flight_max: u64::from(t.in_flight_max),
+                slow: t.slow,
+                latency_sum_ms: t.latency_sum_ms,
+                latency_max_ms: u64::from(t.latency_max_ms),
+            }
+        },
+        accepted: accepted.get(..cores).unwrap_or(&[]),
     }
 }
 

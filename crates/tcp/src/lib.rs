@@ -49,6 +49,8 @@ extern crate alloc;
 pub mod cc;
 pub mod cookie;
 pub mod seq;
+
+mod refused;
 mod siphash;
 pub mod table;
 pub mod wire;
@@ -68,6 +70,7 @@ use alloc::vec::Vec;
 
 use cc::{Congestion, NewReno};
 use cookie::Cookies;
+use refused::{RefusedFlows, Verdict};
 use seq::{ge, gt, le, lt};
 use table::{Key, Table};
 use urmqtt_mm::slab::Slab;
@@ -95,6 +98,13 @@ pub enum CloseReason {
 /// The application side of the stack, called synchronously from
 /// [`TcpStack::input`], [`TcpStack::poll`] and [`TcpStack::flush`].
 pub trait App {
+    /// A SYN for `local_port` from `remote` arrived. Return false to drop
+    /// it without a SYN-ACK: no state exists yet, and the peer's own TCP
+    /// retransmits after its backoff (1 s, 2 s, ...). Used to shed load
+    /// before any work is done (PERF, ADR-080). The default accepts all.
+    fn syn_ok(&mut self, _local_port: u16, _remote: [u8; 4]) -> bool {
+        true
+    }
     /// A handshake completed; return false to refuse (the peer gets RST).
     fn accept(&mut self, c: ConnId, local_port: u16, remote: Endpoint) -> bool;
     /// In-order payload; must be consumed (processed or copied) now.
@@ -140,6 +150,15 @@ pub struct Stats {
     pub out_of_order: u64,
     pub refused_full: u64,
     pub accepted: u64,
+    /// SYNs dropped without a SYN-ACK because the application was full
+    /// ([`App::syn_ok`]).
+    pub syn_dropped: u64,
+    /// Connections the application refused at the final ACK ([`App::accept`]
+    /// returned false): the peer got a RST.
+    pub refused_app: u64,
+    /// Segments of a flow refused a moment ago, answered or dropped without
+    /// asking the application again (see `RefusedFlows`).
+    pub refused_repeat: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +288,7 @@ pub struct TcpStack {
     dirty: Vec<u32>,
     rst_tokens: u32,
     rst_last_ms: u64,
+    refused: RefusedFlows,
     buf: Vec<u8>,
     pub stats: Stats,
 }
@@ -293,6 +313,7 @@ impl TcpStack {
             dirty: Vec::new(),
             rst_tokens: cfg.rst_per_sec,
             rst_last_ms: now_ms,
+            refused: RefusedFlows::new(seed),
             buf: Vec::with_capacity(1600),
             cfg,
             stats: Stats::default(),
@@ -551,6 +572,12 @@ impl TcpStack {
                 self.stats.refused_small_mss += 1;
                 return;
             }
+            // The application is full: no SYN-ACK and no state. The peer's
+            // own TCP retransmits the SYN after its backoff (PERF, ADR-080).
+            if !app.syn_ok(h.dport, src) {
+                self.stats.syn_dropped += 1;
+                return;
+            }
             // Stateless SYN-ACK: the cookie is our ISN.
             let flow = cookie::Flow {
                 src,
@@ -575,6 +602,30 @@ impl TcpStack {
         if h.flags & (SYN | RST) != 0 || h.flags & ACK == 0 {
             self.reset_unknown(now_ms, src, h, payload.len() as u32, out);
             return;
+        }
+        // A flow refused a moment ago (its ClientHello follows the refused
+        // ACK): do not ask the application again.
+        match self.refused.check(&key, now_ms) {
+            Verdict::Unknown => {}
+            Verdict::Reset => {
+                self.stats.refused_repeat += 1;
+                let o = Out {
+                    sport: h.dport,
+                    dport: h.sport,
+                    seq: h.ack,
+                    ack: 0,
+                    flags: RST,
+                    window: 0,
+                    mss: None,
+                };
+                self.emit(src, &o, &[], out);
+                self.stats.rst_sent += 1;
+                return;
+            }
+            Verdict::Drop => {
+                self.stats.refused_repeat += 1;
+                return;
+            }
         }
         // Final ACK of the handshake: validate the cookie.
         let our_isn = h.ack.wrapping_sub(1);
@@ -641,6 +692,8 @@ impl TcpStack {
                 port: h.sport,
             },
         ) {
+            self.stats.refused_app += 1;
+            self.refused.note(&key, now_ms);
             self.abort(c, out);
             return;
         }

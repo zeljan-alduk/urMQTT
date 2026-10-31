@@ -47,7 +47,10 @@ pub struct Ops {
 #[derive(Default, Clone, Copy)]
 struct Counters {
     accepted: u64,
-    refused: [u64; 4],
+    refused: [u64; 5],
+    syn_dropped: [u64; 5],
+    hs: dataplane::HsTotals,
+    dropped_by: [u64; 4],
     watchdog: u64,
     verify_hits: u64,
     dropped_frames: u64,
@@ -64,11 +67,14 @@ struct Counters {
 fn counters(lost: u64, unsent: u64) -> Counters {
     // Relaxed throughout: statistics.
     Counters {
-        accepted: dataplane::ACCEPTED
+        accepted: dataplane::ACCEPTED_TOTAL
             .iter()
             .map(|a| a.load(Ordering::Relaxed))
             .sum(),
-        refused: dataplane::REFUSED
+        refused: dataplane::refused_by_reason(),
+        syn_dropped: dataplane::syn_dropped_by_reason(),
+        hs: dataplane::handshake_totals(),
+        dropped_by: dataplane::DROPPED_BY
             .each_ref()
             .map(|r| r.load(Ordering::Relaxed)),
         watchdog: crate::watchdog::FIRED.load(Ordering::Relaxed),
@@ -310,13 +316,45 @@ impl Ops {
             );
         }
         add("accepted", d(now.accepted, prev.accepted), "c");
-        for (i, name) in ["rate", "in_flight", "memory", "storage"]
-            .iter()
-            .enumerate()
-        {
+        for r in urmqtt_net::admission::Reason::ALL {
+            let i = r as usize;
             let (a, b) = (now.refused.get(i), prev.refused.get(i));
             add(
-                &alloc::format!("refused.{name}"),
+                &alloc::format!("refused.{}", r.name()),
+                d(a.copied().unwrap_or(0), b.copied().unwrap_or(0)),
+                "c",
+            );
+            let (a, b) = (now.syn_dropped.get(i), prev.syn_dropped.get(i));
+            add(
+                &alloc::format!("syn_dropped.{}", r.name()),
+                d(a.copied().unwrap_or(0), b.copied().unwrap_or(0)),
+                "c",
+            );
+        }
+        // Handshakes (PERF, ADR-080): started at the final ACK, done = TLS
+        // established, in flight now, and accept-to-done latency.
+        let (h, ph) = (&now.hs, &prev.hs);
+        add("handshakes.started", d(h.started, ph.started), "c");
+        add("handshakes.done", d(h.done, ph.done), "c");
+        add("handshakes.failed", d(h.failed, ph.failed), "c");
+        add("handshakes.timed_out", d(h.timed_out, ph.timed_out), "c");
+        add("handshakes.slow", d(h.slow, ph.slow), "c");
+        add(
+            "handshakes.latency_ms_sum",
+            d(h.latency_sum_ms, ph.latency_sum_ms),
+            "c",
+        );
+        add("handshakes.in_flight", h.in_flight, "g");
+        add("handshakes.in_flight_max", u64::from(h.in_flight_max), "g");
+        add(
+            "handshakes.latency_max_ms",
+            u64::from(h.latency_max_ms),
+            "g",
+        );
+        for (i, site) in dataplane::DROP_SITES.iter().enumerate() {
+            let (a, b) = (now.dropped_by.get(i), prev.dropped_by.get(i));
+            add(
+                &alloc::format!("frames.dropped.{site}"),
                 d(a.copied().unwrap_or(0), b.copied().unwrap_or(0)),
                 "c",
             );

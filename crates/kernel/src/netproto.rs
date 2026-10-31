@@ -21,7 +21,7 @@ use urmqtt_net::iface::{Event, Iface, Rx};
 use urmqtt_tcp::{App, CloseReason, ConnId, Endpoint, TcpStack};
 use urmqtt_virtio::net::{MTU_FRAME, VirtioNet};
 
-use crate::dataplane::{self, CoreMsg, DROPPED_FRAMES, Frame, Link, POOL_MAX, new_frame};
+use crate::dataplane::{self, CoreMsg, DropSite, Frame, Link, POOL_MAX, new_frame};
 use crate::db::Restored;
 use crate::devices;
 use crate::mqtt_service::{MAX_CONNS, MqttService, TcpEvents};
@@ -34,6 +34,9 @@ const PING_TIMEOUT_MS: u64 = 2_000;
 const RX_BURST: usize = 64;
 /// Messages taken from each peer per pass.
 const MSG_BURST: usize = 256;
+/// A serving dispatcher handles frames for its own connections this long
+/// (ns) before it looks at the NIC again (`cpu.dispatcher_serves`).
+const LOCAL_SLICE_NS: u64 = 200_000;
 
 fn now_ms() -> u64 {
     time::uptime_ns() / 1_000_000
@@ -129,13 +132,20 @@ impl TcpStatsLog {
         let d = |a: u64, b: u64| a.saturating_sub(b);
         info!(
             "tcp: core {}: {} seg(s) in, cookies {} sent/{} ok/{} bad, {} refused(full table), \
-             RST {} sent ({} rate-limited), {} bad segment(s), {} connection(s)",
+             {} SYN(s) dropped (full), {} refused by the application, {} repeat segment(s) of refused flows, \
+             {} retransmission(s) ({} fast, {} timeouts), RST {} sent ({} rate-limited), {} bad segment(s), {} connection(s)",
             crate::smp::current(),
             d(s.segs_in, self.last.segs_in),
             d(s.cookies_sent, self.last.cookies_sent),
             d(s.cookies_ok, self.last.cookies_ok),
             d(s.cookies_bad, self.last.cookies_bad),
             d(s.refused_full, self.last.refused_full),
+            d(s.syn_dropped, self.last.syn_dropped),
+            d(s.refused_app, self.last.refused_app),
+            d(s.refused_repeat, self.last.refused_repeat),
+            d(s.retransmits, self.last.retransmits),
+            d(s.fast_retransmits, self.last.fast_retransmits),
+            d(s.timeouts, self.last.timeouts),
             d(s.rst_sent, self.last.rst_sent),
             d(s.rst_limited, self.last.rst_limited),
             d(s.bad_segments, self.last.bad_segments),
@@ -173,6 +183,10 @@ struct CoreApp<'a> {
 }
 
 impl App for CoreApp<'_> {
+    fn syn_ok(&mut self, port: u16, remote: [u8; 4]) -> bool {
+        port == ECHO_PORT && self.echo.is_some() || self.mqtt.syn_ok(port, remote)
+    }
+
     fn accept(&mut self, c: ConnId, port: u16, remote: Endpoint) -> bool {
         if port == ECHO_PORT
             && let Some(e) = self.echo.as_mut()
@@ -308,7 +322,9 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
         let now = now_ms();
         cookies.tick(&mut tcp, now);
         tcpstats.tick(&tcp.stats, tcp.connections(), now);
+        let t = time::uptime_ns();
         let mut activity = drain_mesh(&mut link, &mut mqtt, &mut iface, &mut tcp, now);
+        idle.prof.mesh += time::uptime_ns() - t;
         let mut sent = false;
         let mut done: Vec<Frame> = Vec::new();
         {
@@ -320,13 +336,14 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
                     d.copy_from_slice(s);
                 }
                 if tx.push(frame).is_err() {
-                    DROPPED_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    dataplane::drop_frame(DropSite::WorkerTx);
                 }
                 sent = true;
             };
             for _ in 0..RX_BURST {
                 let Some(f) = rx.pop() else { break };
                 activity = true;
+                let t = time::uptime_ns();
                 if let Rx::Tcp { src, seg } =
                     iface.receive(now, f.data.get(..f.len).unwrap_or(&[]), &mut emit)
                 {
@@ -339,9 +356,13 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
                         iface.send_tcp(dst, s, &mut emit)
                     });
                 }
+                idle.prof.rx += time::uptime_ns() - t;
                 done.push(f);
             }
+            let t = time::uptime_ns();
             activity |= mqtt.poll(&mut tcp, &mut link, now);
+            idle.prof.poll += time::uptime_ns() - t;
+            let t = time::uptime_ns();
             for c in mqtt.take_aborts() {
                 tcp.abort(c, &mut |dst, s| iface.send_tcp(dst, s, &mut emit));
             }
@@ -356,6 +377,7 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
                 });
             }
             tcp.flush(now, &mut |dst, s| iface.send_tcp(dst, s, &mut emit));
+            idle.prof.tcp += time::uptime_ns() - t;
         }
         link.flush();
         pool.append(&mut done);
@@ -412,7 +434,7 @@ fn dispatch(
                     match tx.push(f) {
                         Ok(()) => steered = true,
                         Err(f) => {
-                            DROPPED_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            dataplane::drop_frame(DropSite::Steer);
                             pool.push(f);
                         }
                     }
@@ -431,7 +453,7 @@ fn dispatch(
             moved = true;
             dataplane::DISPATCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if net.queue(f.data.get(..f.len).unwrap_or(&[])).is_err() {
-                DROPPED_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                dataplane::drop_frame(DropSite::NicTx);
             }
             if pool.len() < POOL_MAX {
                 pool.push(f);
@@ -475,8 +497,13 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     let mac = net.mac;
     if n > 1 {
         info!(
-            "net: dispatcher mode: core 0 owns the single virtio-net queue pair and steers MQTT flows to {} worker core(s) (Toeplitz hash)",
-            n - 1
+            "net: dispatcher mode: core 0 owns the single virtio-net queue pair and steers MQTT flows to {} worker core(s) (Toeplitz hash){}",
+            dataplane::workers(n).len(),
+            if dataplane::dispatcher_serves() {
+                ", core 0 among them (cpu.dispatcher_serves)"
+            } else {
+                ""
+            }
         );
     }
     let mut xid = [0u8; 4];
@@ -508,7 +535,8 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         }
     };
     let mut mqtt = MqttService::new(restored.as_deref(), 0, n);
-    let mut ports = if n == 1 { mqtt.ports() } else { Vec::new() };
+    let serves = n == 1 || dataplane::dispatcher_serves();
+    let mut ports = if serves { mqtt.ports() } else { Vec::new() };
     let mut echo_svc = echo.then(EchoSvc::default);
     if echo_svc.is_some() {
         ports.push(ECHO_PORT);
@@ -536,17 +564,23 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             );
         }
         dataplane::mem_report(now, &mut mem_last, &mut mem_conns);
+        let t = time::uptime_ns();
         let mut activity = dispatch(&mut net, &mut link, &mut pool, &mut local);
+        idle.prof.disp += time::uptime_ns() - t;
+        let t = time::uptime_ns();
         activity |= drain_mesh(&mut link, &mut mqtt, &mut iface, &mut tcp, now);
+        idle.prof.mesh += time::uptime_ns() - t;
         let mut events: Vec<Event> = Vec::new();
         {
             let mut emit = |f: &[u8]| {
                 if net.queue(f).is_err() {
-                    DROPPED_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    dataplane::drop_frame(DropSite::NicTxLocal);
                 }
             };
+            let slice = time::uptime_ns();
             while let Some(f) = local.pop_front() {
                 activity = true;
+                let t = time::uptime_ns();
                 match iface.receive(now, f.data.get(..f.len).unwrap_or(&[]), &mut emit) {
                     Rx::Tcp { src, seg } => {
                         let mut app = CoreApp {
@@ -564,8 +598,16 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
                     Rx::Event(e) => events.push(e),
                     Rx::None => {}
                 }
+                let t1 = time::uptime_ns();
+                idle.prof.rx += t1 - t;
                 if pool.len() < POOL_MAX {
                     pool.push(f);
+                }
+                // A dispatcher that also serves connections goes back to the
+                // NIC after a slice: its work is cut between frames (one
+                // TLS step, up to a few ms, cannot be cut).
+                if serves && t1 - slice > LOCAL_SLICE_NS {
+                    break;
                 }
             }
             if let Some(e) = iface.poll(now, &mut emit) {
@@ -646,7 +688,10 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             if let Some(e) = echo_svc.as_mut() {
                 e.pump(&mut tcp);
             }
+            let t = time::uptime_ns();
             activity |= mqtt.poll(&mut tcp, &mut link, now);
+            idle.prof.poll += time::uptime_ns() - t;
+            let t = time::uptime_ns();
             for c in mqtt.take_aborts() {
                 tcp.abort(c, &mut |dst, s| iface.send_tcp(dst, s, &mut emit));
             }
@@ -664,6 +709,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
                 });
             }
             tcp.flush(now, &mut |dst, s| iface.send_tcp(dst, s, &mut emit));
+            idle.prof.tcp += time::uptime_ns() - t;
         }
         link.flush();
         net.flush();
