@@ -24,6 +24,12 @@
 //! heap's allocation map, lock-free) is an invalid free. Allocations of
 //! 32 KiB and more, and any allocation whose block has the room, get a
 //! canary gap behind them that is checked at free.
+//!
+//! With memory tagging (ADR-174) a live allocation is also given a random
+//! allocation tag over its bytes rounded up to 16, the pointer returned
+//! carries it, and freeing sets the tags back to zero: a stale pointer or an
+//! overflow faults in hardware, at the instruction. All of the allocator's
+//! own accesses use the untagged address, which the hardware does not check.
 
 #![allow(unsafe_code)]
 
@@ -94,6 +100,22 @@ unsafe fn get(p: *mut u8, off: usize) -> usize {
     unsafe { p.wrapping_add(off).cast::<usize>().read() }
 }
 
+/// Memory tagging, supplied by the architecture (aarch64 MTE).
+#[derive(Clone, Copy)]
+pub struct Tagging {
+    /// Gives `[p, p + len)` (`p` 16-aligned, `len` a multiple of 16) a fresh
+    /// random allocation tag and returns `p` carrying the matching tag.
+    pub retag: unsafe fn(*mut u8, usize) -> *mut u8,
+    /// Sets the allocation tags of `[p, p + len)` back to 0 (free).
+    pub clear: unsafe fn(*mut u8, usize),
+}
+
+/// Allocations above this many bytes are not tagged: a tag store per 16
+/// bytes of a huge buffer costs more than it protects.
+pub const TAG_MAX: usize = 1 << 20;
+/// Bits 59:56 of a pointer: the logical tag.
+const TAG_BITS: usize = 0xf << 56;
+
 /// How the cache learns the current CPU and keeps interrupts out.
 pub struct Hooks {
     pub cpu: fn() -> usize,
@@ -117,6 +139,7 @@ pub struct CachedHeap {
     caches: [UnsafeCell<Cache>; MAX_CPUS],
     hooks: OnceCell<Hooks>,
     view: OnceCell<AllocView>,
+    tagging: OnceCell<Tagging>,
     /// Per-boot key for the cache links, tags and canaries.
     key: AtomicUsize,
     /// Bytes requested and not yet freed, per CPU (a block freed on another
@@ -180,6 +203,7 @@ impl CachedHeap {
             }; MAX_CPUS],
             hooks: OnceCell::new(),
             view: OnceCell::new(),
+            tagging: OnceCell::new(),
             key: AtomicUsize::new(0x9e37_79b9_7f4a_7c15),
             live: [const { AtomicI64::new(0) }; MAX_CPUS],
             blocks: [const { AtomicI64::new(0) }; MAX_CPUS],
@@ -225,6 +249,42 @@ impl CachedHeap {
     /// global heap.
     pub fn enable(&self, hooks: Hooks) {
         let _ = self.hooks.set(hooks);
+    }
+
+    /// Turns memory tagging on: from now on live allocations of up to
+    /// [`TAG_MAX`] bytes are tagged. Call once the architecture has enabled
+    /// tag checking on every CPU that allocates (the boot CPU, before the
+    /// others start) and the heap is mapped as tagged memory.
+    pub fn enable_tagging(&self, t: Tagging) {
+        let _ = self.tagging.set(t);
+    }
+
+    /// Tags the allocation `p` of `size` bytes, if tagging is on.
+    fn tag_out(&self, p: *mut u8, size: usize) -> *mut u8 {
+        match self.tagging.get() {
+            Some(t) if !p.is_null() && size <= TAG_MAX => {
+                // SAFETY: `p` is a fresh allocation of at least `size`
+                // bytes, 16-aligned (blocks are 32-aligned), in tagged memory.
+                unsafe { (t.retag)(p, size.next_multiple_of(16)) }
+            }
+            _ => p,
+        }
+    }
+
+    /// The untagged address of a pointer handed out by [`tag_out`](Self::tag_out),
+    /// with its allocation tags cleared.
+    fn tag_in(&self, p: *mut u8, size: usize) -> *mut u8 {
+        let (Some(t), Some(v)) = (self.tagging.get(), self.view.get()) else {
+            return p;
+        };
+        // The heap's own logical tag bits are what "untagged" means.
+        let plain = (p as usize & !TAG_BITS) | (v.base() & TAG_BITS);
+        let plain = plain as *mut u8;
+        if size <= TAG_MAX && v.contains(plain as usize) {
+            // SAFETY: the allocation is being freed; its granules are ours.
+            unsafe { (t.clear)(plain, size.next_multiple_of(16)) };
+        }
+        plain
     }
 
     /// (free bytes, capacity) of the global heap (cached blocks count as used).
@@ -435,13 +495,14 @@ unsafe impl GlobalAlloc for CachedHeap {
             self.account(layout, layout, 1);
             if let Some(r) = self.take(c) {
                 match r {
-                    Ok(p) if !p.is_null() => return p,
+                    Ok(p) if !p.is_null() => return self.tag_out(p, layout.size()),
                     Ok(_) => {}
                     Err(f) => crate::heap_fault(f),
                 }
             }
             // SAFETY: forwarded GlobalAlloc contract.
-            return unsafe { self.global.alloc(layout) };
+            let p = unsafe { self.global.alloc(layout) };
+            return self.tag_out(p, layout.size());
         }
         let Some(real) = padded(layout) else {
             return null_mut();
@@ -457,10 +518,11 @@ unsafe impl GlobalAlloc for CachedHeap {
                 unsafe { p.wrapping_add(layout.size() + i).write(c) };
             }
         }
-        p
+        self.tag_out(p, layout.size())
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let ptr = self.tag_in(ptr, layout.size());
         if let Some(c) = class_of(layout) {
             self.account(layout, layout, -1);
             // SAFETY: forwarded contract: `ptr` has a layout of class `c`.
@@ -700,6 +762,41 @@ mod tests {
         let p = r.alloc(3000);
         unsafe { core::ptr::write_bytes(p, 1, 3000) };
         r.free(p, 3000);
+    }
+
+    use core::sync::atomic::{AtomicUsize, Ordering as O};
+    static RETAGS: AtomicUsize = AtomicUsize::new(0);
+    static CLEARED: AtomicUsize = AtomicUsize::new(0);
+    unsafe fn fake_retag(p: *mut u8, len: usize) -> *mut u8 {
+        RETAGS.fetch_add(len, O::SeqCst);
+        // A logical tag of 3 in bits 59:56.
+        ((p as usize & !(0xf << 56)) | (3 << 56)) as *mut u8
+    }
+    unsafe fn fake_clear(_p: *mut u8, len: usize) {
+        CLEARED.fetch_add(len, O::SeqCst);
+    }
+
+    #[test]
+    fn tagging_hooks_see_rounded_sizes_and_frees_take_tagged_pointers() {
+        let r = Rig::new();
+        r.heap.enable_tagging(Tagging {
+            retag: fake_retag,
+            clear: fake_clear,
+        });
+        let (a0, c0) = (RETAGS.load(O::SeqCst), CLEARED.load(O::SeqCst));
+        let p = r.alloc(100); // small path
+        let q = r.alloc(5000); // large path
+        assert_eq!(p as usize >> 56 & 0xf, 3);
+        assert_eq!(q as usize >> 56 & 0xf, 3);
+        assert_eq!(RETAGS.load(O::SeqCst) - a0, 112 + 5008);
+        // The allocator accepts the tagged pointers back (it works on the
+        // untagged address), and clears the tags of what was tagged.
+        r.free(p, 100);
+        r.free(q, 5000);
+        assert_eq!(CLEARED.load(O::SeqCst) - c0, 112 + 5008);
+        // A double free through a tagged pointer is still a double free.
+        let m = panic_of(|| r.free(p, 100));
+        assert!(m.contains("double free"), "{m}");
     }
 
     #[test]

@@ -56,6 +56,12 @@ pub enum TestFault {
     /// A panic whose message is formatted from known key bytes.
     #[cfg(feature = "selftest")]
     PanicSecret,
+    /// Read a heap block through a stale pointer (H4 memory tagging).
+    #[cfg(feature = "selftest")]
+    MteUaf,
+    /// Write one granule past a heap allocation (H4 memory tagging).
+    #[cfg(feature = "selftest")]
+    MteOverflow,
 }
 
 /// Storage self-tests (M11).
@@ -271,6 +277,10 @@ impl BootOptions {
                 "test=fault-secrets-open" => o.test_fault = Some(TestFault::FaultSecretsOpen),
                 #[cfg(feature = "selftest")]
                 "test=panic-secret" => o.test_fault = Some(TestFault::PanicSecret),
+                #[cfg(feature = "selftest")]
+                "test=mte-uaf" => o.test_fault = Some(TestFault::MteUaf),
+                #[cfg(feature = "selftest")]
+                "test=mte-overflow" => o.test_fault = Some(TestFault::MteOverflow),
                 #[cfg(feature = "selftest")]
                 "redact" => o.redact = true,
                 "test=simd-irq" => o.simd_irq = true,

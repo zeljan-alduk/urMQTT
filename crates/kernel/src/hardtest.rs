@@ -29,6 +29,8 @@ pub fn run(fault: TestFault) {
         TestFault::StackSmash => stack_smash(),
         TestFault::FaultSecrets | TestFault::FaultSecretsOpen => fault_with_secrets(),
         TestFault::PanicSecret => panic_with_secret(),
+        TestFault::MteUaf => mte_uaf(),
+        TestFault::MteOverflow => mte_overflow(),
         _ => warn!("test: {fault:?} is not implemented in this image"),
     }
 }
@@ -179,30 +181,7 @@ fn fault_with_secrets() {
     black_box(&on_heap);
     black_box(&on_stack);
     let unmapped = crate::memory::unmapped_mmio_probe();
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: deliberately faulting load from an unmapped address; the
-    // exception handler reports it and does not return.
-    unsafe {
-        core::arch::asm!(
-            "ldr xzr, [{p}]",
-            p = in(reg) unmapped,
-            in("x20") TEST_KEY[0], in("x21") TEST_KEY[1], in("x22") TEST_KEY[2],
-            in("x23") TEST_KEY[3], in("x24") TEST_KEY[4], in("x25") TEST_KEY[5],
-            options(nostack, readonly)
-        );
-    }
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: as above.
-    unsafe {
-        core::arch::asm!(
-            "mov rax, [{p}]",
-            p = in(reg) unmapped,
-            out("rax") _,
-            in("r10") TEST_KEY[0], in("r11") TEST_KEY[1], in("r12") TEST_KEY[2],
-            in("r13") TEST_KEY[3], in("r14") TEST_KEY[4], in("r15") TEST_KEY[5],
-            options(nostack, readonly)
-        );
-    }
+    urmqtt_arch::trap::load_with_registers(unmapped, &TEST_KEY);
     error!("test: the fault with secrets did not happen");
 }
 
@@ -218,4 +197,46 @@ fn panic_with_secret() {
             key[0]
         );
     }
+}
+
+/// `test=mte-uaf`: a read through a pointer to a block that was freed. With
+/// memory tagging the free set the block's tags to 0 and the stale pointer
+/// carries a tag from 1 to 14: the read faults at once, before the
+/// allocator's own check (which only runs when the block is reused) is
+/// reached.
+#[inline(never)]
+fn mte_uaf() {
+    if !crate::hardening::mte_active() {
+        warn!("test: memory tagging is not active on this machine (no FEAT_MTE2), nothing to show");
+        return;
+    }
+    let (p, layout) = block(100);
+    // SAFETY: the block is ours until the free.
+    unsafe { black_box(p).write_volatile(0x41) };
+    // SAFETY: the block came from `block`.
+    unsafe { dealloc(p, layout) };
+    // SAFETY: deliberately wrong: a read through the stale pointer.
+    let v = unsafe { black_box(p).read_volatile() };
+    error!("test: the use after free was NOT detected (read {v:#x})");
+}
+
+/// `test=mte-overflow`: a write one granule (16 bytes) past the allocation,
+/// into the next granule, which is not part of any allocation (tag 0).
+#[inline(never)]
+fn mte_overflow() {
+    if !crate::hardening::mte_active() {
+        warn!("test: memory tagging is not active on this machine (no FEAT_MTE2), nothing to show");
+        return;
+    }
+    // 100 bytes are tagged as 112; byte 112 is the first one outside.
+    let (p, layout) = block(100);
+    // SAFETY: the last byte of the tagged part is inside the allocation's
+    // granules.
+    unsafe { black_box(p).wrapping_add(111).write_volatile(0x41) };
+    info!("test: the write inside the last granule was accepted (granularity is 16 bytes)");
+    // SAFETY: deliberately wrong: the first byte after the tagged granules.
+    unsafe { black_box(p).wrapping_add(112).write_volatile(0x41) };
+    error!("test: the overflow was NOT detected");
+    // SAFETY: the block came from `block`.
+    unsafe { dealloc(p, layout) };
 }

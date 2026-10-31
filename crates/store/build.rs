@@ -106,12 +106,16 @@ fn main() {
                 "-mcmodel=small",
                 "-mstrict-align",
                 "-mbranch-protection=pac-ret+bti",
+                // Position independent, so the kernel can be slid (ADR-173).
+                "-fPIE",
             ],
             "x86_64" => &[
                 "--target=x86_64-unknown-none-elf",
                 "-mcmodel=kernel",
                 "-mno-red-zone",
                 "-march=x86-64-v2",
+                // Position independent, so the kernel can be slid (ADR-173).
+                "-fPIE",
             ],
             other => panic!("unsupported kernel architecture {other}"),
         };
@@ -121,8 +125,6 @@ fn main() {
             "-fno-builtin",
             "-fstack-protector-strong",
             "-mstack-protector-guard=global",
-            "-fno-pic",
-            "-fno-pie",
             "-ffunction-sections",
             "-fdata-sections",
             "-fno-asynchronous-unwind-tables",

@@ -160,6 +160,24 @@ pub fn general_protection() {
     core::hint::black_box(v);
 }
 
+/// Loads from `addr` (an address that faults) with six general-purpose
+/// registers holding `regs`, so the fault report can be checked for them
+/// (H4 fault policy, dev tests only).
+pub fn load_with_registers(addr: u64, regs: &[u64; 6]) {
+    // SAFETY: deliberately faulting load in test mode; the exception
+    // handler reports it and does not return here.
+    unsafe {
+        core::arch::asm!(
+            "mov rax, [{p}]",
+            p = in(reg) addr,
+            out("rax") _,
+            in("r10") regs[0], in("r11") regs[1], in("r12") regs[2],
+            in("r13") regs[3], in("r14") regs[4], in("r15") regs[5],
+            options(nostack, readonly)
+        );
+    }
+}
+
 /// A #GP whose gate is not present: delivering it raises #NP, and two
 /// contributory exceptions in a row are a #DF, taken on its own IST stack.
 pub fn double_fault() {

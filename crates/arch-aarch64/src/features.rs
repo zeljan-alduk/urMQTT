@@ -30,6 +30,8 @@ pub struct Features {
     pub lse: bool,
     /// Memory tagging, any level.
     pub mte: bool,
+    /// Memory tagging with tag checking (FEAT_MTE2 and up).
+    pub mte2: bool,
     pub sve: bool,
 }
 
@@ -70,6 +72,7 @@ impl Features {
             crc32: field(r.isar0, 16) >= 1,
             lse: field(r.isar0, 20) >= 2,
             mte: field(r.pfr1, 8) >= 1,
+            mte2: field(r.pfr1, 8) >= 2,
             sve: field(r.pfr0, 32) >= 1,
         }
     }

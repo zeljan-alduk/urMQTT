@@ -192,6 +192,11 @@ impl AllocView {
     pub fn contains(&self, addr: usize) -> bool {
         addr >= self.base && addr - self.base < self.size
     }
+
+    /// The first address of the heap.
+    pub fn base(&self) -> usize {
+        self.base
+    }
 }
 
 impl BuddyHeap {

@@ -42,10 +42,10 @@ fn a_dropped_generator_is_overwritten_in_place() {
         "the state of a dropped generator was left in memory"
     );
     // And nothing of the old state survives at all (not one 8-byte run).
-    for w in before.chunks_exact(8) {
+    for w in before.as_chunks::<8>().0 {
         if w.iter().any(|&b| b != 0) {
             assert!(
-                !after.chunks_exact(8).any(|a| a == w),
+                !after.as_chunks::<8>().0.iter().any(|a| a == w),
                 "a word of the old state survived"
             );
         }

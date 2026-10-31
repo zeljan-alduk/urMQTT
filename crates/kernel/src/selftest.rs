@@ -85,7 +85,7 @@ pub fn wx_audit() -> Result<(), &'static str> {
         ("text", text, false, true),
         ("sealed", sealed_start, false, false),
         ("data", data_start, true, false),
-        ("heap", layout::HEAP_BASE, true, false),
+        ("heap", layout::heap_base(), true, false),
         ("stack", layout::stacks(0).1.0, true, false),
     ];
     for (name, va, want_w, want_x) in checks {
@@ -101,7 +101,7 @@ pub fn wx_audit() -> Result<(), &'static str> {
     if vm::kernel_alias_writable() {
         return Err("HHDM alias of the kernel image is writable");
     }
-    if vm::leaf_at(layout::PT_ALIAS_BASE).is_some() {
+    if vm::leaf_at(layout::pt_alias_base()).is_some() {
         return Err("page-table alias still mapped after lock");
     }
     if vm::leaf_at(layout::stacks(0).1.0 - PAGE_SIZE).is_some() {

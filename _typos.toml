@@ -2,6 +2,8 @@
 extend-exclude = ["vendor/", "*.pem", "*.key", "Cargo.lock", "fuzz/Cargo.lock"]
 
 [default.extend-words]
+# ELF dynamic relocation section names (.rela.dyn)
+rela = "rela"
 mosquitto = "mosquitto"
 Mosquitto = "Mosquitto"
 BA = "BA"

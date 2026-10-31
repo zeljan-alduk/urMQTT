@@ -116,6 +116,8 @@ struct Stage2 {
     options: BootOptions,
     platform: Option<urmqtt_platform::PlatformInfo>,
     boot_entropy: [u64; ENTROPY_VALUES as usize],
+    /// Key material derived from `boot_entropy` (wiped after use).
+    seed: hardening::Seed,
     pac_key: Option<(u64, u64)>,
     cpus: u64,
     built: vm::Built,
@@ -164,6 +166,16 @@ extern "C" fn urmqtt_kmain() -> ! {
 
     let dev = urmqtt_config::CONFIG.env == "dev";
     let early = discover(&mem);
+    // Where every region of the kernel's address space goes this boot
+    // (ADR-173), before anything is mapped. The seed also keys the allocator
+    // and the stack canary in stage 2.
+    let boot_entropy = bootloader_entropy();
+    let seed = hardening::Seed::new(&boot_entropy);
+    let mut draw = 0u64;
+    let placement = layout::randomise(1 << 30, || {
+        draw += 1;
+        seed.key(hardening::domain::LAYOUT.wrapping_add(draw))
+    });
     let mmio_ok = memory::init_early_mmio(&mem);
     // The UART (AArch64) or the time base (x86), mapped in the bootloader's
     // tables; both are replayed into the kernel's.
@@ -315,6 +327,7 @@ extern "C" fn urmqtt_kmain() -> ! {
         exe.virtual_base,
         arch::bti(&features),
         heap_mb,
+        arch::heap_tagged(&features),
     ) {
         Ok(b) => b,
         Err(e) => fatal_fmt(format_args!(
@@ -327,6 +340,7 @@ extern "C" fn urmqtt_kmain() -> ! {
         (built.free_frames as u64 * 4096) >> 20
     );
 
+    hardening::log_placement(&placement, &seed, exe.virtual_base, dev);
     let pac_key = arch::pac_key(&features);
     let pac_on = pac_key.is_some();
     vm::activate();
@@ -335,7 +349,8 @@ extern "C" fn urmqtt_kmain() -> ! {
     *STAGE2.lock() = Some(Stage2 {
         options,
         platform: early,
-        boot_entropy: bootloader_entropy(),
+        boot_entropy,
+        seed,
         pac_key,
         cpus: cpus as u64,
         built,
@@ -349,6 +364,16 @@ extern "C" fn urmqtt_kmain() -> ! {
     // SAFETY: both stacks were mapped by `vm::build` and are 16-byte aligned
     // at the top; this frame (on the bootloader's stack) is abandoned.
     unsafe { cpu::switch_to(main_top, exc_top, 0, kmain_stage2, pac_on) }
+}
+
+/// The memory-tag generator of application processor `id` (ADR-174).
+pub(crate) fn arch_mte_init_cpu(id: u64) {
+    arch::mte_init_cpu(mte_seed(id));
+}
+
+/// A 16-bit seed for a CPU's memory-tag generator.
+pub(crate) fn mte_seed(cpu: u64) -> u16 {
+    (hardening::mix(time::uptime_ns() ^ cpu.rotate_left(32) ^ 0x4d54_4500) & 0xffff) as u16
 }
 
 /// The bootloader's entropy values (zero if none), for the CSPRNG pool.
@@ -374,7 +399,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     };
     // First thing: a stack canary that is not the build-time constant. Safe
     // here because this function never returns (ADR-171).
-    let seed = hardening::Seed::new(&s.boot_entropy);
+    let mut seed = s.seed;
     hardening::stack_guard::renew(seed.key(hardening::domain::GUARD));
     smp::init_boot_cpu();
     vm::retire_early_frames(s.early_frames);
@@ -387,13 +412,21 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         fatal_fmt(format_args!("heap init failed: {e:?}"));
     }
     seed.log();
+    // Every key is derived: the seed words do not stay in memory.
+    seed.wipe();
+    s.seed.wipe();
     info!(
         "hardening: heap poison-on-free, double/invalid-free checks, obfuscated free lists, canary gaps"
     );
     info!(
-        "vm: running on kernel stacks (main {} KiB at {:#x}, exception {} KiB), {}",
+        "vm: running on kernel stacks (main {} KiB{}, exception {} KiB), {}",
         layout::MAIN_STACK_SIZE >> 10,
-        s.built.main_top,
+        // Where the stacks are is what KASLR hides (ADR-173): dev only.
+        if urmqtt_config::CONFIG.env == "dev" {
+            alloc::format!(" at {:#x}", s.built.main_top)
+        } else {
+            alloc::string::String::new()
+        },
         layout::EXC_STACK_SIZE >> 10,
         arch::protection_summary(&s.features),
     );
@@ -404,6 +437,13 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         fatal(msg);
     }
     vm::enable_heap_caches();
+    // Memory tagging (ADR-174): checking on for this CPU (the others copy
+    // its registers when they start), then live allocations are tagged.
+    if arch::enable_mte(&s.features, mte_seed(0)) {
+        hardening::mte_on();
+        #[cfg(target_arch = "aarch64")]
+        vm::enable_heap_tagging();
+    }
     // Power-on self-test of the backends sealed in stage 1 (X0b), before
     // anything uses them: fail closed.
     match urmqtt_tls::kat::run() {
@@ -1003,7 +1043,9 @@ fn run_test_fault(fault: TestFault, features: Features) {
         | TestFault::StackSmash
         | TestFault::FaultSecrets
         | TestFault::FaultSecretsOpen
-        | TestFault::PanicSecret => crate::hardtest::run(fault),
+        | TestFault::PanicSecret
+        | TestFault::MteUaf
+        | TestFault::MteOverflow => crate::hardtest::run(fault),
         // Handled by the architecture's `run_fault`.
         TestFault::DataAbort
         | TestFault::Pac

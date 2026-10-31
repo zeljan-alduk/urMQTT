@@ -126,6 +126,17 @@ impl EarlyHw {
 }
 
 /// XSAVE state, CPUID summary and the features the dispatch looks at.
+/// x86_64 has no memory tagging: the heap stays ordinary memory.
+pub(crate) fn heap_tagged(_f: &Features) -> bool {
+    false
+}
+
+pub(crate) fn enable_mte(_f: &Features, _seed: u16) -> bool {
+    false
+}
+
+pub(crate) fn mte_init_cpu(_seed: u16) {}
+
 pub(crate) fn cpu_summary() -> Features {
     // XSAVE state before CPUID is read: the census reports XCR0.
     let xcr0 = cpu::enable_extended_state();

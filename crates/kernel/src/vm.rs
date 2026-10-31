@@ -45,7 +45,7 @@ impl KernelSpace {
     /// Table accessor through the writable alias of the pool.
     fn tables(&self) -> HhdmTables {
         HhdmTables {
-            hhdm: layout::PT_ALIAS_BASE.wrapping_sub(self.pool.0),
+            hhdm: layout::pt_alias_base().wrapping_sub(self.pool.0),
         }
     }
 }
@@ -153,6 +153,7 @@ pub fn build(
     virt_base: u64,
     bti: bool,
     heap_mb: u32,
+    tagged_heap: bool,
 ) -> Result<Built, BuildError> {
     let hhdm = mem.hhdm();
     // Relaxed: see `hhdm`.
@@ -171,7 +172,7 @@ pub fn build(
     }
     if hhdm
         .checked_add(hi)
-        .is_none_or(|end| end > layout::MMIO_BASE)
+        .is_none_or(|end| end > layout::MMIO_WINDOW)
     {
         return Err(BuildError::HhdmOverlapsLayout);
     }
@@ -261,7 +262,7 @@ pub fn build(
     // 5b. Writable alias of the page-table pool (removed by `lock`).
     for off in (0..pool.1).step_by(BLOCK_2M as usize) {
         m.map_block_2m(
-            layout::PT_ALIAS_BASE + off,
+            layout::pt_alias_base() + off,
             pool.0 + off,
             PageAttrs::data(),
             &mut pt,
@@ -278,18 +279,31 @@ pub fn build(
     }
 
     // 7. Heap and its bookkeeping.
+    // Memory tagging (ADR-174) needs the heap mapped as Normal Tagged.
+    #[cfg(target_arch = "aarch64")]
+    let heap_attrs = if tagged_heap {
+        PageAttrs::data_tagged()
+    } else {
+        PageAttrs::data()
+    };
+    // x86_64 has no memory tagging (`tagged_heap` is always false there).
+    #[cfg(not(target_arch = "aarch64"))]
+    let heap_attrs = {
+        let _ = tagged_heap;
+        PageAttrs::data()
+    };
     for off in (0..heap_bytes).step_by(PAGE_SIZE as usize) {
         m.map_page(
-            layout::HEAP_BASE + off,
+            layout::heap_base() + off,
             data_frame()?,
-            PageAttrs::data(),
+            heap_attrs,
             &mut pt,
         )?;
     }
     let meta_size = meta_bytes.next_multiple_of(PAGE_SIZE);
     for off in (0..meta_size).step_by(PAGE_SIZE as usize) {
         m.map_page(
-            layout::HEAP_META_BASE + off,
+            layout::heap_meta_base() + off,
             data_frame()?,
             PageAttrs::data(),
             &mut pt,
@@ -446,7 +460,7 @@ pub fn lock() -> Result<u64, MapError> {
     // The level-2 table holding the alias's block entries lives in the pool
     // too; every write below goes through the alias, so the block that maps
     // that table itself must be removed last.
-    let l2 = l2_table_of(&m, layout::PT_ALIAS_BASE).ok_or(MapError::BlockInTheWay)?;
+    let l2 = l2_table_of(&m, layout::pt_alias_base()).ok_or(MapError::BlockInTheWay)?;
     let blocks = s.pool.1 / BLOCK_2M;
     let own = (l2 - s.pool.0) / BLOCK_2M;
     let alias = s.tables();
@@ -467,9 +481,9 @@ struct AliasWriter {
 
 impl AliasWriter {
     fn unmap(&mut self, block: u64) {
-        let idx = paging::index(layout::PT_ALIAS_BASE + block * BLOCK_2M, 2);
+        let idx = paging::index(layout::pt_alias_base() + block * BLOCK_2M, 2);
         paging::TableMemory::write(&mut self.tables, self.l2, idx, 0);
-        paging::tlb_flush_va(layout::PT_ALIAS_BASE + block * BLOCK_2M);
+        paging::tlb_flush_va(layout::pt_alias_base() + block * BLOCK_2M);
     }
 }
 
@@ -568,15 +582,25 @@ pub fn init_heap(
     // aligned far beyond `2^order`.
     let heap = unsafe {
         BuddyHeap::new(
-            layout::HEAP_BASE as usize,
+            layout::heap_base() as usize,
             order,
-            layout::HEAP_META_BASE as *mut u64,
+            layout::heap_meta_base() as *mut u64,
             meta_words,
             buddy_key,
         )
     }?;
     HEAP.init(heap, cache_key);
     Ok(())
+}
+
+/// Starts tagging live heap allocations (ADR-174). Tag checking is already
+/// on for this CPU and the heap is mapped tagged.
+#[cfg(target_arch = "aarch64")]
+pub fn enable_heap_tagging() {
+    HEAP.enable_tagging(urmqtt_mm::cached::Tagging {
+        retag: urmqtt_arch::mte::retag,
+        clear: urmqtt_arch::mte::clear,
+    });
 }
 
 /// Turns on the per-CPU heap caches (after the boot-time heap self-test,

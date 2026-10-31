@@ -22,6 +22,10 @@ pub const fn mix(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
+/// Where the linker script puts the kernel image (`linker*.ld`); the
+/// bootloader's slide is the difference to the address it loaded it at.
+pub const LINK_BASE: u64 = 0xffff_ffff_8000_0000;
+
 /// Key material for the boot, and what it is made of.
 #[derive(Clone, Copy)]
 pub struct Seed {
@@ -83,6 +87,14 @@ impl Seed {
         k
     }
 
+    /// Overwrites the key material (the boot state outlives its use).
+    pub fn wipe(&mut self) {
+        for w in &mut self.words {
+            // SAFETY: a valid, exclusive reference.
+            unsafe { core::ptr::write_volatile(w, 0) };
+        }
+    }
+
     pub fn log(&self) {
         info!(
             "hardening: boot seed of {} bit(s): {} bootloader value(s), cpu rng {}",
@@ -95,6 +107,7 @@ impl Seed {
 
 /// Domain separators for [`Seed::key`].
 pub mod domain {
+    pub const LAYOUT: u64 = 0x4c41_594f_5500_0004;
     pub const GUARD: u64 = 0x4755_4152_4400_0003;
     pub const BUDDY: u64 = 0x4255_4444_5900_0001;
     pub const CACHE: u64 = 0x4341_4348_4500_0002;
@@ -199,4 +212,56 @@ pub mod fault_policy {
             }
         }
     }
+}
+
+/// The boot log's account of the randomisation (ADR-173): how many bits
+/// each region's placement has, never where anything is. A dev image adds
+/// the addresses, which are what a developer needs to read a fault.
+pub fn log_placement(p: &crate::layout::Placement, seed: &Seed, image_base: u64, dev: bool) {
+    let slide = image_base.wrapping_sub(LINK_BASE);
+    info!(
+        "kaslr: heap {} bit(s), heap bookkeeping {}, stacks {}, page-table alias {}, mmio {}; \
+         kernel image {} (seed {} bit(s))",
+        p.heap_bits,
+        p.heap_meta_bits,
+        p.stacks_bits,
+        p.pt_alias_bits,
+        p.mmio_bits,
+        if slide != 0 {
+            "slid by the bootloader"
+        } else if cfg!(target_arch = "aarch64") {
+            "not slid (this boot's slide was zero)"
+        } else {
+            "not slid (static image, ADR-173)"
+        },
+        seed.bits
+    );
+    if dev {
+        info!(
+            "kaslr (dev only): image {:#x} (slide {:#x}), heap {:#x}, bookkeeping {:#x}, stacks {:#x}, \
+             page-table alias {:#x}, mmio {:#x}",
+            image_base,
+            slide,
+            crate::layout::heap_base(),
+            crate::layout::heap_meta_base(),
+            crate::layout::stacks_base(),
+            crate::layout::pt_alias_base(),
+            crate::layout::mmio_base()
+        );
+    }
+}
+
+/// Memory tagging state (ADR-174).
+static MTE_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Records that tag checking is on (the boot CPU did it).
+pub fn mte_on() {
+    // Release: the application processors read it after the boot CPU has
+    // set the registers they copy.
+    MTE_ON.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Whether heap allocations are tagged.
+pub fn mte_active() -> bool {
+    MTE_ON.load(core::sync::atomic::Ordering::Acquire)
 }

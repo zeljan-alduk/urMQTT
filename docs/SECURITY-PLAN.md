@@ -211,6 +211,12 @@ Every milestone ends with:
 
 **Tests:** smoke scenarios `kaslr-differs` (two boots, different bases, dev log only), `stack-smash`, `mte-uaf`, `mte-overflow`, `double-free`, `keyslab-zero`, `fault-no-secrets`, and `iommu-dma-blocked` (QEMU `intel-iommu` / `smmuv3` with a test device). Costs go in `make bench`.
 
+**H4 status (2026-10-31, first release scope: VPS only)**
+- Done, one commit and one ADR per step: allocator hardening, key slab and zeroisation (ADR-170); stack protector for Rust and SQLite, canary from the CSPRNG (ADR-171); panic and fault policy, hooks compiled out of production (ADR-172); KASLR on both architectures (PIE kernel slid by Limine, about 19 bits, plus random places for the heap, stacks, bookkeeping, page-table alias and MMIO window; ADR-173); MTE for the heap under TCG `mte=on` (ADR-174); kCFI evaluated, not adopted because the pinned nightly crashes on the dependency graph (ADR-175).
+- Smoke scenarios (`SMOKE_ONLY=hardening`): `kaslr-differs`, `stack-guard-boot`, `stack-smash`, `double-free`, `heap-uaf`, `heap-overflow`, `keyslab-zero`, `fault-secrets` (+ open control), `panic-secret` (+ open control), `double-free-prod`, and on aarch64 under TCG `mte-boot`, `mte-uaf`, `mte-overflow`, `mte-mqtt-tls`.
+- **Deferred:** H4b (IOMMU) with bare metal (ADR-176); randomising the HHDM base; hardware guard pages for the heap (the page tables are locked, so the gap is a software canary); asynchronous MTE and a production switch for it; kCFI; tagging the SQLite arena.
+- Cost on the handshake path (`dp-bench`, aarch64 HVF): allocator -2.2%, stack protector -2.7% (both measured on a quiet machine), then position-independent code with the tagging code present: a further -2% to -3% on a loaded machine (the noise was as large); see ADR-170, ADR-171, ADR-173.
+
 ### H5 — Verification tooling · M (CI jobs; can start right after H0)
 
 **Work**

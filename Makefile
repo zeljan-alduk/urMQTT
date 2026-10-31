@@ -46,8 +46,11 @@ REMAP       := --remap-path-prefix=$(SYSROOT)=/rustc --remap-path-prefix=$(CARGO
 	--remap-path-prefix=$(CURDIR)=/urmqtt
 # Exploit mitigations compiled into the kernel (H4, ADR-171).
 HARDEN      := -Zstack-protector=strong
-export CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS := $(REMAP) $(HARDEN)
-export CARGO_TARGET_X86_64_URMQTT_NONE_RUSTFLAGS := $(REMAP) $(HARDEN)
+# A position-independent kernel, so that Limine can slide it (KASLR, ADR-173).
+PIE_AARCH64 := -Crelocation-model=pie -Clink-arg=-pie
+PIE_X86_64  := -Crelocation-model=pie -Clink-arg=-pie
+export CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS := $(REMAP) $(HARDEN) $(PIE_AARCH64)
+export CARGO_TARGET_X86_64_URMQTT_NONE_RUSTFLAGS := $(REMAP) $(HARDEN) $(PIE_X86_64)
 # Dev images carry the in-guest benchmark and its TLS client; others do not.
 KERNEL_FEATURES := $(if $(filter dev,$(ENV)),--features selftest)
 export URMQTT_ENV := $(ENV)
@@ -77,7 +80,7 @@ certs: ## Generate development certificates into deploy/dev/ (idempotent)
 # the same rustflags twice (use as RUSTFLAGS="<config flags> $(make -s print-rustflags)").
 .PHONY: print-rustflags
 print-rustflags:
-	@echo '$(REMAP) $(HARDEN)'
+	@echo '$(REMAP) $(HARDEN) $(if $(filter aarch64,$(ARCH)),$(PIE_AARCH64),$(PIE_X86_64))'
 
 .PHONY: build
 build: $(if $(filter dev,$(ENV)),certs) ## Build the kernel ELF (release, LTO, panic=abort)

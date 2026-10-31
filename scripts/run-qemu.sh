@@ -202,7 +202,7 @@ FW=$(firmware)
 [[ $GIC == 2 || $GIC == 3 ]] || { echo "error: --gic 3|2" >&2; exit 2; }
 
 ARGS=(
-    -machine "virt,gic-version=$GIC,acpi=$ACPI"
+    -machine "virt,gic-version=$GIC,acpi=$ACPI${URMQTT_MTE:+,mte=on}"
     -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
     -bios "$FW"
     -device ramfb

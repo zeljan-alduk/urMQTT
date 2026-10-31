@@ -7,6 +7,9 @@ PHDRS
     text   PT_LOAD FLAGS((1 << 0) | (1 << 2)); /* R X */
     rodata PT_LOAD FLAGS((1 << 2));            /* R   */
     data   PT_LOAD FLAGS((1 << 1) | (1 << 2)); /* R W */
+    /* Limine slides a position-independent kernel (KASLR, ADR-173) and finds
+     * its relocations through this header. */
+    dynamic PT_DYNAMIC;
 }
 
 SECTIONS
@@ -26,7 +29,14 @@ SECTIONS
     .rodata : {
         __rodata_start = .;
         *(.rodata .rodata.*)
+        /* Read-only after the bootloader has relocated it. */
+        *(.data.rel.ro .data.rel.ro.*)
     } :rodata
+    .dynsym : { *(.dynsym) } :rodata
+    .gnu.hash : { *(.gnu.hash) } :rodata
+    .hash : { *(.hash) } :rodata
+    .dynstr : { *(.dynstr) } :rodata
+    .rela.dyn : { *(.rela.dyn) *(.rela.*) } :rodata
     . = ALIGN(4096);
     __rodata_end = .;
 
@@ -49,6 +59,8 @@ SECTIONS
         /* GOT entries: the stack protector reaches __stack_chk_guard through one (ADR-171). */
         *(.got .got.*)
     } :data
+
+    .dynamic : { *(.dynamic) } :data :dynamic
 
     .bss (NOLOAD) : {
         *(.bss .bss.*)

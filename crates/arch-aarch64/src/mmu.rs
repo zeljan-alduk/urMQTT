@@ -16,7 +16,16 @@ const TTBR_BADDR: u64 = 0x0000_ffff_ffff_fffe;
 pub fn merge_memory_attributes() {
     // SAFETY: MAIR indices 0 and 1 (used by the bootloader's mappings) are
     // preserved; the kernel's indices were unused until now.
-    unsafe { regs::set_mair_el1(MemType::merge_into_mair(regs::mair_el1())) };
+    unsafe {
+        let mair = regs::mair_el1();
+        regs::set_mair_el1(
+            if crate::features::Features::decode(crate::pac::id_regs()).mte2 {
+                MemType::merge_into_mair_tagged(mair)
+            } else {
+                MemType::merge_into_mair(mair)
+            },
+        );
+    }
     cpu::isb();
 }
 
