@@ -1181,3 +1181,25 @@ verified in the named milestone before it becomes Accepted).
 - **Tests.** The light reader against the full decoder on every dev certificate and on 8 x 400 single-bit corruptions (whenever both answer, they agree), truncations, negative, padded, empty and over-long serials.
 - **Result** (build server, in process, full handshakes with the CA signature memoised, server side only): minimum 440-495 us -> 150-162 us, median 497-566 us -> 194-206 us (five runs each). The sum of the primitives (key share, shared secret, signature, CertificateVerify verification, about 20 us of hashing and records) is 159 us at the minimum, so what remains outside the primitives is within the noise of the measurement. With the memo missing, add the CA verification: 20 us now (118 us before).
 - **Dropped after measuring or by judgement.** A per-device table for the client's CertificateVerify key (ADR-111's argument stands: a table costs more than ten verifications). The 4x64 X25519 on aarch64 (slower than dalek there). OpenSSL's AVX2 point selection (the kernel cannot use it, so host figures would not be the production ones).
+## ADR-120 — Kani: bounded proofs, scratch `rust-version`, a time cap (H5)
+
+- **Status:** Accepted.
+- **Context.** Kani 0.68 bundles a rustc one release behind the pinned nightly, and cargo refuses the workspace `rust-version = "1.101"` with it. CBMC also does not terminate on the timer wheel (slab + `Vec`): harnesses with 200, 72, 16 and 6 ticks ran 7 to 28 minutes at up to 17 GB and were killed.
+- **Decision.** Harnesses live in `crates/*/src/proofs.rs` behind `#[cfg(kani)]` (`cfg(kani)` is declared in the workspace `check-cfg`). `scripts/kani.sh` lowers `rust-version` in `Cargo.toml` for the run and restores the file on exit; nothing else changes. Every harness has a 3 minute cap (`--harness-timeout`); a harness that hits it is reported as NOT PROVEN with the bound tried. Timer wheel: only the placement and skip arithmetic is proven; the behaviour stays with unit tests, the model test and Miri.
+- **Result at the time of writing.** Proven: TLS `record_len`, TCP `parse`, the two timer-wheel arithmetic harnesses. Not proven (timed out): both MQTT decoder harnesses, both config harnesses, and the timer-wheel behaviour. The `kani` CI job is `continue-on-error` until those are reformulated.
+- **Not claimed.** Unbounded correctness of any parser; the TLS record layer (AEAD) and the broker; anything beyond the bounds in `docs/VERIFICATION.md`.
+
+## ADR-121 — Sanitizers on the host, C side included (H5)
+
+- **Status:** Accepted.
+- **Decision.** `scripts/sanitize.sh`: `-Zsanitizer=address` for Rust with an explicit `--target` (build scripts uninstrumented, own target dir `target/sanitize`), and `CFLAGS=-fsanitize=address,undefined -fsanitize-trap=undefined` for the SQLite amalgamation and the C shims compiled by `cc`. Trapping UBSan avoids linking a UBSan runtime (Apple clang's does not match rustc's). On macOS a no-op definition of Apple clang's `__asan_version_mismatch_check_*` is linked, because rustc's LLVM runtime does not define it. No LeakSanitizer on arm64 macOS; it stays on for Linux CI. Rust UB is Miri's job, there is no rustc UBSan.
+
+## ADR-122 — The ACL fuzzer is a model-based test with an independent oracle (H5)
+
+- **Status:** Accepted.
+- **Decision.** `crates/broker/tests/acl_model.rs`, no new dependency (own xorshift generator, replayable by seed). Payload tags carry the oracle's verdict for each published message, so any output channel of the broker can be checked without tracking routing. The oracle restates the rules as prefix checks and does not call `acl.rs`. It runs 3 s inside `cargo test`, `make acl-fuzz` runs it for `ACL_FUZZ_SECS` (default 600), and the scheduled fuzz workflow runs it too. Scope and non-goals are in `docs/VERIFICATION.md`.
+
+## ADR-123 — Miri runs a curated fast subset (H5)
+
+- **Status:** Accepted.
+- **Decision.** `scripts/miri.sh` runs the `--lib` tests of mqtt, timer-wheel, net, tcp, broker and tls with a skip list for tests that need minutes under Miri (the tcp stateful model and simulations, the broker's 60 000-step and 10 000-iteration loops, the RSS spread test). The list and the reason for each is in the script and in `docs/VERIFICATION.md`. The skipped tests still run natively on every `cargo test`. The `store` crate is not run under Miri (C code); ADR-121 covers it.

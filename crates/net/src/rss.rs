@@ -51,6 +51,10 @@ mod tests {
     /// hash modulo the worker count must be even for the port ranges
     /// operating systems use (PERF, ADR-080).
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "750 000 Toeplitz hashes: minutes under Miri, pure integer arithmetic"
+    )]
     fn one_source_address_spreads_over_the_workers() {
         for (lo, hi) in [(32768u16, 60999u16), (49152, 65535), (1024, 65535)] {
             for workers in 2usize..=8 {

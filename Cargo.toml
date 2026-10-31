@@ -48,7 +48,7 @@ urmqtt-config-schema = { path = "crates/config-schema" }
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 # RustCrypto backend switches set for the kernel target (.cargo/config.toml).
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(aes_armv8)", "cfg(polyval_armv8)", "cfg(chacha20_force_neon)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(aes_armv8)", "cfg(polyval_armv8)", "cfg(chacha20_force_neon)", "cfg(kani)"] }
 unused_must_use = "deny"
 
 [workspace.lints.clippy]
