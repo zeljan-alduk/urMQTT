@@ -55,6 +55,17 @@ pub enum DbTest {
     /// fill several segments each, then continue booting (S4: the next
     /// boot retires them and releases their space).
     DiscardFill,
+    /// Fill the selftest table, take a backup now, write more, then
+    /// continue booting (S5: the next boot's `Corrupt` restores the first
+    /// part).
+    BackupFill,
+    /// Damage the database file before opening it (S5): the boot must
+    /// restore the newest backup, log it, and continue booting.
+    Corrupt,
+    /// Backup under load: a database of some tens of MiB, a backup taken in
+    /// bounded steps while a writer keeps committing, the commit latency and
+    /// the longest step reported (ADR-164), then continue booting.
+    BackupBench,
     /// In-guest data-plane scaling benchmark on the worker cores.
     DpBench,
     /// A handler overruns the watchdog budget on purpose (M16).
@@ -187,6 +198,9 @@ impl BootOptions {
                 "test=log-verify" => o.db_test = Some(DbTest::LogVerify),
                 "test=log-tear" => o.db_test = Some(DbTest::LogTear),
                 "test=discard-fill" => o.db_test = Some(DbTest::DiscardFill),
+                "test=db-backup" => o.db_test = Some(DbTest::BackupFill),
+                "test=db-corrupt" => o.db_test = Some(DbTest::Corrupt),
+                "test=db-backup-bench" => o.db_test = Some(DbTest::BackupBench),
                 "test=dp-bench" => o.db_test = Some(DbTest::DpBench),
                 "test=watchdog" => o.db_test = Some(DbTest::Watchdog),
                 "test=watchdog-handshake" => o.db_test = Some(DbTest::WatchdogHandshake),
@@ -410,6 +424,19 @@ mod tests {
         }
         let p = BootOptions::parse("sntp=10.0.2.2:12300", false);
         assert_eq!((p.sntp_server, p.ignored), (None, 1));
+    }
+
+    #[test]
+    fn backup_test_words_are_dev_only() {
+        for (w, t) in [
+            ("test=db-backup", DbTest::BackupFill),
+            ("test=db-corrupt", DbTest::Corrupt),
+            ("test=db-backup-bench", DbTest::BackupBench),
+        ] {
+            assert_eq!(BootOptions::parse(w, true).db_test, Some(t), "{w}");
+            let prod = BootOptions::parse(w, false);
+            assert_eq!((prod.db_test, prod.ignored), (None, 1), "{w}");
+        }
     }
 
     #[test]

@@ -195,6 +195,11 @@ pub struct Storage {
     /// Release retired telemetry segments, the tail of truncated files and
     /// space a grow added (S4).
     pub discard: DiscardMode,
+    /// Minutes between two in-disk database backups (S5); 0: none.
+    pub backup_interval_min: u32,
+    /// Restore the newest intact backup when the database fails its
+    /// integrity check at boot (S5).
+    pub auto_restore: bool,
     pub require_flush: bool,
     pub require_data_disk: bool,
     pub refuse_on_corruption: bool,

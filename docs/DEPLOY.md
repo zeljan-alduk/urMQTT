@@ -590,10 +590,71 @@ disk offers (`storage: discard: auto, device discard (…)`), the counters follo
   the command, zeroes the range, or returns garbage changes nothing
   (docs/DISK-FORMAT.md section 11).
 
+### The in-disk database backup (S5)
+
+The broker's database (the device registry, revocations, retained messages,
+persistent sessions with their queues) is copied into a **backup region** of the
+same data partition, every `storage.backup_interval_min` minutes (default 60,
+`0` turns it off). If the database file is found corrupt at boot, the newest
+intact copy replaces it, and the log says exactly what was lost. Telemetry is a
+ring of records with a checksum each and is not part of it.
+- **What it is for:** corruption of the database file itself (a bad sector, a
+  bug, a torn write beyond what SQLite's journalling covers). It is not a
+  second copy in another place: **a lost or destroyed disk takes it along.**
+  For that, keep your own: `urmqtt-disk backup-extract DISK out.sqlite` writes
+  the newest intact snapshot as a plain SQLite file (offline, the disk is not
+  changed), and the same file is what `export-db` gives you with the WAL applied.
+- **How it works:** two slots, written alternately. A snapshot is copied in
+  small steps while the broker serves (the commit latency does not move: ADR-162),
+  read back, and only then made valid by a header (sequence, time, schema
+  version, CRC). The slot holding the previous good snapshot is never written
+  while the next one is made, so a power cut during a backup costs at most that
+  backup.
+- **Existing disks.** A disk formatted by an earlier build has no backup
+  region. The first boot of this build adds one with a single write of the
+  superblock (layout v2.0 becomes v2.1; the boot log says `storage: backup
+  region added (layout v2.1)`), taken from the unused tail of the database's
+  space; nothing moves, no data is copied, and a power cut during it leaves the
+  disk as it was or upgraded. If the database is too large to give anything up
+  (it must keep twice its size plus 1 MiB) the log says `storage: no backup
+  region` and the broker runs as before. `urmqtt-disk backup DISK --write` does
+  the same offline and takes the first snapshot.
+- **Going back to an older kernel is refused.** A v2.1 disk is not opened by a
+  kernel from before S5 (it checks the minor version and refuses). To go back,
+  restore the disk from your own copy, or move the data with `urmqtt-disk
+  export-db` / `export-telemetry`; there is no downgrade of the layout.
+- **Provider snapshots versus this.** A snapshot of the volume (a cloud
+  provider's, a hypervisor's, LVM, `qemu-img snapshot`) is **crash-consistent**:
+  it is what the disk would hold after a power cut, which urMQTT recovers from
+  by design (the SIGKILL and power-cut tests: SQLite's WAL and the telemetry
+  ring's torn-tail truncation). You can take one while the broker runs. The
+  in-disk backup does not replace it, and it does not replace the in-disk backup:
+  a provider snapshot restores everything (including telemetry and the backup
+  region itself) to a moment, from outside; the in-disk backup repairs a
+  database file in place at boot without anyone doing anything. Do both; keep
+  provider snapshots for disaster recovery.
+- **Restoring.** Automatically at boot when `quick_check` (or opening the file)
+  finds the database corrupt and `storage.auto_restore` is true (the default).
+  The log shows `storage: DATABASE RESTORED FROM BACKUP: snapshot seq N from slot
+  S …; T s of changes … are LOST` at error level; `urmqtt.backup.restored` is 1
+  in statsd. Changes since the snapshot, up to `backup_interval_min`, are gone;
+  devices reconnect and republish, retained messages and sessions are as they
+  were at the snapshot. With `auto_restore = false`, or with no intact backup,
+  the broker refuses to serve (`storage.refuse_on_corruption`), as before. A
+  restore cut by a power loss is finished by the next boot. Offline:
+  `urmqtt-disk backup-restore DISK --write`.
+- **Watching it.** `urmqtt.backup.age_s` (seconds since the newest snapshot) is
+  the gauge to alert on; `urmqtt.backup.failed` counts failed backups, and
+  `backup: FAILED: …` in the log says why (typically `the database does not fit a
+  backup slot`: a slot is an eighth of the database region at the time the
+  region was added, at least 1 MiB). `urmqtt-disk info` and `verify` list both
+  slots with their sequence, time, size and whether the payload matches its
+  CRC.
+
 ### Disk safety, as before
 
 Only the disk Limine booted from is written, and only inside its data
 partition (and the partition table at the first boot and when growing). The
-offline tool writes only with `--write`. `scripts/fault-loop.sh migrate|grow`
+offline tool writes only with `--write`. `scripts/fault-loop.sh migrate|grow|backup`
 runs the procedures on an image with a power cut after every write and checks
 that each case ends in a valid disk that finishes.

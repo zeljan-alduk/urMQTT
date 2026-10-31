@@ -289,6 +289,15 @@ struct RawStorage {
     /// space a grow added to the device (S4).
     #[serde(default = "default_discard")]
     discard: DiscardMode,
+    /// Minutes between two in-disk database backups; 0 turns the backups
+    /// off (S5, ADR-162).
+    #[serde(default = "default_backup_interval_min")]
+    backup_interval_min: u32,
+    /// Restore the newest intact backup when the database fails its
+    /// integrity check at boot (S5, ADR-163). With `false` the disk is
+    /// refused (or the dev fallback applies), as before S5.
+    #[serde(default = "default_auto_restore")]
+    auto_restore: bool,
     require_flush: bool,
     require_data_disk: bool,
     refuse_on_corruption: bool,
@@ -300,6 +309,19 @@ fn default_grow_ratio_db() -> u32 {
 
 const fn default_discard() -> DiscardMode {
     DiscardMode::Auto
+}
+
+/// One backup an hour by default.
+pub const BACKUP_INTERVAL_DEFAULT_MIN: u32 = 60;
+/// Longest interval: a week.
+pub const BACKUP_INTERVAL_MAX_MIN: u32 = 7 * 24 * 60;
+
+const fn default_backup_interval_min() -> u32 {
+    BACKUP_INTERVAL_DEFAULT_MIN
+}
+
+const fn default_auto_restore() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -431,6 +453,11 @@ pub struct Storage {
     /// `"auto"` (default) or `"off"`: release retired telemetry segments,
     /// the tail of truncated files and space a grow added (S4).
     pub discard: DiscardMode,
+    /// Minutes between two in-disk database backups (S5); 0: none.
+    pub backup_interval_min: u32,
+    /// Restore the newest intact backup when the database is corrupt at
+    /// boot (S5); `false`: refuse, as before.
+    pub auto_restore: bool,
     pub require_flush: bool,
     /// Without a data disk: refuse to serve (true) or run in memory only.
     pub require_data_disk: bool,
@@ -1171,6 +1198,12 @@ fn validate_storage(
     if raw.retention_days == 0 {
         errors.push(err("storage.retention_days", "must be greater than 0"));
     }
+    if raw.backup_interval_min > BACKUP_INTERVAL_MAX_MIN {
+        errors.push(err(
+            "storage.backup_interval_min",
+            format!("must be in 0..={BACKUP_INTERVAL_MAX_MIN} (minutes; 0 turns the backups off)"),
+        ));
+    }
     if raw.grow_ratio_db > 100 {
         errors.push(err("storage.grow_ratio_db", "must be in 0..=100 (percent)"));
     }
@@ -1190,6 +1223,8 @@ fn validate_storage(
         retention_days: raw.retention_days,
         grow_ratio_db: raw.grow_ratio_db,
         discard: raw.discard,
+        backup_interval_min: raw.backup_interval_min,
+        auto_restore: raw.auto_restore,
         require_flush: raw.require_flush,
         require_data_disk: raw.require_data_disk,
         refuse_on_corruption: raw.refuse_on_corruption,
@@ -1461,6 +1496,8 @@ pub const CONFIG: BuildConfig = BuildConfig {{
         retention_days: {rd},
         grow_ratio_db: {grd},
         discard: DiscardMode::{disc:?},
+        backup_interval_min: {bim},
+        auto_restore: {ar},
         require_flush: {rf},
         require_data_disk: {rdd},
         refuse_on_corruption: {roc},
@@ -1545,6 +1582,8 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         rd = cfg.storage.retention_days,
         grd = cfg.storage.grow_ratio_db,
         disc = cfg.storage.discard,
+        bim = cfg.storage.backup_interval_min,
+        ar = cfg.storage.auto_restore,
         rf = cfg.storage.require_flush,
         rdd = cfg.storage.require_data_disk,
         roc = cfg.storage.refuse_on_corruption,

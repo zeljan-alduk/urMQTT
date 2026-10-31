@@ -263,6 +263,18 @@ pub enum Opened {
     Formatted,
 }
 
+/// What [`Disk::ensure_backup`] found or did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupRegion {
+    /// The layout has a backup region already.
+    Present,
+    /// It was added.
+    Added { bytes: u64, slot_bytes: u64 },
+    /// The database has no room to give (it would have to keep twice its
+    /// size plus 1 MiB): the layout is as it was.
+    NoRoom,
+}
+
 /// What [`Disk::grow`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Grown {
@@ -738,6 +750,63 @@ impl Disk {
         self.sb_slot = slot;
         self.discard_sectors(from, to, DiscardSource::Grow);
         Ok(Some(info))
+    }
+
+    /// Where slot `slot`'s payload sits in the backup region: (offset of
+    /// its first byte, bytes it can hold). `None`: no backup region or no
+    /// such slot.
+    pub fn backup_payload(&self, slot: usize) -> Option<(u64, u64)> {
+        if slot > 1 {
+            return None;
+        }
+        let g = self.layout.backup()?;
+        Some((
+            g.slot_offset(slot) + crate::layout::BACKUP_HEADER_BYTES,
+            g.payload_capacity(),
+        ))
+    }
+
+    /// Gives a layout without a backup region one (layout v2.0 -> v2.1, S5,
+    /// ADR-160): the tail of the database's last extent beyond its logical
+    /// end becomes the control block and two snapshot slots. Their header
+    /// blocks are zeroed (and flushed) first, so whatever the bytes held
+    /// reads as "no backup"; then the new superblock goes to the slot not in
+    /// force, the only write that matters. A crash before it leaves the old
+    /// layout, a torn write leaves the old slot in force, a completed one
+    /// the new layout. Nothing moves.
+    pub fn ensure_backup(&mut self) -> Result<BackupRegion, DiskError> {
+        if self.layout.region(RegionKind::Backup).is_some() {
+            return Ok(BackupRegion::Present);
+        }
+        let db_bytes = self
+            .file_size(FileKind::Db)
+            .max(self.sizes.sizes.first().copied().unwrap_or(0));
+        let Some(next) = self.layout.with_backup(db_bytes) else {
+            return Ok(BackupRegion::NoRoom);
+        };
+        let Some(r) = next.region(RegionKind::Backup) else {
+            return Ok(BackupRegion::NoRoom);
+        };
+        let g = next.backup().ok_or(LayoutError::Inconsistent)?;
+        // Whatever the DB's dead tail held is not a backup.
+        let zeros = [0u8; BLOCK];
+        for off in [0, g.slot_offset(0), g.slot_offset(1)] {
+            self.write_dev(r.start + off / SECTOR, &zeros)?;
+        }
+        self.dev.flush()?;
+        let slot = 1 - self.sb_slot;
+        self.write_dev(
+            SB_SLOT_LBA.get(slot).copied().unwrap_or(SB_SLOT_LBA[0]),
+            &next.encode(),
+        )?;
+        self.dev.flush()?;
+        self.discard_cancel(r.start, r.sectors);
+        self.layout = next;
+        self.sb_slot = slot;
+        Ok(BackupRegion::Added {
+            bytes: r.bytes(),
+            slot_bytes: g.slot_bytes,
+        })
     }
 
     /// Writes zeros over the bytes `[from, to)` of region `kind`: a file

@@ -124,6 +124,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | Layout v2: regions aligned to 1 MiB and the device's optimal I/O size, writes in whole physical blocks, A/B superblock; `urmqtt-disk migrate` (dry run, verify, rollback) from v1 | ✅ S2 |
 | | The disk grows with the volume, at boot or online, crash-safe, never shrinks (`storage.grow_ratio_db`) | ✅ S3 |
 | | Expired telemetry, truncated file tails and grown space are released to the disk (virtio-blk discard, virtio-scsi UNMAP), within the device's limits, rate limited, never in front of a commit (`storage.discard`) | ✅ S4 |
+| | The database is copied into a backup region of the data partition (two slots, written alternately by SQLite's online backup API in bounded steps, the previous good one never touched) and restored at boot, logged loudly, if it is found corrupt (`storage.backup_interval_min`, `storage.auto_restore`) | ✅ S5 |
 | | Device registry, revocations, retained messages, persistent sessions with offline queues | ✅ M11 |
 | | Per-core append-only telemetry log with CRC and crash recovery | ✅ M12 |
 | **Scale** | Per-core event loops and broker shards, per-CPU heap caches, frame pools, cross-core fan-out | ✅ M13 |
@@ -502,6 +503,8 @@ error: invalid configuration deploy/bad/config.toml:
 | `storage.retention_days` | > 0 | Telemetry retention |
 | `storage.grow_ratio_db` | 0 to 100, default 50 | When the disk grows, the percentage of the new space that goes to the SQLite database; the rest goes to the telemetry ring (S3) |
 | `storage.discard` | `"auto"` (default) or `"off"` | Release expired telemetry segments, truncated file tails and grown space to the disk (virtio-blk DISCARD, virtio-scsi UNMAP). `"off"` never sends a command (S4) |
+| `storage.backup_interval_min` | 0 to 10080, default 60 | Minutes between in-disk database backups; `0` turns them (and the backup region) off (S5) |
+| `storage.auto_restore` | bool, default `true` | When the database is corrupt at boot, replace it from the newest intact in-disk backup and log the lost window; `false` refuses to serve, as before (S5) |
 | `storage.require_flush` | bool | Refuse disks without `VIRTIO_BLK_F_FLUSH` (false only in `dev`) |
 | `storage.require_data_disk` | bool | Refuse to serve without a data disk (false only in `dev`: memory-only) |
 | `storage.refuse_on_corruption` | bool | Refuse to serve when `PRAGMA quick_check` fails (false only in `dev`) |
@@ -964,7 +967,7 @@ Security is the first priority and wins conflicts with the other tracks.
 | ✅ | **S2** Layout v2 | regions aligned to 1 MiB and the device topology (virtio-blk, virtio-scsi), zero misaligned writes; partition count in the layout; A/B superblock; the kernel refuses v1, `urmqtt-disk migrate` converts offline with a rollback (NVMe/ATA topology comes with X13) |
 | ✅ | **S3** Growing the disk | the new space is used at boot and, on virtio-blk, while running (config-change interrupt); 1 → 4 → 64 GiB with data present, a power cut at every write leaves the old or the new layout; never shrinks |
 | ✅ | **S4** Discard | expired telemetry, truncated file tails and grown space are released (virtio-blk DISCARD, virtio-scsi UNMAP), within the device's limits, rate limited, never in front of a commit; a qcow2 with `discard=unmap` shrinks after retention (62 → 15 MiB mapped); recovery never trusts a released range; db-bench unchanged (NVMe/AHCI come with X13) |
-| 📋 | **S5** In-disk backup | A/B database snapshots; optional restore on corruption |
+| ✅ | **S5** In-disk backup | layout v2.1 backup region carved from the database's tail with one superblock write (v2.0 disks keep working); A/B snapshots by SQLite's online backup API in 16-page steps (commits do not slow down: max 2.4 ms against 2.2 ms alone, the single-call copy would stall 445 ms); restore at boot when `quick_check` fails, a cut mid-restore is finished by the next boot; a power cut at every write of a backup leaves the previous slot intact |
 | 📋 | **S6** Scrubbing | bit flips found and reported within an I/O budget |
 | 📋 | **S7** Encryption at rest | optional AES-256-XTS with hardware AES, ≤ 5 % measured overhead |
 | 📋 | **S8** Docs & hardening | final format spec, fuzz targets and golden images for every version |

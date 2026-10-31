@@ -53,12 +53,22 @@ pub enum Step {
 impl Db {
     /// Opens (creating if needed) the main database on the `urmqtt` VFS.
     pub fn open() -> Result<Self> {
+        Self::open_named(crate::vfs::DB_NAME)
+    }
+
+    /// Opens the backup slot the VFS has attached as a database file
+    /// (S5): the destination of an online backup.
+    pub fn open_backup_target() -> Result<Self> {
+        Self::open_named(crate::vfs::BACKUP_NAME)
+    }
+
+    fn open_named(name: &CStr) -> Result<Self> {
         let mut raw = ptr::null_mut();
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_EXRESCODE;
         // SAFETY: valid NUL-terminated names and an out pointer.
         let rc = unsafe {
             sqlite3_open_v2(
-                crate::vfs::DB_NAME.as_ptr(),
+                name.as_ptr(),
                 &mut raw,
                 flags,
                 crate::vfs::VFS_NAME.as_ptr(),
@@ -175,6 +185,69 @@ impl Drop for Db {
         // SAFETY: `close_v2` defers the close until every statement is
         // finalised, so drop order with `Stmt`s does not matter.
         unsafe { sqlite3_close_v2(self.raw) };
+    }
+}
+
+/// What one [`Backup::step`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupStep {
+    /// Pages remain.
+    More,
+    /// Every page is copied and committed to the destination.
+    Done,
+    /// A lock is held somewhere; try again later.
+    Busy,
+}
+
+/// An online backup (the SQLite backup API) from one open database into
+/// another, copied in bounded steps. Drop it before the destination (and
+/// the source) closes.
+pub struct Backup {
+    raw: *mut sqlite3_backup,
+}
+
+// SAFETY: as for `Db`.
+unsafe impl Send for Backup {}
+
+impl Backup {
+    /// Starts copying `src`'s main database into `dest`'s.
+    pub fn new(dest: &Db, src: &Db) -> Result<Self> {
+        // SAFETY: two open connections and NUL-terminated names.
+        let raw =
+            unsafe { sqlite3_backup_init(dest.raw, c"main".as_ptr(), src.raw, c"main".as_ptr()) };
+        if raw.is_null() {
+            return Err(dest.error(SQLITE_ERROR));
+        }
+        Ok(Self { raw })
+    }
+
+    /// Copies up to `pages` pages (at least one).
+    pub fn step(&mut self, pages: u32) -> Result<BackupStep> {
+        let n = c_int::try_from(pages.max(1)).unwrap_or(c_int::MAX);
+        // SAFETY: a live backup handle.
+        match unsafe { sqlite3_backup_step(self.raw, n) } {
+            SQLITE_OK => Ok(BackupStep::More),
+            SQLITE_DONE => Ok(BackupStep::Done),
+            rc if rc & 0xff == SQLITE_BUSY || rc & 0xff == SQLITE_LOCKED => Ok(BackupStep::Busy),
+            rc => Err(code_error(rc)),
+        }
+    }
+
+    /// (pages still to copy, pages in the source), as of the last step.
+    pub fn progress(&self) -> (u32, u32) {
+        // SAFETY: a live backup handle.
+        let r = unsafe { sqlite3_backup_remaining(self.raw) };
+        // SAFETY: as above.
+        let t = unsafe { sqlite3_backup_pagecount(self.raw) };
+        (r.max(0) as u32, t.max(0) as u32)
+    }
+}
+
+impl Drop for Backup {
+    fn drop(&mut self) {
+        // SAFETY: valid handle, finished exactly once (an unfinished backup
+        // is rolled back, which is what a dropped job wants).
+        unsafe { sqlite3_backup_finish(self.raw) };
     }
 }
 

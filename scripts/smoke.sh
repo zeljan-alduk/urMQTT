@@ -875,8 +875,12 @@ own_damaged() {
             check "own-damaged [$accel]" "$log1" 1 "gpt: data partition"
             continue
         fi
-        # Flip one byte inside the superblock's region table.
+        # Flip one byte inside the region table of both superblock slots (A at
+        # sector 0, B at sector 24): since S5 the first boot has written the
+        # upgraded layout to slot B and left the old one valid in slot A, so
+        # damaging only one of them is survived by design (A/B superblock).
         printf '\xff' | dd of="$disk" bs=1 seek=$((first * 512 + 100)) conv=notrunc status=none
+        printf '\xff' | dd of="$disk" bs=1 seek=$(((first + 24) * 512 + 100)) conv=notrunc status=none
         local before
         before=$(dd if="$disk" bs=512 skip="$first" count=64 status=none | shasum -a 256)
         boot "$log2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
@@ -994,7 +998,7 @@ storage_topology() {
             boot "$log" --disk "$disk" --bus "$bus" ${props:+--blk-props "$props"} --accel "$accel" --headless --no-net || status=$?
             check "topology $bus phys=$phys opt=$opt [$accel]" "$log" "$status" \
                 "blk: topology: logical 512 B, physical $phys B, alignment offset 0 B, minimum I/O [0-9]+ B, optimal I/O $opt B" \
-                "storage: data disk formatted \(was blank\)" "telemetry partition\(s\), aligned to $align KiB, generation 1" \
+                "storage: data disk formatted \(was blank\)" "telemetry partition\(s\), aligned to $align KiB, generation 2" \
                 "storage: misaligned_writes=0 of [0-9]+ device writes after startup \(physical block $phys B, write granularity $phys B, optimal I/O $opt B\)" \
                 "db-bench: .* 5100 rows verified" \
                 "storage: misaligned_writes=0 of [0-9]+ device writes after db-bench \(physical block $phys B" \
@@ -1071,7 +1075,7 @@ layout_v1() {
         status=0
         boot "$l2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
         check "layout-v1-migrated-boots [$accel]" "$l2" "$status" "storage: data disk opened" \
-            "8 telemetry partition\(s\), aligned to 1024 KiB, generation 2" "$restored" "$telemetry" \
+            "8 telemetry partition\(s\), aligned to 1024 KiB, generation 3" "$restored" "$telemetry" \
             "storage: misaligned_writes=0 of" "^URMQTT READY$" "NOT:storage: grew" "$NO_FAULT"
 
         # S3: the disk gets larger (a cloud volume resize). The next boot
@@ -1083,12 +1087,12 @@ layout_v1() {
         check "grow-boot [$accel]" "$l3" "$status" \
             "gpt: backup table moved to the end of the 192 MiB disk" \
             "gpt: data partition extended to the end of the 192 MiB disk" \
-            "storage: grew the layout from [0-9]+ MiB to [0-9]+ MiB \(generation 3\): database \+[0-9]+ MiB, telemetry \+[0-9]+ MiB, split 50% database" \
+            "storage: grew the layout from [0-9]+ MiB to [0-9]+ MiB \(generation 4\): database \+[0-9]+ MiB, telemetry \+[0-9]+ MiB, split 50% database" \
             "storage: data disk opened" "$restored" "$telemetry" "^URMQTT READY$" "NOT:THE DISK" "$NO_FAULT"
         status=0
         boot "$l4" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
         check "grow-again-noop [$accel]" "$l4" "$status" "storage: data disk opened" "$restored" "$telemetry" \
-            "generation 3" "NOT:storage: grew" "NOT:gpt: data partition extended" "NOT:gpt: backup table moved" \
+            "generation 4" "NOT:storage: grew" "NOT:gpt: data partition extended" "NOT:gpt: backup table moved" \
             "^URMQTT READY$" "$NO_FAULT"
         "$ud" verify "$disk" >"$tl.final" 2>&1 && echo "tool: final verify exit 0" >>"$tl.final"
         check "grow-tool-verify [$accel]" "$tl.final" 0 "verify: ok" "tool: final verify exit 0" "layout: ok"
@@ -1180,21 +1184,21 @@ PY
         check "grow-online [$accel]" "$log" "$status" \
             "blk: resize notification \(configuration-change interrupt\): armed" \
             "qmp: block_resize \{'return': \{\}\}" \
-            "storage: grew the layout online from [0-9]+ MiB to 1[0-9]{2} MiB \(generation 3\)" \
+            "storage: grew the layout online from [0-9]+ MiB to 1[0-9]{2} MiB \(generation 4\)" \
             "grow-online: 1 online grow\(s\) logged" "NOT:online grow failed" "NOT:taking up the grown layout failed" \
             "storage: discard: requests=[1-9][0-9]* ranges=[1-9][0-9]* released=[1-9][0-9]* KiB \(queued: telemetry 0 KiB, truncate [0-9]+ KiB, grow [1-9][0-9]* KiB\)" \
             "NOT:storage: discard failed" "$NO_FAULT"
         "$ud" verify "$disk" >"$log.verify" 2>&1 && echo "tool: verify exit 0" >>"$log.verify"
         "$ud" info "$disk" >>"$log.verify" 2>&1
         check "grow-online-disk [$accel]" "$log.verify" 0 "verify: ok" "tool: verify exit 0" \
-            "data: layout v2 generation 3" "telemetry: ok, 600 record\(s\)" \
+            "data: layout v2 generation 4" "telemetry: ok, 600 record\(s\)" \
             "urMQTT data \"urMQTT data\" LBA [0-9]+\.\.[0-9]+ \(1[0-9]{2} MiB\)"
         # An ordinary reboot sees the grown layout and all the data.
         set_esp "$disk" "$OUT/layout-v1-ok.raw"
         status=0
         boot "$log2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
         check "grow-online-reboot [$accel]" "$log2" "$status" "storage: data disk opened \(1[0-9]{2} MiB" \
-            "$restored" "$telemetry" "generation 3" "NOT:storage: grew" "^URMQTT READY$" "$NO_FAULT"
+            "$restored" "$telemetry" "generation 4" "NOT:storage: grew" "^URMQTT READY$" "$NO_FAULT"
     done
 }
 
@@ -1305,6 +1309,227 @@ PY
                 "telemetry: log recovered in [0-9]+ ms: [0-9]+ record\(s\) in 8 segment\(s\), 0 torn tail\(s\) truncated" \
                 "storage: data disk opened" "quick_check ok" "^URMQTT READY$" "NOT:telemetry log rejected" "$NO_FAULT"
         done
+    done
+}
+
+# S5 (ADR-160 to ADR-164): the in-disk database backup, end to end.
+#   1. `test=db-backup` fills 100 selftest rows, takes a backup (adding the
+#      backup region to the fresh layout first: one superblock write), writes
+#      50 more rows. The host tool sees the intact snapshot, and the snapshot
+#      is an SQLite file with exactly 100 rows.
+#   2. `test=db-corrupt` damages the database file; the same boot finds it
+#      corrupt, restores the snapshot, logs the lost window loudly and
+#      carries on with the first 100 rows.
+#   3. A plain boot afterwards restores nothing.
+#   4. The power is cut inside a second backup (test=disk-fault, at two
+#      points of its writes): the first snapshot is still intact, the disk
+#      verifies, and the next boot with a damaged database restores it.
+db_backup() {
+    build_disk_tool || {
+        echo "  ✗ db-backup needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local ud=$DISK_TOOL fill="$OUT/db-backup-fill.raw" cor="$OUT/db-backup-corrupt.raw" plain="$OUT/db-backup-plain.raw"
+    mkimg "$fill" "smoke test=db-backup"
+    mkimg "$cor" "smoke test=db-corrupt"
+    mkimg "$plain" "smoke"
+    local restored='storage: DATABASE RESTORED FROM BACKUP: snapshot seq 1 from slot 0 \([0-9]+ KiB, schema v[0-9]+\); [0-9]+ s of changes \(since unix [0-9]+\) are LOST; reason: .+'
+    for accel in $ACCELS; do
+        local disk="$OUT/db-backup-$accel.img" base="$OUT/db-backup-base-$accel.img" status=0
+        local l1="$OUT/db-backup-$accel-1.log" l2="$OUT/db-backup-$accel-2.log" l3="$OUT/db-backup-$accel-3.log"
+        fresh_disk "$fill" "$disk"
+        boot "$l1" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "db-backup-snapshot [$accel]" "$l1" "$status" \
+            "storage: backup region added \(layout v2.1\): [0-9]+ MiB, two slots of [0-9]+ KiB, carved from the database's unused tail" \
+            "backup: every 60 min into the backup region; newest snapshot: seq 1" \
+            "db-backup: device writes before the backup [0-9]+, after [0-9]+" \
+            "db-backup: 100 selftest rows in snapshot seq 1 \(slot 0, [0-9]+ KiB, [0-9]+ step\(s\), longest [0-9]+ us\)" \
+            "db-backup: 50 more rows committed after the snapshot \(150 in all\)" "^URMQTT READY$" "NOT:backup: FAILED" "$NO_FAULT"
+        local w0 w1
+        w0=$(clean "$l1" | sed -n 's/.*db-backup: device writes before the backup \([0-9]*\), after \([0-9]*\)/\1/p' | tail -1)
+        w1=$(clean "$l1" | sed -n 's/.*db-backup: device writes before the backup \([0-9]*\), after \([0-9]*\)/\2/p' | tail -1)
+        {
+            "$ud" info "$disk"
+            "$ud" verify "$disk" && echo "tool: verify exit 0"
+            "$ud" backup-extract "$disk" "$disk.snap.sqlite" && echo "tool: extract exit 0"
+            if command -v sqlite3 >/dev/null; then
+                echo "tool: snapshot has $(sqlite3 "$disk.snap.sqlite" "PRAGMA integrity_check; SELECT count(*) FROM selftest;" | tr '\n' ' ')selftest rows"
+            fi
+        } >"$l1.tool" 2>&1
+        check "db-backup-tool [$accel]" "$l1.tool" 0 "backup: region [0-9]+ MiB, two slots of [0-9]+ KiB" \
+            "backup slot 0: seq 1 \(newest\), taken at unix [0-9]+, [0-9]+ KiB, schema v[0-9]+, intact" \
+            "backup slot 1: empty or invalid" "tool: verify exit 0" "tool: extract exit 0" \
+            "$(command -v sqlite3 >/dev/null && echo 'tool: snapshot has ok 100 selftest rows' || echo 'tool: extract exit 0')"
+        cp "$disk" "$base"
+
+        status=0
+        set_esp "$disk" "$cor"
+        boot "$l2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "db-corrupt-restored [$accel]" "$l2" "$status" \
+            "db-corrupt: the database file's first two pages are now garbage" "$restored" \
+            "db-corrupt: after boot the database holds 100 selftest rows, consistent" \
+            "db: sqlite .* quick_check ok" "^URMQTT READY$" "NOT:refusing to serve" "NOT:INCONSISTENT" "$NO_FAULT"
+
+        status=0
+        set_esp "$disk" "$plain"
+        boot "$l3" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "db-restored-then-plain-boot [$accel]" "$l3" "$status" "storage: data disk opened" \
+            "backup: every 60 min into the backup region; newest snapshot: seq 1" "db: sqlite .* quick_check ok" \
+            "^URMQTT READY$" "NOT:RESTORED" "NOT:refusing to serve" "$NO_FAULT"
+        "$ud" verify "$disk" >"$l3.tool" 2>&1 && echo "tool: verify exit 0" >>"$l3.tool"
+        check "db-restored-verify [$accel]" "$l3.tool" 0 "verify: ok" "tool: verify exit 0"
+
+        # The calibration run: a second backup with no fault, to learn how
+        # many device writes it takes.
+        local lb="$OUT/db-backup-$accel-b0.log" bdisk="$OUT/db-backup-b-$accel.img"
+        cp "$base" "$bdisk"
+        status=0
+        boot "$lb" --disk "$bdisk" --accel "$accel" --headless --no-net || status=$?
+        check "db-backup-second [$accel]" "$lb" "$status" "db-backup: 100 selftest rows in snapshot seq 2 \(slot 1," "^URMQTT READY$" "$NO_FAULT"
+        local b0 b1 n spec
+        b0=$(clean "$lb" | sed -n 's/.*db-backup: device writes before the backup \([0-9]*\), after \([0-9]*\)/\1/p' | tail -1)
+        b1=$(clean "$lb" | sed -n 's/.*db-backup: device writes before the backup \([0-9]*\), after \([0-9]*\)/\2/p' | tail -1)
+        if [[ -z $b0 || -z $b1 ]]; then
+            echo "  ✗ db-backup: the write counts were not logged [$accel]"
+            FAILED=$((FAILED + 1))
+            continue
+        fi
+        # The kernel's fault counter also sees the boot self-test's write.
+        for n in $((b0 + 1 + (b1 - b0) / 3)) $((b1)); do
+            spec="stop-after-write=$n"
+            local fimg="$OUT/db-backup-fault-$n.raw" fdisk="$OUT/db-backup-f-$accel.img"
+            local lf="$OUT/db-backup-$accel-fault-$n.log" lr="$OUT/db-backup-$accel-recover-$n.log"
+            mkimg "$fimg" "smoke test=db-backup test=disk-fault:$spec"
+            cp "$base" "$fdisk"
+            set_esp "$fdisk" "$fimg"
+            status=0
+            boot "$lf" --disk "$fdisk" --accel "$accel" --headless --no-net || status=$?
+            check "db-backup-cut $spec [$accel]" "$lf" "$status" "db-backup: backup failed" "NOT:EXCEPTION|PANIC"
+            {
+                "$ud" info "$fdisk"
+                "$ud" verify "$fdisk" && echo "tool: verify exit 0"
+            } >"$lf.tool" 2>&1
+            check "db-backup-cut-disk $spec [$accel]" "$lf.tool" 0 \
+                "backup slot 0: seq 1( \(newest\))?, taken at unix [0-9]+, [0-9]+ KiB, schema v[0-9]+, intact" \
+                "tool: verify exit 0" "NOT:PAYLOAD CRC MISMATCH"
+            set_esp "$fdisk" "$cor"
+            status=0
+            boot "$lr" --disk "$fdisk" --accel "$accel" --headless --no-net || status=$?
+            check "db-backup-cut-restores $spec [$accel]" "$lr" "$status" "$restored" \
+                "db-corrupt: after boot the database holds 100 selftest rows, consistent" "^URMQTT READY$" "$NO_FAULT"
+        done
+    done
+}
+
+# S5 (ADR-160): a disk formatted before S5 (layout v2.0: here made by the
+# host tool's migration of a populated layout-v1 image) is upgraded by the
+# kernel's boot with one superblock write; the broker state is all there.
+# `urmqtt-disk backup` then takes a snapshot offline, and a boot that finds
+# the database damaged restores it.
+backup_upgrade() {
+    build_disk_tool || {
+        echo "  ✗ backup-upgrade needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local ud=$DISK_TOOL img="$OUT/backup-upgrade.raw" cor="$OUT/backup-upgrade-corrupt.raw"
+    mkimg "$img" "smoke"
+    mkimg "$cor" "smoke test=db-corrupt"
+    local state='db: restored 2 retained message\(s\), 1 persistent session\(s\) with 1 queued message\(s\), [0-9]+ revoked serial\(s\), 40 known device\(s\)'
+    local telemetry='telemetry: log recovered in [0-9]+ ms: 600 record\(s\)'
+    for accel in $ACCELS; do
+        local disk="$OUT/backup-upgrade-$accel.img" rb="$OUT/backup-upgrade-$accel.rollback" tl="$OUT/backup-upgrade-$accel.tool"
+        local l1="$OUT/backup-upgrade-$accel-1.log" l2="$OUT/backup-upgrade-$accel-2.log" l3="$OUT/backup-upgrade-$accel-3.log" status=0
+        fresh_disk "$img" "$disk"
+        rm -f "$rb"
+        {
+            "$ud" fixture-v1 "$disk" --populate --write &&
+                "$ud" migrate "$disk" --write --rollback-file "$rb" >/dev/null && "$ud" info "$disk"
+        } >"$tl" 2>&1 || { echo "  ✗ backup-upgrade: could not build the v2.0 disk"; cat "$tl"; FAILED=$((FAILED + 1)); continue; }
+        check "backup-upgrade-v2.0-disk [$accel]" "$tl" 0 "data: layout v2 generation 2" \
+            "backup: none \(layout v2.0; the kernel adds the region at its next boot"
+        boot "$l1" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "backup-upgrade-boot [$accel]" "$l1" "$status" \
+            "storage: backup region added \(layout v2.1\): [0-9]+ MiB, two slots of [0-9]+ KiB" \
+            "8 telemetry partition\(s\), aligned to 1024 KiB, generation 3" "$state" "$telemetry" \
+            "^URMQTT READY$" "NOT:running WITHOUT in-disk backups" "$NO_FAULT"
+        {
+            "$ud" info "$disk"
+            "$ud" verify "$disk" && echo "tool: verify exit 0"
+            "$ud" backup "$disk" && echo "tool: dry run exit 0"
+            "$ud" backup "$disk" --write && echo "tool: backup exit 0"
+            "$ud" verify "$disk" && echo "tool: verify after exit 0"
+        } >"$tl.2" 2>&1
+        check "backup-upgrade-tool [$accel]" "$tl.2" 0 "data: layout v2 generation 3" \
+            "backup: region [0-9]+ MiB, two slots of [0-9]+ KiB" "backup slot 0: empty or invalid" \
+            "tool: verify exit 0" "dry run: nothing was changed; add --write" "tool: dry run exit 0" \
+            "backup: snapshot seq 1 in slot 0: [0-9]+ KiB, schema v[0-9]+, CRC [0-9a-f]{8}" "tool: backup exit 0" \
+            "tool: verify after exit 0" "backup slot 0: seq 1 \(newest\)"
+        status=0
+        set_esp "$disk" "$cor"
+        boot "$l2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "backup-upgrade-restore [$accel]" "$l2" "$status" \
+            "storage: DATABASE RESTORED FROM BACKUP: snapshot seq 1 from slot 0" "$state" "$telemetry" \
+            "^URMQTT READY$" "NOT:refusing to serve" "$NO_FAULT"
+    done
+}
+
+# S5 (ADR-162): the periodic backup in a serving kernel. 10 s after boot,
+# with no snapshot yet, the DB core takes one in bounded steps; the host tool
+# then finds it intact on the disk of the killed VM.
+backup_scheduled() {
+    build_disk_tool || {
+        echo "  ✗ backup-scheduled needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local ud=$DISK_TOOL img="$OUT/backup-scheduled.raw"
+    mkimg "$img" "smoke serve"
+    for accel in $ACCELS; do
+        local disk="$OUT/backup-scheduled-$accel.img" log="$OUT/backup-scheduled-$accel.log" status=0
+        fresh_disk "$img" "$disk"
+        start_vm "$log" --disk "$disk" --accel "$accel" --fwd none
+        wait_log "$log" "backup: snapshot seq 1 written to slot 0" || status=$?
+        kill_vm
+        check "backup-scheduled [$accel]" "$log" "$status" "backup: every 60 min into the backup region; no snapshot yet" \
+            "backup: snapshot seq 1 written to slot 0: [0-9]+ page\(s\), [0-9]+ KiB, schema v[0-9]+, [0-9]+ step\(s\) over [0-9]+ ms, longest step [0-9]+ us" \
+            "NOT:backup: FAILED" "$NO_FAULT"
+        "$ud" verify "$disk" >"$log.tool" 2>&1 && echo "tool: verify exit 0" >>"$log.tool"
+        "$ud" info "$disk" >>"$log.tool" 2>&1
+        check "backup-scheduled-disk [$accel]" "$log.tool" 0 "verify: ok" "tool: verify exit 0" \
+            "backup slot 0: seq 1 \(newest\), taken at unix [0-9]+, [0-9]+ KiB, schema v[0-9]+, intact"
+    done
+}
+
+# S5 (ADR-164): what a backup costs the DB core, measured in the guest. A
+# database of about 24 MiB, a writer committing every millisecond, first
+# alone and then while a backup runs in 16-page steps between the commits;
+# the longest step against the longest single call of the same copy done in
+# one go (the stall VACUUM INTO would cause). The numbers go to the log; the
+# check is that bounded steps keep the longest stall at a fraction of it.
+backup_bench() {
+    local img="$OUT/backup-bench.raw"
+    mkimg "$img" "smoke test=db-backup-bench"
+    for accel in $ACCELS; do
+        local disk="$OUT/backup-bench-$accel.img" log="$OUT/backup-bench-$accel.log" status=0
+        fresh_disk "$img" "$disk" 1g
+        boot "$log" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "backup-bench [$accel]" "$log" "$status" \
+            "backup-bench: [0-9]+ pages \([0-9]+ MiB\), snapshot seq 1 slot 0; commits alone: [0-9]+ in 1 s, mean [0-9]+ us, max [0-9]+ us; commits during the backup: [0-9]+ in [0-9]+ ms, mean [0-9]+ us, max [0-9]+ us; backup steps of 16 pages: [0-9]+, mean [0-9]+ us, longest [0-9]+ us; the whole copy as one call: longest call [0-9]+ us of [0-9]+ us in all" \
+            "^URMQTT READY$" "NOT:backup-bench: incomplete" "NOT:backup-bench: step failed" "$NO_FAULT"
+        local line step one
+        line=$(clean "$log" | grep 'backup-bench: [0-9]* pages' | tail -1)
+        step=$(sed -n 's/.*longest \([0-9]*\) us; the whole.*/\1/p' <<<"$line")
+        one=$(sed -n 's/.*longest call \([0-9]*\) us of.*/\1/p' <<<"$line")
+        echo "  backup-bench [$accel]: ${line#*backup-bench: }"
+        if [[ -n $step && -n $one ]] && (( step * 4 < one )); then
+            echo "  ✓ bounded steps: the longest step ${step} us is under a quarter of the single-call copy (${one} us) [$accel]"
+            PASSED=$((PASSED + 1))
+        else
+            echo "  ✗ the longest bounded step (${step:-?} us) is not well under the single-call copy (${one:-?} us) [$accel]"
+            FAILED=$((FAILED + 1))
+        fi
     done
 }
 
@@ -1585,12 +1810,12 @@ universal_migrated() {
         u_run "$kind" "$accel" "$log" disk "$disk" || status=$?
         if [[ $first -eq 1 ]]; then
             check "universal-migrated: first boot on $name grows the disk" "$log" "$status" \
-                "storage: grew the layout from [0-9]+ MiB to [0-9]+ MiB \(generation 3\)" "storage: data disk opened" \
+                "storage: grew the layout from [0-9]+ MiB to [0-9]+ MiB \(generation 4\)" "storage: data disk opened" \
                 "$restored" "$telemetry" "^URMQTT READY$" "$NO_FAULT"
             first=0
         else
             check "universal-migrated: $name reads it" "$log" "$status" "storage: data disk opened \(1[0-9]{2} MiB" \
-                "generation 3" "$restored" "$telemetry" "NOT:storage: grew" "^URMQTT READY$" "$NO_FAULT"
+                "generation 4" "$restored" "$telemetry" "NOT:storage: grew" "^URMQTT READY$" "$NO_FAULT"
         fi
     done
 }
@@ -1867,6 +2092,10 @@ if [[ ${SMOKE_ONLY:-} == storage && $ARCH != universal ]]; then
     want layout_v1 && layout_v1
     want grow_online && grow_online
     want discard_qcow2 && discard_qcow2
+    want db_backup && db_backup
+    want backup_upgrade && backup_upgrade
+    want backup_scheduled && backup_scheduled
+    want backup_bench && backup_bench
     if ! want disk_tool; then
         :
     elif command -v mosquitto_pub >/dev/null && command -v sqlite3 >/dev/null; then
@@ -2361,6 +2590,10 @@ want own_damaged && own_damaged
 want storage_topology && storage_topology
 want layout_v1 && layout_v1
 want grow_online && grow_online
+want db_backup && db_backup
+want backup_upgrade && backup_upgrade
+want backup_scheduled && backup_scheduled
+want backup_bench && backup_bench
 want disk_tool && disk_tool
 [[ $ARCH == aarch64 ]] && want install_iso && install_iso
 want no_hw_rng && no_hw_rng

@@ -23,6 +23,14 @@
 //!                                                use the space a larger disk offers (the kernel does
 //!                                                the same at boot): partition table, then layout.
 //!                                                Without --write: what would change
+//! urmqtt-disk backup DISK [--write]              take an in-disk backup now (S5), adding the backup
+//!                                                region first if the layout has none. Without --write
+//!                                                the whole run happens on an in-memory overlay
+//! urmqtt-disk backup-extract DISK OUT [--slot N] write the newest intact snapshot (or slot N) as an
+//!                                                SQLite file; the disk is not changed
+//! urmqtt-disk backup-restore DISK --write        replace the database by the newest intact snapshot
+//!                                                (the kernel does the same at boot when the database
+//!                                                is corrupt and storage.auto_restore is on)
 //! ```
 //!
 //! Test hooks (images only): `fixture-v1 DISK [--populate] --write` builds a
@@ -246,6 +254,10 @@ fn info(path: &str) -> Result<(), String> {
                         mib(disk.spare_sectors())
                     );
                 }
+                let mut disk = disk;
+                for line in backup_report(&mut disk).0 {
+                    println!("  {line}");
+                }
             }
             Err(e) => println!("data: partition at LBA {}: {e}", d.first_lba),
         },
@@ -305,6 +317,11 @@ fn verify(path: &str) -> Result<(), String> {
         }
         Err(e) => problems.push(e),
     }
+    let (lines, bad) = backup_report(&mut disk);
+    for l in lines {
+        println!("{l}");
+    }
+    problems.extend(bad);
     let store = open_store(disk)?;
     let qc = store
         .db()
@@ -771,6 +788,187 @@ fn grow_cmd(path: &str, ratio: u32, write: bool, fault: Option<&str>) -> Result<
     Ok(())
 }
 
+// --- backup (S5) ----------------------------------------------------------------------
+
+/// The backup region of a disk as text lines, and the problems found: a
+/// slot whose header is valid but whose payload fails its CRC.
+fn backup_report(disk: &mut Disk) -> (Vec<String>, Vec<String>) {
+    use urmqtt_store::backup;
+    let (mut lines, mut bad) = (Vec::new(), Vec::new());
+    let Some(g) = disk.layout().backup() else {
+        lines.push(if disk.layout().minor == 0 {
+            "backup: none (layout v2.0; the kernel adds the region at its next boot, or run `urmqtt-disk backup --write`)".to_string()
+        } else {
+            "backup: none".to_string()
+        });
+        return (lines, bad);
+    };
+    let pending = matches!(backup::read_control(disk), Ok(c) if c.restoring.is_some());
+    lines.push(format!(
+        "backup: region {} MiB, two slots of {} KiB{}",
+        g.region_bytes >> 20,
+        g.slot_bytes >> 10,
+        if pending {
+            ", a RESTORE IS PENDING (the next boot finishes it)"
+        } else {
+            ""
+        }
+    ));
+    match backup::scan(disk) {
+        Ok(slots) => {
+            for (i, h) in slots.header.iter().enumerate() {
+                let Some(h) = h else {
+                    lines.push(format!("backup slot {i}: empty or invalid"));
+                    continue;
+                };
+                let state = match backup::verify_slot(disk, i, h) {
+                    Ok(true) => "intact",
+                    Ok(false) => {
+                        bad.push(format!(
+                            "backup: slot {i} (seq {}) fails its payload CRC",
+                            h.seq
+                        ));
+                        "PAYLOAD CRC MISMATCH"
+                    }
+                    Err(_) => "unreadable",
+                };
+                lines.push(format!(
+                    "backup slot {i}: seq {}{}, taken at unix {}, {} KiB, schema v{}, {state}",
+                    h.seq,
+                    if slots.newest() == Some(i) {
+                        " (newest)"
+                    } else {
+                        ""
+                    },
+                    h.created,
+                    h.payload_bytes >> 10,
+                    h.schema_version
+                ));
+            }
+        }
+        Err(e) => bad.push(format!("backup: unreadable: {e}")),
+    }
+    (lines, bad)
+}
+
+/// A disk for a backup command: a changeable one with `--write`, otherwise
+/// an in-memory overlay (the run is rehearsed and nothing is changed).
+fn open_for_backup(path: &str, write: bool, fault: Option<&str>) -> Result<Disk, String> {
+    let mut dev: Box<dyn BlockDevice> = if write {
+        writable(path, fault)?
+    } else {
+        Box::new(Overlay::new(Box::new(FileDisk::open(path, false)?)))
+    };
+    let found = inspect(dev.as_mut())?;
+    let part = data_part(path, dev, &found)?;
+    open_layout(part)
+}
+
+fn backup_cmd(path: &str, write: bool, fault: Option<&str>) -> Result<(), String> {
+    use urmqtt_store::backup::{BackupJob, Progress};
+    use urmqtt_store::disk::BackupRegion;
+    let mut disk = open_for_backup(path, write, fault)?;
+    match disk
+        .ensure_backup()
+        .map_err(|e| format!("backup region: {e:?}"))?
+    {
+        BackupRegion::Added { bytes, slot_bytes } => println!(
+            "backup: region added (layout v2.1): {} MiB, two slots of {} KiB{}",
+            bytes >> 20,
+            slot_bytes >> 10,
+            if write { "" } else { " (dry run)" }
+        ),
+        BackupRegion::NoRoom => {
+            return Err("the database leaves no room for a backup region".into());
+        }
+        BackupRegion::Present => {}
+    }
+    let store = open_store(disk)?;
+    let mut job = BackupJob::start(None, now_unix()).map_err(|e| e.to_string())?;
+    loop {
+        match job
+            .step(store.db(), 64, 1 << 20)
+            .map_err(|e| format!("backup: {e}"))?
+        {
+            Progress::Working => {}
+            Progress::Done(h, slot) => {
+                println!(
+                    "backup: snapshot seq {} in slot {slot}: {} KiB, schema v{}, CRC {:08x}{}",
+                    h.seq,
+                    h.payload_bytes >> 10,
+                    h.schema_version,
+                    h.payload_crc,
+                    if write {
+                        ""
+                    } else {
+                        " (dry run: nothing was changed; add --write)"
+                    }
+                );
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn backup_extract(path: &str, out: &str, slot: Option<usize>) -> Result<(), String> {
+    use urmqtt_store::backup;
+    let (dev, f) = overlay(path)?;
+    let mut disk = open_layout(data_part(path, Box::new(dev.view()), &f)?)?;
+    let slots = backup::scan(&mut disk).map_err(|e| e.to_string())?;
+    let mut pick = None;
+    for (i, h) in slots.by_age() {
+        if slot.is_some_and(|s| s != i) {
+            continue;
+        }
+        if backup::verify_slot(&mut disk, i, &h).map_err(|e| e.to_string())? {
+            pick = Some((i, h));
+            break;
+        }
+    }
+    let (i, h) = pick.ok_or("no intact snapshot")?;
+    let g = disk.layout().backup().ok_or("no backup region")?;
+    let mut data = vec![0u8; h.payload_bytes as usize];
+    disk.read_at(
+        RegionKind::Backup,
+        g.slot_offset(i) + urmqtt_store::layout::BACKUP_HEADER_BYTES,
+        &mut data,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    std::fs::write(out, &data).map_err(|e| format!("{out}: {e}"))?;
+    eprintln!(
+        "backup-extract: {out}: snapshot seq {} of slot {i}, {} bytes, taken at unix {}",
+        h.seq,
+        data.len(),
+        h.created
+    );
+    Ok(())
+}
+
+fn backup_restore(path: &str, write: bool, fault: Option<&str>) -> Result<(), String> {
+    if !write {
+        return Err(
+            "backup-restore replaces the database: add --write (with the VM stopped)".into(),
+        );
+    }
+    let mut disk = open_for_backup(path, true, fault)?;
+    let r = urmqtt_store::backup::restore(&mut disk, urmqtt_store::schema::VERSION as u32)
+        .map_err(|e| format!("restore: {e}"))?;
+    println!(
+        "backup-restore: the database now holds snapshot seq {} of slot {} (taken at unix {}, {} KiB, schema v{}){}",
+        r.header.seq,
+        r.slot,
+        r.header.created,
+        r.header.payload_bytes >> 10,
+        r.header.schema_version,
+        if r.resumed {
+            "; an interrupted restore was finished"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
 // --- fixture (test hook) ------------------------------------------------------------
 
 /// A layout-v1 data partition on an image: the kernel only reads v2, so the
@@ -889,6 +1087,17 @@ fn run(args: &[String]) -> Result<(), String> {
             flag("--write"),
             opt("--fault").as_deref(),
         ),
+        Some("backup") => backup_cmd(arg(1, "DISK")?, flag("--write"), opt("--fault").as_deref()),
+        Some("backup-extract") => backup_extract(
+            arg(1, "DISK")?,
+            arg(2, "OUT")?,
+            opt("--slot")
+                .map(|s| s.parse::<usize>().map_err(|e| format!("--slot: {e}")))
+                .transpose()?,
+        ),
+        Some("backup-restore") => {
+            backup_restore(arg(1, "DISK")?, flag("--write"), opt("--fault").as_deref())
+        }
         Some("fixture-v1") => {
             if !flag("--write") {
                 return Err("fixture-v1 writes the image: add --write".into());

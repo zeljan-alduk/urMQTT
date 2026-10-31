@@ -179,6 +179,13 @@ syslog). Procedures are in [DEPLOY.md](DEPLOY.md) section 9.
 | `telemetry: N segment(s) past retention (30 days) retired, M still in use` | retention found whole segments older than `storage.retention_days` and queued their space for release |
 | `storage: discard: requests=… ranges=… released=… KiB (queued: …) cancelled=… dropped=… failed=…` | the counters, once the queue is idle. `cancelled`: space a later write took back; `dropped`: queue overflow (space merely not released); `failed` must be 0 |
 | `storage: discard failed …`, `storage: discard stopped for this boot` | the disk failed discards (three in a row stop them); nothing is lost, space is not released until the next boot |
+| `storage: backup region added (layout v2.1): N MiB, two slots of K KiB, carved from the database's unused tail` | the disk predated the backup region and got one at this boot (one superblock write) |
+| `storage: no backup region: the database leaves no room for one …` | the database is too large to give space up; the broker runs without in-disk backups |
+| `backup: every N min into the backup region; newest snapshot: seq S taken at unix T (K KiB, schema vV)` or `no snapshot yet` | the backup schedule; the first snapshot comes 10 s after boot |
+| `backup: snapshot seq S written to slot X: P page(s), K KiB, schema vV, N step(s) over M ms, longest step U us` | a snapshot finished; the other slot is the previous one |
+| `backup: FAILED: …; the previous good snapshot is untouched; trying again in M min` | a backup failed (often: the database no longer fits a slot); `urmqtt.backup.failed` counts them |
+| `storage: DATABASE RESTORED FROM BACKUP: snapshot seq N from slot S (…); T s of changes (since unix U) are LOST; reason: …` | the database was corrupt at boot and was replaced by the newest intact snapshot. Read the reason and the window; check the disk |
+| `storage: the database is corrupt and storage.auto_restore is off …` / `restoring from a backup failed: …` | corruption that was not (or could not be) restored; the broker refuses to serve unless `storage.refuse_on_corruption = false` |
 
 `storage.grow_ratio_db` sets how the new space is shared (default 50: half to
 the SQLite database, half to the telemetry ring).
@@ -188,3 +195,11 @@ the store no longer uses is released to the disk. Discards are sent one at a
 time, a few per second, only while the broker has nothing waiting for the disk,
 and never destroy data in use (a write to a queued range takes it back). Turn it
 off if a storage backend misbehaves under discards; nothing else changes.
+
+`storage.backup_interval_min` (default 60; `0` = no backups and no backup
+region) sets how often the broker copies its database into the backup region of
+the data partition; `storage.auto_restore` (default `true`) lets it replace a
+corrupt database from the newest intact copy at boot. statsd gauges:
+`urmqtt.backup.enabled`, `snapshots_done`, `failed`, `restored`, `last_bytes`
+and `age_s` (seconds since the newest snapshot: alert on it). Details and the
+provider-snapshot question are in [DEPLOY.md](DEPLOY.md) section 9.

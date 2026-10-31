@@ -19,12 +19,14 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use urmqtt_arch::{cpu, time};
 use urmqtt_broker::{Msg, MsgInner, PersistOp};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{error, info, warn};
+use urmqtt_store::backup::{BackupError, BackupJob, Progress};
+use urmqtt_store::disk::BackupRegion;
 use urmqtt_store::layout::LayoutError;
 use urmqtt_store::telemetry::{Recovery, TelemetryLog};
 use urmqtt_store::{Disk, DiskError, Opened, Platform, Retained, SessionRecord, Store, StoreError};
@@ -44,6 +46,43 @@ const STATS_EVERY_MS: u64 = 10_000;
 pub const LOG_FLUSH_MS: u64 = 5;
 /// Flush the telemetry log once this much is pending.
 pub const LOG_FLUSH_BYTES: usize = 256 * 1024;
+
+/// Pages copied per backup step (S5, ADR-162): 64 KiB, well under a
+/// millisecond of SQLite work, so a commit waits for at most one step.
+const BACKUP_PAGES: u32 = 16;
+/// Bytes read back per step when a snapshot is verified.
+const BACKUP_READ_BYTES: usize = 128 * 1024;
+/// Pause between two backup steps: the DB core serves its rings in between.
+const BACKUP_GAP_MS: u64 = 2;
+/// First backup of a disk without one, after boot has settled.
+const BACKUP_FIRST_MS: u64 = 10_000;
+/// Retry after a failed backup (never sooner than this).
+const BACKUP_RETRY_MS: u64 = 300_000;
+
+/// Backup state for statsd (`urmqtt.backup.*`): updated by the DB core.
+pub struct BackupMetrics {
+    /// Snapshots completed this boot.
+    pub done: AtomicU64,
+    /// Backups that failed this boot.
+    pub failed: AtomicU64,
+    /// Unix seconds of the newest snapshot on the disk (0: none).
+    pub last_unix: AtomicU64,
+    /// Bytes of that snapshot.
+    pub last_bytes: AtomicU64,
+    /// 1 when this boot replaced the database from a backup.
+    pub restored: AtomicU64,
+    /// 1 when the disk has a backup region.
+    pub enabled: AtomicU64,
+}
+
+pub static BACKUP: BackupMetrics = BackupMetrics {
+    done: AtomicU64::new(0),
+    failed: AtomicU64::new(0),
+    last_unix: AtomicU64::new(0),
+    last_bytes: AtomicU64::new(0),
+    restored: AtomicU64::new(0),
+    enabled: AtomicU64::new(0),
+};
 
 /// Telemetry records from one core: (Unix ms, message).
 pub type LogBatch = Vec<(u64, Msg)>;
@@ -242,6 +281,30 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
             return refuse_or_degrade(false, format_args!("data partition unreadable: {e:?}"));
         }
     };
+    // S5: a layout without a backup region gets one (one superblock write,
+    // ADR-160), before the discard queue is on so nothing queued can overlap.
+    if cfg.backup_interval_min > 0 && !crate::live::ephemeral() {
+        match disk.ensure_backup() {
+            Ok(BackupRegion::Present) => {}
+            Ok(BackupRegion::Added { bytes, slot_bytes }) => info!(
+                "storage: backup region added (layout v2.1): {} MiB, two slots of {} KiB, carved from the database's unused tail",
+                bytes >> 20,
+                slot_bytes >> 10
+            ),
+            Ok(BackupRegion::NoRoom) => warn!(
+                "storage: no backup region: the database leaves no room for one; running WITHOUT in-disk backups"
+            ),
+            Err(e) if faulty => {
+                warn!(
+                    "disk-fault: power cut injected while adding the backup region ({e:?}), powering off"
+                );
+                crate::power::off()
+            }
+            Err(e) => warn!(
+                "storage: adding the backup region failed ({e:?}); running without in-disk backups"
+            ),
+        }
+    }
     // S4: release space the store no longer uses, if the device can and the
     // configuration allows it (before the grow, which queues the new space).
     log_discard_mode(&mut disk);
@@ -287,10 +350,23 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
     if let Err(e) = urmqtt_store::init(heap, disk, platform()) {
         return refuse_or_degrade(false, format_args!("{e}"));
     }
+    if test == Some(DbTest::Corrupt) {
+        corrupt_database();
+    }
     let t0 = time::uptime_ns();
-    let (mut store, info) = match urmqtt_store::open() {
-        Ok(s) => s,
+    let (mut store, info) = match urmqtt_store::backup::open_or_restore(cfg.auto_restore) {
+        Ok((s, info, restored)) => {
+            if let Some(r) = restored {
+                log_restored(&r);
+            }
+            (s, info)
+        }
         Err(e @ StoreError::Corrupt(_)) => {
+            if !cfg.auto_restore {
+                error!(
+                    "storage: the database is corrupt and storage.auto_restore is off: not restoring from a backup"
+                );
+            }
             return refuse_or_degrade(!cfg.refuse_on_corruption, format_args!("{e}"));
         }
         Err(e) => return refuse_or_degrade(false, format_args!("{e}")),
@@ -343,6 +419,15 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
 
     match test {
         Some(DbTest::Bench) => bench(&mut store),
+        Some(DbTest::BackupFill) => backup_fill(&mut store),
+        Some(DbTest::BackupBench) => backup_bench(&mut store),
+        Some(DbTest::Corrupt) => match store.selftest_verify() {
+            Ok(Ok(n)) => {
+                info!("db-corrupt: after boot the database holds {n} selftest rows, consistent")
+            }
+            Ok(Err(e)) => error!("db-corrupt: INCONSISTENT: {e}"),
+            Err(e) => error!("db-corrupt: failed: {e}"),
+        },
         Some(DbTest::Crash) => crash_writer(&mut store),
         Some(DbTest::Verify) => match store.selftest_verify() {
             Ok(Ok(n)) => info!("db-verify: {n} rows consistent"),
@@ -398,6 +483,7 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
         log_since_ms: None,
         log_reported: 0,
         control_seq,
+        backup: backup_start(cfg, test),
     });
     // Relaxed: read only after the data plane starts (later in boot).
     ACTIVE.store(true, Ordering::Relaxed);
@@ -665,6 +751,359 @@ struct Worker {
     discard_next_ms: u64,
     retire_next_ms: u64,
     discard_logged: u64,
+    /// The in-disk backup schedule and the job in progress (S5).
+    backup: BackupState,
+}
+
+/// The backup schedule (S5, ADR-162).
+struct BackupState {
+    /// A backup region exists and `storage.backup_interval_min` is non-zero.
+    on: bool,
+    interval_ms: u64,
+    /// When the next backup may start, and when the next step may run.
+    next_ms: u64,
+    step_ms: u64,
+    /// Sequence of the newest snapshot read back and found intact this boot.
+    trusted: Option<u64>,
+    job: Option<BackupJob>,
+    started_ms: u64,
+    steps: u32,
+    max_step_us: u64,
+    busy_ms: u64,
+}
+
+/// Opens the backup schedule: when the newest snapshot on the disk (by its
+/// wall-clock time) is old enough, the next backup is due soon after boot,
+/// otherwise when the interval since it is over.
+fn backup_start(cfg: &urmqtt_config::Storage, test: Option<DbTest>) -> BackupState {
+    let mut b = BackupState {
+        on: false,
+        interval_ms: u64::from(cfg.backup_interval_min) * 60_000,
+        next_ms: 0,
+        step_ms: 0,
+        trusted: None,
+        job: None,
+        started_ms: 0,
+        steps: 0,
+        max_step_us: 0,
+        busy_ms: 0,
+    };
+    if cfg.backup_interval_min == 0 || crate::live::ephemeral() {
+        return b;
+    }
+    let slots = urmqtt_store::vfs::with_disk(|d| {
+        d.layout().backup().map(|_| urmqtt_store::backup::scan(d))
+    })
+    .flatten();
+    let Some(Ok(slots)) = slots else {
+        return b;
+    };
+    b.on = true;
+    // Relaxed: statistics.
+    BACKUP.enabled.store(1, Ordering::Relaxed);
+    let now = crate::boot::now_unix().unwrap_or(0);
+    let newest = slots.by_age().first().map(|(_, h)| *h);
+    if let Some(h) = newest {
+        BACKUP.last_unix.store(h.created, Ordering::Relaxed);
+        BACKUP.last_bytes.store(h.payload_bytes, Ordering::Relaxed);
+    }
+    let age_ms = match (newest, now) {
+        (Some(h), n) if n > 0 && h.created > 0 => n.saturating_sub(h.created) * 1000,
+        _ => u64::MAX,
+    };
+    b.next_ms = now_ms()
+        + if newest.is_none() || age_ms >= b.interval_ms {
+            BACKUP_FIRST_MS
+        } else {
+            (b.interval_ms - age_ms).max(BACKUP_FIRST_MS)
+        };
+    // The test hooks that take their own backup leave the schedule alone.
+    if matches!(test, Some(DbTest::BackupFill | DbTest::BackupBench)) {
+        b.next_ms = u64::MAX;
+    }
+    info!(
+        "backup: every {} min into the backup region; {}",
+        cfg.backup_interval_min,
+        match newest {
+            Some(h) => alloc::format!(
+                "newest snapshot: seq {} taken at unix {} ({} KiB, schema v{})",
+                h.seq,
+                h.created,
+                h.payload_bytes >> 10,
+                h.schema_version
+            ),
+            None => "no snapshot yet".into(),
+        }
+    );
+    b
+}
+
+/// What a restore did, for the log (and statsd): loud, because data written
+/// since the snapshot is gone.
+fn log_restored(r: &urmqtt_store::backup::RestoreReport) {
+    let h = &r.restored.header;
+    let now = crate::boot::now_unix().unwrap_or(0);
+    let window = if now > 0 && h.created > 0 {
+        alloc::format!(
+            "{} s of changes (since unix {}) are LOST",
+            now.saturating_sub(h.created),
+            h.created
+        )
+    } else {
+        alloc::format!(
+            "the changes since the snapshot (taken at unix {}) are LOST",
+            h.created
+        )
+    };
+    error!(
+        "storage: DATABASE RESTORED FROM BACKUP: snapshot seq {} from slot {} ({} KiB, schema v{}){}; {window}; reason: {}",
+        h.seq,
+        r.restored.slot,
+        h.payload_bytes >> 10,
+        h.schema_version,
+        if r.restored.resumed {
+            ", finishing a restore an earlier boot began"
+        } else {
+            ""
+        },
+        r.reason
+    );
+    // Relaxed: statistics.
+    BACKUP.restored.store(1, Ordering::Relaxed);
+}
+
+/// `test=db-corrupt`: the database file is checkpointed, closed and then
+/// damaged (its first two pages overwritten), so that the open that follows
+/// finds it corrupt.
+fn corrupt_database() {
+    match urmqtt_store::open() {
+        Ok((s, _)) => {
+            if let Err(e) = s.db().exec("PRAGMA wal_checkpoint(TRUNCATE)") {
+                error!("db-corrupt: checkpoint failed: {e}");
+            }
+        }
+        Err(e) => {
+            error!("db-corrupt: cannot open the database to damage it: {e}");
+            return;
+        }
+    }
+    let mut junk = alloc::vec![0u8; 8192];
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    for b in &mut junk {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *b = (x >> 24) as u8;
+    }
+    let r = urmqtt_store::vfs::with_disk(|d| {
+        d.write_at(urmqtt_store::layout::RegionKind::Db, 0, &junk)?;
+        d.sync()
+    });
+    match r {
+        Some(Ok(())) => info!("db-corrupt: the database file's first two pages are now garbage"),
+        other => error!(
+            "db-corrupt: damaging the file failed: {:?}",
+            other.map(|x| x.err())
+        ),
+    }
+}
+
+/// `test=db-backup`: 100 selftest rows, a backup taken now, then 50 more
+/// rows. The next boot, with `test=db-corrupt`, must come back with the
+/// first 100.
+fn backup_fill(store: &mut Store) {
+    let r = (|| {
+        store.selftest_clear().ok();
+        store.begin()?;
+        store.selftest_clear()?;
+        for i in 1..=100 {
+            store.selftest_insert(i, 200)?;
+        }
+        store.commit()?;
+        Ok::<_, StoreError>(())
+    })();
+    if let Err(e) = r {
+        error!("db-backup: filling failed: {e}");
+        return;
+    }
+    let now = crate::boot::now_unix().unwrap_or(0);
+    let t0 = time::uptime_ns();
+    let w0 = urmqtt_store::vfs::disk_stats().device_writes;
+    let r = run_backup(store, None, now);
+    let w1 = urmqtt_store::vfs::disk_stats().device_writes;
+    // (The smoke test cuts the power inside this range.)
+    info!("db-backup: device writes before the backup {w0}, after {w1}");
+    match r {
+        Ok((h, slot, steps, max_us)) => info!(
+            "db-backup: 100 selftest rows in snapshot seq {} (slot {slot}, {} KiB, {} step(s), longest {max_us} us) in {} ms",
+            h.seq,
+            h.payload_bytes >> 10,
+            steps,
+            (time::uptime_ns() - t0) / 1_000_000
+        ),
+        Err(e) => {
+            error!("db-backup: backup failed: {e}");
+            return;
+        }
+    }
+    let r = (|| {
+        store.begin()?;
+        for i in 101..=150 {
+            store.selftest_insert(i, 200)?;
+        }
+        store.commit()
+    })();
+    match r {
+        Ok(()) => info!("db-backup: 50 more rows committed after the snapshot (150 in all)"),
+        Err(e) => error!("db-backup: writing after the snapshot failed: {e}"),
+    }
+}
+
+/// Runs one backup to the end, synchronously. Returns the header, the
+/// slot, the number of steps and the longest step in microseconds.
+fn run_backup(
+    store: &mut Store,
+    trusted: Option<u64>,
+    now: u64,
+) -> Result<(urmqtt_store::backup::SlotHeader, usize, u32, u64), BackupError> {
+    let mut job = BackupJob::start(trusted, now)?;
+    let (mut steps, mut max_us) = (0u32, 0u64);
+    loop {
+        let t = time::uptime_ns();
+        let p = job.step(store.db(), BACKUP_PAGES, BACKUP_READ_BYTES)?;
+        max_us = max_us.max((time::uptime_ns() - t) / 1000);
+        steps += 1;
+        if let Progress::Done(h, slot) = p {
+            return Ok((h, slot, steps, max_us));
+        }
+    }
+}
+
+/// `test=db-backup-bench` (ADR-164): the cost of a backup to the work the DB
+/// core is doing. A database of about 24 MiB; a writer committing a small
+/// transaction every millisecond, first alone (the baseline), then while a
+/// backup runs in bounded steps between the commits; the longest commit and
+/// the longest backup step of each. The same backup is also taken in one go
+/// (the whole copy as one call: the stall VACUUM INTO would cause) for
+/// comparison.
+fn backup_bench(store: &mut Store) {
+    const ROWS: i64 = 6000;
+    let r = (|| {
+        store.begin()?;
+        store.selftest_clear()?;
+        for i in 1..=ROWS {
+            store.selftest_insert(i, 3800)?;
+        }
+        store.commit()?;
+        Ok::<_, StoreError>(())
+    })();
+    if let Err(e) = r {
+        error!("backup-bench: filling failed: {e}");
+        return;
+    }
+    let pages = store.db().query_i64("PRAGMA page_count").unwrap_or(0);
+    // One writer pass: a commit every ~1 ms for `ms` milliseconds, measuring
+    // each; `between` runs after every commit.
+    let mut seq = ROWS;
+    let mut writer = |store: &mut Store, ms: u64, between: &mut dyn FnMut(&mut Store) -> bool| {
+        let (mut max_us, mut total_us, mut n) = (0u64, 0u64, 0u64);
+        let end = time::uptime_ns() + ms * 1_000_000;
+        while time::uptime_ns() < end {
+            let t = time::uptime_ns();
+            seq += 1;
+            let r = store
+                .begin()
+                .and_then(|()| store.selftest_insert(seq, 100))
+                .and_then(|()| store.commit());
+            if r.is_err() {
+                break;
+            }
+            let us = (time::uptime_ns() - t) / 1000;
+            max_us = max_us.max(us);
+            total_us += us;
+            n += 1;
+            if !between(store) {
+                break;
+            }
+            let until = time::uptime_ns() + 1_000_000;
+            while time::uptime_ns() < until {
+                core::hint::spin_loop();
+            }
+        }
+        (n, total_us / n.max(1), max_us)
+    };
+    let (n0, mean0, max0) = writer(store, 1000, &mut |_| true);
+    // With a bounded-step backup between the commits.
+    let now = crate::boot::now_unix().unwrap_or(0);
+    let mut job = match BackupJob::start(None, now) {
+        Ok(j) => j,
+        Err(e) => {
+            error!("backup-bench: {e}");
+            return;
+        }
+    };
+    let (mut steps, mut step_max, mut step_total) = (0u64, 0u64, 0u64);
+    let mut done = None;
+    let t0 = time::uptime_ns();
+    let (n1, mean1, max1) = writer(store, 60_000, &mut |s| {
+        let t = time::uptime_ns();
+        let p = job.step(s.db(), BACKUP_PAGES, BACKUP_READ_BYTES);
+        let us = (time::uptime_ns() - t) / 1000;
+        step_max = step_max.max(us);
+        step_total += us;
+        steps += 1;
+        match p {
+            Ok(Progress::Done(h, slot)) => {
+                done = Some((h, slot));
+                false
+            }
+            Ok(Progress::Working) => true,
+            Err(e) => {
+                error!("backup-bench: step failed: {e}");
+                false
+            }
+        }
+    });
+    let ms = (time::uptime_ns() - t0) / 1_000_000;
+    drop(job);
+    // The whole copy in one call, nothing else running: the longest single
+    // call is the stall VACUUM INTO (which cannot be split) would cause.
+    let t1 = time::uptime_ns();
+    let mut longest_us = 0u64;
+    let one = (|| {
+        let mut j = BackupJob::start(done.map(|(h, _)| h.seq), now)?;
+        loop {
+            let t = time::uptime_ns();
+            // 1 << 30 pages: the copy runs to the end inside one call.
+            let p = j.step(store.db(), 1 << 30, usize::MAX / 2)?;
+            longest_us = longest_us.max((time::uptime_ns() - t) / 1000);
+            if let Progress::Done(h, _) = p {
+                return Ok::<_, BackupError>(h);
+            }
+        }
+    })();
+    let one_us = (time::uptime_ns() - t1) / 1000;
+    match (done, one) {
+        (Some((h, slot)), Ok(h1)) => info!(
+            "backup-bench: {pages} pages ({} MiB), snapshot seq {} slot {slot}; commits alone: {n0} in 1 s, mean {mean0} us, max {max0} us; \
+             commits during the backup: {n1} in {ms} ms, mean {mean1} us, max {max1} us; \
+             backup steps of {BACKUP_PAGES} pages: {steps}, mean {} us, longest {step_max} us; \
+             the whole copy as one call: longest call {longest_us} us of {one_us} us in all (seq {})",
+            (pages * 4096) >> 20,
+            h.seq,
+            step_total / steps.max(1),
+            h1.seq
+        ),
+        (d, o) => error!(
+            "backup-bench: incomplete (backup done: {}, one call: {:?})",
+            d.is_some(),
+            o.err()
+        ),
+    }
+    let _ = store
+        .begin()
+        .and_then(|()| store.selftest_clear())
+        .and_then(|()| store.commit());
 }
 
 /// Pause between two discard requests (rate limit, S4).
@@ -857,6 +1296,7 @@ impl Worker {
         did |= self.step_log(now_ms);
         did |= self.check_online_grow(now_ms);
         did |= self.step_discard(now_ms);
+        did |= self.step_backup(now_ms);
         if now_ms.saturating_sub(self.last_stats_ms) >= STATS_EVERY_MS {
             self.refresh_disk_used();
             self.log_stats(now_ms);
@@ -922,6 +1362,93 @@ impl Worker {
                 true
             }
         }
+    }
+
+    /// The in-disk backup (S5, ADR-162). When the interval is over, a job
+    /// starts; it then advances one bounded step (16 pages, or a read-back
+    /// of 128 KiB) at most every 2 ms and only between transactions, so a
+    /// commit waits for one step at most, and the data cores, which only
+    /// push to rings, not at all. The previous good slot is never touched
+    /// (the store crate's order of writes); a failure is logged, counted and
+    /// retried later.
+    fn step_backup(&mut self, now_ms: u64) -> bool {
+        let b = &mut self.backup;
+        if !b.on {
+            return false;
+        }
+        if b.job.is_none() {
+            if now_ms < b.next_ms {
+                return false;
+            }
+            let now = crate::boot::now_unix().unwrap_or(0);
+            match BackupJob::start(b.trusted, now) {
+                Ok(j) => {
+                    b.job = Some(j);
+                    b.started_ms = now_ms;
+                    b.steps = 0;
+                    b.max_step_us = 0;
+                    b.busy_ms = 0;
+                    b.step_ms = now_ms;
+                }
+                Err(e) => {
+                    self.backup_failed(now_ms, &e);
+                    return true;
+                }
+            }
+        }
+        if now_ms < b.step_ms || self.store.in_transaction() {
+            return true;
+        }
+        let Some(job) = b.job.as_mut() else {
+            return false;
+        };
+        let t = time::uptime_ns();
+        let r = job.step(self.store.db(), BACKUP_PAGES, BACKUP_READ_BYTES);
+        let us = (time::uptime_ns() - t) / 1000;
+        b.max_step_us = b.max_step_us.max(us);
+        b.steps += 1;
+        b.step_ms = now_ms + BACKUP_GAP_MS;
+        match r {
+            Ok(Progress::Working) => {}
+            Ok(Progress::Done(h, slot)) => {
+                let (pages, busy) = b.job.take().map_or((0, 0), |j| (j.pages, j.busy));
+                b.trusted = Some(h.seq);
+                b.next_ms = now_ms + b.interval_ms;
+                // Relaxed: statistics.
+                BACKUP.done.fetch_add(1, Ordering::Relaxed);
+                BACKUP.last_unix.store(h.created, Ordering::Relaxed);
+                BACKUP.last_bytes.store(h.payload_bytes, Ordering::Relaxed);
+                info!(
+                    "backup: snapshot seq {} written to slot {slot}: {pages} page(s), {} KiB, schema v{}, {} step(s) over {} ms, longest step {} us{}",
+                    h.seq,
+                    h.payload_bytes >> 10,
+                    h.schema_version,
+                    b.steps,
+                    now_ms.saturating_sub(b.started_ms),
+                    b.max_step_us,
+                    if busy > 0 {
+                        alloc::format!(", {busy} step(s) found a lock")
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            Err(e) => self.backup_failed(now_ms, &e),
+        }
+        true
+    }
+
+    fn backup_failed(&mut self, now_ms: u64, e: &BackupError) {
+        let b = &mut self.backup;
+        b.job = None;
+        b.next_ms = now_ms + b.interval_ms.min(BACKUP_RETRY_MS);
+        self.stats.errors += 1;
+        // Relaxed: statistics.
+        BACKUP.failed.fetch_add(1, Ordering::Relaxed);
+        error!(
+            "backup: FAILED: {e}; the previous good snapshot is untouched; trying again in {} min",
+            b.interval_ms.min(BACKUP_RETRY_MS) / 60_000
+        );
     }
 
     /// Retention (S4): telemetry segments whose newest record is older than
@@ -1166,7 +1693,7 @@ pub fn run_core() -> ! {
         let worked = w.step(now_ms());
         // An open transaction or pending telemetry must commit within its
         // batch delay: keep polling until then (the tick is 10 ms).
-        let due = w.store.in_transaction() || w.log_since_ms.is_some();
+        let due = w.store.in_transaction() || w.log_since_ms.is_some() || w.backup.job.is_some();
         idle.pass(worked || due, || w.pending());
     }
 }

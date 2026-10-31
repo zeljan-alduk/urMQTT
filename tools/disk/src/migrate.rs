@@ -87,6 +87,7 @@ fn name(kind: RegionKind) -> &'static str {
         RegionKind::Journal => "journal",
         RegionKind::Telemetry => "telemetry",
         RegionKind::Scratch => "scratch",
+        RegionKind::Backup => "backup",
     }
 }
 
@@ -249,6 +250,7 @@ pub fn plan(dev: &mut dyn BlockDevice, v1_sb: &[u8; BLOCK], opts: &Options) -> R
         regions,
         partitions: l1.partitions,
         align_sectors: opts.align_sectors,
+        minor: 0,
         generation: 1,
         flags: FLAG_LEGACY_TELEMETRY,
     };

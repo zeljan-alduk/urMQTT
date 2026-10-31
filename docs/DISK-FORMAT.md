@@ -1,10 +1,10 @@
-# Data disk format, layout version 2
+# Data disk format, layout version 2 (minor 1)
 
-The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0, S2, S3).
+The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0, S2, S3, S5).
 Since S1 the "data disk" is the **data partition of the boot disk** (§0);
 everything below §0 is relative to that partition's first sector. Layout v2
 (S2) adds alignment, the partition count and an A/B superblock; S3 adds the
-grow (§9). Layout v1 (S0/S1) is described only as far as `urmqtt-disk migrate`
+grow (§9); S5 adds minor version 1 and the backup region (§12). Layout v1 (S0/S1) is described only as far as `urmqtt-disk migrate`
 reads it (§10). The data has **no
 filesystem**: the kernel accesses it raw, as a superblock, a region table and
 fixed regions. The code is in `crates/store`
@@ -179,17 +179,22 @@ segments are 4 KiB aligned, but not 1 MiB aligned.
 | 48 | 4 | u32 | partitions | telemetry partitions, 1 to 64 |
 | 52 | 4 | u32 | align_sectors | alignment unit `A` in sectors: a multiple of 2048, at most 131072 |
 | 56 | 4 | u32 | flags | bit 0: the telemetry ring is a v1 ring kept in place (§5.2); other bits must be 0 |
+| 60 | 4 | u32 | minor | minor version: `0` (no backup region, every disk formatted before S5) or `1` (the layout may have a backup region, §12) |
 | 64 | 24 | region[] | regions | `region_count` entries of §3.1, back to back (up to offset 3136) |
 | 4092 | 4 | crc32c | crc | over bytes 0..4092 |
 
-Bytes 60..64 are reserved and must be zero.
+The word at 60 was reserved-and-zero up to S4, and a reader of that age refuses a
+non-zero value (`Inconsistent`). Setting it to 1 is therefore what keeps an
+older kernel from opening a disk whose backup region it would not understand
+(it would otherwise read it as a gap and might claim it); this build reads
+minor 0 and 1 and refuses a larger one (`UnsupportedMinor`).
 
 ### 3.1 Region entry (24 bytes, at 64 + 24·i)
 
 <!-- struct: region size=24 -->
 | Offset | Size | Type | Field | Description |
 |---|---|---|---|---|
-| 0 | 4 | u32 | kind | 1 database, 2 WAL, 3 journal, 4 telemetry, 5 scratch |
+| 0 | 4 | u32 | kind | 1 database, 2 WAL, 3 journal, 4 telemetry, 5 scratch, 6 backup (minor 1 only) |
 | 8 | 8 | u64 | start | first sector (LBA), a multiple of 8 and of `align_sectors` |
 | 16 | 8 | u64 | sectors | length in sectors, a multiple of 8 |
 
@@ -208,10 +213,11 @@ order (§9). The other kinds appear once.
 **Validity of one slot** (`Layout::decode`):
 1. The 4096 bytes are all zero: the slot is **blank**.
 2. Otherwise the magic must match, or the result is `UnknownData`: foreign data, never formatted over.
-3. The CRC must match; `version` must be 2 (1 is `OldVersion`); `region_count` ≤ 128; every `kind` must be known; `flags` has only bit 0, the reserved word is 0.
+3. The CRC must match; `version` must be 2 (1 is `OldVersion`); `region_count` ≤ 128; every `kind` must be known; `flags` has only bit 0; `minor` is 0 or 1.
 4. `total_sectors` ≤ the device size and a multiple of 8; `partitions` and `align_sectors` in range.
 5. Regions are non-empty, a multiple of 8 sectors long, start at or after `align_sectors`, do not overlap and end within `total_sectors`. Every region except scratch starts on a multiple of `align_sectors`; the first telemetry extent is exempt when flag bit 0 is set.
-6. Database, WAL and journal regions exist; WAL, journal and scratch have one extent. Telemetry and scratch are optional for the reader.
+6. Database, WAL and journal regions exist; WAL, journal, scratch and backup have one extent. Telemetry and scratch are optional for the reader.
+7. A backup region needs `minor` 1 and room for a control block and two slots of at least a header and one page (§12).
 
 ## 4. Size table (LBA 8 = slot A, LBA 16 = slot B)
 
@@ -502,3 +508,117 @@ or garbage. Every reader therefore treats it as unwritten, which is already how
 the format works: file bytes beyond the logical size are not read, a segment is
 valid only with the magic, this layout's UUID and a valid CRC, and a record only
 with its CRC. `storage.discard = "off"` stops all of it.
+
+## 12. The backup region (S5, ADR-160 to ADR-164)
+
+Layout minor 1. A copy of the broker's database kept on the same disk, so that
+a damaged database file can be replaced at boot without an operator. It does
+not replace an off-disk backup (the disk is one failure domain, §0); it covers
+corruption of the database file itself, which the other regions' CRCs and
+SQLite's own checks can detect but not mend.
+
+### 12.1 Where it comes from
+
+A disk formatted before S5 has no backup region and no spare space: the
+formatter gives the database half of the usable space, the telemetry ring the
+rest. The region is therefore **carved from the tail of the last database
+extent**, beyond the database file's logical end (the size table), by
+`Disk::ensure_backup` at boot:
+
+| Step | Write |
+|---|---|
+| 1 | the control block and both slot headers of the new region are zeroed; flush |
+| 2 | the new superblock (`minor` 1, a `backup` region entry, the last database extent shortened, `generation` + 1) goes to the slot **not in force**; flush |
+
+Step 2 is the only write that changes what the disk means, and it is one block
+into the slot not in force, as in the grow (§9). A cut before it leaves the old
+layout; a torn write leaves an invalid slot and the old one in force; a
+complete write puts the new layout in force. No byte that is read moves.
+
+The carve needs the database to keep at least twice its file size plus 1 MiB.
+It takes `4 KiB + 2 × slot` where `slot = clamp(database region / 8, 1 MiB, 1 GiB)`
+(4 KiB aligned), rounded to the alignment unit. If the database has no such
+room the layout stays as it is (`NoRoom`), the broker runs without a backup and
+says so. A fresh disk is formatted as minor 0 and carved at its first boot by
+the same code, so there is one path.
+
+### 12.2 Inside the region
+
+```
+region offset 0                    control block (4 KiB)
+region offset 4096                 slot 0: header (4 KiB), then the payload
+region offset 4096 + slot_bytes    slot 1: the same
+```
+
+`slot_bytes = floor_4K((region - 4096) / 2)`. The payload is a complete SQLite
+database file (the main database, WAL applied), copied by SQLite's online backup
+API; it holds at most `slot_bytes - 4096` bytes.
+
+<!-- struct: backup_slot_header size=4096 -->
+| Offset | Size | Type | Field | Description |
+|---|---|---|---|---|
+| 0 | 8 | magic | magic | `URMQBKP1` |
+| 8 | 8 | u64 | seq | snapshot number, increases by one per snapshot, at least 1; the highest valid one is the newest |
+| 16 | 8 | u64 | created | Unix seconds when the snapshot finished, 0 if the clock was unknown |
+| 24 | 16 | bytes | uuid | the superblock's `uuid`: a snapshot of another incarnation of the disk never counts |
+| 40 | 4 | u32 | schema_version | the snapshot's `PRAGMA user_version` (the broker's schema version) |
+| 44 | 4 | u32 | page_size | the database page size, a power of two from 512 to 65536 |
+| 48 | 8 | u64 | page_count | pages in the payload |
+| 56 | 8 | u64 | payload_bytes | `page_size × page_count`, at most the slot's payload capacity |
+| 64 | 4 | u32 | payload_crc | CRC-32C of the payload's `payload_bytes` bytes |
+| 4092 | 4 | crc32c | crc | over bytes 0..4092 |
+
+<!-- struct: backup_control size=4096 -->
+| Offset | Size | Type | Field | Description |
+|---|---|---|---|---|
+| 0 | 8 | magic | magic | `URMQBKC1` |
+| 8 | 8 | u64 | seq | incremented by one with every write of the block |
+| 16 | 16 | bytes | uuid | the superblock's `uuid` |
+| 32 | 4 | u32 | state | `0` idle, `1` a restore was started and not finished |
+| 36 | 4 | u32 | slot | state 1: the slot being restored from |
+| 40 | 8 | u64 | backup_seq | state 1: the `seq` of the snapshot being restored |
+| 4092 | 4 | crc32c | crc | over bytes 0..4092 |
+
+A header is **valid** if its magic, CRC and `uuid` match and its fields are
+consistent. A snapshot is **intact** if its header is valid and the payload's
+CRC-32C equals `payload_crc`. Nothing else makes bytes a snapshot, so garbage
+in a slot (including what a device returns for a released range, §11) is never
+mistaken for one. A control block that is blank, torn or foreign reads as idle.
+
+### 12.3 Writing a snapshot
+
+Let `N` be the slot holding the newest *intact* snapshot (a newest slot whose
+payload fails its CRC does not count). The snapshot goes to the other slot:
+
+1. **Only if the newest snapshot has not been read back since boot:** its payload is read and checked.
+2. The target slot's header block is zeroed; flush. (From here the target is invalid.)
+3. SQLite's backup API copies the database into the target's payload area in steps of a few pages, between the broker's own transactions; flush.
+4. The payload is read back and its CRC-32C computed, and the SQLite header (page size, page count, `user_version`) is read from it.
+5. The target's header is written in one block, with `seq` one above the highest header's; flush.
+
+Slot `N` is never written, read-modify-written or discarded. A cut anywhere
+leaves `N` as it was; the target is invalid until step 5 completes. If the
+database does not fit the slot the job stops before step 2.
+
+### 12.4 Restoring
+
+At boot, with the store closed:
+1. If the control block says a restore was started, it is continued with the same snapshot.
+2. Otherwise, if `PRAGMA quick_check` (or opening the file) found the database corrupt and `storage.auto_restore` is set, the newest intact snapshot whose `schema_version` the build can read is chosen.
+
+The restore then:
+1. writes the control block (`state` 1, the snapshot); flush;
+2. sets the WAL and journal sizes to 0; flush (a stale WAL frame is never applied to the restored file);
+3. copies the payload over the start of the database region and flushes (the copy's CRC is checked against the header);
+4. sets the database file size to `payload_bytes` and flushes;
+5. writes the control block idle; flush.
+
+The snapshot is only read, so a cut at any point leaves it intact and the next
+boot repeats the restore from step 1 or 2. The lost time window is `now - created`.
+
+### 12.5 Invariants
+
+- A slot other than the target is not written while a snapshot is made.
+- A header never becomes valid before its payload is complete and read back.
+- The database's logical size never exceeds its (shortened) region: the carve leaves it twice its size.
+- Released space (§11) cannot reach the backup region: the region is no longer part of the database's extents, and the carve cancels queued discards over it.

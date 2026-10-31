@@ -12,7 +12,8 @@
 //! LBA 32..63 reserved for the offline migration record (zero on a fresh disk)
 //! LBA align  regions, each aligned to `align_sectors` (>= 1 MiB): SQLite main
 //!            db (one or more extents), WAL, rollback journal, telemetry
-//!            (one or more extents)
+//!            (one or more extents), and, since layout v2.1 (S5, ADR-160),
+//!            the in-disk backup (control block and two snapshot slots)
 //! last 8     scratch for the boot block-device self-test
 //! ```
 
@@ -25,6 +26,12 @@ pub const BLOCK: usize = 4096;
 pub const BLOCK_SECTORS: u64 = BLOCK as u64 / SECTOR;
 pub const MAGIC: [u8; 8] = *b"URMQTTDK";
 pub const VERSION: u32 = 2;
+/// Minor version, stored in the superblock's formerly reserved word (S5,
+/// ADR-160). 0: no backup region (every disk formatted before S5). 1: the
+/// layout may carry a backup region. A reader that predates minors refuses a
+/// non-zero one, so an older kernel never opens a disk it cannot fully
+/// interpret; this build reads both.
+pub const MINOR: u32 = 1;
 pub const SIZE_MAGIC: [u8; 8] = *b"URMQSZT1";
 /// The fixed metadata blocks live in the first 32 KiB: both superblock
 /// slots, both size-table slots and the migration record. A new data
@@ -73,6 +80,9 @@ pub enum RegionKind {
     Journal = 3,
     Telemetry = 4,
     Scratch = 5,
+    /// The in-disk database backup (layout v2.1, S5): a control block and two
+    /// snapshot slots. One extent.
+    Backup = 6,
 }
 
 impl RegionKind {
@@ -83,6 +93,7 @@ impl RegionKind {
             3 => Self::Journal,
             4 => Self::Telemetry,
             5 => Self::Scratch,
+            6 => Self::Backup,
             _ => return None,
         })
     }
@@ -196,6 +207,8 @@ pub struct Layout {
     pub partitions: u32,
     /// Alignment unit of the regions, sectors.
     pub align_sectors: u32,
+    /// Minor version (0 or [`MINOR`]); a backup region needs 1.
+    pub minor: u32,
     /// Bumped by every superblock write; the higher valid slot wins.
     pub generation: u64,
     pub flags: u32,
@@ -217,6 +230,8 @@ pub enum LayoutError {
     SizeTableLost,
     /// The region table has no room for another extent.
     TooManyRegions,
+    /// A v2 superblock of a minor version this build does not know.
+    UnsupportedMinor(u32),
 }
 
 const fn align_down(x: u64, a: u64) -> u64 {
@@ -225,6 +240,49 @@ const fn align_down(x: u64, a: u64) -> u64 {
 
 const fn align_up(x: u64, a: u64) -> u64 {
     x.div_ceil(a) * a
+}
+
+/// Bytes of the backup region's control block (at offset 0).
+pub const BACKUP_CONTROL_BYTES: u64 = BLOCK as u64;
+/// Bytes of a snapshot slot's header (at the slot's start).
+pub const BACKUP_HEADER_BYTES: u64 = BLOCK as u64;
+/// Smallest and largest snapshot slot a carve chooses (header included).
+pub const BACKUP_SLOT_MIN: u64 = 1 << 20;
+pub const BACKUP_SLOT_MAX: u64 = 1 << 30;
+
+/// How the backup region divides into the control block and two slots:
+///
+/// ```text
+/// [ control 4 KiB ][ slot 0: header 4 KiB + payload ][ slot 1: the same ]
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackupGeometry {
+    pub region_bytes: u64,
+    /// Bytes of one slot, header included: a multiple of 4096.
+    pub slot_bytes: u64,
+}
+
+impl BackupGeometry {
+    /// The geometry of a region of `region_bytes`; `None` if a slot could
+    /// not hold its header and one page.
+    pub fn of(region_bytes: u64) -> Option<Self> {
+        let slot =
+            region_bytes.checked_sub(BACKUP_CONTROL_BYTES)? / 2 / BLOCK as u64 * BLOCK as u64;
+        (slot >= BACKUP_HEADER_BYTES + BLOCK as u64).then_some(Self {
+            region_bytes,
+            slot_bytes: slot,
+        })
+    }
+
+    /// Offset of slot `i` (0 or 1) in the region.
+    pub fn slot_offset(&self, i: usize) -> u64 {
+        BACKUP_CONTROL_BYTES + (i.min(1) as u64) * self.slot_bytes
+    }
+
+    /// Largest snapshot a slot holds.
+    pub fn payload_capacity(&self) -> u64 {
+        self.slot_bytes - BACKUP_HEADER_BYTES
+    }
 }
 
 impl Layout {
@@ -276,6 +334,7 @@ impl Layout {
             regions,
             partitions: p.partitions,
             align_sectors: p.align_sectors,
+            minor: 0,
             generation: 1,
             flags: 0,
         };
@@ -296,6 +355,77 @@ impl Layout {
     /// Bytes of all extents of `kind`.
     pub fn bytes(&self, kind: RegionKind) -> u64 {
         self.extents(kind).map(|r| r.bytes()).sum()
+    }
+
+    /// The geometry of the backup region, if the layout has one.
+    pub fn backup(&self) -> Option<BackupGeometry> {
+        BackupGeometry::of(self.region(RegionKind::Backup)?.bytes())
+    }
+
+    /// Adds the backup region (layout v2.0 -> v2.1, S5, ADR-160): the tail
+    /// of the last database extent becomes a control block and two snapshot
+    /// slots, and the minor version becomes 1. Nothing moves: the bytes
+    /// taken lie beyond the database file's logical end (`db_file_bytes`).
+    /// The database keeps at least twice its size plus 1 MiB. `None`: the
+    /// layout has a backup region already, is a v1 view, or the database has
+    /// no room to give. The generation is bumped; the update is one
+    /// superblock write.
+    pub fn with_backup(&self, db_file_bytes: u64) -> Option<Self> {
+        if self.is_v1_view() || self.region(RegionKind::Backup).is_some() {
+            return None;
+        }
+        let a = u64::from(self.align_sectors);
+        let db_total = self.bytes(RegionKind::Db);
+        let (idx, last) = self
+            .regions
+            .iter()
+            .enumerate()
+            .rfind(|(_, r)| r.kind == RegionKind::Db)?;
+        // The slot the database size asks for, or less if the last extent
+        // (a disk that grew has a small one) cannot give that much; the
+        // extent keeps at least one alignment unit.
+        let fit = ((last.sectors.checked_sub(a)? * SECTOR).saturating_sub(BACKUP_CONTROL_BYTES))
+            / 2
+            / BLOCK as u64
+            * BLOCK as u64;
+        let slot = (db_total / 8)
+            .clamp(BACKUP_SLOT_MIN, BACKUP_SLOT_MAX)
+            .next_multiple_of(BLOCK as u64)
+            .min(fit);
+        if slot < BACKUP_SLOT_MIN {
+            return None;
+        }
+        let want = (BACKUP_CONTROL_BYTES + 2 * slot) / SECTOR;
+        let start = align_down(last.end().checked_sub(want)?, a);
+        if start <= last.start {
+            return None;
+        }
+        let taken = (last.end() - start) * SECTOR;
+        let left = db_total - taken;
+        if left < 2 * db_file_bytes + (1 << 20) {
+            return None;
+        }
+        let mut regions = self.regions.clone();
+        *regions.get_mut(idx)? = Region {
+            sectors: start - last.start,
+            ..*last
+        };
+        regions.insert(
+            idx + 1,
+            Region {
+                kind: RegionKind::Backup,
+                start,
+                sectors: last.end() - start,
+            },
+        );
+        let l = Self {
+            regions,
+            minor: MINOR,
+            generation: self.generation + 1,
+            ..self.clone()
+        };
+        l.validate().ok()?;
+        Some(l)
     }
 
     pub fn is_v1_view(&self) -> bool {
@@ -346,10 +476,22 @@ impl Layout {
             }
         }
         // The files with one flat range each, and one scratch area.
-        for k in [RegionKind::Wal, RegionKind::Journal, RegionKind::Scratch] {
+        for k in [
+            RegionKind::Wal,
+            RegionKind::Journal,
+            RegionKind::Scratch,
+            RegionKind::Backup,
+        ] {
             if self.extents(k).count() > 1 {
                 return Err(LayoutError::Inconsistent);
             }
+        }
+        // A backup region is a v2.1 feature, and must hold a control block
+        // and two slots that can each take a header and one page.
+        if let Some(b) = self.region(RegionKind::Backup)
+            && (self.minor == 0 || BackupGeometry::of(b.bytes()).is_none())
+        {
+            return Err(LayoutError::Inconsistent);
         }
         Ok(())
     }
@@ -452,6 +594,7 @@ impl Layout {
             regions,
             partitions: self.partitions,
             align_sectors: self.align_sectors,
+            minor: self.minor,
             generation: self.generation + 1,
             flags: self.flags & STORED_FLAGS,
         };
@@ -470,6 +613,7 @@ impl Layout {
         put(&mut b, 48, &self.partitions.to_le_bytes());
         put(&mut b, 52, &self.align_sectors.to_le_bytes());
         put(&mut b, 56, &(self.flags & STORED_FLAGS).to_le_bytes());
+        put(&mut b, 60, &self.minor.to_le_bytes());
         for (i, r) in self.regions.iter().take(MAX_REGIONS).enumerate() {
             let at = REGIONS_AT + i * REGION_BYTES;
             put(&mut b, at, &(r.kind as u32).to_le_bytes());
@@ -501,8 +645,12 @@ impl Layout {
             return Err(LayoutError::UnsupportedVersion(version));
         }
         let n = u32_at(b, 12) as usize;
-        if n > MAX_REGIONS || u32_at(b, 60) != 0 || u32_at(b, 56) & !STORED_FLAGS != 0 {
+        if n > MAX_REGIONS || u32_at(b, 56) & !STORED_FLAGS != 0 {
             return Err(LayoutError::Inconsistent);
+        }
+        let minor = u32_at(b, 60);
+        if minor > MINOR {
+            return Err(LayoutError::UnsupportedMinor(minor));
         }
         let mut uuid = [0u8; 16];
         uuid.copy_from_slice(b.get(16..32).unwrap_or(&[0; 16]));
@@ -527,6 +675,7 @@ impl Layout {
             generation: u64_at(b, 40),
             partitions: u32_at(b, 48),
             align_sectors: u32_at(b, 52),
+            minor,
             flags: u32_at(b, 56),
         };
         l.validate()?;
@@ -635,6 +784,7 @@ pub mod v1 {
             regions,
             partitions: 8,
             align_sectors: BLOCK_SECTORS as u32,
+            minor: 0,
             generation: 0,
             flags: FLAG_V1_VIEW | FLAG_LEGACY_TELEMETRY,
         }

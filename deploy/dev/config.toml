@@ -47,6 +47,8 @@ sqlite_heap_mb = 32
 telemetry_topics = ["devices/+/telemetry/#"]
 retention_days = 30
 discard = "auto"                    # "auto" | "off": release retired telemetry segments, truncated file tails and grown space to the device (virtio-blk discard, SCSI UNMAP)
+backup_interval_min = 60            # minutes between in-disk database backups (S5); 0 = off
+auto_restore = true                 # restore the newest intact backup when the database is corrupt at boot (logged loudly); false = refuse to serve
 require_flush = true
 require_data_disk = false           # dev: boots without a disk, memory only
 refuse_on_corruption = true

@@ -317,6 +317,13 @@ Each milestone ends with:
 - Fault injection during the backup never invalidates the previous good slot.
 - The data plane is not stalled: measured.
 
+**Status: done** (docs/PROGRESS.md, S5; ADR-160 to ADR-163). Deviations from the work list:
+- **The backup region is not in the formatter's plan:** a disk formatted before S5 has no free space, so the region is carved from the database's unused tail by one superblock write at boot (layout v2.0 becomes v2.1, a minor version in the formerly reserved superblock word), for new and old disks alike (ADR-160).
+- **`VACUUM INTO` was measured out:** this SQLite build has `SQLITE_MAX_ATTACHED=0` and it fails; the backup API in 16-page steps is used (ADR-161).
+- **A restore mark** in a control block makes an interrupted restore finish at the next boot (not in the work list).
+- **`auto_restore` defaults to true** (ADR-163).
+- **Not covered by a smoke scenario:** `auto_restore = false` in a VM (host and schema tests only). Off-disk backup copies are the operator's (`urmqtt-disk backup-extract`).
+
 ### S6 — Scrubbing · S–M
 
 **Work**

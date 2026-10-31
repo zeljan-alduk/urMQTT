@@ -22,6 +22,7 @@
 
 extern crate alloc;
 
+pub mod backup;
 pub mod crc;
 #[allow(unsafe_code)] // SQLite C API wrappers
 pub mod db;

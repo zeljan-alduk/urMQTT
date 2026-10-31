@@ -18,6 +18,11 @@ use crate::layout::{FileKind, RegionKind};
 /// Name of the main database file; the WAL and journal derive from it.
 pub const DB_NAME: &CStr = c"urmqtt.db";
 pub const VFS_NAME: &CStr = c"urmqtt";
+/// The fourth file (S5, ADR-161): the payload of one backup slot, present
+/// only while a backup is attached ([`backup_attach`]). It has no WAL and no
+/// journal, and its size lives in memory: the slot's header, written after
+/// the copy, is what makes it a backup.
+pub const BACKUP_NAME: &CStr = c"urmqtt-backup.db";
 
 /// Services the VFS needs from its environment.
 #[derive(Clone, Copy)]
@@ -34,6 +39,8 @@ pub struct Platform {
 struct Vfs {
     disk: Disk,
     platform: Platform,
+    /// The attached backup slot and the logical size of its file.
+    backup: Option<(usize, u64)>,
 }
 
 static STATE: SpinLock<Option<Vfs>> = SpinLock::new(None);
@@ -41,7 +48,34 @@ static STATE: SpinLock<Option<Vfs>> = SpinLock::new(None);
 /// Installs the disk and platform hooks. Must happen before
 /// `sqlite3_initialize` (which registers the VFS).
 pub fn install(disk: Disk, platform: Platform) {
-    *STATE.lock() = Some(Vfs { disk, platform });
+    *STATE.lock() = Some(Vfs {
+        disk,
+        platform,
+        backup: None,
+    });
+}
+
+/// Attaches snapshot slot `slot` as the backup file, empty. `false`: the
+/// layout has no such slot.
+pub fn backup_attach(slot: usize) -> bool {
+    with(|v| {
+        if v.disk.backup_payload(slot).is_none() {
+            return false;
+        }
+        v.backup = Some((slot, 0));
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Detaches the backup file; returns its logical size (the payload bytes).
+pub fn backup_detach() -> u64 {
+    with(|v| v.backup.take().map_or(0, |(_, size)| size)).unwrap_or(0)
+}
+
+/// Logical size of the attached backup file.
+pub fn backup_size() -> u64 {
+    with(|v| v.backup.map_or(0, |(_, size)| size)).unwrap_or(0)
 }
 
 /// Runs `f` on the installed disk (layout inspection, telemetry in M12).
@@ -66,7 +100,15 @@ fn with<R>(f: impl FnOnce(&mut Vfs) -> R) -> Option<R> {
 #[repr(C)]
 struct File {
     base: sqlite3_file,
-    kind: FileKind,
+    kind: Which,
+}
+
+/// The files this VFS knows: the three mapped by the size table, and the
+/// backup slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Which {
+    Main(FileKind),
+    Backup,
 }
 
 fn kind_of(name: &[u8]) -> Option<FileKind> {
@@ -80,23 +122,97 @@ fn kind_of(name: &[u8]) -> Option<FileKind> {
     }
 }
 
+fn which_of(name: &[u8]) -> Option<Which> {
+    if name == BACKUP_NAME.to_bytes() {
+        return Some(Which::Backup);
+    }
+    kind_of(name).map(Which::Main)
+}
+
 /// # Safety
 /// `name` is null or a NUL-terminated string from SQLite.
-unsafe fn name_kind(name: *const c_char) -> Option<FileKind> {
+unsafe fn name_kind(name: *const c_char) -> Option<Which> {
     if name.is_null() {
         return None;
     }
     // SAFETY: non-null, NUL-terminated (SQLite contract).
     let s = unsafe { CStr::from_ptr(name) };
-    kind_of(s.to_bytes())
+    which_of(s.to_bytes())
 }
 
 /// # Safety
 /// `f` is a `File` this VFS opened.
-unsafe fn file_kind(f: *mut sqlite3_file) -> FileKind {
+unsafe fn file_kind(f: *mut sqlite3_file) -> Which {
     // SAFETY: SQLite passes back the `szOsFile`-sized object we filled in
     // `x_open`, whose layout is `File`.
     unsafe { (*f.cast::<File>()).kind }
+}
+
+/// Reads, writes and sizes of the files, by which file it is. The backup
+/// file is a byte range of the attached slot's payload.
+impl Vfs {
+    fn size_of(&self, w: Which) -> u64 {
+        match w {
+            Which::Main(k) => self.disk.file_size(k),
+            Which::Backup => self.backup.map_or(0, |(_, size)| size),
+        }
+    }
+
+    fn read(&mut self, w: Which, off: u64, buf: &mut [u8]) -> Result<(), DiskError> {
+        match w {
+            Which::Main(k) => self.disk.read_at(RegionKind::of_file(k), off, buf),
+            Which::Backup => {
+                let (slot, _) = self.backup.ok_or(DiskError::Full)?;
+                let (base, cap) = self.disk.backup_payload(slot).ok_or(DiskError::Full)?;
+                if off + buf.len() as u64 > cap {
+                    return Err(DiskError::Full);
+                }
+                self.disk.read_at(RegionKind::Backup, base + off, buf)
+            }
+        }
+    }
+
+    fn write(&mut self, w: Which, off: u64, data: &[u8]) -> Result<(), DiskError> {
+        match w {
+            Which::Main(k) => self.disk.write_at(RegionKind::of_file(k), off, data),
+            Which::Backup => {
+                let (slot, _) = self.backup.ok_or(DiskError::Full)?;
+                let (base, cap) = self.disk.backup_payload(slot).ok_or(DiskError::Full)?;
+                if off + data.len() as u64 > cap {
+                    return Err(DiskError::Full);
+                }
+                self.disk.write_at(RegionKind::Backup, base + off, data)
+            }
+        }
+    }
+
+    /// Zeros over `[from, to)` of the file (a gap that must read as zeros).
+    fn zero(&mut self, w: Which, from: u64, to: u64) -> Result<(), DiskError> {
+        match w {
+            Which::Main(k) => self.disk.zero_fill(RegionKind::of_file(k), from, to),
+            Which::Backup => {
+                let zeros = [0u8; 4096];
+                let mut at = from;
+                while at < to {
+                    let n = (to - at).min(zeros.len() as u64) as usize;
+                    self.write(w, at, zeros.get(..n).unwrap_or(&[]))?;
+                    at += n as u64;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn set_size(&mut self, w: Which, size: u64) {
+        match w {
+            Which::Main(k) => self.disk.set_file_size(k, size),
+            Which::Backup => {
+                if let Some((_, s)) = self.backup.as_mut() {
+                    *s = size;
+                }
+            }
+        }
+    }
 }
 
 unsafe extern "C" fn x_open(
@@ -115,6 +231,10 @@ unsafe extern "C" fn x_open(
         return SQLITE_CANTOPEN;
     };
     if with(|_| ()).is_none() {
+        return SQLITE_CANTOPEN;
+    }
+    // The backup file exists only while a slot is attached.
+    if kind == Which::Backup && with(|v| v.backup.is_some()) != Some(true) {
         return SQLITE_CANTOPEN;
     }
     // SAFETY: as above; the object is ours to initialise.
@@ -138,8 +258,11 @@ unsafe extern "C" fn x_delete(
         return SQLITE_IOERR_DELETE;
     };
     let r = with(|v| {
-        v.disk.set_file_size(kind, 0);
-        v.disk.sync()
+        v.set_size(kind, 0);
+        match kind {
+            Which::Main(_) => v.disk.sync(),
+            Which::Backup => Ok(()),
+        }
     });
     match r {
         Some(Ok(())) => SQLITE_OK,
@@ -156,9 +279,7 @@ unsafe extern "C" fn x_access(
     // SAFETY: `name` comes from SQLite.
     let kind = unsafe { name_kind(name) };
     let exists = match kind {
-        Some(k) if flags == SQLITE_ACCESS_EXISTS => {
-            with(|v| v.disk.file_size(k) > 0).unwrap_or(false)
-        }
+        Some(k) if flags == SQLITE_ACCESS_EXISTS => with(|v| v.size_of(k) > 0).unwrap_or(false),
         Some(_) => true,
         None => false,
     };
@@ -255,12 +376,12 @@ unsafe extern "C" fn x_read(
     let out = unsafe { core::slice::from_raw_parts_mut(buf.cast::<u8>(), amt as usize) };
     let off = off as u64;
     let r = with(|v| {
-        let size = v.disk.file_size(kind);
+        let size = v.size_of(kind);
         let avail = size.saturating_sub(off).min(out.len() as u64) as usize;
         let (have, rest) = out.split_at_mut(avail);
         rest.fill(0);
         if avail > 0 {
-            v.disk.read_at(RegionKind::of_file(kind), off, have)?;
+            v.read(kind, off, have)?;
         }
         Ok::<bool, DiskError>(avail == out.len())
     });
@@ -289,14 +410,14 @@ unsafe extern "C" fn x_write(
     let r = with(|v| {
         // A write past the end leaves a gap that reads as zeros, whatever
         // the disk holds there (stale data, or anything after a discard).
-        let size = v.disk.file_size(kind);
+        let size = v.size_of(kind);
         if off > size {
-            v.disk.zero_fill(RegionKind::of_file(kind), size, off)?;
+            v.zero(kind, size, off)?;
         }
-        v.disk.write_at(RegionKind::of_file(kind), off, data)?;
+        v.write(kind, off, data)?;
         let end = off + data.len() as u64;
-        if end > v.disk.file_size(kind) {
-            v.disk.set_file_size(kind, end);
+        if end > v.size_of(kind) {
+            v.set_size(kind, end);
         }
         Ok::<(), DiskError>(())
     });
@@ -316,11 +437,11 @@ unsafe extern "C" fn x_truncate(f: *mut sqlite3_file, size: sqlite3_int64) -> c_
     let size = size as u64;
     let r = with(|v| {
         // Growing by truncate exposes zeros, not what the disk held.
-        let cur = v.disk.file_size(kind);
+        let cur = v.size_of(kind);
         if size > cur {
-            v.disk.zero_fill(RegionKind::of_file(kind), cur, size)?;
+            v.zero(kind, cur, size)?;
         }
-        v.disk.set_file_size(kind, size);
+        v.set_size(kind, size);
         Ok::<(), DiskError>(())
     });
     match r {
@@ -340,7 +461,7 @@ unsafe extern "C" fn x_sync(_f: *mut sqlite3_file, _flags: c_int) -> c_int {
 unsafe extern "C" fn x_file_size(f: *mut sqlite3_file, out: *mut sqlite3_int64) -> c_int {
     // SAFETY: `f` is one of our files.
     let kind = unsafe { file_kind(f) };
-    let size = with(|v| v.disk.file_size(kind)).unwrap_or(0);
+    let size = with(|v| v.size_of(kind)).unwrap_or(0);
     // SAFETY: valid out pointer from SQLite.
     unsafe { *out = size as sqlite3_int64 };
     SQLITE_OK
@@ -450,5 +571,8 @@ mod tests {
         assert_eq!(kind_of(b"urmqtt.db-shm"), None);
         assert_eq!(kind_of(b"other.db"), None);
         assert_eq!(kind_of(b""), None);
+        assert_eq!(which_of(b"urmqtt-backup.db"), Some(Which::Backup));
+        assert_eq!(which_of(b"urmqtt-backup.db-journal"), None);
+        assert_eq!(which_of(b"urmqtt.db"), Some(Which::Main(FileKind::Db)));
     }
 }

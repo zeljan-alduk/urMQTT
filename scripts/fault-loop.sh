@@ -6,6 +6,7 @@
 #
 #   scripts/fault-loop.sh migrate [--tool PATH] [--keep]
 #   scripts/fault-loop.sh grow    [--tool PATH] [--keep]
+#   scripts/fault-loop.sh backup  [--tool PATH] [--keep]
 #
 # migrate: a layout-v1 image with real broker state (devices, retained
 #          messages, a session, 600 telemetry records) is migrated with the
@@ -17,6 +18,12 @@
 #          device stopping after write N. Then at least one partition table
 #          copy must be valid and the layout v1/v2 readable, and growing again
 #          must finish, verify clean, with all 600 telemetry records.
+#
+# backup:  a migrated layout-v2 image with a first in-disk backup (slot 0, the
+#          kernel's backup region added by the tool) and changed data is
+#          backed up again with the device stopping after write N. Then the
+#          first snapshot must still be intact and unchanged in slot 0, verify
+#          must pass, and taking the backup again must finish (seq 2 in slot 1).
 #
 # The cut is clean (the file has no volatile cache): the same as dropping
 # the unflushed writes. The tests in tools/disk/tests/migrate.rs and
@@ -41,7 +48,7 @@ while [[ $# -gt 0 ]]; do
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
-[[ $PROC == migrate || $PROC == grow ]] || { echo "usage: $0 migrate|grow [--tool PATH] [--keep]" >&2; exit 2; }
+[[ $PROC == migrate || $PROC == grow || $PROC == backup ]] || { echo "usage: $0 migrate|grow|backup [--tool PATH] [--keep]" >&2; exit 2; }
 if [[ ! -x $TOOL ]]; then
     (cd "$ROOT" && cargo build --release --locked -q -p urmqtt-disk-tool)
 fi
@@ -56,6 +63,15 @@ head -c 1048576 /dev/zero >"$WORK/esp.img"
 if [[ $PROC == grow ]]; then
     "$TOOL" migrate "$WORK/base.img" --write --rollback-file "$WORK/base.rb" >/dev/null
     truncate -s 192m "$WORK/base.img"
+fi
+if [[ $PROC == backup ]]; then
+    "$TOOL" migrate "$WORK/base.img" --write --rollback-file "$WORK/base.rb" >/dev/null
+    # The first snapshot (adds the backup region), then data the second one will carry.
+    "$TOOL" backup "$WORK/base.img" --write >/dev/null
+    printf 'late-device-1\nlate-device-2\n' >"$WORK/late.txt"
+    "$TOOL" import-devices "$WORK/base.img" "$WORK/late.txt" --write >/dev/null 2>&1
+    "$TOOL" backup-extract "$WORK/base.img" "$WORK/first.sqlite" >/dev/null 2>&1
+    first_crc=$(cksum <"$WORK/first.sqlite")
 fi
 
 fail() { echo "fault-loop: FAIL: $*" >&2; exit 1; }
@@ -79,6 +95,12 @@ for variant in stop tear; do
                 echo "fault-loop: migrate completes with $((n - 1)) write(s) before the fault ($variant)"
                 break
             fi
+        elif [[ $PROC == backup ]]; then
+            if "$TOOL" backup "$img" --write --fault "$spec" >/dev/null 2>&1; then
+                completed=1
+                echo "fault-loop: backup completes with $((n - 1)) write(s) before the fault ($variant)"
+                break
+            fi
         else
             if "$TOOL" grow "$img" --write --fault "$spec" >/dev/null 2>&1; then
                 completed=1
@@ -91,7 +113,19 @@ for variant in stop tear; do
         # 1. A valid disk: one GPT copy valid, layout v1 or v2.
         grep -Eq 'primary valid|backup valid' <<<"$info" || fail "$spec: no valid partition table copy"
         grep -Eq 'data: layout v[12]' <<<"$info" || fail "$spec: neither a v1 nor a v2 layout: $(grep 'data:' <<<"$info")"
-        if [[ $PROC == migrate ]]; then
+        if [[ $PROC == backup ]]; then
+            # The first snapshot is intact and byte-identical, wherever the cut fell.
+            grep -Eq 'backup slot 0: seq 1[ ,].*intact' <<<"$info" || fail "$spec: the first snapshot is not intact: $(grep 'backup' <<<"$info")"
+            "$TOOL" backup-extract "$img" "$WORK/now.sqlite" --slot 0 >/dev/null 2>&1 || fail "$spec: backup-extract of slot 0"
+            [[ $(cksum <"$WORK/now.sqlite") == "$first_crc" ]] || fail "$spec: slot 0 changed"
+            "$TOOL" verify "$img" >/dev/null 2>"$WORK/err" || fail "$spec: verify: $(cat "$WORK/err")"
+            # Taking the backup again finishes, into the other slot.
+            "$TOOL" backup "$img" --write >"$WORK/out" 2>"$WORK/err" || fail "$spec: backup again: $(cat "$WORK/err")"
+            # (Seq 2 in slot 1; a cut after the new header was written leaves seq 2 already, and then seq 3 goes to slot 0.)
+            grep -Eq 'snapshot seq (2 in slot 1|3 in slot 0)' "$WORK/out" || fail "$spec: second backup: $(cat "$WORK/out")"
+            "$TOOL" verify "$img" >/dev/null 2>"$WORK/err" || fail "$spec: verify after the second backup: $(cat "$WORK/err")"
+            [[ $(count_records "$img") == 600 ]] || fail "$spec: telemetry records after backup"
+        elif [[ $PROC == migrate ]]; then
             # 2. Finish.
             cp "$img" "$WORK/resume.img"
             if grep -q 'migration record' <<<"$info"; then
@@ -110,7 +144,7 @@ for variant in stop tear; do
             after=$("$TOOL" info "$WORK/back.img" 2>&1) || fail "$spec: info after rollback"
             grep -q 'data: layout v1' <<<"$after" || fail "$spec: not v1 after rollback"
             "$TOOL" migrate "$WORK/back.img" >/dev/null 2>"$WORK/err" || fail "$spec: dry run after rollback: $(cat "$WORK/err")"
-        else
+        elif [[ $PROC == grow ]]; then
             # 2. Grow again, without the fault.
             "$TOOL" grow "$img" --write >/dev/null 2>"$WORK/err" || fail "$spec: grow again: $(cat "$WORK/err")"
             "$TOOL" verify "$img" >/dev/null 2>"$WORK/err" || fail "$spec: verify after grow: $(cat "$WORK/err")"
@@ -122,4 +156,4 @@ for variant in stop tear; do
     [[ $completed == 1 ]] || fail "the procedure never completed within $MAX writes"
     completed=0
 done
-echo "fault-loop: $PROC: $cases cases, every one a valid disk that finishes (and rolls back, for migrate): ok"
+echo "fault-loop: $PROC: $cases cases, every one a valid disk that finishes (and rolls back, for migrate; keeps the first snapshot, for backup): ok"

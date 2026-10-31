@@ -131,6 +131,21 @@ pub struct Store {
 /// Opens the database: exclusive locking + WAL, defensive mode, integrity
 /// check, migrations, prepared statements.
 pub fn open() -> Result<(Store, OpenInfo)> {
+    open_inner().map_err(|e| match e {
+        // A database file that is not a database, or fails SQLite's own
+        // structural checks, is corruption: the case a backup can mend (S5).
+        StoreError::Sql(ref s) if is_corruption(s.code) => StoreError::Corrupt(format!("{s}")),
+        e => e,
+    })
+}
+
+/// SQLite's "the file is damaged" result codes (SQLITE_CORRUPT and
+/// SQLITE_NOTADB, with their extended forms).
+fn is_corruption(code: i32) -> bool {
+    matches!(code & 0xff, 11 | 26)
+}
+
+fn open_inner() -> Result<(Store, OpenInfo)> {
     let db = Db::open()?;
     db.config_flag(SQLITE_DBCONFIG_DEFENSIVE, true)?;
     db.config_flag(SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;

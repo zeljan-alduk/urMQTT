@@ -259,6 +259,26 @@ impl Ops {
             "g",
         );
         add("storage.ram_bytes", crate::live::store_bytes(), "g");
+        // In-disk database backup (S5): gauges, so a missed datagram costs
+        // nothing. `age_s` is what an alert wants: seconds since the newest
+        // snapshot on the disk (absent while there is none or the clock is
+        // unknown).
+        {
+            let b = &crate::db::BACKUP;
+            add("backup.enabled", b.enabled.load(Ordering::Relaxed), "g");
+            add("backup.snapshots_done", b.done.load(Ordering::Relaxed), "g");
+            add("backup.failed", b.failed.load(Ordering::Relaxed), "g");
+            add("backup.restored", b.restored.load(Ordering::Relaxed), "g");
+            add(
+                "backup.last_bytes",
+                b.last_bytes.load(Ordering::Relaxed),
+                "g",
+            );
+            let last = b.last_unix.load(Ordering::Relaxed);
+            if let (true, Some(now)) = (last > 0, crate::boot::now_unix()) {
+                add("backup.age_s", now.saturating_sub(last), "g");
+            }
+        }
         if let Some(days) = server_cert_days() {
             add("tls.server_cert_days", days.max(0) as u64, "g");
         }

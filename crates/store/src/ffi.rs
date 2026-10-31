@@ -18,6 +18,11 @@ pub struct sqlite3_stmt {
 }
 
 #[repr(C)]
+pub struct sqlite3_backup {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
 pub struct sqlite3_file {
     pub methods: *const sqlite3_io_methods,
 }
@@ -89,12 +94,15 @@ pub struct sqlite3_vfs {
 
 pub const SQLITE_OK: c_int = 0;
 pub const SQLITE_ERROR: c_int = 1;
+pub const SQLITE_BUSY: c_int = 5;
+pub const SQLITE_LOCKED: c_int = 6;
 pub const SQLITE_NOMEM: c_int = 7;
 pub const SQLITE_IOERR: c_int = 10;
 pub const SQLITE_CORRUPT: c_int = 11;
 pub const SQLITE_NOTFOUND: c_int = 12;
 pub const SQLITE_FULL: c_int = 13;
 pub const SQLITE_CANTOPEN: c_int = 14;
+pub const SQLITE_NOTADB: c_int = 26;
 pub const SQLITE_ROW: c_int = 100;
 pub const SQLITE_DONE: c_int = 101;
 pub const SQLITE_IOERR_READ: c_int = SQLITE_IOERR | (1 << 8);
@@ -192,6 +200,16 @@ unsafe extern "C" {
     pub fn sqlite3_extended_errcode(db: *mut sqlite3) -> c_int;
     pub fn sqlite3_changes64(db: *mut sqlite3) -> sqlite3_int64;
     pub fn sqlite3_free(p: *mut c_void);
+    pub fn sqlite3_backup_init(
+        dest: *mut sqlite3,
+        dest_name: *const c_char,
+        src: *mut sqlite3,
+        src_name: *const c_char,
+    ) -> *mut sqlite3_backup;
+    pub fn sqlite3_backup_step(p: *mut sqlite3_backup, pages: c_int) -> c_int;
+    pub fn sqlite3_backup_finish(p: *mut sqlite3_backup) -> c_int;
+    pub fn sqlite3_backup_remaining(p: *mut sqlite3_backup) -> c_int;
+    pub fn sqlite3_backup_pagecount(p: *mut sqlite3_backup) -> c_int;
     pub fn sqlite3_status64(
         op: c_int,
         current: *mut sqlite3_int64,

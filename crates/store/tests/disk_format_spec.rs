@@ -177,6 +177,9 @@ fn superblock_and_region_entries() {
     // A grown disk has extra extents and a higher generation; the legacy
     // flag is set by migration only. Exercise every field.
     l = l.grown(total + 40960, 50, 0).unwrap().unwrap();
+    // Layout v2.1: the backup region carved from the database's tail.
+    l = l.with_backup(0).unwrap();
+    assert_eq!(l.minor, urmqtt_store::layout::MINOR);
     l.flags = urmqtt_store::layout::FLAG_LEGACY_TELEMETRY;
     let b = l.encode();
     let mut regions = Vec::new();
@@ -199,6 +202,7 @@ fn superblock_and_region_entries() {
     e.insert("partitions", le32(12));
     e.insert("align_sectors", le32(4096));
     e.insert("flags", le32(1));
+    e.insert("minor", le32(1));
     e.insert("regions", regions);
     e.insert("crc", crc_of(&b, BLOCK));
     check("superblock", &b, &e, &BTreeMap::new());
@@ -309,6 +313,56 @@ fn size_table() {
     );
     assert_eq!(a.next_slot(), 0);
     assert_eq!(SizeTable { seq: 6, ..a }.next_slot(), 1);
+}
+
+/// A backup snapshot slot's header and the backup control block (S5).
+#[test]
+fn backup_slot_header_and_control_block() {
+    use urmqtt_store::backup::{Control, SlotHeader};
+    let uuid = [0x5a; 16];
+    let h = SlotHeader {
+        seq: 0x0102_0304_0506_0708,
+        created: 1_761_696_000,
+        schema_version: 3,
+        page_size: 4096,
+        page_count: 300,
+        payload_bytes: 300 * 4096,
+        payload_crc: 0xdead_beef,
+    };
+    let b = h.encode(&uuid);
+    let mut e = BTreeMap::new();
+    e.insert("magic", b"URMQBKP1".to_vec());
+    e.insert("seq", le64(h.seq));
+    e.insert("created", le64(h.created));
+    e.insert("uuid", uuid.to_vec());
+    e.insert("schema_version", le32(3));
+    e.insert("page_size", le32(4096));
+    e.insert("page_count", le64(300));
+    e.insert("payload_bytes", le64(300 * 4096));
+    e.insert("payload_crc", le32(0xdead_beef));
+    e.insert("crc", crc_of(&b, BLOCK));
+    check("backup_slot_header", &b, &e, &BTreeMap::new());
+    assert_eq!(SlotHeader::decode(&b, &uuid, 1 << 30), Some(h));
+    // Another disk's snapshot, or one that does not fit, is not valid.
+    assert_eq!(SlotHeader::decode(&b, &[0; 16], 1 << 30), None);
+    assert_eq!(SlotHeader::decode(&b, &uuid, 1000), None);
+
+    let c = Control {
+        seq: 0x1122_3344_5566_7788,
+        restoring: Some((1, 0x99aa_bbcc)),
+    };
+    let b = c.encode(&uuid);
+    let mut e = BTreeMap::new();
+    e.insert("magic", b"URMQBKC1".to_vec());
+    e.insert("seq", le64(c.seq));
+    e.insert("uuid", uuid.to_vec());
+    e.insert("state", le32(1));
+    e.insert("slot", le32(1));
+    e.insert("backup_seq", le64(0x99aa_bbcc));
+    e.insert("crc", crc_of(&b, BLOCK));
+    check("backup_control", &b, &e, &BTreeMap::new());
+    assert_eq!(Control::decode(&b, &uuid), Some(c));
+    assert_eq!(Control::decode(&b, &[1; 16]), None);
 }
 
 #[test]

@@ -453,6 +453,58 @@ fn discard_defaults_to_auto_and_takes_auto_or_off() {
     }
 }
 
+/// S5: `storage.backup_interval_min` (60) and `storage.auto_restore` (true)
+/// are optional; production, which does not list them, gets the defaults.
+#[test]
+fn backup_settings_default_and_are_bounded() {
+    assert_eq!(parse("dev", DEV).unwrap().storage.backup_interval_min, 60);
+    assert!(parse("dev", DEV).unwrap().storage.auto_restore);
+    let prod = parse("prod", PROD).unwrap();
+    assert_eq!(
+        prod.storage.backup_interval_min,
+        BACKUP_INTERVAL_DEFAULT_MIN
+    );
+    assert!(prod.storage.auto_restore, "the default restores");
+    // The bench template turns the backups off.
+    let bench = include_str!("../../../deploy/bench/config.toml");
+    assert_eq!(
+        parse("bench", bench).unwrap().storage.backup_interval_min,
+        0
+    );
+    for ok in [0, 1, 15, BACKUP_INTERVAL_MAX_MIN] {
+        let t = dev_in(
+            "storage",
+            "backup_interval_min",
+            &format!("backup_interval_min = {ok}"),
+        );
+        assert_eq!(parse("dev", &t).unwrap().storage.backup_interval_min, ok);
+    }
+    for bad in [
+        format!("backup_interval_min = {}", BACKUP_INTERVAL_MAX_MIN + 1),
+        "backup_interval_min = -1".to_string(),
+        "backup_interval_min = \"60\"".to_string(),
+        "backup_interval_min = 1.5".to_string(),
+    ] {
+        assert_rejected(
+            "dev",
+            &dev_in("storage", "backup_interval_min", &bad),
+            "backup_interval_min",
+        );
+    }
+    for (line, want) in [
+        ("auto_restore = false", false),
+        ("auto_restore = true", true),
+    ] {
+        let t = dev_in("storage", "auto_restore", line);
+        assert_eq!(parse("dev", &t).unwrap().storage.auto_restore, want);
+    }
+    assert_rejected(
+        "dev",
+        &dev_in("storage", "auto_restore", "auto_restore = \"yes\""),
+        "auto_restore",
+    );
+}
+
 /// O3: a production configuration must choose the medium explicitly (no
 /// silent default), while dev and old configs keep the disk as the default.
 #[test]
