@@ -5,8 +5,8 @@
 use limine::BaseRevision;
 use limine::request::{
     BootloaderInfoRequest, DateAtBootRequest, DtbRequest, ExecutableAddressRequest,
-    ExecutableCmdlineRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest,
-    MemmapRequest, ModulesRequest, MpRequest, Request, RsdpRequest,
+    ExecutableCmdlineRequest, ExecutableFileRequest, FirmwareTypeRequest, FramebufferRequest,
+    HhdmRequest, MemmapRequest, ModulesRequest, MpRequest, Request, RsdpRequest,
 };
 use limine::{RequestsEndMarker, RequestsStartMarker};
 
@@ -72,6 +72,10 @@ pub(crate) static EXECUTABLE_ADDRESS: ExecutableAddressRequest = ExecutableAddre
 #[used]
 #[unsafe(link_section = ".requests")]
 static MODULES: ModulesRequest = ModulesRequest::new();
+/// BIOS or UEFI (the diagnostic reports it).
+#[used]
+#[unsafe(link_section = ".requests")]
+pub(crate) static FIRMWARE: FirmwareTypeRequest = FirmwareTypeRequest::new();
 /// Where the kernel was loaded from: identifies the boot disk (S1).
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -212,6 +216,10 @@ extern "C" fn urmqtt_kmain() -> ! {
     // H7 lower bound: the image cannot run before it was built, so an
     // earlier clock (an empty CMOS battery, a broken RTC) is unknown time,
     // and everything that needs the time fails closed.
+    crate::diag::note_rtc(
+        DATE_AT_BOOT.response().map(|d| d.timestamp.max(0) as u64),
+        BUILD_UNIX,
+    );
     match DATE_AT_BOOT.response().map(|d| d.timestamp.max(0) as u64) {
         // `black_box`: a build without SOURCE_DATE_EPOCH has a bound of 0.
         Some(t) if t >= core::hint::black_box(BUILD_UNIX) => {
@@ -232,6 +240,7 @@ extern "C" fn urmqtt_kmain() -> ! {
     urmqtt_tls::set_clock(now_unix);
     console::log_framebuffer();
     mem.log_summary();
+    crate::diag::note_memory(&mem);
     if options.ignored > 0 {
         warn!("ignored {} kernel command line option(s)", options.ignored);
     }
@@ -262,8 +271,14 @@ extern "C" fn urmqtt_kmain() -> ! {
     // Live mode (O3): the RAM store comes out of the same RAM as the heap, so
     // the heap shrinks (to a power of two) if both do not fit.
     let ram_bytes = mem.ram_bytes();
-    let storage = match urmqtt_config::CONFIG.storage.mode.backing(options.live) {
+    // The diagnostic entry never uses a data store, whatever storage.mode says.
+    let storage = match urmqtt_config::CONFIG
+        .storage
+        .mode
+        .backing(options.live && !options.diag)
+    {
         Ok(urmqtt_config::Backing::Disk) => StoragePlan::Disk,
+        Ok(urmqtt_config::Backing::Ram) if options.diag => StoragePlan::Disk,
         Ok(urmqtt_config::Backing::Ram) => {
             let cfg = &urmqtt_config::CONFIG;
             match urmqtt_store::ram::plan(
@@ -406,7 +421,15 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
             s.ram_bytes >> 20
         )),
     };
-    devices::set_install_mode(s.options.install);
+    if s.options.diag && !urmqtt_config::CONFIG.storage.diagnostic {
+        fatal(
+            "the diagnostic entry was requested by the boot menu, but this image's storage.diagnostic is false: \
+             set storage.diagnostic = true in deploy/<env>/config.toml and rebuild, or choose another entry",
+        );
+    }
+    // The diagnostic shares install mode's probe: every disk is kept as a
+    // candidate and none is chosen, opened for writing or formatted.
+    devices::set_install_mode(s.options.install || s.options.diag);
     // PCIe and virtio (M6): all device MMIO must be mapped before the lock.
     if let Some(p) = s.platform.as_ref() {
         match devices::probe(p, &s.boot_entropy) {
@@ -468,6 +491,9 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     );
 
     tick_selftest(timer_line);
+    if s.options.diag {
+        crate::diag::run(&s.options, s.cpus, &s.features, s.medium);
+    }
     if s.options.install {
         crate::install::run(
             s.install_image,
@@ -702,7 +728,7 @@ pub(crate) fn fatal_fmt(args: core::fmt::Arguments<'_>) -> ! {
 
 /// The image's build time (`SOURCE_DATE_EPOCH`, the commit time): the
 /// wall clock's lower bound (H7). 0 if the build did not set it.
-const BUILD_UNIX: u64 = match option_env!("SOURCE_DATE_EPOCH") {
+pub(crate) const BUILD_UNIX: u64 = match option_env!("SOURCE_DATE_EPOCH") {
     Some(s) => parse_u64(s),
     None => 0,
 };

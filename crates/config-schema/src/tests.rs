@@ -810,3 +810,13 @@ fn acl_cannot_grant_the_system_namespace() {
         );
     }
 }
+
+/// O4 (ADR-063): `storage.diagnostic` is off unless the configuration says so.
+#[test]
+fn diagnostic_entry_is_off_by_default() {
+    assert!(parse("dev", DEV).unwrap().storage.diagnostic);
+    let off = DEV.replace("diagnostic = true", "");
+    assert!(!parse("dev", &off).unwrap().storage.diagnostic);
+    let bad = DEV.replace("diagnostic = true", "diagnostic = \"yes\"");
+    assert!(parse("dev", &bad).is_err());
+}

@@ -175,6 +175,8 @@ pub struct Storage {
     pub mode: StorageMode,
     /// Share of RAM reserved for the in-memory store (live mode), percent.
     pub ram_percent: u32,
+    /// The ISO's diagnostic boot entry may run (O4, ADR-063).
+    pub diagnostic: bool,
     pub sqlite_heap_mb: u32,
     pub telemetry_topics: &'static [&'static str],
     pub retention_days: u32,

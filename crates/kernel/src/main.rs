@@ -38,6 +38,8 @@ mod dataplane;
 mod db;
 #[cfg(target_os = "none")]
 mod devices;
+#[cfg(target_os = "none")]
+mod diag;
 #[cfg(all(target_os = "none", feature = "selftest"))]
 mod dpbench;
 #[cfg(target_os = "none")]

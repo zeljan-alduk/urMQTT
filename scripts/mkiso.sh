@@ -6,6 +6,7 @@
 #   scripts/mkiso.sh --universal --kernel-aarch64 ELF --kernel-x86_64 ELF --out ISO
 #                    [--cmdline STR] [--esp-out IMG] [--disk-out IMG]
 #                    [--install-cmdline STR] [--install-default]
+#                    [--diag-cmdline STR] [--diag-default] [--no-diag]
 #
 # --universal (X10, ADR-043) builds ONE hybrid ISO for aarch64 UEFI, x86_64
 # UEFI and x86_64 BIOS: both kernels (urmqtt-<arch>.elf, ${ARCH} spelling of
@@ -29,7 +30,16 @@
 #   1. urMQTT                                   cmdline "live" (O3, RAM-backed;
 #                                               default, after 10 s)
 #   2. Install urMQTT on this machine's disk    cmdline "install", module esp.img
+#   3. Diagnostic: hardware detection and benchmarks   cmdline "diag" (O4,
+#                                               ADR-063; read-only except a
+#                                               confirmed write test in
+#                                               unallocated space)
 # Both the kernel and the module are pinned by blake2b, the editor is off.
+# The diagnostic entry runs only if the baked configuration allows it
+# (storage.diagnostic = true); otherwise it stops with the reason on screen.
+# --diag-cmdline replaces its command line (dev tests add options after
+# "diag"); --diag-default makes it the default entry with no timeout;
+# --no-diag leaves the entry out.
 # --install-cmdline replaces the install entry's command line (dev tests add
 # options after "install"); --install-default makes it the default entry
 # with no timeout (unattended smoke tests).
@@ -48,7 +58,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 ARCH=${URMQTT_ARCH:-aarch64}
 KERNEL="" OUT="" CMDLINE="" ESP_OUT="" INSTALL_CMDLINE="install" INSTALL_DEFAULT=0
-UNIVERSAL=0 KERNEL_A64="" KERNEL_X86="" DISK_OUT="" LIVE=""
+UNIVERSAL=0 KERNEL_A64="" KERNEL_X86="" DISK_OUT="" LIVE="" DIAG_CMDLINE="diag" DIAG_DEFAULT=0 NO_DIAG=0
 while [[ $# -gt 0 ]]; do
     case $1 in
         --arch) ARCH=$2; shift 2 ;;
@@ -62,6 +72,9 @@ while [[ $# -gt 0 ]]; do
         --esp-out) ESP_OUT=$2; shift 2 ;;
         --install-cmdline) INSTALL_CMDLINE=$2; shift 2 ;;
         --install-default) INSTALL_DEFAULT=1; shift ;;
+        --diag-cmdline) DIAG_CMDLINE=$2; shift 2 ;;
+        --diag-default) DIAG_DEFAULT=1; shift ;;
+        --no-diag) NO_DIAG=1; shift ;;
         --live) LIVE=1; shift ;;
         --no-live) LIVE=0; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -80,7 +93,7 @@ fi
 for tool in mformat mmd mcopy xorriso python3; do
     command -v "$tool" >/dev/null || { echo "error: $tool not found (brew install mtools xorriso / apt install mtools xorriso)" >&2; exit 1; }
 done
-if [[ "$CMDLINE$INSTALL_CMDLINE" == *$'\n'* ]]; then
+if [[ "$CMDLINE$INSTALL_CMDLINE$DIAG_CMDLINE" == *$'\n'* ]]; then
     echo "error: command line must be a single line" >&2; exit 2
 fi
 
@@ -185,7 +198,9 @@ if [[ $UNIVERSAL -eq 1 ]]; then
     DISK_HASH=$(blake2b "$TMP/disk.img")
     # `default_entry` counts the entries visible to the running architecture
     # (verified against Limine 12.9.4): 1 is urMQTT, 2 the installer.
-    if [[ $INSTALL_DEFAULT -eq 1 ]]; then
+    if [[ $DIAG_DEFAULT -eq 1 ]]; then
+        MENU_TIMEOUT=0 DEFAULT_ENTRY=3
+    elif [[ $INSTALL_DEFAULT -eq 1 ]]; then
         MENU_TIMEOUT=0 DEFAULT_ENTRY=2
     else
         MENU_TIMEOUT=${URMQTT_MENU_TIMEOUT:-10} DEFAULT_ENTRY=1
@@ -200,6 +215,9 @@ if [[ $UNIVERSAL -eq 1 ]]; then
         menu_style
         entries urMQTT "$LIVE_CMDLINE" ""
         entries "Install urMQTT on this machine's disk" "$INSTALL_CMDLINE" "boot():/disk.img#$DISK_HASH"
+        if [[ $NO_DIAG -eq 0 ]]; then
+            entries "Diagnostic: hardware detection and benchmarks" "$DIAG_CMDLINE" ""
+        fi
     } >"$TMP/iso-limine.conf"
     # The ISO's own EFI system partition (El Torito, and the GPT partition of
     # the hybrid image) is what UEFI firmware boots from, so it carries the
@@ -344,7 +362,9 @@ python3 -I "$ROOT/scripts/fat-stamp.py" "$ESP" "$SOURCE_DATE_EPOCH" >/dev/null
 # Limine treats the ISO9660 volume as the boot volume on CD boots, so the
 # kernel lives on the ISO filesystem too, with the menu config.
 ESP_HASH=$(python3 -I -c 'import hashlib,sys; print(hashlib.blake2b(open(sys.argv[1],"rb").read()).hexdigest())' "$ESP")
-if [[ $INSTALL_DEFAULT -eq 1 ]]; then
+if [[ $DIAG_DEFAULT -eq 1 ]]; then
+    MENU_TIMEOUT=0 DEFAULT_ENTRY=3
+elif [[ $INSTALL_DEFAULT -eq 1 ]]; then
     MENU_TIMEOUT=0 DEFAULT_ENTRY=2
 else
     MENU_TIMEOUT=${URMQTT_MENU_TIMEOUT:-10} DEFAULT_ENTRY=1
@@ -373,6 +393,16 @@ fi
     echo "    path: boot():/boot/urmqtt#$HASH"
     printf '    cmdline: %s\n' "$INSTALL_CMDLINE"
     echo "    module_path: boot():/esp.img#$ESP_HASH"
+    if [[ $NO_DIAG -eq 0 ]]; then
+        echo
+        echo "/Diagnostic: hardware detection and benchmarks"
+        echo "    protocol: limine"
+        echo "    path: boot():/boot/urmqtt#$HASH"
+        if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then
+            printf '    resolution: %s\n' "$URMQTT_RESOLUTION"
+        fi
+        printf '    cmdline: %s\n' "$DIAG_CMDLINE"
+    fi
 } >"$TMP/iso-limine.conf"
 TZ=UTC touch -t "$STAMP" "$TMP/iso-limine.conf"
 mkdir -p "$TMP/iso/EFI/BOOT" "$TMP/iso/boot" "$(dirname "$OUT")"

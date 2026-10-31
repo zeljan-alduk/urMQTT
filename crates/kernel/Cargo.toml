@@ -29,6 +29,7 @@ urmqtt-tcp = { path = "../tcp" }
 limine = "0.6.5"
 urmqtt-arch = { path = "../arch" }
 urmqtt-control = { path = "../control" }
+urmqtt-diag = { path = "../diag" }
 urmqtt-sync = { path = "../sync" }
 urmqtt-log = { path = "../log" }
 urmqtt-mm = { path = "../mm" }

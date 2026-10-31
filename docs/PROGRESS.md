@@ -1459,3 +1459,24 @@ TCG numbers (`crypto-bench` 557 MiB/s GCM, 300 SHA-256, 151 CRC) are emulation a
 - SHA-NI and the whole x86 set are not measured on real x86 hardware; the enable-by-default rule of X86-PLAN X9 ("only with a real-hardware number") is not met yet. They are on because the software is never faster and the KATs pass.
 - The 20 ms stalls of the VPS are not explained; the step name in the report is there to find them.
 - Records/s and a handshake bench per implementation (`make bench ARCH=x86_64` table) not run.
+
+## O4 — Diagnostic boot entry (2026-10-31)
+
+PLAN §O4; ADR-063. **QEMU only: aarch64 under HVF, x86_64 q35+OVMF and pc+SeaBIOS under TCG. Not run on KVM, on the Contabo VPS or on hardware.**
+
+**Done**
+
+- **A third ISO menu entry**, *Diagnostic: hardware detection and benchmarks* (`diag` on the command line; `mkiso.sh --diag-cmdline/--diag-default/--no-diag`), honoured only if `storage.diagnostic = true` (off by default; the dev template says true).
+- **Detection screen** (CPU, crypto units and the active backend, RAM, PCI, disks, NICs, time source, RTC, firmware, hypervisor) and **measurements** (RAM MiB/s and the pointer-chase latency curve, crypto and a TLS handshake estimate, disk sequential read and random 4 KiB IOPS with percentiles, and a guarded sequential write), drawn as an ALDO TECH dashboard on the framebuffer with a progress footer, and as one `URMQTT-DIAG-JSON` line on the serial port. The screen stays; a key reboots.
+- **Write guard:** only unallocated space (partitions and the data layout's region table subtracted), never the first or last MiB, a typed `WIPE` for a blank or foreign disk, every request re-checked against the free extents, the area zeroed afterwards. An installed disk has no free space under the installer's layout, so its write test is skipped and says why.
+- New crate `urmqtt-diag` (pure, no dependencies), `urmqtt_tls::probe`, framebuffer drawing primitives, polled serial and PS/2 input, `storage.diagnostic`.
+
+**Tests**
+
+- Host (`cargo test --workspace`): 42 in `urmqtt-diag` (percentiles, rates, formatting, bar scaling, the free-space computation including a sweep proving no free extent overlaps a partition or leaves the guards, the write-guard decision table, JSON escaping and shape, PS/2 decoding, the line editor, the dashboard drawn inside the screen at nine sizes), the command-line words, `storage.diagnostic`, the framebuffer primitives, the TLS probes.
+- Smoke (`SMOKE_ONLY=diag scripts/smoke.sh --arch universal`, 12 checks): on aarch64 (HVF), x86_64 UEFI and BIOS (TCG), format a disk, boot the diagnostic with it attached, check the JSON (`scripts/diag-check.py`) and that the installed disk is byte-identical; a blank disk without a confirmation stays untouched; with the dev confirmation word the write test runs, verifies and leaves the disk zeroed.
+- Looked at on x86_64 UEFI (a QEMU screendump at 1280x800): panels, bars and the confirmation prompt render as designed.
+
+**Skipped**
+
+- The full smoke suites (by instruction), a screendump on aarch64, the PS/2 path (the typed confirmation was exercised through the dev switch, not through QEMU's keyboard), KVM and hardware.

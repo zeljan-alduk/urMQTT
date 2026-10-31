@@ -48,6 +48,7 @@ operator_ids = ["operator"]       # the only identities that read $SYS/ and use 
 #   "ram"   always RAM, whatever the boot medium (a diskless appliance).
 mode = "disk"
 ram_percent = 10                  # auto/ram: share of RAM for the in-memory data store (2..=50)
+diagnostic = false                 # true: the ISO's Diagnostic entry may run (hardware detection and benchmarks; disk writes only in unallocated space after a typed confirmation)
 sqlite_heap_mb = 8                # sized for a 64 MB VM; raise with RAM (ADR-008)
 telemetry_topics = ["devices/+/telemetry/#"]
 retention_days = 30

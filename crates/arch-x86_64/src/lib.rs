@@ -59,6 +59,8 @@ pub mod power;
 #[cfg(target_os = "none")]
 pub mod prim;
 #[cfg(target_os = "none")]
+pub mod ps2;
+#[cfg(target_os = "none")]
 pub mod serial;
 #[cfg(target_os = "none")]
 pub mod time;

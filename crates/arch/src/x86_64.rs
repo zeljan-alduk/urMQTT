@@ -100,13 +100,20 @@ pub mod power {
 /// The 16550 UART at COM1 (x86 only).
 #[cfg(target_os = "none")]
 pub mod serial {
-    pub use super::imp::serial::{COM1, flush, init, write_byte, write_bytes};
+    pub use super::imp::serial::{COM1, flush, init, read_byte, write_byte, write_bytes};
+}
+
+/// The PS/2 keyboard controller (x86 only; the diagnostic prompt, O4).
+#[cfg(target_os = "none")]
+pub mod ps2 {
+    pub use super::imp::ps2::poll;
 }
 
 /// CPU features.
 pub mod features {
     pub use super::imp::features::{
         BASELINE_ECX, Census, Features, IdRegs, Identity, Missing, baseline_missing,
+        family_model_stepping,
     };
 
     /// Reads the executing CPU's CPUID leaves and XCR0 (after

@@ -1319,9 +1319,90 @@ live_suite() {
     fi
 }
 
+# O4 (ADR-063): the ISO's third entry, the diagnostic. It boots from the ISO
+# (a CD) with disks attached, prints one JSON document on the serial port, and
+# (dev, smoke) powers off. Checked: the keys and sane values (diag-check.py),
+# that an installed disk stays byte-identical (nothing is written: no free
+# space), that a blank disk stays untouched without a confirmation, and that
+# a confirmed write test (dev: diag-confirm=WIPE) runs only on the blank disk
+# and leaves it zeroed again.
+DIAG_PATTERNS=("^URMQTT DIAG START" "^URMQTT-DIAG-JSON \{\"urmqtt_diag\":1," "^URMQTT DIAG DONE$"
+    "NOT:^URMQTT READY$" "NOT:FAILED" "$NO_FAULT")
+
+# diag_run <kind> <accel> <log> <iso> <disk>: boots the diagnostic with <disk> attached.
+diag_run() {
+    local kind=$1 accel=$2 log=$3 iso=$4 disk=$5
+    u_run "$kind" "$accel" "$log" iso "$iso" \
+        -- -drive "if=none,id=t0,file=$disk,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile=
+}
+
+# diag_check <name> <log> <status> <disk-state> <write> [extra patterns...]
+diag_check() {
+    local name=$1 log=$2 status=$3 state=$4 write=$5
+    shift 5
+    python3 -I "$ROOT/scripts/diag-check.py" "$log" --disk-state "$state" --write "$write" >>"$log" 2>&1 || true
+    check "$name" "$log" "$status" "${DIAG_PATTERNS[@]}" "diag-json ok: disk $state, seq_write $write" "$@"
+}
+
+universal_diag() {
+    local iso="$OUT/universal-diag.iso" row
+    mkuniversal "$iso" "smoke" --diag-cmdline "diag smoke diag-confirm-timeout=2" --diag-default
+    local iso_yes="$OUT/universal-diag-confirm.iso"
+    mkuniversal "$iso_yes" "smoke" --diag-cmdline "diag smoke diag-confirm=WIPE" --diag-default
+    local rows=("aa64|aa64|hvf|aa64" "x86-uefi|x86-uefi|tcg|x86" "x86-bios|x86-bios|tcg|x86")
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name kind accel _ <<<"$row"
+        [[ -z "${SMOKE_DIAG:-}" || $name == "$SMOKE_DIAG" ]] || continue
+        [[ $kind == aa64 && " $ACCELS " != *" $accel "* ]] && continue
+        # An installed disk: the raw boot image booted once creates the data
+        # partition and formats the store.
+        local t="$OUT/universal-diag-$name.img" log status=0 before after
+        rm -f "$t"
+        cp "$iso.disk" "$t"
+        truncate -s 64m "$t"
+        log="$OUT/universal-diag-$name-format.log"
+        u_run "$kind" "$accel" "$log" disk "$t" || status=$?
+        check "universal-diag: format the test disk [$name]" "$log" "$status" "storage: data disk formatted" "^URMQTT READY$"
+        before=$(shasum -a 256 "$t" | cut -d' ' -f1)
+        log="$OUT/universal-diag-$name-installed.log" status=0
+        diag_run "$kind" "$accel" "$log" "$iso" "$t" || status=$?
+        after=$(shasum -a 256 "$t" | cut -d' ' -f1)
+        [[ $before == "$after" ]] || echo "A DISK WAS WRITTEN" >>"$log"
+        diag_check "universal-diag: installed disk, read-only, byte-identical [$name]" "$log" "$status" installed skipped \
+            "\"reason\":\"no unallocated space" "contents installed" "NOT:A DISK WAS WRITTEN"
+        # A blank disk, no confirmation typed: nothing is written.
+        local b="$OUT/universal-diag-$name-blank.img"
+        rm -f "$b"
+        truncate -s 64m "$b"
+        before=$(shasum -a 256 "$b" | cut -d' ' -f1)
+        log="$OUT/universal-diag-$name-blank.log" status=0
+        diag_run "$kind" "$accel" "$log" "$iso" "$b" || status=$?
+        after=$(shasum -a 256 "$b" | cut -d' ' -f1)
+        [[ $before == "$after" ]] || echo "A DISK WAS WRITTEN" >>"$log"
+        diag_check "universal-diag: blank disk without confirmation is not written [$name]" "$log" "$status" blank skipped \
+            "Type WIPE \+ Enter to write" "not confirmed on the keyboard" "NOT:A DISK WAS WRITTEN"
+        # Confirmed (dev test seam): the write test runs, verifies, and zeroes its area.
+        log="$OUT/universal-diag-$name-confirmed.log" status=0
+        diag_run "$kind" "$accel" "$log" "$iso_yes" "$b" || status=$?
+        after=$(shasum -a 256 "$b" | cut -d' ' -f1)
+        [[ $before == "$after" ]] || echo "THE TEST AREA WAS NOT ZEROED" >>"$log"
+        diag_check "universal-diag: confirmed write test on the blank disk [$name]" "$log" "$status" blank done \
+            "sequential write [0-9]+ MiB/s" "NOT:THE TEST AREA WAS NOT ZEROED"
+    done
+}
+
 # SMOKE_ONLY=live: just the live-mode scenarios of this architecture.
 if [[ ${SMOKE_ONLY:-} == live && $ARCH != universal ]]; then
     live_suite
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=diag (universal): only the diagnostic scenarios; SMOKE_DIAG=<aa64|x86-uefi|x86-bios>
+# limits which machine runs them.
+if [[ ${SMOKE_ONLY:-} == diag && $ARCH == universal ]]; then
+    universal_diag
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit
@@ -1340,6 +1421,7 @@ if [[ $ARCH == universal ]]; then
     universal_iso
     universal_raw
     universal_install
+    universal_diag
     if command -v mosquitto_pub >/dev/null; then
         # One ISO, three machines, no disk.
         URMQTT_MENU_TIMEOUT=0 mkuniversal "$OUT/universal-live.iso" "serve"
