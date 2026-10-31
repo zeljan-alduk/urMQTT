@@ -368,7 +368,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     // Power-on self-test of the backends sealed in stage 1 (X0b), before
     // anything uses them: fail closed.
     match urmqtt_tls::kat::run() {
-        Ok(()) if urmqtt_store::crc::crc32c(b"123456789") == 0xe306_9283 => info!(
+        Ok(()) if urmqtt_store::crc::kat() => info!(
             "crypto: known-answer tests passed (AES-128-GCM, ChaCha20-Poly1305, SHA-256, HMAC-SHA-256, CRC-32C)"
         ),
         Ok(()) => fatal("crypto: CRC-32C known-answer test failed"),
@@ -448,6 +448,24 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         #[cfg(not(feature = "selftest"))]
         warn!("crypto-bench: not in this image (built without the selftest feature)");
     }
+
+    // Where a handshake spends its time on this machine (X9), in
+    // microseconds, so a real VPS's log shows it. The estimate also sets the
+    // watchdog's handshake budget (ADR-071).
+    let profile = urmqtt_tls::bench::run(uptime_ns);
+    info!("crypto-profile: {profile}");
+    let hs_budget = crate::watchdog::calibrate(profile.handshake_ns());
+    info!(
+        "watchdog: handshake budget {hs_budget} ms ({}), other handlers {} ms, stuck-core reset at {} ms",
+        if urmqtt_config::CONFIG.watchdog.handshake_budget_ms == 0 {
+            "calibrated"
+        } else {
+            "configured"
+        },
+        urmqtt_config::CONFIG.watchdog.handler_budget_ms,
+        crate::watchdog::STUCK_MS
+            .max(u64::from(urmqtt_config::CONFIG.watchdog.handler_budget_ms) * 100)
+    );
 
     tick_selftest(timer_line);
     if s.options.install {
@@ -546,6 +564,9 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
 
     if s.options.db_test == Some(crate::cmdline::DbTest::Watchdog) {
         crate::watchdog::self_test();
+    }
+    if s.options.db_test == Some(crate::cmdline::DbTest::WatchdogHandshake) {
+        crate::watchdog::self_test_handshake();
     }
     if live {
         crate::live::banner();

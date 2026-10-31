@@ -155,6 +155,9 @@ check() {
 scenario() {
     local name=$1 cmdline=$2 acpi=$3
     shift 3
+    # SMOKE_SCENARIOS=<regex>: run only the scenarios whose name matches (dev
+    # shortcut, e.g. 'crypto|watchdog'); unset runs them all.
+    [[ -z ${SMOKE_SCENARIOS:-} || $name =~ $SMOKE_SCENARIOS ]] || return 0
     local iso="$OUT/$name.raw"
     mkimg "$iso" "$cmdline"
     for accel in $ACCELS; do
@@ -175,6 +178,7 @@ scenario() {
 service() {
     local name=$1 cmdline=$2 port=$3 ready=$4
     shift 4
+    [[ -z ${SMOKE_SCENARIOS:-} || $name =~ $SMOKE_SCENARIOS ]] || return 0
     local client=()
     while [[ $# -gt 0 && $1 != -- ]]; do
         client+=("$1")
@@ -1420,10 +1424,14 @@ DEV_OK=("pci: ECAM 0xe0000000 buses 0-255" "virtio-blk" "virtio-net" "virtio-rng
 DB_OK=("storage: data disk formatted \(was blank\)" "db: sqlite 3\.[0-9]+\.[0-9]+ on the data disk: WAL, exclusive locking, quick_check ok"
     "telemetry: log recovered in [0-9]+ ms: 0 record\(s\)"
     "db: restored 0 retained" "db: DB core is cpu 3" "db: worker running on cpu 3")
-# No hardware backends are built for x86 yet (X9): the portable code runs.
-DISPATCH_OK=("cpu dispatch: detected .*, disabled none"
-    "crypto: aes-gcm=soft ghash=soft chacha=soft sha256=soft crc32c=table toeplitz=bitwise"
-    "crypto: known-answer tests passed \(AES-128-GCM, ChaCha20-Poly1305, SHA-256, HMAC-SHA-256, CRC-32C\)")
+# X9: AES-NI, PCLMULQDQ, SHA-NI and SSE4.2 CRC (QEMU's TCG CPU offers them
+# all); the known-answer tests, long vectors included, pass on them. The
+# boot also prints the handshake profile and the calibrated watchdog budget.
+DISPATCH_OK=("cpu dispatch: detected [a-z0-9 ]*aes pmull sha2 crc32, disabled none"
+    "crypto: aes-gcm=aesni ghash=pclmulqdq chacha=sse2 sha256=sha-ni crc32c=sse4.2 toeplitz=bitwise"
+    "crypto: known-answer tests passed \(AES-128-GCM, ChaCha20-Poly1305, SHA-256, HMAC-SHA-256, CRC-32C\)"
+    "crypto-profile: x25519-base=[0-9]+\.[0-9]+us .*ecdsa-verify=[0-9]+\.[0-9]+us .* => handshake~[0-9]+\.[0-9]+us \([0-9]+% public-key\)"
+    "watchdog: handshake budget [0-9]+ ms \(calibrated\), other handlers 10 ms, stuck-core reset at 1000 ms")
 SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordered pairs ping-pong ok"
     "smp: 4/4 cpus ticking on their own timer")
 
@@ -1461,8 +1469,11 @@ for accel in $ACCELS; do
     fi
 done
 scenario x86-crypto-soft "smoke cpu-disable=aes,pmull,sha2,crc32" on \
-    "disabled aes pmull sha2 crc32" "crypto: aes-gcm=soft ghash=soft chacha=soft sha256=soft crc32c=table" \
+    "disabled aes pmull sha2 crc32" "crypto: aes-gcm=soft ghash=soft chacha=sse2 sha256=soft crc32c=table" \
     "crypto: known-answer tests passed" "^URMQTT READY$" "$NO_FAULT"
+scenario x86-crypto-bench "smoke test=crypto-bench" on \
+    "crypto-bench: AES-128-GCM [0-9]+ MiB/s, ChaCha20-Poly1305 [0-9]+ MiB/s, SHA-256 [0-9]+ MiB/s, CRC-32C [0-9]+ MiB/s.*aes-gcm=aesni" \
+    "^URMQTT READY$" "$NO_FAULT"
 scenario x86-simd-irq "smoke test=simd-irq" on \
     "simd-irq: [0-9]+ known-answer rounds on 4 cores in 10 s with [0-9]+ IPIs and the tick: 0 mismatches" \
     "^URMQTT READY$" "$NO_FAULT"
@@ -1485,7 +1496,9 @@ DB_OK=("storage: data disk formatted \(was blank\)" "db: sqlite 3\.[0-9]+\.[0-9]
 # known-answer tests pass on the chosen backends before anything uses them.
 DISPATCH_OK=("cpu dispatch: detected [a-z0-9 ]*aes pmull[a-z0-9 ]*, disabled none"
     "crypto: aes-gcm=armv8-aes ghash=armv8-pmull chacha=neon sha256=armv8-sha2 crc32c=armv8-crc toeplitz=bitwise"
-    "crypto: known-answer tests passed \(AES-128-GCM, ChaCha20-Poly1305, SHA-256, HMAC-SHA-256, CRC-32C\)")
+    "crypto: known-answer tests passed \(AES-128-GCM, ChaCha20-Poly1305, SHA-256, HMAC-SHA-256, CRC-32C\)"
+    "crypto-profile: x25519-base=[0-9]+\.[0-9]+us .*ecdsa-verify=[0-9]+\.[0-9]+us .* => handshake~[0-9]+\.[0-9]+us \([0-9]+% public-key\)"
+    "watchdog: handshake budget [0-9]+ ms \(calibrated\), other handlers 10 ms, stuck-core reset at 1000 ms")
 SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordered pairs ping-pong ok"
     "smp: 4/4 cpus ticking on their own timer")
 
@@ -1695,8 +1708,13 @@ scenario db-bench "smoke test=db-bench" on \
     "db-bench: 5000 inserts in 50 transactions: [0-9]+ ops/s" "5100 rows verified" "^URMQTT READY$" "$NO_FAULT"
 # M16: a handler overrunning its budget is reported from the tick.
 scenario watchdog "smoke test=watchdog" on \
-    "watchdog: core 0 self-test handler for conn 42 over budget: [0-9]+ ms > 10 ms \(action: Log\)" \
+    "watchdog: core 0 self-test handler \(step -\) for conn 42 over budget: [0-9]+ ms > 10 ms \(action: Log" \
     "^URMQTT READY$" "$NO_FAULT"
+# ADR-071: a handshake step has a budget of its own. The self-test spends half
+# of it (not reported although far over the ordinary 10 ms), then overruns it.
+scenario watchdog-handshake "smoke test=watchdog-handshake" on \
+    "watchdog: core 0 handshake handler \(step -\) for conn 43 over budget: [0-9]+ ms > ([5-9][0-9]|[1-9][0-9]{2}) ms \(action: Log" \
+    "NOT:conn 43 over budget: [0-9]+ ms > 10 ms" "^URMQTT READY$" "$NO_FAULT"
 db_crash
 log_crash
 log_tear

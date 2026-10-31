@@ -502,7 +502,8 @@ error: invalid configuration deploy/bad/config.toml:
 | `storage.refuse_on_corruption` | bool | Refuse to serve when `PRAGMA quick_check` fails (false only in `dev`) |
 | `observability.log_level` | `error`…`trace` | |
 | `observability.syslog_udp`, `metrics_udp` | `""` or `"a.b.c.d:port"` | Private syslog and statsd collectors |
-| `watchdog.handler_budget_ms` | 1–10 000 | Per-handler time budget |
+| `watchdog.handler_budget_ms` | 1–10 000 | Time budget of an ordinary handler |
+| `watchdog.handshake_budget_ms` | 0, 1–900 | Budget of a TLS handshake step; 0 (default) = 10x the handshake cost measured at boot, 50–500 ms (ADR-071) |
 | `watchdog.action` | `log` \| `drop` \| `reset` | What happens on overrun (ADR-035); a core stuck for 100 budgets always resets |
 
 ### Configuration examples

@@ -1407,3 +1407,55 @@ PLAN §O3; ADR-061 (selection), ADR-062 (the RAM store). **QEMU only: aarch64 un
 **Skipped (scope cut for this deploy; the nightly full run covers them)**
 
 - The full aarch64, x86_64 and universal smoke suites with the live changes (a first full run was stopped), the fault/W^X/db/crypto scenarios, the mqtt-persist retained-across-restart check on a disk boot after this change, aarch64 under TCG, `make dist`, `make repro`. `universal_iso` and `iso_as_cd` expectations were updated (first entry is live now; `iso_as_cd` uses `--no-live`) but not re-run.
+
+## X9 + WD — x86 hardware crypto, the handshake profile, and a watchdog budget for handshakes (2026-10-31)
+
+ADR-070 (x86 crypto and the profile), ADR-071 (watchdog classes). **QEMU only: x86_64 under TCG, aarch64 under HVF. Not run on KVM, on the VPS or on x86 hardware** (the host is an Apple M4 Pro; the x86_64 code was run under Rosetta, which has AES-NI, PCLMULQDQ and SSE4.2 but no SHA extensions, BMI or ADX). Motivation: a real KVM VPS (AMD EPYC, 4 vCPU, software crypto) did about 344 full TLS 1.3 + mTLS handshakes/s and logged `watchdog: core N output handler for conn - over budget: 50-90 ms > 20 ms (action: Drop)`.
+
+**Where the cycles of a handshake go** (`cargo run --release -p urmqtt-tls --example profile`; x86_64 build under Rosetta, per operation)
+
+| Step | us | in one server-side handshake |
+|---|---:|---|
+| X25519 base multiplication + shared secret | 36 + 36 | 1 + 1 |
+| ECDSA P-256 sign | 199 | 1 (CertificateVerify) |
+| ECDSA P-256 verify | 206 | 2 (client certificate, client CertificateVerify) |
+| HMAC-SHA-256 (40 B) | 0.7 | about 48 |
+| SHA-256 block | 0.18 | about 160 |
+| AES-128-GCM 1 KiB | 0.7 (5.0 in software) | about 4 |
+
+Public-key math is about **89-91 %** of a handshake (about 680 us), hashing and records about 70-85 us. So AES-NI, PCLMULQDQ and SHA-NI change a handshake by roughly 2 % (symmetric part 84 -> 68 us); they pay for records and for the store's checksums. On the M4's own aarch64 build the split is 95 % public-key (handshake about 520 us). **The VPS figure does not follow from crypto:** 680 us per handshake is more than 1 400/s on one core, so more than 5 000/s on four, against 344/s measured. The cores were mostly not doing crypto (load generator, network path, stalls, refusals) or something else costs the time. The new boot line settles it on the VPS: `crypto-profile: x25519-base=… ecdsa-verify=… => handshake~N us (P% public-key)`.
+
+**Done**
+
+- **x86 backends behind the sealed dispatch**, selected at boot, software last: `crypto: aes-gcm=aesni ghash=pclmulqdq chacha=sse2 sha256=sha-ni crc32c=sse4.2 toeplitz=bitwise`. `[cpu] disable = aes,pmull,sha2,crc32` still takes them out (smoke `x86-crypto-soft`: `aes-gcm=soft … crc32c=table`). The vendored `cpufeatures` (both versions) asks the kernel on x86 as it does on aarch64; AVX and everything else is refused (no AVX state, ADR-042). No hand-written assembly; the arch-leak check passes.
+- **CRC-32C with SSE4.2** in `arch-x86_64` (it was `unimplemented`), installed through the store's hook.
+- **Known-answer tests grown**: 1000-byte AES-128-GCM with AAD (vector from OpenSSL AES-CTR plus an independent GHASH script, not from RustCrypto), SHA-256 over 64/128/1000 bytes, CRC-32C (RFC 3720 vectors, split computation, unaligned tail) via `urmqtt_store::crc::kat()`. They run at boot (fail closed) and under `simd-irq`.
+- **Certificate-signature memo** (`provider/verify.rs`): a successful ECDSA verification is remembered by SHA-256(key, message, signature) (512 entries); a reconnecting device's CA signature is not verified again (one of the two verifications, about 30 % of the handshake). Failures and CertificateVerify messages are never cached. Counter `tls.verify_memo_hits`.
+- **Boot profile line** `crypto-profile:` in microseconds (all images, about 0.25 s at boot, before the data plane).
+- **Watchdog classes (WD)**: `Phase::Handshake` for TLS handshake steps with `watchdog.handshake_budget_ms` (0 = calibrated at boot: 10x the profile's handshake cost, 50-500 ms; 1-900 pins it; never above the stuck-core reset). Ordinary handlers keep `handler_budget_ms`. The report names the step of an output handler (`step timers|shrink|sys|ready|tcp|routes|control|persist|telemetry`) and says when `drop` had nothing to drop. **`drop` on an output handler aborts nothing** (no connection recorded), so the VPS's `output handler for conn -` reports were stalls in `MqttService::poll`, not refused handshakes; which step stalls is for the next VPS log to say.
+- `SMOKE_SCENARIOS=<regex>` in `scripts/smoke.sh` runs only matching scenarios (dev shortcut; include `sealed-write` when filtering because of its follow-up check).
+
+**Tests**
+
+- Host: dispatch (x86 names, AVX refused), SSE4.2 CRC vs the bitwise definition (RFC vectors, 0..4099 bytes, unaligned, streaming; run under Rosetta with `cargo test -p urmqtt-arch-x86_64 --target x86_64-apple-darwin`; skipped on aarch64 hosts), the verification memo (hit, tamper, wrong key, no failure caching, CertificateVerify bypass), the budget function, config bounds, the profile itself, `kat::run` and `crc::kat`.
+- Differential, x86_64 build vs `ring`, 20 000 random cases (lengths to 70 KB): AES-128-GCM, ChaCha20-Poly1305, SHA-256 (both `sha2` versions, chunked) and CRC-32C: **no differences**. `fuzz/diff_crc32c` has an x86 arm. SHA-NI was only exercised by the TCG KATs.
+- `make check` pieces: `cargo fmt --check`, clippy host `--all-targets`, clippy for both kernels with and without `selftest` (aarch64 with RUSTFLAGS by hand), `check-arch-leaks`, `cargo test --workspace`: all pass.
+- Smoke (selected scenarios only, no full suites): x86_64 TCG `x86-disk-q35` (boot line, KATs, profile, budget), `x86-crypto-soft`, `x86-crypto-bench`, `x86-simd-irq` (380 139 rounds, 1 140 417 IPIs, 0 mismatches), `x86-sealed-write`, `watchdog`, `watchdog-handshake`; aarch64 HVF `boot-acpi`, `crypto-soft`, `crypto-bench`, `sealed-write`, `watchdog`, `watchdog-handshake`. `time-before-build` failed on aarch64 in the filtered run (`date at boot: unix … is before this image was built`; the worktree's build time against the QEMU clock, not touched by this work, not investigated).
+
+**Measured (x86_64 build under Rosetta, Apple M4 Pro; not x86 silicon)**
+
+| Primitive | Portable | Hardware | Factor |
+|---|---:|---:|---:|
+| AES-128-GCM, 1 KiB seal | 5.02 us | 0.68 us | 7.4x |
+| CRC-32C, 1 MiB buffers | 462 MiB/s | 11 027 MiB/s | 24x |
+| Handshake (profile total) | 767 us | 794 us | no change (noise) |
+| SHA-256 (SHA-NI) | | not measurable under Rosetta | |
+
+TCG numbers (`crypto-bench` 557 MiB/s GCM, 300 SHA-256, 151 CRC) are emulation and decide nothing.
+
+**Not done / open**
+
+- No BMI2/ADX P-256 field multiplier (it means forking `p256`/`primefield`/`crypto-bigint` for at most 1.3-1.5x), no fixed-base signing tables (`p256` needs `std` or `critical-section`), no VAES/AVX2 (no AVX state).
+- SHA-NI and the whole x86 set are not measured on real x86 hardware; the enable-by-default rule of X86-PLAN X9 ("only with a real-hardware number") is not met yet. They are on because the software is never faster and the KATs pass.
+- The 20 ms stalls of the VPS are not explained; the step name in the report is there to find them.
+- Records/s and a handshake bench per implementation (`make bench ARCH=x86_64` table) not run.

@@ -56,6 +56,7 @@ metrics_udp = "10.0.2.2:8125"  # statsd; "" = off
 
 [watchdog]
 handler_budget_ms = 10
+# handshake_budget_ms = 0   # 0 (default): calibrated at boot from the measured handshake cost (ADR-071)
 action = "log"                 # "log" | "drop" | "reset"
 
 [memory]

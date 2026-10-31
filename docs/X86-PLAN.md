@@ -339,6 +339,8 @@ The cipher-preference rule (PROMPT §1): without AES-NI the server orders ChaCha
 - `make bench ARCH=x86_64` has a table per implementation.
 - Each optimisation is enabled by default only with a real-hardware number (KVM runner or the user's host) recorded in PROGRESS.
 
+**Status: items 1-3 done for QEMU (PROGRESS, X9 + WD; ADR-070).** AES-NI/PCLMULQDQ, SHA-NI and SSE4.2 CRC-32C are dispatched, with long known-answer tests and a differential run against `ring`; ChaCha20 stays on SSE2. The profile shows public-key math is about 90 % of a handshake, so these do not move the handshake rate; the memo of verified certificate signatures does for reconnects. Items 4 (AVX2), 5 (VAES), 6, 7 are open, and no number from x86 hardware exists yet.
+
 ### X10 — One multi-arch ISO · M
 
 **Work** per D4:

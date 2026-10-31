@@ -323,6 +323,26 @@ fn watchdog_budget_bounds() {
 }
 
 #[test]
+fn handshake_budget_is_optional_and_bounded() {
+    // Absent: calibrated at boot (0).
+    let cfg = parse("dev", DEV).unwrap();
+    assert_eq!(cfg.watchdog.handshake_budget_ms, 0);
+    let text = dev_with(
+        "handler_budget_ms",
+        "handler_budget_ms = 10\nhandshake_budget_ms = 250",
+    );
+    assert_eq!(
+        parse("dev", &text).unwrap().watchdog.handshake_budget_ms,
+        250
+    );
+    let text = dev_with(
+        "handler_budget_ms",
+        "handler_budget_ms = 10\nhandshake_budget_ms = 901",
+    );
+    assert_rejected("dev", &text, "watchdog.handshake_budget_ms");
+}
+
+#[test]
 fn storage_bounds() {
     assert_rejected(
         "dev",

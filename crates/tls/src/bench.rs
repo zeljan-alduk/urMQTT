@@ -83,7 +83,7 @@ pub const BUDGET_FLOOR_MS: u32 = 50;
 /// stuck-core reset, so a handler that never returns still trips it.
 pub const BUDGET_CAP_MS: u32 = 500;
 
-/// The watchdog budget for one TLS handshake step (ADR-070): the configured
+/// The watchdog budget for one TLS handshake step (ADR-071): the configured
 /// value if there is one, else [`BUDGET_FACTOR`] times the estimated cost of
 /// a handshake, rounded up to whole milliseconds, within
 /// [`BUDGET_FLOOR_MS`]..=[`BUDGET_CAP_MS`].

@@ -193,6 +193,8 @@ pub struct Observability {
 #[derive(Debug, Clone, Copy)]
 pub struct Watchdog {
     pub handler_budget_ms: u32,
+    /// TLS handshake steps; 0: calibrated at boot (ADR-071).
+    pub handshake_budget_ms: u32,
     pub action: WatchdogAction,
 }
 

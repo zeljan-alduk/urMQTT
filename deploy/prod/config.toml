@@ -61,7 +61,9 @@ syslog_udp = ""                # "10.0.0.5:514" for a private collector
 metrics_udp = ""               # statsd
 
 [watchdog]
-handler_budget_ms = 20         # a full P-256 handshake takes ~0.6 ms; leaves room for steal time
+handler_budget_ms = 20         # ordinary handlers (MQTT packets, output, timers)
+# handshake_budget_ms = 0      # TLS handshake steps: 0 (default) = calibrated at boot (10x the measured
+#                              # handshake cost, 50..500 ms, ADR-071); 1..=900 pins it
 action = "drop"                # "log" | "drop" | "reset"; a stuck core (100 budgets, >= 1 s) always resets
 
 [memory]

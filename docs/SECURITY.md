@@ -279,7 +279,7 @@ Every resource is bounded. What happens at the limit is part of the design:
 | Cross-core fan-out | 16 384 messages per core pair | QoS 0 dropped, QoS 1 kept |
 | Telemetry backlog | 65 536 records per core | dropped and counted |
 | Log lines | 100/s, burst 300 | suppressed and counted |
-| A handler hogging its core | `watchdog.handler_budget_ms` | `watchdog.action` (log, drop the connection, reset); a core stuck for 100 budgets (≥ 1 s) resets the VM (smoke: `watchdog`) |
+| A handler hogging its core | `watchdog.handler_budget_ms` (handshake steps: `watchdog.handshake_budget_ms`, ADR-071) | `watchdog.action` (log, drop the connection, reset); a core stuck for 100 budgets (≥ 1 s) resets the VM (smoke: `watchdog`) |
 | A core that stops making progress | 2 health checks (20 s) | VM reset (a fresh boot is the recovery) |
 
 Memory left by a peak is returned within 10 s (slab chunks, tables), so the

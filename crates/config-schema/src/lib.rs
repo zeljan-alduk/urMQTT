@@ -259,6 +259,9 @@ struct RawObservability {
 #[serde(deny_unknown_fields)]
 struct RawWatchdog {
     handler_budget_ms: u32,
+    /// 0 (the default): derived at boot from the measured handshake cost.
+    #[serde(default)]
+    handshake_budget_ms: u32,
     action: WatchdogAction,
 }
 
@@ -389,6 +392,8 @@ pub struct Memory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watchdog {
     pub handler_budget_ms: u32,
+    /// Budget of a TLS handshake step; 0 means "calibrate at boot" (ADR-071).
+    pub handshake_budget_ms: u32,
     pub action: WatchdogAction,
 }
 
@@ -1069,8 +1074,17 @@ fn validate_watchdog(raw: &RawWatchdog, errors: &mut Vec<ConfigError>) -> Watchd
     if !(1..=10_000).contains(&raw.handler_budget_ms) {
         errors.push(err("watchdog.handler_budget_ms", "must be in 1..=10000"));
     }
+    // 0 asks for the boot calibration; an explicit value stays below the
+    // one-second stuck-core reset (ADR-071).
+    if raw.handshake_budget_ms > 900 {
+        errors.push(err(
+            "watchdog.handshake_budget_ms",
+            "must be 0 (calibrate at boot) or in 1..=900",
+        ));
+    }
     Watchdog {
         handler_budget_ms: raw.handler_budget_ms,
+        handshake_budget_ms: raw.handshake_budget_ms,
         action: raw.action,
     }
 }
@@ -1304,6 +1318,7 @@ pub const CONFIG: BuildConfig = BuildConfig {{
     }},
     watchdog: Watchdog {{
         handler_budget_ms: {hb},
+        handshake_budget_ms: {hsb},
         action: WatchdogAction::{wa:?},
     }},
     entropy: Entropy {{
@@ -1374,6 +1389,7 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
         syslog = render_addr(cfg.observability.syslog_udp),
         metrics = render_addr(cfg.observability.metrics_udp),
         hb = cfg.watchdog.handler_budget_ms,
+        hsb = cfg.watchdog.handshake_budget_ms,
         wa = cfg.watchdog.action,
         heap_kernel = cfg.memory.kernel_heap_mb,
         min_free = cfg.memory.min_free_mb,

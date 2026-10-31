@@ -764,6 +764,14 @@ impl MqttService {
         true
     }
 
+    /// Is `c` a TLS connection whose handshake has not finished?
+    fn is_handshaking(&self, c: u32) -> bool {
+        self.conns
+            .get(&c)
+            .and_then(|k| k.session.as_ref())
+            .is_some_and(|s| !s.is_established())
+    }
+
     fn on_data(&mut self, c: u32, data: &[u8], link: &mut Link, now_ms: u64) {
         let Some(k) = self.conns.get_mut(&c) else {
             return;
@@ -1111,16 +1119,20 @@ impl MqttService {
             self.conns.remove(&c);
             self.aborts.push(c);
         }
+        watchdog::step(watchdog::Step::Timers);
         if now_ms.saturating_sub(self.last_tick_ms) >= 100 {
             self.last_tick_ms = now_ms;
             self.broker.tick(now_ms);
             self.expire_handshakes(link, now_ms);
         }
+        watchdog::step(watchdog::Step::Shrink);
         if now_ms.saturating_sub(self.last_shrink_ms) >= SHRINK_MS {
             self.last_shrink_ms = now_ms;
             self.shrink(tcp);
         }
+        watchdog::step(watchdog::Step::Sys);
         self.sys.poll(&mut self.broker, now_ms);
+        watchdog::step(watchdog::Step::Ready);
         let mut ready = core::mem::take(&mut self.ready);
         self.broker.drain_ready(&mut ready);
         for b in ready.drain(..) {
@@ -1133,6 +1145,7 @@ impl MqttService {
         }
         self.ready = ready;
         // Hand pending bytes to TCP; finish closes.
+        watchdog::step(watchdog::Step::Tcp);
         let mut blocked = core::mem::take(&mut self.blocked);
         blocked.sort_unstable();
         blocked.dedup();
@@ -1144,6 +1157,7 @@ impl MqttService {
             }
         }
         self.blocked.append(&mut still);
+        watchdog::step(watchdog::Step::Routes);
         for (msg, qos, retain) in self.broker.drain_routes() {
             for peer in dataplane::workers(self.n).filter(|&p| p != self.me) {
                 if qos == QoS::AtMostOnce && link.backlog_len(peer) > ROUTE_BACKLOG {
@@ -1166,6 +1180,7 @@ impl MqttService {
                 );
             }
         }
+        watchdog::step(watchdog::Step::Control);
         // Control messages go to the DB core unchanged; it authenticates
         // them. Without durable storage they are refused (H1).
         for m in self.broker.drain_control() {
@@ -1201,12 +1216,14 @@ impl MqttService {
             activity = true;
             self.apply_control(now_ms);
         }
+        watchdog::step(watchdog::Step::Persist);
         if let Some(dbl) = self.db.as_mut() {
             for op in self.broker.drain_persist() {
                 dbl.send(DbReq::Persist(op));
             }
             dbl.pump();
         }
+        watchdog::step(watchdog::Step::Telemetry);
         match self.log.as_mut() {
             Some(log) => {
                 for msg in self.broker.drain_telemetry() {
@@ -1414,7 +1431,13 @@ impl urmqtt_tcp::App for TcpEvents<'_> {
     }
 
     fn data(&mut self, c: urmqtt_tcp::ConnId, data: &[u8]) {
-        let _wd = watchdog::enter(watchdog::Phase::Input, Some(u64::from(c)));
+        // A handshake step has a budget of its own (ADR-071).
+        let phase = if self.mqtt.is_handshaking(c) {
+            watchdog::Phase::Handshake
+        } else {
+            watchdog::Phase::Input
+        };
+        let _wd = watchdog::enter(phase, Some(u64::from(c)));
         self.mqtt.on_data(c, data, self.link, self.now_ms);
     }
 
