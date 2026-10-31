@@ -1459,3 +1459,23 @@ TCG numbers (`crypto-bench` 557 MiB/s GCM, 300 SHA-256, 151 CRC) are emulation a
 - SHA-NI and the whole x86 set are not measured on real x86 hardware; the enable-by-default rule of X86-PLAN X9 ("only with a real-hardware number") is not met yet. They are on because the software is never faster and the KATs pass.
 - The 20 ms stalls of the VPS are not explained; the step name in the report is there to find them.
 - Records/s and a handshake bench per implementation (`make bench ARCH=x86_64` table) not run.
+
+## ADR-072 — the `step sys` watchdog reports of the VPS (O1 follow-up, 2026-10-31)
+
+**Cause found and fixed** (ADR-072). The `Sys::poll` pass was not expensive; its console read waited for the log's sink lock, which every core's log line holds for the time the serial port and framebuffer take (milliseconds on a KVM VPS: trapped COM1, scrolling framebuffer). The console ring now has a lock of its own.
+
+**Measured** (x86_64 TCG, 4 vCPU, operator subscribed, `test=slow-log:4000` = 4 ms per line to stand in for the VPS; worst pass per 10 s window, microseconds):
+
+| part | before | after |
+|---|---|---|
+| report (counters) | 1-53 | 3-46 |
+| retained publish, ~20 topics | 182-2 374 | 152-2 206 (first pass), 152-392 later |
+| console (ring read + deliver) | **10 825-36 272** | **44-522** |
+| requests | 1-123 | 1-46 |
+| whole pass | 10 831-38 731 | 152-2 820 |
+
+`step sys` reports over budget (10 ms dev budget): 4 in 25 s before, 0 after. Other steps: none reported before or after in this run; they log rarely but can wait for the same lock (ADR-072).
+
+**Tests:** smoke `sys-slow-log` (no `(step sys)` report with an operator subscribed and slow lines), host `console_readers_do_not_wait_for_the_sinks`, `slow_log_is_dev_only`.
+
+**Not verified on the VPS:** that is what the Contabo ISO built with this commit is for. Look for `watchdog: ... (step ...)` lines in the VNC log after boot and under load; if any remain, the step name now points at another log call.

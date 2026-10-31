@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Operator scenarios: `$SYS/` and the console over MQTT (O1, O2).
 
-    scripts/sys-scenarios.py CERTDIR PORT [reboot]
+    scripts/sys-scenarios.py [reboot|watch] CERTDIR PORT
 
 Every client connects with mutual TLS. The operator is the dev identity
 `operator` (deploy/dev/services/operator.*); the ordinary clients, which must
@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 
+MODE = sys.argv.pop(1) if len(sys.argv) > 1 and sys.argv[1] in ("watch", "reboot") else ""
 DIR, PORT = sys.argv[1], int(sys.argv[2])
 TIMEOUT = 40
 results = []
@@ -175,7 +176,17 @@ def pub(client_id, cert, topic, message, *extra):
                    capture_output=True, text=True, timeout=TIMEOUT)
 
 
-if sys.argv[3:] == ["reboot"]:
+if MODE == "watch":
+    # An operator subscribed to everything under load of its own: the harness
+    # checks the serial log for watchdog reports of the `sys` step (ADR-072).
+    op = Operator()
+    ack = op.subscribe("$SYS/#")
+    got = op.listen(25)
+    op.close()
+    report("sys-watch", ack == [0] and len(got) > 20, f"{len(got)} message(s)")
+    sys.exit(0 if results[0] else 1)
+
+if MODE == "reboot":
     # Only the command's acceptance; the harness watches the VM reset.
     op = Operator()
     op.subscribe("$SYS/console/out")

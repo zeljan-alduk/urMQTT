@@ -180,6 +180,9 @@ extern "C" fn urmqtt_kmain() -> ! {
 
     let options = BootOptions::parse(CMDLINE.response().map_or("", |r| r.cmdline()), dev);
     power::set_smoke(options.smoke);
+    if let Some(us) = options.slow_log_us {
+        urmqtt_log::set_sink_delay_us(us);
+    }
 
     let cpus = MP.response().map_or(1, |r| r.cpus().len());
     urmqtt_log::raw(format_args!(
