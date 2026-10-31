@@ -590,6 +590,9 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
                     "dp-bench needs at least one worker core besides core 0 (3+ CPUs with storage)",
                 );
             }
+            #[cfg(all(feature = "memprof", target_arch = "x86_64"))]
+            crate::memprof::run(s.options.smoke);
+            #[cfg(not(all(feature = "memprof", target_arch = "x86_64")))]
             crate::dpbench::run(data_cores - 1, s.options.smoke);
         }
         #[cfg(not(feature = "selftest"))]

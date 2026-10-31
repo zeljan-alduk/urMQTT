@@ -31,6 +31,13 @@ pub mod crc {
     pub use super::imp::crc::crc32c_update;
 }
 
+/// `memcpy`, `memmove` and `memset` (x86_64 only; aarch64 keeps compiler_builtins').
+pub mod mem {
+    #[cfg(feature = "mem-baseline")]
+    pub use super::imp::mem::baseline;
+    pub use super::imp::mem::{copy, fast_rep, set, set_fast_rep};
+}
+
 /// Message-signalled interrupts.
 pub mod msi {
     pub use super::imp::msi::{Frame, TYPER};

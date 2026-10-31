@@ -30,6 +30,8 @@ pub mod gdt;
 pub mod hpet;
 pub mod idt;
 pub mod ioapic;
+#[cfg(target_arch = "x86_64")]
+pub mod mem;
 pub mod msi;
 pub mod paging;
 pub mod pat;

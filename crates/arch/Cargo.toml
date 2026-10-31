@@ -14,6 +14,11 @@ bench = false
 [lints]
 workspace = true
 
+[features]
+# See urmqtt-arch-x86_64: the kernel's memprof build defines the mem symbols.
+no-mem-symbols = ["urmqtt-arch-x86_64/no-mem-symbols"]
+mem-baseline = ["urmqtt-arch-x86_64/mem-baseline"]
+
 [dependencies]
 urmqtt-dispatch = { path = "../dispatch" }
 

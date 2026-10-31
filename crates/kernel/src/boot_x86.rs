@@ -130,7 +130,12 @@ pub(crate) fn cpu_summary() -> Features {
     // XSAVE state before CPUID is read: the census reports XCR0.
     let xcr0 = cpu::enable_extended_state();
     let id = features::read_id_regs();
+    // ERMS (leaf 7 EBX bit 9): `rep movsb`/`rep stosb` for blocks of 2 KiB and
+    // more in memcpy/memset (ADR-200). Until now the SSE loop ran.
+    let erms = id.l7_ebx >> 9 & 1 == 1;
+    urmqtt_arch::mem::set_fast_rep(erms);
     info!("cpu: {}", Identity(&id));
+    info!("mem: memcpy/memset use rep movsb for 2 KiB and more: {erms} (ERMS)");
     info!("cpu features: {}", Census(&id));
     if xcr0 == 0 {
         warn!("cpu: no XSAVE, x87/SSE state only");

@@ -46,6 +46,9 @@ sha2 = { version = "0.11", default-features = false, optional = true }
 [features]
 # Dev images: in-guest benchmarks and self-tests that need a TLS client.
 # Production images are built without it (M17).
+# PERF (ADR-200): dev-only memcpy/memmove/memset profile of `test=dp-bench`.
+# Defines the three symbols itself: counting wrappers around the arch copies; x86_64.
+memprof = ["selftest", "urmqtt-arch/no-mem-symbols", "urmqtt-arch/mem-baseline"]
 selftest = ["urmqtt-tls/client", "dep:aes-gcm", "dep:chacha20poly1305", "dep:sha2"]
 
 [lints]
