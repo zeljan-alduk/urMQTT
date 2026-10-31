@@ -107,6 +107,10 @@ pub struct BootOptions {
     /// `test=ticket-rotate:S` (dev only): rotate the session-ticket keys
     /// every S seconds instead of 12 h (H2 rotation tests).
     pub ticket_rotate_s: Option<u64>,
+    /// `test=slow-log:US` (dev only): every log line holds the sink lock US
+    /// microseconds longer, like a trapped serial port or a scrolling
+    /// framebuffer on a VPS (ADR-072).
+    pub slow_log_us: Option<u32>,
     /// `registry=allowlist`: allowlist mode even if the configuration says
     /// "open" (stricter only, for tests of one image in both modes).
     pub allowlist: bool,
@@ -192,6 +196,11 @@ impl BootOptions {
                         .filter(|&s| s > 0)
                     {
                         o.ticket_rotate_s = Some(s);
+                    } else if let Some(us) = w
+                        .strip_prefix("test=slow-log:")
+                        .and_then(|v| v.parse::<u32>().ok())
+                    {
+                        o.slow_log_us = Some(us);
                     } else if let Some(s) = w
                         .strip_prefix("diag-confirm-timeout=")
                         .and_then(|v| v.parse().ok())
@@ -293,6 +302,18 @@ mod tests {
             assert!(!BootOptions::parse(w, true).diag, "{w}");
             assert!(!BootOptions::parse(w, true).diag_auto_confirm, "{w}");
         }
+    }
+
+    /// ADR-072: `test=slow-log:US` is a dev switch like the other tests.
+    #[test]
+    fn slow_log_is_dev_only() {
+        assert_eq!(
+            BootOptions::parse("test=slow-log:4000", true).slow_log_us,
+            Some(4000)
+        );
+        assert_eq!(BootOptions::parse("test=slow-log:x", true).ignored, 1);
+        let p = BootOptions::parse("test=slow-log:4000", false);
+        assert_eq!((p.slow_log_us, p.ignored), (None, 1));
     }
 
     #[test]

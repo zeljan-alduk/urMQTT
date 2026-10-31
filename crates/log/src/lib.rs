@@ -9,7 +9,10 @@
 //! ring (no allocation) that the network core drains ([`drain_records`]).
 //! A second ring serves the MQTT console (O2): readers keep their own cursor
 //! ([`console_read`]), so a slow or absent reader never blocks a writer and
-//! loses lines instead, counted. Logs must never contain secrets or payloads.
+//! loses lines instead, counted. The ring has a lock of its own, held only
+//! for a copy of a few records, because the sink lock is held for as long as
+//! the serial port and the framebuffer take for a line (milliseconds on a
+//! hypervisor): a reader must never queue behind that (ADR-072). Logs must never contain secrets or payloads.
 
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_code)]
@@ -18,9 +21,8 @@ pub mod fbcon;
 pub mod pl011;
 
 use core::fmt::{self, Write};
-#[cfg(all(target_os = "none", target_arch = "x86_64"))]
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 pub use urmqtt_config::LogLevel as Level;
 use urmqtt_sync::sync::SpinLock;
@@ -91,12 +93,20 @@ struct Records {
 
 /// The console ring: every line since the console was enabled, numbered.
 struct Console {
-    on: bool,
     ring: [Record; CONSOLE_LINES],
     /// The number the next line gets; the ring holds the last
     /// `min(next, CONSOLE_LINES)` lines.
     next: u64,
 }
+
+/// The console ring's own lock (nested inside `SINKS` by writers, never
+/// the other way round; readers take this one only).
+static CONSOLE: SpinLock<Console> = SpinLock::new(Console {
+    ring: [Record::EMPTY; CONSOLE_LINES],
+    next: 0,
+});
+/// The console ring is being kept.
+static CONSOLE_ON: AtomicBool = AtomicBool::new(false);
 
 /// [`Console::next`] outside the lock, so a reader with nothing new to read
 /// (every network loop pass) does not touch the lock the writers use.
@@ -155,7 +165,6 @@ struct Sinks {
     refilled_ns: u64,
     suppressed: u64,
     records: Records,
-    console: Console,
 }
 
 static SINKS: SpinLock<Sinks> = SpinLock::new(Sinks {
@@ -173,11 +182,6 @@ static SINKS: SpinLock<Sinks> = SpinLock::new(Sinks {
         head: 0,
         len: 0,
         lost: 0,
-    },
-    console: Console {
-        on: false,
-        ring: [Record::EMPTY; CONSOLE_LINES],
-        next: 0,
     },
 });
 
@@ -274,7 +278,8 @@ pub fn enable_records() {
 
 /// Starts keeping lines for the MQTT console (O2).
 pub fn enable_console() {
-    Locked::acquire().sinks().console.on = true;
+    // Relaxed: a switch set once at boot.
+    CONSOLE_ON.store(true, Ordering::Relaxed);
 }
 
 /// The number the next console line will get: a reader whose cursor is
@@ -296,8 +301,11 @@ pub fn console_read(cursor: &mut u64, max: usize, mut f: impl FnMut(&Record)) ->
     while left > 0 {
         let mut n = 0;
         {
-            let mut locked = Locked::acquire();
-            let c = &locked.sinks().console;
+            // IRQs masked: the tick's watchdog report logs, and would spin on a
+            // ring lock its own core holds.
+            #[cfg(target_os = "none")]
+            let irq_state = urmqtt_arch::cpu::irq_save();
+            let c = CONSOLE.lock();
             let oldest = c.next.saturating_sub(CONSOLE_LINES as u64);
             if *cursor < oldest {
                 lost += oldest - *cursor;
@@ -313,6 +321,9 @@ pub fn console_read(cursor: &mut u64, max: usize, mut f: impl FnMut(&Record)) ->
                 *cursor += 1;
                 n += 1;
             }
+            drop(c);
+            #[cfg(target_os = "none")]
+            urmqtt_arch::cpu::irq_restore(irq_state);
         }
         for rec in batch.get(..n).unwrap_or(&[]) {
             f(rec);
@@ -442,6 +453,18 @@ fn take_token(sinks: &mut Sinks, ns: u64) -> bool {
     true
 }
 
+/// Microseconds every line holds the sink lock extra (dev `test=slow-log:US`).
+/// A hypervisor's trapped serial port and a scrolling framebuffer make a
+/// real line cost milliseconds; this reproduces that in the emulator.
+static SINK_DELAY_US: AtomicU32 = AtomicU32::new(0);
+
+/// Makes every log line take at least `us` more while the sink lock is held
+/// (tests only).
+pub fn set_sink_delay_us(us: u32) {
+    // Relaxed: a test switch set once at boot.
+    SINK_DELAY_US.store(us, Ordering::Relaxed);
+}
+
 fn line(sinks: &mut Sinks, ns: u64, level: Level, args: fmt::Arguments<'_>) {
     // Sinks never fail; a formatting error just truncates the line.
     let _ = writeln!(
@@ -452,7 +475,19 @@ fn line(sinks: &mut Sinks, ns: u64, level: Level, args: fmt::Arguments<'_>) {
         tag(level),
         args
     );
-    if sinks.records.on || sinks.console.on {
+    // Relaxed: see `set_sink_delay_us`.
+    let delay_us = SINK_DELAY_US.load(Ordering::Relaxed);
+    if delay_us > 0
+        && let Some(clock) = sinks.clock_ns
+    {
+        let until = clock().saturating_add(u64::from(delay_us) * 1_000);
+        while clock() < until {
+            core::hint::spin_loop();
+        }
+    }
+    // Relaxed: see `enable_console`.
+    let console_on = CONSOLE_ON.load(Ordering::Relaxed);
+    if sinks.records.on || console_on {
         let mut rec = Record {
             level,
             cpu: sinks.cpu.map_or(0, |c| c()) as u8,
@@ -460,14 +495,16 @@ fn line(sinks: &mut Sinks, ns: u64, level: Level, args: fmt::Arguments<'_>) {
             ..Record::EMPTY
         };
         let _ = rec.write_fmt(args);
-        if sinks.console.on {
-            let c = &mut sinks.console;
-            if let Some(slot) = c.ring.get_mut((c.next % CONSOLE_LINES as u64) as usize) {
+        if console_on {
+            let mut c = CONSOLE.lock();
+            let at = (c.next % CONSOLE_LINES as u64) as usize;
+            if let Some(slot) = c.ring.get_mut(at) {
                 *slot = rec;
             }
             c.next += 1;
             // Relaxed: see `console_next`.
             CONSOLE_NEXT.store(c.next, Ordering::Relaxed);
+            drop(c);
         }
         if sinks.records.on {
             let r = &mut sinks.records;
@@ -635,6 +672,23 @@ mod tests {
         assert_eq!(lines, ["audited"]);
     }
 
+    /// ADR-072: a console reader never waits for the sink lock, which a line
+    /// holds for as long as the serial port and the framebuffer take. With
+    /// the lock held (here: by this thread, so waiting would hang forever)
+    /// a read still completes.
+    #[test]
+    fn console_readers_do_not_wait_for_the_sinks() {
+        enable_console();
+        let mut cursor = 0;
+        let sinks = SINKS.lock();
+        let mut n = 0;
+        // The read returns (before the fix it spun on the lock forever).
+        console_read(&mut cursor, 8, |_| n += 1);
+        let _ = console_next();
+        drop(sinks);
+        assert!(cursor >= n);
+    }
+
     #[test]
     fn rate_limit_allows_a_burst_then_the_rate() {
         let mut s = Sinks {
@@ -652,11 +706,6 @@ mod tests {
                 head: 0,
                 len: 0,
                 lost: 0,
-            },
-            console: Console {
-                on: false,
-                ring: [Record::EMPTY; CONSOLE_LINES],
-                next: 0,
             },
         };
         let passed = (0..1000).filter(|_| take_token(&mut s, 1)).count() as u64;

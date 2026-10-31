@@ -1688,7 +1688,7 @@ sys_reboot() {
         fresh_disk "$iso" "$data"
         start_vm "$log" --disk "$data" --accel "$accel" --fwd 18883:8883
         if wait_log "$log" "TLS 1.3 listener"; then
-            python3 -I "$ROOT/scripts/sys-scenarios.py" "$ROOT/deploy/dev" 18883 reboot >"$log.client" 2>&1 || status=1
+            python3 -I "$ROOT/scripts/sys-scenarios.py" reboot "$ROOT/deploy/dev" 18883 >"$log.client" 2>&1 || status=1
             until ! kill -0 "$VM_PID" 2>/dev/null; do
                 if (( waited >= 300 )); then
                     echo "client: the VM did not reset within 30 s" >>"$log.client"
@@ -1708,6 +1708,16 @@ sys_reboot() {
             "NOT:the VM did not reset" "NOT:FAILED" "$NO_FAULT"
     done
 }
+
+# ADR-072: the `sys` step of the output handler never waits for the log. With
+# every log line made slow (like a hypervisor's serial port or a scrolling
+# framebuffer) and an operator subscribed, no output handler may be reported
+# over budget in step `sys`.
+if command -v mosquitto_pub >/dev/null; then
+    SERVICE_PORT=8883 service sys-slow-log "serve test=slow-log:4000" 18883 "TLS 1.3 listener on port 8883" \
+        python3 -I "$ROOT/scripts/sys-scenarios.py" watch "$ROOT/deploy/dev" -- \
+        "client: sys-watch ok" "NOT:\(step sys\)" "NOT:FAILED" "$NO_FAULT"
+fi
 
 # O1, O2: an operator with mutual TLS reads `$SYS/broker/#` (retained, every
 # 10 s), asks `$SYS/query/info`, reads the console and runs the fixed command
