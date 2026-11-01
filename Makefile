@@ -164,15 +164,20 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	$(MAKE) --no-print-directory check-x86
 	$(CARGO) test $(CARGO_FLAGS) --workspace
 	python3 -I scripts/test-mirror-releases.py
+	python3 -I scripts/test-caddy-apply.py
 	@if command -v node >/dev/null && rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$$'; then \
 	 $(MAKE) --no-print-directory builder-test; \
 	 else echo "check: node or the wasm32 target (rustup target add wasm32-unknown-unknown) missing, the builder tests are skipped (CI runs them)"; fi
 
-# The web builder (C1e, ADR-225..227): the WebAssembly module and the page in
+# The web builder (C1e, C1g, ADR-225..228): the WebAssembly module and the page in
 # build/builder/, and its tests. `make builder` needs the wasm32 target and node.
 .PHONY: builder
 builder: ## The web builder (WebAssembly module and page) in build/builder/
 	tools/builder/build.sh
+
+.PHONY: builder-emulator
+builder-emulator: ## The web builder with the emulator of "Try in the emulator" (downloads and patches qemu-wasm, GPL-2.0; see tools/builder/emulator/SOURCE.txt)
+	tools/builder/build.sh --emulator
 
 .PHONY: builder-test
 builder-test: ## The builder's tests: the module against the command line tool, the form logic, the page in a headless browser

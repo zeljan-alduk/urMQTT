@@ -103,6 +103,18 @@ function relationIssues() {
   return out;
 }
 
+/** True once the list of releases is loaded and none of them can be built from (and no files of one's own are chosen). */
+function noReleaseYet() {
+  return !app.release && Boolean(app.releases) && !app.releases.releases.some(x => x.usable);
+}
+
+/** What the line under the emulator button says now: why it is off, or what it will do. */
+function emulatorHintText() {
+  if (app.ui.emulatorWhy) return t('emulator.unavailable', { reason: t(app.ui.emulatorWhy) });
+  if (!app.result) return noReleaseYet() ? t('bar.no-release') : t('emulator.need-build');
+  return app.stale ? t('result.stale') : t('emulator.hint');
+}
+
 function refresh() {
   if (!app.builder) return;
   const built = buildToml(app.model, app.state);
@@ -140,7 +152,7 @@ function paintValidation() {
   let kind = 'ok';
   let text = t('bar.valid');
   if (problems) { kind = 'bad'; text = t('bar.problems', { n: problems }); }
-  else if (noRelease) { kind = 'work'; text = t('bar.choose-release'); }
+  else if (noRelease) { kind = 'work'; text = noReleaseYet() ? t('bar.no-release') : t('bar.choose-release'); }
   setStatus(ui.status, kind, text);
   clear(ui.problems);
   c.issues.slice(0, 6).forEach(is => {
@@ -160,7 +172,8 @@ function paintValidation() {
   ui.fingerprint.hidden = !c.info;
   if (c.info) ui.fingerprintValue.textContent = groupHex(c.info.fingerprint.slice(0, 32), 8) + '…';
   ui.build.disabled = app.busy || noRelease;
-  ui.buildHint.textContent = noRelease ? t('bar.choose-release') : '';
+  ui.buildHint.textContent = noRelease ? (noReleaseYet() ? t('bar.no-release') : t('bar.choose-release')) : '';
+  if (ui.emulatorHint && !app.result) ui.emulatorHint.textContent = emulatorHintText();
   if (loose.length === 0) ui.loose.hidden = true;
   else {
     clear(ui.loose);
@@ -195,7 +208,12 @@ function renderReleases() {
     return;
   }
   if (!r.releases.length || !r.releases.some(x => x.usable)) {
-    box.append(h('div', { class: 'ub-banner' }, h('p', { text: t('release.none') })));
+    // Nothing can be built from yet (no release has a template): say so plainly, keep the releases there
+    // greyed out with their reasons, point to where releases appear, and leave the way of using one's own files.
+    box.append(h('div', { class: 'ub-banner', id: 'ub-no-release', role: 'status' },
+      h('p', { class: 'ub-strong', text: t('release.none') }),
+      h('p', { class: 'ub-help', text: t('release.none-help') }),
+      r.source ? h('p', { class: 'ub-row' }, h('a', { href: r.source, rel: 'noopener', target: '_blank', text: t('release.all-releases') })) : null));
   }
   const group = h('fieldset', { class: 'ub-releases' }, h('legend', { class: 'ub-sr', text: t('release.title') }));
   const name = nextId('rel');
@@ -346,8 +364,10 @@ function renderBar() {
   ui.fileName = h('span', { class: 'ub-code' });
   ui.build = h('button', { class: 'ub-btn', type: 'button', id: 'ub-build', 'aria-describedby': 'ub-build-hint', on: { click: () => build() } }, icon('shield'), t('action.build'));
   ui.download = h('a', { class: 'ub-btn secondary', id: 'ub-download', role: 'button', 'aria-disabled': 'true', href: '#', on: { click: e => { if (ui.download.getAttribute('aria-disabled') === 'true') e.preventDefault(); } } }, icon('download'), t('action.download'));
-  ui.emulator = h('button', { class: 'ub-btn secondary', type: 'button', id: 'ub-emulator', 'aria-disabled': 'true', 'aria-describedby': 'ub-emulator-hint', on: { click: () => { if (ui.emulator.getAttribute('aria-disabled') !== 'true') openEmulatorDialog(); } } }, icon('play'), t('action.emulator'));
-  ui.emulatorHint = h('p', { class: 'ub-help', id: 'ub-emulator-hint', text: t('emulator.need-build') });
+  // The emulator button exists only where the emulator can run; elsewhere the page says why (nothing is loaded either way).
+  ui.emulatorWhy = emulatorUnavailable();
+  ui.emulator = ui.emulatorWhy ? null : h('button', { class: 'ub-btn secondary', type: 'button', id: 'ub-emulator', 'aria-disabled': 'true', 'aria-describedby': 'ub-emulator-hint', on: { click: () => { if (ui.emulator.getAttribute('aria-disabled') !== 'true') openEmulatorDialog(); } } }, icon('play'), t('action.emulator'));
+  ui.emulatorHint = h('p', { class: 'ub-help', id: 'ub-emulator-hint', text: ui.emulatorWhy ? t('emulator.unavailable', { reason: t(ui.emulatorWhy) }) : t('emulator.need-build') });
   ui.progress = h('div', { class: 'ub-progress', hidden: true, role: 'group', 'aria-label': t('progress.title') },
     h('div', { class: 'ub-progress-row' }, h('span', { id: 'ub-progress-text', role: 'status', 'aria-live': 'polite' }), h('span', { id: 'ub-progress-pct' })),
     h('progress', { id: 'ub-progress-bar', max: '100', value: '0', 'aria-labelledby': 'ub-progress-text' }),
@@ -361,8 +381,8 @@ function renderBar() {
   } } });
   ui.bar = h('div', { class: 'ub-bar', data: { open: 'false', ready: 'false' } },
     h('div', { class: 'ub-bar-top' }, ui.status, ui.changed),
-    h('div', { class: 'ub-bar-actions' }, ui.build, more),
-    h('div', { class: 'ub-pair' }, ui.download, ui.emulator),
+    h('div', { class: 'ub-bar-actions' }, ui.build, ui.buildHint, more),
+    h('div', { class: ui.emulator ? 'ub-pair' : 'ub-pair single' }, ui.download, ui.emulator),
     ui.progress,
     h('div', { class: 'ub-bar-detail' },
       ui.problems, ui.loose, ui.notes,
@@ -393,8 +413,10 @@ function paintResult() {
   ui.download.setAttribute('aria-disabled', String(!ready));
   ui.download.href = ready ? r.url : '#';
   if (ready) ui.download.setAttribute('download', r.name); else ui.download.removeAttribute('download');
-  ui.emulator.setAttribute('aria-disabled', String(!ready));
-  ui.emulatorHint.textContent = !r ? t('emulator.need-build') : app.stale ? t('result.stale') : t('emulator.hint');
+  if (ui.emulator) {
+    ui.emulator.setAttribute('aria-disabled', String(!ready));
+    ui.emulatorHint.textContent = emulatorHintText();
+  }
   ui.emulatorHint.hidden = false;
   if (!r) { ui.resultBox.hidden = true; return; }
   ui.resultBox.hidden = false;

@@ -7,7 +7,7 @@
 //
 //   node tools/builder/web/bundle.mjs [OUT_DIR]
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -50,14 +50,29 @@ function build() {
 
   for (const f of ['app.css']) if (existsSync(join(HERE, f))) cpSync(join(HERE, f), join(OUT, f));
   if (existsSync(join(HERE, 'i18n'))) cpSync(join(HERE, 'i18n'), join(OUT, 'i18n'), { recursive: true });
-  if (existsSync(join(HERE, 'emulator'))) cpSync(join(HERE, 'emulator'), join(OUT, 'emulator'), { recursive: true });
+
+  // The emulator (C1g, ADR-228): its loader (tools/builder/emulator) and, if make-runtime.sh has made it, the
+  // runtime. The directory is named after the wasm's hash, so everything in it can be cached forever; the
+  // page learns the name from the manifest. Without a runtime the page says the emulator is not part of this build.
+  rmSync(join(OUT, 'emulator'), { recursive: true, force: true });
+  let emulator = null;
+  const runtime = join(ROOT, 'build/emulator-runtime/qemu');
+  if (existsSync(join(runtime, 'qemu-system-x86_64.wasm'))) {
+    emulator = createHash('sha256').update(readFileSync(join(runtime, 'qemu-system-x86_64.wasm'))).digest('hex').slice(0, 10);
+    const dest = join(OUT, 'emulator', emulator);
+    mkdirSync(dest, { recursive: true });
+    for (const f of ['urmqtt-emulator.js', 'emu-worker.js', 'emu-core.js', 'SOURCE.txt', 'qemu-wasm-ctpop-fix.patch']) {
+      cpSync(join(ROOT, 'tools/builder/emulator', f), join(dest, f));
+    }
+    cpSync(runtime, join(dest, 'qemu'), { recursive: true });
+  }
 
   // The hashes the site build turns into ?v= query strings (immutable caching).
   const hashes = {};
   const walk = (dir, rel = '') => {
     for (const e of readdirSync(join(dir, rel), { withFileTypes: true })) {
       const r = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) walk(dir, r);
+      if (e.isDirectory()) { if (r !== 'emulator') walk(dir, r); }
       else if (e.name !== 'manifest.json' && e.name !== 'index.html') {
         hashes[r] = createHash('sha256').update(readFileSync(join(dir, r))).digest('hex').slice(0, 10);
       }
@@ -74,8 +89,8 @@ function build() {
     html = html.replace(/__FORMAT_VERSION__/g, format);
     writeFileSync(join(OUT, 'index.html'), html);
   }
-  writeFileSync(join(OUT, 'manifest.json'), JSON.stringify({ format: Number(format), files: hashes }, null, 2) + '\n');
-  console.log(`builder: ${Object.keys(hashes).length} files in ${OUT}`);
+  writeFileSync(join(OUT, 'manifest.json'), JSON.stringify({ format: Number(format), files: hashes, emulator }, null, 2) + '\n');
+  console.log(`builder: ${Object.keys(hashes).length} files in ${OUT}${emulator ? `, emulator ${emulator}` : ', without the emulator runtime'}`);
 }
 
 build();

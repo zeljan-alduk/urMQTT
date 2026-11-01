@@ -7,7 +7,11 @@
 #                        the aldo.tech site wraps the same app in its own template
 #   i18n/<lang>.json     the page's texts, one file per site language
 #
-#   tools/builder/build.sh [--wasm-only]
+#   tools/builder/build.sh [--wasm-only] [--emulator]
+#
+# --emulator also makes the runtime of "Try in the emulator" (tools/builder/emulator/make-runtime.sh: it downloads
+# about 45 MB of someone else's prebuilt files, checks their SHA-256 against pinned values and patches them) and
+# puts it into build/builder/emulator/<version>/. Without it the page is built without the emulator and says so.
 #
 # Needs the wasm32 target (`rustup target add wasm32-unknown-unknown`); there is
 # no npm and no bundler: the script concatenates the ES modules of
@@ -32,5 +36,8 @@ cp "$ROOT/target/wasm32-unknown-unknown/wasm/urmqtt_builder_wasm.wasm" "$OUT/urm
 printf 'builder: %s (%s bytes)\n' "$OUT/urmqtt-cfg$FORMAT.wasm" "$(wc -c < "$OUT/urmqtt-cfg$FORMAT.wasm" | tr -d ' ')"
 
 [[ ${1:-} == --wasm-only ]] && exit 0
+if [[ ${1:-} == --emulator || ${2:-} == --emulator ]]; then
+    "$ROOT/tools/builder/emulator/make-runtime.sh" "$ROOT/build/emulator-runtime" >/dev/null
+fi
 command -v node >/dev/null || { echo "build.sh: node is needed to assemble the page" >&2; exit 1; }
 node "$ROOT/tools/builder/web/bundle.mjs" "$OUT"

@@ -26,9 +26,13 @@ async function main() {
   app.lang = (root.dataset.lang || document.documentElement.lang || 'en').toLowerCase().split('-')[0];
 
   const missing = missingFeatures();
+  // The content hashes of the app's files (for ?v= caching) and the emulator's version, from the page
+  // that embeds us (data-v) or from manifest.json next to the script.
   try {
-    app.v = root.dataset.v ? JSON.parse(root.dataset.v) : (await (await fetch(`${app.base}manifest.json`, { cache: 'no-cache' })).json()).files;
-  } catch { app.v = {}; }
+    const manifest = root.dataset.v ? JSON.parse(root.dataset.v) : await (await fetch(`${app.base}manifest.json`, { cache: 'no-cache' })).json();
+    app.v = manifest.files || {};
+    app.emulator = manifest.emulator || '';
+  } catch { app.v = {}; app.emulator = ''; }
   try {
     await loadTexts(app.base, app.lang, app.v);
   } catch (e) {

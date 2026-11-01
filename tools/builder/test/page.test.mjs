@@ -4,14 +4,14 @@
 // Skipped when there is no Chrome (set CHROME=/path) or no Node 22.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { copyFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { after, before } from 'node:test';
 
 import { haveBrowser, launch } from './cdp.mjs';
 import { prepareSite } from './fixture-site.mjs';
 import { serve } from './serve.mjs';
-import { DEV, WASM, cli, haveCli, haveDevCerts, haveWasm, tmp } from './helpers.mjs';
+import { DEV, ROOT, WASM, cli, haveCli, haveDevCerts, haveWasm, realTemplate, tmp } from './helpers.mjs';
 import { loadBuilder } from '../web/src/wasm.js';
 
 if (!haveBrowser() || !haveWasm() || !haveCli()) {
@@ -20,6 +20,7 @@ if (!haveBrowser() || !haveWasm() || !haveCli()) {
 }
 
 let site, server, browser, page, base, wasm;
+const ISOLATION = { 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'require-corp' };
 const SHOTS = process.env.BUILDER_SHOTS || '';
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const field = id => `.ub-field[data-id="${id}"]`;
@@ -95,7 +96,8 @@ before(async () => {
       { tag: 'v0.1.0', prerelease: true, published: '2026-10-30T00:50:09Z', template: null },
     ],
   });
-  server = await serve({ app: site.appDir, mirror: site.mirrorDir });
+  // As the real site serves the builder page: cross-origin isolated (the emulator's threads need it).
+  server = await serve({ app: site.appDir, mirror: site.mirrorDir, headers: ISOLATION });
   base = `http://127.0.0.1:${server.port}`;
   wasm = await loadBuilder(readFileSync(WASM));
   browser = await launch();
@@ -353,11 +355,32 @@ test('the layout holds at phone width, in the dark and with reduced motion', asy
   await page.media({});
 });
 
+const emulatorBuilt = existsSync(join(ROOT, 'build/emulator-runtime/qemu/qemu-system-x86_64.wasm'));
+
 test('no request is made for emulator files before the button is clicked', async () => {
   await open();
-  assert.deepEqual(page.requests.filter(r => /emulator/i.test(r.url)), []);
-  assert.equal(await page.eval(`document.querySelector('#ub-emulator').getAttribute('aria-disabled')`), 'true');
-  assert.match(await page.eval(`document.querySelector('#ub-emulator-hint').textContent`), /Build the ISO first/);
+  assert.deepEqual(page.requests.filter(r => /emulator/i.test(r.url)), [], 'nothing of the emulator is fetched when the page loads');
+  if (emulatorBuilt) {
+    assert.equal(await page.eval(`document.querySelector('#ub-emulator').getAttribute('aria-disabled')`), 'true');
+    assert.match(await page.eval(`document.querySelector('#ub-emulator-hint').textContent`), /Build the ISO first/);
+    // Clicking the disabled button does nothing, and not even a dialog opens.
+    await page.click('#ub-emulator');
+    assert.equal(await page.eval(`!!document.querySelector('dialog[open]')`), false);
+    assert.deepEqual(page.requests.filter(r => /emulator/i.test(r.url)), []);
+  }
+});
+
+test('without cross-origin isolation the page says the emulator is not available and has no button for it', async () => {
+  const plain = await serve({ app: site.appDir, mirror: site.mirrorDir });
+  try {
+    await page.goto(`http://127.0.0.1:${plain.port}/`);
+    await page.waitFor(`document.documentElement.dataset.ubReleases === '1'`);
+    assert.equal(await page.eval(`document.querySelector('#ub-emulator')`), null);
+    assert.match(await page.eval(`document.querySelector('#ub-emulator-hint').textContent`), /emulator is not available here: .*cross-origin isolated/);
+    assert.ok(page.requests.every(r => !/emulator\/[0-9a-f]+\//.test(r.url)));
+  } finally {
+    await plain.close();
+  }
 });
 
 test('without a release list the page says so and offers files from the computer, never GitHub', async () => {
@@ -396,4 +419,59 @@ test('a template file from the computer is checked against SHA256SUMS and its si
   await page.waitFor(`!document.querySelector('dialog[open]')`);
   assert.match(await page.eval(`document.querySelector('#ub-verify').textContent`), /signature of the checksums is valid/);
   assert.equal(await page.eval(`document.querySelector('#ub-build').disabled`), false);
+});
+
+// The emulator itself: boots the image the page has just built, in the headless browser. Slow (about 20 s)
+// and needs the runtime (`make builder-emulator`) and a real template ISO (`make template`).
+const bigTemplate = realTemplate();
+test('the emulator boots the image that was just built and its kernel prints the page\'s fingerprint', {
+  skip: (!emulatorBuilt && 'run `make builder-emulator`') || (!bigTemplate && 'run `make template`') || (!haveDevCerts() && 'run `make certs`'),
+  timeout: 240000,
+}, async () => {
+  const real = await prepareSite({ releases: (_small, big) => [{ tag: 'v9.9.9', published: '2026-11-05T09:00:00Z', template: { path: big } }], real: true });
+  const srv = await serve({ app: real.appDir, mirror: real.mirrorDir, headers: ISOLATION });
+  try {
+    await page.goto(`http://127.0.0.1:${srv.port}/#`);
+    await page.eval('sessionStorage.clear()');
+    await page.goto(`http://127.0.0.1:${srv.port}/`);
+    await page.waitFor(`document.documentElement.dataset.ubReleases === '1'`);
+    const errorsBefore = page.consoleErrors.length; // the page object is shared: earlier tests left errors on purpose
+    await importAllDevMaterial();
+    await page.click('.ub-preset:nth-child(2)'); // a fixed address
+    await setField('network.address', '10.0.2.15/24');
+    await setField('network.gateway', '10.0.2.2');
+    await page.waitFor(`document.querySelector('.ub-bar-status').classList.contains('ok')`);
+    await build();
+    await waitBuilt();
+    await closeDialogs(); // the instructions that open after a build
+    const info = await page.eval(`document.querySelector('.ub-result').textContent`);
+    const fingerprint = info.replace(/\s/g, '').match(/[0-9a-f]{64}/g).pop();
+    assert.deepEqual(page.requests.filter(r => /\/emulator\//.test(r.url)), [], 'still nothing of the emulator after the build');
+
+    await openDialog('#ub-emulator');
+    assert.deepEqual(page.requests.filter(r => /\/emulator\//.test(r.url)), [], 'the dialog is not the emulator: still nothing fetched');
+    const note = await page.eval(`document.querySelector('dialog[open]').textContent`);
+    assert.match(note, /far slower than real hardware/);
+    assert.match(note, /says nothing about the broker's performance/);
+    assert.match(note, /no network/);
+    await page.click('#ub-emu-start');
+    await page.waitFor(`/URMQTT READY/.test(document.querySelector('.ub-emu-log').textContent)`, { what: 'the kernel to be ready', timeout: 120000 });
+    const log = await page.eval(`document.querySelector('.ub-emu-log').textContent`);
+    assert.ok(log.includes(`config: fingerprint ${fingerprint}`), 'the emulated kernel prints the fingerprint the page showed');
+    assert.match(await page.eval(`document.querySelector('dialog[open] .ub-checks').textContent`), /same configuration fingerprint as this page/);
+    // Now (and only now) the emulator's files were requested, from this site only. (The protocol reports the page's
+    // own requests, the loader and its worker; the worker's requests for the wasm and the ROMs are its own.)
+    const emu = page.requests.filter(r => /\/emulator\//.test(r.url));
+    assert.ok(emu.length >= 2 && emu.some(r => /urmqtt-emulator\.js$/.test(r.url)) && emu.some(r => /emu-worker\.js$/.test(r.url)), JSON.stringify(emu.map(r => r.url)));
+    assert.ok(emu.every(r => r.url.startsWith(`http://127.0.0.1:${srv.port}/`) && r.method === 'GET'));
+    // The screen was drawn on the canvas (not all black).
+    const lit = await page.eval(`(() => { const c = document.querySelector('dialog[open] canvas'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 0; i < d.length; i += 4000) if (d[i] || d[i + 1] || d[i + 2]) n++; return n; })()`);
+    assert.ok(lit > 10, `the console canvas is drawn (${lit} lit samples)`);
+    if (SHOTS) await page.screenshot(join(SHOTS, 'emulator.png'));
+    // Closing stops it.
+    await closeDialogs();
+    assert.deepEqual(page.consoleErrors.slice(errorsBefore).filter(e => !/favicon/.test(e)), []);
+  } finally {
+    await srv.close();
+  }
 });

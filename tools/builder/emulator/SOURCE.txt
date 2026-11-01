@@ -1,0 +1,42 @@
+urMQTT builder: the files of "Try in the emulator"
+==================================================
+
+This directory holds what the page loads only when the visitor clicks "Try in the emulator".
+Two kinds of files, with different licences.
+
+1. The loader (this repository, MIT OR Apache-2.0)
+   urmqtt-emulator.js, emu-worker.js, emu-core.js
+   Source: https://github.com/zeljan-alduk/urMQTT/tree/main/tools/builder/emulator
+
+2. The emulator (qemu/): QEMU 8.2.0 compiled to WebAssembly
+   qemu/qemu-system-x86_64.wasm, qemu-system-x86_64.js (Emscripten glue), qemu-system-x86_64.worker.js
+   Licence: GNU General Public License version 2 (QEMU), with LGPL-2.1 (glib), MIT (Emscripten runtime,
+   mimalloc, the terminal glue) and other licences of the libraries linked into it.
+   Source of the emulator: https://github.com/ktock/qemu-wasm  (a fork of QEMU 8.2.0 whose TCG backend
+   emits WebAssembly; the build recipe is in its README and Dockerfile). The files here are the
+   prebuilt files of its demo, https://github.com/ktock/qemu-wasm-demo-images at commit
+   b7c549b5e6f4c376f76483a03e983214421434ad (directory alpine-x86_64/), with two changes made by
+   tools/builder/emulator/make-runtime.sh:
+     - the debug and name sections are removed from the .wasm (40.8 MB -> 12.4 MB);
+     - four bytes of the .wasm are changed: the upstream backend passes the wrong operands to the
+       WebAssembly translation of x86 POPCNT, which makes the urMQTT kernel refuse to boot. The change
+       in source form is qemu-wasm-ctpop-fix.patch (next to this file). Without it the emulator cannot
+       run the image; with it the serial log of the kernel equals that of native QEMU apart from CPU
+       features QEMU 8.2 does not emulate.
+   SHA-256 of the upstream files (what make-runtime.sh checks before it changes anything):
+     out.js                        dab94140dc2ea847181ba47ae4cbd759728e551d8fd9ba9de409711ed25eddcc
+     qemu-system-x86_64.wasm       f53107a35029d676aa551cd00d042f4f65af39a89bf72464494321fafdf54191
+     qemu-system-x86_64.worker.js  8efab02a9cb5ee63ced22e9853bce74cbb895d15a5fb3d5139fef855c50f62ea
+     load-rom.js                   617e4dc685cb2cedada4844f097eb18a56cf0f8bbd4c4e2e9231b4f07d0d8a88
+     load-rom.data                 15de099e1363ceb13a31b9d11836337bab974f9460836449330b20c0534d06c9
+   The corresponding source of these binaries is the repository above; a copy on a physical medium or
+   by e-mail is available on request: info@aldo.tech.
+
+3. Firmware (qemu/roms/), taken from the same bundle (QEMU 8.2.0 pc-bios)
+   bios-256k.bin     SeaBIOS 1.16.3        LGPL-3.0     https://seabios.org
+   vgabios-stdvga.bin  VGA BIOS            LGPL-2.1+    https://www.nongnu.org/vgabios/
+   kvmvapic.bin, linuxboot_dma.bin         GPL-2.0+     https://www.qemu.org
+
+The emulator runs entirely in the visitor's browser. It has no network: the machine it starts cannot
+reach anything and nothing can reach it. The image the visitor built is passed to it in memory and is
+never sent anywhere.

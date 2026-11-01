@@ -29,7 +29,9 @@ async function loadReleases(url) {
   const j = await res.json();
   if (!j || j.schema !== 1 || !Array.isArray(j.releases)) throw new Error('not a releases.json of schema 1');
   const releases = j.releases.map(r => ({ ...r, usable: releaseProblem(r) === '', problem: releaseProblem(r) }));
-  return { generated: j.generated, keyId: j.key_id, releases };
+  // Where the releases are published, for a link: only a GitHub address is ever shown as one.
+  const source = typeof j.source === 'string' && /^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/releases\/?$/.test(j.source) ? j.source : '';
+  return { generated: j.generated, keyId: j.key_id, source, releases };
 }
 
 /** Newest stable release with a usable template, else newest pre-release with one. */
