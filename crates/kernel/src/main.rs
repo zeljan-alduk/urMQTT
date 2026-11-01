@@ -13,6 +13,7 @@ extern crate alloc;
 use urmqtt_broker as _;
 use urmqtt_mqtt as _;
 use urmqtt_net as _;
+use urmqtt_plain as _;
 use urmqtt_store as _;
 use urmqtt_tcp as _;
 
@@ -70,6 +71,8 @@ mod mqtt_service;
 mod netproto;
 #[cfg(target_os = "none")]
 mod ops;
+#[cfg(target_os = "none")]
+mod plain;
 #[cfg(target_os = "none")]
 mod power;
 #[cfg(target_os = "none")]

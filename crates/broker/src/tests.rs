@@ -36,6 +36,7 @@ fn cfg() -> Config {
         telemetry: &["devices/+/telemetry/#"],
         fanout: false,
         control_ids: &["operator"],
+        plain: None,
     }
 }
 
@@ -1842,4 +1843,510 @@ fn stats_track_subscriptions_and_online_connections() {
     d.kill(&mut b, 0);
     assert_eq!((b.stats().subscriptions, b.stats().online), (1, 0));
     assert_eq!(b.stats().sessions, 1);
+}
+
+// ---- plaintext clients (P1, ADR-230) ---------------------------------------
+
+const PLAIN_ID: &str = "sensor-1";
+
+fn plain_cfg() -> Config {
+    Config {
+        plain: Some(PlainPolicy {
+            publish: &["devices/{id}/#", "lan/{id}/#"],
+            subscribe: &["devices/{id}/cmd/#", "announce/#"],
+            max_packet_size: 128,
+            rate_tokens: 3,
+            rate_period_ms: 1000,
+            retain: false,
+        }),
+        ..cfg()
+    }
+}
+
+/// A plaintext client: the login named `identity`, an ordinary client id.
+fn connect_plain(
+    b: &mut Broker,
+    identity: &str,
+    client_id: &str,
+    clean: bool,
+    will: Option<MqttWill<'_>>,
+    now: u64,
+) -> (Client, Got) {
+    let mut c = Client {
+        c: b.open(now).unwrap(),
+        rx: Vec::new(),
+        pending: Vec::new(),
+    };
+    assert!(b.set_plain_identity(c.c, identity));
+    c.send(
+        b,
+        &Packet::Connect(Connect {
+            protocol_level: 4,
+            clean_session: clean,
+            keep_alive: 10,
+            client_id,
+            will,
+            username: Some(identity),
+            password: Some(b"ignored by the broker"),
+        }),
+        now,
+    );
+    let mut got = c.recv(b);
+    let ack = got.remove(0);
+    c.pending = got;
+    (c, ack)
+}
+
+#[test]
+fn a_plaintext_client_is_a_device_of_its_login_with_a_free_client_id() {
+    let mut b = Broker::new(plain_cfg());
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    assert_eq!(
+        svc.subscribe(&mut b, 1, &[("devices/#", QoS::AtMostOnce)], 0),
+        vec![Got::SubAck(1, vec![0])]
+    );
+    // The client id is whatever the client likes (mosquitto's default has `|`).
+    let (mut p, ack) = connect_plain(&mut b, PLAIN_ID, "mosqpub|4711-host", true, None, 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    assert_eq!(b.client_id(p.c), Some("$plain/sensor-1/mosqpub|4711-host"));
+    // The ACL's {id} is the login: own topics yes, other devices no.
+    assert!(
+        p.publish(
+            &mut b,
+            "devices/sensor-1/telemetry/t",
+            b"21",
+            QoS::AtLeastOnce,
+            false,
+            0
+        )
+        .contains(&Got::PubAck(7))
+    );
+    assert!(svc.recv(&mut b).contains(&publish(
+        "devices/sensor-1/telemetry/t",
+        b"21",
+        0,
+        None,
+        false
+    )));
+    let dropped = b.stats().dropped_acl;
+    p.publish(
+        &mut b,
+        "devices/sensor-2/telemetry/t",
+        b"x",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    p.publish(&mut b, "fleet/all", b"x", QoS::AtMostOnce, false, 0);
+    assert_eq!(b.stats().dropped_acl, dropped + 2);
+    assert!(svc.recv(&mut b).is_empty(), "nothing leaked to the backend");
+    // Subscriptions: its own commands and the open `announce/#`, not others'.
+    assert_eq!(
+        p.subscribe(
+            &mut b,
+            2,
+            &[
+                ("devices/sensor-1/cmd/#", QoS::AtLeastOnce),
+                ("devices/sensor-2/cmd/#", QoS::AtLeastOnce),
+                ("devices/+/cmd/#", QoS::AtLeastOnce),
+                ("announce/news", QoS::AtMostOnce),
+                ("#", QoS::AtMostOnce),
+            ],
+            0
+        ),
+        vec![Got::SubAck(2, vec![1, 0x80, 0x80, 0, 0x80])]
+    );
+    // A command from the backend reaches it, through the shared trie.
+    svc.publish(
+        &mut b,
+        "devices/sensor-1/cmd/reboot",
+        b"now",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(
+        p.recv(&mut b),
+        vec![publish(
+            "devices/sensor-1/cmd/reboot",
+            b"now",
+            0,
+            None,
+            false
+        )]
+    );
+}
+
+#[test]
+fn a_plaintext_session_is_clean_and_leaves_nothing_behind() {
+    let mut b = Broker::new(Config {
+        persist: true,
+        ..plain_cfg()
+    });
+    // A stored session is not available to a plaintext client.
+    let (c, ack) = connect_plain(&mut b, PLAIN_ID, "c1", false, None, 0);
+    assert_eq!(ack, Got::ConnAck(false, 5));
+    assert_eq!(b.close_requested(c.c), Some(CloseReason::Rejected));
+    let (mut p, ack) = connect_plain(&mut b, PLAIN_ID, "c1", true, None, 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    p.subscribe(
+        &mut b,
+        1,
+        &[("devices/sensor-1/cmd/#", QoS::AtLeastOnce)],
+        0,
+    );
+    p.publish(
+        &mut b,
+        "devices/sensor-1/telemetry/t",
+        b"1",
+        QoS::AtLeastOnce,
+        true,
+        0,
+    );
+    assert_eq!(
+        b.drain_persist().count(),
+        0,
+        "no stored session, subscription or message"
+    );
+    p.kill(&mut b, 0);
+    assert_eq!(
+        b.stats().sessions,
+        0,
+        "the session ended with its connection"
+    );
+    assert_eq!(b.drain_persist().count(), 0);
+}
+
+#[test]
+fn a_plaintext_client_id_cannot_take_over_anything_else() {
+    let mut b = Broker::new(plain_cfg());
+    // A TLS device named dev-1 is online.
+    let (tls, ack) = Client::connect_tls(&mut b, "dev-1", 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    // A plaintext client of any login that picks the client id dev-1 does not
+    // meet it, not even if its login is also dev-1.
+    for login in ["dev-1", "x"] {
+        let (p, ack) = connect_plain(&mut b, login, "dev-1", true, None, 0);
+        assert_eq!(ack, Got::ConnAck(false, 0), "{login}");
+        assert_eq!(
+            b.close_requested(tls.c),
+            None,
+            "{login}: the TLS session is untouched"
+        );
+        assert_eq!(b.close_requested(p.c), None);
+    }
+    // Two logins with the same client id are two sessions; the same login with
+    // the same client id is the same session (a reconnect takes over).
+    let (a1, _) = connect_plain(&mut b, "alice", "phone", true, None, 0);
+    let (b1, _) = connect_plain(&mut b, "bob", "phone", true, None, 0);
+    assert_eq!(b.close_requested(a1.c), None);
+    assert_eq!(b.close_requested(b1.c), None);
+    let (a2, _) = connect_plain(&mut b, "alice", "phone", true, None, 0);
+    assert_eq!(b.close_requested(a1.c), Some(CloseReason::TakenOver));
+    assert_eq!(b.close_requested(b1.c), None);
+    assert_eq!(b.close_requested(a2.c), None);
+    // A plaintext client id is not a topic level, so what a certificate identity
+    // may not hold is fine here (mosquitto's default id has a slash); only
+    // nothing is refused.
+    for odd in [
+        "mosqpub/4711-host",
+        "a/b",
+        "x+",
+        "#",
+        "$sys",
+        "with space",
+        "ünï",
+    ] {
+        let (c, ack) = connect_plain(&mut b, PLAIN_ID, odd, true, None, 0);
+        assert_eq!(ack, Got::ConnAck(false, 0), "{odd:?}");
+        assert_eq!(
+            b.client_id(c.c),
+            Some(format!("$plain/sensor-1/{odd}").as_str())
+        );
+        c.kill(&mut b, 0);
+    }
+    // No id at all (what mosquitto's tools send): a clean session is named by
+    // the broker, each time a new one; a stored session without an id is refused.
+    let (e1, ack) = connect_plain(&mut b, PLAIN_ID, "", true, None, 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    let (e2, ack) = connect_plain(&mut b, PLAIN_ID, "", true, None, 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    let (n1, n2) = (
+        b.client_id(e1.c).map(String::from).unwrap(),
+        b.client_id(e2.c).map(String::from).unwrap(),
+    );
+    assert!(n1.starts_with("$plain/sensor-1/auto-") && n2.starts_with("$plain/sensor-1/auto-"));
+    assert_ne!(n1, n2, "two anonymous clients are two sessions");
+    assert_eq!(b.close_requested(e1.c), None);
+    let (_, ack) = connect_plain(&mut b, PLAIN_ID, "", false, None, 0);
+    assert_eq!(ack, Got::ConnAck(false, 2));
+    // ... and the identity in the key is read back as the identity, however odd the tail.
+    let (mut p, _) = connect_plain(&mut b, PLAIN_ID, "x/devices/sensor-2", true, None, 0);
+    assert_eq!(
+        p.subscribe(
+            &mut b,
+            1,
+            &[
+                ("devices/sensor-2/cmd/#", QoS::AtMostOnce),
+                ("devices/sensor-1/cmd/#", QoS::AtMostOnce)
+            ],
+            0
+        ),
+        vec![Got::SubAck(1, vec![0x80, 0])]
+    );
+}
+
+#[test]
+fn a_plaintext_client_never_holds_another_role_whatever_its_name() {
+    let mut b = Broker::new(Config {
+        control_ids: &["controller"],
+        ..plain_cfg()
+    });
+    let (mut tls_svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    tls_svc.subscribe(&mut b, 1, &[("devices/#", QoS::AtMostOnce)], 0);
+    // The names of a service, an operator and a control identity.
+    for name in ["backend", "ops", "controller"] {
+        let (mut p, ack) = connect_plain(&mut b, name, "c", true, None, 0);
+        assert_eq!(ack, Got::ConnAck(false, 0), "{name}");
+        // Not the service's wide rights: `devices/#` and the commands it publishes.
+        assert_eq!(
+            p.subscribe(
+                &mut b,
+                1,
+                &[("devices/#", QoS::AtMostOnce), ("fleet/#", QoS::AtMostOnce)],
+                0
+            ),
+            vec![Got::SubAck(1, vec![0x80, 0x80])],
+            "{name}"
+        );
+        let before = b.stats().dropped_acl;
+        p.publish(
+            &mut b,
+            &format!("devices/other/cmd/{name}"),
+            b"x",
+            QoS::AtMostOnce,
+            false,
+            0,
+        );
+        assert_eq!(b.stats().dropped_acl, before + 1, "{name}");
+        // Not the operator's $SYS: neither reading nor the console.
+        assert_eq!(
+            p.subscribe(
+                &mut b,
+                2,
+                &[
+                    ("$SYS/#", QoS::AtMostOnce),
+                    ("$SYS/broker/uptime", QoS::AtMostOnce)
+                ],
+                0
+            ),
+            vec![Got::SubAck(2, vec![0x80, 0x80])],
+            "{name}"
+        );
+        p.publish(
+            &mut b,
+            "$SYS/console/in",
+            b"reboot",
+            QoS::AtMostOnce,
+            false,
+            0,
+        );
+        p.publish(&mut b, "$SYS/query/info", b"", QoS::AtMostOnce, false, 0);
+        assert_eq!(b.drain_sys_requests().count(), 0, "{name}");
+        // Not the control channel, even with the right name: dropped and counted.
+        let before = b.dropped_control();
+        p.publish(
+            &mut b,
+            "$urmqtt/control",
+            b"forged",
+            QoS::AtMostOnce,
+            false,
+            0,
+        );
+        assert_eq!(b.dropped_control(), before + 1, "{name}");
+        assert_eq!(b.drain_control().count(), 0, "{name}");
+        p.kill(&mut b, 0);
+    }
+    assert!(tls_svc.recv(&mut b).is_empty());
+    // And a will cannot be a way in either.
+    for topic in ["$SYS/console/in", "$urmqtt/control", "devices/other/status"] {
+        let will = MqttWill {
+            topic,
+            payload: b"x",
+            qos: QoS::AtMostOnce,
+            retain: false,
+        };
+        let (_, ack) = connect_plain(&mut b, PLAIN_ID, "w", true, Some(will), 0);
+        assert_eq!(ack, Got::ConnAck(false, 5), "{topic}");
+    }
+}
+
+#[test]
+fn the_plaintext_limits_are_its_own() {
+    let mut b = Broker::new(plain_cfg());
+    // The packet limit (128 bytes here, 4096 for the rest).
+    let (mut p, _) = connect_plain(&mut b, PLAIN_ID, "big", true, None, 0);
+    p.publish(
+        &mut b,
+        "devices/sensor-1/t",
+        &[7u8; 60],
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(b.close_requested(p.c), None);
+    p.publish(
+        &mut b,
+        "devices/sensor-1/t",
+        &[7u8; 200],
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(b.close_requested(p.c), Some(CloseReason::ProtocolError));
+    let (mut tls, _) = Client::connect_tls(&mut b, "dev-9", 0);
+    tls.publish(
+        &mut b,
+        "devices/dev-9/t",
+        &[7u8; 200],
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(
+        b.close_requested(tls.c),
+        None,
+        "a TLS device keeps the larger limit"
+    );
+    // The CONNECT itself counts: a plaintext CONNECT over the limit is refused
+    // before it is read to the end.
+    let c = b.open(0).unwrap();
+    assert!(b.set_plain_identity(c, PLAIN_ID));
+    let long_id = "x".repeat(300);
+    b.input(c, &[0x10, 0xff, 0x03], 0);
+    b.input(c, long_id.as_bytes(), 0);
+    assert_eq!(b.close_requested(c), Some(CloseReason::ProtocolError));
+    // The publish rate: 3 tokens per second, a TLS device has 100.
+    let (mut q, _) = connect_plain(&mut b, PLAIN_ID, "rate", true, None, 0);
+    let dropped = b.stats().dropped_rate;
+    for _ in 0..5 {
+        q.publish(
+            &mut b,
+            "devices/sensor-1/t",
+            b"1",
+            QoS::AtMostOnce,
+            false,
+            10,
+        );
+    }
+    assert_eq!(b.stats().dropped_rate, dropped + 2);
+    for _ in 0..20 {
+        tls.publish(&mut b, "devices/dev-9/t", b"1", QoS::AtMostOnce, false, 10);
+    }
+    assert_eq!(
+        b.stats().dropped_rate,
+        dropped + 2,
+        "the TLS device is not limited by it"
+    );
+    // It refills at the plaintext rate.
+    q.publish(
+        &mut b,
+        "devices/sensor-1/t",
+        b"1",
+        QoS::AtMostOnce,
+        false,
+        2000,
+    );
+    assert_eq!(b.stats().dropped_rate, dropped + 2);
+}
+
+#[test]
+fn a_retained_publish_of_a_plaintext_client_is_delivered_but_not_retained_unless_allowed() {
+    let mut b = Broker::new(plain_cfg());
+    let (mut sub, _) = Client::connect(&mut b, "backend", true, None, 0);
+    sub.subscribe(&mut b, 1, &[("devices/#", QoS::AtMostOnce)], 0);
+    let (mut p, _) = connect_plain(&mut b, PLAIN_ID, "r", true, None, 0);
+    p.publish(
+        &mut b,
+        "devices/sensor-1/state",
+        b"on",
+        QoS::AtMostOnce,
+        true,
+        0,
+    );
+    // Delivered live, with the retain flag cleared (a live delivery has none).
+    assert_eq!(
+        sub.recv(&mut b),
+        vec![publish("devices/sensor-1/state", b"on", 0, None, false)]
+    );
+    assert_eq!(b.stats().retained, 0);
+    // A will with the retain flag is not retained either.
+    let will = MqttWill {
+        topic: "devices/sensor-1/status",
+        payload: b"offline",
+        qos: QoS::AtMostOnce,
+        retain: true,
+    };
+    let (w, _) = connect_plain(&mut b, PLAIN_ID, "w", true, Some(will), 0);
+    w.kill(&mut b, 0);
+    assert_eq!(
+        sub.recv(&mut b),
+        vec![publish(
+            "devices/sensor-1/status",
+            b"offline",
+            0,
+            None,
+            false
+        )]
+    );
+    assert_eq!(b.stats().retained, 0);
+    // Allowed by the configuration: retained, and owned by the login.
+    let mut b = Broker::new(Config {
+        plain: plain_cfg().plain.map(|p| PlainPolicy { retain: true, ..p }),
+        ..cfg()
+    });
+    let (mut p, _) = connect_plain(&mut b, PLAIN_ID, "r", true, None, 0);
+    p.publish(
+        &mut b,
+        "devices/sensor-1/state",
+        b"on",
+        QoS::AtMostOnce,
+        true,
+        0,
+    );
+    assert_eq!(b.stats().retained, 1);
+}
+
+#[test]
+fn a_broker_that_serves_no_plaintext_refuses_the_login() {
+    let mut b = Broker::new(cfg());
+    let c = b.open(0).unwrap();
+    assert!(!b.set_plain_identity(c, PLAIN_ID));
+    // The ACL asked for the plaintext role directly gets nothing.
+    assert!(!cfg().may_publish(Role::Plain, PLAIN_ID, "devices/sensor-1/t"));
+    assert!(!cfg().may_subscribe(Role::Plain, PLAIN_ID, "devices/sensor-1/cmd/#"));
+}
+
+#[test]
+fn plaintext_sessions_are_found_by_the_allowlist_sweep_by_their_login() {
+    let mut b = Broker::new(plain_cfg());
+    let (a, _) = connect_plain(&mut b, "alice", "c1", true, None, 0);
+    let (z, _) = connect_plain(&mut b, "zoe", "c1", true, None, 0);
+    let (dev, _) = Client::connect_tls(&mut b, "dev-5", 0);
+    let seen = std::cell::RefCell::new(Vec::new());
+    let closed = b.disconnect_unless(
+        |id, role| {
+            seen.borrow_mut().push((id.to_owned(), role));
+            !(role == Role::Plain && id == "alice")
+        },
+        CloseReason::Disallowed,
+    );
+    let seen = seen.into_inner();
+    assert_eq!(closed, 1);
+    assert_eq!(b.close_requested(a.c), Some(CloseReason::Disallowed));
+    assert_eq!(b.close_requested(z.c), None);
+    assert_eq!(b.close_requested(dev.c), None);
+    assert!(seen.contains(&("alice".to_owned(), Role::Plain)));
+    assert!(seen.contains(&("zoe".to_owned(), Role::Plain)));
+    assert!(seen.contains(&("dev-5".to_owned(), Role::Device)));
 }

@@ -570,7 +570,10 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     );
     let profile = urmqtt_tls::bench::run(uptime_ns);
     info!("crypto-profile: {profile}");
-    let hs_budget = crate::watchdog::calibrate(profile.handshake_ns());
+    // A plaintext login with a password costs CPU in the same handler class
+    // as a handshake step (P1): the budget covers the dearer of the two.
+    let passwd_ns = crate::plain::measure();
+    let hs_budget = crate::watchdog::calibrate(profile.handshake_ns().max(passwd_ns));
     info!(
         "watchdog: handshake budget {hs_budget} ms ({}), other handlers {} ms, stuck-core reset at {} ms",
         if urmqtt_config::CONFIG.watchdog.handshake_budget_ms == 0 {
@@ -682,6 +685,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         crate::db::start_log_crash(cpus);
     }
     crate::mqtt_service::init_tickets(s.options.ticket_rotate_s);
+    crate::plain::init();
     crate::dataplane::init(data_cores);
     crate::dataplane::set_heap_reserve(s.options.heap_limit_mb);
     crate::dataplane::set_bench_limits(s.options.bench_limits);
@@ -1019,6 +1023,26 @@ fn report_config(module: bool, result: &Result<urmqtt_config::LoadInfo, urmqtt_c
                 signed,
                 urmqtt_config::CONFIG.env,
             );
+            // The fingerprint report says so when the image speaks plaintext (P1).
+            let pl = &urmqtt_config::CONFIG.plaintext;
+            if pl.enabled {
+                warn!(
+                    "config: plaintext MQTT is ON (port {}, {}, {} account(s), {} network(s) allowed{}): the traffic on that port is not encrypted",
+                    pl.port,
+                    match pl.auth {
+                        urmqtt_config::PlainAuth::Password => "password login",
+                        urmqtt_config::PlainAuth::Anonymous => "no login",
+                        urmqtt_config::PlainAuth::Ip => "login by address",
+                    },
+                    pl.users.len(),
+                    pl.allow_from.len(),
+                    if pl.allow_from_anywhere {
+                        ", ANY ADDRESS"
+                    } else {
+                        ""
+                    }
+                );
+            }
             if !module {
                 warn!("config: no configuration module was loaded: built-in defaults");
             } else if i.empty {

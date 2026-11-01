@@ -89,6 +89,53 @@ pub struct Config {
     /// Operational identities that may publish control messages to
     /// `$urmqtt/control` ([`Broker::drain_control`], H1).
     pub control_ids: &'static [&'static str],
+    /// The rules of plaintext sessions (P1, ADR-230); `None`: this broker
+    /// serves none, and a connection that claims to be one is refused.
+    pub plain: Option<PlainPolicy>,
+}
+
+/// What a plaintext session may do and how much (P1, ADR-229, ADR-230). The
+/// ACL is the configuration's `plaintext.acl_*`; a plaintext client never
+/// holds the service, operator or control role, whatever its name.
+#[derive(Debug, Clone, Copy)]
+pub struct PlainPolicy {
+    /// Topic filters it may publish to; `{id}` is its identity.
+    pub publish: &'static [&'static str],
+    /// Topic filters it may subscribe to.
+    pub subscribe: &'static [&'static str],
+    /// Largest MQTT packet it may send.
+    pub max_packet_size: u32,
+    /// Publish token bucket of its sessions.
+    pub rate_tokens: u32,
+    pub rate_period_ms: u32,
+    /// May it publish retained messages (a retained publish is delivered but
+    /// not retained when not).
+    pub retain: bool,
+}
+
+impl Config {
+    /// May the session of `role` and ACL name `id` publish to `topic`? The
+    /// plaintext role has its own patterns.
+    fn may_publish(&self, role: Role, id: &str, topic: &str) -> bool {
+        match (role, &self.plain) {
+            (Role::Plain, Some(p)) => acl::plain_may_publish(p.publish, id, topic),
+            (Role::Plain, None) => false,
+            _ => self.acl.may_publish(role, id, topic),
+        }
+    }
+
+    fn may_subscribe(&self, role: Role, id: &str, filter: &str) -> bool {
+        match (role, &self.plain) {
+            (Role::Plain, Some(p)) => acl::plain_may_subscribe(p.subscribe, id, filter),
+            (Role::Plain, None) => false,
+            _ => self.acl.may_subscribe(role, id, filter),
+        }
+    }
+
+    /// May a session of `role` publish retained messages?
+    fn may_retain(&self, role: Role) -> bool {
+        role != Role::Plain || self.plain.is_some_and(|p| p.retain)
+    }
 }
 
 /// Session-key prefix of bootstrap identities (H1). A real client id can
@@ -96,6 +143,19 @@ pub struct Config {
 /// an operational session of the same id: it can neither take it over nor
 /// read its queue.
 const BOOTSTRAP_KEY: &str = "$bootstrap/";
+
+/// Session-key prefix of plaintext sessions (P1, ADR-230): the key is
+/// `$plain/<identity>/<client id>`. A certificate identity never starts with
+/// `$` or contains `/`, so a plaintext client cannot take over a TLS device's
+/// session by choosing its client id, and the sessions of two plaintext
+/// identities never meet either. Plaintext sessions are clean: nothing of
+/// them is persisted.
+pub const PLAIN_KEY: &str = "$plain/";
+
+/// The session key of the plaintext client `client_id` of `identity`.
+pub fn plain_session_key(identity: &str, client_id: &str) -> alloc::string::String {
+    alloc::format!("{PLAIN_KEY}{identity}/{client_id}")
+}
 
 /// The control topic (H1); see `urmqtt_control::TOPIC`.
 pub const CONTROL_TOPIC: &str = "$urmqtt/control";
@@ -247,6 +307,10 @@ struct Extra {
     identity: Option<Box<str>>,
     /// The identity comes from a bootstrap trust anchor (H1).
     bootstrap: bool,
+    /// A plaintext connection (P1): the identity is the login's, not a
+    /// certificate's. Stays set for the connection's life: it selects the
+    /// packet limit, the rate and the rules.
+    plain: bool,
     will: Option<Will>,
 }
 
@@ -260,10 +324,14 @@ impl Conn {
         if self
             .extra
             .as_ref()
-            .is_some_and(|e| e.identity.is_none() && e.will.is_none())
+            .is_some_and(|e| e.identity.is_none() && e.will.is_none() && !e.plain)
         {
             self.extra = None;
         }
+    }
+
+    fn plain(&self) -> bool {
+        self.extra.as_ref().is_some_and(|e| e.plain)
     }
 }
 
@@ -332,14 +400,20 @@ struct Session {
 
 impl Session {
     /// The identity the ACL's `{id}` stands for (the client id without the
-    /// bootstrap session prefix).
+    /// bootstrap session prefix; for a plaintext session the identity of
+    /// `$plain/<identity>/<client id>`).
     fn acl_id(&self) -> &str {
-        if self.role == Role::Bootstrap {
-            self.client_id
+        match self.role {
+            Role::Bootstrap => self
+                .client_id
                 .strip_prefix(BOOTSTRAP_KEY)
-                .unwrap_or_default()
-        } else {
-            &self.client_id
+                .unwrap_or_default(),
+            Role::Plain => self
+                .client_id
+                .strip_prefix(PLAIN_KEY)
+                .and_then(|r| r.split('/').next())
+                .unwrap_or_default(),
+            _ => &self.client_id,
         }
     }
 
@@ -388,6 +462,9 @@ pub struct Broker {
     /// subscriber.
     console: VecDeque<Msg>,
     sys_in: Vec<SysRequest>,
+    /// Counter for the client ids this shard gives plaintext clients that
+    /// bring none (MQTT 3.1.1 3.1.3.1; mosquitto's tools send none).
+    plain_seq: u64,
 }
 
 /// The scope level of the device ACL: the first level of a device
@@ -471,6 +548,7 @@ impl Broker {
             sys_bytes: 0,
             console: VecDeque::new(),
             sys_in: Vec::new(),
+            plain_seq: 0,
         }
     }
 
@@ -872,6 +950,24 @@ impl Broker {
         }
     }
 
+    /// Binds the identity the login of plaintext connection `c` established
+    /// (before its CONNECT, P1). The connection then has the plaintext limits
+    /// and the plaintext role, and its client id is free: the session is named
+    /// `$plain/<identity>/<client id>` ([`plain_session_key`]). Returns false
+    /// when this broker serves no plaintext sessions; the caller closes the
+    /// connection.
+    pub fn set_plain_identity(&mut self, c: ConnId, identity: &str) -> bool {
+        if self.cfg.plain.is_none() {
+            return false;
+        }
+        if let Some(k) = self.conn(c) {
+            let e = k.extra_mut();
+            e.identity = Some(identity.into());
+            e.plain = true;
+        }
+        true
+    }
+
     fn conn(&mut self, c: ConnId) -> Option<&mut Conn> {
         self.conns.get_mut(c)
     }
@@ -882,7 +978,17 @@ impl Broker {
 
     /// Bytes received on `c`. Processes every complete packet.
     pub fn input(&mut self, c: ConnId, data: &[u8], now_ms: u64) {
-        let limit = self.cfg.limits.max_packet_size as usize + INBUF_SLACK;
+        // A plaintext connection has a packet limit of its own (P1). For every
+        // other connection this costs one test of a field that is `None`
+        // unless plaintext is configured.
+        let limits = match &self.cfg.plain {
+            Some(p) if self.conns.get(c).is_some_and(Conn::plain) => Limits {
+                max_packet_size: p.max_packet_size,
+                ..self.cfg.limits
+            },
+            _ => self.cfg.limits,
+        };
+        let limit = limits.max_packet_size as usize + INBUF_SLACK;
         let Some(conn) = self.conn(c) else { return };
         if conn.close.is_some() {
             return;
@@ -895,7 +1001,6 @@ impl Broker {
                 return;
             }
             let buf = conn.inbuf.take();
-            let limits = self.cfg.limits;
             match decode(&buf, &limits) {
                 Ok((packet, used)) => {
                     self.handle(c, packet, now_ms);
@@ -1124,15 +1229,38 @@ impl Broker {
     }
 
     fn on_connect(&mut self, c: ConnId, p: &Connect<'_>, now_ms: u64) {
-        if !Self::valid_identity(p.client_id) {
+        // A plaintext connection (P1, ADR-230): the identity is what its login
+        // established and its client id is free. Taken here; cleared below.
+        let plain_conn = self.conn(c).is_some_and(|k| k.plain());
+        // A certificate identity becomes a topic level (`{id}`), so it may not
+        // hold `/`, `+`, `#` or start with `$`. A plaintext client id is only the
+        // tail of a session name (mosquitto's own default, `mosqpub/4711-host`,
+        // has a slash): anything will do, and nothing too (the broker names a
+        // clean session that brings no id, 3.1.3.1).
+        let usable = if plain_conn {
+            !p.client_id.is_empty() || p.clean_session
+        } else {
+            Self::valid_identity(p.client_id)
+        };
+        if !usable {
             return self.reject(c, ConnectReturnCode::IdentifierRejected);
         }
-        // PROMPT §7.1: the client id must equal the certificate identity.
-        let mismatch = self
+        let plain_id: Option<Box<str>> = self
             .conns
             .get(c)
-            .and_then(|k| k.extra.as_ref()?.identity.as_deref())
-            .is_some_and(|id| id != p.client_id);
+            .and_then(|k| k.extra.as_ref())
+            .filter(|e| e.plain)
+            .and_then(|e| e.identity.clone());
+        if plain_conn && plain_id.is_none() {
+            return self.reject(c, ConnectReturnCode::NotAuthorized);
+        }
+        // PROMPT §7.1: the client id must equal the certificate identity.
+        let mismatch = !plain_conn
+            && self
+                .conns
+                .get(c)
+                .and_then(|k| k.extra.as_ref()?.identity.as_deref())
+                .is_some_and(|id| id != p.client_id);
         if mismatch {
             return self.reject(c, ConnectReturnCode::IdentifierRejected);
         }
@@ -1162,7 +1290,14 @@ impl Broker {
         if bootstrap && !p.clean_session {
             return self.reject(c, ConnectReturnCode::NotAuthorized);
         }
-        let role = if bootstrap {
+        // Nor is a plaintext session: nothing of it is kept once it is over, so
+        // a client that asks for a stored session is told it cannot have one.
+        if plain_conn && !p.clean_session {
+            return self.reject(c, ConnectReturnCode::NotAuthorized);
+        }
+        let role = if plain_conn {
+            Role::Plain
+        } else if bootstrap {
             Role::Bootstrap
         } else {
             match self.cfg.acl.role(p.client_id) {
@@ -1170,19 +1305,29 @@ impl Broker {
                 r => r,
             }
         };
-        let boot_key;
-        let key: &str = if bootstrap {
+        let (boot_key, plain_key);
+        let key: &str = if let Some(id) = plain_id.as_deref() {
+            let tail = if p.client_id.is_empty() {
+                self.plain_seq += 1;
+                alloc::format!("auto-{}", self.plain_seq)
+            } else {
+                p.client_id.into()
+            };
+            plain_key = plain_session_key(id, &tail);
+            &plain_key
+        } else if bootstrap {
             boot_key = alloc::format!("{BOOTSTRAP_KEY}{}", p.client_id);
             &boot_key
         } else {
             p.client_id
         };
+        // The name the ACL's `{id}` stands for: the certificate's identity (the
+        // client id, equal to it), or the login's for a plaintext client.
+        let acl_name: &str = plain_id.as_deref().unwrap_or(p.client_id);
         let will = match &p.will {
             // A will is published by the broker on the client's behalf: it
             // must never be a way into `$SYS/` (the console input).
-            Some(w)
-                if acl::sys(w.topic) || !self.cfg.acl.may_publish(role, p.client_id, w.topic) =>
-            {
+            Some(w) if acl::sys(w.topic) || !self.cfg.may_publish(role, acl_name, w.topic) => {
                 return self.reject(c, ConnectReturnCode::NotAuthorized);
             }
             Some(w) => Some(Will {
@@ -1191,8 +1336,8 @@ impl Broker {
                     payload: w.payload.into(),
                 }),
                 qos: w.qos.min(QoS::AtLeastOnce),
-                retain: w.retain,
-                owner: p.client_id.into(),
+                retain: w.retain && self.cfg.may_retain(role),
+                owner: acl_name.into(),
             }),
             None => None,
         };
@@ -1287,7 +1432,10 @@ impl Broker {
             subs: Small::default(),
             pending: None,
             refilled_ms: now_ms,
-            tokens: self.cfg.rate_tokens,
+            tokens: match (&self.cfg.plain, role) {
+                (Some(p), Role::Plain) => p.rate_tokens,
+                _ => self.cfg.rate_tokens,
+            },
             next_pid: 1,
             persisted: false,
         };
@@ -1323,13 +1471,18 @@ impl Broker {
     }
 
     fn take_token(&mut self, sid: SessionId, now_ms: u64) -> bool {
-        let (rate, period) = (
+        let (mut rate, mut period) = (
             self.cfg.rate_tokens,
             u64::from(self.cfg.rate_period_ms.max(1)),
         );
+        let plain = self.cfg.plain;
         let Some(s) = self.session(sid) else {
             return false;
         };
+        // A plaintext session has a publish rate of its own (P1).
+        if let (Some(p), Role::Plain) = (plain, s.role) {
+            (rate, period) = (p.rate_tokens, u64::from(p.rate_period_ms.max(1)));
+        }
         let elapsed = now_ms.saturating_sub(s.refilled_ms);
         let refill = (elapsed * u64::from(rate) / period) as u32;
         if refill > 0 {
@@ -1365,7 +1518,8 @@ impl Broker {
         // operational control identity reaches the control handler, and
         // only on the exact control topic; everything else is dropped.
         if acl::reserved(p.topic) {
-            let control = role != Role::Bootstrap
+            // (Not a plaintext client, whatever its name: P1.)
+            let control = !matches!(role, Role::Bootstrap | Role::Plain)
                 && p.topic == CONTROL_TOPIC
                 && self.cfg.control_ids.iter().any(|id| **id == *allowed);
             if control && self.control.len() < MAX_CONTROL_BACKLOG {
@@ -1382,7 +1536,7 @@ impl Broker {
         // O1, O2: `$SYS/` belongs to operators. What they publish there is
         // a request to the kernel, never routed and never retained.
         if acl::sys(p.topic) {
-            if !self.cfg.acl.may_publish(role, &allowed, p.topic) {
+            if !self.cfg.may_publish(role, &allowed, p.topic) {
                 self.stats.dropped_acl += 1;
             } else if !self.take_token(sid, now_ms) || self.sys_in.len() >= sys::MAX_REQUESTS {
                 self.stats.dropped_sys += 1;
@@ -1400,7 +1554,7 @@ impl Broker {
             }
             return;
         }
-        if !self.cfg.acl.may_publish(role, &allowed, p.topic) {
+        if !self.cfg.may_publish(role, &allowed, p.topic) {
             self.stats.dropped_acl += 1;
             return;
         }
@@ -1421,7 +1575,10 @@ impl Broker {
         {
             self.telemetry.push(msg.clone());
         }
-        self.route(&msg, p.qos, p.retain.then_some(&*allowed));
+        // A retained publish of a plaintext client is delivered but not
+        // retained unless the configuration allows it (P1).
+        let retain = p.retain && self.cfg.may_retain(role);
+        self.route(&msg, p.qos, retain.then_some(&*allowed));
     }
 
     /// Delivers `msg` to every matching subscriber; retains it for `owner`
@@ -1651,7 +1808,7 @@ impl Broker {
         let Some(sid) = self.conn(c).and_then(|k| k.session) else {
             return;
         };
-        let acl = self.cfg.acl;
+        let cfg = self.cfg;
         let mut codes: Vec<u8> = Vec::with_capacity(topics.len());
         let mut granted: Vec<(&str, QoS)> = Vec::new();
         for &(filter, want) in topics {
@@ -1660,7 +1817,7 @@ impl Broker {
             };
             // QoS 2 is granted as 1 (§3.9.3 permits a lower grant).
             let qos = want.min(QoS::AtLeastOnce);
-            if !acl.may_subscribe(s.role, s.acl_id(), filter) || !self.add_sub(sid, filter, qos) {
+            if !cfg.may_subscribe(s.role, s.acl_id(), filter) || !self.add_sub(sid, filter, qos) {
                 codes.push(SUBACK_FAILURE);
                 continue;
             }

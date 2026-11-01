@@ -180,7 +180,20 @@ fn a_password_is_hashed_with_the_pages_salt_and_wiped() {
     assert!(read(pw2).iter().all(|b| *b == 0));
     let e = ub_error();
     assert!(String::from_utf8(read(e)).unwrap().contains("iterations"));
-    for h in [pw, pw2, salt, out, e] {
+    // An empty or a too long password is refused, as by the command line.
+    let nothing = ub_buf_new(0);
+    assert_eq!(ub_hash_password(nothing, salt, 1000), 0);
+    let e2 = ub_error();
+    assert!(String::from_utf8(read(e2)).unwrap().contains("empty"));
+    let long = put(&[b'x'; 300]);
+    assert_eq!(ub_hash_password(long, salt, 1000), 0);
+    let e3 = ub_error();
+    assert!(
+        String::from_utf8(read(e3))
+            .unwrap()
+            .contains("longer than 256")
+    );
+    for h in [pw, pw2, salt, out, e, nothing, e2, long, e3] {
         ub_buf_free(h);
     }
     assert_eq!(

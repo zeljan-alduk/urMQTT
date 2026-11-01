@@ -237,6 +237,9 @@ pub struct MqttService {
     ticket_rotations_seen: u64,
     /// `$SYS/` topics, the console and the operator's commands (O1, O2).
     sys: crate::sys::Sys,
+    /// The plaintext listener (P1, ADR-230); `None` unless the image's
+    /// configuration switches it on.
+    plain: Option<Box<crate::plain::PlainState>>,
 }
 
 /// This core's telemetry ring to the DB core.
@@ -387,6 +390,7 @@ pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
         telemetry: CONFIG.storage.telemetry_topics,
         fanout,
         control_ids: CONFIG.control.service_ids,
+        plain: crate::plain::broker_policy(),
     }
 }
 
@@ -493,6 +497,7 @@ impl MqttService {
                     "mqtt: PLAINTEXT listener on port {port} (dev build only, identity = client id)"
                 );
             }
+            crate::plain::announce(dataplane::workers(n).len());
         }
         let mut broker = Broker::new(broker_config(MAX_CONNS * n, n > 1));
         let mut homed = 0;
@@ -586,6 +591,7 @@ impl MqttService {
             tickets_refused_seen: 0,
             ticket_rotations_seen: 0,
             sys: crate::sys::Sys::new(me, n),
+            plain: crate::plain::PlainState::new(),
         }
     }
 
@@ -662,6 +668,9 @@ impl MqttService {
         if let Some(x) = self.plain_port {
             p.push(x);
         }
+        if let Some(pl) = &self.plain {
+            p.push(pl.port());
+        }
         p
     }
 
@@ -685,6 +694,14 @@ impl MqttService {
     /// now (PERF, ADR-080). A refusal here costs no state and no packet,
     /// and the client's TCP retries after its backoff instead of at once.
     pub fn syn_ok(&mut self, port: u16, ip: [u8; 4], now_ms: u64) -> bool {
+        // The plaintext port: its allow-list, lock-out and limits (P1).
+        if self.is_plain_policy_port(port) {
+            let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
+            return self
+                .plain
+                .as_mut()
+                .is_some_and(|p| p.syn_ok(ip, now_ms, heap_ok, behind));
+        }
         let tls = Some(port) != self.plain_port;
         let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
         let Err(r) = self.adm.syn_check(ip, tls, now_ms, heap_ok, behind) else {
@@ -709,6 +726,12 @@ impl MqttService {
             );
         }
         false
+    }
+
+    /// Whether `port` is the plaintext listener of the image's configuration
+    /// (not the development port, which has no policy).
+    fn is_plain_policy_port(&self, port: u16) -> bool {
+        self.plain.as_ref().is_some_and(|p| p.port() == port)
     }
 
     /// Admission for a new connection (PROMPT §6, M16): free heap above the
@@ -739,16 +762,28 @@ impl MqttService {
 
     /// The connection `c` stops counting as a handshake in flight (once).
     fn leave_flight(&mut self, c: u32, how: Leave, now_ms: u64) {
+        let outcome = |t0_ms: u32| match how {
+            Leave::Done => Outcome::Done {
+                latency_ms: (now_ms as u32).wrapping_sub(t0_ms),
+            },
+            Leave::Failed => Outcome::Failed,
+            Leave::TimedOut => Outcome::TimedOut,
+        };
         if let Some(f) = self.flights.remove(&c) {
-            let outcome = match how {
-                Leave::Done => Outcome::Done {
-                    latency_ms: (now_ms as u32).wrapping_sub(f.t0_ms),
-                },
-                Leave::Failed => Outcome::Failed,
-                Leave::TimedOut => Outcome::TimedOut,
-            };
-            self.adm.leave(f.ip, outcome);
+            self.adm.leave(f.ip, outcome(f.t0_ms));
+        } else if let Some(p) = self.plain.as_mut() {
+            // A plaintext connection waiting for its CONNECT (P1).
+            p.leave_flight(c, outcome);
         }
+    }
+
+    /// Forgets the connection `c`: gives back what the plaintext listener
+    /// counted for it, and drops the transport state.
+    fn drop_conn(&mut self, c: u32, now_ms: u64) {
+        if let Some(p) = self.plain.as_mut() {
+            p.release(c, (now_ms / 1000) as u32);
+        }
+        self.conns.remove(&c);
     }
 
     /// Mirrors this core's admission counters into the shared statistics
@@ -829,8 +864,19 @@ impl MqttService {
     // ---- TCP events (called from the stack, see `TcpEvents`) -------------
 
     fn on_accept(&mut self, c: u32, port: u16, ip: [u8; 4], now_ms: u64) -> bool {
-        let tls = Some(port) != self.plain_port;
-        if !self.admit(tls, ip, now_ms) {
+        // The plaintext port has an admission of its own (P1, ADR-230).
+        let policy = self.is_plain_policy_port(port);
+        let tls = !policy && Some(port) != self.plain_port;
+        if policy {
+            let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
+            let admitted = self
+                .plain
+                .as_mut()
+                .is_some_and(|p| p.accept(c, ip, now_ms, heap_ok, behind));
+            if !admitted {
+                return false;
+            }
+        } else if !self.admit(tls, ip, now_ms) {
             return false;
         }
         let session = if tls {
@@ -863,13 +909,16 @@ impl MqttService {
                 serial_tag: 0,
             },
         );
-        self.flights.insert(
-            c,
-            Flight {
-                ip,
-                t0_ms: now_ms as u32,
-            },
-        );
+        // (A plaintext connection's flight is kept by its listener.)
+        if !policy {
+            self.flights.insert(
+                c,
+                Flight {
+                    ip,
+                    t0_ms: now_ms as u32,
+                },
+            );
+        }
         // The queue only serves the timeout; entries of connections that
         // left it are dropped here when they pile up behind an old one.
         if self.handshakes.len() > 2 * self.adm.limits().per_core as usize + 16 {
@@ -885,12 +934,16 @@ impl MqttService {
         true
     }
 
-    /// Is `c` a TLS connection whose handshake has not finished?
+    /// Is `c` a TLS connection whose handshake has not finished, or a
+    /// plaintext one whose login (a password check costs about as much as a
+    /// handshake step) has not been decided?
     fn is_handshaking(&self, c: u32) -> bool {
         self.conns
             .get(&c)
-            .and_then(|k| k.session.as_ref())
-            .is_some_and(|s| !s.is_established())
+            .is_some_and(|k| match k.session.as_ref() {
+                Some(s) => !s.is_established(),
+                None => k.peer.is_none() && self.plain.as_ref().is_some_and(|p| p.has(c)),
+            })
     }
 
     fn on_data(&mut self, c: u32, data: &[u8], link: &mut Link, now_ms: u64) {
@@ -981,7 +1034,7 @@ impl MqttService {
     fn on_closed(&mut self, c: u32, link: &mut Link, now_ms: u64) {
         self.detach(c, link, now_ms);
         self.leave_flight(c, Leave::Failed, now_ms);
-        self.conns.remove(&c);
+        self.drop_conn(c, now_ms);
     }
 
     // ---- sessions -----------------------------------------------------------
@@ -1042,6 +1095,9 @@ impl MqttService {
     /// then attaches to its home shard. Garbage goes to this core's shard,
     /// which rejects it.
     fn sniff_connect(&mut self, c: u32, data: &[u8], link: &mut Link, now_ms: u64) {
+        if self.plain.as_ref().is_some_and(|p| p.has(c)) {
+            return self.plain_connect(c, data, link, now_ms);
+        }
         let Some(k) = self.conns.get_mut(&c) else {
             return;
         };
@@ -1071,6 +1127,135 @@ impl MqttService {
         } else {
             self.start_close(c);
         }
+    }
+
+    /// The plaintext listener's first packet (P1, ADR-230): holds bytes until
+    /// the CONNECT is complete, decides who the client is, and only then lets
+    /// the broker see it, as a session of that identity on its home shard. A
+    /// refusal is answered here, with a CONNACK, and the connection closes.
+    fn plain_connect(&mut self, c: u32, data: &[u8], link: &mut Link, now_ms: u64) {
+        let Some(k) = self.conns.get_mut(&c) else {
+            return;
+        };
+        k.early.extend_from_slice(data);
+        let limit = CONFIG.plaintext.max_packet_size as usize + 5;
+        let decoded = urmqtt_mqtt::decode(k.early.as_slice(), &crate::plain::mqtt_limits());
+        // What to do once the borrow of the packet is over.
+        enum Next {
+            Wait,
+            Refuse(u8),
+            Garbage,
+            Accept {
+                identity: &'static str,
+                key: String,
+                no_id: bool,
+            },
+        }
+        let next = match decoded {
+            Ok((urmqtt_mqtt::Packet::Connect(p), _)) => {
+                match self.plain.as_mut().map(|pl| pl.decide(c, &p, now_ms)) {
+                    Some(crate::plain::Decision::Accept(identity)) => Next::Accept {
+                        identity,
+                        key: urmqtt_broker::plain_session_key(identity, p.client_id),
+                        no_id: p.client_id.is_empty(),
+                    },
+                    Some(crate::plain::Decision::Refuse(code)) => Next::Refuse(code),
+                    None => Next::Refuse(3),
+                }
+            }
+            Err(urmqtt_mqtt::Error::Incomplete(_)) if k.early.len() <= limit => Next::Wait,
+            // An MQTT 5 client (this broker speaks 3.1.1): told so, not a bad login.
+            Err(urmqtt_mqtt::Error::UnsupportedProtocolLevel(_)) => Next::Refuse(1),
+            _ => Next::Garbage,
+        };
+        match next {
+            Next::Wait => {}
+            Next::Refuse(code) => self.refuse_plain(c, code),
+            Next::Garbage => {
+                if let Some(pl) = self.plain.as_mut() {
+                    pl.garbage(c, now_ms);
+                }
+                self.refuse_plain(c, 0);
+            }
+            Next::Accept {
+                identity,
+                key,
+                no_id,
+            } => {
+                // A client without an id is given a unique one by the shard it
+                // lands on, so any shard will do: this one.
+                let home = if no_id {
+                    self.me
+                } else {
+                    dataplane::home_of(&key, self.n)
+                };
+                let home = if dataplane::workers(self.n).contains(&home) {
+                    home
+                } else {
+                    self.me
+                };
+                let early = self
+                    .conns
+                    .get_mut(&c)
+                    .map(|k| k.early.take())
+                    .unwrap_or_default();
+                if self.attach_plain(c, home, identity, link, now_ms) {
+                    self.leave_flight(c, Leave::Done, now_ms);
+                    self.deliver(c, &early, link, now_ms);
+                } else {
+                    self.start_close(c);
+                }
+            }
+        }
+    }
+
+    /// Answers a refused plaintext CONNECT (`code` 0: nothing to say, as for
+    /// bytes that are no MQTT) and closes after it.
+    fn refuse_plain(&mut self, c: u32, code: u8) {
+        if let Some(k) = self.conns.get_mut(&c) {
+            k.early.take();
+            if code != 0 {
+                // CONNACK: session not present, the return code.
+                k.pending.extend_from_slice(&[0x20, 0x02, 0x00, code]);
+            }
+        }
+        self.start_close(c);
+        self.mark_blocked(c);
+    }
+
+    /// Like `attach`, for a plaintext connection of `identity`.
+    fn attach_plain(
+        &mut self,
+        c: u32,
+        home: usize,
+        identity: &str,
+        link: &mut Link,
+        now_ms: u64,
+    ) -> bool {
+        let Some(k) = self.conns.get_mut(&c) else {
+            return false;
+        };
+        if home == self.me {
+            let Some(b) = self.broker.open(now_ms) else {
+                return false;
+            };
+            if !self.broker.set_plain_identity(b, identity) {
+                self.broker.closed(b, now_ms);
+                return false;
+            }
+            k.peer = Some(Peer::Local(b));
+            self.by_broker.insert(b, c);
+        } else {
+            link.send(
+                home,
+                CoreMsg::OpenPlain {
+                    tconn: k.tconn,
+                    identity: identity.into(),
+                },
+            );
+            k.peer = Some(Peer::Remote { home: home as u16 });
+        }
+        true
     }
 
     /// Ends the MQTT session of a connection (persistence snapshot, will)
@@ -1139,6 +1324,27 @@ impl MqttService {
                     if let Some(t) = self.by_tconn.get_mut(peer) {
                         t.insert(tconn as u32, (tconn, b));
                     }
+                }
+                None => link.send(peer, CoreMsg::Close { tconn }),
+            },
+            CoreMsg::OpenPlain { tconn, identity } => match self.broker.open(now_ms) {
+                Some(b) if self.broker.set_plain_identity(b, &identity) => {
+                    self.remote.insert(
+                        b,
+                        Remote {
+                            from: peer as u16,
+                            tconn,
+                            credit: RELAY_CREDIT as u32,
+                            close_sent: false,
+                        },
+                    );
+                    if let Some(t) = self.by_tconn.get_mut(peer) {
+                        t.insert(tconn as u32, (tconn, b));
+                    }
+                }
+                Some(b) => {
+                    self.broker.closed(b, now_ms);
+                    link.send(peer, CoreMsg::Close { tconn });
                 }
                 None => link.send(peer, CoreMsg::Close { tconn }),
             },
@@ -1245,7 +1451,7 @@ impl MqttService {
             warn!("watchdog: aborting connection {c}");
             self.detach(c, link, now_ms);
             self.leave_flight(c, Leave::Failed, now_ms);
-            self.conns.remove(&c);
+            self.drop_conn(c, now_ms);
             self.aborts.push(c);
         }
         watchdog::step(watchdog::Step::Timers);
@@ -1254,6 +1460,14 @@ impl MqttService {
             self.broker.tick(now_ms);
             self.expire_handshakes(link, now_ms);
             self.publish_admission(now_ms);
+            if let Some(p) = self.plain.as_mut() {
+                // The plaintext listener judges its exposure from the address
+                // the interface has now (one core says it).
+                p.tick(
+                    tcp.local_addr(),
+                    self.me == dataplane::workers(self.n).start,
+                );
+            }
         }
         watchdog::step(watchdog::Step::Shrink);
         if now_ms.saturating_sub(self.last_shrink_ms) >= SHRINK_MS {
@@ -1400,8 +1614,14 @@ impl MqttService {
             self.start_close(c);
         }
         if crate::control::allowlist_mode() {
+            // (Plaintext logins are identities too: P1.)
             closed += self.broker.disconnect_unless(
-                |id, role| role != urmqtt_broker::Role::Device || crate::control::admitted(id),
+                |id, role| {
+                    !matches!(
+                        role,
+                        urmqtt_broker::Role::Device | urmqtt_broker::Role::Plain
+                    ) || crate::control::admitted(id)
+                },
                 CloseReason::Disallowed,
             ) as u64;
         }
@@ -1573,7 +1793,7 @@ impl MqttService {
             }
             self.detach(c, link, now_ms);
             self.leave_flight(c, Leave::TimedOut, now_ms);
-            self.conns.remove(&c);
+            self.drop_conn(c, now_ms);
             self.aborts.push(c);
         }
     }

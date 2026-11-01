@@ -64,6 +64,13 @@ impl Verdict<'_> {
     }
 }
 
+/// Runs a password hash of `iterations` over fixed data: for timing a check
+/// at boot (the kernel sizes the watchdog's handshake budget and its login
+/// admission rate from it).
+pub fn probe(iterations: u32) -> [u8; 32] {
+    urmqtt_cfg::passwd::pbkdf2_hmac_sha256(b"urmqtt-probe", &[0x5a; 16], iterations)
+}
+
 pub struct Authenticator<'a> {
     mode: PlainAuth,
     users: Vec<(&'a str, PasswordHash)>,

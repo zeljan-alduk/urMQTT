@@ -81,6 +81,9 @@ pub enum CoreMsg {
         /// The certificate came from a bootstrap anchor (H1).
         bootstrap: bool,
     },
+    /// Transport → home: a new connection of the plaintext listener, whose
+    /// login (P1, ADR-230) established `identity`.
+    OpenPlain { tconn: Tconn, identity: Box<str> },
     /// Transport → home: plaintext MQTT bytes from the client.
     Input { tconn: Tconn, data: Vec<u8> },
     /// Transport → home: the connection is gone.

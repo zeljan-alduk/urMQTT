@@ -1956,6 +1956,93 @@ PY
     KERNEL=$dev_kernel
 }
 
+# P1 (ADR-229, ADR-230): plaintext MQTT for trusted networks. The dev image's
+# configuration plus a [plaintext] section, packed with the host tool (the same
+# blob the builder page makes), one image per mode. QEMU's user networking
+# makes every host client appear as 10.0.2.2, so "the allowed source" is a
+# configuration that lists 10.0.2.0/24 and "the refused source" one that does
+# not. scripts/plain-scenarios.py plays the clients (raw packets, and the real
+# mosquitto tools); the serial log is checked for what the kernel says.
+#   password   default clients, ACL by login, the refusals, limits, retain,
+#              client ids, the operator's counters; then the TLS scenarios
+#              (mqtt-scenarios.py) on the same VM: TLS works alongside
+#   lockout    failed logins lock the address out, then it recovers
+#   refused    a source outside allow_from gets no answer
+#   anonymous / ip / limits / registry   the other modes and limits
+plaintext() {
+    [[ -z ${SMOKE_SCENARIOS:-} || plaintext =~ $SMOKE_SCENARIOS ]] || return 0
+    command -v mosquitto_pub >/dev/null || { echo "  ✗ plaintext scenarios need the mosquitto clients"; FAILED=$((FAILED + 1)); return 0; }
+    local dir="$OUT/plain" tool="$ROOT/target/debug/urmqtt-config" ppt=${SMOKE_PLAIN_PORT:-$((PORT + 1))}
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed"; FAILED=$((FAILED + 1)); return 0; }
+    local h1 h2 users
+    h1=$(printf '%s\n' alpha-secret | "$tool" hash-password --iterations 3000)
+    h2=$(printf '%s\n' beta-secret | "$tool" hash-password --iterations 3000)
+    users="users = [{ id = \"sensor-1\", password_hash = \"$h1\" }, { id = \"sensor-2\", password_hash = \"$h2\" }]"
+    # The dev configuration without its development plaintext port (the new
+    # section is the way in), and a copy with the allowlist registry.
+    sed -e 's/^mqtt_plain_port = 1883 .*/mqtt_plain_port = 0/' "$ROOT/deploy/dev/config.toml" >"$dir/base.toml"
+    sed -e 's/^mode = "open" .*/mode = "allowlist"/' "$dir/base.toml" >"$dir/base-registry.toml"
+    local allow='allow_from = ["10.0.2.0/24"]'
+    mk() { # mk <name> <base> <[plaintext] lines...>
+        local name=$1 base=$2
+        shift 2
+        { cat "$dir/$base.toml"; printf '\n[plaintext]\nenabled = true\n'; printf '%s\n' "$@"; } >"$dir/$name.toml"
+        "$tool" pack "$dir/$name.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/$name.blob" >/dev/null
+    }
+    mk password base "$allow" "$users" 'max_failed_auths_per_ip = 1000' 'max_packet_size = 256'
+    mk lockout base "$allow" "$users" 'max_failed_auths_per_ip = 3' 'lockout_s = 10'
+    mk refused base 'allow_from = ["192.0.2.0/24"]' "$users"
+    mk anonymous base "$allow" 'auth = "anonymous"' 'acl_publish = ["home/#"]' 'acl_subscribe = ["home/#"]'
+    mk ip base "$allow" 'auth = "ip"' 'ip_identities = [{ from = "10.0.2.2/32", id = "gateway" }]'
+    mk limits base "$allow" "$users" 'max_connections_per_ip = 3'
+    mk registry base-registry "$allow" "$users"
+    local common=("mqtt: PLAINTEXT listener on port 1883 \(NOT ENCRYPTED\)" "config: plaintext MQTT is ON \(port 1883" "^URMQTT READY$" "NOT:client: .* FAILED" "$NO_FAULT")
+    local name
+    for name in password lockout refused anonymous ip limits registry; do
+        local extra=() iso="$OUT/plain-$name.raw"
+        case $name in
+            password) extra=("plaintext: one password check costs about [0-9]+ us \(3000 iterations" "plaintext: login refused for 10\.0\.2\.2 \(wrong password\), 1 so far"
+                "control: 1 publish\(es\) to \\\$urmqtt/ by identities without control rights dropped"
+                "client: default-client-publishes ok" "client: default-client-receives-a-command ok" "client: acl-publish-only-own-topics ok"
+                "client: acl-subscribe-only-own-commands ok" "client: no-sys-subscribe ok" "client: stored-session-refused ok" "client: client-id-with-a-slash-is-fine ok" "client: empty-client-id-is-named-by-the-broker ok" "client: empty-client-id-with-a-stored-session-refused ok"
+                "client: retained-publish-not-retained ok" "client: packet-limit ok" "client: one-login-many-client-ids ok"
+                "client: publish-rate-limited ok" "client: operator-reads-the-plaintext-counters ok"
+                "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" "client: qos1-after-reconnect ok"
+                "client: tls-revoked-rejected ok") ;;
+            lockout) extra=("plaintext: 10\.0\.2\.2 is locked out for 10 s after 3 failed login\(s\)" "plaintext: 1 SYN\(s\) from locked-out addresses dropped without an answer"
+                "client: locked-out-address-gets-no-answer ok" "client: login-works-again-after-the-lockout ok" "client: tls-is-not-locked-out ok") ;;
+            refused) extra=("plaintext: 1 SYN\(s\) from addresses outside plaintext\.allow_from dropped without an answer"
+                "client: refused-source-gets-no-answer ok" "client: tls-works-beside-a-refused-plaintext-source ok" "NOT:login refused") ;;
+            anonymous) extra=("mqtt: plaintext.auth = \"anonymous\"" "client: anonymous-default-clients ok" "client: anonymous-acl ok") ;;
+            ip) extra=("mqtt: plaintext.auth = \"ip\"" "client: ip-mode-identity-is-the-networks ok") ;;
+            limits) extra=("client: per-address-connection-limit ok" "client: a-closed-connection-makes-room ok") ;;
+            registry) extra=("registry: plaintext login sensor-1 is not on the allowlist, refused" "client: not-on-the-allowlist-refused ok") ;;
+        esac
+        MKIMG_EXTRA=(--config "$dir/$name.blob")
+        mkimg "$iso" "serve log=info"
+        MKIMG_EXTRA=()
+        for accel in $ACCELS; do
+            local log="$OUT/plain-$name-$accel.log" data="$OUT/plain-$name-$accel.img" status=0
+            fresh_disk "$iso" "$data"
+            start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883,$ppt:1883"
+            if wait_log "$log" "^URMQTT READY$"; then
+                python3 -I "$ROOT/scripts/plain-scenarios.py" "$name" "$ppt" "$PORT" "$ROOT/deploy/dev" >"$log.client" 2>&1 || status=$?
+                if [[ $name == password ]]; then
+                    # TLS beside it: the standard device and backend scenarios on the same VM.
+                    python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" "$PORT" >>"$log.client" 2>&1 || status=$?
+                fi
+                sleep 1
+            else
+                status=124
+            fi
+            kill_vm
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            check "plaintext-$name [$accel]" "$log" "$status" "${common[@]}" "${extra[@]}"
+        done
+    done
+}
+
 # GICv2 (ADR-039), what KVM gives a guest on a GIC-400 host such as the
 # Raspberry Pi 4/5. HVF cannot emulate a GICv2, so this runs under TCG:
 # boot with ACPI and DT, then the TLS broker scenarios.
@@ -2843,6 +2930,7 @@ scenario x86-disk-q35 "smoke" on \
     "${DISPATCH_OK[@]}" "${CONFIG_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 want config_packed && config_packed
 want release_kernel && release_kernel
+want plaintext && plaintext
 scenario x86-fault-unmapped-mmio "smoke test=data-abort" on \
     "EXCEPTION: #PF page fault" "page not present, read, supervisor mode" "NOT:URMQTT READY"
 SMP=8 scenario x86-smp8 "smoke" on \
@@ -2862,6 +2950,7 @@ scenario x86-sealed-write "smoke test=sealed-write" on \
     "NOT:URMQTT READY"
 for accel in $ACCELS; do
     log="$OUT/x86-sealed-write-$accel.log"
+    [[ -f $log ]] || continue # SMOKE_SCENARIOS filtered the scenario out
     at=$(clean "$log" | grep -Eo 'sealed cpu dispatch at 0x[0-9a-f]+' | grep -Eo '0x[0-9a-f]+$')
     far=$(clean "$log" | grep -Eo 'CR2=0x[0-9a-f]+' | head -1 | cut -d= -f2)
     if [[ -n "$at" && $((at)) -eq $((far)) ]]; then
@@ -2914,6 +3003,7 @@ scenario boot-dtb "smoke" off \
     "${TIME_OK[@]}" "${DEV_OK[@]}" "${DISPATCH_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 want config_packed && config_packed
 want release_kernel && release_kernel
+want plaintext && plaintext
 scenario fault-data-abort "smoke test=data-abort" on \
     "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
     "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \

@@ -79,6 +79,39 @@ pub struct Drops {
     pub frames_nic: u64,
 }
 
+/// The plaintext listener, as `$SYS/broker/plaintext/...` reports it (P1,
+/// ADR-230). Counters are since boot, all cores together.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlainInfo<'a> {
+    pub enabled: bool,
+    pub port: u16,
+    /// `password`, `anonymous` or `ip`.
+    pub auth: &'a str,
+    /// The networks that may connect, or `anywhere`.
+    pub allow_from: &'a str,
+    pub accounts: u64,
+    /// Connections open now.
+    pub connections: u64,
+    /// Connections accepted.
+    pub accepted: u64,
+    /// SYNs dropped because the address is not in `allow_from`.
+    pub refused_source: u64,
+    /// SYNs dropped because the address is locked out.
+    pub refused_locked: u64,
+    /// Connections or SYNs refused for a limit: all connections, per address,
+    /// in flight, the login rate, memory.
+    pub refused_limit: u64,
+    /// Logins refused because the identity is not on the allowlist.
+    pub refused_registry: u64,
+    /// CONNECT packets refused for the session (a stored session was asked for, a
+    /// client id that cannot be used).
+    pub refused_session: u64,
+    pub auth_ok: u64,
+    pub auth_failed: u64,
+    /// Addresses locked out for failed logins.
+    pub lockouts: u64,
+}
+
 /// Everything `$SYS/broker/...` and the info query report.
 #[derive(Debug, Clone, Copy)]
 pub struct Info<'a> {
@@ -112,6 +145,7 @@ pub struct Info<'a> {
     /// Connections accepted per core since boot (how evenly the flows
     /// spread over the cores).
     pub accepted: &'a [u64],
+    pub plaintext: PlainInfo<'a>,
 }
 
 /// Calls `f(topic, payload)` for every retained topic, in a fixed order.
@@ -175,9 +209,29 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
     for (core, a) in i.accepted.iter().enumerate() {
         put(&alloc::format!("cpu/accepted/{core}"), a);
     }
+    // The plaintext listener (P1): one topic while it is off.
+    let p = &i.plaintext;
+    put("plaintext/enabled", &p.enabled);
+    if p.enabled {
+        put("plaintext/port", &p.port);
+        put("plaintext/auth", &p.auth);
+        put("plaintext/allow_from", &p.allow_from);
+        put("plaintext/accounts", &p.accounts);
+        put("plaintext/connections", &p.connections);
+        put("plaintext/accepted", &p.accepted);
+        put("plaintext/refused/source", &p.refused_source);
+        put("plaintext/refused/locked_out", &p.refused_locked);
+        put("plaintext/refused/limit", &p.refused_limit);
+        put("plaintext/refused/registry", &p.refused_registry);
+        put("plaintext/refused/session", &p.refused_session);
+        put("plaintext/auth_ok", &p.auth_ok);
+        put("plaintext/auth_failed", &p.auth_failed);
+        put("plaintext/lockouts", &p.lockouts);
+    }
 }
 
-/// The topics of [`topics`] as a list, for tests and the docs.
+/// The topics of [`topics`] as a list, for tests and the docs (with the
+/// plaintext listener on, so every topic is listed).
 pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
     let busy = alloc::vec![0u8; cores];
     let accepted = alloc::vec![0u64; cores];
@@ -204,6 +258,10 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
         drops: Drops::default(),
         handshakes: Handshakes::default(),
         accepted: &accepted,
+        plaintext: PlainInfo {
+            enabled: true,
+            ..PlainInfo::default()
+        },
     };
     let mut v = alloc::vec::Vec::new();
     topics(&info, |t, _| v.push(t.into()));
@@ -302,7 +360,32 @@ pub fn json(i: &Info<'_>) -> String {
     for (n, a) in i.accepted.iter().enumerate() {
         let _ = write!(o, "{}{a}", if n == 0 { "" } else { "," });
     }
-    o.push_str("]}");
+    o.push(']');
+    let p = &i.plaintext;
+    let _ = write!(o, ",\"plaintext\":{{\"enabled\":{}", p.enabled);
+    if p.enabled {
+        let _ = write!(o, ",\"port\":{},\"auth\":", p.port);
+        json_str(&mut o, p.auth);
+        o.push_str(",\"allow_from\":");
+        json_str(&mut o, p.allow_from);
+        let _ = write!(
+            o,
+            ",\"accounts\":{},\"connections\":{},\"accepted\":{},\"refused\":{{\"source\":{},\"locked_out\":{},\"limit\":{},\"registry\":{},\"session\":{}}},\
+             \"auth_ok\":{},\"auth_failed\":{},\"lockouts\":{}",
+            p.accounts,
+            p.connections,
+            p.accepted,
+            p.refused_source,
+            p.refused_locked,
+            p.refused_limit,
+            p.refused_registry,
+            p.refused_session,
+            p.auth_ok,
+            p.auth_failed,
+            p.lockouts
+        );
+    }
+    o.push_str("}}");
     o
 }
 
@@ -369,6 +452,22 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
         d.frames_worker_tx,
         d.frames_nic
     ));
+    let p = &i.plaintext;
+    if p.enabled {
+        out.push(alloc::format!(
+            "plaintext MQTT ON (not encrypted): port {}, auth {}, from {}; {} open, {} accepted, \
+             {} login(s) failed, {} lock-out(s); SYNs dropped: {} not allowed, {} locked out",
+            p.port,
+            p.auth,
+            p.allow_from,
+            p.connections,
+            p.accepted,
+            p.auth_failed,
+            p.lockouts,
+            p.refused_source,
+            p.refused_locked
+        ));
+    }
     out.push(alloc::format!(
         "log level {level} (build maximum {max_level}), {} console line(s) dropped",
         i.console_dropped
@@ -535,7 +634,84 @@ mod tests {
                 ..Handshakes::default()
             },
             accepted: &[4, 5],
+            plaintext: PlainInfo::default(),
         }
+    }
+
+    fn plain_on() -> PlainInfo<'static> {
+        PlainInfo {
+            enabled: true,
+            port: 1883,
+            auth: "password",
+            allow_from: "10.0.0.0/8, 192.168.0.0/16",
+            accounts: 3,
+            connections: 4,
+            accepted: 40,
+            refused_source: 5,
+            refused_locked: 6,
+            refused_limit: 7,
+            refused_registry: 8,
+            refused_session: 9,
+            auth_ok: 30,
+            auth_failed: 10,
+            lockouts: 2,
+        }
+    }
+
+    #[test]
+    fn the_plaintext_listener_is_reported_when_it_is_on() {
+        let mut on = info(&[10]);
+        on.plaintext = plain_on();
+        let mut got = alloc::vec::Vec::new();
+        topics(&on, |t, v| got.push((t.to_owned(), v.to_owned())));
+        let val = |t: &str| got.iter().find(|(k, _)| k == t).map(|(_, v)| v.as_str());
+        assert_eq!(val("$SYS/broker/plaintext/enabled"), Some("true"));
+        assert_eq!(val("$SYS/broker/plaintext/port"), Some("1883"));
+        assert_eq!(val("$SYS/broker/plaintext/auth"), Some("password"));
+        assert_eq!(
+            val("$SYS/broker/plaintext/allow_from"),
+            Some("10.0.0.0/8, 192.168.0.0/16")
+        );
+        assert_eq!(val("$SYS/broker/plaintext/connections"), Some("4"));
+        assert_eq!(val("$SYS/broker/plaintext/refused/source"), Some("5"));
+        assert_eq!(val("$SYS/broker/plaintext/refused/locked_out"), Some("6"));
+        assert_eq!(val("$SYS/broker/plaintext/auth_failed"), Some("10"));
+        assert_eq!(val("$SYS/broker/plaintext/lockouts"), Some("2"));
+        assert!(got.iter().all(|(_, v)| !v.is_empty()));
+        // The listed names are the ones published when it is on.
+        let on_names: alloc::vec::Vec<&str> = got
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .filter(|t| t.starts_with("$SYS/broker/plaintext/"))
+            .collect();
+        let all = topic_names(1);
+        let listed: alloc::vec::Vec<&str> = all
+            .iter()
+            .map(String::as_str)
+            .filter(|t| t.starts_with("$SYS/broker/plaintext/"))
+            .collect();
+        assert_eq!(on_names, listed);
+        // The query reply carries it as an object; the status gets one line.
+        let j = json(&on);
+        assert!(
+            j.contains("\"plaintext\":{\"enabled\":true,\"port\":1883,\"auth\":\"password\",\"allow_from\":\"10.0.0.0/8, 192.168.0.0/16\",\"accounts\":3,\"connections\":4,\"accepted\":40,\"refused\":{\"source\":5,\"locked_out\":6,\"limit\":7,\"registry\":8,\"session\":9},\"auth_ok\":30,\"auth_failed\":10,\"lockouts\":2}"),
+            "{j}"
+        );
+        assert!(j.ends_with("}}"));
+        let lines = status_lines(&on, "info", "debug");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l
+                    .starts_with("plaintext MQTT ON (not encrypted): port 1883, auth password")),
+            "{lines:?}"
+        );
+        assert!(
+            !status_lines(&info(&[10]), "info", "debug")
+                .iter()
+                .any(|l| l.contains("plaintext")),
+            "nothing about plaintext while it is off"
+        );
     }
 
     #[test]
@@ -590,6 +766,7 @@ mod tests {
                 "$SYS/broker/handshakes/latency_max_ms",
                 "$SYS/broker/cpu/accepted/0",
                 "$SYS/broker/cpu/accepted/1",
+                "$SYS/broker/plaintext/enabled",
             ]
         );
         let val = |t: &str| got.iter().find(|(k, _)| k == t).map(|(_, v)| v.as_str());
@@ -607,7 +784,13 @@ mod tests {
         assert_eq!(val("$SYS/broker/cpu/accepted/1"), Some("5"));
         // No payload is empty: an empty retained payload would clear it.
         assert!(got.iter().all(|(_, v)| !v.is_empty()));
-        assert_eq!(topic_names(2).len(), got.len());
+        assert_eq!(val("$SYS/broker/plaintext/enabled"), Some("false"));
+        // (`topic_names` lists the topics with plaintext on.)
+        let plain = topic_names(2)
+            .iter()
+            .filter(|t| t.starts_with("$SYS/broker/plaintext/"))
+            .count();
+        assert_eq!(topic_names(2).len() - plain + 1, got.len());
     }
 
     #[test]
@@ -624,7 +807,7 @@ mod tests {
              \"publish_rate\":0,\"frames_steer\":0,\"frames_worker_tx\":0,\"frames_nic\":0},\
              \"handshakes\":{\"started\":9,\"done\":8,\"failed\":0,\"timed_out\":0,\"refused\":0,\
              \"syn_dropped\":0,\"in_flight\":0,\"in_flight_max\":0,\"slow\":0,\"latency_sum_ms\":0,\
-             \"latency_max_ms\":0},\"accepted\":[4,5]}"
+             \"latency_max_ms\":0},\"accepted\":[4,5],\"plaintext\":{\"enabled\":false}}"
         );
         let mut unknown = info(&[]);
         unknown.server_cert_days = None;

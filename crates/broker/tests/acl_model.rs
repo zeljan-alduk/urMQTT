@@ -62,6 +62,7 @@ fn cfg() -> Config {
         telemetry: &["devices/+/telemetry/#"],
         fanout: true,
         control_ids: &["backend"],
+        plain: None,
     }
 }
 

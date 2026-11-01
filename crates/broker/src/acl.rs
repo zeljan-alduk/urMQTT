@@ -25,6 +25,10 @@ pub enum Role {
     Operator,
     /// A certificate from a bootstrap trust anchor (H1): provisioning only.
     Bootstrap,
+    /// A client of the plaintext listener (P1, ADR-230): its rules are the
+    /// configuration's `plaintext.acl_*`, never `Acl`'s, and it never holds
+    /// the service, operator or control role whatever its name is.
+    Plain,
 }
 
 /// The only topics a bootstrap identity may use, for publishing and
@@ -78,6 +82,9 @@ impl Acl {
             (Role::Bootstrap, _) => BOOTSTRAP_RULES,
             (Role::Operator, true) => OPERATOR_PUBLISH,
             (Role::Operator, false) => OPERATOR_SUBSCRIBE,
+            // The plaintext role has its own patterns (`plain_may_*`); asked
+            // here it gets nothing, so a mistake fails closed.
+            (Role::Plain, _) => &[],
         }
     }
 
@@ -103,6 +110,20 @@ impl Acl {
             .iter()
             .any(|p| covers(p, id, filter))
     }
+}
+
+/// May a plaintext client named `id` publish to `topic`, under `patterns`
+/// (`plaintext.acl_publish`)? Never in the reserved or the system namespace,
+/// whatever the patterns say.
+pub fn plain_may_publish(patterns: &[&str], id: &str, topic: &str) -> bool {
+    !(reserved(topic) || sys(topic)) && patterns.iter().any(|p| matches_topic(p, id, topic))
+}
+
+/// May a plaintext client named `id` subscribe to `filter`, under `patterns`
+/// (`plaintext.acl_subscribe`)? Every topic the filter can match must be
+/// allowed by one pattern; never in the reserved or the system namespace.
+pub fn plain_may_subscribe(patterns: &[&str], id: &str, filter: &str) -> bool {
+    !(reserved(filter) || sys(filter)) && patterns.iter().any(|p| covers(p, id, filter))
 }
 
 fn level<'a>(pattern_level: &'a str, id: &'a str) -> &'a str {
@@ -278,6 +299,57 @@ mod tests {
         assert!(!OPEN.may_subscribe(op, "ops", "devices/#"));
         assert!(!OPEN.may_subscribe(op, "ops", "$urmqtt/#"));
         assert!(sys("$SYS/x") && sys("$SYS") && !sys("$SYSx/x") && !sys("a/$SYS"));
+    }
+
+    /// P1: the plaintext role has the patterns of its own configuration and
+    /// nothing else; the system and control namespaces are closed to it
+    /// whatever the patterns say; `Acl` itself gives it nothing.
+    #[test]
+    fn plaintext_role_rules() {
+        let publish = ["devices/{id}/#", "lan/+/state"];
+        let subscribe = ["devices/{id}/cmd/#", "announce/#"];
+        assert!(plain_may_publish(&publish, "s1", "devices/s1/telemetry/t"));
+        assert!(plain_may_publish(&publish, "s1", "devices/s1"));
+        assert!(plain_may_publish(&publish, "s1", "lan/anyone/state"));
+        assert!(!plain_may_publish(&publish, "s1", "devices/s2/telemetry"));
+        assert!(!plain_may_publish(&publish, "s1", "lan/x/y/state"));
+        assert!(
+            !plain_may_publish(&[], "s1", "devices/s1/t"),
+            "an empty list is read only"
+        );
+        assert!(plain_may_subscribe(&subscribe, "s1", "devices/s1/cmd/#"));
+        assert!(plain_may_subscribe(&subscribe, "s1", "devices/s1/cmd/a/+"));
+        assert!(plain_may_subscribe(&subscribe, "s1", "announce/#"));
+        assert!(plain_may_subscribe(&subscribe, "s1", "announce/news"));
+        assert!(
+            !plain_may_subscribe(&subscribe, "s1", "devices/+/cmd/#"),
+            "wildcard over identities"
+        );
+        assert!(!plain_may_subscribe(&subscribe, "s1", "devices/s2/cmd/#"));
+        assert!(!plain_may_subscribe(&subscribe, "s1", "#"));
+        // However permissive the patterns, `$SYS/` and `$urmqtt/` stay shut.
+        let open = ["#", "$SYS/#", "$urmqtt/#", "+/#"];
+        for t in [
+            "$SYS/broker/uptime",
+            "$SYS/console/in",
+            "$urmqtt/control",
+            "$SYS",
+            "$urmqtt",
+        ] {
+            assert!(!plain_may_publish(&open, "s1", t), "{t}");
+            assert!(!plain_may_subscribe(&open, "s1", t), "{t}");
+        }
+        for f in ["$SYS/#", "$SYS/+", "$urmqtt/#"] {
+            assert!(!plain_may_subscribe(&open, "s1", f), "{f}");
+        }
+        assert!(plain_may_publish(&open, "s1", "anything/else"));
+        // The identity is substituted whole: a client cannot reach another's
+        // topics through a crafted name (names have no `/` or wildcards).
+        assert!(!plain_may_publish(&publish, "s1", "devices/s1x/t"));
+        // `Acl` has nothing for the role.
+        assert!(!ACL.may_publish(Role::Plain, "s1", "devices/s1/t"));
+        assert!(!ACL.may_subscribe(Role::Plain, "s1", "devices/s1/cmd/#"));
+        assert!(!ACL.may_subscribe(Role::Plain, "ops", "$SYS/#"));
     }
 
     #[test]

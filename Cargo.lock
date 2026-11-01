@@ -1644,6 +1644,7 @@ dependencies = [
  "urmqtt-mqtt",
  "urmqtt-net",
  "urmqtt-pci",
+ "urmqtt-plain",
  "urmqtt-platform",
  "urmqtt-sntp",
  "urmqtt-store",

@@ -270,6 +270,15 @@ pub fn plaintext_summary(b: &Blob<'_>) -> Option<String> {
 /// supplies the salt (16 to 32 random bytes); the command line takes it from
 /// the operating system, the browser from `crypto.getRandomValues`.
 pub fn hash_password(password: &[u8], salt: &[u8], iterations: u32) -> Result<String, String> {
+    if password.is_empty() {
+        return Err("the password is empty".into());
+    }
+    if password.len() > urmqtt_cfg::passwd::MAX_PASSWORD {
+        return Err(format!(
+            "the password is longer than {} bytes, which no login can match",
+            urmqtt_cfg::passwd::MAX_PASSWORD
+        ));
+    }
     urmqtt_cfg::passwd::encode(password, salt, iterations).map_err(|e| e.to_string())
 }
 

@@ -2,7 +2,7 @@
 // warning banner of its section, and the accounts editor. The accounts hold
 // password hashes, never a clear password: the password is typed into an input
 // element, hashed in the WebAssembly module with a salt from
-// crypto.getRandomValues, and then the input is emptied (ADR-230).
+// crypto.getRandomValues, and then the input is emptied (ADR-231).
 
 /** Switches that ask before they turn on: field id -> a function that resolves true when the user agrees. */
 const SWITCH_GATES = {
