@@ -455,6 +455,33 @@ option on a release kernel (a plaintext port, for example), or a bad signature. 
 empty (the template) boots on the documented defaults but **does not serve** until it has a server
 certificate, its key and a CA.
 
+### Configure and download your ISO
+
+No toolchain and no command line: the **urMQTT builder** page on aldo.tech
+([aldo.tech/en/products/urmqtt-builder/](https://aldo.tech/en/products/urmqtt-builder/), also in Croatian and 13 other
+languages) is the same `urmqtt-config` compiled to WebAssembly ([ADR-220](docs/DECISIONS.md)). You choose a release, pick a
+preset (a lab VM on DHCP, a VPS with a fixed address, DHCP first with a fixed fallback) or leave every field at its default,
+add your CA, server certificate and key, and download `urmqtt-<version>-<name>-universal.iso`.
+
+- **Nothing leaves the browser.** Certificates, private keys, settings and the finished ISO stay on your computer; the page only
+  downloads release files from its own site (no third-party scripts, no tracking, `connect-src 'self'`). The address bar and
+  `sessionStorage` keep the settings and the public certificates for a reload, never a private key.
+- **Releases are checked in the browser.** The template ISO, `SHA256SUMS` and its minisign signature come from a mirror of the
+  GitHub releases on the same site, but the page does not trust the mirror: it verifies the signature against the release key
+  built into the page (`minisign.pub`) and the template against the signed sums, and a failed check blocks the build unless you
+  override it in a dialog. Releases built before the runtime configuration existed are listed greyed out, with the reason.
+- **Same bytes as the command line.** The page and `urmqtt-config pack --iso` produce identical images for the same input (a test
+  in `make check` builds the same configuration both ways in headless Chrome). Every field of the form has a default, shown as its
+  placeholder; a field you do not touch is not written, so a newer kernel's defaults apply. You can import and export a
+  `config.toml`, so a result of the page can be reproduced offline. The page shows the SHA-256 of the file and the configuration
+  fingerprint the kernel prints at every boot ([trust statement](docs/SECURITY.md#configured-images-what-is-attested-c1-adr-219)).
+- **Optional: try it in the emulator.** A second button loads, only when clicked, an x86-64 emulator in WebAssembly and starts
+  the image you just built, with its console on a canvas (see [ADR-223](docs/DECISIONS.md) for what it can and cannot show).
+
+`make builder` builds the page (WebAssembly module, script, style and texts) into `build/builder/`; `make builder-test` runs its
+tests. The directory is static: any web server that also serves a `releases.json` (made by `scripts/mirror-releases.py`)
+can host it.
+
 ### Making a configured image
 
 The source is the same `config.toml` as always (`deploy/<env>/config.toml`), now with **defaults for
@@ -478,7 +505,7 @@ prints the **fingerprint** (SHA-256 of the canonical bytes). The same configurat
 bytes. The kernel prints the fingerprint on every boot (`config: fingerprint ... unsigned, env=prod`),
 so you can compare it with what the tool showed. `--sign KEY.pem` adds an optional Ed25519 signature
 over the fingerprint (off by default; see [docs/SECURITY.md](docs/SECURITY.md#configured-images-what-is-attested-c1-adr-219)).
-Keys stay on your machine: the tool uploads nothing, and the browser builder planned in C1e works the same way.
+Keys stay on your machine: the tool uploads nothing, and the browser builder above works the same way.
 A patched ISO is not the released ISO and has no official hash; the template it came from does.
 
 Invalid input **fails `pack`** (and `make dist`) with every error listed at once:

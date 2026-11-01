@@ -163,6 +163,7 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-dbworker --target $(TARGET) -- -D warnings
 	$(MAKE) --no-print-directory check-x86
 	$(CARGO) test $(CARGO_FLAGS) --workspace
+	python3 -I scripts/test-mirror-releases.py
 	@if command -v node >/dev/null && rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$$'; then \
 	 $(MAKE) --no-print-directory builder-test; \
 	 else echo "check: node or the wasm32 target (rustup target add wasm32-unknown-unknown) missing, the builder tests are skipped (CI runs them)"; fi

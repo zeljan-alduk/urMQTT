@@ -256,6 +256,46 @@ is attested, and by what:
   private key is in the slot of every image made from it, in the clear (as it
   was when it was compiled in).
 
+### The builder page (C1e, ADR-220 to ADR-222)
+
+The page at aldo.tech (Products, urMQTT builder) does what `urmqtt-config pack
+--iso` does, in the browser, with the same Rust code compiled to WebAssembly.
+What that gives you and what it does not:
+
+- **Same bytes.** The page and the tool produce identical images and the same
+  problem messages for the same input; `make check` builds one configuration
+  both ways in a headless browser and compares the files.
+- **The release is checked in the browser, against a key built into the page.**
+  The page downloads `SHA256SUMS` and `SHA256SUMS.minisig` from the mirror on
+  the same site and verifies the signature with `minisign.pub` (the key id is
+  shown on the page; compare it with this repository and the GitHub release),
+  then the template's SHA-256 against the signed sums. The mirror is **not** a
+  trust anchor: a modified template or sums file fails the check, and a failed
+  check blocks the build unless you override it in a dialog that says what is
+  wrong. A release the mirror cannot verify is not offered at all.
+- **What leaves the browser.** Only plain GET requests to the page's own site,
+  for the release list and the release files. Certificates, private keys, the
+  optional signing key, the settings and the finished ISO are never sent
+  anywhere (the page's `Content-Security-Policy` is `connect-src 'self'`, there
+  is no third-party script and no tracking; a browser test fails if any request
+  carries key material). The address bar holds the changed settings and
+  `sessionStorage` the public certificates and the control public key, so that a
+  reload does not lose the form; **a private key is held in memory only** and
+  must be chosen again after a reload.
+- **What you still trust.** The page is code that handles your private key and
+  it is delivered by aldo.tech each time you open it: whoever can change what
+  that site serves could serve a page that sends the key away. The page cannot
+  protect you from that, and a browser cannot prove which build of the page it
+  is running. If that is a risk for your keys, build the image offline with
+  `urmqtt-config pack` from a checked-out and verified release (same bytes,
+  nothing leaves your machine), or use the page only with a certificate whose
+  key you can replace. The kernel's checks at boot (fingerprint, optional
+  signature, release rules) and the fingerprint comparison detect a changed
+  *configuration*, not a leaked *key*.
+- **The emulator (C1g) is optional and separate.** Nothing of it is loaded
+  until you click its button; it runs in WebAssembly in your browser and has no
+  network of its own beyond what the page gives it (ADR-223).
+
 ## Mitigations
 
 ### Code execution
