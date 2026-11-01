@@ -390,3 +390,65 @@ fn a_raw_image_gets_its_unconfigured_slot_replaced() {
     assert!(image::configure_raw(&two, &blob).is_err());
     assert!(image::configure_raw(&[0u8; 5000], &blob).is_err());
 }
+
+#[test]
+fn in_place_configuration_equals_the_copying_one_and_a_probe_describes_the_template() {
+    let (tpl, _) = synthetic_template();
+    let blob = lab_blob();
+    let copied = image::configure_iso(&tpl, &blob).unwrap();
+    let mut inplace = tpl.clone();
+    let report = image::configure_iso_in_place(&mut inplace, &blob).unwrap();
+    assert_eq!(inplace, copied.bytes);
+    assert_eq!(report, copied.report);
+    // The probe sees the template's own (empty) configuration, then the new one.
+    let p = image::probe(&tpl).unwrap();
+    assert_eq!((p.slot_copies, p.hash_refs, p.format_version), (2, 12, 1));
+    assert_eq!(&p.blob[..empty_blob().len()], &empty_blob()[..]);
+    assert_eq!(image::probe(&inplace).unwrap().format_version, 1);
+    assert!(image::probe(&vec![0u8; 100_000]).is_err());
+    // A refused configuration leaves the image untouched.
+    let mut untouched = tpl.clone();
+    assert!(image::configure_iso_in_place(&mut untouched, &[1, 2, 3]).is_err());
+    assert_eq!(untouched, tpl);
+}
+
+#[test]
+fn check_release_verifies_the_real_signature_and_the_listed_files() {
+    let dir = fixtures().join("minisign");
+    let pubkey = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../minisign.pub");
+    let check = |sums: &Path, files: &[&Path]| {
+        let mut c = bin();
+        c.arg("check-release")
+            .arg("--pubkey")
+            .arg(&pubkey)
+            .arg("--sums")
+            .arg(sums);
+        c.args(files);
+        run(&mut c)
+    };
+    let text = ok(&check(&dir.join("SHA256SUMS"), &[]));
+    assert!(
+        text.contains("signature ok: key 9229E05252D01F8E"),
+        "{text}"
+    );
+    // A listed file with the wrong content is refused, and so is a file the
+    // sums do not list.
+    let fake = tmp("urmqtt-dev-v0.1.0.iso");
+    std::fs::write(&fake, b"not the iso").unwrap();
+    let o = check(&dir.join("SHA256SUMS"), &[&fake]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("SHA256SUMS says"));
+    let other = tmp("other.bin");
+    std::fs::write(&other, b"x").unwrap();
+    let o = check(&dir.join("SHA256SUMS"), &[&other]);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("does not list"));
+    // Sums changed after signing.
+    let altered = tmp("SHA256SUMS");
+    let mut bytes = std::fs::read(dir.join("SHA256SUMS")).unwrap();
+    bytes[3] = if bytes[3] == b'3' { b'4' } else { b'3' };
+    std::fs::write(&altered, bytes).unwrap();
+    std::fs::copy(dir.join("SHA256SUMS.minisig"), tmp("SHA256SUMS.minisig")).unwrap();
+    let o = check(&altered, &[]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("does not match the file"));
+}

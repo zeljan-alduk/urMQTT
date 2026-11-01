@@ -80,6 +80,17 @@ fn check_blob(blob: &[u8]) -> Result<(), String> {
 /// A copy of the template ISO with `blob` as its configuration: every boot
 /// slot replaced, every module hash in the `limine.conf` copies updated.
 pub fn configure_iso(iso: &[u8], blob: &[u8]) -> Result<Patched, String> {
+    let mut bytes = iso.to_vec();
+    let report = configure_iso_in_place(&mut bytes, blob)?;
+    Ok(Patched { bytes, report })
+}
+
+/// What [`configure_iso`] does, on the image itself (the browser holds the
+/// 60 MB ISO once, in WebAssembly memory, and must not copy it). Every check
+/// runs before the first byte changes; if the final read-back fails after
+/// that (an internal error, never seen with a consistent template) the
+/// buffer must be discarded.
+pub fn configure_iso_in_place(iso: &mut [u8], blob: &[u8]) -> Result<String, String> {
     check_blob(blob)?;
     let new_slot = make_slot(SlotKind::Boot, blob)
         .ok_or("the configuration does not fit in a 256 KiB slot")?;
@@ -104,28 +115,56 @@ pub fn configure_iso(iso: &[u8], blob: &[u8]) -> Result<Patched, String> {
         }
     }
     let new_hash = slot_hash(&new_slot);
-    let mut out = iso.to_vec();
     for o in &offs {
-        out.get_mut(*o..*o + SLOT_SIZE)
+        iso.get_mut(*o..*o + SLOT_SIZE)
             .ok_or("slot is cut off")?
             .copy_from_slice(&new_slot);
     }
     for r in &refs {
-        out.get_mut(*r..*r + HASH_LEN)
+        iso.get_mut(*r..*r + HASH_LEN)
             .ok_or("hash is cut off")?
             .copy_from_slice(new_hash.as_bytes());
     }
     // Read it back the way verify does.
-    verify(&out, true)
+    verify(iso, true)
         .map_err(|e| format!("internal error: the patched image does not verify: {e}"))?;
-    Ok(Patched {
-        bytes: out,
-        report: format!(
-            "configured: {} copies of the slot replaced, {} module hash references updated (blake2b {}…)",
-            offs.len(),
-            refs.len(),
-            &new_hash[..16]
-        ),
+    Ok(format!(
+        "configured: {} copies of the slot replaced, {} module hash references updated (blake2b {}…)",
+        offs.len(),
+        refs.len(),
+        &new_hash[..16]
+    ))
+}
+
+/// What a template ISO is, before anything is changed: how many copies of the
+/// configuration slot and how many module hash references it holds, and the
+/// blob in the slot. The page uses it to refuse a file that is not a template
+/// before it offers anything.
+pub struct Probe {
+    pub slot_copies: usize,
+    pub hash_refs: usize,
+    pub format_version: u16,
+    pub blob: Vec<u8>,
+}
+
+/// Looks at a template ISO without changing it.
+pub fn probe(iso: &[u8]) -> Result<Probe, String> {
+    let (offs, slot) = slots_of(iso, SlotKind::Boot)?;
+    let slot = slot.ok_or(
+        "no configuration slot found: this is not a template ISO of this format (build 0.1.x releases and earlier have none)",
+    )?;
+    let blob = slot_blob(&slot, SlotKind::Boot)
+        .map_err(|e| e.to_string())?
+        .to_vec();
+    let format_version = blob
+        .get(8..10)
+        .and_then(|b| <[u8; 2]>::try_from(b).ok())
+        .map_or(0, u16::from_le_bytes);
+    Ok(Probe {
+        slot_copies: offs.len(),
+        hash_refs: hash_refs(iso).len(),
+        format_version,
+        blob,
     })
 }
 

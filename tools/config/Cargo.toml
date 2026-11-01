@@ -24,6 +24,14 @@ urmqtt-cfg = { path = "../../crates/cfg", features = ["std"] }
 urmqtt-config-schema.workspace = true
 urmqtt-control = { path = "../../crates/control" }
 ed25519-dalek = { version = "2.2", default-features = false }
+# Release checks (ADR-220): the minisign signature on SHA256SUMS and the sums,
+# the same code on the command line and in the browser.
+sha2 = { version = "0.11", default-features = false }
+base64ct = { version = "1.8", default-features = false, features = ["alloc"] }
+# What the page shows about a certificate and its key, and whether they belong
+# together (ECDSA P-256 only, like the broker's TLS stack).
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "pem", "alloc"] }
+x509-cert = { version = "0.3", default-features = false, features = ["pem"] }
 
 [lints]
 workspace = true

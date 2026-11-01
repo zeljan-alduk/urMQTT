@@ -1,7 +1,11 @@
 //! `urmqtt-config`: pack, show and verify urMQTT configuration blobs
 //! (C1, ADR-215, ADR-218). The same code the web builder compiles to
-//! WebAssembly lives in `urmqtt-cfg` and `urmqtt-config-schema`; this crate
-//! is the file handling around it.
+//! WebAssembly (ADR-220) lives in `urmqtt-cfg` and `urmqtt-config-schema`;
+//! this crate holds everything around it that does not touch the file
+//! system (packing from text, signing, the ISO patching, minisign and
+//! `SHA256SUMS` checks), so the command line and the browser run the very
+//! same functions. Only [`pack_blob`] and the `main` of the binary read
+//! files.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -11,7 +15,17 @@ use urmqtt_cfg::blob::{Blob, Hex, SlotKind, slot_blob};
 use urmqtt_cfg::fields::{self, Kind};
 use urmqtt_config_schema::pack::{PackOptions, pack};
 
+pub mod certs;
 pub mod image;
+pub mod keys;
+pub mod minisign;
+pub mod release;
+
+pub use urmqtt_config_schema::ConfigError;
+
+/// Supplies the files a configuration names (the command line reads them from
+/// disk next to the TOML, the browser from the files the user chose).
+pub type ReadFile<'a> = &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>;
 
 /// What `pack` needs.
 #[derive(Debug, Default, Clone)]
@@ -53,13 +67,11 @@ pub fn pack_blob(args: &PackArgs) -> Result<Vec<u8>, String> {
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
     });
     let mut read = |name: &str| std::fs::read(dir.join(name)).map_err(|e| e.to_string());
-    let blob = pack(
+    let blob = pack_text(
         &text,
-        PackOptions {
-            read: &mut read,
-            now_unix: args.now_unix.unwrap_or_else(default_now),
-            env: args.env.as_deref(),
-        },
+        &mut read,
+        args.env.as_deref(),
+        args.now_unix.unwrap_or_else(default_now),
     )
     .map_err(|errors| {
         let list: Vec<String> = errors.iter().map(|e| format!("  - {e}")).collect();
@@ -75,21 +87,52 @@ pub fn pack_blob(args: &PackArgs) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Signs `blob` with the Ed25519 key in `path`.
-pub fn sign(blob: &[u8], path: &Path) -> Result<Vec<u8>, String> {
+/// Builds the (unsigned) blob for the configuration `text`. The files it names
+/// come from `read`; `env` is the environment name (`--env`); `now_unix` is the
+/// clock for the certificate expiry rules. Every problem found is returned,
+/// addressed by its TOML key, so a page can put each next to its field. This
+/// is the function the command line and the browser (WebAssembly) both call.
+pub fn pack_text(
+    text: &str,
+    read: ReadFile<'_>,
+    env: Option<&str>,
+    now_unix: u64,
+) -> Result<Vec<u8>, Vec<ConfigError>> {
+    pack(
+        text,
+        PackOptions {
+            read,
+            now_unix,
+            env,
+        },
+    )
+}
+
+/// The message for a key that is not an Ed25519 PKCS#8 private key.
+pub const NOT_AN_ED25519_KEY: &str =
+    "expected an Ed25519 private key in PKCS#8 PEM (`openssl genpkey -algorithm ed25519`)";
+
+/// Signs `blob` with the Ed25519 private key `pem` (PKCS#8, PEM or DER).
+pub fn sign_pem(blob: &[u8], pem: &[u8]) -> Result<Vec<u8>, String> {
     use ed25519_dalek::{Signer, SigningKey};
-    let pem = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let seed = urmqtt_control::parse_private_key(&pem).ok_or_else(|| {
-        format!(
-            "{}: expected an Ed25519 private key in PKCS#8 PEM (`openssl genpkey -algorithm ed25519`)",
-            path.display()
-        )
-    })?;
+    let seed = urmqtt_control::parse_private_key(pem).ok_or(NOT_AN_ED25519_KEY)?;
     let key = SigningKey::from_bytes(&seed);
     urmqtt_cfg::build::sign(blob, |m| {
         (key.verifying_key().to_bytes(), key.sign(m).to_bytes())
     })
     .map_err(|e| e.to_string())
+}
+
+/// Signs `blob` with the Ed25519 key in `path`.
+pub fn sign(blob: &[u8], path: &Path) -> Result<Vec<u8>, String> {
+    let pem = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    sign_pem(blob, &pem).map_err(|e| {
+        if e == NOT_AN_ED25519_KEY {
+            format!("{}: {e}", path.display())
+        } else {
+            e
+        }
+    })
 }
 
 /// The slot file (marker, blob, padding) for `blob`.

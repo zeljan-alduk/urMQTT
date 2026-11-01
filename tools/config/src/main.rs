@@ -25,17 +25,23 @@
 //!     hash agree. Non-zero exit on any problem.
 //! urmqtt-config schema
 //!     The field table as JSON: key, type, default, range, help, dev-only.
+//! urmqtt-config check-release --pubkey minisign.pub --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]
+//!     Verifies the minisign signature over SHA256SUMS (default signature
+//!     file: the sums file name plus .minisig) and each FILE against the
+//!     sums (by file name). The same code the builder page runs in the
+//!     browser. Non-zero exit on any problem.
 //! ```
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use urmqtt_config_tool::{PackArgs, image};
+use urmqtt_config_tool::{PackArgs, image, release};
 
 fn usage() -> String {
     "usage:\n  urmqtt-config pack CONFIG.toml [--env NAME] [--sign KEY.pem] [--root DIR] [--now UNIX] \
      (--out BLOB | --out-slot SLOT | --iso TEMPLATE.iso --out OUT.iso | --image DISK.img --out OUT.img)\n  \
-     urmqtt-config slot BLOB OUT\n  urmqtt-config show FILE [--all]\n  urmqtt-config verify FILE [--dev]\n  urmqtt-config schema\n"
+     urmqtt-config slot BLOB OUT\n  urmqtt-config show FILE [--all]\n  urmqtt-config verify FILE [--dev]\n  urmqtt-config schema\n  \
+     urmqtt-config check-release --pubkey minisign.pub --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]\n"
         .to_owned()
 }
 
@@ -147,6 +153,30 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             };
             let data = std::fs::read(file).map_err(|e| format!("cannot read {file}: {e}"))?;
             println!("{}", image::verify(&data, dev)?);
+            Ok(())
+        }
+        "check-release" => {
+            let pubkey = take(&mut args, "--pubkey")?.ok_or_else(usage)?;
+            let sums_path = take(&mut args, "--sums")?.ok_or_else(usage)?;
+            let sig_path =
+                take(&mut args, "--sig")?.unwrap_or_else(|| format!("{sums_path}.minisig"));
+            let read = |p: &str| std::fs::read(p).map_err(|e| format!("cannot read {p}: {e}"));
+            let pubkey = String::from_utf8_lossy(&read(&pubkey)?).into_owned();
+            let sums = read(&sums_path)?;
+            let sig = String::from_utf8_lossy(&read(&sig_path)?).into_owned();
+            let signed = release::verify_sums(&pubkey, &sums, &sig)?;
+            println!(
+                "signature ok: key {}, \"{}\"",
+                signed.signature.key_id, signed.signature.trusted_comment
+            );
+            for file in &args {
+                let name = std::path::Path::new(file)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or_else(|| format!("{file}: not a file name"))?;
+                let digest = signed.sums.check(name, &read(file)?)?;
+                println!("ok: {name} sha256 {}", release::hex(&digest));
+            }
             Ok(())
         }
         _ => Err(usage()),

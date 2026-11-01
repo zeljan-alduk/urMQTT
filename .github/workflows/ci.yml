@@ -92,6 +92,22 @@ jobs:
       - name: Constant-time tests (H2)
         run: make ct
 
+  builder:
+    name: Web builder (WebAssembly module and page)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: builder
+      - run: rustup target add wasm32-unknown-unknown
+      - run: make certs
+      # The module against the command line tool (byte for byte), the form
+      # logic, and the page in the runner's headless Chrome (ADR-220..222).
+      - run: make builder-test
+
   kernel:
     name: Kernel (aarch64-unknown-none, ${{ matrix.env }})
     strategy:

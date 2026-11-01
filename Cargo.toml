@@ -30,6 +30,7 @@ members = [
     "crates/virtio",
     "crates/x25519",
     "tools/attack",
+    "tools/builder/wasm",
     "tools/config",
     "tools/control",
     "tools/disk",
@@ -69,6 +70,13 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 debug = false
+
+# The builder page's WebAssembly module (tools/builder, `make builder`): the
+# smallest code that is still fast enough to hash a 60 MB image in a browser.
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+strip = true
 
 # RustCrypto's CPU feature detection, patched to ask the kernel on bare metal
 # (vendor/README.md, ADR-041). Host builds behave as upstream.

@@ -163,6 +163,21 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-dbworker --target $(TARGET) -- -D warnings
 	$(MAKE) --no-print-directory check-x86
 	$(CARGO) test $(CARGO_FLAGS) --workspace
+	@if command -v node >/dev/null && rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$$'; then \
+	 $(MAKE) --no-print-directory builder-test; \
+	 else echo "check: node or the wasm32 target (rustup target add wasm32-unknown-unknown) missing, the builder tests are skipped (CI runs them)"; fi
+
+# The web builder (C1e, ADR-220..222): the WebAssembly module and the page in
+# build/builder/, and its tests. `make builder` needs the wasm32 target and node.
+.PHONY: builder
+builder: ## The web builder (WebAssembly module and page) in build/builder/
+	tools/builder/build.sh
+
+.PHONY: builder-test
+builder-test: ## The builder's tests: the module against the command line tool, the form logic, the page in a headless browser
+	$(CARGO) build $(CARGO_FLAGS) -p urmqtt-config-tool
+	tools/builder/build.sh
+	node --test tools/builder/test/*.test.mjs
 
 .PHONY: check-x86
 check-x86: ## clippy -D warnings for the x86_64 kernel (X1)
