@@ -87,6 +87,27 @@ boot() {
     wait "$pid"
 }
 
+# boot_until <log> <pattern> <run-qemu args...>: boots in the background, waits
+# for <pattern> in the serial log, then stops QEMU. For images that do not end
+# by themselves (a production kernel serves; after a fatal error it shows the
+# message for a minute before it resets). Returns 124 if the pattern never came.
+boot_until() {
+    local log=$1 pat=$2 waited=0 status=0 pid
+    shift 2
+    rm -f "$log"
+    "$ROOT/scripts/run-qemu.sh" --serial "$log" --headless "$@" >"$log.qemu" 2>&1 &
+    pid=$!
+    until clean "$log" 2>/dev/null | grep -Eq -- "$pat"; do
+        if ! kill -0 "$pid" 2>/dev/null || (( waited >= TIMEOUT * 10 )); then status=124; break; fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    sleep 1
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    return $status
+}
+
 # Strip terminal escapes the firmware and Limine print.
 clean() { LC_ALL=C sed -e $'s/\x1b\\[[0-9;?=]*[A-Za-z]//g' -e $'s/\r//g' "$1"; }
 
@@ -1862,6 +1883,79 @@ PY
     done
 }
 
+# C1b (ADR-216): the RELEASE kernel (any ENV but dev, built once for everyone)
+# refuses what only a dev kernel may run, and serves with a production
+# configuration. Needs a release kernel of this architecture:
+#   SMOKE_RELEASE_KERNEL=<ELF built with URMQTT_ENV=release> scripts/smoke.sh ...
+# (the Makefile builds one for the template ISO: `make template`).
+release_kernel() {
+    local rk=${SMOKE_RELEASE_KERNEL:-}
+    if [[ -z $rk || ! -f $rk ]]; then
+        echo "  - release-kernel skipped (SMOKE_RELEASE_KERNEL=<a release kernel ELF of this architecture>)"
+        return
+    fi
+    make_cfg_blobs
+    local dir="$OUT/cfgpack" tool="$ROOT/target/debug/urmqtt-config" dev_kernel=$KERNEL iso accel
+    KERNEL=$rk
+    # 1. A dev configuration (env = dev: plaintext port, durability shortcuts).
+    iso="$OUT/rel-dev.raw"
+    MKIMG_EXTRA=(--config "$dir/plain.blob")
+    mkimg "$iso" "smoke"
+    MKIMG_EXTRA=()
+    for accel in $ACCELS; do
+        local log="$OUT/rel-dev-$accel.log" data="$OUT/rel-dev-$accel.img" status=0
+        fresh_disk "$iso" "$data"
+        boot_until "$log" "resetting in 60 s" --disk "$data" --accel "$accel" --fwd none || status=$?
+        check "release-kernel-refuses-dev-config [$accel]" "$log" "$status" \
+            "fatal: configuration refused: env: the dev environment is refused by a release kernel" \
+            "NOT:URMQTT READY" "NOT:PLAINTEXT" "NOT:config: development kernel"
+    done
+    # 2. A production configuration that nevertheless asks for the plaintext
+    # port (made by hand: the packer refuses to build it).
+    iso="$OUT/rel-plain.raw"
+    "$tool" pack "$ROOT/deploy/prod/config.toml" --root "$ROOT/deploy/dev" --out "$dir/prod.blob" >/dev/null
+    MKIMG_EXTRA=(--config "$dir/prod.blob")
+    mkimg "$iso" "smoke"
+    MKIMG_EXTRA=()
+    python3 -I - "$iso" <<'PY'
+import hashlib, struct, sys
+path = sys.argv[1]
+d = bytearray(open(path, "rb").read())
+i = d.find(b"URMQTT-CFG-SLOT\0" + b"URMQCFG\0")
+assert i > 0
+# env prod (the default), the plaintext port 1883 (tag 15, u16), a certificate-less blob
+payload = struct.pack("<HI", 15, 2) + struct.pack("<H", 1883)
+head = b"URMQCFG\0" + struct.pack("<HHI", 1, 0, len(payload)) + payload
+blob = head + hashlib.sha256(b"urmqtt-cfg-v1" + head).digest() + b"\0"
+d[i + 16 : i + 262144] = blob + bytes(262144 - 16 - len(blob))
+open(path, "wb").write(d)
+PY
+    for accel in $ACCELS; do
+        local log="$OUT/rel-plain-$accel.log" data="$OUT/rel-plain-$accel.img" status=0
+        fresh_disk "$iso" "$data"
+        boot_until "$log" "resetting in 60 s" --disk "$data" --accel "$accel" --fwd none || status=$?
+        check "release-kernel-refuses-plaintext-port [$accel]" "$log" "$status" \
+            "fatal: configuration refused: network.mqtt_plain_port: (development option|plaintext)" \
+            "NOT:URMQTT READY" "NOT:PLAINTEXT"
+    done
+    # 3. The production configuration itself: serves TLS, no plaintext. (Its kernel
+    # heap is 1 GiB: the VM gets 2 GiB.)
+    iso="$OUT/rel-prod.raw"
+    MKIMG_EXTRA=(--config "$dir/prod.blob")
+    mkimg "$iso" "serve"
+    MKIMG_EXTRA=()
+    for accel in $ACCELS; do
+        local log="$OUT/rel-prod-$accel.log" data="$OUT/rel-prod-$accel.img" status=0
+        fresh_disk "$iso" "$data"
+        boot_until "$log" "^URMQTT READY$" --disk "$data" --accel "$accel" --fwd none --mem 2G || status=$?
+        check "release-kernel-serves-production-config [$accel]" "$log" "$status" \
+            "config: fingerprint [0-9a-f]{64} \([0-9]+ bytes, unsigned\), env=prod" \
+            "mqtt: TLS 1.3 listener on port 8883" "^URMQTT READY$" \
+            "NOT:PLAINTEXT" "NOT:config: development kernel" "NOT:net: tcp echo service" "$NO_FAULT"
+    done
+    KERNEL=$dev_kernel
+}
+
 # GICv2 (ADR-039), what KVM gives a guest on a GIC-400 host such as the
 # Raspberry Pi 4/5. HVF cannot emulate a GICv2, so this runs under TCG:
 # boot with ACPI and DT, then the TLS broker scenarios.
@@ -1950,6 +2044,15 @@ u_run() { # u_run <aa64|x86-uefi|x86-bios> <accel> <log> <iso|disk> <file> [qemu
         aa64) boot "$log" "--$how" "$file" --accel "$accel" --headless --no-net --smp 4 "$@" ;;
         x86-uefi) boot "$log" --arch x86_64 "--$how" "$file" --accel tcg --headless --no-net --smp 2 "$@" ;;
         x86-bios) boot "$log" --arch x86_64 --machine pc --firmware bios "--$how" "$file" --accel tcg --headless --no-net --smp 2 "$@" ;;
+    esac
+}
+
+# u_args <kind> <accel> <iso|disk> <file>: the run-qemu.sh arguments of a machine (as u_run).
+u_args() {
+    case $1 in
+        aa64) echo "--$3 $4 --accel $2 --smp 4" ;;
+        x86-uefi) echo "--arch x86_64 --$3 $4 --accel tcg --smp 2" ;;
+        x86-bios) echo "--arch x86_64 --machine pc --firmware bios --$3 $4 --accel tcg --smp 2" ;;
     esac
 }
 
@@ -2071,6 +2174,56 @@ universal_config() {
         check "universal-config-boots-$name" "$log" "$status" "$boot_line" \
             "config: fingerprint $CFG_FP \([0-9]+ bytes, signed by key $CFG_SIGNER\), env=dev" \
             "watchdog: handshake budget [0-9]+ ms \(calibrated\), other handlers 37 ms" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
+# C1d: the template ISO as released (`make template`, release kernels, empty
+# configuration), SMOKE_TEMPLATE_ISO=<file>. Unconfigured it boots, says so and
+# does not serve; configured with a production configuration by `pack --iso` it
+# serves TLS (no plaintext) on aarch64 UEFI, x86_64 UEFI and x86_64 BIOS.
+universal_template() {
+    local tpl=${SMOKE_TEMPLATE_ISO:-}
+    if [[ -z $tpl || ! -f $tpl ]]; then
+        echo "  - universal-template skipped (SMOKE_TEMPLATE_ISO=<the template ISO>)"
+        return
+    fi
+    local tool="$ROOT/target/debug/urmqtt-config" dir="$OUT/template" row
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool)
+    local status=0 out="$dir/pack.log" sum
+    sum=$(shasum -a 256 "$tpl" | cut -d' ' -f1)
+    "$tool" verify "$tpl" >"$out" 2>&1 || status=$?
+    check "universal-template-verify" "$out" "$status" "ok: fingerprint [0-9a-f]{64}, unsigned, no certificate" \
+        "slot copies identical, [0-9]+ module hash reference\\(s\\) match"
+    # The production template of the repository with the dev certificates.
+    status=0
+    "$tool" pack "$ROOT/deploy/prod/config.toml" --root "$ROOT/deploy/dev" --iso "$tpl" --out "$dir/prod.iso" >"$out" 2>&1 || status=$?
+    check "universal-template-pack" "$out" "$status" "configured: 2 copies of the slot replaced" "ok: fingerprint [0-9a-f]{64}, unsigned, complete"
+    local fp
+    fp=$(grep -o 'fingerprint [0-9a-f]*' "$out" | tail -1 | cut -d' ' -f2)
+    [[ $(shasum -a 256 "$tpl" | cut -d' ' -f1) == "$sum" ]] || { echo "  ✗ the template was modified"; FAILED=$((FAILED + 1)); }
+    local aa64='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$' x86='^URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$'
+    local rows=("aa64-hvf|aa64|hvf|$aa64" "x86-q35-uefi|x86-uefi|tcg|$x86" "x86-pc-bios|x86-bios|tcg|$x86")
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name kind accel boot_line <<<"$row"
+        [[ $kind == aa64 && " $ACCELS " != *" $accel "* ]] && continue
+        # Unconfigured: boots, refuses to serve.
+        local log="$dir/empty-$name.log" qargs
+        status=0
+        qargs=$(u_args "$kind" "$accel" iso "$tpl")
+        # shellcheck disable=SC2086 # the arguments contain no spaces
+        boot_until "$log" "resetting in 60 s" $qargs --fwd none || status=$?
+        check "universal-template-empty-$name" "$log" "$status" "$boot_line" "config: the configuration slot is empty" \
+            "fatal: refusing to serve: no server certificate and key" "NOT:URMQTT READY"
+        # Configured: serves. (The ISO's first entry is live mode, from RAM.)
+        log="$dir/prod-$name.log"
+        status=0
+        qargs=$(u_args "$kind" "$accel" iso "$dir/prod.iso")
+        # shellcheck disable=SC2086
+        boot_until "$log" "^URMQTT READY$" $qargs --fwd none --mem 2G || status=$?
+        check "universal-template-configured-serves-$name" "$log" "$status" "$boot_line" \
+            "config: fingerprint $fp \\([0-9]+ bytes, unsigned\\), env=prod" "mqtt: TLS 1.3 listener on port 8883" \
+            "^URMQTT READY$" "NOT:PLAINTEXT" "NOT:config: development kernel" "$NO_FAULT"
     done
 }
 
@@ -2554,10 +2707,19 @@ if [[ ${SMOKE_ONLY:-} == migrated && $ARCH == universal ]]; then
     exit
 fi
 
+# SMOKE_ONLY=template (universal): only the released template ISO (SMOKE_TEMPLATE_ISO=<file>).
+if [[ ${SMOKE_ONLY:-} == template && $ARCH == universal ]]; then
+    universal_template
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=config (universal): the configuration scenarios (C1: the patched template, the installer
 # carrying the configuration to the installed disk).
 if [[ ${SMOKE_ONLY:-} == config && $ARCH == universal ]]; then
     universal_config
+    universal_template
     universal_install
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
@@ -2680,6 +2842,7 @@ scenario x86-disk-q35 "smoke" on \
     "time: tsc [0-9]+ Hz from " "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${DEV_OK[@]}" "${SMP4_OK[@]}" "${DB_OK[@]}" \
     "${DISPATCH_OK[@]}" "${CONFIG_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 want config_packed && config_packed
+want release_kernel && release_kernel
 scenario x86-fault-unmapped-mmio "smoke test=data-abort" on \
     "EXCEPTION: #PF page fault" "page not present, read, supervisor mode" "NOT:URMQTT READY"
 SMP=8 scenario x86-smp8 "smoke" on \
@@ -2750,6 +2913,7 @@ scenario boot-dtb "smoke" off \
     "$BOOT_LINE" "platform: discovered via DeviceTree" "console: pl011 at 0x9000000" "${MEMORY_OK[@]}" \
     "${TIME_OK[@]}" "${DEV_OK[@]}" "${DISPATCH_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 want config_packed && config_packed
+want release_kernel && release_kernel
 scenario fault-data-abort "smoke test=data-abort" on \
     "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
     "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \

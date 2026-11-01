@@ -333,18 +333,20 @@ fn fill(bytes: &'static [u8], builtin: bool) -> Result<LoadInfo, CfgError> {
     Ok(info)
 }
 
+/// The blob inside a slot file. A slot still marked as the installation
+/// image's template (an installed disk that was never configured) is read
+/// like any other: it holds the empty configuration.
+fn blob_in(slot: &[u8]) -> Result<&[u8], CfgError> {
+    blob::slot_blob(slot, SlotKind::Boot)
+        .or_else(|e| blob::slot_blob(slot, SlotKind::Disk).map_err(|_| e))
+}
+
 /// Loads the configuration from the module the bootloader provided: the
 /// slot file (marker, blob, padding). Call once, first thing at boot. On an
 /// error nothing is installed and the built-in defaults apply (the caller
 /// decides whether to stop).
 pub fn load(slot: &'static [u8]) -> Result<LoadInfo, LoadError> {
-    // A slot still marked as the installation image's template (an installed
-    // disk that was never configured) is read like any other: it holds the
-    // empty configuration.
-    let bytes = match blob::slot_blob(slot, SlotKind::Boot) {
-        Ok(b) => b,
-        Err(e) => blob::slot_blob(slot, SlotKind::Disk).map_err(|_| e)?,
-    };
+    let bytes = blob_in(slot)?;
     begin()?;
     match fill(bytes, false) {
         Ok(info) => {
@@ -544,6 +546,25 @@ mod tests {
             })
         );
         assert_eq!(c.memory.kernel_heap_mb, 128);
+    }
+
+    #[test]
+    fn both_slot_markers_are_read_and_others_refused() {
+        use urmqtt_cfg::blob::{DISK_MARKER, SLOT_MARKER, make_slot};
+        use urmqtt_cfg::build::Builder;
+        let blob = Builder::new().finish(false).unwrap();
+        let slot = make_slot(SlotKind::Boot, &blob).unwrap();
+        assert_eq!(blob_in(&slot).unwrap().get(..blob.len()), Some(&blob[..]));
+        let mut template = slot.clone();
+        template[..16].copy_from_slice(&DISK_MARKER);
+        assert_eq!(
+            blob_in(&template).unwrap().get(..blob.len()),
+            Some(&blob[..])
+        );
+        let mut other = slot.clone();
+        other[..16].copy_from_slice(b"URMQTT-CFG-????\0");
+        assert!(blob_in(&other).is_err());
+        assert!(blob_in(&slot[..SLOT_MARKER.len() + 10]).is_err());
     }
 
     #[test]
