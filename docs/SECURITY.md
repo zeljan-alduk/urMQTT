@@ -10,7 +10,10 @@ TLS 1.3 with client certificates), no shell, no console input, no remote
 administration. Configuration changes mean a new image. The one exception is the
 identity lifecycle (revocation and the device allowlist, H1): it changes at
 runtime through signed control messages on the same MQTT/TLS port. See
-[Control channel](#control-channel-h1).
+[Control channel](#control-channel-h1). A second, **optional and off by default**
+exception is a plaintext MQTT port for trusted networks (P1): see
+[Plaintext MQTT for trusted networks](#plaintext-mqtt-for-trusted-networks-p1-adr-229-to-adr-231),
+which says what it gives up.
 
 ## Assets
 
@@ -22,6 +25,7 @@ runtime through signed control messages on the same MQTT/TLS port. See
 | Device identities and the revocation list | CA embedded; revocations embedded and in SQLite | Who may connect. |
 | Control signing key (Ed25519) | **Offline**, never in the image: a file on an operator machine (dev) or an HSM/KMS behind `urmqtt-control --sign-cmd` (prod). The image holds only the public key (`deploy/<env>/control.pub`). | Revoking, unrevoking and allowlisting devices at runtime. |
 | Trust anchors by role | `[trust] operational` and `bootstrap` CA lists, embedded | Which CA grants which rights; rotation with overlap. |
+| Plaintext accounts (P1, opt-in) | Salted PBKDF2 hashes in the image's configuration slot (ADR-231); the passwords are never stored | Logging in on the plaintext port as a device. The hashes are public to whoever holds the image: use long random passwords. |
 | Messages | In flight (RAM), retained and offline queues (SQLite), telemetry (log on the data disk) | Confidentiality and integrity of device data. |
 | Availability | — | The broker's purpose; the main target of a remote attacker. |
 
@@ -30,6 +34,7 @@ runtime through signed control messages on the same MQTT/TLS port. See
 | Boundary | Trusted? | Notes |
 |---|---|---|
 | Network (TCP 8883, and the L2 segment) | **Untrusted** | Every byte is hostile until TLS client authentication completes, and stays untrusted as MQTT input afterwards. |
+| Plaintext listener (P1, opt-in, `plaintext.enabled`) | **Untrusted, and unencrypted** | Reachable only from `plaintext.allow_from`; a client holds the plaintext role (a narrower ACL, smaller packets, a lower rate, no `$SYS`, no control) and its traffic can be read and changed by anyone on the path. Chosen by the owner for a network the owner controls. |
 | Authenticated device | Partially | Restricted by the ACL and every limit below. A device can only harm itself and its own topics. |
 | Backend/service identity | More trusted | Wider ACL (`acl.service_*`). Still no query interface and no code execution. |
 | Data disk | Integrity-checked | Treated as corruptible (torn writes, bit rot), not as malicious: the hypervisor owns it. |
@@ -45,7 +50,11 @@ runtime through signed control messages on the same MQTT/TLS port. See
    Goals: other devices' data, denial of service, persistence after revocation.
 3. **On-link attacker:** on the same L2 segment as the VM (a shared cloud
    network). Goals: redirecting traffic, spoofing DHCP.
-4. **Damaged storage:** not an attacker, but the disk content after a crash or
+4. **On the path of a plaintext connection (P1, only when the owner enabled it):**
+   can read and change everything on port 1883, replay a login and impersonate
+   the broker. Not defended against by design; the exposure is limited by who can
+   reach the port and by what a plaintext client may do.
+5. **Damaged storage:** not an attacker, but the disk content after a crash or
    corruption is untrusted input at boot.
 
 ## Attack surface: everything that parses untrusted input
@@ -65,6 +74,7 @@ runtime through signed control messages on the same MQTT/TLS port. See
 | SQLite database file | SQLite 3.54.1 (vendored), **in the unprivileged database worker** (H6, ADR-210 to ADR-212) | EL0 / ring 3 in its own address space; fault containment and restart (smoke `worker-contain`, `worker-fault`); `quick_check` at boot, `SQLITE_DBCONFIG_DEFENSIVE`; upstream fuzzing |
 | Firmware tables (DTB, ACPI) | `urmqtt-platform` | fuzz `fdt_parse`, `acpi_parse` (trusted source, fuzzed anyway) |
 | Control messages (`$urmqtt/control`, H1) | `urmqtt-control` (own, `forbid(unsafe_code)`, fixed layout) + `ed25519-dalek` `verify_strict` | RFC 8032 vectors, round trip, every flipped byte fails; fuzz `control_message`; smoke `control-*` |
+| First packet of a plaintext connection, its CONNECT credentials, the `[plaintext]` entries (CIDRs, accounts, password hashes) | `urmqtt-mqtt` (the same decoder as TLS), `urmqtt-plain` and `urmqtt-cfg::{net,passwd,plain}` (own, `forbid(unsafe_code)` in `urmqtt-plain`) | fuzz `mqtt_decode`, `broker_input` (plaintext connections included), `plain_input` (parsers, allow-list and the table of source addresses against a model); 25 host tests in `urmqtt-plain`; smoke `plaintext-*` |
 | Build-time configuration | `urmqtt-config-schema` | 38 tests; fuzz `config_parse`; invalid configuration fails the build |
 
 CI runs every fuzz target on every push (60 s each), and longer in the
@@ -174,6 +184,143 @@ read of the log (which never holds secrets or payloads). Revoke it through
 the control channel; keep operator certificates short-lived and on the
 operator's machine only. The console is on in every build; with an empty
 `acl.operator_ids` nobody can use it.
+
+## Plaintext MQTT for trusted networks (P1, ADR-229 to ADR-231)
+
+A release image can open a second MQTT port, TCP 1883 by default, **without
+TLS**, for devices that cannot do it (a small microcontroller, a legacy sensor, a
+gateway on a wire the owner controls). It is **off by default**; nothing about the
+TLS port changes when it is on or off. This section says what it gives up, when
+that is acceptable, what it never gives, and where each claim is checked.
+
+### What plaintext gives up
+
+| Property | TLS port (8883) | Plaintext port (1883) |
+|---|---|---|
+| Confidentiality of messages | yes | **no**: anyone on the path reads every packet, including passwords |
+| Integrity of messages | yes | **no**: anyone on the path can change, inject or drop packets |
+| Authenticity of the broker | certificate | **none**: a client cannot tell the broker from an impostor on the path |
+| Authenticity of the client | client certificate (mTLS) | password (sent in the clear), or nothing (`anonymous`), or its source address (`ip`) |
+| Replay of a captured login | impossible | **possible**: the password is the credential |
+| Revocation | registry, control channel, CRL | registry allowlist and `disallow` (the identity), no certificate |
+
+None of that can be repaired by configuration: it is what "no TLS" means. The
+design limits what a plaintext client can **do** and who can **reach** the port;
+it cannot make the bytes private.
+
+### When it is acceptable
+
+- A private network the owner controls end to end: a wired segment, a dedicated
+  VLAN, a VPN or a cloud private network between the broker and the devices,
+  where nobody untrusted can attach a machine or sniff.
+- Devices whose messages are not secret and whose commands cannot cause harm
+  if forged (or whose ACL is narrow enough that a forged message cannot).
+- As a migration step, with an `allow_from` as narrow as the devices' subnet.
+
+It is **not** acceptable on a public address with a public `allow_from`, for
+anything private, or where a forged command matters. The configuration check, the
+builder and the boot report all say so (see below), and `allow_from_anywhere`
+exists only so that opening the port to everyone is never an accident.
+
+### What it never gets
+
+- **No service, operator or control rights.** The broker gives every plaintext
+  session the plaintext role, whatever its name is. The configuration check
+  refuses a plaintext identity that is also an `acl.service_ids`,
+  `acl.operator_ids` or `control.service_ids` entry. A plaintext client cannot
+  publish control messages, read `$SYS` or `$urmqtt`, or reach the console
+  (host tests `plaintext_role_rules` and `a_plaintext_client_never_holds_another_role_whatever_its_name`;
+  smoke `no-sys-subscribe`, and the `$urmqtt` publish a plaintext client makes is
+  dropped and counted, as the log line of `plaintext-password` shows).
+- **No access to TLS sessions.** The session key is `$plain/<identity>/<client
+  id>`; no TLS session or client id can collide with it (host test `a_plaintext_client_id_cannot_take_over_anything_else`; smoke
+  `plaintext-client-id-cannot-take-over-a-tls-session`).
+- **No stored sessions.** `clean_session = 0` is refused (CONNACK 5), so there is
+  no session to read after the device and no offline queue to fill (smoke
+  `stored-session-refused`).
+- **No retained messages** unless `plaintext.retain = true` (smoke
+  `retained-publish-not-retained`).
+- **A narrower ACL than the devices'**: `plaintext.acl_publish` /
+  `acl_subscribe`, by default `devices/{id}/#` and `devices/{id}/cmd/#`, where
+  `{id}` is the identity (smoke `acl-publish-only-own-topics`,
+  `acl-subscribe-only-own-commands`, `anonymous-acl`).
+- **Smaller packets and a lower rate**: 1024 bytes and 5 publishes a second by
+  default (smoke `packet-limit`, `publish-rate-limited`).
+- **The registry applies.** With `registry.mode = "allowlist"` an identity must
+  be on the list to log in (smoke `not-on-the-allowlist-refused`).
+
+### Who can reach it, and what a refusal costs
+
+1. **The allow-list is checked at the SYN.** `plaintext.allow_from` is a list of
+   IPv4 networks and is **mandatory** (an empty list is a configuration error
+   when the listener is on; `0.0.0.0/0` is refused and spelled
+   `allow_from_anywhere = true`). An address outside it, an address that is
+   locked out and an address at its connection limit get **no SYN-ACK**: the
+   broker keeps no state for them, so a scan or a flood from outside the list
+   costs one comparison per packet (smoke `plaintext-refused`,
+   `refused-source-gets-no-answer`; host tests in `urmqtt-plain`).
+2. **Failed logins lock the source address out** (`max_failed_auths_per_ip`
+   failures in `lockout_s` seconds: 5 in 300 by default). A locked-out address
+   gets no SYN-ACK either. The count is by address, not by user name, so nobody
+   can lock a user out from elsewhere (smoke `plaintext-lockout`).
+3. **Logins cost CPU and are admitted at a rate** (a password hash is about
+   2.5 ms at the default 10 000 iterations on the test machine; the rate is sized
+   from a measurement at boot), through an admission of its own, so a flood of
+   logins cannot take handshake capacity from TLS (smoke `tls-is-not-locked-out`,
+   and the TLS scenarios run on the same VM in `plaintext-password`).
+4. **Whatever the reason, a refused login looks the same and takes the same
+   time**: no credentials, unknown user and wrong password are all CONNACK 4 and
+   exactly one password hash is computed on each path (host tests
+   `every_refusal_is_a_bad_login_with_one_code` and
+   `the_work_does_not_depend_on_whether_the_user_exists` in `urmqtt-plain::auth`).
+
+### Authentication modes
+
+| Mode | Who a client is | What it proves | Use |
+|---|---|---|---|
+| `password` (default) | the user name, if the password matches the account's salted PBKDF2 hash | that the client knows the password, **which any sniffer learns** | the default; needs per-device accounts |
+| `anonymous` | `anonymous_identity` (`lan`) | nothing | a closed segment where the allow-list is the only gate |
+| `ip` | the identity of the longest matching `ip_identities` network | that the packet came from that address, which holds only while nobody can forge it | a segment with one network per device class |
+
+Passwords are never stored: the image holds `pbkdf2-sha256$iterations$salt$key`
+(ADR-231). The builder page hashes in the browser and keeps only the hash; the
+command line reads the password from standard input. **An image is a file anyone
+may copy, and its hashes allow offline guessing** at roughly GPU speed for
+SHA-256: use long random passwords (the builder generates them), not words.
+
+### Threat model entries (plaintext)
+
+| Threat | Mitigation | Check |
+|---|---|---|
+| Sniffing messages or passwords on the path | None possible; limit where the port is reachable | documented; boot warning, builder risk dialog |
+| Replaying a sniffed login | None possible (the password is the credential); lock-out limits only guessing | documented |
+| Forging the broker (man in the middle) | None possible; clients cannot verify the broker | documented |
+| Guessing passwords online | PBKDF2; lock-out per source address; login rate; uniform answer and time | `plaintext-lockout`; host tests |
+| Scanning for the port from outside `allow_from` | No SYN-ACK, no state | `plaintext-refused` |
+| Exhausting connections from one address | `max_connections_per_ip`, refused at the SYN | `per-address-connection-limit` |
+| Exhausting connections from many allowed addresses | `max_connections`; TLS port has its own limits | `plaintext-limits` |
+| Learning which user names exist | Same CONNACK and same work on every path | host tests |
+| A plaintext client becoming a service, an operator or the control channel | Role is the plaintext role whatever the name; config check; `$SYS`/`$urmqtt` refused | host tests; `no-sys-subscribe` |
+| Taking over a TLS device's session or reading a stored session | Separate session namespace; clean sessions only | `plaintext-client-id-cannot-take-over-a-tls-session`, `stored-session-refused` |
+| A forged source address in `ip` mode | **Not mitigated**: the mode is documented as only as strong as the network | warning at boot |
+| The port reachable from the internet by mistake | Mandatory allow-list, `allow_from_anywhere` spelled out, warnings at build and boot | config tests; boot report |
+| A stolen image gives password hashes | Long random passwords; hashes are salted and iterated | documented (residual risk) |
+| Parser attacks on the first packet | Same MQTT decoder as TLS (`mqtt_decode`), packet size limited to 1024 from the first byte | fuzz `mqtt_decode`, `broker_input`, `plain_input` |
+
+### Operating it
+
+`$SYS/broker/plaintext/*` (operator only) reports `enabled`, `port`, `auth`,
+`allow_from`, `accounts`, `connections`, `accepted`, `refused/source`,
+`refused/locked_out`, `refused/limit`, `refused/registry`, `refused/session`,
+`auth_ok`, `auth_failed` and `lockouts`, and the JSON object of the info query (`$SYS/query/info`) and the status line
+carry the same. The boot log carries one line with the port,
+the mode, the allowed networks and every limit, and a warning when
+`allow_from_anywhere` is set, when the mode is `anonymous` or `ip`, or when the
+machine's own address is public. Accounts are changed by building a new image;
+an identity can be cut off at once through the registry (`disallow` on the
+signed control channel). Adding and removing accounts at run time is **not**
+implemented (it would need a signed message type and a place to keep the hashes
+across reboots) and is listed as later work.
 
 ## Installer entry (S1b)
 
@@ -413,8 +560,12 @@ power cut, and the broker goes on.
   is a gauge and warnings at 60, 30, 7 and 1 days.
 - ACL in the image's configuration, evaluated without the database: by default a device may
   publish to `devices/{id}/#` and subscribe to `devices/{id}/cmd/#`.
-- The plaintext port can only exist in the `dev` environment; the build rejects
-  it elsewhere.
+- `network.mqtt_plain_port` (the development plaintext port, which takes the
+  identity from the client id) can only exist in the `dev` environment; the build
+  rejects it elsewhere (smoke `release-kernel-refuses-plaintext-port`). A release
+  image gets plaintext MQTT only through the `[plaintext]` section (P1), which is
+  off by default and has its own allow-list, logins and limits: see
+  [Plaintext MQTT for trusted networks](#plaintext-mqtt-for-trusted-networks-p1-adr-229-to-adr-231).
 
 ### Denial of service
 
@@ -428,6 +579,10 @@ Every resource is bounded. What happens at the limit is part of the design:
 | New TLS handshakes per core | `limits.handshakes_per_core_per_sec` | SYN dropped without an answer, or refused (RST) at the ACK, before any crypto (ADR-080) |
 | Handshakes in flight per core | `limits.max_handshakes_in_flight_per_core` | SYN dropped, or refused at the ACK; a flow refused at the ACK is remembered for 1 s and not admitted again by its next segment |
 | … of those from one source address | `limits.max_handshakes_in_flight_per_ip` | refused (an unauthenticated peer cannot take every slot) |
+| Plaintext SYNs from outside `plaintext.allow_from` | `plaintext.allow_from` (mandatory) | no SYN-ACK, no state (P1) |
+| Plaintext connections | `plaintext.max_connections`, `plaintext.max_connections_per_ip` | SYN dropped without an answer, or refused at the ACK |
+| Failed plaintext logins from one address | `plaintext.max_failed_auths_per_ip` in `plaintext.lockout_s` | the address gets no SYN-ACK for `lockout_s` |
+| Password checks (CPU) | their own admission rate, sized from a boot-time measurement | SYN dropped before any hashing; TLS admission untouched |
 | Time to finish a handshake and CONNECT | 10 s (3 s while three quarters of the in-flight limit are taken) | connection aborted |
 | Free heap | `memory.min_free_mb` | new connections refused (smoke: `storm`) |
 | DB core backlog | 16 384 requests | new connections refused; registry updates skipped beyond 4 096 |
@@ -481,6 +636,11 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 | A restored old data-disk snapshot brings back old revocations and `seq`. | The disk is trusted not to be maliciously rolled back. | Image-listed revocations are re-applied at every boot; validity windows bound old messages. |
 | DHCP and ARP are unauthenticated. | IPv4 on a shared L2 segment has no defence against on-link spoofing. | Static addressing (`network.mode = "static"`) and a private network for the VM. |
 | Many source addresses defeat the per-address handshake limit. | A botnet can use the per-core in-flight and rate limits up. | Upstream filtering; the limits keep the broker alive for connected devices. |
+| Plaintext MQTT (P1, only if enabled) gives up confidentiality, integrity and the broker's authenticity, and a sniffed login can be replayed. | That is what "no TLS" means. | Enable it only on a network the owner controls end to end; narrow `plaintext.allow_from`; keep a firewall in front; prefer `auth = "password"` over `anonymous` and `ip`. |
+| Plaintext `auth = "ip"` trusts the source address. | An address on a shared segment can be forged. | Use it only where nobody can forge one; the boot report says so. |
+| The password hashes in an image allow offline guessing (PBKDF2 at GPU speed). | An image is a file; there is no hardware-backed store, and no memory-hard function in the kernel. | Long random passwords (the builder generates them); treat the ISO as a secret; change passwords with a new image. |
+| Plaintext lock-out is by source address. | Devices behind one NAT share it; an attacker who shares it can lock the others out. | The allow-list is the better tool behind a NAT; raise `max_failed_auths_per_ip`. |
+| Plaintext accounts cannot be added or removed at run time. | It needs a signed control message type and a place to keep the hashes (listed as later work, ADR-230). | A new image; revoke an identity at once with `disallow` through the registry. |
 | Syslog and statsd are plain UDP. | No TLS sink in the kernel. | Collectors on a private network only. |
 | No hardware RNG on the cloud (Ampere Altra has no `RNDR`; virtio-rng may be absent). | Then the CSPRNG is seeded from CPU timing jitter, which is weaker evidence than a hardware source. | Health tests and a conservative estimate gate it (ADR-038), and it is logged at boot. Prefer clouds with virtio-rng; `entropy.fallback = "none"` refuses to boot without one. |
 | Side channels in the crypto. | RustCrypto implementations are designed to be constant-time. The tag checks and our one secret comparison are checked by dudect-style timing tests (`make ct`, H2), but the asymmetric code (P-256, X25519, Ed25519) is not measured here. | ChaCha20-Poly1305 is offered alongside AES-128-GCM; docs/CRYPTO.md lists what is checked. |

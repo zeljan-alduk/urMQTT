@@ -84,6 +84,12 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/handshakes/slow` | completed handshakes that took more than 250 ms from accept to done |
 | `$SYS/broker/handshakes/latency_sum_ms`, `latency_max_ms` | sum of accept-to-done times (divide the change by the change of `done` for the mean), longest in the last 5 s |
 | `$SYS/broker/cpu/accepted/<core>` | connections accepted per core since boot: how evenly the flows spread |
+| `$SYS/broker/plaintext/enabled` | `true` or `false`: whether the plaintext listener (P1, ADR-229, ADR-230) is on. While it is off this is the only plaintext topic |
+| `$SYS/broker/plaintext/port`, `auth`, `allow_from`, `accounts` | the plaintext port, the login mode (`password`, `anonymous`, `ip`), the networks that may connect (`10.0.0.0/8, 192.168.0.0/16` or `anywhere`) and how many password accounts the image holds |
+| `$SYS/broker/plaintext/connections`, `accepted` | plaintext connections open now, and accepted since boot |
+| `$SYS/broker/plaintext/refused/source`, `locked_out`, `limit` | SYNs dropped without an answer (or connections refused at the ACK): from an address outside `allow_from`, from a locked-out address, and for a limit (connections, per address, login rate, memory) |
+| `$SYS/broker/plaintext/refused/registry`, `session` | logins refused because the identity is not on the registry's allowlist, and CONNECT packets refused for the session (a stored session asked for, an unusable client id) |
+| `$SYS/broker/plaintext/auth_ok`, `auth_failed`, `lockouts` | logins accepted, logins refused (wrong password, unknown user, no credentials, an address that is no one's, a first packet that is no CONNECT) and addresses locked out. A rising `auth_failed` with no `lockouts` is a device with the wrong password; `lockouts` rising is a guesser or a NAT full of such devices |
 
 **Time (T1, ADR-100).** The wall clock is the firmware RTC read at boot, plus
 uptime. With `[time] servers = ["a.b.c.d", ...]` in `deploy/<env>/config.toml`

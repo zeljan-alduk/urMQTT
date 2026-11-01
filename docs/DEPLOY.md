@@ -104,8 +104,12 @@ route produces) into the slot. Every `ENV` but `dev` builds the **same kernel**;
   Write it to the VM's boot disk.
 - `.elf`: the kernel itself (for debugging, and for comparing builds).
 
-Production images contain no plaintext listener, no self-tests and no TLS
-client (`selftest` feature off; the prod ELF is about 180 KiB smaller than dev).
+Production images contain no development plaintext listener, no self-tests and
+no TLS client (`selftest` feature off; the prod ELF is about 180 KiB smaller
+than dev). A production image listens on a plaintext port only if its
+configuration has `[plaintext] enabled = true` (P1, off by default, with a
+mandatory `allow_from`; see the README and docs/SECURITY.md); the boot log and
+the configuration report say so.
 Dev-only command-line switches are ignored.
 
 **The image embeds the server's private key** (in its configuration slot, and

@@ -346,3 +346,42 @@ evidence; it cannot say who held the CPU. The Linux guest's `/proc/stat` showed 
   `wan-bridge 27001 RTT_MS LOSS_PERCENT 0 1000` (start it before the guest: it learns QEMU's address from the first frame), and
   `scripts/run-qemu.sh --iso ISO --accel hvf --smp 4 --dgram 27002:27001` with a static-address image (`mkbench.sh --x11 --static 10.0.2.15/24 10.0.2.2`).
   The generator then connects to 10.0.2.15 from the container.
+
+## 8. The plaintext path against the TLS path (P1, ADR-230)
+
+`scripts/plain-bench.sh` boots one development image that serves TLS on 8883 and plaintext (anonymous mode) on 1883, 4 vCPUs under HVF
+on an Apple-silicon laptop, reached through QEMU user networking, and drives both ports with the same `urmqtt-loadgen` (`--plain 1` for
+plaintext). A second image in password mode measures logins. Heap 128 MB, the handshake limits and the publish rate lifted (a measurement
+image, never a deployment). Three runs of 10 s each; raw output of the run quoted here: `docs/perf-results/plaintext-vs-tls.txt`.
+
+| Load (16 publisher/subscriber pairs, 64 B unless noted) | TLS 1.3 + client certificate | plaintext |
+|---|---|---|
+| QoS 0, 500 msg/s each, delivered/s | 8000, 8000, 8000 | 8000, 8000, 8000 |
+| same, latency p50 / p99 | 0.17 / 0.43 ms | 0.13-0.18 / 0.42-0.43 ms |
+| QoS 1, 500 msg/s each, delivered/s | 8000 x 3 | 8000 x 3 |
+| QoS 0, 512 B, 500 msg/s each, delivered/s | 8000 x 3 | 8000 x 3 |
+| New connections per second (32 clients) | 2757, 2704, 2598 | anonymous 7824, 4893, 4868 |
+| New connections per second, password mode (PBKDF2, 10 000 iterations) | - | 334, 308, 342 |
+
+**What this says.** At a rate both can carry, the two paths deliver every message with the same latency: on this rig the record layer is
+not visible at 8 000 messages a second. A plaintext connection costs less to set up (about 2x the TLS rate here, with the rig and the
+generator in the way), and **a password login is the expensive part**: one PBKDF2 at 10 000 iterations costs about 2.5 ms on the guest's
+cores (measured at boot, `plaintext: one password check costs about 2506 us`), so the login admission caps new password connections at
+about 200 a second per data core, and the measured 310-340 a second over two data cores is that cap. Anonymous and `ip` modes have no
+such cost. That is the price of a hash that is expensive to guess; it only matters in a reconnect storm, where the cap protects TLS clients
+from sharing the cores with a flood of logins (the rate is also capped by `limits.handshakes_per_core_per_sec`).
+
+**What this does not say.**
+- The single-flow flood (1 pair, QoS 0, as fast as possible) ranged from 20k to 440k delivered a second between runs on both ports. The
+  rig (user-mode networking, one generator thread per client, a guest that the watchdog resets when a core stays in one handler for a
+  second) is not a stable instrument for floods. **No flood conclusion should be drawn**, and no claim that plaintext is faster or slower
+  there. A flood from 16 pairs wedged the guest (the watchdog reset it) on both ports; the table above therefore uses a fixed rate.
+- 32 connections opened at once time out in the user-mode network on both ports; the pair rows open 4 at a time (`--open-par 4`).
+- The generator's CPU (whole process, user plus system, per wall second) is in the raw file; it stayed under 0.35 cores for the fixed-rate
+  rows, so the generator is not the limit there. It is near one core in the flood rows.
+- It is a laptop, not a VPS. The plan asked for plaintext against Mosquitto on the same VPS; that comparison needs the VPS (excluded
+  from this task) and is open. The numbers above are not a capacity statement.
+- The TLS path itself did not change: the plaintext listener adds one port comparison per SYN and per accepted connection, and an
+  `Option` test on the connection-close path. No TLS-path row of sections 3 to 7 was re-measured on a VPS.
+
+Reproduce: `scripts/plain-bench.sh --runs 3` (needs a kernel from `make build ENV=dev` and the Mosquitto-free host tools only).

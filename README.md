@@ -540,7 +540,7 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `network.address`, `network.gateway` | `"a.b.c.d/len"`, `"a.b.c.d"` | Required for `static` and `auto`, forbidden for `dhcp` |
 | `network.dhcp_timeout_s` | 3–120 (default 15) | `auto` only: how long to wait for a lease before the static settings are used (also used at once when a lease is lost) |
 | `network.mqtt_tls_port` | 1–65535 | MQTT over TLS listener (8883) |
-| `network.mqtt_plain_port` | 0 or port | Plaintext MQTT; **non-zero only in `dev`** |
+| `network.mqtt_plain_port` | 0 or port | Development plaintext port (the identity is the client id); **non-zero only in `dev`**. A release image gets plaintext MQTT only from `[plaintext]` below |
 | `tls.cert`, `tls.key` | file names in `deploy/<env>/` | Embedded server PEMs; encrypted keys are rejected |
 | `tls.min_server_cert_days` | ≥ 1 (60) | The build fails if `server.pem` expires sooner; runtime warnings from this many days |
 | `tls.early_data` | `false` | 0-RTT is replayable: `true` fails the build |
@@ -552,6 +552,22 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `control.service_ids` | exact ids (or `[]` = off) | Operational identities that may publish to `$urmqtt/control` |
 | `control.allow_unrevoke` | bool | Whether `unrevoke` is accepted (keep `false` in production) |
 | `control.max_message_age_s` | 1–86 400 | Longest validity window of a control message |
+| `plaintext.enabled` | bool, default `false` | **Plaintext MQTT, no TLS, for trusted networks** (P1). Off unless you turn it on; read [the section below](#plaintext-mqtt-on-a-trusted-network-p1) first |
+| `plaintext.port` | 1–65535 (1883) | Its TCP port; not the TLS port |
+| `plaintext.allow_from` | `["10.0.0.0/8", ...]` (up to 64) | **Required** when enabled: the networks that may connect. A source outside gets no answer to its SYN (no state kept). `0.0.0.0/0` is refused |
+| `plaintext.allow_from_anywhere` | bool, default `false` | Say it out loud: every address may connect. Loud warnings at build and at boot; never on a machine with a public address |
+| `plaintext.auth` | `"password"` (default) \| `"anonymous"` \| `"ip"` | Who a client is: the user name if its password matches, `anonymous_identity`, or the identity of its source network |
+| `plaintext.users` | `[{ id = "...", password_hash = "..." }]` (up to 256) | The accounts of `auth = "password"`; the hash comes from `urmqtt-config hash-password` or the builder page, never the password |
+| `plaintext.anonymous_identity` | identity (`lan`) | The identity of every client with `auth = "anonymous"` |
+| `plaintext.ip_identities` | `[{ from = "10.1.0.0/16", id = "..." }]` (up to 64) | The identity of each source network with `auth = "ip"` (longest match) |
+| `plaintext.max_connections` | 1–1 000 000 (1000) | Connections of the plaintext port, all cores |
+| `plaintext.max_connections_per_ip` | 1–65 535 (16) | Of those, from one source address |
+| `plaintext.max_packet_size` | 64 – 268 435 455 (1024) | Largest MQTT packet a plaintext client may send |
+| `plaintext.publish_rate_per_device` | `"N/s"`, `"N/m"`, `"N/h"` (`"5/s"`) | Token bucket per plaintext session |
+| `plaintext.max_failed_auths_per_ip` | 1–1000 (5) | Failed logins from one address, within `lockout_s`, that lock it out |
+| `plaintext.lockout_s` | 1–86 400 (300) | How long a locked-out address gets no answer |
+| `plaintext.acl_publish`, `plaintext.acl_subscribe` | topic filters, up to 16, `{id}` = identity (`devices/{id}/#`, `devices/{id}/cmd/#`) | What a plaintext client may publish and subscribe to; never `$SYS` |
+| `plaintext.retain` | bool, default `false` | May plaintext clients publish retained messages (otherwise delivered, not stored) |
 | `tls.identity_field` | `"cn"` \| `"san_uri"` | Certificate field that becomes the `device_id` |
 | `tls.resumption` | bool | TLS 1.3 PSK session resumption |
 | `tls.revocation_list` | file name or `""` | Revoked client-certificate serials (hex, one per line); runtime revocations come on top (H1) |
@@ -593,6 +609,62 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `watchdog.handler_budget_ms` | 1–10 000 | Time budget of an ordinary handler |
 | `watchdog.handshake_budget_ms` | 0, 1–900 | Budget of a TLS handshake step; 0 (default) = 10x the handshake cost measured at boot, 50–500 ms (ADR-071) |
 | `watchdog.action` | `log` \| `drop` \| `reset` | What happens on overrun (ADR-035); a core stuck for 100 budgets always resets |
+
+### Plaintext MQTT on a trusted network (P1)
+
+Much of the IoT world speaks plain MQTT on port 1883: Mosquitto's default, Tasmota, ESPHome, Home Assistant,
+a microcontroller with no room for TLS or no clock to check a certificate with. urMQTT can serve that, **as an
+explicit opt-in that is off by default**: nothing listens on 1883 unless the image's configuration says so,
+and the TLS port is not affected either way.
+
+**What you give up.** Anyone on the path between a device and the broker can read every message and every
+password, change or inject messages, replay a login and pretend to be the broker. No setting repairs that; it is
+what "no TLS" means. Use it only on a network you control end to end (a wired segment, a VLAN, a VPN, a private
+cloud network), for data that is not secret, and keep `allow_from` as narrow as the devices' subnet. The full
+list, and when it is acceptable, is in [docs/SECURITY.md](docs/SECURITY.md#plaintext-mqtt-for-trusted-networks-p1-adr-229-to-adr-231).
+
+**What a plaintext client never gets.** No service, operator or control rights, no `$SYS`, no console, no stored
+session, no retained messages (unless `retain = true`), a narrower ACL than a device with a certificate
+(`devices/{id}/#` to publish, `devices/{id}/cmd/#` to subscribe, where `{id}` is its login), smaller packets (1 KiB)
+and a lower publish rate (5 a second). The registry allowlist applies.
+
+**Who can connect.** `allow_from` is required: a source address outside it gets no answer to its SYN, and the
+broker keeps no state for it. `allow_from_anywhere = true` is the explicit, loudly warned-about alternative.
+Failed logins lock the source address out (5 in 300 s by default), also without an answer.
+
+```toml
+[plaintext]
+enabled = true
+allow_from = ["10.0.0.0/8", "192.168.0.0/16"]    # required; 0.0.0.0/0 is spelled allow_from_anywhere
+auth = "password"                                # "password" (default) | "anonymous" | "ip"
+users = [{ id = "sensor-1", password_hash = "pbkdf2-sha256$10000$..." }]
+```
+
+Passwords are stored only as salted, iterated hashes. Make one with the tool (the password is read from standard
+input, so it stays out of your shell history) or let the [builder page](https://aldo.tech/en/products/urmqtt-builder/)
+do it in your browser, which keeps only the hash and can generate a long random password for you:
+
+```bash
+$ printf '%s\n' 'a-long-random-password' | urmqtt-config hash-password
+pbkdf2-sha256$10000$5c0a...$9f31...
+$ urmqtt-config pack config.toml --out config.blob      # refuses a plaintext section with no allow_from, no accounts, ...
+```
+
+An image is a file anyone may copy, and its hashes allow offline guessing: use long random passwords.
+With the image running, a default client works:
+
+```bash
+mosquitto_pub -h <broker-ip> -p 1883 -u sensor-1 -P 'a-long-random-password' -t devices/sensor-1/telemetry/temp -m 21.5
+mosquitto_sub -h <broker-ip> -p 1883 -u sensor-1 -P 'a-long-random-password' -t 'devices/sensor-1/cmd/#'
+```
+
+`auth = "anonymous"` makes every client the one `anonymous_identity`; `auth = "ip"` gives each source network its
+identity (`ip_identities = [{ from = "10.1.0.0/16", id = "plc" }]`) and trusts that nobody can forge an address.
+The boot log prints one `PLAINTEXT listener` line with everything that is on and a warning for each risky choice,
+the configuration report says `plaintext MQTT is ON`, and the operator reads `$SYS/broker/plaintext/*`
+([docs/OPERATE.md](docs/OPERATE.md)). Accounts change by building a new image; an identity can be cut off at once
+with `disallow` on the signed control channel when the registry is in `allowlist` mode. Adding accounts at run
+time is not implemented yet.
 
 ### Configuration examples
 
@@ -762,7 +834,8 @@ mosquitto_sub -h 127.0.0.1 -p 1883 -i device-001 -t 'devices/device-002/cmd/#'  
 python3 scripts/mqtt-scenarios.py 1883
 ```
 
-A prod build with a non-zero `mqtt_plain_port` does not compile.
+A prod build with a non-zero `mqtt_plain_port` does not compile. (A release image that needs plaintext MQTT uses the
+`[plaintext]` section instead: [Plaintext MQTT on a trusted network](#plaintext-mqtt-on-a-trusted-network-p1).)
 
 ### 6. Running on more cores, with TCG, or under a debugger (M1–M4)
 

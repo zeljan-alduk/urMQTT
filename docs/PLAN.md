@@ -279,3 +279,5 @@ retain = false                     # may plaintext clients publish retained mess
 ```
 
 The same keys are editable at run time only through a new image or a re-packed ISO (the builder), never over the plaintext listener itself. The builder shows the section collapsed with the switch off, a risk dialog when the switch is turned on or `allow_from_anywhere` is set, and writes only changed keys into the blob.
+
+**Status (2026-11-01): implemented**, see ADR-229 to ADR-231, docs/SECURITY.md "Plaintext MQTT for trusted networks" and PROGRESS.md "P1". Open: run-time account add/revoke over the control channel, and the comparison with Mosquitto on the VPS.

@@ -1,3 +1,29 @@
+## P1: optional plaintext MQTT for trusted networks (2026-11-01)
+
+A `[plaintext]` section, off by default, opens TCP 1883 without TLS for devices that cannot do it (ADR-229 to ADR-231). What it gives up, and when it is acceptable, is in docs/SECURITY.md.
+
+**Done**
+
+- **Configuration** (ADR-229): all keys of the plan with their defaults in `config.toml`, the runtime blob (format 2; format 1 still reads; untouched keys are not written), the schema (`urmqtt-config schema/show/pack`) and the builder form. Cross-field checks in two implementations compared by tests (allow-list mandatory, `0.0.0.0/0` only as `allow_from_anywhere`, mode-specific keys, identities that hold another role refused).
+- **Listener** (ADR-230): the allow-list is checked at the SYN (no SYN-ACK, no state); one table of source addresses for all cores (connections, failures, lock-out); three login modes; lock-out by address; its own admission sized from a boot-time measurement of the password check; sessions in their own namespace (`$plain/<identity>/<client id>`), clean only; the broker's plaintext role (no service, operator or control rights, no `$SYS`, own ACL, packet size, rate, retain); registry allowlist applies; `$SYS/broker/plaintext/*`, boot line, warnings, fingerprint report line.
+- **Passwords** (ADR-231): PBKDF2-HMAC-SHA-256 with a salt and 10 000 iterations by default, constant-time comparison, one hash computed on every path; `urmqtt-config hash-password`; the builder hashes in the browser and keeps only the hash in memory.
+- **Builder:** the section collapsed with its switch off, risk dialogs, accounts editor with a generated password, 15 languages.
+- **Docs:** README, SECURITY.md (what plaintext gives up, when it is acceptable, threat-model entries, residual risks), OPERATE.md, DEPLOY.md, AUDIT.md, PERFORMANCE.md section 8.
+
+**Verified**
+
+- `make check` (nested-worktree wrapper): 902 Rust tests passed, 0 failed, 8 ignored; builder 62 pass, 0 fail, 2 skipped.
+- Fuzz: new target `plain_input` (parsers, allow-list, table against a model; 2.3M runs without a finding), `broker_input` now opens plaintext connections (2.4M runs).
+- Smoke group `plaintext` (password, lockout, refused, anonymous, ip, limits, registry): 7 of 7 on aarch64 HVF and 7 of 7 on x86_64 TCG; in password mode the TLS scenarios run on the same VM.
+- Measurement (PERFORMANCE.md section 8): at 8 000 messages a second TLS and plaintext deliver the same with the same latency; plaintext connects faster; a password login is capped by its admission at about 200 a second per data core. Floods on this rig are not stable and are not a conclusion.
+
+**Not done / open**
+
+- Adding and removing accounts at run time over the signed control channel (needs a message type and a place to keep the hashes across reboots); today a new image, and `disallow` through the registry cuts an identity at once.
+- Plaintext against Mosquitto on the VPS (the VPS was out of scope).
+- `docs/audit/inventory.md` is stale since H3 and was not regenerated here (the script needs the main checkout's cargo configuration).
+- A memory-hard password hash (Argon2) as a second scheme.
+
 ## C1e and C1g: the builder page, the release mirror, the pages on aldo.tech and "Try in the emulator" (2026-11-01)
 
 The page that does what `urmqtt-config pack --iso` does, in the browser, with the same Rust code (ADR-225, ADR-226); the mirror of the GitHub releases it loads its template from and the pages on aldo.tech (ADR-227); the optional emulator (ADR-228). **It is live: https://aldo.tech/en/products/urmqtt-builder/** (and the other 14 languages, see below). No release with a template exists yet (v0.1.0 predates the runtime configuration), so the page says so and builds nothing until the maintainer publishes one.
