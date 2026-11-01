@@ -861,11 +861,13 @@ fn ps_subscriber(
                 pos += 2;
             }
             sh.delivered.fetch_add(1, Ordering::Relaxed);
-            if sh.measuring.load(Ordering::Relaxed) && lat.len() < 200_000
-                && let Some(ts) = body.get(pos..pos + 8) {
-                    let sent = u64::from_be_bytes(ts.try_into().unwrap_or([0; 8]));
-                    lat.push(now_us.saturating_sub(sent).min(u64::from(u32::MAX)) as u32);
-                }
+            if sh.measuring.load(Ordering::Relaxed)
+                && lat.len() < 200_000
+                && let Some(ts) = body.get(pos..pos + 8)
+            {
+                let sent = u64::from_be_bytes(ts.try_into().unwrap_or([0; 8]));
+                lat.push(now_us.saturating_sub(sent).min(u64::from(u32::MAX)) as u32);
+            }
         }
         buf.drain(..at);
         if !acks.is_empty() && tls.write_all(&acks).is_err() {
