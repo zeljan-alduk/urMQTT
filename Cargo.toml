@@ -5,6 +5,7 @@ members = [
     "crates/arch-aarch64",
     "crates/arch-x86_64",
     "crates/broker",
+    "crates/cfg",
     "crates/config",
     "crates/config-schema",
     "crates/control",
@@ -44,6 +45,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/zeljan-alduk/urMQTT"
 
 [workspace.dependencies]
+urmqtt-cfg = { path = "crates/cfg" }
 urmqtt-config = { path = "crates/config" }
 urmqtt-config-schema = { path = "crates/config-schema" }
 

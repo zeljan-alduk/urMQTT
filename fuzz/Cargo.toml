@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+urmqtt-cfg = { path = "../crates/cfg", features = ["alloc"] }
 urmqtt-config-schema = { path = "../crates/config-schema" }
 urmqtt-mqtt = { path = "../crates/mqtt" }
 urmqtt-platform = { path = "../crates/platform" }
@@ -34,6 +35,13 @@ ed25519-dalek = { version = "2.2", default-features = false }
 # Standalone workspace: fuzz builds need sanitizer RUSTFLAGS.
 [workspace]
 members = ["."]
+
+[[bin]]
+name = "cfg_blob"
+path = "fuzz_targets/cfg_blob.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "config_parse"

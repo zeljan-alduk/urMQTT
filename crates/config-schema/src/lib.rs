@@ -1731,6 +1731,10 @@ pub static SERVER_KEY_PEM: &[u8] = include_bytes!({key:?});
     out
 }
 
+pub mod pack;
+
+#[cfg(test)]
+mod pack_tests;
 #[cfg(test)]
 mod tests;
 

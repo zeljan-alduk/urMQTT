@@ -1,0 +1,30 @@
+[package]
+name = "urmqtt-cfg"
+description = "The urmqtt-cfg binary configuration blob (C1, ADR-215): format, field table with defaults and ranges, fail-closed validation. no_std, shared by the kernel, the host tools and the web builder."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[features]
+default = []
+# The builder (host side): needs `alloc`.
+alloc = []
+# Everything for host tests and tools.
+std = ["alloc"]
+
+[dependencies]
+sha2 = { version = "0.11", default-features = false }
+ed25519-dalek = { version = "2.2", default-features = false }
+urmqtt-dispatch = { path = "../dispatch" }
+
+[dev-dependencies]
+ed25519-dalek = { version = "2.2", default-features = false, features = ["alloc"] }
+
+[lints]
+workspace = true
