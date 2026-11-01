@@ -49,6 +49,7 @@ function enumLabel(f, variant) {
 }
 
 function buildRow(f) {
+  if (isUserList(f)) return buildUsersRow(f);
   const id = nextId('f');
   const ctl = {};
   const label = h('label', { class: 'ub-label', for: id, text: f.name });
@@ -70,7 +71,16 @@ function buildRow(f) {
     control = slot.el;
     extraSync = slot.sync;
   } else if (f.type === 'bool') {
-    const input = h('input', { type: 'checkbox', id, 'aria-describedby': describedBy, on: { change: () => setValue(f, input.checked) } });
+    const input = h('input', { type: 'checkbox', id, 'aria-describedby': describedBy, on: { change: async () => {
+      // Some switches ask first; only the user flipping it asks (not an import or the address bar).
+      const gate = SWITCH_GATES[f.id];
+      if (input.checked && gate) {
+        input.checked = false;
+        if (!(await gate())) return;
+        input.checked = true;
+      }
+      setValue(f, input.checked);
+    } } });
     const text = h('span', {});
     control = h('div', { class: 'ub-switch' }, input, text);
     extraSync = () => {
@@ -122,7 +132,8 @@ function buildRow(f) {
         ta.focus();
       } } }));
     }
-    control = h('div', { class: 'ub-field-group', style: 'display:grid;gap:6px' }, ta, h('div', { class: 'ub-tools' }, tools, h('span', { class: 'ub-help', text: t('list.hint') })));
+    const hintKey = has(`list.hint.${f.item}`) ? `list.hint.${f.item}` : 'list.hint';
+    control = h('div', { class: 'ub-field-group', style: 'display:grid;gap:6px' }, ta, h('div', { class: 'ub-tools' }, tools, h('span', { class: 'ub-help', text: t(hintKey) })));
     extraSync = force => {
       const v = getValue(f);
       const editing = !force && document.activeElement === ta;
@@ -150,7 +161,7 @@ function buildRow(f) {
   ctl.input = control;
   ctl.sync = force => {
     extraSync(force);
-    const changed = isFileType(f) ? fileIsSet(f, app.state) : f.id === 'tls.revoked_serials' ? (getValue(f) || []).some(s => String(s).trim()) : isChanged(f, getValue(f));
+    const changed = !isApplicable(f, app.state) ? false : isFileType(f) ? fileIsSet(f, app.state) : f.id === 'tls.revoked_serials' ? (getValue(f) || []).some(s => String(s).trim()) : isChanged(f, getValue(f));
     root.dataset.changed = String(changed);
     changedChip.hidden = !changed;
     reset.hidden = !changed;
@@ -175,9 +186,7 @@ function buildRow(f) {
 function renderSections() {
   const wrap = h('div', { class: 'ub-main-sections', style: 'display:grid;gap:18px' });
   const open = new Set(['network', 'tls', 'trust']);
-  // The accounts of the plaintext listener (hashes, no clear text) get their
-  // own editor; until then the generic text area is not offered for them.
-  const sectionBody = fields => h('div', { class: 'ub-fields' }, fields.filter(f => !isUserList(f)).map(f => {
+  const sectionBody = fields => h('div', { class: 'ub-fields' }, fields.map(f => {
     const row = buildRow(f);
     rows.set(f.id, row);
     return row.el;
@@ -186,13 +195,16 @@ function renderSections() {
   for (const s of app.model.sections) {
     const count = h('span', { class: 'ub-badge changed', hidden: true });
     const resetBtn = h('button', { class: 'ub-btn small secondary', type: 'button', text: t('section.reset'), hidden: true, on: { click: () => resetSection(s) } });
+    const banner = s.id === 'plaintext' ? buildPlaintextBanner() : null;
     const details = h('details', { class: 'ub-card', id: `sec-${s.id}`, open: open.has(s.id) },
       h('summary', {}, h('span', { class: 'ub-title' }, h('h2', { text: t('section.' + s.id) }), count), icon('chevron', 'ub-chev')),
       h('div', { class: 'ub-tools', style: 'justify-content:flex-end;margin:-4px 0 10px' }, resetBtn),
+      banner ? banner.el : null,
       sectionBody(s.fields));
     sectionViews.set(s.id, {
       el: details,
       sync: () => {
+        if (banner) banner.sync();
         const n = s.fields.filter(f => rows.get(f.id) && rows.get(f.id).el.dataset.changed === 'true').length;
         count.hidden = n === 0;
         count.textContent = t('section.changed', { n });
@@ -253,7 +265,8 @@ function showIssues(issues) {
   }
   for (const [id, row] of rows) {
     const mine = byField.get(id);
-    row.setIssue(mine ? mine.map(m => m.message).join(' ') : '', 'error');
+    if (row.setIssues) row.setIssues(mine || []);
+    else row.setIssue(mine ? mine.map(m => m.message).join(' ') : '', 'error');
   }
   return loose;
 }

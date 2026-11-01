@@ -57,8 +57,10 @@ function persist() {
       const f = app.model.byId.get(id);
       return !(f && isUserList(f));
     }));
+    // Only how many accounts there were (a number), so that a reload can say they are gone.
+    const accounts = completeUsers(s.values['plaintext.users']).length || (app.accountsForgotten ? 1 : 0);
     sessionStorage.setItem(STORE_KEY, JSON.stringify({
-      v: 1, values, name: s.name, preset: s.preset, release: s.release,
+      v: 1, accounts, values, name: s.name, preset: s.preset, release: s.release,
       files: { cert: pub(s.files.cert), control: pub(s.files.control), operational: s.files.operational.map(pub), bootstrap: s.files.bootstrap.map(pub) },
     }));
   } catch { /* private window: the form simply starts empty after a reload */ }
@@ -70,7 +72,10 @@ function restore() {
   try { saved = JSON.parse(sessionStorage.getItem(STORE_KEY) || 'null'); } catch { saved = null; }
   if (!s && saved && saved.v === 1) {
     s = emptyState();
-    for (const [id, v] of Object.entries(saved.values || {})) if (app.model.byId.has(id)) s.values[id] = v;
+    for (const [id, v] of Object.entries(saved.values || {})) {
+      const f = app.model.byId.get(id);
+      if (f && !isUserList(f)) s.values[id] = v;
+    }
     s.name = String(saved.name || '').slice(0, 40);
     s.preset = saved.preset || '';
     s.release = saved.release || '';
@@ -85,6 +90,8 @@ function restore() {
     s.files.operational = (saved.files.operational || []).map(ok).filter(Boolean).slice(0, 8);
     s.files.bootstrap = (saved.files.bootstrap || []).map(ok).filter(Boolean).slice(0, 8);
   }
+  // The accounts' hashes are never kept: after a reload the form says so.
+  app.accountsForgotten = Boolean(saved && saved.v === 1 && Number(saved.accounts) > 0);
   app.state = s;
 }
 
@@ -122,7 +129,8 @@ function emulatorHintText() {
 
 function refresh() {
   if (!app.builder) return;
-  const built = buildToml(app.model, app.state);
+  // Checked with a stand-in hash for an account that has no password yet, so its id is validated while it is typed.
+  const built = buildToml(app.model, app.state, { draft: true });
   const res = app.builder.pack({
     toml: built.toml, files: built.files, now: app.nowUnix(),
     signPem: app.state.signing ? app.state.signing.pem : null,
@@ -130,6 +138,12 @@ function refresh() {
   const issues = [];
   for (const [id, code] of Object.entries(built.local)) {
     issues.push({ field: app.model.byId.get(id), path: id, message: t('err.' + code) });
+  }
+  const users = app.model.byId.get('plaintext.users');
+  if (users && isApplicable(users, app.state)) {
+    for (const p of userProblems(app.state.values[users.id])) {
+      issues.push({ field: users, path: users.id, row: p.row, message: t(p.kind === 'password' ? 'plaintext.need-password' : 'plaintext.need-id') });
+    }
   }
   let info = null;
   if (res.ok) info = app.builder.blobInfo(res.blob);
@@ -332,6 +346,7 @@ function renderPresets() {
   const buttons = ids.map(id => h('button', { class: 'ub-preset', type: 'button', 'aria-pressed': String(app.state.preset === id), on: { click: () => choosePreset(id) } },
     h('strong', { text: t(`preset.${id}`) }), h('span', { text: t(`preset.${id}.desc`) })));
   box.append(h('div', { class: 'ub-presets', role: 'group', 'aria-label': t('preset.title') }, buttons));
+  box.append(h('p', { class: 'ub-help', style: 'margin-top:10px', text: t('preset.plaintext-note') }));
   app.ui.presetButtons = buttons;
 }
 

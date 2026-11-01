@@ -266,3 +266,25 @@ dialog.ub-dialog.narrow { width: min(520px, calc(100vw - 24px)); }
   .ub-field[data-changed="true"] { border-left-color: Highlight; }
   .ub-release:has(input:checked), .ub-preset[aria-pressed="true"] { outline: 2px solid Highlight; }
 }
+
+/* ---- plaintext MQTT: the warning and the accounts editor (P1) ------------------------ */
+.ub-plain-banner { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 14px; }
+.ub-plain-banner[hidden] { display: none; }
+.ub-plain-banner > svg { flex: none; width: 20px; height: 20px; margin-top: 2px; fill: none; stroke: var(--ub-warn); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.ub-plain-banner.err { background: color-mix(in srgb, var(--ub-err) 10%, var(--ub-bg)); border-color: var(--ub-err); }
+.ub-plain-banner.err > svg { stroke: var(--ub-err); }
+.ub-plain-banner p { margin: 0; }
+.ub-accounts { display: grid; gap: 10px; }
+.ub-account { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(0, 2fr) auto; gap: 8px 12px; align-items: start; padding: 10px 12px; border: 1px solid var(--ub-line); border-radius: 8px; background: var(--ub-bg); }
+.ub-account > .ub-error { grid-column: 1 / -1; }
+.ub-account[data-invalid="true"] { border-color: var(--ub-err); }
+.ub-account[data-invalid="true"] .ub-account-id .ub-input { border-color: var(--ub-err); }
+.ub-account-id .ub-input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 15px; }
+.ub-pw-edit { display: grid; gap: 6px; min-width: 0; }
+.ub-pw-done { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; min-height: 42px; }
+.ub-pw-set { flex: 1 1 220px; min-width: 0; font-size: 14px; color: var(--ub-ok); font-weight: 600; }
+.ub-account-remove { min-height: 42px; }
+@media (max-width: 720px) {
+  .ub-account { grid-template-columns: minmax(0, 1fr); }
+  .ub-account-remove { justify-self: start; }
+}

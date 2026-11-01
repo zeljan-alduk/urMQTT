@@ -31,6 +31,8 @@ export const EXAMPLES = {
   'observability.syslog_udp': '192.0.2.50:514',
   'observability.metrics_udp': '192.0.2.51:8125',
   'time.servers': '192.0.2.123',
+  'plaintext.allow_from': '10.0.0.0/8',
+  'plaintext.ip_identities': '10.0.1.0/24 plc',
 };
 
 /** Builds the form model from the exported schema. */
@@ -99,13 +101,64 @@ export const isUserList = f => f.type === 'string_list' && f.item === 'user';
 /** Networks and their identities (P1): lines `a.b.c.d/len id` in the state, `{ from, id }` tables in the TOML. */
 export const isIpIdentityList = f => f.type === 'string_list' && f.item === 'ip_identity';
 
+const PASSWORD_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+/**
+ * A random password of `length` characters from a-zA-Z0-9. Bytes come from
+ * `crypto.getRandomValues`; a byte that would favour the first characters
+ * (those at or above the largest multiple of 62 below 256) is thrown away.
+ */
+export function randomPassword(length = 20, random = n => crypto.getRandomValues(new Uint8Array(n))) {
+  const n = PASSWORD_ALPHABET.length;
+  const limit = 256 - (256 % n);
+  let out = '';
+  while (out.length < length) {
+    for (const b of random(length * 2)) {
+      if (b < limit && out.length < length) out += PASSWORD_ALPHABET[b % n];
+    }
+  }
+  return out;
+}
+
 /** The entries of a user list that are complete (an id and a hash). */
 export const completeUsers = v => (v || []).filter(u => u && String(u.id || '').trim() && String(u.hash || '').trim());
+
+/** A hash that has the right shape and belongs to no password: stands in for a missing one while the form is checked (never built, never exported). */
+export const DRAFT_HASH = 'pbkdf2-sha256$10000$' + '00'.repeat(16) + '$' + '00'.repeat(32);
+
+/**
+ * The rows of the accounts editor, as the validator should see them: every row
+ * with an id, a row without a password carrying [DRAFT_HASH]. `rows[k]` is the
+ * editor row of the validator's `plaintext.users[k]`.
+ */
+export function draftUsers(v) {
+  const rows = [];
+  const users = [];
+  (v || []).forEach((u, i) => {
+    const id = String((u && u.id) || '').trim();
+    if (!id) return;
+    rows.push(i);
+    users.push({ id, hash: String(u.hash || '').trim() || DRAFT_HASH });
+  });
+  return { rows, users };
+}
+
+/** What blocks a build in the accounts editor: [{row, kind: 'password' | 'id'}]. Empty rows are ignored. */
+export function userProblems(v) {
+  const out = [];
+  (v || []).forEach((u, i) => {
+    const id = String((u && u.id) || '').trim();
+    const hash = String((u && u.hash) || '').trim();
+    if (id && !hash) out.push({ row: i, kind: 'password' });
+    else if (!id && hash) out.push({ row: i, kind: 'id' });
+  });
+  return out;
+}
 
 /** Whether the user's raw value differs from the default (and so is written). */
 export function isChanged(f, v) {
   if (v === undefined) return false;
-  if (isUserList(f)) return (v || []).length > 0;
+  if (isUserList(f)) return (v || []).some(u => u && (String(u.id || '').trim() || String(u.hash || '').trim()));
   switch (f.type) {
     case 'bool': return v !== f.default;
     case 'uint': return String(v).trim() !== '' && Number(String(v).trim()) !== f.default;
@@ -143,9 +196,9 @@ export function tomlString(s) {
 export const isWholeNumber = v => /^\d{1,15}$/.test(String(v).trim());
 
 /** One value as TOML text (a number field must pass [isWholeNumber]). */
-export function tomlValue(f, v) {
+export function tomlValue(f, v, draft = false) {
   if (isUserList(f)) {
-    return '[' + completeUsers(v).map(u => `{ id = ${tomlString(String(u.id).trim())}, password_hash = ${tomlString(String(u.hash).trim())} }`).join(', ') + ']';
+    return '[' + (draft ? draftUsers(v).users : completeUsers(v)).map(u => `{ id = ${tomlString(String(u.id).trim())}, password_hash = ${tomlString(String(u.hash).trim())} }`).join(', ') + ']';
   }
   if (isIpIdentityList(f)) {
     return '[' + (v || []).map(s => String(s).trim()).filter(Boolean).map(line => {
@@ -182,6 +235,7 @@ export function emptyState() {
 export function changedIds(model, state) {
   const out = [];
   for (const f of model.fields) {
+    if (!isApplicable(f, state)) continue;
     if (isFileType(f)) {
       if (fileIsSet(f, state)) out.push(f.id);
     } else if (f.id === 'tls.revoked_serials') {
@@ -208,7 +262,7 @@ export function listFileNames(slot, n) {
  * The TOML text and the files it names for a state. Only what differs from
  * the defaults is written.
  */
-export function buildToml(model, state) {
+export function buildToml(model, state, { draft = false } = {}) {
   const top = [];
   const sections = new Map();
   let current = null;
@@ -249,7 +303,7 @@ export function buildToml(model, state) {
     if (!isChanged(f, v)) continue;
     if (f.type === 'uint' && !isWholeNumber(v)) { local[f.id] = 'int'; continue; }
     if (f.type === 'enum' && !f.variants.includes(v)) { local[f.id] = 'enum'; continue; }
-    emit(tomlValue(f, v));
+    emit(tomlValue(f, v, draft));
   }
   // Render, remembering which field each line belongs to so that a TOML
   // syntax or type error (which names a line, not a key) can be shown at its field.
@@ -269,7 +323,7 @@ export function buildToml(model, state) {
 export function fieldForPath(model, path) {
   if (!path) return null;
   // "acl.device_publish[0]" names an entry of the list field.
-  const key = path.replace(/\[\d+\]$/, '');
+  const key = path.replace(/\[\d+\](\.\w+)?$/, '');
   return model.byId.get(key) || model.byToml.get(key) || null;
 }
 
@@ -342,7 +396,30 @@ export function isApplicable(f, state) {
   const mode = state.values['network.mode'] || 'dhcp';
   if (f.id === 'network.address' || f.id === 'network.gateway') return mode !== 'dhcp';
   if (f.id === 'network.dhcp_timeout_s') return mode === 'auto';
+  // Plaintext MQTT (P1): nothing but the switch while it is off; then what the mode uses.
+  if (f.section === 'plaintext' && f.id !== 'plaintext.enabled') {
+    if (state.values['plaintext.enabled'] !== true) return false;
+    const auth = state.values['plaintext.auth'] || 'password';
+    if (f.id === 'plaintext.users') return auth === 'password';
+    if (f.id === 'plaintext.anonymous_identity') return auth === 'anonymous';
+    if (f.id === 'plaintext.ip_identities') return auth === 'ip';
+  }
   return true;
+}
+
+/**
+ * Whether an IPv4 address (`a.b.c.d`, or `a.b.c.d/len`) is one that is not
+ * routed on the Internet: 10/8, 172.16/12, 192.168/16, 100.64/10 (carrier-grade
+ * NAT), 169.254/16 (link-local) and 127/8 (loopback). Anything else, also a
+ * text that is no address, is false.
+ */
+export function isPrivateAddress(text) {
+  const m = /^\s*(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/\d{1,2})?\s*$/.exec(String(text));
+  if (!m) return false;
+  const [a, b, c, d] = m.slice(1).map(Number);
+  if ([a, b, c, d].some(x => x > 255)) return false;
+  return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254);
 }
 
 // --- risks ---------------------------------------------------------------------------
@@ -374,6 +451,16 @@ export function evaluateRisks(model, state, info) {
   if (!state.files.control) risks.push({ id: 'no-control', level: 'note' });
   if (val('registry.mode') === 'open') risks.push({ id: 'registry-open', level: 'note' });
   if (val('entropy.fallback') === 'none') risks.push({ id: 'entropy-none', level: 'note' });
+  if (val('plaintext.enabled')) {
+    risks.push({ id: 'plaintext-on', level: 'confirm' });
+    if (val('plaintext.allow_from_anywhere')) risks.push({ id: 'plaintext-anywhere', level: 'confirm' });
+    if (val('plaintext.auth') === 'anonymous') risks.push({ id: 'plaintext-anonymous', level: 'note' });
+    const mode = val('network.mode');
+    const addr = String(state.values['network.address'] || '').trim();
+    if ((mode === 'static' || mode === 'auto') && addr && !isPrivateAddress(addr)) {
+      risks.push({ id: 'plaintext-public-address', level: 'confirm', args: { address: addr.split('/')[0] } });
+    }
+  }
   return risks;
 }
 
@@ -413,7 +500,7 @@ export function decodeHash(model, hash) {
   if (p.v && typeof p.v === 'object') {
     for (const [id, v] of Object.entries(p.v)) {
       const f = model.byId.get(id);
-      if (!f || f.fileKey) continue;
+      if (!f || f.fileKey || isUserList(f)) continue; // hashes never come from an address
       if (f.type === 'bool' ? typeof v === 'boolean'
         : f.type === 'enum' ? f.variants.includes(v)
           : isListType(f) ? Array.isArray(v) && v.every(x => typeof x === 'string')
