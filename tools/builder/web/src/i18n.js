@@ -1,6 +1,6 @@
 // Texts of the page. One JSON file per site language (i18n/<lang>.json); a key
 // missing in a language falls back to English. Field labels are the TOML keys
-// and the help texts come from the schema, in English (ADR-221): only the page's
+// and the help texts come from the schema, in English (ADR-226): only the page's
 // own words and the section names are translated.
 
 let texts = {};

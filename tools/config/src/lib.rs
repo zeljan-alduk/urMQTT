@@ -1,6 +1,6 @@
 //! `urmqtt-config`: pack, show and verify urMQTT configuration blobs
 //! (C1, ADR-215, ADR-218). The same code the web builder compiles to
-//! WebAssembly (ADR-220) lives in `urmqtt-cfg` and `urmqtt-config-schema`;
+//! WebAssembly (ADR-225) lives in `urmqtt-cfg` and `urmqtt-config-schema`;
 //! this crate holds everything around it that does not touch the file
 //! system (packing from text, signing, the ISO patching, minisign and
 //! `SHA256SUMS` checks), so the command line and the browser run the very

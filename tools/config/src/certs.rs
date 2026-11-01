@@ -1,4 +1,4 @@
-//! Looking at certificates and keys the way the page shows them (ADR-221):
+//! Looking at certificates and keys the way the page shows them (ADR-226):
 //! subject, issuer, validity, names, key type, fingerprint; whether a private
 //! key belongs to a certificate; whether a certificate was signed by a CA.
 //! All of it is local computation on the bytes the user chose; the browser

@@ -1,4 +1,4 @@
-//! The urMQTT builder as a WebAssembly module (C1e, ADR-220).
+//! The urMQTT builder as a WebAssembly module (C1e, ADR-225).
 //!
 //! The page that configures a template ISO in the browser needs the very same
 //! logic the command line tool has: the field table and its defaults, the

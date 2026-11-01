@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the web builder (C1e, ADR-220..222) into build/builder/:
+# Builds the web builder (C1e, ADR-225..227) into build/builder/:
 #
 #   urmqtt-cfg<N>.wasm   the WebAssembly module for configuration format N
 #   app.js, app.css      the page's script and style (sources in tools/builder/web/src)

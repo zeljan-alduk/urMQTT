@@ -105,7 +105,7 @@ jobs:
       - run: rustup target add wasm32-unknown-unknown
       - run: make certs
       # The module against the command line tool (byte for byte), the form
-      # logic, and the page in the runner's headless Chrome (ADR-220..222).
+      # logic, and the page in the runner's headless Chrome (ADR-225..227).
       - run: make builder-test
 
   kernel:

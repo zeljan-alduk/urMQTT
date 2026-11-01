@@ -1,7 +1,7 @@
 // Releases: the list the mirror publishes (releases.json), the check of a
 // release's SHA256SUMS signature against the key embedded in this page, and the
 // download of the template into WebAssembly memory. The mirror is not trusted:
-// everything it serves is checked here (docs/PLAN.md C1e, ADR-222).
+// everything it serves is checked here (docs/PLAN.md C1e, ADR-227).
 
 /** The release signing key (minisign.pub of the repository), put in at build time. */
 const RELEASE_PUBKEY = __RELEASE_PUBKEY__;

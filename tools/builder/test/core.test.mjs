@@ -1,7 +1,7 @@
 // The form's logic against the real module: every field has a default, a
 // state that sets nothing (or sets defaults) writes nothing and packs to the
 // blob of the empty configuration, and every field can be changed to a valid
-// other value and written as TOML the validator accepts (ADR-221).
+// other value and written as TOML the validator accepts (ADR-226).
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';

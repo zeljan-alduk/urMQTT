@@ -256,7 +256,7 @@ is attested, and by what:
   private key is in the slot of every image made from it, in the clear (as it
   was when it was compiled in).
 
-### The builder page (C1e, ADR-220 to ADR-222)
+### The builder page (C1e, ADR-225 to ADR-227)
 
 The page at aldo.tech (Products, urMQTT builder) does what `urmqtt-config pack
 --iso` does, in the browser, with the same Rust code compiled to WebAssembly.
@@ -294,7 +294,7 @@ What that gives you and what it does not:
   *configuration*, not a leaked *key*.
 - **The emulator (C1g) is optional and separate.** Nothing of it is loaded
   until you click its button; it runs in WebAssembly in your browser and has no
-  network of its own beyond what the page gives it (ADR-223).
+  network of its own beyond what the page gives it (ADR-228).
 
 ## Mitigations
 

@@ -1,4 +1,4 @@
-// The builder's WebAssembly module (tools/builder/wasm, ADR-220) as a JavaScript
+// The builder's WebAssembly module (tools/builder/wasm, ADR-225) as a JavaScript
 // object. Everything crosses as a buffer handle; see exports.rs. This file is
 // used unchanged by the page and by the Node tests.
 

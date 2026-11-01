@@ -1,6 +1,6 @@
 // The page in a real (headless) Chrome: the release list, the form with its
 // defaults, validation, importing certificates, the build, the integrity
-// failure, the privacy of keys, modal dialogs and the layout (ADR-221).
+// failure, the privacy of keys, modal dialogs and the layout (ADR-226).
 // Skipped when there is no Chrome (set CHROME=/path) or no Node 22.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

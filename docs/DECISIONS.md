@@ -1642,7 +1642,7 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
 - **Decision.** What is attested: the **template** (kernels, loader, installer) by `SHA256SUMS` and its signature, and the **configuration** by the fingerprint the packer prints and the kernel prints at every boot. The customer compares the fingerprint on the console with the one the tool or page showed. **Signing is optional and off by default:** `pack --sign KEY.pem` attaches an Ed25519 signature over the fingerprint; the kernel verifies it and prints the signer's key id. The signer key is the customer's own and is *not* a trust anchor in the kernel: nothing in the image says whose key to expect, so a signature proves only that the blob was not changed after the holder of that key signed it. Making it mandatory would need a place to pin the expected key, which an image the customer configures cannot offer without making the pin part of what the customer configures; and would put key management on people who asked not to have a toolchain. (The open question of the C1 plan, "sign by default?", is thereby answered no, with a pin as the later step.) A patched image also has a modified ISO 9660/FAT structure around unchanged kernel bytes; the kernel bytes still match the pinned hash that Limine checks at boot.
 - **Consequences.** `docs/SECURITY.md` carries the statement ("Configured images"); the builder page repeats it.
 
-## ADR-220 — The builder's WebAssembly module: the command line tool's code, compiled (C1e)
+## ADR-225 — The builder's WebAssembly module: the command line tool's code, compiled (C1e)
 
 - **Status:** Accepted (C1e).
 - **Context.** The builder page must pack, validate and patch exactly as `urmqtt-config` does (ADR-218): a second implementation in JavaScript would drift, and the whole point of the page is that its result is the file the tool would have written. The page also needs what the tool never needed to show: the field schema, BLAKE2b and SHA-256 of a 60 MB image, the optional Ed25519 signature, the minisign check of a release, and what a certificate or key says.
@@ -1656,7 +1656,7 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
 - **Alternatives.** Re-implementing in JavaScript (drift, and the TOML/PEM/x509 rules are not small). `wasm-bindgen` or `wasm-pack` (generator in the supply chain, glue code to review). A server-side builder (keys would leave the browser: the one property the page promises).
 - **Consequences.** `make builder` needs `rustup target add wasm32-unknown-unknown` and Node; `make check` runs the builder tests when both are there and says so when they are not. The module must be rebuilt with every change to the tool's library; the page and the kernel can therefore not disagree, because both are built from the same commit.
 
-## ADR-221 — The builder page: one screen, defaults everywhere, nothing leaves the browser (C1e)
+## ADR-226 — The builder page: one screen, defaults everywhere, nothing leaves the browser (C1e)
 
 - **Status:** Accepted (C1e).
 - **Context.** A customer who cannot or will not build the kernel needs to produce the same configured ISO as `urmqtt-config pack --iso` (ADR-218) from a browser, with their own certificates and keys. The page has to be usable on a phone, accessible, honest about what it does with a private key, and small enough to audit: it is the one place where this project's code runs next to a customer's key.

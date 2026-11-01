@@ -1,7 +1,7 @@
 // The builder's logic without a DOM: the form model made from the exported
 // schema, the state the user changes, the TOML that state stands for, the
 // import of a TOML, presets, risks, and the URL hash. Used by the page and by
-// the Node tests (ADR-221).
+// the Node tests (ADR-226).
 //
 // Principle (docs/PLAN.md C1e): every field has a default, shown as the
 // placeholder; a field the user does not touch is not written anywhere. The

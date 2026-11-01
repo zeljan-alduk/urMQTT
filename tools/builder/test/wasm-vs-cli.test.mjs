@@ -1,5 +1,5 @@
 // The WebAssembly module and the `urmqtt-config` command line tool must produce
-// the same bytes for the same input (docs/PLAN.md C1e, ADR-220). The module is
+// the same bytes for the same input (docs/PLAN.md C1e, ADR-225). The module is
 // the one the page loads (build/builder/urmqtt-cfg1.wasm); the tool is the
 // debug binary of the same workspace.
 import assert from 'node:assert/strict';

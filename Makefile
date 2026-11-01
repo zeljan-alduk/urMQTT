@@ -168,7 +168,7 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	 $(MAKE) --no-print-directory builder-test; \
 	 else echo "check: node or the wasm32 target (rustup target add wasm32-unknown-unknown) missing, the builder tests are skipped (CI runs them)"; fi
 
-# The web builder (C1e, ADR-220..222): the WebAssembly module and the page in
+# The web builder (C1e, ADR-225..227): the WebAssembly module and the page in
 # build/builder/, and its tests. `make builder` needs the wasm32 target and node.
 .PHONY: builder
 builder: ## The web builder (WebAssembly module and page) in build/builder/

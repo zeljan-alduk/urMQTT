@@ -459,7 +459,7 @@ certificate, its key and a CA.
 
 No toolchain and no command line: the **urMQTT builder** page on aldo.tech
 ([aldo.tech/en/products/urmqtt-builder/](https://aldo.tech/en/products/urmqtt-builder/), also in Croatian and 13 other
-languages) is the same `urmqtt-config` compiled to WebAssembly ([ADR-220](docs/DECISIONS.md)). You choose a release, pick a
+languages) is the same `urmqtt-config` compiled to WebAssembly ([ADR-225](docs/DECISIONS.md)). You choose a release, pick a
 preset (a lab VM on DHCP, a VPS with a fixed address, DHCP first with a fixed fallback) or leave every field at its default,
 add your CA, server certificate and key, and download `urmqtt-<version>-<name>-universal.iso`.
 
@@ -476,7 +476,7 @@ add your CA, server certificate and key, and download `urmqtt-<version>-<name>-u
   `config.toml`, so a result of the page can be reproduced offline. The page shows the SHA-256 of the file and the configuration
   fingerprint the kernel prints at every boot ([trust statement](docs/SECURITY.md#configured-images-what-is-attested-c1-adr-219)).
 - **Optional: try it in the emulator.** A second button loads, only when clicked, an x86-64 emulator in WebAssembly and starts
-  the image you just built, with its console on a canvas (see [ADR-223](docs/DECISIONS.md) for what it can and cannot show).
+  the image you just built, with its console on a canvas (see [ADR-228](docs/DECISIONS.md) for what it can and cannot show).
 
 `make builder` builds the page (WebAssembly module, script, style and texts) into `build/builder/`; `make builder-test` runs its
 tests. The directory is static: any web server that also serves a `releases.json` (made by `scripts/mirror-releases.py`)

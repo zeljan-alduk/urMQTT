@@ -3,7 +3,7 @@
 // content hashes. No npm, no bundler: the modules are concatenated in order
 // with their import and export keywords removed, inside one function scope, so
 // every top-level name of src/ must be unique. The same files are what the
-// aldo.tech site build copies (ADR-221).
+// aldo.tech site build copies (ADR-226).
 //
 //   node tools/builder/web/bundle.mjs [OUT_DIR]
 import { createHash } from 'node:crypto';

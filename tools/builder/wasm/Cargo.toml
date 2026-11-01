@@ -1,6 +1,6 @@
 [package]
 name = "urmqtt-builder-wasm"
-description = "The urMQTT builder as a WebAssembly module (C1e, ADR-220): packing, validation, the schema, certificate checks, minisign verification and ISO patching, from the same Rust code as the urmqtt-config command line tool."
+description = "The urMQTT builder as a WebAssembly module (C1e, ADR-225): packing, validation, the schema, certificate checks, minisign verification and ISO patching, from the same Rust code as the urmqtt-config command line tool."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
