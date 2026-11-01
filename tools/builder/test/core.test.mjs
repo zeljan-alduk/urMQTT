@@ -99,7 +99,16 @@ test('every field can be changed on its own and the validator accepts it or blam
     if (f.id === 'network.address') Object.assign(s.values, { 'network.mode': 'static', 'network.gateway': '10.1.2.1' });
     if (f.id === 'network.gateway') Object.assign(s.values, { 'network.mode': 'static', 'network.address': '10.1.2.3/24' });
     if (f.id === 'network.dhcp_timeout_s') Object.assign(s.values, { 'network.mode': 'auto', 'network.address': '10.1.2.3/24', 'network.gateway': '10.1.2.1' });
+    // Plaintext fields only exist while plaintext MQTT is on, and each of the three modes has its own.
+    if (f.section === 'plaintext' && f.id !== 'plaintext.enabled') {
+      Object.assign(s.values, { 'plaintext.enabled': true, 'plaintext.allow_from': ['10.0.0.0/8'] });
+      if (f.id === 'plaintext.anonymous_identity') s.values['plaintext.auth'] = 'anonymous';
+      if (f.id === 'plaintext.ip_identities') s.values['plaintext.auth'] = 'ip';
+      if (f.id === 'plaintext.auth') s.values['plaintext.users'] = otherValue(model.byId.get('plaintext.users'));
+    }
     s.values[f.id] = v;
+    if (f.id === 'plaintext.enabled') Object.assign(s.values, { 'plaintext.allow_from': ['10.0.0.0/8'], 'plaintext.users': otherValue(model.byId.get('plaintext.users')) });
+    if (f.id === 'plaintext.users') Object.assign(s.values, { 'plaintext.enabled': true, 'plaintext.allow_from': ['10.0.0.0/8'] });
     if (f.id === 'tls.min_server_cert_days' || f.id === 'trust.min_anchor_days') continue; // checked with certificates
     const { toml, files } = buildToml(model, s);
     assert.ok(toml.length > 0, `${f.id} is written when changed`);
