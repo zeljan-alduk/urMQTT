@@ -15,6 +15,8 @@ left in `docs/PERFORMANCE.md` section 7; raw files `docs/perf-results/urmqtt-x11
 
 **Results on the Contabo VPS** (same load host, same day, 24-30 runs each): connections lost per run 7-16 -> 0 (flood), watchdog aborts 148 in 30 runs -> 0 in 24; one 64 B flow 1.9k -> 23.7k published/s (Mosquitto 29.3k), 1 KiB 0 -> 3.9k (5.4k); 16 pairs flood 24.7k -> 43.2k (Mosquitto 31.4k). **One flow is still not faster than Mosquitto**; see the open items (lock wait of 4-7 % of a data core, up to 27 % in a window; SACK on our sending side; RX interrupt).
 
+**The VPS** is back on the production ISO built from this tree (`v0.1.0-90-g120da49`, `deploy/prod` unmodified; the commit after it only adds this line): console `URMQTT READY`, `openssl s_client` from the build server completes TLS 1.3, `$SYS/broker/version` as above. Temporary images, the SSH secret, the served ISO directory and the generator's directory (with the CA key) were deleted; Mosquitto ran on Debian 13 for the same-session comparison before that.
+
 **Not done / open**: heap lock contention (per-CPU caches above 2 KiB), SACK-driven recovery on our sending side, a receive interrupt, handshake/idle/fan-out not measured again, the shared load host (steal 58-77 %) limits every cell, bare metal.
 
 
