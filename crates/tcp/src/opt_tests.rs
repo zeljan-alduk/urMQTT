@@ -311,13 +311,16 @@ fn one_lost_segment_costs_one_retransmission() {
     assert_eq!(app.data.len(), 2000);
     assert_eq!(s.stats.ooo_buffered, 27);
     assert_eq!(s.stats.ooo_bytes, 27_000);
-    // Every out-of-order segment was answered at once with the same ACK, and
-    // the SACK blocks name the single range beyond the hole.
+    // The two in-order segments were answered by one ACK (every second one is),
+    // every out-of-order segment at once with the same ACK, and the SACK blocks
+    // name the single range beyond the hole.
     let acks: Vec<Header> = out
         .iter()
         .map(|b| wire::parse(SERVER, CLIENT, b).unwrap())
         .collect();
-    assert_eq!(acks.len(), 27);
+    assert_eq!(acks.len(), 1 + 27);
+    assert_eq!(acks[0].ack, C_ISN + 1 + 2000);
+    assert_eq!(acks[0].nsack, 0);
     let h = acks.last().unwrap();
     assert_eq!(h.ack, C_ISN + 1 + 2000);
     assert_eq!(h.nsack, 1);
@@ -329,6 +332,44 @@ fn one_lost_segment_costs_one_retransmission() {
     assert_eq!(app.data, data);
     assert_eq!(last_ack(&out).ack, C_ISN + 1 + 30_000);
     assert_eq!(s.stats.ooo_bytes, 0);
+}
+
+#[test]
+fn every_second_segment_is_acknowledged_when_it_arrives() {
+    let mut s = TcpStack::new(cfg(1 << 20, 1 << 18), 0);
+    let mut app = Sink::default();
+    let (mut p, _) = open(&mut s, &mut app, Some(7), true, true);
+    let data = stream(9 * 1000);
+    let mut out = Vec::new();
+    // Nine segments arrive in one pass, no flush between them: the ACKs of a
+    // batch do not wait for its end (a sender of a long batch was held up by
+    // the one ACK per pass, ADR-265).
+    for i in 0..9u32 {
+        let seg = p.data(
+            i * 1000,
+            &data[(i * 1000) as usize..((i + 1) * 1000) as usize],
+        );
+        s.input(10, CLIENT, &seg, &mut app, &mut |_, b| out.push(b.to_vec()));
+    }
+    let acks: Vec<u32> = out
+        .iter()
+        .map(|b| wire::parse(SERVER, CLIENT, b).unwrap().ack)
+        .collect();
+    assert_eq!(
+        acks,
+        [2000, 4000, 6000, 8000].map(|n| C_ISN + 1 + n),
+        "one ACK for every two segments"
+    );
+    // The ninth is acknowledged at the end of the pass.
+    out.clear();
+    s.flush(11, &mut |_, b| out.push(b.to_vec()));
+    assert_eq!(out.len(), 1);
+    assert_eq!(last_ack(&out).ack, C_ISN + 1 + 9000);
+    // Nothing is owed after that.
+    out.clear();
+    s.flush(12, &mut |_, b| out.push(b.to_vec()));
+    assert!(out.is_empty());
+    assert_eq!(app.data, data);
 }
 
 #[test]
