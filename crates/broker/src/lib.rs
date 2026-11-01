@@ -216,6 +216,16 @@ pub struct Stats {
     pub dropped_sys: u64,
 }
 
+/// What decoding the start of a connection's input led to.
+enum Step {
+    /// A packet of this many bytes was handled.
+    Used(usize),
+    /// The bytes are the start of a packet.
+    Incomplete,
+    /// The connection is being closed.
+    Stop,
+}
+
 struct Will {
     msg: Msg,
     qos: QoS,
@@ -880,6 +890,33 @@ impl Broker {
         self.sessions.get_mut(s)
     }
 
+    /// Decodes and handles the packet at the start of `buf` for `c`.
+    fn step(&mut self, c: ConnId, buf: &[u8], now_ms: u64) -> Step {
+        let limits = self.cfg.limits;
+        match decode(buf, &limits) {
+            Ok((packet, used)) => {
+                self.handle(c, packet, now_ms);
+                Step::Used(used.min(buf.len()))
+            }
+            Err(CodecError::Incomplete(_)) => Step::Incomplete,
+            Err(CodecError::UnsupportedProtocolLevel(_)) => {
+                self.send(
+                    c,
+                    &Packet::ConnAck(ConnAck {
+                        session_present: false,
+                        code: ConnectReturnCode::UnacceptableProtocolVersion,
+                    }),
+                );
+                self.mark_close(c, CloseReason::Unsupported);
+                Step::Stop
+            }
+            Err(_) => {
+                self.mark_close(c, CloseReason::ProtocolError);
+                Step::Stop
+            }
+        }
+    }
+
     /// Bytes received on `c`. Processes every complete packet.
     pub fn input(&mut self, c: ConnId, data: &[u8], now_ms: u64) {
         let limit = self.cfg.limits.max_packet_size as usize + INBUF_SLACK;
@@ -888,25 +925,49 @@ impl Broker {
             return;
         }
         conn.last_rx_ms = now_ms;
+        if conn.inbuf.is_empty() {
+            // Nothing is pending: the packets in `data` are decoded where they
+            // are, and only what is left of a cut packet is kept (M15). A
+            // connection whose reads end on packet boundaries never allocates
+            // an input buffer (ADR-231: it was a copy and a block of the heap
+            // per read).
+            let mut rest = data;
+            while !rest.is_empty() {
+                if self.conn(c).is_none_or(|k| k.close.is_some()) {
+                    return;
+                }
+                match self.step(c, rest, now_ms) {
+                    Step::Used(n) => rest = rest.get(n..).unwrap_or(&[]),
+                    Step::Incomplete => break,
+                    Step::Stop => return,
+                }
+            }
+            if !rest.is_empty()
+                && let Some(conn) = self.conn(c)
+            {
+                conn.inbuf.extend_from_slice(rest);
+                if rest.len() > limit {
+                    conn.close = Some(CloseReason::ProtocolError);
+                }
+            }
+            return;
+        }
         conn.inbuf.extend_from_slice(data);
         loop {
             let Some(conn) = self.conn(c) else { return };
             if conn.close.is_some() {
                 return;
             }
-            let buf = conn.inbuf.take();
-            let limits = self.cfg.limits;
-            match decode(&buf, &limits) {
-                Ok((packet, used)) => {
-                    self.handle(c, packet, now_ms);
+            let mut buf = conn.inbuf.take();
+            match self.step(c, &buf, now_ms) {
+                Step::Used(n) => {
                     if let Some(conn) = self.conn(c) {
-                        let mut buf = buf;
-                        buf.drain(..used.min(buf.len()));
+                        buf.drain(..n);
                         // Idle connections keep no buffer (M15).
                         conn.inbuf.set(buf);
                     }
                 }
-                Err(CodecError::Incomplete(_)) => {
+                Step::Incomplete => {
                     let too_big = buf.len() > limit;
                     if let Some(conn) = self.conn(c) {
                         conn.inbuf.set(buf);
@@ -916,21 +977,7 @@ impl Broker {
                     }
                     return;
                 }
-                Err(CodecError::UnsupportedProtocolLevel(_)) => {
-                    self.send(
-                        c,
-                        &Packet::ConnAck(ConnAck {
-                            session_present: false,
-                            code: ConnectReturnCode::UnacceptableProtocolVersion,
-                        }),
-                    );
-                    self.mark_close(c, CloseReason::Unsupported);
-                    return;
-                }
-                Err(_) => {
-                    self.mark_close(c, CloseReason::ProtocolError);
-                    return;
-                }
+                Step::Stop => return,
             }
         }
     }

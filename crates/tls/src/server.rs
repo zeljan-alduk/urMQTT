@@ -834,6 +834,8 @@ fn drain_records(o: &mut Open, tx: &mut Vec<u8>, app: &mut Vec<u8>) -> Result<Ev
     };
     let mut off = 0usize;
     let mut ev = Event::None;
+    // The record keys, derived once for the records of this read (ADR-231).
+    let mut keys = o.rec.rx_keys();
     let r = (|| {
         while let Some(rest) = buf.get(off..) {
             let Some(n) = record::record_len(rest) else {
@@ -845,14 +847,18 @@ fn drain_records(o: &mut Open, tx: &mut Vec<u8>, app: &mut Vec<u8>) -> Result<Ev
             let Some(rec) = buf.get_mut(off..off + n) else {
                 break;
             };
-            match o.rec.open(rec, tx)? {
+            let Some(k) = keys.as_ref() else {
+                return Err(TlsError::Record(RecordError::BadRecord));
+            };
+            match o.rec.open_with(k, rec, tx)? {
                 Opened::Data(r) => app.extend_from_slice(rec.get(r).unwrap_or(&[])),
                 Opened::Closed => {
                     ev = Event::PeerClosed;
                     off += n;
                     break;
                 }
-                Opened::KeyUpdated { .. } => {}
+                // New keys from the next record on.
+                Opened::KeyUpdated { .. } => keys = o.rec.rx_keys(),
             }
             off += n;
         }

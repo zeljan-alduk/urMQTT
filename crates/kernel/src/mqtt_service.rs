@@ -29,9 +29,16 @@ use crate::dataplane::{self, CoreMsg, Link, Tconn};
 use crate::db::{self, DbReq, DbResp, LogBatch, Restored};
 use crate::watchdog;
 
-/// Reply bytes in flight from a home core to one relayed connection.
-const RELAY_CREDIT: usize = 32 * 1024;
-const RELAY_CHUNK: usize = 16 * 1024;
+/// Reply bytes in flight from a home core to one relayed connection. A flow
+/// moves at most this many bytes per round trip between the two cores (the
+/// credit returns when the transport core has taken the bytes), and on a VPS
+/// whose vCPUs the host preempts that round trip is 5 to 30 ms: 32 KiB capped a
+/// relayed subscriber at 1 to 6 MB/s however open its TCP window was (the
+/// console showed 32 KiB queued and 32 KiB in flight on a path that needed
+/// 100 KiB, ADR-232). 256 KiB per relayed connection is the most that is ever
+/// held between two cores for it, and only while it is busy.
+const RELAY_CREDIT: usize = 256 * 1024;
+const RELAY_CHUNK: usize = 64 * 1024;
 /// QoS 0 fan-out to a core is dropped beyond this backlog (QoS 1 is kept).
 const ROUTE_BACKLOG: usize = 16_384;
 /// Telemetry records held back while the log ring is full; beyond this
@@ -42,6 +49,12 @@ const LOG_BATCH: usize = 256;
 const LOG_BATCH_MS: u64 = 1;
 /// Ciphertext queued for TCP per connection before we stop taking replies.
 const TX_BUF: usize = 32 * 1024;
+/// Bytes the broker buffers for one connection before QoS 0 messages for it
+/// are dropped (and QoS 1 ones queued). It must hold what one pass of a core
+/// can add: 64 frames of up to 1448 bytes of PUBLISH, all for this
+/// subscriber (ADR-231). At 32 KiB a burst of 40 messages of 1 KiB lost
+/// messages for a subscriber whose TCP queue was nearly empty.
+const OUTBUF_MAX: usize = 128 * 1024;
 /// Device-registry updates are skipped (counted) while this many DB
 /// requests wait for the ring: they are statistics, and a reconnect storm
 /// must not queue one per connection without bound (M16).
@@ -374,7 +387,7 @@ pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
         max_retained_bytes: l.max_retained_bytes as usize,
         rate_tokens: l.publish_rate_per_device.tokens,
         rate_period_ms: l.publish_rate_per_device.per_ms,
-        max_outbound_bytes: TX_BUF,
+        max_outbound_bytes: OUTBUF_MAX,
         acl: Acl {
             device_publish: CONFIG.acl.device_publish,
             device_subscribe: CONFIG.acl.device_subscribe,
@@ -1219,6 +1232,7 @@ impl MqttService {
     }
 
     fn shrink_inner(&mut self, tcp: &mut TcpStack) {
+        crate::vm::HEAP.trim();
         tcp.shrink();
         self.broker.shrink();
         self.conns.0.shrink();

@@ -1843,3 +1843,70 @@ fn stats_track_subscriptions_and_online_connections() {
     assert_eq!((b.stats().subscriptions, b.stats().online), (1, 0));
     assert_eq!(b.stats().sessions, 1);
 }
+
+#[test]
+fn input_cut_anywhere_gives_the_same_answers_and_keeps_no_buffer_on_boundaries() {
+    // A CONNECT, a SUBSCRIBE, a PUBLISH to the own topic and a PINGREQ in one
+    // stream, read whole and cut at every position into two reads: the broker
+    // answers the same each time (the packets of a read are decoded where
+    // they are, only a cut one is buffered).
+    let mk = |p: &Packet<'_>| {
+        let mut out = vec![0u8; encoded_len(p)];
+        encode(p, &mut out).unwrap();
+        out
+    };
+    let packets: Vec<Vec<u8>> = vec![
+        mk(&Packet::Connect(Connect {
+            protocol_level: 4,
+            clean_session: true,
+            keep_alive: 10,
+            client_id: "backend",
+            will: None,
+            username: None,
+            password: None,
+        })),
+        mk(&Packet::Subscribe(Subscribe {
+            packet_id: 1,
+            topics: SubscribeTopics::List(&[("fleet/#", QoS::AtMostOnce)]),
+        })),
+        mk(&Packet::Publish(urmqtt_mqtt::Publish {
+            dup: false,
+            qos: QoS::AtMostOnce,
+            retain: false,
+            topic: "fleet/x",
+            packet_id: None,
+            payload: &[7u8; 300],
+        })),
+        mk(&Packet::PingReq),
+    ];
+    let stream: Vec<u8> = packets.concat();
+    let answer = |cuts: &[usize]| {
+        let mut b = Broker::new(cfg());
+        let c = b.open(0).unwrap();
+        let mut at = 0;
+        for &cut in cuts.iter().chain(&[stream.len()]) {
+            b.input(c, &stream[at..cut], 0);
+            at = cut;
+        }
+        (b.output(c).to_vec(), b.stats().published)
+    };
+    let (whole, published) = answer(&[]);
+    assert!(whole.len() > 300, "the PUBLISH came back to its sender");
+    for cut in 0..=stream.len() {
+        let (got, p) = answer(&[cut]);
+        assert_eq!(got, whole, "cut at {cut}");
+        assert_eq!(p, published, "cut at {cut}");
+    }
+    // Reads that end on packet boundaries leave no input buffer behind.
+    let mut b = Broker::new(cfg());
+    let c = b.open(0).unwrap();
+    for (i, p) in packets.iter().enumerate() {
+        b.input(c, p, 0);
+        assert_eq!(b.conn(c).map_or(1, |k| k.inbuf.len()), 0, "packet {i}");
+    }
+    // Several packets in one read.
+    let mut b = Broker::new(cfg());
+    let c = b.open(0).unwrap();
+    b.input(c, &stream, 0);
+    assert_eq!(b.conn(c).map_or(1, |k| k.inbuf.len()), 0);
+}

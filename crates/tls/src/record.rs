@@ -148,7 +148,35 @@ impl Drop for Key {
     }
 }
 
+/// The record key and the IV of one direction for its current generation,
+/// derived once for a run of records: deriving them (two HKDF-Expand-Labels,
+/// a dozen compressions of SHA-256) for every record was most of what a small
+/// record cost (ADR-231). Not kept in the connection (M15): the caller holds it
+/// for the records of one read or one send, and a key update makes it stale.
+pub struct Keys {
+    key: Key,
+    iv: [u8; 12],
+}
+
+impl Drop for Keys {
+    fn drop(&mut self) {
+        self.iv.zeroize();
+    }
+}
+
 impl Direction {
+    /// The key and IV of the current generation.
+    fn keys(&self, suite: Suite) -> Option<Keys> {
+        let key = self.key(suite);
+        if key.len == 0 {
+            return None;
+        }
+        Some(Keys {
+            key,
+            iv: self.iv()?,
+        })
+    }
+
     fn new(secret: [u8; 32], seq: u64) -> Self {
         Self { secret, seq }
     }
@@ -165,14 +193,19 @@ impl Direction {
         true
     }
 
-    /// The per-record nonce (RFC 8446 §5.3): the IV, derived afresh, XOR
-    /// the sequence number. None only if HKDF fails (it cannot for 12 B).
-    fn nonce(&self) -> Option<[u8; 12]> {
-        let mut n = self.iv()?;
+    /// The per-record nonce (RFC 8446 §5.3): the IV XOR the sequence number.
+    fn nonce_of(&self, iv: &[u8; 12]) -> [u8; 12] {
+        let mut n = *iv;
         for (b, s) in n.iter_mut().skip(4).zip(self.seq.to_be_bytes()) {
             *b ^= s;
         }
-        Some(n)
+        n
+    }
+
+    /// The nonce with the IV derived afresh (single records). None only if
+    /// HKDF fails (it cannot for 12 B).
+    fn nonce(&self) -> Option<[u8; 12]> {
+        Some(self.nonce_of(&self.iv()?))
     }
 
     /// The record key for `suite`, derived from the traffic secret.
@@ -213,6 +246,26 @@ fn seal_in_place(
             .is_ok_and(|c| c.encrypt_in_place(nonce.into(), aad, buf).is_ok()),
         Suite::ChaCha20Poly1305 => chacha20poly1305::ChaCha20Poly1305::new_from_slice(key)
             .is_ok_and(|c| c.encrypt_in_place(nonce.into(), aad, buf).is_ok()),
+    }
+}
+
+/// Encrypts `body` in place and returns the tag.
+fn seal_detached(
+    suite: Suite,
+    key: &[u8],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    body: &mut [u8],
+) -> Option<[u8; TAG]> {
+    match suite {
+        Suite::Aes128Gcm => aes_gcm::Aes128Gcm::new_from_slice(key)
+            .ok()
+            .and_then(|c| c.encrypt_in_place_detached(nonce.into(), aad, body).ok())
+            .map(Into::into),
+        Suite::ChaCha20Poly1305 => chacha20poly1305::ChaCha20Poly1305::new_from_slice(key)
+            .ok()
+            .and_then(|c| c.encrypt_in_place_detached(nonce.into(), aad, body).ok())
+            .map(Into::into),
     }
 }
 
@@ -290,8 +343,29 @@ impl RecordLayer {
         &self.tx
     }
 
+    /// The receiving keys of the current generation, for [`open_with`]
+    /// (valid until a record returns [`Opened::KeyUpdated`]).
+    ///
+    /// [`open_with`]: Self::open_with
+    pub fn rx_keys(&self) -> Option<Keys> {
+        self.rx.keys(self.suite)
+    }
+
     /// Decrypts the complete record `rec` (header included) in place.
     pub fn open(&mut self, rec: &mut [u8], out: &mut Vec<u8>) -> Result<Opened, RecordError> {
+        let keys = self.rx_keys().ok_or(RecordError::BadRecord)?;
+        self.open_with(&keys, rec, out)
+    }
+
+    /// As [`open`](Self::open) with the keys of [`rx_keys`](Self::rx_keys),
+    /// which a run of records shares. After [`Opened::KeyUpdated`] they are
+    /// stale and must be derived again.
+    pub fn open_with(
+        &mut self,
+        keys: &Keys,
+        rec: &mut [u8],
+        out: &mut Vec<u8>,
+    ) -> Result<Opened, RecordError> {
         let (header, body) = rec
             .split_at_mut_checked(HEADER)
             .ok_or(RecordError::BadHeader)?;
@@ -308,9 +382,8 @@ impl RecordLayer {
         if self.rx.seq == u64::MAX {
             return Err(RecordError::SequenceExhausted);
         }
-        let nonce = self.rx.nonce().ok_or(RecordError::BadRecord)?;
-        let key = self.rx.key(self.suite);
-        let pt_len = open_in_place(self.suite, key.as_slice(), &nonce, header, body)
+        let nonce = self.rx.nonce_of(&keys.iv);
+        let pt_len = open_in_place(self.suite, keys.key.as_slice(), &nonce, header, body)
             .ok_or(RecordError::BadRecord)?;
         self.rx.seq += 1;
         if pt_len > MAX_PLAINTEXT + 1 {
@@ -354,30 +427,42 @@ impl RecordLayer {
         }
     }
 
-    fn seal(&mut self, ctype: u8, data: &[u8], out: &mut Vec<u8>) -> Result<(), RecordError> {
+    fn seal(
+        &mut self,
+        keys: &mut Keys,
+        ctype: u8,
+        data: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<(), RecordError> {
         if self.tx.seq >= self.suite.record_limit() - 1 {
             // Rotate before the AEAD confidentiality limit.
             self.send_key_update(out)?;
+            *keys = self.tx.keys(self.suite).ok_or(RecordError::BadRecord)?;
         }
         let len = data.len() + 1 + TAG;
         let header = [CT_APP_DATA, 3, 3, (len >> 8) as u8, len as u8];
-        let mut buf = Vec::with_capacity(len);
-        buf.extend_from_slice(data);
-        buf.push(ctype);
-        let nonce = self.tx.nonce().ok_or(RecordError::BadRecord)?;
-        if !seal_in_place(
-            self.suite,
-            self.tx.key(self.suite).as_slice(),
-            &nonce,
-            &header,
-            &mut buf,
-        ) {
-            return Err(RecordError::BadRecord);
-        }
-        self.tx.seq += 1;
+        let nonce = self.tx.nonce_of(&keys.iv);
+        // The record is built and encrypted where it is going to be sent,
+        // at the end of `out`: no buffer of its own (a 16 KiB one per record
+        // was a visit to the global heap lock each, ADR-231).
+        let start = out.len();
+        out.reserve(HEADER + len);
         out.extend_from_slice(&header);
-        out.extend_from_slice(&buf);
-        buf.zeroize();
+        out.extend_from_slice(data);
+        out.push(ctype);
+        let tag = out
+            .get_mut(start + HEADER..)
+            .and_then(|body| seal_detached(self.suite, keys.key.as_slice(), &nonce, &header, body));
+        let Some(tag) = tag else {
+            // Not a byte of plaintext stays behind in the buffer.
+            if let Some(tail) = out.get_mut(start..) {
+                tail.zeroize();
+            }
+            out.truncate(start);
+            return Err(RecordError::BadRecord);
+        };
+        out.extend_from_slice(&tag);
+        self.tx.seq += 1;
         Ok(())
     }
 
@@ -405,22 +490,32 @@ impl RecordLayer {
         }
     }
 
+    /// One record of any content type (tests).
+    #[cfg(test)]
+    fn seal_one(&mut self, ctype: u8, data: &[u8], out: &mut Vec<u8>) -> Result<(), RecordError> {
+        let mut keys = self.tx.keys(self.suite).ok_or(RecordError::BadRecord)?;
+        self.seal(&mut keys, ctype, data, out)
+    }
+
     /// Encrypts application data into records of at most 16 KiB.
     pub fn send(&mut self, data: &[u8], out: &mut Vec<u8>) -> Result<(), RecordError> {
+        let mut keys = self.tx.keys(self.suite).ok_or(RecordError::BadRecord)?;
         for chunk in data.chunks(MAX_PLAINTEXT) {
-            self.seal(CT_APP_DATA, chunk, out)?;
+            self.seal(&mut keys, CT_APP_DATA, chunk, out)?;
         }
         Ok(())
     }
 
     /// Queues close_notify.
     pub fn close(&mut self, out: &mut Vec<u8>) -> Result<(), RecordError> {
-        self.seal(CT_ALERT, &[1, 0], out)
+        let mut keys = self.tx.keys(self.suite).ok_or(RecordError::BadRecord)?;
+        self.seal(&mut keys, CT_ALERT, &[1, 0], out)
     }
 
     /// Queues the fatal alert `desc` (the connection ends after it).
     pub fn alert(&mut self, desc: u8, out: &mut Vec<u8>) -> Result<(), RecordError> {
-        self.seal(CT_ALERT, &[2, desc], out)
+        let mut keys = self.tx.keys(self.suite).ok_or(RecordError::BadRecord)?;
+        self.seal(&mut keys, CT_ALERT, &[2, desc], out)
     }
 
     /// Initiates a key update of our sending keys (tests, long sessions).
@@ -525,7 +620,7 @@ mod tests {
         let (mut s, mut c) = pair(Suite::ChaCha20Poly1305);
         // Client asks for an update (update_requested = 1).
         let mut wire = Vec::new();
-        c.seal(CT_HANDSHAKE, &[HS_KEY_UPDATE, 0, 0, 1, 1], &mut wire)
+        c.seal_one(CT_HANDSHAKE, &[HS_KEY_UPDATE, 0, 0, 1, 1], &mut wire)
             .unwrap();
         assert!(c.tx.update());
         let mut reply = Vec::new();
@@ -545,19 +640,68 @@ mod tests {
     }
 
     #[test]
+    fn a_run_of_records_shares_its_keys_until_a_key_update() {
+        let (mut s, mut c) = pair(Suite::Aes128Gcm);
+        // Data, a KeyUpdate (nothing requested), data: one buffer, one read.
+        let mut wire = Vec::new();
+        c.send(b"one", &mut wire).unwrap();
+        c.send(b"and", &mut wire).unwrap();
+        c.seal_one(CT_HANDSHAKE, &[HS_KEY_UPDATE, 0, 0, 1, 0], &mut wire)
+            .unwrap();
+        assert!(c.tx.update());
+        c.send(b"two", &mut wire).unwrap();
+        c.send(b"more", &mut wire).unwrap();
+        let mut keys = s.rx_keys().unwrap();
+        let (mut off, mut got, mut updates) = (0, Vec::new(), 0);
+        while off < wire.len() {
+            let n = record_len(&wire[off..]).unwrap();
+            let rec = &mut wire[off..off + n];
+            match s.open_with(&keys, rec, &mut Vec::new()).unwrap() {
+                Opened::Data(r) => got.extend_from_slice(&rec[r]),
+                Opened::KeyUpdated { .. } => {
+                    updates += 1;
+                    keys = s.rx_keys().unwrap();
+                }
+                Opened::Closed => break,
+            }
+            off += n;
+        }
+        assert_eq!(got, b"oneandtwomore");
+        assert_eq!(updates, 1);
+        // Keys derived before an update do not open the records after it.
+        let (mut s2, mut c2) = pair(Suite::Aes128Gcm);
+        let old = s2.rx_keys().unwrap();
+        let mut w = Vec::new();
+        c2.seal_one(CT_HANDSHAKE, &[HS_KEY_UPDATE, 0, 0, 1, 0], &mut w)
+            .unwrap();
+        assert!(c2.tx.update());
+        c2.send(b"z", &mut w).unwrap();
+        let n = record_len(&w).unwrap();
+        let (first, second) = w.split_at_mut(n);
+        assert_eq!(
+            s2.open_with(&old, first, &mut Vec::new()).unwrap(),
+            Opened::KeyUpdated { respond: false }
+        );
+        assert_eq!(
+            s2.open_with(&old, second, &mut Vec::new()),
+            Err(RecordError::BadRecord)
+        );
+    }
+
+    #[test]
     fn alerts() {
         let (mut s, mut c) = pair(Suite::Aes128Gcm);
         let mut wire = Vec::new();
         c.close(&mut wire).unwrap();
         assert_eq!(s.open(&mut wire, &mut Vec::new()).unwrap(), Opened::Closed);
         let mut wire = Vec::new();
-        c.seal(CT_ALERT, &[2, 40], &mut wire).unwrap();
+        c.seal_one(CT_ALERT, &[2, 40], &mut wire).unwrap();
         assert_eq!(
             s.open(&mut wire, &mut Vec::new()),
             Err(RecordError::PeerAlert(40))
         );
         let mut wire = Vec::new();
-        c.seal(CT_HANDSHAKE, &[4, 0, 0, 0], &mut wire).unwrap();
+        c.seal_one(CT_HANDSHAKE, &[4, 0, 0, 0], &mut wire).unwrap();
         assert_eq!(
             s.open(&mut wire, &mut Vec::new()),
             Err(RecordError::UnexpectedMessage)
