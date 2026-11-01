@@ -1566,6 +1566,7 @@ dependencies = [
 name = "urmqtt-dbworker"
 version = "0.1.0"
 dependencies = [
+ "urmqtt-store",
  "urmqtt-usys",
 ]
 
@@ -1684,6 +1685,7 @@ dependencies = [
  "cc",
  "sha2 0.11.1",
  "urmqtt-sync",
+ "urmqtt-usys",
 ]
 
 [[package]]

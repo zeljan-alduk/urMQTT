@@ -41,7 +41,7 @@ Further findings while reading:
 3. **Open registry (Q2).** Every certificate from the CA is admitted; a CA compromise or a wrongly issued certificate gives immediate access.
 4. **Custom security-critical code without differential testing:** the TLS record layer, the TCP stack and the MQTT ACL. They are fuzzed for crashes, but not proven equivalent to a reference or checked for invariants.
 5. **No KASLR, no stack protector, no allocator hardening.** W^X, PAC/BTI and guard pages exist, but a memory-safety bug in `unsafe` code or in SQLite (C) would have fixed addresses to aim at.
-6. **SQLite (≈ 250k lines of C) runs at EL1** with full kernel rights (H6).
+6. ~~**SQLite (≈ 250k lines of C) runs at EL1** with full kernel rights (H6).~~ **Done in H6:** it runs at EL0 / ring 3 in an address space of its own (ADR-210).
 7. **On bare metal: no IOMMU** (DMA from devices) and Secure Boot not yet supported.
 
 ---
@@ -246,6 +246,13 @@ Every milestone ends with:
 - **Hardening flags verified by a test:** `SQLITE_DBCONFIG_DEFENSIVE`, `trusted_schema=OFF`, `cell_size_check=ON`, no mmap, no extensions, only fixed prepared statements.
 
 **Accept:** a deliberate out-of-bounds write from SQLite context (test hook) faults without touching kernel memory; db-bench within an agreed cost.
+
+**H6 status (2026-11-01): done on both architectures** (docs/PROGRESS.md, H6; ADR-210 to ADR-212). Deviations from the work list above:
+- The worker does have **system calls** (twelve, for the VFS, random, time, sleep and log): "no syscalls, requests through the rings only" was not workable for a VFS that must reach the disk synchronously; each call is validated against the volume layout and the kernel never dereferences a worker address (data moves through a shared window).
+- A fault at EL0 is **not** fatal for the DB core: it ends the call, restarts the worker and reopens the store from the WAL (storm limit: 5 a minute).
+- x86_64 got ring 3 (not PKS) in the same milestone: SMEP/SMAP, `swapgs`, a second PML4.
+- Cost measured with `test=db-bench` (docs/PROGRESS.md). The hardening flags are enforced at open (`config_flag` fails if SQLite does not report the option set); no separate test.
+- Open: fuzzing the worker (H5), KPTI/PCID, a production switch to turn the isolation off (there is none: the kernel does not link SQLite).
 
 ### H7 — Time security · M (the lower bound moves forward into H1)
 

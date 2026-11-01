@@ -4,9 +4,35 @@
 
 use core::panic::PanicInfo;
 
-use urmqtt_usys::abi::{MAGIC, hdr, op, sys};
-use urmqtt_usys::layout::{SHM_BASE, SHM_HEADER};
-use urmqtt_usys::stub::{privileged, syscall};
+use urmqtt_store::worker::{self, Ops};
+#[cfg(feature = "selftest")]
+use urmqtt_usys::abi::{MAGIC, op};
+use urmqtt_usys::abi::{hdr, sys};
+use urmqtt_usys::layout::SHM_BASE;
+#[cfg(feature = "selftest")]
+use urmqtt_usys::layout::SHM_HEADER;
+#[cfg(feature = "selftest")]
+use urmqtt_usys::stub::privileged;
+use urmqtt_usys::stub::syscall;
+
+/// The worker has no allocator: SQLite has its own heap and the dispatcher
+/// uses fixed tables. The store crate's other modules (the disk layer and so
+/// on) are linked in unused and name the `alloc` crate; this makes any
+/// allocation that did happen fail instead of corrupting memory.
+struct NoHeap;
+
+// SAFETY: allocation always fails (null), deallocation is never called for a
+// block this allocator did not return.
+unsafe impl core::alloc::GlobalAlloc for NoHeap {
+    unsafe fn alloc(&self, _: core::alloc::Layout) -> *mut u8 {
+        core::ptr::null_mut()
+    }
+
+    unsafe fn dealloc(&self, _: *mut u8, _: core::alloc::Layout) {}
+}
+
+#[global_allocator]
+static HEAP: NoHeap = NoHeap;
 
 /// The stack protector's guard (`-Zstack-protector`); the kernel gives a
 /// fresh seed at every start.
@@ -31,6 +57,11 @@ fn panic(_: &PanicInfo<'_>) -> ! {
     exit(0xdead_0002)
 }
 
+fn system_call(nr: u64, a: [u64; 6]) -> u64 {
+    // SAFETY: the kernel validates every argument of its system calls.
+    unsafe { syscall(nr, a) }
+}
+
 fn word(off: usize) -> *mut u64 {
     (SHM_BASE as usize + off) as *mut u64
 }
@@ -40,11 +71,13 @@ fn read(off: usize) -> u64 {
     unsafe { word(off).read_volatile() }
 }
 
+#[cfg(feature = "selftest")]
 fn write(off: usize, v: u64) {
     // SAFETY: as above.
     unsafe { word(off).write_volatile(v) }
 }
 
+#[cfg(feature = "selftest")]
 fn log(msg: &[u8]) {
     let io = (SHM_BASE as usize + SHM_HEADER) as *mut u8;
     // SAFETY: the I/O area is mapped and far larger than any message here.
@@ -53,6 +86,7 @@ fn log(msg: &[u8]) {
     unsafe { syscall(sys::LOG, [msg.len() as u64, 0, 0, 0, 0, 0]) };
 }
 
+#[cfg(feature = "selftest")]
 static mut SCRATCH: [u8; 64] = [0; 64];
 
 /// The worker's entry: the kernel starts every call here with a fresh
@@ -65,8 +99,31 @@ pub extern "C" fn _start() -> ! {
         // SAFETY: single-threaded, before any function with a protector runs again.
         unsafe { core::ptr::addr_of_mut!(__stack_chk_guard).write_volatile(seed) };
     }
-    let a0 = read(hdr::ARG);
-    match read(hdr::OP) {
+    let o = read(hdr::OP);
+    if o >= 32 {
+        // The store's operations (ADR-211).
+        // SAFETY: the shared window is mapped for the life of the worker and
+        // used only by this program and the kernel, never at the same time.
+        unsafe {
+            worker::install(Ops {
+                shm: SHM_BASE as *mut u8,
+                sys: system_call,
+            });
+        }
+        exit(worker::dispatch());
+    }
+    #[cfg(feature = "selftest")]
+    selftest(o, read(hdr::ARG));
+    #[cfg(not(feature = "selftest"))]
+    exit(0xdead_0003)
+}
+
+/// The operations of the dev self-tests (`test=worker-contain`,
+/// `test=worker-fault`): a round trip and every way a worker can misbehave.
+#[cfg(feature = "selftest")]
+fn selftest(o: u64, a0: u64) -> ! {
+    match o {
+        op::NOP => {}
         op::HELLO => {
             log(b"dbworker: hello from user mode");
             write(hdr::RET, a0 ^ MAGIC);
@@ -93,7 +150,8 @@ pub extern "C" fn _start() -> ! {
             core::hint::spin_loop();
         },
         op::FAULT_WRITE_TEXT => {
-            let p = _start as usize as *mut u32;
+            let entry: extern "C" fn() -> ! = _start;
+            let p = entry as usize as *mut u32;
             // SAFETY: deliberately faulting write to read-only code (test).
             unsafe { p.write_volatile(0) };
         }

@@ -286,6 +286,10 @@ core::arch::global_asm!(
     "stp d14, d15, [x2, #152]",
     "mrs x9, daif",
     "str x9, [x2, #168]",
+    // From here to the eret an interrupt would overwrite ELR_EL1 and
+    // SPSR_EL1, which hold the worker's entry: mask everything. The eret
+    // opens the interrupts in user mode.
+    "msr daifset, #15",
     "mrs x9, fpcr",
     "str x9, [x2, #176]",
     // The kernel runs on SP_EL0 (EL1t) or on SP_EL1 (EL1h); exceptions from

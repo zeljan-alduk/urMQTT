@@ -1090,6 +1090,7 @@ dependencies = [
  "cc",
  "sha2 0.11.1",
  "urmqtt-sync",
+ "urmqtt-usys",
 ]
 
 [[package]]
@@ -1134,6 +1135,10 @@ dependencies = [
  "x509-cert",
  "zeroize",
 ]
+
+[[package]]
+name = "urmqtt-usys"
+version = "0.1.0"
 
 [[package]]
 name = "urmqtt-x25519"

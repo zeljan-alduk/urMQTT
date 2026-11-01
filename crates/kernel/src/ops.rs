@@ -295,6 +295,34 @@ impl Ops {
                 }
             }
         }
+        // The unprivileged database worker (H6): gauges, so a missed datagram
+        // costs nothing. `restarts` is what an alert wants: each one is a
+        // fault or a runaway in SQLite's address space (logged with its cause).
+        add(
+            "dbworker.restarts",
+            crate::dbsandbox::RESTARTS.load(Ordering::Relaxed),
+            "g",
+        );
+        add(
+            "dbworker.faults",
+            crate::dbsandbox::FAULTS.load(Ordering::Relaxed),
+            "g",
+        );
+        add(
+            "dbworker.calls",
+            crate::dbsandbox::CALLS.load(Ordering::Relaxed),
+            "g",
+        );
+        add(
+            "dbworker.syscalls",
+            crate::dbsandbox::SYSCALLS.load(Ordering::Relaxed),
+            "g",
+        );
+        add(
+            "dbworker.us_inside",
+            crate::dbsandbox::WORKER_NS.load(Ordering::Relaxed) / 1000,
+            "g",
+        );
         // In-disk database backup (S5): gauges, so a missed datagram costs
         // nothing. `age_s` is what an alert wants: seconds since the newest
         // snapshot on the disk (absent while there is none or the clock is

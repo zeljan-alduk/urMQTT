@@ -17,5 +17,13 @@ bench = false
 [lints]
 workspace = true
 
+[features]
+# Fault-injection operations for the dev self-tests (never in a production image).
+selftest = []
+
 [dependencies]
 urmqtt-usys = { path = "../usys" }
+
+# SQLite and the dispatcher exist only in the bare-metal build.
+[target.'cfg(target_os = "none")'.dependencies]
+urmqtt-store = { path = "../store", features = ["worker"] }

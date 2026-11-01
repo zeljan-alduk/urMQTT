@@ -34,7 +34,7 @@ static IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dbworker.elf"));
 
 const PAGE: usize = 4096;
 /// Wall-clock budget of one call into the worker (ADR-210).
-static BUDGET_NS: AtomicU64 = AtomicU64::new(5_000_000_000);
+static BUDGET_NS: AtomicU64 = AtomicU64::new(30_000_000_000);
 /// More restarts than this within [`STORM_WINDOW_NS`] mean the worker is
 /// broken, not unlucky: it is not started again.
 static STORM_LIMIT: AtomicUsize = AtomicUsize::new(5);
@@ -46,6 +46,13 @@ pub static RESTARTS: AtomicU64 = AtomicU64::new(0);
 pub static CALLS: AtomicU64 = AtomicU64::new(0);
 /// Worker calls ended by a fault or a timeout.
 pub static FAULTS: AtomicU64 = AtomicU64::new(0);
+/// VFS system calls served for the worker since boot.
+pub static SYSCALLS: AtomicU64 = AtomicU64::new(0);
+/// Nanoseconds spent inside calls (entry to return, system calls included).
+pub static WORKER_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Length of the SQLite heap of the worker, for the store's transport.
+static HEAP_LEN: AtomicUsize = AtomicUsize::new(0);
 
 /// Kernel alias of the shared window, for the exception handler (it must not
 /// take the lock the caller holds). 0: no worker.
@@ -147,6 +154,8 @@ struct Worker {
     shm: Ram,
     restarts: Vec<u64>,
     failed: bool,
+    /// The stack protector's guard for this life of the worker.
+    seed: u64,
 }
 
 /// `(vaddr, file offset, file size, memory size, flags)` of a `PT_LOAD`.
@@ -338,10 +347,12 @@ pub fn create(heap_bytes: usize) -> Result<(), CreateError> {
         shm,
         restarts: Vec::new(),
         failed: false,
+        seed: 0,
     };
     w.load();
     // Relaxed: read by the exception handler on the core that runs a call.
     SHM_KVA.store(shm_kva as u64, Ordering::Relaxed);
+    HEAP_LEN.store(heap_len, Ordering::Relaxed);
     info!(
         "dbworker: address space built: {} KiB image, {} KiB stack, {} MiB heap, {} KiB shared window",
         w.segments.iter().map(|s| s.ram.len / 1024).sum::<usize>(),
@@ -366,6 +377,11 @@ impl Worker {
         }
         self.stack.zero();
         self.shm.zero();
+        let mut seed = [0u8; 8];
+        if urmqtt_tls::rng::fill_global(&mut seed).is_err() {
+            seed = [1; 8];
+        }
+        self.seed = u64::from_le_bytes(seed);
         if self.heap.len > 0 {
             self.heap.zero();
         }
@@ -396,10 +412,6 @@ pub fn call(op: u64, args: [u64; 6], input: &[u8], output: &mut [u8]) -> Result<
     }
     // Relaxed: counters.
     CALLS.fetch_add(1, Ordering::Relaxed);
-    let mut seed = [0u8; 8];
-    if urmqtt_tls::rng::fill_global(&mut seed).is_err() {
-        seed = [1; 8];
-    }
     let shm = w.shm;
     shm.put(hdr::OP, op);
     for (i, a) in args.iter().enumerate() {
@@ -408,16 +420,18 @@ pub fn call(op: u64, args: [u64; 6], input: &[u8], output: &mut [u8]) -> Result<
     shm.put(hdr::RET, 0);
     shm.put(hdr::RET2, 0);
     shm.put(hdr::LEN, input.len() as u64);
-    shm.put(hdr::SEED, u64::from_le_bytes(seed));
+    shm.put(hdr::SEED, w.seed);
     let _ = shm.write(SHM_HEADER, input);
     TIMED_OUT.store(false, Ordering::Relaxed);
     DEADLINE.store(
         time::uptime_ns().saturating_add(BUDGET_NS.load(Ordering::Relaxed)),
         Ordering::Relaxed,
     );
+    let t0 = time::uptime_ns();
     // SAFETY: tables built by `create`, entry and stack inside them; calls
     // are serialised by the lock and the kernel tables do not change.
     let exit = unsafe { user::enter(w.root, w.entry, STACK_TOP) };
+    WORKER_NS.fetch_add(time::uptime_ns().saturating_sub(t0), Ordering::Relaxed);
     DEADLINE.store(u64::MAX, Ordering::Relaxed);
     let failure = match exit {
         Exit::Done(0) => None,
@@ -466,6 +480,39 @@ pub fn call(op: u64, args: [u64; 6], input: &[u8], output: &mut [u8]) -> Result<
     Ok(Reply { ret, ret2, len })
 }
 
+/// How the store reaches the worker (ADR-211).
+pub fn transport() -> urmqtt_store::remote::Transport {
+    use urmqtt_store::remote::{Failure, Reply as StoreReply, Transport};
+
+    fn via(
+        op: u64,
+        args: [u64; 6],
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<StoreReply, Failure> {
+        match call(op, args, input, output) {
+            Ok(r) => Ok(StoreReply {
+                ret: r.ret,
+                ret2: r.ret2,
+                len: r.len,
+            }),
+            Err(CallError::Absent) => Err(Failure::Absent),
+            Err(_) => Err(Failure::Died),
+        }
+    }
+
+    fn epoch() -> u64 {
+        // Relaxed: a counter.
+        RESTARTS.load(Ordering::Relaxed)
+    }
+
+    Transport {
+        call: via,
+        epoch,
+        heap: (HEAP_BASE, HEAP_LEN.load(Ordering::Relaxed)),
+    }
+}
+
 /// An exception taken from the worker: serves system calls and interrupts,
 /// ends the call on anything else. Called from the exception handler.
 pub fn on_exception(frame: &mut urmqtt_arch::trap::TrapFrame, vector: urmqtt_arch::trap::Vector) {
@@ -495,6 +542,22 @@ pub fn on_exception(frame: &mut urmqtt_arch::trap::TrapFrame, vector: urmqtt_arc
                     );
                 }
                 user::set_return(frame, 0);
+            }
+            n if n >= urmqtt_usys::proto::vfs::OPEN => {
+                let kva = SHM_KVA.load(Ordering::Relaxed) as usize;
+                SYSCALLS.fetch_add(1, Ordering::Relaxed);
+                let r = if kva == 0 {
+                    u64::MAX
+                } else {
+                    // SAFETY: the I/O area of the shared window, which the
+                    // worker is not using while it waits for this call; the
+                    // window exists once the first call is made.
+                    let io = unsafe {
+                        core::slice::from_raw_parts_mut((kva + SHM_HEADER) as *mut u8, SHM_IO)
+                    };
+                    urmqtt_store::vfs::syscall(n, args, io).unwrap_or(u64::MAX)
+                };
+                user::set_return(frame, r);
             }
             _ => user::set_return(frame, u64::MAX),
         },
@@ -545,6 +608,19 @@ pub fn contain_selftest() {
         ok
     };
     let mut good = hello("before");
+    // What entering and leaving user mode costs: a call that does nothing.
+    {
+        const N: u64 = 20_000;
+        let t0 = time::uptime_ns();
+        for _ in 0..N {
+            let _ = call(op::NOP, [1, 0, 0, 0, 0, 0], &[], &mut []);
+        }
+        let ns = time::uptime_ns() - t0;
+        info!(
+            "worker-contain: {N} empty calls, {} ns per round trip (enter user mode, exit)",
+            ns / N
+        );
+    }
     info!(
         "worker-contain: kernel/user separation: {}",
         user::protections()
@@ -610,7 +686,7 @@ pub fn contain_selftest() {
             " (WITH FAILURES)"
         }
     );
-    BUDGET_NS.store(5_000_000_000, Ordering::Relaxed);
+    BUDGET_NS.store(30_000_000_000, Ordering::Relaxed);
     STORM_LIMIT.store(5, Ordering::Relaxed);
     *WORKER.lock() = None;
 }

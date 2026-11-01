@@ -105,6 +105,11 @@ pub enum DbTest {
     /// bounded steps while a writer keeps committing, the commit latency and
     /// the longest step reported (ADR-164), then continue booting.
     BackupBench,
+    /// The database worker faults in the middle of use (H6, ADR-210): rows
+    /// are committed, more are left uncommitted, the worker is made to fault;
+    /// the store must come back from the WAL with exactly the committed rows
+    /// and the broker must keep serving.
+    WorkerFault,
     /// In-guest data-plane scaling benchmark on the worker cores.
     DpBench,
     /// A handler overruns the watchdog budget on purpose (M16).
@@ -251,6 +256,7 @@ impl BootOptions {
                 "test=log-fill" => o.db_test = Some(DbTest::LogFill),
                 "test=scrub" => o.db_test = Some(DbTest::Scrub),
                 "test=scrub-load" => o.db_test = Some(DbTest::ScrubLoad),
+                "test=worker-fault" => o.db_test = Some(DbTest::WorkerFault),
                 "test=db-backup-bench" => o.db_test = Some(DbTest::BackupBench),
                 "test=dp-bench" => o.db_test = Some(DbTest::DpBench),
                 "test=watchdog" => o.db_test = Some(DbTest::Watchdog),
@@ -510,6 +516,7 @@ mod tests {
             ("test=log-fill", DbTest::LogFill),
             ("test=scrub", DbTest::Scrub),
             ("test=scrub-load", DbTest::ScrubLoad),
+            ("test=worker-fault", DbTest::WorkerFault),
         ] {
             assert_eq!(BootOptions::parse(w, true).db_test, Some(t), "{w}");
             let prod = BootOptions::parse(w, false);

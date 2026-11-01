@@ -21,6 +21,8 @@ All notable changes to this project are documented here. The format follows
 
 - H9: supply chain (ADR-190 to ADR-193). A CycloneDX SBOM for every release (`scripts/sbom.py`, `make sbom`; Rust crates with `.crate` hashes, SQLite, Limine, the nistz256 assembly and the three patched crates with hashes checked against their files), in `SHA256SUMS` and attested next to the provenance. `cargo-vet` with imported audits and 140 listed exemptions (53 of 67 kernel-linked crates: **not audited**, docs/SUPPLY-CHAIN.md); `cargo-deny` treats advisories, unmaintained and unsound crates as errors and a daily job re-checks them. `docs/VULNERABILITY-HANDLING.md`: intake, triage, fix, release, disclosure, supported versions, alignment with the EU Cyber Resilience Act (not legal advice; no support period promised yet).
 
+- H6: SQLite is an unprivileged component (ADR-210 to ADR-212). The 254k lines of C no longer run in the kernel: `crates/dbworker` is a separate static program at EL0 (aarch64) / ring 3 (x86_64) with its own address space, called by the DB core, which reaches the disk only through 12 checked VFS system calls and one shared window. A fault, an illegal access or a 30 s overrun restarts the worker and the store reopens from the WAL; the broker keeps serving. `PAN`/`PXN` and `SMEP`/`SMAP` are asserted by the smoke tests `worker-contain` and `worker-fault`. The kernel validates what comes back but still trusts its content (SECURITY.md). Measured cost in docs/PROGRESS.md.
+
 ### Changed
 
 - The boot sequence is shared by both architectures (`boot.rs`; ADR-059). The aarch64 boot log is unchanged.

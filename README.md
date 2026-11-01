@@ -118,7 +118,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | ACL (`devices/{id}/#` by default), service identities, per-device rate limits | ✅ M9 |
 | | Operator role: retained `$SYS/broker/#` statistics every 10 s, `$SYS/query/info`, a console over MQTT (`$SYS/console/{out,in}`: log lines, `help`, `status`, `log level`, `reboot`), mTLS only, audit-logged | ✅ O1, O2 |
 | | MQTT 5.0, QoS 2 | 📋 later |
-| **Storage** | SQLite in the kernel over a raw-disk VFS (WAL, exclusive), quick_check at boot | ✅ M11 |
+| **Storage** | SQLite over a raw-disk VFS (WAL, exclusive), quick_check at boot; since H6 SQLite runs as an unprivileged program (EL0 / ring 3), not in the kernel | ✅ M11, ✅ H6 |
 | | One disk: data in a partition of the boot disk (virtio-blk or virtio-scsi), created on the first boot, crash-safe; other disks never touched | ✅ S1 |
 | | `urmqtt-disk`: offline info, verify, export (SQLite, telemetry), import devices, kernel update | ✅ S1 |
 | | Layout v2: regions aligned to 1 MiB and the device's optimal I/O size, writes in whole physical blocks, A/B superblock; `urmqtt-disk migrate` (dry run, verify, rollback) from v1 | ✅ S2 |
@@ -288,8 +288,8 @@ LBA 64     [ SQLite main DB ½ ][ SQLite WAL ⅛ ][ journal 1 MiB ][ telemetry l
 last 4 KiB [ scratch for the boot block-device self-test ]
 ```
 
-- **SQLite** (vendored 3.54.1, checksum-verified at build time) is compiled into the kernel with clang, freestanding, and uses a fixed `memsys5` heap. Its VFS maps three fixed files onto disk regions; there is no filesystem. It runs in WAL mode with `locking_mode=EXCLUSIVE` (so no shared-memory index) and `synchronous=FULL`, and the boot fails safe on `quick_check` errors. It holds the device registry, revocations, retained messages and persistent sessions with their offline QoS 1 queues.
-- **The DB core** (the highest-numbered CPU) runs SQLite and nothing else. The data plane sends it state changes over a lock-free SPSC ring; it batches them into one transaction per 5 ms or 512 operations and reports commits on a second ring. A blank data partition is formatted on first boot; a damaged one is refused and left as it is, never formatted over.
+- **SQLite** (vendored 3.54.1, checksum-verified at build time) is compiled with clang, freestanding, into a separate unprivileged program (`crates/dbworker`, EL0 / ring 3, embedded in the image; ADR-210) and uses a fixed `memsys5` heap in that program's address space. Its VFS maps three fixed files onto disk regions; there is no filesystem. It runs in WAL mode with `locking_mode=EXCLUSIVE` (so no shared-memory index) and `synchronous=FULL`, and the boot fails safe on `quick_check` errors. It holds the device registry, revocations, retained messages and persistent sessions with their offline QoS 1 queues.
+- **The DB core** (the highest-numbered CPU) runs the store, and so calls the database worker, and nothing else. The data plane sends it state changes over a lock-free SPSC ring; it batches them into one transaction per 5 ms or 512 operations and reports commits on a second ring. A blank data partition is formatted on first boot; a damaged one is refused and left as it is, never formatted over.
 - **Telemetry**: every accepted PUBLISH on `storage.telemetry_topics` goes to its core's partition of the telemetry log, a ring of segments with a CRC per record (salted with the segment sequence, so old ring passes never reappear). Cores hand records to the DB core over their own SPSC ring without copying. The DB core flushes every 5 ms or 256 KiB. On boot, recovery keeps every flushed record, truncates a torn tail and continues in a fresh segment. Retention is by size (the ring) and by age (`retention_days`).
 
 ## Repository layout
@@ -985,7 +985,7 @@ Security is the first priority and wins conflicts with the other tracks.
 | 📋 | **H3** TCP/IP & DoS | RFC 5961/6528 with key rotation; scripted and model-based TCP tests; adversarial suite with bounded memory and CPU |
 | 📋 | **H4** Exploit mitigations | KASLR, stack protector, kCFI, MTE, hardened allocator, zeroization; IOMMU on bare metal |
 | 📋 | **H5** Verification tooling | Miri, Kani proofs, ASan/UBSan, stateful ACL fuzzing in CI |
-| 📋 | **H6** SQLite isolation | SQLite at EL0 on the DB core; an out-of-bounds write from SQLite cannot touch kernel memory |
+| ✅ | **H6** SQLite isolation | SQLite runs at EL0 (aarch64) / ring 3 (x86_64) in an address space of its own, called by the DB core through 12 checked VFS system calls; a fault or a runaway restarts it and the store reopens from the WAL; the kernel links no SQLite. Not claimed: protection from wrong answers, speculative leaks, fuzzing ([SECURITY.md](docs/SECURITY.md)) |
 | 📋 | **H7** Time security | build time as a hard lower bound; optional SNTP with sanity limits; fail closed |
 | 📋 | **H8** Boot integrity | Limine config hash enrolled; Secure Boot with signed loaders (CI test and the Intel PC) |
 | ✅ | **H9** Supply chain | CycloneDX SBOM per release (with the vendored C and binaries), cargo-vet with imported audits and listed exemptions (the TCB is not audited yet), advisories fail CI plus a daily job, [vulnerability-handling process](docs/VULNERABILITY-HANDLING.md) |
@@ -1047,7 +1047,7 @@ Security is the first priority and wins conflicts with the other tracks.
 
 riscv64 is a later, separate step (PROMPT-x86_64.md §9).
 
-Later: MQTT 5.0, QoS 2, IPv6, cold-session compression, SQLite isolation at EL0, an export bridge,
+Later: MQTT 5.0, QoS 2, IPv6, cold-session compression, an export bridge,
 and ACPI-only validation on real ARM clouds.
 
 ## Contributing

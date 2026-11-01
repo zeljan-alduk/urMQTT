@@ -125,9 +125,8 @@ impl Db {
     /// Sets a boolean `sqlite3_db_config` option.
     pub fn config_flag(&self, op: c_int, on: bool) -> Result<()> {
         let mut out: c_int = 0;
-        // SAFETY: the boolean options take (int, int*).
-        let rc =
-            unsafe { sqlite3_db_config(self.raw, op, c_int::from(on), &mut out as *mut c_int) };
+        // SAFETY: an open connection and a valid out pointer.
+        let rc = unsafe { db_config_flag(self.raw, op, c_int::from(on), &mut out) };
         self.check(rc)?;
         if (out != 0) == on {
             Ok(())

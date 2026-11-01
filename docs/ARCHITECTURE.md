@@ -15,7 +15,8 @@ aarch64 ELF that contains everything needed to be an MQTT broker:
 │  mqtt    ─ zero-copy 3.1.1/5.0 codec                                             │
 │  tls     ─ rustls handshake → own TLS 1.3 record layer                           │
 │  tcp     ─ server-only TCP, SYN cookies       net ─ Eth/ARP/IPv4/ICMP/DHCPv4     │
-│  store   ─ SQLite (C, vendored) + raw-disk VFS · per-core telemetry log          │
+│  store   ─ raw-disk VFS · SQL in Rust · per-core telemetry log · worker proxy    │
+│  dbworker ─ SQLite (C, vendored) as an EL0 / ring-3 program (own address space)  │
 │  virtio  ─ net · blk · rng      pci ─ ECAM · BARs · MSI-X                        │
 │  mm      ─ frames · heap · per-CPU slabs · pools · key slab                      │
 │  platform ─ DTB | ACPI → one PlatformInfo       log ─ per-CPU rings → sinks      │
@@ -25,8 +26,10 @@ aarch64 ELF that contains everything needed to be an MQTT broker:
         ▲ UEFI + Limine                 ▲ virtio-pci devices from the hypervisor
 ```
 
-There is no scheduler, no processes, no syscalls, no filesystem, no shell and
-no console input. The only listening socket is TCP 8883 (plus 1883 in dev
+There is no scheduler, no processes, no filesystem, no shell and no console
+input. The one exception to "no processes, no syscalls" is the **database
+worker** (section 4b): SQLite runs as an unprivileged program with twelve VFS
+system calls (and `exit`), called synchronously by the kernel. The only listening socket is TCP 8883 (plus 1883 in dev
 builds only, enforced at build time).
 
 ## 2. Boot sequence
@@ -75,7 +78,7 @@ One universal ISO boots both architectures (ADR-043); the crypto runs the portab
 - Each data core runs one loop: poll RX, then process to completion, then flush TX, then run expired timers, then drain the rings. When idle it switches to interrupts and `WFI` (adaptive polling).
 - Interrupt handlers only acknowledge and mark work.
 - Cores share no mutable state. Cross-core traffic goes through bounded lock-free SPSC rings, one per ordered pair of cores. Every atomic documents its memory ordering, because AArch64 is weakly ordered.
-- The highest-numbered core runs SQLite only. With one CPU, the DB work runs between loop iterations.
+- The highest-numbered core runs the store, and so the database worker, only. With one CPU, the DB work runs between loop iterations.
 - A per-core 10 ms watchdog tick detects a handler that overruns its budget (ADR-013).
 
 ### Data path for one PUBLISH
@@ -118,7 +121,46 @@ only while an MQTT frame or TLS record is incomplete, or while TX data is
 unacknowledged. `size_of` assertions in tests catch regressions.
 
 Separate regions: kernel heap, per-CPU slabs, packet pools, the **crypto key
-slab** (never compressed, zeroized on free) and a fixed SQLite `memsys5` heap.
+slab** (never compressed, zeroized on free) and, in the database worker's own
+address space, a fixed SQLite `memsys5` heap.
+
+## 4b. The database worker (H6, ADR-210 to ADR-212)
+
+SQLite is 254k lines of C that parse a file from the volume. It does not run
+in the kernel. `crates/dbworker` is a separate static program (own linker
+script, no kernel symbol) that the kernel embeds, loads into frames of its own
+and calls synchronously, on the core that owns the store:
+
+```
+ kernel (EL1 / ring 0)                          dbworker (EL0 / ring 3)
+ ─────────────────────                          ───────────────────────
+ db.rs / store.rs  (fixed SQL, Rust)            dispatcher + VFS shim (Rust)
+   │  Db / Stmt  → remote.rs (sqlite3_* as RPC)    │
+   │                                              SQLite 3.54.1 (C, unchanged)
+   │  shared window: header + 1 MiB I/O area ◄──►  its heap (storage.sqlite_heap_mb)
+   │  enter user mode (eret / iretq)                 stack, image (W^X), guard page
+   ◄─ 12 system calls (VFS, random, time, log) ─────┘
+ vfs::syscall → Disk → virtio-blk       exit / fault / 30 s budget → restart
+```
+
+- **Address spaces.** aarch64: the worker's tables hang off `TTBR0_EL1`, which is
+  disabled (`EPD0`) except while a call runs; user pages are `PXN` always, `UXN`
+  except code, non-global, and `PAN` is on for the kernel from the first call.
+  x86_64: a second PML4 with the kernel's upper half shared (supervisor only) and
+  the worker's lower half, `CR3` switched on entry and on leave; `SMEP` and
+  `SMAP` are on, ring-3 entries swap `GS` and clear `EFLAGS.AC`, the I/O
+  bitmap is empty. The kernel never dereferences a worker address: data moves
+  through the shared window, which the kernel reaches through its own alias.
+- **Calls.** One entry into the worker per store operation in the common case
+  (binds and resets ride with the step). A call ends on the exit system call, on
+  a fault (any exception from user mode: abort, undefined instruction, `#PF`,
+  `#GP`, ...) or when it runs past 30 s; the last two restart the worker and the
+  kernel reopens the store from the WAL (`open_or_restore`). More than five
+  restarts in a minute and the worker is given up on: storage is unavailable until
+  the next boot and the broker serves from memory.
+- **What the worker can do** is read and write the database, WAL, journal and
+  attached backup slot through twelve checked VFS system calls, and return wrong
+  answers. See [SECURITY.md](SECURITY.md) for what is and is not isolated.
 
 ## 5. TLS
 

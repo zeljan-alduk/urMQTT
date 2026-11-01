@@ -101,6 +101,10 @@ fn build_worker() {
         )
     };
     cmd.arg("--target").arg(&target_arg);
+    // The self-test operations (fault injection) are in dev images only.
+    if std::env::var("CARGO_FEATURE_SELFTEST").is_ok() {
+        cmd.args(["--features", "selftest"]);
+    }
     cmd.env("CARGO_ENCODED_RUSTFLAGS", flags.join("\x1f"));
     for var in [
         "RUSTFLAGS",

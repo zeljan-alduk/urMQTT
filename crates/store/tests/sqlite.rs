@@ -316,3 +316,30 @@ fn store_runs_on_a_ram_disk_and_a_reboot_forgets() {
     assert!(s.retained().unwrap().is_empty());
     assert_eq!(s.device_count().unwrap(), 0);
 }
+
+/// Rows come back in one call up to the first buffer (4 KiB) and are fetched
+/// by a second call above it (ADR-211): the sizes around the boundary and
+/// far above it must all round-trip, byte for byte, in the direct mode and
+/// through the worker protocol alike.
+#[test]
+fn rows_around_and_above_the_first_buffer_round_trip() {
+    let _g = lock();
+    let m = MemDisk::new(32 << 20);
+    let (mut s, _) = mount(&m);
+    let sizes = [1usize, 100, 3900, 4000, 4096, 4300, 70_000, 400_000];
+    s.begin().unwrap();
+    for (i, n) in sizes.iter().enumerate() {
+        let payload: Vec<u8> = (0..*n).map(|j| (j * 7 + i) as u8).collect();
+        s.retain(&format!("big/{i}"), &payload, 1).unwrap();
+    }
+    s.commit().unwrap();
+    let mut got = s.retained().unwrap();
+    got.sort_by(|a, b| a.topic.cmp(&b.topic));
+    assert_eq!(got.len(), sizes.len());
+    for (i, n) in sizes.iter().enumerate() {
+        let want: Vec<u8> = (0..*n).map(|j| (j * 7 + i) as u8).collect();
+        assert_eq!(got[i].topic, format!("big/{i}"));
+        assert_eq!(got[i].payload, want, "payload of {n} bytes");
+        assert_eq!(got[i].qos, 1);
+    }
+}

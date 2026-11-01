@@ -148,6 +148,8 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	$(CARGO) clippy $(CARGO_FLAGS) --workspace --all-targets -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-kernel --target $(TARGET) -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-kernel --target $(TARGET) -- -D warnings
+	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-dbworker --target $(TARGET) -- -D warnings
+	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-dbworker --target $(TARGET) -- -D warnings
 	$(MAKE) --no-print-directory check-x86
 	$(CARGO) test $(CARGO_FLAGS) --workspace
 
@@ -159,6 +161,8 @@ check-x86: ## clippy -D warnings for the x86_64 kernel (X1)
 clippy-kernel:
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-kernel --target $(TARGET) -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-kernel --target $(TARGET) -- -D warnings
+	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-dbworker --target $(TARGET) -- -D warnings
+	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-dbworker --target $(TARGET) -- -D warnings
 
 .PHONY: conformance interop
 conformance: build certs ## tlsfuzzer TLS 1.3 conformance probes against a dev VM (H2)

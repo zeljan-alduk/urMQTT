@@ -41,6 +41,8 @@ pub mod op {
     pub const FAULT_EXEC_DATA: u64 = 8;
     /// Test: read through the null pointer.
     pub const FAULT_NULL: u64 = 9;
+    /// Test: do nothing (the cost of entering and leaving user mode).
+    pub const NOP: u64 = 10;
 }
 
 pub const MAGIC: u64 = 0x5552_4d51_5454_0001;

@@ -2256,6 +2256,17 @@ hardening_suite() {
     # ends in a failed call and a restart, never a kernel fault; the kernel
     # word it tried to overwrite is intact; the CPU's kernel/user separation
     # (PAN, or SMEP and SMAP) is on.
+    # The same on the real store path: the worker faults between a commit and
+    # the next one; the store comes back from the WAL with the committed rows
+    # only, and the broker goes on.
+    scenario worker-fault "smoke serve test=worker-fault" on \
+        "worker-fault: 100 rows committed, 10 more in an open transaction" \
+        "dbworker: call [0-9]+ faulted: " "dbworker: restarted \(restart #1\)" \
+        "db: the database worker was restarted \(restart #1\); reopening the store, 11 uncommitted op\(s\) lost|db: the database worker was restarted \(restart #1\); reopening the store, 0 uncommitted op\(s\) lost" \
+        "db: store reopened after the worker restart" \
+        "worker-fault: 100 rows consistent after the restart, the 10 uncommitted rows are gone" \
+        "worker-fault: done, powering off" \
+        "NOT:INCONSISTENT|expected 100|setup failed|verify failed" "NOT:!!! EXCEPTION|PANIC" "^URMQTT READY$"
     scenario worker-contain "smoke test=worker-contain" on \
         "worker-contain: hello before: ok" \
         "worker-contain: kernel/user separation: (PAN|SMEP\+SMAP)$" \

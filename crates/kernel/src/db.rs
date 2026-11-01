@@ -36,7 +36,7 @@ use urmqtt_sync::sync::SpinLock;
 
 use crate::cmdline::DbTest;
 use crate::devices;
-use crate::{smp, vm};
+use crate::smp;
 
 /// Longest a write waits for its transaction to commit.
 pub const BATCH_MS: u64 = 5;
@@ -396,16 +396,20 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
     // Relaxed: statistics for `$SYS/broker/disk/total` (O1).
     crate::sys::DISK_TOTAL.store(disk.layout().total_sectors * 512, Ordering::Relaxed);
 
+    // SQLite runs in the unprivileged dbworker (ADR-210): its address space
+    // holds the heap (`sqlite_heap_mb`), so the kernel keeps none.
     let heap_bytes = (cfg.sqlite_heap_mb as usize) << 20;
-    let Some((va, _pa, len)) = vm::dma_alloc(heap_bytes) else {
+    if let Err(e) = crate::dbsandbox::create(heap_bytes) {
         return refuse_or_degrade(
             false,
-            format_args!("cannot allocate the {} MiB SQLite heap", cfg.sqlite_heap_mb),
+            format_args!(
+                "cannot start the database worker with a {} MiB heap: {e:?}",
+                cfg.sqlite_heap_mb
+            ),
         );
-    };
-    // SAFETY: freshly allocated, zeroed RAM in the HHDM, page aligned,
-    // owned exclusively by SQLite from here on and never freed.
-    let heap = unsafe { core::slice::from_raw_parts_mut(va as *mut u8, len) };
+    }
+    urmqtt_store::remote::install(crate::dbsandbox::transport());
+    let heap: &'static mut [u8] = &mut [];
     if let Err(e) = urmqtt_store::init(heap, disk, platform()) {
         return refuse_or_degrade(false, format_args!("{e}"));
     }
@@ -545,6 +549,9 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
         control_seq,
         backup: backup_start(cfg, test),
         scrub: scrub_start(cfg, test),
+        store_epoch: urmqtt_store::remote::epoch(),
+        reopen_next_ms: 0,
+        worker_fault: (test == Some(DbTest::WorkerFault)).then(|| (now_ms() + 2_000, 0)),
     });
     // Relaxed: read only after the data plane starts (later in boot).
     ACTIVE.store(true, Ordering::Relaxed);
@@ -700,6 +707,12 @@ fn bench(store: &mut Store) {
     const ROWS: i64 = 5000;
     const PER_TXN: i64 = 100;
     const SINGLE: i64 = 100;
+    use crate::dbsandbox::{CALLS, SYSCALLS, WORKER_NS};
+    let (c0, s0, n0) = (
+        CALLS.load(Ordering::Relaxed),
+        SYSCALLS.load(Ordering::Relaxed),
+        WORKER_NS.load(Ordering::Relaxed),
+    );
     let r = (|| {
         store.selftest_clear()?;
         let t0 = time::uptime_ns();
@@ -741,6 +754,14 @@ fn bench(store: &mut Store) {
         }
         Err(e) => error!("db-bench: failed: {e}"),
     }
+    let calls = CALLS.load(Ordering::Relaxed) - c0;
+    let sys = SYSCALLS.load(Ordering::Relaxed) - s0;
+    let ns = WORKER_NS.load(Ordering::Relaxed) - n0;
+    info!(
+        "db-bench: the worker: {calls} call(s), {sys} VFS system call(s), {} us inside it ({} ns per call)",
+        ns / 1000,
+        ns / calls.max(1)
+    );
     log_io_stats("after db-bench");
 }
 
@@ -817,6 +838,14 @@ struct Worker {
     backup: BackupState,
     /// The scrubber's schedule and the pass in progress (S6).
     scrub: ScrubState,
+    /// The epoch of the database worker the open store belongs to
+    /// (ADR-210): when the worker is restarted after a fault the store is
+    /// dead and is reopened from the WAL.
+    store_epoch: u64,
+    /// When to try again after a failed reopen.
+    reopen_next_ms: u64,
+    /// `test=worker-fault`: when to start, and how far it is.
+    worker_fault: Option<(u64, u8)>,
 }
 
 /// The scrub schedule (S6, ADR-164).
@@ -1415,8 +1444,138 @@ impl Worker {
 
     /// Applies queued requests and commits when the batch is due. Returns
     /// whether there was any work.
+    /// The database worker faulted and was restarted (ADR-210): everything
+    /// the old one held (connections, statements, the open transaction, a
+    /// backup in progress, a scrub pass) is gone. The store is reopened from
+    /// the WAL by the path a boot takes; what was not committed is lost, as
+    /// after a power cut. Returns whether the store is usable.
+    fn recover_worker(&mut self, now_ms: u64) -> bool {
+        let epoch = urmqtt_store::remote::epoch();
+        if epoch == self.store_epoch {
+            return true;
+        }
+        if now_ms < self.reopen_next_ms {
+            return false;
+        }
+        let lost = core::mem::take(&mut self.txn_ops);
+        self.backup.job = None;
+        self.scrub.run = None;
+        warn!(
+            "db: the database worker was restarted (restart #{}); reopening the store, {lost} uncommitted op(s) lost",
+            crate::dbsandbox::RESTARTS.load(Ordering::Relaxed)
+        );
+        match urmqtt_store::backup::open_or_restore(CONFIG.storage.auto_restore) {
+            Ok((s, _info, restored)) => {
+                if let Some(r) = restored {
+                    log_restored(&r);
+                }
+                // The new store replaces the dead one; dropping that only
+                // frees its bookkeeping (its epoch is over).
+                self.store = s;
+                self.store_epoch = epoch;
+                info!("db: store reopened after the worker restart");
+                for tx in &mut self.tx {
+                    let _ = tx.push(DbResp::Failed { ops: lost });
+                }
+                true
+            }
+            Err(e) => {
+                if crate::dbsandbox::available() {
+                    error!("db: reopening the store failed: {e}; retrying in 5 s");
+                    self.reopen_next_ms = now_ms + 5_000;
+                } else {
+                    error!(
+                        "db: reopening the store failed: {e}; the database worker is out of service, storage is unavailable until the next boot"
+                    );
+                    // Never retried: the epoch no longer changes.
+                    self.store_epoch = epoch;
+                }
+                false
+            }
+        }
+    }
+
+    /// `test=worker-fault` (ADR-210): commits rows, leaves more uncommitted,
+    /// makes the worker fault, and after the automatic recovery checks that
+    /// exactly the committed rows are there.
+    #[cfg(feature = "selftest")]
+    fn step_worker_fault(&mut self, now_ms: u64) -> bool {
+        let Some((start, phase)) = self.worker_fault else {
+            return false;
+        };
+        if now_ms < start {
+            return false;
+        }
+        match phase {
+            0 => {
+                let r = (|| {
+                    self.store.selftest_clear()?;
+                    self.store.begin()?;
+                    for i in 1..=100 {
+                        self.store.selftest_insert(i, 200)?;
+                    }
+                    self.store.commit()?;
+                    self.store.begin()?;
+                    for i in 101..=110 {
+                        self.store.selftest_insert(i, 200)?;
+                    }
+                    Ok::<(), StoreError>(())
+                })();
+                if let Err(e) = r {
+                    error!("worker-fault: setup failed: {e}");
+                    self.worker_fault = None;
+                    return true;
+                }
+                info!(
+                    "worker-fault: 100 rows committed, 10 more in an open transaction; making the worker fault"
+                );
+                let r =
+                    crate::dbsandbox::call(urmqtt_usys::abi::op::FAULT_NULL, [0; 6], &[], &mut []);
+                info!("worker-fault: the call ended with {r:?}");
+                self.worker_fault = Some((start, 1));
+            }
+            1 if self.store_epoch == urmqtt_store::remote::epoch() => {
+                let r = self.store.selftest_verify();
+                match r {
+                    Ok(Ok(100)) => info!(
+                        "worker-fault: 100 rows consistent after the restart, the 10 uncommitted rows are gone"
+                    ),
+                    Ok(Ok(n)) => error!("worker-fault: {n} rows after the restart, expected 100"),
+                    Ok(Err(e)) => error!("worker-fault: INCONSISTENT after the restart: {e}"),
+                    Err(e) => error!("worker-fault: verify failed: {e}"),
+                }
+                let _ = self.store.begin();
+                let _ = self.store.selftest_clear();
+                let _ = self.store.commit();
+                self.worker_fault = None;
+                info!("worker-fault: done, powering off");
+                crate::power::off();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    #[cfg(not(feature = "selftest"))]
+    fn step_worker_fault(&mut self, _now_ms: u64) -> bool {
+        // The fault-injection test exists in dev images only.
+        let _ = self.worker_fault;
+        false
+    }
+
     fn step(&mut self, now_ms: u64) -> bool {
-        let mut did = false;
+        if !self.recover_worker(now_ms) {
+            // No store: the requests fail, the rings keep flowing.
+            let mut dropped = 0u64;
+            for rx in &mut self.rx {
+                while rx.pop().is_some() {
+                    dropped += 1;
+                }
+            }
+            self.stats.errors += dropped;
+            return dropped > 0;
+        }
+        let mut did = self.step_worker_fault(now_ms);
         let mut core = 0;
         let mut idle_rings = 0;
         while self.txn_ops < BATCH_OPS && idle_rings < self.rx.len() {

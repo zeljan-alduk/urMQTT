@@ -50,6 +50,10 @@ pub mod op {
     pub const BACKUP_PROGRESS: u64 = 49;
     /// `a0` = status option: `ret` = current, `ret2` = high-water mark.
     pub const STATUS: u64 = 50;
+    /// `a0` = length: the first `a0` bytes of the I/O area come back
+    /// unchanged. Fetches a row that did not fit the buffer of the step that
+    /// produced it, so the kernel never keeps a row-sized buffer.
+    pub const FETCH: u64 = 51;
 }
 
 /// System calls of the VFS (the worker asks, the kernel serves); they

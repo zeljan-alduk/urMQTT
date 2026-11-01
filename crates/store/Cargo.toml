@@ -12,6 +12,14 @@ links = "sqlite3"
 [lib]
 bench = false
 
+[features]
+# The dbworker's half (ADR-210): compiles the C library for the worker and
+# the dispatcher and VFS shim of `worker.rs`.
+worker = []
+# Host tests only: the store talks to an in-process worker through the same
+# protocol the kernel uses.
+loopback = []
+
 [lints]
 workspace = true
 
@@ -19,6 +27,7 @@ workspace = true
 # GUIDs of raw boot images, derived like scripts/mkraw.py (gpt.rs).
 sha2 = { version = "0.11", default-features = false }
 urmqtt-sync = { path = "../sync" }
+urmqtt-usys = { path = "../usys" }
 
 [build-dependencies]
 # Compiles the vendored SQLite amalgamation (ADR-030).

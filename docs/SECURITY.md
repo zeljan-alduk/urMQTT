@@ -62,7 +62,7 @@ runtime through signed control messages on the same MQTT/TLS port. See
 | MQTT session behaviour | `urmqtt-broker` (own, `forbid(unsafe_code)`) | 30 host tests; fuzz `broker_input` |
 | Disk superblock and size table | `urmqtt-store::layout` | fuzz `disk_layout` |
 | Telemetry log on the disk | `urmqtt-store::telemetry` | crash and torn-write tests; fuzz `telemetry_recover` |
-| SQLite database file | SQLite 3.54.1 (vendored) | `quick_check` at boot, `SQLITE_DBCONFIG_DEFENSIVE`; upstream fuzzing |
+| SQLite database file | SQLite 3.54.1 (vendored), **in the unprivileged database worker** (H6, ADR-210 to ADR-212) | EL0 / ring 3 in its own address space; fault containment and restart (smoke `worker-contain`, `worker-fault`); `quick_check` at boot, `SQLITE_DBCONFIG_DEFENSIVE`; upstream fuzzing |
 | Firmware tables (DTB, ACPI) | `urmqtt-platform` | fuzz `fdt_parse`, `acpi_parse` (trusted source, fuzzed anyway) |
 | Control messages (`$urmqtt/control`, H1) | `urmqtt-control` (own, `forbid(unsafe_code)`, fixed layout) + `ed25519-dalek` `verify_strict` | RFC 8032 vectors, round trip, every flipped byte fails; fuzz `control_message`; smoke `control-*` |
 | Build-time configuration | `urmqtt-config-schema` | 38 tests; fuzz `config_parse`; invalid configuration fails the build |
@@ -232,7 +232,64 @@ writes the raw boot image onto the machine's disk.
   FEAT_MTE2 heap allocations are tagged. The test hooks are compiled out of
   production images (`scripts/check-prod-hooks.sh`). Smoke: `SMOKE_ONLY=hardening`.
 - SQLite: statements are fixed at compile time; defensive mode on; extensions
-  and ATTACH compiled out. There is no network-reachable SQL.
+  and ATTACH compiled out. There is no network-reachable SQL. SQLite does not
+  run in the kernel (H6): see "The database worker" below.
+
+### The database worker (H6, ADR-210 to ADR-212)
+
+SQLite parses a database, WAL and journal read from the volume, which an
+attacker with write access to the disk image controls. It is 254k lines of C.
+It therefore runs as an unprivileged program: EL0 on aarch64, ring 3 on
+x86_64, in an address space of its own, called synchronously by the kernel
+and talking to it through twelve checked VFS system calls (and `exit`) and one shared window.
+
+**What is isolated.** A memory-safety bug in SQLite, in its libc shims or in
+the worker's dispatcher can: corrupt the worker's own memory; return wrong
+data; read and write the database, WAL, journal and an attached backup slot
+(and nothing else on the disk: files are numbers 0 to 3, offsets and lengths
+are checked, the disk layer bounds every access to the file's region); make
+the worker fault, loop or burn its 30 s budget. It cannot: read or write
+kernel memory, TLS and ticket keys, the CSPRNG, or another core's data (not
+mapped; `PAN` or `SMAP` and the page tables hold, and the kernel never
+dereferences an address the worker supplies); execute kernel code or inject
+code (W^X; user pages are never kernel-executable: `PXN` or `SMEP`); touch a
+device or MMIO; make any system call but those and `exit`. Every way of
+misbehaving that the smoke test `worker-contain` tries (kernel read, write
+and jump, a privileged instruction, a write to its own code, a jump into its
+data, a null read, an endless loop) ends in a failed call and a restart, the
+kernel word it tried to overwrite is intact, and the test asserts that
+`PAN` or `SMEP`+`SMAP` is on. `worker-fault` does the same on the real store
+path: committed rows survive, the open transaction is lost like after a
+power cut, and the broker goes on.
+
+**What is not.**
+
+1. *The kernel trusts what the worker returns, after validating its shape.*
+   A compromised worker can make the broker see wrong data (retained
+   messages, sessions, the revocation list and the allow-list it reads at
+   boot) and can write garbage to its files. A worker that returns an empty
+   revocation list un-revokes certificates. This is what a crafted volume
+   could already do through SQLite's own parsing; the split stops it from
+   becoming a kernel compromise, not from being a wrong answer.
+2. *Same CPU, no page-table isolation of the kernel half.* The worker runs on
+   the DB core between its other duties and the kernel's mappings are present
+   while it runs (no KPTI). Meltdown-class and Spectre-class leaks from the
+   worker to kernel memory are not prevented by this change; KVM guests on
+   current hosts get the host's mitigations, and no claim is made.
+3. *Denial of service of the storage path* is possible within the budget: a
+   worker that faults at every start is restarted at most five times in a
+   minute, then given up on (storage unavailable until the next boot, the
+   broker serves from memory and says so).
+4. *Pointer authentication keys* are shared by EL0 and EL1 on aarch64. The
+   worker is built with BTI but without pointer authentication, and a
+   compromised worker can use `PACIA` as a signing oracle with the kernel's
+   key for any pointer and modifier it chooses; it can see neither the key
+   nor any kernel stack value.
+5. *NMI on x86_64* arriving in the two instructions between a ring-3 entry's
+   privilege test and `swapgs` would run with the wrong `GS`. The kernel
+   enables no NMI source and QEMU raises none.
+6. *Not fuzzed.* The protocol decoders have host tests; the worker is not fuzzed
+   (H5's SQLite fuzzing target is still open, gap H0-W8).
 
 ### Authentication and authorisation
 

@@ -21,6 +21,8 @@ strings_wanted=(
     "keyslab-zero:"
     "the fault with secrets did not happen"
     "test panic carrying a key"
+    "worker-contain: "
+    "worker-fault: "
 )
 count() { LC_ALL=C grep -c -a -F -- "$2" "$1" || true; }
 fail=0

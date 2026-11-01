@@ -117,7 +117,7 @@ unsafe impl Sync for ExitCell {}
 static LAST: ExitCell = ExitCell(core::cell::UnsafeCell::new(Exit::Timeout));
 
 unsafe extern "C" {
-    fn urmqtt_user_enter(pc: u64, sp: u64, resume: *mut Resume, rsp0: *mut u64);
+    fn urmqtt_user_enter(pc: u64, sp: u64, resume: *mut Resume, rsp0: *mut u64, avx: u64);
     fn urmqtt_user_leave(resume: *const Resume) -> !;
 }
 
@@ -159,6 +159,7 @@ fn write_cr3(v: u64) {
 pub unsafe fn enter(root: u64, pc: u64, sp: u64) -> Exit {
     let slot = gdt::rsp0_slot(percpu::current());
     let kernel_root = paging::kernel_root();
+    let avx = avx_enabled();
     // The program's GS base lives in KERNEL_GS_BASE while the kernel runs;
     // every entry starts it at zero.
     prim::wrmsr(MSR_KERNEL_GS_BASE, 0);
@@ -167,7 +168,9 @@ pub unsafe fn enter(root: u64, pc: u64, sp: u64) -> Exit {
     write_cr3(root);
     // SAFETY: saves our callee-saved state and drops to ring 3; control
     // comes back here through `leave`.
-    unsafe { urmqtt_user_enter(pc, sp, RESUME.0.get(), slot) };
+    // The ABI expects the stack pointer at 8 modulo 16 on entry to a function
+    // (a return address was pushed): the entry point is called as if it were.
+    unsafe { urmqtt_user_enter(pc, sp.wrapping_sub(8), RESUME.0.get(), slot, u64::from(avx)) };
     RUNNING.store(false, Ordering::Relaxed);
     write_cr3(kernel_root);
     // SAFETY: `leave` wrote the reason before the long jump.
@@ -213,7 +216,38 @@ pub fn set_return(frame: &mut TrapFrame, value: u64) {
     frame.gpr[0] = value;
 }
 
-static DEFAULT_MXCSR: u32 = 0x1f80;
+/// The `FXRSTOR` image the worker starts from: all registers zero, x87 control
+/// word 0x037f and MXCSR 0x1f80 (the power-on defaults).
+#[repr(C, align(16))]
+struct FxImage([u8; 512]);
+
+static ZERO_STATE: FxImage = {
+    let mut b = [0u8; 512];
+    b[0] = 0x7f;
+    b[1] = 0x03;
+    b[24] = 0x80;
+    b[25] = 0x1f;
+    FxImage(b)
+};
+
+/// Whether the kernel enabled AVX state (`XCR0` bit 2): then the upper halves
+/// of the YMM registers can hold kernel data (the dispatched crypto) and are
+/// cleared on entry.
+fn avx_enabled() -> bool {
+    let cr4: u64;
+    // SAFETY: reading a control register has no side effect.
+    unsafe { asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags)) };
+    if cr4 & (1 << 18) == 0 {
+        return false; // OSXSAVE off: XGETBV would fault
+    }
+    let lo: u32;
+    // SAFETY: OSXSAVE is set, so XCR0 is readable.
+    unsafe {
+        asm!("xgetbv", in("ecx") 0u32, out("eax") lo, out("edx") _,
+             options(nomem, nostack, preserves_flags));
+    }
+    lo & 4 != 0
+}
 
 global_asm!(
     r#"
@@ -221,7 +255,7 @@ global_asm!(
     .balign 16
     .global urmqtt_user_enter
 urmqtt_user_enter:
-    # rdi = pc, rsi = user sp, rdx = resume record, rcx = &TSS.rsp0
+    # rdi = pc, rsi = user sp, rdx = resume record, rcx = &TSS.rsp0, r8 = AVX on
     mov [rdx + 0], rbx
     mov [rdx + 8], rbp
     mov [rdx + 16], r12
@@ -244,25 +278,14 @@ urmqtt_user_enter:
     mov eax, {user_ds}
     mov ds, ax
     mov es, ax
-    ldmxcsr [rip + {mxcsr}]
-    fninit
-    # Nothing of the kernel's registers or vector state reaches the worker.
-    pxor xmm0, xmm0
-    pxor xmm1, xmm1
-    pxor xmm2, xmm2
-    pxor xmm3, xmm3
-    pxor xmm4, xmm4
-    pxor xmm5, xmm5
-    pxor xmm6, xmm6
-    pxor xmm7, xmm7
-    pxor xmm8, xmm8
-    pxor xmm9, xmm9
-    pxor xmm10, xmm10
-    pxor xmm11, xmm11
-    pxor xmm12, xmm12
-    pxor xmm13, xmm13
-    pxor xmm14, xmm14
-    pxor xmm15, xmm15
+    # Nothing of the kernel's vector state reaches the worker: x87 and SSE
+    # registers come from a zero image (default control words), and the upper
+    # halves of the YMM registers are cleared when the kernel enabled AVX.
+    fxrstor64 [rip + {zero}]
+    test r8, r8
+    jz 13f
+    vzeroall
+13:
     xor eax, eax
     xor ebx, ebx
     xor ecx, ecx
@@ -301,5 +324,5 @@ urmqtt_user_leave:
     "#,
     user_ds = const gdt::USER_DS as u32,
     user_cs = const gdt::USER_CS as u32,
-    mxcsr = sym DEFAULT_MXCSR,
+    zero = sym ZERO_STATE,
 );

@@ -1,11 +1,20 @@
 //! Compiles the vendored SQLite amalgamation (ADR-030).
 //!
 //! The source is verified against `vendor/sqlite/CHECKSUMS` first, so a
-//! modified amalgamation never gets linked. For the bare-metal target it is
-//! built freestanding with clang, using the kernel ABI: hard float (ADR-003),
-//! BTI + PAC return addresses (ADR-016), strict alignment, no PIC, the strong
-//! stack protector with the kernel global guard (ADR-171). Host builds (tests)
-//! use the host C compiler and libc.
+//! modified amalgamation never gets linked. It is linked into exactly two
+//! kinds of program: the host tests (host C compiler and libc) and the
+//! unprivileged dbworker (ADR-210), the bare-metal build with the `worker`
+//! feature: freestanding with clang as a *user* program (hard float
+//! (ADR-003), BTI on aarch64 but no pointer authentication, strict
+//! alignment, static non-PIE at a fixed low address, the strong stack
+//! protector with a global guard the worker sets). The kernel itself links
+//! no SQLite: without `worker`, a bare-metal build compiles nothing here.
+//!
+//! This script also sets two cfgs for the crate:
+//! - `sandboxed`: SQLite is reached through the worker (`remote.rs`): the
+//!   kernel, and the host tests with the `loopback` feature;
+//! - `direct_vfs`: the VFS callbacks of `vfs.rs` are SQLite's own (the host
+//!   tests without `loopback`).
 
 use std::path::Path;
 
@@ -63,6 +72,23 @@ fn main() {
     println!("cargo:rerun-if-env-changed=URMQTT_AR");
     verify_checksums(&vendor);
 
+    let bare_metal = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("none");
+    let worker = std::env::var("CARGO_FEATURE_WORKER").is_ok();
+    let loopback = std::env::var("CARGO_FEATURE_LOOPBACK").is_ok();
+    let sandboxed = (bare_metal && !worker) || loopback;
+    println!("cargo::rustc-check-cfg=cfg(sandboxed)");
+    println!("cargo::rustc-check-cfg=cfg(direct_vfs)");
+    if sandboxed {
+        println!("cargo::rustc-cfg=sandboxed");
+    }
+    if !sandboxed && !worker {
+        println!("cargo::rustc-cfg=direct_vfs");
+    }
+    // The C library is needed by whoever calls it directly.
+    if bare_metal && !worker {
+        return;
+    }
+
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let mut b = cc::Build::new();
     b.file(vendor.join("sqlite3.c"))
@@ -97,27 +123,28 @@ fn main() {
             .archiver(ar)
             .no_default_flags(true)
             .include(Path::new(env!("CARGO_MANIFEST_DIR")).join("csrc/include"));
-        // The kernel ABI per architecture: aarch64 is strict-alignment with
-        // PAC and BTI (ADR-016); x86_64 is hard-float SSE at the x86-64-v2
-        // baseline, no red zone, kernel code model (ADR-042).
+        // The worker's ABI per architecture: aarch64 is strict-alignment with
+        // BTI (no pointer authentication: the keys are the kernel's);
+        // x86_64 is hard-float SSE at the x86-64-v2 baseline. Both are
+        // static code at a fixed low address: small code model, no PIC.
         let arch_flags: &[&str] = match arch.as_str() {
             "aarch64" => &[
                 "--target=aarch64-unknown-none-elf",
                 "-mcmodel=small",
                 "-mstrict-align",
-                "-mbranch-protection=pac-ret+bti",
-                // Position independent, so the kernel can be slid (ADR-173).
-                "-fPIE",
+                "-mbranch-protection=bti",
+                "-fno-pic",
+                "-fno-pie",
             ],
             "x86_64" => &[
                 "--target=x86_64-unknown-none-elf",
-                "-mcmodel=kernel",
+                "-mcmodel=small",
                 "-mno-red-zone",
                 "-march=x86-64-v2",
-                // Position independent, so the kernel can be slid (ADR-173).
-                "-fPIE",
+                "-fno-pic",
+                "-fno-pie",
             ],
-            other => panic!("unsupported kernel architecture {other}"),
+            other => panic!("unsupported architecture {other}"),
         };
         for flag in arch_flags.iter().chain(&[
             "-ffreestanding",
