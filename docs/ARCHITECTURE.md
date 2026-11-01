@@ -79,7 +79,8 @@ One universal ISO boots both architectures (ADR-043); the crypto runs the portab
 - Interrupt handlers only acknowledge and mark work.
 - Cores share no mutable state. Cross-core traffic goes through bounded lock-free SPSC rings, one per ordered pair of cores. Every atomic documents its memory ordering, because AArch64 is weakly ordered.
 - The highest-numbered core runs the store, and so the database worker, only. With one CPU, the DB work runs between loop iterations.
-- A per-core 10 ms watchdog tick detects a handler that overruns its budget (ADR-013).
+- A per-core 10 ms watchdog tick detects a handler that overruns its budget (ADR-013). The budget is **running time**: time the virtual CPU was not scheduled (a tick that arrives long after its deadline, KVM steal time where the host reports it) and time spent waiting for a spin lock are not charged to the handler (ADR-214), so a stalled vCPU does not cost a healthy connection.
+- TCP keeps data that arrives beyond a hole (bounded per connection and per core), reports it with SACK, and negotiates window scaling, SACK and timestamps through the SYN cookie, so one lost segment costs one retransmission and a window can cover the bandwidth-delay product (ADR-215). Frames the NIC cannot take yet wait on core 0 instead of being dropped, and QoS 0 loss under overload is counted per cause in `$SYS` (ADR-216).
 
 ### Data path for one PUBLISH
 

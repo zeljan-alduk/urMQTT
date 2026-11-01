@@ -202,6 +202,9 @@ struct Slot {
     fired: AtomicBool,
     /// Counted as excused (once per handler run, ADR-214).
     excused: AtomicBool,
+    /// Over budget at one tick: it fires only if the handler is still
+    /// running, and still over, at the next one (ADR-214).
+    suspect: AtomicBool,
     /// Connection to abort once the handler returns (`drop`).
     drop: AtomicU64,
 }
@@ -217,6 +220,7 @@ static SLOTS: [Slot; MAX_CPUS] = [const {
         step: AtomicU8::new(0),
         fired: AtomicBool::new(false),
         excused: AtomicBool::new(false),
+        suspect: AtomicBool::new(false),
         drop: AtomicU64::new(NO_CONN),
         disc0: AtomicU64::new(0),
     }
@@ -259,6 +263,7 @@ pub fn enter(phase: Phase, conn: Option<u64>) -> Option<Guard> {
     slot.step.store(0, Ordering::Relaxed);
     slot.fired.store(false, Ordering::Relaxed);
     slot.excused.store(false, Ordering::Relaxed);
+    slot.suspect.store(false, Ordering::Relaxed);
     slot.disc0.store(
         DISCOUNT.get(me).map_or(0, |d| d.load(Ordering::Relaxed)),
         Ordering::Relaxed,
@@ -386,6 +391,13 @@ pub fn check(late: u64, period: u64) {
                 ConnName(conn)
             );
         }
+        return;
+    }
+    // A stall that ended before the tick's deadline leaves no late tick, so
+    // the first sighting over budget proves nothing: a handler that is still
+    // running one tick later is not a stall (a stalled one finishes within
+    // microseconds of the core coming back).
+    if !slot.suspect.swap(true, Ordering::Relaxed) {
         return;
     }
     if slot.fired.swap(true, Ordering::Relaxed) {

@@ -1,0 +1,42 @@
+# Local WAN rig (ADR-216): one publisher and one subscriber, QoS 0, flood, 10 s after 2 s warm-up.
+# Guest: production configuration (mkbench.sh --x11 --static), aarch64 HVF on a Mac, 4 vCPU. Peer: urmqtt-loadgen (Linux, SACK,
+# timestamps, window scaling) in a Docker container behind scripts/wan-bridge.c: RTT 10-15 ms (ping through the bridge), loss
+# applied to each direction. 'old' is main at 7f9517e (X11), 'final' is this tree. Columns: published/s delivered/s p50 ms.
+# The guest itself drops about 0.3 percent of frames from bursts on this rig even at loss=0 (its virtio queue of 256 buffers
+# against QEMU's datagram socket); both kernels see the same.
+old loss=0% payload=64 rtt= 7.223/10.661/15.010/3.090 ms pub=49391 dlv=49369 p50=101.35 lost=0
+old loss=0% payload=64 rtt= 7.223/10.661/15.010/3.090 ms pub=45649 dlv=45652 p50=88.58 lost=0
+old loss=0% payload=1024 rtt= 7.223/10.661/15.010/3.090 ms pub=4054 dlv=2207 p50=140.00 lost=0
+old loss=0% payload=1024 rtt= 7.223/10.661/15.010/3.090 ms pub=4799 dlv=2722 p50=112.09 lost=0
+old loss=0.1% payload=64 rtt= 9.665/12.278/15.194/1.805 ms pub=12504 dlv=7405 p50=666.90 lost=0
+old loss=0.1% payload=64 rtt= 9.665/12.278/15.194/1.805 ms pub=16152 dlv=10138 p50=320.04 lost=0
+old loss=0.1% payload=1024 rtt= 9.665/12.278/15.194/1.805 ms pub=1723 dlv=885 p50=187.24 lost=0
+old loss=0.1% payload=1024 rtt= 9.665/12.278/15.194/1.805 ms pub=1156 dlv=81 p50=839.20 lost=0
+old loss=0.5% payload=64 rtt= 10.031/14.026/18.464/2.912 ms pub=4303 dlv=165 p50=978.08 lost=0
+old loss=0.5% payload=64 rtt= 10.031/14.026/18.464/2.912 ms pub=5675 dlv=4834 p50=698.74 lost=0
+old loss=0.5% payload=1024 rtt= 10.031/14.026/18.464/2.912 ms pub=308 dlv=0 p50=0.00 lost=0
+old loss=0.5% payload=1024 rtt= 10.031/14.026/18.464/2.912 ms pub=172 dlv=171 p50=1739.16 lost=0
+final loss=0% payload=64 rtt= 9.482/11.988/17.149/2.685 ms pub=94945 dlv=68139 p50=93.08 lost=0
+final loss=0% payload=64 rtt= 9.482/11.988/17.149/2.685 ms pub=121516 dlv=65096 p50=158.70 lost=0
+final loss=0% payload=1024 rtt= 9.482/11.988/17.149/2.685 ms pub=9442 dlv=4419 p50=101.27 lost=0
+final loss=0% payload=1024 rtt= 9.482/11.988/17.149/2.685 ms pub=8741 dlv=4054 p50=209.17 lost=0
+final loss=0.1% payload=64 rtt= 10.130/13.404/15.415/1.969 ms pub=43077 dlv=16398 p50=448.75 lost=0
+final loss=0.1% payload=64 rtt= 10.130/13.404/15.415/1.969 ms pub=38969 dlv=19895 p50=501.16 lost=0
+final loss=0.1% payload=1024 rtt= 10.130/13.404/15.415/1.969 ms pub=4090 dlv=1688 p50=231.77 lost=0
+final loss=0.1% payload=1024 rtt= 10.130/13.404/15.415/1.969 ms pub=4029 dlv=1629 p50=361.13 lost=0
+final loss=0.5% payload=64 rtt= 10.653/13.581/17.103/2.075 ms pub=18915 dlv=9803 p50=740.39 lost=0
+final loss=0.5% payload=64 rtt= 10.653/13.581/17.103/2.075 ms pub=16385 dlv=9324 p50=747.96 lost=0
+final loss=0.5% payload=1024 rtt= 10.653/13.581/17.103/2.075 ms pub=1910 dlv=759 p50=737.70 lost=0
+final loss=0.5% payload=1024 rtt= 10.653/13.581/17.103/2.075 ms pub=1855 dlv=729 p50=1386.12 lost=0
+
+# Stalls injected from outside (build/sp/stall.sh): the QEMU process is stopped for 60 ms every 1.5 s for 26 s (a descheduled
+# vCPU as the guest sees it) while 16 publishers and 16 subscribers flood QoS 0 (64 B) through the bridge; production profile,
+# watchdog action = drop.
+# old   (7f9517e):  17 stalls of 60 ms -> 2 watchdog reports (output handler, step tcp, 64 ms and 72 ms > 20 ms, 'no single connection to drop')
+# final (this tree): 16 stalls of 60 ms -> 0 reports, 0 aborted connections; the console names the handlers it did not charge
+#   (core 2 input handler for conn 15: 62 ms elapsed, 0 ms running; core 1 output handler: 67 ms elapsed, 0 ms running; ...)
+# A lighter load (16 x 300 msg/s) gave 0 reports on the old kernel too: the stall has to land inside a handler.
+#
+# Linux baseline on the same rig (not comparable in absolute terms: Mosquitto 2.0.18 and the generator in one container, MTU 1500,
+# netem 7.5 ms each way on lo, 304 384 published and delivered/s at 64 B without loss, 242 653 published and 92 453 delivered with
+# 0.1 percent loss): a Linux stack with SACK and an autotuned window is not slowed by 15 ms or by 0.1 percent loss.
