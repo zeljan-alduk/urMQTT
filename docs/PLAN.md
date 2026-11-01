@@ -189,3 +189,18 @@ source (RTC, SNTP, or unknown) and the last offset are logged and published as
 `$SYS/broker/time/{source,offset_ms}`. A wrong RTC no longer means "refuse
 everything" when a server answers. NTS is out of scope (plain SNTP is
 unauthenticated, so the bounds above are the defence).
+
+## C1 — Runtime configuration and the web builder (user request, 2026-11-01)
+
+Goal: the customer sets up their own certificates and every other option without a toolchain. A page "Products → urMQTT builder" on aldo.tech lets them choose options and supply their own CA, server certificate and key; the browser downloads the newest release ISO and writes the configuration into it **on the client** (keys never leave the browser). Order: after the robustness work (single-flow throughput, watchdog), before S8.
+
+Why the current design cannot do it: the configuration is compiled into the kernel (`config-schema` renders Rust constants, certificates and keys are `include_bytes!`), the Limine menu pins the kernel by blake2b, and the installer image holds a second copy of the kernel. Patching the kernel in a browser would be fragile and would break reproducible builds.
+
+Design (to be confirmed by an ADR first):
+1. **Config as data, not code.** A compact, versioned binary form of the validated configuration (the same checks as `config-schema`, run again in the kernel at boot, fail closed) holding limits, ACLs, network, TLS material, trust anchors, control public key. The kernel reads it from a Limine module (a file in the ISO with a reserved, padded slot) instead of compiled-in constants. The release kernel is then built once and is identical for everyone (reproducible, one hash to publish).
+2. **The installed disk** carries the same blob on the ESP; `urmqtt-disk` and the installer copy it.
+3. **Builder:** a static page (WebAssembly for the validation shared with `config-schema` and for blake2b) that fetches the release ISO, checks its published hash, fills the slot, updates the module hash in `limine.conf`, and offers the ISO for download. A host CLI (`urmqtt-config pack`) does the same offline, and CI tests that both produce identical bytes.
+4. **Trust:** a patched ISO has no official hash. The blob carries a fingerprint the builder shows; optionally the blob is signed with a key the customer holds, and the kernel prints the fingerprint at boot. Open question for the user: sign by default?
+5. Constraints that stay: plaintext port and `dev`-only options are impossible in the release kernel; limits that size static arrays must become boot-time allocations or be capped at build time with documented maxima.
+
+Milestones: C1a ADR and binary format with a round-trip test; C1b kernel reads the module (aarch64 and x86_64), smoke with a packed config; C1c installer/disk copy; C1d `urmqtt-config pack` CLI; C1e web builder and page on aldo.tech; C1f docs and the security statement.
