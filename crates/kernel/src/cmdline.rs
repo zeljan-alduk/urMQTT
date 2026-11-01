@@ -118,6 +118,8 @@ pub enum DbTest {
     WatchdogHandshake,
     /// A stalled handler is not reported, a really overrunning one is (ADR-214).
     WatchdogStall,
+    /// A handler that waits 50 ms for a lock is not reported (ADR-214).
+    WatchdogLockWait,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -264,6 +266,7 @@ impl BootOptions {
                 "test=watchdog" => o.db_test = Some(DbTest::Watchdog),
                 "test=watchdog-handshake" => o.db_test = Some(DbTest::WatchdogHandshake),
                 "test=watchdog-stall" => o.db_test = Some(DbTest::WatchdogStall),
+                "test=watchdog-lockwait" => o.db_test = Some(DbTest::WatchdogLockWait),
                 "log=error" => o.log_level = Some(urmqtt_config::LogLevel::Error),
                 "log=warn" => o.log_level = Some(urmqtt_config::LogLevel::Warn),
                 "log=info" => o.log_level = Some(urmqtt_config::LogLevel::Info),

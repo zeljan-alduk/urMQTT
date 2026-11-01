@@ -714,6 +714,9 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     if s.options.db_test == Some(crate::cmdline::DbTest::WatchdogStall) {
         crate::watchdog::self_test_stall();
     }
+    if s.options.db_test == Some(crate::cmdline::DbTest::WatchdogLockWait) {
+        crate::watchdog::self_test_lockwait();
+    }
     if live {
         crate::live::banner();
         if !urmqtt_config::CONFIG.control.service_ids.is_empty() {

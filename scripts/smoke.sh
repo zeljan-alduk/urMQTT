@@ -2841,6 +2841,10 @@ scenario watchdog-handshake "smoke test=watchdog-handshake" on \
 scenario watchdog-stall "smoke test=watchdog-stall" on \
     "watchdog: core 0 self-test handler \(step -\) for conn 45 over budget: [0-9]+ ms > 10 ms \(action: Log" \
     "NOT:conn 44 over budget" "^URMQTT READY$" "$NO_FAULT"
+# ... and a handler that waits 50 ms for a spin lock is not reported while it waits.
+scenario watchdog-lockwait "smoke test=watchdog-lockwait" on \
+    "watchdog: core 0 self-test handler \(step -\) for conn 47 over budget: [0-9]+ ms > 10 ms \(action: Log" \
+    "NOT:conn 46 over budget" "^URMQTT READY$" "$NO_FAULT"
 db_crash
 log_crash
 log_tear

@@ -14,39 +14,49 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 /// watchdog does not count that wait as the running handler's own time (the
 /// holder may be a virtual CPU the host has descheduled).
 static CLOCK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+static BEGIN: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 static REPORT: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
-/// Installs the contention hooks: `clock` returns a monotonic count,
-/// `report` receives the difference of two readings for every wait that
-/// had to spin.
-pub fn set_contention_hooks(clock: fn() -> u64, report: fn(u64)) {
-    // Release: the clock must be visible before the report hook is.
+/// Installs the contention hooks: `clock` returns a monotonic count, `begin`
+/// receives its reading when a wait starts to spin (so a watchdog that looks
+/// in the middle of a long wait can count it), `report` the difference of two
+/// readings when the wait ends.
+pub fn set_contention_hooks(clock: fn() -> u64, begin: fn(u64), report: fn(u64)) {
+    // Release: the clock and `begin` must be visible before `report` is.
     CLOCK.store(clock as *mut (), Ordering::Release);
+    BEGIN.store(begin as *mut (), Ordering::Release);
     REPORT.store(report as *mut (), Ordering::Release);
 }
 
 #[cold]
 fn wait_for(serving: &AtomicU32, ticket: u32) {
-    let (clock, report) = (
+    let (clock, begin, report) = (
         CLOCK.load(Ordering::Acquire),
+        BEGIN.load(Ordering::Acquire),
         REPORT.load(Ordering::Acquire),
     );
-    let hooks = if clock.is_null() || report.is_null() {
+    let hooks = if clock.is_null() || begin.is_null() || report.is_null() {
         None
     } else {
         // SAFETY: only `set_contention_hooks` stores into this pointer, and it
         // stores a `fn() -> u64`.
         let clock = unsafe { core::mem::transmute::<*mut (), fn() -> u64>(clock) };
         // SAFETY: as above, for a `fn(u64)`.
+        let begin = unsafe { core::mem::transmute::<*mut (), fn(u64)>(begin) };
+        // SAFETY: as above, for a `fn(u64)`.
         let report = unsafe { core::mem::transmute::<*mut (), fn(u64)>(report) };
-        Some((clock, report))
+        Some((clock, begin, report))
     };
-    let t0 = hooks.map(|(c, _)| c());
+    let t0 = hooks.map(|(c, b, _)| {
+        let t = c();
+        b(t);
+        t
+    });
     // Acquire: pairs with the Release store in `drop`.
     while serving.load(Ordering::Acquire) != ticket {
         core::hint::spin_loop();
     }
-    if let (Some((c, r)), Some(t0)) = (hooks, t0) {
+    if let (Some((c, _, r)), Some(t0)) = (hooks, t0) {
         r(c().saturating_sub(t0));
     }
 }
