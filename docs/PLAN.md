@@ -205,7 +205,7 @@ Design (to be confirmed by an ADR first):
 
 Milestones: C1a ADR and binary format with a round-trip test; C1b kernel reads the module (aarch64 and x86_64), smoke with a packed config; C1c installer/disk copy; C1d `urmqtt-config pack` CLI; C1e web builder and page on aldo.tech; C1f docs and the security statement.
 
-**Status (2026-11-01).** C1a to C1d are done: ADR-215 to ADR-218, the `urmqtt-cfg` crate, kernel, installer, `urmqtt-disk`, `urmqtt-config` and the template ISO (docs/PROGRESS.md, "C1"). C1f's docs and ADR-219 are written; the open question "sign by default?" is answered no (ADR-219). C1e (the builder page, mirror, emulator) and C1g remain.
+**Status (2026-11-01).** C1a to C1d are done: ADR-215 to ADR-218, the `urmqtt-cfg` crate, kernel, installer, `urmqtt-disk`, `urmqtt-config` and the template ISO (docs/PROGRESS.md, "C1"). C1f's docs and ADR-219 are written; the open question "sign by default?" is answered no (ADR-219). **C1e and C1g are built too** (ADR-225 to ADR-228; docs/PROGRESS.md, "C1e and C1g"): the WebAssembly module, the builder page, the release mirror with its web server, the Products and builder pages on aldo.tech in 15 languages, and the optional emulator (spike done: it boots a configured image in headless Chrome in about 8 s, no performance claims). The pages are live and linked on aldo.tech (the owner's decision of 2026-11-01); until a signed release with a template (`urmqtt-template-<ver>-universal.iso`, `SHA256SUMS`, `.minisig`) exists the builder page says so plainly and builds nothing. Publishing such a release needs the maintainer's minisign key and is not done here.
 
 ### C1e — the builder page (plan, user request 2026-11-01)
 

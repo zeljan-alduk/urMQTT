@@ -1,6 +1,43 @@
+## C1e and C1g: the builder page, the release mirror, the pages on aldo.tech and "Try in the emulator" (2026-11-01)
+
+The page that does what `urmqtt-config pack --iso` does, in the browser, with the same Rust code (ADR-225, ADR-226); the mirror of the GitHub releases it loads its template from and the pages on aldo.tech (ADR-227); the optional emulator (ADR-228). **It is live: https://aldo.tech/en/products/urmqtt-builder/** (and the other 14 languages, see below). No release with a template exists yet (v0.1.0 predates the runtime configuration), so the page says so and builds nothing until the maintainer publishes one.
+
+**Done**
+
+- **The module** (`tools/builder/wasm`, ADR-225): the tool's library compiled to WebAssembly, 1.06 MB, no imports and no `unsafe` block, a plain C ABI on buffer handles; `make builder`. The tool's code was moved into the library, not copied (`pack_text`, `sign_pem`, `image::configure_iso_in_place`, `minisign`, `release`, `certs`); the command line gained `check-release`.
+- **The page** (`tools/builder/web`, ADR-226): one screen with native modal dialogs, light and dark, labelled controls and keyboard focus tested (Lighthouse accessibility 95 or better), a form generated from the exported schema with every default shown and untouched fields not written, presets, TOML import and export, certificate and key import that says what a certificate is and whether the key belongs to it, state in the address and `sessionStorage` (never a private key), release list with pre-releases marked and releases without a template greyed with the reason, **the signature of `SHA256SUMS` and the template's SHA-256 checked in the browser against the key built into the page**, the ISO built in WebAssembly memory with progress and Cancel, SHA-256 and configuration fingerprint of the result, download as `urmqtt-<ver>-<name>-universal.iso`. 15 languages (`tools/builder/web/i18n`; field names are the TOML keys and the schema's help stays English). **With no usable release** it says so in plain words, keeps the releases there greyed out with their reasons, links to the releases on GitHub and switches Build, Download and the emulator off with the reason beside them.
+- **The mirror** (`scripts/mirror-releases.py`, `scripts/mirror/`, ADR-227): hourly systemd timer, nice 19, idle I/O, rate limited, sandboxed, verifies every release before publishing it, writes `releases.json`; a nginx container behind Caddy adds rate limits (`nginx.conf`, `install-web.sh`); `caddy-apply.py` makes the two marked Caddy regions and is idempotent.
+- **The pages on the site** (`tools/builder/site`, `scripts/deploy-builder-site.sh`, ADR-227): the Products page and the builder page in 15 languages through the site's own generator, patched by `apply_products.py` (every edit must match exactly once). *Products* is in the header and footer of every page, the sitemap and the home page; the two urMQTT posts and their cards link to the builder in the page's language. The owner's decision of 2026-11-01 to publish and link at once replaced the first plan (unlisted until a template exists, with a listing hook; both removed).
+- **The emulator** (`tools/builder/emulator`, `emulator.js`, ADR-228): spike first (numbers in ADR-228), then QEMU compiled to WebAssembly (GPL-2.0, pinned upstream files checked by SHA-256, four bytes patched for a POPCNT bug, source offer in `SOURCE.txt`), loaded only on a click, no network, boots the configured image in about 9 s with the countdown skipped and checks that the kernel prints the page's fingerprint. `make builder-emulator`; the runtime is a build output and is not committed.
+- README ("Configure and download your ISO"), `docs/SECURITY.md` (the builder page), `docs/DEPLOY.md` section 10 (install, check, roll back), screenshots in `docs/screenshots/` (the live page as it is today, and the full flow against a throwaway-key test mirror).
+
+**Live on aldo.tech (2026-11-01)**
+
+- Mirror: `urmqtt-mirror.timer` (hourly), `urmqtt-mirror-web.service` (container on `127.0.0.1:18089`, image pinned by digest), `/var/www/aldotech.io/urmqtt/releases/`; first run 15:02 UTC listed v0.1.0 without a template. Installed files are identical to the repository's (checked by SHA-256).
+- Caddy: two marked regions (headers for the builder pages, the mirror and emulator handles, `/products/` redirect); `caddy validate` before every reload; four reloads (the status of all URLs compared after the first and after the publish, spot checks after the others).
+- Site: generator patched, `publish.sh` now excludes `/urmqtt/releases/` and `/_x/`; published 15:36 UTC after a dry run of the rsync (0 deletions, 69 new files, the rest rewritten as on every publish). **Backups:** `/root/aldotech-site-backup-20261101` (the generator as it was), `/root/aldotech-site-backup-20261101-extra/` (original Caddyfile, `build.py.before-products`), `/etc/caddy/Caddyfile.bak-20261101-urmqtt` (original) and `-step2` to `-step4` (before each later edit), `/opt/aldotech-site/publish.sh.bak-20261101`. Rollback: `docs/DEPLOY.md` section 10.
+- Hiding the pages without removing them: publish with `URMQTT_PRODUCTS_LISTED=0`.
+
+**Verified**
+
+- `make check`, as an equivalent script (nested worktree, see C1 below): fmt, typos, arch-leaks, `cargo vet`, host and kernel clippy for both architectures, workspace tests (824 passed, 0 failed, 8 ignored), the mirror job's 62 tests against a fake GitHub with throwaway minisign keys, the Caddy edit's 10 tests, shellcheck of the new scripts, and the builder's 45 tests: the module against the command line byte for byte (also the real 63 MB template), the form logic, the page in headless Chrome (15, among them a build whose bytes equal `urmqtt-config pack --iso`, the privacy of requests and storage, a tampered template blocked unless overridden, dialogs, phone and dark layout, **the emulator booting the page's image and printing the page's fingerprint**), the page without a usable release (4), the 15 language files (same keys and placeholders, nothing left in English).
+- The site: before and after the publish, the status of the 140 URLs (the sitemap and a few fixed ones: 139 x 200 and my 404 probe) is identical; 30 new URLs (15 Products, 15 builder) answer 200 and the sitemap lists 170; a build of the patched generator into a temporary directory equals the old output once the additions are taken out (250 of 250 files).
+- The live pages in headless Chrome, all 15 languages: renders, `releases.json` loads, no console error, no request to another site, cross-origin isolated, the Products link in header and footer, the "no release" state in the page's language.
+- Live, with the real template ISO chosen from this computer: the page stops at the unsigned file and asks, builds after the override, and the emulator boots it on the live site (ready after 8.9 s, fingerprints equal).
+- Live, in a labelled random-token directory (removed): a mirror signed with a throwaway key, the page built with that key: the 63 MB template comes from the site through Caddy, the signature is verified in the browser, the build takes 5 to 18 s, the downloaded file has the SHA-256 the page shows, no request carries key material. In the real mirror directory a template-shaped test file (removed) was served by nginx through Caddy with `immutable` caching, the sums with `must-revalidate`, `meta.json` with 404 and a single `Server` header.
+
+**Not done / open**
+
+- **A signed release with a template is needed for the builder to build from the mirror** (`urmqtt-template-<ver>-universal.iso`, `SHA256SUMS`, `SHA256SUMS.minisig`, signed with the release key, which this work never touched). Until then the real path (mirror, key built into the page) was proven with throwaway keys and the real template from the computer, not with a release. `.github/workflows/release.yml`'s template step has never run.
+- The 13 translations of the page and the Products texts were written by an AI agent and checked by tests and spot checks, not by native speakers.
+- The emulator: BIOS only (UEFI crashes in it), no network, a desktop browser with isolation and about 1.5 GB (Chrome tested, Firefox and Safari not), the upstream POPCNT bug is patched here but not reported.
+- Headless Chrome on the development Mac stalls on any aldo.tech page over HTTP/3 (the site advertises it); with QUIC off everything loads. Presumably this machine's UDP path; not investigated.
+- The site's build now copies a 36 MB emulator directory into its output on every publish (rsync skips what is unchanged).
+- `.github/workflows/ci.yml`'s `builder` job has never run (nothing was pushed).
+
 ## C1 — Runtime configuration (C1a to C1d and the docs of C1f, 2026-11-01)
 
-The kernel is built once and the configuration is data (ADR-215 to ADR-219). The web builder page (C1e) and the emulator (C1g) are not part of this work.
+The kernel is built once and the configuration is data (ADR-215 to ADR-219). The web builder page (C1e) and the emulator (C1g) came after, see the entry above.
 
 **Done**
 
@@ -21,7 +58,7 @@ The kernel is built once and the configuration is data (ADR-215 to ADR-219). The
 **Not done / open**
 
 - `make smoke` was not run end to end as one command (about 150 scenarios per architecture; the groups above ran separately, with `SMOKE_PORT` because other jobs on this machine hold the default port). The x86_64 TLS-heavy TCG suites (`service` scenarios with `mosquitto` clients) were not run. aarch64 under TCG was not run (HVF only, as asked).
-- No WebAssembly build of `urmqtt-cfg` and `config-schema` yet (C1e; the `wasm32` target is not installed here). Neither does I/O; the file reads are closures.
+- (Done in C1e, see above: the WebAssembly build of the tool's library; the file reads are closures.)
 - `pack` does not check that the key matches the certificate or that the certificate chains to a CA (the TLS stack fails at boot if the key does not match); expiry is checked.
 - The signature has no pinned expected key (ADR-219); "sign by default?" is answered no.
 - The audit inventory (`docs/audit`) was already out of date before this work (x86 crates and others missing) and is not regenerated here; the new `unsafe` (the configuration arena, `crates/config/src/store.rs`) is covered by Miri and will appear when it is.

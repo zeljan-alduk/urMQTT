@@ -38,8 +38,11 @@ x86_64 UEFI and x86_64 BIOS, and the **empty configuration**. On its own it
 boots on the documented defaults and stops with `refusing to serve: no server
 certificate and key`; the installer and the diagnostic entry work without one.
 `urmqtt-config` (built from this repository with `cargo build --release -p
-urmqtt-config-tool`; the releases do not ship the binary yet, the builder page
-will do the same in the browser) writes your configuration into a copy of it:
+urmqtt-config-tool`; the releases do not ship the binary yet) writes your
+configuration into a copy of it. The **builder page** on aldo.tech does the same
+in the browser, with the same code compiled to WebAssembly (README, "Configure and
+download your ISO"); the command line is the way to do it offline and to check a
+page's result byte for byte:
 
 ```bash
 # my/config.toml names ca.pem, server.pem, server.key, control.pub next to it;
@@ -767,3 +770,37 @@ partition (and the partition table at the first boot and when growing). The
 offline tool writes only with `--write`. `scripts/fault-loop.sh migrate|grow|backup`
 runs the procedures on an image with a power cut after every write and checks
 that each case ends in a valid disk that finishes.
+
+## 10. The release mirror and the builder page on a web server (C1e, ADR-227)
+
+Only for whoever runs the site (aldo.tech does); the broker needs none of this. The builder page loads its template
+from the site it is served from, so the site mirrors the GitHub releases and serves the page. Everything below is
+idempotent and prints what it does; `--dry-run` changes nothing.
+
+1. **The mirror job** (root, from a checkout): `scripts/mirror/install.sh`. It creates the unprivileged `urmqtt-mirror`
+   user and `/var/www/aldotech.io/urmqtt/releases`, and enables `urmqtt-mirror.timer` (hourly, nice 19, idle I/O,
+   2 MiB/s). A release is published there only after its `SHA256SUMS` signature (key `/etc/urmqtt-mirror/minisign.pub`)
+   and the template's SHA-256 check out. `systemctl start urmqtt-mirror` runs it now, `journalctl -u urmqtt-mirror`
+   is its log; exit 2 means a release failed verification (the unit shows as failed).
+2. **Its web server**: `scripts/mirror/install-web.sh` starts an nginx container (pinned image, read-only, no
+   capabilities) on `127.0.0.1:18089` that serves only `releases.json`, `SHA256SUMS`, its signature and the template,
+   with rate limits (Caddy has none).
+3. **Caddy**: `python3 scripts/mirror/caddy-apply.py /etc/caddy/Caddyfile` adds two marked regions (a backup is written
+   next to the file), then `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && systemctl reload caddy`.
+   It proxies `/urmqtt/releases*` to the container, sends `Cross-Origin-Embedder-Policy` for the builder pages (the
+   emulator needs it), serves the emulator's files pre-compressed and redirects `/products/` to the English page.
+4. **The pages**: `make builder` (or `make builder-emulator` to include the emulator), then
+   `scripts/deploy-builder-site.sh --chown USER:GROUP` copies the page and the site modules to the generator's directory and
+   patches its `build.py` (refused if it is not the generator it knows; a second run changes nothing). Publish with the
+   site's own `publish.sh`, **which must leave the mirror alone**: `rsync -a --delete --exclude=/urmqtt/releases/ ...`.
+   Try it first with `--site-dir` pointing at a scratch copy and `OUT=/somewhere python3 site/build.py`, and compare the
+   output with the old one (every existing page must be the same page apart from the added links).
+5. **Checking**: the status of every URL in `sitemap.xml` before and after (nothing may change except the new pages),
+   and the page in a browser (`tools/builder/test/` has the harness).
+6. **Taking the links away** without removing the pages: build the site with `URMQTT_PRODUCTS_LISTED=0` (no header or
+   footer link, no sitemap entry, no card links, `noindex`).
+7. **Rolling back**: restore `build.py` (and `publish.sh`) from the backups made before step 4, delete `products.py`,
+   `products_i18n.py`, `apply_products.py` and `urmqtt-builder/` from the generator's directory and publish; restore the
+   Caddyfile from its `.bak-<date>-urmqtt*` copy, validate, reload; `systemctl disable --now urmqtt-mirror.timer
+   urmqtt-mirror-web`, remove the units, `/usr/local/lib/urmqtt-mirror`, `/etc/urmqtt-mirror` and the container.
+   The mirrored files are only a copy of what GitHub has.

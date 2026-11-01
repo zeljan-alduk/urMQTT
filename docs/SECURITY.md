@@ -256,7 +256,7 @@ is attested, and by what:
   private key is in the slot of every image made from it, in the clear (as it
   was when it was compiled in).
 
-### The builder page (C1e, ADR-225 to ADR-227)
+### The builder page (C1e and C1g, ADR-225 to ADR-228)
 
 The page at aldo.tech (Products, urMQTT builder) does what `urmqtt-config pack
 --iso` does, in the browser, with the same Rust code compiled to WebAssembly.
@@ -292,9 +292,16 @@ What that gives you and what it does not:
   key you can replace. The kernel's checks at boot (fingerprint, optional
   signature, release rules) and the fingerprint comparison detect a changed
   *configuration*, not a leaked *key*.
-- **The emulator (C1g) is optional and separate.** Nothing of it is loaded
-  until you click its button; it runs in WebAssembly in your browser and has no
-  network of its own beyond what the page gives it (ADR-228).
+- **The emulator (C1g) is optional and separate.** Nothing of it is fetched
+  until you click its button and then *Start*; it is QEMU compiled to
+  WebAssembly (GPL-2.0, files of its own under `emulator/<version>/` on the same
+  site, with the source offer and the change we made to it next to them), runs in
+  a worker of your browser and **has no network**: it cannot reach anything and
+  nothing can reach it. The image you built is handed to it in memory and is
+  never sent anywhere; closing the dialog ends the worker. It is code from
+  another project at a pinned commit and its sums are checked when the files are
+  made, not in your browser. What it shows says nothing about the broker's
+  performance (ADR-228).
 
 ## Mitigations
 

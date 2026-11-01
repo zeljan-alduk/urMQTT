@@ -478,6 +478,16 @@ add your CA, server certificate and key, and download `urmqtt-<version>-<name>-u
 - **Optional: try it in the emulator.** A second button loads, only when clicked, an x86-64 emulator in WebAssembly and starts
   the image you just built, with its console on a canvas (see [ADR-228](docs/DECISIONS.md) for what it can and cannot show).
 
+The page works on releases that contain a template ISO with its `SHA256SUMS` and signature. v0.1.0 predates the runtime
+configuration, so until the first release that has one is published the page says so plainly (the release is greyed out with
+the reason and a link to the releases on GitHub) and offers only what works without it: the form, a `config.toml` export and
+files from your computer. Pictures of the page on aldo.tech as it is today, with no release yet: [desktop](docs/screenshots/live-desktop.png),
+[phone](docs/screenshots/live-phone.png), [dark](docs/screenshots/live-dark.png), [a dialog](docs/screenshots/live-dialog.png),
+[the Products page](docs/screenshots/live-products.png), and [the emulator](docs/screenshots/live-emulator.png) (booting the real template
+ISO chosen from the computer). With a release to build from (taken against a test mirror signed with a throwaway key, the release names
+are the fixture's): [desktop](docs/screenshots/builder-desktop.png), [phone](docs/screenshots/builder-phone.png),
+[dark](docs/screenshots/builder-dark.png), [a dialog](docs/screenshots/builder-dialog.png), [the emulator](docs/screenshots/builder-emulator.png).
+
 `make builder` builds the page (WebAssembly module, script, style and texts) into `build/builder/`; `make builder-test` runs its
 tests. The directory is static: any web server that also serves a `releases.json` (made by `scripts/mirror-releases.py`)
 can host it.
