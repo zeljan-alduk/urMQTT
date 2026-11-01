@@ -12,13 +12,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 CRATES=("$@")
-[[ ${#CRATES[@]} -gt 0 ]] || CRATES=(urmqtt-mqtt urmqtt-timer-wheel urmqtt-net urmqtt-tcp urmqtt-broker urmqtt-tls)
+[[ ${#CRATES[@]} -gt 0 ]] || CRATES=(urmqtt-mqtt urmqtt-timer-wheel urmqtt-net urmqtt-tcp urmqtt-broker urmqtt-tls urmqtt-cfg urmqtt-config)
 export MIRIFLAGS="${MIRIFLAGS:--Zmiri-strict-provenance -Zmiri-disable-isolation}"
 export PROPTEST_CASES="${PROPTEST_CASES:-6}" PROPTEST_DISABLE_FAILURE_PERSISTENCE=true
 for c in "${CRATES[@]}"; do
     echo "== miri: $c"
     only=()
+    flags=$MIRIFLAGS
     case "$c" in
+        # The configuration blob (C1): the decoder and the field table. The 20 000-case
+        # garbage loop is the fuzz target's job.
+        urmqtt-cfg) only=(--skip garbage_never_panics) ;;
+        # The loaded configuration lives in a write-once `.bss` arena (the one unsafe
+        # module, ADR-216); its tests leak a few boxes on purpose.
+        urmqtt-config) flags="$MIRIFLAGS -Zmiri-ignore-leaks" ;;
         # The scripted segment tests, cookies only (table::behaves_like_a_map_under_churn is too slow too). model:: (the
         # stateful proptest) and tests:: (loss, flood and retransmission
         # simulations) run for more than 25 minutes each under Miri; they run
@@ -28,5 +35,5 @@ for c in "${CRATES[@]}"; do
         urmqtt-broker) only=(--skip compact:: --skip console_lines_are_replayed --skip clearing_retained_messages --skip unsubscribed_filters_leave --skip many_sessions_route --skip retained_per_device_limit --skip retained_byte_budget --skip hot_state_stays_small) ;;
         urmqtt-tcp) only=(cookie:: refused:: scripts:: seq:: siphash::) ;;
     esac
-    cargo miri test -q -p "$c" --lib -- ${only[@]+"${only[@]}"}
+    MIRIFLAGS=$flags cargo miri test -q -p "$c" --lib -- ${only[@]+"${only[@]}"}
 done

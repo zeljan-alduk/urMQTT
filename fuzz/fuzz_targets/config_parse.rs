@@ -23,6 +23,7 @@ fuzz_target!(|data: &[u8]| {
         PackOptions {
             read: &mut read,
             now_unix: 1_800_000_000,
+            env: None,
         },
     ) {
         let b = urmqtt_cfg::Blob::parse(&blob).expect("a packed blob parses");

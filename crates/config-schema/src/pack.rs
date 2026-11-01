@@ -172,6 +172,9 @@ pub struct PackOptions<'a> {
     pub read: ReadFile<'a>,
     /// The packer's clock, for the certificate expiry checks.
     pub now_unix: u64,
+    /// The environment name (`--env`). The TOML's own top-level `env` key must
+    /// agree if both are given; with neither it is `prod`.
+    pub env: Option<&'a str>,
 }
 
 fn variant(list: &[&str], name: &str) -> u8 {
@@ -487,15 +490,26 @@ pub fn pack(toml_text: &str, mut opts: PackOptions<'_>) -> Result<Vec<u8>, Vec<C
     let mut user: toml::Table = toml_text
         .parse()
         .map_err(|e: toml::de::Error| vec![cerr("", e.to_string())])?;
-    let env = match user.remove("env") {
-        None => fields::by_tag(tag::ENV)
+    let toml_env = match user.remove("env") {
+        None => None,
+        Some(toml::Value::String(s)) => Some(s),
+        Some(_) => return Err(vec![cerr("env", "must be a string")]),
+    };
+    let env = match (toml_env, opts.env) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(vec![cerr(
+                "env",
+                format!("the configuration says {a:?}, the command line {b:?}"),
+            )]);
+        }
+        (Some(a), _) => a,
+        (None, Some(b)) => b.to_owned(),
+        (None, None) => fields::by_tag(tag::ENV)
             .and_then(|f| match f.kind {
                 Kind::Str { default, .. } => Some(default.to_owned()),
                 _ => None,
             })
             .unwrap_or_default(),
-        Some(toml::Value::String(s)) => s,
-        Some(_) => return Err(vec![cerr("env", "must be a string")]),
     };
     let (text, supplied) = complete(&user)?;
     let cfg = parse(&env, &text)?;

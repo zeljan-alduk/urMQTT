@@ -52,19 +52,13 @@ pub fn pack_blob(args: &PackArgs) -> Result<Vec<u8>, String> {
             .parent()
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
     });
-    // `--env` becomes the top-level `env` key unless the TOML sets one.
-    let text = match &args.env {
-        Some(env) if !text.lines().any(|l| l.trim_start().starts_with("env")) => {
-            format!("env = {env:?}\n{text}")
-        }
-        _ => text,
-    };
     let mut read = |name: &str| std::fs::read(dir.join(name)).map_err(|e| e.to_string());
     let blob = pack(
         &text,
         PackOptions {
             read: &mut read,
             now_unix: args.now_unix.unwrap_or_else(default_now),
+            env: args.env.as_deref(),
         },
     )
     .map_err(|errors| {
@@ -117,8 +111,8 @@ pub fn blob_of(bytes: &[u8]) -> Result<&[u8], String> {
     Err("not a urmqtt-cfg blob or configuration slot".into())
 }
 
-/// The first 8 bytes of SHA-256 of a public key: how the kernel's console
-/// line names a signer.
+/// The first 8 bytes of the domain-separated SHA-256 (`fingerprint_of`) of a
+/// public key: how the kernel's console line names a signer.
 pub fn signer_id(key: &[u8; 32]) -> String {
     Hex(&urmqtt_cfg::blob::fingerprint_of(key)[..8]).to_string()
 }

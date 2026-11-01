@@ -31,6 +31,7 @@ fn pack_plain(text: &str) -> Result<Vec<u8>, Vec<crate::ConfigError>> {
         PackOptions {
             read: &mut read,
             now_unix: NOW,
+            env: None,
         },
     )
 }
@@ -408,6 +409,7 @@ fn the_dev_configuration_packs_and_round_trips() {
         PackOptions {
             read: &mut read,
             now_unix: NOW,
+            env: None,
         },
     )
     .expect("dev packs");
@@ -449,6 +451,7 @@ fn the_dev_configuration_packs_and_round_trips() {
         PackOptions {
             read: &mut read2,
             now_unix: NOW + 5,
+            env: None,
         },
     )
     .unwrap();
@@ -477,6 +480,7 @@ fn prod_and_bench_configurations_pack_with_the_dev_files() {
             PackOptions {
                 read: &mut read,
                 now_unix: NOW,
+                env: None,
             },
         )
         .expect("packs");
@@ -507,6 +511,7 @@ fn expired_and_wrong_files_are_refused() {
             PackOptions {
                 read: &mut read,
                 now_unix: now,
+                env: None,
             },
         )
     };
@@ -523,9 +528,38 @@ fn expired_and_wrong_files_are_refused() {
         PackOptions {
             read: &mut none,
             now_unix: NOW,
+            env: None,
         },
     )
     .unwrap_err();
     assert!(e.iter().any(|x| x.message.contains("cannot read")), "{e:?}");
     let _ = PemKind::Certificate;
+}
+
+#[test]
+fn the_environment_comes_from_the_toml_or_the_option() {
+    let go = |text: &str, env: Option<&str>| {
+        let mut read = no_files;
+        pack(
+            text,
+            PackOptions {
+                read: &mut read,
+                now_unix: NOW,
+                env,
+            },
+        )
+    };
+    let env_of = |blob: Vec<u8>| Blob::parse(&blob).unwrap().str(tag::ENV).to_owned();
+    assert_eq!(env_of(go("", None).unwrap()), "prod");
+    assert_eq!(env_of(go("", Some("lab-1")).unwrap()), "lab-1");
+    assert_eq!(env_of(go("env = \"lab-2\"\n", None).unwrap()), "lab-2");
+    assert_eq!(
+        env_of(go("env = \"lab-3\"\n", Some("lab-3")).unwrap()),
+        "lab-3"
+    );
+    let e = go("env = \"a\"\n", Some("b")).unwrap_err();
+    assert!(e.iter().any(|x| x.path == "env"), "{e:?}");
+    assert!(go("env = 5\n", None).is_err());
+    // A name that is no environment name is refused.
+    assert!(go("", Some("Bad Name")).is_err());
 }

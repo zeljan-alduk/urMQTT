@@ -16,7 +16,8 @@ pub use store::{CONFIG, ConfigHandle, LoadError, LoadInfo, info, load, load_defa
 pub use urmqtt_cfg::blob::Hex;
 
 /// How the console names the signer of a configuration: the first 8 bytes of
-/// the SHA-256 of its public key (compare with `urmqtt-config show`).
+/// the domain-separated SHA-256 (`urmqtt_cfg::blob::fingerprint_of`) of its
+/// public key (`urmqtt-config show` prints the same id).
 pub fn signer_id(key: &[u8; 32]) -> [u8; 8] {
     use urmqtt_cfg::blob::fingerprint_of;
     let fp = fingerprint_of(key);

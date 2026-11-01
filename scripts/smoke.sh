@@ -1863,7 +1863,7 @@ PY
     for accel in $ACCELS; do
         local log="$OUT/cfg-tampered-$accel.log" data="$OUT/cfg-tampered-$accel.img" status=0
         fresh_disk "$iso" "$data"
-        boot "$log" --disk "$data" --accel "$accel" --headless || status=$?
+        boot_until "$log" "resetting in 60 s" --disk "$data" --accel "$accel" --fwd none || status=$?
         check "config-tampered-refused [$accel]" "$log" "$status" \
             "(fatal: configuration refused: blob: fingerprint mismatch|Blake2b hash for URI .boot\(\):/boot/urmqtt.cfg. does not match)" "NOT:URMQTT READY" "NOT:config: fingerprint"
     done
@@ -1875,7 +1875,7 @@ PY
     for accel in $ACCELS; do
         local log="$OUT/cfg-empty-$accel.log" data="$OUT/cfg-empty-$accel.img" status=0
         fresh_disk "$iso" "$data"
-        boot "$log" --disk "$data" --accel "$accel" --headless || status=$?
+        boot_until "$log" "resetting in 60 s" --disk "$data" --accel "$accel" --fwd none || status=$?
         check "config-empty-refuses-to-serve [$accel]" "$log" "$status" \
             "config: fingerprint [0-9a-f]{64} \(49 bytes, unsigned\), env=prod" \
             "config: the configuration slot is empty" \

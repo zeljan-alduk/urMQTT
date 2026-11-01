@@ -5,7 +5,7 @@ runs at the time of writing are in `docs/PROGRESS.md` (entry H5).
 
 | Tool | Command | CI job | Covers |
 |---|---|---|---|
-| Miri | `make miri` (`scripts/miri.sh [crate...]`) | `miri` | Undefined behaviour and aliasing in the host unit tests of mqtt, timer-wheel, net, tcp (subset), broker (subset), tls |
+| Miri | `make miri` (`scripts/miri.sh [crate...]`) | `miri` | Undefined behaviour and aliasing in the host unit tests of mqtt, timer-wheel, net, tcp (subset), broker (subset), tls, cfg (the configuration blob decoder) and config (the write-once `.bss` arena of the loaded configuration: its one `unsafe` module) |
 | Kani | `make kani` (`scripts/kani.sh`) | `kani` | Bounded proofs: MQTT decoder, TCP segment parser, TLS record header, config checks, timer-wheel arithmetic |
 | Sanitizers | `make sanitize` (`scripts/sanitize.sh`) | `sanitize` | ASan on Rust and on the C SQLite amalgamation, trapping UBSan on the C side, over the host test suites |
 | ACL fuzzer | `make acl-fuzz ACL_FUZZ_SECS=600` | `fuzz` (scheduled) | Stateful, model-checked access rules of the broker |

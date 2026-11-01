@@ -300,8 +300,8 @@ pub static FIELDS: &[Field] = &[
     derived(f(
         t::TLS_CERT_NOT_AFTER,
         "tls.server_cert_not_after",
-        uint(8, 0, u64::MAX, 0),
-        "Server certificate notAfter, Unix seconds (computed by the packer).",
+        uint(8, 0, 253_402_300_799, 0),
+        "Server certificate notAfter, Unix seconds (computed by the packer; X.509 times end in the year 9999).",
     )),
     // trust
     f(
@@ -380,8 +380,8 @@ pub static FIELDS: &[Field] = &[
     f(
         t::LIM_RETAINED_BYTES,
         "limits.max_retained_bytes",
-        uint(8, 1, u64::MAX, 1_048_576),
-        "Bytes of retained topics and payloads per data core; at most an eighth of memory.kernel_heap_mb.",
+        uint(8, 1, 134_217_728, 1_048_576),
+        "Bytes of retained topics and payloads per data core; at most an eighth of memory.kernel_heap_mb (so never more than 128 MiB).",
     ),
     f(
         t::LIM_PUBLISH_RATE,
