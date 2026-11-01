@@ -254,3 +254,28 @@ Design rules (to be fixed in an ADR by the implementer, defaults in bold):
 - **Visible:** boot line and `$SYS/broker/plaintext` (enabled, allowed networks, auth mode, connections), a warning when enabled together with a public address, and the fact is printed in the configuration fingerprint report.
 - **Docs and honesty:** SECURITY.md states what plaintext gives up (confidentiality, integrity, device identity strength) and when it is acceptable; README configuration section; threat-model entry; tests (host: allow-list, auth, rate limit, no operator rights; smoke: a plaintext client on an allowed and a refused source, wrong password, TLS still works alongside); `mosquitto_pub -h <ip>` works with default clients.
 - **Performance:** measure the plaintext path against Mosquitto on the same VPS (no handshake cost; the single-flow numbers apply directly).
+
+**P1 configuration keys (user, 2026-11-01: plaintext MQTT must be switched on and tuned from the configuration, in `config.toml`, in the runtime blob and in the builder page).** Every key has a default shown in the builder; none is compiled in:
+
+```toml
+[plaintext]
+enabled = false                    # the switch; everything below is ignored (and not allowed to look dangerous) while false
+port = 1883
+allow_from = []                    # CIDRs, required and non-empty when enabled, e.g. ["10.0.0.0/8", "192.168.0.0/16"]
+allow_from_anywhere = false        # explicit override of allow_from, loud warning, never in a preset
+auth = "password"                  # "password" | "anonymous" | "ip"
+anonymous_identity = "lan"         # auth = "anonymous": the identity and ACL every connection gets
+users = []                         # auth = "password": [{ id = "sensor-1", password_hash = "..." }]; builder takes a clear password and stores only the hash
+ip_identities = []                 # auth = "ip": [{ from = "10.0.1.0/24", id = "plc" }]
+max_connections = 1000             # all plaintext connections together
+max_connections_per_ip = 16
+max_packet_size = 1024
+publish_rate_per_device = "5/s"
+max_failed_auths_per_ip = 5        # then locked out for lockout_s
+lockout_s = 300
+acl_publish = ["devices/{id}/#"]
+acl_subscribe = ["devices/{id}/cmd/#"]
+retain = false                     # may plaintext clients publish retained messages
+```
+
+The same keys are editable at run time only through a new image or a re-packed ISO (the builder), never over the plaintext listener itself. The builder shows the section collapsed with the switch off, a risk dialog when the switch is turned on or `allow_from_anywhere` is set, and writes only changed keys into the blob.
