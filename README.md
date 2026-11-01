@@ -15,6 +15,15 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 
 </div>
 
+> [!TIP]
+> **Make your own ISO in the browser, no toolchain needed:** the **urMQTT builder** at
+> **<https://aldo.tech/en/products/urmqtt-builder/>** (Croatian: <https://aldo.tech/proizvodi/urmqtt-builder/>, and 13 more languages
+> under [aldo.tech/en/products/](https://aldo.tech/en/products/)). Pick a release, set the network (DHCP, a static address, or DHCP with a static
+> fallback), your own certificates and keys, limits, the ACL and, if you need it, plain MQTT for a trusted network. Every field starts with its
+> default. The page downloads the signed template ISO of the release, checks its signature and checksums, writes your configuration into it
+> **inside your browser** (your keys never leave it) and hands you the finished ISO, which you can also try in an in-browser emulator first.
+> Details: [Configure and download your ISO](#configure-and-download-your-iso).
+
 > [!WARNING]
 > **urMQTT is pre-alpha** ([v0.1.0](https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.1.0): an aarch64
 > VM image; its release assets are dev builds with throwaway keys). It serves MQTT 3.1.1 over TLS 1.3 with mutual TLS (and, in dev builds
