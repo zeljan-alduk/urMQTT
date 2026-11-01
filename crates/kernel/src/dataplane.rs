@@ -33,7 +33,9 @@ use urmqtt_sync::sync::OnceCell;
 use urmqtt_virtio::net::MTU_FRAME;
 
 pub const MSG_RING: usize = 512;
-pub const FRAME_RING: usize = 512;
+/// Frames in flight between the dispatcher and a worker, each way. A window of
+/// 1 MiB is about 720 segments (ADR-215): the ring must hold a burst of it.
+pub const FRAME_RING: usize = 2048;
 /// Frame buffers a core keeps for reuse; extra ones are freed.
 pub const POOL_MAX: usize = 512;
 
@@ -192,6 +194,8 @@ const STATS_WINDOW_NS: u64 = 5_000_000_000;
 
 impl Idle {
     pub fn new() -> Self {
+        // Each data core builds its `Idle` on its own CPU, at start.
+        crate::watchdog::enable_steal();
         Self {
             last_work_ns: 0,
             slept_ns: 0,
@@ -221,18 +225,24 @@ impl Idle {
         } else {
             0
         };
+        let nic_peak = if me == 0 {
+            NIC_BACKLOG_PEAK.swap(0, Ordering::Relaxed)
+        } else {
+            0
+        };
         let busy = 100 - (self.slept_ns * 100 / window.max(1)).min(100);
         // Relaxed: statistics, for `$SYS/broker/cpu/busy/<core>` (O1).
         if let Some(b) = crate::sys::BUSY.get(me) {
             b.store(busy as u8, Ordering::Relaxed);
         }
         // Relaxed: statistics written by this core's tick and lock waits.
-        let (late_ticks, late_worst, lock_wait) =
-            crate::watchdog::STALLS.get(me).map_or((0, 0, 0), |st| {
+        let (late_ticks, late_worst, lock_wait, steal) =
+            crate::watchdog::STALLS.get(me).map_or((0, 0, 0, 0), |st| {
                 (
                     st.count.swap(0, Ordering::Relaxed),
                     st.worst_ns.swap(0, Ordering::Relaxed),
                     st.lock_wait_ns.swap(0, Ordering::Relaxed),
+                    st.steal_ns.swap(0, Ordering::Relaxed),
                 )
             });
         let p = core::mem::take(&mut self.prof);
@@ -240,8 +250,8 @@ impl Idle {
         if acc > 0 || tls > 0 || frames > 0 {
             urmqtt_log::info!(
                 "dataplane: core {me}: busy {busy}%, work {}% (rx {}%, of it tls {}%, poll {}%, tcp {}%, mesh {}%, nic {}%), \
-                 {acc} connection(s) accepted ({} us of work, {} us of it TLS, each), {frames} frame(s) dispatched, \
-                 {} loop passes in {} ms, longest stall {} us ({} late tick(s), worst {} us, {} us lock wait)",
+                 {acc} connection(s) accepted ({} us of work, {} us of it TLS, each), {frames} frame(s) dispatched (NIC backlog peak {nic_peak}), \
+                 {} loop passes in {} ms, longest stall {} us ({} late tick(s), worst {} us, {} us lock wait, host steal {} us)",
                 pct(p.work()),
                 pct(p.rx),
                 pct(tls),
@@ -256,7 +266,8 @@ impl Idle {
                 self.max_gap_ns / 1000,
                 late_ticks,
                 late_worst / 1000,
-                lock_wait / 1000
+                lock_wait / 1000,
+                steal / 1000
             );
         }
         // Relaxed: statistics.
@@ -599,6 +610,19 @@ pub enum DropSite {
 
 pub const DROP_SITES: [&str; 4] = ["steer", "worker_tx", "nic_tx", "nic_tx_local"];
 pub static DROPPED_BY: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+/// QoS 0 messages not offered to another core because it was far behind
+/// (all cores), for `$SYS` (ADR-216).
+pub static ROUTE_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// The most frames core 0 held back for a full NIC queue in this window.
+pub static NIC_BACKLOG_PEAK: AtomicU64 = AtomicU64::new(0);
+
+/// Notes the length of core 0's NIC backlog (statistics).
+pub fn note_nic_backlog(len: usize) {
+    // Relaxed: statistics.
+    NIC_BACKLOG_PEAK.fetch_max(len as u64, Ordering::Relaxed);
+}
 
 /// Counts a dropped frame (statistics).
 pub fn drop_frame(site: DropSite) {

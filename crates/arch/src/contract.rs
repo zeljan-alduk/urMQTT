@@ -67,6 +67,8 @@ const PERCPU_AP_CAPTURE: fn(
 ) = percpu::ApBoot::capture;
 
 // time
+const TIME_STEAL_ENABLE: fn(fn(usize) -> u64) -> bool = time::steal_enable;
+const TIME_STEAL_NS: fn() -> u64 = time::steal_ns;
 const TIME_UPTIME_NS: fn() -> u64 = time::uptime_ns;
 const TIME_NOW: fn() -> u64 = time::now;
 const TIME_FREQUENCY: fn() -> u64 = time::frequency;

@@ -130,6 +130,8 @@ pub struct StallStats {
     pub total_ns: AtomicU64,
     /// Time spent waiting for spin locks, ns.
     pub lock_wait_ns: AtomicU64,
+    /// Steal time the host reported (KVM x86), ns.
+    pub steal_ns: AtomicU64,
 }
 
 pub static STALLS: [StallStats; MAX_CPUS] = [const {
@@ -138,8 +140,32 @@ pub static STALLS: [StallStats; MAX_CPUS] = [const {
         worst_ns: AtomicU64::new(0),
         total_ns: AtomicU64::new(0),
         lock_wait_ns: AtomicU64::new(0),
+        steal_ns: AtomicU64::new(0),
     }
 }; MAX_CPUS];
+
+/// Whether this core's host reports steal time, and the last reading (ns).
+static STEAL_ON: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+static STEAL_LAST: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Asks the host for this core's steal time (KVM on x86: the time the
+/// virtual CPU wanted to run and was not scheduled). Call on the core. With
+/// it the watchdog subtracts what the host says; without it, the late-tick
+/// estimate stands alone.
+pub fn enable_steal() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    let v2p: fn(usize) -> u64 = crate::boot_x86::kernel_virt_to_phys;
+    #[cfg(not(target_arch = "x86_64"))]
+    let v2p: fn(usize) -> u64 = |_| 0;
+    let on = time::steal_enable(v2p);
+    let me = crate::smp::current();
+    if on && let (Some(f), Some(l)) = (STEAL_ON.get(me), STEAL_LAST.get(me)) {
+        // Relaxed: this core's tick reads them.
+        l.store(time::steal_ns(), Ordering::Relaxed);
+        f.store(true, Ordering::Relaxed);
+    }
+    on
+}
 
 /// Handlers excused from a report because a stall was credited (metrics).
 pub static EXCUSED: AtomicU64 = AtomicU64::new(0);
@@ -292,16 +318,35 @@ pub fn check(late: u64, period: u64) {
         return;
     };
     let late_ns = time::ticks_to_ns(late);
+    // What the host says it took away since the last tick, if it says.
+    let host_steal_ns = match (STEAL_ON.get(me), STEAL_LAST.get(me)) {
+        (Some(on), Some(last)) if on.load(Ordering::Relaxed) => {
+            let now = time::steal_ns();
+            now.saturating_sub(last.swap(now, Ordering::Relaxed))
+        }
+        _ => 0,
+    };
+    let mut credit = 0;
     if late_ns >= STALL_MIN_NS {
         // The core was not running for at least `late`; the stall began up
         // to one period before the deadline.
-        // Relaxed: read by this core only (its handlers and this tick).
-        disc.fetch_add(late.saturating_add(period), Ordering::Relaxed);
+        credit = late.saturating_add(period);
         if let Some(st) = STALLS.get(me) {
             st.count.fetch_add(1, Ordering::Relaxed);
             st.total_ns.fetch_add(late_ns, Ordering::Relaxed);
             st.worst_ns.fetch_max(late_ns, Ordering::Relaxed);
         }
+    }
+    if host_steal_ns > 0 {
+        // The host's own account, exact: credit it if it is the larger.
+        credit = credit.max(time::ns_to_ticks(host_steal_ns));
+        if let Some(st) = STALLS.get(me) {
+            st.steal_ns.fetch_add(host_steal_ns, Ordering::Relaxed);
+        }
+    }
+    if credit > 0 {
+        // Relaxed: read by this core only (its handlers and this tick).
+        disc.fetch_add(credit, Ordering::Relaxed);
     }
     let since = slot.since.load(Ordering::Relaxed);
     if since == 0 {

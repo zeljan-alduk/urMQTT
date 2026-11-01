@@ -32,6 +32,14 @@ const PING_IDENT: u16 = 0x5155;
 const PING_TIMEOUT_MS: u64 = 2_000;
 /// Frames taken from the NIC per pass.
 const RX_BURST: usize = 64;
+/// Frames core 0 holds for a full NIC transmit queue before it stops taking
+/// them from the workers (ADR-216).
+const NIC_BACKLOG: usize = 4096;
+/// Spare frame buffers a core keeps once it has been quiet for `POOL_IDLE_MS`
+/// (a busy core keeps up to `POOL_MAX`): the pools do not hold megabytes of
+/// heap on an idle broker (M16).
+const POOL_IDLE: usize = 32;
+const POOL_IDLE_MS: u64 = 1_000;
 /// Messages taken from each peer per pass.
 const MSG_BURST: usize = 256;
 /// A serving dispatcher handles frames for its own connections this long
@@ -63,8 +71,14 @@ fn new_tcp(addr: [u8; 4], ports: Vec<u16>) -> TcpStack {
             ports,
             mss: 1460,
             rcv_wnd: 65535,
+            // 1 MiB with window scaling (shift 5) for peers that offer it
+            // (ADR-215): a window must cover the bandwidth-delay product.
+            rcv_wnd_scaled: 1 << 20,
             max_conns: MAX_CONNS,
             tx_max: 64 * 1024,
+            tx_cap: 1 << 20,
+            ooo_budget: 16 << 20,
+            ooo_conn_max: 1 << 20,
             cookie_key: key,
             rst_per_sec: 200,
         },
@@ -131,9 +145,9 @@ impl TcpStatsLog {
         }
         let d = |a: u64, b: u64| a.saturating_sub(b);
         info!(
-            "tcp: core {}: {} seg(s) in, cookies {} sent/{} ok/{} bad, {} refused(full table), \
-             {} SYN(s) dropped (full), {} refused by the application, {} repeat segment(s) of refused flows, \
-             {} retransmission(s) ({} fast, {} timeouts), RST {} sent ({} rate-limited), {} bad segment(s), {} connection(s)",
+            "tcp: core {}: {} seg(s) in, cookies {} sent/{} ok/{} bad, {} table full, \
+             {} SYN(s) dropped, {} refused by the app, {} repeat(s) of refused flows, \
+             {} retransmission(s) ({} fast, {} timeouts), RST {} sent ({} rate-limited), {} bad seg(s), {} connection(s)",
             crate::smp::current(),
             d(s.segs_in, self.last.segs_in),
             d(s.cookies_sent, self.last.cookies_sent),
@@ -151,6 +165,20 @@ impl TcpStatsLog {
             d(s.bad_segments, self.last.bad_segments),
             conns,
         );
+        if s.ooo_buffered != self.last.ooo_buffered
+            || s.ooo_dropped != self.last.ooo_dropped
+            || s.scaled != self.last.scaled
+        {
+            info!(
+                "tcp: core {}: {} out-of-order segment(s) kept, {} not kept, {} byte(s) held now; {} connection(s) with window scaling, {} with SACK",
+                crate::smp::current(),
+                d(s.ooo_buffered, self.last.ooo_buffered),
+                d(s.ooo_dropped, self.last.ooo_dropped),
+                s.ooo_bytes,
+                d(s.scaled, self.last.scaled),
+                d(s.sack_neg, self.last.sack_neg),
+            );
+        }
         self.last = *s;
     }
 }
@@ -318,6 +346,7 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
     let mut idle = dataplane::Idle::new();
     let mut cookies = CookieRotation::new(now_ms());
     let mut tcpstats = TcpStatsLog::new(now_ms());
+    let mut last_busy_ms = now_ms();
     loop {
         let now = now_ms();
         cookies.tick(&mut tcp, now);
@@ -382,6 +411,12 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
         link.flush();
         pool.append(&mut done);
         pool.truncate(POOL_MAX);
+        if activity || sent {
+            last_busy_ms = now;
+        } else if now.saturating_sub(last_busy_ms) > POOL_IDLE_MS {
+            // Quiet: give the spare frame buffers back to the heap.
+            pool.truncate(POOL_IDLE);
+        }
         if let Some(c) = dataplane::CONNECTIONS.get(me) {
             // Relaxed: statistics.
             c.store(
@@ -405,6 +440,7 @@ fn dispatch(
     link: &mut Link,
     pool: &mut Vec<Frame>,
     local: &mut VecDeque<Frame>,
+    nic_q: &mut VecDeque<Frame>,
 ) -> bool {
     let n = link.n;
     let mut moved = false;
@@ -448,18 +484,39 @@ fn dispatch(
             dataplane::wake(core);
         }
     }
+    // Frames from the workers go to the NIC. A full transmit queue is a
+    // reason to wait, not to drop: they stay here (up to NIC_BACKLOG) and
+    // leave as the device frees descriptors; beyond that the rings fill and
+    // the worker drops (counted). A dropped data frame costs the peer a round
+    // trip or more to recover (PERF, ADR-216).
+    while let Some(f) = nic_q.front() {
+        if net.queue(f.data.get(..f.len).unwrap_or(&[])).is_err() {
+            break;
+        }
+        moved = true;
+        if let Some(f) = nic_q.pop_front()
+            && pool.len() < POOL_MAX
+        {
+            pool.push(f);
+        }
+    }
     for rx in link.collect.iter_mut().flatten() {
-        while let Some(f) = rx.pop() {
+        while nic_q.len() < NIC_BACKLOG {
+            let Some(f) = rx.pop() else { break };
             moved = true;
             dataplane::DISPATCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if net.queue(f.data.get(..f.len).unwrap_or(&[])).is_err() {
-                dataplane::drop_frame(DropSite::NicTx);
-            }
-            if pool.len() < POOL_MAX {
-                pool.push(f);
+            if nic_q.is_empty() && net.queue(f.data.get(..f.len).unwrap_or(&[])).is_ok() {
+                if pool.len() < POOL_MAX {
+                    pool.push(f);
+                }
+            } else {
+                nic_q.push_back(f);
+                dataplane::note_nic_backlog(nic_q.len());
             }
         }
     }
+    // Still waiting for descriptors: keep this core polling.
+    moved |= !nic_q.is_empty();
     net.flush();
     moved
 }
@@ -545,10 +602,12 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     let mut tcp = new_tcp(iface.addr().unwrap_or([0; 4]), ports);
     let mut pool: Vec<Frame> = Vec::new();
     let mut local: VecDeque<Frame> = VecDeque::new();
+    let mut nic_q: VecDeque<Frame> = VecDeque::new();
     let mut ping = Ping::Waiting;
     let mut idle = dataplane::Idle::new();
     let (mut mem_last, mut mem_conns) = (now_ms(), 0u64);
     dataplane::set_baseline();
+    let mut last_busy_ms = now_ms();
     let mut ops = crate::ops::Ops::new(now_ms());
     let mut sntp = crate::time_sync::TimeSync::new(now_ms());
     let mut cookies = CookieRotation::new(now_ms());
@@ -566,7 +625,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         }
         dataplane::mem_report(now, &mut mem_last, &mut mem_conns);
         let t = time::uptime_ns();
-        let mut activity = dispatch(&mut net, &mut link, &mut pool, &mut local);
+        let mut activity = dispatch(&mut net, &mut link, &mut pool, &mut local, &mut nic_q);
         idle.prof.disp += time::uptime_ns() - t;
         let t = time::uptime_ns();
         activity |= drain_mesh(&mut link, &mut mqtt, &mut iface, &mut tcp, now);
@@ -726,6 +785,11 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         let busy = activity
             || tcp.has_pending()
             || matches!(ping, Ping::Resolving { .. } | Ping::Sent { .. });
+        if busy {
+            last_busy_ms = now;
+        } else if now.saturating_sub(last_busy_ms) > POOL_IDLE_MS {
+            pool.truncate(POOL_IDLE);
+        }
         idle.pass(busy, || {
             link.pending() || net.rx_pending() || !local.is_empty()
         });

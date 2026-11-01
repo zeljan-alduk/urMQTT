@@ -269,6 +269,86 @@ fn kvmclock_hz(src: &Sources) -> Option<u64> {
     out
 }
 
+// ---- KVM steal time (ADR-214) ----
+
+const MSR_KVM_STEAL_TIME: u32 = 0x4b56_4d03;
+const KVM_FEATURE_STEAL_TIME: u32 = 1 << 5;
+
+/// kvm_steal_time, one per CPU, 64-byte aligned as the host requires.
+#[repr(C, align(64))]
+struct StealRec {
+    steal: u64,
+    version: u32,
+    flags: u32,
+    preempted: u8,
+    _pad: [u8; 3],
+    _pad2: [u32; 11],
+}
+
+struct StealPages(core::cell::UnsafeCell<[StealRec; MAX_CPUS]>);
+
+// SAFETY: record `i` is written by the host for CPU `i` and read with a
+// volatile load by that CPU only.
+unsafe impl Sync for StealPages {}
+
+static STEAL: StealPages = StealPages(core::cell::UnsafeCell::new(
+    [const {
+        StealRec {
+            steal: 0,
+            version: 0,
+            flags: 0,
+            preempted: 0,
+            _pad: [0; 3],
+            _pad2: [0; 11],
+        }
+    }; MAX_CPUS],
+));
+static STEAL_ON: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+
+/// Registers this CPU's steal-time record with the host (KVM only, when it
+/// offers the feature). Returns whether it is on. Call on each CPU.
+pub fn steal_enable(v2p: fn(usize) -> u64) -> bool {
+    if prim::hypervisor_signature() != *b"KVMKVMKVM\0\0\0"
+        || prim::hypervisor_max_leaf() < 0x4000_0001
+        || prim::cpuid(0x4000_0001, 0).0 & KVM_FEATURE_STEAL_TIME == 0
+    {
+        return false;
+    }
+    let cpu = percpu::current().min(MAX_CPUS - 1);
+    let va = STEAL.0.get().cast::<StealRec>().wrapping_add(cpu) as usize;
+    let pa = v2p(va);
+    if pa == 0 {
+        return false;
+    }
+    prim::wrmsr(MSR_KVM_STEAL_TIME, pa | 1);
+    if let Some(on) = STEAL_ON.get(cpu) {
+        on.store(true, Ordering::Release);
+    }
+    true
+}
+
+/// Nanoseconds the host kept this CPU waiting while it wanted to run, since
+/// `steal_enable`; 0 when the host does not report it.
+pub fn steal_ns() -> u64 {
+    let cpu = percpu::current().min(MAX_CPUS - 1);
+    if !STEAL_ON
+        .get(cpu)
+        .is_some_and(|on| on.load(Ordering::Acquire))
+    {
+        return 0;
+    }
+    // `steal` is the first field of the record.
+    let rec = STEAL
+        .0
+        .get()
+        .cast::<StealRec>()
+        .wrapping_add(cpu)
+        .cast::<u64>();
+    // SAFETY: `rec` points at the first (aligned) u64 of a record in the
+    // static array; the host updates it, hence the volatile read.
+    unsafe { core::ptr::read_volatile(rec) }
+}
+
 // ---- the facade ----
 
 /// Counter frequency in Hz.

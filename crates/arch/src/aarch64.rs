@@ -55,6 +55,17 @@ pub mod time {
     pub use super::imp::timer::{
         deadline, frequency, now, ns_to_ticks, set_deadline, ticks_to_ns, uptime_ns,
     };
+
+    /// Steal time is a KVM x86 feature here; aarch64 has no host-reported
+    /// figure (the watchdog uses the late-tick estimate, ADR-214).
+    pub fn steal_enable(_virt_to_phys: fn(usize) -> u64) -> bool {
+        false
+    }
+
+    /// See [`steal_enable`]: always 0.
+    pub fn steal_ns() -> u64 {
+        0
+    }
 }
 
 /// Translation tables: descriptor encoding and walking (pure), and turning

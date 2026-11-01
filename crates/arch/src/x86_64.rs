@@ -54,7 +54,7 @@ pub mod percpu {
 pub mod time {
     pub use super::imp::time::{
         Error, Info, PmTimer, Sources, deadline, finest_clock, frequency, init, now, ns_to_ticks,
-        set_deadline, ticks_to_ns, timer_is_fallback, uptime_ns,
+        set_deadline, steal_enable, steal_ns, ticks_to_ns, timer_is_fallback, uptime_ns,
     };
 }
 

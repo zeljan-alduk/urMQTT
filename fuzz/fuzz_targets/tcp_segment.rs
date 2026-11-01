@@ -6,7 +6,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use urmqtt_tcp::wire::{self, ACK, Out, SYN};
+use urmqtt_tcp::wire::{self, ACK, Ext, Out, SYN};
 use urmqtt_tcp::{App, CloseReason, Config, ConnId, Endpoint, TcpStack};
 
 const S: [u8; 4] = [10, 0, 2, 15];
@@ -33,8 +33,20 @@ impl App for Sink {
 }
 
 fn seg(sport: u16, seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8]) -> Vec<u8> {
+    seg_x(sport, seq, ack, flags, window, &Ext::NONE, payload)
+}
+
+fn seg_x(
+    sport: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    x: &Ext,
+    payload: &[u8],
+) -> Vec<u8> {
     let mut b = Vec::new();
-    wire::emit(
+    wire::emit_ext(
         C,
         S,
         &Out {
@@ -46,6 +58,7 @@ fn seg(sport: u16, seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8]) -
             window,
             mss: (flags & SYN != 0).then_some(1460),
         },
+        x,
         payload,
         &mut b,
     );
@@ -59,8 +72,12 @@ fuzz_target!(|data: &[u8]| {
             ports: vec![8883],
             mss: 1460,
             rcv_wnd: 65535,
+            rcv_wnd_scaled: 512 * 1024,
             max_conns: 64,
             tx_max: 64 * 1024,
+            tx_cap: 1 << 20,
+            ooo_budget: 1 << 20,
+            ooo_conn_max: 256 * 1024,
             cookie_key: [3; 16],
             rst_per_sec: 1000,
         },
@@ -73,7 +90,20 @@ fuzz_target!(|data: &[u8]| {
     s.input(
         0,
         C,
-        &seg(5555, client_isn, 0, SYN, 65535, &[]),
+        &seg_x(
+            5555,
+            client_isn,
+            0,
+            SYN,
+            65535,
+            &Ext {
+                sack_perm: true,
+                wscale: Some(7),
+                ts: Some((1000, 0)),
+                ..Ext::NONE
+            },
+            &[],
+        ),
         &mut app,
         &mut |_, b| out.push(b.to_vec()),
     );
@@ -83,12 +113,16 @@ fuzz_target!(|data: &[u8]| {
     s.input(
         0,
         C,
-        &seg(
+        &seg_x(
             5555,
             client_isn + 1,
             server_isn.wrapping_add(1),
             ACK,
             65535,
+            &Ext {
+                ts: Some((1001, h.ts.map_or(0, |t| t.0))),
+                ..Ext::NONE
+            },
             &[],
         ),
         &mut app,
@@ -106,12 +140,16 @@ fuzz_target!(|data: &[u8]| {
             0 => {
                 let seq = cseq.wrapping_add(i16::from_le_bytes([*sd0, *sd1]) as i32 as u32);
                 let ack = server_isn.wrapping_add(i16::from_le_bytes([*ad0, *ad1]) as i32 as u32);
-                let b = seg(
+                let b = seg_x(
                     5555,
                     seq,
                     ack,
                     flags & 0x3f,
                     u16::from_le_bytes([*w0, *w1]),
+                    &Ext {
+                        ts: Some((1002 + now as u32, 0)),
+                        ..Ext::NONE
+                    },
                     rest,
                 );
                 s.input(now, C, &b, &mut app, &mut |_, _| {});
