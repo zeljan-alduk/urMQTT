@@ -17,7 +17,7 @@ const OUT = resolve(process.argv[2] || join(ROOT, 'build/builder'));
 const SRC = join(HERE, 'src');
 
 // Dependency order: a module may use the names of the ones before it.
-const ORDER = ['wasm.js', 'core.js', 'i18n.js', 'dom.js', 'release.js', 'dialogs.js', 'certs.js', 'form.js', 'plaintext.js', 'emulator.js', 'ui.js', 'main.js'];
+const ORDER = ['wasm.js', 'core.js', 'i18n.js', 'dom.js', 'release.js', 'dialogs.js', 'certs.js', 'form.js', 'plaintext.js', 'emulator.js', 'ui.js', 'simple.js', 'main.js'];
 
 function strip(name, text) {
   let out = text;

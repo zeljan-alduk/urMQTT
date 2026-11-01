@@ -34,7 +34,7 @@ const SAFE = { 'plaintext.enabled': true, 'plaintext.allow_from': ['10.0.0.0/8']
 /** A fresh page: empty storage, then the address given (a real load, so that the hash is read again). */
 async function open(hash = '') {
   await page.goto(base + '/#');
-  await page.eval('sessionStorage.clear(); localStorage.clear()');
+  await page.eval('sessionStorage.clear(); localStorage.clear(); localStorage.setItem("urmqtt-builder-advanced", "1")');
   await page.goto('about:blank');
   await page.goto(base + '/' + hash);
   await page.waitFor(`document.documentElement.dataset.ubReleases === '1'`, { what: 'the releases to load' });

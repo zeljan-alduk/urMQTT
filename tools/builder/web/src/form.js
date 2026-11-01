@@ -247,6 +247,8 @@ async function resetSection(s) {
 function focusField(id) {
   const row = rows.get(id);
   if (!row) return;
+  if (!app.advanced && simpleFocus(id)) return;
+  if (!app.advanced) setAdvanced(true);
   const details = row.el.closest('details');
   if (details) details.open = true;
   row.el.scrollIntoView({ block: 'center', behavior: prefersReducedMotion() ? 'auto' : 'smooth' });

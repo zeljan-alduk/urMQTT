@@ -22,6 +22,50 @@ function emulatorMemory() {
   return { ram: '1024M', heap, ok: false };
 }
 
+// Keys of the user's keyboard, sent to the machine through the monitor (QMP send-key), one stroke each.
+const QCODES = {
+  ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', Enter: 'ret', NumpadEnter: 'ret', Escape: 'esc', Space: 'spc',
+  Backspace: 'backspace', Delete: 'delete', Home: 'home', End: 'end', PageUp: 'pgup', PageDown: 'pgdn', Insert: 'insert',
+  Minus: 'minus', Equal: 'equal', Comma: 'comma', Period: 'dot', Slash: 'slash', Semicolon: 'semicolon', Quote: 'apostrophe',
+  Backslash: 'backslash', BracketLeft: 'bracket_left', BracketRight: 'bracket_right', Backquote: 'grave_accent',
+};
+/** The QEMU key name for a key event, or '' (Tab is left alone: it is how the keyboard leaves the screen). */
+function qcodeOf(e) {
+  const c = e.code || '';
+  if (/^Key[A-Z]$/.test(c)) return c.slice(3).toLowerCase();
+  if (/^Digit[0-9]$/.test(c)) return c.slice(5);
+  if (/^F([1-9]|1[0-2])$/.test(c)) return c.toLowerCase();
+  return QCODES[c] || '';
+}
+
+/**
+ * Chooses the boot menu's entry without keys, in the copy of the image the emulator gets: Limine's `timeout:` and
+ * `default_entry:` lines are text in the ISO (in every copy of limine.conf) and are changed in place, to the same width.
+ * Entry 1 is the broker, 2 the installer, 3 the diagnostic. Returns how many lines were changed.
+ */
+function chooseBootEntry(bytes, entry, skipCountdown) {
+  let changed = 0;
+  const digitsAt = (i, word) => {
+    for (let k = 0; k < word.length; k++) if (bytes[i + k] !== word.charCodeAt(k)) return -1;
+    return i + word.length;
+  };
+  for (let i = bytes.indexOf(0x74); i >= 0 && i < bytes.length - 20; i = bytes.indexOf(0x74, i + 1)) {
+    if (i > 0 && bytes[i - 1] !== 10) continue; // a line starts here
+    let p = digitsAt(i, 'timeout: ');
+    if (p >= 0) {
+      let q = p;
+      while (bytes[q] >= 48 && bytes[q] <= 57) q++;
+      if (q > p && skipCountdown) { for (let k = p; k < q; k++) bytes[k] = 48; changed++; }
+    }
+  }
+  for (let i = bytes.indexOf(0x64); i >= 0 && i < bytes.length - 20; i = bytes.indexOf(0x64, i + 1)) {
+    if (i > 0 && bytes[i - 1] !== 10) continue;
+    const p = digitsAt(i, 'default_entry: ');
+    if (p >= 0 && bytes[p] >= 48 && bytes[p] <= 57 && !(bytes[p + 1] >= 48 && bytes[p + 1] <= 57) && entry !== 1) { bytes[p] = 48 + entry; changed++; }
+  }
+  return changed;
+}
+
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g; // eslint-disable-line no-control-regex
 
 function openEmulatorDialog() {
@@ -35,9 +79,25 @@ function openEmulatorDialog() {
   let text = '';
   const checks = h('ul', { class: 'ub-checks', 'aria-live': 'polite' });
   const status = h('p', { class: 'ub-help', role: 'status', 'aria-live': 'polite', text: t('emulator.idle') });
-  const canvas = h('canvas', { width: '1280', height: '800', role: 'img', 'aria-label': t('emulator.screen'), hidden: true });
+  const canvas = h('canvas', { width: '1280', height: '800', role: 'img', tabindex: '0', 'aria-label': t('emulator.screen'), 'aria-describedby': 'ub-emu-keys', hidden: true });
+  let keyChain = Promise.resolve();
+  const sendKey = q => { keyChain = keyChain.then(() => (vm ? vm.qmp('send-key', { keys: [{ type: 'qcode', data: q }], 'hold-time': 60 }) : null)).catch(() => {}); };
+  ['mousedown', 'click'].forEach(ev => canvas.addEventListener(ev, () => canvas.focus()));
+  canvas.addEventListener('keydown', e => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const q = qcodeOf(e);
+    if (!q || !vm) return;
+    e.preventDefault();
+    sendKey(q);
+  });
   const log = h('pre', { class: 'ub-emu-log', tabindex: '0', role: 'log', 'aria-label': t('emulator.serial'), hidden: true });
   const skip = h('input', { type: 'checkbox', id: 'ub-emu-skip', checked: true });
+  const diagOn = app.state.values['storage.diagnostic'] === true;
+  const entryUrmqtt = h('input', { type: 'radio', name: 'ub-emu-entry', id: 'ub-emu-entry-1', value: '1', checked: true });
+  const entryDiag = h('input', { type: 'radio', name: 'ub-emu-entry', id: 'ub-emu-entry-3', value: '3' });
+  const entryNote = h('p', { class: 'ub-help', id: 'ub-emu-entry-note', 'aria-live': 'polite' });
+  const paintEntry = () => { entryNote.textContent = entryDiag.checked ? t(diagOn ? 'emulator.entry.diag-note' : 'emulator.entry.diag-off') : ''; };
+  entryUrmqtt.addEventListener('change', paintEntry); entryDiag.addEventListener('change', paintEntry);
   const startBtn = h('button', { class: 'ub-btn', type: 'button', id: 'ub-emu-start', disabled: !mem.ok }, icon('play'), t('emulator.start'));
   const stopBtn = h('button', { class: 'ub-btn secondary', type: 'button', id: 'ub-emu-stop', hidden: true }, icon('stop'), t('emulator.stop'));
   const resetBtn = h('button', { class: 'ub-btn secondary', type: 'button', id: 'ub-emu-reset', hidden: true }, icon('refresh'), t('emulator.reset'));
@@ -95,14 +155,17 @@ function openEmulatorDialog() {
       const mod = await import(url);
       // The ISO as bytes: moved to the emulator's worker, not copied; the Blob stays for the download.
       const iso = new Uint8Array(await r.blob.arrayBuffer());
+      // The menu: the entry and the countdown are chosen in this copy only (the file to download is not touched).
+      chooseBootEntry(iso, entryDiag.checked ? 3 : 1, skip.checked || entryDiag.checked);
       vm = await mod.bootIso({
         iso, transferIso: true, canvas, onSerial, onStatus, signal: abort.signal,
         memory: mem.ram, tbSizeMiB: 128,
         // The image is configured, so it has a network card to configure (without a backend: the broker
         // starts and listens, nothing can connect).
         extraArgs: ['-device', 'virtio-net-pci,romfile='],
-        autoKeys: skip.checked ? [{ afterMs: 3200, qcode: 'ret' }] : [],
+        autoKeys: [],
       });
+      canvas.focus(); // the keyboard goes to the machine from the start; Tab leaves the screen
       vm.done.then(res => { vm = null; if (res.reason === 'crashed') status.textContent = t('emulator.failed', { reason: String(res.detail || '').slice(0, 200) }); });
     } catch (e) {
       starting = false;
@@ -126,12 +189,15 @@ function openEmulatorDialog() {
       h('li', { text: t('emulator.limit-memory') }),
       h('li', { text: t('emulator.limit-network') })),
     mem.ok ? null : h('p', { class: 'ub-error', text: t('emulator.too-big', { heap: mem.heap }) }),
+    h('fieldset', { class: 'ub-extras' }, h('legend', { text: t('emulator.entry') }),
+      h('label', { class: 'ub-switch', for: 'ub-emu-entry-1' }, entryUrmqtt, h('span', { text: t('emulator.entry.urmqtt') })),
+      h('label', { class: 'ub-switch', for: 'ub-emu-entry-3' }, entryDiag, h('span', { text: t('emulator.entry.diag') })), entryNote),
     h('label', { class: 'ub-switch', for: 'ub-emu-skip' }, skip, h('span', { text: t('emulator.skip') })),
     h('p', { class: 'ub-help' }, t('emulator.licence'), ' ', h('a', { href: new URL(`emulator/${app.emulator}/SOURCE.txt`, app.base).href, target: '_blank', rel: 'noopener', text: t('emulator.source') })));
   introRef = intro;
   const d = openDialog({
     title: t('emulator.title'), size: 'wide',
-    body: [intro, status, checks, h('div', { class: 'ub-emu-screen' }, canvas), log],
+    body: [intro, status, checks, h('div', { class: 'ub-emu-screen' }, canvas), h('p', { class: 'ub-help', id: 'ub-emu-keys', text: t('emulator.keys-hint') }), log],
     actions: [closeBtn, resetBtn, stopBtn, startBtn],
     onOpen: dlg => startBtn.focus(),
   });

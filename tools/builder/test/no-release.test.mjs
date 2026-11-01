@@ -35,7 +35,7 @@ before(async () => {
   page = await browser.newPage();
   await page.viewport(1280, 900);
   await page.goto(base + '/#');
-  await page.eval('sessionStorage.clear(); localStorage.clear()');
+  await page.eval(`sessionStorage.clear(); localStorage.clear(); localStorage.setItem("urmqtt-builder-advanced", "1")`);
   await page.goto(base + '/');
   await page.waitFor(`document.documentElement.dataset.ubReleases === '1'`, { what: 'the releases to load' });
 }, { timeout: 120000 });

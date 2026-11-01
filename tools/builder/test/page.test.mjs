@@ -30,7 +30,7 @@ const certs = haveDevCerts() ? {} : { skip: 'run `make certs`' };
 async function open(path = '/', { keep = false } = {}) {
   if (!keep) {
     await page.goto(base + '/#');
-    await page.eval('sessionStorage.clear(); localStorage.clear()');
+    await page.eval(`sessionStorage.clear(); localStorage.clear(); localStorage.setItem('urmqtt-builder-advanced', '1')`);
   }
   await page.goto(base + path);
   await page.waitFor(`document.documentElement.dataset.ubReleases === '1'`, { what: 'the releases to load' });
@@ -147,7 +147,7 @@ test('every field shows its default as the placeholder and nothing is marked as 
   assert.ok(!shown.some(s => s.id.startsWith('network.mqtt_plain') || s.id === 'storage.require_flush'), 'development-only options are not offered');
   // Nothing but the release is in the address bar.
   const hash = await page.eval('location.hash');
-  assert.deepEqual(JSON.parse(Buffer.from(hash.slice(3), 'base64url').toString()), { r: 'v0.4.0' });
+  assert.deepEqual(JSON.parse(Buffer.from(hash.slice(3), 'base64url').toString()), { r: 'v0.4.0', a: 1 });
 });
 
 test('a changed field is marked, written to the address, and can be reset (field and section)', async () => {
@@ -432,7 +432,7 @@ test('the emulator boots the image that was just built and its kernel prints the
   const srv = await serve({ app: real.appDir, mirror: real.mirrorDir, headers: ISOLATION });
   try {
     await page.goto(`http://127.0.0.1:${srv.port}/#`);
-    await page.eval('sessionStorage.clear()');
+    await page.eval(`sessionStorage.clear(); localStorage.setItem('urmqtt-builder-advanced', '1')`);
     await page.goto(`http://127.0.0.1:${srv.port}/`);
     await page.waitFor(`document.documentElement.dataset.ubReleases === '1'`);
     const errorsBefore = page.consoleErrors.length; // the page object is shared: earlier tests left errors on purpose

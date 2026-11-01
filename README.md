@@ -497,6 +497,8 @@ ISO chosen from the computer). With a release to build from (taken against a tes
 are the fixture's): [desktop](docs/screenshots/builder-desktop.png), [phone](docs/screenshots/builder-phone.png),
 [dark](docs/screenshots/builder-dark.png), [a dialog](docs/screenshots/builder-dialog.png), [the emulator](docs/screenshots/builder-emulator.png).
 
+The page opens in a **simple view** (three steps: where it runs, drop your certificate, key and CA in one go, name the image; the release is chosen and checked for you) and has an **Advanced** switch with every option, a search and a "changed from default" filter; both edit the same settings ([simple](docs/screenshots/simple-ready.png), [result](docs/screenshots/simple-result.png), [advanced](docs/screenshots/advanced-search.png), [phone](docs/screenshots/simple-phone.png)). In the emulator you can pick the boot entry (urMQTT or Diagnostic) and use your keyboard.
+
 `make builder` builds the page (WebAssembly module, script, style and texts) into `build/builder/`; `make builder-test` runs its
 tests. The directory is static: any web server that also serves a `releases.json` (made by `scripts/mirror-releases.py`)
 can host it.

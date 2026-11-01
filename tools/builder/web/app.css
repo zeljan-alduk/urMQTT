@@ -288,3 +288,28 @@ dialog.ub-dialog.narrow { width: min(520px, calc(100vw - 24px)); }
   .ub-account { grid-template-columns: minmax(0, 1fr); }
   .ub-account-remove { justify-self: start; }
 }
+
+/* The simple view and the advanced switch. */
+.ub-adv-switch { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 14px; }
+.ub-switch-btn { appearance: none; display: inline-flex; align-items: center; gap: 10px; min-height: 40px; padding: 4px 14px 4px 6px; border: 1px solid var(--ub-line); border-radius: 999px; background: var(--ub-card); color: var(--ub-text); font: inherit; font-weight: 600; cursor: pointer; }
+.ub-switch-btn .ub-knob { width: 34px; height: 22px; border-radius: 999px; background: color-mix(in srgb, var(--ub-text) 30%, var(--ub-card)); position: relative; transition: background .15s; }
+.ub-switch-btn .ub-knob::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.ub-switch-btn[aria-checked="true"] .ub-knob { background: var(--ub-accent); }
+.ub-switch-btn[aria-checked="true"] .ub-knob::after { transform: translateX(12px); }
+@media (prefers-reduced-motion: reduce) { .ub-switch-btn .ub-knob, .ub-switch-btn .ub-knob::after { transition: none; } }
+.ub-simple, .ub-advanced { display: grid; gap: 18px; }
+.ub-where { appearance: none; text-align: left; font: inherit; color: var(--ub-text); background: var(--ub-card); border: 1px solid var(--ub-line); border-radius: var(--ub-radius); padding: 12px 14px; cursor: pointer; display: grid; gap: 4px; }
+.ub-where span { color: var(--ub-muted); font-size: 14px; }
+.ub-where[aria-pressed="true"] { border-color: var(--ub-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ub-accent) 30%, transparent); background: var(--ub-row); }
+.ub-fixed { display: grid; gap: 10px; margin-top: 14px; max-width: 460px; }
+.ub-extras { border: 0; padding: 0; margin: 14px 0 0; display: grid; gap: 6px; }
+.ub-extras legend { font-weight: 700; padding: 0; margin-bottom: 4px; }
+.ub-chip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 9px; border-radius: 999px; font-size: 13px; font-weight: 600; border: 1px solid currentColor; }
+.ub-chip.ok { color: var(--ub-ok); } .ub-chip.bad { color: var(--ub-err); } .ub-chip.work { color: var(--ub-muted); }
+.ub-chip svg { width: 13px; height: 13px; }
+.ub-version-details { margin-top: 6px; } .ub-version-details summary { cursor: pointer; display: inline-block; }
+.ub-version-details[open] > :not(summary) { margin-top: 10px; }
+.ub-filter { display: grid; gap: 8px; max-width: 520px; }
+.ub-field[data-filtered="true"], .ub-card[data-filtered="true"] { display: none; }
+/* In the simple view the bar keeps to the essentials: the name and the tools are elsewhere or advanced. */
+.ub[data-mode="simple"] .ub-bar .ub-name, .ub[data-mode="simple"] .ub-bar .ub-tools { display: none; }

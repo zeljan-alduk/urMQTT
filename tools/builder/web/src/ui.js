@@ -3,6 +3,7 @@
 // about certificates. Single page, no navigation: details open in modal dialogs.
 
 const STORE_KEY = 'urmqtt-builder-v1';
+const ADVANCED_KEY = 'urmqtt-builder-advanced';
 
 const app = {
   el: null,          // root element
@@ -46,6 +47,7 @@ const scheduleRefresh = debounce(() => refresh(), 120);
 /** What survives a reload: the hash (values, no files) and sessionStorage (public files). Never keys. */
 function persist() {
   const s = app.state;
+  s.advanced = app.advanced;
   try {
     const hash = encodeHash(app.model, s);
     history.replaceState(null, '', location.pathname + location.search + hash);
@@ -92,6 +94,9 @@ function restore() {
   }
   // The accounts' hashes are never kept: after a reload the form says so.
   app.accountsForgotten = Boolean(saved && saved.v === 1 && Number(saved.accounts) > 0);
+  let stored = false;
+  try { stored = localStorage.getItem(ADVANCED_KEY) === '1'; } catch { stored = false; }
+  app.advanced = Boolean(s.advanced) || stored;
   app.state = s;
 }
 
@@ -157,6 +162,7 @@ function refresh() {
 function paintValidation() {
   const c = app.current;
   if (!c) return;
+  syncSimple();
   const loose = showIssues(c.issues);
   // Lines about how certificate, key and CA fit together.
   const rel = app.ui.relations;
@@ -170,8 +176,10 @@ function paintValidation() {
   const noRelease = !app.release;
   let kind = 'ok';
   let text = t('bar.valid');
-  if (problems) { kind = 'bad'; text = t('bar.problems', { n: problems }); }
+  if (problems && needsAddress() && !app.advanced) { kind = 'work'; text = t('bar.next-address'); }
+  else if (problems) { kind = 'bad'; text = t('bar.problems', { n: problems }); }
   else if (noRelease) { kind = 'work'; text = noReleaseYet() ? t('bar.no-release') : t('bar.choose-release'); }
+  else if (!app.advanced && certsMissing()) { kind = 'work'; text = t('bar.add-certs'); }
   setStatus(ui.status, kind, text);
   clear(ui.problems);
   c.issues.slice(0, 6).forEach(is => {
@@ -180,7 +188,7 @@ function paintValidation() {
       ? h('button', { class: 'ub-link-btn', type: 'button', text: label, on: { click: () => focusField(is.field.id) } })
       : label));
   });
-  ui.problems.hidden = problems === 0;
+  ui.problems.hidden = problems === 0 || (!app.advanced && needsAddress());
   clear(ui.notes);
   if (!problems) {
     c.risks.slice(0, 4).forEach(r => ui.notes.append(h('li', { text: riskTitle(r) })));
@@ -265,6 +273,7 @@ function renderReleases() {
 }
 
 function paintVerify() {
+  paintChip();
   const box = app.ui.verifyBox;
   if (!box) return;
   clear(box);
@@ -288,6 +297,7 @@ function paintVerify() {
 
 async function selectRelease(rel) {
   if (app.abortVerify) app.abortVerify.abort();
+  cancelPrefetch();
   app.release = rel;
   app.state.release = rel.tag;
   app.verify = null;
@@ -300,13 +310,16 @@ async function selectRelease(rel) {
   app.abortVerify = ctl;
   app.verifyState = 'work';
   paintVerify();
+  startPrefetch(rel);
   try {
     const v = await verifyRelease(app.builder, new URL('.', app.releasesUrl).href, rel, ctl.signal);
     if (app.release !== rel) return;
     app.verify = v;
+    if (!v.ok) cancelPrefetch();
   } catch (e) {
     if (e.name === 'AbortError') return;
     app.verify = { ok: false, error: e.message };
+    cancelPrefetch();
   }
   app.verifyState = 'done';
   paintVerify();
@@ -365,6 +378,7 @@ async function choosePreset(id) {
   syncFields(true);
   app.ui.presetButtons.forEach((b, i) => b.setAttribute('aria-pressed', String(['lab', 'vps', 'auto', 'defaults'][i] === id)));
   app.onChange();
+  syncSimple();
   announce(t('preset.applied', { name: t(`preset.${id}`) }));
 }
 
@@ -421,7 +435,9 @@ function renderBar() {
 }
 
 function paintFileName() {
-  if (app.ui.fileName) app.ui.fileName.textContent = outputName(app.release ? app.release.tag : 'x', app.state.name);
+  const name = outputName(app.release ? app.release.tag : 'x', app.state.name);
+  if (app.ui.fileName) app.ui.fileName.textContent = name;
+  if (app.ui.sFile) app.ui.sFile.textContent = name;
 }
 
 function paintResult() {
@@ -508,8 +524,18 @@ async function build() {
     // 1. The template, into WebAssembly memory.
     setProgress(t('progress.download'), 0);
     const total = app.release.local ? app.release.local.iso.size : app.release.template.size;
-    const onProgress = (got, all) => setProgress(`${t('progress.download')} ${formatBytes(got)} / ${formatBytes(all)}`, (got / all) * 100);
-    if (app.release.local) iso = await streamToBuffer(app.builder, app.release.local.iso.stream(), total, onProgress, app.abort.signal);
+    const t0 = Date.now();
+    const onProgress = (got, all) => setProgress(`${t('progress.download')} ${formatBytes(got)} / ${formatBytes(all)}${etaText(got, all, (app.prefetch && app.prefetch.t0) || t0)}`, (got / all) * 100);
+    const pf = !app.release.local && app.prefetch && app.prefetch.tag === app.release.tag ? app.prefetch : null;
+    if (pf) {
+      app.prefetch = null;
+      pf.onProgress = onProgress;
+      app.abort.signal.addEventListener('abort', () => pf.ctl.abort());
+      onProgress(pf.got, total);
+      try { iso = await pf.promise; } catch (e) { if (e.name === 'AbortError') throw e; iso = 0; }
+    }
+    if (iso) { /* the template was fetched while the page was being filled in */ }
+    else if (app.release.local) iso = await streamToBuffer(app.builder, app.release.local.iso.stream(), total, onProgress, app.abort.signal);
     else iso = await downloadTemplate(app.builder, mirrorUrl(new URL('.', app.releasesUrl).href, app.release.template.path), total, onProgress, app.abort.signal);
 
     // 2. Is it the template the signed sums name?
@@ -551,7 +577,7 @@ async function build() {
     app.stale = false;
     paintResult();
     announce(t('result.title'));
-    openNextDialog(true);
+    if (app.advanced) openNextDialog(true); else showResultCard();
   } catch (e) {
     if (e.name === 'AbortError') announce(t('progress.cancelled'));
     else if (e.name === 'Declined') announce(t('progress.cancelled'));
@@ -570,6 +596,7 @@ async function build() {
     ui.build.disabled = !app.release;
     paintResult();
     paintValidation();
+    if (app.release && !app.release.local && app.verify && app.verify.ok && !app.prefetch) startPrefetch(app.release);
   }
 }
 
@@ -861,14 +888,18 @@ function renderShell() {
   root.setAttribute('lang', app.lang);
   const ui = app.ui;
   ui.releaseBox = h('div', {});
+  ui.releaseSlot = h('div', {}, ui.releaseBox);
   ui.presetBox = h('div', {});
   const head = h('div', { class: 'ub-head' },
     h('h1', { text: t('title') }),
     h('p', { class: 'ub-lead', text: t('lead') }),
     h('div', { class: 'ub-privacy' }, icon('shield'), h('p', {}, h('strong', { text: t('privacy.title') + ' ' }), t('privacy.text'))));
+  ui.toggle = h('button', { class: 'ub-switch-btn', id: 'ub-advanced-toggle', type: 'button', role: 'switch', 'aria-checked': 'false', 'aria-describedby': 'ub-adv-hint', on: { click: () => setAdvanced(!app.advanced) } },
+    h('span', { class: 'ub-knob', 'aria-hidden': 'true' }), h('span', { text: t('adv.toggle') }));
+  head.append(h('div', { class: 'ub-adv-switch' }, ui.toggle, h('span', { class: 'ub-help', id: 'ub-adv-hint', text: t('adv.hint') })));
   const releaseCard = h('section', { class: 'ub-card', 'aria-labelledby': 'ub-h-release' },
     h('header', {}, h('h2', { id: 'ub-h-release' }, h('span', { class: 'ub-step', 'aria-hidden': 'true', text: '1' }), t('release.title'))),
-    h('p', { class: 'ub-sub', text: t('release.help') }), ui.releaseBox);
+    h('p', { class: 'ub-sub', text: t('release.help') }), ui.releaseSlot);
   const presetCard = h('section', { class: 'ub-card', 'aria-labelledby': 'ub-h-preset' },
     h('header', {}, h('h2', { id: 'ub-h-preset' }, h('span', { class: 'ub-step', 'aria-hidden': 'true', text: '2' }), t('preset.title'))),
     h('p', { class: 'ub-sub', text: t('preset.help') }), ui.presetBox);
@@ -877,11 +908,14 @@ function renderShell() {
   const tlsFields = $('#sec-tls .ub-fields', sections);
   if (tlsFields) tlsFields.after(ui.relations);
   const formHead = h('h2', { style: 'margin:10px 0 -4px' }, h('span', { class: 'ub-step', 'aria-hidden': 'true', text: '3' }), t('form.title'));
-  const main = h('div', { class: 'ub-main' }, releaseCard, presetCard, formHead, sections);
+  ui.simple = renderSimple();
+  ui.advanced = h('div', { class: 'ub-advanced' }, releaseCard, presetCard, formHead, renderAdvancedTools(), sections);
+  const main = h('div', { class: 'ub-main' }, ui.simple, ui.advanced);
   const layout = h('div', { class: 'ub-layout' }, main, renderBar());
   root.append(h('div', { class: 'ub-wrap' }, head, layout));
   renderPresets();
   renderReleases();
+  applyView();
 }
 
 function resetUiState() { rows.clear(); sectionViews.clear(); }

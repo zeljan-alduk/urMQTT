@@ -480,7 +480,7 @@ export function encodeHash(model, state) {
     if (isUserList(f)) continue;
     if (state.values[f.id] !== undefined && isChanged(f, state.values[f.id])) v[f.id] = state.values[f.id];
   }
-  const payload = { r: state.release || undefined, p: state.preset || undefined, n: state.name || undefined, v: Object.keys(v).length ? v : undefined };
+  const payload = { r: state.release || undefined, p: state.preset || undefined, n: state.name || undefined, a: state.advanced ? 1 : undefined, v: Object.keys(v).length ? v : undefined };
   const json = JSON.stringify(payload);
   if (json === '{}') return '';
   return '#s=' + b64url(new TextEncoder().encode(json));
@@ -497,6 +497,7 @@ export function decodeHash(model, hash) {
   s.release = typeof p.r === 'string' ? p.r.slice(0, 64) : '';
   s.preset = typeof p.p === 'string' && PRESETS[p.p] ? p.p : '';
   s.name = typeof p.n === 'string' ? p.n.slice(0, 40) : '';
+  if (p.a) s.advanced = true;
   if (p.v && typeof p.v === 'object') {
     for (const [id, v] of Object.entries(p.v)) {
       const f = model.byId.get(id);

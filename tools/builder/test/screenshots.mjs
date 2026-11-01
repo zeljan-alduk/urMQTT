@@ -48,7 +48,7 @@ async function setField(id, text) {
 try {
   await page.viewport(1280, 800);
   await page.goto(`${base}/#`);
-  await page.eval('sessionStorage.clear()');
+  await page.eval(`sessionStorage.clear(); localStorage.setItem('urmqtt-builder-advanced', '1')`);
   await page.goto(`${base}/`);
   await ready();
   // A configuration in the middle of being made: the VPS preset, a fixed address, the certificates.
