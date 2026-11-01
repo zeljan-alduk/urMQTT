@@ -243,6 +243,14 @@ impl Idle {
         } else {
             0
         };
+        let (rx_peak, rx_size) = if me == 0 {
+            (
+                RX_RING_PEAK.swap(0, Ordering::Relaxed),
+                RX_RING_SIZE.load(Ordering::Relaxed),
+            )
+        } else {
+            (0, 0)
+        };
         let busy = 100 - (self.slept_ns * 100 / window.max(1)).min(100);
         // Relaxed: statistics, for `$SYS/broker/cpu/busy/<core>` (O1).
         if let Some(b) = crate::sys::BUSY.get(me) {
@@ -257,6 +265,20 @@ impl Idle {
                     st.lock_wait_ns.swap(0, Ordering::Relaxed),
                     st.steal_ns.swap(0, Ordering::Relaxed),
                 )
+            });
+        // The lock this core waited for most in the window, and how often.
+        let (top_addr, top_count, top_ns) =
+            crate::watchdog::LOCK_TOP.get(me).map_or((0, 0, 0), |t| {
+                let mut best = (0usize, 0u64, 0u64);
+                for e in t {
+                    let ns = e.ns.swap(0, Ordering::Relaxed);
+                    let n = e.count.swap(0, Ordering::Relaxed);
+                    let a = e.addr.swap(0, Ordering::Relaxed);
+                    if ns >= best.2 {
+                        best = (a, n, ns);
+                    }
+                }
+                best
             });
         let p = core::mem::take(&mut self.prof);
         let pct = |ns: u64| ns * 100 / window.max(1);
@@ -285,12 +307,41 @@ impl Idle {
         // host reports, 100 ms of lock waiting in the window, a NIC backlog. A VPS
         // with a noisy neighbour has late ticks in every window; that would be a
         // line per core every 5 s on a console that costs milliseconds per line.
-        if late_worst >= 20_000_000 || steal > 0 || lock_wait >= 100_000_000 || nic_peak > 0 {
+        if late_worst >= 20_000_000
+            || steal > 0
+            || lock_wait >= 20_000_000
+            || nic_peak > 0
+            || rx_peak * 4 >= rx_size.max(1) * 3
+        {
+            // Which lock: its distance in the image from the heap's (0: the
+            // heap's own), the same in every boot whatever the kernel was slid
+            // to; `nm` turns it into a name.
+            let from_heap = (top_addr as i64).wrapping_sub(crate::vm::HEAP.lock_addr() as i64);
             urmqtt_log::info!(
-                "stalls: core {me}: {late_ticks} late tick(s), worst {} us; {} us waiting for locks; host steal {} us; NIC backlog peak {nic_peak}",
+                "stalls: core {me}: {late_ticks} late tick(s), worst {} us; {} us waiting for locks (most for the lock at heap lock {from_heap:+}: {} us in {} waits); host steal {} us; NIC backlog peak {nic_peak}; NIC receive queue peak {rx_peak} of {rx_size}",
                 late_worst / 1000,
                 lock_wait / 1000,
+                top_ns / 1000,
+                top_count,
                 steal / 1000
+            );
+        }
+        // Visits to the global heap lock (ADR-230): large allocations the
+        // per-core caches cannot serve, and their refills and drains.
+        let ops = crate::vm::HEAP.take_ops(me);
+        if ops[0] + ops[2] + ops[3] + ops[5] + ops[6] >= 5_000
+            || time::ticks_to_ns(ops[4]) >= 20_000_000
+        {
+            urmqtt_log::info!(
+                "heap: core {me}: {} us in the global heap for {} large allocation(s) ({} KiB), {} cache refill(s), {} drain(s); through the depots {} refill(s), {} drain(s); in {} ms",
+                time::ticks_to_ns(ops[4]) / 1000,
+                ops[0],
+                ops[1],
+                ops[2],
+                ops[3],
+                ops[5],
+                ops[6],
+                window / 1_000_000
             );
         }
         // Relaxed: statistics.
@@ -434,9 +485,13 @@ pub fn set_heap_reserve(limit_mb: Option<u32>) {
 pub fn heap_has_room() -> bool {
     // Relaxed: see `set_heap_reserve`.
     let reserve = HEAP_RESERVE.load(Ordering::Relaxed);
-    crate::vm::HEAP
-        .stats()
-        .is_none_or(|(free, _)| free as u64 >= reserve)
+    let Some((free, capacity)) = crate::vm::HEAP.stats() else {
+        return true;
+    };
+    // The big blocks the per-CPU caches keep are memory this check does not
+    // see: within a sixteenth of the heap of the reserve they are not kept.
+    crate::vm::HEAP.set_pressure((free as u64) < reserve.saturating_add(capacity as u64 / 16));
+    free as u64 >= reserve
 }
 
 /// Records the idle heap the next reports are measured against.
@@ -646,6 +701,18 @@ pub static ROUTE_DROPPED: AtomicU64 = AtomicU64::new(0);
 
 /// The most frames core 0 held back for a full NIC queue in this window.
 pub static NIC_BACKLOG_PEAK: AtomicU64 = AtomicU64::new(0);
+
+/// The most frames the NIC's receive queue held unread when core 0 looked
+/// in this window, and the queue's size (statistics): a queue that gets
+/// full drops the frames behind it in the host, unseen by the guest.
+pub static RX_RING_PEAK: AtomicU64 = AtomicU64::new(0);
+pub static RX_RING_SIZE: AtomicU64 = AtomicU64::new(0);
+
+/// Notes how many received frames wait in the NIC's queue (statistics).
+pub fn note_rx_ring(n: u16) {
+    // Relaxed: statistics.
+    RX_RING_PEAK.fetch_max(u64::from(n), Ordering::Relaxed);
+}
 
 /// Notes the length of core 0's NIC backlog (statistics).
 pub fn note_nic_backlog(len: usize) {

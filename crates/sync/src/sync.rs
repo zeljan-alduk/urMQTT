@@ -18,10 +18,11 @@ static BEGIN: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 static REPORT: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Installs the contention hooks: `clock` returns a monotonic count, `begin`
-/// receives its reading when a wait starts to spin (so a watchdog that looks
-/// in the middle of a long wait can count it), `report` the difference of two
+/// receives its reading and the lock's address when a wait starts to spin (so
+/// a watchdog that looks in the middle of a long wait can count it, and the
+/// statistics can say which lock it was), `report` the difference of two
 /// readings when the wait ends.
-pub fn set_contention_hooks(clock: fn() -> u64, begin: fn(u64), report: fn(u64)) {
+pub fn set_contention_hooks(clock: fn() -> u64, begin: fn(u64, usize), report: fn(u64)) {
     // Release: the clock and `begin` must be visible before `report` is.
     CLOCK.store(clock as *mut (), Ordering::Release);
     BEGIN.store(begin as *mut (), Ordering::Release);
@@ -29,7 +30,7 @@ pub fn set_contention_hooks(clock: fn() -> u64, begin: fn(u64), report: fn(u64))
 }
 
 #[cold]
-fn wait_for(serving: &AtomicU32, ticket: u32) {
+fn wait_for(serving: &AtomicU32, ticket: u32, lock: usize) {
     let (clock, begin, report) = (
         CLOCK.load(Ordering::Acquire),
         BEGIN.load(Ordering::Acquire),
@@ -41,15 +42,15 @@ fn wait_for(serving: &AtomicU32, ticket: u32) {
         // SAFETY: only `set_contention_hooks` stores into this pointer, and it
         // stores a `fn() -> u64`.
         let clock = unsafe { core::mem::transmute::<*mut (), fn() -> u64>(clock) };
-        // SAFETY: as above, for a `fn(u64)`.
-        let begin = unsafe { core::mem::transmute::<*mut (), fn(u64)>(begin) };
+        // SAFETY: as above, for a `fn(u64, usize)`.
+        let begin = unsafe { core::mem::transmute::<*mut (), fn(u64, usize)>(begin) };
         // SAFETY: as above, for a `fn(u64)`.
         let report = unsafe { core::mem::transmute::<*mut (), fn(u64)>(report) };
         Some((clock, begin, report))
     };
     let t0 = hooks.map(|(c, b, _)| {
         let t = c();
-        b(t);
+        b(t, lock);
         t
     });
     // Acquire: pairs with the Release store in `drop`.
@@ -89,7 +90,7 @@ impl<T> SpinLock<T> {
         // Acquire: pairs with the Release store in `drop`, making the previous
         // holder's writes to `value` visible before we touch it.
         if self.serving.load(Ordering::Acquire) != ticket {
-            wait_for(&self.serving, ticket);
+            wait_for(&self.serving, ticket, self as *const Self as usize);
         }
         SpinGuard { lock: self }
     }

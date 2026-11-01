@@ -109,12 +109,90 @@ impl LockedHeap {
         *self.inner.lock() = Some(heap);
     }
 
+    /// The address of the heap's lock (to tell it from other locks in the
+    /// contention statistics).
+    pub fn lock_addr(&self) -> usize {
+        &self.inner as *const _ as usize
+    }
+
     /// (free bytes, capacity), or `None` before `init`.
     pub fn stats(&self) -> Option<(usize, usize)> {
         self.inner
             .lock()
             .as_ref()
             .map(|h| (h.free_bytes(), h.capacity()))
+    }
+
+    /// Allocates up to `n` blocks of `layout` under one hold of the lock and
+    /// calls `put` for each (the poison check of each runs after the lock is
+    /// released). Returns how many it got.
+    ///
+    /// # Safety
+    /// As `GlobalAlloc::alloc`.
+    #[allow(unsafe_code)]
+    pub unsafe fn alloc_many(
+        &self,
+        layout: Layout,
+        n: usize,
+        mut put: impl FnMut(*mut u8),
+    ) -> usize {
+        let mut got: [Option<(NonNull<u8>, usize)>; 32] = [None; 32];
+        let n = n.min(got.len());
+        let fault = {
+            let mut g = self.inner.lock();
+            let mut fault = None;
+            if let Some(h) = g.as_mut() {
+                for slot in got.iter_mut().take(n) {
+                    *slot = h.alloc_deferred(layout);
+                    if slot.is_none() {
+                        break;
+                    }
+                }
+                fault = h.take_fault();
+            }
+            fault
+        };
+        if let Some(f) = fault {
+            heap_fault(f);
+        }
+        let mut count = 0;
+        for (p, verify) in got.iter().take(n).flatten() {
+            // SAFETY: as in `alloc`.
+            if *verify > 0 && !unsafe { buddy::check_poison(*p, *verify) } {
+                heap_fault(buddy::HeapFault::WriteAfterFree);
+            }
+            put(p.as_ptr());
+            count += 1;
+        }
+        count
+    }
+
+    /// Frees `n` blocks of `layout` (poisoned by the caller after their
+    /// headers, see [`buddy::BuddyHeap::dealloc_ex`]) under one hold of the
+    /// lock.
+    ///
+    /// # Safety
+    /// As `GlobalAlloc::dealloc` for each block.
+    #[allow(unsafe_code)]
+    pub unsafe fn dealloc_many(&self, layout: Layout, blocks: &[*mut u8]) {
+        let fault = {
+            let mut g = self.inner.lock();
+            let mut fault = None;
+            if let Some(h) = g.as_mut() {
+                for &p in blocks {
+                    if let Some(p) = NonNull::new(p) {
+                        // SAFETY: GlobalAlloc's contract; poisoned as announced.
+                        if let Err(f) = unsafe { h.dealloc_ex(p, layout, true) } {
+                            fault.get_or_insert(f);
+                        }
+                    }
+                }
+            }
+            fault
+        };
+        if let Some(f) = fault {
+            heap_fault(f);
+        }
     }
 
     /// Frees a block the caller may already have poisoned (see
@@ -154,7 +232,7 @@ unsafe impl GlobalAlloc for LockedHeap {
             let mut g = self.inner.lock();
             match g.as_mut() {
                 Some(h) => {
-                    let p = h.alloc(layout);
+                    let p = h.alloc_deferred(layout);
                     (p, h.take_fault())
                 }
                 None => (None, None),
@@ -163,7 +241,16 @@ unsafe impl GlobalAlloc for LockedHeap {
         if let Some(f) = fault {
             heap_fault(f);
         }
-        p.map_or(core::ptr::null_mut(), NonNull::as_ptr)
+        let Some((p, verify)) = p else {
+            return core::ptr::null_mut();
+        };
+        // The poison check reads up to 16 KiB: after the lock, not inside it
+        // (ADR-230). The block is ours; a block that fails is a write after free.
+        // SAFETY: `p` and `verify` are what `alloc_deferred` returned.
+        if verify > 0 && !unsafe { buddy::check_poison(p, verify) } {
+            heap_fault(buddy::HeapFault::WriteAfterFree);
+        }
+        p.as_ptr()
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {

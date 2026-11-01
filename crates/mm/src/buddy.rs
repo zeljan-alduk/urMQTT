@@ -53,7 +53,7 @@ pub const HEADER: usize = 32;
 pub const POISON_LIMIT: usize = 16 * 1024;
 
 /// Bytes of a block of `size` that are poisoned when it is freed.
-const fn prange(size: usize) -> usize {
+pub const fn prange(size: usize) -> usize {
     if size < POISON_LIMIT {
         size
     } else {
@@ -456,6 +456,23 @@ impl BuddyHeap {
     }
 
     pub fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+        let (p, verify) = self.alloc_deferred(layout)?;
+        // SAFETY: the block is ours and `verify` bytes after its header are
+        // inside it.
+        if verify > 0 && !unsafe { all_poison(p.as_ptr() as usize + HEADER, verify) } {
+            self.flag(HeapFault::WriteAfterFree);
+            return None;
+        }
+        Some(p)
+    }
+
+    /// As [`alloc`](Self::alloc), without the check that a block freed earlier
+    /// is still all [`POISON`]: the block comes back with the number of bytes
+    /// after its header that must be poison (0: none). The check reads up to
+    /// 16 KiB, which a caller holding a lock should do after releasing it (the
+    /// block is the caller's alone by then, so nothing changes); a block that
+    /// fails it is a write after free ([`check_poison`]).
+    pub fn alloc_deferred(&mut self, layout: Layout) -> Option<(NonNull<u8>, usize)> {
         if self.fault.is_some() {
             return None;
         }
@@ -491,20 +508,16 @@ impl BuddyHeap {
             unsafe { self.push(k, addr + child, cst) };
         }
         let size = 1usize << order;
-        if st == State::Poisoned {
-            // SAFETY: the block is ours; the poisoned prefix after the
-            // header is poison.
-            let intact = unsafe { all_poison(addr + HEADER, prange(size) - HEADER) };
-            if !intact {
-                self.flag(HeapFault::WriteAfterFree);
-                return None;
-            }
-        }
+        let verify = if st == State::Poisoned {
+            prange(size) - HEADER
+        } else {
+            0
+        };
         // SAFETY: the block is ours; the header is stale list data.
         unsafe { ptr::write_bytes(addr as *mut u8, POISON, HEADER.min(size)) };
         self.set_bit_at(self.alloc_bit(addr), true);
         self.free_bytes -= size;
-        NonNull::new(addr as *mut u8)
+        Some((NonNull::new(addr as *mut u8)?, verify))
     }
 
     /// # Safety
@@ -607,6 +620,30 @@ impl BuddyHeap {
         unsafe { self.push(order, addr, st) };
         Ok(())
     }
+}
+
+/// Whether the `len` bytes after the header of the block at `p` are all
+/// [`POISON`] (the check [`BuddyHeap::alloc_deferred`] leaves to its caller).
+///
+/// # Safety
+/// `p` is a block just returned by `alloc_deferred`, `len` the number it
+/// returned with it.
+pub unsafe fn check_poison(p: NonNull<u8>, len: usize) -> bool {
+    // SAFETY: per the contract the range is inside a block that is ours.
+    unsafe { all_poison(p.as_ptr() as usize + HEADER, len) }
+}
+
+/// Poisons the part of a block of `size` bytes that [`BuddyHeap::dealloc_ex`]
+/// with `poisoned = true` takes as done: everything after the header up to
+/// the poison limit.
+///
+/// # Safety
+/// `p` is a live block of exactly `size` bytes that the caller is about to
+/// free.
+pub unsafe fn poison_for_free(p: *mut u8, size: usize) {
+    let start = p.wrapping_add(HEADER);
+    // SAFETY: per the contract the range is inside the block.
+    unsafe { ptr::write_bytes(start, POISON, prange(size).saturating_sub(HEADER)) };
 }
 
 /// Whether `len` bytes at `addr` (32-byte aligned, a multiple of 8 long) are

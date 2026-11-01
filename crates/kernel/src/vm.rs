@@ -607,6 +607,7 @@ pub fn enable_heap_tagging() {
 /// which compares global free bytes before and after).
 pub fn enable_heap_caches() {
     HEAP.enable(urmqtt_mm::cached::Hooks {
+        clock: urmqtt_arch::time::now,
         cpu: crate::smp::current,
         irq_save: urmqtt_arch::cpu::irq_save,
         irq_restore: urmqtt_arch::cpu::irq_restore,

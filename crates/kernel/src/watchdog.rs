@@ -45,7 +45,7 @@
 //! connections (no connection recorded), so over budget they are reported
 //! and nothing is aborted.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use urmqtt_arch::time;
 use urmqtt_config::{CONFIG, WatchdogAction};
@@ -185,11 +185,55 @@ pub static EXCUSED: AtomicU64 = AtomicU64::new(0);
 /// wait lasts, and the handler is charged nothing for it.
 static WAITING_SINCE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
-/// Called when a spin lock wait starts, with the clock's reading.
-fn lock_begin(now: u64) {
-    if let Some(w) = WAITING_SINCE.get(crate::smp::current()) {
+/// The lock this core is waiting for (its address), for the statistics.
+static WAITING_FOR: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
+
+/// Per core, the locks it waited for in this window: address, count, ns. Four
+/// entries are enough to see which lock it is; a fifth is not recorded.
+pub struct LockTop {
+    pub addr: AtomicUsize,
+    pub count: AtomicU64,
+    pub ns: AtomicU64,
+}
+
+pub static LOCK_TOP: [[LockTop; 4]; MAX_CPUS] = [const {
+    [const {
+        LockTop {
+            addr: AtomicUsize::new(0),
+            count: AtomicU64::new(0),
+            ns: AtomicU64::new(0),
+        }
+    }; 4]
+}; MAX_CPUS];
+
+/// Called when a spin lock wait starts, with the clock's reading and the
+/// lock's address.
+fn lock_begin(now: u64, lock: usize) {
+    let me = crate::smp::current();
+    if let Some(w) = WAITING_SINCE.get(me) {
         // Relaxed: read by this core's own tick.
         w.store(now.max(1), Ordering::Relaxed);
+    }
+    if let Some(l) = WAITING_FOR.get(me) {
+        l.store(lock, Ordering::Relaxed);
+    }
+}
+
+/// Adds a finished wait to this core's per-lock table.
+fn note_lock(me: usize, ticks: u64) {
+    let (Some(lock), Some(table)) = (WAITING_FOR.get(me), LOCK_TOP.get(me)) else {
+        return;
+    };
+    let addr = lock.load(Ordering::Relaxed);
+    let ns = time::ticks_to_ns(ticks);
+    for e in table {
+        let a = e.addr.load(Ordering::Relaxed);
+        if a == addr || a == 0 {
+            e.addr.store(addr, Ordering::Relaxed);
+            e.count.fetch_add(1, Ordering::Relaxed);
+            e.ns.fetch_add(ns, Ordering::Relaxed);
+            return;
+        }
     }
 }
 
@@ -200,6 +244,7 @@ fn lock_wait(ticks: u64) {
     if let Some(w) = WAITING_SINCE.get(me) {
         w.store(0, Ordering::Relaxed);
     }
+    note_lock(me, ticks);
     if let Some(d) = DISCOUNT.get(me) {
         // Relaxed: read by this core's own tick.
         d.fetch_add(ticks, Ordering::Relaxed);
@@ -554,7 +599,7 @@ pub fn self_test_lockwait() {
     {
         let _g = enter(Phase::SelfTest, Some(46));
         let t0 = time::now();
-        lock_begin(t0);
+        lock_begin(t0, 0);
         let end = t0 + time::ns_to_ticks(50_000_000);
         while time::now() < end {
             core::hint::spin_loop();
