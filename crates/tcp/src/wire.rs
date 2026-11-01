@@ -18,8 +18,41 @@ pub struct Header {
     pub window: u16,
     /// MSS option, if present (only meaningful on SYN).
     pub mss: Option<u16>,
+    /// Window scale option (RFC 7323), the shift, if present (SYN only).
+    pub wscale: Option<u8>,
+    /// SACK-permitted option (RFC 2018), on SYN.
+    pub sack_ok: bool,
+    /// Timestamps option (RFC 7323): TSval, TSecr.
+    pub ts: Option<(u32, u32)>,
+    /// SACK blocks (RFC 2018), `nsack` of them valid: left and right edge.
+    pub sack: [(u32, u32); 4],
+    pub nsack: u8,
     /// Offset of the payload in the segment.
     pub data_off: usize,
+}
+
+/// Options beyond the MSS that a segment of ours carries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Ext {
+    /// SACK-permitted (SYN-ACK only).
+    pub sack_perm: bool,
+    /// Window scale shift (SYN-ACK only).
+    pub wscale: Option<u8>,
+    /// TSval, TSecr.
+    pub ts: Option<(u32, u32)>,
+    /// SACK blocks to report, `nsack` valid (at most 3 next to timestamps).
+    pub sacks: [(u32, u32); 3],
+    pub nsack: u8,
+}
+
+impl Ext {
+    pub const NONE: Ext = Ext {
+        sack_perm: false,
+        wscale: None,
+        ts: None,
+        sacks: [(0, 0); 3],
+        nsack: 0,
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +118,8 @@ pub fn parse(src: [u8; 4], dst: [u8; 4], seg: &[u8]) -> Result<Header, WireError
         return Err(WireError::BadFlags);
     }
     let mut mss = None;
+    let (mut wscale, mut sack_ok, mut ts) = (None, false, None);
+    let (mut sack, mut nsack) = ([(0u32, 0u32); 4], 0u8);
     let mut i = HEADER;
     while i < off {
         match seg.get(i).copied() {
@@ -95,8 +130,28 @@ pub fn parse(src: [u8; 4], dst: [u8; 4], seg: &[u8]) -> Result<Header, WireError
                 if len < 2 || i + len > off {
                     return Err(WireError::BadOffset);
                 }
-                if kind == 2 && len == 4 {
-                    mss = be16(seg, i + 2);
+                match (kind, len) {
+                    (2, 4) => mss = be16(seg, i + 2),
+                    (3, 3) => wscale = seg.get(i + 2).map(|&s| s.min(14)),
+                    (4, 2) => sack_ok = true,
+                    (8, 10) => {
+                        if let (Some(v), Some(e)) = (be32(seg, i + 2), be32(seg, i + 6)) {
+                            ts = Some((v, e));
+                        }
+                    }
+                    (5, l) if l >= 10 && (l - 2) % 8 == 0 => {
+                        for b in 0..((l - 2) / 8).min(4) {
+                            if let (Some(a), Some(z), Some(slot)) = (
+                                be32(seg, i + 2 + 8 * b),
+                                be32(seg, i + 6 + 8 * b),
+                                sack.get_mut(b),
+                            ) {
+                                *slot = (a, z);
+                                nsack = b as u8 + 1;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
                 i += len;
             }
@@ -110,6 +165,11 @@ pub fn parse(src: [u8; 4], dst: [u8; 4], seg: &[u8]) -> Result<Header, WireError
         flags,
         window: be16(seg, 14).ok_or(WireError::Truncated)?,
         mss,
+        wscale,
+        sack_ok,
+        ts,
+        sack,
+        nsack,
         data_off: off,
     })
 }
@@ -129,8 +189,57 @@ pub struct Out {
 /// Writes header (+ MSS option) and `payload` into `buf` (cleared first)
 /// and fills in the checksum.
 pub fn emit(src: [u8; 4], dst: [u8; 4], o: &Out, payload: &[u8], buf: &mut alloc::vec::Vec<u8>) {
+    emit_ext(src, dst, o, &Ext::NONE, payload, buf);
+}
+
+/// [`emit`] with the options of [`Ext`]. Layout as Linux writes it: on a
+/// SYN-ACK `MSS, SACK-permitted, timestamps, NOP, window scale`; on other
+/// segments `NOP NOP timestamps` and then `NOP NOP SACK blocks`.
+pub fn emit_ext(
+    src: [u8; 4],
+    dst: [u8; 4],
+    o: &Out,
+    x: &Ext,
+    payload: &[u8],
+    buf: &mut alloc::vec::Vec<u8>,
+) {
     buf.clear();
-    let hlen = if o.mss.is_some() { HEADER + 4 } else { HEADER };
+    let mut opts = [1u8; 40];
+    let mut n = 0usize;
+    let mut put = |bytes: &[u8]| {
+        if let Some(d) = opts.get_mut(n..n + bytes.len()) {
+            d.copy_from_slice(bytes);
+            n += bytes.len();
+        }
+    };
+    if let Some(m) = o.mss {
+        put(&[2, 4]);
+        put(&m.to_be_bytes());
+    }
+    match (x.sack_perm, x.ts) {
+        (true, Some(_)) => put(&[4, 2]),
+        (true, None) => put(&[4, 2, 1, 1]),
+        (false, Some(_)) => put(&[1, 1]),
+        (false, None) => {}
+    }
+    if let Some((v, e)) = x.ts {
+        put(&[8, 10]);
+        put(&v.to_be_bytes());
+        put(&e.to_be_bytes());
+    }
+    if let Some(sh) = x.wscale {
+        put(&[1, 3, 3, sh]);
+    }
+    if x.nsack > 0 {
+        let k = usize::from(x.nsack).min(x.sacks.len());
+        put(&[1, 1, 5, (2 + 8 * k) as u8]);
+        for &(a, z) in x.sacks.iter().take(k) {
+            put(&a.to_be_bytes());
+            put(&z.to_be_bytes());
+        }
+    }
+    let olen = n.div_ceil(4) * 4;
+    let hlen = HEADER + olen;
     buf.extend_from_slice(&o.sport.to_be_bytes());
     buf.extend_from_slice(&o.dport.to_be_bytes());
     buf.extend_from_slice(&o.seq.to_be_bytes());
@@ -139,10 +248,7 @@ pub fn emit(src: [u8; 4], dst: [u8; 4], o: &Out, payload: &[u8], buf: &mut alloc
     buf.push(o.flags);
     buf.extend_from_slice(&o.window.to_be_bytes());
     buf.extend_from_slice(&[0, 0, 0, 0]);
-    if let Some(m) = o.mss {
-        buf.extend_from_slice(&[2, 4]);
-        buf.extend_from_slice(&m.to_be_bytes());
-    }
+    buf.extend_from_slice(opts.get(..olen).unwrap_or(&[]));
     buf.extend_from_slice(payload);
     let c = checksum(src, dst, buf);
     if let Some(d) = buf.get_mut(16..18) {

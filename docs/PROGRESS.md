@@ -28,6 +28,28 @@ The kernel is built once and the configuration is data (ADR-215 to ADR-219). The
 - The release workflow's template step has never run; it builds the x86_64 kernel on the arm64 runner, which CI did not do before.
 - ADR numbers 215 to 219 may collide with the robustness work done in parallel (resolve at merge).
 
+## PERF/ROBUST — single flow, QoS 0 overload and the watchdog (2026-11-01)
+
+Goal set after X11: find and fix the causes behind its findings. Decisions ADR-221 to ADR-224; numbers, method and the honest list of what is
+left in `docs/PERFORMANCE.md` section 7; raw files `docs/perf-results/urmqtt-x11v-{before,after,step-*}.txt`, `mosquitto-x11v-same-session.txt`,
+`local-wan-rig.txt`.
+
+**Causes found (with evidence in PERFORMANCE.md 7.1)**
+
+- A **lost wake-up** in `MqttService::poll` (the drained ready list overwrote the connections just put back): a subscriber that fell behind once was never served again, QoS 0 to it was dropped until a PINGRESP - "delivered 0/s" in 4 of 6 single-flow runs on the VPS. Fixed.
+- **TCP threw away every segment after a loss** (in-order receive only), had a 16 bit window, a 64 KiB send queue and counted ACKs instead of bytes. Now: bounded out-of-order queue per connection and per core, SACK blocks, window scaling / SACK / timestamps through the SYN cookie (options in the low bits of our timestamp value; stateless until the final ACK), send queue = 2 x cwnd up to 1 MiB, byte-counting congestion window. Host tests (16 new), fuzz target extended (2 M runs clean), H3 model test unchanged and passing.
+- The **dispatcher slept until the 10 ms tick** (no RX interrupt on virtio-net): 0-10 ms per pause. Now polls every 200 us while connections exist (ADR-224): ping through the rig 13.1 -> 7.4 ms.
+- Frames dropped for a full NIC queue: core 0 now holds up to 4 096; rings 2 048; spare frame buffers returned when quiet (this also repaired the `storm` smoke).
+- QoS 0 loss now **counted per cause** (`$SYS/broker/messages/dropped/*`, `frames/dropped/*`, `status`, a warning line per core per 10 s).
+- **Watchdog**: the budget is **running time** (late ticks, lock waits including a wait in progress, close-up 1 ms ticks for a long handler, confirmation at the next tick; KVM steal time read where the host offers it, Contabo's does not). Production `action = "drop"` unchanged.
+
+**Results on the Contabo VPS** (same load host, same day, 24-30 runs each): connections lost per run 7-16 -> 0 (flood), watchdog aborts 148 in 30 runs -> 0 in 24; one 64 B flow 1.9k -> 23.7k published/s (Mosquitto 29.3k), 1 KiB 0 -> 3.9k (5.4k); 16 pairs flood 24.7k -> 43.2k (Mosquitto 31.4k). **One flow is still not faster than Mosquitto**; see the open items (lock wait of 4-7 % of a data core, up to 27 % in a window; SACK on our sending side; RX interrupt).
+
+**The VPS** is back on the production ISO built from this tree (`v0.1.0-90-g120da49`, `deploy/prod` unmodified; the commit after it only adds this line): console `URMQTT READY`, `openssl s_client` from the build server completes TLS 1.3, `$SYS/broker/version` as above. Temporary images, the SSH secret, the served ISO directory and the generator's directory (with the CA key) were deleted; Mosquitto ran on Debian 13 for the same-session comparison before that.
+
+**Not done / open**: heap lock contention (per-CPU caches above 2 KiB), SACK-driven recovery on our sending side, a receive interrupt, handshake/idle/fan-out not measured again, the shared load host (steal 58-77 %) limits every cell, bare metal.
+
+
 ## X11 — Performance on the real VPS, with Mosquitto on the same VPS (2026-11-01)
 
 First release scope (VPS only). Method ADR-213; every number, caveat and the findings are in `docs/PERFORMANCE.md`; raw output in `docs/perf-results/` (`urmqtt-prod.txt`, `urmqtt-bench.txt` and `.pass1.txt`, `urmqtt-bench-log.txt`, `mosquitto.txt`, `mosquitto-idle*.txt`; tables with `scripts/x11-report.py`).

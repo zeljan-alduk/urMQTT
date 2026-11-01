@@ -1273,7 +1273,16 @@ impl MqttService {
                 self.remote_output(b, link);
             }
         }
+        // `local_output` and `remote_output` list a connection again when they
+        // could not move all of its output (TLS buffer full, no relay credit)
+        // by pushing it on `self.ready`; keep those for the next pass. Putting
+        // the drained list back over them forgot the request, and a subscriber
+        // whose output buffer was full then never got another pass: every QoS 0
+        // message to it was dropped until something else (a PINGRESP) woke it
+        // (ADR-223).
+        let mut again = core::mem::take(&mut self.ready);
         self.ready = ready;
+        self.ready.append(&mut again);
         // Hand pending bytes to TCP; finish closes.
         watchdog::step(watchdog::Step::Tcp);
         let mut blocked = core::mem::take(&mut self.blocked);
@@ -1292,6 +1301,8 @@ impl MqttService {
             for peer in dataplane::workers(self.n).filter(|&p| p != self.me) {
                 if qos == QoS::AtMostOnce && link.backlog_len(peer) > ROUTE_BACKLOG {
                     self.dropped_routes += 1;
+                    // Relaxed: statistics.
+                    dataplane::ROUTE_DROPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if self.dropped_routes.is_power_of_two() {
                         warn!(
                             "mqtt: {} QoS 0 fan-out message(s) dropped (core {peer} behind)",

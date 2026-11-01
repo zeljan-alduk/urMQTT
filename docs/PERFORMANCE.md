@@ -8,7 +8,8 @@ of its heap where Mosquitto's process grew by about 27 KB per connection, and de
 about the same or a lower end-to-end latency at modest rates. Under heavy offered load the picture is
 mixed and **not in urMQTT's favour in two places**: a single TCP flow moves much less data through urMQTT than through
 Mosquitto, and urMQTT's 20 ms handler watchdog **dropped live connections** when the hypervisor stalled a vCPU
-(production setting `action = "drop"`). Both are in the tables and in "Findings" below. Everything else about
+(production setting `action = "drop"`). Both are in the tables and in "Findings" below. **Both turned out to have causes in urMQTT, found and fixed afterwards: section 7
+(ADR-221 to ADR-224) holds the causes, the changes and the numbers measured again on the same VPS.** Everything else about
 these numbers is limited by a shared, noisy load generator; read "Caveats" before quoting anything.
 
 Method and decisions: ADR-213 in `docs/DECISIONS.md`. Raw files: `docs/perf-results/`. Tools: `scripts/x11-bench.sh`
@@ -150,11 +151,13 @@ urMQTT (3 316 to 98 139) and should be read as "not characterised".
    and aborted the connection that happened to be in the handler. With `action = "log"` the same sweeps had **zero lost connections**.
    Production keeps `drop`; on a noisy host that means random disconnects under load (the device reconnects). Either measure the budget in
    time the vCPU actually ran, or give `drop` a stall-aware rule. Not changed here (that is a design change, not a measurement).
+   **Done afterwards: the budget is now running time (ADR-221, section 7.4).**
 2. **A single flow is slow.** urMQTT moves 0.7 MB/s (1 KiB messages) and 3 000 small messages/s through one connection over a 15 ms
    path, 2 to 8 times less than Mosquitto and with large run-to-run spread (stalls of seconds). Leads (not established): the TCP receive window is 16 bit
    with no window scaling (`rcv_wnd: u16`, so at most 64 KiB per round trip is 4.4 MB/s, higher than measured), the console reports frames dropped for
    a full NIC queue (39 in 5 s under load) and TCP retransmissions, whose recovery without fast retransmit would stall a flow for
    an RTO. It matters for a few devices sending bulk data; for many small flows (3.4) it does not.
+   **The leads were right and there were three more causes (a lost wake-up in the output loop, a dispatcher that slept until the next tick, a congestion window that counted ACKs); all fixed afterwards, section 7.**
 3. **Handshakes: about 2x Mosquitto per second at equal concurrency, 0.26 ms of server CPU per handshake.** Limited by the generator in both cases, see 3.1.
 4. **Memory per idle connection is about 40 to 50 times smaller** (0.5 to 0.7 KB of kernel heap against 27 KB of process growth; the two counters do not count the same things, see 3.2).
 5. **Latency at modest rates is lower for urMQTT** (14 ms against 21 to 40 ms p50, tails equal within noise).
@@ -203,3 +206,143 @@ urMQTT (3 316 to 98 139) and should be read as "not characterised".
    ```
 
 4. Put the VPS back to the image it served before (the suite takes about 90 minutes per broker, the VPS is out of service for the duration).
+
+## 7. Why one flow was slow and why the watchdog dropped connections: causes found and fixed (ADR-221 to ADR-224)
+
+Written after X11, same VPS, same load host, same method (ADR-213), same day. Section 3 is the state of X11; this section is what the
+findings of section 4 turned out to be and what changed. The honest summary: **most of the single-flow weakness and all of the
+watchdog drops were urMQTT's own doing, not the hypervisor's; the hypervisor is real and large (below) and is why the
+watchdog needed a different clock, not a bigger budget.**
+
+### 7.1 Causes (each with its evidence)
+
+| X11 symptom | Cause in urMQTT | Evidence | Change |
+|---|---|---|---|
+| single flow 1.9k msg/s, sometimes **0 delivered**, "stalls of seconds" | **A lost wake-up.** `MqttService::poll` put the drained ready-list back over the connections it had just listed again (TLS buffer full, no relay credit). A subscriber whose output buffer filled once was never served again; every later QoS 0 message to it was dropped until a PINGRESP woke it | VPS, X11 image, same session: `published 18 024/s, delivered 0` and `delivered 0` in 4 of 6 QoS 0 single-flow runs; on the rig `delivered 0/s` in 2 of 3 floods | ADR-223 |
+| a few percent loss turns 48k msg/s into 14k | **Every segment after a lost one was thrown away** (in-order receive only): recovery cost one round trip per discarded segment, and a vCPU stall makes the host drop thousands of frames | rig, 0.1 % loss: 47.5k -> 14.3k published/s (X11 kernel), 0.5 %: 5.0k | out-of-order queue, SACK (ADR-222) |
+| 4.4 MB/s ceiling at 15 ms, 1 MB/s per flow | **16-bit window, 64 KiB send queue; slow start counted ACKs, not bytes**, so a receiver that acknowledges in batches (the load host, with 60-70 % steal) made the window grow by two segments per round trip | rig: 31k msg/s = 64 KiB / 20 ms; VPS: `ss` on the generator showed the subscriber leg app-limited at ~1 MB/s while the window of the other leg sat at 115 segments | window scaling, timestamps, send queue = 2 x cwnd, byte counting (ADR-222) |
+| every round trip of a flow that pauses pays 0-10 ms | **The dispatcher slept until the next 10 ms tick**: the virtio-net queues have no receive interrupt and core 0 sleeps after 100 us idle. Linux measured 66 ms round trips on a 15 ms path | rig: ping with one open connection 13.1 -> 7.4 ms mean; one 1 KiB flow 4.3k -> 11.3k delivered/s | poll every 200 us while connections exist (ADR-224) |
+| "frames dropped for a full NIC queue", QoS 0 loss unattributed | core 0 dropped frames the 256-entry queue could not take yet; QoS 0 drops were counted in one number | X11 console: 39 per 5 s | frames wait (4 096), rings 2 048, drops counted per cause in `$SYS` (ADR-223) |
+| 1-8 connections dropped per run by the 20 ms watchdog | **Elapsed time was charged to the handler.** The VPS stalls its vCPUs, a lot (7.4) | base image today: 148 aborted connections, 247 over-budget reports in 30 runs, median 32 ms, up to 371 ms | budget in running time (ADR-221) |
+
+(The VPS rows are the production configuration with the benchmark limits (`bench-x11v`: `mkbench.sh --x11 --static`), `watchdog.action = "drop"`
+as shipped, x86_64, 4 vCPU; "X11 code" is main at 7f9517e built the same way and run today, "now" is this tree at 86a71ff.)
+
+### 7.2 One flow and the stress rows, measured again on the VPS (same load host, same method)
+
+| published/s / delivered/s, median (min-max) | urMQTT X11 code (7f9517e) | urMQTT now | Mosquitto 2.0.21 |
+|---|---|---|---|
+| single flow, QoS 0, 64 B | 1.9k (1.8k-18.0k) / 0 (0-1.9k) | 23.7k (17.0k-28.0k) / 12.6k (6.9k-25.9k) | 29.3k (29.2k-33.1k) / 29.2k (27.7k-34.1k) |
+| single flow, QoS 0, 1 KiB | 0 (0-589) / 0 (0-396) | 3.9k (2.5k-4.8k) / 2.3k (676-2.9k) | 5.4k (4.0k-5.9k) / 5.4k (4.0k-6.0k) |
+| single flow, QoS 1, 64 B | 1.1k (1.1k-1.3k) / 529 (370-795) | 1.5k (1.4k-1.6k) / 744 (470-979) | 866 (782-927) / 652 (566-714) |
+| 16 pairs flood, QoS 0, 64 B | 24.7k (16.9k-31.9k) / 20.0k (13.2k-27.1k) | 43.2k (33.5k-43.9k) / 37.4k (33.3k-43.9k) | 31.4k (22.4k-34.5k) / 30.7k (22.6k-33.1k) |
+| 16 pairs flood, QoS 0, 1 KiB | 3.7k (3.3k-4.4k) / 2.9k (1.9k-3.2k) | 5.0k (4.3k-5.2k) / 4.5k (4.2k-4.7k) | 5.9k (5.3k-6.6k) / 5.7k (5.3k-6.7k) |
+| 16 pairs x 1000 msg/s, QoS 0, 64 B | 9.3k (9.0k-12.2k) / 8.8k (6.9k-10.9k) | 16.0k (16.0k-16.2k) / 15.9k (15.8k-16.0k) | - |
+
+| lost connections per run (median, min-max) | urMQTT X11 code | urMQTT now | Mosquitto |
+|---|---|---|---|
+| single flow, QoS 0, 64 B | 1 (0-1) | 0 (0-0) | 0 (0-0) |
+| single flow, QoS 0, 1 KiB | 1 (1-1) | 0 (0-0) | 0 (0-0) |
+| single flow, QoS 1, 64 B | 0 (0-0) | 0 (0-0) | 0 (0-0) |
+| 16 pairs flood, QoS 0, 64 B | 13 (7-16) | 0 (0-0) | 0 (0-0) |
+| 16 pairs flood, QoS 0, 1 KiB | 3 (2-9) | 0 (0-0) | 0 (0-0) |
+| 16 pairs x 1000 msg/s, QoS 0, 64 B | 11 (6-13) | 0 (0-0) | - |
+
+Median and (min-max) of three runs per cell; for the single-flow rows of the X11 code and of the new code, six where the sweep suite added
+its own (see the raw files). QoS 0 "published" is what the broker accepted, "delivered" what the subscribers read; the difference is
+what the broker dropped on purpose because the subscriber's buffer was full (counted: `$SYS/broker/messages/dropped/slow_subscriber`).
+
+What this says, with the limits of the instrument. **The generator is the same shared VM (steal 58-77 % today) and was the limit in
+many cells; a ratio under about 20 % is not a claim.**
+
+* **The X11 code could not carry one flow; the new code carries about as much as Mosquitto at 64 B, and half at 1 KiB.** One 64 B flow: 1.9k
+  published and 0 delivered (median) became 23.7k and 12.6k, against Mosquitto's 29.3k and 29.2k. At 1 KiB: 0 became 3.9k (2.3k delivered)
+  against 5.4k. **urMQTT is not faster than Mosquitto on a single flow on this VPS; the claim of the task is not met for one flow.** What is left
+  of the gap is on the subscriber leg (published is near 80 % of Mosquitto's, delivered 40 %): the broker drops QoS 0 when a subscriber's flow
+  is slower than the publisher's, where Mosquitto queues without bound (its p50 latency in these runs is as long as ours). The subscriber leg
+  is limited by the same receiver (the generator, a thread per connection on a stolen vCPU), by the congestion window of a sender that has
+  not yet seen the path (slow start from 10 segments, no SACK on our sending side), and by core time spent waiting for a lock (7.4: 4-7 % of a data core on average, more than 20 % in one window in ten).
+* **QoS 1, one flow:** 1.5k published/s against 0.87k for Mosquitto (16 in flight in both).
+* **Many flows (16 pairs, flood):** 43.2k published and 37.4k delivered/s against 31.4k and 30.7k for Mosquitto (it was 24.7k and 20.0k
+  before the change, with 7-16 connections lost per run); at 1 KiB 5.0k against 5.9k (Mosquitto ahead by 15 %, inside the noise). Both
+  brokers' single core / worker cores were saturated or close to it.
+* **Connections lost per run: 0 in every one of the 24 runs of the new code** (X11 code: 7-16 per flood run, 6-13 per 1 000 msg/s sweep run,
+  1 per 300 msg/s run; Mosquitto: 0).
+* The sweep at 1 000 messages/s per publisher: 15.9k delivered (it was 8.8k with 6-13 lost connections).
+
+Intermediate images (each change measured as it went in, raw files `urmqtt-x11v-step-*.txt`): the first image (out-of-order queue, scaling, ready-list fix,
+NIC backlog; 3036401) already reached 19.7k / 10.3k at 64 B and lost a connection in 2 of 27 runs (X11 code: in 26 of 30); the byte-counting congestion window and the
+confirm-at-next-tick watchdog (c202c16) moved the single flow to 27.9k / 18.9k; the dispatcher's NIC polling (019a258) changed nothing
+measurable on the VPS (24.8k; inside the noise, ping and one-flow numbers on the rig improved a lot, ADR-224); the close-up ticks and the
+in-progress lock wait (86a71ff) removed the last drops.
+
+### 7.3 The local rig (no VPS needed; the rig is in the repository)
+
+`scripts/wan-bridge.c` joins a QEMU `-netdev dgram` socket to a tap in a Linux container, delaying each direction, dropping frames at random
+and optionally limiting the rate, with `urmqtt-loadgen` in the same container as a real Linux TCP peer (SACK, timestamps, window scaling);
+Docker on a Mac is enough (ADR-223). Guest: the production configuration under HVF, 4 vCPU. RTT 10-15 ms measured by ping through the
+bridge. One publisher and one subscriber, QoS 0 flood, 10 s, two runs each; published/s (delivered/s), medians:
+
+| | loss 0 | loss 0.1 % | loss 0.5 % |
+|---|---|---|---|
+| 64 B, X11 code (7f9517e) | 47.5k (47.5k) | 14.3k (8.8k) | 5.0k (2.5k) |
+| 64 B, this tree | 108.2k (66.6k) | 41.0k (18.1k) | 17.7k (9.6k) |
+| 1 KiB, X11 code | 4.4k (2.5k) | 1.4k (0.5k) | 0.24k (0.09k) |
+| 1 KiB, this tree | 9.1k (4.2k) | 4.1k (1.7k) | 1.9k (0.74k) |
+
+(A guest on this rig loses about 0.3 % of frames to bursts at loss 0; both kernels see it. A Linux stack against a Linux broker on the same
+rig, Mosquitto 2.0.18, is not slowed by 15 ms or by 0.1 % loss: 304k and 243k published/s; the rig measures protocol behaviour, not capacity.)
+The raw files are in `docs/perf-results/local-wan-rig.txt`.
+
+### 7.4 The watchdog: what the hypervisor does and what the budget now means
+
+**The VPS stalls its vCPUs, often and for long.** From the new `stalls:` line of every core, read over 24 runs (about 80 windows of 5 s per core):
+
+| core | late ticks (>= 4 ms; 0.5 ms while a handler is looked at closely) per 5 s: median / 90th percentile | worst stall per window, median / worst | lock wait per window: median / 90th percentile |
+|---|---|---|---|
+| 0 (NIC and dispatch) | 80 / 152 | 74 ms / 891 ms | 189 ms / 1.10 s |
+| 1 (worker) | 36 / 86 | 76 ms / 945 ms | 357 ms / 1.29 s |
+| 2 (worker) | 36 / 77 | 68 ms / 898 ms | 353 ms / 1.33 s |
+| 3 (database, log) | 27 / 39 | 279 ms / 1.55 s | 0 / 0 |
+
+(At boot, before any load: 11-47 late ticks per 5 s per core, worst 673 ms.) The host does **not** report KVM steal time (`host steal 0 us`
+in every line: the feature is absent or the figure is not maintained on this host), so the guest has only the late-tick and lock-wait
+evidence; it cannot say who held the CPU. The Linux guest's `/proc/stat` showed no steal on this VPS in X11 either.
+
+* **X11 code, today, `action = "drop"`, 30 loaded runs:** 247 over-budget reports (median 32 ms, up to 371 ms, 183 on input handlers) and **148 aborted
+  connections**; the reports were not the handlers' time: with the same traffic, the new code's console lists 452 handlers whose elapsed time exceeded 20 ms
+  with **0 ms of running time** charged (median elapsed 31 ms, 90th percentile 109 ms, up to 900 ms), and **0 reports, 0 aborted
+  connections in 24 loaded runs**. The two intermediate images before the last change (confirm at the next tick, 10 ms ticks, a lock wait credited only when it ended)
+  still dropped 2 connections in 24 runs each, every time a handler of 32-39 ms with nothing credited: most likely a wait for a lock whose
+  holder was a descheduled vCPU (credited only when it ended, ADR-221 point 5) or a run of stalls shorter than a tick.
+* So: **our code was not slow; the host was.** The part of the stalls that is urMQTT's own doing is the lock wait: every data core
+  spends a median 4-7 % of its time, and in one window in ten 22-27 %, spinning on a ticket lock (the global heap's: blocks above 2 KiB and the per-core
+  caches' refills; the data cores share nothing else). A descheduled lock holder is what makes it long. This costs throughput, not connections, and is
+  the first thing to attack next (7.5).
+* The stuck-core reset (1 s of running time) and the action (`drop`) are unchanged. A handler that really overruns, interrupts enabled,
+  is still reported and dropped (smoke `watchdog`, `watchdog-stall`, `watchdog-lockwait`; and the external test below).
+* **Injected stalls (rig, production profile, `drop`):** 16 publishers and 16 subscribers flooding QoS 0 while the QEMU process is stopped for
+  60 ms every 1.5 s (a descheduled vCPU as the guest sees it): X11 code, 17 stalls: 2 over-budget reports (output handler, 64 and 72 ms);
+  this tree, 16 stalls: 0 reports, 0 aborted, and the console names the handlers it did not charge.
+
+### 7.5 What is left (honest list)
+
+* **One flow is still not faster than Mosquitto's.** 64 B: 80 % of its published rate and 40 % of its delivered rate; 1 KiB: 70 % and 40 %.
+  Candidates, none measured yet on the VPS: the lock wait (a per-CPU cache for blocks up to 16 KiB would remove most of it), SACK on our sending side
+  (a lost segment of a long subscriber stream is retransmitted NewReno-style), and a receive interrupt for the NIC (ADR-224's polling is a stop-gap).
+* **Stalls shorter than a millisecond** and the last part of every stall before a tick's deadline are still charged; with close-up ticks (1 ms) the error per tick is
+  below 1 ms, so a drop now needs a handler that really ran for most of 20 ms or stalls of 20 ms in 1 ms pieces.
+* The comparison with Mosquitto is one session, one path, one generator at 60-77 % steal; two cells (1 KiB, 16 pairs; delivered rate of one flow)
+  are in its favour, three in ours, one is a tie. Not measured again: handshakes (the change does not touch the handshake path; `dp-bench` on the
+  rig scaled 3.82x on 4 worker cores as before), idle capacity, fan-out.
+* Memory per connection grew by 16 bytes (`Conn` 96 to 112) and a core now keeps up to 16 MiB of out-of-order data in the worst case, both bounded.
+
+### 7.6 Reproduce section 7
+
+* VPS: as section 6, with `scripts/mkbench.sh --x11 --static ADDR/LEN GATEWAY --env bench-x11v`, then `MAXLOAD=10 CONSOLE=1 REPS=3 THROUGHPUT_CFGS="0 64 16;0 1024 16"
+  SWEEP_CFGS="0 64 1000" ./x11-bench.sh LABEL single throughput sweep` on the load host (with `x11-console.py` next to it: it reads the broker's console and `$SYS` counters
+  over MQTT with only Python's standard library). Build the generator for the load host with the pinned nightly; ISO, image and reinstall as ADR-213 says.
+* Local rig: a Docker image with `iproute2`, `gcc`, the pinned Rust nightly and the generator; `gcc -O2 -o wan-bridge scripts/wan-bridge.c`; inside the container
+  `wan-bridge 27001 RTT_MS LOSS_PERCENT 0 1000` (start it before the guest: it learns QEMU's address from the first frame), and
+  `scripts/run-qemu.sh --iso ISO --accel hvf --smp 4 --dgram 27002:27001` with a static-address image (`mkbench.sh --x11 --static 10.0.2.15/24 10.0.2.2`).
+  The generator then connects to 10.0.2.15 from the container.

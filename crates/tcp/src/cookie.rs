@@ -3,8 +3,11 @@
 //! MAC over the 4-tuple, the client's ISN and the counter. Half-open
 //! connections therefore need no state at all.
 //!
-//! Like Linux without timestamps, cookies cannot carry window scaling or
-//! SACK, so the stack negotiates neither (ADR-033).
+//! The ISN has no room for window scaling or SACK. Like Linux, the stack
+//! carries them in the timestamp value of the SYN-ACK instead (`ts_encode`):
+//! a peer that offers timestamps echoes the value in the final ACK, where
+//! `ts_decode` reads the options back. A peer without timestamps gets neither
+//! (ADR-033, ADR-222).
 
 use crate::siphash::SipHasher;
 
@@ -24,6 +27,40 @@ pub struct Cookies {
     /// (H3): a handshake in flight across a rotation still completes.
     previous: Option<[u8; 16]>,
     previous_until_s: u64,
+}
+
+/// The options a SYN cookie carries beyond the MSS.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Opts {
+    pub sack_ok: bool,
+    /// The peer's window scale shift (0 to 14).
+    pub wscale: Option<u8>,
+}
+
+/// The low bits of a timestamp value that carry [`Opts`].
+const TS_MASK: u32 = 0x3f;
+
+/// The timestamp value of a SYN-ACK at `now` (ms), the options in its low six
+/// bits. Never above `now`, so the values that follow cannot go backwards.
+pub fn ts_encode(now: u32, o: Opts) -> u32 {
+    let mut bits = u32::from(o.sack_ok);
+    if let Some(sh) = o.wscale {
+        bits |= 2 | (u32::from(sh.min(14)) << 2);
+    }
+    let ts = (now & !TS_MASK) | bits;
+    if crate::seq::gt(ts, now) {
+        ts.wrapping_sub(TS_MASK + 1)
+    } else {
+        ts
+    }
+}
+
+/// The options in an echoed timestamp value.
+pub fn ts_decode(tsecr: u32) -> Opts {
+    Opts {
+        sack_ok: tsecr & 1 != 0,
+        wscale: (tsecr & 2 != 0).then(|| (((tsecr >> 2) & 0xf) as u8).min(14)),
+    }
 }
 
 /// The connection a cookie is bound to (as seen by the server).
@@ -101,6 +138,23 @@ impl Cookies {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn options_ride_in_the_timestamp() {
+        for now in [0u32, 5, 63, 64, 1000, u32::MAX - 3] {
+            for sack_ok in [false, true] {
+                for wscale in [None, Some(0), Some(7), Some(14)] {
+                    let o = Opts { sack_ok, wscale };
+                    let ts = ts_encode(now, o);
+                    assert!(!crate::seq::gt(ts, now), "never ahead of the clock");
+                    assert!(now.wrapping_sub(ts) <= 2 * (TS_MASK + 1));
+                    assert_eq!(ts_decode(ts), o);
+                }
+            }
+        }
+        // A wscale above 14 is clamped, nothing else leaks in.
+        assert_eq!(ts_decode(0xffff_ffff).wscale, Some(14));
+    }
 
     #[test]
     fn valid_within_two_periods_and_bound_to_the_flow() {

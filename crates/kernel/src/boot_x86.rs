@@ -94,7 +94,7 @@ pub(crate) fn early_hw(platform: Option<&PlatformInfo>, mmio_ok: bool, _dev: boo
 
 /// Physical address of a kernel image address (for the paravirtual clock
 /// page, a static).
-fn kernel_virt_to_phys(va: usize) -> u64 {
+pub(crate) fn kernel_virt_to_phys(va: usize) -> u64 {
     EXECUTABLE_ADDRESS.response().map_or(0, |e| {
         (va as u64).wrapping_sub(e.virtual_base) + e.physical_base
     })
