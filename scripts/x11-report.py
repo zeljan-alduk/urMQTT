@@ -23,6 +23,8 @@ def parse(path):
             line = line.rstrip("\n")
             if line.startswith("RUN "):
                 m = re.match(r"RUN (.*) rep=(\d+)", line)
+                if m is None:
+                    continue
                 cur = m.group(1)
                 if cur not in groups:
                     groups[cur] = []
