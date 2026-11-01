@@ -194,7 +194,7 @@ pub mod fault_policy {
     /// Whether reports are redacted.
     pub fn redact() -> bool {
         // Relaxed: see `force`.
-        FORCED.load(Ordering::Relaxed) || urmqtt_config::CONFIG.env != "dev"
+        FORCED.load(Ordering::Relaxed) || !urmqtt_config::CONFIG.dev()
     }
 
     /// `pc` as `kernel+0xOFFSET` when it is inside the image, else a fixed

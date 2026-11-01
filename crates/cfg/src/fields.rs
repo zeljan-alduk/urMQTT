@@ -285,7 +285,7 @@ pub static FIELDS: &[Field] = &[
         t::TLS_REVOKED,
         "tls.revoked_serials",
         Kind::Strs {
-            max_items: 4096,
+            max_items: 1024,
             max_len: 40,
             default: &[],
         },

@@ -514,7 +514,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         let hint = "net: no virtio-net NIC. Attach one (QEMU/KVM: virtio-net-pci; Oracle Cloud: import the \
                     image with launch mode PARAVIRTUALIZED; Hetzner: the default NIC; a VPS panel: the VirtIO \
                     network adapter)";
-        if urmqtt_config::CONFIG.env == "dev" {
+        if urmqtt_config::CONFIG.dev() {
             warn!("{hint}; idling (dev)");
             loop {
                 cpu::wait_for_interrupt();

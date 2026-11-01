@@ -51,6 +51,17 @@
 # refusal); the x86_64-only ISO has no menu and takes the word with --live.
 # The no-menu configuration of the installed disk never carries it.
 #
+# The configuration (C1, ADR-215, ADR-216): the kernel is the same for every
+# configuration; the configuration is the 256 KiB slot /boot/urmqtt.cfg, loaded
+# by Limine as a module and pinned in the ISO menus by blake2b. By default it is
+# packed from deploy/$URMQTT_ENV/config.toml (the same blob `urmqtt-config pack`
+# and the web builder produce); --config FILE takes a TOML, a blob or a slot,
+# --config-root DIR the directory the TOML's files are read from, --empty-config the defaults (the template ISO, which `urmqtt-config pack
+# --iso` configures later). The installation image carries an unconfigured
+# slot (marked DISK), so the hash of the image pinned in the menus does not
+# depend on the configuration; the installer copies the booted slot into the
+# installed disk, whose limine.conf lists the module without a hash (ADR-217).
+#
 # Timestamps and the FAT volume serial are fixed (SOURCE_DATE_EPOCH, default:
 # last commit time) so identical inputs produce an identical image.
 set -euo pipefail
@@ -59,6 +70,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 ARCH=${URMQTT_ARCH:-aarch64}
 KERNEL="" OUT="" CMDLINE="" ESP_OUT="" INSTALL_CMDLINE="install" INSTALL_DEFAULT=0
 UNIVERSAL=0 KERNEL_A64="" KERNEL_X86="" DISK_OUT="" LIVE="" DIAG_CMDLINE="diag" DIAG_DEFAULT=0 NO_DIAG=0
+CONFIG="" CONFIG_ROOT="" EMPTY_CONFIG=0
 while [[ $# -gt 0 ]]; do
     case $1 in
         --arch) ARCH=$2; shift 2 ;;
@@ -75,6 +87,9 @@ while [[ $# -gt 0 ]]; do
         --diag-cmdline) DIAG_CMDLINE=$2; shift 2 ;;
         --diag-default) DIAG_DEFAULT=1; shift ;;
         --no-diag) NO_DIAG=1; shift ;;
+        --config) CONFIG=$2; shift 2 ;;
+        --config-root) CONFIG_ROOT=$2; shift 2 ;;
+        --empty-config) EMPTY_CONFIG=1; shift ;;
         --live) LIVE=1; shift ;;
         --no-live) LIVE=0; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -112,6 +127,32 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 blake2b() { python3 -I -c 'import hashlib,sys; print(hashlib.blake2b(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
+
+# --- the configuration slot -------------------------------------------------
+cfgtool() { (cd "$ROOT" && cargo run -q --locked -p urmqtt-config-tool --bin urmqtt-config -- "$@"); }
+CFG_ENV=${URMQTT_ENV:-dev}
+if [[ $EMPTY_CONFIG -eq 1 ]]; then
+    : > "$TMP/empty.toml"
+    cfgtool pack "$TMP/empty.toml" --out-slot "$TMP/urmqtt.cfg" | sed 's/^/config: empty (template): /' >&2
+elif [[ -n "$CONFIG" && "$CONFIG" != *.toml ]]; then
+    cfgtool slot "$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")" "$TMP/urmqtt.cfg"
+    echo "config: $CONFIG" >&2
+else
+    CFG_TOML=${CONFIG:-$ROOT/deploy/$CFG_ENV/config.toml}
+    [[ -f "$CFG_TOML" ]] || { echo "error: configuration $CFG_TOML not found" >&2; exit 1; }
+    CFG_TOML=$(cd "$(dirname "$CFG_TOML")" && pwd)/$(basename "$CFG_TOML")
+    cfgtool pack "$CFG_TOML" --env "$CFG_ENV" ${CONFIG_ROOT:+--root "$CONFIG_ROOT"} --out-slot "$TMP/urmqtt.cfg" | sed "s|^|config ($CFG_ENV): |" >&2
+fi
+# The installation image's template slot is always the EMPTY configuration, whatever
+# this image is configured with: the image (and its hash in the menus) must not depend
+# on the customer's configuration, and must not carry their keys a second time.
+: > "$TMP/empty.toml"
+cfgtool pack "$TMP/empty.toml" --out-slot "$TMP/empty.cfg" >/dev/null
+python3 -I "$ROOT/scripts/cfgslot.py" as-disk "$TMP/empty.cfg" "$TMP/urmqtt-disk.cfg"
+CFG_HASH=$(blake2b "$TMP/urmqtt.cfg")
+# The module line of limine.conf: with the hash in the ISO menus, without it
+# in the installed disk's configuration (its ESP is writable anyway).
+CFG_MODULE="boot():/boot/urmqtt.cfg"
 
 # The menu's look (ALDO TECH wallpaper, no Limine branding or key help),
 # hash-pinned like the kernels. Only the menus carry it: the no-menu ESP
@@ -161,6 +202,7 @@ if [[ $UNIVERSAL -eq 1 ]]; then
             echo "    path: boot():/boot/urmqtt-"'${ARCH}'".elf#$hash"
             if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then printf '    resolution: %s\n' "$URMQTT_RESOLUTION"; fi
             if [[ -n "$cmd" ]]; then printf '    cmdline: %s\n' "$cmd"; fi
+            echo "    module_path: $CFG_MODULE"
             if [[ -n "$module" ]]; then echo "    module_path: $module"; fi
         done
     }
@@ -170,14 +212,15 @@ if [[ $UNIVERSAL -eq 1 ]]; then
         echo "quiet: yes"
         echo "editor_enabled: no"
         echo "hash_mismatch_panic: yes"
+        CFG_MODULE="boot():/boot/urmqtt.cfg"
         entries urMQTT "$CMDLINE" ""
     } > "$TMP/limine.conf"
     for f in BOOTAA64.EFI BOOTX64.EFI limine-bios.sys limine-bios-cd.bin; do cp "$ROOT/vendor/limine/$f" "$TMP/$f"; done
     cp "$KERNEL_A64" "$TMP/urmqtt-aarch64.elf"
     cp "$KERNEL_X86" "$TMP/urmqtt-x86-64.elf"
-    TZ=UTC touch -t "$STAMP" "$TMP"/*.EFI "$TMP"/*.elf "$TMP"/limine.conf "$TMP"/limine-bios.sys "$TMP"/limine-bios-cd.bin
+    TZ=UTC touch -t "$STAMP" "$TMP"/*.EFI "$TMP"/*.elf "$TMP"/limine.conf "$TMP"/limine-bios.sys "$TMP"/limine-bios-cd.bin "$TMP"/urmqtt.cfg "$TMP"/urmqtt-disk.cfg
     payload=0
-    for f in BOOTAA64.EFI BOOTX64.EFI limine-bios.sys urmqtt-aarch64.elf urmqtt-x86-64.elf; do
+    for f in BOOTAA64.EFI BOOTX64.EFI limine-bios.sys urmqtt-aarch64.elf urmqtt-x86-64.elf urmqtt.cfg; do
         payload=$(( payload + $(wc -c < "$TMP/$f") ))
     done
     mib=$(( (payload * 2 / 1048576) + 1 ))
@@ -191,6 +234,7 @@ if [[ $UNIVERSAL -eq 1 ]]; then
     mcopy -m -i "$ESP" "$TMP/limine.conf" ::/boot/limine/limine.conf
     mcopy -m -i "$ESP" "$TMP/limine-bios.sys" ::/boot/limine/limine-bios.sys
     mcopy -m -i "$ESP" "$TMP/urmqtt-aarch64.elf" "$TMP/urmqtt-x86-64.elf" ::/boot/
+    mcopy -m -i "$ESP" "$TMP/urmqtt-disk.cfg" ::/boot/urmqtt.cfg
     python3 -I "$ROOT/scripts/fat-stamp.py" "$ESP" "$SOURCE_DATE_EPOCH" >/dev/null
     # The installed disk: GPT, BIOS boot partition, ESP; Limine's BIOS stage 1
     # and stage 1.5 applied (the tool is deterministic: checked by `make repro`).
@@ -214,6 +258,7 @@ if [[ $UNIVERSAL -eq 1 ]]; then
         echo "editor_enabled: no"
         echo "hash_mismatch_panic: yes"
         menu_style
+        CFG_MODULE="boot():/boot/urmqtt.cfg#$CFG_HASH"
         entries urMQTT "$LIVE_CMDLINE" ""
         entries "Install urMQTT on this machine's disk" "$INSTALL_CMDLINE" "boot():/disk.img#$DISK_HASH"
         if [[ $NO_DIAG -eq 0 ]]; then
@@ -225,7 +270,7 @@ if [[ $UNIVERSAL -eq 1 ]]; then
     # menu and the installation image too: the installed disk's ESP above
     # plus /disk.img and the menu in place of the no-menu config.
     OUTER="$TMP/esp-iso.img"
-    outer_payload=$(( payload + $(wc -c < "$TMP/disk.img") ))
+    outer_payload=$(( payload + $(wc -c < "$TMP/disk.img") + $(wc -c < "$TMP/urmqtt.cfg") ))
     outer_mib=$(( (outer_payload * 5 / 4 / 1048576) + 2 ))
     mformat -i "$OUTER" -C -T $(( outer_mib * 2048 )) -h 64 -s 32 -N 55524d51 -v URMQTT ::
     mmd -i "$OUTER" ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
@@ -234,6 +279,7 @@ if [[ $UNIVERSAL -eq 1 ]]; then
     mcopy -m -i "$OUTER" "$TMP/iso-limine.conf" ::/boot/limine/limine.conf
     mcopy -m -i "$OUTER" "$TMP/limine-bios.sys" ::/boot/limine/limine-bios.sys
     mcopy -m -i "$OUTER" "$TMP/urmqtt-aarch64.elf" "$TMP/urmqtt-x86-64.elf" ::/boot/
+    mcopy -m -i "$OUTER" "$TMP/urmqtt.cfg" ::/boot/urmqtt.cfg
     mcopy -m -i "$OUTER" "$TMP/disk.img" ::/disk.img
     cp "$WALLPAPER" "$TMP/wallpaper.png"
     TZ=UTC touch -t "$STAMP" "$TMP/wallpaper.png"
@@ -246,7 +292,7 @@ if [[ $UNIVERSAL -eq 1 ]]; then
     cp "$TMP/iso-limine.conf" "$TMP/iso/EFI/BOOT/limine.conf"
     cp "$TMP/iso-limine.conf" "$TMP/iso/boot/limine/limine.conf"
     cp "$TMP/limine-bios.sys" "$TMP/limine-bios-cd.bin" "$TMP/iso/boot/limine/"
-    cp "$TMP/urmqtt-aarch64.elf" "$TMP/urmqtt-x86-64.elf" "$TMP/wallpaper.png" "$TMP/iso/boot/"
+    cp "$TMP/urmqtt-aarch64.elf" "$TMP/urmqtt-x86-64.elf" "$TMP/wallpaper.png" "$TMP/urmqtt.cfg" "$TMP/iso/boot/"
     find "$TMP/iso" -exec env TZ=UTC touch -t "$STAMP" {} +
     xorriso -as mkisofs -quiet -iso-level 3 -R -V URMQTT \
         --set_all_file_dates "=$SOURCE_DATE_EPOCH" \
@@ -255,8 +301,14 @@ if [[ $UNIVERSAL -eq 1 ]]; then
         -o "$OUT" "$TMP/iso" 2>&1 | grep -vE '^(xorriso : NOTE|GNU xorriso|$)' >&2 || true
     [[ -s "$OUT" ]] || { echo "error: xorriso produced no image" >&2; exit 1; }
     "$TMP/limine" bios-install "$OUT" >/dev/null 2>&1 || { echo "error: limine bios-install failed" >&2; exit 1; }
-    if [[ -n "$ESP_OUT" ]]; then cp "$ESP" "$ESP_OUT"; fi
-    if [[ -n "$DISK_OUT" ]]; then cp "$TMP/disk.img" "$DISK_OUT"; fi
+    # The ESP and disk image the caller keeps (raw images, `make disk`) carry
+    # the configuration; the copies inside the ISO keep the unconfigured slot.
+    if [[ -n "$ESP_OUT" ]]; then
+        cp "$ESP" "$ESP_OUT"; python3 -I "$ROOT/scripts/cfgslot.py" patch "$ESP_OUT" "$TMP/urmqtt.cfg"
+    fi
+    if [[ -n "$DISK_OUT" ]]; then
+        cp "$TMP/disk.img" "$DISK_OUT"; python3 -I "$ROOT/scripts/cfgslot.py" patch "$DISK_OUT" "$TMP/urmqtt.cfg"
+    fi
     echo "iso: $OUT ($(wc -c < "$OUT" | tr -d ' ') bytes, universal: aarch64 ${HASH_A64:0:16}…, x86-64 ${HASH_X86:0:16}…)"
     exit 0
 fi
@@ -284,15 +336,21 @@ if [[ $ARCH == x86_64 ]]; then
         echo "    protocol: limine"
         echo "    kaslr: yes"
         echo "    path: boot():/boot/urmqtt#$HASH"
+        echo "    module_path: boot():/boot/urmqtt.cfg#$CFG_HASH"
         if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then printf '    resolution: %s\n' "$URMQTT_RESOLUTION"; fi
         X86_CMDLINE=$CMDLINE
         [[ ${LIVE:-0} == 1 ]] && X86_CMDLINE=$LIVE_CMDLINE
         if [[ -n "$X86_CMDLINE" ]]; then printf '    cmdline: %s\n' "$X86_CMDLINE"; fi
     } > "$TMP/limine.conf"
+    # The ESP copy (what --esp-out and a raw image carry) lists the module without
+    # a hash, like the installed disk of the universal image: a configuration put
+    # there later (urmqtt-disk update-boot, ADR-217) must not trip the bootloader.
+    # The ISO tree keeps the hash.
+    sed '/module_path/ s/#[0-9a-f]*$//' "$TMP/limine.conf" > "$TMP/limine-esp.conf"
     cp "$ROOT/vendor/limine/BOOTX64.EFI" "$TMP/BOOTX64.EFI"
     cp "$KERNEL" "$TMP/urmqtt"
-    TZ=UTC touch -t "$STAMP" "$TMP/BOOTX64.EFI" "$TMP/urmqtt" "$TMP/limine.conf"
-    payload=$(( $(wc -c < "$TMP/BOOTX64.EFI") + $(wc -c < "$TMP/urmqtt") ))
+    TZ=UTC touch -t "$STAMP" "$TMP/BOOTX64.EFI" "$TMP/urmqtt" "$TMP/limine.conf" "$TMP/limine-esp.conf" "$TMP/urmqtt.cfg"
+    payload=$(( $(wc -c < "$TMP/BOOTX64.EFI") + $(wc -c < "$TMP/urmqtt") + $(wc -c < "$TMP/urmqtt.cfg") ))
     mib=$(( (payload * 2 / 1048576) + 1 ))
     (( mib < 8 )) && mib=8
     ESP="$TMP/esp.img"
@@ -300,8 +358,9 @@ if [[ $ARCH == x86_64 ]]; then
     mformat -i "$ESP" -C -T $(( mib * 2048 )) -h 64 -s 32 -N 55524d51 -v URMQTT ::
     mmd -i "$ESP" ::/EFI ::/EFI/BOOT ::/boot
     mcopy -m -i "$ESP" "$TMP/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
-    mcopy -m -i "$ESP" "$TMP/limine.conf" ::/EFI/BOOT/limine.conf
+    mcopy -m -i "$ESP" "$TMP/limine-esp.conf" ::/EFI/BOOT/limine.conf
     mcopy -m -i "$ESP" "$TMP/urmqtt" ::/boot/urmqtt
+    mcopy -m -i "$ESP" "$TMP/urmqtt.cfg" ::/boot/urmqtt.cfg
     python3 -I "$ROOT/scripts/fat-stamp.py" "$ESP" "$SOURCE_DATE_EPOCH" >/dev/null
     mkdir -p "$TMP/iso/EFI/BOOT" "$TMP/iso/boot/limine" "$(dirname "$OUT")"
     cp "$ESP" "$TMP/iso/esp.img"
@@ -309,6 +368,7 @@ if [[ $ARCH == x86_64 ]]; then
     cp "$TMP/limine.conf" "$TMP/iso/boot/limine/limine.conf"
     cp "$TMP/BOOTX64.EFI" "$TMP/iso/EFI/BOOT/BOOTX64.EFI"
     cp "$TMP/urmqtt" "$TMP/iso/boot/urmqtt"
+    cp "$TMP/urmqtt.cfg" "$TMP/iso/boot/urmqtt.cfg"
     cp "$ROOT/vendor/limine/limine-bios.sys" "$ROOT/vendor/limine/limine-bios-cd.bin" "$TMP/iso/boot/limine/"
     find "$TMP/iso" -exec env TZ=UTC touch -t "$STAMP" {} +
     xorriso -as mkisofs -quiet -iso-level 3 -R -V URMQTT \
@@ -335,6 +395,7 @@ hash_mismatch_panic: yes
     protocol: limine
     kaslr: yes
     path: boot():/boot/urmqtt#$HASH
+    module_path: boot():/boot/urmqtt.cfg
 EOF
 if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then
     printf '    resolution: %s\n' "$URMQTT_RESOLUTION" >> "$TMP/limine.conf"
@@ -345,10 +406,10 @@ fi
 
 cp "$ROOT/vendor/limine/BOOTAA64.EFI" "$TMP/BOOTAA64.EFI"
 cp "$KERNEL" "$TMP/urmqtt"
-TZ=UTC touch -t "$STAMP" "$TMP/BOOTAA64.EFI" "$TMP/urmqtt" "$TMP/limine.conf"
+TZ=UTC touch -t "$STAMP" "$TMP/BOOTAA64.EFI" "$TMP/urmqtt" "$TMP/limine.conf" "$TMP/urmqtt.cfg" "$TMP/urmqtt-disk.cfg"
 
 # FAT image: twice the payload, at least 8 MiB.
-payload=$(( $(wc -c < "$TMP/BOOTAA64.EFI") + $(wc -c < "$TMP/urmqtt") ))
+payload=$(( $(wc -c < "$TMP/BOOTAA64.EFI") + $(wc -c < "$TMP/urmqtt") + $(wc -c < "$TMP/urmqtt.cfg") ))
 mib=$(( (payload * 2 / 1048576) + 1 ))
 (( mib < 8 )) && mib=8
 ESP="$TMP/esp.img"
@@ -358,13 +419,18 @@ mmd -i "$ESP" ::/EFI ::/EFI/BOOT ::/boot
 mcopy -m -i "$ESP" "$TMP/BOOTAA64.EFI" ::/EFI/BOOT/BOOTAA64.EFI
 mcopy -m -i "$ESP" "$TMP/limine.conf" ::/EFI/BOOT/limine.conf
 mcopy -m -i "$ESP" "$TMP/urmqtt" ::/boot/urmqtt
+mcopy -m -i "$ESP" "$TMP/urmqtt-disk.cfg" ::/boot/urmqtt.cfg
 # mtools versions differ in which timestamps follow SOURCE_DATE_EPOCH
 # (directories, `.` and `..`): set them all explicitly.
 python3 -I "$ROOT/scripts/fat-stamp.py" "$ESP" "$SOURCE_DATE_EPOCH" >/dev/null
 
 # Limine treats the ISO9660 volume as the boot volume on CD boots, so the
 # kernel lives on the ISO filesystem too, with the menu config.
+# The install module has the unconfigured slot; the El Torito/boot ESP and the
+# one the caller keeps carry the configuration.
 ESP_HASH=$(python3 -I -c 'import hashlib,sys; print(hashlib.blake2b(open(sys.argv[1],"rb").read()).hexdigest())' "$ESP")
+cp "$ESP" "$TMP/esp-cfg.img"
+python3 -I "$ROOT/scripts/cfgslot.py" patch "$TMP/esp-cfg.img" "$TMP/urmqtt.cfg"
 if [[ $DIAG_DEFAULT -eq 1 ]]; then
     MENU_TIMEOUT=0 DEFAULT_ENTRY=3
 elif [[ $INSTALL_DEFAULT -eq 1 ]]; then
@@ -385,6 +451,7 @@ fi
     echo "    protocol: limine"
     echo "    kaslr: yes"
     echo "    path: boot():/boot/urmqtt#$HASH"
+    echo "    module_path: boot():/boot/urmqtt.cfg#$CFG_HASH"
     if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then
         printf '    resolution: %s\n' "$URMQTT_RESOLUTION"
     fi
@@ -397,13 +464,15 @@ fi
     echo "    kaslr: yes"
     echo "    path: boot():/boot/urmqtt#$HASH"
     printf '    cmdline: %s\n' "$INSTALL_CMDLINE"
-    echo "    module_path: boot():/esp.img#$ESP_HASH"
+    echo "    module_path: boot():/boot/urmqtt.cfg#$CFG_HASH"
+    echo "    module_path: boot():/install/esp.img#$ESP_HASH"
     if [[ $NO_DIAG -eq 0 ]]; then
         echo
         echo "/Diagnostic: hardware detection and benchmarks"
         echo "    protocol: limine"
         echo "    kaslr: yes"
         echo "    path: boot():/boot/urmqtt#$HASH"
+        echo "    module_path: boot():/boot/urmqtt.cfg#$CFG_HASH"
         if [[ -n "${URMQTT_RESOLUTION:-}" ]]; then
             printf '    resolution: %s\n' "$URMQTT_RESOLUTION"
         fi
@@ -411,10 +480,12 @@ fi
     fi
 } >"$TMP/iso-limine.conf"
 TZ=UTC touch -t "$STAMP" "$TMP/iso-limine.conf"
-mkdir -p "$TMP/iso/EFI/BOOT" "$TMP/iso/boot" "$(dirname "$OUT")"
-cp "$ESP" "$TMP/iso/esp.img"
+mkdir -p "$TMP/iso/EFI/BOOT" "$TMP/iso/boot" "$TMP/iso/install" "$(dirname "$OUT")"
+cp "$TMP/esp-cfg.img" "$TMP/iso/esp.img"
+cp "$ESP" "$TMP/iso/install/esp.img"
 cp "$TMP/iso-limine.conf" "$TMP/iso/EFI/BOOT/limine.conf"
 cp "$TMP/urmqtt" "$TMP/iso/boot/urmqtt"
+cp "$TMP/urmqtt.cfg" "$TMP/iso/boot/urmqtt.cfg"
 cp "$WALLPAPER" "$TMP/iso/boot/wallpaper.png"
 find "$TMP/iso" -exec env TZ=UTC touch -t "$STAMP" {} +
 xorriso -as mkisofs -quiet -iso-level 3 -R -V URMQTT \
@@ -423,6 +494,6 @@ xorriso -as mkisofs -quiet -iso-level 3 -R -V URMQTT \
     -o "$OUT" "$TMP/iso" 2>&1 | grep -vE '^(xorriso : NOTE|GNU xorriso|$)' >&2 || true
 [[ -s "$OUT" ]] || { echo "error: xorriso produced no image" >&2; exit 1; }
 if [[ -n "$ESP_OUT" ]]; then
-    cp "$ESP" "$ESP_OUT"
+    cp "$TMP/esp-cfg.img" "$ESP_OUT"
 fi
 echo "iso: $OUT ($(wc -c < "$OUT" | tr -d ' ') bytes, kernel blake2b ${HASH:0:16}…)"

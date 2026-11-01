@@ -1,6 +1,6 @@
 [package]
 name = "urmqtt-config"
-description = "Build-time configuration of an urMQTT image as typed constants, generated from deploy/<env>/config.toml."
+description = "The configuration of a running urMQTT image: the typed view of the urmqtt-cfg blob the bootloader hands the kernel (ADR-215, ADR-216)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,9 +12,11 @@ build = "build.rs"
 [lib]
 bench = false
 
-[build-dependencies]
-urmqtt-config-schema.workspace = true
-urmqtt-control = { path = "../control" }
+[dependencies]
+urmqtt-cfg.workspace = true
+
+[dev-dependencies]
+urmqtt-cfg = { workspace = true, features = ["alloc"] }
 
 [lints]
 workspace = true

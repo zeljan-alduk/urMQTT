@@ -99,7 +99,8 @@ clean() { LC_ALL=C sed -e $'s/\x1b\\[[0-9;?=]*[A-Za-z]//g' -e $'s/\r//g' "$1"; }
 mkimg() {
     local out=$1 cmdline=$2
     [[ -f "$out" ]] && return 0
-    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$out.iso" --cmdline "$cmdline" --esp-out "$out.esp" >/dev/null
+    "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$out.iso" --cmdline "$cmdline" --esp-out "$out.esp" \
+        ${MKIMG_EXTRA[@]+"${MKIMG_EXTRA[@]}"} >/dev/null
     python3 -I "$ROOT/scripts/mkraw.py" "$out.esp" "$out" >/dev/null
     rm -f "$out.iso"
 }
@@ -1688,13 +1689,16 @@ install_iso() {
             -- -drive "if=none,id=t0,file=$t,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile= \
             || status=$?
         [[ $(shasum -a 256 "$iso" | cut -d' ' -f1) == "$iso_sum" ]] || echo "ISO MODIFIED" >>"$log1"
-        check "install-vm [$accel]" "$log1" "$status" "boot: from optical media" \
+        local ifp
+        ifp=$(clean "$log1" | grep -o 'config: fingerprint [0-9a-f]*' | head -1 | cut -d' ' -f3)
+        check "install-vm [$accel]" "$log1" "$status" "boot: from optical media" "config: fingerprint [0-9a-f]{64} " \
             "install: disk virtio-blk 00:0[0-9a-f]\.0: 64 MiB$" "install: ALL DATA ON virtio-blk" \
             "install: writing to virtio-blk 00:0[0-9a-f]\.0 in 1 s; power off now to cancel" \
             "install: done: 10 MiB written and verified" "NOT:URMQTT READY" "NOT:ISO MODIFIED" "$NO_FAULT"
         status=0
         boot "$log2" --disk "$t" --accel "$accel" --headless --no-net || status=$?
         check "install-vm-boots [$accel]" "$log2" "$status" "boot: from a GPT disk" \
+            "config: fingerprint ${ifp:-missing} \([0-9]+ bytes, unsigned\), env=dev" "NOT:slot is empty" \
             "gpt: backup table moved to the end of the 64 MiB disk" "created now, new disk GUID" \
             "storage: data disk formatted \(was blank\)" "^URMQTT READY$" "$NO_FAULT"
 
@@ -1776,6 +1780,88 @@ no_hw_rng() {
     done
 }
 
+# C1b (ADR-216): the kernel is the same for every configuration; the
+# configuration is the slot the bootloader loads. This packs a non-default
+# configuration with the host tool (TOML plus the dev certificates), boots it
+# and checks the fingerprint line and settings that differ from the defaults
+# and from the dev image; then the signed form, a tampered slot (fail closed),
+# and the empty template (boots, refuses to serve, says why).
+# make_cfg_blobs: $OUT/cfgpack/{plain,signed}.blob, a configuration that
+# differs from the dev image's (watchdog budget 37 ms, heap 16 MiB, log level
+# info); sets CFG_FP (its fingerprint) and CFG_SIGNER (the signer's id).
+make_cfg_blobs() {
+    local dir="$OUT/cfgpack" tool="$ROOT/target/debug/urmqtt-config"
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool)
+    # The dev files are read from deploy/dev (--root).
+    sed -e 's/^handler_budget_ms = 10/handler_budget_ms = 37/' \
+        -e 's/^kernel_heap_mb = 32 /kernel_heap_mb = 16 /' \
+        -e 's/^log_level = "debug"/log_level = "info"/' \
+        "$ROOT/deploy/dev/config.toml" >"$dir/config.toml"
+    CFG_FP=$("$tool" pack "$dir/config.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/plain.blob" | grep -o 'fingerprint [0-9a-f]*' | cut -d' ' -f2)
+    "$tool" pack "$dir/config.toml" --env dev --root "$ROOT/deploy/dev" --sign "$ROOT/deploy/dev/control.key" --out "$dir/signed.blob" >/dev/null
+    CFG_SIGNER=$("$tool" show "$dir/signed.blob" | grep -o 'signer key [0-9a-f]*' | cut -d' ' -f3)
+}
+
+config_packed() {
+    local dir="$OUT/cfgpack"
+    make_cfg_blobs
+    local fp=$CFG_FP signer=$CFG_SIGNER
+    local name iso accel
+    for name in plain signed; do
+        iso="$OUT/cfg-$name.raw"
+        MKIMG_EXTRA=(--config "$dir/$name.blob")
+        mkimg "$iso" "smoke"
+        MKIMG_EXTRA=()
+        local want_sig="unsigned"
+        [[ $name == signed ]] && want_sig="signed by key $signer"
+        for accel in $ACCELS; do
+            local log="$OUT/cfg-$name-$accel.log" data="$OUT/cfg-$name-$accel.img" status=0
+            fresh_disk "$iso" "$data"
+            boot "$log" --disk "$data" --accel "$accel" --headless || status=$?
+            check "config-packed-$name [$accel]" "$log" "$status" \
+                "config: fingerprint $fp \([0-9]+ bytes, $want_sig\), env=dev" \
+                "watchdog: handshake budget [0-9]+ ms \(calibrated\), other handlers 37 ms" \
+                "heap 16 MiB" "^URMQTT READY$" "$NO_FAULT"
+        done
+    done
+    # A slot with one flipped payload byte: refused, never defaults.
+    iso="$OUT/cfg-tampered.raw"
+    MKIMG_EXTRA=(--config "$dir/plain.blob")
+    mkimg "$iso" "smoke"
+    MKIMG_EXTRA=()
+    python3 -I - "$iso" <<'PY'
+import sys
+path = sys.argv[1]
+d = bytearray(open(path, "rb").read())
+i = d.find(b"URMQTT-CFG-SLOT\0" + b"URMQCFG\0")  # the kernel holds the marker alone
+assert i > 0
+d[i + 16 + 20] ^= 0x01  # inside the payload
+open(path, "wb").write(d)
+PY
+    for accel in $ACCELS; do
+        local log="$OUT/cfg-tampered-$accel.log" data="$OUT/cfg-tampered-$accel.img" status=0
+        fresh_disk "$iso" "$data"
+        boot "$log" --disk "$data" --accel "$accel" --headless || status=$?
+        check "config-tampered-refused [$accel]" "$log" "$status" \
+            "(fatal: configuration refused: blob: fingerprint mismatch|Blake2b hash for URI .boot\(\):/boot/urmqtt.cfg. does not match)" "NOT:URMQTT READY" "NOT:config: fingerprint"
+    done
+    # The empty template: boots, but will not serve.
+    iso="$OUT/cfg-empty.raw"
+    MKIMG_EXTRA=(--empty-config)
+    mkimg "$iso" "smoke"
+    MKIMG_EXTRA=()
+    for accel in $ACCELS; do
+        local log="$OUT/cfg-empty-$accel.log" data="$OUT/cfg-empty-$accel.img" status=0
+        fresh_disk "$iso" "$data"
+        boot "$log" --disk "$data" --accel "$accel" --headless || status=$?
+        check "config-empty-refuses-to-serve [$accel]" "$log" "$status" \
+            "config: fingerprint [0-9a-f]{64} \(49 bytes, unsigned\), env=prod" \
+            "config: the configuration slot is empty" \
+            "fatal: refusing to serve: no server certificate and key \(tls.cert, tls.key\)" "NOT:URMQTT READY"
+    done
+}
+
 # GICv2 (ADR-039), what KVM gives a guest on a GIC-400 host such as the
 # Raspberry Pi 4/5. HVF cannot emulate a GICv2, so this runs under TCG:
 # boot with ACPI and DT, then the TLS broker scenarios.
@@ -1821,6 +1907,8 @@ rm -f "$OUT"/*.iso "$OUT"/*.iso.disk "$OUT"/*.raw "$OUT"/*.raw.esp
 echo "smoke: accelerators: $ACCELS"
 
 NO_FAULT='NOT:EXCEPTION|PANIC'
+# C1b: the configuration the dev image boots with is identified at boot.
+CONFIG_OK=("config: fingerprint [0-9a-f]{64} \([0-9]+ bytes, unsigned\), env=dev")
 
 # X2: the x86_64 boot and exception scenarios (TCG, or KVM on an x86 host).
 # Each boots an ISO built by mkiso.sh --arch x86_64 (BIOS and UEFI capable)
@@ -1948,11 +2036,53 @@ universal_migrated() {
     done
 }
 
+# C1d (ADR-218): the template ISO (empty configuration) configured by
+# `urmqtt-config pack --iso` is byte for byte the ISO mkiso builds directly with
+# that configuration, and it boots on all three machines with that
+# configuration (fingerprint and a non-default setting).
+universal_config() {
+    local tool="$ROOT/target/debug/urmqtt-config" tpl="$OUT/universal-template.iso" row
+    make_cfg_blobs
+    mkuniversal "$tpl" "smoke" --empty-config
+    local direct="$OUT/universal-config-direct.iso" patched="$OUT/universal-config-patched.iso"
+    mkuniversal "$direct" "smoke" --config "$OUT/cfgpack/signed.blob"
+    local status=0 out="$OUT/universal-config-pack.log"
+    "$tool" pack "$OUT/cfgpack/config.toml" --env dev --root "$ROOT/deploy/dev" \
+        --sign "$ROOT/deploy/dev/control.key" --iso "$tpl" --out "$patched" >"$out" 2>&1 || status=$?
+    if [[ $status -eq 0 ]] && cmp -s "$direct" "$patched"; then
+        echo "  ✓ universal-config: pack --iso on the template == the ISO built with that configuration"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ universal-config: the patched template differs from the direct build (pack status $status)"
+        sed 's/^/    | /' "$out" | tail -5
+        FAILED=$((FAILED + 1))
+    fi
+    "$tool" verify "$patched" --dev >"$out" 2>&1 || status=$?
+    check "universal-config-verify" "$out" "$status" "ok: fingerprint $CFG_FP, signed, complete" \
+        "slot copies identical, [0-9]+ module hash reference\(s\) match"
+    local aa64='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$' x86='^URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$'
+    local rows=("aa64-hvf|aa64|hvf|$aa64" "x86-q35-uefi|x86-uefi|tcg|$x86" "x86-pc-bios|x86-bios|tcg|$x86")
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name kind accel boot_line <<<"$row"
+        [[ $kind == aa64 && " $ACCELS " != *" $accel "* ]] && continue
+        local log="$OUT/universal-config-$name.log"
+        status=0
+        u_run "$kind" "$accel" "$log" iso "$patched" || status=$?
+        check "universal-config-boots-$name" "$log" "$status" "$boot_line" \
+            "config: fingerprint $CFG_FP \([0-9]+ bytes, signed by key $CFG_SIGNER\), env=dev" \
+            "watchdog: handshake budget [0-9]+ ms \(calibrated\), other handlers 37 ms" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
 # The installer of the universal ISO on each machine, then the installed
 # disk booted by all three boot paths (aarch64 UEFI, x86 UEFI, x86 BIOS).
 universal_install() {
     local iso="$OUT/universal-install.iso" row
-    mkuniversal "$iso" "smoke" --install-cmdline "install install-countdown=1" --install-default
+    # A packed non-default configuration, signed: the installer copies the
+    # slot it booted with into the installed disk (C1c, ADR-217).
+    make_cfg_blobs
+    mkuniversal "$iso" "smoke" --install-cmdline "install install-countdown=1" --install-default \
+        --config "$OUT/cfgpack/signed.blob"
     local aa64='^URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$' x86='^URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$'
     local rows=("aa64|aa64|hvf|$aa64" "x86-uefi|x86-uefi|tcg|$x86" "x86-bios|x86-bios|tcg|$x86")
     local installer
@@ -1968,7 +2098,7 @@ universal_install() {
         check "universal-install via $iname" "$log" "$status" "boot: from optical media" \
             "install: installation image: boot disk image of [0-9]+ KiB for UEFI and BIOS" \
             "install: disk virtio-blk 00:0[0-9a-f]\.0: 64 MiB$" "install: ALL DATA ON virtio-blk" \
-            "install: done: [0-9]+ MiB written and verified" "NOT:URMQTT READY" "$NO_FAULT"
+            "config: fingerprint $CFG_FP " "install: done: [0-9]+ MiB written and verified" "NOT:URMQTT READY" "$NO_FAULT"
         # Every boot path starts the disk the installer wrote.
         for row in "${rows[@]}"; do
             IFS='|' read -r name kind accel boot_line <<<"$row"
@@ -1979,7 +2109,9 @@ universal_install() {
             u_run "$kind" "$accel" "$blog" disk "$copy" || status=$?
             check "universal-install: disk written via $iname boots on $name" "$blog" "$status" "$boot_line" \
                 "boot: from a GPT disk" "gpt: backup table moved to the end of the 64 MiB disk" \
-                "storage: data disk formatted \(was blank\)" "^URMQTT READY$" "$NO_FAULT"
+                "config: fingerprint $CFG_FP \([0-9]+ bytes, signed by key $CFG_SIGNER\), env=dev" \
+                "watchdog: handshake budget [0-9]+ ms \(calibrated\), other handlers 37 ms" \
+                "storage: data disk formatted \(was blank\)" "^URMQTT READY$" "NOT:slot is empty" "$NO_FAULT"
         done
     done
 }
@@ -2422,6 +2554,16 @@ if [[ ${SMOKE_ONLY:-} == migrated && $ARCH == universal ]]; then
     exit
 fi
 
+# SMOKE_ONLY=config (universal): the configuration scenarios (C1: the patched template, the installer
+# carrying the configuration to the installed disk).
+if [[ ${SMOKE_ONLY:-} == config && $ARCH == universal ]]; then
+    universal_config
+    universal_install
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=install (universal): only the installer scenarios; SMOKE_INSTALLER=<aa64|x86-uefi|x86-bios>
 # limits which machine runs the installer.
 if [[ ${SMOKE_ONLY:-} == install && $ARCH == universal ]]; then
@@ -2433,6 +2575,7 @@ fi
 
 if [[ $ARCH == universal ]]; then
     universal_iso
+    universal_config
     universal_raw
     universal_migrated
     universal_install
@@ -2535,7 +2678,8 @@ SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordere
 scenario x86-disk-q35 "smoke" on \
     "$BOOT_LINE" "platform: discovered via Acpi" "acpi: lapic=0xfee00000 ioapic=1\[0@0xfec00000\+0\]" \
     "time: tsc [0-9]+ Hz from " "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${DEV_OK[@]}" "${SMP4_OK[@]}" "${DB_OK[@]}" \
-    "${DISPATCH_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
+    "${DISPATCH_OK[@]}" "${CONFIG_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
+want config_packed && config_packed
 scenario x86-fault-unmapped-mmio "smoke test=data-abort" on \
     "EXCEPTION: #PF page fault" "page not present, read, supervisor mode" "NOT:URMQTT READY"
 SMP=8 scenario x86-smp8 "smoke" on \
@@ -2601,10 +2745,11 @@ SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordere
 
 scenario boot-acpi "smoke" on \
     "$BOOT_LINE" "platform: discovered via Acpi" "console: pl011 at 0x9000000" "psci 1\.[0-9]+ via hvc" \
-    "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${DEV_OK[@]}" "${SMP4_OK[@]}" "${DB_OK[@]}" "${DISPATCH_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
+    "${MEMORY_OK[@]}" "${TIME_OK[@]}" "${DEV_OK[@]}" "${SMP4_OK[@]}" "${DB_OK[@]}" "${DISPATCH_OK[@]}" "${CONFIG_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
 scenario boot-dtb "smoke" off \
     "$BOOT_LINE" "platform: discovered via DeviceTree" "console: pl011 at 0x9000000" "${MEMORY_OK[@]}" \
     "${TIME_OK[@]}" "${DEV_OK[@]}" "${DISPATCH_OK[@]}" "^URMQTT READY$" "$NO_FAULT"
+want config_packed && config_packed
 scenario fault-data-abort "smoke test=data-abort" on \
     "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
     "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \

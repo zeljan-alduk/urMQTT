@@ -1,0 +1,29 @@
+[package]
+name = "urmqtt-config-tool"
+description = "Host tool for urMQTT configuration blobs: pack a TOML and PEM files into a blob or into a template ISO, show, verify, export the schema (C1, ADR-215, ADR-218)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "urmqtt_config_tool"
+path = "src/lib.rs"
+bench = false
+
+[[bin]]
+name = "urmqtt-config"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+urmqtt-cfg = { path = "../../crates/cfg", features = ["std"] }
+urmqtt-config-schema.workspace = true
+urmqtt-control = { path = "../../crates/control" }
+ed25519-dalek = { version = "2.2", default-features = false }
+
+[lints]
+workspace = true

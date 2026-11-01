@@ -34,6 +34,18 @@ pub const MARKER_LEN: usize = 16;
 pub const MAX_BLOB: usize = SLOT_SIZE - MARKER_LEN;
 pub const SIG_KEY_LEN: usize = 32;
 pub const SIG_LEN: usize = 64;
+/// Length of the empty configuration: header, fingerprint, no signature.
+pub const EMPTY_BLOB_LEN: usize = HEADER_LEN + FINGERPRINT_LEN + 1;
+
+/// Writes the empty configuration (every field at its default) into `out`.
+#[allow(clippy::indexing_slicing)] // constant ranges inside a fixed-size array
+pub fn write_empty(out: &mut [u8; EMPTY_BLOB_LEN]) {
+    out.fill(0);
+    out[..8].copy_from_slice(&MAGIC);
+    out[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    let fp = fingerprint_of(&out[..HEADER_LEN]);
+    out[HEADER_LEN..HEADER_LEN + FINGERPRINT_LEN].copy_from_slice(&fp);
+}
 
 const FINGERPRINT_DOMAIN: &[u8] = b"urmqtt-cfg-v1";
 const SIGNATURE_DOMAIN: &[u8] = b"urmqtt-cfg-sig-v1";

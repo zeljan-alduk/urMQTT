@@ -108,10 +108,10 @@ pub fn init(revoked_hex: &[String], allowlist: &[String], allowlist_mode: bool) 
             alloc::format!(
                 "channel on $urmqtt/control for {:?}, Ed25519 key {:02x}{:02x}{:02x}{:02x}…",
                 CONFIG.control.service_ids,
-                urmqtt_config::CONTROL_PUBLIC_KEY[0],
-                urmqtt_config::CONTROL_PUBLIC_KEY[1],
-                urmqtt_config::CONTROL_PUBLIC_KEY[2],
-                urmqtt_config::CONTROL_PUBLIC_KEY[3]
+                urmqtt_config::CONFIG.control.public_key[0],
+                urmqtt_config::CONFIG.control.public_key[1],
+                urmqtt_config::CONFIG.control.public_key[2],
+                urmqtt_config::CONFIG.control.public_key[3]
             )
         },
         if allowlist_mode { "allowlist" } else { "open" },
@@ -242,7 +242,11 @@ fn apply(
     if !CONFIG.control.service_ids.contains(&from) {
         return Err(Reject::Unauthorized);
     }
-    let m = urmqtt_control::verify(CONFIG.env, &urmqtt_config::CONTROL_PUBLIC_KEY, payload)?;
+    let m = urmqtt_control::verify(
+        CONFIG.env,
+        &urmqtt_config::CONFIG.control.public_key,
+        payload,
+    )?;
     urmqtt_control::check(&m, crate::boot::now_unix(), *last_seq, &policy())?;
     if m.command == Command::Unrevoke
         && m.items.iter().any(|s| {

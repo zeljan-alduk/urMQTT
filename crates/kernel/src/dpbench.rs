@@ -92,7 +92,9 @@ pub fn worker(me: usize) -> ! {
     let srv = crate::mqtt_service::tls_server_for_bench();
     let cli = TlsClient::new(&ClientSetup {
         // The server certificate is issued by the first operational CA.
-        ca_pem: urmqtt_config::OPERATIONAL_CA_PEMS
+        ca_pem: urmqtt_config::CONFIG
+            .trust
+            .operational
             .first()
             .copied()
             .unwrap_or_default(),

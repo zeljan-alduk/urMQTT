@@ -72,7 +72,7 @@ impl EarlyHw {
         if let Some(va) = self.uart_va {
             let base = self.uart.map_or(0, |u| u.base);
             // The virtual address says where the MMIO window is (ADR-173).
-            if urmqtt_config::CONFIG.env == "dev" {
+            if urmqtt_config::CONFIG.dev() {
                 info!("console: pl011 at {base:#x} mapped at {va:#x}");
             } else {
                 info!("console: pl011 at {base:#x}");

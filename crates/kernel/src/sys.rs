@@ -221,7 +221,7 @@ impl Sys {
                 for l in sys::status_lines(
                     &info,
                     level_name(urmqtt_log::level()),
-                    level_name(urmqtt_log::MAX_LEVEL),
+                    level_name(urmqtt_log::max_level()),
                 ) {
                     broker.console_line(&l);
                 }
@@ -234,7 +234,7 @@ impl Sys {
                     format_args!(
                         "log level is now {} (build maximum {})",
                         level_name(urmqtt_log::level()),
-                        level_name(urmqtt_log::MAX_LEVEL)
+                        level_name(urmqtt_log::max_level())
                     ),
                 );
                 broker.console_line(&line);

@@ -205,3 +205,120 @@ fn a_prebuilt_boot_image_is_written_verbatim_and_checked() {
         "nothing written"
     );
 }
+
+// --- the configuration slot (C1c, ADR-217) -------------------------------
+
+use urmqtt_cfg::blob::{DISK_MARKER, SLOT_SIZE, SlotKind, make_slot};
+use urmqtt_cfg::build::Builder;
+use urmqtt_cfg::fields::tag;
+
+fn slots() -> (Vec<u8>, Vec<u8>) {
+    let empty = Builder::new().finish(false).unwrap();
+    let mut b = Builder::new();
+    b.uint(tag::NET_TLS_PORT, 9999).unwrap();
+    let mine = b.finish(false).unwrap();
+    let mut template = make_slot(SlotKind::Boot, &empty).unwrap();
+    template[..16].copy_from_slice(&DISK_MARKER);
+    (template, make_slot(SlotKind::Boot, &mine).unwrap())
+}
+
+/// An ESP with the template slot at a sector boundary, and some bytes that
+/// look like the marker (the kernel carries the constant).
+fn esp_with_template(template: &[u8]) -> Vec<u8> {
+    let mut e = esp();
+    e[3000..3016].copy_from_slice(&DISK_MARKER); // a stray marker, not a slot
+    e[MIB..MIB + SLOT_SIZE].copy_from_slice(template);
+    e
+}
+
+/// The installer puts the slot it booted with where the image's template slot
+/// is, and the read-back compares the disk with the image as patched.
+#[test]
+fn the_installed_disk_carries_the_configuration_of_the_installer() {
+    let (template, mine) = slots();
+    let e = esp_with_template(&template);
+    let m = MemDisk::new(64 * MIB);
+    let n = write_image_with(m.device().as_mut(), &e, Some(&mine)).unwrap();
+    let img = gpt::raw_image(&e).unwrap();
+    assert_eq!(n as usize, img.len());
+    let on_disk = m.raw(0, img.len());
+    // Everything is the image's, except the slot, which is the installer's.
+    let off = urmqtt_cfg::blob::find_slots(&img, SlotKind::Disk)[0];
+    assert_eq!(&on_disk[off..off + SLOT_SIZE], &mine[..]);
+    assert_eq!(&on_disk[..off], &img[..off]);
+    assert_eq!(&on_disk[off + SLOT_SIZE..], &img[off + SLOT_SIZE..]);
+    // Without a slot to carry, the image is written as it is.
+    let plain = MemDisk::new(64 * MIB);
+    write_image_with(plain.device().as_mut(), &e, None).unwrap();
+    assert_eq!(plain.raw(0, img.len()), img);
+    // The same through a finished boot image (the universal ISO's module).
+    let whole = MemDisk::new(64 * MIB);
+    write_boot_image_with(whole.device().as_mut(), &img, Some(&mine)).unwrap();
+    assert_eq!(whole.raw(0, img.len()), on_disk);
+}
+
+/// A slot that is not a boot slot, or an image without exactly one template
+/// slot, is refused before anything is written.
+#[test]
+fn a_missing_or_wrong_configuration_slot_writes_nothing() {
+    let (template, mine) = slots();
+    let blank = MemDisk::new(64 * MIB);
+    // The image has no template slot.
+    assert_eq!(
+        write_image_with(blank.device().as_mut(), &esp(), Some(&mine)),
+        Err(InstallError::NoConfigSlot)
+    );
+    // The image has two.
+    let mut two = esp_with_template(&template);
+    two[2 * MIB..2 * MIB + SLOT_SIZE].copy_from_slice(&template);
+    assert_eq!(
+        write_image_with(blank.device().as_mut(), &two, Some(&mine)),
+        Err(InstallError::NoConfigSlot)
+    );
+    // The slot to carry is garbage, or the template itself.
+    let one = esp_with_template(&template);
+    for bad in [vec![0u8; SLOT_SIZE], template.clone(), mine[..100].to_vec()] {
+        assert_eq!(
+            write_image_with(blank.device().as_mut(), &one, Some(&bad)),
+            Err(InstallError::NoConfigSlot)
+        );
+    }
+    assert!(
+        blank.raw(0, 64 * MIB).iter().all(|&b| b == 0),
+        "nothing written"
+    );
+}
+
+/// A power cut at any write of an installation that carries a slot still
+/// leaves a disk that does not boot, never a half-new one that does: the slot
+/// is written before the primary header, like the rest of the image.
+#[test]
+fn an_interrupted_install_with_a_slot_never_boots() {
+    let (template, mine) = slots();
+    // Small ESP: the loop below installs once per write.
+    let mut e = esp()[..2 * MIB].to_vec();
+    e[MIB / 2..MIB / 2 + SLOT_SIZE].copy_from_slice(&template);
+    let probe = MemDisk::new(24 * MIB);
+    let mut f = FaultDevice::new(probe.device(), FaultSpec::default());
+    write_image_with(&mut f, &e, Some(&mine)).unwrap();
+    let writes = f.writes();
+    assert!(writes > 8, "{writes} writes");
+    for n in 1..writes {
+        let m = MemDisk::new(24 * MIB);
+        let spec = FaultSpec {
+            stop_after_writes: Some(n),
+            ..FaultSpec::default()
+        };
+        let mut f = FaultDevice::new(m.device(), spec);
+        assert!(
+            write_image_with(&mut f, &e, Some(&mine)).is_err(),
+            "write {n}"
+        );
+        m.crash(|_| true);
+        let mut d = m.device();
+        assert!(
+            gpt::read_table(d.as_mut(), 1).unwrap().is_none(),
+            "a cut after write {n} left a valid primary GPT"
+        );
+    }
+}

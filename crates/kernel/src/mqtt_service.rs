@@ -433,10 +433,10 @@ pub fn ticket_stats() -> urmqtt_tls::ticket::TicketStats {
 /// revocation list shared with the control channel (H1).
 fn tls_server() -> Option<TlsServer> {
     let setup = ServerSetup {
-        operational_ca_pems: urmqtt_config::OPERATIONAL_CA_PEMS,
-        bootstrap_ca_pems: urmqtt_config::BOOTSTRAP_CA_PEMS,
-        cert_pem: urmqtt_config::SERVER_CERT_PEM,
-        key_pem: urmqtt_config::SERVER_KEY_PEM,
+        operational_ca_pems: urmqtt_config::CONFIG.trust.operational,
+        bootstrap_ca_pems: urmqtt_config::CONFIG.trust.bootstrap,
+        cert_pem: urmqtt_config::CONFIG.tls.cert_pem,
+        key_pem: urmqtt_config::CONFIG.tls.key_pem,
         identity_field: match CONFIG.tls.identity_field {
             urmqtt_config::IdentityField::Cn => IdentityField::Cn,
             urmqtt_config::IdentityField::SanUri => IdentityField::SanUri,
@@ -477,8 +477,8 @@ impl MqttService {
                     CONFIG.network.mqtt_tls_port,
                     CONFIG.tls.identity_field,
                     crate::control::revocations().len(),
-                    urmqtt_config::OPERATIONAL_CA_PEMS.len(),
-                    urmqtt_config::BOOTSTRAP_CA_PEMS.len()
+                    urmqtt_config::CONFIG.trust.operational.len(),
+                    urmqtt_config::CONFIG.trust.bootstrap.len()
                 );
                 if CONFIG.tls.resumption {
                     let iv = tickets().interval();

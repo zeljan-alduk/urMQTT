@@ -236,21 +236,45 @@ static EMERGENCY_UART: AtomicUsize = AtomicUsize::new(0);
 #[cfg(all(target_os = "none", target_arch = "x86_64"))]
 static EMERGENCY_COM1: AtomicBool = AtomicBool::new(false);
 
-/// Most verbose level that is emitted, from the build-time configuration.
-pub const MAX_LEVEL: Level = urmqtt_config::CONFIG.observability.log_level;
+/// Most verbose level that may be emitted, from the configuration. Set once
+/// at boot ([`set_max_level`]); `Info` until then.
+static MAX: AtomicU8 = AtomicU8::new(Level::Info as u8);
 
-/// Run-time level (`log=` on a dev command line); never above `MAX_LEVEL`.
-static LEVEL: AtomicU8 = AtomicU8::new(MAX_LEVEL as u8);
+fn level_of(v: u8) -> Level {
+    match v {
+        0 => Level::Error,
+        1 => Level::Warn,
+        2 => Level::Info,
+        3 => Level::Debug,
+        _ => Level::Trace,
+    }
+}
 
-/// Lowers (never raises past the build-time maximum) the emitted level.
+/// Most verbose level that is emitted (`observability.log_level`).
+pub fn max_level() -> Level {
+    // Relaxed: a filter, set once at boot.
+    level_of(MAX.load(Ordering::Relaxed))
+}
+
+/// Sets the configured maximum and makes it the current level.
+pub fn set_max_level(level: Level) {
+    // Relaxed: see `max_level`.
+    MAX.store(level as u8, Ordering::Relaxed);
+    LEVEL.store(level as u8, Ordering::Relaxed);
+}
+
+/// Run-time level (`log=` on a dev command line); never above the maximum.
+static LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
+
+/// Lowers (never raises past the configured maximum) the emitted level.
 pub fn set_level(level: Level) {
-    let l = level.min(MAX_LEVEL);
+    let l = level.min(max_level());
     // Relaxed: a filter; a line logged at the old level during the switch
     // is harmless.
     LEVEL.store(l as u8, Ordering::Relaxed);
 }
 
-/// The level currently emitted (never above [`MAX_LEVEL`]).
+/// The level currently emitted (never above [`max_level`]).
 pub fn level() -> Level {
     // Relaxed: see `set_level`.
     match LEVEL.load(Ordering::Relaxed) {
@@ -265,7 +289,7 @@ pub fn level() -> Level {
 /// Whether `level` is currently emitted.
 pub fn enabled(level: Level) -> bool {
     // Relaxed: see `set_level`.
-    level <= MAX_LEVEL && (level as u8) <= LEVEL.load(Ordering::Relaxed)
+    (level as u8) <= LEVEL.load(Ordering::Relaxed)
 }
 
 pub fn set_uart(uart: Pl011, base: usize) {
@@ -1139,7 +1163,7 @@ mod tests {
         log(Level::Info, format_args!("hidden"));
         let mut lines = std::vec::Vec::new();
         console_read(&mut c, 10, |r| lines.push(r.text().to_owned()));
-        set_level(MAX_LEVEL);
+        set_level(max_level());
         assert_eq!(lines, ["audited"]);
     }
 

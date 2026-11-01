@@ -749,49 +749,6 @@ fn pem_checks() {
 }
 
 #[test]
-fn render_contains_validated_values() {
-    let text = dev_with(
-        "mode",
-        "mode = \"static\"\naddress = \"10.0.0.10/24\"\ngateway = \"10.0.0.1\"",
-    )
-    .replace(
-        "syslog_udp = \"10.0.2.2:5514\"",
-        "syslog_udp = \"10.0.0.5:514\"",
-    )
-    .replace("metrics_udp = \"10.0.2.2:8125\"", "metrics_udp = \"\"");
-    let cfg = parse("dev", &text).unwrap();
-    let files = EmbeddedFiles {
-        operational: vec!["/abs/ca.pem".into(), "/abs/ca-2.pem".into()],
-        bootstrap: vec![],
-        cert: "/abs/server.pem".into(),
-        key: "/abs/server.key".into(),
-        revoked: vec!["0a1b".into()],
-        control_public_key: [7; 32],
-        server_cert_not_after: 1_900_000_000,
-    };
-    let out = render(&cfg, &files);
-    assert!(out.contains("addr: [10, 0, 0, 10], prefix_len: 24"));
-    assert!(out.contains("gateway: [10, 0, 0, 1]"));
-    assert!(out.contains("mqtt_plain_port: Some(1883)"));
-    assert!(out.contains("Rate { tokens: 10, per_ms: 1000 }"));
-    assert!(out.contains(r#"device_publish: &["devices/{id}/#"]"#));
-    assert!(out.contains("syslog_udp: Some(SocketAddrV4 { addr: [10, 0, 0, 5], port: 514 })"));
-    assert!(out.contains("metrics_udp: None"));
-    assert!(out.contains("LogLevel::Debug"));
-    assert!(out.contains(r#"include_bytes!("/abs/server.key")"#));
-    assert!(out.contains("kernel_heap_mb: 32"));
-    assert!(out.contains(r#"revoked_serials: &["0a1b"]"#));
-    assert!(out.contains(
-        r#"OPERATIONAL_CA_PEMS: &[&[u8]] = &[include_bytes!("/abs/ca.pem"), include_bytes!("/abs/ca-2.pem")]"#
-    ));
-    assert!(out.contains("BOOTSTRAP_CA_PEMS: &[&[u8]] = &[];"));
-    assert!(out.contains("CONTROL_PUBLIC_KEY: [u8; 32] = [7, 7,"));
-    assert!(out.contains("server_cert_not_after: 1900000000"));
-    assert!(out.contains(r#"service_ids: &["operator"]"#));
-    assert!(out.contains("allowlist: false"));
-}
-
-#[test]
 fn durability_shortcuts_are_dev_only() {
     for key in ["require_flush", "require_data_disk", "refuse_on_corruption"] {
         let prod = PROD

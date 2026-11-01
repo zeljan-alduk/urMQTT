@@ -30,6 +30,7 @@ members = [
     "crates/virtio",
     "crates/x25519",
     "tools/attack",
+    "tools/config",
     "tools/control",
     "tools/disk",
     "tools/loadgen",

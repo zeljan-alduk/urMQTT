@@ -24,7 +24,7 @@ pub fn set_smoke(smoke: bool) {
     SMOKE.store(smoke, Ordering::Relaxed);
     // Only a dev image in smoke mode may write QEMU's debug-exit port.
     #[cfg(target_arch = "x86_64")]
-    arch_power::set_debug_exit(urmqtt_config::CONFIG.env == "dev" && smoke);
+    arch_power::set_debug_exit(urmqtt_config::CONFIG.dev() && smoke);
 }
 
 /// Whether this is a dev image booted in smoke mode (tests end the run).

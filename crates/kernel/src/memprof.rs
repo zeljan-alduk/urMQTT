@@ -553,7 +553,9 @@ pub fn run(smoke: bool) -> ! {
 
     let server = crate::mqtt_service::tls_server_for_bench();
     let cli = TlsClient::new(&ClientSetup {
-        ca_pem: urmqtt_config::OPERATIONAL_CA_PEMS
+        ca_pem: urmqtt_config::CONFIG
+            .trust
+            .operational
             .first()
             .copied()
             .unwrap_or_default(),

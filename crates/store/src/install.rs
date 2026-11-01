@@ -12,7 +12,8 @@
 //!    step 1 cleared.
 //! 3. The primary entry array, then the protective MBR.
 //! 4. The primary header last. Only now does the disk carry a valid GPT.
-//! 5. Flush, then read back the image's length and compare SHA-256.
+//! 5. Flush, then read back the image's length and compare it with the
+//!    image (with the configuration slot as installed, ADR-217).
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -71,6 +72,10 @@ pub enum InstallError {
     TooSmall,
     /// The read-back differs from what was written.
     Verify,
+    /// A configuration was to be installed, but the image has no (or more
+    /// than one) unconfigured configuration slot, or the slot is not a
+    /// valid boot slot.
+    NoConfigSlot,
 }
 
 impl From<IoError> for InstallError {
@@ -87,17 +92,38 @@ fn write_chunked(dev: &mut dyn BlockDevice, lba: u64, data: &[u8]) -> Result<(),
     Ok(())
 }
 
-fn sha256(data: &[u8]) -> [u8; 32] {
-    use sha2::Digest;
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&sha2::Sha256::digest(data));
-    out
-}
-
 /// Writes the boot image built around `esp` onto `dev` (module docs).
 /// Returns the image's length in bytes.
 pub fn write_image(dev: &mut dyn BlockDevice, esp: &[u8]) -> Result<u64, InstallError> {
-    let img = gpt::raw_image(esp).ok_or(InstallError::BadImage)?;
+    write_image_with(dev, esp, None)
+}
+
+/// Where the installation image's unconfigured configuration slot is
+/// (C1c, ADR-217): exactly one, and `slot` must be a boot slot that parses.
+fn config_slot_offset(img: &[u8], slot: &[u8]) -> Result<usize, InstallError> {
+    use urmqtt_cfg::blob::{Blob, SlotKind, find_slots, slot_blob};
+    let valid = slot_blob(slot, SlotKind::Boot).is_ok_and(|b| Blob::parse(b).is_ok());
+    match (valid, find_slots(img, SlotKind::Disk).as_slice()) {
+        (true, [off]) => Ok(*off),
+        _ => Err(InstallError::NoConfigSlot),
+    }
+}
+
+/// Like [`write_image`], and when `slot` is given (the slot the installer
+/// itself booted with) it replaces the image's unconfigured configuration
+/// slot, so the installed disk boots with the same configuration.
+pub fn write_image_with(
+    dev: &mut dyn BlockDevice,
+    esp: &[u8],
+    slot: Option<&[u8]>,
+) -> Result<u64, InstallError> {
+    let mut img = gpt::raw_image(esp).ok_or(InstallError::BadImage)?;
+    if let Some(slot) = slot {
+        let off = config_slot_offset(&img, slot)?;
+        img.get_mut(off..off + slot.len())
+            .ok_or(InstallError::NoConfigSlot)?
+            .copy_from_slice(slot);
+    }
     write_boot_image(dev, &img)
 }
 
@@ -126,6 +152,21 @@ fn is_boot_image(img: &[u8]) -> bool {
 /// ESP it carries the BIOS boot code in sector 0 and the gap before the
 /// ESP (X10). Returns the image's length in bytes.
 pub fn write_boot_image(dev: &mut dyn BlockDevice, img: &[u8]) -> Result<u64, InstallError> {
+    write_boot_image_with(dev, img, None)
+}
+
+/// Like [`write_boot_image`], with the image's unconfigured configuration
+/// slot replaced by `slot` on the disk (ADR-217). The read-back compares the
+/// disk with the image as patched.
+pub fn write_boot_image_with(
+    dev: &mut dyn BlockDevice,
+    img: &[u8],
+    slot: Option<&[u8]>,
+) -> Result<u64, InstallError> {
+    let patch = match slot {
+        Some(sl) => Some((config_slot_offset(img, sl)?, sl)),
+        None => None,
+    };
     if !is_boot_image(img) {
         return Err(InstallError::BadImage);
     }
@@ -152,6 +193,11 @@ pub fn write_boot_image(dev: &mut dyn BlockDevice, img: &[u8]) -> Result<u64, In
         img.get(head * s..).ok_or(InstallError::BadImage)?,
     )?;
     dev.flush()?;
+    // 2b. The configuration slot (sector aligned) over the template's.
+    if let Some((off, sl)) = patch {
+        write_chunked(dev, (off / s) as u64, sl)?;
+        dev.flush()?;
+    }
     // 3. Primary entries, then the protective MBR.
     write_chunked(
         dev,
@@ -164,20 +210,30 @@ pub fn write_boot_image(dev: &mut dyn BlockDevice, img: &[u8]) -> Result<u64, In
     write_chunked(dev, 1, img.get(s..2 * s).ok_or(InstallError::BadImage)?)?;
     dev.flush()?;
     // 5. Read back, one request at a time (no second copy of the image:
-    // the installer runs in the kernel's heap), into one running hash.
-    use sha2::Digest;
+    // the installer runs in the kernel's heap), and compare with the image
+    // as it should be on the disk.
     let chunk = (dev.max_io() / s).max(1) * s;
     let mut buf = vec![0u8; chunk];
-    let mut h = sha2::Sha256::new();
-    for (i, want) in img.chunks(chunk).enumerate() {
-        let b = buf.get_mut(..want.len()).ok_or(InstallError::Verify)?;
-        dev.read((i * chunk / s) as u64, b)?;
-        h.update(&*b);
-    }
-    let mut back = [0u8; 32];
-    back.copy_from_slice(&h.finalize());
-    if back != sha256(img) {
-        return Err(InstallError::Verify);
+    let mut want = vec![0u8; chunk];
+    for (i, src) in img.chunks(chunk).enumerate() {
+        let start = i * chunk;
+        let w = want.get_mut(..src.len()).ok_or(InstallError::Verify)?;
+        w.copy_from_slice(src);
+        if let Some((off, sl)) = patch {
+            // The overlap of [start, start+len) and [off, off+sl.len()).
+            let lo = start.max(off);
+            let hi = (start + src.len()).min(off + sl.len());
+            if lo < hi {
+                w.get_mut(lo - start..hi - start)
+                    .ok_or(InstallError::Verify)?
+                    .copy_from_slice(sl.get(lo - off..hi - off).ok_or(InstallError::Verify)?);
+            }
+        }
+        let b = buf.get_mut(..src.len()).ok_or(InstallError::Verify)?;
+        dev.read((start / s) as u64, b)?;
+        if *b != *w {
+            return Err(InstallError::Verify);
+        }
     }
     Ok(img_sectors * SECTOR)
 }

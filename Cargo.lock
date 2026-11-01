@@ -1539,8 +1539,7 @@ dependencies = [
 name = "urmqtt-config"
 version = "0.1.0"
 dependencies = [
- "urmqtt-config-schema",
- "urmqtt-control",
+ "urmqtt-cfg",
 ]
 
 [[package]]
@@ -1553,6 +1552,16 @@ dependencies = [
  "urmqtt-control",
  "urmqtt-dispatch",
  "x509-cert",
+]
+
+[[package]]
+name = "urmqtt-config-tool"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "urmqtt-cfg",
+ "urmqtt-config-schema",
+ "urmqtt-control",
 ]
 
 [[package]]
@@ -1694,6 +1703,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "sha2 0.11.1",
+ "urmqtt-cfg",
  "urmqtt-sync",
  "urmqtt-usys",
 ]

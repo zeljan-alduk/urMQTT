@@ -371,3 +371,11 @@ fn garbage_never_panics() {
         let _ = Blob::parse(&junk);
     }
 }
+
+#[test]
+fn the_built_in_empty_blob_equals_the_builders() {
+    let mut buf = [0u8; blob::EMPTY_BLOB_LEN];
+    blob::write_empty(&mut buf);
+    assert_eq!(&buf[..], &empty()[..]);
+    assert!(Blob::parse(&buf).is_ok());
+}

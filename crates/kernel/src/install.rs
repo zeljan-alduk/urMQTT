@@ -43,7 +43,12 @@ pub enum Image {
 }
 
 /// Runs the installer; never returns (the machine powers off).
-pub fn run(source: Option<Image>, countdown_s: u64, fault: Option<FaultSpec>) -> ! {
+pub fn run(
+    source: Option<Image>,
+    config_slot: Option<&'static [u8]>,
+    countdown_s: u64,
+    fault: Option<FaultSpec>,
+) -> ! {
     let Some(source) = source else {
         error!(
             "install: no installation image: boot the ISO's \"Install urMQTT on this machine's disk\" entry"
@@ -163,8 +168,8 @@ pub fn run(source: Option<Image>, countdown_s: u64, fault: Option<FaultSpec>) ->
     info!("install: writing {} MiB to {name}", image >> 20);
     let t0 = time::uptime_ns();
     let written = match source {
-        Image::Esp(esp) => install::write_image(dev.as_mut(), esp),
-        Image::Disk(img) => install::write_boot_image(dev.as_mut(), img),
+        Image::Esp(esp) => install::write_image_with(dev.as_mut(), esp, config_slot),
+        Image::Disk(img) => install::write_boot_image_with(dev.as_mut(), img, config_slot),
     };
     match written {
         Ok(n) => {
@@ -172,6 +177,13 @@ pub fn run(source: Option<Image>, countdown_s: u64, fault: Option<FaultSpec>) ->
                 "install: done: {} MiB written and verified in {} ms; remove the installation medium, then boot from {name}",
                 n >> 20,
                 (time::uptime_ns() - t0) / 1_000_000
+            );
+            power::off()
+        }
+        Err(install::InstallError::NoConfigSlot) => {
+            error!(
+                "install: the installation image has no (single) unconfigured configuration slot to put this boot's configuration in; \
+                 nothing written to {name}"
             );
             power::off()
         }

@@ -127,6 +127,8 @@ struct Stage2 {
     medium: devices::BootMedium,
     /// The installation image, if the bootloader loaded one.
     install_image: Option<crate::install::Image>,
+    /// The configuration slot the bootloader loaded (the installer copies it).
+    config_slot: Option<&'static [u8]>,
     /// Where the data lives this boot (`storage.mode` and the `live` word),
     /// and, for RAM, the memory plan made before the heap was sized (O3).
     storage: StoragePlan,
@@ -164,7 +166,16 @@ extern "C" fn urmqtt_kmain() -> ! {
     let memmap = MEMMAP.response().map_or(&[][..], |r| r.entries());
     let mem = memory::BootMemory::new(hhdm, memmap);
 
-    let dev = urmqtt_config::CONFIG.env == "dev";
+    // The configuration first (ADR-216): the heap size, the log level and the
+    // development switches all come from it. The result is reported once the
+    // console exists; until then the built-in defaults are in effect.
+    let config_slot = config_module();
+    let config_result = match config_slot {
+        Some(slot) => urmqtt_config::load(slot),
+        None => Ok(urmqtt_config::load_defaults()),
+    };
+    urmqtt_log::set_max_level(urmqtt_config::CONFIG.observability.log_level);
+    let dev = urmqtt_config::CONFIG.dev();
     let early = discover(&mem);
     // Where every region of the kernel's address space goes this boot
     // (ADR-173), before anything is mapped. The seed also keys the allocator
@@ -222,6 +233,7 @@ extern "C" fn urmqtt_kmain() -> ! {
         BOOTLOADER.response().map_or("?", |r| r.name()),
         BOOTLOADER.response().map_or("?", |r| r.version()),
     );
+    report_config(config_slot.is_some(), &config_result);
     match early {
         Some(e) => {
             info!("platform: discovered via {:?}", e.source);
@@ -358,6 +370,7 @@ extern "C" fn urmqtt_kmain() -> ! {
         features,
         medium: boot_medium(),
         install_image: install_image(),
+        config_slot,
         storage,
         ram_bytes,
     });
@@ -422,7 +435,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         "vm: running on kernel stacks (main {} KiB{}, exception {} KiB), {}",
         layout::MAIN_STACK_SIZE >> 10,
         // Where the stacks are is what KASLR hides (ADR-173): dev only.
-        if urmqtt_config::CONFIG.env == "dev" {
+        if urmqtt_config::CONFIG.dev() {
             alloc::format!(" at {:#x}", s.built.main_top)
         } else {
             alloc::string::String::new()
@@ -577,11 +590,26 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     if s.options.install {
         crate::install::run(
             s.install_image,
+            s.config_slot,
             s.options
                 .install_countdown_s
                 .unwrap_or(crate::install::COUNTDOWN_S),
             s.options.disk_fault,
         );
+    }
+    // Serving needs the customer's certificates (ADR-216): fail closed with
+    // the way out, before any disk is touched.
+    if let Some(missing) = urmqtt_config::CONFIG.missing_to_serve() {
+        fatal_fmt(format_args!(
+            "refusing to serve: {missing}. This image carries {} configuration; \
+             create one with `urmqtt-config pack` (or the builder page) and put it in the \
+             image's configuration slot, see docs/DEPLOY.md",
+            if urmqtt_config::info().is_some_and(|i| i.empty) {
+                "the empty (default)"
+            } else {
+                "a"
+            }
+        ));
     }
     if live {
         // No disk is used, written or even opened: the store is RAM.
@@ -728,7 +756,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
     crate::netproto::run(
         0,
-        urmqtt_config::CONFIG.env == "dev",
+        urmqtt_config::CONFIG.dev(),
         crate::netproto::take_restored(),
     )
 }
@@ -952,6 +980,68 @@ pub(crate) fn now_unix_ms() -> Option<u64> {
 /// Nanoseconds since the counter started (boot).
 fn uptime_ns() -> u64 {
     time::uptime_ns()
+}
+
+/// The configuration slot: the module whose path ends in `/urmqtt.cfg`
+/// (ADR-216). Its contents live in module memory, which stays mapped; only
+/// the descriptor is in reclaimable memory, so this runs in stage 1.
+fn config_module() -> Option<&'static [u8]> {
+    MODULES
+        .response()?
+        .modules()
+        .iter()
+        .find(|m| m.path().ends_with("/urmqtt.cfg"))
+        .map(|m| m.data())
+}
+
+/// Prints the loaded configuration's identity, or stops: a configuration
+/// that is present but wrong is never replaced by defaults (fail closed).
+fn report_config(module: bool, result: &Result<urmqtt_config::LoadInfo, urmqtt_config::LoadError>) {
+    use urmqtt_config::Hex;
+    match result {
+        Ok(i) => {
+            let signed = match i.signer {
+                Some(k) => SignerText::By(urmqtt_config::signer_id(&k)),
+                None => SignerText::Unsigned,
+            };
+            info!(
+                "config: fingerprint {} ({} bytes, {}), env={}",
+                Hex(&i.fingerprint),
+                i.blob_len,
+                signed,
+                urmqtt_config::CONFIG.env,
+            );
+            if !module {
+                warn!("config: no configuration module was loaded: built-in defaults");
+            } else if i.empty {
+                warn!(
+                    "config: the configuration slot is empty (all defaults): no certificates, the broker will not serve"
+                );
+            }
+            if urmqtt_config::DEV_KERNEL {
+                warn!("config: development kernel: development options are available");
+            }
+        }
+        Err(e) => fatal_fmt(format_args!(
+            "configuration refused: {e}. The image's configuration slot (/boot/urmqtt.cfg) is invalid; \
+             rebuild it with `urmqtt-config pack`, see docs/DEPLOY.md"
+        )),
+    }
+}
+
+/// How the signature of the configuration is shown.
+enum SignerText {
+    Unsigned,
+    By([u8; 8]),
+}
+
+impl core::fmt::Display for SignerText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unsigned => f.write_str("unsigned"),
+            Self::By(k) => write!(f, "signed by key {}", urmqtt_config::Hex(k)),
+        }
+    }
 }
 
 /// The module of the ISO's install entry: `/esp.img` (the EFI system

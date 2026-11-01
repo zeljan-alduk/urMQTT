@@ -1,12 +1,31 @@
-//! Build-time configuration compiled into an urMQTT image.
+//! The configuration of a running urMQTT image (C1, ADR-215, ADR-216).
 //!
-//! Values come from `deploy/<env>/config.toml` (selected with `URMQTT_ENV`,
-//! default `dev`), validated by `urmqtt-config-schema` in `build.rs`. Every
-//! limit used by the data path is read from [`CONFIG`]; there are no magic
-//! numbers in logic crates.
+//! The values come from the `urmqtt-cfg` blob the bootloader hands the
+//! kernel as a module ([`load`]); until then, or when there is none, from
+//! the documented defaults. Every limit used by the data path is read from
+//! [`CONFIG`]; there are no magic numbers in logic crates. The kernel
+//! itself is built once: the only build-time switch is [`DEV_KERNEL`].
 
 #![cfg_attr(not(test), no_std)]
-#![forbid(unsafe_code)]
+// The one place that needs `unsafe` is `store` (initialise-once storage in
+// `.bss`, no allocator before the heap exists).
+#![deny(unsafe_code)]
+
+mod store;
+pub use store::{CONFIG, ConfigHandle, LoadError, LoadInfo, info, load, load_defaults};
+pub use urmqtt_cfg::blob::Hex;
+
+/// How the console names the signer of a configuration: the first 8 bytes of
+/// the SHA-256 of its public key (compare with `urmqtt-config show`).
+pub fn signer_id(key: &[u8; 32]) -> [u8; 8] {
+    use urmqtt_cfg::blob::fingerprint_of;
+    let fp = fingerprint_of(key);
+    let mut id = [0u8; 8];
+    for (o, i) in id.iter_mut().zip(fp) {
+        *o = i;
+    }
+    id
+}
 
 /// IPv4 address with prefix length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +98,10 @@ pub struct Network {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Tls {
+    /// Server certificate chain (PEM); empty when none is configured.
+    pub cert_pem: &'static [u8],
+    /// Server private key (PEM); empty when none is configured.
+    pub key_pem: &'static [u8],
     pub identity_field: IdentityField,
     pub resumption: bool,
     /// Revoked client certificate serials (lowercase hex, no leading zeros
@@ -102,6 +125,9 @@ pub struct Registry {
 /// The control channel (H1).
 #[derive(Debug, Clone, Copy)]
 pub struct Control {
+    /// Ed25519 public key that verifies control messages (all zero when
+    /// none is configured; then `service_ids` is empty).
+    pub public_key: [u8; 32],
     /// Operational identities that may publish control messages (empty:
     /// the channel is off).
     pub service_ids: &'static [&'static str],
@@ -267,7 +293,16 @@ pub struct Time {
     pub max_step_s: u32,
 }
 
-/// The complete build-time configuration.
+/// Trust anchors by role (PEM files).
+#[derive(Debug, Clone, Copy)]
+pub struct Trust {
+    /// Device and service rights.
+    pub operational: &'static [&'static [u8]],
+    /// `provision/{id}/#` only.
+    pub bootstrap: &'static [&'static [u8]],
+}
+
+/// The complete configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildConfig {
     /// Environment name, e.g. `dev` or `prod`.
@@ -285,6 +320,28 @@ pub struct BuildConfig {
     pub time: Time,
     pub registry: Registry,
     pub control: Control,
+    pub trust: Trust,
+}
+
+impl BuildConfig {
+    /// Development options are in effect: a dev kernel running an
+    /// `env = "dev"` configuration.
+    pub fn dev(&self) -> bool {
+        DEV_KERNEL && self.env == "dev"
+    }
+
+    /// What is missing for a production run (`None`: nothing). The broker
+    /// refuses to serve without a server certificate, its key and at least
+    /// one operational CA.
+    pub fn missing_to_serve(&self) -> Option<&'static str> {
+        if self.tls.cert_pem.is_empty() || self.tls.key_pem.is_empty() {
+            Some("no server certificate and key (tls.cert, tls.key)")
+        } else if self.trust.operational.is_empty() {
+            Some("no operational CA (trust.operational)")
+        } else {
+            None
+        }
+    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
