@@ -61,7 +61,7 @@ test('the default is the simple view: three steps, the newest release chosen and
 test('a card that needs an address shows only the address and gateway, and the bar names the next step', async () => {
   await page.click('.ub-where[data-id="vps"]');
   await page.waitFor(`!document.querySelector('.ub-fixed').hidden`);
-  assert.equal(await status(), "Next: enter the server's address and gateway");
+  await page.waitFor(`document.querySelector('.ub-bar-status').textContent === "Next: enter the server's address and gateway"`);
   await page.type('#ub-s-addr', '203.0.113.10/24');
   await page.type('#ub-s-gw', '203.0.113.1');
   await page.waitFor(`document.querySelector('.ub-bar-status').textContent === 'Next: add your certificates'`);
