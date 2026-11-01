@@ -118,11 +118,18 @@ console_end() {
         echo "### console $1 rep=$2"
         cat "$DIR/console.out"
     } >>"$OUT.console"
+    # The console replays its last lines to every new subscriber: count only
+    # the reports not seen in an earlier run (by their timestamps).
     local over drop late
-    over=$(grep -c 'over budget' "$DIR/console.out")
-    drop=$(grep -c 'watchdog: aborting connection' "$DIR/console.out")
-    late=$(grep -o '[0-9]* late tick(s), worst [0-9]* us' "$DIR/console.out" | awk '{n+=$1; if ($5>w) w=$5} END{printf "late_ticks=%d worst_us=%d", n, w}')
-    echo "CONSOLE watchdog_reports=$over aborted=$drop $late $(grep -c 'longest stall' "$DIR/console.out") dataplane_lines" | tee -a "$OUT"
+    grep -E 'over budget' "$DIR/console.out" | sort -u >"$DIR/wd.cur"
+    grep -E 'watchdog: aborting connection' "$DIR/console.out" | sort -u >"$DIR/wd.cur.abort"
+    touch "$DIR/wd.seen" "$DIR/wd.seen.abort"
+    over=$(comm -13 "$DIR/wd.seen" "$DIR/wd.cur" | wc -l)
+    drop=$(comm -13 "$DIR/wd.seen.abort" "$DIR/wd.cur.abort" | wc -l)
+    cat "$DIR/wd.cur" "$DIR/wd.seen" | sort -u >"$DIR/wd.seen.tmp" && mv "$DIR/wd.seen.tmp" "$DIR/wd.seen"
+    cat "$DIR/wd.cur.abort" "$DIR/wd.seen.abort" | sort -u >"$DIR/wd.seen.tmp" && mv "$DIR/wd.seen.tmp" "$DIR/wd.seen.abort"
+    late=$(grep -o '[0-9]* late tick(s), worst [0-9]* us' "$DIR/console.out" | sort -u | awk '{n+=$1; if ($5>w) w=$5} END{printf "late_ticks_in_window=%d worst_us=%d", n, w}')
+    echo "CONSOLE new_watchdog_reports=$over new_aborted_connections=$drop $late" | tee -a "$OUT"
     grep -E 'SYSVAL .*(dropped|messages/(received|sent))' "$DIR/console.out" | sed 's/SYSVAL \$SYS\/broker\///' | tr '\n' ' ' | sed 's/^/DROPS /' | tee -a "$OUT"
     echo | tee -a "$OUT" >/dev/null
 }
@@ -213,7 +220,9 @@ for suite in $SUITES; do
         # Offered load at fixed rates: what is delivered, how late, and whether
         # a connection is lost. 16 publishers and 16 subscribers on 16 topics.
         [ "$PUBSUB" = 1 ] || continue
-        for cfg in "0 64 100" "0 64 300" "0 64 1000" "1 64 100" "1 64 300" "1 64 1000" "0 1024 100" "0 1024 300"; do
+        # SWEEP_CFGS="QOS PAYLOAD RATE;QOS PAYLOAD RATE;..." picks a subset.
+        IFS=';' read -ra sweep_cfgs <<<"${SWEEP_CFGS:-0 64 100;0 64 300;0 64 1000;1 64 100;1 64 300;1 64 1000;0 1024 100;0 1024 300}"
+        for cfg in "${sweep_cfgs[@]}"; do
             set -- $cfg
             for r in $(seq 1 "$REPS"); do
                 run "sweep qos=$1 payload=$2 rate=$3 pairs=16" "$r" pubsub "${COMMON[@]}" --prefix "svc-$(uid)" \

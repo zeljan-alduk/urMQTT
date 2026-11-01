@@ -247,7 +247,7 @@ impl Idle {
             });
         let p = core::mem::take(&mut self.prof);
         let pct = |ns: u64| ns * 100 / window.max(1);
-        if acc > 0 || tls > 0 || frames > 0 {
+        if acc > 0 || tls > 0 || frames > 0 || late_ticks > 0 || steal > 0 {
             urmqtt_log::info!(
                 "dataplane: core {me}: busy {busy}%, work {}% (rx {}%, of it tls {}%, poll {}%, tcp {}%, mesh {}%, nic {}%), \
                  {acc} connection(s) accepted ({} us of work, {} us of it TLS, each), {frames} frame(s) dispatched (NIC backlog peak {nic_peak}), \

@@ -49,7 +49,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use urmqtt_arch::time;
 use urmqtt_config::{CONFIG, WatchdogAction};
-use urmqtt_log::{error, warn};
+use urmqtt_log::{error, info, warn};
 
 use crate::smp::MAX_CPUS;
 
@@ -200,6 +200,8 @@ struct Slot {
     step: AtomicU8,
     /// Reported (once per handler run).
     fired: AtomicBool,
+    /// Counted as excused (once per handler run, ADR-214).
+    excused: AtomicBool,
     /// Connection to abort once the handler returns (`drop`).
     drop: AtomicU64,
 }
@@ -214,6 +216,7 @@ static SLOTS: [Slot; MAX_CPUS] = [const {
         phase: AtomicU8::new(0),
         step: AtomicU8::new(0),
         fired: AtomicBool::new(false),
+        excused: AtomicBool::new(false),
         drop: AtomicU64::new(NO_CONN),
         disc0: AtomicU64::new(0),
     }
@@ -255,6 +258,7 @@ pub fn enter(phase: Phase, conn: Option<u64>) -> Option<Guard> {
     slot.phase.store(phase as u8, Ordering::Relaxed);
     slot.step.store(0, Ordering::Relaxed);
     slot.fired.store(false, Ordering::Relaxed);
+    slot.excused.store(false, Ordering::Relaxed);
     slot.disc0.store(
         DISCOUNT.get(me).map_or(0, |d| d.load(Ordering::Relaxed)),
         Ordering::Relaxed,
@@ -372,10 +376,15 @@ pub fn check(late: u64, period: u64) {
         crate::power::fatal();
     }
     if ms <= budget {
-        if wall_ms > budget && !slot.fired.load(Ordering::Relaxed) {
+        if wall_ms > budget && !slot.excused.swap(true, Ordering::Relaxed) {
             // Over budget in elapsed time only: the core was not running.
             // Relaxed: statistics.
             EXCUSED.fetch_add(1, Ordering::Relaxed);
+            info!(
+                "watchdog: core {} {phase} handler for conn {} not charged: {wall_ms} ms elapsed, {ms} ms running (the core was stalled or waiting for a lock)",
+                crate::smp::current(),
+                ConnName(conn)
+            );
         }
         return;
     }
