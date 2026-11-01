@@ -5,7 +5,6 @@
   "privacy.text": "Your certificates, private keys, settings and the finished ISO stay on your computer. The page only downloads the release files from this site, and it has no tracking and no third-party scripts.",
   "unsupported": "This browser lacks features the builder needs: {features}. Use a current version of Firefox, Chrome, Edge or Safari.",
   "module-failed": "The builder module could not be loaded: {reason}",
-
   "common.close": "Close",
   "common.cancel": "Cancel",
   "common.retry": "Retry",
@@ -15,13 +14,14 @@
   "common.on": "on",
   "common.off": "off",
   "common.days": "days",
-
   "release.title": "Release",
   "release.help": "The template is the released urMQTT image with an empty configuration. It is downloaded from this site and checked against the release signature in your browser before anything is written into it.",
   "release.failed": "The list of releases could not be loaded ({reason}).",
   "release.failed-help": "Nothing is fetched from GitHub in its place. If you already have a template ISO and its SHA256SUMS, you can use files from your computer.",
   "release.local": "Use files from my computer",
   "release.none": "No release with a configurable template has been published yet.",
+  "release.none-help": "The releases listed below were built before the runtime configuration existed, so they cannot be configured here. This page will offer the first release that comes with a template ISO. Until then you can use files from your computer.",
+  "release.all-releases": "All releases on GitHub",
   "release.stable": "stable",
   "release.prerelease": "pre-release",
   "release.published": "Published {date}",
@@ -41,7 +41,6 @@
   "release.verify-failed": "The signature check failed: {reason}",
   "release.report": "Integrity report",
   "release.local-unverified": "This file has no signed checksums, so it cannot be checked against a release.",
-
   "preset.title": "Start from",
   "preset.help": "A preset only sets a few values. Everything else stays at its default, and you can change any field below.",
   "preset.lab": "Lab VM (DHCP)",
@@ -56,7 +55,6 @@
   "preset.confirm": "Choosing a preset replaces the values you changed. Certificates and keys you imported are kept.",
   "preset.apply": "Replace",
   "preset.applied": "Preset applied: {name}",
-
   "form.title": "Configuration",
   "section.network": "Network",
   "section.tls": "TLS",
@@ -78,7 +76,6 @@
   "section.reset-title": "Reset this section?",
   "section.reset-files": "The section also holds certificates or keys you imported. Resetting removes them from this page.",
   "section.reset-done": "Section reset to its defaults.",
-
   "field.default": "default",
   "field.changed": "changed",
   "field.reset": "Reset to default",
@@ -101,7 +98,6 @@
   "file.none-optional": "Not set (optional)",
   "file.count": "Files: {n}",
   "file.imported": "Imported",
-
   "enum.network.mode.dhcp": "address from DHCP",
   "enum.network.mode.static": "fixed address",
   "enum.network.mode.auto": "DHCP first, then the fixed address",
@@ -121,11 +117,11 @@
   "enum.entropy.fallback.none": "refuse to boot",
   "err.int": "Must be a whole number.",
   "err.enum": "Not one of the allowed values.",
-
   "bar.title": "Summary",
   "bar.valid": "The configuration is valid.",
   "bar.problems": "Problems to fix: {n}",
   "bar.choose-release": "Choose a release first.",
+  "bar.no-release": "There is no release to build from yet.",
   "bar.changed": "Settings changed from the defaults: {n}",
   "bar.fingerprint": "Configuration fingerprint:",
   "bar.name": "Name",
@@ -157,7 +153,6 @@
   "result.compare": "The broker prints the configuration fingerprint at every boot. If it differs from this one, the machine is not running this configuration.",
   "build.failed": "The build failed",
   "build.failed-help": "Nothing was changed on your computer. You can try again, or use files from your computer instead.",
-
   "risk.title": "Please confirm",
   "risk.intro": "These choices are allowed but deserve a second look:",
   "risk.back": "Go back",
@@ -180,7 +175,6 @@
   "risk.registry-open.text": "Every device with a certificate from your CA may connect. Use the allowlist to admit listed identities only.",
   "risk.entropy-none.title": "No entropy fallback",
   "risk.entropy-none.text": "Without a hardware random source (virtio-rng, RDRAND) the broker refuses to boot.",
-
   "integrity.title": "Integrity report",
   "integrity.release": "Release",
   "integrity.key": "Signing key id",
@@ -207,7 +201,6 @@
   "integrity.override-help": "Do not continue unless you know why. An ISO built from a template that does not match the release carries no guarantee about its kernel.",
   "integrity.stop": "Stop",
   "integrity.override": "Build anyway (not recommended)",
-
   "next.title": "What to do next",
   "next.intro": "Your image is a normal bootable ISO.",
   "next.built": "{name} was built in this browser.",
@@ -224,7 +217,6 @@
   "next.step5.text": "Choose \"Install urMQTT\" in the boot menu to copy the image, with its configuration, to the machine's disk.",
   "next.sha": "SHA-256 of the file: {sha}",
   "next.no-official-hash": "A configured image has no official hash: it contains your configuration. What is signed is the template and, in your hands, the fingerprint above.",
-
   "toml.title": "Import or export TOML",
   "toml.nothing": "Nothing differs from the defaults.",
   "toml.export": "Export",
@@ -241,7 +233,6 @@
   "toml.choose-files": "Choose the files the TOML names",
   "toml.apply": "Apply",
   "toml.applied": "The TOML was applied.",
-
   "local.title": "Use files from my computer",
   "local.help": "Choose a template ISO (urmqtt-template-…-universal.iso). Add SHA256SUMS and SHA256SUMS.minisig of the same release to have it checked.",
   "local.iso": "Template ISO",
@@ -250,7 +241,6 @@
   "local.warn": "Without the checksums and their signature the file cannot be checked.",
   "local.both": "Give both SHA256SUMS and its signature, or neither.",
   "local.use": "Use these files",
-
   "cert.title.cert": "Server certificate",
   "cert.title.key": "Server private key",
   "cert.title.operational": "Operational CA certificates",
@@ -308,9 +298,38 @@
   "sign.generate": "Generate a new key",
   "sign.generate-help": "Creates a key pair in this browser and downloads the private key. Keep it: you need it to sign again.",
   "sign.generated": "New key",
-
   "emulator.title": "Try in the emulator",
   "emulator.need-build": "Build the ISO first.",
-  "emulator.hint": "Boots the ISO you just built, inside this page.",
-  "emulator.not-ready": "The emulator is not available yet."
+  "emulator.hint": "Starts the ISO you just built in an emulator inside this page.",
+  "emulator.unavailable": "The emulator is not available here: {reason}",
+  "emulator.no-runtime": "this build of the page does not include it.",
+  "emulator.no-isolation": "the page is not cross-origin isolated, which the emulator's threads need (SharedArrayBuffer).",
+  "emulator.phone": "it needs a desktop browser with at least 4 GB of memory.",
+  "emulator.idle": "Ready to start.",
+  "emulator.note": "This starts the image you just built in an x86-64 emulator that runs inside this page (WebAssembly). The console appears below. Nothing is sent anywhere.",
+  "emulator.limit-size": "The emulator is loaded only now: about 3 MB the first time, then kept by your browser.",
+  "emulator.limit-slow": "It is far slower than real hardware and keeps two processor cores busy while it runs. Time or speed seen here says nothing about the broker's performance.",
+  "emulator.limit-memory": "It needs about 1.5 GB of memory. Closing this window stops it and frees the memory.",
+  "emulator.limit-network": "It has no network: the broker starts and listens, but nothing can connect to it. Use it to see that the image boots and what its console says.",
+  "emulator.too-big": "This image asks for a kernel heap of {heap} MB; the emulator can give its machine 1 GB of memory, so the image cannot boot here.",
+  "emulator.skip": "Skip the 10 second countdown of the boot menu",
+  "emulator.licence": "The emulator is QEMU compiled to WebAssembly (GPL-2.0).",
+  "emulator.source": "Licences and source",
+  "emulator.start": "Start",
+  "emulator.stop": "Stop",
+  "emulator.reset": "Restart the machine",
+  "emulator.loading": "Loading the emulator…",
+  "emulator.starting": "Starting the machine…",
+  "emulator.running": "The machine is running.",
+  "emulator.exited": "The machine has powered off.",
+  "emulator.stopped": "Stopped.",
+  "emulator.crashed": "The emulator stopped unexpectedly.",
+  "emulator.failed": "The emulator could not run: {reason}",
+  "emulator.screen": "Screen of the emulated machine",
+  "emulator.serial": "Serial console of the emulated machine",
+  "emulator.fp-ok": "The kernel printed the same configuration fingerprint as this page.",
+  "emulator.fp-bad": "The kernel printed fingerprint {got}…, this page has {want}…: it is not the configuration you built.",
+  "emulator.ready": "The broker reports that it is ready.",
+  "emulator.refuses": "The kernel refuses to serve (a server certificate, its key and a CA are missing, or the configuration is incomplete).",
+  "emulator.fatal": "The kernel stopped: {line}"
 }

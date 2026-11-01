@@ -5,7 +5,6 @@
   "privacy.text": "Vaši certifikati, privatni ključevi, postavke i gotov ISO ostaju na Vašem računalu. Stranica s ovog sjedišta preuzima samo datoteke izdanja, bez praćenja i bez skripti trećih strana.",
   "unsupported": "Ovom pregledniku nedostaju mogućnosti koje builder treba: {features}. Koristite aktualnu verziju preglednika Firefox, Chrome, Edge ili Safari.",
   "module-failed": "Modul buildera nije se mogao učitati: {reason}",
-
   "common.close": "Zatvori",
   "common.cancel": "Odustani",
   "common.retry": "Pokušaj ponovno",
@@ -15,13 +14,14 @@
   "common.on": "uključeno",
   "common.off": "isključeno",
   "common.days": "dana",
-
   "release.title": "Izdanje",
   "release.help": "Predložak je izdani urMQTT image s praznom konfiguracijom. Preuzima se s ovog sjedišta, a prije nego što se u njega išta upiše, u Vašem pregledniku provjerava se potpis izdanja.",
   "release.failed": "Popis izdanja nije se mogao učitati ({reason}).",
   "release.failed-help": "Umjesto toga ništa se ne dohvaća s GitHuba. Ako već imate predložak ISO i njegov SHA256SUMS, možete upotrijebiti datoteke s računala.",
   "release.local": "Koristi datoteke s mog računala",
   "release.none": "Još nije objavljeno nijedno izdanje s predloškom koji se može konfigurirati.",
+  "release.none-help": "Izdanja navedena u nastavku izgrađena su prije nego što je konfiguracija u radu postojala, pa se ovdje ne mogu konfigurirati. Ova će stranica ponuditi prvo izdanje koje dolazi s predloškom ISO. Do tada možete koristiti datoteke s računala.",
+  "release.all-releases": "Sva izdanja na GitHubu",
   "release.stable": "stabilno",
   "release.prerelease": "predizdanje",
   "release.published": "Objavljeno {date}",
@@ -41,7 +41,6 @@
   "release.verify-failed": "Provjera potpisa nije uspjela: {reason}",
   "release.report": "Izvješće o cjelovitosti",
   "release.local-unverified": "Ova datoteka nema potpisane kontrolne zbrojeve pa se ne može provjeriti prema izdanju.",
-
   "preset.title": "Počnite od",
   "preset.help": "Predložak postavlja samo nekoliko vrijednosti. Sve ostalo ostaje na zadanom, a bilo koje polje niže možete promijeniti.",
   "preset.lab": "Laboratorijski VM (DHCP)",
@@ -56,7 +55,6 @@
   "preset.confirm": "Odabir predloška zamjenjuje vrijednosti koje ste promijenili. Uvezeni certifikati i ključevi ostaju.",
   "preset.apply": "Zamijeni",
   "preset.applied": "Predložak primijenjen: {name}",
-
   "form.title": "Konfiguracija",
   "section.network": "Mreža",
   "section.tls": "TLS",
@@ -78,7 +76,6 @@
   "section.reset-title": "Vratiti ovaj odjeljak?",
   "section.reset-files": "Odjeljak sadrži i certifikate ili ključeve koje ste uvezli. Vraćanjem se uklanjaju s ove stranice.",
   "section.reset-done": "Odjeljak je vraćen na zadano.",
-
   "field.default": "zadano",
   "field.changed": "promijenjeno",
   "field.reset": "Vrati na zadano",
@@ -101,7 +98,6 @@
   "file.none-optional": "Nije postavljeno (neobavezno)",
   "file.count": "Datoteka: {n}",
   "file.imported": "Uvezeno",
-
   "enum.network.mode.dhcp": "adresa s DHCP-a",
   "enum.network.mode.static": "fiksna adresa",
   "enum.network.mode.auto": "prvo DHCP, zatim fiksna adresa",
@@ -121,11 +117,11 @@
   "enum.entropy.fallback.none": "ne pokreći se",
   "err.int": "Mora biti cijeli broj.",
   "err.enum": "Nije jedna od dopuštenih vrijednosti.",
-
   "bar.title": "Sažetak",
   "bar.valid": "Konfiguracija je valjana.",
   "bar.problems": "Problema za ispraviti: {n}",
   "bar.choose-release": "Prvo odaberite izdanje.",
+  "bar.no-release": "Još nema izdanja iz kojeg bi se mogao izgraditi ISO.",
   "bar.changed": "Postavki promijenjeno u odnosu na zadano: {n}",
   "bar.fingerprint": "Otisak konfiguracije:",
   "bar.name": "Naziv",
@@ -157,7 +153,6 @@
   "result.compare": "Broker pri svakom pokretanju ispisuje otisak konfiguracije. Ako se razlikuje od ovog, stroj ne radi s ovom konfiguracijom.",
   "build.failed": "Izgradnja nije uspjela",
   "build.failed-help": "Na Vašem računalu ništa nije promijenjeno. Možete pokušati ponovno ili umjesto toga upotrijebiti datoteke s računala.",
-
   "risk.title": "Potvrdite, molimo",
   "risk.intro": "Ovi su odabiri dopušteni, ali vrijedi ih još jednom pogledati:",
   "risk.back": "Natrag",
@@ -180,7 +175,6 @@
   "risk.registry-open.text": "Svaki uređaj s certifikatom Vašeg CA smije se spojiti. Popis dopuštenih ograničava pristup na navedene identitete.",
   "risk.entropy-none.title": "Nema rezervnog izvora entropije",
   "risk.entropy-none.text": "Bez hardverskog izvora slučajnih brojeva (virtio-rng, RDRAND) broker se ne pokreće.",
-
   "integrity.title": "Izvješće o cjelovitosti",
   "integrity.release": "Izdanje",
   "integrity.key": "ID ključa za potpis",
@@ -207,7 +201,6 @@
   "integrity.override-help": "Ne nastavljajte ako ne znate zašto. ISO izgrađen iz predloška koji ne odgovara izdanju ne daje nikakvo jamstvo za svoju jezgru.",
   "integrity.stop": "Zaustavi",
   "integrity.override": "Ipak izgradi (ne preporučuje se)",
-
   "next.title": "Što dalje",
   "next.intro": "Vaš image je običan ISO s kojeg se može pokrenuti stroj.",
   "next.built": "{name} je izgrađen u ovom pregledniku.",
@@ -224,7 +217,6 @@
   "next.step5.text": "U izborniku pri pokretanju odaberite \"Install urMQTT\" da se image, s konfiguracijom, kopira na disk stroja.",
   "next.sha": "SHA-256 datoteke: {sha}",
   "next.no-official-hash": "Konfigurirani image nema službeni hash: sadrži Vašu konfiguraciju. Potpisan je predložak, a u Vašim rukama otisak gore.",
-
   "toml.title": "Uvoz ili izvoz TOML-a",
   "toml.nothing": "Ništa se ne razlikuje od zadanog.",
   "toml.export": "Izvoz",
@@ -241,7 +233,6 @@
   "toml.choose-files": "Odaberite datoteke koje TOML navodi",
   "toml.apply": "Primijeni",
   "toml.applied": "TOML je primijenjen.",
-
   "local.title": "Koristi datoteke s mog računala",
   "local.help": "Odaberite predložak ISO (urmqtt-template-…-universal.iso). Dodajte SHA256SUMS i SHA256SUMS.minisig istog izdanja da se provjeri.",
   "local.iso": "Predložak ISO",
@@ -250,7 +241,6 @@
   "local.warn": "Bez kontrolnih zbrojeva i njihova potpisa datoteka se ne može provjeriti.",
   "local.both": "Dajte i SHA256SUMS i njegov potpis, ili nijedno.",
   "local.use": "Koristi ove datoteke",
-
   "cert.title.cert": "Certifikat poslužitelja",
   "cert.title.key": "Privatni ključ poslužitelja",
   "cert.title.operational": "Operativni CA certifikati",
@@ -308,9 +298,38 @@
   "sign.generate": "Generiraj novi ključ",
   "sign.generate-help": "Stvara par ključeva u ovom pregledniku i preuzima privatni ključ. Sačuvajte ga: treba Vam za ponovno potpisivanje.",
   "sign.generated": "Novi ključ",
-
   "emulator.title": "Isprobaj u emulatoru",
   "emulator.need-build": "Prvo izgradite ISO.",
-  "emulator.hint": "Pokreće ISO koji ste upravo izgradili, unutar ove stranice.",
-  "emulator.not-ready": "Emulator još nije dostupan."
+  "emulator.hint": "Pokreće ISO koji ste upravo izgradili u emulatoru unutar ove stranice.",
+  "emulator.unavailable": "Emulator ovdje nije dostupan: {reason}",
+  "emulator.no-runtime": "ova izvedba stranice ga ne sadrži.",
+  "emulator.no-isolation": "stranica nije izolirana između izvora (cross-origin isolated), što dretve emulatora trebaju (SharedArrayBuffer).",
+  "emulator.phone": "treba preglednik na računalu s najmanje 4 GB memorije.",
+  "emulator.idle": "Spremno za pokretanje.",
+  "emulator.note": "Ovo pokreće image koji ste upravo izgradili u x86-64 emulatoru koji radi unutar ove stranice (WebAssembly). Konzola se prikazuje ispod. Ništa se nikamo ne šalje.",
+  "emulator.limit-size": "Emulator se učitava tek sada: oko 3 MB prvi put, zatim ga čuva Vaš preglednik.",
+  "emulator.limit-slow": "Znatno je sporiji od stvarnog hardvera i dok radi zauzima dvije jezgre procesora. Vrijeme ili brzina viđeni ovdje ne govore ništa o performansama brokera.",
+  "emulator.limit-memory": "Treba oko 1,5 GB memorije. Zatvaranjem ovog prozora zaustavlja se i oslobađa memoriju.",
+  "emulator.limit-network": "Nema mrežu: broker se pokrene i sluša, ali se na njega ništa ne može spojiti. Koristite ga da vidite da se image pokreće i što piše na njegovoj konzoli.",
+  "emulator.too-big": "Ovaj image traži heap jezgre od {heap} MB; emulator svom stroju može dati 1 GB memorije pa se image ovdje ne može pokrenuti.",
+  "emulator.skip": "Preskoči odbrojavanje od 10 sekundi u izborniku pokretanja",
+  "emulator.licence": "Emulator je QEMU preveden u WebAssembly (GPL-2.0).",
+  "emulator.source": "Licence i izvorni kod",
+  "emulator.start": "Pokreni",
+  "emulator.stop": "Zaustavi",
+  "emulator.reset": "Ponovno pokreni stroj",
+  "emulator.loading": "Učitavanje emulatora…",
+  "emulator.starting": "Pokretanje stroja…",
+  "emulator.running": "Stroj radi.",
+  "emulator.exited": "Stroj se ugasio.",
+  "emulator.stopped": "Zaustavljeno.",
+  "emulator.crashed": "Emulator se neočekivano zaustavio.",
+  "emulator.failed": "Emulator se nije mogao pokrenuti: {reason}",
+  "emulator.screen": "Zaslon emuliranog stroja",
+  "emulator.serial": "Serijska konzola emuliranog stroja",
+  "emulator.fp-ok": "Jezgra je ispisala isti otisak konfiguracije kao ova stranica.",
+  "emulator.fp-bad": "Jezgra je ispisala otisak {got}…, a ova stranica ima {want}…: to nije konfiguracija koju ste izgradili.",
+  "emulator.ready": "Broker javlja da je spreman.",
+  "emulator.refuses": "Jezgra odbija posluživati (nedostaje certifikat poslužitelja, njegov ključ i CA, ili je konfiguracija nepotpuna).",
+  "emulator.fatal": "Jezgra se zaustavila: {line}"
 }
