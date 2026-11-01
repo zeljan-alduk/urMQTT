@@ -1,0 +1,10 @@
+# Several mistakes at once; pack must report all of them and write nothing.
+[network]
+mqtt_tls_port = 0
+mqtt_plain_port = 1883
+
+[memory]
+kernel_heap_mb = 100
+
+[acl]
+device_publish = ["a/#/b"]

@@ -99,6 +99,11 @@ UNIVERSAL_KERNELS := --kernel-aarch64 target/aarch64-unknown-none/release/urmqtt
 	--kernel-x86_64 target/x86_64-urmqtt-none/release/urmqtt
 UNIVERSAL_ISO := $(BUILD_DIR)/urmqtt-$(ENV)-$(VERSION)-universal.iso
 UNIVERSAL_RAW := $(BUILD_DIR)/urmqtt-$(ENV)-$(VERSION)-universal.img
+# The template ISO (C1, ADR-218): the universal ISO with the release kernels
+# (every ENV but dev builds the same one) and the EMPTY configuration. The
+# customer's configuration goes into it afterwards, without a toolchain:
+# `urmqtt-config pack my.toml --iso <template> --out my.iso`.
+TEMPLATE_ISO := $(BUILD_DIR)/urmqtt-template-$(VERSION)-universal.iso
 
 .PHONY: universal
 universal: ## One ISO (and raw image) that boots on aarch64 UEFI, x86_64 UEFI and x86_64 BIOS
@@ -106,6 +111,12 @@ universal: ## One ISO (and raw image) that boots on aarch64 UEFI, x86_64 UEFI an
 	$(MAKE) --no-print-directory build ARCH=x86_64
 	scripts/mkiso.sh --universal $(UNIVERSAL_KERNELS) --out $(UNIVERSAL_ISO) --disk-out $(UNIVERSAL_RAW)
 	@ln -sf $(notdir $(UNIVERSAL_ISO)) $(BUILD_DIR)/urmqtt-$(ENV)-universal.iso
+
+.PHONY: template
+template: ## The template ISO (release kernels, empty configuration) for `urmqtt-config pack --iso`
+	$(MAKE) --no-print-directory build ARCH=aarch64 ENV=release
+	$(MAKE) --no-print-directory build ARCH=x86_64 ENV=release
+	scripts/mkiso.sh --universal $(UNIVERSAL_KERNELS) --empty-config --out $(TEMPLATE_ISO)
 
 .PHONY: run
 run: disk ## Boot the dev disk in QEMU (HVF on macOS), 4 vCPU, 512 MB, serial on stdio
@@ -235,10 +246,12 @@ raw: build ## Build a raw GPT disk image (EFI system partition) for KVM/Proxmox/
 	@rm -f $(BUILD_DIR)/.raw-tmp.iso $(BUILD_DIR)/.esp.img
 
 .PHONY: dist
-dist: iso raw ## Release artifacts (ELF, ISO, raw image) and SHA256SUMS in build/dist/
+dist: iso raw ## Release artifacts (ELF, ISO, raw image, the template ISO) and SHA256SUMS in build/dist/
 	@rm -rf $(BUILD_DIR)/dist && mkdir -p $(BUILD_DIR)/dist
 	cp $(KERNEL_ELF) $(BUILD_DIR)/dist/urmqtt-$(ENV)-$(VERSION).elf
 	cp $(ISO) $(RAW) $(BUILD_DIR)/dist/
+	$(MAKE) --no-print-directory template
+	cp $(TEMPLATE_ISO) $(BUILD_DIR)/dist/
 	scripts/sbom.py --strict --version $(VERSION) --out $(BUILD_DIR)/dist/urmqtt-$(ENV)-$(VERSION).cdx.json
 	cd $(BUILD_DIR)/dist && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
 
@@ -248,6 +261,8 @@ dist-universal: universal ## Both ELFs, the universal ISO and raw image, SHA256S
 	cp target/aarch64-unknown-none/release/urmqtt $(BUILD_DIR)/dist-universal/urmqtt-$(ENV)-$(VERSION)-aarch64.elf
 	cp target/x86_64-urmqtt-none/release/urmqtt $(BUILD_DIR)/dist-universal/urmqtt-$(ENV)-$(VERSION)-x86_64.elf
 	cp $(UNIVERSAL_ISO) $(UNIVERSAL_RAW) $(BUILD_DIR)/dist-universal/
+	$(MAKE) --no-print-directory template
+	cp $(TEMPLATE_ISO) $(BUILD_DIR)/dist-universal/
 	scripts/sbom.py --strict --version $(VERSION) --out $(BUILD_DIR)/dist-universal/urmqtt-$(ENV)-$(VERSION).cdx.json
 	cd $(BUILD_DIR)/dist-universal && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
 

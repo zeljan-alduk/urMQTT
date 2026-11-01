@@ -31,9 +31,16 @@ jobs:
       - run: make certs
       # Only the dev image is published: prod images embed private keys and are
       # built by the operator from their own deploy/prod/ (docs/DEPLOY.md).
+      # `make dist` also builds the template ISO (urmqtt-template-<version>-universal.iso:
+      # the release kernels, the empty configuration), which `urmqtt-config pack --iso`
+      # turns into a configured image without a toolchain (C1, ADR-218).
       - name: Install ISO tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends xorriso mtools
       - run: make dist ENV=dev
+      - name: The template ISO is in the release and in SHA256SUMS
+        run: |
+          ls build/dist/urmqtt-template-*-universal.iso
+          grep -q 'urmqtt-template-.*-universal.iso$' build/dist/SHA256SUMS
       - name: Sign SHA256SUMS with minisign
         if: env.HAS_MINISIGN == 'true'
         env:

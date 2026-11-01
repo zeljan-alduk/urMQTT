@@ -1,0 +1,26 @@
+# A lab configuration without certificates: a fixed address, narrower ACLs and
+# tighter limits than the defaults. Used by the golden tests of urmqtt-config.
+[network]
+mode = "static"
+address = "192.0.2.10/24"
+gateway = "192.0.2.1"
+mqtt_tls_port = 8884
+
+[limits]
+max_packet_size = 8192
+publish_rate_per_device = "600/m"
+
+[acl]
+device_publish = ["lab/{id}/#"]
+operator_ids = []
+
+[observability]
+log_level = "debug"
+syslog_udp = "192.0.2.50:514"
+
+[memory]
+kernel_heap_mb = 128
+min_free_mb = 16
+
+[time]
+servers = ["192.0.2.123"]
