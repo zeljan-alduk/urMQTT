@@ -47,7 +47,7 @@ test('the default is the simple view: three steps, the newest release chosen and
   assert.equal(await mode(), 'simple');
   assert.equal(await page.eval(`document.querySelector('.ub-advanced').hidden`), true);
   const heads = await page.eval(`[...document.querySelectorAll('.ub-simple h2')].map(h => h.textContent.replace(/^\\d/, ''))`);
-  assert.deepEqual(heads, ['Where will it run?', 'Your certificates', 'Name your image']);
+  assert.deepEqual(heads, ['Where will it run?', 'How will devices connect?', 'Name your image']);
   // The release is chosen without a click and the check ran silently: a green chip.
   await page.waitFor(`document.querySelector('.ub-chip.ok')`, { what: 'the verified chip' });
   assert.match(await page.eval(`document.querySelector('.ub-version-line').textContent`), /v0\.5\.0.*Verified/);
@@ -79,15 +79,15 @@ test('the certificate, its key and the CA are dropped in one go and sorted by wh
   assert.equal(await status(), 'The configuration is valid.');
   // A file that is not PEM is named, nothing else changes.
   await page.setFiles('#ub-s-drop input[type=file]', [join(DEV, '../../Cargo.toml')]);
-  await page.waitFor(`document.querySelector('.ub-simple [role=alert]')`);
-  assert.match(await page.eval(`document.querySelector('.ub-simple [role=alert]').textContent`), /No usable certificate or key was found in: Cargo\.toml/);
+  await page.waitFor(`document.querySelector('#ub-s-tls [role=alert]')`);
+  assert.match(await page.eval(`document.querySelector('#ub-s-tls [role=alert]').textContent`), /No usable certificate or key was found in: Cargo\.toml/);
 });
 
-test('the extras: diagnostics is a plain checkbox, plain MQTT shows where its accounts are set up', async () => {
+test('the extras: diagnostics is a plain checkbox, and plain MQTT (a listener of its own) can be switched on and off', async () => {
   await page.click('#ub-x-diag');
   await page.waitFor(`document.querySelector('#ub-x-diag').checked`);
   await page.click('#ub-x-plain');
-  assert.equal(await page.eval(`document.querySelector('#ub-x-plain').checked && !document.querySelector('#ub-x-plain').closest('fieldset').querySelector('.ub-help').hidden`), true);
+  assert.equal(await page.eval(`!document.querySelector('#ub-s-plain').hidden`), true, 'plain MQTT shows its own questions');
   await page.click('#ub-x-plain'); // off again: its accounts would be needed
   await page.type('#ub-s-name', 'trial');
   assert.match(await page.eval(`document.querySelector('.ub-simple .ub-code').textContent`), /urmqtt-0\.5\.0-trial-universal\.iso/);

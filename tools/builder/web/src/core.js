@@ -396,6 +396,8 @@ export function isApplicable(f, state) {
   const mode = state.values['network.mode'] || 'dhcp';
   if (f.id === 'network.address' || f.id === 'network.gateway') return mode !== 'dhcp';
   if (f.id === 'network.dhcp_timeout_s') return mode === 'auto';
+  // The TLS listener is off (ADR-233): its certificate, its CAs, the control key and the revocations have no use.
+  if (tlsOff(state) && (f.section === 'tls' || f.section === 'trust' || f.section === 'control')) return false;
   // Plaintext MQTT (P1): nothing but the switch while it is off; then what the mode uses.
   if (f.section === 'plaintext' && f.id !== 'plaintext.enabled') {
     if (state.values['plaintext.enabled'] !== true) return false;
@@ -451,6 +453,7 @@ export function evaluateRisks(model, state, info) {
   if (!state.files.control) risks.push({ id: 'no-control', level: 'note' });
   if (val('registry.mode') === 'open') risks.push({ id: 'registry-open', level: 'note' });
   if (val('entropy.fallback') === 'none') risks.push({ id: 'entropy-none', level: 'note' });
+  if (tlsOff(state)) risks.push({ id: 'tls-off', level: 'confirm' });
   if (val('plaintext.enabled')) {
     risks.push({ id: 'plaintext-on', level: 'confirm' });
     if (val('plaintext.allow_from_anywhere')) risks.push({ id: 'plaintext-anywhere', level: 'confirm' });
@@ -463,6 +466,9 @@ export function evaluateRisks(model, state, info) {
   }
   return risks;
 }
+
+/** The TLS listener is off: its port is 0 (ADR-233). */
+export const tlsOff = state => String(state.values['network.mqtt_tls_port'] ?? '').trim() === '0';
 
 // --- the URL hash -------------------------------------------------------------------
 

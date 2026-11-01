@@ -808,3 +808,7 @@ idempotent and prints what it does; `--dry-run` changes nothing.
    Caddyfile from its `.bak-<date>-urmqtt*` copy, validate, reload; `systemctl disable --now urmqtt-mirror.timer
    urmqtt-mirror-web`, remove the units, `/usr/local/lib/urmqtt-mirror`, `/etc/urmqtt-mirror` and the container.
    The mirrored files are only a copy of what GitHub has.
+
+### TLS off, plain MQTT only (ADR-233)
+
+A trusted plant network can run without certificates: `[network] mqtt_tls_port = 0` and `[plaintext] enabled = true` with `allow_from` and a login mode. The image then needs no `tls.cert`, `tls.key` or `trust.operational`, boots with `mqtt: TLS listener off`, and has no operator, service or control access (those need mutual TLS). The configuration is written in format 3, which a kernel of **v0.2.1 or newer** reads; older templates are refused with the reason. With both listeners on (the default of the simple view's second box plus plain MQTT) nothing changes for TLS.

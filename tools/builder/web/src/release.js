@@ -17,7 +17,7 @@ function releaseProblem(r) {
     return 'release.no-template';
   }
   if (!r.sums) return 'release.no-signature';
-  if (r.template.config_format !== SUPPORTED_FORMAT) return 'release.format-unsupported';
+  if (r.template.config_format > SUPPORTED_FORMAT || r.template.config_format < 1) return 'release.format-unsupported';
   if (r.status !== 'ok' || r.verified === false) return 'release.unverified';
   return '';
 }

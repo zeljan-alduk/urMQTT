@@ -31,8 +31,11 @@ function simpleFocus(id) {
   return true;
 }
 
+const plainIsOn = () => app.state.values['plaintext.enabled'] === true;
+const needsNetworks = () => plainIsOn() && !(app.state.values['plaintext.allow_from'] || []).length && app.state.values['plaintext.allow_from_anywhere'] !== true;
+const needsAccount = () => plainIsOn() && (app.state.values['plaintext.auth'] || 'password') === 'password' && !completeUsers(app.state.values['plaintext.users']).length;
 const needsAddress = () => ['static', 'auto'].includes(app.state.values['network.mode']) && !(app.state.values['network.address'] || '').trim();
-const certsMissing = () => !(app.state.files.cert && app.state.files.key && app.state.files.operational.length);
+const certsMissing = () => !tlsOff(app.state) && !(app.state.files.cert && app.state.files.key && app.state.files.operational.length);
 
 // --- building the view -------------------------------------------------------------------------
 
@@ -60,7 +63,10 @@ function renderSimple() {
     h('header', {}, h('h2', { id: 'ub-s-h-where' }, h('span', { class: 'ub-step', 'aria-hidden': 'true', text: '1' }), t('simple.title.where'))),
     h('div', { class: 'ub-presets', role: 'group', 'aria-labelledby': 'ub-s-h-where' }, ui.whereCards), ui.fixed);
 
-  // 2. Certificates
+  // 2. How devices connect: the two listeners, each its own checkbox, and what each needs.
+  ui.xTls = h('input', { type: 'checkbox', id: 'ub-x-tls', on: { change: e => toggleListener('tls', e.target.checked) } });
+  ui.xPlain = h('input', { type: 'checkbox', id: 'ub-x-plain', on: { change: e => toggleListener('plain', e.target.checked) } });
+  ui.listenerMsg = h('p', { class: 'ub-error', role: 'alert', hidden: true });
   ui.certFound = h('ul', { class: 'ub-checks', 'aria-live': 'polite' });
   ui.certInput = h('input', { type: 'file', multiple: true, 'aria-label': t('simple.certs.drop'), on: { change: async e => { await takeFiles(e.target.files); e.target.value = ''; } } });
   const drop = h('div', { class: 'ub-drop', id: 'ub-s-drop' }, icon('upload'), ' ', h('span', { text: t('simple.certs.drop') }), ui.certInput);
@@ -69,18 +75,36 @@ function renderSimple() {
   drop.addEventListener('drop', e => takeFiles(e.dataTransfer.files));
   ui.certClear = h('button', { class: 'ub-link-btn', type: 'button', text: t('simple.certs.clear'), hidden: true, on: { click: () => { clearCerts(); } } });
   ui.certProblems = h('div', { style: 'display:grid;gap:8px' });
-  const certs = h('section', { class: 'ub-card', 'aria-labelledby': 'ub-s-h-certs' },
-    h('header', {}, h('h2', { id: 'ub-s-h-certs' }, h('span', { class: 'ub-step', 'aria-hidden': 'true', text: '2' }), t('simple.title.certs'))),
+  ui.tlsBox = h('div', { class: 'ub-sub-card', id: 'ub-s-tls' },
+    h('h3', { text: t('simple.title.certs') }),
     h('p', { class: 'ub-sub', text: t('simple.certs.help') }), drop, ui.certProblems, ui.certFound,
     h('p', { class: 'ub-help' }, ui.certClear, ' ', h('a', { href: 'https://github.com/zeljan-alduk/urMQTT/blob/main/docs/DEPLOY.md', target: '_blank', rel: 'noopener', text: t('simple.certs.test') })));
+  // Plain MQTT: which networks, and how a device logs in. The accounts editor is the advanced form's own
+  // (it hashes the passwords); it is moved in while this view is shown.
+  ui.networks = h('textarea', { class: 'ub-textarea', id: 'ub-s-networks', rows: 3, spellcheck: 'false', autocomplete: 'off', 'aria-describedby': 'ub-s-networks-help', on: { input: e => setSimple('plaintext.allow_from', lines(e.target.value)) } });
+  ui.authRadios = ['password', 'anonymous', 'ip'].map(id => h('label', { class: 'ub-switch', for: `ub-s-auth-${id}` },
+    h('input', { type: 'radio', name: 'ub-s-auth', id: `ub-s-auth-${id}`, value: id, on: { change: () => setSimple('plaintext.auth', id === 'password' ? '' : id) } }),
+    h('span', { text: t(`simple.plain.auth.${id}`) })));
+  ui.plainRows = h('div', { class: 'ub-plain-rows' });
+  ui.plainBox = h('div', { class: 'ub-sub-card', id: 'ub-s-plain' },
+    h('h3', { text: t('simple.plain.title') }),
+    h('label', { class: 'ub-label-row', for: 'ub-s-networks' }, h('span', { class: 'ub-label', style: 'font-family:inherit', text: t('simple.plain.networks') }), ui.networks),
+    h('p', { class: 'ub-help', id: 'ub-s-networks-help', text: t('simple.plain.networks.help') }),
+    h('fieldset', { class: 'ub-extras' }, h('legend', { text: t('simple.plain.auth') }), ui.authRadios), ui.plainRows);
+  ui.tlsOffNote = h('p', { class: 'ub-banner', role: 'status', hidden: true, text: t('simple.tls-off.note') });
+  const certs = h('section', { class: 'ub-card', 'aria-labelledby': 'ub-s-h-connect' },
+    h('header', {}, h('h2', { id: 'ub-s-h-connect' }, h('span', { class: 'ub-step', 'aria-hidden': 'true', text: '2' }), t('simple.title.connect'))),
+    h('fieldset', { class: 'ub-extras' }, h('legend', { class: 'ub-sr', text: t('simple.title.connect') }),
+      h('label', { class: 'ub-switch', for: 'ub-x-tls' }, ui.xTls, h('span', { text: t('simple.listener.tls') })),
+      h('p', { class: 'ub-help', text: t('simple.listener.tls.help') }),
+      h('label', { class: 'ub-switch', for: 'ub-x-plain' }, ui.xPlain, h('span', { text: t('simple.listener.plain') })),
+      h('p', { class: 'ub-help', text: t('simple.listener.plain.help') }), ui.listenerMsg),
+    ui.tlsOffNote, ui.tlsBox, ui.plainBox);
 
   // 3. Name, extras, version
   ui.sName = h('input', { class: 'ub-input', id: 'ub-s-name', type: 'text', maxlength: '40', autocomplete: 'off', spellcheck: 'false', placeholder: 'custom', 'aria-describedby': 'ub-s-name-help', on: { input: e => { app.state.name = e.target.value; ui.name.value = e.target.value; persist(); paintFileName(); } } });
   ui.sFile = h('span', { class: 'ub-code' });
   ui.xDiag = h('input', { type: 'checkbox', id: 'ub-x-diag', on: { change: e => setSimple('storage.diagnostic', e.target.checked) } });
-  ui.xPlain = h('input', { type: 'checkbox', id: 'ub-x-plain', on: { change: e => setSimple('plaintext.enabled', e.target.checked) } });
-  ui.xPlainNote = h('p', { class: 'ub-help', hidden: true }, t('simple.extra.plaintext-help'), ' ',
-    h('button', { class: 'ub-link-btn', type: 'button', text: t('simple.extra.open-advanced'), on: { click: () => { setAdvanced(true); const s = $('#sec-plaintext'); if (s) { s.open = true; s.scrollIntoView({ block: 'start' }); } } } }));
   ui.versionLine = h('span', { class: 'ub-version-line' });
   ui.versionDetails = h('details', { class: 'ub-version-details' }, h('summary', { class: 'ub-link-btn', text: t('simple.change-version') }));
   const name = h('section', { class: 'ub-card', 'aria-labelledby': 'ub-s-h-name' },
@@ -88,9 +112,7 @@ function renderSimple() {
     h('label', { class: 'ub-label-row', for: 'ub-s-name' }, h('span', { class: 'ub-label', style: 'font-family:inherit', text: t('bar.name') }), ui.sName),
     h('p', { class: 'ub-help', id: 'ub-s-name-help' }, t('simple.name.help'), ' ', ui.sFile),
     h('fieldset', { class: 'ub-extras' }, h('legend', { text: t('simple.extras') }),
-      h('label', { class: 'ub-switch', for: 'ub-x-diag' }, ui.xDiag, h('span', { text: t('simple.extra.diagnostic') })),
-      h('label', { class: 'ub-switch', for: 'ub-x-plain' }, ui.xPlain, h('span', { text: t('simple.extra.plaintext') })),
-      ui.xPlainNote),
+      h('label', { class: 'ub-switch', for: 'ub-x-diag' }, ui.xDiag, h('span', { text: t('simple.extra.diagnostic') }))),
     h('p', { class: 'ub-help' }, t('simple.version'), ' ', ui.versionLine), ui.versionDetails);
 
   return h('div', { class: 'ub-simple' }, where, certs, name);
@@ -100,6 +122,7 @@ function renderSimple() {
 function syncSimple() {
   const ui = app.ui;
   if (!ui.simple) return;
+  ensureRelease();
   const v = app.state.values;
   ui.whereCards.forEach(b => b.setAttribute('aria-pressed', String(app.state.preset === b.dataset.id)));
   const fixed = ['static', 'auto'].includes(v['network.mode']);
@@ -109,8 +132,17 @@ function syncSimple() {
   if (document.activeElement !== ui.name) ui.name.value = app.state.name || '';
   ui.sFile.textContent = outputName(app.release ? app.release.tag : 'x', app.state.name);
   ui.xDiag.checked = v['storage.diagnostic'] === true;
-  ui.xPlain.checked = v['plaintext.enabled'] === true;
-  ui.xPlainNote.hidden = !ui.xPlain.checked;
+  const plainOn = v['plaintext.enabled'] === true;
+  const off = tlsOff(app.state);
+  ui.xTls.checked = !off;
+  ui.xPlain.checked = plainOn;
+  ui.tlsBox.hidden = off;          // hidden, not just empty: nothing of TLS is asked for
+  ui.plainBox.hidden = !plainOn;
+  ui.tlsOffNote.hidden = !off;
+  if (document.activeElement !== ui.networks) ui.networks.value = (v['plaintext.allow_from'] || []).join('\n');
+  const auth = v['plaintext.auth'] || 'password';
+  ui.authRadios.forEach(l => { const r = l.querySelector('input'); r.checked = r.value === auth; });
+  parkPlainRows(!app.advanced && plainOn);
   // What the certificate files say.
   clear(ui.certFound);
   const f = app.state.files;
@@ -130,6 +162,7 @@ function paintChip() {
   clear(ui.versionLine);
   if (!app.release) { ui.versionLine.append(h('span', { text: noReleaseYet() ? t('bar.no-release') : '…' })); return; }
   ui.versionLine.append(h('strong', { text: app.release.local ? app.release.name : app.release.tag }), ' ');
+  if (releaseTooOld()) ui.versionLine.append(h('span', { class: 'ub-chip bad', text: t('release.no-tls-off') }), ' ');
   let kind = '', text = '';
   if (app.verifyState === 'work') { kind = 'work'; text = t('simple.chip.checking'); }
   else if (app.verify && app.verify.ok) { kind = 'ok'; text = t('simple.chip.ok'); }
@@ -270,4 +303,88 @@ function showResultCard() {
   ui.bar.dataset.open = 'true';
   ui.resultBox.scrollIntoView({ block: 'nearest', behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
   ui.download.focus();
+}
+
+// --- the two listeners ----------------------------------------------------------------------------
+
+const PRIVATE_RANGES = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'];
+
+/** Turns a listener on or off; at least one must stay on (the box goes back and says why). */
+function toggleListener(which, on) {
+  const ui = app.ui;
+  const v = app.state.values;
+  const tlsOn = !tlsOff(app.state);
+  const plainOn = v['plaintext.enabled'] === true;
+  ui.listenerMsg.hidden = true;
+  if (!on && ((which === 'tls' && !plainOn) || (which === 'plain' && !tlsOn))) {
+    ui.listenerMsg.textContent = t('simple.listener.one');
+    ui.listenerMsg.hidden = false;
+    syncSimple();
+    return;
+  }
+  if (which === 'tls') {
+    if (on) { if (tlsOff(app.state)) delete v['network.mqtt_tls_port']; } else v['network.mqtt_tls_port'] = '0';
+  } else if (on) {
+    v['plaintext.enabled'] = true;
+    // The networks are prefilled with the private ranges, where the user sees and edits them.
+    if (!(v['plaintext.allow_from'] || []).length && v['plaintext.allow_from_anywhere'] !== true) v['plaintext.allow_from'] = [...PRIVATE_RANGES];
+  } else {
+    delete v['plaintext.enabled'];
+  }
+  syncFields(true);
+  app.onChange();
+  syncSimple();
+}
+
+/** The advanced form's rows for the accounts, the shared identity and the network identities live in this view while plain MQTT is on. */
+function parkPlainRows(here) {
+  const ids = ['plaintext.users', 'plaintext.anonymous_identity', 'plaintext.ip_identities'];
+  const list = here ? ids : [...ids].reverse();
+  for (const id of list) {
+    const row = rows.get(id);
+    if (!row) continue;
+    if (here) {
+      if (!row.el.__home) row.el.__home = { parent: row.el.parentNode, next: row.el.nextSibling };
+      if (row.el.parentNode !== app.ui.plainRows) app.ui.plainRows.append(row.el);
+    } else if (row.el.__home && row.el.parentNode === app.ui.plainRows) {
+      row.el.__home.parent.insertBefore(row.el, row.el.__home.next);
+    }
+  }
+}
+
+// --- what the chosen listeners need of the release --------------------------------------------------
+
+/** A release's template reads configuration format 3 from v0.2.1 on; turning the TLS listener off needs it. */
+function releaseSupports(rel) {
+  if (!tlsOff(app.state)) return true;
+  if (rel.local) return true;
+  return Boolean(rel.template) && rel.template.config_format >= 3;
+}
+
+const releaseTooOld = () => Boolean(app.release) && !releaseSupports(app.release);
+
+/**
+ * While the release was chosen by the page (not by the user), it follows the choice of listeners: the newest
+ * stable release that can do what is asked, else the newest pre-release; the list greys out the ones that cannot.
+ */
+function ensureRelease() {
+  if (!app.releases || !app.release || app.release.local || app.ensuring) return;
+  const ok = app.releases.releases.filter(r => r.usable && releaseSupports(r));
+  const best = defaultRelease(ok);
+  const wrong = !releaseSupports(app.release);
+  if (!best || !(wrong || (app.autoRelease && best.tag !== app.release.tag))) return;
+  app.ensuring = true;
+  app.autoRelease = true;
+  const input = $$('input[type=radio]', app.ui.releaseBox).find(i => i.value === best.tag);
+  renderReleases();
+  if (input) { const i2 = $$('input[type=radio]', app.ui.releaseBox).find(i => i.value === best.tag); if (i2) i2.checked = true; }
+  selectRelease(best).finally(() => { app.ensuring = false; });
+}
+
+/** The one thing to do next in the simple view when something is still missing: the key of its text, or ''. */
+function nextStep() {
+  if (needsAddress()) return 'bar.next-address';
+  if (needsNetworks()) return 'bar.next-networks';
+  if (needsAccount()) return 'bar.next-account';
+  return '';
 }

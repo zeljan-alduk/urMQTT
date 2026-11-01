@@ -176,7 +176,9 @@ function paintValidation() {
   const noRelease = !app.release;
   let kind = 'ok';
   let text = t('bar.valid');
-  if (problems && needsAddress() && !app.advanced) { kind = 'work'; text = t('bar.next-address'); }
+  const next = !app.advanced && problems ? nextStep() : '';
+  if (next) { kind = 'work'; text = t(next); }
+  else if (!problems && releaseTooOld()) { kind = 'bad'; text = t('bar.needs-newer'); }
   else if (problems) { kind = 'bad'; text = t('bar.problems', { n: problems }); }
   else if (noRelease) { kind = 'work'; text = noReleaseYet() ? t('bar.no-release') : t('bar.choose-release'); }
   else if (!app.advanced && certsMissing()) { kind = 'work'; text = t('bar.add-certs'); }
@@ -188,7 +190,7 @@ function paintValidation() {
       ? h('button', { class: 'ub-link-btn', type: 'button', text: label, on: { click: () => focusField(is.field.id) } })
       : label));
   });
-  ui.problems.hidden = problems === 0 || (!app.advanced && needsAddress());
+  ui.problems.hidden = problems === 0 || Boolean(next);
   clear(ui.notes);
   if (!problems) {
     c.risks.slice(0, 4).forEach(r => ui.notes.append(h('li', { text: riskTitle(r) })));
@@ -245,8 +247,9 @@ function renderReleases() {
   const group = h('fieldset', { class: 'ub-releases' }, h('legend', { class: 'ub-sr', text: t('release.title') }));
   const name = nextId('rel');
   for (const rel of r.releases) {
-    const usable = rel.usable;
-    const input = h('input', { type: 'radio', name, value: rel.tag, disabled: !usable, checked: app.release && app.release.tag === rel.tag, on: { change: () => selectRelease(rel) } });
+    const supports = releaseSupports(rel);
+    const usable = rel.usable && supports;
+    const input = h('input', { type: 'radio', name, value: rel.tag, disabled: !usable, checked: app.release && app.release.tag === rel.tag, on: { change: () => { app.autoRelease = false; selectRelease(rel); } } });
     const labelId = nextId('rl');
     group.append(h('label', { class: 'ub-release', 'aria-disabled': String(!usable) },
       input,
@@ -258,7 +261,7 @@ function renderReleases() {
         h('span', { text: t('release.published', { date: formatDate(rel.published, app.lang) }) }),
         rel.template ? h('span', { text: formatBytes(rel.template.size) }) : null,
         rel.template ? h('span', { text: `${t('release.format')} ${rel.template.config_format}` }) : null),
-      !usable ? h('span', { class: 'ub-why', text: t(rel.problem) }) : null,
+      !usable ? h('span', { class: 'ub-why', text: t(rel.usable ? 'release.no-tls-off' : rel.problem) }) : null,
       h('span', { class: 'ub-links' },
         rel.url ? h('a', { href: rel.url, rel: 'noopener', target: '_blank', text: t('release.github') }) : null,
         rel.attestations ? h('a', { href: rel.attestations, rel: 'noopener', target: '_blank', text: t('release.attestations') }) : null)));
@@ -336,7 +339,8 @@ async function loadReleaseList() {
     app.keyId = app.builder.minisignKeyId(RELEASE_PUBKEY);
     renderReleases();
     const want = app.state.release && r.releases.find(x => x.tag === app.state.release && x.usable);
-    const pick = want || defaultRelease(r.releases);
+    app.autoRelease = !want;
+    const pick = want || defaultRelease(r.releases.filter(releaseSupports));
     if (pick) {
       const input = $$('input[type=radio]', app.ui.releaseBox).find(i => i.value === pick.tag);
       if (input) input.checked = true;

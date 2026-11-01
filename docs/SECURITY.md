@@ -403,6 +403,10 @@ is attested, and by what:
   private key is in the slot of every image made from it, in the clear (as it
   was when it was compiled in).
 
+### TLS off: plain MQTT only (ADR-233)
+
+`network.mqtt_tls_port = 0` with `plaintext.enabled = true` serves **only** plain MQTT. What that means, honestly: nothing is encrypted and nobody on the path is authenticated beyond the login mode you chose; there are **no operator, service or control rights at all** (they are certificate identities over mutual TLS, so there is no way to read the counters, send control messages or reach `$SYS`), and no console; a device is whoever the plaintext login says (an account, one shared identity, or its network address), and only addresses in `plaintext.allow_from` get an answer. The builder says this beside the checkbox and asks again before building. Use it on a segment you control or behind a VPN; with both listeners on, TLS keeps all of its rights.
+
 ### The builder page (C1e and C1g, ADR-225 to ADR-228)
 
 The page at aldo.tech (Products, urMQTT builder) does what `urmqtt-config pack

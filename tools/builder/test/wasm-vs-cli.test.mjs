@@ -141,7 +141,9 @@ for (const [label, make] of isoCases()) {
     b.view(iso).set(tpl);
     const probe = b.isoProbe(iso);
     assert.equal(probe.supported, true);
-    assert.equal(probe.format_version, FORMAT);
+    // A template says what its kernel reads: the newest (a synthetic one, v0.2.1 on) or 2 (v0.2.0).
+    assert.ok(probe.format_version === FORMAT || probe.format_version === 2, String(probe.format_version));
+    assert.equal(probe.supported, true);
     const report = b.isoConfigure(iso, w.blob);
     const mine = Buffer.from(b.view(iso));
     assert.equal(mine.length, tpl.length);
@@ -156,7 +158,13 @@ for (const [label, make] of isoCases()) {
 
     // A template can be configured again and returns to the original when
     // configured with the empty configuration.
-    const emptyBlob = b.pack({ toml: '', now: NOW }).blob;
+    // (A template of the newest format has its empty slot written in it, `pack --latest-format`.)
+    let emptyBlob = b.pack({ toml: '', now: NOW }).blob;
+    if (probe.format_version === FORMAT) {
+      const e = join(dir, 'empty.toml'); writeFileSync(e, '');
+      assert.equal(cli(['pack', e, '--latest-format', '--out', join(dir, 'empty.blob')]).status, 0);
+      emptyBlob = readFileSync(join(dir, 'empty.blob'));
+    }
     b.isoConfigure(iso, emptyBlob);
     assert.ok(Buffer.from(b.view(iso)).equals(tpl), 'back to the template, byte for byte');
     b.free(iso);

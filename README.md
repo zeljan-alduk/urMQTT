@@ -550,7 +550,7 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `network.mode` | `"dhcp"` \| `"static"` \| `"auto"` | Address configuration. DHCP lets one ISO serve many VMs; `auto` tries DHCP first and falls back to the static settings |
 | `network.address`, `network.gateway` | `"a.b.c.d/len"`, `"a.b.c.d"` | Required for `static` and `auto`, forbidden for `dhcp` |
 | `network.dhcp_timeout_s` | 3–120 (default 15) | `auto` only: how long to wait for a lease before the static settings are used (also used at once when a lease is lost) |
-| `network.mqtt_tls_port` | 1–65535 | MQTT over TLS listener (8883) |
+| `network.mqtt_tls_port` | 0–65535 | MQTT over TLS listener (8883); 0 turns it off (only with `plaintext.enabled`, ADR-233) |
 | `network.mqtt_plain_port` | 0 or port | Development plaintext port (the identity is the client id); **non-zero only in `dev`**. A release image gets plaintext MQTT only from `[plaintext]` below |
 | `tls.cert`, `tls.key` | file names in `deploy/<env>/` | Embedded server PEMs; encrypted keys are rejected |
 | `tls.min_server_cert_days` | ≥ 1 (60) | The build fails if `server.pem` expires sooner; runtime warnings from this many days |

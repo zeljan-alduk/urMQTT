@@ -46,7 +46,7 @@ export function syntheticTemplate(blake2bHex) {
   const dir = tmp();
   writeFileSync(join(dir, 'empty.toml'), '');
   const out = join(dir, 'slot.bin');
-  const r = cli(['pack', join(dir, 'empty.toml'), '--out-slot', out]);
+  const r = cli(['pack', join(dir, 'empty.toml'), '--latest-format', '--out-slot', out]);
   if (r.status !== 0) throw new Error('cannot make the empty slot: ' + r.stderr);
   const slot = readFileSync(out);
   const disk = Buffer.from(slot);
