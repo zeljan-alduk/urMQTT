@@ -66,3 +66,5 @@ pub mod ps2;
 pub mod serial;
 #[cfg(target_os = "none")]
 pub mod time;
+#[cfg(target_os = "none")]
+pub mod user;

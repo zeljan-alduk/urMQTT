@@ -1563,6 +1563,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "urmqtt-dbworker"
+version = "0.1.0"
+dependencies = [
+ "urmqtt-usys",
+]
+
+[[package]]
 name = "urmqtt-diag"
 version = "0.1.0"
 
@@ -1605,6 +1612,7 @@ dependencies = [
  "urmqtt-sync",
  "urmqtt-tcp",
  "urmqtt-tls",
+ "urmqtt-usys",
  "urmqtt-virtio",
 ]
 
@@ -1723,6 +1731,10 @@ dependencies = [
  "x509-cert",
  "zeroize",
 ]
+
+[[package]]
+name = "urmqtt-usys"
+version = "0.1.0"
 
 [[package]]
 name = "urmqtt-virtio"

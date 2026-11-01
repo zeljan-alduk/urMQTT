@@ -15,6 +15,7 @@ pub struct Gate {
 }
 
 const ATTR_INTERRUPT_GATE: u8 = 0x8e; // present, DPL 0, 64-bit interrupt gate
+const ATTR_USER_INTERRUPT_GATE: u8 = 0xee; // present, DPL 3, 64-bit interrupt gate
 
 impl Gate {
     /// A gate that is not present: using it raises #NP.
@@ -40,6 +41,13 @@ impl Gate {
             offset_hi: (handler >> 32) as u32,
             zero: 0,
         }
+    }
+
+    /// An interrupt gate that ring 3 may enter with `int` (DPL 3).
+    pub const fn user_interrupt(handler: u64, selector: u16) -> Self {
+        let mut g = Self::interrupt(handler, selector, 0);
+        g.attr = ATTR_USER_INTERRUPT_GATE;
+        g
     }
 
     pub const fn is_present(&self) -> bool {
@@ -117,7 +125,12 @@ mod boot {
         // SAFETY: exclusive access per the contract.
         let table = unsafe { &mut *IDT.0.get() };
         for (v, gate) in table.0.iter_mut().enumerate() {
-            *gate = Gate::interrupt(base + 16 * v as u64, KERNEL_CS, ist_for(v as u64));
+            let handler = base + 16 * v as u64;
+            *gate = if v as u32 == crate::vectors::SYSCALL {
+                Gate::user_interrupt(handler, KERNEL_CS)
+            } else {
+                Gate::interrupt(handler, KERNEL_CS, ist_for(v as u64))
+            };
         }
         // SAFETY: the table was just filled; the GDT is loaded (contract).
         unsafe { load() };
@@ -172,6 +185,14 @@ mod tests {
         assert_eq!(g.ist(), 4);
         assert!(g.is_present());
         assert_eq!(core::mem::size_of::<Gate>(), 16);
+    }
+
+    #[test]
+    fn the_syscall_gate_is_dpl3_and_nothing_else_is() {
+        let g = Gate::user_interrupt(0x2000, 0x08);
+        assert_eq!(g.attr, 0xee);
+        assert_eq!(g.attr >> 5 & 3, 3, "DPL 3");
+        assert_eq!(Gate::interrupt(0x2000, 0x08, 0).attr >> 5 & 3, 0);
     }
 
     #[test]

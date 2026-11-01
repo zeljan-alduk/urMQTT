@@ -77,6 +77,15 @@ pub mod trap {
     };
 }
 
+/// Running the unprivileged dbworker (ADR-210).
+#[cfg(target_os = "none")]
+pub mod user {
+    pub use super::imp::user::{
+        Exit, FaultInfo, UserEvent, decode, enter, leave, protections, running, set_return,
+        sync_code,
+    };
+}
+
 /// The CPU's own random number source.
 #[cfg(target_os = "none")]
 pub mod entropy {

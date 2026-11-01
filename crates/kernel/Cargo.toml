@@ -37,6 +37,7 @@ urmqtt-mm = { path = "../mm" }
 urmqtt-pci = { path = "../pci" }
 urmqtt-platform = { path = "../platform" }
 urmqtt-tls = { path = "../tls" }
+urmqtt-usys = { path = "../usys" }
 urmqtt-virtio = { path = "../virtio" }
 # test=crypto-bench (dev images only): the same crates the TLS layer uses.
 aes-gcm = { version = "0.10", default-features = false, features = ["aes"], optional = true }

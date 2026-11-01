@@ -47,6 +47,15 @@ urmqtt_isr_stubs:
 
     .balign 16
 urmqtt_isr_common:
+    # From ring 3 (the dbworker, ADR-210): GS is the user's until swapped, and
+    # EFLAGS.AC (SMAP's escape hatch) may be set by the program: clear it.
+    test byte ptr [rsp + 24], 3
+    jz 11f
+    swapgs
+    pushfq
+    and qword ptr [rsp], -262145
+    popfq
+11:
     cld
     sub rsp, 8
     push r15
@@ -92,6 +101,10 @@ urmqtt_isr_common:
     pop r14
     pop r15
     add rsp, 24
+    test byte ptr [rsp + 8], 3
+    jz 12f
+    swapgs
+12:
     iretq
     "#
 );

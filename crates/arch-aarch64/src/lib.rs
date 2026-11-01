@@ -51,3 +51,5 @@ pub mod psci;
 pub mod regs;
 #[cfg(target_os = "none")]
 pub mod timer;
+#[cfg(target_os = "none")]
+pub mod user;

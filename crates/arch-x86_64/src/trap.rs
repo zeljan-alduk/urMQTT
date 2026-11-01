@@ -115,6 +115,8 @@ pub struct TrapFrame {
 pub enum Event {
     Irq,
     ResumableBreakpoint,
+    /// An exception taken from the unprivileged worker (ADR-210).
+    User,
     Fatal,
 }
 
@@ -160,6 +162,11 @@ impl fmt::Display for Registers<'_> {
 
 impl TrapFrame {
     pub fn classify(&self, _vector: Vector) -> Event {
+        // Ring 3 can only be the worker, and only while a call runs.
+        #[cfg(target_os = "none")]
+        if self.cs & 3 == 3 && crate::user::running() {
+            return Event::User;
+        }
         match self.vector {
             3 => Event::ResumableBreakpoint,
             v if v >= 32 => Event::Irq,

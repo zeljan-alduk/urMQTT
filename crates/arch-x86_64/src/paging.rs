@@ -236,6 +236,99 @@ const fn is_leaf(entry: u64, level: u8) -> bool {
     level == 3 || (level >= 1 && entry & PAGE_SIZE_BIT != 0)
 }
 
+/// What ring 3 may do with a page of the dbworker's address space
+/// (ADR-210). Ring 0 can never use these pages: SMEP forbids executing them
+/// and SMAP forbids touching them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserAccess {
+    /// Read + execute. Never writable.
+    Code,
+    /// Read only, never executable.
+    ReadOnly,
+    /// Read + write, never executable.
+    ReadWrite,
+}
+
+/// The user bit (`U/S`): set in every entry on the way to a user page.
+const USER: u64 = 1 << 2;
+
+/// Encodes a level-3 entry for a user page. W^X holds by construction.
+pub const fn user_page_descriptor(pa: u64, access: UserAccess) -> u64 {
+    let mut f = (pa & ADDR_MASK) | PRESENT | ACCESSED | DIRTY | USER;
+    match access {
+        UserAccess::Code => {}
+        UserAccess::ReadOnly => f |= NX,
+        UserAccess::ReadWrite => f |= NX | WRITABLE,
+    }
+    f
+}
+
+/// A fresh root table for a user address space: empty lower half, and the
+/// upper half (entries 256..512) shared with the kernel's root, so the
+/// kernel is mapped (supervisor-only) while the worker runs.
+pub fn user_new_root<M: TableMemory, F: FrameSource>(
+    mem: &mut M,
+    frames: &mut F,
+    kernel_root: u64,
+) -> Option<u64> {
+    let root = frames.alloc_frame()?;
+    for i in 0..ENTRIES {
+        let v = if i >= ENTRIES / 2 {
+            mem.read(kernel_root, i)
+        } else {
+            0
+        };
+        mem.write(root, i, v);
+    }
+    Some(root)
+}
+
+/// Maps one user page into the space rooted at `root`. Every table on the
+/// way carries the user bit; the leaf decides the rest.
+pub fn user_map_page<M: TableMemory, F: FrameSource>(
+    mem: &mut M,
+    root: u64,
+    va: u64,
+    pa: u64,
+    access: UserAccess,
+    _bti: bool,
+    frames: &mut F,
+) -> Result<(), MapError> {
+    if !va.is_multiple_of(PAGE_SIZE) || !pa.is_multiple_of(PAGE_SIZE) || pa >= MAX_PA {
+        return Err(MapError::Unaligned);
+    }
+    if va >= 1 << 47 {
+        return Err(MapError::NonCanonical);
+    }
+    let mut table = root;
+    for level in 0..3u8 {
+        let idx = index(va, level);
+        let e = mem.read(table, idx);
+        table = if e & PRESENT == 0 {
+            let new = frames.alloc_frame().ok_or(MapError::OutOfFrames)?;
+            for i in 0..ENTRIES {
+                mem.write(new, i, 0);
+            }
+            mem.write(
+                table,
+                idx,
+                (new & ADDR_MASK) | PRESENT | WRITABLE | ACCESSED | USER,
+            );
+            new
+        } else if is_leaf(e, level) {
+            return Err(MapError::BlockInTheWay);
+        } else {
+            e & ADDR_MASK
+        };
+    }
+    let idx = index(va, 3);
+    if mem.read(table, idx) & PRESENT != 0 {
+        return Err(MapError::AlreadyMapped);
+    }
+    mem.write(table, idx, user_page_descriptor(pa, access));
+    Ok(())
+}
+
 /// Walks and edits one address space rooted at `root` (the CR3 base).
 pub struct Mapper<'m, M: TableMemory> {
     mem: &'m mut M,
@@ -833,6 +926,77 @@ mod tests {
             0xfffe_ffff_ffff_ffff,
         ] {
             assert!(!is_canonical(bad), "{bad:#x}");
+        }
+    }
+
+    #[test]
+    fn user_pages_carry_the_user_bit_on_every_level_and_stay_wx() {
+        let mut mem = FakeMem::default();
+        // A kernel root with one upper-half entry.
+        mem.write(ROOT, 511, 0x1234_0003);
+        let mut frames = Bump(0x20_0000, 0x30_0000);
+        let root = user_new_root(&mut mem, &mut frames, ROOT).unwrap();
+        assert_eq!(mem.read(root, 511), 0x1234_0003, "kernel half is shared");
+        assert_eq!(mem.read(root, 0), 0);
+        user_map_page(
+            &mut mem,
+            root,
+            0x40_0000,
+            0x1000,
+            UserAccess::Code,
+            false,
+            &mut frames,
+        )
+        .unwrap();
+        user_map_page(
+            &mut mem,
+            root,
+            0x40_1000,
+            0x2000,
+            UserAccess::ReadWrite,
+            false,
+            &mut frames,
+        )
+        .unwrap();
+        assert_eq!(
+            user_map_page(
+                &mut mem,
+                root,
+                0x40_0000,
+                0x3000,
+                UserAccess::Code,
+                false,
+                &mut frames
+            ),
+            Err(MapError::AlreadyMapped)
+        );
+        assert_eq!(
+            user_map_page(
+                &mut mem,
+                root,
+                0xffff_8000_0000_0000,
+                0x1000,
+                UserAccess::Code,
+                false,
+                &mut frames
+            ),
+            Err(MapError::NonCanonical)
+        );
+        let mut table = root;
+        for level in 0..3u8 {
+            let e = mem.read(table, index(0x40_0000, level));
+            assert_ne!(e & USER, 0, "level {level} must be user-accessible");
+            table = e & ADDR_MASK;
+        }
+        for (access, w, x) in [
+            (UserAccess::Code, false, true),
+            (UserAccess::ReadOnly, false, false),
+            (UserAccess::ReadWrite, true, false),
+        ] {
+            let d = user_page_descriptor(0x5000, access);
+            assert_ne!(d & USER, 0);
+            assert_eq!(d & WRITABLE != 0, w, "{access:?}");
+            assert_eq!(d & NX == 0, x, "{access:?}");
         }
     }
 

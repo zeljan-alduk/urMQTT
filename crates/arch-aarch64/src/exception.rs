@@ -45,6 +45,13 @@ impl TrapFrame {
         if matches!(vector, Vector::CurrentSp0Irq | Vector::CurrentSpxIrq) {
             return Event::Irq;
         }
+        if matches!(
+            vector,
+            Vector::Lower64Sync | Vector::Lower64Irq | Vector::Lower64Fiq | Vector::Lower64SError
+        ) && crate::user::running()
+        {
+            return Event::User;
+        }
         let esr = self.esr();
         if vector.is_synchronous()
             && esr.class() == ExceptionClass::Brk64
@@ -89,6 +96,8 @@ pub enum Event {
     Irq,
     /// The test-mode breakpoint: report, skip it and return.
     ResumableBreakpoint,
+    /// An exception taken from the unprivileged worker (ADR-210).
+    User,
     /// Anything else: report and stop.
     Fatal,
 }

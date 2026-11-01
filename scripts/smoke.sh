@@ -2252,6 +2252,24 @@ kaslr_differs() {
 # raw dev image with a test word and read the serial log.
 hardening_suite() {
     kaslr_differs
+    # The unprivileged database worker (ADR-210): every way it can misbehave
+    # ends in a failed call and a restart, never a kernel fault; the kernel
+    # word it tried to overwrite is intact; the CPU's kernel/user separation
+    # (PAN, or SMEP and SMAP) is on.
+    scenario worker-contain "smoke test=worker-contain" on \
+        "worker-contain: hello before: ok" \
+        "worker-contain: kernel/user separation: (PAN|SMEP\+SMAP)$" \
+        "worker-contain: read-kernel-data: contained \(Fault\), worker restarted" \
+        "worker-contain: write-kernel-data: contained \(Fault\), worker restarted" \
+        "worker-contain: exec-kernel-text: contained \(Fault\), worker restarted" \
+        "worker-contain: privileged-instruction: contained \(Fault\), worker restarted" \
+        "worker-contain: write-own-code: contained \(Fault\), worker restarted" \
+        "worker-contain: exec-own-data: contained \(Fault\), worker restarted" \
+        "worker-contain: null-read: contained \(Fault\), worker restarted" \
+        "worker-contain: endless-loop: contained \(Timeout\), worker restarted" \
+        "worker-contain: kernel data intact" \
+        "worker-contain: 8/8 contained, 8 restart\(s\), kernel still running$" \
+        "NOT:NOT contained|FAILED|OVERWRITTEN|WITH FAILURES" "^URMQTT READY$" "$NO_FAULT"
     # Allocator (ADR-170): the allocator stops the VM on each of these.
     scenario double-free "smoke test=double-free" on \
         "test mode: triggering HeapDoubleFree" "PANIC: panicked at" "^heap: double free" \

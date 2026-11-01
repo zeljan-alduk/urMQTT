@@ -18,7 +18,7 @@ X86='^crates/arch-x86_64/'
 ANY_ARCH='^crates/arch-(aarch64|x86_64)/'
 # Pure-computation assembly (no privileged or system instruction) may also
 # live in its own leaf crates, cfg-gated by target_arch (ADR-130, ADR-131).
-ASM_OK='^crates/(arch-(aarch64|x86_64)|nistz256|x25519)/'
+ASM_OK='^crates/(arch-(aarch64|x86_64)|nistz256|x25519|usys)/'
 PATTERNS=(
     '\basm!'
     '\bglobal_asm!'

@@ -24,6 +24,8 @@ members = [
     "crates/tcp",
     "crates/timer-wheel",
     "crates/tls",
+    "crates/usys",
+    "crates/dbworker",
     "crates/virtio",
     "crates/x25519",
     "tools/attack",

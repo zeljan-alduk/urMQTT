@@ -2,11 +2,12 @@
 //! host; loading them is bare metal only.
 //!
 //! Long mode ignores base and limit of code and data segments, so the GDT
-//! is five slots: null, kernel code, kernel data, and the 16-byte TSS
-//! descriptor. The TSS carries the interrupt stack table (IST): the
+//! is seven slots: null, kernel code, kernel data, the 16-byte TSS
+//! descriptor, and the user data and code segments of the dbworker. The TSS carries the interrupt stack table (IST): the
 //! exceptions that must be reportable even when the current stack is gone
 //! (double fault, NMI, machine check, page fault) run on stacks of their
-//! own. There is no user mode.
+//! own. Ring 3 exists only for the dbworker (ADR-210): `rsp[0]` of the TSS
+//! is its entry stack, set by `user::enter`.
 
 /// Selector of the kernel code segment.
 pub const KERNEL_CS: u16 = 0x08;
@@ -14,6 +15,10 @@ pub const KERNEL_CS: u16 = 0x08;
 pub const KERNEL_DS: u16 = 0x10;
 /// Selector of the TSS.
 pub const TSS_SEL: u16 = 0x18;
+/// Selector of the user data segment (RPL 3) for the dbworker (ADR-210).
+pub const USER_DS: u16 = 0x28 | 3;
+/// Selector of the user 64-bit code segment (RPL 3).
+pub const USER_CS: u16 = 0x30 | 3;
 
 /// IST slots (1-based, as in the IDT gate): which exception uses which.
 pub const IST_DOUBLE_FAULT: u8 = 1;
@@ -25,6 +30,16 @@ pub const IST_PAGE_FAULT: u8 = 4;
 pub const fn code64() -> u64 {
     // Access 0x9a (P, S, type 0xa), flags L (bit 53) in the upper dword.
     (0x9a << 40) | (0xa << 52) | 0xffff | (0xf << 48)
+}
+
+/// A 64-bit code segment for ring 3: present, DPL 3, execute/read, L=1.
+pub const fn code64_user() -> u64 {
+    (0xfa << 40) | (0xa << 52) | 0xffff | (0xf << 48)
+}
+
+/// A flat data segment for ring 3: present, DPL 3, read/write.
+pub const fn data_user() -> u64 {
+    (0xf2 << 40) | (0xc << 52) | 0xffff | (0xf << 48)
 }
 
 /// A flat data segment: present, DPL 0, read/write.
@@ -82,7 +97,7 @@ impl Default for Tss {
 }
 
 #[cfg(target_os = "none")]
-pub use boot::{IST_REGION_SIZE, init, init_ap, which_ist};
+pub use boot::{IST_REGION_SIZE, init, init_ap, rsp0_slot, which_ist};
 
 #[cfg(target_os = "none")]
 #[allow(unsafe_code)]
@@ -107,7 +122,7 @@ mod boot {
     #[repr(C, align(16))]
     #[derive(Clone, Copy)]
     struct Tables {
-        gdt: [u64; 5],
+        gdt: [u64; 7],
         tss: Tss,
     }
 
@@ -122,7 +137,7 @@ mod boot {
         Boot(UnsafeCell::new(IstStacks([[0; IST_STACK_SIZE]; IST_COUNT])));
     static TABLES: Boot<[Tables; MAX_CPUS]> = Boot(UnsafeCell::new(
         [Tables {
-            gdt: [0; 5],
+            gdt: [0; 7],
             tss: Tss::new(),
         }; MAX_CPUS],
     ));
@@ -148,6 +163,16 @@ mod boot {
                 (top - IST_STACK_SIZE as u64..top).contains(&addr)
             })
         })
+    }
+
+    /// Address of `rsp0` in `cpu`'s TSS: the stack the CPU switches to when
+    /// an interrupt arrives in ring 3. `user::enter` stores the kernel stack
+    /// pointer there.
+    pub fn rsp0_slot(cpu: usize) -> *mut u64 {
+        let cpu = cpu.min(MAX_CPUS - 1);
+        // SAFETY: only an address is computed; the table lives for ever.
+        let tables = unsafe { &mut (*TABLES.0.get())[cpu] };
+        core::ptr::addr_of_mut!(tables.tss.rsp).cast::<u64>()
     }
 
     /// Builds the GDT and TSS for the boot CPU, loads them, and reloads
@@ -191,7 +216,15 @@ mod boot {
             core::ptr::addr_of!(tables.tss) as u64,
             (Tss::SIZE - 1) as u32,
         );
-        tables.gdt = [0, code64(), data(), desc[0], desc[1]];
+        tables.gdt = [
+            0,
+            code64(),
+            data(),
+            desc[0],
+            desc[1],
+            data_user(),
+            code64_user(),
+        ];
         let gdtr = [
             // Limit (16 bits) and base (64 bits), packed into 10 bytes.
             ((core::mem::size_of_val(&tables.gdt) - 1) as u64) | (tables.gdt.as_ptr() as u64) << 16,
@@ -246,6 +279,17 @@ mod tests {
         assert_eq!((d[0] >> 40) & 0xff, 0x89, "present, available 64-bit TSS");
         assert_eq!(d[0] >> 56, 0x81);
         assert_eq!(d[1], 0xffff_ffff);
+    }
+
+    #[test]
+    fn user_descriptors_are_dpl3() {
+        assert_eq!(code64_user() >> 40 & 0xff, 0xfa);
+        assert_eq!(data_user() >> 40 & 0xff, 0xf2);
+        assert_eq!(USER_CS & 3, 3);
+        assert_eq!(USER_DS & 3, 3);
+        // Index 6 is the code segment, index 5 the data segment.
+        assert_eq!(USER_CS >> 3, 6);
+        assert_eq!(USER_DS >> 3, 5);
     }
 
     #[test]

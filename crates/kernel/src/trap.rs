@@ -18,6 +18,10 @@ pub fn handle(frame: &mut TrapFrame, vector: Vector) {
             crate::irq::dispatch();
             return;
         }
+        Event::User => {
+            crate::dbsandbox::on_exception(frame, vector);
+            return;
+        }
         Event::ResumableBreakpoint => {
             emergency(format_args!(
                 "exception: resumable brk at {:#x}, continuing\n",

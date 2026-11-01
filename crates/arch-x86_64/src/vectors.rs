@@ -6,6 +6,7 @@
 //! 0x21-0x3f  I/O APIC lines: vector = 0x21 + GSI (GSI 0..=30)
 //! 0x40-0xdf  MSI / MSI-X, handed out by `msi::Frame`
 //! 0xe0-0xef  the remapped 8259 PIC (kept masked; a spurious IRQ7/15 lands here)
+//! 0xf0       the dbworker's system calls (a DPL 3 gate, `int 0xf0`)
 //! 0xf1-0xf3  IPIs: ping, pong, wake (the facade's `ipi` constants)
 //! 0xfe       local APIC error
 //! 0xff       local APIC spurious
@@ -21,6 +22,8 @@ pub const MSI_FIRST: u32 = 0x40;
 pub const MSI_LAST: u32 = 0xdf;
 pub const PIC_MASTER_BASE: u32 = 0xe0;
 pub const PIC_SLAVE_BASE: u32 = 0xe8;
+/// The dbworker's system-call gate (`int 0xf0`, DPL 3; ADR-210, ADR-211).
+pub const SYSCALL: u32 = 0xf0;
 pub const IPI_PING: u32 = 0xf1;
 pub const IPI_PONG: u32 = 0xf2;
 pub const IPI_WAKE: u32 = 0xf3;

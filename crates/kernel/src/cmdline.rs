@@ -163,6 +163,10 @@ pub struct BootOptions {
     /// `test=simd-irq` (dev only): crypto known answers on every core under
     /// an IPI storm for 10 s.
     pub simd_irq: bool,
+    /// `test=worker-contain` (dev only, H6): every way the unprivileged
+    /// database worker can misbehave must end in a restart, not a kernel
+    /// fault.
+    pub worker_contain: bool,
     /// `test=ticket-rotate:S` (dev only): rotate the session-ticket keys
     /// every S seconds instead of 12 h (H2 rotation tests).
     pub ticket_rotate_s: Option<u64>,
@@ -284,6 +288,8 @@ impl BootOptions {
                 #[cfg(feature = "selftest")]
                 "redact" => o.redact = true,
                 "test=simd-irq" => o.simd_irq = true,
+                #[cfg(feature = "selftest")]
+                "test=worker-contain" => o.worker_contain = true,
                 "diag-confirm=WIPE" => o.diag_auto_confirm = true,
                 "limits=bench" => o.bench_limits = true,
                 w => {

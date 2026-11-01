@@ -1,0 +1,15 @@
+[package]
+name = "urmqtt-usys"
+description = "The contract between the kernel and the unprivileged dbworker: memory layout, system calls, request format (ADR-210, ADR-211)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true

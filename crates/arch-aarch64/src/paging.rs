@@ -15,6 +15,8 @@ const ATTR_INDX_SHIFT: u64 = 2;
 const AP_RO: u64 = 1 << 7; // AP[2]: read-only
 const SH_INNER: u64 = 0b11 << 8;
 const AF: u64 = 1 << 10;
+const AP_USER: u64 = 1 << 6; // AP[1]: accessible from EL0
+const NG: u64 = 1 << 11; // not global: tagged with the ASID
 const GP: u64 = 1 << 50; // BTI guarded page
 const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
@@ -150,6 +152,38 @@ pub const fn page_descriptor(pa: u64, attrs: PageAttrs) -> u64 {
     d
 }
 
+/// What EL0 may do with a page of the dbworker's address space (ADR-210).
+/// The kernel (EL1) can never execute these pages (`PXN`), and with `PAN`
+/// it cannot read or write them by accident either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserAccess {
+    /// Read + execute. Never writable.
+    Code,
+    /// Read only, never executable.
+    ReadOnly,
+    /// Read + write, never executable.
+    ReadWrite,
+}
+
+/// Encodes a level-3 descriptor for a user page: normal write-back memory,
+/// tagged with the ASID, `PXN` always, `UXN` unless it is code. W^X holds by
+/// construction.
+pub const fn user_page_descriptor(pa: u64, access: UserAccess, bti: bool) -> u64 {
+    let mut d = (pa & ADDR_MASK) | VALID | TABLE_OR_PAGE | AF | NG | SH_INNER | AP_USER | PXN | UXN;
+    match access {
+        UserAccess::Code => {
+            d &= !UXN;
+            d |= AP_RO;
+            if bti {
+                d |= GP;
+            }
+        }
+        UserAccess::ReadOnly => d |= AP_RO,
+        UserAccess::ReadWrite => {}
+    }
+    d
+}
+
 /// Size of a level-2 block mapping.
 pub const BLOCK_2M: u64 = 2 << 20;
 
@@ -217,6 +251,32 @@ const fn is_canonical(va: u64) -> bool {
     top == 0 || top == 0xffff
 }
 
+/// A fresh, empty root table for a user address space (`TTBR0`).
+pub fn user_new_root<M: TableMemory, F: FrameSource>(
+    mem: &mut M,
+    frames: &mut F,
+    _kernel_root: u64,
+) -> Option<u64> {
+    let root = frames.alloc_frame()?;
+    for i in 0..ENTRIES {
+        mem.write(root, i, 0);
+    }
+    Some(root)
+}
+
+/// Maps one user page into the space rooted at `root`.
+pub fn user_map_page<M: TableMemory, F: FrameSource>(
+    mem: &mut M,
+    root: u64,
+    va: u64,
+    pa: u64,
+    access: UserAccess,
+    bti: bool,
+    frames: &mut F,
+) -> Result<(), MapError> {
+    Mapper::new(mem, root).map_user_page(va, pa, access, bti, frames)
+}
+
 /// Walks and edits one translation regime rooted at `root` (TTBRn base).
 pub struct Mapper<'m, M: TableMemory> {
     mem: &'m mut M,
@@ -261,6 +321,34 @@ impl<'m, M: TableMemory> Mapper<'m, M> {
             };
         }
         self.mem.write(table, idx, new);
+        Ok(())
+    }
+
+    /// Maps one 4 KiB user page (lower half).
+    pub fn map_user_page<F: FrameSource>(
+        &mut self,
+        va: u64,
+        pa: u64,
+        access: UserAccess,
+        bti: bool,
+        frames: &mut F,
+    ) -> Result<(), MapError> {
+        if !va.is_multiple_of(PAGE_SIZE) || !pa.is_multiple_of(PAGE_SIZE) {
+            return Err(MapError::Unaligned);
+        }
+        if va >> 48 != 0 {
+            return Err(MapError::NonCanonical);
+        }
+        let mut table = self.root;
+        for level in 0..3u8 {
+            table = self.next_table(table, index(va, level), frames)?;
+        }
+        let idx = index(va, 3);
+        if self.mem.read(table, idx) & VALID != 0 {
+            return Err(MapError::AlreadyMapped);
+        }
+        self.mem
+            .write(table, idx, user_page_descriptor(pa, access, bti));
         Ok(())
     }
 
@@ -517,6 +605,50 @@ mod tests {
         assert_eq!(index(va, 2), 0);
         assert_eq!(index(va, 3), 1);
         assert_eq!(upper_half_l0_base(511), 0xffff_ff80_0000_0000);
+    }
+
+    #[test]
+    fn user_pages_are_wx_and_never_kernel_executable() {
+        for (access, writable, exec) in [
+            (UserAccess::Code, false, true),
+            (UserAccess::ReadOnly, false, false),
+            (UserAccess::ReadWrite, true, false),
+        ] {
+            let d = page_descriptor_user(access);
+            assert_ne!(d & PXN, 0, "{access:?}: the kernel must never execute it");
+            assert_ne!(d & AP_USER, 0);
+            assert_ne!(d & NG, 0, "user pages are ASID-tagged");
+            assert_eq!(d & AP_RO == 0, writable, "{access:?}");
+            assert_eq!(d & UXN == 0, exec, "{access:?}");
+        }
+    }
+
+    fn page_descriptor_user(access: UserAccess) -> u64 {
+        user_page_descriptor(0x8000, access, true)
+    }
+
+    #[test]
+    fn user_mapping_goes_to_the_lower_half_only() {
+        let mut mem = FakeMem::default();
+        let mut frames = Bump(0x20_0000, 0x30_0000);
+        let mut m = Mapper::new(&mut mem, ROOT);
+        m.map_user_page(0x40_0000, 0x1000, UserAccess::Code, true, &mut frames)
+            .unwrap();
+        assert_eq!(
+            m.map_user_page(0x40_0000, 0x2000, UserAccess::Code, true, &mut frames),
+            Err(MapError::AlreadyMapped)
+        );
+        assert_eq!(
+            m.map_user_page(
+                0xffff_ffff_8000_0000,
+                0x1000,
+                UserAccess::ReadWrite,
+                true,
+                &mut frames
+            ),
+            Err(MapError::NonCanonical)
+        );
+        assert_eq!(m.translate(0x40_0000), Some(0x1000));
     }
 
     #[test]

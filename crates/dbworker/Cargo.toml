@@ -1,0 +1,21 @@
+[package]
+name = "urmqtt-dbworker"
+description = "The unprivileged database worker: SQLite at EL0 / ring 3, called by the kernel (ADR-210)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "urmqtt-dbworker"
+path = "src/main.rs"
+test = false
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+urmqtt-usys = { path = "../usys" }
