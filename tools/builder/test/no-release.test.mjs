@@ -9,6 +9,12 @@ import { haveBrowser, launch } from './cdp.mjs';
 import { prepareSite } from './fixture-site.mjs';
 import { serve } from './serve.mjs';
 import { haveWasm } from './helpers.mjs';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// The page only has an emulator button in a build made with `make builder-emulator`.
+const emulatorBuilt = existsSync(join(dirname(fileURLToPath(import.meta.url)), '../../../build/emulator-runtime/qemu/qemu-system-x86_64.wasm'));
 
 if (!haveBrowser() || !haveWasm()) {
   console.log('skipped: needs a Chrome (CHROME=/path), Node 22 and build/builder (make builder)');
@@ -80,10 +86,15 @@ test('no button looks usable and is not: Build is off with the reason, Download 
   assert.equal(state.status, why);
   assert.equal(state.download.aria, 'true');
   assert.equal(state.download.href, '#');
-  assert.equal(state.emulator, 'true', 'the emulator button is there (the page is isolated) and off');
-  assert.equal(state.emulatorHint, why);
+  if (emulatorBuilt) {
+    assert.equal(state.emulator, 'true', 'the emulator button is there (the page is isolated) and off');
+    assert.equal(state.emulatorHint, why);
+  } else {
+    assert.equal(state.emulator, null, 'a build without the emulator has no button for it');
+    assert.match(state.emulatorHint, /does not include it/);
+  }
   // Clicking the off buttons does nothing: no dialog, no request for the emulator.
-  await page.click('#ub-emulator');
+  if (emulatorBuilt) await page.click('#ub-emulator');
   await page.click('#ub-download');
   assert.equal(await page.eval(`Boolean(document.querySelector('dialog[open]'))`), false);
   assert.deepEqual(page.requests.filter(r => /\/emulator\//.test(r.url)), []);

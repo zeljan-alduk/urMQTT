@@ -370,7 +370,7 @@ test('no request is made for emulator files before the button is clicked', async
   }
 });
 
-test('without cross-origin isolation the page says the emulator is not available and has no button for it', async () => {
+test('without cross-origin isolation the page says the emulator is not available and has no button for it', { skip: !emulatorBuilt && 'run `make builder-emulator`' }, async () => {
   const plain = await serve({ app: site.appDir, mirror: site.mirrorDir });
   try {
     await page.goto(`http://127.0.0.1:${plain.port}/`);
