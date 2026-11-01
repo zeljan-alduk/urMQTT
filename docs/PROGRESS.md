@@ -32,3 +32,7 @@ SECURITY-PLAN H6, on both architectures. ADR-210 (design, what is and is not iso
 - Rows are limited to 1 MiB and 64 columns; binds to 1 MiB. `max_packet_size` is 4 KiB in every shipped configuration.
 - VHE (entry at EL2) is untested, as before. The nested worktree still needs `RUSTFLAGS` set by hand to build the aarch64 kernel.
 
+
+## H7 — time security (closed 2026-11-01)
+
+Nothing new to build: the lower bound (ADR-050, H1) and SNTP with median consensus, per-step and total bounds and kiss-of-death handling (ADR-100, T1) cover the H7 scope. NTS (RFC 8915) stays out of scope and is a documented residual: with plain SNTP a man in the middle that controls every answer can move the clock by `max_step` in total after boot. `docs/AUDIT.md` question 3 is updated and `deploy/prod/config.toml` carries a commented `[time]` example (no servers by default: an operator picks IPv4 literals).
