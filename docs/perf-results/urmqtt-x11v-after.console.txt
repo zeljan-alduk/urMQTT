@@ -1,0 +1,883 @@
+### console single-flow qos=0 payload=64 rep=1
+[    0.650412] INFO  watchdog: handshake budget 50 ms (calibrated), other handlers 20 ms, stuck-core reset at 2000 ms
+[    9.143375] INFO  stalls: core 3: 28 late tick(s), worst 421651 us; 254610 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[    9.271885] INFO  stalls: core 2: 4 late tick(s), worst 94939 us; 51 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[    9.272030] INFO  stalls: core 1: 13 late tick(s), worst 225515 us; 167554 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   10.503682] INFO  stalls: core 0: 66 late tick(s), worst 1060822 us; 381259 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   14.144743] INFO  stalls: core 3: 18 late tick(s), worst 255251 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   14.272940] INFO  stalls: core 1: 13 late tick(s), worst 10658 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   14.278047] INFO  stalls: core 2: 15 late tick(s), worst 14410 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   15.512882] INFO  stalls: core 0: 22 late tick(s), worst 31722 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/console/dropped=0
+SYSVAL $SYS/broker/frames/dropped/nic=0
+SYSVAL $SYS/broker/frames/dropped/steer=0
+SYSVAL $SYS/broker/frames/dropped/worker_tx=0
+SYSVAL $SYS/broker/handshakes/syn_dropped=0
+SYSVAL $SYS/broker/messages/dropped/cross_core=0
+SYSVAL $SYS/broker/messages/dropped/offline=0
+SYSVAL $SYS/broker/messages/dropped/publish_rate=0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=0
+### console single-flow qos=0 payload=64 rep=2
+[   22.541802] INFO  watchdog: core 2 input handler for conn 0 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   22.664387] INFO  watchdog: core 2 output handler for conn - not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   22.692820] INFO  watchdog: core 2 input handler for conn 0 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   24.041942] INFO  watchdog: core 2 input handler for conn 0 not charged: 35 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   24.226569] INFO  watchdog: core 2 input handler for conn 0 not charged: 34 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   24.285328] INFO  stalls: core 1: 72 late tick(s), worst 251419 us; 947621 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   24.286761] INFO  stalls: core 2: 57 late tick(s), worst 184782 us; 1034179 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   24.463027] INFO  stalls: core 3: 12 late tick(s), worst 2983831 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   24.812246] INFO  watchdog: core 2 input handler for conn 0 not charged: 48 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   25.328746] INFO  watchdog: core 1 output handler for conn - not charged: 39 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   25.513529] INFO  stalls: core 0: 132 late tick(s), worst 226775 us; 737796 us waiting for locks; host steal 0 us; NIC backlog peak 9
+[   25.577284] INFO  watchdog: core 2 input handler for conn 0 not charged: 30 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   25.640687] INFO  watchdog: core 2 output handler for conn - not charged: 45 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   25.743874] INFO  watchdog: core 2 input handler for conn 0 not charged: 45 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   25.866844] INFO  watchdog: core 2 input handler for conn 0 not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   25.948597] INFO  watchdog: core 2 output handler for conn - not charged: 52 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   26.026644] INFO  watchdog: core 2 input handler for conn 0 not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   26.077088] INFO  watchdog: core 2 output handler for conn - not charged: 32 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   26.836425] INFO  watchdog: core 2 input handler for conn 0 not charged: 185 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   26.993200] INFO  watchdog: core 2 input handler for conn 0 not charged: 156 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   27.310877] INFO  watchdog: core 2 input handler for conn 0 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   28.411505] INFO  watchdog: core 2 input handler for conn 0 not charged: 396 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   28.663220] INFO  watchdog: core 2 input handler for conn 0 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   28.692071] INFO  watchdog: core 2 input handler for conn 0 not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   28.755280] INFO  watchdog: core 2 input handler for conn 0 not charged: 63 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   28.849972] INFO  watchdog: core 2 input handler for conn 0 not charged: 94 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   29.550158] INFO  stalls: core 3: 28 late tick(s), worst 1048068 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   30.078907] INFO  watchdog: core 2 input handler for conn 0 not charged: 900 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   30.079854] INFO  stalls: core 2: 58 late tick(s), worst 897928 us; 2170275 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   30.253050] INFO  stalls: core 1: 72 late tick(s), worst 945153 us; 2114746 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   30.513764] INFO  stalls: core 0: 107 late tick(s), worst 891026 us; 2126164 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   30.518550] INFO  watchdog: core 2 input handler for conn 0 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   30.767754] INFO  watchdog: core 2 input handler for conn 0 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   31.079001] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 133957 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[   31.223112] INFO  watchdog: core 2 output handler for conn - not charged: 36 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   32.063360] INFO  watchdog: core 2 input handler for conn 0 not charged: 71 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   34.550715] INFO  stalls: core 3: 45 late tick(s), worst 381184 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   35.085415] INFO  stalls: core 2: 21 late tick(s), worst 114071 us; 393826 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   35.262127] INFO  stalls: core 1: 26 late tick(s), worst 359505 us; 215633 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   35.522866] INFO  stalls: core 0: 44 late tick(s), worst 70701 us; 328050 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/cross_core=54174
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=162978
+### console single-flow qos=0 payload=64 rep=3
+[   38.401829] INFO  watchdog: core 2 output handler for conn - not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   38.802454] INFO  watchdog: core 2 input handler for conn 1 not charged: 37 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   39.555002] INFO  stalls: core 3: 37 late tick(s), worst 277430 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   40.086773] INFO  stalls: core 2: 27 late tick(s), worst 45734 us; 327783 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   40.262417] INFO  stalls: core 1: 23 late tick(s), worst 49616 us; 398664 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   40.287840] INFO  watchdog: core 2 output handler for conn - not charged: 21 ms elapsed, 4 ms running (the core was stalled or waiting for a lock)
+[   40.523074] INFO  stalls: core 0: 55 late tick(s), worst 48476 us; 323413 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   41.151225] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 34293 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[   41.563666] INFO  watchdog: core 2 input handler for conn 1 not charged: 179 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   42.062886] INFO  watchdog: core 2 input handler for conn 1 not charged: 466 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   42.084968] INFO  watchdog: core 2 input handler for conn 1 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   42.501259] INFO  watchdog: core 2 output handler for conn - not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   42.774642] INFO  watchdog: core 2 input handler for conn 1 not charged: 87 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   42.856873] INFO  watchdog: core 2 input handler for conn 1 not charged: 81 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   43.738674] INFO  watchdog: core 2 input handler for conn 1 not charged: 54 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   44.559018] INFO  stalls: core 3: 27 late tick(s), worst 612685 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   44.726470] INFO  watchdog: core 2 input handler for conn 1 not charged: 36 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   44.751277] INFO  watchdog: core 2 input handler for conn 1 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   44.778955] INFO  watchdog: core 2 input handler for conn 1 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   44.830355] INFO  watchdog: core 2 output handler for conn - not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   45.090425] INFO  stalls: core 2: 63 late tick(s), worst 457471 us; 2029952 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   45.270570] INFO  stalls: core 1: 55 late tick(s), worst 356843 us; 1937624 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   45.300668] INFO  watchdog: core 2 input handler for conn 1 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   45.326720] INFO  watchdog: core 2 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   45.523124] INFO  stalls: core 0: 72 late tick(s), worst 469025 us; 1665358 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   46.616990] INFO  watchdog: core 2 input handler for conn 1 not charged: 29 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   47.112092] INFO  watchdog: core 2 input handler for conn 1 not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   49.115433] INFO  watchdog: core 2 input handler for conn 1 not charged: 37 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   49.563415] INFO  stalls: core 3: 39 late tick(s), worst 743964 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   50.092104] INFO  stalls: core 2: 74 late tick(s), worst 51401 us; 486005 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   50.274008] INFO  stalls: core 1: 61 late tick(s), worst 51397 us; 441373 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   50.527644] INFO  stalls: core 0: 121 late tick(s), worst 41626 us; 271614 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   51.237302] INFO  watchdog: core 2 input handler for conn 1 not charged: 103 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   51.299291] INFO  watchdog: core 2 input handler for conn 1 not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   51.434011] INFO  watchdog: core 2 input handler for conn 1 not charged: 54 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   54.572251] INFO  stalls: core 3: 18 late tick(s), worst 363671 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   55.098462] INFO  stalls: core 2: 41 late tick(s), worst 170748 us; 182953 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   55.277226] INFO  stalls: core 1: 44 late tick(s), worst 167430 us; 189425 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=168357
+### console single-flow qos=0 payload=1024 rep=1
+[   55.527770] INFO  stalls: core 0: 38 late tick(s), worst 124047 us; 134103 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   57.221924] INFO  watchdog: core 1 input handler for conn 0 not charged: 44 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   59.575444] INFO  stalls: core 3: 22 late tick(s), worst 191829 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   59.585645] INFO  watchdog: core 1 input handler for conn 0 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   59.609938] INFO  watchdog: core 1 input handler for conn 0 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   59.998092] INFO  watchdog: core 1 input handler for conn 0 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   60.099765] INFO  stalls: core 2: 27 late tick(s), worst 52888 us; 232560 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   60.277502] INFO  stalls: core 1: 28 late tick(s), worst 34803 us; 215885 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   60.386104] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 1107 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[   60.528165] INFO  stalls: core 0: 54 late tick(s), worst 43761 us; 146532 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   61.459790] INFO  watchdog: core 1 input handler for conn 0 not charged: 51 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   61.618688] INFO  watchdog: core 1 input handler for conn 0 not charged: 40 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   64.129383] INFO  watchdog: core 1 input handler for conn 0 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   64.180780] INFO  watchdog: core 1 input handler for conn 0 not charged: 51 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   64.581744] INFO  stalls: core 3: 38 late tick(s), worst 471576 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   65.115645] INFO  stalls: core 2: 29 late tick(s), worst 63452 us; 438613 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   65.288058] INFO  stalls: core 1: 35 late tick(s), worst 152907 us; 512943 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   65.528166] INFO  stalls: core 0: 88 late tick(s), worst 143303 us; 315491 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   65.953639] INFO  watchdog: core 1 input handler for conn 0 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   66.098938] INFO  watchdog: core 1 input handler for conn 0 not charged: 62 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   66.219749] INFO  watchdog: core 1 input handler for conn 0 not charged: 34 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   67.018337] INFO  watchdog: core 1 input handler for conn 0 not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   67.635012] INFO  watchdog: core 1 input handler for conn 0 not charged: 34 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   67.709443] INFO  watchdog: core 1 input handler for conn 0 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   69.581896] INFO  stalls: core 3: 20 late tick(s), worst 565482 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   70.117000] INFO  stalls: core 2: 48 late tick(s), worst 53701 us; 362872 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   70.297321] INFO  stalls: core 1: 62 late tick(s), worst 80483 us; 377300 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   70.447620] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 18543 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[   70.528516] INFO  stalls: core 0: 100 late tick(s), worst 117737 us; 239645 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=188007
+### console single-flow qos=0 payload=1024 rep=2
+[   74.584845] INFO  stalls: core 3: 26 late tick(s), worst 184354 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   75.025130] INFO  watchdog: core 1 input handler for conn 0 not charged: 57 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   75.121258] INFO  stalls: core 2: 11 late tick(s), worst 13720 us; 1529 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   75.121431] INFO  watchdog: core 1 input handler for conn 0 not charged: 56 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   75.146146] INFO  watchdog: core 1 input handler for conn 0 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   75.285733] INFO  watchdog: core 1 input handler for conn 0 not charged: 83 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   75.297650] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 2425 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[   75.308379] INFO  stalls: core 1: 14 late tick(s), worst 70590 us; 336246 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   75.528638] INFO  stalls: core 0: 29 late tick(s), worst 98645 us; 339812 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   77.197162] INFO  watchdog: core 1 input handler for conn 0 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   78.027871] INFO  watchdog: core 1 input handler for conn 0 not charged: 92 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   78.075375] INFO  watchdog: core 1 input handler for conn 0 not charged: 47 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   78.391348] INFO  watchdog: core 1 input handler for conn 0 not charged: 35 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   78.565630] INFO  watchdog: core 1 input handler for conn 0 not charged: 30 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   79.394732] INFO  watchdog: core 1 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   79.658145] INFO  stalls: core 3: 42 late tick(s), worst 436167 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   80.129215] INFO  stalls: core 2: 34 late tick(s), worst 89438 us; 525060 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   80.319208] INFO  stalls: core 1: 44 late tick(s), worst 91404 us; 446330 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   80.528666] INFO  stalls: core 0: 99 late tick(s), worst 93016 us; 424105 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   83.122533] INFO  watchdog: core 1 output handler for conn - not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   84.806459] INFO  stalls: core 3: 20 late tick(s), worst 307551 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   85.129214] INFO  stalls: core 2: 32 late tick(s), worst 17396 us; 768 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   85.312929] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 18912 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[   85.327060] INFO  stalls: core 1: 41 late tick(s), worst 66057 us; 65075 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   85.504827] INFO  watchdog: core 1 output handler for conn - not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   85.536336] INFO  stalls: core 0: 111 late tick(s), worst 30034 us; 106345 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   86.010660] INFO  watchdog: core 1 input handler for conn 0 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   86.358121] INFO  watchdog: core 1 input handler for conn 0 not charged: 78 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   86.440930] INFO  watchdog: core 1 input handler for conn 0 not charged: 49 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   86.780175] INFO  watchdog: core 1 input handler for conn 0 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   89.813262] INFO  stalls: core 3: 16 late tick(s), worst 1291332 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   90.129444] INFO  stalls: core 2: 21 late tick(s), worst 15793 us; 81453 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   90.333283] INFO  stalls: core 1: 25 late tick(s), worst 76457 us; 262700 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   90.540758] INFO  stalls: core 0: 30 late tick(s), worst 84639 us; 189471 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=206451
+### console single-flow qos=0 payload=1024 rep=3
+[   93.326352] INFO  watchdog: core 2 input handler for conn 0 not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   94.867726] INFO  stalls: core 3: 22 late tick(s), worst 362003 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   95.138705] INFO  stalls: core 2: 11 late tick(s), worst 17550 us; 136693 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   95.340659] INFO  stalls: core 1: 15 late tick(s), worst 24737 us; 178435 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   95.412009] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 7204 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[   95.540835] INFO  stalls: core 0: 29 late tick(s), worst 21600 us; 154726 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[   95.987987] INFO  watchdog: core 2 output handler for conn - not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   96.051010] INFO  watchdog: core 2 input handler for conn 0 not charged: 33 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   97.362665] INFO  watchdog: core 2 output handler for conn - not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   97.930092] INFO  watchdog: core 2 input handler for conn 0 not charged: 52 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   99.683967] INFO  watchdog: core 2 input handler for conn 0 not charged: 105 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[   99.909536] INFO  stalls: core 3: 25 late tick(s), worst 514161 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  100.139560] INFO  stalls: core 2: 42 late tick(s), worst 95742 us; 607819 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  100.349354] INFO  stalls: core 1: 28 late tick(s), worst 95578 us; 501321 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  100.543926] INFO  stalls: core 0: 52 late tick(s), worst 89416 us; 513674 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  103.325555] INFO  watchdog: core 2 input handler for conn 0 not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  104.919003] INFO  stalls: core 3: 31 late tick(s), worst 157103 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  105.145735] INFO  stalls: core 2: 29 late tick(s), worst 58635 us; 268304 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  105.355273] INFO  stalls: core 1: 17 late tick(s), worst 68841 us; 245823 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  105.435722] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 13746 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  105.547027] INFO  stalls: core 0: 49 late tick(s), worst 67772 us; 207106 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  109.920806] INFO  stalls: core 3: 13 late tick(s), worst 140937 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  110.145753] INFO  stalls: core 2: 1 late tick(s), worst 6149 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=229641
+### console single-flow qos=1 payload=64 rep=1
+[  110.548059] INFO  stalls: core 0: 6 late tick(s), worst 4942 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  112.610553] INFO  watchdog: core 2 input handler for conn 1 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  113.901782] INFO  watchdog: core 2 input handler for conn 1 not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  114.246488] INFO  watchdog: core 2 input handler for conn 1 not charged: 67 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  114.277778] INFO  watchdog: core 2 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  114.708372] INFO  watchdog: core 2 input handler for conn 1 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  114.924125] INFO  stalls: core 3: 35 late tick(s), worst 807803 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  115.021419] INFO  watchdog: core 2 input handler for conn 1 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  115.110483] INFO  watchdog: core 2 input handler for conn 1 not charged: 32 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  115.174267] INFO  stalls: core 2: 54 late tick(s), worst 185430 us; 835918 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  115.375073] INFO  stalls: core 1: 46 late tick(s), worst 184599 us; 825822 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  115.462641] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 6714 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  115.548141] INFO  stalls: core 0: 111 late tick(s), worst 185193 us; 814086 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  117.820973] INFO  watchdog: core 2 input handler for conn 1 not charged: 129 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  117.869175] INFO  watchdog: core 2 input handler for conn 1 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  117.918356] INFO  watchdog: core 2 input handler for conn 1 not charged: 42 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  119.249068] INFO  watchdog: core 2 input handler for conn 1 not charged: 41 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  119.936065] INFO  stalls: core 3: 49 late tick(s), worst 176010 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  120.175032] INFO  stalls: core 2: 44 late tick(s), worst 122437 us; 473083 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  120.389276] INFO  stalls: core 1: 36 late tick(s), worst 105742 us; 450797 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  120.548351] INFO  stalls: core 0: 99 late tick(s), worst 137323 us; 457488 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  121.494280] INFO  watchdog: core 2 input handler for conn 1 not charged: 34 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  124.936953] INFO  stalls: core 3: 13 late tick(s), worst 325894 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  125.177524] INFO  stalls: core 2: 21 late tick(s), worst 21324 us; 51012 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  125.393851] INFO  stalls: core 1: 16 late tick(s), worst 21239 us; 59294 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  125.502959] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 5754 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  125.549334] INFO  stalls: core 0: 16 late tick(s), worst 50979 us; 14832 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=242762
+### console single-flow qos=1 payload=64 rep=2
+[  129.937563] INFO  stalls: core 3: 23 late tick(s), worst 279425 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  130.181760] INFO  stalls: core 2: 20 late tick(s), worst 15796 us; 4 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  130.394338] INFO  stalls: core 1: 16 late tick(s), worst 10396 us; 15 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  130.549498] INFO  stalls: core 0: 42 late tick(s), worst 18795 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  133.727750] INFO  watchdog: core 2 input handler for conn 0 not charged: 69 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  134.938438] INFO  stalls: core 3: 22 late tick(s), worst 360900 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  135.192342] INFO  stalls: core 2: 26 late tick(s), worst 68045 us; 54415 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  135.395094] INFO  stalls: core 1: 27 late tick(s), worst 63974 us; 69433 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  135.523872] INFO  watchdog: core 2 output handler for conn - not charged: 36 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  135.535691] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 3304 (queue full); 0 publish(es) over the rate limit
+[  135.549743] INFO  stalls: core 0: 93 late tick(s), worst 29808 us; 35102 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  139.946464] INFO  stalls: core 3: 18 late tick(s), worst 262183 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  140.196814] INFO  stalls: core 2: 21 late tick(s), worst 31824 us; 33334 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  140.398204] INFO  stalls: core 1: 9 late tick(s), worst 25074 us; 1730 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  140.550676] INFO  stalls: core 0: 38 late tick(s), worst 13722 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  144.955453] INFO  stalls: core 3: 11 late tick(s), worst 225081 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  145.196814] INFO  stalls: core 2: 3 late tick(s), worst 6817 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  145.404873] INFO  stalls: core 1: 1 late tick(s), worst 4866 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  145.556794] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 4000 (queue full); 0 publish(es) over the rate limit
+[  145.560190] INFO  stalls: core 0: 19 late tick(s), worst 15479 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=7304
+### console single-flow qos=1 payload=64 rep=3
+[  148.194664] INFO  watchdog: core 1 input handler for conn 2 not charged: 208 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  149.962152] INFO  stalls: core 3: 24 late tick(s), worst 230380 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  150.200560] INFO  stalls: core 2: 31 late tick(s), worst 197242 us; 216609 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  150.412905] INFO  stalls: core 1: 30 late tick(s), worst 199881 us; 211848 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  150.561634] INFO  stalls: core 0: 113 late tick(s), worst 35869 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  154.967434] INFO  stalls: core 3: 16 late tick(s), worst 204954 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  155.201206] INFO  stalls: core 2: 40 late tick(s), worst 22634 us; 10 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  155.418735] INFO  stalls: core 1: 43 late tick(s), worst 15337 us; 12 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  155.561872] INFO  stalls: core 0: 155 late tick(s), worst 16206 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  155.583189] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 5070 (queue full); 0 publish(es) over the rate limit
+[  159.971548] INFO  stalls: core 3: 25 late tick(s), worst 371899 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  160.203250] INFO  stalls: core 2: 20 late tick(s), worst 23250 us; 2735 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  160.423085] INFO  stalls: core 1: 21 late tick(s), worst 23247 us; 2080 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  160.566655] INFO  stalls: core 0: 34 late tick(s), worst 29104 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  164.973359] INFO  stalls: core 3: 16 late tick(s), worst 151330 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=14742
+### console throughput qos=0 payload=64 pairs=16 rep=1
+[  165.214577] INFO  stalls: core 2: 6 late tick(s), worst 17367 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  165.431515] INFO  stalls: core 1: 9 late tick(s), worst 31374 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  165.567107] INFO  stalls: core 0: 40 late tick(s), worst 61477 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  165.596635] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 2368 (queue full); 0 publish(es) over the rate limit
+[  165.666479] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 331 (queue full); 0 publish(es) over the rate limit
+[  169.981319] INFO  stalls: core 3: 24 late tick(s), worst 334840 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  170.221503] INFO  stalls: core 2: 24 late tick(s), worst 21099 us; 53 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  170.438949] INFO  stalls: core 1: 13 late tick(s), worst 24391 us; 36 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  170.567176] INFO  stalls: core 0: 45 late tick(s), worst 33357 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  173.153697] INFO  watchdog: core 1 input handler for conn 0 not charged: 91 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  174.987415] INFO  stalls: core 3: 23 late tick(s), worst 237160 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  175.224247] INFO  stalls: core 2: 18 late tick(s), worst 82267 us; 93183 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  175.444763] INFO  stalls: core 1: 34 late tick(s), worst 83581 us; 92553 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  175.568231] INFO  stalls: core 0: 97 late tick(s), worst 28250 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  175.668465] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 10381 (queue full); 0 publish(es) over the rate limit
+[  179.995010] INFO  stalls: core 3: 14 late tick(s), worst 269702 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  180.226001] INFO  stalls: core 2: 10 late tick(s), worst 11389 us; 51 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  180.454368] INFO  stalls: core 1: 6 late tick(s), worst 25793 us; 64 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  180.575573] INFO  stalls: core 0: 33 late tick(s), worst 22108 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=23464
+### console throughput qos=0 payload=64 pairs=16 rep=2
+[  280.704759] INFO  stalls: core 0: 1 late tick(s), worst 7009 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  280.761775] INFO  stalls: core 1: 3 late tick(s), worst 15255 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  280.791474] INFO  stalls: core 2: 3 late tick(s), worst 14203 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  285.497445] INFO  stalls: core 3: 19 late tick(s), worst 141400 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  285.707355] INFO  stalls: core 0: 2 late tick(s), worst 6040 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  285.791477] INFO  stalls: core 2: 1 late tick(s), worst 4515 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  290.504343] INFO  stalls: core 3: 11 late tick(s), worst 146721 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  290.714767] INFO  stalls: core 0: 7 late tick(s), worst 7406 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  290.761804] INFO  stalls: core 1: 1 late tick(s), worst 4544 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  290.791483] INFO  stalls: core 2: 3 late tick(s), worst 5858 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  295.505443] INFO  stalls: core 3: 6 late tick(s), worst 152874 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  295.791482] INFO  stalls: core 2: 1 late tick(s), worst 7176 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  300.511626] INFO  stalls: core 3: 6 late tick(s), worst 285342 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  300.714764] INFO  stalls: core 0: 2 late tick(s), worst 8862 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  300.770563] INFO  stalls: core 1: 4 late tick(s), worst 32407 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  300.799581] INFO  stalls: core 2: 7 late tick(s), worst 26701 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  305.512591] INFO  stalls: core 3: 7 late tick(s), worst 149233 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  305.719300] INFO  stalls: core 0: 8 late tick(s), worst 12369 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  305.773858] INFO  stalls: core 1: 6 late tick(s), worst 13282 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  310.517052] INFO  stalls: core 3: 9 late tick(s), worst 137921 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  310.719307] INFO  stalls: core 0: 7 late tick(s), worst 8224 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  310.773861] INFO  stalls: core 1: 5 late tick(s), worst 7684 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  310.799583] INFO  stalls: core 2: 5 late tick(s), worst 8092 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  315.521476] INFO  stalls: core 3: 15 late tick(s), worst 161397 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  315.720068] INFO  stalls: core 0: 3 late tick(s), worst 6216 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  315.774425] INFO  stalls: core 1: 3 late tick(s), worst 9799 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  315.799584] INFO  stalls: core 2: 5 late tick(s), worst 6031 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  320.528342] INFO  stalls: core 3: 12 late tick(s), worst 126888 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  320.723309] INFO  stalls: core 0: 2 late tick(s), worst 4135 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  320.784380] INFO  stalls: core 1: 1 late tick(s), worst 4618 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  320.801939] INFO  stalls: core 2: 2 late tick(s), worst 12361 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  325.529962] INFO  stalls: core 3: 9 late tick(s), worst 139878 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  325.724690] INFO  stalls: core 0: 19 late tick(s), worst 15260 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  325.801946] INFO  stalls: core 2: 3 late tick(s), worst 6352 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  330.531065] INFO  stalls: core 3: 8 late tick(s), worst 139947 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  330.734728] INFO  stalls: core 0: 2 late tick(s), worst 8505 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  330.801945] INFO  stalls: core 2: 2 late tick(s), worst 4439 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  335.537076] INFO  stalls: core 3: 8 late tick(s), worst 153244 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  335.736452] INFO  stalls: core 0: 5 late tick(s), worst 18676 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  335.793856] INFO  stalls: core 1: 1 late tick(s), worst 4494 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  335.808120] INFO  stalls: core 2: 3 late tick(s), worst 26183 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=26722
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=308188
+### console throughput qos=0 payload=64 pairs=16 rep=3
+[  345.302589] INFO  watchdog: core 1 input handler for conn 12 not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  345.347539] INFO  watchdog: core 1 input handler for conn 10 not charged: 36 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  345.432450] INFO  watchdog: core 2 input handler for conn 18 not charged: 48 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  345.465782] INFO  watchdog: core 2 input handler for conn 18 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  345.487065] INFO  watchdog: core 2 input handler for conn 18 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  345.491745] INFO  watchdog: core 1 input handler for conn 11 not charged: 54 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  345.737047] INFO  stalls: core 0: 144 late tick(s), worst 74036 us; 141222 us waiting for locks; host steal 0 us; NIC backlog peak 73
+[  345.812626] INFO  watchdog: core 2 input handler for conn 14 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  345.821021] INFO  stalls: core 3: 52 late tick(s), worst 286235 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  345.823690] INFO  stalls: core 2: 70 late tick(s), worst 49471 us; 712759 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  345.824928] INFO  stalls: core 1: 81 late tick(s), worst 66506 us; 689341 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  346.438582] INFO  watchdog: core 2 output handler for conn - not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  346.522420] INFO  watchdog: core 1 input handler for conn 12 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  347.308169] INFO  watchdog: core 2 input handler for conn 18 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  347.797722] INFO  watchdog: core 1 output handler for conn - not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  347.885136] INFO  watchdog: core 1 input handler for conn 8 not charged: 47 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  348.184622] INFO  watchdog: core 1 input handler for conn 11 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  348.456297] INFO  watchdog: core 2 output handler for conn - not charged: 77 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  348.623155] INFO  watchdog: core 1 input handler for conn 9 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  348.806127] INFO  watchdog: core 2 input handler for conn 14 not charged: 89 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  349.095135] INFO  watchdog: core 1 output handler for conn - not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  349.467282] INFO  watchdog: core 1 input handler for conn 12 not charged: 79 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  349.504226] INFO  watchdog: core 2 input handler for conn 11 not charged: 115 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  350.554541] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 3095 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  350.737425] INFO  stalls: core 0: 146 late tick(s), worst 108747 us; 379739 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  350.838150] INFO  stalls: core 2: 70 late tick(s), worst 111296 us; 1077018 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  350.839184] INFO  stalls: core 1: 95 late tick(s), worst 101053 us; 1074691 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  351.272091] INFO  stalls: core 3: 32 late tick(s), worst 703515 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  351.561184] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 1335 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  352.113109] INFO  watchdog: core 1 input handler for conn 9 not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  352.113109] INFO  watchdog: core 2 input handler for conn 14 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  352.194898] INFO  watchdog: core 1 output handler for conn - not charged: 29 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  352.211341] INFO  watchdog: core 2 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  352.335506] INFO  watchdog: core 2 input handler for conn 11 not charged: 41 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  352.409041] INFO  watchdog: core 1 input handler for conn 8 not charged: 110 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  352.445364] INFO  watchdog: core 2 input handler for conn 11 not charged: 109 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  352.459656] INFO  watchdog: core 1 input handler for conn 8 not charged: 50 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  352.492113] INFO  watchdog: core 1 input handler for conn 12 not charged: 29 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  352.608890] INFO  watchdog: core 1 input handler for conn 8 not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  355.742966] INFO  stalls: core 0: 68 late tick(s), worst 49592 us; 72797 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  355.841309] INFO  stalls: core 1: 33 late tick(s), worst 110108 us; 336953 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  355.844994] INFO  stalls: core 2: 33 late tick(s), worst 108853 us; 342171 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  356.293652] INFO  stalls: core 3: 30 late tick(s), worst 271822 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=316540
+### console throughput qos=0 payload=1024 pairs=16 rep=1
+[  364.298216] INFO  watchdog: core 1 input handler for conn 12 not charged: 29 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  364.389240] INFO  watchdog: core 2 output handler for conn - not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  364.626357] INFO  watchdog: core 2 input handler for conn 17 not charged: 40 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  364.632014] INFO  watchdog: core 1 output handler for conn - not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  364.682337] INFO  watchdog: core 2 input handler for conn 13 not charged: 55 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  364.887022] INFO  watchdog: core 1 input handler for conn 12 not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  365.301879] INFO  watchdog: core 1 input handler for conn 12 not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  365.304985] INFO  watchdog: core 2 input handler for conn 18 not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  365.337899] INFO  watchdog: core 1 input handler for conn 12 not charged: 35 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  365.505941] INFO  watchdog: core 1 input handler for conn 12 not charged: 33 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  365.527145] INFO  watchdog: core 1 input handler for conn 12 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  365.853044] INFO  watchdog: core 1 input handler for conn 10 not charged: 269 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  365.853089] INFO  stalls: core 0: 117 late tick(s), worst 370711 us; 762641 us waiting for locks; host steal 0 us; NIC backlog peak 3
+[  365.853814] INFO  stalls: core 1: 81 late tick(s), worst 269438 us; 1727343 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  365.858380] INFO  stalls: core 2: 76 late tick(s), worst 368070 us; 1703724 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  366.151851] INFO  watchdog: core 2 input handler for conn 13 not charged: 71 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  366.151940] INFO  watchdog: core 1 input handler for conn 10 not charged: 72 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  366.307376] INFO  watchdog: core 1 input handler for conn 12 not charged: 40 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  366.307376] INFO  watchdog: core 2 input handler for conn 15 not charged: 39 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  366.403129] INFO  watchdog: core 1 output handler for conn - not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  366.410200] INFO  stalls: core 3: 46 late tick(s), worst 259603 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  366.596191] INFO  watchdog: core 1 input handler for conn 12 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  368.019557] INFO  watchdog: core 1 input handler for conn 12 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  368.500381] INFO  watchdog: core 2 output handler for conn - not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  368.526510] INFO  watchdog: core 2 input handler for conn 11 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  368.613297] INFO  watchdog: core 2 input handler for conn 9 not charged: 64 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  368.703323] INFO  watchdog: core 1 input handler for conn 5 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  368.806325] INFO  watchdog: core 2 input handler for conn 15 not charged: 29 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  369.005045] INFO  watchdog: core 2 input handler for conn 13 not charged: 65 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  369.186196] INFO  watchdog: core 2 input handler for conn 13 not charged: 181 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  369.319400] INFO  watchdog: core 1 input handler for conn 7 not charged: 119 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  369.355680] INFO  watchdog: core 1 input handler for conn 12 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  370.975870] INFO  stalls: core 0: 165 late tick(s), worst 184549 us; 1036635 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  370.976749] INFO  stalls: core 1: 78 late tick(s), worst 161259 us; 1294143 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  370.976815] INFO  stalls: core 2: 85 late tick(s), worst 180144 us; 1301297 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  370.979880] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 3455 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  371.244725] INFO  watchdog: core 2 input handler for conn 12 not charged: 78 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  371.281754] INFO  watchdog: core 2 input handler for conn 14 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  371.335972] INFO  watchdog: core 1 input handler for conn 7 not charged: 167 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  371.335999] INFO  watchdog: core 2 input handler for conn 18 not charged: 46 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  371.401279] INFO  watchdog: core 2 input handler for conn 10 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  371.520076] INFO  stalls: core 3: 39 late tick(s), worst 156344 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  371.601159] INFO  watchdog: core 2 input handler for conn 18 not charged: 139 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  371.825409] INFO  watchdog: core 1 input handler for conn 10 not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  371.978417] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 1258 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  372.138552] INFO  watchdog: core 2 input handler for conn 18 not charged: 37 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=333642
+### console throughput qos=0 payload=1024 pairs=16 rep=2
+[  376.648629] INFO  stalls: core 3: 30 late tick(s), worst 283759 us; 1 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  376.899703] INFO  watchdog: core 2 input handler for conn 12 not charged: 37 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  377.181884] INFO  watchdog: core 1 output handler for conn - not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  379.684940] INFO  watchdog: core 2 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  380.977084] INFO  stalls: core 0: 105 late tick(s), worst 87131 us; 591441 us waiting for locks; host steal 0 us; NIC backlog peak 245
+[  380.986604] INFO  stalls: core 2: 43 late tick(s), worst 79258 us; 710198 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  380.999137] INFO  stalls: core 1: 35 late tick(s), worst 72329 us; 718538 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  381.040434] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 3387 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  381.726907] INFO  watchdog: core 1 output handler for conn - not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  381.944342] INFO  stalls: core 3: 28 late tick(s), worst 1550095 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  382.004042] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 12667 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  382.557816] INFO  watchdog: core 2 input handler for conn 6 not charged: 60 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  382.692541] INFO  watchdog: core 1 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  382.752621] INFO  watchdog: core 2 input handler for conn 1 not charged: 74 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  382.908298] INFO  watchdog: core 2 input handler for conn 6 not charged: 136 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  384.069051] INFO  watchdog: core 2 output handler for conn - not charged: 32 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  384.101810] INFO  watchdog: core 1 output handler for conn - not charged: 37 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  384.802902] INFO  watchdog: core 1 output handler for conn - not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  385.293124] INFO  watchdog: core 1 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  385.295777] INFO  watchdog: core 2 output handler for conn - not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  385.502021] INFO  watchdog: core 1 output handler for conn - not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  385.600281] INFO  watchdog: core 1 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  385.977778] INFO  stalls: core 0: 147 late tick(s), worst 52626 us; 7 us waiting for locks; host steal 0 us; NIC backlog peak 91
+[  385.991908] INFO  stalls: core 2: 70 late tick(s), worst 120867 us; 769937 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  386.007486] INFO  stalls: core 1: 121 late tick(s), worst 95805 us; 769212 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  387.045404] INFO  stalls: core 3: 30 late tick(s), worst 745973 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  387.084547] INFO  watchdog: core 1 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  387.704365] INFO  watchdog: core 1 input handler for conn 8 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  388.004844] INFO  watchdog: core 2 input handler for conn 6 not charged: 37 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  389.962099] INFO  watchdog: core 1 input handler for conn 13 not charged: 165 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  390.986424] INFO  stalls: core 0: 65 late tick(s), worst 147321 us; 316144 us waiting for locks; host steal 0 us; NIC backlog peak 97
+[  390.993919] INFO  stalls: core 2: 41 late tick(s), worst 112197 us; 450604 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  391.010450] INFO  stalls: core 1: 20 late tick(s), worst 159655 us; 310376 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  391.249814] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 70 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  392.029096] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 48 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  392.146543] INFO  stalls: core 3: 30 late tick(s), worst 192122 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=349754
+### console throughput qos=0 payload=1024 pairs=16 rep=3
+[  395.993920] INFO  stalls: core 2: 41 late tick(s), worst 30521 us; 388397 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  396.010454] INFO  stalls: core 1: 48 late tick(s), worst 98292 us; 368932 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  396.027987] INFO  stalls: core 0: 86 late tick(s), worst 231903 us; 280171 us waiting for locks; host steal 0 us; NIC backlog peak 202
+[  397.226088] INFO  stalls: core 3: 20 late tick(s), worst 658186 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  397.605908] INFO  watchdog: core 1 input handler for conn 16 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  397.722286] INFO  watchdog: core 1 output handler for conn - not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  397.812714] INFO  watchdog: core 1 output handler for conn - not charged: 30 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  398.092586] INFO  watchdog: core 1 output handler for conn - not charged: 48 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  399.514935] INFO  watchdog: core 1 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  399.523935] INFO  watchdog: core 2 input handler for conn 6 not charged: 29 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  399.636880] INFO  watchdog: core 2 input handler for conn 4 not charged: 32 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  399.777113] INFO  watchdog: core 2 output handler for conn - not charged: 39 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  399.791049] INFO  watchdog: core 1 input handler for conn 16 not charged: 192 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  399.862961] INFO  watchdog: core 1 input handler for conn 15 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  399.884762] INFO  watchdog: core 1 input handler for conn 17 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  400.743741] INFO  watchdog: core 2 input handler for conn 7 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  400.813840] INFO  watchdog: core 2 input handler for conn 7 not charged: 53 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  400.814004] INFO  watchdog: core 1 input handler for conn 15 not charged: 95 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  400.868342] INFO  watchdog: core 1 output handler for conn - not charged: 37 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  401.100325] INFO  stalls: core 0: 115 late tick(s), worst 86570 us; 424 us waiting for locks; host steal 0 us; NIC backlog peak 214
+[  401.132601] INFO  watchdog: core 0 output handler for conn - not charged: 32 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  401.454751] INFO  watchdog: core 2 input handler for conn 7 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  401.522160] INFO  stalls: core 1: 83 late tick(s), worst 182677 us; 1200099 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  401.522921] INFO  stalls: core 2: 62 late tick(s), worst 462304 us; 1244229 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  401.524035] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 538 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  402.340045] INFO  stalls: core 3: 34 late tick(s), worst 318605 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  402.522001] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 2095 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  403.186180] INFO  watchdog: core 0 output handler for conn - not charged: 66 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  404.401153] INFO  watchdog: core 2 output handler for conn - not charged: 21 ms elapsed, 3 ms running (the core was stalled or waiting for a lock)
+[  405.518694] INFO  watchdog: core 2 input handler for conn 6 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  405.537938] INFO  watchdog: core 1 input handler for conn 13 not charged: 32 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  405.731628] INFO  watchdog: core 2 input handler for conn 9 not charged: 41 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  405.788689] INFO  watchdog: core 1 input handler for conn 16 not charged: 39 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  405.814296] INFO  watchdog: core 1 output handler for conn - not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  406.101756] INFO  stalls: core 0: 120 late tick(s), worst 56940 us; 108473 us waiting for locks; host steal 0 us; NIC backlog peak 99
+[  406.526747] INFO  stalls: core 1: 48 late tick(s), worst 45443 us; 370396 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  406.530824] INFO  stalls: core 2: 49 late tick(s), worst 53364 us; 327323 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  406.902564] INFO  watchdog: core 1 input handler for conn 14 not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  406.935705] INFO  watchdog: core 1 input handler for conn 16 not charged: 33 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  406.973251] INFO  watchdog: core 2 input handler for conn 12 not charged: 96 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  406.976279] INFO  watchdog: core 1 input handler for conn 16 not charged: 35 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  407.396955] INFO  stalls: core 3: 36 late tick(s), worst 206648 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  407.457360] INFO  watchdog: core 2 input handler for conn 9 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  407.481918] INFO  watchdog: core 2 input handler for conn 7 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  411.101751] INFO  stalls: core 0: 65 late tick(s), worst 87735 us; 184668 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  411.532162] INFO  stalls: core 1: 29 late tick(s), worst 54464 us; 184735 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=353765
+### console sweep qos=0 payload=64 rate=1000 pairs=16 rep=1
+[  414.045329] INFO  watchdog: core 2 output handler for conn - not charged: 34 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  415.690124] INFO  watchdog: core 2 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  416.118762] INFO  stalls: core 0: 122 late tick(s), worst 46952 us; 86937 us waiting for locks; host steal 0 us; NIC backlog peak 102
+[  416.119596] INFO  watchdog: core 1 output handler for conn - not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  416.283337] INFO  watchdog: core 1 input handler for conn 9 not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  416.537800] INFO  stalls: core 2: 63 late tick(s), worst 56600 us; 440254 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  416.548368] INFO  stalls: core 1: 77 late tick(s), worst 47168 us; 418922 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  416.887973] INFO  watchdog: core 1 output handler for conn - not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  417.490423] INFO  stalls: core 3: 31 late tick(s), worst 292956 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  418.451442] INFO  watchdog: core 1 output handler for conn - not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  418.916755] INFO  watchdog: core 1 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  419.460084] INFO  watchdog: core 2 output handler for conn - not charged: 30 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  419.644017] INFO  watchdog: core 1 output handler for conn - not charged: 36 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  419.648011] INFO  watchdog: core 2 output handler for conn - not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  420.016137] INFO  watchdog: core 1 input handler for conn 14 not charged: 44 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  420.301912] INFO  watchdog: core 1 input handler for conn 12 not charged: 38 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  420.353967] INFO  watchdog: core 1 input handler for conn 12 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  420.381762] INFO  watchdog: core 1 input handler for conn 14 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  420.495014] INFO  watchdog: core 2 input handler for conn 5 not charged: 144 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  420.495014] INFO  watchdog: core 1 input handler for conn 14 not charged: 33 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  421.108701] INFO  watchdog: core 2 input handler for conn 9 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  421.118902] INFO  stalls: core 0: 158 late tick(s), worst 57257 us; 9 us waiting for locks; host steal 0 us; NIC backlog peak 115
+[  421.284000] INFO  watchdog: core 1 output handler for conn - not charged: 21 ms elapsed, 2 ms running (the core was stalled or waiting for a lock)
+[  421.511586] INFO  watchdog: core 2 output handler for conn - not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  421.543843] INFO  stalls: core 2: 75 late tick(s), worst 143958 us; 492514 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  421.553694] INFO  stalls: core 1: 84 late tick(s), worst 38338 us; 489745 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  421.730769] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 119 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  421.824370] INFO  watchdog: core 1 output handler for conn - not charged: 21 ms elapsed, 7 ms running (the core was stalled or waiting for a lock)
+[  421.827214] INFO  watchdog: core 2 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  422.754271] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 1205 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  422.965070] INFO  stalls: core 3: 30 late tick(s), worst 693848 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  423.241090] INFO  watchdog: core 1 input handler for conn 14 not charged: 69 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  426.119148] INFO  stalls: core 0: 98 late tick(s), worst 42186 us; 110699 us waiting for locks; host steal 0 us; NIC backlog peak 69
+[  426.386945] INFO  watchdog: core 2 input handler for conn 13 not charged: 83 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  426.548022] INFO  stalls: core 2: 44 late tick(s), worst 78025 us; 353449 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  426.563808] INFO  stalls: core 1: 53 late tick(s), worst 61429 us; 356847 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  427.973293] INFO  stalls: core 3: 28 late tick(s), worst 253771 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=355253
+### console sweep qos=0 payload=64 rate=1000 pairs=16 rep=2
+[  431.553575] INFO  stalls: core 2: 24 late tick(s), worst 223882 us; 353092 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  431.564927] INFO  stalls: core 1: 20 late tick(s), worst 239961 us; 356782 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  431.754884] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 8 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  432.011388] INFO  watchdog: core 2 input handler for conn 17 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  432.772036] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 14 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  433.045552] INFO  stalls: core 3: 22 late tick(s), worst 253097 us; 32705 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  434.575368] INFO  watchdog: core 2 input handler for conn 0 not charged: 304 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  434.602722] INFO  watchdog: core 2 input handler for conn 18 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  434.625336] INFO  watchdog: core 2 output handler for conn - not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  436.284461] INFO  stalls: core 0: 75 late tick(s), worst 300675 us; 508372 us waiting for locks; host steal 0 us; NIC backlog peak 64
+[  436.558157] INFO  stalls: core 2: 34 late tick(s), worst 296550 us; 529627 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  436.567601] INFO  stalls: core 1: 34 late tick(s), worst 267804 us; 522220 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  437.261503] INFO  watchdog: core 1 input handler for conn 4 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  437.382931] INFO  watchdog: core 1 input handler for conn 0 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  437.639170] INFO  watchdog: core 2 input handler for conn 20 not charged: 122 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  437.784690] INFO  watchdog: core 2 input handler for conn 15 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  438.161921] INFO  stalls: core 3: 23 late tick(s), worst 902498 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  438.610478] INFO  watchdog: core 1 output handler for conn - not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  438.918058] INFO  watchdog: core 2 input handler for conn 15 not charged: 331 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  439.127505] INFO  watchdog: core 2 input handler for conn 17 not charged: 103 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  439.303475] INFO  watchdog: core 2 input handler for conn 10 not charged: 175 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  439.627911] INFO  watchdog: core 2 input handler for conn 15 not charged: 53 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  441.284598] INFO  stalls: core 0: 93 late tick(s), worst 303977 us; 1274837 us waiting for locks; host steal 0 us; NIC backlog peak 95
+[  441.564043] INFO  stalls: core 2: 53 late tick(s), worst 318402 us; 1280312 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  441.576186] INFO  stalls: core 1: 63 late tick(s), worst 283480 us; 1212837 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  441.802312] INFO  watchdog: core 2 output handler for conn - not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  442.427137] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 4 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  442.800762] INFO  watchdog: core 1 output handler for conn - not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  443.167892] INFO  stalls: core 3: 30 late tick(s), worst 131863 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  443.431831] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 362 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  446.294240] INFO  stalls: core 0: 35 late tick(s), worst 35545 us; 117298 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  446.569272] INFO  stalls: core 2: 33 late tick(s), worst 26210 us; 110040 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  446.582440] INFO  stalls: core 1: 11 late tick(s), worst 35583 us; 110615 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  448.176710] INFO  stalls: core 3: 15 late tick(s), worst 370363 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=355619
+### console sweep qos=0 payload=64 rate=1000 pairs=16 rep=3
+[  453.453934] INFO  watchdog: core 2 input handler for conn 4 not charged: 34 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  453.588627] INFO  watchdog: core 1 input handler for conn 17 not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  453.607824] INFO  watchdog: core 2 input handler for conn 8 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  453.620505] INFO  watchdog: core 1 input handler for conn 13 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  453.664458] INFO  watchdog: core 2 input handler for conn 13 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  453.732672] INFO  watchdog: core 2 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  453.781843] INFO  watchdog: core 1 input handler for conn 16 not charged: 161 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  454.509558] INFO  watchdog: core 2 input handler for conn 10 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  454.796835] INFO  watchdog: core 2 output handler for conn - not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  454.825493] INFO  watchdog: core 2 input handler for conn 4 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  454.850816] INFO  watchdog: core 1 input handler for conn 14 not charged: 29 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  454.961495] INFO  watchdog: core 1 output handler for conn - not charged: 53 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  454.992050] INFO  watchdog: core 1 input handler for conn 14 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  455.059335] INFO  watchdog: core 2 input handler for conn 8 not charged: 86 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  455.387148] INFO  watchdog: core 2 input handler for conn 4 not charged: 327 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  455.635085] INFO  watchdog: core 2 input handler for conn 8 not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  455.853486] INFO  watchdog: core 1 input handler for conn 12 not charged: 49 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  456.028345] INFO  watchdog: core 2 output handler for conn - not charged: 109 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  456.058207] INFO  watchdog: core 2 input handler for conn 4 not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  456.149512] INFO  watchdog: core 1 input handler for conn 16 not charged: 60 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  456.190281] INFO  watchdog: core 2 input handler for conn 9 not charged: 54 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  456.236899] INFO  watchdog: core 1 output handler for conn - not charged: 84 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  456.305775] INFO  stalls: core 0: 102 late tick(s), worst 297170 us; 1323786 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  456.623338] INFO  stalls: core 2: 77 late tick(s), worst 326808 us; 1557729 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  456.623853] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 3 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  456.726519] INFO  stalls: core 1: 56 late tick(s), worst 274358 us; 1457143 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  456.953801] INFO  watchdog: core 1 output handler for conn - not charged: 49 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  456.987509] INFO  watchdog: core 1 output handler for conn - not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  457.537917] INFO  watchdog: core 1 input handler for conn 16 not charged: 42 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  458.462034] INFO  watchdog: core 2 input handler for conn 5 not charged: 103 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  458.510338] INFO  watchdog: core 1 input handler for conn 18 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  458.576351] INFO  stalls: core 3: 39 late tick(s), worst 616062 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  458.799983] INFO  watchdog: core 1 input handler for conn 16 not charged: 30 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  458.804906] INFO  watchdog: core 2 input handler for conn 10 not charged: 29 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  459.343010] INFO  watchdog: core 1 output handler for conn - not charged: 46 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  459.343010] INFO  watchdog: core 2 input handler for conn 4 not charged: 44 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  461.120418] INFO  watchdog: core 2 input handler for conn 10 not charged: 137 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  461.161193] INFO  watchdog: core 1 output handler for conn - not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  461.552727] INFO  watchdog: core 2 input handler for conn 5 not charged: 432 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  461.611312] INFO  watchdog: core 2 output handler for conn - not charged: 58 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  462.062676] INFO  stalls: core 1: 70 late tick(s), worst 366819 us; 1539808 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  462.062680] INFO  stalls: core 2: 68 late tick(s), worst 431304 us; 1558342 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  462.062700] INFO  stalls: core 0: 78 late tick(s), worst 658048 us; 1693567 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  462.114645] INFO  watchdog: core 1 input handler for conn 18 not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  463.582217] INFO  stalls: core 3: 31 late tick(s), worst 236747 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=355745
+[  472.063537] INFO  stalls: core 0: 87 late tick(s), worst 235124 us; 809127 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  472.064074] INFO  stalls: core 1: 51 late tick(s), worst 157706 us; 826788 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  472.078242] INFO  stalls: core 2: 54 late tick(s), worst 222542 us; 803459 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  473.398408] INFO  watchdog: core 2 input handler for conn 6 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  473.491554] INFO  watchdog: core 1 input handler for conn 8 not charged: 70 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  473.638734] INFO  stalls: core 3: 34 late tick(s), worst 162095 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  473.934753] INFO  watchdog: core 1 input handler for conn 4 not charged: 54 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  474.204210] INFO  watchdog: core 2 input handler for conn 3 not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  474.248808] INFO  watchdog: core 2 input handler for conn 3 not charged: 44 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  474.842077] INFO  watchdog: core 1 input handler for conn 6 not charged: 29 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  474.941192] INFO  watchdog: core 1 input handler for conn 10 not charged: 59 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  476.040094] INFO  watchdog: core 1 input handler for conn 4 not charged: 43 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  476.080133] INFO  watchdog: core 1 input handler for conn 9 not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  476.130531] INFO  watchdog: core 2 input handler for conn 6 not charged: 140 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  476.227472] INFO  watchdog: core 1 input handler for conn 5 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  476.261230] INFO  watchdog: core 1 input handler for conn 17 not charged: 33 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  476.377210] INFO  watchdog: core 2 input handler for conn 3 not charged: 130 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  476.801221] INFO  watchdog: core 2 input handler for conn 14 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  476.825602] INFO  watchdog: core 2 input handler for conn 9 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  476.900205] INFO  watchdog: core 1 input handler for conn 8 not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  476.910302] INFO  watchdog: core 2 input handler for conn 9 not charged: 81 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  476.949193] INFO  watchdog: core 1 output handler for conn - not charged: 47 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  477.134695] INFO  stalls: core 1: 94 late tick(s), worst 267465 us; 890764 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  477.134900] INFO  stalls: core 0: 157 late tick(s), worst 260349 us; 791119 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  477.182999] INFO  stalls: core 2: 77 late tick(s), worst 294191 us; 905134 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  477.290683] INFO  watchdog: core 1 input handler for conn 15 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  477.603475] INFO  watchdog: core 1 input handler for conn 14 not charged: 44 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  477.638201] INFO  watchdog: core 1 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  478.134003] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 776 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  478.183000] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 699 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  478.729254] INFO  stalls: core 3: 32 late tick(s), worst 866045 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  479.042063] INFO  watchdog: core 1 input handler for conn 6 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  479.112996] INFO  watchdog: core 1 input handler for conn 17 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  479.591167] INFO  watchdog: core 1 input handler for conn 6 not charged: 32 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  479.615378] INFO  watchdog: core 1 input handler for conn 5 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  482.135389] INFO  stalls: core 0: 101 late tick(s), worst 377596 us; 533178 us waiting for locks; host steal 0 us; NIC backlog peak 131
+[  482.136487] INFO  stalls: core 1: 69 late tick(s), worst 46017 us; 539209 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  482.188242] INFO  stalls: core 2: 46 late tick(s), worst 392061 us; 558064 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  483.729634] INFO  stalls: core 3: 29 late tick(s), worst 210624 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=357220
+[  488.051688] INFO  watchdog: core 1 input handler for conn 0 not charged: 43 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  488.212588] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 3266 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  488.462834] INFO  watchdog: core 2 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  488.801057] INFO  watchdog: core 1 input handler for conn 0 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  488.813463] INFO  stalls: core 3: 36 late tick(s), worst 288419 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  490.835775] INFO  watchdog: core 1 input handler for conn 0 not charged: 29 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  490.879470] INFO  watchdog: core 1 input handler for conn 0 not charged: 30 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  490.923716] INFO  watchdog: core 2 output handler for conn - not charged: 135 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  491.213491] INFO  watchdog: core 1 input handler for conn 0 not charged: 33 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  491.243026] INFO  watchdog: core 1 input handler for conn 0 not charged: 29 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  491.295760] INFO  watchdog: core 1 input handler for conn 0 not charged: 43 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  491.377858] INFO  watchdog: core 1 input handler for conn 0 not charged: 82 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  491.406273] INFO  watchdog: core 1 input handler for conn 0 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  491.724999] INFO  watchdog: core 2 output handler for conn - not charged: 35 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  492.010350] INFO  watchdog: core 1 input handler for conn 0 not charged: 29 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  492.119396] INFO  watchdog: core 2 output handler for conn - not charged: 61 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  492.152599] INFO  stalls: core 0: 152 late tick(s), worst 212820 us; 1488883 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  492.204900] INFO  stalls: core 1: 104 late tick(s), worst 230480 us; 1446259 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  492.218109] INFO  stalls: core 2: 80 late tick(s), worst 217098 us; 1247250 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  493.307710] INFO  watchdog: core 2 output handler for conn - not charged: 61 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  493.656285] INFO  watchdog: core 1 input handler for conn 0 not charged: 259 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  493.814427] INFO  stalls: core 3: 35 late tick(s), worst 299237 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  493.906550] INFO  watchdog: core 2 output handler for conn - not charged: 47 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  494.138711] INFO  watchdog: core 1 input handler for conn 0 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  494.223569] INFO  watchdog: core 2 output handler for conn - not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  494.425666] INFO  watchdog: core 1 input handler for conn 0 not charged: 109 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  495.112989] INFO  watchdog: core 2 output handler for conn - not charged: 22 ms elapsed, 8 ms running (the core was stalled or waiting for a lock)
+[  495.350109] INFO  watchdog: core 1 input handler for conn 0 not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  496.094208] INFO  watchdog: core 1 input handler for conn 0 not charged: 33 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  496.104212] INFO  watchdog: core 2 output handler for conn - not charged: 45 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  496.348069] INFO  watchdog: core 1 input handler for conn 0 not charged: 253 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  496.701265] INFO  watchdog: core 1 input handler for conn 0 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  496.840163] INFO  watchdog: core 1 input handler for conn 0 not charged: 132 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  497.154725] INFO  stalls: core 0: 212 late tick(s), worst 254450 us; 1033290 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  497.208962] INFO  stalls: core 1: 113 late tick(s), worst 252858 us; 1114400 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  497.218109] INFO  stalls: core 2: 119 late tick(s), worst 249218 us; 1051175 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  498.108478] INFO  watchdog: core 1 input handler for conn 0 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  498.162106] INFO  watchdog: core 1 input handler for conn 0 not charged: 53 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  498.192302] INFO  watchdog: core 1 input handler for conn 0 not charged: 30 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  498.922469] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 17198 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  499.106109] INFO  stalls: core 3: 30 late tick(s), worst 570071 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  502.157126] INFO  stalls: core 0: 93 late tick(s), worst 114939 us; 207836 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  502.211450] INFO  stalls: core 1: 44 late tick(s), worst 69967 us; 178526 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  502.233293] INFO  stalls: core 2: 37 late tick(s), worst 43038 us; 263541 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  504.115111] INFO  stalls: core 3: 29 late tick(s), worst 243304 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=377684
+[  506.143097] INFO  watchdog: core 2 input handler for conn 2 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  506.594605] INFO  watchdog: core 2 input handler for conn 2 not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  506.632447] INFO  watchdog: core 2 input handler for conn 2 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  507.301688] INFO  stalls: core 2: 75 late tick(s), worst 136951 us; 350093 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  507.339646] INFO  stalls: core 0: 90 late tick(s), worst 113069 us; 359769 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  507.397361] INFO  watchdog: core 2 input handler for conn 2 not charged: 74 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  507.401493] INFO  stalls: core 1: 53 late tick(s), worst 136951 us; 463481 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  508.744484] INFO  watchdog: core 2 input handler for conn 2 not charged: 36 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  508.973997] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 11721 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  509.202814] INFO  stalls: core 3: 35 late tick(s), worst 636887 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  512.301722] INFO  stalls: core 2: 36 late tick(s), worst 62248 us; 439128 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  512.341418] INFO  stalls: core 0: 108 late tick(s), worst 88709 us; 400432 us waiting for locks; host steal 0 us; NIC backlog peak 28
+[  512.402251] INFO  stalls: core 1: 46 late tick(s), worst 162935 us; 295223 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  514.206381] INFO  stalls: core 3: 32 late tick(s), worst 170979 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  514.548926] INFO  watchdog: core 2 input handler for conn 2 not charged: 61 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  514.576792] INFO  watchdog: core 2 input handler for conn 2 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  514.979935] INFO  watchdog: core 2 input handler for conn 2 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  515.784123] INFO  watchdog: core 2 input handler for conn 2 not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  515.820700] INFO  watchdog: core 2 input handler for conn 2 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  515.841867] INFO  watchdog: core 2 input handler for conn 2 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  517.302121] INFO  stalls: core 2: 33 late tick(s), worst 59950 us; 278467 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  517.341421] INFO  stalls: core 0: 49 late tick(s), worst 113989 us; 286664 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  517.405163] INFO  stalls: core 1: 23 late tick(s), worst 15620 us; 21080 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  519.005180] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 9004 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  519.216260] INFO  stalls: core 3: 23 late tick(s), worst 263682 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  522.305877] INFO  stalls: core 2: 27 late tick(s), worst 14372 us; 1386 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  522.341440] INFO  stalls: core 0: 17 late tick(s), worst 9942 us; 1742 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=395060
+[  522.405167] INFO  stalls: core 1: 12 late tick(s), worst 9046 us; 1092 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  524.221645] INFO  stalls: core 3: 19 late tick(s), worst 296226 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  524.843289] INFO  watchdog: core 1 output handler for conn - not charged: 25 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  524.907812] INFO  watchdog: core 1 input handler for conn 2 not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  525.662822] INFO  watchdog: core 1 input handler for conn 2 not charged: 46 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  525.754565] INFO  watchdog: core 1 input handler for conn 2 not charged: 39 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  526.114335] INFO  watchdog: core 1 input handler for conn 2 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  526.145928] INFO  watchdog: core 1 input handler for conn 2 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  526.389940] INFO  watchdog: core 1 input handler for conn 2 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  526.423647] INFO  watchdog: core 1 input handler for conn 2 not charged: 32 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  526.491793] INFO  watchdog: core 1 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  526.989182] INFO  watchdog: core 1 input handler for conn 2 not charged: 112 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  527.200523] INFO  watchdog: core 1 output handler for conn - not charged: 30 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  527.237624] INFO  watchdog: core 1 input handler for conn 2 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  527.312577] INFO  stalls: core 2: 71 late tick(s), worst 87040 us; 725467 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  527.341559] INFO  stalls: core 0: 118 late tick(s), worst 227508 us; 991327 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  527.429542] INFO  stalls: core 1: 98 late tick(s), worst 112240 us; 1028924 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  529.002208] INFO  watchdog: core 1 input handler for conn 2 not charged: 44 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  529.058173] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 10815 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  529.228176] INFO  stalls: core 3: 35 late tick(s), worst 293840 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  532.355944] INFO  stalls: core 0: 82 late tick(s), worst 82517 us; 367970 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  532.362569] INFO  stalls: core 2: 43 late tick(s), worst 77624 us; 424184 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  532.429796] INFO  watchdog: core 1 input handler for conn 2 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  532.509324] INFO  watchdog: core 1 input handler for conn 2 not charged: 38 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  532.587088] INFO  watchdog: core 1 input handler for conn 2 not charged: 63 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  532.603141] INFO  stalls: core 1: 50 late tick(s), worst 108326 us; 532484 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  533.723498] INFO  watchdog: core 1 input handler for conn 2 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  534.232906] INFO  stalls: core 3: 26 late tick(s), worst 113245 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  535.651622] INFO  watchdog: core 2 output handler for conn - not charged: 687 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  537.364453] INFO  stalls: core 0: 55 late tick(s), worst 484647 us; 1098797 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  537.369135] INFO  stalls: core 2: 34 late tick(s), worst 671853 us; 996707 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  537.603313] INFO  stalls: core 1: 35 late tick(s), worst 608354 us; 880451 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  539.242525] INFO  stalls: core 3: 25 late tick(s), worst 265379 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  539.727952] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 13198 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=421929
+[  546.224135] INFO  watchdog: core 2 input handler for conn 1 not charged: 37 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  546.924479] INFO  watchdog: core 2 input handler for conn 1 not charged: 41 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  547.008168] INFO  watchdog: core 2 input handler for conn 1 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  547.045468] INFO  watchdog: core 2 input handler for conn 1 not charged: 33 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  547.120347] INFO  watchdog: core 2 input handler for conn 1 not charged: 72 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  547.164762] INFO  watchdog: core 2 input handler for conn 1 not charged: 43 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  547.196028] INFO  watchdog: core 2 input handler for conn 1 not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  547.237675] INFO  watchdog: core 2 input handler for conn 1 not charged: 40 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  547.315161] INFO  watchdog: core 2 input handler for conn 1 not charged: 35 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  547.444059] INFO  stalls: core 0: 134 late tick(s), worst 568888 us; 1490359 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  547.558520] INFO  stalls: core 2: 90 late tick(s), worst 556987 us; 1539484 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  547.606850] INFO  stalls: core 1: 79 late tick(s), worst 556522 us; 1273493 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  547.954190] INFO  watchdog: core 2 input handler for conn 1 not charged: 37 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  548.142056] INFO  watchdog: core 2 input handler for conn 1 not charged: 119 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  548.447852] INFO  watchdog: core 2 input handler for conn 1 not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  548.479192] INFO  watchdog: core 2 output handler for conn - not charged: 30 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  548.613462] INFO  watchdog: core 2 input handler for conn 1 not charged: 112 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  548.858141] INFO  watchdog: core 2 input handler for conn 1 not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  549.210112] INFO  watchdog: core 2 input handler for conn 1 not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  549.297448] INFO  stalls: core 3: 42 late tick(s), worst 835285 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  549.350652] INFO  watchdog: core 2 input handler for conn 1 not charged: 140 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  549.875375] INFO  watchdog: core 2 input handler for conn 1 not charged: 307 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  549.877400] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 145107 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  550.341624] INFO  watchdog: core 2 input handler for conn 1 not charged: 277 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  550.514422] INFO  watchdog: core 2 input handler for conn 1 not charged: 33 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  550.571449] INFO  watchdog: core 2 output handler for conn - not charged: 47 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  550.636658] INFO  watchdog: core 2 input handler for conn 1 not charged: 62 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  550.743925] INFO  watchdog: core 2 input handler for conn 1 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  550.800998] INFO  watchdog: core 2 input handler for conn 1 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  550.908701] INFO  watchdog: core 2 input handler for conn 1 not charged: 37 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  551.180449] INFO  watchdog: core 2 input handler for conn 1 not charged: 100 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  551.469485] INFO  watchdog: core 2 input handler for conn 1 not charged: 86 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  551.536079] INFO  watchdog: core 2 input handler for conn 1 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  552.444056] INFO  stalls: core 0: 162 late tick(s), worst 305258 us; 1574367 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  552.558521] INFO  stalls: core 2: 99 late tick(s), worst 307244 us; 1660221 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  552.614146] INFO  stalls: core 1: 86 late tick(s), worst 241837 us; 1533230 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  553.435399] INFO  watchdog: core 2 input handler for conn 1 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  553.564045] INFO  watchdog: core 2 input handler for conn 1 not charged: 65 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  553.934032] INFO  watchdog: core 2 input handler for conn 1 not charged: 44 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  554.220630] INFO  watchdog: core 2 input handler for conn 1 not charged: 225 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  554.303903] INFO  stalls: core 3: 44 late tick(s), worst 320949 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  554.331698] INFO  watchdog: core 2 input handler for conn 1 not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  554.384999] INFO  watchdog: core 2 input handler for conn 1 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  554.528877] INFO  watchdog: core 2 input handler for conn 1 not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  554.556236] INFO  watchdog: core 2 input handler for conn 1 not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  554.771771] INFO  watchdog: core 2 input handler for conn 1 not charged: 109 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  557.448441] INFO  stalls: core 0: 80 late tick(s), worst 209437 us; 602222 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  557.571639] INFO  stalls: core 2: 42 late tick(s), worst 224394 us; 597112 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  557.617718] INFO  stalls: core 1: 49 late tick(s), worst 54297 us; 227369 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  559.311395] INFO  stalls: core 3: 23 late tick(s), worst 177942 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=617688
+[  562.842457] INFO  watchdog: core 2 output handler for conn - not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  563.228382] INFO  watchdog: core 2 output handler for conn - not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  563.398167] INFO  watchdog: core 2 input handler for conn 0 not charged: 106 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  563.578081] INFO  watchdog: core 2 input handler for conn 0 not charged: 79 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  563.871579] INFO  watchdog: core 2 input handler for conn 0 not charged: 281 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  563.913586] INFO  watchdog: core 2 input handler for conn 0 not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  564.019364] INFO  watchdog: core 2 input handler for conn 0 not charged: 72 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  564.104224] INFO  watchdog: core 2 input handler for conn 0 not charged: 24 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  564.348996] INFO  stalls: core 3: 34 late tick(s), worst 591677 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  564.752661] INFO  watchdog: core 2 output handler for conn - not charged: 44 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  564.998147] INFO  watchdog: core 2 output handler for conn - not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  566.019668] INFO  watchdog: core 2 output handler for conn - not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  566.316678] INFO  watchdog: core 2 input handler for conn 0 not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  567.200695] INFO  watchdog: core 2 input handler for conn 0 not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  567.483866] INFO  stalls: core 0: 155 late tick(s), worst 278759 us; 1082145 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  567.753194] INFO  stalls: core 2: 73 late tick(s), worst 280787 us; 1331059 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  567.753918] INFO  stalls: core 1: 80 late tick(s), worst 327843 us; 1203809 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  567.918776] INFO  watchdog: core 2 input handler for conn 0 not charged: 28 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  568.217109] INFO  watchdog: core 2 output handler for conn - not charged: 27 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  568.457411] INFO  watchdog: core 2 input handler for conn 0 not charged: 90 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  568.519134] INFO  watchdog: core 2 input handler for conn 0 not charged: 55 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  568.575527] INFO  watchdog: core 2 input handler for conn 0 not charged: 56 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  568.789873] INFO  watchdog: core 2 input handler for conn 0 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  568.920436] INFO  watchdog: core 2 input handler for conn 0 not charged: 54 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  569.098724] INFO  watchdog: core 2 output handler for conn - not charged: 48 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  569.216478] INFO  watchdog: core 2 output handler for conn - not charged: 109 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  569.361208] INFO  watchdog: core 2 input handler for conn 0 not charged: 144 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  569.403011] INFO  watchdog: core 2 input handler for conn 0 not charged: 41 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  569.462948] INFO  stalls: core 3: 42 late tick(s), worst 498835 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  569.548525] INFO  watchdog: core 2 output handler for conn - not charged: 21 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  569.743742] INFO  watchdog: core 2 input handler for conn 0 not charged: 61 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  570.009632] INFO  watchdog: core 2 input handler for conn 0 not charged: 30 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  570.321144] INFO  watchdog: core 2 input handler for conn 0 not charged: 39 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  570.801569] INFO  watchdog: core 2 input handler for conn 0 not charged: 89 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  570.910618] INFO  watchdog: core 2 output handler for conn - not charged: 30 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  571.011214] INFO  watchdog: core 2 output handler for conn - not charged: 38 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  571.044507] INFO  watchdog: core 2 input handler for conn 0 not charged: 31 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  571.087504] INFO  watchdog: core 2 input handler for conn 0 not charged: 26 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  571.444765] INFO  watchdog: core 2 output handler for conn - not charged: 23 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  571.575203] INFO  watchdog: core 2 output handler for conn - not charged: 115 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  571.640051] INFO  watchdog: core 1 output handler for conn - not charged: 48 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  571.691056] INFO  watchdog: core 2 output handler for conn - not charged: 47 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  571.777550] INFO  watchdog: core 2 input handler for conn 0 not charged: 85 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  571.777707] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 75861 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  571.891810] INFO  watchdog: core 2 input handler for conn 0 not charged: 105 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  572.319191] INFO  watchdog: core 2 input handler for conn 0 not charged: 46 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  572.341833] INFO  watchdog: core 2 input handler for conn 0 not charged: 22 ms elapsed, 0 ms running (the core was stalled or waiting for a lock)
+[  572.596550] INFO  stalls: core 0: 169 late tick(s), worst 105422 us; 808382 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  572.754520] INFO  stalls: core 1: 95 late tick(s), worst 172572 us; 1159360 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  572.756563] INFO  stalls: core 2: 81 late tick(s), worst 143724 us; 1175452 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  574.468245] INFO  stalls: core 3: 33 late tick(s), worst 227347 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0
+[  577.596547] INFO  stalls: core 0: 19 late tick(s), worst 23513 us; 8 us waiting for locks; host steal 0 us; NIC backlog peak 0
+SYSVAL $SYS/broker/messages/dropped/cross_core=58591
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=696429

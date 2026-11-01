@@ -23,6 +23,10 @@ All notable changes to this project are documented here. The format follows
 
 - H6: SQLite is an unprivileged component (ADR-210 to ADR-212). The 254k lines of C no longer run in the kernel: `crates/dbworker` is a separate static program at EL0 (aarch64) / ring 3 (x86_64) with its own address space, called by the DB core, which reaches the disk only through 12 checked VFS system calls and one shared window. A fault, an illegal access or a 30 s overrun restarts the worker and the store reopens from the WAL; the broker keeps serving. `PAN`/`PXN` and `SMEP`/`SMAP` are asserted by the smoke tests `worker-contain` and `worker-fault`. The kernel validates what comes back but still trusts its content (SECURITY.md). Measured cost in docs/PROGRESS.md.
 
+### Fixed
+
+- PERF/ROBUST (ADR-214 to ADR-217): a subscriber whose output buffer filled was never served again until a keep-alive woke it (lost wake-up in the output loop); one TCP flow was slow because the stack dropped every segment after a loss, had a 16 bit window and counted ACKs instead of bytes, and the dispatcher slept until the next 10 ms tick; the 20 ms handler watchdog dropped healthy connections when the host stalled a vCPU (its budget is now running time). TCP gains an out-of-order queue, SACK, window scaling and timestamps (negotiated through the SYN cookie). QoS 0 loss is counted per cause in `$SYS`.
+
 ### Changed
 
 - The boot sequence is shared by both architectures (`boot.rs`; ADR-059). The aarch64 boot log is unchanged.
