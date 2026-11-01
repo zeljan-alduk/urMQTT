@@ -175,6 +175,10 @@ pub struct Idle {
     max_gap_ns: u64,
     /// Frames dropped (by [`DropSite`]) at the last report, core 0 only.
     last_dropped: [u64; 4],
+    /// While asleep, wake up at least this often (ns; 0: only the 10 ms
+    /// tick and wake-ups from other cores). The NIC has no receive
+    /// interrupt, so the core that polls it must come back by itself.
+    poll_wake_ns: u64,
 }
 
 /// Nanoseconds this core spent in TLS processing (handshakes, records),
@@ -206,7 +210,16 @@ impl Idle {
             slept_last: true,
             max_gap_ns: 0,
             last_dropped: [0; 4],
+            poll_wake_ns: 0,
         }
+    }
+
+    /// Sets how often a sleeping core polls its NIC (0: it does not). The
+    /// dispatcher asks for this while connections exist (ADR-216): without it
+    /// the first frame after a pause in the traffic waits for the next 10 ms
+    /// tick, and every round trip of a flow that pauses between bursts pays it.
+    pub fn poll_wake(&mut self, ns: u64) {
+        self.poll_wake_ns = ns;
     }
 
     /// Logs this core's load every 5 s while it has accepted connections.
@@ -330,6 +343,12 @@ impl Idle {
         flag.store(true, Ordering::Relaxed);
         fence(Ordering::SeqCst);
         if !pending() {
+            if self.poll_wake_ns != 0 {
+                let at = time::now() + time::ns_to_ticks(self.poll_wake_ns);
+                if at < time::deadline() {
+                    time::set_deadline(at);
+                }
+            }
             cpu::wait_for_interrupt();
         }
         flag.store(false, Ordering::Relaxed);

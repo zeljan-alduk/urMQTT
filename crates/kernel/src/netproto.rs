@@ -39,6 +39,8 @@ const NIC_BACKLOG: usize = 4096;
 /// (a busy core keeps up to `POOL_MAX`): the pools do not hold megabytes of
 /// heap on an idle broker (M16).
 const POOL_IDLE: usize = 32;
+/// How often the dispatcher polls the NIC while it sleeps and connections exist.
+const NIC_POLL_NS: u64 = 200_000;
 const POOL_IDLE_MS: u64 = 1_000;
 /// Messages taken from each peer per pass.
 const MSG_BURST: usize = 256;
@@ -790,6 +792,13 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         } else if now.saturating_sub(last_busy_ms) > POOL_IDLE_MS {
             pool.truncate(POOL_IDLE);
         }
+        // With connections on the workers, come back to the NIC often enough
+        // that a frame never waits for the 10 ms tick (it has no interrupt).
+        let conns: u64 = dataplane::CONNECTIONS
+            .iter()
+            .map(|c| c.load(core::sync::atomic::Ordering::Relaxed))
+            .sum();
+        idle.poll_wake(if conns > 0 { NIC_POLL_NS } else { 0 });
         idle.pass(busy, || {
             link.pending() || net.rx_pending() || !local.is_empty()
         });
