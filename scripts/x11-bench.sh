@@ -6,7 +6,10 @@
 #   scripts/x11-bench.sh LABEL [SUITE...]
 #
 #   LABEL   urmqtt-prod | urmqtt-bench | mosquitto (any word; it names the file)
-#   SUITE   handshake | throughput | latency | fanout | idle  (default: all)
+#   SUITE   handshake | throughput | latency | fanout | idle | sweep | single  (default: all but sweep, single)
+#           single (ADR-214/215): one publisher and one subscriber, QoS 0, 64 B and 1 KiB, flood;
+#           with CONSOLE=1 every run also records the broker's console (watchdog reports, late
+#           ticks, steal, drops) and `$SYS` counters through scripts/x11-console.py
 #
 # Environment (defaults in brackets):
 #   HOST [169.58.184.193]  PORT [8883]  DIR [/tmp/x11]  REPS [3]
@@ -16,6 +19,8 @@
 #                          identity that may publish at speed, see PERFORMANCE.md)
 #   BROKER [urmqtt]        urmqtt | mosquitto: which $SYS topics to sample
 #   SSHVPS []              "user@host" to read the broker's RSS over ssh (mosquitto)
+#   CONSOLE [0]            1: record the urMQTT console and drop counters during each run
+#                          (needs DIR/x11-console.py; python3 on this host)
 #
 # Layout of $DIR: urmqtt-loadgen, certs/ (ca.pem ca.key = the CA that signs the
 # simulated devices; operator.pem operator.key for $SYS), results/.
@@ -29,6 +34,7 @@ set -u
 LABEL=${1:?label}
 shift
 SUITES=${*:-handshake throughput latency fanout idle}
+CONSOLE=${CONSOLE:-0}
 HOST=${HOST:-169.58.184.193}
 PORT=${PORT:-8883}
 DIR=${DIR:-/tmp/x11}
@@ -80,6 +86,7 @@ run() {
     say "RUN $name rep=$rep"
     local o s0 s1
     busy_start
+    console_start
     s0=$(head -1 /proc/stat)
     o=$("${LG[@]}" "$@" 2>"$DIR/err.out")
     echo "$o" | grep -E '^(RESULT|loadgen: (handshake|pubsub|hold):|loadgen: (whole|tcp|tls|errors))' | tee -a "$OUT"
@@ -90,7 +97,34 @@ run() {
     awk -v a="$s0" -v b="$s1" 'BEGIN{split(a,x," ");split(b,y," ");t=0;for(i=2;i<=9;i++)t+=y[i]-x[i];
         if(t>0)printf "HOSTCPU steal=%.0f%% idle=%.0f%% user+sys=%.0f%%\n",100*(y[9]-x[9])/t,100*(y[5]-x[5])/t,100*((y[2]-x[2])+(y[4]-x[4]))/t}' | tee -a "$OUT"
     busy_end
+    console_end "$name" "$rep"
     sleep 3
+}
+
+# With CONSOLE=1: the broker's console lines and `$SYS` counters during the run.
+console_start() {
+    CONPID=
+    [ "$CONSOLE" = 1 ] && [ "$BROKER" = urmqtt ] || return 0
+    python3 "$DIR/x11-console.py" "$HOST" "$PORT" "$CERTS" "${CONSOLE_S:-17}" "$DIR/console.out" 2>"$DIR/console.err" &
+    CONPID=$!
+    sleep 1
+}
+
+console_end() {
+    [ -n "${CONPID:-}" ] || return 0
+    wait "$CONPID" 2>/dev/null
+    CONPID=
+    {
+        echo "### console $1 rep=$2"
+        cat "$DIR/console.out"
+    } >>"$OUT.console"
+    local over drop late
+    over=$(grep -c 'over budget' "$DIR/console.out")
+    drop=$(grep -c 'watchdog: aborting connection' "$DIR/console.out")
+    late=$(grep -o '[0-9]* late tick(s), worst [0-9]* us' "$DIR/console.out" | awk '{n+=$1; if ($5>w) w=$5} END{printf "late_ticks=%d worst_us=%d", n, w}')
+    echo "CONSOLE watchdog_reports=$over aborted=$drop $late $(grep -c 'longest stall' "$DIR/console.out") dataplane_lines" | tee -a "$OUT"
+    grep -E 'SYSVAL .*(dropped|messages/(received|sent))' "$DIR/console.out" | sed 's/SYSVAL \$SYS\/broker\///' | tr '\n' ' ' | sed 's/^/DROPS /' | tee -a "$OUT"
+    echo | tee -a "$OUT" >/dev/null
 }
 
 # The broker's own CPU use while a run is going: urMQTT publishes the busy
@@ -190,6 +224,17 @@ for suite in $SUITES; do
         # One connection each way, as fast as the broker takes it: the limit of a
         # single TCP flow over this path.
         for cfg in "0 1024" "0 64"; do
+            set -- $cfg
+            for r in $(seq 1 "$REPS"); do
+                run "single-flow qos=$1 payload=$2" "$r" pubsub "${COMMON[@]}" --prefix "svc-$(uid)" \
+                    --publishers 1 --subscribers 1 --topics 1 --qos "$1" --payload "$2" \
+                    --rate 0 --duration 10 --warmup 2
+            done
+        done
+        ;;
+    single)
+        [ "$PUBSUB" = 1 ] || continue
+        for cfg in "0 64" "0 1024" "1 64"; do
             set -- $cfg
             for r in $(seq 1 "$REPS"); do
                 run "single-flow qos=$1 payload=$2" "$r" pubsub "${COMMON[@]}" --prefix "svc-$(uid)" \
