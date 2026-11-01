@@ -1012,7 +1012,15 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "sha2 0.11.1",
+ "subtle",
  "urmqtt-dispatch",
+]
+
+[[package]]
+name = "urmqtt-config"
+version = "0.1.0"
+dependencies = [
+ "urmqtt-cfg",
 ]
 
 [[package]]
@@ -1061,6 +1069,7 @@ dependencies = [
  "urmqtt-control",
  "urmqtt-mqtt",
  "urmqtt-net",
+ "urmqtt-plain",
  "urmqtt-platform",
  "urmqtt-store",
  "urmqtt-tcp",
@@ -1088,6 +1097,14 @@ version = "0.1.0"
 dependencies = [
  "cpufeatures 0.3.1",
  "zeroize",
+]
+
+[[package]]
+name = "urmqtt-plain"
+version = "0.1.0"
+dependencies = [
+ "urmqtt-cfg",
+ "urmqtt-config",
 ]
 
 [[package]]

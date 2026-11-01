@@ -5,7 +5,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use urmqtt_broker::{Acl, Broker, Config};
+use urmqtt_broker::{Acl, Broker, Config, PlainPolicy};
 use urmqtt_mqtt::Limits;
 
 const ACL: Acl = Acl {
@@ -40,6 +40,15 @@ fn cfg() -> Config {
         telemetry: &["devices/+/telemetry/#"],
         fanout: true,
         control_ids: &["svc"],
+        // P1: plaintext sessions, with their own patterns, limits and rate.
+        plain: Some(PlainPolicy {
+            publish: &["devices/{id}/#"],
+            subscribe: &["devices/{id}/cmd/#"],
+            max_packet_size: 256,
+            rate_tokens: 5,
+            rate_period_ms: 1000,
+            retain: false,
+        }),
     }
 }
 
@@ -74,6 +83,12 @@ fuzz_target!(|data: &[u8]| {
                     {
                         // Bit 5: a bootstrap certificate (H1).
                         b.set_identity(c, IDS[slot % IDS.len()], op & 0x20 != 0);
+                    } else if let Some(c) = *entry
+                        && op & 0x80 != 0
+                    {
+                        // Bit 7 without bit 6: a plaintext connection (P1)
+                        // whose identity the listener proved.
+                        let _ = b.set_plain_identity(c, IDS[slot % 2]);
                     }
                 }
                 if let Some(c) = *entry {

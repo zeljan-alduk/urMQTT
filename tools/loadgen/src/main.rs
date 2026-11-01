@@ -34,6 +34,13 @@
 //!   is for scripts. It also reports its own CPU use (Linux), because a
 //!   load generator at its CPU budget measures itself.
 //!
+//! `--plain 1` (P1): the same modes over the plaintext listener, no TLS and no
+//! certificates. The simulated devices are `<prefix>-00000`, ... as client ids;
+//! `--user NAME --password PW` log in as one account (password mode), without
+//! them the CONNECT carries no credentials (anonymous mode). `handshake` then
+//! measures TCP connect + CONNECT/CONNACK per second (a login with a password
+//! hash included), and `pubsub` the message path with no record layer.
+//!
 //! The `handshake` report (PERF, ADR-080) counts the rate over the
 //! measurement window only (not the drain of the last connections), gives
 //! the latency percentiles of a whole connection (TCP connect, TLS, CONNECT,
@@ -51,6 +58,7 @@
 //! urmqtt-loadgen storm --port 18883 --clients 2000 --rounds 3 --retry-s 60
 //! urmqtt-loadgen pubsub --port 18883 --prefix svc --publishers 8 --subscribers 8 \
 //!     --topics 8 --qos 1 --payload 64 --rate 0 --duration 10
+//! urmqtt-loadgen handshake --plain 1 --port 11883 --user bench --password secret
 //! ```
 
 use std::io::{Read, Write};
@@ -60,7 +68,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use rustls::{ClientConfig, ClientConnection, RootCertStore};
 
 struct Opts {
     mode: String,
@@ -97,6 +105,10 @@ struct Opts {
     /// CONNECT keep-alive, seconds (`hold` pings every 30 s, but only once all
     /// connections are open: opening 20 000 can take longer than 1.5 x 60 s).
     keepalive: u16,
+    /// Plaintext listener, no TLS (P1), and the account to log in as.
+    plain: bool,
+    user: &'static str,
+    password: &'static str,
 }
 
 fn parse() -> Result<Opts, String> {
@@ -131,6 +143,9 @@ fn parse() -> Result<Opts, String> {
         warmup: 2,
         open_par: 32,
         keepalive: 60,
+        plain: false,
+        user: "",
+        password: "",
     };
     while let Some(k) = a.next() {
         let v = a.next().ok_or(format!("{k} needs a value"))?;
@@ -160,6 +175,10 @@ fn parse() -> Result<Opts, String> {
             "--warmup" => o.warmup = num(&v)?,
             "--open-par" => o.open_par = (num(&v)? as usize).max(1),
             "--keepalive" => o.keepalive = num(&v)?.min(65535) as u16,
+            "--plain" => o.plain = num(&v)? != 0,
+            // Leaked once: the options are copied into every thread.
+            "--user" => o.user = Box::leak(v.into_boxed_str()),
+            "--password" => o.password = Box::leak(v.into_boxed_str()),
             "--close" => match v.as_str() {
                 "client" => o.close_first = true,
                 "server" => o.close_first = false,
@@ -177,8 +196,14 @@ fn parse() -> Result<Opts, String> {
     Ok(o)
 }
 
-/// One TLS client configuration per simulated device identity.
-fn identities(o: &Opts, n: usize) -> Result<Vec<(String, Arc<ClientConfig>)>, String> {
+/// One TLS client configuration per simulated device identity (none with
+/// `--plain`: a client id is all a plaintext device has).
+fn identities(o: &Opts, n: usize) -> Result<Vec<Identity>, String> {
+    if o.plain {
+        return Ok((0..n)
+            .map(|i| (format!("{}-{i:05}", o.prefix), None))
+            .collect());
+    }
     let read = |f: &str| {
         std::fs::read_to_string(format!("{}/{f}", o.certs)).map_err(|e| format!("{f}: {e}"))
     };
@@ -220,16 +245,23 @@ fn identities(o: &Opts, n: usize) -> Result<Vec<(String, Arc<ClientConfig>)>, St
             .map_err(|e| e.to_string())?;
         // Every connection is a full handshake.
         cfg.resumption = rustls::client::Resumption::disabled();
-        out.push((id, Arc::new(cfg)));
+        out.push((id, Some(Arc::new(cfg))));
     }
     Ok(out)
 }
 
-fn connect_packet(client_id: &str, keepalive: u16) -> Vec<u8> {
-    let mut body = vec![0, 4, b'M', b'Q', b'T', b'T', 4, 0x02];
+fn connect_packet(client_id: &str, keepalive: u16, login: Option<(&str, &str)>) -> Vec<u8> {
+    let flags = if login.is_some() { 0xc2 } else { 0x02 };
+    let mut body = vec![0, 4, b'M', b'Q', b'T', b'T', 4, flags];
     body.extend_from_slice(&keepalive.to_be_bytes());
     body.extend_from_slice(&(client_id.len() as u16).to_be_bytes());
     body.extend_from_slice(client_id.as_bytes());
+    if let Some((user, password)) = login {
+        for field in [user, password] {
+            body.extend_from_slice(&(field.len() as u16).to_be_bytes());
+            body.extend_from_slice(field.as_bytes());
+        }
+    }
     let mut p = vec![0x10];
     let mut len = body.len();
     loop {
@@ -255,9 +287,107 @@ fn publish_packet(topic: &str, payload: &[u8]) -> Vec<u8> {
     p
 }
 
-type Tls = StreamOwned<ClientConnection, TcpStream>;
+/// One client connection: TLS, or with `--plain` the bare TCP stream. The
+/// methods are the few things the modes do with rustls, so that they do not
+/// care which it is.
+struct Tls {
+    conn: Option<ClientConnection>,
+    sock: TcpStream,
+    /// Plaintext: what waits for the socket.
+    out: Vec<u8>,
+}
+
+impl Tls {
+    fn wants_write(&self) -> bool {
+        self.conn
+            .as_ref()
+            .map_or(!self.out.is_empty(), |c| c.wants_write())
+    }
+
+    /// Queues a packet (the record layer seals it for TLS).
+    fn queue(&mut self, pkt: &[u8]) -> std::io::Result<()> {
+        match &mut self.conn {
+            Some(c) => c.writer().write_all(pkt),
+            None => {
+                self.out.extend_from_slice(pkt);
+                Ok(())
+            }
+        }
+    }
+
+    /// Writes what is queued to the (non-blocking) socket.
+    fn push(&mut self) -> std::io::Result<usize> {
+        match &mut self.conn {
+            Some(c) => c.write_tls(&mut self.sock),
+            None => {
+                let n = self.sock.write(&self.out)?;
+                self.out.drain(..n);
+                Ok(n)
+            }
+        }
+    }
+
+    /// Reads from the (non-blocking) socket into `inbuf`; `Ok(0)` is the end.
+    fn pull(&mut self, inbuf: &mut Vec<u8>, tmp: &mut [u8]) -> std::io::Result<usize> {
+        match &mut self.conn {
+            Some(c) => {
+                let n = c.read_tls(&mut self.sock)?;
+                if n > 0 {
+                    c.process_new_packets()
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    while let Ok(m) = c.reader().read(tmp) {
+                        if m == 0 {
+                            break;
+                        }
+                        inbuf.extend_from_slice(&tmp[..m]);
+                    }
+                }
+                Ok(n)
+            }
+            None => {
+                let n = self.sock.read(tmp)?;
+                inbuf.extend_from_slice(&tmp[..n]);
+                Ok(n)
+            }
+        }
+    }
+
+    fn close_notify(&mut self) {
+        if let Some(c) = &mut self.conn {
+            c.send_close_notify();
+        }
+    }
+}
+
+impl Read for Tls {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match &mut self.conn {
+            Some(c) => rustls::Stream::new(c, &mut self.sock).read(buf),
+            None => self.sock.read(buf),
+        }
+    }
+}
+
+impl Write for Tls {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match &mut self.conn {
+            Some(c) => rustls::Stream::new(c, &mut self.sock).write(buf),
+            None => self.sock.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match &mut self.conn {
+            Some(c) => rustls::Stream::new(c, &mut self.sock).flush(),
+            None => self.sock.flush(),
+        }
+    }
+}
+
+/// The TLS configuration of a simulated device (none with `--plain`).
+type Cfg = Option<Arc<ClientConfig>>;
 /// A simulated device: its client id and TLS configuration.
-type Identity = (String, Arc<ClientConfig>);
+type Identity = (String, Cfg);
 
 /// TCP connect, with the `--connect-timeout-s` bound if given.
 fn connect(o: &Opts) -> Result<TcpStream, String> {
@@ -275,21 +405,31 @@ fn connect(o: &Opts) -> Result<TcpStream, String> {
 }
 
 /// TCP + TLS + CONNECT/CONNACK.
-fn open(o: &Opts, id: &str, cfg: &Arc<ClientConfig>) -> Result<Tls, String> {
+fn open(o: &Opts, id: &str, cfg: &Cfg) -> Result<Tls, String> {
     open_timed(o, id, cfg).map(|(t, _)| t)
 }
 
 /// [`open`], also returning how long the TCP connect took.
-fn open_timed(o: &Opts, id: &str, cfg: &Arc<ClientConfig>) -> Result<(Tls, Duration), String> {
+fn open_timed(o: &Opts, id: &str, cfg: &Cfg) -> Result<(Tls, Duration), String> {
     let t_connect = Instant::now();
     let tcp = connect(o)?;
     let connect_time = t_connect.elapsed();
     tcp.set_nodelay(true).ok();
     tcp.set_read_timeout(Some(Duration::from_secs(10))).ok();
-    let name = ServerName::try_from("localhost").map_err(|e| e.to_string())?;
-    let conn = ClientConnection::new(cfg.clone(), name).map_err(|e| e.to_string())?;
-    let mut tls = StreamOwned::new(conn, tcp);
-    tls.write_all(&connect_packet(id, o.keepalive))
+    let conn = match cfg {
+        Some(cfg) => {
+            let name = ServerName::try_from("localhost").map_err(|e| e.to_string())?;
+            Some(ClientConnection::new(cfg.clone(), name).map_err(|e| e.to_string())?)
+        }
+        None => None,
+    };
+    let mut tls = Tls {
+        conn,
+        sock: tcp,
+        out: Vec::new(),
+    };
+    let login = (!o.user.is_empty()).then_some((o.user, o.password));
+    tls.write_all(&connect_packet(id, o.keepalive, login))
         .map_err(|e| format!("tls/connect: {e}"))?;
     let mut ack = [0u8; 4];
     tls.read_exact(&mut ack)
@@ -324,7 +464,7 @@ fn open_timed(o: &Opts, id: &str, cfg: &Arc<ClientConfig>) -> Result<(Tls, Durat
 /// client only answers its FIN, so the client's port is free at once.
 fn close(mut tls: Tls, client_first: bool) {
     let _ = tls.write_all(&[0xe0, 0x00]);
-    tls.conn.send_close_notify();
+    tls.close_notify();
     let _ = tls.flush();
     if client_first {
         let _ = tls.sock.shutdown(std::net::Shutdown::Write);
@@ -513,7 +653,7 @@ fn hold(o: &Opts) -> Result<(), String> {
     let t0 = Instant::now();
     // Open in parallel: `--threads` workers each take a share.
     let threads = o.threads.clamp(1, ids.len().max(1));
-    let shares: Vec<Vec<(String, Arc<ClientConfig>)>> = (0..threads)
+    let shares: Vec<Vec<Identity>> = (0..threads)
         .map(|t| ids.iter().skip(t).step_by(threads).cloned().collect())
         .collect();
     let opened: Vec<_> = shares
@@ -757,7 +897,7 @@ struct PsShared {
     delivered: AtomicU64,
 }
 
-fn ps_open(o: &Opts, sh: &PsShared, gate: &Gate, id: &str, cfg: &Arc<ClientConfig>) -> Option<Tls> {
+fn ps_open(o: &Opts, sh: &PsShared, gate: &Gate, id: &str, cfg: &Cfg) -> Option<Tls> {
     gate.enter();
     let r = open(o, id, cfg);
     gate.leave();
@@ -791,14 +931,7 @@ fn would_block(e: &std::io::Error) -> bool {
 
 /// A subscriber: blocking reads, so the time of a delivery is the time the
 /// packet arrived; QoS 1 deliveries are acknowledged at once.
-fn ps_subscriber(
-    o: &Opts,
-    sh: &PsShared,
-    gate: &Gate,
-    id: &str,
-    cfg: &Arc<ClientConfig>,
-    k: usize,
-) -> Vec<u32> {
+fn ps_subscriber(o: &Opts, sh: &PsShared, gate: &Gate, id: &str, cfg: &Cfg, k: usize) -> Vec<u32> {
     let mut lat = Vec::new();
     let Some(mut tls) = ps_open(o, sh, gate, id, cfg) else {
         return lat;
@@ -881,7 +1014,7 @@ fn ps_subscriber(
 
 /// A publisher: non-blocking, so it can keep `--window` QoS 1 messages in
 /// flight and send at a fixed rate without a second thread per connection.
-fn ps_publisher(o: &Opts, sh: &PsShared, gate: &Gate, id: &str, cfg: &Arc<ClientConfig>, k: usize) {
+fn ps_publisher(o: &Opts, sh: &PsShared, gate: &Gate, id: &str, cfg: &Cfg, k: usize) {
     let Some(mut tls) = ps_open(o, sh, gate, id, cfg) else {
         return;
     };
@@ -898,8 +1031,8 @@ fn ps_publisher(o: &Opts, sh: &PsShared, gate: &Gate, id: &str, cfg: &Arc<Client
     'run: while !sh.stop.load(Ordering::Relaxed) {
         let mut busy = false;
         // 1. push what rustls holds to the socket
-        while tls.conn.wants_write() {
-            match tls.conn.write_tls(&mut tls.sock) {
+        while tls.wants_write() {
+            match tls.push() {
                 Ok(0) => break,
                 Ok(_) => busy = true,
                 Err(e) if would_block(&e) => break,
@@ -909,7 +1042,7 @@ fn ps_publisher(o: &Opts, sh: &PsShared, gate: &Gate, id: &str, cfg: &Arc<Client
         // 2. send, unless the socket is backed up or the window is full
         let mut burst = 0;
         while burst < 64
-            && !tls.conn.wants_write()
+            && !tls.wants_write()
             && (o.qos == 0 || inflight < o.window)
             && interval.is_none_or(|_| Instant::now() >= next)
         {
@@ -917,7 +1050,7 @@ fn ps_publisher(o: &Opts, sh: &PsShared, gate: &Gate, id: &str, cfg: &Arc<Client
             let us = sh.t0.elapsed().as_micros() as u64;
             payload[..8].copy_from_slice(&us.to_be_bytes());
             let pkt = publish_qos(&topic, o.qos, pid, &payload);
-            if tls.conn.writer().write_all(&pkt).is_err() {
+            if tls.queue(&pkt).is_err() {
                 break 'run;
             }
             if o.qos > 0 {
@@ -933,26 +1066,17 @@ fn ps_publisher(o: &Opts, sh: &PsShared, gate: &Gate, id: &str, cfg: &Arc<Client
             }
             burst += 1;
             busy = true;
-            while tls.conn.wants_write() {
-                match tls.conn.write_tls(&mut tls.sock) {
+            while tls.wants_write() {
+                match tls.push() {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
             }
         }
         // 3. read acknowledgements (and anything else) without blocking
-        match tls.conn.read_tls(&mut tls.sock) {
+        match tls.pull(&mut inbuf, &mut tmp) {
             Ok(0) => break 'run,
             Ok(_) => {
-                if tls.conn.process_new_packets().is_err() {
-                    break 'run;
-                }
-                while let Ok(n) = tls.conn.reader().read(&mut tmp) {
-                    if n == 0 {
-                        break;
-                    }
-                    inbuf.extend_from_slice(&tmp[..n]);
-                }
                 let mut at = 0;
                 while let Some((first, len, _)) = next_packet(&inbuf[at..]) {
                     at += len;
