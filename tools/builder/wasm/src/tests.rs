@@ -138,7 +138,56 @@ fn the_handle_interface_round_trips() {
     assert!(ub_buf_len(s) > 1000);
     ub_buf_free(s);
     assert_eq!(ub_abi_version(), core::ABI_VERSION);
-    assert_eq!(ub_format_version(), 1);
+    assert_eq!(ub_format_version(), 2);
+}
+
+/// P1: the page hashes a plaintext account's password in the module, with a
+/// salt of its own; the clear text does not stay in the module's memory.
+#[test]
+fn a_password_is_hashed_with_the_pages_salt_and_wiped() {
+    let put = |b: &[u8]| {
+        let h = ub_buf_new(b.len() as u32);
+        assert_ne!(h, 0);
+        with(|s| {
+            let slot = s.bufs[(h - 1) as usize].as_mut().unwrap();
+            slot.copy_from_slice(b);
+        });
+        h
+    };
+    let read = |h: u32| with(|s| s.get(h).unwrap().to_vec());
+    let pw = put(b"correct horse");
+    let salt = put(&[7u8; 16]);
+    let out = ub_hash_password(pw, salt, 1000);
+    assert_ne!(out, 0);
+    let text = String::from_utf8(read(out)).unwrap();
+    assert!(
+        text.starts_with("pbkdf2-sha256$1000$07070707070707070707070707070707$"),
+        "{text}"
+    );
+    // The same as the command line's function, and the kernel's parser verifies it.
+    assert_eq!(
+        text,
+        urmqtt_config_tool::hash_password(b"correct horse", &[7u8; 16], 1000).unwrap()
+    );
+    let parsed = urmqtt_cfg::passwd::PasswordHash::parse(&text).unwrap();
+    assert!(parsed.verify(b"correct horse"));
+    // The password buffer is zeros now; the salt buffer is untouched.
+    assert!(read(pw).iter().all(|b| *b == 0));
+    assert_eq!(read(salt), vec![7u8; 16]);
+    // A failure wipes it too and says why.
+    let pw2 = put(b"secret");
+    assert_eq!(ub_hash_password(pw2, salt, 5), 0);
+    assert!(read(pw2).iter().all(|b| *b == 0));
+    let e = ub_error();
+    assert!(String::from_utf8(read(e)).unwrap().contains("iterations"));
+    for h in [pw, pw2, salt, out, e] {
+        ub_buf_free(h);
+    }
+    assert_eq!(
+        ub_hash_password(999, 998, 1000),
+        0,
+        "bad handles are refused"
+    );
 }
 
 /// A stand-in template (see tools/config/tests/cli.rs), built with the
@@ -147,6 +196,11 @@ fn synthetic_template() -> Vec<u8> {
     use urmqtt_cfg::blake2b;
     use urmqtt_cfg::blob::{DISK_MARKER, SlotKind, make_slot};
     let empty = urmqtt_cfg::build::Builder::new().finish(false).unwrap();
+    assert_eq!(
+        empty[8],
+        urmqtt_cfg::FORMAT_VERSION as u8,
+        "a template declares the newest format"
+    );
     let slot = make_slot(SlotKind::Boot, &empty).unwrap();
     let mut disk = slot.clone();
     disk[..16].copy_from_slice(&DISK_MARKER);
@@ -172,7 +226,7 @@ fn an_iso_is_probed_and_configured_in_place_like_the_tool_does() {
     let tpl = synthetic_template();
     let probe = core::iso_probe(&tpl).unwrap();
     assert!(
-        probe.contains(r#""format_version":1"#) && probe.contains(r#""supported":true"#),
+        probe.contains(r#""format_version":2"#) && probe.contains(r#""supported":true"#),
         "{probe}"
     );
     let blob = core::pack(&lab_toml(), &Files::new(), None, 1_900_000_000, None).unwrap();

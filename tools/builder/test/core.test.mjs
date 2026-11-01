@@ -76,6 +76,9 @@ function otherValue(f) {
     case 'ipv4': return '10.1.2.1';
     case 'socket_addr': return '10.1.2.50:514';
     case 'string_list':
+      if (f.item === 'user') return [{ id: 'sensor-1', hash: 'pbkdf2-sha256$1000$00112233445566778899aabbccddeeff$4c5805526868c915a4cba43d75ec6b0a07152bb7b9ca30501c96ea0f91886829' }];
+      if (f.item === 'ip_identity') return ['10.1.0.0/16 plc'];
+      if (f.item === 'cidr') return ['10.1.0.0/16'];
       if (f.id === 'cpu.disable') return ['aes'];
       if (f.id === 'tls.revoked_serials') return ['0a1b2c'];
       if (f.id === 'acl.service_ids' || f.id === 'acl.operator_ids' || f.id === 'control.service_ids') return ['svc-one'];

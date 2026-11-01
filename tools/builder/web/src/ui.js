@@ -52,8 +52,13 @@ function persist() {
   } catch { /* some embedders forbid it */ }
   try {
     const pub = x => (x ? { pem: x.pem, summary: x.summary } : null);
+    // The plaintext accounts hold password hashes: in memory only, like private keys.
+    const values = Object.fromEntries(Object.entries(s.values).filter(([id]) => {
+      const f = app.model.byId.get(id);
+      return !(f && isUserList(f));
+    }));
     sessionStorage.setItem(STORE_KEY, JSON.stringify({
-      v: 1, values: s.values, name: s.name, preset: s.preset, release: s.release,
+      v: 1, values, name: s.name, preset: s.preset, release: s.release,
       files: { cert: pub(s.files.cert), control: pub(s.files.control), operational: s.files.operational.map(pub), bootstrap: s.files.bootstrap.map(pub) },
     }));
   } catch { /* private window: the form simply starts empty after a reload */ }

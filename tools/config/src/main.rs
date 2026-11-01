@@ -25,6 +25,12 @@
 //!     hash agree. Non-zero exit on any problem.
 //! urmqtt-config schema
 //!     The field table as JSON: key, type, default, range, help, dev-only.
+//! urmqtt-config hash-password [--id NAME] [--iterations N]
+//!     Reads a password from standard input (one line; pipe it, so it stays
+//!     out of the shell history and the process list) and prints its stored
+//!     hash for `plaintext.users` (PBKDF2-HMAC-SHA-256, a random salt, 10000
+//!     iterations unless told otherwise). With --id, prints the whole table
+//!     `{ id = "NAME", password_hash = "..." }` to paste into the TOML.
 //! urmqtt-config check-release --pubkey minisign.pub --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]
 //!     Verifies the minisign signature over SHA256SUMS (default signature
 //!     file: the sums file name plus .minisig) and each FILE against the
@@ -41,6 +47,7 @@ fn usage() -> String {
     "usage:\n  urmqtt-config pack CONFIG.toml [--env NAME] [--sign KEY.pem] [--root DIR] [--now UNIX] \
      (--out BLOB | --out-slot SLOT | --iso TEMPLATE.iso --out OUT.iso | --image DISK.img --out OUT.img)\n  \
      urmqtt-config slot BLOB OUT\n  urmqtt-config show FILE [--all]\n  urmqtt-config verify FILE [--dev]\n  urmqtt-config schema\n  \
+     urmqtt-config hash-password [--id NAME] [--iterations N]   (the password is read from standard input)\n  \
      urmqtt-config check-release --pubkey minisign.pub --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]\n"
         .to_owned()
 }
@@ -78,6 +85,44 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
     match cmd.as_str() {
         "schema" => {
             print!("{}", urmqtt_config_schema::pack::schema_json());
+            Ok(())
+        }
+        "hash-password" => {
+            use std::io::{BufRead, IsTerminal};
+            let id = take(&mut args, "--id")?;
+            let iterations = take(&mut args, "--iterations")?
+                .map(|v| {
+                    v.parse::<u32>()
+                        .map_err(|_| "--iterations takes a number".to_owned())
+                })
+                .transpose()?
+                .unwrap_or(urmqtt_cfg::passwd::DEFAULT_ITERATIONS);
+            if !args.is_empty() {
+                return Err(usage());
+            }
+            if let Some(id) = &id {
+                urmqtt_cfg::plain::check_identity(id).map_err(|m| format!("--id: {m}"))?;
+            }
+            let stdin = std::io::stdin();
+            if stdin.is_terminal() {
+                eprintln!("password (shown as you type; end with Enter):");
+            }
+            let mut line = String::new();
+            stdin
+                .lock()
+                .read_line(&mut line)
+                .map_err(|e| format!("cannot read the password: {e}"))?;
+            let password = line.trim_end_matches(['\r', '\n']);
+            if password.is_empty() {
+                return Err("the password is empty".into());
+            }
+            let mut salt = [0u8; 16];
+            urmqtt_config_tool::os_random(&mut salt)?;
+            let hash = urmqtt_config_tool::hash_password(password.as_bytes(), &salt, iterations)?;
+            match id {
+                Some(id) => println!("{{ id = \"{id}\", password_hash = \"{hash}\" }}"),
+                None => println!("{hash}"),
+            }
             Ok(())
         }
         "pack" => {

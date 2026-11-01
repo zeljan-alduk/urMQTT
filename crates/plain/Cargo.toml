@@ -1,0 +1,22 @@
+[package]
+name = "urmqtt-plain"
+description = "Plaintext MQTT for trusted networks (P1, ADR-229, ADR-230): the SYN-time allow-list, the per-address table (connections, failed logins, lock-out) and the login check. no_std, host-tested; the kernel wires it to the TCP stack."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[dependencies]
+urmqtt-cfg.workspace = true
+urmqtt-config.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+urmqtt-cfg = { workspace = true, features = ["alloc"] }

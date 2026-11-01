@@ -32,9 +32,13 @@ pub mod blob;
 pub mod build;
 pub mod check;
 pub mod fields;
+pub mod net;
+pub mod passwd;
+pub mod plain;
 
 pub use blob::{
-    Blob, DISK_MARKER, FORMAT_VERSION, MAGIC, MAX_BLOB, SLOT_MARKER, SLOT_SIZE, SlotKind,
+    Blob, DISK_MARKER, FORMAT_MIN, FORMAT_VERSION, MAGIC, MAX_BLOB, SLOT_MARKER, SLOT_SIZE,
+    SlotKind,
 };
 
 use core::fmt;

@@ -22,7 +22,8 @@ use crate::json::{self, Object};
 pub type Files = BTreeMap<String, Vec<u8>>;
 
 /// The module's interface version; the page refuses a module it does not know.
-pub const ABI_VERSION: u32 = 1;
+/// 2: `ub_hash_password` (plaintext accounts, P1).
+pub const ABI_VERSION: u32 = 2;
 
 fn errors_json(errors: &[ConfigError]) -> String {
     json::array(
@@ -290,6 +291,14 @@ pub fn new_signing_key(seed: &[u8]) -> Result<String, String> {
         .str("public_key", &hex(&k.public_key))
         .str("signer_id", &urmqtt_config_tool::signer_id(&k.public_key))
         .build())
+}
+
+/// The stored hash of a plaintext account's password (P1, ADR-229):
+/// PBKDF2-HMAC-SHA-256 with the salt the page drew from
+/// `crypto.getRandomValues` (16 bytes) and the iteration count. This is the
+/// command line's `hash-password`; the configuration keeps only the result.
+pub fn hash_password(password: &[u8], salt: &[u8], iterations: u32) -> Result<String, String> {
+    urmqtt_config_tool::hash_password(password, salt, iterations)
 }
 
 /// Who an Ed25519 private key (the optional configuration signature) belongs to.

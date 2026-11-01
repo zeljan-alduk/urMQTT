@@ -70,6 +70,7 @@
   "section.registry": "Регистар уређаја",
   "section.entropy": "Ентропија",
   "section.cpu": "Могућности процесора",
+  "section.plaintext": "MQTT без шифровања",
   "section.misc": "Окружење",
   "section.changed": "Промењено: {n}",
   "section.reset": "Врати одељак",

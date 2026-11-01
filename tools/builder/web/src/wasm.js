@@ -6,7 +6,10 @@ const enc = new TextEncoder();
 const dec = new TextDecoder('utf-8', { fatal: false });
 
 /** The interface version this file was written for (core::ABI_VERSION). */
-export const ABI_VERSION = 1;
+export const ABI_VERSION = 2;
+
+/** Iterations of a new password hash (urmqtt_cfg::passwd::DEFAULT_ITERATIONS; a test compares). */
+export const PASSWORD_ITERATIONS = 10000;
 
 /**
  * Loads the module. `source` is a URL string, a Response (or promise of one),
@@ -165,6 +168,19 @@ export class Builder {
   controlKey(pem) { return this.with([pem], p => this.json(this.x.ub_control_key(p))); }
   newSigningKey(seed) { return this.with([seed], s => this.json(this.x.ub_new_signing_key(s))); }
   signingKeyInfo(pem) { return this.with([pem], p => this.json(this.x.ub_signing_key_info(p))); }
+
+  /**
+   * The stored hash of a plaintext account's password (P1, ADR-229):
+   * `pbkdf2-sha256$iterations$salt$key`, PBKDF2-HMAC-SHA-256 with the 16-byte
+   * `salt` the caller drew from `crypto.getRandomValues` (the module has no
+   * random numbers of its own). The module overwrites its copy of the password
+   * before it returns; the configuration, the address bar and the storage only
+   * ever get the hash.
+   */
+  hashPassword(password, salt, iterations = PASSWORD_ITERATIONS) {
+    const p = this.put(password), s = this.put(salt);
+    try { return this.text(this.x.ub_hash_password(p, s, iterations)); } finally { this.free(p); this.free(s); }
+  }
 
   // --- releases --------------------------------------------------------------
 

@@ -18,6 +18,7 @@ members = [
     "crates/nistz256",
     "crates/net",
     "crates/pci",
+    "crates/plain",
     "crates/platform",
     "crates/sntp",
     "crates/store",

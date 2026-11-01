@@ -70,6 +70,7 @@
   "section.registry": "Registar uređaja",
   "section.entropy": "Entropija",
   "section.cpu": "Mogućnosti procesora",
+  "section.plaintext": "MQTT bez šifriranja",
   "section.misc": "Okruženje",
   "section.changed": "Promijenjeno: {n}",
   "section.reset": "Vrati odjeljak",

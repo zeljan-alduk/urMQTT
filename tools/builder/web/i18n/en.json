@@ -70,6 +70,7 @@
   "section.registry": "Device registry",
   "section.entropy": "Entropy",
   "section.cpu": "CPU features",
+  "section.plaintext": "Plaintext MQTT",
   "section.misc": "Environment",
   "section.changed": "{n} changed",
   "section.reset": "Reset section",

@@ -17,9 +17,9 @@ use std::cell::RefCell;
 use crate::core::{self, Files};
 
 #[derive(Default)]
-struct Store {
+pub(crate) struct Store {
     /// Handle `n` is `bufs[n - 1]`; freed slots are reused.
-    bufs: Vec<Option<Vec<u8>>>,
+    pub(crate) bufs: Vec<Option<Vec<u8>>>,
     files: Files,
     last_error: Option<String>,
 }
@@ -28,12 +28,12 @@ thread_local! {
     static STORE: RefCell<Store> = RefCell::new(Store::default());
 }
 
-fn with<R>(f: impl FnOnce(&mut Store) -> R) -> R {
+pub(crate) fn with<R>(f: impl FnOnce(&mut Store) -> R) -> R {
     STORE.with(|s| f(&mut s.borrow_mut()))
 }
 
 impl Store {
-    fn get(&self, h: u32) -> Option<&[u8]> {
+    pub(crate) fn get(&self, h: u32) -> Option<&[u8]> {
         let i = usize::try_from(h).ok()?.checked_sub(1)?;
         self.bufs.get(i)?.as_deref()
     }
@@ -72,6 +72,18 @@ impl Store {
 
     fn bytes(&self, h: u32) -> Result<&[u8], String> {
         self.get(h).ok_or_else(|| "bad buffer handle".to_owned())
+    }
+
+    /// Overwrites a buffer with zeros (a secret the module was handed).
+    fn wipe(&mut self, h: u32) {
+        if let Some(b) = usize::try_from(h)
+            .ok()
+            .and_then(|i| i.checked_sub(1))
+            .and_then(|i| self.bufs.get_mut(i))
+            .and_then(Option::as_mut)
+        {
+            b.fill(0);
+        }
     }
 
     fn done(&mut self, r: Result<Vec<u8>, String>) -> u32 {
@@ -285,6 +297,19 @@ pub extern "C" fn ub_control_key(pem_h: u32) -> u32 {
 pub extern "C" fn ub_new_signing_key(seed_h: u32) -> u32 {
     with(|s| {
         let r = s.bytes(seed_h).and_then(core::new_signing_key);
+        s.done_text(r)
+    })
+}
+
+/// The stored hash (`pbkdf2-sha256$...`) of the password in `password_h`, with
+/// the salt in `salt_h` (16 random bytes from the page) and `iterations`.
+/// **The password buffer is overwritten with zeros before this returns**, so
+/// the clear password does not stay in the module's memory.
+#[unsafe(no_mangle)]
+pub extern "C" fn ub_hash_password(password_h: u32, salt_h: u32, iterations: u32) -> u32 {
+    with(|s| {
+        let r = (|| core::hash_password(s.bytes(password_h)?, s.bytes(salt_h)?, iterations))();
+        s.wipe(password_h);
         s.done_text(r)
     })
 }

@@ -29,7 +29,7 @@ const PLACEHOLDER_KEY: &str = "-key-placeholder.key";
 const PLACEHOLDER_CTL: &str = "-control-placeholder.pub";
 const PLACEHOLDER_CA: &str = "-ca-placeholder.pem";
 
-fn rate_text(tokens: u32, per_ms: u32) -> String {
+pub(crate) fn rate_text(tokens: u32, per_ms: u32) -> String {
     let unit = match per_ms {
         1_000 => "s",
         60_000 => "m",
@@ -480,7 +480,54 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     b.strs(tag::CTL_SERVICE_IDS, &cfg.control.service_ids)?;
     b.bool(tag::CTL_ALLOW_UNREVOKE, cfg.control.allow_unrevoke)?;
     b.uint(tag::CTL_MAX_AGE, u64::from(cfg.control.max_message_age_s))?;
+    build_plaintext(&mut b, &cfg.plaintext)?;
     Ok(b)
+}
+
+/// The `[plaintext]` section (P1, ADR-229). Values equal to their default are
+/// left out by the builder, so a configuration that does not use the section
+/// stays a version 1 blob, byte for byte.
+fn build_plaintext(b: &mut Builder, p: &crate::Plaintext) -> Result<(), urmqtt_cfg::CfgError> {
+    use urmqtt_cfg::plain::{ip_identity_entry, user_entry};
+    b.bool(tag::PL_ENABLED, p.enabled)?;
+    b.uint(tag::PL_PORT, u64::from(p.port))?;
+    b.strs(tag::PL_ALLOW_FROM, &p.allow_from)?;
+    b.bool(tag::PL_ANYWHERE, p.allow_from_anywhere)?;
+    b.variant(
+        tag::PL_AUTH,
+        match p.auth {
+            crate::PlaintextAuth::Password => 0,
+            crate::PlaintextAuth::Anonymous => 1,
+            crate::PlaintextAuth::Ip => 2,
+        },
+    )?;
+    b.str(tag::PL_ANON_ID, &p.anonymous_identity)?;
+    let users: Vec<String> = p
+        .users
+        .iter()
+        .map(|u| user_entry(&u.id, &u.password_hash))
+        .collect();
+    b.strs(tag::PL_USERS, &users)?;
+    let ids: Vec<String> = p
+        .ip_identities
+        .iter()
+        .map(|e| ip_identity_entry(&e.from, &e.id))
+        .collect();
+    b.strs(tag::PL_IP_IDENTITIES, &ids)?;
+    b.uint(tag::PL_MAX_CONNS, u64::from(p.max_connections))?;
+    b.uint(tag::PL_MAX_PER_IP, u64::from(p.max_connections_per_ip))?;
+    b.uint(tag::PL_MAX_PACKET, u64::from(p.max_packet_size))?;
+    b.rate(
+        tag::PL_PUBLISH_RATE,
+        p.publish_rate_per_device.tokens,
+        p.publish_rate_per_device.per_ms,
+    )?;
+    b.uint(tag::PL_MAX_FAILS, u64::from(p.max_failed_auths_per_ip))?;
+    b.uint(tag::PL_LOCKOUT, u64::from(p.lockout_s))?;
+    b.strs(tag::PL_ACL_PUBLISH, &p.acl_publish)?;
+    b.strs(tag::PL_ACL_SUBSCRIBE, &p.acl_subscribe)?;
+    b.bool(tag::PL_RETAIN, p.retain)?;
+    Ok(())
 }
 
 /// Packs `toml_text` into an unsigned blob. A top-level `env = "..."` picks
@@ -554,8 +601,9 @@ fn json_list(items: &[&str]) -> String {
 pub fn schema_json() -> String {
     let mut o = String::new();
     o.push_str(&format!(
-        "{{\"format\":\"urmqtt-cfg\",\"format_version\":{},\"slot_size\":{},\"fields\":[",
+        "{{\"format\":\"urmqtt-cfg\",\"format_version\":{},\"format_min\":{},\"slot_size\":{},\"fields\":[",
         urmqtt_cfg::FORMAT_VERSION,
+        urmqtt_cfg::FORMAT_MIN,
         urmqtt_cfg::SLOT_SIZE
     ));
     for (i, f) in fields::FIELDS.iter().enumerate() {
@@ -607,8 +655,14 @@ pub fn schema_json() -> String {
             }
             Kind::Key32 => "\"type\":\"ed25519_public_key\",\"default\":null".to_owned(),
         };
+        // What the entries of a list are, when more than text (P1): the
+        // builder renders accounts and per-network identities differently.
+        let item = f
+            .item
+            .name()
+            .map_or_else(String::new, |n| format!(",\"item\":{}", json_str(n)));
         o.push_str(&format!(
-            "{{\"tag\":{},\"key\":{},\"section\":{},\"name\":{},\"toml_key\":{},{detail},\"help\":{},\"dev_only\":{},\"derived\":{},\"stored\":{}}}",
+            "{{\"tag\":{},\"key\":{},\"section\":{},\"name\":{},\"toml_key\":{},{detail},\"help\":{},\"dev_only\":{},\"derived\":{},\"stored\":{},\"since\":{}{item}}}",
             f.tag,
             json_str(f.key),
             json_str(section),
@@ -617,7 +671,8 @@ pub fn schema_json() -> String {
             json_str(f.help),
             f.dev_only,
             f.derived,
-            f.stored
+            f.stored,
+            f.since
         ));
     }
     o.push_str("]}\n");

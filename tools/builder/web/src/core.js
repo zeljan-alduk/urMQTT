@@ -21,6 +21,7 @@ export const FILE_KEYS = {
 export const SECTION_ORDER = [
   'network', 'tls', 'trust', 'control', 'limits', 'acl', 'storage',
   'observability', 'time', 'watchdog', 'memory', 'registry', 'entropy', 'cpu',
+  'plaintext',
 ];
 
 /** Examples shown as the placeholder of fields that have no default. */
@@ -89,10 +90,22 @@ export function defaultText(f) {
 
 export const isListType = f => f.type === 'string_list' || f.type === 'socket_addr_list';
 export const isFileType = f => f.type === 'pem' || f.type === 'pem_list' || f.type === 'ed25519_public_key';
+/**
+ * The accounts of the plaintext listener (P1): the state holds
+ * `[{id, hash}]`, never a clear password; the TOML gets
+ * `{ id = ..., password_hash = ... }` tables.
+ */
+export const isUserList = f => f.type === 'string_list' && f.item === 'user';
+/** Networks and their identities (P1): lines `a.b.c.d/len id` in the state, `{ from, id }` tables in the TOML. */
+export const isIpIdentityList = f => f.type === 'string_list' && f.item === 'ip_identity';
+
+/** The entries of a user list that are complete (an id and a hash). */
+export const completeUsers = v => (v || []).filter(u => u && String(u.id || '').trim() && String(u.hash || '').trim());
 
 /** Whether the user's raw value differs from the default (and so is written). */
 export function isChanged(f, v) {
   if (v === undefined) return false;
+  if (isUserList(f)) return (v || []).length > 0;
   switch (f.type) {
     case 'bool': return v !== f.default;
     case 'uint': return String(v).trim() !== '' && Number(String(v).trim()) !== f.default;
@@ -131,6 +144,15 @@ export const isWholeNumber = v => /^\d{1,15}$/.test(String(v).trim());
 
 /** One value as TOML text (a number field must pass [isWholeNumber]). */
 export function tomlValue(f, v) {
+  if (isUserList(f)) {
+    return '[' + completeUsers(v).map(u => `{ id = ${tomlString(String(u.id).trim())}, password_hash = ${tomlString(String(u.hash).trim())} }`).join(', ') + ']';
+  }
+  if (isIpIdentityList(f)) {
+    return '[' + (v || []).map(s => String(s).trim()).filter(Boolean).map(line => {
+      const [from, ...rest] = line.split(/\s+/);
+      return `{ from = ${tomlString(from)}, id = ${tomlString(rest.join(' '))} }`;
+    }).join(', ') + ']';
+  }
   switch (f.type) {
     case 'bool': return v ? 'true' : 'false';
     case 'uint': return String(Number(String(v).trim()));
@@ -283,6 +305,12 @@ export function importToml(model, json, base = emptyState()) {
 }
 
 function fromJson(f, v) {
+  if (isUserList(f)) {
+    return (Array.isArray(v) ? v : []).filter(u => u && typeof u === 'object').map(u => ({ id: String(u.id ?? ''), hash: String(u.password_hash ?? '') }));
+  }
+  if (isIpIdentityList(f)) {
+    return (Array.isArray(v) ? v : []).filter(e => e && typeof e === 'object').map(e => `${e.from ?? ''} ${e.id ?? ''}`.trim());
+  }
   switch (f.type) {
     case 'bool': return Boolean(v);
     case 'string_list': case 'socket_addr_list': return Array.isArray(v) ? v.map(String) : [String(v)];
@@ -360,6 +388,9 @@ export function encodeHash(model, state) {
   const v = {};
   for (const f of model.fields) {
     if (f.fileKey) continue;
+    // The accounts hold password hashes: like a private key they are kept in
+    // memory only, never in the address bar (which people copy and share).
+    if (isUserList(f)) continue;
     if (state.values[f.id] !== undefined && isChanged(f, state.values[f.id])) v[f.id] = state.values[f.id];
   }
   const payload = { r: state.release || undefined, p: state.preset || undefined, n: state.name || undefined, v: Object.keys(v).length ? v : undefined };

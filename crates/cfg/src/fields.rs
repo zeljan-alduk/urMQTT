@@ -51,6 +51,34 @@ pub enum Kind {
     Key32,
 }
 
+/// What the entries of a string-list field are (P1): plain text, or a
+/// grammar the semantic check and the builder know. Only a hint for them; the
+/// blob stores every list the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Item {
+    /// Free text (topic filters, identities, serials, ...).
+    Text,
+    /// An IPv4 network, `a.b.c.d/len` ([`crate::net::Cidr`]).
+    Cidr,
+    /// A plaintext account, `<id> <password hash>` ([`crate::plain::parse_user`]).
+    User,
+    /// A network and the identity it gets, `<a.b.c.d/len> <id>`
+    /// ([`crate::plain::parse_ip_identity`]).
+    IpIdentity,
+}
+
+impl Item {
+    /// For the JSON schema; `None` for plain text.
+    pub const fn name(self) -> Option<&'static str> {
+        match self {
+            Self::Text => None,
+            Self::Cidr => Some("cidr"),
+            Self::User => Some("user"),
+            Self::IpIdentity => Some("ip_identity"),
+        }
+    }
+}
+
 /// One configuration key.
 #[derive(Debug, Clone, Copy)]
 pub struct Field {
@@ -68,6 +96,12 @@ pub struct Field {
     pub stored: bool,
     /// Computed by the packer from other inputs (not set by the user).
     pub derived: bool,
+    /// The first blob format version that has this field (ADR-229). A blob
+    /// of an older version cannot hold it (the decoder refuses the record), so
+    /// a version 1 blob keeps meaning exactly what it meant.
+    pub since: u16,
+    /// What the entries of a `Strs` field are.
+    pub item: Item,
 }
 
 const fn f(tag: u16, key: &'static str, kind: Kind, help: &'static str) -> Field {
@@ -79,7 +113,21 @@ const fn f(tag: u16, key: &'static str, kind: Kind, help: &'static str) -> Field
         dev_only: false,
         stored: true,
         derived: false,
+        since: 1,
+        item: Item::Text,
     }
+}
+
+/// The field first appears in blob format `v`.
+const fn since(mut x: Field, v: u16) -> Field {
+    x.since = v;
+    x
+}
+
+/// The entries of a string-list field follow the grammar `i`.
+const fn items(mut x: Field, i: Item) -> Field {
+    x.item = i;
+    x
 }
 
 const fn dev(mut x: Field) -> Field {
@@ -189,6 +237,24 @@ pub mod tag {
     pub const CTL_SERVICE_IDS: u16 = 161;
     pub const CTL_ALLOW_UNREVOKE: u16 = 162;
     pub const CTL_MAX_AGE: u16 = 163;
+    // Plaintext MQTT for trusted networks (P1, ADR-229): format version 2.
+    pub const PL_ENABLED: u16 = 170;
+    pub const PL_PORT: u16 = 171;
+    pub const PL_ALLOW_FROM: u16 = 172;
+    pub const PL_ANYWHERE: u16 = 173;
+    pub const PL_AUTH: u16 = 174;
+    pub const PL_ANON_ID: u16 = 175;
+    pub const PL_USERS: u16 = 176;
+    pub const PL_IP_IDENTITIES: u16 = 177;
+    pub const PL_MAX_CONNS: u16 = 178;
+    pub const PL_MAX_PER_IP: u16 = 179;
+    pub const PL_MAX_PACKET: u16 = 180;
+    pub const PL_PUBLISH_RATE: u16 = 181;
+    pub const PL_MAX_FAILS: u16 = 182;
+    pub const PL_LOCKOUT: u16 = 183;
+    pub const PL_ACL_PUBLISH: u16 = 184;
+    pub const PL_ACL_SUBSCRIBE: u16 = 185;
+    pub const PL_RETAIN: u16 = 186;
 }
 
 use tag as t;
@@ -201,6 +267,16 @@ pub const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 pub const ENTROPY_FALLBACKS: &[&str] = &["jitter", "none"];
 pub const REGISTRY_MODES: &[&str] = &["open", "allowlist"];
 pub const WATCHDOG_ACTIONS: &[&str] = &["log", "drop", "reset"];
+/// How a plaintext client proves who it is (P1).
+pub const PLAINTEXT_AUTH: &[&str] = &["password", "anonymous", "ip"];
+
+/// Limits of the plaintext lists (they size arrays in the kernel).
+pub const MAX_PLAIN_NETWORKS: usize = 64;
+pub const MAX_PLAIN_USERS: usize = 256;
+pub const MAX_PLAIN_IP_IDENTITIES: usize = 64;
+pub const MAX_PLAIN_ACL: usize = 16;
+/// Longest identity (a user name, the anonymous identity, an `ip_identities` id).
+pub const MAX_IDENTITY_LEN: usize = 64;
 
 /// Every field, in ascending tag order.
 pub static FIELDS: &[Field] = &[
@@ -715,6 +791,198 @@ pub static FIELDS: &[Field] = &[
         "control.max_message_age_s",
         uint(4, 1, 86_400, 600),
         "Longest validity window of a control message, seconds.",
+    ),
+    // plaintext MQTT for trusted networks (P1, ADR-229)
+    since(
+        f(
+            t::PL_ENABLED,
+            "plaintext.enabled",
+            Kind::Bool(false),
+            "Accept plain, unencrypted MQTT on plaintext.port. Anyone on the path can read and change the traffic, and a client is identified only by a password or by its address. Use it on a network you control, with allow_from set. Off by default.",
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_PORT,
+            "plaintext.port",
+            uint(2, 1, 65_535, 1883),
+            "TCP port of plaintext MQTT (1883 is the usual one); different from network.mqtt_tls_port.",
+        ),
+        2,
+    ),
+    since(
+        items(
+            f(
+                t::PL_ALLOW_FROM,
+                "plaintext.allow_from",
+                Kind::Strs {
+                    max_items: MAX_PLAIN_NETWORKS as u16,
+                    max_len: 18,
+                    default: &[],
+                },
+                "Networks (a.b.c.d/len, for example 10.0.0.0/8) that may connect. Required when plaintext is enabled. Any other address gets no answer at all and the broker keeps no state for it.",
+            ),
+            Item::Cidr,
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_ANYWHERE,
+            "plaintext.allow_from_anywhere",
+            Kind::Bool(false),
+            "DANGEROUS: accept connections from every address instead of allow_from. Not for a machine with a public address.",
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_AUTH,
+            "plaintext.auth",
+            Kind::Enum {
+                variants: PLAINTEXT_AUTH,
+                default: 0,
+            },
+            "password: an MQTT user name and password per client (the user name is the device id in the ACL). anonymous: no login; every client gets anonymous_identity. ip: the client's address decides who it is (ip_identities).",
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_ANON_ID,
+            "plaintext.anonymous_identity",
+            Kind::Str {
+                max: MAX_IDENTITY_LEN as u16,
+                default: "lan",
+            },
+            "auth = anonymous: the identity every plaintext client gets; it is the {id} of acl_publish and acl_subscribe.",
+        ),
+        2,
+    ),
+    since(
+        items(
+            f(
+                t::PL_USERS,
+                "plaintext.users",
+                Kind::Strs {
+                    max_items: MAX_PLAIN_USERS as u16,
+                    max_len: 256,
+                    default: &[],
+                },
+                "auth = password: the accounts. Each has an id (the MQTT user name and the device id in the ACL) and a salted, iterated PBKDF2-SHA-256 hash of the password, made by the builder page or `urmqtt-config hash-password`. The password itself is never stored.",
+            ),
+            Item::User,
+        ),
+        2,
+    ),
+    since(
+        items(
+            f(
+                t::PL_IP_IDENTITIES,
+                "plaintext.ip_identities",
+                Kind::Strs {
+                    max_items: MAX_PLAIN_IP_IDENTITIES as u16,
+                    max_len: 96,
+                    default: &[],
+                },
+                "auth = ip: networks (a.b.c.d/len) and the identity every client in them gets; the longest matching network wins and each must lie within allow_from.",
+            ),
+            Item::IpIdentity,
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_MAX_CONNS,
+            "plaintext.max_connections",
+            uint(4, 1, 1_000_000, 1000),
+            "Plaintext connections held at once, all cores together; more are refused.",
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_MAX_PER_IP,
+            "plaintext.max_connections_per_ip",
+            uint(4, 1, 65_535, 16),
+            "Plaintext connections held at once from one source address (devices behind one NAT share it).",
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_MAX_PACKET,
+            "plaintext.max_packet_size",
+            uint(4, MIN_PACKET_SIZE, MQTT_MAX_PACKET_SIZE, 1024),
+            "Largest MQTT packet a plaintext client may send, in bytes.",
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_PUBLISH_RATE,
+            "plaintext.publish_rate_per_device",
+            Kind::Rate {
+                tokens: 5,
+                per_ms: 1000,
+            },
+            "Publish rate per plaintext session as \"N/s\", \"N/m\" or \"N/h\".",
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_MAX_FAILS,
+            "plaintext.max_failed_auths_per_ip",
+            uint(4, 1, 1000, 5),
+            "Failed logins from one address, within lockout_s, before it is locked out.",
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_LOCKOUT,
+            "plaintext.lockout_s",
+            uint(4, 1, 86_400, 300),
+            "Seconds a locked-out address gets no answer; also the window in which its failed logins are counted.",
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_ACL_PUBLISH,
+            "plaintext.acl_publish",
+            Kind::Strs {
+                max_items: MAX_PLAIN_ACL as u16,
+                max_len: 512,
+                default: &["devices/{id}/#"],
+            },
+            "Topic filters a plaintext client may publish to; {id} is its identity. No filter may start with $.",
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_ACL_SUBSCRIBE,
+            "plaintext.acl_subscribe",
+            Kind::Strs {
+                max_items: MAX_PLAIN_ACL as u16,
+                max_len: 512,
+                default: &["devices/{id}/cmd/#"],
+            },
+            "Topic filters a plaintext client may subscribe to; {id} is its identity. No filter may start with $.",
+        ),
+        2,
+    ),
+    since(
+        f(
+            t::PL_RETAIN,
+            "plaintext.retain",
+            Kind::Bool(false),
+            "Let plaintext clients publish retained messages. Off: such a message is delivered but not retained.",
+        ),
+        2,
     ),
 ];
 

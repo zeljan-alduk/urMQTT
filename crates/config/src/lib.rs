@@ -303,6 +303,61 @@ pub struct Trust {
     pub bootstrap: &'static [&'static [u8]],
 }
 
+/// A network, as the plaintext allow-list and `ip_identities` hold it.
+pub use urmqtt_cfg::net::Cidr;
+
+/// How a plaintext client proves who it is (P1, ADR-229).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlainAuth {
+    /// An MQTT user name and password; the user name is the identity.
+    Password,
+    /// No login: every client is `anonymous_identity`.
+    Anonymous,
+    /// The client's address decides (`ip_identities`).
+    Ip,
+}
+
+/// One plaintext account: the id (the MQTT user name, also the device id of
+/// the ACL) and the stored password hash (`urmqtt_cfg::passwd`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlainUser {
+    pub id: &'static str,
+    pub hash: &'static str,
+}
+
+/// A network and the identity every client in it gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlainNetwork {
+    pub net: Cidr,
+    pub id: &'static str,
+}
+
+/// Plaintext MQTT for trusted networks (P1, ADR-229). Off unless the image's
+/// configuration says so; the other fields mean nothing while `enabled` is false.
+#[derive(Debug, Clone, Copy)]
+pub struct Plaintext {
+    pub enabled: bool,
+    pub port: u16,
+    /// Networks that may connect; empty and `allow_from_anywhere` false only
+    /// while disabled (a configuration check refuses it otherwise).
+    pub allow_from: &'static [Cidr],
+    pub allow_from_anywhere: bool,
+    pub auth: PlainAuth,
+    pub anonymous_identity: &'static str,
+    pub users: &'static [PlainUser],
+    pub ip_identities: &'static [PlainNetwork],
+    /// All plaintext connections together, over all cores.
+    pub max_connections: u32,
+    pub max_connections_per_ip: u32,
+    pub max_packet_size: u32,
+    pub publish_rate_per_device: Rate,
+    pub max_failed_auths_per_ip: u32,
+    pub lockout_s: u32,
+    pub acl_publish: &'static [&'static str],
+    pub acl_subscribe: &'static [&'static str],
+    pub retain: bool,
+}
+
 /// The complete configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildConfig {
@@ -322,6 +377,7 @@ pub struct BuildConfig {
     pub registry: Registry,
     pub control: Control,
     pub trust: Trust,
+    pub plaintext: Plaintext,
 }
 
 impl BuildConfig {

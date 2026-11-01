@@ -56,7 +56,7 @@ fn pack_is_deterministic_and_matches_the_golden_blob() {
     let text = ok(&o);
     assert!(
         text.contains(
-            "fingerprint 1a5d4dcce0a2767a29f39c984e55ae5cdd92b8940257de0ac7a23de64f386cd6"
+            "fingerprint 9df8c08e0655ec3bfc55f1c9acdec1a731a14a23515f4ac5e62c95aef8c69f79"
         ),
         "{text}"
     );
@@ -101,7 +101,7 @@ fn show_prints_values_that_differ_from_the_defaults() {
     let o = run(bin().arg("show").arg(fixtures().join("lab.blob")));
     let text = ok(&o);
     for line in [
-        "fingerprint: 1a5d4dcce0a2767a29f39c984e55ae5cdd92b8940257de0ac7a23de64f386cd6",
+        "fingerprint: 9df8c08e0655ec3bfc55f1c9acdec1a731a14a23515f4ac5e62c95aef8c69f79",
         "signature:   none",
         "mode = static",
         "address = 192.0.2.10/24",
@@ -123,7 +123,7 @@ fn show_prints_values_that_differ_from_the_defaults() {
 #[test]
 fn verify_accepts_a_release_blob_and_refuses_a_dev_one_as_a_release_kernel() {
     let o = run(bin().arg("verify").arg(fixtures().join("lab.blob")));
-    assert!(ok(&o).starts_with("ok: fingerprint 1a5d"));
+    assert!(ok(&o).starts_with("ok: fingerprint 9df8"));
     // A tampered blob is refused.
     let mut bad = std::fs::read(fixtures().join("lab.blob")).unwrap();
     bad[20] ^= 1;
@@ -153,7 +153,7 @@ fn slots_wrap_blobs_and_signing_round_trips() {
         .arg(&slot)));
     assert_eq!(std::fs::metadata(&slot).unwrap().len() as usize, SLOT_SIZE);
     // show/verify read a slot too.
-    assert!(ok(&run(bin().arg("verify").arg(&slot))).starts_with("ok: fingerprint 1a5d"));
+    assert!(ok(&run(bin().arg("verify").arg(&slot))).starts_with("ok: fingerprint 9df8"));
     // An Ed25519 key (PKCS#8 PEM, as `openssl genpkey -algorithm ed25519` writes it).
     let key = tmp("sign.key");
     let seed = [7u8; 32];
@@ -190,7 +190,7 @@ fn slots_wrap_blobs_and_signing_round_trips() {
         .arg("--out")
         .arg(&out)));
     // The fingerprint is the unsigned blob's.
-    assert!(text.contains("1a5d4dcce0a2767a"), "{text}");
+    assert!(text.contains("9df8c08e0655ec3b"), "{text}");
     assert!(text.contains("signed"));
     let shown = ok(&run(bin().arg("show").arg(&out)));
     assert!(shown.contains("signature:   valid, signer key "), "{shown}");
@@ -316,7 +316,7 @@ fn the_template_is_configured_in_place() {
         "{v}"
     );
     let shown = image::show(&p.bytes, false).unwrap();
-    assert!(shown.contains("1a5d4dcce0a2767a"), "{shown}");
+    assert!(shown.contains("9df8c08e0655ec3b"), "{shown}");
     assert!(shown.contains("2 configuration slot copies"), "{shown}");
     assert!(
         shown.contains("2 installation-image template copies"),
@@ -383,7 +383,7 @@ fn a_raw_image_gets_its_unconfigured_slot_replaced() {
     let p = image::configure_raw(&img, &blob).unwrap();
     assert_eq!(p.bytes.len(), img.len());
     assert_eq!(&p.bytes[..8192], &img[..8192]);
-    assert!(image::show(&p.bytes, false).unwrap().contains("1a5d4dcc"));
+    assert!(image::show(&p.bytes, false).unwrap().contains("9df8c08e"));
     // Two slots: an ISO, not a raw image.
     let mut two = p.bytes.clone();
     two.extend_from_slice(&make_slot(SlotKind::Boot, &blob).unwrap());
@@ -402,9 +402,9 @@ fn in_place_configuration_equals_the_copying_one_and_a_probe_describes_the_templ
     assert_eq!(report, copied.report);
     // The probe sees the template's own (empty) configuration, then the new one.
     let p = image::probe(&tpl).unwrap();
-    assert_eq!((p.slot_copies, p.hash_refs, p.format_version), (2, 12, 1));
+    assert_eq!((p.slot_copies, p.hash_refs, p.format_version), (2, 12, 2));
     assert_eq!(&p.blob[..empty_blob().len()], &empty_blob()[..]);
-    assert_eq!(image::probe(&inplace).unwrap().format_version, 1);
+    assert_eq!(image::probe(&inplace).unwrap().format_version, 2);
     assert!(image::probe(&vec![0u8; 100_000]).is_err());
     // A refused configuration leaves the image untouched.
     let mut untouched = tpl.clone();
@@ -451,4 +451,141 @@ fn check_release_verifies_the_real_signature_and_the_listed_files() {
     let o = check(&altered, &[]);
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("does not match the file"));
+}
+
+/// ADR-229: format 2 added the plaintext fields; a format 1 blob (the golden
+/// of the first release of the configuration, kept as `lab-v1.blob`) is still
+/// read, checked and shown, with the fingerprint it always had.
+#[test]
+fn the_format_1_golden_blob_is_still_valid() {
+    let v1 = fixtures().join("lab-v1.blob");
+    let text = ok(&run(bin().arg("show").arg(&v1)));
+    assert!(text.contains("urmqtt-cfg version 1"), "{text}");
+    assert!(
+        text.contains(
+            "fingerprint: 1a5d4dcce0a2767a29f39c984e55ae5cdd92b8940257de0ac7a23de64f386cd6"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("address = 192.0.2.10/24") && text.contains("mqtt_tls_port = 8884"));
+    assert!(
+        !text.contains("plaintext"),
+        "no plaintext in a format 1 blob: {text}"
+    );
+    let v = ok(&run(bin().arg("verify").arg(&v1)));
+    assert!(v.contains("ok: fingerprint 1a5d4dcc"), "{v}");
+    // The same TOML packed today is another blob (format 2), with the same values.
+    let now = std::fs::read(fixtures().join("lab.blob")).unwrap();
+    let then = std::fs::read(&v1).unwrap();
+    assert_ne!(now, then);
+    assert_eq!((now[8], then[8]), (2, 1));
+    assert_eq!(now.len(), then.len());
+    // A version 1 blob wrapped in a slot is what an old template ISO holds.
+    let slot = tmp("v1.slot");
+    ok(&run(bin().arg("slot").arg(&v1).arg(&slot)));
+    assert!(ok(&run(bin().arg("show").arg(&slot))).contains("version 1"));
+}
+
+#[test]
+fn the_plaintext_fixture_matches_its_golden_blob_and_is_announced() {
+    let out = tmp("plain.blob");
+    let text = ok(&run(bin()
+        .arg("pack")
+        .arg(fixtures().join("plain.toml"))
+        .arg("--out")
+        .arg(&out)));
+    assert!(
+        text.contains(
+            "fingerprint 1114a1cdbb9898ad11917e9c0fff896ccc212a29d2e0ef8c2e9e0c86a2c4a672"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("warning: plaintext MQTT ON, NOT ENCRYPTED: port 1883, password, 2 account(s), from 192.0.2.0/24, 10.20.0.0/16"),
+        "{text}"
+    );
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        std::fs::read(fixtures().join("plain.blob")).unwrap(),
+        "the golden blob pins the plaintext encoding (tags 170 to 186)"
+    );
+    let shown = ok(&run(bin().arg("show").arg(&out)));
+    assert!(shown.contains("urmqtt-cfg version 2"));
+    assert!(
+        shown.contains("users = [\"sensor-1 (pbkdf2-sha256, 1000 iterations)\""),
+        "{shown}"
+    );
+    assert!(shown.contains("allow_from = [\"192.0.2.0/24\", \"10.20.0.0/16\"]"));
+    assert!(shown.contains("max_failed_auths_per_ip = 3") && shown.contains("lockout_s = 120"));
+    // The hashes are not printed.
+    assert!(
+        !shown.contains("4c580552") && !shown.contains("d8e0e2fe"),
+        "{shown}"
+    );
+    // A release kernel accepts it.
+    assert!(ok(&run(bin().arg("verify").arg(&out))).contains("plaintext MQTT ON"));
+    // The same fixture without the section: no announcement.
+    let off = ok(&run(bin().arg("show").arg(fixtures().join("lab.blob"))));
+    assert!(!off.contains("plaintext"), "{off}");
+}
+
+#[test]
+fn hash_password_reads_the_password_from_stdin() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let run_with = |pw: &str, args: &[&str]| {
+        let mut c = bin()
+            .arg("hash-password")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin.take().unwrap().write_all(pw.as_bytes()).unwrap();
+        c.wait_with_output().unwrap()
+    };
+    // A bare hash that the kernel's parser reads and the password verifies.
+    let o = run_with("correct horse\n", &[]);
+    let hash = ok(&o).trim().to_owned();
+    let parsed = urmqtt_cfg::passwd::PasswordHash::parse(&hash).unwrap();
+    assert_eq!(parsed.iterations(), urmqtt_cfg::passwd::DEFAULT_ITERATIONS);
+    assert!(parsed.verify(b"correct horse") && !parsed.verify(b"correct horse2"));
+    assert_eq!(parsed.salt().len(), 16);
+    // Each run uses a new salt.
+    assert_ne!(hash, ok(&run_with("correct horse\n", &[])).trim());
+    // CRLF input, a chosen iteration count, and the TOML table for pasting.
+    let o = run_with("pw\r\n", &["--id", "sensor-9", "--iterations", "2000"]);
+    let table = ok(&o);
+    assert!(
+        table.starts_with("{ id = \"sensor-9\", password_hash = \"pbkdf2-sha256$2000$"),
+        "{table}"
+    );
+    let toml = format!(
+        "[plaintext]\nenabled = true\nallow_from = [\"10.0.0.0/8\"]\nusers = [{}]\n",
+        table.trim()
+    );
+    let cfg = tmp("hashed.toml");
+    std::fs::write(&cfg, toml).unwrap();
+    let packed = ok(&run(bin()
+        .arg("pack")
+        .arg(&cfg)
+        .arg("--out")
+        .arg(tmp("hashed.blob"))));
+    assert!(packed.contains("1 account(s)"), "{packed}");
+    // Refusals: no password, a bad id, an iteration count out of range.
+    for (pw, args) in [
+        ("\n", vec![]),
+        ("x\n", vec!["--id", "a/b"]),
+        ("x\n", vec!["--iterations", "10"]),
+        ("x\n", vec!["--iterations", "many"]),
+        ("x\n", vec!["unexpected"]),
+    ] {
+        let o = run_with(pw, &args);
+        assert!(!o.status.success(), "{args:?}");
+        assert!(
+            !String::from_utf8_lossy(&o.stdout).contains("pbkdf2"),
+            "no hash on error"
+        );
+    }
 }

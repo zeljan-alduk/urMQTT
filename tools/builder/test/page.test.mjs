@@ -135,6 +135,8 @@ test('every field shows its default as the placeholder and nothing is marked as 
   let checked = 0;
   for (const f of schema.fields) {
     if (f.derived || f.dev_only) continue;
+    // The plaintext accounts (password hashes) are not a text area: their editor comes with the page work of P1.
+    if (f.item === 'user') continue;
     const s = byId.get(f.key);
     assert.ok(s, `${f.key} is in the form`);
     assert.equal(s.changed, 'false', f.key);

@@ -210,13 +210,448 @@ fn structural_attacks_fail_closed() {
     let mut over = record(tag::NET_MODE, &[0]);
     over[2] = 200;
     assert!(Blob::parse(&assemble(&over)).is_err());
-    // Version 2 is not understood.
-    let mut v = assemble(&ok);
-    v[8] = 2;
+    // A version this code does not know (0, and one above the newest).
+    for unknown in [0u8, 3, 9] {
+        let v = with_version(&assemble(&ok), unknown);
+        assert!(Blob::parse(&v).is_err(), "version {unknown}");
+    }
+}
+
+/// The same blob with another version number in its header, fingerprint
+/// recomputed (the blob is unsigned).
+fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
+    let mut v = blob.to_vec();
+    v[8] = version;
     let fp = blob::fingerprint_of(&v[..v.len() - 33]);
     let n = v.len();
     v[n - 33..n - 1].copy_from_slice(&fp);
-    assert!(Blob::parse(&v).is_err());
+    v
+}
+
+/// ADR-229: the writer writes the newest format (2) and the reader still
+/// reads version 1. A version 1 blob cannot hold a record that came with
+/// version 2, so it keeps meaning exactly what it meant.
+#[test]
+fn format_2_is_written_and_format_1_is_still_read() {
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 2));
+    // What the builder and the built-in default write.
+    let e = empty();
+    assert_eq!(Blob::parse(&e).unwrap().version(), 2);
+    assert_eq!(&e[8..10], &[2, 0]);
+    let mut buf = [0u8; blob::EMPTY_BLOB_LEN];
+    blob::write_empty(&mut buf);
+    assert_eq!(&buf[8..10], &[2, 0]);
+    // A version 1 blob made by the previous release's tool: the same records,
+    // the version in its header and its own fingerprint. It still parses and
+    // passes the checks, and its values are read as before.
+    let old = assemble(&record(tag::NET_TLS_PORT, &9883u16.to_le_bytes()));
+    assert_eq!(&old[8..10], &[1, 0]);
+    let p = Blob::parse(&old).unwrap();
+    assert_eq!(p.version(), 1);
+    assert_eq!(p.uint(tag::NET_TLS_PORT), 9883);
+    check::check(&p, false).unwrap();
+    // The empty version 1 blob (a template ISO or an installed disk made
+    // before this change) is the defaults, plaintext off.
+    let old_empty = assemble(&[]);
+    let p = Blob::parse(&old_empty).unwrap();
+    assert!(p.is_empty() && !p.bool(tag::PL_ENABLED));
+    assert_eq!(p.uint(tag::PL_PORT), 1883);
+    check::check(&p, false).unwrap();
+    // A version 1 blob holding a version 2 record is refused; version 2 is fine.
+    let rec = record(tag::PL_PORT, &1884u16.to_le_bytes());
+    assert!(Blob::parse(&assemble(&rec)).is_err());
+    assert!(Blob::parse(&with_version(&assemble(&rec), 2)).is_ok());
+    // Every record of a version 1 blob is allowed in version 2, with the same value.
+    let mut b = Builder::new();
+    b.uint(tag::NET_TLS_PORT, 9883).unwrap();
+    let v2 = b.finish(false).unwrap();
+    assert_eq!(Blob::parse(&v2).unwrap().uint(tag::NET_TLS_PORT), 9883);
+    // The default value of a version 2 field is not written.
+    let mut d = Builder::new();
+    d.uint(tag::PL_PORT, 1883).unwrap();
+    d.bool(tag::PL_ENABLED, false).unwrap();
+    d.strs(tag::PL_ACL_PUBLISH, &["devices/{id}/#"]).unwrap();
+    assert_eq!(d.finish(false).unwrap(), e);
+}
+
+/// The plaintext section's rules (the TOML-side validator has a twin of each,
+/// compared in `config-schema`).
+#[test]
+fn plaintext_rules() {
+    use crate::passwd;
+    let hash = passwd::encode(b"pw", b"0123456789abcdef", 1000).unwrap();
+    let user = |id: &str| format!("{id} {hash}");
+    // Disabled, with nothing else set: fine. Enabled needs a network and an account.
+    let mut off = Builder::new();
+    assert!(off.finish(false).is_ok());
+    off.bool(tag::PL_ENABLED, true).unwrap();
+    assert!(off.finish(false).is_err(), "no network");
+    off.strs(tag::PL_ALLOW_FROM, &["10.0.0.0/8"]).unwrap();
+    assert!(off.finish(false).is_err(), "password mode without accounts");
+    off.strs(tag::PL_USERS, &[user("sensor-1")]).unwrap();
+    let ok = off
+        .finish(false)
+        .expect("the minimal password configuration");
+    assert_eq!(Blob::parse(&ok).unwrap().version(), 2);
+
+    // The plaintext listener is on, with these strings, flags, integers and
+    // enum variants set; does the check accept it?
+    let try_with = |strs: Vec<(u16, Vec<String>)>,
+                    flags: Vec<(u16, bool)>,
+                    uints: Vec<(u16, u64)>,
+                    variants: Vec<(u16, u8)>| {
+        let mut b = Builder::new();
+        b.bool(tag::PL_ENABLED, true).unwrap();
+        for (t, v) in flags {
+            b.bool(t, v).unwrap();
+        }
+        for (t, v) in uints {
+            b.uint(t, v).unwrap();
+        }
+        for (t, v) in variants {
+            b.variant(t, v).unwrap();
+        }
+        for (t, v) in strs {
+            b.strs(t, &v).unwrap();
+        }
+        b.finish(false).is_ok()
+    };
+    let net = |s: &str| (tag::PL_ALLOW_FROM, vec![s.to_owned()]);
+    let users = |ids: &[&str]| {
+        (
+            tag::PL_USERS,
+            ids.iter().map(|i| user(i)).collect::<Vec<_>>(),
+        )
+    };
+    let ids = |l: &[&str]| {
+        (
+            tag::PL_IP_IDENTITIES,
+            l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+        )
+    };
+    // allow_from or anywhere, never both, never neither.
+    assert!(try_with(
+        vec![net("10.0.0.0/8"), users(&["a"])],
+        vec![],
+        vec![],
+        vec![]
+    ));
+    assert!(
+        !try_with(vec![users(&["a"])], vec![], vec![], vec![]),
+        "no network"
+    );
+    assert!(try_with(
+        vec![users(&["a"])],
+        vec![(tag::PL_ANYWHERE, true)],
+        vec![],
+        vec![]
+    ));
+    assert!(
+        !try_with(
+            vec![net("10.0.0.0/8"), users(&["a"])],
+            vec![(tag::PL_ANYWHERE, true)],
+            vec![],
+            vec![]
+        ),
+        "both"
+    );
+    // Malformed networks and accounts.
+    assert!(!try_with(
+        vec![net("0.0.0.0/0"), users(&["a"])],
+        vec![],
+        vec![],
+        vec![]
+    ));
+    assert!(!try_with(
+        vec![net("10.0.0.1/8"), users(&["a"])],
+        vec![],
+        vec![],
+        vec![]
+    ));
+    assert!(!try_with(
+        vec![net("nonsense"), users(&["a"])],
+        vec![],
+        vec![],
+        vec![]
+    ));
+    assert!(
+        !try_with(
+            vec![
+                (
+                    tag::PL_ALLOW_FROM,
+                    vec!["10.0.0.0/8".into(), "10.0.0.0/8".into()]
+                ),
+                users(&["a"])
+            ],
+            vec![],
+            vec![],
+            vec![]
+        ),
+        "twice"
+    );
+    assert!(
+        !try_with(
+            vec![net("10.0.0.0/8"), users(&["a", "a"])],
+            vec![],
+            vec![],
+            vec![]
+        ),
+        "same id twice"
+    );
+    assert!(!try_with(
+        vec![
+            net("10.0.0.0/8"),
+            (tag::PL_USERS, vec!["a not-a-hash".into()])
+        ],
+        vec![],
+        vec![],
+        vec![]
+    ));
+    assert!(!try_with(
+        vec![net("10.0.0.0/8"), users(&["a/b"])],
+        vec![],
+        vec![],
+        vec![]
+    ));
+    // Modes exclude each other's settings.
+    assert!(!try_with(
+        vec![net("10.0.0.0/8"), users(&["a"]), ids(&["10.0.0.0/24 plc"])],
+        vec![],
+        vec![],
+        vec![]
+    ));
+    assert!(
+        try_with(
+            vec![net("10.0.0.0/8")],
+            vec![],
+            vec![],
+            vec![(tag::PL_AUTH, 1)]
+        ),
+        "anonymous needs nothing else"
+    );
+    assert!(
+        !try_with(
+            vec![net("10.0.0.0/8"), users(&["a"])],
+            vec![],
+            vec![],
+            vec![(tag::PL_AUTH, 1)]
+        ),
+        "accounts with anonymous"
+    );
+    assert!(try_with(
+        vec![net("10.0.0.0/8"), ids(&["10.1.0.0/16 plc"])],
+        vec![],
+        vec![],
+        vec![(tag::PL_AUTH, 2)]
+    ));
+    assert!(
+        !try_with(
+            vec![net("10.0.0.0/8")],
+            vec![],
+            vec![],
+            vec![(tag::PL_AUTH, 2)]
+        ),
+        "ip without networks"
+    );
+    assert!(
+        !try_with(
+            vec![net("10.0.0.0/8"), ids(&["192.168.0.0/16 plc"])],
+            vec![],
+            vec![],
+            vec![(tag::PL_AUTH, 2)]
+        ),
+        "outside allow_from"
+    );
+    assert!(
+        try_with(
+            vec![ids(&["192.168.0.0/16 plc"])],
+            vec![(tag::PL_ANYWHERE, true)],
+            vec![],
+            vec![(tag::PL_AUTH, 2)]
+        ),
+        "anywhere covers all"
+    );
+    assert!(
+        !try_with(
+            vec![net("10.0.0.0/8"), ids(&["10.0.0.0/16 a", "10.0.0.0/16 b"])],
+            vec![],
+            vec![],
+            vec![(tag::PL_AUTH, 2)]
+        ),
+        "network twice"
+    );
+    assert!(
+        try_with(
+            vec![
+                net("10.0.0.0/8"),
+                ids(&["10.0.0.0/16 a", "10.0.0.0/24 a", "10.1.0.0/16 b"])
+            ],
+            vec![],
+            vec![],
+            vec![(tag::PL_AUTH, 2)]
+        ),
+        "overlap is fine"
+    );
+    assert!(
+        !try_with(
+            vec![
+                net("10.0.0.0/8"),
+                ids(&["10.0.0.0/16 plc"]),
+                (tag::ACL_OPERATOR_IDS, vec!["plc".into()])
+            ],
+            vec![],
+            vec![],
+            vec![(tag::PL_AUTH, 2)]
+        ),
+        "operator id"
+    );
+    // Another role's identity is refused for a plaintext account.
+    assert!(
+        !try_with(
+            vec![net("10.0.0.0/8"), users(&["backend"])],
+            vec![],
+            vec![],
+            vec![]
+        ),
+        "service id"
+    );
+    assert!(
+        !try_with(
+            vec![net("10.0.0.0/8"), users(&["operator"])],
+            vec![],
+            vec![],
+            vec![]
+        ),
+        "operator id"
+    );
+    assert!(
+        !try_with(
+            vec![
+                net("10.0.0.0/8"),
+                users(&["ctl"]),
+                (tag::CTL_SERVICE_IDS, vec!["ctl".into()])
+            ],
+            vec![],
+            vec![],
+            vec![]
+        ),
+        "control id"
+    );
+    assert!(try_with(
+        vec![net("10.0.0.0/8"), users(&["backend2"])],
+        vec![],
+        vec![],
+        vec![]
+    ));
+    assert!(
+        !try_with(
+            vec![
+                net("10.0.0.0/8"),
+                (tag::ACL_SERVICE_IDS, vec!["svc-*".into()]),
+                users(&["svc-1"])
+            ],
+            vec![],
+            vec![],
+            vec![]
+        ),
+        "service prefix"
+    );
+    // Ports.
+    assert!(
+        !try_with(
+            vec![net("10.0.0.0/8"), users(&["a"])],
+            vec![],
+            vec![(tag::PL_PORT, 8883)],
+            vec![]
+        ),
+        "the TLS port"
+    );
+    assert!(try_with(
+        vec![net("10.0.0.0/8"), users(&["a"])],
+        vec![],
+        vec![(tag::PL_PORT, 1884)],
+        vec![]
+    ));
+}
+
+/// The anonymous identity is a string field, not a list.
+#[test]
+fn the_anonymous_identity() {
+    let anon = |id: &str, extra: &dyn Fn(&mut Builder)| {
+        let mut b = Builder::new();
+        b.bool(tag::PL_ENABLED, true).unwrap();
+        b.strs(tag::PL_ALLOW_FROM, &["10.0.0.0/8"]).unwrap();
+        b.variant(tag::PL_AUTH, 1).unwrap();
+        // Too long a name is refused already by the field's own bound.
+        if b.str(tag::PL_ANON_ID, id).is_err() {
+            return false;
+        }
+        extra(&mut b);
+        b.finish(false).is_ok()
+    };
+    assert!(anon("lan", &|_| {}));
+    assert!(anon("house-1", &|_| {}));
+    assert!(!anon("", &|_| {}), "an identity is not empty");
+    assert!(!anon("a/b", &|_| {}));
+    assert!(!anon("a b", &|_| {}));
+    assert!(!anon(&"x".repeat(65), &|_| {}));
+    assert!(!anon("backend", &|_| {}), "a service id");
+    assert!(!anon("operator", &|b| b
+        .strs(tag::ACL_OPERATOR_IDS, &["operator"])
+        .unwrap()));
+    // A non-default name is only for the anonymous mode.
+    let mut b = Builder::new();
+    b.bool(tag::PL_ENABLED, true).unwrap();
+    b.strs(tag::PL_ALLOW_FROM, &["10.0.0.0/8"]).unwrap();
+    b.str(tag::PL_ANON_ID, "house").unwrap();
+    b.strs(
+        tag::PL_USERS,
+        &[format!(
+            "a {}",
+            crate::passwd::encode(b"x", b"0123456789abcdef", 1000).unwrap()
+        )],
+    )
+    .unwrap();
+    assert!(b.finish(false).is_err());
+}
+
+/// A disabled section is inert but not allowed to look dangerous, and what is
+/// written in it must still be well formed.
+#[test]
+fn a_disabled_plaintext_section_is_checked_but_inert() {
+    let go = |f: &dyn Fn(&mut Builder)| {
+        let mut b = Builder::new();
+        f(&mut b);
+        b.finish(false).is_ok()
+    };
+    assert!(go(&|b| b
+        .strs(tag::PL_ALLOW_FROM, &["10.0.0.0/8"])
+        .unwrap()));
+    assert!(
+        !go(&|b| b.strs(tag::PL_ALLOW_FROM, &["10.0.0.9/8"]).unwrap()),
+        "malformed even when off"
+    );
+    assert!(!go(&|b| b.strs(tag::PL_USERS, &["x y"]).unwrap()));
+    assert!(
+        !go(&|b| b.bool(tag::PL_ANYWHERE, true).unwrap()),
+        "anywhere without enabled"
+    );
+    assert!(
+        go(&|b| b.uint(tag::PL_PORT, 8883).unwrap()),
+        "port clashes only matter when on"
+    );
+    assert!(!go(&|b| b.strs(tag::PL_ACL_PUBLISH, &["$SYS/#"]).unwrap()));
+    assert!(!go(&|b| b
+        .strs(tag::PL_ACL_SUBSCRIBE, &["$foo/#"])
+        .unwrap()));
+    assert!(
+        go(&|b| b.strs::<&str>(tag::PL_ACL_PUBLISH, &[]).unwrap()),
+        "an empty list means read-only"
+    );
+    assert!(!go(&|b| b.strs(tag::PL_ACL_PUBLISH, &["a/#/b"]).unwrap()));
+    assert!(go(&|b| b
+        .strs(tag::PL_ACL_SUBSCRIBE, &["home/{id}/#", "lights/+"])
+        .unwrap()));
 }
 
 #[test]

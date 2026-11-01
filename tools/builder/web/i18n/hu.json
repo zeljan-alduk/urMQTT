@@ -70,6 +70,7 @@
   "section.registry": "Eszköznyilvántartás",
   "section.entropy": "Entrópia",
   "section.cpu": "Processzorfunkciók",
+  "section.plaintext": "Titkosítatlan MQTT",
   "section.misc": "Környezet",
   "section.changed": "Módosítva: {n}",
   "section.reset": "Szakasz visszaállítása",

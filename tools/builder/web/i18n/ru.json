@@ -70,6 +70,7 @@
   "section.registry": "Реестр устройств",
   "section.entropy": "Энтропия",
   "section.cpu": "Возможности процессора",
+  "section.plaintext": "MQTT без шифрования",
   "section.misc": "Окружение",
   "section.changed": "Изменено: {n}",
   "section.reset": "Сбросить раздел",

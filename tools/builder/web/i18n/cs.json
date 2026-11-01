@@ -70,6 +70,7 @@
   "section.registry": "Registr zařízení",
   "section.entropy": "Entropie",
   "section.cpu": "Funkce procesoru",
+  "section.plaintext": "MQTT bez šifrování",
   "section.misc": "Prostředí",
   "section.changed": "Změněno: {n}",
   "section.reset": "Obnovit sekci",

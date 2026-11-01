@@ -167,6 +167,7 @@ pub fn check(b: &Blob<'_>, dev_allowed: bool) -> Result<(), CfgError> {
     network(b, dev)?;
     let limits = limits(b)?;
     let (max_len, max_levels) = limits;
+    plaintext(b, max_len, max_levels)?;
     filters(
         "acl.device_publish",
         b,
@@ -353,6 +354,194 @@ fn network(b: &Blob<'_>, dev: bool) -> Result<(), CfgError> {
                 "network.mqtt_plain_port",
                 "must differ from mqtt_tls_port",
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `id` is a role the plaintext listener never grants: a service id
+/// (exact or prefix pattern), an operator or a control identity.
+fn holds_other_role(b: &Blob<'_>, id: &str) -> bool {
+    b.strs(tag::ACL_SERVICE_IDS)
+        .any(|p| match p.strip_suffix('*') {
+            Some(prefix) => id.starts_with(prefix),
+            None => p == id,
+        })
+        || b.strs(tag::ACL_OPERATOR_IDS).any(|o| o == id)
+        || b.strs(tag::CTL_SERVICE_IDS).any(|c| c == id)
+}
+
+const ROLE_MSG: &str = "is also an acl.service_ids, acl.operator_ids or control.service_ids identity: plaintext clients never hold those roles, pick another name";
+
+/// The `[plaintext]` section (P1, ADR-229). What is written must be well
+/// formed whether or not the listener is on; what the listener needs, and
+/// what must not contradict the mode, is checked when it is on.
+fn plaintext(b: &Blob<'_>, max_len: u64, max_levels: u64) -> Result<(), CfgError> {
+    use crate::net::Cidr;
+    use crate::plain;
+
+    let enabled = b.bool(tag::PL_ENABLED);
+    let anywhere = b.bool(tag::PL_ANYWHERE);
+    let auth = b.variant(tag::PL_AUTH);
+    let (password, anonymous, by_ip) = (auth == 0, auth == 1, auth == 2);
+
+    // Well-formed entries, enabled or not.
+    for (n, s) in b.strs(tag::PL_ALLOW_FROM).enumerate() {
+        plain::parse_allow(s).map_err(|m| err("plaintext.allow_from", m))?;
+        if b.strs(tag::PL_ALLOW_FROM).take(n).any(|o| o == s) {
+            return Err(err("plaintext.allow_from", "a network is listed twice"));
+        }
+    }
+    for (n, s) in b.strs(tag::PL_USERS).enumerate() {
+        let (id, _) = plain::parse_user(s).map_err(|m| err("plaintext.users", m))?;
+        let earlier = b.strs(tag::PL_USERS).take(n);
+        if earlier
+            .filter_map(|o| o.split_once(' '))
+            .any(|(other, _)| other == id)
+        {
+            return Err(err("plaintext.users", "an id is listed twice"));
+        }
+    }
+    for (n, s) in b.strs(tag::PL_IP_IDENTITIES).enumerate() {
+        let (net, _) =
+            plain::parse_ip_identity(s).map_err(|m| err("plaintext.ip_identities", m))?;
+        let dup = b
+            .strs(tag::PL_IP_IDENTITIES)
+            .take(n)
+            .filter_map(|o| plain::parse_ip_identity(o).ok())
+            .any(|(other, _)| other == net);
+        if dup {
+            return Err(err("plaintext.ip_identities", "a network is listed twice"));
+        }
+    }
+    plain::check_identity(b.str(tag::PL_ANON_ID))
+        .map_err(|m| err("plaintext.anonymous_identity", m))?;
+    for (key, t) in [
+        ("plaintext.acl_publish", tag::PL_ACL_PUBLISH),
+        ("plaintext.acl_subscribe", tag::PL_ACL_SUBSCRIBE),
+    ] {
+        for f in b.strs(t) {
+            check_topic_filter(key, f, max_len, max_levels, Placeholder::Allowed)?;
+            if f.starts_with('$') {
+                return Err(err(key, "no filter may start with $ (broker topics)"));
+            }
+        }
+    }
+
+    if !enabled {
+        if anywhere {
+            return Err(err(
+                "plaintext.allow_from_anywhere",
+                "is set but plaintext is not enabled: remove it, so the file does not look more dangerous than it is",
+            ));
+        }
+        return Ok(());
+    }
+
+    // The listener is on: it needs its allow-list and its logins.
+    let nets = b.strs(tag::PL_ALLOW_FROM).count();
+    if anywhere && nets > 0 {
+        return Err(err(
+            "plaintext.allow_from_anywhere",
+            "overrides allow_from: remove one of the two",
+        ));
+    }
+    if !anywhere && nets == 0 {
+        return Err(err(
+            "plaintext.allow_from",
+            "required when plaintext is enabled: the networks that may connect (for example 10.0.0.0/8), or allow_from_anywhere = true",
+        ));
+    }
+    let port = b.uint(tag::PL_PORT);
+    if port == b.uint(tag::NET_TLS_PORT) {
+        return Err(err(
+            "plaintext.port",
+            "must differ from network.mqtt_tls_port",
+        ));
+    }
+    if port != 0 && port == b.uint(tag::NET_PLAIN_PORT) {
+        return Err(err(
+            "plaintext.port",
+            "must differ from network.mqtt_plain_port",
+        ));
+    }
+    let users = b.strs(tag::PL_USERS).count();
+    let ip_ids = b.strs(tag::PL_IP_IDENTITIES).count();
+    let anon_id = b.str(tag::PL_ANON_ID);
+    let anon_default = anon_id == "lan";
+    if password {
+        if users == 0 {
+            return Err(err(
+                "plaintext.users",
+                "auth = \"password\" needs at least one account",
+            ));
+        }
+        if ip_ids > 0 {
+            return Err(err(
+                "plaintext.ip_identities",
+                "only used with auth = \"ip\"",
+            ));
+        }
+        if !anon_default {
+            return Err(err(
+                "plaintext.anonymous_identity",
+                "only used with auth = \"anonymous\"",
+            ));
+        }
+        for s in b.strs(tag::PL_USERS) {
+            let id = s.split_once(' ').map_or(s, |(id, _)| id);
+            if holds_other_role(b, id) {
+                return Err(err("plaintext.users", ROLE_MSG));
+            }
+        }
+    } else if anonymous {
+        if users > 0 {
+            return Err(err("plaintext.users", "only used with auth = \"password\""));
+        }
+        if ip_ids > 0 {
+            return Err(err(
+                "plaintext.ip_identities",
+                "only used with auth = \"ip\"",
+            ));
+        }
+        if holds_other_role(b, anon_id) {
+            return Err(err("plaintext.anonymous_identity", ROLE_MSG));
+        }
+    } else if by_ip {
+        if ip_ids == 0 {
+            return Err(err(
+                "plaintext.ip_identities",
+                "auth = \"ip\" needs at least one network",
+            ));
+        }
+        if users > 0 {
+            return Err(err("plaintext.users", "only used with auth = \"password\""));
+        }
+        if !anon_default {
+            return Err(err(
+                "plaintext.anonymous_identity",
+                "only used with auth = \"anonymous\"",
+            ));
+        }
+        for s in b.strs(tag::PL_IP_IDENTITIES) {
+            let Ok((net, id)) = plain::parse_ip_identity(s) else {
+                continue;
+            };
+            if holds_other_role(b, id) {
+                return Err(err("plaintext.ip_identities", ROLE_MSG));
+            }
+            // A network outside allow_from would never match: say so.
+            if !anywhere
+                && !b
+                    .strs(tag::PL_ALLOW_FROM)
+                    .filter_map(|a| Cidr::parse(a).ok())
+                    .any(|a| a.contains_net(&net))
+            {
+                return Err(err(
+                    "plaintext.ip_identities",
+                    "a network is not inside allow_from, so no client could ever match it",
+                ));
+            }
         }
     }
     Ok(())

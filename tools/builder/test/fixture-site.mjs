@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { ROOT, WASM, realTemplate, syntheticTemplate, tmp } from './helpers.mjs';
+import { ROOT, WASM, WASM_NAME, realTemplate, syntheticTemplate, tmp } from './helpers.mjs';
 import { loadBuilder } from '../web/src/wasm.js';
 import { newKey, writeMirror } from './mirror-fixture.mjs';
 import { readFileSync } from 'node:fs';
@@ -21,7 +21,7 @@ export async function prepareSite({ real = false, tamper = [], releases } = {}) 
   const mirrorDir = join(dir, 'mirror');
   mkdirSync(appDir, { recursive: true });
   const key = newKey();
-  copyFileSync(WASM, join(appDir, 'urmqtt-cfg1.wasm'));
+  copyFileSync(WASM, join(appDir, WASM_NAME));
   execFileSync('node', [join(ROOT, 'tools/builder/web/bundle.mjs'), appDir], {
     env: { ...process.env, BUILDER_PUBKEY_TEXT: key.publicText },
     stdio: ['ignore', 'ignore', 'inherit'],

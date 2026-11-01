@@ -1,6 +1,6 @@
 // The WebAssembly module and the `urmqtt-config` command line tool must produce
 // the same bytes for the same input (docs/PLAN.md C1e, ADR-225). The module is
-// the one the page loads (build/builder/urmqtt-cfg1.wasm); the tool is the
+// the one the page loads (build/builder/urmqtt-cfg<N>.wasm); the tool is the
 // debug binary of the same workspace.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { loadBuilder, hex } from '../web/src/wasm.js';
-import { CLI, DEV, FIXTURES, ROOT, WASM, cli, haveCli, haveDevCerts, haveWasm, realTemplate, syntheticTemplate, tmp } from './helpers.mjs';
+import { CLI, DEV, FIXTURES, FORMAT, ROOT, WASM, cli, haveCli, haveDevCerts, haveWasm, realTemplate, syntheticTemplate, tmp } from './helpers.mjs';
 
 if (!haveWasm() || !haveCli()) {
   console.log(`skipped: needs ${WASM} (make builder) and ${CLI} (cargo build -p urmqtt-config-tool)`);
@@ -27,7 +27,7 @@ test('the schema is the command line schema, byte for byte', () => {
 });
 
 test('the module reads the format version the tool writes', () => {
-  assert.equal(b.formatVersion, 1);
+  assert.equal(b.formatVersion, FORMAT);
 });
 
 test('a configuration without files packs to the same bytes', () => {
@@ -141,7 +141,7 @@ for (const [label, make] of isoCases()) {
     b.view(iso).set(tpl);
     const probe = b.isoProbe(iso);
     assert.equal(probe.supported, true);
-    assert.equal(probe.format_version, 1);
+    assert.equal(probe.format_version, FORMAT);
     const report = b.isoConfigure(iso, w.blob);
     const mine = Buffer.from(b.view(iso));
     assert.equal(mine.length, tpl.length);

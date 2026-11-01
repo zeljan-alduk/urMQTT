@@ -18,8 +18,16 @@ use crate::fields::{self, Field, Kind};
 use crate::{CfgError, err};
 
 pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
-/// The only format version this code reads.
-pub const FORMAT_VERSION: u16 = 1;
+/// The format version this code writes, and the newest it reads. Version 2
+/// added the `plaintext.*` fields (P1, ADR-229).
+pub const FORMAT_VERSION: u16 = 2;
+/// The oldest format version it still reads. Blobs of the older versions stay
+/// valid (an installed disk keeps its configuration across a kernel update):
+/// the records of version 1 are the same in version 2, and a version 1 blob
+/// cannot hold a record that came later (see [`crate::fields::Field::since`]).
+/// A kernel that only knows version 1 refuses a version 2 blob by its version,
+/// before it reads a record.
+pub const FORMAT_MIN: u16 = 1;
 pub const HEADER_LEN: usize = 16;
 pub const FINGERPRINT_LEN: usize = 32;
 /// Size of the file the bootloader loads as the configuration module.
@@ -42,6 +50,8 @@ pub const EMPTY_BLOB_LEN: usize = HEADER_LEN + FINGERPRINT_LEN + 1;
 pub fn write_empty(out: &mut [u8; EMPTY_BLOB_LEN]) {
     out.fill(0);
     out[..8].copy_from_slice(&MAGIC);
+    // The newest format: a template ISO's empty configuration declares the
+    // format its kernel reads (the release mirror and the builder page ask).
     out[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
     let fp = fingerprint_of(&out[..HEADER_LEN]);
     out[HEADER_LEN..HEADER_LEN + FINGERPRINT_LEN].copy_from_slice(&fp);
@@ -121,6 +131,7 @@ pub struct Blob<'a> {
     fingerprint: [u8; 32],
     signature: Option<Signature>,
     len: usize,
+    version: u16,
 }
 
 impl core::fmt::Debug for Blob<'_> {
@@ -158,7 +169,7 @@ impl<'a> Blob<'a> {
             return Err(bad("not a urmqtt-cfg blob (bad magic)"));
         }
         let version = bytes.get(8..).and_then(le16).ok_or(bad("truncated"))?;
-        if version != FORMAT_VERSION {
+        if !(FORMAT_MIN..=FORMAT_VERSION).contains(&version) {
             return Err(bad("unsupported format version"));
         }
         if bytes.get(10..).and_then(le16) != Some(0) {
@@ -216,6 +227,7 @@ impl<'a> Blob<'a> {
             fingerprint,
             signature,
             len,
+            version,
         };
         blob.check_records()?;
         Ok(blob)
@@ -240,10 +252,21 @@ impl<'a> Blob<'a> {
             if !field.stored {
                 return Err(err(field.key, "this field is not stored in a blob"));
             }
+            if field.since > self.version {
+                return Err(err(
+                    field.key,
+                    "needs a newer blob format version than the blob declares",
+                ));
+            }
             check_value(field, value)?;
             rest = it.0;
         }
         Ok(())
+    }
+
+    /// The blob format version it declares.
+    pub fn version(&self) -> u16 {
+        self.version
     }
 
     /// SHA-256 identifying this configuration.

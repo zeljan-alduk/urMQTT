@@ -70,6 +70,7 @@
   "section.registry": "Geräteregister",
   "section.entropy": "Entropie",
   "section.cpu": "CPU-Funktionen",
+  "section.plaintext": "MQTT ohne Verschlüsselung",
   "section.misc": "Umgebung",
   "section.changed": "{n} geändert",
   "section.reset": "Abschnitt zurücksetzen",

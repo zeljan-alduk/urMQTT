@@ -191,6 +191,23 @@ fn value_text(f: &fields::Field, blob: &Blob<'_>) -> String {
             .unwrap_or("?")
             .to_owned(),
         Kind::Str { .. } => format!("{:?}", blob.str(t)),
+        // The accounts of the plaintext listener are shown without their
+        // hashes (they are not secrets of the image, but they are not for a
+        // screen or a log either).
+        Kind::Strs { .. } if f.item == fields::Item::User => {
+            let shown: Vec<String> = blob
+                .strs(t)
+                .map(|entry| match urmqtt_cfg::plain::parse_user(entry) {
+                    Ok((id, h)) => format!(
+                        "{id} ({}, {} iterations)",
+                        urmqtt_cfg::passwd::SCHEME,
+                        h.iterations()
+                    ),
+                    Err(_) => "<invalid>".to_owned(),
+                })
+                .collect();
+            format!("{shown:?}")
+        }
         Kind::Strs { .. } => format!("{:?}", blob.strs(t).collect::<Vec<_>>()),
         Kind::Bin { .. } => pem_summary(blob.bin(t)),
         Kind::BinList { .. } => blob.bins(t).map(pem_summary).collect::<Vec<_>>().join("; "),
@@ -222,16 +239,54 @@ fn value_text(f: &fields::Field, blob: &Blob<'_>) -> String {
     }
 }
 
+/// One line about the plaintext listener when it is on (P1, ADR-229): what
+/// whoever ships the image has to know. `None` when it is off.
+pub fn plaintext_summary(b: &Blob<'_>) -> Option<String> {
+    use fields::tag;
+    if !b.bool(tag::PL_ENABLED) {
+        return None;
+    }
+    let from = if b.bool(tag::PL_ANYWHERE) {
+        "ANY ADDRESS (allow_from_anywhere)".to_owned()
+    } else {
+        b.strs(tag::PL_ALLOW_FROM).collect::<Vec<_>>().join(", ")
+    };
+    let who = match b.variant(tag::PL_AUTH) {
+        1 => format!("no login, everyone is {:?}", b.str(tag::PL_ANON_ID)),
+        2 => format!(
+            "the address decides, {} network(s)",
+            b.strs(tag::PL_IP_IDENTITIES).count()
+        ),
+        _ => format!("password, {} account(s)", b.strs(tag::PL_USERS).count()),
+    };
+    Some(format!(
+        "plaintext MQTT ON, NOT ENCRYPTED: port {}, {who}, from {from}",
+        b.uint(tag::PL_PORT)
+    ))
+}
+
+/// The stored hash of `password` for the plaintext listener
+/// (`pbkdf2-sha256$iterations$salt$key`, see `urmqtt_cfg::passwd`). The caller
+/// supplies the salt (16 to 32 random bytes); the command line takes it from
+/// the operating system, the browser from `crypto.getRandomValues`.
+pub fn hash_password(password: &[u8], salt: &[u8], iterations: u32) -> Result<String, String> {
+    urmqtt_cfg::passwd::encode(password, salt, iterations).map_err(|e| e.to_string())
+}
+
+/// Fills `buf` from the operating system's random source (host tools only).
+pub fn os_random(buf: &mut [u8]) -> Result<(), String> {
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(buf))
+        .map_err(|e| format!("cannot read random bytes from /dev/urandom: {e}"))
+}
+
 /// A human-readable description of a blob: identity, signature and every
 /// value that differs from the default (`all`: every field).
 pub fn describe(blob_bytes: &[u8], all: bool) -> Result<String, String> {
     let b = Blob::parse(blob_bytes).map_err(|e| e.to_string())?;
     let mut o = String::new();
-    let _ = writeln!(
-        o,
-        "format:      urmqtt-cfg version {}",
-        urmqtt_cfg::FORMAT_VERSION
-    );
+    let _ = writeln!(o, "format:      urmqtt-cfg version {}", b.version());
     let _ = writeln!(o, "fingerprint: {}", Hex(b.fingerprint()));
     let _ = writeln!(o, "size:        {} bytes", b.len());
     match b.signature() {
@@ -249,6 +304,9 @@ pub fn describe(blob_bytes: &[u8], all: bool) -> Result<String, String> {
     }
     let env = b.str(fields::tag::ENV);
     let _ = writeln!(o, "env:         {env}");
+    if let Some(p) = plaintext_summary(&b) {
+        let _ = writeln!(o, "warning:     {p}");
+    }
     if b.is_empty() {
         let _ = writeln!(
             o,
@@ -289,8 +347,9 @@ pub fn verify_blob(blob_bytes: &[u8], dev: bool) -> Result<String, String> {
     } else {
         "complete: a kernel will serve with it"
     };
+    let plaintext = plaintext_summary(&b).map_or_else(String::new, |p| format!("\nwarning: {p}"));
     Ok(format!(
-        "ok: fingerprint {}, {}, {served}",
+        "ok: fingerprint {}, {}, {served}{plaintext}",
         Hex(b.fingerprint()),
         if b.signature().is_some() {
             "signed"

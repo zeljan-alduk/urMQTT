@@ -106,6 +106,119 @@ struct RawConfig {
     trust: RawTrust,
     registry: RawRegistry,
     control: RawControl,
+    /// Optional: without it there is no plaintext listener (P1, ADR-229).
+    #[serde(default)]
+    plaintext: RawPlaintext,
+}
+
+/// How a plaintext client proves who it is (P1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaintextAuth {
+    /// An MQTT user name and password; the user name is the identity.
+    Password,
+    /// No login: every client is `anonymous_identity`.
+    Anonymous,
+    /// The client's address decides (`ip_identities`).
+    Ip,
+}
+
+/// An account of the plaintext listener (TOML: `{ id = ..., password_hash = ... }`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlainUser {
+    pub id: String,
+    pub password_hash: String,
+}
+
+/// A network and its identity (TOML: `{ from = ..., id = ... }`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlainIpIdentity {
+    pub from: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawPlaintext {
+    enabled: bool,
+    port: u16,
+    allow_from: Vec<String>,
+    allow_from_anywhere: bool,
+    auth: PlaintextAuth,
+    anonymous_identity: String,
+    users: Vec<PlainUser>,
+    ip_identities: Vec<PlainIpIdentity>,
+    max_connections: u32,
+    max_connections_per_ip: u32,
+    max_packet_size: u32,
+    publish_rate_per_device: String,
+    max_failed_auths_per_ip: u32,
+    lockout_s: u32,
+    acl_publish: Vec<String>,
+    acl_subscribe: Vec<String>,
+    retain: bool,
+}
+
+/// The default of a field of the table (the one place defaults live).
+fn default_of(key: &str) -> Option<urmqtt_cfg::fields::Kind> {
+    urmqtt_cfg::fields::by_key(key).map(|f| f.kind)
+}
+
+fn default_uint(key: &str) -> u64 {
+    match default_of(key) {
+        Some(urmqtt_cfg::fields::Kind::UInt { default, .. }) => default,
+        _ => 0,
+    }
+}
+
+fn default_bool(key: &str) -> bool {
+    matches!(default_of(key), Some(urmqtt_cfg::fields::Kind::Bool(true)))
+}
+
+fn default_strs(key: &str) -> Vec<String> {
+    match default_of(key) {
+        Some(urmqtt_cfg::fields::Kind::Strs { default, .. }) => {
+            default.iter().map(|s| (*s).to_owned()).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+impl Default for RawPlaintext {
+    fn default() -> Self {
+        let u32_of = |k: &str| u32::try_from(default_uint(k)).unwrap_or(u32::MAX);
+        let rate = match default_of("plaintext.publish_rate_per_device") {
+            Some(urmqtt_cfg::fields::Kind::Rate { tokens, per_ms }) => {
+                pack::rate_text(tokens, per_ms)
+            }
+            _ => "5/s".to_owned(),
+        };
+        let text = |k: &str| match default_of(k) {
+            Some(urmqtt_cfg::fields::Kind::Str { default, .. }) => default.to_owned(),
+            _ => String::new(),
+        };
+        Self {
+            enabled: default_bool("plaintext.enabled"),
+            port: u16::try_from(default_uint("plaintext.port")).unwrap_or(0),
+            allow_from: default_strs("plaintext.allow_from"),
+            allow_from_anywhere: default_bool("plaintext.allow_from_anywhere"),
+            auth: PlaintextAuth::Password,
+            anonymous_identity: text("plaintext.anonymous_identity"),
+            users: Vec::new(),
+            ip_identities: Vec::new(),
+            max_connections: u32_of("plaintext.max_connections"),
+            max_connections_per_ip: u32_of("plaintext.max_connections_per_ip"),
+            max_packet_size: u32_of("plaintext.max_packet_size"),
+            publish_rate_per_device: rate,
+            max_failed_auths_per_ip: u32_of("plaintext.max_failed_auths_per_ip"),
+            lockout_s: u32_of("plaintext.lockout_s"),
+            acl_publish: default_strs("plaintext.acl_publish"),
+            acl_subscribe: default_strs("plaintext.acl_subscribe"),
+            retain: default_bool("plaintext.retain"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -546,6 +659,31 @@ pub struct Config {
     pub trust: Trust,
     pub registry: RegistryMode,
     pub control: Control,
+    pub plaintext: Plaintext,
+}
+
+/// Plaintext MQTT for trusted networks (P1, ADR-229). Off by default; the
+/// other keys are inert while `enabled` is false.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plaintext {
+    pub enabled: bool,
+    pub port: u16,
+    /// Networks that may connect, as `a.b.c.d/len` text.
+    pub allow_from: Vec<String>,
+    pub allow_from_anywhere: bool,
+    pub auth: PlaintextAuth,
+    pub anonymous_identity: String,
+    pub users: Vec<PlainUser>,
+    pub ip_identities: Vec<PlainIpIdentity>,
+    pub max_connections: u32,
+    pub max_connections_per_ip: u32,
+    pub max_packet_size: u32,
+    pub publish_rate_per_device: Rate,
+    pub max_failed_auths_per_ip: u32,
+    pub lockout_s: u32,
+    pub acl_publish: Vec<String>,
+    pub acl_subscribe: Vec<String>,
+    pub retain: bool,
 }
 
 /// The SNTP wall clock (T1, ADR-100).
@@ -630,6 +768,14 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
     let time = validate_time(&raw.time, &mut errors);
     let trust = validate_trust(&raw.trust, &mut errors);
     let control = validate_control(&raw.control, &mut errors);
+    let plaintext = validate_plaintext(
+        &raw.plaintext,
+        &network,
+        &limits,
+        &acl,
+        &control,
+        &mut errors,
+    );
 
     if !errors.is_empty() {
         return Err(errors);
@@ -650,7 +796,329 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         trust,
         registry: raw.registry.mode,
         control,
+        plaintext,
     })
+}
+
+/// The `[plaintext]` section (P1, ADR-229). The same rules as
+/// `urmqtt_cfg::check` applies to a blob (the kernel's copy), with messages
+/// that name the offending entry. Entries must be well formed whether or not
+/// the listener is on; what the listener needs is checked when it is on.
+fn validate_plaintext(
+    raw: &RawPlaintext,
+    network: &Network,
+    limits: &Limits,
+    acl: &Acl,
+    control: &Control,
+    errors: &mut Vec<ConfigError>,
+) -> Plaintext {
+    use urmqtt_cfg::net::Cidr;
+    use urmqtt_cfg::plain;
+
+    let port_key = "plaintext.port";
+    if raw.port == 0 {
+        errors.push(err(port_key, "must be a non-zero port"));
+    }
+    for (key, v, min, max) in [
+        (
+            "plaintext.max_connections",
+            raw.max_connections,
+            1,
+            1_000_000,
+        ),
+        (
+            "plaintext.max_connections_per_ip",
+            raw.max_connections_per_ip,
+            1,
+            65_535,
+        ),
+        (
+            "plaintext.max_failed_auths_per_ip",
+            raw.max_failed_auths_per_ip,
+            1,
+            1000,
+        ),
+        ("plaintext.lockout_s", raw.lockout_s, 1, 86_400),
+    ] {
+        if !(min..=max).contains(&v) {
+            errors.push(err(key, format!("must be in {min}..={max}")));
+        }
+    }
+    if !(MIN_PACKET_SIZE..=MQTT_MAX_PACKET_SIZE).contains(&raw.max_packet_size) {
+        errors.push(err(
+            "plaintext.max_packet_size",
+            format!("must be in {MIN_PACKET_SIZE}..={MQTT_MAX_PACKET_SIZE}"),
+        ));
+    }
+    let publish_rate_per_device = parse_rate(&raw.publish_rate_per_device).unwrap_or_else(|m| {
+        errors.push(err("plaintext.publish_rate_per_device", m));
+        Rate {
+            tokens: 0,
+            per_ms: 0,
+        }
+    });
+
+    // Lists: their sizes first (the kernel's arrays), then each entry.
+    for (key, len, max) in [
+        (
+            "plaintext.allow_from",
+            raw.allow_from.len(),
+            urmqtt_cfg::fields::MAX_PLAIN_NETWORKS,
+        ),
+        (
+            "plaintext.users",
+            raw.users.len(),
+            urmqtt_cfg::fields::MAX_PLAIN_USERS,
+        ),
+        (
+            "plaintext.ip_identities",
+            raw.ip_identities.len(),
+            urmqtt_cfg::fields::MAX_PLAIN_IP_IDENTITIES,
+        ),
+        (
+            "plaintext.acl_publish",
+            raw.acl_publish.len(),
+            urmqtt_cfg::fields::MAX_PLAIN_ACL,
+        ),
+        (
+            "plaintext.acl_subscribe",
+            raw.acl_subscribe.len(),
+            urmqtt_cfg::fields::MAX_PLAIN_ACL,
+        ),
+    ] {
+        if len > max {
+            errors.push(err(key, format!("at most {max} entries")));
+        }
+    }
+    let mut nets: Vec<Cidr> = Vec::new();
+    for (i, s) in raw.allow_from.iter().enumerate() {
+        match plain::parse_allow(s) {
+            Ok(c) if nets.contains(&c) => {
+                errors.push(err(
+                    &format!("plaintext.allow_from[{i}]"),
+                    format!("{s:?} is listed twice"),
+                ));
+            }
+            Ok(c) => nets.push(c),
+            Err(m) => errors.push(err(
+                &format!("plaintext.allow_from[{i}]"),
+                format!("{s:?}: {m}"),
+            )),
+        }
+    }
+    for (i, u) in raw.users.iter().enumerate() {
+        let path = format!("plaintext.users[{i}]");
+        if let Err(m) = plain::check_identity(&u.id) {
+            errors.push(err(&format!("{path}.id"), format!("{:?}: {m}", u.id)));
+        } else if raw.users.iter().take(i).any(|o| o.id == u.id) {
+            errors.push(err(
+                &format!("{path}.id"),
+                format!("{:?} is listed twice", u.id),
+            ));
+        }
+        if let Err(m) = urmqtt_cfg::passwd::PasswordHash::parse(&u.password_hash) {
+            errors.push(err(&format!("{path}.password_hash"), m.msg()));
+        }
+    }
+    let mut id_nets: Vec<Cidr> = Vec::new();
+    for (i, e) in raw.ip_identities.iter().enumerate() {
+        let path = format!("plaintext.ip_identities[{i}]");
+        match Cidr::parse(&e.from) {
+            Ok(c) if c.prefix == 0 => errors.push(err(
+                &format!("{path}.from"),
+                "0.0.0.0/0 is every address: use auth = \"anonymous\" for that",
+            )),
+            Ok(c) if id_nets.contains(&c) => {
+                errors.push(err(
+                    &format!("{path}.from"),
+                    format!("{:?} is listed twice", e.from),
+                ));
+            }
+            Ok(c) => id_nets.push(c),
+            Err(m) => errors.push(err(&format!("{path}.from"), format!("{:?}: {m}", e.from))),
+        }
+        if let Err(m) = plain::check_identity(&e.id) {
+            errors.push(err(&format!("{path}.id"), format!("{:?}: {m}", e.id)));
+        }
+    }
+    if let Err(m) = plain::check_identity(&raw.anonymous_identity) {
+        errors.push(err(
+            "plaintext.anonymous_identity",
+            format!("{:?}: {m}", raw.anonymous_identity),
+        ));
+    }
+    for (key, list) in [
+        ("plaintext.acl_publish", &raw.acl_publish),
+        ("plaintext.acl_subscribe", &raw.acl_subscribe),
+    ] {
+        for (i, f) in list.iter().enumerate() {
+            let path = format!("{key}[{i}]");
+            if let Err(m) = check_topic_filter(f, limits, Placeholder::Allowed) {
+                errors.push(err(&path, m));
+            } else if f.starts_with('$') {
+                errors.push(err(&path, "no filter may start with $ (broker topics)"));
+            }
+        }
+    }
+
+    if !raw.enabled {
+        if raw.allow_from_anywhere {
+            errors.push(err(
+                "plaintext.allow_from_anywhere",
+                "is set but plaintext is not enabled: remove it, so the file does not look more dangerous than it is",
+            ));
+        }
+    } else {
+        validate_plaintext_enabled(raw, &nets, network, acl, control, errors);
+    }
+
+    Plaintext {
+        enabled: raw.enabled,
+        port: raw.port,
+        allow_from: raw.allow_from.clone(),
+        allow_from_anywhere: raw.allow_from_anywhere,
+        auth: raw.auth,
+        anonymous_identity: raw.anonymous_identity.clone(),
+        users: raw.users.clone(),
+        ip_identities: raw.ip_identities.clone(),
+        max_connections: raw.max_connections,
+        max_connections_per_ip: raw.max_connections_per_ip,
+        max_packet_size: raw.max_packet_size,
+        publish_rate_per_device,
+        max_failed_auths_per_ip: raw.max_failed_auths_per_ip,
+        lockout_s: raw.lockout_s,
+        acl_publish: raw.acl_publish.clone(),
+        acl_subscribe: raw.acl_subscribe.clone(),
+        retain: raw.retain,
+    }
+}
+
+/// What a plaintext listener that is on needs, and what must not contradict
+/// its mode.
+fn validate_plaintext_enabled(
+    raw: &RawPlaintext,
+    nets: &[urmqtt_cfg::net::Cidr],
+    network: &Network,
+    acl: &Acl,
+    control: &Control,
+    errors: &mut Vec<ConfigError>,
+) {
+    let other_role = |id: &str| {
+        acl.service_ids.iter().any(|p| match p.strip_suffix('*') {
+            Some(prefix) => id.starts_with(prefix),
+            None => p == id,
+        }) || acl.operator_ids.iter().any(|o| o == id)
+            || control.service_ids.iter().any(|c| c == id)
+    };
+    const ROLE: &str = "is also an acl.service_ids, acl.operator_ids or control.service_ids identity: plaintext clients never hold those roles, pick another name";
+    if raw.allow_from_anywhere && !raw.allow_from.is_empty() {
+        errors.push(err(
+            "plaintext.allow_from_anywhere",
+            "overrides allow_from: remove one of the two",
+        ));
+    }
+    if !raw.allow_from_anywhere && raw.allow_from.is_empty() {
+        errors.push(err(
+            "plaintext.allow_from",
+            "required when plaintext is enabled: the networks that may connect (for example 10.0.0.0/8), or allow_from_anywhere = true",
+        ));
+    }
+    if raw.port == network.mqtt_tls_port {
+        errors.push(err(
+            "plaintext.port",
+            "must differ from network.mqtt_tls_port",
+        ));
+    }
+    if network.mqtt_plain_port == Some(raw.port) {
+        errors.push(err(
+            "plaintext.port",
+            "must differ from network.mqtt_plain_port",
+        ));
+    }
+    let anon_default = raw.anonymous_identity == "lan";
+    match raw.auth {
+        PlaintextAuth::Password => {
+            if raw.users.is_empty() {
+                errors.push(err(
+                    "plaintext.users",
+                    "auth = \"password\" needs at least one account",
+                ));
+            }
+            if !raw.ip_identities.is_empty() {
+                errors.push(err(
+                    "plaintext.ip_identities",
+                    "only used with auth = \"ip\"",
+                ));
+            }
+            if !anon_default {
+                errors.push(err(
+                    "plaintext.anonymous_identity",
+                    "only used with auth = \"anonymous\"",
+                ));
+            }
+            for (i, u) in raw.users.iter().enumerate() {
+                if other_role(&u.id) {
+                    errors.push(err(
+                        &format!("plaintext.users[{i}].id"),
+                        format!("{:?} {ROLE}", u.id),
+                    ));
+                }
+            }
+        }
+        PlaintextAuth::Anonymous => {
+            if !raw.users.is_empty() {
+                errors.push(err("plaintext.users", "only used with auth = \"password\""));
+            }
+            if !raw.ip_identities.is_empty() {
+                errors.push(err(
+                    "plaintext.ip_identities",
+                    "only used with auth = \"ip\"",
+                ));
+            }
+            if other_role(&raw.anonymous_identity) {
+                errors.push(err(
+                    "plaintext.anonymous_identity",
+                    format!("{:?} {ROLE}", raw.anonymous_identity),
+                ));
+            }
+        }
+        PlaintextAuth::Ip => {
+            if raw.ip_identities.is_empty() {
+                errors.push(err(
+                    "plaintext.ip_identities",
+                    "auth = \"ip\" needs at least one network",
+                ));
+            }
+            if !raw.users.is_empty() {
+                errors.push(err("plaintext.users", "only used with auth = \"password\""));
+            }
+            if !anon_default {
+                errors.push(err(
+                    "plaintext.anonymous_identity",
+                    "only used with auth = \"anonymous\"",
+                ));
+            }
+            for (i, e) in raw.ip_identities.iter().enumerate() {
+                let path = format!("plaintext.ip_identities[{i}]");
+                if other_role(&e.id) {
+                    errors.push(err(&format!("{path}.id"), format!("{:?} {ROLE}", e.id)));
+                }
+                if let Ok(net) = urmqtt_cfg::net::Cidr::parse(&e.from)
+                    && net.prefix != 0
+                    && !raw.allow_from_anywhere
+                    && !nets.iter().any(|a| a.contains_net(&net))
+                {
+                    errors.push(err(
+                        &format!("{path}.from"),
+                        format!(
+                            "{:?} is not inside allow_from, so no client could ever match it",
+                            e.from
+                        ),
+                    ));
+                }
+            }
+        }
+    }
 }
 
 fn validate_trust(raw: &RawTrust, errors: &mut Vec<ConfigError>) -> Trust {
@@ -1473,6 +1941,8 @@ pub mod pack;
 
 #[cfg(test)]
 mod pack_tests;
+#[cfg(test)]
+mod plain_tests;
 #[cfg(test)]
 mod tests;
 

@@ -1,0 +1,22 @@
+# A lab configuration with plaintext MQTT switched on (P1, ADR-229): two
+# accounts (their hashes were made with Python's hashlib.pbkdf2_hmac, an
+# independent implementation, for the passwords "correct horse" and
+# "sensor-2-secret"), two trusted networks and a few tightened limits. Used by
+# the golden tests of urmqtt-config.
+[network]
+mode = "static"
+address = "192.0.2.10/24"
+gateway = "192.0.2.1"
+
+[plaintext]
+enabled = true
+port = 1883
+allow_from = ["192.0.2.0/24", "10.20.0.0/16"]
+users = [
+  { id = "sensor-1", password_hash = "pbkdf2-sha256$1000$00112233445566778899aabbccddeeff$4c5805526868c915a4cba43d75ec6b0a07152bb7b9ca30501c96ea0f91886829" },
+  { id = "sensor-2", password_hash = "pbkdf2-sha256$1000$00112233445566778899aabbccddeeff$d8e0e2fe5529c9a22ab5544ab7731dee2bd812edd94059f6f97ff26be82c319b" },
+]
+max_connections = 200
+max_failed_auths_per_ip = 3
+lockout_s = 120
+acl_publish = ["sensors/{id}/#"]

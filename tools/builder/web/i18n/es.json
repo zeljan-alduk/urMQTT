@@ -70,6 +70,7 @@
   "section.registry": "Registro de dispositivos",
   "section.entropy": "Entropía",
   "section.cpu": "Funciones de la CPU",
+  "section.plaintext": "MQTT sin cifrar",
   "section.misc": "Entorno",
   "section.changed": "Modificados: {n}",
   "section.reset": "Restablecer sección",

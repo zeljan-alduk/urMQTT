@@ -70,6 +70,7 @@
   "section.registry": "Registre des appareils",
   "section.entropy": "Entropie",
   "section.cpu": "Fonctions du processeur",
+  "section.plaintext": "MQTT en clair",
   "section.misc": "Environnement",
   "section.changed": "Modifications\u00a0: {n}",
   "section.reset": "Réinitialiser la section",

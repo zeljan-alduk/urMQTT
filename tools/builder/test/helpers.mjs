@@ -7,7 +7,11 @@ import { fileURLToPath } from 'node:url';
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(HERE, '../../..');
-export const WASM = process.env.BUILDER_WASM || join(ROOT, 'build/builder/urmqtt-cfg1.wasm');
+/** The configuration format version the kernel and the module speak (crates/cfg/src/blob.rs). */
+export const FORMAT = Number(readFileSync(join(ROOT, 'crates/cfg/src/blob.rs'), 'utf8').match(/pub const FORMAT_VERSION: u16 = (\d+);/)[1]);
+/** The file name of the module the page loads for that format. */
+export const WASM_NAME = `urmqtt-cfg${FORMAT}.wasm`;
+export const WASM = process.env.BUILDER_WASM || join(ROOT, 'build/builder', WASM_NAME);
 export const CLI = process.env.URMQTT_CONFIG || join(ROOT, 'target/debug/urmqtt-config');
 export const FIXTURES = join(ROOT, 'tools/config/tests/fixtures');
 export const DEV = join(ROOT, 'deploy/dev');

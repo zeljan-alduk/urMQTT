@@ -5,6 +5,7 @@
 import { createHash, createPrivateKey, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { FORMAT } from './helpers.mjs';
 
 const b64 = buf => Buffer.from(buf).toString('base64');
 
@@ -67,7 +68,7 @@ export function writeMirror(dir, key, releases, { tamper = [] } = {}) {
       } else if (!existsSync(target)) {
         try { symlinkSync(r.template.path, target); } catch { copyFileSync(r.template.path, target); }
       }
-      rel.template = { file, path: `${r.tag}/${file}`, size, sha256: digest, config_format: r.format || 1 };
+      rel.template = { file, path: `${r.tag}/${file}`, size, sha256: digest, config_format: r.format || FORMAT };
       rel.sums = { path: `${r.tag}/SHA256SUMS`, sig_path: `${r.tag}/SHA256SUMS.minisig` };
       rel.assets = [{ name: file, size, sha256: digest, mirrored: true, github_url: `https://github.com/zeljan-alduk/urMQTT/releases/download/${r.tag}/${file}` }];
     } else {

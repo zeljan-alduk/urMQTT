@@ -19,22 +19,34 @@ use urmqtt_cfg::fields::tag;
 use urmqtt_cfg::{CfgError, fields};
 
 use crate::{
-    Acl, BuildConfig, Control, Cpu, DEV_KERNEL, DiscardMode, Entropy, IdentityField, Ipv4Cidr,
-    Limits, LogLevel, Memory, Network, NetworkMode, Observability, Rate, Registry, SocketAddrV4,
-    Storage, StorageMode, Time, Tls, Trust, Watchdog, WatchdogAction,
+    Acl, BuildConfig, Cidr, Control, Cpu, DEV_KERNEL, DiscardMode, Entropy, IdentityField,
+    Ipv4Cidr, Limits, LogLevel, Memory, Network, NetworkMode, Observability, PlainAuth,
+    PlainNetwork, PlainUser, Plaintext, Rate, Registry, SocketAddrV4, Storage, StorageMode, Time,
+    Tls, Trust, Watchdog, WatchdogAction,
 };
 
-/// Room for every string list of the field table at its documented maximum
-/// (the sum of the `max_items` of all `Strs` fields; checked by a test).
-const STR_SLOTS: usize = 1488;
+/// Room for every plain-text string list of the field table at its
+/// documented maximum (the sum of the `max_items` of the `Strs` fields whose
+/// entries are text; the typed lists have arrays of their own; checked by a
+/// test).
+const STR_SLOTS: usize = 1520;
 /// Operational plus bootstrap CAs at their maxima.
 const PEM_SLOTS: usize = 16;
 const ADDR_SLOTS: usize = fields::MAX_TIME_SERVERS;
+/// The plaintext lists (P1): networks, accounts, per-network identities.
+const NET_SLOTS: usize = fields::MAX_PLAIN_NETWORKS;
+const USER_SLOTS: usize = fields::MAX_PLAIN_USERS;
+const IPID_SLOTS: usize = fields::MAX_PLAIN_IP_IDENTITIES;
+
+const NO_NET: Cidr = Cidr { addr: 0, prefix: 0 };
 
 struct Arena {
     strs: [&'static str; STR_SLOTS],
     pems: [&'static [u8]; PEM_SLOTS],
     addrs: [SocketAddrV4; ADDR_SLOTS],
+    nets: [Cidr; NET_SLOTS],
+    users: [PlainUser; USER_SLOTS],
+    ipids: [PlainNetwork; IPID_SLOTS],
 }
 
 impl Arena {
@@ -46,6 +58,12 @@ impl Arena {
                 addr: [0; 4],
                 port: 0,
             }; ADDR_SLOTS],
+            nets: [NO_NET; NET_SLOTS],
+            users: [PlainUser { id: "", hash: "" }; USER_SLOTS],
+            ipids: [PlainNetwork {
+                net: NO_NET,
+                id: "",
+            }; IPID_SLOTS],
         }
     }
 }
@@ -138,6 +156,8 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
     let control_ids = list(tag::CTL_SERVICE_IDS);
     let cpu_disable = list(tag::CPU_DISABLE);
     let revoked_serials = list(tag::TLS_REVOKED);
+    let plain_acl_publish = list(tag::PL_ACL_PUBLISH);
+    let plain_acl_subscribe = list(tag::PL_ACL_SUBSCRIBE);
     let mut pem_list = |t: u16| -> &'static [&'static [u8]] {
         let n = b.bins(t).count();
         let (head, tail) = take(&mut pems).split_at_mut_checked(n).unwrap_or_default();
@@ -160,6 +180,50 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
         n = i + 1;
     }
     let servers: &'static [SocketAddrV4] = arena.addrs.get(..n).unwrap_or_default();
+
+    // The plaintext lists (P1): the blob holds text, the kernel wants typed
+    // entries it can match on the SYN path. The blob passed the checks, so
+    // every entry parses; one that did not would be skipped, never trusted.
+    let mut n_nets = 0;
+    for (i, (slot, c)) in arena
+        .nets
+        .iter_mut()
+        .zip(
+            b.strs(tag::PL_ALLOW_FROM)
+                .filter_map(|s| Cidr::parse(s).ok()),
+        )
+        .enumerate()
+    {
+        *slot = c;
+        n_nets = i + 1;
+    }
+    let allow_from: &'static [Cidr] = arena.nets.get(..n_nets).unwrap_or_default();
+    let mut n_users = 0;
+    for (i, (slot, (id, hash))) in arena
+        .users
+        .iter_mut()
+        .zip(b.strs(tag::PL_USERS).filter_map(|s| s.split_once(' ')))
+        .enumerate()
+    {
+        *slot = PlainUser { id, hash };
+        n_users = i + 1;
+    }
+    let users: &'static [PlainUser] = arena.users.get(..n_users).unwrap_or_default();
+    let mut n_ids = 0;
+    for (i, (slot, (net, id))) in arena
+        .ipids
+        .iter_mut()
+        .zip(
+            b.strs(tag::PL_IP_IDENTITIES)
+                .filter_map(|s| urmqtt_cfg::plain::parse_ip_identity(s).ok()),
+        )
+        .enumerate()
+    {
+        *slot = PlainNetwork { net, id };
+        n_ids = i + 1;
+    }
+    let ip_identities: &'static [PlainNetwork] = arena.ipids.get(..n_ids).unwrap_or_default();
+    let (pl_tokens, pl_per_ms) = b.rate(tag::PL_PUBLISH_RATE);
 
     let sock = |t: u16| b.addr(t).map(|(addr, port)| SocketAddrV4 { addr, port });
     let u32_of = |t: u16| u32::try_from(b.uint(t)).unwrap_or(u32::MAX);
@@ -302,6 +366,32 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             operational,
             bootstrap,
         },
+        plaintext: Plaintext {
+            enabled: b.bool(tag::PL_ENABLED),
+            port: u16::try_from(b.uint(tag::PL_PORT)).unwrap_or(0),
+            allow_from,
+            allow_from_anywhere: b.bool(tag::PL_ANYWHERE),
+            auth: match b.variant(tag::PL_AUTH) {
+                1 => PlainAuth::Anonymous,
+                2 => PlainAuth::Ip,
+                _ => PlainAuth::Password,
+            },
+            anonymous_identity: b.str(tag::PL_ANON_ID),
+            users,
+            ip_identities,
+            max_connections: u32_of(tag::PL_MAX_CONNS),
+            max_connections_per_ip: u32_of(tag::PL_MAX_PER_IP),
+            max_packet_size: u32_of(tag::PL_MAX_PACKET),
+            publish_rate_per_device: Rate {
+                tokens: pl_tokens,
+                per_ms: pl_per_ms,
+            },
+            max_failed_auths_per_ip: u32_of(tag::PL_MAX_FAILS),
+            lockout_s: u32_of(tag::PL_LOCKOUT),
+            acl_publish: plain_acl_publish,
+            acl_subscribe: plain_acl_subscribe,
+            retain: b.bool(tag::PL_RETAIN),
+        },
     }
 }
 
@@ -441,14 +531,34 @@ mod tests {
 
     #[test]
     fn the_string_arena_holds_every_list_at_its_maximum() {
+        // Text lists live in `strs`; the lists with typed entries (networks,
+        // accounts, per-network identities) have arrays of their own.
         let total: usize = fields::FIELDS
             .iter()
             .map(|f| match f.kind {
-                fields::Kind::Strs { max_items, .. } => usize::from(max_items),
+                fields::Kind::Strs { max_items, .. } if f.item == fields::Item::Text => {
+                    usize::from(max_items)
+                }
                 _ => 0,
             })
             .sum();
         assert!(total <= STR_SLOTS, "{total} > {STR_SLOTS}");
+        for (item, slots) in [
+            (fields::Item::Cidr, NET_SLOTS),
+            (fields::Item::User, USER_SLOTS),
+            (fields::Item::IpIdentity, IPID_SLOTS),
+        ] {
+            let max: usize = fields::FIELDS
+                .iter()
+                .map(|f| match f.kind {
+                    fields::Kind::Strs { max_items, .. } if f.item == item => {
+                        usize::from(max_items)
+                    }
+                    _ => 0,
+                })
+                .sum();
+            assert_eq!(max, slots, "{item:?}");
+        }
         let pems: usize = fields::FIELDS
             .iter()
             .map(|f| match f.kind {
@@ -546,6 +656,121 @@ mod tests {
             })
         );
         assert_eq!(c.memory.kernel_heap_mb, 128);
+    }
+
+    #[test]
+    fn plaintext_is_off_by_default_with_the_documented_defaults() {
+        let p = CONFIG.plaintext;
+        assert!(!p.enabled && !p.allow_from_anywhere && !p.retain);
+        assert_eq!((p.port, p.auth), (1883, PlainAuth::Password));
+        assert!(p.allow_from.is_empty() && p.users.is_empty() && p.ip_identities.is_empty());
+        assert_eq!(p.anonymous_identity, "lan");
+        assert_eq!(
+            (
+                p.max_connections,
+                p.max_connections_per_ip,
+                p.max_packet_size
+            ),
+            (1000, 16, 1024)
+        );
+        assert_eq!(
+            p.publish_rate_per_device,
+            Rate {
+                tokens: 5,
+                per_ms: 1000
+            }
+        );
+        assert_eq!((p.max_failed_auths_per_ip, p.lockout_s), (5, 300));
+        assert_eq!(p.acl_publish, ["devices/{id}/#"]);
+        assert_eq!(p.acl_subscribe, ["devices/{id}/cmd/#"]);
+    }
+
+    #[test]
+    fn a_plaintext_configuration_is_decoded() {
+        use urmqtt_cfg::build::Builder;
+        use urmqtt_cfg::passwd;
+        let hash = passwd::encode(b"pw", b"0123456789abcdef", 1000).unwrap();
+        let mut b = Builder::new();
+        b.bool(tag::PL_ENABLED, true).unwrap();
+        b.uint(tag::PL_PORT, 1884).unwrap();
+        b.strs(tag::PL_ALLOW_FROM, &["10.0.0.0/8", "192.168.1.0/24"])
+            .unwrap();
+        b.strs(
+            tag::PL_USERS,
+            &[format!("sensor-1 {hash}"), format!("boiler {hash}")],
+        )
+        .unwrap();
+        b.uint(tag::PL_MAX_CONNS, 40).unwrap();
+        b.rate(tag::PL_PUBLISH_RATE, 2, 1000).unwrap();
+        b.strs(tag::PL_ACL_PUBLISH, &["home/{id}/#"]).unwrap();
+        b.strs::<&str>(tag::PL_ACL_SUBSCRIBE, &[]).unwrap();
+        b.bool(tag::PL_RETAIN, true).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        let p = c.plaintext;
+        assert!(p.enabled && p.retain && !p.allow_from_anywhere);
+        assert_eq!(p.port, 1884);
+        assert_eq!(p.allow_from.len(), 2);
+        assert!(p.allow_from[0].contains_octets([10, 9, 9, 9]));
+        assert!(!p.allow_from[0].contains_octets([11, 0, 0, 1]));
+        assert!(p.allow_from[1].contains_octets([192, 168, 1, 77]));
+        assert_eq!(p.users.len(), 2);
+        assert_eq!(
+            (p.users[0].id, p.users[0].hash),
+            ("sensor-1", hash.as_str())
+        );
+        assert_eq!(p.users[1].id, "boiler");
+        assert_eq!(p.max_connections, 40);
+        assert_eq!(
+            p.publish_rate_per_device,
+            Rate {
+                tokens: 2,
+                per_ms: 1000
+            }
+        );
+        assert_eq!(p.acl_publish, ["home/{id}/#"]);
+        assert!(
+            p.acl_subscribe.is_empty(),
+            "an explicit empty list is read-only"
+        );
+        // Untouched keys keep their defaults.
+        assert_eq!((p.max_connections_per_ip, p.lockout_s), (16, 300));
+        assert_eq!(c.acl.device_publish, ["devices/{id}/#"]);
+    }
+
+    #[test]
+    fn an_ip_identity_list_is_decoded_longest_prefix_data_intact() {
+        use urmqtt_cfg::build::Builder;
+        let mut b = Builder::new();
+        b.bool(tag::PL_ENABLED, true).unwrap();
+        b.variant(tag::PL_AUTH, 2).unwrap();
+        b.strs(tag::PL_ALLOW_FROM, &["10.0.0.0/8"]).unwrap();
+        b.strs(
+            tag::PL_IP_IDENTITIES,
+            &["10.1.0.0/16 plc", "10.1.2.0/24 gate", "10.9.9.9/32 pump"],
+        )
+        .unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        let p = c.plaintext;
+        assert_eq!(p.auth, PlainAuth::Ip);
+        let ids: Vec<(String, &str)> = p
+            .ip_identities
+            .iter()
+            .map(|e| (e.net.to_string(), e.id))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("10.1.0.0/16".to_owned(), "plc"),
+                ("10.1.2.0/24".to_owned(), "gate"),
+                ("10.9.9.9/32".to_owned(), "pump"),
+            ]
+        );
     }
 
     #[test]

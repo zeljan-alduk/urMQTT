@@ -175,7 +175,9 @@ function buildRow(f) {
 function renderSections() {
   const wrap = h('div', { class: 'ub-main-sections', style: 'display:grid;gap:18px' });
   const open = new Set(['network', 'tls', 'trust']);
-  const sectionBody = fields => h('div', { class: 'ub-fields' }, fields.map(f => {
+  // The accounts of the plaintext listener (hashes, no clear text) get their
+  // own editor; until then the generic text area is not offered for them.
+  const sectionBody = fields => h('div', { class: 'ub-fields' }, fields.filter(f => !isUserList(f)).map(f => {
     const row = buildRow(f);
     rows.set(f.id, row);
     return row.el;

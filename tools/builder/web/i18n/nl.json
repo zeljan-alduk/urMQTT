@@ -70,6 +70,7 @@
   "section.registry": "Apparaatregister",
   "section.entropy": "Entropie",
   "section.cpu": "CPU-functies",
+  "section.plaintext": "MQTT zonder versleuteling",
   "section.misc": "Omgeving",
   "section.changed": "{n} gewijzigd",
   "section.reset": "Sectie terugzetten",

@@ -1544,6 +1544,7 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "sha2 0.11.1",
+ "subtle",
  "urmqtt-dispatch",
 ]
 
@@ -1705,6 +1706,14 @@ dependencies = [
 [[package]]
 name = "urmqtt-pci"
 version = "0.1.0"
+
+[[package]]
+name = "urmqtt-plain"
+version = "0.1.0"
+dependencies = [
+ "urmqtt-cfg",
+ "urmqtt-config",
+]
 
 [[package]]
 name = "urmqtt-platform"
