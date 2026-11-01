@@ -135,6 +135,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
                         .map_err(|_| "--now takes Unix seconds".to_owned())
                 })
                 .transpose()?;
+            let latest_format = flag(&mut args, "--latest-format");
             let out = take(&mut args, "--out")?;
             let out_slot = take(&mut args, "--out-slot")?;
             let iso = take(&mut args, "--iso")?;
@@ -148,6 +149,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
                 sign_key,
                 root,
                 now_unix,
+                latest_format,
             })?;
             let desc = urmqtt_config_tool::verify_blob(&blob, true)?;
             match (out, out_slot, iso, img) {

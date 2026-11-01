@@ -37,8 +37,8 @@ pub mod passwd;
 pub mod plain;
 
 pub use blob::{
-    Blob, DISK_MARKER, FORMAT_MIN, FORMAT_VERSION, MAGIC, MAX_BLOB, SLOT_MARKER, SLOT_SIZE,
-    SlotKind,
+    BASE_VERSION, Blob, DISK_MARKER, FORMAT_MIN, FORMAT_VERSION, MAGIC, MAX_BLOB, SLOT_MARKER,
+    SLOT_SIZE, SlotKind,
 };
 
 use core::fmt;

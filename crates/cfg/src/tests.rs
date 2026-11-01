@@ -204,14 +204,17 @@ fn structural_attacks_fail_closed() {
     assert!(Blob::parse(&assemble(&dup)).is_err());
     // Wrong width, out of range, bad variant, port 0.
     assert!(Blob::parse(&assemble(&record(tag::NET_TLS_PORT, &[1]))).is_err());
-    assert!(Blob::parse(&assemble(&record(tag::NET_TLS_PORT, &0u16.to_le_bytes()))).is_err());
+    // Port 0 is in range now (the TLS listener off, ADR-233) but the check refuses it without plaintext.
+    let off = assemble(&record(tag::NET_TLS_PORT, &0u16.to_le_bytes()));
+    let off = Blob::parse(&off).unwrap();
+    assert!(check::check(&off, false).is_err());
     assert!(Blob::parse(&assemble(&record(tag::NET_MODE, &[3]))).is_err());
     // A record that overruns the payload.
     let mut over = record(tag::NET_MODE, &[0]);
     over[2] = 200;
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, and one above the newest).
-    for unknown in [0u8, 3, 9] {
+    for unknown in [0u8, 4, 9] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
@@ -233,14 +236,18 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 2));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 3));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
     assert_eq!(&e[8..10], &[2, 0]);
     let mut buf = [0u8; blob::EMPTY_BLOB_LEN];
     blob::write_empty(&mut buf);
-    assert_eq!(&buf[8..10], &[2, 0]);
+    assert_eq!(
+        &buf[8..10],
+        &[3, 0],
+        "the built-in empty slot declares the newest format this kernel reads"
+    );
     // A version 1 blob made by the previous release's tool: the same records,
     // the version in its header and its own fingerprint. It still parses and
     // passes the checks, and its values are read as before.
@@ -811,6 +818,11 @@ fn garbage_never_panics() {
 fn the_built_in_empty_blob_equals_the_builders() {
     let mut buf = [0u8; blob::EMPTY_BLOB_LEN];
     blob::write_empty(&mut buf);
-    assert_eq!(&buf[..], &empty()[..]);
+    assert_eq!(
+        &buf[..],
+        &Builder::new()
+            .finish_as(false, blob::FORMAT_VERSION)
+            .unwrap()[..]
+    );
     assert!(Blob::parse(&buf).is_ok());
 }

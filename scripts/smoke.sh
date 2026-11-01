@@ -1997,9 +1997,12 @@ plaintext() {
     mk ip base "$allow" 'auth = "ip"' 'ip_identities = [{ from = "10.0.2.2/32", id = "gateway" }]'
     mk limits base "$allow" "$users" 'max_connections_per_ip = 3'
     mk registry base-registry "$allow" "$users"
+    # ADR-233: the TLS listener off (network.mqtt_tls_port = 0), plaintext only.
+    sed -e 's/^mqtt_tls_port = .*/mqtt_tls_port = 0/' "$dir/base.toml" >"$dir/base-notls.toml"
+    mk plainonly base-notls "$allow" 'auth = "anonymous"' 'acl_publish = ["home/#"]' 'acl_subscribe = ["home/#"]'
     local common=("mqtt: PLAINTEXT listener on port 1883 \(NOT ENCRYPTED\)" "config: plaintext MQTT is ON \(port 1883" "^URMQTT READY$" "NOT:client: .* FAILED" "$NO_FAULT")
     local name
-    for name in password lockout refused anonymous ip limits registry; do
+    for name in password lockout refused anonymous ip limits registry plainonly; do
         local extra=() iso="$OUT/plain-$name.raw"
         case $name in
             password) extra=("plaintext: one password check costs about [0-9]+ us \(3000 iterations" "plaintext: login refused for 10\.0\.2\.2 \(wrong password\), 1 so far"
@@ -2017,6 +2020,7 @@ plaintext() {
             anonymous) extra=("mqtt: plaintext.auth = \"anonymous\"" "client: anonymous-default-clients ok" "client: anonymous-acl ok") ;;
             ip) extra=("mqtt: plaintext.auth = \"ip\"" "client: ip-mode-identity-is-the-networks ok") ;;
             limits) extra=("client: per-address-connection-limit ok" "client: a-closed-connection-makes-room ok") ;;
+            plainonly) extra=("mqtt: TLS listener off \(plaintext only" "NOT:TLS 1\.3 listener on port" "client: anonymous-default-clients ok" "client: no-tls-listener ok") ;;
             registry) extra=("registry: plaintext login sensor-1 is not on the allowlist, refused" "client: not-on-the-allowlist-refused ok") ;;
         esac
         MKIMG_EXTRA=(--config "$dir/$name.blob")

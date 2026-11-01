@@ -4,7 +4,9 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use crate::blob::{self, Blob, FORMAT_VERSION, HEADER_LEN, MAGIC, SIG_KEY_LEN, SIG_LEN};
+use crate::blob::{
+    self, BASE_VERSION, Blob, FORMAT_VERSION, HEADER_LEN, MAGIC, SIG_KEY_LEN, SIG_LEN,
+};
 use crate::fields::{self, Field, Kind};
 use crate::{CfgError, err};
 
@@ -135,6 +137,32 @@ impl Builder {
     /// Encodes the unsigned blob and validates it as the kernel will.
     /// `dev_allowed`: the target kernel is a dev build.
     pub fn finish(&self, dev_allowed: bool) -> Result<Vec<u8>, CfgError> {
+        self.finish_as(dev_allowed, self.lowest_version())
+    }
+
+    /// The lowest format version that can hold this configuration: 2, or 3 when the TLS listener is off.
+    pub fn lowest_version(&self) -> u16 {
+        let tls_off = self
+            .records
+            .iter()
+            .any(|(t, v)| *t == crate::fields::tag::NET_TLS_PORT && v.iter().all(|b| *b == 0));
+        if tls_off {
+            FORMAT_VERSION
+        } else {
+            BASE_VERSION
+        }
+    }
+
+    /// [`finish`](Self::finish) with a format version of the caller's choice (the newest, for the empty
+    /// configuration of a template ISO, which is how a template says what its kernel reads). A version
+    /// below [`lowest_version`](Self::lowest_version) is refused.
+    pub fn finish_as(&self, dev_allowed: bool, version: u16) -> Result<Vec<u8>, CfgError> {
+        if version < self.lowest_version() || version > FORMAT_VERSION {
+            return Err(err(
+                "blob",
+                "this configuration needs a newer format version than the one asked for",
+            ));
+        }
         let mut payload = Vec::new();
         for (tag, value) in &self.records {
             payload.extend_from_slice(&tag.to_le_bytes());
@@ -144,7 +172,7 @@ impl Builder {
         }
         let mut out = Vec::with_capacity(HEADER_LEN + payload.len() + 33);
         out.extend_from_slice(&MAGIC);
-        out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        out.extend_from_slice(&version.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         let plen = u32::try_from(payload.len()).map_err(|_| err("blob", "payload too long"))?;
         out.extend_from_slice(&plen.to_le_bytes());

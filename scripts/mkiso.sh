@@ -133,7 +133,7 @@ cfgtool() { (cd "$ROOT" && cargo run -q --locked -p urmqtt-config-tool --bin urm
 CFG_ENV=${URMQTT_ENV:-dev}
 if [[ $EMPTY_CONFIG -eq 1 ]]; then
     : > "$TMP/empty.toml"
-    cfgtool pack "$TMP/empty.toml" --out-slot "$TMP/urmqtt.cfg" | sed 's/^/config: empty (template): /' >&2
+    cfgtool pack "$TMP/empty.toml" --latest-format --out-slot "$TMP/urmqtt.cfg" | sed 's/^/config: empty (template): /' >&2
 elif [[ -n "$CONFIG" && "$CONFIG" != *.toml ]]; then
     cfgtool slot "$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")" "$TMP/urmqtt.cfg"
     echo "config: $CONFIG" >&2
@@ -147,7 +147,7 @@ fi
 # this image is configured with: the image (and its hash in the menus) must not depend
 # on the customer's configuration, and must not carry their keys a second time.
 : > "$TMP/empty.toml"
-cfgtool pack "$TMP/empty.toml" --out-slot "$TMP/empty.cfg" >/dev/null
+cfgtool pack "$TMP/empty.toml" --latest-format --out-slot "$TMP/empty.cfg" >/dev/null
 python3 -I "$ROOT/scripts/cfgslot.py" as-disk "$TMP/empty.cfg" "$TMP/urmqtt-disk.cfg"
 CFG_HASH=$(blake2b "$TMP/urmqtt.cfg")
 # The module line of limine.conf: with the hash in the ISO menus, without it

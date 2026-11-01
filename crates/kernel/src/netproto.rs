@@ -53,7 +53,7 @@ fn now_ms() -> u64 {
 }
 
 fn is_mqtt_port(port: u16) -> bool {
-    port == CONFIG.network.mqtt_tls_port
+    (CONFIG.network.mqtt_tls_port != 0 && port == CONFIG.network.mqtt_tls_port)
         || CONFIG.network.mqtt_plain_port == Some(port)
         || crate::plain::port() == Some(port)
 }

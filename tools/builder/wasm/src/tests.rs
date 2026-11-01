@@ -21,6 +21,7 @@ fn lab_toml() -> String {
 fn packing_equals_the_command_line_tool() {
     let blob = core::pack(&lab_toml(), &Files::new(), None, 1_900_000_000, None).unwrap();
     let cli = pack_blob(&PackArgs {
+        latest_format: false,
         toml: fixtures().join("lab.toml"),
         now_unix: Some(1_900_000_000),
         ..PackArgs::default()
@@ -138,7 +139,7 @@ fn the_handle_interface_round_trips() {
     assert!(ub_buf_len(s) > 1000);
     ub_buf_free(s);
     assert_eq!(ub_abi_version(), core::ABI_VERSION);
-    assert_eq!(ub_format_version(), 2);
+    assert_eq!(ub_format_version(), 3);
 }
 
 /// P1: the page hashes a plaintext account's password in the module, with a
@@ -208,7 +209,9 @@ fn a_password_is_hashed_with_the_pages_salt_and_wiped() {
 fn synthetic_template() -> Vec<u8> {
     use urmqtt_cfg::blake2b;
     use urmqtt_cfg::blob::{DISK_MARKER, SlotKind, make_slot};
-    let empty = urmqtt_cfg::build::Builder::new().finish(false).unwrap();
+    let empty = urmqtt_cfg::build::Builder::new()
+        .finish_as(false, urmqtt_cfg::FORMAT_VERSION)
+        .unwrap();
     assert_eq!(
         empty[8],
         urmqtt_cfg::FORMAT_VERSION as u8,
@@ -239,7 +242,7 @@ fn an_iso_is_probed_and_configured_in_place_like_the_tool_does() {
     let tpl = synthetic_template();
     let probe = core::iso_probe(&tpl).unwrap();
     assert!(
-        probe.contains(r#""format_version":2"#) && probe.contains(r#""supported":true"#),
+        probe.contains(r#""format_version":3"#) && probe.contains(r#""supported":true"#),
         "{probe}"
     );
     let blob = core::pack(&lab_toml(), &Files::new(), None, 1_900_000_000, None).unwrap();

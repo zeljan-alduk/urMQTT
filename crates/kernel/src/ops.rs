@@ -98,6 +98,10 @@ fn counters(lost: u64, unsent: u64) -> Counters {
 /// Days until the server certificate expires (negative: expired), if the
 /// wall clock is known.
 pub(crate) fn server_cert_days() -> Option<i64> {
+    // No TLS listener (plaintext only, ADR-233): there is no server certificate to expire.
+    if urmqtt_config::CONFIG.network.mqtt_tls_port == 0 {
+        return None;
+    }
     let now = crate::boot::now_unix()?;
     let after = urmqtt_config::CONFIG.tls.server_cert_not_after;
     Some((after as i64 - now as i64).div_euclid(86_400))
@@ -139,6 +143,7 @@ impl Ops {
             HEALTH_EVERY_MS / 1000
         );
         match server_cert_days() {
+            None if CONFIG.network.mqtt_tls_port == 0 => {}
             Some(d) => info!(
                 "tls: server certificate valid for {d} more day(s) (warnings from {} days)",
                 CERT_WARN_DAYS[0]

@@ -341,6 +341,12 @@ fn network(b: &Blob<'_>, dev: bool) -> Result<(), CfgError> {
         }
     }
     let tls_port = b.uint(tag::NET_TLS_PORT);
+    if tls_port == 0 && !b.bool(tag::PL_ENABLED) {
+        return Err(err(
+            "network.mqtt_tls_port",
+            "0 (the TLS listener off) is only allowed with plaintext.enabled = true: a broker needs at least one listener",
+        ));
+    }
     let plain = b.uint(tag::NET_PLAIN_PORT);
     if plain != 0 {
         if !dev {
@@ -349,7 +355,7 @@ fn network(b: &Blob<'_>, dev: bool) -> Result<(), CfgError> {
                 "plaintext MQTT is only allowed in env = \"dev\"",
             ));
         }
-        if plain == tls_port {
+        if tls_port != 0 && plain == tls_port {
             return Err(err(
                 "network.mqtt_plain_port",
                 "must differ from mqtt_tls_port",
@@ -453,7 +459,7 @@ fn plaintext(b: &Blob<'_>, max_len: u64, max_levels: u64) -> Result<(), CfgError
         ));
     }
     let port = b.uint(tag::PL_PORT);
-    if port == b.uint(tag::NET_TLS_PORT) {
+    if b.uint(tag::NET_TLS_PORT) != 0 && port == b.uint(tag::NET_TLS_PORT) {
         return Err(err(
             "plaintext.port",
             "must differ from network.mqtt_tls_port",

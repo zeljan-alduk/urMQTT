@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use urmqtt_cfg::blob::{Blob, Hex, SlotKind, slot_blob};
 use urmqtt_cfg::fields::{self, Kind};
-use urmqtt_config_schema::pack::{PackOptions, pack};
+use urmqtt_config_schema::pack::{PackOptions, pack, pack_with};
 
 pub mod certs;
 pub mod image;
@@ -42,6 +42,9 @@ pub struct PackArgs {
     /// The clock for the certificate expiry checks (default: now, but never
     /// before `SOURCE_DATE_EPOCH`).
     pub now_unix: Option<u64>,
+    /// Write the newest format version whatever the configuration needs (`--latest-format`): for the
+    /// empty configuration of a template ISO, whose slot then tells what its kernel reads (ADR-233).
+    pub latest_format: bool,
 }
 
 /// The packer's clock: the system time, never earlier than the commit time
@@ -67,11 +70,14 @@ pub fn pack_blob(args: &PackArgs) -> Result<Vec<u8>, String> {
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
     });
     let mut read = |name: &str| std::fs::read(dir.join(name)).map_err(|e| e.to_string());
-    let blob = pack_text(
+    let blob = pack_with(
         &text,
-        &mut read,
-        args.env.as_deref(),
-        args.now_unix.unwrap_or_else(default_now),
+        PackOptions {
+            read: &mut read,
+            now_unix: args.now_unix.unwrap_or_else(default_now),
+            env: args.env.as_deref(),
+        },
+        args.latest_format,
     )
     .map_err(|errors| {
         let list: Vec<String> = errors.iter().map(|e| format!("  - {e}")).collect();

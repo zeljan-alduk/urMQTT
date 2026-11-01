@@ -533,7 +533,17 @@ fn build_plaintext(b: &mut Builder, p: &crate::Plaintext) -> Result<(), urmqtt_c
 /// Packs `toml_text` into an unsigned blob. A top-level `env = "..."` picks
 /// the environment (default `prod`). Missing keys take the defaults; every
 /// problem found is returned.
-pub fn pack(toml_text: &str, mut opts: PackOptions<'_>) -> Result<Vec<u8>, Vec<ConfigError>> {
+pub fn pack(toml_text: &str, opts: PackOptions<'_>) -> Result<Vec<u8>, Vec<ConfigError>> {
+    pack_with(toml_text, opts, false)
+}
+
+/// [`pack`], optionally written in the newest format version whatever the configuration needs: for the
+/// empty configuration of a template ISO, whose slot then tells what its kernel can read (ADR-233).
+pub fn pack_with(
+    toml_text: &str,
+    mut opts: PackOptions<'_>,
+    newest_format: bool,
+) -> Result<Vec<u8>, Vec<ConfigError>> {
     let mut user: toml::Table = toml_text
         .parse()
         .map_err(|e: toml::de::Error| vec![cerr("", e.to_string())])?;
@@ -564,7 +574,13 @@ pub fn pack(toml_text: &str, mut opts: PackOptions<'_>) -> Result<Vec<u8>, Vec<C
     let builder = build(&cfg, &files).map_err(blob_err)?;
     // Packed for a dev kernel when the environment is dev; otherwise the
     // strictest check (a release kernel).
-    builder.finish(cfg.env == "dev").map_err(blob_err)
+    if newest_format {
+        builder
+            .finish_as(cfg.env == "dev", urmqtt_cfg::FORMAT_VERSION)
+            .map_err(blob_err)
+    } else {
+        builder.finish(cfg.env == "dev").map_err(blob_err)
+    }
 }
 
 // --- the schema as JSON, for the web form ----------------------------------

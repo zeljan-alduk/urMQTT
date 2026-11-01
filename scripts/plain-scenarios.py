@@ -391,6 +391,19 @@ def anonymous_mode():
     c.close()
 
 
+def plainonly_mode():
+    # TLS is off (network.mqtt_tls_port = 0, ADR-233): the plaintext listener works for an allowed source ...
+    anonymous_mode()
+    # ... and nothing answers a TLS client on the TLS port: the connection is reset or closed, no handshake.
+    try:
+        c = Conn(TLS, tls="devices/device-001", timeout=6)
+        ok = c.connect("device-001") != 0
+        c.close()
+    except (OSError, ssl.SSLError, AssertionError, TypeError, ValueError, TimeoutError):
+        ok = True
+    report("no-tls-listener", ok, "a TLS client got in" if not ok else "")
+
+
 def ip_mode():
     bk = backend()
     c, code = plain("whatever")
@@ -429,7 +442,7 @@ def registry_mode():
 
 MODES = {
     "password": password_mode, "lockout": lockout_mode, "refused": refused_mode, "anonymous": anonymous_mode,
-    "ip": ip_mode, "limits": limits_mode, "registry": registry_mode,
+    "ip": ip_mode, "limits": limits_mode, "registry": registry_mode, "plainonly": plainonly_mode,
 }
 try:
     MODES[MODE]()

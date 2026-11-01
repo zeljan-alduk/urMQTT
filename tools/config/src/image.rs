@@ -98,6 +98,25 @@ pub fn configure_iso_in_place(iso: &mut [u8], blob: &[u8]) -> Result<String, Str
     let old = old.ok_or(
         "no configuration slot found: this is not a template ISO of this format (build 0.1.x releases and earlier have none)",
     )?;
+    // The kernel of the template reads blobs up to the version its own empty slot has: a configuration
+    // that needs a newer one (the TLS listener off, ADR-233) would be refused at boot.
+    let version_of = |b: &[u8]| {
+        b.get(8..10)
+            .and_then(|v| <[u8; 2]>::try_from(v).ok())
+            .map_or(0, u16::from_le_bytes)
+    };
+    // Only an empty slot (a template) says what the kernel reads: once a configuration is in, its version
+    // is the configuration's, not the kernel's, so a configured image can be configured again.
+    let template_reads = slot_blob(&old, SlotKind::Boot)
+        .ok()
+        .filter(|b| urmqtt_cfg::Blob::parse(b).is_ok_and(|p| p.is_empty()))
+        .map_or(urmqtt_cfg::FORMAT_VERSION, version_of);
+    if version_of(blob) > template_reads {
+        return Err(format!(
+            "this configuration needs configuration format {}, which this template's kernel does not read (it reads up to {template_reads}): use a newer release",
+            version_of(blob)
+        ));
+    }
     let old_hash = slot_hash(&old);
     let refs = hash_refs(iso);
     if refs.is_empty() {

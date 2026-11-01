@@ -735,7 +735,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         ));
     }
 
-    let network = validate_network(env, &raw.network, &mut errors);
+    let network = validate_network(env, &raw.network, raw.plaintext.enabled, &mut errors);
     let tls = validate_tls(&raw.tls, &mut errors);
     let limits = validate_limits(&raw.limits, &mut errors);
     let acl = validate_acl(&raw.acl, &limits, &mut errors);
@@ -1023,7 +1023,7 @@ fn validate_plaintext_enabled(
             "required when plaintext is enabled: the networks that may connect (for example 10.0.0.0/8), or allow_from_anywhere = true",
         ));
     }
-    if raw.port == network.mqtt_tls_port {
+    if network.mqtt_tls_port != 0 && raw.port == network.mqtt_tls_port {
         errors.push(err(
             "plaintext.port",
             "must differ from network.mqtt_tls_port",
@@ -1264,7 +1264,12 @@ fn is_valid_env_name(env: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-fn validate_network(env: &str, raw: &RawNetwork, errors: &mut Vec<ConfigError>) -> Network {
+fn validate_network(
+    env: &str,
+    raw: &RawNetwork,
+    plaintext_on: bool,
+    errors: &mut Vec<ConfigError>,
+) -> Network {
     let mode = match raw.mode {
         NetworkModeKind::Dhcp => {
             if raw.address.is_some() || raw.gateway.is_some() {
@@ -1347,8 +1352,11 @@ fn validate_network(env: &str, raw: &RawNetwork, errors: &mut Vec<ConfigError>) 
         }
     };
 
-    if raw.mqtt_tls_port == 0 {
-        errors.push(err("network.mqtt_tls_port", "must be a non-zero port"));
+    if raw.mqtt_tls_port == 0 && !plaintext_on {
+        errors.push(err(
+            "network.mqtt_tls_port",
+            "0 (the TLS listener off) is only allowed with plaintext.enabled = true: a broker needs at least one listener",
+        ));
     }
     let mqtt_plain_port = match raw.mqtt_plain_port {
         0 => None,
@@ -1359,7 +1367,7 @@ fn validate_network(env: &str, raw: &RawNetwork, errors: &mut Vec<ConfigError>) 
                     format!("plaintext MQTT is only allowed in {PLAINTEXT_ENVS:?}, set it to 0"),
                 ));
             }
-            if p == raw.mqtt_tls_port {
+            if raw.mqtt_tls_port != 0 && p == raw.mqtt_tls_port {
                 errors.push(err(
                     "network.mqtt_plain_port",
                     "must differ from mqtt_tls_port",
@@ -1945,6 +1953,8 @@ mod pack_tests;
 mod plain_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tls_off_tests;
 
 #[cfg(kani)]
 mod proofs;

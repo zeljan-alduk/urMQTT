@@ -320,8 +320,8 @@ pub static FIELDS: &[Field] = &[
     f(
         t::NET_TLS_PORT,
         "network.mqtt_tls_port",
-        uint(2, 1, 65_535, 8883),
-        "TCP port of MQTT over TLS.",
+        uint(2, 0, 65_535, 8883),
+        "TCP port of MQTT over TLS; 0 turns the TLS listener off (only with plaintext.enabled = true: then there is no mutual TLS, so no operator, service or control rights, no $SYS and no certificate is needed).",
     ),
     dev(f(
         t::NET_PLAIN_PORT,

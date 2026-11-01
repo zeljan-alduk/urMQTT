@@ -391,6 +391,10 @@ impl BuildConfig {
     /// refuses to serve without a server certificate, its key and at least
     /// one operational CA.
     pub fn missing_to_serve(&self) -> Option<&'static str> {
+        // The TLS listener is off (plaintext only, ADR-233): nothing of the TLS side is needed.
+        if self.network.mqtt_tls_port == 0 {
+            return None;
+        }
         if self.tls.cert_pem.is_empty() || self.tls.key_pem.is_empty() {
             Some("no server certificate and key (tls.cert, tls.key)")
         } else if self.trust.operational.is_empty() {

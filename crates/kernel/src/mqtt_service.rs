@@ -473,9 +473,18 @@ impl MqttService {
     pub fn new(restored: Option<&Restored>, me: usize, n: usize) -> Self {
         // The revocation list is shared with the control channel; it was
         // filled from the store (seeded from the image) or the image.
-        let tls = tls_server();
+        // The TLS listener is off when its port is 0 (plaintext only, ADR-233): no server is even set up.
+        let tls = if CONFIG.network.mqtt_tls_port == 0 {
+            None
+        } else {
+            tls_server()
+        };
         if me == dataplane::workers(n).start {
-            if tls.is_some() {
+            if CONFIG.network.mqtt_tls_port == 0 {
+                info!(
+                    "mqtt: TLS listener off (plaintext only: no mutual TLS, so no operator, service or control rights, no $SYS and no certificate checks; every identity comes from the plaintext login)"
+                );
+            } else if tls.is_some() {
                 info!(
                     "mqtt: TLS 1.3 listener on port {} (mutual TLS, identity = certificate {:?}, {} revoked serial(s), {} operational and {} bootstrap CA file(s))",
                     CONFIG.network.mqtt_tls_port,

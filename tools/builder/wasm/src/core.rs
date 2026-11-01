@@ -97,6 +97,10 @@ pub fn pack(
 /// `tls.key`, `trust.operational`).
 pub fn missing_for_serving(b: &Blob<'_>) -> Vec<&'static str> {
     let mut missing = Vec::new();
+    // The TLS listener is off (plaintext only, ADR-233): no certificate, key or CA is needed.
+    if b.uint(urmqtt_cfg::fields::tag::NET_TLS_PORT) == 0 {
+        return missing;
+    }
     if b.bin(tag::TLS_CERT).is_empty() {
         missing.push("tls.cert");
     }
@@ -320,7 +324,10 @@ pub fn iso_probe(iso: &[u8]) -> Result<String, String> {
         .num("slot_copies", p.slot_copies as u64)
         .num("hash_refs", p.hash_refs as u64)
         .num("format_version", u64::from(p.format_version))
-        .bool("supported", p.format_version == urmqtt_cfg::FORMAT_VERSION)
+        .bool(
+            "supported",
+            (urmqtt_cfg::FORMAT_MIN..=urmqtt_cfg::FORMAT_VERSION).contains(&p.format_version),
+        )
         .str("summary", &describe(&p.blob, false).unwrap_or_default())
         .build())
 }
