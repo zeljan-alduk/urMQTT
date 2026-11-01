@@ -24,8 +24,10 @@ pub const MTU_FRAME: usize = 1514;
 pub const MIN_FRAME: usize = 60;
 const RX_QUEUE: u16 = 0;
 const TX_QUEUE: u16 = 1;
-const RX_BUFFERS: u16 = 256;
-const TX_BUFFERS: u16 = 256;
+/// Descriptors asked for (the device may offer fewer): a deeper receive ring is
+/// what a core that is descheduled for some milliseconds can afford (ADR-233).
+const RX_BUFFERS: u16 = 1024;
+const TX_BUFFERS: u16 = 1024;
 
 pub struct VirtioNet {
     t: Transport,
@@ -42,6 +44,10 @@ pub struct VirtioNet {
     pub features: u64,
     /// Frames dropped because every TX descriptor was in flight.
     pub tx_full: u64,
+    /// Descriptors of the receive and the transmit queue (what the device allows, at most
+    /// 1 024).
+    pub rx_size: u16,
+    pub tx_size: u16,
 }
 
 impl VirtioNet {
@@ -96,6 +102,8 @@ impl VirtioNet {
             mac,
             features,
             tx_full: 0,
+            rx_size,
+            tx_size,
         })
     }
 
@@ -170,6 +178,11 @@ impl VirtioNet {
     /// Whether a received frame is waiting (cheap: one ring index read).
     pub fn rx_pending(&self) -> bool {
         self.rx.has_used()
+    }
+
+    /// How many received frames wait in the queue, unread.
+    pub fn rx_queued(&self) -> u16 {
+        self.rx.used_pending()
     }
 
     /// Copies one received frame into `out` and recycles its buffer.

@@ -154,7 +154,7 @@ if [[ $ARCH == x86_64 ]]; then
                 done
             fi
         fi
-        X86ARGS+=(-netdev "$NETDEV" -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=)
+        X86ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
         [[ -n "$PCAP" ]] && X86ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
     else
         X86ARGS+=(-nic none)
@@ -250,7 +250,7 @@ if [[ $NET -eq 1 ]]; then
             done
         fi
     fi
-    ARGS+=(-netdev "$NETDEV" -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=)
+    ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
     [[ -n "$PCAP" ]] && ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
 else
     # Without this QEMU adds a default NIC (with an iPXE option ROM).

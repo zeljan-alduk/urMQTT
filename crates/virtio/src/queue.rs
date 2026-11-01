@@ -12,8 +12,9 @@ use core::sync::atomic::{Ordering, fence};
 
 pub const DESC_F_NEXT: u16 = 1;
 pub const DESC_F_WRITE: u16 = 2;
-/// Largest queue the driver will use.
-pub const MAX_QUEUE: u16 = 256;
+/// Largest queue the driver will use. The network queues ask for 1 024
+/// descriptors where the device offers them (ADR-233); the others stay small.
+pub const MAX_QUEUE: u16 = 1024;
 
 /// A buffer for one descriptor: physical address, length, device writes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +197,12 @@ impl SplitQueue {
     pub fn has_used(&self) -> bool {
         let used_idx: u16 = self.load(self.layout.used + 2);
         used_idx != self.last_used
+    }
+
+    /// How many completed chains wait to be popped.
+    pub fn used_pending(&self) -> u16 {
+        let used_idx: u16 = self.load(self.layout.used + 2);
+        used_idx.wrapping_sub(self.last_used)
     }
 
     /// The descriptor `add` will use next for a one-descriptor chain, so a
@@ -444,7 +451,7 @@ mod tests {
             Some(QueueError::BadSize)
         );
         assert_eq!(
-            unsafe { SplitQueue::new(r, 512) }.err(),
+            unsafe { SplitQueue::new(r, 2048) }.err(),
             Some(QueueError::BadSize)
         );
         assert_eq!(

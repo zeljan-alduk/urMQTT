@@ -165,10 +165,11 @@ impl TcpStatsLog {
         }
     }
 
-    fn tick(&mut self, s: &urmqtt_tcp::Stats, conns: usize, now: u64) {
+    fn tick(&mut self, tcp: &TcpStack, now: u64) {
         if now < self.next_ms {
             return;
         }
+        let (s, conns) = (&tcp.stats, tcp.connections());
         self.next_ms = now + Self::EVERY_MS;
         if s.segs_in == self.last.segs_in {
             self.last = *s;
@@ -208,6 +209,26 @@ impl TcpStatsLog {
                 s.ooo_bytes,
                 d(s.scaled, self.last.scaled),
                 d(s.sack_neg, self.last.sack_neg),
+            );
+        }
+        // Where the busiest sender's rate is decided (ADR-233): what it has in
+        // flight against its congestion window and the peer's.
+        if let Some(f) = tcp.busiest_sender() {
+            info!(
+                "tcp: core {}: busiest sender: {} KiB queued, {} KiB in flight, cwnd {} KiB, ssthresh {} KiB, peer window {} KiB, srtt {} ms, rto {} ms{}",
+                crate::smp::current(),
+                f.queued >> 10,
+                f.in_flight >> 10,
+                f.cwnd >> 10,
+                f.ssthresh.min(1 << 30) >> 10,
+                f.peer_window >> 10,
+                f.srtt_ms,
+                f.rto_ms,
+                if f.recovering {
+                    ", in loss recovery"
+                } else {
+                    ""
+                }
             );
         }
         self.last = *s;
@@ -381,7 +402,7 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
     loop {
         let now = now_ms();
         cookies.tick(&mut tcp, now);
-        tcpstats.tick(&tcp.stats, tcp.connections(), now);
+        tcpstats.tick(&tcp, now);
         let t = time::uptime_ns();
         let mut activity = drain_mesh(&mut link, &mut mqtt, &mut iface, &mut tcp, now);
         idle.prof.mesh += time::uptime_ns() - t;
@@ -476,6 +497,7 @@ fn dispatch(
     let n = link.n;
     let mut moved = false;
     let mut steered = false;
+    dataplane::note_rx_ring(net.rx_queued());
     for _ in 0..RX_BURST {
         let mut f = pool.pop().unwrap_or_else(new_frame);
         match net.recv(&mut f.data) {
@@ -583,6 +605,15 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     };
     let n = link.n;
     let mac = net.mac;
+    info!(
+        "net: virtio-net with {} receive and {} transmit descriptor(s)",
+        net.rx_size, net.tx_size
+    );
+    // Relaxed: statistics.
+    dataplane::RX_RING_SIZE.store(
+        u64::from(net.rx_size),
+        core::sync::atomic::Ordering::Relaxed,
+    );
     if n > 1 {
         info!(
             "net: dispatcher mode: core 0 owns the single virtio-net queue pair and steers MQTT flows to {} worker core(s) (Toeplitz hash){}",
@@ -663,7 +694,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     loop {
         let now = now_ms();
         cookies.tick(&mut tcp, now);
-        tcpstats.tick(&tcp.stats, tcp.connections(), now);
+        tcpstats.tick(&tcp, now);
         if let Some(c) = dataplane::CONNECTIONS.first() {
             // Relaxed: statistics.
             c.store(
