@@ -226,13 +226,22 @@ impl Idle {
         if let Some(b) = crate::sys::BUSY.get(me) {
             b.store(busy as u8, Ordering::Relaxed);
         }
+        // Relaxed: statistics written by this core's tick and lock waits.
+        let (late_ticks, late_worst, lock_wait) =
+            crate::watchdog::STALLS.get(me).map_or((0, 0, 0), |st| {
+                (
+                    st.count.swap(0, Ordering::Relaxed),
+                    st.worst_ns.swap(0, Ordering::Relaxed),
+                    st.lock_wait_ns.swap(0, Ordering::Relaxed),
+                )
+            });
         let p = core::mem::take(&mut self.prof);
         let pct = |ns: u64| ns * 100 / window.max(1);
         if acc > 0 || tls > 0 || frames > 0 {
             urmqtt_log::info!(
                 "dataplane: core {me}: busy {busy}%, work {}% (rx {}%, of it tls {}%, poll {}%, tcp {}%, mesh {}%, nic {}%), \
                  {acc} connection(s) accepted ({} us of work, {} us of it TLS, each), {frames} frame(s) dispatched, \
-                 {} loop passes in {} ms, longest stall {} us",
+                 {} loop passes in {} ms, longest stall {} us ({} late tick(s), worst {} us, {} us lock wait)",
                 pct(p.work()),
                 pct(p.rx),
                 pct(tls),
@@ -244,7 +253,10 @@ impl Idle {
                 tls.checked_div(acc).unwrap_or(0) / 1000,
                 self.passes,
                 window / 1_000_000,
-                self.max_gap_ns / 1000
+                self.max_gap_ns / 1000,
+                late_ticks,
+                late_worst / 1000,
+                lock_wait / 1000
             );
         }
         // Relaxed: statistics.

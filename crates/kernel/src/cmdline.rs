@@ -116,6 +116,8 @@ pub enum DbTest {
     Watchdog,
     /// A handshake-class handler stays inside, then overruns, its own budget (ADR-071).
     WatchdogHandshake,
+    /// A stalled handler is not reported, a really overrunning one is (ADR-214).
+    WatchdogStall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -261,6 +263,7 @@ impl BootOptions {
                 "test=dp-bench" => o.db_test = Some(DbTest::DpBench),
                 "test=watchdog" => o.db_test = Some(DbTest::Watchdog),
                 "test=watchdog-handshake" => o.db_test = Some(DbTest::WatchdogHandshake),
+                "test=watchdog-stall" => o.db_test = Some(DbTest::WatchdogStall),
                 "log=error" => o.log_level = Some(urmqtt_config::LogLevel::Error),
                 "log=warn" => o.log_level = Some(urmqtt_config::LogLevel::Warn),
                 "log=info" => o.log_level = Some(urmqtt_config::LogLevel::Info),

@@ -570,6 +570,8 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
             .max(u64::from(urmqtt_config::CONFIG.watchdog.handler_budget_ms) * 100)
     );
 
+    crate::watchdog::install_lock_accounting();
+
     tick_selftest(timer_line);
     if s.options.diag {
         crate::diag::run(&s.options, s.cpus, &s.features, s.medium);
@@ -708,6 +710,9 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
     if s.options.db_test == Some(crate::cmdline::DbTest::WatchdogHandshake) {
         crate::watchdog::self_test_handshake();
+    }
+    if s.options.db_test == Some(crate::cmdline::DbTest::WatchdogStall) {
+        crate::watchdog::self_test_stall();
     }
     if live {
         crate::live::banner();

@@ -2835,6 +2835,12 @@ scenario watchdog "smoke test=watchdog" on \
 scenario watchdog-handshake "smoke test=watchdog-handshake" on \
     "watchdog: core 0 handshake handler \(step -\) for conn 43 over budget: [0-9]+ ms > ([5-9][0-9]|[1-9][0-9]{2}) ms \(action: Log" \
     "NOT:conn 43 over budget: [0-9]+ ms > 10 ms" "^URMQTT READY$" "$NO_FAULT"
+# ADR-214: the budget is running time. A handler whose core is stalled for 45 ms
+# (interrupts masked: the tick arrives late, as after a descheduled vCPU) is not
+# reported; one that really runs for 50 ms is.
+scenario watchdog-stall "smoke test=watchdog-stall" on \
+    "watchdog: core 0 self-test handler \(step -\) for conn 45 over budget: [0-9]+ ms > 10 ms \(action: Log" \
+    "NOT:conn 44 over budget" "^URMQTT READY$" "$NO_FAULT"
 db_crash
 log_crash
 log_tear
