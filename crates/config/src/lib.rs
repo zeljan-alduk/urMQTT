@@ -25,7 +25,17 @@ pub struct SocketAddrV4 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkMode {
     Dhcp,
-    Static { address: Ipv4Cidr, gateway: [u8; 4] },
+    Static {
+        address: Ipv4Cidr,
+        gateway: [u8; 4],
+    },
+    /// DHCP first; the static address and gateway when no lease arrives
+    /// within `dhcp_timeout_s` or when the lease is lost.
+    Auto {
+        address: Ipv4Cidr,
+        gateway: [u8; 4],
+        dhcp_timeout_s: u32,
+    },
 }
 
 /// Certificate field that becomes the device id.

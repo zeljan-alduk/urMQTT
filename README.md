@@ -460,8 +460,9 @@ error: invalid configuration deploy/bad/config.toml:
 
 | Key | Type / values | Meaning |
 |---|---|---|
-| `network.mode` | `"dhcp"` \| `"static"` | Address configuration. DHCP lets one ISO serve many VMs |
-| `network.address`, `network.gateway` | `"a.b.c.d/len"`, `"a.b.c.d"` | Required for `static`, forbidden for `dhcp` |
+| `network.mode` | `"dhcp"` \| `"static"` \| `"auto"` | Address configuration. DHCP lets one ISO serve many VMs; `auto` tries DHCP first and falls back to the static settings |
+| `network.address`, `network.gateway` | `"a.b.c.d/len"`, `"a.b.c.d"` | Required for `static` and `auto`, forbidden for `dhcp` |
+| `network.dhcp_timeout_s` | 3–120 (default 15) | `auto` only: how long to wait for a lease before the static settings are used (also used at once when a lease is lost) |
 | `network.mqtt_tls_port` | 1–65535 | MQTT over TLS listener (8883) |
 | `network.mqtt_plain_port` | 0 or port | Plaintext MQTT; **non-zero only in `dev`** |
 | `tls.cert`, `tls.key` | file names in `deploy/<env>/` | Embedded server PEMs; encrypted keys are rejected |
@@ -870,7 +871,10 @@ mode = "auto"                  # the ISO's live entry runs from RAM (ephemeral);
 3. Boot the ISO. The log (serial or VNC) shows `net: static address ...`; check with
    `mosquitto_pub -h <address> -p 8883 ...` or `urmqtt-loadgen`.
 4. For DHCP networks use `mode = "dhcp"` and leave `address` and `gateway` out: they are rejected
-   in DHCP mode. One image then serves many VMs.
+   in DHCP mode. One image then serves many VMs. With `mode = "auto"` the image asks DHCP first and,
+   if no lease arrives within `dhcp_timeout_s` (default 15 s), uses `address` and `gateway`
+   (`net: no dhcp lease in time, falling back to the static settings`). A lease that arrives later
+   replaces the static address; a lost lease returns to the static settings.
 
 `storage.mode = "disk"` refuses to start from the ISO's live entry, `"auto"` allows it with data in RAM,
 `"ram"` is always diskless. The checked-in file holds the author's test VPS; replace the address and

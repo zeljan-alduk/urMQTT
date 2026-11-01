@@ -72,6 +72,35 @@ fn new_tcp(addr: [u8; 4], ports: Vec<u16>) -> TcpStack {
     )
 }
 
+/// Applies the configured static address and gateway on every core (mode
+/// `static`, and the fallback of mode `auto`).
+fn apply_static(
+    iface: &mut Iface,
+    tcp: &mut TcpStack,
+    link: &mut Link,
+    n: usize,
+    address: urmqtt_config::Ipv4Cidr,
+    gateway: [u8; 4],
+) {
+    iface.set_addr(Some((address.addr, address.prefix_len)), Some(gateway));
+    tcp.set_local_addr(address.addr);
+    info!(
+        "net: static address {}/{} gateway {}",
+        ip_str(address.addr),
+        address.prefix_len,
+        ip_str(gateway)
+    );
+    for core in 1..n {
+        link.send(
+            core,
+            CoreMsg::IpConfig {
+                addr: Some((address.addr, address.prefix_len)),
+                router: Some(gateway),
+            },
+        );
+    }
+}
+
 /// The SYN-cookie key is replaced every 10 minutes (H3, H0-W3); the old one
 /// still validates the cookies it issued for their lifetime (128 s).
 const COOKIE_ROTATE_MS: u64 = 600_000;
@@ -512,7 +541,9 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         crate::boot::fatal("dhcp: no random generator for the transaction id");
     }
     let mut iface = match CONFIG.network.mode {
-        NetworkMode::Dhcp => Iface::new(mac, true, Some(u32::from_be_bytes(xid)), now_ms()),
+        NetworkMode::Dhcp | NetworkMode::Auto { .. } => {
+            Iface::new(mac, true, Some(u32::from_be_bytes(xid)), now_ms())
+        }
         NetworkMode::Static { address, gateway } => {
             let mut i = Iface::new(mac, true, None, now_ms());
             i.set_addr(Some((address.addr, address.prefix_len)), Some(gateway));
@@ -534,6 +565,21 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             i
         }
     };
+    // mode = "auto": DHCP first, the static settings when no lease arrives in
+    // time or when the lease is lost.
+    let auto_static = match CONFIG.network.mode {
+        NetworkMode::Auto {
+            address,
+            gateway,
+            dhcp_timeout_s,
+        } => Some((
+            address,
+            gateway,
+            now_ms() + u64::from(dhcp_timeout_s) * 1000,
+        )),
+        _ => None,
+    };
+    let mut auto_pending = auto_static.is_some();
     let mut mqtt = MqttService::new(restored.as_deref(), 0, n);
     let serves = n == 1 || dataplane::dispatcher_serves();
     let mut ports = if serves { mqtt.ports() } else { Vec::new() };
@@ -622,9 +668,19 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             }
             ops.poll(&mut iface, now, &mut emit);
             sntp.poll(&mut iface, now, &mut emit);
+            if auto_pending
+                && let Some((address, gateway, deadline)) = auto_static
+                && iface.addr().is_none()
+                && now >= deadline
+            {
+                warn!("net: no dhcp lease in time, falling back to the static settings");
+                auto_pending = false;
+                apply_static(&mut iface, &mut tcp, &mut link, n, address, gateway);
+            }
             for e in events {
                 match e {
                     Event::Dhcp(dhcp::Event::Bound(l) | dhcp::Event::Renewed(l)) => {
+                        auto_pending = false;
                         info!(
                             "net: dhcp lease {}/{} router {} dns [{}]",
                             ip_str(l.addr),
@@ -651,15 +707,20 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
                     }
                     Event::Dhcp(dhcp::Event::Lost) => {
                         warn!("net: dhcp lease lost");
-                        tcp.set_local_addr([0; 4]);
-                        for core in 1..n {
-                            link.send(
-                                core,
-                                CoreMsg::IpConfig {
-                                    addr: None,
-                                    router: None,
-                                },
-                            );
+                        if let Some((address, gateway, _)) = auto_static {
+                            warn!("net: using the static settings");
+                            apply_static(&mut iface, &mut tcp, &mut link, n, address, gateway);
+                        } else {
+                            tcp.set_local_addr([0; 4]);
+                            for core in 1..n {
+                                link.send(
+                                    core,
+                                    CoreMsg::IpConfig {
+                                        addr: None,
+                                        router: None,
+                                    },
+                                );
+                            }
                         }
                     }
                     Event::PingReply { from, rtt_ms } => {

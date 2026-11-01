@@ -1571,3 +1571,11 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   6. **Every table in `docs/PERFORMANCE.md` has the repetitions behind it** (three, median and range), and a claim is made only where the ranges of the two brokers do not overlap and the generator was not the limit.
 - **What the numbers may be quoted for.** One VPS model in one data centre, one source address, 15 ms away, TLS 1.3 with ECDSA P-256 and mutual authentication, small messages. Not for other CPUs, other paths or large payloads, and not as "faster than Mosquitto" in general: the two have different feature sets (Mosquitto has MQTT 5, bridges, plugins; urMQTT enforces an ACL per publish, SYN cookies and admission control) and Mosquitto is one thread against urMQTT's data cores.
 - **Consequences.** The suite is repeatable by anyone with a Linux host in reach of a VPS (`scripts/x11-bench.sh`, `scripts/x11-report.py`). A new image or a new Mosquitto version means a new run, not an edit of the old tables.
+
+## ADR-214 — `network.mode = "auto"`: DHCP first, static fallback
+
+- **Status:** Accepted.
+- **Context.** `dhcp` suits one ISO for many VMs, but providers such as Contabo give no DHCP to a custom ISO, so a VPS needed a different image from a lab VM.
+- **Decision.** A third mode `auto` with `address`, `gateway` (both required) and `dhcp_timeout_s` (3..=120, default 15). The interface starts DHCP; when no lease is bound by the deadline, or when a lease is lost, the static settings are applied on every core (`netproto::apply_static`, also used by `static`). A lease that arrives later replaces the static address through the existing lease path. `dhcp_timeout_s` is rejected with the other modes.
+- **Testing.** Schema tests (required fields, default and explicit timeout, range, other modes). Manual QEMU aarch64 with the prod config in `auto` mode: with slirp DHCP the lease 10.0.2.15 is used; with no network peer (`--dgram`) the log shows the fallback after 5 s and `net: static address 10.0.2.77/24`. No smoke scenario yet (a scenario needs its own image config).
+- **Not done.** DNS/NTP from the lease are still unused (ADR-100), no IPv6.

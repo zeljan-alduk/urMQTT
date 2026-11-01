@@ -176,7 +176,62 @@ fn static_mode_parses_cidr() {
 #[test]
 fn dhcp_mode_rejects_static_fields() {
     let text = dev_with("mode", "mode = \"dhcp\"\naddress = \"10.0.0.10/24\"");
-    assert_rejected("dev", &text, "only allowed with mode = \"static\"");
+    assert_rejected(
+        "dev",
+        &text,
+        "only allowed with mode = \"static\" or \"auto\"",
+    );
+}
+
+#[test]
+fn auto_mode_needs_the_static_fallback() {
+    let text = dev_with("mode", "mode = \"auto\"");
+    let msgs = messages(parse("dev", &text));
+    assert!(msgs.iter().any(|m| m.starts_with("network.address")));
+    assert!(msgs.iter().any(|m| m.starts_with("network.gateway")));
+}
+
+#[test]
+fn auto_mode_parses_with_default_and_explicit_timeout() {
+    let base = "mode = \"auto\"\naddress = \"10.0.0.10/24\"\ngateway = \"10.0.0.1\"";
+    let cfg = parse("dev", &dev_with("mode", base)).unwrap();
+    let want = |t| NetworkMode::Auto {
+        address: Ipv4Cidr {
+            addr: Ipv4Addr::new(10, 0, 0, 10),
+            prefix_len: 24,
+        },
+        gateway: Ipv4Addr::new(10, 0, 0, 1),
+        dhcp_timeout_s: t,
+    };
+    assert_eq!(cfg.network.mode, want(15));
+    let cfg = parse(
+        "dev",
+        &dev_with("mode", &format!("{base}\ndhcp_timeout_s = 40")),
+    )
+    .unwrap();
+    assert_eq!(cfg.network.mode, want(40));
+}
+
+#[test]
+fn dhcp_timeout_is_bounded_and_only_for_auto() {
+    let base = "address = \"10.0.0.10/24\"\ngateway = \"10.0.0.1\"";
+    for t in [0, 2, 121] {
+        let text = dev_with(
+            "mode",
+            &format!("mode = \"auto\"\n{base}\ndhcp_timeout_s = {t}"),
+        );
+        assert_rejected("dev", &text, "dhcp_timeout_s");
+    }
+    let text = dev_with(
+        "mode",
+        &format!("mode = \"static\"\n{base}\ndhcp_timeout_s = 20"),
+    );
+    assert_rejected("dev", &text, "only allowed with mode = \"auto\"");
+    assert_rejected(
+        "dev",
+        &dev_with("mode", "mode = \"dhcp\"\ndhcp_timeout_s = 20"),
+        "only allowed with mode = \"auto\"",
+    );
 }
 
 #[test]

@@ -58,6 +58,7 @@ fn err(path: &str, message: impl Into<String>) -> ConfigError {
 pub enum NetworkModeKind {
     Dhcp,
     Static,
+    Auto,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -186,6 +187,7 @@ struct RawNetwork {
     mode: NetworkModeKind,
     address: Option<String>,
     gateway: Option<String>,
+    dhcp_timeout_s: Option<u32>,
     mqtt_tls_port: u16,
     mqtt_plain_port: u16,
 }
@@ -381,7 +383,18 @@ pub enum NetworkMode {
         address: Ipv4Cidr,
         gateway: Ipv4Addr,
     },
+    /// DHCP first; without a lease after `dhcp_timeout_s` (or when the lease
+    /// is lost) the static address and gateway are used.
+    Auto {
+        address: Ipv4Cidr,
+        gateway: Ipv4Addr,
+        dhcp_timeout_s: u32,
+    },
 }
+
+/// Default and limits of `network.dhcp_timeout_s` (mode `auto`).
+pub const DHCP_TIMEOUT_DEFAULT_S: u32 = 15;
+pub const DHCP_TIMEOUT_RANGE_S: core::ops::RangeInclusive<u32> = 3..=120;
 
 /// Token-bucket rate: `tokens` per `per_ms` milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -790,12 +803,23 @@ fn validate_network(env: &str, raw: &RawNetwork, errors: &mut Vec<ConfigError>) 
             if raw.address.is_some() || raw.gateway.is_some() {
                 errors.push(err(
                     "network",
-                    "address/gateway are only allowed with mode = \"static\"",
+                    "address/gateway are only allowed with mode = \"static\" or \"auto\"",
+                ));
+            }
+            if raw.dhcp_timeout_s.is_some() {
+                errors.push(err(
+                    "network.dhcp_timeout_s",
+                    "only allowed with mode = \"auto\"",
                 ));
             }
             NetworkMode::Dhcp
         }
-        NetworkModeKind::Static => {
+        kind @ (NetworkModeKind::Static | NetworkModeKind::Auto) => {
+            let name = if kind == NetworkModeKind::Auto {
+                "auto"
+            } else {
+                "static"
+            };
             let address = match raw.address.as_deref() {
                 Some(s) => parse_cidr(s).unwrap_or_else(|m| {
                     errors.push(err("network.address", m));
@@ -805,7 +829,10 @@ fn validate_network(env: &str, raw: &RawNetwork, errors: &mut Vec<ConfigError>) 
                     }
                 }),
                 None => {
-                    errors.push(err("network.address", "required when mode = \"static\""));
+                    errors.push(err(
+                        "network.address",
+                        format!("required when mode = \"{name}\""),
+                    ));
                     Ipv4Cidr {
                         addr: Ipv4Addr::UNSPECIFIED,
                         prefix_len: 0,
@@ -821,11 +848,35 @@ fn validate_network(env: &str, raw: &RawNetwork, errors: &mut Vec<ConfigError>) 
                     Ipv4Addr::UNSPECIFIED
                 }),
                 None => {
-                    errors.push(err("network.gateway", "required when mode = \"static\""));
+                    errors.push(err(
+                        "network.gateway",
+                        format!("required when mode = \"{name}\""),
+                    ));
                     Ipv4Addr::UNSPECIFIED
                 }
             };
-            NetworkMode::Static { address, gateway }
+            if kind == NetworkModeKind::Auto {
+                let t = raw.dhcp_timeout_s.unwrap_or(DHCP_TIMEOUT_DEFAULT_S);
+                if !DHCP_TIMEOUT_RANGE_S.contains(&t) {
+                    errors.push(err(
+                        "network.dhcp_timeout_s",
+                        format!("must be in {DHCP_TIMEOUT_RANGE_S:?} seconds"),
+                    ));
+                }
+                NetworkMode::Auto {
+                    address,
+                    gateway,
+                    dhcp_timeout_s: t,
+                }
+            } else {
+                if raw.dhcp_timeout_s.is_some() {
+                    errors.push(err(
+                        "network.dhcp_timeout_s",
+                        "only allowed with mode = \"auto\"",
+                    ));
+                }
+                NetworkMode::Static { address, gateway }
+            }
         }
     };
 
@@ -1479,6 +1530,17 @@ pub fn render(cfg: &Config, files: &EmbeddedFiles) -> String {
             render_ipv4(address.addr),
             address.prefix_len,
             render_ipv4(gateway)
+        ),
+        NetworkMode::Auto {
+            address,
+            gateway,
+            dhcp_timeout_s,
+        } => format!(
+            "NetworkMode::Auto {{ address: Ipv4Cidr {{ addr: {}, prefix_len: {} }}, gateway: {}, dhcp_timeout_s: {} }}",
+            render_ipv4(address.addr),
+            address.prefix_len,
+            render_ipv4(gateway),
+            dhcp_timeout_s
         ),
     };
     let plain = match cfg.network.mqtt_plain_port {
