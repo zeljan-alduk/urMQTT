@@ -281,7 +281,11 @@ impl Idle {
         }
         // What the core could tell about its own stalls (ADR-214) and the
         // dispatcher's NIC backlog (ADR-216); a short line of its own.
-        if late_ticks > 0 || steal > 0 || lock_wait > 1000 || nic_peak > 0 {
+        // Only when there is something to see: a stall of 20 ms or more, steal the
+        // host reports, 100 ms of lock waiting in the window, a NIC backlog. A VPS
+        // with a noisy neighbour has late ticks in every window; that would be a
+        // line per core every 5 s on a console that costs milliseconds per line.
+        if late_worst >= 20_000_000 || steal > 0 || lock_wait >= 100_000_000 || nic_peak > 0 {
             urmqtt_log::info!(
                 "stalls: core {me}: {late_ticks} late tick(s), worst {} us; {} us waiting for locks; host steal {} us; NIC backlog peak {nic_peak}",
                 late_worst / 1000,
