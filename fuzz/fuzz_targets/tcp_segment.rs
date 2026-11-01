@@ -140,6 +140,22 @@ fuzz_target!(|data: &[u8]| {
             0 => {
                 let seq = cseq.wrapping_add(i16::from_le_bytes([*sd0, *sd1]) as i32 as u32);
                 let ack = server_isn.wrapping_add(i16::from_le_bytes([*ad0, *ad1]) as i32 as u32);
+                // With bit 6 of the flags set the segment carries SACK blocks
+                // (up to three, edges relative to the ACK) taken from the data:
+                // what the sender's scoreboard and loss recovery do with them
+                // must never break it (ADR-232).
+                let (mut sacks, mut nsack, mut payload) = ([(0u32, 0u32); 3], 0u8, rest);
+                if flags & 0x40 != 0 {
+                    let n = usize::from(rest.first().copied().unwrap_or(0) % 4);
+                    let blocks = rest.get(1..).unwrap_or(&[]);
+                    for (slot, b) in sacks.iter_mut().zip(blocks.chunks_exact(4)).take(n) {
+                        let l = i16::from_le_bytes([b[0], b[1]]) as i32 as u32;
+                        let r = i16::from_le_bytes([b[2], b[3]]) as i32 as u32;
+                        *slot = (ack.wrapping_add(l), ack.wrapping_add(r));
+                        nsack += 1;
+                    }
+                    payload = &[];
+                }
                 let b = seg_x(
                     5555,
                     seq,
@@ -148,9 +164,11 @@ fuzz_target!(|data: &[u8]| {
                     u16::from_le_bytes([*w0, *w1]),
                     &Ext {
                         ts: Some((1002 + now as u32, 0)),
+                        sacks,
+                        nsack,
                         ..Ext::NONE
                     },
-                    rest,
+                    payload,
                 );
                 s.input(now, C, &b, &mut app, &mut |_, _| {});
                 if seq == cseq {

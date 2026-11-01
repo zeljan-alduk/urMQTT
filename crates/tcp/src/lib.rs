@@ -60,6 +60,7 @@ pub mod cookie;
 pub mod seq;
 
 mod ooo;
+mod sack;
 
 mod refused;
 mod siphash;
@@ -72,6 +73,8 @@ mod model;
 mod ooo_tests;
 #[cfg(test)]
 mod opt_tests;
+#[cfg(test)]
+mod sack_tests;
 #[cfg(test)]
 mod script;
 #[cfg(test)]
@@ -87,6 +90,7 @@ use cc::{Congestion, NewReno};
 use cookie::Cookies;
 use ooo::Ooo;
 use refused::{RefusedFlows, Verdict};
+use sack::Board;
 use seq::{ge, gt, le, lt};
 use table::{Key, Table};
 use urmqtt_mm::slab::Slab;
@@ -237,7 +241,13 @@ struct Conn {
     /// `FIN_QUEUED`, `FIN_SENT`, `ACK_PENDING`, … (one byte, M15).
     flags: u8,
     dupacks: u8,
+    /// Retransmission timeouts in a row (low four bits, at most `MAX_RETRIES`) and
+    /// how often a retransmission proved needless (high four bits, see
+    /// `reorder`).
     retries: u8,
+    /// In-order data segments received since the last ACK went out: every
+    /// second one is acknowledged at once (RFC 5681 §4.2).
+    ack_segs: u8,
     mss: u16,
     snd_una: u32,
     snd_nxt: u32,
@@ -269,10 +279,18 @@ struct Conn {
     rto: u16,
     cc: NewReno,
     timer: Option<(TimerId, TimerKind)>,
-    /// Bytes from `snd_una` on: unacknowledged, then unsent. Boxed so an
-    /// idle connection pays 8 bytes for it instead of 32.
-    #[allow(clippy::box_collection)]
-    tx: Option<Box<VecDeque<u8>>>,
+    /// Bytes from `snd_una` on: unacknowledged, then unsent, and what the peer
+    /// said about holes. Boxed so an idle connection pays 8 bytes for it.
+    tx: Option<Box<Sender>>,
+}
+
+/// The sending side of a connection that has data queued.
+struct Sender {
+    /// Bytes from `snd_una` on: unacknowledged, then unsent.
+    q: VecDeque<u8>,
+    /// The peer's SACK blocks and the recovery's frontier (RFC 6675), while
+    /// the peer reports holes (ADR-232).
+    board: Option<Box<Board>>,
 }
 
 /// FIN queued by the application (sent after the data).
@@ -302,7 +320,45 @@ impl Conn {
     }
 
     fn tx_len(&self) -> usize {
-        self.tx.as_ref().map_or(0, |b| b.len())
+        self.tx.as_ref().map_or(0, |t| t.q.len())
+    }
+
+    /// Retransmission timeouts in a row.
+    fn timeouts(&self) -> u8 {
+        self.retries & 15
+    }
+
+    fn set_timeouts(&mut self, n: u8) {
+        self.retries = (self.retries & 0xf0) | n.min(15);
+    }
+
+    /// How many times the peer reported a duplicate of data we may have sent
+    /// again (RFC 2883): the network reorders more than the loss detection
+    /// waited for, and the window it waits grows by a factor of two each time.
+    fn reorder(&self) -> u8 {
+        self.retries >> 4
+    }
+
+    fn bump_reorder(&mut self) {
+        if self.reorder() < 7 {
+            self.retries += 16;
+        }
+    }
+
+    /// The pipe of a recovery driven by the peer's SACK blocks (RFC 6675 §4):
+    /// what is in the network, being what is in flight less what the peer holds
+    /// and what is lost and not yet sent again. `None` outside such a recovery.
+    fn sack_pipe(&self) -> Option<u32> {
+        if !self.has(IN_RECOVERY) {
+            return None;
+        }
+        let b = self.tx.as_ref()?.board.as_ref()?;
+        let t = b.tally(self.snd_una, self.eff_mss() as u32);
+        Some(
+            self.flight()
+                .saturating_sub(t.sacked)
+                .saturating_sub(t.lost.saturating_sub(t.resent)),
+        )
     }
 
     /// Data bytes in flight (sent, not acknowledged), excluding our FIN.
@@ -338,10 +394,12 @@ impl Conn {
         usize::from(self.mss) - if self.has(TS_OK) { 12 } else { 0 }
     }
 
-    /// Bytes the application may queue: twice the congestion window, between
-    /// the base and the cap.
+    /// Bytes the application may queue: twice what the sender may have in
+    /// flight (the smaller of the congestion window and the peer's window),
+    /// between the base and the cap. A reader that stops (a zero window) keeps
+    /// only the base queued however large its congestion window grew.
     fn tx_limit(&self, base: usize, cap: usize) -> usize {
-        (self.cc.window() as usize)
+        (self.cc.window().min(self.snd_wnd) as usize)
             .saturating_mul(2)
             .clamp(base, cap.max(base))
     }
@@ -481,8 +539,13 @@ impl TcpStack {
         }
         let n = data.len().min(max.saturating_sub(k.tx_len()));
         if n > 0 {
-            let tx = k.tx.get_or_insert_with(|| Box::new(VecDeque::new()));
-            tx.extend(data.get(..n).unwrap_or(&[]));
+            let tx = k.tx.get_or_insert_with(|| {
+                Box::new(Sender {
+                    q: VecDeque::new(),
+                    board: None,
+                })
+            });
+            tx.q.extend(data.get(..n).unwrap_or(&[]));
             self.mark_dirty(c);
         }
         n
@@ -817,6 +880,7 @@ impl TcpStack {
             flags,
             dupacks: 0,
             retries: 0,
+            ack_segs: 0,
             mss,
             snd_una: h.ack,
             snd_nxt: h.ack,
@@ -878,6 +942,7 @@ impl TcpStack {
         let x = self.ext_of(k, true);
         let Some(k) = self.conn_mut(c) else { return };
         k.set(ACK_PENDING, false);
+        k.ack_segs = 0;
         let o = Out {
             sport: k.key.lport,
             dport: k.key.rport,
@@ -1012,6 +1077,13 @@ impl TcpStack {
             // Even a segment that did not fit (a zero-window probe) is
             // answered, with the current window.
             k.set(ACK_PENDING, true);
+            // Every second segment is acknowledged at once, *before* the
+            // application works on the data: at the end of the pass only, a
+            // sender saw one ACK per batch of 64 frames (every 8 to 50 ms on a
+            // VPS whose cores are preempted), and its window waited for it
+            // (ADR-232).
+            k.ack_segs = k.ack_segs.saturating_add(1);
+            let early_ack = !fin && k.ack_segs >= 2;
             if fin {
                 k.rcv_nxt = k.rcv_nxt.wrapping_add(1);
                 k.state = match k.state {
@@ -1029,6 +1101,9 @@ impl TcpStack {
                     }
                     s => s,
                 };
+            }
+            if early_ack {
+                self.send_ack_now(c, out);
             }
             if !take.is_empty() {
                 app.data(c, take);
@@ -1145,18 +1220,29 @@ impl TcpStack {
             k.snd_wl1 = h.seq;
             k.snd_wl2 = h.ack;
         }
+        self.sack_input(c, h, now_ms);
+        let Some(k) = self.conn_mut(c) else {
+            return false;
+        };
         if gt(h.ack, k.snd_una) {
             let acked = h.ack.wrapping_sub(k.snd_una);
             let data_acked = (acked as usize).min(k.tx_len());
             // Our FIN sits one past the last data byte.
             let fin_acked = k.has(FIN_SENT) && acked as usize == k.tx_len() + 1;
             if let Some(tx) = k.tx.as_mut() {
-                tx.drain(..data_acked.min(tx.len()));
-                if tx.is_empty() {
+                tx.q.drain(..data_acked.min(tx.q.len()));
+                if tx.q.is_empty() {
                     k.tx = None;
+                } else if let Some(b) = tx.board.as_mut() {
+                    b.advance(h.ack);
+                    if b.is_empty() {
+                        tx.board = None;
+                    }
                 }
             }
-            if k.has(RTT_TIMING) && ge(h.ack, k.rtt_seq) {
+            // The timed segment is acknowledged: a round trip is over.
+            let round = k.has(RTT_TIMING) && ge(h.ack, k.rtt_seq);
+            if round {
                 k.set(RTT_TIMING, false);
                 let rtt = (now_ms as u32).wrapping_sub(k.rtt_start);
                 Self::rtt_sample(k, rtt);
@@ -1165,21 +1251,31 @@ impl TcpStack {
             if lt(k.snd_nxt, k.snd_una) {
                 k.snd_nxt = k.snd_una;
             }
-            k.retries = 0;
+            k.set_timeouts(0);
             if k.has(IN_RECOVERY) {
                 let full = ge(h.ack, k.recover);
-                k.cc.on_recovery_ack(acked, mss, full);
+                let sack = k.has(SACK_OK);
+                // With the peer's SACK blocks the window stays at the reduced
+                // value and the holes the blocks name are sent again; without,
+                // NewReno deflates and sends the next segment on a partial ACK.
+                if full || !sack {
+                    k.cc.on_recovery_ack(acked, mss, full);
+                }
                 if full {
                     k.set(IN_RECOVERY, false);
                     k.dupacks = 0;
-                } else {
+                    if let Some(tx) = k.tx.as_mut() {
+                        tx.board = None;
+                    }
+                } else if !sack {
                     // Partial ACK: retransmit the next hole (RFC 6582).
                     let una = k.snd_una;
-                    self.retransmit_one(c, una, out);
+                    self.retransmit_one(c, una, usize::MAX, out);
                 }
             } else {
                 k.dupacks = 0;
-                k.cc.on_ack(acked, mss);
+                let flight = k.flight();
+                k.cc.on_ack(acked, mss, flight, round);
             }
             let Some(k) = self.conn_mut(c) else {
                 return false;
@@ -1204,13 +1300,21 @@ impl TcpStack {
                 self.arm(c, now_ms, TimerKind::Retransmit, rto);
             }
             self.mark_dirty(c);
+            self.sack_decide(c, now_ms);
         } else if h.ack == k.snd_una && pure && !window_changed && k.snd_max != k.snd_una {
             // Duplicate ACK.
             k.dupacks = k.dupacks.saturating_add(1);
+            // A peer that reports its holes (SACK) is believed: its duplicate
+            // ACKs without blocks are not evidence of a loss, and a loss is
+            // acted on when the blocks say so (`sack_decide`).
+            let has_board = k.tx.as_ref().is_some_and(|t| t.board.is_some());
+            let classic = !k.has(SACK_OK) || !has_board;
             if k.has(IN_RECOVERY) {
-                k.cc.on_dupack_in_recovery(mss);
+                if !k.has(SACK_OK) {
+                    k.cc.on_dupack_in_recovery(mss);
+                }
                 self.mark_dirty(c);
-            } else if k.dupacks == 3 {
+            } else if classic && k.dupacks == 3 {
                 let flight = k.flight();
                 k.cc.on_fast_retransmit(flight, mss);
                 k.set(IN_RECOVERY, true);
@@ -1218,7 +1322,9 @@ impl TcpStack {
                 k.set(RTT_TIMING, false);
                 let una = k.snd_una;
                 self.stats.fast_retransmits += 1;
-                self.retransmit_one(c, una, out);
+                self.retransmit_one(c, una, usize::MAX, out);
+            } else {
+                self.sack_decide(c, now_ms);
             }
         } else if window_changed {
             self.mark_dirty(c);
@@ -1226,15 +1332,137 @@ impl TcpStack {
         true
     }
 
-    /// Sends one segment starting at `from` (a retransmission).
-    fn retransmit_one(&mut self, c: ConnId, from: u32, out: &mut impl FnMut([u8; 4], &[u8])) {
+    /// Takes the SACK blocks of an ACK into the scoreboard (RFC 6675 §5): a
+    /// block must lie within what was sent and not yet acknowledged to say
+    /// anything, and the board holds a few ranges only.
+    fn sack_input(&mut self, c: ConnId, h: &Header, now_ms: u64) {
+        let Some(k) = self.conn_mut(c) else { return };
+        if !k.has(SACK_OK) || h.nsack == 0 {
+            return;
+        }
+        let (una, max) = (k.snd_una, k.snd_max);
+        // A first block below the ACK's own cumulative number, or inside the
+        // second block, reports data that arrived twice (RFC 2883): a
+        // retransmission that was not needed, so reordering is what the network
+        // does here and the wait before a loss is acted on grows.
+        let first = h.sack.first().copied().unwrap_or((0, 0));
+        let second = h.sack.get(1).copied().unwrap_or((0, 0));
+        if h.nsack > 0
+            && !ge(first.0, first.1)
+            && (le(first.1, h.ack)
+                || (h.nsack > 1 && le(second.0, first.0) && le(first.1, second.1)))
+        {
+            k.bump_reorder();
+        }
+        let Some(tx) = k.tx.as_mut() else { return };
+        for &(l, r) in h.sack.iter().take(usize::from(h.nsack)) {
+            // At or below the cumulative ACK (a duplicate report) or beyond
+            // what was sent: nothing to learn (RFC 2883, RFC 6675 §5 step 1).
+            if le(r, una) || gt(r, max) || ge(l, r) {
+                continue;
+            }
+            let l = if lt(l, una) { una } else { l };
+            let b = tx
+                .board
+                .get_or_insert_with(|| Box::new(Board::new(now_ms as u32, una)));
+            b.insert(l, r);
+        }
+        if tx.board.as_ref().is_some_and(|b| b.is_empty()) {
+            tx.board = None;
+        }
+    }
+
+    /// Whether the holes the peer reported make a recovery (RFC 6675 §4:
+    /// more than two segments, or three ranges, SACKed above the first
+    /// hole), once the hole has stayed that way for the reordering window
+    /// (an eighth of the round trip, at least a millisecond: segments that
+    /// the network reorders by a few places come in that time).
+    fn sack_decide(&mut self, c: ConnId, now_ms: u64) {
+        let Some(k) = self.conn_mut(c) else { return };
+        if k.has(IN_RECOVERY) || !k.has(SACK_OK) {
+            return;
+        }
+        let (una, mss) = (k.snd_una, k.eff_mss() as u32);
+        // The reordering window: an eighth of the round trip, doubled for every
+        // retransmission that proved needless, but not more than a round trip.
+        let rtt = u32::from(k.srtt).max(4);
+        let reo = ((rtt / 8).max(1) << k.reorder()).min(rtt);
+        let flight = k.flight();
+        let now = now_ms as u32;
+        let Some(b) = k.tx.as_mut().and_then(|t| t.board.as_mut()) else {
+            return;
+        };
+        if !b.first_hole_lost(una, mss) {
+            b.since = 0;
+            return;
+        }
+        if b.since == 0 {
+            b.since = now.max(1);
+        }
+        if now.wrapping_sub(b.since) < reo {
+            // Looked at again at the next pass.
+            self.mark_dirty(c);
+            return;
+        }
+        b.next = una;
+        k.cc.on_fast_retransmit(flight, u32::from(k.mss));
+        // The pipe, not inflation, paces what is sent in this recovery.
+        k.cc.cwnd = k.cc.ssthresh();
+        k.set(IN_RECOVERY, true);
+        k.recover = k.snd_max;
+        k.set(RTT_TIMING, false);
+        self.stats.fast_retransmits += 1;
+        self.mark_dirty(c);
+    }
+
+    /// Sends the holes the scoreboard calls lost, each once, while the pipe
+    /// leaves room for a segment.
+    fn sack_resend(&mut self, c: ConnId, out: &mut impl FnMut([u8; 4], &[u8])) -> bool {
+        let mut sent = false;
+        loop {
+            let Some(k) = self.conn(c) else { return sent };
+            let Some(pipe) = k.sack_pipe() else {
+                return sent;
+            };
+            let mss = k.eff_mss() as u32;
+            if k.cc.window().saturating_sub(pipe) < mss {
+                return sent;
+            }
+            let Some((seq, len)) =
+                k.tx.as_ref()
+                    .and_then(|t| t.board.as_ref())
+                    .and_then(|b| b.next_hole(k.snd_una, mss))
+            else {
+                return sent;
+            };
+            self.retransmit_one(c, seq, len as usize, out);
+            sent = true;
+            if let Some(b) = self
+                .conn_mut(c)
+                .and_then(|k| k.tx.as_mut())
+                .and_then(|t| t.board.as_mut())
+            {
+                b.next = seq.wrapping_add(len);
+            }
+        }
+    }
+
+    /// Sends one segment starting at `from`, of at most `limit` bytes (a
+    /// retransmission).
+    fn retransmit_one(
+        &mut self,
+        c: ConnId,
+        from: u32,
+        limit: usize,
+        out: &mut impl FnMut([u8; 4], &[u8]),
+    ) {
         let Some(k) = self.conn(c) else { return };
         let off = from.wrapping_sub(k.snd_una) as usize;
-        let mss = k.eff_mss();
+        let mss = k.eff_mss().min(limit);
         let mut payload = [0u8; 1460];
         let n = k.tx.as_ref().map_or(0, |tx| {
-            let avail = tx.len().saturating_sub(off).min(mss).min(payload.len());
-            copy_out(tx, off, payload.get_mut(..avail).unwrap_or(&mut []))
+            let avail = tx.q.len().saturating_sub(off).min(mss).min(payload.len());
+            copy_out(&tx.q, off, payload.get_mut(..avail).unwrap_or(&mut []))
         });
         let x = self.ext_of(k, false);
         // Our FIN follows the last data byte.
@@ -1256,13 +1484,16 @@ impl TcpStack {
         self.stats.retransmits += 1;
         if let Some(k) = self.conn_mut(c) {
             k.set(ACK_PENDING, false);
+            k.ack_segs = 0;
         }
     }
 
     /// Sends what the windows allow (data, then FIN), from `snd_nxt`.
     /// Returns whether a segment went out (it carried the pending ACK).
     fn transmit(&mut self, now_ms: u64, c: ConnId, out: &mut impl FnMut([u8; 4], &[u8])) -> bool {
-        let mut sent_any = false;
+        // The holes of a SACK recovery go first; the loss itself may be decided now.
+        self.sack_decide(c, now_ms);
+        let mut sent_any = self.sack_resend(c, out);
         loop {
             let Some(k) = self.conn(c) else {
                 return sent_any;
@@ -1274,7 +1505,13 @@ impl TcpStack {
             let off = k.snd_nxt.wrapping_sub(k.snd_una) as usize;
             let unsent = data_len.saturating_sub(off);
             let wnd = k.snd_wnd.min(k.cc.window()) as usize;
-            let room = wnd.saturating_sub(off.min(data_len));
+            let room = match k.sack_pipe() {
+                // In a SACK recovery the pipe says how much is in the network,
+                // the peer's window where the right edge is.
+                Some(pipe) => (k.cc.window().saturating_sub(pipe) as usize)
+                    .min((k.snd_wnd as usize).saturating_sub(off.min(data_len))),
+                None => wnd.saturating_sub(off.min(data_len)),
+            };
             let n = unsent.min(room).min(mss);
             let fin = k.has(FIN_QUEUED) && off <= data_len && off + n == data_len;
             if n == 0 && !fin {
@@ -1288,7 +1525,7 @@ impl TcpStack {
             }
             let mut payload = [0u8; 1460];
             if let Some(tx) = k.tx.as_ref() {
-                copy_out(tx, off, payload.get_mut(..n).unwrap_or(&mut []));
+                copy_out(&tx.q, off, payload.get_mut(..n).unwrap_or(&mut []));
             }
             // A segment with data carries no SACK blocks (no room next to the
             // payload); the next pure ACK does.
@@ -1309,11 +1546,14 @@ impl TcpStack {
                 return true;
             };
             k.set(ACK_PENDING, false);
+            k.ack_segs = 0;
             k.rcv_adv = k.adv_edge(o.window);
             k.snd_nxt = k.snd_nxt.wrapping_add(n as u32 + u32::from(fin));
             if gt(k.snd_nxt, k.snd_max) {
                 k.snd_max = k.snd_nxt;
             }
+            let flight = k.flight();
+            k.cc.on_sent(flight);
             if !k.has(RTT_TIMING) && n > 0 && k.snd_nxt == k.snd_max {
                 k.set(RTT_TIMING, true);
                 k.rtt_seq = k.snd_nxt;
@@ -1400,8 +1640,8 @@ impl TcpStack {
                     if k.snd_una == k.snd_max {
                         continue;
                     }
-                    k.retries += 1;
-                    if k.retries > MAX_RETRIES {
+                    k.set_timeouts(k.timeouts() + 1);
+                    if k.timeouts() > MAX_RETRIES {
                         self.stats.timeouts += 1;
                         self.close_with(c, CloseReason::Timeout, app);
                         continue;
@@ -1411,6 +1651,9 @@ impl TcpStack {
                     k.cc.on_timeout(flight, mss);
                     k.set(IN_RECOVERY, false);
                     k.dupacks = 0;
+                    if let Some(tx) = k.tx.as_mut() {
+                        tx.board = None;
+                    }
                     k.set(RTT_TIMING, false);
                     k.rto = k.rto.saturating_mul(2).min(RTO_MAX_MS);
                     // Go back to the first unacknowledged byte (Karn: no RTT
@@ -1442,6 +1685,43 @@ impl TcpStack {
     pub fn has_pending(&self) -> bool {
         !self.dirty.is_empty()
     }
+
+    /// The connection with the most data queued for sending (looking at no
+    /// more than 8 192 of them), for the log: where a flow's rate is decided.
+    pub fn busiest_sender(&self) -> Option<SendInfo> {
+        self.conns
+            .iter()
+            .take(8192)
+            .map(|(_, k)| k)
+            .max_by_key(|k| k.tx_len())
+            .filter(|k| k.tx_len() > 0)
+            .map(|k| SendInfo {
+                queued: k.tx_len(),
+                in_flight: k.flight(),
+                cwnd: k.cc.window(),
+                ssthresh: k.cc.ssthresh(),
+                peer_window: k.snd_wnd,
+                srtt_ms: k.srtt,
+                rto_ms: k.rto,
+                recovering: k.has(IN_RECOVERY),
+            })
+    }
+}
+
+/// What [`TcpStack::busiest_sender`] reports.
+#[derive(Debug, Clone, Copy)]
+pub struct SendInfo {
+    /// Bytes queued: unacknowledged and unsent.
+    pub queued: usize,
+    /// Bytes sent and not acknowledged.
+    pub in_flight: u32,
+    pub cwnd: u32,
+    pub ssthresh: u32,
+    /// The window the peer announces (scaled).
+    pub peer_window: u32,
+    pub srtt_ms: u16,
+    pub rto_ms: u16,
+    pub recovering: bool,
 }
 
 /// Copies `dst.len()` bytes of `tx` starting at `off` into `dst`; returns how
