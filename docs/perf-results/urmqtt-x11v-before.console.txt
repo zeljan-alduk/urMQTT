@@ -1,0 +1,432 @@
+### console single-flow qos=0 payload=64 rep=1
+SYSVAL $SYS/broker/console/dropped=0
+SYSVAL $SYS/broker/handshakes/syn_dropped=0
+### console single-flow qos=0 payload=64 rep=2
+[  165.598729] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 26 ms > 20 ms (action: Drop, no single connection to drop)
+[  169.697454] WARN  watchdog: core 1 input handler (step -) for conn 1 over budget: 23 ms > 20 ms (action: Drop)
+[  169.697714] WARN  watchdog: aborting connection 1
+### console single-flow qos=0 payload=64 rep=3
+### console single-flow qos=0 payload=1024 rep=1
+[  203.270068] WARN  watchdog: core 1 input handler (step -) for conn 0 over budget: 40 ms > 20 ms (action: Drop)
+[  203.270835] WARN  watchdog: aborting connection 0
+### console single-flow qos=0 payload=1024 rep=2
+[  218.672253] WARN  watchdog: core 2 input handler (step -) for conn 2 over budget: 63 ms > 20 ms (action: Drop)
+[  218.672329] WARN  watchdog: aborting connection 2
+### console single-flow qos=0 payload=1024 rep=3
+[  236.315984] WARN  watchdog: core 2 input handler (step -) for conn 0 over budget: 31 ms > 20 ms (action: Drop)
+[  236.316168] WARN  watchdog: aborting connection 0
+### console single-flow qos=1 payload=64 rep=1
+[  256.262389] WARN  watchdog: core 2 output handler (step persist) for conn - over budget: 21 ms > 20 ms (action: Drop, no single connection to drop)
+[  261.954628] WARN  watchdog: core 2 input handler (step -) for conn 1 over budget: 53 ms > 20 ms (action: Drop)
+[  261.954950] WARN  watchdog: aborting connection 1
+### console single-flow qos=1 payload=64 rep=2
+### console single-flow qos=1 payload=64 rep=3
+### console throughput qos=0 payload=64 pairs=16 rep=1
+### console throughput qos=0 payload=64 pairs=16 rep=2
+[  328.370448] WARN  watchdog: core 1 input handler (step -) for conn 11 over budget: 78 ms > 20 ms (action: Drop)
+[  328.372841] WARN  watchdog: core 2 input handler (step -) for conn 8 over budget: 81 ms > 20 ms (action: Drop)
+[  328.373031] WARN  watchdog: aborting connection 8
+[  328.408287] WARN  watchdog: core 2 output handler (step ready) for conn - over budget: 35 ms > 20 ms (action: Drop, no single connection to drop)
+[  328.420698] WARN  watchdog: aborting connection 11
+[  330.319476] WARN  watchdog: core 2 input handler (step -) for conn 15 over budget: 21 ms > 20 ms (action: Drop)
+[  330.319756] WARN  watchdog: aborting connection 15
+[  336.189724] WARN  watchdog: core 2 input handler (step -) for conn 14 over budget: 23 ms > 20 ms (action: Drop)
+[  336.190955] WARN  watchdog: aborting connection 14
+### console throughput qos=0 payload=64 pairs=16 rep=3
+[  438.422030] WARN  watchdog: core 1 input handler (step -) for conn 10 over budget: 29 ms > 20 ms (action: Drop)
+[  438.451373] WARN  watchdog: core 2 input handler (step -) for conn 6 over budget: 29 ms > 20 ms (action: Drop)
+[  438.451979] WARN  watchdog: aborting connection 6
+[  438.452107] WARN  watchdog: aborting connection 10
+[  438.795824] WARN  watchdog: core 1 input handler (step -) for conn 8 over budget: 27 ms > 20 ms (action: Drop)
+[  438.797518] WARN  watchdog: aborting connection 8
+[  439.293975] WARN  watchdog: core 1 input handler (step -) for conn 12 over budget: 25 ms > 20 ms (action: Drop)
+[  439.294268] WARN  watchdog: aborting connection 12
+[  440.292880] WARN  watchdog: core 2 output handler (step ready) for conn - over budget: 21 ms > 20 ms (action: Drop, no single connection to drop)
+[  440.396702] WARN  watchdog: core 2 input handler (step -) for conn 5 over budget: 102 ms > 20 ms (action: Drop)
+[  440.402891] WARN  watchdog: aborting connection 5
+[  441.072521] WARN  watchdog: core 1 input handler (step -) for conn 14 over budget: 371 ms > 20 ms (action: Drop)
+[  441.073300] WARN  watchdog: aborting connection 14
+[  441.127010] WARN  watchdog: core 2 input handler (step -) for conn 8 over budget: 43 ms > 20 ms (action: Drop)
+[  441.128425] WARN  watchdog: aborting connection 8
+[  441.160141] WARN  watchdog: core 2 input handler (step -) for conn 14 over budget: 30 ms > 20 ms (action: Drop)
+[  441.174523] WARN  watchdog: aborting connection 14
+[  443.373822] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 23 ms > 20 ms (action: Drop, no single connection to drop)
+[  444.013451] WARN  watchdog: core 2 input handler (step -) for conn 15 over budget: 21 ms > 20 ms (action: Drop)
+[  444.015197] WARN  watchdog: aborting connection 15
+[  444.411406] WARN  watchdog: core 2 input handler (step -) for conn 9 over budget: 27 ms > 20 ms (action: Drop)
+[  444.413478] WARN  watchdog: aborting connection 9
+[  514.827564] WARN  watchdog: core 2 handshake handler (step -) for conn 0 over budget: 53 ms > 50 ms (action: Drop)
+[  514.843422] WARN  watchdog: core 1 handshake handler (step -) for conn 2 over budget: 63 ms > 50 ms (action: Drop)
+[  515.165879] WARN  watchdog: core 1 handshake handler (step -) for conn 4 over budget: 51 ms > 50 ms (action: Drop)
+[  515.244182] WARN  watchdog: core 2 handshake handler (step -) for conn 5 over budget: 93 ms > 50 ms (action: Drop)
+[  515.245679] WARN  watchdog: aborting connection 4
+### console throughput qos=0 payload=1024 pairs=16 rep=1
+[  515.833486] WARN  watchdog: core 2 input handler (step -) for conn 10 over budget: 35 ms > 20 ms (action: Drop)
+[  515.862049] WARN  watchdog: core 2 input handler (step -) for conn 16 over budget: 28 ms > 20 ms (action: Drop)
+[  515.873797] WARN  watchdog: aborting connection 16
+[  516.536480] WARN  watchdog: core 2 input handler (step -) for conn 10 over budget: 37 ms > 20 ms (action: Drop)
+[  516.537064] WARN  watchdog: aborting connection 10
+[  516.538078] WARN  watchdog: core 1 input handler (step -) for conn 7 over budget: 49 ms > 20 ms (action: Drop)
+[  516.538472] WARN  watchdog: aborting connection 7
+[  517.285138] WARN  watchdog: core 1 input handler (step -) for conn 6 over budget: 96 ms > 20 ms (action: Drop)
+[  517.410950] WARN  watchdog: aborting connection 6
+[  517.529848] WARN  watchdog: core 1 input handler (step -) for conn 10 over budget: 22 ms > 20 ms (action: Drop)
+[  517.535688] WARN  watchdog: aborting connection 10
+[  517.655578] WARN  watchdog: core 2 input handler (step -) for conn 7 over budget: 34 ms > 20 ms (action: Drop)
+[  517.659557] WARN  watchdog: aborting connection 7
+[  517.827753] WARN  watchdog: core 2 input handler (step -) for conn 11 over budget: 27 ms > 20 ms (action: Drop)
+[  517.844282] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 48 ms > 20 ms (action: Drop, no single connection to drop)
+[  517.861309] WARN  watchdog: core 2 input handler (step -) for conn 11 over budget: 33 ms > 20 ms (action: Drop)
+[  517.921023] WARN  watchdog: core 2 input handler (step -) for conn 19 over budget: 48 ms > 20 ms (action: Drop)
+[  517.921747] WARN  watchdog: aborting connection 19
+[  518.028937] WARN  watchdog: core 2 input handler (step -) for conn 8 over budget: 41 ms > 20 ms (action: Drop)
+[  518.029101] WARN  watchdog: aborting connection 8
+[  518.191535] WARN  watchdog: core 2 input handler (step -) for conn 13 over budget: 94 ms > 20 ms (action: Drop)
+[  518.191727] WARN  watchdog: aborting connection 13
+[  518.262270] WARN  watchdog: core 2 output handler (step ready) for conn - over budget: 23 ms > 20 ms (action: Drop, no single connection to drop)
+[  518.288436] WARN  watchdog: core 2 input handler (step -) for conn 11 over budget: 24 ms > 20 ms (action: Drop)
+[  518.289071] WARN  watchdog: aborting connection 11
+[  518.528656] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 21 ms > 20 ms (action: Drop, no single connection to drop)
+[  518.696763] WARN  watchdog: core 1 input handler (step -) for conn 12 over budget: 105 ms > 20 ms (action: Drop)
+[  518.696763] WARN  watchdog: core 2 input handler (step -) for conn 15 over budget: 100 ms > 20 ms (action: Drop)
+[  518.697957] WARN  watchdog: aborting connection 15
+[  518.698288] WARN  watchdog: aborting connection 12
+[  518.860546] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 25 ms > 20 ms (action: Drop, no single connection to drop)
+[  520.499527] WARN  watchdog: core 2 input handler (step -) for conn 12 over budget: 26 ms > 20 ms (action: Drop)
+[  520.507047] WARN  watchdog: core 1 input handler (step -) for conn 9 over budget: 23 ms > 20 ms (action: Drop)
+[  520.507156] WARN  watchdog: aborting connection 12
+[  520.508078] WARN  watchdog: aborting connection 9
+[  520.594360] WARN  watchdog: core 2 output handler (step ready) for conn - over budget: 24 ms > 20 ms (action: Drop, no single connection to drop)
+[  521.092783] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 35 ms > 20 ms (action: Drop, no single connection to drop)
+[  522.708638] WARN  watchdog: core 1 input handler (step -) for conn 8 over budget: 26 ms > 20 ms (action: Drop)
+[  522.721779] WARN  watchdog: aborting connection 8
+[  524.632336] WARN  watchdog: core 1 input handler (step -) for conn 11 over budget: 51 ms > 20 ms (action: Drop)
+[  524.634749] WARN  watchdog: aborting connection 11
+### console throughput qos=0 payload=1024 pairs=16 rep=2
+[  534.112871] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 21 ms > 20 ms (action: Drop, no single connection to drop)
+[  534.124028] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 24 ms > 20 ms (action: Drop, no single connection to drop)
+[  535.809607] WARN  dataplane: frames dropped in 5001 ms: 0 for a worker core that is behind, 0 for the dispatcher, 111 for a full NIC queue (workers' frames), 0 for a full NIC queue (core 0's own); TCP retransmits them
+[  539.544406] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 44 ms > 20 ms (action: Drop, no single connection to drop)
+[  541.722726] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 35 ms > 20 ms (action: Drop, no single connection to drop)
+[  542.587519] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 29 ms > 20 ms (action: Drop, no single connection to drop)
+[  542.647466] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 25 ms > 20 ms (action: Drop, no single connection to drop)
+[  542.713590] WARN  watchdog: core 2 input handler (step -) for conn 13 over budget: 26 ms > 20 ms (action: Drop)
+[  542.714042] WARN  watchdog: aborting connection 13
+[  542.818810] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 45 ms > 20 ms (action: Drop, no single connection to drop)
+[  542.902768] WARN  watchdog: core 1 input handler (step -) for conn 5 over budget: 27 ms > 20 ms (action: Drop)
+[  542.964957] WARN  watchdog: aborting connection 5
+[  543.015896] WARN  watchdog: core 2 output handler (step ready) for conn - over budget: 51 ms > 20 ms (action: Drop, no single connection to drop)
+[  543.579841] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 26 ms > 20 ms (action: Drop, no single connection to drop)
+[  544.078372] WARN  watchdog: core 1 output handler (step telemetry) for conn - over budget: 21 ms > 20 ms (action: Drop, no single connection to drop)
+[  544.151829] WARN  watchdog: core 1 output handler (step telemetry) for conn - over budget: 37 ms > 20 ms (action: Drop, no single connection to drop)
+[  544.478216] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 50 ms > 20 ms (action: Drop, no single connection to drop)
+[  544.840044] WARN  watchdog: core 2 input handler (step -) for conn 12 over budget: 21 ms > 20 ms (action: Drop)
+[  544.847370] WARN  watchdog: aborting connection 12
+[  544.931173] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 46 ms > 20 ms (action: Drop, no single connection to drop)
+[  544.999667] WARN  watchdog: core 1 input handler (step -) for conn 3 over budget: 23 ms > 20 ms (action: Drop)
+[  545.013895] WARN  watchdog: core 2 input handler (step -) for conn 14 over budget: 37 ms > 20 ms (action: Drop)
+[  545.013944] WARN  watchdog: aborting connection 14
+[  545.014224] WARN  watchdog: aborting connection 3
+[  545.817664] WARN  dataplane: frames dropped in 5002 ms: 0 for a worker core that is behind, 0 for the dispatcher, 18 for a full NIC queue (workers' frames), 0 for a full NIC queue (core 0's own); TCP retransmits them
+### console throughput qos=0 payload=1024 pairs=16 rep=3
+[  550.698644] WARN  watchdog: core 1 input handler (step -) for conn 8 over budget: 54 ms > 20 ms (action: Drop)
+[  550.771640] WARN  watchdog: core 1 input handler (step -) for conn 8 over budget: 23 ms > 20 ms (action: Drop)
+[  550.860547] WARN  watchdog: core 1 input handler (step -) for conn 6 over budget: 76 ms > 20 ms (action: Drop)
+[  550.920262] WARN  watchdog: core 1 input handler (step -) for conn 6 over budget: 40 ms > 20 ms (action: Drop)
+[  550.927170] WARN  watchdog: aborting connection 6
+[  551.518730] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 35 ms > 20 ms (action: Drop, no single connection to drop)
+[  552.940646] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 29 ms > 20 ms (action: Drop, no single connection to drop)
+[  553.040851] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 30 ms > 20 ms (action: Drop, no single connection to drop)
+[  553.095415] WARN  watchdog: core 2 output handler (step persist) for conn - over budget: 53 ms > 20 ms (action: Drop, no single connection to drop)
+[  553.263049] WARN  watchdog: core 1 output handler (step control) for conn - over budget: 41 ms > 20 ms (action: Drop, no single connection to drop)
+[  553.424208] WARN  watchdog: core 1 output handler (step control) for conn - over budget: 58 ms > 20 ms (action: Drop, no single connection to drop)
+[  553.604443] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 23 ms > 20 ms (action: Drop, no single connection to drop)
+[  553.888917] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 77 ms > 20 ms (action: Drop, no single connection to drop)
+[  553.943529] WARN  watchdog: core 2 input handler (step -) for conn 7 over budget: 26 ms > 20 ms (action: Drop)
+[  553.985414] WARN  watchdog: core 2 input handler (step -) for conn 7 over budget: 41 ms > 20 ms (action: Drop)
+[  553.987471] WARN  watchdog: aborting connection 7
+[  554.015077] WARN  watchdog: core 1 output handler (step ready) for conn - over budget: 27 ms > 20 ms (action: Drop, no single connection to drop)
+[  554.106281] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 24 ms > 20 ms (action: Drop, no single connection to drop)
+[  556.558857] WARN  watchdog: core 1 input handler (step -) for conn 11 over budget: 36 ms > 20 ms (action: Drop)
+[  556.588891] WARN  watchdog: core 1 input handler (step -) for conn 11 over budget: 25 ms > 20 ms (action: Drop)
+[  556.662755] WARN  watchdog: core 2 input handler (step -) for conn 10 over budget: 140 ms > 20 ms (action: Drop)
+[  556.705090] WARN  watchdog: core 1 input handler (step -) for conn 11 over budget: 79 ms > 20 ms (action: Drop)
+[  556.765127] WARN  watchdog: core 1 input handler (step -) for conn 8 over budget: 21 ms > 20 ms (action: Drop)
+[  556.825124] WARN  watchdog: core 1 input handler (step -) for conn 8 over budget: 23 ms > 20 ms (action: Drop)
+[  556.878369] WARN  watchdog: core 2 input handler (step -) for conn 10 over budget: 215 ms > 20 ms (action: Drop)
+[  556.911127] WARN  watchdog: core 1 input handler (step -) for conn 8 over budget: 68 ms > 20 ms (action: Drop)
+[  556.911225] WARN  watchdog: aborting connection 8
+[  556.911475] WARN  watchdog: aborting connection 10
+[  556.933567] WARN  watchdog: core 2 output handler (step ready) for conn - over budget: 21 ms > 20 ms (action: Drop, no single connection to drop)
+[  557.615365] WARN  watchdog: core 1 input handler (step -) for conn 4 over budget: 30 ms > 20 ms (action: Drop)
+[  557.656570] WARN  watchdog: aborting connection 4
+[  557.905805] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 21 ms > 20 ms (action: Drop, no single connection to drop)
+[  557.943080] WARN  watchdog: core 1 input handler (step -) for conn 5 over budget: 52 ms > 20 ms (action: Drop)
+[  557.943510] WARN  watchdog: aborting connection 5
+[  558.370818] WARN  watchdog: core 2 input handler (step -) for conn 2 over budget: 40 ms > 20 ms (action: Drop)
+[  558.371075] WARN  watchdog: aborting connection 2
+[  560.351648] WARN  watchdog: core 2 input handler (step -) for conn 12 over budget: 29 ms > 20 ms (action: Drop)
+[  560.358045] WARN  watchdog: aborting connection 12
+[  560.499062] WARN  watchdog: core 1 input handler (step -) for conn 12 over budget: 28 ms > 20 ms (action: Drop)
+[  560.505378] WARN  watchdog: aborting connection 12
+### console throughput qos=1 payload=64 pairs=16 rep=1
+[  570.903238] WARN  dataplane: frames dropped in 5007 ms: 0 for a worker core that is behind, 0 for the dispatcher, 50 for a full NIC queue (workers' frames), 0 for a full NIC queue (core 0's own); TCP retransmits them
+[  575.328002] WARN  watchdog: core 2 input handler (step -) for conn 1 over budget: 22 ms > 20 ms (action: Drop)
+[  575.328288] WARN  watchdog: aborting connection 1
+[  579.046945] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 25 ms > 20 ms (action: Drop, no single connection to drop)
+[  579.075966] WARN  watchdog: core 2 input handler (step -) for conn 14 over budget: 28 ms > 20 ms (action: Drop)
+[  579.076432] WARN  watchdog: aborting connection 14
+[  579.113112] WARN  watchdog: core 2 input handler (step -) for conn 2 over budget: 35 ms > 20 ms (action: Drop)
+[  579.142932] WARN  watchdog: core 2 input handler (step -) for conn 13 over budget: 29 ms > 20 ms (action: Drop)
+[  579.143078] WARN  watchdog: aborting connection 13
+[  579.182391] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 32 ms > 20 ms (action: Drop, no single connection to drop)
+[  579.219791] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 69 ms > 20 ms (action: Drop, no single connection to drop)
+[  580.265032] WARN  watchdog: core 1 input handler (step -) for conn 12 over budget: 32 ms > 20 ms (action: Drop)
+[  580.265460] WARN  watchdog: aborting connection 12
+[  580.423425] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 94 ms > 20 ms (action: Drop, no single connection to drop)
+[  580.526930] WARN  watchdog: core 1 input handler (step -) for conn 14 over budget: 22 ms > 20 ms (action: Drop)
+[  580.527373] WARN  watchdog: aborting connection 14
+[  580.627556] WARN  watchdog: core 1 input handler (step -) for conn 10 over budget: 28 ms > 20 ms (action: Drop)
+[  580.665636] WARN  watchdog: core 2 input handler (step -) for conn 15 over budget: 87 ms > 20 ms (action: Drop)
+[  580.665649] WARN  watchdog: core 1 input handler (step -) for conn 11 over budget: 30 ms > 20 ms (action: Drop)
+[  580.665963] WARN  watchdog: aborting connection 11
+[  580.666128] WARN  watchdog: aborting connection 15
+[  580.920790] WARN  dataplane: frames dropped in 5012 ms: 0 for a worker core that is behind, 0 for the dispatcher, 122 for a full NIC queue (workers' frames), 0 for a full NIC queue (core 0's own); TCP retransmits them
+### console throughput qos=1 payload=64 pairs=16 rep=2
+[  587.702265] WARN  watchdog: core 2 input handler (step -) for conn 16 over budget: 33 ms > 20 ms (action: Drop)
+[  587.702418] WARN  watchdog: aborting connection 16
+### console throughput qos=1 payload=64 pairs=16 rep=3
+[  606.706414] WARN  watchdog: core 2 input handler (step -) for conn 1 over budget: 23 ms > 20 ms (action: Drop)
+[  606.707309] WARN  watchdog: aborting connection 1
+[  614.700668] WARN  watchdog: core 1 output handler (step ready) for conn - over budget: 21 ms > 20 ms (action: Drop, no single connection to drop)
+### console throughput qos=1 payload=1024 pairs=16 rep=1
+[  622.565630] WARN  watchdog: core 1 input handler (step -) for conn 17 over budget: 101 ms > 20 ms (action: Drop)
+[  622.566316] WARN  watchdog: aborting connection 17
+[  630.630709] WARN  watchdog: core 1 input handler (step -) for conn 12 over budget: 144 ms > 20 ms (action: Drop)
+[  630.640807] WARN  watchdog: aborting connection 12
+[  630.740629] WARN  watchdog: core 2 input handler (step -) for conn 10 over budget: 47 ms > 20 ms (action: Drop)
+[  630.740921] WARN  watchdog: aborting connection 10
+### console throughput qos=1 payload=1024 pairs=16 rep=2
+[  639.249780] WARN  watchdog: aborting connection 10
+[  640.254969] WARN  watchdog: core 1 input handler (step -) for conn 4 over budget: 23 ms > 20 ms (action: Drop)
+[  640.313580] WARN  watchdog: core 2 input handler (step -) for conn 11 over budget: 86 ms > 20 ms (action: Drop)
+[  640.313984] WARN  watchdog: aborting connection 4
+[  640.314110] WARN  watchdog: aborting connection 11
+[  640.756734] WARN  watchdog: core 1 input handler (step -) for conn 9 over budget: 30 ms > 20 ms (action: Drop)
+[  640.790894] WARN  watchdog: core 1 input handler (step -) for conn 5 over budget: 30 ms > 20 ms (action: Drop)
+[  640.820054] WARN  watchdog: core 2 input handler (step -) for conn 16 over budget: 21 ms > 20 ms (action: Drop)
+[  640.820109] WARN  watchdog: aborting connection 16
+[  640.834466] WARN  watchdog: core 1 input handler (step -) for conn 11 over budget: 32 ms > 20 ms (action: Drop)
+[  640.836143] WARN  watchdog: aborting connection 11
+[  640.975897] WARN  dataplane: frames dropped in 5002 ms: 0 for a worker core that is behind, 0 for the dispatcher, 8 for a full NIC queue (workers' frames), 0 for a full NIC queue (core 0's own); TCP retransmits them
+[  641.294496] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 27 ms > 20 ms (action: Drop, no single connection to drop)
+[  641.375476] WARN  watchdog: core 2 input handler (step -) for conn 1 over budget: 32 ms > 20 ms (action: Drop)
+[  641.375743] WARN  watchdog: aborting connection 1
+[  641.476993] WARN  watchdog: core 2 input handler (step -) for conn 9 over budget: 26 ms > 20 ms (action: Drop)
+[  641.543769] WARN  watchdog: core 1 input handler (step -) for conn 9 over budget: 46 ms > 20 ms (action: Drop)
+[  641.543778] WARN  watchdog: core 2 input handler (step -) for conn 6 over budget: 31 ms > 20 ms (action: Drop)
+[  641.543864] WARN  watchdog: aborting connection 9
+[  641.544096] WARN  watchdog: aborting connection 6
+[  642.957725] WARN  watchdog: core 2 input handler (step -) for conn 18 over budget: 80 ms > 20 ms (action: Drop)
+[  642.966840] WARN  watchdog: aborting connection 18
+[  644.949298] WARN  watchdog: core 1 input handler (step -) for conn 8 over budget: 25 ms > 20 ms (action: Drop)
+[  644.949555] WARN  watchdog: core 2 input handler (step -) for conn 15 over budget: 31 ms > 20 ms (action: Drop)
+[  644.963578] WARN  watchdog: aborting connection 8
+[  644.963697] WARN  watchdog: aborting connection 15
+[  645.609178] WARN  watchdog: core 2 input handler (step -) for conn 19 over budget: 22 ms > 20 ms (action: Drop)
+[  645.676063] WARN  watchdog: core 2 input handler (step -) for conn 19 over budget: 66 ms > 20 ms (action: Drop)
+[  645.701661] WARN  watchdog: core 2 input handler (step -) for conn 12 over budget: 25 ms > 20 ms (action: Drop)
+[  645.701940] WARN  watchdog: aborting connection 12
+[  646.425825] WARN  watchdog: core 1 input handler (step -) for conn 13 over budget: 35 ms > 20 ms (action: Drop)
+[  646.426114] WARN  watchdog: aborting connection 13
+[  646.920480] WARN  watchdog: core 1 input handler (step -) for conn 12 over budget: 23 ms > 20 ms (action: Drop)
+[  646.934691] WARN  watchdog: aborting connection 12
+[  648.186716] WARN  watchdog: core 2 input handler (step -) for conn 19 over budget: 43 ms > 20 ms (action: Drop)
+[  648.189823] WARN  watchdog: aborting connection 19
+[  648.724433] WARN  watchdog: core 2 input handler (step -) for conn 17 over budget: 23 ms > 20 ms (action: Drop)
+[  648.724726] WARN  watchdog: core 1 input handler (step -) for conn 2 over budget: 27 ms > 20 ms (action: Drop)
+[  648.724801] WARN  watchdog: aborting connection 2
+[  648.724993] WARN  watchdog: aborting connection 17
+### console throughput qos=1 payload=1024 pairs=16 rep=3
+[  657.806704] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 30 ms > 20 ms (action: Drop, no single connection to drop)
+[  657.825047] WARN  watchdog: core 2 input handler (step -) for conn 13 over budget: 31 ms > 20 ms (action: Drop)
+[  657.886687] WARN  watchdog: core 2 input handler (step -) for conn 2 over budget: 21 ms > 20 ms (action: Drop)
+[  657.958615] WARN  watchdog: core 2 input handler (step -) for conn 5 over budget: 26 ms > 20 ms (action: Drop)
+[  657.958838] WARN  watchdog: core 1 input handler (step -) for conn 5 over budget: 142 ms > 20 ms (action: Drop)
+[  657.984144] WARN  watchdog: core 1 input handler (step -) for conn 10 over budget: 25 ms > 20 ms (action: Drop)
+[  658.133829] WARN  watchdog: core 2 input handler (step -) for conn 6 over budget: 22 ms > 20 ms (action: Drop)
+[  658.250933] WARN  watchdog: core 2 input handler (step -) for conn 2 over budget: 60 ms > 20 ms (action: Drop)
+[  658.287026] WARN  watchdog: aborting connection 2
+[  658.287617] WARN  watchdog: core 1 input handler (step -) for conn 11 over budget: 303 ms > 20 ms (action: Drop)
+[  658.308786] WARN  watchdog: aborting connection 11
+[  658.430357] WARN  watchdog: core 1 input handler (step -) for conn 9 over budget: 24 ms > 20 ms (action: Drop)
+[  658.454022] WARN  watchdog: aborting connection 9
+[  658.470912] WARN  watchdog: core 2 input handler (step -) for conn 18 over budget: 22 ms > 20 ms (action: Drop)
+[  658.471083] WARN  watchdog: aborting connection 18
+[  661.256031] WARN  watchdog: core 1 input handler (step -) for conn 5 over budget: 37 ms > 20 ms (action: Drop)
+[  661.296017] WARN  watchdog: core 1 input handler (step -) for conn 5 over budget: 24 ms > 20 ms (action: Drop)
+[  661.346012] WARN  watchdog: core 1 input handler (step -) for conn 0 over budget: 22 ms > 20 ms (action: Drop)
+[  661.348725] WARN  watchdog: aborting connection 0
+[  661.720854] WARN  watchdog: core 2 input handler (step -) for conn 17 over budget: 21 ms > 20 ms (action: Drop)
+[  661.720987] WARN  watchdog: aborting connection 17
+[  665.136318] WARN  watchdog: core 1 input handler (step -) for conn 5 over budget: 24 ms > 20 ms (action: Drop)
+[  665.169150] WARN  watchdog: aborting connection 5
+### console throughput qos=1 payload=64 pairs=64 rep=1
+[  675.013057] WARN  watchdog: core 1 input handler (step -) for conn 15 over budget: 136 ms > 20 ms (action: Drop)
+[  675.160582] WARN  watchdog: core 1 input handler (step -) for conn 7 over budget: 110 ms > 20 ms (action: Drop)
+[  675.161922] WARN  watchdog: aborting connection 7
+[  675.612045] WARN  watchdog: core 2 input handler (step -) for conn 2 over budget: 36 ms > 20 ms (action: Drop)
+[  675.612482] WARN  watchdog: aborting connection 2
+[  680.269503] WARN  watchdog: core 1 input handler (step -) for conn 12 over budget: 24 ms > 20 ms (action: Drop)
+[  680.276970] WARN  watchdog: aborting connection 12
+[  685.591874] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 21 ms > 20 ms (action: Drop, no single connection to drop)
+### console throughput qos=1 payload=64 pairs=64 rep=2
+[  695.711646] WARN  watchdog: core 2 input handler (step -) for conn 57 over budget: 240 ms > 20 ms (action: Drop)
+[  695.712771] WARN  watchdog: aborting connection 57
+[  697.325517] WARN  watchdog: core 2 input handler (step -) for conn 59 over budget: 30 ms > 20 ms (action: Drop)
+[  697.325596] WARN  watchdog: aborting connection 59
+[  697.350287] WARN  watchdog: core 2 input handler (step -) for conn 35 over budget: 23 ms > 20 ms (action: Drop)
+[  697.350820] WARN  watchdog: aborting connection 35
+[  697.600460] WARN  watchdog: core 1 input handler (step -) for conn 61 over budget: 32 ms > 20 ms (action: Drop)
+[  697.614449] WARN  watchdog: core 2 input handler (step -) for conn 44 over budget: 46 ms > 20 ms (action: Drop)
+[  697.614616] WARN  watchdog: aborting connection 61
+[  697.614668] WARN  watchdog: aborting connection 44
+[  697.799332] WARN  watchdog: core 2 input handler (step -) for conn 20 over budget: 28 ms > 20 ms (action: Drop)
+[  697.898365] WARN  watchdog: core 2 input handler (step -) for conn 4 over budget: 71 ms > 20 ms (action: Drop)
+[  697.946845] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 83 ms > 20 ms (action: Drop, no single connection to drop)
+[  698.002057] WARN  watchdog: aborting connection 4
+[  698.217796] WARN  watchdog: core 1 input handler (step -) for conn 34 over budget: 32 ms > 20 ms (action: Drop)
+[  698.218209] WARN  watchdog: aborting connection 34
+[  698.440273] WARN  watchdog: core 2 input handler (step -) for conn 5 over budget: 24 ms > 20 ms (action: Drop)
+[  698.449811] WARN  watchdog: aborting connection 5
+[  698.651288] WARN  watchdog: core 2 output handler (step routes) for conn - over budget: 73 ms > 20 ms (action: Drop, no single connection to drop)
+[  698.782081] WARN  watchdog: core 1 input handler (step -) for conn 42 over budget: 174 ms > 20 ms (action: Drop)
+[  698.782790] WARN  watchdog: aborting connection 42
+[  699.122517] WARN  watchdog: core 2 input handler (step -) for conn 1 over budget: 33 ms > 20 ms (action: Drop)
+[  699.122957] WARN  watchdog: aborting connection 1
+[  699.708667] WARN  watchdog: core 1 input handler (step -) for conn 3 over budget: 31 ms > 20 ms (action: Drop)
+[  699.803681] WARN  watchdog: core 2 input handler (step -) for conn 55 over budget: 103 ms > 20 ms (action: Drop)
+[  699.803869] WARN  watchdog: aborting connection 55
+[  699.818655] WARN  watchdog: core 1 input handler (step -) for conn 24 over budget: 109 ms > 20 ms (action: Drop)
+[  699.819367] WARN  watchdog: aborting connection 24
+[  700.050464] WARN  watchdog: core 1 input handler (step -) for conn 52 over budget: 26 ms > 20 ms (action: Drop)
+[  700.050922] WARN  watchdog: aborting connection 52
+[  700.540054] WARN  watchdog: core 2 input handler (step -) for conn 45 over budget: 23 ms > 20 ms (action: Drop)
+[  700.540195] WARN  watchdog: aborting connection 45
+[  700.617752] WARN  watchdog: core 2 input handler (step -) for conn 58 over budget: 24 ms > 20 ms (action: Drop)
+[  700.618399] WARN  watchdog: aborting connection 58
+[  701.348278] WARN  watchdog: core 2 input handler (step -) for conn 56 over budget: 67 ms > 20 ms (action: Drop)
+[  701.348296] WARN  watchdog: core 1 input handler (step -) for conn 44 over budget: 66 ms > 20 ms (action: Drop)
+[  701.349110] WARN  watchdog: aborting connection 44
+[  701.351494] WARN  watchdog: aborting connection 56
+[  701.591657] WARN  watchdog: core 1 input handler (step -) for conn 56 over budget: 25 ms > 20 ms (action: Drop)
+[  701.592185] WARN  watchdog: aborting connection 56
+[  701.897017] WARN  watchdog: core 2 input handler (step -) for conn 41 over budget: 25 ms > 20 ms (action: Drop)
+[  701.897267] WARN  watchdog: aborting connection 41
+[  702.418610] WARN  watchdog: core 2 input handler (step -) for conn 42 over budget: 27 ms > 20 ms (action: Drop)
+[  702.419008] WARN  watchdog: aborting connection 42
+[  702.434255] WARN  watchdog: core 1 output handler (step tcp) for conn - over budget: 35 ms > 20 ms (action: Drop, no single connection to drop)
+[  703.405783] WARN  watchdog: core 1 input handler (step -) for conn 29 over budget: 33 ms > 20 ms (action: Drop)
+[  703.407579] WARN  watchdog: aborting connection 29
+[  703.911965] WARN  watchdog: core 1 output handler (step sys) for conn - over budget: 22 ms > 20 ms (action: Drop, no single connection to drop)
+### console throughput qos=1 payload=64 pairs=64 rep=3
+[  714.845839] WARN  watchdog: core 2 output handler (step control) for conn - over budget: 42 ms > 20 ms (action: Drop, no single connection to drop)
+[  715.245448] WARN  watchdog: core 1 input handler (step -) for conn 28 over budget: 156 ms > 20 ms (action: Drop)
+[  715.246825] WARN  watchdog: aborting connection 28
+[  715.470821] WARN  watchdog: core 2 input handler (step -) for conn 18 over budget: 192 ms > 20 ms (action: Drop)
+[  715.521085] WARN  watchdog: aborting connection 18
+[  716.645070] WARN  watchdog: core 1 input handler (step -) for conn 65 over budget: 66 ms > 20 ms (action: Drop)
+[  716.712682] WARN  watchdog: core 1 input handler (step -) for conn 65 over budget: 67 ms > 20 ms (action: Drop)
+[  716.713410] WARN  watchdog: aborting connection 65
+[  716.815068] WARN  watchdog: core 2 input handler (step -) for conn 51 over budget: 45 ms > 20 ms (action: Drop)
+[  716.822644] WARN  watchdog: aborting connection 51
+[  717.727301] WARN  watchdog: core 2 input handler (step -) for conn 61 over budget: 39 ms > 20 ms (action: Drop)
+[  717.728506] WARN  watchdog: aborting connection 61
+[  718.328825] WARN  watchdog: core 2 output handler (step timers) for conn - over budget: 36 ms > 20 ms (action: Drop, no single connection to drop)
+[  718.332889] WARN  watchdog: core 1 input handler (step -) for conn 20 over budget: 33 ms > 20 ms (action: Drop)
+[  718.341298] WARN  watchdog: aborting connection 20
+[  719.312901] WARN  watchdog: core 2 input handler (step -) for conn 31 over budget: 33 ms > 20 ms (action: Drop)
+[  719.313419] WARN  watchdog: aborting connection 31
+[  719.832088] WARN  watchdog: core 1 input handler (step -) for conn 55 over budget: 34 ms > 20 ms (action: Drop)
+[  719.832282] WARN  watchdog: aborting connection 55
+[  719.861168] WARN  watchdog: core 2 input handler (step -) for conn 30 over budget: 42 ms > 20 ms (action: Drop)
+[  719.861389] WARN  watchdog: aborting connection 30
+[  719.916535] WARN  watchdog: core 1 input handler (step -) for conn 60 over budget: 43 ms > 20 ms (action: Drop)
+[  719.956664] WARN  watchdog: core 1 input handler (step -) for conn 54 over budget: 24 ms > 20 ms (action: Drop)
+[  719.957061] WARN  watchdog: aborting connection 54
+[  720.001606] WARN  watchdog: core 1 input handler (step -) for conn 51 over budget: 43 ms > 20 ms (action: Drop)
+[  720.001961] WARN  watchdog: aborting connection 51
+[  720.336047] WARN  watchdog: core 1 input handler (step -) for conn 21 over budget: 27 ms > 20 ms (action: Drop)
+[  720.336113] WARN  watchdog: aborting connection 21
+[  721.309187] WARN  watchdog: core 1 input handler (step -) for conn 36 over budget: 112 ms > 20 ms (action: Drop)
+[  721.309474] WARN  watchdog: aborting connection 36
+[  721.619874] WARN  watchdog: core 2 input handler (step -) for conn 50 over budget: 21 ms > 20 ms (action: Drop)
+[  721.620183] WARN  watchdog: aborting connection 50
+### console sweep qos=0 payload=64 rate=300 pairs=16 rep=1
+[  775.236863] WARN  watchdog: core 2 input handler (step -) for conn 33 over budget: 43 ms > 20 ms (action: Drop)
+[  775.237473] WARN  watchdog: aborting connection 33
+[  907.466129] WARN  watchdog: core 2 handshake handler (step -) for conn 1 over budget: 96 ms > 50 ms (action: Drop)
+### console sweep qos=0 payload=64 rate=300 pairs=16 rep=2
+[  917.236035] WARN  watchdog: core 1 input handler (step -) for conn 13 over budget: 29 ms > 20 ms (action: Drop)
+[  917.264183] WARN  watchdog: aborting connection 13
+### console sweep qos=0 payload=64 rate=300 pairs=16 rep=3
+[ 1042.806596] WARN  watchdog: core 2 output handler (step ready) for conn - over budget: 27 ms > 20 ms (action: Drop, no single connection to drop)
+[ 1045.312675] WARN  watchdog: core 2 input handler (step -) for conn 14 over budget: 28 ms > 20 ms (action: Drop)
+[ 1045.313085] WARN  watchdog: aborting connection 14
+[ 1053.649440] WARN  watchdog: core 2 output handler (step ready) for conn - over budget: 77 ms > 20 ms (action: Drop, no single connection to drop)
+### console sweep qos=0 payload=64 rate=1000 pairs=16 rep=1
+[ 1065.377574] WARN  watchdog: core 2 input handler (step -) for conn 7 over budget: 109 ms > 20 ms (action: Drop)
+[ 1065.377659] WARN  watchdog: aborting connection 7
+[ 1070.977054] WARN  watchdog: core 2 input handler (step -) for conn 11 over budget: 75 ms > 20 ms (action: Drop)
+[ 1070.977242] WARN  watchdog: aborting connection 11
+### console sweep qos=0 payload=64 rate=1000 pairs=16 rep=2
+[ 1081.803086] WARN  watchdog: core 1 input handler (step -) for conn 5 over budget: 118 ms > 20 ms (action: Drop)
+[ 1081.803086] WARN  watchdog: core 2 input handler (step -) for conn 14 over budget: 115 ms > 20 ms (action: Drop)
+[ 1081.803500] WARN  watchdog: aborting connection 5
+[ 1081.803953] WARN  watchdog: aborting connection 14
+[ 1084.721244] WARN  watchdog: core 1 input handler (step -) for conn 4 over budget: 23 ms > 20 ms (action: Drop)
+[ 1084.817418] WARN  watchdog: core 1 input handler (step -) for conn 4 over budget: 27 ms > 20 ms (action: Drop)
+[ 1084.817803] WARN  watchdog: aborting connection 4
+[ 1085.232270] WARN  watchdog: core 1 input handler (step -) for conn 11 over budget: 148 ms > 20 ms (action: Drop)
+[ 1085.232315] WARN  watchdog: aborting connection 11
+[ 1086.194950] WARN  watchdog: core 2 output handler (step ready) for conn - over budget: 24 ms > 20 ms (action: Drop, no single connection to drop)
+[ 1086.619952] WARN  watchdog: core 2 input handler (step -) for conn 7 over budget: 32 ms > 20 ms (action: Drop)
+[ 1086.695102] WARN  watchdog: aborting connection 7
+[ 1088.510318] WARN  watchdog: core 1 output handler (step ready) for conn - over budget: 26 ms > 20 ms (action: Drop, no single connection to drop)
+[ 1089.289652] WARN  watchdog: core 2 input handler (step -) for conn 10 over budget: 31 ms > 20 ms (action: Drop)
+[ 1089.289968] WARN  watchdog: aborting connection 10
+### console sweep qos=0 payload=64 rate=1000 pairs=16 rep=3
+[ 1098.894542] WARN  watchdog: core 2 input handler (step -) for conn 9 over budget: 128 ms > 20 ms (action: Drop)
+[ 1098.895205] WARN  watchdog: aborting connection 9
+[ 1098.956116] WARN  watchdog: core 1 output handler (step ready) for conn - over budget: 33 ms > 20 ms (action: Drop, no single connection to drop)
+[ 1101.563776] WARN  watchdog: core 1 input handler (step -) for conn 7 over budget: 76 ms > 20 ms (action: Drop)
+[ 1101.667956] WARN  watchdog: core 1 input handler (step -) for conn 7 over budget: 104 ms > 20 ms (action: Drop)
+[ 1101.668351] WARN  watchdog: aborting connection 7
+[ 1101.885749] WARN  watchdog: core 2 input handler (step -) for conn 6 over budget: 33 ms > 20 ms (action: Drop)
+[ 1101.906687] WARN  watchdog: aborting connection 6
+[ 1101.936793] WARN  watchdog: core 2 output handler (step ready) for conn - over budget: 30 ms > 20 ms (action: Drop, no single connection to drop)
+[ 1103.113824] WARN  watchdog: core 2 input handler (step -) for conn 13 over budget: 33 ms > 20 ms (action: Drop)
+[ 1103.248500] WARN  watchdog: core 1 input handler (step -) for conn 8 over budget: 170 ms > 20 ms (action: Drop)
+[ 1103.249174] WARN  watchdog: aborting connection 8
+[ 1103.249651] WARN  watchdog: aborting connection 13
+[ 1103.453795] WARN  watchdog: core 2 input handler (step -) for conn 8 over budget: 53 ms > 20 ms (action: Drop)
+[ 1103.595116] WARN  watchdog: aborting connection 8
+[ 1103.620251] WARN  watchdog: core 1 input handler (step -) for conn 11 over budget: 24 ms > 20 ms (action: Drop)
+[ 1103.647194] WARN  watchdog: core 1 input handler (step -) for conn 14 over budget: 23 ms > 20 ms (action: Drop)
+[ 1103.788474] WARN  watchdog: core 2 input handler (step -) for conn 14 over budget: 113 ms > 20 ms (action: Drop)
+[ 1103.788653] WARN  watchdog: aborting connection 14
+[ 1103.789149] WARN  watchdog: aborting connection 14
+[ 1103.891838] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 24 ms > 20 ms (action: Drop, no single connection to drop)
+[ 1107.097833] WARN  watchdog: core 2 input handler (step -) for conn 15 over budget: 32 ms > 20 ms (action: Drop)
+[ 1107.097887] WARN  watchdog: aborting connection 15
+[ 1107.314706] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 25 ms > 20 ms (action: Drop, no single connection to drop)
+[ 1107.810020] WARN  watchdog: core 1 input handler (step -) for conn 10 over budget: 44 ms > 20 ms (action: Drop)
+[ 1107.810031] WARN  watchdog: core 2 input handler (step -) for conn 12 over budget: 39 ms > 20 ms (action: Drop)
+[ 1107.810286] WARN  watchdog: aborting connection 12
+[ 1107.823331] WARN  watchdog: aborting connection 10
+[ 1108.696724] WARN  watchdog: core 1 input handler (step -) for conn 9 over budget: 24 ms > 20 ms (action: Drop)
+[ 1108.792121] WARN  watchdog: core 2 output handler (step tcp) for conn - over budget: 41 ms > 20 ms (action: Drop, no single connection to drop)
+[ 1109.020477] WARN  watchdog: core 1 input handler (step -) for conn 9 over budget: 297 ms > 20 ms (action: Drop)
+[ 1109.020737] WARN  watchdog: aborting connection 9
+[ 1109.121914] WARN  watchdog: core 2 input handler (step -) for conn 7 over budget: 42 ms > 20 ms (action: Drop)
+[ 1109.123655] WARN  watchdog: aborting connection 7

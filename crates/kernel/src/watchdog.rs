@@ -22,6 +22,25 @@
 //! resets, since nothing on that core can recover by itself. That hard cap
 //! is why no handshake budget exceeds 900 ms.
 //!
+//! # Running time, not elapsed time (ROBUST, ADR-221)
+//!
+//! A handler is judged on the time the core really spent in it. On a shared
+//! VPS the host can take the virtual CPU away for tens of milliseconds; the
+//! guest sees its clock jump, the handler looks slow, and an elapsed-time
+//! check drops a healthy connection. Two kinds of time are therefore not
+//! charged to the handler:
+//!
+//! - **a stalled core**: the tick is programmed for a deadline, so a tick that
+//!   arrives much later than that deadline (more than [`STALL_MIN_NS`]) tells
+//!   the core was not running. The late part, and one tick period for the
+//!   part of the stall that came before the deadline, are credited;
+//! - **a wait for a spin lock** ([`lock_wait`]): the holder may be a core the
+//!   host has descheduled.
+//!
+//! A handler that really runs past the budget, interrupts enabled, still
+//! fires: nothing is credited for it. The stuck-core reset uses the same
+//! running time.
+//!
 //! The drop action needs a victim: output and timer handlers serve many
 //! connections (no connection recorded), so over budget they are reported
 //! and nothing is aborted.
@@ -30,7 +49,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use urmqtt_arch::time;
 use urmqtt_config::{CONFIG, WatchdogAction};
-use urmqtt_log::{error, warn};
+use urmqtt_log::{error, info, warn};
 
 use crate::smp::MAX_CPUS;
 
@@ -93,15 +112,128 @@ fn budget_ms(phase: u8) -> u64 {
     ordinary
 }
 
+/// Ticks of this core's time that were not the handler's (stalls, lock
+/// waits), cumulative: a handler subtracts what accrued since it started.
+static DISCOUNT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// A tick later than this after its deadline is a stalled core (a healthy
+/// interrupt arrives within tens of microseconds; the boot log has seen
+/// 2.3 ms on the VPS).
+pub const STALL_MIN_NS: u64 = 4_000_000;
+
+/// While a handler has run for half its budget the tick comes this often
+/// instead of every 10 ms. A stall that ends before a tick's deadline leaves
+/// no late tick, and the host preempts a vCPU in slices of a few ms, so at
+/// 10 ms a long handler could hide most of its stalls; at 1 ms they all show.
+/// Handlers are microseconds long, so this costs nothing in practice.
+pub const FAST_TICK_NS: u64 = 1_000_000;
+/// ... and a tick this late then means a stall.
+const FAST_STALL_MIN_NS: u64 = 500_000;
+
+/// Stall statistics of the current report window, per core (the dataplane
+/// line swaps them to zero): late ticks, the worst lateness and the sum of
+/// the lateness, in ns.
+pub struct StallStats {
+    pub count: AtomicU64,
+    pub worst_ns: AtomicU64,
+    pub total_ns: AtomicU64,
+    /// Time spent waiting for spin locks, ns.
+    pub lock_wait_ns: AtomicU64,
+    /// Steal time the host reported (KVM x86), ns.
+    pub steal_ns: AtomicU64,
+}
+
+pub static STALLS: [StallStats; MAX_CPUS] = [const {
+    StallStats {
+        count: AtomicU64::new(0),
+        worst_ns: AtomicU64::new(0),
+        total_ns: AtomicU64::new(0),
+        lock_wait_ns: AtomicU64::new(0),
+        steal_ns: AtomicU64::new(0),
+    }
+}; MAX_CPUS];
+
+/// Whether this core's host reports steal time, and the last reading (ns).
+static STEAL_ON: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+static STEAL_LAST: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Asks the host for this core's steal time (KVM on x86: the time the
+/// virtual CPU wanted to run and was not scheduled). Call on the core. With
+/// it the watchdog subtracts what the host says; without it, the late-tick
+/// estimate stands alone.
+pub fn enable_steal() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    let v2p: fn(usize) -> u64 = crate::boot_x86::kernel_virt_to_phys;
+    #[cfg(not(target_arch = "x86_64"))]
+    let v2p: fn(usize) -> u64 = |_| 0;
+    let on = time::steal_enable(v2p);
+    let me = crate::smp::current();
+    if on && let (Some(f), Some(l)) = (STEAL_ON.get(me), STEAL_LAST.get(me)) {
+        // Relaxed: this core's tick reads them.
+        l.store(time::steal_ns(), Ordering::Relaxed);
+        f.store(true, Ordering::Relaxed);
+    }
+    on
+}
+
+/// Handlers excused from a report because a stall was credited (metrics).
+pub static EXCUSED: AtomicU64 = AtomicU64::new(0);
+
+/// When this core started waiting for the spin lock it is waiting for now (0:
+/// it is not waiting). The tick counts a wait that is still going on: the
+/// holder may be a virtual CPU the host has descheduled for as long as the
+/// wait lasts, and the handler is charged nothing for it.
+static WAITING_SINCE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Called when a spin lock wait starts, with the clock's reading.
+fn lock_begin(now: u64) {
+    if let Some(w) = WAITING_SINCE.get(crate::smp::current()) {
+        // Relaxed: read by this core's own tick.
+        w.store(now.max(1), Ordering::Relaxed);
+    }
+}
+
+/// Called when a spin lock wait ends: `ticks` of this core's time were
+/// spent waiting for another core.
+fn lock_wait(ticks: u64) {
+    let me = crate::smp::current();
+    if let Some(w) = WAITING_SINCE.get(me) {
+        w.store(0, Ordering::Relaxed);
+    }
+    if let Some(d) = DISCOUNT.get(me) {
+        // Relaxed: read by this core's own tick.
+        d.fetch_add(ticks, Ordering::Relaxed);
+    }
+    if let Some(s) = STALLS.get(me) {
+        s.lock_wait_ns
+            .fetch_add(time::ticks_to_ns(ticks), Ordering::Relaxed);
+    }
+}
+
+/// Installs the spin-lock contention accounting (once, at boot).
+pub fn install_lock_accounting() {
+    urmqtt_sync::sync::set_contention_hooks(time::now, lock_begin, lock_wait);
+}
+
 struct Slot {
     /// Counter ticks when the handler started; 0 while idle.
     since: AtomicU64,
+    /// `DISCOUNT` of this core when the handler started.
+    disc0: AtomicU64,
     conn: AtomicU64,
     phase: AtomicU8,
     /// What the handler was doing last ([`Step`]), for the report.
     step: AtomicU8,
     /// Reported (once per handler run).
     fired: AtomicBool,
+    /// Counted as excused (once per handler run, ADR-221).
+    excused: AtomicBool,
+    /// Over budget at one tick: it fires only if the handler is still
+    /// running, and still over, at the next one (ADR-221).
+    suspect: AtomicBool,
+    /// The handler has run long enough to be looked at closely: the tick
+    /// comes every [`FAST_TICK_NS`] until it returns (ADR-221).
+    fast: AtomicBool,
     /// Connection to abort once the handler returns (`drop`).
     drop: AtomicU64,
 }
@@ -116,7 +248,11 @@ static SLOTS: [Slot; MAX_CPUS] = [const {
         phase: AtomicU8::new(0),
         step: AtomicU8::new(0),
         fired: AtomicBool::new(false),
+        excused: AtomicBool::new(false),
+        suspect: AtomicBool::new(false),
+        fast: AtomicBool::new(false),
         drop: AtomicU64::new(NO_CONN),
+        disc0: AtomicU64::new(0),
     }
 }; MAX_CPUS];
 
@@ -125,12 +261,14 @@ static SLOTS: [Slot; MAX_CPUS] = [const {
 pub struct Guard {
     slot: &'static Slot,
     since: u64,
+    disc0: u64,
     conn: u64,
     phase: u8,
 }
 
 impl Drop for Guard {
     fn drop(&mut self) {
+        self.slot.disc0.store(self.disc0, Ordering::Relaxed);
         self.slot.conn.store(self.conn, Ordering::Relaxed);
         self.slot.phase.store(self.phase, Ordering::Relaxed);
         self.slot.since.store(self.since, Ordering::Relaxed);
@@ -140,9 +278,11 @@ impl Drop for Guard {
 /// Marks this core as running `phase` for connection `conn`.
 pub fn enter(phase: Phase, conn: Option<u64>) -> Option<Guard> {
     let slot = SLOTS.get(crate::smp::current())?;
+    let me = crate::smp::current();
     let guard = Guard {
         slot,
         since: slot.since.load(Ordering::Relaxed),
+        disc0: slot.disc0.load(Ordering::Relaxed),
         conn: slot.conn.load(Ordering::Relaxed),
         phase: slot.phase.load(Ordering::Relaxed),
     };
@@ -152,6 +292,13 @@ pub fn enter(phase: Phase, conn: Option<u64>) -> Option<Guard> {
     slot.phase.store(phase as u8, Ordering::Relaxed);
     slot.step.store(0, Ordering::Relaxed);
     slot.fired.store(false, Ordering::Relaxed);
+    slot.excused.store(false, Ordering::Relaxed);
+    slot.suspect.store(false, Ordering::Relaxed);
+    slot.fast.store(false, Ordering::Relaxed);
+    slot.disc0.store(
+        DISCOUNT.get(me).map_or(0, |d| d.load(Ordering::Relaxed)),
+        Ordering::Relaxed,
+    );
     slot.since.store(time::now().max(1), Ordering::Relaxed);
     Some(guard)
 }
@@ -202,37 +349,121 @@ pub fn take_drop() -> Option<u64> {
     (c != NO_CONN).then_some(c)
 }
 
-/// From the tick interrupt: checks this core's running handler.
-pub fn check() {
-    let Some(slot) = SLOTS.get(crate::smp::current()) else {
+/// From the tick interrupt: checks this core's running handler. `late` is how
+/// long after its programmed deadline the tick arrived, `period` the tick
+/// period (both in counter ticks).
+pub fn check(late: u64, period: u64) {
+    let me = crate::smp::current();
+    let (Some(slot), Some(disc)) = (SLOTS.get(me), DISCOUNT.get(me)) else {
         return;
     };
+    let late_ns = time::ticks_to_ns(late);
+    // Is this tick one of the close-up ticks of a long handler?
+    let fast = slot.fast.load(Ordering::Relaxed) && slot.since.load(Ordering::Relaxed) != 0;
+    let (period, stall_min_ns) = if fast {
+        (time::ns_to_ticks(FAST_TICK_NS), FAST_STALL_MIN_NS)
+    } else {
+        (period, STALL_MIN_NS)
+    };
+    // What the host says it took away since the last tick, if it says.
+    let host_steal_ns = match (STEAL_ON.get(me), STEAL_LAST.get(me)) {
+        (Some(on), Some(last)) if on.load(Ordering::Relaxed) => {
+            let now = time::steal_ns();
+            now.saturating_sub(last.swap(now, Ordering::Relaxed))
+        }
+        _ => 0,
+    };
+    let mut credit = 0;
+    if late_ns >= stall_min_ns {
+        // The core was not running for at least `late`; the stall began up
+        // to one period before the deadline.
+        credit = late.saturating_add(period);
+        if let Some(st) = STALLS.get(me) {
+            st.count.fetch_add(1, Ordering::Relaxed);
+            st.total_ns.fetch_add(late_ns, Ordering::Relaxed);
+            st.worst_ns.fetch_max(late_ns, Ordering::Relaxed);
+        }
+    }
+    if host_steal_ns > 0 {
+        // The host's own account, exact: credit it if it is the larger.
+        credit = credit.max(time::ns_to_ticks(host_steal_ns));
+        if let Some(st) = STALLS.get(me) {
+            st.steal_ns.fetch_add(host_steal_ns, Ordering::Relaxed);
+        }
+    }
+    if credit > 0 {
+        // Relaxed: read by this core only (its handlers and this tick).
+        disc.fetch_add(credit, Ordering::Relaxed);
+    }
     let since = slot.since.load(Ordering::Relaxed);
     if since == 0 {
+        slot.fast.store(false, Ordering::Relaxed);
         return;
     }
-    let ms = time::ticks_to_ns(time::now().saturating_sub(since)) / 1_000_000;
+    let now = time::now();
+    let wall = now.saturating_sub(since);
+    // Credited so far, and the wait for a lock that is going on right now.
+    let waiting = WAITING_SINCE
+        .get(me)
+        .map_or(0, |w| w.load(Ordering::Relaxed));
+    let in_wait = if waiting != 0 {
+        now.saturating_sub(waiting.max(since))
+    } else {
+        0
+    };
+    let credited = disc
+        .load(Ordering::Relaxed)
+        .saturating_sub(slot.disc0.load(Ordering::Relaxed))
+        .saturating_add(in_wait);
+    let wall_ms = time::ticks_to_ns(wall) / 1_000_000;
+    let ms = time::ticks_to_ns(wall.saturating_sub(credited)) / 1_000_000;
     let phase_id = slot.phase.load(Ordering::Relaxed);
     let budget = budget_ms(phase_id);
+    if wall_ms >= budget / 2 {
+        // Look closer: the next tick in 1 ms (this runs last in the tick
+        // handler, after it re-armed itself).
+        slot.fast.store(true, Ordering::Relaxed);
+        time::set_deadline(time::now() + time::ns_to_ticks(FAST_TICK_NS));
+    }
     let conn = slot.conn.load(Ordering::Relaxed);
     let phase = Phase::name(phase_id);
-    // The stuck-core reset is the hard cap of every class.
+    // The stuck-core reset is the hard cap of every class (running time).
     if ms >= STUCK_MS.max(u64::from(CONFIG.watchdog.handler_budget_ms) * 100) {
         error!(
-            "watchdog: core {} stuck in {phase} for {ms} ms (conn {}), resetting",
+            "watchdog: core {} stuck in {phase} for {ms} ms running ({wall_ms} ms elapsed, conn {}), resetting",
             crate::smp::current(),
             ConnName(conn)
         );
         crate::power::fatal();
     }
-    if ms <= budget || slot.fired.swap(true, Ordering::Relaxed) {
+    if ms <= budget {
+        if wall_ms > budget && !slot.excused.swap(true, Ordering::Relaxed) {
+            // Over budget in elapsed time only: the core was not running.
+            // Relaxed: statistics.
+            EXCUSED.fetch_add(1, Ordering::Relaxed);
+            info!(
+                "watchdog: core {} {phase} handler for conn {} not charged: {wall_ms} ms elapsed, {ms} ms running (the core was stalled or waiting for a lock)",
+                crate::smp::current(),
+                ConnName(conn)
+            );
+        }
+        return;
+    }
+    // A stall that ended before the tick's deadline leaves no late tick, so
+    // the first sighting over budget proves nothing: a handler that is still
+    // running one tick later is not a stall (a stalled one finishes within
+    // microseconds of the core coming back).
+    if !slot.suspect.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    if slot.fired.swap(true, Ordering::Relaxed) {
         return;
     }
     let action = CONFIG.watchdog.action;
     // Relaxed: statistics.
     FIRED.fetch_add(1, Ordering::Relaxed);
     warn!(
-        "watchdog: core {} {phase} handler (step {}) for conn {} over budget: {ms} ms > {budget} ms (action: {action:?}{})",
+        "watchdog: core {} {phase} handler (step {}) for conn {} over budget: {ms} ms > {budget} ms (action: {action:?}{}); {wall_ms} ms elapsed, {} ms not running (stalls, lock waits)",
         crate::smp::current(),
         Step::name(slot.step.load(Ordering::Relaxed)),
         ConnName(conn),
@@ -240,7 +471,8 @@ pub fn check() {
             ", no single connection to drop"
         } else {
             ""
-        }
+        },
+        wall_ms.saturating_sub(ms)
     );
     match action {
         WatchdogAction::Log => {}
@@ -282,6 +514,54 @@ pub fn self_test_handshake() {
 /// `test=watchdog`: a handler that overruns its budget on purpose.
 pub fn self_test() {
     let _g = enter(Phase::SelfTest, Some(42));
+    let end = time::now() + time::ns_to_ticks(50_000_000);
+    while time::now() < end {
+        core::hint::spin_loop();
+    }
+}
+
+/// `test=watchdog-stall` (dev): a handler that is stalled for 45 ms (interrupts
+/// masked, so the tick arrives late exactly as after a descheduled virtual
+/// CPU) must not be reported: its running time is far below the budget. A
+/// second handler that really runs for 50 ms with interrupts on must be.
+pub fn self_test_stall() {
+    {
+        let _g = enter(Phase::SelfTest, Some(44));
+        let flags = urmqtt_arch::cpu::irq_save();
+        let end = time::now() + time::ns_to_ticks(45_000_000);
+        while time::now() < end {
+            core::hint::spin_loop();
+        }
+        urmqtt_arch::cpu::irq_restore(flags);
+        // The late tick is delivered here; give it time to run.
+        let end = time::now() + time::ns_to_ticks(3_000_000);
+        while time::now() < end {
+            core::hint::spin_loop();
+        }
+    }
+    let _g = enter(Phase::SelfTest, Some(45));
+    let end = time::now() + time::ns_to_ticks(50_000_000);
+    while time::now() < end {
+        core::hint::spin_loop();
+    }
+}
+
+/// `test=watchdog-lockwait` (dev): a handler that spends 50 ms waiting for a
+/// spin lock (the holder being a virtual CPU the host has descheduled, which
+/// this stands in for) must not be reported, because the tick counts a wait
+/// that is still going on; one that really runs for 50 ms must be.
+pub fn self_test_lockwait() {
+    {
+        let _g = enter(Phase::SelfTest, Some(46));
+        let t0 = time::now();
+        lock_begin(t0);
+        let end = t0 + time::ns_to_ticks(50_000_000);
+        while time::now() < end {
+            core::hint::spin_loop();
+        }
+        lock_wait(time::now().saturating_sub(t0));
+    }
+    let _g = enter(Phase::SelfTest, Some(47));
     let end = time::now() + time::ns_to_ticks(50_000_000);
     while time::now() < end {
         core::hint::spin_loop();

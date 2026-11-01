@@ -56,6 +56,29 @@ pub struct Handshakes {
     pub latency_max_ms: u64,
 }
 
+/// Messages and frames the broker did not deliver, by cause (PERF, ADR-223).
+/// QoS 0 loss under overload is deliberate and bounded; it is also counted
+/// here, per cause, so that it is never silent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Drops {
+    /// QoS 0: the subscriber's output buffer was full.
+    pub slow_subscriber: u64,
+    /// QoS 0: the subscriber's client is not connected.
+    pub offline: u64,
+    /// QoS 0 fan-out to another core: that core was too far behind.
+    pub cross_core: u64,
+    /// QoS 1: the session's queue was full.
+    pub qos1_queue_full: u64,
+    /// Publishes refused by the per-identity rate limit.
+    pub publish_rate: u64,
+    /// Frames (TCP retransmits them) dropped because a worker core was behind.
+    pub frames_steer: u64,
+    /// ... because the dispatcher was behind.
+    pub frames_worker_tx: u64,
+    /// ... because the NIC queue and the dispatcher's backlog were full.
+    pub frames_nic: u64,
+}
+
 /// Everything `$SYS/broker/...` and the info query report.
 #[derive(Debug, Clone, Copy)]
 pub struct Info<'a> {
@@ -84,6 +107,7 @@ pub struct Info<'a> {
     pub time_offset_ms: Option<i64>,
     /// Console lines lost because a reader fell behind.
     pub console_dropped: u64,
+    pub drops: Drops,
     pub handshakes: Handshakes,
     /// Connections accepted per core since boot (how evenly the flows
     /// spread over the cores).
@@ -127,6 +151,15 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
         None => put("time/offset_ms", &"unknown"),
     }
     put("console/dropped", &i.console_dropped);
+    let d = &i.drops;
+    put("messages/dropped/slow_subscriber", &d.slow_subscriber);
+    put("messages/dropped/offline", &d.offline);
+    put("messages/dropped/cross_core", &d.cross_core);
+    put("messages/dropped/qos1_queue_full", &d.qos1_queue_full);
+    put("messages/dropped/publish_rate", &d.publish_rate);
+    put("frames/dropped/steer", &d.frames_steer);
+    put("frames/dropped/worker_tx", &d.frames_worker_tx);
+    put("frames/dropped/nic", &d.frames_nic);
     let h = &i.handshakes;
     put("handshakes/started", &h.started);
     put("handshakes/done", &h.done);
@@ -168,6 +201,7 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
         time_source: "",
         time_offset_ms: None,
         console_dropped: 0,
+        drops: Drops::default(),
         handshakes: Handshakes::default(),
         accepted: &accepted,
     };
@@ -236,12 +270,23 @@ pub fn json(i: &Info<'_>) -> String {
         None => o.push_str("null"),
     }
     let h = &i.handshakes;
+    let d = &i.drops;
     let _ = write!(
         o,
-        "}},\"console_dropped\":{},\"handshakes\":{{\"started\":{},\"done\":{},\"failed\":{},\
+        "}},\"console_dropped\":{},\"dropped\":{{\"slow_subscriber\":{},\"offline\":{},\"cross_core\":{},\
+         \"qos1_queue_full\":{},\"publish_rate\":{},\"frames_steer\":{},\"frames_worker_tx\":{},\"frames_nic\":{}}},\
+         \"handshakes\":{{\"started\":{},\"done\":{},\"failed\":{},\
          \"timed_out\":{},\"refused\":{},\"syn_dropped\":{},\"in_flight\":{},\"in_flight_max\":{},\
          \"slow\":{},\"latency_sum_ms\":{},\"latency_max_ms\":{}}},\"accepted\":[",
         i.console_dropped,
+        d.slow_subscriber,
+        d.offline,
+        d.cross_core,
+        d.qos1_queue_full,
+        d.publish_rate,
+        d.frames_steer,
+        d.frames_worker_tx,
+        d.frames_nic,
         h.started,
         h.done,
         h.failed,
@@ -312,6 +357,18 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
         )),
         None => out.push(alloc::format!("time source {}", i.time_source)),
     }
+    let d = &i.drops;
+    out.push(alloc::format!(
+        "dropped QoS0 slow {} offline {} xcore {}; QoS1 {}; rate {}; frames {}/{}/{}",
+        d.slow_subscriber,
+        d.offline,
+        d.cross_core,
+        d.qos1_queue_full,
+        d.publish_rate,
+        d.frames_steer,
+        d.frames_worker_tx,
+        d.frames_nic
+    ));
     out.push(alloc::format!(
         "log level {level} (build maximum {max_level}), {} console line(s) dropped",
         i.console_dropped
@@ -468,6 +525,10 @@ mod tests {
             time_source: "sntp",
             time_offset_ms: Some(-12),
             console_dropped: 0,
+            drops: Drops {
+                slow_subscriber: 3,
+                ..Drops::default()
+            },
             handshakes: Handshakes {
                 started: 9,
                 done: 8,
@@ -508,6 +569,14 @@ mod tests {
                 "$SYS/broker/time/source",
                 "$SYS/broker/time/offset_ms",
                 "$SYS/broker/console/dropped",
+                "$SYS/broker/messages/dropped/slow_subscriber",
+                "$SYS/broker/messages/dropped/offline",
+                "$SYS/broker/messages/dropped/cross_core",
+                "$SYS/broker/messages/dropped/qos1_queue_full",
+                "$SYS/broker/messages/dropped/publish_rate",
+                "$SYS/broker/frames/dropped/steer",
+                "$SYS/broker/frames/dropped/worker_tx",
+                "$SYS/broker/frames/dropped/nic",
                 "$SYS/broker/handshakes/started",
                 "$SYS/broker/handshakes/done",
                 "$SYS/broker/handshakes/failed",
@@ -531,6 +600,10 @@ mod tests {
         assert_eq!(val("$SYS/broker/time/source"), Some("sntp"));
         assert_eq!(val("$SYS/broker/time/offset_ms"), Some("-12"));
         assert_eq!(val("$SYS/broker/handshakes/done"), Some("8"));
+        assert_eq!(
+            val("$SYS/broker/messages/dropped/slow_subscriber"),
+            Some("3")
+        );
         assert_eq!(val("$SYS/broker/cpu/accepted/1"), Some("5"));
         // No payload is empty: an empty retained payload would clear it.
         assert!(got.iter().all(|(_, v)| !v.is_empty()));
@@ -547,6 +620,8 @@ mod tests {
              \"disk\":{\"total\":0,\"used\":0},\"clients\":{\"connected\":3,\"total\":5},\
              \"subscriptions\":7,\"retained\":2,\"messages\":{\"received\":100,\"sent\":250},\
              \"connections_refused\":1,\"tls\":{\"server_cert_days\":90},\"time\":{\"source\":\"sntp\",\"offset_ms\":-12},\"console_dropped\":0,\
+             \"dropped\":{\"slow_subscriber\":3,\"offline\":0,\"cross_core\":0,\"qos1_queue_full\":0,\
+             \"publish_rate\":0,\"frames_steer\":0,\"frames_worker_tx\":0,\"frames_nic\":0},\
              \"handshakes\":{\"started\":9,\"done\":8,\"failed\":0,\"timed_out\":0,\"refused\":0,\
              \"syn_dropped\":0,\"in_flight\":0,\"in_flight_max\":0,\"slow\":0,\"latency_sum_ms\":0,\
              \"latency_max_ms\":0},\"accepted\":[4,5]}"
@@ -599,12 +674,16 @@ mod tests {
     #[test]
     fn status_is_a_few_short_lines() {
         let lines = status_lines(&info(&[10, 20]), "info", "debug");
-        assert_eq!(lines.len(), 8);
+        assert_eq!(lines.len(), 9);
         assert_eq!(lines[0], "urmqtt 0.1.0 aarch64 up 12 s");
         assert_eq!(lines[1], "cpu 2 core(s), busy % 10/20");
         assert!(lines[3].starts_with("clients 3 connected, 5 sessions"));
         assert_eq!(lines[6], "time source sntp, last sntp offset -12 ms");
-        assert!(lines[7].starts_with("log level info (build maximum debug)"));
+        assert_eq!(
+            lines[7],
+            "dropped QoS0 slow 3 offline 0 xcore 0; QoS1 0; rate 0; frames 0/0/0"
+        );
+        assert!(lines[8].starts_with("log level info (build maximum debug)"));
         assert!(lines.iter().all(|l| l.len() < 120 && !l.contains('\n')));
     }
 

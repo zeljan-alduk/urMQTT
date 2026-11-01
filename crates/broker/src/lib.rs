@@ -190,7 +190,13 @@ pub struct Stats {
     pub dropped_acl: u64,
     pub dropped_rate: u64,
     pub dropped_queue_full: u64,
+    /// QoS 0 messages not delivered because the subscriber's output buffer
+    /// was full (it reads slower than the topic is published to), or its
+    /// connection was closing.
     pub dropped_backpressure: u64,
+    /// QoS 0 messages for a subscription whose client is not connected (a
+    /// QoS 0 message is never stored).
+    pub dropped_offline: u64,
     pub wills_published: u64,
     /// Publishes to the reserved namespace by identities without control
     /// rights, dropped (H1).
@@ -1512,6 +1518,7 @@ impl Broker {
             Send1(ConnId, u16),
             Queue,
             Drop,
+            DropOffline,
         }
         let max_inflight = self.cfg.max_inflight;
         let max_queued = self.cfg.max_queued;
@@ -1525,7 +1532,8 @@ impl Broker {
         let Some(s) = self.session(sid) else { return };
         let action = match (qos, conn) {
             (QoS::AtMostOnce, Some(c)) if room => Action::Send0(c),
-            (QoS::AtMostOnce, _) => Action::Drop,
+            (QoS::AtMostOnce, Some(_)) => Action::Drop,
+            (QoS::AtMostOnce, None) => Action::DropOffline,
             (_, Some(c)) if room && s.inflight().len() < max_inflight && (s.queue_len() == 0) => {
                 let pid = Self::alloc_pid(s);
                 s.pending_mut().inflight.push((pid, msg.clone()));
@@ -1534,7 +1542,7 @@ impl Broker {
             // Offline persistent session, full window or backpressure.
             (_, Some(_)) => Action::Queue,
             (_, None) if !s.clean => Action::Queue,
-            (_, None) => Action::Drop,
+            (_, None) => Action::DropOffline,
         };
         match action {
             Action::Send0(c) => self.send_publish(c, msg, QoS::AtMostOnce, None, retain, false),
@@ -1562,6 +1570,7 @@ impl Broker {
                 }
             }
             Action::Drop => self.stats.dropped_backpressure += 1,
+            Action::DropOffline => self.stats.dropped_offline += 1,
         }
     }
 

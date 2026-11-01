@@ -14,6 +14,10 @@ fn cfg() -> Config {
         ports: alloc::vec![PORT, 1883],
         mss: 1460,
         rcv_wnd: 65535,
+        rcv_wnd_scaled: 512 * 1024,
+        tx_cap: 1 << 20,
+        ooo_budget: 1 << 20,
+        ooo_conn_max: 256 * 1024,
         max_conns: 1024,
         tx_max: 256 * 1024,
         cookie_key: [9; 16],
@@ -611,18 +615,27 @@ fn out_of_order_data_gets_a_duplicate_ack_and_waits() {
         &mut app,
         &mut |_, b| out.push(b.to_vec()),
     );
+    // Kept, not delivered: it lies beyond a hole.
     assert!(!app.received.contains_key(&id));
     let h = wire::parse(SERVER, CLIENT, &out[0]).unwrap();
     assert_eq!(h.ack, base);
     assert_eq!(s.stats.out_of_order, 1);
+    assert_eq!(s.stats.ooo_buffered, 1);
+    assert_eq!(s.stats.ooo_bytes, 5);
+    // The hole fills: both pieces reach the application at once, in order.
+    out.clear();
     s.input(
         2,
         CLIENT,
         &c.seg(base, ACK | PSH, b"hello"),
         &mut app,
-        &mut |_, _| {},
+        &mut |_, b| out.push(b.to_vec()),
     );
-    assert_eq!(app.received[&id], b"hello");
+    assert_eq!(app.received[&id], b"helloworld");
+    assert_eq!(s.stats.ooo_bytes, 0);
+    // ... and the sender is told so immediately.
+    let h = wire::parse(SERVER, CLIENT, &out[0]).unwrap();
+    assert_eq!(h.ack, base.wrapping_add(10));
     // A retransmission overlapping old data delivers only the new part.
     s.input(
         3,
@@ -632,6 +645,7 @@ fn out_of_order_data_gets_a_duplicate_ack_and_waits() {
         &mut |_, _| {},
     );
     assert_eq!(app.received[&id], b"helloworld");
+    assert_eq!(s.stats.ooo_bytes, 0);
 }
 
 #[test]
@@ -730,7 +744,8 @@ fn survives_heavy_loss() {
 #[test]
 fn connection_state_stays_small() {
     assert!(
-        core::mem::size_of::<Conn>() <= 96,
+        // 96 before the out-of-order list, window scale and timestamps (ADR-222).
+        core::mem::size_of::<Conn>() <= 112,
         "{}",
         core::mem::size_of::<Conn>()
     );

@@ -23,8 +23,17 @@
 //! - No TIME_WAIT. The client closes or is closed and the server forgets the
 //!   connection right after the final ACK; a late duplicate gets a RST
 //!   (server-side RST policy).
-//! - In-order receive only: an out-of-order segment is dropped and answered
-//!   with a duplicate ACK, which triggers the sender's fast retransmit.
+//! - Out-of-order data is kept (PERF, ADR-222): a segment beyond a hole is
+//!   buffered in a small per-connection list of ranges (allocated on the first
+//!   one, freed when the hole fills, bounded per connection and per core),
+//!   answered at once with a duplicate ACK that carries SACK blocks when the
+//!   peer negotiated them. One loss costs one retransmission, not the rest of
+//!   the window.
+//! - Window scaling, SACK and timestamps (RFC 7323, RFC 2018) are negotiated
+//!   through the SYN cookie: the options the peer offered ride in the low six
+//!   bits of our timestamp value (as Linux does), the peer echoes them in the
+//!   final ACK, and the stack stays stateless until then. A peer that offers
+//!   no timestamps gets the plain 16-bit window and no SACK.
 
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_code)]
@@ -50,6 +59,8 @@ pub mod cc;
 pub mod cookie;
 pub mod seq;
 
+mod ooo;
+
 mod refused;
 mod siphash;
 pub mod table;
@@ -57,6 +68,10 @@ pub mod wire;
 
 #[cfg(test)]
 mod model;
+#[cfg(test)]
+mod ooo_tests;
+#[cfg(test)]
+mod opt_tests;
 #[cfg(test)]
 mod script;
 #[cfg(test)]
@@ -70,12 +85,13 @@ use alloc::vec::Vec;
 
 use cc::{Congestion, NewReno};
 use cookie::Cookies;
+use ooo::Ooo;
 use refused::{RefusedFlows, Verdict};
 use seq::{ge, gt, le, lt};
 use table::{Key, Table};
 use urmqtt_mm::slab::Slab;
 use urmqtt_timer_wheel::{TimerId, Wheel};
-use wire::{ACK, FIN, Header, Out, PSH, RST, SYN};
+use wire::{ACK, Ext, FIN, Header, Out, PSH, RST, SYN};
 
 pub type ConnId = u32;
 
@@ -121,11 +137,22 @@ pub struct Config {
     pub ports: Vec<u16>,
     /// MSS we announce (Ethernet MTU 1500 minus headers).
     pub mss: u16,
-    /// Receive window when the application has not set one.
+    /// Receive window when the application has not set one (and the window
+    /// announced on a SYN-ACK, which is never scaled).
     pub rcv_wnd: u16,
+    /// Receive window of a connection that negotiated window scaling, bytes
+    /// (0: no scaling is offered). The shift is the smallest that fits 16 bits.
+    pub rcv_wnd_scaled: u32,
     pub max_conns: usize,
-    /// Most bytes queued for sending per connection.
+    /// Most bytes queued for sending per connection while its congestion
+    /// window is small ...
     pub tx_max: usize,
+    /// ... and as many as twice the congestion window, up to this.
+    pub tx_cap: usize,
+    /// Bytes of out-of-order data this stack may hold in all (0: none is kept).
+    pub ooo_budget: usize,
+    /// ... and per connection.
+    pub ooo_conn_max: usize,
     pub cookie_key: [u8; 16],
     /// RST/challenge-ACK segments per second sent for unknown connections.
     pub rst_per_sec: u32,
@@ -159,6 +186,16 @@ pub struct Stats {
     /// Segments of a flow refused a moment ago, answered or dropped without
     /// asking the application again (see `RefusedFlows`).
     pub refused_repeat: u64,
+    /// Segments kept because they arrived beyond a hole.
+    pub ooo_buffered: u64,
+    /// Out-of-order segments dropped: connection or core budget used up, or
+    /// the list of ranges full (the peer retransmits them).
+    pub ooo_dropped: u64,
+    /// Bytes of out-of-order data held now.
+    pub ooo_bytes: u64,
+    /// Connections that negotiated window scaling, and SACK.
+    pub scaled: u64,
+    pub sack_neg: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +219,9 @@ enum TimerKind {
     Persist,
     FinWait2,
 }
+
+/// Bytes of buffered data handed to the application per call.
+const DELIVER_SLICE: usize = 16 * 1024;
 
 const RTO_INIT_MS: u16 = 1000;
 const RTO_MIN_MS: u32 = 200;
@@ -211,6 +251,13 @@ struct Conn {
     rcv_nxt: u32,
     /// Receive space set by the application.
     rcv_space: u32,
+    /// Window scale: the peer's (applies to what it advertises) and ours.
+    snd_shift: u8,
+    rcv_shift: u8,
+    /// The peer's latest timestamp, echoed in our segments.
+    ts_recent: u32,
+    /// Data beyond a hole, if any.
+    ooo: Option<Box<Ooo>>,
     /// Right edge we last advertised (never moved left).
     rcv_adv: u32,
     rtt_seq: u32,
@@ -236,6 +283,10 @@ const ACK_PENDING: u8 = 4;
 const IN_DIRTY: u8 = 8;
 const IN_RECOVERY: u8 = 16;
 const RTT_TIMING: u8 = 32;
+/// SACK-permitted was negotiated: we report out-of-order ranges.
+const SACK_OK: u8 = 64;
+/// Timestamps were negotiated: every segment carries them, and costs 12 bytes of payload.
+const TS_OK: u8 = 128;
 
 impl Conn {
     fn has(&self, f: u8) -> bool {
@@ -259,7 +310,8 @@ impl Conn {
         (self.snd_max.wrapping_sub(self.snd_una) as usize).min(self.tx_len()) as u32
     }
 
-    fn window(&self) -> u16 {
+    /// The receive window in bytes.
+    fn window_bytes(&self) -> u32 {
         // The advertised window never shrinks below what was promised.
         let edge = self.rcv_nxt.wrapping_add(self.rcv_space);
         let edge = if gt(edge, self.rcv_adv) {
@@ -267,7 +319,31 @@ impl Conn {
         } else {
             self.rcv_adv
         };
-        edge.wrapping_sub(self.rcv_nxt).min(65535) as u16
+        edge.wrapping_sub(self.rcv_nxt)
+    }
+
+    /// The window field to announce (scaled down, rounded down).
+    fn window(&self) -> u16 {
+        (self.window_bytes() >> self.rcv_shift).min(65535) as u16
+    }
+
+    /// The right edge the announced field promises.
+    fn adv_edge(&self, field: u16) -> u32 {
+        self.rcv_nxt
+            .wrapping_add(u32::from(field) << self.rcv_shift)
+    }
+
+    /// Payload bytes a full segment carries (timestamps take 12 of the MSS).
+    fn eff_mss(&self) -> usize {
+        usize::from(self.mss) - if self.has(TS_OK) { 12 } else { 0 }
+    }
+
+    /// Bytes the application may queue: twice the congestion window, between
+    /// the base and the cap.
+    fn tx_limit(&self, base: usize, cap: usize) -> usize {
+        (self.cc.window() as usize)
+            .saturating_mul(2)
+            .clamp(base, cap.max(base))
     }
 
     fn can_receive(&self) -> bool {
@@ -290,6 +366,10 @@ pub struct TcpStack {
     rst_last_ms: u64,
     refused: RefusedFlows,
     buf: Vec<u8>,
+    /// Out-of-order bytes held by all connections.
+    ooo_used: usize,
+    /// The timestamp clock (ms, wrapping), set on every entry.
+    clock: u32,
     pub stats: Stats,
 }
 
@@ -315,6 +395,8 @@ impl TcpStack {
             rst_last_ms: now_ms,
             refused: RefusedFlows::new(seed),
             buf: Vec::with_capacity(1600),
+            ooo_used: 0,
+            clock: now_ms as u32,
             cfg,
             stats: Stats::default(),
         }
@@ -335,8 +417,10 @@ impl TcpStack {
 
     /// Bytes the application may still queue on `c`.
     pub fn send_space(&self, c: ConnId) -> usize {
-        self.conn(c)
-            .map_or(0, |k| self.cfg.tx_max.saturating_sub(k.tx_len()))
+        self.conn(c).map_or(0, |k| {
+            k.tx_limit(self.cfg.tx_max, self.cfg.tx_cap)
+                .saturating_sub(k.tx_len())
+        })
     }
 
     /// Bytes queued and not yet acknowledged.
@@ -374,7 +458,7 @@ impl TcpStack {
         let mut update = false;
         if let Some(k) = self.conn_mut(c) {
             let before = k.window();
-            k.rcv_space = bytes.min(65535);
+            k.rcv_space = bytes.min(65535 << k.rcv_shift);
             let after = k.window();
             // Announce a reopened window (at least one MSS more, or from 0).
             if after > before && (before == 0 || u32::from(after - before) >= u32::from(k.mss)) {
@@ -389,8 +473,9 @@ impl TcpStack {
 
     /// Queues `data`; returns how many bytes were accepted.
     pub fn send(&mut self, c: ConnId, data: &[u8]) -> usize {
-        let max = self.cfg.tx_max;
+        let (base, cap) = (self.cfg.tx_max, self.cfg.tx_cap);
         let Some(k) = self.conn_mut(c) else { return 0 };
+        let max = k.tx_limit(base, cap);
         if k.has(FIN_QUEUED) || !matches!(k.state, State::Established | State::CloseWait) {
             return 0;
         }
@@ -436,6 +521,10 @@ impl TcpStack {
         let Some(k) = self.conns.remove(c) else {
             return;
         };
+        if let Some(o) = &k.ooo {
+            self.ooo_used = self.ooo_used.saturating_sub(o.bytes());
+            self.stats.ooo_bytes = self.ooo_used as u64;
+        }
         if let Some((t, _)) = k.timer {
             self.wheel.cancel(t);
         }
@@ -462,11 +551,38 @@ impl TcpStack {
         payload: &[u8],
         out: &mut impl FnMut([u8; 4], &[u8]),
     ) {
+        self.emit_x(dst, o, &Ext::NONE, payload, out);
+    }
+
+    fn emit_x(
+        &mut self,
+        dst: [u8; 4],
+        o: &Out,
+        x: &Ext,
+        payload: &[u8],
+        out: &mut impl FnMut([u8; 4], &[u8]),
+    ) {
         let mut buf = core::mem::take(&mut self.buf);
-        wire::emit(self.cfg.local_addr, dst, o, payload, &mut buf);
+        wire::emit_ext(self.cfg.local_addr, dst, o, x, payload, &mut buf);
         out(dst, &buf);
         self.buf = buf;
         self.stats.segs_out += 1;
+    }
+
+    /// The options an established connection's segment carries: timestamps
+    /// and, on a segment without data, the SACK blocks.
+    fn ext_of(&self, k: &Conn, sacks: bool) -> Ext {
+        let mut x = Ext::NONE;
+        if k.has(TS_OK) {
+            x.ts = Some((self.clock, k.ts_recent));
+        }
+        if sacks
+            && k.has(SACK_OK)
+            && let Some(o) = &k.ooo
+        {
+            (x.sacks, x.nsack) = o.blocks();
+        }
+        x
     }
 
     /// RSTs for segments that match no connection, rate-limited.
@@ -527,6 +643,7 @@ impl TcpStack {
         out: &mut impl FnMut([u8; 4], &[u8]),
     ) {
         self.stats.segs_in += 1;
+        self.clock = now_ms as u32;
         let h = match wire::parse(src, self.cfg.local_addr, seg) {
             Ok(h) => h,
             Err(_) => {
@@ -595,7 +712,22 @@ impl TcpStack {
                 window: self.cfg.rcv_wnd,
                 mss: Some(self.cfg.mss),
             };
-            self.emit(src, &o, &[], out);
+            // Options only for a peer that offered timestamps: they carry the
+            // rest through the cookie.
+            let mut x = Ext::NONE;
+            if let Some((tsval, _)) = h.ts {
+                let scale = self.cfg.rcv_wnd_scaled > 0;
+                let opts = cookie::Opts {
+                    sack_ok: h.sack_ok,
+                    wscale: if scale { h.wscale } else { None },
+                };
+                x.ts = Some((cookie::ts_encode(self.clock, opts), tsval));
+                x.sack_perm = h.sack_ok;
+                if opts.wscale.is_some() {
+                    x.wscale = Some(self.rcv_shift());
+                }
+            }
+            self.emit_x(src, &o, &x, &[], out);
             self.stats.cookies_sent += 1;
             return;
         }
@@ -654,22 +786,51 @@ impl TcpStack {
             return;
         }
         let mss = mss.min(self.cfg.mss);
+        // What the cookie carried (an ACK without timestamps negotiated nothing).
+        let opts = match h.ts {
+            Some((_, tsecr)) => cookie::ts_decode(tsecr),
+            None => cookie::Opts::default(),
+        };
+        let mut flags = 0;
+        if h.ts.is_some() {
+            flags |= TS_OK;
+        }
+        if opts.sack_ok && h.ts.is_some() {
+            flags |= SACK_OK;
+            self.stats.sack_neg += 1;
+        }
+        let (snd_shift, rcv_shift) = match opts.wscale {
+            Some(sh) if h.ts.is_some() => {
+                self.stats.scaled += 1;
+                (sh, self.rcv_shift())
+            }
+            _ => (0, 0),
+        };
+        let rcv_space = if opts.wscale.is_some() && h.ts.is_some() {
+            self.cfg.rcv_wnd_scaled.max(u32::from(self.cfg.rcv_wnd))
+        } else {
+            u32::from(self.cfg.rcv_wnd)
+        };
         let conn = Conn {
             key,
             state: State::Established,
-            flags: 0,
+            flags,
             dupacks: 0,
             retries: 0,
             mss,
             snd_una: h.ack,
             snd_nxt: h.ack,
             snd_max: h.ack,
-            snd_wnd: u32::from(h.window),
+            snd_wnd: u32::from(h.window) << snd_shift,
             snd_wl1: h.seq,
             snd_wl2: h.ack,
             recover: h.ack,
             rcv_nxt: h.seq,
-            rcv_space: u32::from(self.cfg.rcv_wnd),
+            rcv_space,
+            snd_shift,
+            rcv_shift,
+            ts_recent: h.ts.map_or(0, |(v, _)| v),
+            ooo: None,
             rcv_adv: h.seq.wrapping_add(u32::from(self.cfg.rcv_wnd)),
             rtt_seq: 0,
             rtt_start: 0,
@@ -703,7 +864,18 @@ impl TcpStack {
         }
     }
 
+    /// Our window shift: the smallest that fits `rcv_wnd_scaled` in 16 bits.
+    fn rcv_shift(&self) -> u8 {
+        let mut sh = 0;
+        while sh < 14 && (self.cfg.rcv_wnd_scaled >> sh) > 65535 {
+            sh += 1;
+        }
+        sh
+    }
+
     fn send_ack_now(&mut self, c: ConnId, out: &mut impl FnMut([u8; 4], &[u8])) {
+        let Some(k) = self.conn(c) else { return };
+        let x = self.ext_of(k, true);
         let Some(k) = self.conn_mut(c) else { return };
         k.set(ACK_PENDING, false);
         let o = Out {
@@ -715,9 +887,9 @@ impl TcpStack {
             window: k.window(),
             mss: None,
         };
-        k.rcv_adv = k.rcv_nxt.wrapping_add(u32::from(o.window));
+        k.rcv_adv = k.adv_edge(o.window);
         let dst = k.key.addr;
-        self.emit(dst, &o, &[], out);
+        self.emit_x(dst, &o, &x, &[], out);
     }
 
     fn arm(&mut self, c: ConnId, now_ms: u64, kind: TimerKind, after_ms: u64) {
@@ -768,7 +940,7 @@ impl TcpStack {
     ) {
         let Some(k) = self.conn(c) else { return };
         let seg_len = payload.len() as u32 + u32::from(h.flags & FIN != 0);
-        let wnd = u32::from(k.window()).max(1);
+        let wnd = k.window_bytes().max(1);
         // Acceptability (RFC 793 §3.3): the segment must overlap the window.
         let acceptable = if seg_len == 0 {
             seq::in_window(h.seq, k.rcv_nxt, wnd) || h.seq == k.rcv_nxt
@@ -804,8 +976,15 @@ impl TcpStack {
         if !self.process_ack(now_ms, c, h, payload.is_empty(), app, out) {
             return;
         }
-        // Data, in order only.
+        // Data: in order is delivered, beyond a hole it is kept.
         let Some(k) = self.conn_mut(c) else { return };
+        if let Some((tsval, _)) = h.ts
+            && k.has(TS_OK)
+            && le(h.seq, k.rcv_nxt)
+            && ge(tsval, k.ts_recent)
+        {
+            k.ts_recent = tsval;
+        }
         let mut data = payload;
         let mut seq_no = h.seq;
         if lt(seq_no, k.rcv_nxt) {
@@ -816,13 +995,14 @@ impl TcpStack {
         if !data.is_empty() || h.flags & FIN != 0 {
             if seq_no != k.rcv_nxt {
                 self.stats.out_of_order += 1;
+                self.keep_out_of_order(c, seq_no, data);
                 self.send_ack_now(c, out);
                 return;
             }
             if !k.can_receive() {
                 data = &[];
             }
-            let room = u32::from(k.window()) as usize;
+            let room = k.window_bytes() as usize;
             let n = data.len().min(room);
             let fin = h.flags & FIN != 0 && n == data.len();
             let take = data.get(..n).unwrap_or(&[]);
@@ -857,8 +1037,81 @@ impl TcpStack {
                 app.peer_closed(c);
                 // A FIN is acknowledged right away.
                 self.send_ack_now(c, out);
+            } else if self.deliver_buffered(c, app) {
+                // A hole was filled: the sender is waiting for this ACK.
+                self.send_ack_now(c, out);
             } else {
                 self.mark_dirty(c);
+            }
+        }
+    }
+
+    /// Keeps `data` (which starts beyond `rcv_nxt`) for when the hole fills.
+    fn keep_out_of_order(&mut self, c: ConnId, seq_no: u32, data: &[u8]) {
+        let (conn_max, budget) = (self.cfg.ooo_conn_max, self.cfg.ooo_budget);
+        let used = self.ooo_used;
+        let Some(k) = self.conns.get_mut(c) else {
+            return;
+        };
+        // Only what lies inside the window we announced.
+        let edge = k.rcv_nxt.wrapping_add(k.window_bytes());
+        let start_off = seq_no.wrapping_sub(k.rcv_nxt);
+        let room = edge.wrapping_sub(seq_no) as usize;
+        if data.is_empty() || !k.can_receive() || start_off >= k.window_bytes() {
+            return;
+        }
+        let data = data.get(..data.len().min(room)).unwrap_or(&[]);
+        let held = k.ooo.as_ref().map_or(0, |o| o.bytes());
+        if budget == 0 || held + data.len() > conn_max || used + data.len() > budget {
+            self.stats.ooo_dropped += 1;
+            return;
+        }
+        let o = k.ooo.get_or_insert_with(|| Box::new(Ooo::default()));
+        let before = o.bytes();
+        if o.insert(seq_no, data).is_none() {
+            self.stats.ooo_dropped += 1;
+            return;
+        }
+        let after = o.bytes();
+        self.stats.ooo_buffered += 1;
+        self.ooo_used = (self.ooo_used + after).saturating_sub(before);
+        self.stats.ooo_bytes = self.ooo_used as u64;
+    }
+
+    /// Hands the application the buffered ranges the new `rcv_nxt` reached.
+    /// Returns whether any was delivered.
+    fn deliver_buffered(&mut self, c: ConnId, app: &mut impl App) -> bool {
+        let mut any = false;
+        loop {
+            let Some(k) = self.conns.get_mut(c) else {
+                return any;
+            };
+            let rcv_nxt = k.rcv_nxt;
+            let Some(o) = k.ooo.as_mut() else {
+                return any;
+            };
+            let before = o.bytes();
+            let chunk = o.take_front(rcv_nxt);
+            let after = o.bytes();
+            if after == 0 {
+                k.ooo = None;
+            }
+            self.ooo_used = self.ooo_used.saturating_sub(before - after);
+            self.stats.ooo_bytes = self.ooo_used as u64;
+            let Some(chunk) = chunk else {
+                return any;
+            };
+            if let Some(k) = self.conns.get_mut(c) {
+                k.rcv_nxt = k.rcv_nxt.wrapping_add(chunk.len() as u32);
+            }
+            if !chunk.is_empty() {
+                any = true;
+                // In slices: each call is one watchdog-supervised handler in
+                // the application, and a hole that closes after half a
+                // megabyte arrived must not look like one very long handler.
+                for part in chunk.chunks(DELIVER_SLICE) {
+                    app.data(c, part);
+                }
             }
         }
     }
@@ -884,10 +1137,11 @@ impl TcpStack {
             return false;
         }
         let mss = u32::from(k.mss);
-        let window_changed = u32::from(h.window) != k.snd_wnd;
+        let peer_wnd = u32::from(h.window) << k.snd_shift;
+        let window_changed = peer_wnd != k.snd_wnd;
         // Window update (RFC 793 SND.WL1/WL2 rule).
         if lt(k.snd_wl1, h.seq) || (k.snd_wl1 == h.seq && le(k.snd_wl2, h.ack)) {
-            k.snd_wnd = u32::from(h.window);
+            k.snd_wnd = peer_wnd;
             k.snd_wl1 = h.seq;
             k.snd_wl2 = h.ack;
         }
@@ -976,17 +1230,13 @@ impl TcpStack {
     fn retransmit_one(&mut self, c: ConnId, from: u32, out: &mut impl FnMut([u8; 4], &[u8])) {
         let Some(k) = self.conn(c) else { return };
         let off = from.wrapping_sub(k.snd_una) as usize;
-        let mss = usize::from(k.mss);
+        let mss = k.eff_mss();
         let mut payload = [0u8; 1460];
         let n = k.tx.as_ref().map_or(0, |tx| {
             let avail = tx.len().saturating_sub(off).min(mss).min(payload.len());
-            for (i, b) in tx.range(off..off + avail).enumerate() {
-                if let Some(p) = payload.get_mut(i) {
-                    *p = *b;
-                }
-            }
-            avail
+            copy_out(tx, off, payload.get_mut(..avail).unwrap_or(&mut []))
         });
+        let x = self.ext_of(k, false);
         // Our FIN follows the last data byte.
         let fin = k.has(FIN_SENT) && off + n == k.tx_len();
         if n == 0 && !fin {
@@ -1002,7 +1252,7 @@ impl TcpStack {
             mss: None,
         };
         let dst = k.key.addr;
-        self.emit(dst, &o, payload.get(..n).unwrap_or(&[]), out);
+        self.emit_x(dst, &o, &x, payload.get(..n).unwrap_or(&[]), out);
         self.stats.retransmits += 1;
         if let Some(k) = self.conn_mut(c) {
             k.set(ACK_PENDING, false);
@@ -1017,7 +1267,7 @@ impl TcpStack {
             let Some(k) = self.conn(c) else {
                 return sent_any;
             };
-            let mss = usize::from(k.mss);
+            let mss = k.eff_mss();
             let data_len = k.tx_len();
             // Offset of `snd_nxt` from `snd_una`; past `data_len` once our
             // FIN went out.
@@ -1038,12 +1288,11 @@ impl TcpStack {
             }
             let mut payload = [0u8; 1460];
             if let Some(tx) = k.tx.as_ref() {
-                for (i, b) in tx.range(off..off + n).enumerate() {
-                    if let Some(p) = payload.get_mut(i) {
-                        *p = *b;
-                    }
-                }
+                copy_out(tx, off, payload.get_mut(..n).unwrap_or(&mut []));
             }
+            // A segment with data carries no SACK blocks (no room next to the
+            // payload); the next pure ACK does.
+            let x = self.ext_of(k, false);
             let o = Out {
                 sport: k.key.lport,
                 dport: k.key.rport,
@@ -1054,13 +1303,13 @@ impl TcpStack {
                 mss: None,
             };
             let dst = k.key.addr;
-            self.emit(dst, &o, payload.get(..n).unwrap_or(&[]), out);
+            self.emit_x(dst, &o, &x, payload.get(..n).unwrap_or(&[]), out);
             sent_any = true;
             let Some(k) = self.conn_mut(c) else {
                 return true;
             };
             k.set(ACK_PENDING, false);
-            k.rcv_adv = k.rcv_nxt.wrapping_add(u32::from(o.window));
+            k.rcv_adv = k.adv_edge(o.window);
             k.snd_nxt = k.snd_nxt.wrapping_add(n as u32 + u32::from(fin));
             if gt(k.snd_nxt, k.snd_max) {
                 k.snd_max = k.snd_nxt;
@@ -1098,6 +1347,7 @@ impl TcpStack {
     }
 
     pub fn flush(&mut self, now_ms: u64, out: &mut impl FnMut([u8; 4], &[u8])) {
+        self.clock = now_ms as u32;
         let dirty = core::mem::take(&mut self.dirty);
         for &c in &dirty {
             if let Some(k) = self.conn_mut(c) {
@@ -1117,6 +1367,7 @@ impl TcpStack {
 
     /// Runs expired timers (retransmission, persist, FIN-WAIT-2).
     pub fn poll(&mut self, now_ms: u64, app: &mut impl App, out: &mut impl FnMut([u8; 4], &[u8])) {
+        self.clock = now_ms as u32;
         let mut due: Vec<u32> = Vec::new();
         self.wheel.advance(now_ms, |c| due.push(c));
         for c in due {
@@ -1191,6 +1442,31 @@ impl TcpStack {
     pub fn has_pending(&self) -> bool {
         !self.dirty.is_empty()
     }
+}
+
+/// Copies `dst.len()` bytes of `tx` starting at `off` into `dst`; returns how
+/// many it could copy.
+fn copy_out(tx: &VecDeque<u8>, off: usize, dst: &mut [u8]) -> usize {
+    let (a, b) = tx.as_slices();
+    let mut n = 0;
+    let mut skip = off;
+    for part in [a, b] {
+        if skip >= part.len() {
+            skip -= part.len();
+            continue;
+        }
+        let src = part.get(skip..).unwrap_or(&[]);
+        skip = 0;
+        let take = src.len().min(dst.len() - n);
+        if let (Some(d), Some(s)) = (dst.get_mut(n..n + take), src.get(..take)) {
+            d.copy_from_slice(s);
+        }
+        n += take;
+        if n == dst.len() {
+            break;
+        }
+    }
+    n
 }
 
 #[cfg(kani)]

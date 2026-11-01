@@ -43,6 +43,10 @@ pub struct Shard {
     retained: AtomicU64,
     published: AtomicU64,
     delivered: AtomicU64,
+    dropped_backpressure: AtomicU64,
+    dropped_offline: AtomicU64,
+    dropped_queue_full: AtomicU64,
+    dropped_rate: AtomicU64,
 }
 
 impl Shard {
@@ -54,6 +58,10 @@ impl Shard {
             retained: AtomicU64::new(0),
             published: AtomicU64::new(0),
             delivered: AtomicU64::new(0),
+            dropped_backpressure: AtomicU64::new(0),
+            dropped_offline: AtomicU64::new(0),
+            dropped_queue_full: AtomicU64::new(0),
+            dropped_rate: AtomicU64::new(0),
         }
     }
 }
@@ -81,6 +89,10 @@ pub struct Sys {
     /// Commands refused by the rate limit, for the rate-limited log.
     limited: u64,
     reboot_at_ms: Option<u64>,
+    /// Drops already reported in the log: slow subscriber, offline, QoS 1
+    /// queue full, publish rate; and when the last line was written.
+    drops_seen: [u64; 4],
+    drops_logged_ms: u64,
 }
 
 impl Sys {
@@ -96,6 +108,8 @@ impl Sys {
             limiter: Limiter::new(BURST, PERIOD_MS),
             limited: 0,
             reboot_at_ms: None,
+            drops_seen: [0; 4],
+            drops_logged_ms: 0,
         }
     }
 
@@ -106,7 +120,7 @@ impl Sys {
         }
         if now_ms >= self.next_stats_ms {
             self.next_stats_ms = now_ms + STATS_MS;
-            self.report(broker);
+            self.report(broker, now_ms);
         }
         if now_ms >= self.next_refresh_ms {
             self.next_refresh_ms = now_ms + REFRESH_MS;
@@ -128,8 +142,34 @@ impl Sys {
     }
 
     /// Writes this shard's counters for the readers.
-    fn report(&self, broker: &Broker) {
+    fn report(&mut self, broker: &Broker, now_ms: u64) {
         let st = broker.stats();
+        // Loss under overload is deliberate and bounded, and never silent: at
+        // most one line every 10 s per core, with the counts by cause.
+        let now = [
+            st.dropped_backpressure,
+            st.dropped_offline,
+            st.dropped_queue_full,
+            st.dropped_rate,
+        ];
+        if now != self.drops_seen && now_ms.saturating_sub(self.drops_logged_ms) >= 10_000 {
+            let d = |i: usize| {
+                now.get(i)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(self.drops_seen.get(i).copied().unwrap_or(0))
+            };
+            urmqtt_log::warn!(
+                "mqtt: core {} did not deliver, since the last report: QoS 0 {} to a slow subscriber, {} to an offline one; QoS 1 {} (queue full); {} publish(es) over the rate limit",
+                self.me,
+                d(0),
+                d(1),
+                d(2),
+                d(3)
+            );
+            self.drops_seen = now;
+            self.drops_logged_ms = now_ms;
+        }
         let Some(s) = SHARDS.get(self.me) else { return };
         s.online.store(st.online as u64, Ordering::Relaxed);
         s.sessions.store(st.sessions as u64, Ordering::Relaxed);
@@ -138,6 +178,13 @@ impl Sys {
         s.retained.store(st.retained as u64, Ordering::Relaxed);
         s.published.store(st.published, Ordering::Relaxed);
         s.delivered.store(st.delivered, Ordering::Relaxed);
+        s.dropped_backpressure
+            .store(st.dropped_backpressure, Ordering::Relaxed);
+        s.dropped_offline
+            .store(st.dropped_offline, Ordering::Relaxed);
+        s.dropped_queue_full
+            .store(st.dropped_queue_full, Ordering::Relaxed);
+        s.dropped_rate.store(st.dropped_rate, Ordering::Relaxed);
     }
 
     /// New kernel log lines to `$SYS/console/out`.
@@ -260,7 +307,12 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
     }
     let (mut online, mut sessions, mut subs, mut published, mut delivered) = (0, 0, 0, 0, 0);
     let mut retained = 0;
+    let mut drops = urmqtt_broker::sys::Drops::default();
     for s in SHARDS.iter() {
+        drops.slow_subscriber += s.dropped_backpressure.load(Ordering::Relaxed);
+        drops.offline += s.dropped_offline.load(Ordering::Relaxed);
+        drops.qos1_queue_full += s.dropped_queue_full.load(Ordering::Relaxed);
+        drops.publish_rate += s.dropped_rate.load(Ordering::Relaxed);
         online += s.online.load(Ordering::Relaxed);
         sessions += s.sessions.load(Ordering::Relaxed);
         subs += s.subscriptions.load(Ordering::Relaxed);
@@ -269,6 +321,16 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
         // Every shard holds a replica of the retained messages.
         retained = retained.max(s.retained.load(Ordering::Relaxed));
     }
+    // Relaxed: statistics.
+    drops.cross_core = dataplane::ROUTE_DROPPED.load(Ordering::Relaxed);
+    let by = |site: dataplane::DropSite| {
+        dataplane::DROPPED_BY
+            .get(site as usize)
+            .map_or(0, |d| d.load(Ordering::Relaxed))
+    };
+    drops.frames_steer = by(dataplane::DropSite::Steer);
+    drops.frames_worker_tx = by(dataplane::DropSite::WorkerTx);
+    drops.frames_nic = by(dataplane::DropSite::NicTx) + by(dataplane::DropSite::NicTxLocal);
     let (free, cap) = crate::vm::HEAP.stats().unwrap_or((0, 0));
     Info {
         version: crate::VERSION,
@@ -290,6 +352,7 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
         time_source: crate::boot::clock_source().name(),
         time_offset_ms: crate::boot::clock_offset_ms(),
         console_dropped: CONSOLE_DROPPED.load(Ordering::Relaxed),
+        drops,
         handshakes: {
             let t = dataplane::handshake_totals();
             urmqtt_broker::sys::Handshakes {
