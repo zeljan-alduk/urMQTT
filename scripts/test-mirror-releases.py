@@ -239,6 +239,7 @@ class FakeGitHub:
         self.names: dict[int, str] = {}
         self.page_size: int | None = None  # force pagination whatever per_page says
         self.list_error: tuple[int, dict[str, str], bytes] | None = None
+        self.asset_error: tuple[int, dict[str, str], bytes] | None = None  # for the asset endpoint
         self.next_link_host: str | None = None  # make the Link header point to another host name
         self.truncate: dict[str, int] = {}  # asset name -> bytes sent before the connection is dropped
         self.stall: dict[str, tuple[int, threading.Event]] = {}  # asset name -> (bytes, release event)
@@ -341,7 +342,10 @@ class FakeGitHub:
 
     def _asset(self, h: Any, parts: urllib.parse.SplitResult) -> None:
         asset = self._find_asset(int(parts.path.rsplit("/", 1)[1]))
-        if asset is None:
+        if self.asset_error is not None:
+            status, error_headers, error_body = self.asset_error
+            self._send(h, status, error_body, "application/json", error_headers)
+        elif asset is None:
             self._send(h, 404, b'{"message":"Not Found"}', "application/json")
         elif "application/octet-stream" not in (h.headers.get("Accept") or ""):
             self._send(h, 200, b'{"note":"asset metadata"}', "application/json")
@@ -1152,6 +1156,34 @@ class Behaviour(MirrorCase):
         self.assertIn("refusing a redirect to http://192.0.2.1:9/blob/1/x", job.err)
         self.assertEqual(self.entry("v0.2.0")["reason"], "download-failed")
         self.assertEqual(self.fake.downloads()[0:1], ["SHA256SUMS"])
+
+    def test_a_rate_limit_during_downloads_stops_the_requests_and_heals_later(self) -> None:
+        self.add_release("v0.2.0", published="2026-11-02T00:00:00Z")
+        self.add_release("v0.3.0", published="2026-11-03T00:00:00Z")
+        limited = b'{"message":"API rate limit exceeded"}'
+        self.fake.asset_error = (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1793543874"}, limited)
+        job = self.run_job()
+        self.assertEqual(job.code, 1, job.err)
+        self.assertEqual(len(self.fake.downloads()), 1, "after the first 403 the job must not ask again")
+        self.assertIn("rate limit", job.err)
+        for tag in ("v0.2.0", "v0.3.0"):
+            self.assertEqual(self.entry(tag)["reason"], "download-failed")
+            self.assertNothingPublished(tag)
+        self.fake.asset_error = None  # the limit resets: both are retried although nothing changed upstream
+        healed = self.run_job()
+        self.assertEqual(healed.code, 0, healed.err)
+        self.assertEqual(self.document()["templates"], 2)
+
+    def test_release_names_with_non_ascii_text_are_written_as_utf8(self) -> None:
+        nice = "urMQTT 0.2.0 – première 日本"
+        self.add_release("v0.2.0", name=nice, published="2026-11-02T00:00:00Z")
+        self.add_release("v0.3.0", name="lone \ud800 surrogate‮", published="2026-11-03T00:00:00Z")
+        self.assertEqual(self.run_job().code, 0)
+        raw = (self.root / "releases.json").read_bytes()
+        self.assertIn(nice.encode("utf-8"), raw)  # plain UTF-8, not \\u escapes
+        self.assertEqual(self.entry("v0.2.0")["name"], nice)
+        name = self.entry("v0.3.0")["name"]
+        self.assertTrue(name.startswith("lone ") and name.endswith("surrogate"), name)  # surrogate and bidi override dropped
 
     def test_a_download_failure_does_not_stop_the_other_releases(self) -> None:
         iso = make_iso(seed=1)
