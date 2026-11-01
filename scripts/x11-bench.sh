@@ -129,7 +129,10 @@ console_end() {
     cat "$DIR/wd.cur" "$DIR/wd.seen" | sort -u >"$DIR/wd.seen.tmp" && mv "$DIR/wd.seen.tmp" "$DIR/wd.seen"
     cat "$DIR/wd.cur.abort" "$DIR/wd.seen.abort" | sort -u >"$DIR/wd.seen.tmp" && mv "$DIR/wd.seen.tmp" "$DIR/wd.seen.abort"
     late=$(grep -o '[0-9]* late tick(s), worst [0-9]* us' "$DIR/console.out" | sort -u | awk '{n+=$1; if ($5>w) w=$5} END{printf "late_ticks_in_window=%d worst_us=%d", n, w}')
-    echo "CONSOLE new_watchdog_reports=$over new_aborted_connections=$drop $late" | tee -a "$OUT"
+    local steal excused
+    steal=$(grep -o 'host steal [0-9]* us' "$DIR/console.out" | sort -u | awk '{n+=$3} END{printf "host_steal_us_in_window=%d", n}')
+    excused=$(grep -c 'not charged' "$DIR/console.out")
+    echo "CONSOLE new_watchdog_reports=$over new_aborted_connections=$drop $late $steal not_charged_lines_in_window=$excused" | tee -a "$OUT"
     grep -E 'SYSVAL .*(dropped|messages/(received|sent))' "$DIR/console.out" | sed 's/SYSVAL \$SYS\/broker\///' | tr '\n' ' ' | sed 's/^/DROPS /' | tee -a "$OUT"
     echo | tee -a "$OUT" >/dev/null
 }
@@ -197,7 +200,9 @@ for suite in $SUITES; do
         ;;
     throughput)
         [ "$PUBSUB" = 1 ] || continue
-        for cfg in "0 64 16" "0 1024 16" "1 64 16" "1 1024 16" "1 64 64"; do
+        # THROUGHPUT_CFGS="QOS PAYLOAD PAIRS;..." picks a subset.
+        IFS=';' read -ra tp_cfgs <<<"${THROUGHPUT_CFGS:-0 64 16;0 1024 16;1 64 16;1 1024 16;1 64 64}"
+        for cfg in "${tp_cfgs[@]}"; do
             set -- $cfg
             for r in $(seq 1 "$REPS"); do
                 run "throughput qos=$1 payload=$2 pairs=$3" "$r" pubsub "${COMMON[@]}" --prefix "svc-$(uid)" \

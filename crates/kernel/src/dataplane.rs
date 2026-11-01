@@ -247,11 +247,11 @@ impl Idle {
             });
         let p = core::mem::take(&mut self.prof);
         let pct = |ns: u64| ns * 100 / window.max(1);
-        if acc > 0 || tls > 0 || frames > 0 || late_ticks > 0 || steal > 0 {
+        if acc > 0 || tls > 0 || frames > 0 {
             urmqtt_log::info!(
                 "dataplane: core {me}: busy {busy}%, work {}% (rx {}%, of it tls {}%, poll {}%, tcp {}%, mesh {}%, nic {}%), \
-                 {acc} connection(s) accepted ({} us of work, {} us of it TLS, each), {frames} frame(s) dispatched (NIC backlog peak {nic_peak}), \
-                 {} loop passes in {} ms, longest stall {} us ({} late tick(s), worst {} us, {} us lock wait, host steal {} us)",
+                 {acc} connection(s) accepted ({} us of work, {} us of it TLS, each), {frames} frame(s) dispatched, \
+                 {} loop passes in {} ms, longest stall {} us",
                 pct(p.work()),
                 pct(p.rx),
                 pct(tls),
@@ -263,8 +263,14 @@ impl Idle {
                 tls.checked_div(acc).unwrap_or(0) / 1000,
                 self.passes,
                 window / 1_000_000,
-                self.max_gap_ns / 1000,
-                late_ticks,
+                self.max_gap_ns / 1000
+            );
+        }
+        // What the core could tell about its own stalls (ADR-214) and the
+        // dispatcher's NIC backlog (ADR-216); a short line of its own.
+        if late_ticks > 0 || steal > 0 || lock_wait > 1000 || nic_peak > 0 {
+            urmqtt_log::info!(
+                "stalls: core {me}: {late_ticks} late tick(s), worst {} us; {} us waiting for locks; host steal {} us; NIC backlog peak {nic_peak}",
                 late_worst / 1000,
                 lock_wait / 1000,
                 steal / 1000
