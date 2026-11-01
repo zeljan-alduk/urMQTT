@@ -1,0 +1,820 @@
+# urmqtt-bench 2026-11-01T04:43:12Z host=169.58.184.193:8883 cores=2,3 reps=3
+# loadgen 45ae7fd8e4fb kernel 7.0.0-38-generic nproc=4
+## suite handshake
+GUARD load1=2.96 site_s=0.214517
+RUN handshake threads=32 rep=1
+loadgen: handshake: 1713 connections in 10.0 s = 171 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 185.1 ms, 0 error(s)
+loadgen: whole connection: mean 185.1 ms, p50 184.4, p90 272.7, p99 491.1, max 2300.4 ms
+loadgen: tcp connect: mean 47.7 ms, p50 19.8, p90 85.6, p99 131.4, max 2208.5 ms
+loadgen: tls + connect/connack: mean 94.1 ms, p50 94.1, p90 120.7, p99 369.5, max 406.7 ms
+loadgen: handshake: generator cpu 0.26 cores (process total, all threads)
+RESULT mode=handshake threads=32 conn_per_s=171 errors=0 lat_p50_ms=184.4 lat_p99_ms=491.1 tcp_p50_ms=19.8 tls_p50_ms=94.1 tls_p99_ms=369.5 gen_cpu=0.26
+HOSTCPU steal=64% idle=10% user+sys=24%
+BROKERBUSY c0=6 c1=16 c2=15 c3=48
+GUARD load1=2.12 site_s=0.090164
+RUN handshake threads=32 rep=2
+loadgen: handshake: 1548 connections in 10.0 s = 155 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 204.7 ms, 4 error(s)
+loadgen: whole connection: mean 204.7 ms, p50 196.4, p90 300.8, p99 406.0, max 1298.9 ms
+loadgen: tcp connect: mean 49.9 ms, p50 25.9, p90 87.8, p99 106.5, max 1124.1 ms
+loadgen: tls + connect/connack: mean 107.8 ms, p50 98.8, p90 189.3, p99 299.7, max 427.4 ms
+loadgen: errors by kind: 4 TLS or CONNECT write (reset or alert)
+loadgen: handshake: generator cpu 0.24 cores (process total, all threads)
+RESULT mode=handshake threads=32 conn_per_s=155 errors=4 lat_p50_ms=196.4 lat_p99_ms=406.0 tcp_p50_ms=25.9 tls_p50_ms=98.8 tls_p99_ms=299.7 gen_cpu=0.24
+loadgen: bench-x189967643-00008: tls/connect: Connection reset by peer (os error 104)
+loadgen: bench-x189967643-00017: tls/connect: Connection reset by peer (os error 104)
+loadgen: bench-x189967643-00008: tls/connect: Connection reset by peer (os error 104)
+loadgen: bench-x189967643-00031: tls/connect: Connection reset by peer (os error 104)
+HOSTCPU steal=63% idle=11% user+sys=24%
+BROKERBUSY c0=3 c1=14 c2=13 c3=48
+GUARD load1=1.72 site_s=0.013916
+RUN handshake threads=32 rep=3
+loadgen: handshake: 1695 connections in 10.0 s = 169 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 187.2 ms, 0 error(s)
+loadgen: whole connection: mean 187.2 ms, p50 186.4, p90 279.0, p99 410.4, max 1297.5 ms
+loadgen: tcp connect: mean 44.6 ms, p50 20.0, p90 84.8, p99 115.7, max 1119.3 ms
+loadgen: tls + connect/connack: mean 97.9 ms, p50 95.7, p90 174.0, p99 298.6, max 522.4 ms
+loadgen: handshake: generator cpu 0.24 cores (process total, all threads)
+RESULT mode=handshake threads=32 conn_per_s=169 errors=0 lat_p50_ms=186.4 lat_p99_ms=410.4 tcp_p50_ms=20.0 tls_p50_ms=95.7 tls_p99_ms=298.6 gen_cpu=0.24
+HOSTCPU steal=66% idle=7% user+sys=25%
+BROKERBUSY c0=5 c1=7 c2=8 c3=50
+GUARD load1=5.39 site_s=0.093733
+RUN handshake threads=64 rep=1
+loadgen: handshake: 2890 connections in 10.0 s = 289 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 216.6 ms, 2 error(s)
+loadgen: whole connection: mean 216.6 ms, p50 199.5, p90 299.3, p99 517.1, max 1297.0 ms
+loadgen: tcp connect: mean 54.6 ms, p50 34.2, p90 94.0, p99 106.8, max 1197.0 ms
+loadgen: tls + connect/connack: mean 113.2 ms, p50 99.9, p90 186.9, p99 371.5, max 972.5 ms
+loadgen: errors by kind: 1 TLS or CONNECT write (reset or alert), 1 CONNACK (reset or timeout)
+loadgen: handshake: generator cpu 0.48 cores (process total, all threads)
+RESULT mode=handshake threads=64 conn_per_s=289 errors=2 lat_p50_ms=199.5 lat_p99_ms=517.1 tcp_p50_ms=34.2 tls_p50_ms=99.9 tls_p99_ms=371.5 gen_cpu=0.48
+loadgen: bench-x1051518037-00044: tls/connect: Connection reset by peer (os error 104)
+loadgen: bench-x1051518037-00005: connack: Connection reset by peer (os error 104)
+HOSTCPU steal=62% idle=12% user+sys=22%
+BROKERBUSY c0=7 c1=21 c2=19 c3=48
+GUARD load1=7.27 site_s=0.013811
+RUN handshake threads=64 rep=2
+loadgen: handshake: 2774 connections in 10.0 s = 277 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 228.3 ms, 0 error(s)
+loadgen: whole connection: mean 228.3 ms, p50 204.7, p90 304.4, p99 406.6, max 1365.4 ms
+loadgen: tcp connect: mean 52.4 ms, p50 67.4, p90 98.7, p99 107.4, max 1169.5 ms
+loadgen: tls + connect/connack: mean 123.0 ms, p50 101.5, p90 198.0, p99 206.7, max 601.1 ms
+loadgen: handshake: generator cpu 0.49 cores (process total, all threads)
+RESULT mode=handshake threads=64 conn_per_s=277 errors=0 lat_p50_ms=204.7 lat_p99_ms=406.6 tcp_p50_ms=67.4 tls_p50_ms=101.5 tls_p99_ms=206.7 gen_cpu=0.49
+HOSTCPU steal=64% idle=10% user+sys=23%
+BROKERBUSY c0=5 c1=20 c2=21 c3=59
+GUARD load1=9.94 site_s=0.078334
+RUN handshake threads=64 rep=3
+loadgen: handshake: 2805 connections in 10.1 s = 278 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 226.5 ms, 5 error(s)
+loadgen: whole connection: mean 226.5 ms, p50 200.7, p90 323.0, p99 501.8, max 604.7 ms
+loadgen: tcp connect: mean 51.8 ms, p50 67.6, p90 98.9, p99 108.3, max 215.0 ms
+loadgen: tls + connect/connack: mean 121.4 ms, p50 101.1, p90 199.2, p99 311.2, max 414.4 ms
+loadgen: errors by kind: 3 TLS or CONNECT write (reset or alert), 2 CONNACK (reset or timeout)
+loadgen: handshake: generator cpu 0.45 cores (process total, all threads)
+RESULT mode=handshake threads=64 conn_per_s=278 errors=5 lat_p50_ms=200.7 lat_p99_ms=501.8 tcp_p50_ms=67.6 tls_p50_ms=101.1 tls_p99_ms=311.2 gen_cpu=0.45
+loadgen: bench-x2722515410-00042: tls/connect: Connection reset by peer (os error 104)
+loadgen: bench-x2722515410-00059: connack: Connection reset by peer (os error 104)
+loadgen: bench-x2722515410-00017: connack: Connection reset by peer (os error 104)
+loadgen: bench-x2722515410-00040: tls/connect: Connection reset by peer (os error 104)
+loadgen: bench-x2722515410-00050: tls/connect: Connection reset by peer (os error 104)
+HOSTCPU steal=63% idle=12% user+sys=23%
+BROKERBUSY c0=5 c1=6 c2=6 c3=56
+GUARD load1=11.85 site_s=0.024715
+RUN handshake threads=128 rep=1
+loadgen: handshake: 3828 connections in 10.1 s = 378 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 325.0 ms, 9 error(s)
+loadgen: whole connection: mean 325.0 ms, p50 300.8, p90 490.2, p99 611.9, max 1476.0 ms
+loadgen: tcp connect: mean 71.8 ms, p50 85.2, p90 105.4, p99 206.0, max 1177.6 ms
+loadgen: tls + connect/connack: mean 173.9 ms, p50 185.0, p90 292.8, p99 481.4, max 596.3 ms
+loadgen: errors by kind: 7 TLS or CONNECT write (reset or alert), 2 CONNACK (reset or timeout)
+loadgen: handshake: generator cpu 0.60 cores (process total, all threads)
+RESULT mode=handshake threads=128 conn_per_s=378 errors=9 lat_p50_ms=300.8 lat_p99_ms=611.9 tcp_p50_ms=85.2 tls_p50_ms=185.0 tls_p99_ms=481.4 gen_cpu=0.60
+loadgen: bench-x841526489-00084: tls/connect: Connection reset by peer (os error 104)
+loadgen: bench-x841526489-00118: tls/connect: Connection reset by peer (os error 104)
+loadgen: bench-x841526489-00095: tls/connect: Connection reset by peer (os error 104)
+loadgen: bench-x841526489-00072: tls/connect: Connection reset by peer (os error 104)
+loadgen: bench-x841526489-00085: tls/connect: Connection reset by peer (os error 104)
+HOSTCPU steal=65% idle=10% user+sys=21%
+BROKERBUSY c0=9 c1=18 c2=16 c3=63
+GUARD load1=11.67 site_s=0.020763
+RUN handshake threads=128 rep=2
+loadgen: handshake: 4136 connections in 10.0 s = 413 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 303.9 ms, 4 error(s)
+loadgen: whole connection: mean 303.9 ms, p50 298.8, p90 404.4, p99 585.6, max 1502.1 ms
+loadgen: tcp connect: mean 70.9 ms, p50 83.6, p90 105.6, p99 196.1, max 1196.6 ms
+loadgen: tls + connect/connack: mean 161.5 ms, p50 179.7, p90 208.0, p99 392.7, max 587.4 ms
+loadgen: errors by kind: 1 TLS or CONNECT write (reset or alert), 3 CONNACK (reset or timeout)
+loadgen: handshake: generator cpu 0.66 cores (process total, all threads)
+RESULT mode=handshake threads=128 conn_per_s=413 errors=4 lat_p50_ms=298.8 lat_p99_ms=585.6 tcp_p50_ms=83.6 tls_p50_ms=179.7 tls_p99_ms=392.7 gen_cpu=0.66
+loadgen: bench-x1719910307-00115: connack: Connection reset by peer (os error 104)
+loadgen: bench-x1719910307-00049: connack: Connection reset by peer (os error 104)
+loadgen: bench-x1719910307-00042: tls/connect: Connection reset by peer (os error 104)
+loadgen: bench-x1719910307-00021: connack: Connection reset by peer (os error 104)
+HOSTCPU steal=65% idle=9% user+sys=21%
+BROKERBUSY c0=6 c1=36 c2=30 c3=64
+GUARD load1=9.67 site_s=0.017073
+RUN handshake threads=128 rep=3
+loadgen: handshake: 4565 connections in 10.1 s = 452 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 279.3 ms, 0 error(s)
+loadgen: whole connection: mean 279.3 ms, p50 291.4, p90 395.6, p99 503.4, max 1497.9 ms
+loadgen: tcp connect: mean 64.4 ms, p50 79.8, p90 103.6, p99 125.6, max 1201.9 ms
+loadgen: tls + connect/connack: mean 147.4 ms, p50 124.6, p90 202.1, p99 298.3, max 578.5 ms
+loadgen: handshake: generator cpu 0.74 cores (process total, all threads)
+RESULT mode=handshake threads=128 conn_per_s=452 errors=0 lat_p50_ms=291.4 lat_p99_ms=503.4 tcp_p50_ms=79.8 tls_p50_ms=124.6 tls_p99_ms=298.3 gen_cpu=0.74
+HOSTCPU steal=66% idle=8% user+sys=21%
+BROKERBUSY c0=6 c1=13 c2=12 c3=52
+## suite sweep
+GUARD load1=8.22 site_s=0.017459
+RUN sweep qos=0 payload=64 rate=100 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.7 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 1600/s, acknowledged 0/s, delivered 1598/s, lost connections 0
+loadgen: pubsub: generator cpu 0.18 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=100 sent_per_s=1600 acked_per_s=0 delivered_per_s=1598 lat_p50_ms=16.44 lat_p90_ms=90.18 lat_p99_ms=101.24 lat_max_ms=406.54 samples=15978 gen_cpu=0.18 ready=32 failed=0 lost=0
+HOSTCPU steal=60% idle=15% user+sys=24%
+BROKERBUSY c0=5 c1=5 c2=6 c3=43
+GUARD load1=6.68 site_s=0.110380
+RUN sweep qos=0 payload=64 rate=100 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.4 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 1602/s, acknowledged 0/s, delivered 1599/s, lost connections 1
+loadgen: pubsub: generator cpu 0.37 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=100 sent_per_s=1602 acked_per_s=0 delivered_per_s=1599 lat_p50_ms=15.36 lat_p90_ms=88.52 lat_p99_ms=106.39 lat_max_ms=199.54 samples=15988 gen_cpu=0.37 ready=32 failed=0 lost=1
+loadgen: lost: svc-x1775927310-00029: publisher: connection ended (t=12.4s)
+HOSTCPU steal=61% idle=14% user+sys=23%
+BROKERBUSY c0=4 c1=5 c2=7 c3=34
+GUARD load1=5.20 site_s=0.220137
+RUN sweep qos=0 payload=64 rate=100 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 1605/s, acknowledged 0/s, delivered 1601/s, lost connections 0
+loadgen: pubsub: generator cpu 0.34 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=100 sent_per_s=1605 acked_per_s=0 delivered_per_s=1601 lat_p50_ms=15.10 lat_p90_ms=80.10 lat_p99_ms=100.42 lat_max_ms=305.70 samples=16029 gen_cpu=0.34 ready=32 failed=0 lost=0
+HOSTCPU steal=64% idle=9% user+sys=26%
+BROKERBUSY c0=5 c1=6 c2=6 c3=25
+GUARD load1=4.08 site_s=0.090259
+RUN sweep qos=0 payload=64 rate=300 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate 300/publisher, window 10.0 s
+loadgen: pubsub: published 4353/s, acknowledged 0/s, delivered 4365/s, lost connections 3
+loadgen: pubsub: generator cpu 0.33 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=300 sent_per_s=4353 acked_per_s=0 delivered_per_s=4365 lat_p50_ms=19.77 lat_p90_ms=103.27 lat_p99_ms=499.87 lat_max_ms=794.41 samples=43650 gen_cpu=0.33 ready=32 failed=0 lost=3
+loadgen: lost: svc-x200121571-00020: publisher: connection ended (t=2.1s)
+loadgen: lost: svc-x200121571-00028: publisher: connection ended (t=8.0s)
+loadgen: lost: svc-x200121571-00021: publisher: connection ended (t=11.3s)
+HOSTCPU steal=63% idle=12% user+sys=24%
+BROKERBUSY c0=6 c1=6 c2=7 c3=54
+GUARD load1=3.17 site_s=0.016457
+RUN sweep qos=0 payload=64 rate=300 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.5 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate 300/publisher, window 10.0 s
+loadgen: pubsub: published 4800/s, acknowledged 0/s, delivered 4827/s, lost connections 1
+loadgen: pubsub: generator cpu 0.38 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=300 sent_per_s=4800 acked_per_s=0 delivered_per_s=4827 lat_p50_ms=19.93 lat_p90_ms=137.22 lat_p99_ms=808.27 lat_max_ms=1285.99 samples=48274 gen_cpu=0.38 ready=32 failed=0 lost=1
+loadgen: lost: svc-x1569910287-00021: publisher: connection ended (t=12.1s)
+HOSTCPU steal=63% idle=11% user+sys=24%
+BROKERBUSY c0=10 c1=9 c2=8 c3=49
+GUARD load1=2.34 site_s=0.092640
+RUN sweep qos=0 payload=64 rate=300 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate 300/publisher, window 10.0 s
+loadgen: pubsub: published 4391/s, acknowledged 0/s, delivered 4393/s, lost connections 3
+loadgen: pubsub: generator cpu 0.39 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=300 sent_per_s=4391 acked_per_s=0 delivered_per_s=4393 lat_p50_ms=69.90 lat_p90_ms=467.16 lat_p99_ms=6280.87 lat_max_ms=7419.28 samples=43930 gen_cpu=0.39 ready=32 failed=0 lost=3
+loadgen: lost: svc-x127128000-00020: publisher: connection ended (t=8.1s)
+loadgen: lost: svc-x127128000-00031: publisher: connection ended (t=9.7s)
+loadgen: lost: svc-x127128000-00025: publisher: connection ended (t=9.7s)
+HOSTCPU steal=65% idle=8% user+sys=25%
+BROKERBUSY c0=10 c1=10 c2=9 c3=45
+GUARD load1=2.64 site_s=0.095075
+RUN sweep qos=0 payload=64 rate=1000 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.4 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate 1000/publisher, window 10.0 s
+loadgen: pubsub: published 9640/s, acknowledged 0/s, delivered 9989/s, lost connections 5
+loadgen: pubsub: generator cpu 0.25 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=1000 sent_per_s=9640 acked_per_s=0 delivered_per_s=9989 lat_p50_ms=599.85 lat_p90_ms=2518.33 lat_p99_ms=4197.15 lat_max_ms=4476.22 samples=99896 gen_cpu=0.25 ready=32 failed=0 lost=5
+loadgen: lost: svc-x1373712-00026: publisher: connection ended (t=2.6s)
+loadgen: lost: svc-x1373712-00025: publisher: connection ended (t=2.6s)
+loadgen: lost: svc-x1373712-00031: publisher: connection ended (t=3.1s)
+loadgen: lost: svc-x1373712-00029: publisher: connection ended (t=3.6s)
+loadgen: lost: svc-x1373712-00027: publisher: connection ended (t=3.6s)
+HOSTCPU steal=66% idle=7% user+sys=25%
+BROKERBUSY c0=7 c1=13 c2=11 c3=40
+GUARD load1=3.62 site_s=0.021843
+RUN sweep qos=0 payload=64 rate=1000 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.2 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate 1000/publisher, window 10.0 s
+loadgen: pubsub: published 12876/s, acknowledged 0/s, delivered 12126/s, lost connections 3
+loadgen: pubsub: generator cpu 0.38 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=1000 sent_per_s=12876 acked_per_s=0 delivered_per_s=12126 lat_p50_ms=423.64 lat_p90_ms=1835.85 lat_p99_ms=4788.95 lat_max_ms=5386.98 samples=121261 gen_cpu=0.38 ready=32 failed=0 lost=3
+loadgen: lost: svc-x2631816835-00031: publisher: connection ended (t=1.9s)
+loadgen: lost: svc-x2631816835-00029: publisher: connection ended (t=2.8s)
+loadgen: lost: svc-x2631816835-00028: publisher: connection ended (t=5.8s)
+HOSTCPU steal=61% idle=13% user+sys=23%
+BROKERBUSY c0=16 c1=16 c2=16 c3=33
+GUARD load1=5.67 site_s=0.197012
+RUN sweep qos=0 payload=64 rate=1000 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.4 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate 1000/publisher, window 10.0 s
+loadgen: pubsub: published 13744/s, acknowledged 0/s, delivered 12774/s, lost connections 8
+loadgen: pubsub: generator cpu 0.37 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=1000 sent_per_s=13744 acked_per_s=0 delivered_per_s=12774 lat_p50_ms=598.91 lat_p90_ms=2023.65 lat_p99_ms=4203.69 lat_max_ms=4911.51 samples=127737 gen_cpu=0.37 ready=32 failed=0 lost=8
+loadgen: lost: svc-x1982624105-00016: publisher: connection ended (t=7.6s)
+loadgen: lost: svc-x1982624105-00021: publisher: connection ended (t=8.5s)
+loadgen: lost: svc-x1982624105-00025: publisher: connection ended (t=8.5s)
+loadgen: lost: svc-x1982624105-00023: publisher: connection ended (t=9.1s)
+loadgen: lost: svc-x1982624105-00020: publisher: connection ended (t=9.2s)
+HOSTCPU steal=63% idle=11% user+sys=23%
+BROKERBUSY c0=14 c1=21 c2=18 c3=49
+GUARD load1=6.40 site_s=0.091924
+RUN sweep qos=1 payload=64 rate=100 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.2 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 1607/s, acknowledged 1601/s, delivered 1601/s, lost connections 0
+loadgen: pubsub: generator cpu 0.31 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=100 sent_per_s=1607 acked_per_s=1601 delivered_per_s=1601 lat_p50_ms=14.00 lat_p90_ms=88.85 lat_p99_ms=103.51 lat_max_ms=314.58 samples=16011 gen_cpu=0.31 ready=32 failed=0 lost=0
+HOSTCPU steal=60% idle=14% user+sys=24%
+BROKERBUSY c0=6 c1=7 c2=7 c3=42
+GUARD load1=5.05 site_s=0.016843
+RUN sweep qos=1 payload=64 rate=100 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 1610/s, acknowledged 1615/s, delivered 1610/s, lost connections 0
+loadgen: pubsub: generator cpu 0.26 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=100 sent_per_s=1610 acked_per_s=1615 delivered_per_s=1610 lat_p50_ms=12.99 lat_p90_ms=82.97 lat_p99_ms=120.77 lat_max_ms=214.88 samples=16097 gen_cpu=0.26 ready=32 failed=0 lost=0
+HOSTCPU steal=63% idle=11% user+sys=24%
+BROKERBUSY c0=5 c1=6 c2=6 c3=41
+GUARD load1=4.23 site_s=0.090256
+RUN sweep qos=1 payload=64 rate=100 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 1598/s, acknowledged 1597/s, delivered 1598/s, lost connections 0
+loadgen: pubsub: generator cpu 0.31 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=100 sent_per_s=1598 acked_per_s=1597 delivered_per_s=1598 lat_p50_ms=17.19 lat_p90_ms=79.97 lat_p99_ms=112.85 lat_max_ms=218.31 samples=15984 gen_cpu=0.31 ready=32 failed=0 lost=0
+HOSTCPU steal=66% idle=7% user+sys=26%
+BROKERBUSY c0=5 c1=4 c2=3 c3=26
+GUARD load1=3.19 site_s=0.013748
+RUN sweep qos=1 payload=64 rate=300 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate 300/publisher, window 10.0 s
+loadgen: pubsub: published 4411/s, acknowledged 4377/s, delivered 4209/s, lost connections 1
+loadgen: pubsub: generator cpu 0.39 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=300 sent_per_s=4411 acked_per_s=4377 delivered_per_s=4209 lat_p50_ms=99.12 lat_p90_ms=219.29 lat_p99_ms=417.17 lat_max_ms=586.21 samples=42095 gen_cpu=0.39 ready=32 failed=0 lost=1
+loadgen: lost: svc-x318419342-00019: publisher: connection ended (t=5.6s)
+HOSTCPU steal=66% idle=8% user+sys=25%
+BROKERBUSY c0=6 c1=10 c2=8 c3=35
+GUARD load1=3.22 site_s=0.077717
+RUN sweep qos=1 payload=64 rate=300 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.4 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate 300/publisher, window 10.0 s
+loadgen: pubsub: published 3871/s, acknowledged 3854/s, delivered 3769/s, lost connections 4
+loadgen: pubsub: generator cpu 0.33 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=300 sent_per_s=3871 acked_per_s=3854 delivered_per_s=3769 lat_p50_ms=76.69 lat_p90_ms=198.86 lat_p99_ms=699.61 lat_max_ms=805.35 samples=37699 gen_cpu=0.33 ready=32 failed=0 lost=4
+loadgen: lost: svc-x309673432-00018: publisher: connection ended (t=5.4s)
+loadgen: lost: svc-x309673432-00031: publisher: connection ended (t=7.3s)
+loadgen: lost: svc-x309673432-00020: publisher: connection ended (t=9.1s)
+loadgen: lost: svc-x309673432-00027: publisher: connection ended (t=9.1s)
+HOSTCPU steal=62% idle=12% user+sys=24%
+BROKERBUSY c0=9 c1=24 c2=23 c3=46
+GUARD load1=2.58 site_s=0.017605
+RUN sweep qos=1 payload=64 rate=300 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate 300/publisher, window 10.0 s
+loadgen: pubsub: published 4762/s, acknowledged 4754/s, delivered 4716/s, lost connections 0
+loadgen: pubsub: generator cpu 0.39 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=300 sent_per_s=4762 acked_per_s=4754 delivered_per_s=4716 lat_p50_ms=34.95 lat_p90_ms=197.06 lat_p99_ms=303.14 lat_max_ms=496.32 samples=47196 gen_cpu=0.39 ready=32 failed=0 lost=0
+HOSTCPU steal=64% idle=10% user+sys=24%
+BROKERBUSY c0=7 c1=11 c2=11 c3=45
+GUARD load1=2.16 site_s=0.018596
+RUN sweep qos=1 payload=64 rate=1000 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate 1000/publisher, window 10.0 s
+loadgen: pubsub: published 7666/s, acknowledged 7673/s, delivered 4280/s, lost connections 5
+loadgen: pubsub: generator cpu 0.60 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=1000 sent_per_s=7666 acked_per_s=7673 delivered_per_s=4280 lat_p50_ms=198.30 lat_p90_ms=314.28 lat_p99_ms=512.17 lat_max_ms=784.77 samples=42800 gen_cpu=0.60 ready=32 failed=0 lost=5
+loadgen: lost: svc-x3062919978-00016: publisher: connection ended (t=1.8s)
+loadgen: lost: svc-x3062919978-00014: subscriber read: Connection reset by peer (os error 104) (t=3.0s)
+loadgen: lost: svc-x3062919978-00017: publisher: connection ended (t=6.8s)
+loadgen: lost: svc-x3062919978-00027: publisher: connection ended (t=8.6s)
+loadgen: lost: svc-x3062919978-00004: subscriber read: Connection reset by peer (os error 104) (t=8.6s)
+HOSTCPU steal=67% idle=6% user+sys=25%
+BROKERBUSY c0=8 c1=11 c2=8 c3=29
+GUARD load1=6.23 site_s=0.100426
+RUN sweep qos=1 payload=64 rate=1000 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate 1000/publisher, window 10.0 s
+loadgen: pubsub: published 9186/s, acknowledged 9186/s, delivered 5290/s, lost connections 4
+loadgen: pubsub: generator cpu 0.53 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=1000 sent_per_s=9186 acked_per_s=9186 delivered_per_s=5290 lat_p50_ms=187.93 lat_p90_ms=304.40 lat_p99_ms=499.32 lat_max_ms=583.69 samples=52900 gen_cpu=0.53 ready=32 failed=0 lost=4
+loadgen: lost: svc-x2732430781-00018: publisher: connection ended (t=4.3s)
+loadgen: lost: svc-x2732430781-00028: publisher: connection ended (t=7.4s)
+loadgen: lost: svc-x2732430781-00019: publisher: connection ended (t=10.5s)
+loadgen: lost: svc-x2732430781-00025: publisher: connection ended (t=10.5s)
+HOSTCPU steal=64% idle=10% user+sys=24%
+BROKERBUSY c0=7 c1=14 c2=15 c3=32
+GUARD load1=8.98 site_s=0.019352
+RUN sweep qos=1 payload=64 rate=1000 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 1.4 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate 1000/publisher, window 10.0 s
+loadgen: pubsub: published 9522/s, acknowledged 9537/s, delivered 5204/s, lost connections 4
+loadgen: pubsub: generator cpu 0.56 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=1000 sent_per_s=9522 acked_per_s=9537 delivered_per_s=5204 lat_p50_ms=184.12 lat_p90_ms=277.52 lat_p99_ms=377.79 lat_max_ms=598.26 samples=52044 gen_cpu=0.56 ready=32 failed=0 lost=4
+loadgen: lost: svc-x2508513155-00023: publisher: connection ended (t=1.7s)
+loadgen: lost: svc-x2508513155-00031: publisher: connection ended (t=1.7s)
+loadgen: lost: svc-x2508513155-00014: subscriber read: Connection reset by peer (os error 104) (t=2.6s)
+loadgen: lost: svc-x2508513155-00029: publisher: connection ended (t=8.2s)
+HOSTCPU steal=63% idle=12% user+sys=24%
+BROKERBUSY c0=6 c1=14 c2=12 c3=52
+GUARD load1=11.10 site_s=0.098862
+RUN sweep qos=0 payload=1024 rate=100 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.2 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 1273/s, acknowledged 0/s, delivered 1319/s, lost connections 3
+loadgen: pubsub: generator cpu 0.20 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=100 sent_per_s=1273 acked_per_s=0 delivered_per_s=1319 lat_p50_ms=20.91 lat_p90_ms=319.19 lat_p99_ms=1312.56 lat_max_ms=1700.17 samples=13255 gen_cpu=0.20 ready=32 failed=0 lost=3
+loadgen: lost: svc-x2524531655-00023: publisher: connection ended (t=2.2s)
+loadgen: lost: svc-x2524531655-00024: publisher: connection ended (t=2.2s)
+loadgen: lost: svc-x2524531655-00031: publisher: connection ended (t=2.2s)
+HOSTCPU steal=65% idle=7% user+sys=26%
+BROKERBUSY c0=4 c1=8 c2=7 c3=53
+GUARD load1=11.66 site_s=0.094734
+RUN sweep qos=0 payload=1024 rate=100 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.2 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 1483/s, acknowledged 0/s, delivered 1462/s, lost connections 2
+loadgen: pubsub: generator cpu 0.27 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=100 sent_per_s=1483 acked_per_s=0 delivered_per_s=1462 lat_p50_ms=23.45 lat_p90_ms=493.79 lat_p99_ms=980.15 lat_max_ms=2702.15 samples=14632 gen_cpu=0.27 ready=32 failed=0 lost=2
+loadgen: lost: svc-x22819919-00017: publisher: connection ended (t=0.6s)
+loadgen: lost: svc-x22819919-00028: publisher: connection ended (t=11.9s)
+HOSTCPU steal=60% idle=14% user+sys=24%
+BROKERBUSY c0=6 c1=11 c2=11 c3=39
+GUARD load1=11.93 site_s=0.120174
+RUN sweep qos=0 payload=1024 rate=100 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 1356/s, acknowledged 0/s, delivered 1350/s, lost connections 3
+loadgen: pubsub: generator cpu 0.29 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=100 sent_per_s=1356 acked_per_s=0 delivered_per_s=1350 lat_p50_ms=28.44 lat_p90_ms=395.22 lat_p99_ms=1347.64 lat_max_ms=1712.87 samples=13499 gen_cpu=0.29 ready=32 failed=0 lost=3
+loadgen: lost: svc-x2262025629-00017: publisher: connection ended (t=2.3s)
+loadgen: lost: svc-x2262025629-00026: publisher: connection ended (t=3.1s)
+loadgen: lost: svc-x2262025629-00023: publisher: connection ended (t=9.2s)
+HOSTCPU steal=66% idle=7% user+sys=24%
+BROKERBUSY c0=11 c1=15 c2=15 c3=30
+GUARD load1=10.81 site_s=0.094309
+RUN sweep qos=0 payload=1024 rate=300 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.4 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate 300/publisher, window 10.0 s
+loadgen: pubsub: published 2341/s, acknowledged 0/s, delivered 2092/s, lost connections 1
+loadgen: pubsub: generator cpu 0.44 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=300 sent_per_s=2341 acked_per_s=0 delivered_per_s=2092 lat_p50_ms=1294.83 lat_p90_ms=2926.44 lat_p99_ms=6101.01 lat_max_ms=7368.71 samples=20923 gen_cpu=0.44 ready=32 failed=0 lost=1
+loadgen: lost: svc-x566426345-00026: publisher: connection ended (t=2.4s)
+HOSTCPU steal=64% idle=10% user+sys=23%
+BROKERBUSY c0=13 c1=19 c2=25 c3=41
+GUARD load1=10.22 site_s=0.019977
+RUN sweep qos=0 payload=1024 rate=300 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.2 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate 300/publisher, window 10.0 s
+loadgen: pubsub: published 2541/s, acknowledged 0/s, delivered 2183/s, lost connections 8
+loadgen: pubsub: generator cpu 0.39 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=300 sent_per_s=2541 acked_per_s=0 delivered_per_s=2183 lat_p50_ms=992.65 lat_p90_ms=2469.33 lat_p99_ms=5499.32 lat_max_ms=8300.87 samples=21828 gen_cpu=0.39 ready=32 failed=0 lost=8
+loadgen: lost: svc-x1242725889-00017: publisher: connection ended (t=2.6s)
+loadgen: lost: svc-x1242725889-00026: publisher: connection ended (t=4.6s)
+loadgen: lost: svc-x1242725889-00029: publisher: connection ended (t=10.0s)
+loadgen: lost: svc-x1242725889-00020: publisher: connection ended (t=10.0s)
+loadgen: lost: svc-x1242725889-00025: publisher: connection ended (t=10.4s)
+HOSTCPU steal=63% idle=11% user+sys=24%
+BROKERBUSY c0=25 c1=14 c2=33 c3=42
+GUARD load1=7.47 site_s=0.024288
+RUN sweep qos=0 payload=1024 rate=300 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.6 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate 300/publisher, window 10.0 s
+loadgen: pubsub: published 2961/s, acknowledged 0/s, delivered 2813/s, lost connections 0
+loadgen: pubsub: generator cpu 0.52 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=300 sent_per_s=2961 acked_per_s=0 delivered_per_s=2813 lat_p50_ms=1014.69 lat_p90_ms=2612.17 lat_p99_ms=3863.97 lat_max_ms=4424.11 samples=28140 gen_cpu=0.52 ready=32 failed=0 lost=0
+HOSTCPU steal=66% idle=7% user+sys=24%
+BROKERBUSY c0=6 c1=4 c2=3 c3=48
+GUARD load1=7.01 site_s=0.018116
+RUN single-flow qos=0 payload=1024 rep=1
+loadgen: pubsub: 2 of 2 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1 subscriber(s), 1 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 990/s, acknowledged 0/s, delivered 661/s, lost connections 0
+loadgen: pubsub: generator cpu 0.08 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=1024 rate=0 sent_per_s=990 acked_per_s=0 delivered_per_s=661 lat_p50_ms=1194.48 lat_p90_ms=2011.25 lat_p99_ms=2106.72 lat_max_ms=2177.66 samples=6611 gen_cpu=0.08 ready=2 failed=0 lost=0
+HOSTCPU steal=62% idle=11% user+sys=26%
+BROKERBUSY c0=3 c1=7 c2=7 c3=41
+GUARD load1=5.02 site_s=0.088659
+RUN single-flow qos=0 payload=1024 rep=2
+loadgen: pubsub: 2 of 2 clients ready in 0.2 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1 subscriber(s), 1 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 724/s, acknowledged 0/s, delivered 519/s, lost connections 1
+loadgen: pubsub: generator cpu 0.05 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=1024 rate=0 sent_per_s=724 acked_per_s=0 delivered_per_s=519 lat_p50_ms=1502.57 lat_p90_ms=2987.54 lat_p99_ms=4094.20 lat_max_ms=4099.70 samples=5195 gen_cpu=0.05 ready=2 failed=0 lost=1
+loadgen: lost: svc-x2132415625-00001: publisher: connection ended (t=11.8s)
+HOSTCPU steal=60% idle=13% user+sys=25%
+BROKERBUSY c0=4 c1=4 c2=6 c3=55
+GUARD load1=4.37 site_s=0.109233
+RUN single-flow qos=0 payload=1024 rep=3
+loadgen: pubsub: 2 of 2 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1 subscriber(s), 1 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 498/s, acknowledged 0/s, delivered 384/s, lost connections 0
+loadgen: pubsub: generator cpu 0.04 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=1024 rate=0 sent_per_s=498 acked_per_s=0 delivered_per_s=384 lat_p50_ms=2093.11 lat_p90_ms=3692.08 lat_p99_ms=4000.21 lat_max_ms=4092.11 samples=3845 gen_cpu=0.04 ready=2 failed=0 lost=0
+HOSTCPU steal=59% idle=15% user+sys=25%
+BROKERBUSY c0=4 c1=10 c2=4 c3=35
+GUARD load1=3.39 site_s=0.084774
+RUN single-flow qos=0 payload=64 rep=1
+loadgen: pubsub: 2 of 2 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1 subscriber(s), 1 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 7733/s, acknowledged 0/s, delivered 7701/s, lost connections 1
+loadgen: pubsub: generator cpu 0.13 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=0 sent_per_s=7733 acked_per_s=0 delivered_per_s=7701 lat_p50_ms=481.05 lat_p90_ms=1213.68 lat_p99_ms=2223.60 lat_max_ms=2253.24 samples=77015 gen_cpu=0.13 ready=2 failed=0 lost=1
+loadgen: lost: svc-x248468259-00001: publisher: connection ended (t=8.4s)
+HOSTCPU steal=64% idle=8% user+sys=26%
+BROKERBUSY c0=4 c1=16 c2=4 c3=36
+GUARD load1=2.97 site_s=0.022346
+RUN single-flow qos=0 payload=64 rep=2
+loadgen: pubsub: 2 of 2 clients ready in 0.2 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1 subscriber(s), 1 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 0/s, acknowledged 0/s, delivered 0/s, lost connections 1
+loadgen: pubsub: generator cpu 0.00 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=0 sent_per_s=0 acked_per_s=0 delivered_per_s=0 lat_p50_ms=0.00 lat_p90_ms=0.00 lat_p99_ms=0.00 lat_max_ms=0.00 samples=0 gen_cpu=0.00 ready=2 failed=0 lost=1
+loadgen: lost: svc-x149034763-00001: publisher: connection ended (t=0.5s)
+HOSTCPU steal=64% idle=7% user+sys=27%
+BROKERBUSY c0=2 c1=2 c2=7 c3=31
+GUARD load1=2.13 site_s=0.105402
+RUN single-flow qos=0 payload=64 rep=3
+loadgen: pubsub: 2 of 2 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1 subscriber(s), 1 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 2962/s, acknowledged 0/s, delivered 2968/s, lost connections 0
+loadgen: pubsub: generator cpu 0.09 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=0 sent_per_s=2962 acked_per_s=0 delivered_per_s=2968 lat_p50_ms=4109.83 lat_p90_ms=5292.89 lat_p99_ms=6277.43 lat_max_ms=6300.32 samples=29687 gen_cpu=0.09 ready=2 failed=0 lost=0
+HOSTCPU steal=63% idle=9% user+sys=27%
+BROKERBUSY c0=3 c1=5 c2=3 c3=29
+## suite throughput
+GUARD load1=2.95 site_s=0.090714
+RUN throughput qos=0 payload=64 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.4 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 34420/s, acknowledged 0/s, delivered 30726/s, lost connections 6
+loadgen: pubsub: generator cpu 0.76 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=34420 acked_per_s=0 delivered_per_s=30726 lat_p50_ms=1299.01 lat_p90_ms=4300.87 lat_p99_ms=7626.60 lat_max_ms=7818.40 samples=307260 gen_cpu=0.76 ready=32 failed=0 lost=6
+loadgen: lost: svc-x51871818-00021: publisher: connection ended (t=3.5s)
+loadgen: lost: svc-x51871818-00027: publisher: connection ended (t=3.8s)
+loadgen: lost: svc-x51871818-00026: publisher: connection ended (t=5.9s)
+loadgen: lost: svc-x51871818-00028: publisher: connection ended (t=11.2s)
+loadgen: lost: svc-x51871818-00022: publisher: connection ended (t=11.4s)
+HOSTCPU steal=65% idle=8% user+sys=24%
+BROKERBUSY c0=16 c1=26 c2=71 c3=32
+GUARD load1=2.33 site_s=0.095366
+RUN throughput qos=0 payload=64 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.2 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 24299/s, acknowledged 0/s, delivered 16369/s, lost connections 8
+loadgen: pubsub: generator cpu 0.61 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=24299 acked_per_s=0 delivered_per_s=16369 lat_p50_ms=2213.94 lat_p90_ms=3887.32 lat_p99_ms=6120.24 lat_max_ms=6376.16 samples=163737 gen_cpu=0.61 ready=32 failed=0 lost=8
+loadgen: lost: svc-x18444455-00029: publisher: connection ended (t=4.1s)
+loadgen: lost: svc-x18444455-00020: publisher: connection ended (t=4.9s)
+loadgen: lost: svc-x18444455-00016: publisher: connection ended (t=4.9s)
+loadgen: lost: svc-x18444455-00031: publisher: connection ended (t=6.7s)
+loadgen: lost: svc-x18444455-00028: publisher: connection ended (t=7.0s)
+HOSTCPU steal=64% idle=9% user+sys=24%
+BROKERBUSY c0=10 c1=15 c2=17 c3=52
+GUARD load1=2.09 site_s=0.017847
+RUN throughput qos=0 payload=64 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.4 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 23996/s, acknowledged 0/s, delivered 18280/s, lost connections 7
+loadgen: pubsub: generator cpu 0.68 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=23996 acked_per_s=0 delivered_per_s=18280 lat_p50_ms=1700.99 lat_p90_ms=4399.10 lat_p99_ms=9387.94 lat_max_ms=10907.32 samples=182797 gen_cpu=0.68 ready=32 failed=0 lost=7
+loadgen: lost: svc-x484421978-00026: publisher: connection ended (t=0.7s)
+loadgen: lost: svc-x484421978-00023: publisher: connection ended (t=0.7s)
+loadgen: lost: svc-x484421978-00017: publisher: connection ended (t=6.2s)
+loadgen: lost: svc-x484421978-00030: publisher: connection ended (t=6.3s)
+loadgen: lost: svc-x484421978-00016: publisher: connection ended (t=7.5s)
+HOSTCPU steal=66% idle=7% user+sys=25%
+BROKERBUSY c0=15 c1=28 c2=25 c3=50
+GUARD load1=2.31 site_s=0.017651
+RUN throughput qos=0 payload=1024 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.5 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 2357/s, acknowledged 0/s, delivered 1414/s, lost connections 2
+loadgen: pubsub: generator cpu 0.63 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=0 sent_per_s=2357 acked_per_s=0 delivered_per_s=1414 lat_p50_ms=2323.39 lat_p90_ms=4990.03 lat_p99_ms=7406.81 lat_max_ms=7816.93 samples=14136 gen_cpu=0.63 ready=32 failed=0 lost=2
+loadgen: lost: svc-x2880731177-00026: publisher: connection ended (t=2.1s)
+loadgen: lost: svc-x2880731177-00021: publisher: connection ended (t=2.7s)
+HOSTCPU steal=68% idle=4% user+sys=26%
+BROKERBUSY c0=7 c1=10 c2=48 c3=47
+GUARD load1=2.94 site_s=0.259531
+RUN throughput qos=0 payload=1024 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.4 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 3793/s, acknowledged 0/s, delivered 1055/s, lost connections 14
+loadgen: pubsub: generator cpu 0.26 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=0 sent_per_s=3793 acked_per_s=0 delivered_per_s=1055 lat_p50_ms=972.97 lat_p90_ms=2120.71 lat_p99_ms=2423.82 lat_max_ms=2673.19 samples=10547 gen_cpu=0.26 ready=32 failed=0 lost=14
+loadgen: lost: svc-x1406822111-00030: publisher: connection ended (t=1.5s)
+loadgen: lost: svc-x1406822111-00017: publisher: connection ended (t=1.9s)
+loadgen: lost: svc-x1406822111-00024: publisher: connection ended (t=2.1s)
+loadgen: lost: svc-x1406822111-00026: publisher: connection ended (t=2.6s)
+loadgen: lost: svc-x1406822111-00016: publisher: connection ended (t=2.6s)
+HOSTCPU steal=73% idle=2% user+sys=23%
+BROKERBUSY c0=24 c1=90 c2=86 c3=100
+GUARD load1=8.68 site_s=0.118080
+RUN throughput qos=0 payload=1024 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.2 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 2934/s, acknowledged 0/s, delivered 1485/s, lost connections 13
+loadgen: pubsub: generator cpu 0.37 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=0 sent_per_s=2934 acked_per_s=0 delivered_per_s=1485 lat_p50_ms=1209.40 lat_p90_ms=3394.69 lat_p99_ms=4313.35 lat_max_ms=4481.64 samples=14849 gen_cpu=0.37 ready=32 failed=0 lost=13
+loadgen: lost: svc-x1529027469-00017: publisher: connection ended (t=0.5s)
+loadgen: lost: svc-x1529027469-00029: publisher: connection ended (t=1.3s)
+loadgen: lost: svc-x1529027469-00025: publisher: connection ended (t=3.9s)
+loadgen: lost: svc-x1529027469-00024: publisher: connection ended (t=4.1s)
+loadgen: lost: svc-x1529027469-00020: publisher: connection ended (t=4.2s)
+HOSTCPU steal=66% idle=3% user+sys=29%
+BROKERBUSY c0=8 c1=26 c2=27 c3=100
+GUARD load1=9.85 site_s=0.100249
+RUN throughput qos=1 payload=64 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 10864/s, acknowledged 10864/s, delivered 5975/s, lost connections 3
+loadgen: pubsub: generator cpu 0.59 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=0 sent_per_s=10864 acked_per_s=10864 delivered_per_s=5975 lat_p50_ms=178.54 lat_p90_ms=285.81 lat_p99_ms=495.57 lat_max_ms=716.69 samples=59749 gen_cpu=0.59 ready=32 failed=0 lost=3
+loadgen: lost: svc-x580923395-00023: publisher: connection ended (t=0.9s)
+loadgen: lost: svc-x580923395-00024: publisher: connection ended (t=9.9s)
+loadgen: lost: svc-x580923395-00021: publisher: connection ended (t=10.6s)
+HOSTCPU steal=65% idle=4% user+sys=29%
+BROKERBUSY c0=6 c1=12 c2=14 c3=40
+GUARD load1=11.83 site_s=0.202020
+RUN throughput qos=1 payload=64 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.4 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 9808/s, acknowledged 9810/s, delivered 5142/s, lost connections 4
+loadgen: pubsub: generator cpu 0.58 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=0 sent_per_s=9808 acked_per_s=9810 delivered_per_s=5142 lat_p50_ms=196.28 lat_p90_ms=307.10 lat_p99_ms=511.06 lat_max_ms=797.78 samples=51421 gen_cpu=0.58 ready=32 failed=0 lost=4
+loadgen: lost: svc-x457111003-00003: subscriber read: Connection reset by peer (os error 104) (t=6.2s)
+loadgen: lost: svc-x457111003-00020: publisher: connection ended (t=6.3s)
+loadgen: lost: svc-x457111003-00014: subscriber read: Connection reset by peer (os error 104) (t=10.8s)
+loadgen: lost: svc-x457111003-00017: publisher: connection ended (t=10.8s)
+HOSTCPU steal=66% idle=7% user+sys=25%
+BROKERBUSY c0=7 c1=12 c2=13 c3=35
+GUARD load1=11.82 site_s=0.018364
+RUN throughput qos=1 payload=64 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 11661/s, acknowledged 11661/s, delivered 6190/s, lost connections 0
+loadgen: pubsub: generator cpu 0.58 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=0 sent_per_s=11661 acked_per_s=11661 delivered_per_s=6190 lat_p50_ms=190.21 lat_p90_ms=295.42 lat_p99_ms=400.17 lat_max_ms=789.81 samples=61910 gen_cpu=0.58 ready=32 failed=0 lost=0
+HOSTCPU steal=64% idle=10% user+sys=24%
+BROKERBUSY c0=6 c1=7 c2=7 c3=28
+GUARD load1=11.37 site_s=0.086479
+RUN throughput qos=1 payload=1024 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.4 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 4457/s, acknowledged 4459/s, delivered 2486/s, lost connections 8
+loadgen: pubsub: generator cpu 0.50 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=1024 rate=0 sent_per_s=4457 acked_per_s=4459 delivered_per_s=2486 lat_p50_ms=227.30 lat_p90_ms=499.70 lat_p99_ms=1080.89 lat_max_ms=1686.17 samples=24865 gen_cpu=0.50 ready=32 failed=0 lost=8
+loadgen: lost: svc-x195723879-00030: publisher: connection ended (t=5.3s)
+loadgen: lost: svc-x195723879-00028: publisher: connection ended (t=5.9s)
+loadgen: lost: svc-x195723879-00002: subscriber read: Connection reset by peer (os error 104) (t=6.4s)
+loadgen: lost: svc-x195723879-00007: subscriber read: Connection reset by peer (os error 104) (t=6.4s)
+loadgen: lost: svc-x195723879-00017: publisher: connection ended (t=6.7s)
+HOSTCPU steal=67% idle=6% user+sys=25%
+BROKERBUSY c0=18 c1=15 c2=17 c3=50
+GUARD load1=11.43 site_s=0.093304
+RUN throughput qos=1 payload=1024 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 3452/s, acknowledged 3452/s, delivered 2440/s, lost connections 7
+loadgen: pubsub: generator cpu 0.38 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=1024 rate=0 sent_per_s=3452 acked_per_s=3452 delivered_per_s=2440 lat_p50_ms=201.56 lat_p90_ms=494.59 lat_p99_ms=1023.41 lat_max_ms=1599.84 samples=24368 gen_cpu=0.38 ready=32 failed=0 lost=7
+loadgen: lost: svc-x215245715-00016: publisher: connection ended (t=1.7s)
+loadgen: lost: svc-x215245715-00020: publisher: connection ended (t=2.7s)
+loadgen: lost: svc-x215245715-00022: publisher: connection ended (t=3.1s)
+loadgen: lost: svc-x215245715-00017: publisher: connection ended (t=5.4s)
+loadgen: lost: svc-x215245715-00028: publisher: connection ended (t=7.1s)
+HOSTCPU steal=63% idle=12% user+sys=23%
+BROKERBUSY c0=14 c1=17 c2=16 c3=41
+GUARD load1=11.51 site_s=0.086254
+RUN throughput qos=1 payload=1024 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 2297/s, acknowledged 2297/s, delivered 1531/s, lost connections 11
+loadgen: pubsub: generator cpu 0.30 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=1024 rate=0 sent_per_s=2297 acked_per_s=2297 delivered_per_s=1531 lat_p50_ms=213.47 lat_p90_ms=719.48 lat_p99_ms=1500.00 lat_max_ms=3811.68 samples=15296 gen_cpu=0.30 ready=32 failed=0 lost=11
+loadgen: lost: svc-x321121630-00020: publisher: connection ended (t=0.4s)
+loadgen: lost: svc-x321121630-00024: publisher: connection ended (t=0.4s)
+loadgen: lost: svc-x321121630-00018: publisher: connection ended (t=0.5s)
+loadgen: lost: svc-x321121630-00019: publisher: connection ended (t=3.8s)
+loadgen: lost: svc-x321121630-00022: publisher: connection ended (t=5.8s)
+HOSTCPU steal=61% idle=12% user+sys=25%
+BROKERBUSY c0=23 c1=20 c2=19 c3=61
+GUARD load1=10.92 site_s=0.090827
+RUN throughput qos=1 payload=64 pairs=64 rep=1
+loadgen: pubsub: 128 of 128 clients ready in 1.5 s, 0 failed
+loadgen: pubsub: 64 publisher(s), 64 subscriber(s), 64 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 21777/s, acknowledged 21767/s, delivered 14082/s, lost connections 14
+loadgen: pubsub: generator cpu 1.57 cores (process total, all threads)
+RESULT mode=pubsub pubs=64 subs=64 topics=64 qos=1 payload=64 rate=0 sent_per_s=21777 acked_per_s=21767 delivered_per_s=14082 lat_p50_ms=220.84 lat_p90_ms=405.39 lat_p99_ms=618.81 lat_max_ms=997.57 samples=140827 gen_cpu=1.57 ready=128 failed=0 lost=14
+loadgen: lost: svc-x1968214947-00072: publisher: connection ended (t=3.0s)
+loadgen: lost: svc-x1968214947-00116: publisher: connection ended (t=3.2s)
+loadgen: lost: svc-x1968214947-00121: publisher: connection ended (t=3.4s)
+loadgen: lost: svc-x1968214947-00125: publisher: connection ended (t=3.4s)
+loadgen: lost: svc-x1968214947-00103: publisher: connection ended (t=3.5s)
+HOSTCPU steal=70% idle=3% user+sys=24%
+BROKERBUSY c0=11 c1=29 c2=28 c3=99
+GUARD load1=11.55 site_s=0.089245
+RUN throughput qos=1 payload=64 pairs=64 rep=2
+loadgen: pubsub: 128 of 128 clients ready in 1.0 s, 0 failed
+loadgen: pubsub: 64 publisher(s), 64 subscriber(s), 64 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 19144/s, acknowledged 19144/s, delivered 11365/s, lost connections 20
+loadgen: pubsub: generator cpu 1.52 cores (process total, all threads)
+RESULT mode=pubsub pubs=64 subs=64 topics=64 qos=1 payload=64 rate=0 sent_per_s=19144 acked_per_s=19144 delivered_per_s=11365 lat_p50_ms=287.01 lat_p90_ms=517.93 lat_p99_ms=1074.19 lat_max_ms=1398.92 samples=113652 gen_cpu=1.52 ready=128 failed=0 lost=20
+loadgen: lost: svc-x988123665-00088: publisher: connection ended (t=1.5s)
+loadgen: lost: svc-x988123665-00048: subscriber read: Connection reset by peer (os error 104) (t=1.7s)
+loadgen: lost: svc-x988123665-00082: publisher: connection ended (t=1.7s)
+loadgen: lost: svc-x988123665-00094: publisher: connection ended (t=1.8s)
+loadgen: lost: svc-x988123665-00010: subscriber read: Connection reset by peer (os error 104) (t=1.9s)
+HOSTCPU steal=70% idle=3% user+sys=24%
+BROKERBUSY c0=24 c1=46 c2=44 c3=73
+GUARD load1=11.04 site_s=0.089672
+RUN throughput qos=1 payload=64 pairs=64 rep=3
+loadgen: pubsub: 128 of 128 clients ready in 0.7 s, 0 failed
+loadgen: pubsub: 64 publisher(s), 64 subscriber(s), 64 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 19413/s, acknowledged 19412/s, delivered 11798/s, lost connections 21
+loadgen: pubsub: generator cpu 1.48 cores (process total, all threads)
+RESULT mode=pubsub pubs=64 subs=64 topics=64 qos=1 payload=64 rate=0 sent_per_s=19413 acked_per_s=19412 delivered_per_s=11798 lat_p50_ms=282.62 lat_p90_ms=430.06 lat_p99_ms=595.91 lat_max_ms=789.53 samples=117981 gen_cpu=1.48 ready=128 failed=0 lost=21
+loadgen: lost: svc-x1100030168-00095: publisher: connection ended (t=1.4s)
+loadgen: lost: svc-x1100030168-00123: publisher: connection ended (t=1.4s)
+loadgen: lost: svc-x1100030168-00118: publisher: connection ended (t=1.5s)
+loadgen: lost: svc-x1100030168-00067: publisher: connection ended (t=1.5s)
+loadgen: lost: svc-x1100030168-00076: publisher: connection ended (t=2.1s)
+HOSTCPU steal=69% idle=4% user+sys=24%
+BROKERBUSY c0=12 c1=17 c2=21 c3=71
+## suite latency
+GUARD load1=11.35 site_s=0.021849
+RUN latency qos=0 payload=64 pairs=8 rate=100 rep=1
+loadgen: pubsub: 16 of 16 clients ready in 0.4 s, 0 failed
+loadgen: pubsub: 8 publisher(s), 8 subscriber(s), 8 topic(s), QoS 0, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 761/s, acknowledged 0/s, delivered 762/s, lost connections 1
+loadgen: pubsub: generator cpu 0.13 cores (process total, all threads)
+RESULT mode=pubsub pubs=8 subs=8 topics=8 qos=0 payload=64 rate=100 sent_per_s=761 acked_per_s=0 delivered_per_s=762 lat_p50_ms=14.04 lat_p90_ms=74.33 lat_p99_ms=100.23 lat_max_ms=312.98 samples=7630 gen_cpu=0.13 ready=16 failed=0 lost=1
+loadgen: lost: svc-x1459212511-00013: publisher: connection ended (t=8.6s)
+HOSTCPU steal=66% idle=7% user+sys=27%
+BROKERBUSY c0=7 c1=7 c2=6 c3=46
+GUARD load1=9.14 site_s=0.023150
+RUN latency qos=0 payload=64 pairs=8 rate=100 rep=2
+loadgen: pubsub: 16 of 16 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 8 publisher(s), 8 subscriber(s), 8 topic(s), QoS 0, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 802/s, acknowledged 0/s, delivered 800/s, lost connections 0
+loadgen: pubsub: generator cpu 0.15 cores (process total, all threads)
+RESULT mode=pubsub pubs=8 subs=8 topics=8 qos=0 payload=64 rate=100 sent_per_s=802 acked_per_s=0 delivered_per_s=800 lat_p50_ms=16.51 lat_p90_ms=85.44 lat_p99_ms=102.00 lat_max_ms=174.63 samples=8002 gen_cpu=0.15 ready=16 failed=0 lost=0
+HOSTCPU steal=63% idle=10% user+sys=26%
+BROKERBUSY c0=4 c1=3 c2=3 c3=36
+GUARD load1=8.52 site_s=0.017256
+RUN latency qos=0 payload=64 pairs=8 rate=100 rep=3
+loadgen: pubsub: 16 of 16 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 8 publisher(s), 8 subscriber(s), 8 topic(s), QoS 0, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 802/s, acknowledged 0/s, delivered 800/s, lost connections 0
+loadgen: pubsub: generator cpu 0.13 cores (process total, all threads)
+RESULT mode=pubsub pubs=8 subs=8 topics=8 qos=0 payload=64 rate=100 sent_per_s=802 acked_per_s=0 delivered_per_s=800 lat_p50_ms=13.75 lat_p90_ms=80.34 lat_p99_ms=113.69 lat_max_ms=197.35 samples=7998 gen_cpu=0.13 ready=16 failed=0 lost=0
+HOSTCPU steal=60% idle=14% user+sys=25%
+BROKERBUSY c0=5 c1=7 c2=6 c3=47
+GUARD load1=6.31 site_s=0.216433
+RUN latency qos=1 payload=64 pairs=8 rate=100 rep=1
+loadgen: pubsub: 16 of 16 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 8 publisher(s), 8 subscriber(s), 8 topic(s), QoS 1, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 804/s, acknowledged 801/s, delivered 802/s, lost connections 0
+loadgen: pubsub: generator cpu 0.20 cores (process total, all threads)
+RESULT mode=pubsub pubs=8 subs=8 topics=8 qos=1 payload=64 rate=100 sent_per_s=804 acked_per_s=801 delivered_per_s=802 lat_p50_ms=13.86 lat_p90_ms=79.64 lat_p99_ms=207.50 lat_max_ms=472.26 samples=8017 gen_cpu=0.20 ready=16 failed=0 lost=0
+HOSTCPU steal=60% idle=14% user+sys=25%
+BROKERBUSY c0=4 c1=6 c2=5 c3=24
+GUARD load1=5.13 site_s=0.079795
+RUN latency qos=1 payload=64 pairs=8 rate=100 rep=2
+loadgen: pubsub: 16 of 16 clients ready in 0.2 s, 0 failed
+loadgen: pubsub: 8 publisher(s), 8 subscriber(s), 8 topic(s), QoS 1, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 805/s, acknowledged 801/s, delivered 801/s, lost connections 0
+loadgen: pubsub: generator cpu 0.15 cores (process total, all threads)
+RESULT mode=pubsub pubs=8 subs=8 topics=8 qos=1 payload=64 rate=100 sent_per_s=805 acked_per_s=801 delivered_per_s=801 lat_p50_ms=18.89 lat_p90_ms=97.44 lat_p99_ms=198.92 lat_max_ms=218.06 samples=8014 gen_cpu=0.15 ready=16 failed=0 lost=0
+HOSTCPU steal=63% idle=10% user+sys=25%
+BROKERBUSY c0=4 c1=6 c2=5 c3=37
+GUARD load1=3.90 site_s=0.018400
+RUN latency qos=1 payload=64 pairs=8 rate=100 rep=3
+loadgen: pubsub: 16 of 16 clients ready in 0.2 s, 0 failed
+loadgen: pubsub: 8 publisher(s), 8 subscriber(s), 8 topic(s), QoS 1, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 804/s, acknowledged 800/s, delivered 800/s, lost connections 0
+loadgen: pubsub: generator cpu 0.14 cores (process total, all threads)
+RESULT mode=pubsub pubs=8 subs=8 topics=8 qos=1 payload=64 rate=100 sent_per_s=804 acked_per_s=800 delivered_per_s=800 lat_p50_ms=14.77 lat_p90_ms=85.09 lat_p99_ms=105.69 lat_max_ms=200.76 samples=7998 gen_cpu=0.14 ready=16 failed=0 lost=0
+HOSTCPU steal=62% idle=11% user+sys=26%
+BROKERBUSY c0=5 c1=6 c2=6 c3=43
+## suite fanout
+GUARD load1=3.41 site_s=0.088325
+RUN fanout qos=0 subs=100 rate=50 rep=1
+loadgen: pubsub: 101 of 101 clients ready in 1.3 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 100 subscriber(s), 1 topic(s), QoS 0, 64 B, rate 50/publisher, window 10.0 s
+loadgen: pubsub: published 50/s, acknowledged 0/s, delivered 5002/s, lost connections 0
+loadgen: pubsub: generator cpu 0.15 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=100 topics=1 qos=0 payload=64 rate=50 sent_per_s=50 acked_per_s=0 delivered_per_s=5002 lat_p50_ms=16.58 lat_p90_ms=76.29 lat_p99_ms=100.10 lat_max_ms=227.59 samples=50024 gen_cpu=0.15 ready=101 failed=0 lost=0
+HOSTCPU steal=61% idle=13% user+sys=25%
+BROKERBUSY c0=3 c1=4 c2=5 c3=52
+GUARD load1=2.86 site_s=0.090693
+RUN fanout qos=0 subs=100 rate=50 rep=2
+loadgen: pubsub: 101 of 101 clients ready in 1.1 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 100 subscriber(s), 1 topic(s), QoS 0, 64 B, rate 50/publisher, window 10.0 s
+loadgen: pubsub: published 49/s, acknowledged 0/s, delivered 4889/s, lost connections 0
+loadgen: pubsub: generator cpu 0.27 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=100 topics=1 qos=0 payload=64 rate=50 sent_per_s=49 acked_per_s=0 delivered_per_s=4889 lat_p50_ms=20.08 lat_p90_ms=77.37 lat_p99_ms=101.53 lat_max_ms=198.05 samples=48895 gen_cpu=0.27 ready=101 failed=0 lost=0
+HOSTCPU steal=66% idle=7% user+sys=25%
+BROKERBUSY c0=5 c1=6 c2=6 c3=23
+GUARD load1=4.22 site_s=0.093351
+RUN fanout qos=0 subs=100 rate=50 rep=3
+loadgen: pubsub: 101 of 101 clients ready in 1.0 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 100 subscriber(s), 1 topic(s), QoS 0, 64 B, rate 50/publisher, window 10.0 s
+loadgen: pubsub: published 50/s, acknowledged 0/s, delivered 5012/s, lost connections 0
+loadgen: pubsub: generator cpu 0.21 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=100 topics=1 qos=0 payload=64 rate=50 sent_per_s=50 acked_per_s=0 delivered_per_s=5012 lat_p50_ms=15.83 lat_p90_ms=81.40 lat_p99_ms=101.60 lat_max_ms=180.94 samples=50125 gen_cpu=0.21 ready=101 failed=0 lost=0
+HOSTCPU steal=61% idle=13% user+sys=24%
+BROKERBUSY c0=3 c1=5 c2=4 c3=22
+GUARD load1=3.02 site_s=0.102491
+RUN fanout qos=0 subs=1000 rate=10 rep=1
+loadgen: pubsub: 1001 of 1001 clients ready in 8.9 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1000 subscriber(s), 1 topic(s), QoS 0, 64 B, rate 10/publisher, window 10.0 s
+loadgen: pubsub: published 10/s, acknowledged 0/s, delivered 10051/s, lost connections 0
+loadgen: pubsub: generator cpu 0.31 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1000 topics=1 qos=0 payload=64 rate=10 sent_per_s=10 acked_per_s=0 delivered_per_s=10051 lat_p50_ms=295.60 lat_p90_ms=897.94 lat_p99_ms=2494.71 lat_max_ms=8224.64 samples=100489 gen_cpu=0.31 ready=1001 failed=0 lost=0
+HOSTCPU steal=63% idle=11% user+sys=23%
+BROKERBUSY c0=6 c1=11 c2=9 c3=55
+GUARD load1=7.53 site_s=0.095007
+RUN fanout qos=0 subs=1000 rate=10 rep=2
+loadgen: pubsub: 996 of 1001 clients ready in 9.6 s, 5 failed
+loadgen: pubsub: 1 publisher(s), 1000 subscriber(s), 1 topic(s), QoS 0, 64 B, rate 10/publisher, window 10.0 s
+loadgen: pubsub: published 2/s, acknowledged 0/s, delivered 2151/s, lost connections 1
+loadgen: pubsub: generator cpu 0.25 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1000 topics=1 qos=0 payload=64 rate=10 sent_per_s=2 acked_per_s=0 delivered_per_s=2151 lat_p50_ms=214.57 lat_p90_ms=1296.98 lat_p99_ms=2697.20 lat_max_ms=4896.88 samples=21513 gen_cpu=0.25 ready=996 failed=5 lost=1
+loadgen: svc-x257887406-00131: connack: Connection reset by peer (os error 104)
+loadgen: svc-x257887406-00647: connack: Connection reset by peer (os error 104)
+loadgen: svc-x257887406-00982: connack: Connection reset by peer (os error 104)
+loadgen: svc-x257887406-00987: tls/connect: Connection reset by peer (os error 104)
+loadgen: svc-x257887406-00991: tls/connect: Connection reset by peer (os error 104)
+HOSTCPU steal=67% idle=2% user+sys=25%
+BROKERBUSY c0=5 c1=18 c2=17 c3=60
+GUARD load1=11.65 site_s=0.017230
+RUN fanout qos=0 subs=1000 rate=10 rep=3
+loadgen: pubsub: 999 of 1001 clients ready in 8.8 s, 2 failed
+loadgen: pubsub: 1 publisher(s), 1000 subscriber(s), 1 topic(s), QoS 0, 64 B, rate 10/publisher, window 10.0 s
+loadgen: pubsub: published 10/s, acknowledged 0/s, delivered 9790/s, lost connections 0
+loadgen: pubsub: generator cpu 0.40 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1000 topics=1 qos=0 payload=64 rate=10 sent_per_s=10 acked_per_s=0 delivered_per_s=9790 lat_p50_ms=277.94 lat_p90_ms=994.52 lat_p99_ms=2596.64 lat_max_ms=3482.63 samples=97900 gen_cpu=0.40 ready=999 failed=2 lost=0
+loadgen: svc-x2213413966-00485: tls/connect: Connection reset by peer (os error 104)
+loadgen: svc-x2213413966-00993: subscribe failed [00, 00, 00, 00, 00]
+HOSTCPU steal=66% idle=8% user+sys=24%
+BROKERBUSY c0=6 c1=16 c2=15 c3=63
+GUARD load1=11.87 site_s=0.289753
+RUN fanout qos=1 subs=100 rate=50 rep=1
+loadgen: pubsub: 101 of 101 clients ready in 1.0 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 100 subscriber(s), 1 topic(s), QoS 1, 64 B, rate 50/publisher, window 10.0 s
+loadgen: pubsub: published 50/s, acknowledged 50/s, delivered 4997/s, lost connections 0
+loadgen: pubsub: generator cpu 0.38 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=100 topics=1 qos=1 payload=64 rate=50 sent_per_s=50 acked_per_s=50 delivered_per_s=4997 lat_p50_ms=25.76 lat_p90_ms=99.83 lat_p99_ms=230.73 lat_max_ms=504.75 samples=49974 gen_cpu=0.38 ready=101 failed=0 lost=0
+HOSTCPU steal=65% idle=9% user+sys=24%
+BROKERBUSY c0=5 c1=10 c2=12 c3=34
+GUARD load1=10.55 site_s=0.018597
+RUN fanout qos=1 subs=100 rate=50 rep=2
+loadgen: pubsub: 101 of 101 clients ready in 1.1 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 100 subscriber(s), 1 topic(s), QoS 1, 64 B, rate 50/publisher, window 10.0 s
+loadgen: pubsub: published 50/s, acknowledged 50/s, delivered 5010/s, lost connections 0
+loadgen: pubsub: generator cpu 0.28 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=100 topics=1 qos=1 payload=64 rate=50 sent_per_s=50 acked_per_s=50 delivered_per_s=5010 lat_p50_ms=18.86 lat_p90_ms=97.76 lat_p99_ms=105.07 lat_max_ms=186.06 samples=50100 gen_cpu=0.28 ready=101 failed=0 lost=0
+HOSTCPU steal=62% idle=12% user+sys=24%
+BROKERBUSY c0=5 c1=11 c2=10 c3=21
+GUARD load1=8.12 site_s=0.091828
+RUN fanout qos=1 subs=100 rate=50 rep=3
+loadgen: pubsub: 101 of 101 clients ready in 0.7 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 100 subscriber(s), 1 topic(s), QoS 1, 64 B, rate 50/publisher, window 10.0 s
+loadgen: pubsub: published 50/s, acknowledged 50/s, delivered 4997/s, lost connections 0
+loadgen: pubsub: generator cpu 0.29 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=100 topics=1 qos=1 payload=64 rate=50 sent_per_s=50 acked_per_s=50 delivered_per_s=4997 lat_p50_ms=15.61 lat_p90_ms=77.25 lat_p99_ms=100.74 lat_max_ms=200.69 samples=49974 gen_cpu=0.29 ready=101 failed=0 lost=0
+HOSTCPU steal=64% idle=9% user+sys=25%
+BROKERBUSY c0=2 c1=6 c2=5 c3=44
+GUARD load1=6.32 site_s=0.087936
+RUN fanout qos=0 subs=100 rate=0 rep=1
+loadgen: pubsub: 101 of 101 clients ready in 1.0 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 100 subscriber(s), 1 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 31/s, acknowledged 0/s, delivered 3316/s, lost connections 1
+loadgen: pubsub: generator cpu 0.03 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=100 topics=1 qos=0 payload=64 rate=0 sent_per_s=31 acked_per_s=0 delivered_per_s=3316 lat_p50_ms=2672.49 lat_p90_ms=2898.00 lat_p99_ms=3169.44 lat_max_ms=3169.84 samples=33156 gen_cpu=0.03 ready=101 failed=0 lost=1
+loadgen: lost: svc-x452810557-00100: publisher: connection ended (t=3.8s)
+HOSTCPU steal=61% idle=13% user+sys=26%
+BROKERBUSY c0=5 c1=7 c2=9 c3=29
+GUARD load1=5.94 site_s=0.085363
+RUN fanout qos=0 subs=100 rate=0 rep=2
+loadgen: pubsub: 101 of 101 clients ready in 1.1 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 100 subscriber(s), 1 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 405/s, acknowledged 0/s, delivered 15602/s, lost connections 1
+loadgen: pubsub: generator cpu 0.05 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=100 topics=1 qos=0 payload=64 rate=0 sent_per_s=405 acked_per_s=0 delivered_per_s=15602 lat_p50_ms=2323.07 lat_p90_ms=3212.00 lat_p99_ms=3714.03 lat_max_ms=3893.91 samples=156017 gen_cpu=0.05 ready=101 failed=0 lost=1
+loadgen: lost: svc-x55313601-00100: publisher: connection ended (t=4.6s)
+HOSTCPU steal=61% idle=12% user+sys=25%
+BROKERBUSY c0=6 c1=32 c2=38 c3=41
+GUARD load1=4.70 site_s=0.090475
+RUN fanout qos=0 subs=100 rate=0 rep=3
+loadgen: pubsub: 101 of 101 clients ready in 1.3 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 100 subscriber(s), 1 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 6206/s, acknowledged 0/s, delivered 98139/s, lost connections 0
+loadgen: pubsub: generator cpu 0.23 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=100 topics=1 qos=0 payload=64 rate=0 sent_per_s=6206 acked_per_s=0 delivered_per_s=98139 lat_p50_ms=2189.70 lat_p90_ms=4077.26 lat_p99_ms=6194.97 lat_max_ms=9219.80 samples=981409 gen_cpu=0.23 ready=101 failed=0 lost=0
+HOSTCPU steal=62% idle=13% user+sys=23%
+BROKERBUSY c0=9 c1=100 c2=100 c3=52
+# done 2026-11-01T05:13:38Z

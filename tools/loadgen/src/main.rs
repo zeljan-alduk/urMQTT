@@ -20,6 +20,20 @@
 //!   many attempts were refused and how long the round took; fails if a
 //!   round connects fewer than `--min-connected`.
 //!
+//! - `pubsub` (X11): `--publishers P` and `--subscribers S` clients on
+//!   `fleet/bench/<k>` topics (`--topics K`: client i uses topic i mod K, so
+//!   `P = S = K` makes P independent 1:1 pairs and `P = 1, S = 1000, K = 1` is
+//!   a fan-out of 1000). `--qos 0|1`, `--payload` bytes (8 or more; the first
+//!   8 carry the send time), `--rate` messages per second per publisher (0:
+//!   as fast as the broker lets it, QoS 1 with `--window` messages in
+//!   flight). After a connect phase and `--warmup` seconds it measures for
+//!   `--duration` seconds: messages sent and acknowledged per second,
+//!   deliveries per second and the end-to-end latency (publisher write to
+//!   subscriber read, one process, one clock; it includes the round trip
+//!   to the broker twice) as p50/p90/p99/max. The last line, `RESULT ...`,
+//!   is for scripts. It also reports its own CPU use (Linux), because a
+//!   load generator at its CPU budget measures itself.
+//!
 //! The `handshake` report (PERF, ADR-080) counts the rate over the
 //! measurement window only (not the drain of the last connections), gives
 //! the latency percentiles of a whole connection (TCP connect, TLS, CONNECT,
@@ -35,6 +49,8 @@
 //! urmqtt-loadgen handshake --port 18883 --threads 64 --duration 10
 //! urmqtt-loadgen hold --port 18883 --clients 500 --duration 30 --publish-ms 1000
 //! urmqtt-loadgen storm --port 18883 --clients 2000 --rounds 3 --retry-s 60
+//! urmqtt-loadgen pubsub --port 18883 --prefix svc --publishers 8 --subscribers 8 \
+//!     --topics 8 --qos 1 --payload 64 --rate 0 --duration 10
 //! ```
 
 use std::io::{Read, Write};
@@ -66,13 +82,28 @@ struct Opts {
     connect_timeout_s: u64,
     /// The client sends its FIN first (and keeps the TIME_WAIT).
     close_first: bool,
+    /// pubsub: publishers, subscribers, topics, QoS, payload bytes, rate
+    /// per publisher (0: unlimited), QoS 1 window, warm-up seconds,
+    /// concurrent connects.
+    publishers: usize,
+    subscribers: usize,
+    topics: usize,
+    qos: u8,
+    payload: usize,
+    rate: u64,
+    window: usize,
+    warmup: u64,
+    open_par: usize,
+    /// CONNECT keep-alive, seconds (`hold` pings every 30 s, but only once all
+    /// connections are open: opening 20 000 can take longer than 1.5 x 60 s).
+    keepalive: u16,
 }
 
 fn parse() -> Result<Opts, String> {
     let mut a = std::env::args().skip(1);
     let mode = a
         .next()
-        .ok_or("usage: urmqtt-loadgen handshake|hold|storm [options]")?;
+        .ok_or("usage: urmqtt-loadgen handshake|hold|storm|pubsub [options]")?;
     let mut o = Opts {
         mode,
         host: "127.0.0.1".into(),
@@ -90,6 +121,16 @@ fn parse() -> Result<Opts, String> {
         error_sleep_ms: 50,
         connect_timeout_s: 0,
         close_first: false,
+        publishers: 1,
+        subscribers: 1,
+        topics: 1,
+        qos: 0,
+        payload: 64,
+        rate: 0,
+        window: 32,
+        warmup: 2,
+        open_par: 32,
+        keepalive: 60,
     };
     while let Some(k) = a.next() {
         let v = a.next().ok_or(format!("{k} needs a value"))?;
@@ -109,6 +150,16 @@ fn parse() -> Result<Opts, String> {
             "--prefix" => o.prefix = v,
             "--error-sleep-ms" => o.error_sleep_ms = num(&v)?,
             "--connect-timeout-s" => o.connect_timeout_s = num(&v)?,
+            "--publishers" => o.publishers = num(&v)? as usize,
+            "--subscribers" => o.subscribers = num(&v)? as usize,
+            "--topics" => o.topics = (num(&v)? as usize).max(1),
+            "--qos" => o.qos = num(&v)?.min(1) as u8,
+            "--payload" => o.payload = (num(&v)? as usize).clamp(8, 60_000),
+            "--rate" => o.rate = num(&v)?,
+            "--window" => o.window = (num(&v)? as usize).max(1),
+            "--warmup" => o.warmup = num(&v)?,
+            "--open-par" => o.open_par = (num(&v)? as usize).max(1),
+            "--keepalive" => o.keepalive = num(&v)?.min(65535) as u16,
             "--close" => match v.as_str() {
                 "client" => o.close_first = true,
                 "server" => o.close_first = false,
@@ -238,7 +289,7 @@ fn open_timed(o: &Opts, id: &str, cfg: &Arc<ClientConfig>) -> Result<(Tls, Durat
     let name = ServerName::try_from("localhost").map_err(|e| e.to_string())?;
     let conn = ClientConnection::new(cfg.clone(), name).map_err(|e| e.to_string())?;
     let mut tls = StreamOwned::new(conn, tcp);
-    tls.write_all(&connect_packet(id, 60))
+    tls.write_all(&connect_packet(id, o.keepalive))
         .map_err(|e| format!("tls/connect: {e}"))?;
     let mut ack = [0u8; 4];
     tls.read_exact(&mut ack)
@@ -344,6 +395,7 @@ fn handshake(o: &Opts) -> Result<(), String> {
         o.duration
     );
     let start = Instant::now();
+    let cpu0 = cpu_seconds();
     let workers: Vec<_> = (0..o.threads)
         .map(|t| {
             let (ids, done, errors, stop) =
@@ -407,6 +459,7 @@ fn handshake(o: &Opts) -> Result<(), String> {
     // out of the figures.
     stop.store(true, Ordering::Relaxed);
     let window = start.elapsed().as_secs_f64();
+    let gen_cpu = (cpu_seconds() - cpu0) / window;
     let (d, e) = (done.load(Ordering::Relaxed), errors.load(Ordering::Relaxed));
     let (mut total, mut conn, mut tls_t) = (Vec::new(), Vec::new(), Vec::new());
     let mut kinds = [0u64; 5];
@@ -440,6 +493,18 @@ fn handshake(o: &Opts) -> Result<(), String> {
         println!("loadgen: errors by kind: {}", by.join(", "));
     }
     println!("loadgen: drained the last attempts in {drained:.1} s (not counted)");
+    println!("loadgen: handshake: generator cpu {gen_cpu:.2} cores (process total, all threads)");
+    println!(
+        "RESULT mode=handshake threads={} conn_per_s={:.0} errors={e} lat_p50_ms={:.1} lat_p99_ms={:.1} \
+         tcp_p50_ms={:.1} tls_p50_ms={:.1} tls_p99_ms={:.1} gen_cpu={gen_cpu:.2}",
+        o.threads,
+        d as f64 / window,
+        percentile_ms(&total, 50.0),
+        percentile_ms(&total, 99.0),
+        percentile_ms(&conn, 50.0),
+        percentile_ms(&tls_t, 50.0),
+        percentile_ms(&tls_t, 99.0),
+    );
     Ok(())
 }
 
@@ -510,8 +575,10 @@ fn hold(o: &Opts) -> Result<(), String> {
         conns.len(),
         o.duration
     );
-    for (_, t) in conns {
-        close(t, true);
+    // Sending DISCONNECT and waiting for each FIN one by one would take
+    // minutes with tens of thousands of connections.
+    for (_, mut t) in conns {
+        let _ = t.write_all(&[0xe0, 0x00]);
     }
     Ok(())
 }
@@ -601,12 +668,446 @@ fn storm(o: &Opts) -> Result<(), String> {
     Ok(())
 }
 
+/// User + system CPU seconds of this process (Linux; 0 elsewhere).
+fn cpu_seconds() -> f64 {
+    let Ok(s) = std::fs::read_to_string("/proc/self/stat") else {
+        return 0.0;
+    };
+    let rest = s.rsplit_once(')').map_or("", |x| x.1);
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let tick = |i: usize| f.get(i).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
+    (tick(11) + tick(12)) / 100.0
+}
+
+fn varint(mut n: usize, out: &mut Vec<u8>) {
+    loop {
+        let mut b = (n % 128) as u8;
+        n /= 128;
+        if n > 0 {
+            b |= 0x80;
+        }
+        out.push(b);
+        if n == 0 {
+            break;
+        }
+    }
+}
+
+/// PUBLISH at QoS 0 or 1 with any payload length.
+fn publish_qos(topic: &str, qos: u8, id: u16, payload: &[u8]) -> Vec<u8> {
+    let mut p = vec![0x30 | (qos << 1)];
+    let rem = 2 + topic.len() + if qos > 0 { 2 } else { 0 } + payload.len();
+    varint(rem, &mut p);
+    p.extend_from_slice(&(topic.len() as u16).to_be_bytes());
+    p.extend_from_slice(topic.as_bytes());
+    if qos > 0 {
+        p.extend_from_slice(&id.to_be_bytes());
+    }
+    p.extend_from_slice(payload);
+    p
+}
+
+/// One MQTT packet at the front of `buf`: (first byte, packet length,
+/// header length), or None if it is not complete yet.
+fn next_packet(buf: &[u8]) -> Option<(u8, usize, usize)> {
+    let first = *buf.first()?;
+    let (mut len, mut mult, mut i) = (0usize, 1usize, 1usize);
+    loop {
+        let b = *buf.get(i)?;
+        len += usize::from(b & 0x7f) * mult;
+        i += 1;
+        if b & 0x80 == 0 {
+            break;
+        }
+        mult *= 128;
+        if mult > 128 * 128 * 128 {
+            return None;
+        }
+    }
+    (buf.len() >= i + len).then_some((first, i + len, i))
+}
+
+/// A counting semaphore: how many connects run at once.
+struct Gate(std::sync::Mutex<usize>, std::sync::Condvar);
+
+impl Gate {
+    fn enter(&self) {
+        let mut n = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        while *n == 0 {
+            n = self.1.wait(n).unwrap_or_else(|e| e.into_inner());
+        }
+        *n -= 1;
+    }
+    fn leave(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.1.notify_one();
+    }
+}
+
+struct PsShared {
+    t0: Instant,
+    stop: AtomicBool,
+    go: AtomicBool,
+    measuring: AtomicBool,
+    ready: AtomicU64,
+    failed: AtomicU64,
+    lost: AtomicU64,
+    sent: AtomicU64,
+    acked: AtomicU64,
+    delivered: AtomicU64,
+}
+
+fn ps_open(o: &Opts, sh: &PsShared, gate: &Gate, id: &str, cfg: &Arc<ClientConfig>) -> Option<Tls> {
+    gate.enter();
+    let r = open(o, id, cfg);
+    gate.leave();
+    match r {
+        Ok(t) => Some(t),
+        Err(e) => {
+            if sh.failed.fetch_add(1, Ordering::Relaxed) < 5 {
+                eprintln!("loadgen: {id}: {e}");
+            }
+            None
+        }
+    }
+}
+
+/// A client lost its connection before the end of the run.
+fn lost(sh: &PsShared, id: &str, why: &str) {
+    if sh.lost.fetch_add(1, Ordering::Relaxed) < 5 {
+        eprintln!(
+            "loadgen: lost: {id}: {why} (t={:.1}s)",
+            sh.t0.elapsed().as_secs_f64()
+        );
+    }
+}
+
+fn would_block(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+/// A subscriber: blocking reads, so the time of a delivery is the time the
+/// packet arrived; QoS 1 deliveries are acknowledged at once.
+fn ps_subscriber(
+    o: &Opts,
+    sh: &PsShared,
+    gate: &Gate,
+    id: &str,
+    cfg: &Arc<ClientConfig>,
+    k: usize,
+) -> Vec<u32> {
+    let mut lat = Vec::new();
+    let Some(mut tls) = ps_open(o, sh, gate, id, cfg) else {
+        return lat;
+    };
+    let filter = format!("fleet/bench/{k}");
+    let mut sub = vec![0x82];
+    varint(2 + 2 + filter.len() + 1, &mut sub);
+    sub.extend_from_slice(&[0, 1]);
+    sub.extend_from_slice(&(filter.len() as u16).to_be_bytes());
+    sub.extend_from_slice(filter.as_bytes());
+    sub.push(o.qos);
+    let mut ack = [0u8; 5];
+    if tls.write_all(&sub).is_err()
+        || tls.read_exact(&mut ack).is_err()
+        || ack[0] != 0x90
+        || ack[4] != o.qos
+    {
+        eprintln!("loadgen: {id}: subscribe failed {ack:02x?}");
+        sh.failed.fetch_add(1, Ordering::Relaxed);
+        return lat;
+    }
+    tls.sock
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .ok();
+    sh.ready.fetch_add(1, Ordering::Relaxed);
+    let (mut buf, mut tmp) = (Vec::<u8>::new(), vec![0u8; 65536]);
+    let mut acks = Vec::new();
+    while !sh.stop.load(Ordering::Relaxed) {
+        match tls.read(&mut tmp) {
+            Ok(0) => {
+                lost(sh, id, "subscriber: closed by the broker");
+                return lat;
+            }
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(e) if would_block(&e) => continue,
+            Err(e) => {
+                lost(sh, id, &format!("subscriber read: {e}"));
+                return lat;
+            }
+        }
+        let now_us = sh.t0.elapsed().as_micros() as u64;
+        let mut at = 0;
+        acks.clear();
+        while let Some((first, len, hl)) = next_packet(&buf[at..]) {
+            let pkt = &buf[at..at + len];
+            at += len;
+            if first >> 4 != 3 {
+                continue;
+            }
+            let body = &pkt[hl..];
+            let tl = body
+                .first()
+                .zip(body.get(1))
+                .map_or(0, |(a, b)| usize::from(*a) << 8 | usize::from(*b));
+            let mut pos = 2 + tl;
+            if (first >> 1) & 3 == 1 {
+                if let Some(idb) = body.get(pos..pos + 2) {
+                    acks.extend_from_slice(&[0x40, 2, idb[0], idb[1]]);
+                }
+                pos += 2;
+            }
+            sh.delivered.fetch_add(1, Ordering::Relaxed);
+            if sh.measuring.load(Ordering::Relaxed) && lat.len() < 200_000
+                && let Some(ts) = body.get(pos..pos + 8) {
+                    let sent = u64::from_be_bytes(ts.try_into().unwrap_or([0; 8]));
+                    lat.push(now_us.saturating_sub(sent).min(u64::from(u32::MAX)) as u32);
+                }
+        }
+        buf.drain(..at);
+        if !acks.is_empty() && tls.write_all(&acks).is_err() {
+            lost(sh, id, "subscriber: PUBACK write failed");
+            return lat;
+        }
+    }
+    let _ = tls.write_all(&[0xe0, 0x00]);
+    lat
+}
+
+/// A publisher: non-blocking, so it can keep `--window` QoS 1 messages in
+/// flight and send at a fixed rate without a second thread per connection.
+fn ps_publisher(o: &Opts, sh: &PsShared, gate: &Gate, id: &str, cfg: &Arc<ClientConfig>, k: usize) {
+    let Some(mut tls) = ps_open(o, sh, gate, id, cfg) else {
+        return;
+    };
+    tls.sock.set_nonblocking(true).ok();
+    sh.ready.fetch_add(1, Ordering::Relaxed);
+    while !sh.go.load(Ordering::Relaxed) && !sh.stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let topic = format!("fleet/bench/{k}");
+    let mut payload = vec![0x5au8; o.payload];
+    let interval = (o.rate > 0).then(|| Duration::from_secs_f64(1.0 / o.rate as f64));
+    let (mut next, mut inflight, mut pid) = (Instant::now(), 0usize, 0u16);
+    let (mut inbuf, mut tmp) = (Vec::<u8>::new(), vec![0u8; 16384]);
+    'run: while !sh.stop.load(Ordering::Relaxed) {
+        let mut busy = false;
+        // 1. push what rustls holds to the socket
+        while tls.conn.wants_write() {
+            match tls.conn.write_tls(&mut tls.sock) {
+                Ok(0) => break,
+                Ok(_) => busy = true,
+                Err(e) if would_block(&e) => break,
+                Err(_) => break 'run,
+            }
+        }
+        // 2. send, unless the socket is backed up or the window is full
+        let mut burst = 0;
+        while burst < 64
+            && !tls.conn.wants_write()
+            && (o.qos == 0 || inflight < o.window)
+            && interval.is_none_or(|_| Instant::now() >= next)
+        {
+            pid = pid.wrapping_add(1).max(1);
+            let us = sh.t0.elapsed().as_micros() as u64;
+            payload[..8].copy_from_slice(&us.to_be_bytes());
+            let pkt = publish_qos(&topic, o.qos, pid, &payload);
+            if tls.conn.writer().write_all(&pkt).is_err() {
+                break 'run;
+            }
+            if o.qos > 0 {
+                inflight += 1;
+            }
+            sh.sent.fetch_add(1, Ordering::Relaxed);
+            if let Some(iv) = interval {
+                next += iv;
+                let now = Instant::now();
+                if next + Duration::from_millis(200) < now {
+                    next = now;
+                }
+            }
+            burst += 1;
+            busy = true;
+            while tls.conn.wants_write() {
+                match tls.conn.write_tls(&mut tls.sock) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+        // 3. read acknowledgements (and anything else) without blocking
+        match tls.conn.read_tls(&mut tls.sock) {
+            Ok(0) => break 'run,
+            Ok(_) => {
+                if tls.conn.process_new_packets().is_err() {
+                    break 'run;
+                }
+                while let Ok(n) = tls.conn.reader().read(&mut tmp) {
+                    if n == 0 {
+                        break;
+                    }
+                    inbuf.extend_from_slice(&tmp[..n]);
+                }
+                let mut at = 0;
+                while let Some((first, len, _)) = next_packet(&inbuf[at..]) {
+                    at += len;
+                    if first >> 4 == 4 {
+                        inflight = inflight.saturating_sub(1);
+                        sh.acked.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                inbuf.drain(..at);
+                busy = true;
+            }
+            Err(e) if would_block(&e) => {}
+            Err(_) => break 'run,
+        }
+        if !busy {
+            let wait = interval.map_or(Duration::from_micros(100), |_| {
+                next.saturating_duration_since(Instant::now())
+                    .min(Duration::from_micros(500))
+            });
+            std::thread::sleep(wait.max(Duration::from_micros(50)));
+        }
+    }
+    if !sh.stop.load(Ordering::Relaxed) {
+        lost(sh, id, "publisher: connection ended");
+    }
+}
+
+fn pubsub(o: &Opts) -> Result<(), String> {
+    let (np, ns) = (o.publishers, o.subscribers);
+    let ids = identities(o, np + ns)?;
+    let o2 = Arc::new(Opts {
+        mode: String::new(),
+        host: o.host.clone(),
+        certs: String::new(),
+        prefix: String::new(),
+        ..*o
+    });
+    let sh = Arc::new(PsShared {
+        t0: Instant::now(),
+        stop: AtomicBool::new(false),
+        go: AtomicBool::new(false),
+        measuring: AtomicBool::new(false),
+        ready: AtomicU64::new(0),
+        failed: AtomicU64::new(0),
+        lost: AtomicU64::new(0),
+        sent: AtomicU64::new(0),
+        acked: AtomicU64::new(0),
+        delivered: AtomicU64::new(0),
+    });
+    let gate = Arc::new(Gate(
+        std::sync::Mutex::new(o.open_par),
+        std::sync::Condvar::new(),
+    ));
+    let mut subs = Vec::new();
+    let mut pubs = Vec::new();
+    for (i, (id, cfg)) in ids.into_iter().enumerate() {
+        let (o2, sh, gate) = (o2.clone(), sh.clone(), gate.clone());
+        if i < ns {
+            subs.push(std::thread::spawn(move || {
+                ps_subscriber(&o2, &sh, &gate, &id, &cfg, i % o2.topics)
+            }));
+        } else {
+            let j = i - ns;
+            pubs.push(std::thread::spawn(move || {
+                ps_publisher(&o2, &sh, &gate, &id, &cfg, j % o2.topics);
+            }));
+        }
+    }
+    let t_conn = Instant::now();
+    let total = (np + ns) as u64;
+    while sh.ready.load(Ordering::Relaxed) + sh.failed.load(Ordering::Relaxed) < total
+        && t_conn.elapsed() < Duration::from_secs(120)
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (ready, failed) = (
+        sh.ready.load(Ordering::Relaxed),
+        sh.failed.load(Ordering::Relaxed),
+    );
+    println!(
+        "loadgen: pubsub: {ready} of {total} clients ready in {:.1} s, {failed} failed",
+        t_conn.elapsed().as_secs_f64()
+    );
+    sh.go.store(true, Ordering::Relaxed);
+    std::thread::sleep(Duration::from_secs(o.warmup));
+    let (c0, w0) = (cpu_seconds(), Instant::now());
+    let (s0, a0, d0) = (
+        sh.sent.load(Ordering::Relaxed),
+        sh.acked.load(Ordering::Relaxed),
+        sh.delivered.load(Ordering::Relaxed),
+    );
+    sh.measuring.store(true, Ordering::Relaxed);
+    std::thread::sleep(Duration::from_secs(o.duration));
+    sh.measuring.store(false, Ordering::Relaxed);
+    let win = w0.elapsed().as_secs_f64();
+    let (c1, s1, a1, d1) = (
+        cpu_seconds(),
+        sh.sent.load(Ordering::Relaxed),
+        sh.acked.load(Ordering::Relaxed),
+        sh.delivered.load(Ordering::Relaxed),
+    );
+    sh.stop.store(true, Ordering::Relaxed);
+    let mut lat = Vec::new();
+    for h in subs {
+        lat.extend(h.join().unwrap_or_default());
+    }
+    for h in pubs {
+        let _ = h.join();
+    }
+    let (sent, acked, deliv) = (
+        (s1 - s0) as f64 / win,
+        (a1 - a0) as f64 / win,
+        (d1 - d0) as f64 / win,
+    );
+    let cpu = (c1 - c0) / win;
+    let lost = sh.lost.load(Ordering::Relaxed);
+    println!(
+        "loadgen: pubsub: {np} publisher(s), {ns} subscriber(s), {} topic(s), QoS {}, {} B, rate {}/publisher, window {win:.1} s",
+        o.topics,
+        o.qos,
+        o.payload,
+        if o.rate == 0 {
+            "max".into()
+        } else {
+            o.rate.to_string()
+        },
+    );
+    println!(
+        "loadgen: pubsub: published {sent:.0}/s, acknowledged {acked:.0}/s, delivered {deliv:.0}/s, lost connections {lost}"
+    );
+    println!("{}", latency_line("end-to-end latency", &mut lat));
+    println!("loadgen: pubsub: generator cpu {cpu:.2} cores (process total, all threads)");
+    let q = |p: f64| percentile_ms(&lat, p);
+    println!(
+        "RESULT mode=pubsub pubs={np} subs={ns} topics={} qos={} payload={} rate={} sent_per_s={sent:.0} acked_per_s={acked:.0} \
+         delivered_per_s={deliv:.0} lat_p50_ms={:.2} lat_p90_ms={:.2} lat_p99_ms={:.2} lat_max_ms={:.2} samples={} gen_cpu={cpu:.2} \
+         ready={ready} failed={failed} lost={lost}",
+        o.topics,
+        o.qos,
+        o.payload,
+        o.rate,
+        q(50.0),
+        q(90.0),
+        q(99.0),
+        q(100.0),
+        lat.len(),
+    );
+    Ok(())
+}
+
 fn main() {
     let r = parse().and_then(|o| match o.mode.as_str() {
         "handshake" => handshake(&o),
         "hold" => hold(&o),
         "storm" => storm(&o),
-        m => Err(format!("unknown mode {m:?} (handshake|hold|storm)")),
+        "pubsub" => pubsub(&o),
+        m => Err(format!("unknown mode {m:?} (handshake|hold|storm|pubsub)")),
     });
     if let Err(e) = r {
         eprintln!("urmqtt-loadgen: {e}");

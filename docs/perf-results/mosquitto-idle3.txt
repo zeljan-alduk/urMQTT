@@ -1,0 +1,52 @@
+# mosquitto-idle3 2026-11-01T06:42:28Z host=169.58.184.193:8883 cores=2,3 reps=3
+# loadgen 836981fb5468 kernel 7.0.0-38-generic nproc=4
+## suite idle
+IDLE baseline
+SYS $SYS/broker/clients/connected=1
+SYS $SYS/broker/heap/current=838216
+SYS rss_kb=10628
+GUARD load1=11.29 site_s=5.0021999
+IDLE clients=5000
+IDLE progress t=20s vps: TCP:   3834 (estab 3822, closed 1, orphaned 1, timewait 0) 14.6 113540 
+IDLE opened_in=29s errors=0 first: 
+IDLE generator_rss_kb=59172 generator_threads=1
+loadgen: hold: 5000 of 5000 connections established in 30.5 s
+SYS $SYS/broker/clients/connected=5001
+SYS $SYS/broker/heap/current=4886840
+SYS rss_kb=144516
+IDLE after close
+SYS $SYS/broker/clients/connected=1
+SYS $SYS/broker/heap/current=838280
+SYS rss_kb=144516
+GUARD load1=3.29 site_s=0.286559
+IDLE clients=10000
+IDLE progress t=20s vps: TCP:   4043 (estab 4031, closed 1, orphaned 1, timewait 0) 15.0 144516 
+IDLE progress t=40s vps: TCP:   8515 (estab 8503, closed 1, orphaned 1, timewait 0) 20.1 239620 
+IDLE opened_in=51s errors=0 first: 
+IDLE generator_rss_kb=111872 generator_threads=1
+loadgen: hold: 10000 of 10000 connections established in 55.3 s
+SYS $SYS/broker/clients/connected=10001
+SYS $SYS/broker/heap/current=8969432
+SYS rss_kb=278532
+IDLE after close
+SYS $SYS/broker/clients/connected=1
+SYS $SYS/broker/heap/current=838264
+SYS rss_kb=278532
+GUARD load1=2.40 site_s=0.286020
+IDLE clients=20000
+IDLE progress t=20s vps: TCP:   3342 (estab 3331, closed 1, orphaned 0, timewait 0) 19.0 278532 
+IDLE progress t=40s vps: TCP:   7680 (estab 7668, closed 1, orphaned 1, timewait 0) 21.6 278532 
+IDLE progress t=60s vps: TCP:   12088 (estab 12076, closed 1, orphaned 1, timewait 0) 24.3 335876 
+IDLE progress t=80s vps: TCP:   15488 (estab 15476, closed 1, orphaned 1, timewait 0) 26.4 426116 
+IDLE progress t=100s vps: TCP:   18309 (estab 18297, closed 1, orphaned 1, timewait 0) 27.9 501252 
+IDLE opened_in=117s errors=0 first: 
+IDLE generator_rss_kb=214996 generator_threads=1
+loadgen: hold: 20000 of 20000 connections established in 134.7 s
+SYS $SYS/broker/clients/connected=20001
+SYS $SYS/broker/heap/current=17106032
+SYS rss_kb=546564
+IDLE after close
+SYS $SYS/broker/clients/connected=1
+SYS $SYS/broker/heap/current=1103456
+SYS rss_kb=546564
+# done 2026-11-01T06:52:57Z

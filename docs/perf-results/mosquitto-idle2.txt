@@ -1,0 +1,44 @@
+# mosquitto-idle2 2026-11-01T06:32:50Z host=169.58.184.193:8883 cores=2,3 reps=3
+# loadgen 836981fb5468 kernel 7.0.0-38-generic nproc=4
+## suite idle
+IDLE baseline
+SYS $SYS/broker/clients/connected=1
+SYS $SYS/broker/heap/current=838216
+SYS rss_kb=10644
+GUARD load1=6.73 site_s=0.217378
+IDLE clients=5000
+IDLE opened_in=0s errors=0 first: 
+IDLE generator_rss_kb=17720 generator_threads=65
+SYS $SYS/broker/clients/connected=897
+SYS $SYS/broker/heap/current=1562184
+SYS rss_kb=49556
+IDLE after close
+SYS $SYS/broker/clients/connected=1
+SYS $SYS/broker/heap/current=902776
+SYS rss_kb=144660
+GUARD load1=8.89 site_s=0.023668
+IDLE clients=10000
+IDLE progress t=20s vps: TCP:   4071 (estab 4059, closed 1, orphaned 1, timewait 0) 24.7 144660 
+IDLE progress t=40s vps: TCP:   8263 (estab 8252, closed 1, orphaned 0, timewait 0) 30.7 233108 
+IDLE opened_in=53s errors=0 first: 
+IDLE generator_rss_kb=110832 generator_threads=1
+loadgen: hold: 10000 of 10000 connections established in 60.3 s
+SYS $SYS/broker/clients/connected=10001
+SYS $SYS/broker/heap/current=8969336
+SYS rss_kb=278548
+IDLE after close
+SYS $SYS/broker/clients/connected=2
+SYS $SYS/broker/heap/current=969112
+SYS rss_kb=278548
+GUARD load1=2.46 site_s=0.171694
+IDLE clients=20000
+IDLE opened_in=0s errors=0 first: 
+IDLE generator_rss_kb=20748 generator_threads=1
+SYS $SYS/broker/clients/connected=278
+SYS $SYS/broker/heap/current=1059976
+SYS rss_kb=278548
+IDLE after close
+SYS $SYS/broker/clients/connected=1
+SYS $SYS/broker/heap/current=1107480
+SYS rss_kb=546268
+# done 2026-11-01T06:42:03Z

@@ -1,0 +1,8 @@
+# Every authenticated identity: its own devices/<id>/ tree and the benchmark
+# topics; the operator reads $SYS. urMQTT's ACL is stricter (PERFORMANCE.md).
+# "pattern" lines apply to all users ("topic" lines before a "user" line would
+# apply to anonymous clients only, and Mosquitto then drops publishes silently).
+pattern readwrite devices/%u/#
+pattern readwrite fleet/bench/#
+user operator
+topic read $SYS/#

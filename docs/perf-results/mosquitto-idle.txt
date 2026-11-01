@@ -1,0 +1,40 @@
+# mosquitto-idle 2026-11-01T06:23:42Z host=169.58.184.193:8883 cores=2,3 reps=3
+# loadgen 4ca26f196c8f kernel 7.0.0-38-generic nproc=4
+## suite idle
+IDLE baseline
+SYS $SYS/broker/clients/connected=1
+SYS $SYS/broker/heap/current=838280
+SYS rss_kb=10628
+GUARD load1=1.07 site_s=0.200433
+IDLE clients=10000
+IDLE progress t=20s vps: TCP:   3900 (estab 3889, closed 1, orphaned 0, timewait 0) 34.4 115844 
+IDLE progress t=40s vps: TCP:   8001 (estab 7990, closed 1, orphaned 0, timewait 0) 46.6 224516 
+IDLE opened_in=52s errors=0 first: 
+IDLE generator_rss_kb=111880 generator_threads=1
+loadgen: hold: 10000 of 10000 connections established in 56.1 s
+SYS $SYS/broker/clients/connected=10001
+SYS $SYS/broker/heap/current=8969336
+SYS rss_kb=278532
+IDLE after close
+SYS $SYS/broker/clients/connected=1
+SYS $SYS/broker/heap/current=968312
+SYS rss_kb=278532
+GUARD load1=8.89 site_s=0.013402
+IDLE clients=20000
+IDLE progress t=20s vps: TCP:   3089 (estab 3078, closed 1, orphaned 0, timewait 0) 26.2 278532 
+IDLE progress t=40s vps: TCP:   6702 (estab 6691, closed 1, orphaned 0, timewait 0) 31.9 278532 
+IDLE progress t=60s vps: TCP:   10481 (estab 10470, closed 1, orphaned 0, timewait 0) 35.9 292228 
+IDLE progress t=80s vps: TCP:   14439 (estab 14428, closed 1, orphaned 0, timewait 0) 38.9 398084 
+IDLE progress t=100s vps: TCP:   16713 (estab 12790, closed 3913, orphaned 0, timewait 3912) 40.3 401284 
+IDLE progress t=120s vps: TCP:   19054 (estab 11179, closed 7836, orphaned 29, timewait 7835) 42.0 401284 
+IDLE opened_in=131s errors=0 first: 
+IDLE generator_rss_kb=216004 generator_threads=1
+loadgen: hold: 20000 of 20000 connections established in 153.0 s
+SYS $SYS/broker/clients/connected=8680
+SYS $SYS/broker/heap/current=7979208
+SYS rss_kb=401284
+IDLE after close
+SYS $SYS/broker/clients/connected=1
+SYS $SYS/broker/heap/current=838296
+SYS rss_kb=396432
+# done 2026-11-01T06:30:55Z

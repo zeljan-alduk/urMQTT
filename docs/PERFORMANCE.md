@@ -1,0 +1,205 @@
+# Performance: urMQTT and Mosquitto on the same VPS (X11)
+
+What this file claims, in one paragraph. On one Contabo VPS (4 vCPU AMD EPYC, KVM, 8 GiB), loaded over the
+internet from one Linux host 15 ms away, with mutual TLS 1.3 on both sides and the same certificates, urMQTT
+completed more full handshakes per second than Mosquitto 2.0.21 on Debian 13 (about 2x at the same client
+concurrency; the load generator, not urMQTT, was the limit), held 20 000 idle connections in about 0.5 KB each
+of its heap where Mosquitto's process grew by about 27 KB per connection, and delivered small messages with
+about the same or a lower end-to-end latency at modest rates. Under heavy offered load the picture is
+mixed and **not in urMQTT's favour in two places**: a single TCP flow moves much less data through urMQTT than through
+Mosquitto, and urMQTT's 20 ms handler watchdog **dropped live connections** when the hypervisor stalled a vCPU
+(production setting `action = "drop"`). Both are in the tables and in "Findings" below. Everything else about
+these numbers is limited by a shared, noisy load generator; read "Caveats" before quoting anything.
+
+Method and decisions: ADR-213 in `docs/DECISIONS.md`. Raw files: `docs/perf-results/`. Tools: `scripts/x11-bench.sh`
+(the suite), `scripts/x11-report.py` (tables), `scripts/x11-mosquitto.sh` and `scripts/mosquitto/` (Mosquitto side),
+`scripts/mkbench.sh --x11` (the benchmark image), `tools/loadgen` (`urmqtt-loadgen`, modes `handshake`, `hold`, `pubsub`).
+
+## 1. Setup
+
+| | |
+|---|---|
+| Server | Contabo VPS "Cloud VPS 4 (2026)", instance 203712023, 4 vCPU (AMD EPYC family 23 model 1, Zen 1, KVM guest), 8 GiB, data centre EU 2, IPv4 169.58.184.193, port 8883 only |
+| Load generator | the project's build server (also runs a production web server): 4 vCPU KVM guest on an AMD EPYC 9354P host, Linux 7.0, x86_64. The generator runs under `taskset -c 2,3` and `nice -n 19`. The host showed **60 to 70 % CPU steal** during the runs (hypervisor overcommit), see "Caveats" |
+| Path | 15.2 ms mean round trip (ping min/avg/max 10.2/15.2/22.2 ms, 20 probes), one source address, no firewall between |
+| TLS | TLS 1.3 only, ECDSA P-256 certificates (server and 1 to 1 000 simulated devices, all from the project's test CA), client certificate required, identity = certificate CN. Negotiated suite on both servers: `TLS_AES_128_GCM_SHA256` (Mosquitto is told to offer only the two suites urMQTT supports) |
+| urMQTT `prod` | `build/urmqtt-prod-universal.iso` (v0.1.0-74-g794f607, sha256 `70118d7d...bfcd`), production configuration (`deploy/prod/config.toml`), live (RAM) boot |
+| urMQTT `bench-x11` | built from commit 878a95e (H7) by `scripts/mkbench.sh --x11 --static 169.58.184.193/17 169.58.128.1`, sha256 `fbf83e03...8586`: production configuration with the ADR-082 handshake limits relaxed (2000 to 100000 per core per second, 256 and 32 in flight to 4096), `publish_rate_per_device` 10/s to 1000000/s, and identities `svc-*` allowed `fleet/#` like `backend`. Same code paths otherwise. Differs from `prod` by two commits of H6/H7 (the SQLite worker and time checks) that do not touch the data path |
+| urMQTT `bench-x11-log` | the same with `[watchdog] action = "log"` instead of `"drop"` (`--x11-watchdog-log`), sha256 `2b72ebc4...9f9e`; used for the offered-load sweep only, to tell watchdog drops from other losses |
+| Mosquitto | Debian 13 (trixie), kernel 6.12.38+deb13-cloud-amd64, `mosquitto` 2.0.21-1, OpenSSL 3.5.7, stock packages. `scripts/mosquitto/urmqtt-x11.conf` and `.acl`: same CA, server certificate and key, `tls_version tlsv1.3`, `require_certificate true`, `use_identity_as_username true`, `allow_anonymous false`, ACL file (own `devices/<id>/#`, `fleet/bench/#`; operator reads `$SYS`), `persistence false`, `max_connections -1`, `max_inflight_messages 16`, `max_packet_size 4096`, `LimitNOFILE=1048576`, `sys_interval 2`. Single thread (Mosquitto 2.0 has no worker threads) |
+| Generator binary | `urmqtt-loadgen` built on the load host (`cargo build --release --locked -p urmqtt-loadgen`, nightly-2026-10-20); the `handshake` run against `prod` used an earlier build of the same code before the `RESULT` and CPU lines were added (sha 12 chars `e8aabc2e682e`; later runs `45ae7fd8e4fb`) |
+| urMQTT cores | on this VPS the production image uses core 0 for the NIC and dispatch, **cores 1 and 2 as MQTT/TLS workers** and core 3 for the database (`$SYS/broker/cpu/accepted/<core>`: only 1 and 2 accept). So "3 data cores" is 2 here while storage is on |
+
+Every run: three repetitions, median and (min-max) in the tables. A run measures 10 s after a 2 s warm-up (handshake: 10 s).
+The suite guards the shared host: before every run it waits for the load average to fall (it was 3 to 15 all day,
+mostly other tenants), reads the web server's response time (always 15 to 280 ms; the suite stops if it exceeds 1 s twice; it never did) and records the host's steal share.
+
+## 2. What was measured and how
+
+* **Handshakes** (`urmqtt-loadgen handshake`): N threads each loop TCP connect, full TLS 1.3 handshake with a client certificate (no resumption), CONNECT/CONNACK, DISCONNECT, close; the server closes first (ADR-080). The rate counts the window only. 32, 64, 128 threads (beyond 128 is the region of ADR-080's overload collapse and the production per-address limit; it was not run).
+* **Idle capacity** (`hold`): 64 threads open N connections (full mTLS, CONNECT), they stay idle (PINGREQ at 30 s), and the broker's own figures are read: urMQTT `$SYS/broker/memory/used`, Mosquitto's process RSS over ssh (`ps -o rss`) and `$SYS/broker/heap/current`. Memory per connection is the growth from the baseline divided by the connections the broker reports.
+* **Throughput, offered-load sweep** (`pubsub`): P publishers and P subscribers on P topics (1:1 pairs, P = 16 or 64), messages of 64 B or 1 KiB with the send time in the first 8 bytes, QoS 0 or 1 (QoS 1: window of 32 publishes in flight; the brokers' own limit on messages in flight to a subscriber is 16 for both). "flood": as fast as the broker lets it. "sweep": a fixed rate per publisher (100, 300, 1000 messages/s). Reported: published/s, acknowledged/s (QoS 1), **delivered/s** (what the subscribers received), end-to-end latency p50/p99 (publisher write to subscriber read, one process and clock; includes the network round trip once), connections lost during the run.
+* **Latency at a modest rate**: 8 pairs x 100 messages/s, 64 B, QoS 0 and 1.
+* **Fan-out**: 1 publisher to 100 or 1000 subscribers on one topic at a fixed rate (50/s and 10/s: 5 000 and 10 000 deliveries/s), QoS 0 and 1; and a 1 to 100 flood.
+* **Single flow**: one publisher and one subscriber, flood: what one TCP connection each way carries.
+* **Broker CPU**: urMQTT publishes the busy percentage of each core in `$SYS` (every 5 s; the DB core, core 3, polls and always shows high); Mosquitto's `utime+stime` is read over ssh for 10 s. Both are from the first 14 s of each run, so approximate.
+* Generator CPU (`gen cpu`, cores of CPU time used by the whole process) and the host's steal/idle shares come with each run.
+
+## 3. Results
+
+All numbers: median (min-max) of three runs unless stated. Full tables with generator CPU and host steal for every row: run
+`scripts/x11-report.py docs/perf-results/*.txt`.
+
+### 3.1 Full mTLS handshakes per second (TLS 1.3 + client certificate + CONNECT, no resumption)
+
+| clients (threads) | urMQTT prod (limits as shipped) | urMQTT bench (limits relaxed) | Mosquitto 2.0.21 |
+|---|---|---|---|
+| 32 | 185 (177-194), p50 177 ms | 169 (155-171), p50 186 ms | 82 (76-92), p50 361 ms |
+| 64 | 262 (246-269), p50 212 ms, 1-11 errors | 278 (277-289), p50 201 ms | 140 (125-145), p50 401 ms |
+| 128 | 333 (324-339), p50 310 ms, **202-286 errors** (resets during the handshake) | 413 (378-452), p50 299 ms | 184 (152-211), p50 597 ms; p99 1.6 s |
+
+What these say. They are **lower bounds of what the servers can do**, not capacities: at 128 threads the
+generator used 0.6-0.7 cores of CPU time while the host stole 60 to 66 % of its two pinned vCPUs, so it was at
+about its own ceiling (1.6 ms of client CPU per handshake, about 450 handshakes/s on the share of two vCPUs it
+got), and below that each client thread waits two to six round trips per connection. urMQTT's two workers (cores 1 and 2) were 12 to 13 % busy (bench) and 33 to 35 % (prod) at 128 threads,
+so the server had room; its console reports 260 us of server-side TLS work per
+handshake (X25519 + ECDSA P-256 sign and verify, 90 % public-key) on this CPU. Mosquitto's single thread was at
+68 to 84 % of one core at 64 and 128 threads (about 4.6 ms of its CPU per connection including the kernel's TCP work), so it
+was close to its own limit at 128 threads and the ratio at that point (about 2.2x) is the most meaningful one here; at 32 and
+64 threads the generator waits are the limit and the ratio (2.0x) mostly reflects latency per handshake.
+With the production limits one source address is capped (handshakes in flight per address and core, ADR-080): the 128-thread
+errors are resets of connections in the handshake, which is what that limit does (the refusal counters in `$SYS` were not recorded per run, so
+this is the expected cause, not a proven one); the 413 per second of the relaxed profile is the better indicator of the data
+path, and it still rises with threads.
+
+### 3.2 Idle connections
+
+| | urMQTT bench | Mosquitto |
+|---|---|---|
+| 5 000 | 4 995 connected in 17 s; broker heap +3.3 MB = **0.66 KB per connection** (4.13 -> 7.42 MB) | 5 001 connected in 30 s; process RSS 10.6 -> 144.5 MB = **26.8 KB per connection** (`$SYS` heap counter: 0.8 KB, excludes OpenSSL's allocations) |
+| 10 000 | 9 987 in 35 s; +6.0 MB = 0.60 KB | 10 001 in 55 s; RSS 278.5 MB = 26.8 KB |
+| 20 000 | 19 975 in 94 s; +10.1 MB = **0.50 KB per connection** | 20 001 in 135 s; RSS 546.6 MB = **26.8 KB per connection** |
+
+urMQTT's figure is the kernel heap in use (`$SYS/broker/memory/used`); it leaves out the NIC's receive buffers
+and the per-core frame buffers (the console shows them separately, about 2 MiB) and the guest's own tables, so
+the guest's total RAM per connection is somewhat more; the configuration's own estimate (`kernel_heap_mb`: about 500 B per idle connection) agrees. The generator held 20 000 connections in
+204 MB of RSS (10 KB each) and was not the limit; the 28 000 usable source ports of one address would be (50 000 was
+not attempted). The source address kept 5 000 to 20 000 TIME_WAIT sockets after each run, which is why the suite waits 65 s between sizes.
+Mosquitto's numbers are from `mosquitto-idle3.txt` (fresh process, keep-alive 600 s in the generator). Two earlier attempts (`mosquitto.txt`, `mosquitto-idle.txt`, `mosquitto-idle2.txt`) are **not valid** and are kept as raw data: the suite sampled while connections were still being opened (a stale output file from the previous size ended its wait at once), and with the generator's 60 s keep-alive Mosquitto closed the first connections of a 150 s opening phase after 90 s (8 680 of 20 000 left), which is the keep-alive working, not a capacity limit. urMQTT's pass-1 rows were consistent (clients connected = clients established) but used the 60 s keep-alive too; its 94 s opening of 20 000 is at the edge of that window.
+
+### 3.3 End-to-end latency at a modest rate (8 pairs x 100 msg/s = 800/s, 64 B)
+
+| | urMQTT bench | Mosquitto |
+|---|---|---|
+| QoS 0 | p50 **14.0** (13.8-16.5) ms, p99 102 (100-114) | p50 21.4 (19.6-21.9), p99 200 (131-201) |
+| QoS 1 | p50 **14.8** (13.9-18.9), p99 199 (106-208) | p50 39.5 (23.4-69.7), p99 277 (217-299) |
+
+The path itself is one round trip (about 15 ms) so 14 ms is "no measurable broker time". The p99 near 100 ms and 200 ms
+(both brokers, and with the generator being preempted for tens of ms) says the tail is dominated by the shared hosts
+(generator steal; urMQTT's own console reports core stalls of 50 to 170 ms on the VPS), not by either design. The p50 gap of 7 to 25 ms to
+Mosquitto is real in these runs and repeatable (ranges do not overlap for QoS 0), the cause was not investigated.
+
+### 3.4 Offered-load sweep: 16 pairs, QoS 0 and 1 (delivered messages per second, p50 / p99 latency)
+
+| offered | urMQTT bench (`action = "drop"`) | urMQTT bench-x11-log (2 runs) | Mosquitto |
+|---|---|---|---|
+| QoS 0, 64 B, 1 600/s | 1 599; 15 / 101 ms | 1 602; 16 / 146 | 1 598; 90 / 221 |
+| QoS 0, 64 B, 4 800/s | 4 393; 20 / 808; 1-3 lost | 4 716; 20 / 950 | 4 803; 90 / 386 |
+| QoS 0, 64 B, 16 000/s | 12 126; 599 / 4 204 ms; **3-8 lost** | 14 756; 557 / 3 655 | **15 901**; 100 / 592 |
+| QoS 1, 64 B, 1 600/s | 1 601; 14 / 113 | 1 598; 18 / 295 | 1 582; 95 / 402 |
+| QoS 1, 64 B, 4 800/s | 4 209; 77 / 417; 0-4 lost | 4 480; 61 / 406 | 4 235; 197 / 1 823 |
+| QoS 1, 64 B, 16 000/s | **5 204**; 188 / 499 | 5 948; 186 / 449 | 4 630; 573 / 3 294 |
+| QoS 0, 1 KiB, 1 600/s | 1 350; 23 / **1 313** | 1 420; 200 / 2 188 | **1 586**; 23 / 280 |
+| QoS 0, 1 KiB, 4 800/s | 2 183; 1 015 / 5 499 | 2 076; 1 251 / 4 207 | **3 695**; 300 / 1 300 |
+
+QoS 1 at 16 000/s is capped by the 16-in-flight window per subscriber over a 15 ms round trip (16 / 15 ms is about
+1 000 messages/s per subscription, 16 000 for 16): both brokers sit well below it, urMQTT higher. Flood tests
+(`throughput` rows in the result files: publishers as fast as the broker takes it) show the same ordering and a
+behaviour worth stating plainly: with QoS 0 at flood, urMQTT delivered 18 280 (16 369-30 726) messages/s of 24 299 published and
+**lost 6-8 connections** per run to the watchdog; Mosquitto delivered 28 977 of 29 430 published and its single core was at 101 %.
+QoS 1 flood, 64 B, 16 pairs: urMQTT 5 975 delivered/s, Mosquitto 4 187; with 64 pairs 11 798 against 9 809.
+At 1 KiB the picture reverses (QoS 0 sweep above; flood 1 414 against 4 168 delivered/s) and is the single-flow limit of 3.6.
+
+### 3.5 Fan-out (1 publisher, QoS 0 unless noted, 64 B)
+
+| | urMQTT bench | Mosquitto |
+|---|---|---|
+| 100 subscribers, 50 msg/s (5 000 deliveries/s) | 5 002 delivered/s, p50 16.6 ms, p99 101 | 5 019, p50 99 ms, p99 307 |
+| 100 subscribers, QoS 1, 50 msg/s | 4 997, p50 18.9, p99 105 | 5 036, p50 103, p99 368 |
+| 1 000 subscribers, 10 msg/s (10 000/s) | 9 790 (2 151-10 051; one run lost the publisher), p50 278 ms, p99 2.6 s | 9 849, p50 190 ms, p99 813 ms |
+| 1 to 100 flood (unbounded publisher) | 15 602 (3 316-98 139) delivered/s, p50 2.3 s; both worker cores 100 % busy | 60 955 (43 025-72 020), p50 6.7 s; its core 98 % |
+
+Steady fan-out of 5 000 deliveries per second is delivered completely and promptly by both. At 1 000 subscribers
+the tails (seconds) are dominated by the generator (1 000 reading threads on two stolen vCPUs) and the 1 000
+simultaneous connections' round trips; both brokers show it, urMQTT more. The flood row is unstable for
+urMQTT (3 316 to 98 139) and should be read as "not characterised".
+
+### 3.6 One TCP flow (1 publisher, 1 subscriber, QoS 0, flood)
+
+| | urMQTT bench | Mosquitto |
+|---|---|---|
+| 64 B | 2 962 (0-7 733) published/s; some runs stall for seconds | **22 749** (16 664-28 971) |
+| 1 KiB | 724 (498-990) published/s = 0.7 MB/s | **1 402** (772-2 162) |
+
+## 4. Findings the numbers force
+
+1. **The 20 ms handler watchdog drops healthy connections when the vCPU stalls.** The console (`$SYS/console/out`) during the
+   sweep showed `watchdog: core 1 input handler ... over budget: 37 ms .. 111 ms > 20 ms (action: Drop)` followed by `aborting
+   connection`, about one every two seconds, together with `longest stall` of 50 to 170 ms per core and `timer: irq latency max` of 2.3 ms at boot.
+   The handler did not run for that long: the vCPU was not scheduled (this is a shared VPS), the wall-clock watchdog fired
+   and aborted the connection that happened to be in the handler. With `action = "log"` the same sweeps had **zero lost connections**.
+   Production keeps `drop`; on a noisy host that means random disconnects under load (the device reconnects). Either measure the budget in
+   time the vCPU actually ran, or give `drop` a stall-aware rule. Not changed here (that is a design change, not a measurement).
+2. **A single flow is slow.** urMQTT moves 0.7 MB/s (1 KiB messages) and 3 000 small messages/s through one connection over a 15 ms
+   path, 2 to 8 times less than Mosquitto and with large run-to-run spread (stalls of seconds). Leads (not established): the TCP receive window is 16 bit
+   with no window scaling (`rcv_wnd: u16`, so at most 64 KiB per round trip is 4.4 MB/s, higher than measured), the console reports frames dropped for
+   a full NIC queue (39 in 5 s under load) and TCP retransmissions, whose recovery without fast retransmit would stall a flow for
+   an RTO. It matters for a few devices sending bulk data; for many small flows (3.4) it does not.
+3. **Handshakes: about 2x Mosquitto per second at equal concurrency, 0.26 ms of server CPU per handshake.** Limited by the generator in both cases, see 3.1.
+4. **Memory per idle connection is about 40 to 50 times smaller** (0.5 to 0.7 KB of kernel heap against 27 KB of process growth; the two counters do not count the same things, see 3.2).
+5. **Latency at modest rates is lower for urMQTT** (14 ms against 21 to 40 ms p50, tails equal within noise).
+
+## 5. Caveats (read before quoting)
+
+* **The load generator is a shared VM with 60-70 % steal.** It had two pinned vCPUs and was itself near its CPU
+  limit in the handshake runs at 128 threads and in every run with 64 pairs or 1 000 subscribers. Handshake rates and
+  flood throughput are therefore **lower bounds for both brokers**; latencies above about 100 ms and every
+  figure in seconds include generator scheduling delay. Calibration of the generator alone (against a local broker)
+  was not done on the shared host. The same generator and the same bounds apply to both brokers, but the steal varied
+  over the day (58 to 71 %) and the brokers were measured hours apart, so differences under about 20 % are not claims.
+* **The VPS is shared too.** Contabo's guest reports no steal; urMQTT's own stall counters show the vCPUs were descheduled for tens of ms
+  repeatedly. Both brokers ran on the same VM type at different times.
+* **One source address, 15 ms away, one path.** No many-client topology, no IPv6, no packet loss measured. A fleet of real devices differs.
+* **Different products.** Mosquitto: one thread, MQTT 5, plugins, bridges. urMQTT: MQTT 3.1.1, two worker cores here, per-device ACL at every
+  publish, admission control and SYN cookies, no persistence in live mode. Mosquitto was run with persistence off and without
+  per-user limits; urMQTT was run in its benchmark profile (relaxed handshake limits; for the handshake rows also as shipped) and the build is not the
+  production build in two commits. The ACLs are equivalent for the benchmark topics, not in general.
+* **urMQTT `bench` is not a release image** (ADR-082, ADR-213). Every urMQTT row except the first column of 3.1 is from it.
+* **Handshake rows from one `prod` run per concurrency** were taken with the older loadgen build and with identity names re-used between runs (two errors at most); the
+  unique-identity rule (`uid` in the suite) came with the later runs. The first pass of the benchmark image
+  (`urmqtt-bench.pass1.txt`) re-used client identities between runs (a risk: a new connection with an id re-used within seconds of an unclean close); the
+  second pass, with a fresh identity prefix per run, lost fewer connections (QoS 0 flood: 6-8 against 11-15), and none with the watchdog in log mode. Idle capacity
+  of urMQTT is from the first pass (it does not depend on identity reuse).
+* Mosquitto's idle figure is the process RSS (including allocator slack that is not returned after the run: the RSS stays at its peak after the connections close).
+* Not measured: bare metal, other CPUs, dp-bench scaling on the VPS, TLS resumption, retained messages, persistent sessions, MQTT 5, packets larger than 4 KiB, more than 20 000 idle connections, more than 128 handshake clients.
+
+## 6. Reproduce
+
+1. Build the benchmark image and the generator:
+
+   ```sh
+   scripts/mkbench.sh --certs deploy/prod --static ADDR/LEN GATEWAY --x11 --env bench-x11   # universal ISO in build/
+   cargo build --release --locked -p urmqtt-loadgen                                          # on a Linux host near the VPS
+   ```
+
+2. Mosquitto: copy `deploy/prod/{ca.pem,server.pem,server.key}` and `scripts/mosquitto/*` to `/root/x11/` on a Debian 13 VPS and run `scripts/x11-mosquitto.sh`.
+3. On the Linux host, in a directory with `urmqtt-loadgen`, `certs/` (`ca.pem`, `ca.key`, `operator.pem`, `operator.key` from `deploy/prod`) and `x11-bench.sh`:
+
+   ```sh
+   BROKER=urmqtt   ./x11-bench.sh urmqtt-bench handshake sweep throughput latency fanout idle
+   BROKER=mosquitto SSHVPS=root@VPS DIR=. ./x11-bench.sh mosquitto handshake sweep throughput latency fanout idle   # needs DIR/id (ssh key)
+   PUBSUB=0 ./x11-bench.sh urmqtt-prod handshake       # the shipped image: no identity may publish at speed
+   python3 scripts/x11-report.py results/*.txt
+   ```
+
+4. Put the VPS back to the image it served before (the suite takes about 90 minutes per broker, the VPS is out of service for the duration).

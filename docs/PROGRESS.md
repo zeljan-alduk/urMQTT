@@ -1,3 +1,35 @@
+## X11 — Performance on the real VPS, with Mosquitto on the same VPS (2026-11-01)
+
+First release scope (VPS only). Method ADR-213; every number, caveat and the findings are in `docs/PERFORMANCE.md`; raw output in `docs/perf-results/` (`urmqtt-prod.txt`, `urmqtt-bench.txt` and `.pass1.txt`, `urmqtt-bench-log.txt`, `mosquitto.txt`, `mosquitto-idle*.txt`; tables with `scripts/x11-report.py`).
+
+**Done**
+
+- **Load generator.** `urmqtt-loadgen` has a `pubsub` mode (publishers, subscribers, topics, QoS 0/1, payload, fixed rate or flood, in-flight window, end-to-end latency stamped in the payload, `RESULT` line, its own CPU use, reasons for lost connections), `--keepalive`, and prints a `RESULT` line and its CPU for `handshake`; `hold` no longer waits for each close. Nothing else changed; no host tests touch it (a binary with `test = false`); `cargo clippy -p urmqtt-loadgen` is clean.
+- **Images and configurations.** `scripts/mkbench.sh --x11` (prod configuration, ADR-082 handshake limits, publish rate lifted, `svc-*` identities with the backend's `fleet/#` rights) and `--x11-watchdog-log`; `scripts/mosquitto/urmqtt-x11.{conf,acl}` and `scripts/x11-mosquitto.sh` (Debian 13, Mosquitto 2.0.21, same CA/server certificate, TLS 1.3 with urMQTT's two suites, mTLS, ACL, no persistence).
+- **Suite.** `scripts/x11-bench.sh` (guarded run of the whole matrix from a Linux host: nice 19, two pinned CPUs, waits for the host's load, stops if the web server on the shared host answers slowly, records the host's steal) and `scripts/x11-report.py`.
+- **Run on the Contabo VPS (4 vCPU EPYC, KVM)**, from the build server 15 ms away: urMQTT `prod` as it stood, `bench-x11`, `bench-x11` with the watchdog in log mode, Debian 13 with Mosquitto, then **the production ISO restored** (console `URMQTT READY`, `openssl s_client` completes, `$SYS/broker/version` v0.1.0-74-g794f607). Temporary images, the served ISO and the temporary ssh key deleted.
+
+**Results** (median of three; generator-limited figures are lower bounds; see PERFORMANCE.md for ranges, caveats and the rest)
+
+- Full mTLS handshakes/s at 32/64/128 clients: urMQTT prod 185/262/333 (limits as shipped; 202-286 errors at 128), bench 169/278/413, Mosquitto 82/140/184 (its single thread 70-84 % busy). Server side: 260 us of TLS work per handshake (console).
+- Idle connections: urMQTT 0.50-0.66 KB of kernel heap each, 19 975 held (generator 10 KB each); Mosquitto 26.8 KB of process growth each at 5 000, 10 000 and 20 000 (`mosquitto-idle3.txt`; the earlier attempts are invalid, see PERFORMANCE.md 3.2).
+- Latency, 800 msg/s, 64 B, p50: urMQTT 14.0 ms (QoS 0), 14.8 (QoS 1); Mosquitto 21.4 and 39.5; RTT 15 ms; tails equal within noise.
+- Offered load, 16 pairs, QoS 1: urMQTT delivers more at the top (5 204/s against 4 630/s at 16 000/s offered); QoS 0 64 B flood: urMQTT 18 280 delivered/s (24 299 published), Mosquitto 28 977 (its one core at 101 %).
+- Fan-out 1 to 100 at 5 000 deliveries/s: both complete, p50 16.6 ms (urMQTT) against 99 ms (Mosquitto).
+
+**Found**
+
+- The 20 ms handler watchdog (`action = "drop"`, the production default) **dropped live connections** under load on this VPS: `watchdog: core N input handler over budget: 37-111 ms > 20 ms (action: Drop)` every couple of seconds, while the console's `longest stall` of the cores was 50-170 ms. The vCPU was not scheduled; the handler was not slow. With `action = "log"` the same sweeps lost no connection in any of 20 runs (the `drop` image: 1-8 per run at 300 msg/s per publisher and above). Not changed here (a design decision: measure in running time, or a stall-aware drop rule).
+- One TCP flow through urMQTT carries 0.7 MB/s (1 KiB messages) or about 3 000 small messages/s with stalls of seconds, 2 to 8 times less than Mosquitto. Leads, not established: 16-bit window without scaling, `frames dropped for a full NIC queue` (39 per 5 s), retransmissions.
+- The 1 000-subscriber fan-out and every flood row are limited by the generator (a shared VM with 60-70 % CPU steal); they are not capacity figures.
+
+**Not done / honest limits**
+
+- No calibration of the generator alone, no second source address, no more than 20 000 idle connections or 128 handshake clients, no dp-bench scaling on the VPS, no bare metal, no Intel. The Mac cannot reach the VPS, so every figure carries the build server's noise.
+- The production-limits column covers handshakes only (the shipped image has no identity that may publish at speed).
+- The Mosquitto 20 000-connection figure needed a longer keep-alive in the generator (the first attempt measured the keep-alive of connections opened more than 90 s before the pings started, not the broker).
+
+
 ## H6 — SQLite as an unprivileged component (2026-11-01)
 
 SECURITY-PLAN H6, on both architectures. ADR-210 (design, what is and is not isolated), ADR-211 (interface and validation), ADR-212 (build). Two commits: the user-mode infrastructure with a hello worker, then SQLite moved in. **Closes the part of gap H0-W8 that was the privilege of SQLite; it does not close the fuzzing half (H5), and it is not a claim about wrong answers or speculative leaks** (SECURITY.md, "The database worker").
