@@ -93,7 +93,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | Area | Feature | Status |
 |---|---|---|
 | **Build** | Reproducible workspace, pinned toolchain, `--locked` everywhere | ✅ M0 |
-| | Build-time configuration, validated, compiled to constants | ✅ M0 |
+| | Configuration as data: a validated, versioned blob in the image's slot (`urmqtt-config`), one release kernel for everyone | ✅ C1 |
 | | Bootable UEFI ISO (Limine) for aarch64 | ✅ M1 |
 | | The ISO installs itself onto the machine's disk (boot menu, countdown, verified write) | ✅ S1b |
 | | Bit-for-bit reproducible (checked in CI), minisign-signed images; ISO and raw GPT disk image | ✅ M17 |
@@ -260,7 +260,7 @@ falls as fixed slab chunks amortize, so it does not grow with the connection cou
 
 ### Security model
 
-- **One port.** TCP 8883: TLS 1.3 only, client certificates required, signed by the CA compiled into the image. The MQTT client id must equal the certificate's device id.
+- **One port.** TCP 8883: TLS 1.3 only, client certificates required, signed by the CA in the image's configuration. The MQTT client id must equal the certificate's device id.
 - **No ways in.** No shell, console input, SSH, admin API, dynamic code, network-reachable SQL or filesystem.
 - **Memory safety.** Rust, with `forbid(unsafe_code)` in the protocol crates, every `unsafe` block justified with a `// SAFETY:` comment (lint-enforced), and no panics on external input (clippy denies `unwrap`, `expect`, indexing and `panic!` in data-path crates).
 - **Exploit mitigation.**
@@ -270,7 +270,7 @@ falls as fixed slab chunks amortize, so it does not grow with the connection cou
   - Every stack has guard pages, and exceptions run on a separate stack.
   - PAC (`pac-ret`) and BTI are enabled when the CPU supports them, and verified by the smoke tests.
 - **Abuse resistance.** SYN cookies; admission refuses new connections (before any crypto) on a low heap, a DB core that is behind, too many handshakes in flight per core or per source address, or the handshake rate. Per-device rate limits, bounded queues, a TCP window tied to broker backpressure, rate-limited logs, a handler watchdog and a health check.
-- **Immutable, except who may connect.** Configuration, trust anchors and server key are baked into the image, and changing them means a new image. Revocations and the device allowlist change at runtime through control messages that need a control identity's mTLS certificate **and** an offline Ed25519 signature (H1, [docs/SECURITY.md](docs/SECURITY.md#control-channel-h1)).
+- **Immutable, except who may connect.** Configuration, trust anchors and server key are in the image's configuration slot (the kernel itself never changes), and changing them means a new slot, not a new kernel. Revocations and the device allowlist change at runtime through control messages that need a control identity's mTLS certificate **and** an offline Ed25519 signature (H1, [docs/SECURITY.md](docs/SECURITY.md#control-channel-h1)).
 
 The threat model is in [docs/SECURITY.md](docs/SECURITY.md); the cryptography (keys, record layer, tickets, constant-time and conformance results) in [docs/CRYPTO.md](docs/CRYPTO.md).
 
@@ -315,7 +315,8 @@ urMQTT/
 │   ├── timer-wheel/        hierarchical timing wheel
 │   ├── store/              SQLite FFI, VFS, telemetry log, boot-disk GPT, fault injection
 │   ├── control/            signed control messages: format, Ed25519, freshness (H1)
-│   ├── config/             no_std typed build-time configuration
+│   ├── cfg/                no_std configuration blob: format, field table, checks (ADR-215)
+│   ├── config/             no_std typed view of the loaded configuration
 │   └── config-schema/      TOML schema, validation, codegen (host)
 ├── deploy/{dev,prod}/      config.toml per environment (certificates are never committed)
 ├── scripts/                gen-dev-certs.sh, later mkiso.sh, run-qemu.sh, smoke.sh
@@ -445,18 +446,56 @@ A data abort report looks like this:
 
 ## Configuration
 
-Everything is configured **at build time** in `deploy/<env>/config.toml` and compiled into the image.
-`crates/config-schema` validates it: unknown keys, wrong types, out-of-range values, malformed
-topic patterns and misplaced files all **fail the build** with every error listed at once:
+The kernel is built **once** and is the same for everyone. Its configuration is **data**: a compact,
+versioned blob (`urmqtt-cfg`, [ADR-215](docs/DECISIONS.md)) in a fixed 256 KiB slot that the bootloader
+hands the kernel as a module (`/boot/urmqtt.cfg` in the ISO and on the installed disk's ESP). It holds
+the limits, ACLs, network, the TLS server certificate and key, the trust anchors and the control public
+key. The kernel checks it again at every boot and **refuses** one it does not understand, a development
+option on a release kernel (a plaintext port, for example), or a bad signature. An image whose slot is
+empty (the template) boots on the documented defaults but **does not serve** until it has a server
+certificate, its key and a CA.
+
+### Making a configured image
+
+The source is the same `config.toml` as always (`deploy/<env>/config.toml`), now with **defaults for
+every key you leave out**, plus the PEM files it names.
+
+```bash
+# cargo build --release -p urmqtt-config-tool      (the tool is built from this repository)
+# from a release: the template ISO has the empty configuration
+urmqtt-config pack my.toml --iso urmqtt-template-<version>-universal.iso --out my.iso
+urmqtt-config show my.iso          # fingerprint, signature, every non-default value
+urmqtt-config verify my.iso        # the kernel's checks, every copy of the slot, every module hash
+urmqtt-config schema               # all keys: type, default, range, help, dev-only (JSON)
+
+# from a checkout: make dist / make iso pack deploy/$ENV/config.toml with the same tool
+make dist-universal ENV=prod
+```
+
+`pack` reads the files the TOML names (relative to it, or `--root DIR`), checks them (PEM structure,
+certificate expiry against `tls.min_server_cert_days` and `trust.min_anchor_days`, the control key) and
+prints the **fingerprint** (SHA-256 of the canonical bytes). The same configuration always gives the same
+bytes. The kernel prints the fingerprint on every boot (`config: fingerprint ... unsigned, env=prod`),
+so you can compare it with what the tool showed. `--sign KEY.pem` adds an optional Ed25519 signature
+over the fingerprint (off by default; see [docs/SECURITY.md](docs/SECURITY.md#configured-images-what-is-attested-c1-adr-219)).
+Keys stay on your machine: the tool uploads nothing, and the browser builder planned in C1e works the same way.
+A patched ISO is not the released ISO and has no official hash; the template it came from does.
+
+Invalid input **fails `pack`** (and `make dist`) with every error listed at once:
 
 ```text
-$ make build ENV=bad
+$ urmqtt-config pack deploy/bad/config.toml --out bad.blob
 error: invalid configuration deploy/bad/config.toml:
   - network.mqtt_plain_port: plaintext MQTT is only allowed in ["dev"], set it to 0
   - limits.max_inflight_qos1: must be greater than 0
 ```
 
 ### Reference
+
+Every key has a default (`urmqtt-config schema` prints key, type, default, range, help and whether a
+non-default value is allowed outside `env = "dev"`). The kernel sizes its configuration tables without an
+allocator, so lists have documented maxima (also in the schema): 64 entries per ACL list, 1024 revoked
+serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 
 | Key | Type / values | Meaning |
 |---|---|---|
@@ -559,9 +598,13 @@ metrics_udp = "10.0.0.5:8125"
 **A new environment.** Create `deploy/staging/config.toml`, add its certificates, then:
 
 ```bash
-make build ENV=staging
-make iso ENV=staging        # from M1
+make iso ENV=staging        # packs deploy/staging/config.toml into the slot
+make dist-universal ENV=staging
 ```
+
+Every environment except `dev` builds the *same* kernel; only the configuration differs. The `dev`
+kernel (the default `ENV`) additionally accepts development options for `env = "dev"` and carries the
+in-guest self-tests.
 
 ## Usage examples
 
@@ -820,7 +863,7 @@ Production images set `observability.syslog_udp` and `metrics_udp` to collectors
 
 ## Deployment
 
-An image is the entire deployment: the code, configuration, CA and server key are all inside it.
+An image is the entire deployment: the kernel and its configuration (CA, server certificate and key) are all inside it.
 The VM has one disk: the raw image written to it, the rest becomes the data partition on the first boot.
 Upgrading replaces only the EFI system partition (`urmqtt-disk update-boot`, or `scripts/kvm-host/install.sh`
 again) and keeps the data.
@@ -867,7 +910,8 @@ mode = "auto"                  # the ISO's live entry runs from RAM (ephemeral);
 1. Read the address, prefix and gateway from the provider's panel (or its `ip addr` / `ip route` output
    from the rescue system).
 2. Edit `deploy/prod/config.toml` and build: `make dist-universal ENV=prod` (the certificates stay
-   in `deploy/prod/`, never committed).
+   in `deploy/prod/`, never committed), or take the template ISO of a release and run
+   `urmqtt-config pack deploy/prod/config.toml --iso urmqtt-template-<version>-universal.iso --out prod.iso`.
 3. Boot the ISO. The log (serial or VNC) shows `net: static address ...`; check with
    `mosquitto_pub -h <address> -p 8883 ...` or `urmqtt-loadgen`.
 4. For DHCP networks use `mode = "dhcp"` and leave `address` and `gateway` out: they are rejected

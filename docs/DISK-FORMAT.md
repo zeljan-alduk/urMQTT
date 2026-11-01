@@ -42,6 +42,16 @@ last             backup GPT header
 | EFI system partition | `C12A7328-F81F-11D2-BA4B-00A0C93EC93B` | `EFI system partition` | the image (`scripts/mkraw.py`, `gpt::raw_image`) |
 | urMQTT data | `58D3F720-BDF5-4DB7-99EC-DE26C8B8850F` | `urMQTT data` | the first boot |
 
+**The configuration slot (C1, ADR-215, ADR-217).** The ESP holds `/boot/urmqtt.cfg`,
+a file of exactly 262144 bytes: a 16-byte marker (`URMQTT-CFG-SLOT\0` for a
+configured slot, `URMQTT-CFG-DISK\0` for the installation image's unconfigured
+template), the `urmqtt-cfg` blob (`crates/cfg/src/blob.rs`: magic `URMQCFG\0`,
+version, length, records, SHA-256 fingerprint, optional Ed25519 signature) and
+zero padding. The installer overwrites the template slot of the image with the
+slot it booted with, after the image and before the read-back; the data
+partition is not involved. Tools locate a slot by marker at a 512-byte boundary,
+a parseable blob and zeros to the end.
+
 **The image** (`make raw`, the release `.img`) is the first three items and a
 backup table right after the ESP. Its GUIDs are derived from the ESP's SHA-256
 (`v4(SHA-256(label ‖ sha256(esp))[0..16])` for the labels `disk` and `esp`), so

@@ -1,15 +1,19 @@
 # Deployment
 
-An urMQTT image is a complete appliance: kernel, configuration, CA, server
-certificate and key, all compiled in. Deploying means building an image from
-your own `deploy/prod/`, checking it, and booting it on an aarch64 VM with UEFI
-and virtio devices. There is nothing to configure after boot, and no way to
-log in.
+An urMQTT image is a complete appliance: the kernel (one binary, the same for
+everyone) and its configuration, which holds the limits, ACLs, network, CA,
+server certificate and key. The configuration is a blob in a fixed-size slot of
+the image (C1, ADR-215, ADR-216), packed by `urmqtt-config` from a TOML and the
+PEM files it names. Deploying means producing an image with your configuration
+(section 1b: from a release's template ISO without a toolchain, or section 2:
+from a checkout), checking it, and booting it on a VM with UEFI (or BIOS on
+x86_64) and virtio devices. There is nothing to configure after boot, and no way
+to log in.
 
 ## 1. Inputs
 
-`deploy/prod/` holds the committed `config.toml` template. Add your secrets
-next to it. They are ignored by git (`.gitignore`) and must never be committed:
+`deploy/prod/` holds the committed `config.toml` template (keys you leave out
+take the defaults). Add your secrets next to it. They are ignored by git (`.gitignore`) and must never be committed:
 
 | File | Content |
 |---|---|
@@ -18,7 +22,7 @@ next to it. They are ignored by git (`.gitignore`) and must never be committed:
 | `server.pem` | broker certificate chain (leaf first); the build fails if it expires within `tls.min_server_cert_days` |
 | `server.key` | unencrypted PEM private key (the VM cannot prompt for a passphrase) |
 | `control.pub` | the Ed25519 public key of the offline control signing key (`openssl pkey -pubout`); required even if `control.service_ids` is empty |
-| revocation list | optional: a file of hex serials named by `tls.revocation_list` |
+| revocation list | optional: a file of hex serials named by `tls.revocation_list`; at most 1024 serials go into the image (the control channel revokes more at run time) |
 
 Sizing: `memory.kernel_heap_mb` (1024 in the template) must fit the VM's RAM
 together with `storage.sqlite_heap_mb` and about 64 MiB for the kernel, its
@@ -26,11 +30,71 @@ tables and frame buffers. An idle device connection costs about 500 bytes of
 heap (ADR-034), so 1 GiB holds well over a million. The VM refuses to boot
 with a clear message if the heap does not fit.
 
+## 1b. Configuring an image without building: the template ISO (C1)
+
+Every release carries `urmqtt-template-<version>-universal.iso` (listed in
+`SHA256SUMS` like the other files): the release kernels for aarch64 UEFI,
+x86_64 UEFI and x86_64 BIOS, and the **empty configuration**. On its own it
+boots on the documented defaults and stops with `refusing to serve: no server
+certificate and key`; the installer and the diagnostic entry work without one.
+`urmqtt-config` (built from this repository with `cargo build --release -p
+urmqtt-config-tool`; the releases do not ship the binary yet, the builder page
+will do the same in the browser) writes your configuration into a copy of it:
+
+```bash
+# my/config.toml names ca.pem, server.pem, server.key, control.pub next to it;
+# keys left out take the defaults (urmqtt-config schema lists them all)
+urmqtt-config pack my/config.toml --iso urmqtt-template-0.1.0-universal.iso --out urmqtt-mine.iso
+# configuration fingerprint: the same one the kernel prints at every boot
+urmqtt-config show urmqtt-mine.iso
+urmqtt-config verify urmqtt-mine.iso      # kernel's checks; all slot copies and module hashes agree
+```
+
+What `pack` does: reads the TOML (a top-level `env = "name"` or `--env`, default
+`prod`; `dev` only for dev kernels), fills in the defaults, validates it with the
+same rules as the build (`config-schema`), reads and checks the PEM files
+(structure, expiry against `tls.min_server_cert_days` and
+`trust.min_anchor_days`, an Ed25519 control key, hex revocation serials) and
+builds the blob; then it replaces the configuration slot in the copy of the ISO
+(it is in the ISO 9660 tree and in the EFI system partition image) and the
+`blake2b` of the slot in every `limine.conf` that lists it. Nothing changes
+size, no file system is rebuilt, the kernels keep the hashes the release
+published. The output is deterministic: the same inputs give the same bytes.
+`--sign KEY.pem` attaches an optional Ed25519 signature over the fingerprint
+(SECURITY.md, "Configured images"). `pack --image DISK.img` does the same for a
+raw disk image's slot.
+
+**The ISO you make is not the release ISO.** It has its own SHA-256, and no
+official one: check the *template* against the release's `SHA256SUMS` and its
+minisign signature, and the *configuration* by the fingerprint on the console
+(`config: fingerprint <64 hex> (<n> bytes, unsigned), env=prod`) against the one
+`pack`/`show` printed.
+
+The same ISO then installs to the machine's disk (menu entry 2): the installer
+copies the slot it booted with into the installed disk, so the installed system
+boots with the same configuration. The installed disk's `limine.conf` lists the
+module without a hash (its ESP is writable anyway). To change the configuration
+of an installed disk offline, or to update the kernel and keep it:
+`urmqtt-disk update-boot DISK --esp NEW-ESP --write` keeps the disk's own
+configuration whenever it has a real one (the default, whatever configuration
+the new ESP carries: a release's `.img` holds the dev one), `--config BLOB` sets
+one, `--replace-config` takes the new ESP's own; `urmqtt-disk info DISK` prints the
+installed configuration's fingerprint. Data-layout migration, grow and backup
+never touch the ESP.
+
+An installed disk or image whose slot is still the unconfigured template says
+so at boot (`config: the configuration slot is empty`) and does not serve.
+
 ## 2. Build
 
 ```bash
-make dist ENV=prod     # build/dist/: urmqtt-prod-<version>.{elf,iso,img} + SHA256SUMS
+make dist ENV=prod     # build/dist/: urmqtt-prod-<version>.{elf,iso,img}, urmqtt-template-<version>-universal.iso + SHA256SUMS
 ```
+
+`make iso`, `make raw`, `make dist` and the other image targets pack
+`deploy/$ENV/config.toml` with `urmqtt-config pack` (the same blob the template
+route produces) into the slot. Every `ENV` but `dev` builds the **same kernel**;
+`make template` builds the template ISO from it.
 
 - `.iso`: UEFI-bootable ISO 9660 (El Torito EFI image), for hosts that attach ISOs.
 - `.img`: raw GPT disk with one EFI system partition, for hosts that boot disks.
@@ -41,8 +105,9 @@ Production images contain no plaintext listener, no self-tests and no TLS
 client (`selftest` feature off; the prod ELF is about 180 KiB smaller than dev).
 Dev-only command-line switches are ignored.
 
-**The image embeds the server's private key.** Store it, copy it and delete it
-like the key itself.
+**The image embeds the server's private key** (in its configuration slot, and
+the ISO has two copies of the slot). Store it, copy it and delete it like the key
+itself.
 
 ## 3. Verify: reproducible and signed
 

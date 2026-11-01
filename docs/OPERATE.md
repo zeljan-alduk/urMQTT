@@ -8,7 +8,7 @@ SECURITY.md ("Operator role").
 ## Who is an operator
 
 An identity listed in `acl.operator_ids` of `deploy/<env>/config.toml` (exact
-ids, fixed at build time). Nothing else reaches `$SYS/`: not devices, not the
+ids, fixed in the image's configuration). Nothing else reaches `$SYS/`: not devices, not the
 `backend` service, not an operator id on a connection without a certificate.
 
 | Environment | Identity | Certificate and key |

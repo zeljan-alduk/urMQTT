@@ -1,5 +1,6 @@
-# Development configuration. Compiled into the ISO by crates/config/build.rs.
-# Every key is required; unknown keys are rejected. See README.md, "Configuration".
+# Development configuration. scripts/mkiso.sh packs it (`urmqtt-config pack`) into the
+# ISO's configuration slot. Keys left out take the defaults (`urmqtt-config schema`);
+# unknown keys are rejected. See README.md, "Configuration".
 
 [network]
 mode = "dhcp"                  # "dhcp" | "static" (static needs address + gateway)

@@ -16,7 +16,7 @@ runtime through signed control messages on the same MQTT/TLS port. See
 
 | Asset | Where it lives | Why it matters |
 |---|---|---|
-| Server TLS private key | Embedded in the image (`include_bytes!`) | Impersonating the broker; decrypting nothing (TLS 1.3 is forward secret), but accepting devices. |
+| Server TLS private key | In the image's configuration slot (ADR-215) | Impersonating the broker; decrypting nothing (TLS 1.3 is forward secret), but accepting devices. |
 | Session-ticket keys | Random per boot (CSPRNG), in RAM only; current for 12 h, previous for 12 h, then zeroised (H2, ADR-054) | Forging resumption tickets. Never stored, never derived from the image: a copy of the image or disk forges nothing. |
 | Traffic secrets | Per connection, in RAM, zeroized on drop | Reading or injecting one device's traffic. |
 | Device identities and the revocation list | CA embedded; revocations embedded and in SQLite | Who may connect. |
@@ -208,6 +208,54 @@ writes the raw boot image onto the machine's disk.
   is no "keep data" mode yet; an offline kernel update keeps data
   (`urmqtt-disk update-boot`).
 
+## Configured images: what is attested (C1, ADR-219)
+
+A released image has a published hash and a minisign signature over
+`SHA256SUMS`. An image you configure with `urmqtt-config pack` (or the builder
+page) is different bytes by construction, so **it has no official hash**. What
+is attested, and by what:
+
+- **The template** (kernels, loader, installer, the empty configuration): its
+  SHA-256 in `SHA256SUMS`, signed. Check it before you configure it. Limine
+  still verifies each kernel against the blake2b pinned in the menu
+  (`hash_mismatch_panic`) at every boot; the tool changes neither the kernels
+  nor their hashes.
+- **The configuration**: its **fingerprint**, the SHA-256 of the canonical blob
+  (limits, ACLs, network, certificates, keys, trust anchors, control key; each
+  field in one form only, so one configuration has one fingerprint). The tool
+  prints it, `urmqtt-config show IMAGE` prints it again from the image, and the
+  kernel prints it at every boot together with whether and by whom it is signed.
+  Compare them: that is how you know the machine runs the configuration you made.
+- **The slot** is also protected against corruption: the blob's fingerprint is
+  checked by the kernel, the menus pin the slot by blake2b (the bootloader stops
+  on a mismatch).
+- **Optional signature.** `pack --sign KEY.pem` attaches an Ed25519 signature
+  over the fingerprint, together with the signer's public key; the kernel
+  verifies it and prints an 8-byte id of the signer's key
+  (`signed by key 1b3c...`; the first 8 bytes of the domain-separated SHA-256
+  that `urmqtt-config show` prints for the same key). Default **off**. The image names no expected signer
+  (a customer-configurable image has nowhere to pin one), so a valid signature
+  proves only that the blob was not changed after the holder of that key signed
+  it; compare the printed key id with the one your key has (`urmqtt-config show`
+  prints it). Anyone who can write the ISO can replace the blob *and* the
+  signature. Making signing mandatory would need an expected-key pin in the
+  image, which is an operator decision (planned with the builder page).
+- **What a patched image does not protect against:** whoever can write the
+  image can replace the configuration, including the trust anchors and the
+  control key; the fingerprint on the console is the check. The installed disk's
+  `limine.conf` lists the configuration module without a hash because its ESP is
+  writable by anyone with disk access anyway.
+- **Fail closed.** The kernel refuses a configuration it does not understand or
+  that fails a check (unknown or duplicate field, value out of range, wrong
+  format version, bad fingerprint or signature) with the key and reason on the
+  console. A release kernel also refuses `env = "dev"`, a plaintext port and the
+  other development options (the durability shortcuts): they are impossible
+  outside the dev environment. Without a server certificate, its key and an
+  operational CA the kernel does not serve, whatever else the slot says.
+- **Where keys go:** the tool reads and writes local files only. The server
+  private key is in the slot of every image made from it, in the clear (as it
+  was when it was compiled in).
+
 ## Mitigations
 
 ### Code execution
@@ -316,7 +364,7 @@ power cut, and the broker goes on.
 - **Expiry safety (H1):** the build fails for a server certificate or trust
   anchor that is about to expire (test `expiry_build_check`). At runtime there
   is a gauge and warnings at 60, 30, 7 and 1 days.
-- ACL compiled in and evaluated without the database: by default a device may
+- ACL in the image's configuration, evaluated without the database: by default a device may
   publish to `devices/{id}/#` and subscribe to `devices/{id}/cmd/#`.
 - The plaintext port can only exist in the `dev` environment; the build rejects
   it elsewhere.

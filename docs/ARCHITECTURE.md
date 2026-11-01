@@ -34,7 +34,8 @@ builds only, enforced at build time).
 
 ## 2. Boot sequence
 
-1. **UEFI → Limine.** Limine loads the kernel at its fixed higher-half address and hands over a memory map, HHDM offset, framebuffer, DTB and/or RSDP, the MP (CPU) list and the date at boot.
+1. **UEFI → Limine.** Limine loads the kernel at its fixed higher-half address and hands over a memory map, HHDM offset, framebuffer, DTB and/or RSDP, the MP (CPU) list and the date at boot, and the configuration slot as a module (`/boot/urmqtt.cfg`, pinned by blake2b in the ISO menu).
+1b. **Configuration.** The first thing the kernel does: find the module, parse and re-validate the `urmqtt-cfg` blob (`crates/cfg`, ADR-215) and fill the typed `CONFIG` (`crates/config`, in `.bss`, no allocator needed), or stop with the reason; no module means the documented defaults. The heap size, log level and development switches all come from it. The fingerprint and signature state are logged once the console is up. A development kernel is the only build switch (`URMQTT_ENV=dev`); a release kernel refuses development options (ADR-216).
 2. **Early console.** The PL011 address comes from the DTB `stdout-path` or the ACPI SPCR table (with a dev fallback). The framebuffer text logger starts.
 3. **Exceptions.** The EL1 vector table is installed. Every synchronous exception prints a decoded ESR (exception class, ISS), ELR, FAR and SPSR. A panic logs, then calls PSCI `SYSTEM_RESET` (`SYSTEM_OFF` in smoke mode).
 4. **Memory.** The frame allocator is built from the Limine memmap, and the kernel switches to its own translation tables with W^X: `.text` RX, `.rodata` R, everything else RW-NX. Every stack gets a guard page. PAC/BTI are enabled if `ID_AA64ISAR1_EL1` / `ID_AA64PFR1_EL1` report them. After boot the tables are locked: nothing is ever remapped executable.
@@ -164,7 +165,7 @@ and calls synchronously, on the core that owns the store:
 
 ## 5. TLS
 
-- TLS 1.3 only, with mutual TLS: device certificates must chain to the CA compiled into the image.
+- TLS 1.3 only, with mutual TLS: device certificates must chain to a CA in the image's configuration.
 - `device_id` is taken from the configured field (`cn` or `san_uri`), and the MQTT client id must match it.
 - The handshake runs through rustls in `no_std` mode with a pure-Rust crypto provider. Admission control is a per-core token bucket. Every handshake phase has a timeout. Resumption uses PSK tickets.
 - After the handshake the traffic keys are extracted and the rustls object is dropped. A minimal record layer (AES-128-GCM, ChaCha20-Poly1305) decrypts in place and encrypts directly into TX buffers (KeyUpdate: ADR-012).

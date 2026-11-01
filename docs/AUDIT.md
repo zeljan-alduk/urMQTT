@@ -89,7 +89,7 @@ not on bare metal for devices (DMA, see H4b).
 | PCI configuration space, capabilities | firmware/devices | `pci/src/lib.rs` | capability list walk | **none** (gap H0-W9) |
 | virtio rings, config space, SCSI sense/INQUIRY | hypervisor/devices | `virtio/src/{queue,blk,net,scsi,transport}.rs` | ring sizes, descriptor ids | **none** (gap H0-W9) |
 | Limine responses (memory map, MP, date) | bootloader | `kernel/src/boot.rs` via the `limine` crate | — | none (trusted) |
-| Build configuration (`deploy/<env>/config.toml`, PEMs) | operator, at build time | `config-schema` | validated at build | `config_parse` |
+| Configuration (`deploy/<env>/config.toml`, PEMs, packed into the `urmqtt-cfg` blob of the image's slot; ADR-215, ADR-216) | operator, when the image is made | `config-schema` at pack time, `urmqtt-cfg` at every boot | fail closed: the kernel refuses a blob it does not understand, a dev option on a release kernel, a bad fingerprint or signature | `config_parse`, `cfg_blob` |
 | Kernel command line | operator (`limine.conf`) | `kernel/src/cmdline.rs` | **prod ignores every option** (dev only) | none (fixed words) |
 
 ---
@@ -132,13 +132,13 @@ scenario (`scripts/smoke.sh`), a host test or a CI job. "**none**" is a gap.
 | Kernel pinned by blake2b in `limine.conf` | `scripts/mkiso.sh` | **none** tampers with the kernel (gap, H8) | all |
 | Reproducible images | `make repro` | CI "Reproducible prod image (built twice)" | aarch64 |
 | Signed releases, provenance | `make sign`, release workflow | release workflow (minisign verify, SLSA attestation) | all |
-| Config validated at build time | `config-schema` | config tests; `config_parse` fuzzing | all |
+| Config validated when the image is made and again at every boot | `config-schema`, `urmqtt-cfg` | config tests; `config_parse` fuzzing | all |
 
 ---
 
 ## 4. The nine questions of PROMPT-security H0
 
-1. **Can a device certificate be revoked at runtime without a new image?** **No.** The list comes from `tls.revocation_list` at build time and is seeded into SQLite at boot (`kernel/src/db.rs:470`); nothing changes it at runtime. Gap → H1.
+1. **Can a device certificate be revoked at runtime without a new image?** **No.** The list comes from `tls.revocation_list` when the image is configured and is seeded into SQLite at boot (`kernel/src/db.rs:470`); nothing changes it at runtime. Gap → H1.
 2. **Is the registry an allowlist?** **No.** It is a record filled on first connect: `DbReq::DeviceSeen` is an upsert (`mqtt_service.rs:281`, `db.rs:699`). Any certificate from the CA connects. Gap → H1 (`registry.mode`).
 3. **Where does wall-clock time come from, and what if it is wrong?** From the firmware RTC through Limine, plus uptime (`boot.rs:226-233`, `now_unix` at `boot.rs:608-625`). An unknown date refuses every handshake (fail closed, ADR-009). A **wrong** date used to be believed; since H1 a clock before the image's build time is unknown (ADR-050), and since T1/H7 an SNTP client (ADR-100: several IPv4 servers, median consensus, a drift budget of `max_step`) can correct it. Not authenticated: NTS is out of scope, so a man in the middle who controls every answer can move the clock by `max_step` in total after boot. *H7 closed: lower bound, SNTP, bounded jumps.*
 4. **KASLR?** **No.** The kernel is linked statically at a fixed address (`crates/kernel/linker.ld`); the heap, stacks and per-CPU regions are at fixed virtual addresses (`kernel/src/layout.rs`). Gap → H4.
