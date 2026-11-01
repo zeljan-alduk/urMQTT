@@ -26,7 +26,7 @@ APP_DIR = os.environ.get("URMQTT_BUILDER_DIR", os.path.join(HERE, "urmqtt-builde
 # The addresses the page uses for itself and for the release list. Overridable only to test a copy of the page
 # under another path (a labelled, unlisted test directory); production uses the defaults.
 APP_URL = os.environ.get("URMQTT_APP_URL", "/urmqtt/builder/")
-RELEASES_URL = os.environ.get("URMQTT_RELEASES_URL", "/urmqtt/releases.json")
+RELEASES_URL = os.environ.get("URMQTT_RELEASES_URL", "/urmqtt/releases/releases.json")
 
 
 def pick(table, code):

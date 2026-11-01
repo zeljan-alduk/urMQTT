@@ -22,7 +22,7 @@ async function main() {
   if (!root) return;
   app.el = root;
   app.base = new URL(root.dataset.base || './', location.href).href;
-  app.releasesUrl = new URL(root.dataset.releases || '/urmqtt/releases.json', location.href).href;
+  app.releasesUrl = new URL(root.dataset.releases || '/urmqtt/releases/releases.json', location.href).href;
   app.lang = (root.dataset.lang || document.documentElement.lang || 'en').toLowerCase().split('-')[0];
 
   const missing = missingFeatures();
