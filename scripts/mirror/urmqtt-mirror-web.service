@@ -1,0 +1,30 @@
+# The web server of the release mirror: nginx in a container, on 127.0.0.1:18089
+# only, behind Caddy (scripts/mirror/nginx.conf says what it adds). The mirror
+# job (urmqtt-mirror.service) writes the files, this only reads them.
+# Installed by scripts/mirror/install-web.sh. Log: journalctl -u urmqtt-mirror-web
+[Unit]
+Description=urMQTT release mirror: web server (nginx container, loopback only)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+# The image is pinned by digest: update it deliberately (docker pull, read the
+# digest, change it here and in install-web.sh).
+Environment=IMAGE=nginxinc/nginx-unprivileged@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
+ExecStartPre=-/usr/bin/docker rm -f urmqtt-mirror-web
+# Read-only root and mounts, no capabilities, no new privileges, small and
+# lowest-priority: the mirror must never get in the way of the sites on this host.
+ExecStart=/usr/bin/docker run --rm --name urmqtt-mirror-web \
+    --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+    --cap-drop ALL --security-opt no-new-privileges \
+    --memory 64m --cpus 0.5 --cpu-shares 64 --pids-limit 64 \
+    -p 127.0.0.1:18089:8080 \
+    -v /etc/urmqtt-mirror/nginx.conf:/etc/nginx/nginx.conf:ro \
+    -v /var/www/aldotech.io/urmqtt/releases:/srv/mirror:ro \
+    $IMAGE
+ExecStop=/usr/bin/docker stop -t 10 urmqtt-mirror-web
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
