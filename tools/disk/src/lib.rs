@@ -2,6 +2,7 @@
 //! devices it works on, the host-side SQLite and telemetry checks, and the
 //! offline migration. The command line is `main.rs`.
 
+pub mod config;
 pub mod dev;
 pub mod host;
 pub mod migrate;

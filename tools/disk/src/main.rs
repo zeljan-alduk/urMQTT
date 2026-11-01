@@ -10,10 +10,16 @@
 //! urmqtt-disk import-devices DISK FILE [--allowlist] --write
 //!                                                device ids, one per line, into the registry
 //!                                                (and the allowlist)
-//! urmqtt-disk create OUT --esp ESP [--size BYTES[K|M|G]]
+//! urmqtt-disk create OUT --esp ESP [--size BYTES[K|M|G]] [--config BLOB|SLOT]
 //!                                                a boot image (byte for byte mkraw.py), optionally
-//!                                                on a larger disk; the first boot formats the data
-//! urmqtt-disk update-boot DISK --esp ESP --write replace the kernel (ESP), keep the data
+//!                                                on a larger disk, optionally configured; the first
+//!                                                boot formats the data
+//! urmqtt-disk update-boot DISK --esp ESP --write [--config BLOB|SLOT | --keep-config | --replace-config]
+//!                                                replace the kernel (ESP), keep the data. The disk's
+//!                                                configuration slot (C1c) is kept whenever it holds a
+//!                                                real configuration (the default, whatever the new ESP
+//!                                                carries); --config sets one, --replace-config takes
+//!                                                the new ESP's own
 //! urmqtt-disk migrate DISK [--write] [--resume | --rollback [--force]]
 //!                    [--rollback-file FILE] [--align-mib N]
 //!                                                layout v1 -> v2. Without --write: the plan and the
@@ -51,6 +57,7 @@ use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use urmqtt_disk::config;
 use urmqtt_disk::dev::{FileDisk, Overlay, S, Shared};
 use urmqtt_disk::host::{self, mib, now_unix, open_store};
 use urmqtt_disk::migrate;
@@ -165,7 +172,7 @@ fn print_regions(l: &Layout) {
 }
 
 fn info(path: &str) -> Result<(), String> {
-    let (dev, f) = overlay(path)?;
+    let (mut dev, f) = overlay(path)?;
     let total = dev.sectors();
     println!("disk: {path}, {} MiB ({total} sectors)", mib(total));
     let Some(t) = f.primary.as_ref().or(f.backup.as_ref()) else {
@@ -187,6 +194,12 @@ fn info(path: &str) -> Result<(), String> {
         },
         t.header.backup_lba
     );
+    if let Some(e) = t.entries.iter().find(|e| e.type_guid == gpt::ESP_TYPE) {
+        match read_esp(&mut dev, e) {
+            Ok(esp) => println!("{}", config::describe(&config::read(&esp))),
+            Err(m) => println!("config: unreadable ({m})"),
+        }
+    }
     for (i, e) in t.entries.iter().enumerate() {
         let kind = if e.type_guid == gpt::ESP_TYPE {
             "EFI system partition"
@@ -532,8 +545,18 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .map_err(|e| format!("size {s:?}: {e}"))
 }
 
-fn create(out: &str, esp: &str, size: Option<u64>) -> Result<(), String> {
+fn create(out: &str, esp: &str, size: Option<u64>, config: Option<&str>) -> Result<(), String> {
     let esp = std::fs::read(esp).map_err(|e| format!("{esp}: {e}"))?;
+    let esp = match config {
+        None => esp,
+        Some(c) => {
+            let slot = config::slot_from_file(&std::fs::read(c).map_err(|e| format!("{c}: {e}"))?)?;
+            // A fresh image has nothing to keep: the new ESP's slot is replaced.
+            let (esp, what) = config::carry_over(&[], esp, &config::Policy::Set(slot))?;
+            eprintln!("create: {what}");
+            esp
+        }
+    };
     let img = gpt::raw_image(&esp).ok_or("the ESP must be a non-empty multiple of 512 bytes")?;
     if size.is_some_and(|s| s < img.len() as u64) {
         return Err(format!("--size is below the image's {} bytes", img.len()));
@@ -556,7 +579,18 @@ fn create(out: &str, esp: &str, size: Option<u64>) -> Result<(), String> {
     Ok(())
 }
 
-fn update_boot(path: &str, esp: &str, write: bool) -> Result<(), String> {
+/// The whole EFI system partition `e` of `dev`.
+fn read_esp(dev: &mut dyn BlockDevice, e: &gpt::Entry) -> Result<Vec<u8>, String> {
+    let mut buf = vec![0u8; (e.sectors() * SECTOR) as usize];
+    let chunk = 2048 * S; // 1 MiB
+    for (i, c) in buf.chunks_mut(chunk).enumerate() {
+        dev.read(e.first_lba + (i * 2048) as u64, c)
+            .map_err(|err| format!("read failed: {err:?}"))?;
+    }
+    Ok(buf)
+}
+
+fn update_boot(path: &str, esp: &str, write: bool, policy: &config::Policy) -> Result<(), String> {
     let esp = std::fs::read(esp).map_err(|e| format!("{esp}: {e}"))?;
     let mut dev = FileDisk::open(path, write)?;
     let f = inspect(&mut dev)?;
@@ -573,6 +607,16 @@ fn update_boot(path: &str, esp: &str, write: bool) -> Result<(), String> {
             esp.len()
         ));
     }
+    // The configuration slot (C1c): carried over from the disk's current ESP
+    // unless the new ESP is configured itself (or the caller says otherwise).
+    let old = read_esp(&mut dev, e)?;
+    let (esp, what) = config::carry_over(&old, esp, policy)?;
+    println!(
+        "update-boot: {}\nupdate-boot: before: {}\nupdate-boot: after:  {}",
+        what,
+        config::describe(&config::read(&old)),
+        config::describe(&config::read(&esp)),
+    );
     if !write {
         println!(
             "update-boot: would write {} bytes at LBA {} (dry run; add --write)",
@@ -1078,6 +1122,8 @@ fn run(args: &[String]) -> Result<(), String> {
                         | "--rollback"
                         | "--force"
                         | "--populate"
+                        | "--keep-config"
+                        | "--replace-config"
                 );
                 continue;
             }
@@ -1111,12 +1157,33 @@ fn run(args: &[String]) -> Result<(), String> {
             arg(1, "OUT")?,
             &opt("--esp").ok_or("--esp ESP is required")?,
             opt("--size").map(|s| parse_size(&s)).transpose()?,
+            opt("--config").as_deref(),
         ),
-        Some("update-boot") => update_boot(
-            arg(1, "DISK")?,
-            &opt("--esp").ok_or("--esp ESP is required")?,
-            flag("--write"),
-        ),
+        Some("update-boot") => {
+            let policy = match (
+                opt("--config"),
+                flag("--keep-config"),
+                flag("--replace-config"),
+            ) {
+                (None, false, false) => config::Policy::Auto,
+                (None, true, false) => config::Policy::Keep,
+                (None, false, true) => config::Policy::Replace,
+                (Some(c), false, false) => config::Policy::Set(config::slot_from_file(
+                    &std::fs::read(&c).map_err(|e| format!("{c}: {e}"))?,
+                )?),
+                _ => {
+                    return Err(
+                        "give at most one of --config FILE, --keep-config, --replace-config".into(),
+                    );
+                }
+            };
+            update_boot(
+                arg(1, "DISK")?,
+                &opt("--esp").ok_or("--esp ESP is required")?,
+                flag("--write"),
+                &policy,
+            )
+        }
         Some("migrate") => migrate_cmd(
             arg(1, "DISK")?,
             &MigrateArgs {

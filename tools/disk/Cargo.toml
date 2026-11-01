@@ -20,6 +20,7 @@ test = false
 bench = false
 
 [dependencies]
+urmqtt-cfg = { path = "../../crates/cfg", features = ["alloc"] }
 urmqtt-store = { path = "../../crates/store" }
 
 [lints]
