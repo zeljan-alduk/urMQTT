@@ -1,4 +1,4 @@
-# Local WAN rig (ADR-216): one publisher and one subscriber, QoS 0, flood, 10 s after 2 s warm-up.
+# Local WAN rig (ADR-223): one publisher and one subscriber, QoS 0, flood, 10 s after 2 s warm-up.
 # Guest: production configuration (mkbench.sh --x11 --static), aarch64 HVF on a Mac, 4 vCPU. Peer: urmqtt-loadgen (Linux, SACK,
 # timestamps, window scaling) in a Docker container behind scripts/wan-bridge.c: RTT 10-15 ms (ping through the bridge), loss
 # applied to each direction. 'old' is main at 7f9517e (X11), 'final' is this tree. Columns: published/s delivered/s p50 ms.

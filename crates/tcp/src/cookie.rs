@@ -7,7 +7,7 @@
 //! carries them in the timestamp value of the SYN-ACK instead (`ts_encode`):
 //! a peer that offers timestamps echoes the value in the final ACK, where
 //! `ts_decode` reads the options back. A peer without timestamps gets neither
-//! (ADR-033, ADR-215).
+//! (ADR-033, ADR-222).
 
 use crate::siphash::SipHasher;
 

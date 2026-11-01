@@ -1,5 +1,5 @@
 /* A delaying L2 bridge between a QEMU `-netdev dgram` socket and a Linux TAP
- * device (PERF, ADR-215). Run in a Linux container with NET_ADMIN and
+ * device (PERF, ADR-222). Run in a Linux container with NET_ADMIN and
  * /dev/net/tun; a load generator in the same container reaches the guest
  * through the tap, so the guest sees a real Linux TCP peer at a chosen
  * round-trip time, loss and bottleneck rate instead of QEMU's slirp proxy.

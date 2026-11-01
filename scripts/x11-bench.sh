@@ -7,7 +7,7 @@
 #
 #   LABEL   urmqtt-prod | urmqtt-bench | mosquitto (any word; it names the file)
 #   SUITE   handshake | throughput | latency | fanout | idle | sweep | single  (default: all but sweep, single)
-#           single (ADR-214/215): one publisher and one subscriber, QoS 0, 64 B and 1 KiB, flood;
+#           single (ADR-221/215): one publisher and one subscriber, QoS 0, 64 B and 1 KiB, flood;
 #           with CONSOLE=1 every run also records the broker's console (watchdog reports, late
 #           ticks, steal, drops) and `$SYS` counters through scripts/x11-console.py
 #

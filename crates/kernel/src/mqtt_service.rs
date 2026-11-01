@@ -1279,7 +1279,7 @@ impl MqttService {
         // the drained list back over them forgot the request, and a subscriber
         // whose output buffer was full then never got another pass: every QoS 0
         // message to it was dropped until something else (a PINGRESP) woke it
-        // (ADR-216).
+        // (ADR-223).
         let mut again = core::mem::take(&mut self.ready);
         self.ready = ready;
         self.ready.append(&mut again);

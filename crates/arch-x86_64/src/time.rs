@@ -269,7 +269,7 @@ fn kvmclock_hz(src: &Sources) -> Option<u64> {
     out
 }
 
-// ---- KVM steal time (ADR-214) ----
+// ---- KVM steal time (ADR-221) ----
 
 const MSR_KVM_STEAL_TIME: u32 = 0x4b56_4d03;
 const KVM_FEATURE_STEAL_TIME: u32 = 1 << 5;

@@ -23,7 +23,7 @@
 //! - No TIME_WAIT. The client closes or is closed and the server forgets the
 //!   connection right after the final ACK; a late duplicate gets a RST
 //!   (server-side RST policy).
-//! - Out-of-order data is kept (PERF, ADR-215): a segment beyond a hole is
+//! - Out-of-order data is kept (PERF, ADR-222): a segment beyond a hole is
 //!   buffered in a small per-connection list of ranges (allocated on the first
 //!   one, freed when the hole fills, bounded per connection and per core),
 //!   answered at once with a duplicate ACK that carries SACK blocks when the

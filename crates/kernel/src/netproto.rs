@@ -33,7 +33,7 @@ const PING_TIMEOUT_MS: u64 = 2_000;
 /// Frames taken from the NIC per pass.
 const RX_BURST: usize = 64;
 /// Frames core 0 holds for a full NIC transmit queue before it stops taking
-/// them from the workers (ADR-216).
+/// them from the workers (ADR-223).
 const NIC_BACKLOG: usize = 4096;
 /// Spare frame buffers a core keeps once it has been quiet for `POOL_IDLE_MS`
 /// (a busy core keeps up to `POOL_MAX`): the pools do not hold megabytes of
@@ -74,7 +74,7 @@ fn new_tcp(addr: [u8; 4], ports: Vec<u16>) -> TcpStack {
             mss: 1460,
             rcv_wnd: 65535,
             // 1 MiB with window scaling (shift 5) for peers that offer it
-            // (ADR-215): a window must cover the bandwidth-delay product.
+            // (ADR-222): a window must cover the bandwidth-delay product.
             rcv_wnd_scaled: 1 << 20,
             max_conns: MAX_CONNS,
             tx_max: 64 * 1024,
@@ -490,7 +490,7 @@ fn dispatch(
     // reason to wait, not to drop: they stay here (up to NIC_BACKLOG) and
     // leave as the device frees descriptors; beyond that the rings fill and
     // the worker drops (counted). A dropped data frame costs the peer a round
-    // trip or more to recover (PERF, ADR-216).
+    // trip or more to recover (PERF, ADR-223).
     while let Some(f) = nic_q.front() {
         if net.queue(f.data.get(..f.len).unwrap_or(&[])).is_err() {
             break;

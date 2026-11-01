@@ -1,6 +1,6 @@
 ## PERF/ROBUST — single flow, QoS 0 overload and the watchdog (2026-11-01)
 
-Goal set after X11: find and fix the causes behind its findings. Decisions ADR-214 to ADR-217; numbers, method and the honest list of what is
+Goal set after X11: find and fix the causes behind its findings. Decisions ADR-221 to ADR-224; numbers, method and the honest list of what is
 left in `docs/PERFORMANCE.md` section 7; raw files `docs/perf-results/urmqtt-x11v-{before,after,step-*}.txt`, `mosquitto-x11v-same-session.txt`,
 `local-wan-rig.txt`.
 
@@ -8,7 +8,7 @@ left in `docs/PERFORMANCE.md` section 7; raw files `docs/perf-results/urmqtt-x11
 
 - A **lost wake-up** in `MqttService::poll` (the drained ready list overwrote the connections just put back): a subscriber that fell behind once was never served again, QoS 0 to it was dropped until a PINGRESP - "delivered 0/s" in 4 of 6 single-flow runs on the VPS. Fixed.
 - **TCP threw away every segment after a loss** (in-order receive only), had a 16 bit window, a 64 KiB send queue and counted ACKs instead of bytes. Now: bounded out-of-order queue per connection and per core, SACK blocks, window scaling / SACK / timestamps through the SYN cookie (options in the low bits of our timestamp value; stateless until the final ACK), send queue = 2 x cwnd up to 1 MiB, byte-counting congestion window. Host tests (16 new), fuzz target extended (2 M runs clean), H3 model test unchanged and passing.
-- The **dispatcher slept until the 10 ms tick** (no RX interrupt on virtio-net): 0-10 ms per pause. Now polls every 200 us while connections exist (ADR-217): ping through the rig 13.1 -> 7.4 ms.
+- The **dispatcher slept until the 10 ms tick** (no RX interrupt on virtio-net): 0-10 ms per pause. Now polls every 200 us while connections exist (ADR-224): ping through the rig 13.1 -> 7.4 ms.
 - Frames dropped for a full NIC queue: core 0 now holds up to 4 096; rings 2 048; spare frame buffers returned when quiet (this also repaired the `storm` smoke).
 - QoS 0 loss now **counted per cause** (`$SYS/broker/messages/dropped/*`, `frames/dropped/*`, `status`, a warning line per core per 10 s).
 - **Watchdog**: the budget is **running time** (late ticks, lock waits including a wait in progress, close-up 1 ms ticks for a long handler, confirmation at the next tick; KVM steal time read where the host offers it, Contabo's does not). Production `action = "drop"` unchanged.

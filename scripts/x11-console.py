@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reads the broker's console and counters over MQTT for a while (PERF, ADR-214/216).
+"""Reads the broker's console and counters over MQTT for a while (PERF, ADR-221/216).
 
     x11-console.py HOST PORT CERTDIR SECONDS [OUTFILE]
 

@@ -25,7 +25,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- PERF/ROBUST (ADR-214 to ADR-217): a subscriber whose output buffer filled was never served again until a keep-alive woke it (lost wake-up in the output loop); one TCP flow was slow because the stack dropped every segment after a loss, had a 16 bit window and counted ACKs instead of bytes, and the dispatcher slept until the next 10 ms tick; the 20 ms handler watchdog dropped healthy connections when the host stalled a vCPU (its budget is now running time). TCP gains an out-of-order queue, SACK, window scaling and timestamps (negotiated through the SYN cookie). QoS 0 loss is counted per cause in `$SYS`.
+- PERF/ROBUST (ADR-221 to ADR-224): a subscriber whose output buffer filled was never served again until a keep-alive woke it (lost wake-up in the output loop); one TCP flow was slow because the stack dropped every segment after a loss, had a 16 bit window and counted ACKs instead of bytes, and the dispatcher slept until the next 10 ms tick; the 20 ms handler watchdog dropped healthy connections when the host stalled a vCPU (its budget is now running time). TCP gains an out-of-order queue, SACK, window scaling and timestamps (negotiated through the SYN cookie). QoS 0 loss is counted per cause in `$SYS`.
 
 ### Changed
 

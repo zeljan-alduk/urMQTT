@@ -1,4 +1,4 @@
-//! Tests of the out-of-order range list (ADR-215).
+//! Tests of the out-of-order range list (ADR-222).
 
 use alloc::vec::Vec;
 

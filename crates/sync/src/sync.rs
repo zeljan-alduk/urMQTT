@@ -9,7 +9,7 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
-/// Contention accounting (ROBUST, ADR-214): a clock and a sink for the time a
+/// Contention accounting (ROBUST, ADR-221): a clock and a sink for the time a
 /// core spent waiting for a ticket. The kernel installs them at boot; the
 /// watchdog does not count that wait as the running handler's own time (the
 /// holder may be a virtual CPU the host has descheduled).

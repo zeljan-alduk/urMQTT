@@ -22,7 +22,7 @@
 //! resets, since nothing on that core can recover by itself. That hard cap
 //! is why no handshake budget exceeds 900 ms.
 //!
-//! # Running time, not elapsed time (ROBUST, ADR-214)
+//! # Running time, not elapsed time (ROBUST, ADR-221)
 //!
 //! A handler is judged on the time the core really spent in it. On a shared
 //! VPS the host can take the virtual CPU away for tens of milliseconds; the
@@ -226,13 +226,13 @@ struct Slot {
     step: AtomicU8,
     /// Reported (once per handler run).
     fired: AtomicBool,
-    /// Counted as excused (once per handler run, ADR-214).
+    /// Counted as excused (once per handler run, ADR-221).
     excused: AtomicBool,
     /// Over budget at one tick: it fires only if the handler is still
-    /// running, and still over, at the next one (ADR-214).
+    /// running, and still over, at the next one (ADR-221).
     suspect: AtomicBool,
     /// The handler has run long enough to be looked at closely: the tick
-    /// comes every [`FAST_TICK_NS`] until it returns (ADR-214).
+    /// comes every [`FAST_TICK_NS`] until it returns (ADR-221).
     fast: AtomicBool,
     /// Connection to abort once the handler returns (`drop`).
     drop: AtomicU64,

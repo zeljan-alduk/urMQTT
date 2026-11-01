@@ -1,4 +1,4 @@
-//! Data that arrived beyond a hole (PERF, ADR-215): a sorted list of
+//! Data that arrived beyond a hole (PERF, ADR-222): a sorted list of
 //! non-overlapping byte ranges, kept until the hole before them fills.
 //!
 //! The list is small (at most [`MAX_RANGES`] ranges) and allocated when the

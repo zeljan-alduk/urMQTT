@@ -57,7 +57,7 @@ pub mod time {
     };
 
     /// Steal time is a KVM x86 feature here; aarch64 has no host-reported
-    /// figure (the watchdog uses the late-tick estimate, ADR-214).
+    /// figure (the watchdog uses the late-tick estimate, ADR-221).
     pub fn steal_enable(_virt_to_phys: fn(usize) -> u64) -> bool {
         false
     }

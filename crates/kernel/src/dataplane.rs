@@ -34,7 +34,7 @@ use urmqtt_virtio::net::MTU_FRAME;
 
 pub const MSG_RING: usize = 512;
 /// Frames in flight between the dispatcher and a worker, each way. A window of
-/// 1 MiB is about 720 segments (ADR-215): the ring must hold a burst of it.
+/// 1 MiB is about 720 segments (ADR-222): the ring must hold a burst of it.
 pub const FRAME_RING: usize = 2048;
 /// Frame buffers a core keeps for reuse; extra ones are freed.
 pub const POOL_MAX: usize = 512;
@@ -215,7 +215,7 @@ impl Idle {
     }
 
     /// Sets how often a sleeping core polls its NIC (0: it does not). The
-    /// dispatcher asks for this while connections exist (ADR-216): without it
+    /// dispatcher asks for this while connections exist (ADR-223): without it
     /// the first frame after a pause in the traffic waits for the next 10 ms
     /// tick, and every round trip of a flow that pauses between bursts pays it.
     pub fn poll_wake(&mut self, ns: u64) {
@@ -279,8 +279,8 @@ impl Idle {
                 self.max_gap_ns / 1000
             );
         }
-        // What the core could tell about its own stalls (ADR-214) and the
-        // dispatcher's NIC backlog (ADR-216); a short line of its own.
+        // What the core could tell about its own stalls (ADR-221) and the
+        // dispatcher's NIC backlog (ADR-223); a short line of its own.
         // Only when there is something to see: a stall of 20 ms or more, steal the
         // host reports, 100 ms of lock waiting in the window, a NIC backlog. A VPS
         // with a noisy neighbour has late ticks in every window; that would be a
@@ -641,7 +641,7 @@ pub const DROP_SITES: [&str; 4] = ["steer", "worker_tx", "nic_tx", "nic_tx_local
 pub static DROPPED_BY: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
 /// QoS 0 messages not offered to another core because it was far behind
-/// (all cores), for `$SYS` (ADR-216).
+/// (all cores), for `$SYS` (ADR-223).
 pub static ROUTE_DROPPED: AtomicU64 = AtomicU64::new(0);
 
 /// The most frames core 0 held back for a full NIC queue in this window.

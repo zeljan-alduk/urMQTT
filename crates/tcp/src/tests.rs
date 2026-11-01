@@ -744,7 +744,7 @@ fn survives_heavy_loss() {
 #[test]
 fn connection_state_stays_small() {
     assert!(
-        // 96 before the out-of-order list, window scale and timestamps (ADR-215).
+        // 96 before the out-of-order list, window scale and timestamps (ADR-222).
         core::mem::size_of::<Conn>() <= 112,
         "{}",
         core::mem::size_of::<Conn>()

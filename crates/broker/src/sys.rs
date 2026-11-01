@@ -56,7 +56,7 @@ pub struct Handshakes {
     pub latency_max_ms: u64,
 }
 
-/// Messages and frames the broker did not deliver, by cause (PERF, ADR-216).
+/// Messages and frames the broker did not deliver, by cause (PERF, ADR-223).
 /// QoS 0 loss under overload is deliberate and bounded; it is also counted
 /// here, per cause, so that it is never silent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

@@ -1,4 +1,4 @@
-//! Options and loss recovery (ADR-215): window scaling, SACK and timestamps
+//! Options and loss recovery (ADR-222): window scaling, SACK and timestamps
 //! negotiated through the SYN cookie, and what a receiver does with data that
 //! arrives beyond a hole.
 

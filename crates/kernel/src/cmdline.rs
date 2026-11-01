@@ -116,9 +116,9 @@ pub enum DbTest {
     Watchdog,
     /// A handshake-class handler stays inside, then overruns, its own budget (ADR-071).
     WatchdogHandshake,
-    /// A stalled handler is not reported, a really overrunning one is (ADR-214).
+    /// A stalled handler is not reported, a really overrunning one is (ADR-221).
     WatchdogStall,
-    /// A handler that waits 50 ms for a lock is not reported (ADR-214).
+    /// A handler that waits 50 ms for a lock is not reported (ADR-221).
     WatchdogLockWait,
 }
 
