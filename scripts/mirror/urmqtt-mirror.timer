@@ -1,0 +1,20 @@
+# Starts urmqtt-mirror.service every hour (scripts/mirror/install.sh enables it).
+# Next runs: systemctl list-timers urmqtt-mirror.timer
+
+[Unit]
+Description=Hourly mirror of the urMQTT GitHub releases
+
+[Timer]
+# On the hour ...
+OnCalendar=hourly
+# ... plus up to five minutes at random, so the job does not call GitHub at :00
+# together with everything else.
+RandomizedDelaySec=5min
+# After downtime or a reboot, run once at once for the hours that were missed
+# instead of waiting for the next one.
+Persistent=true
+# systemd may delay a start by up to this to batch wake-ups; a minute is plenty exact.
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

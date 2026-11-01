@@ -1,0 +1,84 @@
+# One run of the release mirror (scripts/mirror-releases.py, docs/PLAN.md, C1e).
+# scripts/mirror/install.sh puts this file in /etc/systemd/system/; the timer
+# (urmqtt-mirror.timer) starts it every hour. By hand: systemctl start urmqtt-mirror
+# Log: journalctl -u urmqtt-mirror. Exit codes of the job: 0 fine, 1 operational
+# error (GitHub unreachable or rate limited, disk full, a download failed), 2 a
+# release failed verification (alert). Both make the unit "failed", so
+# `systemctl --failed` shows it and an OnFailure= drop-in can send the alert.
+#
+# GitHub token (optional, raises the API limit from 60 to 5000 requests an hour):
+# put it alone in /etc/urmqtt-mirror/github-token (root:urmqtt-mirror, 0640), then
+# `systemctl edit urmqtt-mirror` and repeat ExecStart= (an empty ExecStart= first)
+# with `--token-file /etc/urmqtt-mirror/github-token` added.
+
+[Unit]
+Description=Mirror urMQTT GitHub releases to the web root (minisign-verified)
+Documentation=https://github.com/zeljan-alduk/urMQTT/blob/main/docs/PLAN.md
+# The job talks to api.github.com: wait until the network is configured.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# The job runs once and exits; the timer starts it again.
+Type=oneshot
+# A dedicated unprivileged user (scripts/mirror/install.sh creates it). It owns
+# the web directory and nothing else.
+User=urmqtt-mirror
+Group=urmqtt-mirror
+# The script reads the release public key from /etc and writes only below --root.
+# --limit-rate is bytes per second (2 MiB/s): a 55 MB ISO takes about 30 seconds.
+ExecStart=/usr/bin/python3 /usr/local/lib/urmqtt-mirror/mirror-releases.py --root /var/www/aldotech.io/urmqtt/releases --pubkey /etc/urmqtt-mirror/minisign.pub --limit-rate 2097152
+# systemd sets $JOURNAL_STREAM for stdout and stderr, which makes the job prefix
+# its log lines with the journal priorities (<3> error, <4> warning, <6> info).
+# Python writes each line as it is logged, so a killed run still has its log.
+Environment=PYTHONUNBUFFERED=1
+
+# Never get in the web server's way: lowest CPU priority, idle I/O class and
+# idle CPU scheduling policy (the job only runs when the machine has nothing else to do).
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+# The job streams its downloads; this is a hard ceiling in case something goes wrong.
+MemoryMax=256M
+# One python and one minisign at a time.
+TasksMax=32
+# A run that is still going after an hour is hung (a normal one takes seconds, an
+# initial sync of many releases minutes). The default for Type=oneshot is no
+# timeout at all. Killing it is safe: its lock goes with it, the next run
+# empties .tmp, and nothing is ever visible under a final name half written.
+TimeoutStartSec=1h
+TimeoutStopSec=30s
+
+# Sandbox. The job needs the network, /etc (key, certificates), and the web directory.
+# No privilege can be gained through setuid programs or file capabilities.
+NoNewPrivileges=yes
+# The whole file system is read-only for this service ...
+ProtectSystem=strict
+# ... and home directories are not visible at all ...
+ProtectHome=yes
+# ... except this directory, the one place the job writes (releases.json,
+# <tag>/ and .tmp). The directory must exist when the service starts.
+ReadWritePaths=/var/www/aldotech.io/urmqtt/releases
+# Its own empty /tmp and /var/tmp.
+PrivateTmp=yes
+# No device nodes except the harmless ones (null, zero, random).
+PrivateDevices=yes
+# Kernel knobs, modules, logs, the clock, the host name and cgroups are read-only or hidden.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectControlGroups=yes
+# Only the socket families an HTTPS client needs (unix for name resolution).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# No new namespaces, no real-time scheduling, no setuid/setgid files, no personality() tricks.
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# No capabilities at all: it is an ordinary user's job.
+CapabilityBoundingSet=
+# Files are created 0644 and directories 0755 (the job also sets this itself):
+# the web server's user must be able to read what the mirror writes.
+UMask=0022
