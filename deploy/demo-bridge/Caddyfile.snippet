@@ -1,0 +1,23 @@
+# D1b: wss://aldo.tech/demo/mqtt -> the demo bridge (127.0.0.1:18090). NOT APPLIED ANYWHERE.
+#
+# Put it into the (site) snippet of the Caddyfile, before the catch-all `handle` (the same place as the mirror's
+# regions from scripts/mirror/caddy-apply.py), then:
+#   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && systemctl reload caddy
+# Taking it out again: delete the block, validate, reload. Only this path is proxied; /healthz of the bridge is
+# not reachable from outside.
+#
+# Caddy upgrades WebSockets by itself. Because the client is not one of Caddy's trusted_proxies (do not add
+# any), reverse_proxy REPLACES X-Forwarded-For with the real peer address, which is what the bridge counts
+# per-address limits by. The bridge checks the Origin header itself.
+	# BEGIN urMQTT demo bridge (D1b)
+	handle /demo/mqtt {
+		reverse_proxy 127.0.0.1:18090 {
+			flush_interval -1
+			header_down -Server
+			transport http {
+				dial_timeout 3s
+				response_header_timeout 15s
+			}
+		}
+	}
+	# END urMQTT demo bridge
