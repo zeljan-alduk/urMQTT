@@ -6,7 +6,7 @@
 #   scripts/mkiso.sh --universal --kernel-aarch64 ELF --kernel-x86_64 ELF --out ISO
 #                    [--cmdline STR] [--esp-out IMG] [--disk-out IMG]
 #                    [--install-cmdline STR] [--install-default]
-#                    [--diag-cmdline STR] [--diag-default] [--no-diag]
+#                    [--diag-cmdline STR] [--diag-default] [--no-diag] [--no-enroll]
 #
 # --universal (X10, ADR-043) builds ONE hybrid ISO for aarch64 UEFI, x86_64
 # UEFI and x86_64 BIOS: both kernels (urmqtt-<arch>.elf, ${ARCH} spelling of
@@ -62,6 +62,15 @@
 # depend on the configuration; the installer copies the booted slot into the
 # installed disk, whose limine.conf lists the module without a hash (ADR-217).
 #
+# The loaders' configuration is enrolled (H8, ADR-250): `limine enroll-config` writes
+# the blake2b of the exact limine.conf into each loader (BOOTAA64.EFI, BOOTX64.EFI and
+# the BIOS stage limine-bios.sys), which then refuses to start if the file it reads
+# differs by one byte ("CHECKSUM MISMATCH FOR CONFIG FILE"). The universal image has two
+# configurations, so two sets of loaders: the no-menu one of the installed disk's ESP and
+# the menu of the ISO. --no-enroll leaves the loaders as upstream ships them (the control
+# of the tamper tests, nothing else). Tools that edit an ISO's limine.conf (urmqtt-config
+# pack --iso) re-enroll the ISO's loaders; both configs end with a marker line they find.
+#
 # Timestamps and the FAT volume serial are fixed (SOURCE_DATE_EPOCH, default:
 # last commit time) so identical inputs produce an identical image.
 set -euo pipefail
@@ -70,7 +79,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 ARCH=${URMQTT_ARCH:-aarch64}
 KERNEL="" OUT="" CMDLINE="" ESP_OUT="" INSTALL_CMDLINE="install" INSTALL_DEFAULT=0
 UNIVERSAL=0 KERNEL_A64="" KERNEL_X86="" DISK_OUT="" LIVE="" DIAG_CMDLINE="diag" DIAG_DEFAULT=0 NO_DIAG=0
-CONFIG="" CONFIG_ROOT="" EMPTY_CONFIG=0
+CONFIG="" CONFIG_ROOT="" EMPTY_CONFIG=0 ENROLL=1
 while [[ $# -gt 0 ]]; do
     case $1 in
         --arch) ARCH=$2; shift 2 ;;
@@ -87,6 +96,7 @@ while [[ $# -gt 0 ]]; do
         --diag-cmdline) DIAG_CMDLINE=$2; shift 2 ;;
         --diag-default) DIAG_DEFAULT=1; shift ;;
         --no-diag) NO_DIAG=1; shift ;;
+        --no-enroll) ENROLL=0; shift ;;
         --config) CONFIG=$2; shift 2 ;;
         --config-root) CONFIG_ROOT=$2; shift 2 ;;
         --empty-config) EMPTY_CONFIG=1; shift ;;
@@ -215,8 +225,26 @@ if [[ $UNIVERSAL -eq 1 ]]; then
         [[ -n ${URMQTT_LIMINE_SERIAL:-} ]] && echo "serial: yes"
         CFG_MODULE="boot():/boot/urmqtt.cfg"
         entries urMQTT "$CMDLINE" ""
+        echo
+        echo "# end of limine.conf"
     } > "$TMP/limine.conf"
-    for f in BOOTAA64.EFI BOOTX64.EFI limine-bios.sys limine-bios-cd.bin; do cp "$ROOT/vendor/limine/$f" "$TMP/$f"; done
+    # enroll_loaders <dir> <limine.conf>: the loaders of the vendored Limine in <dir>, with the
+    # blake2b of <limine.conf> enrolled (copies only: vendor/limine stays as upstream ships it).
+    enroll_loaders() {
+        local dir=$1 conf=$2 f
+        mkdir -p "$dir"
+        for f in BOOTAA64.EFI BOOTX64.EFI limine-bios.sys; do
+            cp "$ROOT/vendor/limine/$f" "$dir/$f"
+            if [[ $ENROLL -eq 1 ]]; then
+                "$TMP/limine" enroll-config --quiet "$dir/$f" "$(blake2b "$conf")" \
+                    || { echo "error: limine enroll-config failed on $f" >&2; exit 1; }
+            fi
+        done
+        TZ=UTC touch -t "$STAMP" "$dir"/*
+    }
+    enroll_loaders "$TMP/esp-ldr" "$TMP/limine.conf"
+    cp "$ROOT/vendor/limine/limine-bios-cd.bin" "$TMP/limine-bios-cd.bin"
+    cp "$TMP/esp-ldr/BOOTAA64.EFI" "$TMP/esp-ldr/BOOTX64.EFI" "$TMP/esp-ldr/limine-bios.sys" "$TMP/"
     cp "$KERNEL_A64" "$TMP/urmqtt-aarch64.elf"
     cp "$KERNEL_X86" "$TMP/urmqtt-x86-64.elf"
     TZ=UTC touch -t "$STAMP" "$TMP"/*.EFI "$TMP"/*.elf "$TMP"/limine.conf "$TMP"/limine-bios.sys "$TMP"/limine-bios-cd.bin "$TMP"/urmqtt.cfg "$TMP"/urmqtt-disk.cfg
@@ -268,7 +296,12 @@ if [[ $UNIVERSAL -eq 1 ]]; then
         if [[ $NO_DIAG -eq 0 ]]; then
             entries "Diagnostic: hardware detection and benchmarks" "$DIAG_CMDLINE" ""
         fi
+        echo
+        echo "# end of limine.conf"
     } >"$TMP/iso-limine.conf"
+    # The ISO's own loaders carry the menu's hash; the ones above (kept in $TMP for the
+    # installed disk's ESP, already built) carry the no-menu config's.
+    enroll_loaders "$TMP/iso-ldr" "$TMP/iso-limine.conf"
     # The ISO's own EFI system partition (El Torito, and the GPT partition of
     # the hybrid image) is what UEFI firmware boots from, so it carries the
     # menu and the installation image too: the installed disk's ESP above
@@ -278,10 +311,10 @@ if [[ $UNIVERSAL -eq 1 ]]; then
     outer_mib=$(( (outer_payload * 5 / 4 / 1048576) + 2 ))
     mformat -i "$OUTER" -C -T $(( outer_mib * 2048 )) -h 64 -s 32 -N 55524d51 -v URMQTT ::
     mmd -i "$OUTER" ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
-    mcopy -m -i "$OUTER" "$TMP/BOOTAA64.EFI" "$TMP/BOOTX64.EFI" ::/EFI/BOOT/
+    mcopy -m -i "$OUTER" "$TMP/iso-ldr/BOOTAA64.EFI" "$TMP/iso-ldr/BOOTX64.EFI" ::/EFI/BOOT/
     mcopy -m -i "$OUTER" "$TMP/iso-limine.conf" ::/EFI/BOOT/limine.conf
     mcopy -m -i "$OUTER" "$TMP/iso-limine.conf" ::/boot/limine/limine.conf
-    mcopy -m -i "$OUTER" "$TMP/limine-bios.sys" ::/boot/limine/limine-bios.sys
+    mcopy -m -i "$OUTER" "$TMP/iso-ldr/limine-bios.sys" ::/boot/limine/limine-bios.sys
     mcopy -m -i "$OUTER" "$TMP/urmqtt-aarch64.elf" "$TMP/urmqtt-x86-64.elf" ::/boot/
     mcopy -m -i "$OUTER" "$TMP/urmqtt.cfg" ::/boot/urmqtt.cfg
     mcopy -m -i "$OUTER" "$TMP/disk.img" ::/disk.img
@@ -292,10 +325,10 @@ if [[ $UNIVERSAL -eq 1 ]]; then
     mkdir -p "$TMP/iso/EFI/BOOT" "$TMP/iso/boot/limine" "$(dirname "$OUT")"
     cp "$OUTER" "$TMP/iso/esp.img"
     cp "$TMP/disk.img" "$TMP/iso/disk.img"
-    cp "$TMP/BOOTAA64.EFI" "$TMP/BOOTX64.EFI" "$TMP/iso/EFI/BOOT/"
+    cp "$TMP/iso-ldr/BOOTAA64.EFI" "$TMP/iso-ldr/BOOTX64.EFI" "$TMP/iso/EFI/BOOT/"
     cp "$TMP/iso-limine.conf" "$TMP/iso/EFI/BOOT/limine.conf"
     cp "$TMP/iso-limine.conf" "$TMP/iso/boot/limine/limine.conf"
-    cp "$TMP/limine-bios.sys" "$TMP/limine-bios-cd.bin" "$TMP/iso/boot/limine/"
+    cp "$TMP/iso-ldr/limine-bios.sys" "$TMP/limine-bios-cd.bin" "$TMP/iso/boot/limine/"
     cp "$TMP/urmqtt-aarch64.elf" "$TMP/urmqtt-x86-64.elf" "$TMP/wallpaper.png" "$TMP/urmqtt.cfg" "$TMP/iso/boot/"
     find "$TMP/iso" -exec env TZ=UTC touch -t "$STAMP" {} +
     xorriso -as mkisofs -quiet -iso-level 3 -R -V URMQTT \

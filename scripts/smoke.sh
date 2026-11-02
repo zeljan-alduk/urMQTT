@@ -2496,18 +2496,29 @@ universal_install() {
     done
 }
 
-# H8 (ADR-250, ADR-251): boot integrity. A modified kernel or configuration module
+# H8 (ADR-250, ADR-251): boot integrity. A modified kernel, configuration module or limine.conf
 # in a built image is refused by the loader itself, on each of the three machines the universal
 # image boots (aarch64 UEFI, x86_64 UEFI, x86_64 BIOS). The refusal is read from Limine's own
 # message: the test images are built with URMQTT_LIMINE_SERIAL=1 (Limine's messages on the
 # serial port; never set for a release image). Every refusal has a control that boots: the same
-# image with the kernel of the OTHER architecture changed (that machine does not read it).
+# image with the kernel of the OTHER architecture changed (that machine does not read it), and,
+# for the configuration, the same edit in an image built with --no-enroll.
 #
 # integrity_refused <label> <kind> <accel> <iso|disk> <file> <wait-for> <patterns...>
 integrity_refused() {
     local label=$1 kind=$2 accel=$3 how=$4 file=$5 pat=$6
     shift 6
     local log="$OUT/integrity-$label.log" status=0
+    if [[ $pat == - ]]; then
+        # The BIOS stage reads limine.conf before it knows to use the serial port, so a refused
+        # configuration is on the screen only: the machine must simply not boot in the time the
+        # control needs (SMOKE_REFUSE_WAIT, default 45 s), and the controls show it would.
+        # shellcheck disable=SC2046
+        TIMEOUT=${SMOKE_REFUSE_WAIT:-45} boot_until "$log" 'URMQTT BOOT' $(u_args "$kind" "$accel" "$how" "$file") --no-net || status=$?
+        [[ $status -eq 124 ]] && status=0 || status=1
+        check "integrity: $label refused (does not boot; message on screen only)" "$log" "$status" "NOT:URMQTT BOOT" "NOT:URMQTT READY" "$@"
+        return 0
+    fi
     # shellcheck disable=SC2046 # u_args prints a word list
     boot_until "$log" "$pat" $(u_args "$kind" "$accel" "$how" "$file") --no-net || status=$?
     check "integrity: $label refused" "$log" "$status" "$pat" "NOT:URMQTT BOOT" "NOT:URMQTT READY" \
@@ -2529,9 +2540,10 @@ integrity_boots() {
 }
 
 universal_integrity() {
-    local base="$OUT/integrity-base.iso" cfg="$OUT/integrity-urmqtt.cfg"
+    local base="$OUT/integrity-base.iso" noenr="$OUT/integrity-noenroll.iso" cfg="$OUT/integrity-urmqtt.cfg"
     local tamper="$ROOT/scripts/tamper.py"
     URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$base" "smoke"
+    URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$noenr" "smoke" --no-enroll
     # The ISO's configuration module, as a file, to find its copies in the image.
     rm -f "$cfg"
     xorriso -osirrox on -indev "$base" -extract /boot/urmqtt.cfg "$cfg" >/dev/null 2>&1 || true
@@ -2541,14 +2553,19 @@ universal_integrity() {
         return 0
     fi
     local t_a64="$OUT/integrity-tampered-aarch64.iso" t_x86="$OUT/integrity-tampered-x86.iso"
-    local t_cfg="$OUT/integrity-tampered-module.iso"
-    local d_a64="$OUT/integrity-tampered-aarch64.img" d_x86="$OUT/integrity-tampered-x86.img"
+    local t_cfg="$OUT/integrity-tampered-module.iso" t_conf="$OUT/integrity-tampered-conf.iso"
+    local t_conf_ne="$OUT/integrity-tampered-conf-noenroll.iso"
+    local d_a64="$OUT/integrity-tampered-aarch64.img" d_x86="$OUT/integrity-tampered-x86.img" d_conf="$OUT/integrity-tampered-conf.img"
     python3 -I "$tamper" "$base" --file "$KERNEL_A64" --out "$t_a64" >/dev/null
     python3 -I "$tamper" "$base" --file "$KERNEL_X86" --out "$t_x86" >/dev/null
     python3 -I "$tamper" "$base" --file "$cfg" --offset 5000 --out "$t_cfg" >/dev/null
+    # An attacker re-enabling the menu editor: a same-length edit of the one line that disables it.
+    python3 -I "$tamper" "$base" --replace "editor_enabled: no" "editor_enabled: on" --out "$t_conf" >/dev/null
+    python3 -I "$tamper" "$noenr" --replace "editor_enabled: no" "editor_enabled: on" --out "$t_conf_ne" >/dev/null
     # The raw disk image (the installed disk: ESP with the no-menu configuration).
     python3 -I "$tamper" "$base.disk" --file "$KERNEL_A64" --out "$d_a64" >/dev/null
     python3 -I "$tamper" "$base.disk" --file "$KERNEL_X86" --out "$d_x86" >/dev/null
+    python3 -I "$tamper" "$base.disk" --replace 'timeout: 0\nquiet: yes' 'timeout: 5\nquiet: yes' --out "$d_conf" >/dev/null
     local row name kind accel
     local rows=("aa64|aa64|${ACCELS%% *}" "x86-uefi|x86-uefi|tcg" "x86-bios|x86-bios|tcg")
     for row in "${rows[@]}"; do
@@ -2567,6 +2584,11 @@ universal_integrity() {
         integrity_boots "kernel-disk-$name control (other architecture's kernel changed)" "$kind" "$accel" disk "$other_disk"
         integrity_refused "module-iso-$name" "$kind" "$accel" iso "$t_cfg" \
             'PANIC: Blake2b hash for URI `boot\(\):/boot/urmqtt\.cfg` does not match'
+        local cpat='CHECKSUM MISMATCH FOR CONFIG FILE'
+        [[ $kind == x86-bios ]] && cpat=-
+        integrity_refused "conf-iso-$name" "$kind" "$accel" iso "$t_conf" "$cpat"
+        integrity_boots "conf-iso-$name control (same edit, config not enrolled)" "$kind" "$accel" iso "$t_conf_ne"
+        integrity_refused "conf-disk-$name" "$kind" "$accel" disk "$d_conf" "$cpat"
     done
 }
 
