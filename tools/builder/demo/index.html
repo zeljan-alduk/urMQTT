@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Try urMQTT live</title>
+<meta name="description" content="A real urMQTT broker you can use from your browser: connect, subscribe, publish and watch the messages. A shared toy; nothing private.">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="app.css?v=__V:app.css__">
+<style>
+  /* The standalone page (tests and local use): the colours and body of the site it normally sits in. */
+  :root { --bg: #f3f4f7; --card: #ffffff; --text: #25253a; --muted: #5d6078; --line: #dcdee8; --row: rgba(47,127,224,.06);
+    --blue: #2f7fe0; --link: #2670c8; --btn: #2670c8; --amber: #ffae2b; --ok: #1c7a47; --err: #b42f2f; --band: #2c2c44; color-scheme: light; }
+  @media (prefers-color-scheme: dark) {
+    :root { --band: #22223a; --bg: #15151f; --card: #1d1d2a; --text: #ecedf5; --muted: #a2a5ba; --line: #2c2d40; --row: rgba(106,168,245,.08); --link: #6aa8f5; --ok: #6fd39c; --err: #ff9c9c; color-scheme: dark; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.6 "Onest", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+  .standalone-band { background: var(--band); color: #f1f2f7; padding: 18px 0; }
+  .standalone-band div, main { max-width: 1160px; margin: 0 auto; padding: 0 20px; }
+</style>
+</head>
+<body>
+  <div class="standalone-band"><div>URMQTT LIVE DEMO (standalone page)</div></div>
+  <main>
+    <div id="urmqtt-demo" data-lang="en" data-base="./" data-broker="demo-mqtt.aldo.tech">
+      <noscript><p>This page needs JavaScript to run an MQTT client in your browser.</p></noscript>
+    </div>
+  </main>
+  <script src="app.js?v=__V:app.js__" defer></script>
+</body>
+</html>

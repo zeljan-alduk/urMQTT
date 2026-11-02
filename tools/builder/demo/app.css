@@ -1,0 +1,81 @@
+/* "Try urMQTT live". Scoped to .ud; it uses the colour variables of the site it sits in (--bg --card --text --muted
+   --line --row --link --btn --blue --ok --err --amber) with the same fallbacks as the builder's style (tools/builder/web/
+   app.css), so it follows the site's light and dark themes. */
+
+.ud {
+  --ud-card: var(--card, #fff);
+  --ud-text: var(--text, #25253a);
+  --ud-muted: var(--muted, #5d6078);
+  --ud-line: var(--line, #dcdee8);
+  --ud-row: var(--row, rgba(47, 127, 224, .06));
+  --ud-accent: var(--btn, #2670c8);
+  --ud-link: var(--link, #2670c8);
+  --ud-focus: var(--blue, #2f7fe0);
+  --ud-ok: var(--ok, #1c7a47);
+  --ud-err: var(--err, #b42f2f);
+  --ud-warn-bg: rgba(255, 174, 43, .14);
+  --ud-warn-line: var(--amber, #ffae2b);
+  --ud-code: rgba(127, 127, 150, .14);
+  color: var(--ud-text);
+  font: inherit;
+  line-height: 1.5;
+  padding-bottom: 48px;
+}
+.ud *, .ud *::before, .ud *::after { box-sizing: border-box; }
+.ud [hidden] { display: none !important; }
+.ud h1 { font-family: "Unbounded", "Unbounded Fallback", system-ui, sans-serif; font-weight: 600; font-size: clamp(26px, 4vw, 40px); line-height: 1.12; letter-spacing: -.02em; margin: 32px 0 14px; }
+.ud h2 { font-family: "Unbounded", "Unbounded Fallback", system-ui, sans-serif; font-weight: 600; font-size: 17px; line-height: 1.3; margin: 0 0 12px; }
+.ud p { margin: 0 0 10px; }
+.ud a { color: var(--ud-link); text-underline-offset: 2px; }
+.ud code { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--ud-code); border-radius: 4px; padding: 1px 5px; overflow-wrap: anywhere; }
+.ud :focus-visible { outline: 3px solid var(--ud-focus); outline-offset: 2px; border-radius: 4px; }
+.ud-lead { font-size: clamp(16px, 2vw, 18px); color: var(--ud-muted); max-width: 46em; }
+.ud-muted, .ud-hint { color: var(--ud-muted); }
+.ud-hint { font-size: 14px; margin: 4px 0 0; }
+
+.ud-warn { max-width: 56em; margin: 18px 0 24px; padding: 14px 18px; background: var(--ud-warn-bg); border: 1px solid var(--ud-warn-line); border-left-width: 5px; border-radius: 10px; }
+.ud-limits { margin: 0; padding-left: 20px; }
+.ud-limits li { margin: 6px 0; }
+
+.ud-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 16px; align-items: start; }
+.ud-card { background: var(--ud-card); border: 1px solid var(--ud-line); border-radius: 10px; padding: 18px; min-width: 0; }
+.ud-wide { margin-bottom: 16px; }
+@media (max-width: 900px) { .ud-grid { grid-template-columns: 1fr; } }
+
+.ud-field { margin: 0 0 12px; }
+.ud-field label { display: block; font-weight: 600; font-size: 14.5px; margin-bottom: 4px; }
+.ud input[type=text], .ud textarea, .ud select {
+  width: 100%; padding: 9px 11px; font: 15px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--ud-text);
+  background: var(--ud-card); border: 1px solid var(--ud-line); border-radius: 8px;
+}
+.ud textarea { resize: vertical; min-height: 70px; }
+.ud select { font-family: inherit; }
+.ud [aria-invalid=true] { border-color: var(--ud-err); }
+
+.ud-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.ud-between { justify-content: space-between; }
+.ud-between h2 { margin: 0; }
+.ud-btn { font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--ud-line); background: var(--ud-card); color: var(--ud-text); cursor: pointer; min-height: 40px; }
+.ud-btn:hover:not(:disabled) { border-color: var(--ud-accent); }
+.ud-btn:disabled { opacity: .5; cursor: not-allowed; }
+.ud-primary { background: var(--ud-accent); border-color: var(--ud-accent); color: #fff; }
+.ud-small { padding: 3px 10px; min-height: 28px; font-size: 13px; }
+
+.ud-status { font-weight: 600; padding: 8px 12px; border-radius: 8px; background: var(--ud-row); border-left: 4px solid var(--ud-muted); }
+.ud-status[data-state=ok] { border-left-color: var(--ud-ok); }
+.ud-status[data-state=error] { border-left-color: var(--ud-err); }
+.ud-status[data-state=busy] { border-left-color: var(--ud-warn-line); }
+.ud-error { color: var(--ud-err); font-weight: 600; min-height: 1.2em; margin: 8px 0 0; }
+.ud-subs { list-style: none; margin: 8px 0 0; padding: 0; }
+.ud-subs li { margin: 6px 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.ud-log { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow: auto; border-top: 1px solid var(--ud-line); }
+.ud-entry { padding: 7px 4px; border-bottom: 1px solid var(--ud-line); overflow-wrap: anywhere; }
+.ud-time { color: var(--ud-muted); font-variant-numeric: tabular-nums; font-size: 13px; }
+.ud-kind { display: inline-block; min-width: 5.5em; font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+.ud-sent .ud-kind { color: var(--ud-link); }
+.ud-received .ud-kind { color: var(--ud-ok); }
+.ud-error.ud-entry .ud-kind { color: var(--ud-err); }
+.ud-info .ud-kind { color: var(--ud-muted); }
+.ud-code { display: block; padding: 10px 12px; overflow: auto; white-space: pre; background: var(--ud-code); border-radius: 8px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+@media (prefers-reduced-motion: reduce) { .ud * { scroll-behavior: auto !important; transition: none !important; } }
