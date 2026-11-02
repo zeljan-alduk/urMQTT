@@ -52,7 +52,10 @@ fn a_hex_key_file_gives_the_same_blob_bytes() {
     let hex: String = key().iter().map(|b| format!("{b:02x}")).collect();
     let a = run(ENC, &key()).unwrap();
     let b = run(ENC, format!("{hex}\n").as_bytes()).unwrap();
-    assert_eq!(Blob::parse(&a).unwrap().bin(tag::ST_DISK_KEY), Blob::parse(&b).unwrap().bin(tag::ST_DISK_KEY));
+    assert_eq!(
+        Blob::parse(&a).unwrap().bin(tag::ST_DISK_KEY),
+        Blob::parse(&b).unwrap().bin(tag::ST_DISK_KEY)
+    );
 }
 
 #[test]

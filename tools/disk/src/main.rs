@@ -856,10 +856,11 @@ fn grow_cmd(path: &str, ratio: u32, write: bool, fault: Option<&str>) -> Result<
     }
     let window = Partition::new(dev, part.first_lba, part.sectors())
         .ok_or("data partition beyond the end")?;
-    let (mut disk, _) = Disk::open_keyed(Box::new(window), random, 8, KEY.get()).map_err(|e| match e {
-        DiskError::Layout(LayoutError::OldVersion(_)) => V1_HINT.to_string(),
-        e => key_error(e).unwrap_or_else(|| format!("data partition layout: {e:?}")),
-    })?;
+    let (mut disk, _) =
+        Disk::open_keyed(Box::new(window), random, 8, KEY.get()).map_err(|e| match e {
+            DiskError::Layout(LayoutError::OldVersion(_)) => V1_HINT.to_string(),
+            e => key_error(e).unwrap_or_else(|| format!("data partition layout: {e:?}")),
+        })?;
     match disk.grow(ratio).map_err(|e| format!("grow: {e:?}"))? {
         Some(g) => println!(
             "grow: layout {} MiB -> {} MiB, generation {}: database +{} MiB, telemetry +{} MiB ({}% database){}",
@@ -916,13 +917,24 @@ fn convert_cmd(
         mem_j = MemJournal::default();
         &mut mem_j
     };
-    let r = convert::convert(&mut part, from.as_ref(), to.as_ref(), j, resume, |done, total| {
-        eprint!("\rconverted {} of {} MiB", mib(done), mib(total));
-    })?;
+    let r = convert::convert(
+        &mut part,
+        from.as_ref(),
+        to.as_ref(),
+        j,
+        resume,
+        |done, total| {
+            eprint!("\rconverted {} of {} MiB", mib(done), mib(total));
+        },
+    )?;
     eprintln!();
     println!(
         "{}: {} MiB rewritten, {} chunk(s) of 1 MiB were empty{}{}",
-        if write { "done" } else { "dry run on an overlay (nothing written)" },
+        if write {
+            "done"
+        } else {
+            "dry run on an overlay (nothing written)"
+        },
         mib(r.sectors_rewritten),
         r.chunks_skipped,
         if r.resumed { ", resumed" } else { "" },
@@ -1195,7 +1207,8 @@ fn run(args: &[String]) -> Result<(), String> {
             .and_then(|i| args.get(i + 1).cloned())
     };
     if let Some(k) = opt("--key") {
-        KEY.set(load_key(&k)?).map_err(|_| "--key given twice".to_string())?;
+        KEY.set(load_key(&k)?)
+            .map_err(|_| "--key given twice".to_string())?;
     }
     let pos: Vec<&String> = {
         let mut v = Vec::new();

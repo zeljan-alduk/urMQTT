@@ -21,6 +21,8 @@
 //! scrambles one 16-byte block of plaintext (the CRCs above catch it), and
 //! an attacker with two snapshots can swap or roll back sectors.
 
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -156,10 +158,10 @@ fn mul_alpha(t: [u8; 16]) -> [u8; 16] {
         *o = (i << 1) | carry;
         carry = i >> 7;
     }
-    if carry != 0 {
-        if let Some(b) = r.first_mut() {
-            *b ^= 0x87;
-        }
+    if carry != 0
+        && let Some(b) = r.first_mut()
+    {
+        *b ^= 0x87;
     }
     r
 }

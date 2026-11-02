@@ -13,8 +13,8 @@ use urmqtt_sync::sync::SpinLock;
 
 use crate::crypt::{CryptDev, DiskKey, KEY_BYTES};
 use crate::layout::{
-    BLOCK, CONVERT_LBA, CONVERT_MAGIC, FLAG_ENCRYPTED, FileKind, Layout, LayoutError, Params, Region, RegionKind, SB_SLOT_LBA, SECTOR,
-    SIZE_SLOT_LBA, SizeTable, Topology,
+    BLOCK, CONVERT_LBA, CONVERT_MAGIC, FLAG_ENCRYPTED, FileKind, Layout, LayoutError, Params,
+    Region, RegionKind, SB_SLOT_LBA, SECTOR, SIZE_SLOT_LBA, SizeTable, Topology,
 };
 
 /// A 512-byte-sector block device (virtio-blk in the kernel, memory in tests).

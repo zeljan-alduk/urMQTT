@@ -21,6 +21,8 @@
 //! A sector that is all zero on the medium is a hole in both states (XTS
 //! layer, ADR-240) and stays one; so do sectors that decrypt to zeros.
 
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -102,7 +104,9 @@ impl Journal for FileJournal {
         }
         let first = u64::from_le_bytes(body[..8].try_into().map_err(|_| "journal")?);
         let len = u64::from_le_bytes(body[8..16].try_into().map_err(|_| "journal")?) as usize;
-        let raw = body.get(16..16 + len).ok_or("the journal file is damaged")?;
+        let raw = body
+            .get(16..16 + len)
+            .ok_or("the journal file is damaged")?;
         Ok(Some((first, raw.to_vec())))
     }
     fn clear(&mut self) -> Res<()> {
@@ -192,10 +196,10 @@ fn transform(raw: &[u8], first: u64, from: Option<&DiskKey>, to: Option<&DiskKey
         if let Some(k) = from {
             k.sector(lba, s, false);
         }
-        if let Some(k) = to {
-            if s.iter().any(|&b| b != 0) {
-                k.sector(lba, s, true);
-            }
+        if let Some(k) = to
+            && s.iter().any(|&b| b != 0)
+        {
+            k.sector(lba, s, true);
         }
         // Plain sectors that are all zero were holes or written zeros; as a
         // hole they stay zero in either state.
@@ -239,8 +243,8 @@ pub fn convert(
     let cf = check_of(kf.as_ref(), &layout.uuid);
     let ct = check_of(kt.as_ref(), &layout.uuid);
     let rec = Record::decode(&read_block(dev, CONVERT_LBA)?)?;
-    let at_from = layout.encrypted() == from.is_some()
-        && (from.is_none() || layout.key_check == cf);
+    let at_from =
+        layout.encrypted() == from.is_some() && (from.is_none() || layout.key_check == cf);
     let at_to = layout.encrypted() == to.is_some() && (to.is_none() || layout.key_check == ct);
 
     let (mut next, resumed) = match rec {
@@ -252,7 +256,9 @@ pub fn convert(
                 return Err("the disk is encrypted: give its key with --key".into());
             }
             if !layout.encrypted() && from.is_some() {
-                return Err("the disk is not encrypted: --key is only for an encrypted disk".into());
+                return Err(
+                    "the disk is not encrypted: --key is only for an encrypted disk".into(),
+                );
             }
             if !at_from {
                 return Err("the key does not match this disk".into());

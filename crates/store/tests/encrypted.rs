@@ -95,7 +95,7 @@ fn a_keyed_blank_disk_is_formatted_encrypted_and_reopens_only_with_its_key() {
     assert_eq!(how, urmqtt_store::Opened::Existing);
     let (log, info) = TelemetryLog::open(&mut d, NOW, RET).unwrap();
     drop(log);
-    assert!(format!("{info:?}").len() > 0);
+    let _ = info;
     // Reading the ring back through the layer gives the payload.
     let mut buf = vec![0u8; 64 * 1024];
     d.read_at(RegionKind::Telemetry, 4096, &mut buf).unwrap();

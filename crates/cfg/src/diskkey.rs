@@ -36,7 +36,11 @@ pub fn parse_key_file(file: &[u8]) -> Result<[u8; KEY_BYTES], KeyError> {
     let mut digits = file.iter().filter(|b| !b.is_ascii_whitespace());
     let n = digits.clone().count();
     if n == 2 * KEY_BYTES && digits.clone().all(u8::is_ascii_hexdigit) {
-        let mut nib = || (digits.next().copied().unwrap_or(b'0') as char).to_digit(16).unwrap_or(0) as u8;
+        let mut nib = || {
+            (digits.next().copied().unwrap_or(b'0') as char)
+                .to_digit(16)
+                .unwrap_or(0) as u8
+        };
         for o in out.iter_mut() {
             let hi = nib();
             let lo = nib();
