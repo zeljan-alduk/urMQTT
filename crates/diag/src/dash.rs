@@ -536,12 +536,12 @@ fn crypto_lines(c: Option<&CryptoBench>) -> Vec<Line> {
         ),
         Line::Text(
             format!(
-                "AES-256-XTS (disk encryption) {}  {}",
+                "AES-XTS {}  disk encryption, {}",
                 fmt::rate_mib(c.aes_xts_mib_s),
                 if c.aes_xts_hardware {
-                    "hardware AES"
+                    "hw AES"
                 } else {
-                    "NO hardware AES: storage.encryption would be refused"
+                    "NO hw AES: refused"
                 }
             ),
             if c.aes_xts_hardware { TEXT } else { AMBER },
