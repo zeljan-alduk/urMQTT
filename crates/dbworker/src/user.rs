@@ -36,9 +36,13 @@ static HEAP: NoHeap = NoHeap;
 
 /// The stack protector's guard (`-Zstack-protector`); the kernel gives a
 /// fresh seed at every start.
+// SAFETY: the compiler's stack-protector code reads `__stack_chk_guard` by name; no other item has
+// it, and only `_start` writes it (once, single-threaded, before protected code runs again).
 #[unsafe(no_mangle)]
 pub static mut __stack_chk_guard: u64 = 0x0000_0a0d_5a5a_0000;
 
+// SAFETY: the compiler's epilogue calls `__stack_chk_fail` by name with the C ABI; no other item
+// has that name, and it never returns.
 #[unsafe(no_mangle)]
 pub extern "C" fn __stack_chk_fail() -> ! {
     exit(0xdead_0001)

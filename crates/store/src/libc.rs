@@ -69,6 +69,8 @@ unsafe fn contains(set: *const c_char, c: u8) -> bool {
 }
 
 #[unsafe(no_mangle)]
+// SAFETY (caller contract): the C contract of `strcspn`: `s` and `reject` are NUL-terminated;
+// `no_mangle` provides the symbol SQLite's C code links against (no libc in the image).
 pub unsafe extern "C" fn strcspn(s: *const c_char, reject: *const c_char) -> usize {
     let mut n = 0;
     loop {
@@ -114,6 +116,8 @@ pub unsafe extern "C" fn strchr(s: *const c_char, c: c_int) -> *mut c_char {
 }
 
 #[unsafe(no_mangle)]
+// SAFETY (caller contract): the C contract of `strrchr`: `s` is NUL-terminated; `no_mangle`
+// provides the symbol SQLite's C code links against (no libc in the image).
 pub unsafe extern "C" fn strrchr(s: *const c_char, c: c_int) -> *mut c_char {
     let want = c as u8;
     let mut found = core::ptr::null_mut();

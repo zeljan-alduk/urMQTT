@@ -88,6 +88,8 @@ fn record(op: usize, n: usize, cyc: u64) {
 }
 
 #[inline(always)]
+// SAFETY: the contract of `memcpy`/`memmove` (valid `dest`/`src` for `n` bytes); the only callers
+// are the shims below, which pass their own arguments unchanged. `memprof` builds only (dev).
 unsafe fn do_copy(dest: *mut u8, src: *const u8, n: usize) {
     unsafe {
         if OLD.load(Relaxed) {
@@ -99,6 +101,8 @@ unsafe fn do_copy(dest: *mut u8, src: *const u8, n: usize) {
 }
 
 #[inline(always)]
+// SAFETY: the contract of `memset` (`dest` valid for `n` bytes); the only callers are the `memset`
+// shim below, which passes its own arguments unchanged. `memprof` builds only (dev).
 unsafe fn do_set(dest: *mut u8, c: i32, n: usize) {
     unsafe {
         if OLD.load(Relaxed) {
@@ -169,6 +173,7 @@ static ARMED: AtomicBool = AtomicBool::new(false);
 #[inline(always)]
 fn srv<T>(f: impl FnOnce() -> T) -> T {
     ON.store(ARMED.load(Relaxed), Relaxed);
+    // SAFETY: `rdtsc` reads the time-stamp counter; always allowed in ring 0, touches no memory.
     let t0 = unsafe { _rdtsc() };
     let r = f();
     let dt = unsafe { _rdtsc() }.saturating_sub(t0 + OVH.load(Relaxed));
@@ -534,6 +539,7 @@ pub fn run(smoke: bool) -> ! {
     PAUSE_MS.store(if smoke { 0 } else { 9_000 }, Relaxed);
     let ovh = (0..2000)
         .map(|_| {
+            // SAFETY: `rdtsc` reads the time-stamp counter; always allowed in ring 0, touches no memory.
             let a = unsafe { _rdtsc() };
             let b = unsafe { _rdtsc() };
             b - a
@@ -541,10 +547,12 @@ pub fn run(smoke: bool) -> ! {
         .min()
         .unwrap_or(0);
     OVH.store(ovh, Relaxed);
+    // SAFETY: `rdtsc` reads the time-stamp counter; always allowed in ring 0, touches no memory.
     let (t0, n0) = (unsafe { _rdtsc() }, time::uptime_ns());
     while time::uptime_ns() < n0 + 100_000_000 {
         core::hint::spin_loop();
     }
+    // SAFETY: as above.
     let hz = (unsafe { _rdtsc() } - t0) * 10;
     info!(
         "memprof: rdtsc pair overhead {ovh} cycles, tsc {} MHz",

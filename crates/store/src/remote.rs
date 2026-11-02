@@ -182,6 +182,8 @@ pub struct sqlite3_backup {
     total: u32,
 }
 
+// SAFETY (caller contract): none beyond the C signature; there are no arguments, and the returned
+// pointer is to a `CString` in a static that is never freed.
 pub unsafe fn sqlite3_libversion() -> *const c_char {
     static VERSION: urmqtt_sync::sync::OnceCell<CString> = urmqtt_sync::sync::OnceCell::new();
     if let Some(v) = VERSION.get() {
@@ -202,6 +204,8 @@ pub unsafe fn sqlite3_libversion() -> *const c_char {
     VERSION.get().map_or(c"?".as_ptr(), |v| v.as_ptr())
 }
 
+// SAFETY (caller contract): stands in for the C function of that name (see the module doc): handles
+// are the live boxes this module made, strings NUL-terminated, out pointers writable.
 pub unsafe fn sqlite3_open_v2(
     filename: *const c_char,
     db: *mut *mut sqlite3,
@@ -263,6 +267,8 @@ pub unsafe fn sqlite3_close_v2(db: *mut sqlite3) -> c_int {
 }
 
 /// `sqlite3_db_config` for the boolean options (the C function is variadic).
+// SAFETY (caller contract): stands in for the C function of that name (see the module doc): handles
+// are the live boxes this module made, strings NUL-terminated, out pointers writable.
 pub unsafe fn db_config_flag(db: *mut sqlite3, option: c_int, on: c_int, out: *mut c_int) -> c_int {
     // SAFETY: a live connection box from `sqlite3_open_v2`.
     let d = unsafe { &*db };
@@ -297,6 +303,8 @@ pub unsafe fn sqlite3_extended_result_codes(db: *mut sqlite3, onoff: c_int) -> c
     }
 }
 
+// SAFETY (caller contract): stands in for the C function of that name (see the module doc): handles
+// are the live boxes this module made, strings NUL-terminated, out pointers writable.
 pub unsafe fn sqlite3_exec(
     db: *mut sqlite3,
     sql: *const c_char,
@@ -324,6 +332,8 @@ pub unsafe fn sqlite3_exec(
     }
 }
 
+// SAFETY (caller contract): stands in for the C function of that name (see the module doc): handles
+// are the live boxes this module made, strings NUL-terminated, out pointers writable.
 pub unsafe fn sqlite3_prepare_v3(
     db: *mut sqlite3,
     sql: *const c_char,
@@ -420,6 +430,8 @@ fn bind(stmt: *mut sqlite3_stmt, i: c_int, b: Bind<'_>) -> c_int {
     }
 }
 
+// SAFETY (caller contract): stands in for the C function of that name (see the module doc): handles
+// are the live boxes this module made, strings NUL-terminated, out pointers writable.
 pub unsafe fn sqlite3_bind_int64(stmt: *mut sqlite3_stmt, i: c_int, v: sqlite3_int64) -> c_int {
     bind(stmt, i, Bind::Int(v))
 }
@@ -545,6 +557,8 @@ pub unsafe fn sqlite3_step(stmt: *mut sqlite3_stmt) -> c_int {
     SQLITE_ROW
 }
 
+// SAFETY (caller contract): stands in for the C function of that name (see the module doc): handles
+// are the live boxes this module made, strings NUL-terminated, out pointers writable.
 pub unsafe fn sqlite3_reset(stmt: *mut sqlite3_stmt) -> c_int {
     // SAFETY: a live statement box.
     let s = unsafe { &mut *stmt };
@@ -574,6 +588,8 @@ pub unsafe fn sqlite3_reset(stmt: *mut sqlite3_stmt) -> c_int {
     SQLITE_OK
 }
 
+// SAFETY (caller contract): stands in for the C function of that name (see the module doc): handles
+// are the live boxes this module made, strings NUL-terminated, out pointers writable.
 pub unsafe fn sqlite3_clear_bindings(stmt: *mut sqlite3_stmt) -> c_int {
     // Bindings are cleared with the reset (which `db.rs` always makes
     // first): nothing more to do here.
@@ -648,6 +664,8 @@ fn column_bytes_of(stmt: *mut sqlite3_stmt, i: c_int) -> Option<(*const u8, usiz
     }
 }
 
+// SAFETY (caller contract): `stmt` is a live statement box; the returned pointer is valid until the
+// next step, reset or finalize of that statement, as in SQLite.
 pub unsafe fn sqlite3_column_text(stmt: *mut sqlite3_stmt, i: c_int) -> *const u8 {
     column_bytes_of(stmt, i).map_or(core::ptr::null(), |(p, _)| p)
 }
@@ -660,6 +678,8 @@ pub unsafe fn sqlite3_column_bytes(stmt: *mut sqlite3_stmt, i: c_int) -> c_int {
     column_bytes_of(stmt, i).map_or(0, |(_, n)| n as c_int)
 }
 
+// SAFETY (caller contract): stands in for the C function of that name (see the module doc): handles
+// are the live boxes this module made, strings NUL-terminated, out pointers writable.
 pub unsafe fn sqlite3_errmsg(db: *mut sqlite3) -> *const c_char {
     // SAFETY: a live connection box.
     let d = unsafe { &mut *db };
@@ -711,6 +731,7 @@ fn fetch_error(d: &mut sqlite3) -> c_int {
     }
 }
 
+// SAFETY (caller contract): none beyond the C signature; the pointer is into a static table.
 pub unsafe fn sqlite3_errstr(code: c_int) -> *const c_char {
     errstr(code).as_ptr()
 }
@@ -760,6 +781,8 @@ fn errstr(code: c_int) -> &'static CStr {
     }
 }
 
+// SAFETY (caller contract): stands in for the C function of that name (see the module doc): handles
+// are the live boxes this module made, strings NUL-terminated, out pointers writable.
 pub unsafe fn sqlite3_changes64(db: *mut sqlite3) -> sqlite3_int64 {
     // SAFETY: a live connection box.
     let d = unsafe { &*db };
@@ -775,6 +798,8 @@ pub unsafe fn sqlite3_changes64(db: *mut sqlite3) -> sqlite3_int64 {
 
 pub unsafe fn sqlite3_free(_p: *mut c_void) {}
 
+// SAFETY (caller contract): `_p` is ignored; nothing this module returns needs freeing (strings
+// are static or owned by their handle).
 pub unsafe fn sqlite3_backup_init(
     dest: *mut sqlite3,
     _dest_name: *const c_char,
@@ -802,6 +827,8 @@ pub unsafe fn sqlite3_backup_init(
     }
 }
 
+// SAFETY (caller contract): stands in for the C function of that name (see the module doc): handles
+// are the live boxes this module made, strings NUL-terminated, out pointers writable.
 pub unsafe fn sqlite3_backup_step(p: *mut sqlite3_backup, pages: c_int) -> c_int {
     // SAFETY: a live backup box.
     let b = unsafe { &mut *p };
@@ -821,6 +848,8 @@ pub unsafe fn sqlite3_backup_step(p: *mut sqlite3_backup, pages: c_int) -> c_int
     }
 }
 
+// SAFETY (caller contract): stands in for the C function of that name (see the module doc): handles
+// are the live boxes this module made, strings NUL-terminated, out pointers writable.
 pub unsafe fn sqlite3_backup_finish(p: *mut sqlite3_backup) -> c_int {
     if p.is_null() {
         return SQLITE_OK;

@@ -20,6 +20,7 @@ use rustls::{
     HandshakeKind, KeyLog, RootCertStore, ServerConfig, SignatureScheme,
 };
 use urmqtt_sync::sync::SpinLock;
+use zeroize::Zeroize;
 
 use crate::identity::{self, IdentityField};
 use crate::record::{self, Opened, RecordError, RecordLayer, Suite};
@@ -83,13 +84,92 @@ impl SinceSecs for UnixTime {
 
 // --- traffic secret capture (for our own KeyUpdate) -----------------------
 
-/// (ClientHello random, client traffic secret, server traffic secret).
-type CapturedSecrets = ([u8; 32], Option<[u8; 32]>, Option<[u8; 32]>);
+/// One handshake's captured secrets. A slot is wiped in place when it is
+/// taken, dropped or evicted: the table never moves an entry (no `remove`,
+/// no `swap_remove`), so no copy is left in the vacated tail of the vector.
+/// A reallocation of the vector frees the old buffer, and the allocator
+/// poisons freed blocks (ADR-170), so a copy there does not survive either.
+#[derive(Clone, Copy)]
+struct Slot {
+    live: bool,
+    client_random: [u8; 32],
+    client: Option<[u8; 32]>,
+    server: Option<[u8; 32]>,
+}
+
+impl Slot {
+    const VACANT: Self = Self {
+        live: false,
+        client_random: [0; 32],
+        client: None,
+        server: None,
+    };
+
+    /// Overwrites the slot with the vacant state (volatile, not elided).
+    fn wipe(&mut self) {
+        self.client_random.zeroize();
+        if let Some(c) = self.client.as_mut() {
+            c.zeroize();
+        }
+        if let Some(c) = self.server.as_mut() {
+            c.zeroize();
+        }
+        self.client = None;
+        self.server = None;
+        self.live = false;
+    }
+}
 
 /// Traffic secrets by ClientHello random, while handshakes are in flight.
 #[derive(Default)]
 struct Captured {
-    entries: Vec<CapturedSecrets>,
+    entries: Vec<Slot>,
+}
+
+impl Captured {
+    fn position(&self, cr: &[u8; 32]) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|e| e.live && &e.client_random == cr)
+    }
+
+    /// The slot for `cr`: an existing one, a vacant one, a new one, or (at
+    /// the bound) the oldest, wiped first.
+    fn slot_for(&mut self, cr: &[u8; 32]) -> Option<&mut Slot> {
+        let idx = match self.position(cr) {
+            Some(i) => i,
+            None => {
+                let i = match self.entries.iter().position(|e| !e.live) {
+                    Some(i) => i,
+                    None if self.entries.len() >= MAX_CAPTURED => {
+                        if let Some(first) = self.entries.first_mut() {
+                            first.wipe();
+                        }
+                        0
+                    }
+                    None => {
+                        self.entries.push(Slot::VACANT);
+                        self.entries.len() - 1
+                    }
+                };
+                let e = self.entries.get_mut(i)?;
+                *e = Slot::VACANT;
+                e.live = true;
+                e.client_random = *cr;
+                i
+            }
+        };
+        self.entries.get_mut(idx)
+    }
+
+    /// The secrets of `cr`, copied out; the slot is wiped.
+    fn take(&mut self, cr: &[u8; 32]) -> Option<([u8; 32], [u8; 32])> {
+        let i = self.position(cr)?;
+        let e = self.entries.get_mut(i)?;
+        let out = e.client.zip(e.server);
+        e.wipe();
+        out
+    }
 }
 
 /// Bound on concurrently captured handshakes (admission control keeps the
@@ -116,21 +196,11 @@ impl KeyLog for SecretCapture {
             return;
         }
         let mut g = SECRETS.lock();
-        let idx = match g.entries.iter().position(|e| e.0 == cr) {
-            Some(i) => i,
-            None => {
-                if g.entries.len() >= MAX_CAPTURED {
-                    g.entries.remove(0);
-                }
-                g.entries.push((cr, None, None));
-                g.entries.len() - 1
-            }
-        };
-        if let Some(e) = g.entries.get_mut(idx) {
+        if let Some(e) = g.slot_for(&cr) {
             if client {
-                e.1 = Some(s);
+                e.client = Some(s);
             } else {
-                e.2 = Some(s);
+                e.server = Some(s);
             }
         }
     }
@@ -141,14 +211,60 @@ impl KeyLog for SecretCapture {
 }
 
 fn take_secrets(client_random: &[u8; 32]) -> Option<([u8; 32], [u8; 32])> {
-    let mut g = SECRETS.lock();
-    let i = g.entries.iter().position(|e| &e.0 == client_random)?;
-    let (_, c, s) = g.entries.swap_remove(i);
-    Some((c?, s?))
+    SECRETS.lock().take(client_random)
 }
 
 fn drop_secrets(client_random: &[u8; 32]) {
     let _ = take_secrets(client_random);
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    fn all_zero(s: &Slot) -> bool {
+        s.client_random == [0; 32] && s.client.is_none() && s.server.is_none() && !s.live
+    }
+
+    #[test]
+    fn a_taken_or_dropped_entry_leaves_nothing_behind() {
+        let mut c = Captured::default();
+        for n in 0..5u8 {
+            let cr = [n + 1; 32];
+            let e = c.slot_for(&cr).unwrap();
+            e.client = Some([0xc0 + n; 32]);
+            e.server = Some([0xd0 + n; 32]);
+        }
+        assert_eq!(c.take(&[3; 32]), Some(([0xc2; 32], [0xd2; 32])));
+        assert_eq!(c.take(&[3; 32]), None, "taken once");
+        // The vacated slot is wiped in place, not merely unlinked.
+        assert!(all_zero(&c.entries[2]));
+        // A vacant slot is reused before the vector grows.
+        let before = c.entries.len();
+        c.slot_for(&[9; 32]).unwrap().client = Some([1; 32]);
+        assert_eq!(c.entries.len(), before);
+        // An entry with only one secret yields nothing and is still wiped.
+        assert_eq!(c.take(&[9; 32]), None);
+        assert!(c.entries.iter().all(|e| e.live || all_zero(e)));
+    }
+
+    #[test]
+    fn the_bound_evicts_the_oldest_and_wipes_it() {
+        let mut c = Captured::default();
+        for n in 0..MAX_CAPTURED {
+            let mut cr = [0u8; 32];
+            cr[..8].copy_from_slice(&(n as u64 + 1).to_le_bytes());
+            c.slot_for(&cr).unwrap().client = Some([0xaa; 32]);
+        }
+        assert_eq!(c.entries.len(), MAX_CAPTURED);
+        let mut cr = [0u8; 32];
+        cr[..8].copy_from_slice(&(u64::MAX).to_le_bytes());
+        let e = c.slot_for(&cr).unwrap();
+        // The evicted oldest slot was reused for the newcomer: nothing of it
+        // is left (no client secret).
+        assert!(e.client.is_none());
+        assert_eq!(c.entries.len(), MAX_CAPTURED);
+    }
 }
 
 // --- client certificate verification: roles and revocation ----------------

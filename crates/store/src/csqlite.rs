@@ -22,6 +22,8 @@ pub struct sqlite3_backup {
     _private: [u8; 0],
 }
 
+// SAFETY: the C declarations of the vendored SQLite amalgamation; each is called from `db.rs` /
+// `lib.rs` with live handles and NUL-terminated strings, as the C API requires.
 unsafe extern "C" {
     pub fn sqlite3_config(op: c_int, ...) -> c_int;
     pub fn sqlite3_initialize() -> c_int;

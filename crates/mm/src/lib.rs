@@ -166,6 +166,8 @@ unsafe impl GlobalAlloc for LockedHeap {
         p.map_or(core::ptr::null_mut(), NonNull::as_ptr)
     }
 
+    // SAFETY (caller contract): `GlobalAlloc::dealloc`: `ptr` came from this allocator's `alloc` with
+    // the same `layout` and is not used afterwards; the body forwards that contract.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         // SAFETY: forwarded GlobalAlloc contract.
         unsafe { self.dealloc_ex(ptr, layout, false) }

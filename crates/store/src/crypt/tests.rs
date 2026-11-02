@@ -126,3 +126,66 @@ fn xts_throughput() {
         );
     }
 }
+
+/// A second, deliberately naive XTS (u128 arithmetic for the tweak, one block
+/// at a time) against `DiskKey::sector`, over many sectors, both directions:
+/// an independent check of the whole 512 bytes, which the single IEEE vector
+/// block above does not give.
+#[test]
+fn agrees_with_a_naive_reference_over_many_sectors() {
+    use aes::Aes256;
+    use aes::cipher::generic_array::GenericArray;
+    use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+
+    fn reference(key: &[u8; KEY_BYTES], lba: u64, data: &mut [u8], enc: bool) {
+        let k1 = Aes256::new(GenericArray::from_slice(&key[..32]));
+        let k2 = Aes256::new(GenericArray::from_slice(&key[32..]));
+        let mut t = GenericArray::clone_from_slice(&{
+            let mut b = [0u8; 16];
+            b[..8].copy_from_slice(&lba.to_le_bytes());
+            b
+        });
+        k2.encrypt_block(&mut t);
+        let mut tw = u128::from_le_bytes(t.into());
+        for chunk in data.chunks_exact_mut(16) {
+            let mut x = [0u8; 16];
+            for (i, b) in x.iter_mut().enumerate() {
+                *b = chunk[i] ^ tw.to_le_bytes()[i];
+            }
+            let mut blk = GenericArray::clone_from_slice(&x);
+            if enc {
+                k1.encrypt_block(&mut blk);
+            } else {
+                k1.decrypt_block(&mut blk);
+            }
+            for (i, b) in chunk.iter_mut().enumerate() {
+                *b = blk[i] ^ tw.to_le_bytes()[i];
+            }
+            let carry = tw >> 127;
+            tw = (tw << 1) ^ (carry * 0x87);
+        }
+    }
+
+    let mut seed = 0x1234_5678_9abc_def0u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for round in 0..200u8 {
+        let k = key(round);
+        let dk = DiskKey::new(&k);
+        let lba = next();
+        let mut data = [0u8; 512];
+        for b in data.iter_mut() {
+            *b = next() as u8;
+        }
+        for enc in [true, false] {
+            let (mut a, mut b) = (data, data);
+            dk.sector(lba, &mut a, enc);
+            reference(&k, lba, &mut b, enc);
+            assert_eq!(a[..], b[..], "round {round} lba {lba} enc {enc}");
+        }
+    }
+}

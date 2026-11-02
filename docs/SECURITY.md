@@ -26,6 +26,7 @@ which says what it gives up.
 | Control signing key (Ed25519) | **Offline**, never in the image: a file on an operator machine (dev) or an HSM/KMS behind `urmqtt-control --sign-cmd` (prod). The image holds only the public key (`deploy/<env>/control.pub`). | Revoking, unrevoking and allowlisting devices at runtime. |
 | Trust anchors by role | `[trust] operational` and `bootstrap` CA lists, embedded | Which CA grants which rights; rotation with overlap. |
 | Plaintext accounts (P1, opt-in) | Salted PBKDF2 hashes in the image's configuration slot (ADR-231); the passwords are never stored | Logging in on the plaintext port as a device. The hashes are public to whoever holds the image: use long random passwords. |
+| Disk key (S7, opt-in) | In the image's configuration slot (`storage.disk_key`), and in RAM while the disk is open (the cipher's round keys, wiped on drop) | Reading a stolen volume or snapshot. Whoever has the ISO has it (ADR-240). |
 | Messages | In flight (RAM), retained and offline queues (SQLite), telemetry (log on the data disk) | Confidentiality and integrity of device data. |
 | Availability | — | The broker's purpose; the main target of a remote attacker. |
 
@@ -79,6 +80,31 @@ which says what it gives up.
 
 CI runs every fuzz target on every push (60 s each), and longer in the
 scheduled fuzz workflow.
+
+## STRIDE per component (H10)
+
+One row per component, one cell per threat class, each with what answers it.
+"—" means the class does not apply or is out of scope there; "**open**" means
+no adequate answer exists yet and the item is in [AUDIT.md](AUDIT.md) §5 or §6.
+S spoofing, T tampering, R repudiation, I information disclosure, D denial of
+service, E elevation of privilege.
+
+| Component | S | T | R | I | D | E |
+|---|---|---|---|---|---|---|
+| **Network stack** (Ethernet, ARP, IPv4, TCP) | forged SYN/ACK/RST: SYN cookies keyed (SipHash, rotating), RFC 5961 checks; **ARP and DHCP are unauthenticated on a shared segment (accepted, static addressing)** | segment injection: sequence and window checks, TLS above | — | none held: no state before the handshake | SYN, ACK, RST floods, slowloris: cookies, rate limits, per-address caps, admission (`tools/attack`) | a parser bug runs in ring 0: Rust, fuzzed (`net_frame`, `tcp_segment`), Kani, Miri |
+| **TLS 1.3** (rustls handshake, own record layer) | mutual TLS, identity from the certificate (CN or SAN URI), revocation list, trust anchors by role; no 0-RTT | AEAD records, per-record keys, fatal alerts | — | forward secret; tickets under random per-boot keys; traffic secrets wiped (H0-W2) | handshake admission, in-flight caps, heap reserve, watchdog budget | rustls and webpki are third party (§6); hand-over code fuzzed and conformance-tested |
+| **MQTT broker** (codec, sessions, ACL, retained) | identity fixed by the certificate; client id must match | packet and topic limits, validated UTF-8 | per-identity counters, logs without payloads | device-scoped ACL (`{id}`), reserved namespaces, `$SYS` only for operators | per-device publish rate, subscription, in-flight, queue and retained bounds (AUDIT §6b) | no code path from a message to anything but routing; ACL fuzzer |
+| **Control channel** (signed revoke/unrevoke, registry) | Ed25519 signature from an offline key; only listed service identities may publish to it | sequence number, validity window, replay rejected; persisted | the sequence number and the log of each accepted message | — | verification before any work; rate limited like any publish | revocation is the only effect; unrevocation is off by default (`allow_unrevoke`); **theft of the signing key and a service identity is a residual risk** |
+| **Operator surface** (`$SYS`, console) | operator identities by exact id over mutual TLS | four fixed commands (`help`, `status`, `log level`, `reboot`), anything else refused; output replayed from a bounded ring | every command is logged with the identity and the text, refused or not | metrics carry no payloads or secrets | at most 5 commands in a burst then one per 2 s; a slow reader loses lines, never blocks the broker; **`reboot` is a denial of service in the wrong hands, which is why operator ids are exact** | no shell and no way to run code; the log level is never above the build-time maximum |
+| **Plaintext listener** (P1, opt-in) | **not authenticated by design** beyond the chosen login mode; `auth = "ip"` trusts the source address (documented) | none: nothing protects the path | per-identity counters | none: plaintext; a login can be replayed | SYN-time allow-list, per-address and total caps, lock-out, small packets, own rate | the plaintext role has no service, operator or control rights |
+| **Configuration and image** (blob, ISO, builder page) | the blob is validated at every boot; signed form available; template ISO refuses to serve | tampered module refused by the loader's hash pin and the blob's fingerprint; **a rewritten ISO is not detected without Secure Boot (H8 open)** | — | the image holds the server key (and the disk key): treat it as a secret | an invalid blob stops boot (fail closed) | production ignores the kernel command line; the builder runs in the user's browser and sends nothing |
+| **Data volume** (layout, telemetry, backups) | UUID and CRC on every structure; a damaged or foreign partition is refused, never formatted | torn writes survive by design (A/B superblock, fault-injection loops); **a malicious rewrite of sectors is only detected by the CRCs** | — | optional AES-256-XTS (ADR-240): protects a stolen volume, not a stolen ISO | a full or failing disk: bounded ring, scrubbing, backup and restore | parsers fuzzed (`disk_layout`, `disk_backup`, `disk_crypt`, `telemetry_recover`); XTS has no integrity (sector swap and rollback are possible with write access to the volume) |
+| **SQLite worker** (EL0 / ring 3) | — | checked system calls, bounds on every offset and length | — | own address space; no kernel symbol, no allocator | 30 s overrun and fault restart the worker; a restart storm makes storage unavailable | a compromised worker cannot touch kernel memory (`worker-contain`); **the kernel trusts its answers (an empty revocation list un-revokes certificates), there is no KPTI** |
+| **Kernel** (memory, interrupts, boot) | — | W^X, locked page tables (**no test writes one**), guard pages, canary, KASLR, allocator checks | fault and panic reports redacted | no secret in logs or reports (`fault-secrets`, `panic-secret`) | watchdog and stuck-core reset | PAC, BTI, MTE (TCG only), poison on free; **no forward-edge CFI; the HHDM base is fixed** |
+| **Boot chain** (UEFI, Limine, kernel) | pinned by hash in `limine.conf`; **loaders not signed, config not enrolled: H8 open** | a flipped byte in the configuration module is refused (`config-tampered-refused`); **a modified kernel is untested** | — | — | a refused boot is the failure mode | the installer entry erases a disk for whoever can use the boot menu (physical or console access, which already allows that) |
+| **Time** (RTC, SNTP) | unauthenticated NTP: median of several servers, bounded steps; **NTS out of scope** | lower bound is the build time | — | — | a wrong date refuses handshakes (fail closed) | — |
+| **Observability** (syslog, statsd, console) | plain UDP to a collector on a private network (accepted) | — | rate-limited logs | no payloads, keys or certificates in any sink | per-CPU rings drop rather than block | — |
+| **Supply chain** (dependencies, build, release) | signed releases (minisign), SLSA provenance | reproducible builds (`make repro`), pinned toolchain and `Cargo.lock` | — | SBOM per release | — | 53 of 67 linked crate versions are cargo-vet exemptions, not audits (SUPPLY-CHAIN.md) |
 
 ## Control channel (H1)
 

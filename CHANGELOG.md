@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- H10: **the audit package** (`docs/AUDIT.md`: TCB and `unsafe` inventory with every site justified, the mitigation matrix and its tests, a bounds table for every network-reachable loop, build and test instructions, the proposed external audit scope, a red-team checklist with results), STRIDE per component in `SECURITY.md`, and the encryption-at-rest section of `CRYPTO.md`.
+
 - S8: fuzz targets for the backup headers (`disk_backup`) and for encrypted disks under wrong keys and damage (`disk_crypt`), golden images for layout 2.1 and for an encrypted disk, the data-disk format spec final (a section on what checks it).
 
 - S7: **encryption at rest** (ADR-240), optional and off by default. `storage.encryption = "aes-256-xts"` and `storage.disk_key` encrypt the data partition (AES-256-XTS per 512-byte sector, hardware AES required; blob format 4, written only when it is on). `urmqtt-disk encrypt | decrypt | rekey` convert a disk offline, resumable after a power cut; `--key FILE` opens an encrypted disk for every other command. Protects a stolen volume or snapshot, not a stolen ISO; XTS has no integrity. Not on the builder page yet.
@@ -37,6 +39,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- H0-W2: captured TLS traffic secrets are wiped in place when taken, dropped or evicted. The AES-XTS tweak step is branch-free.
 - PERF/ROBUST (ADR-221 to ADR-224): a subscriber whose output buffer filled was never served again until a keep-alive woke it (lost wake-up in the output loop); one TCP flow was slow because the stack dropped every segment after a loss, had a 16 bit window and counted ACKs instead of bytes, and the dispatcher slept until the next 10 ms tick; the 20 ms handler watchdog dropped healthy connections when the host stalled a vCPU (its budget is now running time). TCP gains an out-of-order queue, SACK, window scaling and timestamps (negotiated through the SYN cookie). QoS 0 loss is counted per cause in `$SYS`.
 
 ### Changed

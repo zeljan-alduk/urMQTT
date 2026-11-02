@@ -144,6 +144,8 @@ pub fn init(heap: &'static mut [u8], disk: Disk, platform: Platform) -> Result<(
 
 #[cfg(direct_vfs)]
 #[allow(unsafe_code)] // called by SQLite
+// SAFETY (caller contract): called by SQLite with the `msg` it owns, NUL-terminated and valid for
+// the call (null is checked); `ctx` is not used.
 unsafe extern "C" fn log_callback(_ctx: *mut c_void, code: c_int, msg: *const c_char) {
     if msg.is_null() {
         return;

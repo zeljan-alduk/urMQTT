@@ -1,3 +1,25 @@
+## H10 — Audit package (2026-11-02)
+
+SECURITY-PLAN H10, the last milestone of the first release's path. `docs/AUDIT.md` is now the audit package (it began as the H0 baseline).
+
+**Done**
+
+- **AUDIT.md:** a reading order, the system on one page, the TCB with fresh numbers (89 612 lines of own Rust in the image, 67 linked third-party crates, 889 `unsafe` sites, all justified), the inputs and their parsers (with the new disk and encryption targets), the mitigation matrix brought up to date (three "none" rows closed or restated honestly, §3b for everything added since H0), the nine questions answered at H10, every weakness with its status, the known limits and accepted risks (§6), **the table of every network-reachable loop and allocation with its bound and test (§6b, the H3 deliverable)**, build, run and test instructions (§7), the proposed external scope in ten areas (§8), and an internal red-team checklist of 31 attacks with results (§9).
+- **SECURITY.md:** a STRIDE table per component (14 components) and the disk key in the assets. **CRYPTO.md:** the AES-256-XTS section.
+- **`unsafe`:** the 108 sites that lacked a written justification (mostly `#[unsafe(no_mangle)]` and `link_section` attributes, a few `unsafe fn` with caller contracts) now have one; comments only, no behaviour changed.
+- **H0-W2 fixed:** the captured TLS traffic secrets were stored in a `Vec` and moved by `remove` and `swap_remove`, leaving copies. The table is now slot based: a slot is wiped in place when taken, dropped or evicted, a vacant slot is reused, and the bound evicts the oldest after wiping it (`capture_tests`).
+- **A test for the SQLite connection hardening** (`the_connection_hardening_is_in_force`): `trusted_schema`, `cell_size_check`, `synchronous`, `foreign_keys`, `DEFENSIVE` (through `writable_schema`) and no `load_extension`.
+- **XTS:** the tweak step is branch-free (the tweak is derived from the key) and a naive reference implementation now checks whole sectors in both directions; found while writing the CRYPTO section.
+
+**Tests**
+
+- `cargo test --workspace`, `make clippy-kernel`, `make check-x86`, `cargo fmt --check`, `make audit` (the inventory is current): `cargo test --workspace` green (including the new `capture_tests`, `the_connection_hardening_is_in_force` and the XTS reference test); `cargo clippy --workspace --all-targets -D warnings`, `make clippy-kernel`, `make check-x86` and both `cargo fmt --check` clean; `scripts/audit-inventory.py --check` current. Smoke `SMOKE_ONLY=hardening` on aarch64 (HVF and TCG) after the TLS and XTS changes: **32 passed, 0 failed** (the KASLR, stack, heap, panic and fault-secret scenarios, and the MTE ones under TCG). Not re-run for H10: the other smoke groups, the x86_64 suite, fuzzing, Miri, Kani, sanitizers, the red-team tools (their last results are in the entries of their milestones).
+
+**Open, and stated as such in AUDIT.md §5, §6 and §9**
+
+- H8: Secure Boot, signed loaders, TPM sealing; no test tampers with the kernel image. H4b: IOMMU. No fuzzing of PCI and virtio (H0-W9). No test that writes a page table after the lock (H0-W10). No constant-time measurement of P-256, X25519, Ed25519. No fuzzing of crafted SQLite files (H0-W8, contained by H6). 53 of 67 linked crates are vet exemptions. x86_64 is verified under QEMU TCG only.
+- The red-team results in §9 are the results the cited tests and tools reported when they last ran (the dates are in the milestones' entries); only the groups named in the run line below were re-run for H10.
+
 ## S8 — Documentation and hardening (2026-11-02)
 
 STORAGE-PLAN S8. No format change and no new behaviour; the storage track's documentation is final and its parsers are fuzzed.

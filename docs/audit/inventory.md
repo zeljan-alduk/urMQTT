@@ -6,31 +6,42 @@
 
 | Crate | Path | src lines | tests/ lines | unsafe sites (justified) | `unsafe_code` lint |
 |---|---|---:|---:|---:|---|
-| `urmqtt-arch` | `crates/arch` | 237 | 0 | 0 (0) | deny |
-| `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 2922 | 0 | 73 (73) | deny |
-| `urmqtt-attack` | `tools/attack` | 1007 | 0 | 0 (0) | default |
-| `urmqtt-broker` | `crates/broker` | 3770 | 0 | 0 (0) | forbid |
-| `urmqtt-config` | `crates/config` | 175 | 0 | 0 (0) | forbid |
-| `urmqtt-config-schema` | `crates/config-schema` | 1837 | 0 | 0 (0) | forbid |
+| `urmqtt-arch` | `crates/arch` | 396 | 0 | 0 (0) | deny |
+| `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 3631 | 0 | 101 (101) | deny |
+| `urmqtt-arch-x86_64` | `crates/arch-x86_64` | 6991 | 0 | 155 (155) | deny |
+| `urmqtt-attack` | `tools/attack` | 1010 | 0 | 0 (0) | default |
+| `urmqtt-broker` | `crates/broker` | 5868 | 729 | 0 (0) | forbid |
+| `urmqtt-builder-wasm` | `tools/builder/wasm` | 1186 | 0 | 29 (29) | deny |
+| `urmqtt-cfg` | `crates/cfg` | 4454 | 0 | 0 (0) | forbid |
+| `urmqtt-config` | `crates/config` | 1167 | 0 | 9 (9) | deny |
+| `urmqtt-config-schema` | `crates/config-schema` | 4876 | 0 | 0 (0) | forbid |
+| `urmqtt-config-tool` | `tools/config` | 1478 | 562 | 0 (0) | default |
 | `urmqtt-control` | `crates/control` | 609 | 0 | 0 (0) | forbid |
 | `urmqtt-control-tool` | `tools/control` | 416 | 0 | 0 (0) | default |
-| `urmqtt-disk-tool` | `tools/disk` | 679 | 0 | 0 (0) | default |
-| `urmqtt-dispatch` | `crates/dispatch` | 522 | 0 | 0 (0) | forbid |
-| `urmqtt-kernel` | `crates/kernel` | 8426 | 0 | 59 (42) | deny |
-| `urmqtt-loadgen` | `tools/loadgen` | 452 | 0 | 0 (0) | default |
-| `urmqtt-log` | `crates/log` | 655 | 0 | 5 (5) | deny |
-| `urmqtt-mm` | `crates/mm` | 1219 | 0 | 35 (35) | deny |
-| `urmqtt-mqtt` | `crates/mqtt` | 1354 | 234 | 0 (0) | forbid |
-| `urmqtt-net` | `crates/net` | 1380 | 0 | 0 (0) | deny |
-| `urmqtt-pci` | `crates/pci` | 439 | 0 | 0 (0) | deny |
-| `urmqtt-platform` | `crates/platform` | 1017 | 453 | 0 (0) | deny |
-| `urmqtt-store` | `crates/store` | 4849 | 752 | 119 (107) | deny |
-| `urmqtt-sync` | `crates/sync` | 435 | 0 | 16 (16) | deny |
-| `urmqtt-tcp` | `crates/tcp` | 3605 | 0 | 0 (0) | deny |
-| `urmqtt-timer-wheel` | `crates/timer-wheel` | 395 | 0 | 0 (0) | forbid |
-| `urmqtt-tls` | `crates/tls` | 3107 | 805 | 0 (0) | forbid |
-| `urmqtt-virtio` | `crates/virtio` | 1681 | 0 | 19 (19) | deny |
-| **total** | | **41188** | | **326 (297)** | |
+| `urmqtt-dbworker` | `crates/dbworker` | 172 | 0 | 22 (22) | default |
+| `urmqtt-diag` | `crates/diag` | 3114 | 0 | 0 (0) | deny |
+| `urmqtt-disk-tool` | `tools/disk` | 3001 | 866 | 0 (0) | default |
+| `urmqtt-dispatch` | `crates/dispatch` | 594 | 0 | 0 (0) | forbid |
+| `urmqtt-kernel` | `crates/kernel` | 17147 | 0 | 117 (117) | deny |
+| `urmqtt-loadgen` | `tools/loadgen` | 1200 | 0 | 0 (0) | default |
+| `urmqtt-log` | `crates/log` | 1882 | 128 | 12 (12) | deny |
+| `urmqtt-mm` | `crates/mm` | 2565 | 0 | 74 (74) | deny |
+| `urmqtt-mqtt` | `crates/mqtt` | 1436 | 234 | 0 (0) | forbid |
+| `urmqtt-net` | `crates/net` | 1914 | 0 | 0 (0) | deny |
+| `urmqtt-nistz256` | `crates/nistz256` | 1369 | 0 | 19 (19) | allow |
+| `urmqtt-pci` | `crates/pci` | 696 | 0 | 0 (0) | deny |
+| `urmqtt-plain` | `crates/plain` | 1202 | 0 | 0 (0) | forbid |
+| `urmqtt-platform` | `crates/platform` | 1940 | 922 | 0 (0) | deny |
+| `urmqtt-sntp` | `crates/sntp` | 1146 | 0 | 0 (0) | forbid |
+| `urmqtt-store` | `crates/store` | 12164 | 4611 | 302 (302) | deny |
+| `urmqtt-sync` | `crates/sync` | 484 | 0 | 19 (19) | deny |
+| `urmqtt-tcp` | `crates/tcp` | 5026 | 0 | 0 (0) | deny |
+| `urmqtt-timer-wheel` | `crates/timer-wheel` | 446 | 0 | 0 (0) | forbid |
+| `urmqtt-tls` | `crates/tls` | 4627 | 911 | 0 (0) | forbid |
+| `urmqtt-usys` | `crates/usys` | 477 | 0 | 8 (8) | default |
+| `urmqtt-virtio` | `crates/virtio` | 2458 | 0 | 19 (19) | deny |
+| `urmqtt-x25519` | `crates/x25519` | 821 | 0 | 3 (3) | default |
+| **total** | | **97963** | | **889 (889)** | |
 
 ## Vendored components
 
@@ -38,8 +49,8 @@
 |---|---|---|
 | SQLite amalgamation (C) | 3.54.1 | 254268 lines (sqlite3.c) |
 | libc headers for SQLite (C) | own | 53 lines in 7 headers |
-| RustCrypto cpufeatures, patched (vendor/README.md) | 0.2.17 | 642 lines |
-| RustCrypto cpufeatures, patched (vendor/README.md) | 0.3.1 | 565 lines |
+| RustCrypto cpufeatures, patched (vendor/README.md) | 0.2.17 | 675 lines |
+| RustCrypto cpufeatures, patched (vendor/README.md) | 0.3.1 | 598 lines |
 | Limine bootloader (binary) | v12.9.4 | BOOTAA64.EFI, 331776 bytes |
 
 ## Third-party crates in the kernel (`aarch64-unknown-none`, normal and build dependencies)
@@ -51,7 +62,6 @@
 | `aes-gcm` | 0.10.3 | 326 | linked |
 | `autocfg` | 1.5.1 | 830 | build script (build time) |
 | `base16ct` | 1.0.0 | 331 | linked |
-| `base64ct` | 1.8.3 | 1762 | build script (build time) |
 | `block-buffer` | 0.10.4 | 375 | linked |
 | `block-buffer` | 0.12.1 | 656 | linked |
 | `cc` | 1.10.0 | 10492 | build script (build time) |
@@ -93,13 +103,11 @@
 | `once_cell` | 1.21.4 | 2381 | linked |
 | `opaque-debug` | 0.3.1 | 78 | linked |
 | `p256` | 0.14.0 | 3090 | linked |
-| `pem-rfc7468` | 1.0.0 | 919 | build script (build time) |
 | `pkcs8` | 0.11.0 | 1021 | linked |
 | `poly1305` | 0.8.0 | 2677 | linked |
 | `polyval` | 0.6.2 | 1202 | linked |
 | `ppv-lite86` | 0.2.21 | 3642 | linked |
 | `primefield` | 0.14.0 | 2190 | linked |
-| `primeorder` | 0.14.0 | 2511 | linked |
 | `proc-macro2` | 1.0.107 | 5596 | proc-macro (build time) |
 | `quote` | 1.0.47 | 2439 | proc-macro (build time) |
 | `rand_chacha` | 0.3.1 | 844 | linked |
@@ -112,10 +120,6 @@
 | `rustls-webpki` | 0.103.16 | 9083 | linked |
 | `sec1` | 0.8.1 | 1094 | linked |
 | `semver` | 1.0.28 | 1917 | build script (build time) |
-| `serde` | 1.0.229 | 15575 | build script (build time) |
-| `serde_core` | 1.0.229 | 10994 | build script (build time) |
-| `serde_derive` | 1.0.229 | 8138 | build script (build time) |
-| `serde_spanned` | 1.1.2 | 337 | build script (build time) |
 | `sha2` | 0.10.9 | 2089 | linked |
 | `sha2` | 0.11.1 | 2610 | linked |
 | `shlex` | 2.0.1 | 771 | build script (build time) |
@@ -124,24 +128,17 @@
 | `spki` | 0.8.1 | 768 | linked |
 | `subtle` | 2.6.1 | 931 | linked |
 | `syn` | 2.0.119 | 47885 | proc-macro (build time) |
-| `syn` | 3.0.9 | 49509 | build script (build time) |
-| `toml` | 1.1.8+spec-1.1.0 | 8043 | build script (build time) |
-| `toml_datetime` | 1.1.2+spec-1.1.0 | 1258 | build script (build time) |
-| `toml_parser` | 1.1.5+spec-1.1.0 | 7055 | build script (build time) |
-| `toml_writer` | 1.1.3+spec-1.1.0 | 1015 | build script (build time) |
 | `typenum` | 1.20.1 | 17271 | linked |
 | `unicode-ident` | 1.0.27 | 962 | proc-macro (build time) |
 | `universal-hash` | 0.5.1 | 167 | linked |
 | `untrusted` | 0.9.0 | 367 | linked |
 | `version_check` | 0.9.5 | 1146 | build script (build time) |
-| `winnow` | 1.0.4 | 37651 | build script (build time) |
 | `wnaf` | 0.14.1 | 639 | linked |
-| `x25519-dalek` | 2.0.1 | 367 | linked |
 | `x509-cert` | 0.3.0 | 5623 | linked |
 | `zerocopy` | 0.8.63 | 31068 | linked |
 | `zeroize` | 1.9.1 | 973 | linked |
-| **total** | | **639762** (linked: 297675) | |
+| **total** | | **494628** (linked: 294797) | |
 
 ## Fuzz targets
 
-`acpi_parse`, `broker_input`, `config_parse`, `control_message`, `diff_aes_gcm`, `diff_chacha20poly1305`, `diff_crc32c`, `diff_sha256`, `diff_tls_record`, `disk_layout`, `fdt_parse`, `gpt_parse`, `mqtt_decode`, `net_frame`, `tcp_segment`, `telemetry_recover`, `tls_record`, `x509_identity`
+`acpi_parse`, `aml_s5`, `broker_input`, `cfg_blob`, `config_parse`, `control_message`, `diff_aes_gcm`, `diff_chacha20poly1305`, `diff_crc32c`, `diff_sha256`, `diff_tls_record`, `disk_backup`, `disk_crypt`, `disk_layout`, `fdt_parse`, `gpt_parse`, `mqtt_decode`, `net_frame`, `plain_input`, `tcp_segment`, `telemetry_recover`, `tls_record`, `x509_identity`

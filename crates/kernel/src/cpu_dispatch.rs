@@ -51,6 +51,8 @@ pub fn sealed_addr() -> u64 {
 /// Called by the vendored `cpufeatures` (RustCrypto): may target feature
 /// `name` be used? `false` before the seal, so nothing latches a hardware
 /// path early.
+// SAFETY: `urmqtt_cpu_has` is a unique symbol, looked up by name by the vendored `cpufeatures`;
+// its pointer and length are validated below (null, then UTF-8) before use.
 #[unsafe(no_mangle)]
 extern "C" fn urmqtt_cpu_has(name: *const u8, len: usize) -> bool {
     if name.is_null() {

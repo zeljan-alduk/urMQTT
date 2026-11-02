@@ -60,6 +60,8 @@ pub fn hhdm() -> u64 {
     HHDM.load(Ordering::Relaxed)
 }
 
+// SAFETY: these are linker-script symbols (kernel.ld) whose addresses are taken, never read as
+// `u8` values; they exist in every kernel image.
 unsafe extern "C" {
     static __text_start: u8;
     static __text_end: u8;

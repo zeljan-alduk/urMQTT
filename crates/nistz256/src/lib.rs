@@ -67,6 +67,8 @@ struct Aff {
     y: Limbs,
 }
 
+// SAFETY: symbols of the vendored assembly (vendor/nistz256/p256-x86_64-asm.S); each takes pointers
+// to 32-byte aligned `#[repr(C)]` values valid for the call; `_adx` ones only after `adx_bmi2`.
 unsafe extern "C" {
     fn urmqtt_nistz256_neg(res: *mut Limbs, a: *const Limbs);
     fn urmqtt_nistz256_mul_mont_nohw(res: *mut Limbs, a: *const Limbs, b: *const Limbs);

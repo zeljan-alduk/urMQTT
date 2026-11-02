@@ -27,6 +27,8 @@ use crate::{
 pub(crate) use arch::{ARCH, PRIVILEGE_LABEL};
 
 #[used]
+// SAFETY: `link_section` only places this static in the Limine request area; `#[used]` keeps it
+// and the bootloader scans it before the kernel runs. The type is `#[repr(C)]` per the protocol.
 #[unsafe(link_section = ".requests_start_marker")]
 static REQUESTS_START: RequestsStartMarker = RequestsStartMarker::new();
 #[used]
@@ -39,6 +41,8 @@ pub(crate) static BOOTLOADER: BootloaderInfoRequest = BootloaderInfoRequest::new
 #[unsafe(link_section = ".requests")]
 pub(crate) static HHDM: HhdmRequest = HhdmRequest::new();
 #[used]
+// SAFETY: `link_section` only places this static in the Limine request area; `#[used]` keeps it
+// and the bootloader scans it before the kernel runs. The type is `#[repr(C)]` per the protocol.
 #[unsafe(link_section = ".requests")]
 pub(crate) static MEMMAP: MemmapRequest = MemmapRequest::new();
 /// Ask Limine for x2APIC on x86 (all CPUs, if the CPU has it).
@@ -50,6 +54,8 @@ const MP_FLAGS: u64 = 0;
 #[unsafe(link_section = ".requests")]
 pub(crate) static MP: MpRequest = MpRequest::new(MP_FLAGS);
 #[used]
+// SAFETY: `link_section` only places this static in the Limine request area; `#[used]` keeps it
+// and the bootloader scans it before the kernel runs. The type is `#[repr(C)]` per the protocol.
 #[unsafe(link_section = ".requests")]
 static DTB: DtbRequest = DtbRequest::new();
 #[used]
@@ -58,6 +64,8 @@ static RSDP: RsdpRequest = RsdpRequest::new();
 /// Also read by the x86 entry stub when the CPU is below the baseline
 /// (`arch-x86_64::entry`), by this symbol: no Rust has run yet then.
 #[used]
+// SAFETY: `link_section` places the request in `.requests`, as above; `export_name` gives it the
+// one symbol the x86 entry stub reads before any Rust runs, and no other item has that name.
 #[unsafe(link_section = ".requests")]
 #[unsafe(export_name = "urmqtt_limine_framebuffer_request")]
 pub(crate) static FRAMEBUFFER: FramebufferRequest = FramebufferRequest::new();
@@ -72,6 +80,8 @@ static DATE_AT_BOOT: DateAtBootRequest = DateAtBootRequest::new();
 pub(crate) static EXECUTABLE_ADDRESS: ExecutableAddressRequest = ExecutableAddressRequest::new();
 /// The installation image (the ESP), loaded by the ISO's install entry (S1b).
 #[used]
+// SAFETY: `link_section` only places this static in the Limine request area; `#[used]` keeps it
+// and the bootloader scans it before the kernel runs. The type is `#[repr(C)]` per the protocol.
 #[unsafe(link_section = ".requests")]
 static MODULES: ModulesRequest = ModulesRequest::new();
 /// BIOS or UEFI (the diagnostic reports it).
@@ -92,6 +102,8 @@ pub struct EntropyRespData {
 /// Random 64-bit values from the bootloader's best source (EFI RNG, RNDR).
 pub(crate) const ENTROPY_VALUES: u64 = 8;
 #[used]
+// SAFETY: `link_section` only places this static in the Limine request area; `#[used]` keeps it
+// and the bootloader scans it before the kernel runs. The type is `#[repr(C)]` per the protocol.
 #[unsafe(link_section = ".requests")]
 // SAFETY: id and response layout follow the Limine protocol's Entropy feature.
 pub(crate) static ENTROPY: Request<EntropyRespData, u64> = unsafe {
@@ -147,6 +159,8 @@ enum StoragePlan {
 
 static STAGE2: SpinLock<Option<Stage2>> = SpinLock::new(None);
 
+// SAFETY: `urmqtt_kmain` is a unique symbol; the arch `_start` stubs call it once per boot, on
+// the boot CPU, with the C ABI and no arguments (see the comment above).
 #[unsafe(no_mangle)]
 extern "C" fn urmqtt_kmain() -> ! {
     // The console first on x86, so that every later failure can say why.

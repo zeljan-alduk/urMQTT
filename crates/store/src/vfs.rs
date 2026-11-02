@@ -442,6 +442,8 @@ mod c {
         }
     }
 
+    // SAFETY (caller contract): an SQLite VFS callback, reached only through the method tables below,
+    // with pointers SQLite owns (`f`, `buf`, `out`, `name`) that are valid for the call.
     unsafe extern "C" fn x_access(
         _vfs: *mut sqlite3_vfs,
         name: *const c_char,
@@ -506,6 +508,8 @@ mod c {
         UNIX_EPOCH_JD_MS + ms as i64
     }
 
+    // SAFETY (caller contract): an SQLite VFS callback, reached only through the method tables below,
+    // with pointers SQLite owns (`f`, `buf`, `out`, `name`) that are valid for the call.
     unsafe extern "C" fn x_current_time_int64(
         _vfs: *mut sqlite3_vfs,
         out: *mut sqlite3_int64,
@@ -529,6 +533,8 @@ mod c {
         0
     }
 
+    // SAFETY (caller contract): an SQLite VFS callback, reached only through the method tables below,
+    // with pointers SQLite owns (`f`, `buf`, `out`, `name`) that are valid for the call.
     unsafe extern "C" fn x_close(_f: *mut sqlite3_file) -> c_int {
         SQLITE_OK
     }
@@ -565,6 +571,8 @@ mod c {
         }
     }
 
+    // SAFETY (caller contract): an SQLite VFS callback, reached only through the method tables below,
+    // with pointers SQLite owns (`f`, `buf`, `out`, `name`) that are valid for the call.
     unsafe extern "C" fn x_write(
         f: *mut sqlite3_file,
         buf: *const c_void,
@@ -600,6 +608,8 @@ mod c {
         }
     }
 
+    // SAFETY (caller contract): an SQLite VFS callback, reached only through the method tables below,
+    // with pointers SQLite owns (`f`, `buf`, `out`, `name`) that are valid for the call.
     unsafe extern "C" fn x_truncate(f: *mut sqlite3_file, size: sqlite3_int64) -> c_int {
         // SAFETY: `f` is one of our files.
         let kind = unsafe { file_kind(f) };
@@ -623,6 +633,8 @@ mod c {
         }
     }
 
+    // SAFETY (caller contract): an SQLite VFS callback, reached only through the method tables below,
+    // with pointers SQLite owns (`f`, `buf`, `out`, `name`) that are valid for the call.
     unsafe extern "C" fn x_sync(_f: *mut sqlite3_file, _flags: c_int) -> c_int {
         match with(|v| v.disk.sync()) {
             Some(Ok(())) => SQLITE_OK,
@@ -658,6 +670,8 @@ mod c {
         SQLITE_NOTFOUND
     }
 
+    // SAFETY (caller contract): an SQLite VFS callback, reached only through the method tables below,
+    // with pointers SQLite owns (`f`, `buf`, `out`, `name`) that are valid for the call.
     unsafe extern "C" fn x_sector_size(_f: *mut sqlite3_file) -> c_int {
         512
     }
@@ -724,6 +738,8 @@ mod c {
 
     /// Called by `sqlite3_initialize` (`SQLITE_OS_OTHER`): registers our VFS
     /// as the default.
+    // SAFETY: `sqlite3_os_init` is the hook SQLite calls (SQLITE_OS_OTHER) from `sqlite3_initialize`;
+    // it is a unique symbol, the C code resolves by name, and it takes no arguments.
     #[unsafe(no_mangle)]
     pub extern "C" fn sqlite3_os_init() -> c_int {
         // SAFETY: `VFS` lives forever; SQLite takes ownership of `pNext`.

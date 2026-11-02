@@ -158,10 +158,10 @@ fn mul_alpha(t: [u8; 16]) -> [u8; 16] {
         *o = (i << 1) | carry;
         carry = i >> 7;
     }
-    if carry != 0
-        && let Some(b) = r.first_mut()
-    {
-        *b ^= 0x87;
+    // Branch-free: the tweak is derived from the key, so no condition may
+    // depend on it (`0u8 - carry` is 0xff for a carry of 1, 0 for none).
+    if let Some(b) = r.first_mut() {
+        *b ^= 0x87 & 0u8.wrapping_sub(carry);
     }
     r
 }

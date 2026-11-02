@@ -237,3 +237,42 @@ Resumption is confirmed in the server log as well as by the client. Not
 covered yet: an embedded MQTT client on real firmware (ESP-IDF, or Paho
 Embedded over mbedTLS on a device). Mbed TLS above is the library ESP-IDF
 uses, run on the host.
+
+## Encryption at rest: AES-256-XTS (S7, ADR-240)
+
+Separate from the TLS code; it protects the data partition, not traffic.
+
+- **Primitive.** AES-256 from the same RustCrypto `aes` crate and hardware
+  backends as the AES-GCM above (ARMv8 AES through the sealed dispatch, AES-NI);
+  the **XTS mode is ours** (`crates/store/src/crypt.rs`, about 60 lines):
+  IEEE 1619 with one 512-byte sector per data unit, the tweak the sector number
+  as a 64-bit little-endian integer encrypted under the second key, multiplied
+  by the primitive element of GF(2^128) for each 16-byte block. A sector is 32
+  blocks, so there is no ciphertext stealing. Checked against the first
+  ciphertext block of IEEE 1619 vector 10 (AES-256, data unit `0xff`, 512 bytes)
+  and, over the whole 512 bytes in both directions, against a naive reference (u128 tweak arithmetic, one block at a time) for 200 random keys and sectors; the other 31 blocks of the published vector are not compared.
+- **Key.** 64 bytes: the data key then the tweak key; the halves must differ
+  (XTS requires it) and the key must not be one repeated byte. It comes from
+  the configuration (`storage.disk_key`), 512 random bits and not a passphrase,
+  so there is no key derivation function. The superblock holds an HMAC-SHA-256
+  of a fixed label and the disk UUID under that key, so a wrong key is refused
+  before any sector is decrypted; the check tells a guesser nothing but yes or no.
+- **Zero ciphertext.** An all-zero sector on the medium is read as zeros and
+  never decrypted (holes: never written, discarded, zeroed). The chance that
+  real ciphertext is all zero is 2^-4096.
+- **What it does not give.** No authentication: a modified ciphertext sector
+  decrypts to noise in 16-byte blocks (the CRCs above find it) and sectors can be
+  swapped or rolled back. The tweak does not include a write counter, so the same
+  sector written twice with the same plaintext gives the same ciphertext (a
+  snapshot comparison shows *that* a sector changed, not what it holds). A
+  data unit of 512 bytes is far below the 2^20 blocks per key-and-tweak limit
+  that IEEE 1619 asks for.
+- **Hardware only.** The kernel refuses `storage.encryption` without AES
+  instructions (and with `[cpu] disable` turning them off) rather than run the
+  software implementation. Throughput: 3.1 GB/s per core in hardware against
+  0.25 GB/s in software on the measuring host (PERFORMANCE.md §9).
+- **Not measured:** constant-time behaviour of the XTS mode itself (the `aes`
+  crate's hardware backends are data-independent; the tweak multiplication is a
+  shift and a masked xor with no branch on the tweak, which is derived from the
+  key).
+

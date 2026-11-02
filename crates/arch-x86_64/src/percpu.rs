@@ -212,6 +212,8 @@ urmqtt_ap_entry:
 
 /// Gives the AP its own GDT/TSS, the shared IDT and its per-CPU pointer,
 /// then enters the kernel on its main stack.
+// SAFETY: `urmqtt_ap_prepare` is a unique symbol, called only by the AP start-up assembly above
+// (`call urmqtt_ap_prepare`) with a pointer to this CPU's `ApBoot`, which outlives the call.
 #[unsafe(no_mangle)]
 extern "C" fn urmqtt_ap_prepare(boot: &ApBoot) -> ! {
     let cpu = boot.cpu as usize;

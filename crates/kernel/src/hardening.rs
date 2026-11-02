@@ -131,12 +131,16 @@ pub mod stack_guard {
     const BUILD_TIME: usize = 0x0000_0aff_0d0a_0000;
 
     /// The symbol the compiler's prologue and epilogue read.
+    // SAFETY: the compiler's stack-protector prologue/epilogue reads `__stack_chk_guard` by name;
+    // no other item has that name, and it is an atomic, so reads racing a store are defined.
     #[unsafe(no_mangle)]
     #[allow(non_upper_case_globals)]
     pub static __stack_chk_guard: AtomicUsize = AtomicUsize::new(BUILD_TIME);
 
     /// Called by every protected epilogue whose canary does not match.
     /// Nothing about the frame is printed (ADR-172).
+    // SAFETY: the compiler's epilogue calls `__stack_chk_fail` by name with the C ABI when a canary
+    // differs; no other item has that name, and it never returns.
     #[unsafe(no_mangle)]
     #[cold]
     #[inline(never)]

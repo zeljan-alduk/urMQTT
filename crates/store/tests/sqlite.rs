@@ -343,3 +343,27 @@ fn rows_around_and_above_the_first_buffer_round_trip() {
         assert_eq!(got[i].qos, 1);
     }
 }
+
+/// H10 (audit, was gap in the mitigation matrix): the hardening flags the
+/// store sets on its connection are really in force, so a change that drops
+/// one is caught. `DEFENSIVE` is probed through its effect: with it on,
+/// `writable_schema` cannot be switched on.
+#[test]
+fn the_connection_hardening_is_in_force() {
+    let _g = lock();
+    let m = MemDisk::new(32 << 20);
+    let (s, _) = mount(&m);
+    let db = s.db();
+    assert_eq!(db.query_text("PRAGMA trusted_schema").unwrap(), "0");
+    assert_eq!(db.query_text("PRAGMA cell_size_check").unwrap(), "1");
+    assert_eq!(db.query_text("PRAGMA synchronous").unwrap(), "2"); // FULL
+    assert_eq!(db.query_text("PRAGMA foreign_keys").unwrap(), "1");
+    let _ = db.exec("PRAGMA writable_schema = ON");
+    assert_eq!(
+        db.query_text("PRAGMA writable_schema").unwrap(),
+        "0",
+        "DEFENSIVE must refuse writable_schema"
+    );
+    // No loadable extensions in this build (SQLITE_OMIT_LOAD_EXTENSION).
+    assert!(db.exec("SELECT load_extension('x')").is_err());
+}

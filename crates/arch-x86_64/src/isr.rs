@@ -119,6 +119,8 @@ pub fn set_handler(h: Handler) {
 
 /// Called by the common path with the saved state. Runs with interrupts
 /// off; returns to resume (only `int3` does).
+// SAFETY: `urmqtt_trap_dispatch` is a unique symbol, called only by the common-path assembly of
+// this file with the C ABI and a pointer to the `TrapFrame` it just saved on the stack.
 #[unsafe(no_mangle)]
 extern "C" fn urmqtt_trap_dispatch(frame: &mut TrapFrame) {
     let vector = Vector::from_index(frame.vector).unwrap_or(Vector::Other);

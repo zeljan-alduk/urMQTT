@@ -105,6 +105,8 @@ impl Store {
 }
 
 /// The interface version (`core::ABI_VERSION`).
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_abi_version() -> u32 {
     core::ABI_VERSION
@@ -117,6 +119,8 @@ pub extern "C" fn ub_format_version() -> u32 {
 }
 
 /// A zero-filled buffer of `len` bytes, or 0 if the memory cannot be had.
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_buf_new(len: u32) -> u32 {
     let Ok(n) = usize::try_from(len) else {
@@ -132,6 +136,8 @@ pub extern "C" fn ub_buf_new(len: u32) -> u32 {
 
 /// Where the buffer is in the module's memory (valid until the module's
 /// memory grows or the buffer is freed; ask again after any call).
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_buf_ptr(h: u32) -> u32 {
     with(|s| {
@@ -150,6 +156,8 @@ pub extern "C" fn ub_buf_len(h: u32) -> u32 {
     })
 }
 
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_buf_free(h: u32) {
     with(|s| {
@@ -164,6 +172,8 @@ pub extern "C" fn ub_buf_free(h: u32) {
 }
 
 /// The reason the last failed call failed (0 if none). The text is consumed.
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_error() -> u32 {
     with(|s| match s.last_error.take() {
@@ -177,6 +187,8 @@ pub extern "C" fn ub_schema() -> u32 {
     with(|s| s.done_text(Ok(core::schema())))
 }
 
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_default_toml() -> u32 {
     with(|s| s.done_text(Ok(core::default_toml())))
@@ -190,6 +202,8 @@ pub extern "C" fn ub_file_clear() {
 
 /// Makes `data` available to `ub_pack` under the name `name` (the name the
 /// TOML uses for it). Returns 1, or 0 on a bad handle.
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_file_put(name_h: u32, data_h: u32) -> u32 {
     with(|s| {
@@ -214,6 +228,8 @@ pub extern "C" fn ub_file_put(name_h: u32, data_h: u32) -> u32 {
 /// Packs the TOML in `toml_h` with the files given so far. `env_h` (0: none)
 /// is the environment name, `now_unix` the clock (seconds), `sign_h` (0: none)
 /// an Ed25519 PKCS#8 private key to sign with. Returns the blob.
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_pack(toml_h: u32, env_h: u32, now_unix: f64, sign_h: u32) -> u32 {
     with(|s| {
@@ -230,6 +246,8 @@ pub extern "C" fn ub_pack(toml_h: u32, env_h: u32, now_unix: f64, sign_h: u32) -
     })
 }
 
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_blob_info(blob_h: u32) -> u32 {
     with(|s| {
@@ -246,6 +264,8 @@ pub extern "C" fn ub_describe_all(blob_h: u32) -> u32 {
     })
 }
 
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_toml_to_json(text_h: u32) -> u32 {
     with(|s| {
@@ -262,6 +282,8 @@ pub extern "C" fn ub_cert_info(pem_h: u32) -> u32 {
     })
 }
 
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_key_info(pem_h: u32) -> u32 {
     with(|s| {
@@ -285,6 +307,8 @@ pub extern "C" fn ub_cross_check(cert_h: u32, key_h: u32, ca_h: u32) -> u32 {
     })
 }
 
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_control_key(pem_h: u32) -> u32 {
     with(|s| {
@@ -305,6 +329,8 @@ pub extern "C" fn ub_new_signing_key(seed_h: u32) -> u32 {
 /// the salt in `salt_h` (16 random bytes from the page) and `iterations`.
 /// **The password buffer is overwritten with zeros before this returns**, so
 /// the clear password does not stay in the module's memory.
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_hash_password(password_h: u32, salt_h: u32, iterations: u32) -> u32 {
     with(|s| {
@@ -322,6 +348,8 @@ pub extern "C" fn ub_signing_key_info(pem_h: u32) -> u32 {
     })
 }
 
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_iso_probe(iso_h: u32) -> u32 {
     with(|s| {
@@ -351,6 +379,8 @@ pub extern "C" fn ub_iso_configure(iso_h: u32, blob_h: u32) -> u32 {
     })
 }
 
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_iso_verify(iso_h: u32) -> u32 {
     with(|s| {
@@ -367,6 +397,8 @@ pub extern "C" fn ub_verify_release(pubkey_h: u32, sums_h: u32, sig_h: u32) -> u
     })
 }
 
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_minisign_key_id(pubkey_h: u32) -> u32 {
     with(|s| {
@@ -387,6 +419,8 @@ pub extern "C" fn ub_sha256(h: u32) -> u32 {
 }
 
 /// BLAKE2b-512 of a buffer (64 bytes), the hash Limine checks.
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_blake2b(h: u32) -> u32 {
     with(|s| {

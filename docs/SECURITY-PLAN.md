@@ -308,6 +308,8 @@ Plus an internal red-team checklist with results and fixes.
 
 **Accept:** an external auditor can build, boot and test everything without asking.
 
+**Status: done for the first release (VPS only)** (docs/PROGRESS.md, H10). `docs/AUDIT.md` is the package: the system and the TCB, the inputs and what bounds them, the mitigation matrix with its tests (and the protections with none), the weaknesses (fixed and open), the bounds on every network-reachable loop (§6b), build and test instructions (§7), the proposed external scope (§8), and the red-team checklist with results (§9); `SECURITY.md` has STRIDE per component, `CRYPTO.md` the S7 cipher. **Open and listed, not hidden:** H8 (Secure Boot, signed loaders, TPM sealing), H4b (IOMMU), fuzzing of PCI and virtio, a test for the page-table lock, constant-time evidence for P-256/X25519/Ed25519, fuzzing of crafted SQLite files.
+
 ---
 
 ## 4. Configuration additions
