@@ -40,7 +40,20 @@
 //! urmqtt-disk backup-restore DISK --write        replace the database by the newest intact snapshot
 //!                                                (the kernel does the same at boot when the database
 //!                                                is corrupt and storage.auto_restore is on)
+//! urmqtt-disk encrypt DISK --key-new FILE --write [--resume] [--journal FILE]
+//! urmqtt-disk decrypt DISK --key FILE --write [--resume] [--journal FILE]
+//! urmqtt-disk rekey DISK --key FILE --key-new FILE --write [--resume] [--journal FILE]
+//!                                                encryption at rest (S7): AES-256-XTS over the whole
+//!                                                data partition, offline. The VM must be stopped. The
+//!                                                disk is refused by the kernel until a run that was cut
+//!                                                is resumed (--resume, same keys); the journal (default
+//!                                                DISK.convert-journal) must be kept until then. Without
+//!                                                --write the run happens on an in-memory overlay
 //! ```
+//!
+//! `--key FILE` goes with every other command that reads an encrypted disk
+//! (`info`, `verify`, `export-*`, `scrub`, `backup*`, `grow`, `import-devices`):
+//! 64 raw bytes or 128 hex digits.
 //!
 //! Test hooks (images only): `fixture-v1 DISK [--populate] --write` builds a
 //! layout-v1 data partition (the kernel only reads v2), and `--fault SPEC`
@@ -58,6 +71,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use urmqtt_disk::config;
+use urmqtt_disk::convert::{self, FileJournal, Key, MemJournal};
 use urmqtt_disk::dev::{FileDisk, Overlay, S, Shared};
 use urmqtt_disk::host::{self, mib, now_unix, open_store};
 use urmqtt_disk::migrate;
@@ -111,12 +125,37 @@ fn name(e: &gpt::Entry) -> String {
 
 const V1_HINT: &str = "the data partition is layout v1; this tool and the kernel need v2: run `urmqtt-disk migrate DISK` (docs/DEPLOY.md)";
 
+/// The disk key given with `--key FILE`, for every command that opens the
+/// data partition.
+static KEY: std::sync::OnceLock<Key> = std::sync::OnceLock::new();
+
+fn key_error(e: DiskError) -> Option<String> {
+    Some(match e {
+        DiskError::KeyRequired => {
+            "the data partition is encrypted: give its key with --key FILE".into()
+        }
+        DiskError::WrongKey => "the key does not match this disk (--key FILE)".into(),
+        DiskError::NotEncrypted => {
+            "the data partition is not encrypted: leave out --key".into()
+        }
+        DiskError::ConversionPending => "an encrypt, decrypt or rekey run was interrupted: run it again with --resume and the same keys".into(),
+        _ => return None,
+    })
+}
+
+fn load_key(path: &str) -> Result<Key, String> {
+    let b = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    urmqtt_store::crypt::parse_key(&b).map_err(|e| {
+        format!("{path}: not a usable disk key ({e:?}): 64 raw bytes or 128 hex digits, two different halves")
+    })
+}
+
 fn open_layout(part: Partition) -> Result<Disk, String> {
-    match Disk::open(Box::new(part), || [0; 16]) {
+    match Disk::open_keyed(Box::new(part), || [0; 16], 8, KEY.get()) {
         Ok((d, Opened::Existing)) => Ok(d),
         Ok((_, Opened::Formatted)) => Err("the data partition is blank (never booted)".into()),
         Err(DiskError::Layout(LayoutError::OldVersion(_))) => Err(V1_HINT.into()),
-        Err(e) => Err(format!("data partition layout: {e:?}")),
+        Err(e) => Err(key_error(e).unwrap_or_else(|| format!("data partition layout: {e:?}"))),
     }
 }
 
@@ -817,9 +856,9 @@ fn grow_cmd(path: &str, ratio: u32, write: bool, fault: Option<&str>) -> Result<
     }
     let window = Partition::new(dev, part.first_lba, part.sectors())
         .ok_or("data partition beyond the end")?;
-    let (mut disk, _) = Disk::open_with(Box::new(window), random, 8).map_err(|e| match e {
+    let (mut disk, _) = Disk::open_keyed(Box::new(window), random, 8, KEY.get()).map_err(|e| match e {
         DiskError::Layout(LayoutError::OldVersion(_)) => V1_HINT.to_string(),
-        e => format!("data partition layout: {e:?}"),
+        e => key_error(e).unwrap_or_else(|| format!("data partition layout: {e:?}")),
     })?;
     match disk.grow(ratio).map_err(|e| format!("grow: {e:?}"))? {
         Some(g) => println!(
@@ -845,6 +884,56 @@ fn grow_cmd(path: &str, ratio: u32, write: bool, fault: Option<&str>) -> Result<
 }
 
 // --- scrub (S6) -----------------------------------------------------------------------
+
+fn convert_cmd(
+    path: &str,
+    from: Option<Key>,
+    to: Option<Key>,
+    write: bool,
+    resume: bool,
+    journal: Option<String>,
+    fault: Option<&str>,
+) -> Result<(), String> {
+    let mut dev: Box<dyn BlockDevice> = if write {
+        writable(path, fault)?
+    } else {
+        Box::new(Overlay::new(Box::new(FileDisk::open(path, false)?)))
+    };
+    let found = inspect(dev.as_mut())?;
+    let d = found.data.ok_or_else(|| {
+        format!("{path}: no urMQTT data partition (the image has not been booted yet)")
+    })?;
+    let mut part = Partition::new(dev, d.first_lba, d.sectors())
+        .ok_or_else(|| format!("{path}: data partition beyond the end of the disk"))?;
+    let mut file_j;
+    let mut mem_j;
+    let j: &mut dyn convert::Journal = if write {
+        file_j = FileJournal(PathBuf::from(
+            journal.unwrap_or_else(|| format!("{path}.convert-journal")),
+        ));
+        &mut file_j
+    } else {
+        mem_j = MemJournal::default();
+        &mut mem_j
+    };
+    let r = convert::convert(&mut part, from.as_ref(), to.as_ref(), j, resume, |done, total| {
+        eprint!("\rconverted {} of {} MiB", mib(done), mib(total));
+    })?;
+    eprintln!();
+    println!(
+        "{}: {} MiB rewritten, {} chunk(s) of 1 MiB were empty{}{}",
+        if write { "done" } else { "dry run on an overlay (nothing written)" },
+        mib(r.sectors_rewritten),
+        r.chunks_skipped,
+        if r.resumed { ", resumed" } else { "" },
+        if to.is_some() {
+            "; the disk is now encrypted: boot it with the key in the ISO's configuration (storage.disk_key)"
+        } else {
+            "; the disk is now plain"
+        }
+    );
+    Ok(())
+}
 
 fn scrub_cmd(path: &str) -> Result<(), String> {
     use urmqtt_store::scrub::{Finding, Scrubber};
@@ -1105,6 +1194,9 @@ fn run(args: &[String]) -> Result<(), String> {
             .position(|a| a == f)
             .and_then(|i| args.get(i + 1).cloned())
     };
+    if let Some(k) = opt("--key") {
+        KEY.set(load_key(&k)?).map_err(|_| "--key given twice".to_string())?;
+    }
     let pos: Vec<&String> = {
         let mut v = Vec::new();
         let mut skip = false;
@@ -1209,6 +1301,27 @@ fn run(args: &[String]) -> Result<(), String> {
             flag("--write"),
             opt("--fault").as_deref(),
         ),
+        Some(c @ ("encrypt" | "decrypt" | "rekey")) => {
+            let new = opt("--key-new").map(|k| load_key(&k)).transpose()?;
+            let old = KEY.get().copied();
+            let (from, to) = match (c, old, new) {
+                ("encrypt", None, Some(n)) => (None, Some(n)),
+                ("decrypt", Some(o), None) => (Some(o), None),
+                ("rekey", Some(o), Some(n)) => (Some(o), Some(n)),
+                ("encrypt", ..) => return Err("encrypt: give --key-new FILE (and no --key)".into()),
+                ("decrypt", ..) => return Err("decrypt: give --key FILE (and no --key-new)".into()),
+                _ => return Err("rekey: give --key FILE and --key-new FILE".into()),
+            };
+            convert_cmd(
+                arg(1, "DISK")?,
+                from,
+                to,
+                flag("--write"),
+                flag("--resume"),
+                opt("--journal"),
+                opt("--fault").as_deref(),
+            )
+        }
         Some("scrub") => scrub_cmd(arg(1, "DISK")?),
         Some("backup") => backup_cmd(arg(1, "DISK")?, flag("--write"), opt("--fault").as_deref()),
         Some("backup-extract") => backup_extract(
