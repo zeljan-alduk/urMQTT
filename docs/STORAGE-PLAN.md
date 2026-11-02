@@ -364,6 +364,14 @@ Each milestone ends with:
 
 **Accept:** the storage smoke set passes with encryption on; a wrong key gives a clear refusal; overhead ≤ 5 % on hardware with AES instructions, or a report of what dominates.
 
+**Status: done** (docs/PROGRESS.md, S7; ADR-240; docs/DISK-FORMAT.md §14). Deviations from the work list:
+- **One 512-byte sector per XTS data unit**, tweak = sector number, not one 4 KiB block: the store writes in device sectors, and a 4 KiB unit would make every 512-byte write a read-modify-write.
+- **An all-zero sector on the medium reads as zeros** (holes stay holes), so discard, zero-write and never-written space keep working.
+- **The key check is in the superblock's tail** (offset 3136), the flag is `flags` bit 1; no minor version.
+- **No hardware AES: refused**, Adiantum not built (ADR-240).
+- **The builder page does not offer it yet**; `urmqtt-config pack` does.
+- **The smoke set** runs the dedicated `storage-encrypted` scenario (all of its checks, on both architectures); the whole storage group was run with the unchanged plain configuration to show nothing regressed, not once more with encryption on.
+
 ### S8 — Documentation and hardening · S–M
 
 **Work**

@@ -101,3 +101,28 @@ fn wrapper_encrypts_all_but_the_superblock_and_keeps_holes_zero() {
     d.read(200, &mut back).unwrap();
     assert_eq!(back, [0u8; 4096]);
 }
+
+/// `cargo test -p urmqtt-store --release --lib crypt::tests::xts_throughput -- --ignored --nocapture`
+/// (S7 measurement; host CPU, the `aes` crate's best backend for it).
+#[test]
+#[ignore]
+fn xts_throughput() {
+    let dk = DiskKey::new(&key(9));
+    let mut buf = vec![0x5au8; 1 << 20];
+    for enc in [true, false] {
+        let rounds = 400;
+        let t = std::time::Instant::now();
+        for r in 0..rounds {
+            for (i, s) in buf.chunks_exact_mut(512).enumerate() {
+                dk.sector((r * 2048 + i) as u64, s, enc);
+            }
+        }
+        let secs = t.elapsed().as_secs_f64();
+        println!(
+            "xts {}: {:.0} MB/s (hardware_aes={})",
+            if enc { "encrypt" } else { "decrypt" },
+            rounds as f64 / secs * 1.048576,
+            hardware_aes()
+        );
+    }
+}

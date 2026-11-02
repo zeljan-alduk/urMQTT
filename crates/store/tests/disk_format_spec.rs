@@ -180,7 +180,10 @@ fn superblock_and_region_entries() {
     // Layout v2.1: the backup region carved from the database's tail.
     l = l.with_backup(0).unwrap();
     assert_eq!(l.minor, urmqtt_store::layout::MINOR);
-    l.flags = urmqtt_store::layout::FLAG_LEGACY_TELEMETRY;
+    // Encrypted (S7): the flag and a recognisable key check.
+    l.flags = urmqtt_store::layout::FLAG_LEGACY_TELEMETRY | urmqtt_store::layout::FLAG_ENCRYPTED;
+    let kc: Vec<u8> = (0..32u8).map(|i| 0xa0 + i).collect();
+    l.key_check.copy_from_slice(&kc);
     let b = l.encode();
     let mut regions = Vec::new();
     for (i, r) in l.regions.iter().enumerate() {
@@ -201,8 +204,9 @@ fn superblock_and_region_entries() {
     e.insert("generation", le64(l.generation));
     e.insert("partitions", le32(12));
     e.insert("align_sectors", le32(4096));
-    e.insert("flags", le32(1));
+    e.insert("flags", le32(3));
     e.insert("minor", le32(1));
+    e.insert("key_check", kc);
     e.insert("regions", regions);
     e.insert("crc", crc_of(&b, BLOCK));
     check("superblock", &b, &e, &BTreeMap::new());

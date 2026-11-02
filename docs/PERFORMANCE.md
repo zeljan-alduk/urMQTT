@@ -385,3 +385,28 @@ from sharing the cores with a flood of logins (the rate is also capped by `limit
   `Option` test on the connection-close path. No TLS-path row of sections 3 to 7 was re-measured on a VPS.
 
 Reproduce: `scripts/plain-bench.sh --runs 3` (needs a kernel from `make build ENV=dev` and the Mosquitto-free host tools only).
+
+## 9. Encryption at rest (S7, ADR-240)
+
+AES-256-XTS under the disk layer, one 512-byte sector per data unit. Numbers, with what they are.
+
+**XTS throughput, one core** (`cargo test -p urmqtt-store --release --lib crypt::tests::xts_throughput -- --ignored --nocapture`, Apple silicon host, 1 MiB of sectors in a loop, the `aes` crate):
+
+| Backend | Encrypt | Decrypt |
+|---|---|---|
+| ARMv8 AES (`--cfg aes_armv8`, as the kernel is built) | 3109 MB/s | 3103 MB/s |
+| software (no `--cfg`; what the kernel **refuses** to run) | 252 MB/s | 258 MB/s |
+
+x86_64 uses AES-NI through the `aes` crate's own runtime detection; it was **not measured on KVM or on the Intel PC** (the smoke scenario runs on TCG, whose timing means nothing).
+
+**The in-guest database benchmark** (`test=db-bench`, 5000 inserts in 50 transactions, aarch64 HVF, the same image with the configuration packed without and with `storage.encryption`, five runs each, interleaved; `SMOKE_ONLY=storage SMOKE_SCENARIOS=storage_encrypted_bench scripts/smoke.sh --accels hvf`):
+
+| | ops/s, five runs | median | µs per commit, median |
+|---|---|---|---|
+| off | 49239, 47401, 50802, 53417, 46531 | 49239 | 2030 |
+| on | 57790, 46173, 45939, 52787, 49632 | 49632 | 2014 |
+
+The spread between runs (46k to 58k) is larger than the difference between the medians (+0.8 %): **no overhead is measurable here**. That is what the arithmetic says too: this benchmark writes 1572 sectors-worth of 4 KiB blocks and 319 flushes per run, about 6 MB, which at 3 GB/s is about 2 ms of AES in a run of 100 ms; a commit waits for the flush, not for the cipher. The acceptance line (≤ 5 %) is met on this hardware. Not measured: telemetry throughput at the disk's limit, the backup benchmark and boot time with encryption on (the first boot of a blank disk formats the same regions either way), the x86_64 machines.
+
+**The offline conversion** (`urmqtt-disk encrypt`, 54 MiB partition with 12 MiB used, a file on an SSD): the unused 43 MiB are skipped as holes. Its cost is reading and writing the used part once, plus a flush per MiB.
+

@@ -1172,7 +1172,7 @@ Security is the first priority and wins conflicts with the other tracks.
 | ✅ | **S4** Discard | expired telemetry, truncated file tails and grown space are released (virtio-blk DISCARD, virtio-scsi UNMAP), within the device's limits, rate limited, never in front of a commit; a qcow2 with `discard=unmap` shrinks after retention (62 → 15 MiB mapped); recovery never trusts a released range; db-bench unchanged (NVMe/AHCI come with X13) |
 | ✅ | **S5** In-disk backup | layout v2.1 backup region carved from the database's tail with one superblock write (v2.0 disks keep working); A/B snapshots by SQLite's online backup API in 16-page steps (commits do not slow down: max 2.4 ms against 2.2 ms alone, the single-call copy would stall 445 ms); restore at boot when `quick_check` fails, a cut mid-restore is finished by the next boot; a power cut at every write of a backup leaves the previous slot intact |
 | ✅ | **S6** Scrubbing | idle scrub of the database, the backups and every telemetry record; injected bit flips are found, classified (damage, bad tail, bad header) and reported with their position; the I/O stays within the budget under load (measured); G8: boot reads the newest segment of each partition, not the ring (1.1 MiB for 5.8 MiB of records in the test) |
-| 📋 | **S7** Encryption at rest | optional AES-256-XTS with hardware AES, ≤ 5 % measured overhead |
+| ✅ | **S7** Encryption at rest | optional AES-256-XTS with hardware AES, offline `urmqtt-disk encrypt/decrypt/rekey`, measured overhead in PERFORMANCE |
 | 📋 | **S8** Docs & hardening | final format spec, fuzz targets and golden images for every version |
 
 **Platforms: x86_64, the multi-platform ISO and bare metal**: [PROMPT-x86_64.md](PROMPT-x86_64.md), plan in

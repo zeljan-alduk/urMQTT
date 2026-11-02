@@ -1141,6 +1141,38 @@ PY
     done
 }
 
+# S7 measurement (not a pass/fail check): the in-guest database benchmark and
+# the boot with encryption off and on, interleaved, SMOKE_BENCH_RUNS (5) runs
+# each. Reads the numbers out of the serial logs.
+storage_encrypted_bench() {
+    local dir="$OUT/encb" tool="$ROOT/target/debug/urmqtt-config" runs=${SMOKE_BENCH_RUNS:-5}
+    rm -rf "$dir"
+    mkdir -p "$dir/root"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool)
+    cp "$ROOT"/deploy/dev/* "$dir/root/" 2>/dev/null || true
+    python3 -I -c 'print("".join("%02x" % ((i * 7 + 3) & 255) for i in range(64)))' >"$dir/root/disk.key"
+    sed -e 's/^\[storage\]/[storage]\nencryption = "aes-256-xts"\ndisk_key = "disk.key"/' "$ROOT/deploy/dev/config.toml" >"$dir/enc.toml"
+    "$tool" pack "$dir/enc.toml" --env dev --root "$dir/root" --out "$dir/enc.blob" >/dev/null
+    "$tool" pack "$ROOT/deploy/dev/config.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/plain.blob" >/dev/null
+    local mode
+    for mode in plain enc; do
+        MKIMG_EXTRA=(--config "$dir/$mode.blob")
+        mkimg "$OUT/encb-$mode.raw" "smoke test=db-bench"
+        MKIMG_EXTRA=()
+    done
+    local accel i
+    for accel in $ACCELS; do
+        for i in $(seq 1 "$runs"); do
+            for mode in plain enc; do
+                local disk="$OUT/encb-$mode-$accel.img" l="$OUT/encb-$mode-$accel-$i.log" status=0
+                fresh_disk "$OUT/encb-$mode.raw" "$disk"
+                boot "$l" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+                echo "bench $mode [$accel] run $i: $(clean "$l" | sed -n 's/.*db-bench: 5000 inserts in 50 transactions: \([0-9]*\) ops\/s (\([0-9]*\) us per commit).*/\1 ops\/s, \2 us per commit/p' | tail -1); ready at $(clean "$l" | sed -n 's/^\[ *\([0-9.]*\)\].*URMQTT READY.*/\1/p' | tail -1) s"
+            done
+        done
+    done
+}
+
 # S2 + S3 end to end (ADR-141, ADR-142). A layout-v1 data partition holding
 # real broker state (the host tool builds it: no v1 kernel exists any more):
 #   1. the kernel refuses it and writes nothing (the disk's hash is the same
@@ -2859,6 +2891,7 @@ if [[ ${SMOKE_ONLY:-} == storage && $ARCH != universal ]]; then
     want discard_qcow2 && discard_qcow2
     want db_backup && db_backup
     want storage_encrypted && storage_encrypted
+    [[ ${SMOKE_SCENARIOS:-} == *storage_encrypted_bench* ]] && storage_encrypted_bench
     want backup_upgrade && backup_upgrade
     want backup_scheduled && backup_scheduled
     want backup_bench && backup_bench

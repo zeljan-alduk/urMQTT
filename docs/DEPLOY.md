@@ -767,6 +767,52 @@ takes under a minute at the default.
   recovered … in the K newest segment(s) read of S`): seconds for hundreds of
   gigabytes instead of minutes. The rest is the scrubber's.
 
+### Encryption at rest (S7, ADR-240)
+
+Optional and off by default. It protects the data partition (registry,
+retained and queued messages, telemetry, the backups) when a **volume or a
+snapshot is taken away**: the cloud provider's snapshot, a copy of the disk
+image, a disk pulled from a machine. It does **not** protect against whoever
+holds the ISO (the key is in its configuration) or the running machine.
+
+1. Make a key, once, and keep it somewhere that is not the repository:
+   `head -c 64 /dev/urandom | xxd -p -c 200 > disk.key` (128 hex digits; 64 raw
+   bytes work too). It is 512 random bits, not a passphrase.
+2. In the configuration TOML:
+   ```toml
+   [storage]
+   encryption = "aes-256-xts"
+   disk_key = "disk.key"      # a file name next to the TOML, like tls.key
+   ```
+   `urmqtt-config pack` reads the file into the configuration (blob format 4;
+   an image without encryption is still format 2, so older kernels keep
+   booting those). The builder page does not offer this yet.
+3. **A new disk** is formatted encrypted at its first boot
+   (`storage: encryption aes-256-xts (key check ok …)` in the boot log).
+   **An existing disk** is converted offline, with the VM stopped:
+   `urmqtt-disk encrypt DISK --key-new disk.key --write`. The kernel never
+   converts at boot: a plain disk with `storage.encryption` on, an encrypted
+   disk without it, a different key and an interrupted conversion are all
+   refused at boot with the reason.
+4. `urmqtt-disk … --key disk.key` opens an encrypted disk for `info`, `verify`,
+   `export-db`, `export-telemetry`, `scrub`, `backup`, `backup-extract`,
+   `backup-restore`, `grow`, `import-devices`.
+5. `urmqtt-disk rekey DISK --key old.key --key-new new.key --write` and
+   `urmqtt-disk decrypt DISK --key disk.key --write` convert in place. They
+   rewrite the used part of the disk (holes stay holes), so they take about as
+   long as reading and writing it. If one is cut (power, `^C`), run the same
+   command again with `--resume` and the same keys; the **journal**
+   (`DISK.convert-journal`, or `--journal FILE`) must still be there. Until it
+   finishes the kernel refuses the disk.
+6. The CPU needs AES instructions (every VPS CPU of the supported kinds has
+   them). Without, or with `[cpu] disable` turning them off, the kernel refuses
+   rather than run XTS in software.
+
+XTS gives confidentiality, not integrity: a flipped bit scrambles 16 bytes of
+data (the checksums and the scrubber find it), and two snapshots can be mixed
+sector by sector. The partition table, the superblock and the sizes are not
+encrypted. Costs are in docs/PERFORMANCE.md.
+
 ### Disk safety, as before
 
 Only the disk Limine booted from is written, and only inside its data

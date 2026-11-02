@@ -188,9 +188,10 @@ segments are 4 KiB aligned, but not 1 MiB aligned.
 | 40 | 8 | u64 | generation | 1 at format, plus 1 with every superblock write |
 | 48 | 4 | u32 | partitions | telemetry partitions, 1 to 64 |
 | 52 | 4 | u32 | align_sectors | alignment unit `A` in sectors: a multiple of 2048, at most 131072 |
-| 56 | 4 | u32 | flags | bit 0: the telemetry ring is a v1 ring kept in place (§5.2); other bits must be 0 |
+| 56 | 4 | u32 | flags | bit 0: the telemetry ring is a v1 ring kept in place (§5.2); bit 1: the disk is encrypted (§14); other bits must be 0 |
 | 60 | 4 | u32 | minor | minor version: `0` (no backup region, every disk formatted before S5) or `1` (the layout may have a backup region, §12) |
 | 64 | 24 | region[] | regions | `region_count` entries of §3.1, back to back (up to offset 3136) |
+| 3136 | 32 | bytes | key_check | encrypted disks (flags bit 1): HMAC-SHA-256, keyed with the disk key, of `urMQTT disk key check v1` followed by the 16-byte `uuid`; all zero on a plain disk (§14) |
 | 4092 | 4 | crc32c | crc | over bytes 0..4092 |
 
 The word at 60 was reserved-and-zero up to S4, and a reader of that age refuses a
@@ -664,3 +665,59 @@ changed) is not judged.
 
 A bit flipped in a segment's magic, or in a block that is not a segment,
 cannot be told from a never-used slot and is not found.
+
+
+## 14. Encryption at rest (S7, ADR-240)
+
+A disk with `flags` bit 1 set is encrypted. Nothing else about the layout
+changes: the same regions, the same size table, the same telemetry ring; the
+bytes on the medium are different.
+
+- **What is encrypted.** Every 512-byte sector of the data partition **except
+  the two superblock slots** (LBA 0 to 7 and 24 to 31, which stay plaintext
+  because they carry the flag and the key check, never the key). That
+  includes the size tables, the migration area, the database, the WAL, the
+  telemetry ring, the backup region and the scratch area.
+- **Algorithm.** AES-256-XTS (IEEE 1619), one **sector** per data unit, the
+  tweak being the sector number as a 64-bit little-endian integer in a 16-byte
+  block, counted from the first sector of the data partition (the window the
+  store sees; for a partition that moves, the contents are still valid as
+  long as the offset inside the partition is the same). The key is 64 bytes:
+  the data key, then the tweak key; the halves must differ. A 512-byte sector is
+  32 AES blocks, so there is no ciphertext stealing.
+- **Holes.** A sector that is **all zero on the medium** reads as an all-zero
+  plaintext sector and is never decrypted. A sector that was never written,
+  that was discarded or zeroed (S4) therefore still reads as zeros, which the
+  telemetry ring and the grow code rely on. A written sector whose ciphertext
+  is all zero has probability 2^-4096. The offline tool keeps holes holes.
+- **Key check.** `key_check` lets the kernel and the tool refuse a wrong key
+  before reading anything else. It is a keyed hash of a constant and the disk
+  UUID, so it tells nothing about the key beyond whether a guess was right
+  (a guess costs one HMAC; the key is 512 random bits, not a password).
+- **Older readers.** A reader that predates S7 refuses the unknown `flags`
+  bit (`Inconsistent`); the minor version is not used.
+- **Conversion.** `urmqtt-disk encrypt | decrypt | rekey` converts a data
+  partition offline (§14.1). The kernel never converts a disk at boot: an
+  encrypted disk without a key, a key for a plain disk, and a wrong key are
+  refused with a reason.
+- **What it is not.** XTS is confidentiality without integrity: a flipped
+  ciphertext bit scrambles one 16-byte block of plaintext (the CRCs and the
+  scrubber find it), and two snapshots of the same volume can be swapped
+  sector by sector. The superblock, the partition table, the size of the
+  partition and which sectors are holes are visible.
+
+### 14.1 The conversion record
+
+While `urmqtt-disk encrypt`, `decrypt` or `rekey` runs, sector 56 (the first
+sector of the fourth header block; plaintext) holds the **conversion
+record**: `URMQCNV1`, the key check before and after (32 bytes each, zero for
+plain), the next sector to convert and the formatted size, with a CRC-32C in
+the last four bytes of the sector. A record is **written first** and **cleared
+last**; while one exists the kernel refuses the partition
+(`ConversionPending`). The sectors are converted in chunks of 1 MiB: the
+chunk's old bytes go to a journal on the host (flushed), the converted chunk is
+written and flushed, then the record's watermark moves. The superblock is
+switched last, into the other slot with the next generation. `--resume` with
+the same keys puts back the chunk the journal holds if it is the one the
+watermark points at, and carries on. Tested with a power cut (clean and torn,
+cache dropped and kept) at every write of each of the three procedures.

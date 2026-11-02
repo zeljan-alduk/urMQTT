@@ -1,3 +1,32 @@
+## S7 — Encryption at rest (2026-11-02)
+
+STORAGE-PLAN S7, on both architectures. ADR-240. Optional, off by default.
+
+**Done**
+
+- **The layer.** `urmqtt_store::crypt`: AES-256-XTS (IEEE 1619, from the `aes` crate's hardware backends; the mode is written here and checked against vector 10), one 512-byte sector per data unit, wrapped around the block device **below** `Disk`, so nothing above it changed. The two superblock slots stay plaintext; an all-zero sector on the medium reads as zeros (holes, discard and the grow code keep working). `Disk::open_keyed` is the only place that decides; `KeyRequired`, `NotEncrypted`, `WrongKey` and `ConversionPending` are refusals with their own messages.
+- **Format.** `flags` bit 1 and a 32-byte keyed key check at offset 3136 of the superblock (DISK-FORMAT §3 and §14); an older kernel refuses the unknown bit, no minor version.
+- **Configuration.** `storage.encryption`, `storage.disk_key` (a key file, raw or hex), blob **format 4**, written only when encryption is on (older kernels still boot every other image); the packer, the strict parser and the kernel's blob check agree; the key never prints.
+- **Kernel.** Opens with the key, wipes its copy, logs `storage: encryption aes-256-xts (key check ok …)`; refuses on a CPU without AES instructions and on every mismatch; never converts at boot.
+- **Tool.** `urmqtt-disk encrypt | decrypt | rekey DISK … --write [--resume] [--journal FILE]` and `--key FILE` for every other command. A conversion record (written first, cleared last), 1 MiB chunks with their old bytes journalled on the host, the superblock switched last; the kernel refuses a half-converted disk.
+- **Builder page.** Does not offer encryption yet (it needs a key dialog); `urmqtt-config pack` does.
+
+**Tests**
+
+- `cargo test --workspace` green; `make clippy-kernel` and `make check-x86` clean; the builder's node tests (78) pass.
+- Crypt layer: IEEE 1619 vector, sector/position dependence, plain superblock, holes, key checks; integration: the telemetry ring and SQLite on an encrypted disk, no SQLite header or payload on the medium, wrong key, no key, key for a plain disk.
+- Conversion: encrypt, rekey and decrypt keep every table and the telemetry digest; **a power cut at every write** (clean and torn, cache dropped and kept) of each of the three procedures ends, after `--resume` (or a re-run if the cut came before the record), in the converted disk with all its data.
+- Smoke `storage-encrypted`: aarch64 HVF and TCG and x86_64 TCG, 7 checks each (first boot with self-test and backup, no plaintext in the data partition, second boot, another key refused, no configuration refused, the tool with and without the key then `decrypt`, a plain boot of the result). The whole aarch64 HVF storage group with the plain configuration: 86 passed, 0 failed.
+
+**Measured** (docs/PERFORMANCE §9): XTS 3.1 GB/s per core with ARMv8 AES against 0.25 GB/s in software (which the kernel refuses to run); `db-bench` on HVF with encryption on against off: medians 49632 against 49239 ops/s, inside the 46k to 58k spread of the runs, so no overhead is measurable (acceptance ≤ 5 %).
+
+**Not done / honest limits**
+
+- Not measured on x86_64 hardware (KVM or the Intel PC): AES-NI throughput and the benchmark there. Telemetry throughput and boot time with encryption on are not measured separately.
+- XTS has no integrity (sector swap and rollback between snapshots, SECURITY.md); the key is in the ISO's configuration, so a stolen ISO defeats it; the key's expanded round keys live in the kernel's heap while it runs (wiped on drop), the blob copy stays in memory.
+- The storage group was not run again with encryption on for every scenario, only the dedicated one; the golden image for an encrypted disk is S8.
+- The builder page does not offer it; rekeying and the first conversion are offline and need the VM stopped.
+
 ## P1: optional plaintext MQTT for trusted networks (2026-11-01)
 
 A `[plaintext]` section, off by default, opens TCP 1883 without TLS for devices that cannot do it (ADR-229 to ADR-231). What it gives up, and when it is acceptable, is in docs/SECURITY.md.

@@ -625,6 +625,38 @@ at once against an 8 MiB admission limit.
 - Observability goes to private collectors named in the build-time
   configuration. It is plain UDP and carries no payloads or secrets.
 
+### Encryption at rest (S7, ADR-240)
+
+Optional (`storage.encryption = "aes-256-xts"`). The whole data partition but
+the two superblock slots is AES-256-XTS, one 512-byte sector per data unit,
+under a 64-byte key from the configuration; the superblock carries a keyed
+check so a wrong key is refused before anything is read (`docs/DISK-FORMAT.md`
+§14). What that does and does not do:
+- It protects a **stolen volume, snapshot or disk image**: registry, retained
+  and queued messages, telemetry and backups are unreadable without the key.
+- It does **not** protect against a **stolen ISO** (the key is inside it: the
+  configuration holds the TLS private key as well), against someone who can
+  read the running machine's memory, or against the cloud provider's
+  hypervisor.
+- **XTS is not authenticated.** A changed ciphertext sector decrypts to noise
+  in the affected 16-byte blocks (the CRCs, the scrubber and SQLite's checks
+  find it, as they find a flipped bit); an attacker with write access to the
+  volume can also **roll back or swap whole sectors** between two snapshots.
+  Integrity of the data against an active attacker on the storage is not a
+  claim.
+- **What stays visible:** the GPT, the superblock (layout, sizes, the UUID,
+  that the disk is encrypted), which sectors were ever written, and the
+  pattern and timing of access.
+- **The key** is read from the configuration blob into the kernel's memory
+  (like the TLS private key), used to build the cipher, and the 64-byte copy
+  made for the open is wiped. The expanded round keys are wiped when the
+  cipher is dropped. The configuration blob itself stays in memory. Rekeying
+  and conversion are offline.
+- **A weak or reused key** is the user's risk: the packer refuses a wrong
+  length, equal halves and one repeated byte, nothing more. Generate it from
+  `/dev/urandom`.
+- **No hardware AES: refused**, never a silent software fallback.
+
 ### Supply chain
 
 Pinned nightly toolchain and `Cargo.lock`; `--locked` builds; cargo-deny
