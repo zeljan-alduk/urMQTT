@@ -2640,6 +2640,7 @@ integrity_boots() {
         "bootloader=Limine" "^URMQTT READY$" "NOT:CHECKSUM MISMATCH" "NOT:does not match"
 }
 
+# shellcheck disable=SC2016 # the patterns hold literal backticks
 universal_integrity() {
     local base="$OUT/integrity-base.iso" noenr="$OUT/integrity-noenroll.iso" cfg="$OUT/integrity-urmqtt.cfg"
     local tamper="$ROOT/scripts/tamper.py"
@@ -2672,7 +2673,7 @@ universal_integrity() {
     for row in "${rows[@]}"; do
         IFS='|' read -r name kind accel <<<"$row"
         [[ -z "${SMOKE_INTEGRITY:-}" || $name == "$SMOKE_INTEGRITY" ]] || continue
-        local mine other_iso other_disk mine_iso mine_disk elf
+        local other_iso other_disk mine_iso mine_disk elf
         if [[ $kind == aa64 ]]; then
             mine_iso=$t_a64 mine_disk=$d_a64 other_iso=$t_x86 other_disk=$d_x86 elf=aarch64
         else
@@ -2707,6 +2708,7 @@ universal_integrity() {
 # SMOKE_REQUIRE_SB=1 (CI) turns that into a failure. aarch64: the AArch64 edk2 of this machine
 # does not enforce Secure Boot (an unsigned ISO boots with keys enrolled), so only the signature of
 # BOOTAA64.EFI is checked offline and the signed ISO is booted with Secure Boot off.
+# shellcheck disable=SC2016 # the patterns hold literal backticks
 universal_secureboot() {
     local missing="" sbfw="" vars="" c
     command -v openssl >/dev/null || missing="openssl"
@@ -2819,6 +2821,7 @@ universal_secureboot() {
 # Each case runs with a blank 64 MiB disk attached, whose bytes must be the same afterwards. The control
 # of the first is the same edit in an image built with --no-enroll: the kernel gets the word and, with
 # no module, refuses to write.
+# shellcheck disable=SC2016 # the patterns hold literal backticks
 universal_install_rules() {
     local base="$OUT/integrity-base.iso" noenr="$OUT/integrity-noenroll.iso" inst="$OUT/install-rules-default.iso"
     URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$base" "smoke"
@@ -2845,6 +2848,7 @@ universal_install_rules() {
         IFS='|' read -r name kind accel <<<"$row"
         [[ -z "${SMOKE_INTEGRITY:-}" || $name == "$SMOKE_INTEGRITY" ]] || continue
         target="$OUT/install-rules-target-$name.img"
+        # shellcheck disable=SC2054 # QEMU option syntax
         local drive=(-- -drive "if=none,id=t0,file=$target,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile=)
         # 1. A word added to the first entry: refused by the loader (BIOS: the message is on the screen only).
         rm -f "$target"; truncate -s 64m "$target"; before=$(shasum -a 256 "$target" | cut -d' ' -f1)
