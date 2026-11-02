@@ -16,8 +16,9 @@ Weaknesses are listed even when they are not fixed. Where a protection has no
 test, that is listed as a gap too: an untested protection does not count.
 
 **What this release does not claim.** It targets a **VPS (KVM)**. Bare metal is
-not claimed: no IOMMU (H4b), no Secure Boot or signed loaders (H8), no TPM
-sealing, no native NIC or disk drivers (X12 to X16). The `unsafe` and
+not claimed: no IOMMU (H4b), no Secure Boot enforced for release images (the loaders are
+unsigned by any project key; the signing path exists and is tested on x86_64 OVMF only, H8), no TPM
+sealing (a spike, ADR-254), no native NIC or disk drivers (X12 to X16). The `unsafe` and
 inventory tables below include the code that exists for bare metal (x86_64
 platform code, PCI) because it is built into the image, but nothing here
 audits it against a hostile device.
@@ -96,7 +97,7 @@ from them at the H10 commit (H0 baseline: 30 773 lines, 65 linked crates, 308
 | `dbworker`, `usys` (H6) | 2 crates, about 650 lines of Rust | the worker's entry, panic and syscall stub, and the kernel/worker contract; the dispatcher and VFS shim are `store/src/worker.rs`, the kernel's side `store/src/remote.rs` |
 | Own C headers for SQLite | 53 lines in 7 headers | the libc surface SQLite sees (functions implemented in Rust, `store/src/libc.rs`) |
 | RustCrypto `cpufeatures` 0.2.17 and 0.3.1, vendored (X0b) | 675 + 598 lines | upstream sources plus one hunk each: on bare metal they ask the kernel's sealed dispatch (`urmqtt_cpu_has`). Reviewable with `diff -r` against the crates.io files ([vendor/README.md](../vendor/README.md)) |
-| Limine v12.9.4 (binary) | `BOOTAA64.EFI`, 331 776 bytes (and the x86_64 and BIOS loaders in the universal ISO) | pre-kernel; integrity is H8 (open) |
+| Limine v12.9.4 (binary) | `BOOTAA64.EFI`, 331 776 bytes (and the x86_64 and BIOS loaders in the universal ISO) | pre-kernel; its configuration is enrolled (ADR-250), signing path ADR-251; **no project signing key exists**, so release loaders are unsigned |
 
 **`unsafe` in non-test code of the workspace:** 889 sites, **all 889 with a
 `// SAFETY:` comment or a `# Safety` section** (the tool crate `builder-wasm`
@@ -229,6 +230,9 @@ scenario (`scripts/smoke.sh`), a host test or a CI job. "**none**" is a gap.
 | Signed configuration, refused when tampered; empty template refuses to serve | `urmqtt-cfg`, `kernel` (C1, ADR-215 to ADR-219) | `config-packed-*`, `config-tampered-refused`, `config-empty-refuses-to-serve`; `cfg_blob` and `config_parse` fuzzing | both |
 | Data disk: a damaged partition is refused and never re-formatted; crash safety of every multi-step update; scrubbing; in-disk backup with automatic restore | `store`, `kernel/src/db.rs` (S1 to S6) | the fault-injection loops (`tools/disk/tests`, `crates/store/tests`, `scripts/fault-loop.sh`), the storage smoke group (86 scenarios on aarch64 HVF at S7), `disk_layout`, `disk_backup`, `telemetry_recover` fuzzing, golden images of every layout version | both |
 | Encryption at rest (optional): AES-256-XTS, hardware AES required, key check, never converted at boot | `store/src/crypt.rs`, `kernel/src/db.rs` (S7, ADR-240) | IEEE 1619 vector, the conversion procedures under a power cut at every write, smoke `storage-encrypted`, `disk_crypt` fuzzing | both |
+| UEFI Secure Boot path: loaders signed with an owner key (`sbsign` or `osslsigncode`), keys enrolled in OVMF's variable store | `scripts/sign-loaders.sh`, `mkiso.sh --sb-key`, `run-qemu.sh --secure-vars` (H8, ADR-251) | `SMOKE_ONLY=secureboot` (x86_64 q35, OVMF with SMM): signed ISO boots; unsigned, other key, and changed-after-signing are `Access Denied`; a modified kernel or `limine.conf` is still refused by Limine under Secure Boot; the signed ISO is reproducible. **Not tested:** aarch64 enforcement (the firmware here does not enforce), Proxmox, a physical PC, the CI wiring (the group skips when its tools are missing; `SMOKE_REQUIRE_SB=1` makes that a failure). Limits: a signed ISO cannot be configured afterwards (`pack --iso` breaks the signature); an installed disk does not boot under Secure Boot (ADR-217's module has no hash) | x86_64 |
+| What may start the installer: three production words, a module the loader pins, an enrolled menu | `cmdline.rs`, `install.rs`, `mkiso.sh` (H8, ADR-253) | `production_honours_*` (host), `SMOKE_ONLY=install-rules` (a word added to the menu refused; with no module `install` writes nothing; a changed installation image refused; the target disk's SHA-256 unchanged; three machines) | all |
+| Image secrecy: a warning for a production image built outside CI; no key bytes in logs or repro output | `mkiso.sh`, `scripts/secret-scan.py`, `scripts/repro.sh` (H8, ADR-252) | `SMOKE_ONLY=secrecy` (server key and disk key scanned for in the serial logs of an encrypted boot and both refusals, dev and release kernels; the scan must find them in the image), the scan in `make repro` | aarch64 (repro: the image it builds) |
 | SBOM, vet, advisory job, vulnerability process | `scripts/sbom.py`, `supply-chain/`, CI (H9, ADR-190 to ADR-193) | CI jobs; 53 of 67 kernel-linked crate versions are cargo-vet *exemptions*, not audits ([audit/vet-exemptions.md](audit/vet-exemptions.md)) | n/a |
 
 ---
@@ -282,9 +286,21 @@ Found while doing H1 (kept here so the list stays in one place):
 | H1-W3 | **The build's expiry check is cached** by cargo until the configuration or certificates change | low | `config/build.rs` | clean builds (CI, repro, release) always run it; optional: a `make` target that forces it |
 | H1-W4 | **Allowlist mode without durable storage** means an empty, frozen allowlist: every device is refused | low (fails closed, logged at boot) | `boot.rs` | intended; documented |
 
+Found while doing H8:
+
+| Id | Weakness | Severity | Where | Plan |
+|---|---|---|---|---|
+| H8-W1 | **An installed disk does not boot under Secure Boot**: its `limine.conf` names the configuration module without a hash (ADR-217) and Limine refuses a file with no hash when Secure Boot is active (asserted by `secureboot: installed-disk-known-limit`) | low (Secure Boot is not used on the VPS target) | `scripts/mkiso.sh`, ADR-217 | **open:** a per-machine ESP with the module pinned and the loader re-enrolled and re-signed by the key's owner; not built |
+| H8-W2 | **A signed image cannot be configured afterwards**: `urmqtt-config pack --iso` changes the enrolled hash, which breaks the loader's signature (tested: `configured-after-signing` is refused). The builder page cannot make a Secure Boot image from the template | low | ADR-251 | documented: configure, then sign, with the owner's key |
+| H8-W3 | **The BIOS path has no signature**, and its stage 1 and `limine-bios.sys` are not covered by the enrolled hash | accepted (BIOS has no Secure Boot) | ADR-250 | none |
+| H8-W4 | **Aarch64 Secure Boot enforcement is untested** (the AArch64 edk2 on the development machine does not enforce it), as are Proxmox and a physical PC; the CI job for the x86_64 test is not wired | medium for the claim, low for a VPS | ADR-251 | open |
+| H8-W5 | SECURITY-PLAN said "exactly one command-line word, `install`"; production honours three (`install`, `live`, `diag`) | low (wording) | `cmdline.rs` | **fixed in H8:** the documents say so (ADR-253) |
+| H8-W6 | **No downgrade protection**: an older, correctly pinned and signed image boots | low | ADR-251 | open (no version counter, no `dbx` plan) |
+
 Untested protections (from §3) count as gaps as well: FP-state save, 0-RTT,
-the page-table lock, no secrets in logs, the SQLite flags, the kernel hash in
-`limine.conf`, and prod ignoring the command line.
+the page-table lock and the SQLite flags (the last is tested since H10). The kernel hash in
+`limine.conf`, the secrecy of the logs and prod ignoring the command line are tested
+(`integrity-*`, `secrecy`, `production_ignores_every_option`).
 
 ---
 
@@ -296,8 +312,8 @@ package. The ones an auditor should weigh first:
 
 | Limit | Why it stands | Where recorded |
 |---|---|---|
-| **The image holds the server private key and, with encryption at rest, the disk key.** A copy of the ISO is a copy of both. | No secure key store in a VM. TPM or vTPM sealing is a research spike (H8) that is not done. | SECURITY.md residual risks; ADR-240 |
-| **No Secure Boot, no signed loaders, no measured boot (H8 is open).** Limine and the kernel are pinned by hash in a configuration that itself is not enrolled. | The release targets a VPS, whose firmware and loader are the host's. | PLAN.md (first release scope); §3 matrix |
+| **The image holds the server private key and, with encryption at rest, the disk key.** A copy of the ISO is a copy of both. | No secure key store in a VM. TPM or vTPM sealing was studied (ADR-254) and not built: it needs a TPM driver and a new configuration format, protects a copied disk but not the install ISO, and a vTPM's state travels with the VM. A production image built outside CI warns (ADR-252). | SECURITY.md residual risks; ADR-240, ADR-252, ADR-254 |
+| **No Secure Boot for release images, no measured boot, BIOS path unprotected.** The configuration is enrolled into the loaders and the kernel and module are pinned (H8, ADR-250), but nothing signs the loaders: whoever can rewrite `BOOTX64.EFI`, `limine-bios.sys` or the MBR defeats both. The signing path exists (ADR-251) and has no project key; a signed ISO cannot be configured afterwards and an installed disk does not boot under Secure Boot. | The release targets a VPS, whose firmware and loader are the host's. | PLAN.md (first release scope); §3b; ADR-250, ADR-251 |
 | **No IOMMU (H4b), and no fuzzing of PCI and virtio parsing (H0-W9).** | VM devices are the hypervisor's, which is trusted; both matter on bare metal. | SECURITY.md; H0-W9 |
 | **SQLite is 254k lines of C.** Contained (EL0 / ring 3, restart on fault), not eliminated: the kernel trusts the worker's *answers* (an empty revocation list from a compromised worker un-revokes certificates), there is no KPTI and no PCID, and PAC keys are shared on aarch64. | ADR-210; the remaining cost of isolation. | PROGRESS.md H6, "Not done / honest limits" |
 | **No forward-edge CFI (kCFI crashes the pinned compiler), no MTE on x86_64, on HVF or on most clouds; the HHDM base is fixed.** | ADR-174, ADR-175. | SECURITY.md residual risks |
@@ -446,11 +462,15 @@ the date of the run is in PROGRESS.md for the milestone named.
 | 25 | A hostile `unsafe` claim: a site with no written justification | `scripts/audit-inventory.py` | see §1: every site now carries one, and CI fails if a new one does not |
 | 26 | A vulnerable or unreviewed dependency | `cargo deny`, the scheduled advisory job, cargo-vet | clean at H9; 53 of 67 versions are exemptions (§6) |
 | 27 | **A hostile virtio or PCI device** | none | **not tested** (H0-W9); the hypervisor is trusted in a VM |
-| 28 | A modified kernel image, configuration module or `limine.conf` (**a downgrade and a replaced loader are not tested**) | `integrity-kernel-*`, `integrity-module-iso-*`, `integrity-conf-*` | the loader refuses on all three machines. A rewritten ISO that also replaces the loader is not refused without Secure Boot (see 3b); a downgrade to an older, correctly pinned image is not detected (no version counter) |
+| 28 | A modified kernel image, configuration module or `limine.conf` (**a downgrade and a replaced loader are not tested**) | `integrity-kernel-*`, `integrity-module-iso-*`, `integrity-conf-*` | refused by the loader on aarch64 UEFI, x86_64 UEFI and x86_64 BIOS (H8, ADR-250). **A loader replaced by the attacker is not refused without Secure Boot**; under Secure Boot (x86_64 OVMF only, ADR-251) an unsigned or other-signed loader is refused; **a downgrade to an older correctly pinned image is not detected** (H8-W6) |
+| 32 | An unsigned, foreign-signed or post-signing-modified loader under Secure Boot | `secureboot-*` (`SMOKE_ONLY=secureboot`) | `Access Denied` on x86_64 OVMF; **aarch64, Proxmox and a physical PC not tested** (H8-W4) |
+| 33 | Key bytes in a log, panic or the repro output | `secrecy`, the scan in `make repro` | none found; the scan sees the keys in the image (the control) |
+| 34 | The installer started by an added word, or with a replaced installation image | `install-rules-*` | refused; the target disk unchanged |
 | 29 | **A write to a page table after the lock** | none | **not tested** (H0-W10) |
 | 30 | **Timing of P-256, X25519, Ed25519** | none | **not measured** (§6) |
 | 31 | **A crafted SQLite database file under ASan** | none | **not fuzzed** (H0-W8, contained by H6) |
 
-Items 27 to 31 are the open findings of this review; they are repeated in §5
+Items 27 and 29 to 31 are the open findings of this review (28 is closed for modified
+files and open for a replaced loader and for downgrade, H8-W6); they are repeated in §5
 and, for the first four, are part of the scope in §8.
 

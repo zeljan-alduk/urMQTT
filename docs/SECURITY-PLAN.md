@@ -283,6 +283,8 @@ Every milestone ends with:
 
 **Accept:** a modified kernel or config does not boot; the Secure Boot CI test passes; Secure Boot works on the Intel PC.
 
+**Status: partly done, for a VPS-first release** (docs/PROGRESS.md, H8; ADR-250 to ADR-254). **Done and tested:** a modified kernel, configuration module or `limine.conf` is refused on aarch64 UEFI, x86_64 UEFI and x86_64 BIOS (config enrolled into all three loaders); the signing path (`scripts/sign-loaders.sh`, `mkiso.sh --sb-key`) and an OVMF Secure Boot scenario on x86_64; the installer's entry rules; the image-secrecy warning and key-bytes scan; the TPM spike as an ADR (not built). **Not done:** Secure Boot on the Intel PC and on real hardware, Proxmox and aarch64 enforcement (untested), the CI wiring of the Secure Boot job, a project signing key and a signed release, an installed disk that boots under Secure Boot (ADR-217's module has no hash), downgrade protection, TPM sealing. The plan's wording "exactly one command-line word" was wrong: production honours `install`, `live` and `diag` (ADR-253).
+
 ### H9 — Supply chain and compliance readiness · M
 
 **Work**
