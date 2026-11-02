@@ -380,6 +380,8 @@ Each milestone ends with:
 
 **Accept:** the docs match the code; every fuzz target runs in CI.
 
+**Status: done** (docs/PROGRESS.md, S8; DISK-FORMAT §15). Added `disk_backup` and `disk_crypt` to the existing `disk_layout` and `telemetry_recover`, golden images for layout 2.1 and for an encrypted disk next to those of v1 and v2.0. Not fuzzed on their own: the conversion record's decoder and the migration plan's input.
+
 ---
 
 ## 4. Fault-injection framework (S1, then everywhere)

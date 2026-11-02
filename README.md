@@ -942,8 +942,8 @@ python3 scripts/echo-client.py 7007        # client: echo 1 ok / 3000 ok / 60000
 
 ```bash
 make fuzz T=config_parse FUZZ_TIME=60     # every parser has a target; CI runs each for 60 s
-cargo fuzz list                            # 12 targets: config_parse, fdt_parse, acpi_parse, mqtt_decode,
-                                           # disk_layout, tcp_segment, net_frame, tls_record, x509_identity,
+cargo fuzz list                            # 23 targets, among them: config_parse, fdt_parse, acpi_parse, mqtt_decode,
+                                           # disk_layout, disk_backup, disk_crypt, tcp_segment, net_frame, tls_record, x509_identity,
                                            # broker_input, telemetry_recover, control_message
 make fuzz T=mqtt_decode FUZZ_TIME=600      # the M8 acceptance run
 ```
@@ -1173,7 +1173,7 @@ Security is the first priority and wins conflicts with the other tracks.
 | ✅ | **S5** In-disk backup | layout v2.1 backup region carved from the database's tail with one superblock write (v2.0 disks keep working); A/B snapshots by SQLite's online backup API in 16-page steps (commits do not slow down: max 2.4 ms against 2.2 ms alone, the single-call copy would stall 445 ms); restore at boot when `quick_check` fails, a cut mid-restore is finished by the next boot; a power cut at every write of a backup leaves the previous slot intact |
 | ✅ | **S6** Scrubbing | idle scrub of the database, the backups and every telemetry record; injected bit flips are found, classified (damage, bad tail, bad header) and reported with their position; the I/O stays within the budget under load (measured); G8: boot reads the newest segment of each partition, not the ring (1.1 MiB for 5.8 MiB of records in the test) |
 | ✅ | **S7** Encryption at rest | optional AES-256-XTS with hardware AES, offline `urmqtt-disk encrypt/decrypt/rekey`, measured overhead in PERFORMANCE |
-| 📋 | **S8** Docs & hardening | final format spec, fuzz targets and golden images for every version |
+| ✅ | **S8** Docs & hardening | final format spec (v2.1, backup region, encryption), fuzz targets for the layout, backup headers and encrypted disks, golden images for every layout version |
 
 **Platforms: x86_64, the multi-platform ISO and bare metal**: [PROMPT-x86_64.md](PROMPT-x86_64.md), plan in
 [docs/X86-PLAN.md](docs/X86-PLAN.md).

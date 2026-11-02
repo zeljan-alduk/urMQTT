@@ -80,6 +80,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "disk_backup"
+path = "fuzz_targets/disk_backup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "disk_crypt"
+path = "fuzz_targets/disk_crypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "disk_layout"
 path = "fuzz_targets/disk_layout.rs"
 test = false

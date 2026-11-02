@@ -68,7 +68,7 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 #[cfg(any(direct_vfs, feature = "loopback"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
-pub use disk::{BlockDevice, Disk, DiskError, IoError, MemDisk, Opened};
+pub use disk::{BackupRegion, BlockDevice, Disk, DiskError, IoError, MemDisk, Opened};
 pub use ram::RamDisk;
 pub use store::{OpenInfo, Queued, Retained, SessionRecord, Store, StoreError, open};
 pub use vfs::Platform;

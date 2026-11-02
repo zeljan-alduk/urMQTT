@@ -1,10 +1,10 @@
 # Data disk format, layout version 2 (minor 1)
 
-The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0, S2, S3, S5, S6).
+The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0, S2, S3, S5, S6, S7, S8).
 Since S1 the "data disk" is the **data partition of the boot disk** (§0);
 everything below §0 is relative to that partition's first sector. Layout v2
 (S2) adds alignment, the partition count and an A/B superblock; S3 adds the
-grow (§9); S5 adds minor version 1 and the backup region (§12); S6 reads without writing (§13). Layout v1 (S0/S1) is described only as far as `urmqtt-disk migrate`
+grow (§9); S5 adds minor version 1 and the backup region (§12); S6 reads without writing (§13); S7 adds optional encryption at rest (§14, a flag and a key check in the superblock, no new version). Layout v1 (S0/S1) is described only as far as `urmqtt-disk migrate`
 reads it (§10). The data has **no
 filesystem**: the kernel accesses it raw, as a superblock, a region table and
 fixed regions. The code is in `crates/store`
@@ -120,7 +120,9 @@ LBA 0          superblock slot A             1 block
 LBA 8          size table slot A             1 block
 LBA 16         size table slot B             1 block
 LBA 24         superblock slot B             1 block
-LBA 32 .. 63   reserved: the migration record (§10), zero on a fresh disk
+LBA 32 .. 55   reserved: the migration record (§10), zero on a fresh disk
+LBA 56         the offline conversion record of encrypt/decrypt/rekey (§14.1), one sector, zero unless a conversion is under way
+LBA 57 .. 63   reserved, zero
 LBA 64 .. align-1  unused (zero), the rest of the first alignment unit
 LBA align ..   regions (from the region table), each starting on an alignment boundary
                and a multiple of 8 sectors long:
@@ -709,7 +711,7 @@ bytes on the medium are different.
 ### 14.1 The conversion record
 
 While `urmqtt-disk encrypt`, `decrypt` or `rekey` runs, sector 56 (the first
-sector of the fourth header block; plaintext) holds the **conversion
+sector of the last block of the 32 KiB header; plaintext) holds the **conversion
 record**: `URMQCNV1`, the key check before and after (32 bytes each, zero for
 plain), the next sector to convert and the formatted size, with a CRC-32C in
 the last four bytes of the sector. A record is **written first** and **cleared
@@ -721,3 +723,12 @@ switched last, into the other slot with the next generation. `--resume` with
 the same keys puts back the chunk the journal holds if it is the one the
 watermark points at, and carries on. Tested with a power cut (clean and torn,
 cache dropped and kept) at every write of each of the three procedures.
+
+## 15. What checks this document (S8)
+
+| What | Where | Covers |
+|---|---|---|
+| Field tables against the encoder | `crates/store/tests/disk_format_spec.rs` | every `<!-- struct -->` table: superblock (with the encryption flag and key check), region entry, size table, telemetry header, segment header, record, migration record, backup headers |
+| Golden images, one per layout version | `crates/store/tests/golden_v1.rs` (v1: fresh, telemetry, torn), `golden_v2.rs` (v2.0: fresh, with data), `golden_v21.rs` (v2.1 with a backup region and data; the same encrypted with a fixed key) | the code still writes the same bytes, the frozen files still open, an encrypted image opens only with its key |
+| Fuzz targets | `fuzz/fuzz_targets/disk_layout.rs` (superblock slots v2 and the v1 view, size table, the migration record), `disk_backup.rs` (slot header and control block), `disk_crypt.rs` (the sector cipher, the key-file parser, an encrypted disk with damaged sectors opened with the right key, a wrong key and none), `telemetry_recover.rs` (segments and records) | no panic, accepted structures round-trip, a wrong key never opens a disk; CI runs every file in `fuzz/fuzz_targets` (`.github/workflows/fuzz.yml` builds the matrix from the directory) |
+| Procedures under power cuts | `tools/disk/tests/migrate.rs`, `convert.rs`, `crates/store/tests/grow.rs`, `backup.rs`, `scripts/fault-loop.sh` | migrate, grow, backup, encrypt, decrypt and rekey end in a valid disk with all its data after a cut at every write |

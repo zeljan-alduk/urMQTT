@@ -1,3 +1,22 @@
+## S8 — Documentation and hardening (2026-11-02)
+
+STORAGE-PLAN S8. No format change and no new behaviour; the storage track's documentation is final and its parsers are fuzzed.
+
+**Done**
+
+- **Fuzz targets** (`fuzz/fuzz_targets`): `disk_backup` (slot header and control block; the input is also stamped with the magic, UUID and CRC so the field checks behind them are reached: coverage 36 to 98 edges), `disk_crypt` (the sector cipher round trip and a wrong key never giving the plaintext back, the key-file parser, and an encrypted disk with up to four sectors overwritten with garbage opened with the right key, a wrong key and none: a wrong key or no key never opens it). With `disk_layout` (superblock v2 and the v1 view, size table, the migration record) and `telemetry_recover` the storage structures all have one. CI builds its matrix from the directory, so every file runs there. Locally 30 s each: `disk_backup` 3.4 M runs, `disk_crypt` 0.3 M runs, no finding.
+- **Golden images for every layout version:** `golden_v21.rs` freezes a layout-2.1 disk with a backup region and data, and the same disk encrypted with a fixed key (`tests/golden/v21-backup.txt`, `encrypted-v21.txt`); with `golden_v1` and `golden_v2` that is v1, v2.0, v2.1 and encrypted. Each checks the bytes written now, that the frozen file opens, that the encrypted one refuses no key, a wrong key and (for the plain one) a key, and that SQLite runs on the frozen encrypted image.
+- **Docs:** DISK-FORMAT §2 (the conversion record's sector) and a new §15 (what checks the document: spec test, goldens, fuzz targets, power-cut procedures); AUDIT (the backup and encryption attack-surface rows); README (features table, fuzz target count). DEPLOY (resize, snapshots, backup and restore, export, encryption) and SECURITY (encryption threat model) were already complete from S3 to S7.
+
+**Tests**
+
+- `cargo test -p urmqtt-store` green with the new goldens; the fuzz workspace builds and formats clean.
+
+**Not done / honest limits**
+
+- The fuzz targets ran 30 s locally, not the 60 s per target of CI nor a long campaign. The conversion record's decoder (`tools/disk`) and the migration plan's input have no fuzz target of their own (the migration *record* is in `disk_layout`).
+- `scripts/fault-loop.sh` does not drive encrypt or rekey (the cargo power-cut tests do).
+
 ## S7 — Encryption at rest (2026-11-02)
 
 STORAGE-PLAN S7, on both architectures. ADR-240. Optional, off by default.
