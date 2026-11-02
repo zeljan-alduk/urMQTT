@@ -2708,6 +2708,81 @@ universal_secureboot() {
     fi
 }
 
+# H8 (ADR-253): the installer entry's rules. The installer erases a disk, so what may start it matters.
+#  * A production kernel honours three command-line words, install, live and diag (ADR-052, ADR-054,
+#    ADR-063; host tests production_honours_*), and only install writes to a disk. It does nothing
+#    without the installation image: no module, no write ("install: no installation image").
+#  * The image is a module that Limine checks against the blake2b in the ISO menu: a changed copy is
+#    refused before the kernel runs, and nothing is written.
+#  * Adding install to another entry means editing limine.conf, which the loaders refuse (ADR-250).
+# Each case runs with a blank 64 MiB disk attached, whose bytes must be the same afterwards. The control
+# of the first is the same edit in an image built with --no-enroll: the kernel gets the word and, with
+# no module, refuses to write.
+universal_install_rules() {
+    local base="$OUT/integrity-base.iso" noenr="$OUT/integrity-noenroll.iso" inst="$OUT/install-rules-default.iso"
+    URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$base" "smoke"
+    URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$noenr" "smoke" --no-enroll
+    URMQTT_LIMINE_SERIAL=1 mkuniversal "$inst" "smoke" --install-default --install-cmdline "install install-countdown=1"
+    local t_word="$OUT/install-rules-word.iso" t_word_ne="$OUT/install-rules-word-noenroll.iso" t_img="$OUT/install-rules-image.iso"
+    local img="$OUT/install-rules-disk.img"
+    rm -f "$img"
+    xorriso -osirrox on -indev "$inst" -extract /disk.img "$img" >/dev/null 2>&1 || true
+    if [[ ! -s "$img" ]]; then
+        echo "  ✗ install-rules: cannot extract /disk.img from the ISO"
+        FAILED=$((FAILED + 1))
+        return 0
+    fi
+    chmod u+rw "$img"
+    local tamper="$ROOT/scripts/tamper.py"
+    # "live smoke" and "install no" are the same length: a same-length edit of the first entry's command line.
+    python3 -I "$tamper" "$base" --replace "cmdline: live smoke" "cmdline: install no" --out "$t_word" >/dev/null
+    python3 -I "$tamper" "$noenr" --replace "cmdline: live smoke" "cmdline: install no" --out "$t_word_ne" >/dev/null
+    python3 -I "$tamper" "$inst" --file "$img" --offset 100000 --out "$t_img" >/dev/null
+    local row name kind accel target before after status log
+    local rows=("aa64|aa64|${ACCELS%% *}" "x86-uefi|x86-uefi|tcg" "x86-bios|x86-bios|tcg")
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name kind accel <<<"$row"
+        [[ -z "${SMOKE_INTEGRITY:-}" || $name == "$SMOKE_INTEGRITY" ]] || continue
+        target="$OUT/install-rules-target-$name.img"
+        local drive=(-- -drive "if=none,id=t0,file=$target,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile=)
+        # 1. A word added to the first entry: refused by the loader (BIOS: the message is on the screen only).
+        rm -f "$target"; truncate -s 64m "$target"; before=$(shasum -a 256 "$target" | cut -d' ' -f1)
+        log="$OUT/install-rules-word-$name.log"; status=0
+        if [[ $kind == x86-bios ]]; then
+            # shellcheck disable=SC2046
+            TIMEOUT=${SMOKE_REFUSE_WAIT:-45} boot_until "$log" 'install: ' $(u_args "$kind" "$accel" iso "$t_word") --no-net "${drive[@]}" || status=$?
+            [[ $status -eq 124 ]] && status=0 || status=1
+            after=$(shasum -a 256 "$target" | cut -d' ' -f1)
+            [[ $after == "$before" ]] || echo "DISK CHANGED" >>"$log"
+            check "install-rules: a word added to limine.conf is refused [$name]" "$log" "$status" "NOT:install: " "NOT:DISK CHANGED"
+        else
+            # shellcheck disable=SC2046
+            boot_until "$log" 'CHECKSUM MISMATCH FOR CONFIG FILE' $(u_args "$kind" "$accel" iso "$t_word") --no-net "${drive[@]}" || status=$?
+            after=$(shasum -a 256 "$target" | cut -d' ' -f1)
+            [[ $after == "$before" ]] || echo "DISK CHANGED" >>"$log"
+            check "install-rules: a word added to limine.conf is refused [$name]" "$log" "$status" \
+                "CHECKSUM MISMATCH FOR CONFIG FILE" "NOT:install: " "NOT:URMQTT" "NOT:DISK CHANGED"
+        fi
+        # 2. Control: the same edit, config not enrolled. The kernel gets install, has no module, writes nothing.
+        rm -f "$target"; truncate -s 64m "$target"; before=$(shasum -a 256 "$target" | cut -d' ' -f1)
+        log="$OUT/install-rules-word-control-$name.log"; status=0
+        u_run "$kind" "$accel" "$log" iso "$t_word_ne" "${drive[@]}" || status=$?
+        after=$(shasum -a 256 "$target" | cut -d' ' -f1)
+        [[ $after == "$before" ]] || echo "DISK CHANGED" >>"$log"
+        check "install-rules: with install but no installation image nothing is written [$name]" "$log" "$status" \
+            "install: no installation image" "NOT:install: ALL DATA ON" "NOT:install: done" "NOT:URMQTT READY" "NOT:DISK CHANGED"
+        # 3. The installation image changed by one bit: Limine refuses it, nothing is written.
+        rm -f "$target"; truncate -s 64m "$target"; before=$(shasum -a 256 "$target" | cut -d' ' -f1)
+        log="$OUT/install-rules-image-$name.log"; status=0
+        # shellcheck disable=SC2046
+        boot_until "$log" 'PANIC: Blake2b hash for URI `boot\(\):/disk\.img` does not match' $(u_args "$kind" "$accel" iso "$t_img") --no-net "${drive[@]}" || status=$?
+        after=$(shasum -a 256 "$target" | cut -d' ' -f1)
+        [[ $after == "$before" ]] || echo "DISK CHANGED" >>"$log"
+        check "install-rules: a changed installation image is refused [$name]" "$log" "$status" \
+            'PANIC: Blake2b hash for URI `boot\(\):/disk\.img` does not match' "NOT:install: " "NOT:DISK CHANGED"
+    done
+}
+
 # Cross-architecture data disk: broker state written by a VM of one
 # architecture is restored by a VM of the other on the same disk (retained
 # message, persistent session with a queued command, one telemetry record).
@@ -3176,6 +3251,14 @@ if [[ ${SMOKE_ONLY:-} == integrity && $ARCH == universal ]]; then
     exit
 fi
 
+# SMOKE_ONLY=install-rules (universal): H8, what may start the installer (SMOKE_INTEGRITY=<machine> limits it).
+if [[ ${SMOKE_ONLY:-} == install-rules && $ARCH == universal ]]; then
+    universal_install_rules
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=secureboot (universal): H8, OVMF with Secure Boot enforced (needs the tools universal_secureboot lists).
 if [[ ${SMOKE_ONLY:-} == secureboot && $ARCH == universal ]]; then
     universal_secureboot
@@ -3200,6 +3283,7 @@ if [[ $ARCH == universal ]]; then
     universal_migrated
     universal_install
     universal_integrity
+    universal_install_rules
     universal_secureboot
     universal_diag
     if command -v mosquitto_pub >/dev/null; then

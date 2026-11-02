@@ -366,7 +366,9 @@ writes the raw boot image onto the machine's disk.
 - **Mitigations:**
   - the menu editor is off;
   - the kernel and the image are pinned by blake2b in the menu file
-    (`hash_mismatch_panic`), H8 will add the config hash to the enrolled loader;
+    (`hash_mismatch_panic`), and the menu file itself is enrolled into the
+    loaders (H8, ADR-250), so a word cannot be added to an entry, nor an entry
+    to the menu, without the loader refusing to start;
   - the target, its size and a warning are on screen, followed by a 30 s
     countdown during which a power-off cancels; dev tests may shorten it,
     production cannot;
@@ -374,9 +376,26 @@ writes the raw boot image onto the machine's disk.
     that boots (host test `an_interrupted_install_never_boots_and_can_be_redone`,
     smoke `install-crash`);
   - the result is verified by reading it back.
-- **Production command line:** still ignored, except the exact word `install`
-  (ADR-052; test `production_honours_install_and_nothing_else`). Without the
-  installation module, `install` only prints a message and powers off.
+- **Production command line:** ignored, except three exact words: `install`
+  (ADR-052), `live` (ADR-054) and `diag` (ADR-063); tests
+  `production_honours_install_and_nothing_else`, `..._live_...`, `..._diag_...`.
+  (SECURITY-PLAN H8 said "exactly one word, `install`"; the later entries added
+  the other two, and only `install` writes to a disk.) Without the installation
+  module, `install` only prints a message and powers off, and writes nothing.
+- **Entry rules, tested (H8, ADR-253, `SMOKE_ONLY=install-rules`, on aarch64
+  UEFI, x86_64 UEFI and x86_64 BIOS, each with a blank disk whose bytes must
+  be unchanged afterwards):** a word added to an entry's command line is
+  refused by the loader; the same edit in an image without the enrolled hash
+  gives the kernel `install` and, with no module, "no installation image" and no
+  write; a changed installation image is refused by the loader before the kernel
+  runs.
+- **Entry rules, not enforced (accepted):**
+  - the kernel does not check the module's hash itself; the loader does, so the
+    rule depends on the loader that the firmware starts (without Secure Boot,
+    whoever can replace the loader on the boot medium controls this too);
+  - the installed disk's `limine.conf` has no `install` entry and its module has no
+    hash (ADR-217), so a person with write access to the ESP can add an entry with their
+    own image; the enrollment (ADR-250) is what stops the *configuration* edit there.
 - **Residual risk:** the installer erases the previous data partition. There
   is no "keep data" mode yet; an offline kernel update keeps data
   (`urmqtt-disk update-boot`).
@@ -693,7 +712,7 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 
 | Risk | Why it remains | Mitigation available today |
 |---|---|---|
-| The image contains the server key. | No secure key storage in the VM. | Treat the ISO as a secret; rotate the key with a new image. |
+| The image contains the server key. | No secure key storage in the VM. TPM sealing was studied and not built (ADR-254). | Treat the ISO as a secret; rotate the key with a new image; a build outside CI says so loudly (ADR-252). |
 | Theft of the control signing key **and** a control service identity. | Both are needed; then arbitrary revocation (DoS) or, with `allow_unrevoke`, unrevocation. | Offline key in an HSM/KMS (`--sign-cmd`); `allow_unrevoke = false` (default); revocations that must survive anything also in the image. |
 | A restored old data-disk snapshot brings back old revocations and `seq`. | The disk is trusted not to be maliciously rolled back. | Image-listed revocations are re-applied at every boot; validity windows bound old messages. |
 | DHCP and ARP are unauthenticated. | IPv4 on a shared L2 segment has no defence against on-link spoofing. | Static addressing (`network.mode = "static"`) and a private network for the VM. |
