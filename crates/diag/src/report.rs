@@ -102,6 +102,12 @@ pub struct CryptoBench {
     pub handshake_ticks: u64,
     pub tick_clock: String,
     pub aes_gcm_mib_s: u64,
+    /// AES-256-XTS over 512-byte sectors, what `storage.encryption` costs
+    /// per core (S7, ADR-240).
+    pub aes_xts_mib_s: u64,
+    /// The CPU has AES instructions; without them the kernel refuses
+    /// `storage.encryption`, and `aes_xts_mib_s` is the software figure.
+    pub aes_xts_hardware: bool,
     pub chacha_mib_s: u64,
     pub sha256_mib_s: u64,
     pub crc32c_mib_s: u64,
@@ -398,6 +404,8 @@ impl Report {
                 j.u64(Some("handshake_ticks"), c.handshake_ticks);
                 j.str(Some("tick_clock"), &c.tick_clock);
                 j.u64(Some("aes_gcm_mib_s"), c.aes_gcm_mib_s);
+                j.u64(Some("aes_xts_mib_s"), c.aes_xts_mib_s);
+                j.bool(Some("aes_xts_hardware"), c.aes_xts_hardware);
                 j.u64(Some("chacha20_poly1305_mib_s"), c.chacha_mib_s);
                 j.u64(Some("sha256_mib_s"), c.sha256_mib_s);
                 j.u64(Some("crc32c_mib_s"), c.crc32c_mib_s);

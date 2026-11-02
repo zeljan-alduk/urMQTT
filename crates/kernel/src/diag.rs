@@ -550,6 +550,18 @@ fn crypto(run: &mut Run) {
     let crc = rate(&mut || {
         black_box(urmqtt_store::crc::crc32c(&buf));
     });
+    // S7: what storage.encryption costs per core, over 512-byte sectors.
+    let xts_key = urmqtt_store::crypt::DiskKey::new(&core::array::from_fn(|i| {
+        (i as u8).wrapping_mul(7).wrapping_add(3)
+    }));
+    let mut xbuf = vec![0x5au8; 64 * 1024];
+    let xts = rate(&mut || {
+        for (i, s) in xbuf.chunks_exact_mut(512).enumerate() {
+            xts_key.sector(i as u64, s, true);
+        }
+        black_box(&xbuf);
+    });
+    let xts_hw = urmqtt_store::crypt::hardware_aes();
     let c = CryptoBench {
         x25519_us_x10: x,
         sign_us_x10: sign,
@@ -558,12 +570,14 @@ fn crypto(run: &mut Run) {
         handshake_ticks: ticks / reps,
         tick_clock: run.clock_name.into(),
         aes_gcm_mib_s: aes,
+        aes_xts_mib_s: xts,
+        aes_xts_hardware: xts_hw,
         chacha_mib_s: chacha,
         sha256_mib_s: sha,
         crc32c_mib_s: crc,
     };
     info!(
-        "diag: TLS handshake about {} us ({} ticks of the {}); AES-GCM {aes}, ChaCha20 {chacha}, SHA-256 {sha}, CRC-32C {crc} MiB/s",
+        "diag: TLS handshake about {} us ({} ticks of the {}); AES-GCM {aes}, ChaCha20 {chacha}, SHA-256 {sha}, CRC-32C {crc}, AES-256-XTS {xts} MiB/s (hardware AES: {xts_hw})",
         c.handshake_us_x10 / 10,
         c.handshake_ticks,
         c.tick_clock

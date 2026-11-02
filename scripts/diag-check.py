@@ -69,8 +69,10 @@ def main():
     c = d["crypto"]
     if not c or c["handshake_us"] <= 0 or c["x25519_us"] <= 0 or c["ecdsa_verify_us"] <= 0:
         fail("crypto figures missing")
-    if c["handshake_ticks"] <= 0 or c["aes_gcm_mib_s"] <= 0 or c["sha256_mib_s"] <= 0:
+    if c["handshake_ticks"] <= 0 or c["aes_gcm_mib_s"] <= 0 or c["aes_xts_mib_s"] <= 0 or c["sha256_mib_s"] <= 0:
         fail("crypto figures missing")
+    if "aes_xts_hardware" not in c:
+        fail("AES-XTS hardware flag missing")
 
     want = opts.get("--disk-state")
     if want:

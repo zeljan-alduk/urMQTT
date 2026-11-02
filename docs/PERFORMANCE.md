@@ -408,5 +408,7 @@ x86_64 uses AES-NI through the `aes` crate's own runtime detection; it was **not
 
 The spread between runs (46k to 58k) is larger than the difference between the medians (+0.8 %): **no overhead is measurable here**. That is what the arithmetic says too: this benchmark writes 1572 sectors-worth of 4 KiB blocks and 319 flushes per run, about 6 MB, which at 3 GB/s is about 2 ms of AES in a run of 100 ms; a commit waits for the flush, not for the cipher. The acceptance line (≤ 5 %) is met on this hardware. Not measured: telemetry throughput at the disk's limit, the backup benchmark and boot time with encryption on (the first boot of a blank disk formats the same regions either way), the x86_64 machines.
 
+**In the Diagnostic entry:** the crypto stage measures AES-256-XTS over 512-byte sectors on the machine it runs on, shows it under the crypto bars with whether the CPU has hardware AES (amber, "storage.encryption would be refused", when not), and writes `aes_xts_mib_s` and `aes_xts_hardware` into the JSON report. It is the cipher only, not a disk.
+
 **The offline conversion** (`urmqtt-disk encrypt`, 54 MiB partition with 12 MiB used, a file on an SSD): the unused 43 MiB are skipped as holes. Its cost is reading and writing the used part once, plus a flush per MiB.
 

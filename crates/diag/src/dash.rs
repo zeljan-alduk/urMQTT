@@ -534,6 +534,18 @@ fn crypto_lines(c: Option<&CryptoBench>) -> Vec<Line> {
             ),
             TEXT,
         ),
+        Line::Text(
+            format!(
+                "AES-256-XTS (disk encryption) {}  {}",
+                fmt::rate_mib(c.aes_xts_mib_s),
+                if c.aes_xts_hardware {
+                    "hardware AES"
+                } else {
+                    "NO hardware AES: storage.encryption would be refused"
+                }
+            ),
+            if c.aes_xts_hardware { TEXT } else { AMBER },
+        ),
     ]
 }
 
@@ -809,6 +821,8 @@ mod tests {
                 handshake_ticks: 1_250_000,
                 tick_clock: "tsc".into(),
                 aes_gcm_mib_s: 3000,
+                aes_xts_mib_s: 3100,
+                aes_xts_hardware: true,
                 chacha_mib_s: 1500,
                 sha256_mib_s: 1900,
                 crc32c_mib_s: 9000,
