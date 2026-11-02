@@ -1037,6 +1037,110 @@ build_disk_tool() {
     DISK_TOOL="$ROOT/target/release/urmqtt-disk"
 }
 
+# S7 end to end (ADR-240): encryption at rest. A dev configuration with
+# storage.encryption = "aes-256-xts" and a key file:
+#   1. a blank disk is formatted encrypted, the self-test (database, backup)
+#      runs on it, and the disk image holds no SQLite header afterwards;
+#   2. a second boot opens it again with the same key;
+#   3. a configuration with another key, and one without encryption, are
+#      refused with a reason (nothing is converted at boot);
+#   4. the host tool opens it with the key, refuses without, and `decrypt`
+#      gives a disk the plain configuration boots.
+storage_encrypted() {
+    build_disk_tool || {
+        echo "  ✗ storage-encrypted needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local ud=$DISK_TOOL dir="$OUT/enc" tool="$ROOT/target/debug/urmqtt-config"
+    rm -rf "$dir"
+    mkdir -p "$dir/root"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool)
+    cp "$ROOT"/deploy/dev/* "$dir/root/" 2>/dev/null || true
+    python3 -I - "$dir" <<'PY'
+import sys
+d = sys.argv[1]
+open(d + "/k1.hex", "w").write("".join("%02x" % ((i * 7 + 3) & 255) for i in range(64)) + "\n")
+open(d + "/k2.hex", "w").write("".join("%02x" % ((i * 11 + 5) & 255) for i in range(64)) + "\n")
+PY
+    local k
+    for k in 1 2; do
+        cp "$dir/k$k.hex" "$dir/root/disk.key"
+        sed -e 's/^\[storage\]/[storage]\nencryption = "aes-256-xts"\ndisk_key = "disk.key"/' \
+            "$ROOT/deploy/dev/config.toml" >"$dir/config$k.toml"
+        "$tool" pack "$dir/config$k.toml" --env dev --root "$dir/root" --out "$dir/enc$k.blob" >/dev/null ||
+            { echo "  ✗ storage-encrypted: packing failed"; FAILED=$((FAILED + 1)); return; }
+    done
+    sed -e 's/^handler_budget_ms = 10/handler_budget_ms = 10/' "$ROOT/deploy/dev/config.toml" >"$dir/plain.toml"
+    "$tool" pack "$dir/plain.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/plain.blob" >/dev/null
+    local name
+    for name in enc1-fill:enc1:test=db-backup enc1-plain:enc1: enc2:enc2: plain:plain:; do
+        local img=${name%%:*} rest=${name#*:}
+        local blob=${rest%%:*} test=${rest#*:}
+        MKIMG_EXTRA=(--config "$dir/$blob.blob")
+        mkimg "$OUT/enc-$img.raw" "smoke${test:+ $test}"
+        MKIMG_EXTRA=()
+    done
+    local accel
+    for accel in $ACCELS; do
+        local disk="$OUT/enc-$accel.img" status=0 l
+        fresh_disk "$OUT/enc-enc1-fill.raw" "$disk"
+        l="$OUT/enc-$accel-1.log"
+        boot "$l" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "encrypted-first-boot [$accel]" "$l" "$status" \
+            "storage: encryption aes-256-xts \(key check ok" \
+            "db-backup: 100 selftest rows in snapshot seq 1" "db-backup: 50 more rows committed after the snapshot \(150 in all\)" \
+            "^URMQTT READY$" "NOT:refusing to serve" "$NO_FAULT"
+        {
+            # The data partition only: the ESP holds the kernel, which embeds SQLite.
+            dd if="$disk" of="$disk.data" bs=512 skip=18432 status=none
+            if grep -aq "SQLite format 3" "$disk.data"; then echo "image: plaintext SQLite header FOUND"; else echo "image: no plaintext SQLite header"; fi
+            if grep -aq "selftest" "$disk.data"; then echo "image: table name FOUND"; else echo "image: no plaintext table name"; fi
+        } >"$l.scan"
+        check "encrypted-no-plaintext-at-rest [$accel]" "$l.scan" 0 "image: no plaintext SQLite header" "image: no plaintext table name"
+
+        status=0
+        set_esp "$disk" "$OUT/enc-enc1-plain.raw"
+        l="$OUT/enc-$accel-2.log"
+        boot "$l" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "encrypted-second-boot [$accel]" "$l" "$status" "storage: encryption aes-256-xts" "storage: data disk opened" \
+            "db: sqlite .* quick_check ok" "^URMQTT READY$" "NOT:RESTORED" "NOT:refusing to serve" "$NO_FAULT"
+
+        status=0
+        set_esp "$disk" "$OUT/enc-enc2.raw"
+        l="$OUT/enc-$accel-3.log"
+        boot_until "$l" "refusing to serve" --disk "$disk" --accel "$accel" --fwd none || status=$?
+        check "encrypted-wrong-key-refused [$accel]" "$l" "$status" \
+            "storage.disk_key does not match the data partition's key check" "NOT:URMQTT READY"
+
+        status=0
+        set_esp "$disk" "$OUT/enc-plain.raw"
+        l="$OUT/enc-$accel-4.log"
+        boot_until "$l" "refusing to serve" --disk "$disk" --accel "$accel" --fwd none || status=$?
+        check "encrypted-without-config-refused [$accel]" "$l" "$status" \
+            "the data partition is encrypted but the configuration has no storage.encryption" "NOT:URMQTT READY"
+
+        {
+            "$ud" verify "$disk" 2>&1 || echo "tool: verify without key refused"
+            "$ud" verify "$disk" --key "$dir/k2.hex" 2>&1 || echo "tool: verify with the wrong key refused"
+            "$ud" verify "$disk" --key "$dir/k1.hex" 2>&1 && echo "tool: verify with the key exit 0"
+            "$ud" decrypt "$disk" --key "$dir/k1.hex" --write 2>&1 | tail -1
+            "$ud" verify "$disk" 2>&1 && echo "tool: verify of the decrypted disk exit 0"
+        } >"$disk.tool" 2>&1
+        check "encrypted-disk-tool [$accel]" "$disk.tool" 0 \
+            "the data partition is encrypted: give its key with --key FILE" "tool: verify without key refused" \
+            "the key does not match this disk" "tool: verify with the wrong key refused" \
+            "tool: verify with the key exit 0" "the disk is now plain" "tool: verify of the decrypted disk exit 0"
+
+        status=0
+        set_esp "$disk" "$OUT/enc-plain.raw"
+        l="$OUT/enc-$accel-5.log"
+        boot "$l" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        check "decrypted-disk-boots-plain [$accel]" "$l" "$status" "storage: data disk opened" \
+            "db: sqlite .* quick_check ok" "^URMQTT READY$" "NOT:encryption" "NOT:refusing to serve" "$NO_FAULT"
+    done
+}
+
 # S2 + S3 end to end (ADR-141, ADR-142). A layout-v1 data partition holding
 # real broker state (the host tool builds it: no v1 kernel exists any more):
 #   1. the kernel refuses it and writes nothing (the disk's hash is the same
@@ -2754,6 +2858,7 @@ if [[ ${SMOKE_ONLY:-} == storage && $ARCH != universal ]]; then
     want grow_online && grow_online
     want discard_qcow2 && discard_qcow2
     want db_backup && db_backup
+    want storage_encrypted && storage_encrypted
     want backup_upgrade && backup_upgrade
     want backup_scheduled && backup_scheduled
     want backup_bench && backup_bench
