@@ -135,6 +135,8 @@ test('every field shows its default as the placeholder and nothing is marked as 
   let checked = 0;
   for (const f of schema.fields) {
     if (f.derived || f.dev_only) continue;
+    // Disk encryption needs a key dialog the page does not have yet (S7, ADR-240).
+    if (f.key === 'storage.encryption' || f.key === 'storage.disk_key') { assert.ok(!byId.has(f.key), `${f.key} is not offered`); continue; }
     const s = byId.get(f.key);
     assert.ok(s, `${f.key} is in the form`);
     assert.equal(s.changed, 'false', f.key);

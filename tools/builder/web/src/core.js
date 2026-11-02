@@ -17,6 +17,11 @@ export const FILE_KEYS = {
   'tls.revoked_serials': { slot: 'revoked', file: 'revoked.txt' },
 };
 
+/** Fields the page does not offer. Disk encryption (S7, ADR-240) needs a key
+ * dialog (generate, save, import) the page does not have yet; it is set with
+ * `urmqtt-config pack` and the TOML (docs/OPERATE.md). */
+export const HIDDEN = new Set(['storage.encryption', 'storage.disk_key']);
+
 /** Section order of the form and which sections open by default. */
 export const SECTION_ORDER = [
   'network', 'tls', 'trust', 'control', 'limits', 'acl', 'storage',
@@ -41,6 +46,7 @@ export function buildModel(schema) {
   const dev = [];
   for (const f of schema.fields) {
     if (f.derived) continue; // computed from the certificate, not chosen
+    if (HIDDEN.has(f.key)) continue;
     const field = {
       ...f,
       id: f.key,
