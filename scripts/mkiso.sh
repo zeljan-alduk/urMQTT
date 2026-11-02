@@ -212,6 +212,7 @@ if [[ $UNIVERSAL -eq 1 ]]; then
         echo "quiet: yes"
         echo "editor_enabled: no"
         echo "hash_mismatch_panic: yes"
+        [[ -n ${URMQTT_LIMINE_SERIAL:-} ]] && echo "serial: yes"
         CFG_MODULE="boot():/boot/urmqtt.cfg"
         entries urMQTT "$CMDLINE" ""
     } > "$TMP/limine.conf"
@@ -257,6 +258,9 @@ if [[ $UNIVERSAL -eq 1 ]]; then
         echo "default_entry: $DEFAULT_ENTRY"
         echo "editor_enabled: no"
         echo "hash_mismatch_panic: yes"
+        # Tests only (H8): Limine's own messages, such as the hash-mismatch panic,
+        # on the serial port. Never set for a release image.
+        [[ -n ${URMQTT_LIMINE_SERIAL:-} ]] && echo "serial: yes"
         menu_style
         CFG_MODULE="boot():/boot/urmqtt.cfg#$CFG_HASH"
         entries urMQTT "$LIVE_CMDLINE" ""

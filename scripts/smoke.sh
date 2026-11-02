@@ -2496,6 +2496,80 @@ universal_install() {
     done
 }
 
+# H8 (ADR-250, ADR-251): boot integrity. A modified kernel or configuration module
+# in a built image is refused by the loader itself, on each of the three machines the universal
+# image boots (aarch64 UEFI, x86_64 UEFI, x86_64 BIOS). The refusal is read from Limine's own
+# message: the test images are built with URMQTT_LIMINE_SERIAL=1 (Limine's messages on the
+# serial port; never set for a release image). Every refusal has a control that boots: the same
+# image with the kernel of the OTHER architecture changed (that machine does not read it).
+#
+# integrity_refused <label> <kind> <accel> <iso|disk> <file> <wait-for> <patterns...>
+integrity_refused() {
+    local label=$1 kind=$2 accel=$3 how=$4 file=$5 pat=$6
+    shift 6
+    local log="$OUT/integrity-$label.log" status=0
+    # shellcheck disable=SC2046 # u_args prints a word list
+    boot_until "$log" "$pat" $(u_args "$kind" "$accel" "$how" "$file") --no-net || status=$?
+    check "integrity: $label refused" "$log" "$status" "$pat" "NOT:URMQTT BOOT" "NOT:URMQTT READY" \
+        "NOT:bootloader=Limine" "$@"
+}
+
+# integrity_boots <label> <kind> <accel> <iso|disk> <file>: the control, it boots.
+integrity_boots() {
+    local label=$1 kind=$2 accel=$3 how=$4 file=$5
+    local log="$OUT/integrity-$label.log" status=0
+    # A raw image is booted from a copy on a larger disk (the data partition is created at the first boot).
+    if [[ $how == disk ]]; then
+        fresh_disk "$file" "$OUT/integrity-boot-$kind.img"
+        file="$OUT/integrity-boot-$kind.img"
+    fi
+    u_run "$kind" "$accel" "$log" "$how" "$file" || status=$?
+    check "integrity: $label boots" "$log" "$status" 'URMQTT BOOT [^ ]+ (arch=x86_64 )?cpu=[0-9]+ mem=[0-9]+$' \
+        "bootloader=Limine" "^URMQTT READY$" "NOT:CHECKSUM MISMATCH" "NOT:does not match"
+}
+
+universal_integrity() {
+    local base="$OUT/integrity-base.iso" cfg="$OUT/integrity-urmqtt.cfg"
+    local tamper="$ROOT/scripts/tamper.py"
+    URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$base" "smoke"
+    # The ISO's configuration module, as a file, to find its copies in the image.
+    rm -f "$cfg"
+    xorriso -osirrox on -indev "$base" -extract /boot/urmqtt.cfg "$cfg" >/dev/null 2>&1 || true
+    if [[ ! -s "$cfg" ]]; then
+        echo "  ✗ integrity: cannot extract /boot/urmqtt.cfg from the ISO"
+        FAILED=$((FAILED + 1))
+        return 0
+    fi
+    local t_a64="$OUT/integrity-tampered-aarch64.iso" t_x86="$OUT/integrity-tampered-x86.iso"
+    local t_cfg="$OUT/integrity-tampered-module.iso"
+    local d_a64="$OUT/integrity-tampered-aarch64.img" d_x86="$OUT/integrity-tampered-x86.img"
+    python3 -I "$tamper" "$base" --file "$KERNEL_A64" --out "$t_a64" >/dev/null
+    python3 -I "$tamper" "$base" --file "$KERNEL_X86" --out "$t_x86" >/dev/null
+    python3 -I "$tamper" "$base" --file "$cfg" --offset 5000 --out "$t_cfg" >/dev/null
+    # The raw disk image (the installed disk: ESP with the no-menu configuration).
+    python3 -I "$tamper" "$base.disk" --file "$KERNEL_A64" --out "$d_a64" >/dev/null
+    python3 -I "$tamper" "$base.disk" --file "$KERNEL_X86" --out "$d_x86" >/dev/null
+    local row name kind accel
+    local rows=("aa64|aa64|${ACCELS%% *}" "x86-uefi|x86-uefi|tcg" "x86-bios|x86-bios|tcg")
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name kind accel <<<"$row"
+        [[ -z "${SMOKE_INTEGRITY:-}" || $name == "$SMOKE_INTEGRITY" ]] || continue
+        local mine other_iso other_disk mine_iso mine_disk elf
+        if [[ $kind == aa64 ]]; then
+            mine_iso=$t_a64 mine_disk=$d_a64 other_iso=$t_x86 other_disk=$d_x86 elf=aarch64
+        else
+            mine_iso=$t_x86 mine_disk=$d_x86 other_iso=$t_a64 other_disk=$d_a64 elf=x86-64
+        fi
+        local kpat="PANIC: Blake2b hash for URI \`boot\(\):/boot/urmqtt-$elf\.elf\` does not match"
+        integrity_refused "kernel-iso-$name" "$kind" "$accel" iso "$mine_iso" "$kpat"
+        integrity_boots "kernel-iso-$name control (other architecture's kernel changed)" "$kind" "$accel" iso "$other_iso"
+        integrity_refused "kernel-disk-$name" "$kind" "$accel" disk "$mine_disk" "$kpat"
+        integrity_boots "kernel-disk-$name control (other architecture's kernel changed)" "$kind" "$accel" disk "$other_disk"
+        integrity_refused "module-iso-$name" "$kind" "$accel" iso "$t_cfg" \
+            'PANIC: Blake2b hash for URI `boot\(\):/boot/urmqtt\.cfg` does not match'
+    done
+}
+
 # Cross-architecture data disk: broker state written by a VM of one
 # architecture is restored by a VM of the other on the same disk (retained
 # message, persistent session with a queued command, one telemetry record).
@@ -2955,6 +3029,15 @@ if [[ ${SMOKE_ONLY:-} == config && $ARCH == universal ]]; then
     exit
 fi
 
+# SMOKE_ONLY=integrity (universal): H8, modified kernel / module / limine.conf are refused by the loader
+# (SMOKE_INTEGRITY=<aa64|x86-uefi|x86-bios> limits the machine).
+if [[ ${SMOKE_ONLY:-} == integrity && $ARCH == universal ]]; then
+    universal_integrity
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=install (universal): only the installer scenarios; SMOKE_INSTALLER=<aa64|x86-uefi|x86-bios>
 # limits which machine runs the installer.
 if [[ ${SMOKE_ONLY:-} == install && $ARCH == universal ]]; then
@@ -2970,6 +3053,7 @@ if [[ $ARCH == universal ]]; then
     universal_raw
     universal_migrated
     universal_install
+    universal_integrity
     universal_diag
     if command -v mosquitto_pub >/dev/null; then
         # One ISO, three machines, no disk.
