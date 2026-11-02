@@ -250,6 +250,9 @@ fn enum_variants_agree() {
             if f.key == "network.mode" {
                 continue; // needs addresses; covered by cross_field tests
             }
+            if f.key == "storage.encryption" && *v != "off" {
+                continue; // needs a key file; covered by encryption_tests
+            }
             let t = pack_plain(&with(f.key, &format!("{v:?}"))).is_ok();
             let mut b = Builder::new();
             b.variant(f.tag, i as u8).unwrap();

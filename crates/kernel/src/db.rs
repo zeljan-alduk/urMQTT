@@ -314,7 +314,66 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
     // Telemetry partitions of a disk formatted now: one per core, at least
     // 8 (G4); an existing layout keeps its own.
     let partitions = cpus.next_power_of_two().clamp(8, 64) as u32;
-    let (mut disk, how) = match Disk::open_with(dev, uuid, partitions) {
+    // S7 (ADR-240): the disk key from the configuration. Without AES
+    // instructions the kernel refuses rather than run XTS in software.
+    let mut key = [0u8; urmqtt_store::crypt::KEY_BYTES];
+    let key_ref = if cfg.encryption {
+        if !urmqtt_store::crypt::hardware_aes() {
+            return refuse_or_degrade(
+                false,
+                format_args!(
+                    "storage.encryption needs AES instructions and this CPU has none (or [cpu] disable turned them off); refusing rather than run slowly"
+                ),
+            );
+        }
+        if cfg.disk_key.0.len() != key.len() {
+            return refuse_or_degrade(false, format_args!("storage.disk_key is not 64 bytes"));
+        }
+        key.copy_from_slice(cfg.disk_key.0);
+        Some(&key)
+    } else {
+        None
+    };
+    let opened = Disk::open_keyed(dev, uuid, partitions, key_ref);
+    urmqtt_store::crypt::wipe(&mut key);
+    let opened = match opened {
+        Err(DiskError::KeyRequired) => {
+            error!("storage: refused reason=encrypted");
+            return refuse_or_degrade(
+                false,
+                format_args!(
+                    "the data partition is encrypted but the configuration has no storage.encryption and storage.disk_key"
+                ),
+            );
+        }
+        Err(DiskError::NotEncrypted) => {
+            error!("storage: refused reason=not-encrypted");
+            return refuse_or_degrade(
+                false,
+                format_args!(
+                    "storage.encryption is on but the data partition is not encrypted: convert it offline with `urmqtt-disk encrypt` (it is never converted at boot)"
+                ),
+            );
+        }
+        Err(DiskError::WrongKey) => {
+            error!("storage: refused reason=wrong-key");
+            return refuse_or_degrade(
+                false,
+                format_args!("storage.disk_key does not match the data partition's key check"),
+            );
+        }
+        Err(DiskError::ConversionPending) => {
+            error!("storage: refused reason=conversion-pending");
+            return refuse_or_degrade(
+                false,
+                format_args!(
+                    "an offline encrypt, decrypt or rekey run was interrupted: resume it with `urmqtt-disk ... --resume`"
+                ),
+            );
+        }
+        r => r,
+    };
+    let (mut disk, how) = match opened {
         Ok(d) => d,
         Err(DiskError::Layout(LayoutError::OldVersion(v))) => {
             // An older layout is never converted at boot: refused before
@@ -340,6 +399,11 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
             return refuse_or_degrade(false, format_args!("data partition unreadable: {e:?}"));
         }
     };
+    if cfg.encryption {
+        info!(
+            "storage: encryption aes-256-xts (key check ok; XTS gives confidentiality, not integrity)"
+        );
+    }
     // S5: a layout without a backup region gets one (one superblock write,
     // ADR-160), before the discard queue is on so nothing queued can overlap.
     if cfg.backup_interval_min > 0 && !crate::live::ephemeral() {

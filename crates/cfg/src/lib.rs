@@ -31,6 +31,7 @@ pub mod blob;
 #[cfg(any(test, feature = "alloc"))]
 pub mod build;
 pub mod check;
+pub mod diskkey;
 pub mod fields;
 pub mod net;
 pub mod passwd;

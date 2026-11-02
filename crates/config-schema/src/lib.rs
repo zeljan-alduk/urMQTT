@@ -369,6 +369,16 @@ pub enum DiscardMode {
     Off,
 }
 
+/// Encryption of the data partition at rest (S7, ADR-240).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum EncryptionMode {
+    #[serde(rename = "off")]
+    Off,
+    /// AES-256-XTS per 512-byte sector.
+    #[serde(rename = "aes-256-xts")]
+    Aes256Xts,
+}
+
 /// Bounds of `storage.ram_percent`: the floor keeps the RAM store above
 /// the data layout's 16 MiB minimum on ordinary machines, the ceiling
 /// leaves most of RAM to the connections.
@@ -420,9 +430,20 @@ struct RawStorage {
     /// Megabytes per second a scrub pass may read (S6).
     #[serde(default = "default_scrub_io_budget_mb_s")]
     scrub_io_budget_mb_s: u32,
+    /// `"off"` (default) or `"aes-256-xts"`: the data partition is
+    /// encrypted at rest (S7, ADR-240).
+    #[serde(default = "default_encryption")]
+    encryption: EncryptionMode,
+    /// The key file (only with encryption).
+    #[serde(default)]
+    disk_key: String,
     require_flush: bool,
     require_data_disk: bool,
     refuse_on_corruption: bool,
+}
+
+const fn default_encryption() -> EncryptionMode {
+    EncryptionMode::Off
 }
 
 fn default_grow_ratio_db() -> u32 {
@@ -612,6 +633,10 @@ pub struct Storage {
     pub scrub_interval_h: u32,
     /// Megabytes per second a scrub pass may read (S6).
     pub scrub_io_budget_mb_s: u32,
+    /// Encryption at rest (S7).
+    pub encryption: EncryptionMode,
+    /// Name of the key file, empty when encryption is off.
+    pub disk_key: String,
     pub require_flush: bool,
     /// Without a data disk: refuse to serve (true) or run in memory only.
     pub require_data_disk: bool,
@@ -1774,6 +1799,22 @@ fn validate_storage(
     if raw.grow_ratio_db > 100 {
         errors.push(err("storage.grow_ratio_db", "must be in 0..=100 (percent)"));
     }
+    match (raw.encryption, raw.disk_key.is_empty()) {
+        (EncryptionMode::Aes256Xts, true) => errors.push(err(
+            "storage.disk_key",
+            "required with storage.encryption = \"aes-256-xts\": the name of a file with the key",
+        )),
+        (EncryptionMode::Off, false) => errors.push(err(
+            "storage.disk_key",
+            "only with storage.encryption = \"aes-256-xts\"",
+        )),
+        _ => {}
+    }
+    if !raw.disk_key.is_empty()
+        && let Err(m) = check_file_name(&raw.disk_key)
+    {
+        errors.push(err("storage.disk_key", m));
+    }
     validate_filters(
         "storage.telemetry_topics",
         &raw.telemetry_topics,
@@ -1794,6 +1835,8 @@ fn validate_storage(
         auto_restore: raw.auto_restore,
         scrub_interval_h: raw.scrub_interval_h,
         scrub_io_budget_mb_s: raw.scrub_io_budget_mb_s,
+        encryption: raw.encryption,
+        disk_key: raw.disk_key.clone(),
         require_flush: raw.require_flush,
         require_data_disk: raw.require_data_disk,
         refuse_on_corruption: raw.refuse_on_corruption,
@@ -1947,6 +1990,8 @@ pub fn check_expiry(pem: &[u8], now_unix: u64, min_days: u32) -> Result<u64, Str
 
 pub mod pack;
 
+#[cfg(test)]
+mod encryption_tests;
 #[cfg(test)]
 mod pack_tests;
 #[cfg(test)]

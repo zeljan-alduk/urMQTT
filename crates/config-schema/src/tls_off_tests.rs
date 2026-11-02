@@ -76,7 +76,7 @@ fn both_listeners_and_tls_only_stay_format_2() {
 #[test]
 fn the_newest_format_can_be_asked_for_and_never_a_lower_one_than_needed() {
     let empty = run("", true).unwrap();
-    assert_eq!(Blob::parse(&empty).unwrap().version(), 3);
+    assert_eq!(Blob::parse(&empty).unwrap().version(), 4);
     assert_eq!(
         pack(
             "",
@@ -93,7 +93,7 @@ fn the_newest_format_can_be_asked_for_and_never_a_lower_one_than_needed() {
     b.uint(tag::NET_TLS_PORT, 0).unwrap();
     assert_eq!(b.lowest_version(), 3);
     assert!(b.finish_as(false, 2).is_err());
-    assert!(b.finish_as(false, 4).is_err());
+    assert!(b.finish_as(false, 5).is_err());
 }
 
 #[test]

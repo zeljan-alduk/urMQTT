@@ -590,6 +590,22 @@ fn storage(b: &Blob<'_>, dev: bool) -> Result<(), CfgError> {
             }
         }
     }
+    // Encryption at rest (S7): on needs a usable key, off takes none.
+    let on = b.variant(tag::ST_ENCRYPTION) != 0;
+    let key = b.bin(tag::ST_DISK_KEY);
+    if on {
+        if crate::diskkey::check_key(key).is_err() {
+            return Err(err(
+                "storage.disk_key",
+                "required with storage.encryption: 64 bytes, two different halves, not one repeated byte",
+            ));
+        }
+    } else if !key.is_empty() {
+        return Err(err(
+            "storage.disk_key",
+            "only with storage.encryption = \"aes-256-xts\"",
+        ));
+    }
     Ok(())
 }
 

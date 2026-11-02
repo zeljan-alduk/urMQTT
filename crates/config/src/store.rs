@@ -313,6 +313,8 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             auto_restore: b.bool(tag::ST_AUTO_RESTORE),
             scrub_interval_h: u32_of(tag::ST_SCRUB_INTERVAL),
             scrub_io_budget_mb_s: u32_of(tag::ST_SCRUB_BUDGET),
+            encryption: b.variant(tag::ST_ENCRYPTION) != 0,
+            disk_key: crate::Secret(b.bin(tag::ST_DISK_KEY)),
             require_flush: b.bool(tag::ST_REQUIRE_FLUSH),
             require_data_disk: b.bool(tag::ST_REQUIRE_DATA_DISK),
             refuse_on_corruption: b.bool(tag::ST_REFUSE_ON_CORRUPTION),

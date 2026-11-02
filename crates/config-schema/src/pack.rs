@@ -211,6 +211,7 @@ struct Files {
     revoked: Vec<String>,
     control_key: Option<[u8; 32]>,
     cert_not_after: u64,
+    disk_key: Option<[u8; urmqtt_cfg::diskkey::KEY_BYTES]>,
 }
 
 fn read_files(
@@ -237,6 +238,7 @@ fn read_files(
         revoked: Vec::new(),
         control_key: None,
         cert_not_after: 0,
+        disk_key: None,
     };
     if supplied.contains("tls.cert")
         && let Some(b) = read(&mut errors, "tls.cert", &cfg.tls.cert)
@@ -257,6 +259,17 @@ fn read_files(
         match check_pem(&b, PemKind::PrivateKey) {
             Ok(()) => files.key = Some(b),
             Err(m) => errors.push(cerr("tls.key", m)),
+        }
+    }
+    if cfg.storage.encryption == crate::EncryptionMode::Aes256Xts
+        && let Some(b) = read(&mut errors, "storage.disk_key", &cfg.storage.disk_key)
+    {
+        match urmqtt_cfg::diskkey::parse_key_file(&b) {
+            Ok(k) => files.disk_key = Some(k),
+            Err(_) => errors.push(cerr(
+                "storage.disk_key",
+                "not a usable disk key: 64 raw bytes or 128 hex digits, two different halves, not one repeated byte",
+            )),
         }
     }
     if !cfg.tls.revocation_list.is_empty()
@@ -432,6 +445,16 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     b.bool(tag::ST_AUTO_RESTORE, s.auto_restore)?;
     b.uint(tag::ST_SCRUB_INTERVAL, u64::from(s.scrub_interval_h))?;
     b.uint(tag::ST_SCRUB_BUDGET, u64::from(s.scrub_io_budget_mb_s))?;
+    b.variant(
+        tag::ST_ENCRYPTION,
+        match s.encryption {
+            crate::EncryptionMode::Off => 0,
+            crate::EncryptionMode::Aes256Xts => 1,
+        },
+    )?;
+    if let Some(k) = &f.disk_key {
+        b.bin(tag::ST_DISK_KEY, k)?;
+    }
     b.bool(tag::ST_REQUIRE_FLUSH, s.require_flush)?;
     b.bool(tag::ST_REQUIRE_DATA_DISK, s.require_data_disk)?;
     b.bool(tag::ST_REFUSE_ON_CORRUPTION, s.refuse_on_corruption)?;

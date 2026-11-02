@@ -218,6 +218,8 @@ pub mod tag {
     pub const ST_REQUIRE_FLUSH: u16 = 82;
     pub const ST_REQUIRE_DATA_DISK: u16 = 83;
     pub const ST_REFUSE_ON_CORRUPTION: u16 = 84;
+    pub const ST_ENCRYPTION: u16 = 85;
+    pub const ST_DISK_KEY: u16 = 86;
     pub const OBS_LOG_LEVEL: u16 = 90;
     pub const OBS_SYSLOG: u16 = 91;
     pub const OBS_METRICS: u16 = 92;
@@ -263,6 +265,7 @@ pub const NETWORK_MODES: &[&str] = &["dhcp", "static", "auto"];
 pub const IDENTITY_FIELDS: &[&str] = &["cn", "san_uri"];
 pub const STORAGE_MODES: &[&str] = &["disk", "auto", "ram"];
 pub const DISCARD_MODES: &[&str] = &["auto", "off"];
+pub const ENCRYPTION_MODES: &[&str] = &["off", "aes-256-xts"];
 pub const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 pub const ENTROPY_FALLBACKS: &[&str] = &["jitter", "none"];
 pub const REGISTRY_MODES: &[&str] = &["open", "allowlist"];
@@ -648,6 +651,21 @@ pub static FIELDS: &[Field] = &[
         Kind::Bool(true),
         "Refuse to serve when the database fails its integrity check. false: development only.",
     )),
+    f(
+        t::ST_ENCRYPTION,
+        "storage.encryption",
+        Kind::Enum {
+            variants: ENCRYPTION_MODES,
+            default: 0,
+        },
+        "off, or aes-256-xts: the data partition is encrypted at rest (needs storage.disk_key; format 4). Protects a stolen volume or snapshot, not a stolen ISO.",
+    ),
+    f(
+        t::ST_DISK_KEY,
+        "storage.disk_key",
+        Kind::Bin { max: 128 },
+        "File with the disk key: 64 raw bytes or 128 hex digits (two different AES-256 keys). Only with storage.encryption; never commit it.",
+    ),
     // observability
     f(
         t::OBS_LOG_LEVEL,

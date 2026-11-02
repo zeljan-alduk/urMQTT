@@ -214,7 +214,7 @@ fn structural_attacks_fail_closed() {
     over[2] = 200;
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, and one above the newest).
-    for unknown in [0u8, 4, 9] {
+    for unknown in [0u8, 5, 9] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
@@ -236,7 +236,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 3));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 4));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -245,7 +245,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[3, 0],
+        &[4, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,

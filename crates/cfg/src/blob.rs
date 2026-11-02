@@ -20,10 +20,11 @@ use crate::{CfgError, err};
 pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// The newest format version this code reads (and writes for a configuration that needs it). Version 2
 /// added the `plaintext.*` fields (P1, ADR-229); version 3 allows `network.mqtt_tls_port = 0` (the TLS
-/// listener off, with `plaintext.enabled`; ADR-233). The records of 2 and 3 are the same: the packer writes
+/// listener off, with `plaintext.enabled`; ADR-233); version 4 adds `storage.encryption` and
+/// `storage.disk_key` (S7, ADR-240: a kernel that does not know them must not boot an encrypted disk). The records of 2 and 3 are the same: the packer writes
 /// the lowest version that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind
 /// still boots every image that does not use what came later.
-pub const FORMAT_VERSION: u16 = 3;
+pub const FORMAT_VERSION: u16 = 4;
 /// The version a configuration is written in unless it needs a newer one.
 pub const BASE_VERSION: u16 = 2;
 /// The oldest format version it still reads. Blobs of the older versions stay

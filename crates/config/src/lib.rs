@@ -241,9 +241,23 @@ pub struct Storage {
     pub scrub_interval_h: u32,
     /// Megabytes per second a scrub pass may read (S6).
     pub scrub_io_budget_mb_s: u32,
+    /// AES-256-XTS over the data partition (S7, ADR-240).
+    pub encryption: bool,
+    /// The 64-byte disk key, empty when `encryption` is off.
+    pub disk_key: Secret,
     pub require_flush: bool,
     pub require_data_disk: bool,
     pub refuse_on_corruption: bool,
+}
+
+/// Key material that never prints: `Debug` shows only its length.
+#[derive(Clone, Copy)]
+pub struct Secret(pub &'static [u8]);
+
+impl core::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "<{} bytes, not shown>", self.0.len())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

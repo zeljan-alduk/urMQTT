@@ -140,14 +140,20 @@ impl Builder {
         self.finish_as(dev_allowed, self.lowest_version())
     }
 
-    /// The lowest format version that can hold this configuration: 2, or 3 when the TLS listener is off.
+    /// The lowest format version that can hold this configuration: 2, 3 when the TLS listener is off, 4 with disk encryption.
     pub fn lowest_version(&self) -> u16 {
         let tls_off = self
             .records
             .iter()
             .any(|(t, v)| *t == crate::fields::tag::NET_TLS_PORT && v.iter().all(|b| *b == 0));
-        if tls_off {
-            FORMAT_VERSION
+        let encrypted = self
+            .records
+            .iter()
+            .any(|(t, v)| *t == crate::fields::tag::ST_ENCRYPTION && v.iter().any(|b| *b != 0));
+        if encrypted {
+            4
+        } else if tls_off {
+            3
         } else {
             BASE_VERSION
         }

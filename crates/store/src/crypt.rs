@@ -34,58 +34,36 @@ use zeroize::Zeroize;
 use crate::disk::{BlockDevice, DiscardCaps, IoError};
 use crate::layout::{SB_SLOT_LBA, SECTOR, Topology};
 
-/// The disk key: two AES-256 keys (data and tweak), as XTS wants.
-pub const KEY_BYTES: usize = 64;
+pub use urmqtt_cfg::diskkey::{KEY_BYTES, KeyError, check_key};
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+cpufeatures::new!(cpu_aes, "aes");
+
+/// Whether this CPU has AES instructions that the `aes` crate uses (AES-NI,
+/// FEAT_AES). Without them AES-XTS would run in software at a fraction of the
+/// speed, so the kernel refuses `storage.encryption` instead of falling back
+/// silently (ADR-240). On aarch64 the answer honours `[cpu] disable`.
+pub fn hardware_aes() -> bool {
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        cpu_aes::get()
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        false
+    }
+}
 
 const SECTOR_BYTES: usize = SECTOR as usize;
 const BLOCKS: usize = SECTOR_BYTES / 16;
 /// The key check is the HMAC of this and the disk's UUID.
 const CHECK_LABEL: &[u8] = b"urMQTT disk key check v1";
 
-/// What a key is refused for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyError {
-    /// Not [`KEY_BYTES`] long.
-    Length,
-    /// The two halves are equal (XTS forbids it) or all one byte value.
-    Weak,
-}
+pub use urmqtt_cfg::diskkey::parse_key_file as parse_key;
 
-/// Checks the key material the way the build does: right length, halves
-/// different, not a repeated byte.
-pub fn check_key(key: &[u8]) -> Result<(), KeyError> {
-    if key.len() != KEY_BYTES {
-        return Err(KeyError::Length);
-    }
-    let (a, b) = key.split_at(KEY_BYTES / 2);
-    let first = key.first().copied().unwrap_or(0);
-    if a == b || key.iter().all(|&x| x == first) {
-        return Err(KeyError::Weak);
-    }
-    Ok(())
-}
-
-/// Reads a key file: [`KEY_BYTES`] raw bytes, or 128 hex digits (blanks and
-/// a final newline allowed). Returns the key and checks it.
-pub fn parse_key(file: &[u8]) -> Result<[u8; KEY_BYTES], KeyError> {
-    let mut out = [0u8; KEY_BYTES];
-    let text: Vec<u8> = file
-        .iter()
-        .copied()
-        .filter(|b| !b.is_ascii_whitespace())
-        .collect();
-    if text.len() == 2 * KEY_BYTES && text.iter().all(u8::is_ascii_hexdigit) {
-        for (o, pair) in out.iter_mut().zip(text.chunks_exact(2)) {
-            let h = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
-            *o = h(pair.first().copied().unwrap_or(0)) << 4 | h(pair.get(1).copied().unwrap_or(0));
-        }
-    } else if file.len() == KEY_BYTES {
-        out.copy_from_slice(file);
-    } else {
-        return Err(KeyError::Length);
-    }
-    check_key(&out)?;
-    Ok(out)
+/// Overwrites key material (not optimised away).
+pub fn wipe(b: &mut [u8]) {
+    b.zeroize();
 }
 
 /// The expanded key. The round keys are wiped when it is dropped (the
