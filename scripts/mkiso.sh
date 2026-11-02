@@ -7,6 +7,7 @@
 #                    [--cmdline STR] [--esp-out IMG] [--disk-out IMG]
 #                    [--install-cmdline STR] [--install-default]
 #                    [--diag-cmdline STR] [--diag-default] [--no-diag] [--no-enroll]
+#                    [--sb-key KEY --sb-cert CERT]
 #
 # --universal (X10, ADR-043) builds ONE hybrid ISO for aarch64 UEFI, x86_64
 # UEFI and x86_64 BIOS: both kernels (urmqtt-<arch>.elf, ${ARCH} spelling of
@@ -71,6 +72,12 @@
 # of the tamper tests, nothing else). Tools that edit an ISO's limine.conf (urmqtt-config
 # pack --iso) re-enroll the ISO's loaders; both configs end with a marker line they find.
 #
+# --sb-key/--sb-cert (H8, ADR-251) sign the two EFI loaders for UEFI Secure Boot with
+# scripts/sign-loaders.sh, after enrolling (the signature covers the enrolled hash). The
+# signed loaders are tied to the configuration: `urmqtt-config pack --iso` on a signed
+# ISO changes the enrolled hash and so breaks the signature (the firmware then refuses
+# the loader). Configure first, then sign: build with --config and --sb-key together.
+#
 # Timestamps and the FAT volume serial are fixed (SOURCE_DATE_EPOCH, default:
 # last commit time) so identical inputs produce an identical image.
 set -euo pipefail
@@ -79,7 +86,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 ARCH=${URMQTT_ARCH:-aarch64}
 KERNEL="" OUT="" CMDLINE="" ESP_OUT="" INSTALL_CMDLINE="install" INSTALL_DEFAULT=0
 UNIVERSAL=0 KERNEL_A64="" KERNEL_X86="" DISK_OUT="" LIVE="" DIAG_CMDLINE="diag" DIAG_DEFAULT=0 NO_DIAG=0
-CONFIG="" CONFIG_ROOT="" EMPTY_CONFIG=0 ENROLL=1
+CONFIG="" CONFIG_ROOT="" EMPTY_CONFIG=0 ENROLL=1 SB_KEY="" SB_CERT=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --arch) ARCH=$2; shift 2 ;;
@@ -97,6 +104,8 @@ while [[ $# -gt 0 ]]; do
         --diag-default) DIAG_DEFAULT=1; shift ;;
         --no-diag) NO_DIAG=1; shift ;;
         --no-enroll) ENROLL=0; shift ;;
+        --sb-key) SB_KEY=$2; shift 2 ;;
+        --sb-cert) SB_CERT=$2; shift 2 ;;
         --config) CONFIG=$2; shift 2 ;;
         --config-root) CONFIG_ROOT=$2; shift 2 ;;
         --empty-config) EMPTY_CONFIG=1; shift ;;
@@ -105,6 +114,10 @@ while [[ $# -gt 0 ]]; do
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+if [[ -n "$SB_KEY$SB_CERT" ]]; then
+    [[ $UNIVERSAL -eq 1 && -f "$SB_KEY" && -f "$SB_CERT" && $ENROLL -eq 1 ]] \
+        || { echo "error: --sb-key and --sb-cert (existing files) go with --universal and an enrolled configuration" >&2; exit 2; }
+fi
 if [[ $UNIVERSAL -eq 1 ]]; then
     [[ -n "$KERNEL_A64" && -n "$KERNEL_X86" && -n "$OUT" ]] \
         || { echo "usage: $0 --universal --kernel-aarch64 ELF --kernel-x86_64 ELF --out ISO [--cmdline STR]" >&2; exit 2; }
@@ -240,6 +253,13 @@ if [[ $UNIVERSAL -eq 1 ]]; then
                     || { echo "error: limine enroll-config failed on $f" >&2; exit 1; }
             fi
         done
+        if [[ -n $SB_KEY ]]; then
+            for f in BOOTAA64.EFI BOOTX64.EFI; do
+                "$ROOT/scripts/sign-loaders.sh" sign "$SB_KEY" "$SB_CERT" "$dir/$f" "$dir/$f.signed" \
+                    || { echo "error: signing $f failed" >&2; exit 1; }
+                mv "$dir/$f.signed" "$dir/$f"
+            done
+        fi
         TZ=UTC touch -t "$STAMP" "$dir"/*
     }
     enroll_loaders "$TMP/esp-ldr" "$TMP/limine.conf"
