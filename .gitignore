@@ -27,3 +27,6 @@ deploy/*/revoked.txt
 .vscode/
 __pycache__/
 *.pyc
+
+# The public demo broker's generated certificates (scripts/demo-certs.sh, D1); never committed.
+deploy/demo/pki/
