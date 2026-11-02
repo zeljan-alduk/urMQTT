@@ -40,6 +40,11 @@ pub const HEADER_SECTORS: u64 = 64;
 /// Superblock slots A and B.
 pub const SB_SLOT_LBA: [u64; 2] = [0, 24];
 pub const SIZE_SLOT_LBA: [u64; 2] = [8, 16];
+/// The offline conversion record of `urmqtt-disk encrypt|decrypt|rekey`
+/// (S7): while a block with the magic below sits here the data partition is
+/// half converted and the kernel refuses to open it.
+pub const CONVERT_LBA: u64 = 56;
+pub const CONVERT_MAGIC: [u8; 8] = *b"URMQCNV1";
 /// 1 MiB in sectors: the smallest alignment unit of a v2 layout.
 pub const MIB_SECTORS: u64 = 1024 * 1024 / SECTOR;
 /// Scratch area at the end of the disk (the boot self-test writes there).

@@ -13,7 +13,7 @@ use urmqtt_sync::sync::SpinLock;
 
 use crate::crypt::{CryptDev, DiskKey, KEY_BYTES};
 use crate::layout::{
-    BLOCK, FLAG_ENCRYPTED, FileKind, Layout, LayoutError, Params, Region, RegionKind, SB_SLOT_LBA, SECTOR,
+    BLOCK, CONVERT_LBA, CONVERT_MAGIC, FLAG_ENCRYPTED, FileKind, Layout, LayoutError, Params, Region, RegionKind, SB_SLOT_LBA, SECTOR,
     SIZE_SLOT_LBA, SizeTable, Topology,
 };
 
@@ -215,6 +215,9 @@ pub enum DiskError {
     NotEncrypted,
     /// The key does not match the key check in the superblock.
     WrongKey,
+    /// An offline conversion (`urmqtt-disk encrypt|decrypt|rekey`) was
+    /// interrupted: the disk is half converted until it is resumed.
+    ConversionPending,
 }
 
 impl From<IoError> for DiskError {
@@ -332,6 +335,11 @@ impl Disk {
         let topo = dev.topology();
         let gran = gran_of(&topo);
         let (a, b) = read_slots(dev.as_mut())?;
+        let mut rec = [0u8; BLOCK];
+        dev.read(CONVERT_LBA, &mut rec)?;
+        if rec.get(..8) == Some(&CONVERT_MAGIC[..]) {
+            return Err(DiskError::ConversionPending);
+        }
         match Layout::select(&a, &b, total)? {
             Some((layout, slot)) => {
                 match (layout.encrypted(), key) {

@@ -3,6 +3,7 @@
 //! offline migration. The command line is `main.rs`.
 
 pub mod config;
+pub mod convert;
 pub mod dev;
 pub mod host;
 pub mod migrate;
