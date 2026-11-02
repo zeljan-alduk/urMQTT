@@ -555,6 +555,7 @@ fn crypto(run: &mut Run) {
         (i as u8).wrapping_mul(7).wrapping_add(3)
     }));
     let mut xbuf = vec![0x5au8; 64 * 1024];
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     let xts = rate(&mut || {
         for (i, s) in xbuf.chunks_exact_mut(512).enumerate() {
             xts_key.sector(i as u64, s, true);
