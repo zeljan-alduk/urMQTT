@@ -1,3 +1,29 @@
+## D1 — A public demo broker behind aldo.tech: built, NOT deployed (2026-11-02)
+
+Everything is files in the repository, tested locally. **Nothing was deployed or exposed**: no DNS, firewall, Caddy or server change, no push, no tag, no service left running.
+
+**Done**
+
+- **Demo configuration** (`deploy/demo/config.toml`): live mode (`storage.mode = "ram"`), mutual TLS with `demo/{id}/#` and no service, operator or control rights, small limits, no retained messages, the plaintext listener only for the bridge host (`allow_from` placeholder, replaced by `scripts/demo-pack.sh --bridge`), anonymous identity `web` with the narrowest ACL. `scripts/demo-certs.sh`: a client CA whose key is published on purpose, a separate broker CA whose key is deleted, `web` and N client certificates, a zip. `scripts/demo-pack.sh` (`urmqtt-config pack`), `scripts/demo-smoke.sh` + `scripts/demo-scenarios.py` (QEMU).
+- **Bridge** (`deploy/demo-bridge/bridge.py`, Python standard library): WebSocket (binary, subprotocol `mqtt`) to one fixed TCP upstream; per-address and global caps, new-connection rate, 1 KiB message cap, token buckets, idle and lifetime timeouts, Origin allow-list, MQTT CONNECT first, graceful 1001 close, no payloads or addresses in the log. Dockerfile, systemd unit, Caddy snippet.
+- **Page** (`tools/builder/demo/`): "Try urMQTT live", an MQTT 3.1.1 client in plain JS, messages shown as text, English and Croatian; `tools/builder/site/{demo,apply_demo}.py`, `scripts/deploy-builder-site.sh --with-demo`; unlisted and noindex until `URMQTT_DEMO_LISTED=1`.
+- **Docs**: DEPLOY.md section 11 (runbook), SECURITY.md "The public demo broker (D1)".
+
+**Tests run here**
+
+- `scripts/demo-smoke.sh` on the template ISO built by `make template` (release kernels, from a copy of the tree outside the nested worktree because the parent `.cargo/config.toml` doubles the branch-protection flag), packed with `--bridge 10.0.2.0/24`, aarch64 under QEMU/HVF: boot lines `EPHEMERAL`, TLS 8883, PLAINTEXT 1883, `URMQTT READY`; **18 scenarios ok**: own-topic round trip, other ids dropped or refused, client id must match, the public CA does not authenticate the broker, minted `operator` and `backend` certificates have no extra rights, retained not kept (TLS and plaintext), plaintext ACL, stored session refused, packet over 1 KiB closes, publish rate limit, mosquitto clients over TLS and plaintext.
+- `python3 -I deploy/demo-bridge/test_bridge.py`: 26 tests (unit, fake server, local mosquitto on a free loopback port) pass, run four times.
+- `node --test tools/builder/test/demo.test.mjs` (10) and `demo-page.test.mjs` (9, headless Chrome): pass. `python3 -I tools/builder/site/test_demo_site.py` (4) pass. `make builder-test`: 87 tests, 0 failed, 5 skipped (the existing ones that need `make certs`).
+
+**Not done, and why**
+
+- No deployment of any kind (the owner's go-ahead is needed). No real VPS, DNS, firewall or Caddy test; `caddy validate` was not run (Caddy is not installed here); the systemd unit and `deploy-builder-site.sh --with-demo` were not run (`bash -n` only).
+- The container image was not built (no base image was pulled; the Dockerfile says to pin it by digest first).
+- `apply_demo.py` was tested only against a stand-in made from what `apply_products.py` writes; the real aldo.tech `build.py` is not in the repository.
+- The demo image was booted on aarch64 only; the VPS is x86_64 (the template carries both kernels, the x86_64 boot of this configuration was not run). No test under real load.
+- The page has English and Croatian texts; the other 13 languages show English.
+- The Products page does not link to the demo page yet (unlisted by design).
+
 ## H10 — Audit package (2026-11-02)
 
 SECURITY-PLAN H10, the last milestone of the first release's path. `docs/AUDIT.md` is now the audit package (it began as the H0 baseline).

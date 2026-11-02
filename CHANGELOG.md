@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- D1: **a public demo broker, built and not deployed** (needs the owner's go-ahead). `deploy/demo/config.toml` (live mode, `demo/{id}/#`, plaintext only for a bridge host), `scripts/demo-certs.sh` (a published throwaway client CA, a separate broker CA whose key is deleted), `demo-pack.sh`, `demo-smoke.sh`; a stdlib Python WebSocket-to-TCP bridge with caps, rate limits and an Origin allow-list (`deploy/demo-bridge/`); the page "Try urMQTT live" with an MQTT client in plain JS (`tools/builder/demo/`, English and Croatian); the runbook in `docs/DEPLOY.md` section 11 and the threat model in `docs/SECURITY.md`.
+
 - H10: **the audit package** (`docs/AUDIT.md`: TCB and `unsafe` inventory with every site justified, the mitigation matrix and its tests, a bounds table for every network-reachable loop, build and test instructions, the proposed external audit scope, a red-team checklist with results), STRIDE per component in `SECURITY.md`, and the encryption-at-rest section of `CRYPTO.md`.
 
 - S8: fuzz targets for the backup headers (`disk_backup`) and for encrypted disks under wrong keys and damage (`disk_crypt`), golden images for layout 2.1 and for an encrypted disk, the data-disk format spec final (a section on what checks it).
