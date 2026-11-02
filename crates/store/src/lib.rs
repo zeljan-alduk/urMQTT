@@ -31,6 +31,7 @@ extern crate alloc;
 
 pub mod backup;
 pub mod crc;
+pub mod crypt;
 #[cfg(any(not(sandboxed), feature = "loopback"))]
 #[allow(unsafe_code)] // the C library's functions
 mod csqlite;

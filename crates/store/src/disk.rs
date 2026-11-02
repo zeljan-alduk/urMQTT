@@ -11,8 +11,9 @@ use alloc::vec::Vec;
 
 use urmqtt_sync::sync::SpinLock;
 
+use crate::crypt::{CryptDev, DiskKey, KEY_BYTES};
 use crate::layout::{
-    BLOCK, FileKind, Layout, LayoutError, Params, Region, RegionKind, SB_SLOT_LBA, SECTOR,
+    BLOCK, FLAG_ENCRYPTED, FileKind, Layout, LayoutError, Params, Region, RegionKind, SB_SLOT_LBA, SECTOR,
     SIZE_SLOT_LBA, SizeTable, Topology,
 };
 
@@ -208,6 +209,12 @@ pub enum DiskError {
     Layout(LayoutError),
     /// A write would go past the end of its region.
     Full,
+    /// The disk is encrypted (S7) and no key was given.
+    KeyRequired,
+    /// A key was given for a disk that is not encrypted.
+    NotEncrypted,
+    /// The key does not match the key check in the superblock.
+    WrongKey,
 }
 
 impl From<IoError> for DiskError {
@@ -302,9 +309,24 @@ impl Disk {
     /// A disk of an older layout version is refused (`OldVersion`) before
     /// anything is written.
     pub fn open_with(
+        dev: Box<dyn BlockDevice>,
+        uuid: impl FnOnce() -> [u8; 16],
+        partitions: u32,
+    ) -> Result<(Self, Opened), DiskError> {
+        Self::open_keyed(dev, uuid, partitions, None)
+    }
+
+    /// Like [`open_with`](Self::open_with) with the disk key of an encrypted
+    /// disk (STORAGE-PLAN S7, ADR-240). With a key, a blank disk is
+    /// formatted encrypted; an existing disk must be encrypted and the key
+    /// must match its key check (`WrongKey`, before anything is written).
+    /// Without a key an encrypted disk is refused (`KeyRequired`) and
+    /// a plain one opens as before.
+    pub fn open_keyed(
         mut dev: Box<dyn BlockDevice>,
         uuid: impl FnOnce() -> [u8; 16],
         partitions: u32,
+        key: Option<&[u8; KEY_BYTES]>,
     ) -> Result<(Self, Opened), DiskError> {
         let total = dev.sectors();
         let topo = dev.topology();
@@ -312,6 +334,18 @@ impl Disk {
         let (a, b) = read_slots(dev.as_mut())?;
         match Layout::select(&a, &b, total)? {
             Some((layout, slot)) => {
+                match (layout.encrypted(), key) {
+                    (false, None) => {}
+                    (false, Some(_)) => return Err(DiskError::NotEncrypted),
+                    (true, None) => return Err(DiskError::KeyRequired),
+                    (true, Some(k)) => {
+                        let dk = DiskKey::new(k);
+                        if !dk.matches(&layout.uuid, &layout.key_check) {
+                            return Err(DiskError::WrongKey);
+                        }
+                        dev = Box::new(CryptDev::new(dev, dk));
+                    }
+                }
                 let sizes = read_sizes(dev.as_mut())?;
                 let disk = Self::assemble(dev, layout, sizes, slot, gran, topo);
                 Ok((disk, Opened::Existing))
@@ -321,7 +355,13 @@ impl Disk {
                     partitions,
                     align_sectors: topo.layout_align_sectors(),
                 };
-                let layout = Layout::plan(total, uuid(), params)?;
+                let mut layout = Layout::plan(total, uuid(), params)?;
+                if let Some(k) = key {
+                    let dk = DiskKey::new(k);
+                    layout.flags |= FLAG_ENCRYPTED;
+                    layout.key_check = dk.key_check(&layout.uuid);
+                    dev = Box::new(CryptDev::new(dev, dk));
+                }
                 let sizes = SizeTable::default();
                 let mut disk = Self::assemble(dev, layout, sizes, 0, gran, topo);
                 // Size table first, superblock last: a crash in between
@@ -1327,6 +1367,8 @@ fn apply_op(
 }
 
 fn read_blocks(m: &BTreeMap<u64, Box<[u8; BLOCK]>>, mut at: u64, out: &mut [u8]) {
+    // A sector never written reads as zeros, whatever the buffer held.
+    out.fill(0);
     let mut done = 0usize;
     while done < out.len() {
         let idx = at / BLOCK as u64;

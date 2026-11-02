@@ -21,6 +21,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -1728,11 +1729,14 @@ version = "0.1.0"
 name = "urmqtt-store"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "cc",
+ "hmac",
  "sha2 0.11.1",
  "urmqtt-cfg",
  "urmqtt-sync",
  "urmqtt-usys",
+ "zeroize",
 ]
 
 [[package]]

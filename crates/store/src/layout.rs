@@ -60,7 +60,15 @@ const REGIONS_AT: usize = 64;
 pub const FLAG_LEGACY_TELEMETRY: u32 = 1;
 /// Never stored: this layout is the read-only view of a v1 disk.
 pub const FLAG_V1_VIEW: u32 = 1 << 31;
-const STORED_FLAGS: u32 = FLAG_LEGACY_TELEMETRY;
+/// The disk is encrypted (S7, ADR-240): every sector but the two superblock
+/// slots is AES-256-XTS ciphertext, and the superblock carries a key check.
+/// A reader that predates S7 refuses the unknown flag bit (`Inconsistent`),
+/// so no minor version is spent on it.
+pub const FLAG_ENCRYPTED: u32 = 2;
+const STORED_FLAGS: u32 = FLAG_LEGACY_TELEMETRY | FLAG_ENCRYPTED;
+/// Where the key check lives in the superblock: right after the 128 region
+/// entries the format allows.
+const KEY_CHECK_AT: usize = REGIONS_AT + MAX_REGIONS * REGION_BYTES;
 
 /// Files the VFS maps onto regions. Their logical sizes live in the size
 /// table, in this order.
@@ -212,6 +220,9 @@ pub struct Layout {
     /// Bumped by every superblock write; the higher valid slot wins.
     pub generation: u64,
     pub flags: u32,
+    /// HMAC-SHA256 of the disk key over a constant and the UUID (all zero
+    /// while the disk is not encrypted). Never the key.
+    pub key_check: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,6 +348,7 @@ impl Layout {
             minor: 0,
             generation: 1,
             flags: 0,
+            key_check: [0; 32],
         };
         l.validate()?;
         Ok(l)
@@ -430,6 +442,10 @@ impl Layout {
 
     pub fn is_v1_view(&self) -> bool {
         self.flags & FLAG_V1_VIEW != 0
+    }
+
+    pub fn encrypted(&self) -> bool {
+        self.flags & FLAG_ENCRYPTED != 0
     }
 
     pub fn legacy_telemetry(&self) -> bool {
@@ -597,6 +613,7 @@ impl Layout {
             minor: self.minor,
             generation: self.generation + 1,
             flags: self.flags & STORED_FLAGS,
+            key_check: self.key_check,
         };
         l.validate()?;
         Ok(Some(l))
@@ -614,6 +631,7 @@ impl Layout {
         put(&mut b, 52, &self.align_sectors.to_le_bytes());
         put(&mut b, 56, &(self.flags & STORED_FLAGS).to_le_bytes());
         put(&mut b, 60, &self.minor.to_le_bytes());
+        put(&mut b, KEY_CHECK_AT, &self.key_check);
         for (i, r) in self.regions.iter().take(MAX_REGIONS).enumerate() {
             let at = REGIONS_AT + i * REGION_BYTES;
             put(&mut b, at, &(r.kind as u32).to_le_bytes());
@@ -668,6 +686,8 @@ impl Layout {
                 sectors: u64_at(b, at + 16),
             });
         }
+        let mut key_check = [0u8; 32];
+        key_check.copy_from_slice(b.get(KEY_CHECK_AT..KEY_CHECK_AT + 32).unwrap_or(&[0; 32]));
         let l = Self {
             uuid,
             total_sectors: formatted,
@@ -677,6 +697,7 @@ impl Layout {
             align_sectors: u32_at(b, 52),
             minor,
             flags: u32_at(b, 56),
+            key_check,
         };
         l.validate()?;
         Ok(Some(l))
@@ -787,6 +808,7 @@ pub mod v1 {
             minor: 0,
             generation: 0,
             flags: FLAG_V1_VIEW | FLAG_LEGACY_TELEMETRY,
+            key_check: [0; 32],
         }
     }
 

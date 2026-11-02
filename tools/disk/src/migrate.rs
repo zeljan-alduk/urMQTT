@@ -253,6 +253,7 @@ pub fn plan(dev: &mut dyn BlockDevice, v1_sb: &[u8; BLOCK], opts: &Options) -> R
         minor: 0,
         generation: 1,
         flags: FLAG_LEGACY_TELEMETRY,
+        key_check: [0; 32],
     };
     v2.validate()
         .map_err(|e| format!("the planned v2 layout is invalid: {e:?}"))?;
