@@ -669,6 +669,18 @@ at once against an 8 MiB admission limit.
   record keys exist only on the stack while a record is sealed or opened.
 - Observability goes to private collectors named in the build-time
   configuration. It is plain UDP and carries no payloads or secrets.
+- **Image secrecy (H8, ADR-252).** The image holds the server's private key and
+  the disk key, so the image is a secret. Building a production image outside CI
+  (the `CI` variable unset) prints a boxed warning to stderr, every time
+  (`scripts/mkiso.sh`; tested by `SMOKE_ONLY=secrecy`). The serial logs of an
+  encrypted-at-rest boot, of the wrong-key and no-key refusals, on the dev kernel
+  and on a release kernel with the production configuration, and the output and
+  build logs of `make repro`, are scanned for the key bytes in every form a log
+  could show them (`scripts/secret-scan.py`: raw, hex, base64, the EC scalar, PEM
+  lines), with the image itself as the control that proves the scan can see them.
+  What this does **not** cover: panics and fault reports on paths the scenarios do
+  not reach (the redaction policy of ADR-172 and its `-open` controls cover the
+  planted-secret case), and the image's own contents (it holds the keys by design).
 
 ### Encryption at rest (S7, ADR-240)
 

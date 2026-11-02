@@ -55,15 +55,17 @@ for d in a b; do
 done
 
 status=0
+TRANSCRIPT="$WORK/transcript"
+: >"$TRANSCRIPT"
 compare() {
     local what=$1 fa=$2 fb=$3
     local ha hb
     ha=$(shasum -a 256 "$fa" | cut -d' ' -f1)
     hb=$(shasum -a 256 "$fb" | cut -d' ' -f1)
     if [[ "$ha" == "$hb" ]]; then
-        echo "  ✓ $what identical: $ha"
+        echo "  ✓ $what identical: $ha" | tee -a "$TRANSCRIPT"
     else
-        echo "  ✗ $what differs: $ha vs $hb ($(cmp -l "$fa" "$fb" | wc -l | tr -d ' ') byte(s))"
+        echo "  ✗ $what differs: $ha vs $hb ($(cmp -l "$fa" "$fb" | wc -l | tr -d ' ') byte(s))" | tee -a "$TRANSCRIPT"
         status=1
     fi
 }
@@ -75,8 +77,25 @@ if [[ $UNIVERSAL -eq 1 ]]; then
     compare "x86_64 kernel ELF" "$DIR_a/target/x86_64-urmqtt-none/release/urmqtt" "$DIR_b/target/x86_64-urmqtt-none/release/urmqtt"
     compare "universal ISO" "$DIR_a/build/urmqtt-$ENV-$v-universal.iso" "$DIR_b/build/urmqtt-$ENV-$v-universal.iso"
     compare "universal raw disk image" "$DIR_a/build/urmqtt-$ENV-$v-universal.img" "$DIR_b/build/urmqtt-$ENV-$v-universal.img"
+    KEY_IMAGE="$DIR_a/build/urmqtt-$ENV-$v-universal.iso"
 else
     compare "ISO" "$DIR_a/build/urmqtt-$ENV-$v.iso" "$DIR_b/build/urmqtt-$ENV-$v.iso"
     compare "raw disk image" "$DIR_a/build/urmqtt-$ENV-$v.img" "$DIR_b/build/urmqtt-$ENV-$v.img"
+    KEY_IMAGE="$DIR_a/build/urmqtt-$ENV-$v.iso"
+fi
+# H8, image secrecy: what this script leaves behind to be read (both build logs and the lines
+# above) must not hold the server key or the disk key. The image itself does hold them, which
+# is the scan's control: it must find them there, or it is blind.
+if [[ -f "$ROOT/deploy/$ENV/server.key" ]]; then
+    scan=(--server-key "$ROOT/deploy/$ENV/server.key")
+    [[ -f "$ROOT/deploy/$ENV/disk.key" ]] && scan+=(--disk-key "$ROOT/deploy/$ENV/disk.key")
+    if python3 -I "$ROOT/scripts/secret-scan.py" "${scan[@]}" --found-in "$KEY_IMAGE" "$WORK/a.log" "$WORK/b.log" "$TRANSCRIPT"; then
+        echo "  ✓ no key bytes in the build logs and the comparison output"
+    else
+        echo "  ✗ key bytes in the build logs or the comparison output (see above)"
+        status=1
+    fi
+else
+    echo "  - secret scan skipped (no deploy/$ENV/server.key)"
 fi
 exit $status

@@ -1037,6 +1037,107 @@ build_disk_tool() {
     DISK_TOOL="$ROOT/target/release/urmqtt-disk"
 }
 
+# H8, image secrecy (ADR-252): the keys that are in the image never reach a log.
+#  1. an image with a production configuration made outside CI says so, loudly, on stderr (and
+#     does not when CI is set, nor for a dev image, nor for the key-less template);
+#  2. the serial logs of an encrypted-at-rest boot, the refusals (wrong disk key, no key) and
+#     the fatal paths, on the dev kernel (the chattiest) and, when SMOKE_RELEASE_KERNEL is set,
+#     on a release kernel with the production configuration, are scanned for the bytes of the
+#     server's private key and of the disk key in every form scripts/secret-scan.py knows
+#     (raw, hex, base64, the EC scalar, the PEM lines). The scan's control is the image itself,
+#     which holds both keys: a scan that cannot find them there fails.
+# (The repro comparison output is scanned by scripts/repro.sh, the same way.)
+secrecy() {
+    [[ -z ${SMOKE_SCENARIOS:-} || secrecy =~ $SMOKE_SCENARIOS ]] || return 0
+    local dir="$OUT/secrecy" tool="$ROOT/target/debug/urmqtt-config"
+    rm -rf "$dir"
+    mkdir -p "$dir/root"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool)
+    cp "$ROOT"/deploy/dev/* "$dir/root/" 2>/dev/null || true
+    python3 -I - "$dir" <<'PY'
+import os, sys
+d = sys.argv[1]
+for n in ("k1", "k2"):
+    open(f"{d}/{n}.hex", "w").write(os.urandom(64).hex() + "\n")
+PY
+    local variant
+    for variant in dev rel; do
+        local toml="$ROOT/deploy/dev/config.toml" env=dev kernel=$KERNEL
+        if [[ $variant == rel ]]; then
+            if [[ -z ${SMOKE_RELEASE_KERNEL:-} || ! -f ${SMOKE_RELEASE_KERNEL:-} ]]; then
+                echo "  - secrecy on a release kernel skipped (SMOKE_RELEASE_KERNEL=<a release kernel ELF of this architecture>)"
+                continue
+            fi
+            toml="$ROOT/deploy/prod/config.toml" env=prod kernel=$SMOKE_RELEASE_KERNEL
+        fi
+        local k
+        for k in 1 2; do
+            cp "$dir/k$k.hex" "$dir/root/disk.key"
+            sed -e 's/^\[storage\]/[storage]\nencryption = "aes-256-xts"\ndisk_key = "disk.key"/' "$toml" >"$dir/$variant-$k.toml"
+            "$tool" pack "$dir/$variant-$k.toml" --env "$env" --root "$dir/root" --out "$dir/$variant-enc$k.blob" >/dev/null ||
+                { echo "  ✗ secrecy: packing failed"; FAILED=$((FAILED + 1)); return 0; }
+        done
+        "$tool" pack "$toml" --env "$env" --root "$dir/root" --out "$dir/$variant-plain.blob" >/dev/null
+        # 1. The warning (the image is built with the module's own env, not URMQTT_ENV).
+        local warn="$dir/$variant-warn.txt" st=0
+        CI='' "$ROOT/scripts/mkiso.sh" --kernel "$kernel" --out "$dir/$variant-w.iso" --cmdline smoke \
+            --config "$dir/$variant-enc1.blob" >/dev/null 2>"$warn" || st=$?
+        if [[ $variant == rel ]]; then
+            check "secrecy: a production image built outside CI warns loudly" "$warn" "$st" \
+                "WARNING: a 'prod' image is being built OUTSIDE CI" "server's TLS private key" "disk key"
+            st=0
+            CI=true "$ROOT/scripts/mkiso.sh" --kernel "$kernel" --out "$dir/$variant-w2.iso" --cmdline smoke \
+                --config "$dir/$variant-enc1.blob" >/dev/null 2>"$warn.ci" || st=$?
+            check "secrecy: no warning in CI" "$warn.ci" "$st" "NOT:WARNING" "NOT:OUTSIDE CI"
+        else
+            check "secrecy: a dev image does not warn" "$warn" "$st" "NOT:WARNING" "NOT:OUTSIDE CI"
+        fi
+        # 2. The logs.
+        local name
+        for name in enc1-fill:enc1:test=db-backup enc1-plain:enc1: enc2:enc2: plain:plain:; do
+            local img=${name%%:*} rest=${name#*:}
+            local blob=${rest%%:*} test=${rest#*:}
+            MKIMG_EXTRA=(--config "$dir/$variant-$blob.blob")
+            local saved=$KERNEL
+            KERNEL=$kernel
+            CI=true mkimg "$dir/$variant-$img.raw" "smoke${test:+ $test}"
+            KERNEL=$saved
+            MKIMG_EXTRA=()
+        done
+        local accel=${ACCELS%% *} disk="$dir/$variant.img" status=0 l logs=()
+        fresh_disk "$dir/$variant-enc1-fill.raw" "$disk"
+        l="$dir/$variant-1.log"
+        logs+=("$l")
+        if [[ $variant == rel ]]; then
+            set_esp "$disk" "$dir/$variant-enc1-fill.raw"
+            boot_until "$l" "^URMQTT READY$" --disk "$disk" --accel "$accel" --fwd none --mem 2G || status=$?
+        else
+            boot "$l" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        fi
+        check "secrecy[$variant]: encrypted first boot" "$l" "$status" "storage: encryption aes-256-xts" "^URMQTT READY$" "NOT:refusing to serve"
+        status=0
+        set_esp "$disk" "$dir/$variant-enc2.raw"
+        l="$dir/$variant-2.log"
+        logs+=("$l")
+        boot_until "$l" "refusing to serve" --disk "$disk" --accel "$accel" --fwd none --mem 2G || status=$?
+        check "secrecy[$variant]: wrong disk key refused" "$l" "$status" \
+            "storage.disk_key does not match the data partition's key check" "NOT:URMQTT READY"
+        status=0
+        set_esp "$disk" "$dir/$variant-plain.raw"
+        l="$dir/$variant-3.log"
+        logs+=("$l")
+        boot_until "$l" "refusing to serve" --disk "$disk" --accel "$accel" --fwd none --mem 2G || status=$?
+        check "secrecy[$variant]: no disk key refused" "$l" "$status" "NOT:URMQTT READY"
+        local scan="$dir/$variant-scan.txt" sst=0
+        cp "$dir/root/server.key" "$dir/server.key"
+        python3 -I "$ROOT/scripts/secret-scan.py" --server-key "$dir/server.key" --disk-key "$dir/k1.hex" \
+            --found-in "$dir/$variant-enc1-fill.raw" "${logs[@]}" >"$scan" 2>&1 || sst=$?
+        python3 -I "$ROOT/scripts/secret-scan.py" --disk-key "$dir/k2.hex" --found-in "$dir/$variant-enc2.raw" "${logs[@]}" >>"$scan" 2>&1 || sst=$?
+        check "secrecy[$variant]: no server-key or disk-key bytes in the serial logs" "$scan" "$sst" \
+            "control .*the scan finds [0-9]+ needle" "NOT:LEAK" "NOT:blind"
+    done
+}
+
 # S7 end to end (ADR-240): encryption at rest. A dev configuration with
 # storage.encryption = "aes-256-xts" and a key file:
 #   1. a blank disk is formatted encrypted, the self-test (database, backup)
@@ -3192,6 +3293,15 @@ if [[ ${SMOKE_ONLY:-} == storage && $ARCH != universal ]]; then
         echo "  ✗ disk-tool needs sqlite3 and the mosquitto clients"
         FAILED=$((FAILED + 1))
     fi
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=secrecy (aarch64): H8, the production-image warning and the key-bytes scan of the serial logs
+# (SMOKE_RELEASE_KERNEL=<release kernel ELF> adds the release kernel with the production configuration).
+if [[ ${SMOKE_ONLY:-} == secrecy && $ARCH == aarch64 ]]; then
+    secrecy
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit

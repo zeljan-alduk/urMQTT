@@ -166,6 +166,23 @@ else
     CFG_TOML=$(cd "$(dirname "$CFG_TOML")" && pwd)/$(basename "$CFG_TOML")
     cfgtool pack "$CFG_TOML" --env "$CFG_ENV" ${CONFIG_ROOT:+--root "$CONFIG_ROOT"} --out-slot "$TMP/urmqtt.cfg" | sed "s|^|config ($CFG_ENV): |" >&2
 fi
+# H8, image secrecy: a production image holds the server's private key and, with encryption
+# at rest, the disk key, so who has the ISO has them. One that is built outside CI (GitHub
+# Actions sets CI) has been through this machine's disk, memory and shell history, and is
+# not the reproducible, attested image of a release. Said loudly, every time; not an error.
+SLOT_ENV=$(cfgtool show "$TMP/urmqtt.cfg" 2>/dev/null | sed -n 's/^env: *//p' | head -1)
+if [[ $EMPTY_CONFIG -eq 0 && ${SLOT_ENV:-$CFG_ENV} != dev && -z ${CI:-} ]]; then
+    {
+        echo "================================================================================"
+        echo " WARNING: a '${SLOT_ENV:-$CFG_ENV}' image is being built OUTSIDE CI (the CI variable is not set)."
+        echo " This image contains the server's TLS private key and, if storage.encryption is on,"
+        echo " the disk key: whoever has the ISO has both. The keys passed through this machine."
+        echo " A release image comes from the CI workflow (reproducible, attested). Keep this one"
+        echo " off shared storage, tickets and chats, and treat the keys as exposed if this"
+        echo " machine is not yours alone. (docs/SECURITY.md, image secrecy)"
+        echo "================================================================================"
+    } >&2
+fi
 # The installation image's template slot is always the EMPTY configuration, whatever
 # this image is configured with: the image (and its hash in the menus) must not depend
 # on the customer's configuration, and must not carry their keys a second time.
