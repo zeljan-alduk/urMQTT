@@ -38,6 +38,12 @@ for c in "${CRATES[@]}"; do
         # hundreds of retained messages or run 10 000 iterations.
         urmqtt-broker) only=(--skip compact:: --skip console_lines_are_replayed --skip clearing_retained_messages --skip unsubscribed_filters_leave --skip many_sessions_route --skip retained_per_device_limit --skip retained_byte_budget --skip hot_state_stays_small) ;;
         urmqtt-tcp) only=(cookie:: refused:: scripts:: seq:: siphash::) ;;
+        # The TLS record layer, tickets, rng and the secret-capture table keep their Miri run.
+        # provider:: (the P-256 and X25519 table arithmetic, X9/PERF work after H5), kat::, bench:: and
+        # probe:: are heavy pure-arithmetic tests (the first one alone ran for 55 minutes under
+        # Miri and took the job past its timeout); the crate is forbid(unsafe_code), the unsafe
+        # assembly lives in urmqtt-nistz256/x25519, and all of these run natively in `cargo test`.
+        urmqtt-tls) only=(--skip provider:: --skip kat:: --skip bench:: --skip probe::) ;;
     esac
     MIRIFLAGS=$flags cargo miri test -q -p "$c" --lib -- ${only[@]+"${only[@]}"}
 done
