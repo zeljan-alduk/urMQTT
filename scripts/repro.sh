@@ -49,6 +49,7 @@ for d in a b; do
     # of its own to differ on, but keep it explicit).
     targets="iso raw"
     [[ $UNIVERSAL -eq 1 ]] && targets="universal"
+    # shellcheck disable=SC2086 # $targets is a list of make goals
     (cd "$dir" && make --no-print-directory $targets ENV="$ENV" VERSION="$(git -C "$ROOT" describe --tags --always)" \
         >"$WORK/$d.log" 2>&1) || { tail -30 "$WORK/$d.log"; echo "repro: build $d failed" >&2; exit 1; }
     eval "DIR_$d=\$dir"

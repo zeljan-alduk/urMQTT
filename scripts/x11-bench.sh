@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # the $SYS/... MQTT topics are literal, not shell variables
 # X11: the measurement suite, run ON the load-generator host (a Linux machine
 # that reaches the VPS), against one broker at a time. Writes the raw output
 # to $DIR/results/<label>.txt; scripts/x11-report.py turns it into tables.
@@ -59,8 +60,8 @@ say() { echo "$@" | tee -a "$OUT"; }
 uid() { echo "x$RANDOM$RANDOM"; }
 
 guard() {
-    local i l t
-    for i in $(seq 1 30); do
+    local l t
+    for _ in $(seq 1 30); do
         l=$(cut -d' ' -f1 /proc/loadavg)
         awk -v l="$l" -v m="$MAXLOAD" 'BEGIN{exit !(l<=m)}' && break
         sleep 5
@@ -203,6 +204,7 @@ for suite in $SUITES; do
         # THROUGHPUT_CFGS="QOS PAYLOAD PAIRS;..." picks a subset.
         IFS=';' read -ra tp_cfgs <<<"${THROUGHPUT_CFGS:-0 64 16;0 1024 16;1 64 16;1 1024 16;1 64 64}"
         for cfg in "${tp_cfgs[@]}"; do
+            # shellcheck disable=SC2086 # cfg is a space-separated list of benchmark parameters
             set -- $cfg
             for r in $(seq 1 "$REPS"); do
                 run "throughput qos=$1 payload=$2 pairs=$3" "$r" pubsub "${COMMON[@]}" --prefix "svc-$(uid)" \
@@ -228,6 +230,7 @@ for suite in $SUITES; do
         # SWEEP_CFGS="QOS PAYLOAD RATE;QOS PAYLOAD RATE;..." picks a subset.
         IFS=';' read -ra sweep_cfgs <<<"${SWEEP_CFGS:-0 64 100;0 64 300;0 64 1000;1 64 100;1 64 300;1 64 1000;0 1024 100;0 1024 300}"
         for cfg in "${sweep_cfgs[@]}"; do
+            # shellcheck disable=SC2086 # cfg is a space-separated list of benchmark parameters
             set -- $cfg
             for r in $(seq 1 "$REPS"); do
                 run "sweep qos=$1 payload=$2 rate=$3 pairs=16" "$r" pubsub "${COMMON[@]}" --prefix "svc-$(uid)" \
@@ -238,6 +241,7 @@ for suite in $SUITES; do
         # One connection each way, as fast as the broker takes it: the limit of a
         # single TCP flow over this path.
         for cfg in "0 1024" "0 64"; do
+            # shellcheck disable=SC2086 # cfg is a space-separated list of benchmark parameters
             set -- $cfg
             for r in $(seq 1 "$REPS"); do
                 run "single-flow qos=$1 payload=$2" "$r" pubsub "${COMMON[@]}" --prefix "svc-$(uid)" \
@@ -249,6 +253,7 @@ for suite in $SUITES; do
     single)
         [ "$PUBSUB" = 1 ] || continue
         for cfg in "0 64" "0 1024" "1 64"; do
+            # shellcheck disable=SC2086 # cfg is a space-separated list of benchmark parameters
             set -- $cfg
             for r in $(seq 1 "$REPS"); do
                 run "single-flow qos=$1 payload=$2" "$r" pubsub "${COMMON[@]}" --prefix "svc-$(uid)" \
@@ -260,6 +265,7 @@ for suite in $SUITES; do
     fanout)
         [ "$PUBSUB" = 1 ] || continue
         for cfg in "0 100 50" "0 1000 10" "1 100 50" "0 100 0"; do
+            # shellcheck disable=SC2086 # cfg is a space-separated list of benchmark parameters
             set -- $cfg
             for r in $(seq 1 "$REPS"); do
                 run "fanout qos=$1 subs=$2 rate=$3" "$r" pubsub "${COMMON[@]}" --prefix "svc-$(uid)" \
