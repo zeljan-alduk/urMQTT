@@ -36,10 +36,13 @@ EDITS = [
     ('<link rel="icon" href="{asset("favicon.svg")}" type="image/svg+xml">\n',
      '<link rel="icon" href="{asset("favicon.svg")}" type="image/svg+xml">{head_extra}\n'),
     # 6. The header button and the footer link, once the builder is usable.
-    ('      <div class="tools">\n      <a class="nav" href="{surl(code)}">{e(STACK_LABEL[code])}</a>\n',
-     '      <div class="tools">\n      {products_nav}<a class="nav" href="{surl(code)}">{e(STACK_LABEL[code])}</a>\n'),
-    ('<a href="{surl(code)}">{e(STACK_LABEL[code])}</a><a href="{murl(code)}">{e(BOOK_LABEL[code])}</a>',
-     '<a href="{surl(code)}">{e(STACK_LABEL[code])}</a>{products_foot}<a href="{murl(code)}">{e(BOOK_LABEL[code])}</a>'),
+    # Products goes first in the header, whatever follows it (since the Services link was added to the site's own
+    # header, the order is Products | Services | Tech stack | Blog): so anchor on the start of the tools block only.
+    ('      <div class="tools">\n      ',
+     '      <div class="tools">\n      {products_nav}'),
+    # (anchored on the Tech stack link alone: other footer links may sit between it and the meeting link)
+    ('<a href="{surl(code)}">{e(STACK_LABEL[code])}</a>',
+     '<a href="{surl(code)}">{e(STACK_LABEL[code])}</a>{products_foot}'),
     ('    seo_meta = ""\n    if where:\n',
      '    products_nav = f\'<a class="nav" href="{PR.products_url(code, url)}">{e(PR.label(code))}</a>\\n      \' if PR.LISTED else ""\n'
      '    products_foot = f\'<a href="{PR.products_url(code, url)}">{e(PR.label(code))}</a>\' if PR.LISTED else ""\n'
