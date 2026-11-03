@@ -663,7 +663,9 @@ mod tests {
         let blk = unsafe { core::slice::from_raw_parts(p, 128) };
         // Poisoned as far as the 100 bytes it held reach (rounded to 8).
         assert!(blk[CHEAD..104].iter().all(|&b| b == POISON));
-        assert!(!blk.contains(&0x42));
+        // Nothing of what the owner wrote survives behind the header. (The header itself holds the
+        // obfuscated free-list link: random bytes, which contain 0x42 now and then, so it is not looked at.)
+        assert!(!blk[CHEAD..].contains(&0x42));
         // The same block comes back, and what it held is gone.
         let q = r.alloc(100);
         assert_eq!(q, p);
