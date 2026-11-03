@@ -605,7 +605,14 @@ fn hash_password_reads_the_password_from_stdin() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        c.stdin.take().unwrap().write_all(pw.as_bytes()).unwrap();
+        // The tool refuses a bad id or iteration count before it reads stdin,
+        // and reads only one line otherwise: it may be gone (or have closed
+        // stdin) before this write, which is a BrokenPipe and not a failure.
+        // Whether the run did the right thing is asserted on its output.
+        match c.stdin.take().unwrap().write_all(pw.as_bytes()) {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            r => r.unwrap(),
+        }
         c.wait_with_output().unwrap()
     };
     // A bare hash that the kernel's parser reads and the password verifies.

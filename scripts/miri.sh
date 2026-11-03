@@ -22,7 +22,11 @@ for c in "${CRATES[@]}"; do
     case "$c" in
         # The configuration blob (C1): the decoder and the field table. The 20 000-case
         # garbage loop is the fuzz target's job.
-        urmqtt-cfg) only=(--skip garbage_never_panics) ;;
+        # PBKDF2 (passwd, ADR-229): every account hash runs at least 1000 iterations, and
+        # Miri needs minutes per hash (passwd:: alone ran for more than 35 minutes). The
+        # RFC vectors and the stored-form rules run natively in `cargo test`; Miri keeps
+        # the cheap ones (long_keys, hmac).
+        urmqtt-cfg) only=(--skip garbage_never_panics --skip passwd::published_vectors --skip passwd::encode_parse_verify_round_trip --skip passwd::binary_and_long_passwords --skip passwd::every_salt_and_iteration_changes_the_hash --skip passwd::the_stored_form_is_strict --skip passwd::the_decoy_costs --skip passwd::debug_never_shows_the_key --skip plain::tests::user_entries --skip plaintext_rules --skip the_anonymous_identity --skip passwd::tests::rfc_7914_vectors --skip passwd::tests::encode_refuses_out_of_range_parameters) ;;
         # The loaded configuration lives in a write-once `.bss` arena (the one unsafe
         # module, ADR-216); its tests leak a few boxes on purpose.
         urmqtt-config) flags="$MIRIFLAGS -Zmiri-ignore-leaks" ;;
