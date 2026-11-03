@@ -55,13 +55,30 @@ done
 if [[ ${#LIBS[@]} -eq 0 ]] && pkg-config --exists openssl 2>/dev/null; then
     build openssl USE_OPENSSL "$(pkg-config --cflags openssl)" "$(pkg-config --libs openssl)"
 fi
+# wolfSSL: the copy built by scripts/build-wolfssl.sh, else Homebrew, else
+# pkg-config. Only a build with WOLFSSL_TICKET_NONCE_MALLOC can take rustls's
+# 32-byte ticket nonce (Ubuntu's libwolfssl-dev 5.6.6 cannot: it answers the
+# first NewSessionTicket with illegal_parameter), so another build is refused.
+wolf_ok() { grep -qs "^#define WOLFSSL_TICKET_NONCE_MALLOC" "$1/wolfssl/options.h"; }
+wolf_inc=""
+wolf_libs=""
 p=$(brew_prefix wolfssl || true)
-if [[ -n "$p" && -f "$p/include/wolfssl/ssl.h" ]]; then
-    build wolfssl USE_WOLFSSL "-I$p/include" "-L$p/lib -lwolfssl"
+if [[ -f "$ROOT/build/wolfssl/include/wolfssl/ssl.h" ]]; then
+    wolf_inc="$ROOT/build/wolfssl/include"
+    wolf_libs="-L$ROOT/build/wolfssl/lib -Wl,-rpath,$ROOT/build/wolfssl/lib -lwolfssl"
+elif [[ -n "$p" && -f "$p/include/wolfssl/ssl.h" ]]; then
+    wolf_inc="$p/include"
+    wolf_libs="-L$p/lib -lwolfssl"
 elif pkg-config --exists wolfssl 2>/dev/null; then
-    build wolfssl USE_WOLFSSL "$(pkg-config --cflags wolfssl)" "$(pkg-config --libs wolfssl)"
+    wolf_inc=$(pkg-config --variable=includedir wolfssl)
+    wolf_libs=$(pkg-config --libs wolfssl)
+fi
+if [[ -z "$wolf_inc" ]]; then
+    SKIPPED+=("wolfssl (not installed; scripts/build-wolfssl.sh builds one)")
+elif ! wolf_ok "$wolf_inc"; then
+    SKIPPED+=("wolfssl (built without WOLFSSL_TICKET_NONCE_MALLOC, it refuses rustls's 32-byte ticket nonce; scripts/build-wolfssl.sh builds one)")
 else
-    SKIPPED+=("wolfssl (not installed)")
+    build wolfssl USE_WOLFSSL "-I$wolf_inc" "$wolf_libs"
 fi
 p=$(brew_prefix mbedtls || true)
 if [[ -n "$p" && -f "$p/include/mbedtls/ssl.h" ]]; then
