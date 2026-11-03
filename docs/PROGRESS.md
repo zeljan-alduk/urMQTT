@@ -1,3 +1,8 @@
+## Test fixes after the merge: log-slow-flood on x86_64, the pre-H8 template (2026-11-03)
+
+- **`log-slow-flood` on x86_64 TCG** failed ("log ring full", lines lost), also on the v0.2.1 sources. Cause: the scenario paced every core at 25 ms, while ADR-090 measured it at 50 ms on x86_64 TCG. COM1 is trapped port I/O per byte there, so the one core that writes the sinks needs about 9 ms per line and three cores at 25 ms ask for more than a second of sink time per second; the rings fill, which is the designed overflow, not a bug. The scenario is now paced at 50 ms on x86_64 and stays at 25 ms on aarch64 (`scripts/smoke.sh`). Checked: x86_64 TCG passes (30 of 30 in the run that includes the baseline scenarios) with the change, and failed without it.
+- **Test for templates made before H8:** `a_template_made_before_h8_is_configured_as_before` and `a_half_marked_image_is_still_refused` in `tools/config/tests/cli.rs` (the fix itself, in `image.rs`, went in with the merge). The first test fails with the original error when the fix is taken out.
+
 ## Release candidate v0.3.0 (2026-11-02)
 
 Everything for the release except publishing: nothing was pushed or tagged, nothing was signed or uploaded. The commands to cut it are in `docs/RELEASE.md`.

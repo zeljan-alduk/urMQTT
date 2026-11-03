@@ -3705,11 +3705,19 @@ if command -v mosquitto_pub >/dev/null; then
 fi
 
 # ADR-090: the log never stalls the data path. Every core logs one numbered
-# line every 25 ms from inside a watched handler while each line takes 4 ms
-# to reach the sinks (a hypervisor's serial port and screen). No handler may
-# be reported over budget; no line may be lost or reordered within its core,
-# and the timestamps of the merged log are in order.
-SERVICE_PORT=8883 service log-slow-flood "serve test=slow-log:4000 test=log-flood:25 ${LOG_FLOOD_EXTRA:-}" 18893 \
+# line every 25 ms (50 ms on x86_64) from inside a watched handler while each
+# line takes 4 ms to reach the sinks (a hypervisor's serial port and screen).
+# No handler may be reported over budget; no line may be lost or reordered
+# within its core, and the timestamps of the merged log are in order.
+# x86_64 is paced at 50 ms because COM1 is trapped port I/O per byte: under TCG
+# the one core that writes the sinks needs about 9 ms per line, so three cores
+# at 25 ms ask for more than a second of sink time per second and the rings
+# fill ("log ring full": the designed overflow, not a bug). ADR-090 measured
+# this scenario at 50 ms on x86_64 TCG; it passes there, and failed at 25 ms
+# (also on the v0.2.1 sources). aarch64 keeps 25 ms.
+LOG_FLOOD_MS=25
+[[ $ARCH == x86_64 ]] && LOG_FLOOD_MS=50
+SERVICE_PORT=8883 service log-slow-flood "serve test=slow-log:4000 test=log-flood:$LOG_FLOOD_MS ${LOG_FLOOD_EXTRA:-}" 18893 \
     "TLS 1.3 listener on port 8883" python3 -I "$ROOT/scripts/log-flood-check.py" -- \
     "client: log-flood ok" "log: asynchronous: cores queue their lines" "log: cost: [0-9]+ call" \
     "NOT:over budget" "NOT:FAILED" "$NO_FAULT"
