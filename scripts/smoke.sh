@@ -176,6 +176,21 @@ check() {
     fi
 }
 
+# check_quiet <log> <status> <patterns...>: the verdict of `check`, silently (0 = every pattern holds).
+check_quiet() {
+    local log=$1 status=$2 pat text="$1.clean"
+    shift 2
+    [[ $status -eq 0 ]] || return 1
+    clean "$log" >"$text"
+    for pat in "$@"; do
+        if [[ $pat == NOT:* ]]; then
+            ! grep -Eq -- "${pat:4}" "$text" || return 1
+        else
+            grep -Eq -- "$pat" "$text" || return 1
+        fi
+    done
+}
+
 # scenario <name> <cmdline> <acpi on|off> <patterns...>
 scenario() {
     local name=$1 cmdline=$2 acpi=$3
@@ -212,30 +227,43 @@ service() {
     shift
     local iso="$OUT/$name.raw"
     mkimg "$iso" "$cmdline"
+    # SMOKE_RETRY=<regex>: scenarios named by it are timing-sensitive (they assert that no handler is ever
+    # reported over its watchdog budget, which a vCPU that the host does not schedule for tens of milliseconds
+    # breaks, as seen on a shared VPS and on CI runners under TCG). They get three attempts; a real regression
+    # fails all three.
+    local tries=1 attempt
+    [[ -n ${SMOKE_RETRY:-} && $name =~ $SMOKE_RETRY ]] && tries=3
     for accel in $ACCELS; do
-        local log="$OUT/$name-$accel.log" data="$OUT/$name-$accel.img" status=0 waited=0
-        rm -f "$log"
-        fresh_disk "$iso" "$data"
-        "$ROOT/scripts/run-qemu.sh" --serial "$log" --disk "$data" --accel "$accel" --headless \
-            --fwd "$port:${SERVICE_PORT:-$port}" >"$log.qemu" 2>&1 &
-        local pid=$!
-        until clean "$log" 2>/dev/null | grep -Eq -- "$ready"; do
-            if ! kill -0 "$pid" 2>/dev/null || (( waited >= TIMEOUT * 10 )); then
-                status=124
-                break
+        for ((attempt = 1; attempt <= tries; attempt++)); do
+            local log="$OUT/$name-$accel.log" data="$OUT/$name-$accel.img" status=0 waited=0
+            rm -f "$log"
+            fresh_disk "$iso" "$data"
+            "$ROOT/scripts/run-qemu.sh" --serial "$log" --disk "$data" --accel "$accel" --headless \
+                --fwd "$port:${SERVICE_PORT:-$port}" >"$log.qemu" 2>&1 &
+            local pid=$!
+            until clean "$log" 2>/dev/null | grep -Eq -- "$ready"; do
+                if ! kill -0 "$pid" 2>/dev/null || (( waited >= TIMEOUT * 10 )); then
+                    status=124
+                    break
+                fi
+                sleep 0.1
+                waited=$((waited + 1))
+            done
+            if [[ $status -eq 0 ]]; then
+                # The clients that check the serial log itself read it from here.
+                SMOKE_LOG="$log" "${client[@]}" "$port" >"$log.client" 2>&1 || status=$?
+                sleep 0.5
             fi
-            sleep 0.1
-            waited=$((waited + 1))
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            if (( attempt < tries )) && ! check_quiet "$log" "$status" "$@"; then
+                echo "  ~ $name [$accel]: attempt $attempt of $tries failed (timing-sensitive scenario), trying again"
+                continue
+            fi
+            check "$name [$accel]" "$log" "$status" "$@"
+            break
         done
-        if [[ $status -eq 0 ]]; then
-            # The clients that check the serial log itself read it from here.
-            SMOKE_LOG="$log" "${client[@]}" "$port" >"$log.client" 2>&1 || status=$?
-            sleep 0.5
-        fi
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-        cat "$log.client" >>"$log" 2>/dev/null || true
-        check "$name [$accel]" "$log" "$status" "$@"
     done
 }
 

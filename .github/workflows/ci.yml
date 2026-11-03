@@ -213,7 +213,7 @@ jobs:
       - name: Install QEMU, UEFI firmware and ISO tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-system-arm qemu-efi-aarch64 xorriso mtools mosquitto-clients sqlite3
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-arm qemu-efi-aarch64 qemu-utils xorriso mtools mosquitto-clients sqlite3
           qemu-system-aarch64 --version | head -1
       - run: make certs
       # The secrecy group also checks a release kernel: build it before
@@ -227,6 +227,10 @@ jobs:
       - run: make smoke ACCELS=tcg
         env:
           SMOKE_TIMEOUT: "300"
+          # Two scenarios assert that no handler is ever reported over its watchdog budget; under TCG on a
+          # shared runner a vCPU that is not scheduled for tens of ms breaks that (the same effect as on the
+          # VPS in X11). They get three attempts (scripts/smoke.sh, SMOKE_RETRY).
+          SMOKE_RETRY: "^(sys-slow-log|log-slow-flood)$"
           SMOKE_ONLY: ${{ matrix.only }}
           SMOKE_GROUPS: ${{ matrix.groups }}
           SMOKE_NO_GROUPS: ${{ matrix.no-groups }}

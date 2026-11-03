@@ -235,7 +235,7 @@ class UnitTests(unittest.TestCase):
         self.assertFalse(c.allow_no_origin)
         self.assertTrue(B.config_from(["--origin", "https://x.test"], {"DEMO_BRIDGE_LOG_IPS": "true"}).log_ips)
 
-    def test_client_address_is_the_peer_or_a_trusted_proxys_last_xff_entry(self):
+    def test_client_address_is_the_peer_or_a_trusted_proxies_last_xff_entry(self):
         b = B.Bridge(cfg(), log=lambda m: None)
         self.assertEqual(b.client_key("198.51.100.9", {"x-forwarded-for": "203.0.113.1"}), "198.51.100.9")  # not a proxy: header ignored
         self.assertEqual(b.client_key("127.0.0.1", {"x-forwarded-for": "6.6.6.6, 203.0.113.1"}), "203.0.113.1")  # the last entry
