@@ -288,9 +288,9 @@ jobs:
     name: Kani proofs (parsers, timer wheel, H5)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
-    # Four harnesses (mqtt, config) are NOT PROVEN yet (docs/VERIFICATION.md):
-    # the job reports but does not block until they are reformulated.
-    continue-on-error: true
+    # Four harnesses (mqtt, config), and tcp's parse_any_segment on this runner, are NOT PROVEN
+    # (docs/VERIFICATION.md): scripts/kani.sh lists them by name, reports them on every run and
+    # fails on any other failure, so this job is a real gate.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

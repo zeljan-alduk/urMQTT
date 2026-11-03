@@ -37,6 +37,7 @@ Install: `cargo install --locked kani-verifier && cargo kani setup` (Kani
 0.68.0, CBMC 6.11.0 here). The harnesses are in `crates/*/src/proofs.rs`
 behind `#[cfg(kani)]`. `scripts/kani.sh` caps every harness (`KANI_TIMEOUT`,
 default 3 minutes). **A harness that hits the cap is NOT PROVEN, not passed.**
+The script keeps a list of the harnesses documented below as NOT PROVEN (`KNOWN_NOT_PROVEN` in `scripts/kani.sh`): they are reported with their name on every run and do not fail it; any other harness that fails, and any failure with a counterexample, does. `tcp::parse_any_segment` is proven on an Apple M-series machine but does not finish within 3 minutes on the 4-core CI runner, so it is on that list too (a fifth NOT PROVEN, in CI only).
 
 Bounds are part of the claim. Each is stated in the harness file. Status
 at the time of writing (Kani 0.68.0, Apple M-series, 3 minute cap):
