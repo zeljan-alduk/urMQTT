@@ -233,7 +233,13 @@ library, against one dev VM, HVF on an M4 Pro):
 | rustls 0.23.46 (host tests) | ✅ | ✅ | ✅ | — | — |
 | mosquitto 2 (OpenSSL), smoke | ✅ | — | — | — | — |
 
-Resumption is confirmed in the server log as well as by the client. Not
+Resumption is confirmed in the server log as well as by the client. The
+wolfSSL in CI is built by `scripts/build-wolfssl.sh` (pinned release, with
+`WOLFSSL_TICKET_NONCE_MALLOC`): rustls sends a 32-byte ticket nonce, which
+RFC 8446 allows (up to 255 bytes), but a wolfSSL built without that define
+(Ubuntu's libwolfssl-dev 5.6.6) accepts 8 and answers the first
+NewSessionTicket with an illegal_parameter alert. `scripts/interop.sh`
+skips such a build and says why. Not
 covered yet: an embedded MQTT client on real firmware (ESP-IDF, or Paho
 Embedded over mbedTLS on a device). Mbed TLS above is the library ESP-IDF
 uses, run on the host.

@@ -114,11 +114,12 @@ static struct conn *tls_open(void *session) {
 #endif
     LIB(set_fd)(c->ssl, c->fd);
     if (session) LIB(set_session)(c->ssl, session);
-    if (LIB(connect)(c->ssl) != 1) {
+    int rc = LIB(connect)(c->ssl);
+    if (rc != 1) {
 #ifdef USE_WOLFSSL
         char e[WOLFSSL_MAX_ERROR_SZ];
         fprintf(stderr, "wolfSSL connect: %s\n",
-                wolfSSL_ERR_error_string((unsigned long)wolfSSL_get_error(c->ssl, 0), e));
+                wolfSSL_ERR_error_string((unsigned long)wolfSSL_get_error(c->ssl, rc), e));
 #else
         ERR_print_errors_fp(stderr);
 #endif
@@ -129,7 +130,17 @@ static struct conn *tls_open(void *session) {
 }
 
 static int tls_write(struct conn *c, const unsigned char *b, int n) { return LIB(write)(c->ssl, b, n) == n; }
-static int tls_read(struct conn *c, unsigned char *b, int n) { return LIB(read)(c->ssl, b, n); }
+static int tls_read(struct conn *c, unsigned char *b, int n) {
+    int r = LIB(read)(c->ssl, b, n);
+#ifdef USE_WOLFSSL
+    if (r <= 0) {
+        char e[WOLFSSL_MAX_ERROR_SZ];
+        fprintf(stderr, "wolfSSL read: %s\n",
+                wolfSSL_ERR_error_string((unsigned long)wolfSSL_get_error(c->ssl, r), e));
+    }
+#endif
+    return r;
+}
 
 static int tls_key_update(struct conn *c) {
 #ifdef USE_WOLFSSL

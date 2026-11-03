@@ -206,7 +206,11 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends qemu-system-arm qemu-efi-aarch64 xorriso mtools \
-            python3-venv libssl-dev libwolfssl-dev
+            python3-venv libssl-dev autoconf automake libtool
+      # Ubuntu's libwolfssl-dev (5.6.6) lacks WOLFSSL_TICKET_NONCE_MALLOC and rejects
+      # rustls's 32-byte ticket nonce with illegal_parameter; build a pinned release.
+      - name: Build wolfSSL (pinned, with WOLFSSL_TICKET_NONCE_MALLOC)
+        run: scripts/build-wolfssl.sh
       - run: make certs
       - run: make build
       - name: tlsfuzzer probes
