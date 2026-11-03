@@ -7,8 +7,8 @@
 | Role | Crate versions linked | Exempt | Covered by imported audits |
 |---|---:|---:|---:|
 | linked into a kernel (TCB) | 67 | 53 | 14 |
-| build time (proc-macro, build script) | - | 22 | - |
-| host only (tools, tests, build host) | - | 65 | - |
+| build time (proc-macro, build script) | - | 10 | - |
+| host only (tools, tests, build host) | - | 77 | - |
 
 The vendored, patched crates (`cpufeatures` 0.2.17 and 0.3.1, `primeorder` 0.14.0) are first-party for cargo-vet (`audit-as-crates-io = false`): they are not the crates.io bytes. They are reviewed as a diff against the pinned upstream (vendor/README.md).
 
@@ -75,27 +75,15 @@ The vendored, patched crates (`cpufeatures` 0.2.17 and 0.3.1, `primeorder` 0.14.
 | Crate | Version | Criteria |
 |---|---|---|
 | `autocfg` | 1.5.1 | safe-to-deploy |
-| `base64ct` | 1.8.3 | safe-to-deploy |
 | `cc` | 1.10.0 | safe-to-deploy |
 | `curve25519-dalek-derive` | 0.1.1 | safe-to-deploy |
 | `der_derive` | 0.8.0 | safe-to-deploy |
 | `find-msvc-tools` | 0.1.15 | safe-to-deploy |
 | `libc` | 0.2.191 | safe-to-deploy |
-| `pem-rfc7468` | 1.0.0 | safe-to-deploy |
 | `proc-macro2` | 1.0.107 | safe-to-deploy |
-| `serde` | 1.0.229 | safe-to-deploy |
-| `serde_core` | 1.0.229 | safe-to-deploy |
-| `serde_derive` | 1.0.229 | safe-to-deploy |
-| `serde_spanned` | 1.1.2 | safe-to-deploy |
 | `syn` | 2.0.119 | safe-to-deploy |
-| `syn` | 3.0.9 | safe-to-deploy |
-| `toml` | 1.1.8+spec-1.1.0 | safe-to-deploy |
-| `toml_datetime` | 1.1.2+spec-1.1.0 | safe-to-deploy |
-| `toml_parser` | 1.1.5+spec-1.1.0 | safe-to-deploy |
-| `toml_writer` | 1.1.3+spec-1.1.0 | safe-to-deploy |
 | `unicode-ident` | 1.0.27 | safe-to-deploy |
 | `version_check` | 0.9.5 | safe-to-deploy |
-| `winnow` | 1.0.4 | safe-to-deploy |
 
 ## Host only: exempt
 
@@ -105,6 +93,7 @@ The vendored, patched crates (`cpufeatures` 0.2.17 and 0.3.1, `primeorder` 0.14.
 | `asn1-rs-derive` | 0.6.0 | safe-to-deploy |
 | `asn1-rs-impl` | 0.2.0 | safe-to-deploy |
 | `base64` | 0.23.1 | safe-to-deploy |
+| `base64ct` | 1.8.3 | safe-to-deploy |
 | `bitflags` | 2.13.2 | safe-to-run |
 | `borsh` | 1.8.1 | safe-to-run |
 | `borsh-derive` | 1.8.1 | safe-to-run |
@@ -127,6 +116,7 @@ The vendored, patched crates (`cpufeatures` 0.2.17 and 0.3.1, `primeorder` 0.14.
 | `num-integer` | 0.1.47 | safe-to-deploy |
 | `oid-registry` | 0.8.1 | safe-to-deploy |
 | `pem` | 4.0.0 | safe-to-deploy |
+| `pem-rfc7468` | 1.0.0 | safe-to-deploy |
 | `pkcs8` | 0.10.2 | safe-to-deploy |
 | `powerfmt` | 0.2.1 | safe-to-deploy |
 | `proc-macro-crate` | 3.5.0 | safe-to-run |
@@ -140,15 +130,24 @@ The vendored, patched crates (`cpufeatures` 0.2.17 and 0.3.1, `primeorder` 0.14.
 | `rusticata-macros` | 4.1.0 | safe-to-deploy |
 | `rustix` | 1.1.6 | safe-to-run |
 | `rusty-fork` | 0.3.1 | safe-to-run |
+| `serde` | 1.0.229 | safe-to-deploy |
+| `serde_core` | 1.0.229 | safe-to-deploy |
+| `serde_derive` | 1.0.229 | safe-to-deploy |
+| `serde_spanned` | 1.1.2 | safe-to-deploy |
 | `serdect` | 0.4.3 | safe-to-deploy |
 | `spki` | 0.7.3 | safe-to-deploy |
+| `syn` | 3.0.9 | safe-to-deploy |
 | `thiserror` | 2.0.21 | safe-to-deploy |
 | `thiserror-impl` | 2.0.21 | safe-to-deploy |
 | `time` | 0.3.55 | safe-to-deploy |
 | `time-macros` | 0.2.32 | safe-to-deploy |
 | `tls_codec` | 0.4.2 | safe-to-deploy |
 | `tls_codec_derive` | 0.4.2 | safe-to-deploy |
+| `toml` | 1.1.8+spec-1.1.0 | safe-to-deploy |
+| `toml_datetime` | 1.1.2+spec-1.1.0 | safe-to-deploy |
 | `toml_edit` | 0.25.17+spec-1.1.0 | safe-to-run |
+| `toml_parser` | 1.1.5+spec-1.1.0 | safe-to-deploy |
+| `toml_writer` | 1.1.3+spec-1.1.0 | safe-to-deploy |
 | `wasi` | 0.11.1+wasi-snapshot-preview1 | safe-to-deploy |
 | `windows-sys` | 0.52.0 | safe-to-deploy |
 | `windows-sys` | 0.61.2 | safe-to-run |
@@ -161,6 +160,7 @@ The vendored, patched crates (`cpufeatures` 0.2.17 and 0.3.1, `primeorder` 0.14.
 | `windows_x86_64_gnu` | 0.52.6 | safe-to-deploy |
 | `windows_x86_64_gnullvm` | 0.52.6 | safe-to-deploy |
 | `windows_x86_64_msvc` | 0.52.6 | safe-to-deploy |
+| `winnow` | 1.0.4 | safe-to-deploy |
 | `x25519-dalek` | 2.0.1 | safe-to-run |
 | `x509-parser` | 0.18.1 | safe-to-deploy |
 | `yasna` | 0.6.0 | safe-to-deploy |
