@@ -162,10 +162,46 @@ jobs:
           set -o pipefail
           scripts/repro.sh prod | tee -a "$GITHUB_STEP_SUMMARY"
 
+  # The aarch64 suite is about 300 scenarios, far over one job's budget under
+  # TCG (no KVM on the runners), so it runs as parallel shards by group
+  # (scripts/smoke.sh: SMOKE_ONLY=<group>, SMOKE_GROUPS=<regex of group
+  # function names>). Together they cover the former single `make smoke` run:
+  #   core      every unguarded scenario of the default run (boot, faults, services,
+  #             time, watchdog, crash logs); SMOKE_NO_GROUPS=1 skips the guarded ones
+  #   storage-* the disk scenarios (SMOKE_ONLY=storage), in two halves
+  #   live      the live-mode scenarios
+  #   misc      the other guarded ones (configuration, release kernel, plaintext, storm, attacks, ...)
+  #   hardening the H4 scenarios (MTE, ...)
+  #   secrecy   H8, the production-image warning and the key-bytes scan
+  # NOT in CI yet: the x86_64 and universal-ISO suites (--arch x86_64 and
+  # --arch universal, SMOKE_ONLY=diag|install|migrated|config|template|
+  # integrity|install-rules|secureboot). They need qemu-system-x86, OVMF
+  # (including the Secure Boot build), virt-firmware, osslsigncode and the
+  # x86_64 kernel; they are run by hand on the KVM VPS (docs/RELEASE.md).
   smoke:
-    name: Smoke (QEMU TCG boot + fault reports)
+    name: Smoke ${{ matrix.group }} (QEMU TCG)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: core
+            no-groups: "1"
+          - group: storage-a
+            only: storage
+            groups: "^(first_boot|first_boot_crash|scsi_boot|iso_as_cd|own_damaged|storage_topology|layout_v1|grow_online|discard_qcow2)$"
+          - group: storage-b
+            only: storage
+            groups: "^(db_backup|storage_encrypted|backup_upgrade|backup_scheduled|backup_bench|scrub_flip|scrub_load|disk_tool)$"
+          - group: live
+            only: live
+          - group: misc
+            only: misc
+          - group: hardening
+            only: hardening
+          - group: secrecy
+            only: secrecy
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -180,13 +216,24 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends qemu-system-arm qemu-efi-aarch64 xorriso mtools mosquitto-clients sqlite3
           qemu-system-aarch64 --version | head -1
       - run: make certs
+      # The secrecy group also checks a release kernel: build it before
+      # `make smoke` rebuilds the dev kernel at the same path.
+      - name: Build the release kernel (secrecy group)
+        if: matrix.group == 'secrecy'
+        run: |
+          make build ENV=prod
+          cp target/aarch64-unknown-none/release/urmqtt "$RUNNER_TEMP/urmqtt-release.elf"
+          echo "SMOKE_RELEASE_KERNEL=$RUNNER_TEMP/urmqtt-release.elf" >> "$GITHUB_ENV"
       - run: make smoke ACCELS=tcg
         env:
           SMOKE_TIMEOUT: "300"
+          SMOKE_ONLY: ${{ matrix.only }}
+          SMOKE_GROUPS: ${{ matrix.groups }}
+          SMOKE_NO_GROUPS: ${{ matrix.no-groups }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: smoke-serial-logs
+          name: smoke-serial-logs-${{ matrix.group }}
           path: build/smoke/*.log*
           if-no-files-found: ignore
 

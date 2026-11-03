@@ -241,7 +241,10 @@ service() {
 
 # want <function>: with SMOKE_SCENARIOS=<regex> the groups of scenarios that
 # are functions (storm, attack_app, ...) run only if their name matches too.
-want() { [[ -z ${SMOKE_SCENARIOS:-} || $1 =~ $SMOKE_SCENARIOS ]]; }
+# SMOKE_GROUPS=<regex> selects only among those functions (the scenario names
+# are then not filtered); SMOKE_NO_GROUPS=1 skips all of them (CI runs the
+# groups as their own shards).
+want() { [[ -z ${SMOKE_NO_GROUPS:-} ]] && [[ -z ${SMOKE_GROUPS:-${SMOKE_SCENARIOS:-}} || $1 =~ ${SMOKE_GROUPS:-$SMOKE_SCENARIOS} ]]; }
 
 # start_vm <log> <qemu args...>: boots in the background; sets VM_PID.
 start_vm() {
@@ -3248,6 +3251,24 @@ hardening_suite() {
         echo "  - mte-*: skipped (needs aarch64 under TCG; HVF and x86_64 have no FEAT_MTE)"
     fi
 }
+
+# SMOKE_ONLY=misc: the scenarios of the default run that are guarded by `want` and belong to no other
+# group (the default run with SMOKE_NO_GROUPS=1 skips exactly these, so CI runs both and loses nothing).
+if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
+    want config_packed && config_packed
+    want release_kernel && release_kernel
+    want plaintext && plaintext
+    want storm && storm
+    want attack_raw && attack_raw
+    want attack_app && attack_app
+    want observability && observability
+    want no_hw_rng && no_hw_rng
+    [[ $ARCH == aarch64 ]] && want install_iso && install_iso
+    [[ $ARCH == aarch64 ]] && want gicv2 && gicv2
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
 
 # SMOKE_ONLY=hardening: the H4 scenarios of this architecture.
 if [[ ${SMOKE_ONLY:-} == hardening && $ARCH != universal ]]; then
