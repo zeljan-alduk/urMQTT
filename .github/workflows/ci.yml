@@ -231,6 +231,8 @@ jobs:
           # shared runner a vCPU that is not scheduled for tens of ms breaks that (the same effect as on the
           # VPS in X11). They get three attempts (scripts/smoke.sh, SMOKE_RETRY).
           SMOKE_RETRY: "^(sys-slow-log|log-slow-flood)$"
+          # ... and a handler budget of 25 ms instead of 10 for those two (a slow TCG CPU, not a stall).
+          SMOKE_HANDLER_BUDGET_MS: "25"
           SMOKE_ONLY: ${{ matrix.only }}
           SMOKE_GROUPS: ${{ matrix.groups }}
           SMOKE_NO_GROUPS: ${{ matrix.no-groups }}

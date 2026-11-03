@@ -267,6 +267,21 @@ service() {
     done
 }
 
+# budget_images <scenario>: with SMOKE_HANDLER_BUDGET_MS set, the next image of that scenario carries the
+# development configuration with that watchdog handler budget instead of 10 ms. The two slow-log scenarios
+# assert that no handler is ever reported over budget; a slow CPU (TCG on a shared CI runner: the `sys`
+# step needs 11 to 13 ms there against about 5 ms on the Mac) makes the 10 ms budget fail without any
+# stall, while the faults they exist to catch (a handler waiting on a slow sink: 36 to 375 ms in ADR-072)
+# are far above a budget of 25 ms.
+budget_images() {
+    MKIMG_EXTRA=()
+    [[ -n ${SMOKE_HANDLER_BUDGET_MS:-} ]] || return 0
+    local cfg="$OUT/$1-config.toml"
+    mkdir -p "$OUT"
+    sed -e "s/^handler_budget_ms = 10/handler_budget_ms = $SMOKE_HANDLER_BUDGET_MS/" "$ROOT/deploy/dev/config.toml" >"$cfg"
+    MKIMG_EXTRA=(--config "$cfg" --config-root "$ROOT/deploy/dev")
+}
+
 # want <function>: with SMOKE_SCENARIOS=<regex> the groups of scenarios that
 # are functions (storm, attack_app, ...) run only if their name matches too.
 # SMOKE_GROUPS=<regex> selects only among those functions (the scenario names
@@ -3748,9 +3763,11 @@ sys_reboot() {
 # framebuffer) and an operator subscribed, no output handler may be reported
 # over budget in step `sys`.
 if command -v mosquitto_pub >/dev/null; then
+    budget_images sys-slow-log
     SERVICE_PORT=8883 service sys-slow-log "serve test=slow-log:4000" "$PORT" "TLS 1.3 listener on port 8883" \
         python3 -I "$ROOT/scripts/sys-scenarios.py" watch "$ROOT/deploy/dev" -- \
         "client: sys-watch ok" "NOT:\(step sys\)" "NOT:FAILED" "$NO_FAULT"
+    MKIMG_EXTRA=()
 fi
 
 # ADR-090: the log never stalls the data path. Every core logs one numbered
@@ -3766,10 +3783,12 @@ fi
 # (also on the v0.2.1 sources). aarch64 keeps 25 ms.
 LOG_FLOOD_MS=25
 [[ $ARCH == x86_64 ]] && LOG_FLOOD_MS=50
+budget_images log-slow-flood
 SERVICE_PORT=8883 service log-slow-flood "serve test=slow-log:4000 test=log-flood:$LOG_FLOOD_MS ${LOG_FLOOD_EXTRA:-}" 18893 \
     "TLS 1.3 listener on port 8883" python3 -I "$ROOT/scripts/log-flood-check.py" -- \
     "client: log-flood ok" "log: asynchronous: cores queue their lines" "log: cost: [0-9]+ call" \
     "NOT:over budget" "NOT:FAILED" "$NO_FAULT"
+MKIMG_EXTRA=()
 
 # O1, O2: an operator with mutual TLS reads `$SYS/broker/#` (retained, every
 # 10 s), asks `$SYS/query/info`, reads the console and runs the fixed command
