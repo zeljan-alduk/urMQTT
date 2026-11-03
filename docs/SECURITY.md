@@ -348,6 +348,44 @@ signed control channel). Adding and removing accounts at run time is **not**
 implemented (it would need a signed message type and a place to keep the hashes
 across reboots) and is listed as later work.
 
+## The public demo broker (D1)
+
+D1 (docs/PLAN.md, docs/DEPLOY.md section 11) is a urMQTT that **anyone on the internet may use**, so that people can try it
+without installing anything. It is built, tested locally and **not deployed**. It is a toy; this section says what it exposes and
+why that is acceptable.
+
+**What is public, on purpose.** The private key of the demo *client* CA is in the download (`ca.key`): anyone can mint a client
+certificate, so mutual TLS authenticates nobody here. The broker's own certificate comes from a *different* CA whose key is
+deleted after signing, so a client that trusts `server-ca.pem` still talks to the real demo broker. Anyone can read `demo/<any
+id>/#` for an id they mint, and the browser page shares one identity (`web`) between all visitors. The CA, certificates and ids
+are generated for this deployment and must never be reused.
+
+**What keeps it harmless** is configuration, not secrecy: `acl.device_*` = `demo/{id}/#` and no `service_ids`, `operator_ids` or
+`control.service_ids` (a certificate that claims the name `operator` or `backend` gets `demo/operator/#`, nothing more), no
+retained messages (`max_retained_per_device = 0`, `plaintext.retain = false`), no stored sessions, small limits (1 KiB packets, 4
+subscriptions, 5 publishes a second, 60 plaintext connections and 400 per data core), live mode (nothing is written anywhere) and a
+reboot as the reset.
+
+| Threat | Mitigation | Check |
+|---|---|---|
+| Anyone mints a certificate and claims an operator, service or control identity | No such ids are configured; the role comes from the configuration, not from the name | `minted-operator-certificate-has-no-operator-rights`, `minted-backend-certificate-has-no-service-rights` (`scripts/demo-scenarios.py`) |
+| Reading or writing another id's topics, `#`, `$SYS`, `$urmqtt` | ACL `demo/{id}/#`; refusals are SUBACK 0x80 | `tls-subscribe-elsewhere-refused`, `tls-publish-to-another-id-dropped`, `plaintext-subscribe-only-demo-web`, `plaintext-publish-only-demo-web` |
+| **The bridge as an open relay** to the plaintext listener, or to other hosts | The upstream is one configured `host:port`, never taken from the request; the firewall and `plaintext.allow_from` accept only the bridge host (any other source gets no SYN-ACK); the first message of a session must be an MQTT CONNECT, so it is not a general TCP relay; an Origin allow-list | bridge tests `test_only_an_mqtt_connect_may_start_a_session`, `test_requests_that_are_refused`; smoke `plaintext-refused` (P1) |
+| A page on another site uses the bridge | `Origin` must be on the allow-list (browsers always send it); a non-browser can fake it, so the limits below carry the load | `test_requests_that_are_refused` |
+| Connection or bandwidth exhaustion through the bridge | Per-address (4) and total (50) caps, 20 new connections a minute per address, 1 KiB messages, per-connection token buckets, idle (120 s) and lifetime (1 h) limits, head and frame deadlines, container memory, pid and CPU limits | `test_per_address_and_total_caps`, `test_rate_limit_closes_a_flooding_connection`, `test_idle_timeout_and_pings_keep_a_connection_alive`, `test_a_frame_that_stalls_is_closed` |
+| One visitor using up the broker's plaintext connections | The bridge's total (50) is below the broker's (60); per-address caps use the real client address from Caddy's `X-Forwarded-For`, trusted only from loopback and the container network | `test_client_address_is_the_peer_or_a_trusted_proxys_last_xff_entry` |
+| Spoofing the client address with `X-Forwarded-For` | Used only when the peer is a trusted proxy, and only its last entry | `test_xff_from_an_untrusted_peer_cannot_dodge_the_cap` |
+| Reflection and amplification | The bridge sends the browser only what the broker delivers; the broker's publish rate (5/s per session), 1 KiB packets and 4 subscriptions bound it; there is no UDP and no request-triggered outbound connection except the fixed upstream | design; `plaintext-publish-rate-limited` |
+| Filling storage | Impossible: live mode has no disk. RAM is bounded by `storage.ram_percent`, the connection and subscription caps and `memory.min_free_mb` (new connections are refused below it); retained messages are not kept at all | boot line `EPHEMERAL`; `tls-retained-not-kept`, `plaintext-retained-not-kept` |
+| Stored XSS: a visitor publishes markup that other visitors' pages render | The page shows every message as text (`textContent`), no `innerHTML`, no eval, no third-party script; the test publishes markup and checks it stays inert | `what other clients publish is shown as text, never as HTML`, `the page has no third-party script...` |
+| Tracking visitors | No analytics script on the page, no cookies, nothing in browser storage; the bridge logs no addresses by default; the broker sees only the bridge's address | page tests, `test_payloads_and_addresses_are_not_logged` |
+| Two people use `web` or `demo-001` at once | One connection per client id: the newer takes over the older. A nuisance, not a breach | by design, said on the page |
+| Abuse (spam, illegal content) on a public broker | Small limits and no storage reduce it; the owner can take the demo down at once (DEPLOY section 11); messages are not logged, so there is no moderation | accepted |
+| A flaw in the broker is now reachable by anyone | The demo runs the release image on a **separate machine** and address, so a compromise is not the production broker | operational (DEPLOY section 11, "Decide first") |
+
+**Not covered.** The deployment (firewall, DNS, Caddy, the container image build) has not been exercised: the tests ran against
+local processes and a QEMU VM on loopback. The demo image was booted on aarch64 only; the VPS is x86_64.
+
 ## Installer entry (S1b)
 
 Written with the implementation. The ISO's boot menu has a second entry,

@@ -858,3 +858,113 @@ idempotent and prints what it does; `--dry-run` changes nothing.
 ### TLS off, plain MQTT only (ADR-233)
 
 A trusted plant network can run without certificates: `[network] mqtt_tls_port = 0` and `[plaintext] enabled = true` with `allow_from` and a login mode. The image then needs no `tls.cert`, `tls.key` or `trust.operational`, boots with `mqtt: TLS listener off`, and has no operator, service or control access (those need mutual TLS). The configuration is written in format 3, which a kernel of **v0.2.1 or newer** reads; older templates are refused with the reason. With both listeners on (the default of the simple view's second box plus plain MQTT) nothing changes for TLS.
+
+## 11. A public demo broker (D1)
+
+> **Status: built and tested locally, NOT deployed.** Nothing below has been run on a server, in a DNS zone, in a firewall or
+> in your Caddy. This section is the runbook for the day you decide to expose it. Read
+> [SECURITY.md, "The public demo broker (D1)"](SECURITY.md#the-public-demo-broker-d1) first: what you are about to publish is
+> a toy whose client CA key is public on purpose.
+
+What it is: a urMQTT in **live mode** (`storage.mode = "ram"`, nothing persists, a reboot is a reset) with mutual TLS on
+`demo-mqtt.aldo.tech:8883` and published throwaway client certificates (D1a), plus a plaintext listener that only the bridge
+host may reach, behind a WebSocket bridge that serves `wss://aldo.tech/demo/mqtt` to the page "Try urMQTT live" (D1b).
+Files: `deploy/demo/config.toml`, `scripts/demo-certs.sh`, `scripts/demo-pack.sh`, `scripts/demo-smoke.sh`,
+`deploy/demo-bridge/` (bridge, Dockerfile, systemd unit, Caddy snippet), `tools/builder/demo/` (the page),
+`tools/builder/site/{demo,apply_demo}.py`.
+
+**Decide first.**
+1. **Which machine.** Do **not** run the demo on the production broker's machine: one VM runs one image, so the demo would
+   replace the production image and put a public toy on the address devices use. Use a second small KVM VPS with its own
+   address. (PLAN.md D1 spoke of the Contabo VPS staying on the production image; that and a demo exclude each other on one VM.)
+2. **The bridge host**: the machine that runs Caddy for aldo.tech and the bridge container. Its public address is what the
+   firewall and `allow_from` below name (`BRIDGE_IP`).
+3. **Listed or not**: the page is built unlisted (noindex, no menu or sitemap entry, reachable by its address) until you set
+   `URMQTT_DEMO_LISTED=1` for the site build.
+
+**1. The certificates** (any machine with OpenSSL >= 3; keep `deploy/demo/pki/server.key` private):
+```bash
+scripts/demo-certs.sh --host demo-mqtt.aldo.tech --count 20     # deploy/demo/pki/, git-ignored
+```
+It makes the public client CA (`ca.pem`, `ca.key`), a separate broker CA whose key it deletes, the broker certificate, `web` and
+`demo-001..020`, and `pki/download/` with `demo-certs.zip`. The client CA lasts 730 days, the leaves 365: **repeat before they
+expire** (`--force` starts over with new CAs, so repack the image and replace the download).
+
+**2. The image.** A release with a template (`urmqtt-template-<version>-universal.iso`, checked against its `SHA256SUMS` and
+signature as in section 1b) or `make template`. Then:
+```bash
+cargo build --release -p urmqtt-config-tool
+scripts/demo-pack.sh --template urmqtt-template-<version>-universal.iso --out urmqtt-demo.iso \
+    --bridge BRIDGE_IP/32 --static DEMO_IP/PREFIX GATEWAY --tool target/release/urmqtt-config
+```
+`--bridge` is the only source the plaintext port answers (any other source gets no SYN-ACK). It prints the configuration
+fingerprint; the kernel prints the same one at every boot. **Before shipping it, run the local acceptance test** (no exposure;
+QEMU forwards loopback ports only):
+`scripts/demo-smoke.sh --template urmqtt-template-<version>-universal.iso --tool target/release/urmqtt-config`.
+
+**3. Boot it** on the demo VPS as in section 5b (upload the ISO, boot from it; the first menu entry is the live entry, and
+`storage.mode = "ram"` keeps everything in RAM). The console shows `EPHEMERAL: data is lost on reboot`,
+`TLS 1.3 listener on port 8883`, `PLAINTEXT listener on port 1883` and `URMQTT READY`. Do not install it to the disk.
+
+**4. Firewall** (the provider's panel; the broker has no firewall of its own beyond `allow_from`):
+
+| Direction | Port | Source | Why |
+|---|---|---|---|
+| in | 8883/tcp | anywhere | demo clients (mutual TLS) |
+| in | 1883/tcp | `BRIDGE_IP` only | the bridge; the broker's `allow_from` is the second lock |
+| in | everything else | none | |
+
+**5. DNS**: an `A` record `demo-mqtt.aldo.tech` -> `DEMO_IP`, **DNS only** (no CDN or HTTP proxy: it cannot carry raw TLS on
+8883). The name must match `--host` of step 1 (the broker certificate's SAN).
+
+**6. The bridge** (on the bridge host):
+```bash
+docker pull python:3.12-alpine && docker inspect --format '{{index .RepoDigests 0}}' python:3.12-alpine   # pin it
+docker build --build-arg PYTHON_IMAGE=python@sha256:<digest> -t urmqtt-demo-bridge deploy/demo-bridge
+# what the unit runs; read-only, no capabilities, non-root, loopback only, no secrets:
+docker run --rm --name urmqtt-demo-bridge --read-only --tmpfs /tmp:rw,noexec,nosuid,size=4m \
+    --cap-drop ALL --security-opt no-new-privileges --memory 96m --cpus 0.5 --pids-limit 32 \
+    -e DEMO_BRIDGE_UPSTREAM=DEMO_IP:1883 -e DEMO_BRIDGE_ORIGINS=https://aldo.tech,https://aldotech.io \
+    -p 127.0.0.1:18090:8080 urmqtt-demo-bridge
+curl -s http://127.0.0.1:18090/healthz        # {"ok": true, "open": 0, ...}
+```
+For a service, edit the three `CHANGE` lines of `deploy/demo-bridge/urmqtt-demo-bridge.service`, install it and
+`systemctl enable --now urmqtt-demo-bridge`. Its limits (all `DEMO_BRIDGE_*` variables; `bridge.py --help`): 4 connections per
+visitor address and 50 in all (the broker's `plaintext.max_connections` is 60), 20 new connections a minute per address,
+1024-byte messages (the broker's plaintext packet size), 20 messages and 8 KiB a second per connection, 120 s idle, 1 h
+lifetime, an Origin allow-list. The log has counters, no payloads and no addresses.
+
+**7. Caddy**: put `deploy/demo-bridge/Caddyfile.snippet` into the `(site)` snippet before the catch-all `handle`, then
+`caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && systemctl reload caddy`. Do not configure `trusted_proxies`
+for the clients: Caddy must overwrite `X-Forwarded-For` with the real peer, which is what the bridge counts by.
+
+**8. The page**: `scripts/demo-certs.sh` first (the page links the zip), then
+```bash
+make demo-page
+scripts/deploy-builder-site.sh --with-demo --chown USER:GROUP --dry-run     # then without --dry-run
+```
+`apply_demo.py` runs after `apply_products.py` (the script does it) and refuses a `build.py` it does not recognise. **It was
+only tested against a stand-in generator**: back `build.py` up, try it with `--site-dir` on a scratch copy and compare the
+output first. The page is `/<products slug>/urmqtt-live/` (for example `/en/products/urmqtt-live/`) with the site's own CSP: if
+that blocks the WebSocket (an old Safari does not let `default-src 'self'` cover `wss:`), add `connect-src 'self'
+wss://aldo.tech` to the generator's CSP. To list the page, build with `URMQTT_DEMO_LISTED=1`. The generator copies
+`urmqtt-demo/` to `/urmqtt/demo/` like the builder; the publish script must not delete it.
+
+**9. Check it from outside**:
+```bash
+mosquitto_pub -h demo-mqtt.aldo.tech -p 8883 --cafile server-ca.pem --cert clients/demo-001.pem --key clients/demo-001.key \
+    -i demo-001 -t demo/demo-001/hello -m hi -q 1                      # works
+nc -vz -w 3 DEMO_IP 1883                                               # from anywhere but BRIDGE_IP: no answer
+curl -si -H 'Origin: https://evil.example' -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Sec-WebSocket-Protocol: mqtt' https://aldo.tech/demo/mqtt | head -1   # 403
+```
+and open the page in a browser: connect, subscribe, publish, see the message.
+
+**Reset**: reboot the demo VM (provider panel). Live mode keeps nothing: retained messages, sessions and the log are gone, and
+the image is the whole state. **Monitoring**: `journalctl -u urmqtt-demo-bridge` (counter summaries: `accepted`, `refused_*`,
+`closed_*`), `curl 127.0.0.1:18090/healthz`, an uptime check that opens TCP 8883 and the page, the broker's console (VNC) and, if
+you set `observability.syslog_udp` to a private collector, its log. The demo has no operator identity, so there is no `$SYS`.
+**Taking it down**: delete the Caddy block and reload; `systemctl disable --now urmqtt-demo-bridge` and remove the container;
+close 8883 and 1883 and delete the DNS record; power off the VM (or put the production image back); remove the page: delete
+`urmqtt-demo/`, `demo.py` and `apply_demo.py` from the generator's directory, restore `build.py` from the backup, publish. The
+published CA key is then of no use to anybody.

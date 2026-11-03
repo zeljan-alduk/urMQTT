@@ -165,6 +165,8 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	$(CARGO) test $(CARGO_FLAGS) --workspace
 	python3 -I scripts/test-mirror-releases.py
 	python3 -I scripts/test-caddy-apply.py
+	python3 -I deploy/demo-bridge/test_bridge.py
+	python3 -I tools/builder/site/test_demo_site.py
 	@if command -v node >/dev/null && rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$$'; then \
 	 $(MAKE) --no-print-directory builder-test; \
 	 else echo "check: node or the wasm32 target (rustup target add wasm32-unknown-unknown) missing, the builder tests are skipped (CI runs them)"; fi
@@ -174,6 +176,10 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 .PHONY: builder
 builder: ## The web builder (WebAssembly module and page) in build/builder/
 	tools/builder/build.sh
+
+.PHONY: demo-page
+demo-page: ## The "Try urMQTT live" page (D1b) in build/demo/ (with the certificate download if scripts/demo-certs.sh ran)
+	node tools/builder/demo/bundle.mjs
 
 .PHONY: builder-emulator
 builder-emulator: ## The web builder with the emulator of "Try in the emulator" (downloads and patches qemu-wasm, GPL-2.0; see tools/builder/emulator/SOURCE.txt)

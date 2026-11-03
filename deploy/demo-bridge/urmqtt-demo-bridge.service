@@ -1,0 +1,35 @@
+# The demo bridge (D1b): bridge.py in a container on 127.0.0.1:18090 only, behind Caddy
+# (deploy/demo-bridge/Caddyfile.snippet). Same style as the release mirror's web unit.
+# NOT INSTALLED ANYWHERE: docs/DEPLOY.md, section 11, says when and how.
+# Edit the three values marked CHANGE, then:
+#   install -m 0644 urmqtt-demo-bridge.service /etc/systemd/system/ && systemctl daemon-reload
+#   systemctl enable --now urmqtt-demo-bridge
+# Log: journalctl -u urmqtt-demo-bridge (counters only, never payloads or addresses)
+[Unit]
+Description=urMQTT demo bridge: WebSocket to TCP (container, loopback only)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+# CHANGE: the image you built, pinned by digest if you pushed it to a registry.
+Environment=IMAGE=urmqtt-demo-bridge:latest
+# CHANGE: the demo broker's plaintext listener (the VPS address) -- the firewall must let ONLY this host reach it.
+Environment=DEMO_BRIDGE_UPSTREAM=203.0.113.10:1883
+# CHANGE: the sites that serve the page.
+Environment=DEMO_BRIDGE_ORIGINS=https://aldo.tech,https://aldotech.io
+ExecStartPre=-/usr/bin/docker rm -f urmqtt-demo-bridge
+# Read-only root, no capabilities, no new privileges, small and low priority: a toy must never get in the way of
+# the sites on this host. --pids-limit and --memory bound what a bug or an abuse can use.
+ExecStart=/usr/bin/docker run --rm --name urmqtt-demo-bridge \
+    --read-only --tmpfs /tmp:rw,noexec,nosuid,size=4m \
+    --cap-drop ALL --security-opt no-new-privileges \
+    --memory 96m --cpus 0.5 --cpu-shares 64 --pids-limit 32 \
+    -e DEMO_BRIDGE_UPSTREAM -e DEMO_BRIDGE_ORIGINS \
+    -p 127.0.0.1:18090:8080 \
+    $IMAGE
+ExecStop=/usr/bin/docker stop -t 10 urmqtt-demo-bridge
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

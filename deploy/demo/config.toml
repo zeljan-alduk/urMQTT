@@ -1,0 +1,108 @@
+# The PUBLIC DEMO broker (D1): a toy that anyone may use, run from RAM and reset by a reboot.
+#
+# Read docs/DEPLOY.md, "A public demo broker (D1)" and docs/SECURITY.md, "The public demo broker", first.
+#   - the client CA (pki/ca.pem) has a PUBLISHED private key on purpose: mTLS here is a ceremony, not a gate;
+#   - the broker certificate comes from a different CA whose key is never published (and is deleted after use);
+#   - nothing on this broker is private, nothing persists, no service/operator/control rights exist.
+#
+# scripts/demo-certs.sh makes deploy/demo/pki/, scripts/demo-pack.sh packs this file into an ISO. Files named
+# here are read from deploy/demo/pki/ (`--root`). The values marked PLACEHOLDER are replaced by demo-pack.sh
+# (--bridge CIDR, --static ADDRESS/PREFIX GATEWAY); the file is valid as it stands so that it can be checked.
+
+[network]
+mode = "dhcp"                  # demo-pack.sh --static 192.0.2.10/24 192.0.2.1 writes mode, address and gateway
+mqtt_tls_port = 8883
+mqtt_plain_port = 0            # the legacy dev-only port stays off; [plaintext] below is the bridge's way in
+
+[tls]
+cert = "server.pem"            # signed by pki/server-ca.pem (its private key is deleted); clients check the broker with it
+key = "server.key"
+identity_field = "cn"
+resumption = true
+revocation_list = ""
+min_server_cert_days = 30
+early_data = false
+
+[trust]
+operational = ["ca.pem"]       # the PUBLISHED client CA: anyone may mint a client certificate. See SECURITY.md.
+bootstrap = []
+min_anchor_days = 365
+
+[limits]
+max_connections_per_core = 400          # the whole demo, per data core
+max_packet_size = 1024
+max_topic_len = 128
+max_topic_levels = 8
+max_subscriptions_per_session = 4
+max_inflight_qos1 = 4
+max_queued_per_offline_session = 0      # no stored sessions of any use on a demo
+max_retained_per_device = 0             # retained messages are delivered but never kept
+max_retained_bytes = 65536              # a minimum; unused while max_retained_per_device = 0
+publish_rate_per_device = "5/s"
+handshakes_per_core_per_sec = 20
+max_handshakes_in_flight_per_core = 16
+max_handshakes_in_flight_per_ip = 4
+
+[acl]
+# Each demo certificate (CN = its id) sees only demo/<its id>/#. No service, no operator, no control.
+device_publish = ["demo/{id}/#"]
+device_subscribe = ["demo/{id}/#"]
+service_ids = []
+service_publish = []
+service_subscribe = []
+operator_ids = []
+
+[plaintext]
+# ONLY for the WebSocket bridge (deploy/demo-bridge). The VPS firewall must also let only the bridge host reach
+# TCP 1883; allow_from is the second lock (a source outside it gets no SYN-ACK). Everybody behind the bridge is
+# the same anonymous identity "web" with the narrowest ACL: demo/web/# and nothing else.
+enabled = true
+port = 1883
+allow_from = ["10.0.0.0/24"]            # PLACEHOLDER: the bridge host, e.g. demo-pack.sh --bridge 203.0.113.7/32
+auth = "anonymous"
+anonymous_identity = "web"
+acl_publish = ["demo/{id}/#"]
+acl_subscribe = ["demo/{id}/#"]
+retain = false
+max_connections = 60                    # the bridge caps itself at 50
+max_connections_per_ip = 60             # every browser arrives from the bridge's address
+max_packet_size = 1024
+publish_rate_per_device = "5/s"         # per session, i.e. per browser tab
+
+[storage]
+mode = "ram"                   # live mode: nothing is written anywhere; a reboot is a reset
+ram_percent = 5
+diagnostic = false
+sqlite_heap_mb = 8
+telemetry_topics = []
+retention_days = 1
+require_flush = true
+require_data_disk = true       # the production default; mode = "ram" does not use a disk
+refuse_on_corruption = true
+
+[registry]
+mode = "open"
+
+[control]
+service_ids = []               # the control channel is off; no signing key is needed
+allow_unrevoke = false
+max_message_age_s = 600
+
+[observability]
+log_level = "info"
+syslog_udp = ""
+metrics_udp = ""
+
+[watchdog]
+handler_budget_ms = 20
+action = "drop"
+
+[memory]
+kernel_heap_mb = 128           # power of two; a few hundred idle connections need far less
+min_free_mb = 16
+
+[entropy]
+fallback = "jitter"
+
+[cpu]
+disable = []
