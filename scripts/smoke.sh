@@ -282,9 +282,9 @@ ticket_restart() {
         local data="$OUT/ticket-restart-$accel.img" go="$OUT/ticket-restart-$accel.go" status=0 cpid=""
         rm -f "$go" "$log2.client"
         fresh_disk "$iso" "$data"
-        start_vm "$log1" --disk "$data" --accel "$accel" --fwd $PORT:8883
+        start_vm "$log1" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
         if wait_log "$log1" "TLS 1.3 listener"; then
-            python3 -I "$ROOT/scripts/ticket-scenarios.py" "$ROOT/deploy/dev" restart "$go" $PORT \
+            python3 -I "$ROOT/scripts/ticket-scenarios.py" "$ROOT/deploy/dev" restart "$go" "$PORT" \
                 >"$log2.client" 2>&1 &
             cpid=$!
             local waited=0
@@ -301,7 +301,7 @@ ticket_restart() {
         fi
         kill_vm
         if [[ $status -eq 0 ]]; then
-            start_vm "$log2" --disk "$data" --accel "$accel" --fwd $PORT:8883
+            start_vm "$log2" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
             if wait_log "$log2" "TLS 1.3 listener"; then
                 touch "$go"
                 wait "$cpid" || status=1
@@ -335,7 +335,7 @@ control_persist() {
         local data="$OUT/control-persist-$accel.img" status=0
         rm -f "$msg" "$log2.client"
         fresh_disk "$iso" "$data"
-        start_vm "$log1" --disk "$data" --accel "$accel" --fwd $PORT:8883
+        start_vm "$log1" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
         if wait_log "$log1" "TLS 1.3 listener"; then
             "$CONTROL_TOOL" revoke --cert "$d/devices/device-002.pem" --env dev --key "$d/control.key" \
                 --out "$msg" "${tls[@]}" >>"$log1.client" 2>&1 || status=1
@@ -345,11 +345,11 @@ control_persist() {
         fi
         kill_vm
         if [[ $status -eq 0 ]]; then
-            start_vm "$log2" --disk "$data" --accel "$accel" --fwd $PORT:8883
+            start_vm "$log2" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
             if wait_log "$log2" "TLS 1.3 listener"; then
                 "$CONTROL_TOOL" publish-file "$msg" "${tls[@]}" >>"$log2.client" 2>&1 || status=1
                 wait_log "$log2" "rejected: replay" || status=124
-                if mosquitto_pub -h 127.0.0.1 -p $PORT -V mqttv311 -i device-002 --cafile "$d/ca.pem" \
+                if mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i device-002 --cafile "$d/ca.pem" \
                     --cert "$d/devices/device-002.pem" --key "$d/devices/device-002.key" \
                     -t devices/device-002/x -m x >/dev/null 2>&1; then
                     echo "client: revoked device admitted after reboot" >>"$log2.client"
@@ -571,7 +571,7 @@ mqtt_persist() {
             local log="$OUT/mqtt-persist-$accel-$phase.log" status=0
             start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
             if wait_log "$log" "TLS 1.3 listener on port 8883"; then
-                python3 -I "$ROOT/scripts/mqtt-persist.py" $PORT --tls "$ROOT/deploy/dev" --phase "$phase" \
+                python3 -I "$ROOT/scripts/mqtt-persist.py" "$PORT" --tls "$ROOT/deploy/dev" --phase "$phase" \
                     >"$log.client" 2>&1 || status=$?
             else
                 status=124
@@ -608,7 +608,7 @@ storm() {
         fresh_disk "$iso" "$data"
         start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
         if wait_log "$log" "TLS 1.3 listener on port 8883"; then
-            (cd "$ROOT" && "$loadgen" storm --port $PORT --clients 3000 --threads 8 --rounds 3 \
+            (cd "$ROOT" && "$loadgen" storm --port "$PORT" --clients 3000 --threads 8 --rounds 3 \
                 --retry-s 30 --subscribe 1 --min-connected 500) >"$log.client" 2>&1 || status=$?
             # Memory left by the last round is returned within 10 s.
             sleep 12
@@ -935,14 +935,14 @@ disk_tool() {
         local disk="$OUT/disk-tool-$accel.img" log1="$OUT/disk-tool-$accel-1.log"
         local log2="$OUT/disk-tool-$accel-2.log" out="$OUT/disk-tool-$accel.out" status=0
         fresh_disk "$serve" "$disk"
-        start_vm "$log1" --disk "$disk" --accel "$accel" --fwd $PORT:8883
+        start_vm "$log1" --disk "$disk" --accel "$accel" --fwd "$PORT:8883"
         # Client output goes to its own file: QEMU writes the serial log at
         # its own offset, so appending there while it runs loses lines.
         rm -f "$log1.client" "$log2.client"
         if wait_log "$log1" "TLS 1.3 listener on port 8883"; then
-            python3 -I "$ROOT/scripts/mqtt-persist.py" $PORT --tls "$d" --phase 1 >>"$log1.client" 2>&1 || status=1
+            python3 -I "$ROOT/scripts/mqtt-persist.py" "$PORT" --tls "$d" --phase 1 >>"$log1.client" 2>&1 || status=1
             for v in 11 22 33; do
-                mosquitto_pub -h 127.0.0.1 -p $PORT -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
+                mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
                     --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" -q 1 \
                     -t devices/device-001/telemetry/disk-tool -m "v$v" >>"$log1.client" 2>&1 || status=1
             done
@@ -973,10 +973,10 @@ disk_tool() {
             "import-devices: 1 device\(s\) imported and allowlisted" "$NO_FAULT"
         status=0
         set_esp "$disk" "$allow"
-        start_vm "$log2" --disk "$disk" --accel "$accel" --fwd $PORT:8883
+        start_vm "$log2" --disk "$disk" --accel "$accel" --fwd "$PORT:8883"
         if wait_log "$log2" "TLS 1.3 listener on port 8883"; then
             for id in device-002 device-003; do
-                if mosquitto_pub -h 127.0.0.1 -p $PORT -V mqttv311 -i "$id" --cafile "$d/ca.pem" \
+                if mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i "$id" --cafile "$d/ca.pem" \
                     --cert "$d/devices/$id.pem" --key "$d/devices/$id.key" -q 1 \
                     -t "devices/$id/x" -m x >/dev/null 2>&1; then
                     echo "client: $id admitted" >>"$log2.client"
@@ -1611,9 +1611,6 @@ db_backup() {
             "db-backup: device writes before the backup [0-9]+, after [0-9]+" \
             "db-backup: 100 selftest rows in snapshot seq 1 \(slot 0, [0-9]+ KiB, [0-9]+ step\(s\), longest [0-9]+ us\)" \
             "db-backup: 50 more rows committed after the snapshot \(150 in all\)" "^URMQTT READY$" "NOT:backup: FAILED" "$NO_FAULT"
-        local w0 w1
-        w0=$(clean "$l1" | sed -n 's/.*db-backup: device writes before the backup \([0-9]*\), after \([0-9]*\)/\1/p' | tail -1)
-        w1=$(clean "$l1" | sed -n 's/.*db-backup: device writes before the backup \([0-9]*\), after \([0-9]*\)/\2/p' | tail -1)
         {
             "$ud" info "$disk"
             "$ud" verify "$disk" && echo "tool: verify exit 0"
@@ -1838,14 +1835,15 @@ scrub_flip() {
             "log-fill: [0-9]+ record\(s\) dated now durable in 8 partition\(s\)" \
             "scrub: every 24 h, at most 8 MB/s; the first pass 600 s after boot" "^URMQTT READY$" "NOT:scrub: pass" "$NO_FAULT"
         # Where the ring is, from the tool.
-        local info first tel parts segs kib base segb
+        local info first tel segs kib base segb
         info=$("$ud" info "$disk" 2>&1)
         first=$(sed -n 's/.*urMQTT data "urMQTT data" LBA \([0-9]*\)\.\..*/\1/p' <<<"$info" | head -1)
         tel=$(sed -n 's/.*region Telemetry: LBA \([0-9]*\)\.\..*/\1/p' <<<"$info" | head -1)
-        read -r parts segs kib < <(sed -n 's/.*telemetry ring: \([0-9]*\) partition(s) of \([0-9]*\) segment(s) of \([0-9]*\) KiB.*/\1 \2 \3/p' <<<"$info" | head -1)
+        read -r _ segs kib < <(sed -n 's/.*telemetry ring: \([0-9]*\) partition(s) of \([0-9]*\) segment(s) of \([0-9]*\) KiB.*/\1 \2 \3/p' <<<"$info" | head -1)
         if [[ -z $first || -z $tel || -z $kib ]]; then
             echo "  ✗ scrub-flip: could not read the ring geometry from the tool [$accel]"
-            echo "$info" | sed 's/^/    | /'
+            # shellcheck disable=SC2001 # a per-line prefix: the substitution form needs a newline pattern
+            sed 's/^/    | /' <<<"$info"
             FAILED=$((FAILED + 1))
             continue
         fi
@@ -1897,7 +1895,7 @@ scrub_load() {
         start_vm "$log" --disk "$disk" --accel "$accel" --fwd none
         wait_log "$log" "scrub: pass 1 done" || status=$?
         local last
-        last=$(clean "$log" | grep -E 'log-crash: core [0-9]+ writing' | wc -l | tr -d ' ')
+        last=$(clean "$log" | grep -cE 'log-crash: core [0-9]+ writing' | tr -d ' ')
         kill_vm
         check "scrub-under-load [$accel]" "$log" "$status" "log-crash: core 0 writing" \
             "scrub: pass 1 started \(budget 8 MB/s\)" \
@@ -2312,7 +2310,7 @@ gicv2() {
     fresh_disk "$iso" "$data"
     start_vm "$log" --disk "$data" --accel tcg --gic 2 --fwd "$PORT:8883"
     if wait_log "$log" "TLS 1.3 listener on port 8883"; then
-        python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" $PORT >"$log.client" 2>&1 || status=$?
+        python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" "$PORT" >"$log.client" 2>&1 || status=$?
     else
         status=124
     fi
@@ -2339,14 +2337,14 @@ CONFIG_OK=("config: fingerprint [0-9a-f]{64} \([0-9]+ bytes, unsigned\), env=dev
 #
 # x86_scenario <name> <machine> <firmware> <cpu|-> <cmdline> <patterns...>
 x86_scenario() {
-    local name=$1 machine=$2 fw=$3 cpu=$4 cmdline=$5
+    local name=$1 machine=$2 fw=$3 cpumodel=$4 cmdline=$5
     shift 5
     local iso="$OUT/$name.iso"
     "$ROOT/scripts/mkiso.sh" --arch x86_64 --kernel "$KERNEL" --out "$iso" --cmdline "$cmdline" >/dev/null
     for accel in $ACCELS; do
         local log="$OUT/$name-$accel.log" status=0
         local cpuargs=()
-        [[ $cpu != - ]] && cpuargs=(--cpu "$cpu")
+        [[ $cpumodel != - ]] && cpuargs=(--cpu "$cpumodel")
         boot "$log" --arch x86_64 --iso "$iso" --accel "$accel" --machine "$machine" --firmware "$fw" \
             ${cpuargs[@]+"${cpuargs[@]}"} --smp 2 --headless --no-net || status=$?
         check "$name [$accel]" "$log" "$status" "$@"
@@ -2849,7 +2847,7 @@ universal_install_rules() {
         [[ -z "${SMOKE_INTEGRITY:-}" || $name == "$SMOKE_INTEGRITY" ]] || continue
         target="$OUT/install-rules-target-$name.img"
         # shellcheck disable=SC2054 # QEMU option syntax
-        local drive=(-- -drive "if=none,id=t0,file=$target,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile=)
+        local drive=(-- -drive "if=none,id=t0,file=$target,format=raw,cache=none" -device "virtio-blk-pci,drive=t0,romfile=")
         # 1. A word added to the first entry: refused by the loader (BIOS: the message is on the screen only).
         rm -f "$target"; truncate -s 64m "$target"; before=$(shasum -a 256 "$target" | cut -d' ' -f1)
         log="$OUT/install-rules-word-$name.log"; status=0
@@ -2902,7 +2900,7 @@ cross_arch() {
     # Phase 1 on <from>: the broker with the dev certificates, forwarded to $PORT.
     start_vm_kind "$from" "$faccel" "$l1" "$data"
     if wait_log "$l1" "TLS 1.3 listener on port 8883"; then
-        python3 -I "$ROOT/scripts/mqtt-persist.py" $PORT --tls "$ROOT/deploy/dev" --phase 1 >"$l1.client" 2>&1 || status=$?
+        python3 -I "$ROOT/scripts/mqtt-persist.py" "$PORT" --tls "$ROOT/deploy/dev" --phase 1 >"$l1.client" 2>&1 || status=$?
     else
         status=124
     fi
@@ -2913,7 +2911,7 @@ cross_arch() {
     status=0
     start_vm_kind "$to" "$taccel" "$l2" "$data"
     if wait_log "$l2" "TLS 1.3 listener on port 8883"; then
-        python3 -I "$ROOT/scripts/mqtt-persist.py" $PORT --tls "$ROOT/deploy/dev" --phase 2 >"$l2.client" 2>&1 || status=$?
+        python3 -I "$ROOT/scripts/mqtt-persist.py" "$PORT" --tls "$ROOT/deploy/dev" --phase 2 >"$l2.client" 2>&1 || status=$?
     else
         status=124
     fi
@@ -2929,9 +2927,9 @@ cross_arch() {
 start_vm_kind() {
     local kind=$1 accel=$2 log=$3 disk=$4
     case $kind in
-        aa64) start_vm "$log" --disk "$disk" --accel "$accel" --fwd $PORT:8883 ;;
-        x86-uefi) start_vm "$log" --arch x86_64 --disk "$disk" --accel tcg --fwd $PORT:8883 ;;
-        x86-bios) start_vm "$log" --arch x86_64 --machine pc --firmware bios --disk "$disk" --accel tcg --fwd $PORT:8883 ;;
+        aa64) start_vm "$log" --disk "$disk" --accel "$accel" --fwd "$PORT:8883" ;;
+        x86-uefi) start_vm "$log" --arch x86_64 --disk "$disk" --accel tcg --fwd "$PORT:8883" ;;
+        x86-bios) start_vm "$log" --arch x86_64 --machine pc --firmware bios --disk "$disk" --accel tcg --fwd "$PORT:8883" ;;
     esac
 }
 
@@ -2943,9 +2941,9 @@ start_vm_iso() {
     local kind=$1 accel=$2 log=$3 iso=$4
     shift 4
     case $kind in
-        aa64) start_vm "$log" --iso "$iso" --accel "$accel" --fwd $PORT:8883 "$@" ;;
-        x86-uefi) start_vm "$log" --arch x86_64 --iso "$iso" --accel "$accel" --smp 2 --fwd $PORT:8883 "$@" ;;
-        x86-bios) start_vm "$log" --arch x86_64 --machine pc --firmware bios --iso "$iso" --accel "$accel" --smp 2 --fwd $PORT:8883 "$@" ;;
+        aa64) start_vm "$log" --iso "$iso" --accel "$accel" --fwd "$PORT:8883" "$@" ;;
+        x86-uefi) start_vm "$log" --arch x86_64 --iso "$iso" --accel "$accel" --smp 2 --fwd "$PORT:8883" "$@" ;;
+        x86-bios) start_vm "$log" --arch x86_64 --machine pc --firmware bios --iso "$iso" --accel "$accel" --smp 2 --fwd "$PORT:8883" "$@" ;;
     esac
 }
 
@@ -2963,7 +2961,7 @@ live_serve() {
     local l1="$OUT/$name-$kind-$accel-1.log" l2="$OUT/$name-$kind-$accel-2.log" status=0
     start_vm_iso "$kind" "$accel" "$l1" "$iso"
     if wait_log "$l1" "TLS 1.3 listener on port 8883"; then
-        python3 -I "$ROOT/scripts/mqtt-persist.py" $PORT --tls "$ROOT/deploy/dev" --phase live1 \
+        python3 -I "$ROOT/scripts/mqtt-persist.py" "$PORT" --tls "$ROOT/deploy/dev" --phase live1 \
             >"$l1.client" 2>&1 || status=$?
     else
         status=124
@@ -2975,7 +2973,7 @@ live_serve() {
     status=0
     start_vm_iso "$kind" "$accel" "$l2" "$iso"
     if wait_log "$l2" "TLS 1.3 listener on port 8883"; then
-        python3 -I "$ROOT/scripts/mqtt-persist.py" $PORT --tls "$ROOT/deploy/dev" --phase gone \
+        python3 -I "$ROOT/scripts/mqtt-persist.py" "$PORT" --tls "$ROOT/deploy/dev" --phase gone \
             >"$l2.client" 2>&1 || status=$?
     else
         status=124
@@ -2995,7 +2993,7 @@ live_leaves_disks_alone() {
     rm -f "$t"
     truncate -s 64m "$t"
     z=$(shasum -a 256 "$t" | cut -d' ' -f1)
-    local extra=(-- -drive "if=none,id=t0,file=$t,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile=)
+    local extra=(-- -drive "if=none,id=t0,file=$t,format=raw,cache=none" -device "virtio-blk-pci,drive=t0,romfile=")
     case $kind in
         aa64) boot "$log" --iso "$iso" --accel "$accel" --headless --no-net "${extra[@]}" || status=$? ;;
         x86-uefi) boot "$log" --arch x86_64 --iso "$iso" --accel "$accel" --smp 2 --headless --no-net "${extra[@]}" || status=$? ;;
@@ -3050,6 +3048,7 @@ diag_run() {
 diag_check() {
     local name=$1 log=$2 status=$3 state=$4 write=$5
     shift 5
+    # shellcheck disable=SC2094 # the checker reads the log first, then the shell appends its report
     python3 -I "$ROOT/scripts/diag-check.py" "$log" --disk-state "$state" --write "$write" >>"$log" 2>&1 || true
     check "$name" "$log" "$status" "${DIAG_PATTERNS[@]}" "diag-json ok: disk $state, seq_write $write" "$@"
 }
@@ -3096,7 +3095,7 @@ universal_diag() {
         diag_run "$kind" "$accel" "$log" "$iso_yes" "$b" || status=$?
         after=$(shasum -a 256 "$b" | cut -d' ' -f1)
         [[ $before == "$after" ]] || echo "THE TEST AREA WAS NOT ZEROED" >>"$log"
-        diag_check "universal-diag: confirmed write test on the blank disk [$name]" "$log" "$status" blank done \
+        diag_check "universal-diag: confirmed write test on the blank disk [$name]" "$log" "$status" blank "done" \
             "sequential write [0-9]+ MiB/s" "NOT:THE TEST AREA WAS NOT ZEROED"
     done
 }
@@ -3240,7 +3239,7 @@ hardening_suite() {
             "NOT:was NOT detected" "NOT:URMQTT READY"
         # The whole broker under tag checking: TLS handshakes, MQTT, the
         # database. A false positive anywhere would be a tag check fault.
-        ACCELS=tcg URMQTT_MTE=1 SERVICE_PORT=8883 service mte-mqtt-tls "serve" $PORT "TLS 1.3 listener on port 8883" \
+        ACCELS=tcg URMQTT_MTE=1 SERVICE_PORT=8883 service mte-mqtt-tls "serve" "$PORT" "TLS 1.3 listener on port 8883" \
             python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" -- \
             "$MTE_ON" "client: pubsub-wildcard ok" "client: retained ok" "client: qos1-after-reconnect ok" \
             "client: tls-wrong-ca-rejected ok" "tls: device-001 authenticated \(TLS13_" \
@@ -3446,6 +3445,7 @@ if [[ $ARCH == x86_64 ]]; then
     # The smallest CPU that is still x86-64-v2: no AES-NI, no AVX.
     x86_scenario x86-boot-v2-minimal q35 uefi "qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt,+cx16" "smoke" \
         "${X86_BOOT[@]}" "NOT:cpu features: .*(aes|avx2)" "$NO_FAULT"
+    # shellcheck disable=SC2016 # literal backticks in the expected text
     x86_scenario x86-baseline-refuse q35 uefi qemu64 "smoke" \
         "Missing: ssse3 sse4.1 sse4.2 popcnt" \
         'VM CPU type too old: use `host`, `x86-64-v2-AES` or newer in Proxmox/QEMU' \
@@ -3650,7 +3650,7 @@ if command -v mosquitto_pub >/dev/null && command -v mosquitto_sub >/dev/null; t
         "broker: 1 retained message\(s\) not retained on core [0-9]+ \(1 over an identity's limit of 32" "NOT:FAILED" "$NO_FAULT"
     # M10: the same scenarios over TLS 1.3 with mutual TLS, plus the four
     # handshakes/CONNECTs that must be refused.
-    SERVICE_PORT=8883 service mqtt-tls "serve" $PORT "TLS 1.3 listener on port 8883" \
+    SERVICE_PORT=8883 service mqtt-tls "serve" "$PORT" "TLS 1.3 listener on port 8883" \
         python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" -- \
         "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
         "client: qos1-after-reconnect ok" "client: acl-subscribe-denied ok" "client: retained-limit ok" \
@@ -3671,9 +3671,9 @@ sys_reboot() {
     for accel in $ACCELS; do
         local log="$OUT/sys-reboot-$accel.log" data="$OUT/sys-reboot-$accel.img" status=0 waited=0
         fresh_disk "$iso" "$data"
-        start_vm "$log" --disk "$data" --accel "$accel" --fwd $PORT:8883
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
         if wait_log "$log" "TLS 1.3 listener"; then
-            python3 -I "$ROOT/scripts/sys-scenarios.py" reboot "$ROOT/deploy/dev" $PORT >"$log.client" 2>&1 || status=1
+            python3 -I "$ROOT/scripts/sys-scenarios.py" reboot "$ROOT/deploy/dev" "$PORT" >"$log.client" 2>&1 || status=1
             until ! kill -0 "$VM_PID" 2>/dev/null; do
                 if (( waited >= 300 )); then
                     echo "client: the VM did not reset within 30 s" >>"$log.client"
@@ -3699,7 +3699,7 @@ sys_reboot() {
 # framebuffer) and an operator subscribed, no output handler may be reported
 # over budget in step `sys`.
 if command -v mosquitto_pub >/dev/null; then
-    SERVICE_PORT=8883 service sys-slow-log "serve test=slow-log:4000" $PORT "TLS 1.3 listener on port 8883" \
+    SERVICE_PORT=8883 service sys-slow-log "serve test=slow-log:4000" "$PORT" "TLS 1.3 listener on port 8883" \
         python3 -I "$ROOT/scripts/sys-scenarios.py" watch "$ROOT/deploy/dev" -- \
         "client: sys-watch ok" "NOT:\(step sys\)" "NOT:FAILED" "$NO_FAULT"
 fi
@@ -3727,7 +3727,7 @@ SERVICE_PORT=8883 service log-slow-flood "serve test=slow-log:4000 test=log-floo
 # set; devices and the backend service cannot reach any of it. Every command
 # is audit-logged on the serial console.
 if command -v mosquitto_pub >/dev/null && command -v mosquitto_sub >/dev/null; then
-    SERVICE_PORT=8883 service sys-operator "serve" $PORT "TLS 1.3 listener on port 8883" \
+    SERVICE_PORT=8883 service sys-operator "serve" "$PORT" "TLS 1.3 listener on port 8883" \
         python3 -I "$ROOT/scripts/sys-scenarios.py" "$ROOT/deploy/dev" -- \
         "client: sys-broker-topics ok" "client: sys-refresh ok" "client: sys-cpu-busy-per-core ok" \
         "client: sys-retained-flag ok" "client: sys-query-info ok" "client: console-replays-the-log ok" \
@@ -3748,7 +3748,7 @@ fi
 # H2: session tickets under random per-boot keys. With a 20 s rotation, a
 # ticket issued late in the first interval resumes after the rotation (the
 # previous key), and a ticket from before a reboot does not.
-SERVICE_PORT=8883 service ticket-rotation "serve test=ticket-rotate:20" $PORT "TLS 1.3 listener on port 8883" \
+SERVICE_PORT=8883 service ticket-rotation "serve test=ticket-rotate:20" "$PORT" "TLS 1.3 listener on port 8883" \
     python3 -I "$ROOT/scripts/ticket-scenarios.py" "$ROOT/deploy/dev" rotation 20 -- \
     "tls: session tickets under random per-boot keys, rotated every 20 s of uptime \(ticket lifetime 20 s\)" \
     "client: ticket-resume ok" "client: ticket-previous-key ok" \
@@ -3767,7 +3767,7 @@ for c in "$(brew --prefix openssl@3 2>/dev/null)/bin/openssl" openssl; do
     fi
 done
 if [[ -n "$CONTROL_TOOL" ]] && command -v mosquitto_pub >/dev/null && [[ -n "${OPENSSL:-}" ]]; then
-    SERVICE_PORT=8883 service control "serve" $PORT "TLS 1.3 listener on port 8883" \
+    SERVICE_PORT=8883 service control "serve" "$PORT" "TLS 1.3 listener on port 8883" \
         python3 -I "$ROOT/scripts/control-scenarios.py" "$ROOT/deploy/dev" "$CONTROL_TOOL" -- \
         "client: control-revoke-live ok" "client: control-unrevoke ok" "client: control-forged ok" \
         "client: control-replay ok" "client: control-expired ok" "client: control-from-device ok" \
@@ -3781,7 +3781,7 @@ if [[ -n "$CONTROL_TOOL" ]] && command -v mosquitto_pub >/dev/null && [[ -n "${O
         "publish\(es\) to \\\$urmqtt/ by identities without control rights dropped" \
         "tls: device-006 authenticated \(TLS13_[A-Z0-9_]+, bootstrap role\)" \
         "tls: device-005 authenticated" "NOT:FAILED" "$NO_FAULT"
-    SERVICE_PORT=8883 service registry-allowlist "serve registry=allowlist" $PORT "TLS 1.3 listener on port 8883" \
+    SERVICE_PORT=8883 service registry-allowlist "serve registry=allowlist" "$PORT" "TLS 1.3 listener on port 8883" \
         python3 -I "$ROOT/scripts/control-scenarios.py" "$ROOT/deploy/dev" "$CONTROL_TOOL" --allowlist -- \
         "client: registry-allowlist ok" "registry allowlist, 0 allowlisted identities" \
         "registry: device-001 is not on the allowlist, refused" \
@@ -3893,7 +3893,7 @@ sys.exit(0 if found else 1)
 PY
 }
 BOOT_SCENARIO=boot-acpi
-[[ $ARCH == x86_64 ]] && BOOT_SCENARIO=x86-disk-q35
+if [[ $ARCH == x86_64 ]]; then BOOT_SCENARIO="x86-disk-q35"; fi
 for accel in $ACCELS; do
     if pcap_has_garp "$OUT/$BOOT_SCENARIO-$accel.log.pcap"; then
         echo "  ✓ gratuitous ARP from 52:54:00:12:34:56 found in pcap [$accel]"

@@ -50,7 +50,7 @@ for t in "${TARGETS[@]}"; do
     bin="$(find target fuzz/target -type f -path "*/coverage/*/release/$t" 2>/dev/null | head -n1)"
     [[ -n "$bin" ]] || { echo "$t: instrumented binary not found" >&2; continue; }
     prof="fuzz/coverage/$t/coverage.profdata"
-    # shellcheck disable=SC2086
+    # shellcheck disable=SC2046,SC2086 # src_of prints several -sources/file arguments
     "$LLVM_BIN/llvm-cov" export -summary-only -instr-profile="$prof" "$bin" $(src_of "$t") >"$COV_DIR/$t.json"
     python3 - "$t" "$COV_DIR/$t.json" <<'PY'
 import json, sys

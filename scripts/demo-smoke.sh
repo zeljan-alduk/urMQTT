@@ -30,10 +30,11 @@ fi
 WORK=$(mktemp -d)
 LOG=$WORK/serial.log
 QPID=""
+# shellcheck disable=SC2329 # runs from the EXIT trap
 cleanup() {
     [[ -n $QPID ]] && kill "$QPID" 2>/dev/null || true
     pkill -f "demo-smoke-$$" 2>/dev/null || true
-    ((KEEP)) && echo "kept: $WORK" || rm -rf "$WORK"
+    if ((KEEP)); then echo "kept: $WORK"; else rm -rf "$WORK"; fi
 }
 trap cleanup EXIT
 
@@ -55,7 +56,7 @@ for _ in $(seq 1 120); do
 done
 grep -aq 'URMQTT READY' "$LOG" || { echo "the broker did not become ready"; tail -30 "$LOG"; exit 1; }
 for want in "EPHEMERAL: data is lost on reboot" "TLS 1.3 listener on port 8883" "PLAINTEXT listener on port 1883"; do
-    grep -aq "$want" "$LOG" && echo "  boot: $want" || { echo "  MISSING in the boot log: $want"; exit 1; }
+    if grep -aq "$want" "$LOG"; then echo "  boot: $want"; else echo "  MISSING in the boot log: $want"; exit 1; fi
 done
 status=0
 python3 -I scripts/demo-scenarios.py "$TLS_PORT" "$PLAIN_PORT" deploy/demo/pki | tee "$WORK/scenarios.log" || status=$?
