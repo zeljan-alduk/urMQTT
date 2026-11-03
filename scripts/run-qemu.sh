@@ -30,7 +30,9 @@
 # q35), --firmware uefi|bios (default uefi; bios = SeaBIOS), --cpu MODEL
 # (default max under TCG, host under KVM). Accelerators: tcg (default off
 # Linux x86_64 with /dev/kvm) or kvm. The isa-debug-exit device is always
-# attached (dev images use it as a fallback power-off). --gic and --acpi
+# attached (dev images use it as a fallback power-off). --secure-vars FILE (H8) boots the
+# Secure Boot build of OVMF (SMM, q35) with FILE as its variable store, which must have the
+# keys enrolled (scripts/sign-loaders.sh ovmf-vars); FILE is never written back. --gic and --acpi
 # are aarch64-only; --bus, --data, --fwd, --pcap and --dgram work as on
 # aarch64.
 #
@@ -44,12 +46,14 @@ DISKFMT=raw DRIVEOPTS=""
 ISO="" DISK="" BUS=blk CPU_MODEL="" GIC=3 RNG=1 ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
 FWD="1883:1883,8883:8883"
 DGRAM=""
+SECURE_VARS=""
 EXTRA=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --arch) ARCH=$2; shift 2 ;;
         --machine) MACHINE=$2; shift 2 ;;
         --firmware) FIRMWARE=$2; shift 2 ;;
+        --secure-vars) SECURE_VARS=$2; shift 2 ;;
         --iso) ISO=$2; shift 2 ;;
         --disk) DISK=$2; shift 2 ;;
         --bus) BUS=$2; shift 2 ;;
@@ -92,9 +96,26 @@ if [[ $ARCH == x86_64 ]]; then
     fi
     case $ACCEL in kvm) CPU=host ;; tcg) CPU=max ;; *) echo "error: x86_64 needs --accel tcg|kvm" >&2; exit 2 ;; esac
     [[ -n "$CPU_MODEL" ]] && CPU=$CPU_MODEL
-    X86ARGS=(-machine "$MACHINE" -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
+    MACHINE_ARG=$MACHINE
+    if [[ -n "$SECURE_VARS" ]]; then
+        [[ $MACHINE == q35 && $FIRMWARE == uefi && -f "$SECURE_VARS" ]] \
+            || { echo "error: --secure-vars FILE needs --machine q35, --firmware uefi and an existing file" >&2; exit 2; }
+        MACHINE_ARG=q35,smm=on
+    fi
+    X86ARGS=(-machine "$MACHINE_ARG" -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
         -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04)
-    if [[ $FIRMWARE == uefi ]]; then
+    if [[ $FIRMWARE == uefi && -n "$SECURE_VARS" ]]; then
+        FW=""
+        for c in "${URMQTT_FIRMWARE_SECURE:-}" "$(brew --prefix qemu 2>/dev/null)/share/qemu/edk2-x86_64-secure-code.fd" \
+            /usr/share/qemu/edk2-x86_64-secure-code.fd /usr/share/OVMF/OVMF_CODE.secboot.fd \
+            /usr/share/OVMF/OVMF_CODE_4M.secboot.fd /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd; do
+            [[ -n "$c" && -f "$c" ]] && { FW=$c; break; }
+        done
+        [[ -n "$FW" ]] || { echo "error: no Secure Boot OVMF found; set URMQTT_FIRMWARE_SECURE" >&2; exit 1; }
+        X86ARGS+=(-global driver=cfi.pflash01,property=secure,value=on
+            -drive "if=pflash,format=raw,unit=0,readonly=on,file=$FW"
+            -drive "if=pflash,format=raw,unit=1,snapshot=on,file=$SECURE_VARS")
+    elif [[ $FIRMWARE == uefi ]]; then
         FW=""
         for c in "${URMQTT_FIRMWARE:-}" "$(brew --prefix qemu 2>/dev/null)/share/qemu/edk2-x86_64-code.fd" \
             /usr/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd; do

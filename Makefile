@@ -109,7 +109,7 @@ TEMPLATE_ISO := $(BUILD_DIR)/urmqtt-template-$(VERSION)-universal.iso
 universal: ## One ISO (and raw image) that boots on aarch64 UEFI, x86_64 UEFI and x86_64 BIOS
 	$(MAKE) --no-print-directory build ARCH=aarch64
 	$(MAKE) --no-print-directory build ARCH=x86_64
-	scripts/mkiso.sh --universal $(UNIVERSAL_KERNELS) --out $(UNIVERSAL_ISO) --disk-out $(UNIVERSAL_RAW)
+	scripts/mkiso.sh --universal $(UNIVERSAL_KERNELS) --out $(UNIVERSAL_ISO) --disk-out $(UNIVERSAL_RAW) $(MKISO_ARGS)
 	@ln -sf $(notdir $(UNIVERSAL_ISO)) $(BUILD_DIR)/urmqtt-$(ENV)-universal.iso
 
 .PHONY: template

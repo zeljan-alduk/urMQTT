@@ -101,7 +101,7 @@ service, E elevation of privilege.
 | **Data volume** (layout, telemetry, backups) | UUID and CRC on every structure; a damaged or foreign partition is refused, never formatted | torn writes survive by design (A/B superblock, fault-injection loops); **a malicious rewrite of sectors is only detected by the CRCs** | — | optional AES-256-XTS (ADR-240): protects a stolen volume, not a stolen ISO | a full or failing disk: bounded ring, scrubbing, backup and restore | parsers fuzzed (`disk_layout`, `disk_backup`, `disk_crypt`, `telemetry_recover`); XTS has no integrity (sector swap and rollback are possible with write access to the volume) |
 | **SQLite worker** (EL0 / ring 3) | — | checked system calls, bounds on every offset and length | — | own address space; no kernel symbol, no allocator | 30 s overrun and fault restart the worker; a restart storm makes storage unavailable | a compromised worker cannot touch kernel memory (`worker-contain`); **the kernel trusts its answers (an empty revocation list un-revokes certificates), there is no KPTI** |
 | **Kernel** (memory, interrupts, boot) | — | W^X, locked page tables (**no test writes one**), guard pages, canary, KASLR, allocator checks | fault and panic reports redacted | no secret in logs or reports (`fault-secrets`, `panic-secret`) | watchdog and stuck-core reset | PAC, BTI, MTE (TCG only), poison on free; **no forward-edge CFI; the HHDM base is fixed** |
-| **Boot chain** (UEFI, Limine, kernel) | pinned by hash in `limine.conf`; **loaders not signed, config not enrolled: H8 open** | a flipped byte in the configuration module is refused (`config-tampered-refused`); **a modified kernel is untested** | — | — | a refused boot is the failure mode | the installer entry erases a disk for whoever can use the boot menu (physical or console access, which already allows that) |
+| **Boot chain** (UEFI, Limine, kernel) | pinned by hash in `limine.conf`, which is enrolled into the loaders (ADR-250); **loaders not signed (H8)** | a flipped byte in the kernel, the configuration module or `limine.conf` is refused (`integrity-*`, `config-tampered-refused`) | — | — | a refused boot is the failure mode | the installer entry erases a disk for whoever can use the boot menu (physical or console access, which already allows that) |
 | **Time** (RTC, SNTP) | unauthenticated NTP: median of several servers, bounded steps; **NTS out of scope** | lower bound is the build time | — | — | a wrong date refuses handshakes (fail closed) | — |
 | **Observability** (syslog, statsd, console) | plain UDP to a collector on a private network (accepted) | — | rate-limited logs | no payloads, keys or certificates in any sink | per-CPU rings drop rather than block | — |
 | **Supply chain** (dependencies, build, release) | signed releases (minisign), SLSA provenance | reproducible builds (`make repro`), pinned toolchain and `Cargo.lock` | — | SBOM per release | — | 53 of 67 linked crate versions are cargo-vet exemptions, not audits (SUPPLY-CHAIN.md) |
@@ -404,7 +404,9 @@ writes the raw boot image onto the machine's disk.
 - **Mitigations:**
   - the menu editor is off;
   - the kernel and the image are pinned by blake2b in the menu file
-    (`hash_mismatch_panic`), H8 will add the config hash to the enrolled loader;
+    (`hash_mismatch_panic`), and the menu file itself is enrolled into the
+    loaders (H8, ADR-250), so a word cannot be added to an entry, nor an entry
+    to the menu, without the loader refusing to start;
   - the target, its size and a warning are on screen, followed by a 30 s
     countdown during which a power-off cancels; dev tests may shorten it,
     production cannot;
@@ -412,9 +414,26 @@ writes the raw boot image onto the machine's disk.
     that boots (host test `an_interrupted_install_never_boots_and_can_be_redone`,
     smoke `install-crash`);
   - the result is verified by reading it back.
-- **Production command line:** still ignored, except the exact word `install`
-  (ADR-052; test `production_honours_install_and_nothing_else`). Without the
-  installation module, `install` only prints a message and powers off.
+- **Production command line:** ignored, except three exact words: `install`
+  (ADR-052), `live` (ADR-054) and `diag` (ADR-063); tests
+  `production_honours_install_and_nothing_else`, `..._live_...`, `..._diag_...`.
+  (SECURITY-PLAN H8 said "exactly one word, `install`"; the later entries added
+  the other two, and only `install` writes to a disk.) Without the installation
+  module, `install` only prints a message and powers off, and writes nothing.
+- **Entry rules, tested (H8, ADR-253, `SMOKE_ONLY=install-rules`, on aarch64
+  UEFI, x86_64 UEFI and x86_64 BIOS, each with a blank disk whose bytes must
+  be unchanged afterwards):** a word added to an entry's command line is
+  refused by the loader; the same edit in an image without the enrolled hash
+  gives the kernel `install` and, with no module, "no installation image" and no
+  write; a changed installation image is refused by the loader before the kernel
+  runs.
+- **Entry rules, not enforced (accepted):**
+  - the kernel does not check the module's hash itself; the loader does, so the
+    rule depends on the loader that the firmware starts (without Secure Boot,
+    whoever can replace the loader on the boot medium controls this too);
+  - the installed disk's `limine.conf` has no `install` entry and its module has no
+    hash (ADR-217), so a person with write access to the ESP can add an entry with their
+    own image; the enrollment (ADR-250) is what stops the *configuration* edit there.
 - **Residual risk:** the installer erases the previous data partition. There
   is no "keep data" mode yet; an offline kernel update keeps data
   (`urmqtt-disk update-boot`).
@@ -688,6 +707,18 @@ at once against an 8 MiB admission limit.
   record keys exist only on the stack while a record is sealed or opened.
 - Observability goes to private collectors named in the build-time
   configuration. It is plain UDP and carries no payloads or secrets.
+- **Image secrecy (H8, ADR-252).** The image holds the server's private key and
+  the disk key, so the image is a secret. Building a production image outside CI
+  (the `CI` variable unset) prints a boxed warning to stderr, every time
+  (`scripts/mkiso.sh`; tested by `SMOKE_ONLY=secrecy`). The serial logs of an
+  encrypted-at-rest boot, of the wrong-key and no-key refusals, on the dev kernel
+  and on a release kernel with the production configuration, and the output and
+  build logs of `make repro`, are scanned for the key bytes in every form a log
+  could show them (`scripts/secret-scan.py`: raw, hex, base64, the EC scalar, PEM
+  lines), with the image itself as the control that proves the scan can see them.
+  What this does **not** cover: panics and fault reports on paths the scenarios do
+  not reach (the redaction policy of ADR-172 and its `-open` controls cover the
+  planted-secret case), and the image's own contents (it holds the keys by design).
 
 ### Encryption at rest (S7, ADR-240)
 
@@ -731,7 +762,7 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 
 | Risk | Why it remains | Mitigation available today |
 |---|---|---|
-| The image contains the server key. | No secure key storage in the VM. | Treat the ISO as a secret; rotate the key with a new image. |
+| The image contains the server key. | No secure key storage in the VM. TPM sealing was studied and not built (ADR-254). | Treat the ISO as a secret; rotate the key with a new image; a build outside CI says so loudly (ADR-252). |
 | Theft of the control signing key **and** a control service identity. | Both are needed; then arbitrary revocation (DoS) or, with `allow_unrevoke`, unrevocation. | Offline key in an HSM/KMS (`--sign-cmd`); `allow_unrevoke = false` (default); revocations that must survive anything also in the image. |
 | A restored old data-disk snapshot brings back old revocations and `seq`. | The disk is trusted not to be maliciously rolled back. | Image-listed revocations are re-applied at every boot; validity windows bound old messages. |
 | DHCP and ARP are unauthenticated. | IPv4 on a shared L2 segment has no defence against on-link spoofing. | Static addressing (`network.mode = "static"`) and a private network for the VM. |

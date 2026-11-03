@@ -366,6 +366,84 @@ and without a hypervisor timing leaf the boot stops (`no usable time base`).
 DSDT's `_S5` sleep type, and the reset register) and then QEMU's ports under a
 hypervisor. On real hardware this path has never run.
 
+## 5d. Secure Boot (H8, ADR-250, ADR-251)
+
+**Status: the signing path and the x86_64 OVMF test are done; nothing here has run on real
+hardware, on Proxmox or on aarch64 firmware.** The first release targets a KVM VPS, whose
+firmware and boot chain belong to the host; most VPS images boot with Secure Boot off. Use this
+section when you control the firmware (your own hypervisor, a test PC).
+
+**What it protects, and what it does not.** The firmware verifies the signature of the loader
+(`BOOTX64.EFI`, `BOOTAA64.EFI`). The loader then checks its enrolled hash of `limine.conf`, and the
+hashes of the kernel and of the configuration module that the file names (under Secure Boot Limine
+refuses any file without one). So firmware, signature, loader, configuration, kernel and
+configuration are one chain. It does **not** cover: the BIOS path (no signatures exist there),
+rollback to an older, correctly signed image (there is no version counter and no `dbx` entries
+are made), or a machine whose firmware lets whoever has physical access change the keys.
+
+**Two limits of this design, both tested and both fail closed:**
+
+1. **Sign after you configure.** The enrolled hash covers the module hash of your configuration,
+   so `urmqtt-config pack --iso` on a *signed* ISO changes a signed loader and breaks its
+   signature; the firmware then answers "Access Denied". Build the image with its configuration
+   and the signature in one step, with your own key:
+   `scripts/mkiso.sh --universal ... --config my/config.toml --sb-key db.key --sb-cert db.crt`
+   (or `make universal` with the same two options passed through `MKISO_ARGS`). The template ISO of a
+   release is **not** signed with a key you trust; to use Secure Boot you build the image yourself
+   from the release artifacts (`make universal`), or sign with your own key as above.
+2. **An installed disk does not boot under Secure Boot.** The installed disk's `limine.conf` names the
+   configuration module without a hash (ADR-217: a configuration written later must not trip the
+   loader), and Limine refuses a file with no hash when Secure Boot is active ("Secure Boot is active
+   and URI ... has no associated hash"). Booting the ISO (live mode) works. Running an installed
+   disk under Secure Boot needs a per-machine ESP (module pinned, loader re-enrolled and re-signed
+   by you): **not done**.
+
+**Keys.** `scripts/sign-loaders.sh gen-keys build/secureboot` makes a throwaway PK, KEK and db
+(RSA 2048) for tests; they protect nothing. A real key is generated offline, kept offline (an HSM or an
+air-gapped machine), and never enters this repository (`*.key`, `*.pem` and `build/` are ignored).
+`scripts/sign-loaders.sh sign KEY CERT IN OUT` signs one EFI binary with `sbsign` (`apt install
+sbsigntool`) or `osslsigncode` (`brew install osslsigncode`); `verify CERT FILE` checks it. The signing
+time is `SOURCE_DATE_EPOCH`, so the same key and loader give the same bytes (the smoke scenario
+compares two builds).
+
+**QEMU with OVMF (tested).** Needs OVMF's Secure Boot build (QEMU ships `edk2-x86_64-secure-code.fd`;
+Debian and Ubuntu `OVMF_CODE.secboot.fd`) and `virt-fw-vars` (`pip install virt-firmware`):
+
+```
+scripts/sign-loaders.sh gen-keys build/secureboot
+scripts/mkiso.sh --universal ... --out build/signed.iso --sb-key build/secureboot/db.key --sb-cert build/secureboot/db.crt
+cp "$(brew --prefix qemu)/share/qemu/edk2-i386-vars.fd" build/vars-empty.fd      # or OVMF_VARS.fd
+scripts/sign-loaders.sh ovmf-vars build/secureboot build/vars-empty.fd build/vars-sb.fd
+scripts/run-qemu.sh --arch x86_64 --iso build/signed.iso --secure-vars build/vars-sb.fd
+```
+
+`ovmf-vars` enrolls PK, KEK and db in the variable store and turns Secure Boot on (the machine is
+`q35,smm=on` with a secure pflash; `--secure-vars` does that). An unsigned or foreign-signed image
+shows `BdsDxe: failed to load ... Access Denied`. CI runs `SMOKE_ONLY=secureboot scripts/smoke.sh
+--arch universal` (with `SMOKE_REQUIRE_SB=1`, so that missing tools fail instead of skipping).
+
+**Proxmox (not tested).** Create the VM with OVMF and an EFI disk *without* the pre-enrolled
+Microsoft keys, then put your keys into its variable store:
+
+```
+qm set VMID --bios ovmf --machine q35 --efidisk0 local-lvm:1,efitype=4m,pre-enrolled-keys=0
+# stop the VM; the EFI disk is a raw 528 KiB volume with OVMF's variable store. Make a store with
+# the keys (scripts/sign-loaders.sh ovmf-vars, starting from /usr/share/pve-edk2-firmware/OVMF_VARS_4M.fd)
+# and write it to the volume, e.g.:  dd if=build/vars-sb.fd of=/dev/pve/vm-VMID-disk-0 bs=1 conv=notrunc
+```
+
+Alternatively, boot the VM once into the firmware setup (Esc at start), *Device Manager, Secure Boot
+Configuration*, switch to *Custom Mode* and enroll `db.der` from a small FAT image attached to the VM.
+The ISO then boots from the virtual CD.
+
+**A physical PC (not tested; needs hardware).** Put the machine in *Setup Mode* (firmware setup,
+Secure Boot, "Erase all keys" / "Custom mode"), copy `db.der` (and, to enroll a PK, `PK.der` and
+`KEK.der`) to a FAT USB stick, enroll `db.der` as an authorized signature through the firmware menu (or
+with `efi-updatevar` / `sbctl enroll-keys` from a Linux), turn Secure Boot on, and boot the ISO. If the
+board offers only the Microsoft keys, the alternative is MOK through `shim`, which this project does
+not ship: that choice is open (ADR-251). The Intel test PC of SECURITY-PLAN H8 was not available when
+this was written.
+
 ## 5c. Load testing a server from one address: the bench profile (PERF, ADR-082)
 
 The production limits protect the server from one slow or abusive source:

@@ -66,6 +66,26 @@ function chooseBootEntry(bytes, entry, skipCountdown) {
   return changed;
 }
 
+/**
+ * H8 (ADR-250): the loaders of a release ISO carry the blake2b of limine.conf and refuse a config that differs by a
+ * byte, and chooseBootEntry changes it. This copy is the emulator's alone (the download is not touched), so the
+ * loaders in it are un-enrolled the way `limine enroll-config --reset` does it: the 128 characters after the
+ * signature become zeros. Returns how many loader copies were reset.
+ */
+function resetEnrolledConfigHash(bytes) {
+  const sig = '++CONFIG_B2SUM_SIGNATURE++';
+  let n = 0;
+  for (let i = bytes.indexOf(0x2b); i >= 0 && i < bytes.length - sig.length - 128; i = bytes.indexOf(0x2b, i + 1)) {
+    let ok = true;
+    for (let k = 0; k < sig.length && ok; k++) ok = bytes[i + k] === sig.charCodeAt(k);
+    if (!ok) continue;
+    bytes.fill(48, i + sig.length, i + sig.length + 128);
+    n++;
+    i += sig.length + 127;
+  }
+  return n;
+}
+
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g; // eslint-disable-line no-control-regex
 
 function openEmulatorDialog() {
@@ -157,6 +177,7 @@ function openEmulatorDialog() {
       const iso = new Uint8Array(await r.blob.arrayBuffer());
       // The menu: the entry and the countdown are chosen in this copy only (the file to download is not touched).
       chooseBootEntry(iso, entryDiag.checked ? 3 : 1, skip.checked || entryDiag.checked);
+      resetEnrolledConfigHash(iso);
       vm = await mod.bootIso({
         iso, transferIso: true, canvas, onSerial, onStatus, signal: abort.signal,
         memory: mem.ram, tbSizeMiB: 128,

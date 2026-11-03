@@ -1037,6 +1037,107 @@ build_disk_tool() {
     DISK_TOOL="$ROOT/target/release/urmqtt-disk"
 }
 
+# H8, image secrecy (ADR-252): the keys that are in the image never reach a log.
+#  1. an image with a production configuration made outside CI says so, loudly, on stderr (and
+#     does not when CI is set, nor for a dev image, nor for the key-less template);
+#  2. the serial logs of an encrypted-at-rest boot, the refusals (wrong disk key, no key) and
+#     the fatal paths, on the dev kernel (the chattiest) and, when SMOKE_RELEASE_KERNEL is set,
+#     on a release kernel with the production configuration, are scanned for the bytes of the
+#     server's private key and of the disk key in every form scripts/secret-scan.py knows
+#     (raw, hex, base64, the EC scalar, the PEM lines). The scan's control is the image itself,
+#     which holds both keys: a scan that cannot find them there fails.
+# (The repro comparison output is scanned by scripts/repro.sh, the same way.)
+secrecy() {
+    [[ -z ${SMOKE_SCENARIOS:-} || secrecy =~ $SMOKE_SCENARIOS ]] || return 0
+    local dir="$OUT/secrecy" tool="$ROOT/target/debug/urmqtt-config"
+    rm -rf "$dir"
+    mkdir -p "$dir/root"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool)
+    cp "$ROOT"/deploy/dev/* "$dir/root/" 2>/dev/null || true
+    python3 -I - "$dir" <<'PY'
+import os, sys
+d = sys.argv[1]
+for n in ("k1", "k2"):
+    open(f"{d}/{n}.hex", "w").write(os.urandom(64).hex() + "\n")
+PY
+    local variant
+    for variant in dev rel; do
+        local toml="$ROOT/deploy/dev/config.toml" env=dev kernel=$KERNEL
+        if [[ $variant == rel ]]; then
+            if [[ -z ${SMOKE_RELEASE_KERNEL:-} || ! -f ${SMOKE_RELEASE_KERNEL:-} ]]; then
+                echo "  - secrecy on a release kernel skipped (SMOKE_RELEASE_KERNEL=<a release kernel ELF of this architecture>)"
+                continue
+            fi
+            toml="$ROOT/deploy/prod/config.toml" env=prod kernel=$SMOKE_RELEASE_KERNEL
+        fi
+        local k
+        for k in 1 2; do
+            cp "$dir/k$k.hex" "$dir/root/disk.key"
+            sed -e 's/^\[storage\]/[storage]\nencryption = "aes-256-xts"\ndisk_key = "disk.key"/' "$toml" >"$dir/$variant-$k.toml"
+            "$tool" pack "$dir/$variant-$k.toml" --env "$env" --root "$dir/root" --out "$dir/$variant-enc$k.blob" >/dev/null ||
+                { echo "  ✗ secrecy: packing failed"; FAILED=$((FAILED + 1)); return 0; }
+        done
+        "$tool" pack "$toml" --env "$env" --root "$dir/root" --out "$dir/$variant-plain.blob" >/dev/null
+        # 1. The warning (the image is built with the module's own env, not URMQTT_ENV).
+        local warn="$dir/$variant-warn.txt" st=0
+        CI='' "$ROOT/scripts/mkiso.sh" --kernel "$kernel" --out "$dir/$variant-w.iso" --cmdline smoke \
+            --config "$dir/$variant-enc1.blob" >/dev/null 2>"$warn" || st=$?
+        if [[ $variant == rel ]]; then
+            check "secrecy: a production image built outside CI warns loudly" "$warn" "$st" \
+                "WARNING: a 'prod' image is being built OUTSIDE CI" "server's TLS private key" "disk key"
+            st=0
+            CI=true "$ROOT/scripts/mkiso.sh" --kernel "$kernel" --out "$dir/$variant-w2.iso" --cmdline smoke \
+                --config "$dir/$variant-enc1.blob" >/dev/null 2>"$warn.ci" || st=$?
+            check "secrecy: no warning in CI" "$warn.ci" "$st" "NOT:WARNING" "NOT:OUTSIDE CI"
+        else
+            check "secrecy: a dev image does not warn" "$warn" "$st" "NOT:WARNING" "NOT:OUTSIDE CI"
+        fi
+        # 2. The logs.
+        local name
+        for name in enc1-fill:enc1:test=db-backup enc1-plain:enc1: enc2:enc2: plain:plain:; do
+            local img=${name%%:*} rest=${name#*:}
+            local blob=${rest%%:*} test=${rest#*:}
+            MKIMG_EXTRA=(--config "$dir/$variant-$blob.blob")
+            local saved=$KERNEL
+            KERNEL=$kernel
+            CI=true mkimg "$dir/$variant-$img.raw" "smoke${test:+ $test}"
+            KERNEL=$saved
+            MKIMG_EXTRA=()
+        done
+        local accel=${ACCELS%% *} disk="$dir/$variant.img" status=0 l logs=()
+        fresh_disk "$dir/$variant-enc1-fill.raw" "$disk"
+        l="$dir/$variant-1.log"
+        logs+=("$l")
+        if [[ $variant == rel ]]; then
+            set_esp "$disk" "$dir/$variant-enc1-fill.raw"
+            boot_until "$l" "^URMQTT READY$" --disk "$disk" --accel "$accel" --fwd none --mem 2G || status=$?
+        else
+            boot "$l" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        fi
+        check "secrecy[$variant]: encrypted first boot" "$l" "$status" "storage: encryption aes-256-xts" "^URMQTT READY$" "NOT:refusing to serve"
+        status=0
+        set_esp "$disk" "$dir/$variant-enc2.raw"
+        l="$dir/$variant-2.log"
+        logs+=("$l")
+        boot_until "$l" "refusing to serve" --disk "$disk" --accel "$accel" --fwd none --mem 2G || status=$?
+        check "secrecy[$variant]: wrong disk key refused" "$l" "$status" \
+            "storage.disk_key does not match the data partition's key check" "NOT:URMQTT READY"
+        status=0
+        set_esp "$disk" "$dir/$variant-plain.raw"
+        l="$dir/$variant-3.log"
+        logs+=("$l")
+        boot_until "$l" "refusing to serve" --disk "$disk" --accel "$accel" --fwd none --mem 2G || status=$?
+        check "secrecy[$variant]: no disk key refused" "$l" "$status" "NOT:URMQTT READY"
+        local scan="$dir/$variant-scan.txt" sst=0
+        cp "$dir/root/server.key" "$dir/server.key"
+        python3 -I "$ROOT/scripts/secret-scan.py" --server-key "$dir/server.key" --disk-key "$dir/k1.hex" \
+            --found-in "$dir/$variant-enc1-fill.raw" "${logs[@]}" >"$scan" 2>&1 || sst=$?
+        python3 -I "$ROOT/scripts/secret-scan.py" --disk-key "$dir/k2.hex" --found-in "$dir/$variant-enc2.raw" "${logs[@]}" >>"$scan" 2>&1 || sst=$?
+        check "secrecy[$variant]: no server-key or disk-key bytes in the serial logs" "$scan" "$sst" \
+            "control .*the scan finds [0-9]+ needle" "NOT:LEAK" "NOT:blind"
+    done
+}
+
 # S7 end to end (ADR-240): encryption at rest. A dev configuration with
 # storage.encryption = "aes-256-xts" and a key file:
 #   1. a blank disk is formatted encrypted, the self-test (database, backup)
@@ -2496,6 +2597,297 @@ universal_install() {
     done
 }
 
+# H8 (ADR-250, ADR-251): boot integrity. A modified kernel, configuration module or limine.conf
+# in a built image is refused by the loader itself, on each of the three machines the universal
+# image boots (aarch64 UEFI, x86_64 UEFI, x86_64 BIOS). The refusal is read from Limine's own
+# message: the test images are built with URMQTT_LIMINE_SERIAL=1 (Limine's messages on the
+# serial port; never set for a release image). Every refusal has a control that boots: the same
+# image with the kernel of the OTHER architecture changed (that machine does not read it), and,
+# for the configuration, the same edit in an image built with --no-enroll.
+#
+# integrity_refused <label> <kind> <accel> <iso|disk> <file> <wait-for> <patterns...>
+integrity_refused() {
+    local label=$1 kind=$2 accel=$3 how=$4 file=$5 pat=$6
+    shift 6
+    local log="$OUT/integrity-$label.log" status=0
+    if [[ $pat == - ]]; then
+        # The BIOS stage reads limine.conf before it knows to use the serial port, so a refused
+        # configuration is on the screen only: the machine must simply not boot in the time the
+        # control needs (SMOKE_REFUSE_WAIT, default 45 s), and the controls show it would.
+        # shellcheck disable=SC2046
+        TIMEOUT=${SMOKE_REFUSE_WAIT:-45} boot_until "$log" 'URMQTT BOOT' $(u_args "$kind" "$accel" "$how" "$file") --no-net || status=$?
+        [[ $status -eq 124 ]] && status=0 || status=1
+        check "integrity: $label refused (does not boot; message on screen only)" "$log" "$status" "NOT:URMQTT BOOT" "NOT:URMQTT READY" "$@"
+        return 0
+    fi
+    # shellcheck disable=SC2046 # u_args prints a word list
+    boot_until "$log" "$pat" $(u_args "$kind" "$accel" "$how" "$file") --no-net || status=$?
+    check "integrity: $label refused" "$log" "$status" "$pat" "NOT:URMQTT BOOT" "NOT:URMQTT READY" \
+        "NOT:bootloader=Limine" "$@"
+}
+
+# integrity_boots <label> <kind> <accel> <iso|disk> <file>: the control, it boots.
+integrity_boots() {
+    local label=$1 kind=$2 accel=$3 how=$4 file=$5
+    local log="$OUT/integrity-$label.log" status=0
+    # A raw image is booted from a copy on a larger disk (the data partition is created at the first boot).
+    if [[ $how == disk ]]; then
+        fresh_disk "$file" "$OUT/integrity-boot-$kind.img"
+        file="$OUT/integrity-boot-$kind.img"
+    fi
+    u_run "$kind" "$accel" "$log" "$how" "$file" || status=$?
+    check "integrity: $label boots" "$log" "$status" 'URMQTT BOOT [^ ]+ (arch=x86_64 )?cpu=[0-9]+ mem=[0-9]+$' \
+        "bootloader=Limine" "^URMQTT READY$" "NOT:CHECKSUM MISMATCH" "NOT:does not match"
+}
+
+# shellcheck disable=SC2016 # the patterns hold literal backticks
+universal_integrity() {
+    local base="$OUT/integrity-base.iso" noenr="$OUT/integrity-noenroll.iso" cfg="$OUT/integrity-urmqtt.cfg"
+    local tamper="$ROOT/scripts/tamper.py"
+    URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$base" "smoke"
+    URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$noenr" "smoke" --no-enroll
+    # The ISO's configuration module, as a file, to find its copies in the image.
+    rm -f "$cfg"
+    xorriso -osirrox on -indev "$base" -extract /boot/urmqtt.cfg "$cfg" >/dev/null 2>&1 || true
+    if [[ ! -s "$cfg" ]]; then
+        echo "  ✗ integrity: cannot extract /boot/urmqtt.cfg from the ISO"
+        FAILED=$((FAILED + 1))
+        return 0
+    fi
+    local t_a64="$OUT/integrity-tampered-aarch64.iso" t_x86="$OUT/integrity-tampered-x86.iso"
+    local t_cfg="$OUT/integrity-tampered-module.iso" t_conf="$OUT/integrity-tampered-conf.iso"
+    local t_conf_ne="$OUT/integrity-tampered-conf-noenroll.iso"
+    local d_a64="$OUT/integrity-tampered-aarch64.img" d_x86="$OUT/integrity-tampered-x86.img" d_conf="$OUT/integrity-tampered-conf.img"
+    python3 -I "$tamper" "$base" --file "$KERNEL_A64" --out "$t_a64" >/dev/null
+    python3 -I "$tamper" "$base" --file "$KERNEL_X86" --out "$t_x86" >/dev/null
+    python3 -I "$tamper" "$base" --file "$cfg" --offset 5000 --out "$t_cfg" >/dev/null
+    # An attacker re-enabling the menu editor: a same-length edit of the one line that disables it.
+    python3 -I "$tamper" "$base" --replace "editor_enabled: no" "editor_enabled: on" --out "$t_conf" >/dev/null
+    python3 -I "$tamper" "$noenr" --replace "editor_enabled: no" "editor_enabled: on" --out "$t_conf_ne" >/dev/null
+    # The raw disk image (the installed disk: ESP with the no-menu configuration).
+    python3 -I "$tamper" "$base.disk" --file "$KERNEL_A64" --out "$d_a64" >/dev/null
+    python3 -I "$tamper" "$base.disk" --file "$KERNEL_X86" --out "$d_x86" >/dev/null
+    python3 -I "$tamper" "$base.disk" --replace 'timeout: 0\nquiet: yes' 'timeout: 5\nquiet: yes' --out "$d_conf" >/dev/null
+    local row name kind accel
+    local rows=("aa64|aa64|${ACCELS%% *}" "x86-uefi|x86-uefi|tcg" "x86-bios|x86-bios|tcg")
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name kind accel <<<"$row"
+        [[ -z "${SMOKE_INTEGRITY:-}" || $name == "$SMOKE_INTEGRITY" ]] || continue
+        local other_iso other_disk mine_iso mine_disk elf
+        if [[ $kind == aa64 ]]; then
+            mine_iso=$t_a64 mine_disk=$d_a64 other_iso=$t_x86 other_disk=$d_x86 elf=aarch64
+        else
+            mine_iso=$t_x86 mine_disk=$d_x86 other_iso=$t_a64 other_disk=$d_a64 elf=x86-64
+        fi
+        local kpat="PANIC: Blake2b hash for URI \`boot\(\):/boot/urmqtt-$elf\.elf\` does not match"
+        integrity_refused "kernel-iso-$name" "$kind" "$accel" iso "$mine_iso" "$kpat"
+        integrity_boots "kernel-iso-$name control (other architecture's kernel changed)" "$kind" "$accel" iso "$other_iso"
+        integrity_refused "kernel-disk-$name" "$kind" "$accel" disk "$mine_disk" "$kpat"
+        integrity_boots "kernel-disk-$name control (other architecture's kernel changed)" "$kind" "$accel" disk "$other_disk"
+        integrity_refused "module-iso-$name" "$kind" "$accel" iso "$t_cfg" \
+            'PANIC: Blake2b hash for URI `boot\(\):/boot/urmqtt\.cfg` does not match'
+        local cpat='CHECKSUM MISMATCH FOR CONFIG FILE'
+        [[ $kind == x86-bios ]] && cpat=-
+        integrity_refused "conf-iso-$name" "$kind" "$accel" iso "$t_conf" "$cpat"
+        integrity_boots "conf-iso-$name control (same edit, config not enrolled)" "$kind" "$accel" iso "$t_conf_ne"
+        integrity_refused "conf-disk-$name" "$kind" "$accel" disk "$d_conf" "$cpat"
+    done
+}
+
+# H8 (ADR-251): UEFI Secure Boot, on x86_64 only. OVMF's Secure Boot build (SMM, q35) with the
+# development PK, KEK and db enrolled (scripts/sign-loaders.sh gen-keys, ovmf-vars) must boot the
+# universal ISO whose loaders are signed with the db key, and must refuse: the same image unsigned,
+# one signed with another key, and a signed image whose loader was changed after signing (what
+# `urmqtt-config pack --iso` does to an enrolled hash, so a signed ISO is configured BEFORE it is
+# signed). Under Secure Boot Limine still refuses a modified kernel or limine.conf, and it
+# refuses the installed disk, whose configuration module has no hash (ADR-217): a known limit,
+# asserted here so that a change of it is noticed. Needs openssl, sbsign or osslsigncode,
+# virt-fw-vars (pip install virt-firmware; PATH or URMQTT_VIRT_FW_VARS) and an OVMF with Secure
+# Boot (QEMU's edk2-x86_64-secure-code.fd, or OVMF_CODE.secboot.fd; URMQTT_FIRMWARE_SECURE and
+# URMQTT_FIRMWARE_VARS point elsewhere). Skipped, and said so, when one is missing;
+# SMOKE_REQUIRE_SB=1 (CI) turns that into a failure. aarch64: the AArch64 edk2 of this machine
+# does not enforce Secure Boot (an unsigned ISO boots with keys enrolled), so only the signature of
+# BOOTAA64.EFI is checked offline and the signed ISO is booted with Secure Boot off.
+# shellcheck disable=SC2016 # the patterns hold literal backticks
+universal_secureboot() {
+    local missing="" sbfw="" vars="" c
+    command -v openssl >/dev/null || missing="openssl"
+    command -v sbsign >/dev/null || command -v osslsigncode >/dev/null || missing="$missing sbsign-or-osslsigncode"
+    command -v "${URMQTT_VIRT_FW_VARS:-virt-fw-vars}" >/dev/null || missing="$missing virt-fw-vars"
+    for c in "${URMQTT_FIRMWARE_SECURE:-}" "$(brew --prefix qemu 2>/dev/null)/share/qemu/edk2-x86_64-secure-code.fd" \
+        /usr/share/qemu/edk2-x86_64-secure-code.fd /usr/share/OVMF/OVMF_CODE.secboot.fd \
+        /usr/share/OVMF/OVMF_CODE_4M.secboot.fd /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd; do
+        [[ -n "$c" && -f "$c" ]] && { sbfw=$c; break; }
+    done
+    [[ -n "$sbfw" ]] || missing="$missing ovmf-secure-boot-firmware"
+    for c in "${URMQTT_FIRMWARE_VARS:-}" "$(dirname "${sbfw:-/nonexistent}")/edk2-i386-vars.fd" \
+        /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2/ovmf/OVMF_VARS.fd; do
+        [[ -n "$c" && -f "$c" ]] && { vars=$c; break; }
+    done
+    [[ -n "$vars" ]] || missing="$missing ovmf-vars"
+    if [[ -n "$missing" ]]; then
+        if [[ -n "${SMOKE_REQUIRE_SB:-}" ]]; then
+            echo "  ✗ universal-secureboot: missing:$missing"
+            FAILED=$((FAILED + 1))
+        else
+            echo "  - universal-secureboot skipped (missing:$missing); NOT tested"
+        fi
+        return 0
+    fi
+    local sb="$ROOT/scripts/sign-loaders.sh" keys="$OUT/secureboot-keys" other="$OUT/secureboot-other"
+    rm -rf "$keys" "$other"
+    "$sb" gen-keys "$keys" >/dev/null
+    "$sb" gen-keys "$other" >/dev/null
+    local svars="$OUT/secureboot-vars.fd"
+    cp "$vars" "$svars"
+    "$sb" ovmf-vars "$keys" "$vars" "$svars" 2>/dev/null
+    local signed="$OUT/sb-signed.iso" unsigned="$OUT/sb-unsigned.iso" wrongkey="$OUT/sb-wrongkey.iso" tpl="$OUT/sb-template.iso"
+    export URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0
+    rm -f "$signed" "$signed.disk" "$unsigned" "$wrongkey" "$tpl"
+    mkuniversal "$signed" "smoke" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    mkuniversal "$unsigned" "smoke"
+    mkuniversal "$wrongkey" "smoke" --sb-key "$other/db.key" --sb-cert "$other/db.crt"
+    mkuniversal "$tpl" "smoke" --empty-config --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    unset URMQTT_LIMINE_SERIAL URMQTT_MENU_TIMEOUT
+    # The same ISO signed twice is the same bytes (the signing time is SOURCE_DATE_EPOCH).
+    local again="$OUT/sb-signed-again.iso"
+    rm -f "$again"
+    URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$again" "smoke" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    if cmp -s "$signed" "$again"; then
+        echo "  ✓ secureboot: the signed ISO is reproducible (same key, same bytes)"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ secureboot: two builds of the signed ISO differ"
+        FAILED=$((FAILED + 1))
+    fi
+    rm -f "$again" "$again.disk"
+    # The configured-after-signing image: the enrolled hash of the menu changes, the signature breaks.
+    make_cfg_blobs
+    local patched="$OUT/sb-configured-after-signing.iso" tool="$ROOT/target/debug/urmqtt-config"
+    "$tool" pack "$OUT/cfgpack/config.toml" --env dev --root "$ROOT/deploy/dev" \
+        --sign "$ROOT/deploy/dev/control.key" --iso "$tpl" --out "$patched" >/dev/null 2>&1 \
+        || { echo "  ✗ secureboot: pack --iso failed"; FAILED=$((FAILED + 1)); }
+    # Tampered copies of the signed ISO.
+    local t_kernel="$OUT/sb-tampered-kernel.iso" t_conf="$OUT/sb-tampered-conf.iso"
+    python3 -I "$ROOT/scripts/tamper.py" "$signed" --file "$KERNEL_X86" --out "$t_kernel" >/dev/null
+    python3 -I "$ROOT/scripts/tamper.py" "$signed" --replace "editor_enabled: no" "editor_enabled: on" --out "$t_conf" >/dev/null
+
+    local x86='URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$' status log
+    sb_boot() { # sb_boot <label> <file> <how iso|disk>
+        local label=$1 file=$2 how=${3:-iso}
+        log="$OUT/secureboot-$label.log" status=0
+        u_run x86-uefi tcg "$log" "$how" "$file" --secure-vars "$svars" || status=$?
+    }
+    sb_refused() { # sb_refused <label> <file> <pattern> [iso|disk]
+        local label=$1 file=$2 pat=$3 how=${4:-iso}
+        log="$OUT/secureboot-$label.log" status=0
+        boot_until "$log" "$pat" --arch x86_64 "--$how" "$file" --accel tcg --smp 2 --no-net --secure-vars "$svars" || status=$?
+        check "secureboot: $label refused" "$log" "$status" "$pat" "NOT:URMQTT BOOT" "NOT:URMQTT READY"
+    }
+    sb_boot signed "$signed"
+    check "secureboot: signed ISO boots with Secure Boot enforced" "$log" "$status" "$x86" "bootloader=Limine" "^URMQTT READY$" "NOT:Access Denied"
+    sb_refused unsigned "$unsigned" "Access Denied"
+    sb_refused wrong-key "$wrongkey" "Access Denied"
+    sb_refused configured-after-signing "$patched" "Access Denied"
+    sb_refused tampered-kernel "$t_kernel" 'PANIC: Blake2b hash for URI `boot\(\):/boot/urmqtt-x86-64\.elf` does not match'
+    sb_refused tampered-conf "$t_conf" "CHECKSUM MISMATCH FOR CONFIG FILE"
+    local d="$OUT/secureboot-disk.img"
+    fresh_disk "$signed.disk" "$d"
+    sb_refused installed-disk-known-limit "$d" 'Secure Boot is active and URI `boot\(\):/boot/urmqtt\.cfg` has no associated hash' disk
+    # Without Secure Boot a signed loader is an ordinary one; BOOTAA64.EFI's signature checks offline.
+    local a64="${ACCELS%% *}" log2="$OUT/secureboot-aarch64-signed.log" st2=0
+    u_run aa64 "$a64" "$log2" iso "$signed" || st2=$?
+    check "secureboot: signed ISO boots on aarch64 (Secure Boot not enforced by this firmware)" "$log2" "$st2" \
+        'URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$' "^URMQTT READY$"
+    local efi="$OUT/secureboot-BOOTAA64.EFI"
+    rm -f "$efi"
+    xorriso -osirrox on -indev "$signed" -extract /EFI/BOOT/BOOTAA64.EFI "$efi" >/dev/null 2>&1 || true
+    if [[ -s "$efi" ]] && "$sb" verify "$keys/db.crt" "$efi" && ! "$sb" verify "$other/db.crt" "$efi"; then
+        echo "  ✓ secureboot: BOOTAA64.EFI is signed by the db key and by no other (offline check)"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ secureboot: BOOTAA64.EFI signature check failed"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+# H8 (ADR-253): the installer entry's rules. The installer erases a disk, so what may start it matters.
+#  * A production kernel honours three command-line words, install, live and diag (ADR-052, ADR-054,
+#    ADR-063; host tests production_honours_*), and only install writes to a disk. It does nothing
+#    without the installation image: no module, no write ("install: no installation image").
+#  * The image is a module that Limine checks against the blake2b in the ISO menu: a changed copy is
+#    refused before the kernel runs, and nothing is written.
+#  * Adding install to another entry means editing limine.conf, which the loaders refuse (ADR-250).
+# Each case runs with a blank 64 MiB disk attached, whose bytes must be the same afterwards. The control
+# of the first is the same edit in an image built with --no-enroll: the kernel gets the word and, with
+# no module, refuses to write.
+# shellcheck disable=SC2016 # the patterns hold literal backticks
+universal_install_rules() {
+    local base="$OUT/integrity-base.iso" noenr="$OUT/integrity-noenroll.iso" inst="$OUT/install-rules-default.iso"
+    URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$base" "smoke"
+    URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$noenr" "smoke" --no-enroll
+    URMQTT_LIMINE_SERIAL=1 mkuniversal "$inst" "smoke" --install-default --install-cmdline "install install-countdown=1"
+    local t_word="$OUT/install-rules-word.iso" t_word_ne="$OUT/install-rules-word-noenroll.iso" t_img="$OUT/install-rules-image.iso"
+    local img="$OUT/install-rules-disk.img"
+    rm -f "$img"
+    xorriso -osirrox on -indev "$inst" -extract /disk.img "$img" >/dev/null 2>&1 || true
+    if [[ ! -s "$img" ]]; then
+        echo "  ✗ install-rules: cannot extract /disk.img from the ISO"
+        FAILED=$((FAILED + 1))
+        return 0
+    fi
+    chmod u+rw "$img"
+    local tamper="$ROOT/scripts/tamper.py"
+    # "live smoke" and "install no" are the same length: a same-length edit of the first entry's command line.
+    python3 -I "$tamper" "$base" --replace "cmdline: live smoke" "cmdline: install no" --out "$t_word" >/dev/null
+    python3 -I "$tamper" "$noenr" --replace "cmdline: live smoke" "cmdline: install no" --out "$t_word_ne" >/dev/null
+    python3 -I "$tamper" "$inst" --file "$img" --offset 100000 --out "$t_img" >/dev/null
+    local row name kind accel target before after status log
+    local rows=("aa64|aa64|${ACCELS%% *}" "x86-uefi|x86-uefi|tcg" "x86-bios|x86-bios|tcg")
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name kind accel <<<"$row"
+        [[ -z "${SMOKE_INTEGRITY:-}" || $name == "$SMOKE_INTEGRITY" ]] || continue
+        target="$OUT/install-rules-target-$name.img"
+        # shellcheck disable=SC2054 # QEMU option syntax
+        local drive=(-- -drive "if=none,id=t0,file=$target,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile=)
+        # 1. A word added to the first entry: refused by the loader (BIOS: the message is on the screen only).
+        rm -f "$target"; truncate -s 64m "$target"; before=$(shasum -a 256 "$target" | cut -d' ' -f1)
+        log="$OUT/install-rules-word-$name.log"; status=0
+        if [[ $kind == x86-bios ]]; then
+            # shellcheck disable=SC2046
+            TIMEOUT=${SMOKE_REFUSE_WAIT:-45} boot_until "$log" 'install: ' $(u_args "$kind" "$accel" iso "$t_word") --no-net "${drive[@]}" || status=$?
+            [[ $status -eq 124 ]] && status=0 || status=1
+            after=$(shasum -a 256 "$target" | cut -d' ' -f1)
+            [[ $after == "$before" ]] || echo "DISK CHANGED" >>"$log"
+            check "install-rules: a word added to limine.conf is refused [$name]" "$log" "$status" "NOT:install: " "NOT:DISK CHANGED"
+        else
+            # shellcheck disable=SC2046
+            boot_until "$log" 'CHECKSUM MISMATCH FOR CONFIG FILE' $(u_args "$kind" "$accel" iso "$t_word") --no-net "${drive[@]}" || status=$?
+            after=$(shasum -a 256 "$target" | cut -d' ' -f1)
+            [[ $after == "$before" ]] || echo "DISK CHANGED" >>"$log"
+            check "install-rules: a word added to limine.conf is refused [$name]" "$log" "$status" \
+                "CHECKSUM MISMATCH FOR CONFIG FILE" "NOT:install: " "NOT:URMQTT" "NOT:DISK CHANGED"
+        fi
+        # 2. Control: the same edit, config not enrolled. The kernel gets install, has no module, writes nothing.
+        rm -f "$target"; truncate -s 64m "$target"; before=$(shasum -a 256 "$target" | cut -d' ' -f1)
+        log="$OUT/install-rules-word-control-$name.log"; status=0
+        u_run "$kind" "$accel" "$log" iso "$t_word_ne" "${drive[@]}" || status=$?
+        after=$(shasum -a 256 "$target" | cut -d' ' -f1)
+        [[ $after == "$before" ]] || echo "DISK CHANGED" >>"$log"
+        check "install-rules: with install but no installation image nothing is written [$name]" "$log" "$status" \
+            "install: no installation image" "NOT:install: ALL DATA ON" "NOT:install: done" "NOT:URMQTT READY" "NOT:DISK CHANGED"
+        # 3. The installation image changed by one bit: Limine refuses it, nothing is written.
+        rm -f "$target"; truncate -s 64m "$target"; before=$(shasum -a 256 "$target" | cut -d' ' -f1)
+        log="$OUT/install-rules-image-$name.log"; status=0
+        # shellcheck disable=SC2046
+        boot_until "$log" 'PANIC: Blake2b hash for URI `boot\(\):/disk\.img` does not match' $(u_args "$kind" "$accel" iso "$t_img") --no-net "${drive[@]}" || status=$?
+        after=$(shasum -a 256 "$target" | cut -d' ' -f1)
+        [[ $after == "$before" ]] || echo "DISK CHANGED" >>"$log"
+        check "install-rules: a changed installation image is refused [$name]" "$log" "$status" \
+            'PANIC: Blake2b hash for URI `boot\(\):/disk\.img` does not match' "NOT:install: " "NOT:DISK CHANGED"
+    done
+}
+
 # Cross-architecture data disk: broker state written by a VM of one
 # architecture is restored by a VM of the other on the same disk (retained
 # message, persistent session with a queued command, one telemetry record).
@@ -2910,6 +3302,15 @@ if [[ ${SMOKE_ONLY:-} == storage && $ARCH != universal ]]; then
     exit
 fi
 
+# SMOKE_ONLY=secrecy (aarch64): H8, the production-image warning and the key-bytes scan of the serial logs
+# (SMOKE_RELEASE_KERNEL=<release kernel ELF> adds the release kernel with the production configuration).
+if [[ ${SMOKE_ONLY:-} == secrecy && $ARCH == aarch64 ]]; then
+    secrecy
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=live: just the live-mode scenarios of this architecture.
 if [[ ${SMOKE_ONLY:-} == live && $ARCH != universal ]]; then
     live_suite
@@ -2955,6 +3356,31 @@ if [[ ${SMOKE_ONLY:-} == config && $ARCH == universal ]]; then
     exit
 fi
 
+# SMOKE_ONLY=integrity (universal): H8, modified kernel / module / limine.conf are refused by the loader
+# (SMOKE_INTEGRITY=<aa64|x86-uefi|x86-bios> limits the machine).
+if [[ ${SMOKE_ONLY:-} == integrity && $ARCH == universal ]]; then
+    universal_integrity
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=install-rules (universal): H8, what may start the installer (SMOKE_INTEGRITY=<machine> limits it).
+if [[ ${SMOKE_ONLY:-} == install-rules && $ARCH == universal ]]; then
+    universal_install_rules
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=secureboot (universal): H8, OVMF with Secure Boot enforced (needs the tools universal_secureboot lists).
+if [[ ${SMOKE_ONLY:-} == secureboot && $ARCH == universal ]]; then
+    universal_secureboot
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=install (universal): only the installer scenarios; SMOKE_INSTALLER=<aa64|x86-uefi|x86-bios>
 # limits which machine runs the installer.
 if [[ ${SMOKE_ONLY:-} == install && $ARCH == universal ]]; then
@@ -2970,6 +3396,9 @@ if [[ $ARCH == universal ]]; then
     universal_raw
     universal_migrated
     universal_install
+    universal_integrity
+    universal_install_rules
+    universal_secureboot
     universal_diag
     if command -v mosquitto_pub >/dev/null; then
         # One ISO, three machines, no disk.

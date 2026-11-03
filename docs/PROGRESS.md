@@ -24,6 +24,33 @@ Everything is files in the repository, tested locally. **Nothing was deployed or
 - The page has English and Croatian texts; the other 13 languages show English.
 - The Products page does not link to the demo page yet (unlisted by design).
 
+## H8 — Boot integrity and secret protection, the parts that need no hardware (2026-11-03)
+
+SECURITY-PLAN H8, scoped to a KVM VPS: nothing here ran on a physical PC or on Proxmox. ADR-250 to ADR-254.
+
+**Done**
+
+- **Kernel-tamper tests.** `scripts/tamper.py` flips a bit in every copy of a file inside a built ISO or raw disk image (or edits a text in place). `SMOKE_ONLY=integrity` (universal image): the kernel (ISO and raw disk), the configuration module and `limine.conf`, on aarch64 UEFI, x86_64 UEFI and x86_64 BIOS, are refused by the loader, whose own message is read from the serial port (`URMQTT_LIMINE_SERIAL=1`, tests only; the BIOS stage refuses a `limine.conf` before it reads `serial: yes`, so there the test asserts that the machine does not boot). Every refusal has a control that boots (the other architecture's kernel changed; the same `limine.conf` edit with `--no-enroll`).
+- **Enrolled loader configuration (ADR-250).** `limine enroll-config` is verified to work on `BOOTAA64.EFI`, `BOOTX64.EFI` and `limine-bios.sys` (v12.9.4); `mkiso.sh --universal` enrolls two sets (the installed disk's no-menu config, the ISO's menu). `urmqtt-config pack --iso` re-enrolls the ISO's loaders (a packed template still equals the direct build, byte for byte), `verify` checks the enrollment, the builder's emulator resets it in its private copy. New Rust test `configuring_the_template_enrolls_the_loaders_again`.
+- **Secure Boot signing path (ADR-251).** `scripts/sign-loaders.sh` (throwaway keys under `build/`, sign with `sbsign` or `osslsigncode`, verify, build an OVMF variable store with PK/KEK/db and Secure Boot on), `mkiso.sh --sb-key/--sb-cert`, `run-qemu.sh --secure-vars`. `SMOKE_ONLY=secureboot` on x86_64 OVMF (SMM): the signed ISO boots with Secure Boot enforced; unsigned, signed by another key, and changed after signing are `Access Denied`; a modified kernel or `limine.conf` is still refused by Limine; the signed ISO is reproducible. DEPLOY.md 5d: QEMU (tested), Proxmox and a physical PC (written, **not tested**).
+- **Installer entry rules (ADR-253).** The code has three production words, `install`, `live` and `diag`, not one as the plan said; only `install` writes. `SMOKE_ONLY=install-rules` on the three machines with a blank disk whose SHA-256 must not change: a word added to the menu is refused (control: without enrollment the kernel gets `install`, has no module and writes nothing); a changed installation image is refused by the loader. Threat-model entry in SECURITY.md.
+- **Image secrecy (ADR-252).** `mkiso.sh` warns loudly (boxed, stderr) for a non-dev image built without `CI`; `scripts/secret-scan.py` searches for the server key and the disk key in every form a log could show them and fails if it cannot find them in the image that holds them; `SMOKE_ONLY=secrecy` scans the serial logs of an encrypted boot and both refusals on the dev kernel and a release kernel; `scripts/repro.sh` scans its own output and both build logs.
+- **TPM spike (ADR-254):** an ADR only, no code. Recommendation: do not build it for the VPS-first release.
+
+**Tests**
+
+- `SMOKE_ONLY=integrity` 24 passed (aarch64 HVF, x86_64 UEFI and BIOS under TCG); `SMOKE_ONLY=config` 17 passed (pack --iso with re-enrollment, installer on three machines, the disks it writes boot on three machines); `SMOKE_ONLY=secureboot` 10 passed; `SMOKE_ONLY=install-rules` 9 passed; `SMOKE_ONLY=secrecy` with `SMOKE_RELEASE_KERNEL` 11 passed; `scripts/repro.sh dev` (aarch64 ISO and raw image identical, no key bytes in the logs). `cargo test -p urmqtt-config-tool` (16 + 7 + 15), `cargo test -p urmqtt-builder-wasm` (14), `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -D warnings`, `make clippy-kernel`, `make check-x86` clean; shellcheck reports no new finding in `scripts/` (the 45 in `smoke.sh` and the rest predate this work). In the nested worktree the kernel builds needed `RUSTFLAGS` set by hand (the parent checkout's `.cargo/config.toml` doubles the Makefile's flags).
+
+**Not done, and why**
+
+- **Secure Boot on the Intel PC / any physical machine, and on Proxmox:** no hardware or Proxmox host here. DEPLOY.md 5d is the written procedure, untested.
+- **Secure Boot on aarch64:** the AArch64 edk2 on the development machine does not enforce it (an unsigned ISO boots with keys enrolled) and `run-qemu.sh` has no variable store for aarch64. The aarch64 loader is signed and its signature checked offline.
+- **CI wiring of the Secure Boot job:** not added to `.github/workflows/ci.yml` (the CI runners are aarch64 and the job needs `qemu-system-x86`, `ovmf`, `sbsigntool` and `pip install virt-firmware`); the group exists, skips with a printed notice when a tool is missing and fails with `SMOKE_REQUIRE_SB=1`.
+- **A project signing key and signed releases:** a decision for the maintainer (key custody, rotation, `dbx`); release images stay unsigned.
+- **An installed disk under Secure Boot** (ADR-217's module has no hash: Limine refuses it; asserted as a known limit), **configuring a signed ISO afterwards** (`pack --iso` breaks the signature), **downgrade protection**, **a kernel-side TPM**: all listed in AUDIT.md (H8-W1 to H8-W6).
+- **`repro.sh --universal`** was not run (the signed universal ISO was compared by the Secure Boot scenario; the universal repro covers both kernels and takes much longer).
+- The web builder's emulator change (reset of the enrolled hash in its copy) is checked in node only; the emulator tests need a browser and the emulator runtime.
+
 ## H10 — Audit package (2026-11-02)
 
 SECURITY-PLAN H10, the last milestone of the first release's path. `docs/AUDIT.md` is now the audit package (it began as the H0 baseline).
