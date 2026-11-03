@@ -1,3 +1,20 @@
+## Release candidate v0.3.0 (2026-11-02)
+
+Everything for the release except publishing: nothing was pushed or tagged, nothing was signed or uploaded. The commands to cut it are in `docs/RELEASE.md`.
+
+**Done**
+
+- Version 0.3.0 (workspace `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock`); the previous value was 0.1.0 although v0.2.0 and v0.2.1 had been tagged (the image version comes from `git describe`, so only host-tool package versions were affected). CHANGELOG `[0.3.0] - 2026-11-02` (covers v0.2.0 and v0.2.1 too, which had no notes), compare links, empty Unreleased. README status line and the verify example, DEPLOY and OPERATE examples follow.
+- Compatibility claims checked by the tests that exist for them: format 1 golden blob still valid, encryption off is format 2, TLS off is format 3, layout v2.0 disks get their backup region by one superblock write, v1 goldens migrate and verify (power cut at every write), `tools/disk/src/migrate.rs` differs from v0.2.1 by one line. The template ISO's empty configuration is format 4, so the builder page must be redeployed before the mirror lists v0.3.0 (RELEASE.md section 4).
+
+**Gates** (details in the final report of the preparation): fmt, clippy, `make clippy-kernel`, `make check-x86`, `cargo test --workspace` (934 tests), `make builder-test` (81 of 81 with the emulator runtime and a template ISO in `build/`), smoke aarch64 HVF+TCG 308/0, universal 59/0, `make repro` (prod, aarch64) identical. Smoke x86_64 TCG: 150 passed, 1 failed (`log-slow-flood`, same failure with the v0.2.1 sources on this Mac: not a regression, a timing scenario).
+
+**Found, not fixed**
+
+- A checkout nested inside another one (a worktree under `.claude/worktrees/`) gives cargo two `.cargo/config.toml` files; the kernel clippy, `cargo tree` for the SBOM and `make supply-chain` fail there with a duplicated `-Zbranch-protection`. Build from a normal clone.
+- `make builder-test` without `make builder-emulator` fails `simple.test.mjs` "the build ends in a result card" (it expects the emulator button); CI runs `make builder-test` only.
+- `scripts/vet-exemptions.py --check` reports `docs/audit/vet-exemptions.md` out of date on macOS (the split between "build time" and "host only" exemptions differs: 22/65 committed, 10/77 here; the kernel numbers 67/53 are the same). Not regenerated; CI on Linux decides.
+
 ## D1 — A public demo broker behind aldo.tech: built, NOT deployed (2026-11-02)
 
 Everything is files in the repository, tested locally. **Nothing was deployed or exposed**: no DNS, firewall, Caddy or server change, no push, no tag, no service left running.
