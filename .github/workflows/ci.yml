@@ -275,20 +275,36 @@ jobs:
           scripts/interop.sh --accel tcg | tee -a "$GITHUB_STEP_SUMMARY"
 
   miri:
-    name: Miri (host crates, H5)
+    name: Miri ${{ matrix.name }} (host crates, H5)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
+    # Miri is slow (urmqtt-tls alone needs about 50 minutes, urmqtt-cfg about 40 on the runner), so the
+    # crates run as three parallel jobs instead of one 100 minute job.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: protocol crates
+            crates: "urmqtt-mqtt urmqtt-timer-wheel urmqtt-net urmqtt-tcp urmqtt-broker"
+          - name: tls
+            crates: "urmqtt-tls"
+          - name: cfg
+            crates: "urmqtt-cfg urmqtt-config"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
-          cache-key: miri
+          cache-key: miri-${{ matrix.name }}
       - name: Install Miri
         run: rustup component add miri
       - name: Miri
-        run: scripts/miri.sh
+        env:
+          CRATES: ${{ matrix.crates }}
+        run: |
+          read -ra crates <<< "$CRATES"
+          scripts/miri.sh "${crates[@]}"
 
   kani:
     name: Kani proofs (parsers, timer wheel, H5)
