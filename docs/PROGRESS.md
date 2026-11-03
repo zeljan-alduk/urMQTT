@@ -68,6 +68,8 @@ SECURITY-PLAN H8, scoped to a KVM VPS: nothing here ran on a physical PC or on P
 - **`repro.sh --universal`** was not run (the signed universal ISO was compared by the Secure Boot scenario; the universal repro covers both kernels and takes much longer).
 - The web builder's emulator change (reset of the enrolled hash in its copy) is checked in node only; the emulator tests need a browser and the emulator runtime.
 
+**Found when the branches were merged:** H8's re-enrollment made `urmqtt-config pack --iso` and the builder page refuse every template made before H8 ("a limine.conf copy has no end marker: not an image of this format"), which would have broken the page for the releases it lists (v0.2.0, v0.2.1). Fixed in `tools/config/src/image.rs`: a template with no end marker anywhere is an unenrolled template and is configured as before. The builder tests that caught it (`wasm-vs-cli` against the real template, the page's build, the emulator boot) pass after it (28 of 28 in those three files; the full suite was 96 of 100 before the fix).
+
 ## H10 — Audit package (2026-11-02)
 
 SECURITY-PLAN H10, the last milestone of the first release's path. `docs/AUDIT.md` is now the audit package (it began as the H0 baseline).

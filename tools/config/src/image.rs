@@ -79,6 +79,12 @@ fn find_all(data: &[u8], needle: &[u8]) -> Vec<usize> {
 /// The byte ranges of the `limine.conf` copies that start with `start`.
 fn conf_copies(data: &[u8], start: &[u8]) -> Result<Vec<std::ops::Range<usize>>, String> {
     let mut out = Vec::new();
+    // A template made before H8 has the start comment but no end marker anywhere and no enrolled
+    // loader: it is configured exactly as before (nothing to re-enroll), so the builder page keeps
+    // working for every release it lists, not only for the newest.
+    if find_all(data, CONF_END).is_empty() {
+        return Ok(out);
+    }
     for s in find_all(data, start) {
         let rest = data.get(s..).ok_or("limine.conf is cut off")?;
         let e = rest

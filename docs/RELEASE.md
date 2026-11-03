@@ -217,7 +217,7 @@ layout-v1 disks are converted offline with `urmqtt-disk migrate`.
   own `deploy/prod/` (docs/DEPLOY.md).
 - First supported target: a VPS or VM under KVM. x86_64 has **not** been run on KVM or real hardware. aarch64 is verified
   on Apple HVF and QEMU TCG.
-- Not done: Secure Boot and signed loaders (H8), an IOMMU. Encryption at rest is not on the builder page yet. 53 of the 67
+- Partly done: Secure Boot (H8). The loaders' configuration is enrolled and a signing path works under OVMF on x86_64, but release images are not signed and no physical machine was tried. Not done: an IOMMU. Encryption at rest is not on the builder page yet. 53 of the 67
   crates in the kernel are cargo-vet exemptions, not audits. The audit package is a self-review, not an external audit.
 - Support: only the latest release gets fixes; **v0.2.1 and older are no longer supported.**
 
