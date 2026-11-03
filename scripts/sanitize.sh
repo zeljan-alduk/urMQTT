@@ -11,7 +11,8 @@
 #   rustc has no UBSan for Rust code (Miri covers that, scripts/miri.sh), so
 #   UBSan here means the C side.
 # - detect_leaks is off on macOS (LeakSanitizer is not supported on arm64
-#   Darwin); on Linux leak detection stays on.
+#   Darwin); on Linux leak detection stays on, except for the store test
+#   binaries that leak on purpose (see the loop at the end).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 CRATES=("$@")
@@ -43,7 +44,26 @@ esac
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1}"
 # The model tests run many cases; the sanitiser slows each by 2-3x.
 export PROPTEST_CASES="${PROPTEST_CASES:-32}" PROPTEST_DISABLE_FAILURE_PERSISTENCE=true
+# The store crate's tests leak ON PURPOSE: they hand a heap to the store with
+# Box::leak (it wants a &'static mut region) and leak crashed SQLite
+# connections instead of closing them (power-cut tests). LeakSanitizer
+# reports all of that. These binaries run with ASan and UBSan but with leak
+# detection off; every other test binary of the crate keeps it on.
+STORE_LEAKY_TESTS=" discard grow sqlite "
 for c in "${CRATES[@]}"; do
     echo "== asan+ubsan(C): $c"
-    cargo test -q --target "$HOST" -p "$c"
+    if [[ $c == urmqtt-store && $HOST != *apple-darwin ]]; then
+        ASAN_OPTIONS="detect_leaks=0" cargo test -q --target "$HOST" -p "$c" --lib
+        for f in crates/store/tests/*.rs; do
+            t="$(basename "$f" .rs)"
+            if [[ $STORE_LEAKY_TESTS == *" $t "* ]]; then
+                ASAN_OPTIONS="detect_leaks=0" cargo test -q --target "$HOST" -p "$c" --test "$t"
+            else
+                cargo test -q --target "$HOST" -p "$c" --test "$t"
+            fi
+        done
+        cargo test -q --target "$HOST" -p "$c" --doc
+    else
+        cargo test -q --target "$HOST" -p "$c"
+    fi
 done
