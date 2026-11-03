@@ -19,8 +19,7 @@ of v0.2.1. A layout-v2.0 data disk opens and is upgraded to v2.1 by one superblo
 refuses it). A layout-v1 disk is refused by the kernel and converted offline with `urmqtt-disk migrate`, as before.
 The builder page picks the newest release whose template can do what the form asks.
 
-**Limits, stated plainly.** The first supported target is a VPS or VM under KVM. **x86_64 is verified under QEMU TCG
-only**, not on KVM or real hardware; aarch64 is verified on Apple HVF and TCG. Secure Boot is only partly done (H8: the loaders'
+**Limits, stated plainly.** The first supported target is a VPS or VM under KVM. The smoke suites run on aarch64 under Apple HVF and TCG and on x86_64 under QEMU TCG; **x86_64 has also been run on a real KVM VPS** (Contabo, 4 vCPU AMD EPYC: boot, mutual TLS under load and a comparison with Mosquitto, X11, at the H7 commit), but not the later code (disk encryption, boot integrity) and not on physical hardware. Secure Boot is only partly done (H8: the loaders'
 configuration is enrolled and the signing path works under OVMF on x86_64, but release images are not signed and
 no physical machine was tried), and there is no IOMMU. Encryption at rest is not on the builder page yet (use `urmqtt-config pack` with
 `storage.encryption`). 53 of the 67 kernel-linked crates are `cargo-vet` exemptions, not audits. The release assets are

@@ -94,7 +94,7 @@ SECURITY-PLAN H10, the last milestone of the first release's path. `docs/AUDIT.m
 
 **Open, and stated as such in AUDIT.md §5, §6 and §9**
 
-- H8: Secure Boot, signed loaders, TPM sealing; no test tampers with the kernel image. H4b: IOMMU. No fuzzing of PCI and virtio (H0-W9). No test that writes a page table after the lock (H0-W10). No constant-time measurement of P-256, X25519, Ed25519. No fuzzing of crafted SQLite files (H0-W8, contained by H6). 53 of 67 linked crates are vet exemptions. x86_64 is verified under QEMU TCG only.
+- H8: Secure Boot, signed loaders, TPM sealing; no test tampers with the kernel image. H4b: IOMMU. No fuzzing of PCI and virtio (H0-W9). No test that writes a page table after the lock (H0-W10). No constant-time measurement of P-256, X25519, Ed25519. No fuzzing of crafted SQLite files (H0-W8, contained by H6). 53 of 67 linked crates are vet exemptions. x86_64: the smoke suites run under QEMU TCG; it also ran on a real KVM VPS at the H7 commit (X11), not the code added since and not on physical hardware.
 - The red-team results in §9 are the results the cited tests and tools reported when they last ran (the dates are in the milestones' entries); only the groups named in the run line below were re-run for H10.
 
 ## S8 — Documentation and hardening (2026-11-02)

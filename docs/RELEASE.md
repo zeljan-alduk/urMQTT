@@ -198,7 +198,7 @@ This release covers everything since v0.1.0 (v0.2.0 and v0.2.1 were tagged witho
 - **Plain MQTT for trusted networks**, off by default, with a mandatory source allowlist checked at the SYN, three login
   modes and tight defaults; TLS can be left off entirely (`mqtt_tls_port = 0`).
 - **x86_64** next to aarch64, and one universal ISO that boots on aarch64 UEFI, x86_64 UEFI and x86_64 BIOS and installs
-  itself. Verified under QEMU TCG only.
+  itself. Smoke suites under QEMU TCG; run on a real KVM VPS (Contabo, AMD EPYC) at the H7 commit (X11), not the later code and not on physical hardware.
 - **Storage:** layout v2, growing disks, TRIM/UNMAP, in-disk database backups with automatic restore, background scrubbing,
   and optional **encryption at rest** (AES-256-XTS, `urmqtt-disk encrypt | decrypt | rekey`).
 - **Security work:** SQLite runs as an unprivileged component (EL0 / ring 3), kernel hardening (KASLR, MTE, stack
@@ -215,8 +215,7 @@ layout-v1 disks are converted offline with `urmqtt-disk migrate`.
 
 - Pre-alpha. The assets here are **dev builds with throwaway keys** for evaluation; production images are built from your
   own `deploy/prod/` (docs/DEPLOY.md).
-- First supported target: a VPS or VM under KVM. x86_64 has **not** been run on KVM or real hardware. aarch64 is verified
-  on Apple HVF and QEMU TCG.
+- First supported target: a VPS or VM under KVM. x86_64 has run on a real KVM VPS (Contabo, 4 vCPU AMD EPYC: X11, at the H7 commit), but not the code added since (disk encryption, boot integrity) and not on physical hardware. aarch64 is verified on Apple HVF and QEMU TCG.
 - Partly done: Secure Boot (H8). The loaders' configuration is enrolled and a signing path works under OVMF on x86_64, but release images are not signed and no physical machine was tried. Not done: an IOMMU. Encryption at rest is not on the builder page yet. 53 of the 67
   crates in the kernel are cargo-vet exemptions, not audits. The audit package is a self-review, not an external audit.
 - Support: only the latest release gets fixes; **v0.2.1 and older are no longer supported.**

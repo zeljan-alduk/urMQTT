@@ -26,7 +26,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 
 > [!WARNING]
 > **urMQTT is pre-alpha** ([v0.3.0](https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.3.0): VM images
-> for aarch64 and x86_64, the latter verified under QEMU TCG only; its release assets are dev builds with throwaway keys). It serves MQTT 3.1.1 over TLS 1.3 with mutual TLS (and, in dev builds
+> for aarch64 and x86_64, the latter run in the QEMU TCG smoke suites and, at the H7 commit, on a real KVM VPS (docs/PERFORMANCE.md); its release assets are dev builds with throwaway keys). It serves MQTT 3.1.1 over TLS 1.3 with mutual TLS (and, in dev builds
 > only, over plain TCP), and keeps its state in SQLite in a raw partition of the disk it boots from. These milestones are complete:
 > - **M0**: tooling and CI
 > - **M1**: UEFI boot, console, exception reports
@@ -1190,7 +1190,7 @@ Security is the first priority and wins conflicts with the other tracks.
 | ✅ | **X6** x86 platform discovery | ACPI (MADT, MCFG, FADT, HPET, SPCR, `_S5`) from QEMU q35 and pc tables; fuzzed |
 | ✅ | **X7** x86 PCI & virtio | ECAM and port-I/O config; blk/scsi/net/rng on q35 and pc (TCG); legacy-only virtio is refused with a message |
 | ✅ | **X8** x86 feature parity | the MQTT, TLS, DB, telemetry, crash, storm and attack scenarios on x86_64 under TCG; data disks portable across architectures (`cross-arch-*`) |
-| ✅ | **X10** One multi-platform ISO | the same ISO file boots on aarch64 UEFI (HVF, TCG), x86_64 UEFI and BIOS (TCG), installs itself, rebuilds bit for bit (`make universal`); KVM, real hardware and Secure Boot untested |
+| ✅ | **X10** One multi-platform ISO | the same ISO file boots on aarch64 UEFI (HVF, TCG), x86_64 UEFI and BIOS (TCG), installs itself, rebuilds bit for bit (`make universal`); real hardware and Secure Boot untested; KVM: run later on a VPS (X11) |
 | 📋 | **X12** Bare-metal foundation | hybrid ISO boots from a USB stick; read-only `hwreport` mode; framebuffer console |
 | 📋 | **X13** NVMe & AHCI | storage and crash scenarios on QEMU models and on the test PC, including a real power cut |
 | 📋 | **X14** Hardware NICs | e1000e/igb (QEMU-tested), then the test PC's onboard NIC; MQTT and storm on the LAN |

@@ -322,7 +322,7 @@ package. The ones an auditor should weigh first:
 | **Rollback of the data volume** restores old revocations and an old sequence number (H1-W2). XTS gives no integrity: sectors can be swapped or rolled back between snapshots. | The disk is trusted not to be maliciously rolled back; image-listed revocations are re-applied at every boot. | SECURITY.md; ADR-240 |
 | **TLS handshake messages are parsed by rustls** (third party); we fuzz our own record layer, identity extraction and ticket code, and run tlsfuzzer against the whole. | Upstream fuzzes rustls. | §2 |
 | **Plaintext MQTT, when the owner turns it on, is plaintext**, and `auth = "ip"` trusts a source address. | That is what the option means; it is off by default, narrow by default and says so at every step. | SECURITY.md (P1 sections) |
-| **Not measured on real hardware:** x86_64 on KVM or bare metal (all x86_64 results are QEMU TCG), 100k and 1M connections, MTE on silicon. | No such machine was available. | PERFORMANCE.md, PROGRESS.md |
+| **Not measured on real hardware:** x86_64 on bare metal, x86_64 on KVM for anything added after the H7 commit (X11 ran the production image on a real KVM VPS, Contabo AMD EPYC, at that commit: boot, mutual TLS under load, a comparison with Mosquitto), 100k and 1M connections, MTE on silicon. | No physical x86 machine was available; the VPS run predates the later changes. | PERFORMANCE.md, PROGRESS.md |
 
 ### 6b. Network-reachable loops and allocations, and their bounds (H3 deliverable)
 
