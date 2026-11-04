@@ -130,3 +130,18 @@ max_message_age_s = 600        # longest validity window a message may have
 # shows; "on": whenever a virtio-gpu is found. Anything but "off" needs a kernel
 # that reads configuration format 5.
 virtio_gpu = "off"
+
+[devices]
+# The optional virtio drivers (ADR-257, ADR-258), each "off" | "auto" | "on".
+# "off" (the default) never starts the driver; "auto" starts it when the device
+# is found; "on" does too and warns loudly when there is none. Anything but
+# "off" needs a kernel that reads configuration format 6 and has the driver
+# (`urmqtt-config pack --iso` refuses a template without it).
+# virtio-console, port 0: a copy of the log, and the Diagnostic entry's keys.
+virtio_console = "off"
+# virtio-balloon: total and free memory reported to the host; never inflates.
+virtio_balloon = "off"
+# virtio-input keyboards: the Diagnostic entry's keys from a VNC console.
+virtio_input = "off"
+# virtio-vsock: the Diagnostic report, read-only, on vsock port 2883.
+virtio_vsock = "off"

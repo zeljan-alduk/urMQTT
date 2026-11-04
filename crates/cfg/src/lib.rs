@@ -32,6 +32,7 @@ pub mod blob;
 pub mod build;
 pub mod check;
 pub mod diskkey;
+pub mod drivers;
 pub mod fields;
 pub mod net;
 pub mod passwd;

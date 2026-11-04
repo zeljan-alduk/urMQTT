@@ -347,6 +347,16 @@ fn present(now: bool) {
     }
 }
 
+/// A byte sink beside the UART and the framebuffer (the virtio-console's
+/// port 0, ADR-258). It gets every byte the UART gets, with the sink lock
+/// held and IRQs masked: it must not block, wait for a lock or log.
+static EXTRA: OnceCell<fn(&[u8])> = OnceCell::new();
+
+/// Installs the extra sink (once; later calls are ignored).
+pub fn set_extra_sink(f: fn(&[u8])) {
+    let _ = EXTRA.set(f);
+}
+
 /// Puts `fb` in place of the framebuffer console (the one on a virtio-gpu
 /// scanout, ADR-256) and draws on it the newest lines of the console ring,
 /// as many as it has rows, so what was logged before it existed is on it
@@ -566,6 +576,9 @@ impl Write for Tee<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         if let Some(u) = self.0.uart.as_mut() {
             u.write_str(s)?;
+        }
+        if let Some(f) = EXTRA.get() {
+            f(s.as_bytes());
         }
         if self.0.fb_log
             && let Some(fb) = self.0.fb.as_mut()
@@ -1273,6 +1286,25 @@ mod tests {
 
     fn fmt_grey() -> u32 {
         0x00d0_d0d0
+    }
+
+    static EXTRA_GOT: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+    fn extra(b: &[u8]) {
+        EXTRA_GOT.lock().unwrap().extend_from_slice(b);
+    }
+
+    /// ADR-258: the extra sink (virtio-console) gets the lines the UART gets,
+    /// raw text too.
+    #[test]
+    fn the_extra_sink_gets_every_line() {
+        let _serial = GLOBAL_LOG.lock();
+        set_extra_sink(extra);
+        log(Level::Warn, format_args!("to the extra sink {}", 42));
+        raw(format_args!("URMQTT READY\n"));
+        let got = String::from_utf8(EXTRA_GOT.lock().unwrap().clone()).unwrap();
+        assert!(got.contains("WARN  to the extra sink 42\n"), "{got}");
+        assert!(got.ends_with("URMQTT READY\n"), "{got}");
     }
 
     /// ADR-256: a framebuffer that takes over (a virtio-gpu scanout) gets the

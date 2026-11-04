@@ -166,7 +166,12 @@ else
     CFG_TOML=${CONFIG:-$ROOT/deploy/$CFG_ENV/config.toml}
     [[ -f "$CFG_TOML" ]] || { echo "error: configuration $CFG_TOML not found" >&2; exit 1; }
     CFG_TOML=$(cd "$(dirname "$CFG_TOML")" && pwd)/$(basename "$CFG_TOML")
-    cfgtool pack "$CFG_TOML" --env "$CFG_ENV" ${CONFIG_ROOT:+--root "$CONFIG_ROOT"} --out-slot "$TMP/urmqtt.cfg" | sed "s|^|config ($CFG_ENV): |" >&2
+    # ADR-257: a [devices] key that asks for a driver a kernel of this image lacks is an error here.
+    KERNEL_ARGS=()
+    for k in ${KERNEL:+"$KERNEL"} ${KERNEL_A64:+"$KERNEL_A64"} ${KERNEL_X86:+"$KERNEL_X86"}; do
+        KERNEL_ARGS+=(--kernel "$(cd "$(dirname "$k")" && pwd)/$(basename "$k")")
+    done
+    cfgtool pack "$CFG_TOML" --env "$CFG_ENV" ${CONFIG_ROOT:+--root "$CONFIG_ROOT"} "${KERNEL_ARGS[@]}" --out-slot "$TMP/urmqtt.cfg" | sed "s|^|config ($CFG_ENV): |" >&2
 fi
 # H8, image secrecy: a production image holds the server's private key and, with encryption
 # at rest, the disk key, so who has the ISO has them. One that is built outside CI (GitHub

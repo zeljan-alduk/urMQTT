@@ -259,6 +259,11 @@ pub mod tag {
     pub const PL_RETAIN: u16 = 186;
     // The console (ADR-256): format version 5.
     pub const CON_VIRTIO_GPU: u16 = 190;
+    // The optional virtio drivers (ADR-257): format version 6.
+    pub const DEV_VIRTIO_CONSOLE: u16 = 191;
+    pub const DEV_VIRTIO_BALLOON: u16 = 192;
+    pub const DEV_VIRTIO_INPUT: u16 = 193;
+    pub const DEV_VIRTIO_VSOCK: u16 = 194;
 }
 
 use tag as t;
@@ -276,6 +281,17 @@ pub const WATCHDOG_ACTIONS: &[&str] = &["log", "drop", "reset"];
 pub const PLAINTEXT_AUTH: &[&str] = &["password", "anonymous", "ip"];
 /// Whether the console drives a virtio-gpu device (ADR-256).
 pub const VIRTIO_GPU_MODES: &[&str] = &["off", "auto", "on"];
+/// Whether an optional virtio driver runs (`[devices]`, ADR-257).
+pub const DEVICE_MODES: &[&str] = &["off", "auto", "on"];
+/// The `[devices]` keys, one per optional virtio driver (ADR-257): tag, key
+/// and the driver's feature (as `urmqtt_virtio::registry::KINDS` names it; a
+/// test there keeps the two equal).
+pub const DEVICE_KEYS: &[(u16, &str, &str)] = &[
+    (tag::DEV_VIRTIO_CONSOLE, "devices.virtio_console", "console"),
+    (tag::DEV_VIRTIO_BALLOON, "devices.virtio_balloon", "balloon"),
+    (tag::DEV_VIRTIO_INPUT, "devices.virtio_input", "input"),
+    (tag::DEV_VIRTIO_VSOCK, "devices.virtio_vsock", "vsock"),
+];
 
 /// Limits of the plaintext lists (they size arrays in the kernel).
 pub const MAX_PLAIN_NETWORKS: usize = 64;
@@ -1018,6 +1034,54 @@ pub static FIELDS: &[Field] = &[
             "Show the console on a virtio-gpu display (2D). off: never. auto: when the boot framebuffer is missing or is RAM nothing shows (edk2 virtio-gpu, e.g. netcup ARM). on: whenever a virtio-gpu is found. Format 5.",
         ),
         5,
+    ), // devices (ADR-257, ADR-258)
+    since(
+        f(
+            t::DEV_VIRTIO_CONSOLE,
+            "devices.virtio_console",
+            Kind::Enum {
+                variants: DEVICE_MODES,
+                default: 0,
+            },
+            "Drive a virtio-console (port 0): the log goes there too, and the Diagnostic entry reads its prompts' keys from it. off: never. auto: when one is found. on: when one is found, and say loudly when none is. Format 6.",
+        ),
+        6,
+    ),
+    since(
+        f(
+            t::DEV_VIRTIO_BALLOON,
+            "devices.virtio_balloon",
+            Kind::Enum {
+                variants: DEVICE_MODES,
+                default: 0,
+            },
+            "Drive a virtio-balloon: report total and free memory to the host. It never inflates (the heap is fixed). off: never. auto: when one is found. on: when one is found, and say loudly when none is. Format 6.",
+        ),
+        6,
+    ),
+    since(
+        f(
+            t::DEV_VIRTIO_INPUT,
+            "devices.virtio_input",
+            Kind::Enum {
+                variants: DEVICE_MODES,
+                default: 0,
+            },
+            "Drive virtio-input keyboards for the Diagnostic entry's prompts (a provider's VNC console). off: never. auto: when one is found. on: when one is found, and say loudly when none is. Format 6.",
+        ),
+        6,
+    ),
+    since(
+        f(
+            t::DEV_VIRTIO_VSOCK,
+            "devices.virtio_vsock",
+            Kind::Enum {
+                variants: DEVICE_MODES,
+                default: 0,
+            },
+            "Drive a virtio-vsock and serve the Diagnostic report, read-only, to the host on vsock port 2883. off: never. auto: when one is found. on: when one is found, and say loudly when none is. Format 6.",
+        ),
+        6,
     ),
 ];
 

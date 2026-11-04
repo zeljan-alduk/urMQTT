@@ -45,7 +45,7 @@ mod devices;
 mod diag;
 #[cfg(all(target_os = "none", feature = "selftest"))]
 mod dpbench;
-#[cfg(target_os = "none")]
+#[cfg(all(target_os = "none", feature = "virtio-gpu"))]
 mod gpucon;
 #[cfg(target_os = "none")]
 mod hardening;
@@ -91,6 +91,8 @@ mod tick;
 mod time_sync;
 #[cfg(target_os = "none")]
 mod trap;
+#[cfg(target_os = "none")]
+mod vdev;
 #[cfg(target_os = "none")]
 mod vm;
 #[cfg(target_os = "none")]

@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **A virtio driver framework** (ADR-257): every driver of `crates/virtio` behind its own Cargo feature, the umbrellas
+  `vps` (the MQTT image's set) and `all`; the kernel's default is `virtio-vps` (`make build VIRTIO=all` for every
+  driver). One table (`registry::KINDS` and the kernel's `vdev::DRIVERS`, kept in step by a build-time check); every
+  virtio device found is listed in the boot log (`virtio: <name> at <bdf>: <state>`) and in the Diagnostic report's
+  new `virtio` list, also those without a driver (`no driver in this image`). A `[devices]` section with one
+  `"off" | "auto" | "on"` key per optional driver, all off by default: configuration **format 6** only when a key is
+  not "off". `urmqtt-config pack --iso`/`--image`/`--kernel` refuses a key for a driver the image's kernel lacks (the
+  kernel carries a `URMQTT-VIRTIO-DRIVERS:` marker); the boot warns where that could not be checked.
+  docs/DEVELOPING-DRIVERS.md is the checklist for the next driver.
+- **virtio-console, virtio-balloon, virtio-input and virtio-vsock drivers** (ADR-258), each off unless configured:
+  the log on a virtio-console's port 0 and the Diagnostic prompts' keys from it; memory statistics for the host from
+  a balloon that never inflates (fixed heap; a host request is logged and refused); virtio keyboards for "press any
+  key" and `WIPE` from a provider's VNC console; the Diagnostic report, read-only, on vsock port 2883. Fuzz targets
+  `virtio_console_device`, `virtio_balloon_device`, `virtio_input_event`, `virtio_vsock_packet`; smoke
+  `virtio_devices` (QEMU HVF: console, balloon with QMP statistics, `WIPE` typed as QMP key events and on the
+  console). **vsock is untested against a real device** (needs vhost-vsock on a Linux host); none of the four has
+  run on a real VPS yet. The release kernels grow by about 80 KiB (aarch64, 2.3 %) and 67 KiB (x86_64, 1.9 %).
 - **A virtio-gpu (2D) console, optional and off by default** (ADR-256, NOW-6): `[console] virtio_gpu = "off" |
   "auto" | "on"`. For VMs whose firmware display goes dark after boot (netcup ARM: "Display output is not active").
   The kernel gives the device a framebuffer of its own on scanout 0, moves the log's console onto it (the lines

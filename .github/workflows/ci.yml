@@ -42,6 +42,9 @@ jobs:
         run: |
           cargo clippy --locked -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem -p urmqtt-kernel --target aarch64-unknown-none -- -D warnings
           cargo clippy --locked -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --features selftest -p urmqtt-kernel --target aarch64-unknown-none -- -D warnings
+          # The virtio driver sets (ADR-257): every driver, and none of the optional ones.
+          cargo clippy --locked -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --features virtio-all -p urmqtt-kernel --target aarch64-unknown-none -- -D warnings
+          cargo clippy --locked -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --no-default-features -p urmqtt-kernel --target aarch64-unknown-none -- -D warnings
       - name: TCB inventory up to date (docs/audit, AUDIT.md)
         run: python3 scripts/audit-inventory.py --check
       - name: No architecture-specific code outside crates/arch-* (ADR-040)
@@ -171,7 +174,8 @@ jobs:
   #   storage-* the disk scenarios (SMOKE_ONLY=storage), in two halves
   #   live      the live-mode scenarios
   #   misc      the other guarded ones (configuration, release kernel, plaintext, storm, attacks,
-  #             the virtio-gpu console with its QMP screendumps, ...)
+  #             the virtio-gpu console with its QMP screendumps, the optional virtio drivers
+  #             (virtio_devices: console, balloon, keyboard; QMP stats and key events), ...)
   #   hardening the H4 scenarios (MTE, ...)
   #   secrecy   H8, the production-image warning and the key-bytes scan
   # NOT in CI yet: the x86_64 and universal-ISO suites (--arch x86_64 and

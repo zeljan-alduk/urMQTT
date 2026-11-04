@@ -1,11 +1,13 @@
-//! virtio-pci modern transport, split virtqueues and the net, blk, scsi,
-//! rng and gpu (2D, for the console) devices (virtio 1.x).
+//! virtio-pci modern transport, split virtqueues and the virtio 1.x device
+//! drivers: net, blk, scsi, rng, gpu (2D, for the console), console,
+//! balloon, input and vsock, each behind its own Cargo feature (ADR-257);
+//! [`registry`] lists every device type, with or without a driver.
 //!
 //! Devices are driven synchronously by polling in M6; interrupts (MSI-X)
 //! are wired per queue by the caller. Everything a device returns (used
 //! ring indices, lengths, config values) is validated before use.
 
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(any(test, feature = "fake")), no_std)]
 #![deny(unsafe_code)]
 #![deny(
     clippy::unwrap_used,
@@ -14,14 +16,32 @@
     clippy::panic
 )]
 
+#[cfg(feature = "balloon")]
+pub mod balloon;
+#[cfg(feature = "blk")]
 pub mod blk;
+pub mod bus;
+#[cfg(feature = "console")]
+pub mod console;
+#[cfg(any(test, feature = "fake"))]
+pub mod fake;
+#[cfg(feature = "gpu")]
 pub mod gpu;
+#[cfg(feature = "input")]
+pub mod input;
+#[cfg(feature = "net")]
 pub mod net;
 pub mod queue;
+pub mod registry;
+#[cfg(feature = "rng")]
 pub mod rng;
+#[cfg(feature = "scsi")]
 pub mod scsi;
 pub mod transport;
+#[cfg(feature = "vsock")]
+pub mod vsock;
 
+pub use bus::Bus;
 pub use queue::{Buf, DmaRegion, QueueError, SplitQueue};
 pub use transport::{Region, Support, Transport, VirtioCaps, find_caps};
 
@@ -37,6 +57,10 @@ pub enum DeviceType {
     Scsi,
     /// virtio-gpu (and virtio-vga, the same device with a VGA BAR).
     Gpu,
+    Console,
+    Balloon,
+    Input,
+    Vsock,
     Other(u16),
 }
 
@@ -44,22 +68,23 @@ impl DeviceType {
     /// Type of a PCI function: modern IDs are 0x1040 + type, transitional
     /// IDs 0x1000..0x103f carry the type in the subsystem ID.
     pub fn from_pci(vendor: u16, device: u16, subsystem: u16) -> Option<Self> {
-        if vendor != VENDOR {
-            return None;
-        }
-        let t = match device {
-            0x1040..=0x107f => device - 0x1040,
-            0x1000..=0x103f => subsystem,
-            _ => return None,
-        };
-        Some(match t {
-            1 => Self::Net,
-            2 => Self::Block,
-            4 => Self::Entropy,
-            8 => Self::Scsi,
-            16 => Self::Gpu,
+        registry::type_of(vendor, device, subsystem).map(Self::from_id)
+    }
+
+    /// The type of virtio device ID `t`.
+    pub fn from_id(t: u16) -> Self {
+        match t {
+            registry::NET => Self::Net,
+            registry::BLOCK => Self::Block,
+            registry::CONSOLE => Self::Console,
+            registry::ENTROPY => Self::Entropy,
+            registry::BALLOON => Self::Balloon,
+            registry::SCSI => Self::Scsi,
+            registry::GPU => Self::Gpu,
+            registry::INPUT => Self::Input,
+            registry::VSOCK => Self::Vsock,
             other => Self::Other(other),
-        })
+        }
     }
 }
 
@@ -447,6 +472,22 @@ mod tests {
         assert_eq!(
             DeviceType::from_pci(VENDOR, 0x1050, 0),
             Some(DeviceType::Gpu)
+        );
+        assert_eq!(
+            DeviceType::from_pci(VENDOR, 0x1043, 0),
+            Some(DeviceType::Console)
+        );
+        assert_eq!(
+            DeviceType::from_pci(VENDOR, 0x1002, 5),
+            Some(DeviceType::Balloon)
+        );
+        assert_eq!(
+            DeviceType::from_pci(VENDOR, 0x1052, 0),
+            Some(DeviceType::Input)
+        );
+        assert_eq!(
+            DeviceType::from_pci(VENDOR, 0x1053, 0),
+            Some(DeviceType::Vsock)
         );
         assert_eq!(DeviceType::from_pci(0x8086, 0x1041, 0), None);
         assert_eq!(DeviceType::from_pci(VENDOR, 0x2000, 0), None);

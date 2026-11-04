@@ -39,13 +39,27 @@ urmqtt-pci = { path = "../pci" }
 urmqtt-platform = { path = "../platform" }
 urmqtt-tls = { path = "../tls" }
 urmqtt-usys = { path = "../usys" }
-urmqtt-virtio = { path = "../virtio" }
+# The drivers the kernel always runs (network, disks, entropy); the others
+# come with the virtio-* features below (ADR-257).
+urmqtt-virtio = { path = "../virtio", default-features = false, features = ["net", "blk", "scsi", "rng"] }
 # test=crypto-bench (dev images only): the same crates the TLS layer uses.
 aes-gcm = { version = "0.10", default-features = false, features = ["aes"], optional = true }
 chacha20poly1305 = { version = "0.10", default-features = false, optional = true }
 sha2 = { version = "0.11", default-features = false, optional = true }
 
 [features]
+# The virtio drivers (ADR-257). `virtio-vps`, the default, is the set of the
+# MQTT image (make build, universal, template, the builder's template);
+# `virtio-all` is every driver that exists, for custom images. virtio-net,
+# -blk, -scsi and -rng are always in (the dependency above).
+default = ["virtio-vps"]
+virtio-vps = ["virtio-gpu", "virtio-console", "virtio-balloon", "virtio-input", "virtio-vsock"]
+virtio-all = ["virtio-vps"]
+virtio-gpu = ["urmqtt-virtio/gpu"]
+virtio-console = ["urmqtt-virtio/console"]
+virtio-balloon = ["urmqtt-virtio/balloon"]
+virtio-input = ["urmqtt-virtio/input"]
+virtio-vsock = ["urmqtt-virtio/vsock"]
 # Dev images: in-guest benchmarks and self-tests that need a TLS client.
 # Production images are built without it (M17).
 # PERF (ADR-200): dev-only memcpy/memmove/memset profile of `test=dp-bench`.

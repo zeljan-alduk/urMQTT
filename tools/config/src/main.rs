@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! urmqtt-config pack CONFIG.toml [--env NAME] [--sign KEY.pem] [--root DIR] [--now UNIX]
+//!                    [--kernel ELF]...
 //!                    --out BLOB | --out-slot SLOT
 //!                    | --iso TEMPLATE.iso --out OUT.iso
 //!                    | --image DISK.img --out OUT.img
@@ -13,6 +14,9 @@
 //!       --out-slot SLOT   the 256 KiB slot file the bootloader loads
 //!       --iso/--image     write the configuration into a template ISO or a
 //!                         raw disk image (a copy; the template is not changed)
+//!       --kernel ELF      the kernel(s) the configuration is for: a [devices]
+//!                         key that is not "off" for a driver it lacks is an
+//!                         error (ADR-257; --iso and --image check their own)
 //! urmqtt-config slot BLOB OUT
 //!     Wraps a blob (or re-marks a slot) as the 256 KiB file the bootloader loads.
 //! urmqtt-config show FILE [--all]
@@ -44,7 +48,7 @@ use std::process::ExitCode;
 use urmqtt_config_tool::{PackArgs, image, release};
 
 fn usage() -> String {
-    "usage:\n  urmqtt-config pack CONFIG.toml [--env NAME] [--sign KEY.pem] [--root DIR] [--now UNIX] \
+    "usage:\n  urmqtt-config pack CONFIG.toml [--env NAME] [--sign KEY.pem] [--root DIR] [--now UNIX] [--kernel ELF]... \
      (--out BLOB | --out-slot SLOT | --iso TEMPLATE.iso --out OUT.iso | --image DISK.img --out OUT.img)\n  \
      urmqtt-config slot BLOB OUT\n  urmqtt-config show FILE [--all]\n  urmqtt-config verify FILE [--dev]\n  urmqtt-config schema\n  \
      urmqtt-config hash-password [--id NAME] [--iterations N]   (the password is read from standard input)\n  \
@@ -140,6 +144,10 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             let out_slot = take(&mut args, "--out-slot")?;
             let iso = take(&mut args, "--iso")?;
             let img = take(&mut args, "--image")?;
+            let mut kernels = Vec::new();
+            while let Some(k) = take(&mut args, "--kernel")? {
+                kernels.push(k);
+            }
             let [toml] = args.as_slice() else {
                 return Err(usage());
             };
@@ -152,6 +160,10 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
                 latest_format,
             })?;
             let desc = urmqtt_config_tool::verify_blob(&blob, true)?;
+            for k in &kernels {
+                let elf = std::fs::read(k).map_err(|e| format!("cannot read {k}: {e}"))?;
+                image::check_drivers(&blob, &elf).map_err(|e| format!("{k}: {e}"))?;
+            }
             match (out, out_slot, iso, img) {
                 (Some(o), None, None, None) => write(&o, &blob)?,
                 (None, Some(o), None, None) => write(&o, &urmqtt_config_tool::slot_of(&blob)?)?,

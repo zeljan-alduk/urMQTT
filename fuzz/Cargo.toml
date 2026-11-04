@@ -23,7 +23,7 @@ urmqtt-control = { path = "../crates/control" }
 urmqtt-plain = { path = "../crates/plain" }
 urmqtt-arch-aarch64 = { path = "../crates/arch-aarch64" }
 urmqtt-arch-x86_64 = { path = "../crates/arch-x86_64" }
-urmqtt-virtio = { path = "../crates/virtio" }
+urmqtt-virtio = { path = "../crates/virtio", features = ["fake"] }
 # X0b differential targets: the crates the kernel uses, against ring.
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
@@ -90,6 +90,34 @@ bench = false
 [[bin]]
 name = "virtio_gpu_response"
 path = "fuzz_targets/virtio_gpu_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "virtio_console_device"
+path = "fuzz_targets/virtio_console_device.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "virtio_balloon_device"
+path = "fuzz_targets/virtio_balloon_device.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "virtio_input_event"
+path = "fuzz_targets/virtio_input_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "virtio_vsock_packet"
+path = "fuzz_targets/virtio_vsock_packet.rs"
 test = false
 doc = false
 bench = false

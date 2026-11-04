@@ -36,6 +36,18 @@ pub struct Memory {
     pub reserved: u64,
 }
 
+/// A virtio function and what the kernel does with it (ADR-257).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VirtioFn {
+    pub bdf: String,
+    /// The virtio device ID.
+    pub ty: u16,
+    pub name: String,
+    /// `driven`, `off`, `no driver in this image`, ...
+    pub state: String,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct PciFn {
     pub bdf: String,
@@ -209,6 +221,8 @@ pub struct Report {
     pub cpu: Cpu,
     pub memory: Memory,
     pub pci: Vec<PciFn>,
+    /// The virtio functions among `pci`, with their driver state.
+    pub virtio: Vec<VirtioFn>,
     pub disks: Vec<Disk>,
     pub nics: Vec<Nic>,
     /// Network controllers with no driver here: `(vendor, device)`.
@@ -295,6 +309,18 @@ impl Report {
             j.str(Some("vendor_name"), &names::pci_vendor(p.vendor));
             j.str(Some("class"), names::pci_class(p.class, p.subclass));
             j.opt_str(Some("driver"), p.driver);
+            j.end_obj();
+        }
+        j.end_arr();
+
+        j.begin_arr(Some("virtio"));
+        for v in &self.virtio {
+            j.begin_obj(None);
+            j.str(Some("bdf"), &v.bdf);
+            j.u64(Some("type"), u64::from(v.ty));
+            j.str(Some("name"), &v.name);
+            j.str(Some("state"), &v.state);
+            j.str(Some("detail"), &v.detail);
             j.end_obj();
         }
         j.end_arr();
@@ -533,6 +559,22 @@ mod tests {
                 subclass: 0,
                 driver: Some("virtio-net"),
             }],
+            virtio: vec![
+                VirtioFn {
+                    bdf: "00:03.0".into(),
+                    ty: 1,
+                    name: "virtio-net".into(),
+                    state: "driven".into(),
+                    detail: "the network".into(),
+                },
+                VirtioFn {
+                    bdf: "00:07.0".into(),
+                    ty: 9,
+                    name: "virtio-9p".into(),
+                    state: "no driver".into(),
+                    detail: "type 9".into(),
+                },
+            ],
             disks: vec![Disk {
                 name: "virtio-blk 00:04.0".into(),
                 bus: "virtio-blk".into(),
@@ -642,6 +684,8 @@ mod tests {
             "\"cpu\":{",
             "\"memory\":{\"total_bytes\":1073741824",
             "\"pci\":[{\"bdf\":\"00:03.0\"",
+            "\"virtio\":[{\"bdf\":\"00:03.0\",\"type\":1,\"name\":\"virtio-net\",\"state\":\"driven\",\"detail\":\"the network\"},",
+            "{\"bdf\":\"00:07.0\",\"type\":9,\"name\":\"virtio-9p\",\"state\":\"no driver\",\"detail\":\"type 9\"}],",
             "\"vendor_name\":\"Red Hat (virtio)\"",
             "\"disks\":[{",
             "\"seq_read\":{\"mib_s\":64",

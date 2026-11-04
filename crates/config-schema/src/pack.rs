@@ -514,6 +514,14 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
             crate::VirtioGpuMode::On => 2,
         },
     )?;
+    // ADR-257: the same for every `[devices]` key; "auto" and "on" need format 6.
+    for ((tag, key, _), (k, mode)) in urmqtt_cfg::fields::DEVICE_KEYS
+        .iter()
+        .zip(cfg.devices.iter())
+    {
+        debug_assert_eq!(*key, k);
+        b.variant(*tag, mode.variant())?;
+    }
     Ok(b)
 }
 

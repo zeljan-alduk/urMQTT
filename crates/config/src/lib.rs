@@ -219,6 +219,75 @@ pub struct Console {
     pub virtio_gpu: VirtioGpuMode,
 }
 
+/// Whether an optional virtio driver runs (`[devices]`, ADR-257).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceMode {
+    /// Never (the default): the driver is not started.
+    Off,
+    /// When a device is found.
+    Auto,
+    /// When a device is found; its absence or failure is a warning.
+    On,
+}
+
+impl DeviceMode {
+    /// The TOML word.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::On => "on",
+        }
+    }
+
+    const fn from_variant(v: u8) -> Self {
+        match v {
+            1 => Self::Auto,
+            2 => Self::On,
+            _ => Self::Off,
+        }
+    }
+}
+
+/// The `[devices]` section (ADR-257): one mode per optional virtio driver,
+/// in the order of `urmqtt_cfg::fields::DEVICE_KEYS`.
+#[derive(Debug, Clone, Copy)]
+pub struct Devices {
+    modes: [DeviceMode; urmqtt_cfg::fields::DEVICE_KEYS.len()],
+}
+
+impl Devices {
+    pub const OFF: Self = Self {
+        modes: [DeviceMode::Off; urmqtt_cfg::fields::DEVICE_KEYS.len()],
+    };
+
+    /// The mode of `key` (`devices.virtio_console`, ...); `None` for a key
+    /// that is not in the section.
+    pub fn mode(&self, key: &str) -> Option<DeviceMode> {
+        urmqtt_cfg::fields::DEVICE_KEYS
+            .iter()
+            .position(|(_, k, _)| *k == key)
+            .and_then(|i| self.modes.get(i).copied())
+    }
+
+    /// Every key with its mode.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, DeviceMode)> + '_ {
+        urmqtt_cfg::fields::DEVICE_KEYS
+            .iter()
+            .zip(self.modes.iter())
+            .map(|((_, k, _), m)| (*k, *m))
+    }
+
+    /// From the blob's variants (each tag of `DEVICE_KEYS`).
+    pub fn from_variants(get: impl Fn(u16) -> u8) -> Self {
+        let mut d = Self::OFF;
+        for (m, (t, _, _)) in d.modes.iter_mut().zip(urmqtt_cfg::fields::DEVICE_KEYS) {
+            *m = DeviceMode::from_variant(get(*t));
+        }
+        d
+    }
+}
+
 /// Where the data store ends up for this boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backing {
@@ -422,6 +491,7 @@ pub struct BuildConfig {
     pub trust: Trust,
     pub plaintext: Plaintext,
     pub console: Console,
+    pub devices: Devices,
 }
 
 impl BuildConfig {

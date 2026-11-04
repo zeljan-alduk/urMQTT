@@ -13,7 +13,9 @@ mod png;
 use std::process::ExitCode;
 
 use urmqtt_diag::dash::{self, Canvas, Rgb, Status};
-use urmqtt_diag::report::{CryptoBench, Firmware, Memory, Nic, PciFn, RamBench, Report, TimeInfo};
+use urmqtt_diag::report::{
+    CryptoBench, Firmware, Memory, Nic, PciFn, RamBench, Report, TimeInfo, VirtioFn,
+};
 use urmqtt_log::fbcon::{FbConsole, PixelFormat};
 
 use json::Value;
@@ -140,6 +142,19 @@ fn report(j: &Value) -> Result<Report, String> {
             class: class_code(&str_of(p, "class")).0,
             subclass: class_code(&str_of(p, "class")).1,
             driver: p.get("driver").and_then(Value::as_str).map(leak),
+        });
+    }
+    // ADR-257: the virtio functions with their driver state (absent before it).
+    for v in j.get("virtio").and_then(Value::as_arr).unwrap_or_default() {
+        r.virtio.push(VirtioFn {
+            bdf: str_of(v, "bdf"),
+            ty: v
+                .get("type")
+                .and_then(Value::as_f64)
+                .map_or(0, |f| f as u16),
+            name: str_of(v, "name"),
+            state: str_of(v, "state"),
+            detail: str_of(v, "detail"),
         });
     }
     for n in j.get("nics").and_then(Value::as_arr).unwrap_or_default() {
@@ -426,6 +441,33 @@ mod tests {
         assert_eq!(d.seq_read.unwrap().mib_s, 332);
         assert!(
             matches!(&d.write, urmqtt_diag::report::WriteState::Skipped(w) if w == "no unallocated space")
+        );
+    }
+
+    /// ADR-257: the virtio list with its driver states comes back; a report
+    /// from before it (no "virtio" key) still draws.
+    #[test]
+    fn the_virtio_states_come_back() {
+        let mut r = Report::default();
+        r.virtio.push(VirtioFn {
+            bdf: "00:04.0".into(),
+            ty: 18,
+            name: "virtio-input".into(),
+            state: "driven".into(),
+            detail: "\"QEMU Virtio Keyboard\", keyboard".into(),
+        });
+        let back = report(&json::parse(&r.to_json()).unwrap()).unwrap();
+        assert_eq!(back.virtio, r.virtio);
+        let old = r.to_json().replace(
+            &format!(",\"virtio\":{}", "[{\"bdf\":\"00:04.0\",\"type\":18,\"name\":\"virtio-input\",\"state\":\"driven\",\"detail\":\"\\\"QEMU Virtio Keyboard\\\", keyboard\"}]"),
+            "",
+        );
+        assert!(!old.contains("\"virtio\""), "{old}");
+        assert!(
+            report(&json::parse(&old).unwrap())
+                .unwrap()
+                .virtio
+                .is_empty()
         );
     }
 

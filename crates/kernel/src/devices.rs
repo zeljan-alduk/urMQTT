@@ -22,8 +22,10 @@ use urmqtt_store::{BlockDevice, IoError};
 use urmqtt_sync::sync::SpinLock;
 use urmqtt_tls::rng::{Csprng, EntropyPool, Source};
 use urmqtt_virtio::blk::VirtioBlk;
+#[cfg(feature = "virtio-gpu")]
 use urmqtt_virtio::gpu::{AutoChoice, VirtioGpu, auto_choice};
 use urmqtt_virtio::net::VirtioNet;
+use urmqtt_virtio::registry::{self, State};
 use urmqtt_virtio::rng::VirtioRng;
 use urmqtt_virtio::scsi::{DiskInfo, ScsiDisk, VirtioScsi};
 use urmqtt_virtio::transport::CapLoc;
@@ -31,7 +33,7 @@ use urmqtt_virtio::{
     DeviceType, DmaRegion, Env, Region, Support, Transport, VirtioCaps, VirtioError, find_caps,
 };
 
-use crate::{irq, memory, vm};
+use crate::{irq, memory, vdev, vm};
 
 /// ECAM configuration space mapped at `va`.
 pub struct Ecam {
@@ -648,7 +650,7 @@ fn region<C: ConfigSpace>(
     Ok(unsafe { Region::new(va, loc.length as usize) })
 }
 
-fn transport<C: ConfigSpace>(
+pub(crate) fn transport<C: ConfigSpace>(
     cfg: &mut C,
     bdf: Bdf,
     caps: &VirtioCaps,
@@ -856,15 +858,17 @@ fn probe_pci(
     let mut v2m = msi_frame(platform);
     let functions = pci::enumerate(&ecam, bus_start, bus_end);
     info!("pci: {how}, {} function(s)", functions.len());
+    info!(
+        "virtio: drivers in this image: {}",
+        vdev::drivers_in_image()
+    );
     // The first virtio-gpu and the display controllers, for the console
     // (ADR-256), brought up after the enumeration.
     let mut gpu: Option<(Bdf, u16)> = None;
     let mut displays: alloc::vec::Vec<Bdf> = alloc::vec::Vec::new();
     for f in functions.iter() {
-        let kind = DeviceType::from_pci(f.vendor, f.device, f.subsystem);
-        if kind == Some(DeviceType::Gpu) && gpu.is_none() {
-            gpu = Some((f.bdf, f.device));
-        }
+        let ty = registry::type_of(f.vendor, f.device, f.subsystem);
+        let kind = ty.map(DeviceType::from_id);
         if f.class == 0x03 && displays.len() < 8 {
             displays.push(f.bdf);
         }
@@ -877,21 +881,14 @@ fn probe_pci(
             }
         }
         info!(
-            "pci {} {:04x}:{:04x} class {:02x}.{:02x}{}",
+            "pci {} {:04x}:{:04x} class {:02x}.{:02x}{}{}",
             f.bdf,
             f.vendor,
             f.device,
             f.class,
             f.subclass,
-            match kind {
-                Some(DeviceType::Net) => " virtio-net",
-                Some(DeviceType::Block) => " virtio-blk",
-                Some(DeviceType::Entropy) => " virtio-rng",
-                Some(DeviceType::Scsi) => " virtio-scsi",
-                Some(DeviceType::Gpu) => " virtio-gpu",
-                Some(DeviceType::Other(_)) => " virtio (unused)",
-                None => "",
-            }
+            if ty.is_some() { " " } else { "" },
+            ty.map_or("", registry::type_name)
         );
         PCI_SEEN.lock().push(PciSeen {
             bdf: alloc::format!("{}", f.bdf),
@@ -907,9 +904,28 @@ fn probe_pci(
                 _ => None,
             },
         });
-        let Some(kind) = kind else { continue };
+        let (Some(ty), Some(kind)) = (ty, kind) else {
+            continue;
+        };
+        // Every type without a path of its own (ADR-257): the table decides.
+        if !matches!(vdev::driver(ty).map(|d| d.path), Some(vdev::Path::Builtin)) {
+            vdev::probe_generic(&mut ecam, env, f.bdf, f.device, ty);
+            continue;
+        }
         // The virtio-gpu is left alone here: `virtio_gpu_console` decides.
-        if matches!(kind, DeviceType::Other(_) | DeviceType::Gpu) {
+        if kind == DeviceType::Gpu {
+            if !registry::kind_of(ty).is_some_and(|k| k.compiled) {
+                vdev::record(
+                    f.bdf,
+                    ty,
+                    State::NotCompiled,
+                    "built without the kernel feature virtio-gpu",
+                );
+            } else if gpu.is_none() {
+                gpu = Some((f.bdf, f.device));
+            } else {
+                vdev::record(f.bdf, ty, State::Spare, "");
+            }
             continue;
         }
         let caps = find_caps(&ecam, f.bdf);
@@ -927,6 +943,7 @@ fn probe_pci(
                      attach it as a modern device (disable-legacy=on)",
                     f.bdf, f.vendor, f.device
                 );
+                vdev::record(f.bdf, ty, State::Legacy, &io);
                 if matches!(kind, DeviceType::Net) {
                     let mut list = OTHER_NICS.lock();
                     if list.len() < 4 {
@@ -940,6 +957,7 @@ fn probe_pci(
                     "pci {}: virtio {:04x}:{:04x} lacks the required virtio 1.0 capabilities, ignored",
                     f.bdf, f.vendor, f.device
                 );
+                vdev::record(f.bdf, ty, State::Incomplete, "");
                 continue;
             }
         }
@@ -950,6 +968,7 @@ fn probe_pci(
                     transport(&mut ecam, f.bdf, &caps, true)?,
                     env,
                 )?);
+                vdev::record(f.bdf, ty, State::Driven, "entropy");
             }
             DeviceType::Block => {
                 // Sizing the BARs (in `transport`) briefly turns decoding
@@ -974,6 +993,12 @@ fn probe_pci(
                     irq::register(spi, ignore_irq);
                 }
                 if install_mode() {
+                    vdev::record(
+                        f.bdf,
+                        ty,
+                        State::Driven,
+                        "a disk candidate (install, diagnostic)",
+                    );
                     devs.install.push(InstallDisk {
                         name: alloc::format!("virtio-blk {}", f.bdf),
                         sectors: blk.capacity_sectors,
@@ -989,6 +1014,7 @@ fn probe_pci(
                         f.bdf,
                         (blk.capacity_sectors * 512) >> 20
                     );
+                    vdev::record(f.bdf, ty, State::NotUsed, "not the boot disk");
                     devs.other_disks += 1;
                     continue;
                 }
@@ -1016,6 +1042,7 @@ fn probe_pci(
                         "not available (a larger disk is taken up at the next boot)"
                     }
                 );
+                vdev::record(f.bdf, ty, State::Driven, "the boot disk");
                 devs.blk_msix_spi = spi;
                 devs.blk = Some(DataDisk::Blk(blk));
             }
@@ -1023,6 +1050,7 @@ fn probe_pci(
                 let mut hba = VirtioScsi::new(transport(&mut ecam, f.bdf, &caps, false)?, env)?;
                 let (disks, n) = hba.scan(env);
                 info!("scsi: {} {n} disk(s) with 512-byte blocks", f.bdf);
+                vdev::record(f.bdf, ty, State::Driven, &alloc::format!("{n} disk(s)"));
                 if install_mode() {
                     let idx = devs.hbas.len();
                     for d in disks.iter().take(n).flatten() {
@@ -1102,20 +1130,27 @@ fn probe_pci(
                     m[5],
                     if net.link_up() { "up" } else { "down" }
                 );
+                vdev::record(f.bdf, ty, State::Driven, "the network");
                 devs.net = Some(net);
             }
-            _ => {}
+            _ => vdev::record(f.bdf, ty, State::Spare, ""),
         }
     }
+    #[cfg(feature = "virtio-gpu")]
     virtio_gpu_console(&mut ecam, env, gpu, &displays);
+    #[cfg(not(feature = "virtio-gpu"))]
+    let _ = (gpu, &displays);
+    vdev::check_configuration();
     Ok(())
 }
 
 /// Largest framebuffer the virtio-gpu console allocates: 1920x1080 at 4
 /// bytes per pixel fits.
+#[cfg(feature = "virtio-gpu")]
 const GPU_FB_BUDGET: u64 = 8 << 20;
 
 /// The memory BARs of `bdf` as (index, base, size).
+#[cfg(feature = "virtio-gpu")]
 fn memory_bars<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> alloc::vec::Vec<(u8, u64, u64)> {
     let mut out = alloc::vec::Vec::new();
     let mut i = 0u8;
@@ -1137,7 +1172,9 @@ fn memory_bars<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> alloc::vec::Vec<(u8, u6
 /// `console.virtio_gpu` (ADR-256): whether the console moves to the first
 /// virtio-gpu, and why. Every outcome is logged as `console: virtio-gpu ...`;
 /// a device that fails to come up leaves the console where it was (a
-/// display problem never stops the broker), loudly.
+/// display problem never stops the broker), loudly. The outcome is also
+/// recorded for the Diagnostic report (`virtio: virtio-gpu at ...`).
+#[cfg(feature = "virtio-gpu")]
 fn virtio_gpu_console(cfg: &mut Cfg, env: &KernelEnv, gpu: Option<(Bdf, u16)>, displays: &[Bdf]) {
     use urmqtt_config::VirtioGpuMode;
     let mode = urmqtt_config::CONFIG.console.virtio_gpu;
@@ -1153,6 +1190,12 @@ fn virtio_gpu_console(cfg: &mut Cfg, env: &KernelEnv, gpu: Option<(Bdf, u16)>, d
     let why = match mode {
         VirtioGpuMode::Off => {
             info!("console: virtio-gpu at pci {bdf} not used (console.virtio_gpu = \"off\")");
+            vdev::record(
+                bdf,
+                registry::GPU,
+                State::Off,
+                "console.virtio_gpu = \"off\"",
+            );
             return;
         }
         VirtioGpuMode::On => "console.virtio_gpu = \"on\"",
@@ -1175,6 +1218,12 @@ fn virtio_gpu_console(cfg: &mut Cfg, env: &KernelEnv, gpu: Option<(Bdf, u16)>, d
                         "console: virtio-gpu at pci {bdf} not used (auto): the boot framebuffer is in BAR{bar} \
                          of display pci {owner}, which shows it"
                     );
+                    vdev::record(
+                        bdf,
+                        registry::GPU,
+                        State::NotUsed,
+                        "auto: the boot framebuffer is shown",
+                    );
                     return;
                 }
             }
@@ -1183,6 +1232,7 @@ fn virtio_gpu_console(cfg: &mut Cfg, env: &KernelEnv, gpu: Option<(Bdf, u16)>, d
     let caps = find_caps(cfg, bdf);
     if caps.support(device, true) != Support::Modern {
         warn!("console: virtio-gpu at pci {bdf}: no virtio 1.0 capabilities, not used ({why})");
+        vdev::record(bdf, registry::GPU, State::Incomplete, why);
         return;
     }
     pci::enable(cfg, bdf, pci::CMD_MEMORY | pci::CMD_BUS_MASTER);
@@ -1190,6 +1240,7 @@ fn virtio_gpu_console(cfg: &mut Cfg, env: &KernelEnv, gpu: Option<(Bdf, u16)>, d
         Ok(t) => t,
         Err(e) => {
             warn!("console: virtio-gpu at pci {bdf}: mapping failed ({e:?}), not used ({why})");
+            vdev::record(bdf, registry::GPU, State::Failed, "mapping failed");
             return;
         }
     };
@@ -1199,11 +1250,15 @@ fn virtio_gpu_console(cfg: &mut Cfg, env: &KernelEnv, gpu: Option<(Bdf, u16)>, d
             if let Some(seen) = PCI_SEEN.lock().iter_mut().find(|p| p.bdf == name) {
                 seen.driver = Some("virtio-gpu");
             }
+            vdev::record(bdf, registry::GPU, State::Driven, "the console");
             crate::gpucon::install(dev, &name, why);
         }
-        Err(e) => warn!(
-            "console: virtio-gpu at pci {bdf}: {e:?}: not used, the console stays on the boot framebuffer ({why})"
-        ),
+        Err(e) => {
+            warn!(
+                "console: virtio-gpu at pci {bdf}: {e:?}: not used, the console stays on the boot framebuffer ({why})"
+            );
+            vdev::record(bdf, registry::GPU, State::Failed, &alloc::format!("{e:?}"));
+        }
     }
 }
 

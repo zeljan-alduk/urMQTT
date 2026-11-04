@@ -144,6 +144,21 @@ fn check_blob(blob: &[u8]) -> Result<(), String> {
     verify_blob(blob, true).map(|_| ())
 }
 
+/// ADR-257: refuses a configuration whose `[devices]` keys ask for a virtio
+/// driver that a kernel in `image` (an ISO, a raw image or a kernel ELF) was
+/// built without. An image whose kernels carry no driver marker predates the
+/// keys; its format version refuses them (checked separately).
+pub fn check_drivers(blob: &[u8], image: &[u8]) -> Result<(), String> {
+    let parsed = urmqtt_cfg::Blob::parse(blob).map_err(|e| format!("{e:?}"))?;
+    match urmqtt_cfg::drivers::first_missing(&parsed, image) {
+        None => Ok(()),
+        Some((key, feature)) => Err(format!(
+            "{key} is not \"off\", but a kernel of this image was built without the virtio-{feature} driver: \
+             set it to \"off\", or use an image built with it (the kernel feature virtio-{feature}, part of virtio-vps)"
+        )),
+    }
+}
+
 /// A copy of the template ISO with `blob` as its configuration: every boot
 /// slot replaced, every module hash in the `limine.conf` copies updated.
 pub fn configure_iso(iso: &[u8], blob: &[u8]) -> Result<Patched, String> {
@@ -184,6 +199,7 @@ pub fn configure_iso_in_place(iso: &mut [u8], blob: &[u8]) -> Result<String, Str
             version_of(blob)
         ));
     }
+    check_drivers(blob, iso)?;
     let old_hash = slot_hash(&old);
     // The menu's limine.conf as the template has it, to find the loaders enrolled with it (H8).
     let menu = conf_copies(iso, MENU_CONF_START)?;
@@ -275,6 +291,7 @@ pub fn probe(iso: &[u8]) -> Result<Probe, String> {
 /// configuration: its unconfigured slot, or its configured one, replaced.
 pub fn configure_raw(img: &[u8], blob: &[u8]) -> Result<Patched, String> {
     check_blob(blob)?;
+    check_drivers(blob, img)?;
     let new_slot = make_slot(SlotKind::Boot, blob)
         .ok_or("the configuration does not fit in a 256 KiB slot")?;
     let mut offs = find_slots(img, SlotKind::Disk);

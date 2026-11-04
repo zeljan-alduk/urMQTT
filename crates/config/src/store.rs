@@ -19,10 +19,10 @@ use urmqtt_cfg::fields::tag;
 use urmqtt_cfg::{CfgError, fields};
 
 use crate::{
-    Acl, BuildConfig, Cidr, Console, Control, Cpu, DEV_KERNEL, DiscardMode, Entropy, IdentityField,
-    Ipv4Cidr, Limits, LogLevel, Memory, Network, NetworkMode, Observability, PlainAuth,
-    PlainNetwork, PlainUser, Plaintext, Rate, Registry, SocketAddrV4, Storage, StorageMode, Time,
-    Tls, Trust, VirtioGpuMode, Watchdog, WatchdogAction,
+    Acl, BuildConfig, Cidr, Console, Control, Cpu, DEV_KERNEL, Devices, DiscardMode, Entropy,
+    IdentityField, Ipv4Cidr, Limits, LogLevel, Memory, Network, NetworkMode, Observability,
+    PlainAuth, PlainNetwork, PlainUser, Plaintext, Rate, Registry, SocketAddrV4, Storage,
+    StorageMode, Time, Tls, Trust, VirtioGpuMode, Watchdog, WatchdogAction,
 };
 
 /// Room for every plain-text string list of the field table at its
@@ -401,6 +401,7 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
                 _ => VirtioGpuMode::Off,
             },
         },
+        devices: Devices::from_variants(|t| b.variant(t)),
     }
 }
 
@@ -665,6 +666,45 @@ mod tests {
             })
         );
         assert_eq!(c.memory.kernel_heap_mb, 128);
+    }
+
+    /// ADR-257: every `[devices]` key is off by default (the empty blob, and
+    /// every blob before format 6); auto and on are decoded per key.
+    #[test]
+    fn the_device_keys_are_off_by_default_and_decoded() {
+        use crate::DeviceMode;
+        use urmqtt_cfg::build::Builder;
+        use urmqtt_cfg::fields::DEVICE_KEYS;
+        assert!(CONFIG.devices.iter().all(|(_, m)| m == DeviceMode::Off));
+        assert_eq!(CONFIG.devices.iter().count(), DEVICE_KEYS.len());
+        assert_eq!(CONFIG.devices.mode("devices.nothing"), None);
+        for (i, &(t, key, _)) in DEVICE_KEYS.iter().enumerate() {
+            let mode = if i % 2 == 0 {
+                DeviceMode::On
+            } else {
+                DeviceMode::Auto
+            };
+            let mut b = Builder::new();
+            b.variant(t, if mode == DeviceMode::On { 2 } else { 1 })
+                .unwrap();
+            let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+            let blob = Blob::parse(bytes).unwrap();
+            assert_eq!(blob.version(), 6);
+            let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+            let d = build(&blob, arena).devices;
+            for (k, m) in d.iter() {
+                assert_eq!(m, if k == key { mode } else { DeviceMode::Off }, "{k}");
+            }
+            assert_eq!(d.mode(key), Some(mode));
+        }
+        assert_eq!(
+            (
+                DeviceMode::Off.name(),
+                DeviceMode::Auto.name(),
+                DeviceMode::On.name()
+            ),
+            ("off", "auto", "on")
+        );
     }
 
     /// ADR-256: off by default (the empty blob, and every blob before format

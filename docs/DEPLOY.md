@@ -187,6 +187,22 @@ RAM, and leaves a virtio-gpu alone when the framebuffer is in a display controll
 which show it). The boot log says what was chosen and why (`console: virtio-gpu ...`). Anything but `"off"` needs a
 kernel that reads configuration format 5; an older template refuses such a configuration when it is packed.
 
+**The optional virtio drivers (ADR-257, ADR-258).** `[devices]` has one key per optional driver, each `"off"` (the
+default, and the production template's), `"auto"` (start the driver when the device is found) or `"on"` (the same,
+and a warning when there is none):
+
+| Key | Device | What it does |
+|---|---|---|
+| `virtio_console` | virtio-console (`virtconsole`), port 0 | a copy of the log, and the Diagnostic entry's prompts read their keys from it |
+| `virtio_balloon` | virtio-balloon | total, free and available memory for the host's statistics; **never inflates** (the heap is fixed): a host request is logged and refused |
+| `virtio_input` | virtio-input keyboards (up to 4) | the Diagnostic entry's "press any key" and `WIPE` from a provider's VNC console that feeds a virtio keyboard |
+| `virtio_vsock` | virtio-vsock | the Diagnostic report (the JSON of `$SYS/diag/report`), read-only, to the host on vsock port 2883 (`socat - VSOCK-CONNECT:<cid>:2883`); **not yet tried on a real device** |
+
+Every virtio device the kernel finds is in the boot log (`virtio: <name> at <bdf>: <state>`) and in the Diagnostic
+report, also those without a driver (`no driver in this image`, `no driver`). Anything but `"off"` needs a kernel
+that reads configuration format 6 and was built with the driver; `urmqtt-config pack --iso` (and the builder page)
+refuses a template without it. The release images carry all four (`virtio-vps`, ADR-257).
+
 **Single-disk model (S1, STORAGE-PLAN §2a).** The disk the VM boots from is
 the only one urMQTT writes:
 - It finds that disk by the GPT disk GUID the bootloader reports.

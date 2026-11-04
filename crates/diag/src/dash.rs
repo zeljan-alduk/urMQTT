@@ -305,7 +305,11 @@ fn pci_lines(r: &Report) -> Vec<Line> {
                     p.device,
                     fmt::left(names::pci_class(p.class, p.subclass), 20),
                     names::pci_vendor(p.vendor),
-                    p.driver.map_or(String::new(), |d| format!(" [{d}]")),
+                    // A virtio function shows its driver state (ADR-257).
+                    match r.virtio.iter().find(|v| v.bdf == p.bdf) {
+                        Some(v) => format!(" [{}: {}]", v.name, v.state),
+                        None => p.driver.map_or(String::new(), |d| format!(" [{d}]")),
+                    },
                 ),
                 TEXT,
             )
@@ -869,6 +873,15 @@ mod tests {
                     driver: Some("virtio-net"),
                 })
                 .collect(),
+            virtio: (0..40)
+                .map(|i| VirtioFn {
+                    bdf: format!("00:{i:02x}.0"),
+                    ty: 1,
+                    name: "virtio-net".into(),
+                    state: if i == 0 { "driven" } else { "not used (another device of this type is driven)" }.into(),
+                    detail: String::new(),
+                })
+                .collect(),
             disks: vec![
                 Disk {
                     name: "virtio-scsi 00:05.0 target 0 lun 0".into(),
@@ -944,6 +957,43 @@ mod tests {
             .map(|t| t.2.as_str())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// ADR-257: a virtio function's line names its driver state.
+    #[test]
+    fn virtio_functions_show_their_driver_state() {
+        let mut r = Report::default();
+        for (bdf, dev) in [
+            ("00:02.0", 0x1041u16),
+            ("00:05.0", 0x1053),
+            ("00:06.0", 0x1234),
+        ] {
+            r.pci.push(PciFn {
+                bdf: bdf.into(),
+                vendor: 0x1af4,
+                device: dev,
+                class: 2,
+                subclass: 0,
+                driver: (dev == 0x1041).then_some("virtio-net"),
+            });
+        }
+        r.virtio.push(VirtioFn {
+            bdf: "00:05.0".into(),
+            ty: 19,
+            name: "virtio-vsock".into(),
+            state: "off".into(),
+            detail: String::new(),
+        });
+        let text: Vec<String> = pci_lines(&r)
+            .into_iter()
+            .map(|l| match l {
+                Line::Text(t, _) => t,
+                _ => String::new(),
+            })
+            .collect();
+        assert!(text[0].ends_with(" [virtio-net]"), "{}", text[0]);
+        assert!(text[1].ends_with(" [virtio-vsock: off]"), "{}", text[1]);
+        assert!(!text[2].contains('['), "{}", text[2]);
     }
 
     #[test]

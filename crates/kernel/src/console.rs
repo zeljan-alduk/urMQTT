@@ -58,6 +58,7 @@ pub fn init_framebuffer(fb: &Framebuffer) {
 /// Physical address and length of the bootloader's framebuffer the console
 /// draws on, if there is a usable one. Limine hands it out as an HHDM
 /// address whether it is RAM or a device BAR.
+#[cfg_attr(not(feature = "virtio-gpu"), allow(dead_code))]
 pub fn boot_framebuffer_phys() -> Option<(u64, u64)> {
     // Relaxed: see `init_framebuffer`.
     let (va, len) = (
