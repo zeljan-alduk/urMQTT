@@ -9,7 +9,7 @@ Every artifact here is pinned to an exact version and verified against
 | `sqlite/` | Official SQLite amalgamation (`sqlite3.c`, `sqlite3.h`) | M11 |
 | `cpufeatures-0.2.17/`, `cpufeatures-0.3.1/` | RustCrypto `cpufeatures`, patched for `target_os = "none"` (below) | X0b |
 | `primeorder-0.14.0/` | RustCrypto `primeorder`, fixed-base table without `std` (below) | PERF |
-| `nistz256/` | P-256 assembly for x86_64 (OpenSSL/Intel `nistz256`, via ring) and the generator's comb table (below) | PERF |
+| `nistz256/` | P-256 assembly for x86_64 and aarch64 (OpenSSL `nistz256`, via ring) and the generator's comb table (below) | PERF |
 
 ## `cpufeatures` (X0b, X9; ADR-041, ADR-053, ADR-070)
 
@@ -49,7 +49,7 @@ rerun the boot KATs and the `diff_*` fuzz targets.
 `vendor/primeorder-0.14.0` is the crates.io source with one file changed, `src/tables/basepoint.rs`: the basepoint table's lazy cell is an atomics-only once-cell instead of `std::sync::LazyLock` / `once_cell` + `critical-section` (the `compile_error!` that required one of them is removed), and `BasepointTable::from_point` builds the table of an arbitrary point eagerly (trust-anchor keys). No arithmetic changed. `Cargo.toml.orig`, `.cargo-ok`, `.cargo_vcs_info.json` and `Cargo.lock` are not copied. Wired in with `[patch.crates-io]` in the root and `fuzz/` manifests. Upstream `.crate` SHA-256: `5c9f42978c78a00e3d68f69fc03e57a234debae69da4020a4fb588fcdcd07b06`. To review: unpack the upstream crate and `diff -r` against the directory. To update: copy the new version and reapply the two hunks, then rerun the boot KATs and `cargo test -p urmqtt-tls`.
 
 
-## `nistz256` (PERF; ADR-130)
+## `nistz256` (PERF; ADR-130, ADR-255)
 
 Source: the pregenerated GNU-assembler output `pregenerated/p256-x86_64-asm-elf.S` and the table `crypto/fipsmodule/ec/p256-nistz-table.h` of **ring 0.17.14** (crates.io `.crate` SHA-256 `a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7`). ring generates the assembly from BoringSSL's `p256-x86_64-asm.pl`, which is OpenSSL's `ecp_nistz256-x86_64.pl`: Copyright 2014-2016 The OpenSSL Project Authors, Copyright (c) 2014 Intel Corporation, Copyright (c) 2015 CloudFlare, Inc.; originally by Shay Gueron and Vlad Krasnov. **License: Apache-2.0** (the header of every file says so; the text is `vendor/nistz256/LICENSE-BoringSSL`, which is ring's copy of BoringSSL's license file and begins with the Apache License 2.0). Apache-2.0 is the license of this workspace's own dual license, so redistribution needs only this notice and the preserved headers.
 
@@ -60,3 +60,12 @@ Source: the pregenerated GNU-assembler output `pregenerated/p256-x86_64-asm-elf.
 | `derive.py` | regenerates both from the unpacked ring crate | |
 
 Changes to the assembly, all mechanical: the `#include`/`#if` lines and the `_CET_ENDBR` markers are removed, the two AVX2 select functions are removed (the kernel keeps no AVX state, ADR-042), `//` comment lines become `#`, and every symbol is renamed `ecp_nistz256_*` -> `urmqtt_nistz256_*` (so it cannot clash with another copy in a binary). Nothing is edited by hand. The assembler (LLVM's, through `global_asm!`) accepts MULX/ADCX/ADOX whatever the target features say. To review: run `derive.py` on the pristine crate and `diff`; the table is also checked entry by entry against RustCrypto's `k*G` in `cargo test -p urmqtt-nistz256`. Used by `crates/nistz256` (the only user), x86_64 on Linux and bare metal only.
+
+**aarch64 (ADR-255).** Source: `pregenerated/p256-armv8-asm-linux64.S` of the same ring 0.17.14 (SHA-256 of that file `48a08da50c5177aaf315c4d36ccb41715563459df3e32bb02c26b41e680b58dc`), generated from BoringSSL's `p256-armv8-asm.pl`, which is OpenSSL's `ecp_nistz256-armv8.pl`: Copyright 2015-2020 The OpenSSL Project Authors, written by Andy Polyakov for the OpenSSL project. **License: Apache-2.0** (the header of the Perl source; the same `LICENSE-BoringSSL` text, ring's copy, identical byte for byte to the one in ring 0.17.14).
+
+| File | Content | SHA-256 |
+|---|---|---|
+| `p256-armv8-asm.S` | Montgomery 4x64 field multiplication/squaring/negation, order-field multiplication/squaring, point doubling/addition/mixed addition; integer registers only | `6ad51958eeaba3fd64ab4a8504ce6920f6a48f00234e820347ff546fbf1acbe3` |
+| `p256-table.bin` | the same file as for x86_64: ring compiles one `p256-nistz-table.h` for both architectures, and both store the limbs little-endian | (above) |
+
+Changes, all mechanical and made by `derive.py`: the `#include <ring-core/asm_base.h>`, `#if` and `#endif` lines are removed; the two NEON selection functions (`ecp_nistz256_select_w5`, `_w7`, everything after `ord_sqr_mont`) are removed (Rust scans replace them, ADR-255); the three `asm_base.h` macros are expanded as for a build with BTI and PAC (A key): `AARCH64_SIGN_LINK_REGISTER` -> `hint #34` (`bti c`) + `hint #25` (`paciasp`), `AARCH64_VALIDATE_LINK_REGISTER` -> `hint #29` (`autiasp`), `AARCH64_VALID_CALL_TARGET` -> `hint #34`, so every exported entry point starts with `bti c`; the two "This file is generated" lines are replaced by a header naming the source, copyright and changes; every symbol is renamed `ecp_nistz256_*` -> `urmqtt_nistz256_*` (including the internal `__ecp_nistz256_*` helpers). `.globl`, `.hidden`, `.type`, `.size`, `.section .rodata`, `.align` and the `//` comments are kept: LLVM's assembler takes them through `global_asm!` on both the Linux and the bare-metal target (as for the x86 file). No instruction is edited. To review: `diff <(sed 's/ecp_nistz256_/urmqtt_nistz256_/g' ring-0.17.14/pregenerated/p256-armv8-asm-linux64.S) vendor/nistz256/p256-armv8-asm.S` shows only the lines above, or rerun `derive.py` and `git diff`. Used by `crates/nistz256/src/aarch64.rs`, aarch64 on Linux and bare metal only.
