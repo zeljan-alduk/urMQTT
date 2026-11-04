@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- `diag-serve` boot word: the Diagnostic entry's measurements that need no disk (detection, RAM, crypto incl. AES-XTS),
+- `diag-serve` boot word: the Diagnostic entry's measurements (detection, RAM, crypto incl. AES-XTS, disk reads),
   then a normal live boot that serves MQTT with the report as the retained `$SYS/diag/report` (operator certificate).
   For machines whose console cannot be seen (a netcup ARM VPS shows "Display output is not active": its virtio-gpu has
   no driver here, and the serial port is not exposed). Use it with `mkiso.sh --diag-default --diag-cmdline diag-serve`.

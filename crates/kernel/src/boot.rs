@@ -520,7 +520,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
     // The diagnostic shares install mode's probe: every disk is kept as a
     // candidate and none is chosen, opened for writing or formatted.
-    devices::set_install_mode(s.options.install || s.options.diag);
+    devices::set_install_mode(s.options.install || s.options.diag || s.options.diag_serve);
     // PCIe and virtio (M6): all device MMIO must be mapped before the lock.
     if let Some(p) = s.platform.as_ref() {
         match devices::probe(p, &s.boot_entropy) {
@@ -607,7 +607,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         crate::diag::run(&s.options, s.cpus, &s.features, s.medium);
     }
     if s.options.diag_serve {
-        crate::diag::run_for_report(s.cpus, s.medium);
+        crate::diag::run_for_report(&s.options, s.cpus, s.medium);
     }
     if s.options.install {
         crate::install::run(

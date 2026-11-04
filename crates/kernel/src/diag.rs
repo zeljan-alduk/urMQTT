@@ -161,11 +161,28 @@ pub fn served_report() -> Option<&'static str> {
     REPORT.get().map(String::as_str)
 }
 
-/// `diag-serve`: detection, RAM and crypto measurements (no dashboard, no
-/// disk), the report kept for `$SYS/diag/report`, then the boot goes on.
+/// Lists the diagnostic disks in the report, "not read" until measured.
+fn register_disks(run: &mut Run, disks: &[devices::DiagDisk]) {
+    for d in disks {
+        run.report.disks.push(Disk {
+            name: d.name.clone(),
+            bus: d.bus.into(),
+            sectors: d.sectors,
+            read_only: d.read_only,
+            boot_medium: d.boot_medium,
+            state: "not read".into(),
+            unmeasured: d.disk.is_none().then(|| {
+                "another LUN of this virtio-scsi controller is measured (one per controller)".into()
+            }),
+            ..Disk::default()
+        });
+    }
+}
+
+/// `diag-serve`: detection, RAM, crypto and disk measurements (no dashboard), the report kept for `$SYS/diag/report`, then the boot goes on.
 /// The 128 MiB measurement buffer stays allocated (there is no free for DMA
 /// frames); a machine small enough to notice is not one to diagnose this way.
-pub fn run_for_report(cpus: u64, medium: devices::BootMedium) {
+pub fn run_for_report(options: &BootOptions, cpus: u64, medium: devices::BootMedium) {
     urmqtt_log::raw(format_args!(
         "\nURMQTT DIAG-SERVE {VERSION}: measurements without disk access, then serving; report at $SYS/diag/report\n"
     ));
@@ -177,12 +194,20 @@ pub fn run_for_report(cpus: u64, medium: devices::BootMedium) {
         clock,
         clock_name,
     };
-    run.status.steps = 4;
+    let mut disks = devices::take_diag_disks();
+    register_disks(&mut run, &disks);
+    let measured = disks.iter().filter(|d| d.disk.is_some()).count();
+    run.status.steps = 4 + measured * 2;
     log_detection(&run.report);
     ram_throughput(&mut run);
     ram_latency(&mut run);
     crypto(&mut run);
     clock_and_entropy(&mut run);
+    for (i, d) in disks.iter_mut().enumerate() {
+        if let Some(disk) = d.disk.take() {
+            disk_tests(&mut run, i, disk, options);
+        }
+    }
     run.status.done = true;
     let json = run.report.to_json();
     urmqtt_log::raw(format_args!("URMQTT-DIAG-JSON {json}\n"));
@@ -218,20 +243,7 @@ pub fn run(
         warn!("diag: no usable framebuffer: the figures go to the serial port only");
     }
     let mut disks = devices::take_diag_disks();
-    for d in &disks {
-        run.report.disks.push(Disk {
-            name: d.name.clone(),
-            bus: d.bus.into(),
-            sectors: d.sectors,
-            read_only: d.read_only,
-            boot_medium: d.boot_medium,
-            state: "not read".into(),
-            unmeasured: d.disk.is_none().then(|| {
-                "another LUN of this virtio-scsi controller is measured (one per controller)".into()
-            }),
-            ..Disk::default()
-        });
-    }
+    register_disks(&mut run, &disks);
     let measured = disks.iter().filter(|d| d.disk.is_some()).count();
     run.status.steps = 4 + measured * 2;
     log_detection(&run.report);

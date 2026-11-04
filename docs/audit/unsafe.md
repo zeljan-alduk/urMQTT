@@ -376,8 +376,8 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-kernel` | `crates/kernel/src/devices.rs:647` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/devices.rs:681` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/devices.rs:781` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/diag.rs:570` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/diag.rs:657` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/diag.rs:582` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/diag.rs:669` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/hardening.rs:94` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/hardening.rs:136` | attribute | yes |
 | `urmqtt-kernel` | `crates/kernel/src/hardening.rs:144` | attribute | yes |

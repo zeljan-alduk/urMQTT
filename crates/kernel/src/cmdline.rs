@@ -150,8 +150,10 @@ pub struct BootOptions {
     /// `diag`: the ISO's Diagnostic entry (O4, ADR-063). Honoured everywhere
     /// like `install`, but the baked `storage.diagnostic` must allow it.
     pub diag: bool,
-    /// `diag-serve`: the measurements of the Diagnostic entry that need no
-    /// disk (detection, RAM, crypto), then a normal live boot that serves
+    /// `diag-serve`: the measurements of the Diagnostic entry (detection, RAM,
+    /// crypto, the disks' reads; a write test only in an installed disk's
+    /// unallocated space, never after a typed confirmation, which this mode
+    /// cannot take), then a normal live boot that serves
     /// MQTT with the report as the retained `$SYS/diag/report` (read it with
     /// an operator certificate). For machines whose console is not visible
     /// (no framebuffer, no serial port, e.g. a VPS). Implies `live`; honoured
