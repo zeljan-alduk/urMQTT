@@ -6,11 +6,40 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-04
+
+A release of the TLS handshake work after v0.4.0 (ADR-259): the trust anchors' verification tables, which were never
+built, X25519 on AArch64 in `mul`/`umulh` inline assembly, and a faster P-256 verification on both architectures. On
+the netcup Neoverse N1 VPS the server's CPU per mutual-TLS handshake was 461 us against 553 us with the P-256
+assembly of ADR-255 alone, one run each (PERFORMANCE.md section 12.1).
+
+**Compatibility.** No configuration format change: the kernel reads formats 1 to 6 and the template declares format 6,
+as in v0.4.0, so everything v0.4.0's template takes, v0.4.1's takes, and the builder page of v0.4.0 offers this release
+without a redeploy (`tools/builder`, `crates/cfg`, `crates/config`, `crates/config-schema` and `tools/config` are
+unchanged since v0.4.0). The data-disk layout is unchanged (v2.1). The boot line `crypto:` gains `x25519=<ladder>`;
+the cipher suites, key-exchange groups and signature schemes offered are unchanged.
+
+**Limits, stated plainly.** The signing key is still a test key, and the release assets are **dev** builds with
+throwaway certificates, for evaluation (as for v0.4.0); production images are built by the operator (docs/DEPLOY.md).
+The AArch64 X25519 assembly is new code written for this project (not vendored from an upstream like the nistz256
+assembly); it is tested against RFC 7748 and against dalek, and the timing records in the repository are from Docker on an
+Apple M4 Pro only; it has had no independent review and needs a human review. PSTATE.DIT is still never set (AUDIT.md
+A255-W2), which now covers the X25519 field arithmetic on the secret scalar too. The P-256 verification change is shared
+code, so it runs on x86_64 as well: x86_64 is built and its kernel checked by clippy, but its unit tests run nowhere
+(CI's host tests run on arm64 Linux and macOS) and nothing of this release ran on an x86_64 KVM guest; the x86_64 and
+universal-ISO smoke suites are not in CI (PROGRESS, "Release candidate v0.4.1", says what was run locally). The
+Neoverse N1 figures are from one netcup VPS, one run each, with a shared load host and a CPU clock that differed between
+the runs (2.58 and 2.89 GHz); the per-stage profile is from Docker on an Apple M4 Pro, not the target CPU. The rest of
+v0.4.0's limits is unchanged.
+
 ### Fixed
 - **The trust anchors' verification tables were never built** (ADR-111, ADR-259, AUDIT.md A259-W1): webpki stores an
   anchor's SubjectPublicKeyInfo without its outer SEQUENCE, which `register_issuer` did not parse, so a device's
   first handshake verified its certificate on the slower unknown-key path. Both forms are accepted now. No effect on
   verdicts; about 20 us less for a first contact (Docker linux/arm64 on an Apple M4 Pro).
+- docs/release-day-v0.4.0.md: the template check needs a configuration a release template accepts (not
+  `deploy/dev/config.toml`), and a dev ELF cannot be reproduced on another machine (its certificates are generated
+  per machine); reproducibility is `make repro ENV=prod`.
 
 ### Changed
 - **X25519 on AArch64**: the shared secret uses `urmqtt-x25519` with new `mul`/`umulh` inline assembly
@@ -32,6 +61,15 @@ All notable changes to this project are documented here. The format follows
   per stage. `make ct` case `x25519_ladder_is_constant_time`; the RFC 7748 million-iteration vector (ignored test).
 - ADR-260: a proposal, not built, for a cache of verified client certificates (it would save about 1 us per
   returning device's full handshake on top of the existing memo; recommended against).
+
+### Security
+- A259-W1 (above) is closed; it never changed a verdict.
+- New `unsafe`: the five AArch64 X25519 inline-assembly blocks (register-only, `options(pure, nomem, nostack)`, each
+  with a `// SAFETY:` comment; AUDIT.md, docs/audit/unsafe.md). They handle the secret scalar: `make ct` gains
+  `x25519_ladder_is_constant_time` (|t| 1.0 to 4.7 in six runs against the bound of 7, Docker on an M4 Pro only;
+  CRYPTO.md). Not measured on a server core, and without PSTATE.DIT (A255-W2, open).
+- P-256 verification is variable time by design (a width-5 NAF and a variable-time inversion of `s`): its inputs (the
+  message digest, the signature, the public key) are public. Signing and ECDH keep the constant-time paths.
 
 ## [0.4.0] - 2026-11-04
 
@@ -252,7 +290,8 @@ production images embed the operator's own keys and are built with
 - M1: Bootable UEFI ISO, console, decoded exception reports, PSCI, `make run`/`smoke`, CI smoke job.
 - M0: CI and CD: lint, host tests, kernel build, cargo-deny, fuzzing, CodeQL, Scorecard, Dependabot and a release workflow with provenance.
 
-[Unreleased]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/zeljan-alduk/urMQTT/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/zeljan-alduk/urMQTT/compare/v0.2.1...v0.3.0
 [0.1.0]: https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.1.0
