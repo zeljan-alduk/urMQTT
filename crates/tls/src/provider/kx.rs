@@ -21,20 +21,35 @@ struct X25519Active {
     public: [u8; 32],
 }
 
-/// `X25519(secret, u)` (RFC 7748; the scalar is clamped inside). On x86_64
-/// our 4x64 ladder, MULX/ADX assembly where the CPU has it (ADR-131); on
-/// aarch64 dalek's 51-bit ladder, which is faster there (18.8 us against
-/// 29.3 us for the 4x64 code on an M4 core).
+/// `X25519(secret, u)` (RFC 7748; the scalar is clamped inside): our 4x64
+/// ladder, with MULX/ADX assembly on x86_64 CPUs that have it (ADR-131) and
+/// `mul`/`umulh` assembly on every AArch64 core (ADR-259; 13.4 us against
+/// 18.0 us for dalek's 51-bit ladder, Docker linux/arm64 on an Apple M4 Pro,
+/// not measured on a server core); dalek elsewhere.
 pub(crate) fn x25519(secret: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         urmqtt_x25519::x25519(urmqtt_x25519::Backend::detect(), secret, u)
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         curve25519_dalek::MontgomeryPoint(*u)
             .mul_clamped(*secret)
             .to_bytes()
+    }
+}
+
+/// Which X25519 ladder runs, for the boot log: `adx` or `portable` (the 4x64
+/// code on x86_64), `armv8` (AArch64), `dalek` elsewhere. The public key
+/// always comes from dalek's fixed-base table ([`x25519_public`]).
+pub fn x25519_backend() -> &'static str {
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        urmqtt_x25519::Backend::detect().name()
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        "dalek"
     }
 }
 

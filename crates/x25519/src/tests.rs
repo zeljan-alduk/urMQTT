@@ -8,6 +8,9 @@ use rand_core::{RngCore, SeedableRng};
 fn backends() -> std::vec::Vec<Backend> {
     let mut v = std::vec![Backend::Portable];
     v.extend(Backend::adx_if_available());
+    if Backend::detect() == Backend::Armv8 {
+        v.push(Backend::Armv8);
+    }
     v
 }
 
@@ -38,6 +41,26 @@ fn rfc7748_section_5_2_vectors() {
             assert_eq!(x25519(b, &hex(k), &hex(u)), hex(want), "{b:?}");
         }
     }
+}
+
+/// RFC 7748 §5.2, the million-iteration vector, for the fastest backend
+/// (`cargo test --release -p urmqtt-x25519 -- --ignored million`).
+#[test]
+#[ignore = "slow: one million ladders"]
+fn rfc7748_iterated_million() {
+    let be = Backend::detect();
+    let mut k = [0u8; 32];
+    k[0] = 9;
+    let mut u = k;
+    for _ in 0..1_000_000 {
+        let r = x25519(be, &k, &u);
+        u = k;
+        k = r;
+    }
+    assert_eq!(
+        k,
+        hex("7c3911e0ab2586fd864497297e575e6f3bc601c0883c30df5f4dd2d24f665424")
+    );
 }
 
 #[test]
@@ -94,10 +117,25 @@ fn dalek(k: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
     x25519_dalek::x25519(*k, *u)
 }
 
-#[cfg(all(target_arch = "x86_64", not(miri)))]
+/// The assembly multiplication and squaring of this target, if any.
+#[allow(clippy::type_complexity)]
+fn asm_field() -> Option<(fn(&Fe, &Fe) -> Fe, fn(&Fe) -> Fe)> {
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    if Backend::adx_if_available().is_some() {
+        return Some((adx::mul, adx::sqr));
+    }
+    #[cfg(all(target_arch = "aarch64", not(miri), not(kani)))]
+    return Some((arm::mul, arm::sqr));
+    #[allow(unreachable_code)]
+    None
+}
+
+/// The assembly gives the portable code's results bit for bit (both fold
+/// the exact product the same way), on carry-chain edge values and random
+/// limbs biased to all-ones and all-zeros.
 #[test]
 fn field_multiplication_backends_agree_on_edge_values() {
-    let Some(_) = Backend::adx_if_available() else {
+    let Some((asm_mul, asm_sqr)) = asm_field() else {
         return;
     };
     let p = [
@@ -127,9 +165,9 @@ fn field_multiplication_backends_agree_on_edge_values() {
     ];
     for a in &vals {
         for b in &vals {
-            assert_eq!(adx::mul(a, b), mul_portable(a, b), "{a:x?} * {b:x?}");
+            assert_eq!(asm_mul(a, b), mul_portable(a, b), "{a:x?} * {b:x?}");
         }
-        assert_eq!(adx::sqr(a), mul_portable(a, a), "{a:x?}^2");
+        assert_eq!(asm_sqr(a), mul_portable(a, a), "{a:x?}^2");
     }
     let mut rng = ChaCha20Rng::seed_from_u64(31);
     for _ in 0..20000 {
@@ -146,8 +184,51 @@ fn field_multiplication_backends_agree_on_edge_values() {
                 _ => {}
             }
         }
-        assert_eq!(adx::mul(&a, &b), mul_portable(&a, &b));
-        assert_eq!(adx::sqr(&a), mul_portable(&a, &a));
+        assert_eq!(asm_mul(&a, &b), mul_portable(&a, &b));
+        assert_eq!(asm_sqr(&a), mul_portable(&a, &a));
+    }
+}
+
+/// The AArch64 addition, subtraction and `* 121665` give the portable
+/// results bit for bit, on the same edge values (borrow and carry twice:
+/// `0 - MAX`, `MAX + MAX`, `MAX * 121665`) and random limbs.
+#[cfg(all(target_arch = "aarch64", not(miri), not(kani)))]
+#[test]
+fn arm_addition_subtraction_and_a24_agree_with_portable() {
+    let mut vals: std::vec::Vec<Fe> = std::vec![
+        [0; 4],
+        [1, 0, 0, 0],
+        [37, 0, 0, 0],
+        [38, 0, 0, 0],
+        [39, 0, 0, 0],
+        [u64::MAX; 4],
+        [u64::MAX - 37, u64::MAX, u64::MAX, u64::MAX],
+        [0, 0, 0, 1 << 63],
+        [
+            0xffff_ffff_ffff_ffed,
+            u64::MAX,
+            u64::MAX,
+            0x7fff_ffff_ffff_ffff
+        ],
+    ];
+    let mut rng = ChaCha20Rng::seed_from_u64(33);
+    for _ in 0..200 {
+        let mut a = [0u64; 4];
+        for l in &mut a {
+            *l = match rng.next_u32() % 4 {
+                0 => u64::MAX,
+                1 => 0,
+                _ => rng.next_u64(),
+            };
+        }
+        vals.push(a);
+    }
+    for a in &vals {
+        assert_eq!(arm::mul_a24(a), mul_a24(a), "{a:x?} * a24");
+        for b in &vals {
+            assert_eq!(arm::add(a, b), add(a, b), "{a:x?} + {b:x?}");
+            assert_eq!(arm::sub(a, b), sub(a, b), "{a:x?} - {b:x?}");
+        }
     }
 }
 

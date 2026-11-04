@@ -9,7 +9,7 @@ fn timings() {
     let k = [0x42u8; 32];
     let mut u = [0u8; 32];
     u[0] = 9;
-    for be in [Some(Backend::Portable), Backend::adx_if_available()]
+    for be in [Some(Backend::Portable), Some(Backend::detect())]
         .into_iter()
         .flatten()
     {
@@ -43,6 +43,42 @@ fn timings() {
         "portable mul {} ns {x:?}",
         t.elapsed().as_nanos() / 1_000_000
     );
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    {
+        let t = Instant::now();
+        let mut x = a;
+        for _ in 0..1_000_000 {
+            x = arm::mul(&x, &b);
+        }
+        std::println!("armv8 mul {} ns {x:?}", t.elapsed().as_nanos() / 1_000_000);
+        let t = Instant::now();
+        let mut x = a;
+        for _ in 0..1_000_000 {
+            x = arm::sqr(&x);
+        }
+        std::println!("armv8 sqr {} ns {x:?}", t.elapsed().as_nanos() / 1_000_000);
+        let t = Instant::now();
+        let mut x = a;
+        for _ in 0..1_000_000 {
+            x = mul_portable(&x, &x);
+        }
+        std::println!(
+            "portable sqr {} ns {x:?}",
+            t.elapsed().as_nanos() / 1_000_000
+        );
+        for (name, f) in [
+            ("add", (|x: &Fe, y: &Fe| add(x, y)) as fn(&Fe, &Fe) -> Fe),
+            ("sub", |x: &Fe, y: &Fe| sub(x, y)),
+            ("a24", |x: &Fe, _: &Fe| mul_a24(x)),
+        ] {
+            let t = Instant::now();
+            let mut x = a;
+            for _ in 0..1_000_000 {
+                x = f(&x, &b);
+            }
+            std::println!("{name} {} ns {x:?}", t.elapsed().as_nanos() / 1_000_000);
+        }
+    }
     #[cfg(all(target_arch = "x86_64", not(miri)))]
     if Backend::adx_if_available().is_some() {
         let t = Instant::now();

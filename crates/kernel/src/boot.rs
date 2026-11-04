@@ -579,8 +579,9 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     // microseconds, so a real VPS's log shows it. The estimate also sets the
     // watchdog's handshake budget (ADR-071).
     info!(
-        "crypto: ecc={} (P-256 and X25519 field arithmetic)",
-        urmqtt_tls::provider::ecc_backend()
+        "crypto: ecc={} x25519={} (P-256 and X25519 field arithmetic)",
+        urmqtt_tls::provider::ecc_backend(),
+        urmqtt_tls::provider::x25519_backend()
     );
     let profile = urmqtt_tls::bench::run(uptime_ns);
     info!("crypto-profile: {profile}");

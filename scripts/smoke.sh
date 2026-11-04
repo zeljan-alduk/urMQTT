@@ -3819,7 +3819,7 @@ DB_OK=("storage: data disk formatted \(was blank\)" "db: sqlite 3\.[0-9]+\.[0-9]
 DISPATCH_OK=("cpu dispatch: detected [a-z0-9 ]*aes pmull sha2 crc32, disabled none"
     "crypto: aes-gcm=aesni ghash=pclmulqdq chacha=sse2 sha256=sha-ni crc32c=sse4.2 toeplitz=bitwise"
     "crypto: known-answer tests passed \(AES-128-GCM, ChaCha20-Poly1305, SHA-256, HMAC-SHA-256, CRC-32C\)"
-    "crypto: ecc=nistz256-(adx|mul) \(P-256 and X25519 field arithmetic\)"
+    "crypto: ecc=nistz256-(adx|mul) x25519=(adx|portable) \(P-256 and X25519 field arithmetic\)"
     "crypto-profile: x25519-base=[0-9]+\.[0-9]+us .*ecdsa-verify=[0-9]+\.[0-9]+us .* => handshake~[0-9]+\.[0-9]+us \([0-9]+% public-key\)"
     "watchdog: handshake budget [0-9]+ ms \(calibrated\), other handlers 10 ms, stuck-core reset at 1000 ms")
 SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordered pairs ping-pong ok"
@@ -3891,7 +3891,7 @@ DB_OK=("storage: data disk formatted \(was blank\)" "db: sqlite 3\.[0-9]+\.[0-9]
 DISPATCH_OK=("cpu dispatch: detected [a-z0-9 ]*aes pmull[a-z0-9 ]*, disabled none"
     "crypto: aes-gcm=armv8-aes ghash=armv8-pmull chacha=neon sha256=armv8-sha2 crc32c=armv8-crc toeplitz=bitwise"
     "crypto: known-answer tests passed \(AES-128-GCM, ChaCha20-Poly1305, SHA-256, HMAC-SHA-256, CRC-32C\)"
-    "crypto: ecc=nistz256-armv8 \(P-256 and X25519 field arithmetic\)"
+    "crypto: ecc=nistz256-armv8 x25519=armv8 \(P-256 and X25519 field arithmetic\)"
     "crypto-profile: x25519-base=[0-9]+\.[0-9]+us .*ecdsa-verify=[0-9]+\.[0-9]+us .* => handshake~[0-9]+\.[0-9]+us \([0-9]+% public-key\)"
     "watchdog: handshake budget [0-9]+ ms \(calibrated\), other handlers 10 ms, stuck-core reset at 1000 ms")
 SMP4_OK=("cpu 1 online" "cpu 3 online" "smp: 4/4 cpus online" "ipi: 12/12 ordered pairs ping-pong ok"

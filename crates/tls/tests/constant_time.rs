@@ -422,6 +422,73 @@ fn p256_signing_nonce_is_constant_time() {
     println!("P-256 ECDSA sign, nonce: skipped (no nistz256 assembly on this target)");
 }
 
+/// The X25519 shared secret through the ladder the handshake runs
+/// (`urmqtt_x25519`, ADR-131 and ADR-259: the `mul`/`umulh` assembly on
+/// AArch64, MULX/ADX or portable on x86_64): the all-zero scalar (clamped to
+/// 2^254, every ladder bit below the top one zero, so every conditional swap
+/// is a no-op) against random scalars, the peer's point fixed. Same samples
+/// and attempts as the P-256 cases; the P-256 double-and-add control below
+/// shows that this scale of measurement sees a scalar-dependent time.
+#[test]
+#[ignore = "timing: run with `make ct`"]
+fn x25519_ladder_is_constant_time() {
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let be = urmqtt_x25519::Backend::detect();
+        let mut u = [0u8; 32];
+        u[0] = 9;
+        let peer = urmqtt_x25519::x25519(be, &[0x17; 32], &u);
+        let mut x = 0x510e_527f_ade6_82d1u64;
+        let pool: Vec<[u8; 32]> = (0..256)
+            .map(|_| {
+                let mut k = [0u8; 32];
+                for c in k.chunks_mut(8) {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    c.copy_from_slice(&x.to_le_bytes());
+                }
+                k
+            })
+            .collect();
+        let fixed = [0u8; 32];
+        let mut i = 0usize;
+        let mut st = fixed;
+        let mut scores = Vec::new();
+        for _ in 0..P256_ATTEMPTS {
+            let t = measure_n(
+                P256_SAMPLES,
+                &mut st,
+                |c, slot| {
+                    *slot = if c {
+                        fixed
+                    } else {
+                        i = (i + 1) % pool.len();
+                        pool[i]
+                    };
+                },
+                |slot| {
+                    black_box(urmqtt_x25519::x25519(be, black_box(slot), &peer));
+                },
+            );
+            scores.push(t);
+            if t < THRESHOLD {
+                break;
+            }
+        }
+        println!(
+            "X25519 ladder ({}), sparse vs random scalar: |t| = {} (attempts: {})",
+            be.name(),
+            scores.last().map_or(0.0, |t| (t * 10.0).round() / 10.0),
+            scores.len()
+        );
+        assert!(
+            scores.last().is_some_and(|t| *t < THRESHOLD),
+            "X25519: timing depends on the secret scalar (|t| = {scores:?})"
+        );
+    }
+}
+
 /// The control at P-256 scale: a textbook double-and-add that skips the
 /// addition for zero bits (the leak a broken window selection or skipped
 /// infinity addition would have, larger) must show the sparse/random

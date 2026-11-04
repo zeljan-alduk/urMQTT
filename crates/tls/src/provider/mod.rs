@@ -21,6 +21,7 @@ mod verify;
 
 pub use fastec::backend as ecc_backend;
 pub use fastec::kx_kat;
+pub use kx::x25519_backend;
 pub(crate) use kx::{x25519, x25519_public};
 pub use verify::MeasuredIssuer;
 pub use verify::cache_stats as verify_cache_stats;

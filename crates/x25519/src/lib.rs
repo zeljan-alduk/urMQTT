@@ -3,21 +3,25 @@
 //! The field is GF(2^255 - 19) with elements held in four little-endian
 //! 64-bit limbs, "loosely reduced": any value below 2^256 is accepted and
 //! produced between operations (2^256 = 38 mod p), and only the final
-//! encoding is canonical. Multiplication has two implementations with
-//! identical results: portable Rust on `u128`, and on x86_64 an assembly
-//! block using MULX and ADCX/ADOX (BMI2 and ADX), chosen once through
-//! `cpufeatures` (the kernel's sealed dispatch on bare metal). Under Miri
-//! only the portable one exists.
+//! encoding is canonical. The field arithmetic has implementations with
+//! bit-identical results: portable Rust on `u128`; on x86_64 an assembly
+//! multiplication and squaring using MULX and ADCX/ADOX (BMI2 and ADX),
+//! chosen once through `cpufeatures` (the kernel's sealed dispatch on bare
+//! metal); on AArch64 assembly multiplication, squaring, addition,
+//! subtraction and `* 121665` with `mul`/`umulh` and carry chains, for every
+//! ARMv8-A core (ADR-259). Under Miri and Kani only the portable one exists.
 //!
 //! The Montgomery ladder is the one of RFC 7748 §5 with a constant-time
 //! conditional swap; there is no secret-dependent branch or memory index.
-//! Unsafe code is limited to the inline assembly in `adx.rs`.
+//! Unsafe code is limited to the inline assembly in `adx.rs` and `arm.rs`.
 
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 mod adx;
+#[cfg(all(target_arch = "aarch64", not(miri), not(kani)))]
+mod arm;
 
 type Fe = [u64; 4];
 
@@ -29,6 +33,8 @@ pub enum Backend {
     Portable,
     /// x86_64 MULX/ADCX/ADOX assembly.
     Adx,
+    /// AArch64 `mul`/`umulh` assembly (every ARMv8-A core, ADR-259).
+    Armv8,
 }
 
 #[cfg(all(target_arch = "x86_64", not(miri)))]
@@ -41,6 +47,9 @@ impl Backend {
         if adx_bmi2::get() {
             return Self::Adx;
         }
+        #[cfg(all(target_arch = "aarch64", not(miri), not(kani)))]
+        return Self::Armv8;
+        #[allow(unreachable_code)]
         Self::Portable
     }
 
@@ -53,6 +62,7 @@ impl Backend {
         match self {
             Self::Portable => "portable",
             Self::Adx => "adx",
+            Self::Armv8 => "armv8",
         }
     }
 }
@@ -170,6 +180,15 @@ trait Field {
     fn sqr(a: &Fe) -> Fe {
         Self::mul(a, a)
     }
+    fn add(a: &Fe, b: &Fe) -> Fe {
+        add(a, b)
+    }
+    fn sub(a: &Fe, b: &Fe) -> Fe {
+        sub(a, b)
+    }
+    fn mul_a24(a: &Fe) -> Fe {
+        mul_a24(a)
+    }
 }
 
 struct Soft;
@@ -188,6 +207,27 @@ impl Field for Mulx {
     }
     fn sqr(a: &Fe) -> Fe {
         adx::sqr(a)
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri), not(kani)))]
+struct Arm;
+#[cfg(all(target_arch = "aarch64", not(miri), not(kani)))]
+impl Field for Arm {
+    fn mul(a: &Fe, b: &Fe) -> Fe {
+        arm::mul(a, b)
+    }
+    fn sqr(a: &Fe) -> Fe {
+        arm::sqr(a)
+    }
+    fn add(a: &Fe, b: &Fe) -> Fe {
+        arm::add(a, b)
+    }
+    fn sub(a: &Fe, b: &Fe) -> Fe {
+        arm::sub(a, b)
+    }
+    fn mul_a24(a: &Fe) -> Fe {
+        arm::mul_a24(a)
     }
 }
 
@@ -230,19 +270,19 @@ fn ladder<F: Field>(k: &[u8; 32], u: &Fe) -> Fe {
         cswap(swap, &mut x2, &mut x3);
         cswap(swap, &mut z2, &mut z3);
         swap = kt;
-        let a = add(&x2, &z2);
+        let a = F::add(&x2, &z2);
         let aa = F::sqr(&a);
-        let b = sub(&x2, &z2);
+        let b = F::sub(&x2, &z2);
         let bb = F::sqr(&b);
-        let e = sub(&aa, &bb);
-        let c = add(&x3, &z3);
-        let d = sub(&x3, &z3);
+        let e = F::sub(&aa, &bb);
+        let c = F::add(&x3, &z3);
+        let d = F::sub(&x3, &z3);
         let da = F::mul(&d, &a);
         let cb = F::mul(&c, &b);
-        x3 = F::sqr(&add(&da, &cb));
-        z3 = F::mul(&x1, &F::sqr(&sub(&da, &cb)));
+        x3 = F::sqr(&F::add(&da, &cb));
+        z3 = F::mul(&x1, &F::sqr(&F::sub(&da, &cb)));
         x2 = F::mul(&aa, &bb);
-        z2 = F::mul(&e, &add(&aa, &mul_a24(&e)));
+        z2 = F::mul(&e, &F::add(&aa, &F::mul_a24(&e)));
     }
     cswap(swap, &mut x2, &mut x3);
     cswap(swap, &mut z2, &mut z3);
@@ -307,6 +347,8 @@ pub fn x25519(backend: Backend, k: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
     let r = match backend {
         #[cfg(all(target_arch = "x86_64", not(miri)))]
         Backend::Adx => ladder::<Mulx>(&k, &u),
+        #[cfg(all(target_arch = "aarch64", not(miri), not(kani)))]
+        Backend::Armv8 => ladder::<Arm>(&k, &u),
         _ => ladder::<Soft>(&k, &u),
     };
     let out = encode(&r);

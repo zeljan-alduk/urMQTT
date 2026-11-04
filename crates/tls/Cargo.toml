@@ -37,7 +37,9 @@ zeroize = { version = "1.8", default-features = false }
 subtle = { version = "2.6", default-features = false }
 urmqtt-sync = { path = "../sync" }
 
-[target.'cfg(target_arch = "x86_64")'.dependencies]
+# X25519 on 4x64 limbs: MULX/ADX on x86_64 (ADR-131), mul/umulh on AArch64
+# (ADR-259).
+[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
 urmqtt-x25519 = { path = "../x25519" }
 
 # P-256 on the OpenSSL nistz256 assembly: x86_64 (ADR-130) and AArch64

@@ -1,6 +1,6 @@
 [package]
 name = "urmqtt-x25519"
-description = "X25519 on 4x64-bit limbs: portable code, and MULX/ADX assembly on x86_64 (ADR-131)."
+description = "X25519 on 4x64-bit limbs: portable code, MULX/ADX assembly on x86_64 (ADR-131), mul/umulh assembly on AArch64 (ADR-259)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
