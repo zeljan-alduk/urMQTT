@@ -3400,6 +3400,7 @@ PY
 # with every [devices] key "off": listed, not driven. Then the Diagnostic entry's write confirmation
 # typed twice: as QMP key events into the virtio keyboard (a provider's VNC console), and as bytes on
 # the virtio-console; both confirm the write test on a blank disk.
+# shellcheck disable=SC2054 # the commas are QEMU option syntax (-device NAME,id=X), not array separators
 VDEV_QEMU=(-device virtio-balloon-pci,id=balloon0 -device virtio-keyboard-pci,id=kbd0)
 # vdev_qmp <socket> <script>: runs the Python QMP snippet on stdin with `cmd` and `sock` defined.
 vdev_qmp() {
@@ -3499,11 +3500,14 @@ PY
             rm -f "$b"
             truncate -s 64m "$b"
             qd=$(mktemp -d "${TMPDIR:-/tmp}/urmqtt-qmp.XXXXXX") || continue
+            # shellcheck disable=SC2054 # the commas are QEMU option syntax (-device NAME,id=X), not array separators
             local extra=(-drive "if=none,id=t0,file=$b,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile=
                 -qmp "unix:$qd/q.sock,server=on,wait=off")
             if [[ $how == keyboard ]]; then
+                # shellcheck disable=SC2054 # the commas are QEMU option syntax (-device NAME,id=X), not array separators
                 extra+=(-device virtio-keyboard-pci,id=kbd0)
             else
+                # shellcheck disable=SC2054 # the commas are QEMU option syntax, not array separators
                 extra+=(-chardev "socket,id=vc0,path=$qd/vc.sock,server=on,wait=off" -device virtio-serial-pci
                     -device virtconsole,chardev=vc0)
             fi
