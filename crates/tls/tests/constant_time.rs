@@ -280,9 +280,25 @@ fn sparse_key() -> p256::SecretKey {
 /// the bound.
 const P256_ATTEMPTS: usize = 3;
 
+/// The bound for ECDSA signing with the ARMv8 assembly. **Raised from 7 to 12
+/// at the owner's request (2026-11-04) and NOT understood:** on the GitHub
+/// arm64 runner this case scored |t| = 8.6, 9.1 and 8.3 in three attempts (and
+/// 8.6 the run before), against 0.5 to 1.9 on an Apple M4 in a container, while
+/// ECDH and key generation pass on the same runner and the leaky control
+/// scores more than 1000. A signal that repeats is not noise. It is listed as
+/// an open finding in docs/AUDIT.md; the leading hypothesis (PSTATE.DIT, data
+/// independent timing of the multiplier on Arm cores that have FEAT_DIT) is
+/// being tested. Lower this back to `THRESHOLD` when the cause is found.
+const P256_SIGN_BOUND: f64 = 12.0;
+
 /// Fixed (sparse) against random secret, both prepared untimed by `make`
 /// into the same slot.
-fn p256_case<T: Clone>(name: &str, make: impl Fn(&p256::SecretKey) -> T, op: impl Fn(&T)) {
+fn p256_case<T: Clone>(
+    name: &str,
+    bound: f64,
+    make: impl Fn(&p256::SecretKey) -> T,
+    op: impl Fn(&T),
+) {
     let pool: Vec<T> = p256_keys().iter().map(&make).collect();
     let fixed = make(&sparse_key());
     let mut i = 0usize;
@@ -303,7 +319,7 @@ fn p256_case<T: Clone>(name: &str, make: impl Fn(&p256::SecretKey) -> T, op: imp
             |slot| op(black_box(slot)),
         );
         scores.push(t);
-        if t < THRESHOLD {
+        if t < bound {
             break;
         }
     }
@@ -314,7 +330,7 @@ fn p256_case<T: Clone>(name: &str, make: impl Fn(&p256::SecretKey) -> T, op: imp
         scores.len()
     );
     assert!(
-        scores.last().is_some_and(|t| *t < THRESHOLD),
+        scores.last().is_some_and(|t| *t < bound),
         "{name}: timing depends on the secret scalar (|t| = {scores:?} in {P256_ATTEMPTS} attempts)"
     );
 }
@@ -322,7 +338,7 @@ fn p256_case<T: Clone>(name: &str, make: impl Fn(&p256::SecretKey) -> T, op: imp
 #[test]
 #[ignore = "timing: run with `make ct`"]
 fn p256_key_generation_is_constant_time() {
-    p256_case("P-256 public key", Clone::clone, |k| {
+    p256_case("P-256 public key", THRESHOLD, Clone::clone, |k| {
         black_box(urmqtt_tls::provider::fastec::p256_public(k));
     });
 }
@@ -331,7 +347,7 @@ fn p256_key_generation_is_constant_time() {
 #[ignore = "timing: run with `make ct`"]
 fn p256_ecdh_is_constant_time() {
     let peer = urmqtt_tls::provider::fastec::p256_public(&p256_keys()[7]);
-    p256_case("P-256 ECDH", Clone::clone, |k| {
+    p256_case("P-256 ECDH", THRESHOLD, Clone::clone, |k| {
         black_box(urmqtt_tls::provider::fastec::p256_dh(k, black_box(&peer))).unwrap();
     });
 }
@@ -343,6 +359,7 @@ fn p256_signing_is_constant_time() {
     // random nonces, the sparse key one fixed nonce.
     p256_case(
         "P-256 ECDSA sign",
+        P256_SIGN_BOUND,
         |k| p256::ecdsa::SigningKey::from(k.clone()),
         |sk| {
             black_box(urmqtt_tls::provider::fastec::ecdsa_sign(
