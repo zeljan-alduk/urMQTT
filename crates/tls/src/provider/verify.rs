@@ -136,7 +136,7 @@ pub fn kat() -> bool {
         "60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299",
     ));
     // The production paths: public key and signature through `fastec` (the
-    // assembly on x86_64), the stock key encoding as a cross-check.
+    // assembly on x86_64 and AArch64), the stock key encoding as a cross-check.
     let pk = sk.verifying_key().as_affine().to_sec1_point(false);
     if pk.as_bytes() != want_pk.as_slice()
         || super::fastec::p256_public(&p256::SecretKey::from(&sk))[..] != want_pk[..]

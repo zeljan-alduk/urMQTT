@@ -36,7 +36,7 @@ fn timings() {
                 }
                 best = best.min(t.elapsed().as_nanos() / 50);
             }
-            std::println!("adx={} {name}: {best} ns", ops.uses_adx());
+            std::println!("{} {name}: {best} ns", ops.name());
         };
         report("mul", &mut || {
             std::hint::black_box(ops.mul(std::hint::black_box(&a), &q.x));
@@ -49,6 +49,14 @@ fn timings() {
         });
         report("add", &mut || {
             std::hint::black_box(ops.add(&j, std::hint::black_box(&j2)));
+        });
+        let row = &g_table()[3];
+        report("select_w7 (64 entries)", &mut || {
+            std::hint::black_box(select_w7(row, std::hint::black_box(37)));
+        });
+        let t5 = [j2; 16];
+        report("select_w5 (16 entries)", &mut || {
+            std::hint::black_box(select_w5(&t5, std::hint::black_box(9)));
         });
         report("inv_p", &mut || {
             std::hint::black_box(ops.inv_p(std::hint::black_box(&a)));
@@ -65,8 +73,8 @@ fn timings() {
         let t0 = Instant::now();
         let kt = KeyTable::new(ops, &gx, &gy).unwrap();
         std::println!(
-            "adx={} KeyTable::new: {} us",
-            ops.uses_adx(),
+            "{} KeyTable::new: {} us",
+            ops.name(),
             t0.elapsed().as_micros()
         );
         let (z, r, s) = ([7u8; 32], [9u8; 32], [11u8; 32]);

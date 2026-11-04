@@ -1,5 +1,6 @@
 //! Differential tests against the portable RustCrypto implementation (the
-//! reference) on random and edge inputs, for both assembly variants.
+//! reference) on random and edge inputs, for every assembly variant (x86_64:
+//! plain `mul` and MULX/ADX where the CPU has it; AArch64: the ARMv8 code).
 
 use super::*;
 use ecdsa::hazmat::{sign_prehashed, verify_prehashed};
@@ -497,5 +498,200 @@ fn key_tables_verify_like_the_plain_path_and_hold_the_right_points() {
             assert!(!table.verify(ops, &z, &s, &r));
         }
         assert!(KeyTable::new(ops, &qx, &[0u8; 32]).is_none());
+    }
+}
+
+/// The constant-time table scans return exactly entry `index - 1`, and zero
+/// for index 0, for every index (on AArch64 these are the Rust scans that
+/// replace upstream's NEON functions; on x86_64 the SSE2 assembly).
+#[test]
+fn table_selection_returns_the_indexed_entry() {
+    let mut rng = ChaCha20Rng::seed_from_u64(15);
+    let mut limbs = || -> Limbs { be_to_limbs(&rand32(&mut rng)) };
+    let mut t5 = [Jac::default(); 16];
+    for e in &mut t5 {
+        *e = Jac {
+            x: limbs(),
+            y: limbs(),
+            z: limbs(),
+        };
+    }
+    let mut t7 = [Aff::default(); 64];
+    for e in &mut t7 {
+        *e = Aff {
+            x: limbs(),
+            y: limbs(),
+        };
+    }
+    let z5 = select_w5(&t5, 0);
+    assert_eq!((z5.x, z5.y, z5.z), (ZERO, ZERO, ZERO));
+    for i in 1..=16u64 {
+        let (got, want) = (select_w5(&t5, i), t5[i as usize - 1]);
+        assert_eq!((got.x, got.y, got.z), (want.x, want.y, want.z), "w5 {i}");
+    }
+    let z7 = select_w7(&t7, 0);
+    assert_eq!((z7.x, z7.y), (ZERO, ZERO));
+    for i in 1..=64u64 {
+        let (got, want) = (select_w7(&t7, i), t7[i as usize - 1]);
+        assert_eq!((got.x, got.y), (want.x, want.y), "w7 {i}");
+    }
+    // The generator's rows too (the production tables).
+    for (r, row) in g_table().iter().enumerate().step_by(9) {
+        for i in [1u64, 2, 33, 63, 64] {
+            let got = select_w7(row, i);
+            assert_eq!(
+                (got.x, got.y),
+                (row[i as usize - 1].x, row[i as usize - 1].y)
+            );
+        }
+        let z = select_w7(row, 0);
+        assert_eq!((z.x, z.y), (ZERO, ZERO), "row {r}");
+    }
+}
+
+/// Negation modulo P, on the edges and random values.
+#[test]
+fn negation_is_modular() {
+    let mut rng = ChaCha20Rng::seed_from_u64(16);
+    assert_eq!(neg(&ZERO), ZERO);
+    assert_eq!(neg(&[1, 0, 0, 0]), sub_borrow(&P, &[1, 0, 0, 0]).0);
+    assert_eq!(neg(&sub_borrow(&P, &[1, 0, 0, 0]).0), [1, 0, 0, 0]);
+    for _ in 0..300 {
+        let a = reduce_once(&be_to_limbs(&rand32(&mut rng)), &P);
+        let n = neg(&a);
+        assert!(lt(&n, &P));
+        assert_eq!(add_mod(&a, &n, &P), ZERO);
+        assert_eq!(n, sub_mod(&ZERO, &a, &P));
+    }
+}
+
+/// Mixed addition with an infinity on either side (Jacobian `z == 0`, affine
+/// (0, 0)), with the opposite point, and agreement with full addition: the
+/// comb walks rely on all four.
+#[test]
+fn mixed_addition_handles_infinity_and_opposites() {
+    let mut rng = ChaCha20Rng::seed_from_u64(17);
+    for ops in variants() {
+        for _ in 0..50 {
+            let (ax, ay) = stock_point(&rand_scalar(&mut rng));
+            let (bx, by) = stock_point(&rand_scalar(&mut rng));
+            let a = ops.point_from_bytes(&ax, &ay).unwrap();
+            let b = ops.point_from_bytes(&bx, &by).unwrap();
+            let ja = Jac {
+                x: a.x,
+                y: a.y,
+                z: ONE_P,
+            };
+            let jb = Jac {
+                x: b.x,
+                y: b.y,
+                z: ONE_P,
+            };
+            // Against the complete addition, and with a non-trivial Z.
+            let mixed = ops.to_affine(&ops.add_affine(&ja, &b)).unwrap();
+            let full = ops.to_affine(&ops.add(&ja, &jb)).unwrap();
+            assert_eq!((mixed.x, mixed.y), (full.x, full.y));
+            let ja2 = ops.dbl(&ja);
+            let mixed = ops.to_affine(&ops.add_affine(&ja2, &b)).unwrap();
+            let full = ops.to_affine(&ops.add(&ja2, &jb)).unwrap();
+            assert_eq!((mixed.x, mixed.y), (full.x, full.y));
+            // Infinity on the left, on the right, and on both sides.
+            let inf = Jac::default();
+            let r = ops.to_affine(&ops.add_affine(&inf, &b)).unwrap();
+            assert_eq!((r.x, r.y), (b.x, b.y));
+            let r = ops
+                .to_affine(&ops.add_affine(&ja, &Aff::default()))
+                .unwrap();
+            assert_eq!((r.x, r.y), (a.x, a.y));
+            assert!(
+                ops.to_affine(&ops.add_affine(&inf, &Aff::default()))
+                    .is_none()
+            );
+            // P + (-P) is infinity.
+            let na = Aff {
+                x: a.x,
+                y: neg(&a.y),
+            };
+            assert!(ops.to_affine(&ops.add_affine(&ja, &na)).is_none());
+        }
+    }
+}
+
+/// The backend name the boot log prints for this architecture.
+#[test]
+fn the_variant_is_named_for_the_boot_log() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        assert_eq!(Ops::detect().name(), "nistz256-armv8");
+        assert!(Ops::adx_if_available().is_none());
+        assert!(!Ops::detect().uses_adx());
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        assert_eq!(Ops::portable().name(), "nistz256-mul");
+        let d = Ops::detect();
+        assert_eq!(
+            d.name(),
+            if d.uses_adx() {
+                "nistz256-adx"
+            } else {
+                "nistz256-mul"
+            }
+        );
+    }
+}
+
+/// Multiplication by small, large and structured scalars for a variable base
+/// against RustCrypto (the windows' edges: zero digits, the top window, a
+/// negative last digit).
+#[test]
+fn variable_base_multiplication_matches_on_structured_scalars() {
+    let mut rng = ChaCha20Rng::seed_from_u64(18);
+    for ops in variants() {
+        let b = rand_scalar(&mut rng);
+        let (qx, qy) = stock_point(&b);
+        let q = ops.point_from_bytes(&qx, &qy).unwrap();
+        let qpt = p256::PublicKey::from_sec1_bytes(&{
+            let mut v = std::vec![4u8];
+            v.extend_from_slice(&qx);
+            v.extend_from_slice(&qy);
+            v
+        })
+        .unwrap();
+        let mut scalars: std::vec::Vec<[u8; 32]> = std::vec::Vec::new();
+        for small in [1u8, 2, 3, 15, 16, 17, 31, 32, 33, 63, 64, 65] {
+            let mut s = [0u8; 32];
+            s[31] = small;
+            scalars.push(s);
+        }
+        for bit in [5usize, 6, 127, 250, 254, 255] {
+            let mut s = [0u8; 32];
+            s[31 - bit / 8] = 1 << (bit % 8);
+            scalars.push(s);
+        }
+        scalars.push(limbs_to_be(&sub_borrow(&N, &[1, 0, 0, 0]).0));
+        scalars.push(limbs_to_be(&sub_borrow(&N, &[2, 0, 0, 0]).0));
+        let mut alt = [0u8; 32];
+        for (i, b) in alt.iter_mut().enumerate() {
+            *b = if i % 2 == 0 { 0x55 } else { 0xaa };
+        }
+        scalars.push(alt);
+        for s in scalars {
+            let k = Option::<p256::Scalar>::from(p256::Scalar::from_repr(s.into())).unwrap();
+            let want = (qpt.to_projective() * k).to_affine().to_sec1_point(false);
+            let got = ops
+                .to_affine(&ops.mul_var_ct(&be_to_limbs(&s), &q))
+                .unwrap();
+            assert_eq!(
+                &want.as_bytes()[1..33],
+                &limbs_to_be(&ops.demont_p(&got.x)),
+                "{s:02x?}"
+            );
+            assert_eq!(
+                &want.as_bytes()[33..],
+                &limbs_to_be(&ops.demont_p(&got.y)),
+                "{s:02x?}"
+            );
+        }
     }
 }

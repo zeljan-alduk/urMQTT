@@ -45,7 +45,8 @@ impl Signer for EcdsaP256 {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
         // Deterministic nonces (RFC 6979): no dependence on the RNG at
         // signing time, and no nonce reuse even if it were weak. The
-        // x86_64 assembly path and the portable one give the same bytes.
+        // assembly path (x86_64, AArch64) and the portable one give the same
+        // bytes.
         super::fastec::ecdsa_sign(&self.key, message)
     }
 

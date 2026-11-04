@@ -1,10 +1,12 @@
-//! P-256 operations with a fast x86_64 path (ADR-130).
+//! P-256 operations with a fast path on x86_64 and AArch64 (ADR-130,
+//! ADR-255).
 //!
-//! On x86_64 (Linux hosts and the bare-metal kernel) signing, key
+//! On x86_64 and AArch64 (Linux hosts and the bare-metal kernel) signing, key
 //! generation, ECDH and the verification of signatures by keys without a
-//! table run on the `urmqtt-nistz256` assembly (MULX/ADX where the CPU has
-//! it). Everywhere else, and for inputs the fast path does not handle, the
-//! RustCrypto implementation runs unchanged. Both produce identical
+//! table run on the `urmqtt-nistz256` assembly (MULX/ADX where an x86 CPU has
+//! it, the ARMv8 code on every AArch64 core). Everywhere else (macOS, Miri,
+//! Kani), and for inputs the fast path does not handle, the RustCrypto
+//! implementation runs unchanged. Both produce identical
 //! results (differential tests below and in `urmqtt-nistz256`).
 
 use alloc::vec::Vec;
@@ -13,36 +15,37 @@ use p256::ecdsa::signature::Signer as _;
 use pki_types::InvalidSignature;
 
 #[cfg(all(
-    target_arch = "x86_64",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
     not(miri),
+    not(kani),
     any(target_os = "linux", target_os = "none")
 ))]
 use urmqtt_nistz256 as nistz;
 
 /// Whether the assembly path is compiled in on this target.
 pub const FAST: bool = cfg!(all(
-    target_arch = "x86_64",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
     not(miri),
+    not(kani),
     any(target_os = "linux", target_os = "none")
 ));
 
-/// Which variant runs, for the boot log: `adx`, `mul` or `portable`.
+/// Which variant runs, for the boot log: `nistz256-adx`, `nistz256-mul`
+/// (x86_64), `nistz256-armv8` (AArch64) or `portable`.
 pub fn backend() -> &'static str {
     #[cfg(all(
-        target_arch = "x86_64",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
         not(miri),
+        not(kani),
         any(target_os = "linux", target_os = "none")
     ))]
     {
-        if nistz::Ops::detect().uses_adx() {
-            "nistz256-adx"
-        } else {
-            "nistz256-mul"
-        }
+        nistz::Ops::detect().name()
     }
     #[cfg(not(all(
-        target_arch = "x86_64",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
         not(miri),
+        not(kani),
         any(target_os = "linux", target_os = "none")
     )))]
     {
@@ -54,8 +57,9 @@ pub fn backend() -> &'static str {
 /// deterministic nonce.
 pub fn ecdsa_sign(key: &p256::ecdsa::SigningKey, msg: &[u8]) -> Result<Vec<u8>, rustls::Error> {
     #[cfg(all(
-        target_arch = "x86_64",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
         not(miri),
+        not(kani),
         any(target_os = "linux", target_os = "none")
     ))]
     if let Some(sig) = fast_sign(key, msg) {
@@ -68,8 +72,9 @@ pub fn ecdsa_sign(key: &p256::ecdsa::SigningKey, msg: &[u8]) -> Result<Vec<u8>, 
 }
 
 #[cfg(all(
-    target_arch = "x86_64",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
     not(miri),
+    not(kani),
     any(target_os = "linux", target_os = "none")
 ))]
 fn fast_sign(key: &p256::ecdsa::SigningKey, msg: &[u8]) -> Option<p256::ecdsa::Signature> {
@@ -109,8 +114,9 @@ pub fn ecdsa_verify(
     signature: &[u8],
 ) -> Result<(), InvalidSignature> {
     #[cfg(all(
-        target_arch = "x86_64",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
         not(miri),
+        not(kani),
         any(target_os = "linux", target_os = "none")
     ))]
     if let Some(ok) = fast_verify(public_key, message, signature) {
@@ -126,8 +132,9 @@ pub fn ecdsa_verify(
 /// `None`: not applicable (the key is not an uncompressed point), take the
 /// portable path.
 #[cfg(all(
-    target_arch = "x86_64",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
     not(miri),
+    not(kani),
     any(target_os = "linux", target_os = "none")
 ))]
 fn fast_verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Option<bool> {
@@ -150,8 +157,9 @@ fn fast_verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Option<bo
 }
 
 #[cfg(all(
-    target_arch = "x86_64",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
     not(miri),
+    not(kani),
     any(target_os = "linux", target_os = "none")
 ))]
 fn split_point(p: &[u8]) -> Option<([u8; 32], [u8; 32])> {
@@ -166,8 +174,9 @@ fn split_point(p: &[u8]) -> Option<([u8; 32], [u8; 32])> {
 /// The uncompressed SEC1 encoding of the public key of `secret`.
 pub fn p256_public(secret: &p256::SecretKey) -> [u8; 65] {
     #[cfg(all(
-        target_arch = "x86_64",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
         not(miri),
+        not(kani),
         any(target_os = "linux", target_os = "none")
     ))]
     {
@@ -201,8 +210,9 @@ pub struct BadPoint;
 /// SEC1 point, which must be a valid point of the curve. `Err` otherwise.
 pub fn p256_dh(secret: &p256::SecretKey, peer: &[u8]) -> Result<[u8; 32], BadPoint> {
     #[cfg(all(
-        target_arch = "x86_64",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
         not(miri),
+        not(kani),
         any(target_os = "linux", target_os = "none")
     ))]
     if let Some((qx, qy)) = split_point(peer) {
@@ -288,15 +298,17 @@ pub fn kx_kat() -> bool {
 }
 
 /// The verification of signatures by one fixed trust anchor key (ADR-111,
-/// ADR-130): a comb of the key on x86_64 (about 12 us), else primeorder's
+/// ADR-130, ADR-255): a comb of the key on x86_64 and AArch64 (about 12 us on
+/// the x86 build server), else primeorder's
 /// fixed-base table (25 KiB). Built once, at configuration time; never from
 /// peer input.
 pub struct IssuerTable(Inner);
 
 enum Inner {
     #[cfg(all(
-        target_arch = "x86_64",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
         not(miri),
+        not(kani),
         any(target_os = "linux", target_os = "none")
     ))]
     Nistz(nistz::KeyTable),
@@ -307,8 +319,9 @@ impl IssuerTable {
     /// The table of the key `point` (on the curve).
     pub fn from_key(point: &p256::AffinePoint) -> Self {
         #[cfg(all(
-            target_arch = "x86_64",
+            any(target_arch = "x86_64", target_arch = "aarch64"),
             not(miri),
+            not(kani),
             any(target_os = "linux", target_os = "none")
         ))]
         {
@@ -337,8 +350,9 @@ impl IssuerTable {
         let sig = p256::ecdsa::Signature::from_der(signature).map_err(|_| InvalidSignature)?;
         match &self.0 {
             #[cfg(all(
-                target_arch = "x86_64",
+                any(target_arch = "x86_64", target_arch = "aarch64"),
                 not(miri),
+                not(kani),
                 any(target_os = "linux", target_os = "none")
             ))]
             Inner::Nistz(t) => {
@@ -487,6 +501,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_backend_is_the_assembly_where_it_is_compiled_in() {
+        assert_eq!(backend() != "portable", FAST);
+        #[cfg(all(
+            target_arch = "aarch64",
+            not(miri),
+            not(kani),
+            any(target_os = "linux", target_os = "none")
+        ))]
+        assert_eq!(backend(), "nistz256-armv8");
+        #[cfg(target_os = "macos")]
+        assert_eq!(backend(), "portable");
     }
 
     #[test]

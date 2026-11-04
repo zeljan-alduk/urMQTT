@@ -1,6 +1,6 @@
 [package]
 name = "urmqtt-nistz256"
-description = "P-256 ECDSA and ECDH on the OpenSSL/Intel nistz256 x86_64 assembly (Montgomery 4x64, MULX/ADX), ADR-130."
+description = "P-256 ECDSA and ECDH on the OpenSSL nistz256 assembly: x86_64 (Montgomery 4x64, MULX/ADX), ADR-130, and AArch64 (ARMv8), ADR-255."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,8 +14,11 @@ bench = false
 [lints]
 workspace = true
 
-[target.'cfg(target_arch = "x86_64")'.dependencies]
+# Only where the crate is not empty (src/lib.rs): Linux or bare metal.
+[target.'cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "none")))'.dependencies]
 cpufeatures = { version = "0.3", default-features = false }
+
+[target.'cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), any(target_os = "linux", target_os = "none")))'.dependencies]
 zeroize = { version = "1.8", default-features = false }
 
 [dev-dependencies]

@@ -305,12 +305,17 @@ fn read_byte(ps2: &mut Ps2) -> Option<u8> {
 fn detect(cpus: u64, medium: devices::BootMedium) -> Report {
     let c = arch::diag_cpu();
     let sealed = crate::cpu_dispatch::sealed();
+    // The P-256 backend (ADR-130, ADR-255) follows the selection: it is not
+    // part of the sealed dispatch, but it is what the handshakes run on.
     let backend = sealed.map_or_else(
         || String::from("unsealed"),
         |s| {
             format!(
-                "{} (detected {}, disabled {})",
-                s.selection, s.detected, s.disabled
+                "{} ecc={} (detected {}, disabled {})",
+                s.selection,
+                urmqtt_tls::provider::ecc_backend(),
+                s.detected,
+                s.disabled
             )
         },
     );

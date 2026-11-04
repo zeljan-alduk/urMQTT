@@ -38,9 +38,12 @@ subtle = { version = "2.6", default-features = false }
 urmqtt-sync = { path = "../sync" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-# P-256 on the OpenSSL/Intel nistz256 assembly (ADR-130).
-urmqtt-nistz256 = { path = "../nistz256" }
 urmqtt-x25519 = { path = "../x25519" }
+
+# P-256 on the OpenSSL nistz256 assembly: x86_64 (ADR-130) and AArch64
+# (ADR-255), where crates/nistz256 is not empty (Linux and bare metal).
+[target.'cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), any(target_os = "linux", target_os = "none")))'.dependencies]
+urmqtt-nistz256 = { path = "../nistz256" }
 rfc6979 = { version = "0.6", default-features = false }
 
 [features]

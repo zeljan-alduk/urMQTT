@@ -1,15 +1,17 @@
-//! P-256 ECDSA and ECDH on the OpenSSL/Intel `nistz256` x86_64 assembly
-//! (ADR-130, PERF).
+//! P-256 ECDSA and ECDH on the `nistz256` assembly of OpenSSL: the
+//! Gueron-Krasnov x86_64 code (ADR-130) and Polyakov's ARMv8 code (ADR-255),
+//! both vendored from the pregenerated GNU assembler output in ring 0.17.14
+//! (`vendor/nistz256`, `vendor/README.md`; Apache-2.0).
 //!
-//! The field and point arithmetic is the Montgomery 4x64 assembly of Gueron
-//! and Krasnov (OpenSSL, Apache-2.0), vendored from the pregenerated GNU
-//! assembler output in ring 0.17.14 (`vendor/nistz256`, `vendor/README.md`),
-//! in two variants: MULX/ADCX/ADOX (BMI2 and ADX) and plain `mul`. Every entry
-//! point picks the variant once, through the kernel's CPU dispatch
-//! (`cpufeatures`), and the plain one runs on any x86-64.
+//! - **x86_64**: two variants, MULX/ADCX/ADOX (BMI2 and ADX) and plain `mul`.
+//!   Every entry point picks the variant once, through the kernel's CPU
+//!   dispatch (`cpufeatures`), and the plain one runs on any x86-64.
+//! - **AArch64**: one variant (`mul`/`umulh`, general-purpose registers only)
+//!   for every ARMv8-A core; the table selection is constant-time Rust.
 //!
 //! The scalar multiplication, recoding, ECDSA and ECDH logic around the
-//! assembly is written here, after ring's `p256-nistz.c`:
+//! assembly is written here, after ring's `p256-nistz.c`, and is the same on
+//! both architectures (so is the generator's comb, `p256-table.bin`):
 //!
 //! - **Secret scalars** (signing nonce, ECDH key, key generation) use signed
 //!   Booth windows with constant-time table selection
@@ -20,15 +22,17 @@
 //!   the group order (the same argument as OpenSSL and ring).
 //! - **Public inputs** (verification) use variable-time code.
 //!
-//! Everything is gated to `x86_64` on Linux or bare metal and not under Miri;
-//! elsewhere the crate is empty and the callers keep the portable RustCrypto
-//! path. Unsafe code is confined to the calls into the assembly and the
-//! reinterpretation of the generator table; each has a SAFETY comment.
+//! Everything is gated to x86_64 or AArch64 on Linux or bare metal, and not
+//! under Miri or Kani (neither runs foreign assembly); elsewhere the crate is
+//! empty and the callers keep the portable RustCrypto path. Unsafe code is
+//! confined to the calls into the assembly and the reinterpretation of the
+//! generator table; each has a SAFETY comment.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg(all(
-    target_arch = "x86_64",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
     not(miri),
+    not(kani),
     any(target_os = "linux", target_os = "none")
 ))]
 #![allow(unsafe_code)]
@@ -39,13 +43,20 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-use core::arch::global_asm;
 use zeroize::Zeroize;
 
-global_asm!(
-    include_str!("../../../vendor/nistz256/p256-x86_64-asm.S"),
-    options(att_syntax)
-);
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
+#[cfg(target_arch = "aarch64")]
+use aarch64 as arch;
+#[cfg(target_arch = "x86_64")]
+use x86_64 as arch;
+
+pub use arch::Ops;
+use arch::{neg, select_w5, select_w7};
 
 /// A field element or a scalar: four little-endian 64-bit limbs.
 type Limbs = [u64; 4];
@@ -66,30 +77,6 @@ struct Aff {
     x: Limbs,
     y: Limbs,
 }
-
-// SAFETY: symbols of the vendored assembly (vendor/nistz256/p256-x86_64-asm.S); each takes pointers
-// to 32-byte aligned `#[repr(C)]` values valid for the call; `_adx` ones only after `adx_bmi2`.
-unsafe extern "C" {
-    fn urmqtt_nistz256_neg(res: *mut Limbs, a: *const Limbs);
-    fn urmqtt_nistz256_mul_mont_nohw(res: *mut Limbs, a: *const Limbs, b: *const Limbs);
-    fn urmqtt_nistz256_mul_mont_adx(res: *mut Limbs, a: *const Limbs, b: *const Limbs);
-    fn urmqtt_nistz256_sqr_mont_nohw(res: *mut Limbs, a: *const Limbs);
-    fn urmqtt_nistz256_sqr_mont_adx(res: *mut Limbs, a: *const Limbs);
-    fn urmqtt_nistz256_ord_mul_mont_nohw(res: *mut Limbs, a: *const Limbs, b: *const Limbs);
-    fn urmqtt_nistz256_ord_mul_mont_adx(res: *mut Limbs, a: *const Limbs, b: *const Limbs);
-    fn urmqtt_nistz256_ord_sqr_mont_nohw(res: *mut Limbs, a: *const Limbs, rep: u64);
-    fn urmqtt_nistz256_ord_sqr_mont_adx(res: *mut Limbs, a: *const Limbs, rep: u64);
-    fn urmqtt_nistz256_select_w5_nohw(val: *mut Jac, table: *const Jac, index: i32);
-    fn urmqtt_nistz256_select_w7_nohw(val: *mut Aff, table: *const Aff, index: i32);
-    fn urmqtt_nistz256_point_double_nohw(r: *mut Jac, a: *const Jac);
-    fn urmqtt_nistz256_point_double_adx(r: *mut Jac, a: *const Jac);
-    fn urmqtt_nistz256_point_add_nohw(r: *mut Jac, a: *const Jac, b: *const Jac);
-    fn urmqtt_nistz256_point_add_adx(r: *mut Jac, a: *const Jac, b: *const Jac);
-    fn urmqtt_nistz256_point_add_affine_nohw(r: *mut Jac, a: *const Jac, b: *const Aff);
-    fn urmqtt_nistz256_point_add_affine_adx(r: *mut Jac, a: *const Jac, b: *const Aff);
-}
-
-cpufeatures::new!(adx_bmi2, "bmi2", "adx");
 
 /// P, the field prime.
 const P: Limbs = [
@@ -159,164 +146,9 @@ static G_TABLE_BYTES: Aligned<[u8; 37 * 64 * 64]> =
 
 fn g_table() -> &'static [[Aff; 64]; 37] {
     // SAFETY: the bytes are 37*64 `Aff` values (64 bytes each, little-endian
-    // limbs as x86_64 stores them), the static is aligned to 64 >= align_of::<Aff>(),
+    // limbs as x86_64 and AArch64 both store them), the static is aligned to 64 >= align_of::<Aff>(),
     // lives forever and is never mutated; every bit pattern is a valid `Aff`.
     unsafe { &*core::ptr::from_ref(&G_TABLE_BYTES).cast::<[[Aff; 64]; 37]>() }
-}
-
-/// Which assembly variant runs: MULX/ADX or plain `mul`.
-#[derive(Clone, Copy)]
-pub struct Ops {
-    adx: bool,
-}
-
-impl Ops {
-    /// The variant for this CPU (through the sealed dispatch in the kernel).
-    pub fn detect() -> Self {
-        Self {
-            adx: adx_bmi2::get(),
-        }
-    }
-
-    /// The plain-`mul` variant (runs everywhere); for tests and fallbacks.
-    pub const fn portable() -> Self {
-        Self { adx: false }
-    }
-
-    /// The MULX/ADX variant if this CPU has it.
-    pub fn adx_if_available() -> Option<Self> {
-        adx_bmi2::get().then_some(Self { adx: true })
-    }
-
-    /// Whether the MULX/ADX variant is in use.
-    pub const fn uses_adx(self) -> bool {
-        self.adx
-    }
-
-    // The pointers below are references converted at the call, valid for the
-    // access sizes the assembly documents (4 limbs, or whole points).
-
-    fn mul(self, a: &Limbs, b: &Limbs) -> Limbs {
-        let mut r = ZERO;
-        if self.adx {
-            // SAFETY: `r`, `a`, `b` are valid 32-byte limb arrays; the assembly
-            // reads `a` and `b` and writes `r` only, uses no CPU feature beyond
-            // what `self.adx` (checked at construction) implies.
-            unsafe { urmqtt_nistz256_mul_mont_adx(&raw mut r, a, b) };
-        } else {
-            // SAFETY: `r`, `a`, `b` are valid 32-byte limb arrays; the assembly
-            // reads `a` and `b` and writes `r` only, uses no CPU feature beyond
-            // what `self.adx` (checked at construction) implies.
-            unsafe { urmqtt_nistz256_mul_mont_nohw(&raw mut r, a, b) };
-        }
-        r
-    }
-
-    fn sqr(self, a: &Limbs) -> Limbs {
-        let mut r = ZERO;
-        if self.adx {
-            // SAFETY: as in `mul`.
-            unsafe { urmqtt_nistz256_sqr_mont_adx(&raw mut r, a) };
-        } else {
-            // SAFETY: as in `mul`.
-            unsafe { urmqtt_nistz256_sqr_mont_nohw(&raw mut r, a) };
-        }
-        r
-    }
-
-    fn sqr_n(self, a: &Limbs, n: u32) -> Limbs {
-        let mut r = *a;
-        for _ in 0..n {
-            r = self.sqr(&r);
-        }
-        r
-    }
-
-    fn ord_mul(self, a: &Limbs, b: &Limbs) -> Limbs {
-        let mut r = ZERO;
-        if self.adx {
-            // SAFETY: as in `mul`.
-            unsafe { urmqtt_nistz256_ord_mul_mont_adx(&raw mut r, a, b) };
-        } else {
-            // SAFETY: as in `mul`.
-            unsafe { urmqtt_nistz256_ord_mul_mont_nohw(&raw mut r, a, b) };
-        }
-        r
-    }
-
-    /// `a^(2^rep)` in the Montgomery domain of N, `rep >= 1`.
-    fn ord_sqr_rep(self, a: &Limbs, rep: u64) -> Limbs {
-        let mut r = ZERO;
-        if self.adx {
-            // SAFETY: as in `mul`; `rep >= 1` is the assembly's precondition.
-            unsafe { urmqtt_nistz256_ord_sqr_mont_adx(&raw mut r, a, rep) };
-        } else {
-            // SAFETY: as in `mul`; `rep >= 1` is the assembly's precondition.
-            unsafe { urmqtt_nistz256_ord_sqr_mont_nohw(&raw mut r, a, rep) };
-        }
-        r
-    }
-
-    fn dbl(self, a: &Jac) -> Jac {
-        let mut r = Jac::default();
-        if self.adx {
-            // SAFETY: `r` and `a` are valid, aligned `Jac` values.
-            unsafe { urmqtt_nistz256_point_double_adx(&raw mut r, a) };
-        } else {
-            // SAFETY: `r` and `a` are valid, aligned `Jac` values.
-            unsafe { urmqtt_nistz256_point_double_nohw(&raw mut r, a) };
-        }
-        r
-    }
-
-    /// Complete addition (handles infinity operands and equal operands).
-    fn add(self, a: &Jac, b: &Jac) -> Jac {
-        let mut r = Jac::default();
-        if self.adx {
-            // SAFETY: as in `dbl`.
-            unsafe { urmqtt_nistz256_point_add_adx(&raw mut r, a, b) };
-        } else {
-            // SAFETY: as in `dbl`.
-            unsafe { urmqtt_nistz256_point_add_nohw(&raw mut r, a, b) };
-        }
-        r
-    }
-
-    /// `a + b` with `b` affine; `a` and `b` must not be the same non-infinity
-    /// point.
-    fn add_affine(self, a: &Jac, b: &Aff) -> Jac {
-        let mut r = Jac::default();
-        if self.adx {
-            // SAFETY: as in `dbl`; `b` is a valid, aligned `Aff`.
-            unsafe { urmqtt_nistz256_point_add_affine_adx(&raw mut r, a, b) };
-        } else {
-            // SAFETY: as in `dbl`; `b` is a valid, aligned `Aff`.
-            unsafe { urmqtt_nistz256_point_add_affine_nohw(&raw mut r, a, b) };
-        }
-        r
-    }
-}
-
-fn neg(a: &Limbs) -> Limbs {
-    let mut r = ZERO;
-    // SAFETY: valid 32-byte arrays; the assembly is plain integer code.
-    unsafe { urmqtt_nistz256_neg(&raw mut r, a) };
-    r
-}
-
-fn select_w5(table: &[Jac; 16], index: u64) -> Jac {
-    let mut r = Jac::default();
-    // SAFETY: `table` has the 16 entries the assembly scans, `index` is at
-    // most 16, `r` is a valid aligned `Jac`; SSE2 only (baseline).
-    unsafe { urmqtt_nistz256_select_w5_nohw(&raw mut r, table.as_ptr(), index as i32) };
-    r
-}
-
-fn select_w7(row: &[Aff; 64], index: u64) -> Aff {
-    let mut r = Aff::default();
-    // SAFETY: as `select_w5`, with 64 entries and `index <= 64`.
-    unsafe { urmqtt_nistz256_select_w7_nohw(&raw mut r, row.as_ptr(), index as i32) };
-    r
 }
 
 /// `dst = src` if `mv == 1`, unchanged if `mv == 0` (constant time).
@@ -434,6 +266,14 @@ fn booth_recode_w7(inp: u64) -> u64 {
 }
 
 impl Ops {
+    fn sqr_n(self, a: &Limbs, n: u32) -> Limbs {
+        let mut r = *a;
+        for _ in 0..n {
+            r = self.sqr(&r);
+        }
+        r
+    }
+
     /// Field inversion `a^(P-2)` (Montgomery domain, `a != 0`), by a fixed
     /// addition chain, so constant time.
     fn inv_p(self, a: &Limbs) -> Limbs {
