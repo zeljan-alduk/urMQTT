@@ -49,6 +49,8 @@ jobs:
           path: fuzz/corpus/${{ matrix.target }}
           key: corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: corpus-${{ matrix.target }}-
+      # The dev certificates the configuration crate embeds at build time (as in ci.yml).
+      - run: make certs
       - run: make fuzz T="${{ matrix.target }}" FUZZ_TIME="${SECONDS_PER_TARGET}"
         env:
           SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
