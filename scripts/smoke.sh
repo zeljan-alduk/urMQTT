@@ -3434,8 +3434,10 @@ virtio_devices() {
     MKIMG_EXTRA=()
     mkimg "$OUT/vdev-auto.raw" "serve"
     local diag="$OUT/vdev-diag.iso"
-    [[ -f $diag ]] || "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$diag" \
-        --diag-cmdline "diag smoke diag-confirm-timeout=60" --diag-default >/dev/null
+    # The x86_64-only ISO has no menu: its one entry takes the words.
+    local diag_args=(--diag-cmdline "diag smoke diag-confirm-timeout=60" --diag-default)
+    [[ $ARCH == x86_64 ]] && diag_args=(--cmdline "diag smoke diag-confirm-timeout=60")
+    [[ -f $diag ]] || "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$diag" "${diag_args[@]}" >/dev/null
     for accel in $ACCELS; do
         local log="$OUT/virtio-devices-auto-$accel.log" data="$OUT/vdev-auto-$accel.img" status=0 qdir sock
         fresh_disk "$OUT/vdev-auto.raw" "$data"
