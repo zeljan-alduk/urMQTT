@@ -13,7 +13,7 @@
 #![allow(unsafe_code)]
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::hint::black_box;
@@ -177,11 +177,12 @@ pub fn run_for_report(cpus: u64, medium: devices::BootMedium) {
         clock,
         clock_name,
     };
-    run.status.steps = 3;
+    run.status.steps = 4;
     log_detection(&run.report);
     ram_throughput(&mut run);
     ram_latency(&mut run);
     crypto(&mut run);
+    clock_and_entropy(&mut run);
     run.status.done = true;
     let json = run.report.to_json();
     urmqtt_log::raw(format_args!("URMQTT-DIAG-JSON {json}\n"));
@@ -232,7 +233,7 @@ pub fn run(
         });
     }
     let measured = disks.iter().filter(|d| d.disk.is_some()).count();
-    run.status.steps = 3 + measured * 2;
+    run.status.steps = 4 + measured * 2;
     log_detection(&run.report);
     run.status.stage = "Detection complete".into();
     run.redraw();
@@ -240,6 +241,7 @@ pub fn run(
     ram_throughput(&mut run);
     ram_latency(&mut run);
     crypto(&mut run);
+    clock_and_entropy(&mut run);
     for (i, d) in disks.iter_mut().enumerate() {
         if let Some(disk) = d.disk.take() {
             disk_tests(&mut run, i, disk, options);
@@ -374,7 +376,163 @@ fn detect(cpus: u64, medium: devices::BootMedium) -> Report {
         },
         ram: None,
         crypto: None,
+        clock: None,
+        entropy: None,
     }
+}
+
+/// The finest counter's rate against the time base: the CPU clock when the
+/// counter counts core cycles (aarch64 PMU), the TSC rate on x86_64.
+fn cpu_clock() -> urmqtt_diag::report::CpuClock {
+    let (now, name) = time::finest_clock();
+    let core_cycles = name.contains("PMU");
+    let counter = String::from(name);
+    // The generic timer and the like run at a fixed rate that says nothing
+    // about the core: not a measurement of the CPU clock.
+    if !core_cycles && !name.contains("tsc") {
+        return urmqtt_diag::report::CpuClock {
+            counter,
+            mhz_x10: 0,
+            core_cycles,
+        };
+    }
+    let mut rates = [0u64; 3];
+    for r in &mut rates {
+        let t0 = time::uptime_ns();
+        let c0 = now();
+        let mut t1 = t0;
+        while t1 - t0 < 20_000_000 {
+            core::hint::spin_loop();
+            t1 = time::uptime_ns();
+        }
+        let ticks = now().wrapping_sub(c0);
+        // ticks per ns is GHz: MHz in tenths = ticks * 10_000 / ns.
+        *r = ticks.saturating_mul(10_000) / (t1 - t0).max(1);
+    }
+    rates.sort_unstable();
+    urmqtt_diag::report::CpuClock {
+        counter,
+        mhz_x10: rates[1],
+        core_cycles,
+    }
+}
+
+/// What the boot used to seed the random number generator, a sanity test of
+/// fresh bytes from each hardware source, and the generator's output.
+fn entropy() -> urmqtt_diag::report::Entropy {
+    use urmqtt_diag::report::{Entropy, EntropySource};
+    use urmqtt_diag::rng::raw_test;
+    let f = devices::ENTROPY_FACTS.lock().clone();
+    let mut sources = Vec::new();
+    let mut buf = vec![0u8; 4096];
+
+    let (state, raw) = match f.virtio_rng {
+        None => ("no device".to_string(), None),
+        Some(Err(())) => ("the device failed at boot".to_string(), None),
+        Some(Ok(n)) => {
+            let got = devices::sample_virtio_rng(&mut buf);
+            (
+                format!("{n} bytes at boot"),
+                (got > 0).then(|| raw_test(&buf[..got])),
+            )
+        }
+    };
+    sources.push(EntropySource {
+        name: "virtio-rng".into(),
+        kind: "hardware".into(),
+        state,
+        raw,
+    });
+
+    let (state, raw) = if f.hw_rng {
+        let got = devices::sample_hw_rng(&mut buf);
+        (
+            "64 bytes at boot".to_string(),
+            (got > 0).then(|| raw_test(&buf[..got])),
+        )
+    } else {
+        ("not available on this CPU".to_string(), None)
+    };
+    sources.push(EntropySource {
+        name: devices::HW_RNG.into(),
+        kind: "hardware".into(),
+        state,
+        raw,
+    });
+
+    sources.push(EntropySource {
+        name: "bootloader (EFI RNG)".into(),
+        kind: "bootloader".into(),
+        state: if f.bootloader_values == 0 {
+            "delivered nothing".into()
+        } else {
+            format!(
+                "{} of {} values non-zero",
+                f.bootloader_values,
+                crate::boot::ENTROPY_VALUES
+            )
+        },
+        raw: None,
+    });
+
+    let state = match &f.jitter {
+        Some(j) => format!(
+            "{} samples of {} steps via the {} (2^{}), {} bit(s)/sample, {} bit(s) credited, health tests {}",
+            j.samples,
+            j.iters,
+            j.clock,
+            j.shift,
+            j.bits_per_sample,
+            j.credited,
+            if j.failed { "FAILED" } else { "passed" }
+        ),
+        None if !f.fallback_allowed => "disabled (entropy.jitter_fallback = false)".to_string(),
+        None if f.hardware_seed => "not needed: a hardware source seeded the generator".to_string(),
+        None => "not run".to_string(),
+    };
+    sources.push(EntropySource {
+        name: "CPU timing jitter".into(),
+        kind: "fallback".into(),
+        state,
+        raw: None,
+    });
+
+    let mut seeded: Vec<&str> = Vec::new();
+    if matches!(f.virtio_rng, Some(Ok(_))) {
+        seeded.push("virtio-rng");
+    }
+    if f.hw_rng {
+        seeded.push(devices::HW_RNG);
+    }
+    if f.jitter.is_some() {
+        seeded.push("CPU jitter (fallback)");
+    }
+    if f.bootloader_values > 0 {
+        seeded.push("bootloader");
+    }
+
+    // The generator: throughput over 8 MiB, and a test of its output.
+    let mut out = vec![0u8; 64 * 1024];
+    let t0 = time::uptime_ns();
+    for _ in 0..128 {
+        let _ = urmqtt_tls::rng::fill_global(&mut out);
+    }
+    let ns = (time::uptime_ns() - t0).max(1);
+    let csprng_mib_s = (8u128 * 1024 * 1024 * 1_000_000_000 / u128::from(ns) / (1 << 20)) as u64;
+    let _ = urmqtt_tls::rng::fill_global(&mut buf);
+    Entropy {
+        sources,
+        seeded_from: seeded.join(", "),
+        csprng_mib_s,
+        output: Some(raw_test(&buf)),
+    }
+}
+
+fn clock_and_entropy(run: &mut Run) {
+    run.stage("CPU clock and random number generator");
+    run.report.clock = Some(cpu_clock());
+    run.report.entropy = Some(entropy());
+    run.redraw();
 }
 
 fn log_detection(r: &Report) {

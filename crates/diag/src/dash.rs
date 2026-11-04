@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use crate::bars;
 use crate::fmt;
 use crate::names;
-use crate::report::{CryptoBench, Disk, RamBench, Report, WriteState};
+use crate::report::{CpuClock, CryptoBench, Disk, Entropy, RamBench, Report, WriteState};
 
 pub type Rgb = (u8, u8, u8);
 
@@ -219,6 +219,7 @@ fn system_lines(r: &Report, inner: usize) -> Vec<Line> {
         TEXT,
     ));
     v.push(Line::Kv("Logical CPUs", format!("{}", cpu.logical), TEXT));
+    v.push(Line::Kv("CPU clock", clock_text(r.clock.as_ref()), TEXT));
     let fw = inner.saturating_sub(LABEL_W);
     for (i, l) in wrap(&cpu.features.join(" "), fw, 2).into_iter().enumerate() {
         v.push(Line::Kv(if i == 0 { "Features" } else { "" }, l, TEXT));
@@ -485,6 +486,97 @@ fn disk_perf_lines(d: &Disk, seq_max: u64, iops_max: u64) -> Vec<Line> {
     v
 }
 
+fn clock_text(c: Option<&CpuClock>) -> String {
+    let Some(c) = c else {
+        return "measuring...".into();
+    };
+    if c.mhz_x10 == 0 {
+        return format!("not measurable (only the {} is readable)", c.counter);
+    }
+    let (mhz, tenth) = (c.mhz_x10 / 10, c.mhz_x10 % 10);
+    let value = if mhz >= 1000 {
+        format!("{}.{:02} GHz", mhz / 1000, (mhz % 1000) / 10)
+    } else {
+        format!("{mhz}.{tenth} MHz")
+    };
+    if c.core_cycles {
+        format!("{value} ({})", c.counter)
+    } else {
+        format!("{value} {} rate, not necessarily the core clock", c.counter)
+    }
+}
+
+fn raw_text(t: Option<&crate::rng::RawTest>) -> String {
+    match t {
+        Some(t) => format!(
+            "{} B: {}.{} % ones, longest run {} bits: {}",
+            t.bytes,
+            t.ones_permille / 10,
+            t.ones_permille % 10,
+            t.longest_run,
+            if t.ok { "ok" } else { "FAILED" }
+        ),
+        None => "no sample".into(),
+    }
+}
+
+fn kind_label(kind: &str) -> &'static str {
+    match kind {
+        "hardware" => "Hardware",
+        "bootloader" => "Bootloader",
+        "fallback" => "Fallback",
+        _ => "Source",
+    }
+}
+
+fn entropy_lines(e: Option<&Entropy>, inner: usize) -> Vec<Line> {
+    let Some(e) = e else {
+        return vec![Line::Text("measuring...".into(), DIM)];
+    };
+    let w = inner.saturating_sub(LABEL_W);
+    let mut v = Vec::new();
+    for (i, l) in wrap(&e.seeded_from, w, 2).into_iter().enumerate() {
+        v.push(Line::Kv(if i == 0 { "Seeded from" } else { "" }, l, AMBER));
+    }
+    for s in &e.sources {
+        // Green only for a hardware source that delivered and passed; dim
+        // for one that is not there; red for one that failed the test.
+        let delivered = s.raw.is_some() || (s.kind != "hardware" && !s.state.contains("nothing"));
+        let color = match s.raw.map(|t| t.ok) {
+            Some(false) => BAD,
+            Some(true) => GOOD,
+            None if delivered => TEXT,
+            None => DIM,
+        };
+        let text = format!("{}: {}", s.name, s.state);
+        for (i, l) in wrap(&text, w, 3).into_iter().enumerate() {
+            v.push(Line::Kv(
+                if i == 0 { kind_label(&s.kind) } else { "" },
+                l,
+                color,
+            ));
+        }
+        if s.raw.is_some() {
+            v.push(Line::Kv(
+                "",
+                format!("sample {}", raw_text(s.raw.as_ref())),
+                DIM,
+            ));
+        }
+    }
+    v.push(Line::Kv(
+        "Generator",
+        format!("ChaCha20 CSPRNG, {} MiB/s", e.csprng_mib_s),
+        TEXT,
+    ));
+    v.push(Line::Kv(
+        "",
+        format!("output {}", raw_text(e.output.as_ref())),
+        DIM,
+    ));
+    v
+}
+
 fn crypto_lines(c: Option<&CryptoBench>) -> Vec<Line> {
     let Some(c) = c else {
         return vec![Line::Text("measuring...".into(), DIM)];
@@ -665,6 +757,10 @@ pub fn draw<C: Canvas>(c: &mut C, r: &Report, s: &Status) {
         ("RAM THROUGHPUT AND LATENCY", ram_lines(r.ram.as_ref())),
         ("DISK PERFORMANCE", disk_perf),
         ("CRYPTO", crypto_lines(r.crypto.as_ref())),
+        (
+            "RANDOM NUMBER GENERATOR",
+            entropy_lines(r.entropy.as_ref(), rw.saturating_sub(4)),
+        ),
     ];
     if two {
         stack(c, lx, body_top, lw, body_rows, &mut left);
@@ -826,6 +922,18 @@ mod tests {
                 chacha_mib_s: 1500,
                 sha256_mib_s: 1900,
                 crc32c_mib_s: 9000,
+            }),
+            clock: Some(CpuClock { counter: "PMU cycle counter".into(), mhz_x10: 28_000, core_cycles: true }),
+            entropy: Some(Entropy {
+                seeded_from: "virtio-rng, RDSEED, bootloader".into(),
+                csprng_mib_s: 900,
+                output: Some(crate::rng::RawTest { bytes: 4096, ones_permille: 501, longest_run: 15, ok: true }),
+                sources: vec![crate::report::EntropySource {
+                    name: "virtio-rng".into(),
+                    kind: "hardware".into(),
+                    state: "64 bytes".into(),
+                    raw: Some(crate::rng::RawTest { bytes: 4096, ones_permille: 499, longest_run: 14, ok: true }),
+                }],
             }),
         }
     }

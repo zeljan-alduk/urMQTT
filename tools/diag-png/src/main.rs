@@ -183,7 +183,48 @@ fn report(j: &Value) -> Result<Report, String> {
             crc32c_mib_s: num(c, "crc32c_mib_s"),
         });
     }
+    if let Some(c) = j.get("cpu_clock").filter(|c| !matches!(c, Value::Null)) {
+        r.clock = Some(urmqtt_diag::report::CpuClock {
+            counter: str_of(c, "counter"),
+            mhz_x10: tenths(c, "mhz"),
+            core_cycles: c
+                .get("core_cycles")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        });
+    }
+    if let Some(e) = j.get("entropy").filter(|e| !matches!(e, Value::Null)) {
+        r.entropy = Some(urmqtt_diag::report::Entropy {
+            seeded_from: str_of(e, "seeded_from"),
+            csprng_mib_s: num(e, "csprng_mib_s"),
+            output: e.get("output_test").and_then(raw_test),
+            sources: e
+                .get("sources")
+                .and_then(Value::as_arr)
+                .unwrap_or_default()
+                .iter()
+                .map(|s| urmqtt_diag::report::EntropySource {
+                    name: str_of(s, "name"),
+                    kind: str_of(s, "kind"),
+                    state: str_of(s, "state"),
+                    raw: s.get("raw_test").and_then(raw_test),
+                })
+                .collect(),
+        });
+    }
     Ok(r)
+}
+
+fn raw_test(v: &Value) -> Option<urmqtt_diag::rng::RawTest> {
+    if matches!(v, Value::Null) {
+        return None;
+    }
+    Some(urmqtt_diag::rng::RawTest {
+        bytes: num(v, "bytes") as u32,
+        ones_permille: num(v, "ones_permille") as u32,
+        longest_run: num(v, "longest_run") as u32,
+        ok: v.get("ok").and_then(Value::as_bool).unwrap_or(false),
+    })
 }
 
 /// The class names `urmqtt_diag::names` prints back to the PCI class code

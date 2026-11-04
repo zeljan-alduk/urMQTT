@@ -12,6 +12,12 @@ All notable changes to this project are documented here. The format follows
   then a normal live boot that serves MQTT with the report as the retained `$SYS/diag/report` (operator certificate).
   For machines whose console cannot be seen (a netcup ARM VPS shows "Display output is not active": its virtio-gpu has
   no driver here, and the serial port is not exposed). Use it with `mkiso.sh --diag-default --diag-cmdline diag-serve`.
+- Diagnostic entry: the **CPU clock** (the PMU cycle counter, or the TSC rate on x86_64, measured against the time
+  base; "not measurable" where only a fixed-rate timer is readable) and a **random number generator** panel: which
+  sources seeded it (virtio-rng, RNDR or RDRAND/RDSEED, the bootloader's EFI RNG, the CPU-jitter fallback with its
+  samples, credited bits and health tests), a sanity test of fresh bytes from each hardware source (share of ones,
+  longest run; not a certification), the generator's throughput and a test of its output. `scripts/diag-check.py`
+  checks the new keys.
 - `tools/diag-png`: draws that JSON (or the `URMQTT-DIAG-JSON` serial line) as the PNG of the dashboard, with the
   kernel's own `dash::draw` and framebuffer font.
 - First measurement on a real aarch64 KVM guest (netcup VPS 500 ARM G12.5, Neoverse N1, 2 vCPU): hardware AES-XTS

@@ -35,7 +35,7 @@ def main():
         fail(f"not valid JSON: {e}")
 
     for key in ("urmqtt_diag", "version", "arch", "env", "hypervisor", "cpu", "memory",
-                "pci", "disks", "nics", "time", "firmware", "ram", "crypto"):
+                "pci", "disks", "nics", "time", "firmware", "ram", "crypto", "cpu_clock", "entropy"):
         if key not in d:
             fail(f"missing key {key}")
     if d["urmqtt_diag"] != 1:
@@ -73,6 +73,18 @@ def main():
         fail("crypto figures missing")
     if "aes_xts_hardware" not in c:
         fail("AES-XTS hardware flag missing")
+    ck = d["cpu_clock"]
+    if not ck or not ck["counter"] or ck["mhz"] < 0 or ck["mhz"] > 10000:
+        fail(f"cpu clock {ck}")
+    e = d["entropy"]
+    if not e or not e["seeded_from"] or e["csprng_mib_s"] <= 0 or not e["sources"]:
+        fail(f"entropy facts missing: {e}")
+    if not e["output_test"] or not e["output_test"]["ok"]:
+        fail(f"the generator's output fails the sanity test: {e['output_test']}")
+    for src in e["sources"]:
+        t = src["raw_test"]
+        if t is not None and not t["ok"]:
+            fail(f"entropy source {src['name']} fails the sanity test: {t}")
 
     want = opts.get("--disk-state")
     if want:

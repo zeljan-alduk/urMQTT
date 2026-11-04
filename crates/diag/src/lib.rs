@@ -18,6 +18,7 @@ pub mod json;
 pub mod keys;
 pub mod names;
 pub mod report;
+pub mod rng;
 pub mod space;
 pub mod stats;
 pub mod time;

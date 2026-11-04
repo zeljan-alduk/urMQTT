@@ -164,6 +164,42 @@ pub struct Disk {
     pub write: WriteState,
 }
 
+/// The CPU clock as far as it can be measured: ticks of the finest counter
+/// against the time base, over a few tens of milliseconds.
+#[derive(Debug, Clone, Default)]
+pub struct CpuClock {
+    /// Which counter was measured ("PMU cycle counter" counts core cycles;
+    /// "tsc" is the time-stamp counter, which need not run at the core clock).
+    pub counter: String,
+    /// The counter's rate in MHz, in tenths; 0 if it could not be measured.
+    pub mhz_x10: u64,
+    /// True if the counter counts core cycles (the figure is the CPU clock).
+    pub core_cycles: bool,
+}
+
+/// One source of the random number generator's seed.
+#[derive(Debug, Clone, Default)]
+pub struct EntropySource {
+    pub name: String,
+    /// "hardware", "bootloader" or "fallback".
+    pub kind: String,
+    /// What it delivered, or why it did not.
+    pub state: String,
+    /// The sanity test of fresh bytes from it, if it could be drawn from.
+    pub raw: Option<crate::rng::RawTest>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Entropy {
+    pub sources: Vec<EntropySource>,
+    /// What the boot says the generator was seeded from.
+    pub seeded_from: String,
+    /// Throughput of the generator's output, MiB/s.
+    pub csprng_mib_s: u64,
+    /// The sanity test of that output.
+    pub output: Option<crate::rng::RawTest>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Report {
     pub version: String,
@@ -181,6 +217,17 @@ pub struct Report {
     pub firmware: Firmware,
     pub ram: Option<RamBench>,
     pub crypto: Option<CryptoBench>,
+    pub clock: Option<CpuClock>,
+    pub entropy: Option<Entropy>,
+}
+
+fn raw_json(j: &mut Json, key: &str, t: &crate::rng::RawTest) {
+    j.begin_obj(Some(key));
+    j.u64(Some("bytes"), u64::from(t.bytes));
+    j.u64(Some("ones_permille"), u64::from(t.ones_permille));
+    j.u64(Some("longest_run"), u64::from(t.longest_run));
+    j.bool(Some("ok"), t.ok);
+    j.end_obj();
 }
 
 fn strs(j: &mut Json, key: &str, v: &[String]) {
@@ -413,6 +460,42 @@ impl Report {
             }
             None => j.null(Some("crypto")),
         }
+        match &self.clock {
+            Some(c) => {
+                j.begin_obj(Some("cpu_clock"));
+                j.str(Some("counter"), &c.counter);
+                j.x10(Some("mhz"), c.mhz_x10);
+                j.bool(Some("core_cycles"), c.core_cycles);
+                j.end_obj();
+            }
+            None => j.null(Some("cpu_clock")),
+        }
+        match &self.entropy {
+            Some(e) => {
+                j.begin_obj(Some("entropy"));
+                j.str(Some("seeded_from"), &e.seeded_from);
+                j.u64(Some("csprng_mib_s"), e.csprng_mib_s);
+                match &e.output {
+                    Some(t) => raw_json(&mut j, "output_test", t),
+                    None => j.null(Some("output_test")),
+                }
+                j.begin_arr(Some("sources"));
+                for s in &e.sources {
+                    j.begin_obj(None);
+                    j.str(Some("name"), &s.name);
+                    j.str(Some("kind"), &s.kind);
+                    j.str(Some("state"), &s.state);
+                    match &s.raw {
+                        Some(t) => raw_json(&mut j, "raw_test", t),
+                        None => j.null(Some("raw_test")),
+                    }
+                    j.end_obj();
+                }
+                j.end_arr();
+                j.end_obj();
+            }
+            None => j.null(Some("entropy")),
+        }
         j.end_obj();
         j.finish()
     }
@@ -492,6 +575,27 @@ mod tests {
                 copy_mib_s: 5000,
                 latency: vec![(4096, 12), (1 << 26, 853)],
             }),
+            clock: Some(CpuClock {
+                counter: "tsc".into(),
+                mhz_x10: 24_999,
+                core_cycles: false,
+            }),
+            entropy: Some(Entropy {
+                seeded_from: "virtio-rng".into(),
+                csprng_mib_s: 700,
+                output: Some(crate::rng::RawTest {
+                    bytes: 4096,
+                    ones_permille: 500,
+                    longest_run: 13,
+                    ok: true,
+                }),
+                sources: vec![EntropySource {
+                    name: "virtio-rng".into(),
+                    kind: "hardware".into(),
+                    state: "64 bytes".into(),
+                    raw: None,
+                }],
+            }),
             ..Report::default()
         }
     }
@@ -550,6 +654,10 @@ mod tests {
             "\"read_mib_s\":9000",
             "{\"bytes\":4096,\"ns\":1.2}",
             "\"crypto\":null",
+            "\"cpu_clock\":{\"counter\":\"tsc\",\"mhz\":2499.9,\"core_cycles\":false}",
+            "\"entropy\":{\"seeded_from\":\"virtio-rng\",\"csprng_mib_s\":700",
+            "\"output_test\":{\"bytes\":4096,\"ones_permille\":500,\"longest_run\":13,\"ok\":true}",
+            "{\"name\":\"virtio-rng\",\"kind\":\"hardware\",\"state\":\"64 bytes\",\"raw_test\":null}",
             "\"model\":\"Test \\\"CPU\\\"\"",
         ] {
             assert!(json.contains(key), "missing {key} in {json}");

@@ -511,6 +511,72 @@ pub fn nic_vendor(v: u16) -> &'static str {
     }
 }
 
+/// What the boot did with each entropy source, for the Diagnostic entry.
+#[derive(Clone, Default)]
+pub struct EntropyFacts {
+    /// How many of the bootloader's values were not zero.
+    pub bootloader_values: u32,
+    /// `None`: no virtio-rng device; `Some(Ok(n))`: n bytes; `Some(Err)`: failed.
+    pub virtio_rng: Option<Result<usize, ()>>,
+    /// The CPU's own instructions delivered 64 bytes.
+    pub hw_rng: bool,
+    /// The jitter fallback ran: clock, granularity shift, samples, steps per
+    /// sample, bits per sample estimated, bits credited, health tests failed.
+    pub jitter: Option<JitterFacts>,
+    /// `entropy.jitter_fallback` of the configuration.
+    pub fallback_allowed: bool,
+    /// The sources that went into the pool (`EntropyPool::sources`).
+    pub mask: u8,
+    /// A hardware source alone seeded the generator.
+    pub hardware_seed: bool,
+}
+
+#[derive(Clone)]
+pub struct JitterFacts {
+    pub clock: &'static str,
+    pub shift: u32,
+    pub samples: u32,
+    pub iters: u32,
+    pub bits_per_sample: u32,
+    pub credited: u64,
+    pub failed: bool,
+}
+
+pub static ENTROPY_FACTS: SpinLock<EntropyFacts> = SpinLock::new(EntropyFacts {
+    bootloader_values: 0,
+    virtio_rng: None,
+    hw_rng: false,
+    jitter: None,
+    fallback_allowed: false,
+    mask: 0,
+    hardware_seed: false,
+});
+
+/// Fresh bytes from the virtio-rng device, for the Diagnostic entry's sanity
+/// test; returns how many it got (0 without the device).
+pub fn sample_virtio_rng(out: &mut [u8]) -> usize {
+    match DEVICES.lock().rng.as_mut() {
+        Some(rng) => rng.fill(&KernelEnv, out).unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// Fresh bytes from the CPU's own random instructions (64 per call).
+pub fn sample_hw_rng(out: &mut [u8]) -> usize {
+    let mut n = 0;
+    for chunk in out.chunks_mut(64) {
+        match urmqtt_arch::entropy::hw_random() {
+            Some(r) => {
+                let k = chunk.len();
+                chunk.copy_from_slice(&r[..k]);
+                n += k;
+            }
+            None => break,
+        }
+    }
+    n
+}
+
 /// The boot CPU's CSPRNG (per-core generators are forked from it).
 pub static RNG: SpinLock<Option<Csprng>> = SpinLock::new(None);
 
@@ -624,6 +690,10 @@ fn setup_msix<C: ConfigSpace>(cfg: &mut C, bdf: Bdf, frame: &mut msi::Frame) -> 
 pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), ProbeError> {
     let env = KernelEnv;
     let mut pool = EntropyPool::new();
+    let mut facts = EntropyFacts {
+        bootloader_values: bootloader_entropy.iter().filter(|v| **v != 0).count() as u32,
+        ..EntropyFacts::default()
+    };
     for v in bootloader_entropy {
         pool.add(Source::Bootloader, &v.to_le_bytes());
     }
@@ -646,17 +716,24 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
         match rng.fill(&env, &mut hw) {
             Ok(n) => {
                 pool.add(Source::VirtioRng, hw.get(..n).unwrap_or(&[]));
+                facts.virtio_rng = Some(Ok(n));
                 info!("entropy: {n} bytes from virtio-rng");
             }
-            Err(e) => warn!("entropy: virtio-rng failed: {e:?}"),
+            Err(e) => {
+                facts.virtio_rng = Some(Err(()));
+                warn!("entropy: virtio-rng failed: {e:?}");
+            }
         }
     }
     if let Some(r) = urmqtt_arch::entropy::hw_random() {
         pool.add(Source::Rndr, &r);
+        facts.hw_rng = true;
         info!("entropy: 64 bytes from {HW_RNG}");
     }
     pool.add(Source::Jitter, &time::now().to_le_bytes());
     let fallback = urmqtt_config::CONFIG.entropy.jitter_fallback;
+    facts.fallback_allowed = fallback;
+    facts.hardware_seed = pool.has_hardware();
     if !pool.has_hardware() && fallback {
         let t0 = time::uptime_ns();
         let r = crate::jitter::collect(&mut pool);
@@ -673,7 +750,18 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
             if r.failed { "FAILED" } else { "passed" },
             (time::uptime_ns() - t0) / 1_000_000
         );
+        facts.jitter = Some(JitterFacts {
+            clock: r.clock,
+            shift: r.shift,
+            samples: r.samples,
+            iters: r.iters,
+            bits_per_sample: r.bits_per_sample,
+            credited: r.credited,
+            failed: r.failed,
+        });
     }
+    facts.mask = pool.sources();
+    *ENTROPY_FACTS.lock() = facts;
     let mut rng = pool
         .finish_with(fallback)
         .map_err(|_| ProbeError::NoEntropy)?;
