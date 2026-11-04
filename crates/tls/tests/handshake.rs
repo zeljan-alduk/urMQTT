@@ -270,6 +270,35 @@ fn trust_anchors_get_a_verification_table() {
     }
 }
 
+/// The trust-anchor tables exist once per key, in one registry every core's
+/// server shares: building more servers (the kernel builds one per data core)
+/// adds no table and no heap, and one table costs at most about 150 KiB
+/// (ADR-261; the boot reports the figure).
+#[test]
+fn trust_anchor_tables_are_built_once_and_shared() {
+    let Some(d) = dev() else { return };
+    if !has(&d, "ca-2.pem") || !has(&d, "ca-bootstrap.pem") {
+        return;
+    }
+    setup_globals();
+    let pems: Vec<Vec<u8>> = ["ca.pem", "ca-2.pem", "ca-bootstrap.pem"]
+        .iter()
+        .map(|f| read(&d.join(f)))
+        .collect();
+    let (ops, boots) = ([&pems[0][..], &pems[1][..]], [&pems[2][..]]);
+    let (n, bytes) = urmqtt_tls::server::prepare_trust_anchors(&[&ops, &boots]);
+    // The only anchors this test binary ever registers are the three dev CAs.
+    assert_eq!(n, 3, "one table per distinct anchor key");
+    assert!(bytes / n <= 150 * 1024, "{bytes} bytes for {n} tables");
+    let none = || Arc::new(RevocationList::new(Vec::new()));
+    let servers: Vec<TlsServer> = (0..4)
+        .map(|_| server_with(&d, &["ca.pem", "ca-2.pem"], &["ca-bootstrap.pem"], none()))
+        .collect();
+    assert_eq!(urmqtt_tls::provider::issuer_tables(), (n, bytes));
+    drop(servers);
+    assert_eq!(urmqtt_tls::provider::issuer_tables(), (n, bytes));
+}
+
 #[test]
 fn garbage_is_not_tls() {
     let Some(d) = dev() else { return };

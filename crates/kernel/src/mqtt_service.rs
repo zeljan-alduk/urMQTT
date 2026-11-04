@@ -433,6 +433,27 @@ pub fn ticket_stats() -> urmqtt_tls::ticket::TicketStats {
     TICKETS.get().map(|t| t.stats()).unwrap_or_default()
 }
 
+/// Builds the trust anchors' verification tables once, on the boot CPU before
+/// the data cores start (ADR-261): they are shared by every core's server, and
+/// the heap line that follows (`set_heap_reserve`) then includes them. Logs
+/// what they cost, measured on the heap (blocks, allocator rounding included).
+pub fn prepare_trust_anchors() {
+    if CONFIG.network.mqtt_tls_port == 0 {
+        return;
+    }
+    let free = || crate::vm::HEAP.stats().map_or(0, |(f, _)| f);
+    let before = free();
+    let (n, bytes) = urmqtt_tls::server::prepare_trust_anchors(&[
+        urmqtt_config::CONFIG.trust.operational,
+        urmqtt_config::CONFIG.trust.bootstrap,
+    ]);
+    info!(
+        "tls: {n} trust-anchor verification table(s), {} KiB of heap ({} KiB requested)",
+        before.saturating_sub(free()) >> 10,
+        bytes >> 10
+    );
+}
+
 /// This core's TLS server: the image's trust anchors by role and the
 /// revocation list shared with the control channel (H1).
 fn tls_server() -> Option<TlsServer> {
