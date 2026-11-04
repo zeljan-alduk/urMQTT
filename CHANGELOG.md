@@ -21,6 +21,11 @@ All notable changes to this project are documented here. The format follows
   9.8 -> 7.2 us (Docker on an M4 Pro).
 - Server CPU per full mutual-TLS handshake, measured stage by stage (Docker on an M4 Pro, PERFORMANCE.md section
   12): returning device 88.8 -> 80.3 us, first contact 118.6 -> 87.8 us. Nothing was measured on the Neoverse N1.
+- **Measured on the netcup Neoverse N1 VPS** (PERFORMANCE.md section 12.1, one run each, shared hosts): the server's
+  CPU per handshake 461 us (553 us with the assembly alone, about 1.0 to 1.08 ms with the portable code; the CPU clock
+  differed between the runs); X25519 128 us, ECDSA verify 124 us; full mTLS handshakes per second 1,451 / 1,624 / 1,599
+  at 32 / 64 / 128 threads against 1,317 / 1,398 / 1,316 with the assembly alone and 848 / 827 / 778 with the portable
+  code (0 errors).
 
 ### Added
 - `stage-profile` feature and `handshake_profile` example of `urmqtt-tls` (host only): the server's handshake time

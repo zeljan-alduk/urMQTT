@@ -1,0 +1,94 @@
+# urmqtt-netcup-tlsopt 2026-11-04T21:13:57Z host=89.58.42.236:8883 cores=2,3 reps=3
+# loadgen 7f8f68641114 kernel 7.0.0-38-generic nproc=4
+## suite handshake
+GUARD load1=1.17 site_s=0.122779
+RUN handshake threads=32 rep=1
+loadgen: handshake: 10456 connections in 10.0 s = 1044 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 30.6 ms, 0 error(s)
+loadgen: whole connection: mean 30.6 ms, p50 23.1, p90 52.8, p99 107.3, max 1022.6 ms
+loadgen: tcp connect: mean 7.0 ms, p50 5.4, p90 11.2, p99 27.8, max 1007.4 ms
+loadgen: tls + connect/connack: mean 16.6 ms, p50 12.3, p90 28.6, p99 70.0, max 162.3 ms
+loadgen: handshake: generator cpu 1.06 cores (process total, all threads)
+RESULT mode=handshake threads=32 conn_per_s=1044 errors=0 lat_p50_ms=23.1 lat_p99_ms=107.3 tcp_p50_ms=5.4 tls_p50_ms=12.3 tls_p99_ms=70.0 gen_cpu=1.06
+HOSTCPU steal=36% idle=40% user+sys=13%
+BROKERBUSY c0=70 c1=31
+GUARD load1=1.53 site_s=0.018198
+RUN handshake threads=32 rep=2
+loadgen: handshake: 14515 connections in 10.0 s = 1451 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 22.0 ms, 0 error(s)
+loadgen: whole connection: mean 22.0 ms, p50 21.7, p90 24.7, p99 29.7, max 219.9 ms
+loadgen: tcp connect: mean 5.0 ms, p50 4.7, p90 6.5, p99 8.5, max 205.5 ms
+loadgen: tls + connect/connack: mean 12.0 ms, p50 11.8, p90 14.2, p99 17.8, max 29.3 ms
+loadgen: handshake: generator cpu 0.91 cores (process total, all threads)
+RESULT mode=handshake threads=32 conn_per_s=1451 errors=0 lat_p50_ms=21.7 lat_p99_ms=29.7 tcp_p50_ms=4.7 tls_p50_ms=11.8 tls_p99_ms=17.8 gen_cpu=0.91
+HOSTCPU steal=10% idle=57% user+sys=15%
+BROKERBUSY c0=30 c1=99
+GUARD load1=1.64 site_s=0.016739
+RUN handshake threads=32 rep=3
+loadgen: handshake: 14599 connections in 10.0 s = 1459 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 21.9 ms, 0 error(s)
+loadgen: whole connection: mean 21.9 ms, p50 21.5, p90 24.9, p99 30.3, max 40.2 ms
+loadgen: tcp connect: mean 5.1 ms, p50 5.0, p90 6.5, p99 8.8, max 12.9 ms
+loadgen: tls + connect/connack: mean 11.5 ms, p50 11.3, p90 13.8, p99 18.2, max 26.0 ms
+loadgen: handshake: generator cpu 0.92 cores (process total, all threads)
+RESULT mode=handshake threads=32 conn_per_s=1459 errors=0 lat_p50_ms=21.5 lat_p99_ms=30.3 tcp_p50_ms=5.0 tls_p50_ms=11.3 tls_p99_ms=18.2 gen_cpu=0.92
+HOSTCPU steal=11% idle=56% user+sys=15%
+BROKERBUSY c0=78 c1=100
+GUARD load1=1.77 site_s=0.012287
+RUN handshake threads=64 rep=1
+loadgen: handshake: 16252 connections in 10.0 s = 1624 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 39.3 ms, 0 error(s)
+loadgen: whole connection: mean 39.3 ms, p50 37.5, p90 46.4, p99 55.4, max 285.2 ms
+loadgen: tcp connect: mean 8.7 ms, p50 8.0, p90 12.7, p99 20.6, max 29.6 ms
+loadgen: tls + connect/connack: mean 20.9 ms, p50 19.6, p90 28.9, p99 35.6, max 276.2 ms
+loadgen: handshake: generator cpu 1.06 cores (process total, all threads)
+RESULT mode=handshake threads=64 conn_per_s=1624 errors=0 lat_p50_ms=37.5 lat_p99_ms=55.4 tcp_p50_ms=8.0 tls_p50_ms=19.6 tls_p99_ms=35.6 gen_cpu=1.06
+HOSTCPU steal=14% idle=52% user+sys=15%
+BROKERBUSY c0=100 c1=55
+GUARD load1=2.74 site_s=0.028896
+RUN handshake threads=64 rep=2
+loadgen: handshake: 13598 connections in 10.0 s = 1357 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 47.1 ms, 0 error(s)
+loadgen: whole connection: mean 47.1 ms, p50 42.8, p90 65.3, p99 114.7, max 221.5 ms
+loadgen: tcp connect: mean 10.7 ms, p50 9.2, p90 16.8, p99 34.5, max 103.5 ms
+loadgen: tls + connect/connack: mean 25.4 ms, p50 21.9, p90 37.9, p99 78.1, max 176.5 ms
+loadgen: handshake: generator cpu 1.37 cores (process total, all threads)
+RESULT mode=handshake threads=64 conn_per_s=1357 errors=0 lat_p50_ms=42.8 lat_p99_ms=114.7 tcp_p50_ms=9.2 tls_p50_ms=21.9 tls_p99_ms=78.1 gen_cpu=1.37
+HOSTCPU steal=37% idle=39% user+sys=12%
+BROKERBUSY c0=12 c1=99
+GUARD load1=4.59 site_s=0.018053
+RUN handshake threads=64 rep=3
+loadgen: handshake: 16496 connections in 10.0 s = 1645 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 38.8 ms, 0 error(s)
+loadgen: whole connection: mean 38.8 ms, p50 37.6, p90 46.1, p99 56.7, max 1076.5 ms
+loadgen: tcp connect: mean 9.0 ms, p50 8.1, p90 12.9, p99 20.4, max 1051.1 ms
+loadgen: tls + connect/connack: mean 20.4 ms, p50 19.2, p90 28.0, p99 35.8, max 210.7 ms
+loadgen: handshake: generator cpu 1.13 cores (process total, all threads)
+RESULT mode=handshake threads=64 conn_per_s=1645 errors=0 lat_p50_ms=37.6 lat_p99_ms=56.7 tcp_p50_ms=8.1 tls_p50_ms=19.2 tls_p99_ms=35.8 gen_cpu=1.13
+HOSTCPU steal=17% idle=49% user+sys=15%
+BROKERBUSY c0=57 c1=99
+GUARD load1=5.36 site_s=0.014297
+RUN handshake threads=128 rep=1
+loadgen: handshake: 16277 connections in 10.0 s = 1625 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 78.5 ms, 0 error(s)
+loadgen: whole connection: mean 78.5 ms, p50 79.5, p90 83.9, p99 94.6, max 126.4 ms
+loadgen: tcp connect: mean 17.3 ms, p50 15.7, p90 25.5, p99 34.4, max 52.7 ms
+loadgen: tls + connect/connack: mean 41.8 ms, p50 41.8, p90 53.4, p99 57.6, max 78.5 ms
+loadgen: handshake: generator cpu 1.05 cores (process total, all threads)
+RESULT mode=handshake threads=128 conn_per_s=1625 errors=0 lat_p50_ms=79.5 lat_p99_ms=94.6 tcp_p50_ms=15.7 tls_p50_ms=41.8 tls_p99_ms=57.6 gen_cpu=1.05
+HOSTCPU steal=12% idle=54% user+sys=15%
+BROKERBUSY c0=100 c1=99
+GUARD load1=4.16 site_s=0.018684
+RUN handshake threads=128 rep=2
+loadgen: handshake: 14005 connections in 10.2 s = 1377 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 92.5 ms, 0 error(s)
+loadgen: whole connection: mean 92.5 ms, p50 79.8, p90 124.3, p99 357.5, max 814.2 ms
+loadgen: tcp connect: mean 19.8 ms, p50 16.5, p90 29.4, p99 92.8, max 463.6 ms
+loadgen: tls + connect/connack: mean 51.6 ms, p50 42.0, p90 72.0, p99 262.2, max 771.9 ms
+loadgen: handshake: generator cpu 1.41 cores (process total, all threads)
+RESULT mode=handshake threads=128 conn_per_s=1377 errors=0 lat_p50_ms=79.8 lat_p99_ms=357.5 tcp_p50_ms=16.5 tls_p50_ms=42.0 tls_p99_ms=262.2 gen_cpu=1.41
+HOSTCPU steal=35% idle=35% user+sys=14%
+BROKERBUSY c0=84 c1=97
+GUARD load1=7.71 site_s=0.016755
+RUN handshake threads=128 rep=3
+loadgen: handshake: 16031 connections in 10.0 s = 1599 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 79.6 ms, 0 error(s)
+loadgen: whole connection: mean 79.6 ms, p50 80.6, p90 84.8, p99 96.3, max 146.1 ms
+loadgen: tcp connect: mean 16.9 ms, p50 15.0, p90 25.9, p99 35.2, max 42.4 ms
+loadgen: tls + connect/connack: mean 43.1 ms, p50 43.4, p90 55.3, p99 60.8, max 100.6 ms
+loadgen: handshake: generator cpu 1.01 cores (process total, all threads)
+RESULT mode=handshake threads=128 conn_per_s=1599 errors=0 lat_p50_ms=80.6 lat_p99_ms=96.3 tcp_p50_ms=15.0 tls_p50_ms=43.4 tls_p99_ms=60.8 gen_cpu=1.01
+HOSTCPU steal=8% idle=56% user+sys=16%
+BROKERBUSY c0=100 c1=97
+# done 2026-11-04T21:16:56Z

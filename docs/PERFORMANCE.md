@@ -607,3 +607,37 @@ certificates as then: `--certs DIR`), installed or booted as in section 11; then
 (the boot's `crypto-profile` line, which now also prints `x25519=armv8` in the `crypto:` line) and
 `scripts/x11-bench.sh` for the handshake rate. Expect on the N1: the X25519 and the two verification rows to fall,
 the key share and the signature to stay; how much is the open question this section cannot answer.
+
+### 12.1 Measured on the netcup Neoverse N1 (2026-11-04, evening)
+
+The question the previous paragraph leaves open, answered once, with the image built from this branch (`v0.4.0-4-g116e1c5`,
+the three changes of ADR-259) on the same VPS, the same load generator and the same method as section 11
+(`docs/perf-results/urmqtt-netcup-tlsopt.txt`, `docs/perf-results/netcup-diag-tlsopt.json`).
+
+**The server's CPU per handshake, from the Diagnostic entry's crypto stage** (one run each; the CPU clock differs between
+the runs, 2.58 GHz with the assembly alone, 2.89 GHz now, so single figures on this shared machine move by tens of
+percent):
+
+| | portable P-256 (about) | P-256 assembly (ADR-255), 2.58 GHz | this branch, 2.89 GHz |
+|---|---|---|---|
+| X25519 (shared secret) | 156 to 177 us | 208.5 us | **127.9 us** |
+| ECDSA verify, unknown key | 508 to 510 us | 192.5 us | **124.0 us** |
+| ECDSA sign | 125 to 142 us | 77.8 us | 67.8 us |
+| handshake (the stage's estimate) | about 1.0 to 1.08 ms | 553 us | **461 us** |
+
+**Full mTLS handshakes per second** (the benchmark image, handshake limits relaxed, 0 errors in every run; median of three
+runs and the range; the load host is shared, one run of each set is usually an outlier):
+
+| threads | portable P-256 | P-256 assembly | this branch | against the assembly | against portable |
+|---|---|---|---|---|---|
+| 32 | 848 (408-855) | 1,317 (957-1,317) | **1,451 (1,044-1,459)** | 1.10x | 1.71x |
+| 64 | 827 (815-839) | 1,398 (1,352-1,416) | **1,624 (1,357-1,645)** | 1.16x | 1.96x |
+| 128 | 778 (714-788) | 1,316 (1,313-1,383) | **1,599 (1,377-1,625)** | 1.22x | 2.05x |
+
+The TLS part of a connection at 32 threads: p50 18.5 ms (portable), 13 ms (assembly), 11.3 to 12.3 ms now. What is
+established: the full-handshake rate rose about 1.1 to 1.2 times over the assembly of ADR-255 and about 1.7 to 2.05
+times over the portable code; the stage figures of X25519 and of the verification fell as the Apple-silicon profile
+above predicted, by more than the clock difference explains. What is not: the share of this that is the shared load host
+(the ranges overlap between the assembly and this branch at 32 threads), a second run on another day, and any other
+server core.
+
