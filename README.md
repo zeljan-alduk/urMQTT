@@ -25,7 +25,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > Details: [Configure and download your ISO](#configure-and-download-your-iso).
 
 > [!WARNING]
-> **urMQTT is pre-alpha** ([v0.3.0](https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.3.0): VM images
+> **urMQTT is pre-alpha** ([v0.4.0](https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.4.0): VM images
 > for aarch64 and x86_64, the latter run in the QEMU TCG smoke suites and, at the H7 commit, on a real KVM VPS (docs/PERFORMANCE.md); its release assets are dev builds with throwaway keys). It serves MQTT 3.1.1 over TLS 1.3 with mutual TLS (and, in dev builds
 > only, over plain TCP), and keeps its state in SQLite in a raw partition of the disk it boots from. These milestones are complete:
 > - **M0**: tooling and CI
@@ -1101,7 +1101,7 @@ runners and uploads the serial logs.
 Verify a release artifact:
 
 ```bash
-gh attestation verify urmqtt-dev-v0.3.0.elf --repo zeljan-alduk/urMQTT
+gh attestation verify urmqtt-dev-v0.4.0.elf --repo zeljan-alduk/urMQTT
 shasum -a 256 -c SHA256SUMS
 ```
 

@@ -6,6 +6,39 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-04
+
+A release of what was built after v0.3.0: optional virtio drivers for the consoles and devices that VPS providers
+attach (a virtio-gpu console, virtio-console, -balloon, -input and -vsock) behind one driver framework, P-256 on
+the ARMv8 assembly, the Diagnostic entry's measurements over the network, and the first records of a real aarch64
+KVM guest. Its main purpose: the builder page only offers published templates, and v0.3.0's template reads
+configuration format 4, so the new keys (`console.virtio_gpu`, `[devices]`) can be used from the page only with a
+release whose template reads format 6.
+
+**Compatibility.** Nothing here breaks an existing image or disk. The kernel reads configuration formats 1 to 6. The
+packer still writes the lowest format that can hold the configuration, so an image whose new keys are all `"off"`
+(the default) is written in format 2, 3 or 4 exactly as before and boots on the kernels that boot it today (2:
+v0.2.0 or newer, 3: v0.2.1 or newer, 4: v0.3.0 or newer). A configuration with `console.virtio_gpu` not "off" is
+format 5, one with any `[devices]` key not "off" is format 6; only a v0.4.0 kernel reads them, an older kernel
+refuses them at boot by the version, and `urmqtt-config pack --iso` (and the builder page) refuses to write them into
+an older template, naming the reason ("use a newer release"). Format 5 was never in a release; a v0.4.0 template
+declares format 6. The data-disk layout is unchanged (v2.1). The golden blobs of formats 1 and 2 are unchanged and
+still valid; the builder page must be redeployed before the mirror lists this release (docs/RELEASE.md section 4).
+
+**Limits, stated plainly.** The signing key is still a test key, and the release assets are **dev** builds with
+throwaway certificates, for evaluation (as for v0.3.0); production images are built by the operator
+(docs/DEPLOY.md). The only real-machine results are one netcup VPS 500 ARM G12.5 (Neoverse N1, 2 vCPU, aarch64 KVM)
+and, for x86_64, the Contabo run at the H7 commit (PERFORMANCE.md 3 and 7). On the netcup machine the Diagnostic
+entry, the measurements and load runs below, and the virtio-gpu console were run; install, boot from the installed
+disk and a retained message that survived a power cut are reported by the owner and not yet recorded in PROGRESS or
+PERFORMANCE (ROADMAP.md section 1). That machine has no virtio-rng and no `RNDR`: its generator was seeded from the
+CPU-jitter fallback and the bootloader's EFI RNG only, the weakest seeding the kernel accepts (ADR-038). The P-256
+speed-up of ADR-255 is measured on an Apple M4 Pro, not on the Neoverse N1. The virtio-console, -balloon, -input and
+-vsock drivers have not run on a real VPS; vsock has run only against the fake device of the tests (it needs
+vhost-vsock on a Linux host). The x86_64 and universal-ISO smoke suites are not in CI and were run here under QEMU
+TCG only, not on KVM; the code after H7 (disk encryption, boot integrity, everything in this release) has not run
+on an x86_64 KVM guest or on physical hardware. Secure Boot, IOMMU and the rest of v0.3.0's limits are unchanged.
+
 ### Added
 
 - **A virtio driver framework** (ADR-257): every driver of `crates/virtio` behind its own Cargo feature, the umbrellas
@@ -32,33 +65,78 @@ All notable changes to this project are documented here. The format follows
   power-off and after every Diagnostic dashboard redraw. "auto" takes the device when the boot framebuffer is
   missing or is RAM nothing shows; "on" whenever one is found. **Verified on a real machine:** netcup VPS 500 ARM
   G12.5, 1280x800, the Diagnostic dashboard visible live in the provider's Screen tab and the final "press any key"
-  screen staying. Configuration **format 5** only when the key is not "off" (an "off" image stays format 2 and
-  boots on older kernels). New fuzz target `virtio_gpu_response`; smoke `virtio_gpu` (QMP screendump checked);
-  `run-qemu.sh --gpu virtio|virtio-vga`.
+  screen staying. Configuration format 5 when the key is not "off" (an "off" image stays format 2 and boots on older
+  kernels); format 5 was never released on its own, a v0.4.0 template declares format 6. New fuzz target
+  `virtio_gpu_response`; smoke `virtio_gpu` (QMP screendump checked); `run-qemu.sh --gpu virtio|virtio-vga`.
+- **Configuration format 6** and the builder page for it: the page's WebAssembly module is `urmqtt-cfg6.wasm`; its
+  advanced view offers `console.virtio_gpu` and the four `[devices]` keys. With a template of v0.2.0 to v0.3.0 the
+  page and `urmqtt-config pack --iso` write every configuration that template's kernel reads and refuse the rest with
+  the reason (new test `templates_of_earlier_releases_take_what_their_kernel_reads`).
 - P-256 on aarch64 through OpenSSL's ARMv8 `nistz256` assembly (ADR-255), vendored from ring 0.17.14 like the
   x86_64 code (ADR-130): ECDSA sign and verify, ECDH, key generation and the trust-anchor tables. Boot line
   `crypto: ecc=nistz256-armv8`; the diagnostic screen's crypto line names the backend too. Measured in Docker on an
   Apple M4 Pro (not the target CPU), production paths, minimum of 11 runs: sign 34.7 -> 11.6 us, verify 147 -> 29 us,
-  ECDH 135 -> 25 us, handshake estimate 292 -> 104 us. Not yet measured on a Neoverse N1 VPS. The vendored assembly
-  uses integer registers only (upstream's two NEON selection functions are replaced by constant-time Rust) and
-  starts every entry point with `bti c`. macOS, Miri and Kani keep the portable code.
-- `make ct`: P-256 key generation, ECDH and signing through the production paths (sparse fixed against random
-  scalars), with a P-256-scale positive control (a variable-time double-and-add).
+  ECDH 135 -> 25 us, handshake estimate 292 -> 104 us (PERFORMANCE.md section 10). Not measured on a Neoverse N1
+  VPS in the repository's records. The vendored assembly uses integer registers only (upstream's two NEON selection
+  functions are replaced by constant-time Rust) and starts every entry point with `bti c`. macOS, Miri and Kani keep
+  the portable code.
+- `make ct`: P-256 key generation, ECDH and signing (key and nonce) through the production paths (sparse fixed
+  against random scalars), with a P-256-scale positive control (a variable-time double-and-add).
 - `diag-serve` boot word: the Diagnostic entry's measurements (detection, RAM, crypto incl. AES-XTS, disk reads),
   then a normal live boot that serves MQTT with the report as the retained `$SYS/diag/report` (operator certificate).
-  For machines whose console cannot be seen (a netcup ARM VPS shows "Display output is not active": its virtio-gpu has
-  no driver here, and the serial port is not exposed). Use it with `mkiso.sh --diag-default --diag-cmdline diag-serve`.
+  For machines whose console cannot be seen (written for the netcup ARM VPS before the virtio-gpu console existed;
+  its serial port is not exposed). Use it with `mkiso.sh --diag-default --diag-cmdline diag-serve`.
 - Diagnostic entry: the **CPU clock** (the PMU cycle counter, or the TSC rate on x86_64, measured against the time
   base; "not measurable" where only a fixed-rate timer is readable) and a **random number generator** panel: which
   sources seeded it (virtio-rng, RNDR or RDRAND/RDSEED, the bootloader's EFI RNG, the CPU-jitter fallback with its
   samples, credited bits and health tests), a sanity test of fresh bytes from each hardware source (share of ones,
   longest run; not a certification), the generator's throughput and a test of its output. `scripts/diag-check.py`
   checks the new keys.
-- `tools/diag-png`: draws that JSON (or the `URMQTT-DIAG-JSON` serial line) as the PNG of the dashboard, with the
-  kernel's own `dash::draw` and framebuffer font.
-- First measurement on a real aarch64 KVM guest (netcup VPS 500 ARM G12.5, Neoverse N1, 2 vCPU): hardware AES-XTS
-  241 MiB/s per core, AES-GCM 314 MiB/s, one mutual-TLS handshake 1.08 ms; TLS 1.3 + mTLS, QoS 1 publish/subscribe,
-  500 held connections and three 1000-client reconnect storms ran over the Internet without an error.
+- `tools/diag-png` (`urmqtt-diag-png`): draws that JSON (or the `URMQTT-DIAG-JSON` serial line) as the PNG of the
+  dashboard, with the kernel's own `dash::draw` and framebuffer font, disks included.
+- First measurement on a real aarch64 KVM guest (netcup VPS 500 ARM G12.5, Neoverse N1, 2 vCPU, before ADR-255):
+  hardware AES-XTS 241 MiB/s per core, AES-GCM 314 MiB/s, ECDSA verify 508 us, sign 141 us, one mutual-TLS handshake
+  1.08 ms; TLS 1.3 + mTLS, QoS 1 publish/subscribe, 500 held connections and three 1000-client reconnect storms ran
+  over the Internet without an error.
+- docs/ROADMAP.md: a proposal for the work after v0.3.0 (what is missing, why, effort, how each item would be
+  verified). Nothing in it is decided.
+
+### Changed
+
+- The template ISO's empty configuration declares format 6 (`FORMAT_VERSION`), so the release mirror reports
+  `config_format` 6 and a builder page built before this release greys the release out.
+- `make clippy-kernel` also checks the kernel with `virtio-all` and with `--no-default-features`.
+- The aldo.tech site patch (`tools/builder/site/apply_products.py`): Products goes first in the header and the footer
+  wherever the site's own links sit.
+
+### Fixed
+
+- `urmqtt-diag-png` left the disks of the report out (the picture said "no disks found").
+- `diag-serve` also measures the disks (reads only; no typed confirmation is possible, so only an installed disk's
+  free space can be written).
+- The mm poison-on-free test looked at the obfuscated free-list header and failed about one run in eight.
+- Tests: the P-256 timing cases retry (fail only if every attempt is over the bound); the ECDSA signing case signs a
+  fresh random message per measurement in both classes (A255-W1: the signal on the arm64 runner came from the DER
+  encoding of a repeated signature, not from the key) and its bound is 7 again; the install smoke patterns no longer
+  depend on the image size; `virtio_devices` boots the x86_64-only ISO with the diag words on its one entry.
+- CI: Miri runs as three parallel jobs (protocol crates, tls, cfg) with the development certificates and a 120 minute
+  timeout, and skips the heavy P-256 table, known-answer and benchmark tests of `urmqtt-tls` (they run natively);
+  Kani is a real gate (the documented NOT PROVEN harnesses are listed by name, any other failure fails); typos;
+  `qemu-utils` for the discard scenario; three attempts and a 25 ms handler budget for the two slow-log watchdog
+  scenarios on a slow TCG runner; the scheduled fuzz workflow makes the development certificates first (every target
+  failed to build without them).
+- docs/PROGRESS.md: the entries M0 to S6, lost when commit 85605d2 replaced the file, are restored from the history.
+
+### Security
+
+- A256-W1, fixed before merge: a virtio-gpu display-info response 4 bytes short of the structure was accepted (found
+  by the new `virtio_gpu_response` fuzz target in its first minute; low, nothing past the buffer was read).
+- A255-W1 closed: the ECDSA signing timing signal was the harness (see Fixed). A255-W2 stays open: PSTATE.DIT is never
+  set, so Arm's data-independent-timing guarantee for the instructions the nistz256 assembly uses is not requested
+  (docs/AUDIT.md).
+- New device inputs, each with a fuzz target and AUDIT.md rows: virtio-gpu responses, virtio-console data, balloon
+  requests, input events, vsock packets. All of them are off unless configured. The balloon never gives memory back;
+  vsock serves only the read-only Diagnostic report.
 
 ## [0.3.0] - 2026-11-02
 
@@ -152,6 +230,7 @@ production images embed the operator's own keys and are built with
 - M1: Bootable UEFI ISO, console, decoded exception reports, PSCI, `make run`/`smoke`, CI smoke job.
 - M0: CI and CD: lint, host tests, kernel build, cargo-deny, fuzzing, CodeQL, Scorecard, Dependabot and a release workflow with provenance.
 
-[Unreleased]: https://github.com/zeljan-alduk/urMQTT/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/zeljan-alduk/urMQTT/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/zeljan-alduk/urMQTT/compare/v0.2.1...v0.3.0
 [0.1.0]: https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.1.0

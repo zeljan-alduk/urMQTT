@@ -247,7 +247,13 @@ fn conf(hash: &str) -> Vec<u8> {
 /// and the one in the FAT image), the unconfigured slot of the installation
 /// image twice, and four `limine.conf` copies naming the slot's hash.
 fn synthetic_template() -> (Vec<u8>, Vec<usize>) {
-    let slot = make_slot(SlotKind::Boot, &empty_blob()).unwrap();
+    synthetic_template_with(&empty_blob())
+}
+
+/// The same stand-in with a given empty configuration in its slot: a release's template declares the
+/// format its kernel reads by the version of that empty blob (v0.2.0: 2, v0.2.1: 3, v0.3.0: 4, v0.4.0: 6).
+fn synthetic_template_with(empty: &[u8]) -> (Vec<u8>, Vec<usize>) {
+    let slot = make_slot(SlotKind::Boot, empty).unwrap();
     let mut disk = slot.clone();
     disk[..16].copy_from_slice(&DISK_MARKER);
     let hash: String = blake2b::hash(&slot)
@@ -775,4 +781,55 @@ fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
         .arg(&without)
         .arg("--out")
         .arg(&out)));
+}
+
+/// The templates of the published releases, configured by this tool (and by the builder page, which runs the
+/// same code): v0.2.0's kernel reads configuration format 2, v0.2.1's 3, v0.3.0's 4, this release's 6. A
+/// configuration that needs no newer format than the template's kernel reads is written into it as before; one
+/// that needs more (the virtio-gpu console: 5, a `[devices]` key: 6) is refused with the reason, before a byte
+/// of the template changes, instead of giving an image whose kernel would refuse it at boot.
+#[test]
+fn templates_of_earlier_releases_take_what_their_kernel_reads() {
+    use urmqtt_cfg::build::Builder;
+    use urmqtt_cfg::fields::tag;
+    let header = |b: &[u8]| u16::from_le_bytes([b[8], b[9]]);
+    let lab = lab_blob();
+    assert_eq!(header(&lab), 2);
+    let mut b = Builder::new();
+    b.variant(tag::CON_VIRTIO_GPU, 1).unwrap();
+    let gpu = b.finish(false).unwrap();
+    assert_eq!(header(&gpu), 5);
+    let mut b = Builder::new();
+    b.variant(tag::DEV_VIRTIO_INPUT, 1).unwrap();
+    let input = b.finish(false).unwrap();
+    assert_eq!(header(&input), 6);
+    for (release, reads) in [
+        ("v0.2.0", 2u16),
+        ("v0.2.1", 3),
+        ("v0.3.0", 4),
+        ("v0.4.0", 6),
+    ] {
+        let empty = Builder::new().finish_as(false, reads).unwrap();
+        assert_eq!(header(&empty), reads);
+        let (tpl, _) = synthetic_template_with(&empty);
+        let p = image::configure_iso(&tpl, &lab).unwrap_or_else(|e| panic!("{release}: {e}"));
+        image::verify(&p.bytes, false).unwrap();
+        for (what, blob, needs) in [("console.virtio_gpu", &gpu, 5u16), ("[devices]", &input, 6)] {
+            match image::configure_iso(&tpl, blob) {
+                Ok(_) => assert!(
+                    needs <= reads,
+                    "{release}: {what} accepted by a kernel that reads up to {reads}"
+                ),
+                Err(e) => {
+                    assert!(needs > reads, "{release}: {what} refused: {e}");
+                    assert!(
+                        e.contains(&format!("needs configuration format {needs}"))
+                            && e.contains(&format!("reads up to {reads}"))
+                            && e.contains("use a newer release"),
+                        "{release}: {e}"
+                    );
+                }
+            }
+        }
+    }
 }
