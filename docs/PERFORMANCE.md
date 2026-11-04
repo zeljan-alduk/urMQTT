@@ -641,3 +641,39 @@ above predicted, by more than the clock difference explains. What is not: the sh
 (the ranges overlap between the assembly and this branch at 32 threads), a second run on another day, and any other
 server core.
 
+### 12.2 The anchor tables' heap and the `storm` hang (ADR-261)
+
+QEMU HVF on the Apple M4 Pro, 4 vCPUs, the dev image with `heap_limit_mb=8` (admission as if the heap had 8 MiB;
+`min_free_mb = 4`), one run each unless stated. Kernels: v0.4.0 (6cc343b), 51fabe2 (ADR-259, before this fix), 51fabe2
+without the `register_issuer` call (the bisection), and this fix.
+
+**Idle heap with one connection** (`mem: 1 connection(s), heap ... in blocks`, the 25 s report):
+
+| kernel | heap in blocks | requested | tables (boot line) |
+|---|---|---|---|
+| v0.4.0 | 1,510 KiB | 953 KiB | none (A259-W1) |
+| 51fabe2 | 2,287 KiB | 1,406 KiB | 3, not reported (one 256 KiB block each) |
+| 51fabe2 without registration | 1,510 KiB | 953 KiB | none |
+| this fix | 1,964 KiB | 1,407 KiB | `3 ... table(s), 445 KiB of heap` |
+
+The tables are one registry for all cores, not per core: the figures above are the whole heap of a 4-vCPU guest
+(three data cores), and the fix's boot line is measured on the boot CPU before the data cores start.
+
+**`storm` (3000 clients, 8 threads, `--retry-s 30`):**
+
+| kernel, loadgen | rounds: connected of 3000, seconds | result |
+|---|---|---|
+| v0.4.0, old loadgen | 2,997 in 34.2 / 2,987 in 64.4 / 2,996 in 71.1 | pass |
+| 51fabe2, old loadgen | round 1 at 2,741 after 190 s, core 0 at 100 % from about 97 s | hang (killed) |
+| TCP fix only (tables of 256 KiB), old loadgen | 2,932 in 259 / 2,962 in 331 / 2,917 in 319 | pass, 15 min |
+| this fix, new loadgen (3 runs) | 2,071-2,349 / 1,448-1,888 / 1,321-1,811, each round 34-36 s | pass 3 of 3, 124-126 s each |
+| 51fabe2 without registration, new loadgen | 2,959 / 1,928 / 2,077 | pass |
+| 51fabe2, new loadgen | 1,951 / 1,204 / 1,338 | pass (the rounds end before any keep-alive expires, so the FIN loop is not reached: hence the `fin_wait2` scenario) |
+
+The old loadgen checked its deadline only between passes over a thread's devices, so a round lasted as long as the
+dropped SYNs made it (each costs a device a 1 s SYN retransmission); the new one stops at `--retry-s`, which is why
+fewer connect per round. Fewer connect with the tables than without in the same 30 s because 445 KiB of a 4 MiB
+admission budget are gone; that is the intended price of a fast first contact, and in a production heap (1 GiB in the
+template) it does not register. **The keep-alive closes with the FIN loop** (A261-W1), from the v0.4.0 kernel too:
+`loadgen hold --clients 500 --keepalive 5 --duration 40`: core 0 100 % busy and 3.7 million frames dispatched per
+5 s; with the fix 27 % and 132 frames per 5 s (the same kernel's level when nothing happens is about 27 %).
