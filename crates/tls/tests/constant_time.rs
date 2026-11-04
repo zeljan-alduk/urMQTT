@@ -63,14 +63,21 @@ fn t_stat(a: &mut [u64], b: &mut [u64], keep: f64) -> f64 {
 /// thousands each time); noise on a shared machine is not. So a case counts
 /// as leaking only if three runs all exceed the bound: the smallest |t| of
 /// up to three runs is returned.
-fn measure<S>(
+fn measure<S>(state: &mut S, prepare: impl FnMut(bool, &mut S), op: impl FnMut(&mut S)) -> f64 {
+    measure_n(SAMPLES, state, prepare, op)
+}
+
+/// [`measure`] with `samples` measurements per run (the P-256 operations
+/// take 10-500 us each, so they run fewer).
+fn measure_n<S>(
+    samples: usize,
     state: &mut S,
     mut prepare: impl FnMut(bool, &mut S),
     mut op: impl FnMut(&mut S),
 ) -> f64 {
     let mut best = f64::INFINITY;
     for _ in 0..3 {
-        best = best.min(measure_once(state, &mut prepare, &mut op));
+        best = best.min(measure_once(samples, state, &mut prepare, &mut op));
         if best < THRESHOLD {
             break;
         }
@@ -79,18 +86,19 @@ fn measure<S>(
 }
 
 fn measure_once<S>(
+    samples: usize,
     state: &mut S,
     prepare: &mut impl FnMut(bool, &mut S),
     op: &mut impl FnMut(&mut S),
 ) -> f64 {
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-    let (mut a, mut b) = (Vec::with_capacity(SAMPLES), Vec::with_capacity(SAMPLES));
+    let (mut a, mut b) = (Vec::with_capacity(samples), Vec::with_capacity(samples));
     // Warm caches and branch predictors with both classes.
-    for i in 0..10_000 {
+    for i in 0..10_000.min(samples / 4) {
         prepare(i % 2 == 0, state);
         op(state);
     }
-    for _ in 0..SAMPLES {
+    for _ in 0..samples {
         let class = rng.bit();
         prepare(class, state);
         let t0 = Instant::now();
@@ -223,5 +231,158 @@ fn forged_ticket_rejection_is_constant_time() {
     assert!(
         tt < THRESHOLD,
         "ticket tag check timing depends on the byte (|t| = {tt:.1})"
+    );
+}
+
+// ---------------------------------------------------------------- P-256 (ADR-130, ADR-255)
+//
+// The secret scalar of key generation (the generator's comb), ECDH (the
+// variable-base windows) and ECDSA signing (nonce, inversions): one class is
+// a fixed scalar with almost every window digit zero (the table scans then
+// select "infinity" and the additions take their infinity operand), the
+// other a fresh random scalar per measurement, copied into the same slot.
+// These run the production paths (`provider::fastec`): the nistz256 assembly
+// on x86_64 and AArch64 Linux, RustCrypto elsewhere.
+
+const P256_SAMPLES: usize = 20_000;
+
+/// 256 random valid secret keys (deterministic).
+fn p256_keys() -> Vec<p256::SecretKey> {
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    let mut out = Vec::new();
+    while out.len() < 256 {
+        let mut b = [0u8; 32];
+        for c in b.chunks_mut(8) {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            c.copy_from_slice(&x.to_le_bytes());
+        }
+        if let Ok(k) = p256::SecretKey::from_slice(&b) {
+            out.push(k);
+        }
+    }
+    out
+}
+
+/// The scalar 2 (the comb's digits are all zero after the first window,
+/// the variable-base windows likewise).
+fn sparse_key() -> p256::SecretKey {
+    let mut b = [0u8; 32];
+    b[31] = 2;
+    p256::SecretKey::from_slice(&b).unwrap()
+}
+
+/// Fixed (sparse) against random secret, both prepared untimed by `make`
+/// into the same slot.
+fn p256_case<T: Clone>(name: &str, make: impl Fn(&p256::SecretKey) -> T, op: impl Fn(&T)) {
+    let pool: Vec<T> = p256_keys().iter().map(&make).collect();
+    let fixed = make(&sparse_key());
+    let mut i = 0usize;
+    let mut st = fixed.clone();
+    let t = measure_n(
+        P256_SAMPLES,
+        &mut st,
+        |c, slot| {
+            *slot = if c {
+                fixed.clone()
+            } else {
+                i = (i + 1) % pool.len();
+                pool[i].clone()
+            };
+        },
+        |slot| op(black_box(slot)),
+    );
+    println!(
+        "{name} ({}), sparse vs random scalar: |t| = {t:.1}",
+        urmqtt_tls::provider::ecc_backend()
+    );
+    assert!(
+        t < THRESHOLD,
+        "{name}: timing depends on the secret scalar (|t| = {t:.1})"
+    );
+}
+
+#[test]
+#[ignore = "timing: run with `make ct`"]
+fn p256_key_generation_is_constant_time() {
+    p256_case("P-256 public key", Clone::clone, |k| {
+        black_box(urmqtt_tls::provider::fastec::p256_public(k));
+    });
+}
+
+#[test]
+#[ignore = "timing: run with `make ct`"]
+fn p256_ecdh_is_constant_time() {
+    let peer = urmqtt_tls::provider::fastec::p256_public(&p256_keys()[7]);
+    p256_case("P-256 ECDH", Clone::clone, |k| {
+        black_box(urmqtt_tls::provider::fastec::p256_dh(k, black_box(&peer))).unwrap();
+    });
+}
+
+#[test]
+#[ignore = "timing: run with `make ct`"]
+fn p256_signing_is_constant_time() {
+    // The RFC 6979 nonce follows from key and message: random keys give
+    // random nonces, the sparse key one fixed nonce.
+    p256_case(
+        "P-256 ECDSA sign",
+        |k| p256::ecdsa::SigningKey::from(k.clone()),
+        |sk| {
+            black_box(urmqtt_tls::provider::fastec::ecdsa_sign(
+                sk,
+                b"constant time",
+            ))
+            .unwrap();
+        },
+    );
+}
+
+/// The control at P-256 scale: a textbook double-and-add that skips the
+/// addition for zero bits (the leak a broken window selection or skipped
+/// infinity addition would have, larger) must show the sparse/random
+/// difference with the same sample count, or the three cases above prove
+/// nothing.
+#[test]
+#[ignore = "timing: run with `make ct`"]
+fn harness_detects_a_variable_time_scalar_multiplication() {
+    use p256::elliptic_curve::Group;
+    use p256::elliptic_curve::PrimeField;
+    fn leaky_mul(k: &p256::Scalar) -> p256::ProjectivePoint {
+        let g = p256::ProjectivePoint::generator();
+        let mut r = p256::ProjectivePoint::IDENTITY;
+        for byte in k.to_repr() {
+            for bit in (0..8).rev() {
+                r = r.double();
+                if (byte >> bit) & 1 == 1 {
+                    r += g;
+                }
+            }
+        }
+        r
+    }
+    let pool: Vec<p256::Scalar> = p256_keys().iter().map(|k| *k.to_nonzero_scalar()).collect();
+    let fixed = *sparse_key().to_nonzero_scalar();
+    let mut i = 0usize;
+    let mut st = fixed;
+    let t = measure_n(
+        P256_SAMPLES,
+        &mut st,
+        |c, slot| {
+            *slot = if c {
+                fixed
+            } else {
+                i = (i + 1) % pool.len();
+                pool[i]
+            };
+        },
+        |slot| {
+            black_box(leaky_mul(black_box(slot)));
+        },
+    );
+    println!("P-256 double-and-add (control), sparse vs random scalar: |t| = {t:.1}");
+    assert!(
+        t > THRESHOLD * 3.0,
+        "the harness cannot see a variable-time scalar multiplication (|t| = {t:.1})"
     );
 }
