@@ -268,7 +268,9 @@ lists v0.4.0 as unusable, so the page is updated before the release mirror lists
 - The P-256 speed-up is measured on an Apple M4 Pro, not on a Neoverse N1 or any other server core.
 - The virtio-console, -balloon, -input and -vsock drivers have run only under QEMU, not on a real VPS; vsock has run
   only against the test suite's fake device.
-- The x86_64 and universal-ISO smoke suites are not in CI; they run under QEMU TCG, not on KVM.
+- The x86_64 and universal-ISO smoke suites are not in CI. For this release only the x86_64 virtio-gpu and
+  virtio-device scenarios were run, under QEMU TCG; the full x86_64 and universal suites were not, and nothing ran on
+  an x86_64 KVM guest.
 - On the netcup VPS the random number generator was seeded from the CPU-jitter fallback and the bootloader's EFI RNG
   only (no virtio-rng, no `RNDR`): the weakest seeding the kernel accepts.
 - Unchanged from v0.3.0: Secure Boot only partly done (release images are not signed), no IOMMU, encryption at rest

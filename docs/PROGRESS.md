@@ -3,6 +3,51 @@
 One entry per milestone: what was done, what was measured and the known gaps. Newest entries first down to H7; the entries from M0 to S6 follow in the order they were written.
 Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptance-criteria).
 
+## Release candidate v0.4.0 (2026-11-04)
+
+Everything for the release except publishing: nothing was pushed, tagged, signed or uploaded, and no server was
+touched. The commands for the day are in `docs/release-day-v0.4.0.md`; the generic steps in `docs/RELEASE.md`.
+
+**Done**
+
+- Version 0.4.0 (workspace `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock`); README status line and verify example,
+  DEPLOY and OPERATE examples. CHANGELOG `[0.4.0] - 2026-11-04` (the preparation date: a placeholder would need a
+  commit after CI is green), compare links, empty Unreleased. Release notes in `docs/release-notes-v0.4.0.md` and in
+  RELEASE.md section 7 (v0.3.0's kept as section 8).
+- Compatibility checked by tests: the golden blobs of format 1 and 2 (unchanged since v0.3.0) still pass; new test
+  `templates_of_earlier_releases_take_what_their_kernel_reads` (synthetic templates declaring format 2, 3, 4, 6).
+  **The published templates of v0.2.0, v0.2.1 and v0.3.0** (downloaded, minisign and SHA-256 verified) configured by
+  this tree's `urmqtt-config pack --iso`: a format 2 configuration packs and verifies on all three; TLS off (format 3)
+  is refused by v0.2.0 and packs on v0.2.1 and v0.3.0; `console.virtio_gpu = "on"` (5), a `[devices]` key (6) and
+  `deploy/dev/config.toml` (6) are refused by all three with "needs configuration format N ... reads up to M: use a
+  newer release", and pack on the locally built v0.4.0 template. That template's empty configuration is format 6 and
+  both release kernels carry `URMQTT-VIRTIO-DRIVERS:net,blk,console,rng,balloon,scsi,gpu,input,vsock`.
+
+**Gates run on this Mac** (macOS, Apple M4 Pro, a normal worktree, not nested): `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets -D warnings`, `make clippy-kernel`, `make check-x86` clean; `cargo test
+--workspace` 1000 passed, 0 failed, 14 ignored; `make build` aarch64 and x86_64; `make dist ENV=dev` (template
+included) and `make dist-universal`; `scripts/check-prod-hooks.sh` on the release and dev kernels;
+`scripts/check-arch-leaks.sh` (and `--self-test`); `scripts/audit-inventory.py --check` (after regenerating for the
+new test); `typos`; `cargo vet --locked`, `scripts/vet-exemptions.py --check` (passes here now), `cargo deny check
+advisories bans licenses sources`; `cargo vet regenerate imports && cargo vet prune` changed nothing;
+`scripts/test-mirror-releases.py` 62 tests; `make repro` (prod, aarch64): ELF, ISO and raw image identical, no key
+bytes in the logs. `make builder-test`: 96 of 99 without the emulator runtime, the one failure being "the build ends
+in a result card" (it waits for the emulator's button: environmental, as noted at v0.3.0); after `make
+builder-emulator` 100 of 100. Smoke on aarch64 HVF: `virtio_gpu` + `virtio_devices` 7/0; the core shard
+(`SMOKE_NO_GROUPS=1`) 51 passed, 1 failed (`log-slow-flood`, "log ring full", lines dropped in the full shard);
+the same scenario alone passed 3 of 3 with the default 10 ms budget. x86_64 TCG: `virtio_gpu` +
+`virtio_devices` 9/0.
+
+**Not run**
+
+- The rest of the smoke suites: aarch64 storage, live, misc (except the two virtio groups), hardening, secrecy and the
+  TCG accelerator; the full x86_64 and universal suites (`--arch x86_64`, `--arch universal`, SMOKE_ONLY=diag,
+  install, config, template, integrity, install-rules, secureboot). Nothing on KVM or on a real VPS.
+- `make ct`, Miri, Kani, sanitizers, fuzzing: CI's jobs, not repeated here.
+- CI itself: it runs on the merge commit; the tag waits for it.
+- The netcup Neoverse N1 figures for the P-256 change (a handshake speed-up and the per-handshake CPU time) are not in
+  PERFORMANCE.md, ADR-255 or here, so the release notes do not quote them.
+
 ## Test fixes after the merge: log-slow-flood on x86_64, the pre-H8 template (2026-11-03)
 
 - **`log-slow-flood` on x86_64 TCG** failed ("log ring full", lines lost), also on the v0.2.1 sources. Cause: the scenario paced every core at 25 ms, while ADR-090 measured it at 50 ms on x86_64 TCG. COM1 is trapped port I/O per byte there, so the one core that writes the sinks needs about 9 ms per line and three cores at 25 ms ask for more than a second of sink time per second; the rings fill, which is the designed overflow, not a bug. The scenario is now paced at 50 ms on x86_64 and stays at 25 ms on aarch64 (`scripts/smoke.sh`). Checked: x86_64 TCG passes (30 of 30 in the run that includes the baseline scenarios) with the change, and failed without it.

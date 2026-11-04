@@ -35,8 +35,9 @@ PERFORMANCE (ROADMAP.md section 1). That machine has no virtio-rng and no `RNDR`
 CPU-jitter fallback and the bootloader's EFI RNG only, the weakest seeding the kernel accepts (ADR-038). The P-256
 speed-up of ADR-255 is measured on an Apple M4 Pro, not on the Neoverse N1. The virtio-console, -balloon, -input and
 -vsock drivers have not run on a real VPS; vsock has run only against the fake device of the tests (it needs
-vhost-vsock on a Linux host). The x86_64 and universal-ISO smoke suites are not in CI and were run here under QEMU
-TCG only, not on KVM; the code after H7 (disk encryption, boot integrity, everything in this release) has not run
+vhost-vsock on a Linux host). The x86_64 and universal-ISO smoke suites are not in CI; for this release only the
+x86_64 `virtio_gpu` and `virtio_devices` groups were run, under QEMU TCG on the Mac (PROGRESS, "Release candidate
+v0.4.0"), not the full x86_64 or universal suites and nothing on KVM; the code after H7 (disk encryption, boot integrity, everything in this release) has not run
 on an x86_64 KVM guest or on physical hardware. Secure Boot, IOMMU and the rest of v0.3.0's limits are unchanged.
 
 ### Added
@@ -112,8 +113,6 @@ on an x86_64 KVM guest or on physical hardware. Secure Boot, IOMMU and the rest 
 ### Fixed
 
 - `urmqtt-diag-png` left the disks of the report out (the picture said "no disks found").
-- `diag-serve` also measures the disks (reads only; no typed confirmation is possible, so only an installed disk's
-  free space can be written).
 - The mm poison-on-free test looked at the obfuscated free-list header and failed about one run in eight.
 - Tests: the P-256 timing cases retry (fail only if every attempt is over the bound); the ECDSA signing case signs a
   fresh random message per measurement in both classes (A255-W1: the signal on the arm64 runner came from the DER
