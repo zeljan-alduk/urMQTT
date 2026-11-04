@@ -1,0 +1,22 @@
+[package]
+name = "urmqtt-diag-png"
+description = "Draws a diagnostic report (the JSON of the Diagnostic entry, or of $SYS/diag/report) as the PNG of the dashboard the entry shows on a screen."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "urmqtt-diag-png"
+path = "src/main.rs"
+test = true
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+urmqtt-diag = { path = "../../crates/diag" }
+urmqtt-log = { path = "../../crates/log" }

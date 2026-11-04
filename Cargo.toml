@@ -34,6 +34,7 @@ members = [
     "tools/builder/wasm",
     "tools/config",
     "tools/control",
+    "tools/diag-png",
     "tools/disk",
     "tools/loadgen",
 ]

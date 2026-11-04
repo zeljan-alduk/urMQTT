@@ -39,7 +39,9 @@
 # The diagnostic entry runs only if the baked configuration allows it
 # (storage.diagnostic = true); otherwise it stops with the reason on screen.
 # --diag-cmdline replaces its command line (dev tests add options after
-# "diag"); --diag-default makes it the default entry with no timeout;
+# "diag"; "diag-serve" instead measures without a disk and then boots live, with
+# the report at $SYS/diag/report, for machines with no visible console);
+# --diag-default makes it the default entry with no timeout;
 # --no-diag leaves the entry out.
 # --install-cmdline replaces the install entry's command line (dev tests add
 # options after "install"); --install-default makes it the default entry

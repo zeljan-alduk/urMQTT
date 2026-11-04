@@ -1612,6 +1612,14 @@ name = "urmqtt-diag"
 version = "0.3.0"
 
 [[package]]
+name = "urmqtt-diag-png"
+version = "0.3.0"
+dependencies = [
+ "urmqtt-diag",
+ "urmqtt-log",
+]
+
+[[package]]
 name = "urmqtt-disk-tool"
 version = "0.3.0"
 dependencies = [

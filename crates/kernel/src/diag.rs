@@ -152,6 +152,42 @@ fn timed(budget_ns: u64, mut f: impl FnMut()) -> (u64, u64) {
     }
 }
 
+/// The report of a `diag-serve` boot (JSON), published as the retained
+/// `$SYS/diag/report` once the broker runs.
+static REPORT: urmqtt_sync::sync::OnceCell<String> = urmqtt_sync::sync::OnceCell::new();
+
+/// The JSON of the `diag-serve` run, if there was one.
+pub fn served_report() -> Option<&'static str> {
+    REPORT.get().map(String::as_str)
+}
+
+/// `diag-serve`: detection, RAM and crypto measurements (no dashboard, no
+/// disk), the report kept for `$SYS/diag/report`, then the boot goes on.
+/// The 128 MiB measurement buffer stays allocated (there is no free for DMA
+/// frames); a machine small enough to notice is not one to diagnose this way.
+pub fn run_for_report(cpus: u64, medium: devices::BootMedium) {
+    urmqtt_log::raw(format_args!(
+        "\nURMQTT DIAG-SERVE {VERSION}: measurements without disk access, then serving; report at $SYS/diag/report\n"
+    ));
+    let (clock, clock_name) = time::finest_clock();
+    let mut run = Run {
+        report: detect(cpus, medium),
+        status: Status::default(),
+        screen: false,
+        clock,
+        clock_name,
+    };
+    run.status.steps = 3;
+    log_detection(&run.report);
+    ram_throughput(&mut run);
+    ram_latency(&mut run);
+    crypto(&mut run);
+    run.status.done = true;
+    let json = run.report.to_json();
+    urmqtt_log::raw(format_args!("URMQTT-DIAG-JSON {json}\n"));
+    let _ = REPORT.set(json);
+}
+
 /// Entry point: never returns (a key reboots; smoke mode powers off).
 pub fn run(
     options: &BootOptions,

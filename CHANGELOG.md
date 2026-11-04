@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `diag-serve` boot word: the Diagnostic entry's measurements that need no disk (detection, RAM, crypto incl. AES-XTS),
+  then a normal live boot that serves MQTT with the report as the retained `$SYS/diag/report` (operator certificate).
+  For machines whose console cannot be seen (a netcup ARM VPS shows "Display output is not active": its virtio-gpu has
+  no driver here, and the serial port is not exposed). Use it with `mkiso.sh --diag-default --diag-cmdline diag-serve`.
+- `tools/diag-png`: draws that JSON (or the `URMQTT-DIAG-JSON` serial line) as the PNG of the dashboard, with the
+  kernel's own `dash::draw` and framebuffer font.
+- First measurement on a real aarch64 KVM guest (netcup VPS 500 ARM G12.5, Neoverse N1, 2 vCPU): hardware AES-XTS
+  241 MiB/s per core, AES-GCM 314 MiB/s, one mutual-TLS handshake 1.08 ms; TLS 1.3 + mTLS, QoS 1 publish/subscribe,
+  500 held connections and three 1000-client reconnect storms ran over the Internet without an error.
+
 ## [0.3.0] - 2026-11-02
 
 The first release with a runtime configuration, an optional plaintext listener, an x86_64 port, a storage track

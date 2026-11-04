@@ -512,7 +512,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
             s.ram_bytes >> 20
         )),
     };
-    if s.options.diag && !urmqtt_config::CONFIG.storage.diagnostic {
+    if (s.options.diag || s.options.diag_serve) && !urmqtt_config::CONFIG.storage.diagnostic {
         fatal(
             "the diagnostic entry was requested by the boot menu, but this image's storage.diagnostic is false: \
              set storage.diagnostic = true in deploy/<env>/config.toml and rebuild, or choose another entry",
@@ -605,6 +605,9 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     tick_selftest(timer_line);
     if s.options.diag {
         crate::diag::run(&s.options, s.cpus, &s.features, s.medium);
+    }
+    if s.options.diag_serve {
+        crate::diag::run_for_report(s.cpus, s.medium);
     }
     if s.options.install {
         crate::install::run(

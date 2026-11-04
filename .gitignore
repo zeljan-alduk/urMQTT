@@ -15,6 +15,7 @@
 *.srl
 *.csr
 deploy/bench-*/
+deploy/netcup/
 deploy/*/devices/
 deploy/*/negative/
 deploy/*/services/

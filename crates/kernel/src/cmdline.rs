@@ -150,6 +150,13 @@ pub struct BootOptions {
     /// `diag`: the ISO's Diagnostic entry (O4, ADR-063). Honoured everywhere
     /// like `install`, but the baked `storage.diagnostic` must allow it.
     pub diag: bool,
+    /// `diag-serve`: the measurements of the Diagnostic entry that need no
+    /// disk (detection, RAM, crypto), then a normal live boot that serves
+    /// MQTT with the report as the retained `$SYS/diag/report` (read it with
+    /// an operator certificate). For machines whose console is not visible
+    /// (no framebuffer, no serial port, e.g. a VPS). Implies `live`; honoured
+    /// only if `storage.diagnostic` allows it, like `diag`.
+    pub diag_serve: bool,
     /// `diag-confirm=WIPE` (dev only): answers the write confirmation, so
     /// the smoke test can exercise the write path without a keyboard.
     pub diag_auto_confirm: bool,
@@ -229,6 +236,11 @@ impl BootOptions {
             // only if the configuration allows it (`storage.diagnostic`).
             if word == "diag" {
                 o.diag = true;
+                continue;
+            }
+            if word == "diag-serve" {
+                o.diag_serve = true;
+                o.live = true;
                 continue;
             }
             if !dev_build {
@@ -452,6 +464,19 @@ mod tests {
         ] {
             assert!(!BootOptions::parse(w, true).diag, "{w}");
             assert!(!BootOptions::parse(w, true).diag_auto_confirm, "{w}");
+        }
+    }
+
+    /// `diag-serve` is honoured by production like `diag` and implies `live`;
+    /// it is not the diagnostic dashboard (`diag` stays false).
+    #[test]
+    fn diag_serve_is_the_report_over_the_network_and_implies_live() {
+        for dev in [false, true] {
+            let o = BootOptions::parse("diag-serve", dev);
+            assert!(o.diag_serve && o.live && !o.diag && o.ignored == 0);
+        }
+        for w in ["Diag-serve", "diag-serve=1", "diagserve"] {
+            assert!(!BootOptions::parse(w, true).diag_serve, "{w}");
         }
     }
 

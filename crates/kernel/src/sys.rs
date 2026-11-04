@@ -127,6 +127,9 @@ impl Sys {
             let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
             let info = collect(&mut busy, &mut accepted);
             sys::topics(&info, |t, v| broker.sys_publish_retained(t, v.as_bytes()));
+            if let Some(report) = crate::diag::served_report() {
+                broker.sys_publish_retained("$SYS/diag/report", report.as_bytes());
+            }
         }
         self.console(broker);
         let requests: alloc::vec::Vec<SysRequest> = broker.drain_sys_requests().collect();
