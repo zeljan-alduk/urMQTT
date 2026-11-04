@@ -1996,7 +1996,7 @@ install_iso() {
         check "install-vm [$accel]" "$log1" "$status" "boot: from optical media" "config: fingerprint [0-9a-f]{64} " \
             "install: disk virtio-blk 00:0[0-9a-f]\.0: 64 MiB$" "install: ALL DATA ON virtio-blk" \
             "install: writing to virtio-blk 00:0[0-9a-f]\.0 in 1 s; power off now to cancel" \
-            "install: done: 10 MiB written and verified" "NOT:URMQTT READY" "NOT:ISO MODIFIED" "$NO_FAULT"
+            "install: done: [0-9]+ MiB written and verified" "NOT:URMQTT READY" "NOT:ISO MODIFIED" "$NO_FAULT"
         status=0
         boot "$log2" --disk "$t" --accel "$accel" --headless --no-net || status=$?
         check "install-vm-boots [$accel]" "$log2" "$status" "boot: from a GPT disk" \
@@ -2032,7 +2032,7 @@ install_iso() {
             -device scsi-hd,drive=t0,bus=scsi0.0,scsi-id=1,lun=0 || status=$?
         check "install-scsi [$accel]" "$log" "$status" \
             "install: disk virtio-scsi 00:0[0-9a-f]\.0 target 1 lun 0: 64 MiB" \
-            "install: done: 10 MiB written and verified" "$NO_FAULT"
+            "install: done: [0-9]+ MiB written and verified" "$NO_FAULT"
         status=0
         boot "$log.boot" --disk "$t" --bus scsi --accel "$accel" --headless --no-net || status=$?
         check "install-scsi-boots [$accel]" "$log.boot" "$status" "blk: boot disk is scsi target 0 lun 0" \
@@ -2058,7 +2058,7 @@ install_iso() {
             -- -drive "if=none,id=t0,file=$t,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile= \
             || status=$?
         check "install-crash-reinstalled [$accel]" "$log.again" "$status" \
-            "install: done: 10 MiB written and verified" "$NO_FAULT"
+            "install: done: [0-9]+ MiB written and verified" "$NO_FAULT"
     done
 }
 

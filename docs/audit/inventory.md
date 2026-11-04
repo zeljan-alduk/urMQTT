@@ -38,7 +38,7 @@
 | `urmqtt-sync` | `crates/sync` | 484 | 0 | 19 (19) | deny |
 | `urmqtt-tcp` | `crates/tcp` | 5026 | 0 | 0 (0) | deny |
 | `urmqtt-timer-wheel` | `crates/timer-wheel` | 446 | 0 | 0 (0) | forbid |
-| `urmqtt-tls` | `crates/tls` | 4655 | 1062 | 0 (0) | forbid |
+| `urmqtt-tls` | `crates/tls` | 4655 | 1077 | 0 (0) | forbid |
 | `urmqtt-usys` | `crates/usys` | 477 | 0 | 8 (8) | default |
 | `urmqtt-virtio` | `crates/virtio` | 2458 | 0 | 19 (19) | deny |
 | `urmqtt-x25519` | `crates/x25519` | 821 | 0 | 3 (3) | default |

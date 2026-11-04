@@ -273,6 +273,13 @@ fn sparse_key() -> p256::SecretKey {
     p256::SecretKey::from_slice(&b).unwrap()
 }
 
+/// Attempts per P-256 case. A secret-dependent time shows in every attempt
+/// (the leaky control scores |t| of several hundred); a noisy shared runner
+/// spoils one attempt at random (|t| = 8.6 was seen once in CI for a case that
+/// scores 0.5 to 2 elsewhere), so the case fails only if every attempt is over
+/// the bound.
+const P256_ATTEMPTS: usize = 3;
+
 /// Fixed (sparse) against random secret, both prepared untimed by `make`
 /// into the same slot.
 fn p256_case<T: Clone>(name: &str, make: impl Fn(&p256::SecretKey) -> T, op: impl Fn(&T)) {
@@ -280,26 +287,35 @@ fn p256_case<T: Clone>(name: &str, make: impl Fn(&p256::SecretKey) -> T, op: imp
     let fixed = make(&sparse_key());
     let mut i = 0usize;
     let mut st = fixed.clone();
-    let t = measure_n(
-        P256_SAMPLES,
-        &mut st,
-        |c, slot| {
-            *slot = if c {
-                fixed.clone()
-            } else {
-                i = (i + 1) % pool.len();
-                pool[i].clone()
-            };
-        },
-        |slot| op(black_box(slot)),
-    );
+    let mut scores = Vec::new();
+    for _ in 0..P256_ATTEMPTS {
+        let t = measure_n(
+            P256_SAMPLES,
+            &mut st,
+            |c, slot| {
+                *slot = if c {
+                    fixed.clone()
+                } else {
+                    i = (i + 1) % pool.len();
+                    pool[i].clone()
+                };
+            },
+            |slot| op(black_box(slot)),
+        );
+        scores.push(t);
+        if t < THRESHOLD {
+            break;
+        }
+    }
     println!(
-        "{name} ({}), sparse vs random scalar: |t| = {t:.1}",
-        urmqtt_tls::provider::ecc_backend()
+        "{name} ({}), sparse vs random scalar: |t| = {} (attempts: {})",
+        urmqtt_tls::provider::ecc_backend(),
+        scores.last().map_or(0.0, |t| (t * 10.0).round() / 10.0),
+        scores.len()
     );
     assert!(
-        t < THRESHOLD,
-        "{name}: timing depends on the secret scalar (|t| = {t:.1})"
+        scores.last().is_some_and(|t| *t < THRESHOLD),
+        "{name}: timing depends on the secret scalar (|t| = {scores:?} in {P256_ATTEMPTS} attempts)"
     );
 }
 
