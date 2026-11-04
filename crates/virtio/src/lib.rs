@@ -1,5 +1,5 @@
-//! virtio-pci modern transport, split virtqueues and the net, blk, scsi
-//! and rng devices (virtio 1.x).
+//! virtio-pci modern transport, split virtqueues and the net, blk, scsi,
+//! rng and gpu (2D, for the console) devices (virtio 1.x).
 //!
 //! Devices are driven synchronously by polling in M6; interrupts (MSI-X)
 //! are wired per queue by the caller. Everything a device returns (used
@@ -15,6 +15,7 @@
 )]
 
 pub mod blk;
+pub mod gpu;
 pub mod net;
 pub mod queue;
 pub mod rng;
@@ -34,6 +35,8 @@ pub enum DeviceType {
     Block,
     Entropy,
     Scsi,
+    /// virtio-gpu (and virtio-vga, the same device with a VGA BAR).
+    Gpu,
     Other(u16),
 }
 
@@ -54,6 +57,7 @@ impl DeviceType {
             2 => Self::Block,
             4 => Self::Entropy,
             8 => Self::Scsi,
+            16 => Self::Gpu,
             other => Self::Other(other),
         })
     }
@@ -439,6 +443,10 @@ mod tests {
         assert_eq!(
             DeviceType::from_pci(VENDOR, 0x1049, 0),
             Some(DeviceType::Other(9))
+        );
+        assert_eq!(
+            DeviceType::from_pci(VENDOR, 0x1050, 0),
+            Some(DeviceType::Gpu)
         );
         assert_eq!(DeviceType::from_pci(0x8086, 0x1041, 0), None);
         assert_eq!(DeviceType::from_pci(VENDOR, 0x2000, 0), None);

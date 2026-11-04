@@ -504,6 +504,16 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     b.bool(tag::CTL_ALLOW_UNREVOKE, cfg.control.allow_unrevoke)?;
     b.uint(tag::CTL_MAX_AGE, u64::from(cfg.control.max_message_age_s))?;
     build_plaintext(&mut b, &cfg.plaintext)?;
+    // ADR-256: "off" is the default and writes nothing (the blob keeps its
+    // version); "auto" and "on" need format 5.
+    b.variant(
+        tag::CON_VIRTIO_GPU,
+        match cfg.console.virtio_gpu {
+            crate::VirtioGpuMode::Off => 0,
+            crate::VirtioGpuMode::Auto => 1,
+            crate::VirtioGpuMode::On => 2,
+        },
+    )?;
     Ok(b)
 }
 

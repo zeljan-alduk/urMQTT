@@ -108,3 +108,9 @@ public_key = "control.pub"     # Ed25519; the private key stays offline
 service_ids = ["operator"]       # operational identities that may publish control messages
 allow_unrevoke = true          # dev only, for tests; keep false in production
 max_message_age_s = 600        # longest validity window a message may have
+
+[console]
+# The console on a virtio-gpu display (ADR-256): "off" | "auto" | "on". Dev uses
+# "auto": the driver starts only where the boot framebuffer is missing or dead
+# (a QEMU without ramfb, with -device virtio-gpu-pci).
+virtio_gpu = "auto"

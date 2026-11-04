@@ -81,6 +81,18 @@ impl<'a> FbConsole<'a> {
         self.rows
     }
 
+    /// The packed colour at (`x`, `y`), `None` outside the surface.
+    pub fn pixel(&self, x: usize, y: usize) -> Option<u32> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let off = y * self.pitch + x * 4;
+        self.buf
+            .get(off..off + 4)
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(u32::from_le_bytes)
+    }
+
     fn put_pixel(&mut self, x: usize, y: usize, color: u32) {
         let off = y * self.pitch + x * 4;
         if let Some(px) = self.buf.get_mut(off..off + 4) {

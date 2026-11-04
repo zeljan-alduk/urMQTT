@@ -190,6 +190,35 @@ pub enum DiscardMode {
     Off,
 }
 
+/// Whether the console drives a virtio-gpu display (`console.virtio_gpu`, ADR-256).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtioGpuMode {
+    /// Never (the default): the driver is not started.
+    Off,
+    /// When a virtio-gpu is found and the bootloader's framebuffer is missing
+    /// or is RAM that nothing presents.
+    Auto,
+    /// Whenever a virtio-gpu is found.
+    On,
+}
+
+impl VirtioGpuMode {
+    /// The TOML word.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::On => "on",
+        }
+    }
+}
+
+/// The `[console]` section (ADR-256).
+#[derive(Debug, Clone, Copy)]
+pub struct Console {
+    pub virtio_gpu: VirtioGpuMode,
+}
+
 /// Where the data store ends up for this boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backing {
@@ -392,6 +421,7 @@ pub struct BuildConfig {
     pub control: Control,
     pub trust: Trust,
     pub plaintext: Plaintext,
+    pub console: Console,
 }
 
 impl BuildConfig {

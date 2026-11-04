@@ -46,6 +46,8 @@ mod diag;
 #[cfg(all(target_os = "none", feature = "selftest"))]
 mod dpbench;
 #[cfg(target_os = "none")]
+mod gpucon;
+#[cfg(target_os = "none")]
 mod hardening;
 #[cfg(all(target_os = "none", feature = "selftest"))]
 mod hardtest;

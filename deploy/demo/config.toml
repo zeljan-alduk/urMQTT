@@ -106,3 +106,11 @@ fallback = "jitter"
 
 [cpu]
 disable = []
+
+[console]
+# The console on a virtio-gpu display (ADR-256): for VMs whose provider console
+# shows "Display output is not active" (netcup ARM). "off" (default): never;
+# "auto": when the bootloader's framebuffer is missing or is RAM that nothing
+# shows; "on": whenever a virtio-gpu is found. Anything but "off" needs a kernel
+# that reads configuration format 5.
+virtio_gpu = "off"

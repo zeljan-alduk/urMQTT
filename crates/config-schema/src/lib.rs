@@ -109,6 +109,30 @@ struct RawConfig {
     /// Optional: without it there is no plaintext listener (P1, ADR-229).
     #[serde(default)]
     plaintext: RawPlaintext,
+    /// Optional: without it the console stays on the bootloader's framebuffer (ADR-256).
+    #[serde(default)]
+    console: RawConsole,
+}
+
+/// Whether the console drives a virtio-gpu display (ADR-256).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtioGpuMode {
+    /// Never: the driver is not started (the default, and production's).
+    #[default]
+    Off,
+    /// When a virtio-gpu is found and the bootloader's framebuffer is missing
+    /// or is RAM that nothing presents (edk2's virtio-gpu GOP after boot).
+    Auto,
+    /// Whenever a virtio-gpu is found.
+    On,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConsole {
+    #[serde(default)]
+    virtio_gpu: VirtioGpuMode,
 }
 
 /// How a plaintext client proves who it is (P1).
@@ -685,6 +709,13 @@ pub struct Config {
     pub registry: RegistryMode,
     pub control: Control,
     pub plaintext: Plaintext,
+    pub console: Console,
+}
+
+/// The `[console]` section (ADR-256).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Console {
+    pub virtio_gpu: VirtioGpuMode,
 }
 
 /// Plaintext MQTT for trusted networks (P1, ADR-229). Off by default; the
@@ -822,6 +853,9 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         registry: raw.registry.mode,
         control,
         plaintext,
+        console: Console {
+            virtio_gpu: raw.console.virtio_gpu,
+        },
     })
 }
 
@@ -1990,6 +2024,8 @@ pub fn check_expiry(pem: &[u8], now_unix: u64, min_days: u32) -> Result<u64, Str
 
 pub mod pack;
 
+#[cfg(test)]
+mod console_tests;
 #[cfg(test)]
 mod encryption_tests;
 #[cfg(test)]

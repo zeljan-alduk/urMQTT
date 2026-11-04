@@ -19,10 +19,10 @@ use urmqtt_cfg::fields::tag;
 use urmqtt_cfg::{CfgError, fields};
 
 use crate::{
-    Acl, BuildConfig, Cidr, Control, Cpu, DEV_KERNEL, DiscardMode, Entropy, IdentityField,
+    Acl, BuildConfig, Cidr, Console, Control, Cpu, DEV_KERNEL, DiscardMode, Entropy, IdentityField,
     Ipv4Cidr, Limits, LogLevel, Memory, Network, NetworkMode, Observability, PlainAuth,
     PlainNetwork, PlainUser, Plaintext, Rate, Registry, SocketAddrV4, Storage, StorageMode, Time,
-    Tls, Trust, Watchdog, WatchdogAction,
+    Tls, Trust, VirtioGpuMode, Watchdog, WatchdogAction,
 };
 
 /// Room for every plain-text string list of the field table at its
@@ -394,6 +394,13 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             acl_subscribe: plain_acl_subscribe,
             retain: b.bool(tag::PL_RETAIN),
         },
+        console: Console {
+            virtio_gpu: match b.variant(tag::CON_VIRTIO_GPU) {
+                1 => VirtioGpuMode::Auto,
+                2 => VirtioGpuMode::On,
+                _ => VirtioGpuMode::Off,
+            },
+        },
     }
 }
 
@@ -658,6 +665,27 @@ mod tests {
             })
         );
         assert_eq!(c.memory.kernel_heap_mb, 128);
+    }
+
+    /// ADR-256: off by default (the empty blob, and every blob before format
+    /// 5); auto and on are decoded from their variants.
+    #[test]
+    fn the_virtio_gpu_console_is_off_by_default_and_decoded() {
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.console.virtio_gpu, VirtioGpuMode::Off);
+        for (v, mode) in [(1u8, VirtioGpuMode::Auto), (2, VirtioGpuMode::On)] {
+            let mut b = Builder::new();
+            b.variant(tag::CON_VIRTIO_GPU, v).unwrap();
+            let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+            let blob = Blob::parse(bytes).unwrap();
+            assert_eq!(blob.version(), 5);
+            let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+            assert_eq!(build(&blob, arena).console.virtio_gpu, mode);
+        }
+        assert_eq!(
+            (VirtioGpuMode::Off.name(), VirtioGpuMode::Auto.name(), VirtioGpuMode::On.name()),
+            ("off", "auto", "on")
+        );
     }
 
     #[test]

@@ -140,7 +140,8 @@ impl Builder {
         self.finish_as(dev_allowed, self.lowest_version())
     }
 
-    /// The lowest format version that can hold this configuration: 2, 3 when the TLS listener is off, 4 with disk encryption.
+    /// The lowest format version that can hold this configuration: 2, 3 when the TLS listener is off, 4 with disk
+    /// encryption, 5 with `console.virtio_gpu` set (ADR-256).
     pub fn lowest_version(&self) -> u16 {
         let tls_off = self
             .records
@@ -150,7 +151,13 @@ impl Builder {
             .records
             .iter()
             .any(|(t, v)| *t == crate::fields::tag::ST_ENCRYPTION && v.iter().any(|b| *b != 0));
-        if encrypted {
+        let virtio_gpu = self
+            .records
+            .iter()
+            .any(|(t, _)| *t == crate::fields::tag::CON_VIRTIO_GPU);
+        if virtio_gpu {
+            5
+        } else if encrypted {
             4
         } else if tls_off {
             3

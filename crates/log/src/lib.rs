@@ -310,12 +310,84 @@ pub fn set_framebuffer(fb: FbConsole<'static>) {
     SINKS.lock().fb = Some(fb);
 }
 
+/// The framebuffer was drawn on since the presenter last took the flag.
+static FB_DIRTY: AtomicBool = AtomicBool::new(false);
+/// Sends the framebuffer to a display that does not scan out guest memory
+/// by itself (virtio-gpu, ADR-256); `true`: now, and wait until it is shown.
+static PRESENT: OnceCell<fn(bool)> = OnceCell::new();
+
+fn mark_dirty() {
+    // Release: the pixels written before are visible to the core that takes
+    // the flag (Acquire in `take_framebuffer_dirty`) and hands them to the device.
+    FB_DIRTY.store(true, Ordering::Release);
+}
+
+/// Takes the "drawn on" flag: `true` if something was drawn since the last
+/// call. For the presenter.
+pub fn take_framebuffer_dirty() -> bool {
+    FB_DIRTY.swap(false, Ordering::AcqRel)
+}
+
+/// Sets the "drawn on" flag again (a presenter that could not send the frame).
+pub fn mark_framebuffer_dirty() {
+    mark_dirty();
+}
+
+/// Installs the presenter. It is called after lines reach the framebuffer
+/// (`false`: it may rate-limit), and with `true` before the machine stops
+/// (fatal errors, panics, power-off) and after a dashboard redraw. It is
+/// called with no log lock held and must not log.
+pub fn set_framebuffer_present(f: fn(bool)) {
+    let _ = PRESENT.set(f);
+}
+
+fn present(now: bool) {
+    if let Some(p) = PRESENT.get() {
+        p(now);
+    }
+}
+
+/// Puts `fb` in place of the framebuffer console (the one on a virtio-gpu
+/// scanout, ADR-256) and draws on it the newest lines of the console ring,
+/// as many as it has rows, so what was logged before it existed is on it
+/// too. The previous console is dropped (its memory is left as it is).
+/// Returns the number of lines redrawn.
+pub fn replace_framebuffer(mut fb: FbConsole<'static>) -> usize {
+    let mut locked = Locked::acquire();
+    let rows = fb.rows().saturating_sub(1) as u64;
+    let mut n = 0;
+    // Relaxed: see `enable_console`.
+    if CONSOLE_ON.load(Ordering::Relaxed) {
+        // Nested inside the sinks, as writers do.
+        let c = CONSOLE.lock();
+        let kept = c.next.min(CONSOLE_LINES as u64);
+        for i in c.next - kept.min(rows)..c.next {
+            if let Some(rec) = c.ring.get((i % CONSOLE_LINES as u64) as usize) {
+                let _ = write_line(&mut fb, rec, None);
+                n += 1;
+            }
+        }
+        drop(c);
+    }
+    locked.sinks().fb = Some(fb);
+    mark_dirty();
+    drop(locked);
+    present(true);
+    n
+}
+
 /// Runs `f` on the framebuffer console with the log sinks locked (IRQs
 /// masked meanwhile); `None` if there is no framebuffer. For the diagnostic
-/// dashboard (O4).
+/// dashboard (O4). The result is presented right away (ADR-256).
 pub fn with_framebuffer<R>(f: impl FnOnce(&mut FbConsole<'static>) -> R) -> Option<R> {
     let mut locked = Locked::acquire();
-    locked.sinks().fb.as_mut().map(f)
+    let r = locked.sinks().fb.as_mut().map(f);
+    drop(locked);
+    if r.is_some() {
+        mark_dirty();
+        present(true);
+    }
+    r
 }
 
 /// Whether log lines are also written to the framebuffer (default yes).
@@ -499,6 +571,7 @@ impl Write for Tee<'_> {
             && let Some(fb) = self.0.fb.as_mut()
         {
             fb.write_str(s)?;
+            mark_dirty();
         }
         Ok(())
     }
@@ -544,30 +617,26 @@ pub fn set_sink_delay_us(us: u32) {
     SINK_DELAY_US.store(us, Ordering::Relaxed);
 }
 
+/// One line as the sinks show it: time, level, text. The synchronous path
+/// still has the arguments (`full`): the sinks get the whole line however
+/// long it is, as before the rings.
+fn write_line(w: &mut impl Write, rec: &Record, full: Option<fmt::Arguments<'_>>) -> fmt::Result {
+    let (s, us, t) = (
+        rec.ns / 1_000_000_000,
+        (rec.ns / 1_000) % 1_000_000,
+        tag(rec.level),
+    );
+    match full {
+        Some(args) => writeln!(w, "[{s:>5}.{us:06}] {t} {args}"),
+        None => writeln!(w, "[{s:>5}.{us:06}] {t} {}", rec.text()),
+    }
+}
+
 /// Writes one finished record to the sinks, the console ring and the
 /// syslog records. The only place a line reaches them.
 fn emit_record(sinks: &mut Sinks, rec: &Record, full: Option<fmt::Arguments<'_>>) {
     // Sinks never fail; a formatting error just truncates the line.
-    let _ = match full {
-        // The synchronous path still has the arguments: the sinks get the
-        // whole line however long it is, as before the rings.
-        Some(args) => writeln!(
-            Tee(sinks),
-            "[{:>5}.{:06}] {} {}",
-            rec.ns / 1_000_000_000,
-            (rec.ns / 1_000) % 1_000_000,
-            tag(rec.level),
-            args
-        ),
-        None => writeln!(
-            Tee(sinks),
-            "[{:>5}.{:06}] {} {}",
-            rec.ns / 1_000_000_000,
-            (rec.ns / 1_000) % 1_000_000,
-            tag(rec.level),
-            rec.text()
-        ),
-    };
+    let _ = write_line(&mut Tee(sinks), rec, full);
     // Relaxed: see `set_sink_delay_us`.
     let delay_us = SINK_DELAY_US.load(Ordering::Relaxed);
     if delay_us > 0
@@ -685,6 +754,8 @@ fn log_sync(level: Level, args: fmt::Arguments<'_>, audit: bool) {
         emit_record(sinks, &rec, None);
     }
     emit_record(sinks, &make_record(cpu, ns, level, args), Some(args));
+    drop(locked);
+    present(false);
 }
 
 /// What became of a line given to [`Hub::push`].
@@ -969,9 +1040,13 @@ pub fn service() -> bool {
         cost_report();
     }
     if !ASYNC.load(Ordering::Acquire) || !HUB.pending() {
+        // What an earlier pass drew and the rate limit held back.
+        present(false);
         return false;
     }
-    drain(PASS_LINES, PASS_NS, None) > 0
+    let wrote = drain(PASS_LINES, PASS_NS, None) > 0;
+    present(false);
+    wrote
 }
 
 /// Whether lines wait for the drain (the consumer must not sleep).
@@ -1052,6 +1127,8 @@ pub fn raw(args: fmt::Arguments<'_>) {
         DRAINING.store(false, Ordering::Release);
     }
     let _ = Tee(locked.sinks()).write_fmt(args);
+    drop(locked);
+    present(false);
 }
 
 /// Waits until the UART has sent everything written so far (before a
@@ -1063,6 +1140,8 @@ pub fn flush() {
     {
         u.flush();
     }
+    // A display that needs to be told (virtio-gpu) shows the last lines too.
+    present(true);
 }
 
 /// Last-resort output for exception and panic reports. Uses the normal sinks
@@ -1077,6 +1156,10 @@ pub fn emergency(args: fmt::Arguments<'_>) {
         if let Some(u) = sinks.uart {
             u.flush();
         }
+        drop(sinks);
+        // The presenter only tries its own lock (ADR-256): a fault inside it
+        // leaves the screen as it was, never a hang.
+        present(true);
         return;
     }
     // Relaxed: see `set_uart`.
@@ -1125,6 +1208,7 @@ mod tests {
     /// count what they missed; writers never wait for them.
     #[test]
     fn console_ring_serves_independent_readers() {
+        let _serial = GLOBAL_LOG.lock();
         enable_console();
         let mut early = console_next();
         let mut late = console_next();
@@ -1182,6 +1266,53 @@ mod tests {
         let _ = console_next();
         drop(sinks);
         assert!(cursor >= n);
+    }
+
+    /// Tests that log through the global sinks and count lines take turns.
+    static GLOBAL_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn fmt_grey() -> u32 {
+        0x00d0_d0d0
+    }
+
+    /// ADR-256: a framebuffer that takes over (a virtio-gpu scanout) gets the
+    /// newest lines of the console ring drawn on it, and is marked drawn on.
+    #[test]
+    fn a_new_framebuffer_gets_the_lines_logged_before_it() {
+        use fbcon::PixelFormat;
+        let _serial = GLOBAL_LOG.lock();
+        enable_console();
+        for i in 0..3 {
+            log(Level::Warn, format_args!("before the gpu {i}"));
+        }
+        let (w, h) = (320usize, 64usize);
+        let buf: &'static mut [u8] = Box::leak(vec![0u8; w * h * 4].into_boxed_slice());
+        let fmt = PixelFormat {
+            red_shift: 16,
+            green_shift: 8,
+            blue_shift: 0,
+        };
+        let fb = FbConsole::new(buf, w, h, w * 4, fmt).unwrap();
+        let _ = take_framebuffer_dirty();
+        let n = replace_framebuffer(fb);
+        // 8 rows of text, one left for the cursor; at least our three lines exist.
+        assert!((3..=7).contains(&n), "{n}");
+        assert!(take_framebuffer_dirty());
+        assert!(!take_framebuffer_dirty());
+        // The first text row has lit pixels (the console's grey).
+        let grey = fmt_grey();
+        let lit = with_framebuffer(|fb| {
+            (0..8)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|&(x, y)| fb.pixel(x, y) == Some(grey))
+                .count()
+        })
+        .unwrap();
+        assert!(lit > 50, "{lit} lit pixels in the first row");
+        // A line written now marks it again.
+        log(Level::Warn, format_args!("after the gpu"));
+        assert!(take_framebuffer_dirty());
+        set_framebuffer_logging(true);
     }
 
     #[test]
