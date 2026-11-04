@@ -11,6 +11,8 @@ use rustls::crypto::cipher::{
 };
 use rustls::{ConnectionTrafficSecrets, ContentType, ProtocolVersion};
 
+use crate::stages::{Stage, timed};
+
 const TAG: usize = 16;
 
 pub struct Aes128Gcm;
@@ -57,13 +59,17 @@ impl Cipher {
 struct Tls13(Cipher, Iv);
 
 fn aes(key: &AeadKey) -> Cipher {
-    aes_gcm::Aes128Gcm::new_from_slice(key.as_ref())
-        .map_or(Cipher::Invalid, |c| Cipher::Aes(Box::new(c)))
+    timed(Stage::Aead, || {
+        aes_gcm::Aes128Gcm::new_from_slice(key.as_ref())
+            .map_or(Cipher::Invalid, |c| Cipher::Aes(Box::new(c)))
+    })
 }
 
 fn chacha(key: &AeadKey) -> Cipher {
-    chacha20poly1305::ChaCha20Poly1305::new_from_slice(key.as_ref())
-        .map_or(Cipher::Invalid, |c| Cipher::ChaCha(Box::new(c)))
+    timed(Stage::Aead, || {
+        chacha20poly1305::ChaCha20Poly1305::new_from_slice(key.as_ref())
+            .map_or(Cipher::Invalid, |c| Cipher::ChaCha(Box::new(c)))
+    })
 }
 
 impl Tls13AeadAlgorithm for Aes128Gcm {
@@ -116,6 +122,20 @@ impl MessageEncrypter for Tls13 {
         m: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, rustls::Error> {
+        timed(Stage::Aead, || self.encrypt_timed(m, seq))
+    }
+
+    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
+        payload_len + 1 + TAG
+    }
+}
+
+impl Tls13 {
+    fn encrypt_timed(
+        &mut self,
+        m: OutboundPlainMessage<'_>,
+        seq: u64,
+    ) -> Result<OutboundOpaqueMessage, rustls::Error> {
         let total = self.encrypted_payload_len(m.payload.len());
         let mut payload = PrefixedPayload::with_capacity(total);
         payload.extend_from_chunks(&m.payload);
@@ -129,10 +149,6 @@ impl MessageEncrypter for Tls13 {
             payload,
         ))
     }
-
-    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
-        payload_len + 1 + TAG
-    }
 }
 
 impl MessageDecrypter for Tls13 {
@@ -141,10 +157,12 @@ impl MessageDecrypter for Tls13 {
         mut m: InboundOpaqueMessage<'a>,
         seq: u64,
     ) -> Result<InboundPlainMessage<'a>, rustls::Error> {
-        let payload = &mut m.payload;
-        let nonce = Nonce::new(&self.1, seq).0;
-        let aad = make_tls13_aad(payload.len());
-        self.0.open(&nonce, &aad, &mut DecBuf(payload))?;
+        timed(Stage::Aead, || {
+            let payload = &mut m.payload;
+            let nonce = Nonce::new(&self.1, seq).0;
+            let aad = make_tls13_aad(payload.len());
+            self.0.open(&nonce, &aad, &mut DecBuf(payload))
+        })?;
         m.into_tls13_unpadded_message()
     }
 }

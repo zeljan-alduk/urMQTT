@@ -251,6 +251,25 @@ fn identity_from_san_uri() {
     );
 }
 
+/// The server gives every P-256 trust anchor a verification table (ADR-111,
+/// ADR-259): looked up by the key exactly as webpki holds the anchor.
+#[test]
+fn trust_anchors_get_a_verification_table() {
+    let Some(d) = dev() else { return };
+    setup_globals();
+    let _srv = server(&d, IdentityField::Cn, &[]);
+    let mut roots = RootCertStore::empty();
+    for c in CertificateDer::pem_file_iter(d.join("ca.pem")).unwrap() {
+        roots.add(c.unwrap()).unwrap();
+    }
+    assert!(!roots.roots.is_empty());
+    for anchor in &roots.roots {
+        assert!(urmqtt_tls::provider::has_issuer_table(
+            anchor.subject_public_key_info.as_ref()
+        ));
+    }
+}
+
 #[test]
 fn garbage_is_not_tls() {
     let Some(d) = dev() else { return };

@@ -6,6 +6,7 @@ use rustls::crypto::{ActiveKeyExchange, SharedSecret, SupportedKxGroup};
 use rustls::{Error, NamedGroup, PeerMisbehaved};
 
 use crate::rng::{fill_global, is_installed};
+use crate::stages::{Stage, timed};
 
 #[derive(Debug)]
 pub struct X25519;
@@ -48,10 +49,12 @@ impl SupportedKxGroup for X25519 {
         if !is_installed() {
             return Err(Error::FailedToGetRandomBytes);
         }
-        let mut secret = zeroize::Zeroizing::new([0u8; 32]);
-        fill_global(&mut secret[..]).map_err(|_| Error::FailedToGetRandomBytes)?;
-        let public = x25519_public(&secret);
-        Ok(Box::new(X25519Active { secret, public }))
+        timed(Stage::X25519Keygen, || {
+            let mut secret = zeroize::Zeroizing::new([0u8; 32]);
+            fill_global(&mut secret[..]).map_err(|_| Error::FailedToGetRandomBytes)?;
+            let public = x25519_public(&secret);
+            Ok(Box::new(X25519Active { secret, public }) as Box<dyn ActiveKeyExchange>)
+        })
     }
 
     fn name(&self) -> NamedGroup {
@@ -64,7 +67,8 @@ impl ActiveKeyExchange for X25519Active {
         let peer: [u8; 32] = peer
             .try_into()
             .map_err(|_| Error::from(PeerMisbehaved::InvalidKeyShare))?;
-        let shared = zeroize::Zeroizing::new(x25519(&self.secret, &peer));
+        let shared =
+            zeroize::Zeroizing::new(timed(Stage::X25519Shared, || x25519(&self.secret, &peer)));
         // Reject all-zero output (small-order peer key, RFC 7748 §6.1).
         if bool::from(subtle::ConstantTimeEq::ct_eq(&shared[..], &[0u8; 32][..])) {
             return Err(PeerMisbehaved::InvalidKeyShare.into());
@@ -94,6 +98,16 @@ impl SupportedKxGroup for Secp256r1 {
         // Rejection sampling: a uniformly random 32-byte string is a valid
         // scalar (non-zero, below the group order) with overwhelming
         // probability; retry otherwise.
+        timed(Stage::P256Kx, || self.start_timed())
+    }
+
+    fn name(&self) -> NamedGroup {
+        NamedGroup::secp256r1
+    }
+}
+
+impl Secp256r1 {
+    fn start_timed(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
         let secret = loop {
             let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
             fill_global(&mut bytes[..]).map_err(|_| Error::FailedToGetRandomBytes)?;
@@ -104,17 +118,13 @@ impl SupportedKxGroup for Secp256r1 {
         let public = super::fastec::p256_public(&secret);
         Ok(Box::new(P256Active { secret, public }))
     }
-
-    fn name(&self) -> NamedGroup {
-        NamedGroup::secp256r1
-    }
 }
 
 impl ActiveKeyExchange for P256Active {
     fn complete(self: Box<Self>, peer: &[u8]) -> Result<SharedSecret, Error> {
         // Uncompressed points only (RFC 8446 §4.2.8.2); decoding validates
         // that the point is on the curve.
-        let shared = super::fastec::p256_dh(&self.secret, peer)
+        let shared = timed(Stage::P256Kx, || super::fastec::p256_dh(&self.secret, peer))
             .map_err(|_| Error::from(PeerMisbehaved::InvalidKeyShare))?;
         Ok(SharedSecret::from(&shared[..]))
     }

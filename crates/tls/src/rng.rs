@@ -289,13 +289,13 @@ pub fn is_installed() -> bool {
 /// Fills `out` from the installed generator. Fails (rather than returning
 /// weak bytes) if none is installed.
 pub fn fill_global(out: &mut [u8]) -> Result<(), NoHardwareEntropy> {
-    match GLOBAL.lock().as_mut() {
+    crate::stages::timed(crate::stages::Stage::Rng, || match GLOBAL.lock().as_mut() {
         Some(r) => {
             r.fill(out);
             Ok(())
         }
         None => Err(NoHardwareEntropy),
-    }
+    })
 }
 
 /// `rand_core` view of the installed generator, for RustCrypto APIs.

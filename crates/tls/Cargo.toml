@@ -49,6 +49,13 @@ rfc6979 = { version = "0.6", default-features = false }
 [features]
 # The sans-IO TLS client, for in-kernel self-tests (dev images only, M17).
 client = []
+# Per-stage timing of the server's handshakes (host profiling only, never in
+# the kernel): crates/tls/src/stages.rs, examples/handshake_profile.rs.
+stage-profile = []
+
+[[example]]
+name = "handshake_profile"
+required-features = ["stage-profile"]
 
 [dev-dependencies]
 # The host tests use our own client as well.

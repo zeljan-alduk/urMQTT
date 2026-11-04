@@ -24,6 +24,7 @@ use zeroize::Zeroize;
 
 use crate::identity::{self, IdentityField};
 use crate::record::{self, Opened, RecordError, RecordLayer, Suite};
+use crate::stages::{Stage, timed};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TlsError {
@@ -432,17 +433,21 @@ impl ClientCertVerifier for RevocationAware {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        let (ok, role) = self.roles.verify(end_entity, intermediates, now)?;
-        if identity::serial(end_entity).is_none() {
-            return Err(rustls::Error::InvalidCertificate(
-                CertificateError::BadEncoding,
-            ));
-        }
-        if self.revoked.is_revoked(end_entity) {
-            return Err(rustls::Error::InvalidCertificate(CertificateError::Revoked));
-        }
-        record_role(end_entity, role);
-        Ok(ok)
+        let (ok, role) = timed(Stage::CertPath, || {
+            self.roles.verify(end_entity, intermediates, now)
+        })?;
+        timed(Stage::CertChecks, || {
+            if identity::serial(end_entity).is_none() {
+                return Err(rustls::Error::InvalidCertificate(
+                    CertificateError::BadEncoding,
+                ));
+            }
+            if self.revoked.is_revoked(end_entity) {
+                return Err(rustls::Error::InvalidCertificate(CertificateError::Revoked));
+            }
+            record_role(end_entity, role);
+            Ok(ok)
+        })
     }
 
     fn verify_tls12_signature(
@@ -820,7 +825,7 @@ impl TlsSession {
         if !done {
             return Ok(Event::None);
         }
-        self.finish_handshake(tx, app)
+        timed(Stage::Finish, || self.finish_handshake(tx, app))
     }
 
     fn finish_handshake(&mut self, tx: &mut Vec<u8>, app: &mut Vec<u8>) -> Result<Event, TlsError> {

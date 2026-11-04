@@ -358,9 +358,11 @@ impl ProducesTickets for Ticketer {
     }
 
     fn encrypt(&self, plain: &[u8]) -> Option<Vec<u8>> {
-        let now = (self.0.uptime)();
-        self.0
-            .seal_at(now, &mut |b| crate::rng::fill_global(b).is_ok(), plain)
+        crate::stages::timed(crate::stages::Stage::Ticket, || {
+            let now = (self.0.uptime)();
+            self.0
+                .seal_at(now, &mut |b| crate::rng::fill_global(b).is_ok(), plain)
+        })
     }
 
     fn decrypt(&self, cipher: &[u8]) -> Option<Vec<u8>> {

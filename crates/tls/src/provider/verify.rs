@@ -20,6 +20,8 @@ use rustls::crypto::WebPkiSupportedAlgorithms;
 use sha2::Digest;
 use urmqtt_sync::sync::SpinLock;
 
+use crate::stages::{Stage, timed};
+
 #[derive(Debug)]
 struct EcdsaP256Sha256;
 
@@ -44,6 +46,13 @@ pub fn cache_stats() -> (u64, u64) {
     (HITS.load(Ordering::Relaxed), MISSES.load(Ordering::Relaxed))
 }
 
+/// Empties the verification memo, so the next handshakes verify the client
+/// certificate's signature again (profiling of a device's first contact).
+#[cfg(feature = "stage-profile")]
+pub fn clear_memo() {
+    *VERIFIED.lock() = [[0; 32]; CACHE_ENTRIES];
+}
+
 /// Trust anchors with a fixed-base table (ADR-111), at most this many.
 const MAX_ISSUERS: usize = 8;
 
@@ -64,10 +73,13 @@ static ISSUERS: SpinLock<Vec<Arc<Issuer>>> = SpinLock::new(Vec::new());
 /// at configuration time (about 1 ms, 25 KiB per key); keys that are not
 /// registered, and registrations past [`MAX_ISSUERS`], use the ordinary
 /// path. Returns whether the key has a table afterwards.
+///
+/// `spki` may be the complete SubjectPublicKeyInfo DER or only its contents
+/// (the SEQUENCE without its tag and length), which is what webpki's
+/// `TrustAnchor::subject_public_key_info` holds and what the server passes.
 pub fn register_issuer(spki: &[u8]) -> bool {
     use p256::elliptic_curve::sec1::ToSec1Point;
-    use p256::pkcs8::DecodePublicKey;
-    let Ok(key) = p256::PublicKey::from_public_key_der(spki) else {
+    let Some(key) = issuer_key(spki) else {
         return false;
     };
     let mut point = [0u8; 65];
@@ -90,6 +102,43 @@ pub fn register_issuer(spki: &[u8]) -> bool {
     }
     all.push(Arc::new(Issuer { point, table }));
     true
+}
+
+/// The P-256 key of a SubjectPublicKeyInfo, given whole or as the contents of
+/// its outer SEQUENCE (webpki's trust anchor form). Until v0.4.0 only the
+/// whole form was accepted, so the anchors the server registered never got a
+/// table and every first verification by a CA took the variable-base path
+/// (ADR-259).
+fn issuer_key(spki: &[u8]) -> Option<p256::PublicKey> {
+    use p256::pkcs8::DecodePublicKey;
+    if let Ok(k) = p256::PublicKey::from_public_key_der(spki) {
+        return Some(k);
+    }
+    p256::PublicKey::from_public_key_der(&wrap_sequence(spki)?).ok()
+}
+
+/// `30 len contents`: the DER SEQUENCE around `contents` (definite length).
+fn wrap_sequence(contents: &[u8]) -> Option<Vec<u8>> {
+    let n = contents.len();
+    let mut out = Vec::with_capacity(n + 4);
+    out.push(0x30);
+    match u16::try_from(n).ok()? {
+        l @ 0..=0x7f => out.push(l as u8),
+        l @ 0x80..=0xff => out.extend_from_slice(&[0x81, l as u8]),
+        l => {
+            out.push(0x82);
+            out.extend_from_slice(&l.to_be_bytes());
+        }
+    }
+    out.extend_from_slice(contents);
+    Some(out)
+}
+
+/// Whether the key of `spki` (either form, as [`register_issuer`]) has a
+/// registered table.
+pub fn has_issuer_table(spki: &[u8]) -> bool {
+    use p256::elliptic_curve::sec1::ToSec1Point;
+    issuer_key(spki).is_some_and(|k| issuer(k.to_sec1_point(false).as_bytes()).is_some())
 }
 
 /// A table of its own for benchmarks and probes, outside the global registry
@@ -199,17 +248,25 @@ impl SignatureVerificationAlgorithm for EcdsaP256Sha256 {
         signature: &[u8],
     ) -> Result<(), InvalidSignature> {
         let cacheable = !is_certificate_verify(message);
-        let d = cacheable.then(|| digest(public_key, message, signature));
-        if let Some(d) = &d
-            && VERIFIED.lock().get(slot(d)) == Some(d)
-        {
+        let (d, hit) = timed(Stage::VerifyMemo, || {
+            let d = cacheable.then(|| digest(public_key, message, signature));
+            let hit = d
+                .as_ref()
+                .is_some_and(|d| VERIFIED.lock().get(slot(d)) == Some(d));
+            (d, hit)
+        });
+        if hit {
             // Relaxed: statistics.
             HITS.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
-        match issuer(public_key) {
-            Some(issuer) => issuer.table.verify(message, signature)?,
-            None => super::fastec::ecdsa_verify(public_key, message, signature)?,
+        match timed(Stage::VerifyMemo, || issuer(public_key)) {
+            Some(issuer) => timed(Stage::VerifyCertificate, || {
+                issuer.table.verify(message, signature)
+            })?,
+            None => timed(Stage::VerifyCertificateVerify, || {
+                super::fastec::ecdsa_verify(public_key, message, signature)
+            })?,
         }
         if let Some(d) = d {
             // Relaxed: statistics.
@@ -361,6 +418,35 @@ mod tests {
         bad[0] ^= 1;
         assert!(EcdsaP256Sha256.verify_signature(&pk, &bad, &sig).is_err());
         assert!(ISSUERS.lock().len() <= MAX_ISSUERS);
+    }
+
+    /// webpki's trust anchors carry the SubjectPublicKeyInfo without its
+    /// outer SEQUENCE header; both forms register the same table, and a
+    /// malformed one registers nothing.
+    #[test]
+    fn issuers_register_from_the_trust_anchor_form_of_the_key() {
+        use p256::pkcs8::EncodePublicKey;
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let sk = p256::ecdsa::SigningKey::from_slice(&[0x42; 32]).unwrap();
+        let full = sk.verifying_key().to_public_key_der().unwrap();
+        let full = full.as_bytes();
+        // 30 59 <89 bytes>: the short-form header of a P-256 SPKI.
+        assert_eq!(&full[..2], &[0x30, 0x59]);
+        let inner = &full[2..];
+        assert!(!has_issuer_table(inner));
+        assert!(register_issuer(inner));
+        assert!(has_issuer_table(inner) && has_issuer_table(full));
+        let pk = sk.verifying_key().to_sec1_bytes();
+        assert!(issuer(&pk).is_some());
+        assert!(!register_issuer(&inner[1..]));
+        assert!(!register_issuer(&[]));
+        // The header written back is exactly the original.
+        assert_eq!(wrap_sequence(inner).unwrap(), full);
+        assert_eq!(wrap_sequence(&[0u8; 200]).unwrap()[..3], [0x30, 0x81, 200]);
+        assert_eq!(
+            wrap_sequence(&[0u8; 300]).unwrap()[..4],
+            [0x30, 0x82, 1, 44]
+        );
     }
 
     #[test]

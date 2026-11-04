@@ -47,7 +47,9 @@ impl Signer for EcdsaP256 {
         // signing time, and no nonce reuse even if it were weak. The
         // assembly path (x86_64, AArch64) and the portable one give the same
         // bytes.
-        super::fastec::ecdsa_sign(&self.key, message)
+        crate::stages::timed(crate::stages::Stage::Sign, || {
+            super::fastec::ecdsa_sign(&self.key, message)
+        })
     }
 
     fn scheme(&self) -> SignatureScheme {

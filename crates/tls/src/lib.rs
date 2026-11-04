@@ -24,6 +24,7 @@ pub mod provider;
 pub mod record;
 pub mod rng;
 pub mod server;
+pub mod stages;
 pub mod ticket;
 
 pub use identity::IdentityField;
