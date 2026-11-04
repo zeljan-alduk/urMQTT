@@ -173,8 +173,19 @@ can feed to a vulnerability scanner.
 | Interrupts | GICv3, or GICv2 (at most 8 vCPUs; what KVM offers on a GIC-400 host such as the Raspberry Pi); MSI-X through GICv2m frames when present (QEMU `virt`), polling otherwise |
 | NIC | one virtio-net (PCI); DHCP unless `network.mode = "static"` |
 | Disk | **one** virtio-blk disk or virtio-scsi LUN (PCI), 512-byte blocks: the raw image written to it, the disk at least 16 MiB larger than the image (8 GiB or more in production, STORAGE-PLAN sizing); with `storage.require_data_disk = true` the broker refuses to serve without its data partition |
+| Display | optional: the boot framebuffer (GOP: ramfb, VGA), or a virtio-gpu PCI (2D) with `console.virtio_gpu` (below) |
 | Entropy | virtio-rng, or `RNDR` on the CPU; otherwise health-tested CPU jitter (`entropy.fallback`), else no boot |
 | Boot medium | the raw image on the VM's disk, or the ISO's installer, which writes that image onto the disk (below); booted as a CD the ISO's **live** entry runs from RAM, no disk needed and nothing kept (below), if `storage.mode` allows it; without the live word a CD holds no data and production refuses to serve from it |
+
+**The console on a virtio-gpu (ADR-256).** Some VMs (netcup ARM) have a virtio-gpu as their only display: the
+firmware draws its menu through it, but after boot the provider's console shows "Display output is not active"
+(the firmware resets the device; the framebuffer it handed over is RAM nothing shows). With
+`[console] virtio_gpu = "on"` (or `"auto"`) in the configuration the kernel drives the device itself and the boot
+log, fatal errors and the Diagnostic dashboard become visible there. `"off"` (the default, and the production
+template's) never starts the driver; `"auto"` starts it when the bootloader gave no usable framebuffer or one in
+RAM, and leaves a virtio-gpu alone when the framebuffer is in a display controller's BAR (virtio-vga, std VGA,
+which show it). The boot log says what was chosen and why (`console: virtio-gpu ...`). Anything but `"off"` needs a
+kernel that reads configuration format 5; an older template refuses such a configuration when it is packed.
 
 **Single-disk model (S1, STORAGE-PLAN §2a).** The disk the VM boots from is
 the only one urMQTT writes:

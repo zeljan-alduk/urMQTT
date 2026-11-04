@@ -7,7 +7,7 @@
 #                       [--pcap FILE] [--gdb] [--no-net] [--fwd HOST:GUEST,...]
 #                       [--blk-props 'physical_block_size=4096,opt_io_size=65536,...']
 #                       [--disk-format raw|qcow2] [--discard unmap]
-#                       [--dgram LOCAL:REMOTE] [-- extra qemu args]
+#                       [--dgram LOCAL:REMOTE] [--gpu virtio|virtio-vga] [-- extra qemu args]
 #
 # --disk boots the raw GPT image (mkraw.py) as a virtio-blk disk, like a
 # KVM host or a cloud server would; the data disk is a second virtio-blk.
@@ -36,6 +36,12 @@
 # are aarch64-only; --bus, --data, --fwd, --pcap and --dgram work as on
 # aarch64.
 #
+# --gpu virtio replaces the default display (ramfb on aarch64, std VGA on x86_64) with
+# a virtio-gpu-pci (id gpu0): the firmware's GOP draws into RAM and the display goes
+# dark after boot unless the kernel drives the device (console.virtio_gpu, ADR-256), as
+# on netcup's ARM VPS. --gpu virtio-vga (x86_64): virtio-vga, the same device with a
+# VGA BAR the firmware scans out of.
+#
 # Without --serial the serial console is on stdio. Ctrl-A X quits QEMU.
 # Option ROMs are disabled (romfile=): no iPXE in the firmware, faster boot.
 set -euo pipefail
@@ -47,6 +53,7 @@ ISO="" DISK="" BUS=blk CPU_MODEL="" GIC=3 RNG=1 ACCEL="" SMP=4 MEM=512M DATA="" 
 FWD="1883:1883,8883:8883"
 DGRAM=""
 SECURE_VARS=""
+GPU=""
 EXTRA=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -75,6 +82,7 @@ while [[ $# -gt 0 ]]; do
         --no-net) NET=0; shift ;;
         --fwd) FWD=$2; shift 2 ;;
         --dgram) DGRAM=$2; shift 2 ;;
+        --gpu) GPU=$2; shift 2 ;;
         --) shift; EXTRA=("$@"); break ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -104,6 +112,12 @@ if [[ $ARCH == x86_64 ]]; then
     fi
     X86ARGS=(-machine "$MACHINE_ARG" -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
         -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04)
+    case $GPU in
+        "") ;;
+        virtio) X86ARGS+=(-vga none -device virtio-gpu-pci,id=gpu0) ;;
+        virtio-vga) X86ARGS+=(-vga none -device virtio-vga,id=gpu0) ;;
+        *) echo "error: --gpu virtio|virtio-vga" >&2; exit 2 ;;
+    esac
     if [[ $FIRMWARE == uefi && -n "$SECURE_VARS" ]]; then
         FW=""
         for c in "${URMQTT_FIRMWARE_SECURE:-}" "$(brew --prefix qemu 2>/dev/null)/share/qemu/edk2-x86_64-secure-code.fd" \
@@ -222,11 +236,16 @@ firmware() {
 FW=$(firmware)
 [[ $GIC == 2 || $GIC == 3 ]] || { echo "error: --gic 3|2" >&2; exit 2; }
 
+case $GPU in
+    "") DISPLAY_DEV=(-device ramfb) ;;
+    virtio) DISPLAY_DEV=(-device virtio-gpu-pci,id=gpu0) ;;
+    *) echo "error: --gpu virtio (aarch64)" >&2; exit 2 ;;
+esac
 ARGS=(
     -machine "virt,gic-version=$GIC,acpi=$ACPI${URMQTT_MTE:+,mte=on}"
     -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
     -bios "$FW"
-    -device ramfb
+    "${DISPLAY_DEV[@]}"
     -display none -no-reboot
 )
 if [[ $RNG -eq 1 ]]; then

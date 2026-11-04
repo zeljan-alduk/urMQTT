@@ -1,6 +1,6 @@
 [package]
 name = "urmqtt-virtio"
-description = "virtio-pci modern transport, split virtqueues and the net, blk and rng devices."
+description = "virtio-pci modern transport, split virtqueues and the net, blk, scsi, rng and gpu (2D) devices."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -3295,6 +3295,104 @@ hardening_suite() {
     fi
 }
 
+# ADR-256: the console on a virtio-gpu (console.virtio_gpu). QEMU gets a virtio-gpu-pci instead of
+# ramfb (aarch64) or std VGA (x86_64), as on netcup's ARM VPS: the firmware's GOP draws into RAM and the
+# display is dead after boot unless the kernel drives the device. Each image serves, a QMP screendump
+# (PPM) is taken once READY is logged, and the picture is checked: with "on" and "auto" the first text
+# row has lit pixels and the console's background fills most of the screen; with "off" the driver is not
+# started and the console is not on that display. x86_64 also boots virtio-vga (the same device with a
+# VGA BAR the firmware scans out of): "auto" leaves it alone, "on" takes it, neither breaks the boot.
+vgpu_screen() {
+    python3 -I - "$1" <<'PY'
+import sys
+d = open(sys.argv[1], "rb").read()
+magic, dims, _maxval, px = d.split(b"\n", 3)
+assert magic == b"P6", magic
+w, h = map(int, dims.split())
+cell = 16 if w >= 1600 else 8
+lit = sum(1 for y in range(cell) for x in range(w) if min(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) >= 0x80)
+step = 3 * 97
+samples = range(0, w * h * 3, step)
+bg = sum(1 for i in samples if px[i:i + 3] == b"\x10\x10\x18")
+print(f"screen: {w}x{h}, first text row lit={lit}, console background {100 * bg // len(samples)}%")
+PY
+}
+
+virtio_gpu() {
+    local dir="$OUT/vgpu" mode
+    mkdir -p "$dir"
+    for mode in on off; do
+        sed -e "s/^virtio_gpu = \"auto\"/virtio_gpu = \"$mode\"/" "$ROOT/deploy/dev/config.toml" >"$dir/$mode.toml"
+        grep -q "^virtio_gpu = \"$mode\"" "$dir/$mode.toml" || { echo "  ✗ virtio-gpu: deploy/dev has no virtio_gpu = \"auto\" to replace"; FAILED=$((FAILED + 1)); return; }
+        MKIMG_EXTRA=(--config "$dir/$mode.toml" --config-root "$ROOT/deploy/dev")
+        mkimg "$OUT/vgpu-$mode.raw" "serve"
+    done
+    MKIMG_EXTRA=()
+    mkimg "$OUT/vgpu-auto.raw" "serve"
+    local runs=("on virtio" "auto virtio" "off virtio")
+    [[ $ARCH == x86_64 ]] && runs+=("auto virtio-vga" "on virtio-vga")
+    local accel run
+    for accel in $ACCELS; do
+        for run in "${runs[@]}"; do
+            local m=${run% *} dev=${run#* } name="virtio-gpu-${run// /-}"
+            local log="$OUT/$name-$accel.log" data="$OUT/$name-$accel.img" status=0 qdir sock
+            fresh_disk "$OUT/vgpu-$m.raw" "$data"
+            qdir=$(mktemp -d "${TMPDIR:-/tmp}/urmqtt-qmp.XXXXXX") || continue
+            sock="$qdir/q.sock"
+            start_vm "$log" --disk "$data" --accel "$accel" --fwd none --gpu "$dev" -- -qmp "unix:$sock,server=on,wait=off"
+            if wait_log "$log" '^URMQTT READY$'; then
+                # Two presents' worth (50 ms each) and the tick that sends what was held back.
+                sleep 1
+                python3 -I - "$sock" "$log.ppm" >"$log.qmp" 2>&1 <<'PY' || status=1
+import json, socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+for _ in range(50):
+    try:
+        s.connect(sys.argv[1]); break
+    except OSError:
+        time.sleep(0.1)
+f = s.makefile("rw")
+f.readline()
+def cmd(c):
+    f.write(json.dumps(c) + "\n"); f.flush()
+    while True:
+        r = json.loads(f.readline())
+        if "return" in r or "error" in r:
+            return r
+cmd({"execute": "qmp_capabilities"})
+print("qmp: screendump", cmd({"execute": "screendump", "arguments": {"filename": sys.argv[2], "device": "gpu0"}}))
+PY
+            else
+                status=124
+            fi
+            kill_vm
+            rm -rf "$qdir"
+            cat "$log.qmp" >>"$log" 2>/dev/null || true
+            [[ -s "$log.ppm" ]] && vgpu_screen "$log.ppm" >>"$log" 2>&1
+            local shown='screen: [0-9]+x[0-9]+, first text row lit=([2-9][0-9]{2}|[0-9]{4,}), console background ([5-9][0-9]|100)%'
+            local pats=("qmp: screendump \{'return': \{\}\}" "^URMQTT READY$" "$NO_FAULT")
+            case $run in
+                "on virtio"|"on virtio-vga")
+                    pats+=("console: virtio-gpu at pci [0-9a-f:.]+ \(console.virtio_gpu = \"on\"\): [0-9]+x[0-9]+ B8G8R8X8 on scanout 0"
+                        "console: virtio-gpu active: [1-9][0-9]* earlier line\(s\) redrawn" "console: virtio-gpu: 0 device error\(s\)" "$shown") ;;
+                "auto virtio")
+                    pats+=("console: virtio-gpu at pci [0-9a-f:.]+ \(auto: (no usable boot framebuffer|the boot framebuffer is RAM that nothing shows)"
+                        "console: virtio-gpu active: [1-9][0-9]* earlier line\(s\) redrawn" "console: virtio-gpu: 0 device error\(s\)" "$shown") ;;
+                "off virtio")
+                    pats+=("console: virtio-gpu at pci [0-9a-f:.]+ not used \(console.virtio_gpu = \"off\"\)"
+                        "NOT:console: virtio-gpu active" "NOT:$shown"
+                        "screen: [0-9]+x[0-9]+, first text row lit=[0-9]+, console background [0-9]+%") ;;
+                "auto virtio-vga")
+                    # The firmware's framebuffer is the VGA BAR, which the device shows: left alone, and the
+                    # console is on the screen through it.
+                    pats+=("console: virtio-gpu at pci [0-9a-f:.]+ not used \(auto\): the boot framebuffer is in BAR[0-5] of display pci"
+                        "NOT:console: virtio-gpu active" "$shown") ;;
+            esac
+            check "$name [$accel]" "$log" "$status" "${pats[@]}"
+        done
+    done
+}
+
 # SMOKE_ONLY=misc: the scenarios of the default run that are guarded by `want` and belong to no other
 # group (the default run with SMOKE_NO_GROUPS=1 skips exactly these, so CI runs both and loses nothing).
 if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
@@ -3308,6 +3406,7 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want no_hw_rng && no_hw_rng
     [[ $ARCH == aarch64 ]] && want install_iso && install_iso
     [[ $ARCH == aarch64 ]] && want gicv2 && gicv2
+    want virtio_gpu && virtio_gpu
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit
@@ -3945,6 +4044,7 @@ want disk_tool && disk_tool
 [[ $ARCH == aarch64 ]] && want install_iso && install_iso
 want no_hw_rng && no_hw_rng
 [[ $ARCH == aarch64 ]] && want gicv2 && gicv2
+want virtio_gpu && virtio_gpu
 
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
 pcap_has_garp() {

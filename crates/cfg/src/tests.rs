@@ -214,7 +214,7 @@ fn structural_attacks_fail_closed() {
     over[2] = 200;
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, and one above the newest).
-    for unknown in [0u8, 5, 9] {
+    for unknown in [0u8, 6, 9] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
@@ -236,7 +236,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 4));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 5));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -245,7 +245,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[4, 0],
+        &[5, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -279,6 +279,50 @@ fn format_2_is_written_and_format_1_is_still_read() {
     d.bool(tag::PL_ENABLED, false).unwrap();
     d.strs(tag::PL_ACL_PUBLISH, &["devices/{id}/#"]).unwrap();
     assert_eq!(d.finish(false).unwrap(), e);
+}
+
+/// ADR-256: `console.virtio_gpu` came with format 5. Off (the default) writes
+/// nothing, so such a configuration stays at the base version and boots on an
+/// older kernel; auto and on need version 5, and a version 4 blob holding the
+/// record is refused (an older kernel refuses it by the version).
+#[test]
+fn virtio_gpu_needs_format_5_and_off_writes_nothing() {
+    use crate::fields::VIRTIO_GPU_MODES;
+    let f = crate::fields::by_key("console.virtio_gpu").unwrap();
+    assert_eq!(
+        (f.tag, f.since, f.dev_only),
+        (tag::CON_VIRTIO_GPU, 5, false)
+    );
+    assert_eq!(VIRTIO_GPU_MODES, ["off", "auto", "on"]);
+    let mut off = Builder::new();
+    off.variant(tag::CON_VIRTIO_GPU, 0).unwrap();
+    assert_eq!(off.lowest_version(), 2);
+    assert_eq!(off.finish(false).unwrap(), empty());
+    assert_eq!(
+        Blob::parse(&empty()).unwrap().variant(tag::CON_VIRTIO_GPU),
+        0
+    );
+    for v in [1u8, 2] {
+        let mut b = Builder::new();
+        b.variant(tag::CON_VIRTIO_GPU, v).unwrap();
+        assert_eq!(b.lowest_version(), 5);
+        assert!(b.finish_as(false, 4).is_err(), "version 4 cannot hold it");
+        let blob = b.finish(false).unwrap();
+        let p = Blob::parse(&blob).unwrap();
+        assert_eq!((p.version(), p.variant(tag::CON_VIRTIO_GPU)), (5, v));
+        // The same record in a version 4 header: refused.
+        assert!(Blob::parse(&with_version(&blob, 4)).is_err());
+    }
+    // A variant past the list is refused.
+    let mut bad = Builder::new();
+    assert!(bad.variant(tag::CON_VIRTIO_GPU, 3).is_err());
+    assert!(
+        Blob::parse(&with_version(
+            &assemble(&record(tag::CON_VIRTIO_GPU, &[3])),
+            5
+        ))
+        .is_err()
+    );
 }
 
 /// The plaintext section's rules (the TOML-side validator has a twin of each,

@@ -775,6 +775,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
             );
         }
     }
+    crate::gpucon::report();
     urmqtt_log::raw(format_args!("URMQTT READY\n"));
     if let Some(level) = s.options.log_level {
         info!("log: level {level:?} from the command line");

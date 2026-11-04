@@ -12,6 +12,10 @@ use urmqtt_log::{info, warn};
 
 /// Framebuffer geometry for the boot log: width << 32 | height.
 static FB_GEOMETRY: AtomicU64 = AtomicU64::new(0);
+/// The bootloader's framebuffer the console uses: HHDM address and length
+/// (0: none usable). For `console.virtio_gpu = "auto"` (ADR-256).
+static FB_VA: AtomicU64 = AtomicU64::new(0);
+static FB_LEN: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_arch = "aarch64")]
 pub fn init_uart(va: u64) {
@@ -45,7 +49,22 @@ pub fn init_framebuffer(fb: &Framebuffer) {
         urmqtt_log::set_framebuffer(con);
         // Relaxed: informational only.
         FB_GEOMETRY.store(((w as u64) << 32) | h as u64, Ordering::Relaxed);
+        // Relaxed: written once at boot on the boot CPU, read later on it.
+        FB_VA.store(fb.address() as u64, Ordering::Relaxed);
+        FB_LEN.store(fb.size() as u64, Ordering::Relaxed);
     }
+}
+
+/// Physical address and length of the bootloader's framebuffer the console
+/// draws on, if there is a usable one. Limine hands it out as an HHDM
+/// address whether it is RAM or a device BAR.
+pub fn boot_framebuffer_phys() -> Option<(u64, u64)> {
+    // Relaxed: see `init_framebuffer`.
+    let (va, len) = (
+        FB_VA.load(Ordering::Relaxed),
+        FB_LEN.load(Ordering::Relaxed),
+    );
+    (va != 0).then(|| (va.wrapping_sub(crate::vm::hhdm()), len))
 }
 
 pub fn log_framebuffer() {

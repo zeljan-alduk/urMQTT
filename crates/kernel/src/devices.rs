@@ -22,6 +22,7 @@ use urmqtt_store::{BlockDevice, IoError};
 use urmqtt_sync::sync::SpinLock;
 use urmqtt_tls::rng::{Csprng, EntropyPool, Source};
 use urmqtt_virtio::blk::VirtioBlk;
+use urmqtt_virtio::gpu::{AutoChoice, VirtioGpu, auto_choice};
 use urmqtt_virtio::net::VirtioNet;
 use urmqtt_virtio::rng::VirtioRng;
 use urmqtt_virtio::scsi::{DiskInfo, ScsiDisk, VirtioScsi};
@@ -855,8 +856,18 @@ fn probe_pci(
     let mut v2m = msi_frame(platform);
     let functions = pci::enumerate(&ecam, bus_start, bus_end);
     info!("pci: {how}, {} function(s)", functions.len());
+    // The first virtio-gpu and the display controllers, for the console
+    // (ADR-256), brought up after the enumeration.
+    let mut gpu: Option<(Bdf, u16)> = None;
+    let mut displays: alloc::vec::Vec<Bdf> = alloc::vec::Vec::new();
     for f in functions.iter() {
         let kind = DeviceType::from_pci(f.vendor, f.device, f.subsystem);
+        if kind == Some(DeviceType::Gpu) && gpu.is_none() {
+            gpu = Some((f.bdf, f.device));
+        }
+        if f.class == 0x03 && displays.len() < 8 {
+            displays.push(f.bdf);
+        }
         // A network controller we have no driver for (e.g. an SR-IOV
         // virtual function): remembered for the error if no virtio-net exists.
         if f.class == 0x02 && kind.is_none() {
@@ -877,6 +888,7 @@ fn probe_pci(
                 Some(DeviceType::Block) => " virtio-blk",
                 Some(DeviceType::Entropy) => " virtio-rng",
                 Some(DeviceType::Scsi) => " virtio-scsi",
+                Some(DeviceType::Gpu) => " virtio-gpu",
                 Some(DeviceType::Other(_)) => " virtio (unused)",
                 None => "",
             }
@@ -896,7 +908,8 @@ fn probe_pci(
             },
         });
         let Some(kind) = kind else { continue };
-        if matches!(kind, DeviceType::Other(_)) {
+        // The virtio-gpu is left alone here: `virtio_gpu_console` decides.
+        if matches!(kind, DeviceType::Other(_) | DeviceType::Gpu) {
             continue;
         }
         let caps = find_caps(&ecam, f.bdf);
@@ -1094,7 +1107,104 @@ fn probe_pci(
             _ => {}
         }
     }
+    virtio_gpu_console(&mut ecam, env, gpu, &displays);
     Ok(())
+}
+
+/// Largest framebuffer the virtio-gpu console allocates: 1920x1080 at 4
+/// bytes per pixel fits.
+const GPU_FB_BUDGET: u64 = 8 << 20;
+
+/// The memory BARs of `bdf` as (index, base, size).
+fn memory_bars<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> alloc::vec::Vec<(u8, u64, u64)> {
+    let mut out = alloc::vec::Vec::new();
+    let mut i = 0u8;
+    while i < 6 {
+        let next = match pci::bar(cfg, bdf, i) {
+            Some(Bar::Memory { base, is64, .. }) => {
+                if let Some(size) = pci::bar_size(cfg, bdf, i) {
+                    out.push((i, base, size));
+                }
+                if is64 { 2 } else { 1 }
+            }
+            _ => 1,
+        };
+        i += next;
+    }
+    out
+}
+
+/// `console.virtio_gpu` (ADR-256): whether the console moves to the first
+/// virtio-gpu, and why. Every outcome is logged as `console: virtio-gpu ...`;
+/// a device that fails to come up leaves the console where it was (a
+/// display problem never stops the broker), loudly.
+fn virtio_gpu_console(cfg: &mut Cfg, env: &KernelEnv, gpu: Option<(Bdf, u16)>, displays: &[Bdf]) {
+    use urmqtt_config::VirtioGpuMode;
+    let mode = urmqtt_config::CONFIG.console.virtio_gpu;
+    let Some((bdf, device)) = gpu else {
+        if mode != VirtioGpuMode::Off {
+            info!(
+                "console: virtio-gpu: none found (console.virtio_gpu = \"{}\")",
+                mode.name()
+            );
+        }
+        return;
+    };
+    let why = match mode {
+        VirtioGpuMode::Off => {
+            info!("console: virtio-gpu at pci {bdf} not used (console.virtio_gpu = \"off\")");
+            return;
+        }
+        VirtioGpuMode::On => "console.virtio_gpu = \"on\"",
+        VirtioGpuMode::Auto => {
+            let boot_fb = crate::console::boot_framebuffer_phys();
+            let bars: alloc::vec::Vec<_> = displays.iter().map(|&d| memory_bars(cfg, d)).collect();
+            let lists: alloc::vec::Vec<&[(u8, u64, u64)]> =
+                bars.iter().map(|b| b.as_slice()).collect();
+            match auto_choice(boot_fb, &lists) {
+                AutoChoice::NoBootFramebuffer => "auto: no usable boot framebuffer",
+                AutoChoice::BootFramebufferInRam => {
+                    "auto: the boot framebuffer is RAM that nothing shows after boot (the firmware's virtio-gpu GOP)"
+                }
+                AutoChoice::BootFramebufferInBar { index, bar } => {
+                    let owner = displays.get(index).map_or_else(
+                        || alloc::string::String::from("?"),
+                        |d| alloc::format!("{d}"),
+                    );
+                    info!(
+                        "console: virtio-gpu at pci {bdf} not used (auto): the boot framebuffer is in BAR{bar} \
+                         of display pci {owner}, which shows it"
+                    );
+                    return;
+                }
+            }
+        }
+    };
+    let caps = find_caps(cfg, bdf);
+    if caps.support(device, true) != Support::Modern {
+        warn!("console: virtio-gpu at pci {bdf}: no virtio 1.0 capabilities, not used ({why})");
+        return;
+    }
+    pci::enable(cfg, bdf, pci::CMD_MEMORY | pci::CMD_BUS_MASTER);
+    let t = match transport(cfg, bdf, &caps, false) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("console: virtio-gpu at pci {bdf}: mapping failed ({e:?}), not used ({why})");
+            return;
+        }
+    };
+    match VirtioGpu::new(t, env, GPU_FB_BUDGET) {
+        Ok(dev) => {
+            let name = alloc::format!("{bdf}");
+            if let Some(seen) = PCI_SEEN.lock().iter_mut().find(|p| p.bdf == name) {
+                seen.driver = Some("virtio-gpu");
+            }
+            crate::gpucon::install(dev, &name, why);
+        }
+        Err(e) => warn!(
+            "console: virtio-gpu at pci {bdf}: {e:?}: not used, the console stays on the boot framebuffer ({why})"
+        ),
+    }
 }
 
 /// Why the boot disk cannot hold a data partition, if it cannot (for the

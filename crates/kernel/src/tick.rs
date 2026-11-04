@@ -42,6 +42,9 @@ fn on_tick(_intid: u32) {
     TICKS.fetch_add(1, Ordering::Relaxed);
     crate::smp::this().ticks.fetch_add(1, Ordering::Relaxed);
     crate::watchdog::check(now.saturating_sub(deadline), period);
+    // The virtio-gpu console (ADR-256): what the rate limit held back. Only
+    // queues (never waits) and only tries the device lock.
+    crate::gpucon::tick();
 }
 
 /// Starts the tick with `period_ns` on this core, delivered as `intid`.

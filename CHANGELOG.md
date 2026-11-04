@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **A virtio-gpu (2D) console, optional and off by default** (ADR-256, NOW-6): `[console] virtio_gpu = "off" |
+  "auto" | "on"`. For VMs whose firmware display goes dark after boot (netcup ARM: "Display output is not active").
+  The kernel gives the device a framebuffer of its own on scanout 0, moves the log's console onto it (the lines
+  logged before are redrawn) and presents changes at most every 50 ms, and at once before a fatal stop, a panic, a
+  power-off and after every Diagnostic dashboard redraw. "auto" takes the device when the boot framebuffer is
+  missing or is RAM nothing shows; "on" whenever one is found. **Verified on a real machine:** netcup VPS 500 ARM
+  G12.5, 1280x800, the Diagnostic dashboard visible live in the provider's Screen tab and the final "press any key"
+  screen staying. Configuration **format 5** only when the key is not "off" (an "off" image stays format 2 and
+  boots on older kernels). New fuzz target `virtio_gpu_response`; smoke `virtio_gpu` (QMP screendump checked);
+  `run-qemu.sh --gpu virtio|virtio-vga`.
 - P-256 on aarch64 through OpenSSL's ARMv8 `nistz256` assembly (ADR-255), vendored from ring 0.17.14 like the
   x86_64 code (ADR-130): ECDSA sign and verify, ECDH, key generation and the trust-anchor tables. Boot line
   `crypto: ecc=nistz256-armv8`; the diagnostic screen's crypto line names the backend too. Measured in Docker on an

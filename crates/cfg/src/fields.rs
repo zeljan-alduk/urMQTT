@@ -257,6 +257,8 @@ pub mod tag {
     pub const PL_ACL_PUBLISH: u16 = 184;
     pub const PL_ACL_SUBSCRIBE: u16 = 185;
     pub const PL_RETAIN: u16 = 186;
+    // The console (ADR-256): format version 5.
+    pub const CON_VIRTIO_GPU: u16 = 190;
 }
 
 use tag as t;
@@ -272,6 +274,8 @@ pub const REGISTRY_MODES: &[&str] = &["open", "allowlist"];
 pub const WATCHDOG_ACTIONS: &[&str] = &["log", "drop", "reset"];
 /// How a plaintext client proves who it is (P1).
 pub const PLAINTEXT_AUTH: &[&str] = &["password", "anonymous", "ip"];
+/// Whether the console drives a virtio-gpu device (ADR-256).
+pub const VIRTIO_GPU_MODES: &[&str] = &["off", "auto", "on"];
 
 /// Limits of the plaintext lists (they size arrays in the kernel).
 pub const MAX_PLAIN_NETWORKS: usize = 64;
@@ -1001,6 +1005,19 @@ pub static FIELDS: &[Field] = &[
             "Let plaintext clients publish retained messages. Off: such a message is delivered but not retained.",
         ),
         2,
+    ),
+    // console
+    since(
+        f(
+            t::CON_VIRTIO_GPU,
+            "console.virtio_gpu",
+            Kind::Enum {
+                variants: VIRTIO_GPU_MODES,
+                default: 0,
+            },
+            "Show the console on a virtio-gpu display (2D). off: never. auto: when the boot framebuffer is missing or is RAM nothing shows (edk2 virtio-gpu, e.g. netcup ARM). on: whenever a virtio-gpu is found. Format 5.",
+        ),
+        5,
     ),
 ];
 

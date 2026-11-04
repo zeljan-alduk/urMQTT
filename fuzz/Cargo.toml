@@ -23,6 +23,7 @@ urmqtt-control = { path = "../crates/control" }
 urmqtt-plain = { path = "../crates/plain" }
 urmqtt-arch-aarch64 = { path = "../crates/arch-aarch64" }
 urmqtt-arch-x86_64 = { path = "../crates/arch-x86_64" }
+urmqtt-virtio = { path = "../crates/virtio" }
 # X0b differential targets: the crates the kernel uses, against ring.
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
@@ -82,6 +83,13 @@ bench = false
 [[bin]]
 name = "disk_backup"
 path = "fuzz_targets/disk_backup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "virtio_gpu_response"
+path = "fuzz_targets/virtio_gpu_response.rs"
 test = false
 doc = false
 bench = false
