@@ -1,8 +1,23 @@
 ## urMQTT v0.4.1 (pre-release)
 
 A broker that is its own operating system: a Rust unikernel for VMs, serving MQTT 3.1.1 over TLS 1.3 with mutual TLS.
-This release covers everything since v0.4.0: a faster server side of the mutual-TLS handshake (ADR-259). No
-configuration format change; the builder page stays as it is.
+This release covers everything since v0.4.0: **a fix for a TCP bug that every earlier release has** (ADR-261) and a faster
+server side of the mutual-TLS handshake (ADR-259). No configuration format change; the builder page stays as it is.
+
+**Fixed (every release from v0.1.0 to v0.4.0 has this bug)**
+
+- **TCP: a FIN was sent again on every acknowledgement in FIN-WAIT-2** (docs/AUDIT.md A261-W1, medium for availability,
+  present since M14). After the broker closed a connection (for example when a keep-alive ran out) and the peer
+  acknowledged the FIN but kept its own side open and acknowledged every further segment, each ACK brought a new FIN
+  one sequence number further, at line rate (439,315 segments each way in about 40 s in a packet capture), and the
+  60 s timer that should have released the connection was replaced each time. One such connection per few hundred
+  clients held a core at 100 %; on the v0.4.0 kernel 500 clients with a 5 s keep-alive that kept their sockets open
+  reproduced it. Now the FIN goes out once and is retransmitted only while unacknowledged. Found while running a smoke
+  test of 3000 clients after the TLS changes below used up heap headroom; the new smoke scenario `fin_wait2` fails
+  without the fix. A device that does not acknowledge the FIN is not affected.
+- **The trust-anchor tables** take 148 KiB each instead of a 256 KiB heap block, are built once at boot and logged
+  (`tls: N trust-anchor verification table(s), K KiB of heap`); the heap sizing in docs/DEPLOY.md counts about 150 KiB
+  per P-256 trust anchor (A259-W2). `urmqtt-loadgen storm` can no longer hang (`--io-timeout-s`).
 
 **New**
 

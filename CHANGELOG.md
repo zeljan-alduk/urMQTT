@@ -6,10 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.4.1] - 2026-11-04
+## [0.4.1] - 2026-11-05
 
-A release of the TLS handshake work after v0.4.0 (ADR-259): the trust anchors' verification tables, which were never
-built, X25519 on AArch64 in `mul`/`umulh` inline assembly, and a faster P-256 verification on both architectures. On
+A release of a **TCP fix that applies to every earlier release** (after the broker closes a connection whose device keeps
+its side open and acknowledges every segment, the broker sent a new FIN on every ACK at line rate and never released the
+connection: ADR-261, AUDIT.md A261-W1, present since M14), and of the TLS handshake work after v0.4.0 (ADR-259): the
+trust anchors' verification tables, which were never built, X25519 on AArch64 in `mul`/`umulh` inline assembly, and a
+faster P-256 verification on both architectures. On
 the netcup Neoverse N1 VPS the server's CPU per mutual-TLS handshake was 461 us against 553 us with the P-256
 assembly of ADR-255 alone, one run each (PERFORMANCE.md section 12.1).
 

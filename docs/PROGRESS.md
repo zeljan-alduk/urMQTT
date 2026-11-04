@@ -11,11 +11,16 @@ What the release contains: ADR-259 (the trust-anchor tables, A259-W1; X25519 on 
 assembly; P-256 verification by a width-5 NAF and a variable-time inversion), the host-only stage profiler, ADR-260 as
 a proposal, PERFORMANCE sections 12 and 12.1, and the release-day corrections of 51fabe2.
 
+**Update (2026-11-05): the blocker below is resolved.** It was a TCP bug older than the TLS work (a FIN sent again on
+every ACK in FIN-WAIT-2, since M14, in every release to v0.4.0; ADR-261, A261-W1) plus the heap use of the now-working
+trust-anchor tables (A259-W2), both fixed in this release. After the fix: `storm` passed 3 of 3 on aarch64 HVF, the new
+scenario `fin_wait2` fails without the TCP fix and passes with it (HVF and TCG), and the TLS-related smoke set passed
+37 of 37 on HVF. The local checks listed below were run before the fix; CI runs on the release commit.
+
 **Done**
 
 - Version 0.4.1 (workspace `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock`: the workspace crates only, no dependency
-  changed); README status line and verify example, DEPLOY and OPERATE examples. CHANGELOG `[0.4.1] - 2026-11-04` (the
-  preparation date), compare links, empty Unreleased. Release notes in `docs/release-notes-v0.4.1.md` and in RELEASE.md
+  changed); README status line and verify example, DEPLOY and OPERATE examples. CHANGELOG `[0.4.1] - 2026-11-05`, compare links, empty Unreleased. Release notes in `docs/release-notes-v0.4.1.md` and in RELEASE.md
   section 7 (v0.4.0's stay in `docs/release-notes-v0.4.0.md`, v0.3.0's in section 8).
 - **No builder page deploy.** `git diff 6cc343b..51fabe2 -- tools/builder crates/config-schema crates/cfg
   crates/config tools/config` is empty, and the configuration format stays 6: the page deployed for v0.4.0 takes the
