@@ -111,9 +111,16 @@ fn cpuinfo() {
     let info = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     let mut seen = std::collections::BTreeSet::new();
     for l in info.lines() {
-        if ["CPU implementer", "CPU architecture", "CPU variant", "CPU part", "CPU revision", "Features"]
-            .iter()
-            .any(|k| l.starts_with(k))
+        if [
+            "CPU implementer",
+            "CPU architecture",
+            "CPU variant",
+            "CPU part",
+            "CPU revision",
+            "Features",
+        ]
+        .iter()
+        .any(|k| l.starts_with(k))
             && seen.insert(l.to_string())
         {
             println!("DIAG cpuinfo {l}");
@@ -154,8 +161,10 @@ fn diag() {
 
     // 1. Production path, sparse d vs random d (the failing test).
     {
-        let pool: Vec<p256::ecdsa::SigningKey> =
-            ks.iter().map(|b| p256::ecdsa::SigningKey::from_slice(b).unwrap()).collect();
+        let pool: Vec<p256::ecdsa::SigningKey> = ks
+            .iter()
+            .map(|b| p256::ecdsa::SigningKey::from_slice(b).unwrap())
+            .collect();
         let fixed = p256::ecdsa::SigningKey::from_slice(&two()).unwrap();
         let mut i = 0;
         let mut st = fixed.clone();
@@ -163,7 +172,12 @@ fn diag() {
             "1 fastec sign: d=2 vs random d",
             &mut st,
             |c, s| {
-                *s = if c { fixed.clone() } else { i = (i + 1) % pool.len(); pool[i].clone() }
+                *s = if c {
+                    fixed.clone()
+                } else {
+                    i = (i + 1) % pool.len();
+                    pool[i].clone()
+                }
             },
             |s| {
                 black_box(urmqtt_tls::provider::fastec::ecdsa_sign(black_box(s), msg)).unwrap();
@@ -176,7 +190,12 @@ fn diag() {
             "2 fastec sign: dense fixed d vs random d",
             &mut st,
             |c, s| {
-                *s = if c { dense.clone() } else { i = (i + 1) % pool.len(); pool[i].clone() }
+                *s = if c {
+                    dense.clone()
+                } else {
+                    i = (i + 1) % pool.len();
+                    pool[i].clone()
+                }
             },
             |s| {
                 black_box(urmqtt_tls::provider::fastec::ecdsa_sign(black_box(s), msg)).unwrap();
@@ -188,11 +207,19 @@ fn diag() {
     // for both classes (the message is public): the output is random in
     // both classes, only the secret differs.
     {
-        let pool: Vec<p256::ecdsa::SigningKey> =
-            ks.iter().map(|b| p256::ecdsa::SigningKey::from_slice(b).unwrap()).collect();
+        let pool: Vec<p256::ecdsa::SigningKey> = ks
+            .iter()
+            .map(|b| p256::ecdsa::SigningKey::from_slice(b).unwrap())
+            .collect();
         for (name, fixed) in [
-            ("1b fastec sign, random msg: d=2 vs random d", p256::ecdsa::SigningKey::from_slice(&two()).unwrap()),
-            ("2b fastec sign, random msg: dense d vs random", p256::ecdsa::SigningKey::from_slice(&[0x5c; 32]).unwrap()),
+            (
+                "1b fastec sign, random msg: d=2 vs random d",
+                p256::ecdsa::SigningKey::from_slice(&two()).unwrap(),
+            ),
+            (
+                "2b fastec sign, random msg: dense d vs random",
+                p256::ecdsa::SigningKey::from_slice(&[0x5c; 32]).unwrap(),
+            ),
         ] {
             let mut i = 0;
             let mut r = Rng(0x1234_5678_9abc_def1);
@@ -201,13 +228,22 @@ fn diag() {
                 name,
                 &mut st,
                 |c, s| {
-                    s.0 = if c { fixed.clone() } else { i = (i + 1) % pool.len(); pool[i].clone() };
+                    s.0 = if c {
+                        fixed.clone()
+                    } else {
+                        i = (i + 1) % pool.len();
+                        pool[i].clone()
+                    };
                     for ch in s.1.chunks_mut(8) {
                         ch.copy_from_slice(&r.next().to_le_bytes());
                     }
                 },
                 |s| {
-                    black_box(urmqtt_tls::provider::fastec::ecdsa_sign(black_box(&s.0), black_box(&s.1))).unwrap();
+                    black_box(urmqtt_tls::provider::fastec::ecdsa_sign(
+                        black_box(&s.0),
+                        black_box(&s.1),
+                    ))
+                    .unwrap();
                 },
             );
         }
@@ -223,7 +259,12 @@ fn diag() {
         "3 nistz::sign: d=2 vs random d, k fixed",
         &mut st,
         |c, s| {
-            s.0 = if c { two() } else { i = (i + 1) % ks.len(); ks[i] };
+            s.0 = if c {
+                two()
+            } else {
+                i = (i + 1) % ks.len();
+                ks[i]
+            };
         },
         |s| {
             black_box(nistz::sign(ops, black_box(&s.0), black_box(&s.1), &z)).unwrap();
@@ -234,7 +275,12 @@ fn diag() {
         "4 nistz::sign: dense d vs random d, k fixed",
         &mut st,
         |c, s| {
-            s.0 = if c { dense } else { i = (i + 1) % ks.len(); ks[i] };
+            s.0 = if c {
+                dense
+            } else {
+                i = (i + 1) % ks.len();
+                ks[i]
+            };
         },
         |s| {
             black_box(nistz::sign(ops, black_box(&s.0), black_box(&s.1), &z)).unwrap();
@@ -246,7 +292,12 @@ fn diag() {
         "5 nistz::sign: fixed k vs random k, d fixed",
         &mut st,
         |c, s| {
-            s.1 = if c { kfix } else { i = (i + 1) % ks.len(); ks[i] };
+            s.1 = if c {
+                kfix
+            } else {
+                i = (i + 1) % ks.len();
+                ks[i]
+            };
         },
         |s| {
             black_box(nistz::sign(ops, black_box(&s.0), black_box(&s.1), &z)).unwrap();
@@ -257,7 +308,12 @@ fn diag() {
         "6 nistz::sign: k=2 vs random k, d fixed",
         &mut st,
         |c, s| {
-            s.1 = if c { two() } else { i = (i + 1) % ks.len(); ks[i] };
+            s.1 = if c {
+                two()
+            } else {
+                i = (i + 1) % ks.len();
+                ks[i]
+            };
         },
         |s| {
             black_box(nistz::sign(ops, black_box(&s.0), black_box(&s.1), &z)).unwrap();
@@ -269,7 +325,12 @@ fn diag() {
         "7 nistz::public_key: d=2 vs random d",
         &mut st,
         |c, s| {
-            *s = if c { two() } else { i = (i + 1) % ks.len(); ks[i] };
+            *s = if c {
+                two()
+            } else {
+                i = (i + 1) % ks.len();
+                ks[i]
+            };
         },
         |s| {
             black_box(nistz::public_key(ops, black_box(s))).unwrap();
@@ -285,10 +346,16 @@ fn diag() {
         "8 rfc6979 KGenerator: d=2 vs random d",
         &mut st,
         |c, s| {
-            *s = if c { two() } else { i = (i + 1) % ks.len(); ks[i] };
+            *s = if c {
+                two()
+            } else {
+                i = (i + 1) % ks.len();
+                ks[i]
+            };
         },
         |s| {
-            let mut kgen = rfc6979::KGenerator::<sha2::Sha256, _>::new(black_box(&*s), &z, &[], &order);
+            let mut kgen =
+                rfc6979::KGenerator::<sha2::Sha256, _>::new(black_box(&*s), &z, &[], &order);
             let mut k = [0u8; 32];
             kgen.fill_next_k(&mut k);
             black_box(k);
@@ -317,7 +384,12 @@ fn diag() {
         "9 Signature::to_der: fixed vs random sig",
         &mut st,
         |c, s| {
-            *s = if c { sfix } else { i = (i + 1) % sigs.len(); sigs[i] };
+            *s = if c {
+                sfix
+            } else {
+                i = (i + 1) % sigs.len();
+                sigs[i]
+            };
         },
         |s| {
             black_box(black_box(&*s).to_der().as_bytes().to_vec());

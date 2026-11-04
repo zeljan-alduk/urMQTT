@@ -57,8 +57,8 @@ use aarch64 as arch;
 use x86_64 as arch;
 
 pub use arch::Ops;
-pub use dit::{DitGuard, dit_guard};
 use arch::{neg, select_w5, select_w7};
+pub use dit::{DitGuard, dit_guard};
 
 /// A field element or a scalar: four little-endian 64-bit limbs.
 type Limbs = [u64; 4];

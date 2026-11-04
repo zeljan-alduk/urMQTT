@@ -242,7 +242,9 @@ fn forged_ticket_rejection_is_constant_time() {
 // select "infinity" and the additions take their infinity operand), the
 // other a fresh random scalar per measurement, copied into the same slot.
 // These run the production paths (`provider::fastec`): the nistz256 assembly
-// on x86_64 and AArch64 Linux, RustCrypto elsewhere.
+// on x86_64 and AArch64 Linux, RustCrypto elsewhere. Signing also signs a
+// fresh random (public) message per measurement in both classes, so that only
+// the key differs; the nonce has its own case on the assembly's `sign`.
 
 const P256_SAMPLES: usize = 20_000;
 
@@ -275,28 +277,17 @@ fn sparse_key() -> p256::SecretKey {
 
 /// Attempts per P-256 case. A secret-dependent time shows in every attempt
 /// (the leaky control scores |t| of several hundred); a noisy shared runner
-/// spoils one attempt at random (|t| = 8.6 was seen once in CI for a case that
-/// scores 0.5 to 2 elsewhere), so the case fails only if every attempt is over
-/// the bound.
+/// can spoil one attempt at random, so the case fails only if every attempt is
+/// over the bound.
 const P256_ATTEMPTS: usize = 3;
 
-/// The bound for ECDSA signing with the ARMv8 assembly. **Raised from 7 to 12
-/// at the owner's request (2026-11-04) and NOT understood:** on the GitHub
-/// arm64 runner this case scored |t| = 8.6, 9.1 and 8.3 in three attempts (and
-/// 8.6 the run before), against 0.5 to 1.9 on an Apple M4 in a container, while
-/// ECDH and key generation pass on the same runner and the leaky control
-/// scores more than 1000. A signal that repeats is not noise. It is listed as
-/// an open finding in docs/AUDIT.md; the leading hypothesis (PSTATE.DIT, data
-/// independent timing of the multiplier on Arm cores that have FEAT_DIT) is
-/// being tested. Lower this back to `THRESHOLD` when the cause is found.
-const P256_SIGN_BOUND: f64 = 12.0;
-
 /// Fixed (sparse) against random secret, both prepared untimed by `make`
-/// into the same slot.
+/// into the same slot. `public` then rewrites the public part of the slot
+/// (the message to sign) in the same way for both classes, also untimed.
 fn p256_case<T: Clone>(
     name: &str,
-    bound: f64,
     make: impl Fn(&p256::SecretKey) -> T,
+    mut public: impl FnMut(&mut T),
     op: impl Fn(&T),
 ) {
     let pool: Vec<T> = p256_keys().iter().map(&make).collect();
@@ -315,11 +306,12 @@ fn p256_case<T: Clone>(
                     i = (i + 1) % pool.len();
                     pool[i].clone()
                 };
+                public(slot);
             },
             |slot| op(black_box(slot)),
         );
         scores.push(t);
-        if t < bound {
+        if t < THRESHOLD {
             break;
         }
     }
@@ -330,7 +322,7 @@ fn p256_case<T: Clone>(
         scores.len()
     );
     assert!(
-        scores.last().is_some_and(|t| *t < bound),
+        scores.last().is_some_and(|t| *t < THRESHOLD),
         "{name}: timing depends on the secret scalar (|t| = {scores:?} in {P256_ATTEMPTS} attempts)"
     );
 }
@@ -338,37 +330,96 @@ fn p256_case<T: Clone>(
 #[test]
 #[ignore = "timing: run with `make ct`"]
 fn p256_key_generation_is_constant_time() {
-    p256_case("P-256 public key", THRESHOLD, Clone::clone, |k| {
-        black_box(urmqtt_tls::provider::fastec::p256_public(k));
-    });
+    p256_case(
+        "P-256 public key",
+        Clone::clone,
+        |_| {},
+        |k| {
+            black_box(urmqtt_tls::provider::fastec::p256_public(k));
+        },
+    );
 }
 
 #[test]
 #[ignore = "timing: run with `make ct`"]
 fn p256_ecdh_is_constant_time() {
     let peer = urmqtt_tls::provider::fastec::p256_public(&p256_keys()[7]);
-    p256_case("P-256 ECDH", THRESHOLD, Clone::clone, |k| {
-        black_box(urmqtt_tls::provider::fastec::p256_dh(k, black_box(&peer))).unwrap();
-    });
+    p256_case(
+        "P-256 ECDH",
+        Clone::clone,
+        |_| {},
+        |k| {
+            black_box(urmqtt_tls::provider::fastec::p256_dh(k, black_box(&peer))).unwrap();
+        },
+    );
 }
 
+/// The signing key is the secret; the message is public and is a fresh
+/// random one per measurement in **both** classes. With one fixed message
+/// (as this case had until ct-dit) the sparse class signs the same message
+/// with the same key every time, so it returns the same signature every
+/// time, while the random class returns a different one each time. The
+/// time spent on the *output* then differs between the classes: the DER
+/// encoding (`to_der`, variable length, leading-zero handling) of one
+/// repeated signature is faster than of varying ones (|t| of about 50 on
+/// the arm64 runner for the encoding alone). That is a property of the
+/// public signature, not of the key, and it was the |t| = 8 to 11 seen on
+/// the runner: a dense fixed key scored higher still (14 to 22), and a
+/// random message per measurement removed it for both (below 3.5). See
+/// ADR-255 (amendment) and A255-W1 in docs/AUDIT.md.
 #[test]
 #[ignore = "timing: run with `make ct`"]
 fn p256_signing_is_constant_time() {
-    // The RFC 6979 nonce follows from key and message: random keys give
-    // random nonces, the sparse key one fixed nonce.
+    let mut x = 0x6a09_e667_f3bc_c908u64;
     p256_case(
         "P-256 ECDSA sign",
-        P256_SIGN_BOUND,
-        |k| p256::ecdsa::SigningKey::from(k.clone()),
-        |sk| {
-            black_box(urmqtt_tls::provider::fastec::ecdsa_sign(
-                sk,
-                b"constant time",
-            ))
-            .unwrap();
+        |k| (p256::ecdsa::SigningKey::from(k.clone()), [0u8; 32]),
+        |(_, msg)| {
+            for c in msg.chunks_mut(8) {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                c.copy_from_slice(&x.to_le_bytes());
+            }
+        },
+        |(sk, msg)| {
+            black_box(urmqtt_tls::provider::fastec::ecdsa_sign(sk, black_box(msg))).unwrap();
         },
     );
+}
+
+/// The signing nonce, the most sensitive secret of ECDSA: a sparse nonce
+/// (k = 2) against random nonces, the key and the message fixed, through the
+/// assembly's `sign` (the production path draws the nonce by RFC 6979
+/// inside `fastec`, so it cannot be chosen there). The output is two fixed-size
+/// arrays, with no variable-length encoding after the timed part. Only where
+/// the assembly is compiled in (x86_64 and AArch64 Linux).
+#[test]
+#[ignore = "timing: run with `make ct`"]
+fn p256_signing_nonce_is_constant_time() {
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_os = "linux"
+    ))]
+    {
+        use urmqtt_nistz256 as nistz;
+        let ops = nistz::Ops::detect();
+        let d: [u8; 32] = p256_keys()[3].to_bytes().into();
+        let z = [0x5au8; 32];
+        p256_case(
+            "P-256 ECDSA sign, nonce",
+            |k| -> [u8; 32] { k.to_bytes().into() },
+            |_| {},
+            |k| {
+                black_box(nistz::sign(ops, &d, black_box(k), &z)).unwrap();
+            },
+        );
+    }
+    #[cfg(not(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_os = "linux"
+    )))]
+    println!("P-256 ECDSA sign, nonce: skipped (no nistz256 assembly on this target)");
 }
 
 /// The control at P-256 scale: a textbook double-and-add that skips the
