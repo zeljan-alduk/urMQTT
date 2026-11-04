@@ -1276,7 +1276,15 @@ impl TcpStack {
             let wnd = k.snd_wnd.min(k.cc.window()) as usize;
             let room = wnd.saturating_sub(off.min(data_len));
             let n = unsent.min(room).min(mss);
-            let fin = k.has(FIN_QUEUED) && off <= data_len && off + n == data_len;
+            // The FIN goes out once (and again only as a retransmission, from
+            // `snd_una`, while it is unacknowledged). Once it is acknowledged
+            // (`snd_una == snd_max` with FIN_SENT) the acknowledged data is
+            // gone and `off == data_len == 0`, so without this test every ACK
+            // in FIN-WAIT-2 sent a new FIN one sequence number further, and a
+            // peer that acknowledges each one kept both sides busy forever
+            // (A261-W1, ADR-261).
+            let fin_acked = k.has(FIN_SENT) && k.snd_una == k.snd_max;
+            let fin = k.has(FIN_QUEUED) && !fin_acked && off <= data_len && off + n == data_len;
             if n == 0 && !fin {
                 // Zero window with data waiting: probe later.
                 let persist = unsent > 0 && k.snd_wnd == 0 && k.timer.is_none();
