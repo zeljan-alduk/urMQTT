@@ -214,7 +214,7 @@ fn structural_attacks_fail_closed() {
     over[2] = 200;
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, and one above the newest).
-    for unknown in [0u8, 6, 9] {
+    for unknown in [0u8, 7, 9] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
@@ -236,7 +236,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 5));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 6));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -245,7 +245,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[5, 0],
+        &[6, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -279,6 +279,46 @@ fn format_2_is_written_and_format_1_is_still_read() {
     d.bool(tag::PL_ENABLED, false).unwrap();
     d.strs(tag::PL_ACL_PUBLISH, &["devices/{id}/#"]).unwrap();
     assert_eq!(d.finish(false).unwrap(), e);
+}
+
+/// ADR-257: the `[devices]` keys came with format 6, one enum each. Off (the
+/// default) writes nothing, so the blob keeps its version and boots on an
+/// older kernel; auto and on need version 6, and a version 5 blob holding
+/// such a record is refused (an older kernel refuses it by the version).
+#[test]
+fn device_keys_need_format_6_and_off_writes_nothing() {
+    use crate::fields::{DEVICE_KEYS, DEVICE_MODES};
+    assert_eq!(DEVICE_MODES, ["off", "auto", "on"]);
+    assert_eq!(DEVICE_KEYS.len(), 4);
+    for &(t, key, _) in DEVICE_KEYS {
+        let f = crate::fields::by_key(key).unwrap();
+        assert_eq!((f.tag, f.since, f.dev_only), (t, 6, false), "{key}");
+        let mut off = Builder::new();
+        off.variant(t, 0).unwrap();
+        assert_eq!(off.lowest_version(), 2);
+        assert_eq!(off.finish(false).unwrap(), empty());
+        for v in [1u8, 2] {
+            let mut b = Builder::new();
+            b.variant(t, v).unwrap();
+            assert_eq!(b.lowest_version(), 6);
+            assert!(
+                b.finish_as(false, 5).is_err(),
+                "version 5 cannot hold {key}"
+            );
+            let blob = b.finish(false).unwrap();
+            let p = Blob::parse(&blob).unwrap();
+            assert_eq!((p.version(), p.variant(t)), (6, v));
+            assert!(Blob::parse(&with_version(&blob, 5)).is_err());
+        }
+        let mut bad = Builder::new();
+        assert!(bad.variant(t, 3).is_err());
+    }
+    // With the virtio-gpu console on as well, still 6; the gpu alone, 5.
+    let mut b = Builder::new();
+    b.variant(tag::CON_VIRTIO_GPU, 1).unwrap();
+    assert_eq!(b.lowest_version(), 5);
+    b.variant(tag::DEV_VIRTIO_INPUT, 2).unwrap();
+    assert_eq!(b.lowest_version(), 6);
 }
 
 /// ADR-256: `console.virtio_gpu` came with format 5. Off (the default) writes

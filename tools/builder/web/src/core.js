@@ -26,7 +26,7 @@ export const HIDDEN = new Set(['storage.encryption', 'storage.disk_key']);
 export const SECTION_ORDER = [
   'network', 'tls', 'trust', 'control', 'limits', 'acl', 'storage',
   'observability', 'time', 'watchdog', 'memory', 'registry', 'entropy', 'cpu',
-  'console', 'plaintext',
+  'console', 'devices', 'plaintext',
 ];
 
 /** Examples shown as the placeholder of fields that have no default. */

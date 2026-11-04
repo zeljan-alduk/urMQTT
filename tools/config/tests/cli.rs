@@ -714,3 +714,65 @@ fn a_half_marked_image_is_still_refused() {
     };
     assert!(e.contains("end marker"), "{e}");
 }
+
+/// ADR-257: a `[devices]` key that is not "off" for a driver the kernel was
+/// built without is refused by `pack --kernel` (the image build) and by
+/// `check_drivers` (what `--iso` and `--image` run); "off" is never refused.
+#[test]
+fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
+    let toml = std::fs::read_to_string(fixtures().join("lab.toml")).unwrap();
+    let with = |v: &str| {
+        let p = tmp(&format!("devices-{v}.toml"));
+        std::fs::write(&p, format!("{toml}\n[devices]\nvirtio_vsock = \"{v}\"\n")).unwrap();
+        p
+    };
+    let kernel = |name: &str, list: &str| {
+        let p = tmp(name);
+        let mut elf = b"\x7fELF fake kernel ".to_vec();
+        elf.extend_from_slice(urmqtt_cfg::drivers::MARKER_PREFIX);
+        elf.extend_from_slice(list.as_bytes());
+        elf.extend_from_slice(&[0; 64]);
+        std::fs::write(&p, elf).unwrap();
+        p
+    };
+    let without = kernel("no-vsock.elf", "net,blk,console,rng,balloon,scsi,gpu,input");
+    let full = kernel(
+        "vps.elf",
+        "net,blk,console,rng,balloon,scsi,gpu,input,vsock",
+    );
+    let out = tmp("devices.blob");
+    let o = run(bin()
+        .arg("pack")
+        .arg(with("on"))
+        .arg("--kernel")
+        .arg(&full)
+        .arg("--kernel")
+        .arg(&without)
+        .arg("--out")
+        .arg(&out));
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("no-vsock.elf")
+            && err.contains("devices.virtio_vsock")
+            && err.contains("virtio-vsock driver"),
+        "{err}"
+    );
+    ok(&run(bin()
+        .arg("pack")
+        .arg(with("auto"))
+        .arg("--kernel")
+        .arg(&full)
+        .arg("--out")
+        .arg(&out)));
+    let blob = std::fs::read(&out).unwrap();
+    assert!(image::check_drivers(&blob, &std::fs::read(&without).unwrap()).is_err());
+    assert!(image::check_drivers(&blob, b"an older kernel without a marker").is_ok());
+    ok(&run(bin()
+        .arg("pack")
+        .arg(with("off"))
+        .arg("--kernel")
+        .arg(&without)
+        .arg("--out")
+        .arg(&out)));
+}

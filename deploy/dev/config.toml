@@ -114,3 +114,20 @@ max_message_age_s = 600        # longest validity window a message may have
 # "auto": the driver starts only where the boot framebuffer is missing or dead
 # (a QEMU without ramfb, with -device virtio-gpu-pci).
 virtio_gpu = "auto"
+
+[devices]
+# The optional virtio drivers (ADR-257, ADR-258), each "off" | "auto" | "on".
+# Dev uses "auto": a QEMU device turns its driver on (-device virtconsole,
+# virtio-balloon-pci, virtio-keyboard-pci; scripts/smoke.sh virtio_devices).
+# "off" (the default) never starts the driver; "auto" starts it when the device
+# is found; "on" does too and warns loudly when there is none. Anything but
+# "off" needs a kernel that reads configuration format 6 and has the driver
+# (`urmqtt-config pack --iso` refuses a template without it).
+# virtio-console, port 0: a copy of the log, and the Diagnostic entry's keys.
+virtio_console = "auto"
+# virtio-balloon: total and free memory reported to the host; never inflates.
+virtio_balloon = "auto"
+# virtio-input keyboards: the Diagnostic entry's keys from a VNC console.
+virtio_input = "auto"
+# virtio-vsock: the Diagnostic report, read-only, on vsock port 2883.
+virtio_vsock = "auto"

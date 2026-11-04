@@ -81,6 +81,13 @@ pub fn note_memory(mem: &memory::BootMemory) {
     MEM_RESERVED.store(reserved, Ordering::Relaxed);
 }
 
+/// Usable RAM in the memory map, bytes (0 before [`note_memory`]).
+#[cfg_attr(not(feature = "virtio-balloon"), allow(dead_code))]
+pub fn memory_usable() -> u64 {
+    // Relaxed: see `note_memory`.
+    MEM_USABLE.load(Ordering::Relaxed)
+}
+
 /// Records the firmware clock at boot.
 pub fn note_rtc(raw: Option<u64>, _build: u64) {
     // Relaxed: see `note_memory`.
@@ -266,6 +273,8 @@ pub fn run(
     run.redraw();
     let json = run.report.to_json();
     urmqtt_log::raw(format_args!("URMQTT-DIAG-JSON {json}\n"));
+    // The same document over vsock while the screen waits for a key (ADR-258).
+    let _ = REPORT.set(json.clone());
     info!(
         "diag: complete: {} MiB/s RAM read, {} disk(s), handshake {} us",
         run.report.ram.as_ref().map_or(0, |r| r.read_mib_s),
@@ -292,9 +301,13 @@ pub fn run(
     }
 }
 
-/// One typed character from the serial port or the keyboard.
+/// One typed character from the serial port, the PS/2 keyboard, a
+/// virtio-console or a virtio-input keyboard (ADR-258).
 fn read_byte(ps2: &mut Ps2) -> Option<u8> {
     if let Some(b) = urmqtt_log::read_serial_byte() {
+        return Some(b);
+    }
+    if let Some(b) = crate::vdev::read_byte() {
         return Some(b);
     }
     arch::poll_scancode().and_then(|c| ps2.feed(c))
@@ -378,6 +391,7 @@ fn detect(cpus: u64, medium: devices::BootMedium) -> Report {
                 driver: p.driver,
             })
             .collect(),
+        virtio: crate::vdev::diag_list(),
         disks: Vec::new(),
         nics,
         other_nics,

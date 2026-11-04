@@ -23,10 +23,11 @@ pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// listener off, with `plaintext.enabled`; ADR-233); version 4 adds `storage.encryption` and
 /// `storage.disk_key` (S7, ADR-240: a kernel that does not know them must not boot an encrypted disk); version 5
 /// adds `console.virtio_gpu` (ADR-256: a kernel without the driver refuses the record by the version, at build
-/// time through the template check, instead of by an unknown tag at boot). The records of 2 and 3 are the same: the packer writes
+/// time through the template check, instead of by an unknown tag at boot); version 6 adds the `[devices]` keys of
+/// the optional virtio drivers (ADR-257, the same reason). The records of 2 and 3 are the same: the packer writes
 /// the lowest version that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind
 /// still boots every image that does not use what came later.
-pub const FORMAT_VERSION: u16 = 5;
+pub const FORMAT_VERSION: u16 = 6;
 /// The version a configuration is written in unless it needs a newer one.
 pub const BASE_VERSION: u16 = 2;
 /// The oldest format version it still reads. Blobs of the older versions stay

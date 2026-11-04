@@ -1,6 +1,6 @@
 [package]
 name = "urmqtt-virtio"
-description = "virtio-pci modern transport, split virtqueues and the net, blk, scsi, rng and gpu (2D) devices."
+description = "virtio-pci modern transport, split virtqueues and the virtio device drivers (net, blk, scsi, rng, gpu 2D, console, balloon, input, vsock), each behind its own feature."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,3 +17,28 @@ workspace = true
 [dependencies]
 urmqtt-pci = { path = "../pci" }
 urmqtt-arch = { path = "../arch" }
+
+[dev-dependencies]
+# The `[devices]` keys and the marker prefix of the configuration format
+# must name what the registry names (a test checks).
+urmqtt-cfg = { path = "../cfg", features = ["std"] }
+
+# One feature per driver module (ADR-257). The transport, the queues and the
+# registry (`registry::KINDS`, which lists every device type with or without a
+# driver) are always built. `vps` is the set the MQTT image ships; `all` is
+# every driver that exists. The default is `all` so the host tests, clippy and
+# the fuzz targets see every driver; the kernel turns the default off and asks
+# for its set (crates/kernel/Cargo.toml).
+[features]
+default = ["all"]
+net = []
+blk = []
+scsi = []
+rng = []
+gpu = []
+console = []
+balloon = []
+input = []
+vsock = []
+vps = ["net", "blk", "scsi", "rng", "gpu", "console", "balloon", "input", "vsock"]
+all = ["vps"]

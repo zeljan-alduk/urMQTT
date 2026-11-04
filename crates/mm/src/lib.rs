@@ -117,6 +117,16 @@ impl LockedHeap {
             .map(|h| (h.free_bytes(), h.capacity()))
     }
 
+    /// [`stats`](Self::stats) without waiting: `None` also while another
+    /// holder has the lock (for interrupt context, which must not spin on a
+    /// lock the code it interrupted may hold).
+    pub fn try_stats(&self) -> Option<(usize, usize)> {
+        self.inner
+            .try_lock()?
+            .as_ref()
+            .map(|h| (h.free_bytes(), h.capacity()))
+    }
+
     /// Frees a block the caller may already have poisoned (see
     /// [`buddy::BuddyHeap::dealloc_ex`]).
     ///

@@ -1803,6 +1803,7 @@ name = "urmqtt-virtio"
 version = "0.3.0"
 dependencies = [
  "urmqtt-arch",
+ "urmqtt-cfg",
  "urmqtt-pci",
 ]
 

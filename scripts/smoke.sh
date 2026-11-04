@@ -3393,6 +3393,165 @@ PY
     done
 }
 
+# ADR-257, ADR-258: the optional virtio drivers the QEMU on this machine can give (vsock needs
+# vhost-vsock on a Linux host and is not here). One serving boot with a virtio-console (its output to a
+# file), a virtio-balloon and a virtio keyboard: every one is driven, the console carries the log, the
+# balloon answers QMP's statistics request with real numbers and refuses to inflate. The same devices
+# with every [devices] key "off": listed, not driven. Then the Diagnostic entry's write confirmation
+# typed twice: as QMP key events into the virtio keyboard (a provider's VNC console), and as bytes on
+# the virtio-console; both confirm the write test on a blank disk.
+VDEV_QEMU=(-device virtio-balloon-pci,id=balloon0 -device virtio-keyboard-pci,id=kbd0)
+# vdev_qmp <socket> <script>: runs the Python QMP snippet on stdin with `cmd` and `sock` defined.
+vdev_qmp() {
+    python3 -I -c '
+import json, socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+for _ in range(100):
+    try:
+        s.connect(sys.argv[1]); break
+    except OSError:
+        time.sleep(0.1)
+f = s.makefile("rw")
+f.readline()
+def cmd(c, **a):
+    f.write(json.dumps({"execute": c, "arguments": a} if a else {"execute": c}) + "\n"); f.flush()
+    while True:
+        r = json.loads(f.readline())
+        if "return" in r or "error" in r:
+            return r
+cmd("qmp_capabilities")
+exec(sys.stdin.read())
+' "$1"
+}
+
+virtio_devices() {
+    local dir="$OUT/vdev" accel
+    mkdir -p "$dir"
+    sed -E 's/^virtio_(console|balloon|input|vsock) = "auto"/virtio_\1 = "off"/' "$ROOT/deploy/dev/config.toml" >"$dir/off.toml"
+    [[ $(grep -c '^virtio_[a-z]* = "off"' "$dir/off.toml") -ge 4 ]] || { echo "  ✗ virtio-devices: deploy/dev has no [devices] keys set to \"auto\""; FAILED=$((FAILED + 1)); return; }
+    MKIMG_EXTRA=(--config "$dir/off.toml" --config-root "$ROOT/deploy/dev")
+    mkimg "$OUT/vdev-off.raw" "serve"
+    MKIMG_EXTRA=()
+    mkimg "$OUT/vdev-auto.raw" "serve"
+    local diag="$OUT/vdev-diag.iso"
+    [[ -f $diag ]] || "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$diag" \
+        --diag-cmdline "diag smoke diag-confirm-timeout=60" --diag-default >/dev/null
+    for accel in $ACCELS; do
+        local log="$OUT/virtio-devices-auto-$accel.log" data="$OUT/vdev-auto-$accel.img" status=0 qdir sock
+        fresh_disk "$OUT/vdev-auto.raw" "$data"
+        qdir=$(mktemp -d "${TMPDIR:-/tmp}/urmqtt-qmp.XXXXXX") || continue
+        sock="$qdir/q.sock"
+        rm -f "$log.vcon"
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd none -- "${VDEV_QEMU[@]}" \
+            -device virtio-serial-pci,id=vser0 -chardev "file,id=vc0,path=$log.vcon" -device virtconsole,chardev=vc0 \
+            -qmp "unix:$sock,server=on,wait=off"
+        if wait_log "$log" '^URMQTT READY$'; then
+            vdev_qmp "$sock" >"$log.qmp" 2>&1 <<'PY' || status=1
+print("qmp: polling", cmd("qom-set", path="/machine/peripheral/balloon0", property="guest-stats-polling-interval", value=1))
+time.sleep(4)
+r = cmd("qom-get", path="/machine/peripheral/balloon0", property="guest-stats")
+st = r.get("return", {}).get("stats", {})
+print("qmp: guest stats total=%d free=%d available=%d" % (st.get("stat-total-memory", -1), st.get("stat-free-memory", -1), st.get("stat-available-memory", -1)))
+print("qmp: balloon", cmd("balloon", value=256 << 20))
+time.sleep(3)
+print("qmp: query-balloon", cmd("query-balloon"))
+PY
+        else
+            status=124
+        fi
+        kill_vm
+        rm -rf "$qdir"
+        cat "$log.qmp" >>"$log" 2>/dev/null || true
+        # What the virtio-console received, prefixed so the patterns tell it from the serial log.
+        [[ -f $log.vcon ]] && sed 's/^/vcon| /' "$log.vcon" >>"$log"
+        check "virtio-devices: console, balloon, keyboard driven [$accel]" "$log" "$status" \
+            "virtio: drivers in this image: net,blk,console,rng,balloon,scsi,gpu,input,vsock" \
+            "virtio: virtio-console at [0-9a-f:.]+: driven: port 0" \
+            "virtio: virtio-balloon at [0-9a-f:.]+: driven: memory statistics for the host; never inflates" \
+            "virtio: virtio-input at [0-9a-f:.]+: driven: \"QEMU Virtio Keyboard\", keyboard" \
+            "virtio: virtio-net at [0-9a-f:.]+: driven: the network" \
+            "virtio: virtio-blk at [0-9a-f:.]+: driven: the boot disk" \
+            "virtio: virtio-rng at [0-9a-f:.]+: driven: entropy" \
+            "qmp: guest stats total=[1-9][0-9]{7,} free=[1-9][0-9]{6,} available=[1-9][0-9]{6,}" \
+            "virtio-balloon: the host asks for [0-9]+ page\(s\) \([0-9]+ MiB\); this kernel never inflates" \
+            "qmp: query-balloon \{'return': \{'actual': 536870912\}\}" \
+            "virtio-balloon: [1-9][0-9]* statistics answer\(s\), 0 protocol error\(s\)" \
+            "^vcon\| urMQTT: the log continues on this virtio-console \(port 0\)" \
+            "^vcon\| \[ *[0-9]+\.[0-9]+\] INFO  virtio: virtio-console at" "^vcon\| URMQTT READY" \
+            "^URMQTT READY$" "NOT:virtio: .*: failed" "NOT:WARN  virtio:" "$NO_FAULT"
+        # Every key off: the devices are listed with their state and not driven.
+        log="$OUT/virtio-devices-off-$accel.log" data="$OUT/vdev-off-$accel.img" status=0
+        fresh_disk "$OUT/vdev-off.raw" "$data"
+        boot_until "$log" '^URMQTT READY$' --disk "$data" --accel "$accel" --fwd none -- "${VDEV_QEMU[@]}" \
+            -chardev null,id=vc0 -device virtio-serial-pci -device virtconsole,chardev=vc0 || status=$?
+        check "virtio-devices: every key off, listed and not driven [$accel]" "$log" "$status" \
+            "virtio: virtio-console at [0-9a-f:.]+: off: devices.virtio_console = \"off\"" \
+            "virtio: virtio-balloon at [0-9a-f:.]+: off: devices.virtio_balloon = \"off\"" \
+            "virtio: virtio-input at [0-9a-f:.]+: off: devices.virtio_input = \"off\"" \
+            "NOT:virtio: virtio-(console|balloon|input) at [0-9a-f:.]+: driven" "^URMQTT READY$" "$NO_FAULT"
+        # The Diagnostic entry's confirmation, typed on the virtio keyboard and on the virtio-console.
+        local how
+        for how in keyboard console; do
+            local b="$dir/blank-$how-$accel.img" qd
+            log="$OUT/virtio-devices-diag-$how-$accel.log" status=0
+            rm -f "$b"
+            truncate -s 64m "$b"
+            qd=$(mktemp -d "${TMPDIR:-/tmp}/urmqtt-qmp.XXXXXX") || continue
+            local extra=(-drive "if=none,id=t0,file=$b,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile=
+                -qmp "unix:$qd/q.sock,server=on,wait=off")
+            if [[ $how == keyboard ]]; then
+                extra+=(-device virtio-keyboard-pci,id=kbd0)
+            else
+                extra+=(-chardev "socket,id=vc0,path=$qd/vc.sock,server=on,wait=off" -device virtio-serial-pci
+                    -device virtconsole,chardev=vc0)
+            fi
+            start_vm "$log" --iso "$diag" --accel "$accel" --fwd none -- "${extra[@]}"
+            if wait_log "$log" "Type WIPE \+ Enter to write"; then
+                if [[ $how == keyboard ]]; then
+                    vdev_qmp "$qd/q.sock" >"$log.qmp" 2>&1 <<'PY' || status=1
+keys = [["shift", "w"], ["shift", "i"], ["shift", "p"], ["shift", "e"], ["ret"]]
+for k in keys:
+    r = cmd("send-key", keys=[{"type": "qcode", "data": q} for q in k])
+    time.sleep(0.2)
+print("qmp: keys sent", r)
+PY
+                else
+                    python3 -I -c '
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+for _ in range(100):
+    try:
+        s.connect(sys.argv[1]); break
+    except OSError:
+        time.sleep(0.1)
+s.sendall(b"WIPE\r")
+print("vcon: typed")
+time.sleep(1)
+' "$qd/vc.sock" >"$log.qmp" 2>&1 || status=1
+                fi
+                # The write test runs, then the smoke diagnostic powers off.
+                local w=0
+                while kill -0 "$VM_PID" 2>/dev/null && (( w < TIMEOUT * 10 )); do sleep 0.1; w=$((w + 1)); done
+            else
+                status=124
+            fi
+            kill_vm
+            rm -rf "$qd"
+            cat "$log.qmp" >>"$log" 2>/dev/null || true
+            local pats=("^URMQTT DIAG START" "Type WIPE \+ Enter to write" "^diag: confirmed$"
+                "sequential write [0-9]+ MiB/s" "^URMQTT DIAG DONE$" "$NO_FAULT")
+            if [[ $how == keyboard ]]; then
+                pats+=("qmp: keys sent \{'return': \{\}\}" "virtio: virtio-input at [0-9a-f:.]+: driven"
+                    "URMQTT-DIAG-JSON .*\"virtio\":\[.*\{\"bdf\":\"[0-9a-f:.]+\",\"type\":18,\"name\":\"virtio-input\",\"state\":\"driven\"")
+            else
+                pats+=("^vcon: typed$" "virtio: virtio-console at [0-9a-f:.]+: driven"
+                    "URMQTT-DIAG-JSON .*\{\"bdf\":\"[0-9a-f:.]+\",\"type\":3,\"name\":\"virtio-console\",\"state\":\"driven\"")
+            fi
+            check "virtio-devices: the Diagnostic confirmation typed on the virtio-$how [$accel]" "$log" "$status" "${pats[@]}"
+        done
+    done
+}
+
 # SMOKE_ONLY=misc: the scenarios of the default run that are guarded by `want` and belong to no other
 # group (the default run with SMOKE_NO_GROUPS=1 skips exactly these, so CI runs both and loses nothing).
 if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
@@ -3407,6 +3566,7 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     [[ $ARCH == aarch64 ]] && want install_iso && install_iso
     [[ $ARCH == aarch64 ]] && want gicv2 && gicv2
     want virtio_gpu && virtio_gpu
+    want virtio_devices && virtio_devices
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit

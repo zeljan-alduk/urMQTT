@@ -140,30 +140,35 @@ impl Builder {
         self.finish_as(dev_allowed, self.lowest_version())
     }
 
-    /// The lowest format version that can hold this configuration: 2, 3 when the TLS listener is off, 4 with disk
-    /// encryption, 5 with `console.virtio_gpu` set (ADR-256).
+    /// The lowest format version that can hold this configuration: 2 (the base), 3 when the TLS listener is off,
+    /// otherwise the newest `since` of the records written: 4 with disk encryption, 5 with `console.virtio_gpu`
+    /// set (ADR-256), 6 with a `[devices]` key set (ADR-257). A field at its default writes no record.
     pub fn lowest_version(&self) -> u16 {
         let tls_off = self
             .records
             .iter()
             .any(|(t, v)| *t == crate::fields::tag::NET_TLS_PORT && v.iter().all(|b| *b == 0));
+        let newest = self
+            .records
+            .keys()
+            .filter_map(|t| crate::fields::by_tag(*t))
+            .map(|f| f.since)
+            .max()
+            .unwrap_or(BASE_VERSION);
+        // Disk encryption's fields predate format 4 (since 1); the version
+        // is what refuses them on an older kernel.
         let encrypted = self
             .records
             .iter()
             .any(|(t, v)| *t == crate::fields::tag::ST_ENCRYPTION && v.iter().any(|b| *b != 0));
-        let virtio_gpu = self
-            .records
-            .iter()
-            .any(|(t, _)| *t == crate::fields::tag::CON_VIRTIO_GPU);
-        if virtio_gpu {
-            5
-        } else if encrypted {
+        let floor = if encrypted {
             4
         } else if tls_off {
             3
         } else {
             BASE_VERSION
-        }
+        };
+        newest.max(floor)
     }
 
     /// [`finish`](Self::finish) with a format version of the caller's choice (the newest, for the empty

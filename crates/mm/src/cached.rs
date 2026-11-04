@@ -292,6 +292,11 @@ impl CachedHeap {
         self.global.stats()
     }
 
+    /// [`stats`](Self::stats) without waiting (interrupt context).
+    pub fn try_stats(&self) -> Option<(usize, usize)> {
+        self.global.try_stats()
+    }
+
     fn key(&self) -> usize {
         // Relaxed: written once at init, before any cache holds a block.
         self.key.load(Ordering::Relaxed)

@@ -51,8 +51,16 @@ PIE_AARCH64 := -Crelocation-model=pie -Clink-arg=-pie
 PIE_X86_64  := -Crelocation-model=pie -Clink-arg=-pie
 export CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS := $(REMAP) $(HARDEN) $(PIE_AARCH64)
 export CARGO_TARGET_X86_64_URMQTT_NONE_RUSTFLAGS := $(REMAP) $(HARDEN) $(PIE_X86_64)
+# The virtio drivers (ADR-257): VIRTIO=vps (the default: the kernel's default
+# feature, the set of the MQTT image, the template and the builder) or
+# VIRTIO=all (every driver, `--features virtio-all`, for custom images).
+VIRTIO      ?= vps
+ifeq ($(filter vps all,$(VIRTIO)),)
+$(error VIRTIO must be vps or all)
+endif
+VIRTIO_FEATURES := $(if $(filter all,$(VIRTIO)),--features virtio-all)
 # Dev images carry the in-guest benchmark and its TLS client; others do not.
-KERNEL_FEATURES := $(if $(filter dev,$(ENV)),--features selftest)
+KERNEL_FEATURES := $(if $(filter dev,$(ENV)),--features selftest) $(VIRTIO_FEATURES)
 export URMQTT_ENV := $(ENV)
 export URMQTT_VERSION := $(VERSION)
 # The commit time: reproducible (M17) and the kernel's lower bound for the
@@ -198,6 +206,8 @@ check-x86: ## clippy -D warnings for the x86_64 kernel (X1)
 .PHONY: clippy-kernel
 clippy-kernel:
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-kernel --target $(TARGET) -- -D warnings
+	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features virtio-all -p urmqtt-kernel --target $(TARGET) -- -D warnings
+	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --no-default-features -p urmqtt-kernel --target $(TARGET) -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-kernel --target $(TARGET) -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) -p urmqtt-dbworker --target $(TARGET) -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) $(KERNEL_FLAGS) --features selftest -p urmqtt-dbworker --target $(TARGET) -- -D warnings

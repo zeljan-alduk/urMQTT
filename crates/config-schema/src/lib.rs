@@ -112,6 +112,68 @@ struct RawConfig {
     /// Optional: without it the console stays on the bootloader's framebuffer (ADR-256).
     #[serde(default)]
     console: RawConsole,
+    /// Optional: without it every optional virtio driver is off (ADR-257).
+    #[serde(default)]
+    devices: Devices,
+}
+
+/// Whether an optional virtio driver runs (`[devices]`, ADR-257).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceMode {
+    /// Never: the driver is not started (the default).
+    #[default]
+    Off,
+    /// When a device is found.
+    Auto,
+    /// When a device is found; a missing device is a boot warning.
+    On,
+}
+
+impl DeviceMode {
+    /// The blob's variant (an index into `urmqtt_cfg::fields::DEVICE_MODES`).
+    pub const fn variant(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Auto => 1,
+            Self::On => 2,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::On => "on",
+        }
+    }
+}
+
+/// The `[devices]` section (ADR-257): one key per optional virtio driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Devices {
+    #[serde(default)]
+    pub virtio_console: DeviceMode,
+    #[serde(default)]
+    pub virtio_balloon: DeviceMode,
+    #[serde(default)]
+    pub virtio_input: DeviceMode,
+    #[serde(default)]
+    pub virtio_vsock: DeviceMode,
+}
+
+impl Devices {
+    /// Every key (`devices.<name>`) with its mode, in the order of
+    /// `urmqtt_cfg::fields::DEVICE_KEYS`.
+    pub fn iter(&self) -> [(&'static str, DeviceMode); 4] {
+        [
+            ("devices.virtio_console", self.virtio_console),
+            ("devices.virtio_balloon", self.virtio_balloon),
+            ("devices.virtio_input", self.virtio_input),
+            ("devices.virtio_vsock", self.virtio_vsock),
+        ]
+    }
 }
 
 /// Whether the console drives a virtio-gpu display (ADR-256).
@@ -710,6 +772,7 @@ pub struct Config {
     pub control: Control,
     pub plaintext: Plaintext,
     pub console: Console,
+    pub devices: Devices,
 }
 
 /// The `[console]` section (ADR-256).
@@ -856,6 +919,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         console: Console {
             virtio_gpu: raw.console.virtio_gpu,
         },
+        devices: raw.devices,
     })
 }
 
@@ -2026,6 +2090,8 @@ pub mod pack;
 
 #[cfg(test)]
 mod console_tests;
+#[cfg(test)]
+mod devices_tests;
 #[cfg(test)]
 mod encryption_tests;
 #[cfg(test)]

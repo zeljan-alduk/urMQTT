@@ -44,7 +44,11 @@ fn on_tick(_intid: u32) {
     crate::watchdog::check(now.saturating_sub(deadline), period);
     // The virtio-gpu console (ADR-256): what the rate limit held back. Only
     // queues (never waits) and only tries the device lock.
+    #[cfg(feature = "virtio-gpu")]
     crate::gpucon::tick();
+    // The optional virtio drivers (ADR-258): balloon statistics, the vsock
+    // service. The same rules: bounded, device locks only tried.
+    crate::vdev::tick();
 }
 
 /// Starts the tick with `period_ns` on this core, delivered as `intid`.
