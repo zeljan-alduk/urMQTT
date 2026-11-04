@@ -346,10 +346,10 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:164` | attribute | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:393` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:414` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:812` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:814` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:866` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:1141` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:813` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:815` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:867` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:1142` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot_aarch64.rs:191` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot_aarch64.rs:193` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot_aarch64.rs:205` | block | yes |
@@ -917,4 +917,9 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-virtio` | `crates/virtio/src/transport.rs:158` | block | yes |
 | `urmqtt-x25519` | `crates/x25519/src/adx.rs:22` | block | yes |
 | `urmqtt-x25519` | `crates/x25519/src/adx.rs:134` | block | yes |
-| `urmqtt-x25519` | `crates/x25519/src/lib.rs:316` | block | yes |
+| `urmqtt-x25519` | `crates/x25519/src/arm.rs:42` | block | yes |
+| `urmqtt-x25519` | `crates/x25519/src/arm.rs:170` | block | yes |
+| `urmqtt-x25519` | `crates/x25519/src/arm.rs:273` | block | yes |
+| `urmqtt-x25519` | `crates/x25519/src/arm.rs:314` | block | yes |
+| `urmqtt-x25519` | `crates/x25519/src/arm.rs:355` | block | yes |
+| `urmqtt-x25519` | `crates/x25519/src/lib.rs:358` | block | yes |

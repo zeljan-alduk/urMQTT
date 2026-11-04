@@ -1107,6 +1107,7 @@ name = "urmqtt-nistz256"
 version = "0.4.0"
 dependencies = [
  "cpufeatures 0.3.1",
+ "p256",
  "zeroize",
 ]
 

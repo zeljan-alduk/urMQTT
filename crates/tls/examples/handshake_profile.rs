@@ -4,13 +4,14 @@
 //!
 //! A stock rustls client (our provider, resumption off, so every handshake
 //! is a full one) connects to `TlsServer` with the dev certificates
-//! (`make certs`); only the server's `input` calls are timed. Two cases:
-//! a returning device (its certificate's signature is in the verification
-//! memo, as on every reconnect) and a device's first contact (memo cleared
-//! before each handshake). Each case runs `ROUNDS` rounds of `PER_ROUND`
-//! handshakes; the table gives the median round, microseconds per
-//! handshake, and the calls per handshake. Allocations are counted while the
-//! server runs.
+//! (`make certs`); only the server's `accept` and `input` calls are timed.
+//! Three cases: a returning device (its certificate's signature is in the
+//! verification memo, as on every reconnect), a device's first contact
+//! (memo cleared before each handshake) and, for comparison, a resumed
+//! handshake (a second client with resumption on). Each case runs `ROUNDS`
+//! rounds of `PER_ROUND` handshakes, interleaved; the table gives the median
+//! round, microseconds per handshake, and the calls per handshake.
+//! Allocations are counted while the server runs.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::PathBuf;
@@ -91,7 +92,7 @@ fn server() -> TlsServer {
     .expect("server")
 }
 
-fn client_config() -> Arc<ClientConfig> {
+fn client_config(resume: bool) -> Arc<ClientConfig> {
     let d = dev();
     let mut roots = RootCertStore::empty();
     for c in CertificateDer::pem_file_iter(d.join("ca.pem")).expect("ca") {
@@ -108,12 +109,15 @@ fn client_config() -> Arc<ClientConfig> {
         .with_root_certificates(roots)
         .with_client_auth_cert(chain, key)
         .expect("client cert");
-    cfg.resumption = Resumption::disabled();
+    if !resume {
+        cfg.resumption = Resumption::disabled();
+    }
     Arc::new(cfg)
 }
 
-/// One full handshake; the server's part is armed.
-fn handshake(srv: &TlsServer, cfg: &Arc<ClientConfig>) {
+/// One handshake (full, or resumed with the client's last ticket); the
+/// server's part is armed.
+fn handshake(srv: &TlsServer, cfg: &Arc<ClientConfig>, want_resumed: bool) {
     let mut client = ClientConnection::new(cfg.clone(), ServerName::try_from("localhost").unwrap())
         .expect("client");
     let mut session = stages::armed(|| srv.accept()).expect("accept");
@@ -129,7 +133,8 @@ fn handshake(srv: &TlsServer, cfg: &Arc<ClientConfig>) {
             COUNT.store(true, Ordering::Relaxed);
             let ev = stages::armed(|| session.input(&c2s, &mut s2c, &mut app)).expect("server");
             COUNT.store(false, Ordering::Relaxed);
-            established |= matches!(ev, Event::Established { resumed: false, .. });
+            established |=
+                matches!(ev, Event::Established { resumed, .. } if resumed == want_resumed);
         }
         if s2c.is_empty() && c2s.is_empty() {
             break;
@@ -149,7 +154,7 @@ struct Round {
     bytes: u64,
 }
 
-fn round(srv: &TlsServer, cfg: &Arc<ClientConfig>, first_contact: bool) -> Round {
+fn round(srv: &TlsServer, cfg: &Arc<ClientConfig>, first_contact: bool, resumed: bool) -> Round {
     let _ = stages::take();
     ALLOCS.store(0, Ordering::Relaxed);
     BYTES.store(0, Ordering::Relaxed);
@@ -157,7 +162,7 @@ fn round(srv: &TlsServer, cfg: &Arc<ClientConfig>, first_contact: bool) -> Round
         if first_contact {
             urmqtt_tls::provider::clear_verify_memo();
         }
-        handshake(srv, cfg);
+        handshake(srv, cfg, resumed);
     }
     Round {
         r: stages::take(),
@@ -219,20 +224,29 @@ fn main() {
     });
     println!("ecc backend: {}", urmqtt_tls::provider::ecc_backend());
     let srv = server();
-    let cfg = client_config();
+    let cfg = client_config(false);
+    let resuming = client_config(true);
     for _ in 0..50 {
-        handshake(&srv, &cfg);
+        handshake(&srv, &cfg, false);
     }
+    // The first ticket.
+    handshake(&srv, &resuming, false);
     let mut returning = Vec::new();
     let mut first = Vec::new();
-    // Interleaved, so drift affects both cases alike.
+    let mut resumed = Vec::new();
+    // Interleaved, so drift affects all cases alike.
     for _ in 0..ROUNDS {
-        returning.push(round(&srv, &cfg, false));
-        first.push(round(&srv, &cfg, true));
+        returning.push(round(&srv, &cfg, false, false));
+        first.push(round(&srv, &cfg, true, false));
+        resumed.push(round(&srv, &resuming, false, true));
     }
     report(
         "Returning device (certificate signature in the memo)",
         &returning,
     );
     report("First contact (memo cleared before each handshake)", &first);
+    report(
+        "Resumed (session ticket, psk_dhe_ke: X25519 again, the chain re-verified)",
+        &resumed,
+    );
 }

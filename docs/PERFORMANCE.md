@@ -514,3 +514,96 @@ core with hardware AES, AES-GCM 272 to 321 MiB/s; the installed 64 GiB virtio-bl
 sequentially (64 KiB blocks) and 22 to 27 thousand random 4 KiB reads per second (p50 9.5 to 10.4 us, p99 398 to
 671 us); RAM read 4.7 to 9.0 GiB/s.
 
+
+
+## 12. The server's handshake, stage by stage, and three changes (ADR-259)
+
+**What this is and is not.** Every figure in this section is from **Docker `linux/arm64` on an Apple M4 Pro** (image
+`urmqtt-ci`, nightly-2026-10-20, release build, `RUSTFLAGS="--cfg aes_armv8 --cfg polyval_armv8"` so the AEADs use the
+same hardware paths as the kernel) or from QEMU/HVF on the same Mac. **Nothing here was measured on the Neoverse N1**
+(the netcup VPS of section 11) or on any other server core; an Apple core has more multipliers and a much larger
+out-of-order window, so the ratios on the N1 may be different in either direction.
+
+**Method.** `cargo run --release -p urmqtt-tls --features stage-profile --example handshake_profile` (new; ADR-259):
+a stock rustls client with our provider runs full TLS 1.3 + mutual-TLS handshakes against `TlsServer` with the dev
+certificates (P-256 CA, server and device keys; X25519; AES-128-GCM, the client's first choice), resumption off, and
+only the server's `accept`/`input` calls are timed. The stages are exclusive (a signature check inside webpki's path
+validation is counted once, under the signature); "rest" is the armed time no stage accounts for. Median round of 9
+rounds x 200 handshakes per process, three processes per tree, before and after interleaved. "Before" is v0.4.0's
+crypto (6cc343b) with the profiler added (the profiler is a no-op without its feature; the "before" tree is 1fb37ba
+with its trust-anchor fix reverted). Microseconds per handshake:
+
+| stage | returning, before | returning, after | first contact, before | first contact, after |
+|---|---:|---:|---:|---:|
+| X25519 key share (dalek fixed-base table) | 7.5 | 7.6 | 7.6 | 7.5 |
+| X25519 shared secret | 19.6 | 15.2 | 19.8 | 15.2 |
+| ECDSA sign (our CertificateVerify) | 12.4 | 12.1 | 12.4 | 12.2 |
+| ECDSA verify, the client's CertificateVerify (unknown key) | 29.5 | 25.7 | 29.4 | 25.7 |
+| ECDSA verify, the client certificate by the CA | memo hit | memo hit | 29.4 (unknown-key path) | 7.4 (CA table) |
+| verification memo (digest, lookup) | 0.3 | 0.3 | 0.3 | 0.3 |
+| webpki path validation (x509/DER parsing, checks) | 0.3 | 0.3 | 0.3 | 0.3 |
+| serial, revocation, role | 0.3 | 0.3 | 0.3 | 0.3 |
+| SHA-256 transcript (23 calls) | 1.6 | 1.6 | 1.6 | 1.6 |
+| HMAC-SHA-256 / HKDF (45 calls) | 3.8 | 3.7 | 3.8 | 3.7 |
+| AEAD of the handshake records (7 calls incl. key setup) | 3.8 | 3.8 | 3.8 | 3.8 |
+| session ticket seal | 1.1 | 1.1 | 1.1 | 1.1 |
+| RNG | 0.2 | 0.2 | 0.2 | 0.2 |
+| finish: identity, serial, record keys | 2.5 | 2.5 | 2.5 | 2.5 |
+| rest: rustls state machine, encoding, copies, allocation | 6.1 | 5.9 | 6.2 | 5.9 |
+| **total (server), the run above** | **88.8** | **80.3** | **118.6** | **87.8** |
+| total, all three processes | 88.8, 89.5, 93.9 | 80.3, 80.5, 80.5 | 118.6, 118.6, 123.8 | 87.8, 88.1, 88.5 |
+
+(The "before" first-contact row splits its 58.7 us of unknown-key verification into two equal calls.) Allocations: 164
+per handshake (48 KiB requested), unchanged. A resumed handshake (session ticket, `psk_dhe_ke`), after: 40.6 to 40.9 us
+(X25519 key share 7.3 and shared secret 14.6, HKDF 4.6, AEAD 2.1, finish 2.7 (the chain from the ticket is checked
+again), rest 6.5). The key-share figure is bimodal from process to process (7.5 us or 10.3 to 12.4 us, in both trees: the
+placement of dalek's 30 KiB table), which is why three processes are shown.
+
+**What changed** (ADR-259):
+1. **The trust anchors get their tables.** `register_issuer` could not parse the key in the form webpki stores it, so
+   since ADR-111 no anchor had a table and a device's first handshake verified its certificate on the unknown-key path.
+   First contact: 118.6 -> 100.3 us with this fix alone (one process).
+2. **X25519 shared secret on AArch64 in `mul`/`umulh` assembly** (`urmqtt-x25519`, `Backend::Armv8`) instead of dalek's
+   51-bit ladder: one ladder 13.4 us against 18.0 us (microbenchmark), 19.6 -> 15.2 us in the handshake.
+3. **P-256 verification**: a width-5 NAF for `u2 Q` (19.3 us against 21.7 us for the constant-time multiplication)
+   and a variable-time scalar inversion (1.17 us against 3.89 us). Unknown key 29.5 -> 25.7 us in the handshake,
+   CA table 10.1 -> 7.4 us. Shared code, so x86_64 gets it too (not measured).
+
+Items that did not pay or were not built: interleaving `u1 G` into the NAF's doubling chain (the comb already has no
+doublings; at most 0.4 us, and the mixed addition has no doubling case); wNAF widths 4 and 6 (computed: both worse than
+5); everything outside the public-key operations (no stage above 5 %: HKDF 4.7 %, AEAD 4.7 %, the rest of rustls 7.4 %,
+which is not ours to change cheaply); a cache of verified certificates (ADR-260: about 1 us of 80 us on top of the
+memo, a security decision, not built).
+
+**Primitives** (`cargo run --release -p urmqtt-tls --example profile`, the production paths, v0.4.0 and this branch
+built in the same container and run interleaved, 7 runs each, minimum / median in microseconds). Note that
+`ecdsa-verify-ca` measures a table it builds itself, so it never showed fix 1:
+
+| | v0.4.0 | this branch | ratio (min) |
+|---|---|---|---|
+| X25519 key share (`x25519-base`) | 7.4 / 7.5 | 7.4 / 7.5 | 1.0x |
+| X25519 shared secret (`x25519-dh`) | 20.0 / 20.3 | 14.4 / 14.6 | 1.38x |
+| P-256 key generation | 6.7 / 6.9 | 6.7 / 6.8 | 1.0x |
+| ECDH P-256 | 24.3 / 24.7 | 24.4 / 24.6 | 1.0x |
+| ECDSA sign | 11.4 / 11.5 | 11.4 / 11.5 | 1.0x |
+| ECDSA verify (unknown key) | 28.3 / 29.0 | 24.2 / 24.5 | 1.17x |
+| CA verify (table) | 9.5 / 9.8 | 7.1 / 7.2 | 1.35x |
+| handshake estimate (the profile's sum) | 92.1 / 92.8 | 79.8 / 80.8 | 1.15x |
+
+**In the kernel** (the boot's `crypto-profile` line, smoke scenario `boot-acpi`, QEMU with HVF on the M4 Pro; v0.4.0 and
+this branch booted alternately, three boots each, median in microseconds): X25519 shared secret 22.1 -> 15.8, ECDSA
+verify 32.9 -> 27.7, CA verify 11.4 -> 8.5, key share 8.5 -> 8.5, sign 18.8 -> 18.8, the estimate 141.5 -> 127.6 (all
+three: 137.6, 141.5, 142.8 -> 127.6, 128.9, 126.6). The estimate counts the CA verify through a table it builds itself,
+so a real first contact on v0.4.0 cost about 20 us more than its estimate (fix 1).
+
+**Field arithmetic** (`cargo test --release -p urmqtt-x25519 -- --ignored --nocapture timings` and the same for
+`urmqtt-nistz256`, Docker, chained operations, so latency): X25519 multiplication 7 ns (portable 12 ns), squaring 6 ns
+(portable, as a multiplication, 12 ns), addition about 1 ns, subtraction 4 ns (Rust), `* 121665` 3 ns (Rust); P-256
+doubling 60 ns, addition 105 ns, `inv_n` 3.9 us, `invert_vartime` 1.17 us.
+
+**For the VPS (the owner's measurement).** The same benchmark image as section 11, from this branch:
+`scripts/mkbench.sh --x11 --env bench-netcup --static ADDR/LEN GATEWAY` (the netcup address and gateway of section 11,
+certificates as then: `--certs DIR`), installed or booted as in section 11; then the Diagnostic entry's crypto stage
+(the boot's `crypto-profile` line, which now also prints `x25519=armv8` in the `crypto:` line) and
+`scripts/x11-bench.sh` for the handshake rate. Expect on the N1: the X25519 and the two verification rows to fall,
+the key share and the signature to stay; how much is the open question this section cannot answer.

@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **The trust anchors' verification tables were never built** (ADR-111, ADR-259, AUDIT.md A259-W1): webpki stores an
+  anchor's SubjectPublicKeyInfo without its outer SEQUENCE, which `register_issuer` did not parse, so a device's
+  first handshake verified its certificate on the slower unknown-key path. Both forms are accepted now. No effect on
+  verdicts; about 20 us less for a first contact (Docker linux/arm64 on an Apple M4 Pro).
+
+### Changed
+- **X25519 on AArch64**: the shared secret uses `urmqtt-x25519` with new `mul`/`umulh` inline assembly
+  (`Backend::Armv8`, ADR-259) instead of dalek's 51-bit ladder; 14.6 us against 20.3 us in the profile (Docker on an
+  M4 Pro, not measured on a server core). The boot line reads `crypto: ecc=... x25519=armv8|adx|portable (...)`.
+- **P-256 verification** (both architectures): a width-5 NAF for the key's multiple and a variable-time scalar
+  inversion (public inputs only; signing and ECDH stay constant time): unknown key 29.0 -> 24.5 us, by a CA table
+  9.8 -> 7.2 us (Docker on an M4 Pro).
+- Server CPU per full mutual-TLS handshake, measured stage by stage (Docker on an M4 Pro, PERFORMANCE.md section
+  12): returning device 88.8 -> 80.3 us, first contact 118.6 -> 87.8 us. Nothing was measured on the Neoverse N1.
+
+### Added
+- `stage-profile` feature and `handshake_profile` example of `urmqtt-tls` (host only): the server's handshake time
+  per stage. `make ct` case `x25519_ladder_is_constant_time`; the RFC 7748 million-iteration vector (ignored test).
+- ADR-260: a proposal, not built, for a cache of verified client certificates (it would save about 1 us per
+  returning device's full handshake on top of the existing memo; recommended against).
+
 ## [0.4.0] - 2026-11-04
 
 A release of what was built after v0.3.0: optional virtio drivers for the consoles and devices that VPS providers

@@ -11,8 +11,8 @@
 |---|---|---|---|
 | TLS record protection | AES-128-GCM, ChaCha20-Poly1305 | RustCrypto `aes-gcm` 0.10, `chacha20poly1305` 0.10 | ARMv8 AES + PMULL; NEON |
 | TLS key schedule, HKDF-Expand-Label | HMAC-SHA-256 | RustCrypto `hkdf`, `hmac`, `sha2` 0.11 | ARMv8 SHA2 |
-| Key exchange | X25519, ECDHE P-256 | `x25519-dalek` 2; P-256: `urmqtt-nistz256` (OpenSSL's `nistz256` assembly, ADR-130, ADR-255), `p256` 0.14 for parsing and fallbacks | X25519 portable; P-256 ARMv8 assembly (`nistz256-armv8`) |
-| Signatures (server, client certificates) | ECDSA P-256 / SHA-256 | `urmqtt-nistz256` (sign, verify, trust-anchor tables), `p256` 0.14, rustls-webpki | ARMv8 assembly (`nistz256-armv8`) |
+| Key exchange | X25519, ECDHE P-256 | X25519: `urmqtt-x25519` for the shared secret (4x64 ladder, ADR-131, ADR-259), `curve25519-dalek` 4's fixed-base table for the key share; P-256: `urmqtt-nistz256` (OpenSSL's `nistz256` assembly, ADR-130, ADR-255), `p256` 0.14 for parsing and fallbacks | X25519 shared secret: `mul`/`umulh` inline assembly (`x25519=armv8`, ADR-259), key share portable (dalek); P-256 ARMv8 assembly (`nistz256-armv8`) |
+| Signatures (server, client certificates) | ECDSA P-256 / SHA-256 | `urmqtt-nistz256` (sign, verify, trust-anchor tables; verification by a width-5 NAF and `p256`'s variable-time scalar inversion, ADR-259), `p256` 0.14, rustls-webpki | ARMv8 assembly (`nistz256-armv8`) |
 | Control messages (H1) | Ed25519 (`verify_strict`) | `ed25519-dalek` 2.2 | portable (SHA-512) |
 | Session tickets | ChaCha20-Poly1305 | `chacha20poly1305` 0.10 | NEON |
 | CSPRNG | ChaCha20 (`rand_chacha`), seeded from RNDR / virtio-rng / jitter | `tls/src/rng.rs` (ADR-038) | — |
@@ -166,7 +166,8 @@ Tests:
 | AEAD tag checks (records, tickets) | RustCrypto (`subtle`) | `make ct`: `forged_record_rejection_is_constant_time` (both suites), `forged_ticket_rejection_is_constant_time` |
 | Comparing our derived record keys and IVs with rustls's | `server::ct_eq` (`subtle`) | `secret_comparison_is_constant_time` |
 | P-256 secret scalars: key generation, ECDH, the signing nonce (ADR-130, ADR-255) | `nistz256`: whole-table scans (assembly on x86_64, masked Rust on aarch64), branch-free negation, the assembly's complete addition | `make ct`: `p256_key_generation_is_constant_time`, `p256_ecdh_is_constant_time`, `p256_signing_is_constant_time` (the key), `p256_signing_nonce_is_constant_time` (the nonce), control `harness_detects_a_variable_time_scalar_multiplication` |
-| Signature checks (ECDSA, Ed25519) | `nistz256` / `p256`, `ed25519-dalek` | none needed: the inputs are public (verification is variable time by design) |
+| X25519 secret scalar: the shared secret (ADR-131, ADR-259) | the RFC 7748 ladder with a branch-free swap; field arithmetic without branches or value-dependent addresses (MULX/ADX on x86_64, `mul`/`umulh` inline assembly on AArch64) | `make ct`: `x25519_ladder_is_constant_time` (the key share, dalek's table, is not measured) |
+| Signature checks (ECDSA, Ed25519) | `nistz256` / `p256`, `ed25519-dalek` | none needed: the inputs are public (verification is variable time by design: since ADR-259 a width-5 NAF and a variable-time inversion of s) |
 | SYN-cookie MAC check | one 32-bit integer compare, no early exit | review |
 | Ticket key id lookup | not secret (sent in the clear) | review |
 
@@ -221,7 +222,17 @@ one public-key run reached 5.5, below the bound but above dudect's 4.5 (the
 others: 3.6, 3.3, 2.3, 1.0, 0.8). What it does not show: the absence of
 smaller leaks, cache or port side channels (a timing test is not an
 analysis), behaviour on a server core (Neoverse N1 has not been measured), or
-anything about X25519 and Ed25519, which are still not measured.
+anything about Ed25519, which is still not measured.
+
+**X25519 (ADR-259).** The ladder the handshake runs for the shared secret
+(`urmqtt_x25519::x25519` with `Backend::detect()`: `armv8` in Docker on the
+M4 Pro), the all-zero scalar (clamped to 2^254: every ladder bit below the
+top one is zero, so no conditional swap ever exchanges anything) against a
+random scalar per measurement, the peer's point fixed, 20 000 measurements per
+run: |t| = 1.0, 1.2, 2.0, 4.7, 1.4, 1.5 in six runs (bound 7; the P-256
+control in the same run 645.6). The same limits as above apply, and PSTATE.DIT
+is not set (AUDIT.md A255-W2). The key share (dalek's fixed-base table) is not
+part of this case.
 
 **The signing case (ct-dit, ADR-255 amendment).** Until ct-dit the signing
 case signed one fixed message. Then the fixed key always produces the same

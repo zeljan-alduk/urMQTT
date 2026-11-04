@@ -449,6 +449,49 @@ mod tests {
         );
     }
 
+    /// Property: arbitrary bytes as a trust anchor key never panic and
+    /// register nothing unless they parse as a P-256 SubjectPublicKeyInfo
+    /// (whole or as contents); truncations of a valid one register nothing.
+    #[test]
+    fn issuer_key_parsing_survives_arbitrary_bytes() {
+        use p256::pkcs8::EncodePublicKey;
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::{RngCore, SeedableRng};
+        let mut rng = ChaCha20Rng::seed_from_u64(0x5bc1);
+        for _ in 0..5000 {
+            let mut b = alloc::vec![0u8; (rng.next_u32() % 400) as usize];
+            rng.fill_bytes(&mut b);
+            if let Some(first) = b.first_mut()
+                && rng.next_u32() % 2 == 0
+            {
+                *first = 0x30;
+            }
+            assert!(issuer_key(&b).is_none());
+        }
+        let sk = p256::ecdsa::SigningKey::from_slice(&[0x43; 32]).unwrap();
+        let full = sk.verifying_key().to_public_key_der().unwrap();
+        let full = full.as_bytes();
+        for cut in 0..full.len() {
+            assert!(issuer_key(&full[..cut]).is_none(), "prefix {cut}");
+            assert!(
+                issuer_key(&full[2..cut.max(2)]).is_none(),
+                "contents prefix {cut}"
+            );
+        }
+        let mut flipped = full.to_vec();
+        for i in 0..flipped.len() {
+            for bit in 0..8 {
+                flipped[i] ^= 1 << bit;
+                // Either rejected or the same key (a bit of the encoding the
+                // parser ignores); never another key.
+                if let Some(k) = issuer_key(&flipped) {
+                    assert_eq!(k, p256::PublicKey::from(sk.verifying_key()));
+                }
+                flipped[i] ^= 1 << bit;
+            }
+        }
+    }
+
     #[test]
     fn certificate_verify_messages_bypass_the_memo() {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
