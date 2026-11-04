@@ -114,6 +114,8 @@ the open audit findings that need no hardware closed, and the gaps the netcup ru
 - Risk: a new device parser (virtio-gpu config and responses) in the TCB; it would join H0-W9's fuzz gap.
 - Dependency: none. Verify: QEMU `-device virtio-gpu-pci` without a GOP framebuffer shows the log in a smoke
   screenshot; the netcup console shows the boot.
+- Status: addressed on branch `virtio-gpu` (ADR-256, `console.virtio_gpu`, off by default): smoke screenshots on
+  aarch64 HVF and x86_64 TCG, and the Diagnostic dashboard seen on the netcup console.
 
 **NOW-7. H0-W10: prove the page tables are read-only after the lock.** S.
 - What: a smoke scenario that writes to a page-table page after `vm::lock` and expects a decoded fault, on both

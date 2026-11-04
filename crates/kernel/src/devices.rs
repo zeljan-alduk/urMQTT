@@ -1159,7 +1159,8 @@ fn virtio_gpu_console(cfg: &mut Cfg, env: &KernelEnv, gpu: Option<(Bdf, u16)>, d
         VirtioGpuMode::Auto => {
             let boot_fb = crate::console::boot_framebuffer_phys();
             let bars: alloc::vec::Vec<_> = displays.iter().map(|&d| memory_bars(cfg, d)).collect();
-            let lists: alloc::vec::Vec<&[(u8, u64, u64)]> = bars.iter().map(|b| b.as_slice()).collect();
+            let lists: alloc::vec::Vec<&[(u8, u64, u64)]> =
+                bars.iter().map(|b| b.as_slice()).collect();
             match auto_choice(boot_fb, &lists) {
                 AutoChoice::NoBootFramebuffer => "auto: no usable boot framebuffer",
                 AutoChoice::BootFramebufferInRam => {

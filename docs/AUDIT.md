@@ -100,22 +100,24 @@ from them at the H10 commit (H0 baseline: 30 773 lines, 65 linked crates, 308
 | RustCrypto `cpufeatures` 0.2.17 and 0.3.1, vendored (X0b) | 675 + 598 lines | upstream sources plus one hunk each: on bare metal they ask the kernel's sealed dispatch (`urmqtt_cpu_has`). Reviewable with `diff -r` against the crates.io files ([vendor/README.md](../vendor/README.md)) |
 | Limine v12.9.4 (binary) | `BOOTAA64.EFI`, 331 776 bytes (and the x86_64 and BIOS loaders in the universal ISO) | pre-kernel; its configuration is enrolled (ADR-250), signing path ADR-251; **no project signing key exists**, so release loaders are unsigned |
 
-**`unsafe` in non-test code of the workspace:** 898 sites, **all 898 with a
+**`unsafe` in non-test code of the workspace:** 901 sites, **all 901 with a
 `// SAFETY:` comment or a `# Safety` section** (the tool crate `builder-wasm`
-accounts for 29 of them; it is not in the image). In the image: 869 (889 and
-860 at H10; the 9 added by ADR-255 are the aarch64 calls into the assembly).
+accounts for 29 of them; it is not in the image). In the image: 872 (889 and
+860 at H10; the 9 added by ADR-255 are the aarch64 calls into the assembly; the 3
+added by ADR-256 are the virtio-gpu driver's request slots and framebuffer, and the
+console's slice of that framebuffer).
 
 | Crate | Sites (justified) | Crate lint |
 |---|---|---|
 | `urmqtt-store` | 302 (302) | deny, with `allow` on the FFI modules (`db`, `ffi`, `libc`, `vfs`, `init`, the log callback, the worker's half) |
 | `urmqtt-arch-x86_64` | 155 (155) | deny; port I/O, MSRs, control registers, interrupt entry |
-| `urmqtt-kernel` | 117 (117) | deny; `cpu_dispatch.rs` (the sealed section, the `urmqtt_cpu_has` export), boot requests, user mode |
+| `urmqtt-kernel` | 118 (118) | deny; `cpu_dispatch.rs` (the sealed section, the `urmqtt_cpu_has` export), boot requests, user mode |
 | `urmqtt-arch-aarch64` | 101 (101) | deny; all assembly and system registers, the ARMv8 CRC-32C intrinsics |
 | `urmqtt-mm` | 74 (74) | deny; frames, heap, slabs, key slab |
 | `urmqtt-dbworker` | 22 (22) | default; the worker's entry and syscall stub |
 | `urmqtt-nistz256` | 28 (28) | allow; the calls into the vendored P-256 assembly (x86_64 and aarch64) and the comb table's reinterpretation (ADR-130, ADR-255) |
 | `urmqtt-sync` | 19 (19) | deny; spinlock, once-cell, SPSC ring |
-| `urmqtt-virtio` | 19 (19) | deny |
+| `urmqtt-virtio` | 21 (21) | deny |
 | `urmqtt-log` | 12 (12) | deny |
 | `urmqtt-config` | 9 (9) | deny; the typed `CONFIG` in `.bss` |
 | `urmqtt-usys` | 8 (8) | default; the kernel and worker's shared formats |
@@ -161,6 +163,7 @@ not on bare metal for devices (DMA, see H4b).
 | ACPI tables | firmware | `platform/src/acpi.rs` | table lengths, MADT entry lengths | `acpi_parse` |
 | PCI configuration space, capabilities | firmware/devices | `pci/src/lib.rs` | capability list walk | **none** (gap H0-W9) |
 | virtio rings, config space, SCSI sense/INQUIRY | hypervisor/devices | `virtio/src/{queue,blk,net,scsi,transport}.rs` | ring sizes, descriptor ids | **none** (gap H0-W9) |
+| virtio-gpu control-queue responses (ADR-256; only with `console.virtio_gpu` not `"off"`, the default) | hypervisor | `virtio/src/gpu.rs` (`parse_response`, `choose_mode`, `auto_choice`) | fixed-size copy of the response (at most 408 bytes); the device's written length is capped at the buffer; type, length and fence checked; a display info only whole; no device value is used as a pointer or an index; the mode is clamped to 640x480..1920x1080 and an 8 MiB budget; every wait has a timeout | `virtio_gpu_response` (narrows H0-W9 for this parser only) |
 | Limine responses (memory map, MP, date) | bootloader | `kernel/src/boot.rs` via the `limine` crate | — | none (trusted) |
 | Configuration (`deploy/<env>/config.toml`, PEMs, packed into the `urmqtt-cfg` blob of the image's slot; ADR-215, ADR-216) | operator, when the image is made | `config-schema` at pack time, `urmqtt-cfg` at every boot | fail closed: the kernel refuses a blob it does not understand, a dev option on a release kernel, a bad fingerprint or signature | `config_parse`, `cfg_blob` |
 | Kernel command line | operator (`limine.conf`) | `kernel/src/cmdline.rs` | **prod ignores every option** (dev only) | none (fixed words) |
@@ -237,6 +240,7 @@ scenario (`scripts/smoke.sh`), a host test or a CI job. "**none**" is a gap.
 | What may start the installer: three production words, a module the loader pins, an enrolled menu | `cmdline.rs`, `install.rs`, `mkiso.sh` (H8, ADR-253) | `production_honours_*` (host), `SMOKE_ONLY=install-rules` (a word added to the menu refused; with no module `install` writes nothing; a changed installation image refused; the target disk's SHA-256 unchanged; three machines) | all |
 | Image secrecy: a warning for a production image built outside CI; no key bytes in logs or repro output | `mkiso.sh`, `scripts/secret-scan.py`, `scripts/repro.sh` (H8, ADR-252) | `SMOKE_ONLY=secrecy` (server key and disk key scanned for in the serial logs of an encrypted boot and both refusals, dev and release kernels; the scan must find them in the image), the scan in `make repro` | aarch64 (repro: the image it builds) |
 | SBOM, vet, advisory job, vulnerability process | `scripts/sbom.py`, `supply-chain/`, CI (H9, ADR-190 to ADR-193) | CI jobs; 53 of 67 kernel-linked crate versions are cargo-vet *exemptions*, not audits ([audit/vet-exemptions.md](audit/vet-exemptions.md)) | n/a |
+| virtio-gpu console (optional, off by default): DMA only into memory allocated for it, the device lock only tried, every wait bounded | `virtio/src/gpu.rs`, `kernel/src/gpucon.rs`, `log` presenter hooks (ADR-256) | host tests (encoding, parsing, mode, `auto`), `virtio_gpu_response` fuzzing, smoke `virtio-gpu-*` (QMP screendump checked; `off`: not started); real machine: netcup VPS 500 ARM G12.5 | both |
 
 ---
 
@@ -300,6 +304,8 @@ Found while doing H8:
 | H8-W5 | SECURITY-PLAN said "exactly one command-line word, `install`"; production honours three (`install`, `live`, `diag`) | low (wording) | `cmdline.rs` | **fixed in H8:** the documents say so (ADR-253) |
 | H8-W6 | **No downgrade protection**: an older, correctly pinned and signed image boots | low | ADR-251 | open (no version counter, no `dbx` plan) |
 | A255-W1 | **ECDSA signing with the ARMv8 assembly shows a repeatable timing difference between a sparse and random secret scalar on the GitHub arm64 runner** (`make ct`: |t| = 8.6, 9.1, 8.3 in three attempts and 8.6 the run before; ECDH 3.9 and key generation 1.9 on the same runner pass; the leaky control scores > 1000; an Apple M4 in a container scores 0.5 to 1.9). The cause is **not understood**. The bound for this one case was raised from 7 to 12 at the owner's request so that CI can pass while it is investigated; the test stays and prints the score. Leading hypothesis: PSTATE.DIT (Arm cores with FEAT_DIT guarantee data-independent multiplier timing only when DIT is set) | **unknown** until explained (a secret-dependent timing in ECDSA signing would be medium to high; it is not shown to exist beyond the test) | `crates/tls/tests/constant_time.rs` (`P256_SIGN_BOUND`), ADR-255 | open: branch `ct-dit` investigates; lower the bound back to 7 when the cause is found |
+| A256-W1 | ~~A virtio-gpu display info **4 bytes short** of the structure (the last scanout's unread `flags`) was accepted~~ | low (the hypervisor is trusted; nothing past the buffer was read) | `virtio/src/gpu.rs` | **fixed in ADR-256** before merge: found by the new `virtio_gpu_response` fuzz target in its first minute; the whole 408 bytes are required, with a regression test |
+| A256-W2 | **`console.virtio_gpu = "auto"` cannot tell a live RAM framebuffer (QEMU `ramfb`) from the dead GOP shadow of edk2's virtio-gpu driver**: with both devices it takes the virtio-gpu, and the `ramfb` picture freezes | low (a display, opt-in, logged with its reason) | `kernel/src/devices.rs`, `auto_choice` | accepted, documented (ADR-256); `"on"`/`"off"` decide explicitly |
 
 Untested protections (from §3) count as gaps as well: FP-state save, 0-RTT,
 the page-table lock and the SQLite flags (the last is tested since H10). The kernel hash in
@@ -470,6 +476,7 @@ the date of the run is in PROGRESS.md for the milestone named.
 | 32 | An unsigned, foreign-signed or post-signing-modified loader under Secure Boot | `secureboot-*` (`SMOKE_ONLY=secureboot`) | `Access Denied` on x86_64 OVMF; **aarch64, Proxmox and a physical PC not tested** (H8-W4) |
 | 33 | Key bytes in a log, panic or the repro output | `secrecy`, the scan in `make repro` | none found; the scan sees the keys in the image (the control) |
 | 34 | The installer started by an added word, or with a replaced installation image | `install-rules-*` | refused; the target disk unchanged |
+| 35 | Malformed, short, mistyped or wrongly fenced virtio-gpu responses (a hostile hypervisor's display device) | `virtio_gpu_response` (52 million runs on the Mac at ADR-256), parser host tests | **found: a display info 4 bytes short was accepted (A256-W1), fixed**; nothing else; the rest of virtio (rings, blk, net, scsi) is still item 27 |
 | 29 | **A write to a page table after the lock** | none | **not tested** (H0-W10) |
 | 30 | **Timing of P-256, X25519, Ed25519** | `make ct`: `p256_*_is_constant_time` (ADR-255) | P-256 key generation, ECDH and signing: no class dependence found (\|t\| below the bound of 7, control far above it; Docker on an M4 Pro, CRYPTO.md); **X25519 and Ed25519 not measured** (§6) |
 | 31 | **A crafted SQLite database file under ASan** | none | **not fuzzed** (H0-W8, contained by H6) |

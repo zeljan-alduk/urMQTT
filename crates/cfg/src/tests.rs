@@ -289,13 +289,19 @@ fn format_2_is_written_and_format_1_is_still_read() {
 fn virtio_gpu_needs_format_5_and_off_writes_nothing() {
     use crate::fields::VIRTIO_GPU_MODES;
     let f = crate::fields::by_key("console.virtio_gpu").unwrap();
-    assert_eq!((f.tag, f.since, f.dev_only), (tag::CON_VIRTIO_GPU, 5, false));
+    assert_eq!(
+        (f.tag, f.since, f.dev_only),
+        (tag::CON_VIRTIO_GPU, 5, false)
+    );
     assert_eq!(VIRTIO_GPU_MODES, ["off", "auto", "on"]);
     let mut off = Builder::new();
     off.variant(tag::CON_VIRTIO_GPU, 0).unwrap();
     assert_eq!(off.lowest_version(), 2);
     assert_eq!(off.finish(false).unwrap(), empty());
-    assert_eq!(Blob::parse(&empty()).unwrap().variant(tag::CON_VIRTIO_GPU), 0);
+    assert_eq!(
+        Blob::parse(&empty()).unwrap().variant(tag::CON_VIRTIO_GPU),
+        0
+    );
     for v in [1u8, 2] {
         let mut b = Builder::new();
         b.variant(tag::CON_VIRTIO_GPU, v).unwrap();

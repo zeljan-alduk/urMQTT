@@ -64,15 +64,13 @@ pub fn install(gpu: VirtioGpu, bdf: &str, why: &str) {
     // alone, mapped read-write in the HHDM for the kernel's lifetime (the
     // driver is never dropped: it moves into `GPU`). Only the console writes
     // it; the device only reads it, when it is told to (TRANSFER_TO_HOST_2D).
-    let buf: &'static mut [u8] = unsafe { core::slice::from_raw_parts_mut(fb.va as *mut u8, bytes) };
+    let buf: &'static mut [u8] =
+        unsafe { core::slice::from_raw_parts_mut(fb.va as *mut u8, bytes) };
     let Some(con) = FbConsole::new(buf, w, h, w * 4, FORMAT) else {
         warn!("console: virtio-gpu at pci {bdf}: no text fits {w}x{h}, not used");
         return;
     };
-    let preferred = gpu
-        .preferred
-        .map(|r| (r.width, r.height))
-        .unwrap_or((0, 0));
+    let preferred = gpu.preferred.map(|r| (r.width, r.height)).unwrap_or((0, 0));
     let scanouts = gpu.scanouts;
     *GPU.lock() = Some(gpu);
     // Release: the driver in `GPU` is visible before a presenter sees the flag.

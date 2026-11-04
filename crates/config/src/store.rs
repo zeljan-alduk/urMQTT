@@ -683,7 +683,11 @@ mod tests {
             assert_eq!(build(&blob, arena).console.virtio_gpu, mode);
         }
         assert_eq!(
-            (VirtioGpuMode::Off.name(), VirtioGpuMode::Auto.name(), VirtioGpuMode::On.name()),
+            (
+                VirtioGpuMode::Off.name(),
+                VirtioGpuMode::Auto.name(),
+                VirtioGpuMode::On.name()
+            ),
             ("off", "auto", "on")
         );
     }

@@ -983,6 +983,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "urmqtt-arch"
+version = "0.3.0"
+dependencies = [
+ "urmqtt-arch-aarch64",
+ "urmqtt-arch-x86_64",
+ "urmqtt-dispatch",
+]
+
+[[package]]
 name = "urmqtt-arch-aarch64"
 version = "0.3.0"
 dependencies = [
@@ -1075,6 +1084,7 @@ dependencies = [
  "urmqtt-store",
  "urmqtt-tcp",
  "urmqtt-tls",
+ "urmqtt-virtio",
 ]
 
 [[package]]
@@ -1099,6 +1109,10 @@ dependencies = [
  "cpufeatures 0.3.1",
  "zeroize",
 ]
+
+[[package]]
+name = "urmqtt-pci"
+version = "0.3.0"
 
 [[package]]
 name = "urmqtt-plain"
@@ -1173,6 +1187,14 @@ dependencies = [
 [[package]]
 name = "urmqtt-usys"
 version = "0.3.0"
+
+[[package]]
+name = "urmqtt-virtio"
+version = "0.3.0"
+dependencies = [
+ "urmqtt-arch",
+ "urmqtt-pci",
+]
 
 [[package]]
 name = "urmqtt-x25519"

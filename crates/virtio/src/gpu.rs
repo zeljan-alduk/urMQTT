@@ -155,6 +155,11 @@ pub fn parse_response(
     }
     match ty {
         RESP_OK_DISPLAY_INFO => {
+            // The whole structure, even the fields not read (the last
+            // scanout's flags): a shorter answer is not a display info.
+            if resp.len() < DISPLAY_INFO_LEN {
+                return Err(RespError::Short);
+            }
             let mut info = DisplayInfo::default();
             for (i, slot) in info.modes.iter_mut().enumerate() {
                 let at = HDR_LEN + i * DISPLAY_ONE;
@@ -234,7 +239,11 @@ pub fn cmd_create_2d(id: u32, format: u32, width: u32, height: u32) -> Request {
 
 /// `RESOURCE_ATTACH_BACKING` with one memory entry (addr, length, padding).
 pub fn cmd_attach_backing(id: u32, addr: u64, length: u32) -> Request {
-    let mut r = request(CMD_RESOURCE_ATTACH_BACKING, HDR_LEN + 8 + 16, RESP_OK_NODATA);
+    let mut r = request(
+        CMD_RESOURCE_ATTACH_BACKING,
+        HDR_LEN + 8 + 16,
+        RESP_OK_NODATA,
+    );
     put32(&mut r.bytes, HDR_LEN, id);
     put32(&mut r.bytes, HDR_LEN + 4, 1);
     put64(&mut r.bytes, HDR_LEN + 8, addr);
@@ -427,10 +436,11 @@ impl VirtioGpu {
         if id != head {
             return Err(VirtioError::Queue(crate::QueueError::DeviceProtocol));
         }
-        self.parse_slot(0, written, req.expect).map_err(|e| match e {
-            RespError::Device(t) => VirtioError::Io((t & 0xff) as u8),
-            _ => VirtioError::Io(0xff),
-        })
+        self.parse_slot(0, written, req.expect)
+            .map_err(|e| match e {
+                RespError::Device(t) => VirtioError::Io((t & 0xff) as u8),
+                _ => VirtioError::Io(0xff),
+            })
     }
 
     /// Takes the answers of a queued present pair that the device has
@@ -598,7 +608,10 @@ mod tests {
         assert_eq!(le32(&r.bytes, 0), Some(0x0106));
         assert_eq!((le32(&r.bytes, 24), le32(&r.bytes, 28)), (Some(1), Some(1)));
         assert_eq!(le64(&r.bytes, 32), Some(0x1234_5678_9abc_d000));
-        assert_eq!((le32(&r.bytes, 40), le32(&r.bytes, 44)), (Some(4096), Some(0)));
+        assert_eq!(
+            (le32(&r.bytes, 40), le32(&r.bytes, 44)),
+            (Some(4096), Some(0))
+        );
 
         let rect = Rect {
             x: 1,
@@ -666,6 +679,11 @@ mod tests {
         let di = hdr(RESP_OK_DISPLAY_INFO, 0, 0);
         assert_eq!(
             parse_response(&di, 200, RESP_OK_DISPLAY_INFO, None),
+            Err(RespError::Short)
+        );
+        // Found by the fuzz target: everything but the last scanout's flags.
+        assert_eq!(
+            parse_response(&di, DISPLAY_INFO_LEN as u32 - 4, RESP_OK_DISPLAY_INFO, None),
             Err(RespError::Short)
         );
         // Error types, unexpected types, the wrong OK type.

@@ -67,7 +67,10 @@ fn the_three_words_parse_and_nothing_else_does() {
         let t = format!("{base}\n[console]\nvirtio_gpu = \"{word}\"\n");
         assert_eq!(parse("dev", &t).unwrap().console.virtio_gpu, mode);
         // Allowed outside dev too: it changes what is shown, not what is served.
-        let p = format!("{}\n[console]\nvirtio_gpu = \"{word}\"\n", without_console(PROD));
+        let p = format!(
+            "{}\n[console]\nvirtio_gpu = \"{word}\"\n",
+            without_console(PROD)
+        );
         assert_eq!(parse("prod", &p).unwrap().console.virtio_gpu, mode);
     }
     for bad in [
@@ -100,5 +103,8 @@ fn off_is_format_2_and_auto_and_on_are_format_5() {
         urmqtt_cfg::check::check(&b, false).unwrap();
     }
     // Off is byte for byte the configuration without the section.
-    assert_eq!(run("").unwrap(), run("[console]\nvirtio_gpu = \"off\"\n").unwrap());
+    assert_eq!(
+        run("").unwrap(),
+        run("[console]\nvirtio_gpu = \"off\"\n").unwrap()
+    );
 }

@@ -60,7 +60,10 @@ pub fn init_framebuffer(fb: &Framebuffer) {
 /// address whether it is RAM or a device BAR.
 pub fn boot_framebuffer_phys() -> Option<(u64, u64)> {
     // Relaxed: see `init_framebuffer`.
-    let (va, len) = (FB_VA.load(Ordering::Relaxed), FB_LEN.load(Ordering::Relaxed));
+    let (va, len) = (
+        FB_VA.load(Ordering::Relaxed),
+        FB_LEN.load(Ordering::Relaxed),
+    );
     (va != 0).then(|| (va.wrapping_sub(crate::vm::hhdm()), len))
 }
 
