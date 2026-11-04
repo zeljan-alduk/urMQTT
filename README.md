@@ -617,6 +617,7 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `storage.refuse_on_corruption` | bool | Refuse to serve when `PRAGMA quick_check` fails (false only in `dev`) |
 | `observability.log_level` | `error`…`trace` | |
 | `console.virtio_gpu` | `"off"` (default) \| `"auto"` \| `"on"` | Show the console on a virtio-gpu display (2D) for VMs whose firmware display is dead after boot (netcup ARM). `auto`: when the boot framebuffer is missing or is RAM nothing shows; `on`: whenever a virtio-gpu is found. Not `off` needs configuration format 5 (ADR-256) |
+| `devices.virtio_console`, `virtio_balloon`, `virtio_input`, `virtio_vsock` | `"off"` (default) \| `"auto"` \| `"on"` | The optional virtio drivers (ADR-257, ADR-258): a log copy and prompt input on a virtio-console, memory statistics for the host (never inflates), virtio keyboards for the Diagnostic prompts, the Diagnostic report on vsock port 2883. Not `off` needs configuration format 6 and a kernel with the driver |
 | `observability.syslog_udp`, `metrics_udp` | `""` or `"a.b.c.d:port"` | Private syslog and statsd collectors |
 | `watchdog.handler_budget_ms` | 1–10 000 | Time budget of an ordinary handler |
 | `watchdog.handshake_budget_ms` | 0, 1–900 | Budget of a TLS handshake step; 0 (default) = 10x the handshake cost measured at boot, 50–500 ms (ADR-071) |

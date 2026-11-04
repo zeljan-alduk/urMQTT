@@ -100,12 +100,14 @@ from them at the H10 commit (H0 baseline: 30 773 lines, 65 linked crates, 308
 | RustCrypto `cpufeatures` 0.2.17 and 0.3.1, vendored (X0b) | 675 + 598 lines | upstream sources plus one hunk each: on bare metal they ask the kernel's sealed dispatch (`urmqtt_cpu_has`). Reviewable with `diff -r` against the crates.io files ([vendor/README.md](../vendor/README.md)) |
 | Limine v12.9.4 (binary) | `BOOTAA64.EFI`, 331 776 bytes (and the x86_64 and BIOS loaders in the universal ISO) | pre-kernel; its configuration is enrolled (ADR-250), signing path ADR-251; **no project signing key exists**, so release loaders are unsigned |
 
-**`unsafe` in non-test code of the workspace:** 901 sites, **all 901 with a
+**`unsafe` in non-test code of the workspace:** 910 sites, **all 910 with a
 `// SAFETY:` comment or a `# Safety` section** (the tool crate `builder-wasm`
-accounts for 29 of them; it is not in the image). In the image: 872 (889 and
-860 at H10; the 9 added by ADR-255 are the aarch64 calls into the assembly; the 3
-added by ADR-256 are the virtio-gpu driver's request slots and framebuffer, and the
-console's slice of that framebuffer).
+accounts for 29 of them and the fake virtio device of the tests and fuzz targets,
+`virtio/src/fake.rs`, behind the `fake` feature, for 6; neither is in the image). In
+the image: 875 (889 and 860 at H10; the 9 added by ADR-255 are the aarch64 calls into
+the assembly; the 3 added by ADR-256 are the virtio-gpu driver's request slots and
+framebuffer, and the console's slice of that framebuffer; the 3 added by ADR-257 are
+the shared queue allocation and the two bounds-checked DMA copies of `virtio/src/bus.rs`).
 
 | Crate | Sites (justified) | Crate lint |
 |---|---|---|
@@ -117,7 +119,7 @@ console's slice of that framebuffer).
 | `urmqtt-dbworker` | 22 (22) | default; the worker's entry and syscall stub |
 | `urmqtt-nistz256` | 28 (28) | allow; the calls into the vendored P-256 assembly (x86_64 and aarch64) and the comb table's reinterpretation (ADR-130, ADR-255) |
 | `urmqtt-sync` | 19 (19) | deny; spinlock, once-cell, SPSC ring |
-| `urmqtt-virtio` | 21 (21) | deny |
+| `urmqtt-virtio` | 30 (30) | deny; 6 of them in the fake device (tests, fuzzing; not in the image) |
 | `urmqtt-log` | 12 (12) | deny |
 | `urmqtt-config` | 9 (9) | deny; the typed `CONFIG` in `.bss` |
 | `urmqtt-usys` | 8 (8) | default; the kernel and worker's shared formats |
@@ -164,6 +166,10 @@ not on bare metal for devices (DMA, see H4b).
 | PCI configuration space, capabilities | firmware/devices | `pci/src/lib.rs` | capability list walk | **none** (gap H0-W9) |
 | virtio rings, config space, SCSI sense/INQUIRY | hypervisor/devices | `virtio/src/{queue,blk,net,scsi,transport}.rs` | ring sizes, descriptor ids | **none** (gap H0-W9) |
 | virtio-gpu control-queue responses (ADR-256; only with `console.virtio_gpu` not `"off"`, the default) | hypervisor | `virtio/src/gpu.rs` (`parse_response`, `choose_mode`, `auto_choice`) | fixed-size copy of the response (at most 408 bytes); the device's written length is capped at the buffer; type, length and fence checked; a display info only whole; no device value is used as a pointer or an index; the mode is clamped to 640x480..1920x1080 and an 8 MiB budget; every wait has a timeout | `virtio_gpu_response` (narrows H0-W9 for this parser only) |
+| virtio-console port 0 receive buffers and transmit completions (ADR-258; only with `devices.virtio_console` not `"off"`, the default) | hypervisor | `virtio/src/console.rs`, `kernel/src/vdev/console.rs` | length clamped to the 64-byte buffer; heads checked against a slot map; received bytes into a fixed 256-byte ring (overflow dropped, counted); output never waits (full buffers drop, counted); the log only tries the device lock | `virtio_console_device` (the driver against a fake device with hostile completions) |
+| virtio-balloon `num_pages` and statistics completions (ADR-258; only with `devices.virtio_balloon` not `"off"`) | hypervisor | `virtio/src/balloon.rs`, `kernel/src/vdev/balloon.rs` | the request is only logged (never inflates, `actual` stays 0); statistics never claim more than the total; a completion for a head never posted is counted; the heap's numbers only tried from the tick | `virtio_balloon_device` |
+| virtio-input configuration (name, event bitmaps) and events (ADR-258; only with `devices.virtio_input` not `"off"`) | hypervisor (fed by the provider's VNC console) | `virtio/src/input.rs`, `kernel/src/vdev/input.rs` | the configuration's size clamped to the 128-byte union, the name to 32 printable bytes; an event only whole (8 bytes); key codes through a fixed table; at most 4 devices; typed bytes into a 256-byte ring | `virtio_input_event` |
+| virtio-vsock packets, credit and transport events (ADR-258; only with `devices.virtio_vsock` not `"off"`) | hypervisor and host processes (any CID the host routes) | `virtio/src/vsock.rs` (`Hdr::parse`, `Stack`), `kernel/src/vdev/vsock.rs` | one listening port (2883), only from CID 2, at most 4 connections, read-only (peer data counted and dropped), sends only within the peer's credit (never negative), payload counted from what the device delivered, 10 s idle and 2 s close timeouts, a reset never answered with a reset; **untested on a real device** | `virtio_vsock_packet` |
 | Limine responses (memory map, MP, date) | bootloader | `kernel/src/boot.rs` via the `limine` crate | — | none (trusted) |
 | Configuration (`deploy/<env>/config.toml`, PEMs, packed into the `urmqtt-cfg` blob of the image's slot; ADR-215, ADR-216) | operator, when the image is made | `config-schema` at pack time, `urmqtt-cfg` at every boot | fail closed: the kernel refuses a blob it does not understand, a dev option on a release kernel, a bad fingerprint or signature | `config_parse`, `cfg_blob` |
 | Kernel command line | operator (`limine.conf`) | `kernel/src/cmdline.rs` | **prod ignores every option** (dev only) | none (fixed words) |
@@ -241,6 +247,8 @@ scenario (`scripts/smoke.sh`), a host test or a CI job. "**none**" is a gap.
 | Image secrecy: a warning for a production image built outside CI; no key bytes in logs or repro output | `mkiso.sh`, `scripts/secret-scan.py`, `scripts/repro.sh` (H8, ADR-252) | `SMOKE_ONLY=secrecy` (server key and disk key scanned for in the serial logs of an encrypted boot and both refusals, dev and release kernels; the scan must find them in the image), the scan in `make repro` | aarch64 (repro: the image it builds) |
 | SBOM, vet, advisory job, vulnerability process | `scripts/sbom.py`, `supply-chain/`, CI (H9, ADR-190 to ADR-193) | CI jobs; 53 of 67 kernel-linked crate versions are cargo-vet *exemptions*, not audits ([audit/vet-exemptions.md](audit/vet-exemptions.md)) | n/a |
 | virtio-gpu console (optional, off by default): DMA only into memory allocated for it, the device lock only tried, every wait bounded | `virtio/src/gpu.rs`, `kernel/src/gpucon.rs`, `log` presenter hooks (ADR-256) | host tests (encoding, parsing, mode, `auto`), `virtio_gpu_response` fuzzing, smoke `virtio-gpu-*` (QMP screendump checked; `off`: not started); real machine: netcup VPS 500 ARM G12.5 | both |
+| The optional virtio drivers (console, balloon, input, vsock; each off by default): a driver configured but not compiled in is refused at pack time and warned about at boot; every device listed with its state | `virtio/src/registry.rs`, `kernel/src/vdev/`, `cfg/src/drivers.rs`, `config/tools image.rs` (ADR-257) | host tests (the table's const check, registry and key tables equal, marker found, `pack --kernel` refusal), smoke `virtio-devices: every key off, listed and not driven` | both |
+| virtio-console, -balloon, -input, -vsock: lengths clamped, heads checked, loops bounded, nothing waits for the device, locks only tried from the log, the tick and the prompts; the balloon never inflates | `virtio/src/{console,balloon,input,vsock}.rs`, `kernel/src/vdev/` (ADR-258) | host tests against `fake::FakeBus`, fuzz `virtio_console_device`, `virtio_balloon_device`, `virtio_input_event`, `virtio_vsock_packet`, smoke `virtio-devices: *` (QMP stats, balloon request refused, `WIPE` typed on the virtio keyboard and on the virtio-console); vsock: host tests and fuzzing only | aarch64 (smoke); both (build) |
 
 ---
 
@@ -478,6 +486,7 @@ the date of the run is in PROGRESS.md for the milestone named.
 | 33 | Key bytes in a log, panic or the repro output | `secrecy`, the scan in `make repro` | none found; the scan sees the keys in the image (the control) |
 | 34 | The installer started by an added word, or with a replaced installation image | `install-rules-*` | refused; the target disk unchanged |
 | 35 | Malformed, short, mistyped or wrongly fenced virtio-gpu responses (a hostile hypervisor's display device) | `virtio_gpu_response` (52 million runs on the Mac at ADR-256), parser host tests | **found: a display info 4 bytes short was accepted (A256-W1), fixed**; nothing else; the rest of virtio (rings, blk, net, scsi) is still item 27 |
+| 36 | A hostile virtio-console, -balloon, -input or -vsock device (completions for heads never posted, lengths past the buffer, indices far ahead, floods, a host that never reads, any vsock packet sequence) | host tests against the fake device; `virtio_console_device`, `virtio_balloon_device`, `virtio_input_event`, `virtio_vsock_packet` (one minute each on the Mac at ADR-258) | nothing found in the drivers (the first runs found three bugs of the fuzz harness and the fake device, fixed); vsock never ran against a real device |
 | 29 | **A write to a page table after the lock** | none | **not tested** (H0-W10) |
 | 30 | **Timing of P-256, X25519, Ed25519** | `make ct`: `p256_*_is_constant_time` (ADR-255) | P-256 key generation, ECDH, signing key and nonce: no class dependence found (\|t\| below the bound of 7, control far above it; Docker on an M4 Pro and the Neoverse N2 CI runner, CRYPTO.md; the earlier signing signal was the harness, A255-W1); **X25519 and Ed25519 not measured** (§6) |
 | 31 | **A crafted SQLite database file under ASan** | none | **not fuzzed** (H0-W8, contained by H6) |

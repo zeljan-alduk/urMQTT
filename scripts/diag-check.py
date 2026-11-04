@@ -35,7 +35,7 @@ def main():
         fail(f"not valid JSON: {e}")
 
     for key in ("urmqtt_diag", "version", "arch", "env", "hypervisor", "cpu", "memory",
-                "pci", "disks", "nics", "time", "firmware", "ram", "crypto", "cpu_clock", "entropy"):
+                "pci", "virtio", "disks", "nics", "time", "firmware", "ram", "crypto", "cpu_clock", "entropy"):
         if key not in d:
             fail(f"missing key {key}")
     if d["urmqtt_diag"] != 1:
@@ -51,6 +51,16 @@ def main():
         fail(f"implausible memory {m}")
     if not d["pci"] or not all("bdf" in p and "vendor" in p and "class" in p for p in d["pci"]):
         fail("pci list is empty or malformed")
+    # ADR-257: every virtio function of the PCI list is in the virtio list, with a state.
+    if "virtio" not in d:
+        fail("missing key virtio")
+    vbdf = {v.get("bdf") for v in d["virtio"]}
+    if not all({"bdf", "type", "name", "state", "detail"} <= v.keys() and v["state"] for v in d["virtio"]):
+        fail("virtio list is malformed")
+    missing = [p["bdf"] for p in d["pci"]
+               if p["vendor"] == "1af4" and 0x1000 <= int(p["device"], 16) <= 0x107f and p["bdf"] not in vbdf]
+    if missing:
+        fail(f"virtio functions without a state: {missing}")
     if d["firmware"]["kind"] not in ("BIOS", "UEFI (x86-64)", "UEFI (aarch64)", "UEFI (32-bit)"):
         fail(f"firmware {d['firmware']}")
     t = d["time"]

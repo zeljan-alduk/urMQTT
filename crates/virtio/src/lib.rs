@@ -7,7 +7,7 @@
 //! are wired per queue by the caller. Everything a device returns (used
 //! ring indices, lengths, config values) is validated before use.
 
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(any(test, feature = "fake")), no_std)]
 #![deny(unsafe_code)]
 #![deny(
     clippy::unwrap_used,
@@ -23,7 +23,7 @@ pub mod blk;
 pub mod bus;
 #[cfg(feature = "console")]
 pub mod console;
-#[cfg(test)]
+#[cfg(any(test, feature = "fake"))]
 pub mod fake;
 #[cfg(feature = "gpu")]
 pub mod gpu;

@@ -40,5 +40,7 @@ console = []
 balloon = []
 input = []
 vsock = []
+# The fake device of the host tests, for the fuzz targets (std; never in the kernel).
+fake = []
 vps = ["net", "blk", "scsi", "rng", "gpu", "console", "balloon", "input", "vsock"]
 all = ["vps"]

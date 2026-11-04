@@ -10,7 +10,6 @@
 #![allow(
     clippy::unwrap_used,
     clippy::indexing_slicing,
-    clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
 )]
 
@@ -21,12 +20,14 @@ use crate::bus::Bus;
 use crate::queue::{DESC_F_NEXT, DESC_F_WRITE, Layout, SplitQueue};
 use crate::{DmaRegion, Env, VirtioError};
 
-/// Host memory as DMA memory; a clock that advances on every reading.
+/// Host memory as DMA memory (freed with the environment, which must
+/// outlive the driver); a clock that advances on every reading.
 #[derive(Default)]
 pub struct FakeEnv {
     pub now: Cell<u64>,
     /// Refuse allocations after this many (None: never).
     pub dma_budget: Cell<Option<usize>>,
+    mem: RefCell<Vec<Vec<u64>>>,
 }
 
 impl Env for FakeEnv {
@@ -38,8 +39,10 @@ impl Env for FakeEnv {
             self.dma_budget.set(Some(n - 1));
         }
         let words = bytes.div_ceil(8).max(1);
-        let mem: &'static mut [u64] = Vec::leak(vec![0u64; words]);
-        let va = mem.as_mut_ptr() as usize;
+        let mut buf = vec![0u64; words];
+        // The heap buffer does not move when the outer list grows.
+        let va = buf.as_mut_ptr() as usize;
+        self.mem.borrow_mut().push(buf);
         Some(DmaRegion {
             va,
             pa: va as u64,
@@ -105,6 +108,7 @@ impl FakeBus {
     }
 
     fn rd16(addr: u64) -> u16 {
+        // SAFETY: `addr` is inside ring memory the driver programmed (host memory, pa == va, owned by the FakeEnv).
         unsafe { (addr as *const u16).read_volatile() }
     }
 
@@ -121,6 +125,7 @@ impl FakeBus {
         let mut i = head;
         for _ in 0..s.size {
             let d = s.desc + 16 * u64::from(i);
+            // SAFETY: descriptor `i < size` of the table the driver programmed (FakeEnv memory).
             let (pa, len, flags, next) = unsafe {
                 (
                     (d as *const u64).read(),
@@ -142,12 +147,17 @@ impl FakeBus {
     pub fn complete(&self, q: u16, head: u32, len: u32) {
         let mut qs = self.queues.borrow_mut();
         let s = &mut qs[usize::from(q)];
+        if !s.enabled {
+            return;
+        }
         let e = s.used + 4 + 8 * u64::from(s.used_idx % s.size);
+        // SAFETY: used-ring element `used_idx % size` of the ring the driver programmed.
         unsafe {
             (e as *mut u32).write(head);
             ((e + 4) as *mut u32).write(len);
         }
         s.used_idx = s.used_idx.wrapping_add(1);
+        // SAFETY: the used ring's index field, inside the ring the driver programmed.
         unsafe { ((s.used + 2) as *mut u16).write_volatile(s.used_idx) };
     }
 
@@ -160,6 +170,7 @@ impl FakeBus {
                 continue;
             }
             let n = (len as usize).min(data.len() - at);
+            // SAFETY: `n <= len`, a device-writable buffer the driver posted (FakeEnv memory, pa == va).
             unsafe { core::ptr::copy_nonoverlapping(data[at..].as_ptr(), pa as *mut u8, n) };
             at += n;
             if at == data.len() {
@@ -176,6 +187,7 @@ impl FakeBus {
             if w {
                 continue;
             }
+            // SAFETY: a driver-readable buffer of `len` bytes the driver posted (FakeEnv memory, pa == va).
             let s = unsafe { core::slice::from_raw_parts(pa as *const u8, len as usize) };
             out.extend_from_slice(s);
         }
