@@ -149,6 +149,9 @@ fn report(j: &Value) -> Result<Report, String> {
             link: n.get("link").and_then(Value::as_bool),
         });
     }
+    for d in j.get("disks").and_then(Value::as_arr).unwrap_or_default() {
+        r.disks.push(disk(d));
+    }
     if let Some(b) = j.get("ram").filter(|b| !matches!(b, Value::Null)) {
         r.ram = Some(RamBench {
             buffer: num(b, "buffer_bytes"),
@@ -213,6 +216,80 @@ fn report(j: &Value) -> Result<Report, String> {
         });
     }
     Ok(r)
+}
+
+fn disk(d: &Value) -> urmqtt_diag::report::Disk {
+    use urmqtt_diag::report::{RandRead, SeqRead, WriteState};
+    let seq_read = d
+        .get("seq_read")
+        .filter(|s| !matches!(s, Value::Null))
+        .map(|s| {
+            let (bytes, mib_s) = (num(s, "bytes"), num(s, "mib_s"));
+            SeqRead {
+                bytes,
+                // Not in the JSON: what the rate implies.
+                ns: (u128::from(bytes) * 1_000_000_000 / (u128::from(mib_s.max(1)) << 20)) as u64,
+                mib_s,
+                block: num(s, "block"),
+            }
+        });
+    let rand_read = d
+        .get("rand_read")
+        .filter(|s| !matches!(s, Value::Null))
+        .map(|s| {
+            let (ops, iops) = (num(s, "ops"), num(s, "iops"));
+            let lat = s.get("latency_ns").unwrap_or(s);
+            RandRead {
+                ops,
+                ns: (u128::from(ops) * 1_000_000_000 / u128::from(iops.max(1))) as u64,
+                iops,
+                block: num(s, "block"),
+                lat: urmqtt_diag::stats::Summary {
+                    count: num(lat, "samples") as usize,
+                    min: num(lat, "min"),
+                    p50: num(lat, "p50"),
+                    p90: num(lat, "p90"),
+                    p99: num(lat, "p99"),
+                    max: num(lat, "max"),
+                    mean: num(lat, "mean"),
+                },
+            }
+        });
+    let write = match d.get("seq_write") {
+        Some(w) => match str_of(w, "status").as_str() {
+            "skipped" => WriteState::Skipped(str_of(w, "reason")),
+            "failed" => WriteState::Failed(str_of(w, "reason")),
+            "done" => WriteState::Done {
+                bytes: num(w, "bytes"),
+                ns: 0,
+                mib_s: num(w, "mib_s"),
+                first_lba: num(w, "first_lba"),
+                sectors: num(w, "sectors"),
+                verified: w.get("verified").and_then(Value::as_bool).unwrap_or(false),
+            },
+            _ => WriteState::Pending,
+        },
+        None => WriteState::Pending,
+    };
+    urmqtt_diag::report::Disk {
+        name: str_of(d, "name"),
+        bus: str_of(d, "bus"),
+        model: d.get("model").and_then(Value::as_str).map(String::from),
+        sectors: num(d, "bytes") / 512,
+        read_only: d.get("read_only").and_then(Value::as_bool).unwrap_or(false),
+        boot_medium: d
+            .get("boot_medium")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        state: str_of(d, "state"),
+        unmeasured: d
+            .get("unmeasured")
+            .and_then(Value::as_str)
+            .map(String::from),
+        seq_read,
+        rand_read,
+        write,
+    }
 }
 
 fn raw_test(v: &Value) -> Option<urmqtt_diag::rng::RawTest> {
@@ -323,6 +400,33 @@ mod tests {
         assert_eq!(back.ram.as_ref().unwrap().read_mib_s, 6000);
         let png = render(&back, 1280, 800).unwrap();
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    /// A disk with its figures survives the JSON round trip into the picture.
+    #[test]
+    fn the_disks_of_the_report_come_back() {
+        let mut r = Report::default();
+        r.disks.push(urmqtt_diag::report::Disk {
+            name: "virtio-blk 08:00.0".into(),
+            bus: "virtio-blk".into(),
+            sectors: 1 << 17,
+            state: "installed".into(),
+            seq_read: Some(urmqtt_diag::report::SeqRead {
+                bytes: 1 << 26,
+                ns: 1,
+                mib_s: 332,
+                block: 65536,
+            }),
+            write: urmqtt_diag::report::WriteState::Skipped("no unallocated space".into()),
+            ..urmqtt_diag::report::Disk::default()
+        });
+        let back = report(&json::parse(&r.to_json()).unwrap()).unwrap();
+        let d = &back.disks[0];
+        assert_eq!((d.state.as_str(), d.sectors), ("installed", 1 << 17));
+        assert_eq!(d.seq_read.unwrap().mib_s, 332);
+        assert!(
+            matches!(&d.write, urmqtt_diag::report::WriteState::Skipped(w) if w == "no unallocated space")
+        );
     }
 
     #[test]

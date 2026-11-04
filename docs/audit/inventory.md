@@ -20,7 +20,7 @@
 | `urmqtt-control-tool` | `tools/control` | 416 | 0 | 0 (0) | default |
 | `urmqtt-dbworker` | `crates/dbworker` | 172 | 0 | 22 (22) | default |
 | `urmqtt-diag` | `crates/diag` | 3396 | 0 | 0 (0) | deny |
-| `urmqtt-diag-png` | `tools/diag-png` | 568 | 0 | 0 (0) | default |
+| `urmqtt-diag-png` | `tools/diag-png` | 670 | 0 | 0 (0) | default |
 | `urmqtt-disk-tool` | `tools/disk` | 3001 | 866 | 0 (0) | default |
 | `urmqtt-dispatch` | `crates/dispatch` | 594 | 0 | 0 (0) | forbid |
 | `urmqtt-kernel` | `crates/kernel` | 17455 | 0 | 117 (117) | deny |
@@ -42,7 +42,7 @@
 | `urmqtt-usys` | `crates/usys` | 477 | 0 | 8 (8) | default |
 | `urmqtt-virtio` | `crates/virtio` | 2458 | 0 | 19 (19) | deny |
 | `urmqtt-x25519` | `crates/x25519` | 821 | 0 | 3 (3) | default |
-| **total** | | **99221** | | **889 (889)** | |
+| **total** | | **99323** | | **889 (889)** | |
 
 ## Vendored components
 
