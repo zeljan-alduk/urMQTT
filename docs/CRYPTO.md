@@ -165,7 +165,7 @@ Tests:
 |---|---|---|
 | AEAD tag checks (records, tickets) | RustCrypto (`subtle`) | `make ct`: `forged_record_rejection_is_constant_time` (both suites), `forged_ticket_rejection_is_constant_time` |
 | Comparing our derived record keys and IVs with rustls's | `server::ct_eq` (`subtle`) | `secret_comparison_is_constant_time` |
-| P-256 secret scalars: key generation, ECDH, the signing nonce (ADR-130, ADR-255) | `nistz256`: whole-table scans (assembly on x86_64, masked Rust on aarch64), branch-free negation, the assembly's complete addition | `make ct`: `p256_key_generation_is_constant_time`, `p256_ecdh_is_constant_time`, `p256_signing_is_constant_time`, control `harness_detects_a_variable_time_scalar_multiplication` |
+| P-256 secret scalars: key generation, ECDH, the signing nonce (ADR-130, ADR-255) | `nistz256`: whole-table scans (assembly on x86_64, masked Rust on aarch64), branch-free negation, the assembly's complete addition | `make ct`: `p256_key_generation_is_constant_time`, `p256_ecdh_is_constant_time`, `p256_signing_is_constant_time` (the key), `p256_signing_nonce_is_constant_time` (the nonce), control `harness_detects_a_variable_time_scalar_multiplication` |
 | Signature checks (ECDSA, Ed25519) | `nistz256` / `p256`, `ed25519-dalek` | none needed: the inputs are public (verification is variable time by design) |
 | SYN-cookie MAC check | one 32-bit integer compare, no early exit | review |
 | Ticket key id lookup | not secret (sent in the clear) | review |
@@ -195,12 +195,15 @@ Measured on an M4 Pro (six runs, range):
 The bound is 7 (dudect: < 4.5 "probably constant time", > 10 "definitely
 not"). CI runs `make ct` on the arm64 runner.
 
-**P-256 (ADR-255).** The three cases run the production functions
-(`provider::fastec`): one class is the fixed scalar 2 (after the first window
-every digit is zero, so the scans select "infinity" and the additions take
-their infinity branch), the other a fresh random scalar per measurement, both
-copied into the same slot untimed; 20 000 measurements per run (these
-operations take 7-25 us). The control is a double-and-add that skips the
+**P-256 (ADR-255).** Key generation, ECDH and signing run the production
+functions (`provider::fastec`): one class is the fixed scalar 2 (after the
+first window every digit is zero, so the scans select "infinity" and the
+additions take their infinity branch), the other a fresh random scalar per
+measurement, both copied into the same slot untimed; 20 000 measurements per
+run (these operations take 7-25 us). Signing also signs a fresh random message
+per measurement in **both** classes (see "The signing case" below). The nonce
+case times the assembly's `sign` with the nonce as the secret (k = 2 against
+random nonces, key and message fixed), on x86_64 and AArch64 Linux only. The control is a double-and-add that skips the
 addition for zero bits: it must be detected with the same sample count.
 Measured in Docker `linux/arm64` on the M4 Pro (`ecc=nistz256-armv8`, six
 runs, range), and once natively on macOS (`portable`, RustCrypto):
@@ -210,7 +213,7 @@ runs, range), and once natively on macOS (`portable`, RustCrypto):
 | double-and-add with skipped additions (control) | 482–749 | 1093 |
 | P-256 public key (comb) | 0.8–5.5 | 2.8 |
 | P-256 ECDH (variable base) | 0.2–2.1 | 1.9 |
-| P-256 ECDSA sign | 0.5–1.9 | 0.4 |
+| P-256 ECDSA sign (one fixed message, before ct-dit) | 0.5–1.9 | 0.4 |
 
 What this shows: at this sample size, on this machine, the time does not
 depend on whether almost every window digit of the secret scalar is zero;
@@ -219,6 +222,31 @@ others: 3.6, 3.3, 2.3, 1.0, 0.8). What it does not show: the absence of
 smaller leaks, cache or port side channels (a timing test is not an
 analysis), behaviour on a server core (Neoverse N1 has not been measured), or
 anything about X25519 and Ed25519, which are still not measured.
+
+**The signing case (ct-dit, ADR-255 amendment).** Until ct-dit the signing
+case signed one fixed message. Then the fixed key always produces the same
+nonce and the same signature, the random keys a different one each time, and
+the classes differ in their public output as well as in the key. On the CI
+arm64 runner (Neoverse N2) that case scored 7.0 to 11.7 in every attempt.
+Diagnosis there, 24 attempts per line (four jobs):
+
+| Case (arm64 runner) | \|t\| |
+|---|---:|
+| production sign, one message, d = 2 against random keys | 7.0–11.7 |
+| the same with a dense fixed key (`0x5c` x 32) | 14.3–23.0 |
+| production sign, random message per measurement, d = 2 | 0.3–4.4 |
+| the same, dense fixed key | 0.2–3.5 |
+| `nistz256::sign` alone: d = 2, dense d, fixed nonce, k = 2 (each against random) | 0.1–4.3 |
+| `nistz256::public_key` alone, d = 2 against random | 0.2–4.8 |
+| RFC 6979 nonce generation alone, d = 2 against random | 1.1–5.7 |
+| `Signature::to_der` + `Vec`: one signature repeated against varying ones | 48.6–56.9 |
+
+The time came from DER-encoding the signature (variable length), which is
+faster for a value encoded over and over: public data, after the secret work.
+The case now draws a random message per measurement for both classes, and
+the bound is 7 again. After the change, on the runner: signing 1.4 and 1.8,
+the nonce case 2.7 and 1.1. The runner's VM does not expose FEAT_DIT, so DIT
+was not a factor there (and is not set by urMQTT, AUDIT.md A255-W2).
 
 The review list is the grep `(key|tag|mac|secret|digest|hash|token|cookie)
 … (==|!=)` over `crates/*/src`. Every hit is in the table above, or it compares
