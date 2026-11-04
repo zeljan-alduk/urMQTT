@@ -11,6 +11,13 @@ mirror lists it. Nothing goes onto aldo.tech by hand: the mirror picks the relea
 once with `systemctl start urmqtt-mirror` (step 6). Check the diff again on the release commit (step 1); if it is not
 empty, do docs/release-day-v0.4.0.md step 2 (the page, before the tag) first.
 
+**Blocker found during the preparation: do not tag until it is explained.** The `storm` smoke scenario hangs with
+every kernel that contains 1fb37ba (4 of 4 runs on HVF; v0.4.0's kernel passed 2 of 2): docs/PROGRESS.md, "Release
+candidate v0.4.1". CI's "Smoke misc (QEMU TCG)" job runs that scenario, so step 1 cannot be green while it hangs (the
+job's timeout is 120 minutes). To check it on the Mac before merging a fix:
+`SMOKE_ONLY=misc SMOKE_GROUPS='^storm$' scripts/smoke.sh --accels hvf` (passes in about 3 minutes, or hangs with the
+connections stuck below 3000 in round 1).
+
 ## 1. Merge and wait for CI
 
 ```bash
@@ -24,7 +31,7 @@ RELEASE_COMMIT=$(git rev-parse HEAD); echo "$RELEASE_COMMIT"
 git diff --stat v0.4.0.."$RELEASE_COMMIT" -- tools/builder crates/config-schema crates/cfg crates/config tools/config   # must print nothing
 ```
 
-Do not tag before CI is green on `$RELEASE_COMMIT`. CI's `make ct` on the arm64 runner is the first run of the new
+Do not tag before CI is green on `$RELEASE_COMMIT`, "Smoke misc (QEMU TCG)" included (the `storm` blocker above). CI's `make ct` on the arm64 runner is the first run of the new
 `x25519_ladder_is_constant_time` case outside Docker on the Mac: look at its |t| in the job log. If a job fails, fix
 on `main` and start again here; the date in CHANGELOG (`[0.4.1] - 2026-11-04`) is the preparation date: change it in
 the fix commit if the tag lands on another day.

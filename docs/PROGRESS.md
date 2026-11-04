@@ -3,6 +3,76 @@
 One entry per milestone: what was done, what was measured and the known gaps. Newest entries first down to H7; the entries from M0 to S6 follow in the order they were written.
 Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptance-criteria).
 
+## Release candidate v0.4.1 (2026-11-04)
+
+Everything for the release except publishing: nothing was pushed, tagged, signed or uploaded, and no server was
+touched. The commands for the day are in `docs/release-day-v0.4.1.md`; the generic steps in `docs/RELEASE.md`.
+What the release contains: ADR-259 (the trust-anchor tables, A259-W1; X25519 on AArch64 in `mul`/`umulh` inline
+assembly; P-256 verification by a width-5 NAF and a variable-time inversion), the host-only stage profiler, ADR-260 as
+a proposal, PERFORMANCE sections 12 and 12.1, and the release-day corrections of 51fabe2.
+
+**Done**
+
+- Version 0.4.1 (workspace `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock`: the workspace crates only, no dependency
+  changed); README status line and verify example, DEPLOY and OPERATE examples. CHANGELOG `[0.4.1] - 2026-11-04` (the
+  preparation date), compare links, empty Unreleased. Release notes in `docs/release-notes-v0.4.1.md` and in RELEASE.md
+  section 7 (v0.4.0's stay in `docs/release-notes-v0.4.0.md`, v0.3.0's in section 8).
+- **No builder page deploy.** `git diff 6cc343b..51fabe2 -- tools/builder crates/config-schema crates/cfg
+  crates/config tools/config` is empty, and the configuration format stays 6: the page deployed for v0.4.0 takes the
+  v0.4.1 template; the mirror lists the release by itself.
+- **Compatibility, with the published templates** of v0.2.0, v0.2.1, v0.3.0 and v0.4.0 (downloaded with `gh release
+  download`, `SHA256SUMS` minisign-verified against `minisign.pub`, the templates' SHA-256 checked) and the locally
+  built v0.4.1 template, configured by this tree's `urmqtt-config pack --iso`: `deploy/prod/config.toml` (format 2,
+  the new keys "off") packs and verifies on all five with the same fingerprint; TLS off (format 3) is refused by
+  v0.2.0 and packs on the other four; `console.virtio_gpu = "on"` (5), `virtio_balloon = "on"` (6) and both (6) are
+  refused by v0.2.0, v0.2.1 and v0.3.0 with "needs configuration format N ... reads up to M: use a newer release" and
+  pack and verify on v0.4.0 and v0.4.1 with the same fingerprints. The small file of docs/release-day-v0.4.1.md step 4
+  (TLS files, CA, control key, `virtio_gpu` and `virtio_balloon` "on") gives the same fingerprint on v0.4.0 and v0.4.1
+  and is refused by v0.3.0. The v0.4.1 template's empty configuration is format 6, both release kernels carry
+  `URMQTT-VIRTIO-DRIVERS:net,blk,console,rng,balloon,scsi,gpu,input,vsock`.
+
+**Gates run on this Mac** (macOS, Apple M4 Pro, a normal worktree, not nested): `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets -D warnings`, `make clippy-kernel`, `make check-x86` clean; `cargo test
+--workspace` 1005 passed, 0 failed, 16 ignored; `make build` aarch64 and x86_64; `make dist-universal` and `make dist
+ENV=dev` (template included); `scripts/check-prod-hooks.sh` on the release kernel against the dev kernel;
+`scripts/check-arch-leaks.sh` (and `--self-test`); `scripts/audit-inventory.py --check`; `typos`; `cargo vet --locked`
+(39 fully audited, 140 exempted), `scripts/vet-exemptions.py --check`, `cargo deny check advisories bans licenses
+sources`; `cargo vet regenerate imports && cargo vet prune` changed nothing; `scripts/test-mirror-releases.py` 62
+tests; `make repro` (prod, aarch64): ELF, ISO and raw image identical, no key bytes in the logs. `make builder-test`:
+96 of 99 without the emulator runtime (the failure: "the build ends in a result card", which waits for the emulator,
+as at v0.3.0 and v0.4.0); after `make builder-emulator` 100 of 100. `build/` was a fresh directory of this worktree,
+so no template of an older release was there; the one extra template from the dirty `dist-universal` run (the same
+tree before the docs commit) was moved out before the test, which used `urmqtt-template-v0.4.0-8-g9648637-universal.iso`.
+Smoke on aarch64 HVF: the core shard (`SMOKE_NO_GROUPS=1`, the shard that holds the TLS scenarios `boot-acpi` with
+the new `crypto: ecc=nistz256-armv8 x25519=armv8` line, `mqtt-tls`, `sys-operator`, the ticket and watchdog
+scenarios) 51 passed, 1 failed: `sys-operator`, whose `sys-query-info` check got no valid `$SYS/query/info` answer in
+that run (the check prints only the first 120 bytes, so which field failed is not known); the scenario alone then
+passed 3 of 3. The live suite 3/0; `release_kernel` (with the release kernel of this tree) 3/0; `attack_app` and
+`no_hw_rng` 2/0.
+
+**Found: the `storm` scenario hangs with the ADR-259 kernels** (release blocker until explained). `SMOKE_ONLY=misc
+SMOKE_GROUPS='^storm$'` (3000 clients x 3 rounds against a dev image with `heap_limit_mb=8`, the same loadgen binary
+in every run), aarch64 HVF: kernels built from 6cc343b (v0.4.0) passed 2 of 2 (round 1: 2998 and 2999 of 3000
+connected in 32 to 35 s, the heap about 3 to 4 MiB while connecting); kernels of this branch (twice), of f58ff7f and of 1fb37ba hung 4 of 4 in
+round 1: the connections stop at 2575 to 2757, the heap is at the reserve and SYNs are dropped for memory, core 0 goes
+to 100 % busy with about 90 000 frames per second dispatched and frame buffers growing to 5 MiB, while two loadgen
+threads wait in `recvfrom` inside a TLS read that never returns (the loadgen has no read timeout, so the scenario never
+ends). So the change that makes the difference is in 1fb37ba (the trust-anchor tables are built and used, the
+per-stage timing wrappers); the cause is not established. CI's "Smoke misc (QEMU TCG)" job on main at 51fabe2 (the
+same kernel code) was still running after 89 minutes when this was written (v0.4.0's took 21); its result was not known.
+
+**Not run**
+
+- The rest of the aarch64 smoke suites: storage-a, storage-b, hardening, secrecy, the misc groups other than
+  `release_kernel`, `storm`, `attack_app` and `no_hw_rng`, and the TCG accelerator; the x86_64 and universal suites
+  (`--arch x86_64`, `--arch universal`), so nothing of this release's x86_64 code ran under QEMU here either.
+- `make ct`, Miri, Kani, sanitizers, fuzzing: CI's jobs, not repeated here. CI's `make ct` on the arm64 runner will be
+  the first run of `x25519_ladder_is_constant_time` outside Docker on the Mac.
+- CI itself: it runs on the merge commit; the tag waits for it.
+- The x86_64 unit tests (no x86_64 host here, and CI's host tests run on arm64 Linux and macOS).
+- Nothing on KVM or on a real VPS for this candidate; the Neoverse N1 figures in the notes are those of PERFORMANCE
+  section 12.1 (the image `v0.4.0-4-g116e1c5`, one run each).
+
 ## netcup ARM64 VPS: install, boot from disk, a power cut, the Diagnostic entry over the network, the performance suite (2026-11-04)
 
 The first real aarch64 server core in these records: netcup "VPS 500 ARM G12.5" (Neoverse N1 at about 3 GHz, 2 vCPUs,
