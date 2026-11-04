@@ -20,6 +20,9 @@ cpufeatures = { version = "0.3", default-features = false }
 
 [target.'cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), any(target_os = "linux", target_os = "none")))'.dependencies]
 zeroize = { version = "1.8", default-features = false }
+# The variable-time scalar inversion of verification (ADR-259): already in
+# the graph through urmqtt-tls.
+p256 = { version = "0.14.0", default-features = false, features = ["arithmetic"] }
 
 [dev-dependencies]
 ecdsa = { version = "0.17", default-features = false, features = ["algorithm"] }

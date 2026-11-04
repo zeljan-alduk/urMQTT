@@ -81,9 +81,42 @@ fn timings() {
         report("KeyTable::verify (bad sig)", &mut || {
             std::hint::black_box(kt.verify(ops, std::hint::black_box(&z), &r, &s));
         });
+        {
+            use p256::elliptic_curve::PrimeField;
+            let sc = p256::Scalar::from_repr(limbs_to_be(&d).into()).unwrap();
+            report("p256 Scalar::invert_vartime", &mut || {
+                std::hint::black_box(std::hint::black_box(&sc).invert_vartime());
+            });
+            report("p256 Scalar::invert", &mut || {
+                std::hint::black_box(std::hint::black_box(&sc).invert());
+            });
+        }
         report("mul_var_ct", &mut || {
             std::hint::black_box(ops.mul_var_ct(std::hint::black_box(&d), &q));
         });
+        report("mul_var_vartime", &mut || {
+            std::hint::black_box(ops.mul_var_vartime(std::hint::black_box(&d), &q));
+        });
+        report("inv_n_vartime", &mut || {
+            std::hint::black_box(ops.inv_n_vartime(std::hint::black_box(&d)));
+        });
+        // A valid signature by an unknown key (the CertificateVerify path).
+        let (qx2, qy2) = (
+            limbs_to_be(&ops.demont_p(&q.x)),
+            limbs_to_be(&ops.demont_p(&q.y)),
+        );
+        let mut one = [0u8; 32];
+        one[31] = 1;
+        let k = [0x5au8; 32];
+        if let Some((r, s)) = sign(ops, &one, &k, &z) {
+            assert!(verify(ops, &qx2, &qy2, &z, &r, &s));
+            report("verify (unknown key, valid)", &mut || {
+                std::hint::black_box(verify(ops, std::hint::black_box(&qx2), &qy2, &z, &r, &s));
+            });
+            report("KeyTable::verify (valid)", &mut || {
+                std::hint::black_box(kt.verify(ops, std::hint::black_box(&z), &r, &s));
+            });
+        }
     }
 }
 

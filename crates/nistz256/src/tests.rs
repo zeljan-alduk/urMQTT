@@ -162,6 +162,145 @@ fn inversions_invert() {
     }
 }
 
+/// The variable-time scalar inversion of verification gives the Fermat
+/// chain's result (both converted to plain form) and refuses 0 and N.
+#[test]
+fn the_variable_time_scalar_inversion_matches_the_fermat_chain() {
+    let mut rng = ChaCha20Rng::seed_from_u64(21);
+    for ops in variants() {
+        let mut cases: std::vec::Vec<Limbs> = std::vec![
+            ONE_RAW,
+            [2, 0, 0, 0],
+            sub_borrow(&N, &[1, 0, 0, 0]).0,
+            sub_borrow(&N, &[2, 0, 0, 0]).0,
+        ];
+        for _ in 0..500 {
+            cases.push(be_to_limbs(&rand_scalar(&mut rng)));
+        }
+        for a in cases {
+            let want = ops.demont_n(&ops.inv_n(&ops.to_mont_n(&a)));
+            assert_eq!(ops.inv_n_vartime(&a), Some(want), "{a:x?}");
+        }
+        assert_eq!(ops.inv_n_vartime(&ZERO), None);
+        assert_eq!(ops.inv_n_vartime(&N), None);
+    }
+}
+
+/// The width-5 NAF reconstructs the scalar and has the NAF shape (odd
+/// digits in -15..=15, four zeros after each non-zero digit).
+#[test]
+fn wnaf_digits_reconstruct_the_scalar() {
+    let mut rng = ChaCha20Rng::seed_from_u64(22);
+    let mut cases: std::vec::Vec<Limbs> = std::vec![ZERO, ONE_RAW, [u64::MAX; 4], N, P];
+    for _ in 0..2000 {
+        let mut l = be_to_limbs(&rand32(&mut rng));
+        if rng.next_u32() % 4 == 0 {
+            l[(rng.next_u32() % 4) as usize] = u64::MAX;
+        }
+        cases.push(l);
+    }
+    for k in cases {
+        let naf = wnaf5(&k);
+        // sum naf[i] 2^i, over 5 limbs with signed digits (two's complement).
+        let mut acc = [0u64; 5];
+        for (i, &d) in naf.iter().enumerate() {
+            if d == 0 {
+                continue;
+            }
+            assert!(d % 2 != 0 && (-15..=15).contains(&d), "digit {d}");
+            for j in 1..5 {
+                if let Some(&e) = naf.get(i + j) {
+                    assert_eq!(e, 0, "non-zero digit {j} after {i}");
+                }
+            }
+            let mut add = [0u64; 5];
+            let mag = u64::from(d.unsigned_abs());
+            add[i / 64] = mag << (i % 64);
+            if i % 64 != 0 && i / 64 + 1 < 5 {
+                add[i / 64 + 1] = mag >> (64 - i % 64);
+            }
+            let mut c = 0u64;
+            for j in 0..5 {
+                if d > 0 {
+                    let (v, o1) = acc[j].overflowing_add(add[j]);
+                    let (v, o2) = v.overflowing_add(c);
+                    acc[j] = v;
+                    c = u64::from(o1 | o2);
+                } else {
+                    let (v, o1) = acc[j].overflowing_sub(add[j]);
+                    let (v, o2) = v.overflowing_sub(c);
+                    acc[j] = v;
+                    c = u64::from(o1 | o2);
+                }
+            }
+        }
+        assert_eq!(acc, [k[0], k[1], k[2], k[3], 0], "{k:x?}");
+    }
+}
+
+/// Verification corners: keys G and -G (d = 1 and d = N - 1, so u1 G and
+/// u2 Q can be equal or opposite), u1 = 0 (z = 0 and z = N), small and
+/// sparse nonces; every verdict, valid and tampered, equals the stock one.
+#[test]
+fn verification_corner_cases_agree_with_the_stock_verifier() {
+    let mut rng = ChaCha20Rng::seed_from_u64(23);
+    let n1 = limbs_to_be(&sub_borrow(&N, &[1, 0, 0, 0]).0);
+    let mut one = [0u8; 32];
+    one[31] = 1;
+    let mut two = [0u8; 32];
+    two[31] = 2;
+    let mut keys = std::vec![one, two, n1];
+    keys.push(rand_scalar(&mut rng));
+    let mut nonces = std::vec![one, two, n1];
+    nonces.push(rand_scalar(&mut rng));
+    let mut msgs = std::vec![[0u8; 32], limbs_to_be(&N), rand32(&mut rng)];
+    msgs.push(n1);
+    for ops in variants() {
+        for d in &keys {
+            let (qx, qy) = stock_point(d);
+            let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(&{
+                let mut v = std::vec![4u8];
+                v.extend_from_slice(&qx);
+                v.extend_from_slice(&qy);
+                v
+            })
+            .unwrap();
+            let stock = |z: &[u8; 32], r: &[u8; 32], s: &[u8; 32]| -> bool {
+                match (
+                    Option::<p256::Scalar>::from(p256::Scalar::from_repr((*r).into())),
+                    Option::<p256::Scalar>::from(p256::Scalar::from_repr((*s).into())),
+                ) {
+                    (Some(rs), Some(ss)) => p256::ecdsa::Signature::from_scalars(rs, ss)
+                        .ok()
+                        .is_some_and(|sig| {
+                            verify_prehashed::<p256::NistP256>(&vk.as_affine().into(), z, &sig)
+                                .is_ok()
+                        }),
+                    _ => false,
+                }
+            };
+            for k in &nonces {
+                for z in &msgs {
+                    let Some((r, s)) = stock_sign(d, k, z) else {
+                        continue;
+                    };
+                    assert!(
+                        verify(ops, &qx, &qy, z, &r, &s),
+                        "valid d={d:02x?} k={k:02x?}"
+                    );
+                    // r = s makes u1 G and u2 Q depend on the same factor;
+                    // r and s swapped; z flipped.
+                    let mut z2 = *z;
+                    z2[31] ^= 1;
+                    for (zz, rr, ss) in [(*z, r, r), (*z, s, r), (z2, r, s), (*z, r, n1)] {
+                        assert_eq!(verify(ops, &qx, &qy, &zz, &rr, &ss), stock(&zz, &rr, &ss));
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn modular_helpers() {
     let mut rng = ChaCha20Rng::seed_from_u64(3);
@@ -679,19 +818,32 @@ fn variable_base_multiplication_matches_on_structured_scalars() {
         for s in scalars {
             let k = Option::<p256::Scalar>::from(p256::Scalar::from_repr(s.into())).unwrap();
             let want = (qpt.to_projective() * k).to_affine().to_sec1_point(false);
-            let got = ops
-                .to_affine(&ops.mul_var_ct(&be_to_limbs(&s), &q))
-                .unwrap();
-            assert_eq!(
-                &want.as_bytes()[1..33],
-                &limbs_to_be(&ops.demont_p(&got.x)),
-                "{s:02x?}"
-            );
-            assert_eq!(
-                &want.as_bytes()[33..],
-                &limbs_to_be(&ops.demont_p(&got.y)),
-                "{s:02x?}"
-            );
+            for got in [
+                ops.mul_var_ct(&be_to_limbs(&s), &q),
+                ops.mul_var_vartime(&be_to_limbs(&s), &q),
+            ] {
+                let got = ops.to_affine(&got).unwrap();
+                assert_eq!(
+                    &want.as_bytes()[1..33],
+                    &limbs_to_be(&ops.demont_p(&got.x)),
+                    "{s:02x?}"
+                );
+                assert_eq!(
+                    &want.as_bytes()[33..],
+                    &limbs_to_be(&ops.demont_p(&got.y)),
+                    "{s:02x?}"
+                );
+            }
+        }
+        // Zero and N are the point at infinity; random scalars agree with
+        // the constant-time multiplication.
+        assert!(ops.to_affine(&ops.mul_var_vartime(&ZERO, &q)).is_none());
+        assert!(ops.to_affine(&ops.mul_var_vartime(&N, &q)).is_none());
+        for _ in 0..200 {
+            let k = be_to_limbs(&rand_scalar(&mut rng));
+            let a = ops.to_affine(&ops.mul_var_ct(&k, &q)).unwrap();
+            let b = ops.to_affine(&ops.mul_var_vartime(&k, &q)).unwrap();
+            assert_eq!((a.x, a.y), (b.x, b.y));
         }
     }
 }

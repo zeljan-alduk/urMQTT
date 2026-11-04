@@ -422,6 +422,57 @@ impl Ops {
         r
     }
 
+    /// `scalar * P` for a **public** `scalar` (variable time; verification
+    /// only): width-5 NAF digits (odd, in -15..=15, at least four zeros
+    /// between two non-zero digits) over the Jacobian table 1P, 3P, ..., 15P
+    /// (one doubling and seven additions). About 256 / 6 additions instead
+    /// of the 51 of [`Ops::mul_var_ct`], no table scans, and no work for the
+    /// leading zero digits. The complete addition of the assembly handles
+    /// equal, opposite and infinite operands, so every scalar, zero
+    /// included (infinity), gives the right point.
+    fn mul_var_vartime(self, scalar: &Limbs, p: &Aff) -> Jac {
+        let naf = wnaf5(scalar);
+        let base = Jac {
+            x: p.x,
+            y: p.y,
+            z: ONE_P,
+        };
+        let twice = self.dbl(&base);
+        let mut odd = [base; 8];
+        for i in 1..8 {
+            odd[i] = self.add(&odd[i - 1], &twice);
+        }
+        let mut r = Jac::default();
+        let mut started = false;
+        for &d in naf.iter().rev() {
+            if started {
+                r = self.dbl(&r);
+            }
+            if d != 0 {
+                let mut t = odd[usize::from(d.unsigned_abs() / 2)];
+                if d < 0 {
+                    t.y = neg(&t.y);
+                }
+                r = if started { self.add(&r, &t) } else { t };
+                started = true;
+            }
+        }
+        r
+    }
+
+    /// `a^-1 mod N` for a **public** `a` in `1..N` (plain, not Montgomery),
+    /// by RustCrypto's variable-time inversion (`Scalar::invert_vartime`,
+    /// safegcd in crypto-bigint): about 1.1 us against 3.8 us for the
+    /// Fermat chain of [`Ops::inv_n`] (Docker linux/arm64, Apple M4 Pro).
+    /// Verification only; signing keeps the constant-time chain.
+    fn inv_n_vartime(self, a: &Limbs) -> Option<Limbs> {
+        use p256::elliptic_curve::PrimeField;
+        let s = Option::<p256::Scalar>::from(p256::Scalar::from_repr(limbs_to_be(a).into()))?;
+        let inv = Option::<p256::Scalar>::from(s.invert_vartime())?;
+        let bytes: [u8; 32] = inv.to_repr().into();
+        Some(be_to_limbs(&bytes))
+    }
+
     /// `scalar * G` for a secret `scalar` (constant time), from the comb.
     fn mul_base_ct(self, scalar: &Limbs) -> Jac {
         let s = scalar_bytes(scalar);
@@ -491,6 +542,39 @@ impl Ops {
         }
         p
     }
+}
+
+/// Width-5 NAF of a scalar below 2^256 (variable time: public scalars only):
+/// `scalar = sum naf[i] 2^i`, every digit zero or odd in `-15..=15`. 257
+/// digits hold any 256-bit value (the top digit absorbs the last carry).
+fn wnaf5(scalar: &Limbs) -> [i8; 257] {
+    let mut k = [scalar[0], scalar[1], scalar[2], scalar[3], 0u64];
+    let mut naf = [0i8; 257];
+    let mut i = 0;
+    while k != [0; 5] && i < naf.len() {
+        if k[0] & 1 == 1 {
+            let m = (k[0] & 31) as i8;
+            let d = if m >= 16 { m - 32 } else { m };
+            naf[i] = d;
+            // k -= d: for a negative digit this adds |d| (with carry).
+            if d > 0 {
+                k[0] -= d as u64;
+            } else {
+                let mut c = u64::from(d.unsigned_abs());
+                for limb in &mut k {
+                    let (v, o) = limb.overflowing_add(c);
+                    *limb = v;
+                    c = u64::from(o);
+                }
+            }
+        }
+        for j in 0..4 {
+            k[j] = (k[j] >> 1) | (k[j + 1] << 63);
+        }
+        k[4] >>= 1;
+        i += 1;
+    }
+    naf
 }
 
 /// Signs: `(r, s)` of the prehash `z` with private key `d` and nonce `k`
@@ -609,14 +693,18 @@ fn verify_with(ops: Ops, key: KeyMul<'_>, z: &[u8; 32], r: &[u8; 32], s: &[u8; 3
         KeyMul::Table(_) => None,
     };
     let zl = reduce_once(&be_to_limbs(z), &N);
-    let sinv = ops.inv_n(&ops.to_mont_n(&sl));
+    // s^-1 in the Montgomery domain of N: (s^-1 R) from the plain inverse.
+    let Some(sinv) = ops.inv_n_vartime(&sl) else {
+        return false;
+    };
+    let sinv = ops.to_mont_n(&sinv);
     let u1 = ops.demont_n(&ops.ord_mul(&ops.to_mont_n(&zl), &sinv));
     let u2 = ops.demont_n(&ops.ord_mul(&ops.to_mont_n(&rl), &sinv));
     let p1 = ops.mul_base_vartime(&u1);
     let p2 = match (&key, &q) {
         (_, _) if u2 == ZERO => Jac::default(),
         (KeyMul::Table(t), _) => ops.comb_vartime(&t.rows, &u2),
-        (_, Some(q)) => ops.mul_var_ct(&u2, q),
+        (_, Some(q)) => ops.mul_var_vartime(&u2, q),
         _ => return false,
     };
     let sum = ops.add(&p1, &p2);
