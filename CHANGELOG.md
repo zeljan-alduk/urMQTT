@@ -29,11 +29,8 @@ still valid; the builder page must be redeployed before the mirror lists this re
 throwaway certificates, for evaluation (as for v0.3.0); production images are built by the operator
 (docs/DEPLOY.md). The only real-machine results are one netcup VPS 500 ARM G12.5 (Neoverse N1, 2 vCPU, aarch64 KVM)
 and, for x86_64, the Contabo run at the H7 commit (PERFORMANCE.md 3 and 7). On the netcup machine the Diagnostic
-entry, the measurements and load runs below, and the virtio-gpu console were run; install, boot from the installed
-disk and a retained message that survived a power cut are reported by the owner and not yet recorded in PROGRESS or
-PERFORMANCE (ROADMAP.md section 1). That machine has no virtio-rng and no `RNDR`: its generator was seeded from the
-CPU-jitter fallback and the bootloader's EFI RNG only, the weakest seeding the kernel accepts (ADR-038). The P-256
-speed-up of ADR-255 is measured on an Apple M4 Pro, not on the Neoverse N1. The virtio-console, -balloon, -input and
+entry, the measurements and load runs below, and the virtio-gpu console were run; install, boot from the installed disk and a retained message that survived a power cut are recorded in PROGRESS and PERFORMANCE (one run each). That machine has no virtio-rng and no `RNDR`: its generator was seeded from the
+CPU-jitter fallback and the bootloader's EFI RNG only, the weakest seeding the kernel accepts (ADR-038). The P-256 speed-up of ADR-255 was measured on the Neoverse N1 once (and on an Apple M4 Pro). The virtio-console, -balloon, -input and
 -vsock drivers have not run on a real VPS; vsock has run only against the fake device of the tests (it needs
 vhost-vsock on a Linux host). The x86_64 and universal-ISO smoke suites are not in CI; for this release only the
 x86_64 `virtio_gpu` and `virtio_devices` groups were run, under QEMU TCG on the Mac (PROGRESS, "Release candidate
@@ -77,8 +74,7 @@ on an x86_64 KVM guest or on physical hardware. Secure Boot, IOMMU and the rest 
   x86_64 code (ADR-130): ECDSA sign and verify, ECDH, key generation and the trust-anchor tables. Boot line
   `crypto: ecc=nistz256-armv8`; the diagnostic screen's crypto line names the backend too. Measured in Docker on an
   Apple M4 Pro (not the target CPU), production paths, minimum of 11 runs: sign 34.7 -> 11.6 us, verify 147 -> 29 us,
-  ECDH 135 -> 25 us, handshake estimate 292 -> 104 us (PERFORMANCE.md section 10). Not measured on a Neoverse N1
-  VPS in the repository's records. The vendored assembly uses integer registers only (upstream's two NEON selection
+  ECDH 135 -> 25 us, handshake estimate 292 -> 104 us (PERFORMANCE.md section 10). On the netcup Neoverse N1 VPS (PERFORMANCE.md section 11): full mTLS handshakes per second 848 -> 1317 at 32 threads, 827 -> 1398 at 64 and 778 -> 1316 at 128 (1.55 to 1.7x, 0 errors), the server's CPU per handshake 553 us (one run) against about 1.0 to 1.08 ms before; two vCPUs, so single-core broker figures. The vendored assembly uses integer registers only (upstream's two NEON selection
   functions are replaced by constant-time Rust) and starts every entry point with `bti c`. macOS, Miri and Kani keep
   the portable code.
 - `make ct`: P-256 key generation, ECDH and signing (key and nonce) through the production paths (sparse fixed

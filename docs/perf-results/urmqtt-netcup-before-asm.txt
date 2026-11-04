@@ -1,0 +1,250 @@
+# urmqtt-netcup 2026-11-04T01:29:24Z host=89.58.42.236:8883 cores=2,3 reps=3
+# loadgen 7f8f68641114 kernel 7.0.0-38-generic nproc=4
+## suite handshake
+GUARD load1=1.09 site_s=0.212942
+RUN handshake threads=32 rep=1
+loadgen: handshake: 8483 connections in 10.0 s = 848 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 37.7 ms, 0 error(s)
+loadgen: whole connection: mean 37.7 ms, p50 36.5, p90 43.3, p99 58.8, max 85.7 ms
+loadgen: tcp connect: mean 8.3 ms, p50 7.8, p90 12.4, p99 19.3, max 26.9 ms
+loadgen: tls + connect/connack: mean 20.0 ms, p50 18.6, p90 27.3, p99 33.0, max 68.8 ms
+loadgen: handshake: generator cpu 0.54 cores (process total, all threads)
+RESULT mode=handshake threads=32 conn_per_s=848 errors=0 lat_p50_ms=36.5 lat_p99_ms=58.8 tcp_p50_ms=7.8 tls_p50_ms=18.6 tls_p99_ms=33.0 gen_cpu=0.54
+HOSTCPU steal=5% idle=70% user+sys=13%
+BROKERBUSY c0=90 c1=93
+GUARD load1=0.93 site_s=0.014122
+RUN handshake threads=32 rep=2
+loadgen: handshake: 8557 connections in 10.0 s = 855 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 37.3 ms, 0 error(s)
+loadgen: whole connection: mean 37.3 ms, p50 36.0, p90 43.6, p99 52.1, max 62.5 ms
+loadgen: tcp connect: mean 8.6 ms, p50 8.0, p90 12.3, p99 19.3, max 24.8 ms
+loadgen: tls + connect/connack: mean 19.5 ms, p50 18.3, p90 26.5, p99 31.7, max 51.6 ms
+loadgen: handshake: generator cpu 0.52 cores (process total, all threads)
+RESULT mode=handshake threads=32 conn_per_s=855 errors=0 lat_p50_ms=36.0 lat_p99_ms=52.1 tcp_p50_ms=8.0 tls_p50_ms=18.3 tls_p99_ms=31.7 gen_cpu=0.52
+HOSTCPU steal=3% idle=72% user+sys=13%
+BROKERBUSY c0=100 c1=99
+GUARD load1=0.66 site_s=0.013180
+RUN handshake threads=32 rep=3
+loadgen: handshake: 4150 connections in 10.2 s = 408 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 78.2 ms, 0 error(s)
+loadgen: whole connection: mean 78.2 ms, p50 64.8, p90 139.8, p99 243.6, max 411.5 ms
+loadgen: tcp connect: mean 16.5 ms, p50 11.9, p90 32.9, p99 73.5, max 160.9 ms
+loadgen: tls + connect/connack: mean 44.7 ms, p50 33.4, p90 83.0, p99 165.6, max 305.1 ms
+loadgen: handshake: generator cpu 1.14 cores (process total, all threads)
+RESULT mode=handshake threads=32 conn_per_s=408 errors=0 lat_p50_ms=64.8 lat_p99_ms=243.6 tcp_p50_ms=11.9 tls_p50_ms=33.4 tls_p99_ms=165.6 gen_cpu=1.14
+HOSTCPU steal=60% idle=23% user+sys=12%
+BROKERBUSY c0=19 c1=11
+GUARD load1=2.28 site_s=0.014719
+RUN handshake threads=64 rep=1
+loadgen: handshake: 8284 connections in 10.0 s = 827 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 77.0 ms, 0 error(s)
+loadgen: whole connection: mean 77.0 ms, p50 76.0, p90 90.3, p99 108.4, max 151.0 ms
+loadgen: tcp connect: mean 17.0 ms, p50 15.8, p90 26.1, p99 34.3, max 61.1 ms
+loadgen: tls + connect/connack: mean 40.4 ms, p50 40.0, p90 51.8, p99 64.7, max 102.3 ms
+loadgen: handshake: generator cpu 0.65 cores (process total, all threads)
+RESULT mode=handshake threads=64 conn_per_s=827 errors=0 lat_p50_ms=76.0 lat_p99_ms=108.4 tcp_p50_ms=15.8 tls_p50_ms=40.0 tls_p99_ms=64.7 gen_cpu=0.65
+HOSTCPU steal=17% idle=59% user+sys=13%
+BROKERBUSY c0=68 c1=68
+GUARD load1=3.86 site_s=0.018022
+RUN handshake threads=64 rep=2
+loadgen: handshake: 8155 connections in 10.0 s = 815 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 78.2 ms, 0 error(s)
+loadgen: whole connection: mean 78.2 ms, p50 78.9, p90 83.3, p99 108.8, max 253.3 ms
+loadgen: tcp connect: mean 17.1 ms, p50 16.2, p90 26.1, p99 34.4, max 149.9 ms
+loadgen: tls + connect/connack: mean 41.0 ms, p50 40.1, p90 52.9, p99 68.5, max 104.2 ms
+loadgen: handshake: generator cpu 0.55 cores (process total, all threads)
+RESULT mode=handshake threads=64 conn_per_s=815 errors=0 lat_p50_ms=78.9 lat_p99_ms=108.8 tcp_p50_ms=16.2 tls_p50_ms=40.1 tls_p99_ms=68.5 gen_cpu=0.55
+HOSTCPU steal=8% idle=67% user+sys=13%
+BROKERBUSY c0=100 c1=99
+GUARD load1=3.21 site_s=0.016172
+RUN handshake threads=64 rep=3
+loadgen: handshake: 8407 connections in 10.0 s = 839 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 75.8 ms, 0 error(s)
+loadgen: whole connection: mean 75.8 ms, p50 75.1, p90 88.8, p99 108.0, max 165.1 ms
+loadgen: tcp connect: mean 17.2 ms, p50 16.5, p90 25.3, p99 31.6, max 67.8 ms
+loadgen: tls + connect/connack: mean 39.5 ms, p50 38.9, p90 50.1, p99 63.1, max 119.4 ms
+loadgen: handshake: generator cpu 0.60 cores (process total, all threads)
+RESULT mode=handshake threads=64 conn_per_s=839 errors=0 lat_p50_ms=75.1 lat_p99_ms=108.0 tcp_p50_ms=16.5 tls_p50_ms=38.9 tls_p99_ms=63.1 gen_cpu=0.60
+HOSTCPU steal=11% idle=64% user+sys=13%
+BROKERBUSY c0=18 c1=2
+GUARD load1=3.43 site_s=0.017450
+RUN handshake threads=128 rep=1
+loadgen: handshake: 7153 connections in 10.0 s = 714 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 177.2 ms, 0 error(s)
+loadgen: whole connection: mean 177.2 ms, p50 166.3, p90 224.7, p99 240.0, max 1235.5 ms
+loadgen: tcp connect: mean 39.6 ms, p50 37.3, p90 59.9, p99 75.6, max 1064.2 ms
+loadgen: tls + connect/connack: mean 92.0 ms, p50 93.5, p90 123.7, p99 151.1, max 235.6 ms
+loadgen: handshake: generator cpu 0.50 cores (process total, all threads)
+RESULT mode=handshake threads=128 conn_per_s=714 errors=0 lat_p50_ms=166.3 lat_p99_ms=240.0 tcp_p50_ms=37.3 tls_p50_ms=93.5 tls_p99_ms=151.1 gen_cpu=0.50
+HOSTCPU steal=8% idle=69% user+sys=13%
+BROKERBUSY c0=43 c1=42
+GUARD load1=2.74 site_s=0.012881
+RUN handshake threads=128 rep=2
+loadgen: handshake: 7882 connections in 10.0 s = 788 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 160.9 ms, 0 error(s)
+loadgen: whole connection: mean 160.9 ms, p50 158.9, p90 182.6, p99 210.7, max 266.7 ms
+loadgen: tcp connect: mean 34.1 ms, p50 30.7, p90 54.3, p99 76.6, max 93.0 ms
+loadgen: tls + connect/connack: mean 85.0 ms, p50 88.0, p90 108.1, p99 145.1, max 183.0 ms
+loadgen: handshake: generator cpu 0.52 cores (process total, all threads)
+RESULT mode=handshake threads=128 conn_per_s=788 errors=0 lat_p50_ms=158.9 lat_p99_ms=210.7 tcp_p50_ms=30.7 tls_p50_ms=88.0 tls_p99_ms=145.1 gen_cpu=0.52
+HOSTCPU steal=6% idle=70% user+sys=13%
+BROKERBUSY c0=100 c1=99
+GUARD load1=2.28 site_s=0.015307
+RUN handshake threads=128 rep=3
+loadgen: handshake: 7796 connections in 10.0 s = 778 conn/s (full TLS 1.3 + mTLS + CONNECT), mean latency 163.2 ms, 0 error(s)
+loadgen: whole connection: mean 163.2 ms, p50 160.3, p90 185.2, p99 217.7, max 342.8 ms
+loadgen: tcp connect: mean 36.8 ms, p50 35.5, p90 52.5, p99 69.9, max 119.2 ms
+loadgen: tls + connect/connack: mean 84.9 ms, p50 87.3, p90 108.0, p99 134.6, max 261.7 ms
+loadgen: handshake: generator cpu 0.51 cores (process total, all threads)
+RESULT mode=handshake threads=128 conn_per_s=778 errors=0 lat_p50_ms=160.3 lat_p99_ms=217.7 tcp_p50_ms=35.5 tls_p50_ms=87.3 tls_p99_ms=134.6 gen_cpu=0.51
+HOSTCPU steal=5% idle=71% user+sys=13%
+BROKERBUSY c0=100 c1=99
+## suite throughput
+GUARD load1=1.83 site_s=0.014097
+RUN throughput qos=0 payload=64 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 212681/s, acknowledged 0/s, delivered 136170/s, lost connections 0
+loadgen: pubsub: generator cpu 1.54 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=212681 acked_per_s=0 delivered_per_s=136170 lat_p50_ms=546.04 lat_p90_ms=1345.35 lat_p99_ms=1959.98 lat_max_ms=2652.25 samples=1361714 gen_cpu=1.54 ready=32 failed=0 lost=0
+HOSTCPU steal=21% idle=38% user+sys=27%
+BROKERBUSY c0=24 c1=5
+GUARD load1=4.52 site_s=0.014736
+RUN throughput qos=0 payload=64 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 217407/s, acknowledged 0/s, delivered 139048/s, lost connections 0
+loadgen: pubsub: generator cpu 1.45 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=217407 acked_per_s=0 delivered_per_s=139048 lat_p50_ms=541.79 lat_p90_ms=1284.01 lat_p99_ms=1770.38 lat_max_ms=2336.88 samples=1390896 gen_cpu=1.45 ready=32 failed=0 lost=0
+HOSTCPU steal=6% idle=49% user+sys=29%
+BROKERBUSY c0=75 c1=3
+GUARD load1=5.37 site_s=0.014547
+RUN throughput qos=0 payload=64 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 218477/s, acknowledged 0/s, delivered 150071/s, lost connections 0
+loadgen: pubsub: generator cpu 1.47 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=218477 acked_per_s=0 delivered_per_s=150071 lat_p50_ms=521.91 lat_p90_ms=1269.75 lat_p99_ms=1638.62 lat_max_ms=2333.84 samples=1500749 gen_cpu=1.47 ready=32 failed=0 lost=0
+HOSTCPU steal=7% idle=47% user+sys=30%
+BROKERBUSY c0=100 c1=2
+GUARD load1=4.98 site_s=0.024010
+RUN throughput qos=0 payload=1024 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 70940/s, acknowledged 0/s, delivered 11141/s, lost connections 0
+loadgen: pubsub: generator cpu 1.17 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=0 sent_per_s=70940 acked_per_s=0 delivered_per_s=11141 lat_p50_ms=642.63 lat_p90_ms=939.57 lat_p99_ms=1535.63 lat_max_ms=2204.23 samples=111528 gen_cpu=1.17 ready=32 failed=0 lost=0
+HOSTCPU steal=16% idle=45% user+sys=26%
+BROKERBUSY c0=55 c1=2
+GUARD load1=6.41 site_s=0.016465
+RUN throughput qos=0 payload=1024 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 63043/s, acknowledged 0/s, delivered 23054/s, lost connections 0
+loadgen: pubsub: generator cpu 1.13 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=0 sent_per_s=63043 acked_per_s=0 delivered_per_s=23054 lat_p50_ms=338.48 lat_p90_ms=582.01 lat_p99_ms=821.50 lat_max_ms=1514.60 samples=230542 gen_cpu=1.13 ready=32 failed=0 lost=0
+HOSTCPU steal=12% idle=51% user+sys=22%
+BROKERBUSY c0=49 c1=3
+GUARD load1=6.26 site_s=0.017539
+RUN throughput qos=0 payload=1024 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 58445/s, acknowledged 0/s, delivered 27393/s, lost connections 0
+loadgen: pubsub: generator cpu 1.17 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=0 sent_per_s=58445 acked_per_s=0 delivered_per_s=27393 lat_p50_ms=348.34 lat_p90_ms=515.77 lat_p99_ms=776.65 lat_max_ms=1698.28 samples=273929 gen_cpu=1.17 ready=32 failed=0 lost=0
+HOSTCPU steal=9% idle=51% user+sys=24%
+BROKERBUSY c0=100 c1=2
+GUARD load1=5.99 site_s=0.014846
+RUN throughput qos=1 payload=64 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 107765/s, acknowledged 107764/s, delivered 55550/s, lost connections 0
+loadgen: pubsub: generator cpu 1.35 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=0 sent_per_s=107765 acked_per_s=107764 delivered_per_s=55550 lat_p50_ms=21.14 lat_p90_ms=24.82 lat_p99_ms=29.78 lat_max_ms=38.91 samples=555520 gen_cpu=1.35 ready=32 failed=0 lost=0
+HOSTCPU steal=8% idle=50% user+sys=27%
+BROKERBUSY c0=85 c1=2
+GUARD load1=6.43 site_s=0.019719
+RUN throughput qos=1 payload=64 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 72208/s, acknowledged 72208/s, delivered 40317/s, lost connections 0
+loadgen: pubsub: generator cpu 1.22 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=0 sent_per_s=72208 acked_per_s=72208 delivered_per_s=40317 lat_p50_ms=23.44 lat_p90_ms=42.62 lat_p99_ms=87.90 lat_max_ms=167.66 samples=403167 gen_cpu=1.22 ready=32 failed=0 lost=0
+HOSTCPU steal=35% idle=36% user+sys=21%
+BROKERBUSY c0=24 c1=3
+GUARD load1=6.90 site_s=0.015482
+RUN throughput qos=1 payload=64 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 107347/s, acknowledged 107347/s, delivered 55126/s, lost connections 0
+loadgen: pubsub: generator cpu 1.34 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=0 sent_per_s=107347 acked_per_s=107347 delivered_per_s=55126 lat_p50_ms=21.29 lat_p90_ms=24.85 lat_p99_ms=29.00 lat_max_ms=204.38 samples=551280 gen_cpu=1.34 ready=32 failed=0 lost=0
+HOSTCPU steal=8% idle=49% user+sys=27%
+BROKERBUSY c0=69 c1=3
+GUARD load1=6.40 site_s=0.209776
+RUN throughput qos=1 payload=1024 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 50958/s, acknowledged 50958/s, delivered 25012/s, lost connections 0
+loadgen: pubsub: generator cpu 1.23 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=1024 rate=0 sent_per_s=50958 acked_per_s=50958 delivered_per_s=25012 lat_p50_ms=46.90 lat_p90_ms=55.65 lat_p99_ms=59.59 lat_max_ms=119.22 samples=250160 gen_cpu=1.23 ready=32 failed=0 lost=0
+HOSTCPU steal=10% idle=50% user+sys=26%
+BROKERBUSY c0=100 c1=2
+GUARD load1=6.29 site_s=0.019127
+RUN throughput qos=1 payload=1024 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 45256/s, acknowledged 45263/s, delivered 23138/s, lost connections 0
+loadgen: pubsub: generator cpu 1.25 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=1024 rate=0 sent_per_s=45256 acked_per_s=45263 delivered_per_s=23138 lat_p50_ms=48.27 lat_p90_ms=58.07 lat_p99_ms=126.95 lat_max_ms=233.94 samples=231427 gen_cpu=1.25 ready=32 failed=0 lost=0
+HOSTCPU steal=20% idle=44% user+sys=23%
+BROKERBUSY c0=21 c1=2
+GUARD load1=7.81 site_s=0.018243
+RUN throughput qos=1 payload=1024 pairs=16 rep=3
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 49931/s, acknowledged 49929/s, delivered 25396/s, lost connections 0
+loadgen: pubsub: generator cpu 1.17 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=1024 rate=0 sent_per_s=49931 acked_per_s=49929 delivered_per_s=25396 lat_p50_ms=46.20 lat_p90_ms=56.06 lat_p99_ms=73.50 lat_max_ms=145.36 samples=253958 gen_cpu=1.17 ready=32 failed=0 lost=0
+HOSTCPU steal=23% idle=45% user+sys=21%
+BROKERBUSY c0=46 c1=3
+GUARD load1=7.95 site_s=0.014170
+RUN throughput qos=1 payload=64 pairs=64 rep=1
+loadgen: pubsub: 128 of 128 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 64 publisher(s), 64 subscriber(s), 64 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 127587/s, acknowledged 127589/s, delivered 67303/s, lost connections 0
+loadgen: pubsub: generator cpu 1.99 cores (process total, all threads)
+RESULT mode=pubsub pubs=64 subs=64 topics=64 qos=1 payload=64 rate=0 sent_per_s=127587 acked_per_s=127589 delivered_per_s=67303 lat_p50_ms=71.37 lat_p90_ms=80.10 lat_p99_ms=88.33 lat_max_ms=156.36 samples=673168 gen_cpu=1.99 ready=128 failed=0 lost=0
+HOSTCPU steal=8% idle=37% user+sys=36%
+BROKERBUSY c0=100 c1=2
+GUARD load1=7.66 site_s=0.029968
+RUN throughput qos=1 payload=64 pairs=64 rep=2
+loadgen: pubsub: 128 of 128 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 64 publisher(s), 64 subscriber(s), 64 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 130009/s, acknowledged 130010/s, delivered 68942/s, lost connections 0
+loadgen: pubsub: generator cpu 2.00 cores (process total, all threads)
+RESULT mode=pubsub pubs=64 subs=64 topics=64 qos=1 payload=64 rate=0 sent_per_s=130009 acked_per_s=130010 delivered_per_s=68942 lat_p50_ms=69.80 lat_p90_ms=79.32 lat_p99_ms=88.14 lat_max_ms=183.53 samples=689443 gen_cpu=2.00 ready=128 failed=0 lost=0
+HOSTCPU steal=7% idle=38% user+sys=35%
+BROKERBUSY c0=58 c1=6
+GUARD load1=7.64 site_s=0.019659
+RUN throughput qos=1 payload=64 pairs=64 rep=3
+loadgen: pubsub: 128 of 128 clients ready in 0.3 s, 0 failed
+loadgen: pubsub: 64 publisher(s), 64 subscriber(s), 64 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 130716/s, acknowledged 130715/s, delivered 67637/s, lost connections 0
+loadgen: pubsub: generator cpu 1.99 cores (process total, all threads)
+RESULT mode=pubsub pubs=64 subs=64 topics=64 qos=1 payload=64 rate=0 sent_per_s=130716 acked_per_s=130715 delivered_per_s=67637 lat_p50_ms=71.22 lat_p90_ms=79.18 lat_p99_ms=86.22 lat_max_ms=212.57 samples=676528 gen_cpu=1.99 ready=128 failed=0 lost=0
+HOSTCPU steal=7% idle=38% user+sys=36%
+BROKERBUSY c0=100 c1=2
+## suite latency
+GUARD load1=7.61 site_s=0.015262
+RUN latency qos=0 payload=64 pairs=8 rate=100 rep=1
+loadgen: pubsub: 16 of 16 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 8 publisher(s), 8 subscriber(s), 8 topic(s), QoS 0, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 800/s, acknowledged 0/s, delivered 800/s, lost connections 0
+loadgen: pubsub: generator cpu 0.26 cores (process total, all threads)
+RESULT mode=pubsub pubs=8 subs=8 topics=8 qos=0 payload=64 rate=100 sent_per_s=800 acked_per_s=0 delivered_per_s=800 lat_p50_ms=4.13 lat_p90_ms=8.66 lat_p99_ms=21.88 lat_max_ms=35.90 samples=8000 gen_cpu=0.26 ready=16 failed=0 lost=0
+HOSTCPU steal=23% idle=62% user+sys=12%
+BROKERBUSY c0=36 c1=2
+GUARD load1=7.34 site_s=0.016566
+RUN latency qos=0 payload=64 pairs=8 rate=100 rep=2
+loadgen: pubsub: 16 of 16 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 8 publisher(s), 8 subscriber(s), 8 topic(s), QoS 0, 64 B, rate 100/publisher, window 10.0 s
+loadgen: pubsub: published 800/s, acknowledged 0/s, delivered 800/s, lost connections 0
+loadgen: pubsub: generator cpu 0.28 cores (process total, all threads)
+RESULT mode=pubsub pubs=8 subs=8 topics=8 qos=0 payload=64 rate=100 sent_per_s=800 acked_per_s=0 delivered_per_s=800 lat_p50_ms=3.92 lat_p90_ms=4.78 lat_p99_ms=6.24 lat_max_ms=12.52 samples=8000 gen_cpu=0.28 ready=16 failed=0 lost=0
+HOSTCPU steal=9% idle=74% user+sys=14%
+BROKERBUSY c0=14 c1=2
+GUARD load1=5.71 site_s=0.014105
+RUN latency qos=0 payload=64 pairs=8 rate=100 rep=3

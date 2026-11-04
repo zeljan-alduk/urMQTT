@@ -459,3 +459,58 @@ snapshot in this session, so there is no before figure for it.
 
 Reproduce: the two `cargo` commands above inside `linux/arm64` Docker (or natively on aarch64 Linux); for "before",
 the same on a checkout of eb3a5d3.
+
+
+## 11. The netcup ARM64 VPS (Neoverse N1), before and after the assembly (ADR-255)
+
+**What this is.** The first real aarch64 server core in these records: netcup "VPS 500 ARM G12.5", Neoverse N1 at
+about 3 GHz, **2 vCPUs**, 3.9 GiB, QEMU/KVM with UEFI, virtio-net and virtio-blk (the Diagnostic entry's PCI list is
+in the PNG of the blog text). The server was the benchmark image of `scripts/mkbench.sh --x11` (handshake limits
+relaxed, the production code paths otherwise), **installed on the VPS's disk** by the ISO's installer and booted from
+it. The load generator is `urmqtt-loadgen` (the same binary as section 3) run on the shared build server, 9 ms away,
+pinned to two CPUs under `nice -n 19` (`scripts/x11-bench.sh`, three repetitions, median and range). Because the VM has
+two vCPUs, **core 0 does the network card, the dispatching and all MQTT and TLS work and core 1 is the database core**
+(2 to 3 % busy throughout): every figure below is single-core broker performance. Raw output:
+`docs/perf-results/urmqtt-netcup-before-asm.txt` and `docs/perf-results/urmqtt-netcup-asm.txt`
+(`scripts/x11-report.py` turns them into tables). The load host is shared: it lost 3 to 60 % of its own CPU to other
+guests during the runs, which is why one repetition of each set is an outlier.
+
+**Full mTLS handshakes per second** (TLS 1.3 + client certificate + CONNECT, no resumption, 0 errors in every run), the
+image before the assembly (main at the commit of the first netcup run, portable RustCrypto P-256) and after it
+(`v0.3.0-29-gefddf6e`, ADR-255):
+
+| threads | before | after | ratio |
+|---|---|---|---|
+| 32 | 848 (408-855) | 1,317 (957-1,317) | 1.55x |
+| 64 | 827 (815-839) | 1,398 (1,352-1,416) | 1.69x |
+| 128 | 778 (714-788) | 1,316 (1,313-1,383) | 1.69x |
+
+The TLS part of a connection at 32 threads: p50 18.5 ms before, 13 ms after. At 128 threads the generator is at its own
+limit on both machines (section 3.1).
+
+**The server's own CPU per handshake**, from the Diagnostic entry's crypto stage (the boot's `bench::run`), **one run
+with the assembly** against three runs before it: handshake **553 us** after (ECDSA verify 192.5 us, sign 77.8 us,
+X25519 208.5 us), against about 1.0 to 1.08 ms before (verify 507.5 to 509.8 us, sign 125.4 to 142.1 us, X25519 156.4
+to 176.8 us, three runs). The run with the assembly was at a CPU clock of 2.58 GHz against 2.95 to 2.98 GHz in the runs
+before, so single figures on this shared machine move by tens of percent (the X25519 figure is unchanged code and went
+from 176 to 209 us). It is one run. That the handshake rate rose 1.55 to 1.7 times while the server's CPU per handshake
+fell about 1.95 times fits together: the rest of a connection is the stack, the generator and the network. X25519
+(about 176 us of what remains) is the next candidate.
+
+**The rest of the suite, after the assembly only** (there is no "before": the run was stopped to build the assembly,
+the first rows of it are in the "before" file): idle connections 5 000 / 10 000 / 20 000 held without an error, kernel
+heap growth 0.34 / 0.41 / 0.43 KB per connection (`$SYS/broker/memory/used` against its value before the first
+connection; 0.50 to 0.66 KB on the x86_64 server at the H7 commit); latency at 800 messages/s (8 pairs x 100, 64 B) p50
+4.0 ms (QoS 0) and 4.1 ms (QoS 1), p99 6.9 and 7.0 ms; fan-out to 100 subscribers at 50 messages/s delivered
+completely (5 000/s, p50 5.9 ms, p99 8.6 ms), to 1 000 subscribers at 10 messages/s 8 805 of 10 000 per second (p50
+207 ms, p99 5.4 s); flood with 16 pairs: QoS 0, 64 B, 231 317 published and 85 140 delivered per second (p50 1.36 s) with
+**no connection lost**, QoS 1, 64 B, 107 349 published and 55 965 delivered per second (p50 21 ms, p99 29 ms). These are
+**not comparable** with the x86_64 rows of sections 3 and 7: other CPU, 2 vCPUs against 4, another distance to the
+generator (the latency is one trip), and the code between the two measurements changed in the data path (ADR-221 to
+ADR-224).
+
+**Other facts from the same machine** (Diagnostic entry, PROGRESS "netcup ARM64 VPS"): AES-XTS 217 to 248 MiB/s per
+core with hardware AES, AES-GCM 272 to 321 MiB/s; the installed 64 GiB virtio-blk disk read 332 to 484 MiB/s
+sequentially (64 KiB blocks) and 22 to 27 thousand random 4 KiB reads per second (p50 9.5 to 10.4 us, p99 398 to
+671 us); RAM read 4.7 to 9.0 GiB/s.
+

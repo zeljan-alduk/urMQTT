@@ -3,6 +3,40 @@
 One entry per milestone: what was done, what was measured and the known gaps. Newest entries first down to H7; the entries from M0 to S6 follow in the order they were written.
 Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptance-criteria).
 
+## netcup ARM64 VPS: install, boot from disk, a power cut, the Diagnostic entry over the network, the performance suite (2026-11-04)
+
+The first real aarch64 server core in these records: netcup "VPS 500 ARM G12.5" (Neoverse N1 at about 3 GHz, 2 vCPUs,
+3.9 GiB, QEMU/KVM, UEFI, virtio-net and virtio-blk, a 64 GiB disk). Driven through the provider's REST API with a
+command-line client (ISO upload, attach as a virtual CD, power cycle, offline snapshot).
+
+**Done and observed**
+
+- **Snapshot of the original system** (offline: an online snapshot is not possible with UEFI), then the ISO's
+  **installer** wrote the image to the disk (about 40 s with the 30 s countdown) and powered the machine off.
+- **Boot from the installed disk** in about 35 s to a TLS 1.3 handshake from the Internet; TLS 1.3 + mTLS handshakes,
+  QoS 1 publish/subscribe, 500 held connections and three 1000-client reconnect storms without an error (the
+  production-limits image).
+- **A retained message survived a hard power cycle** (published, power cut through the API, booted again, read back).
+- **The Diagnostic entry**: the provider's console showed "Display output is not active" (virtio-gpu without a
+  driver), so the entry gained `diag-serve` (the report as the retained `$SYS/diag/report`, drawn by
+  `urmqtt-diag-png`), the CPU clock and a random number generator panel. Findings: the PMU cycle counter measured
+  2.58 to 2.98 GHz; **no virtio-rng and no `RNDR`**: the generator was seeded from the CPU-jitter fallback (1024 samples of
+  64 steps, 3 bits per sample estimated, 768 bits credited, health tests passed) and the bootloader's EFI RNG (8 of 8
+  values non-zero); sanity tests of the generator's output passed (49.6 % ones, longest run 16). AES-XTS 217 to 248 MiB/s
+  per core with hardware AES, AES-GCM 272 to 321 MiB/s. The installed disk: 332 to 484 MiB/s sequential read, 22 to 27
+  thousand random 4 KiB reads per second (p50 9.5 to 10.4 us, p99 398 to 671 us); the write test was skipped (no
+  unallocated space on an installed disk, as designed).
+- **The performance suite** and the handshake before/after the P-256 assembly: PERFORMANCE.md section 11, raw files in
+  `docs/perf-results/urmqtt-netcup-*.txt`.
+- **virtio-gpu console** (ADR-256): with `console.virtio_gpu = "on"` the provider's Screen tab shows the Diagnostic
+  dashboard live (commit e86d2ca, the image that was run).
+
+**Not done / not shown.** One server, one provider, one run of each (install, power cut, the Diagnostic figures); the
+performance rows other than the handshakes have no "before"; the cause of the dark display (edk2 resetting the card at
+ExitBootServices) is likely, not confirmed; nothing here was run on the 4 new virtio drivers (console, balloon, input,
+vsock) of this release; the netcup VPS has an xHCI USB controller, which may be the path of the provider console's
+keyboard and which has no driver here.
+
 ## Release candidate v0.4.0 (2026-11-04)
 
 Everything for the release except publishing: nothing was pushed, tagged, signed or uploaded, and no server was

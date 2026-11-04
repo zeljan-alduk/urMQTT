@@ -221,9 +221,7 @@ page only with this release.
   and in the Diagnostic report, also those without a driver. `urmqtt-config pack` refuses a key for a driver the
   image's kernel lacks.
 - **P-256 on aarch64 through OpenSSL's ARMv8 `nistz256` assembly** (vendored from ring 0.17.14, like the x86_64
-  code): measured on an Apple M4 Pro in Docker, not on the target CPU, sign 34.7 -> 11.6 us, verify 147 -> 29 us,
-  ECDH 135 -> 25 us, the handshake's P-256 estimate 292 -> 104 us (docs/PERFORMANCE.md section 10). `make ct` covers
-  P-256 key generation, ECDH and signing.
+  code). On the netcup Neoverse N1 VPS (2 vCPUs, so one data core) full mTLS handshakes per second rose from 848 to 1,317 at 32 threads, 827 to 1,398 at 64 and 778 to 1,316 at 128 (1.55 to 1.7 times, 0 errors, medians of three runs from a shared load host), and the server's own CPU per handshake was 553 us in one run against about 1.0 to 1.08 ms before (docs/PERFORMANCE.md section 11, raw files in docs/perf-results/). On an Apple M4 Pro in Docker (not the target CPU) sign went 34.7 -> 11.6 us and verify 147 -> 29 us (section 10). `make ct` covers P-256 key generation, ECDH and signing.
 - **The Diagnostic entry over the network** (`diag-serve`): the measurements, then a normal live boot that serves the
   report as the retained `$SYS/diag/report` (operator certificate). The report gains the CPU clock and a random number
   generator panel (which sources seeded it, sanity tests of fresh bytes, throughput). `urmqtt-diag-png` draws the
@@ -265,7 +263,7 @@ lists v0.4.0 as unusable, so the page is updated before the release mirror lists
   retained message that survived a power cut were reported by the owner and are not yet in the test records) and,
   for x86_64, a Contabo KVM VPS at the H7 commit (before disk encryption, boot integrity and this release). Nothing
   has run on physical hardware.
-- The P-256 speed-up is measured on an Apple M4 Pro, not on a Neoverse N1 or any other server core.
+- The P-256 speed-up was measured on one Neoverse N1 VPS (the CPU time per handshake once) and on an Apple M4 Pro, not on any other server core.
 - The virtio-console, -balloon, -input and -vsock drivers have run only under QEMU, not on a real VPS; vsock has run
   only against the test suite's fake device.
 - The x86_64 and universal-ISO smoke suites are not in CI. For this release only the x86_64 virtio-gpu and
