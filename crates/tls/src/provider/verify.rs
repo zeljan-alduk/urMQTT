@@ -141,6 +141,19 @@ pub fn has_issuer_table(spki: &[u8]) -> bool {
     issuer_key(spki).is_some_and(|k| issuer(k.to_sec1_point(false).as_bytes()).is_some())
 }
 
+/// The registered trust-anchor tables: how many, and the heap bytes they hold
+/// (requested). They live once, in this registry, shared by every core's
+/// server; a key registered again (each core's `TlsServer::new` does) finds its
+/// table and builds nothing (ADR-261).
+pub fn issuer_tables() -> (usize, usize) {
+    let all = ISSUERS.lock();
+    let bytes = all
+        .iter()
+        .map(|i| core::mem::size_of::<Issuer>() + i.table.heap_bytes())
+        .sum();
+    (all.len(), bytes)
+}
+
 /// A table of its own for benchmarks and probes, outside the global registry
 /// (so measuring does not use up one of its slots).
 pub struct MeasuredIssuer(IssuerTable);

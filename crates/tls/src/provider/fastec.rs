@@ -336,6 +336,24 @@ impl IssuerTable {
         Self::generic(point)
     }
 
+    /// Heap bytes the table holds (requested), for the boot's accounting of
+    /// the trust-anchor tables (ADR-261): about 148 KiB for the comb, 33 x 8
+    /// projective points for the portable table.
+    pub fn heap_bytes(&self) -> usize {
+        match &self.0 {
+            #[cfg(all(
+                any(target_arch = "x86_64", target_arch = "aarch64"),
+                not(miri),
+                not(kani),
+                any(target_os = "linux", target_os = "none")
+            ))]
+            Inner::Nistz(t) => t.heap_bytes(),
+            Inner::Generic(_) => {
+                core::mem::size_of::<primeorder::BasepointTable<p256::ProjectivePoint, 33>>()
+            }
+        }
+    }
+
     /// The portable table, whatever the target (tests compare the two).
     pub fn generic(point: &p256::AffinePoint) -> Self {
         Self(Inner::Generic(alloc::boxed::Box::new(

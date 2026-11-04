@@ -509,13 +509,15 @@ impl Ops {
 
     /// `scalar * B` for a public `scalar` from the 37 x 64 comb of `B`
     /// (variable time).
-    fn comb_vartime(self, tbl: &[[Aff; 64]], scalar: &Limbs) -> Jac {
+    /// `tbl` is the generator's static comb or a key's boxed rows
+    /// ([`KeyTable`]); `Borrow` lets both be walked by the same code.
+    fn comb_vartime<R: core::borrow::Borrow<[Aff; 64]>>(self, tbl: &[R], scalar: &Limbs) -> Jac {
         let s = scalar_bytes(scalar);
         let mut index: usize = 7;
         let w = booth_recode_w7((u64::from(s[0]) << 1) & 0xff);
         let mut p = Jac::default();
         if (w >> 1) != 0 {
-            let e = &tbl[0][(w >> 1) as usize - 1];
+            let e = &tbl[0].borrow()[(w >> 1) as usize - 1];
             p = Jac {
                 x: e.x,
                 y: e.y,
@@ -534,7 +536,7 @@ impl Ops {
             if (w >> 1) == 0 {
                 continue;
             }
-            let mut t = row[(w >> 1) as usize - 1];
+            let mut t = row.borrow()[(w >> 1) as usize - 1];
             if w & 1 == 1 {
                 t.y = neg(&t.y);
             }
@@ -725,11 +727,21 @@ fn verify_with(ops: Ops, key: KeyMul<'_>, z: &[u8; 32], r: &[u8; 32], s: &[u8; 3
 /// A fixed public key's comb (the same 37 x 64 layout as the generator's, 148
 /// KiB on the heap): verification against that key then takes one table walk
 /// instead of a windowed multiplication. Built once per trust anchor.
+///
+/// Each row is its own 4 KiB allocation. As one 148 KiB vector the table took
+/// a 256 KiB block of the buddy heap (a power of two, and the canary gap of
+/// allocations of 32 KiB and more): 108 KiB of every anchor's table were
+/// rounding (ADR-261, A259-W2).
 pub struct KeyTable {
-    rows: alloc::vec::Vec<[Aff; 64]>,
+    rows: alloc::vec::Vec<alloc::boxed::Box<[Aff; 64]>>,
     qx: [u8; 32],
     qy: [u8; 32],
 }
+
+// A row of a key's comb is exactly one 4 KiB heap block: no power-of-two
+// rounding, and no room for the allocator's canary gap.
+const _: () = assert!(core::mem::size_of::<[Aff; 64]>() == 4096);
+const _: () = assert!(core::mem::align_of::<[Aff; 64]>() <= 4096);
 
 impl KeyTable {
     /// The comb of the point `(qx, qy)` (big-endian), `None` if it is not on
@@ -760,7 +772,9 @@ impl KeyTable {
             prefix.push(acc);
         }
         let mut inv = ops.inv_p(&acc);
-        let mut rows = alloc::vec![[Aff::default(); 64]; 37];
+        let mut rows: alloc::vec::Vec<alloc::boxed::Box<[Aff; 64]>> = (0..37)
+            .map(|_| alloc::boxed::Box::new([Aff::default(); 64]))
+            .collect();
         for i in (0..jac.len()).rev() {
             let zinv = if i == 0 {
                 inv
@@ -780,6 +794,13 @@ impl KeyTable {
             qx: *qx,
             qy: *qy,
         })
+    }
+
+    /// Heap bytes the table holds (requested; each row is one 4 KiB block),
+    /// for the boot's accounting of the trust-anchor tables.
+    pub fn heap_bytes(&self) -> usize {
+        self.rows.capacity() * core::mem::size_of::<alloc::boxed::Box<[Aff; 64]>>()
+            + self.rows.len() * core::mem::size_of::<[Aff; 64]>()
     }
 
     /// The key's uncompressed coordinates the table was built from.

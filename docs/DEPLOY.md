@@ -27,8 +27,13 @@ take the defaults). Add your secrets next to it. They are ignored by git (`.giti
 Sizing: `memory.kernel_heap_mb` (1024 in the template) must fit the VM's RAM
 together with `storage.sqlite_heap_mb` and about 64 MiB for the kernel, its
 tables and frame buffers. An idle device connection costs about 500 bytes of
-heap (ADR-034), so 1 GiB holds well over a million. The VM refuses to boot
-with a clear message if the heap does not fit.
+heap (ADR-034), so 1 GiB holds well over a million. Fixed costs come first:
+about 1.4 MiB at boot, plus about 150 KiB for every P-256 trust anchor
+(`trust.operational` and `trust.bootstrap`, at most 8 get a verification
+table; ADR-261), plus `memory.min_free_mb`; a handshake in flight holds tens of
+KiB until it completes. The boot logs the tables (`tls: N trust-anchor
+verification table(s), K KiB of heap`) and then the heap in use. The VM
+refuses to boot with a clear message if the heap does not fit.
 
 ## 1b. Configuring an image without building: the template ISO (C1)
 

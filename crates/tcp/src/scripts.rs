@@ -59,6 +59,58 @@ expect conns=0 peer_closed
     );
 }
 
+/// We close first; the peer acknowledges our FIN but keeps its own side
+/// open (CLOSE-WAIT: a device whose application stopped reading, a keep-alive
+/// timeout). FIN-WAIT-2 sends nothing more, however often the peer
+/// acknowledges, and its timer ends the connection after 60 s (RFC 9293
+/// §3.6, ADR-261). Before, every ACK of our FIN made `transmit` send a new FIN
+/// one sequence number further (FIN_QUEUED was still set and the acknowledged
+/// data was gone, so the FIN looked unsent), the peer acknowledged that one
+/// too, and the pair exchanged segments as fast as both could forever: the
+/// retransmission timer armed for each new FIN also replaced the FIN-WAIT-2
+/// timer. QEMU's user-mode network acknowledges every such FIN; it held core
+/// 0 at 100 % in the `storm` smoke (A261-W1).
+#[test]
+fn fin_wait_2_with_a_half_open_peer_sends_nothing_and_times_out() {
+    with_open(
+        "
+app close
+> F. seq=1 ack=1
+< . seq=1 ack=2            # our FIN acknowledged; the peer stays open
+> nothing
+< . seq=1 ack=2            # the peer acknowledges again (a window update, a probe)
+> nothing
+< . seq=1 ack=2 win=30000
+> nothing
++30000
+> nothing
+expect conns=1
++31000
+expect conns=0 closed=timeout
+",
+    );
+}
+
+/// The same with data in flight when the application closes: the FIN rides
+/// behind the data, the peer acknowledges both, and nothing follows.
+#[test]
+fn fin_after_data_is_sent_once() {
+    with_open(
+        "
+app send 24
+> P. seq=1 ack=1 len=24
+app close
+> F. seq=25 ack=1
+< . seq=1 ack=26
+> nothing
+< . seq=1 ack=26
+> nothing
++61000
+expect conns=0 closed=timeout
+",
+    );
+}
+
 /// Zero window: nothing is sent, the persist timer probes with one byte
 /// past the window, backing off, and the probe is sent again as long as
 /// the peer does not take it. Data flows once the window opens (RFC 9293

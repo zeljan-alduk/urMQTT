@@ -33,6 +33,17 @@ the runs (2.58 and 2.89 GHz); the per-stage profile is from Docker on an Apple M
 v0.4.0's limits is unchanged.
 
 ### Fixed
+- **TCP: a FIN sent again on every acknowledgement in FIN-WAIT-2** (since M14; v0.1.0 to v0.4.0 have it; ADR-261,
+  AUDIT.md A261-W1). After the broker closed a connection whose device kept its side open and acknowledged each
+  segment (QEMU's user-mode network does), every ACK of the FIN brought a new FIN one sequence number further, at
+  line rate, and the FIN-WAIT-2 timer that should end the connection after 60 s was replaced each time. It held core 0
+  at 100 % in the `storm` smoke and made it hang. Now the FIN goes out once (and again only as a retransmission).
+- **The trust-anchor tables take 148 KiB each instead of a 256 KiB heap block**, are built once at boot before the heap
+  reserve is measured, and are logged (`tls: N trust-anchor verification table(s), K KiB of heap`); DEPLOY.md counts
+  about 150 KiB per P-256 anchor in the heap sizing (ADR-261, A259-W2).
+- `urmqtt-loadgen storm` cannot hang any more: `--io-timeout-s` (default 10) for every step of an attempt, the
+  `--retry-s` deadline per attempt, and a round that is still busy past it fails with an error; `smoke.sh` bounds it
+  at 15 minutes.
 - **The trust anchors' verification tables were never built** (ADR-111, ADR-259, AUDIT.md A259-W1): webpki stores an
   anchor's SubjectPublicKeyInfo without its outer SEQUENCE, which `register_issuer` did not parse, so a device's
   first handshake verified its certificate on the slower unknown-key path. Both forms are accepted now. No effect on
@@ -57,6 +68,8 @@ v0.4.0's limits is unchanged.
   code (0 errors).
 
 ### Added
+- Smoke scenario `fin_wait2`: devices that keep their side open after a keep-alive timeout are released by
+  FIN-WAIT-2 while they still hold their sockets (ADR-261).
 - `stage-profile` feature and `handshake_profile` example of `urmqtt-tls` (host only): the server's handshake time
   per stage. `make ct` case `x25519_ladder_is_constant_time`; the RFC 7748 million-iteration vector (ignored test).
 - ADR-260: a proposal, not built, for a cache of verified client certificates (it would save about 1 us per

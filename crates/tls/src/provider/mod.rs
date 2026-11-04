@@ -28,7 +28,7 @@ pub use verify::cache_stats as verify_cache_stats;
 #[cfg(feature = "stage-profile")]
 pub use verify::clear_memo as clear_verify_memo;
 pub use verify::kat as p256_tables_kat;
-pub use verify::{has_issuer_table, register_issuer};
+pub use verify::{has_issuer_table, issuer_tables, register_issuer};
 
 /// Certificate signatures answered from the verification memo (statistics).
 pub fn verify_cache_hits() -> u64 {

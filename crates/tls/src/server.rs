@@ -525,6 +525,19 @@ fn roots(pems: &[&[u8]]) -> Result<RootCertStore, TlsError> {
     Ok(roots)
 }
 
+/// Builds the verification tables of every trust anchor in `pems` (both roles)
+/// now, once, instead of in the first `TlsServer::new` of whichever core comes
+/// first, and returns the registry's (tables, heap bytes requested). The boot
+/// calls it before it measures the heap the reserve is set against, so the
+/// tables are part of the idle heap it reports (ADR-261). Invalid PEMs are
+/// left to `TlsServer::new` to report.
+pub fn prepare_trust_anchors(pems: &[&[&[u8]]]) -> (usize, usize) {
+    for p in pems {
+        let _ = roots(p);
+    }
+    crate::provider::issuer_tables()
+}
+
 /// Serial numbers compare without the DER sign byte / leading zeros
 /// (OpenSSL prints them that way).
 fn normalize_serial(s: &[u8]) -> Vec<u8> {
