@@ -47,6 +47,7 @@ use zeroize::Zeroize;
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
+pub mod dit;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
@@ -56,6 +57,7 @@ use aarch64 as arch;
 use x86_64 as arch;
 
 pub use arch::Ops;
+pub use dit::{DitGuard, dit_guard};
 use arch::{neg, select_w5, select_w7};
 
 /// A field element or a scalar: four little-endian 64-bit limbs.
