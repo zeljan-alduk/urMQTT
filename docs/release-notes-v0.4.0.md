@@ -55,8 +55,7 @@ lists v0.4.0 as unusable, so the page is updated before the release mirror lists
 - Pre-alpha. The assets here are **dev builds with throwaway keys** for evaluation, and the release signing key is
   still a test key; production images are built from your own `deploy/prod/` (docs/DEPLOY.md).
 - First supported target: a VPS or VM under KVM. The real machines so far: one netcup ARM64 VPS (the Diagnostic
-  entry, the measurements and load runs above, the virtio-gpu console; install, boot from the installed disk and a
-  retained message that survived a power cut were reported by the owner and are not yet in the test records) and,
+  entry, the measurements and load runs above, the virtio-gpu console; install, boot from the installed disk and a retained message that survived a power cut, one run each, are in PROGRESS and PERFORMANCE) and,
   for x86_64, a Contabo KVM VPS at the H7 commit (before disk encryption, boot integrity and this release). Nothing
   has run on physical hardware.
 - The P-256 speed-up was measured on one Neoverse N1 VPS (the CPU time per handshake once) and on an Apple M4 Pro, not on any other server core.
