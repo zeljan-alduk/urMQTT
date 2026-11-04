@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- P-256 on aarch64 through OpenSSL's ARMv8 `nistz256` assembly (ADR-255), vendored from ring 0.17.14 like the
+  x86_64 code (ADR-130): ECDSA sign and verify, ECDH, key generation and the trust-anchor tables. Boot line
+  `crypto: ecc=nistz256-armv8`; the diagnostic screen's crypto line names the backend too. Measured in Docker on an
+  Apple M4 Pro (not the target CPU), production paths, minimum of 11 runs: sign 34.7 -> 11.6 us, verify 147 -> 29 us,
+  ECDH 135 -> 25 us, handshake estimate 292 -> 104 us. Not yet measured on a Neoverse N1 VPS. The vendored assembly
+  uses integer registers only (upstream's two NEON selection functions are replaced by constant-time Rust) and
+  starts every entry point with `bti c`. macOS, Miri and Kani keep the portable code.
+- `make ct`: P-256 key generation, ECDH and signing through the production paths (sparse fixed against random
+  scalars), with a P-256-scale positive control (a variable-time double-and-add).
 - `diag-serve` boot word: the Diagnostic entry's measurements (detection, RAM, crypto incl. AES-XTS, disk reads),
   then a normal live boot that serves MQTT with the report as the retained `$SYS/diag/report` (operator certificate).
   For machines whose console cannot be seen (a netcup ARM VPS shows "Display output is not active": its virtio-gpu has

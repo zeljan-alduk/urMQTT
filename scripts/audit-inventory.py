@@ -182,6 +182,13 @@ def vendored():
     for d in sorted((ROOT / "vendor").glob("cpufeatures-*")):
         rows.append(("RustCrypto cpufeatures, patched (vendor/README.md)", d.name.split("-", 1)[1],
                      f"{sum(nonblank(f) for f in rust_files(d / 'src'))} lines"))
+    # The P-256 assembly (ADR-130, ADR-255) and the generator's comb.
+    for asm, arch in (("p256-x86_64-asm.S", "x86_64"), ("p256-armv8-asm.S", "aarch64")):
+        rows.append((f"OpenSSL nistz256 P-256 assembly, {arch} (vendor/README.md)", "ring 0.17.14",
+                     f"{nonblank(ROOT / 'vendor/nistz256' / asm)} lines ({asm})"))
+    table = ROOT / "vendor/nistz256/p256-table.bin"
+    rows.append(("P-256 generator comb, both architectures (vendor/README.md)", "ring 0.17.14",
+                 f"p256-table.bin, {table.stat().st_size} bytes"))
     first = (ROOT / "vendor/limine/CHECKSUMS").read_text().splitlines()[0]
     lim = re.search(r"Limine (v\S+)", first)
     efi = ROOT / "vendor/limine/BOOTAA64.EFI"

@@ -23,13 +23,13 @@
 | `urmqtt-diag-png` | `tools/diag-png` | 670 | 0 | 0 (0) | default |
 | `urmqtt-disk-tool` | `tools/disk` | 3001 | 866 | 0 (0) | default |
 | `urmqtt-dispatch` | `crates/dispatch` | 594 | 0 | 0 (0) | forbid |
-| `urmqtt-kernel` | `crates/kernel` | 17455 | 0 | 117 (117) | deny |
+| `urmqtt-kernel` | `crates/kernel` | 17460 | 0 | 117 (117) | deny |
 | `urmqtt-loadgen` | `tools/loadgen` | 1200 | 0 | 0 (0) | default |
 | `urmqtt-log` | `crates/log` | 1882 | 128 | 12 (12) | deny |
 | `urmqtt-mm` | `crates/mm` | 2567 | 0 | 74 (74) | deny |
 | `urmqtt-mqtt` | `crates/mqtt` | 1436 | 234 | 0 (0) | forbid |
 | `urmqtt-net` | `crates/net` | 1914 | 0 | 0 (0) | deny |
-| `urmqtt-nistz256` | `crates/nistz256` | 1369 | 0 | 19 (19) | allow |
+| `urmqtt-nistz256` | `crates/nistz256` | 1739 | 0 | 28 (28) | allow |
 | `urmqtt-pci` | `crates/pci` | 696 | 0 | 0 (0) | deny |
 | `urmqtt-plain` | `crates/plain` | 1202 | 0 | 0 (0) | forbid |
 | `urmqtt-platform` | `crates/platform` | 1940 | 922 | 0 (0) | deny |
@@ -38,11 +38,11 @@
 | `urmqtt-sync` | `crates/sync` | 484 | 0 | 19 (19) | deny |
 | `urmqtt-tcp` | `crates/tcp` | 5026 | 0 | 0 (0) | deny |
 | `urmqtt-timer-wheel` | `crates/timer-wheel` | 446 | 0 | 0 (0) | forbid |
-| `urmqtt-tls` | `crates/tls` | 4627 | 911 | 0 (0) | forbid |
+| `urmqtt-tls` | `crates/tls` | 4655 | 1062 | 0 (0) | forbid |
 | `urmqtt-usys` | `crates/usys` | 477 | 0 | 8 (8) | default |
 | `urmqtt-virtio` | `crates/virtio` | 2458 | 0 | 19 (19) | deny |
 | `urmqtt-x25519` | `crates/x25519` | 821 | 0 | 3 (3) | default |
-| **total** | | **99323** | | **889 (889)** | |
+| **total** | | **99726** | | **898 (898)** | |
 
 ## Vendored components
 
@@ -52,6 +52,9 @@
 | libc headers for SQLite (C) | own | 53 lines in 7 headers |
 | RustCrypto cpufeatures, patched (vendor/README.md) | 0.2.17 | 675 lines |
 | RustCrypto cpufeatures, patched (vendor/README.md) | 0.3.1 | 598 lines |
+| OpenSSL nistz256 P-256 assembly, x86_64 (vendor/README.md) | ring 0.17.14 | 3795 lines (p256-x86_64-asm.S) |
+| OpenSSL nistz256 P-256 assembly, aarch64 (vendor/README.md) | ring 0.17.14 | 1332 lines (p256-armv8-asm.S) |
+| P-256 generator comb, both architectures (vendor/README.md) | ring 0.17.14 | p256-table.bin, 151552 bytes |
 | Limine bootloader (binary) | v12.9.4 | BOOTAA64.EFI, 331776 bytes |
 
 ## Third-party crates in the kernel (`aarch64-unknown-none`, normal and build dependencies)

@@ -11,8 +11,8 @@
 |---|---|---|---|
 | TLS record protection | AES-128-GCM, ChaCha20-Poly1305 | RustCrypto `aes-gcm` 0.10, `chacha20poly1305` 0.10 | ARMv8 AES + PMULL; NEON |
 | TLS key schedule, HKDF-Expand-Label | HMAC-SHA-256 | RustCrypto `hkdf`, `hmac`, `sha2` 0.11 | ARMv8 SHA2 |
-| Key exchange | X25519, ECDHE P-256 | `x25519-dalek` 2, `p256` 0.14 | portable |
-| Signatures (server, client certificates) | ECDSA P-256 / SHA-256 | `p256` 0.14, rustls-webpki | portable |
+| Key exchange | X25519, ECDHE P-256 | `x25519-dalek` 2; P-256: `urmqtt-nistz256` (OpenSSL's `nistz256` assembly, ADR-130, ADR-255), `p256` 0.14 for parsing and fallbacks | X25519 portable; P-256 ARMv8 assembly (`nistz256-armv8`) |
+| Signatures (server, client certificates) | ECDSA P-256 / SHA-256 | `urmqtt-nistz256` (sign, verify, trust-anchor tables), `p256` 0.14, rustls-webpki | ARMv8 assembly (`nistz256-armv8`) |
 | Control messages (H1) | Ed25519 (`verify_strict`) | `ed25519-dalek` 2.2 | portable (SHA-512) |
 | Session tickets | ChaCha20-Poly1305 | `chacha20poly1305` 0.10 | NEON |
 | CSPRNG | ChaCha20 (`rand_chacha`), seeded from RNDR / virtio-rng / jitter | `tls/src/rng.rs` (ADR-038) | — |
@@ -28,7 +28,17 @@ before any TLS or storage work, on the backends the CPU dispatch chose:
 - ChaCha20-Poly1305: RFC 8439 §2.8.2;
 - SHA-256: FIPS 180-2, one-shot and streamed;
 - HMAC-SHA-256: RFC 4231 test case 2;
+- ECDSA P-256: RFC 6979 A.2.5 (public key, the deterministic signature of
+  "sample", and its verification through a trust-anchor table, with a
+  tampered message rejected);
+- ECDH P-256: RFC 5903 §8.1 (both public keys and the shared secret);
+- X25519: RFC 7748 §5.2 and §6.1;
 - CRC-32C.
+
+The P-256 and X25519 vectors run through the same functions the handshake
+calls (`provider::fastec`), so on x86_64 and aarch64 they test the assembly.
+The boot line names the symmetric ones only; a P-256 or X25519 mismatch stops
+the boot the same way.
 
 A mismatch stops the boot.
 
@@ -155,7 +165,8 @@ Tests:
 |---|---|---|
 | AEAD tag checks (records, tickets) | RustCrypto (`subtle`) | `make ct`: `forged_record_rejection_is_constant_time` (both suites), `forged_ticket_rejection_is_constant_time` |
 | Comparing our derived record keys and IVs with rustls's | `server::ct_eq` (`subtle`) | `secret_comparison_is_constant_time` |
-| Signature checks (ECDSA, Ed25519) | `p256`, `ed25519-dalek` | upstream; the inputs are public |
+| P-256 secret scalars: key generation, ECDH, the signing nonce (ADR-130, ADR-255) | `nistz256`: whole-table scans (assembly on x86_64, masked Rust on aarch64), branch-free negation, the assembly's complete addition | `make ct`: `p256_key_generation_is_constant_time`, `p256_ecdh_is_constant_time`, `p256_signing_is_constant_time`, control `harness_detects_a_variable_time_scalar_multiplication` |
+| Signature checks (ECDSA, Ed25519) | `nistz256` / `p256`, `ed25519-dalek` | none needed: the inputs are public (verification is variable time by design) |
 | SYN-cookie MAC check | one 32-bit integer compare, no early exit | review |
 | Ticket key id lookup | not secret (sent in the clear) | review |
 
@@ -183,6 +194,31 @@ Measured on an M4 Pro (six runs, range):
 
 The bound is 7 (dudect: < 4.5 "probably constant time", > 10 "definitely
 not"). CI runs `make ct` on the arm64 runner.
+
+**P-256 (ADR-255).** The three cases run the production functions
+(`provider::fastec`): one class is the fixed scalar 2 (after the first window
+every digit is zero, so the scans select "infinity" and the additions take
+their infinity branch), the other a fresh random scalar per measurement, both
+copied into the same slot untimed; 20 000 measurements per run (these
+operations take 7-25 us). The control is a double-and-add that skips the
+addition for zero bits: it must be detected with the same sample count.
+Measured in Docker `linux/arm64` on the M4 Pro (`ecc=nistz256-armv8`, six
+runs, range), and once natively on macOS (`portable`, RustCrypto):
+
+| Case | \|t\| nistz256-armv8 | \|t\| portable |
+|---|---:|---:|
+| double-and-add with skipped additions (control) | 482–749 | 1093 |
+| P-256 public key (comb) | 0.8–5.5 | 2.8 |
+| P-256 ECDH (variable base) | 0.2–2.1 | 1.9 |
+| P-256 ECDSA sign | 0.5–1.9 | 0.4 |
+
+What this shows: at this sample size, on this machine, the time does not
+depend on whether almost every window digit of the secret scalar is zero;
+one public-key run reached 5.5, below the bound but above dudect's 4.5 (the
+others: 3.6, 3.3, 2.3, 1.0, 0.8). What it does not show: the absence of
+smaller leaks, cache or port side channels (a timing test is not an
+analysis), behaviour on a server core (Neoverse N1 has not been measured), or
+anything about X25519 and Ed25519, which are still not measured.
 
 The review list is the grep `(key|tag|mac|secret|digest|hash|token|cookie)
 … (==|!=)` over `crates/*/src`. Every hit is in the table above, or it compares

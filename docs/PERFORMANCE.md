@@ -412,3 +412,50 @@ The spread between runs (46k to 58k) is larger than the difference between the m
 
 **The offline conversion** (`urmqtt-disk encrypt`, 54 MiB partition with 12 MiB used, a file on an SSD): the unused 43 MiB are skipped as holes. Its cost is reading and writing the used part once, plus a flush per MiB.
 
+
+## 10. P-256 on the ARMv8 `nistz256` assembly (ADR-255)
+
+**What this is and is not.** Microbenchmarks of the P-256 operations a handshake performs, before (RustCrypto's
+portable code, `main` at eb3a5d3) and after (the vendored OpenSSL ARMv8 assembly). **All figures are from an Apple M4
+Pro**, not from the target CPU: an Apple core is not a Neoverse N1, has different multiplier latencies and a much
+larger out-of-order window, and the ratios on the netcup VPS may differ. The VPS (Neoverse N1, where verify took
+508 us, sign 141 us and a mutual-TLS handshake 1.08 ms before this change) has **not** been measured with it.
+
+**Host, production paths** (`cargo run --release -p urmqtt-tls --example profile`, which calls `provider::fastec`
+as the handshake does; Docker 28 `linux/arm64` container on macOS, image `urmqtt-ci`, nightly-2026-10-20; both trees
+built in the same container and run interleaved, 11 runs each; minimum / median in microseconds):
+
+| | before | after | ratio (min) |
+|---|---|---|---|
+| key generation | 30.8 / 31.2 | 6.97 / 7.01 | 4.4x |
+| ECDH P-256 | 135.2 / 137.5 | 25.0 / 25.1 | 5.4x |
+| ECDSA sign | 34.7 / 35.4 | 11.6 / 12.1 | 3.0x |
+| ECDSA verify (unknown key) | 147.4 / 152.1 | 29.1 / 29.6 | 5.1x |
+| CA verify (registered issuer) | 54.2 / 55.7 | 9.6 / 10.0 | 5.6x |
+| X25519 base / shared (unchanged code) | 7.4 / 20.4 | 7.5 / 20.1 | 1.0x |
+| handshake estimate (the profile's sum) | 292 / 297 | 104 / 105 | 2.8x |
+
+**Primitives** (`cargo test --release -p urmqtt-nistz256 -- --ignored --nocapture timings`, same container, best of
+30 x 50): field multiplication 23 ns, squaring 15 ns, point doubling 165 ns, addition 315 ns, field inversion 2.8 us,
+scalar inversion 4.5 us, constant-time generator multiplication 4.46 us (3.03 us variable time: the difference bounds
+the cost of the constant-time table scans), variable-base multiplication 23.7 us, a trust-anchor `KeyTable` 0.53 ms.
+
+**In the kernel** (the boot's own `crypto-profile` line, the same `bench::run`; smoke scenario `boot-acpi`, QEMU with
+HVF on the M4 Pro, 4 vCPU; `main` and this change booted alternately, three boots each, median in microseconds; the
+first `main` boot was slower in every P-256 row and is inside the medians):
+
+| | before | after | ratio |
+|---|---|---|---|
+| key generation | 35.9 | 10.2 | 3.5x |
+| ECDH P-256 | 155.9 | 27.3 | 5.7x |
+| ECDSA sign | 44.3 | 18.9 | 2.3x |
+| ECDSA verify | 164.3 | 32.8 | 5.0x |
+| CA verify | 63.1 | 11.4 | 5.5x |
+| handshake estimate | 347 (349, 347, 593) | 141 (142, 141, 143) | 2.5x |
+
+The in-guest `dp-bench` (client and server in the guest, full TLS 1.3 + mTLS + CONNECT) gave 4008-4018 handshakes/s
+on one worker core and 13 012-14 161 on four after the change; the same scenario did not complete on the `main`
+snapshot in this session, so there is no before figure for it.
+
+Reproduce: the two `cargo` commands above inside `linux/arm64` Docker (or natively on aarch64 Linux); for "before",
+the same on a checkout of eb3a5d3.

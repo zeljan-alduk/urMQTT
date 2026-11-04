@@ -376,8 +376,8 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-kernel` | `crates/kernel/src/devices.rs:647` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/devices.rs:681` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/devices.rs:781` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/diag.rs:582` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/diag.rs:669` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/diag.rs:587` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/diag.rs:674` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/hardening.rs:94` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/hardening.rs:136` | attribute | yes |
 | `urmqtt-kernel` | `crates/kernel/src/hardening.rs:144` | attribute | yes |
@@ -527,25 +527,34 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-mm` | `crates/mm/src/lib.rs:152` | fn | yes |
 | `urmqtt-mm` | `crates/mm/src/lib.rs:171` | fn | yes |
 | `urmqtt-mm` | `crates/mm/src/lib.rs:173` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:72` | extern block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:164` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:205` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:210` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:219` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:222` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:239` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:242` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:252` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:255` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:264` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:267` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:277` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:280` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:291` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:294` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:303` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:311` | block | yes |
-| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:318` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/aarch64.rs:21` | extern block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/aarch64.rs:72` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/aarch64.rs:79` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/aarch64.rs:86` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/aarch64.rs:95` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/aarch64.rs:102` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/aarch64.rs:110` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/aarch64.rs:119` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/aarch64.rs:127` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/lib.rs:151` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:16` | extern block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:85` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:90` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:99` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:102` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:111` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:114` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:124` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:127` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:136` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:139` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:149` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:152` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:163` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:166` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:175` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:183` | block | yes |
+| `urmqtt-nistz256` | `crates/nistz256/src/x86_64.rs:190` | block | yes |
 | `urmqtt-store` | `crates/store/src/crc.rs:54` | block | yes |
 | `urmqtt-store` | `crates/store/src/csqlite.rs:27` | extern block | yes |
 | `urmqtt-store` | `crates/store/src/csqlite.rs:110` | fn | yes |

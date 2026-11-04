@@ -136,6 +136,8 @@ the open audit findings that need no hardware closed, and the gaps the netcup ru
   fixed-base tables for these (ADR-110, ADR-130, ADR-131).
 - Risk: a black-box test may be inconclusive at a feasible sample size (AUDIT.md §6 says so); report it as such.
 - Verify: `make ct` output with a negative control per primitive, recorded in CRYPTO.md.
+- Progress (ADR-255): P-256 key generation, ECDH and signing are in `make ct`, with a P-256 positive control;
+  X25519 and Ed25519 are still open, and the P-256 runs so far are Docker on an Apple M4 Pro, not a server core.
 
 **NOW-10. H0-W8: fuzz crafted SQLite files.** M.
 - What: a fuzz target that opens mutated database, WAL and journal images through the worker's VFS under ASan.
