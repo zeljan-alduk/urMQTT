@@ -114,10 +114,12 @@ target/release/urmqtt-config pack deploy/dev/config.toml --iso /tmp/urmqtt-v0.4.
 target/release/urmqtt-config show /tmp/mine.iso
 ```
 
-`deploy/dev/config.toml` sets `console.virtio_gpu` and the `[devices]` keys to "auto", so this pack is format 6: it
-succeeds with the v0.4.0 template, and the same command with the v0.3.0 template must be refused ("needs
-configuration format 6 ... reads up to 4: use a newer release"). The kernel: `make build ENV=dev ARCH=aarch64` on the tag and compare
-`shasum -a 256 target/aarch64-unknown-none/release/urmqtt` with the `.elf` line of `SHA256SUMS`.
+A configuration with the new keys (for example a file with `[console] virtio_gpu = "on"` and `[devices] virtio_balloon = "on"`;
+**not** `deploy/dev/config.toml`: a release template refuses its plaintext port and its `require_data_disk = false`,
+which are dev-only) is format 6: it succeeds with the v0.4.0 template, and the same command with the v0.3.0 template must be refused ("needs
+configuration format 6 ... reads up to 4: use a newer release"). The kernel: the `.elf` of the release is a **dev** build, and a dev build embeds the development certificates that
+`make certs` generates at random on each machine, so its hash cannot be reproduced on another machine (it did not match
+on 2026-11-04, as expected). Reproducibility is checked with `make repro ENV=prod` (two builds of the same tree, identical).
 
 ## 6. The mirror
 
