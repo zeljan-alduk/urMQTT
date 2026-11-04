@@ -289,6 +289,28 @@ budget_images() {
 # groups as their own shards).
 want() { [[ -z ${SMOKE_NO_GROUPS:-} ]] && [[ -z ${SMOKE_GROUPS:-${SMOKE_SCENARIOS:-}} || $1 =~ ${SMOKE_GROUPS:-$SMOKE_SCENARIOS} ]]; }
 
+# bounded <seconds> <command...>: runs the command, killed after <seconds>
+# (status 124 then). For host tools that talk to the guest: a guest that stops
+# answering fails the scenario instead of holding the job (a CI shard once
+# waited 100 minutes on a storm round). macOS has no timeout(1).
+bounded() {
+    local limit=$1 pid waited=0
+    shift
+    "$@" &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        if (( waited >= limit * 10 )); then
+            echo "smoke: killed after ${limit} s: $*" >&2
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 124
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    wait "$pid"
+}
+
 # start_vm <log> <qemu args...>: boots in the background; sets VM_PID.
 start_vm() {
     local log=$1
@@ -641,7 +663,9 @@ mqtt_persist() {
 # devices do not all fit: each round all connect at once (retrying, like
 # devices with backoff), then all drop without DISCONNECT. The kernel must
 # refuse what does not fit, never run out of memory, and give the memory
-# back between rounds.
+# back between rounds. A round lasts at most --retry-s plus the loadgen's
+# watchdog (connect timeout + 4 x --io-timeout-s + 10 s); the whole run is
+# bounded at 15 minutes (three rounds take 2 to 5 minutes on HVF).
 storm() {
     local loadgen="$ROOT/target/release/urmqtt-loadgen"
     if [[ ! -x "$loadgen" ]]; then
@@ -654,8 +678,9 @@ storm() {
         fresh_disk "$iso" "$data"
         start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
         if wait_log "$log" "TLS 1.3 listener on port 8883"; then
-            (cd "$ROOT" && "$loadgen" storm --port "$PORT" --clients 3000 --threads 8 --rounds 3 \
-                --retry-s 30 --subscribe 1 --min-connected 500) >"$log.client" 2>&1 || status=$?
+            (cd "$ROOT" && bounded "${SMOKE_STORM_LIMIT_S:-900}" "$loadgen" storm --port "$PORT" --clients 3000 \
+                --threads 8 --rounds 3 --retry-s 30 --io-timeout-s 10 --subscribe 1 --min-connected 500) \
+                >"$log.client" 2>&1 || status=$?
             # Memory left by the last round is returned within 10 s.
             sleep 12
         else
@@ -666,6 +691,42 @@ storm() {
         check "storm [$accel]" "$log" "$status" "loadgen: storm round 3: [0-9]+ of 3000 connected" \
             "admission: [0-9]+ (connection\(s\) refused|SYN\(s\) dropped without an answer on core [0-9]+): heap below the free reserve" \
             "mem: 0 connection\(s\)" "NOT:memory allocation of" "$NO_FAULT"
+    done
+}
+
+# ADR-261: the broker closes idle connections (keep-alive timeout) whose
+# devices keep their side open and acknowledge everything (QEMU's user-mode
+# network does, like a device whose application stopped reading). The
+# connections go to FIN-WAIT-2 and its 60 s timer ends them while the devices
+# still hold their sockets, so "mem: 0 connection(s)" is logged before the
+# loadgen lets go. Before the fix every ACK of the FIN brought a new FIN, the
+# timer was replaced each time, and core 0 spent itself on the exchange until
+# the devices closed (A261-W1).
+fin_wait2() {
+    local loadgen="$ROOT/target/release/urmqtt-loadgen"
+    if [[ ! -x "$loadgen" ]]; then
+        (cd "$ROOT" && cargo build --release -q -p urmqtt-loadgen) || return 0
+    fi
+    local iso="$OUT/fin-wait2.raw"
+    mkimg "$iso" "serve log=info"
+    for accel in $ACCELS; do
+        local log="$OUT/fin-wait2-$accel.log" data="$OUT/fin-wait2-$accel.img" status=0
+        fresh_disk "$iso" "$data"
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
+        if wait_log "$log" "TLS 1.3 listener on port 8883"; then
+            # Keep-alive 2 s: the broker closes them about 3 s after CONNECT;
+            # FIN-WAIT-2 ends them 60 s later; the devices hold on for 90 s.
+            (cd "$ROOT" && bounded 200 "$loadgen" hold --port "$PORT" --clients 50 --threads 8 --keepalive 2 \
+                --duration 90) >"$log.client" 2>&1 || status=$?
+        else
+            status=124
+        fi
+        # At once: a "mem: 0" line after the devices close would prove nothing.
+        kill_vm
+        grep -v '^loadgen: bench-' "$log.client" >>"$log" 2>/dev/null || true
+        check "fin-wait2: half-open peers end after FIN-WAIT-2, no FIN loop [$accel]" "$log" "$status" \
+            "loadgen: hold: 50 of 50 connections established" "mem: 0 connection\(s\)" \
+            "loadgen: hold: 50 connections kept for 90 s" "$NO_FAULT"
     done
 }
 
@@ -3565,6 +3626,7 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want release_kernel && release_kernel
     want plaintext && plaintext
     want storm && storm
+    want fin_wait2 && fin_wait2
     want attack_raw && attack_raw
     want attack_app && attack_app
     want observability && observability
@@ -4183,6 +4245,7 @@ if command -v mosquitto_pub >/dev/null; then
     want mqtt_persist && mqtt_persist
 fi
 want storm && storm
+want fin_wait2 && fin_wait2
 want attack_raw && attack_raw
 want attack_app && attack_app
 want observability && observability

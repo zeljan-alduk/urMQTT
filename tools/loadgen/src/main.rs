@@ -48,6 +48,10 @@
 //! sorts errors by where they happened. `--error-sleep-ms` is the pause
 //! after a failed attempt (default 50 ms: an aggressive client; a device
 //! with backoff waits seconds) and `--connect-timeout-s` bounds a connect.
+//! `--io-timeout-s` (default 10) bounds every read and write while a
+//! connection opens; in `storm` the `--retry-s` deadline holds for each
+//! attempt, and a round whose threads are still busy a connect timeout plus
+//! four I/O timeouts after it fails with an error instead of waiting.
 //! `--close server` (default) lets the server close first, so the client keeps
 //! no TIME_WAIT; `--close client` is the old order and is limited by the
 //! client's ephemeral ports (about 550 connections/s on macOS).
@@ -88,6 +92,9 @@ struct Opts {
     error_sleep_ms: u64,
     /// Connect timeout, seconds (0: the operating system's).
     connect_timeout_s: u64,
+    /// Read and write timeout of every socket operation while a connection
+    /// opens (TLS handshake, CONNACK, SUBACK), seconds.
+    io_timeout_s: u64,
     /// The client sends its FIN first (and keeps the TIME_WAIT).
     close_first: bool,
     /// pubsub: publishers, subscribers, topics, QoS, payload bytes, rate
@@ -132,6 +139,7 @@ fn parse() -> Result<Opts, String> {
         prefix: "bench".into(),
         error_sleep_ms: 50,
         connect_timeout_s: 0,
+        io_timeout_s: 10,
         close_first: false,
         publishers: 1,
         subscribers: 1,
@@ -165,6 +173,7 @@ fn parse() -> Result<Opts, String> {
             "--prefix" => o.prefix = v,
             "--error-sleep-ms" => o.error_sleep_ms = num(&v)?,
             "--connect-timeout-s" => o.connect_timeout_s = num(&v)?,
+            "--io-timeout-s" => o.io_timeout_s = num(&v)?.max(1),
             "--publishers" => o.publishers = num(&v)? as usize,
             "--subscribers" => o.subscribers = num(&v)? as usize,
             "--topics" => o.topics = (num(&v)? as usize).max(1),
@@ -415,7 +424,11 @@ fn open_timed(o: &Opts, id: &str, cfg: &Cfg) -> Result<(Tls, Duration), String> 
     let tcp = connect(o)?;
     let connect_time = t_connect.elapsed();
     tcp.set_nodelay(true).ok();
-    tcp.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    // A server that accepts and then never answers (or stalls) fails the
+    // attempt after `--io-timeout-s` instead of holding the thread.
+    let io = Duration::from_secs(o.io_timeout_s);
+    tcp.set_read_timeout(Some(io)).ok();
+    tcp.set_write_timeout(Some(io)).ok();
     let conn = match cfg {
         Some(cfg) => {
             let name = ServerName::try_from("localhost").map_err(|e| e.to_string())?;
@@ -734,6 +747,7 @@ fn storm(o: &Opts) -> Result<(), String> {
         let t0 = Instant::now();
         let deadline = t0 + Duration::from_secs(o.retry_s);
         let refused = Arc::new(AtomicU64::new(0));
+        let (done, results) = std::sync::mpsc::channel::<Vec<Tls>>();
         let handles: Vec<_> = shares
             .iter()
             .map(|share| {
@@ -746,6 +760,7 @@ fn storm(o: &Opts) -> Result<(), String> {
                     prefix: String::new(),
                     ..*o
                 };
+                let done = done.clone();
                 std::thread::spawn(move || {
                     let mut conns = Vec::new();
                     let mut todo: Vec<usize> = (0..share.len()).collect();
@@ -753,6 +768,13 @@ fn storm(o: &Opts) -> Result<(), String> {
                     while !todo.is_empty() && Instant::now() < deadline {
                         let mut again = Vec::new();
                         for i in todo {
+                            // The deadline holds for every attempt, not only
+                            // between passes: with SYNs dropped (each attempt
+                            // a connect timeout) a pass over a few hundred
+                            // devices took many minutes past `--retry-s`.
+                            if Instant::now() >= deadline {
+                                break;
+                            }
                             let Some((id, cfg)) = share.get(i) else {
                                 continue;
                             };
@@ -773,14 +795,36 @@ fn storm(o: &Opts) -> Result<(), String> {
                             backoff = (backoff * 2).min(Duration::from_secs(2));
                         }
                     }
-                    conns
+                    // The receiver is gone only after a watchdog error.
+                    let _ = done.send(conns);
                 })
             })
             .collect();
-        let conns: Vec<Tls> = handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap_or_default())
-            .collect();
+        drop(done);
+        // Watchdog: an attempt started just before the deadline may still
+        // take a connect timeout and one I/O timeout per step (TLS flight,
+        // CONNACK, SUBACK); anything longer is a hung server or a hung
+        // client, reported instead of waited for (a CI job waited 100 min).
+        let grace = Duration::from_secs(o.connect_timeout_s + 4 * o.io_timeout_s + 10);
+        let mut conns: Vec<Tls> = Vec::new();
+        for _ in 0..handles.len() {
+            let left = (deadline + grace).saturating_duration_since(Instant::now());
+            match results.recv_timeout(left) {
+                Ok(c) => conns.extend(c),
+                Err(_) => {
+                    let n = handles.iter().filter(|h| !h.is_finished()).count();
+                    return Err(format!(
+                        "storm round {round}: {n} of {} thread(s) still in an attempt {} s after the \
+                         {} s deadline (--io-timeout-s {}): the server stopped answering",
+                        handles.len(),
+                        grace.as_secs(),
+                        o.retry_s,
+                        o.io_timeout_s
+                    ));
+                }
+            }
+        }
+        drop(handles);
         let n = conns.len();
         println!(
             "loadgen: storm round {round}: {n} of {} connected in {:.1} s, {} attempt(s) refused",
