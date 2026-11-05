@@ -58,10 +58,10 @@ devices that are not virtio (AWS ENA and NVMe, Google gVNIC, Azure, VMware, bare
 repository's releases. The line, and the promise that what is open stays open, are in [docs/EDITIONS.md](docs/EDITIONS.md).
 
 > [!NOTE]
-> **Where this is going** ([roadmap](#next-one-multi-platform-iso-raw-disk-demonstrably-secure), planned, not yet built):
-> - **One multi-platform ISO** that boots on aarch64 and x86_64, by UEFI or legacy BIOS, in VMs and on bare-metal hardware, and **installs itself** onto the machine's disk from its boot menu.
-> - **One disk, no filesystem:** the data lives in a raw partition of the disk urMQTT boots from, with its own minimal, specified layout. No other disk is touched.
-> - **Security work aimed at an external audit.**
+> **Where this stands** ([roadmap](docs/ROADMAP.md)):
+> - **One multi-platform ISO** that boots on aarch64 and x86_64, by UEFI or legacy BIOS, and **installs itself** onto the machine's disk from its boot menu: built (X10, S1b). It runs wherever the machine exposes virtio devices; drivers for physical NICs and disk controllers (bare metal, X12 to X16) are the commercial edition's scope, see [Editions](#editions).
+> - **One disk, no filesystem:** the data lives in a raw partition of the disk urMQTT boots from, with its own minimal, specified layout (S0 to S8): built.
+> - **Security work aimed at an external audit:** the audit package exists (H10, [docs/AUDIT.md](docs/AUDIT.md)); the external audit has not happened.
 
 ---
 
@@ -1144,8 +1144,10 @@ X0 to X10); bare metal (X12 to X16) is not.
 **The result:**
 
 - **One multi-platform ISO.** A single `urmqtt-<env>-<version>.iso` (and one raw GPT disk image) that boots on
-  aarch64 UEFI, x86_64 UEFI and x86_64 legacy BIOS. It runs in VMs (KVM, Proxmox, clouds) **and on bare-metal
-  hardware**, starting with an Intel PC. It stays an appliance with everything inside, reproducible and signed.
+  aarch64 UEFI, x86_64 UEFI and x86_64 legacy BIOS. It runs in VMs and clouds that expose virtio devices (KVM,
+  Proxmox, Firecracker, Cloud Hypervisor, netcup, Contabo, ...); the loader boots on bare-metal hardware too, but the
+  drivers for physical NICs and disks (X12 to X16) are the commercial edition's scope ([docs/EDITIONS.md](docs/EDITIONS.md)).
+  It stays an appliance with everything inside, reproducible and signed.
 - **One disk, no filesystem: raw disk access.** The disk urMQTT boots from also holds its data, in a raw partition after
   the boot partition: a superblock, a region table, fixed SQLite regions and a per-core telemetry log. No other disk is touched. There is no filesystem code to attack or corrupt. The storage
   track adds tooling, growth, discard, backup, scrubbing and optional encryption, still without a filesystem.
