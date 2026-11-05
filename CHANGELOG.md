@@ -21,6 +21,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **docs/EDITIONS.md**: the open edition (this repository, everything that runs on virtio devices) and the commercial
+  edition (drivers for devices that are not virtio, bare metal, support), the promise that the line never moves backwards,
+  contribution and licensing rules; README "Editions", ROADMAP NOW-18 (kernel as a library) and Google Cloud as the next
+  real-machine target.
+- **Developer Certificate of Origin**: every commit of a pull request must carry a `Signed-off-by:` trailer (`git commit -s`,
+  CONTRIBUTING.md); the Lint job checks the pull request's commits.
 - **A Miri negative control**: `scripts/miri.sh --negative-control` runs a deliberate use-after-free (compiled only under
   Miri, `#[ignore]`d, in urmqtt-config) and fails unless Miri reports it; every CI Miri job runs it.
 

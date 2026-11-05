@@ -55,7 +55,18 @@ These come from PLAN.md, ADR-213 and the way every milestone so far was closed; 
 
 ## 3. Phases
 
-### Now: v0.4, hardening and operability of what exists (17 items)
+**Editions (owner decision, 2026-11-05).** urMQTT has an open edition (this repository: everything that runs on
+virtio devices, and all protocol, security and storage features) and a commercial edition (a private repository
+that adds drivers for devices that are not virtio, bare metal, and support). The line, the promise that it never
+moves backwards and how the two relate are in [EDITIONS.md](EDITIONS.md). For this roadmap that means: the
+device drivers of LATER-2 and LATER-3 and the bare-metal work of LATER-4 and LATER-8 (X12 to X16) are
+commercial-edition work; every other item stays here, including the security items that bare metal motivated
+(LATER-5, LATER-6, LATER-7). It also answers part of D-11: **Google Cloud is the next real-machine target**,
+first on its instance types that offer virtio-net and a virtio-scsi disk (e2, n2), which the open edition should
+run on unchanged; gVNIC and NVMe for the newer types are the first commercial target. Nothing has run on Google
+Cloud yet.
+
+### Now: v0.4, hardening and operability of what exists (18 items)
 
 The goal of v0.4 would be: a release an operator can run in production on a KVM VPS, with a real signing key,
 the open audit findings that need no hardware closed, and the gaps the netcup run showed fixed.
@@ -196,6 +207,17 @@ the open audit findings that need no hardware closed, and the gaps the netcup ru
   probe"; `make builder-test` without the emulator runtime (PROGRESS, "Found, not fixed").
 - Why: H8-W4 ("the CI job for the x86_64 test is not wired"); README X1 "CI KVM probe not done".
 - Risk: none. Verify: the jobs run on a pull request.
+
+**NOW-18. Kernel as a library.** M.
+- What: a driver registration API for out-of-tree drivers, generic PCI ID binding, and a reserved configuration
+  tag range; the open kernel's behaviour unchanged, `make repro` identical.
+- Why: [EDITIONS.md](EDITIONS.md) §5. The driver framework's tables (`virtio::registry::KINDS`,
+  `kernel/src/vdev/mod.rs::DRIVERS`) and the configuration tags (`crates/cfg/src/fields.rs`) are closed lists
+  inside this repository (ADR-257), so a driver that lives elsewhere needs a patched kernel crate today.
+- Risk: the registration path is code in the TCB that every image carries; a driver registered from outside must
+  not be able to change how the open drivers bind, and the const checks of `vdev/mod.rs` must keep working.
+- Verify: `make repro` identical before and after; smoke and host tests unchanged; a test driver registered from
+  a crate outside the workspace binds a QEMU device by PCI ID and reads a key from the reserved range.
 
 ### Next: protocol and network features (11 items)
 

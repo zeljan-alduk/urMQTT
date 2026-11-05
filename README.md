@@ -50,6 +50,13 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 > The kernel boots under QEMU with HVF and TCG. Every feature and example below is tagged with the milestone that delivers it, and
 > [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
 
+## Editions
+
+This repository is the open edition of urMQTT (Apache-2.0 OR MIT): the protocol, security, storage, the tools and
+every virtio driver, for any hypervisor that gives the guest virtio devices. A commercial edition adds drivers for
+devices that are not virtio (AWS ENA and NVMe, Google gVNIC, Azure, VMware, bare metal) and support, built on this
+repository's releases. The line, and the promise that what is open stays open, are in [docs/EDITIONS.md](docs/EDITIONS.md).
+
 > [!NOTE]
 > **Where this is going** ([roadmap](#next-one-multi-platform-iso-raw-disk-demonstrably-secure), planned, not yet built):
 > - **One multi-platform ISO** that boots on aarch64 and x86_64, by UEFI or legacy BIOS, in VMs and on bare-metal hardware, and **installs itself** onto the machine's disk from its boot menu.
@@ -1120,7 +1127,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M8** MQTT codec | spec tests, property tests, 10 minutes of fuzzing with no crash |
 | ✅ | **M9** Broker over TCP (dev) | pub/sub, wildcards, retained, LWT, QoS 1 redelivery with mosquitto |
 | ✅ | **M10** TLS 1.3 + mTLS | mosquitto over mTLS; wrong CA, expired, client-id mismatch and revoked all rejected |
-| ✅ | **M11** SQLite in the kernel | data survives restarts and `kill -9` |
+| ✅ | **M11** SQLite in the kernel | data survives restarts and `kill -9` (since H6 SQLite runs as an unprivileged worker) |
 | ✅ | **M12** Telemetry log | 1M messages; torn tail truncated on recovery |
 | ✅ | **M13** Multicore data plane | near-linear scaling 1 → 2 → 4 cores |
 | ✅ | **M14** Own TCP stack | smoltcp replaced; loss simulation tests; segment fuzzing |
@@ -1131,7 +1138,8 @@ shasum -a 256 -c SHA256SUMS
 ### Next: one multi-platform ISO, raw disk, demonstrably secure
 
 The work after M17 is planned in three tracks. The order across them is set in [docs/PLAN.md](docs/PLAN.md),
-and each track has a detailed implementation and test plan. **Nothing below is implemented yet.**
+and each track has a detailed implementation and test plan. Most of it is implemented (S0 to S8, H0 to H10 for the VPS scope,
+X0 to X10); bare metal (X12 to X16) is not.
 
 **The result:**
 
@@ -1153,14 +1161,14 @@ Security is the first priority and wins conflicts with the other tracks.
 | ✅ | **H0** Baseline & inventory | `docs/AUDIT.md`: TCB and `unsafe` inventory, parser list, mitigation matrix with tests, 9 questions answered from the code |
 | ✅ | **H1** Identity lifecycle | runtime revocation over a signed (Ed25519, offline key) control channel; live connections of a revoked device closed; allowlist mode; CA roles and rotation; build fails on expiring certificates |
 | ✅ | **H2** TLS assurance | random per-boot ticket keys rotated every 12 h; 0-RTT refused (tested); fatal alerts per RFC 8446; record layer byte-identical to rustls under differential fuzzing; dudect-style constant-time tests; 23 tlsfuzzer probes; interop with OpenSSL 3/4, wolfSSL, Mbed TLS ([CRYPTO.md](docs/CRYPTO.md)) |
-| 📋 | **H3** TCP/IP & DoS | RFC 5961/6528 with key rotation; scripted and model-based TCP tests; adversarial suite with bounded memory and CPU |
-| 📋 | **H4** Exploit mitigations | KASLR, stack protector, kCFI, MTE, hardened allocator, zeroization; IOMMU on bare metal |
-| 📋 | **H5** Verification tooling | Miri, Kani proofs, ASan/UBSan, stateful ACL fuzzing in CI |
+| ✅ | **H3** TCP/IP & DoS | RFC 5961/6528 with key rotation; scripted and model-based TCP tests; adversarial suite with bounded memory and CPU (every network-reachable loop and allocation with its bound: [AUDIT.md](docs/AUDIT.md) §6b) |
+| ✅ | **H4** Exploit mitigations | KASLR, stack protector, MTE (TCG-tested), hardened allocator, panic policy (ADR-170 to ADR-174); zeroization partly ([AUDIT.md](docs/AUDIT.md) §4, question 6); kCFI evaluated and not adopted (ADR-175); IOMMU deferred with bare metal (ADR-176) |
+| ✅ | **H5** Verification tooling | Miri, Kani proofs, ASan/UBSan, stateful ACL fuzzing in CI (ADR-120 to ADR-123, [VERIFICATION.md](docs/VERIFICATION.md)) |
 | ✅ | **H6** SQLite isolation | SQLite runs at EL0 (aarch64) / ring 3 (x86_64) in an address space of its own, called by the DB core through 12 checked VFS system calls; a fault or a runaway restarts it and the store reopens from the WAL; the kernel links no SQLite. Not claimed: protection from wrong answers, speculative leaks, fuzzing ([SECURITY.md](docs/SECURITY.md)) |
-| 📋 | **H7** Time security | build time as a hard lower bound; optional SNTP with sanity limits; fail closed |
-| 📋 | **H8** Boot integrity | Limine config hash enrolled; Secure Boot with signed loaders (CI test and the Intel PC) |
+| ✅ | **H7** Time security | build time as a hard lower bound; optional SNTP with sanity limits; fail closed (ADR-050, ADR-100; NTS out of scope) |
+| ✅ | **H8** Boot integrity | for the VPS scope: Limine config hash enrolled; Secure Boot with signed loaders (ADR-250 to ADR-254); open: H8-W1 to H8-W6, the physical PC, aarch64 enforcement |
 | ✅ | **H9** Supply chain | CycloneDX SBOM per release (with the vendored C and binaries), cargo-vet with imported audits and listed exemptions (the TCB is not audited yet), advisories fail CI plus a daily job, [vulnerability-handling process](docs/VULNERABILITY-HANDLING.md) |
-| 📋 | **H10** Audit package | everything an external auditor needs, with a prioritised audit scope |
+| ✅ | **H10** Audit package | everything an external auditor needs, with a prioritised audit scope ([AUDIT.md](docs/AUDIT.md)) |
 
 **Storage, raw disk without a filesystem**: [PROMPT-storage.md](PROMPT-storage.md), plan in [docs/STORAGE-PLAN.md](docs/STORAGE-PLAN.md).
 
@@ -1198,8 +1206,8 @@ Security is the first priority and wins conflicts with the other tracks.
 | 📋 | **X14** Hardware NICs | e1000e/igb (QEMU-tested), then the test PC's onboard NIC; MQTT and storm on the LAN |
 | 📋 | **X15** aarch64 bare metal (optional) | GICv3 ITS for MSI-X; Ampere servers; Raspberry Pi 4 via UEFI firmware |
 | 📋 | **X16** Hardware compatibility list | `docs/HARDWARE.md` (to be created) with a row per machine; bare-metal claims only for listed machines |
-| 📋 | **X9** x86 CPU optimisations | AES-NI, SHA-NI, CRC32, AVX2, VAES chosen at boot; on by default only if faster on real hardware |
-| 📋 | **X11** Measurements & docs | bytes/connection, handshakes/s and scaling on real x86 hardware, every number backed by PROGRESS |
+| 🚧 | **X9** x86 CPU optimisations | AES-NI, SHA-NI, CRC32, AVX2, VAES chosen at boot; on by default only if faster on real hardware. Items 1 to 3 done under QEMU (ADR-070); items 4 to 7 and hardware numbers open |
+| 🚧 | **X11** Measurements & docs | bytes/connection, handshakes/s and scaling on real x86 hardware, every number backed by PROGRESS. Done on a KVM VPS (Contabo, [PERFORMANCE.md](docs/PERFORMANCE.md), ADR-213); real x86 hardware and PV on/off not measured |
 
 **Order** ([docs/PLAN.md](docs/PLAN.md)):
 
