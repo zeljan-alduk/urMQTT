@@ -16,7 +16,7 @@ bench = false
 
 [dependencies]
 urmqtt-control = { path = "../../crates/control" }
-ed25519-dalek = { version = "2.2", default-features = false }
+ed25519-dalek = { version = "3.0", default-features = false }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 x509-cert = { version = "0.3", features = ["pem", "std"] }
 
