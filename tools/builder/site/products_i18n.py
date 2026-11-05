@@ -263,3 +263,17 @@ BUILDER = {
     "noscript": "Для этой страницы нужны JavaScript и WebAssembly. Всё вычисляется в вашем браузере; ничего не отправляется.",
   },
 }
+
+# The two editions on the Products page (owner's decision of 2026-11-05, docs/EDITIONS.md): the lead, the labels of the two
+# groups, and the statement of what the open edition is. English only for now: the other 14 languages come from the
+# translation step (a missing language falls back to English). The commercial edition's own card and page are texts of
+# the site (enterprise_i18n.py in aldotech-web), not of this repository.
+EDITION = {
+  "en": {
+    "lead": "Software we build ourselves. urMQTT is open source; urMQTT Enterprise is its commercial edition.",
+    "open": "Open source",
+    "open_h": "Open source: Apache-2.0 OR MIT",
+    "open_p": "urMQTT contains everything that runs on virtio devices: the broker, the network stack, TLS and every security feature, the storage, the tools and every virtio driver. What is open stays open, the line between the editions never moves back toward the commercial side, and the open edition is not made weaker to sell the commercial one.",
+    "open_link": "Editions: the line and the promise",
+  },
+}
