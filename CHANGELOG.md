@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Miri in CI runs one process per test, four at a time** (cargo-nextest, `scripts/miri.sh`, ADR-262), instead of
+  each crate's tests one after another on one core. The same tests run; two tls tests run a smaller size under Miri only
+  (`MAX_CAPTURED` 64 instead of 4096 for the capture-table eviction test, 40 instead of 400 corruptions per certificate
+  for the serial reader test; `cargo test` keeps the full size). `MIRI_RUNNER=libtest` keeps the old runner.
+- **Miri cfg skips the PBKDF2 tests it was meant to skip**: seven skip patterns read `passwd::<name>` while the tests are
+  `passwd::tests::<name>`, so they never matched and those seven tests were most of the job; 34 of 47 tests now run under
+  Miri (41 before), the seven run natively in `cargo test`.
+- **A Miri job whose inputs match an earlier green run reports "cached"** (`scripts/miri-cache-key.sh`: the crates and
+  their path dependencies, `Cargo.lock`, the toolchain, Miri and nextest versions, the flags and the scripts). Only a green
+  run is recorded; `workflow_dispatch` with `miri-cache` off runs Miri in full.
+
+### Added
+
+- **A Miri negative control**: `scripts/miri.sh --negative-control` runs a deliberate use-after-free (compiled only under
+  Miri, `#[ignore]`d, in urmqtt-config) and fails unless Miri reports it; every CI Miri job runs it.
+
 ## [0.4.1] - 2026-11-05
 
 A release of a **TCP fix that applies to every earlier release** (after the broker closes a connection whose device keeps

@@ -2043,3 +2043,51 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   4. **Smoke** `fin_wait2` (in `SMOKE_ONLY=misc` and the default run): 50 devices with a 2 s keep-alive held for 90 s; `mem: 0 connection(s)` must be logged while they still hold their sockets (FIN-WAIT-2 ended them). On 51fabe2 it fails (`missing: mem: 0 connection(s)`), with the fix it passes.
 - **Results (HVF, 4 vCPUs, `SMOKE_ONLY=misc SMOKE_GROUPS='^storm$'`).** See PERFORMANCE.md section 12.2. With only the TCP fix and the old loadgen the storm passed in 15 minutes (rounds of 259, 331 and 319 s: the dropped SYNs, not a stall; core 0 at 27 %); with all of the above it passed 3 of 3 in about two minutes each.
 - **Consequences.** v0.4.0 and earlier releases have the FIN loop (A261-W1): a peer that keeps a connection half open after the broker closes it with a FIN (seen with keep-alive timeouts; a handshake timeout is a reset and not affected; the other graceful close paths were not audited one by one) and acknowledges each FIN makes the broker exchange segments with it at line rate for as long as it likes, and the connection slot is never freed. Fixed for the next release. Not verified: a real Linux or lwIP device as the peer, x86_64 (the code is shared), the netcup VPS (where the storm of ADR-259's bench image completed: its rounds ended before any keep-alive expired).
+
+## ADR-262 — Miri in CI: one process per test (cargo-nextest), a result cache, a negative control
+
+- **Status:** Accepted. Amends the Miri part of H5 (`scripts/miri.sh`, docs/VERIFICATION.md).
+- **Problem.** The Miri jobs ran `cargo miri test` per crate: one process, the tests one after another on one of the
+  runner's four vCPUs. Miri tls took about 50 to 90 minutes, Miri cfg about 70, and a release waited for them.
+- **Measured (Apple M4 Pro, macOS, native Miri; nextest's per-test times).** tls: 27 tests, 2,042 s of Miri time, of
+  which `server::capture_tests::the_bound_evicts_the_oldest_and_wipes_it` 1,100 s (4,096 inserts, each a linear scan of
+  the table) and `identity::tests::the_light_serial_reader_agrees_with_the_full_decoder` 534 s (3,200 full X.509
+  decodes); then the AEAD-heavy record tests (161 s, 123 s) and the ticket lifetime test (82 s). cfg: 41 tests, dominated
+  by seven PBKDF2 tests that the script meant to skip: its patterns read `passwd::<name>`, the tests are
+  `passwd::tests::<name>`, so they never matched (since ab5ac4e).
+- **Decision.**
+  1. **Runner.** `scripts/miri.sh` runs `cargo miri nextest run` (one Miri process per test, `MIRI_JOBS` at a time,
+     default 2, CI 4) when cargo-nextest is installed; `MIRI_RUNNER=libtest` keeps the old runner. Same `MIRIFLAGS`,
+     same skip lists (nextest takes libtest's `--skip` filters), same tests: the counts were compared per crate.
+  2. **Two tests smaller under Miri only.** `MAX_CAPTURED` is 64 under `cfg(miri)` (4096 otherwise): the eviction test
+     still fills the table and evicts through the same code. The serial-reader test runs 40 random corruptions per
+     certificate under Miri instead of 400, on every certificate and with every truncation. Both crates' code is
+     `forbid(unsafe_code)`; `cargo test` keeps the full sizes.
+  3. **The cfg skips fixed** to `passwd::tests::<name>`, which is what the comment (ADR-229) always said Miri skips: 34
+     tests run instead of 41; the seven run natively in `cargo test`.
+  4. **Result cache.** `scripts/miri-cache-key.sh` hashes the tracked files of the crates and of every path package
+     they build with, the workspace manifest, `Cargo.lock`, `.cargo/config.toml`, the toolchain file, the Miri scripts,
+     the certificate generator, `rustc -vV`, the Miri and nextest versions, the flags and the OS and architecture. A job
+     whose exact key has a marker reports "cached" and runs nothing; a marker is saved only after the Miri step and the
+     negative control passed (`actions/cache` restore and save, exact key, no prefix match). `workflow_dispatch` with
+     `miri-cache` off bypasses it.
+  5. **Negative control.** `urmqtt-config` has a use-after-free test compiled only under Miri and `#[ignore]`d;
+     `scripts/miri.sh --negative-control` fails unless Miri reports "Undefined Behavior" for it. Every Miri job runs it.
+  6. `scripts/miri.sh` sets `CARGO_INCREMENTAL=0`: cargo-miri compiles the test crate again in every test process, and
+     parallel processes raced on the incremental session directory (seen once in Docker: "failed to move dependency
+     graph").
+- **Results (Miri test time, build excluded; Apple M4 Pro native and Docker linux/arm64 with 4 vCPUs on it).**
+  tls: 27 tests before and after; 2,042 s one after another before, 216 s (macOS) and 201 s (Docker) at `-j 2` after;
+  the longest test is now `record::tests::roundtrip_and_fragmentation_both_suites` (136 to 145 s), the capture test takes
+  0.8 s and the serial-reader test 52 to 57 s. cfg: 41 tests and 1,424 s before (the seven PBKDF2 tests 1,075 s of it),
+  34 tests and 200 s (macOS) and 183 s (Docker) at `-j 2` after, bounded by `net::tests::contains_agrees_with_a_bitwise_reference`
+  (199 s). protocol crates: 120 tests, 131 s wall before, 72 s at `-j 4` after; config: 11 tests, 40 s before, 31 s
+  after. The GitHub runner was not measured: the old jobs' 50 to 90 minutes against 34 minutes here put it 1.5 to 2.6
+  times slower, so the longest Miri job (cfg) should take about 5 to 9 minutes of tests plus its build, under 20 minutes.
+- **Trade-offs.** The two shrunk tests check fewer cases under Miri (the full sizes run natively). The cache skips a
+  run when the hashed inputs are unchanged; it cannot see the random development certificates (their generator is
+  hashed), the runner image's system libraries, or new proptest seeds (Miri with isolation off takes host entropy), so
+  a cached green never retries seeds. Per-test processes cost Miri's
+  start-up (about 0.5 s) per test. Miri stays a gate on every push to main and every pull request: it is the only check
+  of the memory model of the parsers, buffers and the one `unsafe` module that runs on every change; dropping it on
+  main would leave a release depending on whichever pull request last ran it.

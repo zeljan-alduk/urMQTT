@@ -13,8 +13,55 @@ runs at the time of writing are in `docs/PROGRESS.md` (entry H5).
 
 ## Miri
 
-`scripts/miri.sh` runs `cargo miri test --lib` with `-Zmiri-strict-provenance
--Zmiri-disable-isolation` and `PROPTEST_CASES=6`. Excluded, and why:
+`scripts/miri.sh` runs the lib tests of mqtt, timer-wheel, net, tcp, broker,
+tls, cfg and config under Miri with `-Zmiri-strict-provenance
+-Zmiri-disable-isolation` (config adds `-Zmiri-ignore-leaks`) and
+`PROPTEST_CASES=6`.
+
+**Runner (ADR-262).** `MIRI_RUNNER=nextest` (the default when cargo-nextest
+is installed) runs `cargo miri nextest run`: one Miri process per test,
+`MIRI_JOBS` at a time (default 2; CI sets 4, the runner's vCPUs), every test
+printed with its time. `MIRI_RUNNER=libtest` is the old runner (`cargo miri
+test`, one process per crate, the tests one after another on one core) for a
+machine without nextest. Both take the same skip lists and run the same tests.
+`MIRI_PARTITION=count:K/N` (nextest only) runs a share of each crate's tests.
+
+**One test under Miri:** `MIRI_JOBS=1 scripts/miri.sh urmqtt-tls` runs a
+crate; for a single test, `cargo miri nextest run -p urmqtt-tls --lib -E
+'test(=record::tests::alerts)'` or `cargo miri test -p urmqtt-tls --lib --
+--exact record::tests::alerts` with the `MIRIFLAGS` above.
+
+**Negative control.** `scripts/miri.sh --negative-control` runs
+`urmqtt-config`'s `miri_negative_control::deliberate_use_after_free_must_be_reported`
+(compiled only under Miri, `#[ignore]`d) and fails unless Miri reports
+"Undefined Behavior" for it. Every CI Miri job runs it after its crates, with
+the same runner and toolchain.
+
+**Result cache (CI only).** Each Miri job computes `scripts/miri-cache-key.sh
+<crates>`: a SHA-256 over the tracked files of the crates and of every path
+package they build with (normal, build and dev dependencies, transitively, the
+vendored crates included), the workspace `Cargo.toml`, `Cargo.lock`,
+`.cargo/config.toml`, `rust-toolchain.toml`, `scripts/miri.sh`, the key script,
+`scripts/gen-dev-certs.sh`, `rustc -vV`, `cargo miri --version`, the nextest
+version, `MIRIFLAGS`, `PROPTEST_CASES`, `MIRI_RUNNER`, `MIRI_PARTITION` and the
+OS and architecture. A job that finds a marker saved under exactly that key
+(`actions/cache`, no prefix match) reports "cached" with the run that wrote it
+and runs nothing. The marker is saved only by a job whose Miri step and
+negative control both passed. What the key cannot see: the generated
+development certificates (the generator is hashed, its random output is
+not), the runner image (system libraries), and proptest's random seeds (a
+cached green does not retry new seeds; the fuzzers and `cargo test` do).
+Bypass: run the CI workflow by hand (`workflow_dispatch`) with `miri-cache`
+off, or delete the `miri-ok-*` caches (`gh cache delete`).
+
+**Shrunk under Miri only** (same code, fewer iterations; `cargo test` runs the
+full size): tls `server::capture_tests::the_bound_evicts_the_oldest_and_wipes_it`
+(`MAX_CAPTURED` is 64 under Miri instead of 4096: the table fills through a
+linear scan per insert, more than 10 minutes under Miri on an Apple M4 Pro at
+4096) and tls `identity::tests::the_light_serial_reader_agrees_with_the_full_decoder`
+(40 random corruptions per certificate instead of 400; 534 s under Miri).
+
+Excluded, and why:
 
 - `store` (SQLite, VFS, libc shims): Miri cannot execute C. `make sanitize`
   covers it.
@@ -30,6 +77,17 @@ runs at the time of writing are in `docs/PROGRESS.md` (entry H5).
   retained messages or 10 000 iterations (see the skip list in the script).
 - All integration tests under `tests/`: they read files, start processes or
   need minutes of CPU. The ACL fuzzer is one of them.
+- tls `provider::`, `kat::`, `bench::`, `probe::`: P-256 and X25519 arithmetic
+  and known-answer vectors (`provider::` alone ran 55 minutes under Miri). The
+  crate is `forbid(unsafe_code)`; the assembly is in urmqtt-nistz256 and
+  x25519. They run natively in `cargo test`.
+- cfg: the `passwd::tests::` hashing tests and the tests that hash an account
+  password (PBKDF2, at least 1000 iterations per hash, ADR-229) and
+  `garbage_never_panics` (20 000 cases, the fuzz target's job): 13 of 47, see
+  the list in the script; Miri keeps `long_keys_are_hashed_first` and
+  `hmac_matches_rfc_4231_case_2`. They run natively in `cargo test`. Until
+  ADR-262 seven of these skips were written `passwd::<name>`, matched nothing,
+  and those seven PBKDF2 tests ran under Miri.
 
 ## Kani
 

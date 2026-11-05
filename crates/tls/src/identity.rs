@@ -189,8 +189,12 @@ mod tests {
             rng_state ^= rng_state << 17;
             rng_state
         };
+        // 400 random corruptions per certificate natively; under Miri 40, still on every
+        // certificate and with every truncation below (each corruption is a full X.509
+        // decode: 400 ran for 9 minutes under Miri on an Apple M4 Pro, ADR-262).
+        let rounds = if cfg!(miri) { 40 } else { 400 };
         for c in all.iter().take(8) {
-            for _ in 0..400 {
+            for _ in 0..rounds {
                 let mut m = c.clone();
                 let i = (next() as usize) % m.len();
                 m[i] ^= 1 << (next() % 8);

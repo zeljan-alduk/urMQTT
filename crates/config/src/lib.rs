@@ -538,3 +538,24 @@ mod tests {
         assert_eq!(M::Ram.backing(true), Ok(Ram));
     }
 }
+
+/// The Miri negative control (ADR-262): one deliberate use-after-free that
+/// `scripts/miri.sh --negative-control` expects Miri to REPORT, so a Miri job
+/// proves it still detects undefined behaviour with the runner, flags and
+/// toolchain it ran the real tests with. Compiled only under Miri and
+/// `#[ignore]`d, so neither `cargo test` nor the normal Miri run executes it.
+#[cfg(all(test, miri))]
+#[allow(unsafe_code)]
+mod miri_negative_control {
+    #[test]
+    #[ignore = "deliberate UB: run only by scripts/miri.sh --negative-control, which expects it to FAIL"]
+    fn deliberate_use_after_free_must_be_reported() {
+        let b = std::boxed::Box::new(0x5au8);
+        let p: *const u8 = &raw const *b;
+        drop(b);
+        // SAFETY: none, on purpose: `p` dangles (its box was freed above). Miri must
+        // stop here with "Undefined Behavior"; the script fails if it does not.
+        let v = unsafe { p.read() };
+        assert_eq!(v, 0x5a);
+    }
+}

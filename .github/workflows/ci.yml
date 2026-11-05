@@ -6,6 +6,11 @@ on:
   pull_request:
   merge_group:
   workflow_dispatch:
+    inputs:
+      miri-cache:
+        description: Skip a Miri job whose inputs match an earlier green run (ADR-262); off runs Miri in full
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -282,9 +287,11 @@ jobs:
   miri:
     name: Miri ${{ matrix.name }} (host crates, H5)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
-    # Miri is slow (urmqtt-tls alone needs about 50 minutes, urmqtt-cfg about 70 on the runner), so the
-    # crates run as four parallel jobs instead of one job of more than two hours.
+    timeout-minutes: 60
+    # One Miri process per test, four at a time (cargo-nextest, ADR-262): the old runner ran each
+    # crate's tests one after another on one core (urmqtt-tls about 50 to 90 minutes, urmqtt-cfg
+    # about 70). A job whose inputs (scripts/miri-cache-key.sh) match an earlier green run reports
+    # "cached" instead of running again; only a green run is recorded.
     strategy:
       fail-fast: false
       matrix:
@@ -297,6 +304,10 @@ jobs:
             crates: "urmqtt-cfg"
           - name: config
             crates: "urmqtt-config"
+    env:
+      CRATES: ${{ matrix.crates }}
+      MIRI_RUNNER: nextest
+      MIRI_JOBS: "4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -304,15 +315,59 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: miri-${{ matrix.name }}
-      - run: make certs   # crates/config embeds the development certificates at build time
       - name: Install Miri
         run: rustup component add miri
-      - name: Miri
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-nextest
+      - name: Miri result key
+        id: key
         env:
-          CRATES: ${{ matrix.crates }}
+          NAME: ${{ matrix.name }}
+        run: |
+          read -ra crates <<< "$CRATES"
+          key="miri-ok-${NAME// /-}-$(scripts/miri-cache-key.sh "${crates[@]}")"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "Miri result key: $key"
+      - name: Earlier green run with the same inputs
+        id: cache
+        if: github.event_name != 'workflow_dispatch' || inputs.miri-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .miri-ok
+          key: ${{ steps.key.outputs.key }}
+      - name: Cached
+        if: steps.cache.outputs.cache-hit == 'true'
+        env:
+          KEY: ${{ steps.key.outputs.key }}
+        run: |
+          # The marker holds the key of the run that wrote it; anything else is not a hit.
+          [[ "$(cat .miri-ok/key)" == "$KEY" ]] || { echo "the marker does not match $KEY" >&2; exit 1; }
+          echo "cached: Miri passed for $CRATES with these inputs in an earlier run ($(cat .miri-ok/run))" | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: make certs   # crates/config embeds the development certificates at build time
+        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Miri
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           read -ra crates <<< "$CRATES"
           scripts/miri.sh "${crates[@]}"
+      - name: Miri negative control (must report the deliberate UB)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: scripts/miri.sh --negative-control
+      - name: Record the green run
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          KEY: ${{ steps.key.outputs.key }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p .miri-ok
+          printf '%s\n' "$KEY" > .miri-ok/key
+          printf '%s\n' "$RUN" > .miri-ok/run
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: .miri-ok
+          key: ${{ steps.key.outputs.key }}
 
   kani:
     name: Kani proofs (parsers, timer wheel, H5)

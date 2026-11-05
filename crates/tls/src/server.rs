@@ -174,8 +174,11 @@ impl Captured {
 }
 
 /// Bound on concurrently captured handshakes (admission control keeps the
-/// real number far lower).
-const MAX_CAPTURED: usize = 4096;
+/// real number far lower). Under Miri only, a small bound with the same
+/// eviction code: `the_bound_evicts_the_oldest_and_wipes_it` fills the table
+/// through a linear scan per insert, which at 4096 ran for more than ten
+/// minutes under Miri on an Apple M4 Pro (ADR-262); `cargo test` keeps 4096.
+const MAX_CAPTURED: usize = if cfg!(miri) { 64 } else { 4096 };
 
 static SECRETS: SpinLock<Captured> = SpinLock::new(Captured {
     entries: Vec::new(),
