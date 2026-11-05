@@ -64,12 +64,15 @@ A driver for any other virtio type (virtio-iommu, virtio-mem, virtio-fs, a futur
 belongs to the open edition too. The kernel only drives modern (virtio 1.x) devices; a legacy-only device is
 refused with a message (ADR-257, "States").
 
-Hypervisors and providers that give a guest these devices include KVM/QEMU, Proxmox VE, Firecracker, Cloud
+Hypervisors and providers that give a guest these devices over PCI include KVM/QEMU, Proxmox VE, Cloud
 Hypervisor, bhyve, and VPS providers such as netcup, Contabo and Hetzner, and Google Cloud's instance types that
 offer virtio-net and a virtio-scsi persistent disk (e2, n2 and others). Of these, only two machines have run a
 release-candidate image and are recorded in this repository: a Contabo x86_64 KVM VPS and a netcup aarch64 KVM
 VPS ([PERFORMANCE.md](PERFORMANCE.md), [PROGRESS.md](PROGRESS.md)). The others are expected to work because of
 their devices; they are not tested, and [DEPLOY.md](DEPLOY.md) stays the list of what has been tried.
+The kernel's virtio transport is PCI; a hypervisor that offers virtio only over MMIO and starts the guest without
+UEFI or BIOS (Firecracker) is not supported today. That would be open-edition work (an MMIO transport and a direct
+kernel boot), not commercial.
 
 ## 3. What the commercial edition adds
 

@@ -1145,7 +1145,7 @@ X0 to X10); bare metal (X12 to X16) is not.
 
 - **One multi-platform ISO.** A single `urmqtt-<env>-<version>.iso` (and one raw GPT disk image) that boots on
   aarch64 UEFI, x86_64 UEFI and x86_64 legacy BIOS. It runs in VMs and clouds that expose virtio devices (KVM,
-  Proxmox, Firecracker, Cloud Hypervisor, netcup, Contabo, ...); the loader boots on bare-metal hardware too, but the
+  Proxmox, Cloud Hypervisor, netcup, Contabo, ...; virtio over PCI); the loader boots on bare-metal hardware too, but the
   drivers for physical NICs and disks (X12 to X16) are the commercial edition's scope ([docs/EDITIONS.md](docs/EDITIONS.md)).
   It stays an appliance with everything inside, reproducible and signed.
 - **One disk, no filesystem: raw disk access.** The disk urMQTT boots from also holds its data, in a raw partition after
