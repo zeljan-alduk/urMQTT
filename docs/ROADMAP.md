@@ -66,7 +66,7 @@ first on its instance types that offer virtio-net and a virtio-scsi disk (e2, n2
 run on unchanged; gVNIC and NVMe for the newer types are the first commercial target. Nothing has run on Google
 Cloud yet.
 
-### Now: v0.4, hardening and operability of what exists (18 items)
+### Now: v0.4, hardening and operability of what exists (19 items)
 
 The goal of v0.4 would be: a release an operator can run in production on a KVM VPS, with a real signing key,
 the open audit findings that need no hardware closed, and the gaps the netcup run showed fixed.
@@ -218,6 +218,16 @@ the open audit findings that need no hardware closed, and the gaps the netcup ru
   not be able to change how the open drivers bind, and the const checks of `vdev/mod.rs` must keep working.
 - Verify: `make repro` identical before and after; smoke and host tests unchanged; a test driver registered from
   a crate outside the workspace binds a QEMU device by PCI ID and reads a key from the reserved range.
+
+**NOW-19. Honour the MTU the network announces.** S.
+- What: use the MTU from DHCP (option 26) or the interface's configured value instead of assuming 1500 bytes for
+  every segment; clamp the TCP MSS accordingly.
+- Why: Google Cloud's default VPC network uses an MTU of 1460 and others use 1500 or jumbo frames; a kernel that
+  sends 1500-byte frames into a 1460-byte network loses the large segments silently (found while preparing the
+  Google Cloud scripts of the commercial edition, 2026-11-05).
+- Risk: low; a wrong MTU today is a connectivity failure, not a safety one.
+- Verify: a QEMU smoke scenario with a DHCP server that announces 1460 and a tap/user network that drops larger
+  frames; the handshake and a 4 KiB publish complete; `$SYS` or the boot log shows the MTU in use.
 
 ### Next: protocol and network features (11 items)
 

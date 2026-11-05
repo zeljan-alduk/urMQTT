@@ -7,7 +7,7 @@ runs, why it runs there, and what the owner promises about it. The parts that ar
 | | Open edition | Commercial edition |
 |---|---|---|
 | Repository | this one, `zeljan-alduk/urMQTT` | `urmqtt-enterprise` (private) |
-| Name | urMQTT | working name "urMQTT Enterprise"; the final name is not decided |
+| Name | urMQTT | urMQTT Enterprise |
 | Licence | Apache-2.0 OR MIT | proprietary |
 | Runs on | any hypervisor that gives the guest virtio devices | the same, plus machines whose devices are not virtio |
 
@@ -170,7 +170,6 @@ an official edition. This is a note, not legal text.
 
 ## 9. Not decided yet
 
-- The commercial edition's final name.
 - Pricing.
 - The terms of support and the service-level agreement, and how they relate to a support period for the open
   edition (ROADMAP D-15).
