@@ -35,11 +35,13 @@
 //!     hash for `plaintext.users` (PBKDF2-HMAC-SHA-256, a random salt, 10000
 //!     iterations unless told otherwise). With --id, prints the whole table
 //!     `{ id = "NAME", password_hash = "..." }` to paste into the TOML.
-//! urmqtt-config check-release --pubkey minisign.pub --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]
+//! urmqtt-config check-release --pubkey minisign.pub [--pubkey OLD.pub]... --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]
 //!     Verifies the minisign signature over SHA256SUMS (default signature
 //!     file: the sums file name plus .minisig) and each FILE against the
-//!     sums (by file name). The same code the builder page runs in the
-//!     browser. Non-zero exit on any problem.
+//!     sums (by file name). With several --pubkey, the key the signature
+//!     names is used (a release of before a key rotation: add
+//!     keys/minisign-test-9229E05252D01F8E.pub). The same code the builder
+//!     page runs in the browser. Non-zero exit on any problem.
 //! ```
 
 use std::path::PathBuf;
@@ -52,7 +54,7 @@ fn usage() -> String {
      (--out BLOB | --out-slot SLOT | --iso TEMPLATE.iso --out OUT.iso | --image DISK.img --out OUT.img)\n  \
      urmqtt-config slot BLOB OUT\n  urmqtt-config show FILE [--all]\n  urmqtt-config verify FILE [--dev]\n  urmqtt-config schema\n  \
      urmqtt-config hash-password [--id NAME] [--iterations N]   (the password is read from standard input)\n  \
-     urmqtt-config check-release --pubkey minisign.pub --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]\n"
+     urmqtt-config check-release --pubkey minisign.pub [--pubkey OLD.pub]... --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]\n"
         .to_owned()
 }
 
@@ -215,15 +217,25 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         "check-release" => {
-            let pubkey = take(&mut args, "--pubkey")?.ok_or_else(usage)?;
+            let mut pubkeys = Vec::new();
+            while let Some(k) = take(&mut args, "--pubkey")? {
+                pubkeys.push(k);
+            }
+            if pubkeys.is_empty() {
+                return Err(usage());
+            }
             let sums_path = take(&mut args, "--sums")?.ok_or_else(usage)?;
             let sig_path =
                 take(&mut args, "--sig")?.unwrap_or_else(|| format!("{sums_path}.minisig"));
             let read = |p: &str| std::fs::read(p).map_err(|e| format!("cannot read {p}: {e}"));
-            let pubkey = String::from_utf8_lossy(&read(&pubkey)?).into_owned();
+            let texts = pubkeys
+                .iter()
+                .map(|p| read(p).map(|b| String::from_utf8_lossy(&b).into_owned()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let keys: Vec<&str> = texts.iter().map(String::as_str).collect();
             let sums = read(&sums_path)?;
             let sig = String::from_utf8_lossy(&read(&sig_path)?).into_owned();
-            let signed = release::verify_sums(&pubkey, &sums, &sig)?;
+            let signed = release::verify_sums_any(&keys, &sums, &sig)?;
             println!(
                 "signature ok: key {}, \"{}\"",
                 signed.signature.key_id, signed.signature.trusted_comment

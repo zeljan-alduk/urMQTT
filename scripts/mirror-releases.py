@@ -2,7 +2,7 @@
 """Mirror the urMQTT GitHub releases into a web directory (C1e, docs/PLAN.md).
 
     mirror-releases.py --root DIR [--repo OWNER/REPO] [--api-base URL]
-        [--pubkey FILE] [--minisign PATH] [--limit-rate BYTES_PER_SECOND]
+        [--keyring FILE | --pubkey FILE...] [--minisign PATH] [--limit-rate BYTES_PER_SECOND]
         [--min-free BYTES] [--token-file FILE] [--dry-run] [--verbose]
 
 GitHub Releases stays the single source of truth. For every new or changed
@@ -14,6 +14,22 @@ check passes are the files moved into <root>/<tag>/ (SHA256SUMS first, the ISO
 last, each with os.replace, so a half-copied file is never visible at its final
 name). The browser verifies the signature again, so this job is not trusted;
 it only refuses to publish what does not verify.
+
+Keys (ROADMAP NOW-2, docs/release-key-rotation.md)
+    --keyring FILE        keys/release-keys.json: several minisign public keys,
+                          each with the range of tags it may sign. The job
+                          takes the key that the signature names (its key id)
+                          and refuses the release when that key is not in the
+                          ring or the tag is outside its range: the former
+                          test key signed v0.1.0 to v0.4.1 and is trusted for
+                          those tags only. Key files are relative to the ring.
+    --pubkey FILE         one key for every tag (repeatable: each for every
+                          tag); the form of the installs before the rotation.
+    default               ../keys/release-keys.json next to this script, else
+                          /etc/urmqtt-mirror/keys/release-keys.json, else
+                          /etc/urmqtt-mirror/minisign.pub.
+    A key file that is still the placeholder (REPLACE-WITH-THE-NEW-PUBLIC-KEY)
+    is an error: the job does not start.
 
 Layout under --root
     releases.json     what the page reads (schema 1), written atomically after
@@ -88,6 +104,10 @@ DEFAULT_API = "https://api.github.com"
 DEFAULT_RATE = 2 * 1024 * 1024  # bytes per second
 DEFAULT_MIN_FREE = 256 * 1024 * 1024  # free space that must remain after a download
 SYSTEM_PUBKEY = Path("/etc/urmqtt-mirror/minisign.pub")
+SYSTEM_KEYRING = Path("/etc/urmqtt-mirror/keys/release-keys.json")
+KEYRING_SCHEMA = 1
+KEY_PLACEHOLDER = "REPLACE-WITH-THE-NEW-PUBLIC-KEY"
+KEYRING_MAX = 64 * 1024
 API_VERSION = "2022-11-28"
 USER_AGENT = "urmqtt-mirror/1 (+https://github.com/zeljan-alduk/urMQTT)"
 HTTP_TIMEOUT = 60.0  # seconds, per connect or read: a stalled transfer fails
@@ -108,6 +128,9 @@ META_NAME = "meta.json"
 # slip through ("v1\n"), and a tag or file name ends up as a path component.
 TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 TEMPLATE_RE = re.compile(r"urmqtt-template-[A-Za-z0-9._-]+-universal\.iso")
+# Release versions for the key ranges: v1.2.3, 1.2.3, v1.2.3-rc.1 (the suffix does not count).
+VERSION_RE = re.compile(r"v?(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:[-+][0-9A-Za-z.+-]*)?")
+KEY_ID_RE = re.compile(r"[0-9A-F]{16}")
 # Assets that are only listed, never fetched, still must be harmless to print.
 LISTED_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+@=,~-]{0,127}")
 REPO_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
@@ -308,20 +331,87 @@ def setup_logging(verbose: bool, journal: bool) -> None:
 # Public key and token
 
 
+def tag_version(tag: str | None) -> tuple[int, int, int] | None:
+    match = VERSION_RE.fullmatch(tag or "")
+    return (int(match[1]), int(match[2]), int(match[3])) if match else None
+
+
 @dataclasses.dataclass(frozen=True)
 class PubKey:
     path: Path
     key_id: str  # as minisign prints it: 16 hex digits, upper case
     fingerprint: str  # SHA-256 of the 42 key bytes, to notice a changed key
+    name: str = "release"
+    valid_from: str | None = None  # the first tag it may sign; None: no lower bound
+    valid_to: str | None = None  # the last tag it may sign; None: no upper bound
+    former_test_key: bool = False
+
+    def covers(self, tag: str) -> bool:
+        """May this key sign `tag`? A key with a range signs only tags that parse as versions inside it."""
+        if self.valid_from is None and self.valid_to is None:
+            return True
+        version = tag_version(tag)
+        if version is None:
+            return False
+        low, high = tag_version(self.valid_from), tag_version(self.valid_to)
+        return (low is None or version >= low) and (high is None or version <= high)
+
+    def range_text(self) -> str:
+        if self.valid_from and self.valid_to:
+            return f"{self.valid_from} to {self.valid_to}"
+        if self.valid_from:
+            return f"{self.valid_from} and later"
+        if self.valid_to:
+            return f"up to {self.valid_to}"
+        return "any tag"
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "key_id": self.key_id,
+            "name": self.name,
+            "valid_from": self.valid_from,
+            "valid_to": self.valid_to,
+            "former_test_key": self.former_test_key,
+        }
 
 
-def load_pubkey(path: Path) -> PubKey:
+@dataclasses.dataclass(frozen=True)
+class Keyring:
+    """The keys the job trusts. The first key is the current one (releases.json's key_id)."""
+
+    keys: tuple[PubKey, ...]
+
+    @property
+    def fingerprint(self) -> str:
+        """Changes when a key or its range does: a failure that a new key could heal is retried."""
+        if len(self.keys) == 1 and self.keys[0].valid_from is None and self.keys[0].valid_to is None:
+            return self.keys[0].fingerprint  # what a single --pubkey recorded before key rings existed
+        items = [[k.fingerprint, k.valid_from, k.valid_to] for k in self.keys]
+        return hashlib.sha256(json.dumps(items, separators=(",", ":")).encode()).hexdigest()
+
+    @property
+    def primary(self) -> PubKey:
+        return next((k for k in self.keys if not k.former_test_key), self.keys[0])
+
+    def by_id(self, key_id: str) -> PubKey | None:
+        return next((k for k in self.keys if k.key_id == key_id), None)
+
+    def ids(self) -> str:
+        return ", ".join(f"{k.key_id} ({k.name}, {k.range_text()})" for k in self.keys)
+
+
+def load_pubkey(path: Path, **extra: Any) -> PubKey:
     """Parse a minisign public key file: an untrusted comment line, then base64 of
     "Ed" + 8 bytes key id (little endian) + the 32-byte Ed25519 key."""
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise Fatal(f"cannot read the public key {path}: {exc}") from None
+    if KEY_PLACEHOLDER in text:
+        raise Fatal(
+            f"{path} is still the placeholder {KEY_PLACEHOLDER}: the release key has not been set "
+            "(docs/release-key-rotation.md); install the real minisign.pub first"
+        )
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     body = [ln for ln in lines if not ln.startswith("untrusted comment:")]
     try:
@@ -332,7 +422,67 @@ def load_pubkey(path: Path) -> PubKey:
             raise ValueError("not an Ed25519 minisign public key")
     except ValueError as exc:
         raise Fatal(f"{path} is not a minisign public key: {exc}") from None
-    return PubKey(path, raw[2:10][::-1].hex().upper(), hashlib.sha256(raw).hexdigest())
+    return PubKey(path, raw[2:10][::-1].hex().upper(), hashlib.sha256(raw).hexdigest(), **extra)
+
+
+def load_keyring(path: Path) -> Keyring:
+    """keys/release-keys.json: {"schema": 1, "keys": [{"name", "file", "valid_from",
+    "valid_to", "former_test_key", "key_id"?, "note"?}]}. Files are relative to the
+    ring. Strict: anything unexpected stops the job (it is the trust anchor)."""
+    try:
+        raw = path.read_bytes()
+        if len(raw) > KEYRING_MAX:
+            raise ValueError("implausibly large")
+        doc = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise Fatal(f"cannot read the key ring {path}: {printable(exc, 160)}") from None
+    if not isinstance(doc, dict) or doc.get("schema") != KEYRING_SCHEMA or not isinstance(doc.get("keys"), list) or not doc["keys"]:
+        raise Fatal(f"{path} is not a key ring of schema {KEYRING_SCHEMA} with at least one key")
+    keys: list[PubKey] = []
+    for number, entry in enumerate(doc["keys"], 1):
+        where = f"{path}, key {number}"
+        if not isinstance(entry, dict):
+            raise Fatal(f"{where}: not an object")
+        unknown = set(entry) - {"name", "file", "key_id", "valid_from", "valid_to", "former_test_key", "note"}
+        if unknown:
+            raise Fatal(f"{where}: unknown field(s) {', '.join(sorted(unknown))}")
+        name, file = entry.get("name"), entry.get("file")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", name):
+            raise Fatal(f"{where}: name must be a short word")
+        if not isinstance(file, str) or not file or "\0" in file:
+            raise Fatal(f"{where}: file must name the key file")
+        bounds: dict[str, str | None] = {}
+        for field in ("valid_from", "valid_to"):
+            value = entry.get(field)
+            if value is not None and (not isinstance(value, str) or tag_version(value) is None):
+                raise Fatal(f"{where}: {field} must be a version tag like v0.4.1, or null")
+            bounds[field] = value
+        low, high = tag_version(bounds["valid_from"]), tag_version(bounds["valid_to"])
+        if low is not None and high is not None and low > high:
+            raise Fatal(f"{where}: valid_from is after valid_to")
+        test = entry.get("former_test_key", False)
+        if not isinstance(test, bool):
+            raise Fatal(f"{where}: former_test_key must be true or false")
+        key = load_pubkey(path.parent / file, name=name, former_test_key=test, **bounds)
+        declared = entry.get("key_id")
+        if declared is not None and declared != key.key_id:
+            raise Fatal(f"{where}: {file} has key id {key.key_id}, the ring says {printable(declared, 40)}")
+        if any(k.key_id == key.key_id for k in keys):
+            raise Fatal(f"{where}: key {key.key_id} is listed twice")
+        keys.append(key)
+    return Keyring(tuple(keys))
+
+
+def signature_key_id(path: Path) -> str | None:
+    """The key id a .minisig file names (second line: base64 of "ED"/"Ed", 8-byte id, signature)."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        raw = base64.b64decode(lines[1].strip(), validate=True)
+    except (OSError, UnicodeDecodeError, IndexError, ValueError):
+        return None
+    if len(raw) != 74 or raw[:2] not in (b"ED", b"Ed"):
+        return None
+    return raw[2:10][::-1].hex().upper()
 
 
 def read_token(path: Path) -> str:
@@ -790,7 +940,7 @@ class Counters:
 class Context:
     root: Path
     tmp: Path
-    key: PubKey
+    keys: Keyring
     minisign: str
     client: GitHub
     limiter: RateLimiter
@@ -803,6 +953,7 @@ class Checked:
 
     sig_ok: bool = False
     trusted_comment: str = ""
+    key_id: str = ""
     sums_map: dict[str, str] = dataclasses.field(default_factory=dict)
     size: int = 0
     sha256: str = ""
@@ -840,20 +991,41 @@ def download_asset(ctx: Context, asset: Asset, dest: Path) -> tuple[int, str]:
         raise ReleaseFailure("download-failed", f"{asset.name}: {exc}", retry=True) from None
 
 
-def fetch_and_verify_sums(ctx: Context, plan: Plan, work: Path, checked: Checked) -> None:
-    """Download SHA256SUMS and its signature, verify the signature, parse the sums."""
+def pick_key(ctx: Context, sig: Path, tag: str) -> PubKey:
+    """The key the signature names, if the ring has it and it may sign `tag`."""
+    key_id = signature_key_id(sig)
+    if key_id is None:
+        raise ReleaseFailure("verification-failed", f"{SIG_NAME} is not a minisign signature")
+    key = ctx.keys.by_id(key_id)
+    if key is None:
+        raise ReleaseFailure(
+            "verification-failed", f"{SIG_NAME} was made with key {key_id}, which is not in the key ring ({ctx.keys.ids()})"
+        )
+    if not key.covers(tag):
+        what = "the project's former test key" if key.former_test_key else f"the {key.name} key"
+        raise ReleaseFailure(
+            "verification-failed",
+            f"{SIG_NAME} was made with key {key_id} ({what}), which may sign {key.range_text()} only, not {printable(tag, 64)}",
+        )
+    return key
+
+
+def fetch_and_verify_sums(ctx: Context, plan: Plan, work: Path, checked: Checked, tag: str) -> None:
+    """Download SHA256SUMS and its signature, verify the signature with the key it
+    names (if that key may sign `tag`), parse the sums."""
     assert plan.sums is not None and plan.sig is not None
     parts = ((plan.sums, work / f"{SUMS_NAME}.part", SUMS_MAX), (plan.sig, work / f"{SIG_NAME}.part", SIG_MAX))
     for asset, dest, limit in parts:
         if asset.size > limit:
             raise ReleaseFailure("verification-failed", f"{asset.name} is {asset.size} bytes (limit {limit})")
         download_asset(ctx, asset, dest)
-    comment = verify_signature(ctx.minisign, ctx.key.path, parts[0][1], parts[1][1])
+    key = pick_key(ctx, parts[1][1], tag)
+    comment = verify_signature(ctx.minisign, key.path, parts[0][1], parts[1][1])
     try:
         sums = parse_sums(parts[0][1].read_text(encoding="utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
         raise ReleaseFailure("verification-failed", f"{SUMS_NAME} is not a sha256sum list: {exc}") from None
-    checked.trusted_comment, checked.sums_map, checked.sig_ok = comment, sums, True
+    checked.trusted_comment, checked.sums_map, checked.sig_ok, checked.key_id = comment, sums, True, key.key_id
 
 
 def check_free_space(ctx: Context, need: int) -> None:
@@ -866,13 +1038,13 @@ def check_free_space(ctx: Context, need: int) -> None:
         )
 
 
-def check_with_template(ctx: Context, plan: Plan, work: Path, checked: Checked) -> None:
+def check_with_template(ctx: Context, plan: Plan, work: Path, checked: Checked, tag: str) -> None:
     """Every check a template release must pass before anything is published."""
     template = plan.template
     assert template is not None
     if plan.sums is None or plan.sig is None:
         raise ReleaseFailure("no-signature", f"the release has a template but not both {SUMS_NAME} and {SIG_NAME}")
-    fetch_and_verify_sums(ctx, plan, work, checked)  # the cheap checks first: no big download for a bad signature
+    fetch_and_verify_sums(ctx, plan, work, checked, tag)  # the cheap checks first: no big download for a bad signature
     wanted = checked.sums_map.get(template.name)
     if wanted is None:
         raise ReleaseFailure("verification-failed", f"the signed {SUMS_NAME} does not list {template.name}")
@@ -896,12 +1068,15 @@ def check_without_template(ctx: Context, plan: Plan, work: Path, checked: Checke
         LOG.warning("release %s: no template and no complete signature files; listed as unverified", tag)
         return
     try:
-        fetch_and_verify_sums(ctx, plan, work, checked)
+        fetch_and_verify_sums(ctx, plan, work, checked, tag)
     except ReleaseFailure as fail:
         checked.retry = fail.retry
         LOG.warning("release %s: no template; %s not verified: %s", tag, SUMS_NAME, fail)
         return
-    LOG.info("release %s: no template (built before the runtime configuration); signature ok (%s)", tag, checked.trusted_comment)
+    LOG.info(
+        "release %s: no template (built before the runtime configuration); signature ok (key %s, %s)",
+        tag, checked.key_id, checked.trusted_comment,
+    )  # fmt: skip
 
 
 def render_assets(assets: Iterable[Asset], sums_map: dict[str, str], mirrored: set[str]) -> list[dict[str, Any]]:
@@ -944,6 +1119,7 @@ def publish(ctx: Context, rel: Release, plan: Plan, work: Path, checked: Checked
         "sums": {"path": f"{rel.tag}/{SUMS_NAME}", "sig_path": f"{rel.tag}/{SIG_NAME}"},
         "assets": render_assets(rel.assets, checked.sums_map, {SUMS_NAME, SIG_NAME, template.name}),
         "trusted_comment": checked.trusted_comment,
+        "key_id": checked.key_id,
     }
 
 
@@ -968,11 +1144,12 @@ def process_release(ctx: Context, rel: Release, prev: dict[str, Any] | None) -> 
         "meta_schema": META_SCHEMA,
         "tag": tag,
         "fingerprint": fp,
-        "key_fp": ctx.key.fingerprint,
+        "key_fp": ctx.keys.fingerprint,
         "result": "",
         "retry": False,
         "verified": False,
         "sums_map": {},
+        "key_id": None,
         "attempted_at": now,
         "descr": describe(rel),
         "published": old_pub,  # an earlier good edition stays on disk whatever happens now
@@ -990,17 +1167,19 @@ def process_release(ctx: Context, rel: Release, prev: dict[str, Any] | None) -> 
             check_without_template(ctx, plan, work, checked, tag)
             state.update(result="no-template", verified=checked.sig_ok, retry=checked.retry)
         else:
-            check_with_template(ctx, plan, work, checked)
+            check_with_template(ctx, plan, work, checked, tag)
             state["published"] = publish(ctx, rel, plan, work, checked, fp, now)
             state.update(result="ok", verified=True, removed_at=None)
             if old_pub is not None and old_pub.get("fingerprint") != fp:
                 state.update(edited=True, edited_at=now)
                 LOG.warning("release %s: its assets changed after it was mirrored; re-mirrored, flagged as edited", tag)
             LOG.info(
-                "release %s: mirrored %s (%s, sha256 %s, config format %d); signature ok (%s)",
-                tag, plan.template.name, human(checked.size), checked.sha256[:16], checked.config_format, checked.trusted_comment,
+                "release %s: mirrored %s (%s, sha256 %s, config format %d); signature ok (key %s, %s)",
+                tag, plan.template.name, human(checked.size), checked.sha256[:16], checked.config_format, checked.key_id,
+                checked.trusted_comment,
             )
         state["sums_map"] = checked.sums_map
+        state["key_id"] = checked.key_id or None
     except ReleaseFailure as fail:
         state.update(result=fail.reason, retry=fail.retry, verified=False, sums_map=checked.sums_map)
         LOG.error("release %s: NOT published (%s): %s", tag, fail.reason, fail)
@@ -1072,7 +1251,7 @@ def published_intact(root: Path, tag: str, published: object) -> bool:
     return True
 
 
-def decide(rel: Release, prev: dict[str, Any] | None, key: PubKey, root: Path) -> str | None:
+def decide(rel: Release, prev: dict[str, Any] | None, key: Keyring, root: Path) -> str | None:
     """Why this release must be processed now, or None when nothing needs doing."""
     if prev is None:
         return "new"
@@ -1101,7 +1280,22 @@ def update_removed(state: dict[str, Any], removed: bool, now: str) -> bool:
     return False
 
 
-def build_entry(repo: str, state: dict[str, Any], rel: Release | None, now: str) -> dict[str, Any]:
+def signer_of(state: dict[str, Any], root: Path) -> str | None:
+    """The key id that signed what is on disk (or, with nothing mirrored, the last
+    verified SHA256SUMS). Editions mirrored before key rings existed did not record
+    it: their signature file on disk says."""
+    published = state.get("published")
+    if isinstance(published, dict):
+        if isinstance(published.get("key_id"), str) and published["key_id"]:
+            return str(published["key_id"])
+        return signature_key_id(root / state["tag"] / SIG_NAME)
+    key_id = state.get("key_id")
+    return key_id if isinstance(key_id, str) and KEY_ID_RE.fullmatch(key_id) and state.get("verified") else None
+
+
+def build_entry(
+    repo: str, state: dict[str, Any], rel: Release | None, now: str, keys: Keyring | None = None, root: Path | None = None
+) -> dict[str, Any]:
     """One element of releases.json. Descriptive fields come from the fresh
     listing (or the stored copy when the release is gone), the rest from the state."""
     published = state.get("published")
@@ -1135,20 +1329,25 @@ def build_entry(repo: str, state: dict[str, Any], rel: Release | None, now: str)
     if state.get("edited") and state.get("edited_at"):
         entry["edited_at"] = state["edited_at"]
     entry.update(template=template, sums=sums, verified=verified, reason=reason)
+    # Which key signed it (informative: the page checks the signature itself, with its own keys).
+    signer = signer_of(state, root) if root is not None else None
+    known = keys.by_id(signer) if keys is not None and signer else None
+    entry["signed_by"] = (known.describe() if known else {"key_id": signer, "name": None}) if signer else None
     if removed:
         entry["removed_at"] = state["removed_at"]
     entry.update(assets=assets, mirrored_at=mirrored_at, checked_at=now)
     return entry
 
 
-def build_document(repo: str, key: PubKey, entries: list[dict[str, Any]], now: str) -> dict[str, Any]:
+def build_document(repo: str, keys: Keyring, entries: list[dict[str, Any]], now: str) -> dict[str, Any]:
     entries.sort(key=lambda e: (e["published"] or "", e["tag"]), reverse=True)
     return {
         "schema": SCHEMA,
         "generated": now,
         "repo": repo,
         "source": f"https://github.com/{repo}/releases",
-        "key_id": key.key_id,
+        "key_id": keys.primary.key_id,
+        "keys": [k.describe() for k in keys.keys],
         "releases": entries,
         # what the page can offer: a mirrored template that is current and verified
         "templates": sum(1 for e in entries if e["template"] is not None and e["status"] == "ok"),
@@ -1164,7 +1363,8 @@ class Config:
     root: Path
     repo: str
     api_base: str
-    pubkey: Path
+    pubkeys: tuple[Path, ...]  # --pubkey: each key for every tag
+    keyring: Path | None  # --keyring (wins over pubkeys)
     minisign: str | None
     limit_rate: int
     min_free: int
@@ -1206,7 +1406,13 @@ def prepare_tmp(root: Path) -> Path:
 def run(cfg: Config, summary: dict[str, Any]) -> int:
     if not cfg.root.is_dir():
         raise Fatal(f"{cfg.root} is not a directory (scripts/mirror/install.sh creates it)")
-    key = load_pubkey(cfg.pubkey)
+    if cfg.keyring is not None:
+        key = load_keyring(cfg.keyring)
+    else:
+        loaded = [load_pubkey(p) for p in cfg.pubkeys]
+        if len({k.key_id for k in loaded}) != len(loaded):
+            raise Fatal("one key is given twice with --pubkey")
+        key = Keyring(tuple(loaded))
     token = read_token(cfg.token_file) if cfg.token_file else None
     if cfg.minisign is None and not cfg.dry_run:  # fail now, not once per release
         raise Fatal("minisign not found; install it (Debian/Ubuntu: apt install minisign) or pass --minisign")
@@ -1261,7 +1467,7 @@ def sync_listed(
     would: list[dict[str, str]] = []
     for rel in releases:
         prev = states.get(rel.tag)
-        why = decide(rel, prev, ctx.key, ctx.root)
+        why = decide(rel, prev, ctx.keys, ctx.root)
         if why is None:
             assert prev is not None
             state, dirty = prev, False
@@ -1345,14 +1551,14 @@ def sync_unlisted(
     return final
 
 
-def run_locked(cfg: Config, key: PubKey, token: str | None, summary: dict[str, Any]) -> int:
+def run_locked(cfg: Config, key: Keyring, token: str | None, summary: dict[str, Any]) -> int:
     root, repo = cfg.root, cfg.repo
     LOG.info(
-        "mirroring %s into %s%s (key %s, %s)",
+        "mirroring %s into %s%s (keys %s; %s)",
         repo,
         root,
         " [dry run]" if cfg.dry_run else "",
-        key.key_id,
+        key.ids(),
         "unlimited rate" if cfg.limit_rate <= 0 else f"{human(cfg.limit_rate)}/s",
     )
     client = GitHub(cfg.api_base, repo, token)
@@ -1380,7 +1586,7 @@ def run_locked(cfg: Config, key: PubKey, token: str | None, summary: dict[str, A
     if not cfg.dry_run:
         stamp = iso_now()  # one instant for "generated" and every "checked_at": never before a "mirrored_at"
         by_tag = {r.tag: r for r in releases}
-        entries = [build_entry(repo, state, by_tag.get(tag), stamp) for tag, state in final.items()]
+        entries = [build_entry(repo, state, by_tag.get(tag), stamp, key, root) for tag, state in final.items()]
         document = build_document(repo, key, entries, stamp)
         try:
             write_json_atomic(root / RELEASES_JSON, document, ctx.tmp / f"{RELEASES_JSON}.new")
@@ -1438,16 +1644,23 @@ class _Parser(argparse.ArgumentParser):
 
 def parse_args(argv: list[str] | None) -> Config:
     script_dir = Path(__file__).resolve().parent
-    repo_key = script_dir.parent / "minisign.pub"
+    repo_ring = script_dir.parent / "keys" / "release-keys.json"
     parser = _Parser(description="Mirror the urMQTT GitHub releases into a web directory.")
     parser.add_argument("--root", required=True, type=Path, help="directory that holds releases.json and <tag>/")
     parser.add_argument("--repo", default=DEFAULT_REPO, help="OWNER/REPO (default %(default)s)")
     parser.add_argument("--api-base", default=DEFAULT_API, help="GitHub API base URL (default %(default)s)")
-    parser.add_argument(
+    keys = parser.add_mutually_exclusive_group()
+    keys.add_argument(
+        "--keyring",
+        type=Path,
+        help="key ring (keys/release-keys.json): each key with the tags it may sign (default: ../keys/release-keys.json "
+        "next to this script if present, else %s if present, else --pubkey %s)" % (SYSTEM_KEYRING, SYSTEM_PUBKEY),
+    )
+    keys.add_argument(
         "--pubkey",
         type=Path,
-        default=repo_key if repo_key.is_file() else SYSTEM_PUBKEY,
-        help="minisign public key (default: ../minisign.pub next to this script if present, else %s)" % SYSTEM_PUBKEY,
+        action="append",
+        help="a minisign public key trusted for every tag (repeatable); instead of --keyring",
     )
     parser.add_argument("--minisign", default="minisign", help="minisign binary, a name or a path (default: %(default)s from PATH)")
     parser.add_argument(
@@ -1475,11 +1688,15 @@ def parse_args(argv: list[str] | None) -> Config:
         parser.error("--api-base must be an https URL (plain http only for localhost), without credentials or query")
     if args.limit_rate < 0 or args.min_free < 0:
         parser.error("--limit-rate and --min-free must not be negative")
+    keyring: Path | None = args.keyring
+    if keyring is None and not args.pubkey:
+        keyring = next((p for p in (repo_ring, SYSTEM_KEYRING) if p.is_file()), None)
     return Config(
         root=args.root.resolve(),
         repo=args.repo,
         api_base=args.api_base.rstrip("/"),
-        pubkey=args.pubkey,
+        pubkeys=tuple(args.pubkey or ([] if keyring is not None else [SYSTEM_PUBKEY])),
+        keyring=keyring,
         minisign=shutil.which(args.minisign),  # None if it is not there or not executable
         limit_rate=args.limit_rate,
         min_free=args.min_free,

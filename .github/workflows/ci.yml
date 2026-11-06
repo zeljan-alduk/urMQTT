@@ -91,6 +91,12 @@ jobs:
           ./actionlint -shellcheck="$(command -v shellcheck)"
       - name: shellcheck
         run: shellcheck scripts/*.sh scripts/kvm-host/*.sh scripts/mirror/*.sh tools/builder/*.sh tools/builder/emulator/*.sh
+      # The release key ring (keys/release-keys.json, ROADMAP NOW-2). The placeholder minisign.pub is
+      # allowed here (a branch before the owner has set the key); the Release workflow refuses it.
+      - name: Release keys
+        run: |
+          scripts/check-release-key.sh --allow-placeholder
+          scripts/test-check-release-key.sh
 
   test:
     name: Host tests (${{ matrix.os }})

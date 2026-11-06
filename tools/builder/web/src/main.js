@@ -52,7 +52,7 @@ async function main() {
   }
   app.schema = app.builder.schema();
   app.model = buildModel(app.schema);
-  app.keyId = app.builder.minisignKeyId(RELEASE_PUBKEY);
+  app.keyId = currentKey() ? currentKey().keyId : '';
   restore();
   resetUiState();
   renderShell();

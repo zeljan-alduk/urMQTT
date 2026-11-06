@@ -25,9 +25,11 @@ Type=oneshot
 # the web directory and nothing else.
 User=urmqtt-mirror
 Group=urmqtt-mirror
-# The script reads the release public key from /etc and writes only below --root.
+# The script reads the release keys from /etc and writes only below --root. The key ring
+# (keys/release-keys.json of the repository) holds the release key (/etc/urmqtt-mirror/minisign.pub)
+# and the former test key, each trusted for its range of tags only (docs/release-key-rotation.md).
 # --limit-rate is bytes per second (2 MiB/s): a 55 MB ISO takes about 30 seconds.
-ExecStart=/usr/bin/python3 /usr/local/lib/urmqtt-mirror/mirror-releases.py --root /var/www/aldotech.io/urmqtt/releases --pubkey /etc/urmqtt-mirror/minisign.pub --limit-rate 2097152
+ExecStart=/usr/bin/python3 /usr/local/lib/urmqtt-mirror/mirror-releases.py --root /var/www/aldotech.io/urmqtt/releases --keyring /etc/urmqtt-mirror/keys/release-keys.json --limit-rate 2097152
 # systemd sets $JOURNAL_STREAM for stdout and stderr, which makes the job prefix
 # its log lines with the journal priorities (<3> error, <4> warning, <6> info).
 # Python writes each line as it is logged, so a killed run still has its log.

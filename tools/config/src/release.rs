@@ -99,11 +99,37 @@ pub fn verify_sums(pubkey: &str, sums: &[u8], sig: &str) -> Result<SignedSums, S
     })
 }
 
+/// Like [`verify_sums`], with the key taken from `pubkeys` (the contents of
+/// several `minisign.pub` files) by the key id the signature names. A key
+/// rotation leaves old releases signed by the old key; this checks each
+/// release against the key that signed it, and refuses a signature by a key
+/// that is not in the list. Which tags a key may sign is the caller's rule
+/// (keys/release-keys.json; the builder page and the mirror enforce it).
+pub fn verify_sums_any(pubkeys: &[&str], sums: &[u8], sig: &str) -> Result<SignedSums, String> {
+    let wanted = minisign::signature_key_id(sig)?;
+    let mut known = Vec::new();
+    for text in pubkeys {
+        let pk = PublicKey::parse(text)?;
+        if pk.key_id() == wanted {
+            return verify_sums(text, sums, sig);
+        }
+        known.push(pk.key_id());
+    }
+    Err(format!(
+        "the signature was made with key {wanted}, which is not one of the given keys ({})",
+        if known.is_empty() {
+            "none".to_owned()
+        } else {
+            known.join(", ")
+        }
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const PUB: &str = include_str!("../../../minisign.pub");
+    const PUB: &str = include_str!("../../../keys/minisign-test-9229E05252D01F8E.pub");
     const SUMS: &[u8] = include_bytes!("../tests/fixtures/minisign/SHA256SUMS");
     const SIG: &str = include_str!("../tests/fixtures/minisign/SHA256SUMS.minisig");
 
@@ -133,6 +159,42 @@ mod tests {
             verify_sums(PUB, &tampered, SIG).is_err(),
             "the signature covers every byte"
         );
+    }
+
+    /// Another key with another id (the test key's bytes, its id changed).
+    fn other_key() -> String {
+        use base64ct::{Base64, Encoding};
+        let line = PUB.lines().nth(1).unwrap();
+        let mut raw = Base64::decode_vec(line).unwrap();
+        raw[2] ^= 0x55;
+        format!(
+            "untrusted comment: another key\n{}\n",
+            Base64::encode_string(&raw)
+        )
+    }
+
+    #[test]
+    fn the_key_is_picked_by_the_id_the_signature_names() {
+        let other = other_key();
+        // Either order: the test key is found by its id.
+        for keys in [[PUB, other.as_str()], [other.as_str(), PUB]] {
+            let s = verify_sums_any(&keys, SUMS, SIG).unwrap();
+            assert_eq!(s.signature.key_id, "9229E05252D01F8E");
+        }
+        // A signature by a key that is not listed is refused, naming both.
+        let e = verify_sums_any(&[other.as_str()], SUMS, SIG).unwrap_err();
+        assert!(e.contains("made with key 9229E05252D01F8E"), "{e}");
+        assert!(e.contains("not one of the given keys"), "{e}");
+        assert!(
+            verify_sums_any(&[], SUMS, SIG)
+                .unwrap_err()
+                .contains("none")
+        );
+        // The bytes are still checked by the chosen key.
+        let tampered = [SUMS, b"\n"].concat();
+        assert!(verify_sums_any(&[other.as_str(), PUB], &tampered, SIG).is_err());
+        // A placeholder in place of a key is an error, not a skipped entry.
+        assert!(verify_sums_any(&["REPLACE-WITH-THE-NEW-PUBLIC-KEY", PUB], SUMS, SIG).is_err());
     }
 
     #[test]

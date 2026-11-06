@@ -484,7 +484,8 @@ fn in_place_configuration_equals_the_copying_one_and_a_probe_describes_the_templ
 #[test]
 fn check_release_verifies_the_real_signature_and_the_listed_files() {
     let dir = fixtures().join("minisign");
-    let pubkey = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../minisign.pub");
+    let pubkey =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../keys/minisign-test-9229E05252D01F8E.pub");
     let check = |sums: &Path, files: &[&Path]| {
         let mut c = bin();
         c.arg("check-release")
@@ -520,6 +521,49 @@ fn check_release_verifies_the_real_signature_and_the_listed_files() {
     let o = check(&altered, &[]);
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("does not match the file"));
+    // Two keys (a rotation): the one the signature names is used, in either
+    // order; a signature by a key that is not given is refused.
+    let other = tmp("other.pub");
+    let text = std::fs::read_to_string(&pubkey).unwrap();
+    let flipped: String = text
+        .lines()
+        .nth(1)
+        .unwrap()
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if i == 4 && c != 'A' {
+                'A'
+            } else if i == 4 {
+                'B'
+            } else {
+                c
+            }
+        })
+        .collect();
+    std::fs::write(
+        &other,
+        format!("untrusted comment: another key\n{flipped}\n"),
+    )
+    .unwrap();
+    for keys in [[&other, &pubkey], [&pubkey, &other]] {
+        let mut c = bin();
+        c.arg("check-release");
+        for k in keys {
+            c.arg("--pubkey").arg(k);
+        }
+        c.arg("--sums").arg(dir.join("SHA256SUMS"));
+        assert!(ok(&run(&mut c)).contains("signature ok: key 9229E05252D01F8E"));
+    }
+    let mut c = bin();
+    c.arg("check-release")
+        .arg("--pubkey")
+        .arg(&other)
+        .arg("--sums")
+        .arg(dir.join("SHA256SUMS"));
+    let o = run(&mut c);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("not one of the given keys"));
 }
 
 /// ADR-229: format 2 added the plaintext fields; a format 1 blob (the golden

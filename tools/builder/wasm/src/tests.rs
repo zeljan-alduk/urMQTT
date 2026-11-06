@@ -267,7 +267,7 @@ fn an_iso_is_probed_and_configured_in_place_like_the_tool_does() {
 
 #[test]
 fn a_release_is_verified_with_the_embedded_key() {
-    let pubkey = include_str!("../../../../minisign.pub");
+    let pubkey = include_str!("../../../../keys/minisign-test-9229E05252D01F8E.pub");
     let dir = fixtures().join("minisign");
     let sums = std::fs::read(dir.join("SHA256SUMS")).unwrap();
     let sig = std::fs::read_to_string(dir.join("SHA256SUMS.minisig")).unwrap();
@@ -275,6 +275,8 @@ fn a_release_is_verified_with_the_embedded_key() {
     assert!(j.contains(r#""key_id":"9229E05252D01F8E""#), "{j}");
     assert!(j.contains("urmqtt-dev-v0.1.0.iso"), "{j}");
     assert_eq!(core::minisign_key_id(pubkey).unwrap(), "9229E05252D01F8E");
+    assert_eq!(core::minisig_key_id(&sig).unwrap(), "9229E05252D01F8E");
+    assert!(core::minisig_key_id("untrusted comment: x\n").is_err());
     let mut bad = sums.clone();
     bad[0] ^= 1;
     assert!(core::verify_release(pubkey, &bad, &sig).is_err());

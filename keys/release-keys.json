@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "about": "The minisign public keys that sign urMQTT releases, each for a range of tags only (docs/RELEASE.md section 9, docs/release-key-rotation.md). Paths are relative to this file. Read by the builder page (tools/builder/web/bundle.mjs), the release mirror (scripts/mirror-releases.py --keyring) and scripts/check-release-key.sh.",
+  "keys": [
+    {
+      "name": "release",
+      "file": "../minisign.pub",
+      "valid_from": "v0.4.2",
+      "valid_to": null,
+      "former_test_key": false,
+      "note": "The project's release key: generated offline by the maintainer, password-protected at rest; its secret is in no repository. Signs every release after v0.4.1."
+    },
+    {
+      "name": "test",
+      "file": "minisign-test-9229E05252D01F8E.pub",
+      "key_id": "9229E05252D01F8E",
+      "valid_from": "v0.1.0",
+      "valid_to": "v0.4.1",
+      "former_test_key": true,
+      "note": "The project's former TEST key. It signed v0.1.0 to v0.4.1 (those signatures stay valid) and is considered compromised from the day the release key exists: it is accepted for those tags only, never for a newer one."
+    }
+  ]
+}

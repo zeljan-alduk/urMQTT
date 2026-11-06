@@ -188,6 +188,8 @@ export class Builder {
     return this.with([pubkey, sums, sig], (p, s, g) => this.json(this.x.ub_verify_release(p, s, g)));
   }
   minisignKeyId(pubkey) { return this.with([pubkey], p => this.text(this.x.ub_minisign_key_id(p))); }
+  /** The key id a .minisig names (which key to verify it with); checks nothing. */
+  minisigKeyId(sig) { return this.with([sig], g => this.text(this.x.ub_minisig_key_id(g))); }
 
   /** SHA-256 of a buffer handle or bytes, as lower-case hex. */
   sha256Hex(data) {

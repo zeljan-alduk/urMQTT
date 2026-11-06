@@ -183,7 +183,8 @@ test('a file that is not a template is refused before anything changes', () => {
 });
 
 test('the release check agrees with minisign and with the command line', () => {
-  const pubkey = readFileSync(join(ROOT, 'minisign.pub'), 'utf8');
+  const TEST_KEY = join(ROOT, 'keys/minisign-test-9229E05252D01F8E.pub');
+  const pubkey = readFileSync(TEST_KEY, 'utf8');
   const dir = join(FIXTURES, 'minisign');
   const sums = readFileSync(join(dir, 'SHA256SUMS'));
   const sig = readFileSync(join(dir, 'SHA256SUMS.minisig'), 'utf8');
@@ -191,7 +192,8 @@ test('the release check agrees with minisign and with the command line', () => {
   assert.equal(v.key_id, '9229E05252D01F8E');
   assert.equal(v.trusted_comment, 'urMQTT v0.1.0 dev bf311aa0810a7ad2b31e4dc911cb45d8131c350c');
   assert.equal(v.files.length, 3);
-  const r = cli(['check-release', '--pubkey', join(ROOT, 'minisign.pub'), '--sums', join(dir, 'SHA256SUMS')]);
+  assert.equal(b.minisigKeyId(sig), '9229E05252D01F8E');
+  const r = cli(['check-release', '--pubkey', TEST_KEY, '--sums', join(dir, 'SHA256SUMS')]);
   assert.equal(r.status, 0, r.stderr);
   assert.ok(r.stdout.includes(v.trusted_comment));
   assert.equal(b.minisignKeyId(pubkey), '9229E05252D01F8E');
