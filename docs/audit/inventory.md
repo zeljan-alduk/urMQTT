@@ -11,11 +11,11 @@
 | `urmqtt-arch-x86_64` | `crates/arch-x86_64` | 6991 | 0 | 155 (155) | deny |
 | `urmqtt-attack` | `tools/attack` | 1092 | 0 | 0 (0) | default |
 | `urmqtt-broker` | `crates/broker` | 5943 | 729 | 0 (0) | forbid |
-| `urmqtt-builder-wasm` | `tools/builder/wasm` | 1186 | 0 | 29 (29) | deny |
+| `urmqtt-builder-wasm` | `tools/builder/wasm` | 1201 | 0 | 30 (30) | deny |
 | `urmqtt-cfg` | `crates/cfg` | 4814 | 0 | 0 (0) | forbid |
 | `urmqtt-config` | `crates/config` | 1374 | 0 | 10 (10) | deny |
 | `urmqtt-config-schema` | `crates/config-schema` | 5314 | 0 | 0 (0) | forbid |
-| `urmqtt-config-tool` | `tools/config` | 1633 | 846 | 0 (0) | default |
+| `urmqtt-config-tool` | `tools/config` | 2447 | 956 | 0 (0) | default |
 | `urmqtt-control` | `crates/control` | 609 | 0 | 0 (0) | forbid |
 | `urmqtt-control-tool` | `tools/control` | 416 | 0 | 0 (0) | default |
 | `urmqtt-dbworker` | `crates/dbworker` | 172 | 0 | 22 (22) | default |
@@ -42,7 +42,7 @@
 | `urmqtt-usys` | `crates/usys` | 477 | 0 | 8 (8) | default |
 | `urmqtt-virtio` | `crates/virtio` | 6223 | 0 | 30 (30) | deny |
 | `urmqtt-x25519` | `crates/x25519` | 1365 | 0 | 8 (8) | default |
-| **total** | | **107897** | | **916 (916)** | |
+| **total** | | **108726** | | **917 (917)** | |
 
 ## Vendored components
 

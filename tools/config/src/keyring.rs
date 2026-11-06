@@ -554,9 +554,13 @@ mod tests {
         (public, sign)
     }
 
-    /// The repository ring, with the placeholder release key replaced by `release`.
+    /// The repository ring, with the real release key replaced by `release`
+    /// (and the ring's key id by the throwaway's, so the ring check still holds).
     fn repo_ring(release: &str) -> Vec<RingKey> {
-        parse(RING, &mut |f| match f {
+        let raw = Base64::decode_vec(release.lines().nth(1).unwrap()).unwrap();
+        let id: String = raw[2..10].iter().map(|b| format!("{b:02X}")).collect();
+        let ring = RING.replace("721316B961DCB94B", &id);
+        parse(&ring, &mut |f| match f {
             "../minisign.pub" => Ok(release.to_owned()),
             "minisign-test-9229E05252D01F8E.pub" => Ok(TEST_KEY.to_owned()),
             _ => Err(format!("no {f}")),

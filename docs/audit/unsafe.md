@@ -291,8 +291,9 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-builder-wasm` | `tools/builder/wasm/src/exports.rs:384` | attribute | yes |
 | `urmqtt-builder-wasm` | `tools/builder/wasm/src/exports.rs:392` | attribute | yes |
 | `urmqtt-builder-wasm` | `tools/builder/wasm/src/exports.rs:402` | attribute | yes |
-| `urmqtt-builder-wasm` | `tools/builder/wasm/src/exports.rs:411` | attribute | yes |
-| `urmqtt-builder-wasm` | `tools/builder/wasm/src/exports.rs:424` | attribute | yes |
+| `urmqtt-builder-wasm` | `tools/builder/wasm/src/exports.rs:412` | attribute | yes |
+| `urmqtt-builder-wasm` | `tools/builder/wasm/src/exports.rs:421` | attribute | yes |
+| `urmqtt-builder-wasm` | `tools/builder/wasm/src/exports.rs:434` | attribute | yes |
 | `urmqtt-config` | `crates/config/src/lib.rs:562` | block | yes |
 | `urmqtt-config` | `crates/config/src/store.rs:126` | impl | yes |
 | `urmqtt-config` | `crates/config/src/store.rs:427` | block | yes |

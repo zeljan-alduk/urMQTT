@@ -616,7 +616,16 @@ fn check_release_with_the_key_ring_applies_the_pins() {
     for f in ["release-keys.json", "minisign-test-9229E05252D01F8E.pub"] {
         std::fs::copy(root.join("keys").join(f), ring_dir.join("keys").join(f)).unwrap();
     }
-    // A stand-in release key (the repository's is the placeholder until the rotation).
+    // The copied ring names the real release key's id; the stand-in below has another one,
+    // so the ring copy drops that line (a ring without `key_id` checks the file alone).
+    let ring_json = std::fs::read_to_string(ring_dir.join("keys/release-keys.json")).unwrap();
+    let ring_json: String = ring_json
+        .lines()
+        .filter(|l| !(l.contains("\"key_id\"") && l.contains("721316B961DCB94B")))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(ring_dir.join("keys/release-keys.json"), ring_json).unwrap();
+    // A stand-in release key.
     let test =
         std::fs::read_to_string(root.join("keys/minisign-test-9229E05252D01F8E.pub")).unwrap();
     let line = test.lines().nth(1).unwrap();
