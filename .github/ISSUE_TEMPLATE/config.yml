@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Report a vulnerability
+  - name: Report a vulnerability (privately, never as a public issue)
     url: https://github.com/zeljan-alduk/urMQTT/security/advisories/new
-    about: Please report security issues privately.
+    about: A private GitHub Security Advisory. The process and what to include are in SECURITY.md.
+  - name: Security policy
+    url: https://github.com/zeljan-alduk/urMQTT/blob/main/SECURITY.md
+    about: Scope, supported versions and how reports are handled (docs/VULNERABILITY-HANDLING.md).
+  - name: Contact the owner (commercial edition, support, anything that is not an issue)
+    url: https://aldo.tech/
+    about: The commercial edition, urMQTT Enterprise, and the edition line are described in docs/EDITIONS.md.

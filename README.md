@@ -2,7 +2,7 @@
 
 # urMQTT
 
-**An ARM64 unikernel that *is* an MQTT broker.**
+**A unikernel that *is* an MQTT broker, for aarch64 and x86_64.**
 Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, booted from one ISO.
 
 [![CI](https://github.com/zeljan-alduk/urMQTT/actions/workflows/ci.yml/badge.svg)](https://github.com/zeljan-alduk/urMQTT/actions/workflows/ci.yml)
@@ -10,10 +10,14 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![Fuzz](https://github.com/zeljan-alduk/urMQTT/actions/workflows/fuzz.yml/badge.svg)](https://github.com/zeljan-alduk/urMQTT/actions/workflows/fuzz.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-![Target: aarch64](https://img.shields.io/badge/target-aarch64--unknown--none-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(M17)-red)
+![Targets: aarch64, x86_64](https://img.shields.io/badge/targets-aarch64%20%7C%20x86__64-orange)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(v0.4.1)-red)
 
 </div>
+
+**Start here:** [the first hour](docs/FIRST-HOUR.md) (from nothing to a first message over mutual TLS) ·
+[known issues](docs/KNOWN-ISSUES.md) (read before you deploy) · [editions](docs/EDITIONS.md) (what is open, what is
+commercial) · [security policy](SECURITY.md) (report vulnerabilities privately).
 
 > [!TIP]
 > **Make your own ISO in the browser, no toolchain needed:** the **urMQTT builder** at
@@ -26,29 +30,16 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 
 > [!WARNING]
 > **urMQTT is pre-alpha** ([v0.4.1](https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.4.1): VM images
-> for aarch64 and x86_64, the latter run in the QEMU TCG smoke suites and, at the H7 commit, on a real KVM VPS (docs/PERFORMANCE.md); its release assets are dev builds with throwaway keys). It serves MQTT 3.1.1 over TLS 1.3 with mutual TLS (and, in dev builds
-> only, over plain TCP), and keeps its state in SQLite in a raw partition of the disk it boots from. These milestones are complete:
-> - **M0**: tooling and CI
-> - **M1**: UEFI boot, console, exception reports
-> - **M2**: own page tables with enforced W^X, guard pages, locked tables, PAC and BTI
-> - **M3**: GICv3 (GICv2 added later, for Raspberry Pi KVM hosts), generic timer, periodic tick with measured IRQ latency
-> - **M4**: SMP bring-up on up to 64 cores, with IPIs checked between every pair of cores
-> - **M5**: hardware discovery from DTB or ACPI into one description, with identical results from both
-> - **M6**: PCIe and virtio drivers (rng, blk, net), MSI-X, and a CSPRNG seeded from hardware entropy
-> - **M7**: DHCP, ICMP and a TCP echo service on smoltcp
-> - **M8**: complete MQTT 3.1.1 codec, fuzzed and tested against real mosquitto clients
-> - **M9**: broker core with QoS 0/1, wildcards, retained messages, LWT, persistent sessions and ACL, verified with mosquitto clients
-> - **M10**: TLS 1.3 with mutual TLS: rustls handshake, own crypto provider and record layer, revocation list, resumption, admission control
-> - **M11**: SQLite inside the kernel on a raw-disk VFS (WAL, exclusive), with a DB core fed by SPSC rings. State survives restarts and `kill -9`
-> - **M12**: per-core telemetry log with CRC per record, batched writes, crash recovery and torn-tail truncation, verified with a million records
-> - **M13**: multicore data plane: per-core stacks and broker shards, Toeplitz dispatcher, relayed sessions, cross-core fan-out, per-CPU heap caches; linear scaling to 4 worker cores in-guest
-> - **M14**: own server-only TCP/IP stack (SYN cookies, timing wheel, NewReno, ACK coalescing) and DHCP client; smoltcp removed
-> - **M15**: 494 B per idle mTLS connection at 10k (heap blocks, allocator rounding included): compact state, per-record TLS key derivation, device-scoped subscriptions without per-device trie nodes
-> - **M16**: admission that survives reconnect storms (free-heap reserve, in-flight limits per core and per source address, DB backpressure), handler watchdog, health check, rate-limited logs, syslog (RFC 5424) and statsd over UDP, 11 fuzz targets in CI, threat model
-> - **M17**: bit-identical rebuilds (checked in CI), raw GPT disk image next to the ISO, minisign signatures, dev-only code out of production images, deployment guide for KVM/Proxmox and Hetzner
+> for aarch64 and x86_64 and a template ISO that the builder page or `urmqtt-config pack` configures; the release
+> assets are dev builds with throwaway keys, and the release signing key is a test key). It serves MQTT 3.1.1 (QoS 0
+> and 1) over TLS 1.3 with mutual TLS and, only when an image's configuration turns it on, plain MQTT for a trusted
+> network (P1). It keeps its state in SQLite in a raw partition of the disk it boots from.
 >
-> The kernel boots under QEMU with HVF and TCG. Every feature and example below is tagged with the milestone that delivers it, and
-> [docs/PROGRESS.md](docs/PROGRESS.md) is the source of truth for what works.
+> It has run under QEMU with HVF and TCG, and on two real machines: a netcup aarch64 KVM VPS and a Contabo x86_64
+> KVM VPS (the latter at the H7 commit; the x86_64 code after it has not run on KVM). M0 to M17 are complete, and
+> so is most of the work after them (the tables under [Roadmap](#roadmap) say which). What is missing, weak or
+> unproven is in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md); [docs/PROGRESS.md](docs/PROGRESS.md) is the source of
+> truth for what works.
 
 ## Editions
 
@@ -93,9 +84,9 @@ urMQTT removes all of the layers except the broker:
 
 | | Typical broker on Linux | urMQTT |
 |---|---|---|
-| Exposed services | SSH, broker, often a metrics/admin port | **TCP 8883 only** (MQTT over TLS 1.3 + mTLS) |
+| Exposed services | SSH, broker, often a metrics/admin port | **TCP 8883** (MQTT over TLS 1.3 + mTLS); a plaintext MQTT port only if the image's configuration turns it on (P1, off by default) |
 | Code in the image | Kernel, userland, libc, OpenSSL, runtime | **One Rust ELF** (+ vendored SQLite) |
-| Remote management | Shell, config files, package updates | **None.** A new version is a new ISO |
+| Remote management | Shell, config files, package updates | **No shell, no login.** Revocations and the allowlist by signed control messages (H1); `$SYS` statistics and a small console over MQTT for operator certificates (O1, O2). A new version or configuration is a new image |
 | Memory per idle connection | Kilobytes (socket buffers, TLS objects, heap) | **Target ≤ 512 B** |
 | Multicore model | Threads and locks, or one event loop | **Thread-per-core, shared-nothing, run-to-completion** |
 | Code integrity | Writable/executable mappings possible | **W^X, locked page tables, PAC/BTI** |
@@ -110,7 +101,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 |---|---|---|
 | **Build** | Reproducible workspace, pinned toolchain, `--locked` everywhere | ✅ M0 |
 | | Configuration as data: a validated, versioned blob in the image's slot (`urmqtt-config`), one release kernel for everyone | ✅ C1 |
-| | Bootable UEFI ISO (Limine) for aarch64 | ✅ M1 |
+| | Bootable ISO (Limine): aarch64 UEFI since M1; one universal ISO for aarch64 UEFI, x86_64 UEFI and x86_64 legacy BIOS | ✅ M1, X10 |
 | | The ISO installs itself onto the machine's disk (boot menu, countdown, verified write) | ✅ S1b |
 | | Bit-for-bit reproducible (checked in CI), minisign-signed images; ISO and raw GPT disk image | ✅ M17 |
 | **Kernel** | EL1 exception vectors with decoded ESR/ELR/FAR reports | ✅ M1 |
@@ -335,7 +326,7 @@ urMQTT/
 │   ├── config/             no_std typed view of the loaded configuration
 │   └── config-schema/      TOML schema, validation, codegen (host)
 ├── deploy/{dev,prod}/      config.toml per environment (certificates are never committed)
-├── scripts/                gen-dev-certs.sh, later mkiso.sh, run-qemu.sh, smoke.sh
+├── scripts/                gen-dev-certs.sh, mkiso.sh, run-qemu.sh, smoke.sh, check scripts
 ├── fuzz/                   cargo-fuzz targets
 ├── tools/loadgen/          host-side MQTT/TLS load generator
 ├── tools/control/          urmqtt-control: sign and publish control messages (H1)
@@ -608,7 +599,7 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `acl.operator_ids` | exact ids (required, may be empty) | Operator identities: the only ones that read `$SYS/` statistics and use the MQTT console ([docs/OPERATE.md](docs/OPERATE.md)) |
 | `memory.kernel_heap_mb` | power of two, 1–1024 | Kernel heap (buddy allocator); ~500 B per idle connection, ~150 KiB per P-256 trust anchor (ADR-261) |
 | `memory.min_free_mb` | > 0, < heap | New connections are refused below this much free heap |
-| `entropy.fallback` | `jitter` \| `none` | Without virtio-rng and `RNDR`: seed from health-tested CPU jitter, or refuse to boot |
+| `entropy.fallback` | `jitter` (default) \| `none` | Without virtio-rng and `RNDR`/`RDRAND`: `jitter` seeds from health-tested CPU jitter and the firmware's values (weaker than a hardware source; the boot log, `$SYS/broker/entropy/source` and `urmqtt-config pack` say so); `none` refuses to boot (ADR-263) |
 | `storage.mode` | `disk` \| `auto` \| `ram` | Where the data lives (required outside dev). `auto`: the disk, but the ISO's live entry runs from RAM, ephemeral; `ram`: always RAM; `disk`: the live entry is refused (docs/DEPLOY.md, ADR-061) |
 | `storage.ram_percent` | 2–50, default 10 | Live/RAM mode: share of RAM for the in-memory data store, subtracted from the connection budget (ADR-062) |
 | `storage.sqlite_heap_mb` | 1–4096 | Fixed SQLite `memsys5` heap |
@@ -1128,7 +1119,7 @@ shasum -a 256 -c SHA256SUMS
 | ✅ | **M8** MQTT codec | spec tests, property tests, 10 minutes of fuzzing with no crash |
 | ✅ | **M9** Broker over TCP (dev) | pub/sub, wildcards, retained, LWT, QoS 1 redelivery with mosquitto |
 | ✅ | **M10** TLS 1.3 + mTLS | mosquitto over mTLS; wrong CA, expired, client-id mismatch and revoked all rejected |
-| ✅ | **M11** SQLite in the kernel | data survives restarts and `kill -9` (since H6 SQLite runs as an unprivileged worker) |
+| ✅ | **M11** SQLite storage | data survives restarts and `kill -9` (in the kernel at M11; since H6 SQLite runs as an unprivileged worker) |
 | ✅ | **M12** Telemetry log | 1M messages; torn tail truncated on recovery |
 | ✅ | **M13** Multicore data plane | near-linear scaling 1 → 2 → 4 cores |
 | ✅ | **M14** Own TCP stack | smoltcp replaced; loss simulation tests; segment fuzzing |
@@ -1212,6 +1203,20 @@ Security is the first priority and wins conflicts with the other tracks.
 | 🚧 | **X9** x86 CPU optimisations | AES-NI, SHA-NI, CRC32, AVX2, VAES chosen at boot; on by default only if faster on real hardware. Items 1 to 3 done under QEMU (ADR-070); items 4 to 7 and hardware numbers open |
 | 🚧 | **X11** Measurements & docs | bytes/connection, handshakes/s and scaling on real x86 hardware, every number backed by PROGRESS. Done on a KVM VPS (Contabo, [PERFORMANCE.md](docs/PERFORMANCE.md), ADR-213); real x86 hardware and PV on/off not measured |
 
+**Operation, configuration and the builder** (requests made during the tracks; plans in [docs/PLAN.md](docs/PLAN.md),
+results in [docs/PROGRESS.md](docs/PROGRESS.md)):
+
+| | Milestone | Acceptance |
+|---|---|---|
+| ✅ | **O1** `$SYS` introspection | operator role for exact identities with a certificate (`acl.operator_ids`); retained `$SYS/broker/#` statistics every 10 s and `$SYS/query/info` (ADR-060, [OPERATE.md](docs/OPERATE.md)) |
+| ✅ | **O2** Console over MQTT | the kernel log on `$SYS/console/out`, the commands `help`, `status`, `log level`, `reboot` on `$SYS/console/in`, rate limited and logged with the identity (ADR-060) |
+| ✅ | **O3** Live mode | the ISO's first entry runs from a RAM store with no disk, ephemeral and announced as such; `storage.mode` (ADR-061, ADR-062) |
+| ✅ | **O4** Diagnostic entry | the third boot entry: hardware detection and RAM, crypto and disk measurements on screen and as one JSON line (ADR-063) |
+| ✅ | **T1** SNTP wall clock | optional SNTP with sanity limits; the clock never goes below the image's build time (ADR-100) |
+| ✅ | **C1** Runtime configuration and the builder page | one release kernel for everyone, the configuration a validated blob in the image (`urmqtt-config pack`); the builder page writes the same bytes in the browser (ADR-215 to ADR-228) |
+| ✅ | **P1** Optional plaintext MQTT | off by default; `allow_from` required; password, anonymous or by-network identities with narrower rights than a certificate (ADR-229 to ADR-231) |
+| 🚧 | **D1** Public demo broker | built, not deployed (PROGRESS D1) |
+
 **Order** ([docs/PLAN.md](docs/PLAN.md)):
 
 1. Baseline: H0, S0.
@@ -1226,6 +1231,10 @@ Security is the first priority and wins conflicts with the other tracks.
 10. Bare metal: X12–X16.
 11. Optimisations, encryption and release readiness: X9, S7, H9, X11, S8.
 12. The audit package: H10.
+
+Between phases 11 and 12 came O1 and O2 (11b), O3 (11c), O4 (11d) and T1 (11e). The first release targets a VPS
+under KVM only (PLAN.md, "First release scope", 2026-10-31); bare metal (X12 to X16) and the hardware part of H8 come
+after it, and the bare-metal drivers are the commercial edition's scope ([docs/EDITIONS.md](docs/EDITIONS.md)).
 
 riscv64 is a later, separate step (PROMPT-x86_64.md §9).
 

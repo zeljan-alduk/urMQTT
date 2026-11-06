@@ -2265,10 +2265,97 @@ no_hw_rng() {
         # x86: no RDRAND/RDSEED either (the CPU model says so).
         [[ $ARCH == x86_64 ]] && { cpu=(--cpu "max,-rdrand,-rdseed"); rng="RDRAND/RDSEED"; }
         fresh_disk "$iso" "$data"
-        boot "$log" --disk "$data" --accel "$accel" ${cpu[@]+"${cpu[@]}"} --no-rng --headless || status=$?
+        boot "$log" --disk "$data" --accel "$accel" ${cpu[@]+"${cpu[@]}"} --no-rng --headless --fwd none || status=$?
         check "no-hw-rng [$accel]" "$log" "$status" "NOT:entropy: [0-9]+ bytes from" \
             "entropy: no hardware source \(virtio-rng, $rng\): CPU jitter fallback .* health tests passed" \
             "entropy: ChaCha20 CSPRNG seeded" "smp: 4/4 cpus online" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
+# The weak entropy path is an explicit option (ADR-263). Without virtio-rng and
+# a CPU instruction, the default configuration (entropy.fallback = "jitter")
+# boots on the jitter fallback and `$SYS/broker/entropy/source` says so
+# (jitter+firmware, or jitter when the firmware gave no value); with
+# virtio-rng it names the hardware (virtio-rng, plus rndr or rdrand when the
+# CPU has it). `fallback = "none"` refuses to boot without a hardware source,
+# and says why; with virtio-rng it boots.
+entropy_option() {
+    local dir="$OUT/entropy" accel
+    mkdir -p "$dir"
+    sed -e 's/^fallback = "jitter"/fallback = "none"/' "$ROOT/deploy/dev/config.toml" >"$dir/none.toml"
+    grep -q '^fallback = "none"' "$dir/none.toml" || { echo "  ✗ entropy-option: deploy/dev/config.toml has no fallback line"; FAILED=$((FAILED + 1)); return; }
+    local serve="$OUT/entropy-serve.raw" strict="$OUT/entropy-none.raw"
+    mkimg "$serve" "serve"
+    MKIMG_EXTRA=(--config "$dir/none.toml" --config-root "$ROOT/deploy/dev")
+    mkimg "$strict" "smoke"
+    MKIMG_EXTRA=()
+    for accel in $ACCELS; do
+        local cpu=() rng="RNDR" log data status
+        [[ $accel == tcg && $ARCH == aarch64 ]] && cpu=(--cpu neoverse-n1)
+        [[ $ARCH == x86_64 ]] && { cpu=(--cpu "max,-rdrand,-rdseed"); rng="RDRAND/RDSEED"; }
+        # 1. $SYS names the fallback (operator, mutual TLS, retained topic).
+        log="$OUT/entropy-sys-$accel.log" data="$OUT/entropy-sys-$accel.img" status=0
+        fresh_disk "$serve" "$data"
+        "$ROOT/scripts/run-qemu.sh" --serial "$log" --disk "$data" --accel "$accel" ${cpu[@]+"${cpu[@]}"} --no-rng \
+            --headless --fwd "$PORT:8883" >"$log.qemu" 2>&1 &
+        local pid=$! waited=0
+        until clean "$log" 2>/dev/null | grep -Eq -- "TLS 1.3 listener on port 8883"; do
+            if ! kill -0 "$pid" 2>/dev/null || (( waited >= TIMEOUT * 10 )); then status=124; break; fi
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+        if [[ $status -eq 0 ]]; then
+            local d="$ROOT/deploy/dev" got
+            # shellcheck disable=SC2016
+            got=$(mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i operator --cafile "$d/ca.pem" \
+                --cert "$d/services/operator.pem" --key "$d/services/operator.key" \
+                -t '$SYS/broker/entropy/source' -C 1 -W 40 2>/dev/null | head -n 1) || true
+            echo "client: sys-entropy-source=$got" >>"$log"
+        fi
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        check "entropy-sys-fallback [$accel]" "$log" "$status" \
+            "entropy: no hardware source \(virtio-rng, $rng\): CPU jitter fallback .* health tests passed, [0-9]+ ms; weaker than a hardware source \(entropy.fallback = \"none\" refuses such hosts\)" \
+            "client: sys-entropy-source=jitter(\+firmware)?$" "NOT:FAILED" "$NO_FAULT"
+        # 2. With virtio-rng the source is hardware.
+        log="$OUT/entropy-hw-$accel.log" data="$OUT/entropy-hw-$accel.img" status=0
+        fresh_disk "$serve" "$data"
+        "$ROOT/scripts/run-qemu.sh" --serial "$log" --disk "$data" --accel "$accel" --headless \
+            --fwd "$PORT:8883" >"$log.qemu" 2>&1 &
+        pid=$! waited=0
+        until clean "$log" 2>/dev/null | grep -Eq -- "TLS 1.3 listener on port 8883"; do
+            if ! kill -0 "$pid" 2>/dev/null || (( waited >= TIMEOUT * 10 )); then status=124; break; fi
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+        if [[ $status -eq 0 ]]; then
+            local d="$ROOT/deploy/dev" got
+            # shellcheck disable=SC2016
+            got=$(mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i operator --cafile "$d/ca.pem" \
+                --cert "$d/services/operator.pem" --key "$d/services/operator.key" \
+                -t '$SYS/broker/entropy/source' -C 1 -W 40 2>/dev/null | head -n 1) || true
+            echo "client: sys-entropy-source=$got" >>"$log"
+        fi
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        check "entropy-sys-hardware [$accel]" "$log" "$status" \
+            "entropy: [0-9]+ bytes from virtio-rng" "NOT:entropy: no hardware source" \
+            "client: sys-entropy-source=virtio-rng(\+rndr|\+rdrand)?$" "NOT:FAILED" "$NO_FAULT"
+        # 3. fallback = "none" and no hardware source: refused, with the reason.
+        log="$OUT/entropy-none-$accel.log" data="$OUT/entropy-none-$accel.img" status=0
+        fresh_disk "$strict" "$data"
+        # A smoke kernel ends the VM with status 1 after a fatal error (a production kernel shows the message and resets).
+        boot "$log" --disk "$data" --accel "$accel" ${cpu[@]+"${cpu[@]}"} --no-rng --headless --fwd none || status=$?
+        [[ $status -eq 1 ]] && status=0
+        check "entropy-none-refuses [$accel]" "$log" "$status" \
+            "fatal: no entropy source \(virtio-rng, $rng\) and entropy.fallback = \"none\" forbids the CPU-jitter fallback: refusing to run" \
+            "NOT:entropy: ChaCha20 CSPRNG seeded" "NOT:^URMQTT READY$"
+        # 4. ... and with virtio-rng the same image boots.
+        log="$OUT/entropy-none-hw-$accel.log" data="$OUT/entropy-none-hw-$accel.img" status=0
+        fresh_disk "$strict" "$data"
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none || status=$?
+        check "entropy-none-with-virtio-rng [$accel]" "$log" "$status" "entropy: [0-9]+ bytes from virtio-rng" \
+            "entropy: ChaCha20 CSPRNG seeded" "^URMQTT READY$" "$NO_FAULT"
     done
 }
 
@@ -3761,6 +3848,7 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want attack_app && attack_app
     want observability && observability
     want no_hw_rng && no_hw_rng
+    command -v mosquitto_sub >/dev/null && want entropy_option && entropy_option
     [[ $ARCH == aarch64 ]] && want install_iso && install_iso
     [[ $ARCH == aarch64 ]] && want gicv2 && gicv2
     want virtio_gpu && virtio_gpu
@@ -4403,6 +4491,7 @@ want scrub_load && scrub_load
 want disk_tool && disk_tool
 [[ $ARCH == aarch64 ]] && want install_iso && install_iso
 want no_hw_rng && no_hw_rng
+command -v mosquitto_sub >/dev/null && want entropy_option && entropy_option
 [[ $ARCH == aarch64 ]] && want gicv2 && gicv2
 want virtio_gpu && virtio_gpu
 

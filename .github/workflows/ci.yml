@@ -71,6 +71,7 @@ jobs:
           cargo clippy --locked -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --no-default-features -p urmqtt-kernel --target aarch64-unknown-none -- -D warnings
       - name: TCB inventory up to date (docs/audit, AUDIT.md)
         run: python3 scripts/audit-inventory.py --check
+      - run: python3 scripts/check-known-issues.py   # docs/KNOWN-ISSUES.md cites only open AUDIT ids, ROADMAP items and ADRs that exist
       - name: No architecture-specific code outside crates/arch-* (ADR-040)
         run: |
           scripts/check-arch-leaks.sh --self-test

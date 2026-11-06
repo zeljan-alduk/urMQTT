@@ -757,7 +757,7 @@ pub static FIELDS: &[Field] = &[
             variants: ENTROPY_FALLBACKS,
             default: 0,
         },
-        "jitter: seed from CPU timing jitter when no hardware random source exists. none: refuse to boot without one.",
+        "jitter (the default): on a host without virtio-rng and without RNDR/RDRAND, seed the generator from CPU timing jitter and the firmware's values; weaker than a hardware source, and the boot log, $SYS and `urmqtt-config pack` say so. none: refuse to boot without a hardware random source.",
     ),
     // cpu
     f(

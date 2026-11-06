@@ -138,6 +138,10 @@ pub struct Info<'a> {
     /// The last SNTP offset against the clock as it was, ms; `None`: none
     /// measured against a known clock yet.
     pub time_offset_ms: Option<i64>,
+    /// What seeded the random number generator at boot (ADR-263), from
+    /// [`entropy_source`]: `virtio-rng`, `rndr`, `virtio-rng+rndr`,
+    /// `jitter+firmware`, ...
+    pub entropy_source: &'a str,
     /// Console lines lost because a reader fell behind.
     pub console_dropped: u64,
     /// The link MTU in use, bytes (NOW-19, ADR-264): from DHCP option 26,
@@ -149,6 +153,34 @@ pub struct Info<'a> {
     /// spread over the cores).
     pub accepted: &'a [u64],
     pub plaintext: PlainInfo<'a>,
+}
+
+/// The name of what seeded the random number generator, for
+/// `$SYS/broker/entropy/source` (ADR-263): the hardware sources that
+/// delivered (`virtio-rng`, then the CPU's own, `cpu` is `rndr` or
+/// `rdrand`), joined by `+`; without any, the fallback: `jitter+firmware`
+/// (`jitter` alone when the bootloader gave no non-zero value), or `none`
+/// when the jitter fallback did not run either.
+pub fn entropy_source(virtio_rng: bool, cpu: Option<&str>, jitter: bool, firmware: bool) -> String {
+    let mut parts: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    if virtio_rng {
+        parts.push("virtio-rng");
+    }
+    if let Some(c) = cpu {
+        parts.push(c);
+    }
+    if parts.is_empty() {
+        if jitter {
+            parts.push("jitter");
+        }
+        if firmware && jitter {
+            parts.push("firmware");
+        }
+    }
+    if parts.is_empty() {
+        return "none".into();
+    }
+    parts.join("+")
 }
 
 /// Calls `f(topic, payload)` for every retained topic, in a fixed order.
@@ -187,6 +219,7 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
         Some(o) => put("time/offset_ms", &o),
         None => put("time/offset_ms", &"unknown"),
     }
+    put("entropy/source", &i.entropy_source);
     put("console/dropped", &i.console_dropped);
     put("net/mtu", &i.net_mtu);
     let d = &i.drops;
@@ -258,6 +291,7 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
         server_cert_days: None,
         time_source: "",
         time_offset_ms: None,
+        entropy_source: "",
         console_dropped: 0,
         net_mtu: 1500,
         drops: Drops::default(),
@@ -334,6 +368,8 @@ pub fn json(i: &Info<'_>) -> String {
     }
     let h = &i.handshakes;
     let d = &i.drops;
+    o.push_str("},\"entropy\":{\"source\":");
+    json_str(&mut o, i.entropy_source);
     let _ = write!(
         o,
         "}},\"console_dropped\":{},\"net\":{{\"mtu\":{}}},\"dropped\":{{\"slow_subscriber\":{},\"offline\":{},\"cross_core\":{},\
@@ -446,6 +482,7 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
         )),
         None => out.push(alloc::format!("time source {}", i.time_source)),
     }
+    out.push(alloc::format!("entropy source {}", i.entropy_source));
     let d = &i.drops;
     out.push(alloc::format!(
         "dropped QoS0 slow {} offline {} xcore {}; QoS1 {}; rate {}; frames {}/{}/{}",
@@ -629,6 +666,7 @@ mod tests {
             server_cert_days: Some(90),
             time_source: "sntp",
             time_offset_ms: Some(-12),
+            entropy_source: "jitter+firmware",
             console_dropped: 0,
             net_mtu: 1460,
             drops: Drops {
@@ -722,6 +760,33 @@ mod tests {
     }
 
     #[test]
+    fn the_entropy_source_names_what_seeded_the_generator() {
+        assert_eq!(entropy_source(true, None, false, true), "virtio-rng");
+        assert_eq!(entropy_source(false, Some("rndr"), false, true), "rndr");
+        assert_eq!(
+            entropy_source(true, Some("rndr"), false, true),
+            "virtio-rng+rndr"
+        );
+        assert_eq!(
+            entropy_source(false, Some("rdrand"), false, false),
+            "rdrand"
+        );
+        assert_eq!(entropy_source(false, None, true, true), "jitter+firmware");
+        assert_eq!(entropy_source(false, None, true, false), "jitter");
+        assert_eq!(entropy_source(false, None, false, true), "none");
+        let j = json(&info(&[10]));
+        assert!(
+            j.contains("\"entropy\":{\"source\":\"jitter+firmware\"}"),
+            "{j}"
+        );
+        assert!(
+            status_lines(&info(&[10]), "info", "debug")
+                .iter()
+                .any(|l| l == "entropy source jitter+firmware")
+        );
+    }
+
+    #[test]
     fn the_topic_list_is_fixed() {
         let mut got = alloc::vec::Vec::new();
         topics(&info(&[10, 20]), |t, v| {
@@ -751,6 +816,7 @@ mod tests {
                 "$SYS/broker/tls/server_cert_days",
                 "$SYS/broker/time/source",
                 "$SYS/broker/time/offset_ms",
+                "$SYS/broker/entropy/source",
                 "$SYS/broker/console/dropped",
                 "$SYS/broker/net/mtu",
                 "$SYS/broker/messages/dropped/slow_subscriber",
@@ -784,6 +850,7 @@ mod tests {
         assert_eq!(val("$SYS/broker/tls/server_cert_days"), Some("90"));
         assert_eq!(val("$SYS/broker/time/source"), Some("sntp"));
         assert_eq!(val("$SYS/broker/time/offset_ms"), Some("-12"));
+        assert_eq!(val("$SYS/broker/entropy/source"), Some("jitter+firmware"));
         assert_eq!(val("$SYS/broker/handshakes/done"), Some("8"));
         assert_eq!(
             val("$SYS/broker/messages/dropped/slow_subscriber"),
@@ -811,7 +878,7 @@ mod tests {
              \"cpu\":{\"cores\":2,\"busy\":[10,20]},\"memory\":{\"total\":1000,\"used\":400},\
              \"disk\":{\"total\":0,\"used\":0},\"clients\":{\"connected\":3,\"total\":5},\
              \"subscriptions\":7,\"retained\":2,\"messages\":{\"received\":100,\"sent\":250},\
-             \"connections_refused\":1,\"tls\":{\"server_cert_days\":90},\"time\":{\"source\":\"sntp\",\"offset_ms\":-12},\"console_dropped\":0,\"net\":{\"mtu\":1460},\
+             \"connections_refused\":1,\"tls\":{\"server_cert_days\":90},\"time\":{\"source\":\"sntp\",\"offset_ms\":-12},\"entropy\":{\"source\":\"jitter+firmware\"},\"console_dropped\":0,\"net\":{\"mtu\":1460},\
              \"dropped\":{\"slow_subscriber\":3,\"offline\":0,\"cross_core\":0,\"qos1_queue_full\":0,\
              \"publish_rate\":0,\"frames_steer\":0,\"frames_worker_tx\":0,\"frames_nic\":0},\
              \"handshakes\":{\"started\":9,\"done\":8,\"failed\":0,\"timed_out\":0,\"refused\":0,\
@@ -866,16 +933,17 @@ mod tests {
     #[test]
     fn status_is_a_few_short_lines() {
         let lines = status_lines(&info(&[10, 20]), "info", "debug");
-        assert_eq!(lines.len(), 9);
+        assert_eq!(lines.len(), 10);
         assert_eq!(lines[0], "urmqtt 0.1.0 aarch64 up 12 s");
         assert_eq!(lines[1], "cpu 2 core(s), busy % 10/20");
         assert!(lines[3].starts_with("clients 3 connected, 5 sessions"));
         assert_eq!(lines[6], "time source sntp, last sntp offset -12 ms");
+        assert_eq!(lines[7], "entropy source jitter+firmware");
         assert_eq!(
-            lines[7],
+            lines[8],
             "dropped QoS0 slow 3 offline 0 xcore 0; QoS1 0; rate 0; frames 0/0/0"
         );
-        assert!(lines[8].starts_with("log level info (build maximum debug)"));
+        assert!(lines[9].starts_with("log level info (build maximum debug)"));
         assert!(lines.iter().all(|l| l.len() < 120 && !l.contains('\n')));
     }
 

@@ -1,0 +1,112 @@
+name: Boot failure
+description: The image does not reach URMQTT READY, stops with a fatal message, or never answers on the network.
+labels: [bug, boot]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issues do not go here.** Report a vulnerability privately, as described in
+        [SECURITY.md](https://github.com/zeljan-alduk/urMQTT/blob/main/SECURITY.md).
+
+        Most first-boot failures are one of five causes with a known log line: see
+        [docs/FIRST-HOUR.md](https://github.com/zeljan-alduk/urMQTT/blob/main/docs/FIRST-HOUR.md) section 6 and the
+        table "Messages for what is missing" in
+        [docs/DEPLOY.md](https://github.com/zeljan-alduk/urMQTT/blob/main/docs/DEPLOY.md) section 5b.
+
+        **Never paste a private key** or an ISO that contains your server key. `urmqtt-config show` prints no key
+        material (it says `private key, N bytes (not shown)`).
+  - type: input
+    id: release
+    attributes:
+      label: Release or commit
+      description: The tag of the template or image, or the commit you built from.
+      placeholder: v0.4.1
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform, hypervisor and provider
+      placeholder: netcup VPS 500 ARM G12.5 (KVM)
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture of the guest
+      options:
+        - aarch64
+        - x86_64
+        - do not know
+    validations:
+      required: true
+  - type: dropdown
+    id: firmware
+    attributes:
+      label: Firmware
+      options:
+        - UEFI
+        - Legacy BIOS (x86_64 only)
+        - do not know
+    validations:
+      required: true
+  - type: dropdown
+    id: entry
+    attributes:
+      label: Boot entry or medium
+      options:
+        - ISO, live entry (urMQTT, the default after 10 s)
+        - ISO, install entry
+        - ISO, Diagnostic entry
+        - The installed disk (after the install entry)
+        - Raw disk image (.img) written to the VM's disk
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Boot log up to the failure
+      description: |
+        Everything from the first line (`URMQTT BOOT ...`) to the last line you see. Include the `fatal:` line if there is
+        one. From a serial port or `virsh console` as text; from a VNC or web console a screenshot is fine. If nothing
+        appears after the boot menu, say so: that is a finding too (see "Display output is not active" in FIRST-HOUR.md).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration (no secrets)
+      description: |
+        The output of `urmqtt-config show YOUR.iso` (or `urmqtt-config show` of the blob), which lists every non-default
+        value and the fingerprint but never a private key. If you used the builder page: the exported `config.toml`
+        ("Import or export TOML"), which also contains no key.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: devices
+    attributes:
+      label: The virtual hardware
+      description: |
+        The hypervisor's device list for this VM: the QEMU command line, `virsh dumpxml NAME`, `qm config VMID` on
+        Proxmox, or the provider's description of the VM (CPU type, NIC model, disk type and size, RAM, display, whether
+        it has a virtio-rng and a serial port). The boot log's `pci ...` and `virtio: ...` lines help too.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you already tried
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: "I compared the `config: fingerprint` line of the boot log with the one the builder page or `urmqtt-config pack` printed."
+          required: false
+        - label: The text above contains no private key.
+          required: true

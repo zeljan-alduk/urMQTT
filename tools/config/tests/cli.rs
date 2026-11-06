@@ -97,6 +97,45 @@ fn invalid_input_reports_every_problem_and_writes_nothing() {
 }
 
 #[test]
+fn the_weak_entropy_path_is_warned_about_and_the_strict_one_is_not() {
+    const WARNING: &str = "WARNING: entropy.fallback = \"jitter\": on a host without virtio-rng or RNDR/RDRAND the generator is seeded from CPU jitter and firmware values";
+    // The default allows the jitter fallback: pack, verify and show say so.
+    let out = tmp("entropy-default.blob");
+    let text = ok(&run(bin()
+        .arg("pack")
+        .arg(fixtures().join("lab.toml"))
+        .arg("--out")
+        .arg(&out)));
+    assert!(text.contains(WARNING), "{text}");
+    assert!(
+        text.contains("set it to \"none\" to refuse such hosts"),
+        "{text}"
+    );
+    assert!(ok(&run(bin().arg("verify").arg(&out))).contains(WARNING));
+    let shown = ok(&run(bin().arg("show").arg(&out)));
+    assert!(
+        shown.contains("entropy:     CPU-jitter fallback ALLOWED"),
+        "{shown}"
+    );
+    assert!(shown.contains(WARNING.replace("WARNING: ", "WARNING:     ").as_str()));
+    // `none` requires a hardware source: no warning, and show names the setting.
+    let toml = tmp("entropy-none.toml");
+    let mut t = std::fs::read_to_string(fixtures().join("lab.toml")).unwrap();
+    t.push_str("\n[entropy]\nfallback = \"none\"\n");
+    std::fs::write(&toml, t).unwrap();
+    let strict = tmp("entropy-none.blob");
+    let text = ok(&run(bin().arg("pack").arg(&toml).arg("--out").arg(&strict)));
+    assert!(!text.contains("WARNING"), "{text}");
+    let shown = ok(&run(bin().arg("show").arg(&strict)));
+    assert!(
+        shown.contains("entropy:     hardware source REQUIRED"),
+        "{shown}"
+    );
+    assert!(shown.contains("fallback = none"), "{shown}");
+    assert!(!shown.contains("WARNING"), "{shown}");
+}
+
+#[test]
 fn show_prints_values_that_differ_from_the_defaults() {
     let o = run(bin().arg("show").arg(fixtures().join("lab.blob")));
     let text = ok(&o);

@@ -271,6 +271,24 @@ pub fn plaintext_summary(b: &Blob<'_>) -> Option<String> {
     ))
 }
 
+/// Whether the configuration allows the CPU-jitter entropy fallback
+/// (`entropy.fallback = "jitter"`, the default; ADR-038, ADR-263).
+pub fn jitter_allowed(b: &Blob<'_>) -> bool {
+    b.variant(fields::tag::ENTROPY_JITTER) == 0
+}
+
+/// The warning for the weak entropy path, when it is allowed (ADR-263): what
+/// whoever ships the image has to know. `None` when the image requires a
+/// hardware source.
+pub fn entropy_warning(b: &Blob<'_>) -> Option<String> {
+    jitter_allowed(b).then(|| {
+        "entropy.fallback = \"jitter\": on a host without virtio-rng or RNDR/RDRAND the generator is \
+         seeded from CPU jitter and firmware values, which is weaker than a hardware source; \
+         set it to \"none\" to refuse such hosts"
+            .to_owned()
+    })
+}
+
 /// The stored hash of `password` for the plaintext listener
 /// (`pbkdf2-sha256$iterations$salt$key`, see `urmqtt_cfg::passwd`). The caller
 /// supplies the salt (16 to 32 random bytes); the command line takes it from
@@ -322,6 +340,18 @@ pub fn describe(blob_bytes: &[u8], all: bool) -> Result<String, String> {
     if let Some(p) = plaintext_summary(&b) {
         let _ = writeln!(o, "warning:     {p}");
     }
+    let _ = writeln!(
+        o,
+        "entropy:     {}",
+        if jitter_allowed(&b) {
+            "CPU-jitter fallback ALLOWED (entropy.fallback = \"jitter\"): weaker than a hardware source"
+        } else {
+            "hardware source REQUIRED (entropy.fallback = \"none\"): refuses to boot without one"
+        }
+    );
+    if let Some(w) = entropy_warning(&b) {
+        let _ = writeln!(o, "WARNING:     {w}");
+    }
     if b.is_empty() {
         let _ = writeln!(
             o,
@@ -363,8 +393,9 @@ pub fn verify_blob(blob_bytes: &[u8], dev: bool) -> Result<String, String> {
         "complete: a kernel will serve with it"
     };
     let plaintext = plaintext_summary(&b).map_or_else(String::new, |p| format!("\nwarning: {p}"));
+    let entropy = entropy_warning(&b).map_or_else(String::new, |w| format!("\nWARNING: {w}"));
     Ok(format!(
-        "ok: fingerprint {}, {}, {served}{plaintext}",
+        "ok: fingerprint {}, {}, {served}{plaintext}{entropy}",
         Hex(b.fingerprint()),
         if b.signature().is_some() {
             "signed"

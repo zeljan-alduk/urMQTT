@@ -71,6 +71,7 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/tls/server_cert_days` | days until the server certificate expires (`unknown` without a wall clock) |
 | `$SYS/broker/time/source` | where the wall clock comes from: `rtc` (firmware clock at boot), `sntp` (corrected by SNTP, ADR-100) or `unknown` (no usable clock: certificate checks and control messages are refused) |
 | `$SYS/broker/time/offset_ms` | the last SNTP offset against the clock as it was, in ms (`unknown` until one was measured against a known clock; a refused offset is shown too, and logged) |
+| `$SYS/broker/entropy/source` | what seeded the random number generator at boot: `virtio-rng`, `rndr` (aarch64) or `rdrand` (x86_64), `virtio-rng+rndr`, or the weak path `jitter+firmware` (`jitter` when the firmware gave no value; ADR-263, docs/DEPLOY.md "Entropy"). Also `"entropy":{"source":...}` in the info reply |
 | `$SYS/broker/console/dropped` | console lines lost to a slow reader |
 | `$SYS/broker/net/mtu` | the link MTU in use, bytes: `network.mtu`, else DHCP option 26, else 1500; at most 1500 (NOW-19, ADR-264). The boot line `net: mtu N (static\|dhcp\|default)` says where it came from; a lower value than the network's is safe, a higher one loses the large packets |
 | `$SYS/broker/messages/dropped/slow_subscriber` | QoS 0 messages not delivered because the subscriber's output buffer was full (it reads slower than the topic is published to). Deliberate, bounded, counted (ADR-223) |
