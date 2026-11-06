@@ -31,7 +31,7 @@ Compare the key id the builder page shows, and the key you verify with, with thi
 
 | Key | Id | Public key | Trusted for |
 |---|---|---|---|
-| release key, [`minisign.pub`](minisign.pub) | `<KEY ID>` (set at the rotation, docs/release-key-rotation.md) | `<PUBLIC KEY LINE>` | every release after v0.4.1 |
+| release key, [`minisign.pub`](minisign.pub) | `721316B961DCB94B` (set at the rotation, docs/release-key-rotation.md) | `RWRLudxhuRYTcpqyk9TNXAj1qzClrFEvzXTyFMBK6NEuyvk6tVUxjUlH` | every release after v0.4.1 |
 | former test key, [`keys/minisign-test-9229E05252D01F8E.pub`](keys/minisign-test-9229E05252D01F8E.pub) | `9229E05252D01F8E` | `RWSOH9BSUuApkkBWq/AZJ03Rn63oOYq+yXzC/vgI1PZ/i5yaE+SVzOWS` | **v0.1.0 to v0.4.1 only** |
 
 **The former test key is considered compromised** from the day the release key exists: its secret half was a

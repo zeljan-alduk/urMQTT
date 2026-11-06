@@ -5,10 +5,11 @@
     {
       "name": "release",
       "file": "../minisign.pub",
+      "key_id": "721316B961DCB94B",
       "valid_from": "v0.4.2",
       "valid_to": null,
       "former_test_key": false,
-      "note": "The project's release key: generated offline by the maintainer, password-protected at rest; its secret is in no repository. Signs every release after v0.4.1."
+      "note": "The project's release key (id 721316B961DCB94B, generated 2026-11-06 on the maintainer's machine, passwordless because the CI signs with it; the secret is kept outside every repository and in the repository secret MINISIGN_SECRET_KEY). Signs every release after v0.4.1."
     },
     {
       "name": "test",
