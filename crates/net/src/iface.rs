@@ -14,6 +14,11 @@ use crate::ipv4::{self, Arp, Echo, Ip, Mac, PROTO_ICMP, PROTO_TCP, PROTO_UDP};
 const NEIGHBOURS: usize = 32;
 /// ICMP echo replies per second.
 const ICMP_PER_SEC: u32 = 100;
+/// The MTU of an interface until DHCP or the configuration says otherwise,
+/// and the largest this interface sends: the virtio-net driver's frames hold
+/// 1514 bytes (Ethernet header plus 1500), whatever the network allows.
+pub const DEFAULT_MTU: u16 = 1500;
+pub const MAX_SEND_MTU: u16 = 1500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
@@ -51,6 +56,9 @@ pub struct Stats {
     pub icmp_replies: u64,
     pub icmp_limited: u64,
     pub no_neighbour: u64,
+    /// IPv4 packets not sent because they exceed the MTU (we never fragment;
+    /// in practice an ICMP echo request larger than our MTU, NOW-19).
+    pub too_big: u64,
 }
 
 pub struct Iface {
@@ -70,6 +78,8 @@ pub struct Iface {
     icmp_tokens: u32,
     icmp_since: u64,
     ping: Option<(Ip, u16, u64)>,
+    /// Largest IPv4 packet sent (NOW-19).
+    mtu: u16,
     buf: Vec<u8>,
     pub stats: Stats,
 }
@@ -93,6 +103,7 @@ impl Iface {
             icmp_tokens: ICMP_PER_SEC,
             icmp_since: now_ms,
             ping: None,
+            mtu: DEFAULT_MTU,
             buf: Vec::with_capacity(1600),
             stats: Stats::default(),
         }
@@ -104,6 +115,23 @@ impl Iface {
 
     pub fn router(&self) -> Option<Ip> {
         self.router
+    }
+
+    /// The largest IPv4 packet this interface sends, bytes.
+    pub fn mtu(&self) -> u16 {
+        self.mtu
+    }
+
+    /// Sets the MTU (DHCP option 26 or the configuration), at most
+    /// [`MAX_SEND_MTU`] and at least 576. Returns the value in use.
+    pub fn set_mtu(&mut self, mtu: u16) -> u16 {
+        self.mtu = mtu.clamp(dhcp::MTU_MIN, MAX_SEND_MTU);
+        self.mtu
+    }
+
+    /// The largest UDP payload that leaves as one unfragmented datagram.
+    pub fn max_udp_payload(&self) -> usize {
+        usize::from(self.mtu).saturating_sub(ipv4::IP_HDR + 8)
     }
 
     pub fn set_addr(&mut self, addr: Option<(Ip, u8)>, router: Option<Ip>) {
@@ -179,8 +207,15 @@ impl Iface {
         if let Some(d) = buf.get_mut(ip_at + 10..ip_at + 12) {
             d.copy_from_slice(&c.to_be_bytes());
         }
-        out(&buf);
-        self.stats.frames_out += 1;
+        // Never more than the MTU (no fragmentation): such a packet would be
+        // lost silently on the path (NOW-19). TCP and UDP stay within it by
+        // construction; this catches the rest (a large ICMP echo).
+        if usize::from(total) > usize::from(self.mtu) {
+            self.stats.too_big += 1;
+        } else {
+            out(&buf);
+            self.stats.frames_out += 1;
+        }
         self.buf = buf;
     }
 
@@ -405,6 +440,11 @@ impl Iface {
         out: &mut impl FnMut(&[u8]),
     ) -> bool {
         if self.addr.is_none() {
+            return false;
+        }
+        // One datagram, never fragmented (NOW-19): the caller sizes it.
+        if payload.len() > self.max_udp_payload() {
+            self.stats.too_big += 1;
             return false;
         }
         let Some(mac) = self.neighbour(dst) else {
@@ -653,5 +693,53 @@ mod tests {
             ([10, 0, 2, 15], [192, 168, 1, 5], PROTO_UDP)
         );
         assert_eq!(ip.payload.get(8..), Some(&b"m:1|c"[..]));
+    }
+
+    /// NOW-19: nothing leaves larger than the MTU (no fragmentation): a TCP
+    /// segment, a UDP datagram or an echo reply that would not fit is
+    /// counted and not sent. The MTU is clamped to what the driver sends.
+    #[test]
+    fn nothing_larger_than_the_mtu_is_sent() {
+        let mut i = Iface::new(MAC, true, None, 0);
+        assert_eq!(i.mtu(), DEFAULT_MTU);
+        assert_eq!((i.set_mtu(9000), i.set_mtu(100)), (1500, 576));
+        assert_eq!(i.set_mtu(1460), 1460);
+        assert_eq!(i.max_udp_payload(), 1432);
+        i.set_addr(Some(([10, 0, 2, 15], 24)), Some([10, 0, 2, 2]));
+        let f = frame([10, 0, 2, 2], [10, 0, 2, 15], PROTO_TCP, &[0; 20]);
+        i.receive(0, &f, &mut |_| {});
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        // TCP: 1440 bytes of segment make a 1460-byte packet; one more does not fit.
+        i.send_tcp([10, 0, 2, 2], &[0; 1440], &mut |f| out.push(f.to_vec()));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].len(), 14 + 1460);
+        i.send_tcp([10, 0, 2, 2], &[0; 1441], &mut |f| out.push(f.to_vec()));
+        assert_eq!((out.len(), i.stats.too_big), (1, 1));
+        // UDP: 1432 bytes of payload is the largest datagram.
+        assert!(i.send_udp([10, 0, 2, 2], 1, 2, &[0; 1432], &mut |f| {
+            out.push(f.to_vec())
+        }));
+        assert!(!i.send_udp([10, 0, 2, 2], 1, 2, &[0; 1433], &mut |f| {
+            out.push(f.to_vec())
+        }));
+        assert_eq!((out.len(), i.stats.too_big), (2, 2));
+        // An echo request of 1500 bytes from a 1500-byte network: no reply.
+        let mut echo = Vec::new();
+        ipv4::push_icmp_echo(
+            &mut echo,
+            &Echo {
+                request: true,
+                ident: 1,
+                seq: 2,
+                data: &[7; 1472],
+            },
+        );
+        let f = frame([10, 0, 2, 2], [10, 0, 2, 15], PROTO_ICMP, &echo);
+        i.receive(1, &f, &mut |f| out.push(f.to_vec()));
+        assert_eq!((out.len(), i.stats.too_big), (2, 3));
+        // At 1500 the same request is answered.
+        i.set_mtu(1500);
+        i.receive(2, &f, &mut |f| out.push(f.to_vec()));
+        assert_eq!(out.len(), 3);
     }
 }

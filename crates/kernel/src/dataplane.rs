@@ -96,10 +96,12 @@ pub enum CoreMsg {
     Close { tconn: Tconn },
     /// Shard → shard: a message routed at its origin.
     Route { msg: Msg, qos: QoS, retain: bool },
-    /// Core 0 → all: the interface address changed (DHCP).
+    /// Core 0 → all: the interface address or MTU changed (DHCP).
     IpConfig {
         addr: Option<([u8; 4], u8)>,
         router: Option<[u8; 4]>,
+        /// The link MTU in use (NOW-19, ADR-264).
+        mtu: u16,
     },
 }
 

@@ -83,6 +83,7 @@
   "field.changed": "spremenjeno",
   "field.reset": "Ponastavi na privzeto",
   "field.range": "Dovoljeno: od {min} do {max}.",
+  "field.range.network.mtu": "0 (privzeto): MTU, ki ga omrežje sporoči prek DHCP, sicer 1500. Druge vrednosti: od 576 do 9000 bajtov.",
   "unit.ms": "Milisekunde.",
   "unit.mb": "Megabajti.",
   "unit.s": "Sekunde.",

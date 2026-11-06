@@ -176,11 +176,32 @@ can feed to a vulnerability scanner.
 | CPU | aarch64 (ARMv8.0+; PAC/BTI used when present) or x86_64 (x86-64-v2: SSE4.2, POPCNT, CX16; section 5b), 2+ vCPUs (with storage the last CPU is the DB core) |
 | Firmware | UEFI (AAVMF/OVMF), ACPI or device tree; x86_64 also legacy BIOS (ACPI required) |
 | Interrupts | GICv3, or GICv2 (at most 8 vCPUs; what KVM offers on a GIC-400 host such as the Raspberry Pi); MSI-X through GICv2m frames when present (QEMU `virt`), polling otherwise |
-| NIC | one virtio-net (PCI); DHCP unless `network.mode = "static"` |
+| NIC | one virtio-net (PCI); DHCP unless `network.mode = "static"`; MTU from DHCP option 26 or `network.mtu`, else 1500 (below) |
 | Disk | **one** virtio-blk disk or virtio-scsi LUN (PCI), 512-byte blocks: the raw image written to it, the disk at least 16 MiB larger than the image (8 GiB or more in production, STORAGE-PLAN sizing); with `storage.require_data_disk = true` the broker refuses to serve without its data partition |
 | Display | optional: the boot framebuffer (GOP: ramfb, VGA), or a virtio-gpu PCI (2D) with `console.virtio_gpu` (below) |
 | Entropy | virtio-rng, or `RNDR`/`RDRAND`/`RDSEED` on the CPU; otherwise, with `entropy.fallback = "jitter"` (the default), health-tested CPU jitter plus the firmware's values, which is weaker; with `"none"`, no boot (section "Entropy" below) |
 | Boot medium | the raw image on the VM's disk, or the ISO's installer, which writes that image onto the disk (below); booted as a CD the ISO's **live** entry runs from RAM, no disk needed and nothing kept (below), if `storage.mode` allows it; without the live word a CD holds no data and production refuses to serve from it |
+
+**Cloud networks and MTU (NOW-19, ADR-264).** Not every network carries 1500-byte packets. **Google Cloud's VPC
+networks use an MTU of 1460 by default** (configurable per network from 1300 to 8896); some providers use jumbo
+frames (8896, 9000), tunnels and overlays less than 1500. A sender that puts 1500-byte packets on a 1460-byte
+network does not get an error: the large packets are dropped, so the TCP handshake and small messages work and
+every full-sized segment (a TLS certificate flight, a 4 KiB publish) is lost and retransmitted until the
+connection times out. urMQTT uses the MTU in this order:
+
+| Source | When | Boot line |
+|---|---|---|
+| `network.mtu` in the configuration (576 to 9000) | set; in every network mode, and the only source with `mode = "static"` | `net: mtu 1460 (static)` |
+| DHCP option 26 (Interface MTU) | `network.mtu` unset or 0, the lease carries it, 576 to 9000; another value is ignored with a warning | `net: mtu 1460 (dhcp)` |
+| 1500 | neither | `net: mtu 1500 (default)` |
+
+The MTU bounds every packet the broker sends: TCP announces and uses an MSS of MTU minus 40 (1420 at 1460; the
+smaller of ours and the peer's wins), UDP datagrams (syslog, statsd, SNTP, DHCP) stay within it, and an ICMP echo
+reply that would not fit is not sent (nothing is fragmented). Frames above 1500 bytes are never sent: a larger
+value (jumbo frames) is used as 1500, which a jumbo network carries. The value in use is in
+`$SYS/broker/net/mtu` (docs/OPERATE.md). Google Cloud's DHCP announces the network's MTU, so `mode = "dhcp"` needs
+nothing; **with a static address on Google Cloud set `network.mtu = 1460`** (or the network's MTU). Setting it
+needs configuration format 7: a template of an earlier release refuses such a configuration when it is packed.
 
 **The console on a virtio-gpu (ADR-256).** Some VMs (netcup ARM) have a virtio-gpu as their only display: the
 firmware draws its menu through it, but after boot the provider's console shows "Display output is not active"

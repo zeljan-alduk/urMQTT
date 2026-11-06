@@ -214,7 +214,7 @@ fn structural_attacks_fail_closed() {
     over[2] = 200;
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, and one above the newest).
-    for unknown in [0u8, 7, 9] {
+    for unknown in [0u8, 8, 9] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
@@ -236,7 +236,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 6));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 7));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -245,7 +245,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[6, 0],
+        &[7, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -279,6 +279,46 @@ fn format_2_is_written_and_format_1_is_still_read() {
     d.bool(tag::PL_ENABLED, false).unwrap();
     d.strs(tag::PL_ACL_PUBLISH, &["devices/{id}/#"]).unwrap();
     assert_eq!(d.finish(false).unwrap(), e);
+}
+
+/// NOW-19, ADR-264: `network.mtu` came with format 7. 0 (the default: from
+/// DHCP, else 1500) writes nothing, so the blob keeps its version and boots
+/// on an older kernel; a value needs version 7 (a version 6 blob holding it
+/// is refused); the checks allow 0 and 576..=9000, in every network mode.
+#[test]
+fn network_mtu_needs_format_7_and_absent_writes_nothing() {
+    let f = crate::fields::by_key("network.mtu").unwrap();
+    assert_eq!((f.tag, f.since, f.dev_only), (tag::NET_MTU, 7, false));
+    let mut zero = Builder::new();
+    zero.uint(tag::NET_MTU, 0).unwrap();
+    assert_eq!(zero.lowest_version(), 2);
+    assert_eq!(zero.finish(false).unwrap(), empty());
+    assert_eq!(Blob::parse(&empty()).unwrap().uint(tag::NET_MTU), 0);
+    for v in [576u64, 1460, 1500, 9000] {
+        let mut b = Builder::new();
+        b.uint(tag::NET_MTU, v).unwrap();
+        assert_eq!(b.lowest_version(), 7);
+        assert!(b.finish_as(false, 6).is_err(), "version 6 cannot hold {v}");
+        let blob = b.finish(false).unwrap();
+        let p = Blob::parse(&blob).unwrap();
+        assert_eq!((p.version(), p.uint(tag::NET_MTU)), (7, v));
+        check::check(&p, false).unwrap();
+        assert!(Blob::parse(&with_version(&blob, 6)).is_err());
+        // With a static address too (there it is the only source).
+        let mut s = Builder::new();
+        s.variant(tag::NET_MODE, 1).unwrap();
+        s.cidr(tag::NET_ADDRESS, [10, 0, 0, 2], 24).unwrap();
+        s.ipv4(tag::NET_GATEWAY, [10, 0, 0, 1]).unwrap();
+        s.uint(tag::NET_MTU, v).unwrap();
+        s.finish(false).unwrap();
+    }
+    for v in [1u64, 68, 575] {
+        let mut b = Builder::new();
+        b.uint(tag::NET_MTU, v).unwrap();
+        assert!(b.finish(false).is_err(), "{v} is no usable MTU");
+    }
+    // Above the range: refused when set.
+    assert!(Builder::new().uint(tag::NET_MTU, 9001).is_err());
 }
 
 /// ADR-257: the `[devices]` keys came with format 6, one enum each. Off (the

@@ -340,6 +340,14 @@ fn network(b: &Blob<'_>, dev: bool) -> Result<(), CfgError> {
             ));
         }
     }
+    // 0: from DHCP, else 1500 (NOW-19, ADR-264); otherwise a usable MTU.
+    let mtu = b.uint(tag::NET_MTU);
+    if mtu != 0 && mtu < fields::MIN_MTU {
+        return Err(err(
+            "network.mtu",
+            "must be 0 (from DHCP, else 1500) or 576 to 9000",
+        ));
+    }
     let tls_port = b.uint(tag::NET_TLS_PORT);
     if tls_port == 0 && !b.bool(tag::PL_ENABLED) {
         return Err(err(

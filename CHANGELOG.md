@@ -52,6 +52,18 @@ All notable changes to this project are documented here. The format follows
   real-machine target.
 - **Developer Certificate of Origin**: every commit of a pull request must carry a `Signed-off-by:` trailer (`git commit -s`,
   CONTRIBUTING.md); the Lint job checks the pull request's commits.
+- **The network's MTU is honoured** (ROADMAP NOW-19, ADR-264). Every packet was sized for 1500 bytes, so on a smaller
+  network (Google Cloud's VPC: 1460) the full-sized TCP segments were lost without an error. The DHCP client now asks
+  for and reads option 26 (Interface MTU; 576 to 9000 is used, another value is ignored with a warning), and the new
+  optional key **`network.mtu`** (0 or 576 to 9000; default 0: from DHCP, else 1500; with a static address the only
+  source) sets it; it is configuration format 7, and a configuration without it keeps its format. The MSS we announce
+  and use is MTU minus 40 (at most 1460, the smaller of ours and the peer's), open connections follow a lower MTU at a
+  DHCP renewal, UDP datagrams (statsd) stay within it, an ICMP echo reply that would not fit is not sent, and frames
+  above 1500 bytes are never sent. Boot line `net: mtu 1460 (static|dhcp|default)`, `$SYS/broker/net/mtu`, the
+  info query's `net.mtu`; the builder page's advanced view has the key (its range text in 15 languages, AI
+  translations, unreviewed). Smoke group `net_mtu`: a static 1460 configuration (4 KiB QoS 1 round trip over mutual
+  TLS, no guest frame above 1474 bytes, SYN-ACK MSS 1420) and DHCP announcing 1460, 9000 and 300 (urmqtt-attack's
+  raw transport, new mode `mtu-probe`; QEMU's user network cannot announce an MTU).
 - **A Miri negative control**: `scripts/miri.sh --negative-control` runs a deliberate use-after-free (compiled only under
   Miri, `#[ignore]`d, in urmqtt-config) and fails unless Miri reports it; every CI Miri job runs it.
 

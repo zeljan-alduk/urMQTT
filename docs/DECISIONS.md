@@ -2105,3 +2105,64 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
 - **Why not a stricter default.** A default that refuses would stop images from booting on the clouds that matter (Ampere Altra, the netcup finding) with a message nobody had a reason to expect; a default that is allowed and loud, with the strict choice a click away, keeps the first boot working and the decision informed. Revisit if a provider matrix shows hardware sources are the rule.
 - **Tests.** Host: the `$SYS` topic, its JSON and status line, the source names (`urmqtt-broker`); the `pack`/`verify`/`show` output with both settings (`tools/config/tests/cli.rs`); the builder's form logic, the i18n completeness, and the page (the two options, the warning, the note, the hash, the result card). Smoke `entropy_option`: the `$SYS` value with no virtio-rng (`jitter+firmware`) and with it (`virtio-rng`), `fallback = "none"` refusing with the message above, and the same image booting with virtio-rng.
 - **Not done.** Per-provider sources in DEPLOY.md section 6 (filled as providers are tried); the credited-bits figures on an Ampere cloud (TODO.md); a requirement that production images carry an explicit choice.
+
+## ADR-264 — The link MTU: DHCP option 26, `network.mtu` (configuration format 7), the MSS follows it (NOW-19)
+
+- **Status:** Accepted. Amends ADR-033 (the TCP stack: the announced MSS was a constant), ADR-222 (segment size), M7's
+  DHCP client and the virtio-net transmit path. ADR-263 is the entropy-fallback decision; this is the next free number.
+- **Context.** Every packet was sized for a 1500-byte MTU: `urmqtt_tcp::Config::mss` was 1460 from `netproto.rs`,
+  the segment buffers were 1460 bytes, the SYN cookie's MSS table ends at 1460, the DHCP client neither asked for nor
+  read option 26, and statsd datagrams were up to 1400 bytes "for any Ethernet MTU". Google Cloud's VPC networks use
+  1460 by default (found 2026-11-05 while preparing that cloud's scripts): there a full segment is a 1500-byte IP
+  packet, which the network drops without an ICMP error, so the handshake and small messages pass and a certificate
+  flight or a 4 KiB publish stalls in retransmissions until a timeout. Other networks use 1500, jumbo frames (8896,
+  9000) or less (tunnels).
+- **Decision.**
+  1. **Sources, in order:** `network.mtu` when set (576 to 9000, any network mode; with `mode = "static"` the only
+     source; it also wins over DHCP, so an operator can correct a wrong lease); else DHCP option 26 when the lease
+     carries it and it is 576 to 9000 (anything else is logged, `net: dhcp announced mtu N, outside 576..=9000:
+     ignored`, and not used); else 1500. The DHCP request now lists option 26 among its parameters; a malformed
+     option (length other than 2) is ignored. Core 0 applies the value to its interface and TCP stack and sends it to
+     the other data cores in `CoreMsg::IpConfig`; one boot line `net: mtu N (static|dhcp|default)` (again when a
+     renewal changes it), `$SYS/broker/net/mtu` and `net.mtu` in the info query.
+  2. **Frames above 1500 bytes are never sent.** The driver's transmit buffers hold 1514 bytes and it does not
+     negotiate `VIRTIO_NET_F_MTU` or larger frames. A jumbo MTU is used as 1500 (`net: mtu 1500 (dhcp; 9000 asked
+     for, ...)`), which a jumbo network carries. The **receive** buffers are unchanged (2048 bytes per descriptor,
+     independent of our MTU): what the device delivers is accepted as before.
+  3. **TCP: MSS = MTU - 40** (`urmqtt_tcp::mss_for_mtu`, clamped to 536..=1460, the SYN-cookie table's range, which
+     also bounds the segment buffers). It is what the SYN-ACK announces and the most a connection sends; the peer's
+     MSS (through the cookie, rounded down to its table) and ours give the smaller. With timestamps the payload is the
+     MSS minus 12 (ADR-222), so a segment is at most MTU bytes as an IP packet. `TcpStack::set_mss` applies a new
+     value to new connections and lowers open ones (a DHCP renewal that announces less): their next segment and every
+     retransmission are cut to it; the congestion window counts bytes (ADR-222), so it stays valid. ADR-222's send
+     queue, cwnd and window logic is otherwise untouched.
+  4. **UDP and ICMP, no fragmentation.** `Iface` holds the MTU; `send_udp` refuses a datagram larger than MTU - 28
+     and `send_ip` drops any packet larger than the MTU (counted in `Stats::too_big`; in practice an echo request
+     larger than our MTU gets no reply instead of a fragmented one). statsd packs its lines into datagrams of at most
+     `min(1400, MTU - 28)`. The other datagrams are far below 548 (576 - 28), the smallest MTU allowed: DHCP about
+     300 bytes, SNTP 48, a syslog line at most about 400 (254 bytes of record text plus the RFC 5424 header).
+  5. **Configuration format 7.** `network.mtu` is a new tag (195), `uint(2, 0..=9000)`, default 0 ("not set"); the
+     check refuses 1 to 575. 0 writes no record, so a configuration without the key keeps its lowest format and boots on
+     an older kernel; a value needs format 7, so a v0.4.x template (format 6) refuses it when it is packed instead of
+     booting a kernel that would ignore the record. The TOML form, the packer, the builder page (advanced view; the
+     range text says what 0 means, in the 15 site languages, AI translations, unreviewed) and the schema follow the
+     field table as usual. `default_toml` now groups a field added later to an existing section into that section.
+- **Verification.** Host tests: option 26 present, absent, out of range and malformed (`urmqtt-net`); the MTU guard of
+  the interface (TCP, UDP, an oversized echo); the MSS derivation and that no segment exceeds MTU - 40 of payload (and
+  MTU as a packet) at 576, 1460, 1500 and 9000, with and without timestamps, first transmissions and a retransmission,
+  the smaller-MSS rule, and a lowered MTU on an open connection (scripted segments, `urmqtt-tcp`); format 7 and the
+  checks (`urmqtt-cfg`, `urmqtt-config-schema`, `urmqtt-config`, `tools/config`). Smoke group `net_mtu`: a static
+  1460 configuration boots with `net: mtu 1460 (static)`, a 4 KiB QoS 1 message goes device -> broker -> backend over
+  mutual TLS, `$SYS/broker/net/mtu` is 1460, and the capture shows no frame from the guest above 1474 bytes, full ones
+  at 1474 and SYN-ACK MSS 1420; DHCP announcing 1460, 9000 and 300 on urmqtt-attack's raw transport (its DHCP server
+  gained option 26 and the mode `mtu-probe`, which reads the SYN-ACK's MSS), because QEMU's user network has no `mtu`
+  option and its DHCP server sends no option 26.
+- **Not verified.** A network that really drops larger frames: QEMU's user network accepts 1500-byte frames, so the
+  scenarios show what the broker sends, not that it survives a path that drops more. Google Cloud itself (the open
+  edition's first boot there is planned on e2/n2 with virtio-net). Path MTU discovery is not done: a smaller MTU
+  further along the path than on the link still depends on the peer's MSS or on ICMP "fragmentation needed", which we
+  do not act on.
+- **Not done.** `VIRTIO_NET_F_MTU` (the device's own MTU in its configuration space) is not negotiated: negotiating
+  it obliges the driver to post receive buffers of that size, and the receive path stays at 2048-byte buffers. The
+  Diagnostic report's NIC entry does not show the MTU: the Diagnostic boot runs no DHCP, so it could show only the
+  configured value.

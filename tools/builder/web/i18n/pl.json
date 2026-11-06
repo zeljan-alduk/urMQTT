@@ -83,6 +83,7 @@
   "field.changed": "zmieniono",
   "field.reset": "Przywróć wartość domyślną",
   "field.range": "Dozwolone: od {min} do {max}.",
+  "field.range.network.mtu": "0 (domyślnie): MTU ogłaszane przez sieć w DHCP, a bez niego 1500. Inne wartości: od 576 do 9000 bajtów.",
   "unit.ms": "Milisekundy.",
   "unit.mb": "Megabajty.",
   "unit.s": "Sekundy.",

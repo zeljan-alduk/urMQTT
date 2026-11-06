@@ -13,6 +13,9 @@
 mode = "dhcp"                  # demo-pack.sh --static 192.0.2.10/24 192.0.2.1 writes mode, address and gateway
 mqtt_tls_port = 8883
 mqtt_plain_port = 0            # the legacy dev-only port stays off; [plaintext] below is the bridge's way in
+# mtu = 1460                  # largest IPv4 packet (576-9000); unset or 0: from DHCP option 26, else 1500.
+#                             # Set it on a smaller network that does not say so (Google Cloud's VPC: 1460,
+#                             # with mode = "static"); TCP segments follow it (MSS = mtu - 40). Format 7.
 
 [tls]
 cert = "server.pem"            # signed by pki/server-ca.pem (its private key is deleted); clients check the broker with it

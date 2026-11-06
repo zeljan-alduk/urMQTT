@@ -35,12 +35,15 @@ pub struct Transport {
     rsts: Arc<AtomicU64>,
     challenge_acks: Arc<AtomicU64>,
     leases: Arc<AtomicU64>,
+    /// The MSS of the latest SYN-ACK, plus one (0: none seen).
+    syn_ack_mss: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
 }
 
 /// A fixed DHCP reply (OFFER or ACK) built from the request, like QEMU's
-/// slirp: yiaddr 10.0.2.15, mask /24, router/dns/server 10.0.2.2.
-fn dhcp_reply(req: &[u8], msg_type: u8) -> Option<Vec<u8>> {
+/// slirp: yiaddr 10.0.2.15, mask /24, router/dns/server 10.0.2.2, and the
+/// Interface MTU option (26) when `mtu` is set (NOW-19; slirp has none).
+fn dhcp_reply(req: &[u8], msg_type: u8, mtu: Option<u16>) -> Option<Vec<u8>> {
     if req.len() < 240 || req.get(236..240) != Some(&[99, 130, 83, 99]) {
         return None;
     }
@@ -59,6 +62,10 @@ fn dhcp_reply(req: &[u8], msg_type: u8) -> Option<Vec<u8>> {
     m.extend_from_slice(&HOST_IP); // router
     m.extend_from_slice(&[6, 4]);
     m.extend_from_slice(&HOST_IP); // dns
+    if let Some(mtu) = mtu {
+        m.extend_from_slice(&[26, 2]);
+        m.extend_from_slice(&mtu.to_be_bytes());
+    }
     m.push(255);
     Some(m)
 }
@@ -67,7 +74,12 @@ impl Transport {
     /// Binds the datagram socket QEMU sends to and connects back to QEMU's
     /// local port, then starts the background reader that keeps the lease
     /// alive and tallies replies.
-    pub fn bring_up(local: u16, remote: u16, timeout: Duration) -> Result<Self, String> {
+    pub fn bring_up(
+        local: u16,
+        remote: u16,
+        timeout: Duration,
+        dhcp_mtu: Option<u16>,
+    ) -> Result<Self, String> {
         let sock = UdpSocket::bind(("127.0.0.1", remote)).map_err(|e| format!("bind: {e}"))?;
         sock.connect(("127.0.0.1", local))
             .map_err(|e| format!("connect: {e}"))?;
@@ -78,9 +90,10 @@ impl Transport {
             rsts: Arc::new(AtomicU64::new(0)),
             challenge_acks: Arc::new(AtomicU64::new(0)),
             leases: Arc::new(AtomicU64::new(0)),
+            syn_ack_mss: Arc::new(AtomicU64::new(0)),
             stop: Arc::new(AtomicBool::new(false)),
         };
-        t.spawn_reader(sock);
+        t.spawn_reader(sock, dhcp_mtu);
         // The guest must have a lease (so the broker is reachable) before we
         // start; the reader records it and the guest MAC.
         let deadline = Instant::now() + timeout;
@@ -93,7 +106,7 @@ impl Transport {
         Ok(t)
     }
 
-    fn spawn_reader(&self, sock: UdpSocket) {
+    fn spawn_reader(&self, sock: UdpSocket, dhcp_mtu: Option<u16>) {
         let (syn_acks, rsts, chall, leases, stop) = (
             self.syn_acks.clone(),
             self.rsts.clone(),
@@ -101,6 +114,7 @@ impl Transport {
             self.leases.clone(),
             self.stop.clone(),
         );
+        let mss_seen = self.syn_ack_mss.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 2048];
             while !stop.load(Ordering::Relaxed) {
@@ -124,8 +138,8 @@ impl Transport {
                     // DHCP DISCOVER (1) → OFFER (2); REQUEST (3) → ACK (5).
                     let kind = p.payload.get(242).copied();
                     let reply = match kind {
-                        Some(1) => dhcp_reply(&p.payload, 2),
-                        Some(3) => dhcp_reply(&p.payload, 5),
+                        Some(1) => dhcp_reply(&p.payload, 2, dhcp_mtu),
+                        Some(3) => dhcp_reply(&p.payload, 5, dhcp_mtu),
                         _ => None,
                     };
                     if let Some(body) = reply {
@@ -149,6 +163,9 @@ impl Transport {
                     let flags = p.l4.4;
                     if flags & SYN != 0 && flags & ACK != 0 {
                         syn_acks.fetch_add(1, Ordering::Relaxed);
+                        if let Some(m) = p.mss {
+                            mss_seen.store(u64::from(m) + 1, Ordering::Relaxed);
+                        }
                     } else if flags & RST != 0 {
                         rsts.fetch_add(1, Ordering::Relaxed);
                     } else if flags & ACK != 0 && p.payload.is_empty() {
@@ -229,6 +246,42 @@ impl Transport {
             "attack: rst-flood sent {sent} RST(s) to :{port}, {} RST(s) back (expect 0)",
             self.rsts.load(Ordering::Relaxed)
         );
+    }
+}
+
+impl Transport {
+    /// NOW-19: one SYN announcing an MSS of 1460 (a peer on a 1500-byte
+    /// network) from an on-link source; reports the MSS of the SYN-ACK, which
+    /// must follow the MTU the guest uses (MTU - 40), not the peer's.
+    pub fn mtu_probe(&self, port: u16) -> Result<(), String> {
+        let frame = wire::tcp_frame(
+            HOST_MAC,
+            GUEST_MAC,
+            [SRC_NET[0], SRC_NET[1], SRC_NET[2], 77],
+            GUEST_IP,
+            40_077,
+            port,
+            0x1234_5678,
+            0,
+            SYN,
+            64240,
+            Some(1460),
+            &[],
+        );
+        let deadline = Instant::now() + Duration::from_secs(20);
+        // The broker may still be starting: send again until it answers.
+        while self.syn_ack_mss.load(Ordering::Relaxed) == 0 {
+            if Instant::now() >= deadline {
+                return Err("mtu-probe: no SYN-ACK with an MSS".into());
+            }
+            self.send(&frame);
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        println!(
+            "attack: mtu-probe: SYN mss 1460, SYN-ACK mss {}",
+            self.syn_ack_mss.load(Ordering::Relaxed) - 1
+        );
+        Ok(())
     }
 }
 

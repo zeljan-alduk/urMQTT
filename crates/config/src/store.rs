@@ -257,6 +257,10 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
                 0 => None,
                 p => u16::try_from(p).ok(),
             },
+            // The check refused 1..576 already; 0 is "not set".
+            mtu: u16::try_from(b.uint(tag::NET_MTU))
+                .ok()
+                .filter(|m| u64::from(*m) >= fields::MIN_MTU),
         },
         tls: Tls {
             cert_pem: b.bin(tag::TLS_CERT),
@@ -668,6 +672,23 @@ mod tests {
         assert_eq!(c.memory.kernel_heap_mb, 128);
     }
 
+    /// NOW-19, ADR-264: `network.mtu` is unset by default (the empty blob,
+    /// and every blob before format 7) and decoded when set.
+    #[test]
+    fn the_mtu_is_unset_by_default_and_decoded() {
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.network.mtu, None);
+        for v in [576u16, 1460, 9000] {
+            let mut b = Builder::new();
+            b.uint(tag::NET_MTU, u64::from(v)).unwrap();
+            let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+            let blob = Blob::parse(bytes).unwrap();
+            assert_eq!(blob.version(), 7);
+            let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+            assert_eq!(build(&blob, arena).network.mtu, Some(v));
+        }
+    }
+
     /// ADR-257: every `[devices]` key is off by default (the empty blob, and
     /// every blob before format 6); auto and on are decoded per key.
     #[test]
@@ -690,6 +711,10 @@ mod tests {
             let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
             let blob = Blob::parse(bytes).unwrap();
             assert_eq!(blob.version(), 6);
+            assert_eq!(
+                build(&blob, Box::leak(Box::new(Arena::new()))).network.mtu,
+                None
+            );
             let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
             let d = build(&blob, arena).devices;
             for (k, m) in d.iter() {
