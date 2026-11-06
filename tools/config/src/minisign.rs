@@ -80,6 +80,25 @@ impl PublicKey {
     }
 }
 
+/// The key id a `.minisig` file names on its second line, as minisign prints
+/// it. Nothing is verified: this only says which public key to try (a key
+/// ring holds the old and the new release key during a rotation).
+pub fn signature_key_id(sig_text: &str) -> Result<String, String> {
+    let line = sig_text
+        .lines()
+        .nth(1)
+        .ok_or("signature file: expected four lines")?;
+    let raw = decode(line.trim_end_matches('\r'), "signature")?;
+    if raw.len() != 74 {
+        return Err("signature: wrong length (74 bytes expected)".into());
+    }
+    let id: [u8; 8] = raw
+        .get(2..10)
+        .and_then(|b| b.try_into().ok())
+        .ok_or("signature: truncated")?;
+    Ok(id_text(&id))
+}
+
 /// Verifies `sig_text` (the contents of a `.minisig` file) over `message`
 /// (the file that was signed) against `pk`.
 pub fn verify(pk: &PublicKey, sig_text: &str, message: &[u8]) -> Result<Verified, String> {
@@ -152,9 +171,9 @@ pub fn verify(pk: &PublicKey, sig_text: &str, message: &[u8]) -> Result<Verified
 mod tests {
     use super::*;
 
-    // The real release key and the real signature of the v0.1.0 SHA256SUMS
-    // (public data, fetched from the GitHub release).
-    const PUB: &str = include_str!("../../../minisign.pub");
+    // The project's former test key (it signed v0.1.0 to v0.4.1) and the real
+    // signature of the v0.1.0 SHA256SUMS (public data, fetched from the GitHub release).
+    const PUB: &str = include_str!("../../../keys/minisign-test-9229E05252D01F8E.pub");
     const SUMS: &[u8] = include_bytes!("../tests/fixtures/minisign/SHA256SUMS");
     const SIG: &str = include_str!("../tests/fixtures/minisign/SHA256SUMS.minisig");
 
@@ -210,6 +229,18 @@ mod tests {
         assert!(verify(&pk, "untrusted comment: x\n!!!\n", SUMS).is_err());
         assert!(PublicKey::parse("untrusted comment: x\n").is_err());
         assert!(PublicKey::parse("RWSOH9BS").is_err());
+    }
+
+    #[test]
+    fn the_signature_names_its_key_id() {
+        assert_eq!(signature_key_id(SIG).unwrap(), "9229E05252D01F8E");
+        assert_eq!(
+            signature_key_id(&SIG.replace('\n', "\r\n")).unwrap(),
+            "9229E05252D01F8E"
+        );
+        assert!(signature_key_id("").is_err());
+        assert!(signature_key_id("untrusted comment: x\n!!!\n").is_err());
+        assert!(signature_key_id("untrusted comment: x\nRWSOH9BS\n").is_err());
     }
 
     #[test]

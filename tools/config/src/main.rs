@@ -35,11 +35,17 @@
 //!     hash for `plaintext.users` (PBKDF2-HMAC-SHA-256, a random salt, 10000
 //!     iterations unless told otherwise). With --id, prints the whole table
 //!     `{ id = "NAME", password_hash = "..." }` to paste into the TOML.
-//! urmqtt-config check-release --pubkey minisign.pub --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]
+//! urmqtt-config check-release --pubkey minisign.pub [--pubkey OLD.pub]... --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]
 //!     Verifies the minisign signature over SHA256SUMS (default signature
 //!     file: the sums file name plus .minisig) and each FILE against the
-//!     sums (by file name). The same code the builder page runs in the
-//!     browser. Non-zero exit on any problem.
+//!     sums (by file name). With several --pubkey, the key the signature
+//!     names is used (a release of before a key rotation: add
+//!     keys/minisign-test-9229E05252D01F8E.pub). The same code the builder
+//!     page runs in the browser. Non-zero exit on any problem.
+//! urmqtt-config check-release --keyring keys/release-keys.json --tag TAG --sums SHA256SUMS [--sig ...] [FILE...]
+//!     The same with the key ring's rules: the key the signature names, only
+//!     for the tags in its range, and for a pinned tag (the former test key's
+//!     releases) only the SHA256SUMS with the pinned SHA-256.
 //! ```
 
 use std::path::PathBuf;
@@ -52,7 +58,8 @@ fn usage() -> String {
      (--out BLOB | --out-slot SLOT | --iso TEMPLATE.iso --out OUT.iso | --image DISK.img --out OUT.img)\n  \
      urmqtt-config slot BLOB OUT\n  urmqtt-config show FILE [--all]\n  urmqtt-config verify FILE [--dev]\n  urmqtt-config schema\n  \
      urmqtt-config hash-password [--id NAME] [--iterations N]   (the password is read from standard input)\n  \
-     urmqtt-config check-release --pubkey minisign.pub --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]\n"
+     urmqtt-config check-release --pubkey minisign.pub [--pubkey OLD.pub]... --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]\n  \
+     urmqtt-config check-release --keyring keys/release-keys.json --tag TAG --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]\n"
         .to_owned()
 }
 
@@ -215,15 +222,57 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         "check-release" => {
-            let pubkey = take(&mut args, "--pubkey")?.ok_or_else(usage)?;
+            let mut pubkeys = Vec::new();
+            while let Some(k) = take(&mut args, "--pubkey")? {
+                pubkeys.push(k);
+            }
+            let ring = take(&mut args, "--keyring")?;
+            let tag = take(&mut args, "--tag")?;
+            if pubkeys.is_empty() == ring.is_none() || ring.is_some() != tag.is_some() {
+                return Err(usage());
+            }
             let sums_path = take(&mut args, "--sums")?.ok_or_else(usage)?;
             let sig_path =
                 take(&mut args, "--sig")?.unwrap_or_else(|| format!("{sums_path}.minisig"));
             let read = |p: &str| std::fs::read(p).map_err(|e| format!("cannot read {p}: {e}"));
-            let pubkey = String::from_utf8_lossy(&read(&pubkey)?).into_owned();
             let sums = read(&sums_path)?;
             let sig = String::from_utf8_lossy(&read(&sig_path)?).into_owned();
-            let signed = release::verify_sums(&pubkey, &sums, &sig)?;
+            let signed = if let (Some(ring), Some(tag)) = (ring, tag) {
+                let dir = std::path::Path::new(&ring)
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_default();
+                let text = String::from_utf8_lossy(&read(&ring)?).into_owned();
+                let keys = urmqtt_config_tool::keyring::parse(&text, &mut |f| {
+                    let p = dir.join(f);
+                    std::fs::read_to_string(&p)
+                        .map_err(|e| format!("cannot read {}: {e}", p.display()))
+                })?;
+                let v = urmqtt_config_tool::keyring::verify(&keys, &tag, &sums, &sig)?;
+                println!(
+                    "key ring: {tag} signed by {} ({}{}){}",
+                    v.key.public.key_id(),
+                    v.key.name,
+                    if v.key.former_test_key {
+                        ", the project's former test key"
+                    } else {
+                        ""
+                    },
+                    if v.pinned {
+                        "; SHA256SUMS matches the pinned SHA-256"
+                    } else {
+                        ""
+                    }
+                );
+                v.signed
+            } else {
+                let texts = pubkeys
+                    .iter()
+                    .map(|p| read(p).map(|b| String::from_utf8_lossy(&b).into_owned()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let keys: Vec<&str> = texts.iter().map(String::as_str).collect();
+                release::verify_sums_any(&keys, &sums, &sig)?
+            };
             println!(
                 "signature ok: key {}, \"{}\"",
                 signed.signature.key_id, signed.signature.trusted_comment

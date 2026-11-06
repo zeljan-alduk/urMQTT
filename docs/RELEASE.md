@@ -4,23 +4,31 @@ For the maintainer. The workflow that does the work is
 [`.github/workflows/release.yml`](../.github/workflows/release.yml); this page is the order in which to do things
 around it, the commands, the text to paste, and how to take it back. Replace `v0.4.1` for another version, and `v0.4.0` for the release before it (v0.4.0 and v0.3.0 were the examples before; their notes are docs/release-notes-v0.4.0.md and section 8).
 
-What a release is: a tag `vX.Y.Z` pushed to GitHub. The workflow builds on an arm64 runner (`make dist ENV=dev`) and
-publishes, in `build/dist/`:
+What a release is: a tag `vX.Y.Z` pushed to GitHub. The workflow builds on an arm64 runner (`make dist ENV=release`)
+and publishes, in `build/dist/`:
 
 | File | What |
 |---|---|
-| `urmqtt-dev-vX.Y.Z.elf`, `.iso`, `.img` | the **dev** kernel for aarch64 (throwaway certificates; evaluation only), its UEFI ISO and raw disk image |
-| `urmqtt-template-vX.Y.Z-universal.iso` | the release kernels for aarch64 and x86_64 and an empty configuration; what `urmqtt-config pack --iso` and the builder page turn into a configured image |
-| `urmqtt-dev-vX.Y.Z.cdx.json` | the CycloneDX SBOM |
-| `SHA256SUMS`, `SHA256SUMS.minisig` | checksums of all of the above, and their minisign signature (only if the secret `MINISIGN_SECRET_KEY` exists) |
+| `urmqtt-vX.Y.Z.elf` | the **release** kernel for aarch64 (no certificate or key in it; the same bytes as the aarch64 kernel inside the ISO) |
+| `urmqtt-vX.Y.Z.iso` | the universal ISO (aarch64 UEFI, x86_64 UEFI and BIOS) with the **empty configuration**: byte for byte the template below, under the plain name |
+| `urmqtt-vX.Y.Z.img` | its raw disk image (GPT, both kernels, the empty configuration); `urmqtt-config pack --image` configures it |
+| `urmqtt-template-vX.Y.Z-universal.iso` | the same ISO under the name the builder page, the release mirror and `urmqtt-config pack --iso` have always used |
+| `urmqtt-vX.Y.Z.cdx.json` | the CycloneDX SBOM |
+| `SHA256SUMS`, `SHA256SUMS.minisig` | checksums of all of the above, and their minisign signature with the **release key** (`minisign.pub`); trusted comment `urMQTT vX.Y.Z release <commit>` |
 
 plus SLSA build provenance and an SBOM attestation (GitHub attestations). The release is created as a **pre-release**
-(`v0.*`). Production images are not published: the operator builds them from their own `deploy/prod/`
-(docs/DEPLOY.md).
+(`v0.*`). No image with keys is published, and since the key rotation no dev build either: an image that serves is
+made by the user from the template (builder page, `urmqtt-config pack --iso/--image`) or from their own
+`deploy/prod/` (docs/DEPLOY.md).
 
-Note for the decision below: the dev ELF, ISO and image are aarch64 only. x86_64 reaches users through the template ISO
-(and so through the builder page). `make dist-universal` would also publish the x86_64 ELF and a universal dev ISO; the
-workflow does not call it today.
+Names before and after the rotation (both are understood by the mirror, which only ever fetches the template and the
+sums; the builder page uses the template only):
+
+| Releases | Assets | Signed with |
+|---|---|---|
+| v0.1.0 | `urmqtt-dev-v0.1.0.{elf,iso,img}` (no template) | the former test key `9229E05252D01F8E` |
+| v0.2.0 to v0.4.1 | `urmqtt-dev-<tag>.{elf,iso,img,cdx.json}` (dev builds, throwaway certificates), `urmqtt-template-<tag>-universal.iso` | the former test key `9229E05252D01F8E` |
+| after v0.4.1 | `urmqtt-<tag>.{elf,iso,img,cdx.json}`, `urmqtt-template-<tag>-universal.iso` | the release key in `minisign.pub` |
 
 ## 0. Before the tag
 
@@ -42,6 +50,7 @@ workflow does not call it today.
    scripts/smoke.sh --arch x86_64
    scripts/smoke.sh --arch universal
    make repro                                       # prod, built twice; needs deploy/prod/{ca.pem,server.pem,server.key,control.pub}
+   make repro ENV=release                           # the release assets built twice (no deploy/ needed); from the rotation on
    ```
 
    From a checkout nested inside another checkout (a Claude worktree), cargo reads two `.cargo/config.toml` files and the
@@ -49,15 +58,23 @@ workflow does not call it today.
    `make print-rustflags`).
 4. `cargo vet regenerate imports && cargo vet prune` (docs/SUPPLY-CHAIN.md asks for it at each release); commit the
    result if it changed anything.
-5. The signing key. `minisign.pub` in the repository is the release key; the secret half must be in the repository secret
-   `MINISIGN_SECRET_KEY` (a passwordless key, `minisign -G -W`). Check: Settings, Secrets and variables, Actions. Without
-   it the workflow publishes **unsigned** assets, and the release mirror and the builder page refuse an unsigned release.
-   The key is a test key (docs/DEPLOY.md section 3); replacing it with an offline key is a separate change that also
-   needs the new `minisign.pub` in the builder page and in the mirror (`/etc/urmqtt-mirror/minisign.pub`).
-6. Optional dry run of the artifacts on your machine: `make dist ENV=dev` (needs `xorriso` and `mtools`) and compare
-   `build/dist/SHA256SUMS` with what the workflow produces later. The kernels are reproducible, the ISO and raw image
-   only with the same xorriso and mtools versions (docs/DEPLOY.md section 3), so the Linux runner's ISO need not equal a
-   macOS one; the ELFs must.
+5. The signing key. `minisign.pub` in the repository is the release key (section 9); its secret half must be in the
+   repository secret `MINISIGN_SECRET_KEY` (a passwordless key, `minisign -G -W`). `scripts/check-release-key.sh` must
+   print `ok` with the release key and the former test key. The workflow **refuses to start** while `minisign.pub` is the
+   placeholder or the former test key, or the secret is missing, and it checks after signing that the signature
+   verifies with `minisign.pub`. The deployed builder page and the mirror must already know the release key (section 9,
+   steps 5 and 6 of docs/release-key-rotation.md) before the first release signed with it.
+6. Reproducibility of the release assets, on your machine (needs `xorriso` and `mtools`):
+
+   ```bash
+   make repro ENV=release     # builds HEAD twice (make release-images): both release kernels, the template ISO, the raw image
+   make dist ENV=release      # build/dist/: the files of the table above and SHA256SUMS
+   ```
+
+   `make repro ENV=release` needs no `deploy/` directory (a release holds no key). The kernels are reproducible across
+   hosts: the line of `urmqtt-vX.Y.Z.elf` in your `SHA256SUMS` must equal the workflow's. The ISO and raw image are
+   identical only with the same xorriso and mtools versions (docs/DEPLOY.md section 3), so a macOS ISO need not equal the
+   Linux runner's; compare those on Ubuntu 24.04 arm64.
 
 ## 1. Tag and run the workflow
 
@@ -69,9 +86,13 @@ git push origin v0.4.1                       # this starts the Release workflow
 gh run watch --repo zeljan-alduk/urMQTT      # about the time of `make dist` on an arm64 runner
 ```
 
-The workflow: checkout with full history, `make certs`, `make dist ENV=dev` (kernels, ISO, raw image, template ISO,
-SBOM, `SHA256SUMS`), a check that the template is listed in `SHA256SUMS`, minisign signature of `SHA256SUMS` (trusted
-comment `urMQTT v0.4.1 dev <commit>`), SBOM attestation, build provenance, and the GitHub release with generated notes.
+The workflow: checkout with full history, `scripts/check-release-key.sh` and a check that the signing secret exists
+(both before anything is built), `make dist ENV=release` (release kernels, universal ISO, raw image, template ISO, SBOM,
+`SHA256SUMS`), a check that every asset is there and in `SHA256SUMS`, that the `.iso` equals the template, that no dev
+asset and no PEM private key is among them (`scripts/check-no-pem-keys.py`), the minisign signature of `SHA256SUMS`
+(trusted comment `urMQTT vX.Y.Z release <commit>`) and its verification with `minisign.pub`, SBOM attestation, build
+provenance, and the GitHub release with generated notes. (v0.4.1 and earlier: `make dist ENV=dev`, comment `urMQTT
+v0.4.1 dev <commit>`, the former test key.)
 
 If it fails, nothing is published except possibly a half-made release: see Rollback.
 
@@ -96,16 +117,36 @@ Leave the release marked pre-release.
 
 In an empty directory, not inside the repository:
 
+A release after the rotation (vX.Y.Z):
+
+```bash
+mkdir /tmp/urmqtt-vX.Y.Z && cd /tmp/urmqtt-vX.Y.Z
+gh release download vX.Y.Z --repo zeljan-alduk/urMQTT
+curl -fsSLO https://raw.githubusercontent.com/zeljan-alduk/urMQTT/vX.Y.Z/minisign.pub
+minisign -Vm SHA256SUMS -p minisign.pub          # the release key's id; comment "urMQTT vX.Y.Z release <the tag's commit>"
+shasum -a 256 -c SHA256SUMS                      # every file OK
+cmp urmqtt-vX.Y.Z.iso urmqtt-template-vX.Y.Z-universal.iso
+gh attestation verify urmqtt-vX.Y.Z.elf --repo zeljan-alduk/urMQTT
+gh attestation verify urmqtt-vX.Y.Z.iso --repo zeljan-alduk/urMQTT --predicate-type https://cyclonedx.org/bom
+python3 -I -c "import json,sys; d=json.load(open('urmqtt-vX.Y.Z.cdx.json')); print(d['metadata']['component']['version'], len(d['components']))"
+urmqtt-config verify urmqtt-vX.Y.Z.img           # the empty configuration, as a release kernel reads it
+```
+
+A release up to v0.4.1 (here v0.4.1) verifies with the former test key; `minisign.pub` at those tags **is** that key,
+and the repository keeps it as `keys/minisign-test-9229E05252D01F8E.pub`:
+
 ```bash
 mkdir /tmp/urmqtt-v0.4.1 && cd /tmp/urmqtt-v0.4.1
 gh release download v0.4.1 --repo zeljan-alduk/urMQTT
-curl -fsSLO https://raw.githubusercontent.com/zeljan-alduk/urMQTT/v0.4.1/minisign.pub
-minisign -Vm SHA256SUMS -p minisign.pub          # "Signature and comment signature verified", comment names v0.4.1 and the tag's commit
-shasum -a 256 -c SHA256SUMS                      # every file OK
+curl -fsSLO https://raw.githubusercontent.com/zeljan-alduk/urMQTT/main/keys/minisign-test-9229E05252D01F8E.pub
+minisign -Vm SHA256SUMS -p minisign-test-9229E05252D01F8E.pub   # key 9229E05252D01F8E, comment "urMQTT v0.4.1 dev <commit>"
+shasum -a 256 -c SHA256SUMS
 gh attestation verify urmqtt-dev-v0.4.1.elf --repo zeljan-alduk/urMQTT
-gh attestation verify urmqtt-dev-v0.4.1.iso --repo zeljan-alduk/urMQTT --predicate-type https://cyclonedx.org/bom
-python3 -I -c "import json,sys; d=json.load(open('urmqtt-dev-v0.4.1.cdx.json')); print(d['metadata']['component']['version'], len(d['components']))"
 ```
+
+`urmqtt-config check-release --pubkey minisign.pub --pubkey keys/minisign-test-9229E05252D01F8E.pub --sums SHA256SUMS
+<files>` takes both keys and uses the one the signature names; it does not know the tag ranges (the page and the mirror
+enforce them: the test key is accepted for v0.1.0 to v0.4.1 only).
 
 The template works without a toolchain (docs/DEPLOY.md section 1b):
 
@@ -117,19 +158,22 @@ target/release/urmqtt-config pack /tmp/cfg-new/config.toml --iso /tmp/urmqtt-v0.
 target/release/urmqtt-config show /tmp/mine.iso
 ```
 
+The raw image takes the same configuration: `target/release/urmqtt-config pack /tmp/cfg-new/config.toml --image
+urmqtt-vX.Y.Z.img --out /tmp/mine.img`. A production PKI for these files: docs/PKI.md (`scripts/pki.sh`).
+
 Not `deploy/dev/config.toml`: a release template refuses its dev-only keys (the plaintext port,
 `require_data_disk = false`). The file above is format 6; it must also pack into the previous release's template if that
 reads format 6 (v0.4.0) and be refused by v0.3.0's ("needs configuration format 6 ... reads up to 4: use a newer release").
 
-The kernel: the release's `.elf` is a **dev** build, which embeds the development certificates that `make certs`
-generates at random on each machine, so its hash cannot be reproduced elsewhere. Reproducibility is checked with
-`make repro` (prod, two builds of the same tree); a second person with the same `deploy/prod/` compares `SHA256SUMS`
-before deploying.
+The kernel: from the rotation on, `urmqtt-vX.Y.Z.elf` is the **release** kernel, which embeds nothing machine-specific,
+so anyone can rebuild it from the tag and compare (`make repro ENV=release` builds it twice; `make dist ENV=release`
+at the tag gives the line to compare with the published `SHA256SUMS`). Up to v0.4.1 the `.elf` was a **dev** build
+with development certificates generated at random on each machine, so its hash could not be reproduced elsewhere.
 
 ## 4. The release mirror and the builder page on aldo.tech (docs/DEPLOY.md section 10)
 
 Order matters: **the page first, the mirror second.** The page of the previous release only understands templates up to
-the configuration format it was built with (`FORMAT_VERSION` in `crates/cfg/src/blob.rs` is 6 now, 4 in v0.3.0; the page reads
+the configuration format it was built with (`FORMAT_VERSION` in `crates/cfg/src/blob.rs` is 7 on `main` since the MTU change (ADR-264), 6 in v0.4.0 and v0.4.1, 4 in v0.3.0; the page reads
 `release.template.config_format` from the mirror's `releases.json` and greys out a release whose format is newer than
 its WebAssembly module). A release that appears in the mirror before the new page is deployed may be listed but unusable.
 
@@ -161,8 +205,9 @@ applies.
    curl -fsS https://aldo.tech/urmqtt/releases.json | python3 -I -m json.tool | grep -B3 -A25 '"tag": "v0.4.1"'
    ```
 
-   Expected: `v0.4.1` with `"prerelease": true`, `"status": "ok"`, `"verified": true`, and a `template` whose `sha256`
-   equals the template's line in `SHA256SUMS` and whose `config_format` is **6** (the empty configuration in the template
+   Expected: `v0.4.1` with `"prerelease": true`, `"status": "ok"`, `"verified": true`, `"signed_by"` naming the key
+   (the former test key up to v0.4.1, the release key after), and a `template` whose `sha256`
+   equals the template's line in `SHA256SUMS` and whose `config_format` is **6** for v0.4.1 (**7** for the next release, built after the MTU change) (the empty configuration in the template
    is stamped with `FORMAT_VERSION`; checked on the locally built template). The older releases stay listed as before.
 4. In a browser on `https://aldo.tech/en/products/urmqtt-builder/` (and the Croatian page): v0.4.1 is the chosen release
    (the newest stable one, else the newest pre-release; all of ours are pre-releases), the check mark for the signature
@@ -210,6 +255,19 @@ What can go wrong and what to do. Nothing here rewrites history on `main`.
   refused by those kernels, S5; restore a snapshot taken before that update, or use `urmqtt-disk backup-extract`.)
 
 ## 7. Release notes (paste)
+
+**For the first release after the key rotation** replace, in the notes, the "dev builds with throwaway keys" sentence by
+"The assets are the release kernel and images with an empty configuration (`urmqtt-<tag>.elf/.iso/.img`, the `.iso`
+being the template); configure them with the builder page or `urmqtt-config pack --iso/--image`. There is no dev build
+with throwaway keys any more." and the Verify block by:
+
+    gh release download vX.Y.Z --repo zeljan-alduk/urMQTT
+    minisign -Vm SHA256SUMS -p minisign.pub && shasum -a 256 -c SHA256SUMS
+    gh attestation verify urmqtt-vX.Y.Z.elf --repo zeljan-alduk/urMQTT
+
+    `minisign.pub` is in the repository root (key `<KEY ID>`, the release key). Releases up to v0.4.1 were signed with
+    the former test key 9229E05252D01F8E (keys/minisign-test-9229E05252D01F8E.pub), which is no longer trusted for
+    anything newer.
 
 The same text is the file [`docs/release-notes-v0.4.1.md`](release-notes-v0.4.1.md), for `--notes-file` (section 2).
 If one of the two changes, change the other. v0.4.0's notes are [`docs/release-notes-v0.4.0.md`](release-notes-v0.4.0.md).
@@ -338,3 +396,37 @@ layout-v1 disks are converted offline with `urmqtt-disk migrate`.
 `minisign.pub` is in the repository root (key `RWSOH9BSUuApkkBWq/AZJ03Rn63oOYq+yXzC/vgI1PZ/i5yaE+SVzOWS`). Full changelog:
 CHANGELOG.md.
 ```
+
+## 9. The release key and its rotation (ROADMAP NOW-2)
+
+`keys/release-keys.json` is the key ring: the release key (`minisign.pub`, tags from v0.4.2 on) and the former test
+key (`keys/minisign-test-9229E05252D01F8E.pub`, v0.1.0 to v0.4.1 only), each with a note. Every verifier reads it:
+
+- the builder page embeds it at build time (`tools/builder/web/bundle.mjs`), verifies a release with the key its
+  signature names, refuses an unknown key and a key outside its range, and marks the test-key releases "signed with
+  the project's former test key"; a page built while `minisign.pub` is the placeholder trusts only the test key, and
+  `scripts/deploy-builder-site.sh` refuses to deploy it;
+- the release mirror runs with `--keyring /etc/urmqtt-mirror/keys/release-keys.json` (the same rules; `releases.json`
+  lists the keys and each release's `signed_by`);
+- `scripts/check-release-key.sh` checks the ring and refuses a placeholder or test-key `minisign.pub`; the Release
+  workflow, `make sign` and the deploy script run it.
+
+The rotation itself, done once by the owner, with the exact commands: **[docs/release-key-rotation.md](release-key-rotation.md)**
+(generate the key offline, `gh secret set MINISIGN_SECRET_KEY`, commit `minisign.pub`, rebuild and deploy the page,
+then on the web server `scripts/mirror/install.sh`, which installs `/etc/urmqtt-mirror/minisign.pub` and
+`/etc/urmqtt-mirror/keys/`, switches the unit to `--keyring` and restarts the timer; `systemctl start urmqtt-mirror`
+runs it at once). Nothing is re-downloaded by the mirror; old releases keep their test-key signature and stay
+verifiable. A later rotation (a leaked key) is the same with a new entry and a `valid_to` on the old one (and pins of
+the releases the old key signed).
+
+**Pinning the former test key's releases.** For the test key, `keys/release-keys.json` also lists `pinned`: the
+SHA-256 of the published `SHA256SUMS` of each of the six releases it signed (v0.1.0, v0.2.0, v0.2.1, v0.3.0, v0.4.0,
+v0.4.1; fetched from GitHub and checked against the test key on 2026-11-06). The builder page, the mirror
+(`--keyring`) and `urmqtt-config check-release --keyring keys/release-keys.json --tag TAG` accept, for a pinned tag,
+only a `SHA256SUMS` with exactly that hash, whatever the signature says; a tag that is not pinned may not use the test
+key at all; the release key has no pins. So a leaked test key can no longer sign a forged `SHA256SUMS` for an old tag.
+What pinning does not do: it protects `SHA256SUMS`, and through it every file that `SHA256SUMS` lists, but nothing
+beyond what that file lists (an asset added to an old release later is covered by no signature and no pin; the page
+and the mirror use only the template, which is listed). The pins are only as trustworthy as the repository: someone
+who controls the GitHub account could replace them, but only through a commit to `keys/release-keys.json` (visible in
+the history, and the deployed page and mirror change only when they are rebuilt or reinstalled from it).

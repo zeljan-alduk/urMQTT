@@ -523,7 +523,8 @@ fn in_place_configuration_equals_the_copying_one_and_a_probe_describes_the_templ
 #[test]
 fn check_release_verifies_the_real_signature_and_the_listed_files() {
     let dir = fixtures().join("minisign");
-    let pubkey = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../minisign.pub");
+    let pubkey =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../keys/minisign-test-9229E05252D01F8E.pub");
     let check = |sums: &Path, files: &[&Path]| {
         let mut c = bin();
         c.arg("check-release")
@@ -559,6 +560,107 @@ fn check_release_verifies_the_real_signature_and_the_listed_files() {
     let o = check(&altered, &[]);
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("does not match the file"));
+    // Two keys (a rotation): the one the signature names is used, in either
+    // order; a signature by a key that is not given is refused.
+    let other = tmp("other.pub");
+    let text = std::fs::read_to_string(&pubkey).unwrap();
+    let flipped: String = text
+        .lines()
+        .nth(1)
+        .unwrap()
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if i == 4 && c != 'A' {
+                'A'
+            } else if i == 4 {
+                'B'
+            } else {
+                c
+            }
+        })
+        .collect();
+    std::fs::write(
+        &other,
+        format!("untrusted comment: another key\n{flipped}\n"),
+    )
+    .unwrap();
+    for keys in [[&other, &pubkey], [&pubkey, &other]] {
+        let mut c = bin();
+        c.arg("check-release");
+        for k in keys {
+            c.arg("--pubkey").arg(k);
+        }
+        c.arg("--sums").arg(dir.join("SHA256SUMS"));
+        assert!(ok(&run(&mut c)).contains("signature ok: key 9229E05252D01F8E"));
+    }
+    let mut c = bin();
+    c.arg("check-release")
+        .arg("--pubkey")
+        .arg(&other)
+        .arg("--sums")
+        .arg(dir.join("SHA256SUMS"));
+    let o = run(&mut c);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("not one of the given keys"));
+}
+
+/// `check-release --keyring --tag`: the former test key's releases are pinned by
+/// the SHA-256 of their SHA256SUMS (keys/release-keys.json).
+#[test]
+fn check_release_with_the_key_ring_applies_the_pins() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = fixtures().join("minisign");
+    let ring_dir = tmp("ring");
+    std::fs::create_dir_all(ring_dir.join("keys")).unwrap();
+    for f in ["release-keys.json", "minisign-test-9229E05252D01F8E.pub"] {
+        std::fs::copy(root.join("keys").join(f), ring_dir.join("keys").join(f)).unwrap();
+    }
+    // A stand-in release key (the repository's is the placeholder until the rotation).
+    let test =
+        std::fs::read_to_string(root.join("keys/minisign-test-9229E05252D01F8E.pub")).unwrap();
+    let line = test.lines().nth(1).unwrap();
+    let other = format!(
+        "untrusted comment: stand-in\n{}A{}\n",
+        &line[..4],
+        &line[5..]
+    );
+    std::fs::write(ring_dir.join("minisign.pub"), other).unwrap();
+    let check = |tag: &str| {
+        let mut c = bin();
+        c.arg("check-release")
+            .arg("--keyring")
+            .arg(ring_dir.join("keys/release-keys.json"))
+            .arg("--tag")
+            .arg(tag)
+            .arg("--sums")
+            .arg(dir.join("SHA256SUMS"));
+        run(&mut c)
+    };
+    let text = ok(&check("v0.1.0"));
+    assert!(text.contains("signed by 9229E05252D01F8E (test, the project's former test key); SHA256SUMS matches the pinned SHA-256"), "{text}");
+    // The real v0.1.0 file and signature, claimed for another pinned tag: refused.
+    let o = check("v0.4.1");
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("pins 3cca2f59"));
+    let o = check("v0.5.0");
+    assert!(String::from_utf8_lossy(&o.stderr).contains("may sign v0.1.0 to v0.4.1 only"));
+    // The placeholder ring of the repository itself is refused, loudly.
+    if std::fs::read_to_string(root.join("minisign.pub"))
+        .unwrap()
+        .contains("REPLACE-WITH")
+    {
+        let mut c = bin();
+        c.arg("check-release")
+            .arg("--keyring")
+            .arg(root.join("keys/release-keys.json"))
+            .arg("--tag")
+            .arg("v0.1.0")
+            .arg("--sums")
+            .arg(dir.join("SHA256SUMS"));
+        let o = run(&mut c);
+        assert!(String::from_utf8_lossy(&o.stderr).contains("placeholder"));
+    }
 }
 
 /// ADR-229: format 2 added the plaintext fields; a format 1 blob (the golden

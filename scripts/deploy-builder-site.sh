@@ -4,8 +4,9 @@
 #   scripts/deploy-builder-site.sh [--host HOST] [--site-dir DIR] [--chown USER:GROUP] [--with-demo] [--dry-run]
 #
 # What it does, in this order, and nothing else:
-#   1. checks that build/builder/ exists (make builder) and that the texts of all
-#      15 site languages are in it;
+#   1. checks that build/builder/ exists (make builder), that the texts of all
+#      15 site languages are in it, and that the page was built with the release
+#      key (scripts/check-release-key.sh; never with the placeholder minisign.pub);
 #   2. copies tools/builder/site/{products.py,products_i18n.py,apply_products.py}
 #      to DIR on HOST (default: build, /opt/aldotech-site/site);
 #   3. copies build/builder/ (without its standalone index.html) to DIR/urmqtt-builder/
@@ -42,6 +43,12 @@ APP=$ROOT/build/builder
 for lang in hr en de nl fr it es pt hu cs sk pl sl sr ru; do
     [[ -f $APP/i18n/$lang.json ]] || { echo "error: $APP/i18n/$lang.json is missing" >&2; exit 1; }
 done
+
+# The page verifies releases with the keys built into it (keys/release-keys.json): never deploy one
+# that was built while minisign.pub was the placeholder (it would trust only the former test key).
+"$ROOT/scripts/check-release-key.sh" >/dev/null || { echo "error: the release key is not set (scripts/check-release-key.sh); not deploying" >&2; exit 1; }
+python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); sys.exit(0 if m.get("release_key") else 1)' "$APP/manifest.json" \
+    || { echo "error: $APP was built without the release key (minisign.pub was the placeholder): run make builder again" >&2; exit 1; }
 
 run() { printf '+ %s\n' "$*"; if ((!DRY)); then "$@"; fi; }
 SSH=(ssh -o BatchMode=yes "$HOST")

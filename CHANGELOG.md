@@ -8,6 +8,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Releases ship the release environment only** (NOW-2). `make dist ENV=release`, which the Release workflow now
+  runs, publishes `urmqtt-<tag>.elf` (the aarch64 release kernel), `urmqtt-<tag>.iso` (the universal ISO with the empty
+  configuration, byte for byte the template), `urmqtt-<tag>.img` (its raw disk image, configurable with
+  `urmqtt-config pack --image`), `urmqtt-template-<tag>-universal.iso` (as before), `urmqtt-<tag>.cdx.json`,
+  `SHA256SUMS` and its signature. The dev build with throwaway certificates (`urmqtt-dev-<tag>.*`) is no longer a
+  release asset; v0.4.1 and older keep theirs. The trusted comment is `urMQTT <tag> release <commit>`. The workflow
+  refuses to start without the release key and the signing secret, checks the asset set and that no asset holds a PEM
+  private key, and verifies the signature with `minisign.pub`. `make repro ENV=release` builds the release assets twice
+  (no `deploy/` needed). `make dist` with any other ENV is unchanged (an operator's own image).
+- **Release key rotation** (NOW-2). `minisign.pub` is the placeholder for the release key the owner generates
+  (docs/release-key-rotation.md); the former test key `9229E05252D01F8E` is `keys/minisign-test-9229E05252D01F8E.pub`,
+  trusted for v0.1.0 to v0.4.1 only (`keys/release-keys.json`). The builder page verifies each release with the key its
+  signature names, refuses unknown keys and keys outside their range, and marks the old releases "signed with the
+  project's former test key" (the new texts in 14 languages are AI translations). The release mirror takes
+  `--keyring` (`releases.json` gains `keys` and a per-release `signed_by`); `urmqtt-config check-release` takes several
+  `--pubkey`, or `--keyring keys/release-keys.json --tag TAG`. The six releases of the test key are **pinned**: for
+  each, only the `SHA256SUMS` with the SHA-256 in the key ring is accepted, by the page, the mirror and the tool. `scripts/check-release-key.sh` guards the Release workflow, `make sign`, the mirror installer and the page
+  deploy.
+
 - README: a "Start here" line (first hour, known issues, editions, security policy); the title, badges, WARNING
   banner, "Why urMQTT" table, Features Build row and M11 row brought in line with ROADMAP section 6; rows for O1 to
   O4, T1, C1, P1 and D1 (built, not deployed); the order list names 11b to 11e and the first-release scope. The status
@@ -24,6 +43,12 @@ All notable changes to this project are documented here. The format follows
   run is recorded; `workflow_dispatch` with `miri-cache` off runs Miri in full.
 
 ### Added
+
+- **`scripts/pki.sh` and docs/PKI.md: a production PKI** (NOW-3): an offline operational CA (ECDSA P-256,
+  passphrase-protected), the server certificate (DNS and IP names), device and service certificates with the identity
+  as CN and SAN URI, certificates from a device's own CSR, server and CA rotation, the revocation list and the control
+  key pair; `pki.sh check DIR` runs `urmqtt-config pack`'s checks on a deploy directory. Tested by
+  `scripts/test-pki.sh` (`make pki-test`).
 
 - **The weak entropy path is an explicit option, loud wherever a user decides** (NOW-4, D-3, ADR-263). The default stays
   `entropy.fallback = "jitter"` (a host with no virtio-rng and no `RNDR`/`RDRAND`, such as the netcup ARM VPS, still boots).

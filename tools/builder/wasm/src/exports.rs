@@ -407,6 +407,16 @@ pub extern "C" fn ub_minisign_key_id(pubkey_h: u32) -> u32 {
     })
 }
 
+// SAFETY: `no_mangle` only fixes the exported symbol name; the `ub_` prefix keeps it unique in the
+// module, and the page (the only caller) passes buffer handles, never pointers.
+#[unsafe(no_mangle)]
+pub extern "C" fn ub_minisig_key_id(sig_h: u32) -> u32 {
+    with(|s| {
+        let r = s.text(sig_h).and_then(core::minisig_key_id);
+        s.done_text(r)
+    })
+}
+
 /// SHA-256 of a buffer (32 bytes).
 #[unsafe(no_mangle)]
 pub extern "C" fn ub_sha256(h: u32) -> u32 {

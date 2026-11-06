@@ -60,6 +60,8 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "mirror-releases.py"
 REPO_PUBKEY = HERE.parent / "minisign.pub"
+REPO_TEST_KEY = HERE.parent / "keys" / "minisign-test-9229E05252D01F8E.pub"
+REPO_KEYRING = HERE.parent / "keys" / "release-keys.json"
 OWNER, REPO = "zeljan-alduk", "urMQTT"
 MINISIGN = shutil.which("minisign")
 
@@ -426,7 +428,7 @@ class MirrorCase(unittest.TestCase):
         cls._keydir = tempfile.TemporaryDirectory(prefix="mirror-keys-")
         cls._home = tempfile.TemporaryDirectory(prefix="mirror-home-")
         keydir, home = Path(cls._keydir.name), Path(cls._home.name)
-        cls.keys = {name: KeyPair(keydir, name, home) for name in ("good", "other")}
+        cls.keys = {name: KeyPair(keydir, name, home) for name in ("good", "other", "stranger")}
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -488,13 +490,16 @@ class MirrorCase(unittest.TestCase):
         rel.replace_asset("SHA256SUMS.minisig", self.keys[key].sign(signed, f"urMQTT {rel.tag} edited"))
 
     # -- running -----------------------------------------------------------
-    def command(self, *args: str, root: Path | None = None, pubkey: Path | None = None, rate: str = "0") -> list[str]:
+    def command(
+        self, *args: str, root: Path | None = None, pubkey: Path | None = None, rate: str = "0", keyring: Path | None = None
+    ) -> list[str]:
         assert MINISIGN is not None
+        keys = ["--keyring", str(keyring)] if keyring is not None else ["--pubkey", str(pubkey or self.keys["good"].pub)]
         return [
             sys.executable, "-I", str(SCRIPT),
             "--root", str(root or self.root),
             "--api-base", self.fake.base,
-            "--pubkey", str(pubkey or self.keys["good"].pub),
+            *keys,
             "--minisign", MINISIGN,
             "--limit-rate", rate,
             *args,
@@ -505,12 +510,14 @@ class MirrorCase(unittest.TestCase):
         env.update(extra)
         return env
 
-    def run_job(self, *args: str, rate: str = "0", pubkey: Path | None = None, umask: int | None = None, **env: str) -> Job:
+    def run_job(
+        self, *args: str, rate: str = "0", pubkey: Path | None = None, umask: int | None = None, keyring: Path | None = None, **env: str
+    ) -> Job:
         def preexec() -> None:
             os.umask(umask if umask is not None else 0o022)
 
         proc = subprocess.run(
-            self.command(*args, rate=rate, pubkey=pubkey),
+            self.command(*args, rate=rate, pubkey=pubkey, keyring=keyring),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -574,7 +581,11 @@ class Scenarios(MirrorCase):
         self.assertTrue(raw.startswith('{\n  "schema": 1,\n  "generated": "'), raw[:60])
         self.assertTrue(raw.endswith("}\n"))
         doc = json.loads(raw)
-        self.assertEqual(list(doc), ["schema", "generated", "repo", "source", "key_id", "releases", "templates"])
+        self.assertEqual(list(doc), ["schema", "generated", "repo", "source", "key_id", "keys", "releases", "templates"])
+        self.assertEqual(
+            doc["keys"],
+            [{"key_id": self.keys["good"].key_id, "name": "release", "valid_from": None, "valid_to": None, "former_test_key": False, "pinned": []}],
+        )
         self.assertEqual(doc["repo"], f"{OWNER}/{REPO}")
         self.assertEqual(doc["source"], f"https://github.com/{OWNER}/{REPO}/releases")
         self.assertEqual(doc["key_id"], self.keys["good"].key_id)
@@ -583,8 +594,9 @@ class Scenarios(MirrorCase):
         self.assertEqual(
             list(e),
             ["tag", "name", "published", "prerelease", "url", "attestations", "status", "edited",
-             "template", "sums", "verified", "reason", "assets", "mirrored_at", "checked_at"],
+             "template", "sums", "verified", "reason", "signed_by", "assets", "mirrored_at", "checked_at"],
         )  # fmt: skip
+        self.assertEqual(e["signed_by"]["key_id"], self.keys["good"].key_id)
         self.assertEqual(e["name"], "urMQTT 0.2.0")
         self.assertEqual(e["published"], "2026-11-05T10:00:00Z")
         self.assertEqual(e["url"], f"https://github.com/{OWNER}/{REPO}/releases/tag/v0.2.0")
@@ -675,7 +687,7 @@ class Scenarios(MirrorCase):
         self.assertNothingPublished("v0.4.0")
         e = self.entry("v0.4.0")
         self.assertEqual((e["status"], e["verified"], e["reason"], e["template"]), ("unverified", False, "verification-failed", None))
-        self.assertIn("key id", job.err)
+        self.assertIn(f"made with key {self.keys['other'].key_id}, which is not in the key ring", job.err)
         # The operator installs the right key: the failed release is checked again without any upstream change.
         self.fake.reset_log()
         healed = self.run_job(pubkey=self.keys["other"].pub)
@@ -1294,6 +1306,168 @@ class Behaviour(MirrorCase):
 
 
 # ---------------------------------------------------------------------------
+# Key rotation: a key ring with the former test key and the release key
+
+
+class KeyRotation(MirrorCase):
+    """keys/release-keys.json on the mirror (docs/release-key-rotation.md): "other" plays
+    the former test key (v0.1.0 to v0.4.1 only), "good" the release key (v0.4.2 on),
+    "stranger" a key nobody trusts."""
+
+    def keyring(self, *, release: bool = True, pins: dict[str, str] | None = None) -> Path:
+        directory = self.world / "etc"
+        directory.mkdir(exist_ok=True)
+        keys = []
+        if release:
+            shutil.copy(self.keys["good"].pub, directory / "minisign.pub")
+            keys.append({"name": "release", "file": "minisign.pub", "valid_from": "v0.4.2", "valid_to": None, "former_test_key": False})
+        shutil.copy(self.keys["other"].pub, directory / "minisign-test.pub")
+        keys.append(
+            {"name": "test", "file": "minisign-test.pub", "key_id": self.keys["other"].key_id,
+             "valid_from": "v0.1.0", "valid_to": "v0.4.1", "former_test_key": True, "note": "former test key"}
+        )  # fmt: skip
+        if pins is not None:
+            keys[-1]["pinned"] = pins
+        path = directory / "release-keys.json"
+        path.write_text(json.dumps({"schema": 1, "keys": keys}, indent=2))
+        return path
+
+    def add_named_release(self, tag: str, key: str, *, new_names: bool, published: str) -> bytes:
+        """A release as the workflow makes it: up to v0.4.1 the dev assets (urmqtt-dev-<tag>.*),
+        from the rotation on the release assets (urmqtt-<tag>.elf/.iso/.img), the template,
+        the SBOM, SHA256SUMS over all of them and its signature."""
+        seed = zlib.crc32(tag.encode())
+        template = make_iso(seed=seed)
+        stem = f"urmqtt-{tag}" if new_names else f"urmqtt-dev-{tag}"
+        files = {
+            f"{stem}.elf": random.Random(seed).randbytes(2048),
+            f"{stem}.img": random.Random(seed + 1).randbytes(4096),
+            f"{stem}.iso": template if new_names else random.Random(seed + 2).randbytes(4096),
+            f"{stem}.cdx.json": b"{}",
+            f"urmqtt-template-{tag}-universal.iso": template,
+        }
+        signed = sums_text(files)
+        rel = self.fake.add_release(tag, name=tag, published=published, prerelease=True, draft=False)
+        for name, data in files.items():
+            rel.add_asset(name, data)
+        rel.add_asset("SHA256SUMS", signed)
+        rel.add_asset("SHA256SUMS.minisig", self.keys[key].sign(signed, f"urMQTT {tag} {'release' if new_names else 'dev'} test"))
+        return template
+
+    def test_old_releases_verify_with_the_test_key_and_new_ones_with_the_release_key(self) -> None:
+        old = self.add_named_release("v0.4.1", "other", new_names=False, published="2026-11-05T10:00:00Z")
+        new = self.add_named_release("v0.5.0", "good", new_names=True, published="2026-11-10T10:00:00Z")
+        job = self.run_job(keyring=self.keyring())
+        self.assertEqual(job.code, 0, job.err)
+        self.assertPublished("v0.4.1", old)
+        self.assertPublished("v0.5.0", new)
+        doc = self.document()
+        self.assertEqual(doc["key_id"], self.keys["good"].key_id, "the current key is the release key")
+        self.assertEqual([(k["name"], k["valid_from"], k["valid_to"], k["former_test_key"]) for k in doc["keys"]],
+                         [("release", "v0.4.2", None, False), ("test", "v0.1.0", "v0.4.1", True)])  # fmt: skip
+        self.assertEqual(self.entry("v0.4.1")["signed_by"], {"key_id": self.keys["other"].key_id, "name": "test", "valid_from": "v0.1.0", "valid_to": "v0.4.1", "former_test_key": True, "pinned": []})
+        self.assertEqual(self.entry("v0.5.0")["signed_by"]["former_test_key"], False)
+        # Both naming schemes are listed in full; only the template and the sums are mirrored.
+        for tag, stem in (("v0.4.1", "urmqtt-dev-v0.4.1"), ("v0.5.0", "urmqtt-v0.5.0")):
+            assets = {a["name"]: a["mirrored"] for a in self.entry(tag)["assets"]}
+            self.assertEqual(set(assets), {f"{stem}.elf", f"{stem}.img", f"{stem}.iso", f"{stem}.cdx.json",
+                                           f"urmqtt-template-{tag}-universal.iso", "SHA256SUMS", "SHA256SUMS.minisig"})  # fmt: skip
+            self.assertEqual({n for n, mirrored in assets.items() if mirrored}, {f"urmqtt-template-{tag}-universal.iso", "SHA256SUMS", "SHA256SUMS.minisig"})
+        self.assertIn(f"signature ok (key {self.keys['other'].key_id}", job.err)
+
+    def published_sums(self, tag: str) -> bytes:
+        return next(a.data for r in self.fake.releases if r.tag == tag for a in r.assets if a.name == "SHA256SUMS")
+
+    def test_a_pinned_release_with_the_published_sums_is_mirrored(self) -> None:
+        old = self.add_named_release("v0.4.1", "other", new_names=False, published="2026-11-05T10:00:00Z")
+        job = self.run_job(keyring=self.keyring(pins={"v0.4.1": sha(self.published_sums("v0.4.1"))}))
+        self.assertEqual(job.code, 0, job.err)
+        self.assertPublished("v0.4.1", old)
+        self.assertEqual(self.entry("v0.4.1")["signed_by"]["pinned"], ["v0.4.1"])
+
+    def test_a_pinned_tag_with_other_bytes_is_refused_although_the_signature_is_valid(self) -> None:
+        """The test key (leaked) signs a different SHA256SUMS for an old tag: the signature is
+        valid and the tag in range, but the bytes are not the pinned ones."""
+        self.add_named_release("v0.4.1", "other", new_names=False, published="2026-11-05T10:00:00Z")
+        job = self.run_job(keyring=self.keyring(pins={"v0.4.1": "0" * 64}))
+        self.assertEqual(job.code, 2, job.err)
+        self.assertCountEqual(self.fake.downloads(), ["SHA256SUMS", "SHA256SUMS.minisig"])
+        self.assertNothingPublished("v0.4.1")
+        self.assertIn("but the key ring pins 0000000000000000000000000000000000000000000000000000000000000000 for it", job.err)
+        self.assertEqual((self.entry("v0.4.1")["status"], self.entry("v0.4.1")["reason"]), ("unverified", "verification-failed"))
+        # A tag in range but not pinned is refused for a pinned key.
+        self.add_named_release("v0.3.0", "other", new_names=False, published="2026-10-05T10:00:00Z")
+        job = self.run_job(keyring=self.keyring(pins={"v0.4.1": sha(self.published_sums("v0.4.1"))}))
+        self.assertEqual(job.code, 2, job.err)
+        self.assertIn("signs only its pinned releases, and v0.3.0 is not one", job.err)
+        self.assertNothingPublished("v0.3.0")
+
+    def test_the_test_key_is_refused_for_a_newer_tag_and_the_iso_is_never_fetched(self) -> None:
+        self.add_named_release("v0.6.0", "other", new_names=True, published="2026-11-12T10:00:00Z")
+        job = self.run_job(keyring=self.keyring())
+        self.assertEqual(job.code, 2, job.err)
+        self.assertCountEqual(self.fake.downloads(), ["SHA256SUMS", "SHA256SUMS.minisig"])
+        self.assertNothingPublished("v0.6.0")
+        e = self.entry("v0.6.0")
+        self.assertEqual((e["status"], e["verified"], e["reason"], e["signed_by"]), ("unverified", False, "verification-failed", None))
+        self.assertIn(f"made with key {self.keys['other'].key_id} (the project's former test key), which may sign v0.1.0 to v0.4.1 only, not v0.6.0", job.err)
+
+    def test_a_signature_by_an_unknown_key_id_is_refused(self) -> None:
+        self.add_named_release("v0.5.0", "stranger", new_names=True, published="2026-11-10T10:00:00Z")
+        job = self.run_job(keyring=self.keyring())
+        self.assertEqual(job.code, 2, job.err)
+        self.assertCountEqual(self.fake.downloads(), ["SHA256SUMS", "SHA256SUMS.minisig"])
+        self.assertNothingPublished("v0.5.0")
+        self.assertIn(f"made with key {self.keys['stranger'].key_id}, which is not in the key ring", job.err)
+        # An unknown key is not trusted for "any tag" by accident when the ring has only the test key.
+        ring = self.keyring(release=False)
+        self.fake.reset_log()
+        again = self.run_job(keyring=ring)
+        self.assertEqual(again.code, 2, again.err)
+        self.assertNothingPublished("v0.5.0")
+
+    def test_a_placeholder_release_key_stops_the_job_before_anything_is_written(self) -> None:
+        ring = self.keyring()
+        (ring.parent / "minisign.pub").write_text("untrusted comment: minisign public key REPLACE-WITH-THE-NEW-PUBLIC-KEY\nREPLACE-WITH-THE-NEW-PUBLIC-KEY\n")
+        self.add_named_release("v0.4.1", "other", new_names=False, published="2026-11-05T10:00:00Z")
+        before = snapshot(self.root)
+        job = self.run_job(keyring=ring)
+        self.assertEqual(job.code, 1, job.err)
+        self.assertIn("placeholder", job.err)
+        self.assertEqual(snapshot(self.root), before)
+        self.assertEqual(self.fake.log, [], "GitHub was not even asked")
+
+    def test_switching_from_one_pubkey_to_the_key_ring_downloads_nothing_again(self) -> None:
+        """The server today: --pubkey /etc/urmqtt-mirror/minisign.pub (the test key). After the
+        rotation it runs with --keyring; what it mirrored stays as it is, and the signer of the
+        editions mirrored before (no key_id recorded) is read from the signature on disk."""
+        old = self.add_named_release("v0.4.1", "other", new_names=False, published="2026-11-05T10:00:00Z")
+        first = self.run_job(pubkey=self.keys["other"].pub)
+        self.assertEqual(first.code, 0, first.err)
+        meta = self.root / "v0.4.1" / "meta.json"
+        state = json.loads(meta.read_text())
+        del state["published"]["key_id"], state["key_id"]  # as written by the version before key rings
+        meta.write_text(json.dumps(state))
+        self.fake.reset_log()
+        self.add_named_release("v0.5.0", "good", new_names=True, published="2026-11-10T10:00:00Z")
+        job = self.run_job(keyring=self.keyring())
+        self.assertEqual(job.code, 0, job.err)
+        self.assertNotIn("urmqtt-template-v0.4.1-universal.iso", self.fake.downloads())
+        self.assertPublished("v0.4.1", old)
+        self.assertEqual(self.entry("v0.4.1")["signed_by"]["name"], "test")
+        self.assertEqual(self.entry("v0.5.0")["signed_by"]["name"], "release")
+
+    def test_dry_run_over_a_listing_with_both_naming_schemes(self) -> None:
+        self.add_named_release("v0.4.1", "other", new_names=False, published="2026-11-05T10:00:00Z")
+        self.add_named_release("v0.5.0", "good", new_names=True, published="2026-11-10T10:00:00Z")
+        job = self.run_job("--dry-run", keyring=self.keyring())
+        self.assertEqual(job.code, 0, job.err)
+        self.assertEqual(sorted(w["tag"] for w in job.summary["would_process"]), ["v0.4.1", "v0.5.0"])
+        self.assertEqual(self.fake.downloads(), [])
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), [])
+
+
+# ---------------------------------------------------------------------------
 # Unit tests of the pieces (no minisign, no network)
 
 
@@ -1381,11 +1555,110 @@ class Units(unittest.TestCase):
         self.assertEqual(self.m.RateLimiter(2 << 20).chunk, 64 * 1024)
 
     def test_the_repository_key_id_is_read_from_the_key_file(self) -> None:
-        if not REPO_PUBKEY.is_file():
-            self.skipTest("minisign.pub is not next to the scripts directory")
-        key = self.m.load_pubkey(REPO_PUBKEY)
+        if not REPO_TEST_KEY.is_file():
+            self.skipTest("keys/ is not next to the scripts directory")
+        key = self.m.load_pubkey(REPO_TEST_KEY)
         self.assertEqual(key.key_id, "9229E05252D01F8E")  # as SECURITY.md and the file's own comment say
-        self.assertIn("9229E05252D01F8E", REPO_PUBKEY.read_text().splitlines()[0])
+        self.assertIn("9229E05252D01F8E", REPO_TEST_KEY.read_text().splitlines()[0])
+
+    def test_the_repository_key_ring_is_the_test_key_and_the_release_key(self) -> None:
+        """keys/release-keys.json: the former test key for v0.1.0 to v0.4.1, the release key
+        from v0.4.2 on. Until the owner commits the real minisign.pub it is the placeholder,
+        and the ring refuses to load (loudly, naming the placeholder)."""
+        if not REPO_KEYRING.is_file():
+            self.skipTest("keys/ is not next to the scripts directory")
+        doc = json.loads(REPO_KEYRING.read_text(encoding="utf-8"))
+        by_name = {k["name"]: k for k in doc["keys"]}
+        self.assertEqual((by_name["test"]["valid_from"], by_name["test"]["valid_to"], by_name["test"]["former_test_key"]), ("v0.1.0", "v0.4.1", True))
+        self.assertEqual((by_name["release"]["valid_from"], by_name["release"]["valid_to"], by_name["release"]["file"]), ("v0.4.2", None, "../minisign.pub"))
+        self.assertNotIn("pinned", by_name["release"])
+        self.assertEqual(sorted(by_name["test"]["pinned"]), ["v0.1.0", "v0.2.0", "v0.2.1", "v0.3.0", "v0.4.0", "v0.4.1"])
+        # The real v0.1.0 SHA256SUMS (the fixture of tools/config, signed with the test key) is the pinned file.
+        fixture = HERE.parent / "tools/config/tests/fixtures/minisign/SHA256SUMS"
+        self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(), by_name["test"]["pinned"]["v0.1.0"])
+        if "REPLACE-WITH-THE-NEW-PUBLIC-KEY" in REPO_PUBKEY.read_text(encoding="utf-8"):
+            with self.assertRaisesRegex(self.m.Fatal, "placeholder"):
+                self.m.load_keyring(REPO_KEYRING)
+            return
+        ring = self.m.load_keyring(REPO_KEYRING)
+        self.assertEqual([k.name for k in ring.keys], ["release", "test"])
+        self.assertNotEqual(ring.primary.key_id, "9229E05252D01F8E", "the release key must not be the test key")
+        test = ring.by_id("9229E05252D01F8E")
+        self.assertTrue(test.former_test_key)
+        self.assertEqual([t for t, _ in test.pinned], ["v0.1.0", "v0.2.0", "v0.2.1", "v0.3.0", "v0.4.0", "v0.4.1"])
+        self.assertEqual(ring.primary.pinned, (), "the release key has no pins")
+
+    def test_key_ranges(self) -> None:
+        m = self.m
+        test = m.PubKey(Path("t.pub"), "A" * 16, "0" * 64, name="test", valid_from="v0.1.0", valid_to="v0.4.1", former_test_key=True)
+        release = m.PubKey(Path("r.pub"), "B" * 16, "1" * 64, valid_from="v0.4.2")
+        anything = m.PubKey(Path("a.pub"), "C" * 16, "2" * 64)
+        for tag, t, r in [
+            ("v0.1.0", True, False), ("v0.4.1", True, False), ("v0.4.1-rc.1", True, False), ("0.3.0", True, False),
+            ("v0.4.2", False, True), ("v0.5.0", False, True), ("v1.0.0", False, True), ("v0.10.0", False, True),
+            ("v0.0.9", False, False), ("nightly", False, False), ("v0.4", False, False), ("v0.4.1x", False, False),
+        ]:  # fmt: skip
+            self.assertEqual((test.covers(tag), release.covers(tag)), (t, r), tag)
+            self.assertTrue(anything.covers(tag), tag)
+        ring = m.Keyring((test, release))
+        self.assertIs(ring.primary, release)
+        self.assertIsNone(ring.by_id("D" * 16))
+        self.assertNotEqual(ring.fingerprint, m.Keyring((test, dataclasses.replace(release, valid_from="v0.5.0"))).fingerprint)
+        self.assertEqual(m.Keyring((anything,)).fingerprint, anything.fingerprint, "a single --pubkey keeps its old fingerprint")
+
+    def test_a_bad_key_ring_is_refused(self) -> None:
+        m = self.m
+        directory = Path(tempfile.mkdtemp(prefix="mirror-ring-"))
+        self.addCleanup(shutil.rmtree, directory, True)
+        (directory / "test.pub").write_bytes(REPO_TEST_KEY.read_bytes())
+        (directory / "placeholder.pub").write_text("untrusted comment: minisign public key REPLACE-WITH-THE-NEW-PUBLIC-KEY\nREPLACE-WITH-THE-NEW-PUBLIC-KEY\n")
+        good = {"name": "test", "file": "test.pub", "key_id": "9229E05252D01F8E", "valid_from": "v0.1.0", "valid_to": "v0.4.1", "former_test_key": True}
+
+        rings = itertools.count()
+
+        def ring(*keys: Any, schema: int = 1) -> Path:
+            path = directory / f"ring-{next(rings)}.json"
+            path.write_text(json.dumps({"schema": schema, "keys": list(keys)}))
+            return path
+
+        loaded = m.load_keyring(ring(good))
+        self.assertEqual((loaded.keys[0].key_id, loaded.keys[0].valid_to, loaded.keys[0].former_test_key), ("9229E05252D01F8E", "v0.4.1", True))
+        for bad, why in [
+            (ring(good, schema=2), "schema"),
+            (ring(), "at least one key"),
+            (ring({**good, "key_id": "0000000000000000"}), "has key id 9229E05252D01F8E"),
+            (ring(good, {**good, "name": "again"}), "listed twice"),
+            (ring({**good, "valid_from": "v0.5.0"}), "after valid_to"),
+            (ring({**good, "valid_to": "latest"}), "version tag"),
+            (ring({**good, "former_test_key": "yes"}), "true or false"),
+            (ring({**good, "extra": 1}), "unknown field"),
+            (ring({**good, "pinned": {"v0.1.0": "XYZ"}}), "pinned must map"),
+            (ring({**good, "pinned": {"v0.5.0": "a" * 64}}), "outside the key's range"),
+            (ring({**good, "file": "missing.pub"}), "cannot read"),
+            (ring({**good, "name": "release", "file": "placeholder.pub", "key_id": None}), "placeholder"),
+        ]:
+            with self.assertRaisesRegex(m.Fatal, why, msg=why):
+                m.load_keyring(bad)
+        (directory / "ring.json").write_text("{not json")
+        with self.assertRaisesRegex(m.Fatal, "cannot read the key ring"):
+            m.load_keyring(directory / "ring.json")
+
+    def test_old_and_new_asset_names_are_classified_alike(self) -> None:
+        """Releases up to v0.4.1 carry urmqtt-dev-<tag>.* next to the template; from the
+        rotation on, urmqtt-<tag>.elf/.iso/.img. Only the template is ever fetched: the
+        new urmqtt-<tag>.iso (the same bytes) must not be mistaken for it."""
+        m = self.m
+        old = ["SHA256SUMS", "SHA256SUMS.minisig", "urmqtt-dev-v0.4.1.cdx.json", "urmqtt-dev-v0.4.1.elf",
+               "urmqtt-dev-v0.4.1.img", "urmqtt-dev-v0.4.1.iso", "urmqtt-template-v0.4.1-universal.iso"]  # fmt: skip
+        new = ["SHA256SUMS", "SHA256SUMS.minisig", "urmqtt-v0.5.0.cdx.json", "urmqtt-v0.5.0.elf",
+               "urmqtt-v0.5.0.img", "urmqtt-v0.5.0.iso", "urmqtt-template-v0.5.0-universal.iso"]  # fmt: skip
+        for tag, names in (("v0.4.1", old), ("v0.5.0", new)):
+            assets = tuple(m.Asset(n, i + 1, 10, None, None, None) for i, n in enumerate(names))
+            for n in names:
+                self.assertIsNotNone(m.LISTED_NAME_RE.fullmatch(n), n)
+            plan = m.classify(m.Release(tag, tag, None, True, "https://example.org", assets))
+            self.assertEqual(plan.template.name, f"urmqtt-template-{tag}-universal.iso")
+            self.assertEqual((plan.sums.name, plan.sig.name), ("SHA256SUMS", "SHA256SUMS.minisig"))
 
     def test_a_bad_key_file_is_refused(self) -> None:
         m = self.m
@@ -1430,7 +1703,7 @@ class Units(unittest.TestCase):
         for name in ("SHA256SUMS.part", "SHA256SUMS.minisig.part", f"{iso}.part"):
             (work / name).write_bytes(b"x")
         key = m.PubKey(Path("k.pub"), "AABBCCDD00112233", "0" * 64)
-        ctx = m.Context(root, root / ".tmp", key, "minisign", None, None, 0)
+        ctx = m.Context(root, root / ".tmp", m.Keyring((key,)), "minisign", None, None, 0)
         template = m.Asset(iso, 1, 1, None, None, None)
         rel = m.Release("v1", "v1", None, False, "https://example.org/v1", (template,))
         moves: list[tuple[str, str]] = []
@@ -1454,7 +1727,7 @@ class Units(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         (root / ".tmp").mkdir()
         key = m.PubKey(Path("k.pub"), "AABBCCDD00112233", "0" * 64)
-        ctx = m.Context(root, root / ".tmp", key, "minisign", None, None, 0)
+        ctx = m.Context(root, root / ".tmp", m.Keyring((key,)), "minisign", None, None, 0)
         releases = [
             m.Release("v2", "v2", "2026-11-02T00:00:00Z", False, "https://example.org/v2", ()),
             m.Release("v1", "v1", "2026-11-01T00:00:00Z", False, "https://example.org/v1", ()),

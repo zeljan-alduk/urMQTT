@@ -19,3 +19,5 @@ IST = "IST"
 tha = "tha"
 # CVE Numbering Authority
 CNA = "CNA"
+# OpenSSL's -passin option (scripts/pki.sh)
+passin = "passin"

@@ -17,6 +17,7 @@ use urmqtt_config_schema::pack::{PackOptions, pack, pack_with};
 
 pub mod certs;
 pub mod image;
+pub mod keyring;
 pub mod keys;
 pub mod minisign;
 pub mod release;

@@ -366,6 +366,11 @@ pub fn verify_release(pubkey: &str, sums: &[u8], sig: &str) -> Result<String, St
         .build())
 }
 
+/// The key id a `.minisig` file names (which key to verify it with); checks nothing.
+pub fn minisig_key_id(sig: &str) -> Result<String, String> {
+    minisign::signature_key_id(sig)
+}
+
 /// The key id of a minisign public key file, as minisign prints it.
 pub fn minisign_key_id(pubkey: &str) -> Result<String, String> {
     Ok(minisign::PublicKey::parse(pubkey)?.key_id())

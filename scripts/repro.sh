@@ -9,6 +9,14 @@
 # --universal builds `make universal` instead (both kernels, the universal
 # ISO and raw image: X10) and compares those.
 #
+# ENV=release (`make repro ENV=release`, run on release day) builds what a
+# release ships, `make release-images`: both release kernels, the template ISO
+# and its raw disk image, all with the empty configuration. It needs no
+# deploy/ directory (a release holds no certificate or key) and compares the
+# four files; their hashes are the lines of the release's SHA256SUMS for the
+# ELF (urmqtt-<tag>.elf), the template, urmqtt-<tag>.iso and urmqtt-<tag>.img
+# when xorriso and mtools are the versions of the runner (docs/RELEASE.md).
+#
 # The untracked inputs of deploy/<ENV>/ (certificates, keys, revocation
 # list) are copied into both worktrees: they are inputs, not build products.
 # Uncommitted changes are not part of the check (it builds HEAD).
@@ -21,7 +29,9 @@ for a in "$@"; do
     if [[ $a == --universal ]]; then UNIVERSAL=1; else ARGS+=("$a"); fi
 done
 ENV=${ARGS[0]:-prod}
-[[ -d "$ROOT/deploy/$ENV" ]] || { echo "error: deploy/$ENV not found" >&2; exit 2; }
+RELEASE=0
+[[ $ENV == release ]] && RELEASE=1
+[[ $RELEASE -eq 1 || -d "$ROOT/deploy/$ENV" ]] || { echo "error: deploy/$ENV not found" >&2; exit 2; }
 WORK=$(mktemp -d)
 # shellcheck disable=SC2329 # invoked by the EXIT trap
 cleanup() {
@@ -49,6 +59,7 @@ for d in a b; do
     # of its own to differ on, but keep it explicit).
     targets="iso raw"
     [[ $UNIVERSAL -eq 1 ]] && targets="universal"
+    [[ $RELEASE -eq 1 ]] && targets="release-images"
     # shellcheck disable=SC2086 # $targets is a list of make goals
     (cd "$dir" && make --no-print-directory $targets ENV="$ENV" VERSION="$(git -C "$ROOT" describe --tags --always)" \
         >"$WORK/$d.log" 2>&1) || { tail -30 "$WORK/$d.log"; echo "repro: build $d failed" >&2; exit 1; }
@@ -74,7 +85,13 @@ compare() {
 compare "kernel ELF" "$DIR_a/target/aarch64-unknown-none/release/urmqtt" "$DIR_b/target/aarch64-unknown-none/release/urmqtt"
 # The versioned files (not the urmqtt-<env>.iso symlink).
 v=$(git -C "$ROOT" describe --tags --always)
-if [[ $UNIVERSAL -eq 1 ]]; then
+if [[ $RELEASE -eq 1 ]]; then
+    compare "x86_64 kernel ELF" "$DIR_a/target/x86_64-urmqtt-none/release/urmqtt" "$DIR_b/target/x86_64-urmqtt-none/release/urmqtt"
+    compare "template ISO (= urmqtt-$v.iso)" "$DIR_a/build/urmqtt-template-$v-universal.iso" "$DIR_b/build/urmqtt-template-$v-universal.iso"
+    compare "raw disk image (= urmqtt-$v.img)" "$DIR_a/build/urmqtt-template-$v-universal.img" "$DIR_b/build/urmqtt-template-$v-universal.img"
+    echo "  - secret scan skipped (a release image holds no key)"
+    exit $status
+elif [[ $UNIVERSAL -eq 1 ]]; then
     compare "x86_64 kernel ELF" "$DIR_a/target/x86_64-urmqtt-none/release/urmqtt" "$DIR_b/target/x86_64-urmqtt-none/release/urmqtt"
     compare "universal ISO" "$DIR_a/build/urmqtt-$ENV-$v-universal.iso" "$DIR_b/build/urmqtt-$ENV-$v-universal.iso"
     compare "universal raw disk image" "$DIR_a/build/urmqtt-$ENV-$v-universal.img" "$DIR_b/build/urmqtt-$ENV-$v-universal.img"

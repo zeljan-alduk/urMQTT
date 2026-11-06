@@ -256,7 +256,8 @@ function renderReleases() {
       h('span', {},
         h('span', { class: 'ub-tag', id: labelId, text: rel.name && rel.name !== rel.tag ? `${rel.tag} — ${rel.name}` : rel.tag }),
         rel.prerelease ? h('span', { class: 'ub-badge pre', text: t('release.prerelease') }) : h('span', { class: 'ub-badge ok', text: t('release.stable') }),
-        rel.edited ? h('span', { class: 'ub-badge changed', text: t('release.edited') }) : null),
+        rel.edited ? h('span', { class: 'ub-badge changed', text: t('release.edited') }) : null,
+        signedWithTestKey(rel.tag) ? h('span', { class: 'ub-badge', text: t('release.former-test-key') }) : null),
       h('span', { class: 'ub-meta', style: 'grid-column:2' },
         h('span', { text: t('release.published', { date: formatDate(rel.published, app.lang) }) }),
         rel.template ? h('span', { text: formatBytes(rel.template.size) }) : null,
@@ -270,9 +271,25 @@ function renderReleases() {
   box.append(h('div', { class: 'ub-verify work', id: 'ub-verify', 'aria-live': 'polite' }));
   app.ui.verifyBox = $('#ub-verify', box);
   paintVerify();
+  const testKey = RELEASE_KEYS.find(k => k.formerTest);
   box.append(h('p', { class: 'ub-help', style: 'margin-top:10px' },
     t('release.key-note', { key: app.keyId }), ' ',
+    testKey ? t('release.key-note-test', { key: testKey.keyId, from: testKey.validFrom, to: testKey.validTo }) : null, testKey ? ' ' : null,
     h('button', { class: 'ub-link-btn', type: 'button', text: t('release.local'), on: { click: () => openLocalDialog() } })));
+}
+
+/** "The signature ... is valid (key X)", saying so when the key is the former test key. */
+function verifiedText(v) {
+  return v.key && v.key.formerTest
+    ? t('release.verified-test-key', { key: v.keyId, from: v.key.validFrom, to: v.key.validTo })
+    : t('release.verified', { key: v.keyId });
+}
+
+/** The tags a key may sign, as text. */
+function keyRangeText(k) {
+  if (k.validFrom && k.validTo) return t('integrity.range', { from: k.validFrom, to: k.validTo });
+  if (k.validFrom) return t('integrity.range-from', { from: k.validFrom });
+  return t('integrity.range-any');
 }
 
 function paintVerify() {
@@ -288,7 +305,7 @@ function paintVerify() {
     box.append(icon('info'), h('span', { text: t('release.verifying') }));
   } else if (v && v.ok) {
     box.className = 'ub-verify ok';
-    box.append(icon('check'), h('span', {}, t('release.verified', { key: v.keyId }), ' ', h('button', { class: 'ub-link-btn', type: 'button', text: t('release.report'), on: { click: () => openIntegrityDialog() } })));
+    box.append(icon('check'), h('span', {}, verifiedText(v), ' ', h('button', { class: 'ub-link-btn', type: 'button', text: t('release.report'), on: { click: () => openIntegrityDialog() } })));
   } else if (v) {
     box.className = 'ub-verify bad';
     box.append(icon('alert'), h('span', {}, t('release.verify-failed', { reason: v.error }), ' ', h('button', { class: 'ub-link-btn', type: 'button', text: t('release.report'), on: { click: () => openIntegrityDialog() } })));
@@ -326,7 +343,7 @@ async function selectRelease(rel) {
   }
   app.verifyState = 'done';
   paintVerify();
-  announce(app.verify.ok ? t('release.verified', { key: app.verify.keyId }) : t('release.verify-failed', { reason: app.verify.error }));
+  announce(app.verify.ok ? verifiedText(app.verify) : t('release.verify-failed', { reason: app.verify.error }));
 }
 
 async function loadReleaseList() {
@@ -336,7 +353,7 @@ async function loadReleaseList() {
   try {
     const r = await loadReleases(app.releasesUrl);
     app.releases = r;
-    app.keyId = app.builder.minisignKeyId(RELEASE_PUBKEY);
+    app.keyId = currentKey() ? currentKey().keyId : '';
     renderReleases();
     const want = app.state.release && r.releases.find(x => x.tag === app.state.release && x.usable);
     app.autoRelease = !want;
@@ -348,7 +365,7 @@ async function loadReleaseList() {
     } else paintValidation();
   } catch (e) {
     app.releaseError = e.message || String(e);
-    app.keyId = app.builder.minisignKeyId(RELEASE_PUBKEY);
+    app.keyId = currentKey() ? currentKey().keyId : '';
     renderReleases();
     paintValidation();
   }
@@ -709,8 +726,9 @@ function openIntegrityDialog() {
   const kv = [];
   const add = (k, val, mono = false) => kv.push(h('dt', { text: k }), h('dd', { class: mono ? 'mono' : '', text: val }));
   add(t('integrity.release'), rel ? `${rel.tag}${rel.prerelease ? ` (${t('release.prerelease')})` : ''}` : '—');
-  add(t('integrity.key'), app.keyId || '—', true);
-  const pubLines = RELEASE_PUBKEY.trim().split('\n');
+  add(t('integrity.key'), (v && v.keyId) || app.keyId || '—', true);
+  if (v && v.ok && v.key) add(t('integrity.key-kind'), v.key.formerTest ? t('integrity.key-kind-test', { from: v.key.validFrom, to: v.key.validTo }) : t('integrity.key-kind-release'));
+  const pubLines = RELEASE_KEYS.map(k => `# ${keyRangeText(k)}${k.formerTest ? ` (${t('release.former-test-key')})` : ''}: ${k.file}\n${k.text.trim()}`);
   const checks = h('ul', { class: 'ub-checks' });
   if (v) {
     checks.append(v.ok ? statusLine('ok', t('integrity.sig-ok', { key: v.keyId })) : statusLine('bad', t('release.verify-failed', { reason: v.error })));
@@ -736,11 +754,11 @@ function openIntegrityDialog() {
       h('dl', { class: 'ub-kv' }, kv),
       checks,
       h('h3', { text: t('integrity.pubkey') }),
-      h('p', { class: 'ub-help', text: t('integrity.pubkey-help') }),
-      h('pre', { class: 'ub-code', text: pubLines.join('\n') }),
+      h('p', { class: 'ub-help', text: t('integrity.pubkeys-help') }),
+      h('pre', { class: 'ub-code', text: pubLines.join('\n\n') }),
       rel && rel.url ? h('p', {}, h('a', { href: rel.url, target: '_blank', rel: 'noopener', text: t('release.github') }), ' · ', rel.attestations ? h('a', { href: rel.attestations, target: '_blank', rel: 'noopener', text: t('release.attestations') }) : '') : null,
       h('p', { class: 'ub-help', text: t('integrity.offline') }),
-      copyRow(`urmqtt-config check-release --pubkey minisign.pub --sums SHA256SUMS ${rel && rel.template ? rel.template.file : ''}`.trim(), 'check-release'),
+      copyRow(`urmqtt-config check-release --pubkey ${(v && v.key && v.key.file) || 'minisign.pub'} --sums SHA256SUMS ${rel && rel.template ? rel.template.file : ''}`.trim(), 'check-release'),
     ],
     actions: [dialogButton(t('common.close'), 'close')],
   });
@@ -847,10 +865,10 @@ function openLocalDialog() {
     if (sums.files[0] || sig.files[0]) {
       if (!(sums.files[0] && sig.files[0])) { report.append(h('p', { class: 'ub-error', text: t('local.both') })); return; }
       try {
-        const v = app.builder.verifyRelease(RELEASE_PUBKEY, new Uint8Array(await sums.files[0].arrayBuffer()), await readText(sig.files[0]));
+        const { v, key } = verifyWithKeys(app.builder, null, new Uint8Array(await sums.files[0].arrayBuffer()), await readText(sig.files[0]));
         const entry = v.files.find(f => f.name === file.name);
         if (!entry) throw new Error(`SHA256SUMS does not list ${file.name}`);
-        verify = { ok: true, keyId: v.key_id, trustedComment: v.trusted_comment, templateSha256: entry.sha256, files: v.files, error: '' };
+        verify = { ok: true, keyId: v.key_id, key, trustedComment: v.trusted_comment, templateSha256: entry.sha256, files: v.files, error: '' };
       } catch (e) {
         report.append(h('p', { class: 'ub-error', text: t('release.verify-failed', { reason: cleanMessage(e.message) }) }));
         return;

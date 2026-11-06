@@ -81,22 +81,41 @@ the open audit findings that need no hardware closed, and the gaps the netcup ru
 - Verify: `git show 0723ec8:docs/PROGRESS.md` merged with the current file; every "PROGRESS ..." reference in
   docs/ resolves to a heading (a small script, or by hand).
 
-**NOW-2. A real release signing key.** S (work), owner decision (custody).
-- What: an offline, password-protected minisign key replaces `minisign.pub` and the CI secret; the builder page's
+**NOW-2. A real release signing key.** S (work), owner decision (custody). **In progress on branch `release-key`.**
+- What: an offline-generated minisign key replaces `minisign.pub` and the CI secret; the builder page's
   embedded key, SECURITY.md and the mirror follow.
-- Why: TODO.md "Before a real release"; the builder page and `scripts/mirror-releases.py` trust whatever key
-  is embedded (PLAN.md C1e amendment).
-- Risk: a key change breaks verification of older releases on the page unless both keys are listed for a period.
-- Verify: `scripts/test-mirror-releases.py` with the new public key; the page refuses a release signed by the old
-  key once the overlap ends; RELEASE.md §3 run on the next tag.
+- Done on the branch: a key ring (`keys/release-keys.json`): the release key (`minisign.pub`, tags from v0.4.2 on) and
+  the former test key (`keys/minisign-test-9229E05252D01F8E.pub`, v0.1.0 to v0.4.1 only). The builder page embeds it,
+  verifies each release with the key its signature names, refuses an unknown key and a key outside its range, and marks
+  the old releases "signed with the project's former test key" (15 languages). The mirror takes `--keyring` (same rules,
+  `signed_by` and `keys` in `releases.json`; tests for two keys, an unknown key id, the test key on a newer tag, the
+  placeholder, the switch from `--pubkey`). `urmqtt-config check-release` takes several `--pubkey`.
+  `minisign.pub` is the placeholder `REPLACE-WITH-THE-NEW-PUBLIC-KEY`, and `scripts/check-release-key.sh` makes the
+  Release workflow, `make sign`, `scripts/mirror/install.sh` and `scripts/deploy-builder-site.sh` refuse it. Releases
+  ship the release environment only (`urmqtt-<tag>.elf/.iso/.img`, the template, SBOM; no dev build with throwaway
+  certificates), trusted comment `urMQTT <tag> release <commit>`; `make repro ENV=release`.
+- What the owner must do (docs/release-key-rotation.md, with the commands): generate the key on his machine
+  (`minisign -G -W -p minisign.pub -s urmqtt-release.key`), set the secret (`gh secret set MINISIGN_SECRET_KEY`),
+  commit `minisign.pub` on the branch and merge, fill the key id into SECURITY.md, rebuild and deploy the builder page,
+  re-run `scripts/mirror/install.sh` on the web server (the unit switches to `--keyring`), then cut the next release.
+- Risk: a page or mirror that does not know the new key refuses the first release signed with it (hence the order of
+  the checklist). A forged `SHA256SUMS` signed with the compromised test key for an old tag is refused: the six
+  test-key releases are pinned by the SHA-256 of their published `SHA256SUMS` (page, mirror, `check-release --keyring`).
+- Verify: `scripts/test-mirror-releases.py` and `make builder-test` (two keys); `scripts/check-release-key.sh` with the
+  real key; RELEASE.md §3 on the next tag; the page shows v0.4.1 with the test-key note and the new release without.
 
-**NOW-3. Production PKI tooling and guidance.** M.
+**NOW-3. Production PKI tooling and guidance.** M. **In progress on branch `release-key`.**
 - What: a documented, scripted way for an operator to run the device CA, the server certificate and the control
   key offline (rotation, revocation, the bootstrap role), replacing the local test CA in `deploy/prod/`.
-- Why: TODO.md "A real production PKI"; PROVISIONING.md describes the flow, not a tool.
+- Done on the branch: `scripts/pki.sh` (OpenSSL 3: `init` CA + server + control key + revocation list, `device`,
+  `service`, `sign-csr` for keys born on devices, `server` rotation, `ca` for a second or bootstrap CA, `revoke`,
+  `check` through `urmqtt-config pack`), docs/PKI.md (threat model, custody, rotation, revocation, the builder page,
+  issuing at scale), `scripts/test-pki.sh` (host test: issues, revokes, checks the negative cases and packs the
+  result into the release ISO and raw image; boots nothing).
+- What the owner must do: nothing for the release; operators run it on their offline machine. Review the guide.
 - Risk: low. Dependency: NOW-2 for the release side only.
-- Verify: a scripted end-to-end run on a VM (issue, connect, rotate CA with overlap, revoke over the control
-  channel), as `scripts/control-scenarios.py` does today.
+- Verify (still open): a scripted end-to-end run on a VM (issue, connect, rotate CA with overlap, revoke over the
+  control channel) with `pki.sh` output, as `scripts/control-scenarios.py` does with the dev PKI.
 
 **NOW-4. Entropy: make the weak path visible and decide its default.** S. **Done (2026-11-06, ADR-263).**
 - What: publish the seeding sources and credited bits under `$SYS/broker/` and in `$SYS/query/info` (today only

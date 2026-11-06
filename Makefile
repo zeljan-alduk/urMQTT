@@ -120,6 +120,17 @@ universal: ## One ISO (and raw image) that boots on aarch64 UEFI, x86_64 UEFI an
 	scripts/mkiso.sh --universal $(UNIVERSAL_KERNELS) --out $(UNIVERSAL_ISO) --disk-out $(UNIVERSAL_RAW) $(MKISO_ARGS)
 	@ln -sf $(notdir $(UNIVERSAL_ISO)) $(BUILD_DIR)/urmqtt-$(ENV)-universal.iso
 
+# A release (ROADMAP NOW-2): the release kernels and the EMPTY configuration, no
+# certificates of any kind. The template ISO and the raw disk image come out of one
+# mkiso run; `urmqtt-config pack --iso` / `--image` configure them.
+RELEASE_RAW := $(BUILD_DIR)/urmqtt-template-$(VERSION)-universal.img
+
+.PHONY: release-images
+release-images: ## The release kernels, the template ISO and its raw disk image (empty configuration; what a release ships)
+	$(MAKE) --no-print-directory build ARCH=aarch64 ENV=release
+	$(MAKE) --no-print-directory build ARCH=x86_64 ENV=release
+	scripts/mkiso.sh --universal $(UNIVERSAL_KERNELS) --empty-config --out $(TEMPLATE_ISO) --disk-out $(RELEASE_RAW)
+
 .PHONY: template
 template: ## The template ISO (release kernels, empty configuration) for `urmqtt-config pack --iso`
 	$(MAKE) --no-print-directory build ARCH=aarch64 ENV=release
@@ -172,6 +183,8 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	$(MAKE) --no-print-directory check-x86
 	$(CARGO) test $(CARGO_FLAGS) --workspace
 	python3 -I scripts/test-mirror-releases.py
+	scripts/test-check-release-key.sh
+	scripts/test-pki.sh
 	python3 -I scripts/test-caddy-apply.py
 	python3 -I deploy/demo-bridge/test_bridge.py
 	python3 -I tools/builder/site/test_demo_site.py
@@ -282,8 +295,23 @@ raw: build ## Build a raw GPT disk image (EFI system partition) for KVM/Proxmox/
 	scripts/mkraw.py $(BUILD_DIR)/.esp.img $(RAW)
 	@rm -f $(BUILD_DIR)/.raw-tmp.iso $(BUILD_DIR)/.esp.img
 
+# ENV=release is what the Release workflow publishes: urmqtt-<version>.elf (the aarch64
+# release kernel), .iso (the universal ISO with the empty configuration: the same bytes
+# as the template), .img (its raw disk image), the template ISO, the SBOM, SHA256SUMS.
+# No certificate is in any of them. Any other ENV is an operator's own configured image
+# from deploy/<ENV>/ (urmqtt-<env>-<version>.*, aarch64; docs/DEPLOY.md), never a release.
 .PHONY: dist
-dist: iso raw ## Release artifacts (ELF, ISO, raw image, the template ISO) and SHA256SUMS in build/dist/
+ifeq ($(ENV),release)
+dist: release-images
+	@rm -rf $(BUILD_DIR)/dist && mkdir -p $(BUILD_DIR)/dist
+	cp target/aarch64-unknown-none/release/urmqtt $(BUILD_DIR)/dist/urmqtt-$(VERSION).elf
+	cp $(TEMPLATE_ISO) $(BUILD_DIR)/dist/urmqtt-$(VERSION).iso
+	cp $(RELEASE_RAW) $(BUILD_DIR)/dist/urmqtt-$(VERSION).img
+	cp $(TEMPLATE_ISO) $(BUILD_DIR)/dist/
+	scripts/sbom.py --strict --version $(VERSION) --out $(BUILD_DIR)/dist/urmqtt-$(VERSION).cdx.json
+	cd $(BUILD_DIR)/dist && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
+else
+dist: iso raw ## ENV=release: the release assets (release kernel, ISO, raw image, template, SBOM) and SHA256SUMS in build/dist/; other ENV: your configured image
 	@rm -rf $(BUILD_DIR)/dist && mkdir -p $(BUILD_DIR)/dist
 	cp $(KERNEL_ELF) $(BUILD_DIR)/dist/urmqtt-$(ENV)-$(VERSION).elf
 	cp $(ISO) $(RAW) $(BUILD_DIR)/dist/
@@ -291,6 +319,7 @@ dist: iso raw ## Release artifacts (ELF, ISO, raw image, the template ISO) and S
 	cp $(TEMPLATE_ISO) $(BUILD_DIR)/dist/
 	scripts/sbom.py --strict --version $(VERSION) --out $(BUILD_DIR)/dist/urmqtt-$(ENV)-$(VERSION).cdx.json
 	cd $(BUILD_DIR)/dist && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
+endif
 
 .PHONY: dist-universal
 dist-universal: universal ## Both ELFs, the universal ISO and raw image, SHA256SUMS in build/dist-universal/
@@ -303,17 +332,39 @@ dist-universal: universal ## Both ELFs, the universal ISO and raw image, SHA256S
 	scripts/sbom.py --strict --version $(VERSION) --out $(BUILD_DIR)/dist-universal/urmqtt-$(ENV)-$(VERSION).cdx.json
 	cd $(BUILD_DIR)/dist-universal && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
 
+# A release dist (make dist ENV=release) is signed with the project's release key only:
+# scripts/check-release-key.sh refuses the placeholder minisign.pub, the trusted comment is
+# "urMQTT <version> release <commit>" (what the workflow writes), and the signature must
+# verify with minisign.pub. An operator's own dist is signed with whatever key they pass.
 .PHONY: sign
 sign: ## Sign build/dist/SHA256SUMS with minisign (MINISIGN_KEY=path to the secret key)
 	@test -s $(BUILD_DIR)/dist/SHA256SUMS || { echo "make sign: run make dist first" >&2; exit 1; }
 	@command -v minisign >/dev/null || { echo "make sign: install minisign" >&2; exit 1; }
-	minisign -S -s "$(or $(MINISIGN_KEY),$(HOME)/.minisign/minisign.key)" -m $(BUILD_DIR)/dist/SHA256SUMS \
-		-t "urMQTT $$(cd $(BUILD_DIR)/dist && ls *.elf | sed 's/^urmqtt-//; s/\.elf$$//') $$(git rev-parse HEAD)"
+	@release=0; \
+	for t in $(BUILD_DIR)/dist/urmqtt-template-*-universal.iso; do \
+		v=$${t##*/urmqtt-template-}; v=$${v%-universal.iso}; \
+		if [[ -e $(BUILD_DIR)/dist/urmqtt-$$v.elf ]] && cmp -s "$$t" $(BUILD_DIR)/dist/urmqtt-$$v.iso; then release=1; break; fi; \
+	done; \
+	if ((release)); then \
+		scripts/check-release-key.sh || { echo "make sign: refusing to sign a release" >&2; exit 1; }; \
+		comment="urMQTT $$v release $$(git rev-parse HEAD)"; \
+	else \
+		comment="urMQTT $$(cd $(BUILD_DIR)/dist && ls *.elf | sed 's/^urmqtt-//; s/\.elf$$//') $$(git rev-parse HEAD)"; \
+	fi; \
+	minisign -S -s "$(or $(MINISIGN_KEY),$(HOME)/.minisign/minisign.key)" -m $(BUILD_DIR)/dist/SHA256SUMS -t "$$comment"; \
+	if ((release)); then \
+		minisign -Vm $(BUILD_DIR)/dist/SHA256SUMS -p minisign.pub >/dev/null \
+			|| { rm -f $(BUILD_DIR)/dist/SHA256SUMS.minisig; echo "make sign: the signature does not verify with minisign.pub: that secret key is not the release key" >&2; exit 1; }; \
+	fi
 	@echo "verify: minisign -Vm SHA256SUMS -p minisign.pub && shasum -a 256 -c SHA256SUMS"
 
 .PHONY: repro
-repro: ## Build HEAD twice in separate worktrees and compare ELF and ISO (ENV=prod by default)
+repro: ## Build HEAD twice in separate worktrees and compare ELF and ISO (ENV=prod by default; ENV=release: the release assets)
 	scripts/repro.sh $(if $(filter command line,$(origin ENV)),$(ENV),prod)
+
+.PHONY: pki-test
+pki-test: ## Host test of scripts/pki.sh (production PKI): issue, revoke, check, pack into the release images if built
+	scripts/test-pki.sh
 
 .PHONY: audit
 audit: ## Regenerate the TCB and unsafe inventory (docs/audit/, referenced by docs/AUDIT.md)

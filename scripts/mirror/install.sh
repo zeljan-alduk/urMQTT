@@ -12,8 +12,11 @@
 #                readable: the web server serves it as /urmqtt/releases/)
 #                /usr/local/lib/urmqtt-mirror, /etc/urmqtt-mirror   (root)
 #   script       /usr/local/lib/urmqtt-mirror/mirror-releases.py
-#   public key   /etc/urmqtt-mirror/minisign.pub, copied from this checkout's
-#                minisign.pub (the release key, docs/SECURITY.md)
+#   keys         /etc/urmqtt-mirror/minisign.pub (the release key, from this
+#                checkout's minisign.pub), /etc/urmqtt-mirror/keys/release-keys.json
+#                and the former test key next to it (keys/ of this checkout): the
+#                key ring the unit passes with --keyring (docs/release-key-rotation.md).
+#                A minisign.pub that is still the placeholder stops the install.
 #   units        /etc/systemd/system/urmqtt-mirror.service and .timer
 #   systemd      daemon-reload, enable --now urmqtt-mirror.timer
 #
@@ -73,9 +76,14 @@ fi
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
-for f in "$REPO/scripts/mirror-releases.py" "$REPO/minisign.pub" "$HERE/urmqtt-mirror.service" "$HERE/urmqtt-mirror.timer"; do
+RING_FILES=(release-keys.json minisign-test-9229E05252D01F8E.pub)
+for f in "$REPO/scripts/mirror-releases.py" "$REPO/minisign.pub" "$HERE/urmqtt-mirror.service" "$HERE/urmqtt-mirror.timer" \
+    "${RING_FILES[@]/#/$REPO/keys/}"; do
     [[ -f $f ]] || die "$f is missing: run this from a checkout of the repository"
 done
+if grep -q REPLACE-WITH-THE-NEW-PUBLIC-KEY "$REPO/minisign.pub"; then
+    need "minisign.pub is still the placeholder: the release key has not been committed yet (docs/release-key-rotation.md)"
+fi
 
 if ! command -v minisign >/dev/null 2>&1; then
     need "minisign is not installed; install it first (Debian/Ubuntu: apt install minisign) and run this again"
@@ -132,6 +140,7 @@ if [[ -d $WEB_ROOT ]] && [[ -n $(find "$WEB_ROOT" -maxdepth 2 ! -user "$USER_NAM
 fi
 ensure_dir 0755 root root "$LIB_DIR"
 ensure_dir 0755 root root "$ETC_DIR"
+ensure_dir 0755 root root "$ETC_DIR/keys"
 
 install_file 0755 "$REPO/scripts/mirror-releases.py" "$LIB_DIR/mirror-releases.py"
 
@@ -142,7 +151,11 @@ if [[ -f $ETC_DIR/minisign.pub ]] && ! cmp -s "$REPO/minisign.pub" "$ETC_DIR/min
     warn "  new:       $(head -n 1 "$REPO/minisign.pub")"
 fi
 install_file 0644 "$REPO/minisign.pub" "$ETC_DIR/minisign.pub"
-say "key: $(head -n 1 "$REPO/minisign.pub")  (compare the id with docs/SECURITY.md)"
+say "key: $(head -n 1 "$REPO/minisign.pub")  (compare the id with SECURITY.md)"
+# The key ring: the release key (../minisign.pub) and the former test key, each for its tags.
+for f in "${RING_FILES[@]}"; do
+    install_file 0644 "$REPO/keys/$f" "$ETC_DIR/keys/$f"
+done
 
 install_file 0644 "$HERE/urmqtt-mirror.service" "$UNIT_DIR/urmqtt-mirror.service"
 install_file 0644 "$HERE/urmqtt-mirror.timer" "$UNIT_DIR/urmqtt-mirror.timer"
