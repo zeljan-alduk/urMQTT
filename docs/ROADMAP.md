@@ -98,7 +98,7 @@ the open audit findings that need no hardware closed, and the gaps the netcup ru
 - Verify: a scripted end-to-end run on a VM (issue, connect, rotate CA with overlap, revoke over the control
   channel), as `scripts/control-scenarios.py` does today.
 
-**NOW-4. Entropy: make the weak path visible and decide its default.** S.
+**NOW-4. Entropy: make the weak path visible and decide its default.** S. **Done (2026-11-06, ADR-263).**
 - What: publish the seeding sources and credited bits under `$SYS/broker/` and in `$SYS/query/info` (today only
   the boot warning and the Diagnostic report show them); state per tested provider which source it gives
   (DEPLOY.md §6); decide whether production images should default to `entropy.fallback = "none"` with an explicit
@@ -106,6 +106,11 @@ the open audit findings that need no hardware closed, and the gaps the netcup ru
 - Why: the netcup run (section 1); SECURITY.md residual risks "No hardware RNG on the cloud"; ADR-038 measured the
   jitter credit under QEMU only, and TODO.md asks for the figures on an Ampere cloud.
 - Risk: a stricter default stops images from booting on such clouds; it must fail with a message naming the key.
+- Outcome: the default stays `jitter` (such a VPS still boots); the weak path is an explicit choice, loud where a user
+  decides: the builder's basic view (two options, a warning, the result card, a note), `urmqtt-config pack` / `verify` /
+  `show`, the boot log and `$SYS/broker/entropy/source`; `fallback = "none"` is one click in the builder and refuses
+  with a message naming the key (smoke scenario `entropy_option`). Per-provider sources (DEPLOY.md §6) stay to be filled
+  as providers are tried; the credited-bits figures on an Ampere cloud remain open (TODO.md).
 - Verify: smoke `no-hw-rng` checks the new topics; the jitter figures from netcup and one more provider recorded
   in PROGRESS.
 
@@ -380,6 +385,29 @@ to matter with NVMe (LATER-2, LATER-4).
   site texts here only describe urMQTT). If it should point at this project as a reference, the claims it can
   cite are the measured ones in section 1.
 
+### Community readiness (owner decision, 2026-11-06)
+
+Goal: someone from the open-source community can try urMQTT, deploy it and report what they find without help
+from the maintainers. Four items, done on branch `community-docs`:
+
+1. **A first-hour guide**, [FIRST-HOUR.md](FIRST-HOUR.md): from nothing to a first message over mutual TLS (test PKI,
+   builder page or `urmqtt-config pack`, QEMU on a laptop or a KVM VPS, `mosquitto_pub`/`mosquitto_sub`, the five
+   most likely failures with their log lines), with what was run for it.
+2. **Issue and pull-request templates**: the forms `bug`, `boot-failure` and `question` in `.github/ISSUE_TEMPLATE/`
+   (blank issues off, vulnerabilities pointed to SECURITY.md), checked by `scripts/check-issue-forms.py`; the pull
+   request template with the DCO sign-off, `make check` and the edition rule for drivers that are not virtio.
+3. **One page of known problems**, [KNOWN-ISSUES.md](KNOWN-ISSUES.md): what affects a user from AUDIT.md sections 5
+   and 6, the "Limits" of v0.4.0 and v0.4.1, and the protocol, network, platform and entropy limits, each with a
+   workaround and its tracking reference; `scripts/check-known-issues.py` (CI Lint job) fails when a cited AUDIT id,
+   ROADMAP item or ADR no longer exists or an AUDIT weakness it cites is marked fixed.
+4. **Consistent status wording**: README's title, badges, banners, "Why urMQTT" table and milestone tables brought
+   in line with section 6 below and the documents; the status word stays "pre-alpha".
+
+**Definition of "alpha".** The status word changes from "pre-alpha" to "alpha" (README badge and banner, SECURITY.md,
+KNOWN-ISSUES.md) when all three of these have landed on `main`: a real release signing key (NOW-2), the entropy
+option, that is the weak seeding made visible and its production default decided (NOW-4, D-3), and the MTU the
+network announces honoured (NOW-19). The owner makes the change.
+
 ## 4. Candidate items that need an owner decision
 
 Questions, not assumptions. Each blocks one or more items above.
@@ -388,7 +416,7 @@ Questions, not assumptions. Each blocks one or more items above.
 |---|---|---|
 | D-1 | Is v0.4 the "production on a KVM VPS" release (Now phase), or should a protocol feature (IPv6, QoS 2) be in it? | phase order |
 | D-2 | Who holds the minisign key and a Secure Boot project key, where (HSM, air-gapped machine), and how are they rotated? A `dbx`/version-counter plan? (ADR-251 says this is the maintainer's decision.) | NOW-2, LATER-6 |
-| D-3 | Should production images refuse to boot without a hardware RNG (`entropy.fallback = "none"`) unless the operator opts in, given the netcup finding? | NOW-4 |
+| D-3 | Should production images refuse to boot without a hardware RNG (`entropy.fallback = "none"`) unless the operator opts in, given the netcup finding? **Answered (owner, 2026-11-06): the default stays allowed; the choice is explicit in the builder; the hard requirement is one click** (ADR-263). | NOW-4 |
 | D-4 | May the production VPS (Contabo) be used again for KVM runs, or is a separate test VPS bought? | NOW-12, NEXT-6 |
 | D-5 | WebSocket: in the kernel (new HTTP parser in the TCB) or a supported external bridge? | NEXT-5 |
 | D-6 | Is an outbound TCP client acceptable at all? It ends the server-only design (ADR-033) and opens bridging, TLS log shipping, NTS and clustering. | NEXT-7, NEXT-8, LATER-1 |
@@ -423,7 +451,9 @@ Recorded so they are not proposed again without a new reason.
 ## 6. README drift corrections
 
 README's milestone tables and banners were not updated after several milestones closed. Proposed corrections,
-for a separate change (README is not edited here):
+for a separate change (README is not edited here). **Status (2026-11-06): applied** (the H, X9 and X11 rows and
+the NOTE banner earlier, the rest on branch `community-docs`: title, badges, WARNING banner, "Why urMQTT" table,
+Features Build row, M11, the O1 to D1 rows and the order list), as far as the documents back each statement:
 
 | Where in README | README says | State per the docs |
 |---|---|---|

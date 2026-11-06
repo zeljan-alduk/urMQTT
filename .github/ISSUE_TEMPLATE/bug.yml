@@ -1,0 +1,119 @@
+name: Bug report
+description: Something builds, boots or behaves differently from what the documentation says.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issues do not go here.** Report a vulnerability privately, as described in
+        [SECURITY.md](https://github.com/zeljan-alduk/urMQTT/blob/main/SECURITY.md).
+
+        Before you file: [docs/KNOWN-ISSUES.md](https://github.com/zeljan-alduk/urMQTT/blob/main/docs/KNOWN-ISSUES.md)
+        lists the limits that are known, and [docs/FIRST-HOUR.md](https://github.com/zeljan-alduk/urMQTT/blob/main/docs/FIRST-HOUR.md)
+        section 6 the most common causes of a failed first boot. If the machine stops during boot, the
+        "Boot failure" form asks for the right details.
+
+        **Never paste a private key**, a production certificate or an ISO that contains your server key.
+        Certificates made by `scripts/gen-dev-certs.sh` (`make certs`) are throwaway and may be shown.
+  - type: input
+    id: release
+    attributes:
+      label: Release or commit
+      description: The tag (for example v0.4.1) or the commit SHA. The boot log prints it in its first line (`URMQTT BOOT ...`).
+      placeholder: v0.4.1
+    validations:
+      required: true
+  - type: dropdown
+    id: image
+    attributes:
+      label: Which image
+      options:
+        - A release template configured with the builder page
+        - A release template configured with urmqtt-config pack
+        - A release asset as published (dev build)
+        - Built from a checkout (make iso, make dist, make universal)
+        - Not an image (host tests, tools, the builder page itself)
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform, hypervisor and provider
+      description: For example "QEMU 11.1 HVF on macOS", "Proxmox VE 8 (KVM)", "netcup VPS 500 ARM", "Contabo VPS".
+      placeholder: QEMU 11.1.2, HVF, macOS 26 on an Apple M4
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture of the guest
+      options:
+        - aarch64
+        - x86_64
+        - not applicable
+    validations:
+      required: true
+  - type: dropdown
+    id: booted
+    attributes:
+      label: How it was booted
+      options:
+        - ISO, live entry (urMQTT, data in RAM)
+        - ISO, install entry, then the installed disk
+        - ISO, Diagnostic entry
+        - Raw disk image (.img) written to the VM's disk
+        - make run, scripts/run-qemu.sh or make smoke
+        - not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The exact error message, the client's output, what you saw on the console.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: If a document says it should work, link the section.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands, the QEMU or hypervisor configuration, the client commands (mosquitto_pub, mosquitto_sub, ...).
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Serial log or console output
+      description: |
+        The whole log from `URMQTT BOOT` on, or as far as it gets. On a VPS without a serial port, a photo or screenshot of
+        the console. Remove anything you consider private (addresses); the log never contains keys.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: diag
+    attributes:
+      label: Diagnostic report (optional)
+      description: |
+        The JSON line of the Diagnostic boot entry (on the serial port, or the retained `$SYS/diag/report` with `diag-serve`),
+        attached as a file or pasted here. It lists the CPU, memory, every PCI function, the disks, the NIC and the entropy
+        sources.
+      render: json
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I read docs/KNOWN-ISSUES.md and this is not listed there.
+          required: true
+        - label: The text above contains no private key and no production certificate.
+          required: true

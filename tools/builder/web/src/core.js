@@ -445,6 +445,7 @@ export function evaluateRisks(model, state, info) {
     return v === undefined ? f.default : v;
   };
   if (info && info.missing.length) risks.push({ id: 'cannot-serve', level: 'confirm', args: { missing: info.missing.join(', ') } });
+  if (val('entropy.fallback') !== 'none') risks.push({ id: 'entropy-jitter', level: 'note' });
   if (val('storage.mode') === 'ram') risks.push({ id: 'ram-storage', level: 'confirm' });
   const wide = ['acl.device_publish', 'acl.device_subscribe'].filter(id => {
     const v = state.values[id];

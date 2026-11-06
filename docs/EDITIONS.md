@@ -120,6 +120,11 @@ The owner, Željan Alduk, makes these commitments for the lifetime of the projec
    published: the drivers it adds, the external inputs they parse, their fuzz targets and tests, and the open
    findings, in the form of [AUDIT.md](AUDIT.md) §2 and §5.
 
+**Funded priority, open code.** A customer of the commercial edition may pay for the priority of a feature that belongs
+to the open edition (for example QoS 2 or MQTT 5): the work is scheduled for that customer first, and the code lands in
+this repository under its licence, like any other open feature (decided 2026-11-06). What is funded is the order, never
+the exclusivity.
+
 ## 5. How the two relate technically
 
 - **One kernel.** The commercial repository depends on tagged releases of this repository's crates (as git

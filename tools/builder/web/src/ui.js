@@ -485,7 +485,8 @@ function paintResult() {
       h('dt', { text: t('result.file') }), h('dd', { class: 'mono', text: r.name }),
       h('dt', { text: t('result.size') }), h('dd', { text: formatBytes(r.size) }),
       h('dt', { text: t('result.sha256') }), h('dd', { class: 'mono', text: groupHex(r.sha256, 8) }),
-      h('dt', { text: t('result.fingerprint') }), h('dd', { class: 'mono', text: groupHex(r.fingerprint, 8) })),
+      h('dt', { text: t('result.fingerprint') }), h('dd', { class: 'mono', text: groupHex(r.fingerprint, 8) }),
+      h('dt', { text: t('result.entropy') }), h('dd', { class: r.entropy === 'jitter' ? 'ub-warn' : '', text: t(`result.entropy.${r.entropy}`) })),
     h('p', { class: 'ub-help', text: t('result.compare') }),
     h('div', { class: 'ub-tools' },
       h('button', { class: 'ub-btn small secondary', type: 'button', text: t('action.next'), on: { click: () => openNextDialog() } }),
@@ -593,7 +594,7 @@ async function build() {
     app.result = {
       blob: file, url: URL.createObjectURL(file), name: outputName(app.release.tag, app.state.name),
       size: file.size, sha256: outSha, fingerprint: c.info.fingerprint, report, verdict, probe,
-      templateSha256: sha, signed: c.info.signed, signerId: c.info.signer_id, port: portOfConfig(), overridden: problems.length > 0,
+      entropy: app.state.values['entropy.fallback'] === 'none' ? 'none' : 'jitter', templateSha256: sha, signed: c.info.signed, signerId: c.info.signer_id, port: portOfConfig(), overridden: problems.length > 0,
     };
     app.stale = false;
     paintResult();

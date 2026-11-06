@@ -179,7 +179,7 @@ can feed to a vulnerability scanner.
 | NIC | one virtio-net (PCI); DHCP unless `network.mode = "static"` |
 | Disk | **one** virtio-blk disk or virtio-scsi LUN (PCI), 512-byte blocks: the raw image written to it, the disk at least 16 MiB larger than the image (8 GiB or more in production, STORAGE-PLAN sizing); with `storage.require_data_disk = true` the broker refuses to serve without its data partition |
 | Display | optional: the boot framebuffer (GOP: ramfb, VGA), or a virtio-gpu PCI (2D) with `console.virtio_gpu` (below) |
-| Entropy | virtio-rng, or `RNDR` on the CPU; otherwise health-tested CPU jitter (`entropy.fallback`), else no boot |
+| Entropy | virtio-rng, or `RNDR`/`RDRAND`/`RDSEED` on the CPU; otherwise, with `entropy.fallback = "jitter"` (the default), health-tested CPU jitter plus the firmware's values, which is weaker; with `"none"`, no boot (section "Entropy" below) |
 | Boot medium | the raw image on the VM's disk, or the ISO's installer, which writes that image onto the disk (below); booted as a CD the ISO's **live** entry runs from RAM, no disk needed and nothing kept (below), if `storage.mode` allows it; without the live word a CD holds no data and production refuses to serve from it |
 
 **The console on a virtio-gpu (ADR-256).** Some VMs (netcup ARM) have a virtio-gpu as their only display: the
@@ -384,7 +384,8 @@ is drawn on the framebuffer from the first line on):
 | `URMQTT: this CPU does not implement the x86-64-v2 baseline. Missing: ...` (white text on black, before anything else) | the VPS CPU model is too old (a `qemu64` or `kvm64` default); use `host` or `x86-64-v2-AES` |
 | `unsupported legacy virtio device ... attach it as a modern device (disable-legacy=on)` | the hypervisor exposes pre-1.0 virtio only; there is no legacy driver |
 | `net: network controller <vendor>:<device> (...) has no driver; urMQTT needs virtio-net` and `net: no virtio-net NIC. Attach one ...` | the NIC is an e1000, Realtek or similar; no driver yet (X14). A dev image idles, a production image stops |
-| `fatal: no entropy source (virtio-rng, RDRAND/RDSEED, or a jitter fallback that passes its health tests): refusing to run` | no hardware randomness and the jitter fallback is off or failed its health tests |
+| `fatal: no entropy source (virtio-rng, RDRAND/RDSEED) and entropy.fallback = "none" forbids the CPU-jitter fallback: refusing to run` | the image requires a hardware random number generator and the VM has none: ask the provider for virtio-rng, or build with `entropy.fallback = "jitter"` (Entropy, below) |
+| `fatal: no entropy source (virtio-rng, RDRAND/RDSEED, or a jitter fallback that passes its health tests): refusing to run` | no hardware randomness and the jitter fallback ran but failed its health tests |
 | `storage: no data partition: booted from read-only media` | you booted the ISO as a CD without the live word: use the installer |
 | `fatal: live mode (RAM, ephemeral) was requested by the boot menu, but this image's storage.mode is "disk"` | the image forbids live mode: set `storage.mode = "auto"` and rebuild, or use the installer |
 | `EPHEMERAL: data is lost on reboot` | the live entry is running: the broker works, nothing is kept |
@@ -521,10 +522,44 @@ from a Linux rescue system or any Linux VM of the same shape:
   `virtio_rng` if the cloud offers one. Ampere Altra has no `RNDR`. Without
   virtio-rng, urMQTT seeds from health-tested CPU jitter
   (`entropy.fallback = "jitter"`, ADR-038) and says so in a warning at boot.
-  Set `fallback = "none"` to refuse to boot instead.
+  Set `fallback = "none"` to refuse to boot instead (see "Entropy" below).
 - **NIC:** `ls /sys/bus/virtio/drivers/virtio_net/` must show a device (the
   "paravirtualized" or virtio NIC, not a VFIO/SR-IOV one). If there is none,
   the serial console names the NIC that was found and stops.
+
+### Entropy: what a VPS user should check (ADR-263)
+
+The generator behind every TLS handshake and every key the broker makes is a ChaCha20 CSPRNG, seeded at boot from
+the best sources the VM has: **virtio-rng** (the hypervisor's), the CPU's own instruction (`RNDR` on aarch64,
+`RDRAND`/`RDSEED` on x86_64), and the bootloader's values. Either hardware source alone seeds it.
+
+When the VM has neither (a netcup ARM VPS on Neoverse N1 was the first found: no virtio-rng, no `RNDR`), the
+default, `entropy.fallback = "jitter"`, still boots: the generator is seeded from CPU timing jitter (health-tested,
+credited conservatively, at least 256 bits) plus the firmware's values. That is **weaker than a hardware source**, so
+it is an explicit option and the image tells you wherever you decide or look:
+
+- **The builder page** shows "Random numbers" in the basic view with two choices: *Allow CPU-jitter fallback
+  (default)* and *Require a hardware random number generator*. The result card names the one built, and the notes
+  list "Random numbers may come from CPU jitter" while the fallback is allowed.
+- **`urmqtt-config pack`** (and `verify`, `show`) print `WARNING: entropy.fallback = "jitter": ...` when it is
+  allowed; `show` has an `entropy:` line either way.
+- **The boot log** has a `WARN entropy: no hardware source (...)` line with the clock, the samples and the credited
+  bits whenever the fallback ran.
+- **`$SYS/broker/entropy/source`** (and `"entropy":{"source":...}` in the `$SYS/query/info` reply, an
+  `entropy source` line in `status`) names what seeded the generator: `virtio-rng`, `rndr` or `rdrand`,
+  `virtio-rng+rndr`, or `jitter+firmware` (`jitter` when the firmware gave no value). Alert on the two `jitter`
+  values if you want hardware only.
+- **The Diagnostic entry** (boot menu) has an RNG panel with every source, what it delivered and the sanity test.
+
+To check before you rely on a provider: from a Linux VM of the same shape, `cat
+/sys/devices/virtual/misc/hw_random/rng_available` lists `virtio_rng` if the provider attaches one, and
+`grep -m1 -o -w -E 'rng|rdrand|rdseed' /proc/cpuinfo` (aarch64: `Features` has `rng`) shows the CPU instruction.
+To get virtio-rng, ask the provider's support to attach a `virtio-rng-pci` device (libvirt: `<rng model='virtio'>`
+with `/dev/urandom` as the backend; Proxmox: the VM's "VirtIO RNG" device).
+
+To refuse such hosts, set `[entropy] fallback = "none"` (the builder: *Require a hardware random number generator*).
+The image then stops at boot with `fatal: no entropy source (virtio-rng, RNDR) and entropy.fallback = "none" forbids
+the CPU-jitter fallback: refusing to run`, on the serial console and on the framebuffer.
 
 ### Hetzner Cloud CAX
 

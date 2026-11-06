@@ -1,0 +1,28 @@
+name: Question
+description: How do I ...? Does urMQTT ...? A question about using or building urMQTT.
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Many answers are in [docs/FIRST-HOUR.md](https://github.com/zeljan-alduk/urMQTT/blob/main/docs/FIRST-HOUR.md),
+        [docs/DEPLOY.md](https://github.com/zeljan-alduk/urMQTT/blob/main/docs/DEPLOY.md),
+        [docs/OPERATE.md](https://github.com/zeljan-alduk/urMQTT/blob/main/docs/OPERATE.md) and the limits in
+        [docs/KNOWN-ISSUES.md](https://github.com/zeljan-alduk/urMQTT/blob/main/docs/KNOWN-ISSUES.md).
+        Which devices and platforms belong to this repository and which to the commercial edition is in
+        [docs/EDITIONS.md](https://github.com/zeljan-alduk/urMQTT/blob/main/docs/EDITIONS.md).
+
+        **Security issues do not go here:** see [SECURITY.md](https://github.com/zeljan-alduk/urMQTT/blob/main/SECURITY.md).
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What you are trying to do, the release, the platform, and what you already read or tried.
+    validations:
+      required: false

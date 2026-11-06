@@ -555,6 +555,16 @@ pub static ENTROPY_FACTS: SpinLock<EntropyFacts> = SpinLock::new(EntropyFacts {
     hardware_seed: false,
 });
 
+/// The name of what seeded the generator, for `$SYS/broker/entropy/source`
+/// and the status (ADR-263); set once at boot, `unknown` before.
+static ENTROPY_NAME: SpinLock<&'static str> = SpinLock::new("unknown");
+
+/// What seeded the generator (`virtio-rng`, `rndr`, `virtio-rng+rndr`,
+/// `jitter+firmware`, ...).
+pub fn entropy_source_name() -> &'static str {
+    *ENTROPY_NAME.lock()
+}
+
 /// Fresh bytes from the virtio-rng device, for the Diagnostic entry's sanity
 /// test; returns how many it got (0 without the device).
 pub fn sample_virtio_rng(out: &mut [u8]) -> usize {
@@ -742,7 +752,8 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
         let r = crate::jitter::collect(&mut pool);
         warn!(
             "entropy: no hardware source (virtio-rng, {HW_RNG}): CPU jitter fallback via the {} (granularity 2^{}): \
-             {} samples of {} steps, {} bit(s)/sample estimated, {} bit(s) credited (1/{}), health tests {}, {} ms",
+             {} samples of {} steps, {} bit(s)/sample estimated, {} bit(s) credited (1/{}), health tests {}, {} ms; \
+             weaker than a hardware source (entropy.fallback = \"none\" refuses such hosts)",
             r.clock,
             r.shift,
             r.samples,
@@ -764,6 +775,16 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
         });
     }
     facts.mask = pool.sources();
+    // Leaked once: a few bytes that live as long as the kernel.
+    *ENTROPY_NAME.lock() = alloc::boxed::Box::leak(
+        urmqtt_broker::sys::entropy_source(
+            matches!(facts.virtio_rng, Some(Ok(_))),
+            facts.hw_rng.then_some(HW_RNG_NAME),
+            facts.jitter.is_some(),
+            facts.bootloader_values > 0,
+        )
+        .into_boxed_str(),
+    );
     *ENTROPY_FACTS.lock() = facts;
     let mut rng = pool
         .finish_with(fallback)
@@ -1474,6 +1495,12 @@ pub fn blk_selftest() -> Result<(), &'static str> {
     }
     Ok(())
 }
+
+/// The CPU's own random number instruction as `$SYS` names it.
+#[cfg(target_arch = "aarch64")]
+const HW_RNG_NAME: &str = "rndr";
+#[cfg(target_arch = "x86_64")]
+const HW_RNG_NAME: &str = "rdrand";
 
 /// The CPU's own random number instructions, for the boot log.
 #[cfg(target_arch = "aarch64")]
