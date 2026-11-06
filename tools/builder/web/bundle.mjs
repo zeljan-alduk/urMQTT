@@ -44,7 +44,8 @@ function keyIdOf(text) {
 }
 
 /**
- * The keys the page trusts: [{name, keyId, text, file, validFrom, validTo, formerTest}].
+ * The keys the page trusts: [{name, keyId, text, file, validFrom, validTo, formerTest, pinned}]
+ * (pinned: tag -> SHA-256 of the SHA256SUMS that key signed for it; the former test key's releases).
  * BUILDER_KEYRING_JSON (a JSON array of such objects) or BUILDER_PUBKEY_TEXT (one key, any tag)
  * replace keys/release-keys.json for the tests, which sign with throwaway keys.
  * A key file that is still the placeholder is left out, loudly: such a page trusts
@@ -70,7 +71,9 @@ function releaseKeys() {
     const keyId = keyIdOf(text);
     if (!keyId) throw new Error(`${path} is not a minisign public key`);
     if (k.key_id && k.key_id !== keyId) throw new Error(`${path} has key id ${keyId}, keys/release-keys.json says ${k.key_id}`);
-    out.push({ name: k.name, keyId, text: text.trim() + '\n', file: relative(ROOT, path), validFrom: k.valid_from || null, validTo: k.valid_to || null, formerTest: k.former_test_key === true });
+    const pinned = k.pinned || {};
+    for (const [tag, sha] of Object.entries(pinned)) if (!/^[0-9a-f]{64}$/.test(sha)) throw new Error(`keys/release-keys.json: the pin of ${tag} is not a SHA-256`);
+    out.push({ name: k.name, keyId, text: text.trim() + '\n', file: relative(ROOT, path), validFrom: k.valid_from || null, validTo: k.valid_to || null, formerTest: k.former_test_key === true, pinned });
   }
   if (!out.length) throw new Error('keys/release-keys.json: no usable key');
   if (new Set(out.map(k => k.keyId)).size !== out.length) throw new Error('keys/release-keys.json lists one key twice');

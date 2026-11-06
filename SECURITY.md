@@ -37,5 +37,6 @@ Compare the key id the builder page shows, and the key you verify with, with thi
 **The former test key is considered compromised** from the day the release key exists: its secret half was a
 passwordless CI secret and a file on a developer machine. Its signatures on v0.1.0 to v0.4.1 stay valid; a signature
 by it on any later tag is a forgery, and the builder page, the release mirror and `scripts/check-release-key.sh` refuse
-it. Report such a file as a vulnerability (docs/VULNERABILITY-HANDLING.md). The key ring with the ranges is
+it. For the tags it did sign, only the published `SHA256SUMS` is accepted: the key ring pins the SHA-256 of each
+(`pinned` in `keys/release-keys.json`), so a file the leaked key signs for an old tag is refused too. Report such a file as a vulnerability (docs/VULNERABILITY-HANDLING.md). The key ring with the ranges is
 [`keys/release-keys.json`](keys/release-keys.json).

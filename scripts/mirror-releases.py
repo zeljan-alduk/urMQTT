@@ -345,6 +345,11 @@ class PubKey:
     valid_from: str | None = None  # the first tag it may sign; None: no lower bound
     valid_to: str | None = None  # the last tag it may sign; None: no upper bound
     former_test_key: bool = False
+    # Tag -> SHA-256 of its SHA256SUMS. A key with pins signs only those tags, and only those files.
+    pinned: tuple[tuple[str, str], ...] = ()
+
+    def pin(self, tag: str) -> str | None:
+        return dict(self.pinned).get(tag)
 
     def covers(self, tag: str) -> bool:
         """May this key sign `tag`? A key with a range signs only tags that parse as versions inside it."""
@@ -372,6 +377,7 @@ class PubKey:
             "valid_from": self.valid_from,
             "valid_to": self.valid_to,
             "former_test_key": self.former_test_key,
+            "pinned": sorted(t for t, _ in self.pinned),
         }
 
 
@@ -386,7 +392,7 @@ class Keyring:
         """Changes when a key or its range does: a failure that a new key could heal is retried."""
         if len(self.keys) == 1 and self.keys[0].valid_from is None and self.keys[0].valid_to is None:
             return self.keys[0].fingerprint  # what a single --pubkey recorded before key rings existed
-        items = [[k.fingerprint, k.valid_from, k.valid_to] for k in self.keys]
+        items = [[k.fingerprint, k.valid_from, k.valid_to, list(k.pinned)] for k in self.keys]
         return hashlib.sha256(json.dumps(items, separators=(",", ":")).encode()).hexdigest()
 
     @property
@@ -443,7 +449,7 @@ def load_keyring(path: Path) -> Keyring:
         where = f"{path}, key {number}"
         if not isinstance(entry, dict):
             raise Fatal(f"{where}: not an object")
-        unknown = set(entry) - {"name", "file", "key_id", "valid_from", "valid_to", "former_test_key", "note"}
+        unknown = set(entry) - {"name", "file", "key_id", "valid_from", "valid_to", "former_test_key", "note", "pinned"}
         if unknown:
             raise Fatal(f"{where}: unknown field(s) {', '.join(sorted(unknown))}")
         name, file = entry.get("name"), entry.get("file")
@@ -463,7 +469,16 @@ def load_keyring(path: Path) -> Keyring:
         test = entry.get("former_test_key", False)
         if not isinstance(test, bool):
             raise Fatal(f"{where}: former_test_key must be true or false")
-        key = load_pubkey(path.parent / file, name=name, former_test_key=test, **bounds)
+        pins = entry.get("pinned") or {}
+        if not isinstance(pins, dict) or any(
+            not isinstance(t, str) or not isinstance(h, str) or not re.fullmatch(r"[0-9a-f]{64}", h) for t, h in pins.items()
+        ):
+            raise Fatal(f"{where}: pinned must map tags to the lower-case hex SHA-256 of their SHA256SUMS")
+        key = load_pubkey(
+            path.parent / file, name=name, former_test_key=test, pinned=tuple(sorted(pins.items())), **bounds
+        )
+        if any(not key.covers(t) for t in pins):
+            raise Fatal(f"{where}: a pinned tag is outside the key's range")
         declared = entry.get("key_id")
         if declared is not None and declared != key.key_id:
             raise Fatal(f"{where}: {file} has key id {key.key_id}, the ring says {printable(declared, 40)}")
@@ -1007,7 +1022,27 @@ def pick_key(ctx: Context, sig: Path, tag: str) -> PubKey:
             "verification-failed",
             f"{SIG_NAME} was made with key {key_id} ({what}), which may sign {key.range_text()} only, not {printable(tag, 64)}",
         )
+    if key.pinned:
+        wanted = key.pin(tag)
+        if wanted is None:
+            raise ReleaseFailure(
+                "verification-failed", f"{SIG_NAME} was made with key {key_id}, which signs only its pinned releases, and {printable(tag, 64)} is not one"
+            )
     return key
+
+
+def check_pin(key: PubKey, tag: str, sums_path: Path) -> None:
+    """For a pinned key: the downloaded SHA256SUMS must be the pinned file, whatever the signature says."""
+    wanted = key.pin(tag)
+    if wanted is None:
+        return
+    got = hashlib.sha256(sums_path.read_bytes()).hexdigest()
+    if got != wanted:
+        raise ReleaseFailure(
+            "verification-failed",
+            f"{SUMS_NAME} of {printable(tag, 64)} has SHA-256 {got}, but the key ring pins {wanted} for it "
+            f"(signed with key {key.key_id}, not the published file)",
+        )
 
 
 def fetch_and_verify_sums(ctx: Context, plan: Plan, work: Path, checked: Checked, tag: str) -> None:
@@ -1020,6 +1055,7 @@ def fetch_and_verify_sums(ctx: Context, plan: Plan, work: Path, checked: Checked
             raise ReleaseFailure("verification-failed", f"{asset.name} is {asset.size} bytes (limit {limit})")
         download_asset(ctx, asset, dest)
     key = pick_key(ctx, parts[1][1], tag)
+    check_pin(key, tag, parts[0][1])
     comment = verify_signature(ctx.minisign, key.path, parts[0][1], parts[1][1])
     try:
         sums = parse_sums(parts[0][1].read_text(encoding="utf-8"))

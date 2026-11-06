@@ -132,11 +132,13 @@ note.
 - **The test key is compromised from today.** Its secret sat passwordless in a CI secret and on a developer machine; it
   must be treated as known to others. It is kept only to verify v0.1.0 to v0.4.1, and every tool limits it to those
   tags. A file signed with it that claims a later tag is a forgery (docs/VULNERABILITY-HANDLING.md).
-- **What the range does not stop:** someone with the test secret can sign a *different* `SHA256SUMS` and label it with
-  an old tag (say v0.4.1). The page and the mirror would accept that signature for v0.4.1. Protection: GitHub's release
-  assets are what both fetch (an attacker needs write access to the release or control of the mirror to swap them), the
-  mirror flags a release whose assets change ("edited"), and the digests of the old `SHA256SUMS` are in the release
-  history. A pin of the five old `SHA256SUMS` digests in `keys/release-keys.json` would close this completely; it is not
-  done (the digests must be read from GitHub, which this branch did not do).
+- **The old releases are pinned.** The range alone would let someone with the test secret sign a *different*
+  `SHA256SUMS` and label it with an old tag (say v0.4.1). The key ring therefore pins the SHA-256 of the published
+  `SHA256SUMS` of each of the six test-key releases (v0.1.0 to v0.4.1), and the page, the mirror and
+  `urmqtt-config check-release --keyring` accept nothing else for those tags; a tag that is not pinned cannot use the
+  test key. Pinning covers `SHA256SUMS` and every file it lists, nothing beyond (an asset added to an old release later
+  is under no signature); and the pins are as trustworthy as the repository: a compromised GitHub account could change
+  them only through a commit to `keys/release-keys.json`, which shows in the history and reaches the page and the
+  mirror only when they are rebuilt or reinstalled. Check it before steps 5 and 6: `git log -p keys/release-keys.json`.
 - If the **new** secret leaks: generate another key, add it to `keys/release-keys.json` with `valid_from` the next tag,
   give the leaked key a `valid_to` of the last tag it signed, and repeat steps 2 to 6. Say so in an advisory.

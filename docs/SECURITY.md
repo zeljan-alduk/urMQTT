@@ -509,11 +509,9 @@ What that gives you and what it does not:
   signed sums. A signature by a key the page does not know, or by a key outside
   its range of tags, is a failed check. **The former test key is considered
   compromised** from the day the release key exists (its secret was a
-  passwordless CI secret); limiting it to the tags it signed is what keeps old
-  releases verifiable without trusting it for new ones. It does not stop a
-  forged `SHA256SUMS` labelled with an old tag, which needs write access to the
-  GitHub release or control of the mirror (docs/release-key-rotation.md,
-  "Security notes"). The mirror is **not** a
+  passwordless CI secret); it is accepted only for the six releases it signed,
+  and for each only the `SHA256SUMS` whose SHA-256 the key ring pins, so a
+  forged file signed with it is refused (docs/RELEASE.md section 9). The mirror is **not** a
   trust anchor: a modified template or sums file fails the check, and a failed
   check blocks the build unless you override it in a dialog that says what is
   wrong. A release the mirror cannot verify is not offered at all.

@@ -8,8 +8,9 @@
 #     REPLACE-WITH-THE-NEW-PUBLIC-KEY and NOT the former test key 9229E05252D01F8E;
 #   - keys/release-keys.json is a key ring of schema 1: every key file it names
 #     parses, a declared key_id matches its file, no key is listed twice, the
-#     "release" key is ../minisign.pub with no upper bound, and the former test
-#     key is bounded (it may sign v0.1.0 to v0.4.1 only).
+#     "release" key is ../minisign.pub with no upper bound and no pins, and the
+#     former test key is bounded (it may sign v0.1.0 to v0.4.1 only) and pins the
+#     SHA-256 of every SHA256SUMS it signed (inside its range).
 #
 # Exit 0 and one line per key when all is well; 1 with the reason otherwise.
 # The Release workflow, `make sign` and scripts/deploy-builder-site.sh run it
@@ -95,6 +96,14 @@ for entry in ring["keys"]:
             fail(f"keys/release-keys.json, key {name}: {b!r} is not a version tag")
     if lo and hi and version(lo) > version(hi):
         fail(f"keys/release-keys.json, key {name}: valid_from is after valid_to")
+    pins = entry.get("pinned") or {}
+    if not isinstance(pins, dict) or any(not re.fullmatch(r"[0-9a-f]{64}", str(h)) or version(t) is None for t, h in pins.items()):
+        fail(f"keys/release-keys.json, key {name}: pinned must map version tags to the SHA-256 of their SHA256SUMS")
+    for t in pins:
+        if (lo and version(t) < version(lo)) or (hi and version(t) > version(hi)):
+            fail(f"keys/release-keys.json, key {name}: the pinned tag {t} is outside the key's range")
+    if name == "release" and pins:
+        fail("keys/release-keys.json: the release key has no pins (it signs every new release)")
     path = (ring_path.parent / file).resolve()
     if not path.is_file():
         fail(f"keys/release-keys.json, key {name}: {file} does not exist")
@@ -114,7 +123,11 @@ for entry in ring["keys"]:
     seen[kid] = name
     if kid == TEST_KEY_ID and (not entry.get("former_test_key") or hi is None):
         fail("keys/release-keys.json: the former test key 9229E05252D01F8E must be marked former_test_key and bounded (valid_to)")
+    if kid == TEST_KEY_ID and not pins:
+        fail("keys/release-keys.json: the former test key 9229E05252D01F8E must pin the SHA256SUMS of the releases it signed")
     rng = f"{lo or 'any'} to {hi}" if hi else f"{lo or 'any'} and later"
+    if pins:
+        rng += f", {len(pins)} pinned"
     print(f"  {name:<8} {kid}  {rng:<18} {path.relative_to(root)}")
 if "release" not in names:
     fail("keys/release-keys.json has no \"release\" key")

@@ -29,8 +29,13 @@ before(async () => {
       { tag: 'v0.5.1', prerelease: true, published: '2026-11-08T09:00:00Z', template: small, signer: stranger },
       { tag: 'v0.5.0', prerelease: true, published: '2026-11-07T09:00:00Z', template: small },
       { tag: 'v0.4.1', prerelease: true, published: '2026-11-05T09:00:00Z', template: small, signer: oldKey },
+      { tag: 'v0.4.0', prerelease: true, published: '2026-11-04T09:00:00Z', template: small, signer: oldKey },
+      { tag: 'v0.3.0', prerelease: true, published: '2026-11-03T09:00:00Z', template: small, signer: oldKey },
       { tag: 'v0.1.0', prerelease: true, published: '2026-10-30T00:50:09Z', template: null },
     ],
+    // v0.4.1 is pinned to the file it has; v0.4.0 to another one (as if a leaked test key had signed
+    // a forged SHA256SUMS for it); v0.3.0 is not pinned at all.
+    pins: sumsSha => ({ 'v0.4.1': sumsSha('v0.4.1'), 'v0.4.0': 'ab'.repeat(32) }),
   });
   server = await serve({ app: site.appDir, mirror: site.mirrorDir, headers: ISOLATION });
   base = `http://127.0.0.1:${server.port}`;
@@ -59,7 +64,7 @@ test('the page names both keys and marks the releases of the former test key', a
   assert.ok(note.includes(site.key.idText), 'the release key is named');
   assert.ok(note.includes(`signed with the project's former test key ${site.oldKey.idText}`), 'the former test key is named with its releases');
   const rows = await page.eval(`Object.fromEntries([...document.querySelectorAll('.ub-release')].map(l => [l.querySelector('input').value, l.textContent]))`);
-  for (const tag of ['v0.4.1', 'v0.1.0']) assert.match(rows[tag], /signed with the project's former test key/, tag);
+  for (const tag of ['v0.4.1', 'v0.4.0', 'v0.3.0', 'v0.1.0']) assert.match(rows[tag], /signed with the project's former test key/, tag);
   for (const tag of ['v0.5.0', 'v0.5.1', 'v0.6.0']) assert.doesNotMatch(rows[tag], /former test key/, tag);
 });
 
@@ -94,4 +99,16 @@ test('a signature by a key the page does not know is refused', async () => {
   const v = await select('v0.5.1');
   assert.match(v, /^ub-verify bad \|/);
   assert.ok(v.includes(`made with key ${stranger.idText}, which this page does not trust`), v);
+});
+
+test('a pinned old release with a valid test-key signature but other bytes is refused', async () => {
+  const v = await select('v0.4.0');
+  assert.match(v, /^ub-verify bad \|/);
+  assert.ok(v.includes(`but the page pins ${'ab'.repeat(32)} for it: this is not the published file`), v);
+});
+
+test('a test-key release that is not pinned is refused once the key has pins', async () => {
+  const v = await select('v0.3.0');
+  assert.match(v, /^ub-verify bad \|/);
+  assert.ok(v.includes("signs only its pinned releases, and v0.3.0 is not one of them"), v);
 });

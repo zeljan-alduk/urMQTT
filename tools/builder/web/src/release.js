@@ -5,8 +5,9 @@
 
 /**
  * The release signing keys, put in at build time from keys/release-keys.json:
- * [{name, keyId, text, file, validFrom, validTo, formerTest}]. Each key is
- * trusted for the tags in its range only: the former test key for the releases
+ * [{name, keyId, text, file, validFrom, validTo, formerTest, pinned}]. Each key is
+ * trusted for the tags in its range only (and a key with pins only for the
+ * SHA256SUMS whose SHA-256 is pinned for the tag): the former test key for the releases
  * it signed (v0.1.0 to v0.4.1), the release key for every later one. A signature
  * is checked with the key it names; an unknown key, or a key outside its range,
  * is a failed check.
@@ -64,9 +65,19 @@ function verifyWithKeys(builder, tag, sums, sig) {
   if (!key) throw new Error(`SHA256SUMS.minisig was made with key ${id}, which this page does not trust (it trusts ${RELEASE_KEYS.map(k => k.keyId).join(', ')})`);
   const v = builder.verifyRelease(key.text, sums, sig);
   const forTag = tag || commentTag(v.trusted_comment);
+  const who = `key ${id}${key.formerTest ? ", the project's former test key," : ''}`;
   if (!keyCovers(key, forTag)) {
     const range = key.validTo ? `${key.validFrom || 'the first release'} to ${key.validTo}` : `${key.validFrom} and later`;
-    throw new Error(`key ${id}${key.formerTest ? ", the project's former test key," : ''} is trusted for ${range} only, not for ${forTag || 'a release without a version'}`);
+    throw new Error(`${who} is trusted for ${range} only, not for ${forTag || 'a release without a version'}`);
+  }
+  // A pinned key (the former test key) signs only the SHA256SUMS whose SHA-256 is pinned for the tag:
+  // a valid signature on other bytes is a forgery made with the leaked key.
+  const pins = key.pinned || {};
+  if (Object.keys(pins).length) {
+    const want = Object.prototype.hasOwnProperty.call(pins, forTag) ? pins[forTag] : '';
+    if (!want) throw new Error(`${who} signs only its pinned releases, and ${forTag || 'this file'} is not one of them`);
+    const got = builder.sha256Hex(sums);
+    if (got !== want) throw new Error(`SHA256SUMS of ${forTag} has SHA-256 ${got}, but the page pins ${want} for it: this is not the published file`);
   }
   return { v, key };
 }

@@ -99,8 +99,8 @@ the open audit findings that need no hardware closed, and the gaps the netcup ru
   commit `minisign.pub` on the branch and merge, fill the key id into SECURITY.md, rebuild and deploy the builder page,
   re-run `scripts/mirror/install.sh` on the web server (the unit switches to `--keyring`), then cut the next release.
 - Risk: a page or mirror that does not know the new key refuses the first release signed with it (hence the order of
-  the checklist); a forged `SHA256SUMS` signed with the compromised test key and labelled with an old tag is accepted
-  for that tag (a pin of the old sums would close it; not done).
+  the checklist). A forged `SHA256SUMS` signed with the compromised test key for an old tag is refused: the six
+  test-key releases are pinned by the SHA-256 of their published `SHA256SUMS` (page, mirror, `check-release --keyring`).
 - Verify: `scripts/test-mirror-releases.py` and `make builder-test` (two keys); `scripts/check-release-key.sh` with the
   real key; RELEASE.md §3 on the next tag; the page shows v0.4.1 with the test-key note and the new release without.
 

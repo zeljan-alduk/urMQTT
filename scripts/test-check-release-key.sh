@@ -58,6 +58,15 @@ if command -v minisign >/dev/null; then
     # The test key without its upper bound would be trusted for every future tag.
     sed -i.bak 's/"valid_to": "v0.4.1"/"valid_to": null/' "$dir/keys/release-keys.json"
     expect 1 "an unbounded former test key is refused" "$CHECK" --root "$dir"
+    mv "$dir/keys/release-keys.json.bak" "$dir/keys/release-keys.json"
+    # A pin outside the range, or a malformed one, is refused.
+    sed -i.bak 's/"v0.4.1": "3cca/"v0.5.1": "3cca/' "$dir/keys/release-keys.json"
+    expect 1 "a pinned tag outside the test key's range is refused" "$CHECK" --root "$dir"
+    mv "$dir/keys/release-keys.json.bak" "$dir/keys/release-keys.json"
+    sed -i.bak 's/"v0.1.0": "25ba/"v0.1.0": "ZZba/' "$dir/keys/release-keys.json"
+    expect 1 "a malformed pin is refused" "$CHECK" --root "$dir"
+    mv "$dir/keys/release-keys.json.bak" "$dir/keys/release-keys.json"
+    expect 0 "the restored ring passes again" "$CHECK" --root "$dir"
 else
     echo "skip: minisign is not installed; the positive case was not run"
 fi

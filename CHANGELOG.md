@@ -23,7 +23,8 @@ All notable changes to this project are documented here. The format follows
   signature names, refuses unknown keys and keys outside their range, and marks the old releases "signed with the
   project's former test key" (the new texts in 14 languages are AI translations). The release mirror takes
   `--keyring` (`releases.json` gains `keys` and a per-release `signed_by`); `urmqtt-config check-release` takes several
-  `--pubkey`. `scripts/check-release-key.sh` guards the Release workflow, `make sign`, the mirror installer and the page
+  `--pubkey`, or `--keyring keys/release-keys.json --tag TAG`. The six releases of the test key are **pinned**: for
+  each, only the `SHA256SUMS` with the SHA-256 in the key ring is accepted, by the page, the mirror and the tool. `scripts/check-release-key.sh` guards the Release workflow, `make sign`, the mirror installer and the page
   deploy.
 
 - README: a "Start here" line (first hour, known issues, editions, security policy); the title, badges, WARNING

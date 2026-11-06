@@ -416,4 +416,17 @@ The rotation itself, done once by the owner, with the exact commands: **[docs/re
 then on the web server `scripts/mirror/install.sh`, which installs `/etc/urmqtt-mirror/minisign.pub` and
 `/etc/urmqtt-mirror/keys/`, switches the unit to `--keyring` and restarts the timer; `systemctl start urmqtt-mirror`
 runs it at once). Nothing is re-downloaded by the mirror; old releases keep their test-key signature and stay
-verifiable. A later rotation (a leaked key) is the same with a new entry and a `valid_to` on the old one.
+verifiable. A later rotation (a leaked key) is the same with a new entry and a `valid_to` on the old one (and pins of
+the releases the old key signed).
+
+**Pinning the former test key's releases.** For the test key, `keys/release-keys.json` also lists `pinned`: the
+SHA-256 of the published `SHA256SUMS` of each of the six releases it signed (v0.1.0, v0.2.0, v0.2.1, v0.3.0, v0.4.0,
+v0.4.1; fetched from GitHub and checked against the test key on 2026-11-06). The builder page, the mirror
+(`--keyring`) and `urmqtt-config check-release --keyring keys/release-keys.json --tag TAG` accept, for a pinned tag,
+only a `SHA256SUMS` with exactly that hash, whatever the signature says; a tag that is not pinned may not use the test
+key at all; the release key has no pins. So a leaked test key can no longer sign a forged `SHA256SUMS` for an old tag.
+What pinning does not do: it protects `SHA256SUMS`, and through it every file that `SHA256SUMS` lists, but nothing
+beyond what that file lists (an asset added to an old release later is covered by no signature and no pin; the page
+and the mirror use only the template, which is listed). The pins are only as trustworthy as the repository: someone
+who controls the GitHub account could replace them, but only through a commit to `keys/release-keys.json` (visible in
+the history, and the deployed page and mirror change only when they are rebuilt or reinstalled from it).

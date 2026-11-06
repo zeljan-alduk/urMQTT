@@ -584,7 +584,7 @@ class Scenarios(MirrorCase):
         self.assertEqual(list(doc), ["schema", "generated", "repo", "source", "key_id", "keys", "releases", "templates"])
         self.assertEqual(
             doc["keys"],
-            [{"key_id": self.keys["good"].key_id, "name": "release", "valid_from": None, "valid_to": None, "former_test_key": False}],
+            [{"key_id": self.keys["good"].key_id, "name": "release", "valid_from": None, "valid_to": None, "former_test_key": False, "pinned": []}],
         )
         self.assertEqual(doc["repo"], f"{OWNER}/{REPO}")
         self.assertEqual(doc["source"], f"https://github.com/{OWNER}/{REPO}/releases")
@@ -1314,7 +1314,7 @@ class KeyRotation(MirrorCase):
     the former test key (v0.1.0 to v0.4.1 only), "good" the release key (v0.4.2 on),
     "stranger" a key nobody trusts."""
 
-    def keyring(self, *, release: bool = True) -> Path:
+    def keyring(self, *, release: bool = True, pins: dict[str, str] | None = None) -> Path:
         directory = self.world / "etc"
         directory.mkdir(exist_ok=True)
         keys = []
@@ -1326,6 +1326,8 @@ class KeyRotation(MirrorCase):
             {"name": "test", "file": "minisign-test.pub", "key_id": self.keys["other"].key_id,
              "valid_from": "v0.1.0", "valid_to": "v0.4.1", "former_test_key": True, "note": "former test key"}
         )  # fmt: skip
+        if pins is not None:
+            keys[-1]["pinned"] = pins
         path = directory / "release-keys.json"
         path.write_text(json.dumps({"schema": 1, "keys": keys}, indent=2))
         return path
@@ -1363,7 +1365,7 @@ class KeyRotation(MirrorCase):
         self.assertEqual(doc["key_id"], self.keys["good"].key_id, "the current key is the release key")
         self.assertEqual([(k["name"], k["valid_from"], k["valid_to"], k["former_test_key"]) for k in doc["keys"]],
                          [("release", "v0.4.2", None, False), ("test", "v0.1.0", "v0.4.1", True)])  # fmt: skip
-        self.assertEqual(self.entry("v0.4.1")["signed_by"], {"key_id": self.keys["other"].key_id, "name": "test", "valid_from": "v0.1.0", "valid_to": "v0.4.1", "former_test_key": True})
+        self.assertEqual(self.entry("v0.4.1")["signed_by"], {"key_id": self.keys["other"].key_id, "name": "test", "valid_from": "v0.1.0", "valid_to": "v0.4.1", "former_test_key": True, "pinned": []})
         self.assertEqual(self.entry("v0.5.0")["signed_by"]["former_test_key"], False)
         # Both naming schemes are listed in full; only the template and the sums are mirrored.
         for tag, stem in (("v0.4.1", "urmqtt-dev-v0.4.1"), ("v0.5.0", "urmqtt-v0.5.0")):
@@ -1372,6 +1374,33 @@ class KeyRotation(MirrorCase):
                                            f"urmqtt-template-{tag}-universal.iso", "SHA256SUMS", "SHA256SUMS.minisig"})  # fmt: skip
             self.assertEqual({n for n, mirrored in assets.items() if mirrored}, {f"urmqtt-template-{tag}-universal.iso", "SHA256SUMS", "SHA256SUMS.minisig"})
         self.assertIn(f"signature ok (key {self.keys['other'].key_id}", job.err)
+
+    def published_sums(self, tag: str) -> bytes:
+        return next(a.data for r in self.fake.releases if r.tag == tag for a in r.assets if a.name == "SHA256SUMS")
+
+    def test_a_pinned_release_with_the_published_sums_is_mirrored(self) -> None:
+        old = self.add_named_release("v0.4.1", "other", new_names=False, published="2026-11-05T10:00:00Z")
+        job = self.run_job(keyring=self.keyring(pins={"v0.4.1": sha(self.published_sums("v0.4.1"))}))
+        self.assertEqual(job.code, 0, job.err)
+        self.assertPublished("v0.4.1", old)
+        self.assertEqual(self.entry("v0.4.1")["signed_by"]["pinned"], ["v0.4.1"])
+
+    def test_a_pinned_tag_with_other_bytes_is_refused_although_the_signature_is_valid(self) -> None:
+        """The test key (leaked) signs a different SHA256SUMS for an old tag: the signature is
+        valid and the tag in range, but the bytes are not the pinned ones."""
+        self.add_named_release("v0.4.1", "other", new_names=False, published="2026-11-05T10:00:00Z")
+        job = self.run_job(keyring=self.keyring(pins={"v0.4.1": "0" * 64}))
+        self.assertEqual(job.code, 2, job.err)
+        self.assertCountEqual(self.fake.downloads(), ["SHA256SUMS", "SHA256SUMS.minisig"])
+        self.assertNothingPublished("v0.4.1")
+        self.assertIn("but the key ring pins 0000000000000000000000000000000000000000000000000000000000000000 for it", job.err)
+        self.assertEqual((self.entry("v0.4.1")["status"], self.entry("v0.4.1")["reason"]), ("unverified", "verification-failed"))
+        # A tag in range but not pinned is refused for a pinned key.
+        self.add_named_release("v0.3.0", "other", new_names=False, published="2026-10-05T10:00:00Z")
+        job = self.run_job(keyring=self.keyring(pins={"v0.4.1": sha(self.published_sums("v0.4.1"))}))
+        self.assertEqual(job.code, 2, job.err)
+        self.assertIn("signs only its pinned releases, and v0.3.0 is not one", job.err)
+        self.assertNothingPublished("v0.3.0")
 
     def test_the_test_key_is_refused_for_a_newer_tag_and_the_iso_is_never_fetched(self) -> None:
         self.add_named_release("v0.6.0", "other", new_names=True, published="2026-11-12T10:00:00Z")
@@ -1542,6 +1571,11 @@ class Units(unittest.TestCase):
         by_name = {k["name"]: k for k in doc["keys"]}
         self.assertEqual((by_name["test"]["valid_from"], by_name["test"]["valid_to"], by_name["test"]["former_test_key"]), ("v0.1.0", "v0.4.1", True))
         self.assertEqual((by_name["release"]["valid_from"], by_name["release"]["valid_to"], by_name["release"]["file"]), ("v0.4.2", None, "../minisign.pub"))
+        self.assertNotIn("pinned", by_name["release"])
+        self.assertEqual(sorted(by_name["test"]["pinned"]), ["v0.1.0", "v0.2.0", "v0.2.1", "v0.3.0", "v0.4.0", "v0.4.1"])
+        # The real v0.1.0 SHA256SUMS (the fixture of tools/config, signed with the test key) is the pinned file.
+        fixture = HERE.parent / "tools/config/tests/fixtures/minisign/SHA256SUMS"
+        self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(), by_name["test"]["pinned"]["v0.1.0"])
         if "REPLACE-WITH-THE-NEW-PUBLIC-KEY" in REPO_PUBKEY.read_text(encoding="utf-8"):
             with self.assertRaisesRegex(self.m.Fatal, "placeholder"):
                 self.m.load_keyring(REPO_KEYRING)
@@ -1549,7 +1583,10 @@ class Units(unittest.TestCase):
         ring = self.m.load_keyring(REPO_KEYRING)
         self.assertEqual([k.name for k in ring.keys], ["release", "test"])
         self.assertNotEqual(ring.primary.key_id, "9229E05252D01F8E", "the release key must not be the test key")
-        self.assertTrue(ring.by_id("9229E05252D01F8E").former_test_key)
+        test = ring.by_id("9229E05252D01F8E")
+        self.assertTrue(test.former_test_key)
+        self.assertEqual([t for t, _ in test.pinned], ["v0.1.0", "v0.2.0", "v0.2.1", "v0.3.0", "v0.4.0", "v0.4.1"])
+        self.assertEqual(ring.primary.pinned, (), "the release key has no pins")
 
     def test_key_ranges(self) -> None:
         m = self.m
@@ -1595,6 +1632,8 @@ class Units(unittest.TestCase):
             (ring({**good, "valid_to": "latest"}), "version tag"),
             (ring({**good, "former_test_key": "yes"}), "true or false"),
             (ring({**good, "extra": 1}), "unknown field"),
+            (ring({**good, "pinned": {"v0.1.0": "XYZ"}}), "pinned must map"),
+            (ring({**good, "pinned": {"v0.5.0": "a" * 64}}), "outside the key's range"),
             (ring({**good, "file": "missing.pub"}), "cannot read"),
             (ring({**good, "name": "release", "file": "placeholder.pub", "key_id": None}), "placeholder"),
         ]:

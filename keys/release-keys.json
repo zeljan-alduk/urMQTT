@@ -17,7 +17,15 @@
       "valid_from": "v0.1.0",
       "valid_to": "v0.4.1",
       "former_test_key": true,
-      "note": "The project's former TEST key. It signed v0.1.0 to v0.4.1 (those signatures stay valid) and is considered compromised from the day the release key exists: it is accepted for those tags only, never for a newer one."
+      "note": "The project's former TEST key. It signed v0.1.0 to v0.4.1 (those signatures stay valid) and is considered compromised from the day the release key exists: it is accepted for those tags only, never for a newer one, and for each of them only the SHA256SUMS whose SHA-256 is pinned below (the published file, fetched from GitHub and checked against this key on 2026-11-06).",
+      "pinned": {
+        "v0.1.0": "25baed5187be0a78a6ac2f7fc7adb4531721fe4efc77a88289b9dbcd72cfe532",
+        "v0.2.0": "f230dc3497c2814aca291c51ac1ba93abc284a42e86be80b8995c91424f8a306",
+        "v0.2.1": "637b73436e1e038050122453de1633f485b714ea1d2be5f648ccf8e1ec2380e6",
+        "v0.3.0": "3b6eb087e46ce1d28ca63a2d1186152d1bf180e1c4798e4d44ca83ce0def07de",
+        "v0.4.0": "5947460f3e95b14314c469319abffea883e6bee09955e34cabd5f88560ec0f83",
+        "v0.4.1": "3cca2f593cd402addbf975c4104f4cd6b2c00226f84d98874e430156866bb17b"
+      }
     }
   ]
 }
