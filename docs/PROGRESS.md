@@ -3,6 +3,84 @@
 One entry per milestone: what was done, what was measured and the known gaps. Newest entries first down to H7; the entries from M0 to S6 follow in the order they were written.
 Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptance-criteria).
 
+## Release candidate v0.4.2 (2026-11-06)
+
+Everything for the release except publishing: nothing was pushed, tagged, signed or uploaded, and no server was
+touched by this preparation. The commands for the day are in `docs/release-day-v0.4.2.md`; the generic steps in
+`docs/RELEASE.md`. What the release contains: the release key rotation (NOW-2: `minisign.pub` = `721316B961DCB94B`,
+the former test key `9229E05252D01F8E` for v0.1.0 to v0.4.1 only, pinned), release assets without throwaway
+certificates (`make dist ENV=release`), the MTU (ADR-264, configuration format 7), the entropy option (ADR-263),
+`scripts/pki.sh` (NOW-3), the community documents, the Miri changes (ADR-262), the DCO check.
+
+**Done before the preparation, by the owner (recorded here as reported, not checked from this session):** the builder
+page on aldo.tech was redeployed with the key ring and configuration format 7 on 2026-11-06 (the live manifest shows
+format 7 and the keys `721316B961DCB94B` and `9229E05252D01F8E`), and the release mirror on the server was switched to
+`--keyring` by `scripts/mirror/install.sh` on 2026-11-06 at 22:23 UTC; `releases.json` lists both keys and shows
+`signed_by` = the test key for v0.2.0 to v0.4.1. v0.1.0 shows no `signed_by` (an observation; the cause was not
+investigated).
+
+**Done**
+
+- Version 0.4.2 (workspace `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock`: the workspace crates only, 36 and 24 entries,
+  no dependency changed; `cargo metadata --locked` accepts both); README badge and banner, DEPLOY and OPERATE examples,
+  the issue forms' example tag. CHANGELOG `[0.4.2] - 2026-11-06`, compare links, empty Unreleased. Release notes in
+  `docs/release-notes-v0.4.2.md` and RELEASE.md section 7 (v0.4.2 is now RELEASE.md's worked example).
+- Stale documents after the merges: KNOWN-ISSUES (the key, the assets, the MTU, `$SYS/broker/entropy/source`, the
+  status line), ROADMAP NOW-2 and NOW-3, FIRST-HOUR (which key signs which release).
+- **Fixed: `scripts/test-check-release-key.sh` failed** wherever minisign is installed ("a new release key passes",
+  "the restored ring passes again"): since 685bb21 the ring names the release key id, and the test's copy of the ring
+  still named it while holding a freshly generated key. CI's Lint job has no minisign and skips that part, so CI did
+  not see it. The copy now names the generated key's id; all 11 checks pass.
+- **Compatibility, with the published templates.** v0.4.0 and v0.4.1 templates downloaded with `gh release download`
+  into a directory outside the repository; `SHA256SUMS` verified with `keys/minisign-test-9229E05252D01F8E.pub`
+  (comments `urMQTT v0.4.0 dev 6cc343b...` and `urMQTT v0.4.1 dev 71990ac...`), the templates' SHA-256 checked, and the
+  SHA-256 of each `SHA256SUMS` equal to its pin in `keys/release-keys.json` (5947460f..., 3cca2f59...). With this
+  tree's `urmqtt-config pack --iso` and the dev certificates: the format-6 file (TLS files, CA, control key,
+  `console.virtio_gpu = "on"`, `devices.virtio_balloon = "on"`) packs on v0.4.0, v0.4.1 and the local v0.4.2 template
+  with the same fingerprint (`13c46d92...`, `show`: version 6); with `[network] mtu = 1460` added (format 7) it is
+  refused by v0.4.0 and v0.4.1 with "this configuration needs configuration format 7, which this template's kernel
+  does not read (it reads up to 6): use a newer release" and packs on the local v0.4.2 template (`show`: version 7).
+  The local v0.4.2 template's empty configuration is format 7. `urmqtt-config check-release --keyring
+  keys/release-keys.json --tag v0.4.1` accepts the published v0.4.1 sums (pinned, test key) and refuses the same files
+  for `--tag v0.4.2` ("may sign v0.1.0 to v0.4.1 only").
+
+**Gates run on this Mac** (macOS 26.3, Apple M4 Pro, a sibling worktree, not nested): `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets -D warnings`, `make clippy-kernel`, `make check-x86` clean; `cargo test
+--workspace` 1031 passed, 0 failed, 16 ignored; `make build` aarch64 and x86_64; `make dist ENV=release
+VERSION=v0.4.2` (the version given by hand, since no tag exists): `build/dist/` holds exactly `SHA256SUMS`,
+`urmqtt-template-v0.4.2-universal.iso`, `urmqtt-v0.4.2.cdx.json` (222 components), `urmqtt-v0.4.2.elf`, `.img`,
+`.iso`; the `.iso` and the template have the same SHA-256 (`737ea4f2...`); `scripts/check-no-pem-keys.py` finds no PEM
+private key; `urmqtt-config verify` on the `.img`: the empty configuration ("boots, but will not serve"). `make
+template`; `make repro ENV=release` (at 864fe10, version `v0.4.1-35-g864fe10`): both release kernels, the template
+ISO and the raw image identical twice. `scripts/check-release-key.sh` ok (release `721316B961DCB94B` v0.4.2 and later,
+test `9229E05252D01F8E` v0.1.0 to v0.4.1, 6 pinned); `scripts/test-check-release-key.sh` after the fix above;
+`scripts/test-mirror-releases.py` 74 tests ok; `scripts/test-pki.sh` 39 checks, with the local v0.4.2 template and raw
+image (`TEMPLATE=`/`RAW=`); `scripts/audit-inventory.py --check`, `scripts/check-known-issues.py`, `typos` clean.
+`make builder-test`: 105 of 108 passed, 2 skipped, 1 failed without the emulator runtime ("the build ends in a result
+card", the known environmental failure, as at v0.4.1); after `make builder-emulator` (manifest: format 7,
+`release_key` `721316B961DCB94B`, keys release and test) 109 of 109, including the real local v0.4.2 template.
+Smoke on aarch64 HVF (the dev kernel of this tree; a first attempt ran against the release kernel left in `target/`
+by `make dist ENV=release` and every scenario was refused with "the dev environment is refused by a release kernel":
+`make build` before `scripts/smoke.sh` when switching back from a release build): `SMOKE_ONLY=misc
+SMOKE_GROUPS='^(entropy_option|net_mtu|virtio_gpu)$'` 11 passed, 0 failed (`mtu-static-1460`, `mtu-dhcp-1460`,
+`mtu-dhcp-9000`, `mtu-dhcp-300`, the four `entropy-*` scenarios, the three `virtio-gpu-*`). The core shard
+(`SMOKE_NO_GROUPS=1`) 50 passed, 2 failed: `sys-operator`, whose `sys-query-info` check got a reply that parsed but
+failed one of its field checks (only the first 120 bytes are printed, so which field is not known; the same symptom
+as at v0.4.1), then passed 3 of 3 alone (`SMOKE_SCENARIOS='^sys-operator$'`); and the HVF-only threshold "dp-bench
+scaling with 4 worker cores is 2.99x (< 3.0x)" (in-guest handshakes 4,441/s on 1 core, 8,220/s on 2, 13,274/s on 4;
+one run; the rerun with the scenario filter re-read the same log and is not a second measurement). Not investigated;
+the scaling check is enforced only under HVF, so CI (TCG) does not run it.
+
+**Not run**
+
+- The rest of the smoke suites (aarch64 storage, hardening, secrecy, the other misc groups, the TCG accelerator; the
+  x86_64 and universal suites), so nothing of this release's x86_64 code ran under QEMU here.
+- `make supply-chain`, `cargo vet regenerate imports && cargo vet prune`, `make ct`, Miri, Kani, sanitizers, fuzzing:
+  CI's jobs or the day's, not repeated here.
+- CI itself: it runs on the merge commit; the tag waits for it. The minisign signature of a v0.4.2 `SHA256SUMS`
+  (the secret is in CI only), the attestations and the page and mirror with a published v0.4.2: the day's steps.
+- Nothing on KVM, a real VPS or Google Cloud for this candidate.
+
 ## Release candidate v0.4.1 (2026-11-04)
 
 Everything for the release except publishing: nothing was pushed, tagged, signed or uploaded, and no server was

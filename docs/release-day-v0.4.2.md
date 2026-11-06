@@ -56,6 +56,11 @@ Do not tag before CI is green on `$RELEASE_COMMIT`. If a job fails, fix on `main
 CHANGELOG (`[0.4.2] - 2026-11-06`) is the preparation date: change it in the fix commit if the tag lands on another
 day. Also: `git status` is clean and `git describe --tags` says `v0.4.1-<n>-g<commit>`.
 
+Open from the preparation (docs/PROGRESS.md, "Release candidate v0.4.2"): one HVF run of the core smoke shard
+measured the in-guest `dp-bench` scaling at 2.99x with 4 worker cores, just under the HVF-only threshold of 3.0x (CI
+runs TCG, where it is only reported). To look again on the Mac before the tag:
+`SMOKE_NO_GROUPS=1 SMOKE_SCENARIOS='^dp-bench$' scripts/smoke.sh --accels hvf` (after `make build`).
+
 ## 2. Tag and push
 
 Earlier tags (v0.2.0 to v0.4.1) are annotated, not signed; v0.4.2 follows them.
