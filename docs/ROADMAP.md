@@ -380,6 +380,29 @@ to matter with NVMe (LATER-2, LATER-4).
   site texts here only describe urMQTT). If it should point at this project as a reference, the claims it can
   cite are the measured ones in section 1.
 
+### Community readiness (owner decision, 2026-11-06)
+
+Goal: someone from the open-source community can try urMQTT, deploy it and report what they find without help
+from the maintainers. Four items, done on branch `community-docs`:
+
+1. **A first-hour guide**, [FIRST-HOUR.md](FIRST-HOUR.md): from nothing to a first message over mutual TLS (test PKI,
+   builder page or `urmqtt-config pack`, QEMU on a laptop or a KVM VPS, `mosquitto_pub`/`mosquitto_sub`, the five
+   most likely failures with their log lines), with what was run for it.
+2. **Issue and pull-request templates**: the forms `bug`, `boot-failure` and `question` in `.github/ISSUE_TEMPLATE/`
+   (blank issues off, vulnerabilities pointed to SECURITY.md), checked by `scripts/check-issue-forms.py`; the pull
+   request template with the DCO sign-off, `make check` and the edition rule for drivers that are not virtio.
+3. **One page of known problems**, [KNOWN-ISSUES.md](KNOWN-ISSUES.md): what affects a user from AUDIT.md sections 5
+   and 6, the "Limits" of v0.4.0 and v0.4.1, and the protocol, network, platform and entropy limits, each with a
+   workaround and its tracking reference; `scripts/check-known-issues.py` (CI Lint job) fails when a cited AUDIT id,
+   ROADMAP item or ADR no longer exists or an AUDIT weakness it cites is marked fixed.
+4. **Consistent status wording**: README's title, badges, banners, "Why urMQTT" table and milestone tables brought
+   in line with section 6 below and the documents; the status word stays "pre-alpha".
+
+**Definition of "alpha".** The status word changes from "pre-alpha" to "alpha" (README badge and banner, SECURITY.md,
+KNOWN-ISSUES.md) when all three of these have landed on `main`: a real release signing key (NOW-2), the entropy
+option, that is the weak seeding made visible and its production default decided (NOW-4, D-3), and the MTU the
+network announces honoured (NOW-19). The owner makes the change.
+
 ## 4. Candidate items that need an owner decision
 
 Questions, not assumptions. Each blocks one or more items above.
@@ -423,7 +446,9 @@ Recorded so they are not proposed again without a new reason.
 ## 6. README drift corrections
 
 README's milestone tables and banners were not updated after several milestones closed. Proposed corrections,
-for a separate change (README is not edited here):
+for a separate change (README is not edited here). **Status (2026-11-06): applied** (the H, X9 and X11 rows and
+the NOTE banner earlier, the rest on branch `community-docs`: title, badges, WARNING banner, "Why urMQTT" table,
+Features Build row, M11, the O1 to D1 rows and the order list), as far as the documents back each statement:
 
 | Where in README | README says | State per the docs |
 |---|---|---|

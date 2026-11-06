@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- README: a "Start here" line (first hour, known issues, editions, security policy); the title, badges, WARNING
+  banner, "Why urMQTT" table, Features Build row and M11 row brought in line with ROADMAP section 6; rows for O1 to
+  O4, T1, C1, P1 and D1 (built, not deployed); the order list names 11b to 11e and the first-release scope. The status
+  word stays "pre-alpha".
 - **Miri in CI runs one process per test, four at a time** (cargo-nextest, `scripts/miri.sh`, ADR-262), instead of
   each crate's tests one after another on one core. The same tests run; two tls tests run a smaller size under Miri only
   (`MAX_CAPTURED` 64 instead of 4096 for the capture-table eviction test, 40 instead of 400 corruptions per certificate
@@ -21,6 +25,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **docs/FIRST-HOUR.md**: from nothing to a first message over mutual TLS in about an hour (test PKI, the builder
+  page or `urmqtt-config pack`, QEMU for aarch64 and x86_64 with the ISO and an empty disk, a KVM VPS as on netcup,
+  `mosquitto_pub`/`mosquitto_sub` and the `$SYS` topics, the five most likely failures with their log lines), with
+  what was run for it: the v0.4.1 template under HVF (aarch64) and TCG (x86_64) on a Mac.
+- **docs/KNOWN-ISSUES.md**: the limits and open weaknesses that affect a user (AUDIT.md sections 5 and 6, the
+  v0.4.0 and v0.4.1 "Limits", protocol, network, platform and entropy limits), each with a workaround and its
+  tracking reference. `scripts/check-known-issues.py`, run in the Lint job, fails when a cited AUDIT id, ROADMAP item
+  or ADR does not exist or a cited AUDIT weakness is marked fixed.
+- **Issue forms** `bug`, `boot-failure` and `question` (replacing `bug_report`), blank issues off, the contact links
+  to the private advisory and SECURITY.md; `scripts/check-issue-forms.py` checks the forms against GitHub's rules.
+  The pull request template names the DCO sign-off, `make check` and the edition rule for drivers that are not virtio.
+- ROADMAP "Community readiness" and the definition of "alpha" (a real release key, NOW-2; the entropy decision,
+  NOW-4; the MTU, NOW-19).
 - **docs/EDITIONS.md**: the open edition (this repository, everything that runs on virtio devices) and the commercial
   edition (drivers for devices that are not virtio, bare metal, support), the promise that the line never moves backwards,
   contribution and licensing rules; README "Editions", ROADMAP NOW-18 (kernel as a library) and Google Cloud as the next
