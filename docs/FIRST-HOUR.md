@@ -4,7 +4,9 @@ From nothing to a first MQTT message over mutual TLS, in about an hour. For a re
 Linux or macOS laptop. Nothing here needs our help: if a step fails, section 6 lists the usual causes with the log
 line each one prints, and section 7 says where to report the rest.
 
-urMQTT is **pre-alpha** (the release assets are dev builds and the signing key is a test key). Read
+urMQTT is **pre-alpha**. Releases from v0.4.2 on are signed with the release key in `minisign.pub` and ship the
+release kernel and images with an empty configuration; v0.1.0 to v0.4.1 were signed with the former test key
+`9229E05252D01F8E` (pinned, docs/RELEASE.md section 9) and shipped dev builds. Read
 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) before you put it anywhere that matters.
 
 | Step | What | Time |
@@ -125,7 +127,7 @@ V=v0.4.1
 for f in urmqtt-template-$V-universal.iso SHA256SUMS SHA256SUMS.minisig; do
   curl -fLO "https://github.com/zeljan-alduk/urMQTT/releases/download/$V/$f"
 done
-minisign -Vm SHA256SUMS -P RWSOH9BSUuApkkBWq/AZJ03Rn63oOYq+yXzC/vgI1PZ/i5yaE+SVzOWS   # the (test) release key
+minisign -Vm SHA256SUMS -P RWSOH9BSUuApkkBWq/AZJ03Rn63oOYq+yXzC/vgI1PZ/i5yaE+SVzOWS   # the former test key (v0.1.0 to v0.4.1); from v0.4.2 on: -p minisign.pub at the tag
 shasum -a 256 -c SHA256SUMS --ignore-missing      # Linux: sha256sum -c SHA256SUMS --ignore-missing
 cd ../..
 ```
@@ -413,7 +415,7 @@ provider; under QEMU check the port forward (`--fwd`) and that no other program 
 ## Tested
 
 Run for this guide on 2026-11-06, on a MacBook (Apple M4 Pro, macOS 26), QEMU 11.1.2, mosquitto 2.1.2, OpenSSL
-3.6.3, with the published v0.4.1 template (its `SHA256SUMS` minisign-verified against the release key and the
+3.6.3, with the published v0.4.1 template (its `SHA256SUMS` minisign-verified against the former test key, then the release key of v0.4.1, and the
 template's SHA-256 checked) configured by `urmqtt-config pack` from this repository:
 
 - `make certs`; the VPS server certificate of step 1 (`openssl verify` OK; packed and booted with

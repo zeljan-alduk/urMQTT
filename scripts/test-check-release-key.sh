@@ -50,6 +50,11 @@ fi
 if command -v minisign >/dev/null; then
     HOME=$TMP minisign -G -W -p "$TMP/new.pub" -s "$TMP/new.key" >/dev/null
     dir=$(tree "$TMP/new.pub" new)
+    # The ring names the repository's release key id; the copy must name the new key's.
+    old_id=$(head -1 "$ROOT/minisign.pub" | awk '{print $NF}')
+    new_id=$(head -1 "$TMP/new.pub" | awk '{print $NF}')
+    sed -i.bak "s/\"key_id\": \"$old_id\"/\"key_id\": \"$new_id\"/" "$dir/keys/release-keys.json"
+    rm -f "$dir/keys/release-keys.json.bak"
     expect 0 "a new release key passes" "$CHECK" --root "$dir"
     # A broken ring: the test key's declared id does not match its file.
     sed -i.bak 's/"key_id": "9229E05252D01F8E"/"key_id": "0000000000000000"/' "$dir/keys/release-keys.json"
