@@ -4,7 +4,8 @@
 
 use alloc::format;
 
-use crate::script::run;
+use crate::script::{cfg, run, run_with};
+use crate::{MAX_MSS, MIN_MSS, cookie, mss_for_mtu};
 
 /// Three-way handshake through the SYN cookie, data both ways, the
 /// client's close.
@@ -291,6 +292,132 @@ fn ack_of_unsent_data_is_refused() {
 < P. seq=1 ack=1000 len=10
 > . ack=1
 expect data=0 conns=1
+",
+    );
+}
+
+/// NOW-19: the MSS follows the link MTU (IPv4: MTU - 40), never above what
+/// the stack can send (1460) nor below the IPv4 minimum (536).
+#[test]
+fn mss_is_derived_from_the_mtu() {
+    for (mtu, mss) in [
+        (576, 536),
+        (1280, 1240),
+        (1460, 1420),
+        (1500, 1460),
+        (9000, 1460),
+        (100, 536),
+        (0, 536),
+        (u16::MAX, 1460),
+    ] {
+        assert_eq!(mss_for_mtu(mtu), mss, "mtu {mtu}");
+    }
+    // The cookie table spans exactly that range.
+    assert_eq!(cookie::MSS_TABLE[0], MIN_MSS);
+    assert_eq!(cookie::MSS_TABLE[7], MAX_MSS);
+}
+
+/// NOW-19: for each MTU the SYN-ACK announces MTU - 40 and the data the
+/// application sends leaves in segments of at most that much payload: a
+/// peer on a 1500-byte network that announces 1460 still gets segments
+/// that fit the smaller link.
+#[test]
+fn segments_fit_the_mtu() {
+    for (mtu, mss) in [(576u16, 536u32), (1460, 1420), (1500, 1460), (9000, 1460)] {
+        let mut c = cfg();
+        c.mss = mss_for_mtu(mtu);
+        // 4 KiB: a QoS 1 PUBLISH of the smoke scenario.
+        let total = 4096u32;
+        let full = total / mss;
+        let mut script = format!(
+            "
+< S seq=0 mss=1460
+> S. seq=0 ack=1 mss={mss}
+< . seq=1 ack=1
+app send {total}
+"
+        );
+        for i in 0..full {
+            script.push_str(&format!("> P. seq={} len={mss}\n", 1 + i * mss));
+        }
+        script.push_str(&format!(
+            "> P. seq={} len={}\n> nothing\n< . seq=1 ack={}\nexpect conns=1\n",
+            1 + full * mss,
+            total - full * mss,
+            total + 1
+        ));
+        run_with(c, &script);
+    }
+}
+
+/// NOW-19: the smaller of the two MSS values wins (RFC 9293 §3.7.1). A peer
+/// with a smaller MSS than ours gets its own; one with a larger gets ours.
+/// The SYN-cookie rounds the peer's MSS down to its table (1200 stays 1200).
+#[test]
+fn the_smaller_mss_wins() {
+    let mut c = cfg();
+    c.mss = mss_for_mtu(1460);
+    run_with(
+        c.clone(),
+        "
+< S seq=0 mss=1200
+> S. seq=0 ack=1 mss=1420
+< . seq=1 ack=1
+app send 2500
+> P. seq=1 len=1200
+> P. seq=1201 len=1200
+> P. seq=2401 len=100
+",
+    );
+    run_with(
+        c,
+        "
+< S seq=0 mss=8960
+> S. seq=0 ack=1 mss=1420
+< . seq=1 ack=1
+app send 2000
+> P. seq=1 len=1420
+> P. seq=1421 len=580
+",
+    );
+}
+
+/// NOW-19: the MTU drops while a connection is open (a DHCP renewal that
+/// announces 1460): the open connection sends no segment larger than the
+/// new MSS from then on, retransmissions included, and new connections
+/// announce it.
+#[test]
+fn a_lower_mtu_applies_to_open_connections() {
+    with_open(
+        "
+app send 1460
+> P. seq=1 len=1460
+app mtu 1460
+app send 1500
+> P. seq=1461 len=1420
+> P. seq=2881 len=80
++1000
+> P. seq=1 len=1420            # the timed-out first segment, cut to the new MSS
+",
+    );
+    run_with(
+        {
+            let mut c = cfg();
+            c.mss = 9000; // clamped by the stack: it cannot send more than 1460
+            c
+        },
+        "
+< S seq=0 mss=65535
+> S. seq=0 ack=1 mss=1460
+",
+    );
+    let mut c = cfg();
+    c.mss = 100; // below the IPv4 minimum: clamped up to 536
+    run_with(
+        c,
+        "
+< S seq=0 mss=1460
+> S. seq=0 ack=1 mss=536
 ",
     );
 }

@@ -41,8 +41,9 @@ pub(crate) fn rate_text(tokens: u32, per_ms: u32) -> String {
 /// The defaults as TOML text, with every section present: the TOML form of
 /// the empty configuration. Keys that have no default are left out.
 pub fn default_toml() -> String {
-    let mut out = String::new();
-    let mut section = "";
+    // Sections in the order of their first field; a field added to a section
+    // later (a higher tag, e.g. `network.mtu`) joins its section.
+    let mut sections: Vec<(&str, String)> = Vec::new();
     for f in fields::FIELDS {
         let Some((sec, name)) = f.key.split_once('.') else {
             continue;
@@ -50,11 +51,20 @@ pub fn default_toml() -> String {
         let Some(value) = default_value(f) else {
             continue;
         };
-        if sec != section {
-            out.push_str(&format!("\n[{sec}]\n"));
-            section = sec;
+        let i = match sections.iter().position(|(s, _)| *s == sec) {
+            Some(i) => i,
+            None => {
+                sections.push((sec, String::new()));
+                sections.len() - 1
+            }
+        };
+        if let Some((_, body)) = sections.get_mut(i) {
+            body.push_str(&format!("{name} = {value}\n"));
         }
-        out.push_str(&format!("{name} = {value}\n"));
+    }
+    let mut out = String::new();
+    for (sec, body) in sections {
+        out.push_str(&format!("\n[{sec}]\n{body}"));
     }
     out
 }
@@ -353,6 +363,9 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
         }
     }
     b.uint(tag::NET_TLS_PORT, u64::from(cfg.network.mqtt_tls_port))?;
+    // NOW-19, ADR-264: absent (0) writes nothing, so the blob keeps its
+    // version; a value needs format 7.
+    b.uint(tag::NET_MTU, u64::from(cfg.network.mtu.unwrap_or(0)))?;
     b.uint(
         tag::NET_PLAIN_PORT,
         u64::from(cfg.network.mqtt_plain_port.unwrap_or(0)),

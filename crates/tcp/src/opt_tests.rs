@@ -252,6 +252,43 @@ fn segments_are_shorter_by_the_timestamp_option() {
     }
 }
 
+/// NOW-19: with timestamps, for each link MTU, every segment (first
+/// transmissions and a retransmission after a timeout) fits the MTU as an
+/// IPv4 packet: 20 bytes of IP header, 32 of TCP with the option, payload of
+/// at most MSS - 12.
+#[test]
+fn timestamped_segments_fit_every_mtu() {
+    for mtu in [576u16, 1460, 1500, 9000] {
+        let mut c = cfg(1 << 20, 1 << 18);
+        c.mss = mss_for_mtu(mtu);
+        let mut s = TcpStack::new(c, 0);
+        let mut app = Sink::default();
+        let (mut p, synack) = open(&mut s, &mut app, Some(7), true, true);
+        assert_eq!(synack.mss, Some(mss_for_mtu(mtu)), "mtu {mtu}");
+        let conn = app.conns[0];
+        s.input(5, CLIENT, &p.data(0, &stream(10)), &mut app, &mut |_, _| {});
+        s.send(conn, &stream(20_000));
+        let mut out = Vec::new();
+        s.flush(6, &mut |_, b| out.push(b.to_vec()));
+        // Nothing is acknowledged: the retransmission timer fires.
+        s.poll(3_000, &mut app, &mut |_, b| out.push(b.to_vec()));
+        assert!(out.len() >= 3, "mtu {mtu}: {} segments", out.len());
+        assert!(s.stats.retransmits > 0, "mtu {mtu}");
+        let wire_max = usize::from(mtu.min(1500));
+        let payload_max = usize::from(mss_for_mtu(mtu)) - 12;
+        let mut largest = 0;
+        for seg in &out {
+            let h = wire::parse(SERVER, CLIENT, seg).unwrap();
+            let payload = seg.len() - h.data_off;
+            assert!(payload <= payload_max, "mtu {mtu}: payload {payload}");
+            assert!(20 + seg.len() <= wire_max, "mtu {mtu}: {}", seg.len());
+            largest = largest.max(payload);
+        }
+        // And the segments are full: the MTU is used, not undercut.
+        assert_eq!(largest, payload_max, "mtu {mtu}");
+    }
+}
+
 #[test]
 fn one_lost_segment_costs_one_retransmission() {
     let mut s = TcpStack::new(cfg(1 << 20, 1 << 18), 0);

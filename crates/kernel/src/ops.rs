@@ -22,7 +22,8 @@ const METRICS_EVERY_MS: u64 = 10_000;
 const HEALTH_EVERY_MS: u64 = 10_000;
 /// Health checks in a row without progress before a core counts as stuck.
 const STALLED_CHECKS: u8 = 2;
-/// Largest statsd datagram (fits any Ethernet MTU).
+/// Largest statsd datagram; smaller when the link MTU is (NOW-19: never a
+/// fragmented datagram, `Iface::max_udp_payload`).
 const STATSD_MAX: usize = 1400;
 /// RFC 5424 facility local0.
 const FACILITY: u8 = 16;
@@ -198,7 +199,7 @@ impl Ops {
         {
             self.last_metrics_ms = now_ms;
             if self.reachable(iface, dst, now_ms, out) {
-                for d in self.metrics_datagrams() {
+                for d in self.metrics_datagrams(STATSD_MAX.min(iface.max_udp_payload())) {
                     if !iface.send_udp(dst.addr, STATSD_SPORT, dst.port, d.as_bytes(), out) {
                         self.unsent += 1;
                     }
@@ -229,7 +230,7 @@ impl Ops {
         false
     }
 
-    fn metrics_datagrams(&mut self) -> Vec<String> {
+    fn metrics_datagrams(&mut self, max: usize) -> Vec<String> {
         // Relaxed: statistics.
         let conns: u64 = dataplane::CONNECTIONS
             .iter()
@@ -466,7 +467,7 @@ impl Ops {
         let mut out: Vec<String> = Vec::new();
         let mut cur = String::new();
         for l in lines {
-            if !cur.is_empty() && cur.len() + 1 + l.len() > STATSD_MAX {
+            if !cur.is_empty() && cur.len() + 1 + l.len() > max {
                 out.push(core::mem::take(&mut cur));
             }
             if !cur.is_empty() {

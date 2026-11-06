@@ -783,6 +783,135 @@ attack_raw() {
     done
 }
 
+# NOW-19 (ADR-264): the link MTU. A static address with `network.mtu = 1460` (Google Cloud's VPC): the boot
+# line says so, `$SYS/broker/net/mtu` reports it, a 4 KiB QoS 1 message goes device -> broker -> backend over
+# mutual TLS, and the capture shows that no frame the guest sent exceeds 14 + 1460 bytes and that its SYN-ACKs
+# announce MSS 1420. QEMU's user network cannot announce an MTU (no `mtu=` option, no DHCP option 26), so the
+# DHCP variants run on the raw datagram transport of urmqtt-attack, whose DHCP server announces option 26:
+# 1460 is used, 9000 is capped at the 1500 the driver sends, 300 is refused (out of range) and 1500 stays.
+net_mtu() {
+    if ! command -v mosquitto_pub >/dev/null || ! command -v mosquitto_sub >/dev/null; then
+        echo "  ✗ the mtu scenarios need the mosquitto clients"; FAILED=$((FAILED + 1)); return 0
+    fi
+    local d="$ROOT/deploy/dev" cfg="$OUT/mtu-static-config.toml" iso="$OUT/mtu-static.raw"
+    mkdir -p "$OUT"
+    # The dev configuration with QEMU's user-network address set statically, the smaller MTU, and room for a
+    # 4 KiB payload in one MQTT packet (the dev limit is 4096 bytes for the whole packet).
+    awk '/^\[network\]/ { net = 1 } /^\[/ && !/^\[network\]/ { net = 0 }
+         net && /^mode = / { print "mode = \"static\""; print "address = \"10.0.2.15/24\"";
+                             print "gateway = \"10.0.2.2\""; print "mtu = 1460"; next }
+         /^max_packet_size = 4096/ { print "max_packet_size = 8192"; next } { print }' \
+        "$d/config.toml" >"$cfg"
+    MKIMG_EXTRA=(--config "$cfg" --config-root "$d")
+    mkimg "$iso" "serve"
+    MKIMG_EXTRA=()
+    local tls=(--cafile "$d/ca.pem") accel
+    for accel in $ACCELS; do
+        local log="$OUT/mtu-static-$accel.log" data="$OUT/mtu-static-$accel.img" status=0
+        local payload="$OUT/mtu-4k.txt" got="$OUT/mtu-4k-$accel.got"
+        python3 -I -c 'import sys; sys.stdout.write("".join(chr(97 + (i * 7 + i // 26) % 26) for i in range(4096)))' >"$payload"
+        rm -f "$log.pcap" "$got"
+        fresh_disk "$iso" "$data"
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883" --pcap "$log.pcap"
+        if wait_log "$log" "TLS 1.3 listener on port 8883"; then
+            {
+                mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i backend "${tls[@]}" \
+                    --cert "$d/services/backend.pem" --key "$d/services/backend.key" \
+                    -t devices/device-001/mtu -q 1 -C 1 -W 30 -N >"$got" 2>&1 &
+                local spid=$!
+                sleep 2
+                mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i device-001 "${tls[@]}" \
+                    --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" \
+                    -t devices/device-001/mtu -q 1 -f "$payload" || echo "client: publish failed"
+                wait "$spid" || echo "client: subscriber failed"
+                if cmp -s "$payload" "$got"; then echo "client: mtu-4k-qos1 ok"; else echo "client: mtu-4k-qos1 FAILED"; fi
+                # The retained copy may predate the MTU (it is refreshed every 10 s): take the next one.
+                local sys
+                sys=$(mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i operator "${tls[@]}" \
+                    --cert "$d/services/operator.pem" --key "$d/services/operator.key" \
+                    -t "\$SYS/broker/net/mtu" -C 2 -W 25 2>&1 | tail -1) || true
+                echo "client: sys net/mtu = $sys"
+            } >"$log.client" 2>&1
+        else
+            status=124
+        fi
+        kill_vm
+        # The guest's frames (its MAC is fixed by run-qemu.sh): the largest, and the MSS of its SYN-ACKs.
+        python3 -I - "$log.pcap" >>"$log.client" 2>&1 <<'PY' || true
+import struct, sys
+data = open(sys.argv[1], "rb").read()
+off, big, full, mss = 24, 0, 0, set()
+while off + 16 <= len(data):
+    incl = struct.unpack_from("<I", data, off + 8)[0]
+    f = data[off + 16 : off + 16 + incl]
+    off += 16 + incl
+    if f[6:12] != bytes.fromhex("525400123456") or f[12:14] != b"\x08\x00":
+        continue
+    big = max(big, len(f))
+    ip = f[14:]
+    if ip[9] == 6:
+        tcp = ip[(ip[0] & 15) * 4 :]
+        if tcp[13] & 0x12 == 0x12:
+            o, end = 20, (tcp[12] >> 4) * 4
+            while o < end and tcp[o] != 0:
+                if tcp[o] == 1:
+                    o += 1
+                    continue
+                if tcp[o] == 2:
+                    mss.add(struct.unpack_from(">H", tcp, o + 2)[0])
+                o += max(tcp[o + 1], 2)
+        if len(f) == 14 + 1460:
+            full += 1
+print(f"client: guest frames at most {big} bytes, {full} of 1474, SYN-ACK mss {sorted(mss)}")
+PY
+        cat "$log.client" >>"$log" 2>/dev/null || true
+        check "mtu-static-1460 [$accel]" "$log" "$status" \
+            "net: static address 10\.0\.2\.15/24 gateway 10\.0\.2\.2" "net: mtu 1460 \(static\)" \
+            "client: mtu-4k-qos1 ok" "client: sys net/mtu = 1460" \
+            "client: guest frames at most (1[0-3][0-9][0-9]|14[0-6][0-9]|147[0-4]) bytes, [1-9][0-9]* of 1474, SYN-ACK mss \[1420\]" \
+            "NOT:client: .*(FAILED|failed)" "$NO_FAULT"
+    done
+    # DHCP option 26 on the raw transport (urmqtt-attack's DHCP server; QEMU slirp has no such option).
+    local attack="$ROOT/target/release/urmqtt-attack"
+    if [[ ! -x "$attack" ]] || [[ "$ROOT/tools/attack/src/raw.rs" -nt "$attack" ]]; then
+        (cd "$ROOT" && cargo build --release -q -p urmqtt-attack) || {
+            echo "  ✗ urmqtt-attack build failed"; FAILED=$((FAILED + 1)); return 0; }
+    fi
+    iso="$OUT/mtu-dhcp.raw"
+    mkimg "$iso" "serve log=info"
+    local n=0 spec
+    for accel in $ACCELS; do
+        for spec in "1460|net: mtu 1460 \(dhcp\)|SYN-ACK mss 1420" \
+            "9000|net: mtu 1500 \(dhcp; 9000 asked for, this driver sends at most 1500-byte packets\)|SYN-ACK mss 1460" \
+            "300|net: dhcp announced mtu 300, outside 576\.\.=9000: ignored|SYN-ACK mss 1460"; do
+            local announce p_kernel p_client
+            IFS='|' read -r announce p_kernel p_client <<<"$spec"
+            local log="$OUT/mtu-dhcp-$announce-$accel.log" data="$OUT/mtu-dhcp-$announce-$accel.img" status=0
+            local lp=$((45100 + n * 2)) rp=$((45101 + n * 2)); n=$((n + 1))
+            fresh_disk "$iso" "$data"
+            ("$attack" mtu-probe --dgram "$lp:$rp" --port 8883 --dhcp-mtu "$announce") >"$log.client" 2>&1 &
+            local apid=$!
+            start_vm "$log" --disk "$data" --accel "$accel" --dgram "$lp:$rp"
+            local waited=0
+            while kill -0 "$apid" 2>/dev/null; do
+                if ! kill -0 "$VM_PID" 2>/dev/null || (( waited >= TIMEOUT * 10 )); then
+                    status=124; kill "$apid" 2>/dev/null || true; break
+                fi
+                sleep 0.1; waited=$((waited + 1))
+            done
+            local rc=0; wait "$apid" 2>/dev/null || rc=$?
+            (( status == 0 )) && status=$rc
+            kill_vm
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            local extra=()
+            [[ $announce == 300 ]] && extra=("net: mtu 1500 \(default\)")
+            check "mtu-dhcp-$announce [$accel]" "$log" "$status" \
+                "net: dhcp lease 10\.0\.2\.15" "$p_kernel" ${extra[@]+"${extra[@]}"} \
+                "attack: mtu-probe: SYN mss 1460, $p_client" "$NO_FAULT"
+        done
+    done
+}
+
 # H3 (tools/attack): application-level adversaries over the TLS port, run in
 # sequence against one broker. Each must be bounded: slowloris trips the
 # per-IP in-flight cap, fragmented records still complete, an oversize packet
@@ -3715,6 +3844,7 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want storm && storm
     want fin_wait2 && fin_wait2
     want attack_raw && attack_raw
+    want net_mtu && net_mtu
     want attack_app && attack_app
     want observability && observability
     want no_hw_rng && no_hw_rng
@@ -4335,6 +4465,7 @@ fi
 want storm && storm
 want fin_wait2 && fin_wait2
 want attack_raw && attack_raw
+want net_mtu && net_mtu
 want attack_app && attack_app
 want observability && observability
 want first_boot && first_boot

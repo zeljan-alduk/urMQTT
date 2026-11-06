@@ -33,6 +33,8 @@ function syncFields(force = false) {
 }
 
 function fieldRange(f) {
+  // A field whose range has a meaning of its own (network.mtu: 0 is "from DHCP").
+  if (has(`field.range.${f.id}`)) return t(`field.range.${f.id}`);
   if (f.type === 'uint') return t('field.range', { min: f.min, max: f.max });
   return '';
 }

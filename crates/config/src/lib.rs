@@ -95,6 +95,10 @@ pub struct Network {
     pub mqtt_tls_port: u16,
     /// `None` when plaintext MQTT is disabled (always in non-dev builds).
     pub mqtt_plain_port: Option<u16>,
+    /// `network.mtu` (NOW-19, ADR-264): `None` takes the MTU from DHCP
+    /// option 26, else 1500; a value (576..=9000) is used as it is, in every
+    /// mode, and is the only source with a static address.
+    pub mtu: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy)]

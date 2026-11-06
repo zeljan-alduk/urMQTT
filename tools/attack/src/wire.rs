@@ -153,6 +153,8 @@ pub struct Parsed {
     pub l4: (u16, u16, u32, u32, u8),
     pub payload: Vec<u8>,
     pub arp: Option<ArpReq>,
+    /// For TCP: the MSS option, if the segment carries one.
+    pub mss: Option<u16>,
 }
 
 pub struct ArpReq {
@@ -170,6 +172,27 @@ fn be32(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
 
+/// The MSS option (kind 2, length 4) among TCP options.
+fn tcp_mss(mut o: &[u8]) -> Option<u16> {
+    while let Some(&kind) = o.first() {
+        match kind {
+            0 => return None,
+            1 => o = &o[1..],
+            _ => {
+                let len = usize::from(*o.get(1)?);
+                if len < 2 {
+                    return None;
+                }
+                if kind == 2 && len == 4 {
+                    return be16(o, 2);
+                }
+                o = o.get(len..)?;
+            }
+        }
+    }
+    None
+}
+
 pub fn parse(frame: &[u8]) -> Option<Parsed> {
     if frame.len() < ETH_HDR {
         return None;
@@ -185,6 +208,7 @@ pub fn parse(frame: &[u8]) -> Option<Parsed> {
         l4: (0, 0, 0, 0, 0),
         payload: Vec::new(),
         arp: None,
+        mss: None,
     };
     match ethertype {
         ETHERTYPE_ARP => {
@@ -215,6 +239,7 @@ pub fn parse(frame: &[u8]) -> Option<Parsed> {
                         *l4.get(13)? & 0x3f,
                     );
                     p.payload = l4.get(data_off..)?.to_vec();
+                    p.mss = tcp_mss(l4.get(20..data_off)?);
                 }
                 PROTO_UDP => {
                     p.l4 = (be16(l4, 0)?, be16(l4, 2)?, 0, 0, 0);

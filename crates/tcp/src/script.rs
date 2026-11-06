@@ -7,6 +7,7 @@
 //! > nothing                      the server sent nothing
 //! app send 100                   the application sends 100 bytes
 //! app close                      the application closes
+//! app mtu 1460                   the link MTU changed (DHCP option 26)
 //! expect conns=1 data=100 peer_closed closed=reset
 //! ```
 //!
@@ -176,9 +177,10 @@ pub struct Runner {
 }
 
 impl Runner {
-    pub fn new() -> Self {
+    /// A runner whose stack has `cfg` (an MSS of another link MTU, NOW-19).
+    pub fn with_config(cfg: Config) -> Self {
         Self {
-            s: TcpStack::new(cfg(), 0),
+            s: TcpStack::new(cfg, 0),
             app: ScriptApp::default(),
             now: 0,
             out: VecDeque::new(),
@@ -334,6 +336,10 @@ impl Runner {
                 }
             }
             ["close"] => self.s.close(c),
+            // The link MTU changed (NOW-19): what DHCP option 26 does.
+            ["mtu", n] => self
+                .s
+                .set_mss(mss_for_mtu(n.parse().map_err(|e| format!("{e}"))?)),
             ["window", n] => self
                 .s
                 .set_recv_space(c, n.parse().map_err(|e| format!("{e}"))?),
@@ -398,7 +404,12 @@ impl Runner {
 
 /// Runs `script`; panics with the failing line.
 pub fn run(script: &str) {
-    if let Err(e) = Runner::new().run(script) {
+    run_with(cfg(), script);
+}
+
+/// Runs `script` against a stack with `cfg`; panics with the failing line.
+pub fn run_with(cfg: Config, script: &str) {
+    if let Err(e) = Runner::with_config(cfg).run(script) {
         panic!("{e}");
     }
 }

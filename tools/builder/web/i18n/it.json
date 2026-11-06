@@ -86,6 +86,7 @@
   "field.changed": "modificato",
   "field.reset": "Ripristina il valore predefinito",
   "field.range": "Consentito: da {min} a {max}.",
+  "field.range.network.mtu": "0 (predefinito): l'MTU annunciata dalla rete tramite DHCP, altrimenti 1500. Altri valori: da 576 a 9000 byte.",
   "unit.ms": "Millisecondi.",
   "unit.mb": "Megabyte.",
   "unit.s": "Secondi.",

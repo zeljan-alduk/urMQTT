@@ -86,6 +86,7 @@
   "field.changed": "zmenené",
   "field.reset": "Obnoviť predvolenú hodnotu",
   "field.range": "Povolené: od {min} do {max}.",
+  "field.range.network.mtu": "0 (predvolené): MTU, ktorú sieť oznámi cez DHCP, inak 1500. Iné hodnoty: 576 až 9000 bajtov.",
   "unit.ms": "Milisekundy.",
   "unit.mb": "Megabajty.",
   "unit.s": "Sekundy.",

@@ -86,6 +86,7 @@
   "field.changed": "promijenjeno",
   "field.reset": "Vrati na zadano",
   "field.range": "Dopušteno: od {min} do {max}.",
+  "field.range.network.mtu": "0 (zadano): MTU koji mreža najavljuje putem DHCP-a, a bez njega 1500. Ostale vrijednosti: od 576 do 9000 bajtova.",
   "unit.ms": "Milisekunde.",
   "unit.mb": "Megabajti.",
   "unit.s": "Sekunde.",

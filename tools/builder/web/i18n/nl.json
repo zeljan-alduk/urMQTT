@@ -86,6 +86,7 @@
   "field.changed": "gewijzigd",
   "field.reset": "Terugzetten naar standaard",
   "field.range": "Toegestaan: {min} tot {max}.",
+  "field.range.network.mtu": "0 (standaard): de MTU die het netwerk via DHCP meldt, anders 1500. Andere waarden: 576 tot 9000 bytes.",
   "unit.ms": "Milliseconden.",
   "unit.mb": "Megabytes.",
   "unit.s": "Seconden.",

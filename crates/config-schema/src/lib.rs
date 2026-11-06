@@ -388,6 +388,9 @@ struct RawNetwork {
     dhcp_timeout_s: Option<u32>,
     mqtt_tls_port: u16,
     mqtt_plain_port: u16,
+    /// 0: from DHCP option 26, else 1500 (NOW-19, ADR-264).
+    #[serde(default)]
+    mtu: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -627,7 +630,13 @@ pub struct Network {
     pub mode: NetworkMode,
     pub mqtt_tls_port: u16,
     pub mqtt_plain_port: Option<u16>,
+    /// `network.mtu`: `None` takes the MTU from DHCP (option 26), else 1500;
+    /// with mode `static` the value is the only source (NOW-19, ADR-264).
+    pub mtu: Option<u16>,
 }
+
+/// The values `network.mtu` may take besides 0 (NOW-19, ADR-264).
+pub const MTU_RANGE: core::ops::RangeInclusive<u32> = 576..=9000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tls {
@@ -1505,10 +1514,23 @@ fn validate_network(
         }
     };
 
+    let mtu = match raw.mtu {
+        0 => None,
+        m if MTU_RANGE.contains(&m) => u16::try_from(m).ok(),
+        _ => {
+            errors.push(err(
+                "network.mtu",
+                format!("must be 0 (the MTU from DHCP, else 1500) or in {MTU_RANGE:?} bytes"),
+            ));
+            None
+        }
+    };
+
     Network {
         mode,
         mqtt_tls_port: raw.mqtt_tls_port,
         mqtt_plain_port,
+        mtu,
     }
 }
 
@@ -2099,6 +2121,8 @@ mod console_tests;
 mod devices_tests;
 #[cfg(test)]
 mod encryption_tests;
+#[cfg(test)]
+mod mtu_tests;
 #[cfg(test)]
 mod pack_tests;
 #[cfg(test)]

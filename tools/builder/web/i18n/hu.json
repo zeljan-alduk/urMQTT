@@ -86,6 +86,7 @@
   "field.changed": "módosítva",
   "field.reset": "Visszaállítás alapértelmezettre",
   "field.range": "Megengedett: {min} és {max} között.",
+  "field.range.network.mtu": "0 (alapértelmezés): a hálózat által DHCP-n közölt MTU, ennek hiányában 1500. Egyéb értékek: 576–9000 bájt.",
   "unit.ms": "Ezredmásodperc.",
   "unit.mb": "Megabájt.",
   "unit.s": "Másodperc.",
