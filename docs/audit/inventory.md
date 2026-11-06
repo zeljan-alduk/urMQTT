@@ -10,12 +10,12 @@
 | `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 3631 | 0 | 101 (101) | deny |
 | `urmqtt-arch-x86_64` | `crates/arch-x86_64` | 6991 | 0 | 155 (155) | deny |
 | `urmqtt-attack` | `tools/attack` | 1010 | 0 | 0 (0) | default |
-| `urmqtt-broker` | `crates/broker` | 5868 | 729 | 0 (0) | forbid |
+| `urmqtt-broker` | `crates/broker` | 5934 | 729 | 0 (0) | forbid |
 | `urmqtt-builder-wasm` | `tools/builder/wasm` | 1186 | 0 | 29 (29) | deny |
 | `urmqtt-cfg` | `crates/cfg` | 4749 | 0 | 0 (0) | forbid |
 | `urmqtt-config` | `crates/config` | 1346 | 0 | 10 (10) | deny |
-| `urmqtt-config-schema` | `crates/config-schema` | 5198 | 0 | 0 (0) | forbid |
-| `urmqtt-config-tool` | `tools/config` | 1604 | 798 | 0 (0) | default |
+| `urmqtt-config-schema` | `crates/config-schema` | 5203 | 0 | 0 (0) | forbid |
+| `urmqtt-config-tool` | `tools/config` | 1633 | 836 | 0 (0) | default |
 | `urmqtt-control` | `crates/control` | 609 | 0 | 0 (0) | forbid |
 | `urmqtt-control-tool` | `tools/control` | 416 | 0 | 0 (0) | default |
 | `urmqtt-dbworker` | `crates/dbworker` | 172 | 0 | 22 (22) | default |
@@ -23,7 +23,7 @@
 | `urmqtt-diag-png` | `tools/diag-png` | 711 | 0 | 0 (0) | default |
 | `urmqtt-disk-tool` | `tools/disk` | 3001 | 866 | 0 (0) | default |
 | `urmqtt-dispatch` | `crates/dispatch` | 594 | 0 | 0 (0) | forbid |
-| `urmqtt-kernel` | `crates/kernel` | 18514 | 0 | 118 (118) | deny |
+| `urmqtt-kernel` | `crates/kernel` | 18547 | 0 | 118 (118) | deny |
 | `urmqtt-loadgen` | `tools/loadgen` | 1244 | 0 | 0 (0) | default |
 | `urmqtt-log` | `crates/log` | 2040 | 128 | 12 (12) | deny |
 | `urmqtt-mm` | `crates/mm` | 2580 | 0 | 74 (74) | deny |
@@ -42,7 +42,7 @@
 | `urmqtt-usys` | `crates/usys` | 477 | 0 | 8 (8) | default |
 | `urmqtt-virtio` | `crates/virtio` | 6223 | 0 | 30 (30) | deny |
 | `urmqtt-x25519` | `crates/x25519` | 1365 | 0 | 8 (8) | default |
-| **total** | | **107001** | | **916 (916)** | |
+| **total** | | **107134** | | **916 (916)** | |
 
 ## Vendored components
 

@@ -525,6 +525,14 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     if let Some(p) = s.platform.as_ref() {
         match devices::probe(p, &s.boot_entropy) {
             Ok(()) => {}
+            Err(devices::ProbeError::NoEntropy)
+                if !urmqtt_config::CONFIG.entropy.jitter_fallback =>
+            {
+                fatal_fmt(format_args!(
+                    "no entropy source (virtio-rng, {}) and entropy.fallback = \"none\" forbids the CPU-jitter fallback: refusing to run",
+                    devices::HW_RNG
+                ))
+            }
             Err(devices::ProbeError::NoEntropy) => fatal_fmt(format_args!(
                 "no entropy source (virtio-rng, {}, or a jitter fallback that passes its health tests): refusing to run",
                 devices::HW_RNG

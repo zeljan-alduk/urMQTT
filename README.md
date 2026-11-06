@@ -607,7 +607,7 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `acl.operator_ids` | exact ids (required, may be empty) | Operator identities: the only ones that read `$SYS/` statistics and use the MQTT console ([docs/OPERATE.md](docs/OPERATE.md)) |
 | `memory.kernel_heap_mb` | power of two, 1–1024 | Kernel heap (buddy allocator); ~500 B per idle connection, ~150 KiB per P-256 trust anchor (ADR-261) |
 | `memory.min_free_mb` | > 0, < heap | New connections are refused below this much free heap |
-| `entropy.fallback` | `jitter` \| `none` | Without virtio-rng and `RNDR`: seed from health-tested CPU jitter, or refuse to boot |
+| `entropy.fallback` | `jitter` (default) \| `none` | Without virtio-rng and `RNDR`/`RDRAND`: `jitter` seeds from health-tested CPU jitter and the firmware's values (weaker than a hardware source; the boot log, `$SYS/broker/entropy/source` and `urmqtt-config pack` say so); `none` refuses to boot (ADR-263) |
 | `storage.mode` | `disk` \| `auto` \| `ram` | Where the data lives (required outside dev). `auto`: the disk, but the ISO's live entry runs from RAM, ephemeral; `ram`: always RAM; `disk`: the live entry is refused (docs/DEPLOY.md, ADR-061) |
 | `storage.ram_percent` | 2–50, default 10 | Live/RAM mode: share of RAM for the in-memory data store, subtracted from the connection budget (ADR-062) |
 | `storage.sqlite_heap_mb` | 1–4096 | Fixed SQLite `memsys5` heap |

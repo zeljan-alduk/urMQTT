@@ -21,6 +21,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The weak entropy path is an explicit option, loud wherever a user decides** (NOW-4, D-3, ADR-263). The default stays
+  `entropy.fallback = "jitter"` (a host with no virtio-rng and no `RNDR`/`RDRAND`, such as the netcup ARM VPS, still boots).
+  The builder's basic view has a "Random numbers" choice (allow the CPU-jitter fallback, or require a hardware random number
+  generator) with a warning, the result card names the one built and the notes list "Random numbers may come from CPU jitter"
+  (14 translations, AI, unreviewed); `urmqtt-config pack`, `verify` and `show` print a `WARNING` line while the fallback is
+  allowed; `$SYS/broker/entropy/source` (also in the info reply and `status`) says what seeded the generator (`virtio-rng`,
+  `rndr`, `virtio-rng+rndr`, `jitter+firmware`); with `"none"` the refusal at boot names the key. Smoke scenario
+  `entropy_option`; docs/DEPLOY.md "Entropy".
 - **docs/EDITIONS.md**: the open edition (this repository, everything that runs on virtio devices) and the commercial
   edition (drivers for devices that are not virtio, bare metal, support), the promise that the line never moves backwards,
   contribution and licensing rules; README "Editions", ROADMAP NOW-18 (kernel as a library) and Google Cloud as the next

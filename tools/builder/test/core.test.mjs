@@ -248,6 +248,22 @@ test('risks name what deserves a second look', () => {
   assert.equal(got['watchdog-reset'], 'note');
 });
 
+test('the CPU-jitter entropy fallback is a note by default, and a hardware-only image says so instead (ADR-263)', () => {
+  const s = emptyState();
+  const risk = () => Object.fromEntries(evaluateRisks(model, s, null).map(r => [r.id, r.level]));
+  assert.equal(risk()['entropy-jitter'], 'note', 'the default allows the weak path, and the page says so');
+  assert.ok(!('entropy-none' in risk()));
+  s.values['entropy.fallback'] = 'none';
+  assert.ok(!('entropy-jitter' in risk()), 'requiring hardware removes the warning');
+  assert.equal(risk()['entropy-none'], 'note');
+  s.values['entropy.fallback'] = 'jitter';
+  assert.equal(risk()['entropy-jitter'], 'note');
+  // The choice is in the TOML only when it is not the default; `none` survives a round trip and the hash.
+  s.values['entropy.fallback'] = 'none';
+  assert.match(buildToml(model, s).toml, /\[entropy\]\s+fallback = "none"/);
+  assert.equal(decodeHash(model, encodeHash(model, s)).values['entropy.fallback'], 'none');
+});
+
 test('the file name of the result', () => {
   assert.equal(outputName('v0.2.0', 'My Lab!'), 'urmqtt-0.2.0-my-lab-universal.iso');
   assert.equal(outputName('v0.2.0', ''), 'urmqtt-0.2.0-custom-universal.iso');

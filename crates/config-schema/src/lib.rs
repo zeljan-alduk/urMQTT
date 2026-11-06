@@ -833,7 +833,12 @@ pub struct Cpu {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entropy {
-    /// Seed from CPU timing jitter when no hardware source exists.
+    /// `entropy.fallback = "jitter"` (the default): on a host without
+    /// virtio-rng and without RNDR/RDRAND, seed the generator from CPU
+    /// timing jitter and the firmware's values, which is weaker than a
+    /// hardware source (the boot log, `$SYS/broker/entropy/source` and
+    /// `urmqtt-config pack` say so). `false` (`"none"`): refuse to boot
+    /// without a hardware source (ADR-263).
     pub jitter_fallback: bool,
 }
 
