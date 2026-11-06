@@ -16,41 +16,62 @@ jobs:
       id-token: write
       attestations: write
     env:
-      # Optional: a passwordless minisign secret key (minisign -G -W) in the
-      # repository secret MINISIGN_SECRET_KEY signs SHA256SUMS (M17).
+      # The release key (ROADMAP NOW-2, docs/release-key-rotation.md): the secret half of
+      # minisign.pub, passwordless (minisign -G -W), in the repository secret
+      # MINISIGN_SECRET_KEY. A release is never published unsigned: the mirror and the
+      # builder page refuse it anyway.
       HAS_MINISIGN: ${{ secrets.MINISIGN_SECRET_KEY != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
+      # First, before anything is built: minisign.pub must be the real release key, not the
+      # placeholder and not the former test key, and keys/release-keys.json must be sound.
+      - name: The release key is set
+        run: scripts/check-release-key.sh
+      - name: The signing secret is set
+        if: env.HAS_MINISIGN != 'true'
+        run: |
+          echo "::error::the repository secret MINISIGN_SECRET_KEY is not set: a release is never published unsigned (docs/release-key-rotation.md)"
+          exit 1
       - uses: ./.github/actions/setup
         with:
           cache-key: release
           bare-metal-c: "true"
-      - run: make certs
-      # Only the dev image is published: prod images embed private keys and are
-      # built by the operator from their own deploy/prod/ (docs/DEPLOY.md).
-      # `make dist` also builds the template ISO (urmqtt-template-<version>-universal.iso:
-      # the release kernels, the empty configuration), which `urmqtt-config pack --iso`
-      # turns into a configured image without a toolchain (C1, ADR-218).
+      # A release is the release environment only, with the EMPTY configuration: the
+      # release kernels (no development certificate is built or embedded), the universal
+      # ISO (byte for byte the template, urmqtt-template-<version>-universal.iso), its raw
+      # disk image and the aarch64 ELF; `urmqtt-config pack --iso/--image` and the builder
+      # page configure them (C1, ADR-218). Images with keys are built by the operator from
+      # their own deploy/prod/ (docs/DEPLOY.md); the dev build with throwaway certificates
+      # is not published any more.
       - name: Install ISO tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends xorriso mtools
-      - run: make dist ENV=dev
-      - name: The template ISO is in the release and in SHA256SUMS
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends xorriso mtools minisign
+      - run: make dist ENV=release
+      - name: The release assets, and nothing of a dev build
         run: |
-          ls build/dist/urmqtt-template-*-universal.iso
-          grep -q 'urmqtt-template-.*-universal.iso$' build/dist/SHA256SUMS
+          v="$GITHUB_REF_NAME"
+          for f in "urmqtt-$v.elf" "urmqtt-$v.iso" "urmqtt-$v.img" "urmqtt-template-$v-universal.iso" "urmqtt-$v.cdx.json"; do
+            test -s "build/dist/$f" || { echo "::error::build/dist/$f is missing"; exit 1; }
+            grep -q "  $f\$" build/dist/SHA256SUMS || { echo "::error::$f is not in SHA256SUMS"; exit 1; }
+          done
+          cmp "build/dist/urmqtt-$v.iso" "build/dist/urmqtt-template-$v-universal.iso"
+          for f in build/dist/*-dev-*; do
+            if [[ -e $f ]]; then echo "::error::a dev asset is in build/dist: $f"; exit 1; fi
+          done
+          # No private key in any asset (the release kernels and the empty configuration hold none).
+          python3 -I scripts/check-no-pem-keys.py build/dist/*
       - name: Sign SHA256SUMS with minisign
-        if: env.HAS_MINISIGN == 'true'
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
-          sudo apt-get install -y -qq --no-install-recommends minisign
           key="$RUNNER_TEMP/minisign.key"
           (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
-          minisign -S -s "$key" -m build/dist/SHA256SUMS -t "urMQTT $GITHUB_REF_NAME dev $GITHUB_SHA" </dev/null
+          minisign -S -s "$key" -m build/dist/SHA256SUMS -t "urMQTT $GITHUB_REF_NAME release $GITHUB_SHA" </dev/null
           rm -f "$key"
+          # The secret must belong to the committed minisign.pub: what every user verifies with.
+          minisign -Vm build/dist/SHA256SUMS -p minisign.pub
       # The SBOM (CycloneDX, scripts/sbom.py) is built by make dist and listed
       # in SHA256SUMS; this binds it to the images as an SBOM attestation next
       # to the provenance below (H9, ADR-190).
@@ -60,7 +81,7 @@ jobs:
             build/dist/*.elf
             build/dist/*.iso
             build/dist/*.img
-          sbom-path: build/dist/urmqtt-dev-${{ github.ref_name }}.cdx.json
+          sbom-path: build/dist/urmqtt-${{ github.ref_name }}.cdx.json
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: build/dist/*
