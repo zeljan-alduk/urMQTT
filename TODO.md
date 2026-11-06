@@ -35,8 +35,9 @@ in [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## Before a real release
 
-- [ ] Replace the test minisign key (`minisign.pub`, CI secret `MINISIGN_SECRET_KEY`) with an offline, password-protected key.
-- [ ] A real production PKI. `deploy/prod/` holds a local test CA (git-ignored).
+- [ ] Replace the test minisign key with the release key: the code is on branch `release-key`, the owner's steps are
+  docs/release-key-rotation.md (generate offline, `gh secret set MINISIGN_SECRET_KEY`, commit `minisign.pub`, page, mirror).
+- [ ] A real production PKI: `scripts/pki.sh` and docs/PKI.md exist (branch `release-key`); the operator runs it offline.
 
 ## Known limits (no plan yet)
 

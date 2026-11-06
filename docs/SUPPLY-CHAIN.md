@@ -27,7 +27,7 @@ updated by Dependabot).
 ```
 make sbom                           # build/urmqtt-VERSION.cdx.json
 scripts/sbom.py --check             # validate only
-make dist ENV=dev                   # also writes build/dist/urmqtt-dev-VERSION.cdx.json, covered by SHA256SUMS
+make dist ENV=release               # also writes build/dist/urmqtt-VERSION.cdx.json, covered by SHA256SUMS
 ```
 
 It needs `cargo` and Python 3 and nothing else (no `cargo-cyclonedx`, ADR-190).
@@ -50,7 +50,8 @@ is configured), it is a release asset, it is covered by the build provenance
 ISO and raw image as an SBOM attestation:
 
 ```
-gh attestation verify urmqtt-dev-vX.Y.Z.iso -R zeljan-alduk/urMQTT --predicate-type https://cyclonedx.org/bom
+gh attestation verify urmqtt-vX.Y.Z.iso -R zeljan-alduk/urMQTT --predicate-type https://cyclonedx.org/bom
+# up to v0.4.1: urmqtt-dev-vX.Y.Z.iso
 ```
 
 Limits, stated: the SBOM lists what is in the lockfile and `vendor/`; it does

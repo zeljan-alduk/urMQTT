@@ -475,7 +475,7 @@ add your CA, server certificate and key, and download `urmqtt-<version>-<name>-u
   `sessionStorage` keep the settings and the public certificates for a reload, never a private key.
 - **Releases are checked in the browser.** The template ISO, `SHA256SUMS` and its minisign signature come from a mirror of the
   GitHub releases on the same site, but the page does not trust the mirror: it verifies the signature against the release key
-  built into the page (`minisign.pub`) and the template against the signed sums, and a failed check blocks the build unless you
+  built into the page (`minisign.pub`, and for v0.1.0 to v0.4.1 only the former test key in `keys/`) and the template against the signed sums, and a failed check blocks the build unless you
   override it in a dialog. Releases built before the runtime configuration existed are listed greyed out, with the reason.
 - **Same bytes as the command line.** The page and `urmqtt-config pack --iso` produce identical images for the same input (a test
   in `make check` builds the same configuration both ways in headless Chrome). Every field of the form has a default, shown as its
@@ -1007,8 +1007,11 @@ make repro               # rebuild HEAD twice in fresh worktrees: ELF, ISO and r
 make sign                # minisign signature over SHA256SUMS (MINISIGN_KEY=... for another key)
 ```
 
-Releases are signed with the (test) key in [`minisign.pub`](minisign.pub):
-`minisign -Vm SHA256SUMS -P RWSOH9BSUuApkkBWq/AZJ03Rn63oOYq+yXzC/vgI1PZ/i5yaE+SVzOWS`.
+Releases after v0.4.1 are signed with the release key in [`minisign.pub`](minisign.pub)
+(`minisign -Vm SHA256SUMS -p minisign.pub`); v0.1.0 to v0.4.1 with the project's former test key
+(`minisign -Vm SHA256SUMS -p keys/minisign-test-9229E05252D01F8E.pub`), which is trusted for those tags only
+([SECURITY.md](SECURITY.md), "Release signing keys"). A production CA, server and device certificates:
+`scripts/pki.sh` ([docs/PKI.md](docs/PKI.md)).
 
 ### Configuring the network of a VPS (static address)
 
@@ -1099,8 +1102,9 @@ runners and uploads the serial logs.
 Verify a release artifact:
 
 ```bash
-gh attestation verify urmqtt-dev-v0.4.1.elf --repo zeljan-alduk/urMQTT
+minisign -Vm SHA256SUMS -p minisign.pub                     # releases after v0.4.1 (v0.4.1 and older: keys/minisign-test-9229E05252D01F8E.pub)
 shasum -a 256 -c SHA256SUMS
+gh attestation verify urmqtt-vX.Y.Z.elf --repo zeljan-alduk/urMQTT   # up to v0.4.1: urmqtt-dev-v0.4.1.elf
 ```
 
 ## Roadmap

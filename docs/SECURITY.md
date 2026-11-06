@@ -501,9 +501,19 @@ What that gives you and what it does not:
   both ways in a headless browser and compares the files.
 - **The release is checked in the browser, against a key built into the page.**
   The page downloads `SHA256SUMS` and `SHA256SUMS.minisig` from the mirror on
-  the same site and verifies the signature with `minisign.pub` (the key id is
-  shown on the page; compare it with this repository and the GitHub release),
-  then the template's SHA-256 against the signed sums. The mirror is **not** a
+  the same site and verifies the signature with the key the signature names,
+  from the key ring built into the page (`keys/release-keys.json`: the release
+  key `minisign.pub` for releases after v0.4.1, the former test key
+  `9229E05252D01F8E` for v0.1.0 to v0.4.1 only; the key ids are shown on the
+  page, compare them with SECURITY.md), then the template's SHA-256 against the
+  signed sums. A signature by a key the page does not know, or by a key outside
+  its range of tags, is a failed check. **The former test key is considered
+  compromised** from the day the release key exists (its secret was a
+  passwordless CI secret); limiting it to the tags it signed is what keeps old
+  releases verifiable without trusting it for new ones. It does not stop a
+  forged `SHA256SUMS` labelled with an old tag, which needs write access to the
+  GitHub release or control of the mirror (docs/release-key-rotation.md,
+  "Security notes"). The mirror is **not** a
   trust anchor: a modified template or sums file fails the check, and a failed
   check blocks the build unless you override it in a dialog that says what is
   wrong. A release the mirror cannot verify is not offered at all.

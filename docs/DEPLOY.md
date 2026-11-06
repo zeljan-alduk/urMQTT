@@ -150,24 +150,26 @@ second person with the same `deploy/prod/` can rebuild and compare
 Signing uses [minisign](https://jedisct1.github.io/minisign/):
 
 ```bash
-minisign -G                           # once: ~/.minisign/minisign.key + minisign.pub
+minisign -G                           # once: ~/.minisign/minisign.key + minisign.pub (your own key, for your own images)
 make sign                             # signs build/dist/SHA256SUMS (MINISIGN_KEY=... for another key)
 # on the receiving side:
 minisign -Vm SHA256SUMS -p minisign.pub && shasum -a 256 -c SHA256SUMS
 ```
 
 The trusted comment records environment, version and commit. The project's
-release key is [`minisign.pub`](../minisign.pub) in the repository root
-(`RWSOH9BSUuApkkBWq/AZJ03Rn63oOYq+yXzC/vgI1PZ/i5yaE+SVzOWS`). It is a **test**
-key for this pre-alpha: its secret half sits passwordless in the CI secret
-`MINISIGN_SECRET_KEY` and on the maintainer's machine. Replace it with an
-offline, password-protected key before any real release. Published dev
-releases carry SLSA build provenance (`gh attestation verify <file> -R
-zeljan-alduk/urMQTT`), and a minisign signature when the repository secret
-`MINISIGN_SECRET_KEY` holds a passwordless key (`minisign -G -W`). Each
-release also carries a CycloneDX SBOM (`urmqtt-dev-VERSION.cdx.json`, in
-`SHA256SUMS`, with an SBOM attestation: docs/SUPPLY-CHAIN.md), which an operator
-can feed to a vulnerability scanner.
+release key is [`minisign.pub`](../minisign.pub) in the repository root, for
+every release after v0.4.1; v0.1.0 to v0.4.1 were signed with the former **test**
+key `9229E05252D01F8E` (`keys/minisign-test-9229E05252D01F8E.pub`,
+`RWSOH9BSUuApkkBWq/AZJ03Rn63oOYq+yXzC/vgI1PZ/i5yaE+SVzOWS`), which is trusted
+for those tags only and considered compromised once the release key exists
+(SECURITY.md, "Release signing keys"; the rotation: docs/release-key-rotation.md).
+`make sign` on a release dist (`make dist ENV=release`) refuses a placeholder
+`minisign.pub` and checks that the signature verifies with it. Releases carry
+SLSA build provenance (`gh attestation verify <file> -R zeljan-alduk/urMQTT`)
+and a CycloneDX SBOM (`urmqtt-VERSION.cdx.json`, `urmqtt-dev-VERSION.cdx.json` up
+to v0.4.1, in `SHA256SUMS`, with an SBOM attestation: docs/SUPPLY-CHAIN.md),
+which an operator can feed to a vulnerability scanner. `make repro ENV=release`
+rebuilds the release assets twice and compares them; it needs no `deploy/`.
 
 ## 4. Virtual hardware
 
@@ -974,8 +976,13 @@ idempotent and prints what it does; `--dry-run` changes nothing.
 
 1. **The mirror job** (root, from a checkout): `scripts/mirror/install.sh`. It creates the unprivileged `urmqtt-mirror`
    user and `/var/www/aldotech.io/urmqtt/releases`, and enables `urmqtt-mirror.timer` (hourly, nice 19, idle I/O,
-   2 MiB/s). A release is published there only after its `SHA256SUMS` signature (key `/etc/urmqtt-mirror/minisign.pub`)
-   and the template's SHA-256 check out. `systemctl start urmqtt-mirror` runs it now, `journalctl -u urmqtt-mirror`
+   2 MiB/s). A release is published there only after its `SHA256SUMS` signature and the template's SHA-256 check
+   out. The signature is checked with the key it names from the key ring `/etc/urmqtt-mirror/keys/release-keys.json`
+   (a copy of `keys/release-keys.json`; the release key is `/etc/urmqtt-mirror/minisign.pub`, the former test key
+   `keys/minisign-test-9229E05252D01F8E.pub`), and only for the tags that key may sign; the unit passes
+   `--keyring`. The installer refuses a placeholder `minisign.pub`. Installs from before the rotation run with
+   `--pubkey /etc/urmqtt-mirror/minisign.pub` (the test key): re-run the installer from the rotated checkout
+   (docs/release-key-rotation.md, step 6). `systemctl start urmqtt-mirror` runs it now, `journalctl -u urmqtt-mirror`
    is its log; exit 2 means a release failed verification (the unit shows as failed).
 2. **Its web server**: `scripts/mirror/install-web.sh` starts an nginx container (pinned image, read-only, no
    capabilities) on `127.0.0.1:18089` that serves only `releases.json`, `SHA256SUMS`, its signature and the template,
@@ -984,7 +991,8 @@ idempotent and prints what it does; `--dry-run` changes nothing.
    next to the file), then `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && systemctl reload caddy`.
    It proxies `/urmqtt/releases*` to the container, sends `Cross-Origin-Embedder-Policy` for the builder pages (the
    emulator needs it), serves the emulator's files pre-compressed and redirects `/products/` to the English page.
-4. **The pages**: `make builder` (or `make builder-emulator` to include the emulator), then
+4. **The pages**: `make builder` (or `make builder-emulator` to include the emulator; the keys of
+   `keys/release-keys.json` are built into the page, and the deploy script refuses a page without the release key), then
    `scripts/deploy-builder-site.sh --chown USER:GROUP` copies the page and the site modules to the generator's directory and
    patches its `build.py` (refused if it is not the generator it knows; a second run changes nothing). Publish with the
    site's own `publish.sh`, **which must leave the mirror alone**: `rsync -a --delete --exclude=/urmqtt/releases/ ...`.
