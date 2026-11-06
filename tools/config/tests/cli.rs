@@ -784,9 +784,9 @@ fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
 }
 
 /// The templates of the published releases, configured by this tool (and by the builder page, which runs the
-/// same code): v0.2.0's kernel reads configuration format 2, v0.2.1's 3, v0.3.0's 4, this release's 6. A
-/// configuration that needs no newer format than the template's kernel reads is written into it as before; one
-/// that needs more (the virtio-gpu console: 5, a `[devices]` key: 6) is refused with the reason, before a byte
+/// same code): v0.2.0's kernel reads configuration format 2, v0.2.1's 3, v0.3.0's 4, v0.4.0's and v0.4.1's 6,
+/// this one 7. A configuration that needs no newer format than the template's kernel reads is written into it as
+/// before; one that needs more (the virtio-gpu console: 5, a `[devices]` key: 6, `network.mtu`: 7) is refused with the reason, before a byte
 /// of the template changes, instead of giving an image whose kernel would refuse it at boot.
 #[test]
 fn templates_of_earlier_releases_take_what_their_kernel_reads() {
@@ -803,18 +803,28 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
     b.variant(tag::DEV_VIRTIO_INPUT, 1).unwrap();
     let input = b.finish(false).unwrap();
     assert_eq!(header(&input), 6);
+    let mut b = Builder::new();
+    b.uint(tag::NET_MTU, 1460).unwrap();
+    let mtu = b.finish(false).unwrap();
+    assert_eq!(header(&mtu), 7);
     for (release, reads) in [
         ("v0.2.0", 2u16),
         ("v0.2.1", 3),
         ("v0.3.0", 4),
         ("v0.4.0", 6),
+        ("v0.4.1", 6),
+        ("this tree", urmqtt_cfg::FORMAT_VERSION),
     ] {
         let empty = Builder::new().finish_as(false, reads).unwrap();
         assert_eq!(header(&empty), reads);
         let (tpl, _) = synthetic_template_with(&empty);
         let p = image::configure_iso(&tpl, &lab).unwrap_or_else(|e| panic!("{release}: {e}"));
         image::verify(&p.bytes, false).unwrap();
-        for (what, blob, needs) in [("console.virtio_gpu", &gpu, 5u16), ("[devices]", &input, 6)] {
+        for (what, blob, needs) in [
+            ("console.virtio_gpu", &gpu, 5u16),
+            ("[devices]", &input, 6),
+            ("network.mtu", &mtu, 7),
+        ] {
             match image::configure_iso(&tpl, blob) {
                 Ok(_) => assert!(
                     needs <= reads,

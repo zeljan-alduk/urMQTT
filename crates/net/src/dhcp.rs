@@ -18,6 +18,14 @@ const NAK: u8 = 6;
 /// Retransmission of DISCOVER/REQUEST: 4 s, doubling to 64 s (§4.1).
 const RETRY_MS: u64 = 4_000;
 const RETRY_MAX_MS: u64 = 64_000;
+/// Option 26, Interface MTU (RFC 2132 §5.1): two bytes.
+const OPT_MTU: u8 = 26;
+/// The MTUs a lease may set (NOW-19, ADR-264): 576 is the smallest datagram
+/// every IPv4 host must accept (RFC 791) and the smallest RFC 2132 allows;
+/// 9000 the usual jumbo frame. Anything else is ignored and the interface
+/// keeps its configured or default MTU.
+pub const MTU_MIN: u16 = 576;
+pub const MTU_MAX: u16 = 9000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Lease {
@@ -27,6 +35,16 @@ pub struct Lease {
     pub dns: Option<Ip>,
     pub server: Ip,
     pub lease_s: u32,
+    /// Option 26 as the server sent it (any value; see [`Lease::mtu`]).
+    pub mtu_announced: Option<u16>,
+}
+
+impl Lease {
+    /// The announced MTU if it is one this host uses ([`MTU_MIN`]..=[`MTU_MAX`]).
+    pub fn mtu(&self) -> Option<u16> {
+        self.mtu_announced
+            .filter(|m| (MTU_MIN..=MTU_MAX).contains(m))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +97,7 @@ struct Reply {
     lease: Option<u32>,
     t1: Option<u32>,
     t2: Option<u32>,
+    mtu: Option<u16>,
     chaddr: Mac,
 }
 
@@ -99,6 +118,7 @@ fn parse(p: &[u8]) -> Option<Reply> {
         lease: None,
         t1: None,
         t2: None,
+        mtu: None,
         chaddr: p.get(28..34)?.try_into().ok()?,
     };
     let mut i = 240;
@@ -123,6 +143,10 @@ fn parse(p: &[u8]) -> Option<Reply> {
             51 => r.lease = u32v(),
             58 => r.t1 = u32v(),
             59 => r.t2 = u32v(),
+            // Exactly two bytes; another length is malformed and ignored.
+            OPT_MTU => {
+                r.mtu = <[u8; 2]>::try_from(v).ok().map(u16::from_be_bytes);
+            }
             _ => {}
         }
         i += 2 + len;
@@ -175,7 +199,8 @@ impl Client {
             m.extend_from_slice(&[54, 4]);
             m.extend_from_slice(&s);
         }
-        m.extend_from_slice(&[55, 4, 1, 3, 6, 51]);
+        // Parameter request list: mask, router, DNS, interface MTU, lease time.
+        m.extend_from_slice(&[55, 5, 1, 3, 6, OPT_MTU, 51]);
         m.extend_from_slice(&[12, 6]);
         m.extend_from_slice(b"urmqtt");
         m.push(255);
@@ -259,6 +284,7 @@ impl Client {
                     dns: r.dns,
                     server: r.server.unwrap_or([0; 4]),
                     lease_s,
+                    mtu_announced: r.mtu,
                 };
                 let renewed = self.lease.is_some();
                 self.lease = Some(lease);
@@ -294,6 +320,11 @@ mod tests {
 
     /// A tiny DHCP server answering like QEMU's slirp.
     fn reply(req: &[u8], msg: u8, lease: u32) -> Vec<u8> {
+        reply_with(req, msg, lease, &[])
+    }
+
+    /// The same, with extra options (raw `code len value...`) before the end.
+    fn reply_with(req: &[u8], msg: u8, lease: u32, extra: &[u8]) -> Vec<u8> {
         let mut m = req.to_vec();
         m.truncate(240);
         m[0] = 2;
@@ -304,8 +335,61 @@ mod tests {
         ]);
         m.extend_from_slice(&[51, 4]);
         m.extend_from_slice(&lease.to_be_bytes());
+        m.extend_from_slice(extra);
         m.push(255);
         m
+    }
+
+    /// DISCOVER, OFFER, REQUEST, then the ACK with `extra` options: the lease.
+    fn bind(extra: &[u8]) -> Lease {
+        let mut c = Client::new([2; 6], 77, 0);
+        let s = c.poll(0).0.unwrap();
+        assert!(c.input(10, &reply(&s.payload, OFFER, 3600)).is_none());
+        let req = c.poll(10).0.unwrap();
+        match c.input(20, &reply_with(&req.payload, ACK, 3600, extra)) {
+            Some(Event::Bound(l)) => l,
+            ev => panic!("{ev:?}"),
+        }
+    }
+
+    /// NOW-19: option 26 (Interface MTU) is asked for and read; a value in
+    /// 576..=9000 is used, anything else (or a malformed option) is not.
+    #[test]
+    fn option_26_sets_the_mtu_when_sane() {
+        // The request lists option 26 among its parameters.
+        let mut c = Client::new([2; 6], 77, 0);
+        let s = c.poll(0).0.unwrap();
+        let at = s.payload.windows(2).position(|w| w == [55, 5]).unwrap();
+        assert!(s.payload[at + 2..at + 7].contains(&26));
+        // Absent: no MTU, the interface keeps its own.
+        let l = bind(&[]);
+        assert_eq!((l.mtu_announced, l.mtu()), (None, None));
+        // Present: Google Cloud's 1460, the bounds, jumbo frames.
+        for m in [1460u16, 576, 1500, 9000] {
+            let mut o = vec![26, 2];
+            o.extend_from_slice(&m.to_be_bytes());
+            let l = bind(&o);
+            assert_eq!((l.mtu_announced, l.mtu()), (Some(m), Some(m)), "{m}");
+        }
+        // Out of range: announced (for the log line) but not used.
+        for m in [0u16, 68, 575, 9001, 65535] {
+            let mut o = vec![26, 2];
+            o.extend_from_slice(&m.to_be_bytes());
+            let l = bind(&o);
+            assert_eq!((l.mtu_announced, l.mtu()), (Some(m), None), "{m}");
+        }
+        // Malformed (wrong length): ignored, the rest of the lease stands.
+        let l = bind(&[26, 1, 5]);
+        assert_eq!((l.mtu_announced, l.addr), (None, [10, 0, 2, 15]));
+        let l = bind(&[26, 4, 0, 0, 5, 180]);
+        assert_eq!(l.mtu_announced, None);
+        // Truncated at the end of the packet: the parser stops, no panic.
+        let mut c = Client::new([2; 6], 77, 0);
+        let s = c.poll(0).0.unwrap();
+        let mut r = reply(&s.payload, OFFER, 3600);
+        r.pop();
+        r.extend_from_slice(&[26, 2, 5]);
+        let _ = c.input(10, &r);
     }
 
     #[test]

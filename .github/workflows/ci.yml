@@ -198,6 +198,7 @@ jobs:
   #   storage-* the disk scenarios (SMOKE_ONLY=storage), in two halves
   #   live      the live-mode scenarios
   #   misc      the other guarded ones (configuration, release kernel, plaintext, storm, fin_wait2, attacks,
+  #             the link MTU (net_mtu),
   #             the virtio-gpu console with its QMP screendumps, the optional virtio drivers
   #             (virtio_devices: console, balloon, keyboard; QMP stats and key events), ...)
   #   hardening the H4 scenarios (MTE, ...)

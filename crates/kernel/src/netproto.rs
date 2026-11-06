@@ -18,7 +18,7 @@ use urmqtt_log::{info, warn};
 use urmqtt_net::Class;
 use urmqtt_net::dhcp;
 use urmqtt_net::iface::{Event, Iface, Rx};
-use urmqtt_tcp::{App, CloseReason, ConnId, Endpoint, TcpStack};
+use urmqtt_tcp::{App, CloseReason, ConnId, Endpoint, TcpStack, mss_for_mtu};
 use urmqtt_virtio::net::{MTU_FRAME, VirtioNet};
 
 use crate::dataplane::{self, CoreMsg, DropSite, Frame, Link, POOL_MAX, new_frame};
@@ -62,7 +62,7 @@ fn ip_str(a: [u8; 4]) -> alloc::string::String {
     alloc::format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3])
 }
 
-fn new_tcp(addr: [u8; 4], ports: Vec<u16>) -> TcpStack {
+fn new_tcp(addr: [u8; 4], ports: Vec<u16>, mtu: u16) -> TcpStack {
     let mut key = [0u8; 16];
     // Fail closed (H0-W6): a zero cookie key would make ISNs predictable.
     // Boot refuses to get here without a generator, so this never fires.
@@ -73,7 +73,8 @@ fn new_tcp(addr: [u8; 4], ports: Vec<u16>) -> TcpStack {
         urmqtt_tcp::Config {
             local_addr: addr,
             ports,
-            mss: 1460,
+            // NOW-19: MTU - 40, at most 1460 (ADR-264).
+            mss: mss_for_mtu(mtu),
             rcv_wnd: 65535,
             // 1 MiB with window scaling (shift 5) for peers that offer it
             // (ADR-222): a window must cover the bandwidth-delay product.
@@ -89,6 +90,110 @@ fn new_tcp(addr: [u8; 4], ports: Vec<u16>) -> TcpStack {
         now_ms(),
     )
 }
+
+/// Where the MTU in use came from (NOW-19, ADR-264).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MtuSource {
+    /// 1500: neither `network.mtu` nor DHCP option 26 said otherwise.
+    Default,
+    /// `network.mtu` (the only source with a static address; it also wins
+    /// over what DHCP announces).
+    Static,
+    /// DHCP option 26.
+    Dhcp,
+}
+
+impl MtuSource {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Static => "static",
+            Self::Dhcp => "dhcp",
+        }
+    }
+}
+
+/// The MTU in use (low 16 bits) and its source (the next 8), for `$SYS` and
+/// the info query; set by core 0. Relaxed: a statistic.
+static MTU_IN_USE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(urmqtt_net::iface::DEFAULT_MTU as u32);
+
+/// The link MTU the network path uses now, and where it came from.
+pub fn mtu() -> (u16, MtuSource) {
+    let v = MTU_IN_USE.load(core::sync::atomic::Ordering::Relaxed);
+    let src = match v >> 16 {
+        1 => MtuSource::Static,
+        2 => MtuSource::Dhcp,
+        _ => MtuSource::Default,
+    };
+    (v as u16, src)
+}
+
+/// `network.mtu` when set (the check refused anything outside 576..=9000).
+fn configured_mtu() -> Option<u16> {
+    CONFIG.network.mtu
+}
+
+/// The MTU to use: `network.mtu`, else what the lease announced (when sane),
+/// else 1500, and its source.
+fn choose_mtu(lease: Option<&dhcp::Lease>) -> (u16, MtuSource) {
+    if let Some(m) = configured_mtu() {
+        return (m, MtuSource::Static);
+    }
+    match lease.and_then(dhcp::Lease::mtu) {
+        Some(m) => (m, MtuSource::Dhcp),
+        None => (urmqtt_net::iface::DEFAULT_MTU, MtuSource::Default),
+    }
+}
+
+/// Applies an MTU on core 0 (interface and TCP stack), logs it when it
+/// changed, and returns the value in use (at most what the driver sends).
+fn apply_mtu(
+    iface: &mut Iface,
+    tcp: &mut TcpStack,
+    chosen: (u16, MtuSource),
+    lease: Option<&dhcp::Lease>,
+) -> u16 {
+    let (want, src) = chosen;
+    if let Some(l) = lease {
+        match l.mtu_announced {
+            Some(m) if l.mtu().is_none() => warn!(
+                "net: dhcp announced mtu {m}, outside {}..={}: ignored",
+                dhcp::MTU_MIN,
+                dhcp::MTU_MAX
+            ),
+            Some(m) if src == MtuSource::Static && m != want => {
+                info!("net: dhcp announced mtu {m}; network.mtu = {want} is used");
+            }
+            _ => {}
+        }
+    }
+    let before = mtu();
+    let used = iface.set_mtu(want);
+    tcp.set_mss(mss_for_mtu(used));
+    let packed = u32::from(used)
+        | match src {
+            MtuSource::Default => 0,
+            MtuSource::Static => 1 << 16,
+            MtuSource::Dhcp => 2 << 16,
+        };
+    let first = !MTU_LOGGED.swap(true, core::sync::atomic::Ordering::Relaxed);
+    MTU_IN_USE.store(packed, core::sync::atomic::Ordering::Relaxed);
+    if first || before != (used, src) {
+        if used < want {
+            info!(
+                "net: mtu {used} ({}; {want} asked for, this driver sends at most {used}-byte packets)",
+                src.name()
+            );
+        } else {
+            info!("net: mtu {used} ({})", src.name());
+        }
+    }
+    used
+}
+
+/// Whether the first `net: mtu` line was written (later ones only on a change).
+static MTU_LOGGED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Applies the configured static address and gateway on every core (mode
 /// `static`, and the fallback of mode `auto`).
@@ -108,12 +213,14 @@ fn apply_static(
         address.prefix_len,
         ip_str(gateway)
     );
+    let mtu = apply_mtu(iface, tcp, choose_mtu(None), None);
     for core in 1..n {
         link.send(
             core,
             CoreMsg::IpConfig {
                 addr: Some((address.addr, address.prefix_len)),
                 router: Some(gateway),
+                mtu,
             },
         );
     }
@@ -299,9 +406,11 @@ fn drain_mesh(
             let Some(m) = link.recv(peer) else { break };
             any = true;
             match m {
-                CoreMsg::IpConfig { addr, router } => {
+                CoreMsg::IpConfig { addr, router, mtu } => {
                     iface.set_addr(addr, router);
                     tcp.set_local_addr(addr.map_or([0; 4], |a| a.0));
+                    let mtu = iface.set_mtu(mtu);
+                    tcp.set_mss(mss_for_mtu(mtu));
                 }
                 other => mqtt.on_msg(peer, other, link, now),
             }
@@ -374,7 +483,9 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
     };
     let mut iface = Iface::new(mac(), false, None, now_ms());
     let mut mqtt = MqttService::new(restored.as_deref(), me, link.n);
-    let mut tcp = new_tcp([0; 4], mqtt.ports());
+    // Until core 0 says otherwise (its IpConfig carries the MTU in use).
+    let first_mtu = iface.set_mtu(choose_mtu(None).0);
+    let mut tcp = new_tcp([0; 4], mqtt.ports(), first_mtu);
     let mut pool: Vec<Frame> = Vec::new();
     let mut idle = dataplane::Idle::new();
     let mut cookies = CookieRotation::new(now_ms());
@@ -605,26 +716,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         NetworkMode::Dhcp | NetworkMode::Auto { .. } => {
             Iface::new(mac, true, Some(u32::from_be_bytes(xid)), now_ms())
         }
-        NetworkMode::Static { address, gateway } => {
-            let mut i = Iface::new(mac, true, None, now_ms());
-            i.set_addr(Some((address.addr, address.prefix_len)), Some(gateway));
-            info!(
-                "net: static address {}/{} gateway {}",
-                ip_str(address.addr),
-                address.prefix_len,
-                ip_str(gateway)
-            );
-            for core in 1..n {
-                link.send(
-                    core,
-                    CoreMsg::IpConfig {
-                        addr: Some((address.addr, address.prefix_len)),
-                        router: Some(gateway),
-                    },
-                );
-            }
-            i
-        }
+        NetworkMode::Static { .. } => Iface::new(mac, true, None, now_ms()),
     };
     // mode = "auto": DHCP first, the static settings when no lease arrives in
     // time or when the lease is lost.
@@ -649,7 +741,12 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         ports.push(ECHO_PORT);
         info!("net: tcp echo service on port {ECHO_PORT} (dev only)");
     }
-    let mut tcp = new_tcp(iface.addr().unwrap_or([0; 4]), ports);
+    let first_mtu = iface.set_mtu(choose_mtu(None).0);
+    let mut tcp = new_tcp(iface.addr().unwrap_or([0; 4]), ports, first_mtu);
+    // mode = "static": the address, gateway and MTU now, on every core.
+    if let NetworkMode::Static { address, gateway } = CONFIG.network.mode {
+        apply_static(&mut iface, &mut tcp, &mut link, n, address, gateway);
+    }
     let mut pool: Vec<Frame> = Vec::new();
     let mut local: VecDeque<Frame> = VecDeque::new();
     let mut nic_q: VecDeque<Frame> = VecDeque::new();
@@ -752,12 +849,14 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
                             l.dns.map_or_else(alloc::string::String::new, ip_str)
                         );
                         tcp.set_local_addr(l.addr);
+                        let mtu = apply_mtu(&mut iface, &mut tcp, choose_mtu(Some(&l)), Some(&l));
                         for core in 1..n {
                             link.send(
                                 core,
                                 CoreMsg::IpConfig {
                                     addr: Some((l.addr, l.prefix)),
                                     router: l.router,
+                                    mtu,
                                 },
                             );
                         }
@@ -781,6 +880,8 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
                                     CoreMsg::IpConfig {
                                         addr: None,
                                         router: None,
+                                        // The MTU stays until the next lease.
+                                        mtu: iface.mtu(),
                                     },
                                 );
                             }

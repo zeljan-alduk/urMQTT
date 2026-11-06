@@ -355,6 +355,7 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
         time_source: crate::boot::clock_source().name(),
         time_offset_ms: crate::boot::clock_offset_ms(),
         console_dropped: CONSOLE_DROPPED.load(Ordering::Relaxed),
+        net_mtu: crate::netproto::mtu().0,
         drops,
         handshakes: {
             let t = dataplane::handshake_totals();

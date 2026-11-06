@@ -162,6 +162,10 @@ pub const MQTT_MAX_PACKET_SIZE: u64 = 268_435_455;
 pub const MIN_PACKET_SIZE: u64 = 64;
 /// Longest topic (a `u16` length prefix).
 pub const MQTT_MAX_TOPIC_LEN: u64 = 65_535;
+/// `network.mtu` (NOW-19, ADR-264): 0 (the default) takes the MTU from DHCP
+/// option 26, else 1500; otherwise a value in `MIN_MTU..=MAX_MTU`.
+pub const MIN_MTU: u64 = 576;
+pub const MAX_MTU: u64 = 9000;
 /// Most NTP servers a round asks.
 pub const MAX_TIME_SERVERS: usize = 4;
 
@@ -264,6 +268,8 @@ pub mod tag {
     pub const DEV_VIRTIO_BALLOON: u16 = 192;
     pub const DEV_VIRTIO_INPUT: u16 = 193;
     pub const DEV_VIRTIO_VSOCK: u16 = 194;
+    // The link MTU (NOW-19, ADR-264): format version 7.
+    pub const NET_MTU: u16 = 195;
 }
 
 use tag as t;
@@ -1082,6 +1088,16 @@ pub static FIELDS: &[Field] = &[
             "Drive a virtio-vsock and serve the Diagnostic report, read-only, to the host on vsock port 2883. off: never. auto: when one is found. on: when one is found, and say loudly when none is. Format 6.",
         ),
         6,
+    ),
+    // network, continued (NOW-19, ADR-264)
+    since(
+        f(
+            t::NET_MTU,
+            "network.mtu",
+            uint(2, 0, MAX_MTU, 0),
+            "Largest IPv4 packet in bytes (576 to 9000). 0 (the default): the MTU DHCP announces (option 26), else 1500. Set it when the network is smaller than 1500 and does not say so, e.g. 1460 on Google Cloud with a static address. TCP segments follow it (MSS = MTU - 40); frames larger than 1500 are not sent. Format 7.",
+        ),
+        7,
     ),
 ];
 

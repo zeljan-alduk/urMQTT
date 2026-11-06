@@ -72,6 +72,7 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/time/source` | where the wall clock comes from: `rtc` (firmware clock at boot), `sntp` (corrected by SNTP, ADR-100) or `unknown` (no usable clock: certificate checks and control messages are refused) |
 | `$SYS/broker/time/offset_ms` | the last SNTP offset against the clock as it was, in ms (`unknown` until one was measured against a known clock; a refused offset is shown too, and logged) |
 | `$SYS/broker/console/dropped` | console lines lost to a slow reader |
+| `$SYS/broker/net/mtu` | the link MTU in use, bytes: `network.mtu`, else DHCP option 26, else 1500; at most 1500 (NOW-19, ADR-264). The boot line `net: mtu N (static\|dhcp\|default)` says where it came from; a lower value than the network's is safe, a higher one loses the large packets |
 | `$SYS/broker/messages/dropped/slow_subscriber` | QoS 0 messages not delivered because the subscriber's output buffer was full (it reads slower than the topic is published to). Deliberate, bounded, counted (ADR-223) |
 | `$SYS/broker/messages/dropped/offline` | QoS 0 messages for a subscription whose client is not connected (a QoS 0 message is never stored) |
 | `$SYS/broker/messages/dropped/cross_core` | QoS 0 fan-out not offered to a core that was more than 16 384 messages behind |

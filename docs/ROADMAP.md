@@ -219,7 +219,7 @@ the open audit findings that need no hardware closed, and the gaps the netcup ru
 - Verify: `make repro` identical before and after; smoke and host tests unchanged; a test driver registered from
   a crate outside the workspace binds a QEMU device by PCI ID and reads a key from the reserved range.
 
-**NOW-19. Honour the MTU the network announces.** S.
+**NOW-19. Honour the MTU the network announces.** S. **Done (ADR-264).**
 - What: use the MTU from DHCP (option 26) or the interface's configured value instead of assuming 1500 bytes for
   every segment; clamp the TCP MSS accordingly.
 - Why: Google Cloud's default VPC network uses an MTU of 1460 and others use 1500 or jumbo frames; a kernel that
@@ -228,6 +228,11 @@ the open audit findings that need no hardware closed, and the gaps the netcup ru
 - Risk: low; a wrong MTU today is a connectivity failure, not a safety one.
 - Verify: a QEMU smoke scenario with a DHCP server that announces 1460 and a tap/user network that drops larger
   frames; the handshake and a 4 KiB publish complete; `$SYS` or the boot log shows the MTU in use.
+- Done: DHCP option 26 and `network.mtu` (format 7), MSS = MTU - 40 for new and open connections, UDP and ICMP bounded,
+  frames above 1500 never sent; boot line and `$SYS/broker/net/mtu`; host tests (option 26, MSS, segment sizes at 576,
+  1460, 1500, 9000) and the smoke group `net_mtu` (static 1460 with a 4 KiB QoS 1 round trip and the capture checked;
+  DHCP 1460/9000/300 on urmqtt-attack's raw transport, as QEMU's user network cannot announce an MTU). Not verified: a
+  network that really drops larger frames (QEMU's user network accepts them), and Google Cloud itself.
 
 ### Next: protocol and network features (11 items)
 

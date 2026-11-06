@@ -95,6 +95,29 @@ use wire::{ACK, Ext, FIN, Header, Out, PSH, RST, SYN};
 
 pub type ConnId = u32;
 
+/// IPv4 and TCP headers without options: what an MTU holds beyond the MSS.
+pub const IPV4_TCP_HEADERS: u16 = 40;
+/// Largest MSS this stack announces or uses: the size of its segment buffers
+/// and the top of the SYN-cookie table ([`cookie::MSS_TABLE`]). A 1500-byte
+/// Ethernet MTU minus [`IPV4_TCP_HEADERS`].
+pub const MAX_MSS: u16 = 1460;
+/// Smallest MSS (RFC 9293 §3.7.1: 536, the IPv4 default; the cookie's lowest).
+pub const MIN_MSS: u16 = 536;
+
+/// The MSS for an IPv4 link MTU (NOW-19, ADR-264): `mtu - 40`, clamped to
+/// what this stack can send ([`MIN_MSS`]..=[`MAX_MSS`]). A segment then fills
+/// at most the MTU: timestamps take 12 bytes of the MSS, not more.
+pub const fn mss_for_mtu(mtu: u16) -> u16 {
+    let m = mtu.saturating_sub(IPV4_TCP_HEADERS);
+    if m < MIN_MSS {
+        MIN_MSS
+    } else if m > MAX_MSS {
+        MAX_MSS
+    } else {
+        m
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Endpoint {
     pub addr: [u8; 4],
@@ -135,7 +158,8 @@ pub trait App {
 pub struct Config {
     pub local_addr: [u8; 4],
     pub ports: Vec<u16>,
-    /// MSS we announce (Ethernet MTU 1500 minus headers).
+    /// MSS we announce and the most a connection uses: [`mss_for_mtu`] of
+    /// the link MTU (clamped to [`MIN_MSS`]..=[`MAX_MSS`]).
     pub mss: u16,
     /// Receive window when the application has not set one (and the window
     /// announced on a SYN-ACK, which is never scaled).
@@ -374,7 +398,8 @@ pub struct TcpStack {
 }
 
 impl TcpStack {
-    pub fn new(cfg: Config, now_ms: u64) -> Self {
+    pub fn new(mut cfg: Config, now_ms: u64) -> Self {
+        cfg.mss = cfg.mss.clamp(MIN_MSS, MAX_MSS);
         let seed = u64::from_le_bytes([
             cfg.cookie_key[0],
             cfg.cookie_key[3],
@@ -405,6 +430,23 @@ impl TcpStack {
     /// Our address changed (DHCP); existing connections keep theirs.
     pub fn set_local_addr(&mut self, addr: [u8; 4]) {
         self.cfg.local_addr = addr;
+    }
+
+    /// The link MTU changed (DHCP option 26, NOW-19): new connections
+    /// announce and use `mss` (clamped to [`MIN_MSS`]..=[`MAX_MSS`]), and
+    /// open ones never send a segment larger than it from now on (their
+    /// congestion state counts bytes, so it stays valid).
+    pub fn set_mss(&mut self, mss: u16) {
+        let mss = mss.clamp(MIN_MSS, MAX_MSS);
+        self.cfg.mss = mss;
+        for (_, k) in self.conns.iter_mut() {
+            k.mss = k.mss.min(mss);
+        }
+    }
+
+    /// The MSS new connections announce.
+    pub fn mss(&self) -> u16 {
+        self.cfg.mss
     }
 
     pub fn local_addr(&self) -> [u8; 4] {
@@ -1231,7 +1273,7 @@ impl TcpStack {
         let Some(k) = self.conn(c) else { return };
         let off = from.wrapping_sub(k.snd_una) as usize;
         let mss = k.eff_mss();
-        let mut payload = [0u8; 1460];
+        let mut payload = [0u8; MAX_MSS as usize];
         let n = k.tx.as_ref().map_or(0, |tx| {
             let avail = tx.len().saturating_sub(off).min(mss).min(payload.len());
             copy_out(tx, off, payload.get_mut(..avail).unwrap_or(&mut []))
@@ -1294,7 +1336,7 @@ impl TcpStack {
                 }
                 return sent_any;
             }
-            let mut payload = [0u8; 1460];
+            let mut payload = [0u8; MAX_MSS as usize];
             if let Some(tx) = k.tx.as_ref() {
                 copy_out(tx, off, payload.get_mut(..n).unwrap_or(&mut []));
             }
