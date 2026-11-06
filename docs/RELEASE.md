@@ -173,7 +173,7 @@ with development certificates generated at random on each machine, so its hash c
 ## 4. The release mirror and the builder page on aldo.tech (docs/DEPLOY.md section 10)
 
 Order matters: **the page first, the mirror second.** The page of the previous release only understands templates up to
-the configuration format it was built with (`FORMAT_VERSION` in `crates/cfg/src/blob.rs` is 6 now, 4 in v0.3.0; the page reads
+the configuration format it was built with (`FORMAT_VERSION` in `crates/cfg/src/blob.rs` is 7 on `main` since the MTU change (ADR-264), 6 in v0.4.0 and v0.4.1, 4 in v0.3.0; the page reads
 `release.template.config_format` from the mirror's `releases.json` and greys out a release whose format is newer than
 its WebAssembly module). A release that appears in the mirror before the new page is deployed may be listed but unusable.
 
@@ -207,7 +207,7 @@ applies.
 
    Expected: `v0.4.1` with `"prerelease": true`, `"status": "ok"`, `"verified": true`, `"signed_by"` naming the key
    (the former test key up to v0.4.1, the release key after), and a `template` whose `sha256`
-   equals the template's line in `SHA256SUMS` and whose `config_format` is **6** (the empty configuration in the template
+   equals the template's line in `SHA256SUMS` and whose `config_format` is **6** for v0.4.1 (**7** for the next release, built after the MTU change) (the empty configuration in the template
    is stamped with `FORMAT_VERSION`; checked on the locally built template). The older releases stay listed as before.
 4. In a browser on `https://aldo.tech/en/products/urmqtt-builder/` (and the Croatian page): v0.4.1 is the chosen release
    (the newest stable one, else the newest pre-release; all of ours are pre-releases), the check mark for the signature

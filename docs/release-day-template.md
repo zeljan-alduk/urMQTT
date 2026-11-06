@@ -79,7 +79,9 @@ ssh build journalctl -u urmqtt-mirror -n 50 --no-pager      # exit 0; "signature
 curl -fsS https://aldo.tech/urmqtt/releases.json | python3 -I -m json.tool | grep -B3 -A30 '"tag": "vX.Y.Z"'
 ```
 
-Expected for vX.Y.Z: `"status": "ok"`, `"verified": true`, `"signed_by": {"key_id": "<KEY ID>", "name": "release", ...}`.
+Expected for vX.Y.Z: `"status": "ok"`, `"verified": true`, a `template` with `"config_format": 7` (format 7 since
+the MTU change, ADR-264: deploy the page built from the release commit **before** the mirror lists it, docs/RELEASE.md
+section 4, or the deployed page greys the release out), `"signed_by": {"key_id": "<KEY ID>", "name": "release", ...}`.
 v0.4.1 and older: unchanged, `"signed_by"` the test key. In a browser: vX.Y.Z is chosen, the check mark says "(key
 <KEY ID>)" without the test-key note, a build ends in a result card and "Try in the emulator" boots it; choosing v0.4.1
 by hand shows "signed with the project's former test key" and still verifies.
