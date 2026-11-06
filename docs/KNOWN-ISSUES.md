@@ -7,16 +7,17 @@ the "Limits, stated plainly" paragraphs of [CHANGELOG.md](../CHANGELOG.md) for v
 [EDITIONS.md](EDITIONS.md). `scripts/check-known-issues.py` (run in CI) fails if an AUDIT id or ROADMAP item cited
 here no longer exists, or if an AUDIT weakness cited here has been marked fixed.
 
-Status as of v0.4.1 plus the `main` branch of 2026-11-06. **The project is pre-alpha.** It becomes "alpha" when a
-real release signing key, the entropy decision and the MTU fix have landed ([ROADMAP.md](ROADMAP.md), "Community
-readiness").
+Status as of v0.4.2 (2026-11-06). **The project is pre-alpha.** The three items of the definition of "alpha" (a real
+release signing key, the entropy decision and the MTU fix; [ROADMAP.md](ROADMAP.md), "Community readiness") are on
+`main` and in v0.4.2; v0.4.2 is the first release signed with the release key, and the status word changes only when
+the owner changes it.
 
 ## 1. The release itself
 
 | Issue | What it means for you | Workaround | Tracking |
 |---|---|---|---|
-| **v0.1.0 to v0.4.1 are signed with the project's former test key** `9229E05252D01F8E`. Its secret half was a passwordless CI secret. The rotation to a release key is prepared (branch `release-key`) and waits for the owner. | A valid signature on those releases proves the files match what this repository's CI signed, not that an offline key holder approved them; from the rotation on, the test key is trusted for those tags only. | Verify anyway (`minisign -Vm SHA256SUMS -p keys/minisign-test-9229E05252D01F8E.pub`, then the checksums); for anything that matters, build the template yourself (`make template`, `make repro ENV=release`) and compare. | ROADMAP NOW-2; [RELEASE.md](RELEASE.md) section 9 |
-| **The assets of v0.4.1 and earlier are dev builds with throwaway certificates.** From the next release on, the assets are the release kernel and images with an empty configuration. | `urmqtt-dev-*.iso`/`.img` contain keys anyone can read. | Use the template ISO with your own configuration (builder page or `urmqtt-config pack`), or build your own image. | CHANGELOG 0.4.0 and 0.4.1, "Limits"; [RELEASE.md](RELEASE.md) |
+| **v0.1.0 to v0.4.1 are signed with the project's former test key** `9229E05252D01F8E`. Its secret half was a passwordless CI secret. From v0.4.2 on, releases are signed with the release key `721316B961DCB94B` (`minisign.pub`); the test key is accepted for v0.1.0 to v0.4.1 only, each pinned to its published `SHA256SUMS`. | A valid signature on those releases proves the files match what this repository's CI signed, not that an offline key holder approved them; from the rotation on, the test key is trusted for those tags only. | Verify anyway (`minisign -Vm SHA256SUMS -p keys/minisign-test-9229E05252D01F8E.pub`, then the checksums); for anything that matters, build the template yourself (`make template`, `make repro ENV=release`) and compare. | ROADMAP NOW-2; [RELEASE.md](RELEASE.md) section 9 |
+| **The assets of v0.4.1 and earlier are dev builds with throwaway certificates.** From v0.4.2 on, the assets are the release kernel and images with an empty configuration. | `urmqtt-dev-*.iso`/`.img` contain keys anyone can read. | Use the template ISO with your own configuration (builder page or `urmqtt-config pack`), or build your own image. | CHANGELOG 0.4.0 and 0.4.1, "Limits"; [RELEASE.md](RELEASE.md) |
 | **The image holds your server private key** (and, with encryption at rest, the disk key). | A copy of the ISO or of the installed disk is a copy of both keys. | Store, copy and delete the ISO like the key itself; keep the installed disk's snapshots private. | AUDIT.md section 6; ADR-240, ADR-252, ADR-254; ROADMAP LATER-7 |
 | **No external audit yet.** The audit package exists; the review has not happened. Most third-party crates in the kernel are cargo-vet exemptions, not audits. | The security claims are the project's own, backed by its tests. | Read [AUDIT.md](AUDIT.md) and decide; report findings privately ([SECURITY.md](../SECURITY.md)). | AUDIT.md sections 6 and 8; ROADMAP NOW-11 |
 | **The site and the builder page are AI-translated** into 13 of their 15 languages, not reviewed by native speakers. The Products page's edition texts likewise. | A translated sentence may be wrong. | The English page is the reference; report a wrong translation as an issue. | ROADMAP section 3, "Not technical, but blocking adoption" |
@@ -42,7 +43,7 @@ readiness").
 | Issue | What it means for you | Workaround | Tracking |
 |---|---|---|---|
 | **IPv4 only.** | No IPv6 listener, no SLAAC. | An IPv4 address on the VM. | ROADMAP NEXT-1 |
-| **The MTU is assumed to be 1500 bytes.** The MTU a network announces (DHCP option 26) is ignored. **Open.** | On a network with a smaller MTU (Google Cloud's default network: 1460) large segments are lost without an error. | Use a network with an MTU of 1500 (the usual VPS and QEMU case). | ROADMAP NOW-19 |
+| **The MTU: up to v0.4.1 assumed to be 1500 bytes.** Fixed in v0.4.2 (DHCP option 26 and `network.mtu`, ADR-264), tested under QEMU only (smoke group `net_mtu`); nothing has run on Google Cloud. | On a network with a smaller MTU (Google Cloud's default network: 1460) v0.4.1 and older lose large segments without an error. | v0.4.2; with a static address, set `network.mtu` (configuration format 7, read by v0.4.2 and newer only). | ROADMAP NOW-19 |
 | **No DNS.** | SNTP servers and collectors are IPv4 literals. | Give addresses, not names. | ROADMAP NEXT-10 |
 | **Many VPS providers run no DHCP for a custom ISO.** | With `network.mode = "dhcp"` the broker gets no address. | `"static"` with the provider's values, or `"auto"` (DHCP first, then static). | [DEPLOY.md](DEPLOY.md), README "Configuring the network of a VPS" |
 
@@ -71,7 +72,7 @@ readiness").
 
 | Issue | What it means for you | Workaround | Tracking |
 |---|---|---|---|
-| **A VPS without virtio-rng and without `RNDR`/`RDRAND`** (the netcup ARM VPS is one) seeds the random generator from CPU timing jitter plus the bootloader's EFI RNG: the weakest seeding the kernel accepts. The boot log says `WARN entropy: no hardware source ... CPU jitter fallback`; `$SYS` does not show it yet. | The TLS keys of that machine depend on the jitter estimate, which was measured under QEMU and on that one VPS. | Ask the provider for a virtio-rng; or set `entropy.fallback = "none"` and the image refuses to boot without a hardware source. | ADR-038; ROADMAP NOW-4, D-3 |
+| **A VPS without virtio-rng and without `RNDR`/`RDRAND`** (the netcup ARM VPS is one) seeds the random generator from CPU timing jitter plus the bootloader's EFI RNG: the weakest seeding the kernel accepts. The boot log says `WARN entropy: no hardware source ... CPU jitter fallback`; from v0.4.2 on `$SYS/broker/entropy/source` says `jitter+firmware`, and the builder and `urmqtt-config` warn while the fallback is allowed (ADR-263). | The TLS keys of that machine depend on the jitter estimate, which was measured under QEMU and on that one VPS. | Ask the provider for a virtio-rng; or set `entropy.fallback = "none"` and the image refuses to boot without a hardware source. | ADR-038; ROADMAP NOW-4, D-3 |
 
 ## 7. Not proven yet (the "Limits" of v0.4.0 and v0.4.1)
 

@@ -6,6 +6,50 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-06
+
+The **first release signed with the project's release key** (`minisign.pub`, key id `721316B961DCB94B`; the former
+test key `9229E05252D01F8E` signed v0.1.0 to v0.4.1 and is accepted for those tags only, each pinned to its published
+`SHA256SUMS`), and the first whose assets carry **no throwaway certificates**: the release kernel, the universal ISO
+and raw image with an empty configuration, the template, the SBOM (`make dist ENV=release`). With it: the MTU the
+network announces is honoured (ADR-264), the CPU-jitter entropy fallback is an explicit, visible choice (ADR-263), a
+production PKI script (`scripts/pki.sh`), and the community documents (FIRST-HOUR, KNOWN-ISSUES, EDITIONS, issue
+forms, DCO).
+
+**Compatibility.** The kernel reads configuration formats 1 to 7 and the template declares **format 7**. Only the new
+key `network.mtu` (not 0) needs format 7; every other configuration keeps the format it had, so whatever packed into
+the v0.4.0 or v0.4.1 template still packs into those and into v0.4.2's, and a configuration with `network.mtu` is
+refused by the v0.4.1 and older templates with "needs configuration format 7 ... use a newer release" (checked on the
+published v0.4.0 and v0.4.1 templates and the locally built v0.4.2 template, docs/PROGRESS.md "Release candidate
+v0.4.2"). The builder page was rebuilt for format 7 and both keys and deployed before this release; a page of v0.4.1
+would grey out the v0.4.2 template. The data-disk layout is unchanged (v2.1). The asset names change:
+`urmqtt-<tag>.elf/.iso/.img/.cdx.json` instead of `urmqtt-dev-<tag>.*`; the template keeps its name
+(`urmqtt-template-<tag>-universal.iso`) and `urmqtt-<tag>.iso` is the same bytes. The trusted comment of `SHA256SUMS`
+is `urMQTT <tag> release <commit>` (was `urMQTT <tag> dev <commit>`). The cipher suites, key-exchange groups and
+signature schemes offered are unchanged.
+
+**Limits, stated plainly.** Still pre-alpha. The three items of the ROADMAP's definition of "alpha" (a real release
+key, NOW-2; the entropy decision, NOW-4; the MTU, NOW-19) are on `main` and in this release, but NOW-2's last check is
+this release itself (verified with the new key on the builder page and the mirror after publishing) and the status
+word changes only when the owner changes it. The release key's secret is passwordless because CI signs with it; its
+protection is GitHub's secret store and the owner's own copies (docs/release-key-rotation.md). The MTU change ran under QEMU only (smoke group
+`net_mtu`; QEMU's user network cannot announce an MTU, so DHCP option 26 was tested with urmqtt-attack's raw transport);
+**nothing has run on Google Cloud**, the network it was made for. The virtio-console, -balloon, -input and -vsock
+drivers (v0.4.0) have still run only under QEMU, never on a real machine, and vsock only against the fake device of the
+tests. The real machines remain one netcup ARM64 VPS and, for x86_64, a Contabo KVM VPS at the H7 commit; nothing of
+this release ran on either, and nothing on physical hardware. The x86_64 unit tests and the x86_64 and universal-ISO
+smoke suites are not in CI. The new builder texts (entropy choice, test-key note, MTU range) are AI translations,
+unreviewed. The rest of v0.4.1's limits is unchanged (the AArch64 X25519 assembly unreviewed, PSTATE.DIT never set,
+Secure Boot partial, no IOMMU, encryption at rest not on the page, the audit a self-review).
+
+### Fixed
+
+- **The MTU was assumed to be 1500 bytes** (every release to v0.4.1): on a network with a smaller MTU full-sized TCP
+  segments were lost without an error. Now the MTU comes from DHCP option 26 or `network.mtu` (Added, ADR-264).
+- **Miri cfg skips the PBKDF2 tests it was meant to skip**: seven skip patterns read `passwd::<name>` while the tests are
+  `passwd::tests::<name>`, so they never matched and those seven tests were most of the job; 34 of 47 tests now run under
+  Miri (41 before), the seven run natively in `cargo test`.
+
 ### Changed
 
 - **Releases ship the release environment only** (NOW-2). `make dist ENV=release`, which the Release workflow now
@@ -17,15 +61,16 @@ All notable changes to this project are documented here. The format follows
   refuses to start without the release key and the signing secret, checks the asset set and that no asset holds a PEM
   private key, and verifies the signature with `minisign.pub`. `make repro ENV=release` builds the release assets twice
   (no `deploy/` needed). `make dist` with any other ENV is unchanged (an operator's own image).
-- **Release key rotation** (NOW-2). `minisign.pub` is the placeholder for the release key the owner generates
-  (docs/release-key-rotation.md); the former test key `9229E05252D01F8E` is `keys/minisign-test-9229E05252D01F8E.pub`,
-  trusted for v0.1.0 to v0.4.1 only (`keys/release-keys.json`). The builder page verifies each release with the key its
+- **Release key rotation** (NOW-2). `minisign.pub` is the project's release key `721316B961DCB94B` (generated
+  2026-11-06; its secret is in the repository secret `MINISIGN_SECRET_KEY` and kept outside every repository); v0.4.2 is the
+  first release it signs. The former test key `9229E05252D01F8E` is `keys/minisign-test-9229E05252D01F8E.pub`, trusted
+  for v0.1.0 to v0.4.1 only (`keys/release-keys.json`). The builder page verifies each release with the key its
   signature names, refuses unknown keys and keys outside their range, and marks the old releases "signed with the
   project's former test key" (the new texts in 14 languages are AI translations). The release mirror takes
   `--keyring` (`releases.json` gains `keys` and a per-release `signed_by`); `urmqtt-config check-release` takes several
-  `--pubkey`, or `--keyring keys/release-keys.json --tag TAG`. The six releases of the test key are **pinned**: for
-  each, only the `SHA256SUMS` with the SHA-256 in the key ring is accepted, by the page, the mirror and the tool. `scripts/check-release-key.sh` guards the Release workflow, `make sign`, the mirror installer and the page
-  deploy.
+  `--pubkey`, or `--keyring keys/release-keys.json --tag TAG`. `scripts/check-release-key.sh` guards the Release
+  workflow, `make sign`, the mirror installer and the page deploy (SECURITY.md, "Release signing keys";
+  docs/release-key-rotation.md).
 
 - README: a "Start here" line (first hour, known issues, editions, security policy); the title, badges, WARNING
   banner, "Why urMQTT" table, Features Build row and M11 row brought in line with ROADMAP section 6; rows for O1 to
@@ -35,9 +80,6 @@ All notable changes to this project are documented here. The format follows
   each crate's tests one after another on one core. The same tests run; two tls tests run a smaller size under Miri only
   (`MAX_CAPTURED` 64 instead of 4096 for the capture-table eviction test, 40 instead of 400 corruptions per certificate
   for the serial reader test; `cargo test` keeps the full size). `MIRI_RUNNER=libtest` keeps the old runner.
-- **Miri cfg skips the PBKDF2 tests it was meant to skip**: seven skip patterns read `passwd::<name>` while the tests are
-  `passwd::tests::<name>`, so they never matched and those seven tests were most of the job; 34 of 47 tests now run under
-  Miri (41 before), the seven run natively in `cargo test`.
 - **A Miri job whose inputs match an earlier green run reports "cached"** (`scripts/miri-cache-key.sh`: the crates and
   their path dependencies, `Cargo.lock`, the toolchain, Miri and nextest versions, the flags and the scripts). Only a green
   run is recorded; `workflow_dispatch` with `miri-cache` off runs Miri in full.
@@ -91,6 +133,28 @@ All notable changes to this project are documented here. The format follows
   raw transport, new mode `mtu-probe`; QEMU's user network cannot announce an MTU).
 - **A Miri negative control**: `scripts/miri.sh --negative-control` runs a deliberate use-after-free (compiled only under
   Miri, `#[ignore]`d, in urmqtt-config) and fails unless Miri reports it; every CI Miri job runs it.
+
+### Security
+
+- **The release key rotation** (NOW-2, above). What a user does: fetch `minisign.pub` **at the tag**
+  (`https://raw.githubusercontent.com/zeljan-alduk/urMQTT/v0.4.2/minisign.pub`) and check that it names
+  `721316B961DCB94B`; verify v0.4.1 and older with `keys/minisign-test-9229E05252D01F8E.pub`. The test key is
+  **retired and considered compromised** (its secret was a passwordless CI secret): any signature by it on a tag after
+  v0.4.1 is a forgery. The builder page, the mirror and `urmqtt-config check-release --keyring` accept it only for
+  v0.1.0 to v0.4.1, and for each of those six tags only the `SHA256SUMS` whose SHA-256 is pinned in
+  `keys/release-keys.json`, so the test key cannot sign a different `SHA256SUMS` for an old tag either. Pinning covers
+  `SHA256SUMS` and the files it lists, nothing else.
+- **No published asset holds a private key any more**: the dev images with throwaway certificates are gone from the
+  release, and the workflow refuses an asset with a PEM private key (`scripts/check-no-pem-keys.py`).
+- **Entropy** (ADR-263): the default stays `entropy.fallback = "jitter"` (D-3, the owner's decision), but the choice
+  is explicit in the builder's basic view, `urmqtt-config` prints a `WARNING` while the fallback is allowed, and
+  `$SYS/broker/entropy/source` says what seeded the generator; `"none"` makes an image refuse to boot without a
+  hardware source.
+- **The MTU** (ADR-264): an announced MTU outside 576 to 9000 is ignored with a warning, frames above 1500 bytes are
+  never sent, and an ICMP echo reply that would not fit is dropped rather than sent.
+- New `unsafe`: one more `#[unsafe(no_mangle)]` export of the builder's WebAssembly module (`ub_minisig_key_id`, to
+  read a signature's key id), and the Miri negative control's deliberate use-after-free in urmqtt-config, compiled only
+  under Miri and `#[ignore]`d (docs/audit/unsafe.md).
 
 ## [0.4.1] - 2026-11-05
 
@@ -392,7 +456,8 @@ production images embed the operator's own keys and are built with
 - M1: Bootable UEFI ISO, console, decoded exception reports, PSCI, `make run`/`smoke`, CI smoke job.
 - M0: CI and CD: lint, host tests, kernel build, cargo-deny, fuzzing, CodeQL, Scorecard, Dependabot and a release workflow with provenance.
 
-[Unreleased]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/zeljan-alduk/urMQTT/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/zeljan-alduk/urMQTT/compare/v0.2.1...v0.3.0

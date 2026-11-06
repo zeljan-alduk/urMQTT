@@ -1,8 +1,8 @@
-# Cutting a release (v0.4.1 as the worked example)
+# Cutting a release (v0.4.2 as the worked example)
 
 For the maintainer. The workflow that does the work is
 [`.github/workflows/release.yml`](../.github/workflows/release.yml); this page is the order in which to do things
-around it, the commands, the text to paste, and how to take it back. Replace `v0.4.1` for another version, and `v0.4.0` for the release before it (v0.4.0 and v0.3.0 were the examples before; their notes are docs/release-notes-v0.4.0.md and section 8).
+around it, the commands, the text to paste, and how to take it back. Replace `v0.4.2` for another version, and `v0.4.1` for the release before it (v0.4.1, v0.4.0 and v0.3.0 were the examples before; their notes are docs/release-notes-v0.4.1.md, docs/release-notes-v0.4.0.md and section 8).
 
 What a release is: a tag `vX.Y.Z` pushed to GitHub. The workflow builds on an arm64 runner (`make dist ENV=release`)
 and publishes, in `build/dist/`:
@@ -33,10 +33,10 @@ sums; the builder page uses the template only):
 ## 0. Before the tag
 
 1. `main` is the commit to release; the working tree is clean (`git status`).
-2. The version is already `0.4.1` in `Cargo.toml` (workspace), `Cargo.lock` and `fuzz/Cargo.lock`; `CHANGELOG.md` has the
-   dated `[0.4.1]` section. (`make` takes the image version from `git describe`, so the tag decides the file names and the
+2. The version is already `0.4.2` in `Cargo.toml` (workspace), `Cargo.lock` and `fuzz/Cargo.lock`; `CHANGELOG.md` has the
+   dated `[0.4.2]` section. (`make` takes the image version from `git describe`, so the tag decides the file names and the
    version the kernel reports; the crate version is only the fallback when no tag is known, and the host tools' package version.)
-3. The gates, on the commit to be tagged (the list in docs/PROGRESS.md "Release candidate v0.4.1" says which were run
+3. The gates, on the commit to be tagged (the list in docs/PROGRESS.md "Release candidate v0.4.2" says which were run
    and what they found):
 
    ```bash
@@ -80,9 +80,9 @@ sums; the builder page uses the template only):
 
 ```bash
 git switch main && git pull --ff-only
-git tag -a v0.4.1 -m "urMQTT v0.4.1"        # annotated, like v0.2.0 to v0.4.0; -s if you sign tags
+git tag -a v0.4.2 -m "urMQTT v0.4.2"        # annotated, like v0.2.0 to v0.4.1; -s if you sign tags
 git push origin main
-git push origin v0.4.1                       # this starts the Release workflow
+git push origin v0.4.2                       # this starts the Release workflow
 gh run watch --repo zeljan-alduk/urMQTT      # about the time of `make dist` on an arm64 runner
 ```
 
@@ -101,14 +101,14 @@ If it fails, nothing is published except possibly a half-made release: see Rollb
 The workflow sets `generate_release_notes: true`. Replace the body with the text below:
 
 ```bash
-# the text of section 7 is also the file docs/release-notes-v0.4.1.md (no outer fence), ready for --notes-file:
-gh release edit v0.4.1 --repo zeljan-alduk/urMQTT --notes-file docs/release-notes-v0.4.1.md
+# the text of section 7 is also the file docs/release-notes-v0.4.2.md (no outer fence), ready for --notes-file:
+gh release edit v0.4.2 --repo zeljan-alduk/urMQTT --notes-file docs/release-notes-v0.4.2.md
 ```
 
 The workflow creates the release itself (`softprops/action-gh-release`), so this is `gh release edit`, not
 `gh release create`. Only if the workflow built and signed everything but failed to create the release, create it by
-hand from the workflow's artifacts: `gh release create v0.4.1 --repo zeljan-alduk/urMQTT --verify-tag --prerelease
---notes-file docs/release-notes-v0.4.1.md build/dist/*` (the files must be the workflow's, with their attestations).
+hand from the workflow's artifacts: `gh release create v0.4.2 --repo zeljan-alduk/urMQTT --verify-tag --prerelease
+--notes-file docs/release-notes-v0.4.2.md build/dist/*` (the files must be the workflow's, with their attestations).
 
 Do it as soon as the workflow is green. Editing the notes does not matter to the mirror (it re-checks assets, not text).
 Leave the release marked pre-release.
@@ -154,7 +154,7 @@ The template works without a toolchain (docs/DEPLOY.md section 1b):
 cargo build --release -p urmqtt-config-tool      # in a clone of the tag; `make certs` for deploy/dev/'s files
 mkdir -p /tmp/cfg-new && cp deploy/dev/{ca.pem,server.pem,server.key,control.pub} /tmp/cfg-new/
 printf '[tls]\ncert = "server.pem"\nkey = "server.key"\n\n[trust]\noperational = ["ca.pem"]\n\n[control]\npublic_key = "control.pub"\n\n[console]\nvirtio_gpu = "on"\n\n[devices]\nvirtio_balloon = "on"\n' > /tmp/cfg-new/config.toml
-target/release/urmqtt-config pack /tmp/cfg-new/config.toml --iso /tmp/urmqtt-v0.4.1/urmqtt-template-v0.4.1-universal.iso --out /tmp/mine.iso
+target/release/urmqtt-config pack /tmp/cfg-new/config.toml --iso /tmp/urmqtt-v0.4.2/urmqtt-template-v0.4.2-universal.iso --out /tmp/mine.iso
 target/release/urmqtt-config show /tmp/mine.iso
 ```
 
@@ -162,8 +162,10 @@ The raw image takes the same configuration: `target/release/urmqtt-config pack /
 urmqtt-vX.Y.Z.img --out /tmp/mine.img`. A production PKI for these files: docs/PKI.md (`scripts/pki.sh`).
 
 Not `deploy/dev/config.toml`: a release template refuses its dev-only keys (the plaintext port,
-`require_data_disk = false`). The file above is format 6; it must also pack into the previous release's template if that
-reads format 6 (v0.4.0) and be refused by v0.3.0's ("needs configuration format 6 ... reads up to 4: use a newer release").
+`require_data_disk = false`). The file above is format 6; it must also pack into the templates of v0.4.1 and v0.4.0
+(they read format 6) and be refused by v0.3.0's ("needs configuration format 6 ... reads up to 4: use a newer release").
+With `[network]` `mtu = 1460` added it is format 7: it packs into the v0.4.2 template and is refused by v0.4.1's and
+v0.4.0's ("needs configuration format 7 ... reads up to 6: use a newer release").
 
 The kernel: from the rotation on, `urmqtt-vX.Y.Z.elf` is the **release** kernel, which embeds nothing machine-specific,
 so anyone can rebuild it from the tag and compare (`make repro ENV=release` builds it twice; `make dist ENV=release`
@@ -178,11 +180,13 @@ the configuration format it was built with (`FORMAT_VERSION` in `crates/cfg/src/
 its WebAssembly module). A release that appears in the mirror before the new page is deployed may be listed but unusable.
 
 Steps 1 and 2 are needed only when the page or the configuration changed since the previous release:
-`git diff v0.4.0..HEAD -- tools/builder crates/config-schema crates/cfg crates/config tools/config`. If that is empty
-(it is for v0.4.1), the deployed page already handles the new template, nothing is deployed, and only step 3 onward
-applies.
+`git diff v0.4.1..HEAD -- tools/builder crates/config-schema crates/cfg crates/config tools/config`. If that is empty
+(it was for v0.4.1), the deployed page already handles the new template, nothing is deployed, and only step 3 onward
+applies. For v0.4.2 it is not empty (format 7, the key ring), and the page built from `main` with both keys and format
+7 was deployed on 2026-11-06, before the tag, together with the mirror's switch to `--keyring`
+(docs/release-day-v0.4.2.md); on the day only the checks of steps 3 and 4 remain.
 
-1. Build the page from the tag: `git switch --detach v0.4.1 && make builder-emulator` (the emulator needs a one-time
+1. Build the page from the tag: `git switch --detach v0.4.2 && make builder-emulator` (the emulator needs a one-time
    download that is pinned by hash; `build/builder/` is the output).
 2. Deploy it to the site generator's directory and publish with the site's own script:
 
@@ -202,149 +206,183 @@ applies.
    ```bash
    systemctl start urmqtt-mirror
    journalctl -u urmqtt-mirror -n 50 --no-pager            # exit 2 means a release failed verification
-   curl -fsS https://aldo.tech/urmqtt/releases.json | python3 -I -m json.tool | grep -B3 -A25 '"tag": "v0.4.1"'
+   curl -fsS https://aldo.tech/urmqtt/releases.json | python3 -I -m json.tool | grep -B3 -A25 '"tag": "v0.4.2"'
    ```
 
-   Expected: `v0.4.1` with `"prerelease": true`, `"status": "ok"`, `"verified": true`, `"signed_by"` naming the key
+   Expected: `v0.4.2` with `"prerelease": true`, `"status": "ok"`, `"verified": true`, `"signed_by"` naming the key
    (the former test key up to v0.4.1, the release key after), and a `template` whose `sha256`
-   equals the template's line in `SHA256SUMS` and whose `config_format` is **6** for v0.4.1 (**7** for the next release, built after the MTU change) (the empty configuration in the template
+   equals the template's line in `SHA256SUMS` and whose `config_format` is **7** for v0.4.2 (built after the MTU change; **6** for v0.4.0 and v0.4.1) (the empty configuration in the template
    is stamped with `FORMAT_VERSION`; checked on the locally built template). The older releases stay listed as before.
-4. In a browser on `https://aldo.tech/en/products/urmqtt-builder/` (and the Croatian page): v0.4.1 is the chosen release
+4. In a browser on `https://aldo.tech/en/products/urmqtt-builder/` (and the Croatian page): v0.4.2 is the chosen release
    (the newest stable one, else the newest pre-release; all of ours are pre-releases), the check mark for the signature
    appears, a build ends in a result card, "Try in the emulator" boots it. Turning TLS off must still pick a release of
    v0.2.1 or newer. In the advanced view `console.virtio_gpu` and the `[devices]` keys are offered; with one of them
-   not "off", v0.4.1 (and v0.4.0) builds and v0.3.0 or older chosen by hand is refused with "use a newer release". Encryption at
-   rest is not on the page; do not claim it is.
+   not "off", v0.4.2 (and v0.4.1, v0.4.0) builds and v0.3.0 or older chosen by hand is refused with "use a newer release";
+   with `network.mtu` set, v0.4.2 builds and v0.4.1 chosen by hand is refused the same way. v0.4.2's check mark names
+   the release key without the test-key note; v0.4.1 chosen by hand shows "signed with the project's former test key".
+   Encryption at rest is not on the page; do not claim it is.
 5. Statuses of the URLs in `sitemap.xml` before and after must not change except for the new pages.
 
 ## 5. After the release
 
-- Move the README's version references if any are left (`grep -rn "v0.4.0\|v0.4.1" README.md docs/`), and open the
+- Move the README's version references if any are left (`grep -rn "v0.4.1\|v0.4.2" README.md docs/`), and open the
   development branch for the next change: the `[Unreleased]` section of `CHANGELOG.md` is empty.
-- `docs/VULNERABILITY-HANDLING.md` section 6: the supported version is the latest release, so **v0.4.0 and older stop
+- `docs/VULNERABILITY-HANDLING.md` section 6: the supported version is the latest release, so **v0.4.1 and older stop
   being supported** with this release. Say so in the release notes (the text below does).
 - The daily `cargo-deny` job and Dependabot continue as before; nothing to change.
-- Tell the people who deployed v0.4.0: nothing about the configuration changed (format 6 as before); repacking the same
-  configuration into the v0.4.1 template is the update. Formats 5 and 6 (`console.virtio_gpu`, `[devices]` keys not
-  "off") are read by v0.4.0 and newer only.
+- Tell the people who deployed v0.4.1: their configuration keeps its format (6 or lower); repacking the same
+  configuration into the v0.4.2 template is the update. Format 7 (`network.mtu` not 0) is read by v0.4.2 and newer
+  only. Verify v0.4.2 with `minisign.pub` at the tag (the release key), not with an older copy of the file.
 
 ## 6. Rollback
 
 What can go wrong and what to do. Nothing here rewrites history on `main`.
 
 - **The workflow failed before the release existed.** Fix on `main`, delete the tag locally and on the remote
-  (`git tag -d v0.4.1 && git push origin :refs/tags/v0.4.1`), tag the fixed commit again. A tag that was only visible for
+  (`git tag -d v0.4.2 && git push origin :refs/tags/v0.4.2`), tag the fixed commit again. A tag that was only visible for
   minutes and had no release can be moved; the mirror ignores a tag without release.
 - **A bad release is published** (wrong file, unsigned, a defect): first make it unusable for the page and the mirror
-  without deleting evidence: `gh release edit v0.4.1 --prerelease --notes "WITHDRAWN: <reason>"`. To keep the page from
+  without deleting evidence: `gh release edit v0.4.2 --prerelease --notes "WITHDRAWN: <reason>"`. To keep the page from
   offering it, delete the release's assets or the release (the mirror marks a release that disappeared upstream as
   removed, "removed-upstream", and the page will not offer it); on the server `systemctl start urmqtt-mirror` applies it
   now. This path of the mirror is covered by `scripts/test-mirror-releases.py` but was not exercised against a real
-  withdrawn release. `gh release delete v0.4.1 --cleanup-tag` is irreversible: the tag name `v0.4.1` should not be reused for different bytes (people have
-  verified the old ones); publish `v0.4.2` instead.
-- **A security defect:** follow docs/VULNERABILITY-HANDLING.md section 4; the fix is the next release (`v0.4.2`), the
-  advisory names v0.4.1 as affected.
+  withdrawn release. `gh release delete v0.4.2 --cleanup-tag` is irreversible: the tag name `v0.4.2` should not be reused for different bytes (people have
+  verified the old ones); publish `v0.4.3` instead.
+- **A security defect:** follow docs/VULNERABILITY-HANDLING.md section 4; the fix is the next release (`v0.4.3`), the
+  advisory names v0.4.2 as affected.
 - **The page misbehaves after the redeploy:** restore `build.py` and `publish.sh` from the backups the deploy script made,
   remove `urmqtt-builder/` from the generator's directory and publish (docs/DEPLOY.md section 10, "Rolling back"); the
   mirror needs no change.
-- **Users who updated and want v0.4.0 back:** v0.4.1 changes neither the data-disk layout (v2.1) nor the configuration
-  format (6), so the same configuration packed into the v0.4.0 template boots and opens the disk.
-- **Users who want v0.3.0 back:** v0.4.0 and v0.4.1 do not change the data-disk layout (v2.1), so a v0.3.0 kernel
+- **Users who updated and want v0.4.1 back:** v0.4.2 does not change the data-disk layout (v2.1), so the same
+  configuration packed into the v0.4.1 (or v0.4.0) template boots and opens the disk, if it does not set
+  `network.mtu` (format 7, refused by those templates); without it the configuration keeps its format (6 or lower).
+- **Users who want v0.3.0 back:** v0.4.0 to v0.4.2 do not change the data-disk layout (v2.1), so a v0.3.0 kernel
   opens the disk. Its configuration must be one v0.3.0 reads: pack it again with `console.virtio_gpu` and every
   `[devices]` key "off" (format 4 or lower) into the v0.3.0 template. (For v0.2.1 and older: a layout-v2.1 disk is
   refused by those kernels, S5; restore a snapshot taken before that update, or use `urmqtt-disk backup-extract`.)
 
 ## 7. Release notes (paste)
 
-**For the first release after the key rotation** replace, in the notes, the "dev builds with throwaway keys" sentence by
-"The assets are the release kernel and images with an empty configuration (`urmqtt-<tag>.elf/.iso/.img`, the `.iso`
-being the template); configure them with the builder page or `urmqtt-config pack --iso/--image`. There is no dev build
-with throwaway keys any more." and the Verify block by:
+v0.4.2 is the first release after the key rotation: its notes say which key signed it, fetch `minisign.pub` at the
+tag, list the new asset names and say that the dev build with throwaway keys is no longer published. A later release
+keeps the "Verify" block and drops the paragraphs about the rotation once nobody needs them.
 
-    gh release download vX.Y.Z --repo zeljan-alduk/urMQTT
-    minisign -Vm SHA256SUMS -p minisign.pub && shasum -a 256 -c SHA256SUMS
-    gh attestation verify urmqtt-vX.Y.Z.elf --repo zeljan-alduk/urMQTT
-
-    `minisign.pub` is in the repository root (key `<KEY ID>`, the release key). Releases up to v0.4.1 were signed with
-    the former test key 9229E05252D01F8E (keys/minisign-test-9229E05252D01F8E.pub), which is no longer trusted for
-    anything newer.
-
-The same text is the file [`docs/release-notes-v0.4.1.md`](release-notes-v0.4.1.md), for `--notes-file` (section 2).
-If one of the two changes, change the other. v0.4.0's notes are [`docs/release-notes-v0.4.0.md`](release-notes-v0.4.0.md).
+The same text is the file [`docs/release-notes-v0.4.2.md`](release-notes-v0.4.2.md), for `--notes-file` (section 2).
+If one of the two changes, change the other. The notes of v0.4.1 and v0.4.0 are
+[`docs/release-notes-v0.4.1.md`](release-notes-v0.4.1.md) and [`docs/release-notes-v0.4.0.md`](release-notes-v0.4.0.md).
 
 ```markdown
-## urMQTT v0.4.1 (pre-release)
+## urMQTT v0.4.2 (pre-release)
 
 A broker that is its own operating system: a Rust unikernel for VMs, serving MQTT 3.1.1 over TLS 1.3 with mutual TLS.
-This release covers everything since v0.4.0: a faster server side of the mutual-TLS handshake (ADR-259). No
-configuration format change; the builder page stays as it is.
+This release covers everything since v0.4.1. It is the **first release signed with the project's release key**
+(`721316B961DCB94B`) and the first whose assets hold **no throwaway certificates**. New: the MTU the network announces
+is honoured (ADR-264, configuration format 7), and the CPU-jitter entropy fallback is an explicit, visible choice
+(ADR-263).
+
+**The release key (read this first)**
+
+- `minisign.pub` at this tag is the release key `721316B961DCB94B`, generated on 2026-11-06. Fetch it **at the tag**
+  (the commands below), not from an older checkout: at v0.4.1 and earlier `minisign.pub` is the former test key.
+- The former test key `9229E05252D01F8E` is **retired and considered compromised** (its secret was a passwordless CI
+  secret). It signed v0.1.0 to v0.4.1; those signatures stay valid, and the repository keeps the key as
+  `keys/minisign-test-9229E05252D01F8E.pub`. A signature by it on any tag after v0.4.1 is a forgery: report it
+  (SECURITY.md).
+- The builder page, the release mirror and `urmqtt-config check-release --keyring keys/release-keys.json` accept the
+  test key for v0.1.0 to v0.4.1 only, and for each of those six tags only the `SHA256SUMS` whose SHA-256 is pinned in
+  `keys/release-keys.json`. The builder page marks those releases "signed with the project's former test key".
+
+**What the assets are now**
+
+The assets are the release kernel and images with an empty configuration (`urmqtt-v0.4.2.elf/.iso/.img`, the `.iso`
+being the template); configure them with the builder page or `urmqtt-config pack --iso/--image`. There is no dev build
+with throwaway keys any more: the `urmqtt-dev-<tag>.*` images of v0.4.1 and earlier are not published for v0.4.2.
+Where you used one to try urMQTT, build your image on the builder page
+(https://aldo.tech/en/products/urmqtt-builder/, in your browser, keys never leave it) or with `urmqtt-config pack`
+from the template and your own certificates (`scripts/pki.sh`, docs/PKI.md; docs/FIRST-HOUR.md walks through it).
+
+| File | What |
+|---|---|
+| `urmqtt-v0.4.2.elf` | the release kernel for aarch64 (no certificate or key in it; reproducible from the tag with `make dist ENV=release`) |
+| `urmqtt-v0.4.2.iso` | the universal ISO (aarch64 UEFI, x86_64 UEFI and BIOS) with the empty configuration: byte for byte the template |
+| `urmqtt-v0.4.2.img` | its raw disk image; `urmqtt-config pack --image` configures it |
+| `urmqtt-template-v0.4.2-universal.iso` | the same ISO under the template name the builder page and the mirror use |
+| `urmqtt-v0.4.2.cdx.json` | the CycloneDX SBOM |
+| `SHA256SUMS`, `SHA256SUMS.minisig` | the checksums and their signature with the release key; trusted comment `urMQTT v0.4.2 release <commit>` |
 
 **New**
 
-- **The trust anchors get their verification tables.** Since ADR-111 no CA ever had one: the key was stored in a form
-  the registration did not parse, so a device's first handshake checked its certificate on the slower unknown-key
-  path (no effect on verdicts). Fixed (docs/AUDIT.md A259-W1).
-- **X25519 on aarch64 in `mul`/`umulh` inline assembly** for the shared secret, instead of dalek's 51-bit ladder. The
-  boot line reads `crypto: ecc=... x25519=armv8|adx|portable`. `make ct` gains `x25519_ladder_is_constant_time`.
-- **P-256 verification** with a width-5 NAF and a variable-time scalar inversion (public inputs only; signing and ECDH
-  keep their constant-time paths), on both architectures.
-- **Measured on the netcup Neoverse N1 VPS** (2 vCPUs, so one data core; one run each, the load host shared, the CPU
-  clock 2.58 GHz in the earlier run and 2.89 GHz in this one): the server's CPU per handshake 461 us against 553 us
-  with the P-256 assembly of ADR-255 alone and about 1.0 to 1.08 ms with the portable code; X25519 128 us, ECDSA verify
-  124 us. Full mTLS handshakes per second, 0 errors, medians of three runs: 1,451 / 1,624 / 1,599 at 32 / 64 / 128
-  threads, against 1,317 / 1,398 / 1,316 with the assembly alone and 848 / 827 / 778 with the portable code
-  (docs/PERFORMANCE.md section 12.1, raw files in docs/perf-results/).
-- **Profiled stage by stage** (Docker on an Apple M4 Pro, not the target CPU; PERFORMANCE.md section 12): the
-  server's CPU per full mutual-TLS handshake 88.8 -> 80.3 us for a returning device, 118.6 -> 87.8 us for a first
-  contact. The profiler is a host-only feature (`stage-profile`, example `handshake_profile`) and not in the image.
-- **ADR-260, a proposal only**: a cache of verified client certificates. Not built, and recommended against (about
-  1 us per returning device's handshake for a new trust decision).
+- **The network's MTU is honoured** (ROADMAP NOW-19, ADR-264). Every packet was sized for 1500 bytes, so on a smaller
+  network (Google Cloud's VPC: 1460) full-sized TCP segments were lost without an error. The DHCP client reads option
+  26 (576 to 9000 is used, another value ignored with a warning), and the new optional key **`network.mtu`** (0, the
+  default: from DHCP, else 1500; or 576 to 9000; with a static address the only source) sets it. The MSS follows the
+  MTU, open connections follow a lower MTU at a DHCP renewal, statsd datagrams stay within it, frames above 1500 bytes
+  are never sent. Boot line `net: mtu 1460 (static|dhcp|default)`, `$SYS/broker/net/mtu`; the builder's advanced view
+  has the key.
+- **The weak entropy path is an explicit option** (NOW-4, ADR-263). The default stays `entropy.fallback = "jitter"`
+  (a host with no virtio-rng and no `RNDR`/`RDRAND`, such as the netcup ARM VPS, still boots); the builder's basic
+  view has a "Random numbers" choice with a warning, `urmqtt-config pack`, `verify` and `show` print a `WARNING` while
+  the fallback is allowed, and `$SYS/broker/entropy/source` says what seeded the generator. `"none"` makes the image
+  refuse to boot without a hardware source.
+- **A production PKI**: `scripts/pki.sh` and docs/PKI.md (an offline CA, server, device and service certificates,
+  rotation, revocation, the control key; `pki.sh check` runs `urmqtt-config pack`'s checks).
+- **For the community**: docs/FIRST-HOUR.md (from nothing to a first message over mutual TLS), docs/KNOWN-ISSUES.md,
+  docs/EDITIONS.md (the open edition is everything that runs on virtio devices), issue forms, and a DCO sign-off on
+  pull requests.
 
-**Compatibility.** Nothing changes for images, disks or the builder page. The kernel reads configuration formats 1 to
-6 and the template declares format 6, as in v0.4.0; the data-disk layout is unchanged (v2.1). The cipher suites,
-key-exchange groups and signature schemes offered are unchanged.
+**Compatibility.** The kernel reads configuration formats 1 to 7 and the template declares format 7. Only
+`network.mtu` (not 0) needs format 7; any other configuration keeps its format, so what packed into the v0.4.0 or
+v0.4.1 template packs into v0.4.2's unchanged, and repacking it into the v0.4.2 template is the update. The data-disk
+layout is unchanged (v2.1), so going back to v0.4.1 or v0.4.0 is packing the same configuration (without
+`network.mtu`) into that template. The cipher suites, key-exchange groups and signature schemes offered are unchanged.
 
 | Template of | Its kernel reads | What the builder page and `urmqtt-config pack --iso` do with it |
 |---|---|---|
 | v0.1.0 | no template (configuration built in) | not offered: no configuration slot |
-| v0.2.0 | formats 1 and 2 | TLS on, with or without plain MQTT; TLS off is refused (format 3); the virtio-gpu console and `[devices]` keys are refused |
+| v0.2.0 | formats 1 and 2 | TLS on, with or without plain MQTT; TLS off is refused (format 3); the virtio-gpu console, `[devices]` keys and `network.mtu` are refused |
 | v0.2.1 | formats 1 to 3 | as v0.2.0, and TLS off (plain MQTT only) |
 | v0.3.0 | formats 1 to 4 | as v0.2.1; encryption at rest (format 4) through `urmqtt-config pack` only, the page does not offer it |
-| v0.4.0 | formats 1 to 6 | everything the page offers, including `console.virtio_gpu` and the `[devices]` keys |
+| v0.4.0 | formats 1 to 6 | as v0.3.0, and `console.virtio_gpu` and the `[devices]` keys; `network.mtu` is refused (format 7: "use a newer release") |
 | v0.4.1 | formats 1 to 6 | as v0.4.0 |
+| v0.4.2 | formats 1 to 7 | everything the page offers, including `network.mtu` |
 
-The page picks the newest release that can do what the form asks, so it chooses v0.4.1 once the release mirror lists
+The page picks the newest release that can do what the form asks, so it chooses v0.4.2 once the release mirror lists
 it.
 
 **Read this before relying on it**
 
-- Pre-alpha. The assets here are **dev builds with throwaway keys** for evaluation, and the release signing key is
-  still a test key; production images are built from your own `deploy/prod/` (docs/DEPLOY.md).
-- The aarch64 X25519 assembly is new code written for this project, not vendored from an upstream. It is tested
-  against RFC 7748 and against dalek; the timing records in the repository are from Docker on an Apple M4 Pro only.
-  It has had no independent review and needs a human review. PSTATE.DIT is never set (docs/AUDIT.md A255-W2), now
-  for the X25519 field arithmetic as well as for P-256.
-- The Neoverse N1 figures above are one netcup VPS, one run each, from a shared load host; at 32 threads the ranges of
-  this release and of the assembly alone overlap. No other server core was measured.
-- The P-256 verification change runs on x86_64 too, unmeasured. The x86_64 unit tests do not run in CI (its host tests
-  run on arm64 Linux and macOS), the x86_64 and universal-ISO smoke suites are not in CI, and nothing of this release
-  ran on an x86_64 KVM guest.
-- Unchanged from v0.4.0: the real machines so far are one netcup ARM64 VPS and, for x86_64, a Contabo KVM VPS at the
-  H7 commit; nothing has run on physical hardware. The virtio-console, -balloon, -input and -vsock drivers have run only
-  under QEMU. On the netcup VPS the random number generator was seeded from the CPU-jitter fallback and the
-  bootloader's EFI RNG only. Secure Boot only partly done (release images are not signed), no IOMMU, encryption at rest
-  not on the builder page, 53 of the 67 crates in the kernel are cargo-vet exemptions, not audits, and the audit
-  package is a self-review.
-- Support: only the latest release gets fixes; **v0.4.0 and older are no longer supported.**
+- Pre-alpha. The three items of the ROADMAP's definition of "alpha" (a real release key, the entropy decision, the
+  MTU) are in this release; the status word changes when the owner changes it, after this release has been verified
+  with the new key on the builder page and the mirror.
+- The release key's secret is passwordless because CI signs with it: its protection is GitHub's secret store and the
+  owner's own copies (docs/release-key-rotation.md).
+- The MTU change has run under QEMU only (QEMU's user network cannot announce an MTU; DHCP option 26 was tested with a
+  raw test transport). **Nothing has run on Google Cloud yet**, the network it was made for.
+- The virtio-console, -balloon, -input and -vsock drivers have run only under QEMU, never on a real machine; vsock
+  only against the fake device of the tests.
+- The real machines so far are one netcup ARM64 VPS and, for x86_64, a Contabo KVM VPS at the H7 commit; nothing of
+  this release ran on either, and nothing has run on physical hardware. The x86_64 unit tests and the x86_64 and
+  universal-ISO smoke suites are not in CI.
+- The new builder texts (the entropy choice, the test-key note, the MTU range) are AI translations, unreviewed; so is
+  most of the site.
+- Unchanged from v0.4.1: the AArch64 X25519 assembly has had no independent review, PSTATE.DIT is never set, Secure
+  Boot only partly done (release images are not signed), no IOMMU, encryption at rest not on the builder page, most
+  kernel crates are cargo-vet exemptions, and the audit package is a self-review. docs/KNOWN-ISSUES.md lists the rest.
+- Support: only the latest release gets fixes; **v0.4.1 and older are no longer supported.**
 
 **Verify** (in an empty directory):
 
-    gh release download v0.4.1 --repo zeljan-alduk/urMQTT
+    gh release download v0.4.2 --repo zeljan-alduk/urMQTT
+    curl -fsSLO https://raw.githubusercontent.com/zeljan-alduk/urMQTT/v0.4.2/minisign.pub
     minisign -Vm SHA256SUMS -p minisign.pub && shasum -a 256 -c SHA256SUMS
-    gh attestation verify urmqtt-dev-v0.4.1.elf --repo zeljan-alduk/urMQTT
+    gh attestation verify urmqtt-v0.4.2.elf --repo zeljan-alduk/urMQTT
+    gh attestation verify urmqtt-v0.4.2.iso --repo zeljan-alduk/urMQTT --predicate-type https://cyclonedx.org/bom
 
-`minisign.pub` is in the repository root (key `RWSOH9BSUuApkkBWq/AZJ03Rn63oOYq+yXzC/vgI1PZ/i5yaE+SVzOWS`). Full changelog:
-CHANGELOG.md.
+`minisign` must report the key `721316B961DCB94B` (`RWRLudxhuRYTcpqyk9TNXAj1qzClrFEvzXTyFMBK6NEuyvk6tVUxjUlH`)
+and the trusted comment `urMQTT v0.4.2 release <the tag's commit>`. Releases up to v0.4.1 were signed with the former
+test key 9229E05252D01F8E (keys/minisign-test-9229E05252D01F8E.pub), which is no longer trusted for anything newer.
+With a clone of the repository, `urmqtt-config check-release --keyring keys/release-keys.json --tag v0.4.2 --sums
+SHA256SUMS urmqtt-*` applies the same key ring as the builder page. Full changelog: CHANGELOG.md.
 ```
 
 ## 8. Earlier release notes: v0.3.0 (the previous worked example)
