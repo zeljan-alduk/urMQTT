@@ -340,11 +340,16 @@ dist-universal: universal ## Both ELFs, the universal ISO and raw image, SHA256S
 sign: ## Sign build/dist/SHA256SUMS with minisign (MINISIGN_KEY=path to the secret key)
 	@test -s $(BUILD_DIR)/dist/SHA256SUMS || { echo "make sign: run make dist first" >&2; exit 1; }
 	@command -v minisign >/dev/null || { echo "make sign: install minisign" >&2; exit 1; }
-	@if [[ -e $(BUILD_DIR)/dist/urmqtt-$(VERSION).elf ]]; then \
+	@release=0; \
+	for t in $(BUILD_DIR)/dist/urmqtt-template-*-universal.iso; do \
+		v=$${t##*/urmqtt-template-}; v=$${v%-universal.iso}; \
+		if [[ -e $(BUILD_DIR)/dist/urmqtt-$$v.elf ]] && cmp -s "$$t" $(BUILD_DIR)/dist/urmqtt-$$v.iso; then release=1; break; fi; \
+	done; \
+	if ((release)); then \
 		scripts/check-release-key.sh || { echo "make sign: refusing to sign a release" >&2; exit 1; }; \
-		comment="urMQTT $(VERSION) release $$(git rev-parse HEAD)"; release=1; \
+		comment="urMQTT $$v release $$(git rev-parse HEAD)"; \
 	else \
-		comment="urMQTT $$(cd $(BUILD_DIR)/dist && ls *.elf | sed 's/^urmqtt-//; s/\.elf$$//') $$(git rev-parse HEAD)"; release=0; \
+		comment="urMQTT $$(cd $(BUILD_DIR)/dist && ls *.elf | sed 's/^urmqtt-//; s/\.elf$$//') $$(git rev-parse HEAD)"; \
 	fi; \
 	minisign -S -s "$(or $(MINISIGN_KEY),$(HOME)/.minisign/minisign.key)" -m $(BUILD_DIR)/dist/SHA256SUMS -t "$$comment"; \
 	if ((release)); then \
