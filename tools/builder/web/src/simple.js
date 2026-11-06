@@ -104,6 +104,11 @@ function renderSimple() {
   // 3. Name, extras, version
   ui.sName = h('input', { class: 'ub-input', id: 'ub-s-name', type: 'text', maxlength: '40', autocomplete: 'off', spellcheck: 'false', placeholder: 'custom', 'aria-describedby': 'ub-s-name-help', on: { input: e => { app.state.name = e.target.value; ui.name.value = e.target.value; persist(); paintFileName(); } } });
   ui.sFile = h('span', { class: 'ub-code' });
+  // Random numbers: the weak path is a visible, explicit choice (ADR-263). The key is the same as the advanced form's.
+  ui.entropyRadios = ['jitter', 'none'].map(id => h('label', { class: 'ub-switch', for: `ub-s-entropy-${id}` },
+    h('input', { type: 'radio', name: 'ub-s-entropy', id: `ub-s-entropy-${id}`, value: id, 'aria-describedby': `ub-s-entropy-${id}-desc`, on: { change: () => setSimple('entropy.fallback', id === 'jitter' ? '' : 'none') } }),
+    h('span', {}, h('strong', { text: t(`simple.entropy.${id}`) }), h('span', { class: 'ub-help', id: `ub-s-entropy-${id}-desc`, style: 'display:block', text: t(`simple.entropy.${id}.desc`) }))));
+  ui.entropyWarn = h('p', { class: 'ub-banner', id: 'ub-s-entropy-warn', role: 'status', text: t('simple.entropy.warn') });
   ui.xDiag = h('input', { type: 'checkbox', id: 'ub-x-diag', on: { change: e => setSimple('storage.diagnostic', e.target.checked) } });
   ui.versionLine = h('span', { class: 'ub-version-line' });
   ui.versionDetails = h('details', { class: 'ub-version-details' }, h('summary', { class: 'ub-link-btn', text: t('simple.change-version') }));
@@ -111,6 +116,7 @@ function renderSimple() {
     h('header', {}, h('h2', { id: 'ub-s-h-name' }, h('span', { class: 'ub-step', 'aria-hidden': 'true', text: '3' }), t('simple.title.name'))),
     h('label', { class: 'ub-label-row', for: 'ub-s-name' }, h('span', { class: 'ub-label', style: 'font-family:inherit', text: t('bar.name') }), ui.sName),
     h('p', { class: 'ub-help', id: 'ub-s-name-help' }, t('simple.name.help'), ' ', ui.sFile),
+    h('fieldset', { class: 'ub-extras', id: 'ub-s-entropy' }, h('legend', { text: t('simple.entropy.title') }), ui.entropyRadios, ui.entropyWarn),
     h('fieldset', { class: 'ub-extras' }, h('legend', { text: t('simple.extras') }),
       h('label', { class: 'ub-switch', for: 'ub-x-diag' }, ui.xDiag, h('span', { text: t('simple.extra.diagnostic') }))),
     h('p', { class: 'ub-help' }, t('simple.version'), ' ', ui.versionLine), ui.versionDetails);
@@ -132,6 +138,9 @@ function syncSimple() {
   if (document.activeElement !== ui.name) ui.name.value = app.state.name || '';
   ui.sFile.textContent = outputName(app.release ? app.release.tag : 'x', app.state.name);
   ui.xDiag.checked = v['storage.diagnostic'] === true;
+  const strict = v['entropy.fallback'] === 'none';
+  ui.entropyRadios.forEach(l => { const r = l.querySelector('input'); r.checked = (r.value === 'none') === strict; });
+  ui.entropyWarn.hidden = strict;
   const plainOn = v['plaintext.enabled'] === true;
   const off = tlsOff(app.state);
   ui.xTls.checked = !off;

@@ -517,7 +517,7 @@ fn entropy() -> urmqtt_diag::report::Entropy {
             j.credited,
             if j.failed { "FAILED" } else { "passed" }
         ),
-        None if !f.fallback_allowed => "disabled (entropy.jitter_fallback = false)".to_string(),
+        None if !f.fallback_allowed => "disabled (entropy.fallback = \"none\")".to_string(),
         None if f.hardware_seed => "not needed: a hardware source seeded the generator".to_string(),
         None => "not run".to_string(),
     };

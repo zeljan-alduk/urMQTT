@@ -98,7 +98,7 @@ the open audit findings that need no hardware closed, and the gaps the netcup ru
 - Verify: a scripted end-to-end run on a VM (issue, connect, rotate CA with overlap, revoke over the control
   channel), as `scripts/control-scenarios.py` does today.
 
-**NOW-4. Entropy: make the weak path visible and decide its default.** S.
+**NOW-4. Entropy: make the weak path visible and decide its default.** S. **Done (2026-11-06, ADR-263).**
 - What: publish the seeding sources and credited bits under `$SYS/broker/` and in `$SYS/query/info` (today only
   the boot warning and the Diagnostic report show them); state per tested provider which source it gives
   (DEPLOY.md §6); decide whether production images should default to `entropy.fallback = "none"` with an explicit
@@ -106,6 +106,11 @@ the open audit findings that need no hardware closed, and the gaps the netcup ru
 - Why: the netcup run (section 1); SECURITY.md residual risks "No hardware RNG on the cloud"; ADR-038 measured the
   jitter credit under QEMU only, and TODO.md asks for the figures on an Ampere cloud.
 - Risk: a stricter default stops images from booting on such clouds; it must fail with a message naming the key.
+- Outcome: the default stays `jitter` (such a VPS still boots); the weak path is an explicit choice, loud where a user
+  decides: the builder's basic view (two options, a warning, the result card, a note), `urmqtt-config pack` / `verify` /
+  `show`, the boot log and `$SYS/broker/entropy/source`; `fallback = "none"` is one click in the builder and refuses
+  with a message naming the key (smoke scenario `entropy_option`). Per-provider sources (DEPLOY.md §6) stay to be filled
+  as providers are tried; the credited-bits figures on an Ampere cloud remain open (TODO.md).
 - Verify: smoke `no-hw-rng` checks the new topics; the jitter figures from netcup and one more provider recorded
   in PROGRESS.
 
@@ -388,7 +393,7 @@ Questions, not assumptions. Each blocks one or more items above.
 |---|---|---|
 | D-1 | Is v0.4 the "production on a KVM VPS" release (Now phase), or should a protocol feature (IPv6, QoS 2) be in it? | phase order |
 | D-2 | Who holds the minisign key and a Secure Boot project key, where (HSM, air-gapped machine), and how are they rotated? A `dbx`/version-counter plan? (ADR-251 says this is the maintainer's decision.) | NOW-2, LATER-6 |
-| D-3 | Should production images refuse to boot without a hardware RNG (`entropy.fallback = "none"`) unless the operator opts in, given the netcup finding? | NOW-4 |
+| D-3 | Should production images refuse to boot without a hardware RNG (`entropy.fallback = "none"`) unless the operator opts in, given the netcup finding? **Answered (owner, 2026-11-06): the default stays allowed; the choice is explicit in the builder; the hard requirement is one click** (ADR-263). | NOW-4 |
 | D-4 | May the production VPS (Contabo) be used again for KVM runs, or is a separate test VPS bought? | NOW-12, NEXT-6 |
 | D-5 | WebSocket: in the kernel (new HTTP parser in the TCB) or a supported external bridge? | NEXT-5 |
 | D-6 | Is an outbound TCP client acceptable at all? It ends the server-only design (ADR-033) and opens bridging, TLS log shipping, NTS and clustering. | NEXT-7, NEXT-8, LATER-1 |

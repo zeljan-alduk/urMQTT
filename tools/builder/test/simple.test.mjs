@@ -93,6 +93,27 @@ test('the extras: diagnostics is a plain checkbox, and plain MQTT (a listener of
   assert.match(await page.eval(`document.querySelector('.ub-simple .ub-code').textContent`), /urmqtt-0\.5\.0-trial-universal\.iso/);
 });
 
+test('random numbers: a visible choice of two, the weak path is the default and warned about, the strict one is one click (ADR-263)', async () => {
+  const legend = await page.eval(`document.querySelector('#ub-s-entropy legend').textContent`);
+  assert.equal(legend, 'Random numbers');
+  const text = await page.eval(`document.querySelector('#ub-s-entropy').textContent`);
+  assert.match(text, /Allow CPU-jitter fallback \(default\)Boots on hosts without a hardware random number generator, seeding the generator from CPU timing jitter and the firmware's values; weaker than a hardware source\./);
+  assert.match(text, /Require a hardware random number generatorThe image refuses to boot without virtio-rng or a CPU instruction \(RNDR, RDRAND\/RDSEED\) and says so on the console\./);
+  assert.equal(await page.eval(`document.querySelector('#ub-s-entropy-jitter').checked`), true, 'the default allows the fallback');
+  assert.equal(await page.eval(`document.querySelector('#ub-s-entropy-warn').hidden`), false, 'and warns');
+  assert.match(await page.eval(`document.querySelector('#ub-s-entropy-warn').textContent`), /^Warning: on a host with neither virtio-rng nor RNDR\/RDRAND/);
+  assert.match(await page.eval(`document.querySelector('.ub-notes').textContent`), /Random numbers may come from CPU jitter/);
+  // One click: the strict option. The warning and the note go, the advanced field follows.
+  await page.click('#ub-s-entropy-none');
+  await page.waitFor(`document.querySelector('#ub-s-entropy-none').checked && document.querySelector('#ub-s-entropy-warn').hidden`);
+  await page.waitFor(`!document.querySelector('.ub-notes').textContent.includes('Random numbers may come from CPU jitter')`, { what: 'the note to go' });
+  const hash = JSON.parse(Buffer.from((await page.eval(`location.hash`)).slice(3), 'base64url').toString());
+  assert.equal(hash.v['entropy.fallback'], 'none', 'the choice is in the address, so it can be linked');
+  // Back to the default for the rest of the file; the result card of the build below names it.
+  await page.click('#ub-s-entropy-jitter');
+  await page.waitFor(`document.querySelector('#ub-s-entropy-jitter').checked && document.querySelector('.ub-notes').textContent.includes('Random numbers may come from CPU jitter')`);
+});
+
 test('the build ends in a result card, without a dialog in the way', async () => {
   await page.waitFor(`!document.querySelector('#ub-build').disabled`);
   await page.click('#ub-build');
@@ -101,6 +122,7 @@ test('the build ends in a result card, without a dialog in the way', async () =>
   const card = await page.eval(`document.querySelector('.ub-result').textContent`);
   assert.match(card, /urmqtt-0\.5\.0-trial-universal\.iso/);
   assert.match(card, /[0-9a-f]{8} [0-9a-f]{8}/);
+  assert.match(card, /Random numbers\s*CPU-jitter fallback allowed/, 'the card says which entropy option was built');
   assert.equal(await page.eval(`document.querySelector('#ub-emulator').getAttribute('aria-disabled')`), 'false');
   assert.equal(await page.eval(`document.activeElement.id`), 'ub-download', 'the focus is on Download');
 });
