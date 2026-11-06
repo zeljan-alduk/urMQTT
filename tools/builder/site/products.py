@@ -10,16 +10,27 @@ link from the blog cards and the posts about urMQTT (row_link, post_note). That 
 made while no release has a template yet; the builder page itself says so plainly, with the releases there are greyed
 out and a link to GitHub (tools/builder/web, ADR-227). `URMQTT_PRODUCTS_LISTED=0` in the environment of the build
 takes the links, the sitemap entries and the indexing away again (the pages stay reachable by address, with noindex).
+
+The Products page shows the two editions (docs/EDITIONS.md) as two groups: urMQTT, labelled open source, and urMQTT
+Enterprise, labelled commercial. The commercial edition's page and its card texts belong to the site, not to this
+repository: they are in enterprise_i18n.py of aldotech-web, next to build.py. When that module is not there (an older
+site), the Enterprise group is left out, so the page never links to a page that does not exist.
 """
 import html
 import json
 import os
 
-from products_i18n import BUILDER, LABEL, PAGE, SLUG, URMQTT
+from products_i18n import BUILDER, EDITION, LABEL, PAGE, SLUG, URMQTT
+
+try:  # the site's own module for the commercial edition (aldotech-web), see the docstring
+    import enterprise_i18n as ENT
+except ImportError:
+    ENT = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUILDER_SLUG = "urmqtt-builder"
 GITHUB_REPO = "https://github.com/zeljan-alduk/urMQTT"
+EDITIONS_URL = GITHUB_REPO + "/blob/main/docs/EDITIONS.md"
 
 # Where the generator finds the built application.
 APP_DIR = os.environ.get("URMQTT_BUILDER_DIR", os.path.join(HERE, "urmqtt-builder"))
@@ -57,6 +68,11 @@ def products_url(code, home):
 
 def builder_url(code, home):
     return f"{products_url(code, home)}{BUILDER_SLUG}/"
+
+
+def enterprise_url(code, home):
+    """The urMQTT Enterprise page of the site (None when the site has no such page)."""
+    return f"{home(code)}{ENT.SLUG}/" if ENT else None
 
 
 def about_urmqtt(post):
@@ -119,19 +135,32 @@ def render(kind, code, h):
     if kind == "products":
         title, lead = pick(PAGE, code)
         u = pick(URMQTT, code)
+        ed = pick(EDITION, code)
+        lead = ed["lead"] if ENT else lead
+        enterprise = ""
+        if ENT:
+            t = ENT.text(code)
+            enterprise = f"""
+    <div class="group">
+      <div><h2>{e(ENT.NAME)}</h2><p class="more">{e(t['edition'])}</p></div>
+      <div class="rows">
+        <div class="row"><h3><a class="row-link" href="{enterprise_url(code, home)}">{e(t['card_h'])}</a> →</h3><p>{e(t['card_t'])}</p></div>
+      </div>
+    </div>"""
         main = f"""  </div>
   <main class="wrap blog stack">
     <p class="crumbs"><a href="{home(code)}">← {e(h['back'])}</a></p>
     <h1>{e(title)}</h1>
     <p class="lead">{e(lead)}</p>
     <div class="group">
-      <div><h2>urMQTT</h2></div>
+      <div><h2>urMQTT</h2><p class="more">{e(ed['open'])}</p></div>
       <div class="rows">
         <div class="row"><h3>urMQTT</h3><div><p><strong>{e(u['tagline'])}</strong></p><p style="margin-top:10px">{e(u['p1'])}</p><p style="margin-top:10px">{e(u['p2'])}</p></div></div>
+        <div class="row"><h3>{e(ed['open_h'])}</h3><p>{e(ed['open_p'])}<br><a class="row-extra" href="{EDITIONS_URL}" rel="noopener">{e(ed['open_link'])} →</a></p></div>
         <div class="row"><h3><a class="row-link" href="{builder_url(code, home)}">{e(u['builder_h'])}</a> →</h3><p>{e(u['builder_p'])}</p></div>
         <div class="row"><h3><a class="row-link" href="{GITHUB_REPO}" rel="noopener">{e(u['source'])}</a> {h['github_icon']}</h3><p>{GITHUB_REPO.split('//')[1]}</p></div>
       </div>
-    </div>
+    </div>{enterprise}
   </main>"""
         return {"main": main, "title": f"{title} | ALDO TECH", "desc": lead, "head": ""}
     # The builder page: the application mounts into #urmqtt-builder.
