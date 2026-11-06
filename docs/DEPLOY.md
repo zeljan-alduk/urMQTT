@@ -52,7 +52,7 @@ page's result byte for byte:
 ```bash
 # my/config.toml names ca.pem, server.pem, server.key, control.pub next to it;
 # keys left out take the defaults (urmqtt-config schema lists them all)
-urmqtt-config pack my/config.toml --iso urmqtt-template-v0.4.1-universal.iso --out urmqtt-mine.iso
+urmqtt-config pack my/config.toml --iso urmqtt-template-v0.4.2-universal.iso --out urmqtt-mine.iso
 # configuration fingerprint: the same one the kernel prints at every boot
 urmqtt-config show urmqtt-mine.iso
 urmqtt-config verify urmqtt-mine.iso      # kernel's checks; all slot copies and module hashes agree

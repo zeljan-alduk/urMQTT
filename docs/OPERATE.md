@@ -116,7 +116,7 @@ the answer is one JSON document on `$SYS/query/info/response` (subscribe
 first). MQTT 3.1.1 has no Response Topic property, so the reply topic is fixed:
 
 ```json
-{"version":"0.4.1","uptime_s":42,"arch":"aarch64","cpu":{"cores":4,"busy":[2,1,0,0]},
+{"version":"0.4.2","uptime_s":42,"arch":"aarch64","cpu":{"cores":4,"busy":[2,1,0,0]},
  "memory":{"total":33554432,"used":1503744},"disk":{"total":57651200,"used":78288},
  "clients":{"connected":1,"total":1},"subscriptions":1,"retained":0,
  "messages":{"received":0,"sent":21},"connections_refused":0,
