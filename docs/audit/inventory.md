@@ -10,7 +10,7 @@
 | `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 3631 | 0 | 101 (101) | deny |
 | `urmqtt-arch-x86_64` | `crates/arch-x86_64` | 6991 | 0 | 155 (155) | deny |
 | `urmqtt-attack` | `tools/attack` | 1092 | 0 | 0 (0) | default |
-| `urmqtt-broker` | `crates/broker` | 5943 | 2020 | 0 (0) | forbid |
+| `urmqtt-broker` | `crates/broker` | 5943 | 2018 | 0 (0) | forbid |
 | `urmqtt-builder-wasm` | `tools/builder/wasm` | 1201 | 0 | 30 (30) | deny |
 | `urmqtt-cfg` | `crates/cfg` | 4841 | 0 | 0 (0) | forbid |
 | `urmqtt-config` | `crates/config` | 1374 | 0 | 10 (10) | deny |
