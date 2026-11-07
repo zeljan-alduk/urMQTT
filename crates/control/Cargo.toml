@@ -16,7 +16,7 @@ workspace = true
 
 [dependencies]
 # Verification only in the kernel; strict (RFC 8032 + no small-order keys).
-ed25519-dalek = { version = "2.2", default-features = false }
+ed25519-dalek = { version = "3.0", default-features = false }
 
 [dev-dependencies]
-ed25519-dalek = { version = "2.2", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "3.0", default-features = false, features = ["alloc"] }
