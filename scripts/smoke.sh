@@ -2296,6 +2296,8 @@ entropy_option() {
         # 1. $SYS names the fallback (operator, mutual TLS, retained topic).
         log="$OUT/entropy-sys-$accel.log" data="$OUT/entropy-sys-$accel.img" status=0
         fresh_disk "$serve" "$data"
+        # A stale log from an earlier run would satisfy the wait below before QEMU truncates it.
+        rm -f "$log" "$log.client"
         "$ROOT/scripts/run-qemu.sh" --serial "$log" --disk "$data" --accel "$accel" ${cpu[@]+"${cpu[@]}"} --no-rng \
             --headless --fwd "$PORT:8883" >"$log.qemu" 2>&1 &
         local pid=$! waited=0
@@ -2310,16 +2312,21 @@ entropy_option() {
             got=$(mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i operator --cafile "$d/ca.pem" \
                 --cert "$d/services/operator.pem" --key "$d/services/operator.key" \
                 -t '$SYS/broker/entropy/source' -C 1 -W 40 2>/dev/null | head -n 1) || true
-            echo "client: sys-entropy-source=$got" >>"$log"
+            echo "client: sys-entropy-source=$got" >"$log.client"
         fi
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
+        # Appended once QEMU has exited: it writes the serial file at its own offset, and a line
+        # appended while it runs is overwritten by the next console line.
+        cat "$log.client" >>"$log" 2>/dev/null || true
         check "entropy-sys-fallback [$accel]" "$log" "$status" \
             "entropy: no hardware source \(virtio-rng, $rng\): CPU jitter fallback .* health tests passed, [0-9]+ ms; weaker than a hardware source \(entropy.fallback = \"none\" refuses such hosts\)" \
             "client: sys-entropy-source=jitter(\+firmware)?$" "NOT:FAILED" "$NO_FAULT"
         # 2. With virtio-rng the source is hardware.
         log="$OUT/entropy-hw-$accel.log" data="$OUT/entropy-hw-$accel.img" status=0
         fresh_disk "$serve" "$data"
+        # A stale log from an earlier run would satisfy the wait below before QEMU truncates it.
+        rm -f "$log" "$log.client"
         "$ROOT/scripts/run-qemu.sh" --serial "$log" --disk "$data" --accel "$accel" --headless \
             --fwd "$PORT:8883" >"$log.qemu" 2>&1 &
         pid=$! waited=0
@@ -2334,10 +2341,13 @@ entropy_option() {
             got=$(mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i operator --cafile "$d/ca.pem" \
                 --cert "$d/services/operator.pem" --key "$d/services/operator.key" \
                 -t '$SYS/broker/entropy/source' -C 1 -W 40 2>/dev/null | head -n 1) || true
-            echo "client: sys-entropy-source=$got" >>"$log"
+            echo "client: sys-entropy-source=$got" >"$log.client"
         fi
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
+        # Appended once QEMU has exited: it writes the serial file at its own offset, and a line
+        # appended while it runs is overwritten by the next console line.
+        cat "$log.client" >>"$log" 2>/dev/null || true
         check "entropy-sys-hardware [$accel]" "$log" "$status" \
             "entropy: [0-9]+ bytes from virtio-rng" "NOT:entropy: no hardware source" \
             "client: sys-entropy-source=virtio-rng(\+rndr|\+rdrand)?$" "NOT:FAILED" "$NO_FAULT"
