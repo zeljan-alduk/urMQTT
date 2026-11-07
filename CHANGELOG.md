@@ -37,6 +37,10 @@ All notable changes to this project are documented here. The format follows
   256); the boot log names the sizes, the `stalls:` line reports a receive queue three quarters full, and each data
   core logs its busiest TCP sender every 5 s under traffic (ADR-266). New tools: `scripts/x11-capture.sh`,
   `scripts/pcap-flows.py`, `SS=1` for `x11-bench.sh`, `QEMU_NIC_PROPS` for `run-qemu.sh`.
+- A virtqueue's two driver-private tables (free-list next-pointers, chain lengths) live in the queue's DMA memory
+  after the used ring instead of inline in `SplitQueue`: with `MAX_QUEUE` at 1024 the struct had grown to 4 KiB and a
+  driver building three queues at probe time overflowed the 128 KiB main stack (aarch64, virtio-balloon, found by
+  the `virtio-devices` smoke on CI right after ADR-266 landed). A test keeps the struct under 128 bytes.
 
 ## [0.4.2] - 2026-11-06
 

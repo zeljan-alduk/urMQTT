@@ -198,41 +198,41 @@ pub fn matches(filter: &str, topic: &str) -> bool {
 
 /// Topics up to four levels over the alphabet the generators draw from.
 fn universe() -> &'static Vec<String> {
-    thread_local! {
-        static U: &'static Vec<String> = {
-            const A: [&str; 13] = [
-                "devices",
-                "d1",
-                "d2",
-                "cmd",
-                "fleet",
-                "all",
-                "provision",
-                "$urmqtt",
-                "$SYS",
-                "x",
-                "telemetry",
-                "state",
-                "hello",
-            ];
-            let mut all: Vec<String> = Vec::new();
-            let mut cur: Vec<Vec<&str>> = vec![vec![]];
-            for _ in 0..4 {
-                let mut next = Vec::new();
-                for p in &cur {
-                    for a in A {
-                        let mut q = p.clone();
-                        q.push(a);
-                        all.push(q.join("/"));
-                        next.push(q);
-                    }
+    // A process-wide lazy static, not a leaked Box per thread: LeakSanitizer
+    // (scripts/sanitize.sh) reported the leak.
+    static U: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+        const A: [&str; 13] = [
+            "devices",
+            "d1",
+            "d2",
+            "cmd",
+            "fleet",
+            "all",
+            "provision",
+            "$urmqtt",
+            "$SYS",
+            "x",
+            "telemetry",
+            "state",
+            "hello",
+        ];
+        let mut all: Vec<String> = Vec::new();
+        let mut cur: Vec<Vec<&str>> = vec![vec![]];
+        for _ in 0..4 {
+            let mut next = Vec::new();
+            for p in &cur {
+                for a in A {
+                    let mut q = p.clone();
+                    q.push(a);
+                    all.push(q.join("/"));
+                    next.push(q);
                 }
-                cur = next;
             }
-            Box::leak(Box::new(all))
-        };
-    }
-    U.with(|u| *u)
+            cur = next;
+        }
+        all
+    });
+    &U
 }
 
 type FilterCache = RefCell<HashMap<(u8, String, String), bool>>;

@@ -7,8 +7,8 @@
 | Role | Crate versions linked | Exempt | Covered by imported audits |
 |---|---:|---:|---:|
 | linked into a kernel (TCB) | 67 | 53 | 14 |
-| build time (proc-macro, build script) | - | 10 | - |
-| host only (tools, tests, build host) | - | 77 | - |
+| build time (proc-macro, build script) | - | 9 | - |
+| host only (tools, tests, build host) | - | 78 | - |
 
 The vendored, patched crates (`cpufeatures` 0.2.17 and 0.3.1, `primeorder` 0.14.0) are first-party for cargo-vet (`audit-as-crates-io = false`): they are not the crates.io bytes. They are reviewed as a diff against the pinned upstream (vendor/README.md).
 
@@ -75,7 +75,6 @@ The vendored, patched crates (`cpufeatures` 0.2.17 and 0.3.1, `primeorder` 0.14.
 | Crate | Version | Criteria |
 |---|---|---|
 | `autocfg` | 1.5.1 | safe-to-deploy |
-| `cc` | 1.10.0 | safe-to-deploy |
 | `curve25519-dalek-derive` | 0.1.1 | safe-to-deploy |
 | `der_derive` | 0.8.0 | safe-to-deploy |
 | `find-msvc-tools` | 0.1.15 | safe-to-deploy |
@@ -98,6 +97,7 @@ The vendored, patched crates (`cpufeatures` 0.2.17 and 0.3.1, `primeorder` 0.14.
 | `borsh` | 1.8.1 | safe-to-run |
 | `borsh-derive` | 1.8.1 | safe-to-run |
 | `bytes` | 1.12.1 | safe-to-run |
+| `cc` | 1.10.0 | safe-to-deploy |
 | `const-oid` | 0.9.6 | safe-to-deploy |
 | `data-encoding` | 2.11.1 | safe-to-deploy |
 | `der-parser` | 10.0.0 | safe-to-deploy |

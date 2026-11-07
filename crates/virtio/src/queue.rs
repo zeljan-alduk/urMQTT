@@ -1,10 +1,18 @@
 //! Split virtqueue (virtio 1.x §2.7) over device-visible DMA memory.
 //!
-//! The rings live in one physically contiguous allocation. The driver side
-//! here owns the descriptor free list; the device consumes the available
-//! ring and fills the used ring. Every index read from the used ring is
-//! validated, because a buggy or hostile device must not make the driver
-//! index out of bounds.
+//! The rings live in one physically contiguous allocation, followed by the
+//! driver's two private tables (the free-list next-pointers and the length of
+//! each in-flight chain), so that a `SplitQueue` is a few words whatever its
+//! size: with `MAX_QUEUE` at 1 024 (ADR-266) the tables as inline arrays
+//! made a queue 4 KiB and a driver with three queues overflowed the 128 KiB
+//! main stack while it was built at probe time (aarch64, virtio-balloon).
+//! The driver side here owns the descriptor free list; the device consumes
+//! the available ring and fills the used ring. Every index read from the
+//! used ring is validated, because a buggy or hostile device must not make
+//! the driver index out of bounds; a device that scribbles over the tables
+//! (it was never told about them, but they share the DMA memory) can only
+//! make descriptors of its own queue overlap, which it could do through the
+//! used ring anyway.
 
 #![allow(unsafe_code)]
 
@@ -43,12 +51,17 @@ pub enum QueueError {
     DeviceProtocol,
 }
 
-/// Byte layout of the three rings for a queue of `size` entries.
+/// Byte layout of the three rings for a queue of `size` entries, then the
+/// driver's two private tables (`u16` each per descriptor).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
     pub desc: usize,
     pub avail: usize,
     pub used: usize,
+    /// Next-pointers of the free list (driver-private).
+    pub next: usize,
+    /// Descriptors per in-flight chain, indexed by head (driver-private).
+    pub chain_len: usize,
     pub total: usize,
 }
 
@@ -59,11 +72,15 @@ impl Layout {
         let avail = desc + 16 * n;
         // Used ring aligned to 4 bytes (virtio 1.x), we use 64 for cache lines.
         let used = (avail + 6 + 2 * n).next_multiple_of(64);
-        let total = used + 6 + 8 * n;
+        let next = (used + 6 + 8 * n).next_multiple_of(64);
+        let chain_len = next + 2 * n;
+        let total = chain_len + 2 * n;
         Self {
             desc,
             avail,
             used,
+            next,
+            chain_len,
             total,
         }
     }
@@ -76,9 +93,6 @@ pub struct SplitQueue {
     /// Next-pointers of free descriptors (driver-private copy).
     free_head: u16,
     num_free: u16,
-    next: [u16; MAX_QUEUE as usize],
-    /// Descriptors per in-flight chain, indexed by head.
-    chain_len: [u16; MAX_QUEUE as usize],
     avail_idx: u16,
     last_used: u16,
 }
@@ -95,21 +109,39 @@ impl SplitQueue {
         if mem.len < layout.total {
             return Err(QueueError::RegionTooSmall);
         }
-        let mut next = [0u16; MAX_QUEUE as usize];
-        for (i, n) in next.iter_mut().enumerate().take(usize::from(size)) {
-            *n = (i as u16 + 1) % size;
-        }
-        Ok(Self {
+        let q = Self {
             mem,
             layout,
             size,
             free_head: 0,
             num_free: size,
-            next,
-            chain_len: [0; MAX_QUEUE as usize],
             avail_idx: 0,
             last_used: 0,
-        })
+        };
+        // The free list threads every descriptor; the chain lengths are the
+        // zeroes the memory came with.
+        for i in 0..size {
+            q.set_next(i, (i + 1) % size);
+        }
+        Ok(q)
+    }
+
+    /// Driver-private next-pointer of descriptor `i` (free list, chains).
+    fn next(&self, i: u16) -> u16 {
+        self.load(self.layout.next + 2 * usize::from(i % self.size))
+    }
+
+    fn set_next(&self, i: u16, n: u16) {
+        self.store(self.layout.next + 2 * usize::from(i % self.size), n);
+    }
+
+    /// Driver-private length of the chain whose head is `head` (0: none).
+    fn chain_len(&self, head: u16) -> u16 {
+        self.load(self.layout.chain_len + 2 * usize::from(head % self.size))
+    }
+
+    fn set_chain_len(&self, head: u16, n: u16) {
+        self.store(self.layout.chain_len + 2 * usize::from(head % self.size), n);
     }
 
     pub fn size(&self) -> u16 {
@@ -168,7 +200,7 @@ impl SplitQueue {
         let mut cur = head;
         for (k, b) in bufs.iter().enumerate() {
             let last = k + 1 == bufs.len();
-            let nxt = self.next.get(usize::from(cur)).copied().unwrap_or(0);
+            let nxt = self.next(cur);
             let mut flags = if b.device_writes { DESC_F_WRITE } else { 0 };
             if !last {
                 flags |= DESC_F_NEXT;
@@ -181,9 +213,7 @@ impl SplitQueue {
             }
         }
         self.num_free -= n;
-        if let Some(c) = self.chain_len.get_mut(usize::from(head)) {
-            *c = n;
-        }
+        self.set_chain_len(head, n);
         let slot = self.layout.avail + 4 + 2 * usize::from(self.avail_idx % self.size);
         self.store(slot, head);
         // Descriptors and ring entry must be visible before the index.
@@ -237,26 +267,23 @@ impl SplitQueue {
         let id: u32 = self.load(elem);
         let len: u32 = self.load(elem + 4);
         let head = u16::try_from(id).map_err(|_| QueueError::DeviceProtocol)?;
-        let n = self
-            .chain_len
-            .get(usize::from(head))
-            .copied()
-            .filter(|&n| n > 0 && head < self.size)
-            .ok_or(QueueError::DeviceProtocol)?;
+        if head >= self.size {
+            return Err(QueueError::DeviceProtocol);
+        }
+        let n = self.chain_len(head);
+        if n == 0 || n > self.size - self.num_free {
+            return Err(QueueError::DeviceProtocol);
+        }
         self.last_used = self.last_used.wrapping_add(1);
         // Return the chain to the free list using our private next-pointers.
         let mut tail = head;
         for _ in 1..n {
-            tail = self.next.get(usize::from(tail)).copied().unwrap_or(0);
+            tail = self.next(tail);
         }
-        if let Some(t) = self.next.get_mut(usize::from(tail)) {
-            *t = self.free_head;
-        }
+        self.set_next(tail, self.free_head);
         self.free_head = head;
         self.num_free += n;
-        if let Some(c) = self.chain_len.get_mut(usize::from(head)) {
-            *c = 0;
-        }
+        self.set_chain_len(head, 0);
         Ok(Some((head, len)))
     }
 }
@@ -269,6 +296,18 @@ impl SplitQueue {
 )]
 mod tests {
     use super::*;
+
+    /// A driver builds its queues on the main stack at probe time (balloon:
+    /// three of them, ADR-266 made the tables 4x larger); the tables live in
+    /// the DMA memory so that the struct stays a few words.
+    #[test]
+    fn a_queue_is_small_whatever_max_queue_is() {
+        assert!(core::mem::size_of::<SplitQueue>() <= 128);
+        let l = Layout::new(MAX_QUEUE);
+        assert_eq!(l.chain_len - l.next, 2 * usize::from(MAX_QUEUE));
+        assert_eq!(l.total - l.chain_len, 2 * usize::from(MAX_QUEUE));
+        assert_eq!(l.next % 64, 0);
+    }
 
     /// Memory plus a toy device that echoes: it reads every readable
     /// buffer, XORs it into the writable ones and reports bytes written.
@@ -355,7 +394,8 @@ mod tests {
         let l = Layout::new(256);
         assert_eq!(l.avail, 4096);
         assert_eq!(l.used % 64, 0);
-        assert_eq!(l.total, l.used + 6 + 8 * 256);
+        assert_eq!(l.next, (l.used + 6 + 8 * 256).next_multiple_of(64));
+        assert_eq!(l.total, l.next + 4 * 256);
     }
 
     #[test]

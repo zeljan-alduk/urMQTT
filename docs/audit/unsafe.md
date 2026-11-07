@@ -348,10 +348,10 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:164` | attribute | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:393` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:414` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:822` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:824` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:876` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:1151` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:831` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:833` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:885` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:1160` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot_aarch64.rs:191` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot_aarch64.rs:193` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot_aarch64.rs:205` | block | yes |
@@ -903,9 +903,9 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-virtio` | `crates/virtio/src/net.rs:64` | block | yes |
 | `urmqtt-virtio` | `crates/virtio/src/net.rs:140` | block | yes |
 | `urmqtt-virtio` | `crates/virtio/src/net.rs:201` | block | yes |
-| `urmqtt-virtio` | `crates/virtio/src/queue.rs:90` | fn | yes |
-| `urmqtt-virtio` | `crates/virtio/src/queue.rs:138` | block | yes |
-| `urmqtt-virtio` | `crates/virtio/src/queue.rs:146` | block | yes |
+| `urmqtt-virtio` | `crates/virtio/src/queue.rs:104` | fn | yes |
+| `urmqtt-virtio` | `crates/virtio/src/queue.rs:170` | block | yes |
+| `urmqtt-virtio` | `crates/virtio/src/queue.rs:178` | block | yes |
 | `urmqtt-virtio` | `crates/virtio/src/rng.rs:27` | block | yes |
 | `urmqtt-virtio` | `crates/virtio/src/rng.rs:54` | block | yes |
 | `urmqtt-virtio` | `crates/virtio/src/scsi.rs:213` | block | yes |
