@@ -27,5 +27,5 @@ p256 = { version = "0.14.0", default-features = false, features = ["arithmetic"]
 [dev-dependencies]
 ecdsa = { version = "0.17", default-features = false, features = ["algorithm"] }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "ecdh", "pkcs8", "alloc"] }
-rand_chacha = { version = "0.3", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }
 rand_core = { version = "0.6", default-features = false }

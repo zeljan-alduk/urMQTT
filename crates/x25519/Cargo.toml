@@ -19,5 +19,5 @@ cpufeatures = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 x25519-dalek = { version = "2", default-features = false }
-rand_chacha = { version = "0.3", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }
 rand_core = { version = "0.6", default-features = false }
