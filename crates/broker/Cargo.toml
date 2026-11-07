@@ -17,3 +17,6 @@ workspace = true
 [dependencies]
 urmqtt-mqtt = { path = "../mqtt" }
 urmqtt-mm = { path = "../mm" }
+
+[dev-dependencies]
+proptest = "1.12"

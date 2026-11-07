@@ -179,6 +179,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "broker_acl"
+path = "fuzz_targets/broker_acl.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "telemetry_recover"
 path = "fuzz_targets/telemetry_recover.rs"
 test = false
