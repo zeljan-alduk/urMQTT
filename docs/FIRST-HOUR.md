@@ -4,7 +4,7 @@ From nothing to a first MQTT message over mutual TLS, in about an hour. For a re
 Linux or macOS laptop. Nothing here needs our help: if a step fails, section 6 lists the usual causes with the log
 line each one prints, and section 7 says where to report the rest.
 
-urMQTT is **pre-alpha**. Releases from v0.4.2 on are signed with the release key in `minisign.pub` and ship the
+urMQTT is **alpha**. Releases from v0.4.2 on are signed with the release key in `minisign.pub` and ship the
 release kernel and images with an empty configuration; v0.1.0 to v0.4.1 were signed with the former test key
 `9229E05252D01F8E` (pinned, docs/RELEASE.md section 9) and shipped dev builds. Read
 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) before you put it anywhere that matters.

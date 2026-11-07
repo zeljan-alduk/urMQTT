@@ -7,10 +7,10 @@ the "Limits, stated plainly" paragraphs of [CHANGELOG.md](../CHANGELOG.md) for v
 [EDITIONS.md](EDITIONS.md). `scripts/check-known-issues.py` (run in CI) fails if an AUDIT id or ROADMAP item cited
 here no longer exists, or if an AUDIT weakness cited here has been marked fixed.
 
-Status as of v0.4.2 (2026-11-06). **The project is pre-alpha.** The three items of the definition of "alpha" (a real
+Status as of v0.4.2 (2026-11-07). **The project is alpha.** The three items of the definition of "alpha" (a real
 release signing key, the entropy decision and the MTU fix; [ROADMAP.md](ROADMAP.md), "Community readiness") are on
-`main` and in v0.4.2; v0.4.2 is the first release signed with the release key, and the status word changes only when
-the owner changes it.
+`main` and in v0.4.2, the first release signed with the release key; the owner changed the status word on 2026-11-07.
+Alpha means: fit for trials and pilots whose operator reads this document, not for unattended production.
 
 ## 1. The release itself
 

@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The status word is **alpha** (README badge and banner, SECURITY.md, KNOWN-ISSUES.md, FIRST-HOUR.md): the three
+  conditions of the ROADMAP's definition of "alpha" (release signing key, entropy option, MTU honoured) are in v0.4.2.
+
 ## [0.4.2] - 2026-11-06
 
 The **first release signed with the project's release key** (`minisign.pub`, key id `721316B961DCB94B`; the former

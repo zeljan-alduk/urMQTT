@@ -436,7 +436,8 @@ from the maintainers. Four items, done on branch `community-docs`:
 **Definition of "alpha".** The status word changes from "pre-alpha" to "alpha" (README badge and banner, SECURITY.md,
 KNOWN-ISSUES.md) when all three of these have landed on `main`: a real release signing key (NOW-2), the entropy
 option, that is the weak seeding made visible and its production default decided (NOW-4, D-3), and the MTU the
-network announces honoured (NOW-19). The owner makes the change.
+network announces honoured (NOW-19). The owner makes the change. **Done 2026-11-07:** all three are in v0.4.2 and
+the status word is "alpha" (README badge and banner, SECURITY.md, KNOWN-ISSUES.md, FIRST-HOUR.md).
 
 ## 4. Candidate items that need an owner decision
 

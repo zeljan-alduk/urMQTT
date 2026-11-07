@@ -11,7 +11,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Targets: aarch64, x86_64](https://img.shields.io/badge/targets-aarch64%20%7C%20x86__64-orange)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha%20(v0.4.2)-red)
+![Status: alpha](https://img.shields.io/badge/status-alpha%20(v0.4.2)-orange)
 
 </div>
 
@@ -29,7 +29,7 @@ commercial) · [security policy](SECURITY.md) (report vulnerabilities privately)
 > Details: [Configure and download your ISO](#configure-and-download-your-iso).
 
 > [!WARNING]
-> **urMQTT is pre-alpha** ([v0.4.2](https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.4.2): the release
+> **urMQTT is alpha** ([v0.4.2](https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.4.2): the release
 > kernel and a universal template ISO and raw image (aarch64 and x86_64) with an empty configuration, which the builder page or `urmqtt-config pack`
 > configures; signed with the release key in `minisign.pub`). It serves MQTT 3.1.1 (QoS 0
 > and 1) over TLS 1.3 with mutual TLS and, only when an image's configuration turns it on, plain MQTT for a trusted

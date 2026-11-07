@@ -1,6 +1,6 @@
 # Security policy
 
-urMQTT is pre-alpha. No release is fit for production yet.
+urMQTT is alpha (since v0.4.2). No release is fit for unattended production yet; see [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
 
 ## Reporting a vulnerability
 
