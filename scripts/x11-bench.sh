@@ -20,6 +20,9 @@
 #                          identity that may publish at speed, see PERFORMANCE.md)
 #   BROKER [urmqtt]        urmqtt | mosquitto: which $SYS topics to sample
 #   SSHVPS []              "user@host" to read the broker's RSS over ssh (mosquitto)
+#   SS [0]                 1: sample `ss -tin` of the generator's flows once per run, 8 s in (the
+#                          congestion window, round trip time, retransmissions and delivery rate of
+#                          each flow as the sender, the generator, sees them): to $OUT.ss
 #   CONSOLE [0]            1: record the urMQTT console and drop counters during each run
 #                          (needs DIR/x11-console.py; python3 on this host)
 #
@@ -36,6 +39,7 @@ LABEL=${1:?label}
 shift
 SUITES=${*:-handshake throughput latency fanout idle}
 CONSOLE=${CONSOLE:-0}
+SS=${SS:-0}
 HOST=${HOST:-169.58.184.193}
 PORT=${PORT:-8883}
 DIR=${DIR:-/tmp/x11}
@@ -88,6 +92,7 @@ run() {
     local o s0 s1
     busy_start
     console_start
+    ss_start "$name" "$rep"
     s0=$(head -1 /proc/stat)
     o=$("${LG[@]}" "$@" 2>"$DIR/err.out")
     echo "$o" | grep -E '^(RESULT|loadgen: (handshake|pubsub|hold):|loadgen: (whole|tcp|tls|errors))' | tee -a "$OUT"
@@ -99,7 +104,26 @@ run() {
         if(t>0)printf "HOSTCPU steal=%.0f%% idle=%.0f%% user+sys=%.0f%%\n",100*(y[9]-x[9])/t,100*(y[5]-x[5])/t,100*((y[2]-x[2])+(y[4]-x[4]))/t}' | tee -a "$OUT"
     busy_end
     console_end "$name" "$rep"
+    ss_end
     sleep 3
+}
+
+# With SS=1: what the generator's TCP says about its flows, once, 8 s into the run.
+ss_start() {
+    SSPID=
+    [ "$SS" = 1 ] || return 0
+    (
+        sleep "${SS_AT:-8}"
+        echo "### ss $1 rep=$2"
+        ss -tin dst "$HOST" 2>/dev/null
+    ) >>"$OUT.ss" &
+    SSPID=$!
+}
+
+ss_end() {
+    [ -n "${SSPID:-}" ] || return 0
+    wait "$SSPID" 2>/dev/null
+    SSPID=
 }
 
 # With CONSOLE=1: the broker's console lines and `$SYS` counters during the run.

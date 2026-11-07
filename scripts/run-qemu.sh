@@ -25,6 +25,9 @@
 # --dgram LOCAL:REMOTE replaces user networking with a raw L2 datagram
 # socket (QEMU binds UDP LOCAL, sends to REMOTE): a host process is then the
 # whole network and can inject arbitrary frames (H3 adversarial tests).
+# QEMU_NIC_PROPS (environment) is appended to the virtio-net-pci device, e.g.
+# QEMU_NIC_PROPS=rx_queue_size=1024 for the deeper receive queue (ADR-266;
+# QEMU's default is 256, and it keeps tx_queue_size at 256 without vhost-user).
 #
 # --arch x86_64 boots an x86 ISO or raw image (X2): --machine q35|pc (default
 # q35), --firmware uefi|bios (default uefi; bios = SeaBIOS), --cpu MODEL
@@ -189,7 +192,7 @@ if [[ $ARCH == x86_64 ]]; then
                 done
             fi
         fi
-        X86ARGS+=(-netdev "$NETDEV" -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=)
+        X86ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
         [[ -n "$PCAP" ]] && X86ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
     else
         X86ARGS+=(-nic none)
@@ -290,7 +293,7 @@ if [[ $NET -eq 1 ]]; then
             done
         fi
     fi
-    ARGS+=(-netdev "$NETDEV" -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=)
+    ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
     [[ -n "$PCAP" ]] && ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
 else
     # Without this QEMU adds a default NIC (with an iPXE option ROM).

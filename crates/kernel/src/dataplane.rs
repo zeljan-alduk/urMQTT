@@ -248,6 +248,14 @@ impl Idle {
         } else {
             0
         };
+        let (rx_peak, rx_size) = if me == 0 {
+            (
+                RX_RING_PEAK.swap(0, Ordering::Relaxed),
+                RX_RING_SIZE.load(Ordering::Relaxed),
+            )
+        } else {
+            (0, 0)
+        };
         let busy = 100 - (self.slept_ns * 100 / window.max(1)).min(100);
         // Relaxed: statistics, for `$SYS/broker/cpu/busy/<core>` (O1).
         if let Some(b) = crate::sys::BUSY.get(me) {
@@ -290,9 +298,16 @@ impl Idle {
         // host reports, 100 ms of lock waiting in the window, a NIC backlog. A VPS
         // with a noisy neighbour has late ticks in every window; that would be a
         // line per core every 5 s on a console that costs milliseconds per line.
-        if late_worst >= 20_000_000 || steal > 0 || lock_wait >= 100_000_000 || nic_peak > 0 {
+        // Also when the NIC's receive queue was seen three quarters full: a full
+        // queue drops frames in the host, unseen by the guest (ADR-266).
+        if late_worst >= 20_000_000
+            || steal > 0
+            || lock_wait >= 100_000_000
+            || nic_peak > 0
+            || rx_peak * 4 >= rx_size.max(1) * 3
+        {
             urmqtt_log::info!(
-                "stalls: core {me}: {late_ticks} late tick(s), worst {} us; {} us waiting for locks; host steal {} us; NIC backlog peak {nic_peak}",
+                "stalls: core {me}: {late_ticks} late tick(s), worst {} us; {} us waiting for locks; host steal {} us; NIC backlog peak {nic_peak}; NIC receive queue peak {rx_peak} of {rx_size}",
                 late_worst / 1000,
                 lock_wait / 1000,
                 steal / 1000
@@ -651,6 +666,18 @@ pub static ROUTE_DROPPED: AtomicU64 = AtomicU64::new(0);
 
 /// The most frames core 0 held back for a full NIC queue in this window.
 pub static NIC_BACKLOG_PEAK: AtomicU64 = AtomicU64::new(0);
+
+/// The most frames the NIC's receive queue held unread when core 0 looked
+/// in this window, and the queue's size (statistics): a queue that gets
+/// full drops the frames behind it in the host, unseen by the guest.
+pub static RX_RING_PEAK: AtomicU64 = AtomicU64::new(0);
+pub static RX_RING_SIZE: AtomicU64 = AtomicU64::new(0);
+
+/// Notes how many received frames wait in the NIC's queue (statistics).
+pub fn note_rx_ring(n: u16) {
+    // Relaxed: statistics.
+    RX_RING_PEAK.fetch_max(u64::from(n), Ordering::Relaxed);
+}
 
 /// Notes the length of core 0's NIC backlog (statistics).
 pub fn note_nic_backlog(len: usize) {
