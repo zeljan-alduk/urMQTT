@@ -1,4 +1,8 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.cc]]
+who = "Željan Alduk <aldo@aldo.tech>"
+criteria = "safe-to-deploy"
+delta = "1.10.0 -> 1.11.0"
+notes = "Reviewed the delta (5 files, +224/-30): a remap_source_path/reproducible_codeview option (prefix-map flags, clang-cl CodeView), -Tp<path> as one argument for cl.exe, and -march=x86-64 on x86_64 GCC when rustc is on the default CPU; no new process execution, network or filesystem access beyond flag handling."
