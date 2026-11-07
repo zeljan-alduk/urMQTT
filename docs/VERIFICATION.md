@@ -9,6 +9,7 @@ runs at the time of writing are in `docs/PROGRESS.md` (entry H5).
 | Kani | `make kani` (`scripts/kani.sh`) | `kani` | Bounded proofs: MQTT decoder, TCP segment parser, TLS record header, config checks, timer-wheel arithmetic |
 | Sanitizers | `make sanitize` (`scripts/sanitize.sh`) | `sanitize` | ASan on Rust and on the C SQLite amalgamation, trapping UBSan on the C side, over the host test suites |
 | ACL fuzzer | `make acl-fuzz ACL_FUZZ_SECS=600` | `fuzz` (scheduled) | Stateful, model-checked access rules of the broker |
+| ACL fuzzer, coverage-guided | `make fuzz T=broker_acl` | `fuzz` (scheduled), fuzz smoke | A second, independent ACL oracle under libFuzzer; also a proptest in `cargo test` |
 | Coverage | `make coverage` (`scripts/fuzz-coverage.sh`) | none | Line coverage of fuzz targets |
 
 ## Miri
@@ -160,6 +161,44 @@ ACL_FUZZ_SECS=0`. It runs for 3 s in `cargo test`.
 Not modelled: byte-level mutation (the `broker_input` fuzz target does that),
 QoS 2, retained delivery order, ACL changes at runtime, sharding beyond the
 route hand-out.
+
+### The second oracle: `broker_acl`
+
+`crates/broker/tests/acl_oracle/`, written apart from `acl.rs` and from
+`acl_model.rs`. It decodes bytes into a structured operation sequence over
+four connection slots and ten identities (two devices, a control service, a
+service without control rights, a `*`-prefix service and the device next to
+it, bootstrap certificates named like a device and like the control service,
+the invalid ids `+` and `a/b`): connect (spoofed client id, clean or
+persistent, will), publish (QoS 0/1/2, retain, empty), subscribe,
+unsubscribe, ack, DISCONNECT, abrupt drop, tick, ping, garbage bytes,
+`restore_session`, `restore_retained`, `disconnect_identity` and
+`route_remote`. Two drivers share it: the cargo-fuzz target
+`fuzz/fuzz_targets/broker_acl.rs` and the proptest
+`crates/broker/tests/acl_invariants.rs` (fixed seed, in `cargo test`, which
+also replays every file of `fuzz/seeds/broker_acl/`), so a fuzz finding
+replays as a unit test.
+
+The rights are restated as predicates over topic levels, and a filter is
+judged by enumerating every topic of up to four levels over a 13-symbol
+alphabet rather than by `covers`. The test ACL grants `$urmqtt/#` and
+`$SYS/#` in every rule list on purpose; no operator is configured, so `$SYS/`
+must stay closed to all. Checked after every step: the exact counter deltas of
+each publish (`published`, `dropped_acl`, `control_received`,
+`dropped_control`); control messages only from `svc` on the exact topic and
+never from a bootstrap session of that name; no `$SYS` request; every
+delivery (live, queued, retained replay, will, remote, restored) inside the
+receiver's rights and a granted filter, never reserved, never `$SYS`, never
+another device's topic, and from an allowed publisher; a SUBACK grant only
+for a filter wholly inside the rights; CONNACK codes and `session_present`
+against a session model; RETAIN only on the replay of the receiver's own
+SUBSCRIBE; unacknowledged QoS 1 within `max_inflight`; retained count and
+bytes within the limits.
+
+Not modelled: the operator role and `$SYS` requests (`acl_model.rs` has
+them), the plaintext role, queue contents (only their bounds), the rate
+limiter (`rate_tokens` is set out of reach), a retained replica from another
+shard (`route_remote` is sent without retain).
 
 ## Coverage
 

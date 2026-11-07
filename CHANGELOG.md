@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A second stateful ACL fuzzer, coverage-guided (H5 addendum): the cargo-fuzz target `broker_acl` with 18 seeds and
+  the proptest `acl_invariants` in `cargo test` share an oracle written apart from `acl.rs` and from `acl_model.rs`. It
+  checks what a SUBACK grants, the restore, remote-route and revocation entry points, the retained and in-flight
+  bounds, RETAIN and `session_present`, and that `$urmqtt/` and `$SYS/` stay closed when the patterns grant them. No
+  ACL bug found (docs/VERIFICATION.md, docs/PROGRESS.md).
+
 ### Changed
 
 - The status word is **alpha** (README badge and banner, SECURITY.md, KNOWN-ISSUES.md, FIRST-HOUR.md): the three

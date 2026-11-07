@@ -232,6 +232,8 @@ Every milestone ends with:
 
 **Accept:** CI jobs for Miri, Kani and sanitizers; the ACL fuzzer runs 10 min clean; coverage in PROGRESS.
 
+**H5 addendum, a second ACL oracle driven by coverage (2026-11-07).** The acceptance above was met by `crates/broker/tests/acl_model.rs` (`make acl-fuzz`, PROGRESS "H5"). A second oracle, written apart from both `acl.rs` and that model, adds a coverage-guided driver and the invariants the first does not check: SUBACK grants judged against the rights over a topic universe, `restore_session`, `restore_retained`, `route_remote` and `disconnect_identity`, the retained and in-flight bounds, RETAIN only on a SUBSCRIBE replay, `session_present`, `$urmqtt/#` and `$SYS/#` granted by the patterns and still closed. `fuzz/fuzz_targets/broker_acl.rs` (cargo-fuzz, 18 seeds in `fuzz/seeds/broker_acl/`) and `crates/broker/tests/acl_invariants.rs` (proptest, fixed seed, in `cargo test`) share `crates/broker/tests/acl_oracle/`. 10 minutes clean on 2026-10-30 against the broker of that day, 60 s clean after the rebase onto v0.4.2; `acl.rs` 100 % region coverage. No ACL bug found. PROGRESS "H5 addendum".
+
 ### H6 — SQLite isolation · L
 
 **Work**

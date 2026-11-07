@@ -155,7 +155,7 @@ not on bare metal for devices (DMA, see H4b).
 | TLS handshake messages | network | rustls 0.23.46 (third party) | handshake timeout 10 s; in-flight limits | none of our own (upstream fuzzes rustls) |
 | Client X.509 certificates | network (signed by the CA) | rustls-webpki (third party), `tls/src/identity.rs` (own: CN/SAN URI) | certificate size from rustls | `x509_identity` |
 | MQTT 3.1.1 packets | network (authenticated devices) | `mqtt/src/decode.rs`, `validate.rs` | `max_packet_size` 4096, topic length 256 and levels 16 | `mqtt_decode` |
-| MQTT sequences (sessions, ACL, retained, LWT) | authenticated devices | `broker/src/lib.rs` | limits section of config; retained messages per identity and per byte budget (H3, was unbounded: H0-W1) | `broker_input` |
+| MQTT sequences (sessions, ACL, retained, LWT) | authenticated devices | `broker/src/lib.rs` | limits section of config; retained messages per identity and per byte budget (H3, was unbounded: H0-W1) | `broker_input`, `broker_acl` |
 | Plaintext listener (P1, only when `plaintext.enabled`): source addresses, the first packet and CONNECT credentials, the `[plaintext]` entries | network (only addresses in `plaintext.allow_from`); the image's configuration | `cfg/src/net.rs`, `passwd.rs`, `plain.rs`; `plain/src/{allow,sources,auth}.rs`; `kernel/src/plain.rs` (the glue) | SYN-time allow-list, connections (total, per address), login rate, lock-out; packets 1 KiB from the first byte; password 256 bytes, PBKDF2 iterations at most 200 000; the broker's plaintext role (no service, operator or control rights) | `plain_input`, `broker_input`, `mqtt_decode` |
 | Superblock, region table, size table | volume | `store/src/layout.rs` | fixed 4 KiB blocks, region count ≤ 128 | `disk_layout` |
 | Backup slot headers and control block (S5) | volume | `store/src/backup.rs` | magic, disk UUID, CRC-32C, page size and count against the slot's capacity | `disk_backup` |
@@ -236,7 +236,7 @@ scenario (`scripts/smoke.sh`), a host test or a CI job. "**none**" is a gap.
 | KASLR: about 19 bits for the image plus random heap, stacks, bookkeeping, page-table alias and MMIO window | `kernel` (ADR-173) | `kaslr-differs` (three boots, every region elsewhere) | both |
 | MTE heap tagging | `mm` (ADR-174) | `mte-boot`, `mte-uaf`, `mte-overflow`, `mte-mqtt-tls` (TCG `mte=on` only; no hardware or HVF) | aarch64 TCG |
 | SQLite in an unprivileged address space, twelve checked system calls, restart on fault or 30 s overrun | `dbworker`, `usys`, `store/src/{worker,remote}.rs`, `kernel/src/dbsandbox.rs` (H6, ADR-210 to ADR-212) | `worker-contain` (kernel read, write, jump, privileged instruction, write to own code, jump into data, null, endless loop: all contained, kernel word intact), `worker-fault`; the whole store suite through the protocol (`--features loopback`) | both |
-| Stateful ACL invariants | `broker` | the stateful ACL fuzzer (`make acl-fuzz ACL_FUZZ_SECS=600`; the H5 acceptance is a clean 10-minute run, re-run it for the audit) | host |
+| Stateful ACL invariants | `broker` | the stateful ACL fuzzer (`make acl-fuzz ACL_FUZZ_SECS=600`; the H5 acceptance is a clean 10-minute run, re-run it for the audit); the second, coverage-guided oracle (`make fuzz T=broker_acl`, and `acl_invariants` in `cargo test`) | host |
 | Bounded proofs of the parsers | `mqtt`, `tcp`, `tls`, `cfg`, `timer-wheel` (H5) | `make kani` (a harness that hits its cap is *not proven*) | host |
 | Undefined behaviour, memory errors | host builds (H5) | `make miri` (subset, VERIFICATION.md lists what is excluded), `make sanitize` (ASan Rust and C, trapping UBSan on C) | host |
 | Plaintext listener: filtering at the SYN, three login modes, lock-out, a narrower role | `plain` crate, `kernel/src/plain.rs` (P1, ADR-229 to ADR-231) | `plain-scenarios.py`, `plain_input` and `broker_input` fuzzing, the `plaintext-*` smoke scenarios | both |
@@ -408,8 +408,8 @@ Optional: `cargo install cargo-fuzz --locked`, `cargo-vet`, `cargo-deny`,
 | One group of scenarios | `SMOKE_ONLY=hardening` (the H4 scenarios), `storage`, `time`, `live`, `config`, `diag`, `install`, `template`, `migrated`, with `SMOKE_SCENARIOS=<regex>` to pick by name |
 | TLS conformance and interoperability | `make conformance`, `make interop` |
 | Constant-time tests | `make ct` |
-| Fuzz a target (60 s in CI) | `make fuzz T=<target> FUZZ_TIME=600`; `cargo fuzz list` (23 targets) |
-| Stateful ACL fuzzer | `make acl-fuzz ACL_FUZZ_SECS=600` |
+| Fuzz a target (60 s in CI) | `make fuzz T=<target> FUZZ_TIME=600`; `cargo fuzz list` (29 targets) |
+| Stateful ACL fuzzer | `make acl-fuzz ACL_FUZZ_SECS=600`; the coverage-guided one: `make fuzz T=broker_acl FUZZ_TIME=600` |
 | Miri, Kani, sanitizers, coverage | `make miri`, `make kani`, `make sanitize`, `make coverage` (VERIFICATION.md says what each leaves out) |
 | Reproducible build check | `make repro` (builds HEAD twice in separate worktrees and compares the ELF and the ISO) |
 | Release artifacts, signature | `make dist`, `make sign` (minisign) |
@@ -471,7 +471,7 @@ the date of the run is in PROGRESS.md for the milestone named.
 | 9 | Expired, wrong-CA, revoked and mismatched-identity device certificates | `mqtt-tls` scenarios | all rejected |
 | 10 | Early data (0-RTT) | `zero_rtt_is_never_offered`, tlsfuzzer | never offered; the configuration refuses it |
 | 11 | Malformed and truncated TLS records, KeyUpdate abuse | `tls_record`, `diff_tls_record`, 23 tlsfuzzer probes | no panic, same verdict as rustls and ring, fatal alerts reach the peer |
-| 12 | Device reads or writes another device's topics, the control namespace, `$SYS` | the stateful ACL fuzzer, `acl-subscribe-denied` | no violation found at the H5 acceptance run; re-run for the audit |
+| 12 | Device reads or writes another device's topics, the control namespace, `$SYS` | the stateful ACL fuzzers (`make acl-fuzz`, `broker_acl`), `acl-subscribe-denied` | no violation found at the H5 acceptance run, nor by `broker_acl` (10 min on 2026-10-30, 60 s on v0.4.2); re-run for the audit |
 | 13 | Forged, replayed, expired or device-sent control messages | `control-forged`, `control-replay`, `control-expired`, `control-from-device` | all ignored; the legitimate ones apply |
 | 14 | Heap double free, use after free, overflow | `double-free`, `heap-uaf`, `heap-overflow` (and `-prod`) | each stops the machine with a message that names the fault and nothing else |
 | 15 | Stack smashing, stack overflow into the guard | `stack-smash`, `stack-overflow` | canary or guard page catches it |

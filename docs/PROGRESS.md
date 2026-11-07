@@ -3,6 +3,60 @@
 One entry per milestone: what was done, what was measured and the known gaps. Newest entries first down to H7; the entries from M0 to S6 follow in the order they were written.
 Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptance-criteria).
 
+## H5 addendum — a second, coverage-guided ACL oracle (`broker_acl`, 2026-11-07)
+
+SECURITY-PLAN H5, "stateful broker fuzzing" and "seeds for uncovered branches". Written on 2026-10-30 in a branch
+parallel to the H5 entry below (whose `acl_model.rs` met the acceptance) and never merged; rebased onto v0.4.2 and
+adapted on 2026-11-07. Host-only; no kernel change, no smoke cycle.
+
+**Why a second oracle.** `acl_model.rs` drives the broker from a PRNG and checks deliveries, routes, telemetry,
+persist ops, control and `$SYS` requests. It does not check what a SUBACK grants, does not drive `restore_session`,
+`restore_retained`, `route_remote` or `disconnect_identity`, does not bound in-flight or retained state, and is not
+coverage-guided. This one does, and is independent of both `acl.rs` and `acl_model.rs` (docs/VERIFICATION.md, "The
+second oracle").
+
+**Done**
+
+- `crates/broker/tests/acl_oracle/mod.rs`: operation decoder, session model and oracle. Driven by
+  `fuzz/fuzz_targets/broker_acl.rs` (cargo-fuzz; picked up by `cargo fuzz list` in the CI fuzz smoke and by
+  `fuzz/fuzz_targets` in `fuzz.yml` without edits) and by `crates/broker/tests/acl_invariants.rs` (proptest
+  `random_sequences` and `biased_sequences`, 300 cases each with a fixed seed; two directed attack scenarios; replay of
+  every seed). 18 seeds in `fuzz/seeds/broker_acl/`, one of them the input of the only crash ever seen (below).
+- **Adapted to today's broker:** `Acl::operator_ids` (none configured: the operator role is `acl_model.rs`'s subject),
+  `Config::plain` (`None`). The test ACL now grants `$SYS/#` in every rule list next to `$urmqtt/#`, the oracle closes
+  `$SYS` to every identity, the topic universe has a `$SYS` level, and every step checks that no delivery is in `$SYS`
+  and that `drain_sys_requests` stays empty. The module directory is `acl_oracle/` (an `acl_model/` next to main's
+  `acl_model.rs` would be ambiguous to `mod`).
+- **The oracle bites** (2026-10-30, against the broker of that day, proptest only): `+` covering `#` in `covers`; the
+  reserved check dropped from `may_subscribe` and from `may_publish`; the bootstrap role given the device rules;
+  `matches_topic` accepting a longer topic; the `*` prefix match loosened; the control check ignoring the bootstrap
+  role; `may_subscribe` dropped from `restore_session`: all caught. One `covers` mutant survives and is equivalent.
+  2026-11-07, on v0.4.2: the `$SYS` check dropped from `may_subscribe`, and from `may_publish`: both caught.
+
+**Measured** (Apple M4 Pro, aarch64-apple-darwin, ASan, nightly-2026-10-20)
+
+- 2026-10-30, against the broker of that day: `cargo fuzz run broker_acl` 10 minutes with the seeds, **2 191 837 runs,
+  3 646 exec/s, cov 4217, no crash**. Region coverage over that corpus: `acl.rs` **100 %** (13/13 functions),
+  `lib.rs` 91.5 %, `topics.rs` 92.2 %, `compact.rs` 92.0 %, `mqtt/decode.rs` 91.2 %, `mqtt/encode.rs` 77.8 %.
+- 2026-11-07, on v0.4.2: `make fuzz T=broker_acl FUZZ_TIME=60` from the seeds, **522 007 runs in 61 s, no crash**;
+  the corpus (1 671 inputs, 117 KB) replays at cov 4141, ft 22 571. The 10-minute run was not repeated on v0.4.2.
+- `cargo test -p urmqtt-broker`: 64 unit tests, `acl_invariants` 5 (0.7 s), `acl_model` 1, all green.
+- **One crash, a model error, not a broker bug** (2026-10-30): `exp` received `devices/devices/state/d2`, a topic no
+  identity may publish, injected through `route_remote` or `restore_retained`. Those entry points are trusted by
+  design, so the oracle treats them as trusted sources and still applies the receiver's rights; the input is the seed
+  `trusted_source_topic`. **No ACL bug was found.**
+
+**Not done / limits**
+
+- Not modelled: the operator role, `$SYS` requests and the plaintext role (no plaintext policy here; `broker_input`
+  and `plain_input` drive the plaintext role, `acl_model.rs` the operator); queue contents (only `max_inflight` and the
+  queue-full counter); the rate limiter (`rate_tokens` 1 000 000, so the counters stay exact); a retained replica from
+  another shard.
+- Uncovered in `lib.rs` at the 10-minute run (none of it an ACL decision): `disconnect_unless`, a few accessors, an
+  unsupported protocol level and a second CONNECT (garbage rarely forms one; a seed for each is a cheap next step), the
+  rate limiter, a remote retained replica, defensive returns on vanished connections.
+- aarch64 only; the 10-minute run is owed on v0.4.2 and on x86_64.
+
 ## Release candidate v0.4.2 (2026-11-06)
 
 Everything for the release except publishing: nothing was pushed, tagged, signed or uploaded, and no server was

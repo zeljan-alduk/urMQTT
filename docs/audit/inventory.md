@@ -10,7 +10,7 @@
 | `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 3631 | 0 | 101 (101) | deny |
 | `urmqtt-arch-x86_64` | `crates/arch-x86_64` | 6991 | 0 | 155 (155) | deny |
 | `urmqtt-attack` | `tools/attack` | 1092 | 0 | 0 (0) | default |
-| `urmqtt-broker` | `crates/broker` | 5943 | 729 | 0 (0) | forbid |
+| `urmqtt-broker` | `crates/broker` | 5943 | 2018 | 0 (0) | forbid |
 | `urmqtt-builder-wasm` | `tools/builder/wasm` | 1201 | 0 | 30 (30) | deny |
 | `urmqtt-cfg` | `crates/cfg` | 4814 | 0 | 0 (0) | forbid |
 | `urmqtt-config` | `crates/config` | 1374 | 0 | 10 (10) | deny |
@@ -145,4 +145,4 @@
 
 ## Fuzz targets
 
-`acpi_parse`, `aml_s5`, `broker_input`, `cfg_blob`, `config_parse`, `control_message`, `diff_aes_gcm`, `diff_chacha20poly1305`, `diff_crc32c`, `diff_sha256`, `diff_tls_record`, `disk_backup`, `disk_crypt`, `disk_layout`, `fdt_parse`, `gpt_parse`, `mqtt_decode`, `net_frame`, `plain_input`, `tcp_segment`, `telemetry_recover`, `tls_record`, `virtio_balloon_device`, `virtio_console_device`, `virtio_gpu_response`, `virtio_input_event`, `virtio_vsock_packet`, `x509_identity`
+`acpi_parse`, `aml_s5`, `broker_acl`, `broker_input`, `cfg_blob`, `config_parse`, `control_message`, `diff_aes_gcm`, `diff_chacha20poly1305`, `diff_crc32c`, `diff_sha256`, `diff_tls_record`, `disk_backup`, `disk_crypt`, `disk_layout`, `fdt_parse`, `gpt_parse`, `mqtt_decode`, `net_frame`, `plain_input`, `tcp_segment`, `telemetry_recover`, `tls_record`, `virtio_balloon_device`, `virtio_console_device`, `virtio_gpu_response`, `virtio_input_event`, `virtio_vsock_packet`, `x509_identity`
