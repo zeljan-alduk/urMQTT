@@ -929,7 +929,9 @@ attack_app() {
         local log="$OUT/attack-app-$accel.log" data="$OUT/attack-app-$accel.img" status=0
         fresh_disk "$iso" "$data"
         start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
-        if wait_log "$log" "TLS 1.3 listener on port 8883"; then
+        # The lease comes after the listener line; a flood that starts before it
+        # loses its first SYNs and never fills the handshake limit (CI flake).
+        if wait_log "$log" "TLS 1.3 listener on port 8883" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
             local c=(--port "$PORT" --certs "$ROOT/deploy/dev")
             {
                 "$attack" slowloris --stage tcp "${c[@]}" --clients 200 --duration 1
@@ -2598,7 +2600,10 @@ plaintext() {
             local log="$OUT/plain-$name-$accel.log" data="$OUT/plain-$name-$accel.img" status=0
             fresh_disk "$iso" "$data"
             start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883,$ppt:1883"
-            if wait_log "$log" "^URMQTT READY$"; then
+            # READY comes some 60 ms before the DHCP lease; a SYN that arrives
+            # in between is dropped (no address yet) and the client, which does
+            # not retry, sees no CONNACK within its 5 s (CI 2026-11-07, twice).
+            if wait_log "$log" "^URMQTT READY$" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
                 python3 -I "$ROOT/scripts/plain-scenarios.py" "$name" "$ppt" "$PORT" "$ROOT/deploy/dev" >"$log.client" 2>&1 || status=$?
                 if [[ $name == password ]]; then
                     # TLS beside it: the standard device and backend scenarios on the same VM.

@@ -41,6 +41,9 @@ All notable changes to this project are documented here. The format follows
   after the used ring instead of inline in `SplitQueue`: with `MAX_QUEUE` at 1024 the struct had grown to 4 KiB and a
   driver building three queues at probe time overflowed the 128 KiB main stack (aarch64, virtio-balloon, found by
   the `virtio-devices` smoke on CI right after ADR-266 landed). A test keeps the struct under 128 bytes.
+- `scripts/smoke.sh`: the plaintext and `attack-app` scenarios wait for the DHCP lease before their clients start.
+  `URMQTT READY` and the listener line come some 60 ms before the lease; a SYN in between is dropped and a client
+  that does not retry sees no CONNACK (two CI runs on 2026-11-07, `plaintext-registry` and `plaintext-lockout`).
 
 ## [0.4.2] - 2026-11-06
 
