@@ -207,6 +207,11 @@ release signed with it is v0.4.2.**
 - Why: PERFORMANCE.md 7.5 ("One flow is still not faster than Mosquitto's"); ADR-032 "Core 0 has no RX interrupt".
 - Risk: TCP changes touch the H3 model tests and the `tcp_segment` fuzz target; idle power and latency change.
 - Verify: the local rig (PERFORMANCE 7.3) and a same-session VPS run against Mosquitto.
+- Status (2026-11-07): SACK-driven recovery on the sending side is in (ADR-265, rig numbers only) with deeper NIC
+  queues and a receive-queue statistic (ADR-266). Open: the VPS run, the receive interrupt, and the per-CPU heap
+  caches; the unmerged branch `perf-nic-queues-tcp-sack` (624a4fb, a5b9627) has a draft of the caches (up to 128 KiB,
+  depots, trim) and of fewer copies per message (TLS records sealed in place, relay credit 256 KiB, 128 KiB output
+  buffer per connection) without ADR, audit rows, Miri run or numbers.
 
 **NOW-14. A limit on established TLS connections per source address.** S.
 - What: a per-address cap for established connections, like `plaintext.max_connections_per_ip` already has.

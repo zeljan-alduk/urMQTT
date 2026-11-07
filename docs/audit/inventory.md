@@ -23,7 +23,7 @@
 | `urmqtt-diag-png` | `tools/diag-png` | 711 | 0 | 0 (0) | default |
 | `urmqtt-disk-tool` | `tools/disk` | 3001 | 866 | 0 (0) | default |
 | `urmqtt-dispatch` | `crates/dispatch` | 594 | 0 | 0 (0) | forbid |
-| `urmqtt-kernel` | `crates/kernel` | 18644 | 0 | 118 (118) | deny |
+| `urmqtt-kernel` | `crates/kernel` | 18700 | 0 | 118 (118) | deny |
 | `urmqtt-loadgen` | `tools/loadgen` | 1244 | 0 | 0 (0) | default |
 | `urmqtt-log` | `crates/log` | 2040 | 128 | 12 (12) | deny |
 | `urmqtt-mm` | `crates/mm` | 2580 | 0 | 74 (74) | deny |
@@ -36,13 +36,13 @@
 | `urmqtt-sntp` | `crates/sntp` | 1146 | 0 | 0 (0) | forbid |
 | `urmqtt-store` | `crates/store` | 12164 | 4611 | 302 (302) | deny |
 | `urmqtt-sync` | `crates/sync` | 484 | 0 | 19 (19) | deny |
-| `urmqtt-tcp` | `crates/tcp` | 5291 | 0 | 0 (0) | deny |
+| `urmqtt-tcp` | `crates/tcp` | 6715 | 0 | 0 (0) | deny |
 | `urmqtt-timer-wheel` | `crates/timer-wheel` | 446 | 0 | 0 (0) | forbid |
 | `urmqtt-tls` | `crates/tls` | 5052 | 1256 | 0 (0) | forbid |
 | `urmqtt-usys` | `crates/usys` | 477 | 0 | 8 (8) | default |
-| `urmqtt-virtio` | `crates/virtio` | 6223 | 0 | 30 (30) | deny |
+| `urmqtt-virtio` | `crates/virtio` | 6241 | 0 | 30 (30) | deny |
 | `urmqtt-x25519` | `crates/x25519` | 1365 | 0 | 8 (8) | default |
-| **total** | | **108726** | | **917 (917)** | |
+| **total** | | **110224** | | **917 (917)** | |
 
 ## Vendored components
 
@@ -68,7 +68,7 @@
 | `base16ct` | 1.0.0 | 331 | linked |
 | `block-buffer` | 0.10.4 | 375 | linked |
 | `block-buffer` | 0.12.1 | 656 | linked |
-| `cc` | 1.10.0 | 10492 | build script (build time) |
+| `cc` | 1.11.0 | 10658 | build script (build time) |
 | `cfg-if` | 1.0.5 | 201 | linked |
 | `chacha20` | 0.9.1 | 1277 | linked |
 | `chacha20poly1305` | 0.10.1 | 364 | linked |
@@ -141,7 +141,7 @@
 | `x509-cert` | 0.3.0 | 5623 | linked |
 | `zerocopy` | 0.8.63 | 31068 | linked |
 | `zeroize` | 1.9.1 | 973 | linked |
-| **total** | | **494628** (linked: 294797) | |
+| **total** | | **494794** (linked: 294797) | |
 
 ## Fuzz targets
 

@@ -18,6 +18,16 @@ All notable changes to this project are documented here. The format follows
 
 - The status word is **alpha** (README badge and banner, SECURITY.md, KNOWN-ISSUES.md, FIRST-HOUR.md): the three
   conditions of the ROADMAP's definition of "alpha" (release signing key, entropy option, MTU honoured) are in v0.4.2.
+- TCP's sending side recovers from the peer's SACK blocks (RFC 6675 scoreboard, at most 8 ranges per connection,
+  lost holes resent once each, paced by the pipe; a reordering window that grows with D-SACK reports); every second
+  in-order segment is acknowledged when it arrives instead of once per pass; the congestion window grows only while
+  it is used and a fast retransmit cuts it to 70 % (ADR-265). Peers without SACK get NewReno as before. On the local
+  rig a single 1 KiB subscriber stream delivers 7.0k instead of 4.3k messages/s without loss and 0 to 27 % more under
+  0.1 to 1 % loss; not yet measured on a VPS.
+- virtio-net asks for 1024 receive and transmit descriptors and uses what the device offers (QEMU's default stays
+  256); the boot log names the sizes, the `stalls:` line reports a receive queue three quarters full, and each data
+  core logs its busiest TCP sender every 5 s under traffic (ADR-266). New tools: `scripts/x11-capture.sh`,
+  `scripts/pcap-flows.py`, `SS=1` for `x11-bench.sh`, `QEMU_NIC_PROPS` for `run-qemu.sh`.
 
 ## [0.4.2] - 2026-11-06
 

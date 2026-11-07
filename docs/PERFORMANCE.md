@@ -330,6 +330,10 @@ evidence; it cannot say who held the CPU. The Linux guest's `/proc/stat` showed 
 * **One flow is still not faster than Mosquitto's.** 64 B: 80 % of its published rate and 40 % of its delivered rate; 1 KiB: 70 % and 40 %.
   Candidates, none measured yet on the VPS: the lock wait (a per-CPU cache for blocks up to 16 KiB would remove most of it), SACK on our sending side
   (a lost segment of a long subscriber stream is retransmitted NewReno-style), and a receive interrupt for the NIC (ADR-224's polling is a stop-gap).
+  *2026-11-07:* SACK on our sending side, ACKs on arrival and a validated congestion window are in (ADR-265; rig: one 1 KiB
+  subscriber stream 4.3k -> 7.0k delivered/s without loss, 0-27 % more under 0.1-1 % loss, `perf-results/sack-rig-ab.txt`), and
+  the NIC asks for 1024 descriptors with a receive-queue statistic (ADR-266; no gain on the rig). Not yet measured on the VPS; the
+  per-CPU heap cache and the receive interrupt remain.
 * **Stalls shorter than a millisecond** and the last part of every stall before a tick's deadline are still charged; with close-up ticks (1 ms) the error per tick is
   below 1 ms, so a drop now needs a handler that really ran for most of 20 ms or stalls of 20 ms in 1 ms pieces.
 * The comparison with Mosquitto is one session, one path, one generator at 60-77 % steal; two cells (1 KiB, 16 pairs; delivered rate of one flow)

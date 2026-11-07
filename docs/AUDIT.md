@@ -149,7 +149,7 @@ not on bare metal for devices (DMA, see H4b).
 |---|---|---|---|---|
 | Ethernet, ARP, IPv4 (no fragments), ICMP, UDP | network/LAN | `net/src/iface.rs`, `net/src/ipv4.rs` | frame size; ARP cache size | `net_frame` |
 | DHCP replies | LAN | `net/src/dhcp.rs` | packet size; xid match | `net_frame` (via `Iface`) |
-| TCP segments and the state machine | network | `tcp/src/wire.rs`, `tcp/src/lib.rs` | `max_conns`, `tx_max`, window, SYN cookies, `rst_per_sec` | `tcp_segment` (wire + stack) |
+| TCP segments and the state machine | network | `tcp/src/wire.rs`, `tcp/src/lib.rs`, `tcp/src/sack.rs` (the sender's SACK scoreboard, ADR-265) | `max_conns`, `tx_max`, window, SYN cookies, `rst_per_sec`; SACK: at most 4 blocks parsed, 8 ranges kept per connection, blocks outside `(snd_una, snd_max]` ignored | `tcp_segment` (wire + stack; sends SACK blocks since ADR-265) |
 | TLS records (application, KeyUpdate, alerts) | network | `tls/src/record.rs` (own) | 2^14+256 ciphertext, 2^14+1 inner plaintext | `tls_record`; `diff_tls_record` against rustls + ring (H2); 23 tlsfuzzer probes |
 | Session tickets (on resumption) | network | `tls/src/ticket.rs` (own) | AEAD under per-boot keys; length checked first | host tests (every bit flipped) |
 | TLS handshake messages | network | rustls 0.23.46 (third party) | handshake timeout 10 s; in-flight limits | none of our own (upstream fuzzes rustls) |

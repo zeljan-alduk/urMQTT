@@ -2166,3 +2166,110 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   it obliges the driver to post receive buffers of that size, and the receive path stays at 2048-byte buffers. The
   Diagnostic report's NIC entry does not show the MTU: the Diagnostic boot runs no DHCP, so it could show only the
   configured value.
+
+## ADR-265 — TCP recovers from the peer's SACK blocks, acknowledges every second segment on arrival, and grows its window only while it is used (NOW-13, PERF)
+
+- **Status:** Accepted. Amends ADR-222 point 7 ("Not done: SACK-driven retransmission on our sending side") and
+  ADR-033's NewReno. Written on 2026-11-01 on the unmerged branch `perf-nic-queues-tcp-sack` as "ADR-232", a number
+  `main` has since used for the builder; rebased onto `main` (after ADR-261's FIN fix and ADR-264's MTU) on
+  2026-11-07, when 265 was the next free number.
+- **Context.** PERFORMANCE 7.5: one flow is not faster than Mosquitto's, and the subscriber leg (our sending side)
+  is the slow one. A lost segment of a long subscriber stream was recovered NewReno-style: one retransmission per
+  partial ACK, so a window with several holes took one round trip per hole, and a burst of ACKs after a vCPU stall
+  (the host preempts the guest for tens of milliseconds) looked like a series of partial ACKs and resent segments
+  that were not lost. Two more things held a sender back: the receiver acknowledged once per pass of the core (a
+  batch of up to 64 frames, every 8 to 50 ms on a preempted VPS), so the peer's window waited for our ACK; and the
+  congestion window grew while the application did not fill it (a quiet subscriber's window reached megabytes), so
+  the first loss halved *what was in flight*, a few segments.
+- **Decision.**
+  1. **A scoreboard of the peer's SACK blocks** (`crates/tcp/src/sack.rs`, RFC 2018 / RFC 6675): at most 8 ascending,
+     disjoint ranges above `snd_una`, boxed and allocated only while the peer reports holes (about 80 bytes; `None`
+     otherwise), dropped on a full ACK, on a timeout and when the cumulative ACK covers it. A block is taken only if
+     it lies within `(snd_una, snd_max]` and is not empty; its left edge is clamped to `snd_una`; a block that would
+     need a ninth range is ignored (the peer repeats it). The blocks come from the existing option parser
+     (`wire.rs`, at most 4 blocks, bounds-checked; unchanged).
+  2. **Loss detection:** a hole is lost when more than two segments or three ranges are SACKed above it (RFC 6675
+     `IsLost`, DupThresh 3) **and** the evidence has lasted a reordering window: an eighth of the smoothed RTT (at
+     least 1 ms, at most one RTT), doubled each time the peer reports a duplicate (D-SACK, RFC 2883: a first block at
+     or below the ACK, or inside the second), up to 7 doublings (kept in the high nibble of `retries`). Then
+     `ssthresh` is cut and recovery starts with `cwnd = ssthresh`.
+  3. **Recovery:** lost holes only are resent, each once (`next` is the frontier), one segment at a time, while the
+     **pipe** (in flight, less SACKed, less lost and not yet resent) leaves room under `cwnd`; new data follows under
+     the same pipe and the peer's window. A partial ACK no longer resends the next segment by itself when the peer
+     does SACK. A peer that did not negotiate SACK gets NewReno exactly as before, and duplicate ACKs without blocks
+     still start a classic fast retransmit.
+  4. **ACK every second segment on arrival** (RFC 5681 §4.2), before the application sees the data; the rest at the
+     end of the pass as before (an out-of-order segment is still answered at once, ADR-222).
+  5. **Congestion window validation** (RFC 7661, Linux's `is_cwnd_limited`): the window grows only while the flight
+     comes within two segments of it (congestion avoidance) or within half of it (slow start); a fast retransmit cuts
+     to 70 % (Linux CUBIC's beta) of the smaller of the window and twice the recent peak flight, at least the flight;
+     a timeout halves the same base. `ssthresh` and the peak are kept in 16 bits of 64-byte units (up to 4 MiB), so
+     `Conn` stays at 112 bytes. The send queue limit follows `min(cwnd, peer window)`, so a reader that stops keeps
+     only the base queued.
+  6. `TcpStack::busiest_sender` exposes the connection with most data queued (for ADR-266's log line).
+- **Security properties.** All new state is per connection and bounded (8 ranges, one box); a block outside what we
+  sent is ignored. A peer that lies in its blocks (claims data it never received) can only slow itself: the data
+  stays queued until the cumulative ACK covers it and a retransmission timeout clears the board and goes back to
+  `snd_una`. Claiming SACKed data enlarges what may be sent by at most the flight, and is still bounded by the
+  peer's window and `cwnd`, which an optimistic ACKer could already inflate. The RFC 5961 checks, SYN cookies and the
+  receive side are untouched; ADR-261's "FIN once" holds (a hole never contains our FIN, which sits above every
+  SACKed range).
+- **Verification.** `cargo test -p urmqtt-tcp` (79 tests, 16 new): the board (merge, overlap, touch, trim, wrap,
+  `IsLost`, frontier, a random-block model keeping it tidy), scripted connections (one loss resent once and nothing
+  else, a reordered segment not resent, a burst of partial ACKs after a stall is not a loss, two holes repaired in
+  one round trip, a peer without SACK gets NewReno, duplicate ACKs without blocks, a transfer over a lossy reordering
+  link completes with few extra segments), the delayed-ACK change and the cwnd rules. The `tcp_segment` fuzz target
+  now sends up to three SACK blocks (flag bit 6) with edges around the ACK: 5.1 million runs in 300 s on the M-series
+  Mac, no finding. The H3 model tests, ADR-261's half-open scripts and ADR-264's MSS tests pass unchanged.
+- **Numbers (local rig, ADR-223, `docs/perf-results/sack-rig-ab.txt`).** `main` against this change, one publisher
+  and one subscriber, QoS 0 flood, 15 ms configured RTT, 3 runs per cell, medians of delivered/s (published/s
+  changes little, inside the noise):
+
+  | loss | 64 B: main | 64 B: ADR-265 | 1 KiB: main | 1 KiB: ADR-265 |
+  |---|---|---|---|---|
+  | 0 | 78.2k | 84.8k | 4.28k | 7.05k |
+  | 0.1 % | 21.2k | 21.4k | 1.99k | 2.29k |
+  | 0.5 % | 9.9k | 10.3k | 0.85k | 1.04k |
+  | 1 % | 6.2k | 7.9k | 0.61k | 0.72k |
+
+  The largest gain is at 1 KiB without loss (+65 %), where SACK recovery hardly runs: it is the per-arrival ACK and
+  the validated window. Under loss the subscriber leg gains 0 to 27 %; the spread between runs is of the same order in
+  several cells, so only the 1 KiB columns and the 1 % row are a claim. No run lost a connection.
+- **Not verified.** Not measured on a VPS (netcup, Contabo) against Mosquitto, which is what NOW-13 asks for; the rig
+  measures protocol behaviour, not capacity. No Kani harness for `sack.rs` (the existing TCP harnesses cover the
+  parser, which is unchanged).
+- **Not done.** RACK / tail-loss probes (a loss at the tail of a burst, with nothing SACKed above it, still waits for
+  the retransmission timeout, as before); a partial ACK in a SACK recovery that leaves no blocks also waits for more
+  evidence or the timeout. SACK reneging is handled only by the timeout (RFC 6675's rule). PAWS and ECN as in ADR-222.
+  Pending a decision, not part of this change: the same branch's heap caches and TLS/broker copy reductions (its
+  ADR-230 and ADR-231 drafts), see ROADMAP NOW-13.
+
+## ADR-266 — virtio-net queues of up to 1024 descriptors and a receive-queue statistic (NOW-13, PERF)
+
+- **Status:** Accepted. Amends ADR-223 (core 0's NIC backlog) and the virtio driver's `MAX_QUEUE`. Written on the
+  same branch as ADR-265 as "ADR-233"; renumbered on rebase.
+- **Context.** A vCPU that the host deschedules for some milliseconds cannot empty the receive queue; with 256
+  descriptors a burst of a 1 MiB window (about 720 segments) overflows it and the host drops frames the guest never
+  sees (the 0.3 % burst loss of the rig at loss 0, PERFORMANCE 7.3). Nothing in the guest showed how full the queue got.
+- **Decision.**
+  1. `VirtioNet` asks for 1024 receive and 1024 transmit descriptors and takes what the device offers (`queue_max`,
+     which must be a power of two, as before). `MAX_QUEUE` is 1024 (the per-queue bookkeeping arrays grow from 1 to
+     4 KiB per queue); the other drivers ask for their own sizes, unchanged. At 1024 the receive and transmit buffers
+     take 2 MiB each of DMA memory (2048 bytes per descriptor), was 512 KiB each. Boot line `net: virtio-net with N
+     receive and M transmit descriptor(s)`.
+  2. Core 0 notes how many completed receive chains wait before each dispatch burst (`SplitQueue::used_pending`);
+     the per-core `stalls:` line also appears when the peak of the window reaches three quarters of the queue and
+     names it (`NIC receive queue peak P of N`; other cores print 0 of 0).
+  3. Every 5 s with traffic each data core logs its busiest sender (`tcp: core C: busiest sender: ... KiB queued, ...
+     in flight, cwnd, ssthresh, peer window, srtt, rto[, in loss recovery]`, ADR-265's `busiest_sender`).
+  4. Tools: `scripts/x11-capture.sh` (one single-flow run with a 4 s `tcpdump` on the load host),
+     `scripts/pcap-flows.py` (per-flow TCP dynamics from a pcap; Python standard library only), `SS=1` in
+     `x11-bench.sh` (`ss -tin` of the generator's flows 8 s into each run), `QEMU_NIC_PROPS` in `run-qemu.sh`.
+- **What the hosts offer decides.** QEMU's default is 256 and it refuses `tx_queue_size` above 256 without
+  vhost-user; with `QEMU_NIC_PROPS=rx_queue_size=1024` the guest runs with 1024 receive and 256 transmit descriptors
+  (checked on the rig). What netcup, Contabo and Google Cloud offer is not known yet: the boot line will say.
+- **Numbers.** None that show a gain: on the rig at 0.5 % loss, 1024 receive descriptors gave 11.2k and 0.98k
+  delivered/s against 10.3k and 1.04k with 256 (one run each). The change is kept for hosts that offer more and for
+  the statistic, which tells whether queue overflow is a cause on a given host.
+- **Verification.** `cargo test -p urmqtt-virtio` (the size test now refuses 2048); kernel builds for aarch64 and
+  x86_64 (universal ISO); the rig boots with 256 and with 1024 receive descriptors.
