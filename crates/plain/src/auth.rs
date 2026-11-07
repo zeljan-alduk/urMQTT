@@ -71,6 +71,25 @@ pub fn probe(iterations: u32) -> [u8; 32] {
     urmqtt_cfg::passwd::pbkdf2_hmac_sha256(b"urmqtt-probe", &[0x5a; 16], iterations)
 }
 
+/// New password logins a data core admits per second, from the measured cost
+/// of one check in nanoseconds (0: no password mode) and the TLS handshake
+/// rate `cap` (`limits.handshakes_per_core_per_sec`): as many as use **half
+/// the core**, at least 1, at most `cap` (ADR-230, ADR-267).
+///
+/// Until ADR-267 the floor was 20 a second, which overrode the half-core rule
+/// as soon as a check cost more than 25 ms (100 000 iterations on a VPS vCPU,
+/// 200 000 on the test machine): a flood of failing logins from an allowed
+/// address could then hold a whole core.
+pub fn login_rate(cost_ns: u64, cap: u32) -> u32 {
+    let cap = cap.max(1);
+    if cost_ns == 0 {
+        return cap;
+    }
+    u32::try_from(500_000_000 / cost_ns)
+        .unwrap_or(u32::MAX)
+        .clamp(1, cap)
+}
+
 pub struct Authenticator<'a> {
     mode: PlainAuth,
     users: Vec<(&'a str, PasswordHash)>,
@@ -384,6 +403,64 @@ mod tests {
         assert_eq!(
             a.authenticate(SRC, Some("any"), Some(b"thing")),
             Verdict::Reject(Rejection::UnknownUser)
+        );
+    }
+
+    /// ADR-267: the login rate never hands a core more than half its time to
+    /// password checks, whatever the cost, and never stops logins altogether.
+    #[test]
+    fn the_login_rate_keeps_half_the_core() {
+        const MS: u64 = 1_000_000;
+        // No password mode: the TLS rate.
+        assert_eq!(login_rate(0, 2000), 2000);
+        // 10 000 iterations under HVF (2.5 ms): 200 a second.
+        assert_eq!(login_rate(2_500_000, 2000), 200);
+        // 100 000 under HVF (25.5 ms) and on a VPS vCPU (about 50 ms).
+        assert_eq!(login_rate(25_500_000, 2000), 19);
+        assert_eq!(login_rate(50 * MS, 2000), 10);
+        // 600 000 on a VPS vCPU (about 300 ms), and a check dearer than a
+        // second: still one login a second, not none.
+        assert_eq!(login_rate(300 * MS, 2000), 1);
+        assert_eq!(login_rate(2_000 * MS, 2000), 1);
+        // A cheap check is held to the TLS rate; a zero cap is treated as 1.
+        assert_eq!(login_rate(1_000, 2000), 2000);
+        assert_eq!(login_rate(1_000, 0), 1);
+        // Whatever the cost, the admitted checks use at most half a second
+        // of every second (where the floor of 1 does not bind).
+        for cost in [MS, 3 * MS, 7 * MS, 26 * MS, 99 * MS, 333 * MS, 499 * MS] {
+            let r = u64::from(login_rate(cost, 100_000));
+            assert!(r * cost <= 500 * MS, "{cost}: {r}/s");
+            assert!((r + 1) * cost > 500 * MS, "{cost}: {r}/s is not the most");
+        }
+    }
+
+    /// ADR-267: accounts hashed with the old default and the new one live
+    /// side by side; the decoy costs what the dearest of them costs.
+    #[test]
+    fn old_and_new_default_hashes_work_together() {
+        let p = config(
+            PlainAuth::Password,
+            &[
+                ("old", "a", 10_000),
+                ("new", "b", passwd::DEFAULT_ITERATIONS),
+            ],
+            &[],
+            "lan",
+        );
+        let a = Authenticator::new(&p);
+        assert_eq!(a.accounts(), 2);
+        assert_eq!(a.max_iterations(), passwd::DEFAULT_ITERATIONS);
+        assert_eq!(
+            a.authenticate(SRC, Some("old"), Some(b"a")),
+            Verdict::Accept("old")
+        );
+        assert_eq!(
+            a.authenticate(SRC, Some("new"), Some(b"b")),
+            Verdict::Accept("new")
+        );
+        assert_eq!(
+            a.authenticate(SRC, Some("old"), Some(b"b")),
+            Verdict::Reject(Rejection::WrongPassword)
         );
     }
 

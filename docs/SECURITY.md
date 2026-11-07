@@ -289,11 +289,15 @@ exists only so that opening the port to everyone is never an accident.
    failures in `lockout_s` seconds: 5 in 300 by default). A locked-out address
    gets no SYN-ACK either. The count is by address, not by user name, so nobody
    can lock a user out from elsewhere (smoke `plaintext-lockout`).
-3. **Logins cost CPU and are admitted at a rate** (a password hash is about
-   2.5 ms at the default 10 000 iterations on the test machine; the rate is sized
-   from a measurement at boot), through an admission of its own, so a flood of
-   logins cannot take handshake capacity from TLS (smoke `tls-is-not-locked-out`,
-   and the TLS scenarios run on the same VM in `plaintext-password`).
+3. **Logins cost CPU and are admitted at a rate** (a password check is about
+   25 ms of one core at the default 100 000 iterations under HVF on the test
+   machine, an estimated 50 ms on a VPS vCPU; the rate is sized from a
+   measurement at boot so admitted checks use at most half of each data core,
+   ADR-267), through an admission of its own, so a flood of logins cannot take
+   handshake capacity from TLS (smoke `tls-is-not-locked-out`, and the TLS
+   scenarios run on the same VM in `plaintext-password`). A check runs in one
+   go on a data core: that is why the count is capped at 200 000, below
+   OWASP's 600 000 for PBKDF2-HMAC-SHA-256 (ADR-267).
 4. **Whatever the reason, a refused login looks the same and takes the same
    time**: no credentials, unknown user and wrong password are all CONNACK 4 and
    exactly one password hash is computed on each path (host tests
@@ -312,7 +316,12 @@ Passwords are never stored: the image holds `pbkdf2-sha256$iterations$salt$key`
 (ADR-231). The builder page hashes in the browser and keeps only the hash; the
 command line reads the password from standard input. **An image is a file anyone
 may copy, and its hashes allow offline guessing** at roughly GPU speed for
-SHA-256: use long random passwords (the builder generates them), not words.
+SHA-256: use long random passwords (the builder generates them: 20 characters
+of a-zA-Z0-9, about 119 bits), not words. The iteration count (100 000 by
+default, at most 200 000; `urmqtt-config hash-password --iterations N`) makes a
+guess cost more, but no count the broker can afford per login rescues a word:
+remember too that plaintext MQTT sends the password itself in the clear on
+every CONNECT (ADR-267).
 
 ### Threat model entries (plaintext)
 
@@ -777,7 +786,7 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 | Many source addresses defeat the per-address handshake limit. | A botnet can use the per-core in-flight and rate limits up. | Upstream filtering; the limits keep the broker alive for connected devices. |
 | Plaintext MQTT (P1, only if enabled) gives up confidentiality, integrity and the broker's authenticity, and a sniffed login can be replayed. | That is what "no TLS" means. | Enable it only on a network the owner controls end to end; narrow `plaintext.allow_from`; keep a firewall in front; prefer `auth = "password"` over `anonymous` and `ip`. |
 | Plaintext `auth = "ip"` trusts the source address. | An address on a shared segment can be forged. | Use it only where nobody can forge one; the boot report says so. |
-| The password hashes in an image allow offline guessing (PBKDF2 at GPU speed). | An image is a file; there is no hardware-backed store, and no memory-hard function in the kernel. | Long random passwords (the builder generates them); treat the ISO as a secret; change passwords with a new image. |
+| The password hashes in an image allow offline guessing (PBKDF2 at GPU speed). | An image is a file; there is no hardware-backed store, and no memory-hard function in the kernel (D-16, not now: ADR-267). | Long random passwords (the builder generates them); treat the ISO as a secret; change passwords with a new image. |
 | Plaintext lock-out is by source address. | Devices behind one NAT share it; an attacker who shares it can lock the others out. | The allow-list is the better tool behind a NAT; raise `max_failed_auths_per_ip`. |
 | Plaintext accounts cannot be added or removed at run time. | It needs a signed control message type and a place to keep the hashes (listed as later work, ADR-230). | A new image; revoke an identity at once with `disallow` through the registry. |
 | Syslog and statsd are plain UDP. | No TLS sink in the kernel. | Collectors on a private network only. |

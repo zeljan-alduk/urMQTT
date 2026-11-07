@@ -9,7 +9,7 @@ const dec = new TextDecoder('utf-8', { fatal: false });
 export const ABI_VERSION = 2;
 
 /** Iterations of a new password hash (urmqtt_cfg::passwd::DEFAULT_ITERATIONS; a test compares). */
-export const PASSWORD_ITERATIONS = 10000;
+export const PASSWORD_ITERATIONS = 100000;
 
 /**
  * Loads the module. `source` is a URL string, a Response (or promise of one),

@@ -32,9 +32,13 @@
 //! urmqtt-config hash-password [--id NAME] [--iterations N]
 //!     Reads a password from standard input (one line; pipe it, so it stays
 //!     out of the shell history and the process list) and prints its stored
-//!     hash for `plaintext.users` (PBKDF2-HMAC-SHA-256, a random salt, 10000
-//!     iterations unless told otherwise). With --id, prints the whole table
-//!     `{ id = "NAME", password_hash = "..." }` to paste into the TOML.
+//!     hash for `plaintext.users` (PBKDF2-HMAC-SHA-256, a random salt, 100000
+//!     iterations unless told otherwise; 1000 to 200000). With --id, prints the
+//!     whole table `{ id = "NAME", password_hash = "..." }` to paste into the
+//!     TOML. The count is part of the hash: hashes made with another count
+//!     keep working. OWASP's 600000 for PBKDF2-HMAC-SHA-256 is out of range on
+//!     purpose: the broker computes a check on a data core, in one go, for
+//!     every login (ADR-267); use a long random password instead.
 //! urmqtt-config check-release --pubkey minisign.pub [--pubkey OLD.pub]... --sums SHA256SUMS [--sig SHA256SUMS.minisig] [FILE...]
 //!     Verifies the minisign signature over SHA256SUMS (default signature
 //!     file: the sums file name plus .minisig) and each FILE against the

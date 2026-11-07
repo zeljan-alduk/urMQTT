@@ -16,6 +16,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Plaintext password hashes: 100 000 PBKDF2 iterations by default** (was 10 000) in `urmqtt-config hash-password`
+  and the builder page (ADR-267). Existing hashes carry their own count and keep working; hash again to get the new
+  cost. The range stays 1000 to 200 000, below OWASP's 600 000 on purpose: the broker checks a password in one go on a
+  data core for every login (about 25 ms per login under HVF, an estimated 50 ms on a VPS vCPU). Argon2 (ROADMAP D-16):
+  not now, reasons in ADR-267.
+- The plaintext login admission no longer admits at least 20 password logins a second per data core: above 25 ms per
+  check that floor gave logins more than half a core. The floor is 1; admitted checks use at most half of each core.
+  The boot log warns when one check costs more than the watchdog's handshake budget.
+
 - The status word is **alpha** (README badge and banner, SECURITY.md, KNOWN-ISSUES.md, FIRST-HOUR.md): the three
   conditions of the ROADMAP's definition of "alpha" (release signing key, entropy option, MTU honoured) are in v0.4.2.
 - TCP's sending side recovers from the peer's SACK blocks (RFC 6675 scoreboard, at most 8 ranges per connection,

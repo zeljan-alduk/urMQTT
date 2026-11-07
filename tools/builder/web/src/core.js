@@ -130,7 +130,7 @@ export function randomPassword(length = 20, random = n => crypto.getRandomValues
 export const completeUsers = v => (v || []).filter(u => u && String(u.id || '').trim() && String(u.hash || '').trim());
 
 /** A hash that has the right shape and belongs to no password: stands in for a missing one while the form is checked (never built, never exported). */
-export const DRAFT_HASH = 'pbkdf2-sha256$10000$' + '00'.repeat(16) + '$' + '00'.repeat(32);
+export const DRAFT_HASH = 'pbkdf2-sha256$100000$' + '00'.repeat(16) + '$' + '00'.repeat(32);
 
 /**
  * The rows of the accounts editor, as the validator should see them: every row

@@ -1782,7 +1782,7 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   - **One table of source addresses for all cores** (`urmqtt-plain::Sources`, behind a spin lock): per address, its connections, its failures in the current window and its lock-out. It is a fixed set of 8-way buckets, hashed under a per-boot random key (the generator must be up or boot stops), sized at twice `max_connections`. An address is entered only when it opens a connection that passed the allow-list or fails a login, never for a SYN; a full bucket drops an idle slot, never one with a live connection or an active lock-out, and when none can be dropped the new connection is refused rather than left untracked. One table, not one per core, because a client's connections spread over the cores by the hash of their 4-tuple, and a lock-out that one core knew would be a lock-out in name only.
   - **Three login modes** (`urmqtt-plain::Authenticator`). *password* (the default): the MQTT user name picks an account, the password must match its PBKDF2 hash, the user name is the identity. Every refusal (no credentials, unknown user, wrong password) is the same CONNACK 4 and **exactly one hash is computed on every path** (a decoy hash with the dearest account's iteration count stands in for an unknown user, the comparison is constant time), so neither the answer nor the time says whether a user exists. *anonymous*: every client is `anonymous_identity`; credentials sent are ignored. *ip*: the longest matching network of `ip_identities` names the identity; a source in none gets CONNACK 5. The configuration check refuses an identity that is also an `acl.service_ids`, `acl.operator_ids` or `control.service_ids` entry, and an identity may only use `A-Z a-z 0-9 - _ . :` (no `$`, `/`, `+` or `#`), and the broker gives every plaintext session the plaintext role whatever its name is.
   - **Lock-out.** A failed login (a CONNACK 4 or 5 from the checks above, an unreadable first packet, a first packet that is no CONNECT) counts against the **source address**; `max_failed_auths_per_ip` failures inside `lockout_s` lock the address out for `lockout_s`. A locked-out address gets no SYN-ACK (and the connections it already holds are not touched: they passed). A success clears the count. Failures are by address, not by user name, so a user name cannot be locked out by someone else, and a client behind one NAT shares its address's fate, which is the cost of the rule and is why the defaults (5 in 300 s) are generous for a legitimate typo.
-  - **A login costs CPU, so it is admitted at a rate.** Plaintext has its own `Admission` instance per core, not the TLS one: the TLS path is untouched. In password mode each new connection takes a token from a bucket whose rate is `0.5 s / (cost of one hash)` per core, measured at boot (`plaintext: one password check costs about N us`), at least 20 and at most the TLS handshake rate. The watchdog's handshake budget is calibrated with the dearer of a TLS handshake and a password check, and a plaintext connection that has not sent its CONNECT counts as handshaking for it.
+  - **A login costs CPU, so it is admitted at a rate.** Plaintext has its own `Admission` instance per core, not the TLS one: the TLS path is untouched. In password mode each new connection takes a token from a bucket whose rate is `0.5 s / (cost of one hash)` per core, measured at boot (`plaintext: one password check costs about N us`), at least 20 and at most the TLS handshake rate (**amended by ADR-267:** at least 1, so the half-core rule holds at any cost). The watchdog's handshake budget is calibrated with the dearer of a TLS handshake and a password check, and a plaintext connection that has not sent its CONNECT counts as handshaking for it.
   - **The identity is the user name, and it is the ACL's `{id}`.** A plaintext session's ACL name is its identity; the patterns are `plaintext.acl_publish` and `acl_subscribe` (`{id}` is replaced), not the device ACL. Several devices may share an identity (anonymous and ip modes always do).
   - **The session namespace is separate.** The session key is `$plain/<identity>/<client id>`. `$` cannot start a certificate identity or a client id the TLS side accepts, so a plaintext client cannot collide with, take over or be taken over by a TLS session. The client id itself is free text (Mosquitto's tools send `mosqpub/<pid>` or, for MQTT 3.1.1 without `-i`, nothing): a non-empty id is used as sent, an empty one with a clean session is named `auto-N` by the broker. Plaintext sessions are **clean only**: a CONNECT with `clean_session = 0` is answered CONNACK 5 (2 if the id is also empty), so there is no stored session to be read by the next client with the same name and no offline queue to fill.
   - **What a plaintext connection never gets.** No service, operator or control role (the check is in the broker, not in the listener); no `$SYS` subscription and no `$urmqtt` topic; no console; no retained messages unless `retain = true` (a retained publish is delivered to current subscribers and not stored); a will is checked against the plaintext ACL like any publish. Its packets are limited to `plaintext.max_packet_size` (1024) from the first byte, its publishes to `publish_rate_per_device` (5/s) by a token bucket per session, and the broker's usual queue and in-flight limits apply.
@@ -1805,6 +1805,7 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
 - **Testing.** Cfg: the vectors, parse round-trips, every malformed form; the tool: the same password hashed twice differs, verifies, an empty or 257-byte password is refused, the password never appears in an argument or output; builder: `password.test.mjs` (the hash equals the tool's for the same salt, the buffer is wiped, nothing in storage or the URL after entering accounts), `plaintext-page.test.mjs` (the accounts editor in a browser).
 - **Alternatives.** A plain `user:password` list in the blob (the image would carry every device's password in the clear). Hashing in the kernel at boot from clear passwords in the config (same problem, and the clear password would sit in the ISO). bcrypt (not in the dependency set, and it truncates at 72 bytes). Argon2 (the memory cost on a core that also serves TLS needs its own admission, its own measurements and a vetted `no_std` implementation; left for later as a second scheme).
 - **Consequences.** A hash is public once an image is. Anyone with the ISO can try to guess the passwords offline; the defence is a long random password, not the hash. Changing a password means building a new image.
+- **Amended by ADR-267:** the default is 100 000 iterations (the range stays 1000 to 200 000; hashes carry their count, so those made with 10 000 keep working), and D-16 (Argon2) is answered "not now" with the reasons and the conditions to revisit.
 
 ## ADR-232 — The builder is simple by default and advanced when needed; the emulator's keyboard and boot entry (C1e, C1g)
 
@@ -2273,3 +2274,85 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   the statistic, which tells whether queue overflow is a cause on a given host.
 - **Verification.** `cargo test -p urmqtt-virtio` (the size test now refuses 2048); kernel builds for aarch64 and
   x86_64 (universal ISO); the rig boots with 256 and with 1024 receive descriptors.
+
+## ADR-267 — Plaintext password hashes: PBKDF2 at 100 000 iterations by default, a login rate that keeps half the core, no Argon2 for now (D-16)
+
+- **Status:** Accepted (2026-11-07). Amends ADR-231 (the default count, was 10 000) and ADR-230 (the login admission's
+  floor, was 20 a second). Answers ROADMAP D-16. Numbered 267: ADR-265 (TCP SACK recovery) and ADR-266 (virtio-net queues) were merged to main while this was written.
+- **Context.** Plaintext accounts (P1) store `pbkdf2-sha256$<iterations>$<salt>$<key>`; `urmqtt-config hash-password`
+  and the builder page used 10 000 iterations. OWASP's current figure for PBKDF2-HMAC-SHA-256 is 600 000, and D-16
+  asked whether a memory-hard function (Argon2) should be added. What bounds the count here is not the tool but the
+  broker: the kernel verifies **every** password CONNECT, on the path before authentication, in **one handler on a
+  data core** (run to completion: nothing else on that core runs meanwhile), and the decoy for an unknown user costs
+  the same. The plaintext listener is off by default and, when on, answers only `plaintext.allow_from` (checked at the
+  SYN); failed logins lock an address out (5 in 300 s by default); a core admits password logins through a token
+  bucket sized at boot from a measured check (ADR-230); the watchdog's handshake budget is calibrated to the dearer of
+  a TLS handshake and a check, capped at 500 ms, and a handler past 1 s resets the VM (ADR-071).
+- **Measurements** (2026-11-07; kernel figures are the boot line `plaintext: one password check costs about N us`,
+  which times 128 iterations three times and scales to the dearest account's count):
+
+  | Where | per iteration | 10 000 | 100 000 | 200 000 | 600 000 |
+  |---|---|---|---|---|---|
+  | Kernel, aarch64, HVF on the M4 Pro (`sha256=armv8-sha2`) | 0.26 us | 2.56 ms | 25.7 ms | 50.9 ms | ~154 ms (scaled) |
+  | Kernel, aarch64, QEMU TCG | 1.6 us | 16.2 ms | ~162 ms | ~323 ms | ~970 ms |
+  | Kernel, x86_64, QEMU TCG (`sha256=sha-ni`) | 2.5-4.3 us | 42.7 ms | ~427 ms | 495 ms | ~1.5-2.6 s |
+  | Host, macOS on the M4 Pro, this code (release) | 0.07-0.13 us | 1.31 ms | 9.1 ms | 14.0 ms | 41.0 ms |
+  | Host, macOS on the M4 Pro, OpenSSL (`hashlib.pbkdf2_hmac`) | 0.076 us | 0.76 ms | 7.6 ms | - | 45.6 ms |
+  | VPS vCPU, AMD EPYC 9354P (Hostinger KVM), OpenSSL | 0.15 us | 1.35 ms | 15.1 ms | - | 94.1 ms |
+
+  The kernel on the VPS was not booted for this (its two KVM VPSes run broker images); scaling the HVF figure by the
+  VPS/M4 ratio of the same OpenSSL code (about 2x) gives **about 0.5 us per iteration on a VPS vCPU: about 5 ms at
+  10 000, 50 ms at 100 000, 100 ms at 200 000 and 300 ms at 600 000**, more on older vCPUs. The HVF figure varied
+  between boots (25.7 and 60.8 ms at 100 000 with the host busy). The kernel is about 3.5x slower per iteration than
+  the host on the same CPU under HVF; why (hypervisor, the hardware SHA path's call overhead) is not investigated here.
+  For scale: a TLS 1.3 + mTLS handshake is estimated at 130 us of the same core under HVF (`crypto-profile`), so even
+  10 000 iterations cost about 20 handshakes.
+- **The DoS reasoning.**
+  - **600 000 does not fit the design.** About 300 ms per login on a VPS vCPU holds a data core for that long, for every
+    client on it, per login; the admission would allow 1-2 logins a second per core, so a fleet of 1000 devices
+    reconnecting after a restart takes minutes on three data cores; an allowed address that only sends wrong
+    passwords (each costs a full check) keeps that small bucket empty with very little traffic. Under TCG a check
+    passes the 1 s stuck-core limit and resets the VM. OWASP's figure is for a server whose hashing runs on a pool
+    of threads beside the request path, not for a run-to-completion core.
+  - **The admission's floor was a lever.** ADR-230 admitted at least 20 logins a second per core. Above 25 ms per
+    check (100 000 on a VPS vCPU, 200 000, the existing maximum, under HVF) that floor overrode the half-core rule: at
+    200 000 on a VPS (~100 ms) it admitted 2 s of hashing per second, i.e. a whole core, to anyone in `allow_from`. The
+    floor is now 1: admitted checks use at most half of each data core at any cost
+    (`urmqtt_plain::auth::login_rate`, tested).
+  - **What the count buys.** It only matters after an image (and its hashes) is copied: a guess costs `iterations` HMAC
+    pairs on a GPU, so 10x the count is 10x the time for a given password. It does not save a short or human-chosen
+    password at any count the broker can afford, and on this listener the password crosses the network in the clear
+    on every CONNECT anyway. The builder generates 20 characters of a-zA-Z0-9 (about 119 bits), for which any count is
+    enough.
+- **Decision.**
+  1. **Default 100 000 iterations** (`urmqtt_cfg::passwd::DEFAULT_ITERATIONS`, `urmqtt-config hash-password`, the
+     builder's `PASSWORD_ITERATIONS`; a builder test compares the two). 10x the guessing cost of 10 000, for about 25 ms
+     of a core per login under HVF and an estimated 50 ms on a VPS vCPU: at the watchdog's 50 ms handshake floor and a
+     tenth of its 500 ms cap, and 10 to 20 new password logins a second per data core (a 1000-device reconnect in about
+     20 to 35 s on three data cores).
+  2. **The range stays 1000 to 200 000.** 200 000 is about 100 ms on a VPS vCPU, a 5x margin to the 500 ms budget cap.
+     `hash-password --iterations N` documents OWASP's 600 000 and why it is refused here.
+  3. **No migration.** A hash carries its own count, so hashes made with 10 000 (or any count in range) verify as
+     before, side by side with new ones; the decoy costs what the dearest account costs (tests
+     `a_hash_made_with_the_old_default_still_verifies`, against a vector made by Python's `hashlib`, and
+     `old_and_new_default_hashes_work_together`). Nothing in the blob format changes. To get the new cost, hash again.
+  4. **Login admission floor 20 -> 1** (above), the rest of ADR-230 unchanged.
+  5. **A boot warning** when a check costs more than the handshake budget (calibrated or configured): `plaintext: one
+     password check costs N ms, more than the watchdog's handshake budget of M ms: the watchdog acts on every password
+     login (watchdog.action); hash the passwords with fewer iterations` (seen with a 20 ms configured budget and a
+     100 000-iteration account).
+- **D-16, Argon2: not now.** Argon2id is the better function against GPUs, but here: (a) its memory must be reserved
+  per data core, since a check runs on the core (OWASP's minimum is m = 19 MiB, t = 2; three data cores would hold
+  57 MiB, a fifth of a 256 MiB heap on a 512 MiB VM, or an allocation an unauthenticated client can trigger); (b) its
+  time is of the same order as PBKDF2 at 100 000, so the core-holding problem stays; (c) it brings a new crate (`argon2`
+  and `blake2`) into the TCB, with vetting, RFC 9106 vectors, Miri, fuzzing and the browser build; (d) it protects
+  against cracking the hash of a password that this listener sends in the clear. It stays possible later as a second
+  scheme (`argon2id$...`) without a format change. **Revisit** when accounts become changeable at run time (NOW-15),
+  when a check can be split across handler runs or moved off the data cores, or if users need person-chosen passwords.
+- **Tests.** `urmqtt-cfg`: the old-default compatibility vector (skipped under Miri, like the other hashing tests).
+  `urmqtt-plain`: `the_login_rate_keeps_half_the_core`, `old_and_new_default_hashes_work_together`. Builder:
+  `password.test.mjs` (the page's count is the tool's), `plaintext-page.test.mjs` (the hashes in the TOML carry
+  100000 and are the PBKDF2 of the password). The smoke `plaintext` group hashes at 3000 explicitly and is unaffected;
+  `scripts/plain-bench.sh` now labels its login row with the count it used.
+- **Not done.** The kernel on a real VPS (the estimate above stands in for it); the load generator's login rate at
+  100 000 (expected about 19 a second per data core under HVF); the 3.5x gap between kernel and host per iteration.

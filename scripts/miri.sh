@@ -66,7 +66,7 @@ selection() {
         # natively in `cargo test`; Miri keeps the cheap ones (long_keys, hmac). The tests
         # live in passwd::tests: until ADR-262 seven of these skips read `passwd::<name>`,
         # matched nothing, and those seven tests ran under Miri (most of the cfg job).
-        urmqtt-cfg) only=(--skip tests::garbage_never_panics --skip passwd::tests::published_vectors --skip passwd::tests::encode_parse_verify_round_trip --skip passwd::tests::binary_and_long_passwords --skip passwd::tests::every_salt_and_iteration_changes_the_hash --skip passwd::tests::the_stored_form_is_strict --skip passwd::tests::the_decoy_costs --skip passwd::tests::debug_never_shows_the_key --skip plain::tests::user_entries --skip tests::plaintext_rules --skip tests::the_anonymous_identity --skip passwd::tests::rfc_7914_vectors --skip passwd::tests::encode_refuses_out_of_range_parameters) ;;
+        urmqtt-cfg) only=(--skip tests::garbage_never_panics --skip passwd::tests::published_vectors --skip passwd::tests::encode_parse_verify_round_trip --skip passwd::tests::binary_and_long_passwords --skip passwd::tests::every_salt_and_iteration_changes_the_hash --skip passwd::tests::the_stored_form_is_strict --skip passwd::tests::the_decoy_costs --skip passwd::tests::debug_never_shows_the_key --skip plain::tests::user_entries --skip tests::plaintext_rules --skip tests::the_anonymous_identity --skip passwd::tests::rfc_7914_vectors --skip passwd::tests::encode_refuses_out_of_range_parameters --skip passwd::tests::a_hash_made_with_the_old_default) ;;
         # The loaded configuration lives in a write-once `.bss` arena (the one unsafe
         # module, ADR-216); its tests leak a few boxes on purpose.
         urmqtt-config) flags="$MIRIFLAGS -Zmiri-ignore-leaks" ;;

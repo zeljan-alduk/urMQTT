@@ -150,15 +150,11 @@ pub fn init() {
         },
     );
     // A password check costs CPU: a core admits at most as many new plaintext
-    // connections a second as would use half of it, but at least 20.
-    let cost = PASSWD_NS.load(Ordering::Relaxed);
-    let auth_rate = if cost == 0 {
-        CONFIG.limits.handshakes_per_core_per_sec
-    } else {
-        u32::try_from(500_000_000 / cost.max(1))
-            .unwrap_or(u32::MAX)
-            .clamp(20, CONFIG.limits.handshakes_per_core_per_sec.max(20))
-    };
+    // connections a second as would use half of it, at least 1 (ADR-267).
+    let auth_rate = urmqtt_plain::auth::login_rate(
+        PASSWD_NS.load(Ordering::Relaxed),
+        CONFIG.limits.handshakes_per_core_per_sec,
+    );
     let allow_text = allow.describe();
     let _ = SHARED.set(Shared {
         allow,

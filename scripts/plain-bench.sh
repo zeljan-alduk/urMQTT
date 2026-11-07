@@ -7,8 +7,8 @@
 #
 # One dev image serves both ports. The plaintext listener is in anonymous mode
 # (so a message costs the same to authorise as on the TLS port: an ACL match) for
-# the message rows, and a second image in password mode (PBKDF2, 10 000
-# iterations, the default) for the login row. The handshake limits and the
+# the message rows, and a second image in password mode (PBKDF2 at the
+# default count of `urmqtt-config hash-password`, ADR-267) for the login row. The handshake limits and the
 # per-device publish rate are lifted in the configuration of this image so that
 # neither port is held back by them; this is a measurement image, never a
 # deployment.
@@ -48,6 +48,7 @@ clean() { LC_ALL=C sed -e $'s/\x1b\\[[0-9;?=]*[A-Za-z]//g' -e $'s/\r//g' "$1"; }
 
 TLS_PORT=18883 PLAIN_PORT=11883
 HASH=$(printf '%s\n' bench-secret | "$TOOL" hash-password)
+ITERS=$(cut -d'$' -f2 <<<"$HASH")
 
 # The development configuration with its plaintext port off, the limits lifted
 # and the new section on. $@: the lines of the [plaintext] section that differ
@@ -166,7 +167,7 @@ row_pubsub "1 pair, QoS 0, 64 B, flood" 1 0 64 0
 stop_vm
 boot_vm password
 for run in $(seq "$RUNS"); do
-    echo "| plaintext, password (PBKDF2 10 000) | $run | $(conn_rate --plain 1 --port "$PLAIN_PORT" --user bench --password bench-secret) |"
+    echo "| plaintext, password (PBKDF2 $ITERS) | $run | $(conn_rate --plain 1 --port "$PLAIN_PORT" --user bench --password bench-secret) |"
 done
 stop_vm
 clean "$OUT/password.log" | grep -E "plaintext: one password check costs" | head -1 || true

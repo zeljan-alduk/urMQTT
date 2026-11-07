@@ -277,9 +277,9 @@ test('an account: id, password typed and left, stored as a hash only, and the cl
   await page.waitFor(`document.querySelector('${USERS} > .ub-error').hidden`, { what: 'the accounts error to clear' });
 
   const toml = await tomlExport();
-  const m = /users = \[\{ id = "sensor-1", password_hash = "(pbkdf2-sha256\$10000\$([0-9a-f]{32})\$([0-9a-f]{64}))" \}\]/.exec(toml);
+  const m = /users = \[\{ id = "sensor-1", password_hash = "(pbkdf2-sha256\$100000\$([0-9a-f]{32})\$([0-9a-f]{64}))" \}\]/.exec(toml);
   assert.ok(m, toml);
-  assert.equal(pbkdf2Sync(secret, Buffer.from(m[2], 'hex'), 10000, 32, 'sha256').toString('hex'), m[3], 'the hash is the PBKDF2 of the password');
+  assert.equal(pbkdf2Sync(secret, Buffer.from(m[2], 'hex'), 100000, 32, 'sha256').toString('hex'), m[3], 'the hash is the PBKDF2 of the password');
   assertNoSecret(toml + await everything(), secret);
   // The hash itself is not in the address or the storage either: memory only.
   const kept = await page.eval(`JSON.stringify([location.hash, atob(location.hash.slice(3).replace(/-/g, '+').replace(/_/g, '/')), Object.entries(sessionStorage), Object.entries(localStorage)])`);
@@ -299,7 +299,7 @@ test('an account: id, password typed and left, stored as a hash only, and the cl
   await typePassword(1, 'another one');
   await page.waitFor(`document.querySelector('${row(1)} .ub-pw-done:not([hidden])')`);
   const t2 = await tomlExport();
-  assert.ok(!t2.includes(m[3]) && /password_hash = "pbkdf2-sha256\$10000\$/.test(t2), 'a new hash');
+  assert.ok(!t2.includes(m[3]) && /password_hash = "pbkdf2-sha256\$100000\$/.test(t2), 'a new hash');
   // A row is removed, and a second one added; ids are checked by the validator while typed.
   await page.click(`${USERS} .ub-add-account`);
   await page.type(idInput(2), 'bad id');
@@ -340,9 +340,9 @@ test('a generated password: 20 characters, shown or hidden, copied, then hashed'
   assert.equal(await page.eval(`document.querySelector('${pwInput(1)}').value`), '');
   assert.equal(await page.eval(`document.querySelector('${pwInput(1)}').type`), 'password');
   const toml = await tomlExport();
-  const m = /gen-1", password_hash = "pbkdf2-sha256\$10000\$([0-9a-f]{32})\$([0-9a-f]{64})"/.exec(toml);
+  const m = /gen-1", password_hash = "pbkdf2-sha256\$100000\$([0-9a-f]{32})\$([0-9a-f]{64})"/.exec(toml);
   assert.ok(m, toml);
-  assert.equal(pbkdf2Sync(pw, Buffer.from(m[1], 'hex'), 10000, 32, 'sha256').toString('hex'), m[2]);
+  assert.equal(pbkdf2Sync(pw, Buffer.from(m[1], 'hex'), 100000, 32, 'sha256').toString('hex'), m[2]);
   assertNoSecret(toml + await everything(), pw);
   // Two accounts with the same password get different hashes (a salt each).
   await page.click(`${USERS} .ub-add-account`);

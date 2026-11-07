@@ -375,6 +375,10 @@ about 200 a second per data core, and the measured 310-340 a second over two dat
 such cost. That is the price of a hash that is expensive to guess; it only matters in a reconnect storm, where the cap protects TLS clients
 from sharing the cores with a flood of logins (the rate is also capped by `limits.handshakes_per_core_per_sec`).
 
+**Since ADR-267** the default is 100 000 iterations: one check costs about 25.7 ms under HVF on this machine (boot line
+`plaintext: one password check costs about 25683 us`), so the admission allows 19 new password logins a second per data
+core, about a tenth of the row above (not re-measured with the load generator). Hashes made with 10 000 keep their cost.
+
 **What this does not say.**
 - The single-flow flood (1 pair, QoS 0, as fast as possible) ranged from 20k to 440k delivered a second between runs on both ports. The
   rig (user-mode networking, one generator thread per client, a guest that the watchdog resets when a core stays in one handler for a

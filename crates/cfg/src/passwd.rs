@@ -12,10 +12,14 @@
 //! ```
 //!
 //! The salt is 16 to 32 bytes, the derived key 32 bytes, the iteration count
-//! 1 000 to 200 000. The default (10 000) costs the broker about as much CPU
-//! per accepted connection as a TLS handshake; a higher count is allowed, and
-//! the kernel measures the cost at boot and sizes the watchdog's handshake
-//! budget to it.
+//! 1 000 to 200 000. The default is 100 000 (ADR-267; it was 10 000 before):
+//! about 25 ms of one core per login under HVF on the test machine and an
+//! estimated 50 ms on a VPS vCPU. The kernel computes a check in one go on a
+//! data core, so the count is bounded by what a login may hold a core for,
+//! not by OWASP's 600 000 for a web server's thread pool. A hash carries its
+//! own count: hashes made with another count (10 000 included) keep working.
+//! The kernel measures the cost at boot and sizes the login admission rate
+//! and the watchdog's handshake budget to it.
 
 use core::fmt;
 
@@ -25,7 +29,8 @@ use subtle::ConstantTimeEq;
 pub const SCHEME: &str = "pbkdf2-sha256";
 pub const MIN_ITERATIONS: u32 = 1_000;
 pub const MAX_ITERATIONS: u32 = 200_000;
-pub const DEFAULT_ITERATIONS: u32 = 10_000;
+/// What `urmqtt-config hash-password` and the builder page use (ADR-267).
+pub const DEFAULT_ITERATIONS: u32 = 100_000;
 pub const SALT_MIN: usize = 16;
 pub const SALT_MAX: usize = 32;
 pub const KEY_LEN: usize = 32;
@@ -489,6 +494,29 @@ mod tests {
         assert!(!d.verify(b"password"));
         assert_eq!(PasswordHash::decoy(1).iterations(), MIN_ITERATIONS);
         assert_eq!(PasswordHash::decoy(u32::MAX).iterations(), MAX_ITERATIONS);
+    }
+
+    /// ADR-267: raising the default changes nothing for a hash made before.
+    /// This one was made with the old default (10 000) by Python's
+    /// `hashlib.pbkdf2_hmac`, independently of this code.
+    #[test]
+    fn a_hash_made_with_the_old_default_still_verifies() {
+        const OLD: &str = "pbkdf2-sha256$10000$00112233445566778899aabbccddeeff$\
+            6f4a42faddac7256d234a1910b2ab79d90a4f16c0a7f9f566cbefb34dbbe894b";
+        assert_ne!(DEFAULT_ITERATIONS, 10_000);
+        let h = PasswordHash::parse(OLD).unwrap();
+        assert_eq!(h.iterations(), 10_000, "the count comes from the text");
+        assert!(h.verify(b"sensor-1 old password"));
+        assert!(!h.verify(b"sensor-1 old passwore"));
+        // A new hash of the same password differs only by its count (and
+        // its salt), and both verify.
+        let new = encode(b"sensor-1 old password", h.salt(), DEFAULT_ITERATIONS).unwrap();
+        assert!(new.starts_with("pbkdf2-sha256$100000$00112233445566778899aabbccddeeff$"));
+        assert!(
+            PasswordHash::parse(&new)
+                .unwrap()
+                .verify(b"sensor-1 old password")
+        );
     }
 
     #[test]
