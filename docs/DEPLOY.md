@@ -1093,8 +1093,9 @@ QEMU forwards loopback ports only):
 
 **6. The bridge** (on the bridge host):
 ```bash
-docker pull python:3.12-alpine && docker inspect --format '{{index .RepoDigests 0}}' python:3.12-alpine   # pin it
-docker build --build-arg PYTHON_IMAGE=python@sha256:<digest> -t urmqtt-demo-bridge deploy/demo-bridge
+# the Dockerfile pins python:3.12-alpine by digest (Dependabot proposes newer ones); another digest:
+#   --build-arg PYTHON_IMAGE=python:3.12-alpine@sha256:<digest>
+docker build -t urmqtt-demo-bridge deploy/demo-bridge
 # what the unit runs; read-only, no capabilities, non-root, loopback only, no secrets:
 docker run --rm --name urmqtt-demo-bridge --read-only --tmpfs /tmp:rw,noexec,nosuid,size=4m \
     --cap-drop ALL --security-opt no-new-privileges --memory 96m --cpus 0.5 --pids-limit 32 \

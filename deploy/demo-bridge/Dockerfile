@@ -2,16 +2,15 @@
 #
 #   docker build -t urmqtt-demo-bridge deploy/demo-bridge
 #
-# PIN THE BASE IMAGE BY DIGEST before the first real build, like the mirror's nginx (scripts/mirror/
-# urmqtt-mirror-web.service): `docker pull python:3.12-alpine`, read `docker inspect --format
-# '{{index .RepoDigests 0}}' python:3.12-alpine`, and build with
-# `--build-arg PYTHON_IMAGE=python@sha256:<digest>`. The tag below is what was available when this was written;
-# this file has not been built by its author (no image was pulled or built for the D1 commit).
+# The base image is pinned by digest, like the mirror's nginx (scripts/mirror/urmqtt-mirror-web.service):
+# the multi-architecture index of python:3.12-alpine as Docker Hub served it on 2026-11-07 (OpenSSF Scorecard
+# PinnedDependencies, docs/audit/codeql-triage.md). Dependabot (docker, /deploy/demo-bridge) proposes newer
+# digests. To build on another one, pass `--build-arg PYTHON_IMAGE=python:3.12-alpine@sha256:<digest>`.
 #
 # The image holds bridge.py and nothing else: no secrets, no configuration files (everything is DEMO_BRIDGE_*
 # environment variables or options), no shell history, a non-root user. Run it read-only with no capabilities
 # (the docker run line is in deploy/demo-bridge/urmqtt-demo-bridge.service and docs/DEPLOY.md, section 11).
-ARG PYTHON_IMAGE=python:3.12-alpine
+ARG PYTHON_IMAGE=python:3.12-alpine@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7
 FROM ${PYTHON_IMAGE}
 
 RUN adduser -D -H -u 10001 -s /sbin/nologin bridge

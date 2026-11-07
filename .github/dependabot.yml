@@ -24,3 +24,9 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "ci"
+  - package-ecosystem: docker
+    directories: ["/deploy/demo-bridge"]
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps"

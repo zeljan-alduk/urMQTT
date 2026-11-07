@@ -1,0 +1,22 @@
+# CodeQL configuration (referenced from .github/workflows/codeql.yml, `config-file`).
+#
+# Tests, test modules kept in their own files, golden-image tests and fuzz targets legitimately hold
+# fixed keys, salts and nonces (published known-answer vectors, deterministic test keys, fuzz seeds).
+# They are not built into any image, and CodeQL's `rust/hard-coded-cryptographic-value` reported each
+# of them as a critical alert. They are left out of the analysis here; production source stays fully
+# analysed, with every query.
+#
+# What is NOT left out: `#[cfg(test)] mod tests { ... }` blocks written inside a production file
+# (crates/cfg/src/passwd.rs, crates/plain/src/auth.rs, ...). CodeQL has no attribute-based exclusion,
+# and excluding the file would hide its production code, so those are still reported and are
+# dismissed one by one as "used in tests" with the vector or standard named (docs/audit/codeql-triage.md).
+#
+# Every file named `tests.rs` or `*_tests.rs` in this repository is a `#[cfg(test)]` module
+# (checked 2026-11-07, docs/audit/codeql-triage.md says how to re-check). Paths are relative to the
+# repository root; `paths-ignore` works for Rust with `build-mode: none` and for the actions language.
+paths-ignore:
+  - fuzz
+  - "**/tests"
+  - "**/tests.rs"
+  - "**/*_tests.rs"
+  - tools/builder/test
