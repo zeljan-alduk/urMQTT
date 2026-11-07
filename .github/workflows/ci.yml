@@ -34,9 +34,11 @@ jobs:
           persist-credentials: false
       # Developer Certificate of Origin (CONTRIBUTING.md): every commit of a pull
       # request carries a Signed-off-by: trailer. The commits already on the base
-      # branch are not checked.
+      # branch are not checked. Dependabot's commits carry no sign-off (a bot
+      # cannot certify origin); its pull requests change only manifests and
+      # lock files and are reviewed by the maintainer who merges them.
       - name: DCO sign-off (pull requests)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}

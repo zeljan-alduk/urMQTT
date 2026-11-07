@@ -4,9 +4,15 @@ updates:
     directories: ["/", "/fuzz"]
     schedule:
       interval: weekly
+    # Minor and patch updates arrive as one weekly pull request. A major update
+    # (RustCrypto 0.9 / 0.11, dalek 5, rand_core 0.10, ...) changes the API of
+    # the TCB's crypto and arrives on its own, so each is reviewed as a
+    # migration (ROADMAP D-17), never as part of a group; PR #1 (eight majors in
+    # one group, every CI job red) is why.
     groups:
       cargo:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
     commit-message:
       prefix: "deps"
   - package-ecosystem: github-actions

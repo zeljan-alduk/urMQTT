@@ -461,6 +461,7 @@ Questions, not assumptions. Each blocks one or more items above.
 | D-14 | D1: deploy the demo broker, on which machine and name? | D1 |
 | D-15 | A support period (CRA) and an LTS line, before or at 1.0? | VULNERABILITY-HANDLING §6 |
 | D-16 | Should a stricter, memory-hard password hash (Argon2) be added for plaintext accounts? (PROGRESS P1, open.) | plaintext |
+| D-17 | When to migrate the TCB's crypto crates to the next RustCrypto generation (aes 0.9, aes-gcm and chacha20poly1305 0.11, `hybrid-array` instead of `generic-array`, `digest`/`sha2` 0.11), `curve25519`/`x25519`/`ed25519-dalek` 5/3 and `rand_core` 0.10 (its `RngCore` and `TryCryptoRng` traits replace ours)? Dependabot's PR #1 (2026-11-05) bundled all eight majors and broke every crate of the TLS stack; closed, Dependabot now sends majors singly. Each is a migration with its own ADR, KATs re-run, Miri and the differential tests, not a bot merge. | H9, SBOM freshness |
 
 ## 5. Explicitly out of scope
 
