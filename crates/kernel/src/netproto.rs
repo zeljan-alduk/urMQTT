@@ -765,6 +765,8 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     );
     let (irq_spi, mode) = *NIC_WAKE.lock();
     let mut wake = RxWake::new(mode);
+    // When the NIC last moved a frame (ADR-270's hold before arming).
+    let mut last_traffic_ns = 0u64;
     match (mode, irq_spi) {
         (Mode::Interrupt, Some(spi)) => {
             // Routed to this core (0), which owns the NIC; the queue keeps
@@ -871,6 +873,9 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         dataplane::mem_report(now, &mut mem_last, &mut mem_conns);
         let t = time::uptime_ns();
         let mut activity = dispatch(&mut net, &mut link, &mut pool, &mut local, &mut nic_q);
+        if activity {
+            last_traffic_ns = time::uptime_ns();
+        }
         idle.prof.disp += time::uptime_ns() - t;
         let t = time::uptime_ns();
         activity |= drain_mesh(&mut link, &mut mqtt, &mut iface, &mut tcp, now);
@@ -1056,15 +1061,22 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         }
         // Polling mode, with connections on the workers: come back to the NIC
         // often enough that a frame never waits for the 10 ms tick (ADR-224).
-        // Interrupt mode: the receive interrupt ends the sleep (ADR-270).
+        // Interrupt mode: the same while the NIC moved a frame in the last
+        // 2 ms, then the receive interrupt ends the sleep (ADR-270).
         let conns: u64 = dataplane::CONNECTIONS
             .iter()
             .map(|c| c.load(core::sync::atomic::Ordering::Relaxed))
             .sum();
-        idle.poll_wake(wake.poll_ns(conns > 0, NIC_POLL_NS));
-        let irq = wake.interrupt();
-        let irqs = devices::net_irqs();
-        wake.armed(irqs);
+        let plan = wake.plan(
+            conns > 0,
+            time::uptime_ns().saturating_sub(last_traffic_ns),
+            NIC_POLL_NS,
+        );
+        idle.poll_wake(plan.poll_ns);
+        let irq = plan.arm;
+        if irq {
+            wake.armed(devices::net_irqs());
+        }
         let slept = idle.pass_armed(
             busy,
             |on| {
@@ -1079,7 +1091,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             },
             || link.pending() || net.rx_pending() || !local.is_empty(),
         );
-        if slept && wake.after_sleep(devices::net_irqs(), net.rx_pending()) {
+        if slept && irq && wake.after_sleep(devices::net_irqs(), net.rx_pending()) {
             warn!(
                 "net: receive wake-up: {} frames waited after a sleep without the receive interrupt; \
                  polling every {} us while connections exist from now on",

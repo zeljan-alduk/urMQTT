@@ -21,6 +21,25 @@
 /// between reading the counter and the ring, but not eight times in a row.
 pub const MISSES_BEFORE_POLLING: u8 = 8;
 
+/// After NIC traffic, interrupt mode keeps polling for this long before it
+/// arms the interrupt (ns). Under a steady stream a dispatcher that armed the
+/// interrupt at every short idle gap was woken once per gap by an MSI, which
+/// on the rig (one data core, HVF) cost a fifth of the QoS 0 flood rate and
+/// raised the 99th percentile at 16 000 messages/s; polling while traffic is
+/// recent batches frames as ADR-224 did, and the interrupt takes over once the
+/// NIC has been quiet for this long (ADR-270).
+pub const HOLD_NS: u64 = 2_000_000;
+
+/// What a dispatcher does before it sleeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Plan {
+    /// Ask for the receive interrupt (and re-check the ring).
+    pub arm: bool,
+    /// Come back after this long at the latest (ns; 0: only the tick and
+    /// wake-ups).
+    pub poll_ns: u64,
+}
+
 /// Why the receive queue is polled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Why {
@@ -108,6 +127,28 @@ impl RxWake {
         }
     }
 
+    /// The plan for the next sleep: `connections` whether any data core holds
+    /// one, `since_traffic_ns` how long ago the NIC last moved a frame.
+    /// Interrupt mode: poll as ADR-224 did while traffic is recent (within
+    /// [`HOLD_NS`], and only with connections), else arm the interrupt and do
+    /// not poll at all. Polling mode: [`poll_ns`](Self::poll_ns).
+    pub const fn plan(&self, connections: bool, since_traffic_ns: u64, poll_ns: u64) -> Plan {
+        match self.mode {
+            Mode::Interrupt if connections && since_traffic_ns < HOLD_NS => Plan {
+                arm: false,
+                poll_ns,
+            },
+            Mode::Interrupt => Plan {
+                arm: true,
+                poll_ns: 0,
+            },
+            Mode::Polling(_) => Plan {
+                arm: false,
+                poll_ns: self.poll_ns(connections, poll_ns),
+            },
+        }
+    }
+
     /// The queue was armed; `irqs` is the interrupt counter now.
     pub fn armed(&mut self, irqs: u64) {
         self.irqs_at_arm = irqs;
@@ -160,6 +201,58 @@ mod tests {
             assert_eq!(w.poll_ns(true, POLL), POLL);
             assert_eq!(w.poll_ns(false, POLL), 0);
         }
+    }
+
+    #[test]
+    fn interrupt_mode_polls_while_traffic_is_recent() {
+        let w = RxWake::new(Mode::Interrupt);
+        // Busy NIC with connections: poll, do not arm (no MSI per idle gap).
+        assert_eq!(
+            w.plan(true, 0, POLL),
+            Plan {
+                arm: false,
+                poll_ns: POLL
+            }
+        );
+        assert_eq!(
+            w.plan(true, HOLD_NS - 1, POLL),
+            Plan {
+                arm: false,
+                poll_ns: POLL
+            }
+        );
+        // Quiet for the hold time: the interrupt, no polling.
+        assert_eq!(
+            w.plan(true, HOLD_NS, POLL),
+            Plan {
+                arm: true,
+                poll_ns: 0
+            }
+        );
+        // Without connections: always the interrupt (the first SYN wakes it).
+        assert_eq!(
+            w.plan(false, 0, POLL),
+            Plan {
+                arm: true,
+                poll_ns: 0
+            }
+        );
+        // Polling mode never arms.
+        let p = RxWake::new(Mode::Polling(Why::Configured));
+        assert_eq!(
+            p.plan(true, u64::MAX, POLL),
+            Plan {
+                arm: false,
+                poll_ns: POLL
+            }
+        );
+        assert_eq!(
+            p.plan(false, 0, POLL),
+            Plan {
+                arm: false,
+                poll_ns: 0
+            }
+        );
     }
 
     #[test]
