@@ -865,7 +865,9 @@ mqtt5() {
     mkimg "$OUT/mqtt5-off.raw" "serve"
     # ADR-275: services by prefix on the development port, for a group of
     # several workers (the dev certificates have one service).
-    sed -e 's/^service_ids = \["backend"\]/service_ids = ["backend", "worker-*"]/' "$ROOT/deploy/dev/config.toml" >"$dir/shared.toml"
+    # (The device publishes 40 messages at once: the per-device rate raised.)
+    sed -e 's/^service_ids = \["backend"\]/service_ids = ["backend", "worker-*"]/' \
+        -e 's/^publish_rate_per_device = .*/publish_rate_per_device = "1000\/s"/' "$ROOT/deploy/dev/config.toml" >"$dir/shared.toml"
     "$tool" pack "$dir/shared.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/shared.blob" >/dev/null
     MKIMG_EXTRA=(--config "$dir/shared.blob")
     mkimg "$OUT/mqtt5-shared.raw" "serve"

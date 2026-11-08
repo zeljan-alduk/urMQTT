@@ -3470,7 +3470,8 @@ docs/MQTT5-CONFORMANCE.md).
    `limits.max_subscriptions_per_session`. Worst case per owner shard: about 120 B and the name and filter twice per
    group, 12 B per member.
 7. **Persistence.** A shared subscription of a persistent session is a row of `subscriptions` like any other (its
-   filter `$share/...`); at boot it is restored (ACL and limits checked again) and joins its group offline.
+   filter `$share/...`); at boot it is restored (ACL and limits checked again, and dropped with its identifier
+   when the configuration turned the feature off) and joins its group offline.
 8. **Announced.** CONNACK leaves Shared Subscription Available and Subscription Identifier Available out (they mean 1
    then) unless configured off, when it says 0.
 9. **`$SYS`.** `shared/groups`, `shared/members` (on their owners), `shared/messages/delivered`, `/dropped`,
@@ -3519,7 +3520,7 @@ docs/MQTT5-CONFORMANCE.md).
     topic republished often costs one), and at most `SWEEP_PER_TICK` = 64 due ones are cleared per tick, so an
     expiry storm stays within the watchdog's budget; the check on read stays. Every shard clears its replica; the
     first worker shard alone tells the store (one deletion per expiry, not one per shard).
-    `$SYS/broker/retained/expiring`.
+    `$SYS/broker/retained/expiring` (the largest count of a shard: each holds a replica).
 15. **Wills across a restart** (*decided*: documented, not built). A Will, armed or waiting for its delay, lives in
     RAM; a broker restart loses it (KNOWN-ISSUES). Storing it would add a store write to every CONNECT with a Will
     and a deletion to every clean DISCONNECT, for the case of a broker that dies while the client also does; after a

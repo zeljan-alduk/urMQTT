@@ -91,7 +91,7 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/shared/groups`, `shared/members` | Shared-subscription groups and their members now, counted on the data core that owns each group (ADR-275) |
 | `$SYS/broker/shared/messages/delivered`, `dropped`, `redispatched` | Messages handed to one member of a group; dropped (QoS 0 with no member online or whose member was gone, a message handed on more than 4 times); handed to another member because the first one's session ended or it was gone |
 | `$SYS/broker/shared/joins/refused` | Shared SUBSCRIBEs refused by `limits.max_shared_groups` or `limits.max_shared_group_members` (SUBACK 0x97, 3.1.1 0x80) |
-| `$SYS/broker/retained/expiring` | Retained messages with a Message Expiry Interval waiting for the sweep, summed over the data cores' replicas (each core holds every retained message) |
+| `$SYS/broker/retained/expiring` | Retained messages with a Message Expiry Interval waiting for the sweep (every data core holds a replica of every retained message; the largest count of a core is reported, not their sum) |
 | `$SYS/broker/memory/topic_aliases` | Bytes held by 5.0 clients' topic-alias tables (at most `mqtt5.topic_alias_maximum` × (16 + `limits.max_topic_len`) per connection, 2 720 B with the defaults); part of `memory/used` |
 | `$SYS/broker/frames/dropped/steer`, `worker_tx`, `nic` | network frames dropped because a worker core, the dispatcher, or the NIC queue plus the dispatcher's 4 096-frame backlog was full; TCP retransmits them. Normally 0 |
 | `$SYS/broker/handshakes/started` | connections admitted (TCP established, admission said yes) |
