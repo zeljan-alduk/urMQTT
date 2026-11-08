@@ -943,8 +943,8 @@ python3 scripts/echo-client.py 7007        # client: echo 1 ok / 3000 ok / 60000
 
 ```bash
 make fuzz T=config_parse FUZZ_TIME=60     # every parser has a target; CI runs each for 60 s
-cargo fuzz list                            # 23 targets, among them: config_parse, fdt_parse, acpi_parse, mqtt_decode,
-                                           # disk_layout, disk_backup, disk_crypt, tcp_segment, net_frame, tls_record, x509_identity,
+cargo fuzz list                            # 31 targets, among them: config_parse, fdt_parse, acpi_parse, mqtt_decode,
+                                           # mqtt5_packet, mqtt5_props, disk_layout, disk_backup, disk_crypt, tcp_segment, net_frame, tls_record, x509_identity,
                                            # broker_input, telemetry_recover, control_message
 make fuzz T=mqtt_decode FUZZ_TIME=600      # the M8 acceptance run
 ```

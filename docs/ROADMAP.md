@@ -298,6 +298,10 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
   `broker_input` fuzzing with QoS 2 sequences.
 
 **NEXT-3. MQTT 5.0.** L.
+- Status: **part 1: codec + design done** (`urmqtt_mqtt::v5`, ADR-273, `docs/MQTT5-CONFORMANCE.md`); part 2 (version
+  negotiation, reason codes, session/message expiry, will delay, flow control, packet size, topic aliases, keep alive,
+  assigned id, subscription options) after NEXT-2; part 3 (shared subscriptions, subscription identifiers,
+  conformance suite). D-13 answered: full 5.0 in phases.
 - What: protocol level 5 alongside 3.1.1: properties, reason codes, session and message expiry, topic aliases,
   response topic and correlation data, user properties, flow control (receive maximum); shared subscriptions as a
   separate decision.
@@ -308,6 +312,8 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
 - Verify: an MQTT 5 conformance suite (to be chosen), mosquitto 5 clients, re-measured bytes per idle connection.
 
 **NEXT-4. Expiry of offline persistent sessions.** S to M.
+- Status: designed into NEXT-3 part 2 (ADR-273 rule 4: `limits.max_session_expiry_s` for both versions, the
+  session row gains `expiry_s` and `offline_since`).
 - What: a configured maximum age for an offline persistent session and its queue (3.1.1 has none; 5.0 brings
   Session Expiry Interval).
 - Why: I found no expiry in the broker (`Broker::tick` handles keepalive only); sessions are bounded by the number
@@ -467,7 +473,7 @@ Questions, not assumptions. Each blocks one or more items above.
 | D-10 | Disk key outside the image: TPM sealing (ADR-254), network key release, confidential VMs, or "the ISO is a secret" for good? | LATER-7 |
 | D-11 | Which clouds after KVM VPSes, if any: AWS, GCP, Azure? Each is at least one large driver. | LATER-2, LATER-3 |
 | D-12 | Is bare metal still a goal before 1.0, and is the Intel PC available for the inventory? | LATER-4, LATER-5 |
-| D-13 | MQTT 5.0: full, or a subset (properties, reason codes, session expiry) first? Shared subscriptions in or out? | NEXT-3 |
+| D-13 | MQTT 5.0: full, or a subset (properties, reason codes, session expiry) first? Shared subscriptions in or out? **Answered by the owner: full MQTT 5.0, in phases (ADR-273: codec and design done; broker in parts 2 and 3; shared subscriptions in part 3).** | NEXT-3 |
 | D-14 | D1: deploy the demo broker, on which machine and name? | D1 |
 | D-15 | A support period (CRA) and an LTS line, before or at 1.0? | VULNERABILITY-HANDLING §6 |
 | D-16 | Should a stricter, memory-hard password hash (Argon2) be added for plaintext accounts? (PROGRESS P1, open.) **Answered 2026-11-07 (ADR-267): not now.** PBKDF2 stays; its default goes from 10 000 to 100 000 iterations (at most 200 000, below OWASP's 600 000 because a check runs in one go on a data core for every login); the login admission keeps half of each core whatever a check costs. Argon2id would reserve its memory per data core (OWASP's minimum is 19 MiB) and add a vetted `no_std` crate to the TCB, for passwords that plaintext MQTT sends in the clear anyway. Revisit with run-time accounts (NOW-15), or once a check can be split across handler runs. | plaintext |

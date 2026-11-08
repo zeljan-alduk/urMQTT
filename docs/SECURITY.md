@@ -68,7 +68,7 @@ which says what it gives up.
 | TLS handshake | rustls (no_std, own RustCrypto provider) | upstream fuzzing; mTLS scenarios in smoke (wrong CA, expired, mismatch, revoked) |
 | TLS records after the handshake | `urmqtt-tls::record` (own) | unit tests; fuzz `tls_record` (garbage rejected, sealed records round-trip, any changed byte fails) |
 | Client certificate identity and serial | `urmqtt-tls::identity` (x509-cert) | fuzz `x509_identity` |
-| MQTT packets | `urmqtt-mqtt` (own, `forbid(unsafe_code)`) | spec and property tests; mosquitto interop; fuzz `mqtt_decode` |
+| MQTT packets | `urmqtt-mqtt` (own, `forbid(unsafe_code)`) | spec and property tests; mosquitto interop; fuzz `mqtt_decode`; the MQTT 5.0 codec (not reachable yet, ADR-273): spec-table tests, captured Mosquitto and paho interop, fuzz `mqtt5_packet`, `mqtt5_props`, Kani |
 | MQTT session behaviour | `urmqtt-broker` (own, `forbid(unsafe_code)`) | 30 host tests; fuzz `broker_input` |
 | Disk superblock and size table | `urmqtt-store::layout` | fuzz `disk_layout` |
 | Telemetry log on the disk | `urmqtt-store::telemetry` | crash and torn-write tests; fuzz `telemetry_recover` |

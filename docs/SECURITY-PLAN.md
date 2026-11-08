@@ -222,7 +222,9 @@ Every milestone ends with:
 **Work**
 - Miri on the host crates (`mqtt`, `broker`, `tcp`, `net`, `timer-wheel`, `store` layout, `tls` record).
 - **Kani proofs:**
-  - the MQTT decoder never panics and never reads out of bounds up to a bound;
+  - the MQTT decoder never panics and never reads out of bounds up to a bound; for MQTT 5.0 (ADR-273), the
+    Variable Byte Integer round trip and the property-block length arithmetic (`crates/mqtt/src/v5/proofs.rs`;
+    fuzz targets `mqtt5_packet`, `mqtt5_props`);
   - the TCP segment parser and the TLS record header;
   - config validation;
   - timer-wheel invariants.

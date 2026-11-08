@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **MQTT 5.0 codec** (`urmqtt_mqtt::v5`, ROADMAP NEXT-3 part 1, ADR-273): all 15 packet types including AUTH,
+  properties checked against the specification's per-packet table, duplicate and value rules, reason codes per
+  packet, subscription options, shared-subscription syntax; zero-copy and allocation-free like the 3.1.1 codec,
+  with documented bounds for User Properties and Subscription Identifiers; an encoder that refuses what the decoder
+  refuses. Tested from the specification's tables, with round-trip proptests, a negative corpus and packets
+  captured from Mosquitto 2.x and paho-mqtt 2.x clients (`scripts/mqtt-record.py`, `scripts/mqtt5-capture.sh`);
+  fuzz targets `mqtt5_packet` and `mqtt5_props`; Kani harnesses for the varint and property-length arithmetic.
+  **The broker does not use it yet: a 5.0 CONNECT is still refused.** ADR-273 also decides the broker semantics of
+  parts 2 and 3 (version negotiation, session and message expiry, flow control, topic aliases, subscription
+  options, shared subscriptions, enhanced auth refused with 0x8C) and reserves configuration format 12;
+  `docs/MQTT5-CONFORMANCE.md` is the test plan (Eclipse Paho interoperability suite, Mosquitto clients), with
+  `scripts/mqtt5-conformance.sh` as its harness stub.
 - `docs/PERFORMANCE.md` §13: urMQTT v0.4.2, `main` (SACK, ADR-265/266) and Mosquitto 2.0.21 measured on two VPSes
   (Contabo x86_64 4 vCPU, netcup arm64 2 vCPU), each loaded from the other; raw files, tables and figures in
   `docs/perf-results/x11-2026-11-07/`, figures from the new `scripts/x11-charts.py`. Findings: with cores to use
