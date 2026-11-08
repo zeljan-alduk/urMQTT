@@ -29,6 +29,7 @@ members = [
     "crates/usys",
     "crates/dbworker",
     "crates/virtio",
+    "crates/ws",
     "crates/x25519",
     "tools/attack",
     "tools/builder/wasm",

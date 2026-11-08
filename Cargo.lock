@@ -1809,6 +1809,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "urmqtt-ws"
+version = "0.4.2"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "urmqtt-x25519"
 version = "0.4.2"
 dependencies = [

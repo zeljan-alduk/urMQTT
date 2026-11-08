@@ -1,0 +1,18 @@
+[package]
+name = "urmqtt-ws"
+description = "MQTT over WebSocket (RFC 6455, MQTT 3.1.1 section 6), the transport only: a bounded HTTP/1.1 Upgrade parser and the frame codec of a server. no_std, no allocation, host-tested; the kernel wires it between TLS and the MQTT parser (ADR-272)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1.12"
