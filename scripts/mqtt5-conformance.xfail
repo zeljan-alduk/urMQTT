@@ -1,0 +1,17 @@
+# Expected failures of the Eclipse Paho interoperability suite against the
+# conformance image (scripts/mqtt5-conformance.sh --boot: the plaintext
+# listener, open login mode). docs/MQTT5-CONFORMANCE.md section 2.
+# suite        test                            phase   reason
+client_test5   test_shared_subscriptions       part3   shared subscriptions arrive in part 3 (ADR-273 rule 16): SUBACK 0x9E today
+client_test5   test_subscribe_identifiers      part3   subscription identifiers arrive in part 3 (ADR-273 rule 17): SUBACK 0xA1 today
+client_test5   test_offline_message_queueing   always  plaintext sessions are never persistent (ADR-230): Session Expiry is granted 0; covered over mTLS (smoke mqtt5)
+client_test5   test_redelivery_on_reconnect    always  plaintext sessions are never persistent (ADR-230); covered over mTLS (smoke mqtt5, mqtt_qos2)
+client_test5   test_session_expiry             always  plaintext sessions are never persistent (ADR-230); covered over mTLS (smoke mqtt5-session-expiry)
+client_test5   test_publication_expiry         always  needs a persistent session (Session Expiry 99999 to queue while offline); plaintext sessions are never persistent (ADR-230); covered over mTLS (smoke mqtt5-message-expiry)
+client_test5   test_client_topic_alias         always  its last step reconnects with Clean Start 0 and expects the subscriptions of a persistent session (Session Expiry 99999); plaintext sessions are never persistent (ADR-230); the aliases themselves pass (smoke mqtt5-topic-alias-resolved)
+client_test5   test_will_delay                 always  plaintext sessions are never persistent: granted Session Expiry 0, the session ends at the close and its Will goes out then (MQTT 5.0 3.1.2.5, ADR-274); covered over mTLS (smoke mqtt5-will-delay)
+client_test5   test_server_topic_alias         always  the broker never sends topic aliases (ADR-273 rule 9: no per-subscriber alias state)
+client_test5   test_subscribe_failure          always  the conformance ACL allows # (the suite cleans retained messages through it; ACLs have no deny rules) so test/nosubscribe is granted; a refused filter gets 0x87 Not authorized, not 0x80 (ADR-273 rule 13), covered by smoke mqtt5-suback-0x87
+client_test    test_offline_message_queueing   always  as above, 3.1.1 (ADR-230)
+client_test    test_redelivery_on_reconnect    always  as above, 3.1.1 (ADR-230)
+client_test    test_subscribe_failure          always  as above: the ACL allows # for the suite's cleanup

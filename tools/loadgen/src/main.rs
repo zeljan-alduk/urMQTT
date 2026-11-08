@@ -34,6 +34,10 @@
 //!   is for scripts. It also reports its own CPU use (Linux), because a
 //!   load generator at its CPU budget measures itself.
 //!
+//! `--mqtt5 1` (ADR-274): `open` speaks MQTT 5.0 (CONNECT and SUBSCRIBE with empty
+//! property blocks), e.g. `hold --subscribe 1 --mqtt5 1` to compare the bytes per idle
+//! connection with 3.1.1.
+//!
 //! `--plain 1` (P1): the same modes over the plaintext listener, no TLS and no
 //! certificates. The simulated devices are `<prefix>-00000`, ... as client ids;
 //! `--user NAME --password PW` log in as one account (password mode), without
@@ -114,6 +118,9 @@ struct Opts {
     keepalive: u16,
     /// Plaintext listener, no TLS (P1), and the account to log in as.
     plain: bool,
+    /// Speak MQTT 5.0 (CONNECT and SUBSCRIBE with empty property blocks;
+    /// ADR-274), e.g. to compare the bytes per idle connection.
+    mqtt5: bool,
     user: &'static str,
     password: &'static str,
 }
@@ -152,6 +159,7 @@ fn parse() -> Result<Opts, String> {
         open_par: 32,
         keepalive: 60,
         plain: false,
+        mqtt5: false,
         user: "",
         password: "",
     };
@@ -185,6 +193,7 @@ fn parse() -> Result<Opts, String> {
             "--open-par" => o.open_par = (num(&v)? as usize).max(1),
             "--keepalive" => o.keepalive = num(&v)?.min(65535) as u16,
             "--plain" => o.plain = num(&v)? != 0,
+            "--mqtt5" => o.mqtt5 = num(&v)? != 0,
             // Leaked once: the options are copied into every thread.
             "--user" => o.user = Box::leak(v.into_boxed_str()),
             "--password" => o.password = Box::leak(v.into_boxed_str()),
@@ -259,10 +268,19 @@ fn identities(o: &Opts, n: usize) -> Result<Vec<Identity>, String> {
     Ok(out)
 }
 
-fn connect_packet(client_id: &str, keepalive: u16, login: Option<(&str, &str)>) -> Vec<u8> {
+fn connect_packet(
+    client_id: &str,
+    keepalive: u16,
+    login: Option<(&str, &str)>,
+    v5: bool,
+) -> Vec<u8> {
     let flags = if login.is_some() { 0xc2 } else { 0x02 };
-    let mut body = vec![0, 4, b'M', b'Q', b'T', b'T', 4, flags];
+    let mut body = vec![0, 4, b'M', b'Q', b'T', b'T', if v5 { 5 } else { 4 }, flags];
     body.extend_from_slice(&keepalive.to_be_bytes());
+    if v5 {
+        // No properties.
+        body.push(0);
+    }
     body.extend_from_slice(&(client_id.len() as u16).to_be_bytes());
     body.extend_from_slice(client_id.as_bytes());
     if let Some((user, password)) = login {
@@ -442,25 +460,38 @@ fn open_timed(o: &Opts, id: &str, cfg: &Cfg) -> Result<(Tls, Duration), String> 
         out: Vec::new(),
     };
     let login = (!o.user.is_empty()).then_some((o.user, o.password));
-    tls.write_all(&connect_packet(id, o.keepalive, login))
+    tls.write_all(&connect_packet(id, o.keepalive, login, o.mqtt5))
         .map_err(|e| format!("tls/connect: {e}"))?;
-    let mut ack = [0u8; 4];
+    // CONNACK: a 5.0 one carries properties (one-byte remaining length here).
+    let mut head = [0u8; 2];
+    tls.read_exact(&mut head)
+        .map_err(|e| format!("connack: {e}"))?;
+    let mut ack = vec![0u8; usize::from(head[1])];
     tls.read_exact(&mut ack)
         .map_err(|e| format!("connack: {e}"))?;
-    if ack[0] != 0x20 || ack[3] != 0 {
-        return Err(format!("CONNACK refused: {ack:02x?}"));
+    if head[0] != 0x20 || ack.get(1) != Some(&0) {
+        return Err(format!("CONNACK refused: {head:02x?} {ack:02x?}"));
     }
     if o.subscribe {
         let filter = format!("devices/{id}/cmd/#");
-        let mut p = vec![0x82, (2 + 2 + filter.len() + 1) as u8, 0, 1];
+        let v5 = usize::from(o.mqtt5);
+        let mut p = vec![0x82, (2 + v5 + 2 + filter.len() + 1) as u8, 0, 1];
+        if o.mqtt5 {
+            p.push(0);
+        }
         p.extend_from_slice(&(filter.len() as u16).to_be_bytes());
         p.extend_from_slice(filter.as_bytes());
         p.push(1);
         tls.write_all(&p).map_err(|e| format!("subscribe: {e}"))?;
-        let mut ack = [0u8; 5];
+        let mut ack = vec![0u8; 5 + v5];
         tls.read_exact(&mut ack)
             .map_err(|e| format!("suback: {e}"))?;
-        if ack != [0x90, 3, 0, 1, 1] {
+        let want: &[u8] = if o.mqtt5 {
+            &[0x90, 4, 0, 1, 0, 1]
+        } else {
+            &[0x90, 3, 0, 1, 1]
+        };
+        if ack != want {
             return Err(format!("SUBACK refused: {ack:02x?}"));
         }
     }

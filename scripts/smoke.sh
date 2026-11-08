@@ -710,6 +710,203 @@ mqtt_qos2() {
     done
 }
 
+# MQTT 5.0 (ADR-273 part 2, ADR-274), over mTLS. Boot 1 (fresh disk):
+# scripts/mqtt5-scenarios.py (paho-mqtt 2.x and a raw client) checks every
+# rule on the running broker (CONNACK properties, both versions on one port,
+# property forwarding and stripping, request/response, topic aliases, Receive
+# Maximum, Maximum Packet Size, No Local, Retain As Published, Retain
+# Handling, reason codes, server DISCONNECT packets, session and message expiry,
+# will delay, $SYS), mqtt5_mosquitto the same with mosquitto_pub/sub -V
+# mqttv5, then leaves sessions and queued messages with properties and
+# expiry; QEMU is killed. Boot 2 on the same disk, 9 s later: the short
+# session expired while the broker was down (dropped at boot), the other is
+# back with its queue (properties kept, the short message expired, the
+# expiry counted down) and its No Local option. A third image with
+# mqtt5.enabled = false answers a 5.0 CONNECT with CONNACK 0x84 and still
+# serves 3.1.1. Needs the mosquitto clients and paho-mqtt (or uv).
+mqtt5_mosquitto() {
+    local d="$ROOT/deploy/dev" out
+    tls() { echo "--cafile $d/ca.pem --cert $d/$1.pem --key $d/$1.key"; }
+    # shellcheck disable=SC2046 # word splitting of tls is wanted
+    {
+        local tmp
+        tmp=$(mktemp)
+        mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i backend $(tls services/backend) -t 'devices/+/telemetry/#' \
+            -F '%t %p up:[%P] ct:%C rt:%R cd:%D me:%E' -C 2 -W 10 >"$tmp" 2>&1 &
+        local sub=$!
+        sleep 1.5
+        mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i device-001 $(tls devices/device-001) -q 1 \
+            -t devices/device-001/telemetry/t -m five -D publish user-property k v -D publish content-type text/plain \
+            -D publish response-topic devices/device-001/reply -D publish correlation-data abc \
+            -D publish message-expiry-interval 30 || true
+        mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i device-001 $(tls devices/device-001) -q 1 \
+            -t devices/device-001/telemetry/t -m three || true
+        wait "$sub" || true
+        if grep -q '^devices/device-001/telemetry/t five up:\[k:v\] ct:text/plain rt:devices/device-001/reply cd:abc me:30$' "$tmp" \
+            && grep -q '^devices/device-001/telemetry/t three up:\[\] ct: rt: cd: me:$' "$tmp"; then
+            echo "client: mosq-v5-and-v311-properties-forwarded ok"
+        else
+            echo "client: mosq-v5-and-v311-properties-forwarded FAILED $(tr '\n' '|' <"$tmp")"
+        fi
+        # (Output captured first: with pipefail a non-zero exit of the client
+        # would fail a pipe into grep.)
+        out=$(mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i device-001 $(tls devices/device-001) -q 1 \
+            -t fleet/x -m no -d 2>&1 || true)
+        if [[ $out == *"received PUBACK (Mid: 1, RC:135)"* ]]; then
+            echo "client: mosq-puback-0x87 ok"
+        else
+            echo "client: mosq-puback-0x87 FAILED"
+        fi
+        # Session expiry (-x) and message expiry: a command for an offline
+        # session, one expiring in 2 s, one in 60 s; back after 3 s: the
+        # second only.
+        mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i device-005 $(tls devices/device-005) -c -x 60 -q 1 \
+            -t 'devices/device-005/cmd/#' -E >/dev/null 2>&1 || true
+        mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i backend $(tls services/backend) -q 1 \
+            -t devices/device-005/cmd/short -m s -D publish message-expiry-interval 2 || true
+        mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i backend $(tls services/backend) -q 1 \
+            -t devices/device-005/cmd/long -m l -D publish message-expiry-interval 60 || true
+        sleep 3
+        local got
+        got=$(mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i device-005 $(tls devices/device-005) -c -x 3 -q 1 \
+            -t 'devices/device-005/cmd/#' -F '%t me:%E' -W 3 2>/dev/null | tr '\n' '|' || true)
+        if [[ $got =~ ^devices/device-005/cmd/long\ me:5[0-9]\|$ ]]; then
+            echo "client: mosq-message-expiry ok"
+        else
+            echo "client: mosq-message-expiry FAILED $got"
+        fi
+        # That session now expires 3 s after the last disconnect: a command
+        # published after that is not kept.
+        sleep 4
+        mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i backend $(tls services/backend) -q 1 \
+            -t devices/device-005/cmd/late -m late || true
+        got=$(mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i device-005 $(tls devices/device-005) -c -x 0 -q 1 \
+            -t 'devices/device-005/cmd/#' -W 2 2>/dev/null | tr '\n' '|' || true)
+        if [[ -z $got ]]; then echo "client: mosq-session-expiry ok"; else echo "client: mosq-session-expiry FAILED $got"; fi
+        # Will delay: the client killed, the will 3 s later.
+        mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i backend $(tls services/backend) -q 1 \
+            -t 'devices/+/status' -C 1 -W 12 >"$tmp" 2>&1 &
+        sub=$!
+        sleep 1
+        mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i device-002 $(tls devices/device-002) -x 30 \
+            --will-topic devices/device-002/status --will-payload gone --will-qos 1 -D will will-delay-interval 3 \
+            -t devices/device-002/cmd/x >/dev/null 2>&1 &
+        local victim=$!
+        sleep 1
+        kill -9 "$victim" 2>/dev/null || true
+        local t0=$SECONDS
+        wait "$sub" || true
+        local dt=$((SECONDS - t0))
+        if grep -q '^gone$' "$tmp" && ((dt >= 2 && dt <= 6)); then
+            echo "client: mosq-will-delay ok"
+        else
+            echo "client: mosq-will-delay FAILED after ${dt} s: $(tr '\n' '|' <"$tmp")"
+        fi
+        rm -f "$tmp"
+    }
+}
+
+mqtt5() {
+    [[ -z ${SMOKE_SCENARIOS:-} || mqtt5 =~ $SMOKE_SCENARIOS ]] || return 0
+    command -v mosquitto_pub >/dev/null || { echo "  ✗ mqtt5 scenarios need the mosquitto clients"; FAILED=$((FAILED + 1)); return 0; }
+    local py=(python3 -I)
+    if ! python3 -I -c 'import paho.mqtt.client; assert paho.mqtt.__version__ >= "2"' 2>/dev/null; then
+        if command -v uv >/dev/null; then
+            py=(uv run --quiet --no-project --with 'paho-mqtt>=2,<3' python -I)
+        else
+            echo "  ✗ mqtt5 scenarios need paho-mqtt 2.x or uv"
+            FAILED=$((FAILED + 1))
+            return 0
+        fi
+    fi
+    local iso="$OUT/mqtt5.raw" dir="$OUT/mqtt5-cfg" tool="$ROOT/target/debug/urmqtt-config"
+    mkimg "$iso" "serve"
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed"; FAILED=$((FAILED + 1)); return 0; }
+    { cat "$ROOT/deploy/dev/config.toml"; printf '\n[mqtt5]\nenabled = false\n'; } >"$dir/off.toml"
+    "$tool" pack "$dir/off.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/off.blob" >/dev/null
+    MKIMG_EXTRA=(--config "$dir/off.blob")
+    mkimg "$OUT/mqtt5-off.raw" "serve"
+    MKIMG_EXTRA=()
+    local c=("$ROOT/scripts/mqtt5-scenarios.py" "$PORT" --tls "$ROOT/deploy/dev" --phase)
+    local d="$ROOT/deploy/dev"
+    for accel in $ACCELS; do
+        local data="$OUT/mqtt5-$accel.img"
+        fresh_disk "$iso" "$data"
+        for phase in 1 2; do
+            local log="$OUT/mqtt5-$accel-$phase.log" status=0
+            start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
+            if wait_log "$log" "TLS 1.3 listener on port 8883" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+                if [[ $phase == 1 ]]; then
+                    bounded 300 "${py[@]}" "${c[@]}" live >"$log.client" 2>&1 || status=$?
+                    bounded 120 mqtt5_mosquitto >>"$log.client" 2>&1 || status=$?
+                    bounded 60 "${py[@]}" "${c[@]}" persist1 >>"$log.client" 2>&1 || status=$?
+                else
+                    bounded 60 "${py[@]}" "${c[@]}" persist2 >"$log.client" 2>&1 || status=$?
+                fi
+            else
+                status=124
+            fi
+            kill_vm
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            if [[ $phase == 1 ]]; then
+                check "mqtt5-live [$accel]" "$log" "$status" "storage: data disk formatted" "schema v4 \(from v0\)" \
+                    "client: mqtt5-connack-announces-the-limits ok" "client: mqtt5-and-311-on-one-port ok" \
+                    "client: mqtt5-properties-forwarded ok" "client: mqtt5-properties-stripped-for-a-311-subscriber ok" \
+                    "client: mqtt5-request-response ok" "client: mqtt5-topic-alias-resolved ok" \
+                    "client: mqtt5-unknown-alias-disconnect-0x94 ok" "client: mqtt5-receive-maximum-bounds-the-window ok" \
+                    "client: mqtt5-maximum-packet-size-honoured ok" "client: mqtt5-no-local ok" \
+                    "client: mqtt5-retain-handling-and-retain-as-published ok" "client: mqtt5-puback-0x87-outside-the-acl ok" \
+                    "client: mqtt5-suback-0x87-and-0x9e ok" "client: mqtt5-suback-0xa1-subscription-identifier ok" \
+                    "client: mqtt5-unsuback-0x11 ok" "client: mqtt5-takeover-disconnect-0x8e ok" \
+                    "client: mqtt5-auth-disconnect-0x82 ok" "client: mqtt5-session-expiry ok" \
+                    "client: mqtt5-message-expiry ok" "client: mqtt5-will-delay ok" \
+                    "client: mqtt5-will-cancelled-by-a-reconnect ok" "client: mqtt5-sys-counters ok" \
+                    "client: mosq-v5-and-v311-properties-forwarded ok" "client: mosq-puback-0x87 ok" \
+                    "client: mosq-message-expiry ok" "client: mosq-session-expiry ok" "client: mosq-will-delay ok" \
+                    "client: mqtt5-restart-phase1 ok" "NOT:FAILED" "$NO_FAULT"
+                # The short session must have run out while the broker is down.
+                sleep 9
+            else
+                check "mqtt5-after-restart [$accel]" "$log" "$status" "storage: data disk opened" "schema v4 \(from v4\)" \
+                    "persistent session\(s\) homed here \(1 expired while down, dropped\)" \
+                    "client: mqtt5-session-expired-while-the-broker-was-down ok" \
+                    "client: mqtt5-restart-keeps-the-queue-properties-and-expiry ok" \
+                    "client: mqtt5-restart-keeps-the-subscription-options ok" "NOT:FAILED" "$NO_FAULT"
+            fi
+        done
+        # mqtt5.enabled = false: 5.0 refused with CONNACK 0x84, 3.1.1 served.
+        local log="$OUT/mqtt5-off-$accel.log" status=0
+        fresh_disk "$OUT/mqtt5-off.raw" "$OUT/mqtt5-off-$accel.img"
+        start_vm "$log" --disk "$OUT/mqtt5-off-$accel.img" --accel "$accel" --fwd "$PORT:8883"
+        if wait_log "$log" "TLS 1.3 listener on port 8883" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+            {
+                # Captured first: the client exits 132 here, which pipefail would turn into a failed pipe.
+                local refused
+                refused=$(mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i device-001 --cafile "$d/ca.pem" \
+                    --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" -t devices/device-001/x -m 5 -d 2>&1 || true)
+                if [[ $refused == *"received CONNACK (132)"* ]]; then
+                    echo "client: mqtt5-disabled-connack-0x84 ok"
+                else
+                    echo "client: mqtt5-disabled-connack-0x84 FAILED"
+                fi
+                if mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
+                    --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" -t devices/device-001/x -m 3; then
+                    echo "client: mqtt5-disabled-311-still-served ok"
+                else
+                    echo "client: mqtt5-disabled-311-still-served FAILED"
+                fi
+            } >"$log.client" 2>&1
+        else
+            status=124
+        fi
+        kill_vm
+        cat "$log.client" >>"$log" 2>/dev/null || true
+        check "mqtt5-disabled [$accel]" "$log" "$status" "client: mqtt5-disabled-connack-0x84 ok" \
+            "client: mqtt5-disabled-311-still-served ok" "NOT:FAILED" "$NO_FAULT"
+    done
+}
+
 # M16: reconnect storms. Admission pretends the heap has 8 MiB, so 3000
 # devices do not all fit: each round all connect at once (retrying, like
 # devices with backoff), then all drop without DISCONNECT. The kernel must
@@ -2724,7 +2921,7 @@ websocket() {
         case $name in
             mtls) extra=("origins: https://app\.example\.com" "websocket: 1 connection\(s\) refused: origin" "websocket: 1 connection\(s\) refused: timeout"
                 "websocket: [0-9]+ WebSocket protocol violation\(s\)"
-                "client: wss-mtls-pubsub-qos0-qos1 ok" "client: wss-max-packet-size ok" "client: wss-fragmented-message-and-ping ok"
+                "client: wss-mtls-pubsub-qos0-qos1 ok" "client: wss-mtls-mqtt5-properties-forwarded ok" "client: wss-max-packet-size ok" "client: wss-fragmented-message-and-ping ok"
                 "client: wss-abrupt-close-publishes-the-will ok" "client: wss-wrong-origin-403 ok" "client: wss-wrong-subprotocol-400 ok"
                 "client: wss-wrong-version-426 ok" "client: wss-wrong-path-404 ok" "client: wss-request-with-a-body-400 ok"
                 "client: wss-text-frame-1003 ok" "client: wss-unmasked-frame-1002 ok" "client: wss-reserved-bit-1002 ok"
@@ -2733,7 +2930,8 @@ websocket() {
             password) extra=("websocket: one password check costs about [0-9]+ us \(3000 iterations" "password login inside TLS, 1 account\(s\)"
                 "websocket: login refused for 10\.0\.2\.2 \(wrong password\), 1 so far" "websocket: 10\.0\.2\.2 is locked out for 8 s after 3 failed login\(s\)"
                 "client: wss-password-pubsub-with-a-device ok" "client: wss-password-refusals-acl-and-clean-session ok"
-                "client: wss-origin-header-optional-but-checked ok" "client: wss-password-lockout ok") ;;
+                "client: wss-origin-header-optional-but-checked ok" "client: wss-password-lockout ok"
+                "client: wss-password-mqtt5-login-codes-and-acl ok") ;;
         esac
         MKIMG_EXTRA=(--config "$dir/$name.blob")
         mkimg "$iso" "serve log=info"
@@ -4059,6 +4257,7 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     # The broker's state across a restart (QoS 1 and QoS 2): the default run has these too.
     command -v mosquitto_pub >/dev/null && want mqtt_persist && mqtt_persist
     want mqtt_qos2 && mqtt_qos2
+    want mqtt5 && mqtt5
     want storm && storm
     want fin_wait2 && fin_wait2
     want attack_raw && attack_raw
@@ -4490,7 +4689,7 @@ if command -v mosquitto_pub >/dev/null && command -v mosquitto_sub >/dev/null; t
         "client: qos2-pubsub-exactly-once ok" "client: qos2-after-reconnect ok" "client: qos2-retained ok" \
         "broker: 1 retained message\(s\) not retained on core [0-9]+ \(1 over an identity's limit of 32" "NOT:FAILED" "$NO_FAULT"
     # M10: the same scenarios over TLS 1.3 with mutual TLS, plus the four
-    # handshakes/CONNECTs that must be refused.
+    # handshakes/CONNECT packets that must be refused.
     SERVICE_PORT=8883 service mqtt-tls "serve" "$PORT" "TLS 1.3 listener on port 8883" \
         python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" -- \
         "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
@@ -4694,6 +4893,7 @@ if command -v mosquitto_pub >/dev/null; then
     want mqtt_persist && mqtt_persist
 fi
 want mqtt_qos2 && mqtt_qos2
+want mqtt5 && mqtt5
 want storm && storm
 want fin_wait2 && fin_wait2
 want attack_raw && attack_raw

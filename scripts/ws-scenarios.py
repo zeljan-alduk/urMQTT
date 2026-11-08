@@ -215,11 +215,13 @@ def run(name, fn):
 # ---- paho ------------------------------------------------------------------
 
 
-def paho_client(client_id, cert=None, user=None, password=None, ws=True, origin=ORIGIN):
+def paho_client(client_id, cert=None, user=None, password=None, ws=True, origin=ORIGIN, v5=False):
+    proto = mqtt.MQTTv5 if v5 else mqtt.MQTTv311
     if hasattr(mqtt, "CallbackAPIVersion"):
-        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id, transport="websockets" if ws else "tcp")
+        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id,
+                        transport="websockets" if ws else "tcp", protocol=proto)
     else:
-        c = mqtt.Client(client_id=client_id, transport="websockets" if ws else "tcp")
+        c = mqtt.Client(client_id=client_id, transport="websockets" if ws else "tcp", protocol=proto)
     if ws:
         c.ws_set_options(path="/mqtt", headers={"Origin": origin} if origin else None)
     c.tls_set_context(tls_ctx(cert))
@@ -228,7 +230,9 @@ def paho_client(client_id, cert=None, user=None, password=None, ws=True, origin=
         c.username_pw_set(user, password)
     got = []
     ev = threading.Event()
-    c.on_message = lambda cl, ud, msg: (got.append((msg.topic, msg.payload, msg.qos)), ev.set())
+    c.on_message = lambda cl, ud, msg: (got.append((msg.topic, msg.payload, msg.qos)), ev.set(),
+                                        c.props.append(getattr(msg, "properties", None)))
+    c.props = []
     c.got, c.ev = got, ev
     return c
 
@@ -278,6 +282,31 @@ def sys_value(topic):
 
 
 # ---- mtls mode -------------------------------------------------------------
+
+
+def mtls_mqtt5():
+    """MQTT 5.0 over wss (ADR-274): a 5.0 backend and device, a user property
+    forwarded."""
+    from paho.mqtt.packettypes import PacketTypes
+    from paho.mqtt.properties import Properties
+
+    backend = paho_client("backend", cert="services/backend", v5=True)
+    if connect(backend, WS) != 0:
+        return False, "backend could not connect over wss"
+    backend.subscribe("devices/#", 1)
+    time.sleep(0.5)
+    dev = paho_client("device-001", cert="devices/device-001", v5=True)
+    if connect(dev, WS) != 0:
+        return False, "device could not connect over wss"
+    p = Properties(PacketTypes.PUBLISH)
+    p.UserProperty = [("via", "wss")]
+    dev.publish("devices/device-001/t", b"five", qos=1, properties=p).wait_for_publish(5)
+    got = wait_msgs(backend, 1)
+    for c in (dev, backend):
+        c.disconnect()
+        c.loop_stop()
+    up = getattr(backend.props[0], "UserProperty", None) if backend.props else None
+    return [x[1] for x in got] == [b"five"] and up == [("via", "wss")], f"got {got} {up}"
 
 
 def mtls_pubsub():
@@ -573,6 +602,36 @@ def password_refusals():
     return all(out), f"wrong password {ack!r}/{close!r}, login {ok_ack!r}, suback {suback!r}, stored session {stored!r}"
 
 
+def connect5_pkt(client_id, user, password, expiry):
+    props = b"\x11" + struct.pack(">I", expiry)
+    body = mstr("MQTT") + bytes([5, 0xC2]) + struct.pack(">H", 60) + varlen(len(props)) + props
+    return pkt(0x10, body + mstr(client_id) + mstr(user) + mstr(password))
+
+
+def password_mqtt5():
+    """A 5.0 login (ADR-274): a wrong password gets a 5.0 CONNACK 0x86; a good
+    one asking for a stored session is granted Session Expiry 0 and told so;
+    the section's ACL answers SUBACK 0x87. After the lock-out of `lockout`
+    has run out."""
+    time.sleep(9)
+    w = Ws(None, request())
+    w.send(frame(2, connect5_pkt("p5", "web-1", "wrong", 0)))
+    bad = w.mqtt()
+    w.close()
+    w = Ws(None, request())
+    w.send(frame(2, connect5_pkt("p5", "web-1", "web-secret", 3600)))
+    ok = w.mqtt()
+    sub = pkt(0x82, struct.pack(">H", 7) + b"\x00" + mstr("$SYS/#") + b"\x00" + mstr("web/web-1/x") + b"\x01")
+    w.send(frame(2, sub))
+    suback = w.mqtt()
+    w.send(frame(2, b"\xe0\x00") + frame(8, struct.pack(">H", 1000)))
+    w.close()
+    good = isinstance(ok, bytes) and ok[:4] == b"\x20" + bytes([len(ok) - 2]) + b"\x00\x00" \
+        and b"\x11\x00\x00\x00\x00" in ok
+    return (bad == b"\x20\x03\x00\x86\x00" and good and suback == b"\x90\x05\x00\x07\x00\x87\x01",
+            f"wrong {bad!r}, login {ok!r}, suback {suback!r}")
+
+
 def password_without_origin_header():
     # A non-browser client sends no Origin: allowed (it cannot be a
     # cross-site request); a browser's wrong Origin is refused.
@@ -609,6 +668,7 @@ def lockout():
 
 if MODE == "mtls":
     run("wss-mtls-pubsub-qos0-qos1", mtls_pubsub)
+    run("wss-mtls-mqtt5-properties-forwarded", mtls_mqtt5)
     run("wss-max-packet-size", mtls_large)
     run("wss-fragmented-message-and-ping", mtls_fragmented)
     run("wss-abrupt-close-publishes-the-will", abrupt_close)
@@ -630,6 +690,7 @@ elif MODE == "password":
     run("wss-password-refusals-acl-and-clean-session", password_refusals)
     run("wss-origin-header-optional-but-checked", password_without_origin_header)
     run("wss-password-lockout", lockout)
+    run("wss-password-mqtt5-login-codes-and-acl", password_mqtt5)
 else:
     sys.exit(f"unknown mode {MODE}")
 sys.exit(0 if all(results) else 1)

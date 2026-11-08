@@ -1,0 +1,10 @@
+# Expected failures of the Eclipse Paho interoperability suite on the dev
+# image's development port (scripts/mqtt5-conformance.sh --boot --listener dev:
+# client id = identity, sessions persist, the device ACL opened to #).
+# docs/MQTT5-CONFORMANCE.md section 2.
+# suite        test                            phase   reason
+client_test5   test_shared_subscriptions       part3   shared subscriptions arrive in part 3 (ADR-273 rule 16): SUBACK 0x9E today
+client_test5   test_subscribe_identifiers      part3   subscription identifiers arrive in part 3 (ADR-273 rule 17): SUBACK 0xA1 today
+client_test5   test_server_topic_alias         always  the broker never sends topic aliases (ADR-273 rule 9: no per-subscriber alias state)
+client_test5   test_subscribe_failure          always  the device ACL is opened to # for the suite (its cleanup subscribes to #; ACLs have no deny rules), so test/nosubscribe is granted; a refused filter gets 0x87 Not authorized, not 0x80 (ADR-273 rule 13), covered by smoke mqtt5-suback-0x87
+client_test    test_subscribe_failure          always  as above: the ACL allows # for the suite's cleanup
