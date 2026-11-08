@@ -276,6 +276,10 @@ impl Sys {
             return;
         }
         debug!("console: {} queried $SYS/query/info", r.from);
+        // This shard's counters as of now, not of its last report (up to
+        // `STATS_MS` old): the asking client is counted, also when it
+        // connected after that report.
+        self.report(broker, now_ms);
         let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
         let info = collect(&mut busy, &mut accepted);
         broker.sys_publish(sys::QUERY_INFO_RESPONSE, sys::json(&info).as_bytes());
