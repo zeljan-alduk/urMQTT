@@ -81,6 +81,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mqtt5_packet"
+path = "fuzz_targets/mqtt5_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mqtt5_props"
+path = "fuzz_targets/mqtt5_props.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "disk_backup"
 path = "fuzz_targets/disk_backup.rs"
 test = false

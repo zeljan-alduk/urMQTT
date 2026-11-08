@@ -19,6 +19,8 @@ LLVM_BIN="$(rustc --print sysroot)/lib/rustlib/$HOST/bin"
 src_of() {
     case "$1" in
         mqtt_decode) echo "crates/mqtt/src/decode.rs" ;;
+        mqtt5_packet) echo "crates/mqtt/src/v5" ;;
+        mqtt5_props) echo "crates/mqtt/src/v5/props.rs" ;;
         tcp_segment) echo "crates/tcp/src/wire.rs" ;;
         net_frame) echo "crates/net/src" ;;
         tls_record) echo "crates/tls/src/record.rs" ;;
