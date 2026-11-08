@@ -21,6 +21,7 @@
 
 mod decode;
 mod encode;
+pub mod v5;
 mod validate;
 
 pub use decode::decode;
