@@ -29,6 +29,9 @@ pub enum Role {
     /// configuration's `plaintext.acl_*`, never `Acl`'s, and it never holds
     /// the service, operator or control role whatever its name is.
     Plain,
+    /// A password login on the WebSocket listener (ADR-272): the same rules
+    /// as [`Role::Plain`], with the configuration's `websocket.acl_*`.
+    Web,
 }
 
 /// The only topics a bootstrap identity may use, for publishing and
@@ -83,8 +86,9 @@ impl Acl {
             (Role::Operator, true) => OPERATOR_PUBLISH,
             (Role::Operator, false) => OPERATOR_SUBSCRIBE,
             // The plaintext role has its own patterns (`plain_may_*`); asked
-            // here it gets nothing, so a mistake fails closed.
-            (Role::Plain, _) => &[],
+            // here it gets nothing, so a mistake fails closed. The same for
+            // the WebSocket password role (ADR-272).
+            (Role::Plain | Role::Web, _) => &[],
         }
     }
 
@@ -350,6 +354,8 @@ mod tests {
         assert!(!ACL.may_publish(Role::Plain, "s1", "devices/s1/t"));
         assert!(!ACL.may_subscribe(Role::Plain, "s1", "devices/s1/cmd/#"));
         assert!(!ACL.may_subscribe(Role::Plain, "ops", "$SYS/#"));
+        assert!(!ACL.may_publish(Role::Web, "s1", "devices/s1/t"));
+        assert!(!ACL.may_subscribe(Role::Web, "ops", "$SYS/#"));
     }
 
     #[test]

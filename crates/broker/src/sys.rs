@@ -112,6 +112,79 @@ pub struct PlainInfo<'a> {
     pub lockouts: u64,
 }
 
+/// The close codes the WebSocket counters keep apart (ADR-272); anything else
+/// is `other`.
+pub const WS_CLOSE_CODES: [&str; 9] = [
+    "1000", "1001", "1002", "1003", "1007", "1008", "1009", "1011", "other",
+];
+
+/// The index of `code` in [`WS_CLOSE_CODES`].
+pub fn ws_close_index(code: u16) -> usize {
+    match code {
+        1000 => 0,
+        1001 => 1,
+        1002 => 2,
+        1003 => 3,
+        1007 => 4,
+        1008 => 5,
+        1009 => 6,
+        1011 => 7,
+        _ => 8,
+    }
+}
+
+/// Why an upgrade was refused, as the counters name them (ADR-272): the six
+/// answers of the request parser, then the listener's own.
+pub const WS_REFUSALS: [&str; 10] = [
+    "request",
+    "method",
+    "path",
+    "version",
+    "protocol",
+    "origin",
+    "too_large",
+    "timeout",
+    "limit",
+    "locked_out",
+];
+
+/// The WebSocket listener, as `$SYS/broker/websocket/...` reports it
+/// (ADR-272). Counters are since boot, all cores together.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WsInfo<'a> {
+    pub enabled: bool,
+    pub port: u16,
+    pub path: &'a str,
+    /// `mtls` or `password`.
+    pub auth: &'a str,
+    /// Entries of `websocket.origins` (0: any origin).
+    pub origins: u64,
+    pub accounts: u64,
+    /// Connections open now.
+    pub connections: u64,
+    /// TCP connections accepted.
+    pub accepted: u64,
+    /// Upgrades answered 101.
+    pub upgrades: u64,
+    /// Refused upgrades and connections, by [`WS_REFUSALS`].
+    pub refused: [u64; 10],
+    pub auth_ok: u64,
+    pub auth_failed: u64,
+    pub lockouts: u64,
+    /// Data and control frames from clients, and frames sent to them.
+    pub frames_in: u64,
+    pub frames_out: u64,
+    /// MQTT bytes carried in each direction (frame payload).
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    /// Close frames received from clients and sent by the broker, by
+    /// [`WS_CLOSE_CODES`]; `closes_abrupt`: connections that ended without
+    /// the client's close frame.
+    pub closes_client: [u64; 9],
+    pub closes_server: [u64; 9],
+    pub closes_abrupt: u64,
+}
+
 /// Everything `$SYS/broker/...` and the info query report.
 #[derive(Debug, Clone, Copy)]
 pub struct Info<'a> {
@@ -153,6 +226,7 @@ pub struct Info<'a> {
     /// spread over the cores).
     pub accepted: &'a [u64],
     pub plaintext: PlainInfo<'a>,
+    pub websocket: WsInfo<'a>,
 }
 
 /// The name of what seeded the random number generator, for
@@ -265,6 +339,36 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
         put("plaintext/auth_failed", &p.auth_failed);
         put("plaintext/lockouts", &p.lockouts);
     }
+    // The WebSocket listener (ADR-272): one topic while it is off.
+    let w = &i.websocket;
+    put("websocket/enabled", &w.enabled);
+    if w.enabled {
+        put("websocket/port", &w.port);
+        put("websocket/path", &w.path);
+        put("websocket/auth", &w.auth);
+        put("websocket/origins", &w.origins);
+        put("websocket/accounts", &w.accounts);
+        put("websocket/connections", &w.connections);
+        put("websocket/accepted", &w.accepted);
+        put("websocket/upgrades", &w.upgrades);
+        for (name, n) in WS_REFUSALS.iter().zip(w.refused) {
+            put(&alloc::format!("websocket/refused/{name}"), &n);
+        }
+        put("websocket/auth_ok", &w.auth_ok);
+        put("websocket/auth_failed", &w.auth_failed);
+        put("websocket/lockouts", &w.lockouts);
+        put("websocket/frames/in", &w.frames_in);
+        put("websocket/frames/out", &w.frames_out);
+        put("websocket/bytes/in", &w.bytes_in);
+        put("websocket/bytes/out", &w.bytes_out);
+        for (code, n) in WS_CLOSE_CODES.iter().zip(w.closes_client) {
+            put(&alloc::format!("websocket/close/client/{code}"), &n);
+        }
+        for (code, n) in WS_CLOSE_CODES.iter().zip(w.closes_server) {
+            put(&alloc::format!("websocket/close/server/{code}"), &n);
+        }
+        put("websocket/close/abrupt", &w.closes_abrupt);
+    }
 }
 
 /// The topics of [`topics`] as a list, for tests and the docs (with the
@@ -300,6 +404,10 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
         plaintext: PlainInfo {
             enabled: true,
             ..PlainInfo::default()
+        },
+        websocket: WsInfo {
+            enabled: true,
+            ..WsInfo::default()
         },
     };
     let mut v = alloc::vec::Vec::new();
@@ -427,6 +535,43 @@ pub fn json(i: &Info<'_>) -> String {
             p.lockouts
         );
     }
+    o.push('}');
+    let w = &i.websocket;
+    let _ = write!(o, ",\"websocket\":{{\"enabled\":{}", w.enabled);
+    if w.enabled {
+        let _ = write!(o, ",\"port\":{},\"path\":", w.port);
+        json_str(&mut o, w.path);
+        o.push_str(",\"auth\":");
+        json_str(&mut o, w.auth);
+        let _ = write!(
+            o,
+            ",\"origins\":{},\"accounts\":{},\"connections\":{},\"accepted\":{},\"upgrades\":{},\"refused\":{{",
+            w.origins, w.accounts, w.connections, w.accepted, w.upgrades
+        );
+        for (n, (name, v)) in WS_REFUSALS.iter().zip(w.refused).enumerate() {
+            let _ = write!(o, "{}\"{name}\":{v}", if n == 0 { "" } else { "," });
+        }
+        let _ = write!(
+            o,
+            "}},\"auth_ok\":{},\"auth_failed\":{},\"lockouts\":{},\"frames\":{{\"in\":{},\"out\":{}}},\"bytes\":{{\"in\":{},\"out\":{}}},\"close\":{{\"abrupt\":{}",
+            w.auth_ok,
+            w.auth_failed,
+            w.lockouts,
+            w.frames_in,
+            w.frames_out,
+            w.bytes_in,
+            w.bytes_out,
+            w.closes_abrupt
+        );
+        for (side, counts) in [("client", w.closes_client), ("server", w.closes_server)] {
+            let _ = write!(o, ",\"{side}\":{{");
+            for (n, (code, v)) in WS_CLOSE_CODES.iter().zip(counts).enumerate() {
+                let _ = write!(o, "{}\"{code}\":{v}", if n == 0 { "" } else { "," });
+            }
+            o.push('}');
+        }
+        o.push('}');
+    }
     o.push_str("}}");
     o
 }
@@ -509,6 +654,22 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
             p.lockouts,
             p.refused_source,
             p.refused_locked
+        ));
+    }
+    let w = &i.websocket;
+    if w.enabled {
+        let refused: u64 = w.refused.iter().sum();
+        out.push(alloc::format!(
+            "websocket (wss) ON: port {} path {}, auth {}, {} origin(s); {} open, {} upgrade(s), {} refused, {} login(s) failed, {} lock-out(s)",
+            w.port,
+            w.path,
+            w.auth,
+            w.origins,
+            w.connections,
+            w.upgrades,
+            refused,
+            w.auth_failed,
+            w.lockouts
         ));
     }
     out.push(alloc::format!(
@@ -680,7 +841,77 @@ mod tests {
             },
             accepted: &[4, 5],
             plaintext: PlainInfo::default(),
+            websocket: WsInfo::default(),
         }
+    }
+
+    #[test]
+    fn the_websocket_listener_is_reported_when_it_is_on() {
+        let mut on = info(&[10]);
+        let mut refused = [0u64; 10];
+        refused[5] = 3;
+        let mut closes = [0u64; 9];
+        closes[ws_close_index(1000)] = 7;
+        closes[ws_close_index(4000)] = 1;
+        on.websocket = WsInfo {
+            enabled: true,
+            port: 8084,
+            path: "/mqtt",
+            auth: "password",
+            origins: 2,
+            accounts: 4,
+            connections: 5,
+            accepted: 6,
+            upgrades: 5,
+            refused,
+            auth_ok: 4,
+            auth_failed: 1,
+            lockouts: 0,
+            frames_in: 100,
+            frames_out: 90,
+            bytes_in: 1000,
+            bytes_out: 900,
+            closes_client: closes,
+            closes_server: [0; 9],
+            closes_abrupt: 2,
+        };
+        let mut got = alloc::vec::Vec::new();
+        topics(&on, |t, v| got.push((t.to_owned(), v.to_owned())));
+        let val = |t: &str| got.iter().find(|(k, _)| k == t).map(|(_, v)| v.as_str());
+        assert_eq!(val("$SYS/broker/websocket/enabled"), Some("true"));
+        assert_eq!(val("$SYS/broker/websocket/path"), Some("/mqtt"));
+        assert_eq!(val("$SYS/broker/websocket/refused/origin"), Some("3"));
+        assert_eq!(val("$SYS/broker/websocket/close/client/1000"), Some("7"));
+        assert_eq!(val("$SYS/broker/websocket/close/client/other"), Some("1"));
+        assert_eq!(val("$SYS/broker/websocket/close/abrupt"), Some("2"));
+        let on_names: alloc::vec::Vec<&str> = got
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .filter(|t| t.starts_with("$SYS/broker/websocket/"))
+            .collect();
+        let all = topic_names(1);
+        let listed: alloc::vec::Vec<&str> = all
+            .iter()
+            .map(String::as_str)
+            .filter(|t| t.starts_with("$SYS/broker/websocket/"))
+            .collect();
+        assert_eq!(on_names, listed);
+        let j = json(&on);
+        assert!(j.contains("\"websocket\":{\"enabled\":true,\"port\":8084,\"path\":\"/mqtt\",\"auth\":\"password\",\"origins\":2,\"accounts\":4,\"connections\":5,\"accepted\":6,\"upgrades\":5,\"refused\":{\"request\":0,\"method\":0,\"path\":0,\"version\":0,\"protocol\":0,\"origin\":3,\"too_large\":0,\"timeout\":0,\"limit\":0,\"locked_out\":0},\"auth_ok\":4,\"auth_failed\":1,\"lockouts\":0,\"frames\":{\"in\":100,\"out\":90},\"bytes\":{\"in\":1000,\"out\":900},\"close\":{\"abrupt\":2,\"client\":{\"1000\":7,"), "{j}");
+        assert!(j.ends_with("}}}}"), "{j}");
+        // Off: one key, and the JSON stays well formed.
+        let off = json(&info(&[10]));
+        assert!(
+            off.ends_with(",\"websocket\":{\"enabled\":false}}"),
+            "{off}"
+        );
+        let lines = status_lines(&on, "info", "debug");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("websocket (wss) ON: port 8084 path /mqtt, auth password")),
+            "{lines:?}"
+        );
     }
 
     fn plain_on() -> PlainInfo<'static> {
@@ -841,6 +1072,7 @@ mod tests {
                 "$SYS/broker/cpu/accepted/0",
                 "$SYS/broker/cpu/accepted/1",
                 "$SYS/broker/plaintext/enabled",
+                "$SYS/broker/websocket/enabled",
             ]
         );
         let val = |t: &str| got.iter().find(|(k, _)| k == t).map(|(_, v)| v.as_str());
@@ -861,12 +1093,16 @@ mod tests {
         // No payload is empty: an empty retained payload would clear it.
         assert!(got.iter().all(|(_, v)| !v.is_empty()));
         assert_eq!(val("$SYS/broker/plaintext/enabled"), Some("false"));
-        // (`topic_names` lists the topics with plaintext on.)
+        // (`topic_names` lists the topics with plaintext and websocket on.)
         let plain = topic_names(2)
             .iter()
             .filter(|t| t.starts_with("$SYS/broker/plaintext/"))
             .count();
-        assert_eq!(topic_names(2).len() - plain + 1, got.len());
+        let ws = topic_names(2)
+            .iter()
+            .filter(|t| t.starts_with("$SYS/broker/websocket/"))
+            .count();
+        assert_eq!(topic_names(2).len() - plain + 1 - ws + 1, got.len());
     }
 
     #[test]
@@ -883,7 +1119,7 @@ mod tests {
              \"publish_rate\":0,\"frames_steer\":0,\"frames_worker_tx\":0,\"frames_nic\":0},\
              \"handshakes\":{\"started\":9,\"done\":8,\"failed\":0,\"timed_out\":0,\"refused\":0,\
              \"syn_dropped\":0,\"in_flight\":0,\"in_flight_max\":0,\"slow\":0,\"latency_sum_ms\":0,\
-             \"latency_max_ms\":0},\"accepted\":[4,5],\"plaintext\":{\"enabled\":false}}"
+             \"latency_max_ms\":0},\"accepted\":[4,5],\"plaintext\":{\"enabled\":false},\"websocket\":{\"enabled\":false}}"
         );
         let mut unknown = info(&[]);
         unknown.server_cert_days = None;

@@ -63,6 +63,7 @@ fn cfg() -> Config {
         fanout: true,
         control_ids: &["backend"],
         plain: None,
+        web: None,
     }
 }
 

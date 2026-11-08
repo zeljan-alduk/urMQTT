@@ -95,6 +95,7 @@ pub fn config() -> Config {
         control_ids: &["svc"],
         // No plaintext listener: every connection here has a TLS identity.
         plain: None,
+        web: None,
     }
 }
 

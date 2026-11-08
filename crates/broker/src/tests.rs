@@ -37,6 +37,7 @@ fn cfg() -> Config {
         fanout: false,
         control_ids: &["operator"],
         plain: None,
+        web: None,
     }
 }
 
@@ -2349,4 +2350,143 @@ fn plaintext_sessions_are_found_by_the_allowlist_sweep_by_their_login() {
     assert!(seen.contains(&("alice".to_owned(), Role::Plain)));
     assert!(seen.contains(&("zoe".to_owned(), Role::Plain)));
     assert!(seen.contains(&("dev-5".to_owned(), Role::Device)));
+}
+
+// ---- WebSocket password clients (ADR-272) ----------------------------------
+
+fn web_cfg() -> Config {
+    Config {
+        web: Some(PlainPolicy {
+            publish: &["web/{id}/#"],
+            subscribe: &["web/{id}/#", "devices/+/telemetry/#"],
+            max_packet_size: 96,
+            rate_tokens: 2,
+            rate_period_ms: 1000,
+            retain: false,
+        }),
+        ..plain_cfg()
+    }
+}
+
+/// A WebSocket password client: the login named `identity`.
+fn connect_web(
+    b: &mut Broker,
+    identity: &str,
+    client_id: &str,
+    clean: bool,
+    now: u64,
+) -> (Client, Got) {
+    let mut c = Client {
+        c: b.open(now).unwrap(),
+        rx: Vec::new(),
+        pending: Vec::new(),
+    };
+    assert!(b.set_web_identity(c.c, identity));
+    c.send(
+        b,
+        &Packet::Connect(Connect {
+            protocol_level: 4,
+            clean_session: clean,
+            keep_alive: 10,
+            client_id,
+            will: None,
+            username: Some(identity),
+            password: Some(b"checked by the listener"),
+        }),
+        now,
+    );
+    let mut got = c.recv(b);
+    let ack = got.remove(0);
+    c.pending = got;
+    (c, ack)
+}
+
+#[test]
+fn a_web_client_has_its_own_namespace_rules_and_limits() {
+    let mut b = Broker::new(web_cfg());
+    let (mut dev, _) = Client::connect(&mut b, "dev-1", true, None, 0);
+    // Same identity and client id as a plaintext client: different sessions.
+    let (mut w, ack) = connect_web(&mut b, "sensor-1", "page", true, 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    assert_eq!(b.client_id(w.c), Some("$ws/sensor-1/page"));
+    let (p, ack) = connect_plain(&mut b, "sensor-1", "page", true, None, 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    assert_eq!(b.client_id(p.c), Some("$plain/sensor-1/page"));
+    assert_eq!(
+        b.close_requested(w.c),
+        None,
+        "not taken over by the plaintext one"
+    );
+    // The web patterns, not the plaintext or device ones.
+    assert_eq!(
+        w.subscribe(
+            &mut b,
+            1,
+            &[
+                ("devices/+/telemetry/#", QoS::AtMostOnce),
+                ("devices/sensor-1/cmd/#", QoS::AtMostOnce),
+                ("web/sensor-1/#", QoS::AtMostOnce),
+                ("web/other/#", QoS::AtMostOnce),
+                ("$SYS/#", QoS::AtMostOnce),
+            ],
+            0
+        ),
+        vec![Got::SubAck(1, vec![0, 0x80, 0, 0x80, 0x80])]
+    );
+    dev.publish(
+        &mut b,
+        "devices/dev-1/telemetry/t",
+        b"1",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(
+        w.recv(&mut b),
+        vec![publish("devices/dev-1/telemetry/t", b"1", 0, None, false)]
+    );
+    let dropped = b.stats().dropped_acl;
+    w.publish(
+        &mut b,
+        "devices/sensor-1/x",
+        b"x",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    w.publish(&mut b, "$urmqtt/control", b"x", QoS::AtMostOnce, false, 0);
+    assert_eq!(b.stats().dropped_acl, dropped + 1);
+    assert_eq!(b.stats().control_received, 0, "never a control identity");
+    // Its own packet limit (96 bytes).
+    let big = vec![b'x'; 120];
+    w.publish(&mut b, "web/sensor-1/a", &big, QoS::AtMostOnce, false, 0);
+    assert_eq!(b.close_requested(w.c), Some(CloseReason::ProtocolError));
+}
+
+#[test]
+fn a_web_session_is_clean_only_and_needs_its_policy() {
+    let mut b = Broker::new(web_cfg());
+    let (c, ack) = connect_web(&mut b, "u", "c1", false, 0);
+    assert_eq!(ack, Got::ConnAck(false, 5));
+    assert_eq!(b.close_requested(c.c), Some(CloseReason::Rejected));
+    // A broker without the WebSocket policy refuses the binding.
+    let mut plain_only = Broker::new(plain_cfg());
+    let c = plain_only.open(0).unwrap();
+    assert!(!plain_only.set_web_identity(c, "u"));
+}
+
+#[test]
+fn a_web_session_has_its_own_rate_and_no_retain() {
+    let mut b = Broker::new(web_cfg());
+    let (mut w, _) = connect_web(&mut b, "u", "c", true, 0);
+    let dropped = b.stats().dropped_rate;
+    for _ in 0..4 {
+        w.publish(&mut b, "web/u/t", b"x", QoS::AtMostOnce, true, 0);
+    }
+    assert_eq!(b.stats().dropped_rate, dropped + 2, "2 tokens a second");
+    assert_eq!(
+        b.stats().retained,
+        0,
+        "retain = false: delivered, not retained"
+    );
 }

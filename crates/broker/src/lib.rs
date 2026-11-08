@@ -92,6 +92,9 @@ pub struct Config {
     /// The rules of plaintext sessions (P1, ADR-230); `None`: this broker
     /// serves none, and a connection that claims to be one is refused.
     pub plain: Option<PlainPolicy>,
+    /// The rules of password sessions on the WebSocket listener (ADR-272);
+    /// `None`: this broker serves none.
+    pub web: Option<PlainPolicy>,
 }
 
 /// What a plaintext session may do and how much (P1, ADR-229, ADR-230). The
@@ -114,27 +117,42 @@ pub struct PlainPolicy {
 }
 
 impl Config {
+    /// The policy of a login role (plaintext, WebSocket password), if this
+    /// broker serves it.
+    fn login_policy(&self, role: Role) -> Option<&PlainPolicy> {
+        match role {
+            Role::Plain => self.plain.as_ref(),
+            Role::Web => self.web.as_ref(),
+            _ => None,
+        }
+    }
+
     /// May the session of `role` and ACL name `id` publish to `topic`? The
-    /// plaintext role has its own patterns.
+    /// login roles have their own patterns.
     fn may_publish(&self, role: Role, id: &str, topic: &str) -> bool {
-        match (role, &self.plain) {
-            (Role::Plain, Some(p)) => acl::plain_may_publish(p.publish, id, topic),
-            (Role::Plain, None) => false,
+        match role {
+            Role::Plain | Role::Web => self
+                .login_policy(role)
+                .is_some_and(|p| acl::plain_may_publish(p.publish, id, topic)),
             _ => self.acl.may_publish(role, id, topic),
         }
     }
 
     fn may_subscribe(&self, role: Role, id: &str, filter: &str) -> bool {
-        match (role, &self.plain) {
-            (Role::Plain, Some(p)) => acl::plain_may_subscribe(p.subscribe, id, filter),
-            (Role::Plain, None) => false,
+        match role {
+            Role::Plain | Role::Web => self
+                .login_policy(role)
+                .is_some_and(|p| acl::plain_may_subscribe(p.subscribe, id, filter)),
             _ => self.acl.may_subscribe(role, id, filter),
         }
     }
 
     /// May a session of `role` publish retained messages?
     fn may_retain(&self, role: Role) -> bool {
-        role != Role::Plain || self.plain.is_some_and(|p| p.retain)
+        match role {
+            Role::Plain | Role::Web => self.login_policy(role).is_some_and(|p| p.retain),
+            _ => true,
+        }
     }
 }
 
@@ -155,6 +173,17 @@ pub const PLAIN_KEY: &str = "$plain/";
 /// The session key of the plaintext client `client_id` of `identity`.
 pub fn plain_session_key(identity: &str, client_id: &str) -> alloc::string::String {
     alloc::format!("{PLAIN_KEY}{identity}/{client_id}")
+}
+
+/// Session-key prefix of password sessions on the WebSocket listener
+/// (ADR-272), for the same reasons as [`PLAIN_KEY`]: `$ws/<identity>/<client
+/// id>` meets neither a certificate's session nor a plaintext one.
+pub const WEB_KEY: &str = "$ws/";
+
+/// The session key of the WebSocket password client `client_id` of
+/// `identity`.
+pub fn web_session_key(identity: &str, client_id: &str) -> alloc::string::String {
+    alloc::format!("{WEB_KEY}{identity}/{client_id}")
 }
 
 /// The control topic (H1); see `urmqtt_control::TOPIC`.
@@ -311,6 +340,9 @@ struct Extra {
     /// certificate's. Stays set for the connection's life: it selects the
     /// packet limit, the rate and the rules.
     plain: bool,
+    /// A password connection of the WebSocket listener (ADR-272), as `plain`
+    /// with the WebSocket policy.
+    web: bool,
     will: Option<Will>,
 }
 
@@ -324,14 +356,20 @@ impl Conn {
         if self
             .extra
             .as_ref()
-            .is_some_and(|e| e.identity.is_none() && e.will.is_none() && !e.plain)
+            .is_some_and(|e| e.identity.is_none() && e.will.is_none() && !e.plain && !e.web)
         {
             self.extra = None;
         }
     }
 
-    fn plain(&self) -> bool {
-        self.extra.as_ref().is_some_and(|e| e.plain)
+    /// The login role of a connection whose identity came from a password
+    /// (or a plaintext login mode), if it is one.
+    fn login(&self) -> Option<Role> {
+        match self.extra.as_ref() {
+            Some(e) if e.plain => Some(Role::Plain),
+            Some(e) if e.web => Some(Role::Web),
+            _ => None,
+        }
     }
 }
 
@@ -411,6 +449,11 @@ impl Session {
             Role::Plain => self
                 .client_id
                 .strip_prefix(PLAIN_KEY)
+                .and_then(|r| r.split('/').next())
+                .unwrap_or_default(),
+            Role::Web => self
+                .client_id
+                .strip_prefix(WEB_KEY)
                 .and_then(|r| r.split('/').next())
                 .unwrap_or_default(),
             _ => &self.client_id,
@@ -957,13 +1000,27 @@ impl Broker {
     /// when this broker serves no plaintext sessions; the caller closes the
     /// connection.
     pub fn set_plain_identity(&mut self, c: ConnId, identity: &str) -> bool {
-        if self.cfg.plain.is_none() {
+        self.set_login_identity(c, identity, Role::Plain)
+    }
+
+    /// Binds the identity a WebSocket password login established (before its
+    /// CONNECT, ADR-272): as [`set_plain_identity`](Self::set_plain_identity),
+    /// with the WebSocket policy and the session name `$ws/<identity>/<client
+    /// id>` ([`web_session_key`]). Returns false when this broker serves no
+    /// such sessions.
+    pub fn set_web_identity(&mut self, c: ConnId, identity: &str) -> bool {
+        self.set_login_identity(c, identity, Role::Web)
+    }
+
+    fn set_login_identity(&mut self, c: ConnId, identity: &str, role: Role) -> bool {
+        if self.cfg.login_policy(role).is_none() {
             return false;
         }
         if let Some(k) = self.conn(c) {
             let e = k.extra_mut();
             e.identity = Some(identity.into());
-            e.plain = true;
+            e.plain = role == Role::Plain;
+            e.web = role == Role::Web;
         }
         true
     }
@@ -978,15 +1035,20 @@ impl Broker {
 
     /// Bytes received on `c`. Processes every complete packet.
     pub fn input(&mut self, c: ConnId, data: &[u8], now_ms: u64) {
-        // A plaintext connection has a packet limit of its own (P1). For every
-        // other connection this costs one test of a field that is `None`
-        // unless plaintext is configured.
-        let limits = match &self.cfg.plain {
-            Some(p) if self.conns.get(c).is_some_and(Conn::plain) => Limits {
+        // A login connection (plaintext, P1; WebSocket password, ADR-272) has
+        // a packet limit of its own. For every other connection this costs
+        // the test of a box that is `None` once the connection is attached.
+        let limits = match self
+            .conns
+            .get(c)
+            .and_then(Conn::login)
+            .and_then(|r| self.cfg.login_policy(r))
+        {
+            Some(p) => Limits {
                 max_packet_size: p.max_packet_size,
                 ..self.cfg.limits
             },
-            _ => self.cfg.limits,
+            None => self.cfg.limits,
         };
         let limit = limits.max_packet_size as usize + INBUF_SLACK;
         let Some(conn) = self.conn(c) else { return };
@@ -1231,7 +1293,10 @@ impl Broker {
     fn on_connect(&mut self, c: ConnId, p: &Connect<'_>, now_ms: u64) {
         // A plaintext connection (P1, ADR-230): the identity is what its login
         // established and its client id is free. Taken here; cleared below.
-        let plain_conn = self.conn(c).is_some_and(|k| k.plain());
+        // (A WebSocket password connection, ADR-272, is the same with its own
+        // policy and session prefix.)
+        let login = self.conn(c).and_then(|k| k.login());
+        let plain_conn = login.is_some();
         // A certificate identity becomes a topic level (`{id}`), so it may not
         // hold `/`, `+`, `#` or start with `$`. A plaintext client id is only the
         // tail of a session name (mosquitto's own default, `mosqpub/4711-host`,
@@ -1249,7 +1314,7 @@ impl Broker {
             .conns
             .get(c)
             .and_then(|k| k.extra.as_ref())
-            .filter(|e| e.plain)
+            .filter(|e| e.plain || e.web)
             .and_then(|e| e.identity.clone());
         if plain_conn && plain_id.is_none() {
             return self.reject(c, ConnectReturnCode::NotAuthorized);
@@ -1295,8 +1360,8 @@ impl Broker {
         if plain_conn && !p.clean_session {
             return self.reject(c, ConnectReturnCode::NotAuthorized);
         }
-        let role = if plain_conn {
-            Role::Plain
+        let role = if let Some(r) = login {
+            r
         } else if bootstrap {
             Role::Bootstrap
         } else {
@@ -1313,7 +1378,11 @@ impl Broker {
             } else {
                 p.client_id.into()
             };
-            plain_key = plain_session_key(id, &tail);
+            plain_key = if login == Some(Role::Web) {
+                web_session_key(id, &tail)
+            } else {
+                plain_session_key(id, &tail)
+            };
             &plain_key
         } else if bootstrap {
             boot_key = alloc::format!("{BOOTSTRAP_KEY}{}", p.client_id);
@@ -1432,9 +1501,9 @@ impl Broker {
             subs: Small::default(),
             pending: None,
             refilled_ms: now_ms,
-            tokens: match (&self.cfg.plain, role) {
-                (Some(p), Role::Plain) => p.rate_tokens,
-                _ => self.cfg.rate_tokens,
+            tokens: match self.cfg.login_policy(role) {
+                Some(p) => p.rate_tokens,
+                None => self.cfg.rate_tokens,
             },
             next_pid: 1,
             persisted: false,
@@ -1475,12 +1544,17 @@ impl Broker {
             self.cfg.rate_tokens,
             u64::from(self.cfg.rate_period_ms.max(1)),
         );
-        let plain = self.cfg.plain;
+        let (plain, web) = (self.cfg.plain, self.cfg.web);
         let Some(s) = self.session(sid) else {
             return false;
         };
-        // A plaintext session has a publish rate of its own (P1).
-        if let (Some(p), Role::Plain) = (plain, s.role) {
+        // A login session has a publish rate of its own (P1, ADR-272).
+        let policy = match s.role {
+            Role::Plain => plain,
+            Role::Web => web,
+            _ => None,
+        };
+        if let Some(p) = policy {
             (rate, period) = (p.rate_tokens, u64::from(p.rate_period_ms.max(1)));
         }
         let elapsed = now_ms.saturating_sub(s.refilled_ms);
@@ -1519,7 +1593,7 @@ impl Broker {
         // only on the exact control topic; everything else is dropped.
         if acl::reserved(p.topic) {
             // (Not a plaintext client, whatever its name: P1.)
-            let control = !matches!(role, Role::Bootstrap | Role::Plain)
+            let control = !matches!(role, Role::Bootstrap | Role::Plain | Role::Web)
                 && p.topic == CONTROL_TOPIC
                 && self.cfg.control_ids.iter().any(|id| **id == *allowed);
             if control && self.control.len() < MAX_CONTROL_BACKLOG {

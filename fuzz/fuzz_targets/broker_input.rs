@@ -49,6 +49,15 @@ fn cfg() -> Config {
             rate_period_ms: 1000,
             retain: false,
         }),
+        // ADR-272: WebSocket password sessions, with a policy of their own.
+        web: Some(PlainPolicy {
+            publish: &["web/{id}/#"],
+            subscribe: &["web/{id}/#", "devices/+/telemetry/#"],
+            max_packet_size: 512,
+            rate_tokens: 5,
+            rate_period_ms: 1000,
+            retain: true,
+        }),
     }
 }
 
@@ -87,8 +96,13 @@ fuzz_target!(|data: &[u8]| {
                         && op & 0x80 != 0
                     {
                         // Bit 7 without bit 6: a plaintext connection (P1)
-                        // whose identity the listener proved.
-                        let _ = b.set_plain_identity(c, IDS[slot % 2]);
+                        // whose identity the listener proved, or with bit 5
+                        // a WebSocket password connection (ADR-272).
+                        if op & 0x20 != 0 {
+                            let _ = b.set_web_identity(c, IDS[slot % 2]);
+                        } else {
+                            let _ = b.set_plain_identity(c, IDS[slot % 2]);
+                        }
                     }
                 }
                 if let Some(c) = *entry {
