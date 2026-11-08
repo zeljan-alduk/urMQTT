@@ -20,6 +20,18 @@ All notable changes to this project are documented here. The format follows
   options, shared subscriptions, enhanced auth refused with 0x8C) and reserves configuration format 12;
   `docs/MQTT5-CONFORMANCE.md` is the test plan (Eclipse Paho interoperability suite, Mosquitto clients), with
   `scripts/mqtt5-conformance.sh` as its harness stub.
+- **MQTT over secure WebSocket in the kernel** (ROADMAP NEXT-5, D-5 answered: in the kernel; ADR-272). A new
+  `[websocket]` section (configuration format 9; off by default): `wss://host:8084/mqtt`, TLS 1.3, subprotocol `mqtt`,
+  RFC 6455 binary frames. `auth = "mtls"` (default) takes a client certificate exactly as the TLS port does;
+  `auth = "password"` serves browsers without a client certificate and checks an MQTT user name and password from
+  `websocket.users` inside TLS (PBKDF2 hashes, lock-out and login rate as for plaintext accounts), with the section's
+  own ACL (`web/{id}/#`), limits and a `$ws/` session namespace, clean sessions only. `websocket.origins` is the
+  allowlist of web pages (required with passwords). The new `no_std` crate `urmqtt-ws` holds a bounded HTTP Upgrade
+  parser (4 KiB, 32 header lines, fixed 400/403/404/426 answers) and a streaming frame codec without a reassembly
+  buffer; the upgrade must finish within `websocket.upgrade_timeout_s`. `$SYS/broker/websocket/...`, the info query
+  and the status line report upgrades, refusals by reason, logins, frames, bytes and close codes. Verified with fuzz
+  targets `ws_upgrade` and `ws_frames`, Kani, Miri, Autobahn|Testsuite (0 failed; docs/audit/ws-autobahn.md) and the
+  smoke group `websocket` (paho-mqtt over wss against the kernel in QEMU, 10 000 idle connections).
 - `docs/PERFORMANCE.md` §13: urMQTT v0.4.2, `main` (SACK, ADR-265/266) and Mosquitto 2.0.21 measured on two VPSes
   (Contabo x86_64 4 vCPU, netcup arm64 2 vCPU), each loaded from the other; raw files, tables and figures in
   `docs/perf-results/x11-2026-11-07/`, figures from the new `scripts/x11-charts.py`. Findings: with cores to use

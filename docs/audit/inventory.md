@@ -10,12 +10,12 @@
 | `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 3631 | 0 | 101 (101) | deny |
 | `urmqtt-arch-x86_64` | `crates/arch-x86_64` | 6991 | 0 | 155 (155) | deny |
 | `urmqtt-attack` | `tools/attack` | 1092 | 0 | 0 (0) | default |
-| `urmqtt-broker` | `crates/broker` | 5943 | 2018 | 0 (0) | forbid |
+| `urmqtt-broker` | `crates/broker` | 6383 | 2020 | 0 (0) | forbid |
 | `urmqtt-builder-wasm` | `tools/builder/wasm` | 1201 | 0 | 30 (30) | deny |
-| `urmqtt-cfg` | `crates/cfg` | 4841 | 0 | 0 (0) | forbid |
-| `urmqtt-config` | `crates/config` | 1374 | 0 | 10 (10) | deny |
-| `urmqtt-config-schema` | `crates/config-schema` | 5314 | 0 | 0 (0) | forbid |
-| `urmqtt-config-tool` | `tools/config` | 2451 | 956 | 0 (0) | default |
+| `urmqtt-cfg` | `crates/cfg` | 5372 | 0 | 0 (0) | forbid |
+| `urmqtt-config` | `crates/config` | 1494 | 0 | 10 (10) | deny |
+| `urmqtt-config-schema` | `crates/config-schema` | 6180 | 0 | 0 (0) | forbid |
+| `urmqtt-config-tool` | `tools/config` | 2471 | 1039 | 0 (0) | default |
 | `urmqtt-control` | `crates/control` | 609 | 0 | 0 (0) | forbid |
 | `urmqtt-control-tool` | `tools/control` | 416 | 0 | 0 (0) | default |
 | `urmqtt-dbworker` | `crates/dbworker` | 172 | 0 | 22 (22) | default |
@@ -23,7 +23,7 @@
 | `urmqtt-diag-png` | `tools/diag-png` | 711 | 0 | 0 (0) | default |
 | `urmqtt-disk-tool` | `tools/disk` | 3001 | 866 | 0 (0) | default |
 | `urmqtt-dispatch` | `crates/dispatch` | 594 | 0 | 0 (0) | forbid |
-| `urmqtt-kernel` | `crates/kernel` | 18705 | 0 | 118 (118) | deny |
+| `urmqtt-kernel` | `crates/kernel` | 19959 | 0 | 118 (118) | deny |
 | `urmqtt-loadgen` | `tools/loadgen` | 1244 | 0 | 0 (0) | default |
 | `urmqtt-log` | `crates/log` | 2040 | 128 | 12 (12) | deny |
 | `urmqtt-mm` | `crates/mm` | 2580 | 0 | 74 (74) | deny |
@@ -31,18 +31,19 @@
 | `urmqtt-net` | `crates/net` | 2078 | 0 | 0 (0) | deny |
 | `urmqtt-nistz256` | `crates/nistz256` | 2025 | 0 | 28 (28) | allow |
 | `urmqtt-pci` | `crates/pci` | 696 | 0 | 0 (0) | deny |
-| `urmqtt-plain` | `crates/plain` | 1276 | 0 | 0 (0) | forbid |
+| `urmqtt-plain` | `crates/plain` | 1325 | 0 | 0 (0) | forbid |
 | `urmqtt-platform` | `crates/platform` | 1940 | 922 | 0 (0) | deny |
 | `urmqtt-sntp` | `crates/sntp` | 1146 | 0 | 0 (0) | forbid |
 | `urmqtt-store` | `crates/store` | 12164 | 4611 | 302 (302) | deny |
 | `urmqtt-sync` | `crates/sync` | 484 | 0 | 19 (19) | deny |
 | `urmqtt-tcp` | `crates/tcp` | 6715 | 0 | 0 (0) | deny |
 | `urmqtt-timer-wheel` | `crates/timer-wheel` | 446 | 0 | 0 (0) | forbid |
-| `urmqtt-tls` | `crates/tls` | 5052 | 1256 | 0 (0) | forbid |
+| `urmqtt-tls` | `crates/tls` | 5113 | 1333 | 0 (0) | forbid |
 | `urmqtt-usys` | `crates/usys` | 477 | 0 | 8 (8) | default |
 | `urmqtt-virtio` | `crates/virtio` | 6276 | 0 | 30 (30) | deny |
+| `urmqtt-ws` | `crates/ws` | 1766 | 0 | 0 (0) | forbid |
 | `urmqtt-x25519` | `crates/x25519` | 1365 | 0 | 8 (8) | default |
-| **total** | | **114941** | | **917 (917)** | |
+| **total** | | **120048** | | **917 (917)** | |
 
 ## Vendored components
 
@@ -145,4 +146,4 @@
 
 ## Fuzz targets
 
-`acpi_parse`, `aml_s5`, `broker_acl`, `broker_input`, `cfg_blob`, `config_parse`, `control_message`, `diff_aes_gcm`, `diff_chacha20poly1305`, `diff_crc32c`, `diff_sha256`, `diff_tls_record`, `disk_backup`, `disk_crypt`, `disk_layout`, `fdt_parse`, `gpt_parse`, `mqtt5_packet`, `mqtt5_props`, `mqtt_decode`, `net_frame`, `plain_input`, `tcp_segment`, `telemetry_recover`, `tls_record`, `virtio_balloon_device`, `virtio_console_device`, `virtio_gpu_response`, `virtio_input_event`, `virtio_vsock_packet`, `x509_identity`
+`acpi_parse`, `aml_s5`, `broker_acl`, `broker_input`, `cfg_blob`, `config_parse`, `control_message`, `diff_aes_gcm`, `diff_chacha20poly1305`, `diff_crc32c`, `diff_sha256`, `diff_tls_record`, `disk_backup`, `disk_crypt`, `disk_layout`, `fdt_parse`, `gpt_parse`, `mqtt5_packet`, `mqtt5_props`, `mqtt_decode`, `net_frame`, `plain_input`, `tcp_segment`, `telemetry_recover`, `tls_record`, `virtio_balloon_device`, `virtio_console_device`, `virtio_gpu_response`, `virtio_input_event`, `virtio_vsock_packet`, `ws_frames`, `ws_upgrade`, `x509_identity`

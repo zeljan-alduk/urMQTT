@@ -115,6 +115,8 @@ than dev). A production image listens on a plaintext port only if its
 configuration has `[plaintext] enabled = true` (P1, off by default, with a
 mandatory `allow_from`; see the README and docs/SECURITY.md); the boot log and
 the configuration report say so.
+It serves MQTT over secure WebSocket only if the configuration has
+`[websocket] enabled = true` (ADR-272, off by default; see below).
 Dev-only command-line switches are ignored.
 
 **The image embeds the server's private key** (in its configuration slot, and
@@ -1032,6 +1034,37 @@ idempotent and prints what it does; `--dry-run` changes nothing.
 ### TLS off, plain MQTT only (ADR-233)
 
 A trusted plant network can run without certificates: `[network] mqtt_tls_port = 0` and `[plaintext] enabled = true` with `allow_from` and a login mode. The image then needs no `tls.cert`, `tls.key` or `trust.operational`, boots with `mqtt: TLS listener off`, and has no operator, service or control access (those need mutual TLS). The configuration is written in format 3, which a kernel of **v0.2.1 or newer** reads; older templates are refused with the reason. With both listeners on (the default of the simple view's second box plus plain MQTT) nothing changes for TLS.
+
+### MQTT over secure WebSocket for browsers (ADR-272)
+
+`[websocket] enabled = true` opens `wss://<host>:8084/mqtt` beside the TLS port, with the TLS listener's certificate and
+key (so `network.mqtt_tls_port` must be on, and the certificate's name must be what the browser connects to: a
+browser does not let a page skip the check). The configuration is written in format 9; a template whose kernel reads
+less refuses it with the reason. Open the port in the provider's firewall as you did 8883.
+
+- **Devices and services that speak WebSocket:** keep `auth = "mtls"` (the default). Nothing else changes: the same
+  certificates, identities, ACL and revocation.
+- **Browser pages:** `auth = "password"`, the page's origin in `origins` (exactly as the browser sends it:
+  `https://dashboard.example.com`, or `http://localhost:3000` while developing), one account per user or page in
+  `users` (`urmqtt-config hash-password`, or the builder page), and the topics they may use in `acl_publish` and
+  `acl_subscribe`. Sessions are clean: the page subscribes again after every reconnect.
+
+Check it from a machine that can reach the port (the second request must answer 403):
+
+```bash
+curl -sk --http1.1 -o /dev/null -w '%{http_code}\n' -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Sec-WebSocket-Protocol: mqtt' -H 'Origin: https://dashboard.example.com' \
+    https://broker.example.com:8084/mqtt     # 101 with auth = "password"; with mtls add --cert/--key
+curl -sk --http1.1 -o /dev/null -w '%{http_code}\n' -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Sec-WebSocket-Protocol: mqtt' -H 'Origin: https://evil.example' \
+    https://broker.example.com:8084/mqtt     # 403
+```
+
+The boot log has one `mqtt: WebSocket listener on port 8084 (wss://.../mqtt, ...)` line with the mode, the origins and
+the limits; refusals (`websocket: N connection(s) refused: origin`) and protocol violations are logged at powers of
+two, lock-outs always; the operator reads `$SYS/broker/websocket/*`. A reverse proxy in front is not needed; if you
+put one there (to serve the broker on 443 under the page's own name), it must pass the upgrade through unchanged and
+keep the `Origin` header, and with `mtls` it cannot terminate TLS.
 
 ## 11. A public demo broker (D1)
 

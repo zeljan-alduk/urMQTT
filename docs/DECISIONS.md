@@ -2357,6 +2357,138 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
 - **Not done.** The kernel on a real VPS (the estimate above stands in for it); the load generator's login rate at
   100 000 (expected about 19 a second per data core under HVF); the 3.5x gap between kernel and host per iteration.
 
+## ADR-272 — MQTT over secure WebSocket in the kernel: one bounded upgrade, a streaming frame codec, mtls or a password inside TLS (NEXT-5, D-5)
+
+- **Status:** Accepted (2026-11-08). Answers D-5 (the owner: in the kernel, not an external bridge). Configuration
+  format 9 (format 8 is another branch's). Builds on ADR-080 (handshake admission), ADR-221..224 (watchdog
+  classes), ADR-229..231 and ADR-267 (password hashes, lock-out, login rate), ADR-233 (independent listeners).
+- **Context.** Browsers and many web stacks speak MQTT only as WebSocket (`wss://host:port/mqtt`, subprotocol `mqtt`,
+  RFC 6455 binary frames, MQTT 3.1.1 section 6). Until now the only way was the demo's external bridge
+  (`deploy/demo-bridge/`), not a product. A WebSocket listener puts an HTTP request parser and a frame codec into the
+  TCB, which is new attack surface; the design question is how little of HTTP and WebSocket the kernel has to accept,
+  and how a browser, which cannot practically present a client certificate, proves who it is.
+- **Decision.**
+  - **A new `no_std` crate, `urmqtt-ws`, holds all of the protocol** and nothing of the kernel: `forbid(unsafe_code)`,
+    no allocation, clippy's `unwrap`/`expect`/`indexing`/`panic` denials, host-tested. Two pieces:
+    - **The upgrade** (`upgrade.rs`): one request of at most **4 KiB and 32 header lines**, delimited first (`scan`),
+      then read in one pass. Only `GET <path> HTTP/1.1` with the configured path (byte for byte; no query, no absolute
+      form), CRLF line ends only, no folding, token header names, no control characters in values; `Host` once and
+      not empty; `Upgrade` lists `websocket`, `Connection` lists `Upgrade` (case-insensitive lists: Firefox sends
+      `keep-alive, Upgrade`); `Sec-WebSocket-Key` the canonical base64 of 16 bytes; `Sec-WebSocket-Version: 13`
+      (anything else 426 naming 13); `Sec-WebSocket-Protocol` offers `mqtt` (preferred) or `mqttv3.1`; no
+      `Transfer-Encoding`, `Content-Length` absent or 0; a second `Host`, `Upgrade`, `Connection`, key, version, origin
+      or length header is a refusal, not "the last one wins". Everything else is ignored, including
+      `Sec-WebSocket-Extensions`: **no extension is ever agreed on (no permessage-deflate)**. The answers are fixed:
+      101 with the accept value and the subprotocol, or 400, 403 (origin), 404 (path), 426 (version), each with
+      `Connection: close` and nothing the client sent. No body, no keep-alive, no second request, no static files, no
+      CORS preflight, no redirect. `Sec-WebSocket-Accept` needs SHA-1 (RFC 6455 4.2.2); the crate has a 60-line
+      private SHA-1 checked against RFC 3174's vectors, used for nothing else, because the accept value is a protocol
+      handshake, not a security property (no vetted `sha1` crate is in the dependency set and one call does not
+      justify adding one).
+    - **The frames** (`frame.rs`): a streaming decoder that unmasks each payload byte in place and hands it on at once.
+      **MQTT needs no message boundaries** ("the receiver MUST NOT assume that MQTT Control Packets are aligned on
+      WebSocket frame boundaries", 3.1.1 section 6), so there is **no reassembly buffer**: the decoder keeps a frame
+      header (at most 14 bytes) and one control frame's payload (at most 125). Nothing is sized by an attacker's
+      length. A message's announced length is checked against the message limit at the header, before any payload is
+      accepted (64-bit lengths with the top bit set and non-minimal encodings are refused); the limit is the MQTT
+      packet limit in force plus 4 KiB for small packets sent along, a sanity bound rather than a memory bound (the
+      broker's parser bounds each packet). Every server-side rule of RFC 6455 with its close code: unmasked client
+      frame, reserved bits, unknown opcode, a control frame fragmented or over 125 bytes, a continuation without a
+      message or a data frame inside one, a bad close payload (1002); a text frame (1003: MQTT is binary); a close
+      reason that is not UTF-8 (1007); a message over the limit (1009). Close codes accepted from a peer: 1000-1003,
+      1007-1014, 3000-4999.
+  - **The kernel's side is a transport adapter.** A listener on `websocket.port` beside the TLS one, sharing its
+    certificate and key (so `websocket.enabled` needs `network.mqtt_tls_port` set). The connection glue lives in a
+    child module of the MQTT service (`mqtt_service/ws.rs`) and the listener's state in `websocket.rs`; the service's
+    shared paths call in at accept, TLS established, decrypted bytes, output and close. The MQTT bytes the broker
+    sees are exactly the binary frames' payloads, parsed by the **same parser with the same limits** as on the TLS
+    port; server output is one binary frame per broker output chunk, nothing is sent after our close frame. Core 0
+    steers the port's flows to the workers like the other MQTT ports.
+  - **Admission and the slow client.** A WebSocket connection is a TLS connection: the core's TLS admission (in-flight
+    per core and per address, the handshake rate, the heap reserve, the DB backlog) applies at the SYN and the ACK,
+    and the listener adds its own: connections in all (`max_connections`) and per address (`max_connections_per_ip`)
+    in a source table (the plaintext listener's type, its own instance, hashed under a boot key), lock-outs, and in
+    password mode a login token bucket at half a core (ADR-267). Until the upgrade (with mtls) or the login (with
+    passwords) the connection counts as a handshake in flight, so its slot is held only as long as a handshake's.
+    The request must be complete within `upgrade_timeout_s` (1-10 s, default 5) **of the accept, TLS included**, and
+    within 4 KiB; a slower client is reset and counted (`refused/timeout`). The handshake timeout of ADR-080 (10 s,
+    3 s under pressure) still applies on top.
+  - **Two authentication modes, chosen per image (`websocket.auth`):**
+    - **`mtls` (the default).** The TLS port's server: a client certificate, the same identity, roles (device,
+      service, operator, bootstrap), registry and revocation (a revoked serial's WebSocket connections close like its
+      TLS ones). The session attaches at the upgrade. Works for every non-browser WebSocket client and for browsers
+      that hold a certificate.
+    - **`password`.** Browsers cannot practically present client certificates, so the TLS server is built without a
+      client-certificate request (`TlsServer::new_server_only`: same certificate, key, suites and record layer, no
+      session tickets so that nothing of it can resume on the mutual-TLS server) and the first MQTT packet is decided
+      before the broker sees it: a CONNECT whose user name and password match an account of `websocket.users`
+      (PBKDF2-HMAC-SHA-256 as `plaintext.users`, the same checker, decoy and constant-time comparison, one hash on
+      every path). A refusal is CONNACK 4 (5 for the registry or a stored-session request) in a frame, then close 1008;
+      failed logins count toward the source address's lock-out (`max_failed_auths_per_ip` in `lockout_s`). **The
+      password only ever travels inside TLS.** The session is a new broker role, `Role::Web`, with the section's own
+      ACL (`acl_publish`, `acl_subscribe`, `{id}` = the account id, default `web/{id}/#`), packet limit, publish rate
+      and retain flag; it never holds the service, operator or control role, never reaches `$SYS` or `$urmqtt`, is
+      **clean only**, and is named `$ws/<id>/<client id>`, so it meets neither a certificate's session nor a
+      plaintext one. The registry allowlist applies. The broker change is limited to the policy lookup per role; its
+      parser is untouched.
+  - **Origins.** Browsers send `Origin` on every WebSocket request, and cross-site WebSocket hijacking (a page on
+    another site opening a connection with the user's ambient credentials) is the classic attack. `websocket.origins`
+    is a list of exact origins (`https://app.example.com`; the check refuses `null`, wildcards, paths, trailing
+    slashes, upper case and the scheme's default port, which browsers never send); a request whose `Origin` is not
+    listed gets 403. **Required with `password`**; with `mtls` an empty list admits any origin, since only a browser
+    that holds a client certificate gets past TLS. A request **without** `Origin` is accepted: it comes from a device
+    or a script, not a browser, so it cannot be a cross-site request. An origin refusal does **not** count toward the
+    lock-out: a hostile page could otherwise lock out its visitors' addresses.
+  - **Answers on the wire.** Pings are answered with pongs while the connection's output buffer has room (RFC 6455
+    allows answering only the latest; a client that pings without reading does not grow our buffers); a client's
+    close is echoed with its code and the MQTT session ends as on a lost connection (the will is published unless it
+    sent DISCONNECT); a violation is closed with its code; the broker's own close (DISCONNECT, keep-alive, takeover)
+    sends 1000; then TLS close_notify and FIN.
+  - **Watchdog (ADR-221..224).** A WebSocket connection's input runs in the handshake class until the upgrade (and in
+    password mode the login, a password check) is done; boot calibrates that budget with the dearer of a TLS
+    handshake and either listener's password check (`websocket: one password check costs about N us`). The upgrade
+    deadline is checked in the 100 ms timer step with the handshake timeouts.
+  - **Observability.** `$SYS/broker/websocket/{enabled, port, path, auth, origins, accounts, connections, accepted,
+    upgrades, refused/{request, method, path, version, protocol, origin, too_large, timeout, limit, locked_out},
+    auth_ok, auth_failed, lockouts, frames/{in,out}, bytes/{in,out}, close/client/<code>, close/server/<code>,
+    close/abrupt}` (one topic while off), the same as a `websocket` object of the info query and a status line. One
+    boot line names the port, path, mode, origins and limits; refusals and protocol violations are logged at powers
+    of two per kind, a lock-out always, once, with the address.
+  - **Configuration (format 9).** `[websocket]`: `enabled` (false), `port` (8084), `path` (`/mqtt`), `auth` (`mtls` |
+    `password`), `origins`, `users`, `upgrade_timeout_s` (5), `max_connections` (1000), `max_connections_per_ip`
+    (16), and for `password` `max_packet_size` (16 384), `publish_rate_per_device` (10/s), `max_failed_auths_per_ip`
+    (5), `lockout_s` (300), `acl_publish`, `acl_subscribe` (`web/{id}/#`), `retain` (false). Tags 230-245, each
+    `since 9`; a section left at its defaults writes no record, so the blob keeps its older format. The blob check
+    (`urmqtt_cfg::check`) and the TOML validator agree (a table of 27 section shapes); entries are well formed whether
+    or not the listener is on; when on: the TLS listener on, a port of its own, accounts and origins with `password`,
+    no accounts with `mtls`, no account id that is a service, operator or control identity.
+- **Conformance and testing.** Host: RFC 6455's accept and masking examples, RFC 3174's vectors, every refusal and
+  violation, split invariance and no-panic properties (proptest), Kani harnesses (any 16-byte stream split in two,
+  any 12-byte request, every header length), Miri. Fuzz: `ws_upgrade` (any request and policy; what is accepted is a
+  complete request for the path with a well-formed 101 — it found that the `mqttv3.1` response did not fit its
+  160-byte buffer, now 192 with a test) and `ws_frames` (the decoder against itself under arbitrary cuts: same
+  events, same verdict, no message over its limit), 180 s each with no finding after the fix; `broker_input` now
+  opens web sessions. **Autobahn|Testsuite 25.10.1** (fuzzingclient, all 517 cases, against `examples/echo.rs`,
+  which shares the parser and the decoder): 298 OK, 3 informational, 216 unimplemented (12.x/13.x, permessage-deflate,
+  which is not negotiated, so the client falls back cleanly), 0 failed, 0 non-strict (docs/audit/ws-autobahn.md).
+  End to end (smoke group `websocket`, both architectures): paho-mqtt over wss and a raw client against the real
+  kernel in QEMU; QoS 0/1, a packet at the size limit and one over, a fragmented message with a ping inside, clean and
+  abrupt close, every refusal, the violations, a slowloris request cut at the deadline, no certificate refused,
+  10 000 upgraded idle connections and the heap after them, password logins, the ACL, clean sessions, the lock-out.
+- **Alternatives.** The external bridge as a product (no TCB change, but a second process to deploy and secure, and
+  the broker sees the bridge's address and identity, not the client's). Reassembling messages before the broker
+  (a buffer per connection sized by the client, for nothing MQTT needs). Accepting `permessage-deflate` (a
+  decompressor in the TCB and compression oracles inside TLS). A password over plain `ws://` (the password in the
+  clear; never). Cookie or token authentication on the HTTP upgrade (a second credential system; browsers' WebSocket
+  API cannot set headers anyway, so the MQTT CONNECT is the natural place). Reusing `plaintext.users` (a LAN
+  account would become a web account by accident; the two lists are separate and may share ids, in separate session
+  namespaces).
+- **Consequences.** The TCB grows by the crate `urmqtt-ws` (1 766 lines in docs/audit/inventory.md, of which about
+  1 000 are the upgrade, the frames and SHA-1 and the rest tests and proofs) and about 1 250 lines of kernel (the
+  listener's state and the connection glue). A WebSocket connection costs the TLS connection plus about 260 bytes of decoder
+  state while open (measured in the idle scenario). Not done: run-time accounts (NOW-15, as for plaintext), stored
+  sessions for password logins, compression, HTTP/2 or HTTP/3 WebSocket (RFC 8441/9220), `ws://` without TLS.
+
 ## ADR-273 — MQTT 5.0: a strict zero-copy codec now, broker semantics in two phases (NEXT-3, D-13)
 
 - **Status:** Accepted for the codec (part 1, implemented: `crates/mqtt/src/v5/`); **proposed** for the broker

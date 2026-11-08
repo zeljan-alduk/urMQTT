@@ -326,7 +326,7 @@ jobs:
       matrix:
         include:
           - name: protocol crates
-            crates: "urmqtt-mqtt urmqtt-timer-wheel urmqtt-net urmqtt-tcp urmqtt-broker"
+            crates: "urmqtt-mqtt urmqtt-timer-wheel urmqtt-net urmqtt-tcp urmqtt-broker urmqtt-ws"
           - name: tls
             crates: "urmqtt-tls"
           - name: cfg

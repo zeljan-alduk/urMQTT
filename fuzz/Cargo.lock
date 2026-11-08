@@ -1085,6 +1085,7 @@ dependencies = [
  "urmqtt-tcp",
  "urmqtt-tls",
  "urmqtt-virtio",
+ "urmqtt-ws",
 ]
 
 [[package]]
@@ -1196,6 +1197,10 @@ dependencies = [
  "urmqtt-arch",
  "urmqtt-pci",
 ]
+
+[[package]]
+name = "urmqtt-ws"
+version = "0.4.2"
 
 [[package]]
 name = "urmqtt-x25519"

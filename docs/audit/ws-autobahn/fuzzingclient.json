@@ -1,0 +1,9 @@
+{
+  "outdir": "/reports",
+  "servers": [
+    { "agent": "urmqtt-ws", "url": "ws://host.docker.internal:19301" }
+  ],
+  "cases": ["*"],
+  "exclude-cases": [],
+  "exclude-agent-cases": {}
+}

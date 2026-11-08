@@ -102,6 +102,13 @@ fn the_subprotocol_prefers_mqtt_and_takes_mqttv31() {
         upgrade::parse(&r, &POLICY).unwrap().protocol,
         Protocol::MqttV31
     );
+    // The whole response, with the longer name (found by fuzz/ws_upgrade:
+    // 163 bytes did not fit the buffer once).
+    let a = upgrade::parse(&r, &POLICY).unwrap();
+    let mut out = [0u8; upgrade::MAX_RESPONSE];
+    let n = a.response(&mut out);
+    assert_eq!(n, 163);
+    assert!(out[..n].ends_with(b"Sec-WebSocket-Protocol: mqttv3.1\r\n\r\n"));
     let mut l = good();
     l.push("Sec-WebSocket-Protocol: mqttv3.1");
     assert_eq!(
@@ -621,7 +628,13 @@ fn the_message_limit_is_checked_at_the_header() {
 #[test]
 fn large_frames_use_the_16_and_64_bit_lengths() {
     let m = [0xde, 0xad, 0xbe, 0xef];
-    for n in [126, 1000, 65535, 65536, 200_000] {
+    // Miri: the two boundaries only (the long ones take minutes there).
+    let sizes: &[usize] = if cfg!(miri) {
+        &[126, 65536]
+    } else {
+        &[126, 1000, 65535, 65536, 200_000]
+    };
+    for &n in sizes {
         let payload: Vec<u8> = (0..n).map(|i| (i * 7) as u8).collect();
         let (evs, r) = run(MQTT, &client(true, op::BINARY, m, &payload), 4093);
         assert_eq!(r, Ok(()));

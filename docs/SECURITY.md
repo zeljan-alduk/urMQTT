@@ -76,6 +76,7 @@ which says what it gives up.
 | Firmware tables (DTB, ACPI) | `urmqtt-platform` | fuzz `fdt_parse`, `acpi_parse` (trusted source, fuzzed anyway) |
 | Control messages (`$urmqtt/control`, H1) | `urmqtt-control` (own, `forbid(unsafe_code)`, fixed layout) + `ed25519-dalek` `verify_strict` | RFC 8032 vectors, round trip, every flipped byte fails; fuzz `control_message`; smoke `control-*` |
 | First packet of a plaintext connection, its CONNECT credentials, the `[plaintext]` entries (CIDRs, accounts, password hashes) | `urmqtt-mqtt` (the same decoder as TLS), `urmqtt-plain` and `urmqtt-cfg::{net,passwd,plain}` (own, `forbid(unsafe_code)` in `urmqtt-plain`) | fuzz `mqtt_decode`, `broker_input` (plaintext connections included), `plain_input` (parsers, allow-list and the table of source addresses against a model); 25 host tests in `urmqtt-plain`; smoke `plaintext-*` |
+| WebSocket opening handshake (one HTTP/1.1 request, at most 4 KiB and 32 header lines) and RFC 6455 frames, `[websocket]` origins and paths (ADR-272) | `urmqtt-ws` (own, `no_std`, `forbid(unsafe_code)`, no allocation), `urmqtt-cfg::ws`; the MQTT bytes inside go to `urmqtt-mqtt` as on the TLS port | RFC 6455 and RFC 3174 vectors, proptest, Kani, Miri; fuzz `ws_upgrade`, `ws_frames`; Autobahn\|Testsuite (0 failed, docs/audit/ws-autobahn.md); smoke `websocket-*` |
 | Build-time configuration | `urmqtt-config-schema` | 38 tests; fuzz `config_parse`; invalid configuration fails the build |
 
 CI runs every fuzz target on every push (60 s each), and longer in the
@@ -97,6 +98,7 @@ service, E elevation of privilege.
 | **Control channel** (signed revoke/unrevoke, registry) | Ed25519 signature from an offline key; only listed service identities may publish to it | sequence number, validity window, replay rejected; persisted | the sequence number and the log of each accepted message | — | verification before any work; rate limited like any publish | revocation is the only effect; unrevocation is off by default (`allow_unrevoke`); **theft of the signing key and a service identity is a residual risk** |
 | **Operator surface** (`$SYS`, console) | operator identities by exact id over mutual TLS | four fixed commands (`help`, `status`, `log level`, `reboot`), anything else refused; output replayed from a bounded ring | every command is logged with the identity and the text, refused or not | metrics carry no payloads or secrets | at most 5 commands in a burst then one per 2 s; a slow reader loses lines, never blocks the broker; **`reboot` is a denial of service in the wrong hands, which is why operator ids are exact** | no shell and no way to run code; the log level is never above the build-time maximum |
 | **Plaintext listener** (P1, opt-in) | **not authenticated by design** beyond the chosen login mode; `auth = "ip"` trusts the source address (documented) | none: nothing protects the path | per-identity counters | none: plaintext; a login can be replayed | SYN-time allow-list, per-address and total caps, lock-out, small packets, own rate | the plaintext role has no service, operator or control rights |
+| **WebSocket listener** (ADR-272, opt-in, `wss://` only) | `mtls`: the TLS port's certificate identity; `password`: no client certificate, a user name and password inside TLS, PBKDF2, lock-out; **an origin allowlist against cross-site WebSocket hijacking** (required with passwords) | TLS records; a strict upgrade (duplicate headers refused, no body, no extension) | per-identity counters, refusals by reason | inside TLS; nothing the client sent is echoed in an HTTP answer | upgrade deadline and 4 KiB bound (slowloris), the TLS admission, per-address and total caps, login rate, lock-out; no reassembly buffer, pongs only while output has room | password sessions have their own role (`Role::Web`): no service, operator or control rights, no `$SYS`, own ACL and namespace `$ws/` |
 | **Configuration and image** (blob, ISO, builder page) | the blob is validated at every boot; signed form available; template ISO refuses to serve | tampered module refused by the loader's hash pin and the blob's fingerprint; **a rewritten ISO is not detected without Secure Boot (H8 open)** | — | the image holds the server key (and the disk key): treat it as a secret | an invalid blob stops boot (fail closed) | production ignores the kernel command line; the builder runs in the user's browser and sends nothing |
 | **Data volume** (layout, telemetry, backups) | UUID and CRC on every structure; a damaged or foreign partition is refused, never formatted | torn writes survive by design (A/B superblock, fault-injection loops); **a malicious rewrite of sectors is only detected by the CRCs** | — | optional AES-256-XTS (ADR-240): protects a stolen volume, not a stolen ISO | a full or failing disk: bounded ring, scrubbing, backup and restore | parsers fuzzed (`disk_layout`, `disk_backup`, `disk_crypt`, `telemetry_recover`); XTS has no integrity (sector swap and rollback are possible with write access to the volume) |
 | **SQLite worker** (EL0 / ring 3) | — | checked system calls, bounds on every offset and length | — | own address space; no kernel symbol, no allocator | 30 s overrun and fault restart the worker; a restart storm makes storage unavailable | a compromised worker cannot touch kernel memory (`worker-contain`); **the kernel trusts its answers (an empty revocation list un-revokes certificates), there is no KPTI** |
@@ -356,6 +358,26 @@ an identity can be cut off at once through the registry (`disallow` on the
 signed control channel). Adding and removing accounts at run time is **not**
 implemented (it would need a signed message type and a place to keep the hashes
 across reboots) and is listed as later work.
+
+## MQTT over secure WebSocket (ADR-272)
+
+The `[websocket]` listener is off by default. When on it serves `wss://` only, on its own port, with the TLS
+listener's certificate and key. What it adds to the attack surface is one HTTP request per connection and the
+RFC 6455 framing, both in `urmqtt-ws` (no allocation, no reassembly; the MQTT bytes inside go to the broker's own
+parser with its own limits).
+
+| Threat | Mitigation | Check |
+|---|---|---|
+| Cross-site WebSocket hijacking (a page on another site opens a connection from the user's browser) | `websocket.origins`, exact origins; 403 for any other `Origin`; required with `auth = "password"`; with `mtls` only a browser holding a client certificate gets past TLS | `wss-wrong-origin-403`, `wss-origin-header-optional-but-checked`; host tests |
+| A hostile page locking out its visitors' addresses | An origin refusal is not a failed login; only failed MQTT logins count toward the lock-out | ADR-272 |
+| Slowloris on the upgrade | 4 KiB bound, `upgrade_timeout_s` from the accept (TLS included), the handshake timeout and in-flight caps on top | `wss-slowloris-upgrade-cut-at-the-deadline` |
+| Request smuggling and header confusion | One request only; CRLF only, no folding, duplicates of the headers that matter refused, no body, no `Transfer-Encoding` | fuzz `ws_upgrade`; host tests |
+| Memory sized by the client (frame or message length) | Streaming decoder, no reassembly; lengths checked at the header; 14 + 125 bytes of state | fuzz `ws_frames`; Kani; Autobahn 9.x |
+| Compression oracles, decompression bombs | No extension is negotiated (permessage-deflate refused by omission) | Autobahn 12.x/13.x "unimplemented" (clean refusal) |
+| Ping floods | Pongs only while the connection's output buffer has room; the TLS admission and per-address caps bound connections | ADR-272 |
+| Guessing passwords online | PBKDF2; lock-out per source address; login rate at half a core; uniform answer and time | `wss-password-lockout`; host tests |
+| A password login becoming a service, an operator or the control channel; reaching a certificate session | `Role::Web`, own ACL, `$ws/` namespace, clean only; config check refuses ids with other roles | broker tests; `wss-password-refusals-acl-and-clean-session` |
+| A password on an unencrypted channel | No `ws://`; the password is checked inside TLS; the server-only TLS server issues no tickets | ADR-272; TLS test `a_server_only_session_has_no_client_identity` |
 
 ## The public demo broker (D1)
 

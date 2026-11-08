@@ -1,0 +1,9 @@
+GET / HTTP/1.1
+Host: broker:8084
+Upgrade: websocket
+Connection: keep-alive, Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13
+Sec-WebSocket-Protocol: mqtt
+Origin: https://app.example.com
+

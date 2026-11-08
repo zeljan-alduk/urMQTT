@@ -84,7 +84,7 @@ urMQTT removes all of the layers except the broker:
 
 | | Typical broker on Linux | urMQTT |
 |---|---|---|
-| Exposed services | SSH, broker, often a metrics/admin port | **TCP 8883** (MQTT over TLS 1.3 + mTLS); a plaintext MQTT port only if the image's configuration turns it on (P1, off by default) |
+| Exposed services | SSH, broker, often a metrics/admin port | **TCP 8883** (MQTT over TLS 1.3 + mTLS); a plaintext MQTT port (P1) and a secure WebSocket port (`wss://`, 8084, ADR-272) only if the image's configuration turns them on (both off by default) |
 | Code in the image | Kernel, userland, libc, OpenSSL, runtime | **One Rust ELF** (+ vendored SQLite) |
 | Remote management | Shell, config files, package updates | **No shell, no login.** Revocations and the allowlist by signed control messages (H1); `$SYS` statistics and a small console over MQTT for operator certificates (O1, O2). A new version or configuration is a new image |
 | Memory per idle connection | Kilobytes (socket buffers, TLS objects, heap) | **Target ≤ 512 B** |
@@ -124,6 +124,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | QoS 0/1, wildcards, retained, LWT, persistent sessions, keepalive | ✅ M9 |
 | | ACL (`devices/{id}/#` by default), service identities, per-device rate limits | ✅ M9 |
 | | Operator role: retained `$SYS/broker/#` statistics every 10 s, `$SYS/query/info`, a console over MQTT (`$SYS/console/{out,in}`: log lines, `help`, `status`, `log level`, `reboot`), mTLS only, audit-logged | ✅ O1, O2 |
+| | MQTT over secure WebSocket (`wss://.../mqtt`, subprotocol `mqtt`) for browsers: a bounded HTTP Upgrade, a streaming RFC 6455 codec without reassembly, client certificate or a password inside TLS, an origin allowlist; Autobahn\|Testsuite clean | ✅ NEXT-5 (ADR-272) |
 | | MQTT 5.0, QoS 2 | 📋 later |
 | **Storage** | SQLite over a raw-disk VFS (WAL, exclusive), quick_check at boot; since H6 SQLite runs as an unprivileged program (EL0 / ring 3), not in the kernel | ✅ M11, ✅ H6 |
 | | One disk: data in a partition of the boot disk (virtio-blk or virtio-scsi), created on the first boot, crash-safe; other disks never touched | ✅ S1 |
@@ -155,6 +156,7 @@ flowchart TB
         broker["broker<br/>sessions · topic trie · QoS · retained · LWT · ACL · limits"]
         mqtt["mqtt<br/>zero-copy codec"]
         tls["tls<br/>rustls handshake → own record layer"]
+        ws["ws<br/>wss:// upgrade · RFC 6455 frames (optional listener)"]
         tcp["tcp<br/>server-only, SYN cookies"]
         net["net<br/>Eth · ARP · IPv4 · ICMP · DHCPv4"]
         store["store<br/>SQLite + raw VFS · telemetry log"]
@@ -164,6 +166,7 @@ flowchart TB
         platform["platform<br/>DTB | ACPI → PlatformInfo"]
         config["config<br/>constants + embedded CA/cert/key"]
         broker --> mqtt --> tls --> tcp --> net --> drivers
+        mqtt -.-> ws -.-> tls
         broker --> store --> drivers
         drivers --> arch
         mm --> arch
@@ -184,7 +187,7 @@ Today (M13) the NIC has one queue pair, owned by **core 0**, which steers every 
 Toeplitz (RSS) hash of its 4-tuple to a **worker core** (1 … N-2) and transmits what the workers
 send back. A session lives on its **home** worker (`fnv1a(client id)`), so takeover, wills and
 persistence never cross cores. A connection that lands on another worker keeps its TCP and TLS
-there and relays plaintext MQTT to the home core, with credit-based flow control. Every routed
+there and relays plaintext MQTT to the home core, with credit-based flow control. A secure WebSocket connection (ADR-272) is the same with one more layer on its transport core: the RFC 6455 codec between TLS and MQTT takes the frames off before anything is relayed, so the home core and the broker see plain MQTT bytes. Every routed
 message is fanned out to the other shards, each of which keeps a replica of the retained messages.
 
 ```mermaid
@@ -267,7 +270,7 @@ falls as fixed slab chunks amortize, so it does not grow with the connection cou
 
 ### Security model
 
-- **One port.** TCP 8883: TLS 1.3 only, client certificates required, signed by the CA in the image's configuration. The MQTT client id must equal the certificate's device id.
+- **One port.** TCP 8883: TLS 1.3 only, client certificates required, signed by the CA in the image's configuration. The MQTT client id must equal the certificate's device id. Two more ports exist only when an image turns them on: plaintext MQTT for trusted networks (P1) and MQTT over secure WebSocket (ADR-272: TLS 1.3, a client certificate or a password checked inside TLS, an origin allowlist).
 - **No ways in.** No shell, console input, SSH, admin API, dynamic code, network-reachable SQL or filesystem.
 - **Memory safety.** Rust, with `forbid(unsafe_code)` in the protocol crates, every `unsafe` block justified with a `// SAFETY:` comment (lint-enforced), and no panics on external input (clippy denies `unwrap`, `expect`, indexing and `panic!` in data-path crates).
 - **Exploit mitigation.**
@@ -692,6 +695,39 @@ the configuration report says `plaintext MQTT is ON`, and the operator reads `$S
 ([docs/OPERATE.md](docs/OPERATE.md)). Accounts change by building a new image; an identity can be cut off at once
 with `disallow` on the signed control channel when the registry is in `allowlist` mode. Adding accounts at run
 time is not implemented yet.
+
+### MQTT over secure WebSocket (browsers)
+
+Browsers speak MQTT only over WebSocket. With a `[websocket]` section the broker serves `wss://<host>:8084/mqtt`
+(TLS 1.3, subprotocol `mqtt`, RFC 6455 binary frames; never `ws://`), with the TLS listener's certificate and key.
+Two ways to say who a client is ([ADR-272](docs/DECISIONS.md)):
+
+- `auth = "mtls"` (the default): a client certificate, exactly as on port 8883: the same identities, roles,
+  registry and revocation. Right for devices and services that speak WebSocket.
+- `auth = "password"`: no client certificate (browsers cannot practically present one). The MQTT user name and
+  password of the CONNECT are checked inside TLS against `websocket.users` (hashes as for plaintext accounts), with
+  the section's own ACL (`web/{id}/#` by default), packet limit, publish rate and lock-out. Clean sessions only.
+
+`origins` lists the web pages allowed to connect (exact, as the browser sends them); a request from any other
+origin gets 403. It is required with passwords: it is what stops another web site from using your users' browsers.
+
+```toml
+[websocket]
+enabled = true
+auth = "password"
+origins = ["https://dashboard.example.com"]
+users = [{ id = "alice", password_hash = "pbkdf2-sha256$100000$..." }]
+acl_subscribe = ["web/{id}/#", "devices/+/telemetry/#"]
+```
+
+```js
+// MQTT.js in the page served from https://dashboard.example.com
+const c = mqtt.connect("wss://broker.example.com:8084/mqtt", { username: "alice", password: "...", clean: true });
+```
+
+The upgrade must arrive within `upgrade_timeout_s` (5 s, TLS included) and 4 KiB; no extension (compression) is
+agreed on. The operator reads `$SYS/broker/websocket/*` ([docs/OPERATE.md](docs/OPERATE.md)): upgrades,
+refusals by reason, logins, frames, bytes and close codes.
 
 ### Configuration examples
 
@@ -1234,6 +1270,7 @@ results in [docs/PROGRESS.md](docs/PROGRESS.md)):
 | ✅ | **T1** SNTP wall clock | optional SNTP with sanity limits; the clock never goes below the image's build time (ADR-100) |
 | ✅ | **C1** Runtime configuration and the builder page | one release kernel for everyone, the configuration a validated blob in the image (`urmqtt-config pack`); the builder page writes the same bytes in the browser (ADR-215 to ADR-228) |
 | ✅ | **P1** Optional plaintext MQTT | off by default; `allow_from` required; password, anonymous or by-network identities with narrower rights than a certificate (ADR-229 to ADR-231) |
+| ✅ | **NEXT-5** MQTT over secure WebSocket | `[websocket]`, off by default; `wss://` only; `mtls` or a password inside TLS; origin allowlist; Autobahn, fuzz, Kani, smoke (ADR-272) |
 | 🚧 | **D1** Public demo broker | built, not deployed (PROGRESS D1) |
 
 **Order** ([docs/PLAN.md](docs/PLAN.md)):

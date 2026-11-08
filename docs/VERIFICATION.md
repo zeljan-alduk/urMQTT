@@ -5,8 +5,8 @@ runs at the time of writing are in `docs/PROGRESS.md` (entry H5).
 
 | Tool | Command | CI job | Covers |
 |---|---|---|---|
-| Miri | `make miri` (`scripts/miri.sh [crate...]`) | `miri` | Undefined behaviour and aliasing in the host unit tests of mqtt, timer-wheel, net, tcp (subset), broker (subset), tls, cfg (the configuration blob decoder) and config (the write-once `.bss` arena of the loaded configuration: its one `unsafe` module) |
-| Kani | `make kani` (`scripts/kani.sh`) | `kani` | Bounded proofs: MQTT decoder, MQTT 5.0 varint and property-block lengths, TCP segment parser, TLS record header, config checks, timer-wheel arithmetic |
+| Miri | `make miri` (`scripts/miri.sh [crate...]`) | `miri` | Undefined behaviour and aliasing in the host unit tests of mqtt, timer-wheel, net, tcp (subset), broker (subset), ws (the WebSocket codec), tls, cfg (the configuration blob decoder) and config (the write-once `.bss` arena of the loaded configuration: its one `unsafe` module) |
+| Kani | `make kani` (`scripts/kani.sh`) | `kani` | Bounded proofs: MQTT decoder, MQTT 5.0 varint and property-block lengths, TCP segment parser, TLS record header, config checks, timer-wheel arithmetic, WebSocket frame decoder and upgrade parser |
 | Sanitizers | `make sanitize` (`scripts/sanitize.sh`) | `sanitize` | ASan on Rust and on the C SQLite amalgamation, trapping UBSan on the C side, over the host test suites |
 | ACL fuzzer | `make acl-fuzz ACL_FUZZ_SECS=600` | `fuzz` (scheduled) | Stateful, model-checked access rules of the broker |
 | ACL fuzzer, coverage-guided | `make fuzz T=broker_acl` | `fuzz` (scheduled), fuzz smoke | A second, independent ACL oracle under libFuzzer; also a proptest in `cargo test` |
@@ -15,7 +15,7 @@ runs at the time of writing are in `docs/PROGRESS.md` (entry H5).
 ## Miri
 
 `scripts/miri.sh` runs the lib tests of mqtt, timer-wheel, net, tcp, broker,
-tls, cfg and config under Miri with `-Zmiri-strict-provenance
+ws, tls, cfg and config under Miri with `-Zmiri-strict-provenance
 -Zmiri-disable-isolation` (config adds `-Zmiri-ignore-leaks`) and
 `PROPTEST_CASES=6`.
 
@@ -209,3 +209,28 @@ shard (`route_remote` is sent without retain).
 20) from `fuzz/seeds`, replays it with `cargo fuzz coverage` and reports the
 lines of the source files the target is about (`llvm-cov export`). The
 corpus lives in a temp directory.
+
+## MQTT over WebSocket (ADR-272)
+
+The `urmqtt-ws` crate is checked five ways, each for something the others miss:
+
+- **Host tests** (`cargo test -p urmqtt-ws`): RFC 6455's examples (the `Sec-WebSocket-Accept` of section 1.3, the
+  masked frames and length encodings of section 5.7), RFC 3174's SHA-1 vectors and padding boundaries, every refusal
+  of the upgrade and every violation of the framing with its close code, and three properties: any split of a valid
+  stream gives the same events, no input panics, any accepted request has a well-formed answer.
+- **Fuzzing**: `make fuzz T=ws_upgrade` (any request under three paths and three origin lists; what is accepted is a
+  complete request for the configured path and gets a well-formed 101) and `make fuzz T=ws_frames` (the decoder
+  against itself: the same events and verdict however the stream is cut, no message over its limit, no payload it
+  was not fed). Seeds in `fuzz/seeds/ws_*`. At ADR-272: 180 s each; `ws_upgrade` found the `mqttv3.1` response
+  overflowing its buffer (fixed), then ran clean; `ws_frames` 21.8 million runs, clean.
+- **Kani** (`scripts/kani.sh urmqtt-ws`): any 16-byte stream fed in two pieces under any limit (no panic, no
+  overflow, data never longer than the input, a violation is final), any 12-byte request, every server header length.
+- **Miri**: the lib tests (the long-frame test runs two sizes under Miri).
+- **Autobahn|Testsuite** (conformance of the codec): `cargo run --release -p urmqtt-ws --example echo -- 0.0.0.0:19301`
+  and `docker run --rm -v $PWD/docs/audit/ws-autobahn:/config -v /tmp/reports:/reports
+  crossbario/autobahn-testsuite wstest -m fuzzingclient -s /config/fuzzingclient.json` (the URL in the spec is
+  `ws://host.docker.internal:19301`). Results and every deviation: [audit/ws-autobahn.md](audit/ws-autobahn.md).
+
+End to end, the smoke group `websocket` (`SMOKE_ONLY=websocket scripts/smoke.sh [--arch x86_64]`) runs
+`scripts/ws-scenarios.py` (paho-mqtt over wss and a raw client) against the kernel in QEMU.
+

@@ -42,8 +42,9 @@ use crate::sha1;
 pub const MAX_REQUEST: usize = 4096;
 /// Most header lines in a request.
 pub const MAX_HEADERS: usize = 32;
-/// Longest `Sec-WebSocket-Accept` response (`101` with every header).
-pub const MAX_RESPONSE: usize = 160;
+/// Room for the `101` response: 159 bytes with `mqtt`, 163 with `mqttv3.1`
+/// (a test checks both fit).
+pub const MAX_RESPONSE: usize = 192;
 
 /// The GUID of RFC 6455 section 1.3.
 const GUID: &[u8; 36] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";

@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 command -v cargo-kani >/dev/null || { echo "install kani: cargo install --locked kani-verifier && cargo kani setup" >&2; exit 1; }
 CRATES=("$@")
-[[ ${#CRATES[@]} -gt 0 ]] || CRATES=(urmqtt-timer-wheel urmqtt-mqtt urmqtt-tcp urmqtt-tls urmqtt-config-schema)
+[[ ${#CRATES[@]} -gt 0 ]] || CRATES=(urmqtt-timer-wheel urmqtt-mqtt urmqtt-tcp urmqtt-tls urmqtt-config-schema urmqtt-ws)
 backup="$(mktemp)"
 cp Cargo.toml "$backup"
 trap 'cp "$backup" Cargo.toml; rm -f "$backup"' EXIT

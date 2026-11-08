@@ -1,0 +1,12 @@
+ GET /mqtt HTTP/1.1
+Host: broker:8084
+Upgrade: websocket
+Connection: keep-alive, Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13
+Sec-WebSocket-Protocol: mqtt
+Origin: http://localhost:3000
+Sec-WebSocket-Extensions: permessage-deflate
+User-Agent: Mozilla/5.0
+Cookie: a=b
+

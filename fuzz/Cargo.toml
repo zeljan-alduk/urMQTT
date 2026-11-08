@@ -21,6 +21,7 @@ urmqtt-tls = { path = "../crates/tls" }
 urmqtt-broker = { path = "../crates/broker" }
 urmqtt-control = { path = "../crates/control" }
 urmqtt-plain = { path = "../crates/plain" }
+urmqtt-ws = { path = "../crates/ws" }
 urmqtt-arch-aarch64 = { path = "../crates/arch-aarch64" }
 urmqtt-arch-x86_64 = { path = "../crates/arch-x86_64" }
 urmqtt-virtio = { path = "../crates/virtio", features = ["fake"] }
@@ -260,3 +261,17 @@ bench = false
 cpufeatures = { path = "../vendor/cpufeatures-0.3.1" }
 cpufeatures-02 = { package = "cpufeatures", path = "../vendor/cpufeatures-0.2.17" }
 primeorder = { path = "../vendor/primeorder-0.14.0" }
+
+[[bin]]
+name = "ws_upgrade"
+path = "fuzz_targets/ws_upgrade.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ws_frames"
+path = "fuzz_targets/ws_frames.rs"
+test = false
+doc = false
+bench = false

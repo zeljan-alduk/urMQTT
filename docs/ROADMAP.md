@@ -320,13 +320,16 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
   of identities the CA issues, not by time, so the store grows with every identity ever seen.
 - Risk: dropping a session a device expects. Verify: host test at the bound; a smoke scenario across a restart.
 
-**NEXT-5. MQTT over WebSocket.** M (in-kernel) or S (keep the external bridge).
+**NEXT-5. MQTT over WebSocket.** M (in-kernel) or S (keep the external bridge). **Done (ADR-272): in the kernel, `[websocket]`, format 9.**
 - What: either a WebSocket listener in the kernel (HTTP upgrade, framing, masking) or a supported, documented
   version of the D1 bridge (`deploy/demo-bridge/`) for operators.
 - Why: PLAN.md D1b ("urMQTT does not speak MQTT over WebSocket"); browser clients cannot connect otherwise.
 - Risk: an HTTP request parser in the TCB is new attack surface; the bridge keeps it out. Owner decision (D-5).
 - Verify: in-kernel: fuzz target for the upgrade and frame parser, `mqtt.js` interop; bridge: its 26 tests and a
   hardened deployment test.
+- Done: crate `urmqtt-ws` (bounded upgrade parser, streaming frame codec), the kernel listener with `mtls` or a
+  password inside TLS, origin allowlist, upgrade deadline; fuzz targets `ws_upgrade` and `ws_frames`, Kani, Miri,
+  Autobahn|Testsuite (0 failed, docs/audit/ws-autobahn.md), smoke group `websocket` on both architectures.
 
 **NEXT-6. virtio-net multiqueue and RSS.** M.
 - What: one queue pair per data core with the device's RSS, so core 0 stops copying every frame.
@@ -465,7 +468,7 @@ Questions, not assumptions. Each blocks one or more items above.
 | D-2 | Who holds the minisign key and a Secure Boot project key, where (HSM, air-gapped machine), and how are they rotated? A `dbx`/version-counter plan? (ADR-251 says this is the maintainer's decision.) | NOW-2, LATER-6 |
 | D-3 | Should production images refuse to boot without a hardware RNG (`entropy.fallback = "none"`) unless the operator opts in, given the netcup finding? **Answered (owner, 2026-11-06): the default stays allowed; the choice is explicit in the builder; the hard requirement is one click** (ADR-263). | NOW-4 |
 | D-4 | May the production VPS (Contabo) be used again for KVM runs, or is a separate test VPS bought? | NOW-12, NEXT-6 |
-| D-5 | WebSocket: in the kernel (new HTTP parser in the TCB) or a supported external bridge? | NEXT-5 |
+| D-5 | WebSocket: in the kernel (new HTTP parser in the TCB) or a supported external bridge? **Answered (owner): in the kernel.** Built as ADR-272: one bounded HTTP Upgrade, a streaming frame codec without reassembly, TLS only (`wss://`), `mtls` or a password inside TLS, an origin allowlist. | NEXT-5 |
 | D-6 | Is an outbound TCP client acceptable at all? It ends the server-only design (ADR-033) and opens bridging, TLS log shipping, NTS and clustering. | NEXT-7, NEXT-8, LATER-1 |
 | D-7 | Metrics: an external exporter, or an HTTP port on the broker? | NEXT-9 |
 | D-8 | Is HA a goal for 1.0? If so, standby or active-active? | LATER-1 |

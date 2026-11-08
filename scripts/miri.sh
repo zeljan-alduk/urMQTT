@@ -31,7 +31,7 @@ if [[ ${1:-} == --negative-control ]]; then
     shift
 fi
 CRATES=("$@")
-[[ ${#CRATES[@]} -gt 0 ]] || CRATES=(urmqtt-mqtt urmqtt-timer-wheel urmqtt-net urmqtt-tcp urmqtt-broker urmqtt-tls urmqtt-cfg urmqtt-config)
+[[ ${#CRATES[@]} -gt 0 ]] || CRATES=(urmqtt-mqtt urmqtt-timer-wheel urmqtt-net urmqtt-tcp urmqtt-broker urmqtt-ws urmqtt-tls urmqtt-cfg urmqtt-config)
 export MIRIFLAGS="${MIRIFLAGS:--Zmiri-strict-provenance -Zmiri-disable-isolation}"
 export PROPTEST_CASES="${PROPTEST_CASES:-6}" PROPTEST_DISABLE_FAILURE_PERSISTENCE=true
 # cargo-miri's runner compiles the test crate again in every test process; with
