@@ -640,3 +640,217 @@ fn a_transfer_over_a_lossy_reordering_link_completes_with_few_extra_segments() {
         );
     }
 }
+
+// ---- small segments: what an MQTT stream sends (ADR-268) -------------------
+
+impl Rig {
+    /// The application hands over `n` bytes and the pass ends: one segment of
+    /// `n` bytes goes out (a QoS 1 PUBLISH or a PUBACK in its TLS record).
+    fn message(&mut self, n: usize) -> Vec<Sent> {
+        let data: Vec<u8> = (0..n).map(|i| i as u8).collect();
+        assert_eq!(self.s.send(self.c, &data), n);
+        self.flush(0)
+    }
+
+    /// `count` messages of `size` bytes, one segment each.
+    fn messages(&mut self, count: usize, size: usize) -> Vec<Sent> {
+        let mut sent = Vec::new();
+        for _ in 0..count {
+            let s = self.message(size);
+            assert_eq!(s.len(), 1, "one segment per message: {s:?}");
+            sent.extend(s);
+        }
+        sent
+    }
+}
+
+/// A lost segment among small ones (120 bytes, a QoS 1 message in its TLS record) is
+/// repaired by a fast retransmit once three segments are reported above it, as
+/// NewReno's three duplicate ACKs did: RFC 6675's "more than two segments" counted
+/// in bytes of a full MSS needed some 25 such segments, which an MQTT flow seldom
+/// has in flight, and the hole waited for the retransmission timer (200 ms or more,
+/// 1 s before the first RTT sample) instead. On the netcup VPS 90 % of the
+/// retransmissions of the SACK build were such timeouts (ADR-268).
+#[test]
+fn a_lost_small_segment_is_resent_after_three_segments_above_it() {
+    let mut r = Rig::new(true, 0);
+    let flight = r.messages(8, 120);
+    let lost = flight[1];
+    let lost_off = r.off(lost);
+    let after = r.off(flight[2]);
+    let mut resent = Vec::new();
+    // The first arrives, then the receiver reports each one above the hole.
+    resent.extend(r.ack(1, r.top(flight[0]), &[], flight[0].tsval));
+    for f in flight.iter().skip(2).take(3) {
+        let top = r.top(*f);
+        resent.extend(r.ack(1, lost_off, &[(after, top)], f.tsval));
+    }
+    // The reordering window passes (well short of any retransmission timeout).
+    resent.extend(r.ack(5, lost_off, &[(after, r.top(flight[4]))], flight[4].tsval));
+    resent.extend(r.flush(5));
+    let again: Vec<Sent> = resent.into_iter().filter(|x| x.seq == lost.seq).collect();
+    assert_eq!(
+        again.len(),
+        1,
+        "the hole, once, without a timeout: {again:?}"
+    );
+    assert_eq!(again[0].len, 120);
+    assert_eq!(r.s.stats.fast_retransmits, 1);
+    assert_eq!(r.s.stats.retransmits, 1);
+}
+
+/// Two segments above a small hole are still reordering, not loss.
+#[test]
+fn two_small_segments_above_a_hole_are_not_a_loss() {
+    let mut r = Rig::new(true, 0);
+    let flight = r.messages(8, 120);
+    let lost_off = r.off(flight[1]);
+    let after = r.off(flight[2]);
+    r.ack(1, r.top(flight[0]), &[], flight[0].tsval);
+    for f in flight.iter().skip(2).take(2) {
+        let top = r.top(*f);
+        r.ack(1, lost_off, &[(after, top)], f.tsval);
+    }
+    r.ack(5, lost_off, &[(after, r.top(flight[3]))], flight[3].tsval);
+    r.flush(5);
+    assert_eq!(r.s.stats.retransmits, 0);
+    assert!(!r.s.conn(r.c).unwrap().has(IN_RECOVERY));
+}
+
+/// The second of two small holes in one flight is repaired in the same recovery,
+/// not by a timeout.
+#[test]
+fn two_small_holes_are_both_repaired_without_a_timeout() {
+    let mut r = Rig::new(true, 0);
+    let flight = r.messages(12, 120);
+    let (a, b) = (1usize, 6usize);
+    let mut got = alloc::vec![false; flight.len()];
+    let mut resent: Vec<Sent> = Vec::new();
+    got[0] = true;
+    for k in 2..flight.len() {
+        if k == b {
+            continue;
+        }
+        got[k] = true;
+        let (cum, blocks) = report(&r, &flight, &got, k);
+        resent.extend(r.ack(1, cum, &blocks, flight[k].tsval));
+    }
+    let (cum, blocks) = report(&r, &flight, &got, flight.len() - 1);
+    resent.extend(r.ack(5, cum, &blocks, flight[flight.len() - 1].tsval));
+    resent.extend(r.flush(5));
+    let mut holes: Vec<u32> = resent
+        .iter()
+        .filter(|x| x.seq == flight[a].seq || x.seq == flight[b].seq)
+        .map(|x| x.seq)
+        .collect();
+    holes.sort_unstable();
+    holes.dedup();
+    assert_eq!(holes.len(), 2, "both holes: {resent:?}");
+    assert_eq!(r.s.stats.fast_retransmits, 1, "one recovery for both");
+    assert_eq!(r.s.stats.retransmits, 2);
+}
+
+/// An MQTT-like stream over a link that drops `loss` per mille of the segments:
+/// up to `per_ms` messages of `size` bytes every millisecond, each its own
+/// segment, while fewer than `inflight` messages are unacknowledged (QoS 1: the
+/// peer's receive maximum, a publisher waiting for its PUBACKs). Returns the
+/// stack, how many bytes arrived and the milliseconds it took.
+fn stream(
+    total: usize,
+    size: usize,
+    per_ms: usize,
+    inflight: usize,
+    loss: u64,
+    seed: u64,
+) -> (TcpStack, usize, u64) {
+    let mut r = Rig::new(true, 0);
+    let mut rng = Rng(seed | 1);
+    let mut rx = Receiver {
+        base: r.base,
+        next: 0,
+        ranges: Vec::new(),
+        latest: 0,
+        got: Vec::new(),
+        tsval: 0,
+        dsack: None,
+    };
+    let mut link: Vec<(u64, bool, Vec<u8>)> = Vec::new();
+    let mut queued = 0usize;
+    let mut now = 10u64;
+    while now < 120_000 && rx.got.len() < total {
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..per_ms {
+            let held = r.s.conn(r.c).map_or(0, |k| k.tx_len());
+            if queued >= total || r.s.send_space(r.c) < size || held + size > inflight * size {
+                break;
+            }
+            let chunk: Vec<u8> = (queued..queued + size).map(|o| byte_at(o as u32)).collect();
+            queued += r.s.send(r.c, &chunk);
+            r.s.flush(now, &mut |_, b| out.push(b.to_vec()));
+        }
+        r.s.poll(now, &mut r.app, &mut |_, b| out.push(b.to_vec()));
+        r.s.flush(now, &mut |_, b| out.push(b.to_vec()));
+        for b in out {
+            if !rng.chance(loss) {
+                link.push((now + 5, false, b));
+            }
+        }
+        link.sort_by_key(|(due, _, _)| *due);
+        let split = link.partition_point(|(due, _, _)| *due <= now);
+        let due: Vec<(u64, bool, Vec<u8>)> = link.drain(..split).collect();
+        for (_, to_server, bytes) in due {
+            if to_server {
+                let mut out: Vec<Vec<u8>> = Vec::new();
+                r.s.input(now, CLIENT, &bytes, &mut r.app, &mut |_, b| {
+                    out.push(b.to_vec())
+                });
+                for b in out {
+                    link.push((now + 5, false, b));
+                }
+            } else {
+                let h = wire::parse(SERVER, CLIENT, &bytes).unwrap();
+                let len = bytes.len() - h.data_off;
+                if len > 0 {
+                    rx.segment(h.seq, h.ts.map_or(0, |(v, _)| v), &bytes[h.data_off..]);
+                    link.push((now + 5, true, rx.ack(&mut r)));
+                }
+            }
+        }
+        now += 1;
+    }
+    assert!(
+        rx.got
+            .iter()
+            .enumerate()
+            .all(|(o, &b)| b == byte_at(o as u32)),
+        "the bytes are right"
+    );
+    (r.s, rx.got.len(), now)
+}
+
+/// A stream of small messages over a lossy link repairs its losses with fast
+/// retransmits, not with the retransmission timer: on one core of the netcup VPS
+/// the timer's 200 ms (doubling) and the window cut to one segment after it were
+/// the QoS 1 regression of the SACK build (ADR-268).
+#[test]
+fn a_stream_of_small_messages_recovers_without_the_timer() {
+    for (seed, loss) in [(11, 10), (12, 20), (13, 5)] {
+        // At most 16 messages of 120 bytes unacknowledged (1 920 bytes, less
+        // than "more than two" full segments), as fast as they are acknowledged.
+        let total = 120 * 3000;
+        let (s, got, ms) = stream(total, 120, 16, 16, loss, seed);
+        assert_eq!(got, total, "seed {seed}: complete");
+        let st = &s.stats;
+        assert!(st.fast_retransmits > 0, "seed {seed}: {st:?}");
+        assert!(
+            st.rto_fired * 5 <= st.retransmits,
+            "seed {seed}: {} of {} retransmissions on the timer ({} fast)",
+            st.rto_fired,
+            st.retransmits,
+            st.fast_retransmits
+        );
+        // Each timeout costs at least 200 ms with nothing else to send: with
+        // them, the 3 000 messages took 2.8x as long (6.4 s against 2.2 s).
+        assert!(ms < 3_000, "seed {seed}: {ms} ms");
+    }
+}

@@ -12,6 +12,11 @@
 //! burst after a stall used to make NewReno retransmit a dozen segments that
 //! were not lost.
 //!
+//! "Segments" are counted in the flow's own segment size, not in full MSS
+//! (ADR-268): an MQTT flow sends segments of a hundred bytes, and "more than two
+//! full segments" above a hole then took some 25 of them, more than such a flow
+//! has in flight; its holes waited for the retransmission timer.
+//!
 //! Sequence numbers compare with the wrap-around arithmetic of `seq`; all
 //! ranges lie within one window of the left edge.
 
@@ -164,13 +169,15 @@ impl Board {
     }
 
     /// Whether `[a, b)`, a hole with `above` bytes in `ranges_above` ranges
-    /// SACKed beyond it, is lost (RFC 6675 `IsLost`, DupThresh 3).
-    fn lost(above: u32, ranges_above: usize, mss: u32) -> bool {
-        above > 2 * mss || ranges_above >= 3
+    /// SACKed beyond it, is lost (RFC 6675 `IsLost`, DupThresh 3) for a flow
+    /// whose segments are `seg` bytes long.
+    fn lost(above: u32, ranges_above: usize, seg: u32) -> bool {
+        above > 2 * seg.max(1) || ranges_above >= 3
     }
 
-    /// The holes below the highest range that count as lost, and the totals.
-    pub fn tally(&self, una: u32, mss: u32) -> Tally {
+    /// The holes below the highest range that count as lost (segments of
+    /// `seg` bytes), and the totals.
+    pub fn tally(&self, una: u32, seg: u32) -> Tally {
         let total: u32 = self.ranges().iter().map(|&(a, e)| e.wrapping_sub(a)).sum();
         let mut t = Tally {
             sacked: total,
@@ -180,7 +187,7 @@ impl Board {
         for (i, &(a, e)) in self.ranges().iter().enumerate() {
             if lt(gap_start, a) {
                 let len = a.wrapping_sub(gap_start);
-                if Self::lost(total - before, self.ranges().len() - i, mss) {
+                if Self::lost(total - before, self.ranges().len() - i, seg) {
                     t.lost += len;
                     if gt(self.next, gap_start) {
                         t.resent += self.next.wrapping_sub(gap_start).min(len);
@@ -193,12 +200,13 @@ impl Board {
         t
     }
 
-    /// The next lost byte not yet sent again: `(seq, len)` with `len <= mss`.
-    pub fn next_hole(&self, una: u32, mss: u32) -> Option<(u32, u32)> {
+    /// The next lost byte not yet sent again (segments of `seg` bytes):
+    /// `(seq, len)` with `len <= mss`.
+    pub fn next_hole(&self, una: u32, seg: u32, mss: u32) -> Option<(u32, u32)> {
         let total: u32 = self.ranges().iter().map(|&(a, e)| e.wrapping_sub(a)).sum();
         let (mut before, mut gap_start) = (0u32, una);
         for (i, &(a, e)) in self.ranges().iter().enumerate() {
-            if lt(gap_start, a) && Self::lost(total - before, self.ranges().len() - i, mss) {
+            if lt(gap_start, a) && Self::lost(total - before, self.ranges().len() - i, seg) {
                 let from = if gt(self.next, gap_start) {
                     self.next
                 } else {
@@ -214,13 +222,16 @@ impl Board {
         None
     }
 
-    /// Whether the first hole (at `una`) is lost by the rules above.
-    pub fn first_hole_lost(&self, una: u32, mss: u32) -> bool {
+    /// Whether there is a hole at `una` (something SACKed above it).
+    pub fn hole_at(&self, una: u32) -> bool {
+        self.ranges().first().is_some_and(|&(a, _)| lt(una, a))
+    }
+
+    /// Whether the first hole (at `una`) is lost by the rules above
+    /// (segments of `seg` bytes).
+    pub fn first_hole_lost(&self, una: u32, seg: u32) -> bool {
         let total: u32 = self.ranges().iter().map(|&(a, e)| e.wrapping_sub(a)).sum();
-        match self.ranges().first() {
-            Some(&(a, _)) if lt(una, a) => Self::lost(total, self.ranges().len(), mss),
-            _ => false,
-        }
+        self.hole_at(una) && Self::lost(total, self.ranges().len(), seg)
     }
 
     /// Whether `seq` is inside a SACKed range.
@@ -308,11 +319,11 @@ mod tests {
             }
         );
         assert!(!b.first_hole_lost(0, MSS));
-        assert_eq!(b.next_hole(0, MSS), None);
+        assert_eq!(b.next_hole(0, MSS, MSS), None);
         // More than two segments above it: lost.
         let b = board(&[(1000, 3001)]);
         assert!(b.first_hole_lost(0, MSS));
-        assert_eq!(b.next_hole(0, MSS), Some((0, 1000)));
+        assert_eq!(b.next_hole(0, MSS, MSS), Some((0, 1000)));
         // Three ranges above it: lost, whatever their size.
         let b = board(&[(1000, 1100), (2000, 2100), (3000, 3100)]);
         assert!(b.first_hole_lost(0, MSS));
@@ -334,20 +345,41 @@ mod tests {
             }
         );
         // Only the first hole has more than 2 MSS above it (3000); the second has 1500.
-        assert_eq!(b.next_hole(0, MSS), Some((0, 1000)));
+        assert_eq!(b.next_hole(0, MSS, MSS), Some((0, 1000)));
         b.next = 1000;
-        assert_eq!(b.next_hole(0, MSS), Some((1000, 1000)));
+        assert_eq!(b.next_hole(0, MSS, MSS), Some((1000, 1000)));
         assert_eq!(b.tally(0, MSS).resent, 1000);
         b.next = 2000;
         assert_eq!(
-            b.next_hole(0, MSS),
+            b.next_hole(0, MSS, MSS),
             None,
             "the first hole is done; the second is not lost yet"
         );
         // More arrives above the second hole: it is lost now.
         b.insert(6000, 8000);
-        assert_eq!(b.next_hole(0, MSS), Some((3500, 1000)));
+        assert_eq!(b.next_hole(0, MSS, MSS), Some((3500, 1000)));
         assert_eq!(b.tally(0, MSS).lost, 2000 + 1000);
+    }
+
+    /// A flow of 100-byte segments: three of them above a hole make it lost,
+    /// two do not; what is sent again is the hole, up to an MSS (ADR-268).
+    #[test]
+    fn small_segments_count_in_their_own_size() {
+        let seg = 100;
+        let b = board(&[(100, 300)]);
+        assert!(!b.first_hole_lost(0, seg), "two segments above: reordering");
+        assert_eq!(b.next_hole(0, seg, MSS), None);
+        let b = board(&[(100, 400)]);
+        assert!(b.first_hole_lost(0, seg));
+        assert!(!b.first_hole_lost(0, MSS), "in full segments it is not");
+        assert_eq!(b.next_hole(0, seg, MSS), Some((0, 100)));
+        // A second hole, three small segments further up, is lost as well.
+        let b = board(&[(100, 400), (500, 800)]);
+        assert_eq!(b.tally(0, seg).lost, 200);
+        assert_eq!(b.next_hole(0, seg, MSS), Some((0, 100)));
+        // No range above `una`: no hole.
+        assert!(!board(&[]).hole_at(0));
+        assert!(board(&[(100, 200)]).hole_at(0));
     }
 
     #[test]
@@ -356,7 +388,7 @@ mod tests {
         assert!(b.insert(500, 4000));
         assert!(b.first_hole_lost(u32::MAX - 500, MSS));
         assert_eq!(
-            b.next_hole(u32::MAX - 500, MSS),
+            b.next_hole(u32::MAX - 500, MSS, MSS),
             Some((u32::MAX - 500, 1000))
         );
         b.advance(1000);

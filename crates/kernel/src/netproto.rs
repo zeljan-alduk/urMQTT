@@ -307,6 +307,21 @@ impl TcpStatsLog {
             d(s.bad_segments, self.last.bad_segments),
             conns,
         );
+        // How the retransmissions came about (ADR-268): "timeouts" above are
+        // connections given up; a retransmission timer that fired is counted
+        // here. A line of its own: the one above is near the console's width.
+        let retx = d(s.retransmits, self.last.retransmits);
+        if retx > 0 {
+            let fast = d(s.fast_retransmits, self.last.fast_retransmits);
+            let timer = d(s.rto_fired, self.last.rto_fired);
+            info!(
+                "tcp: core {}: retransmissions: {} recoveries started, {} by the timer, {} segment(s) resent in recoveries",
+                crate::smp::current(),
+                fast,
+                timer,
+                retx.saturating_sub(timer),
+            );
+        }
         if s.ooo_buffered != self.last.ooo_buffered
             || s.ooo_dropped != self.last.ooo_dropped
             || s.scaled != self.last.scaled

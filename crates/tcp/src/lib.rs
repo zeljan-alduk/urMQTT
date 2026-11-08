@@ -199,6 +199,9 @@ pub struct Stats {
     pub refused_small_mss: u64,
     pub retransmits: u64,
     pub fast_retransmits: u64,
+    /// Retransmission timer expiries that sent data again (ADR-268: the
+    /// counter `timeouts` only counts connections given up).
+    pub rto_fired: u64,
     pub timeouts: u64,
     pub rst_sent: u64,
     pub rst_limited: u64,
@@ -315,6 +318,9 @@ struct Sender {
     /// The peer's SACK blocks and the recovery's frontier (RFC 6675), while
     /// the peer reports holes (ADR-265).
     board: Option<Box<Board>>,
+    /// How long this flow's data segments are lately (a running average, 0:
+    /// none sent yet): the "segment" that loss detection counts in (ADR-268).
+    seg: u16,
 }
 
 /// FIN queued by the application (sent after the data).
@@ -369,6 +375,17 @@ impl Conn {
         }
     }
 
+    /// The size of segment this flow's loss detection counts in: what it sent
+    /// lately, at most the MSS (ADR-268). A flow of 100-byte MQTT messages has
+    /// three of them above a hole well before it has three full segments.
+    fn seg_size(&self) -> u32 {
+        let mss = self.eff_mss() as u32;
+        match self.tx.as_ref().map_or(0, |t| u32::from(t.seg)) {
+            0 => mss,
+            s => s.min(mss),
+        }
+    }
+
     /// The pipe of a recovery driven by the peer's SACK blocks (RFC 6675 §4):
     /// what is in the network, being what is in flight less what the peer holds
     /// and what is lost and not yet sent again. `None` outside such a recovery.
@@ -377,7 +394,7 @@ impl Conn {
             return None;
         }
         let b = self.tx.as_ref()?.board.as_ref()?;
-        let t = b.tally(self.snd_una, self.eff_mss() as u32);
+        let t = b.tally(self.snd_una, self.seg_size());
         Some(
             self.flight()
                 .saturating_sub(t.sacked)
@@ -585,6 +602,7 @@ impl TcpStack {
                 Box::new(Sender {
                     q: VecDeque::new(),
                     board: None,
+                    seg: 0,
                 })
             });
             tx.q.extend(data.get(..n).unwrap_or(&[]));
@@ -1262,7 +1280,7 @@ impl TcpStack {
             k.snd_wl1 = h.seq;
             k.snd_wl2 = h.ack;
         }
-        self.sack_input(c, h, now_ms);
+        let fresh = self.sack_input(c, h, now_ms);
         let Some(k) = self.conn_mut(c) else {
             return false;
         };
@@ -1345,12 +1363,16 @@ impl TcpStack {
             self.sack_decide(c, now_ms);
         } else if h.ack == k.snd_una && pure && !window_changed && k.snd_max != k.snd_una {
             // Duplicate ACK.
-            k.dupacks = k.dupacks.saturating_add(1);
             // A peer that reports its holes (SACK) is believed: its duplicate
             // ACKs without blocks are not evidence of a loss, and a loss is
-            // acted on when the blocks say so (`sack_decide`).
+            // acted on when the blocks say so (`sack_decide`). With blocks, a
+            // duplicate ACK counts when they report new data (RFC 6675 §2): one
+            // per segment that arrived above the hole.
             let has_board = k.tx.as_ref().is_some_and(|t| t.board.is_some());
             let classic = !k.has(SACK_OK) || !has_board;
+            if classic || fresh {
+                k.dupacks = k.dupacks.saturating_add(1);
+            }
             if k.has(IN_RECOVERY) {
                 if !k.has(SACK_OK) {
                     k.cc.on_dupack_in_recovery(mss);
@@ -1376,11 +1398,14 @@ impl TcpStack {
 
     /// Takes the SACK blocks of an ACK into the scoreboard (RFC 6675 §5): a
     /// block must lie within what was sent and not yet acknowledged to say
-    /// anything, and the board holds a few ranges only.
-    fn sack_input(&mut self, c: ConnId, h: &Header, now_ms: u64) {
-        let Some(k) = self.conn_mut(c) else { return };
+    /// anything, and the board holds a few ranges only. Returns whether the
+    /// blocks told something new.
+    fn sack_input(&mut self, c: ConnId, h: &Header, now_ms: u64) -> bool {
+        let Some(k) = self.conn_mut(c) else {
+            return false;
+        };
         if !k.has(SACK_OK) || h.nsack == 0 {
-            return;
+            return false;
         }
         let (una, max) = (k.snd_una, k.snd_max);
         // A first block below the ACK's own cumulative number, or inside the
@@ -1396,7 +1421,10 @@ impl TcpStack {
         {
             k.bump_reorder();
         }
-        let Some(tx) = k.tx.as_mut() else { return };
+        let Some(tx) = k.tx.as_mut() else {
+            return false;
+        };
+        let mut fresh = false;
         for &(l, r) in h.sack.iter().take(usize::from(h.nsack)) {
             // At or below the cumulative ACK (a duplicate report) or beyond
             // what was sent: nothing to learn (RFC 2883, RFC 6675 §5 step 1).
@@ -1407,24 +1435,27 @@ impl TcpStack {
             let b = tx
                 .board
                 .get_or_insert_with(|| Box::new(Board::new(now_ms as u32, una)));
-            b.insert(l, r);
+            fresh |= b.insert(l, r);
         }
         if tx.board.as_ref().is_some_and(|b| b.is_empty()) {
             tx.board = None;
         }
+        fresh
     }
 
     /// Whether the holes the peer reported make a recovery (RFC 6675 §4:
     /// more than two segments, or three ranges, SACKed above the first
-    /// hole), once the hole has stayed that way for the reordering window
-    /// (an eighth of the round trip, at least a millisecond: segments that
-    /// the network reorders by a few places come in that time).
+    /// hole, or three duplicate ACKs, §5), once the hole has stayed that way
+    /// for the reordering window (an eighth of the round trip, at least a
+    /// millisecond: segments that the network reorders by a few places come
+    /// in that time). A segment is the flow's own (ADR-268).
     fn sack_decide(&mut self, c: ConnId, now_ms: u64) {
         let Some(k) = self.conn_mut(c) else { return };
         if k.has(IN_RECOVERY) || !k.has(SACK_OK) {
             return;
         }
-        let (una, mss) = (k.snd_una, k.eff_mss() as u32);
+        let (una, seg) = (k.snd_una, k.seg_size());
+        let dupthresh = k.dupacks >= 3;
         // The reordering window: an eighth of the round trip, doubled for every
         // retransmission that proved needless, but not more than a round trip.
         let rtt = u32::from(k.srtt).max(4);
@@ -1434,7 +1465,7 @@ impl TcpStack {
         let Some(b) = k.tx.as_mut().and_then(|t| t.board.as_mut()) else {
             return;
         };
-        if !b.first_hole_lost(una, mss) {
+        if !(b.first_hole_lost(una, seg) || (dupthresh && b.hole_at(una))) {
             b.since = 0;
             return;
         }
@@ -1466,14 +1497,16 @@ impl TcpStack {
             let Some(pipe) = k.sack_pipe() else {
                 return sent;
             };
-            let mss = k.eff_mss() as u32;
-            if k.cc.window().saturating_sub(pipe) < mss {
+            let (mss, seg) = (k.eff_mss() as u32, k.seg_size());
+            // Room for a segment of the flow's size: a window cut to a few small
+            // segments still repairs them.
+            if k.cc.window().saturating_sub(pipe) < seg {
                 return sent;
             }
             let Some((seq, len)) =
                 k.tx.as_ref()
                     .and_then(|t| t.board.as_ref())
-                    .and_then(|b| b.next_hole(k.snd_una, mss))
+                    .and_then(|b| b.next_hole(k.snd_una, seg, mss))
             else {
                 return sent;
             };
@@ -1604,6 +1637,20 @@ impl TcpStack {
             }
             let flight = k.flight();
             k.cc.on_sent(flight);
+            // A running average over about four segments (ADR-268) of the
+            // segments the application decided: full ones and those that sent
+            // all it had. A segment the window cut short says nothing about
+            // the flow (a bulk transfer sends a few of them after every ACK).
+            if let Some(t) = k.tx.as_mut()
+                && n > 0
+                && (n == mss || n == unsent)
+            {
+                let n = n.min(usize::from(u16::MAX)) as u32;
+                t.seg = match u32::from(t.seg) {
+                    0 => n,
+                    s => (3 * s + n).div_ceil(4),
+                } as u16;
+            }
             if !k.has(RTT_TIMING) && n > 0 && k.snd_nxt == k.snd_max {
                 k.set(RTT_TIMING, true);
                 k.rtt_seq = k.snd_nxt;
@@ -1711,6 +1758,7 @@ impl TcpStack {
                     k.snd_nxt = k.snd_una;
                     let rto = u64::from(k.rto);
                     self.stats.retransmits += 1;
+                    self.stats.rto_fired += 1;
                     self.transmit(now_ms, c, out);
                     self.arm(c, now_ms, TimerKind::Retransmit, rto);
                 }
