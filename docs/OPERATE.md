@@ -208,7 +208,8 @@ Use it to spread work over several consumers (backends reading `devices/+/teleme
   (`shared/messages/dropped`) and QoS 1 and 2 go to the queue of the next offline persistent member. A message
   handed to a member stays with it while its session lives; when the session ends (a clean session closed, its
   expiry), its unacknowledged QoS 1 messages and its queue go to another member (`shared/messages/redispatched`),
-  QoS 2 in flight never.
+  QoS 2 in flight never. A QoS 0 delivery to a member on a core that is more than 16 384 messages behind is dropped
+  like any QoS 0 fan-out (`messages/dropped/cross_core`); QoS 1 and 2 deliveries are always sent.
 - **No retained messages** are sent for a shared subscription (other filters of the same SUBSCRIBE get theirs).
   No Local on a share is a protocol error (DISCONNECT 0x82).
 - **The SUBACK waits for the group's core** when it is another core (at most 2 s, then 0x80), so a message published
