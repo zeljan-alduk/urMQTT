@@ -93,6 +93,9 @@ pub enum CoreMsg {
     Input { tconn: Tconn, data: Vec<u8> },
     /// Transport → home: the connection is gone.
     Closed { tconn: Tconn },
+    /// Transport → home: the client's certificate was revoked; the broker
+    /// says so (DISCONNECT 0x98 to a 5.0 client) and closes (ADR-275).
+    Revoked { tconn: Tconn },
     /// Transport → home: this many reply bytes were taken; send more.
     Credit { tconn: Tconn, bytes: u32 },
     /// Home → transport: plaintext MQTT bytes for the client.
@@ -116,6 +119,9 @@ pub enum CoreMsg {
     /// Home → transport: close (`true`) or open again the TCP receive window
     /// of a relayed publisher (back-pressure, ADR-269).
     Flow { tconn: Tconn, closed: bool },
+    /// Shard → shard: a shared subscription's join, leave, presence or
+    /// delivery between a group's owner and its members' shards (ADR-275).
+    Shared(urmqtt_broker::SharedMsg),
     /// Core 0 → all: the interface address or MTU changed (DHCP).
     IpConfig {
         addr: Option<([u8; 4], u8)>,

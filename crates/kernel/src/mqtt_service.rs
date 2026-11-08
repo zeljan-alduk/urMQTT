@@ -54,6 +54,9 @@ const SEEN_BACKLOG_MAX: usize = 4_096;
 const DB_BACKLOG_REFUSE: usize = 16_384;
 /// A handshake (or, on the dev port, the CONNECT) must arrive within this.
 const HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
+/// How long a connection of a revoked certificate may stay open while its
+/// broker says DISCONNECT 0x98 (ADR-275); then the transport cuts it.
+const REVOKE_GRACE_MS: u64 = 1_000;
 /// ... or within this while the core is under pressure (three quarters of
 /// its in-flight limit are taken): a handshake that has not finished in 3 s
 /// then is almost surely a dead peer, and its slot is worth more to a
@@ -248,6 +251,9 @@ pub struct MqttService {
     /// Publisher back-pressure: window changes and notes to other shards
     /// (ADR-269).
     flow: crate::backpressure::FlowLink,
+    /// Connections of a revoked certificate, told by their broker, and when
+    /// the transport cuts them anyway: (connection, its tconn, deadline).
+    revoking: Vec<(u32, Tconn, u64)>,
 }
 
 /// This core's telemetry ring to the DB core.
@@ -558,6 +564,10 @@ impl MqttService {
             );
         }
         let mut broker = Broker::new(broker_config(MAX_CONNS * n, n > 1));
+        // Shared groups are owned by the worker shards (ADR-275); set before
+        // the restore, whose sessions join their groups again.
+        let w = dataplane::workers(n);
+        broker.set_shards(me as u16, w.start as u16, w.len() as u16);
         let mut homed = 0;
         let mut expired = 0;
         if let Some(r) = restored {
@@ -633,6 +643,7 @@ impl MqttService {
             plain: crate::plain::PlainState::new(),
             ws: crate::websocket::WsState::new(|| tls_server_with(false)),
             flow: crate::backpressure::FlowLink::new(),
+            revoking: Vec::new(),
         }
     }
 
@@ -1470,6 +1481,11 @@ impl MqttService {
                     self.broker.input(b, &data, now_ms);
                 }
             }
+            CoreMsg::Revoked { tconn } => {
+                if let Some(b) = self.relay_of(peer, tconn) {
+                    self.broker.disconnect_conn(b, CloseReason::Disallowed);
+                }
+            }
             CoreMsg::Closed { tconn } => {
                 if let Some(b) = self.relay_of(peer, tconn) {
                     if let Some(t) = self.by_tconn.get_mut(peer) {
@@ -1517,6 +1533,8 @@ impl MqttService {
                     .route_remote_from(&msg, qos, retain, from, now_ms);
                 self.flow.delivered(peer, origin, n, link, now_ms);
             }
+            // ---- shared subscriptions (ADR-275) ----
+            CoreMsg::Shared(m) => self.broker.shared_input(peer as u16, m, now_ms),
             // ---- publisher back-pressure (ADR-269) ----
             CoreMsg::Seen { conn, n } => {
                 self.broker
@@ -1608,6 +1626,7 @@ impl MqttService {
         if now_ms.saturating_sub(self.last_tick_ms) >= 100 {
             self.last_tick_ms = now_ms;
             self.broker.tick(now_ms);
+            self.cut_revoked(now_ms);
             self.expire_handshakes(link, now_ms);
             self.ws_expire(link, now_ms);
             self.publish_admission(now_ms);
@@ -1690,6 +1709,12 @@ impl MqttService {
                 );
             }
         }
+        // Shared subscriptions: joins, leaves and deliveries for other
+        // shards (ADR-275), never dropped (a QoS 0 delivery is one message,
+        // as its route was).
+        for (to, m) in self.broker.drain_shared() {
+            link.send(usize::from(to), CoreMsg::Shared(m));
+        }
         watchdog::step(watchdog::Step::Control);
         // Control messages go to the DB core unchanged; it authenticates
         // them. Without durable storage they are refused (H1).
@@ -1724,7 +1749,7 @@ impl MqttService {
         }
         if crate::control::epoch() != self.control_epoch {
             activity = true;
-            self.apply_control(now_ms);
+            self.apply_control(link, now_ms);
         }
         watchdog::step(watchdog::Step::Persist);
         if let Some(dbl) = self.db.as_mut() {
@@ -1749,10 +1774,10 @@ impl MqttService {
     /// A control change was applied (H1): closes this core's live
     /// connections whose certificate serial is now revoked (transport
     /// side) and the sessions homed here whose identity left the allowlist.
-    fn apply_control(&mut self, _now_ms: u64) {
+    fn apply_control(&mut self, link: &mut Link, now_ms: u64) {
         self.control_epoch = crate::control::epoch();
         let tags = crate::control::revoked_tags();
-        let revoked: Vec<u32> = self
+        let revoked: Vec<(u32, Option<Peer>, Tconn)> = self
             .conns
             .0
             .iter()
@@ -1762,11 +1787,24 @@ impl MqttService {
                     && k.serial_tag != 0
                     && tags.binary_search(&k.serial_tag).is_ok()
             })
-            .map(|(c, _)| c)
+            .map(|(c, k)| (c, k.peer, k.tconn))
             .collect();
         let mut closed = revoked.len() as u64;
-        for c in revoked {
-            self.start_close(c);
+        for (c, peer, tconn) in revoked {
+            // A session is told why first (5.0: DISCONNECT 0x98), by the
+            // broker that holds it; the transport cuts it anyway after
+            // REVOKE_GRACE_MS (ADR-275). Before its CONNECT: cut now.
+            match peer {
+                Some(Peer::Local(b)) => {
+                    self.broker.disconnect_conn(b, CloseReason::Disallowed);
+                    self.revoking.push((c, tconn, now_ms + REVOKE_GRACE_MS));
+                }
+                Some(Peer::Remote { home }) => {
+                    link.send(usize::from(home), CoreMsg::Revoked { tconn });
+                    self.revoking.push((c, tconn, now_ms + REVOKE_GRACE_MS));
+                }
+                None => self.start_close(c),
+            }
         }
         if crate::control::allowlist_mode() {
             // (Plaintext logins are identities too: P1.)
@@ -1788,6 +1826,26 @@ impl MqttService {
                 "control: core {}: {closed} live connection(s) closed (revoked or no longer allowed)",
                 self.me
             );
+        }
+    }
+
+    /// Revoked connections still open after their grace: cut at the
+    /// transport, whatever the broker did.
+    fn cut_revoked(&mut self, now_ms: u64) {
+        if self.revoking.is_empty() {
+            return;
+        }
+        let due: Vec<(u32, Tconn)> = self
+            .revoking
+            .iter()
+            .filter(|r| now_ms >= r.2)
+            .map(|r| (r.0, r.1))
+            .collect();
+        self.revoking.retain(|r| now_ms < r.2);
+        for (c, tconn) in due {
+            if self.conns.get(&c).is_some_and(|k| k.tconn == tconn) {
+                self.start_close(c);
+            }
         }
     }
 

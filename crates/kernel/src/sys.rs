@@ -35,6 +35,11 @@ const PERIOD_MS: u64 = 2_000;
 /// How long a `reboot` waits, so that its reply leaves the machine.
 const REBOOT_DELAY_MS: u64 = 1_000;
 
+/// A `reboot` was asked for (ADR-275): every shard tells its MQTT 5.0
+/// clients DISCONNECT 0x8B (Server shutting down) within the delay, so they
+/// see why the connection ends.
+static STOPPING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// What one shard reports about itself.
 pub struct Shard {
     online: AtomicU64,
@@ -112,6 +117,8 @@ pub struct Sys {
     drops_logged_ms: u64,
     /// Publisher pauses (and ms paused, pauses that ran out) at the last line.
     bp_seen: (u64, u64, u64),
+    /// This shard's clients were told the broker stops.
+    told_stopping: bool,
 }
 
 impl Sys {
@@ -130,6 +137,7 @@ impl Sys {
             drops_seen: [0; 4],
             drops_logged_ms: 0,
             bp_seen: (0, 0, 0),
+            told_stopping: false,
         }
     }
 
@@ -157,6 +165,17 @@ impl Sys {
             match r.kind {
                 SysKind::Query => self.query(broker, &r, now_ms),
                 SysKind::Console => self.command(broker, &r, now_ms),
+            }
+        }
+        // Relaxed: a flag; the clients are told within the reboot's delay.
+        if !self.told_stopping && STOPPING.load(Ordering::Relaxed) {
+            self.told_stopping = true;
+            let n = broker.shut_down();
+            if n > 0 {
+                urmqtt_log::info!(
+                    "mqtt: core {}: {n} MQTT 5.0 client(s) told DISCONNECT 0x8b (server shutting down)",
+                    self.me
+                );
             }
         }
         if self.reboot_at_ms.is_some_and(|t| now_ms >= t) {
@@ -346,6 +365,8 @@ impl Sys {
                 warn!("console: rebooting at the request of {}", r.from);
                 broker.console_line("rebooting in 1 s");
                 self.reboot_at_ms = Some(now_ms + REBOOT_DELAY_MS);
+                // Relaxed: see `STOPPING`.
+                STOPPING.store(true, Ordering::Relaxed);
             }
         }
     }

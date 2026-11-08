@@ -2123,8 +2123,9 @@ impl Worker {
                     client_id,
                     filter,
                     options,
+                    sub_id,
                     ..
-                } => s.subscribe_options(&client_id, &filter, options),
+                } => s.subscribe_v5(&client_id, &filter, options, sub_id),
                 PersistOp::Unsubscribe { client_id, filter } => s.unsubscribe(&client_id, &filter),
                 PersistOp::QueuePush {
                     client_id,

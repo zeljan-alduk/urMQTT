@@ -13,7 +13,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use urmqtt_broker::sys::Mqtt5Info;
-use urmqtt_broker::{Broker, REASON_SLOTS, StoredMsg, StoredSession};
+use urmqtt_broker::{Broker, REASON_SLOTS, StoredMsg, StoredSession, StoredSub};
 use urmqtt_config::CONFIG;
 use urmqtt_mqtt::v5 as m5;
 use urmqtt_mqtt::{Limits, QoS};
@@ -162,10 +162,19 @@ pub fn restore(
                 .map_or(0, |t| u64::try_from(now.saturating_sub(t)).unwrap_or(0)),
             now_ms,
         };
-        let ok = broker.restore_session_v5(
+        let ok = broker.restore_session5(
             &sess.client_id,
             st,
-            sess.subscriptions.iter().map(|(f, o)| (f.as_str(), *o)),
+            sess.subscriptions.iter().map(|(f, o)| StoredSub {
+                filter: f.as_str(),
+                options: *o,
+                // Schema 5 (ADR-275): the few that have one.
+                sub_id: sess
+                    .sub_ids
+                    .iter()
+                    .find(|(sf, _)| sf == f)
+                    .map_or(0, |(_, id)| *id),
+            }),
             sess.queued.iter().map(|q| StoredMsg {
                 topic: &q.topic,
                 payload: &q.payload,
@@ -190,7 +199,7 @@ pub fn restore(
     }
 }
 
-/// The broker's MQTT 5.0 policy from the configuration (format 12).
+/// The broker's MQTT 5.0 policy from the configuration (formats 12 and 13).
 pub fn broker_policy() -> urmqtt_broker::Mqtt5Policy {
     let m = &CONFIG.mqtt5;
     let l = &CONFIG.limits;
@@ -203,6 +212,10 @@ pub fn broker_policy() -> urmqtt_broker::Mqtt5Policy {
         max_session_expiry_s: l.max_session_expiry_s,
         default_session_expiry_s: l.default_session_expiry_s,
         max_message_expiry_s: l.max_message_expiry_s,
+        shared_subscriptions: m.shared_subscriptions,
+        subscription_identifiers: m.subscription_identifiers,
+        max_shared_groups: l.max_shared_groups,
+        max_shared_group_members: l.max_shared_group_members,
     }
 }
 
@@ -219,6 +232,15 @@ struct Shard5 {
     wills_pending: AtomicU64,
     disconnects: [AtomicU64; REASON_SLOTS],
     refused: [AtomicU64; REASON_SLOTS],
+    // Part 3 (ADR-275).
+    shared_groups: AtomicU64,
+    shared_members: AtomicU64,
+    shared_delivered: AtomicU64,
+    shared_dropped: AtomicU64,
+    shared_redispatched: AtomicU64,
+    shared_refused: AtomicU64,
+    retained_expiring: AtomicU64,
+    alias_bytes: AtomicU64,
 }
 
 impl Shard5 {
@@ -233,6 +255,14 @@ impl Shard5 {
             wills_pending: AtomicU64::new(0),
             disconnects: [const { AtomicU64::new(0) }; REASON_SLOTS],
             refused: [const { AtomicU64::new(0) }; REASON_SLOTS],
+            shared_groups: AtomicU64::new(0),
+            shared_members: AtomicU64::new(0),
+            shared_delivered: AtomicU64::new(0),
+            shared_dropped: AtomicU64::new(0),
+            shared_redispatched: AtomicU64::new(0),
+            shared_refused: AtomicU64::new(0),
+            retained_expiring: AtomicU64::new(0),
+            alias_bytes: AtomicU64::new(0),
         }
     }
 }
@@ -257,6 +287,14 @@ pub fn report(me: usize, st: &urmqtt_broker::Stats) {
     for (a, v) in s.refused.iter().zip(st.connack_refused) {
         put(a, v);
     }
+    put(&s.shared_groups, st.shared_groups as u64);
+    put(&s.shared_members, st.shared_members as u64);
+    put(&s.shared_delivered, st.shared_delivered);
+    put(&s.shared_dropped, st.shared_dropped);
+    put(&s.shared_redispatched, st.shared_redispatched);
+    put(&s.shared_refused, st.shared_refused);
+    put(&s.retained_expiring, st.retained_expiring as u64);
+    put(&s.alias_bytes, st.alias_bytes as u64);
 }
 
 /// The MQTT 5.0 counters of all cores.
@@ -278,6 +316,15 @@ pub fn info() -> Mqtt5Info {
         for (t, a) in m.refused.iter_mut().zip(s.refused.iter()) {
             *t += get(a);
         }
+        m.shared_groups += get(&s.shared_groups);
+        m.shared_members += get(&s.shared_members);
+        m.shared_delivered += get(&s.shared_delivered);
+        m.shared_dropped += get(&s.shared_dropped);
+        m.shared_redispatched += get(&s.shared_redispatched);
+        m.shared_refused += get(&s.shared_refused);
+        // Every shard holds a replica of the same retained messages.
+        m.retained_expiring = m.retained_expiring.max(get(&s.retained_expiring));
+        m.alias_bytes += get(&s.alias_bytes);
     }
     m
 }

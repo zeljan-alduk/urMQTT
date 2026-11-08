@@ -448,6 +448,7 @@ fn fanout(subs: usize, payload: usize, msgs: u64, hz: u64) {
                 round += 1;
                 srv(|| broker.input(pubk, &pkt, 2 + round));
                 broker.drain_routes().for_each(drop);
+                broker.drain_shared().for_each(drop);
                 broker.drain_persist().for_each(drop);
                 for &k in &ks {
                     delivered += srv(|| drain_out(&mut broker, k));
