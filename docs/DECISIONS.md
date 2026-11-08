@@ -2356,3 +2356,225 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   `scripts/plain-bench.sh` now labels its login row with the count it used.
 - **Not done.** The kernel on a real VPS (the estimate above stands in for it); the load generator's login rate at
   100 000 (expected about 19 a second per data core under HVF); the 3.5x gap between kernel and host per iteration.
+
+## ADR-273 — MQTT 5.0: a strict zero-copy codec now, broker semantics in two phases (NEXT-3, D-13)
+
+- **Status:** Accepted for the codec (part 1, implemented: `crates/mqtt/src/v5/`); **proposed** for the broker
+  (parts 2 and 3, below). Answers the design half of ROADMAP NEXT-3; D-13 was answered by the owner as "full MQTT
+  5.0, in phases". Numbers 273 to 278 are reserved for MQTT 5.0: parts 2 and 3 record what they change against this
+  ADR in ADR-274 onwards. 268 to 270 are performance, 271 QoS 2 (NEXT-2, a dependency: part 2 starts after it is
+  merged), 272 WebSocket.
+- **Context.** The broker speaks MQTT 3.1.1 only; a CONNECT with protocol level 5 is refused (KNOWN-ISSUES §2). The
+  3.1.1 codec is zero-copy, `no_std`, `forbid(unsafe_code)`, streaming and bounded (M8, ADR-028), the broker
+  sans-IO with home shards per client id (ADR-032) and about 494 B per idle mTLS connection (M15, ADR-034). MQTT 5.0
+  adds a property block to most packets, reason codes on every acknowledgement and on DISCONNECT, AUTH, and new
+  session, flow-control and subscription semantics. On this branch the broker is unchanged: a 5.0 CONNECT is still
+  refused at run time.
+
+### Part 1: the codec (done)
+
+- **Where.** `urmqtt_mqtt::v5` (new files only; the crate root gained `pub mod v5;`). Same contract as the 3.1.1
+  codec: `decode(buf, &Limits) -> (Packet, used)` with `Error::Incomplete(n)` for streaming, `encode(&Packet, out)`
+  into a caller buffer, `encoded_len`. Re-uses the 3.1.1 string and topic rules (`validate.rs`: valid UTF-8, hence
+  no surrogates, no U+0000, 65 535 bytes by the prefix; topic names without wildcards; `#` last, `+` whole level).
+- **All 15 packet types**, AUTH included. Strict, per the OASIS text: fixed-header flags (§2.1.3), Remaining Length
+  and every Variable Byte Integer at most 4 bytes and minimal (§1.5.5), CONNECT flags (reserved bit, Will QoS 3,
+  Will QoS/Retain without Will; a password without a user name is legal in 5.0), Will Properties, the property
+  matrix of Table 2-4 (27 identifiers × 14 places, the Will counted as a place), duplicates (only User Property
+  repeats, and Subscription Identifier in PUBLISH), value ranges (0/1 flags, zero Receive Maximum, Topic Alias,
+  Maximum Packet Size and Subscription Identifier are protocol errors, Response Topic is a Topic Name),
+  Authentication Data only with an Authentication Method, the reason codes of Table 2-6 per packet, the short forms
+  (PUBACK and friends with Remaining Length 2 or 3, DISCONNECT 0 or 1, AUTH 0), CONNACK Session Present only with
+  0x00, the Subscription Options byte (QoS 3 and reserved bits malformed, Retain Handling 3 a protocol error),
+  shared-subscription syntax (`$share/{non-empty name without + #}/{non-empty filter}`) and No Local on a shared
+  subscription (protocol error), an empty Topic Name only with a Topic Alias, empty SUBSCRIBE/UNSUBSCRIBE and empty
+  SUBACK/UNSUBACK lists refused.
+- **Allocation.** None. A property block, a topic list and a reason-code list are kept as the borrowed bytes after
+  one validating pass and are iterated lazily (`Properties::Raw`, `SubscribeTopics::Raw`, ...). Duplicate detection
+  uses a 64-bit mask of the identifiers seen. The two lists the specification leaves open have documented bounds in
+  `v5::Limits`: `max_user_properties` per block and `max_subscription_identifiers` per PUBLISH; everything else is
+  bounded by `base.max_packet_size` (the Maximum Packet Size this side announces), which is checked from the fixed
+  header before the body is awaited, as in 3.1.1.
+- **Symmetric encoder.** `encode` refuses with `EncodeError::Invalid(e)` every packet the decoder would refuse under
+  `Limits::PROTOCOL_MAX` (it validates the property block it has just written with the decoder's own validator), so
+  whatever it writes decodes to an equal packet. It writes the shortest form (an acknowledgement with 0x00 and no
+  properties is 2 bytes). `Properties::Forward { raw, drop, extra }` encodes a received block minus some
+  identifiers plus appended properties without copying it first: the broker's fan-out primitive (drop Topic Alias
+  and Message Expiry Interval, append the subscriber's Subscription Identifiers and the remaining expiry); a block
+  that is wrong for the target packet (a Will's Will Delay Interval in a PUBLISH) is refused, never emitted.
+- **Errors carry their reason code.** `Error::reason_code()` maps each refusal to what a server answers (CONNACK for
+  the CONNECT, DISCONNECT afterwards): the specification's Malformed Packet (0x81) and Protocol Error (0x82)
+  classification, 0x84 for the protocol name and level, 0x85 for the client id bound, 0x90/0x8F for topic names
+  and filters, 0x95 for the packet size, and 0x83 for our own bounds (topic length and levels, filters, User
+  Properties, Subscription Identifiers). Tested: every code is one a CONNACK or a DISCONNECT may carry.
+- **Dispatch helper.** `v5::connect_protocol_level(buf)` reads the level of a CONNECT from its first bytes (streaming)
+  so that the broker can pick the decoder before parsing the rest.
+- **Deliberately left to the broker** (they need connection state): Topic Alias above the announced maximum, a
+  client sending a Subscription Identifier in PUBLISH [MQTT-3.3.4-6], Receive Maximum overrun, a DISCONNECT that
+  raises Session Expiry from 0, Payload Format Indicator 1 with a payload that is not UTF-8 (the receiver MAY check;
+  §3 below), Retain when Retain Available is 0. Nothing that can be checked on one packet is deliberately accepted.
+- **Verification.** Unit tests straight from Table 2-4 (every identifier × every place, accepted iff the table says
+  so; every byte that is not an identifier refused in every place; duplicates per place) and Table 2-6 (every
+  value × every packet, accepted iff the table says so), byte vectors per packet, a negative corpus (truncations,
+  flags, duplicates, not-allowed properties, bad UTF-8 including surrogates and overlong NUL, five-byte and
+  non-minimal varints, trailing bytes), round-trip proptests (random packets, "careful sender" packets that must
+  always encode, random bytes), interop fixtures captured from Mosquitto 2.x clients and paho-mqtt 2.x
+  (`crates/mqtt/tests/mqtt5_interop.rs`, `scripts/mqtt5-capture.sh`), fuzz targets `mqtt5_packet` and
+  `mqtt5_props`, Kani harnesses for the varint and the property-block length arithmetic
+  (`crates/mqtt/src/v5/proofs.rs`), Miri with the crate's other tests.
+
+### Part 2 and 3: broker semantics (proposed, decided here)
+
+1. **Version negotiation.** Both versions on every listener (TLS, plaintext, and the WebSocket listener of ADR-272
+   when it exists). The broker reads the first packet's level with `v5::connect_protocol_level`: 4 goes to the 3.1.1
+   decoder as today, 5 to `v5::decode` (when `mqtt5.enabled`), 3 (`MQIsdp`) gets the 3.1.1 CONNACK 0x01 as today,
+   anything else is closed. With `mqtt5.enabled = false` a 5.0 CONNECT gets a 5.0 CONNACK 0x84 (the client can
+   parse it, §3.1.4) and the connection is closed. The connection keeps `protocol_level` in its flags byte; every
+   later packet uses that version's codec, both ways. The broker's logic moves onto version-neutral internal
+   events (inbound PUBLISH = topic, payload, QoS, retain, and an optional borrowed property block); a thin per-
+   connection shim decodes into them and encodes out of them. 3.1.1 behaviour and its tests stay byte-identical.
+   The relay between transport and home core (ADR-032) carries bytes and is version-agnostic; the code that peeks
+   at a CONNECT before the broker (the dev plaintext hold and `kernel/src/plain.rs` credentials) learns the level
+   first, then uses the matching decoder.
+2. **Mixed-version fan-out.** A stored message (`MsgInner`) gains `props: Option<Box<[u8]>>`: the validated
+   PUBLISH block **minus** Topic Alias and Subscription Identifier (connection-specific) and with Message Expiry
+   Interval kept as an absolute deadline beside it, not in the bytes. A 5.0 subscriber gets the block through
+   `Properties::Forward` plus its Subscription Identifiers and the remaining expiry; a 3.1.1 subscriber gets topic
+   and payload only (properties stripped); a message from a 3.1.1 publisher has no block. A Will from a 5.0 client
+   is published with its Will Properties minus Will Delay Interval. Forwarded unchanged and unread: Payload Format
+   Indicator, Content Type, Response Topic, Correlation Data, User Properties (request/response is just forwarding).
+   Retained messages and persisted queues keep the block (new `props BLOB` columns).
+3. **Payload Format Indicator** is forwarded, not checked (checking is O(payload) on the publisher's core and the
+   specification lets the receiver choose). A later key `mqtt5.check_payload_format` could answer 0x99.
+4. **Session Expiry Interval, and NEXT-4.** Sessions get an expiry in both versions; this replaces NEXT-4's separate
+   design. 5.0: the CONNECT's interval (absent = 0), lowered to `limits.max_session_expiry_s` and then announced in
+   CONNACK; Clean Start only decides whether an existing session is discarded. 3.1.1: `clean_session=1` is expiry 0,
+   `clean_session=0` is `limits.max_session_expiry_s` (3.1.1 persistent sessions stop being eternal; the default
+   below is long enough that no current deployment should notice, and 0xFFFFFFFF ("never") is only granted when
+   the configured maximum is 0xFFFFFFFF). DISCONNECT may change the interval, except from 0 to non-zero (0x82).
+   Store: migration adds `expiry_s` and `offline_since` (wall-clock seconds, the boot clock of ADR-009) to the
+   session row; each home shard keeps offline sessions with a finite expiry in its timer wheel
+   (`urmqtt-timer-wheel`, seconds resolution) and on restore re-arms from `offline_since + expiry_s` (already past:
+   dropped at boot, counted). Expiry deletes the session, its subscriptions and its queue, and publishes a pending
+   Will (rule 6). Bootstrap and plaintext sessions stay never-persistent (ADR-230): their expiry is forced to 0
+   and a 5.0 client that asks for more is told 0 in CONNACK, instead of the 3.1.1 refusal.
+5. **Message Expiry Interval.** The absolute deadline (monotonic ms while online; wall-clock seconds in the store) is
+   kept beside the message; each delivery sends the remaining seconds, and a message whose deadline passed is
+   dropped instead of delivered from a queue, the retained store or a resend (counted). Retained messages expire
+   the same way, lazily on read and in the periodic compaction. `limits.max_message_expiry_s` (0 = no cap) bounds
+   what a publisher can ask for, so a retained message cannot outlive the operator's policy.
+6. **Will Delay Interval.** On a close that publishes the Will, the Will is armed for `min(will delay, session
+   expiry)` in the home shard's timer wheel; a CONNECT that takes over the session first cancels it. The armed
+   Will lives in the session (it does today in the connection's extra box), so delay costs nothing while unused.
+   DISCONNECT 0x04 (Disconnect with Will Message) publishes it; a normal DISCONNECT discards it, as in 3.1.1.
+7. **Receive Maximum (flow control).** Server to client: the in-flight window of a 5.0 connection is
+   `min(client Receive Maximum, limits.max_inflight_qos1)` (QoS 1 and 2 together), the rest queues as today.
+   Client to server: the broker announces `mqtt5.receive_maximum` (default 32); QoS 1 is acknowledged on receipt,
+   so only QoS 2 publications between PUBREC and PUBREL count; one above the announced value is DISCONNECT 0x93.
+8. **Maximum Packet Size.** Server side: CONNACK announces the effective `limits.max_packet_size` (or
+   `plaintext.max_packet_size` on that listener); a larger packet is DISCONNECT 0x95 (the codec refuses it from the
+   fixed header). Client side: the client's value is kept per connection (default: the protocol maximum); a
+   delivery whose `encoded_len` exceeds it is dropped "as if sent" [MQTT-3.1.2-25] and counted, and a reason
+   string or user properties that would push an acknowledgement over it are left out first.
+9. **Topic aliases.** Client to server only. The broker announces `mqtt5.topic_alias_maximum` (default 10, 0
+   disables); the table is allocated on the first alias (`Box<[Option<Box<str>>]>` of that length), so a client
+   that does not use aliases pays nothing; its worst case is `topic_alias_maximum × (max_topic_len + 16)` bytes
+   (2.7 KiB with the defaults), counted against the connection in the M15 accounting. An alias above the maximum,
+   0, or unknown with an empty topic is DISCONNECT 0x94. Server to client: the broker never sends aliases (the
+   client's Topic Alias Maximum is honoured by not using any), so no per-subscriber state.
+10. **Server Keep Alive.** `mqtt5.max_keep_alive_s` (default 0 = accept the client's). When set and the client asks
+    for 0 or more, CONNACK carries Server Keep Alive with the maximum and the broker enforces it (1.5 × as today).
+11. **Assigned Client Identifier.** An empty client id from a 5.0 client: on TLS the broker assigns the certificate
+    identity (the only id it would accept anyway) and returns it; on plaintext it assigns `auto-N` as it does for
+    3.1.1 today (that rule already exists for clean sessions) and returns it.
+12. **Subscription options.** Stored in the spare bits of the 8-byte `Sub` (QoS 2 bits, No Local, Retain As
+    Published, Retain Handling 2 bits; persisted as one `options` column). No Local: a route carries its origin
+    session (shard, id) and a delivery to the same session is skipped. Retain As Published keeps the RETAIN flag on
+    live delivery (3.1.1 clears it). Retain Handling 1 sends retained messages only if the subscription is new, 2
+    never. 3.1.1 subscriptions are options = QoS only.
+13. **Reason codes and reason strings.** Acknowledgements carry codes the broker can know on its own core: PUBACK/
+    PUBREC 0x00, 0x87 when the ACL refused the publish (3.1.1 keeps ack-and-drop), 0x97 when the publish rate
+    refused it, 0x90 for a topic the broker does not accept; never 0x10 "No matching subscribers" (fan-out to other
+    shards is asynchronous, the home core cannot know). SUBACK per filter: granted QoS, 0x87 refused by the ACL,
+    0x8F not accepted, 0x97 subscription limit, 0x9E/0xA1 until part 3 implements shared subscriptions and
+    subscription identifiers. UNSUBACK 0x00 or 0x11. Reason strings only on CONNACK and DISCONNECT, short and fixed
+    (no client data echoed), and not at all when the client set Request Problem Information 0.
+14. **Server-initiated DISCONNECT** (5.0 connections only; 3.1.1 keeps closing): codec errors with
+    `Error::reason_code()`, 0x8E session taken over, 0x8D keep alive timeout, 0x8B server shutting down, 0x93, 0x94,
+    0x95 as above, 0x96 when the publish rate closes a connection, 0x98 for the control channel's
+    `disconnect_identity`, 0x87 for an ACL refusal that closes, 0x9A Retain when Retain Available is 0 (plaintext
+    without `retain`; 3.1.1 keeps "delivered, not retained"), 0x82 for a client AUTH. CONNACK refusals map the 3.1.1
+    codes: 0x02 -> 0x85, 0x04 -> 0x86, 0x05 -> 0x87, admission -> 0x89 Server busy, a locked-out plaintext address ->
+    0x8A Banned, the plaintext login rate -> 0x9F.
+15. **Enhanced authentication (AUTH): refused for now.** A CONNECT with Authentication Method gets CONNACK 0x8C Bad
+    authentication method; an AUTH packet on a connection that did not negotiate a method is DISCONNECT 0x82.
+    Identity stays where it is: on TLS the certificate authenticates (the 5.0 user name and password are ignored,
+    as in 3.1.1 today); on plaintext and WebSocket the P1 account rules apply to the 5.0 user name and password (a
+    password without a user name, legal in 5.0, is 0x86 in the account modes). **Later**: a method would be a
+    configured list (`mqtt5.auth_methods`, empty today), with SCRAM-SHA-256 over the plaintext accounts as the
+    candidate (it stops sending the password in clear); its steps run under the same login admission and lock-out
+    as a password check (ADR-230, ADR-267), and re-authentication (0x19) would be refused until there is a reason.
+    Its own ADR when someone needs it.
+16. **Shared subscriptions (part 3).** `$share/{group}/{filter}`. **Owner shard:** a group lives on the worker
+    `fnv1a(role class, group, filter) % workers`; joining and leaving are messages to it (the member's home shard
+    sends them), and only the owner matches shared filters, so every message, which is already offered to every
+    shard (ADR-032), is delivered to one member exactly once. **Which member:** round robin over the group's
+    *online* members (offline persistent members are skipped while another is online; with none online, QoS 1 goes
+    to the queue of the next member in turn, QoS 0 is dropped). A delivery to a member on another shard is a
+    "deliver to session" route message; if that member is gone when it arrives, the owner picks the next one (QoS 1
+    only). A message already handed to a member stays with it (the specification allows this on disconnect).
+    **ACL:** a share is checked against the inner filter with the subscribe rules, and the group's identity
+    includes the role class (device, service, operator, plaintext), so a device can never join a service's group
+    and take messages from the backend; between devices allowed the same filter, a device can join another's
+    group, which only takes deliveries away from them (it could subscribe without sharing and see all of them
+    anyway). Retained messages are not sent on a shared subscribe (§4.8.2).
+17. **Subscription identifiers (part 3).** One per SUBSCRIBE, kept per subscription in a side list of the session
+    (only sessions that use them pay), persisted with the subscription; a delivery carries the identifiers of every
+    matching subscription of that session (one delivery per session, as today), bounded by
+    `max_subscriptions_per_session`. CONNACK announces availability per phase.
+18. **User properties** are forwarded with the message and bounded by `mqtt5.max_user_properties` (default 16 per
+    block, the codec's limit) and by the packet size; the broker never adds any.
+19. **Memory.** 3.1.1 connections keep their M15 layout. A 5.0 connection adds one boxed `V5State` (client Receive
+    Maximum, Maximum Packet Size, Topic Alias Maximum, Request Problem Information, the alias table pointer: one
+    32 B block) and the alias table only once used. Part 2 re-measures bytes per idle connection for both versions
+    (NEXT-3's "494 B must be re-established").
+20. **$SYS, statsd and limits.** New: `$SYS/broker/clients/mqtt5` (connected 5.0 clients), `messages/expired`,
+    `messages/dropped/too_large` (client Maximum Packet Size), `sessions/expired`, `wills/delayed`,
+    `disconnects/sent/<reason>` for the server-initiated reasons, `connections/refused/auth_method`. The ACL oracle
+    (`fuzz/fuzz_targets/broker_acl.rs`, `crates/broker/tests/acl_oracle/`) extends to: mixed versions on one
+    broker, `$share/` judged on the inner filter and never across role classes, No Local, Retain Handling and
+    Retain As Published, and "no delivery after expiry". `broker_input` gets 5.0 sequences (seeds from the
+    interop fixtures).
+21. **Configuration (format 12, reserved).** New keys and defaults:
+
+    | Key | Default | Meaning |
+    |---|---|---|
+    | `mqtt5.enabled` | `true` | accept protocol level 5 (false: CONNACK 0x84) |
+    | `mqtt5.receive_maximum` | 32 | announced; QoS 2 publications awaiting PUBREL |
+    | `mqtt5.topic_alias_maximum` | 10 | announced; 0 disables aliases |
+    | `mqtt5.max_user_properties` | 16 | per property block, larger blocks are refused (0x83) |
+    | `mqtt5.max_keep_alive_s` | 0 | 0: accept the client's; otherwise Server Keep Alive |
+    | `mqtt5.shared_subscriptions` | `true` | part 3; announced as Shared Subscription Available |
+    | `mqtt5.subscription_identifiers` | `true` | part 3; announced as Subscription Identifier Available |
+    | `limits.max_session_expiry_s` | 2 592 000 (30 days) | both versions (NEXT-4); 4 294 967 295 = never |
+    | `limits.max_message_expiry_s` | 0 | 0: no cap on a publisher's Message Expiry Interval |
+
+    `mqtt5.auth_methods` is reserved (empty, rule 15). The builder page gets the same keys.
+22. **Phases.** Part 2 (after QoS 2): rules 1 to 14 and 18 to 21 except the part 3 rows: version negotiation,
+    CONNACK and acknowledgement reason codes, server DISCONNECT, session expiry (NEXT-4 closes with it), message
+    expiry, will delay, Receive Maximum, Maximum Packet Size, topic aliases, Server Keep Alive, assigned id,
+    subscription options, user properties, AUTH refused. Part 3: shared subscriptions, subscription identifiers,
+    the conformance suite run to its expected-failure list, the README/KNOWN-ISSUES/PERFORMANCE updates, and any
+    enhanced-auth method if wanted then.
+23. **Conformance plan.** `docs/MQTT5-CONFORMANCE.md`: the Eclipse Paho interoperability suite (`client_test5.py`)
+    against the broker with a checked-in expected-failure list, Mosquitto clients with `-V mqttv5`, and the codec's
+    interop fixtures; `scripts/mqtt5-conformance.sh` is the harness (a stub until part 2).
+
+- **For the owner.** (a) Shared-subscription distribution: round robin over online members on an owner shard
+  (rule 16), against the alternatives "random" (no state, uneven) or "least in flight" (needs the members' load on
+  the owner). (b) Groups scoped by role class (rule 16). (c) Enhanced auth refused (0x8C) until a method is wanted;
+  SCRAM over plaintext accounts is the candidate. (d) The 30-day default session expiry, which also ends 3.1.1's
+  never-expiring persistent sessions (NEXT-4). (e) `mqtt5.enabled` on by default.
+- **Not done here.** Any broker or kernel change. The kernel does not call the 5.0 codec, so the image does not
+  grow: release kernels with and without `pub mod v5;` are the same size (aarch64 3 573 176 B, `.text` +4 B of
+  layout noise; x86_64 3 732 016 B, identical sections).
