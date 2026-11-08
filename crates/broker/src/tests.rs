@@ -1,7 +1,9 @@
 //! End-to-end broker tests over an in-memory transport.
 
 use super::*;
-use urmqtt_mqtt::{Subscribe, SubscribeTopics, Unsubscribe, UnsubscribeTopics, Will as MqttWill};
+use urmqtt_mqtt::{
+    Connect, Subscribe, SubscribeTopics, Unsubscribe, UnsubscribeTopics, Will as MqttWill,
+};
 
 const ACL: Acl = Acl {
     device_publish: &["devices/{id}/#"],
@@ -37,6 +39,7 @@ fn cfg() -> Config {
         fanout: false,
         control_ids: &["operator"],
         plain: None,
+        mqtt5: Default::default(),
         web: None,
         publisher_backpressure: PublisherBackpressure::Single,
     }
@@ -272,13 +275,17 @@ fn connect_accept_and_identity_rules() {
 
 #[test]
 fn unsupported_protocol_level_gets_connack_1() {
-    let mut b = Broker::new(cfg());
-    let v5 = [
-        0x10u8, 12, 0, 4, b'M', b'Q', b'T', b'T', 5, 0x02, 0, 60, 0, 0,
-    ];
-    let mut c = Client::raw(&mut b, &v5, 0);
-    assert_eq!(c.recv(&mut b), vec![Got::ConnAck(false, 1)]);
-    assert_eq!(b.close_requested(c.c), Some(CloseReason::Unsupported));
+    // Level 3 (MQTT 3.1) and anything above 5: the 3.1.1 answer, as before
+    // MQTT 5.0 (level 5 has its own decoder: v5_tests).
+    for level in [3u8, 6, 255] {
+        let mut b = Broker::new(cfg());
+        let connect = [
+            0x10u8, 12, 0, 4, b'M', b'Q', b'T', b'T', level, 0x02, 0, 60, 0, 0,
+        ];
+        let mut c = Client::raw(&mut b, &connect, 0);
+        assert_eq!(c.recv(&mut b), vec![Got::ConnAck(false, 1)]);
+        assert_eq!(b.close_requested(c.c), Some(CloseReason::Unsupported));
+    }
 }
 
 #[test]
@@ -437,14 +444,18 @@ fn dollar_topics_hidden_from_root_wildcards() {
     svc.subscribe(&mut b, 1, &[("$SYS/#", QoS::AtMostOnce)], 0);
     let mut topics = Topics::new();
     let n = topics.intern("$SYS/x");
-    topics.subscribe(n, 9, QoS::AtMostOnce);
+    topics.subscribe(n, 9, SubOpts::qos(QoS::AtMostOnce));
     let h = topics.intern("#");
-    topics.subscribe(h, 8, QoS::AtMostOnce);
+    topics.subscribe(h, 8, SubOpts::qos(QoS::AtMostOnce));
     let mut out = Vec::new();
     topics.subscribers("$SYS/x", &mut out);
-    assert_eq!(out, vec![(9, QoS::AtMostOnce)], "'#' must not match $SYS");
+    assert_eq!(
+        out,
+        vec![(9, SubOpts::qos(QoS::AtMostOnce))],
+        "'#' must not match $SYS"
+    );
     topics.subscribers("a/b", &mut out);
-    assert_eq!(out, vec![(8, QoS::AtMostOnce)]);
+    assert_eq!(out, vec![(8, SubOpts::qos(QoS::AtMostOnce))]);
 }
 
 #[test]
@@ -766,7 +777,7 @@ impl Model {
                             .insert(msg.topic.to_string(), (msg.payload.to_vec(), qos));
                     }
                 }
-                PersistOp::SessionUpsert { client_id } => {
+                PersistOp::SessionUpsert { client_id, .. } => {
                     self.sessions.entry(client_id.to_string()).or_default();
                 }
                 PersistOp::SessionDelete { client_id } => {
@@ -776,6 +787,7 @@ impl Model {
                     client_id,
                     filter,
                     qos,
+                    ..
                 } => {
                     let s = self
                         .sessions
@@ -810,6 +822,7 @@ impl Model {
                     assert!(!s.ids.contains(&id), "primary key ({client_id}, {id:?})");
                     s.ids.push(id);
                 }
+                PersistOp::SessionOffline { .. } => {}
                 PersistOp::QueueClear { client_id } => {
                     if let Some(s) = self.sessions.get_mut(&*client_id) {
                         s.queue.clear();
@@ -832,12 +845,9 @@ impl Model {
             b.restore_session(
                 id,
                 s.subs.iter().map(|(f, q)| (f.as_str(), *q)),
-                s.queue.iter().map(|(t, p, qos, pid)| StoredMsg {
-                    topic: t,
-                    payload: p,
-                    qos: *qos,
-                    pid: *pid,
-                }),
+                s.queue
+                    .iter()
+                    .map(|(t, p, qos, pid)| StoredMsg::plain(t, p, *qos, *pid)),
                 s.ids.iter().copied(),
             );
         }
@@ -2403,6 +2413,7 @@ fn plaintext_sessions_are_found_by_the_allowlist_sweep_by_their_login() {
 
 fn web_cfg() -> Config {
     Config {
+        mqtt5: Default::default(),
         web: Some(PlainPolicy {
             publish: &["web/{id}/#"],
             subscribe: &["web/{id}/#", "devices/+/telemetry/#"],

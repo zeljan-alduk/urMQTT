@@ -114,6 +114,7 @@ pub fn config() -> Config {
         control_ids: &["svc"],
         // No plaintext listener: every connection here has a TLS identity.
         plain: None,
+        mqtt5: Default::default(),
         web: None,
         publisher_backpressure: PublisherBackpressure::Single,
     }
@@ -1060,12 +1061,7 @@ impl Harness {
                 let ok = self.b.restore_session(
                     id,
                     subs.iter().map(|(f, q)| (f.as_str(), *q)),
-                    msgs.iter().map(|(t, p)| StoredMsg {
-                        topic: t,
-                        payload: p,
-                        qos,
-                        pid: None,
-                    }),
+                    msgs.iter().map(|(t, p)| StoredMsg::plain(t, p, qos, None)),
                     (1..=*ids).map(Qos2Id::Received),
                 );
                 assert_eq!(ok, want, "restore_session({id:?})");
@@ -1101,10 +1097,7 @@ impl Harness {
                 // The store and the other shards are trusted: only the
                 // receiver's rights apply.
                 let allowed = !is_reserved(topic);
-                let msg = Arc::new(MsgInner {
-                    topic: topic.as_str().into(),
-                    payload: self.payload(topic, allowed, 2).into(),
-                });
+                let msg = Arc::new(MsgInner::new(topic, &self.payload(topic, allowed, 2)));
                 self.b.route_remote(&msg, *qos, false);
             }
             Op::Ping { slot } => self.feed(*slot, &Packet::PingReq),

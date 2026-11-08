@@ -742,12 +742,7 @@ fn the_flows_survive_a_restart_through_the_store() {
 #[test]
 fn restore_bounds_what_the_store_hands_back() {
     let mut b = Broker::new(cfg()); // max_inflight 2, max_queued 3
-    let msg = |pid: Option<u16>| StoredMsg {
-        topic: "devices/d1/cmd/x",
-        payload: b"p",
-        qos: QoS::ExactlyOnce,
-        pid,
-    };
+    let msg = |pid: Option<u16>| StoredMsg::plain("devices/d1/cmd/x", b"p", QoS::ExactlyOnce, pid);
     let ids = (0..=200u16)
         .map(Qos2Id::Received)
         .chain([Qos2Id::Released(5), Qos2Id::Released(5)]);

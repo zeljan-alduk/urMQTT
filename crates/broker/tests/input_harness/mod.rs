@@ -51,6 +51,7 @@ pub fn cfg() -> Config {
             retain: false,
         }),
         // ADR-272: WebSocket password sessions, with a policy of their own.
+        mqtt5: Default::default(),
         web: Some(PlainPolicy {
             publish: &["web/{id}/#"],
             subscribe: &["web/{id}/#", "devices/+/telemetry/#"],

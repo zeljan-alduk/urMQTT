@@ -74,6 +74,7 @@ fn cfg() -> Config {
         fanout: false,
         control_ids: &[],
         plain: None,
+        mqtt5: Default::default(),
         web: None,
         publisher_backpressure: urmqtt_broker::PublisherBackpressure::Single,
     }

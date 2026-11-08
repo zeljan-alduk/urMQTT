@@ -63,6 +63,7 @@ fn cfg() -> Config {
         fanout: true,
         control_ids: &["backend"],
         plain: None,
+        mqtt5: Default::default(),
         web: None,
         publisher_backpressure: PublisherBackpressure::Single,
     }

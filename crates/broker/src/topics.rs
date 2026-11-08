@@ -9,12 +9,71 @@ use urmqtt_mqtt::QoS;
 use crate::{Msg, SessionId};
 
 pub type NodeId = u32;
+
+/// The options of one subscription: the MQTT 5.0 Subscription Options byte
+/// (§3.8.3.1: maximum QoS in bits 0-1, No Local bit 2, Retain As Published
+/// bit 3, Retain Handling bits 4-5). A 3.1.1 subscription is its QoS alone
+/// (ADR-273 rule 12), so the trie keeps one byte per subscriber, as it kept
+/// the QoS before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SubOpts(pub u8);
+
+impl SubOpts {
+    /// QoS only, every flag off (what a 3.1.1 subscription means).
+    pub const fn qos(q: QoS) -> Self {
+        Self(q as u8)
+    }
+
+    /// From a stored or received byte; reserved bits and an impossible QoS
+    /// or Retain Handling fall back to the QoS bits alone (the store is not
+    /// trusted).
+    pub fn from_byte(b: u8) -> Self {
+        match urmqtt_mqtt::v5::SubscriptionOptions::from_byte(b) {
+            Ok(o) => Self(o.to_byte()),
+            Err(_) => Self::qos(QoS::from_bits(b & 3).unwrap_or(QoS::AtMostOnce)),
+        }
+    }
+
+    /// The maximum QoS of deliveries.
+    pub fn max_qos(self) -> QoS {
+        QoS::from_bits(self.0 & 3).unwrap_or(QoS::AtMostOnce)
+    }
+
+    pub const fn no_local(self) -> bool {
+        self.0 & 0x04 != 0
+    }
+
+    pub const fn retain_as_published(self) -> bool {
+        self.0 & 0x08 != 0
+    }
+
+    /// 0: retained messages on every subscribe, 1: only for a new
+    /// subscription, 2: never.
+    pub const fn retain_handling(self) -> u8 {
+        (self.0 >> 4) & 3
+    }
+
+    /// The same options with another maximum QoS.
+    pub const fn with_qos(self, q: QoS) -> Self {
+        Self((self.0 & !3) | q as u8)
+    }
+
+    /// Two matching subscriptions of one session, delivered once (§3.3.4
+    /// lets the server send one copy): the higher QoS, No Local only if
+    /// both have it, Retain As Published if either has it.
+    pub fn merge(self, o: Self) -> Self {
+        let qos = self.max_qos().max(o.max_qos());
+        let no_local = self.0 & o.0 & 0x04;
+        let rap = (self.0 | o.0) & 0x08;
+        Self((self.0 & 0x30) | no_local | rap | qos as u8)
+    }
+}
 const ROOT: NodeId = 0;
 
 #[derive(Default)]
 struct Node {
     children: BTreeMap<Box<str>, NodeId>,
-    subs: Vec<(SessionId, QoS)>,
+    subs: Vec<(SessionId, SubOpts)>,
     retained: Option<(Msg, QoS)>,
     /// Who retained it, on the shard that accepted it (H3: per-device
     /// limit); `None` for replicas and restored messages.
@@ -120,11 +179,11 @@ impl Topics {
         self.nodes.get(n as usize)?.path.as_deref()
     }
 
-    pub fn subscribe(&mut self, node: NodeId, s: SessionId, qos: QoS) {
+    pub fn subscribe(&mut self, node: NodeId, s: SessionId, opts: SubOpts) {
         if let Some(n) = self.nodes.get_mut(node as usize) {
             match n.subs.iter_mut().find(|(id, _)| *id == s) {
-                Some(e) => e.1 = qos,
-                None => n.subs.push((s, qos)),
+                Some(e) => e.1 = opts,
+                None => n.subs.push((s, opts)),
             }
         }
     }
@@ -179,18 +238,18 @@ impl Topics {
         }
     }
 
-    /// Subscribers matching `topic`, with the highest QoS per session.
-    pub fn subscribers(&self, topic: &str, out: &mut Vec<(SessionId, QoS)>) {
+    /// Subscribers matching `topic`, one entry per session with the options
+    /// of its matching subscriptions merged ([`SubOpts::merge`]).
+    pub fn subscribers(&self, topic: &str, out: &mut Vec<(SessionId, SubOpts)>) {
         out.clear();
         let levels: Vec<&str> = topic.split('/').collect();
         let dollar = topic.starts_with('$');
         self.collect(ROOT, &levels, 0, dollar, out);
         // One delivery per session at the maximum granted QoS (§3.3.5 permits).
-        out.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-        out.dedup_by_key(|e| e.0);
+        dedup_sessions(out);
     }
 
-    fn add_subs(&self, n: NodeId, out: &mut Vec<(SessionId, QoS)>) {
+    fn add_subs(&self, n: NodeId, out: &mut Vec<(SessionId, SubOpts)>) {
         if let Some(node) = self.nodes.get(n as usize) {
             out.extend_from_slice(&node.subs);
         }
@@ -202,7 +261,7 @@ impl Topics {
         levels: &[&str],
         i: usize,
         dollar: bool,
-        out: &mut Vec<(SessionId, QoS)>,
+        out: &mut Vec<(SessionId, SubOpts)>,
     ) {
         let wild_ok = !(dollar && i == 0);
         if wild_ok && let Some(h) = self.child(n, "#") {
@@ -228,6 +287,14 @@ impl Topics {
             retained_cost(&m.topic, m.payload.len()),
             node.owner.as_deref(),
         ))
+    }
+
+    /// Whether the retained message at `topic` is `msg` itself.
+    pub fn retained_is(&self, topic: &str, msg: &Msg) -> bool {
+        self.find(topic)
+            .and_then(|n| self.nodes.get(n as usize))
+            .and_then(|n| n.retained.as_ref())
+            .is_some_and(|(m, _)| alloc::sync::Arc::ptr_eq(m, msg))
     }
 
     /// Stores (or with an empty payload clears) the retained message;
@@ -325,6 +392,20 @@ impl Topics {
             }
         }
     }
+}
+
+/// Sorts `out` by session and merges the entries of one session into one
+/// (the highest QoS first, then [`SubOpts::merge`]).
+pub fn dedup_sessions(out: &mut Vec<(SessionId, SubOpts)>) {
+    out.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.max_qos().cmp(&a.1.max_qos())));
+    out.dedup_by(|later, kept| {
+        if later.0 == kept.0 {
+            kept.1 = kept.1.merge(later.1);
+            true
+        } else {
+            false
+        }
+    });
 }
 
 /// Topic name `topic` matches filter `filter` (`+`, `#`). `None` is the

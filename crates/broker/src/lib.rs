@@ -1,5 +1,8 @@
-//! MQTT 3.1.1 broker core: sessions, topic tree, subscriptions, routing,
-//! QoS 0/1/2, retained messages, Last Will, keepalive, ACL and limits.
+//! MQTT 3.1.1 and 5.0 broker core: sessions, topic tree, subscriptions,
+//! routing, QoS 0/1/2, retained messages, Last Will, keepalive, ACL and
+//! limits; for 5.0 (ADR-273, ADR-274) session and message expiry, will
+//! delay, flow control, topic aliases, subscription options, property
+//! forwarding and reason codes.
 //!
 //! The broker is *sans-IO*: the transport feeds bytes in with [`Broker::input`]
 //! and drains bytes from [`Broker::output`]; time comes in as milliseconds.
@@ -24,25 +27,30 @@ extern crate alloc;
 
 pub mod acl;
 mod compact;
+mod expiry;
 mod flow;
 pub mod sys;
 mod topics;
+mod v5;
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
+use urmqtt_mqtt::v5 as mqtt5;
+use urmqtt_mqtt::v5::{Properties, Property, ReasonCode};
 
 use urmqtt_mqtt::{
-    ConnAck, Connect, ConnectReturnCode, Error as CodecError, Limits, Packet, Publish, QoS,
-    SUBACK_FAILURE, SubAck, decode, encode, encoded_len, is_valid_topic_filter,
-    is_valid_topic_name,
+    ConnAck, ConnectReturnCode, Error as CodecError, Limits, Packet, Publish, QoS, SUBACK_FAILURE,
+    SubAck, decode, encode, encoded_len, is_valid_topic_filter, is_valid_topic_name,
 };
 
 pub use acl::{Acl, Role};
 pub use flow::{FlowStats, PublisherBackpressure};
-pub use topics::{NodeId, Topics};
+pub use topics::{NodeId, SubOpts, Topics};
+pub use v5::REASON_SLOTS;
+use v5::{ConnectIn, PublishIn, V5State, WillIn};
 
 pub use compact::Buf;
 use compact::{Index, Small};
@@ -51,11 +59,43 @@ use urmqtt_mm::slab::Slab;
 pub type ConnId = u32;
 pub type SessionId = u32;
 
-/// A published message, stored once and shared by every delivery.
+/// A published message, stored once and shared by every delivery (and by
+/// the other shards: the cross-core route carries this `Arc`, so the
+/// properties travel with it at no cost for a message that has none).
 #[derive(Debug)]
 pub struct MsgInner {
     pub topic: Box<str>,
     pub payload: Box<[u8]>,
+    /// The MQTT 5.0 properties forwarded to 5.0 subscribers (ADR-273 rule
+    /// 2): the PUBLISH's block without Topic Alias, Subscription Identifier
+    /// and Message Expiry Interval, as validated bytes. `None` for a message
+    /// from a 3.1.1 client or one without properties (no allocation).
+    pub props: Option<Box<[u8]>>,
+    /// When the Message Expiry Interval ends, on the broker's millisecond
+    /// clock (the `now_ms` it is given); 0: never (rule 5).
+    pub expires_ms: u64,
+}
+
+impl MsgInner {
+    /// A message without properties or expiry (what a 3.1.1 PUBLISH is).
+    pub fn new(topic: &str, payload: &[u8]) -> Self {
+        Self {
+            topic: topic.into(),
+            payload: payload.into(),
+            props: None,
+            expires_ms: 0,
+        }
+    }
+
+    /// The forwarded property bytes (empty when none).
+    pub fn props(&self) -> &[u8] {
+        self.props.as_deref().unwrap_or_default()
+    }
+
+    /// Its Message Expiry Interval has passed.
+    pub fn expired(&self, now_ms: u64) -> bool {
+        self.expires_ms != 0 && now_ms >= self.expires_ms
+    }
 }
 
 pub type Msg = Arc<MsgInner>;
@@ -100,6 +140,54 @@ pub struct Config {
     /// Stop reading a publisher whose only recipient cannot keep up, instead
     /// of dropping its QoS 0 messages (NOW-13, ADR-269; [`flow`]).
     pub publisher_backpressure: PublisherBackpressure,
+    /// MQTT 5.0 and session expiry (ADR-273 rule 21, ADR-274).
+    pub mqtt5: Mqtt5Policy,
+}
+
+/// The `[mqtt5]` keys and the expiry limits of the configuration (format
+/// 12). The session expiry limits apply to 3.1.1 persistent sessions too
+/// (NEXT-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mqtt5Policy {
+    /// Accept protocol level 5 (false: CONNACK 0x84).
+    pub enabled: bool,
+    /// Announced Receive Maximum: QoS 2 publications awaiting PUBREL a 5.0
+    /// client may hold; one more is DISCONNECT 0x93.
+    pub receive_maximum: u16,
+    /// Announced Topic Alias Maximum; 0 disables aliases.
+    pub topic_alias_maximum: u16,
+    /// User Properties per property block (more: refused, 0x83).
+    pub max_user_properties: u16,
+    /// 0: the client's keep alive; otherwise its maximum (Server Keep Alive).
+    pub max_keep_alive_s: u16,
+    /// The longest Session Expiry Interval granted; `u32::MAX`: never.
+    pub max_session_expiry_s: u32,
+    /// The Session Expiry of a 3.1.1 persistent session (`clean_session`
+    /// 0), at most `max_session_expiry_s`.
+    pub default_session_expiry_s: u32,
+    /// The longest Message Expiry Interval a publisher may ask for; 0: no
+    /// cap.
+    pub max_message_expiry_s: u32,
+}
+
+impl Mqtt5Policy {
+    /// ADR-273's defaults: 5.0 on, 30 days of session expiry.
+    pub const DEFAULT: Self = Self {
+        enabled: true,
+        receive_maximum: 32,
+        topic_alias_maximum: 10,
+        max_user_properties: 16,
+        max_keep_alive_s: 0,
+        max_session_expiry_s: 2_592_000,
+        default_session_expiry_s: 2_592_000,
+        max_message_expiry_s: 0,
+    };
+}
+
+impl Default for Mqtt5Policy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// What a plaintext session may do and how much (P1, ADR-229, ADR-230). The
@@ -245,6 +333,39 @@ pub struct StoredMsg<'a> {
     /// this packet id and not acknowledged (no PUBACK, no PUBREC). It is
     /// sent again with that id and DUP set (4.4). `None`: queued, not sent.
     pub pid: Option<u16>,
+    /// Its MQTT 5.0 properties (checked again on restore: the store is not
+    /// trusted), `None` for none.
+    pub props: Option<&'a [u8]>,
+    /// Seconds left of its Message Expiry Interval (≤ 0: expired, it is
+    /// dropped and counted); `None`: it does not expire.
+    pub expires_in_s: Option<i64>,
+}
+
+impl<'a> StoredMsg<'a> {
+    /// A message without properties or expiry.
+    pub fn plain(topic: &'a str, payload: &'a [u8], qos: QoS, pid: Option<u16>) -> Self {
+        Self {
+            topic,
+            payload,
+            qos,
+            pid,
+            props: None,
+            expires_in_s: None,
+        }
+    }
+}
+
+/// A stored session's expiry, as the kernel hands it back
+/// ([`Broker::restore_session_v5`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredSession {
+    /// Its Session Expiry Interval; `None`: stored before schema 4, the
+    /// 3.1.1 default applies (`default_session_expiry_s`).
+    pub expiry_s: Option<u32>,
+    /// How long it has been offline (wall clock, 0 when unknown).
+    pub offline_for_s: u64,
+    /// The broker's clock now.
+    pub now_ms: u64,
 }
 
 /// A change to durable broker state, for the DB core (ADR-030).
@@ -257,21 +378,21 @@ pub struct StoredMsg<'a> {
 #[derive(Debug, Clone)]
 pub enum PersistOp {
     /// Set a retained message; an empty payload clears it.
-    Retain {
-        msg: Msg,
-        qos: QoS,
-    },
-    SessionUpsert {
-        client_id: Box<str>,
-    },
+    Retain { msg: Msg, qos: QoS },
+    /// Creates or updates the session with its Session Expiry Interval and
+    /// marks it online (no offline time).
+    SessionUpsert { client_id: Box<str>, expiry_s: u32 },
+    /// The session went offline now: its expiry runs from here (the store
+    /// records the wall-clock time, ADR-273 rule 4).
+    SessionOffline { client_id: Box<str> },
     /// Deletes the session with its subscriptions and queue.
-    SessionDelete {
-        client_id: Box<str>,
-    },
+    SessionDelete { client_id: Box<str> },
     Subscribe {
         client_id: Box<str>,
         filter: Box<str>,
         qos: QoS,
+        /// The Subscription Options byte (its QoS bits are `qos`).
+        options: u8,
     },
     Unsubscribe {
         client_id: Box<str>,
@@ -286,14 +407,9 @@ pub enum PersistOp {
         pid: Option<u16>,
     },
     /// Records a packet id of an unfinished QoS 2 flow (ADR-271).
-    Qos2 {
-        client_id: Box<str>,
-        id: Qos2Id,
-    },
+    Qos2 { client_id: Box<str>, id: Qos2Id },
     /// Clears the stored queue and the QoS 2 packet ids of the session.
-    QueueClear {
-        client_id: Box<str>,
-    },
+    QueueClear { client_id: Box<str> },
 }
 
 /// Why a connection is (being) closed.
@@ -307,9 +423,12 @@ pub enum CloseReason {
     Unsupported,
     /// Its identity left the allowlist (H1).
     Disallowed,
+    /// MQTT 5.0: the broker sent DISCONNECT with this reason code (a failure
+    /// that is none of the above: 0x93, 0x94, 0x95, 0x9A, ...).
+    Refused(u8),
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
     pub connections: usize,
     pub sessions: usize,
@@ -356,6 +475,67 @@ pub struct Stats {
     /// Connections closed because they held more QoS 2 packet ids awaiting
     /// PUBREL than [`Broker::qos2_id_limit`] allows.
     pub qos2_inbound_full: u64,
+    /// Connections with a session that speak MQTT 5.0 (part of `online`).
+    pub online_v5: usize,
+    /// Messages not delivered because their Message Expiry Interval passed
+    /// (from a queue, the retained store, a restore).
+    pub messages_expired: u64,
+    /// Deliveries not sent because they exceeded the client's Maximum
+    /// Packet Size (5.0), dropped as if sent [MQTT-3.1.2-25].
+    pub dropped_too_large: u64,
+    /// Sessions ended by their Session Expiry Interval (offline, or found
+    /// expired at restore).
+    pub sessions_expired: u64,
+    /// Wills armed with a Will Delay Interval (counted when armed).
+    pub wills_delayed: u64,
+    /// Wills armed now.
+    pub wills_pending: usize,
+    /// Offline sessions with a running expiry now.
+    pub sessions_expiring: usize,
+    /// Server-sent DISCONNECTs by reason code (index code − 0x80).
+    pub disconnects_sent: [u64; REASON_SLOTS],
+    /// 5.0 CONNECTs refused, by CONNACK reason code (index code − 0x80).
+    pub connack_refused: [u64; REASON_SLOTS],
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            connections: 0,
+            sessions: 0,
+            subscriptions: 0,
+            retained: 0,
+            topic_nodes: 0,
+            published: 0,
+            delivered: 0,
+            dropped_acl: 0,
+            dropped_rate: 0,
+            dropped_queue_full: 0,
+            dropped_backpressure: 0,
+            dropped_offline: 0,
+            wills_published: 0,
+            dropped_control: 0,
+            control_received: 0,
+            retained_refused_device: 0,
+            retained_refused_bytes: 0,
+            retained_bytes: 0,
+            online: 0,
+            dropped_sys: 0,
+            qos2_received: 0,
+            qos2_duplicates: 0,
+            qos2_completed: 0,
+            qos2_inbound_full: 0,
+            online_v5: 0,
+            messages_expired: 0,
+            dropped_too_large: 0,
+            sessions_expired: 0,
+            wills_delayed: 0,
+            wills_pending: 0,
+            sessions_expiring: 0,
+            disconnects_sent: [0; REASON_SLOTS],
+            connack_refused: [0; REASON_SLOTS],
+        }
+    }
 }
 
 struct Will {
@@ -364,6 +544,11 @@ struct Will {
     retain: bool,
     /// The identity whose will it is (charged for a retained will).
     owner: Box<str>,
+    /// MQTT 5.0 Will Delay Interval (0 for 3.1.1).
+    delay_s: u32,
+    /// MQTT 5.0 Message Expiry Interval of the Will, which runs from when
+    /// it is published.
+    expiry_s: Option<u32>,
 }
 
 struct Conn {
@@ -374,8 +559,10 @@ struct Conn {
     inbuf: Buf,
     outbuf: Buf,
     last_rx_ms: u64,
-    /// The client's keepalive (≤ 65 535 s, so 32 bits of ms suffice).
-    keepalive_ms: u32,
+    /// The client's keep alive (s; 0: none). Seconds, not ms: two bytes
+    /// keep the connection within its 48 next to the 5.0 refusal code and
+    /// the back-pressure state (ADR-269, ADR-274).
+    keepalive_s: u16,
     close: Option<CloseReason>,
     /// Listed in `ready` since the last `drain_ready`.
     ready: bool,
@@ -403,6 +590,9 @@ struct Extra {
     /// with the WebSocket policy.
     web: bool,
     will: Option<Will>,
+    /// An MQTT 5.0 connection (ADR-273 rule 1): every later packet uses the
+    /// 5.0 codec, both ways.
+    v5: Option<Box<V5State>>,
 }
 
 impl Conn {
@@ -412,13 +602,19 @@ impl Conn {
 
     /// Frees the box once nothing is left in it.
     fn release_extra(&mut self) {
-        if self
-            .extra
-            .as_ref()
-            .is_some_and(|e| e.identity.is_none() && e.will.is_none() && !e.plain && !e.web)
-        {
+        if self.extra.as_ref().is_some_and(|e| {
+            e.identity.is_none() && e.will.is_none() && !e.plain && !e.web && e.v5.is_none()
+        }) {
             self.extra = None;
         }
+    }
+
+    fn v5(&self) -> Option<&V5State> {
+        self.extra.as_ref()?.v5.as_deref()
+    }
+
+    fn v5_mut(&mut self) -> Option<&mut V5State> {
+        self.extra.as_mut()?.v5.as_deref_mut()
     }
 
     /// The login role of a connection whose identity came from a password
@@ -462,7 +658,7 @@ struct Pending {
     /// Sent and not completed, in the order sent (resent in this order).
     inflight: Vec<Flight>,
     /// Not sent yet, with the QoS each is delivered at (1 or 2) and whether
-    /// it is a retained replay (sent with RETAIN when its turn comes).
+    /// it is sent with RETAIN (a retained replay, or Retain As Published).
     queue: VecDeque<(Msg, QoS, bool)>,
     /// QoS 2 packet ids received from the client and acknowledged with
     /// PUBREC, awaiting its PUBREL (method B of 4.3.3: the message is routed
@@ -516,7 +712,8 @@ pub const MIN_QOS2_IDS: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Sub {
     node: NodeId,
-    qos: QoS,
+    /// Maximum QoS and, for 5.0, the subscription options (ADR-273 rule 12).
+    opts: SubOpts,
     scoped: bool,
 }
 
@@ -534,7 +731,11 @@ struct Session {
     conn: Option<NonZeroU32>,
     next_pid: u16,
     role: Role,
-    clean: bool,
+    /// Session Expiry Interval in seconds (ADR-273 rule 4): 0 ends the
+    /// session when its connection closes (3.1.1 `clean_session`),
+    /// `u32::MAX` never expires. 3.1.1 persistent sessions get
+    /// `default_session_expiry_s`.
+    expiry_s: u32,
     /// The session exists in the durable store.
     persisted: bool,
 }
@@ -604,7 +805,7 @@ pub struct Broker {
     /// Relative device-scoped filters, shared by every device.
     scoped: Topics,
     stats: Stats,
-    scratch: Vec<(SessionId, QoS)>,
+    scratch: Vec<(SessionId, SubOpts)>,
     ops: Vec<PersistOp>,
     telemetry: Vec<Msg>,
     routes: Vec<(Msg, QoS, bool, Option<ConnId>)>,
@@ -635,6 +836,17 @@ pub struct Broker {
     /// While a routed message is delivered: a connection that may take it
     /// beyond `max_outbound_bytes`, up to the given length (ADR-269).
     flow_allow: Option<(ConnId, usize)>,
+    /// The latest time any call gave (ms): the clock of deliveries that
+    /// happen without one (an acknowledgement frees the window, a remote
+    /// route arrives) for message expiry.
+    now_ms: u64,
+    /// Connections with a session that speak 5.0.
+    online5: usize,
+    /// Offline sessions whose Session Expiry Interval runs.
+    expiring: expiry::Deadlines,
+    /// Wills armed with a Will Delay Interval, by session, and when.
+    wills: BTreeMap<SessionId, Will>,
+    will_at: expiry::Deadlines,
 }
 
 /// The scope level of the device ACL: the first level of a device
@@ -721,6 +933,11 @@ impl Broker {
             plain_seq: 0,
             flow: flow::Flow::default(),
             flow_allow: None,
+            now_ms: 0,
+            online5: 0,
+            expiring: expiry::Deadlines::default(),
+            wills: BTreeMap::new(),
+            will_at: expiry::Deadlines::default(),
         }
     }
 
@@ -738,17 +955,14 @@ impl Broker {
         if payload.is_empty() || !acl::sys(topic) {
             return;
         }
-        let msg = Arc::new(MsgInner {
-            topic: topic.into(),
-            payload: payload.into(),
-        });
+        let msg = Arc::new(MsgInner::new(topic, payload));
         let cost = topics::retained_cost(topic, payload.len());
         if let Some(old) = self.sys_topics.insert(topic.into(), cost) {
             self.sys_bytes -= old;
         }
         self.sys_bytes += cost;
         self.store_retained(&msg, QoS::AtMostOnce, None);
-        self.route_local(&msg, QoS::AtMostOnce, false, true);
+        self.route_local(&msg, QoS::AtMostOnce, false, None);
     }
 
     /// Delivers a `$SYS/` message that is not retained (a query reply).
@@ -756,11 +970,8 @@ impl Broker {
         if !acl::sys(topic) {
             return;
         }
-        let msg = Arc::new(MsgInner {
-            topic: topic.into(),
-            payload: payload.into(),
-        });
-        self.route_local(&msg, QoS::AtMostOnce, false, true);
+        let msg = Arc::new(MsgInner::new(topic, payload));
+        self.route_local(&msg, QoS::AtMostOnce, false, None);
     }
 
     /// Publishes one console line on [`sys::CONSOLE_OUT`] and keeps it in
@@ -768,15 +979,12 @@ impl Broker {
     /// subscriber that cannot take it loses it (QoS 0, counted by
     /// `dropped_backpressure`).
     pub fn console_line(&mut self, text: &str) {
-        let msg = Arc::new(MsgInner {
-            topic: sys::CONSOLE_OUT.into(),
-            payload: text.as_bytes().into(),
-        });
+        let msg = Arc::new(MsgInner::new(sys::CONSOLE_OUT, text.as_bytes()));
         if self.console.len() >= sys::CONSOLE_RING {
             self.console.pop_front();
         }
         self.console.push_back(msg.clone());
-        self.route_local(&msg, QoS::AtMostOnce, false, true);
+        self.route_local(&msg, QoS::AtMostOnce, false, None);
     }
 
     /// Takes the operators' requests received since the last call.
@@ -860,7 +1068,7 @@ impl Broker {
     /// originating shard alone persists it. Returns how many sessions here
     /// it was for.
     pub fn route_remote(&mut self, msg: &Msg, qos: QoS, retain: bool) -> usize {
-        self.route_local(msg, qos, retain, false).n
+        self.route_replica(msg, qos, retain).n
     }
 
     /// [`Broker::route_remote`] for a message whose publisher is known:
@@ -875,15 +1083,26 @@ impl Broker {
         origin: Option<(u16, ConnId)>,
         now_ms: u64,
     ) -> usize {
+        self.tick_clock(now_ms);
         // A subscriber whose publisher was asked to pause takes what is
         // already on its way beyond the usual buffer (ADR-269).
         self.flow_allow = origin.and_then(|o| self.overshoot_for(o));
-        let to = self.route_local(msg, qos, retain, false);
+        let to = self.route_replica(msg, qos, retain);
         self.flow_allow = None;
         if let Some(o) = origin {
             self.remote_single(o, to, now_ms);
         }
         to.n
+    }
+
+    /// A message another shard accepted, to this shard's subscribers.
+    fn route_replica(&mut self, msg: &Msg, qos: QoS, retain: bool) -> flow::Recipients {
+        if retain {
+            // A replica of what another shard accepted (it checked the
+            // limits; the shards hold the same set).
+            self.store_retained(msg, qos, None);
+        }
+        self.route_local(msg, qos, retain, None)
     }
 
     /// Takes the accepted telemetry PUBLISHes since the last call (in order).
@@ -909,13 +1128,26 @@ impl Broker {
 
     /// Restores a retained message from the store (no persist op).
     pub fn restore_retained(&mut self, topic: &str, payload: &[u8], qos: QoS) {
+        self.restore_retained_v5(topic, payload, qos, None, None, self.now_ms);
+    }
+
+    /// Restores a retained message with its MQTT 5.0 properties (checked
+    /// again: the store is not trusted; a block that does not validate is
+    /// dropped, the message kept) and the seconds left of its Message
+    /// Expiry Interval (≤ 0: expired, not restored, counted).
+    pub fn restore_retained_v5(
+        &mut self,
+        topic: &str,
+        payload: &[u8],
+        qos: QoS,
+        props: Option<&[u8]>,
+        expires_in_s: Option<i64>,
+        now_ms: u64,
+    ) {
+        self.tick_clock(now_ms);
         if payload.is_empty() || !within_limits(topic, &self.cfg.limits, is_valid_topic_name) {
             return;
         }
-        let msg = Arc::new(MsgInner {
-            topic: topic.into(),
-            payload: payload.into(),
-        });
         // No owner: counts start empty after a restart; the byte budget
         // still applies to what comes back.
         if self.device_retained_bytes() + topics::retained_cost(topic, payload.len())
@@ -924,24 +1156,57 @@ impl Broker {
             self.stats.retained_refused_bytes += 1;
             return;
         }
+        let Some(msg) = self.stored_msg(topic, payload, props, expires_in_s) else {
+            return;
+        };
         self.topics.set_retained(topic, msg, qos, None);
     }
 
+    /// A message from the store, or `None` when its expiry passed (counted).
+    fn stored_msg(
+        &mut self,
+        topic: &str,
+        payload: &[u8],
+        props: Option<&[u8]>,
+        expires_in_s: Option<i64>,
+    ) -> Option<Msg> {
+        let expires_ms = match expires_in_s {
+            None => 0,
+            Some(s) if s <= 0 => {
+                self.stats.messages_expired += 1;
+                return None;
+            }
+            Some(s) => self
+                .now_ms
+                .saturating_add(u64::try_from(s).unwrap_or(0).saturating_mul(1000))
+                .max(1),
+        };
+        let limits = self.limits5(self.cfg.limits);
+        let props = props
+            .filter(|p| {
+                mqtt5::validate_properties(p, mqtt5::PropertyContext::Publish, &limits).is_ok()
+            })
+            .and_then(|p| v5::strip(p, v5::NOT_STORED));
+        Some(Arc::new(MsgInner {
+            topic: topic.into(),
+            payload: payload.into(),
+            props,
+            expires_ms,
+        }))
+    }
+
     /// How many QoS 2 packet ids a session may hold awaiting the client's
-    /// PUBREL (`max_inflight`, at least [`MIN_QOS2_IDS`]). A client that
-    /// opens one more is disconnected (`qos2_inbound_full`); it sends the
-    /// PUBLISH again when it reconnects.
+    /// PUBREL (`max_inflight`, at least [`MIN_QOS2_IDS`]). A 3.1.1 client
+    /// that opens one more is disconnected (`qos2_inbound_full`); it sends
+    /// the PUBLISH again when it reconnects. A 5.0 client is held to the
+    /// Receive Maximum the broker announced instead (DISCONNECT 0x93).
     pub fn qos2_id_limit(&self) -> usize {
         self.cfg.max_inflight.max(MIN_QOS2_IDS)
     }
 
-    /// Restores an offline persistent session from the store. Subscriptions
-    /// the current ACL no longer allows are dropped (and removed from the
-    /// store); limits apply as for live sessions. Messages that were in
-    /// flight go back into flight with their packet ids (up to the window;
-    /// the rest are queued), then the queue; `ids` are the packet ids of
-    /// unfinished QoS 2 flows (ADR-271). Returns false if the client id is
-    /// not acceptable any more (the session is deleted).
+    /// Restores an offline persistent session from the store, as stored
+    /// before schema 4: the 3.1.1 default expiry, offline time unknown, the
+    /// subscriptions' options their QoS ([`Self::restore_session_v5`]).
     pub fn restore_session<'a>(
         &mut self,
         client_id: &str,
@@ -949,26 +1214,85 @@ impl Broker {
         queued: impl IntoIterator<Item = StoredMsg<'a>>,
         ids: impl IntoIterator<Item = Qos2Id>,
     ) -> bool {
-        if !Self::valid_identity(client_id) || self.find_session(client_id).is_some() {
+        let st = StoredSession {
+            expiry_s: None,
+            offline_for_s: 0,
+            now_ms: self.now_ms,
+        };
+        self.restore_session_v5(
+            client_id,
+            st,
+            subs.into_iter().map(|(f, q)| (f, q as u8)),
+            queued,
+            ids,
+        )
+    }
+
+    /// Restores an offline persistent session from the store. Subscriptions
+    /// the current ACL no longer allows are dropped (and removed from the
+    /// store); limits apply as for live sessions. Messages that were in
+    /// flight go back into flight with their packet ids (up to the window;
+    /// the rest are queued), then the queue; `ids` are the packet ids of
+    /// unfinished QoS 2 flows (ADR-271). `subs` carry the Subscription
+    /// Options byte. A session whose Session Expiry Interval ran out while
+    /// the broker was down is deleted here (counted, ADR-274): nothing of it
+    /// is loaded, so it costs no memory and no later sweep. Returns false if
+    /// the session is not restored (the client id is not acceptable any
+    /// more, or it expired; the session is deleted).
+    pub fn restore_session_v5<'a>(
+        &mut self,
+        client_id: &str,
+        st: StoredSession,
+        subs: impl IntoIterator<Item = (&'a str, u8)>,
+        queued: impl IntoIterator<Item = StoredMsg<'a>>,
+        ids: impl IntoIterator<Item = Qos2Id>,
+    ) -> bool {
+        self.tick_clock(st.now_ms);
+        let m5 = self.cfg.mqtt5;
+        // Capped by today's maximum: the configuration may have lowered it.
+        let expiry = st
+            .expiry_s
+            .unwrap_or(m5.default_session_expiry_s)
+            .min(m5.max_session_expiry_s);
+        let gone = expiry == 0 || (expiry != u32::MAX && st.offline_for_s >= u64::from(expiry));
+        let valid = Self::valid_identity(client_id);
+        if !valid || self.find_session(client_id).is_some() || gone {
+            if gone && valid {
+                self.stats.sessions_expired += 1;
+            }
             self.emit(PersistOp::SessionDelete {
                 client_id: client_id.into(),
             });
             return false;
         }
         let role = self.cfg.acl.role(client_id);
-        let sid = self.insert_session(client_id, role, false, 0);
+        let sid = self.insert_session(client_id, role, expiry, self.now_ms);
+        if expiry != u32::MAX {
+            let left = u64::from(expiry) - st.offline_for_s;
+            self.expiring
+                .arm(sid, self.now_ms.saturating_add(left.saturating_mul(1000)));
+        }
         let max_queued = self.cfg.max_queued;
         let max_inflight = self.cfg.max_inflight;
         let id_limit = self.qos2_id_limit();
-        for (filter, qos) in subs {
+        for (filter, options) in subs {
+            let opts = SubOpts::from_byte(options);
             let ok = within_limits(filter, &self.cfg.limits, is_valid_topic_filter)
+                && !filter.starts_with("$share/")
                 && self.cfg.acl.may_subscribe(role, client_id, filter)
-                && self.add_sub(sid, filter, qos);
+                && self.add_sub(sid, filter, opts).is_some();
             if !ok {
                 self.emit(PersistOp::Unsubscribe {
                     client_id: client_id.into(),
                     filter: filter.into(),
                 });
+            }
+        }
+        // The stored messages, minus those whose expiry passed.
+        let mut msgs: Vec<(Msg, QoS, Option<u16>)> = Vec::new();
+        for m in queued {
+            if let Some(msg) = self.stored_msg(m.topic, m.payload, m.props, m.expires_in_s) {
+                msgs.push((msg, m.qos, m.pid));
             }
         }
         if let Some(s) = self.session(sid) {
@@ -994,14 +1318,10 @@ impl Broker {
                     _ => {}
                 }
             }
-            for m in queued {
-                let qos = m.qos.clamp(QoS::AtLeastOnce, QoS::ExactlyOnce);
-                let msg = Arc::new(MsgInner {
-                    topic: m.topic.into(),
-                    payload: m.payload.into(),
-                });
+            for (msg, qos, pid) in msgs {
+                let qos = qos.clamp(QoS::AtLeastOnce, QoS::ExactlyOnce);
                 let p = s.pending_mut();
-                let pid = m.pid.filter(|&id| {
+                let pid = pid.filter(|&id| {
                     id != 0
                         && p.inflight.len() < max_inflight
                         && !p.inflight.iter().any(|f| f.pid == id)
@@ -1040,43 +1360,42 @@ impl Broker {
             .position(|x| x.scoped == scoped && trie.path(x.node) == Some(f))
     }
 
-    /// Subscribes `sid` to `filter` or updates the granted QoS. False if
-    /// the session is at its subscription limit.
-    fn add_sub(&mut self, sid: SessionId, filter: &str, qos: QoS) -> bool {
+    /// Subscribes `sid` to `filter` or updates its options. `None` if the
+    /// session is at its subscription limit; otherwise whether the
+    /// subscription is new (Retain Handling 1, ADR-273 rule 12).
+    fn add_sub(&mut self, sid: SessionId, filter: &str, opts: SubOpts) -> Option<bool> {
         let existing = self.sub_index(sid, filter);
         let max = self.cfg.max_subscriptions_per_session;
-        let Some(s) = self.sessions.get_mut(sid) else {
-            return false;
-        };
+        let s = self.sessions.get_mut(sid)?;
         if let Some(e) = existing.and_then(|i| s.subs.as_mut_slice().get_mut(i)) {
-            e.qos = qos;
+            e.opts = opts;
             if !e.scoped {
-                self.topics.subscribe(e.node, sid, qos);
+                self.topics.subscribe(e.node, sid, opts);
             }
-            return true;
+            return Some(false);
         }
         if s.subs.len() >= max {
-            return false;
+            return None;
         }
         let sub = match scoped_part(self.scope, &s.client_id, filter) {
             Some(rel) => Sub {
                 node: self.scoped.intern_filter(rel),
-                qos,
+                opts,
                 scoped: true,
             },
             None => {
                 let node = self.topics.intern_filter(filter);
-                self.topics.subscribe(node, sid, qos);
+                self.topics.subscribe(node, sid, opts);
                 Sub {
                     node,
-                    qos,
+                    opts,
                     scoped: false,
                 }
             }
         };
         s.subs.push(sub);
         self.subs_total += 1;
-        true
+        Some(true)
     }
 
     /// Removes `filter` from `sid`; false if it was not subscribed.
@@ -1096,8 +1415,8 @@ impl Broker {
         true
     }
 
-    /// Every filter of session `s` with its QoS, as the client sent it.
-    fn filters_of(&self, s: &Session) -> Vec<(Box<str>, QoS)> {
+    /// Every filter of session `s` with its options, as the client sent it.
+    fn filters_of(&self, s: &Session) -> Vec<(Box<str>, SubOpts)> {
         s.subs
             .as_slice()
             .iter()
@@ -1108,14 +1427,14 @@ impl Broker {
                 } else {
                     self.topics.path(x.node)?.into()
                 };
-                Some((f, x.qos))
+                Some((f, x.opts))
             })
             .collect()
     }
 
     /// Adds the device-scoped subscribers of `topic` to `out` (the device
     /// named by the topic, if its session lives here). True if any.
-    fn scoped_subscribers(&self, topic: &str, out: &mut Vec<(SessionId, QoS)>) -> bool {
+    fn scoped_subscribers(&self, topic: &str, out: &mut Vec<(SessionId, SubOpts)>) -> bool {
         let Some((id, rest)) = scoped_topic(self.scope, topic) else {
             return false;
         };
@@ -1132,7 +1451,7 @@ impl Broker {
                 .path(x.node)
                 .is_some_and(|f| topics::filter_matches(f, rest))
             {
-                out.push((sid, x.qos));
+                out.push((sid, x.opts));
             }
         }
         out.len() > before
@@ -1165,7 +1484,10 @@ impl Broker {
                 .saturating_sub(self.sys_topics.len()),
             retained_bytes: self.device_retained_bytes(),
             online: self.online,
+            online_v5: self.online5,
             topic_nodes: self.topics.node_count(),
+            wills_pending: self.wills.len(),
+            sessions_expiring: self.expiring.len(),
             ..self.stats
         }
     }
@@ -1175,6 +1497,7 @@ impl Broker {
     /// A new network connection. `None` when the connection limit is hit
     /// (the transport should refuse or reset it).
     pub fn open(&mut self, now_ms: u64) -> Option<ConnId> {
+        self.tick_clock(now_ms);
         if self.conns.len() >= self.cfg.max_connections {
             return None;
         }
@@ -1184,7 +1507,7 @@ impl Broker {
             inbuf: Buf::default(),
             outbuf: Buf::default(),
             last_rx_ms: now_ms,
-            keepalive_ms: 0,
+            keepalive_s: 0,
             close: None,
             ready: false,
             flow: 0,
@@ -1244,10 +1567,37 @@ impl Broker {
         self.sessions.get_mut(s)
     }
 
+    /// Moves the broker's clock forward (never back).
+    fn tick_clock(&mut self, now_ms: u64) {
+        if now_ms > self.now_ms {
+            self.now_ms = now_ms;
+        }
+    }
+
+    /// The packet limits of `c`: a login connection (plaintext, P1;
+    /// WebSocket password, ADR-272) has a packet limit of its own. For every
+    /// other connection this costs the test of a box that is `None` once the
+    /// connection is attached.
+    fn conn_limits(&self, c: ConnId) -> Limits {
+        match self
+            .conns
+            .get(c)
+            .and_then(Conn::login)
+            .and_then(|r| self.cfg.login_policy(r))
+        {
+            Some(p) => Limits {
+                max_packet_size: p.max_packet_size,
+                ..self.cfg.limits
+            },
+            None => self.cfg.limits,
+        }
+    }
+
     /// Bytes received on `c`. Processes every complete packet, unless the
     /// connection's input is held for back-pressure (ADR-269): then the bytes
     /// wait for [`Broker::poll_flow`].
     pub fn input(&mut self, c: ConnId, data: &[u8], now_ms: u64) {
+        self.tick_clock(now_ms);
         let Some(conn) = self.conn(c) else { return };
         if conn.close.is_some() {
             return;
@@ -1263,22 +1613,9 @@ impl Broker {
 
     /// Processes the complete packets in `c`'s input buffer, at most about
     /// `budget` bytes of them; stops early when `c` gets paused (ADR-269).
+    /// Either version: a held input of a 5.0 connection is parsed as 5.0.
     fn parse(&mut self, c: ConnId, now_ms: u64, budget: usize) -> flow::Stop {
-        // A login connection (plaintext, P1; WebSocket password, ADR-272) has
-        // a packet limit of its own. For every other connection this costs
-        // the test of a box that is `None` once the connection is attached.
-        let limits = match self
-            .conns
-            .get(c)
-            .and_then(Conn::login)
-            .and_then(|r| self.cfg.login_policy(r))
-        {
-            Some(p) => Limits {
-                max_packet_size: p.max_packet_size,
-                ..self.cfg.limits
-            },
-            None => self.cfg.limits,
-        };
+        let limits = self.conn_limits(c);
         let limit = limits.max_packet_size as usize + INBUF_SLACK;
         let Some(conn) = self.conn(c) else {
             return flow::Stop::Gone;
@@ -1302,33 +1639,29 @@ impl Broker {
                 break flow::Stop::Budget;
             }
             let rest = buf.get(off..).unwrap_or(&[]);
-            match decode(rest, &limits) {
-                Ok((packet, used)) => {
-                    self.handle(c, packet, now_ms);
-                    off += used;
-                }
-                Err(CodecError::Incomplete(_)) => {
-                    if rest.len() > limit
-                        && let Some(conn) = self.conn(c)
-                    {
-                        conn.close = Some(CloseReason::ProtocolError);
+            // The first packet's protocol level picks the codec (ADR-273
+            // rule 1); a connection that negotiated 5.0 keeps it.
+            let v5 = conn.v5().is_some()
+                || (conn.session.is_none()
+                    && mqtt5::connect_protocol_level(rest) == Ok(mqtt5::PROTOCOL_LEVEL_5));
+            let step = if v5 {
+                self.input5(c, rest, limits, now_ms)
+            } else {
+                self.input4(c, rest, &limits, now_ms)
+            };
+            match step {
+                Step::Used(used) => off += used,
+                Step::Wait => {
+                    if rest.len() > limit {
+                        if v5 {
+                            self.close5(c, ReasonCode::PacketTooLarge);
+                        } else if let Some(conn) = self.conn(c) {
+                            conn.close = Some(CloseReason::ProtocolError);
+                        }
                     }
                     break flow::Stop::Incomplete;
                 }
-                Err(CodecError::UnsupportedProtocolLevel(_)) => {
-                    self.send(
-                        c,
-                        &Packet::ConnAck(ConnAck {
-                            session_present: false,
-                            code: ConnectReturnCode::UnacceptableProtocolVersion,
-                        }),
-                    );
-                    self.mark_close(c, CloseReason::Unsupported);
-                    keep = false;
-                    break flow::Stop::Gone;
-                }
-                Err(_) => {
-                    self.mark_close(c, CloseReason::ProtocolError);
+                Step::Stop => {
                     keep = false;
                     break flow::Stop::Gone;
                 }
@@ -1341,6 +1674,60 @@ impl Broker {
             conn.inbuf.set(buf);
         }
         stop
+    }
+
+    /// One 3.1.1 packet from the start of `buf`.
+    fn input4(&mut self, c: ConnId, buf: &[u8], limits: &Limits, now_ms: u64) -> Step {
+        match decode(buf, limits) {
+            Ok((packet, used)) => {
+                self.handle(c, packet, now_ms);
+                Step::Used(used)
+            }
+            Err(CodecError::Incomplete(_)) => Step::Wait,
+            Err(CodecError::UnsupportedProtocolLevel(_)) => {
+                self.send(
+                    c,
+                    &Packet::ConnAck(ConnAck {
+                        session_present: false,
+                        code: ConnectReturnCode::UnacceptableProtocolVersion,
+                    }),
+                );
+                self.mark_close(c, CloseReason::Unsupported);
+                Step::Stop
+            }
+            Err(_) => {
+                self.mark_close(c, CloseReason::ProtocolError);
+                Step::Stop
+            }
+        }
+    }
+
+    /// One 5.0 packet from the start of `buf`. A refused packet is answered
+    /// with its reason code: in a CONNACK before the session exists, in a
+    /// DISCONNECT afterwards (ADR-273 rule 14).
+    fn input5(&mut self, c: ConnId, buf: &[u8], limits: Limits, now_ms: u64) -> Step {
+        let l5 = self.limits5(limits);
+        match mqtt5::decode(buf, &l5) {
+            Ok((packet, used)) => {
+                self.handle5(c, packet, now_ms);
+                Step::Used(used)
+            }
+            Err(mqtt5::Error::Incomplete(_)) => Step::Wait,
+            Err(e) => {
+                let code = e.reason_code();
+                if self.conns.get(c).is_some_and(|k| k.session.is_some()) {
+                    self.close5(c, code);
+                } else {
+                    let code = if code.allowed_in(mqtt5::ReasonTable::ConnAck) {
+                        code
+                    } else {
+                        ReasonCode::UnspecifiedError
+                    };
+                    self.reject5(c, code);
+                }
+                Step::Stop
+            }
+        }
     }
 
     /// Bytes waiting to be sent on `c`.
@@ -1364,75 +1751,128 @@ impl Broker {
         self.conns.get(c).and_then(|k| k.close)
     }
 
+    /// Whether `c` speaks MQTT 5.0 (its CONNECT was a 5.0 one).
+    pub fn is_v5(&self, c: ConnId) -> bool {
+        self.conns.get(c).is_some_and(|k| k.v5().is_some())
+    }
+
     /// The network connection is gone. Publishes the Last Will unless the
-    /// client sent DISCONNECT (§3.1.2.5).
-    pub fn closed(&mut self, c: ConnId, _now_ms: u64) {
+    /// client sent DISCONNECT (§3.1.2.5) with reason 0x00; a 5.0 Will with a
+    /// Will Delay Interval is armed instead while the session lives on
+    /// (ADR-273 rule 6). The session ends if its Session Expiry Interval is 0;
+    /// otherwise its expiry starts.
+    pub fn closed(&mut self, c: ConnId, now_ms: u64) {
+        self.tick_clock(now_ms);
         let Some(conn) = self.conns.remove(c) else {
             return;
         };
         self.flow_forget(c);
         if conn.session.is_some() {
             self.online = self.online.saturating_sub(1);
-        }
-        if conn.close != Some(CloseReason::ClientDisconnect)
-            && let Some(w) = conn.extra.and_then(|e| e.will)
-        {
-            self.stats.wills_published += 1;
-            self.route(&w.msg, w.qos, w.retain.then_some(&*w.owner), None);
-        }
-        if let Some(sid) = conn.session {
-            let (detach, clean) = match self.session(sid) {
-                Some(s) if s.conn() == Some(c) => (true, s.clean),
-                _ => (false, false),
-            };
-            if detach {
-                if clean {
-                    self.remove_session(sid);
-                } else if let Some(s) = self.session(sid) {
-                    s.set_conn(None);
-                    // Snapshot what the device has not acknowledged yet:
-                    // in-flight first (older, with their packet ids), then
-                    // the queue, then the QoS 2 ids of unfinished flows.
-                    if s.persisted {
-                        let cid = s.client_id.clone();
-                        let mut ops = alloc::vec![PersistOp::QueueClear {
-                            client_id: cid.clone(),
-                        }];
-                        for f in s.inflight() {
-                            ops.push(match (&f.msg, f.flow) {
-                                (Some(msg), flow) => PersistOp::QueuePush {
-                                    client_id: cid.clone(),
-                                    msg: msg.clone(),
-                                    qos: flow.qos(),
-                                    pid: Some(f.pid),
-                                },
-                                (None, _) => PersistOp::Qos2 {
-                                    client_id: cid.clone(),
-                                    id: Qos2Id::Released(f.pid),
-                                },
-                            });
-                        }
-                        for (msg, qos, _) in s.pending.iter().flat_map(|p| p.queue.iter()) {
-                            ops.push(PersistOp::QueuePush {
-                                client_id: cid.clone(),
-                                msg: msg.clone(),
-                                qos: *qos,
-                                pid: None,
-                            });
-                        }
-                        for &pid in s.received() {
-                            ops.push(PersistOp::Qos2 {
-                                client_id: cid.clone(),
-                                id: Qos2Id::Received(pid),
-                            });
-                        }
-                        for op in ops {
-                            self.emit(op);
-                        }
-                    }
-                }
+            if conn.v5().is_some() {
+                self.online5 = self.online5.saturating_sub(1);
             }
         }
+        // The session this connection still holds (not taken over).
+        let attached = conn
+            .session
+            .filter(|&sid| self.sessions.get(sid).is_some_and(|s| s.conn() == Some(c)));
+        let expiry = attached
+            .and_then(|sid| self.sessions.get(sid))
+            .map_or(0, |s| s.expiry_s);
+        if let Some(w) = conn.extra.and_then(|e| e.will) {
+            match attached {
+                Some(sid) if expiry > 0 && w.delay_s > 0 => {
+                    let delay = w.delay_s.min(expiry);
+                    self.stats.wills_delayed += 1;
+                    self.will_at.arm(
+                        sid,
+                        self.now_ms
+                            .saturating_add(u64::from(delay).saturating_mul(1000)),
+                    );
+                    self.wills.insert(sid, w);
+                }
+                _ => self.publish_will(w),
+            }
+        }
+        let Some(sid) = attached else { return };
+        if expiry == 0 {
+            self.remove_session(sid);
+            return;
+        }
+        if expiry != u32::MAX {
+            self.expiring.arm(
+                sid,
+                self.now_ms
+                    .saturating_add(u64::from(expiry).saturating_mul(1000)),
+            );
+        }
+        let Some(s) = self.session(sid) else { return };
+        s.set_conn(None);
+        // Snapshot what the device has not acknowledged yet: in-flight first
+        // (older, with their packet ids), then the queue, then the QoS 2 ids
+        // of unfinished flows.
+        if s.persisted {
+            let cid = s.client_id.clone();
+            let mut ops = alloc::vec![PersistOp::QueueClear {
+                client_id: cid.clone(),
+            }];
+            for f in s.inflight() {
+                ops.push(match (&f.msg, f.flow) {
+                    (Some(msg), flow) => PersistOp::QueuePush {
+                        client_id: cid.clone(),
+                        msg: msg.clone(),
+                        qos: flow.qos(),
+                        pid: Some(f.pid),
+                    },
+                    (None, _) => PersistOp::Qos2 {
+                        client_id: cid.clone(),
+                        id: Qos2Id::Released(f.pid),
+                    },
+                });
+            }
+            for (msg, qos, _) in s.pending.iter().flat_map(|p| p.queue.iter()) {
+                ops.push(PersistOp::QueuePush {
+                    client_id: cid.clone(),
+                    msg: msg.clone(),
+                    qos: *qos,
+                    pid: None,
+                });
+            }
+            for &pid in s.received() {
+                ops.push(PersistOp::Qos2 {
+                    client_id: cid.clone(),
+                    id: Qos2Id::Received(pid),
+                });
+            }
+            ops.push(PersistOp::SessionOffline { client_id: cid });
+            for op in ops {
+                self.emit(op);
+            }
+        }
+    }
+
+    /// Publishes a Will now (its Message Expiry Interval starts here).
+    fn publish_will(&mut self, w: Will) {
+        self.stats.wills_published += 1;
+        let msg = match w.expiry_s {
+            Some(e) => Arc::new(MsgInner {
+                topic: w.msg.topic.clone(),
+                payload: w.msg.payload.clone(),
+                props: w.msg.props.clone(),
+                expires_ms: self.deadline(e),
+            }),
+            None => w.msg,
+        };
+        self.route(&msg, w.qos, w.retain.then_some(&*w.owner), None, None);
+    }
+
+    /// The deadline `s` seconds from now on the broker's clock (never 0,
+    /// which means "no deadline").
+    fn deadline(&self, s: u32) -> u64 {
+        self.now_ms
+            .saturating_add(u64::from(s).saturating_mul(1000))
+            .max(1)
     }
 
     /// Returns memory a past peak left behind (empty slab chunks, index
@@ -1450,18 +1890,28 @@ impl Broker {
         }
     }
 
-    /// Enforces keepalive (1.5 × the client's interval, §3.1.2.10).
-    /// Callers run this periodically (every 100 ms is plenty); it scans the
-    /// connections, so it is kept off the per-packet path.
+    /// Enforces keepalive (1.5 × the client's interval, §3.1.2.10), and ends
+    /// what expired: armed Wills whose delay passed are published, offline
+    /// sessions whose Session Expiry Interval passed are deleted (ADR-273
+    /// rules 4 and 6), at most [`SWEEP_PER_TICK`] of each per call so that a
+    /// tick stays within the watchdog's budget (the rest follow on the next
+    /// ticks). Callers run this periodically (every 100 ms is plenty); it
+    /// scans the connections, so it is kept off the per-packet path.
     pub fn tick(&mut self, now_ms: u64) {
+        self.tick_clock(now_ms);
+        let mut late5 = Vec::new();
         for (i, k) in self.conns.iter_mut() {
             // A connection whose input is held for back-pressure is alive:
             // its PINGREQ waits in the held bytes (ADR-269).
             if k.close.is_none()
                 && k.flow == 0
-                && k.keepalive_ms > 0
-                && now_ms.saturating_sub(k.last_rx_ms) > u64::from(k.keepalive_ms) * 3 / 2
+                && k.keepalive_s > 0
+                && now_ms.saturating_sub(k.last_rx_ms) > u64::from(k.keepalive_s) * 1500
             {
+                if k.v5().is_some() {
+                    late5.push(i);
+                    continue;
+                }
                 k.close = Some(CloseReason::KeepAliveTimeout);
                 if !k.ready {
                     k.ready = true;
@@ -1469,15 +1919,56 @@ impl Broker {
                 }
             }
         }
+        for c in late5 {
+            self.mark_close(c, CloseReason::KeepAliveTimeout);
+        }
+        let mut due = Vec::new();
+        self.will_at.take_due(self.now_ms, SWEEP_PER_TICK, &mut due);
+        for sid in due.drain(..) {
+            if let Some(w) = self.wills.remove(&sid) {
+                self.publish_will(w);
+            }
+        }
+        self.expiring
+            .take_due(self.now_ms, SWEEP_PER_TICK, &mut due);
+        for sid in due {
+            if self.sessions.get(sid).is_some_and(|s| s.conn().is_none()) {
+                self.stats.sessions_expired += 1;
+                self.remove_session(sid);
+            }
+        }
     }
 
     // ---- packet handling -------------------------------------------------
 
+    /// Closes `c`. A 5.0 connection with a session is told why first, in a
+    /// DISCONNECT (ADR-273 rule 14); a 3.1.1 one is just closed.
     fn mark_close(&mut self, c: ConnId, why: CloseReason) {
+        let code = match why {
+            CloseReason::TakenOver => Some(ReasonCode::SessionTakenOver),
+            CloseReason::KeepAliveTimeout => Some(ReasonCode::KeepAliveTimeout),
+            CloseReason::Disallowed => Some(ReasonCode::AdministrativeAction),
+            CloseReason::ProtocolError => Some(ReasonCode::ProtocolError),
+            CloseReason::Refused(b) => ReasonCode::from_u8(b),
+            CloseReason::ClientDisconnect | CloseReason::Rejected | CloseReason::Unsupported => {
+                None
+            }
+        };
+        self.close_with(c, why, code);
+    }
+
+    fn close_with(&mut self, c: ConnId, why: CloseReason, code: Option<ReasonCode>) {
+        let mut tell = None;
         if let Some(conn) = self.conn(c)
             && conn.close.is_none()
         {
+            if conn.session.is_some() && conn.v5().is_some() {
+                tell = code;
+            }
             conn.close = Some(why);
+        }
+        if let Some(code) = tell {
+            self.send_disconnect(c, code);
         }
         self.make_ready(c);
     }
@@ -1499,21 +1990,76 @@ impl Broker {
         self.make_ready(c);
     }
 
+    /// PUBACK, PUBREC, PUBREL or PUBCOMP for `pid`, with `code` on a 5.0
+    /// connection (3.1.1 has none).
+    fn send_ack(&mut self, c: ConnId, kind: AckKind, pid: u16, code: ReasonCode) {
+        if self.is_v5(c) {
+            let a = mqtt5::Ack {
+                packet_id: pid,
+                reason: code,
+                properties: Properties::EMPTY,
+            };
+            let p = match kind {
+                AckKind::Ack => mqtt5::Packet::PubAck(a),
+                AckKind::Rec => mqtt5::Packet::PubRec(a),
+                AckKind::Rel => mqtt5::Packet::PubRel(a),
+                AckKind::Comp => mqtt5::Packet::PubComp(a),
+            };
+            self.send5(c, &p);
+        } else {
+            let p = match kind {
+                AckKind::Ack => Packet::PubAck(pid),
+                AckKind::Rec => Packet::PubRec(pid),
+                AckKind::Rel => Packet::PubRel(pid),
+                AckKind::Comp => Packet::PubComp(pid),
+            };
+            self.send(c, &p);
+        }
+    }
+
     fn handle(&mut self, c: ConnId, packet: Packet<'_>, now_ms: u64) {
         let connected = self.conn(c).is_some_and(|k| k.session.is_some());
         match packet {
-            Packet::Connect(p) if !connected => self.on_connect(c, &p, now_ms),
+            Packet::Connect(p) if !connected => {
+                let ci = ConnectIn {
+                    clean_start: p.clean_session,
+                    keep_alive: p.keep_alive,
+                    client_id: p.client_id,
+                    will: p.will.map(|w| WillIn {
+                        topic: w.topic,
+                        payload: w.payload,
+                        qos: w.qos,
+                        retain: w.retain,
+                        props: &[],
+                    }),
+                    v5: None,
+                };
+                self.on_connect(c, &ci, now_ms)
+            }
             // A second CONNECT, or anything before CONNECT (§3.1.0).
             Packet::Connect(_) => self.mark_close(c, CloseReason::ProtocolError),
             _ if !connected => self.mark_close(c, CloseReason::ProtocolError),
-            Packet::Publish(p) => self.on_publish(c, &p, now_ms),
+            Packet::Publish(p) => self.on_publish(
+                c,
+                &PublishIn {
+                    qos: p.qos,
+                    retain: p.retain,
+                    topic: p.topic,
+                    packet_id: p.packet_id,
+                    payload: p.payload,
+                    props: &[],
+                    v5: false,
+                },
+                now_ms,
+            ),
             Packet::PubAck(id) => self.on_puback(c, id),
             Packet::PubRec(id) => self.on_pubrec(c, id),
             Packet::PubRel(id) => self.on_pubrel(c, id),
             Packet::PubComp(id) => self.on_pubcomp(c, id),
             Packet::Subscribe(s) => {
-                let topics: Vec<(&str, QoS)> = s.topics.iter().collect();
-                self.on_subscribe(c, s.packet_id, &topics);
+                let topics: Vec<(&str, SubOpts)> =
+                    s.topics.iter().map(|(f, q)| (f, SubOpts::qos(q))).collect();
+                self.on_subscribe(c, s.packet_id, &topics, false);
             }
             Packet::Unsubscribe(u) => {
                 let topics: Vec<&str> = u.topics.iter().collect();
@@ -1536,7 +2082,22 @@ impl Broker {
         }
     }
 
+    /// Refuses a CONNECT: CONNACK with the 3.1.1 return code, or its 5.0
+    /// reason code (ADR-273 rule 14) on a 5.0 connection.
     fn reject(&mut self, c: ConnId, code: ConnectReturnCode) {
+        if self.is_v5(c) {
+            let r = match code {
+                ConnectReturnCode::IdentifierRejected => ReasonCode::ClientIdentifierNotValid,
+                ConnectReturnCode::BadUserNameOrPassword => ReasonCode::BadUserNameOrPassword,
+                ConnectReturnCode::NotAuthorized => ReasonCode::NotAuthorized,
+                ConnectReturnCode::ServerUnavailable => ReasonCode::ServerUnavailable,
+                ConnectReturnCode::UnacceptableProtocolVersion => {
+                    ReasonCode::UnsupportedProtocolVersion
+                }
+                ConnectReturnCode::Accepted => ReasonCode::UnspecifiedError,
+            };
+            return self.reject5(c, r);
+        }
         self.send(
             c,
             &Packet::ConnAck(ConnAck {
@@ -1553,22 +2114,44 @@ impl Broker {
         !id.is_empty() && !id.contains(['/', '+', '#']) && !id.starts_with('$')
     }
 
-    fn on_connect(&mut self, c: ConnId, p: &Connect<'_>, now_ms: u64) {
+    fn on_connect(&mut self, c: ConnId, p: &ConnectIn<'_>, now_ms: u64) {
+        let is5 = p.v5.is_some();
         // A plaintext connection (P1, ADR-230): the identity is what its login
         // established and its client id is free. Taken here; cleared below.
         // (A WebSocket password connection, ADR-272, is the same with its own
         // policy and session prefix.)
         let login = self.conn(c).and_then(|k| k.login());
         let plain_conn = login.is_some();
+        let cert_id: Option<Box<str>> = self
+            .conns
+            .get(c)
+            .and_then(|k| k.extra.as_ref())
+            .filter(|e| !e.plain && !e.web)
+            .and_then(|e| e.identity.clone());
+        // A 5.0 client may bring no client id at all: it is assigned one
+        // (ADR-273 rule 11) and told which. On TLS that is the certificate's
+        // identity, the only id it may use anyway; a login connection's id is
+        // only the tail of its session name, named below.
+        let mut assigned: Option<alloc::string::String> = None;
+        if is5 && p.client_id.is_empty() && !plain_conn {
+            assigned = Some(match &cert_id {
+                Some(id) => (**id).into(),
+                None => {
+                    self.plain_seq += 1;
+                    alloc::format!("auto-{}", self.plain_seq)
+                }
+            });
+        }
+        let client_id: &str = assigned.as_deref().unwrap_or(p.client_id);
         // A certificate identity becomes a topic level (`{id}`), so it may not
         // hold `/`, `+`, `#` or start with `$`. A plaintext client id is only the
         // tail of a session name (mosquitto's own default, `mosqpub/4711-host`,
         // has a slash): anything will do, and nothing too (the broker names a
-        // clean session that brings no id, 3.1.3.1).
+        // clean session that brings no id, 3.1.3.1; any 5.0 one).
         let usable = if plain_conn {
-            !p.client_id.is_empty() || p.clean_session
+            !client_id.is_empty() || p.clean_start || is5
         } else {
-            Self::valid_identity(p.client_id)
+            Self::valid_identity(client_id)
         };
         if !usable {
             return self.reject(c, ConnectReturnCode::IdentifierRejected);
@@ -1583,12 +2166,7 @@ impl Broker {
             return self.reject(c, ConnectReturnCode::NotAuthorized);
         }
         // PROMPT §7.1: the client id must equal the certificate identity.
-        let mismatch = !plain_conn
-            && self
-                .conns
-                .get(c)
-                .and_then(|k| k.extra.as_ref()?.identity.as_deref())
-                .is_some_and(|id| id != p.client_id);
+        let mismatch = !plain_conn && cert_id.as_deref().is_some_and(|id| id != client_id);
         if mismatch {
             return self.reject(c, ConnectReturnCode::IdentifierRejected);
         }
@@ -1614,32 +2192,45 @@ impl Broker {
             k.release_extra();
         }
         // A bootstrap session is never persistent: it holds nothing worth
-        // keeping and must not leave state behind (H1).
-        if bootstrap && !p.clean_session {
+        // keeping and must not leave state behind (H1). Nor is a plaintext
+        // session: nothing of it is kept once it is over, so a 3.1.1 client
+        // that asks for a stored session is told it cannot have one; a 5.0
+        // client is granted Session Expiry 0 and told so in its CONNACK.
+        let never_kept = bootstrap || plain_conn;
+        if never_kept && !p.clean_start && !is5 {
             return self.reject(c, ConnectReturnCode::NotAuthorized);
         }
-        // Nor is a plaintext session: nothing of it is kept once it is over, so
-        // a client that asks for a stored session is told it cannot have one.
-        if plain_conn && !p.clean_session {
-            return self.reject(c, ConnectReturnCode::NotAuthorized);
-        }
+        // Session Expiry Interval (ADR-273 rule 4): a 5.0 client's, capped;
+        // a 3.1.1 persistent session the default, capped.
+        let m5 = self.cfg.mqtt5;
+        let expiry = match p.v5 {
+            _ if never_kept => 0,
+            Some(v) => v.session_expiry.min(m5.max_session_expiry_s),
+            None if p.clean_start => 0,
+            None => m5.default_session_expiry_s.min(m5.max_session_expiry_s),
+        };
         let role = if let Some(r) = login {
             r
         } else if bootstrap {
             Role::Bootstrap
         } else {
-            match self.cfg.acl.role(p.client_id) {
+            match self.cfg.acl.role(client_id) {
                 Role::Operator if !authenticated => Role::Device,
                 r => r,
             }
         };
+        let mut assigned_tail: Option<alloc::string::String> = None;
         let (boot_key, plain_key);
         let key: &str = if let Some(id) = plain_id.as_deref() {
-            let tail = if p.client_id.is_empty() {
+            let tail = if client_id.is_empty() {
                 self.plain_seq += 1;
-                alloc::format!("auto-{}", self.plain_seq)
+                let t = alloc::format!("auto-{}", self.plain_seq);
+                if is5 {
+                    assigned_tail = Some(t.clone());
+                }
+                t
             } else {
-                p.client_id.into()
+                client_id.into()
             };
             plain_key = if login == Some(Role::Web) {
                 web_session_key(id, &tail)
@@ -1648,118 +2239,219 @@ impl Broker {
             };
             &plain_key
         } else if bootstrap {
-            boot_key = alloc::format!("{BOOTSTRAP_KEY}{}", p.client_id);
+            boot_key = alloc::format!("{BOOTSTRAP_KEY}{client_id}");
             &boot_key
         } else {
-            p.client_id
+            client_id
         };
         // The name the ACL's `{id}` stands for: the certificate's identity (the
         // client id, equal to it), or the login's for a plaintext client.
-        let acl_name: &str = plain_id.as_deref().unwrap_or(p.client_id);
+        let acl_name: &str = plain_id.as_deref().unwrap_or(client_id);
         let will = match &p.will {
             // A will is published by the broker on the client's behalf: it
             // must never be a way into `$SYS/` (the console input).
             Some(w) if acl::sys(w.topic) || !self.cfg.may_publish(role, acl_name, w.topic) => {
                 return self.reject(c, ConnectReturnCode::NotAuthorized);
             }
-            Some(w) => Some(Will {
-                msg: Arc::new(MsgInner {
-                    topic: w.topic.into(),
-                    payload: w.payload.into(),
-                }),
-                qos: w.qos,
-                retain: w.retain && self.cfg.may_retain(role),
-                owner: acl_name.into(),
-            }),
+            // A 5.0 client is told when it cannot have a retained Will
+            // (Retain Available 0, [MQTT-3.2.2-14]); 3.1.1 keeps "published,
+            // not retained".
+            Some(w) if is5 && w.retain && !self.cfg.may_retain(role) => {
+                return self.reject5(c, ReasonCode::RetainNotSupported);
+            }
+            Some(w) => {
+                let wp = Properties::Raw(w.props);
+                let cap = m5.max_message_expiry_s;
+                Some(Will {
+                    msg: Arc::new(MsgInner {
+                        topic: w.topic.into(),
+                        payload: w.payload.into(),
+                        props: v5::strip(w.props, v5::NOT_STORED),
+                        expires_ms: 0,
+                    }),
+                    qos: w.qos,
+                    retain: w.retain && self.cfg.may_retain(role),
+                    owner: acl_name.into(),
+                    delay_s: wp.will_delay_interval().unwrap_or(0),
+                    expiry_s: v5::message_expiry(w.props)
+                        .filter(|&e| e > 0)
+                        .map(|e| if cap > 0 { e.min(cap) } else { e }),
+                })
+            }
             None => None,
         };
 
-        // Session takeover (§3.1.4): the existing connection is closed.
+        // Session takeover (§3.1.4): the existing connection is closed (a 5.0
+        // one is told 0x8E). If the session lives on, the old connection's
+        // delayed Will is not sent: a new connection came within the delay
+        // (§3.1.3.2.2); a Will without delay, or one whose session ends here,
+        // is published when the old connection closes.
         let existing = self.find_session(key);
         if let Some(sid) = existing
             && let Some(old) = self.session(sid).and_then(|s| s.conn())
             && old != c
         {
             self.mark_close(old, CloseReason::TakenOver);
+            if !p.clean_start
+                && let Some(k) = self.conn(old)
+                && let Some(e) = &mut k.extra
+                && e.will.as_ref().is_some_and(|w| w.delay_s > 0)
+            {
+                e.will = None;
+            }
             if let Some(s) = self.session(sid) {
                 s.set_conn(None);
             }
         }
         let session_present = match existing {
-            Some(sid) if p.clean_session => {
+            Some(sid) if p.clean_start => {
+                // The session ends: an armed Will goes out now.
                 self.remove_session(sid);
                 false
             }
-            Some(_) => true,
+            Some(sid) => {
+                // Back within its expiry, and within an armed Will's delay.
+                self.expiring.cancel(sid);
+                self.will_at.cancel(sid);
+                self.wills.remove(&sid);
+                true
+            }
             None => false,
         };
         let sid = match self.find_session(key) {
             Some(sid) => sid,
-            None => self.create_session(key, role, p.clean_session, now_ms),
+            None => self.insert_session(key, role, expiry, now_ms),
         };
         let mut newly_persistent = None;
-        if let Some(s) = self.sessions.get(sid)
-            && !p.clean_session
-            && !s.persisted
-        {
-            newly_persistent = Some((s.client_id.clone(), self.filters_of(s)));
+        let mut stored_gone = None;
+        let mut stored_back = None;
+        if let Some(s) = self.sessions.get(sid) {
+            if expiry > 0 && !s.persisted {
+                newly_persistent = Some((s.client_id.clone(), self.filters_of(s)));
+            } else if expiry == 0 && s.persisted {
+                // A 5.0 client resumed a stored session with expiry 0: it
+                // ends with this connection, so the store forgets it now.
+                stored_gone = Some(s.client_id.clone());
+            } else if s.persisted && session_present {
+                stored_back = Some(s.client_id.clone());
+            }
         }
         if let Some(s) = self.session(sid) {
             s.set_conn(Some(c));
-            s.clean = p.clean_session;
-            s.persisted |= newly_persistent.is_some();
+            s.expiry_s = expiry;
+            s.persisted = (s.persisted || newly_persistent.is_some()) && stored_gone.is_none();
             // A restored session was created without the certificate.
             s.role = role;
         }
         if let Some((cid, subs)) = newly_persistent {
             self.emit(PersistOp::SessionUpsert {
                 client_id: cid.clone(),
+                expiry_s: expiry,
             });
-            for (filter, qos) in subs {
+            for (filter, opts) in subs {
                 self.emit(PersistOp::Subscribe {
                     client_id: cid.clone(),
                     filter,
-                    qos,
+                    qos: opts.max_qos(),
+                    options: opts.0,
                 });
             }
-        } else if session_present {
-            // The stored queue is back in RAM (delivered or in flight).
-            self.emit(PersistOp::QueueClear {
-                client_id: p.client_id.into(),
+        } else if let Some(cid) = stored_gone {
+            self.emit(PersistOp::SessionDelete { client_id: cid });
+        } else if let Some(cid) = stored_back {
+            // Online again with this expiry; the stored queue is back in RAM
+            // (delivered or in flight).
+            self.emit(PersistOp::SessionUpsert {
+                client_id: cid.clone(),
+                expiry_s: expiry,
             });
+            self.emit(PersistOp::QueueClear { client_id: cid });
         }
+        // Server Keep Alive (ADR-273 rule 10): a 5.0 client is held to the
+        // configured maximum.
+        let max_ka = m5.max_keep_alive_s;
+        let keep_alive = if is5 && max_ka > 0 && (p.keep_alive == 0 || p.keep_alive > max_ka) {
+            max_ka
+        } else {
+            p.keep_alive
+        };
         if let Some(k) = self.conn(c) {
             k.session = Some(sid);
-            k.keepalive_ms = u32::from(p.keep_alive) * 1000;
+            k.keepalive_s = keep_alive;
             if will.is_some() {
                 k.extra_mut().will = will;
             }
             self.online += 1;
+            if is5 {
+                self.online5 += 1;
+            }
         }
-        self.send(
-            c,
-            &Packet::ConnAck(ConnAck {
-                session_present,
-                code: ConnectReturnCode::Accepted,
-            }),
-        );
+        match p.v5 {
+            None => self.send(
+                c,
+                &Packet::ConnAck(ConnAck {
+                    session_present,
+                    code: ConnectReturnCode::Accepted,
+                }),
+            ),
+            Some(v) => {
+                let mut props: [Property<'_>; 10] = [Property::PayloadFormatIndicator(0); 10];
+                let mut n = 0;
+                let mut add = |p| {
+                    if let Some(slot) = props.get_mut(n) {
+                        *slot = p;
+                        n += 1;
+                    }
+                };
+                if expiry != v.session_expiry {
+                    add(Property::SessionExpiryInterval(expiry));
+                }
+                let rm = m5.receive_maximum.max(1);
+                if rm != u16::MAX {
+                    add(Property::ReceiveMaximum(rm));
+                }
+                if !self.cfg.may_retain(role) {
+                    add(Property::RetainAvailable(0));
+                }
+                add(Property::MaximumPacketSize(
+                    self.conn_limits(c).max_packet_size,
+                ));
+                if let Some(id) = assigned.as_deref().or(assigned_tail.as_deref()) {
+                    add(Property::AssignedClientIdentifier(id));
+                }
+                if m5.topic_alias_maximum > 0 {
+                    add(Property::TopicAliasMaximum(m5.topic_alias_maximum));
+                }
+                // Part 3 (ADR-273 rules 16, 17): not available yet.
+                add(Property::SubscriptionIdentifierAvailable(0));
+                add(Property::SharedSubscriptionAvailable(0));
+                if keep_alive != p.keep_alive {
+                    add(Property::ServerKeepAlive(keep_alive));
+                }
+                let list = props.get(..n).unwrap_or_default();
+                let ack = |props| {
+                    mqtt5::Packet::ConnAck(mqtt5::ConnAck {
+                        session_present,
+                        reason: ReasonCode::Success,
+                        properties: props,
+                    })
+                };
+                if !self.send5(c, &ack(Properties::List(list))) {
+                    self.send5(c, &ack(Properties::EMPTY));
+                }
+            }
+        }
         if session_present {
             self.resend_inflight(sid);
             self.pump(sid);
         }
     }
 
-    fn create_session(&mut self, id: &str, role: Role, clean: bool, now_ms: u64) -> SessionId {
-        // Persistence of a new persistent session is recorded by the
-        // caller (`on_connect`) once the session is attached.
-        self.insert_session(id, role, clean, now_ms)
-    }
-
-    fn insert_session(&mut self, id: &str, role: Role, clean: bool, now_ms: u64) -> SessionId {
+    fn insert_session(&mut self, id: &str, role: Role, expiry_s: u32, now_ms: u64) -> SessionId {
         let s = Session {
             client_id: id.into(),
             role,
-            clean,
+            expiry_s,
             conn: None,
             subs: Small::default(),
             pending: None,
@@ -1778,10 +2470,16 @@ impl Broker {
         sid
     }
 
+    /// Ends a session: subscriptions, queue, deadlines; the store forgets
+    /// it; a Will armed with a delay is published now (the session ended
+    /// before the delay did, §3.1.3.2.2).
     fn remove_session(&mut self, sid: SessionId) {
         let Some(s) = self.sessions.remove(sid) else {
             return;
         };
+        self.expiring.cancel(sid);
+        self.will_at.cancel(sid);
+        let will = self.wills.remove(&sid);
         self.subs_total = self.subs_total.saturating_sub(s.subs.len());
         for x in s.subs.as_slice().iter().filter(|x| !x.scoped) {
             self.topics.unsubscribe(x.node, sid);
@@ -1799,6 +2497,9 @@ impl Broker {
             self.emit(PersistOp::SessionDelete {
                 client_id: s.client_id,
             });
+        }
+        if let Some(w) = will {
+            self.publish_will(w);
         }
     }
 
@@ -1833,32 +2534,35 @@ impl Broker {
         true
     }
 
-    fn on_publish(&mut self, c: ConnId, p: &Publish<'_>, now_ms: u64) {
+    fn on_publish(&mut self, c: ConnId, p: &PublishIn<'_>, now_ms: u64) {
         let Some(sid) = self.conn(c).and_then(|k| k.session) else {
             return;
         };
-        // §3.3.5: an unauthorised publish is acknowledged and dropped. At
-        // QoS 2 the id is kept until PUBREL whatever happens to the message
-        // (ADR-271, method B): a duplicate is answered and never routed, and
-        // a refused message completes its handshake like an accepted one.
-        match (p.qos, p.packet_id) {
-            (QoS::ExactlyOnce, Some(id)) => {
-                let limit = self.qos2_id_limit();
-                let Some(s) = self.session(sid) else { return };
-                if s.received().contains(&id) {
-                    self.stats.qos2_duplicates += 1;
-                    return self.send(c, &Packet::PubRec(id));
-                }
-                if s.received().len() >= limit {
-                    self.stats.qos2_inbound_full += 1;
-                    return self.mark_close(c, CloseReason::ProtocolError);
-                }
-                s.pending_mut().received.push(id);
-                self.stats.qos2_received += 1;
-                self.send(c, &Packet::PubRec(id));
+        // §3.3.5: an unauthorised publish is acknowledged and dropped (a 5.0
+        // client is told why). At QoS 2 the id is kept until PUBREL whatever
+        // happens to the message (ADR-271, method B): a duplicate is answered
+        // and never routed, and a refused 3.1.1 message completes its
+        // handshake like an accepted one; a 5.0 PUBREC with a failure code
+        // ends the flow, so no id is kept for it.
+        if let (QoS::ExactlyOnce, Some(id)) = (p.qos, p.packet_id) {
+            let limit = if p.v5 {
+                usize::from(self.cfg.mqtt5.receive_maximum.max(1))
+            } else {
+                self.qos2_id_limit()
+            };
+            let Some(s) = self.session(sid) else { return };
+            if s.received().contains(&id) {
+                self.stats.qos2_duplicates += 1;
+                return self.send_ack(c, AckKind::Rec, id, ReasonCode::Success);
             }
-            (_, Some(id)) => self.send(c, &Packet::PubAck(id)),
-            (_, None) => {}
+            if s.received().len() >= limit {
+                self.stats.qos2_inbound_full += 1;
+                return if p.v5 {
+                    self.close5(c, ReasonCode::ReceiveMaximumExceeded)
+                } else {
+                    self.mark_close(c, CloseReason::ProtocolError)
+                };
+            }
         }
         let Some((role, allowed)) = self
             .session(sid)
@@ -1866,59 +2570,50 @@ impl Broker {
         else {
             return;
         };
-        // H1: the reserved namespace bypasses routing entirely. Only an
-        // operational control identity reaches the control handler, and
-        // only on the exact control topic; everything else is dropped.
-        if acl::reserved(p.topic) {
-            // (Not a plaintext client, whatever its name: P1.)
-            let control = !matches!(role, Role::Bootstrap | Role::Plain | Role::Web)
-                && p.topic == CONTROL_TOPIC
-                && self.cfg.control_ids.iter().any(|id| **id == *allowed);
-            if control && self.control.len() < MAX_CONTROL_BACKLOG {
-                self.stats.control_received += 1;
-                self.control.push(ControlMsg {
-                    from: allowed,
-                    payload: p.payload.into(),
-                });
-            } else {
-                self.stats.dropped_control += 1;
-            }
-            return;
+        // A 5.0 client that may not retain was told so (Retain Available 0):
+        // a retained PUBLISH is a protocol violation [MQTT-3.3.1-?], 0x9A.
+        if p.v5 && p.retain && !self.cfg.may_retain(role) {
+            return self.close5(c, ReasonCode::RetainNotSupported);
         }
-        // O1, O2: `$SYS/` belongs to operators. What they publish there is
-        // a request to the kernel, never routed and never retained.
-        if acl::sys(p.topic) {
-            if !self.cfg.may_publish(role, &allowed, p.topic) {
-                self.stats.dropped_acl += 1;
-            } else if !self.take_token(sid, now_ms) || self.sys_in.len() >= sys::MAX_REQUESTS {
-                self.stats.dropped_sys += 1;
-            } else {
-                let kind = if p.topic == sys::QUERY_INFO {
-                    SysKind::Query
+        let verdict = self.judge(sid, role, &allowed, p, now_ms);
+        let code = match verdict {
+            Verdict::Route | Verdict::Taken => ReasonCode::Success,
+            Verdict::Dropped(code) => code,
+        };
+        match (p.qos, p.packet_id) {
+            (QoS::ExactlyOnce, Some(id)) => {
+                self.stats.qos2_received += 1;
+                if p.v5 && code.is_error() {
+                    self.send_ack(c, AckKind::Rec, id, code);
                 } else {
-                    SysKind::Console
-                };
-                self.sys_in.push(SysRequest {
-                    kind,
-                    from: allowed,
-                    payload: p.payload.into(),
-                });
+                    if let Some(s) = self.session(sid) {
+                        s.pending_mut().received.push(id);
+                    }
+                    self.send_ack(c, AckKind::Rec, id, ReasonCode::Success);
+                }
             }
-            return;
+            (_, Some(id)) => self.send_ack(c, AckKind::Ack, id, code),
+            (_, None) => {}
         }
-        if !self.cfg.may_publish(role, &allowed, p.topic) {
-            self.stats.dropped_acl += 1;
-            return;
-        }
-        if !self.take_token(sid, now_ms) {
-            self.stats.dropped_rate += 1;
+        if verdict != Verdict::Route {
             return;
         }
         self.stats.published += 1;
-        let msg = Arc::new(MsgInner {
-            topic: p.topic.into(),
-            payload: p.payload.into(),
-        });
+        let msg = if p.v5 {
+            let cap = self.cfg.mqtt5.max_message_expiry_s;
+            let expires_ms = match v5::message_expiry(p.props) {
+                Some(e) if e > 0 => self.deadline(if cap > 0 { e.min(cap) } else { e }),
+                _ => 0,
+            };
+            Arc::new(MsgInner {
+                topic: p.topic.into(),
+                payload: p.payload.into(),
+                props: v5::strip(p.props, v5::NOT_STORED),
+                expires_ms,
+            })
+        } else {
+            Arc::new(MsgInner::new(p.topic, p.payload))
+        };
         if self
             .cfg
             .telemetry
@@ -1930,25 +2625,95 @@ impl Broker {
         // A retained publish of a plaintext client is delivered but not
         // retained unless the configuration allows it (P1).
         let retain = p.retain && self.cfg.may_retain(role);
-        let to = self.route(&msg, p.qos, retain.then_some(&*allowed), Some(c));
+        let to = self.route(&msg, p.qos, retain.then_some(&*allowed), Some(sid), Some(c));
         self.after_publish(c, to, now_ms);
+    }
+
+    /// What happens to an accepted PUBLISH, before it is acknowledged: the
+    /// reserved namespace and `$SYS/` are taken here (H1, O1, O2), the ACL
+    /// and the publish rate may drop it (counted).
+    fn judge(
+        &mut self,
+        sid: SessionId,
+        role: Role,
+        allowed: &str,
+        p: &PublishIn<'_>,
+        now_ms: u64,
+    ) -> Verdict {
+        // H1: the reserved namespace bypasses routing entirely. Only an
+        // operational control identity reaches the control handler, and
+        // only on the exact control topic; everything else is dropped.
+        if acl::reserved(p.topic) {
+            // (Not a plaintext client, whatever its name: P1.)
+            let control = !matches!(role, Role::Bootstrap | Role::Plain | Role::Web)
+                && p.topic == CONTROL_TOPIC
+                && self.cfg.control_ids.contains(&allowed);
+            if control && self.control.len() < MAX_CONTROL_BACKLOG {
+                self.stats.control_received += 1;
+                self.control.push(ControlMsg {
+                    from: allowed.into(),
+                    payload: p.payload.into(),
+                });
+                return Verdict::Taken;
+            }
+            self.stats.dropped_control += 1;
+            return Verdict::Dropped(if control {
+                ReasonCode::QuotaExceeded
+            } else {
+                ReasonCode::NotAuthorized
+            });
+        }
+        // O1, O2: `$SYS/` belongs to operators. What they publish there is
+        // a request to the kernel, never routed and never retained.
+        if acl::sys(p.topic) {
+            if !self.cfg.may_publish(role, allowed, p.topic) {
+                self.stats.dropped_acl += 1;
+                return Verdict::Dropped(ReasonCode::NotAuthorized);
+            }
+            if !self.take_token(sid, now_ms) || self.sys_in.len() >= sys::MAX_REQUESTS {
+                self.stats.dropped_sys += 1;
+                return Verdict::Dropped(ReasonCode::QuotaExceeded);
+            }
+            let kind = if p.topic == sys::QUERY_INFO {
+                SysKind::Query
+            } else {
+                SysKind::Console
+            };
+            self.sys_in.push(SysRequest {
+                kind,
+                from: allowed.into(),
+                payload: p.payload.into(),
+            });
+            return Verdict::Taken;
+        }
+        if !self.cfg.may_publish(role, allowed, p.topic) {
+            self.stats.dropped_acl += 1;
+            return Verdict::Dropped(ReasonCode::NotAuthorized);
+        }
+        if !self.take_token(sid, now_ms) {
+            self.stats.dropped_rate += 1;
+            return Verdict::Dropped(ReasonCode::QuotaExceeded);
+        }
+        Verdict::Route
     }
 
     /// Delivers `msg` to every matching subscriber; retains it for `owner`
     /// if asked and within the limits. Other shards retain it only if this
-    /// one did.
+    /// one did. `from`: the publisher's session (No Local); `origin`: its
+    /// connection (back-pressure, ADR-269).
     fn route(
         &mut self,
         msg: &Msg,
         qos: QoS,
         retain_for: Option<&str>,
+        from: Option<SessionId>,
         origin: Option<ConnId>,
     ) -> flow::Recipients {
         let retain = retain_for.is_some_and(|o| self.retain(msg, qos, o));
         if self.cfg.fanout {
             self.routes.push((msg.clone(), qos, retain, origin));
         }
-        self.route_local(msg, qos, retain, true)
+        self.route_local(msg, qos, retain, from)
     }
 
     /// Retains `msg` for `owner` here, within the per-identity limit and
@@ -1999,29 +2764,34 @@ impl Broker {
         }
     }
 
-    fn route_local(&mut self, msg: &Msg, qos: QoS, retain: bool, origin: bool) -> flow::Recipients {
-        if retain && !origin {
-            // A replica of what another shard accepted (it checked the
-            // limits; the shards hold the same set).
-            self.store_retained(msg, qos, None);
-        }
+    /// Delivers `msg` to this shard's subscribers; says to whom it went
+    /// (back-pressure, ADR-269).
+    fn route_local(
+        &mut self,
+        msg: &Msg,
+        qos: QoS,
+        retain: bool,
+        from: Option<SessionId>,
+    ) -> flow::Recipients {
         let mut subs = core::mem::take(&mut self.scratch);
         self.topics.subscribers(&msg.topic, &mut subs);
         if self.scoped_subscribers(&msg.topic, &mut subs) {
             // One delivery per session at the highest QoS, as in the trie.
-            subs.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-            subs.dedup_by_key(|e| e.0);
+            topics::dedup_sessions(&mut subs);
         }
-        for &(sid, sub_qos) in &subs {
-            self.deliver(sid, msg, qos.min(sub_qos), false);
+        let mut to = flow::Recipients::default();
+        for &(sid, opts) in &subs {
+            // No Local (ADR-273 rule 12): not back to the publisher's session.
+            if opts.no_local() && from == Some(sid) {
+                continue;
+            }
+            // Retain As Published keeps RETAIN on a live delivery.
+            let r = retain && opts.retain_as_published();
+            let q = qos.min(opts.max_qos());
+            self.deliver(sid, msg, q, r);
+            to.n += 1;
+            to.one = (to.n == 1).then_some((sid, q));
         }
-        let to = flow::Recipients {
-            n: subs.len(),
-            one: match subs.as_slice() {
-                [(sid, sub_qos)] => Some((*sid, qos.min(*sub_qos))),
-                _ => None,
-            },
-        };
         self.scratch = subs;
         to
     }
@@ -2054,6 +2824,16 @@ impl Broker {
         pid
     }
 
+    /// The in-flight window of `c`: `max_inflight`, and for a 5.0 client at
+    /// most its Receive Maximum (ADR-273 rule 7).
+    fn window(&self, c: Option<ConnId>) -> usize {
+        let max = self.cfg.max_inflight;
+        match c.and_then(|c| self.conns.get(c)).and_then(Conn::v5) {
+            Some(v) => max.min(usize::from(v.receive_max)),
+            None => max,
+        }
+    }
+
     fn deliver(&mut self, sid: SessionId, msg: &Msg, qos: QoS, retain: bool) {
         enum Action {
             Send0(ConnId),
@@ -2061,13 +2841,15 @@ impl Broker {
             Queue,
             Drop,
             DropOffline,
+            Expired,
+            TooLarge,
         }
-        let max_inflight = self.cfg.max_inflight;
         let max_queued = self.cfg.max_queued;
         let max_out = self.cfg.max_outbound_bytes;
         let Some(conn) = self.sessions.get(sid).map(|s| s.conn()) else {
             return;
         };
+        let expired = msg.expired(self.now_ms);
         let allow = self.flow_allow;
         let room = conn
             .and_then(|c| Some((c, self.conns.get(c)?)))
@@ -2076,17 +2858,21 @@ impl Broker {
                     && (k.outbuf.len() < max_out
                         || allow.is_some_and(|(a, cap)| a == c && k.outbuf.len() < cap))
             });
+        let too_large = conn.is_some_and(|c| !self.fits(c, msg, qos));
+        let window = self.window(conn);
         let Some(s) = self.session(sid) else { return };
         let action = match (qos, conn) {
+            _ if expired => Action::Expired,
+            (_, Some(_)) if too_large => Action::TooLarge,
             (QoS::AtMostOnce, Some(c)) if room => Action::Send0(c),
             (QoS::AtMostOnce, Some(_)) => Action::Drop,
             (QoS::AtMostOnce, None) => Action::DropOffline,
-            (_, Some(c)) if room && s.inflight().len() < max_inflight && (s.queue_len() == 0) => {
+            (_, Some(c)) if room && s.inflight().len() < window && (s.queue_len() == 0) => {
                 Action::Send(c, Self::start_flight(s, msg, qos, retain))
             }
             // Offline persistent session, full window or backpressure.
             (_, Some(_)) => Action::Queue,
-            (_, None) if !s.clean => Action::Queue,
+            (_, None) if s.expiry_s > 0 => Action::Queue,
             (_, None) => Action::DropOffline,
         };
         match action {
@@ -2116,6 +2902,8 @@ impl Broker {
             }
             Action::Drop => self.stats.dropped_backpressure += 1,
             Action::DropOffline => self.stats.dropped_offline += 1,
+            Action::Expired => self.stats.messages_expired += 1,
+            Action::TooLarge => self.stats.dropped_too_large += 1,
         }
     }
 
@@ -2129,42 +2917,75 @@ impl Broker {
         dup: bool,
     ) {
         self.stats.delivered += 1;
-        self.send(
-            c,
-            &Packet::Publish(Publish {
-                dup,
-                qos,
-                retain,
-                topic: &msg.topic,
-                packet_id: pid,
-                payload: &msg.payload,
-            }),
-        );
+        if !self.is_v5(c) {
+            return self.send(
+                c,
+                &Packet::Publish(Publish {
+                    dup,
+                    qos,
+                    retain,
+                    topic: &msg.topic,
+                    packet_id: pid,
+                    payload: &msg.payload,
+                }),
+            );
+        }
+        // A 5.0 subscriber gets the forwarded properties and the remaining
+        // lifetime (ADR-273 rules 2, 5); never a Topic Alias (rule 9).
+        let expiry = [Property::MessageExpiryInterval(v5::remaining_s(
+            msg.expires_ms,
+            self.now_ms,
+        ))];
+        let p = mqtt5::Packet::Publish(mqtt5::Publish {
+            dup,
+            qos,
+            retain,
+            topic: &msg.topic,
+            packet_id: pid,
+            properties: Properties::Forward {
+                raw: msg.props(),
+                drop: mqtt5::PropertyMask::EMPTY,
+                extra: if msg.expires_ms != 0 { &expiry } else { &[] },
+            },
+            payload: &msg.payload,
+        });
+        if !self.send5(c, &p) {
+            self.stats.delivered -= 1;
+            self.stats.dropped_too_large += 1;
+        }
     }
 
     /// Re-sends what is in flight, in the order it was first sent (4.4):
     /// unacknowledged PUBLISHes with DUP set and their original packet ids,
-    /// and the PUBRELs of QoS 2 flows awaiting PUBCOMP.
+    /// and the PUBRELs of QoS 2 flows awaiting PUBCOMP. A PUBLISH larger than
+    /// a 5.0 client's Maximum Packet Size counts as delivered (§3.1.2.11.4).
     fn resend_inflight(&mut self, sid: SessionId) {
         let Some(s) = self.session(sid) else { return };
         let Some(c) = s.conn() else { return };
         let pending: Vec<Flight> = s.inflight().to_vec();
         for f in pending {
             match f.msg {
+                Some(msg) if !self.fits(c, &msg, f.flow.qos()) => {
+                    self.stats.dropped_too_large += 1;
+                    self.complete(sid, f.pid, f.flow);
+                }
                 Some(msg) => self.send_publish(c, &msg, f.flow.qos(), Some(f.pid), f.retain, true),
-                None => self.send(c, &Packet::PubRel(f.pid)),
+                None => self.send_ack(c, AckKind::Rel, f.pid, ReasonCode::Success),
             }
         }
     }
 
-    /// Moves queued messages into flight while the window and buffer allow.
+    /// Moves queued messages into flight while the window and buffer allow;
+    /// messages that expired in the queue, or that a 5.0 client could not
+    /// take, are dropped on the way (counted).
     fn pump(&mut self, sid: SessionId) {
-        let max_inflight = self.cfg.max_inflight;
         let max_out = self.cfg.max_outbound_bytes;
         loop {
             let Some(s) = self.session(sid) else { return };
             let Some(c) = s.conn() else { return };
-            if s.inflight().len() >= max_inflight || (s.queue_len() == 0) {
+            let queued = s.queue_len();
+            let inflight = s.inflight().len();
+            if queued == 0 || inflight >= self.window(Some(c)) {
                 return;
             }
             let room = self
@@ -2174,11 +2995,27 @@ impl Broker {
             if !room {
                 return;
             }
+            let now = self.now_ms;
             let Some(s) = self.session(sid) else { return };
             let Some((msg, qos, retain)) = s.pending.as_mut().and_then(|p| p.queue.pop_front())
             else {
                 return;
             };
+            if msg.expired(now) {
+                self.stats.messages_expired += 1;
+                if let Some(s) = self.session(sid) {
+                    s.release_pending();
+                }
+                continue;
+            }
+            if !self.fits(c, &msg, qos) {
+                self.stats.dropped_too_large += 1;
+                if let Some(s) = self.session(sid) {
+                    s.release_pending();
+                }
+                continue;
+            }
+            let Some(s) = self.session(sid) else { return };
             let pid = Self::start_flight(s, &msg, qos, retain);
             self.send_publish(c, &msg, qos, Some(pid), retain, false);
         }
@@ -2236,7 +3073,7 @@ impl Broker {
             }
             None => {}
         }
-        self.send(c, &Packet::PubRel(pid));
+        self.send_ack(c, AckKind::Rel, pid, ReasonCode::Success);
     }
 
     /// The client releases a QoS 2 message it sent (4.3.3): the id is
@@ -2252,7 +3089,7 @@ impl Broker {
             }
             s.release_pending();
         }
-        self.send(c, &Packet::PubComp(pid));
+        self.send_ack(c, AckKind::Comp, pid, ReasonCode::Success);
     }
 
     fn on_pubcomp(&mut self, c: ConnId, pid: u16) {
@@ -2265,24 +3102,47 @@ impl Broker {
         }
     }
 
-    fn on_subscribe(&mut self, c: ConnId, packet_id: u16, topics: &[(&str, QoS)]) {
+    /// SUBSCRIBE: one code per filter. 3.1.1 knows only 0x80 for a refusal;
+    /// a 5.0 client is told 0x87 (ACL), 0x97 (subscription limit), 0x9E (a
+    /// shared subscription) or 0xA1 (a Subscription Identifier) until part 3
+    /// (ADR-273 rule 13). Retained messages follow, by Retain Handling.
+    fn on_subscribe(
+        &mut self,
+        c: ConnId,
+        packet_id: u16,
+        topics: &[(&str, SubOpts)],
+        sub_id: bool,
+    ) {
         let Some(sid) = self.conn(c).and_then(|k| k.session) else {
             return;
         };
+        let is5 = self.is_v5(c);
         let cfg = self.cfg;
+        let fail = |code: ReasonCode| if is5 { code as u8 } else { SUBACK_FAILURE };
         let mut codes: Vec<u8> = Vec::with_capacity(topics.len());
-        let mut granted: Vec<(&str, QoS)> = Vec::new();
-        for &(filter, want) in topics {
+        let mut granted: Vec<(&str, SubOpts, bool)> = Vec::new();
+        for &(filter, opts) in topics {
             let Some(s) = self.sessions.get(sid) else {
                 return;
             };
-            let qos = want;
-            if !cfg.may_subscribe(s.role, s.acl_id(), filter) || !self.add_sub(sid, filter, qos) {
-                codes.push(SUBACK_FAILURE);
+            if is5 && filter.starts_with("$share/") {
+                codes.push(ReasonCode::SharedSubscriptionsNotSupported as u8);
                 continue;
             }
-            codes.push(qos as u8);
-            granted.push((filter, qos));
+            if sub_id {
+                codes.push(ReasonCode::SubscriptionIdentifiersNotSupported as u8);
+                continue;
+            }
+            if !cfg.may_subscribe(s.role, s.acl_id(), filter) {
+                codes.push(fail(ReasonCode::NotAuthorized));
+                continue;
+            }
+            let Some(new) = self.add_sub(sid, filter, opts) else {
+                codes.push(fail(ReasonCode::QuotaExceeded));
+                continue;
+            };
+            codes.push(opts.max_qos() as u8);
+            granted.push((filter, opts, new));
             if let Some(s) = self.session(sid)
                 && s.persisted
             {
@@ -2290,24 +3150,46 @@ impl Broker {
                 self.emit(PersistOp::Subscribe {
                     client_id,
                     filter: filter.into(),
-                    qos,
+                    qos: opts.max_qos(),
+                    options: opts.0,
                 });
             }
         }
-        self.send(
-            c,
-            &Packet::SubAck(SubAck {
-                packet_id,
-                return_codes: &codes,
-            }),
-        );
-        // Retained messages for the new subscriptions, RETAIN set (§3.3.1.3).
+        if is5 {
+            self.send5(
+                c,
+                &mqtt5::Packet::SubAck(mqtt5::SubAck {
+                    packet_id,
+                    properties: Properties::EMPTY,
+                    reason_codes: &codes,
+                }),
+            );
+        } else {
+            self.send(
+                c,
+                &Packet::SubAck(SubAck {
+                    packet_id,
+                    return_codes: &codes,
+                }),
+            );
+        }
+        // Retained messages for the new subscriptions, RETAIN set (§3.3.1.3),
+        // unless Retain Handling says otherwise (2: never; 1: only for a
+        // subscription that did not exist).
         let mut retained = Vec::new();
-        for (filter, qos) in granted {
+        for (filter, opts, new) in granted {
+            match opts.retain_handling() {
+                2 => continue,
+                1 if !new => continue,
+                _ => {}
+            }
             retained.clear();
             self.topics.retained_matching(filter, &mut retained);
             for (msg, rq) in retained.drain(..) {
-                self.deliver(sid, &msg, rq.min(qos), true);
+                if msg.expired(self.now_ms) {
+                    self.forget_expired_retained(&msg);
+                }
+                self.deliver(sid, &msg, rq.min(opts.max_qos()), true);
             }
             // The console's last lines (O2), as live messages.
             if acl::sys(filter) && urmqtt_mqtt::topic_matches(filter, sys::CONSOLE_OUT) {
@@ -2319,12 +3201,36 @@ impl Broker {
         }
     }
 
+    /// A retained message whose expiry passed is cleared where it is found
+    /// (on read: ADR-273 rule 5), here and in the store.
+    fn forget_expired_retained(&mut self, msg: &Msg) {
+        if !self.topics.retained_is(&msg.topic, msg) {
+            return;
+        }
+        let clear = Arc::new(MsgInner::new(&msg.topic, &[]));
+        self.store_retained(&clear, QoS::AtMostOnce, None);
+        self.emit(PersistOp::Retain {
+            msg: clear,
+            qos: QoS::AtMostOnce,
+        });
+    }
+
     fn on_unsubscribe(&mut self, c: ConnId, packet_id: u16, topics: &[&str]) {
         let Some(sid) = self.conn(c).and_then(|k| k.session) else {
             return;
         };
+        let is5 = self.is_v5(c);
+        let mut codes: Vec<u8> = Vec::new();
         for f in topics {
-            if self.remove_sub(sid, f) {
+            let found = self.remove_sub(sid, f);
+            if is5 {
+                codes.push(if found {
+                    ReasonCode::Success as u8
+                } else {
+                    ReasonCode::NoSubscriptionExisted as u8
+                });
+            }
+            if found {
                 let stored = self
                     .sessions
                     .get(sid)
@@ -2338,7 +3244,18 @@ impl Broker {
                 }
             }
         }
-        self.send(c, &Packet::UnsubAck(packet_id));
+        if is5 {
+            self.send5(
+                c,
+                &mqtt5::Packet::UnsubAck(mqtt5::UnsubAck {
+                    packet_id,
+                    properties: Properties::EMPTY,
+                    reason_codes: &codes,
+                }),
+            );
+        } else {
+            self.send(c, &Packet::UnsubAck(packet_id));
+        }
     }
 
     /// Client ID of the session attached to `c` (for logs).
@@ -2348,5 +3265,48 @@ impl Broker {
     }
 }
 
+/// Offline sessions and armed Wills one [`Broker::tick`] ends at most (each).
+pub const SWEEP_PER_TICK: usize = 64;
+
+/// What one decode step did with the input buffer.
+enum Step {
+    /// A packet of this many bytes was handled.
+    Used(usize),
+    /// The next packet is not complete.
+    Wait,
+    /// The connection is closing; the rest is not read.
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckKind {
+    Ack,
+    Rec,
+    Rel,
+    Comp,
+}
+
+/// What [`Broker::judge`] decided for a PUBLISH.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Route it.
+    Route,
+    /// Taken by the control or `$SYS/` handler.
+    Taken,
+    /// Dropped (counted); a 5.0 client is acknowledged with this code.
+    Dropped(ReasonCode),
+}
+
+/// The validated bytes of a decoded property block.
+fn raw_props<'a>(p: &Properties<'a>) -> &'a [u8] {
+    match *p {
+        Properties::Raw(r) => r,
+        _ => &[],
+    }
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod v5_tests;

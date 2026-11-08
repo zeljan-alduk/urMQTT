@@ -56,6 +56,7 @@ fn cfg() -> Config {
         fanout: false,
         control_ids: &[],
         plain: None,
+        mqtt5: Default::default(),
         web: None,
         publisher_backpressure: urmqtt_broker::PublisherBackpressure::Single,
     }
@@ -299,7 +300,7 @@ impl Store {
     fn apply(&mut self, b: &mut Broker) {
         for op in b.drain_persist() {
             match op {
-                PersistOp::SessionUpsert { client_id } => {
+                PersistOp::SessionUpsert { client_id, .. } => {
                     self.sessions.entry(client_id.to_string()).or_default();
                 }
                 PersistOp::SessionDelete { client_id } => {
@@ -309,6 +310,7 @@ impl Store {
                     client_id,
                     filter,
                     qos,
+                    ..
                 } => {
                     let s = self.sessions.get_mut(&*client_id).expect("FK");
                     s.subs.retain(|(f, _)| *f != *filter);
@@ -333,6 +335,7 @@ impl Store {
                     let s = self.sessions.get_mut(&*client_id).expect("FK");
                     assert!(s.ids.insert(id), "primary key ({client_id}, {id:?})");
                 }
+                PersistOp::SessionOffline { .. } => {}
                 PersistOp::QueueClear { client_id } => {
                     if let Some(s) = self.sessions.get_mut(&*client_id) {
                         s.queue.clear();
@@ -347,17 +350,16 @@ impl Store {
     fn restore(&self) -> Broker {
         let mut b = Broker::new(cfg());
         for (id, s) in &self.sessions {
-            assert!(b.restore_session(
-                id,
-                s.subs.iter().map(|(f, q)| (f.as_str(), *q)),
-                s.queue.iter().map(|(t, p, qos, pid)| StoredMsg {
-                    topic: t,
-                    payload: p,
-                    qos: *qos,
-                    pid: *pid,
-                }),
-                s.ids.iter().copied(),
-            ));
+            assert!(
+                b.restore_session(
+                    id,
+                    s.subs.iter().map(|(f, q)| (f.as_str(), *q)),
+                    s.queue
+                        .iter()
+                        .map(|(t, p, qos, pid)| StoredMsg::plain(t, p, *qos, *pid)),
+                    s.ids.iter().copied(),
+                )
+            );
         }
         b
     }
