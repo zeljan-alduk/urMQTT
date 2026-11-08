@@ -158,6 +158,10 @@ All notable changes to this project are documented here. The format follows
   when TCP was done with the connection, which a client that never closes its socket drags out to the FIN_WAIT2
   timeout: the Eclipse Paho suite's `test_keepalive` (3.1.1 and 5.0) and `test_will_message` failed. The session now
   ends as soon as its last bytes are handed to TCP (ADR-274).
+- The smoke scenario `watchdog-handshake` failed on x86_64 under TCG whenever the host was busy (main and branches
+  alike, about half the runs): its self-test spun a fixed elapsed time, and the late ticks of a descheduled vCPU are
+  credited as stalls (ADR-221), so the spin never reached the budget in running time. It now spins its length in
+  running time as the watchdog counts it (bounded at 20 times that elapsed); 10 of 10 with and without host load.
 - A retained message replayed for a new subscription while the session's in-flight window was full was sent from
   the queue with RETAIN 0 (QoS 1, since M9; MQTT 3.1.1 3.3.1.3 requires 1). It keeps RETAIN now, also when it is sent
   again after a reconnect. Found by the `broker_acl` fuzzer's new QoS 2 checks (ADR-271).
