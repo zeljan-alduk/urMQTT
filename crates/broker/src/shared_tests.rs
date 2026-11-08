@@ -1092,3 +1092,60 @@ fn topic_alias_tables_are_counted() {
     b.closed(d.c, 0);
     assert_eq!(b.stats().alias_bytes, 0);
 }
+
+#[test]
+fn a_persistent_members_unacknowledged_message_stays_with_it() {
+    let mut b = Broker::new(cfg());
+    let persistent = [Prop::SessionExpiryInterval(600)];
+    let (mut s1, _) = C5::connect(&mut b, "backend", true, &persistent, None, 0);
+    let (mut s2, _) = C5::connect(&mut b, "backend2", true, &[], None, 0);
+    s1.subscribe(&mut b, &[(TELEMETRY, q(QoS::ExactlyOnce))], 0);
+    s2.subscribe(&mut b, &[(TELEMETRY, q(QoS::ExactlyOnce))], 0);
+    let (mut d, _) = C5::connect(&mut b, "d1", true, &[], None, 0);
+    d.publish(
+        &mut b,
+        "devices/d1/telemetry",
+        b"q1",
+        QoS::AtLeastOnce,
+        false,
+        &[],
+        0,
+    );
+    d.publish(
+        &mut b,
+        "devices/d1/telemetry",
+        b"x",
+        QoS::AtLeastOnce,
+        false,
+        &[],
+        0,
+    );
+    d.publish(
+        &mut b,
+        "devices/d1/telemetry",
+        b"q2",
+        QoS::ExactlyOnce,
+        false,
+        &[],
+        0,
+    );
+    let got = s1.recv(&mut b);
+    assert_eq!(pubs(&got).len(), 2, "q1 and q2 to s1 (round robin)");
+    let got2 = s2.recv(&mut b);
+    ack_all(&s2, &mut b, &got2, 0);
+    // s1's connection drops; its session stays: both stay with it (§4.8.2).
+    b.closed(s1.c, 0);
+    assert!(s2.recv(&mut b).is_empty());
+    assert_eq!(b.stats().shared_redispatched, 0);
+    let (mut s1, ack) = C5::connect(&mut b, "backend", false, &persistent, None, 0);
+    assert!(matches!(ack, G::ConnAck { present: true, .. }));
+    let again: Vec<(Vec<u8>, bool)> = s1
+        .recv(&mut b)
+        .into_iter()
+        .filter_map(|g| match g {
+            G::Publish { payload, dup, .. } => Some((payload, dup)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(again, [(b"q1".to_vec(), true), (b"q2".to_vec(), true)]);
+}

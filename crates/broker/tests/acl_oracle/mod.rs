@@ -48,6 +48,19 @@
 //!    only through Retain As Published; a retained replay only as Retain
 //!    Handling allows; nothing is delivered after its Message Expiry
 //!    Interval, and a 5.0 receiver is told what is left of it.
+//! 8. Shared subscriptions (ADR-275, `$share/{group}/{filter}`, both
+//!    versions): one is granted only if every topic the filter inside it can
+//!    match is within the subscriber's rights (the group name is no topic),
+//!    and what comes through it satisfies everything above for that filter
+//!    (no other device's topics, no `$SYS`, provenance, No Local, expiry). A
+//!    session that holds a shared and an ordinary subscription matching one
+//!    topic may get a QoS 2 message once through each (they are separate
+//!    subscriptions, §4.8.2). That a group gets each message exactly once,
+//!    through one member, across shards and never across roles, is the
+//!    subject of `tests/shared_model.rs`.
+//! 9. Subscription Identifiers (ADR-275): every 5.0 SUBSCRIBE carries a
+//!    fresh one; a PUBLISH to a 5.0 client carries only identifiers that
+//!    session was given, and none to a 3.1.1 client.
 
 #![allow(dead_code)]
 
@@ -479,6 +492,18 @@ pub const FILTERS: [&str; 28] = [
     "$SYS/#",
 ];
 
+/// The filter a subscription matches with: the one inside a share.
+pub fn inner(filter: &str) -> &str {
+    filter
+        .strip_prefix("$share/")
+        .and_then(|r| r.split_once('/'))
+        .map_or(filter, |(_, f)| f)
+}
+
+pub fn is_share(filter: &str) -> bool {
+    filter.starts_with("$share/")
+}
+
 const ALPHA: [&str; 15] = [
     "devices",
     "d1",
@@ -642,7 +667,21 @@ pub fn decode_ops(data: &[u8]) -> Vec<Op> {
                             // QoS 0-2, No Local, Retain As Published, Retain
                             // Handling 0-2.
                             let opts = ((o & 3) % 3) | (o & 0x0c) | ((((o >> 4) & 3) % 3) << 4);
-                            (s.topic(true), opts)
+                            let f = s.topic(true);
+                            // Bit 6 (unused by the options): a shared
+                            // subscription to that filter, in group `g` or
+                            // (bit 7) `devices`, a name that is also a topic
+                            // level (ADR-275). No Local on a share is a
+                            // protocol error the codec answers (tested
+                            // apart): not generated. The other bits keep
+                            // their meaning, so older seeds replay as before
+                            // unless they set bit 6.
+                            if o & 0x40 != 0 && !f.is_empty() {
+                                let g = if o & 0x80 != 0 { "devices" } else { "g" };
+                                (format!("$share/{g}/{f}"), opts & !0x04)
+                            } else {
+                                (f, opts)
+                            }
                         })
                         .collect();
                     Op::Subscribe5 { slot, filters }
@@ -795,6 +834,11 @@ struct Sess {
     granted_rap: HashSet<String>,
     /// Its subscriptions now (Retain Handling 1).
     current: HashSet<String>,
+    /// Filters (inside the share) of its shared subscriptions, granted at
+    /// some point (ADR-275).
+    shared: HashSet<String>,
+    /// Subscription Identifiers its SUBSCRIBE packets carried (ADR-275).
+    sub_ids: HashSet<u32>,
     /// Retained messages a SUBSCRIBE of this session may have replayed: a
     /// replay that waits in the queue (window full) arrives later, after
     /// the SUBSCRIBE, and No Local does not apply to it.
@@ -828,6 +872,8 @@ enum Rx {
         dup: bool,
         /// The Message Expiry Interval it says (5.0).
         expiry: Option<u32>,
+        /// Its Subscription Identifiers (5.0).
+        ids: Vec<u32>,
     },
     SubAck(Vec<u8>),
     /// Acknowledgements of the client's publishes, with their code (0 for
@@ -855,6 +901,8 @@ pub struct Harness {
     control_seen: u64,
     /// Retained messages handed back by `restore_retained` (no owner).
     restored: usize,
+    /// The last Subscription Identifier given (ADR-275).
+    next_sub_id: u8,
     /// Payloads published, willed or restored with RETAIN: the only ones a
     /// RETAIN delivery may carry.
     retained_seqs: HashSet<u32>,
@@ -885,6 +933,7 @@ impl Harness {
             sub_opts: Vec::new(),
             control_seen: 0,
             restored: 0,
+            next_sub_id: 0,
             retained_seqs: HashSet::new(),
             steps: 0,
         }
@@ -1341,8 +1390,18 @@ impl Harness {
                 if self.is_v5(*slot) {
                     // By hand: a filter the encoder would refuse must reach
                     // the broker too.
+                    // A fresh Subscription Identifier (ADR-275), from
+                    // 1 to 127 (one byte), given to the session.
+                    self.next_sub_id = self.next_sub_id % 127 + 1;
+                    let sid = self.next_sub_id;
+                    let key = self.slots[*slot].as_ref().expect("accepted").key.clone();
+                    self.sessions
+                        .entry(key)
+                        .or_default()
+                        .sub_ids
+                        .insert(u32::from(sid));
                     let mut body = 7u16.to_be_bytes().to_vec();
-                    body.push(0);
+                    body.extend_from_slice(&[2, 0x0b, sid]);
                     for (f, o) in filters {
                         body.extend_from_slice(&(f.len() as u16).to_be_bytes());
                         body.extend_from_slice(f.as_bytes());
@@ -1567,7 +1626,12 @@ impl Harness {
                     let sess = self.sessions.entry(id.to_string()).or_default();
                     // A queued message is owed to the session whatever it
                     // subscribes to now: its own topic counts as a filter.
-                    sess.granted = subs.iter().map(|(f, _)| f.clone()).collect();
+                    sess.granted = subs.iter().map(|(f, _)| inner(f).to_string()).collect();
+                    sess.shared = subs
+                        .iter()
+                        .filter(|(f, _)| is_share(f))
+                        .map(|(f, _)| inner(f).to_string())
+                        .collect();
                     sess.granted.extend(msgs.iter().map(|(t, _)| t.clone()));
                     sess.granted_local = sess.granted.clone();
                     sess.current = subs.iter().map(|(f, _)| f.clone()).collect();
@@ -1772,6 +1836,14 @@ impl Harness {
                                     retain: p.retain,
                                     dup: p.dup,
                                     expiry: p.properties.message_expiry_interval(),
+                                    ids: p
+                                        .properties
+                                        .iter()
+                                        .filter_map(|x| match x {
+                                            m5::Property::SubscriptionIdentifier(i) => Some(i),
+                                            _ => None,
+                                        })
+                                        .collect(),
                                 }
                             }
                             m5::Packet::SubAck(a) => Rx::SubAck(a.reason_codes.to_vec()),
@@ -1805,6 +1877,7 @@ impl Harness {
                                 retain: p.retain,
                                 dup: p.dup,
                                 expiry: None,
+                                ids: Vec::new(),
                             },
                             Packet::SubAck(a) => Rx::SubAck(a.return_codes.to_vec()),
                             Packet::PubAck(p) => Rx::PubAck(p, 0),
@@ -1838,7 +1911,16 @@ impl Harness {
                 retain,
                 dup,
                 expiry,
+                ids,
             } => {
+                if let Some(s) = self.slots[i].as_ref() {
+                    let given = &self.sessions.get(&s.key).expect("session").sub_ids;
+                    assert!(
+                        ids.iter().all(|x| given.contains(x)),
+                        "{:?} received identifiers {ids:?}, given {given:?}",
+                        WHO[s.who]
+                    );
+                }
                 self.check_v5_delivery(i, &topic, &payload, qos, retain, dup, expiry);
                 self.on_delivery(i, &topic, &payload, qos, pid, retain, dup)
             }
@@ -1956,22 +2038,29 @@ impl Harness {
             }
             let opts = self.sub_opts.get(k).map_or(*want as u8, |o| o.0);
             let key = s.key.clone();
+            // A share is judged and matched by the filter inside it.
+            let m = inner(filter).to_string();
             let sess = self.sessions.get_mut(&key).expect("session");
             sess.current.insert(filter.clone());
-            sess.replayed.extend(self.retained_seqs.iter().filter(|q| {
-                self.sent
-                    .get(**q as usize)
-                    .is_some_and(|m| matches(filter, &m.topic))
-            }));
+            if is_share(filter) {
+                // No retained replay for a share (§4.8.2).
+                sess.shared.insert(m.clone());
+            } else {
+                sess.replayed.extend(self.retained_seqs.iter().filter(|q| {
+                    self.sent
+                        .get(**q as usize)
+                        .is_some_and(|x| matches(filter, &x.topic))
+                }));
+            }
             if opts & 0x04 == 0 {
-                sess.granted_local.insert(filter.clone());
+                sess.granted_local.insert(m.clone());
             }
             if opts & 0x08 != 0 {
-                sess.granted_rap.insert(filter.clone());
+                sess.granted_rap.insert(m.clone());
             }
             let s = self.slots[i].as_ref().expect("slot");
             assert!(
-                filter_allowed(kind, id, filter),
+                filter_allowed(kind, id, &m),
                 "{:?} was granted filter {filter:?} that reaches topics outside its rights",
                 WHO[s.who]
             );
@@ -1981,7 +2070,7 @@ impl Harness {
                 .get_mut(&key)
                 .expect("session")
                 .granted
-                .insert(filter.clone());
+                .insert(m);
         }
     }
 
@@ -2067,7 +2156,16 @@ impl Harness {
             && let Some(seq) = seq
         {
             let sess = self.sessions.get_mut(&key).expect("session");
+            // A shared and an ordinary subscription are two ways in.
+            let two_ways = sess.shared.iter().any(|f| matches(f, topic))
+                && sess
+                    .granted
+                    .iter()
+                    .any(|f| matches(f, topic) && !sess.shared.contains(f));
             match sess.q2.get(&seq) {
+                Some(&(p, rec)) if two_ways && (!dup || p != pid) => {
+                    sess.q2.insert(seq, (pid, rec));
+                }
                 Some(&(p, rec)) => {
                     assert!(
                         dup && p == pid && !rec,

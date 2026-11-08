@@ -23,7 +23,9 @@
 //! uses topic aliases and user properties, and disconnects with or without
 //! its will. The invariants above hold for both, and a 5.0 client is told
 //! the truth: PUBACK 0x87 exactly for what the oracle forbids, SUBACK codes
-//! from the 5.0 set, a CONNACK it can parse.
+//! from the 5.0 set, a CONNACK it can parse. Shared subscriptions
+//! (`$share/{group}/{filter}`, ADR-275) are among the filters: whatever a
+//! group hands a member is held to the same invariants.
 //!
 //! Environment: `ACL_FUZZ_SECS` (default 3), `ACL_FUZZ_SEED` (default 1),
 //! `ACL_FUZZ_OPS` (operations per sequence, default 300). Run it long with
@@ -149,6 +151,16 @@ const FILTERS: &[&str] = &[
     "$+/#",
     "devices/d1/cmd/x",
     "devices/d2/cmd/x",
+    // Shared subscriptions (ADR-275), 3.1.1 and 5.0 alike: the ACL judges
+    // the filter after the group name, so the invariants hold for what comes
+    // through them as for any other subscription.
+    "$share/g/#",
+    "$share/g/devices/+/cmd/#",
+    "$share/g/devices/d1/cmd/#",
+    "$share/devices/devices/d2/cmd/#",
+    "$share/ops/$SYS/#",
+    "$share/g/$urmqtt/#",
+    "$share/g/fleet/#",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

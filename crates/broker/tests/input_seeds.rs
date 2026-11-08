@@ -56,3 +56,11 @@ fn the_mqtt5_seeds_reach_their_flows() {
     assert_eq!((st.qos2_received, st.qos2_inbound_full), (32, 1), "{st:?}");
     assert_eq!(st.disconnects_sent[0x13], 1, "0x93: {st:?}");
 }
+
+/// The part 3 seed (ADR-275) reaches shared subscriptions and identifiers.
+#[test]
+fn the_shared_subscription_seed_reaches_its_flows() {
+    let st = input_harness::run(&seed("mqtt5_shared_and_ids")).stats();
+    assert!(st.shared_delivered >= 2, "{st:?}");
+    assert_eq!(st.disconnects_sent[0x02], 1, "No Local on a share: {st:?}");
+}

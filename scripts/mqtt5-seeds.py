@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Writes the MQTT 5.0 fuzz seeds (ADR-274): python3 scripts/mqtt5-seeds.py \
+# Writes the MQTT 5.0 fuzz seeds (ADR-274, ADR-275): python3 scripts/mqtt5-seeds.py \
 #   fuzz/seeds/broker_input fuzz/seeds/broker_acl
 """Writes MQTT 5.0 seeds for fuzz/seeds/broker_input and broker_acl."""
 import os, sys
@@ -108,6 +108,22 @@ seeds = {
         (D1, ack(0x40, 1) + ack(0x40, 2)),
         (D1, bytes([0xf0, 0])),  # AUTH: 0x82
     ]))[1],
+    # ADR-275: shared subscriptions (5.0 with a Subscription Identifier, No
+    # Local on a share: 0x82 at the end) and identifiers.
+    "mqtt5_shared_and_ids": seed([
+        (SVC, connect('svc', pr=props())),
+        (SVC, subscribe(1, [('$share/g/devices/+/telemetry', 1)], pr=props(bytes([0x0b, 7])))),
+        (SVC, subscribe(2, [('devices/d1/#', 2)], pr=props(bytes([0x0b, 0x81, 0x01])))),
+        (D1, connect('d1', clean=True, pr=props())),
+        (D1, subscribe(1, [('$share/devices/devices/d1/cmd/#', 1), ('$share/g/devices/d2/cmd/#', 0)])),
+        (D1, publish('devices/d1/telemetry', b't1', qos=1, pid=3)),
+        (D1, publish('devices/d1/telemetry', b't2', qos=2, pid=4)),
+        (D1, ack(0x62, 4)),
+        (SVC, ack(0x40, 1) + ack(0x50, 2) + ack(0x40, 3)),
+        (SVC, publish('devices/d1/cmd/go', b'c', qos=1, pid=5)),
+        (CLOSE_D1, b''),
+        (SVC, subscribe(3, [('$share/g/devices/+/telemetry', 0x04)])),
+    ]),
     "mqtt5_flow_control": seed([
         # On slot 1 ("d2"): the input harness reads every 64-byte chunk also
         # as "another shard's subscriber of slot 0's publisher is full"
@@ -146,6 +162,25 @@ acl = {
         7, 0, 8,                       # Tick 4000 ms
     ]),
 }
+# ADR-275: Subscribe5 option bit 6 makes the filter a share (bit 7: group
+# "devices"); the oracle checks the inner filter's rights and the identifiers.
+acl["mqtt5_shared_groups"] = bytes([
+    9, 0x31, 0, 1, 3,                  # Connect5 slot 1 svc clean, expiry 600
+    9, 0x36, 0, 1, 0x1b,               # Connect5 slot 2 exp clean, expiry 600, rm 4
+    9, 0x31, 1, 0, 0x41, 14,           # Subscribe5 svc $share/g/fleet/# QoS 1
+    9, 0x36, 1, 1, 0x41, 14, 0x02, 14, # Subscribe5 exp $share/g/fleet/# + fleet/# QoS 2
+    9, 0x78, 0, 1, 3,                  # Connect5 slot 0 d1 clean
+    9, 0x78, 1, 1, 0xc1, 8, 0x41, 11,  # Subscribe5 d1 $share/devices/devices/d1/cmd/#, $share/g/devices/d2/cmd/# (refused)
+    9, 0x31, 2, 1, 14,                 # Publish5 svc fleet/x/y QoS 1
+    9, 0x31, 2, 2, 13,                 # Publish5 svc fleet/all QoS 2
+    4, 2,                              # Ack slot 2
+    4, 1,                              # Ack slot 1
+    9, 0x31, 2, 1, 4,                  # Publish5 svc devices/d1/cmd/reboot QoS 1
+    6, 2,                              # Drop slot 2
+    9, 0x31, 2, 1, 14,                 # Publish5 svc fleet/x/y QoS 1
+    4, 1,                              # Ack slot 1
+    7, 0, 2,                           # Tick
+])
 for name, data in acl.items():
     with open(os.path.join(out_acl, name), 'wb') as f:
         f.write(data)

@@ -15,6 +15,10 @@
 //! Session Expiry Interval that time (`Advance`) and restarts measure; the
 //! backend stays a 3.1.1 client, so every case mixes the versions. A 3.1.1
 //! persistent device has the configured default expiry.
+//!
+//! Shared subscriptions (ADR-275): in half the cases the backend receives
+//! through `$share/up/devices/d1/up`, the only member of its group, and
+//! must see exactly what it would see through the plain filter.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -524,6 +528,8 @@ impl Store {
 }
 
 struct World {
+    /// The backend receives through a shared subscription (ADR-275).
+    shared: bool,
     b: Broker,
     store: Store,
     m: Model,
@@ -541,13 +547,21 @@ struct World {
     now: u64,
 }
 
-fn backend(b: &mut Broker, now: u64) -> Client {
+/// The backend, subscribed to what the device publishes: directly, or
+/// (`shared`) as the one member of a shared group (ADR-275), which must
+/// make no difference to what it receives.
+fn backend(b: &mut Broker, now: u64, shared: bool) -> Client {
     let mut cl = connect(b, "backend", true, None, now);
+    let filter = if shared {
+        "$share/up/devices/d1/up"
+    } else {
+        UP
+    };
     b.input(
         cl.c,
         &wire(&Packet::Subscribe(Subscribe {
             packet_id: 1,
-            topics: SubscribeTopics::List(&[(UP, QoS::AtMostOnce)]),
+            topics: SubscribeTopics::List(&[(filter, QoS::AtMostOnce)]),
         })),
         now,
     );
@@ -556,9 +570,9 @@ fn backend(b: &mut Broker, now: u64) -> Client {
 }
 
 impl World {
-    fn new(rm: Option<u16>) -> Self {
+    fn new(rm: Option<u16>, shared: bool) -> Self {
         let mut b = Broker::new(cfg());
-        let backend = backend(&mut b, 0);
+        let backend = backend(&mut b, 0, shared);
         let mut m = Model {
             window: rm.map_or(WINDOW, |r| WINDOW.min(usize::from(r))),
             ..Model::default()
@@ -576,6 +590,7 @@ impl World {
             backend_pid: 0,
             rm,
             now: 0,
+            shared,
         }
     }
 
@@ -797,7 +812,7 @@ impl World {
                 }
                 self.store.apply(&mut self.b, self.now);
                 self.b = self.store.restore(self.now);
-                self.backend = backend(&mut self.b, self.now);
+                self.backend = backend(&mut self.b, self.now, self.shared);
                 // A clean session never reaches the store.
                 if self.m.clean {
                     self.m.reset();
@@ -860,8 +875,9 @@ proptest! {
     fn the_broker_follows_the_reference_model(
         ops in proptest::collection::vec(op(), 1..120),
         rm in prop_oneof![Just(None), (1u16..4).prop_map(Some)],
+        shared in any::<bool>(),
     ) {
-        let mut w = World::new(rm);
+        let mut w = World::new(rm, shared);
         w.step(&Op::Connect { clean: false });
         for op in &ops {
             w.step(op);
