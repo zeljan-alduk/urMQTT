@@ -1635,9 +1635,9 @@ impl MqttService {
         for b in ready.drain(..) {
             activity = true;
             if let Some(&c) = self.by_broker.get(&b) {
-                self.local_output(c, b);
+                self.local_output(c, b, now_ms);
             } else if self.remote.contains_key(&b) {
-                self.remote_output(b, link);
+                self.remote_output(b, link, now_ms);
             }
         }
         // `local_output` and `remote_output` list a connection again when they
@@ -1828,7 +1828,7 @@ impl MqttService {
     // ---- end of publisher back-pressure ------------------------------------
 
     /// Broker output of a local session → TLS → `pending`.
-    fn local_output(&mut self, c: u32, b: ConnId) {
+    fn local_output(&mut self, c: u32, b: ConnId, now_ms: u64) {
         let Some(k) = self.conns.get_mut(&c) else {
             return;
         };
@@ -1865,13 +1865,25 @@ impl MqttService {
         let done = self.broker.close_requested(b).is_some() && self.broker.output(b).is_empty();
         self.blocked.push(c);
         if done {
+            // The broker closed it (keep alive, a protocol error, a 5.0
+            // DISCONNECT) and its last bytes are handed over: the session ends
+            // now, so its Will goes out now (MQTT 3.1.2.5, 5.0 3.1.2.5), not
+            // when TCP is done, which a client that never closes its socket
+            // drags out to the FIN_WAIT2 timeout (ADR-274).
+            if let Some(k) = self.conns.get_mut(&c)
+                && matches!(k.peer, Some(Peer::Local(x)) if x == b)
+            {
+                k.peer = None;
+                self.by_broker.remove(&b);
+                finish(&mut self.broker, b, now_ms);
+            }
             self.start_close(c);
         }
     }
 
     /// Home side: replies (within credit) and close requests for a relayed
     /// connection.
-    fn remote_output(&mut self, b: ConnId, link: &mut Link) {
+    fn remote_output(&mut self, b: ConnId, link: &mut Link, now_ms: u64) {
         let Some(r) = self.remote.get_mut(&b) else {
             return;
         };
@@ -1897,7 +1909,16 @@ impl MqttService {
             && self.broker.output(b).is_empty()
         {
             r.close_sent = true;
-            link.send(usize::from(r.from), CoreMsg::Close { tconn: r.tconn });
+            let (from, tconn) = (usize::from(r.from), r.tconn);
+            link.send(from, CoreMsg::Close { tconn });
+            // As for a local connection: the session ends now (its Will goes
+            // out), the transport core closes TCP; its later Closed finds no
+            // relay any more.
+            self.remote.remove(&b);
+            if let Some(t) = self.by_tconn.get_mut(from) {
+                t.remove(&(tconn as u32));
+            }
+            finish(&mut self.broker, b, now_ms);
         }
     }
 
