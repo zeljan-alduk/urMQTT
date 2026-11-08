@@ -12,9 +12,11 @@ the schedule.
 
 ## 1. Where we are
 
-- **Release.** v0.3.0 is tagged (`git tag`: v0.1.0, v0.2.0, v0.2.1, v0.3.0). Scope: a VPS or VM under KVM only
-  (PLAN.md, "First release scope"); bare metal (X12 to X16) and the hardware part of H8 come after it. The release
-  assets are dev builds with throwaway keys (CHANGELOG 0.3.0, "Limits, stated plainly").
+- **Release.** v0.4.2 is the latest published release (tags v0.1.0 to v0.4.2), the first signed with the release
+  key and without throwaway certificates; v0.5.0 (QoS 2, MQTT over WebSocket, MQTT 5.0, the NOW-13 work) is prepared
+  (CHANGELOG 0.5.0, docs/release-day-v0.5.0.md). Scope: a VPS or VM under KVM only (PLAN.md, "First release scope");
+  bare metal (X12 to X16) and the hardware part of H8 come after it. The text below this bullet in section 1 is as of
+  v0.3.0.
 - **CI.** The owner reports `main` green on `68d4820`; not re-checked from this checkout (no network was used).
   At the release candidate: 934 workspace tests, smoke aarch64 HVF+TCG 308/0, universal 59/0, x86_64 TCG 150/1
   (`log-slow-flood`, fixed afterwards), `make repro` identical (PROGRESS, "Release candidate v0.3.0").
@@ -101,7 +103,8 @@ release signed with it is v0.4.2.**
   format 7 on 2026-11-06 (its live manifest names format 7 and both keys), and the release mirror switched to
   `--keyring` by `scripts/mirror/install.sh` on 2026-11-06 at 22:23 UTC (`releases.json` lists both keys; `signed_by`
   is the test key for v0.2.0 to v0.4.1; v0.1.0 shows none, cause not investigated).
-- What remains: cut v0.4.2 (docs/release-day-v0.4.2.md) and verify it with the new key on the page and the mirror.
+- v0.4.2 was cut with it; the mirror lists v0.4.2 with `signed_by` = `721316B961DCB94B` and config format 7 (its
+  `releases.json`, checked 2026-11-09). v0.5.0 is the second release signed with it (docs/release-day-v0.5.0.md).
   The release `.elf` asset is the aarch64 kernel only; the x86_64 release kernel ships inside the universal ISO and
   raw image, not as a file of its own.
 - Risk: a page or mirror that does not know the new key refuses the first release signed with it (hence the order of

@@ -3,6 +3,77 @@
 One entry per milestone: what was done, what was measured and the known gaps. Newest entries first down to H7; the entries from M0 to S6 follow in the order they were written.
 Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptance-criteria).
 
+## Release candidate v0.5.0 (2026-11-09)
+
+Everything for the release except publishing: nothing was pushed, tagged, signed or uploaded, and no server was
+touched by this preparation (only read: the live `releases.json` and the builder's `manifest.json`). The commands for
+the day are in `docs/release-day-v0.5.0.md`; the generic steps in `docs/RELEASE.md`. What the release contains:
+QoS 2 (ADR-271), MQTT over secure WebSocket (ADR-272), MQTT 5.0 (ADR-273 to ADR-275), the NOW-13 work (ADR-265,
+ADR-266, ADR-268 to ADR-270), PBKDF2 at 100 000 iterations (ADR-267), the 30-day default session expiry, the
+watchdog self-test and `$SYS/query/info` fixes, CI and fuzz-oracle fixes, a hashed paho-mqtt in CI.
+
+**Found: CI's Lint job fails on `main`** (e053399, and every commit since 3bdbe01): its shellcheck step reports SC2016
+(info) on the two `mosquitto_sub ... -t '$share/m/devices/+/telemetry/#'` lines of `mqtt5_mosquitto_shared` in
+`scripts/smoke.sh`, and the step fails on any finding. The text is meant literally; this branch adds a
+`# shellcheck disable=SC2016` directive on the function (b8e9223). Without it the merge commit's CI is red and the
+tag must wait.
+
+**Done**
+
+- Version 0.5.0 (workspace `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock`: the workspace crates only, no dependency
+  changed; `cargo metadata --offline` accepts both); README badge and banner (MQTT 3.1.1 and 5.0, QoS 0 to 2, the
+  WebSocket listener when turned on), DEPLOY and OPERATE examples, the issue forms' example tag. CHANGELOG `[0.5.0] -
+  2026-11-09` with a summary, "Upgrading from v0.4.2" (the one-way schema 2 to 5 migration, formats up to 13, the
+  behaviour changes) and "Limits, stated plainly"; compare links, empty Unreleased. Release notes in
+  `docs/release-notes-v0.5.0.md` and RELEASE.md section 7 (v0.5.0 is now RELEASE.md's worked example).
+- Stale documents: KNOWN-ISSUES (status as of v0.5.0, the one-way migration, nothing of v0.5.0 on a VPS), ROADMAP
+  (section 1's release line, NOW-2 after v0.4.2). FIRST-HOUR is left as written against v0.4.1 (its walkthrough was
+  run with that release); moving it to v0.5.0 means running it again.
+- **The builder page needs a redeploy before the tag**: the live page's manifest says `"format": 7`
+  (`urmqtt-cfg7.wasm`, keys `721316B961DCB94B` and `9229E05252D01F8E`), this tree's is 13; the mirror lists v0.4.2 with
+  `config_format` 7 and `signed_by` `721316B961DCB94B` (both read 2026-11-09). The page learns the releases from the
+  mirror's `releases.json`; no text in `tools/builder/` names a release or a format, so nothing there changes.
+- **Compatibility, with the published v0.4.2 template** (downloaded outside the repository, `SHA256SUMS` verified with
+  `minisign.pub`: comment `urMQTT v0.4.2 release 55d33cab...`, the template's SHA-256 ok; `urmqtt-config check-release
+  --keyring keys/release-keys.json --tag v0.4.2` ok). With this tree's `urmqtt-config pack --iso` and the dev
+  certificates: a format-7 file (TLS files, CA, control key, `network.mtu = 1460`) packs on the local v0.5.0 template
+  and on v0.4.2's with the same fingerprint (`6c5e3369...`); with `limits.max_shared_groups = 64` added (format 13) it
+  packs on v0.5.0 (`show`: version 13) and v0.4.2 refuses it with "this configuration needs configuration format 13,
+  which this template's kernel does not read (it reads up to 7): use a newer release". The local template's empty
+  configuration is format 13.
+
+**Gates run on this Mac** (macOS 26.3, Apple M4 Pro, a sibling worktree, not nested): `make check` ran everything up
+to `builder-test` clean (fmt, typos, fuzz fmt, the arch-leak check, `cargo vet` "39 fully audited, 1 partially
+audited, 139 exempted", clippy host and both kernels and `check-x86`; `cargo test --workspace` 1318 passed, 0 failed,
+16 ignored; `test-mirror-releases.py` 74 ok; `test-check-release-key.sh` all passed; `test-pki.sh` 39; the caddy,
+demo-bridge and demo-site tests); `make builder-test` 118 of 121 passed, 2 skipped, 1 failed: "the build ends in a
+result card" (`simple.test.mjs`, the known failure without the emulator runtime, as at v0.4.1 and v0.4.2).
+`make repro ENV=release` (at f0b9eeb, version `v0.4.2-108-gf0b9eeb`): both release kernels, the template ISO and the
+raw image identical twice. `make dist ENV=release VERSION=v0.5.0` (the version given by hand, since no tag exists):
+`build/dist/` holds exactly `SHA256SUMS` (444 B), `urmqtt-template-v0.5.0-universal.iso` (70 580 224 B),
+`urmqtt-v0.5.0.cdx.json` (215 861 B, 223 components), `urmqtt-v0.5.0.elf` (3 904 880 B), `urmqtt-v0.5.0.img`
+(20 971 520 B), `urmqtt-v0.5.0.iso` (70 580 224 B, the same SHA-256 as the template, `e9e0d0a8...`);
+`scripts/check-no-pem-keys.py` finds no PEM private key; `urmqtt-config verify` on the `.img`: the empty
+configuration ("boots, but will not serve"); `check-release` on the dist cannot run (no signature: the secret is in
+CI only). `scripts/check-release-key.sh` ok (release `721316B961DCB94B` v0.4.2 and later, test `9229E05252D01F8E`
+v0.1.0 to v0.4.1, 6 pinned); `scripts/check-known-issues.py` ok; `scripts/audit-inventory.py --check` ok; `typos`,
+`actionlint` clean; `shellcheck` (CI's file list) clean after the fix above. `scripts/test-pki.sh` with
+`TEMPLATE=`/`RAW=` the dist template and raw image: 39 checks, all passed.
+Boots of the dist ISO (`scripts/run-qemu.sh`, no network): aarch64 HVF `URMQTT BOOT v0.5.0 cpu=4 mem=503` and
+x86_64 TCG `URMQTT BOOT v0.5.0 arch=x86_64 cpu=4 mem=505`, both ending in "fatal: refusing to serve: no server
+certificate and key (tls.cert, tls.key). This image carries the empty (default) configuration; ..." as expected. The
+format-13 image packed above from the dist template boots on aarch64 HVF to `URMQTT READY` (live mode, `schema v5`,
+the TLS listener on 8883, `net: mtu 1460 (static)`, the receive interrupt on probation via GICv2m).
+
+**Not run**
+
+- The smoke suites (aarch64, x86_64, universal) on this candidate; CI runs the aarch64 shards on the merge commit.
+- `make supply-chain`, `cargo vet regenerate imports && cargo vet prune`, `make ct`, Miri, Kani, sanitizers, fuzzing:
+  CI's jobs or the day's.
+- `make builder-emulator` and the builder tests with the emulator runtime: the day's step 2, before the page deploy.
+- CI itself, the minisign signature, the attestations and the page and mirror with a published v0.5.0: the day's steps.
+- Nothing on KVM, a real VPS or Google Cloud for this candidate.
+
 ## H5 addendum — a second, coverage-guided ACL oracle (`broker_acl`, 2026-11-07)
 
 SECURITY-PLAN H5, "stateful broker fuzzing" and "seeds for uncovered branches". Written on 2026-10-30 in a branch

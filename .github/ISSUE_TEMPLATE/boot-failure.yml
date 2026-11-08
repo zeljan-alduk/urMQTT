@@ -20,7 +20,7 @@ body:
     attributes:
       label: Release or commit
       description: The tag of the template or image, or the commit you built from.
-      placeholder: v0.4.2
+      placeholder: v0.5.0
     validations:
       required: true
   - type: input
