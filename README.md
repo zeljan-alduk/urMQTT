@@ -619,13 +619,15 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `limits.max_session_expiry_s` | 0 – 4 294 967 295 (2 592 000 = 30 days) | The longest Session Expiry Interval granted, to MQTT 5.0 clients and 3.1.1 persistent sessions alike; 4 294 967 295 = never expire (ADR-273). Set, it needs configuration format 12, like every key below |
 | `limits.default_session_expiry_s` | 0 – 4 294 967 295 (2 592 000) | The Session Expiry Interval of a 3.1.1 persistent session (`clean_session` 0); at most `limits.max_session_expiry_s` |
 | `limits.max_message_expiry_s` | 0 – 4 294 967 295 (0) | The longest Message Expiry Interval a publisher may ask for; 0: no cap |
+| `limits.max_shared_groups` | 1–65 535 (1024) | Shared-subscription groups (`$share/{group}/{filter}`) one data core may own; a SUBSCRIBE that would create one more gets SUBACK 0x97 (MQTT 5.0) / 0x80 (3.1.1). Each group lives on one core chosen by a hash of (role class, group, filter) (ADR-275). Set, it needs configuration format 13 |
+| `limits.max_shared_group_members` | 1–65 535 (1024) | Members one shared-subscription group may have; one more gets SUBACK 0x97 / 0x80. Set, it needs configuration format 13 |
 | `mqtt5.enabled` | bool, default `true` | Accept **MQTT 5.0** clients (CONNECT with protocol level 5) on every listener (ADR-273); `false`: they get CONNACK 0x84 and are closed. Any `[mqtt5]` key set needs configuration format 12 |
 | `mqtt5.receive_maximum` | 1–65 535 (32) | Announced Receive Maximum: QoS 2 publications a 5.0 client may have awaiting PUBREL; one more is DISCONNECT 0x93 |
 | `mqtt5.topic_alias_maximum` | 0–65 535 (10) | Announced Topic Alias Maximum (client to broker only); 0 disables aliases. A connection that uses aliases may hold up to `topic_alias_maximum` × (`limits.max_topic_len` + 16) bytes |
 | `mqtt5.max_user_properties` | 0–1024 (16) | User Properties per property block; a packet with more is refused (0x83) |
 | `mqtt5.max_keep_alive_s` | 0–65 535 (0) | 0: a 5.0 client keeps the keep alive it asked for; otherwise the most it gets (Server Keep Alive in CONNACK) |
-| `mqtt5.shared_subscriptions` | bool, default `true` | Reserved for shared subscriptions (a later release): today the broker announces Shared Subscription Available 0 and answers a `$share/` filter with SUBACK 0x9E whatever this says |
-| `mqtt5.subscription_identifiers` | bool, default `true` | Reserved for subscription identifiers (a later release): today the broker announces Subscription Identifier Available 0 and answers SUBACK 0xA1 whatever this says |
+| `mqtt5.shared_subscriptions` | bool, default `true` | Shared subscriptions (`$share/{group}/{filter}`, MQTT 5.0 4.8.2; also for 3.1.1 clients): each matching message goes to one member of the group. `false`: CONNACK announces Shared Subscription Available 0 and a `$share/` filter gets SUBACK 0x9E (3.1.1: 0x80) |
+| `mqtt5.subscription_identifiers` | bool, default `true` | Subscription Identifiers (MQTT 5.0 3.8.2.1.2): returned in each PUBLISH the subscription matched. `false`: CONNACK announces Subscription Identifier Available 0 and a SUBSCRIBE that carries one gets SUBACK 0xA1 |
 | `acl.device_publish`, `acl.device_subscribe` | topic filters, `{id}` = device id | Default device rights |
 | `acl.service_ids` | ids or `prefix*` | Identities with service rights (backends) |
 | `acl.service_publish`, `acl.service_subscribe` | topic filters | Service rights |
