@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2015 # `cond && say ok || say FAILED` is intended: say only prints, never fails
 # Store schema 3 -> 4 on a real disk (ADR-274): a data disk written by an
 # older kernel (schema 3, e.g. main before MQTT 5.0) is booted by this one.
 #
