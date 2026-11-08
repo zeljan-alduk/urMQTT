@@ -789,6 +789,28 @@ mod tests {
         }
     }
 
+    /// ADR-270: the NIC's receive interrupt is "auto" by default (the empty
+    /// blob, and every blob before format 11); "off" is decoded.
+    #[test]
+    fn the_net_interrupt_is_auto_by_default_and_decoded() {
+        use crate::NetInterrupt;
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.devices.virtio_net_interrupt, NetInterrupt::Auto);
+        let mut b = Builder::new();
+        b.variant(tag::DEV_NET_INTERRUPT, 1).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 11);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let d = build(&blob, arena).devices;
+        assert_eq!(d.virtio_net_interrupt, NetInterrupt::Off);
+        assert!(d.iter().all(|(_, m)| m == crate::DeviceMode::Off));
+        assert_eq!(
+            (NetInterrupt::Auto.name(), NetInterrupt::Off.name()),
+            ("auto", "off")
+        );
+    }
+
     /// ADR-257: every `[devices]` key is off by default (the empty blob, and
     /// every blob before format 6); auto and on are decoded per key.
     #[test]

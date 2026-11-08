@@ -20,6 +20,7 @@ use urmqtt_net::dhcp;
 use urmqtt_net::iface::{Event, Iface, Rx};
 use urmqtt_tcp::{App, CloseReason, ConnId, Endpoint, TcpStack, mss_for_mtu};
 use urmqtt_virtio::net::{MTU_FRAME, VirtioNet};
+use urmqtt_virtio::wake::{Mode, RxWake, Why};
 
 use crate::dataplane::{self, CoreMsg, DropSite, Frame, Link, POOL_MAX, new_frame};
 use crate::db::Restored;
@@ -41,6 +42,11 @@ const NIC_BACKLOG: usize = 4096;
 const POOL_IDLE: usize = 32;
 /// How often the dispatcher polls the NIC while it sleeps and connections exist.
 const NIC_POLL_NS: u64 = 200_000;
+/// What the NIC's MSI-X message targets (ADR-270's boot line).
+#[cfg(target_arch = "aarch64")]
+const MSI_NAME: &str = "GICv2m SPI";
+#[cfg(target_arch = "x86_64")]
+const MSI_NAME: &str = "local APIC vector";
 const POOL_IDLE_MS: u64 = 1_000;
 /// Messages taken from each peer per pass.
 const MSG_BURST: usize = 256;
@@ -462,14 +468,23 @@ static MAC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0
 static RESTORED: urmqtt_sync::sync::SpinLock<Option<Arc<Restored>>> =
     urmqtt_sync::sync::SpinLock::new(None);
 static NIC: urmqtt_sync::sync::SpinLock<Option<VirtioNet>> = urmqtt_sync::sync::SpinLock::new(None);
+/// The NIC's receive interrupt (its SPI or vector) and the dispatcher's
+/// wake-up mode, handed over with the NIC (ADR-270).
+static NIC_WAKE: urmqtt_sync::sync::SpinLock<(Option<u32>, Mode)> =
+    urmqtt_sync::sync::SpinLock::new((None, Mode::Polling(Why::NoMsix)));
 
 /// Boot CPU, before the other data cores start: takes the NIC (core 0
 /// owns it) and publishes the restored broker state for every shard.
 pub fn prepare(restored: Option<Arc<Restored>>) {
     *RESTORED.lock() = restored;
-    let Some(net) = devices::DEVICES.lock().net.take() else {
+    let (net, spi, wake) = {
+        let mut devs = devices::DEVICES.lock();
+        (devs.net.take(), devs.net_msix_spi, devs.net_wake)
+    };
+    let Some(net) = net else {
         return;
     };
+    *NIC_WAKE.lock() = (spi, wake);
     let m = net.mac;
     let packed = u64::from_be_bytes([0, 0, m[0], m[1], m[2], m[3], m[4], m[5]]);
     // Release: read by the other data cores when they start.
@@ -738,6 +753,32 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         "net: virtio-net with {} receive and {} transmit descriptor(s)",
         net.rx_size, net.tx_size
     );
+    let (irq_spi, mode) = *NIC_WAKE.lock();
+    let mut wake = RxWake::new(mode);
+    match (mode, irq_spi) {
+        (Mode::Interrupt, Some(spi)) => {
+            // Routed to this core (0), which owns the NIC; the queue keeps
+            // it suppressed except while this core sleeps.
+            crate::irq::enable_spi(spi, 0);
+            info!(
+                "net: receive wake-up: interrupt (MSI-X via {} {spi}, to core 0); no polling while asleep",
+                MSI_NAME
+            );
+        }
+        _ => {
+            let why = if let Mode::Polling(w) = mode {
+                w
+            } else {
+                Why::NoVector
+            };
+            wake = RxWake::new(Mode::Polling(why));
+            info!(
+                "net: receive wake-up: polling every {} us while connections exist ({})",
+                NIC_POLL_NS / 1000,
+                why.text()
+            );
+        }
+    }
     // Relaxed: statistics.
     dataplane::RX_RING_SIZE.store(
         u64::from(net.rx_size),
@@ -1003,15 +1044,38 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         } else if now.saturating_sub(last_busy_ms) > POOL_IDLE_MS {
             pool.truncate(POOL_IDLE);
         }
-        // With connections on the workers, come back to the NIC often enough
-        // that a frame never waits for the 10 ms tick (it has no interrupt).
+        // Polling mode, with connections on the workers: come back to the NIC
+        // often enough that a frame never waits for the 10 ms tick (ADR-224).
+        // Interrupt mode: the receive interrupt ends the sleep (ADR-270).
         let conns: u64 = dataplane::CONNECTIONS
             .iter()
             .map(|c| c.load(core::sync::atomic::Ordering::Relaxed))
             .sum();
-        idle.poll_wake(if conns > 0 { NIC_POLL_NS } else { 0 });
-        idle.pass(busy, || {
-            link.pending() || net.rx_pending() || !local.is_empty()
-        });
+        idle.poll_wake(wake.poll_ns(conns > 0, NIC_POLL_NS));
+        let irq = wake.interrupt();
+        let irqs = devices::net_irqs();
+        wake.armed(irqs);
+        let slept = idle.pass_armed(
+            busy,
+            |on| {
+                if !irq {
+                    false
+                } else if on {
+                    net.rx_irq_arm()
+                } else {
+                    net.rx_irq_disarm();
+                    false
+                }
+            },
+            || link.pending() || net.rx_pending() || !local.is_empty(),
+        );
+        if slept && wake.after_sleep(devices::net_irqs(), net.rx_pending()) {
+            warn!(
+                "net: receive wake-up: {} frames waited after a sleep without the receive interrupt; \
+                 polling every {} us while connections exist from now on",
+                urmqtt_virtio::wake::MISSES_BEFORE_POLLING,
+                NIC_POLL_NS / 1000
+            );
+        }
     }
 }

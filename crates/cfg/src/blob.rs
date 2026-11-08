@@ -28,10 +28,11 @@ pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// does not know it would send 1500-byte frames into the smaller network it was set for); version 8 adds
 /// `limits.publisher_backpressure` (ADR-269: "off" on a kernel that pauses publishers regardless would be
 /// ignored, so it is refused by the version); version 9 adds the `[websocket]` section (ADR-272: a kernel without
-/// the listener must refuse an image that asks for it). The records of 2 and 3 are the same: the packer writes
+/// the listener must refuse an image that asks for it); version 11 adds `devices.virtio_net_interrupt` (ADR-270;
+/// 10 is unused, 12 is reserved for MQTT 5). The records of 2 and 3 are the same: the packer writes
 /// the lowest version that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind
 /// still boots every image that does not use what came later.
-pub const FORMAT_VERSION: u16 = 9;
+pub const FORMAT_VERSION: u16 = 11;
 /// The version a configuration is written in unless it needs a newer one.
 pub const BASE_VERSION: u16 = 2;
 /// The oldest format version it still reads. Blobs of the older versions stay

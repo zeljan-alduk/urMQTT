@@ -1044,6 +1044,10 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
     b.variant(tag::LIM_PUBLISHER_BACKPRESSURE, 1).unwrap();
     let bp = b.finish(false).unwrap();
     assert_eq!(header(&bp), 8);
+    let mut b = Builder::new();
+    b.variant(tag::DEV_NET_INTERRUPT, 1).unwrap();
+    let net_irq = b.finish(false).unwrap();
+    assert_eq!(header(&net_irq), 11);
     for (release, reads) in [
         ("v0.2.0", 2u16),
         ("v0.2.1", 3),
@@ -1066,6 +1070,7 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             ("network.mtu", &mtu, 7),
             ("[websocket]", &ws, 9),
             ("limits.publisher_backpressure", &bp, 8),
+            ("devices.virtio_net_interrupt", &net_irq, 11),
         ] {
             match image::configure_iso(&tpl, blob) {
                 Ok(_) => assert!(

@@ -4,7 +4,8 @@
 //! [`registry`] lists every device type, with or without a driver.
 //!
 //! Devices are driven synchronously by polling in M6; interrupts (MSI-X)
-//! are wired per queue by the caller. Everything a device returns (used
+//! are wired per queue by the caller (the boot disk's completions, and
+//! virtio-net's receive queue as the dispatcher's wake-up, [`wake`]). Everything a device returns (used
 //! ring indices, lengths, config values) is validated before use.
 
 #![cfg_attr(not(any(test, feature = "fake")), no_std)]
@@ -40,6 +41,7 @@ pub mod scsi;
 pub mod transport;
 #[cfg(feature = "vsock")]
 pub mod vsock;
+pub mod wake;
 
 pub use bus::Bus;
 pub use queue::{Buf, DmaRegion, QueueError, SplitQueue};

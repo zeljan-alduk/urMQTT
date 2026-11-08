@@ -115,3 +115,31 @@ fn off_is_format_2_and_auto_and_on_are_format_6() {
         run("[devices]\nvirtio_console = \"off\"\nvirtio_balloon = \"off\"\nvirtio_input = \"off\"\nvirtio_vsock = \"off\"\n").unwrap()
     );
 }
+
+/// ADR-270: `devices.virtio_net_interrupt = "auto" | "off"`. Optional, auto
+/// by default; auto writes nothing (the blob keeps its version), off needs
+/// format 11; anything else is refused.
+#[test]
+fn the_net_interrupt_key() {
+    use crate::NetInterrupt;
+    use urmqtt_cfg::fields::tag;
+    for (env, t) in [("dev", DEV), ("prod", PROD)] {
+        assert_eq!(
+            parse(env, t).unwrap().devices.virtio_net_interrupt,
+            NetInterrupt::Auto,
+            "{env}"
+        );
+    }
+    let auto = run("[devices]\nvirtio_net_interrupt = \"auto\"\n").unwrap();
+    assert_eq!(auto, run("").unwrap(), "auto writes nothing");
+    assert_eq!(Blob::parse(&auto).unwrap().version(), 2);
+    let off = run("[devices]\nvirtio_net_interrupt = \"off\"\n").unwrap();
+    let b = Blob::parse(&off).unwrap();
+    assert_eq!((b.version(), b.variant(tag::DEV_NET_INTERRUPT)), (11, 1));
+    for bad in ["\"on\"", "\"polling\"", "1", "true"] {
+        assert!(
+            run(&format!("[devices]\nvirtio_net_interrupt = {bad}\n")).is_err(),
+            "{bad}"
+        );
+    }
+}

@@ -541,6 +541,11 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
         debug_assert_eq!(*key, k);
         b.variant(*tag, mode.variant())?;
     }
+    // ADR-270: "auto" is the default and writes nothing; "off" needs format 11.
+    b.variant(
+        tag::DEV_NET_INTERRUPT,
+        cfg.devices.virtio_net_interrupt.variant(),
+    )?;
     Ok(b)
 }
 

@@ -29,6 +29,7 @@ use urmqtt_virtio::registry::{self, State};
 use urmqtt_virtio::rng::VirtioRng;
 use urmqtt_virtio::scsi::{DiskInfo, ScsiDisk, VirtioScsi};
 use urmqtt_virtio::transport::CapLoc;
+use urmqtt_virtio::wake::{Mode, Why};
 use urmqtt_virtio::{
     DeviceType, DmaRegion, Env, Region, Support, Transport, VirtioCaps, VirtioError, find_caps,
 };
@@ -350,6 +351,10 @@ pub struct Devices {
     pub blk: Option<DataDisk>,
     pub rng: Option<VirtioRng>,
     pub blk_msix_spi: Option<u32>,
+    /// The NIC's receive interrupt (ADR-270): its SPI or vector, and the
+    /// dispatcher's wake-up mode.
+    pub net_msix_spi: Option<u32>,
+    pub net_wake: Mode,
     /// Disks driven but left alone (not the boot disk).
     pub other_disks: u32,
     /// The boot disk after [`prepare_boot_disk`].
@@ -466,6 +471,8 @@ pub static DEVICES: SpinLock<Devices> = SpinLock::new(Devices {
     blk: None,
     rng: None,
     blk_msix_spi: None,
+    net_msix_spi: None,
+    net_wake: Mode::Polling(Why::NoMsix),
     other_disks: 0,
     boot: None,
     install: alloc::vec::Vec::new(),
@@ -607,6 +614,23 @@ pub fn blk_irqs() -> u64 {
 /// disk: its completions are polled, the interrupt only needs its EOI.
 fn ignore_irq(_intid: u32) {}
 
+static NET_IRQS: AtomicU64 = AtomicU64::new(0);
+
+/// Receive interrupts of the NIC (ADR-270): the dispatcher compares the
+/// counter across a sleep, the statistics show it per window.
+pub fn net_irqs() -> u64 {
+    // Relaxed: a counter compared with an earlier reading on the same core
+    // that takes the interrupt.
+    NET_IRQS.load(Ordering::Relaxed)
+}
+
+/// The NIC's receive interrupt: only counted. The interrupt itself ended the
+/// dispatcher's `wfi`/`hlt`; the dispatcher reads the ring.
+fn on_net_irq(_intid: u32) {
+    // Relaxed: see `net_irqs`.
+    NET_IRQS.fetch_add(1, Ordering::Relaxed);
+}
+
 fn on_blk_irq(_intid: u32) {
     // Relaxed: statistics read by the boot CPU after the self-test.
     BLK_IRQS.fetch_add(1, Ordering::Relaxed);
@@ -675,18 +699,24 @@ pub(crate) fn transport<C: ConfigSpace>(
 }
 
 /// Points MSI-X vector 0 of `bdf` at a fresh GICv2m SPI (aarch64) or CPU
-/// vector (x86) and enables MSI-X.
-fn setup_msix<C: ConfigSpace>(cfg: &mut C, bdf: Bdf, frame: &mut msi::Frame) -> Option<u32> {
-    let info = pci::msix(cfg, bdf)?;
+/// vector (x86) and enables MSI-X. The error says why the device stays
+/// polled (ADR-270's boot line).
+fn setup_msix<C: ConfigSpace>(
+    cfg: &mut C,
+    bdf: Bdf,
+    frame: Option<&mut msi::Frame>,
+) -> Result<u32, Why> {
+    let info = pci::msix(cfg, bdf).ok_or(Why::NoMsix)?;
+    let frame = frame.ok_or(Why::NoMsiSource)?;
     let Some(Bar::Memory { base, .. }) = pci::bar(cfg, bdf, info.table_bar) else {
-        return None;
+        return Err(Why::TableUnmapped);
     };
-    let spi = frame.alloc()?;
     let table = map(
         base + u64::from(info.table_offset),
         u64::from(info.table_size) * 16,
     )
-    .ok()?;
+    .map_err(|_| Why::TableUnmapped)?;
+    let spi = frame.alloc().ok_or(Why::NoVector)?;
     let (address, data) = frame.compose(spi);
     let entry = pci::msix_entry(address, data, false);
     for (i, w) in entry.iter().enumerate() {
@@ -695,7 +725,7 @@ fn setup_msix<C: ConfigSpace>(cfg: &mut C, bdf: Bdf, frame: &mut msi::Frame) -> 
     }
     pci::msix_enable(cfg, bdf, &info, true);
     pci::enable(cfg, bdf, pci::CMD_INTX_DISABLE);
-    Some(spi)
+    Ok(spi)
 }
 
 /// Enumerates PCIe, maps and initialises the virtio devices and seeds the
@@ -715,6 +745,8 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
         blk: None,
         rng: None,
         blk_msix_spi: None,
+        net_msix_spi: None,
+        net_wake: Mode::Polling(Why::NoMsix),
         other_disks: 0,
         boot: None,
         install: alloc::vec::Vec::new(),
@@ -995,7 +1027,7 @@ fn probe_pci(
                 // Sizing the BARs (in `transport`) briefly turns decoding
                 // off, so it comes before MSI-X is enabled.
                 let t = transport(&mut ecam, f.bdf, &caps, false)?;
-                let spi = v2m.as_mut().and_then(|v| setup_msix(&mut ecam, f.bdf, v));
+                let spi = setup_msix(&mut ecam, f.bdf, v2m.as_mut()).ok();
                 let mut blk = VirtioBlk::new_with_msix(t, env, spi.map(|_| 0))?;
                 // Only the disk Limine booted from is used (single-disk
                 // model, STORAGE-PLAN §2a); every other disk is only read
@@ -1139,7 +1171,32 @@ fn probe_pci(
                 }
             }
             DeviceType::Net if devs.net.is_none() => {
-                let net = VirtioNet::new(transport(&mut ecam, f.bdf, &caps, false)?, env)?;
+                // The receive interrupt (ADR-270): MSI-X vector 0 for the
+                // receive queue, unless the configuration forces polling.
+                // Sizing the BARs (in `transport`) comes first, as for blk.
+                let t = transport(&mut ecam, f.bdf, &caps, false)?;
+                let msix = if urmqtt_config::CONFIG.devices.virtio_net_interrupt
+                    == urmqtt_config::NetInterrupt::Off
+                {
+                    Err(Why::Configured)
+                } else {
+                    setup_msix(&mut ecam, f.bdf, v2m.as_mut())
+                };
+                let net = VirtioNet::new_with_msix(t, env, msix.ok().map(|_| 0))?;
+                devs.net_wake = match msix {
+                    Ok(spi) if net.rx_irq => {
+                        // Counted, and acknowledged, from now on; routed to
+                        // core 0 when its dispatcher starts.
+                        irq::register(spi, on_net_irq);
+                        devs.net_msix_spi = Some(spi);
+                        Mode::Interrupt
+                    }
+                    Ok(spi) => {
+                        irq::register(spi, ignore_irq);
+                        Mode::Polling(Why::Rejected)
+                    }
+                    Err(why) => Mode::Polling(why),
+                };
                 let m = net.mac;
                 info!(
                     "net: mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, link {}",

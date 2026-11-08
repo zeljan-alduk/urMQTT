@@ -201,9 +201,12 @@ pub struct Idle {
     /// Frames dropped (by [`DropSite`]) at the last report, core 0 only.
     last_dropped: [u64; 4],
     /// While asleep, wake up at least this often (ns; 0: only the 10 ms
-    /// tick and wake-ups from other cores). The NIC has no receive
-    /// interrupt, so the core that polls it must come back by itself.
+    /// tick, wake-ups from other cores and the NIC's receive interrupt). A
+    /// NIC without a receive interrupt (ADR-270's polling mode) makes the
+    /// core that polls it come back by itself.
     poll_wake_ns: u64,
+    /// The NIC's receive interrupt counter at the last report (core 0).
+    last_nic_irqs: u64,
 }
 
 /// Nanoseconds this core spent in TLS processing (handshakes, records),
@@ -236,6 +239,7 @@ impl Idle {
             max_gap_ns: 0,
             last_dropped: [0; 4],
             poll_wake_ns: 0,
+            last_nic_irqs: 0,
         }
     }
 
@@ -260,6 +264,14 @@ impl Idle {
         let acc = ACCEPTED.get(me).map_or(0, |a| a.swap(0, Ordering::Relaxed));
         let frames = if me == 0 {
             DISPATCHED.swap(0, Ordering::Relaxed)
+        } else {
+            0
+        };
+        let nic_irqs = if me == 0 {
+            let n = crate::devices::net_irqs();
+            let d = n.wrapping_sub(self.last_nic_irqs);
+            self.last_nic_irqs = n;
+            d
         } else {
             0
         };
@@ -297,7 +309,7 @@ impl Idle {
             urmqtt_log::info!(
                 "dataplane: core {me}: busy {busy}%, work {}% (rx {}%, of it tls {}%, poll {}%, tcp {}%, mesh {}%, nic {}%), \
                  {acc} connection(s) accepted ({} us of work, {} us of it TLS, each), {frames} frame(s) dispatched, \
-                 {} loop passes in {} ms, longest stall {} us",
+                 {nic_irqs} receive interrupt(s), {} loop passes in {} ms, longest stall {} us",
                 pct(p.work()),
                 pct(p.rx),
                 pct(tls),
@@ -359,6 +371,28 @@ impl Idle {
     /// while and `pending()` (re-checked after announcing the sleep) finds
     /// none. The 10 ms tick and wake SGIs end the sleep.
     pub fn pass(&mut self, worked: bool, pending: impl Fn() -> bool) {
+        self.pass_armed(worked, |_| false, pending);
+    }
+
+    /// [`pass`](Self::pass) for the core that owns the NIC (ADR-270):
+    /// `arm(true)`, called with this CPU's interrupts masked after the sleep
+    /// is announced and before `pending()`, asks the device for its receive
+    /// interrupt and returns whether a frame is already there (then the core
+    /// does not sleep); `arm(false)` suppresses it again once awake. Returns
+    /// whether the core slept.
+    ///
+    /// The CPU's interrupts stay masked from the announcement to the wait:
+    /// an interrupt (the NIC's, or a wake SGI) that fires after the last
+    /// check is then taken when the wait ends instead of before it starts,
+    /// so it cannot be consumed by a handler while the core goes on to sleep
+    /// until the next tick. `wfi` returns on a pending interrupt whether or
+    /// not PSTATE.I masks it; on x86 `sti; hlt` takes it inside the `hlt`.
+    pub fn pass_armed(
+        &mut self,
+        worked: bool,
+        arm: impl Fn(bool) -> bool,
+        pending: impl Fn() -> bool,
+    ) -> bool {
         if let Some(l) = LOOPS.get(crate::smp::current()) {
             // Relaxed: a progress counter for the health check.
             l.fetch_add(1, Ordering::Relaxed);
@@ -375,18 +409,25 @@ impl Idle {
         let worked = crate::logtest::flood() | urmqtt_log::service() | worked;
         if worked {
             self.last_work_ns = now;
-            return;
+            return false;
         }
         if now.saturating_sub(self.last_work_ns) < SPIN_NS {
             core::hint::spin_loop();
-            return;
+            return false;
         }
         let me = crate::smp::current();
-        let Some(flag) = SLEEPING.get(me) else { return };
+        let Some(flag) = SLEEPING.get(me) else {
+            return false;
+        };
+        let irq = cpu::irq_save();
         // Relaxed + SeqCst fence: pairs with the fence in `wake`.
         flag.store(true, Ordering::Relaxed);
         fence(Ordering::SeqCst);
-        if !pending() {
+        // `arm` first: its own fence orders the device's flag before the
+        // ring checks below.
+        let ready = arm(true);
+        let slept = !ready && !pending();
+        if slept {
             if self.poll_wake_ns != 0 {
                 let at = time::now() + time::ns_to_ticks(self.poll_wake_ns);
                 if at < time::deadline() {
@@ -396,9 +437,13 @@ impl Idle {
             cpu::wait_for_interrupt();
         }
         flag.store(false, Ordering::Relaxed);
+        // The interrupt that ended the wait is handled here.
+        cpu::irq_restore(irq);
+        arm(false);
         self.last_work_ns = time::uptime_ns();
         self.slept_ns += self.last_work_ns.saturating_sub(now);
         self.slept_last = true;
+        slept
     }
 }
 

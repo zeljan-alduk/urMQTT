@@ -20,6 +20,9 @@ use core::sync::atomic::{Ordering, fence};
 
 pub const DESC_F_NEXT: u16 = 1;
 pub const DESC_F_WRITE: u16 = 2;
+/// `VIRTQ_AVAIL_F_NO_INTERRUPT`: the driver does not want an interrupt for
+/// used buffers (virtio 1.x §2.7.7).
+pub const AVAIL_F_NO_INTERRUPT: u16 = 1;
 /// Largest queue the driver will use. The network queues ask for 1 024
 /// descriptors where the device offers them (ADR-266); the others stay small.
 pub const MAX_QUEUE: u16 = 1024;
@@ -251,6 +254,34 @@ impl SplitQueue {
         flags & 1 == 0
     }
 
+    /// Asks the device not to interrupt for used buffers
+    /// (`VIRTQ_AVAIL_F_NO_INTERRUPT`, virtio 1.x §2.7.7). Without
+    /// `VIRTIO_F_EVENT_IDX` (not negotiated) it is a hint the device may
+    /// ignore, so an interrupt can still arrive; it never storms, because a
+    /// driver keeps the flag set while it is busy (ADR-270).
+    pub fn suppress_interrupts(&self) {
+        self.store(self.layout.avail, AVAIL_F_NO_INTERRUPT);
+    }
+
+    /// Asks for an interrupt at the next used buffer, then re-checks the used
+    /// ring. `true`: a buffer is already there, and the caller must not wait
+    /// for the interrupt (the device may have looked at the flag before it
+    /// was cleared and decided not to send one). The flag store and the index
+    /// load are ordered by a full fence, as the device orders its index store
+    /// and its flag load (virtio 1.x §2.7.10), so either the driver sees the
+    /// buffer or the device sees the cleared flag: no lost wake-up.
+    pub fn enable_interrupts(&self) -> bool {
+        self.store(self.layout.avail, 0u16);
+        fence(Ordering::SeqCst);
+        self.has_used()
+    }
+
+    /// Whether [`suppress_interrupts`](Self::suppress_interrupts) is in force.
+    pub fn interrupts_suppressed(&self) -> bool {
+        let flags: u16 = self.load(self.layout.avail);
+        flags & AVAIL_F_NO_INTERRUPT != 0
+    }
+
     /// Returns the next completed chain as (head id, bytes written by the
     /// device), freeing its descriptors.
     pub fn pop_used(&mut self) -> Result<Option<(u16, u32)>, QueueError> {
@@ -460,6 +491,76 @@ mod tests {
         }
         assert_eq!(done, heads);
         assert_eq!(rig.q.num_free(), 4);
+    }
+
+    impl Rig {
+        /// The device's decision after publishing used buffers: interrupt
+        /// unless the driver set `VIRTQ_AVAIL_F_NO_INTERRUPT`.
+        fn device_would_interrupt(&self) -> bool {
+            self.rd16(self.q.layout.avail) & AVAIL_F_NO_INTERRUPT == 0
+        }
+
+        fn post_rx(&mut self, buf: &mut [u8; 4]) {
+            self.q
+                .add(&[Buf {
+                    pa: buf.as_mut_ptr() as u64,
+                    len: 4,
+                    device_writes: true,
+                }])
+                .unwrap();
+        }
+    }
+
+    /// ADR-270: the dispatcher's sleep protocol. Suppressed while it works;
+    /// enabled just before it sleeps; a buffer that arrived first is found by
+    /// the re-check, one that arrives after interrupts.
+    #[test]
+    fn interrupt_suppression_and_recheck() {
+        let mut rig = Rig::new(8);
+        let mut bufs = [[0u8; 4]; 3];
+        assert!(
+            !rig.q.interrupts_suppressed(),
+            "a fresh queue wants interrupts"
+        );
+        rig.q.suppress_interrupts();
+        assert!(rig.q.interrupts_suppressed());
+        // Busy: the device completes, and does not interrupt.
+        rig.post_rx(&mut bufs[0]);
+        rig.device_run();
+        assert!(!rig.device_would_interrupt());
+        // About to sleep with a completion not yet popped: the re-check finds
+        // it, so the caller does not sleep.
+        assert!(rig.q.enable_interrupts());
+        assert!(rig.q.pop_used().unwrap().is_some());
+        rig.q.suppress_interrupts();
+        // About to sleep with nothing there: armed, and nothing pending.
+        rig.post_rx(&mut bufs[1]);
+        assert!(!rig.q.enable_interrupts());
+        assert!(!rig.q.interrupts_suppressed());
+        // The frame arrives while asleep: the device sees the cleared flag.
+        rig.device_run();
+        assert!(rig.device_would_interrupt());
+        // Awake: suppressed again before the work, so a flood does not storm.
+        rig.q.suppress_interrupts();
+        rig.post_rx(&mut bufs[2]);
+        rig.device_run();
+        assert!(!rig.device_would_interrupt());
+        assert_eq!(rig.q.used_pending(), 2);
+    }
+
+    /// Enabling never touches the available index or the free list.
+    #[test]
+    fn interrupt_flag_leaves_the_ring_alone() {
+        let mut rig = Rig::new(4);
+        let mut b = [0u8; 4];
+        rig.post_rx(&mut b);
+        let idx = rig.rd16(rig.q.layout.avail + 2);
+        for _ in 0..3 {
+            rig.q.suppress_interrupts();
+            let _ = rig.q.enable_interrupts();
+        }
+        assert_eq!(rig.rd16(rig.q.layout.avail + 2), idx);
+        assert_eq!(rig.q.num_free(), 3);
     }
 
     #[test]

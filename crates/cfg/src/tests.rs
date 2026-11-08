@@ -214,7 +214,7 @@ fn structural_attacks_fail_closed() {
     over[2] = 200;
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, and one above the newest).
-    for unknown in [0u8, 10, 11] {
+    for unknown in [0u8, 12, 13] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
@@ -236,7 +236,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 9));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 11));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -245,7 +245,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[9, 0],
+        &[11, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -359,6 +359,42 @@ fn network_mtu_needs_format_7_and_absent_writes_nothing() {
     }
     // Above the range: refused when set.
     assert!(Builder::new().uint(tag::NET_MTU, 9001).is_err());
+}
+
+/// NOW-13, ADR-270: `devices.virtio_net_interrupt` came with format 11.
+/// "auto" (the default) writes nothing, so the blob keeps its version and
+/// boots on an older kernel; "off" needs version 11 (a version 10 or 7 blob
+/// holding it is refused by an older kernel by its version).
+#[test]
+fn net_interrupt_needs_format_11_and_auto_writes_nothing() {
+    use crate::fields::NET_INTERRUPT_MODES;
+    let f = crate::fields::by_key("devices.virtio_net_interrupt").unwrap();
+    assert_eq!(
+        (f.tag, f.since, f.dev_only),
+        (tag::DEV_NET_INTERRUPT, 11, false)
+    );
+    assert_eq!(NET_INTERRUPT_MODES, ["auto", "off"]);
+    let mut auto = Builder::new();
+    auto.variant(tag::DEV_NET_INTERRUPT, 0).unwrap();
+    assert_eq!(auto.lowest_version(), 2);
+    assert_eq!(auto.finish(false).unwrap(), empty());
+    assert_eq!(
+        Blob::parse(&empty())
+            .unwrap()
+            .variant(tag::DEV_NET_INTERRUPT),
+        0
+    );
+    let mut off = Builder::new();
+    off.variant(tag::DEV_NET_INTERRUPT, 1).unwrap();
+    assert_eq!(off.lowest_version(), 11);
+    assert!(off.finish_as(false, 10).is_err());
+    let blob = off.finish(false).unwrap();
+    let p = Blob::parse(&blob).unwrap();
+    assert_eq!((p.version(), p.variant(tag::DEV_NET_INTERRUPT)), (11, 1));
+    check::check(&p, false).unwrap();
+    assert!(Blob::parse(&with_version(&blob, 10)).is_err());
+    assert!(Blob::parse(&with_version(&blob, 7)).is_err());
+    assert!(Builder::new().variant(tag::DEV_NET_INTERRUPT, 2).is_err());
 }
 
 /// ADR-257: the `[devices]` keys came with format 6, one enum each. Off (the

@@ -257,16 +257,48 @@ impl DeviceMode {
     }
 }
 
+/// How the dispatcher learns of received frames
+/// (`devices.virtio_net_interrupt`, ADR-270).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetInterrupt {
+    /// The receive queue's MSI-X interrupt where the platform has one (the
+    /// default), else polling.
+    Auto,
+    /// Always poll (ADR-224's 200 us while connections exist).
+    Off,
+}
+
+impl NetInterrupt {
+    /// The TOML word.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+        }
+    }
+
+    const fn from_variant(v: u8) -> Self {
+        match v {
+            1 => Self::Off,
+            _ => Self::Auto,
+        }
+    }
+}
+
 /// The `[devices]` section (ADR-257): one mode per optional virtio driver,
-/// in the order of `urmqtt_cfg::fields::DEVICE_KEYS`.
+/// in the order of `urmqtt_cfg::fields::DEVICE_KEYS`, and the NIC's receive
+/// interrupt (ADR-270).
 #[derive(Debug, Clone, Copy)]
 pub struct Devices {
     modes: [DeviceMode; urmqtt_cfg::fields::DEVICE_KEYS.len()],
+    /// `devices.virtio_net_interrupt`.
+    pub virtio_net_interrupt: NetInterrupt,
 }
 
 impl Devices {
     pub const OFF: Self = Self {
         modes: [DeviceMode::Off; urmqtt_cfg::fields::DEVICE_KEYS.len()],
+        virtio_net_interrupt: NetInterrupt::Auto,
     };
 
     /// The mode of `key` (`devices.virtio_console`, ...); `None` for a key
@@ -292,6 +324,8 @@ impl Devices {
         for (m, (t, _, _)) in d.modes.iter_mut().zip(urmqtt_cfg::fields::DEVICE_KEYS) {
             *m = DeviceMode::from_variant(get(*t));
         }
+        d.virtio_net_interrupt =
+            NetInterrupt::from_variant(get(urmqtt_cfg::fields::tag::DEV_NET_INTERRUPT));
         d
     }
 }

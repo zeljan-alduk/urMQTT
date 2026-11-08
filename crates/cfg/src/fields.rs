@@ -272,6 +272,9 @@ pub mod tag {
     pub const DEV_VIRTIO_VSOCK: u16 = 194;
     // The link MTU (NOW-19, ADR-264): format version 7.
     pub const NET_MTU: u16 = 195;
+    // The NIC's receive interrupt (NOW-13, ADR-270): format version 11
+    // (10 is unused, 12 is reserved for MQTT 5).
+    pub const DEV_NET_INTERRUPT: u16 = 211;
     // MQTT over WebSocket (NEXT-5, ADR-272): format version 9.
     pub const WS_ENABLED: u16 = 230;
     pub const WS_PORT: u16 = 231;
@@ -320,6 +323,10 @@ pub const MAX_WS_UPGRADE_TIMEOUT_S: u64 = 10;
 pub const VIRTIO_GPU_MODES: &[&str] = &["off", "auto", "on"];
 /// Whether an optional virtio driver runs (`[devices]`, ADR-257).
 pub const DEVICE_MODES: &[&str] = &["off", "auto", "on"];
+/// How the dispatcher learns of received frames (`devices.virtio_net_interrupt`,
+/// ADR-270): the receive queue's MSI-X interrupt where the platform has one,
+/// or polling.
+pub const NET_INTERRUPT_MODES: &[&str] = &["auto", "off"];
 /// The `[devices]` keys, one per optional virtio driver (ADR-257): tag, key
 /// and the driver's feature (as `urmqtt_virtio::registry::KINDS` names it; a
 /// test there keeps the two equal).
@@ -1143,6 +1150,18 @@ pub static FIELDS: &[Field] = &[
         ),
         7,
     ),
+    // devices, continued (NOW-13, ADR-270)
+    since(
+        f(
+            t::DEV_NET_INTERRUPT,
+            "devices.virtio_net_interrupt",
+            Kind::Enum {
+                variants: NET_INTERRUPT_MODES,
+                default: 0,
+            },
+            "How the NIC wakes the core that owns it when a frame arrives. auto (the default): the receive queue's MSI-X interrupt where the platform has one (x86 local APIC, aarch64 GICv2m frame), else polling. off: always poll (every 200 us while connections exist, and the 10 ms tick), for a hypervisor whose interrupt misbehaves. Format 11.",
+        ),
+        11,
     // MQTT over WebSocket (NEXT-5, ADR-272): format version 9.
     since(
         f(

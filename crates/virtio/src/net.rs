@@ -4,7 +4,8 @@
 //! completed ones are reclaimed lazily, and the device is kicked once per
 //! batch ([`VirtioNet::queue`] + [`VirtioNet::flush`]) and only when it asks
 //! for notifications. Received buffers are recycled the same way (M13:
-//! one VM exit per batch instead of two per frame).
+//! one VM exit per batch instead of two per frame). The receive queue can
+//! signal an MSI-X vector that wakes a sleeping dispatcher (ADR-270).
 
 use crate::queue::{Buf, DmaRegion, SplitQueue};
 use crate::transport::Transport;
@@ -48,10 +49,30 @@ pub struct VirtioNet {
     /// 1 024).
     pub rx_size: u16,
     pub tx_size: u16,
+    /// The receive queue signals an MSI-X vector (ADR-270); `false`: polled.
+    pub rx_irq: bool,
+    /// The device refused the vector it was offered (the queue is polled).
+    pub msix_rejected: bool,
 }
 
 impl VirtioNet {
     pub fn new<E: Env>(t: Transport, env: &E) -> Result<Self, VirtioError> {
+        Self::new_with_msix(t, env, None)
+    }
+
+    /// Like [`new`](Self::new), with the receive queue signalling MSI-X
+    /// vector `msix` (MSI-X must already be enabled in PCI config space). A
+    /// device that refuses the vector gets a polled queue instead
+    /// ([`msix_rejected`](Self::msix_rejected)). Interrupts start suppressed
+    /// on both queues: the transmit queue never asks for one (its descriptors
+    /// are reclaimed lazily, and a dispatcher with frames waiting for them
+    /// does not sleep), the receive queue only while the dispatcher sleeps
+    /// ([`rx_irq_arm`](Self::rx_irq_arm)).
+    pub fn new_with_msix<E: Env>(
+        t: Transport,
+        env: &E,
+        msix: Option<u16>,
+    ) -> Result<Self, VirtioError> {
         let features = t.init(env, F_MAC | F_STATUS, F_VERSION_1)?;
         let rx_size = RX_BUFFERS.min(t.queue_max(RX_QUEUE));
         let tx_size = TX_BUFFERS.min(t.queue_max(TX_QUEUE));
@@ -66,7 +87,14 @@ impl VirtioNet {
         };
         let mut rx = alloc_q(rx_size)?;
         let tx = alloc_q(tx_size)?;
-        let rx_notify = t.setup_queue(RX_QUEUE, &rx, None)?;
+        rx.suppress_interrupts();
+        tx.suppress_interrupts();
+        let (rx_notify, msix_rejected) = match t.setup_queue(RX_QUEUE, &rx, msix) {
+            Ok(off) => (off, false),
+            // Refused before the queue was enabled: set it up again, polled.
+            Err(VirtioError::MsixRejected) => (t.setup_queue(RX_QUEUE, &rx, None)?, true),
+            Err(e) => return Err(e),
+        };
         let tx_notify = t.setup_queue(TX_QUEUE, &tx, None)?;
         let rx_bufs = env
             .dma_alloc(BUF_LEN * usize::from(rx_size))
@@ -104,6 +132,8 @@ impl VirtioNet {
             tx_full: 0,
             rx_size,
             tx_size,
+            rx_irq: msix.is_some() && !msix_rejected,
+            msix_rejected,
         })
     }
 
@@ -178,6 +208,22 @@ impl VirtioNet {
     /// Whether a received frame is waiting (cheap: one ring index read).
     pub fn rx_pending(&self) -> bool {
         self.rx.has_used()
+    }
+
+    /// Before the dispatcher sleeps: asks for the receive interrupt and
+    /// re-checks the ring. `true`: a frame is already there, do not sleep.
+    /// Polled queues (no vector) only re-check.
+    pub fn rx_irq_arm(&self) -> bool {
+        if self.rx_irq {
+            self.rx.enable_interrupts()
+        } else {
+            self.rx.has_used()
+        }
+    }
+
+    /// After the sleep: no receive interrupts while the dispatcher works.
+    pub fn rx_irq_disarm(&self) {
+        self.rx.suppress_interrupts();
     }
 
     /// How many received frames wait in the queue, unread.

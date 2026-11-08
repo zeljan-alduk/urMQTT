@@ -152,10 +152,37 @@ impl DeviceMode {
     }
 }
 
-/// The `[devices]` section (ADR-257): one key per optional virtio driver.
+/// How the dispatcher learns of received frames
+/// (`devices.virtio_net_interrupt`, ADR-270).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetInterrupt {
+    /// The receive queue's MSI-X interrupt where the platform has one, else
+    /// polling (the default).
+    #[default]
+    Auto,
+    /// Always poll.
+    Off,
+}
+
+impl NetInterrupt {
+    /// The blob's variant (an index into `urmqtt_cfg::fields::NET_INTERRUPT_MODES`).
+    pub const fn variant(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::Off => 1,
+        }
+    }
+}
+
+/// The `[devices]` section (ADR-257): one key per optional virtio driver, and
+/// the NIC's receive interrupt (ADR-270).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Devices {
+    /// Not an optional driver: virtio-net always runs (ADR-270).
+    #[serde(default)]
+    pub virtio_net_interrupt: NetInterrupt,
     #[serde(default)]
     pub virtio_console: DeviceMode,
     #[serde(default)]

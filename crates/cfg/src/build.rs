@@ -143,7 +143,8 @@ impl Builder {
     /// The lowest format version that can hold this configuration: 2 (the base), 3 when the TLS listener is off,
     /// otherwise the newest `since` of the records written: 4 with disk encryption, 5 with `console.virtio_gpu`
     /// set (ADR-256), 6 with a `[devices]` key set (ADR-257), 7 with `network.mtu` set (ADR-264), 8 with
-    /// `limits.publisher_backpressure` set (ADR-269), 9 with a `[websocket]` key set (ADR-272). A field at its default writes no record.
+    /// `limits.publisher_backpressure` set (ADR-269), 9 with a `[websocket]` key set (ADR-272), 11 with
+    /// `devices.virtio_net_interrupt` set (ADR-270). A field at its default writes no record.
     pub fn lowest_version(&self) -> u16 {
         let tls_off = self
             .records

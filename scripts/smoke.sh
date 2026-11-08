@@ -2760,6 +2760,66 @@ websocket() {
     done
 }
 
+# NOW-13, ADR-270: the NIC's receive interrupt. The serving image with the default configuration says which
+# wake-up its dispatcher uses (the MSI-X interrupt where the platform has an MSI target: GICv2m under HVF and
+# on a GICv2, the local APIC on x86; polling on aarch64 TCG, whose GICv3 has only an ITS) and carries MQTT
+# traffic with it; the same with devices.virtio_net_interrupt = "off" polls and carries it too. The
+# dispatcher's statistics show the receive interrupts it took, and none when it polls.
+net_irq() {
+    if ! command -v mosquitto_pub >/dev/null || ! command -v mosquitto_sub >/dev/null; then
+        echo "  ✗ the net_irq scenarios need the mosquitto clients"; FAILED=$((FAILED + 1)); return 0
+    fi
+    local d="$ROOT/deploy/dev" cfg="$OUT/net-irq-off-config.toml" tls=(--cafile "$ROOT/deploy/dev/ca.pem")
+    mkdir -p "$OUT"
+    awk '{ print } /^\[devices\]/ { print "virtio_net_interrupt = \"off\"" }' "$d/config.toml" >"$cfg"
+    mkimg "$OUT/net-irq-auto.raw" "serve"
+    MKIMG_EXTRA=(--config "$cfg" --config-root "$d")
+    mkimg "$OUT/net-irq-off.raw" "serve"
+    MKIMG_EXTRA=()
+    local accel mode
+    for accel in $ACCELS; do
+        for mode in auto off; do
+            local log="$OUT/net-irq-$mode-$accel.log" data="$OUT/net-irq-$mode-$accel.img" status=0 expect=()
+            fresh_disk "$OUT/net-irq-$mode.raw" "$data"
+            start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
+            if wait_log "$log" "TLS 1.3 listener on port 8883" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+                {
+                    local i
+                    for i in 1 2 3; do
+                        mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i backend "${tls[@]}" \
+                            --cert "$d/services/backend.pem" --key "$d/services/backend.key" \
+                            -t devices/device-001/irq -q 1 -C 1 -W 30 >"$log.got" 2>&1 &
+                        local spid=$!
+                        sleep 1.5
+                        mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i device-001 "${tls[@]}" \
+                            --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" \
+                            -t devices/device-001/irq -q 1 -m "wake $i" || echo "client: publish failed"
+                        wait "$spid" || echo "client: subscriber failed"
+                        if [[ $(cat "$log.got") == "wake $i" ]]; then echo "client: net-irq-qos1 $i ok"; else echo "client: net-irq-qos1 $i FAILED"; fi
+                    done
+                    # One statistics window (5 s) with the traffic in it.
+                    sleep 6
+                } >"$log.client" 2>&1
+            else
+                status=124
+            fi
+            kill_vm
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            if [[ $mode == off ]]; then
+                expect=('net: receive wake-up: polling every 200 us while connections exist \(devices.virtio_net_interrupt = "off"\)'
+                    'dataplane: core 0: .* 0 receive interrupt\(s\)' 'NOT:dataplane: core 0: .* [1-9][0-9]* receive interrupt\(s\)')
+            elif [[ $ARCH == aarch64 && $accel == tcg ]]; then
+                expect=('net: receive wake-up: polling every 200 us while connections exist \(no MSI target')
+            else
+                expect=('net: receive wake-up: interrupt \(MSI-X via (GICv2m SPI|local APIC vector) [0-9]+, to core 0\); no polling while asleep'
+                    'dataplane: core 0: .* [1-9][0-9]* receive interrupt\(s\)' 'NOT:the receive interrupt never arrived')
+            fi
+            check "net-irq $mode [$accel]" "$log" "$status" "${expect[@]}" \
+                "client: net-irq-qos1 1 ok" "client: net-irq-qos1 2 ok" "client: net-irq-qos1 3 ok" "NOT:FAILED" "$NO_FAULT"
+        done
+    done
+}
+
 # GICv2 (ADR-039), what KVM gives a guest on a GIC-400 host such as the
 # Raspberry Pi 4/5. HVF cannot emulate a GICv2, so this runs under TCG:
 # boot with ACPI and DT, then the TLS broker scenarios.
@@ -2795,6 +2855,7 @@ gicv2() {
     kill_vm
     cat "$log.client" >>"$log" 2>/dev/null || true
     check "gicv2 mqtt-tls [tcg]" "$log" "$status" "gic: v2 at" \
+        "net: receive wake-up: interrupt \(MSI-X via GICv2m SPI [0-9]+, to core 0\)" \
         "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
         "client: qos1-after-reconnect ok" "client: tls-revoked-rejected ok" "NOT:FAILED" "$NO_FAULT"
 }
@@ -4003,6 +4064,7 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want fin_wait2 && fin_wait2
     want attack_raw && attack_raw
     want net_mtu && net_mtu
+    want net_irq && net_irq
     want attack_app && attack_app
     want observability && observability
     want no_hw_rng && no_hw_rng
@@ -4637,6 +4699,7 @@ want storm && storm
 want fin_wait2 && fin_wait2
 want attack_raw && attack_raw
 want net_mtu && net_mtu
+want net_irq && net_irq
 want attack_app && attack_app
 want observability && observability
 want first_boot && first_boot
