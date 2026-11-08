@@ -332,8 +332,10 @@ evidence; it cannot say who held the CPU. The Linux guest's `/proc/stat` showed 
   (a lost segment of a long subscriber stream is retransmitted NewReno-style), and a receive interrupt for the NIC (ADR-224's polling is a stop-gap).
   *2026-11-07:* SACK on our sending side, ACKs on arrival and a validated congestion window are in (ADR-265; rig: one 1 KiB
   subscriber stream 4.3k -> 7.0k delivered/s without loss, 0-27 % more under 0.1-1 % loss, `perf-results/sack-rig-ab.txt`), and
-  the NIC asks for 1024 descriptors with a receive-queue statistic (ADR-266; no gain on the rig). Not yet measured on the VPS; the
-  per-CPU heap cache and the receive interrupt remain.
+  the NIC asks for 1024 descriptors with a receive-queue statistic (ADR-266; no gain on the rig). *2026-11-08:* measured on both
+  VPSes against Mosquitto, section 13: on 4 vCPU one 64 B flow is now ahead of Mosquitto's (87k against 51k delivered/s) and 1 KiB
+  inside its range; on one ARM core Mosquitto still wins QoS 0 throughput, and the SACK build is behind v0.4.2 on QoS 1 there
+  (13.3, point 4). The per-CPU heap cache, the receive interrupt and publisher back-pressure remain.
 * **Stalls shorter than a millisecond** and the last part of every stall before a tick's deadline are still charged; with close-up ticks (1 ms) the error per tick is
   below 1 ms, so a drop now needs a handler that really ran for most of 20 ms or stalls of 20 ms in 1 ms pieces.
 * The comparison with Mosquitto is one session, one path, one generator at 60-77 % steal; two cells (1 KiB, 16 pairs; delivered rate of one flow)
@@ -685,3 +687,134 @@ admission budget are gone; that is the intended price of a fast first contact, a
 template) it does not register. **The keep-alive closes with the FIN loop** (A261-W1), from the v0.4.0 kernel too:
 `loadgen hold --clients 500 --keepalive 5 --duration 40`: core 0 100 % busy and 3.7 million frames dispatched per
 5 s; with the fix 27 % and 132 frames per 5 s (the same kernel's level when nothing happens is about 27 %).
+
+## 13. Two VPSes, three brokers, each VPS measured from the other (2026-11-07/08)
+
+**What this is.** The X11 suite run on two machines with the two urMQTT builds the day had (the release **v0.4.2**
+and `main` at **318f60b**, which adds ADR-265 SACK recovery / ACKs on arrival / the validated congestion window and
+ADR-266 deeper NIC queues) and **Mosquitto 2.0.21** (Debian 13 package, OpenSSL 3.5.7, `scripts/x11-mosquitto.sh`,
+the same CA and server certificate). The two machines are the Contabo x86_64 VPS of the earlier sections (4 vCPU AMD
+EPYC, KVM, 8 GiB) and the netcup ARM64 VPS of section 11 (2 vCPU Neoverse N1; **one core does the network card, TLS,
+the broker and the dispatching, the other is the database core**). Each VPS was loaded **from the other VPS**: netcup
+(Debian 13, `urmqtt-loadgen` pinned to its two cores) generated the load for Contabo, Contabo (Debian 13, two of its
+four cores) for netcup; 12 ms apart, 0 % steal on either generator in every run. On each machine the three brokers
+were measured one after the other with the same generator, the same suite and the same order: `handshake`,
+`throughput`, `latency`, `fanout`, `idle`, `sweep`, `single`, three repetitions each, median and min-max. A first pass
+on Contabo from the shared build server (10-45 % steal) is kept as `contabo-urmqtt-*.txt` and `contabo-mosquitto.txt`
+and is **not** used below; it made the same ranking with wider ranges.
+
+Raw files: `perf-results/x11-2026-11-07/` (`*-from-netcup.txt` for Contabo, `netcup-*.txt` for netcup; `.console`
+holds urMQTT's console and `$SYS` counters per run, `.ss` the generator's `ss -tin` samples). Tables:
+`perf-results/x11-2026-11-07/tables.md` (`scripts/x11-report.py`). Figures: `perf-results/x11-2026-11-07/charts/`
+(`scripts/x11-charts.py`; every figure puts the two machines side by side on one scale).
+
+### 13.1 Contabo, x86_64, 4 vCPU (generator: netcup)
+
+Delivered messages per second unless said otherwise; median (min-max) of three runs.
+
+| | urMQTT v0.4.2 | urMQTT main 318f60b | Mosquitto 2.0.21 |
+|---|---|---|---|
+| New mTLS connections/s, 128 threads | 1,830 (1,368-1,834) | **1,956** (1,912-1,985) | 639 (599-697) |
+| TLS p50 at 128 threads | 36 ms | 35 ms | 130 ms |
+| 16 pairs, QoS 0, 64 B, flood | 125k (91-156k) | **201k** (182-212k) | 60k (54-61k) |
+| 16 pairs, QoS 0, 1 KiB, flood | 20.3k | 22.2k | 22.1k |
+| 16 pairs, QoS 1, 64 B, flood (acked / delivered) | 45k / 22.4k | 40k / 22.3k | 36.5k / 18.9k |
+| 64 pairs, QoS 1, 64 B, flood (delivered) | 50k (38-52k) | **69k** (62-78k) | 30k (20-32k) |
+| 1 flow, QoS 0, 64 B (published / delivered) | 59k / 54k (34-72k) | **94k / 87k** (71-97k) | 51k / 51k (48-53k) |
+| 1 flow, QoS 0, 1 KiB (delivered) | 7.2k (5.0-8.3k) | 10.0k (6.2-13.6k) | **12.0k** (7.7-16.1k) |
+| 1 flow, QoS 1, 64 B (delivered; p50) | 1.8k; 37 ms | **2.1k**; 33 ms | 1.1k; 801 ms |
+| 16 x 1000/s, QoS 0: p50 / p99 latency | 11.1 / 138 ms | **7.3 / 27 ms** | 12.3 / 95 ms |
+| 16 x 1000/s, QoS 1: delivered; p50 / p99 | 15.2k; 11.1 / 159 ms | **15.7k; 8.6 / 124 ms** | 14.3k; 38 / 2,085 ms |
+| 8 x 100/s, QoS 0: p50 / p99 | 10.2 / 37 ms | 7.0 / 20 ms | **6.3** / 48 ms |
+| Fan-out 1 -> 100, QoS 0, flood (delivered) | 276k | **287k** | 106k |
+| Fan-out 1 -> 1000 at 10/s (delivered; p50) | 10,000; 28 ms | 10,000; **21 ms** | 10,000; 22 ms |
+| 20,000 idle mTLS connections: memory held | 17.9 MB heap | 17.6 MB heap | **546 MB RSS** (its own heap counter: 17.1 MB) |
+| 20,000 idle connections opened in | 40 s | 38 s | 51 s |
+| Lost connections, any run | 0 | 0 | 0 |
+
+### 13.2 netcup, ARM64, 2 vCPU, one broker core (generator: Contabo)
+
+| | urMQTT v0.4.2 | urMQTT main 318f60b | Mosquitto 2.0.21 |
+|---|---|---|---|
+| New mTLS connections/s, 128 threads | **923** (834-1,156) | 820 (646-857) | 419 (411-425) |
+| TLS p50 at 128 threads | 56 ms | 44 ms | 194 ms |
+| 16 pairs, QoS 0, 64 B, flood (published / delivered) | 187k / 46.5k | 183k / 43.7k (40-69k) | 60k / **57.9k** |
+| 16 pairs, QoS 0, 1 KiB, flood (delivered) | 12.6k | 12.4k | **14.8k** (10-15k) |
+| 16 pairs, QoS 1, 64 B, flood (acked / delivered) | 36k / **17.5k** | 26k / 14.1k | 23k / 14.8k |
+| 64 pairs, QoS 1, 64 B, flood (delivered) | **51.8k** | 42.4k | 20.1k |
+| 1 flow, QoS 0, 64 B (delivered) | 11.8k (10-15k) | 22.3k (13-25k) | **48.7k** (34-52k) |
+| 1 flow, QoS 0, 1 KiB (delivered) | 2.7k (0.45-3.8k) | 2.1k (0.1-3.0k) | **6.1k** (3.4-6.9k) |
+| 1 flow, QoS 1, 64 B (delivered; p50) | **1.25k**; 44 ms | 0.94k; 39 ms | 0.96k; 847 ms |
+| 16 x 1000/s, QoS 0: p50 / p99 | 18.1 / 137 ms | **11.6** / 238 ms | 18.8 / **69 ms** |
+| 16 x 1000/s, QoS 1: delivered; p50 / p99 | **13.0k; 36 / 274 ms** | 8.8k; 33 / 308 ms | 13.0k; 527 / 2,589 ms |
+| 8 x 100/s, QoS 0: p50 / p99 | **8.2 / 59 ms** | 15.7 / 218 ms | 8.2 / 140 ms |
+| Fan-out 1 -> 100, QoS 0, flood (delivered) | 105k | **124k** | 86k |
+| Fan-out 1 -> 1000 at 10/s (delivered; p50) | 8,192; 227 ms | 8,639; 222 ms | **9,841; 56 ms** |
+| 20,000 idle mTLS connections: memory held | 10.7 MB heap | 10.8 MB heap | **546 MB RSS** |
+| NIC receive-queue overruns in the suite (`frames/dropped/nic`) | 199,141 | 260,911 | n/a |
+| Lost connections, any run | 0 | 0 | 0 |
+
+### 13.3 What the numbers say
+
+1. **With cores to use, urMQTT is ahead everywhere that matters to a fleet.** On the 4-vCPU machine `main` accepts
+   3x the new mTLS connections per second (1,956 against 639, with a third of the TLS latency), delivers 3.3x the QoS 0
+   messages with 16 clients a side (201k against 60k) and 2.3x the QoS 1 messages with 64 pairs, fans out 2.7x more, and
+   has the lower latency at every steady rate (p99 27 ms against 95 ms at 16,000 msg/s; QoS 1 p99 124 ms against 2.1 s).
+   Mosquitto is one process on one core (94-100 % of it in every heavy run); urMQTT's cores showed 0.5-2.8 cores busy
+   in the first 14 s of those runs (a noisy sample, `BROKERBUSY` in the raw files) for 3.3x the work.
+2. **One TCP flow was the weak point (sections 3.6, 7.5); on x86_64 it no longer is.** The SACK/ACK-on-arrival build
+   moves a single 64 B stream from 54k to 87k delivered/s, past Mosquitto's 51k, and 1 KiB from 7.2k to 10.0k, inside
+   Mosquitto's range (7.7-16.1k, median 12.0k). Latency on one flow halved (p50 427 -> 222 ms). What is left on a
+   single flow is the publisher: urMQTT accepts 94k/s and delivers 87k/s because it drops QoS 0 messages to a subscriber
+   whose single TCP stream cannot carry them (`messages/dropped/slow_subscriber` in the `.console` files); Mosquitto
+   accepts 51k/s and delivers 51k/s because it stops reading the publisher instead (back-pressure). Both are legal for
+   QoS 0; ours wins on delivered messages, theirs on "every accepted message arrives". The change that would make
+   urMQTT do the latter when the subscriber is the only consumer is the next NOW-13 item.
+3. **On one ARM core, raw QoS 0 throughput belongs to Mosquitto, everything else to urMQTT.** Mosquitto's event loop
+   does more QoS 0 work per core than ours: 58k against 44-47k delivered with 16 pairs, 49k against 12-22k on one 64 B
+   flow, 6.1k against 2-3k on one 1 KiB flow. Our single core is spent on the publishers (accepting 183-187k/s that are
+   then dropped), on polling the NIC every 200 us (ADR-224) and on copies; the NIC's 256-descriptor receive queue
+   overran 199,000-261,000 times in the suite (the netcup virtio-net offers no more than 256, so ADR-266's deeper
+   queues could not help there). Where the work is TLS, QoS 1 bookkeeping or fan-out, the same core beats Mosquitto's:
+   2x the handshakes, 2.6x the QoS 1 messages with 64 pairs, 1.2-1.4x the fan-out, half the p50 at steady QoS 0 rates,
+   and QoS 1 latency in tens of milliseconds where Mosquitto's is in hundreds (its p99 under QoS 1 load is above 2 s
+   on both machines).
+4. **The SACK build is not uniformly better on one core.** On netcup `main` is 10-30 % behind v0.4.2 on QoS 1 (16 pairs
+   14.1k against 17.5k delivered, 64 pairs 42k against 52k, 16 x 1000/s 8.8k against 13.0k) and on the handshake run
+   (820 against 923, with a 1.1 s p99 tail from a ~1 s retransmission timeout that v0.4.2 did not show). The candidates
+   are the congestion-window change (cut to 70 % on a fast retransmit, growth only while the window is used) on short
+   QoS 1 exchanges and the per-segment ACK work on a saturated core; it is a regression to resolve before v0.5.0, with
+   the `.ss` samples of these runs as the evidence (`netcup-urmqtt-sack.txt.ss`).
+5. **Memory for idle connections is urMQTT's clearest win, and the earlier text (section 3.2) understated it.**
+   20,000 idle mTLS connections cost urMQTT 10.7-17.9 MB of heap in total (there is no other memory: the kernel has no
+   process, no page cache, no per-socket kernel state outside that heap), about 0.5-0.9 KB each. Mosquitto's process
+   grew to 546 MB RSS on both machines, about 27 KB per connection, almost all of it OpenSSL's per-connection state;
+   its own `$SYS/broker/heap/current` (17.1 MB) does not see that memory, which is why the two "17 MB" figures are not
+   comparable. The RSS did not fall when the connections closed.
+6. **Fan-out to 1000 slow subscribers on one core is a urMQTT weakness**: 8,200-8,600 of 10,000 messages/s delivered
+   with a p50 of 220 ms, where Mosquitto delivers 9,800 at 56 ms; on four cores both deliver all 10,000 and urMQTT's
+   p50 is the lower (21 against 22 ms). Candidate cause: the per-message walk over 1000 subscriptions on the one core
+   that also runs the NIC; to be profiled.
+7. **The generator matters as much as the broker.** The same Contabo urMQTT v0.4.2 measured from the shared build
+   server gave 1,156-1,834 handshakes/s and 94-132k delivered/s with ranges twice as wide; from the quiet netcup VPS
+   the medians rose and the ranges closed. Every number above comes from a generator with 0 % steal, and the two VPSes
+   measured each other, which is the setup to reuse.
+
+### 13.4 Reproduce
+
+```sh
+# Images: one per machine (static address), both urMQTT builds; the ISO's PKI is the test PKI of deploy/prod.
+scripts/mkbench.sh --certs deploy/prod --static 169.58.184.193/17 169.58.128.1 --x11 --env bench-x11-contabo
+scripts/mkbench.sh --certs deploy/prod --static 89.58.42.236/22 89.58.40.1 --x11 --env bench-x11-netcup
+# Generator on the other VPS (Debian 13): rustup with the pinned nightly, `cargo build --release --locked -p urmqtt-loadgen`,
+# scripts/x11-bench.sh, x11-console.py, x11-report.py and certs/{ca.pem,ca.key,operator.pem,operator.key} in /root/x11.
+MAXLOAD=10 CONSOLE=1 SS=1 REPS=3 CORES=0,1 DIR=/root/x11 HOST=<vps> BROKER=urmqtt \
+  ./x11-bench.sh <label> handshake throughput latency fanout idle sweep single
+MAXLOAD=10 SS=1 REPS=3 CORES=0,1 DIR=/root/x11 HOST=<vps> BROKER=mosquitto SSHVPS=root@<vps> ./x11-bench.sh <label> ...
+python3 scripts/x11-report.py results/*.txt                      # tables
+uv run --no-project --with matplotlib python3 scripts/x11-charts.py OUT "Contabo/urMQTT v0.4.2=..." ...   # figures
+```
+
+Contabo was switched between images with the Contabo API (custom images from the ISOs, `cntb reinstall instance`),
+netcup with the SCP API (ISO attach + power cycle; Debian via the image setup with `sshKeyIds`). Mosquitto measurements
+needed a Debian install on the measured VPS; the production image was restored on Contabo afterwards.

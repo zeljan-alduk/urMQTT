@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `docs/PERFORMANCE.md` §13: urMQTT v0.4.2, `main` (SACK, ADR-265/266) and Mosquitto 2.0.21 measured on two VPSes
+  (Contabo x86_64 4 vCPU, netcup arm64 2 vCPU), each loaded from the other; raw files, tables and figures in
+  `docs/perf-results/x11-2026-11-07/`, figures from the new `scripts/x11-charts.py`. Findings: with cores to use
+  urMQTT leads 2-3x on connections, throughput, fan-out and latency and holds 20,000 idle mTLS connections in 18 MB
+  where Mosquitto's process takes 546 MB; one 64 B flow is now ahead of Mosquitto's on x86_64; on one ARM core
+  Mosquitto keeps QoS 0 throughput and the SACK build is behind v0.4.2 on QoS 1 (ROADMAP NOW-13).
 - A second stateful ACL fuzzer, coverage-guided (H5 addendum): the cargo-fuzz target `broker_acl` with 18 seeds and
   the proptest `acl_invariants` in `cargo test` share an oracle written apart from `acl.rs` and from `acl_model.rs`. It
   checks what a SUBACK grants, the restore, remote-route and revocation entry points, the retained and in-flight

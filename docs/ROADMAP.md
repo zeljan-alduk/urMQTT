@@ -212,6 +212,11 @@ release signed with it is v0.4.2.**
   caches; the unmerged branch `perf-nic-queues-tcp-sack` (624a4fb, a5b9627) has a draft of the caches (up to 128 KiB,
   depots, trim) and of fewer copies per message (TLS records sealed in place, relay credit 256 KiB, 128 KiB output
   buffer per connection) without ADR, audit rows, Miri run or numbers.
+- Status (2026-11-08): the VPS run is done (PERFORMANCE §13: two VPSes, each measured from the other, against
+  Mosquitto 2.0.21). On 4 vCPU the SACK build leads Mosquitto in every row but 1 KiB on one flow (inside its range);
+  on one ARM core Mosquitto keeps QoS 0 throughput and the SACK build is 10-30 % behind v0.4.2 on QoS 1 (a regression
+  to resolve before v0.5.0). Next: publisher back-pressure when the subscriber is the only consumer, the receive
+  interrupt, the per-CPU heap cache, the QoS 1 regression on one core.
 
 **NOW-14. A limit on established TLS connections per source address.** S.
 - What: a per-address cap for established connections, like `plaintext.max_connections_per_ip` already has.
