@@ -11,7 +11,54 @@ use urmqtt_mqtt::v5 as mqtt5;
 use urmqtt_mqtt::v5::{self, Properties, Property, PropertyId, PropertyMask, ReasonCode};
 use urmqtt_mqtt::{Limits, QoS};
 
-use crate::{Broker, CloseReason, Conn, ConnId, Flow, Msg, PersistOp, Role, SubOpts, raw_props};
+use crate::{
+    Broker, CloseReason, Conn, ConnId, Flow, Msg, PersistOp, Role, SessionId, SubOpts, raw_props,
+};
+
+/// The properties the broker adds to a PUBLISH: two inline (the expiry and
+/// one identifier), more on the heap (a session with several matching
+/// identified subscriptions).
+pub(crate) struct ExtraProps {
+    buf: [Property<'static>; 2],
+    n: usize,
+    heap: Vec<Property<'static>>,
+}
+
+impl Default for ExtraProps {
+    fn default() -> Self {
+        Self {
+            buf: [Property::PayloadFormatIndicator(0); 2],
+            n: 0,
+            heap: Vec::new(),
+        }
+    }
+}
+
+impl ExtraProps {
+    fn push(&mut self, p: Property<'static>) {
+        if !self.heap.is_empty() {
+            self.heap.push(p);
+        } else if let Some(slot) = self.buf.get_mut(self.n) {
+            *slot = p;
+            self.n += 1;
+        } else {
+            self.heap.extend_from_slice(&self.buf);
+            self.heap.push(p);
+        }
+    }
+}
+
+impl core::ops::Deref for ExtraProps {
+    type Target = [Property<'static>];
+
+    fn deref(&self) -> &[Property<'static>] {
+        if self.heap.is_empty() {
+            self.buf.get(..self.n).unwrap_or_default()
+        } else {
+            &self.heap
+        }
+    }
+}
 
 /// What a 5.0 connection carries beyond a 3.1.1 one (ADR-273 rule 19): one
 /// box, allocated when its CONNECT is accepted, and the alias table only
@@ -210,10 +257,10 @@ impl Broker {
                     .iter()
                     .map(|(f, o)| (f, SubOpts(o.to_byte())))
                     .collect();
-                let sub_id = s
-                    .properties
-                    .get(mqtt5::PropertyId::SubscriptionIdentifier)
-                    .is_some();
+                let sub_id = s.properties.iter().find_map(|p| match p {
+                    Property::SubscriptionIdentifier(id) => Some(id),
+                    _ => None,
+                });
                 self.on_subscribe(c, s.packet_id, &topics, sub_id);
             }
             mqtt5::Packet::Unsubscribe(u) => {
@@ -360,14 +407,22 @@ impl Broker {
         }
     }
 
-    /// Whether a delivery of `msg` fits the client's Maximum Packet Size
-    /// (always for 3.1.1). A delivery that does not is dropped as if sent
-    /// [MQTT-3.1.2-25] and counted.
-    pub(crate) fn fits(&self, c: ConnId, msg: &Msg, qos: QoS) -> bool {
+    /// Whether a delivery of `msg` to session `sid` fits the client's
+    /// Maximum Packet Size (always for 3.1.1), with the properties the
+    /// broker adds (expiry, Subscription Identifiers). A delivery that does
+    /// not is dropped as if sent [MQTT-3.1.2-25] and counted.
+    pub(crate) fn fits_for(
+        &self,
+        c: ConnId,
+        sid: SessionId,
+        msg: &Msg,
+        qos: QoS,
+        share: u32,
+    ) -> bool {
         let Some(v) = self.conns.get(c).and_then(Conn::v5) else {
             return true;
         };
-        let expiry = [Property::MessageExpiryInterval(0)];
+        let extra = self.extra_props(sid, msg, share);
         let p = mqtt5::Packet::Publish(mqtt5::Publish {
             dup: false,
             qos,
@@ -377,11 +432,37 @@ impl Broker {
             properties: Properties::Forward {
                 raw: msg.props(),
                 drop: mqtt5::PropertyMask::EMPTY,
-                extra: if msg.expires_ms != 0 { &expiry } else { &[] },
+                extra: &extra,
             },
             payload: &msg.payload,
         });
         mqtt5::encoded_len(&p).is_ok_and(|n| n <= v.max_packet as usize)
+    }
+
+    /// The properties a PUBLISH of `msg` to connection `c` gets besides the
+    /// forwarded ones.
+    pub(crate) fn publish_extra(&self, c: ConnId, msg: &Msg, share: u32) -> ExtraProps {
+        match self.conns.get(c).and_then(|k| k.session) {
+            Some(sid) => self.extra_props(sid, msg, share),
+            None => ExtraProps::default(),
+        }
+    }
+
+    /// The remaining Message Expiry Interval (ADR-273 rule 5) and the
+    /// Subscription Identifiers of the matching subscriptions (ADR-275).
+    /// No allocation unless the session uses identifiers.
+    fn extra_props(&self, sid: SessionId, msg: &Msg, share: u32) -> ExtraProps {
+        let mut x = ExtraProps::default();
+        if msg.expires_ms != 0 {
+            x.push(Property::MessageExpiryInterval(remaining_s(
+                msg.expires_ms,
+                self.now_ms,
+            )));
+        }
+        for id in self.ids_for(sid, &msg.topic, share) {
+            x.push(Property::SubscriptionIdentifier(id));
+        }
+        x
     }
 
     /// A 5.0 DISCONNECT (§3.14): any reason but 0x00 keeps the Will (0x04

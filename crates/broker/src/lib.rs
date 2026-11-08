@@ -29,6 +29,7 @@ pub mod acl;
 mod compact;
 mod expiry;
 mod flow;
+mod shared;
 pub mod sys;
 mod topics;
 mod v5;
@@ -48,6 +49,7 @@ use urmqtt_mqtt::{
 
 pub use acl::{Acl, Role};
 pub use flow::{FlowStats, PublisherBackpressure};
+pub use shared::{GroupRef, SHARE_PREFIX, SharedMsg};
 pub use topics::{NodeId, SubOpts, Topics};
 pub use v5::REASON_SLOTS;
 use v5::{ConnectIn, PublishIn, V5State, WillIn};
@@ -168,6 +170,16 @@ pub struct Mqtt5Policy {
     /// The longest Message Expiry Interval a publisher may ask for; 0: no
     /// cap.
     pub max_message_expiry_s: u32,
+    /// Shared subscriptions (`$share/{group}/{filter}`, ADR-275); off: a
+    /// 5.0 SUBSCRIBE to one gets 0x9E, a 3.1.1 one 0x80.
+    pub shared_subscriptions: bool,
+    /// Subscription Identifiers (ADR-275); off: a SUBSCRIBE that carries
+    /// one gets 0xA1 for each filter.
+    pub subscription_identifiers: bool,
+    /// Shared groups one shard may own (more: SUBACK 0x97).
+    pub max_shared_groups: u32,
+    /// Members one shared group may have (more: SUBACK 0x97).
+    pub max_shared_group_members: u32,
 }
 
 impl Mqtt5Policy {
@@ -181,6 +193,10 @@ impl Mqtt5Policy {
         max_session_expiry_s: 2_592_000,
         default_session_expiry_s: 2_592_000,
         max_message_expiry_s: 0,
+        shared_subscriptions: true,
+        subscription_identifiers: true,
+        max_shared_groups: 1024,
+        max_shared_group_members: 1024,
     };
 }
 
@@ -368,6 +384,17 @@ pub struct StoredSession {
     pub now_ms: u64,
 }
 
+/// A subscription of a stored session, as the store hands it back
+/// ([`Broker::restore_session5`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredSub<'a> {
+    pub filter: &'a str,
+    /// The Subscription Options byte.
+    pub options: u8,
+    /// Its Subscription Identifier; 0: none.
+    pub sub_id: u32,
+}
+
 /// A change to durable broker state, for the DB core (ADR-030).
 ///
 /// Persistent sessions are stored with their subscriptions; their queued
@@ -393,6 +420,8 @@ pub enum PersistOp {
         qos: QoS,
         /// The Subscription Options byte (its QoS bits are `qos`).
         options: u8,
+        /// Its Subscription Identifier; 0: none (ADR-275).
+        sub_id: u32,
     },
     Unsubscribe {
         client_id: Box<str>,
@@ -496,6 +525,21 @@ pub struct Stats {
     pub disconnects_sent: [u64; REASON_SLOTS],
     /// 5.0 CONNECT packets refused, by CONNACK reason code (index code − 0x80).
     pub connack_refused: [u64; REASON_SLOTS],
+    /// Shared groups this shard owns, and their members (ADR-275).
+    pub shared_groups: usize,
+    pub shared_members: usize,
+    /// Messages delivered to a shared group's member on this shard.
+    pub shared_delivered: u64,
+    /// Messages a shared group could not deliver: QoS 0 with no member
+    /// online, a group gone, a message handed on too often.
+    pub shared_dropped: u64,
+    /// Messages handed to another member: the chosen one was gone, or its
+    /// session ended before it acknowledged (QoS 1).
+    pub shared_redispatched: u64,
+    /// Joins refused by `max_shared_groups` or `max_shared_group_members`.
+    pub shared_refused: u64,
+    /// Retained messages with a running Message Expiry Interval.
+    pub retained_expiring: usize,
 }
 
 impl Default for Stats {
@@ -534,6 +578,13 @@ impl Default for Stats {
             sessions_expiring: 0,
             disconnects_sent: [0; REASON_SLOTS],
             connack_refused: [0; REASON_SLOTS],
+            shared_groups: 0,
+            shared_members: 0,
+            shared_delivered: 0,
+            shared_dropped: 0,
+            shared_redispatched: 0,
+            shared_refused: 0,
+            retained_expiring: 0,
         }
     }
 }
@@ -646,24 +697,58 @@ enum Flow {
 struct Flight {
     pid: u16,
     flow: Flow,
-    /// A retained message replayed for a new subscription (RETAIN set,
-    /// 3.3.1.3), also when it is sent again.
-    retain: bool,
-    /// Sent on the current connection. After a reconnect every flight is
-    /// owed a resend; a 5.0 client gets them only as its Receive Maximum
-    /// allows (ADR-274), a 3.1.1 one all at once, as before.
-    sent: bool,
+    /// [`RETAIN`]: a retained message replayed for a new subscription
+    /// (RETAIN set, 3.3.1.3), also when it is sent again. [`SENT`]: sent on
+    /// the current connection; after a reconnect every flight is owed a
+    /// resend, which a 5.0 client gets only as its Receive Maximum allows
+    /// (ADR-274), a 3.1.1 one all at once, as before.
+    bits: u8,
+    /// The shared subscription it was delivered through (its node + 1; 0:
+    /// none), so it can go to another member if the session ends (ADR-275).
+    share: u32,
     /// `None` once the PUBREL is sent.
     msg: Option<Msg>,
+}
+
+const RETAIN: u8 = 1;
+const SENT: u8 = 2;
+
+impl Flight {
+    fn retain(&self) -> bool {
+        self.bits & RETAIN != 0
+    }
+
+    fn sent(&self) -> bool {
+        self.bits & SENT != 0
+    }
+
+    fn set_sent(&mut self, sent: bool) {
+        if sent {
+            self.bits |= SENT;
+        } else {
+            self.bits &= !SENT;
+        }
+    }
+}
+
+/// A message waiting for the window (16 bytes, as the tuple it replaces).
+#[derive(Debug, Clone)]
+struct Queued {
+    msg: Msg,
+    /// The QoS it is delivered at (1 or 2).
+    qos: QoS,
+    /// Sent with RETAIN (a retained replay, or Retain As Published).
+    retain: bool,
+    /// As [`Flight::share`].
+    share: u32,
 }
 
 #[derive(Default)]
 struct Pending {
     /// Sent and not completed, in the order sent (resent in this order).
     inflight: Vec<Flight>,
-    /// Not sent yet, with the QoS each is delivered at (1 or 2) and whether
-    /// it is sent with RETAIN (a retained replay, or Retain As Published).
-    queue: VecDeque<(Msg, QoS, bool)>,
+    /// Not sent yet.
+    queue: VecDeque<Queued>,
     /// QoS 2 packet ids received from the client and acknowledged with
     /// PUBREC, awaiting its PUBREL (method B of 4.3.3: the message is routed
     /// on arrival and only the id is kept). Bounded by
@@ -719,6 +804,21 @@ struct Sub {
     /// Maximum QoS and, for 5.0, the subscription options (ADR-273 rule 12).
     opts: SubOpts,
     scoped: bool,
+    /// A shared subscription (ADR-275): `node` is its `$share/{group}/
+    /// {filter}` path in `Broker::share_paths`, and the trie does not hold
+    /// it (the group's owner matches it).
+    shared: bool,
+}
+
+impl Sub {
+    /// Which trie `node` is in: 0 `topics`, 1 `scoped`, 2 `share_paths`.
+    fn kind(&self) -> u8 {
+        if self.shared {
+            2
+        } else {
+            u8::from(self.scoped)
+        }
+    }
 }
 
 struct Session {
@@ -851,6 +951,22 @@ pub struct Broker {
     /// Wills armed with a Will Delay Interval, by session, and when.
     wills: BTreeMap<SessionId, Will>,
     will_at: expiry::Deadlines,
+    /// Retained messages with a Message Expiry Interval, for the sweep.
+    retained_at: expiry::TopicDeadlines,
+    /// Subscription Identifiers (ADR-275): (session, trie kind, node) → id.
+    /// Only sessions that use them pay.
+    sub_ids: BTreeMap<(SessionId, u8, NodeId), u32>,
+    /// This shard among the broker's shards (shared groups' owners).
+    shards: shared::Shards,
+    /// The shared subscriptions of this shard's sessions, by path.
+    share_paths: Topics,
+    /// The shared groups this shard owns.
+    owner: shared::Owner,
+    /// Messages for the other shards' shared groups and members.
+    shared_out: Vec<(u16, SharedMsg)>,
+    /// SUBACKs waiting for owners on other shards.
+    subacks: Vec<shared::Suback>,
+    next_token: u32,
 }
 
 /// The scope level of the device ACL: the first level of a device
@@ -942,6 +1058,14 @@ impl Broker {
             expiring: expiry::Deadlines::default(),
             wills: BTreeMap::new(),
             will_at: expiry::Deadlines::default(),
+            retained_at: expiry::TopicDeadlines::default(),
+            sub_ids: BTreeMap::new(),
+            shards: shared::Shards::default(),
+            share_paths: Topics::new(),
+            owner: shared::Owner::default(),
+            shared_out: Vec::new(),
+            subacks: Vec::new(),
+            next_token: 0,
         }
     }
 
@@ -1163,6 +1287,8 @@ impl Broker {
         let Some(msg) = self.stored_msg(topic, payload, props, expires_in_s) else {
             return;
         };
+        self.retained_at
+            .set(topic, (msg.expires_ms != 0).then_some(msg.expires_ms));
         self.topics.set_retained(topic, msg, qos, None);
     }
 
@@ -1251,6 +1377,31 @@ impl Broker {
         queued: impl IntoIterator<Item = StoredMsg<'a>>,
         ids: impl IntoIterator<Item = Qos2Id>,
     ) -> bool {
+        self.restore_session5(
+            client_id,
+            st,
+            subs.into_iter().map(|(filter, options)| StoredSub {
+                filter,
+                options,
+                sub_id: 0,
+            }),
+            queued,
+            ids,
+        )
+    }
+
+    /// [`Self::restore_session_v5`] with each subscription's Subscription
+    /// Identifier (schema 5, ADR-275). A shared subscription is restored
+    /// too (its ACL judged on the filter inside the share): the session
+    /// joins its group again, offline.
+    pub fn restore_session5<'a>(
+        &mut self,
+        client_id: &str,
+        st: StoredSession,
+        subs: impl IntoIterator<Item = StoredSub<'a>>,
+        queued: impl IntoIterator<Item = StoredMsg<'a>>,
+        ids: impl IntoIterator<Item = Qos2Id>,
+    ) -> bool {
         self.tick_clock(st.now_ms);
         let m5 = self.cfg.mqtt5;
         // Capped by today's maximum: the configuration may have lowered it.
@@ -1279,13 +1430,32 @@ impl Broker {
         let max_queued = self.cfg.max_queued;
         let max_inflight = self.cfg.max_inflight;
         let id_limit = self.qos2_id_limit();
-        for (filter, options) in subs {
+        for StoredSub {
+            filter,
+            options,
+            sub_id,
+        } in subs
+        {
             let opts = SubOpts::from_byte(options);
+            let share = shared::parse(filter);
+            let inner = share.map_or(filter, |(_, f)| f);
             let ok = within_limits(filter, &self.cfg.limits, is_valid_topic_filter)
-                && !filter.starts_with("$share/")
-                && self.cfg.acl.may_subscribe(role, client_id, filter)
+                && (share.is_some() || !filter.starts_with(SHARE_PREFIX))
+                && (share.is_none() || (self.cfg.mqtt5.shared_subscriptions && !opts.no_local()))
+                && self.cfg.acl.may_subscribe(role, client_id, inner)
                 && self.add_sub(sid, filter, opts).is_some();
-            if !ok {
+            if ok {
+                let id = (sub_id != 0
+                    && sub_id <= mqtt5::MAX_VARINT
+                    && self.cfg.mqtt5.subscription_identifiers)
+                    .then_some(sub_id);
+                self.set_sub_id(sid, filter, id);
+                if share.is_some()
+                    && let Some(node) = self.share_node(sid, filter)
+                {
+                    let _ = self.join(sid, node, false, 0);
+                }
+            } else {
                 self.emit(PersistOp::Unsubscribe {
                     client_id: client_id.into(),
                     filter: filter.into(),
@@ -1315,8 +1485,8 @@ impl Broker {
                         p.inflight.push(Flight {
                             pid,
                             flow: Flow::Pubcomp,
-                            retain: false,
-                            sent: false,
+                            bits: 0,
+                            share: 0,
                             msg: None,
                         })
                     }
@@ -1340,12 +1510,17 @@ impl Broker {
                     p.inflight.push(Flight {
                         pid,
                         flow,
-                        retain: false,
-                        sent: false,
+                        bits: 0,
+                        share: 0,
                         msg: Some(msg),
                     });
                 } else if p.queue.len() < max_queued {
-                    p.queue.push_back((msg, qos, false));
+                    p.queue.push_back(Queued {
+                        msg,
+                        qos,
+                        retain: false,
+                        share: 0,
+                    });
                 }
             }
             s.release_pending();
@@ -1356,6 +1531,13 @@ impl Broker {
     /// Index of `filter` among the subscriptions of `sid`.
     fn sub_index(&self, sid: SessionId, filter: &str) -> Option<usize> {
         let s = self.sessions.get(sid)?;
+        if shared::parse(filter).is_some() {
+            return s
+                .subs
+                .as_slice()
+                .iter()
+                .position(|x| x.shared && self.share_paths.path(x.node) == Some(filter));
+        }
         let (trie, f, scoped) = match scoped_part(self.scope, &s.client_id, filter) {
             Some(rel) => (&self.scoped, rel, true),
             None => (&self.topics, filter, false),
@@ -1363,19 +1545,28 @@ impl Broker {
         s.subs
             .as_slice()
             .iter()
-            .position(|x| x.scoped == scoped && trie.path(x.node) == Some(f))
+            .position(|x| !x.shared && x.scoped == scoped && trie.path(x.node) == Some(f))
+    }
+
+    /// The node of `sid`'s shared subscription `filter`.
+    fn share_node(&self, sid: SessionId, filter: &str) -> Option<NodeId> {
+        let i = self.sub_index(sid, filter)?;
+        let x = self.sessions.get(sid)?.subs.as_slice().get(i)?;
+        x.shared.then_some(x.node)
     }
 
     /// Subscribes `sid` to `filter` or updates its options. `None` if the
     /// session is at its subscription limit; otherwise whether the
-    /// subscription is new (Retain Handling 1, ADR-273 rule 12).
+    /// subscription is new (Retain Handling 1, ADR-273 rule 12). A shared
+    /// subscription (`$share/...`) is only recorded here: the caller joins
+    /// its group.
     fn add_sub(&mut self, sid: SessionId, filter: &str, opts: SubOpts) -> Option<bool> {
         let existing = self.sub_index(sid, filter);
         let max = self.cfg.max_subscriptions_per_session;
         let s = self.sessions.get_mut(sid)?;
         if let Some(e) = existing.and_then(|i| s.subs.as_mut_slice().get_mut(i)) {
             e.opts = opts;
-            if !e.scoped {
+            if !e.scoped && !e.shared {
                 self.topics.subscribe(e.node, sid, opts);
             }
             return Some(false);
@@ -1383,19 +1574,32 @@ impl Broker {
         if s.subs.len() >= max {
             return None;
         }
-        let sub = match scoped_part(self.scope, &s.client_id, filter) {
-            Some(rel) => Sub {
-                node: self.scoped.intern_filter(rel),
+        let sub = if shared::parse(filter).is_some() {
+            let node = self.share_paths.intern_filter(filter);
+            self.share_paths.subscribe(node, sid, opts);
+            Sub {
+                node,
                 opts,
-                scoped: true,
-            },
-            None => {
-                let node = self.topics.intern_filter(filter);
-                self.topics.subscribe(node, sid, opts);
-                Sub {
-                    node,
+                scoped: false,
+                shared: true,
+            }
+        } else {
+            match scoped_part(self.scope, &s.client_id, filter) {
+                Some(rel) => Sub {
+                    node: self.scoped.intern_filter(rel),
                     opts,
-                    scoped: false,
+                    scoped: true,
+                    shared: false,
+                },
+                None => {
+                    let node = self.topics.intern_filter(filter);
+                    self.topics.subscribe(node, sid, opts);
+                    Sub {
+                        node,
+                        opts,
+                        scoped: false,
+                        shared: false,
+                    }
                 }
             }
         };
@@ -1404,7 +1608,8 @@ impl Broker {
         Some(true)
     }
 
-    /// Removes `filter` from `sid`; false if it was not subscribed.
+    /// Removes `filter` from `sid`; false if it was not subscribed. A shared
+    /// subscription leaves its group.
     fn remove_sub(&mut self, sid: SessionId, filter: &str) -> bool {
         let Some(i) = self.sub_index(sid, filter) else {
             return false;
@@ -1412,28 +1617,109 @@ impl Broker {
         let Some(s) = self.sessions.get_mut(sid) else {
             return false;
         };
+        let role = s.role;
         if let Some(sub) = s.subs.remove(i) {
             self.subs_total = self.subs_total.saturating_sub(1);
-            if !sub.scoped {
+            self.sub_ids.remove(&(sid, sub.kind(), sub.node));
+            if sub.shared {
+                self.leave(sid, role, sub.node);
+                self.share_paths.unsubscribe(sub.node, sid);
+            } else if !sub.scoped {
                 self.topics.unsubscribe(sub.node, sid);
             }
         }
         true
     }
 
-    /// Every filter of session `s` with its options, as the client sent it.
-    fn filters_of(&self, s: &Session) -> Vec<(Box<str>, SubOpts)> {
+    /// Sets (or with `None` removes) the Subscription Identifier of `sid`'s
+    /// subscription `filter` (ADR-275: a SUBSCRIBE without one removes it).
+    fn set_sub_id(&mut self, sid: SessionId, filter: &str, id: Option<u32>) {
+        let Some(x) = self
+            .sub_index(sid, filter)
+            .and_then(|i| self.sessions.get(sid)?.subs.as_slice().get(i).copied())
+        else {
+            return;
+        };
+        let key = (sid, x.kind(), x.node);
+        match id {
+            Some(id) => {
+                self.sub_ids.insert(key, id);
+            }
+            None => {
+                self.sub_ids.remove(&key);
+            }
+        }
+    }
+
+    /// The Subscription Identifier of `sid`'s subscription `x` (0: none).
+    fn sub_id_of(&self, sid: SessionId, x: &Sub) -> u32 {
+        self.sub_ids
+            .get(&(sid, x.kind(), x.node))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The Subscription Identifiers a delivery of `topic` to `sid` carries
+    /// (ADR-275): those of every matching subscription of the session, or,
+    /// for a delivery through the shared subscription `share`, that one's
+    /// alone. Empty (no allocation) for a session that uses none.
+    fn ids_for(&self, sid: SessionId, topic: &str, share: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        if self.sub_ids.is_empty() {
+            return out;
+        }
+        let mut range = self
+            .sub_ids
+            .range((sid, 0, 0)..=(sid, u8::MAX, NodeId::MAX))
+            .peekable();
+        if range.peek().is_none() {
+            return out;
+        }
+        let Some(s) = self.sessions.get(sid) else {
+            return out;
+        };
+        for (&(_, kind, node), &id) in range {
+            let hit = match kind {
+                2 => share == node.wrapping_add(1),
+                _ if share != 0 => false,
+                0 => self
+                    .topics
+                    .path(node)
+                    .is_some_and(|f| urmqtt_mqtt::topic_matches(f, topic)),
+                _ => scoped_topic(self.scope, topic).is_some_and(|(owner, rest)| {
+                    owner == &*s.client_id
+                        && self
+                            .scoped
+                            .path(node)
+                            .is_some_and(|f| topics::filter_matches(f, rest))
+                }),
+            };
+            if hit && !out.contains(&id) {
+                out.push(id);
+            }
+        }
+        out
+    }
+
+    /// Every filter of session `sid` with its options and Subscription
+    /// Identifier (0: none), as the client sent it.
+    fn filters_of(&self, sid: SessionId) -> Vec<(Box<str>, SubOpts, u32)> {
+        let Some(s) = self.sessions.get(sid) else {
+            return Vec::new();
+        };
         s.subs
             .as_slice()
             .iter()
             .filter_map(|x| {
-                let f: Box<str> = if x.scoped {
+                let f: Box<str> = if x.shared {
+                    self.share_paths.path(x.node)?.into()
+                } else if x.scoped {
                     let rel = self.scoped.path(x.node)?;
                     alloc::format!("{}/{}/{rel}", self.scope, s.client_id).into()
                 } else {
                     self.topics.path(x.node)?.into()
                 };
-                Some((f, x.opts))
+                Some((f, x.opts, self.sub_id_of(sid, x)))
             })
             .collect()
     }
@@ -1494,6 +1780,9 @@ impl Broker {
             topic_nodes: self.topics.node_count(),
             wills_pending: self.wills.len(),
             sessions_expiring: self.expiring.len(),
+            shared_groups: self.shared_owned().0,
+            shared_members: self.shared_owned().1,
+            retained_expiring: self.retained_at.len(),
             ..self.stats
         }
     }
@@ -1641,6 +1930,9 @@ impl Broker {
             if conn.flow & flow::PAUSED != 0 {
                 break flow::Stop::Paused;
             }
+            if conn.flow & flow::WAIT_SUBACK != 0 {
+                break flow::Stop::Waiting;
+            }
             if off >= budget {
                 break flow::Stop::Budget;
             }
@@ -1773,6 +2065,7 @@ impl Broker {
             return;
         };
         self.flow_forget(c);
+        self.forget_subacks(c);
         if conn.session.is_some() {
             self.online = self.online.saturating_sub(1);
             if conn.v5().is_some() {
@@ -1813,6 +2106,8 @@ impl Broker {
                     .saturating_add(u64::from(expiry).saturating_mul(1000)),
             );
         }
+        // Its shared groups pass it over while it is away.
+        self.shared_presence(sid, false);
         let Some(s) = self.session(sid) else { return };
         s.set_conn(None);
         // Snapshot what the device has not acknowledged yet: in-flight first
@@ -1837,11 +2132,11 @@ impl Broker {
                     },
                 });
             }
-            for (msg, qos, _) in s.pending.iter().flat_map(|p| p.queue.iter()) {
+            for q in s.pending.iter().flat_map(|p| p.queue.iter()) {
                 ops.push(PersistOp::QueuePush {
                     client_id: cid.clone(),
-                    msg: msg.clone(),
-                    qos: *qos,
+                    msg: q.msg.clone(),
+                    qos: q.qos,
                     pid: None,
                 });
             }
@@ -1941,6 +2236,43 @@ impl Broker {
             if self.sessions.get(sid).is_some_and(|s| s.conn().is_none()) {
                 self.stats.sessions_expired += 1;
                 self.remove_session(sid);
+            }
+        }
+        self.sweep_retained();
+        if !self.subacks.is_empty() {
+            self.expire_subacks();
+        }
+    }
+
+    /// Clears up to [`SWEEP_PER_TICK`] retained messages whose Message
+    /// Expiry Interval ended (ADR-275: a sweep besides the check on read, so
+    /// an expired message nobody reads does not keep its bytes). Every shard
+    /// clears its own replica; the first shard alone tells the store, so an
+    /// expiry costs one deletion there.
+    fn sweep_retained(&mut self) {
+        if self.retained_at.len() == 0 {
+            return;
+        }
+        let mut due = Vec::new();
+        self.retained_at
+            .take_due(self.now_ms, SWEEP_PER_TICK, &mut due);
+        let store = self.shards.me == self.shards.first;
+        for topic in due {
+            if !self
+                .topics
+                .retained_msg(&topic)
+                .is_some_and(|m| m.expired(self.now_ms))
+            {
+                continue;
+            }
+            self.stats.messages_expired += 1;
+            let clear = Arc::new(MsgInner::new(&topic, &[]));
+            self.store_retained(&clear, QoS::AtMostOnce, None);
+            if store {
+                self.emit(PersistOp::Retain {
+                    msg: clear,
+                    qos: QoS::AtMostOnce,
+                });
             }
         }
     }
@@ -2065,7 +2397,7 @@ impl Broker {
             Packet::Subscribe(s) => {
                 let topics: Vec<(&str, SubOpts)> =
                     s.topics.iter().map(|(f, q)| (f, SubOpts::qos(q))).collect();
-                self.on_subscribe(c, s.packet_id, &topics, false);
+                self.on_subscribe(c, s.packet_id, &topics, None);
             }
             Packet::Unsubscribe(u) => {
                 let topics: Vec<&str> = u.topics.iter().collect();
@@ -2333,7 +2665,7 @@ impl Broker {
         let mut stored_back = None;
         if let Some(s) = self.sessions.get(sid) {
             if expiry > 0 && !s.persisted {
-                newly_persistent = Some((s.client_id.clone(), self.filters_of(s)));
+                newly_persistent = Some((s.client_id.clone(), self.filters_of(sid)));
             } else if expiry == 0 && s.persisted {
                 // A 5.0 client resumed a stored session with expiry 0: it
                 // ends with this connection, so the store forgets it now.
@@ -2354,12 +2686,13 @@ impl Broker {
                 client_id: cid.clone(),
                 expiry_s: expiry,
             });
-            for (filter, opts) in subs {
+            for (filter, opts, sub_id) in subs {
                 self.emit(PersistOp::Subscribe {
                     client_id: cid.clone(),
                     filter,
                     qos: opts.max_qos(),
                     options: opts.0,
+                    sub_id,
                 });
             }
         } else if let Some(cid) = stored_gone {
@@ -2428,9 +2761,14 @@ impl Broker {
                 if m5.topic_alias_maximum > 0 {
                     add(Property::TopicAliasMaximum(m5.topic_alias_maximum));
                 }
-                // Part 3 (ADR-273 rules 16, 17): not available yet.
-                add(Property::SubscriptionIdentifierAvailable(0));
-                add(Property::SharedSubscriptionAvailable(0));
+                // Both available unless configured off (ADR-275): absent
+                // means 1.
+                if !m5.subscription_identifiers {
+                    add(Property::SubscriptionIdentifierAvailable(0));
+                }
+                if !m5.shared_subscriptions {
+                    add(Property::SharedSubscriptionAvailable(0));
+                }
                 if keep_alive != p.keep_alive {
                     add(Property::ServerKeepAlive(keep_alive));
                 }
@@ -2448,6 +2786,8 @@ impl Broker {
             }
         }
         if session_present {
+            // Its shared groups count it again.
+            self.shared_presence(sid, true);
             self.resend_inflight(sid);
             self.pump(sid);
         }
@@ -2487,8 +2827,18 @@ impl Broker {
         self.will_at.cancel(sid);
         let will = self.wills.remove(&sid);
         self.subs_total = self.subs_total.saturating_sub(s.subs.len());
-        for x in s.subs.as_slice().iter().filter(|x| !x.scoped) {
+        for x in s.subs.as_slice().iter().filter(|x| !x.scoped && !x.shared) {
             self.topics.unsubscribe(x.node, sid);
+        }
+        if !self.sub_ids.is_empty() {
+            let keys: Vec<(SessionId, u8, NodeId)> = self
+                .sub_ids
+                .range((sid, 0, 0)..=(sid, u8::MAX, NodeId::MAX))
+                .map(|(k, _)| *k)
+                .collect();
+            for k in keys {
+                self.sub_ids.remove(&k);
+            }
         }
         let sessions = &self.sessions;
         let gone: &str = &s.client_id;
@@ -2499,6 +2849,23 @@ impl Broker {
                 session_name(sessions, x)
             }
         });
+        if s.subs.as_slice().iter().any(|x| x.shared) {
+            // What it got through its shared groups and did not acknowledge
+            // goes to another member: QoS 1 in flight, anything queued
+            // (§4.8.2; never QoS 2 in flight, [MQTT-4.8.2-5]).
+            let mut again: Vec<(Msg, QoS, u32)> = Vec::new();
+            if let Some(p) = s.pending.as_deref() {
+                for f in p.inflight.iter().filter(|f| f.share != 0) {
+                    if let (Some(m), Flow::Puback) = (&f.msg, f.flow) {
+                        again.push((m.clone(), QoS::AtLeastOnce, f.share));
+                    }
+                }
+                for q in p.queue.iter().filter(|q| q.share != 0) {
+                    again.push((q.msg.clone(), q.qos, q.share));
+                }
+            }
+            self.shared_session_end(sid, s.role, s.subs.as_slice(), again);
+        }
         if s.persisted {
             self.emit(PersistOp::SessionDelete {
                 client_id: s.client_id,
@@ -2754,6 +3121,10 @@ impl Broker {
     /// local owner of what it replaces).
     fn store_retained(&mut self, msg: &Msg, qos: QoS, owner: Option<&str>) {
         let new_owner = (!msg.payload.is_empty()).then_some(owner).flatten();
+        let deadline = (!msg.payload.is_empty() && msg.expires_ms != 0).then_some(msg.expires_ms);
+        if deadline.is_some() || self.retained_at.len() > 0 {
+            self.retained_at.set(&msg.topic, deadline);
+        }
         let old = self
             .topics
             .set_retained(&msg.topic, msg.clone(), qos, new_owner);
@@ -2799,6 +3170,8 @@ impl Broker {
             to.one = (to.n == 1).then_some((sid, q));
         }
         self.scratch = subs;
+        // The shared groups this shard owns (ADR-275).
+        self.shared_route(msg, qos, retain);
         to
     }
 
@@ -2814,7 +3187,7 @@ impl Broker {
     }
 
     /// Puts `msg` into flight at `qos` (1 or 2) with a new packet id.
-    fn start_flight(s: &mut Session, msg: &Msg, qos: QoS, retain: bool) -> u16 {
+    fn start_flight(s: &mut Session, msg: &Msg, qos: QoS, retain: bool, share: u32) -> u16 {
         let pid = Self::alloc_pid(s);
         let flow = if qos == QoS::ExactlyOnce {
             Flow::Pubrec
@@ -2824,8 +3197,8 @@ impl Broker {
         s.pending_mut().inflight.push(Flight {
             pid,
             flow,
-            retain,
-            sent: true,
+            bits: SENT | if retain { RETAIN } else { 0 },
+            share,
             msg: Some(msg.clone()),
         });
         pid
@@ -2842,6 +3215,12 @@ impl Broker {
     }
 
     fn deliver(&mut self, sid: SessionId, msg: &Msg, qos: QoS, retain: bool) {
+        self.deliver_tagged(sid, msg, qos, retain, 0);
+    }
+
+    /// [`Self::deliver`] through the shared subscription `share` (its node
+    /// + 1; 0: not a shared delivery).
+    fn deliver_tagged(&mut self, sid: SessionId, msg: &Msg, qos: QoS, retain: bool, share: u32) {
         enum Action {
             Send0(ConnId),
             Send(ConnId, u16),
@@ -2865,7 +3244,7 @@ impl Broker {
                     && (k.outbuf.len() < max_out
                         || allow.is_some_and(|(a, cap)| a == c && k.outbuf.len() < cap))
             });
-        let too_large = conn.is_some_and(|c| !self.fits(c, msg, qos));
+        let too_large = conn.is_some_and(|c| !self.fits_for(c, sid, msg, qos, share));
         let window = self.window(conn);
         let Some(s) = self.session(sid) else { return };
         let action = match (qos, conn) {
@@ -2875,7 +3254,7 @@ impl Broker {
             (QoS::AtMostOnce, Some(_)) => Action::Drop,
             (QoS::AtMostOnce, None) => Action::DropOffline,
             (_, Some(c)) if room && s.inflight().len() < window && (s.queue_len() == 0) => {
-                Action::Send(c, Self::start_flight(s, msg, qos, retain))
+                Action::Send(c, Self::start_flight(s, msg, qos, retain, share))
             }
             // Offline persistent session, full window or backpressure.
             (_, Some(_)) => Action::Queue,
@@ -2883,15 +3262,22 @@ impl Broker {
             (_, None) => Action::DropOffline,
         };
         match action {
-            Action::Send0(c) => self.send_publish(c, msg, QoS::AtMostOnce, None, retain, false),
-            Action::Send(c, pid) => self.send_publish(c, msg, qos, Some(pid), retain, false),
+            Action::Send0(c) => {
+                self.send_publish(c, msg, QoS::AtMostOnce, None, retain, false, share)
+            }
+            Action::Send(c, pid) => self.send_publish(c, msg, qos, Some(pid), retain, false, share),
             Action::Queue => {
                 let mut stored = None;
                 if let Some(s) = self.session(sid) {
                     if s.queue_len() >= max_queued {
                         self.stats.dropped_queue_full += 1;
                     } else {
-                        s.pending_mut().queue.push_back((msg.clone(), qos, retain));
+                        s.pending_mut().queue.push_back(Queued {
+                            msg: msg.clone(),
+                            qos,
+                            retain,
+                            share,
+                        });
                         // Offline: the store holds the queue (see PersistOp).
                         if s.conn().is_none() && s.persisted {
                             stored = Some(s.client_id.clone());
@@ -2914,6 +3300,7 @@ impl Broker {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send_publish(
         &mut self,
         c: ConnId,
@@ -2922,6 +3309,7 @@ impl Broker {
         pid: Option<u16>,
         retain: bool,
         dup: bool,
+        share: u32,
     ) {
         self.stats.delivered += 1;
         if !self.is_v5(c) {
@@ -2937,12 +3325,10 @@ impl Broker {
                 }),
             );
         }
-        // A 5.0 subscriber gets the forwarded properties and the remaining
-        // lifetime (ADR-273 rules 2, 5); never a Topic Alias (rule 9).
-        let expiry = [Property::MessageExpiryInterval(v5::remaining_s(
-            msg.expires_ms,
-            self.now_ms,
-        ))];
+        // A 5.0 subscriber gets the forwarded properties, the remaining
+        // lifetime (ADR-273 rules 2, 5) and its Subscription Identifiers
+        // (ADR-275); never a Topic Alias (rule 9).
+        let extra = self.publish_extra(c, msg, share);
         let p = mqtt5::Packet::Publish(mqtt5::Publish {
             dup,
             qos,
@@ -2952,7 +3338,7 @@ impl Broker {
             properties: Properties::Forward {
                 raw: msg.props(),
                 drop: mqtt5::PropertyMask::EMPTY,
-                extra: if msg.expires_ms != 0 { &expiry } else { &[] },
+                extra: &extra,
             },
             payload: &msg.payload,
         });
@@ -2970,7 +3356,7 @@ impl Broker {
         let Some(s) = self.session(sid) else { return };
         if let Some(p) = s.pending.as_mut() {
             for f in &mut p.inflight {
-                f.sent = false;
+                f.set_sent(false);
             }
         }
         self.resend_owed(sid);
@@ -2991,21 +3377,23 @@ impl Broker {
         loop {
             let Some(s) = self.session(sid) else { return };
             let Some(p) = s.pending.as_mut() else { return };
-            let sent = p.inflight.iter().filter(|f| f.sent).count();
+            let sent = p.inflight.iter().filter(|f| f.sent()).count();
             if sent >= limit {
                 return;
             }
-            let Some(f) = p.inflight.iter_mut().find(|f| !f.sent) else {
+            let Some(f) = p.inflight.iter_mut().find(|f| !f.sent()) else {
                 return;
             };
-            f.sent = true;
+            f.set_sent(true);
             let f = f.clone();
             match f.msg {
-                Some(msg) if !self.fits(c, &msg, f.flow.qos()) => {
+                Some(ref msg) if !self.fits_for(c, sid, msg, f.flow.qos(), f.share) => {
                     self.stats.dropped_too_large += 1;
                     self.complete(sid, f.pid, f.flow);
                 }
-                Some(msg) => self.send_publish(c, &msg, f.flow.qos(), Some(f.pid), f.retain, true),
+                Some(ref msg) => {
+                    self.send_publish(c, msg, f.flow.qos(), Some(f.pid), f.retain(), true, f.share)
+                }
                 None => self.send_ack(c, AckKind::Rel, f.pid, ReasonCode::Success),
             }
         }
@@ -3020,7 +3408,7 @@ impl Broker {
         if self
             .sessions
             .get(sid)
-            .is_some_and(|s| s.inflight().iter().any(|f| !f.sent))
+            .is_some_and(|s| s.inflight().iter().any(|f| !f.sent()))
         {
             self.resend_owed(sid);
         }
@@ -3041,7 +3429,12 @@ impl Broker {
             }
             let now = self.now_ms;
             let Some(s) = self.session(sid) else { return };
-            let Some((msg, qos, retain)) = s.pending.as_mut().and_then(|p| p.queue.pop_front())
+            let Some(Queued {
+                msg,
+                qos,
+                retain,
+                share,
+            }) = s.pending.as_mut().and_then(|p| p.queue.pop_front())
             else {
                 return;
             };
@@ -3052,7 +3445,7 @@ impl Broker {
                 }
                 continue;
             }
-            if !self.fits(c, &msg, qos) {
+            if !self.fits_for(c, sid, &msg, qos, share) {
                 self.stats.dropped_too_large += 1;
                 if let Some(s) = self.session(sid) {
                     s.release_pending();
@@ -3060,8 +3453,8 @@ impl Broker {
                 continue;
             }
             let Some(s) = self.session(sid) else { return };
-            let pid = Self::start_flight(s, &msg, qos, retain);
-            self.send_publish(c, &msg, qos, Some(pid), retain, false);
+            let pid = Self::start_flight(s, &msg, qos, retain, share);
+            self.send_publish(c, &msg, qos, Some(pid), retain, false, share);
         }
     }
 
@@ -3147,15 +3540,19 @@ impl Broker {
     }
 
     /// SUBSCRIBE: one code per filter. 3.1.1 knows only 0x80 for a refusal;
-    /// a 5.0 client is told 0x87 (ACL), 0x97 (subscription limit), 0x9E (a
-    /// shared subscription) or 0xA1 (a Subscription Identifier) until part 3
-    /// (ADR-273 rule 13). Retained messages follow, by Retain Handling.
+    /// a 5.0 client is told 0x87 (ACL), 0x97 (subscription limit, a shared
+    /// group's limit), 0x9E or 0xA1 when shared subscriptions or
+    /// Subscription Identifiers are configured off (ADR-273 rule 13,
+    /// ADR-275). Retained messages follow, by Retain Handling; never for a
+    /// shared subscription (§4.8.2). A shared subscription whose group is
+    /// owned by another shard is answered when that shard has added the
+    /// member: the SUBACK, and the connection's next packets, wait for it.
     fn on_subscribe(
         &mut self,
         c: ConnId,
         packet_id: u16,
         topics: &[(&str, SubOpts)],
-        sub_id: bool,
+        sub_id: Option<u32>,
     ) {
         let Some(sid) = self.conn(c).and_then(|k| k.session) else {
             return;
@@ -3165,19 +3562,31 @@ impl Broker {
         let fail = |code: ReasonCode| if is5 { code as u8 } else { SUBACK_FAILURE };
         let mut codes: Vec<u8> = Vec::with_capacity(topics.len());
         let mut granted: Vec<(&str, SubOpts, bool)> = Vec::new();
+        let mut waiting: Vec<(usize, u32, u8)> = Vec::new();
+        let mut token = 0;
         for &(filter, opts) in topics {
             let Some(s) = self.sessions.get(sid) else {
                 return;
             };
-            if is5 && filter.starts_with("$share/") {
-                codes.push(ReasonCode::SharedSubscriptionsNotSupported as u8);
-                continue;
-            }
-            if sub_id {
+            if sub_id.is_some() && !cfg.mqtt5.subscription_identifiers {
                 codes.push(ReasonCode::SubscriptionIdentifiersNotSupported as u8);
                 continue;
             }
-            if !cfg.may_subscribe(s.role, s.acl_id(), filter) {
+            // `$share/{group}/{filter}`: the ACL judges the filter inside.
+            let share = shared::parse(filter);
+            if filter.starts_with(SHARE_PREFIX) {
+                if !cfg.mqtt5.shared_subscriptions {
+                    codes.push(fail(ReasonCode::SharedSubscriptionsNotSupported));
+                    continue;
+                }
+                if share.is_none() || opts.no_local() {
+                    // Malformed (the 5.0 codec refuses it; a 3.1.1 one does not).
+                    codes.push(fail(ReasonCode::TopicFilterInvalid));
+                    continue;
+                }
+            }
+            let inner = share.map_or(filter, |(_, f)| f);
+            if !cfg.may_subscribe(s.role, s.acl_id(), inner) {
                 codes.push(fail(ReasonCode::NotAuthorized));
                 continue;
             }
@@ -3185,6 +3594,32 @@ impl Broker {
                 codes.push(fail(ReasonCode::QuotaExceeded));
                 continue;
             };
+            self.set_sub_id(sid, filter, sub_id);
+            if share.is_some() {
+                let Some(node) = self.share_node(sid, filter) else {
+                    codes.push(fail(ReasonCode::UnspecifiedError));
+                    continue;
+                };
+                if token == 0 {
+                    token = self.next_token();
+                }
+                let online = self.sessions.get(sid).is_some_and(|s| s.conn().is_some());
+                match self.join(sid, node, online, token) {
+                    shared::JoinState::Done(true) => {
+                        codes.push(opts.max_qos() as u8);
+                        self.persist_shared(sid, node.wrapping_add(1));
+                    }
+                    shared::JoinState::Done(false) => {
+                        self.remove_sub(sid, filter);
+                        codes.push(fail(ReasonCode::QuotaExceeded));
+                    }
+                    shared::JoinState::Sent => {
+                        waiting.push((codes.len(), node.wrapping_add(1), opts.max_qos() as u8));
+                        codes.push(fail(ReasonCode::UnspecifiedError));
+                    }
+                }
+                continue;
+            }
             codes.push(opts.max_qos() as u8);
             granted.push((filter, opts, new));
             if let Some(s) = self.session(sid)
@@ -3196,16 +3631,30 @@ impl Broker {
                     filter: filter.into(),
                     qos: opts.max_qos(),
                     options: opts.0,
+                    sub_id: sub_id.unwrap_or(0),
                 });
             }
         }
-        if is5 {
+        if !waiting.is_empty() {
+            let retained = granted
+                .iter()
+                .map(|&(f, o, n)| (Box::<str>::from(f), o, n))
+                .collect();
+            self.park_suback(token, c, sid, packet_id, codes, waiting, retained);
+            return;
+        }
+        self.send_suback(c, packet_id, &codes);
+        self.replay_retained(sid, &granted);
+    }
+
+    pub(crate) fn send_suback(&mut self, c: ConnId, packet_id: u16, codes: &[u8]) {
+        if self.is_v5(c) {
             self.send5(
                 c,
                 &mqtt5::Packet::SubAck(mqtt5::SubAck {
                     packet_id,
                     properties: Properties::EMPTY,
-                    reason_codes: &codes,
+                    reason_codes: codes,
                 }),
             );
         } else {
@@ -3213,15 +3662,18 @@ impl Broker {
                 c,
                 &Packet::SubAck(SubAck {
                     packet_id,
-                    return_codes: &codes,
+                    return_codes: codes,
                 }),
             );
         }
-        // Retained messages for the new subscriptions, RETAIN set (§3.3.1.3),
-        // unless Retain Handling says otherwise (2: never; 1: only for a
-        // subscription that did not exist).
+    }
+
+    /// Retained messages for new subscriptions, RETAIN set (§3.3.1.3),
+    /// unless Retain Handling says otherwise (2: never; 1: only for a
+    /// subscription that did not exist).
+    pub(crate) fn replay_retained(&mut self, sid: SessionId, granted: &[(&str, SubOpts, bool)]) {
         let mut retained = Vec::new();
-        for (filter, opts, new) in granted {
+        for &(filter, opts, new) in granted {
             match opts.retain_handling() {
                 2 => continue,
                 1 if !new => continue,

@@ -5,6 +5,7 @@
 //! 64-byte session holds no timer handle, and only sessions that wait for
 //! something pay (two tree entries each).
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
@@ -57,9 +58,67 @@ impl Deadlines {
     }
 }
 
+/// Retained messages with a Message Expiry Interval, by topic (ADR-275): the
+/// sweep of [`crate::Broker::tick`] takes the due ones in deadline order. A
+/// topic is listed once, at its latest message's deadline, so a topic
+/// republished often costs one entry; only retained messages that expire pay
+/// (two tree entries and two copies of the topic).
+#[derive(Default)]
+pub(crate) struct TopicDeadlines {
+    by_topic: BTreeMap<Box<str>, u64>,
+    queue: BTreeSet<(u64, Box<str>)>,
+}
+
+impl TopicDeadlines {
+    /// Sets (`Some`) or clears (`None`) the deadline of `topic`.
+    pub fn set(&mut self, topic: &str, at_ms: Option<u64>) {
+        if let Some(old) = self.by_topic.remove(topic) {
+            self.queue.remove(&(old, Box::from(topic)));
+        }
+        if let Some(at) = at_ms {
+            self.by_topic.insert(topic.into(), at);
+            self.queue.insert((at, topic.into()));
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_topic.len()
+    }
+
+    /// Takes up to `max` topics whose deadline is at or before `now_ms`.
+    pub fn take_due(&mut self, now_ms: u64, max: usize, out: &mut Vec<Box<str>>) {
+        while out.len() < max {
+            match self.queue.first() {
+                Some((at, _)) if *at <= now_ms => {}
+                _ => return,
+            }
+            let Some((_, t)) = self.queue.pop_first() else {
+                return;
+            };
+            self.by_topic.remove(&t);
+            out.push(t);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_deadlines_keep_one_entry_per_topic() {
+        let mut d = TopicDeadlines::default();
+        d.set("a", Some(30));
+        d.set("b", Some(10));
+        d.set("a", Some(5)); // replaced: one entry
+        d.set("c", Some(1));
+        d.set("c", None); // cleared
+        assert_eq!(d.len(), 2);
+        let mut out = Vec::new();
+        d.take_due(20, 8, &mut out);
+        assert_eq!(out, [Box::from("a"), Box::from("b")]);
+        assert_eq!(d.len(), 0);
+    }
 
     #[test]
     fn due_sessions_come_out_in_order_and_bounded() {

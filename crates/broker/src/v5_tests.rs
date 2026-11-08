@@ -349,15 +349,10 @@ fn both_versions_on_one_broker_and_connack_announces_what_is_there() {
     assert_eq!(p.receive_maximum(), Some(32));
     assert_eq!(p.maximum_packet_size(), Some(4096));
     assert_eq!(p.topic_alias_maximum(), Some(10));
-    assert_eq!(
-        p.get(Pid::SubscriptionIdentifierAvailable),
-        Some(Prop::SubscriptionIdentifierAvailable(0))
-    );
-    assert_eq!(
-        p.get(Pid::SharedSubscriptionAvailable),
-        Some(Prop::SharedSubscriptionAvailable(0))
-    );
-    // Retain, wildcards and QoS 2 are available: not announced (defaults).
+    // Retain, wildcards, QoS 2, shared subscriptions and Subscription
+    // Identifiers are available: not announced (absent means 1, ADR-275).
+    assert_eq!(p.get(Pid::SubscriptionIdentifierAvailable), None);
+    assert_eq!(p.get(Pid::SharedSubscriptionAvailable), None);
     assert_eq!(p.get(Pid::RetainAvailable), None);
     assert_eq!(p.get(Pid::MaximumQos), None);
     assert_eq!(p.get(Pid::WildcardSubscriptionAvailable), None);
@@ -754,17 +749,10 @@ fn subscribe_and_unsubscribe_reason_codes() {
         ],
         0,
     );
-    // Granted QoS 2, ACL 0x87, shared 0x9E, three more within the limit of
-    // 4, then 0x97 (subscription limit).
-    assert_eq!(got, [G::SubAck(3, vec![2, 0x87, 0x9e, 1, 1, 1, 0x97])]);
-    // A Subscription Identifier (part 3): 0xA1 for every filter.
-    let got = d.subscribe_props(
-        &mut b,
-        &[("devices/d1/cmd/y", q(QoS::AtMostOnce))],
-        &[Prop::SubscriptionIdentifier(7)],
-        0,
-    );
-    assert_eq!(got, [G::SubAck(3, vec![0xa1])]);
+    // Granted QoS 2, ACL 0x87, the shared one QoS 0 (ADR-275), two more
+    // within the limit of 4 (the shared one counts), then 0x97
+    // (subscription limit).
+    assert_eq!(got, [G::SubAck(3, vec![2, 0x87, 0, 1, 1, 0x97, 0x97])]);
     d.send(
         &mut b,
         &P5::Unsubscribe(Unsub5 {
@@ -2214,3 +2202,6 @@ fn a_paused_5_0_publisher_is_answered_within_the_bound() {
     let fs = b.flow_stats();
     assert_eq!((fs.pauses, fs.timeouts, fs.holding), (1, 1, 0));
 }
+
+#[path = "shared_tests.rs"]
+mod shared_tests;

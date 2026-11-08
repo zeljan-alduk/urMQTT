@@ -289,6 +289,12 @@ impl Topics {
         ))
     }
 
+    /// The retained message at `topic`.
+    pub fn retained_msg(&self, topic: &str) -> Option<&Msg> {
+        let node = self.nodes.get(self.find(topic)? as usize)?;
+        node.retained.as_ref().map(|(m, _)| m)
+    }
+
     /// Whether the retained message at `topic` is `msg` itself.
     pub fn retained_is(&self, topic: &str, msg: &Msg) -> bool {
         self.find(topic)

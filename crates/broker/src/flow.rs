@@ -47,6 +47,10 @@ pub(crate) const PAUSED: u8 = 1;
 /// The pause ended; the held bytes are being parsed, the window is still
 /// closed.
 pub(crate) const DRAINING: u8 = 2;
+/// A SUBACK waits for a shared group's owner on another shard (ADR-275):
+/// the input is held as for a pause, so later packets keep their order. Not
+/// a back-pressure state: the bits above leave it alone.
+pub(crate) const WAIT_SUBACK: u8 = 4;
 
 /// Longest pause; then the publisher is read again, in cool-down.
 pub const PAUSE_MAX_MS: u64 = 500;
@@ -82,6 +86,8 @@ pub(crate) enum Stop {
     Budget,
     /// The connection got paused.
     Paused,
+    /// The connection waits for a SUBACK (shared subscription, ADR-275).
+    Waiting,
     /// The connection is gone or closing.
     Gone,
 }
@@ -254,7 +260,7 @@ impl Broker {
             return;
         };
         let was = k.flow;
-        k.flow = PAUSED;
+        k.flow = PAUSED | (was & WAIT_SUBACK);
         if was & DRAINING != 0 {
             // The window is still closed: no event.
             self.flow.draining.retain(|&x| x != c);
@@ -373,7 +379,7 @@ impl Broker {
         if let Some(k) = self.conns.get_mut(c)
             && k.flow & PAUSED != 0
         {
-            k.flow = DRAINING;
+            k.flow = DRAINING | (k.flow & WAIT_SUBACK);
             self.flow.draining.push(c);
         }
     }
@@ -424,10 +430,10 @@ impl Broker {
             match self.parse(c, now_ms, DRAIN_SLICE) {
                 // Paused again: listed in `paused` (and the window is closed).
                 Stop::Paused => {}
-                Stop::Budget => still.push(c),
+                Stop::Budget | Stop::Waiting => still.push(c),
                 Stop::Incomplete | Stop::Gone => {
                     if let Some(k) = self.conns.get_mut(c) {
-                        k.flow = 0;
+                        k.flow &= WAIT_SUBACK;
                         // The held time counts as alive (ADR-269).
                         k.last_rx_ms = now_ms;
                         self.flow.events.push((c, false));
