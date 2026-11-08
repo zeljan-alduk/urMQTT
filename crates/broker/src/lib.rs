@@ -649,6 +649,10 @@ struct Flight {
     /// A retained message replayed for a new subscription (RETAIN set,
     /// 3.3.1.3), also when it is sent again.
     retain: bool,
+    /// Sent on the current connection. After a reconnect every flight is
+    /// owed a resend; a 5.0 client gets them only as its Receive Maximum
+    /// allows (ADR-274), a 3.1.1 one all at once, as before.
+    sent: bool,
     /// `None` once the PUBREL is sent.
     msg: Option<Msg>,
 }
@@ -1312,6 +1316,7 @@ impl Broker {
                             pid,
                             flow: Flow::Pubcomp,
                             retain: false,
+                            sent: false,
                             msg: None,
                         })
                     }
@@ -1336,6 +1341,7 @@ impl Broker {
                         pid,
                         flow,
                         retain: false,
+                        sent: false,
                         msg: Some(msg),
                     });
                 } else if p.queue.len() < max_queued {
@@ -2819,6 +2825,7 @@ impl Broker {
             pid,
             flow,
             retain,
+            sent: true,
             msg: Some(msg.clone()),
         });
         pid
@@ -2961,9 +2968,38 @@ impl Broker {
     /// a 5.0 client's Maximum Packet Size counts as delivered (§3.1.2.11.4).
     fn resend_inflight(&mut self, sid: SessionId) {
         let Some(s) = self.session(sid) else { return };
-        let Some(c) = s.conn() else { return };
-        let pending: Vec<Flight> = s.inflight().to_vec();
-        for f in pending {
+        if let Some(p) = s.pending.as_mut() {
+            for f in &mut p.inflight {
+                f.sent = false;
+            }
+        }
+        self.resend_owed(sid);
+    }
+
+    /// Sends the flights owed a resend, oldest first, while a 5.0 client's
+    /// Receive Maximum allows (unacknowledged PUBLISHes and PUBRELs count,
+    /// §4.9); a 3.1.1 client gets them all.
+    fn resend_owed(&mut self, sid: SessionId) {
+        let Some(c) = self.sessions.get(sid).and_then(Session::conn) else {
+            return;
+        };
+        let limit = if self.is_v5(c) {
+            self.window(Some(c))
+        } else {
+            usize::MAX
+        };
+        loop {
+            let Some(s) = self.session(sid) else { return };
+            let Some(p) = s.pending.as_mut() else { return };
+            let sent = p.inflight.iter().filter(|f| f.sent).count();
+            if sent >= limit {
+                return;
+            }
+            let Some(f) = p.inflight.iter_mut().find(|f| !f.sent) else {
+                return;
+            };
+            f.sent = true;
+            let f = f.clone();
             match f.msg {
                 Some(msg) if !self.fits(c, &msg, f.flow.qos()) => {
                     self.stats.dropped_too_large += 1;
@@ -2980,6 +3016,14 @@ impl Broker {
     /// take, are dropped on the way (counted).
     fn pump(&mut self, sid: SessionId) {
         let max_out = self.cfg.max_outbound_bytes;
+        // Resends owed after a reconnect go first.
+        if self
+            .sessions
+            .get(sid)
+            .is_some_and(|s| s.inflight().iter().any(|f| !f.sent))
+        {
+            self.resend_owed(sid);
+        }
         loop {
             let Some(s) = self.session(sid) else { return };
             let Some(c) = s.conn() else { return };

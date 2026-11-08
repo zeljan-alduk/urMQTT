@@ -49,6 +49,102 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(Config {
+        cases: 300,
+        rng_algorithm: RngAlgorithm::ChaCha,
+        rng_seed: RngSeed::Fixed(0x4835_ac10_0005),
+        failure_persistence: None,
+        ..Config::default()
+    })]
+
+    /// Mixed versions (ADR-274): mostly MQTT 5.0 connects, subscriptions
+    /// with options, publishes with expiry and aliases, disconnects with
+    /// wills or ending the session, among acknowledgements, drops and time.
+    #[test]
+    fn mqtt5_sequences(
+        ops in proptest::collection::vec(
+            (
+                prop_oneof![
+                    3 => Just(100u8), 4 => Just(101u8), 5 => Just(102u8), 1 => Just(103u8),
+                    1 => Just(0u8), 2 => Just(1u8), 1 => Just(2u8),
+                    2 => Just(4u8), 1 => Just(6u8), 2 => Just(7u8),
+                ],
+                any::<[u8; 6]>(),
+            ),
+            0..200,
+        )
+    ) {
+        let mut data = Vec::new();
+        for (o, rest) in ops {
+            if o >= 100 {
+                // Op 9 with b1 & 0x30 == 0x30, then the 5.0 sub-op.
+                data.extend_from_slice(&[9, rest[0] | 0x30, o - 100]);
+                data.extend_from_slice(&rest[1..]);
+            } else {
+                data.push(o);
+                data.extend_from_slice(&rest);
+            }
+        }
+        run(&decode_ops(&data));
+    }
+}
+
+/// Structured MQTT 5.0 operations over the curated topics and filters, so
+/// that No Local, Retain Handling, Retain As Published and both expiries
+/// meet each other often (the byte decoder reaches them rarely).
+fn op5() -> impl Strategy<Value = Op> {
+    let slot = 0usize..4;
+    let who = 0usize..4; // d1, d2, svc, exp
+    let topic = (0usize..acl_oracle::TOPICS.len()).prop_map(|i| acl_oracle::TOPICS[i].to_string());
+    let filter =
+        (0usize..acl_oracle::FILTERS.len()).prop_map(|i| acl_oracle::FILTERS[i].to_string());
+    let qos = prop_oneof![
+        Just(QoS::AtMostOnce),
+        Just(QoS::AtLeastOnce),
+        Just(QoS::ExactlyOnce)
+    ];
+    prop_oneof![
+        2 => (slot.clone(), who.clone(), any::<bool>(), prop_oneof![Just(0u32), Just(1), Just(4), Just(600)], 1u16..4)
+            .prop_map(|(slot, who, clean, expiry, rm)| Op::Connect5 {
+                slot, who, claim: who, clean, will: None, expiry, rm, will_delay: 0,
+            }),
+        1 => (slot.clone(), who).prop_map(|(slot, who)| Op::Connect {
+            slot, who, claim: who, clean: false, will: None,
+        }),
+        3 => (slot.clone(), filter, 0u8..3, any::<bool>(), any::<bool>(), 0u8..3)
+            .prop_map(|(slot, f, q, nl, rap, rh)| Op::Subscribe5 {
+                slot,
+                filters: vec![(f, q | (u8::from(nl) << 2) | (u8::from(rap) << 3) | (rh << 4))],
+            }),
+        5 => (slot.clone(), topic, qos, any::<bool>(), prop_oneof![Just(None), Just(Some(1u32)), Just(Some(3))], any::<bool>())
+            .prop_map(|(slot, topic, qos, retain, expiry, alias)| Op::Publish5 {
+                slot, topic, qos, retain, expiry, alias,
+            }),
+        2 => slot.clone().prop_map(|slot| Op::Ack { slot }),
+        1 => slot.clone().prop_map(|slot| Op::Release { slot }),
+        1 => slot.clone().prop_map(|slot| Op::Drop { slot }),
+        1 => (slot.clone(), any::<bool>(), any::<bool>())
+            .prop_map(|(slot, will, end)| Op::Disconnect5 { slot, will, end }),
+        2 => (0u64..5).prop_map(|s| Op::Tick { ms: s * 1000 }),
+    ]
+}
+
+proptest! {
+    #![proptest_config(Config {
+        cases: 300,
+        rng_algorithm: RngAlgorithm::ChaCha,
+        rng_seed: RngSeed::Fixed(0x4835_ac10_0006),
+        failure_persistence: None,
+        ..Config::default()
+    })]
+
+    #[test]
+    fn mqtt5_structured(ops in proptest::collection::vec(op5(), 0..150)) {
+        run(&ops);
+    }
+}
+
 fn connect(slot: usize, who: usize, clean: bool) -> Op {
     Op::Connect {
         slot,
@@ -289,4 +385,80 @@ fn a_pubrel_inside_garbage_is_answered_with_pubcomp() {
         },
     ];
     run(&ops);
+}
+
+/// MQTT 5.0 directed (ADR-274): No Local, Retain Handling, Message Expiry,
+/// Session Expiry, a 3.1.1 subscriber beside a 5.0 one.
+#[test]
+fn directed_mqtt5() {
+    let c5 = |slot, who, clean, expiry| Op::Connect5 {
+        slot,
+        who,
+        claim: who,
+        clean,
+        will: None,
+        expiry,
+        rm: 2,
+        will_delay: 0,
+    };
+    let pub5 = |slot, topic: &str, qos, retain, expiry| Op::Publish5 {
+        slot,
+        topic: topic.into(),
+        qos,
+        retain,
+        expiry,
+        alias: false,
+    };
+    run(&[
+        // d1 (5.0) subscribes to its own commands with No Local, the
+        // service (3.1.1) to telemetry.
+        c5(0, D1, true, 30),
+        Op::Subscribe5 {
+            slot: 0,
+            filters: vec![("devices/d1/cmd/#".into(), 0x04 | 1)],
+        },
+        connect(1, SVC, true),
+        subscribe(1, "devices/+/telemetry/#"),
+        // Its own command: not back to it.
+        pub5(0, "devices/d1/cmd/reboot", QoS::AtLeastOnce, false, None),
+        // A retained message, then Retain Handling 2 and 1.
+        pub5(0, "devices/d1/cmd/x", QoS::AtMostOnce, true, Some(2)),
+        Op::Subscribe5 {
+            slot: 0,
+            filters: vec![("devices/d1/cmd/#".into(), 0x20)],
+        },
+        Op::Subscribe5 {
+            slot: 0,
+            filters: vec![("devices/d1/cmd/x".into(), 0x10)],
+        },
+        // Retain Handling 1 on a subscription that exists: no replay.
+        Op::Subscribe5 {
+            slot: 0,
+            filters: vec![("devices/d1/cmd/x".into(), 0x10)],
+        },
+        // Telemetry with an expiry the service sees.
+        pub5(
+            0,
+            "devices/d1/telemetry/t",
+            QoS::AtLeastOnce,
+            false,
+            Some(5),
+        ),
+        Op::Ack { slot: 1 },
+        // The retained command expires.
+        Op::Tick { ms: 3000 },
+        Op::Subscribe5 {
+            slot: 0,
+            filters: vec![("devices/d1/cmd/+".into(), 0)],
+        },
+        // Offline past its expiry: gone.
+        Op::Drop { slot: 0 },
+        Op::Tick { ms: 31_000 },
+        c5(0, D1, false, 30),
+        Op::Disconnect5 {
+            slot: 0,
+            will: false,
+            end: true,
+        },
+    ]);
 }

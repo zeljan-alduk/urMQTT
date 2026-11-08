@@ -17,6 +17,14 @@
 //! 4. a TLS identity cannot connect under another client id, and a will the
 //!    publisher could not publish is refused.
 //!
+//! Connections speak MQTT 3.1.1 or 5.0 at random (ADR-274): a 5.0 one asks
+//! for a Session Expiry Interval, a Receive Maximum, a Will Delay, sets
+//! subscription options (No Local, Retain As Published, Retain Handling),
+//! uses topic aliases and user properties, and disconnects with or without
+//! its will. The invariants above hold for both, and a 5.0 client is told
+//! the truth: PUBACK 0x87 exactly for what the oracle forbids, SUBACK codes
+//! from the 5.0 set, a CONNACK it can parse.
+//!
 //! Environment: `ACL_FUZZ_SECS` (default 3), `ACL_FUZZ_SEED` (default 1),
 //! `ACL_FUZZ_OPS` (operations per sequence, default 300). Run it long with
 //! `make acl-fuzz` (default 600 s).
@@ -24,6 +32,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use urmqtt_broker::{Acl, Broker, Config, ConnId, PersistOp, PublisherBackpressure};
+use urmqtt_mqtt::v5 as m5;
 use urmqtt_mqtt::{
     Connect, ConnectReturnCode, Limits, Packet, Publish, QoS, Subscribe, SubscribeTopics,
     Unsubscribe, UnsubscribeTopics, Will, decode, encode, encoded_len,
@@ -235,6 +244,12 @@ struct Conn {
     /// Set when the broker accepted CONNECT.
     active: Option<(String, Role)>,
     rx: Vec<u8>,
+    /// Speaks MQTT 5.0.
+    v5: bool,
+    /// The topic its Topic Alias 1 stands for (5.0).
+    alias: Option<String>,
+    /// QoS 1 publishes awaiting PUBACK (5.0): the oracle's verdict.
+    expect: HashMap<u16, Verdict>,
 }
 
 #[derive(Default)]
@@ -286,8 +301,13 @@ impl Run<'_> {
     }
 
     fn send(&mut self, slot: usize, p: &Packet<'_>) {
-        let mut out = vec![0u8; encoded_len(p)];
-        encode(p, &mut out).unwrap();
+        let out = if self.conns[slot].as_ref().unwrap().v5 {
+            self.wire5(slot, p)
+        } else {
+            let mut out = vec![0u8; encoded_len(p)];
+            encode(p, &mut out).unwrap();
+            out
+        };
         let id = self.conns[slot].as_ref().unwrap().id;
         if self.rng.chance(30) {
             for byte in &out {
@@ -296,6 +316,128 @@ impl Run<'_> {
         } else {
             self.b.input(id, &out, self.now);
         }
+    }
+
+    /// The 5.0 form of `p`, with what 5.0 adds chosen at random.
+    fn wire5(&mut self, slot: usize, p: &Packet<'_>) -> Vec<u8> {
+        let ack = |packet_id| m5::Ack {
+            packet_id,
+            reason: m5::ReasonCode::Success,
+            properties: m5::Properties::EMPTY,
+        };
+        let mut props: Vec<m5::Property<'_>> = Vec::new();
+        let mut will_props: Vec<m5::Property<'_>> = Vec::new();
+        let opts: Vec<(&str, m5::SubscriptionOptions)>;
+        let mut topic_out: String = String::new();
+        let p5 = match *p {
+            Packet::Connect(c) => {
+                if !c.clean_session || self.rng.chance(30) {
+                    let e = *self.rng.pick(&[0u32, 1, 30, u32::MAX]);
+                    props.push(m5::Property::SessionExpiryInterval(e));
+                }
+                if self.rng.chance(30) {
+                    props.push(m5::Property::ReceiveMaximum(1 + self.rng.below(3) as u16));
+                }
+                if self.rng.chance(50) {
+                    will_props.push(m5::Property::WillDelayInterval(self.rng.below(3) as u32));
+                }
+                m5::Packet::Connect(m5::Connect {
+                    clean_start: c.clean_session,
+                    keep_alive: c.keep_alive,
+                    properties: m5::Properties::List(&props),
+                    client_id: c.client_id,
+                    will: c.will.map(|w| m5::Will {
+                        properties: m5::Properties::List(&will_props),
+                        topic: w.topic,
+                        payload: w.payload,
+                        qos: w.qos,
+                        retain: w.retain,
+                    }),
+                    username: None,
+                    password: None,
+                })
+            }
+            Packet::Publish(pb) => {
+                let c = self.conns[slot].as_mut().unwrap();
+                topic_out.push_str(pb.topic);
+                if c.alias.as_deref() == Some(pb.topic) && self.rng.chance(60) {
+                    // The alias alone.
+                    topic_out.clear();
+                    props.push(m5::Property::TopicAlias(1));
+                } else if self.rng.chance(25) {
+                    c.alias = Some(pb.topic.to_string());
+                    props.push(m5::Property::TopicAlias(1));
+                }
+                if self.rng.chance(30) {
+                    props.push(m5::Property::UserProperty("k", "v"));
+                }
+                if let (QoS::AtLeastOnce, Some(pid)) = (pb.qos, pb.packet_id) {
+                    let tag = u64::from_le_bytes(pb.payload[4..].try_into().unwrap());
+                    let v = self.tags.get(&tag).map_or(Verdict::Nothing, |t| t.3);
+                    self.conns[slot].as_mut().unwrap().expect.insert(pid, v);
+                }
+                m5::Packet::Publish(m5::Publish {
+                    dup: pb.dup,
+                    qos: pb.qos,
+                    retain: pb.retain,
+                    topic: &topic_out,
+                    packet_id: pb.packet_id,
+                    properties: m5::Properties::List(&props),
+                    payload: pb.payload,
+                })
+            }
+            Packet::Subscribe(sb) => {
+                opts = sb
+                    .topics
+                    .iter()
+                    .map(|(f, q)| {
+                        let rh = match self.rng.below(3) {
+                            0 => m5::RetainHandling::SendOnSubscribe,
+                            1 => m5::RetainHandling::SendIfNew,
+                            _ => m5::RetainHandling::DoNotSend,
+                        };
+                        let o = m5::SubscriptionOptions {
+                            qos: q,
+                            no_local: self.rng.chance(30),
+                            retain_as_published: self.rng.chance(30),
+                            retain_handling: rh,
+                        };
+                        (f, o)
+                    })
+                    .collect();
+                // By hand: the encoder refuses an invalid filter, which the
+                // broker must meet too.
+                let mut body = sb.packet_id.to_be_bytes().to_vec();
+                body.push(0);
+                for (f, o) in &opts {
+                    body.extend_from_slice(&(f.len() as u16).to_be_bytes());
+                    body.extend_from_slice(f.as_bytes());
+                    body.push(o.to_byte());
+                }
+                return frame(0x82, &body);
+            }
+            Packet::Unsubscribe(u) => {
+                let mut body = u.packet_id.to_be_bytes().to_vec();
+                body.push(0);
+                for f in u.topics.iter() {
+                    body.extend_from_slice(&(f.len() as u16).to_be_bytes());
+                    body.extend_from_slice(f.as_bytes());
+                }
+                return frame(0xa2, &body);
+            }
+            Packet::PubAck(i) => m5::Packet::PubAck(ack(i)),
+            Packet::PingReq => m5::Packet::PingReq,
+            Packet::Disconnect => m5::Packet::Disconnect(m5::Disconnect {
+                reason: if self.rng.chance(30) {
+                    m5::ReasonCode::DisconnectWithWillMessage
+                } else {
+                    m5::ReasonCode::Success
+                },
+                properties: m5::Properties::EMPTY,
+            }),
+            other => panic!("no 5.0 form here for {other:?}"),
+        };
+        enc5(&p5)
     }
 
     fn oracle_role(c: &Conn, id: &str) -> Role {
@@ -328,12 +470,20 @@ impl Run<'_> {
             }
             self.log
                 .push(format!("open slot {slot} conn {id} tls {tls:?}"));
+            let v5 = self.rng.chance(40);
+            self.log.push(format!(
+                "slot {slot} speaks {}",
+                if v5 { "5.0" } else { "3.1.1" }
+            ));
             self.conns[slot] = Some(Conn {
                 id,
                 tls,
                 pending: None,
                 active: None,
                 rx: Vec::new(),
+                v5,
+                alias: None,
+                expect: HashMap::new(),
             });
             self.connect(slot);
             return;
@@ -420,11 +570,20 @@ impl Run<'_> {
         self.send(slot, &p);
         // A will the oracle forbids must have been refused.
         if let Some((topic, _, Verdict::Nothing)) = will {
-            let cid = self.conns[slot].as_ref().unwrap().id;
-            let out = self.b.output(cid).to_vec();
-            if let Ok((Packet::ConnAck(a), _)) = decode(&out, &Limits::PROTOCOL_MAX)
-                && a.code == ConnectReturnCode::Accepted
-            {
+            let c = self.conns[slot].as_ref().unwrap();
+            let out = self.b.output(c.id).to_vec();
+            let accepted = if c.v5 {
+                matches!(
+                    m5::decode(&out, &m5::Limits::PROTOCOL_MAX),
+                    Ok((m5::Packet::ConnAck(a), _)) if a.reason == m5::ReasonCode::Success
+                )
+            } else {
+                matches!(
+                    decode(&out, &Limits::PROTOCOL_MAX),
+                    Ok((Packet::ConnAck(a), _)) if a.code == ConnectReturnCode::Accepted
+                )
+            };
+            if accepted {
                 self.fail(&format!("will on {topic} accepted for {id} ({role:?})"));
             }
             self.st.wills_refused += 1;
@@ -520,7 +679,71 @@ impl Run<'_> {
             let mut sub_ok = 0u64;
             let mut sub_no = 0u64;
             let mut bad = None;
+            let v5 = c.v5;
             loop {
+                if !v5 {
+                    break;
+                }
+                match m5::decode(&c.rx, &m5::Limits::PROTOCOL_MAX) {
+                    Ok((p, n)) => {
+                        match p {
+                            m5::Packet::ConnAck(a) => {
+                                connack = Some(if a.reason == m5::ReasonCode::Success {
+                                    ConnectReturnCode::Accepted
+                                } else {
+                                    ConnectReturnCode::NotAuthorized
+                                })
+                            }
+                            m5::Packet::Publish(p) => {
+                                checks.push((p.topic.to_string(), p.payload.to_vec()));
+                                if p.topic.is_empty() || p.properties.topic_alias().is_some() {
+                                    bad = Some("the broker sent a topic alias".to_string());
+                                }
+                                if let Some(id) = p.packet_id {
+                                    acks.push(id);
+                                }
+                            }
+                            m5::Packet::SubAck(s) => {
+                                for rc in s.reason_codes {
+                                    match rc {
+                                        0..=2 => sub_ok += 1,
+                                        0x87 | 0x97 => sub_no += 1,
+                                        other => {
+                                            bad = Some(format!("SUBACK code {other:#x}"));
+                                        }
+                                    }
+                                }
+                            }
+                            m5::Packet::PubAck(a) => {
+                                let want = c.expect.remove(&a.packet_id);
+                                let code = a.reason as u8;
+                                let ok = match want {
+                                    Some(Verdict::Nothing) => code == 0x87,
+                                    Some(_) => code == 0 || code == 0x97,
+                                    None => true,
+                                };
+                                if !ok {
+                                    bad = Some(format!(
+                                        "PUBACK {} code {code:#x} for verdict {want:?}",
+                                        a.packet_id
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
+                        c.rx.drain(..n);
+                    }
+                    Err(m5::Error::Incomplete(_)) => break,
+                    Err(e) => {
+                        bad = Some(format!("broker produced an undecodable 5.0 packet: {e:?}"));
+                        break;
+                    }
+                }
+            }
+            loop {
+                if v5 {
+                    break;
+                }
                 match decode(&c.rx, &Limits::PROTOCOL_MAX) {
                     Ok((p, n)) => {
                         match p {
@@ -696,6 +919,31 @@ impl Run<'_> {
             ));
         }
     }
+}
+
+/// A packet from its first byte and body (the body is short here).
+fn frame(first: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![first];
+    let mut n = body.len();
+    loop {
+        let mut b = (n & 0x7f) as u8;
+        n >>= 7;
+        if n > 0 {
+            b |= 0x80;
+        }
+        out.push(b);
+        if n == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(body);
+    out
+}
+
+fn enc5(p: &m5::Packet<'_>) -> Vec<u8> {
+    let mut out = vec![0u8; m5::encoded_len(p).unwrap()];
+    m5::encode(p, &mut out).unwrap();
+    out
 }
 
 fn run_sequence(seed: u64, ops: usize, st: &mut Stats) {

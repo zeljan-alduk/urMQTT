@@ -2030,3 +2030,51 @@ fn the_5_0_state_is_one_small_box_and_aliases_cost_nothing_until_used() {
     let k = b.conns.get(d.c).unwrap();
     assert_eq!(k.v5().unwrap().aliases.as_ref().map(|a| a.len()), Some(10));
 }
+
+#[test]
+fn resends_after_a_reconnect_respect_the_new_receive_maximum() {
+    let mut b = Broker::new(cfg());
+    let props = |rm| [Prop::ReceiveMaximum(rm), Prop::SessionExpiryInterval(60)];
+    let (mut d, _) = C5::connect(&mut b, "d1", true, &props(2), None, 0);
+    d.subscribe(&mut b, &[("devices/d1/cmd/#", q(QoS::AtLeastOnce))], 0);
+    let (mut svc, _) = C5::connect(&mut b, "backend", true, &[], None, 0);
+    for i in 0..3u8 {
+        svc.publish(
+            &mut b,
+            "devices/d1/cmd/x",
+            &[i],
+            QoS::AtLeastOnce,
+            false,
+            &[],
+            0,
+        );
+    }
+    assert_eq!(d.recv(&mut b).len(), 2);
+    b.closed(d.c, 0);
+    // Back with Receive Maximum 1: one resend at a time, DUP set.
+    let (mut d, _) = C5::connect(&mut b, "d1", false, &props(1), None, 0);
+    let got = d.recv(&mut b);
+    assert!(
+        matches!(&got[..], [G::Publish { dup: true, payload, pid: Some(1), .. }] if payload == &[0]),
+        "{got:?}"
+    );
+    let ack = |pid| {
+        P5::PubAck(Ack {
+            packet_id: pid,
+            reason: ReasonCode::Success,
+            properties: Props::EMPTY,
+        })
+    };
+    d.send(&mut b, &ack(1), 0);
+    let got = d.recv(&mut b);
+    assert!(
+        matches!(&got[..], [G::Publish { dup: true, payload, pid: Some(2), .. }] if payload == &[1]),
+        "{got:?}"
+    );
+    d.send(&mut b, &ack(2), 0);
+    let got = d.recv(&mut b);
+    assert!(
+        matches!(&got[..], [G::Publish { dup: false, payload, .. }] if payload == &[2]),
+        "{got:?}"
+    );
+}

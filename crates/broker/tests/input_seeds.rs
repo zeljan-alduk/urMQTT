@@ -35,3 +35,24 @@ fn the_qos2_seeds_reach_their_flows() {
     assert_eq!((st.wills_published, st.qos2_received), (1, 1), "{st:?}");
     assert!(st.retained >= 1 && st.qos2_completed >= 1, "{st:?}");
 }
+
+/// The MQTT 5.0 seeds (ADR-274), written by hand with
+/// `scripts/mqtt5-seeds.py`, reach what they are about.
+#[test]
+fn the_mqtt5_seeds_reach_their_flows() {
+    let st = input_harness::run(&seed("mqtt5_session_expiry")).stats();
+    assert_eq!((st.online_v5, st.sessions_expired), (2, 1), "{st:?}");
+    assert!(st.delivered >= 1, "{st:?}");
+    let st = input_harness::run(&seed("mqtt5_will_delay_alias")).stats();
+    assert_eq!(st.published, 3, "{st:?}");
+    assert_eq!(st.disconnects_sent[0x14], 1, "0x94 unknown alias: {st:?}");
+    let st = input_harness::run(&seed("mqtt5_mixed_versions")).stats();
+    assert_eq!((st.online, st.online_v5), (2, 1), "{st:?}");
+    // Twice each: the harness routes a few messages back in as if from
+    // another shard (ADR-269).
+    assert!(st.delivered >= 2, "{st:?}");
+    assert_eq!(st.disconnects_sent[0x02], 1, "AUTH: {st:?}");
+    let st = input_harness::run(&seed("mqtt5_flow_control")).stats();
+    assert_eq!((st.qos2_received, st.qos2_inbound_full), (32, 1), "{st:?}");
+    assert_eq!(st.disconnects_sent[0x13], 1, "0x93: {st:?}");
+}

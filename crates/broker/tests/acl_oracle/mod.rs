@@ -36,6 +36,18 @@
 //!    delivered to a session in one flow only: it is sent again only with
 //!    DUP and the same id, and never after the client's PUBREC; a PUBREL
 //!    comes only after our PUBREC.
+//! 7. MQTT 5.0 (ADR-274): connections speak 3.1.1 or 5.0 on one broker.
+//!    A 5.0 client is told 0x87 exactly for what it may not publish (and a
+//!    refused QoS 2 id is not held); one QoS 2 id above the announced
+//!    Receive Maximum is DISCONNECT 0x93; its own Receive Maximum bounds
+//!    what is in flight to it; a session ends when its Session Expiry
+//!    Interval has run while it was offline (both versions: 3.1.1 persistent
+//!    sessions have the configured default), so a later CONNECT finds none;
+//!    No Local keeps a session's own messages from it unless a matching
+//!    subscription without No Local was granted; RETAIN on a live delivery
+//!    only through Retain As Published; a retained replay only as Retain
+//!    Handling allows; nothing is delivered after its Message Expiry
+//!    Interval, and a 5.0 receiver is told what is left of it.
 
 #![allow(dead_code)]
 
@@ -50,6 +62,7 @@ use urmqtt_broker::{
     Acl, Broker, CONTROL_TOPIC, CloseReason, Config, ConnId, MIN_QOS2_IDS, MsgInner,
     PublisherBackpressure, Qos2Id, Stats, StoredMsg,
 };
+use urmqtt_mqtt::v5 as m5;
 use urmqtt_mqtt::{
     Connect, Error, Limits, Packet, Publish, QoS, Subscribe, SubscribeTopics, Unsubscribe,
     UnsubscribeTopics, Will, decode, encode, encoded_len,
@@ -85,6 +98,12 @@ pub const QOS2_IDS: usize = if MAX_INFLIGHT > MIN_QOS2_IDS {
     MIN_QOS2_IDS
 };
 pub const MAX_SUBS: usize = 4;
+/// The Receive Maximum announced to 5.0 clients (QoS 2 ids they may hold).
+pub const RM_IN: usize = 4;
+/// The Session Expiry Interval of a 3.1.1 persistent session (s).
+pub const DEFAULT_EXPIRY: u32 = 600;
+/// The longest Session Expiry Interval granted (s).
+pub const MAX_EXPIRY: u32 = 2_592_000;
 pub const MAX_RETAINED_PER_DEVICE: usize = 2;
 pub const MAX_RETAINED_BYTES: usize = 600;
 
@@ -114,7 +133,12 @@ pub fn config() -> Config {
         control_ids: &["svc"],
         // No plaintext listener: every connection here has a TLS identity.
         plain: None,
-        mqtt5: Default::default(),
+        mqtt5: urmqtt_broker::Mqtt5Policy {
+            receive_maximum: RM_IN as u16,
+            default_session_expiry_s: DEFAULT_EXPIRY,
+            max_session_expiry_s: MAX_EXPIRY,
+            ..urmqtt_broker::Mqtt5Policy::DEFAULT
+        },
         web: None,
         publisher_backpressure: PublisherBackpressure::Single,
     }
@@ -358,9 +382,44 @@ pub enum Op {
         slot: usize,
         bytes: Vec<u8>,
     },
+    /// An MQTT 5.0 CONNECT: as `Connect`, with a Session Expiry Interval,
+    /// a Receive Maximum and a Will Delay Interval.
+    Connect5 {
+        slot: usize,
+        who: usize,
+        claim: usize,
+        clean: bool,
+        will: Option<(String, bool, QoS)>,
+        expiry: u32,
+        rm: u16,
+        will_delay: u32,
+    },
+    /// SUBSCRIBE with Subscription Options (a 3.1.1 connection sends the
+    /// QoS bits alone).
+    Subscribe5 {
+        slot: usize,
+        filters: Vec<(String, u8)>,
+    },
+    /// PUBLISH with a Message Expiry Interval and, on a 5.0 connection,
+    /// through a Topic Alias when `alias`.
+    Publish5 {
+        slot: usize,
+        topic: String,
+        qos: QoS,
+        retain: bool,
+        expiry: Option<u32>,
+        alias: bool,
+    },
+    /// A 5.0 DISCONNECT: with its will (0x04), and/or ending the session
+    /// (Session Expiry Interval 0). Plain DISCONNECT on 3.1.1.
+    Disconnect5 {
+        slot: usize,
+        will: bool,
+        end: bool,
+    },
 }
 
-const TOPICS: [&str; 26] = [
+pub const TOPICS: [&str; 26] = [
     "fleet/hello",
     "fleet/hello/x",
     "devices/d1/telemetry/t",
@@ -389,7 +448,7 @@ const TOPICS: [&str; 26] = [
     "x",
 ];
 
-const FILTERS: [&str; 28] = [
+pub const FILTERS: [&str; 28] = [
     "devices/+/state/+",
     "devices/d1/telemetry/#",
     "devices/+/state/#",
@@ -549,6 +608,65 @@ pub fn decode_ops(data: &[u8]) -> Vec<Op> {
             8 => Op::Ping { slot },
             9 if b1 & 0x30 == 0x10 => Op::Release { slot },
             9 if b1 & 0x30 == 0x20 => Op::Dup { slot },
+            // MQTT 5.0 (ADR-274).
+            9 if b1 & 0x30 == 0x30 => match s.u8() % 4 {
+                0 => {
+                    let who = usize::from(b1 >> 2) % WHO.len();
+                    let f = s.u8();
+                    let v = s.u8();
+                    let claim = if f & 2 != 0 {
+                        usize::from((f >> 4) & 7) % WHO.len()
+                    } else {
+                        who
+                    };
+                    let will = (f & 4 != 0).then(|| {
+                        let t = s.topic(false);
+                        (t, f & 0x80 != 0, Src::qos(f >> 3))
+                    });
+                    Op::Connect5 {
+                        slot,
+                        who,
+                        claim,
+                        clean: f & 1 != 0,
+                        will,
+                        expiry: [0, 1, 3, 600, u32::MAX][usize::from(v & 7) % 5],
+                        rm: 1 + u16::from((v >> 3) & 3),
+                        will_delay: u32::from(v >> 5) % 4,
+                    }
+                }
+                1 => {
+                    let n = 1 + usize::from(s.u8() % 3);
+                    let filters = (0..n)
+                        .map(|_| {
+                            let o = s.u8();
+                            // QoS 0-2, No Local, Retain As Published, Retain
+                            // Handling 0-2.
+                            let opts = ((o & 3) % 3) | (o & 0x0c) | ((((o >> 4) & 3) % 3) << 4);
+                            (s.topic(true), opts)
+                        })
+                        .collect();
+                    Op::Subscribe5 { slot, filters }
+                }
+                2 => {
+                    let f = s.u8();
+                    Op::Publish5 {
+                        slot,
+                        topic: s.topic(false),
+                        qos: Src::qos(f),
+                        retain: f & 4 != 0,
+                        expiry: [None, Some(1), Some(2), Some(30)][usize::from((f >> 3) & 3)],
+                        alias: f & 0x20 != 0,
+                    }
+                }
+                _ => {
+                    let f = s.u8();
+                    Op::Disconnect5 {
+                        slot,
+                        will: f & 1 != 0,
+                        end: f & 2 != 0,
+                    }
+                }
+            },
             10 => {
                 let who = usize::from(b1 >> 2) % WHO.len();
                 let n = usize::from(b1 >> 6) % 3;
@@ -600,12 +718,19 @@ const MAGIC: [u8; 3] = *b"ACL";
 struct Sent {
     topic: String,
     allowed: bool,
+    /// The publisher's session (No Local); `None` for wills, restored and
+    /// remote messages.
+    from: Option<String>,
+    /// When its Message Expiry Interval ends (ms, the harness clock).
+    expires_at: Option<u64>,
 }
 
 struct Expect {
     code: u8,
     present: bool,
     clean: bool,
+    /// The Session Expiry Interval the session gets (s).
+    expiry: u32,
 }
 
 /// A delivery to this connection that is not complete.
@@ -634,6 +759,14 @@ struct Slot {
     rx: Vec<u8>,
     /// Garbage may have left half a packet in the broker's input buffer.
     dirty: bool,
+    /// MQTT 5.0: the client's Receive Maximum.
+    v5: Option<u16>,
+    /// The topic its Topic Alias 1 stands for (5.0).
+    alias: Option<String>,
+    /// 5.0 QoS 1 and 2 publishes: the PUBACK/PUBREC code they must get.
+    acks: HashMap<u16, u8>,
+    /// The CONNECT asked for Session Expiry 0 (5.0).
+    asked_zero: bool,
 }
 
 #[derive(Default)]
@@ -652,6 +785,16 @@ struct Sess {
     /// QoS 2 deliveries to this session (not retained replays): payload
     /// registry entry -> (packet id, our PUBREC sent).
     q2: HashMap<u32, (u16, bool)>,
+    /// Session Expiry Interval (s): 0 ends it with its connection.
+    expiry: u32,
+    /// When it went offline (ms).
+    offline_since: u64,
+    /// Filters granted at some point without No Local / with Retain As
+    /// Published.
+    granted_local: HashSet<String>,
+    granted_rap: HashSet<String>,
+    /// Its subscriptions now (Retain Handling 1).
+    current: HashSet<String>,
 }
 
 /// What a QoS 2 PUBLISH should do, by the session model.
@@ -679,11 +822,18 @@ enum Rx {
         pid: Option<u16>,
         retain: bool,
         dup: bool,
+        /// The Message Expiry Interval it says (5.0).
+        expiry: Option<u32>,
     },
     SubAck(Vec<u8>),
-    PubRec(u16),
+    /// Acknowledgements of the client's publishes, with their code (0 for
+    /// 3.1.1).
+    PubAck(u16, u8),
+    PubRec(u16, u8),
     PubRel(u16),
     PubComp(u16),
+    /// A server DISCONNECT (5.0).
+    Disconnect(u8),
     Other,
 }
 
@@ -695,6 +845,9 @@ pub struct Harness {
     sessions: HashMap<String, Sess>,
     /// The SUBSCRIBE being processed: its slot and filters.
     sub: Option<(usize, Vec<(String, QoS)>)>,
+    /// Its options, and whether each filter was new to the session (Retain
+    /// Handling 1).
+    sub_opts: Vec<(u8, bool)>,
     control_seen: u64,
     /// Retained messages handed back by `restore_retained` (no owner).
     restored: usize,
@@ -725,6 +878,7 @@ impl Harness {
             sent: Vec::new(),
             sessions: HashMap::new(),
             sub: None,
+            sub_opts: Vec::new(),
             control_seen: 0,
             restored: 0,
             retained_seqs: HashSet::new(),
@@ -738,6 +892,8 @@ impl Harness {
         self.sent.push(Sent {
             topic: topic.to_string(),
             allowed,
+            from: None,
+            expires_at: None,
         });
         let mut p = MAGIC.to_vec();
         p.extend_from_slice(&seq.to_le_bytes());
@@ -747,8 +903,19 @@ impl Harness {
 
     fn feed(&mut self, slot: usize, p: &Packet<'_>) {
         if let Some(s) = &self.slots[slot] {
-            self.b.input(s.c, &wire(p), self.now);
+            let bytes = if s.v5.is_some() { wire5_of(p) } else { wire(p) };
+            self.b.input(s.c, &bytes, self.now);
         }
+    }
+
+    fn feed5(&mut self, slot: usize, p: &m5::Packet<'_>) {
+        if let Some(s) = &self.slots[slot] {
+            self.b.input(s.c, &wire5(p), self.now);
+        }
+    }
+
+    fn is_v5(&self, slot: usize) -> bool {
+        self.slots[slot].as_ref().is_some_and(|s| s.v5.is_some())
     }
 
     fn accepted(&self, slot: usize) -> bool {
@@ -757,6 +924,29 @@ impl Harness {
 
     /// Applies one operation, then checks every invariant.
     pub fn step(&mut self, op: &Op) {
+        // A plain PUBLISH on a 5.0 connection is a 5.0 one without the
+        // extras: its refusals and QoS 2 ids follow the 5.0 rules.
+        let as5;
+        let op = match op {
+            Op::Publish {
+                slot,
+                topic,
+                qos,
+                retain,
+                ..
+            } if self.is_v5(*slot) => {
+                as5 = Op::Publish5 {
+                    slot: *slot,
+                    topic: topic.clone(),
+                    qos: *qos,
+                    retain: *retain,
+                    expiry: None,
+                    alias: false,
+                };
+                &as5
+            }
+            op => op,
+        };
         self.steps += 1;
         let before = self.b.stats();
         // For a PUBLISH: the model's verdict, for the counter check.
@@ -809,12 +999,17 @@ impl Harness {
                         code,
                         present,
                         clean: *clean,
+                        expiry: if *clean { 0 } else { DEFAULT_EXPIRY },
                     }),
                     inflight: BTreeMap::new(),
                     released: Vec::new(),
                     next_pid: 1,
                     rx: Vec::new(),
                     dirty: false,
+                    v5: None,
+                    alias: None,
+                    acks: HashMap::new(),
+                    asked_zero: false,
                 });
                 let will_pkt = will.as_ref().map(|(t, retain, qos)| Will {
                     topic: t,
@@ -920,6 +1115,12 @@ impl Harness {
                 if !self.accepted(*slot) {
                     return self.settle();
                 }
+                let s = self.slots[*slot].as_ref().expect("accepted");
+                if let Some(sess) = self.sessions.get_mut(&s.key) {
+                    for f in filters {
+                        sess.current.remove(f);
+                    }
+                }
                 let list: Vec<&str> = filters.iter().map(String::as_str).collect();
                 self.feed(
                     *slot,
@@ -1019,6 +1220,288 @@ impl Harness {
                 );
             }
             Op::Disconnect { slot } => self.feed(*slot, &Packet::Disconnect),
+            Op::Connect5 {
+                slot,
+                who,
+                claim,
+                clean,
+                will,
+                expiry,
+                rm,
+                will_delay,
+            } => {
+                if self.slots[*slot].is_some() {
+                    return self.settle();
+                }
+                let (id, kind) = WHO[*who];
+                let boot = kind == Kind::Bootstrap;
+                let claim_id = WHO[*claim].0;
+                let bad_will = will.as_ref().is_some_and(|(t, _, _)| !may_pub(kind, id, t));
+                // 5.0 codes; a bootstrap session is granted expiry 0, not
+                // refused.
+                let code = if claim_id != id || invalid_identity(claim_id) {
+                    0x85
+                } else if bad_will {
+                    0x87
+                } else {
+                    0
+                };
+                let key = if boot {
+                    format!("$bootstrap/{id}")
+                } else {
+                    id.to_string()
+                };
+                let present = code == 0 && !clean && self.sessions.contains_key(&key);
+                let granted = if boot { 0 } else { (*expiry).min(MAX_EXPIRY) };
+                let body = match will {
+                    Some((t, retain, _)) => {
+                        if *retain {
+                            self.retained_seqs.insert(self.sent.len() as u32);
+                        }
+                        self.payload(t, true, 0)
+                    }
+                    None => Vec::new(),
+                };
+                let c = self.b.open(self.now).expect("a free connection");
+                self.b.set_identity(c, id, boot);
+                self.slots[*slot] = Some(Slot {
+                    c,
+                    who: *who,
+                    key,
+                    accepted: false,
+                    expect: Some(Expect {
+                        code,
+                        present,
+                        clean: granted == 0,
+                        expiry: granted,
+                    }),
+                    inflight: BTreeMap::new(),
+                    released: Vec::new(),
+                    next_pid: 1,
+                    rx: Vec::new(),
+                    dirty: false,
+                    v5: Some(*rm),
+                    alias: None,
+                    acks: HashMap::new(),
+                    asked_zero: *expiry == 0,
+                });
+                let props = [
+                    m5::Property::SessionExpiryInterval(*expiry),
+                    m5::Property::ReceiveMaximum(*rm),
+                ];
+                let wprops = [m5::Property::WillDelayInterval(*will_delay)];
+                let will_pkt = will.as_ref().map(|(t, retain, qos)| m5::Will {
+                    properties: m5::Properties::List(&wprops),
+                    topic: t,
+                    payload: &body,
+                    qos: *qos,
+                    retain: *retain,
+                });
+                self.feed5(
+                    *slot,
+                    &m5::Packet::Connect(m5::Connect {
+                        clean_start: *clean,
+                        keep_alive: 10,
+                        properties: m5::Properties::List(&props),
+                        client_id: claim_id,
+                        will: will_pkt,
+                        username: None,
+                        password: None,
+                    }),
+                );
+            }
+            Op::Subscribe5 { slot, filters } => {
+                if !self.accepted(*slot) {
+                    return self.settle();
+                }
+                let s = self.slots[*slot].as_ref().expect("accepted");
+                let current = self
+                    .sessions
+                    .get(&s.key)
+                    .map(|x| x.current.clone())
+                    .unwrap_or_default();
+                let mut seen = HashSet::new();
+                // A 3.1.1 connection sends the QoS alone.
+                let mask = if self.is_v5(*slot) { 0xff } else { 0x03 };
+                self.sub_opts = filters
+                    .iter()
+                    .map(|(f, o)| (*o & mask, !current.contains(f) && seen.insert(f.clone())))
+                    .collect();
+                self.sub = Some((
+                    *slot,
+                    filters
+                        .iter()
+                        .map(|(f, o)| (f.clone(), Src::qos(*o)))
+                        .collect(),
+                ));
+                if self.is_v5(*slot) {
+                    // By hand: a filter the encoder would refuse must reach
+                    // the broker too.
+                    let mut body = 7u16.to_be_bytes().to_vec();
+                    body.push(0);
+                    for (f, o) in filters {
+                        body.extend_from_slice(&(f.len() as u16).to_be_bytes());
+                        body.extend_from_slice(f.as_bytes());
+                        body.push(*o);
+                    }
+                    let bytes = frame(0x82, &body);
+                    let c = self.slots[*slot].as_ref().expect("accepted").c;
+                    self.b.input(c, &bytes, self.now);
+                } else {
+                    let list: Vec<(&str, QoS)> = filters
+                        .iter()
+                        .map(|(f, o)| (f.as_str(), Src::qos(*o)))
+                        .collect();
+                    self.feed(
+                        *slot,
+                        &Packet::Subscribe(Subscribe {
+                            packet_id: 7,
+                            topics: SubscribeTopics::List(&list),
+                        }),
+                    );
+                }
+            }
+            Op::Publish5 {
+                slot,
+                topic,
+                qos,
+                retain,
+                expiry,
+                alias,
+            } => {
+                if !self.accepted(*slot) {
+                    return self.settle();
+                }
+                let s = self.slots[*slot].as_mut().expect("accepted");
+                let (id, kind) = WHO[s.who];
+                let dirty = s.dirty;
+                let v5 = s.v5.is_some();
+                let pid = if *qos == QoS::AtMostOnce {
+                    None
+                } else {
+                    s.next_pid = s.next_pid.wrapping_add(1).max(1);
+                    Some(s.next_pid)
+                };
+                let key = s.key.clone();
+                let limit = if v5 { RM_IN } else { QOS2_IDS };
+                let allowed = may_pub(kind, id, topic);
+                let control = topic == CONTROL_TOPIC && kind != Kind::Bootstrap && id == "svc";
+                let q2 = match (qos, pid, self.sessions.get_mut(&key)) {
+                    (QoS::ExactlyOnce, Some(p), Some(sess)) => {
+                        if dirty {
+                            sess.uncertain = true;
+                        }
+                        if sess.uncertain {
+                            sess.awaiting.insert(p);
+                            Q2::Unknown
+                        } else if sess.awaiting.contains(&p) {
+                            Q2::Dup
+                        } else if sess.awaiting.len() >= limit {
+                            Q2::Full
+                        } else {
+                            // A 5.0 PUBREC with a failure code ends the flow:
+                            // the id is not held.
+                            if !v5 || allowed || control {
+                                sess.awaiting.insert(p);
+                            }
+                            Q2::Fresh
+                        }
+                    }
+                    (QoS::ExactlyOnce, _, _) => Q2::Unknown,
+                    _ => Q2::No,
+                };
+                if *retain {
+                    self.retained_seqs.insert(self.sent.len() as u32);
+                }
+                let body = self.payload(topic, allowed, 1);
+                let seq = self.sent.len() - 1;
+                if v5 {
+                    self.sent[seq].from = Some(key.clone());
+                    if let Some(e) = expiry.filter(|e| *e > 0) {
+                        self.sent[seq].expires_at = Some(self.now + u64::from(e) * 1000);
+                    }
+                }
+                if !dirty && q2 != Q2::Unknown {
+                    verdict = Some((topic, allowed, control, q2));
+                }
+                let s = self.slots[*slot].as_mut().expect("accepted");
+                if v5 && let (Some(p), true) = (pid, matches!(q2, Q2::No | Q2::Fresh)) {
+                    s.acks.insert(p, if allowed || control { 0 } else { 0x87 });
+                }
+                if !v5 {
+                    self.feed(
+                        *slot,
+                        &Packet::Publish(Publish {
+                            dup: false,
+                            qos: *qos,
+                            retain: *retain,
+                            topic,
+                            packet_id: pid,
+                            payload: &body,
+                        }),
+                    );
+                } else {
+                    let mut props = Vec::new();
+                    let mut t: &str = topic;
+                    if *alias {
+                        if s.alias.as_deref() == Some(topic.as_str()) {
+                            t = "";
+                        } else {
+                            s.alias = Some(topic.clone());
+                        }
+                        props.push(m5::Property::TopicAlias(1));
+                    }
+                    if let Some(e) = expiry {
+                        props.push(m5::Property::MessageExpiryInterval(*e));
+                    }
+                    props.push(m5::Property::UserProperty("seq", "x"));
+                    self.feed5(
+                        *slot,
+                        &m5::Packet::Publish(m5::Publish {
+                            dup: false,
+                            qos: *qos,
+                            retain: *retain,
+                            topic: t,
+                            packet_id: pid,
+                            properties: m5::Properties::List(&props),
+                            payload: &body,
+                        }),
+                    );
+                }
+            }
+            Op::Disconnect5 { slot, will, end } => {
+                let Some(s) = self.slots[*slot].as_ref() else {
+                    return self.settle();
+                };
+                if s.v5.is_none() {
+                    self.feed(*slot, &Packet::Disconnect);
+                    return self.settle();
+                }
+                let key = s.key.clone();
+                let mine = self.sessions.get(&key).is_some_and(|x| x.conn == Some(s.c));
+                if *end
+                    && mine
+                    && let Some(sess) = self.sessions.get_mut(&key)
+                {
+                    sess.expiry = 0;
+                }
+                let props = [m5::Property::SessionExpiryInterval(0)];
+                self.feed5(
+                    *slot,
+                    &m5::Packet::Disconnect(m5::Disconnect {
+                        reason: if *will {
+                            m5::ReasonCode::DisconnectWithWillMessage
+                        } else {
+                            m5::ReasonCode::Success
+                        },
+                        properties: if *end {
+                            m5::Properties::List(&props)
+                        } else {
+                            m5::Properties::EMPTY
+                        },
+                    }),
+                );
+            }
             Op::Drop { slot } => {
                 self.collect();
                 if let Some(s) = self.slots[*slot].take() {
@@ -1033,6 +1516,13 @@ impl Harness {
                 if *ms == 0 {
                     self.b.shrink();
                 }
+                // Offline sessions whose expiry has run are gone.
+                let now = self.now;
+                self.sessions.retain(|_, x| {
+                    x.conn.is_some()
+                        || x.expiry == u32::MAX
+                        || now - x.offline_since < u64::from(x.expiry) * 1000
+                });
             }
             Op::Restore {
                 who,
@@ -1066,12 +1556,18 @@ impl Harness {
                 );
                 assert_eq!(ok, want, "restore_session({id:?})");
                 if ok {
+                    let now = self.now;
                     let sess = self.sessions.entry(id.to_string()).or_default();
                     // A queued message is owed to the session whatever it
                     // subscribes to now: its own topic counts as a filter.
                     sess.granted = subs.iter().map(|(f, _)| f.clone()).collect();
                     sess.granted.extend(msgs.iter().map(|(t, _)| t.clone()));
+                    sess.granted_local = sess.granted.clone();
+                    sess.current = subs.iter().map(|(f, _)| f.clone()).collect();
                     sess.awaiting = (1..=*ids).collect();
+                    // Stored before schema 4: the 3.1.1 default, from now.
+                    sess.expiry = DEFAULT_EXPIRY;
+                    sess.offline_since = now;
                 }
             }
             Op::RestoreRetained { topic } => {
@@ -1118,6 +1614,7 @@ impl Harness {
         }
         self.settle();
         self.sub = None;
+        self.sub_opts.clear();
         if let Some((topic, allowed, control, q2)) = verdict {
             self.check_deltas(&before, topic, allowed, control, q2);
         }
@@ -1203,10 +1700,11 @@ impl Harness {
         if let Some(sess) = self.sessions.get_mut(&s.key)
             && sess.conn == Some(s.c)
         {
-            if sess.clean {
+            if sess.expiry == 0 {
                 self.sessions.remove(&s.key);
             } else {
                 sess.conn = None;
+                sess.offline_since = self.now;
             }
         }
     }
@@ -1244,6 +1742,49 @@ impl Harness {
             let mut got = Vec::new();
             let mut used = 0;
             loop {
+                if s.v5.is_none() {
+                    break;
+                }
+                let rest = &s.rx[used..];
+                match m5::decode(rest, &m5::Limits::PROTOCOL_MAX) {
+                    Ok((p, n)) => {
+                        got.push(match p {
+                            m5::Packet::ConnAck(a) => {
+                                Rx::ConnAck(a.reason as u8, a.session_present)
+                            }
+                            m5::Packet::Publish(p) => {
+                                assert!(
+                                    !p.topic.is_empty() && p.properties.topic_alias().is_none(),
+                                    "the broker sent a topic alias"
+                                );
+                                Rx::Publish {
+                                    topic: p.topic.to_string(),
+                                    payload: p.payload.to_vec(),
+                                    qos: p.qos,
+                                    pid: p.packet_id,
+                                    retain: p.retain,
+                                    dup: p.dup,
+                                    expiry: p.properties.message_expiry_interval(),
+                                }
+                            }
+                            m5::Packet::SubAck(a) => Rx::SubAck(a.reason_codes.to_vec()),
+                            m5::Packet::PubAck(a) => Rx::PubAck(a.packet_id, a.reason as u8),
+                            m5::Packet::PubRec(a) => Rx::PubRec(a.packet_id, a.reason as u8),
+                            m5::Packet::PubRel(a) => Rx::PubRel(a.packet_id),
+                            m5::Packet::PubComp(a) => Rx::PubComp(a.packet_id),
+                            m5::Packet::Disconnect(d) => Rx::Disconnect(d.reason as u8),
+                            _ => Rx::Other,
+                        });
+                        used += n;
+                    }
+                    Err(m5::Error::Incomplete(_)) => break,
+                    Err(e) => panic!("broker sent an undecodable 5.0 packet: {e:?}"),
+                }
+            }
+            loop {
+                if s.v5.is_some() {
+                    break;
+                }
                 let rest = &s.rx[used..];
                 match decode(rest, &Limits::PROTOCOL_MAX) {
                     Ok((p, n)) => {
@@ -1256,9 +1797,11 @@ impl Harness {
                                 pid: p.packet_id,
                                 retain: p.retain,
                                 dup: p.dup,
+                                expiry: None,
                             },
                             Packet::SubAck(a) => Rx::SubAck(a.return_codes.to_vec()),
-                            Packet::PubRec(p) => Rx::PubRec(p),
+                            Packet::PubAck(p) => Rx::PubAck(p, 0),
+                            Packet::PubRec(p) => Rx::PubRec(p, 0),
                             Packet::PubRel(p) => Rx::PubRel(p),
                             Packet::PubComp(p) => Rx::PubComp(p),
                             _ => Rx::Other,
@@ -1287,16 +1830,28 @@ impl Harness {
                 pid,
                 retain,
                 dup,
-            } => self.on_delivery(i, &topic, &payload, qos, pid, retain, dup),
-            Rx::PubRec(p) => {
-                // Only for an id this client published at QoS 2 and holds.
+                expiry,
+            } => {
+                self.check_v5_delivery(i, &topic, &payload, qos, retain, dup, expiry);
+                self.on_delivery(i, &topic, &payload, qos, pid, retain, dup)
+            }
+            Rx::PubAck(p, code) => self.check_ack_code(i, p, code),
+            Rx::PubRec(p, code) => {
+                self.check_ack_code(i, p, code);
+                // A success only for an id this client published at QoS 2
+                // and holds.
                 let s = self.slots[i].as_ref().expect("slot");
                 let sess = self.sessions.get(&s.key).expect("session");
                 assert!(
-                    sess.uncertain || sess.awaiting.contains(&p),
+                    code != 0 || sess.uncertain || sess.awaiting.contains(&p),
                     "{:?}: PUBREC {p} for an id it does not hold",
                     s.key
                 );
+            }
+            Rx::Disconnect(code) => {
+                let s = self.slots[i].as_ref().expect("slot");
+                assert!(s.v5.is_some(), "DISCONNECT to a 3.1.1 client");
+                assert!(code >= 0x80, "server DISCONNECT {code:#x}");
             }
             Rx::PubRel(p) => {
                 let s = self.slots[i].as_mut().expect("slot");
@@ -1365,10 +1920,11 @@ impl Harness {
         assert_eq!(present, e.present, "session_present for {:?}", s.key);
         s.accepted = true;
         let sess = self.sessions.entry(s.key.clone()).or_default();
-        if e.clean || !e.present {
+        if !e.present {
             *sess = Sess::default();
         }
         sess.clean = e.clean;
+        sess.expiry = e.expiry;
         sess.conn = Some(s.c);
     }
 
@@ -1378,10 +1934,30 @@ impl Harness {
         assert_eq!(codes.len(), filters.len());
         let s = self.slots[i].as_ref().expect("slot");
         let (id, kind) = WHO[s.who];
-        for (code, (filter, want)) in codes.iter().zip(&filters) {
-            if *code == 0x80 {
+        let v5 = s.v5.is_some();
+        for (k, (code, (filter, want))) in codes.iter().zip(&filters).enumerate() {
+            if v5 {
+                // 5.0: why a filter was refused.
+                assert!(
+                    matches!(code, 0..=2 | 0x87 | 0x97 | 0x9e),
+                    "{:?}: SUBACK code {code:#x}",
+                    WHO[s.who]
+                );
+            }
+            if *code >= 0x80 {
                 continue;
             }
+            let opts = self.sub_opts.get(k).map_or(*want as u8, |o| o.0);
+            let key = s.key.clone();
+            let sess = self.sessions.get_mut(&key).expect("session");
+            sess.current.insert(filter.clone());
+            if opts & 0x04 == 0 {
+                sess.granted_local.insert(filter.clone());
+            }
+            if opts & 0x08 != 0 {
+                sess.granted_rap.insert(filter.clone());
+            }
+            let s = self.slots[i].as_ref().expect("slot");
             assert!(
                 filter_allowed(kind, id, filter),
                 "{:?} was granted filter {filter:?} that reaches topics outside its rights",
@@ -1432,9 +2008,14 @@ impl Harness {
         // RETAIN marks a replay for a SUBSCRIBE: sent during it, or (QoS 1 and
         // 2) later from the queue when the window was full, or again after a
         // reconnect; and only a message that was published retained.
+        let rap = self
+            .sessions
+            .get(&s.key)
+            .is_some_and(|x| x.granted_rap.iter().any(|f| matches(f, topic)));
         assert!(
             !retain
                 || qos != QoS::AtMostOnce
+                || rap
                 || self.sub.as_ref().is_some_and(|(slot, _)| *slot == i),
             "{ctx}: RETAIN outside a SUBSCRIBE replay"
         );
@@ -1502,12 +2083,164 @@ impl Harness {
                 seq,
             },
         );
+        let window =
+            s.v5.map_or(MAX_INFLIGHT, |rm| MAX_INFLIGHT.min(usize::from(rm)));
         assert!(
-            s.dirty || s.inflight.len() <= MAX_INFLIGHT,
-            "{ctx}: {} unacknowledged",
+            s.dirty || s.inflight.len() <= window,
+            "{ctx}: {} unacknowledged, window {window}",
             s.inflight.len()
         );
     }
+
+    /// The code of a PUBACK or PUBREC for a 5.0 publish: 0x87 exactly when
+    /// the oracle forbids it.
+    fn check_ack_code(&mut self, i: usize, pid: u16, code: u8) {
+        let s = self.slots[i].as_mut().expect("slot");
+        if s.v5.is_none() {
+            return;
+        }
+        if let Some(want) = s.acks.remove(&pid) {
+            assert_eq!(code, want, "{:?}: acknowledgement of {pid}", WHO[s.who]);
+        } else {
+            // A duplicate or one we sent behind garbage: no failure code
+            // unless we expected one.
+            assert!(
+                code == 0 || code == 0x87,
+                "{:?}: code {code:#x}",
+                WHO[s.who]
+            );
+        }
+    }
+
+    /// What MQTT 5.0 adds to a delivery: No Local, Retain Handling, Message
+    /// Expiry (and the rest of the rules hold for every version).
+    #[allow(clippy::too_many_arguments)]
+    fn check_v5_delivery(
+        &self,
+        i: usize,
+        topic: &str,
+        payload: &[u8],
+        qos: QoS,
+        retain: bool,
+        dup: bool,
+        expiry: Option<u32>,
+    ) {
+        let s = self.slots[i].as_ref().expect("slot");
+        let ctx = format!("{:?} received {topic:?}", WHO[s.who]);
+        let sess = self.sessions.get(&s.key).expect("session");
+        let entry = (payload.len() >= 7 && payload[..3] == MAGIC)
+            .then(|| u32::from_le_bytes([payload[3], payload[4], payload[5], payload[6]]))
+            .and_then(|seq| self.sent.get(seq as usize));
+        let replay = retain && self.sub.as_ref().is_some_and(|(slot, _)| *slot == i);
+        if let Some(m) = entry {
+            // No Local: its own message only through a subscription without.
+            if m.from.as_deref() == Some(s.key.as_str()) && !replay {
+                assert!(
+                    sess.granted_local.iter().any(|f| matches(f, topic)),
+                    "{ctx}: its own message despite No Local"
+                );
+            }
+            // Message Expiry: never after the deadline (a resend of what
+            // was already on its way is not a new delivery).
+            if let Some(at) = m.expires_at
+                && !dup
+            {
+                assert!(self.now < at, "{ctx}: delivered after its expiry");
+                if s.v5.is_some() {
+                    let left = (at - self.now).div_ceil(1000).max(1) as u32;
+                    assert_eq!(expiry, Some(left), "{ctx}: remaining expiry");
+                }
+            }
+        }
+        // Retain Handling: a QoS 0 replay during this SUBSCRIBE comes from a
+        // filter that asked for it (0, or 1 and new to the session).
+        if replay && qos == QoS::AtMostOnce {
+            let filters = &self.sub.as_ref().expect("subscribe").1;
+            let ok = filters
+                .iter()
+                .zip(&self.sub_opts)
+                .any(|((f, _), (o, new))| {
+                    matches(f, topic) && ((o >> 4) & 3 == 0 || ((o >> 4) & 3 == 1 && *new))
+                })
+                || self.sub_opts.is_empty();
+            assert!(ok, "{ctx}: retained replay that Retain Handling refuses");
+        }
+    }
+}
+
+/// The 5.0 form of a packet the 3.1.1 ops send (no properties).
+fn wire5_of(p: &Packet<'_>) -> Vec<u8> {
+    let ack = |packet_id| m5::Ack {
+        packet_id,
+        reason: m5::ReasonCode::Success,
+        properties: m5::Properties::EMPTY,
+    };
+    let p5 = match *p {
+        Packet::Publish(p) => m5::Packet::Publish(m5::Publish {
+            dup: p.dup,
+            qos: p.qos,
+            retain: p.retain,
+            topic: p.topic,
+            packet_id: p.packet_id,
+            properties: m5::Properties::EMPTY,
+            payload: p.payload,
+        }),
+        Packet::PubAck(i) => m5::Packet::PubAck(ack(i)),
+        Packet::PubRec(i) => m5::Packet::PubRec(ack(i)),
+        Packet::PubRel(i) => m5::Packet::PubRel(ack(i)),
+        Packet::PubComp(i) => m5::Packet::PubComp(ack(i)),
+        Packet::PingReq => m5::Packet::PingReq,
+        Packet::Disconnect => m5::Packet::Disconnect(m5::Disconnect {
+            reason: m5::ReasonCode::Success,
+            properties: m5::Properties::EMPTY,
+        }),
+        Packet::Subscribe(s) => {
+            let mut body = s.packet_id.to_be_bytes().to_vec();
+            body.push(0);
+            for (f, q) in s.topics.iter() {
+                body.extend_from_slice(&(f.len() as u16).to_be_bytes());
+                body.extend_from_slice(f.as_bytes());
+                body.push(q as u8);
+            }
+            return frame(0x82, &body);
+        }
+        Packet::Unsubscribe(u) => {
+            let mut body = u.packet_id.to_be_bytes().to_vec();
+            body.push(0);
+            for f in u.topics.iter() {
+                body.extend_from_slice(&(f.len() as u16).to_be_bytes());
+                body.extend_from_slice(f.as_bytes());
+            }
+            return frame(0xa2, &body);
+        }
+        other => panic!("no 5.0 form here for {other:?}"),
+    };
+    wire5(&p5)
+}
+
+fn wire5(p: &m5::Packet<'_>) -> Vec<u8> {
+    let mut v = vec![0u8; m5::encoded_len(p).expect("encodable")];
+    m5::encode(p, &mut v).expect("encodable");
+    v
+}
+
+/// A packet from its first byte and body.
+fn frame(first: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![first];
+    let mut n = body.len();
+    loop {
+        let mut b = (n & 0x7f) as u8;
+        n >>= 7;
+        if n > 0 {
+            b |= 0x80;
+        }
+        out.push(b);
+        if n == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(body);
+    out
 }
 
 /// Runs `ops` against a fresh broker.
