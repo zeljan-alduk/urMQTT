@@ -69,7 +69,7 @@ which says what it gives up.
 | TLS records after the handshake | `urmqtt-tls::record` (own) | unit tests; fuzz `tls_record` (garbage rejected, sealed records round-trip, any changed byte fails) |
 | Client certificate identity and serial | `urmqtt-tls::identity` (x509-cert) | fuzz `x509_identity` |
 | MQTT packets | `urmqtt-mqtt` (own, `forbid(unsafe_code)`) | spec and property tests; mosquitto interop; fuzz `mqtt_decode`; the MQTT 5.0 codec (ADR-273, reachable since ADR-274): spec-table tests, captured Mosquitto and paho interop, fuzz `mqtt5_packet`, `mqtt5_props`, Kani; the Eclipse Paho interoperability suite |
-| MQTT session behaviour, QoS 2 flows (ADR-271), MQTT 5.0 semantics (ADR-274) | `urmqtt-broker` (own, `forbid(unsafe_code)`) | host tests (18 for QoS 2, 35 for 5.0), the `qos2_model` proptest (3.1.1 and 5.0 devices), `acl_model` (mixed versions); fuzz `broker_input` and `broker_acl` (QoS 2 and 5.0 seeds) |
+| MQTT session behaviour, QoS 2 flows (ADR-271), MQTT 5.0 semantics (ADR-274), shared subscriptions and Subscription Identifiers (ADR-275) | `urmqtt-broker` (own, `forbid(unsafe_code)`) | host tests (18 for QoS 2, 35 for 5.0, 20 for shared subscriptions and identifiers), the `qos2_model` proptest (3.1.1 and 5.0 devices, a shared backend), `acl_model` (mixed versions, shared filters), the `shared_model` proptest (three shards; each group exactly once, never across roles); fuzz `broker_input` and `broker_acl` (QoS 2, 5.0 and shared-group seeds) |
 | Disk superblock and size table | `urmqtt-store::layout` | fuzz `disk_layout` |
 | Telemetry log on the disk | `urmqtt-store::telemetry` | crash and torn-write tests; fuzz `telemetry_recover` |
 | SQLite database file | SQLite 3.54.1 (vendored), **in the unprivileged database worker** (H6, ADR-210 to ADR-212) | EL0 / ring 3 in its own address space; fault containment and restart (smoke `worker-contain`, `worker-fault`); `quick_check` at boot, `SQLITE_DBCONFIG_DEFENSIVE`; upstream fuzzing |
@@ -676,6 +676,9 @@ power cut, and the broker goes on.
 - **Since H1, revocations also change at runtime:** signed control messages
   close the live connections of a revoked certificate within milliseconds
   (smoke `control-revoke-live`) and survive reboots (smoke `control-persist`).
+  An MQTT 5.0 client is told DISCONNECT 0x98 first by the core that holds its
+  session; the connection is cut after 1 s whatever happens (ADR-275, test
+  `a_revoked_or_disallowed_connection_is_told_0x98_before_the_close`).
 - **Registry (H1):** `registry.mode = "allowlist"` refuses unknown device
   identities after the handshake (smoke `registry-allowlist`).
 - **Time (H7 lower bound, ADR-050):** a clock before the image's build time is
@@ -686,6 +689,19 @@ power cut, and the broker goes on.
   is a gauge and warnings at 60, 30, 7 and 1 days.
 - ACL in the image's configuration, evaluated without the database: by default a device may
   publish to `devices/{id}/#` and subscribe to `devices/{id}/cmd/#`.
+- **Shared subscriptions (ADR-275)** cannot carry a message across roles: a
+  group is (role class, group name, filter), so a device, a service, an
+  operator, a bootstrap identity, a plaintext and a WebSocket login that use
+  the same `$share/{group}/{filter}` are in different groups. The ACL judges
+  the filter after `$share/{group}/` with the subscriber's own subscribe rules
+  (the group name is not a topic), and every member gets only what its own
+  subscription would give it (tests
+  `the_acl_judges_the_filter_inside_the_share_and_groups_never_cross_roles`,
+  the `shared_model` proptest, the `broker_acl` oracle with shares).
+- **Enhanced authentication (MQTT 5.0 AUTH) is refused** (ADR-275): a CONNECT
+  with an Authentication Method gets CONNACK 0x8C, an AUTH packet after the
+  CONNECT DISCONNECT 0x82, an AUTH as the first packet is closed unanswered.
+  Identity comes from the certificate or a plaintext/WebSocket account only.
 - `network.mqtt_plain_port` (the development plaintext port, which takes the
   identity from the client id) can only exist in the `dev` environment; the build
   rejects it elsewhere (smoke `release-kernel-refuses-plaintext-port`). A release
@@ -715,6 +731,8 @@ Every resource is bounded. What happens at the limit is part of the design:
 | Connections per core | `limits.max_connections_per_core` | refused |
 | Packet size, topic length and levels, client id, topics per packet | `limits.*` | protocol error, connection closed |
 | Subscriptions per session | `limits.max_subscriptions_per_session` | SUBACK failure |
+| Shared-subscription groups per data core, members per group | `limits.max_shared_groups`, `limits.max_shared_group_members` (1024 each; ADR-275) | SUBACK 0x97 (3.1.1: 0x80), counted (`shared/joins/refused`) |
+| MQTT 5.0 topic-alias table per connection | `mqtt5.topic_alias_maximum` × (16 + `limits.max_topic_len`) bytes, 2 720 B by default | alias refused (DISCONNECT 0x94); counted in the heap statistics (`memory/topic_aliases`) and seen by the free-heap admission |
 | QoS 1 and 2 in flight, offline queue | `limits.max_inflight_qos1`, `limits.max_queued_per_offline_session` | queued; beyond the queue, new messages are dropped and counted |
 | QoS 2 ids awaiting PUBREL | `max(limits.max_inflight_qos1, 64)` per session (ADR-271) | one more closes the connection, counted (`messages/qos2/inbound_full`) |
 | Publish rate per device | `limits.publish_rate_per_device` | dropped and counted |

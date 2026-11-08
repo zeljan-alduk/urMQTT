@@ -224,8 +224,9 @@ Every milestone ends with:
 - **Kani proofs:**
   - the MQTT decoder never panics and never reads out of bounds up to a bound; for MQTT 5.0 (ADR-273), the
     Variable Byte Integer round trip and the property-block length arithmetic (`crates/mqtt/src/v5/proofs.rs`;
-    fuzz targets `mqtt5_packet`, `mqtt5_props`); the broker's 5.0 semantics (ADR-274) are not proved but checked by
-    the reference models and the ACL oracle (`broker_acl` with 5.0 sessions), see VERIFICATION.md;
+    fuzz targets `mqtt5_packet`, `mqtt5_props`); the broker's 5.0 semantics (ADR-274, ADR-275) are not proved but
+    checked by the reference models (`qos2_model`, `shared_model`: shared groups never cross roles) and the ACL oracle
+    (`broker_acl` with 5.0 sessions, shares and identifiers), see VERIFICATION.md;
   - the TCP segment parser and the TLS record header;
   - config validation;
   - timer-wheel invariants.
