@@ -2702,7 +2702,10 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   flood's spread between runs is that wide in both modes); 150-730 receive interrupts per 5 s window under the flood (no
   storm). The first version without the hold (`now13b-rx-irq-rig-v1.txt`): the same idle gains, but on 2 vCPU the flood
   delivered 261k/263k/s against 325k/340k/s and the p99 at 16 x 1000/s was 20-21 ms against 12-14 ms, with 1 000 to
-  2 000 receive interrupts a second; on 4 vCPU no difference.
+  2 000 receive interrupts a second; on 4 vCPU no difference. Again after the rebase onto ADR-268/269 (`now13b-rx-irq-rig-v3.txt`):
+  100 idle connections 2.8-2.9 % against 29 % (2 vCPU) and 5.4-5.5 % against 32-35 % (4 vCPU); one 64 B flow
+  240k-249k against 231k-249k delivered/s, one 1 KiB flow 17.7k-18.9k against 18.1k-19.9k, 16 x 1000/s p99
+  10.6-11.3 ms against 10.3-11.5 ms, the 16-pair flood 343k-353k against 346k-355k.
 - **Verification.** Host tests: the suppression and re-check protocol against the queue's toy device
   (`interrupt_suppression_and_recheck`, `interrupt_flag_leaves_the_ring_alone`), the mode machine (a working
   interrupt keeps the mode over 10 000 sleeps, occasional races do not fall back, a silent one falls back exactly once

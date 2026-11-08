@@ -361,6 +361,20 @@ evidence; it cannot say who held the CPU. The Linux guest's `/proc/stat` showed 
   for 110 000-335 000 frames. A first version that armed the interrupt at every idle gap lost a fifth of the flood rate on
   one data core (261-263k/s) and had a p99 of 20-21 ms at 16 x 1000/s (`now13b-rx-irq-rig-v1.txt`), hence the 2 ms hold.
   Not measured on a VPS yet (KVM's interrupt delivery and halt polling differ from HVF's).
+  Measured again on top of ADR-268 and ADR-269 (back-pressure "single", the default; two rounds,
+  `perf-results/now13b-rx-irq-rig-v3.txt`):
+
+  | | 2 vCPU, interrupt | 2 vCPU, polling | 4 vCPU, interrupt | 4 vCPU, polling |
+  |---|---|---|---|---|
+  | host CPU of QEMU, 100 idle mTLS connections | **2.8 / 2.9 %** | 29.3 / 29.2 % | **5.4 / 5.5 %** | 35.1 / 31.9 % |
+  | one flow, 64 B QoS 0 flood, delivered/s (p50) | 240k (36 ms), 249k (69 ms) | 234k (43 ms), 231k (46 ms) | 239k (48 ms), 248k (64 ms) | 243k (36 ms), 249k (33 ms) |
+  | one flow, 1 KiB QoS 0 flood, delivered/s (p50) | 18.8k (99 ms), 18.9k (40 ms) | 18.1k (73 ms), 19.0k (61 ms) | 17.7k (66 ms), 18.9k (58 ms) | 18.2k (39 ms), 19.9k (60 ms) |
+  | 16 x 1000 msg/s QoS 0, p50 / p99 | 6.1 / 11.3, 6.2 / 10.6 ms | 5.9 / 11.1, 6.1 / 11.5 ms | 5.3 / 10.6, 6.2 / 10.7 ms | 5.5 / 11.5, 6.1 / 10.3 ms |
+  | 16-pair QoS 0 flood, delivered/s | 343k, 353k | 346k, 350k | 352k, 349k | 355k, 350k |
+
+  The idle gain holds; throughput is the same in both modes. A flood's p50 is the queue in front of the subscriber
+  and moves by tens of milliseconds between runs of the same mode; on 4 vCPU the 64 B flow's p50 was 48 and 64 ms
+  with the interrupt against 36 and 33 ms polled, which two rounds cannot tell from that noise.
 * **Stalls shorter than a millisecond** and the last part of every stall before a tick's deadline are still charged; with close-up ticks (1 ms) the error per tick is
   below 1 ms, so a drop now needs a handler that really ran for most of 20 ms or stalls of 20 ms in 1 ms pieces.
 * The comparison with Mosquitto is one session, one path, one generator at 60-77 % steal; two cells (1 KiB, 16 pairs; delivered rate of one flow)
