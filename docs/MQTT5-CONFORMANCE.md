@@ -65,13 +65,14 @@ The urMQTT design passes several of these by construction: 0x93 (ADR-273 rule 7)
 ### Results against urMQTT (part 2, ADR-274)
 
 Measured 2026-11-08, aarch64 kernel of this branch under QEMU/HVF on macOS, one vCPU (`--smp 1`, see "Ordering"
-below), `scripts/mqtt5-conformance.sh --boot`, each test in its own process:
+below), `scripts/mqtt5-conformance.sh --boot`, each test in its own process; run again after the rebase onto
+ADR-268..272 (publisher back-pressure, the receive interrupt) with the same result per test:
 
 | Suite | Listener | Passed | Expected failures | Failed | Time |
 |---|---|---|---|---|---|
-| `client_test5.py` (5.0) | plaintext, open login (the reference run) | **17 of 27** | 10 | 0 | 367 s for both suites |
+| `client_test5.py` (5.0) | plaintext, open login (the reference run) | **17 of 27** | 10 | 0 | 368 s for both suites |
 | `client_test.py` (3.1.1) | plaintext, open login | **6 of 10** | 3 | 0 | |
-| `client_test5.py` (5.0) | development port (`--listener dev`: sessions persist) | **23 of 27** | 4 | 0 | 399 s for both suites |
+| `client_test5.py` (5.0) | development port (`--listener dev`: sessions persist) | **23 of 27** | 4 | 0 | 401 s for both suites |
 | `client_test.py` (3.1.1) | development port | **8 of 10** | 2 | 0 | |
 
 Per test, 5.0 on the plaintext listener (P passed, X expected failure, with its reason):
