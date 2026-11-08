@@ -439,6 +439,9 @@ enum Flow {
 struct Flight {
     pid: u16,
     flow: Flow,
+    /// A retained message replayed for a new subscription (RETAIN set,
+    /// 3.3.1.3), also when it is sent again.
+    retain: bool,
     /// `None` once the PUBREL is sent.
     msg: Option<Msg>,
 }
@@ -447,8 +450,9 @@ struct Flight {
 struct Pending {
     /// Sent and not completed, in the order sent (resent in this order).
     inflight: Vec<Flight>,
-    /// Not sent yet, with the QoS each is delivered at (1 or 2).
-    queue: VecDeque<(Msg, QoS)>,
+    /// Not sent yet, with the QoS each is delivered at (1 or 2) and whether
+    /// it is a retained replay (sent with RETAIN when its turn comes).
+    queue: VecDeque<(Msg, QoS, bool)>,
     /// QoS 2 packet ids received from the client and acknowledged with
     /// PUBREC, awaiting its PUBREL (method B of 4.3.3: the message is routed
     /// on arrival and only the id is kept). Bounded by
@@ -939,6 +943,7 @@ impl Broker {
                         p.inflight.push(Flight {
                             pid,
                             flow: Flow::Pubcomp,
+                            retain: false,
                             msg: None,
                         })
                     }
@@ -966,10 +971,11 @@ impl Broker {
                     p.inflight.push(Flight {
                         pid,
                         flow,
+                        retain: false,
                         msg: Some(msg),
                     });
                 } else if p.queue.len() < max_queued {
-                    p.queue.push_back((msg, qos));
+                    p.queue.push_back((msg, qos, false));
                 }
             }
             s.release_pending();
@@ -1329,7 +1335,7 @@ impl Broker {
                                 },
                             });
                         }
-                        for (msg, qos) in s.pending.iter().flat_map(|p| p.queue.iter()) {
+                        for (msg, qos, _) in s.pending.iter().flat_map(|p| p.queue.iter()) {
                             ops.push(PersistOp::QueuePush {
                                 client_id: cid.clone(),
                                 msg: msg.clone(),
@@ -1937,7 +1943,7 @@ impl Broker {
     }
 
     /// Puts `msg` into flight at `qos` (1 or 2) with a new packet id.
-    fn start_flight(s: &mut Session, msg: &Msg, qos: QoS) -> u16 {
+    fn start_flight(s: &mut Session, msg: &Msg, qos: QoS, retain: bool) -> u16 {
         let pid = Self::alloc_pid(s);
         let flow = if qos == QoS::ExactlyOnce {
             Flow::Pubrec
@@ -1947,6 +1953,7 @@ impl Broker {
         s.pending_mut().inflight.push(Flight {
             pid,
             flow,
+            retain,
             msg: Some(msg.clone()),
         });
         pid
@@ -1975,7 +1982,7 @@ impl Broker {
             (QoS::AtMostOnce, Some(_)) => Action::Drop,
             (QoS::AtMostOnce, None) => Action::DropOffline,
             (_, Some(c)) if room && s.inflight().len() < max_inflight && (s.queue_len() == 0) => {
-                Action::Send(c, Self::start_flight(s, msg, qos))
+                Action::Send(c, Self::start_flight(s, msg, qos, retain))
             }
             // Offline persistent session, full window or backpressure.
             (_, Some(_)) => Action::Queue,
@@ -1991,7 +1998,7 @@ impl Broker {
                     if s.queue_len() >= max_queued {
                         self.stats.dropped_queue_full += 1;
                     } else {
-                        s.pending_mut().queue.push_back((msg.clone(), qos));
+                        s.pending_mut().queue.push_back((msg.clone(), qos, retain));
                         // Offline: the store holds the queue (see PersistOp).
                         if s.conn().is_none() && s.persisted {
                             stored = Some(s.client_id.clone());
@@ -2044,7 +2051,7 @@ impl Broker {
         let pending: Vec<Flight> = s.inflight().to_vec();
         for f in pending {
             match f.msg {
-                Some(msg) => self.send_publish(c, &msg, f.flow.qos(), Some(f.pid), false, true),
+                Some(msg) => self.send_publish(c, &msg, f.flow.qos(), Some(f.pid), f.retain, true),
                 None => self.send(c, &Packet::PubRel(f.pid)),
             }
         }
@@ -2068,11 +2075,12 @@ impl Broker {
                 return;
             }
             let Some(s) = self.session(sid) else { return };
-            let Some((msg, qos)) = s.pending.as_mut().and_then(|p| p.queue.pop_front()) else {
+            let Some((msg, qos, retain)) = s.pending.as_mut().and_then(|p| p.queue.pop_front())
+            else {
                 return;
             };
-            let pid = Self::start_flight(s, &msg, qos);
-            self.send_publish(c, &msg, qos, Some(pid), false, false);
+            let pid = Self::start_flight(s, &msg, qos, retain);
+            self.send_publish(c, &msg, qos, Some(pid), retain, false);
         }
     }
 

@@ -693,6 +693,9 @@ pub struct Harness {
     control_seen: u64,
     /// Retained messages handed back by `restore_retained` (no owner).
     restored: usize,
+    /// Payloads published, willed or restored with RETAIN: the only ones a
+    /// RETAIN delivery may carry.
+    retained_seqs: HashSet<u32>,
     pub steps: usize,
 }
 
@@ -719,6 +722,7 @@ impl Harness {
             sub: None,
             control_seen: 0,
             restored: 0,
+            retained_seqs: HashSet::new(),
             steps: 0,
         }
     }
@@ -781,7 +785,12 @@ impl Harness {
                 };
                 let present = code == 0 && !clean && self.sessions.contains_key(&key);
                 let body = match will {
-                    Some((t, _, _)) => self.payload(t, true, 0),
+                    Some((t, retain, _)) => {
+                        if *retain {
+                            self.retained_seqs.insert(self.sent.len() as u32);
+                        }
+                        self.payload(t, true, 0)
+                    }
                     None => Vec::new(),
                 };
                 let c = self.b.open(self.now).expect("a free connection");
@@ -867,6 +876,9 @@ impl Harness {
                 let body = if *empty {
                     Vec::new()
                 } else {
+                    if *retain {
+                        self.retained_seqs.insert(self.sent.len() as u32);
+                    }
                     self.payload(topic, allowed, *extra)
                 };
                 if !dirty && q2 != Q2::Unknown {
@@ -1051,6 +1063,7 @@ impl Harness {
                 // The store and the other shards are trusted: only the
                 // receiver's rights apply.
                 let allowed = !is_reserved(topic);
+                self.retained_seqs.insert(self.sent.len() as u32);
                 let body = self.payload(topic, allowed, 3);
                 self.b.restore_retained(topic, &body, QoS::AtLeastOnce);
                 self.restored += 1;
@@ -1373,10 +1386,22 @@ impl Harness {
             granted.iter().any(|f| matches(f, topic)),
             "{ctx}: no granted filter matches"
         );
+        // RETAIN marks a replay for a SUBSCRIBE: sent during it, or (QoS 1 and
+        // 2) later from the queue when the window was full, or again after a
+        // reconnect; and only a message that was published retained.
         assert!(
-            !retain || self.sub.as_ref().is_some_and(|(slot, _)| *slot == i),
+            !retain
+                || qos != QoS::AtMostOnce
+                || self.sub.as_ref().is_some_and(|(slot, _)| *slot == i),
             "{ctx}: RETAIN outside a SUBSCRIBE replay"
         );
+        if retain && payload.len() >= 7 && payload[..3] == MAGIC {
+            let seq = u32::from_le_bytes([payload[3], payload[4], payload[5], payload[6]]);
+            assert!(
+                self.retained_seqs.contains(&seq),
+                "{ctx}: RETAIN on message {seq}, never published retained"
+            );
+        }
         // Provenance: a message we sent (or a will) by someone allowed to.
         if payload.len() >= 7 && payload[..3] == MAGIC {
             let seq = u32::from_le_bytes([payload[3], payload[4], payload[5], payload[6]]);

@@ -781,3 +781,64 @@ fn restore_bounds_what_the_store_hands_back() {
     );
     assert_eq!(s.queue_len(), 3);
 }
+
+/// A retained message replayed for a new subscription keeps RETAIN when it
+/// has to wait for the window (3.3.1.3), and when it is sent again after a
+/// reconnect. (Before ADR-271 a queued replay lost it, at QoS 1 too.)
+#[test]
+fn a_retained_replay_that_waits_for_the_window_keeps_retain() {
+    let mut b = Broker::new(cfg()); // max_inflight 2
+    let (mut d1, _) = Client::connect(&mut b, "d1", true, None, 0);
+    d1.send(
+        &mut b,
+        &Packet::Publish(Publish {
+            dup: false,
+            qos: QoS::ExactlyOnce,
+            retain: true,
+            topic: "devices/d1/fw",
+            packet_id: Some(1),
+            payload: b"r",
+        }),
+        0,
+    );
+    ack(&mut d1, &mut b, &Packet::PubRel(1));
+    let (mut svc, _) = Client::connect(&mut b, "backend", false, None, 0);
+    svc.subscribe(&mut b, 1, &[("devices/d1/live", QoS::AtLeastOnce)], 0);
+    // Two live messages fill the window.
+    for i in 0..2u8 {
+        d1.publish(&mut b, "devices/d1/live", &[i], QoS::AtLeastOnce, false, 0);
+    }
+    assert_eq!(svc.recv(&mut b).len(), 2);
+    // The replay waits in the queue.
+    assert_eq!(
+        svc.subscribe(&mut b, 2, &[("devices/d1/fw", QoS::ExactlyOnce)], 0),
+        vec![Got::SubAck(2, vec![2])]
+    );
+    let replayed = ack(&mut svc, &mut b, &Packet::PubAck(1));
+    assert_eq!(
+        replayed,
+        vec![Got::Publish {
+            topic: "devices/d1/fw".into(),
+            payload: b"r".to_vec(),
+            qos: 2,
+            pid: Some(3),
+            retain: true,
+            dup: false
+        }]
+    );
+    // Sent again after a reconnect: still RETAIN, now with DUP.
+    svc.kill(&mut b, 0);
+    let (mut svc, _) = Client::connect(&mut b, "backend", false, None, 0);
+    let again = svc.recv(&mut b);
+    assert!(
+        again.contains(&Got::Publish {
+            topic: "devices/d1/fw".into(),
+            payload: b"r".to_vec(),
+            qos: 2,
+            pid: Some(3),
+            retain: true,
+            dup: true
+        }),
+        "{again:?}"
+    );
+}
