@@ -1159,9 +1159,10 @@ pub static FIELDS: &[Field] = &[
                 variants: NET_INTERRUPT_MODES,
                 default: 0,
             },
-            "How the NIC wakes the core that owns it when a frame arrives. auto (the default): the receive queue's MSI-X interrupt where the platform has one (x86 local APIC, aarch64 GICv2m frame), else polling. off: always poll (every 200 us while connections exist, and the 10 ms tick), for a hypervisor whose interrupt misbehaves. Format 11.",
+            "How the NIC wakes the core that owns it when a frame arrives. auto (the default): the receive queue's MSI-X interrupt where the platform has one (x86 local APIC, aarch64 GICv2m frame or GICv3 ITS); polling while NIC traffic is recent (2 ms) and where there is none. off: always poll (every 200 us while connections exist, and the 10 ms tick), for a hypervisor whose interrupt misbehaves. Format 11.",
         ),
         11,
+    ),
     // MQTT over WebSocket (NEXT-5, ADR-272): format version 9.
     since(
         f(

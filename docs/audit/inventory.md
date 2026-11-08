@@ -12,10 +12,10 @@
 | `urmqtt-attack` | `tools/attack` | 1092 | 0 | 0 (0) | default |
 | `urmqtt-broker` | `crates/broker` | 8891 | 3477 | 0 (0) | forbid |
 | `urmqtt-builder-wasm` | `tools/builder/wasm` | 1201 | 0 | 30 (30) | deny |
-| `urmqtt-cfg` | `crates/cfg` | 5429 | 0 | 0 (0) | forbid |
-| `urmqtt-config` | `crates/config` | 1514 | 0 | 10 (10) | deny |
-| `urmqtt-config-schema` | `crates/config-schema` | 6285 | 0 | 0 (0) | forbid |
-| `urmqtt-config-tool` | `tools/config` | 2471 | 1047 | 0 (0) | default |
+| `urmqtt-cfg` | `crates/cfg` | 5486 | 0 | 0 (0) | forbid |
+| `urmqtt-config` | `crates/config` | 1566 | 0 | 10 (10) | deny |
+| `urmqtt-config-schema` | `crates/config-schema` | 6342 | 0 | 0 (0) | forbid |
+| `urmqtt-config-tool` | `tools/config` | 2471 | 1052 | 0 (0) | default |
 | `urmqtt-control` | `crates/control` | 609 | 0 | 0 (0) | forbid |
 | `urmqtt-control-tool` | `tools/control` | 416 | 0 | 0 (0) | default |
 | `urmqtt-dbworker` | `crates/dbworker` | 172 | 0 | 22 (22) | default |
@@ -23,7 +23,7 @@
 | `urmqtt-diag-png` | `tools/diag-png` | 711 | 0 | 0 (0) | default |
 | `urmqtt-disk-tool` | `tools/disk` | 3001 | 866 | 0 (0) | default |
 | `urmqtt-dispatch` | `crates/dispatch` | 594 | 0 | 0 (0) | forbid |
-| `urmqtt-kernel` | `crates/kernel` | 20263 | 0 | 118 (118) | deny |
+| `urmqtt-kernel` | `crates/kernel` | 20604 | 0 | 119 (119) | deny |
 | `urmqtt-loadgen` | `tools/loadgen` | 1244 | 0 | 0 (0) | default |
 | `urmqtt-log` | `crates/log` | 2040 | 128 | 12 (12) | deny |
 | `urmqtt-mm` | `crates/mm` | 2580 | 0 | 74 (74) | deny |
@@ -40,10 +40,10 @@
 | `urmqtt-timer-wheel` | `crates/timer-wheel` | 446 | 0 | 0 (0) | forbid |
 | `urmqtt-tls` | `crates/tls` | 5113 | 1333 | 0 (0) | forbid |
 | `urmqtt-usys` | `crates/usys` | 477 | 0 | 8 (8) | default |
-| `urmqtt-virtio` | `crates/virtio` | 6276 | 0 | 30 (30) | deny |
+| `urmqtt-virtio` | `crates/virtio` | 6724 | 0 | 30 (30) | deny |
 | `urmqtt-ws` | `crates/ws` | 1785 | 0 | 0 (0) | forbid |
 | `urmqtt-x25519` | `crates/x25519` | 1365 | 0 | 8 (8) | default |
-| **total** | | **123510** | | **917 (917)** | |
+| **total** | | **125034** | | **926 (926)** | |
 
 ## Vendored components
 

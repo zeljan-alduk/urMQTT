@@ -2663,10 +2663,16 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
      polling for good with a warning (`net: receive wake-up: 8 frames waited after a sleep without the receive
      interrupt; polling every 200 us ...`). One such sleep is possible with a working interrupt (a frame landing between
      the counter read and the ring read); eight in a row are not.
-  5. **Configuration.** `[devices] virtio_net_interrupt = "auto" | "off"` (tag 211, format 11). `"auto"`, the default,
+  5. **Timers are untouched.** The interrupt only replaces the 200 us deadline; the 10 ms tick keeps running on every
+     core in both modes, so everything driven by time rather than by a frame (TCP retransmission and delayed ACKs,
+     keep-alives, ADR-269's 500 ms limit on a paused publisher, ADR-272's WebSocket upgrade timeout) is served within
+     one tick of its deadline, as it always was on a core without connections. A back-pressure resume is driven
+     by frames (the subscriber's ACKs: the receive interrupt) or by another shard's `CoreMsg::Hold` (the wake SGI,
+     which the masked wait no longer loses).
+  6. **Configuration.** `[devices] virtio_net_interrupt = "auto" | "off"` (tag 211, format 11). `"auto"`, the default,
      writes nothing, so a configuration that does not set it keeps its format and boots on an older kernel; `"off"`
      forces polling (a hypervisor whose interrupt misbehaves) and needs format 11.
-  6. **Boot line**, next to `net: virtio-net with N receive ...`: `net: receive wake-up: interrupt (MSI-X via GICv2m SPI
+  7. **Boot line**, next to `net: virtio-net with N receive ...`: `net: receive wake-up: interrupt (MSI-X via GICv2m SPI
      80 | GICv3 ITS LPI 8192 | local APIC vector 65, to core 0); polling only within 2 ms of NIC traffic`, or `net: receive wake-up:
      polling every 200 us while connections exist (<reason>)` with the reason (`devices.virtio_net_interrupt = "off"`,
      the device has no MSI-X, no MSI target, the ITS could not be set up, no free vector, the device refused it). The

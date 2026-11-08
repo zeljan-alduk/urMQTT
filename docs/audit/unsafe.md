@@ -302,7 +302,7 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-builder-wasm` | `tools/builder/wasm/src/exports.rs:412` | attribute | yes |
 | `urmqtt-builder-wasm` | `tools/builder/wasm/src/exports.rs:421` | attribute | yes |
 | `urmqtt-builder-wasm` | `tools/builder/wasm/src/exports.rs:434` | attribute | yes |
-| `urmqtt-config` | `crates/config/src/lib.rs:606` | block | yes |
+| `urmqtt-config` | `crates/config/src/lib.rs:640` | block | yes |
 | `urmqtt-config` | `crates/config/src/store.rs:127` | impl | yes |
 | `urmqtt-config` | `crates/config/src/store.rs:466` | block | yes |
 | `urmqtt-config` | `crates/config/src/store.rs:469` | block | yes |
