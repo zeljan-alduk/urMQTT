@@ -91,6 +91,8 @@
   "field.range.network.mtu": "0 (par défaut) : la MTU annoncée par le réseau via DHCP, sinon 1500. Autres valeurs : de 576 à 9000 octets.",
   "field.range.limits.max_session_expiry_s": "De 0 à 4294967295 secondes ; 4294967295 : les sessions n'expirent jamais.",
   "field.range.limits.max_message_expiry_s": "0 (par défaut) : pas de plafond. Sinon de 1 à 4294967295 secondes.",
+  "field.range.limits.max_shared_groups": "1 à 65535 groupes sur un cœur de données (1024 par défaut) ; un de plus : SUBACK 0x97 (3.1.1 : 0x80).",
+  "field.range.limits.max_shared_group_members": "1 à 65535 membres dans un groupe (1024 par défaut) ; un de plus : SUBACK 0x97 (3.1.1 : 0x80).",
   "field.range.mqtt5.max_keep_alive_s": "0 (par défaut) : le keep-alive demandé par le client. Sinon de 1 à 65535 secondes.",
   "unit.ms": "Millisecondes.",
   "unit.mb": "Mégaoctets.",

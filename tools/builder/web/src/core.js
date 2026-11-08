@@ -405,6 +405,9 @@ const WEBSOCKET_PASSWORD_ONLY = new Set([
   'websocket.acl_subscribe', 'websocket.retain',
 ]);
 
+/** The limits that bound shared subscriptions (ADR-275, format 13). */
+const SHARED_GROUP_LIMITS = new Set(['limits.max_shared_groups', 'limits.max_shared_group_members']);
+
 /** Whether a field applies given the network mode (static/auto fields). */
 export function isApplicable(f, state) {
   const mode = state.values['network.mode'] || 'dhcp';
@@ -427,6 +430,10 @@ export function isApplicable(f, state) {
   }
   // MQTT 5.0 (ADR-273 rule 21): on by default; its other keys mean nothing while it is off.
   if (f.section === 'mqtt5' && f.id !== 'mqtt5.enabled' && state.values['mqtt5.enabled'] === false) return false;
+  // The shared-group limits (ADR-275) bound nothing while shared subscriptions are off (as written: with MQTT 5.0
+  // off the switch is not written and stays on, for 3.1.1 clients).
+  if (SHARED_GROUP_LIMITS.has(f.id) && state.values['mqtt5.enabled'] !== false &&
+    state.values['mqtt5.shared_subscriptions'] === false) return false;
   return true;
 }
 

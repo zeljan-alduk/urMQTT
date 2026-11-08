@@ -91,6 +91,8 @@
   "field.range.network.mtu": "0 (zadano): MTU koji mreža najavljuje putem DHCP-a, a bez njega 1500. Ostale vrijednosti: od 576 do 9000 bajtova.",
   "field.range.limits.max_session_expiry_s": "Od 0 do 4294967295 sekundi; 4294967295: sesije nikad ne istječu.",
   "field.range.limits.max_message_expiry_s": "0 (zadano): bez ograničenja. Inače od 1 do 4294967295 sekundi.",
+  "field.range.limits.max_shared_groups": "1 do 65535 grupa na jednoj podatkovnoj jezgri (zadano 1024); još jedna: SUBACK 0x97 (3.1.1: 0x80).",
+  "field.range.limits.max_shared_group_members": "1 do 65535 članova u jednoj grupi (zadano 1024); još jedan: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.mqtt5.max_keep_alive_s": "0 (zadano): keep alive koji traži klijent. Inače od 1 do 65535 sekundi.",
   "unit.ms": "Milisekunde.",
   "unit.mb": "Megabajti.",

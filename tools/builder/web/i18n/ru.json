@@ -91,6 +91,8 @@
   "field.range.network.mtu": "0 (по умолчанию): MTU, который сеть сообщает по DHCP, иначе 1500. Другие значения: от 576 до 9000 байт.",
   "field.range.limits.max_session_expiry_s": "От 0 до 4294967295 секунд; 4294967295: сеансы никогда не истекают.",
   "field.range.limits.max_message_expiry_s": "0 (по умолчанию): без ограничения. Иначе от 1 до 4294967295 секунд.",
+  "field.range.limits.max_shared_groups": "От 1 до 65535 групп на одном ядре данных (по умолчанию 1024); ещё одна: SUBACK 0x97 (3.1.1: 0x80).",
+  "field.range.limits.max_shared_group_members": "От 1 до 65535 участников в одной группе (по умолчанию 1024); ещё один: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.mqtt5.max_keep_alive_s": "0 (по умолчанию): keep alive, который запросил клиент. Иначе от 1 до 65535 секунд.",
   "unit.ms": "Миллисекунды.",
   "unit.mb": "Мегабайты.",

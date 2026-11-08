@@ -91,6 +91,8 @@
   "field.range.network.mtu": "0 (predvolené): MTU, ktorú sieť oznámi cez DHCP, inak 1500. Iné hodnoty: 576 až 9000 bajtov.",
   "field.range.limits.max_session_expiry_s": "0 až 4294967295 sekúnd; 4294967295: relácie nikdy nevypršia.",
   "field.range.limits.max_message_expiry_s": "0 (predvolené): bez obmedzenia. Inak 1 až 4294967295 sekúnd.",
+  "field.range.limits.max_shared_groups": "1 až 65535 skupín na jednom dátovom jadre (predvolené 1024); ďalšia: SUBACK 0x97 (3.1.1: 0x80).",
+  "field.range.limits.max_shared_group_members": "1 až 65535 členov v jednej skupine (predvolené 1024); ďalší: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.mqtt5.max_keep_alive_s": "0 (predvolené): keep alive, ktorý si klient vyžiada. Inak 1 až 65535 sekúnd.",
   "unit.ms": "Milisekundy.",
   "unit.mb": "Megabajty.",
