@@ -37,6 +37,7 @@ pub mod fields;
 pub mod net;
 pub mod passwd;
 pub mod plain;
+pub mod ws;
 
 pub use blob::{
     BASE_VERSION, Blob, DISK_MARKER, FORMAT_MIN, FORMAT_VERSION, MAGIC, MAX_BLOB, SLOT_MARKER,

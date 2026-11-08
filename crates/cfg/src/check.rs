@@ -168,6 +168,7 @@ pub fn check(b: &Blob<'_>, dev_allowed: bool) -> Result<(), CfgError> {
     let limits = limits(b)?;
     let (max_len, max_levels) = limits;
     plaintext(b, max_len, max_levels)?;
+    websocket(b, max_len, max_levels)?;
     filters(
         "acl.device_publish",
         b,
@@ -557,6 +558,98 @@ fn plaintext(b: &Blob<'_>, max_len: u64, max_levels: u64) -> Result<(), CfgError
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+const WS_ROLE_MSG: &str = "is also an acl.service_ids, acl.operator_ids or control.service_ids identity: password logins over WebSocket never hold those roles, pick another name";
+
+/// The `[websocket]` section (ADR-272). As for `[plaintext]`: what is written
+/// is well formed whether or not the listener is on; what the listener needs,
+/// and what must not contradict the mode, is checked when it is on.
+fn websocket(b: &Blob<'_>, max_len: u64, max_levels: u64) -> Result<(), CfgError> {
+    use crate::plain;
+    use crate::ws;
+
+    ws::check_path(b.str(tag::WS_PATH)).map_err(|m| err("websocket.path", m))?;
+    for (n, o) in b.strs(tag::WS_ORIGINS).enumerate() {
+        ws::check_origin(o).map_err(|m| err("websocket.origins", m))?;
+        if b.strs(tag::WS_ORIGINS).take(n).any(|x| x == o) {
+            return Err(err("websocket.origins", "an origin is listed twice"));
+        }
+    }
+    for (n, s) in b.strs(tag::WS_USERS).enumerate() {
+        let (id, _) = plain::parse_user(s).map_err(|m| err("websocket.users", m))?;
+        if b.strs(tag::WS_USERS)
+            .take(n)
+            .filter_map(|o| o.split_once(' '))
+            .any(|(other, _)| other == id)
+        {
+            return Err(err("websocket.users", "an id is listed twice"));
+        }
+    }
+    for (key, t) in [
+        ("websocket.acl_publish", tag::WS_ACL_PUBLISH),
+        ("websocket.acl_subscribe", tag::WS_ACL_SUBSCRIBE),
+    ] {
+        for f in b.strs(t) {
+            check_topic_filter(key, f, max_len, max_levels, Placeholder::Allowed)?;
+            if f.starts_with('$') {
+                return Err(err(key, "no filter may start with $ (broker topics)"));
+            }
+        }
+    }
+    if !b.bool(tag::WS_ENABLED) {
+        return Ok(());
+    }
+    // wss:// is TLS: the listener rides on the TLS listener's certificate,
+    // key and trust anchors.
+    let tls_port = b.uint(tag::NET_TLS_PORT);
+    if tls_port == 0 {
+        return Err(err(
+            "websocket.enabled",
+            "needs the TLS listener (network.mqtt_tls_port not 0): wss:// uses its certificate and key",
+        ));
+    }
+    let port = b.uint(tag::WS_PORT);
+    if port == tls_port {
+        return Err(err(
+            "websocket.port",
+            "must differ from network.mqtt_tls_port",
+        ));
+    }
+    if port == b.uint(tag::NET_PLAIN_PORT) {
+        return Err(err(
+            "websocket.port",
+            "must differ from network.mqtt_plain_port",
+        ));
+    }
+    if b.bool(tag::PL_ENABLED) && port == b.uint(tag::PL_PORT) {
+        return Err(err("websocket.port", "must differ from plaintext.port"));
+    }
+    let users = b.strs(tag::WS_USERS).count();
+    let origins = b.strs(tag::WS_ORIGINS).count();
+    if b.variant(tag::WS_AUTH) == 1 {
+        if users == 0 {
+            return Err(err(
+                "websocket.users",
+                "auth = \"password\" needs at least one account",
+            ));
+        }
+        if origins == 0 {
+            return Err(err(
+                "websocket.origins",
+                "required with auth = \"password\": the web pages (https://app.example.com) that may connect; without it any web site a user visits could log in with the browser's help",
+            ));
+        }
+        for s in b.strs(tag::WS_USERS) {
+            let id = s.split_once(' ').map_or(s, |(id, _)| id);
+            if holds_other_role(b, id) {
+                return Err(err("websocket.users", WS_ROLE_MSG));
+            }
+        }
+    } else if users > 0 {
+        return Err(err("websocket.users", "only used with auth = \"password\""));
     }
     Ok(())
 }

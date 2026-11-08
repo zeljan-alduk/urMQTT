@@ -474,6 +474,45 @@ pub struct Plaintext {
     pub retain: bool,
 }
 
+/// How a WebSocket client proves who it is (ADR-272).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WsAuth {
+    /// A client certificate, as on the TLS port.
+    Mtls,
+    /// No client certificate; an MQTT user name and password from
+    /// `websocket.users`, with the section's own ACL.
+    Password,
+}
+
+/// MQTT over secure WebSocket (NEXT-5, ADR-272). Off unless the image's
+/// configuration says so; the other fields mean nothing while `enabled` is
+/// false.
+#[derive(Debug, Clone, Copy)]
+pub struct Websocket {
+    pub enabled: bool,
+    pub port: u16,
+    /// The request target, e.g. `/mqtt`.
+    pub path: &'static str,
+    pub auth: WsAuth,
+    /// Allowed `Origin` values; empty only with `auth = mtls` (any origin).
+    pub origins: &'static [&'static str],
+    /// `auth = password`: the accounts.
+    pub users: &'static [PlainUser],
+    pub upgrade_timeout_s: u32,
+    /// All WebSocket connections together, over all cores.
+    pub max_connections: u32,
+    pub max_connections_per_ip: u32,
+    /// `auth = password`: the packet limit, publish rate, lock-out and ACL of
+    /// a session.
+    pub max_packet_size: u32,
+    pub publish_rate_per_device: Rate,
+    pub max_failed_auths_per_ip: u32,
+    pub lockout_s: u32,
+    pub acl_publish: &'static [&'static str],
+    pub acl_subscribe: &'static [&'static str],
+    pub retain: bool,
+}
+
 /// The complete configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildConfig {
@@ -494,6 +533,7 @@ pub struct BuildConfig {
     pub control: Control,
     pub trust: Trust,
     pub plaintext: Plaintext,
+    pub websocket: Websocket,
     pub console: Console,
     pub devices: Devices,
 }

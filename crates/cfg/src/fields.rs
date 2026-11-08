@@ -270,6 +270,23 @@ pub mod tag {
     pub const DEV_VIRTIO_VSOCK: u16 = 194;
     // The link MTU (NOW-19, ADR-264): format version 7.
     pub const NET_MTU: u16 = 195;
+    // MQTT over WebSocket (NEXT-5, ADR-272): format version 9.
+    pub const WS_ENABLED: u16 = 230;
+    pub const WS_PORT: u16 = 231;
+    pub const WS_PATH: u16 = 232;
+    pub const WS_AUTH: u16 = 233;
+    pub const WS_ORIGINS: u16 = 234;
+    pub const WS_USERS: u16 = 235;
+    pub const WS_UPGRADE_TIMEOUT: u16 = 236;
+    pub const WS_MAX_CONNS: u16 = 237;
+    pub const WS_MAX_PER_IP: u16 = 238;
+    pub const WS_MAX_PACKET: u16 = 239;
+    pub const WS_PUBLISH_RATE: u16 = 240;
+    pub const WS_MAX_FAILS: u16 = 241;
+    pub const WS_LOCKOUT: u16 = 242;
+    pub const WS_ACL_PUBLISH: u16 = 243;
+    pub const WS_ACL_SUBSCRIBE: u16 = 244;
+    pub const WS_RETAIN: u16 = 245;
 }
 
 use tag as t;
@@ -285,6 +302,16 @@ pub const REGISTRY_MODES: &[&str] = &["open", "allowlist"];
 pub const WATCHDOG_ACTIONS: &[&str] = &["log", "drop", "reset"];
 /// How a plaintext client proves who it is (P1).
 pub const PLAINTEXT_AUTH: &[&str] = &["password", "anonymous", "ip"];
+/// How a WebSocket client proves who it is (ADR-272).
+pub const WEBSOCKET_AUTH: &[&str] = &["mtls", "password"];
+/// Most entries of `websocket.origins`.
+pub const MAX_WS_ORIGINS: usize = 16;
+/// Longest `websocket.origins` entry.
+pub const MAX_WS_ORIGIN_LEN: usize = 255;
+/// Longest `websocket.path`.
+pub const MAX_WS_PATH_LEN: usize = 64;
+/// The upgrade deadline's range, seconds (at most the handshake timeout).
+pub const MAX_WS_UPGRADE_TIMEOUT_S: u64 = 10;
 /// Whether the console drives a virtio-gpu device (ADR-256).
 pub const VIRTIO_GPU_MODES: &[&str] = &["off", "auto", "on"];
 /// Whether an optional virtio driver runs (`[devices]`, ADR-257).
@@ -1098,6 +1125,179 @@ pub static FIELDS: &[Field] = &[
             "Largest IPv4 packet in bytes (576 to 9000). 0 (the default): the MTU DHCP announces (option 26), else 1500. Set it when the network is smaller than 1500 and does not say so, e.g. 1460 on Google Cloud with a static address. TCP segments follow it (MSS = MTU - 40); frames larger than 1500 are not sent. Format 7.",
         ),
         7,
+    ),
+    // MQTT over WebSocket (NEXT-5, ADR-272): format version 9.
+    since(
+        f(
+            t::WS_ENABLED,
+            "websocket.enabled",
+            Kind::Bool(false),
+            "Accept MQTT over secure WebSocket (wss://, TLS 1.3, subprotocol mqtt) on websocket.port, for browsers and web stacks. Off by default. Needs the TLS listener (network.mqtt_tls_port) and its certificates. Format 9.",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_PORT,
+            "websocket.port",
+            uint(2, 1, 65_535, 8084),
+            "TCP port of the wss:// listener; different from the other MQTT ports.",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_PATH,
+            "websocket.path",
+            Kind::Str {
+                max: MAX_WS_PATH_LEN as u16,
+                default: "/mqtt",
+            },
+            "The URL path clients connect to (wss://host:port/mqtt). Starts with /; letters, digits and - . _ ~ / only. Any other path is answered 404.",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_AUTH,
+            "websocket.auth",
+            Kind::Enum {
+                variants: WEBSOCKET_AUTH,
+                default: 0,
+            },
+            "mtls: a client certificate, exactly as on the TLS port (identity, roles, revocation). password: no client certificate; an MQTT user name and password from websocket.users, checked inside TLS, with its own ACL (acl_publish, acl_subscribe) and lock-out, for browsers.",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_ORIGINS,
+            "websocket.origins",
+            Kind::Strs {
+                max_items: MAX_WS_ORIGINS as u16,
+                max_len: MAX_WS_ORIGIN_LEN as u16,
+                default: &[],
+            },
+            "Web pages allowed to connect, as exact origins (https://app.example.com, http://localhost:3000). A browser's upgrade from any other origin is refused (403): the defence against cross-site WebSocket hijacking. Required with auth = password; empty with mtls admits any origin.",
+        ),
+        9,
+    ),
+    since(
+        items(
+            f(
+                t::WS_USERS,
+                "websocket.users",
+                Kind::Strs {
+                    max_items: MAX_PLAIN_USERS as u16,
+                    max_len: 256,
+                    default: &[],
+                },
+                "auth = password: the accounts, as in plaintext.users (an id and a PBKDF2-SHA-256 hash made by the builder page or `urmqtt-config hash-password`). The password travels only inside TLS and is never stored.",
+            ),
+            Item::User,
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_UPGRADE_TIMEOUT,
+            "websocket.upgrade_timeout_s",
+            uint(4, 1, MAX_WS_UPGRADE_TIMEOUT_S, 5),
+            "Seconds from the TCP connection to a complete upgrade request (TLS handshake included); a slower client is cut off.",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_MAX_CONNS,
+            "websocket.max_connections",
+            uint(4, 1, 1_000_000, 1000),
+            "WebSocket connections held at once, all cores together; more are refused.",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_MAX_PER_IP,
+            "websocket.max_connections_per_ip",
+            uint(4, 1, 65_535, 16),
+            "WebSocket connections held at once from one source address (browsers behind one NAT share it).",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_MAX_PACKET,
+            "websocket.max_packet_size",
+            uint(4, MIN_PACKET_SIZE, MQTT_MAX_PACKET_SIZE, 16_384),
+            "auth = password: largest MQTT packet a client may send, in bytes (with mtls the broker's limits.max_packet_size applies).",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_PUBLISH_RATE,
+            "websocket.publish_rate_per_device",
+            Kind::Rate {
+                tokens: 10,
+                per_ms: 1000,
+            },
+            "auth = password: publish rate per session as \"N/s\", \"N/m\" or \"N/h\".",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_MAX_FAILS,
+            "websocket.max_failed_auths_per_ip",
+            uint(4, 1, 1000, 5),
+            "auth = password: failed logins from one address, within lockout_s, before it is locked out.",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_LOCKOUT,
+            "websocket.lockout_s",
+            uint(4, 1, 86_400, 300),
+            "auth = password: seconds a locked-out address gets no answer; also the window in which its failed logins are counted.",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_ACL_PUBLISH,
+            "websocket.acl_publish",
+            Kind::Strs {
+                max_items: MAX_PLAIN_ACL as u16,
+                max_len: 512,
+                default: &["web/{id}/#"],
+            },
+            "auth = password: topic filters a client may publish to; {id} is its account id. No filter may start with $.",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_ACL_SUBSCRIBE,
+            "websocket.acl_subscribe",
+            Kind::Strs {
+                max_items: MAX_PLAIN_ACL as u16,
+                max_len: 512,
+                default: &["web/{id}/#"],
+            },
+            "auth = password: topic filters a client may subscribe to; {id} is its account id. No filter may start with $.",
+        ),
+        9,
+    ),
+    since(
+        f(
+            t::WS_RETAIN,
+            "websocket.retain",
+            Kind::Bool(false),
+            "auth = password: let clients publish retained messages. Off: such a message is delivered but not retained.",
+        ),
+        9,
     ),
 ];
 

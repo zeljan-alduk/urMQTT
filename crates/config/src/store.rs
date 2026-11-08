@@ -22,20 +22,21 @@ use crate::{
     Acl, BuildConfig, Cidr, Console, Control, Cpu, DEV_KERNEL, Devices, DiscardMode, Entropy,
     IdentityField, Ipv4Cidr, Limits, LogLevel, Memory, Network, NetworkMode, Observability,
     PlainAuth, PlainNetwork, PlainUser, Plaintext, Rate, Registry, SocketAddrV4, Storage,
-    StorageMode, Time, Tls, Trust, VirtioGpuMode, Watchdog, WatchdogAction,
+    StorageMode, Time, Tls, Trust, VirtioGpuMode, Watchdog, WatchdogAction, Websocket, WsAuth,
 };
 
 /// Room for every plain-text string list of the field table at its
 /// documented maximum (the sum of the `max_items` of the `Strs` fields whose
 /// entries are text; the typed lists have arrays of their own; checked by a
 /// test).
-const STR_SLOTS: usize = 1520;
+const STR_SLOTS: usize = 1568;
 /// Operational plus bootstrap CAs at their maxima.
 const PEM_SLOTS: usize = 16;
 const ADDR_SLOTS: usize = fields::MAX_TIME_SERVERS;
 /// The plaintext lists (P1): networks, accounts, per-network identities.
 const NET_SLOTS: usize = fields::MAX_PLAIN_NETWORKS;
-const USER_SLOTS: usize = fields::MAX_PLAIN_USERS;
+/// The accounts of `plaintext.users` and of `websocket.users` (ADR-272).
+const USER_SLOTS: usize = 2 * fields::MAX_PLAIN_USERS;
 const IPID_SLOTS: usize = fields::MAX_PLAIN_IP_IDENTITIES;
 
 const NO_NET: Cidr = Cidr { addr: 0, prefix: 0 };
@@ -158,6 +159,9 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
     let revoked_serials = list(tag::TLS_REVOKED);
     let plain_acl_publish = list(tag::PL_ACL_PUBLISH);
     let plain_acl_subscribe = list(tag::PL_ACL_SUBSCRIBE);
+    let ws_origins = list(tag::WS_ORIGINS);
+    let ws_acl_publish = list(tag::WS_ACL_PUBLISH);
+    let ws_acl_subscribe = list(tag::WS_ACL_SUBSCRIBE);
     let mut pem_list = |t: u16| -> &'static [&'static [u8]] {
         let n = b.bins(t).count();
         let (head, tail) = take(&mut pems).split_at_mut_checked(n).unwrap_or_default();
@@ -198,17 +202,25 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
         n_nets = i + 1;
     }
     let allow_from: &'static [Cidr] = arena.nets.get(..n_nets).unwrap_or_default();
-    let mut n_users = 0;
-    for (i, (slot, (id, hash))) in arena
+    // Accounts: the plaintext ones first, then the WebSocket ones (ADR-272).
+    let (pl_slots, ws_slots) = arena
         .users
-        .iter_mut()
-        .zip(b.strs(tag::PL_USERS).filter_map(|s| s.split_once(' ')))
-        .enumerate()
-    {
-        *slot = PlainUser { id, hash };
-        n_users = i + 1;
-    }
-    let users: &'static [PlainUser] = arena.users.get(..n_users).unwrap_or_default();
+        .split_at_mut_checked(fields::MAX_PLAIN_USERS)
+        .unwrap_or_default();
+    let mut accounts = |slots: &'static mut [PlainUser], t: u16| -> &'static [PlainUser] {
+        let mut n = 0;
+        for (i, (slot, (id, hash))) in slots
+            .iter_mut()
+            .zip(b.strs(t).filter_map(|s| s.split_once(' ')))
+            .enumerate()
+        {
+            *slot = PlainUser { id, hash };
+            n = i + 1;
+        }
+        slots.get(..n).unwrap_or_default()
+    };
+    let users = accounts(pl_slots, tag::PL_USERS);
+    let ws_users = accounts(ws_slots, tag::WS_USERS);
     let mut n_ids = 0;
     for (i, (slot, (net, id))) in arena
         .ipids
@@ -224,6 +236,7 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
     }
     let ip_identities: &'static [PlainNetwork] = arena.ipids.get(..n_ids).unwrap_or_default();
     let (pl_tokens, pl_per_ms) = b.rate(tag::PL_PUBLISH_RATE);
+    let (ws_tokens, ws_per_ms) = b.rate(tag::WS_PUBLISH_RATE);
 
     let sock = |t: u16| b.addr(t).map(|(addr, port)| SocketAddrV4 { addr, port });
     let u32_of = |t: u16| u32::try_from(b.uint(t)).unwrap_or(u32::MAX);
@@ -397,6 +410,30 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             acl_publish: plain_acl_publish,
             acl_subscribe: plain_acl_subscribe,
             retain: b.bool(tag::PL_RETAIN),
+        },
+        websocket: Websocket {
+            enabled: b.bool(tag::WS_ENABLED),
+            port: u16::try_from(b.uint(tag::WS_PORT)).unwrap_or(0),
+            path: b.str(tag::WS_PATH),
+            auth: match b.variant(tag::WS_AUTH) {
+                1 => WsAuth::Password,
+                _ => WsAuth::Mtls,
+            },
+            origins: ws_origins,
+            users: ws_users,
+            upgrade_timeout_s: u32_of(tag::WS_UPGRADE_TIMEOUT),
+            max_connections: u32_of(tag::WS_MAX_CONNS),
+            max_connections_per_ip: u32_of(tag::WS_MAX_PER_IP),
+            max_packet_size: u32_of(tag::WS_MAX_PACKET),
+            publish_rate_per_device: Rate {
+                tokens: ws_tokens,
+                per_ms: ws_per_ms,
+            },
+            max_failed_auths_per_ip: u32_of(tag::WS_MAX_FAILS),
+            lockout_s: u32_of(tag::WS_LOCKOUT),
+            acl_publish: ws_acl_publish,
+            acl_subscribe: ws_acl_subscribe,
+            retain: b.bool(tag::WS_RETAIN),
         },
         console: Console {
             virtio_gpu: match b.variant(tag::CON_VIRTIO_GPU) {
@@ -670,6 +707,48 @@ mod tests {
             })
         );
         assert_eq!(c.memory.kernel_heap_mb, 128);
+    }
+
+    /// ADR-272: the WebSocket listener is off by default with the documented
+    /// defaults, and a password configuration decodes its own accounts after
+    /// the plaintext ones.
+    #[test]
+    fn the_websocket_section_is_off_by_default_and_decoded() {
+        use urmqtt_cfg::build::Builder;
+        let w = CONFIG.websocket;
+        assert!(!w.enabled);
+        assert_eq!((w.port, w.path, w.auth), (8084, "/mqtt", WsAuth::Mtls));
+        assert_eq!((w.upgrade_timeout_s, w.max_connections), (5, 1000));
+        assert!(w.origins.is_empty() && w.users.is_empty());
+        assert_eq!(w.acl_publish, ["web/{id}/#"]);
+        let hash = urmqtt_cfg::passwd::encode(b"pw", b"0123456789abcdef", 1000).unwrap();
+        let mut b = Builder::new();
+        b.bool(tag::PL_ENABLED, true).unwrap();
+        b.strs(tag::PL_ALLOW_FROM, &["10.0.0.0/8"]).unwrap();
+        b.strs(tag::PL_USERS, &[format!("plain-1 {hash}")]).unwrap();
+        b.bool(tag::WS_ENABLED, true).unwrap();
+        b.variant(tag::WS_AUTH, 1).unwrap();
+        b.uint(tag::WS_PORT, 443).unwrap();
+        b.strs(tag::WS_ORIGINS, &["https://app.example.com"]).unwrap();
+        b.strs(tag::WS_USERS, &[format!("web-1 {hash}"), format!("web-2 {hash}")])
+            .unwrap();
+        b.rate(tag::WS_PUBLISH_RATE, 3, 1000).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 9);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        let w = c.websocket;
+        assert!(w.enabled);
+        assert_eq!((w.port, w.auth), (443, WsAuth::Password));
+        assert_eq!(w.origins, ["https://app.example.com"]);
+        assert_eq!(
+            w.users.iter().map(|u| u.id).collect::<Vec<_>>(),
+            ["web-1", "web-2"]
+        );
+        assert_eq!(c.plaintext.users.len(), 1);
+        assert_eq!(c.plaintext.users[0].id, "plain-1");
+        assert_eq!(w.publish_rate_per_device.tokens, 3);
     }
 
     /// NOW-19, ADR-264: `network.mtu` is unset by default (the empty blob,

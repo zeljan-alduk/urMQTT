@@ -214,7 +214,7 @@ fn structural_attacks_fail_closed() {
     over[2] = 200;
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, and one above the newest).
-    for unknown in [0u8, 8, 9] {
+    for unknown in [0u8, 10, 11] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
@@ -236,7 +236,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 7));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 9));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -245,7 +245,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[7, 0],
+        &[9, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -949,4 +949,82 @@ fn the_built_in_empty_blob_equals_the_builders() {
             .unwrap()[..]
     );
     assert!(Blob::parse(&buf).is_ok());
+}
+
+/// ADR-272: the `[websocket]` section. Off with nothing set is fine and keeps
+/// the base format; on needs the TLS listener and a port of its own; password
+/// mode needs accounts and an origin list; settings of the other mode are
+/// refused; any key set needs format 9.
+#[test]
+fn websocket_rules() {
+    use crate::passwd;
+    let hash = passwd::encode(b"pw", b"0123456789abcdef", 1000).unwrap();
+    let user = |id: &str| format!("{id} {hash}");
+    let base = || {
+        let mut b = Builder::new();
+        b.bool(tag::WS_ENABLED, true).unwrap();
+        b
+    };
+    // mtls, the default: nothing else needed.
+    let ok = base().finish(false).expect("mtls with defaults");
+    assert_eq!(Blob::parse(&ok).unwrap().version(), 9);
+    // Off and untouched: the base format.
+    assert_eq!(
+        Blob::parse(&Builder::new().finish(false).unwrap()).unwrap().version(),
+        2
+    );
+    // Ports.
+    for (t, v) in [(tag::WS_PORT, 8883u64), (tag::NET_PLAIN_PORT, 8084)] {
+        let mut b = base();
+        b.uint(t, v).unwrap();
+        assert!(b.finish(true).is_err(), "port clash {t}");
+    }
+    let mut b = base();
+    b.bool(tag::PL_ENABLED, true).unwrap();
+    b.strs(tag::PL_ALLOW_FROM, &["10.0.0.0/8"]).unwrap();
+    b.strs(tag::PL_USERS, &[user("p")]).unwrap();
+    b.uint(tag::PL_PORT, 8084).unwrap();
+    assert_eq!(b.finish(false).unwrap_err().key, "websocket.port");
+    // TLS off: no wss.
+    let mut b = base();
+    b.uint(tag::NET_TLS_PORT, 0).unwrap();
+    b.bool(tag::PL_ENABLED, true).unwrap();
+    b.strs(tag::PL_ALLOW_FROM, &["10.0.0.0/8"]).unwrap();
+    b.strs(tag::PL_USERS, &[user("p")]).unwrap();
+    assert_eq!(b.finish(false).unwrap_err().key, "websocket.enabled");
+    // Password mode.
+    let mut b = base();
+    b.variant(tag::WS_AUTH, 1).unwrap();
+    assert_eq!(b.finish(false).unwrap_err().key, "websocket.users");
+    b.strs(tag::WS_USERS, &[user("web-1")]).unwrap();
+    assert_eq!(b.finish(false).unwrap_err().key, "websocket.origins");
+    b.strs(tag::WS_ORIGINS, &["https://app.example.com"]).unwrap();
+    assert!(b.finish(false).is_ok());
+    // Roles.
+    let mut r = base();
+    r.variant(tag::WS_AUTH, 1).unwrap();
+    r.strs(tag::WS_ORIGINS, &["https://app.example.com"]).unwrap();
+    r.strs(tag::WS_USERS, &[user("ops")]).unwrap();
+    r.strs(tag::ACL_OPERATOR_IDS, &["ops"]).unwrap();
+    assert_eq!(r.finish(false).unwrap_err().key, "websocket.users");
+    // Accounts with mtls.
+    let mut m = base();
+    m.strs(tag::WS_USERS, &[user("web-1")]).unwrap();
+    assert_eq!(m.finish(false).unwrap_err().key, "websocket.users");
+    // Well-formed whether on or off.
+    for (t, bad) in [
+        (tag::WS_ORIGINS, vec!["https://App.example.com".to_string()]),
+        (tag::WS_ORIGINS, vec!["https://a.b".into(), "https://a.b".into()]),
+        (tag::WS_USERS, vec![user("a"), user("a")]),
+        (tag::WS_USERS, vec!["nohash".into()]),
+        (tag::WS_ACL_PUBLISH, vec!["$SYS/#".into()]),
+        (tag::WS_ACL_SUBSCRIBE, vec!["a/#/b".into()]),
+    ] {
+        let mut b = Builder::new();
+        b.strs(t, &bad).unwrap();
+        assert!(b.finish(false).is_err(), "{t} {bad:?}");
+    }
+    let mut b = Builder::new();
+    b.str(tag::WS_PATH, "/a/../b").unwrap();
+    assert_eq!(b.finish(false).unwrap_err().key, "websocket.path");
 }
