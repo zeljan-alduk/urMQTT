@@ -1149,3 +1149,30 @@ fn a_persistent_members_unacknowledged_message_stays_with_it() {
         .collect();
     assert_eq!(again, [(b"q1".to_vec(), true), (b"q2".to_vec(), true)]);
 }
+
+#[test]
+fn across_shards_a_3_1_1_member_is_refused_with_0x80() {
+    let mut m = Mesh::new(2);
+    for b in &mut m.b {
+        b.cfg.mqtt5.max_shared_group_members = 1;
+    }
+    let filter = "fleet/#";
+    let g = group_owned_by(1, 2, shared::class(Role::Service), filter);
+    let share = format!("$share/{g}/{filter}");
+    let (mut s1, _) = C5::connect(&mut m.b[1], "backend", true, &[], None, 0);
+    s1.subscribe(&mut m.b[1], &[(&share, q(QoS::AtMostOnce))], 0);
+    let c4 = connect4(&mut m.b[0], "backend2", true, 0);
+    let out = send4(
+        &mut m.b[0],
+        c4,
+        &Packet::Subscribe(Subscribe {
+            packet_id: 5,
+            topics: SubscribeTopics::List(&[(&share, QoS::AtMostOnce)]),
+        }),
+        0,
+    );
+    assert!(out.is_empty(), "the SUBACK waits for the owner");
+    m.pump(0);
+    let out = m.b[0].output(c4).to_vec();
+    assert_eq!(out, [0x90, 3, 0, 5, 0x80]);
+}

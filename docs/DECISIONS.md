@@ -3408,3 +3408,174 @@ and mosquitto clients over mTLS, a restart on the same disk, an image with `mqtt
 written by the previous kernel booted by this one (`scripts/mqtt5-migration-check.sh`), and the Paho interoperability
 suite over the plaintext listener and the development port (`scripts/mqtt5-conformance.sh`, results in
 docs/MQTT5-CONFORMANCE.md).
+
+## ADR-275 — MQTT 5.0 part 3: shared subscriptions, subscription identifiers, and what part 2 left open (NEXT-3)
+
+- **Status:** Accepted (part 3 of NEXT-3; NEXT-3 is done with it). Implements ADR-273 rules 15 to 17 and the part-3
+  rows of rule 21, closes the "not done" list of ADR-274, and records every departure (marked *deviation*) and every
+  question ADR-273 left open (marked *decided*). ADR-276 to 278 stay free.
+- **Context.** After part 2 a `$share/` filter got SUBACK 0x9E, a Subscription Identifier 0xA1, and CONNACK said
+  both were unavailable. ADR-274 also left: retained messages expiring only when read, Wills not persisted, a revoked
+  certificate cut without a DISCONNECT, five reason codes never sent, the topic-alias tables outside the memory
+  accounting, and the cross-core ordering of a SUBACK against another client's PUBLISH.
+
+### Shared subscriptions (ADR-273 rule 16)
+
+1. **As decided.** `$share/{group}/{filter}`: a group is (role class, group, filter), the role class being device,
+   service, operator, bootstrap, plaintext or WebSocket login, so a device can never join a service's group (a
+   device group and a service group of the same name and filter are two groups and each gets every message). The
+   group lives on its **owner**, the worker shard `first + fnv1a(class, group, filter) % workers`
+   (`crates/broker/src/shared.rs`, `Broker::set_shards`). Every message is offered to every shard already (ADR-032),
+   so the owner sees each one once and hands it to one member: round robin over the members that are online. The
+   member's own shard delivers it, with the QoS and options of that member's subscription: a
+   `SharedMsg::Deliver` over the mesh (`CoreMsg::Shared`) carries the message's `Arc`, so a delivery costs no copy;
+   the owner keeps 12 bytes per member and one entry per group. A shard that owns no group pays one branch per message.
+2. **Joining waits for the owner** (*decided*). A SUBSCRIBE whose group is owned by another shard sends a
+   `Join` and parks its SUBACK until the owner's `Joined`; the connection's input is held meanwhile (a flow bit,
+   `flow::WAIT_SUBACK`, beside ADR-269's), so the client's next packets keep their order. Two things follow: a limit
+   refuses the join with SUBACK 0x97 instead of failing silently, and a message published after the SUBACK reached
+   the subscriber finds the member at the owner (point 13). A SUBACK that got no answer in 2 s reports 0x80 for the
+   open joins (the mesh does not lose messages: a bound, not a path that is taken). A group owned by the
+   subscriber's own shard answers at once.
+3. **QoS and redelivery** (*decided*). Delivered QoS = min(publish, the member's subscription). With no member online,
+   QoS 0 is dropped (counted, `$SYS/broker/shared/messages/dropped`) and QoS 1 and 2 go to the queue of the next
+   member in turn, which then can only be an offline persistent session (ADR-273 rule 16; the task text said
+   "dropped" for both: the accepted ADR loses nothing a non-shared persistent subscription would keep, so it
+   stands). A message handed to a member stays with it while its session lives (a persistent member gets it again
+   with DUP after reconnecting). When a member's session **ends** (clean session closed, session expiry, a clean
+   start) its QoS 1 messages in flight and everything still queued for it go back to the owner for another member
+   (§4.8.2, SHOULD; `Redispatch`); QoS 2 in flight never [MQTT-4.8.2-5]. A delivery that finds its member gone (it
+   left while the delivery was on the mesh) comes back (`Bounce`): the owner forgets that member and, for QoS 1 and
+   2, picks another, at most `MAX_TRIES` = 4 times; QoS 0 is dropped (counted). The tag that ties a queued or
+   in-flight message to its share is 4 bytes in the padding of `Flight` (still 16 B: RETAIN and the resend flag
+   share a byte) and of the queue entry (16 B, a struct instead of the tuple); it is not stored, so a message of a
+   queue restored at boot is not handed on if its session then ends.
+4. **What else holds.** No retained message on a shared SUBSCRIBE (§4.8.2), whatever Retain Handling says (the
+   other filters of the same SUBSCRIBE get theirs after the SUBACK). No Local on a share is a protocol error (the
+   codec's, DISCONNECT 0x82). The ACL judges the filter after `$share/{group}/` with the subscribe rules (the group
+   name is not a topic: `$share/devices/fleet/#` is the filter `fleet/#`). UNSUBSCRIBE leaves the group; a session
+   that ends leaves all its groups; a takeover that resumes the session keeps its memberships; a session going
+   offline or coming back tells the owners (`Presence`). A Will is routed like any message and reaches one member
+   per group. A group whose last member left is deleted (its id is never reused, so a late `Bounce` cannot reach
+   another group).
+5. **Both protocol versions** (*deviation*: ADR-273 spoke of 5.0). A 3.1.1 client may use `$share/` too, as
+   Mosquitto, EMQX and HiveMQ allow; a malformed share from a 3.1.1 client (empty group or filter, a wildcard in the
+   group) gets 0x80. With `mqtt5.shared_subscriptions = false` a 5.0 client gets 0x9E, a 3.1.1 one 0x80.
+6. **Limits** (format 13): `limits.max_shared_groups` (groups one shard may own) and
+   `limits.max_shared_group_members` (members per group), 1 to 65 535, 1024 by default: a join over either gets
+   SUBACK 0x97 (`$SYS/broker/shared/joins/refused`). A shared subscription also counts against
+   `limits.max_subscriptions_per_session`. Worst case per owner shard: about 120 B and the name and filter twice per
+   group, 12 B per member.
+7. **Persistence.** A shared subscription of a persistent session is a row of `subscriptions` like any other (its
+   filter `$share/...`); at boot it is restored (ACL and limits checked again) and joins its group offline.
+8. **Announced.** CONNACK leaves Shared Subscription Available and Subscription Identifier Available out (they mean 1
+   then) unless configured off, when it says 0.
+9. **`$SYS`.** `shared/groups`, `shared/members` (on their owners), `shared/messages/delivered`, `/dropped`,
+   `/redispatched`, `shared/joins/refused`; the same in the info query and a `status` line. A share of `$SYS/...`
+   (operators) sees only the `$SYS` messages of its owner shard: every shard publishes its own (O1), only the
+   owner's reach the group.
+
+### Subscription identifiers (ADR-273 rule 17)
+
+10. **One per subscription, in a side map** (`Broker::sub_ids`, keyed by session, trie and node; only sessions that
+    use identifiers have entries). A SUBSCRIBE's identifier applies to each of its filters; re-subscribing replaces
+    it, re-subscribing without one removes it. The identifiers are looked up when the PUBLISH is written: one
+    PUBLISH per message and session carries the identifiers of **all** its matching ordinary subscriptions (the
+    form the Paho suite expects, `test_subscribe_identifiers`; Mosquitto sends one PUBLISH per subscription
+    instead); a delivery through a shared subscription carries that subscription's identifier alone; a retained
+    replay, a queued message and a resend carry the identifiers the session's subscriptions have when it is
+    written; a 3.1.1 subscriber never sees one. They count against the client's Maximum Packet Size (a delivery
+    they push over it is dropped as if sent, as in ADR-274). *Decided*: no key of their own; the number per client
+    is bounded by `limits.max_subscriptions_per_session`, each at most 268 435 455 (0 is the codec's protocol
+    error). The common path does not change: a session without identifiers costs one empty-map test per PUBLISH,
+    and the QoS 0 and 1 routing of 3.1.1 traffic still makes 9 and 15 allocations per message
+    (`tests/qos01_allocs.rs`).
+11. **Persistence:** the new column `subscriptions.sub_id` (schema 5, point 15).
+
+### Enhanced authentication (ADR-273 rule 15): final
+
+12. Refused, as decided by the owner. A CONNECT with an Authentication Method (with or without Authentication Data)
+    gets CONNACK 0x8C "enhanced authentication is not supported" and is closed; an AUTH after a CONNECT without a
+    method is DISCONNECT 0x82; an AUTH as the first packet is closed without an answer (no CONNECT, so no CONNACK).
+    `mqtt5.auth_methods` stays unimplemented (no key): SCRAM-SHA-256 over the plaintext accounts remains the
+    candidate when someone needs it, with its own ADR.
+
+### What part 2 left open
+
+13. **Cross-core ordering** (*decided*). For an ordinary subscription nothing is missed in the order that matters:
+    the SUBACK is written after the subscription is in its shard's trie, and every message reaches that shard after
+    it was published, so a message published after the SUBACK reached the subscriber's client (or anyone it told)
+    is delivered. What the broker does not order is two connections that do not wait for each other: a client that
+    publishes right after sending another connection's SUBSCRIBE, without waiting for that SUBACK, can be routed
+    before the SUBSCRIBE is read on a different core (the Paho suite does this in two tests, docs/MQTT5-CONFORMANCE.md
+    "Ordering"); MQTT promises no order between connections. Shared subscriptions are the one place where a SUBACK
+    could come before the subscription is in effect (the member is installed on another shard), and there the SUBACK
+    waits for the owner (point 2). KNOWN-ISSUES says this.
+14. **Retained-message expiry** (*decided*: both). A sweep in `Broker::tick` (every 100 ms): retained messages with
+    a Message Expiry Interval are kept in a deadline set by topic (`expiry::TopicDeadlines`, one entry per topic: a
+    topic republished often costs one), and at most `SWEEP_PER_TICK` = 64 due ones are cleared per tick, so an
+    expiry storm stays within the watchdog's budget; the check on read stays. Every shard clears its replica; the
+    first worker shard alone tells the store (one deletion per expiry, not one per shard).
+    `$SYS/broker/retained/expiring`.
+15. **Wills across a restart** (*decided*: documented, not built). A Will, armed or waiting for its delay, lives in
+    RAM; a broker restart loses it (KNOWN-ISSUES). Storing it would add a store write to every CONNECT with a Will
+    and a deletion to every clean DISCONNECT, for the case of a broker that dies while the client also does; after a
+    restart the clients reconnect and their sessions are found again.
+16. **A revoked certificate gets DISCONNECT 0x98** (Administrative action) from the broker that holds its session,
+    then the close: the transport core asks the home core (`CoreMsg::Revoked`) or the local broker
+    (`Broker::disconnect_conn`), and cuts the connection itself after 1 s whatever happens (`REVOKE_GRACE_MS`). A
+    connection still in its handshake or before its CONNECT is cut at once, as before.
+17. **The reason codes part 2 never sent.**
+    - 0x8B Server shutting down: sent. The console's `reboot` sets a flag every shard sees within its next pass;
+      each tells its 5.0 clients DISCONNECT 0x8B and closes them during the 1 s the reboot waits
+      (`Broker::shut_down`, logged per core). *Decided*: from then on no Will is published or armed: the reboot is
+      not the clients' failure, a reset broker never sent them either, and a persistent session is found again
+      after the restart. 3.1.1 has no way to say it; its connections end with the reset.
+    - 0x96 Message rate too high: not sent, by design: no rate limit closes a connection. Over the per-session rate a
+      PUBLISH is refused with 0x97 (Quota exceeded) in its PUBACK or PUBREC and the connection stays.
+    - 0x89 Server busy, 0x8A Banned, 0x9F Connection rate exceeded: not sent, by design. Admission (memory, the
+      handshake and connection limits), the plaintext lock-out and the login rate act on the SYN or the accept
+      (ADR-080, ADR-230, ADR-267), before there is a CONNECT to answer; reading a CONNECT first would spend what
+      they protect (a TLS handshake, a buffer). A refused password is 0x86 and an allowlist refusal 0x87 at
+      CONNECT, as in part 2.
+18. **Topic-alias tables are counted** (ADR-274 point 9's deviation removed). `Stats::alias_bytes` follows each
+    table (16 B per slot, allocated on the first alias, plus the topics) and is released when the connection
+    closes; `$SYS/broker/memory/topic_aliases`. Per connection it is at most `mqtt5.topic_alias_maximum` × (16 +
+    `limits.max_topic_len`), 2 720 B with the defaults; the heap admission (M16) sees it like every other
+    allocation.
+
+### Store, configuration, kernel
+
+19. **Store schema 5** (`crates/store/src/schema.rs`): `subscriptions.sub_id INTEGER NOT NULL DEFAULT 0 CHECK (sub_id
+    BETWEEN 0 AND 268435455)`, added in the migration's transaction (no rebuild). `Store::subscribe_v5`;
+    `SessionRecord.sub_ids`. Golden files: `schema4-mqtt5` is frozen (the input of the 4 to 5 migration),
+    `schema5-shared` is what the code writes now, `v2-data-schema5` likewise; tests: schema 4 migrates keeping every
+    row, the CHECK holds, a power cut at every write of the migration leaves schema 4 or 5 with every row, the
+    frozen schema 5 image reads back; the 2 to 5 and 3 to 5 paths see every intermediate version.
+20. **Configuration format 13** (`crates/cfg`, tags 260 and 261): `limits.max_shared_groups`,
+    `limits.max_shared_group_members`; formats 8, 9, 11, 12 and 13 are valid, 10 is refused. The part-3 keys of
+    format 12, `mqtt5.shared_subscriptions` and `mqtt5.subscription_identifiers`, now take effect (no format
+    change). The builder page has both limits (shown while shared subscriptions are on) and keeps
+    `mqtt5.shared_subscriptions` shown with MQTT 5.0 off, since 3.1.1 clients share too.
+21. **Kernel.** `CoreMsg::Shared` and `CoreMsg::Revoked`; each worker shard is named before the restore
+    (`set_shards`), so restored shared subscriptions join their groups; the store gets and restores the
+    identifiers; the part-3 counters per shard in `$SYS`.
+
+### Verification
+
+Unit tests in `crates/broker/src/shared_tests.rs` (20: identifiers per rule, shares on one shard and across three,
+the SUBACK and next packet held until the owner answers, a refused join, members gone, clean and persistent members
+that leave with unacknowledged messages, 0x8B, 0x98, enhanced authentication in every form, the alias accounting, the
+retained sweep); a new reference-model proptest `tests/shared_model.rs` (three shards, devices and services, every
+delivery attributed by its identifier: each group exactly once through one member, never across roles; ordinary
+subscriptions one copy with all identifiers; mutation-checked); the ACL oracle (`broker_acl`) with shares and
+identifiers, `acl_model` with shared filters, `qos2_model` with a shared backend; new fuzz seeds; store golden and
+power-cut tests; the smoke group `mqtt5` extended (part-3 scenarios over mTLS, the restart, a four-vCPU image with a
+group of paho and mosquitto workers on the development port); the Paho suite (docs/MQTT5-CONFORMANCE.md). The
+results of the runs are in docs/MQTT5-CONFORMANCE.md and in the branch report.
+
+### For the owner
+
+(a) No Will at `reboot` (point 17). (b) Shared subscriptions for 3.1.1 clients (point 5). (c) No member online:
+QoS 1/2 queued for an offline persistent member rather than dropped (point 3). (d) `limits.max_shared_groups` per
+shard rather than per broker (point 6). (e) Wills are not persisted (point 15).

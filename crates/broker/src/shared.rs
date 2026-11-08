@@ -668,17 +668,18 @@ impl Broker {
         let Some(i) = self.subacks.iter().position(|s| s.token == token) else {
             return;
         };
+        // 3.1.1 knows only 0x80 for a refusal.
+        let refused = match self.subacks.get(i).map(|s| s.conn) {
+            Some(c) if self.is_v5(c) => ReasonCode::QuotaExceeded as u8,
+            _ => urmqtt_mqtt::SUBACK_FAILURE,
+        };
         let Some(s) = self.subacks.get_mut(i) else {
             return;
         };
         if let Some(w) = s.waiting.iter().position(|w| w.1 == share) {
             let (at, _, granted) = s.waiting.swap_remove(w);
             if let Some(code) = s.codes.get_mut(at) {
-                *code = if ok {
-                    granted
-                } else {
-                    ReasonCode::QuotaExceeded as u8
-                };
+                *code = if ok { granted } else { refused };
             }
             if ok && s.sid == sid {
                 self.persist_shared(sid, share);
