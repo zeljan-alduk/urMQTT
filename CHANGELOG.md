@@ -30,7 +30,7 @@ All notable changes to this project are documented here. The format follows
   `shared:` line. Configuration format 13 (the two limits; formats 8, 9, 11, 12 and 13 are valid, 10 is refused);
   the builder page has both limits and keeps `mqtt5.shared_subscriptions` shown with MQTT 5.0 off, since 3.1.1
   clients share too. Database schema 5 (`subscriptions.sub_id`). The 3.1.1 QoS 0 and QoS 1 routing still makes 9 and
-  15 allocations per message; the release kernel grows by 64 112 B (aarch64, 4 127 976 B) and 86 736 B (x86_64,
+  15 allocations per message; the release kernel grows by 64 200 B (aarch64, 4 128 064 B) and 86 736 B (x86_64,
   4 308 600 B). Verified by 20 host tests (`shared_tests.rs`), a new reference-model proptest (`shared_model`: each
   group exactly once through one member, never across roles; mutation-checked), the ACL oracle, `acl_model` and
   `qos2_model` with shares, fuzz seeds `mqtt5_shared_and_ids` and `mqtt5_shared_groups`, store golden and power-cut
