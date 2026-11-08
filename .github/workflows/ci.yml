@@ -266,7 +266,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/smoke-venv"
           "$RUNNER_TEMP/smoke-venv/bin/pip" install --quiet --require-hashes --only-binary=:all: -r scripts/ci-requirements.txt
           echo "$RUNNER_TEMP/smoke-venv/bin" >> "$GITHUB_PATH"
-          python3 -I -c 'import paho.mqtt as p; print("paho-mqtt", p.__version__)'
+          "$RUNNER_TEMP/smoke-venv/bin/python3" -I -c 'import paho.mqtt as p; print("paho-mqtt", p.__version__)'
       - run: make certs
       # The secrecy group also checks a release kernel: build it before
       # `make smoke` rebuilds the dev kernel at the same path.
