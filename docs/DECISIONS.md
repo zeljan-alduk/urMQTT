@@ -230,6 +230,7 @@ verified in the named milestone before it becomes Accepted).
 - **3.1.1 choices:**
   - An unauthorised or rate-limited PUBLISH is acknowledged and dropped (§3.3.5 allows ack-or-close).
   - QoS 2 publishes close the connection, and QoS 2 subscriptions are granted QoS 1 (QoS 2 is a "later" item).
+    *Superseded by ADR-271 (2026-11-08): QoS 2 is supported, method B, granted at 2.*
   - Overlapping subscriptions of one session get one delivery at the highest QoS.
   - Retained messages go to new subscribers with RETAIN=1 and are routed live with RETAIN=0.
   - A will is published on any close except after DISCONNECT, including takeover and keepalive expiry (1.5 × interval).
@@ -2356,6 +2357,145 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   `scripts/plain-bench.sh` now labels its login row with the count it used.
 - **Not done.** The kernel on a real VPS (the estimate above stands in for it); the load generator's login rate at
   100 000 (expected about 19 a second per data core under HVF); the 3.5x gap between kernel and host per iteration.
+
+## ADR-271 — QoS 2, exactly once: method B, the in-flight window for both QoS, packet ids in the store (NEXT-2)
+
+- **Status:** Accepted (2026-11-08). Amends ADR-028 ("QoS 2 publishes close the connection, and QoS 2 subscriptions
+  are granted QoS 1") and ADR-030 (what the store holds of a persistent session). Answers ROADMAP NEXT-2. The number was
+  reserved for this branch: 268 to 270 are performance work, 272 WebSocket, 273 and later MQTT 5.
+- **Context.** A device that published at QoS 2 was disconnected on every publish, and a QoS 2 subscription was
+  granted QoS 1, so the receiver had to be idempotent. MQTT 3.1.1 4.3.3 defines the four-packet flow and leaves the
+  receiver two methods (its Table 4.3 / Figure 4.3): **A** stores the message, answers PUBREC, and delivers it onwards
+  only when PUBREL arrives; **B** stores the packet identifier, delivers the message onwards at once, answers PUBREC,
+  and forgets the identifier at PUBREL; until then any PUBLISH with that identifier is a duplicate.
+- **Decision.**
+  1. **Inbound: method B.** A QoS 2 PUBLISH with a new packet id is answered with PUBREC, the id is added to the
+     session's held ids, and the message then takes exactly the QoS 1 path (reserved namespace, `$SYS/` requests, ACL,
+     rate, telemetry, retain, routing and fan-out). A PUBLISH with a held id, DUP set or not, is answered with PUBREC
+     and nothing else: not routed, not counted as published, not charged to the rate, not looked at by the ACL again
+     (`qos2_duplicates`). PUBREL removes the id and is answered with PUBCOMP, also for an id not held (our PUBCOMP was
+     lost and the client sends PUBREL again; 4.3.3 requires the answer). After PUBREL the id starts a new message.
+     Why B and not A:
+     - **Memory.** B holds 2 bytes per unfinished flow; A holds the message (up to `limits.max_packet_size`, 4 KiB in
+       production) from PUBLISH to PUBREL, per flow and per session, i.e. memory that an authenticated client fills
+       by never sending PUBREL. With B that client fills at most the id bound below.
+     - **One path.** The message is routed when it arrives, like QoS 1: retained messages, wills, telemetry, the
+       control channel and the cross-core fan-out need no second entry point fed from PUBREL, and delivery latency is
+       one packet shorter.
+     - **The cross-core question disappears.** Deduplication happens on the session's home core before the message
+       is routed, so what crosses to other shards is an ordinary routed message (`CoreMsg::Route { msg, qos, retain }`
+       with `qos = 2`); no QoS 2 state is ever on another core. Each shard delivers it to its own sessions with its
+       own outbound flows.
+     B's cost is the one 4.3.3 states: the message goes onwards before the sender knows it was received. That is
+     the same exposure as QoS 1 and is what "exactly once" means between two parties: the receiver's duplicates are
+     suppressed by the id.
+  2. **A refused QoS 2 publish completes its handshake** like an accepted one: PUBREC, the id held, PUBREL ->
+     PUBCOMP, the message dropped and counted (`dropped_acl`, `dropped_rate`, `dropped_control`). This is ADR-028's
+     "acknowledged and dropped" for QoS 1 (3.1.1 has no negative acknowledgement); its duplicate is not judged again,
+     so it is neither counted twice nor accepted later when the rate bucket has refilled.
+  3. **Outbound.** Subscriptions are granted the QoS asked for (0, 1 or 2) when the ACL allows the filter. A message
+     is delivered at min(publish QoS, granted QoS) (one delivery per session at the highest matching grant, as before);
+     wills keep their QoS; retained messages keep theirs and are replayed at min(retained QoS, granted QoS) with RETAIN
+     set. A QoS 2 delivery is a *flight* in the session's in-flight list:
+
+     ```
+       outbound (the broker sends)                   inbound (the client sends), method B
+       ---------------------------                   ------------------------------------
+                 deliver / pump                        PUBLISH id (new) --> PUBREC id; route once;
+                       |                                                     hold id
+                       v                               PUBLISH id (held) -> PUBREC id; nothing else
+       [Pubrec] PUBLISH id sent (DUP on resend)        PUBREL id ---------> PUBCOMP id; forget id
+          |  PUBREC id --> PUBREL id                    (held ids > bound) -> close the connection
+          v                                            reconnect (persistent): held ids kept
+       [Pubcomp] PUBREL id sent (msg released)
+          |  PUBREC id again --> PUBREL id again
+          |  PUBCOMP id --> flight done, pump the queue
+          v
+        (free)
+       PUBACK for a QoS 2 flight, PUBCOMP before PUBREC: ignored
+       PUBREC for an unknown id: PUBREL id (the client may hold state we lost)
+       reconnect (persistent): every flight re-sent in the order first sent,
+         [Pubrec] as PUBLISH with DUP and its id, [Pubcomp] as PUBREL with its id
+       clean session or takeover by a clean CONNECT: everything discarded
+     ```
+
+     QoS 1 keeps its one state (`Puback`): a PUBACK ends only a QoS 1 flight, a PUBREC or PUBCOMP never does.
+  4. **Bounds, no new configuration key.** `limits.max_inflight_qos1` is the in-flight window of a session for QoS 1
+     and QoS 2 together; a QoS 2 flight counts until its PUBCOMP (a PUBREC does not free the slot). The offline queue
+     (`limits.max_queued_per_offline_session`) holds QoS 1 and QoS 2 messages, each with its QoS. The ids a session may
+     hold awaiting PUBREL are `max(max_inflight_qos1, 64)` (`Broker::qos2_id_limit`, `MIN_QOS2_IDS`): 64 covers the
+     common clients' default windows (mosquitto and paho Python pipeline up to 20), and a larger window raises it. One
+     id more closes the connection (`qos2_inbound_full`; a persistent session keeps its ids, and the client sends the
+     PUBLISH again after it reconnects). A held id costs 2 bytes: at most 128 bytes per session at the default. So
+     the configuration format stays at 7 and no `limits.*` key is added (format 10 stays unused by this branch). The
+     key's name says QoS 1; its documentation now says both.
+     Memory: an in-flight entry stays 16 bytes (`Flight { pid: u16, flow, msg: Option<Msg> }`, as the `(u16, Msg)` it
+     replaces); a queued entry grows from 8 to 16 bytes (its QoS); the held ids live in the same boxed `Pending` as
+     the queues, freed when all are empty. `Session` (64 B) and `Conn` (48 B) are unchanged (`hot_state_stays_small`).
+  5. **Persistence: database schema 3.** As for QoS 1 (ADR-030), what a session has in flight lives in RAM while it is
+     online and is written as a snapshot when it goes offline. The snapshot now holds each in-flight message **with
+     its packet id and QoS** (`queued.pid`, 0 for not sent), the queue with each message's QoS, and the QoS 2 ids:
+     `qos2_ids (client_id, released, pid)`, `released` 0 for an id received and awaiting PUBREL, 1 for an id released
+     to the client and awaiting PUBCOMP. `PersistOp::QueuePush` carries `qos` and `pid`, `PersistOp::Qos2` records an
+     id, `QueueClear` clears both. At boot, `restore_session` puts released ids back first (their PUBLISH went out
+     before anything still in flight), then the in-flight messages with their ids (up to the window; beyond it, or on
+     an id already taken, they are queued), then the queue, and the held ids (up to the bound; id 0 and duplicates
+     skipped). So a restart while a device is offline resumes each flow where it stood: PUBREL and PUBLISH with DUP
+     and the original id, and a held inbound id still suppresses its duplicate.
+     **QoS 1 changes with it:** an unacknowledged QoS 1 message used to come back after a restart as a new message
+     with a new id; it now comes back with its id and DUP (4.4 asks for exactly that).
+     Schema 3 rebuilds `retained`, `subscriptions` and `queued` (their `CHECK (qos IN (0, 1))` becomes `(0, 1, 2)`;
+     SQLite cannot alter a CHECK) inside the migration's transaction, copying every row (a schema 2 queued row reads
+     as not in flight), and creates `qos2_ids`. It runs when the store opens a schema 2 database, in the kernel and
+     in `urmqtt-disk` (which opens the store for `verify`, `export` and `migrate --verify`). A kernel before this one
+     refuses a schema 3 database (`schema version 3 is newer than this build`), as it would any newer schema; a backup
+     snapshot records its schema and is restored only by a build that can read it (S5).
+- **Not exactly once across a broker crash while the client is connected.** The online state is not written until
+  the session goes offline (unchanged from QoS 1). If the VM dies while a device is connected, the session comes back
+  as it was at its last disconnect: messages in flight or queued since then are lost (as for QoS 1), an inbound flow
+  whose PUBREC the client never saw is routed a second time when the client sends the PUBLISH again, and a client that
+  holds an id we released may treat our next PUBLISH with that id as a duplicate. Writing each id and flight through
+  the DB core before answering would make every QoS 2 publish wait for a commit (5 ms batches today) and is not
+  done; KNOWN-ISSUES section 5 says so.
+- **Counters.** `Stats::{qos2_received, qos2_duplicates, qos2_completed, qos2_inbound_full}`, summed over the shards
+  into `$SYS/broker/messages/qos2/{received,duplicates,completed,inbound_full}`, the info reply (`"qos2":{...}`) and
+  a line of the console's `status`.
+- **Verification.**
+  - Host: `crates/broker/src/qos2_tests.rs`, 18 tests: every transition of both machines, duplicates with and without
+    DUP, acknowledgements of the wrong kind or out of order, QoS 1 and 2 ids of one client independent, the id wrap
+    skipping a released id, a reconnect in the middle of both directions, a takeover in the middle, clean sessions,
+    a QoS 2 will (retained), retained replay at the lower QoS, ACL and rate refusal completing once, a control message
+    sent twice handled once, the id bound and its floor, the fan-out across shards, the offline queue at QoS 2, the
+    snapshot and a restart through a model store, and the bounds `restore_session` applies to what the store returns.
+  - Model: `crates/broker/tests/qos2_model.rs`, a proptest (400 cases, fixed seed) that runs random sequences of a
+    persistent device (publishes with chosen ids and DUP, PUBREL, every acknowledgement for any id, drops, clean and
+    persistent reconnects) and of the system (a backend commanding at each QoS, a restart from the store while the
+    device is away) against a reference model written from 4.3.3 and 4.4, and compares every packet both clients
+    receive after every step; every device publish must reach the backend exactly once. Mutants checked by hand
+    (no deduplication, no release at PUBREC, no PUBREL on resend, PUBREL forgetting the wrong id, a snapshot that
+    loses a held id or an in-flight id) all fail it.
+  - The `broker_acl` oracle (H5) models the held ids per session (across reconnects, takeovers and `restore_session`)
+    and checks that a duplicate is answered and neither routed nor counted, that one id too many closes, that every
+    PUBREC answers a held id and every PUBREL is answered, that a message reaches a session in one flow only (sent
+    again only with DUP and its id, never after our PUBREC) and that a PUBREL comes only after our PUBREC; new
+    operations `Release` and `Dup`, QoS 2 subscriptions and restores with held ids; 3 new seeds; a directed test.
+  - `broker_input`: the harness moved to `crates/broker/tests/input_harness/` (the fuzz target includes it), its
+    seeds (`fuzz/seeds/broker_input/`, new: duplicates, a resume after a drop, a QoS 2 will and retained message)
+    replay in `cargo test`, and a test checks that they reach the QoS 2 counters.
+  - Store: `golden_schema3.rs` (the frozen schema 2 database of `v2-data` migrates and keeps every row; the rebuilt
+    tables' CHECKs and index; QoS 2 rows written, cleared and cascaded; a power cut at every write of the migration,
+    cut or torn, cache kept or dropped, leaves schema 2 or 3 with every row), `golden_schema3_bytes.rs` (a schema 3
+    database with QoS 2 state is written byte for byte as `schema3-qos2.txt`), `golden_v2.rs` (`v2-data` stays the
+    frozen schema 2 image; the same steps now write `v2-data-schema3`).
+  - Smoke, both architectures: `mqtt-scenarios.py` (run by `mqtt-plain`, `mqtt-tls` and the plaintext and GICv2
+    groups) gains `qos2-pubsub-exactly-once`, `qos2-after-reconnect` and `qos2-retained` with mosquitto `-q 2 -V
+    mqttv311`; the group `mqtt_qos2` (also in `SMOKE_ONLY=misc`) speaks MQTT itself (`scripts/qos2-scenarios.py`):
+    the same PUBLISH three times before PUBREL is delivered once, an inbound and an outbound flow survive a kill of
+    the client at both points, paho-mqtt (through `uv`, when installed) pipelines 40 QoS 2 publishes and drains an
+    offline queue of 24 at QoS 2, each exactly once; then a session is left in the middle of every flow, the client
+    and the VM are killed, and the next boot resumes every flow from the store.
+- **Not done.** Exactly once across a crash of the broker while the client is connected (above). MQTT 5's receive
+  maximum (the client's own bound on our window) comes with NEXT-3. The id bound is not configurable on its own.
 
 ## ADR-272 — MQTT over secure WebSocket in the kernel: one bounded upgrade, a streaming frame codec, mtls or a password inside TLS (NEXT-5, D-5)
 

@@ -9,7 +9,8 @@ runs at the time of writing are in `docs/PROGRESS.md` (entry H5).
 | Kani | `make kani` (`scripts/kani.sh`) | `kani` | Bounded proofs: MQTT decoder, MQTT 5.0 varint and property-block lengths, TCP segment parser, TLS record header, config checks, timer-wheel arithmetic, WebSocket frame decoder and upgrade parser |
 | Sanitizers | `make sanitize` (`scripts/sanitize.sh`) | `sanitize` | ASan on Rust and on the C SQLite amalgamation, trapping UBSan on the C side, over the host test suites |
 | ACL fuzzer | `make acl-fuzz ACL_FUZZ_SECS=600` | `fuzz` (scheduled) | Stateful, model-checked access rules of the broker |
-| ACL fuzzer, coverage-guided | `make fuzz T=broker_acl` | `fuzz` (scheduled), fuzz smoke | A second, independent ACL oracle under libFuzzer; also a proptest in `cargo test` |
+| ACL fuzzer, coverage-guided | `make fuzz T=broker_acl` | `fuzz` (scheduled), fuzz smoke | A second, independent ACL oracle under libFuzzer, with the QoS 2 exactly-once rules; also a proptest in `cargo test` |
+| QoS 2 reference model | `cargo test -p urmqtt-broker --test qos2_model` | `test` | The QoS 2 state machines (both directions, reconnects, restarts through the store) against a model of MQTT 3.1.1 4.3.3 and 4.4 |
 | Coverage | `make coverage` (`scripts/fuzz-coverage.sh`) | none | Line coverage of fuzz targets |
 
 ## Miri
@@ -162,7 +163,7 @@ seeds. A failure prints its seed; replay with `ACL_FUZZ_SEED=<n>
 ACL_FUZZ_SECS=0`. It runs for 3 s in `cargo test`.
 
 Not modelled: byte-level mutation (the `broker_input` fuzz target does that),
-QoS 2, retained delivery order, ACL changes at runtime, sharding beyond the
+QoS 2 (`broker_acl` and `qos2_model.rs` do), retained delivery order, ACL changes at runtime, sharding beyond the
 route hand-out.
 
 ### The second oracle: `broker_acl`
@@ -195,8 +196,30 @@ receiver's rights and a granted filter, never reserved, never `$SYS`, never
 another device's topic, and from an allowed publisher; a SUBACK grant only
 for a filter wholly inside the rights; CONNACK codes and `session_present`
 against a session model; RETAIN only on the replay of the receiver's own
-SUBSCRIBE; unacknowledged QoS 1 within `max_inflight`; retained count and
-bytes within the limits.
+SUBSCRIBE; unacknowledged QoS 1 and QoS 2 within `max_inflight`; retained count and
+bytes within the limits. QoS 2 (ADR-271): the oracle holds each session's QoS 2
+ids (across reconnects, takeovers and restores, with the operations `Release`
+and `Dup`) and checks that a PUBLISH with a held id is answered and neither
+routed nor counted, that one id too many closes, that every PUBREC answers a
+held id and every PUBREL is answered, that a message reaches a session in one
+flow only (again only with DUP and its id, never after our PUBREC) and that a
+broker PUBREL follows our PUBREC.
+
+### QoS 2 against a reference model
+
+`crates/broker/tests/qos2_model.rs` (proptest, 400 cases, fixed seed, in
+`cargo test`): random sequences of a persistent device (QoS 2 publishes with
+chosen ids and DUP, PUBREL, PUBACK, PUBREC and PUBCOMP for any id, drops, clean
+and persistent reconnects) and of the system (a backend commanding at QoS 0, 1
+and 2, a restart from a model of the store while the device is away) run
+against the broker and a small model written from 4.3.3 and 4.4. After every
+step the packets both clients received must be the model's, exactly, and every
+device publish must reach the backend once. Checked to be live with six
+hand-made mutants of the broker (no deduplication; no release at PUBREC; no
+PUBREL on a resend; PUBREL forgetting the wrong id; a snapshot that loses a
+held id; one that loses an in-flight id): each fails it at once. Not modelled:
+several devices, the ACL, retained messages and wills (the unit tests and
+`broker_acl` cover them).
 
 Not modelled: the operator role and `$SYS` requests (`acl_model.rs` has
 them), the plaintext role, queue contents (only their bounds), the rate

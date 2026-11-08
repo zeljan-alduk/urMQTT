@@ -32,6 +32,21 @@ All notable changes to this project are documented here. The format follows
   and the status line report upgrades, refusals by reason, logins, frames, bytes and close codes. Verified with fuzz
   targets `ws_upgrade` and `ws_frames`, Kani, Miri, Autobahn|Testsuite (0 failed; docs/audit/ws-autobahn.md) and the
   smoke group `websocket` (paho-mqtt over wss against the kernel in QEMU, 10 000 idle connections).
+- **QoS 2, exactly once** (MQTT 3.1.1 4.3.3, ROADMAP NEXT-2, ADR-271). A QoS 2 PUBLISH is answered with PUBREC and
+  routed once; its packet id is held until PUBREL, and a PUBLISH with a held id is answered again and never routed
+  again (method B). Subscriptions are granted QoS 2; deliveries at QoS 2 take PUBLISH, PUBREC, PUBREL, PUBCOMP in the
+  existing in-flight window (`limits.max_inflight_qos1` now covers QoS 1 and 2); wills and retained messages keep
+  QoS 2. A persistent session resumes every flow after a reconnect (PUBLISH with DUP and PUBREL, with their ids) and,
+  while it is offline, across a restart. A client may hold `max(max_inflight_qos1, 64)` ids awaiting PUBREL; one more
+  closes its connection. New counters `$SYS/broker/messages/qos2/{received,duplicates,completed,inbound_full}`, also in
+  the info reply and the `status` command. No configuration change: the format stays 7. Not across a crash of the
+  broker while the client is connected (KNOWN-ISSUES section 5, AUDIT A271-W1).
+- Smoke group `mqtt_qos2` (both architectures, also in `SMOKE_ONLY=misc`): duplicates, a client killed in the middle
+  of each flow, paho-mqtt interop (through `uv` when installed), and a restart of the VM in the middle of every flow;
+  QoS 2 scenarios with mosquitto `-q 2` in `mqtt-scenarios.py`. A reference-model proptest for QoS 2
+  (`crates/broker/tests/qos2_model.rs`); the `broker_acl` oracle checks the exactly-once rules; `broker_input` has
+  seeds (QoS 2), replayed by `cargo test`. `cargo run --release -p urmqtt-broker --example throughput` measures the
+  broker core's routing rate.
 - `docs/PERFORMANCE.md` §13: urMQTT v0.4.2, `main` (SACK, ADR-265/266) and Mosquitto 2.0.21 measured on two VPSes
   (Contabo x86_64 4 vCPU, netcup arm64 2 vCPU), each loaded from the other; raw files, tables and figures in
   `docs/perf-results/x11-2026-11-07/`, figures from the new `scripts/x11-charts.py`. Findings: with cores to use
@@ -46,6 +61,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Database schema 3** (ADR-271): `retained`, `subscriptions` and `queued` accept QoS 2 (the tables are rebuilt with
+  every row in the migration's transaction), a queued message records the packet id it was in flight with, and
+  `qos2_ids` holds the ids of unfinished QoS 2 flows. A schema 2 database is migrated when the kernel or
+  `urmqtt-disk` opens it; a power cut during the migration leaves schema 2 or 3. **A kernel before this one refuses a
+  schema 3 database** (and a backup snapshot taken by it): keep the previous image's data disk only if you will not
+  go back. docs/DISK-FORMAT.md section 5.1.1.
+- An unacknowledged QoS 1 message of an offline persistent session now comes back after a restart with its packet id
+  and DUP set (4.4), not as a new message with a new id.
 - **Plaintext password hashes: 100 000 PBKDF2 iterations by default** (was 10 000) in `urmqtt-config hash-password`
   and the builder page (ADR-267). Existing hashes carry their own count and keep working; hash again to get the new
   cost. The range stays 1000 to 200 000, below OWASP's 600 000 on purpose: the broker checks a password in one go on a

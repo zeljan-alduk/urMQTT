@@ -122,10 +122,11 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | Session resumption (PSK tickets under random keys rotated every 12 h), handshake admission control, revocation list | ✅ M10, H2 |
 | **MQTT** | Zero-copy 3.1.1 codec, fuzzed, `forbid(unsafe_code)` | ✅ M8 |
 | | QoS 0/1, wildcards, retained, LWT, persistent sessions, keepalive | ✅ M9 |
+| | QoS 2, exactly once (PUBREC/PUBREL/PUBCOMP, duplicates suppressed by packet id, flows resumed after a reconnect and, for an offline session, after a restart) | ✅ NEXT-2, ADR-271 |
 | | ACL (`devices/{id}/#` by default), service identities, per-device rate limits | ✅ M9 |
 | | Operator role: retained `$SYS/broker/#` statistics every 10 s, `$SYS/query/info`, a console over MQTT (`$SYS/console/{out,in}`: log lines, `help`, `status`, `log level`, `reboot`), mTLS only, audit-logged | ✅ O1, O2 |
 | | MQTT over secure WebSocket (`wss://.../mqtt`, subprotocol `mqtt`) for browsers: a bounded HTTP Upgrade, a streaming RFC 6455 codec without reassembly, client certificate or a password inside TLS, an origin allowlist; Autobahn\|Testsuite clean | ✅ NEXT-5 (ADR-272) |
-| | MQTT 5.0, QoS 2 | 📋 later |
+| | MQTT 5.0 | 📋 later |
 | **Storage** | SQLite over a raw-disk VFS (WAL, exclusive), quick_check at boot; since H6 SQLite runs as an unprivileged program (EL0 / ring 3), not in the kernel | ✅ M11, ✅ H6 |
 | | One disk: data in a partition of the boot disk (virtio-blk or virtio-scsi), created on the first boot, crash-safe; other disks never touched | ✅ S1 |
 | | `urmqtt-disk`: offline info, verify, export (SQLite, telemetry), import devices, kernel update | ✅ S1 |
@@ -603,7 +604,7 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `limits.max_packet_size` | 64 – 268 435 455 | Largest accepted MQTT packet |
 | `limits.max_topic_len`, `max_topic_levels` | ≤ 65 535, > 0 | Topic bounds, checked before any allocation |
 | `limits.max_subscriptions_per_session` | > 0 | |
-| `limits.max_inflight_qos1` | > 0 | Unacknowledged QoS 1 per session |
+| `limits.max_inflight_qos1` | > 0 | Unacknowledged QoS 1 and QoS 2 deliveries per session (a QoS 2 one until its PUBCOMP); also the QoS 2 ids a client may hold awaiting PUBREL, at least 64 (ADR-271) |
 | `limits.max_queued_per_offline_session` | ≥ 0 | Bounded offline queue |
 | `limits.max_retained_per_device` | ≥ 0 | Retained messages one identity may hold; more are delivered but not retained (H3) |
 | `limits.max_retained_bytes` | 1 – heap/8 | Retained topics and payloads per data core (each core holds a replica), plus 128 B each |
@@ -1294,7 +1295,7 @@ after it, and the bare-metal drivers are the commercial edition's scope ([docs/E
 
 riscv64 is a later, separate step (PROMPT-x86_64.md §9).
 
-Later: MQTT 5.0, QoS 2, IPv6, cold-session compression, an export bridge,
+Later: MQTT 5.0, IPv6, cold-session compression, an export bridge,
 and ACPI-only validation on real ARM clouds.
 
 ## Contributing

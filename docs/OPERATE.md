@@ -78,6 +78,8 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/messages/dropped/offline` | QoS 0 messages for a subscription whose client is not connected (a QoS 0 message is never stored) |
 | `$SYS/broker/messages/dropped/cross_core` | QoS 0 fan-out not offered to a core that was more than 16 384 messages behind |
 | `$SYS/broker/messages/dropped/qos1_queue_full`, `publish_rate` | QoS 1 messages not queued (the session's queue was full), publishes refused by the per-identity rate limit |
+| `$SYS/broker/messages/qos2/received`, `duplicates` | QoS 2 PUBLISHes received with a new packet id; those whose id was still held (no PUBREL yet), answered with PUBREC again and not delivered again (ADR-271) |
+| `$SYS/broker/messages/qos2/completed`, `inbound_full` | QoS 2 deliveries to clients completed with PUBCOMP; connections closed because the client held more QoS 2 ids awaiting PUBREL than `max(limits.max_inflight_qos1, 64)` (normally 0) |
 | `$SYS/broker/frames/dropped/steer`, `worker_tx`, `nic` | network frames dropped because a worker core, the dispatcher, or the NIC queue plus the dispatcher's 4 096-frame backlog was full; TCP retransmits them. Normally 0 |
 | `$SYS/broker/handshakes/started` | connections admitted (TCP established, admission said yes) |
 | `$SYS/broker/handshakes/done`, `failed`, `timed_out` | TLS handshakes completed, ended before completing, not finished within 10 s |

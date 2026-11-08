@@ -282,6 +282,26 @@ they may be released to the device, and what they hold is never read). A write
 beyond the logical end, or a truncate to a larger size, first fills the gap
 with zeros.
 
+#### 5.1.1 The database schema
+
+`PRAGMA user_version` holds the schema version; `crates/store/src/schema.rs`
+lists the migrations, which are append-only and each run in one transaction
+when the store opens an older database (in the kernel and in `urmqtt-disk`). A
+database of a newer version is refused (`schema version N is newer than this
+build`), and so is a backup snapshot of one (§12.4, `schema_version`).
+
+| Version | Since | Change |
+|---|---|---|
+| 1 | M11 | `devices`, `revoked`, `retained`, `sessions`, `subscriptions`, `queued` (QoS 0 or 1), `selftest` |
+| 2 | H1 | `control_state` (the control channel's sequence number), `allowlist` |
+| 3 | QoS 2, ADR-271 | `retained`, `subscriptions` and `queued` rebuilt (CHECK `qos IN (0, 1, 2)`; every row copied); `queued.pid` (`INTEGER NOT NULL DEFAULT 0`, 0..=65535): the packet id the message was in flight with when its session went offline, 0 for not sent (every row of version 2); `qos2_ids (client_id, released, pid)`, primary key all three, cascading with the session: QoS 2 packet ids received from the client and awaiting its PUBREL (`released` 0) or released to it and awaiting its PUBCOMP (`released` 1) |
+
+A session's `queued` rows and `qos2_ids` are written as one snapshot when it
+goes offline (cleared first) and cleared when it comes back; while it is
+offline each new message is appended. The broker re-checks everything it
+reads (QoS clamped to 1..=2 for a queued message, ids 1..=65535, the in-flight
+window and the queue and id bounds).
+
 ### 5.2 Telemetry log (kind 4)
 
 ```
@@ -729,6 +749,7 @@ cache dropped and kept) at every write of each of the three procedures.
 | What | Where | Covers |
 |---|---|---|
 | Field tables against the encoder | `crates/store/tests/disk_format_spec.rs` | every `<!-- struct -->` table: superblock (with the encryption flag and key check), region entry, size table, telemetry header, segment header, record, migration record, backup headers |
-| Golden images, one per layout version | `crates/store/tests/golden_v1.rs` (v1: fresh, telemetry, torn), `golden_v2.rs` (v2.0: fresh, with data), `golden_v21.rs` (v2.1 with a backup region and data; the same encrypted with a fixed key) | the code still writes the same bytes, the frozen files still open, an encrypted image opens only with its key |
+| Golden images, one per layout version | `crates/store/tests/golden_v1.rs` (v1: fresh, telemetry, torn), `golden_v2.rs` (v2.0: fresh, with data; `v2-data` keeps its schema 2 database, `v2-data-schema3` is what the same steps write now), `golden_v21.rs` (v2.1 with a backup region and data; the same encrypted with a fixed key) | the code still writes the same bytes, the frozen files still open, an encrypted image opens only with its key |
+| The database schema (§5.1.1) | `crates/store/tests/golden_schema3.rs`, `golden_schema3_bytes.rs` (`schema3-qos2.txt`), `sqlite.rs` | the frozen schema 2 database migrates to 3 with every row, also after a power cut at any write of the migration; a schema 3 database with QoS 2 state is written byte for byte and reads back |
 | Fuzz targets | `fuzz/fuzz_targets/disk_layout.rs` (superblock slots v2 and the v1 view, size table, the migration record), `disk_backup.rs` (slot header and control block), `disk_crypt.rs` (the sector cipher, the key-file parser, an encrypted disk with damaged sectors opened with the right key, a wrong key and none), `telemetry_recover.rs` (segments and records) | no panic, accepted structures round-trip, a wrong key never opens a disk; CI runs every file in `fuzz/fuzz_targets` (`.github/workflows/fuzz.yml` builds the matrix from the directory) |
 | Procedures under power cuts | `tools/disk/tests/migrate.rs`, `convert.rs`, `crates/store/tests/grow.rs`, `backup.rs`, `scripts/fault-loop.sh` | migrate, grow, backup, encrypt, decrypt and rekey end in a valid disk with all its data after a cut at every write |

@@ -69,7 +69,7 @@ which says what it gives up.
 | TLS records after the handshake | `urmqtt-tls::record` (own) | unit tests; fuzz `tls_record` (garbage rejected, sealed records round-trip, any changed byte fails) |
 | Client certificate identity and serial | `urmqtt-tls::identity` (x509-cert) | fuzz `x509_identity` |
 | MQTT packets | `urmqtt-mqtt` (own, `forbid(unsafe_code)`) | spec and property tests; mosquitto interop; fuzz `mqtt_decode`; the MQTT 5.0 codec (not reachable yet, ADR-273): spec-table tests, captured Mosquitto and paho interop, fuzz `mqtt5_packet`, `mqtt5_props`, Kani |
-| MQTT session behaviour | `urmqtt-broker` (own, `forbid(unsafe_code)`) | 30 host tests; fuzz `broker_input` |
+| MQTT session behaviour, QoS 2 flows (ADR-271) | `urmqtt-broker` (own, `forbid(unsafe_code)`) | host tests (18 for QoS 2), the `qos2_model` proptest; fuzz `broker_input` and `broker_acl` (QoS 2 seeds) |
 | Disk superblock and size table | `urmqtt-store::layout` | fuzz `disk_layout` |
 | Telemetry log on the disk | `urmqtt-store::telemetry` | crash and torn-write tests; fuzz `telemetry_recover` |
 | SQLite database file | SQLite 3.54.1 (vendored), **in the unprivileged database worker** (H6, ADR-210 to ADR-212) | EL0 / ring 3 in its own address space; fault containment and restart (smoke `worker-contain`, `worker-fault`); `quick_check` at boot, `SQLITE_DBCONFIG_DEFENSIVE`; upstream fuzzing |
@@ -715,7 +715,8 @@ Every resource is bounded. What happens at the limit is part of the design:
 | Connections per core | `limits.max_connections_per_core` | refused |
 | Packet size, topic length and levels, client id, topics per packet | `limits.*` | protocol error, connection closed |
 | Subscriptions per session | `limits.max_subscriptions_per_session` | SUBACK failure |
-| QoS 1 in flight, offline queue | `limits.max_inflight_qos1`, `limits.max_queued_per_offline_session` | queued; beyond the queue, new messages are dropped and counted |
+| QoS 1 and 2 in flight, offline queue | `limits.max_inflight_qos1`, `limits.max_queued_per_offline_session` | queued; beyond the queue, new messages are dropped and counted |
+| QoS 2 ids awaiting PUBREL | `max(limits.max_inflight_qos1, 64)` per session (ADR-271) | one more closes the connection, counted (`messages/qos2/inbound_full`) |
 | Publish rate per device | `limits.publish_rate_per_device` | dropped and counted |
 | Output buffered per connection | 32 KiB | QoS 0 dropped, QoS 1 queued |
 | Receive window | broker backpressure | TCP window closes |
