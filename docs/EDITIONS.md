@@ -26,7 +26,7 @@ every PCI function they see, whichever edition the image is.
 
 Everything in this repository, now and in future releases:
 
-- **The protocol:** the MQTT codec and broker (today MQTT 3.1.1 with QoS 0 and 1; MQTT 5.0, QoS 2, MQTT over
+- **The protocol:** the MQTT codec and broker (today MQTT 3.1.1 with QoS 0, 1 and 2; MQTT 5.0, MQTT over
   WebSocket and the other protocol features of [ROADMAP.md](ROADMAP.md) when they are built), the optional
   plaintext listener, the signed control channel, `$SYS`, syslog and statsd.
 - **The network stack:** the own TCP/IP stack and DHCP client, IPv4 today and IPv6 when it is built.
