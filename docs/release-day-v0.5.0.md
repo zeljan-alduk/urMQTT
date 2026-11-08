@@ -44,7 +44,8 @@ scripts/check-release-key.sh                     # ok: release 721316B961DCB94B 
 make repro ENV=release                           # both release kernels, the template ISO and the raw image: identical twice
 ```
 
-Do not tag before CI is green on `$RELEASE_COMMIT`. If a job fails, fix on `main` and start again here; the date in
+Do not tag before CI is green on `$RELEASE_COMMIT`. Before this branch, `main`'s Lint job failed at shellcheck (SC2016
+in `scripts/smoke.sh`, since 3bdbe01); the branch carries the fix (docs/PROGRESS.md, "Release candidate v0.5.0"). If a job fails, fix on `main` and start again here; the date in
 CHANGELOG (`[0.5.0] - 2026-11-09`) is the preparation date: change it in the fix commit if the tag lands on another
 day. Also: `git status` is clean and `git describe --tags` says `v0.4.2-<n>-g<commit>`.
 
