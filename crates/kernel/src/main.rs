@@ -16,6 +16,7 @@ use urmqtt_net as _;
 use urmqtt_plain as _;
 use urmqtt_store as _;
 use urmqtt_tcp as _;
+use urmqtt_ws as _;
 
 mod cmdline;
 
@@ -97,6 +98,8 @@ mod vdev;
 mod vm;
 #[cfg(target_os = "none")]
 mod watchdog;
+#[cfg(target_os = "none")]
+mod websocket;
 
 /// Image version: `git describe` passed in by the Makefile, else the crate version.
 pub const VERSION: &str = match option_env!("URMQTT_VERSION") {

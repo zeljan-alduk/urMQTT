@@ -595,13 +595,15 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     info!("crypto-profile: {profile}");
     // A plaintext login with a password costs CPU in the same handler class
     // as a handshake step (P1): the budget covers the dearer of the two.
-    let passwd_ns = crate::plain::measure();
+    // So does a WebSocket password login (ADR-272): its check runs in the
+    // step that decides the CONNECT, which counts as a handshake step.
+    let passwd_ns = crate::plain::measure().max(crate::websocket::measure());
     let hs_budget = crate::watchdog::calibrate(profile.handshake_ns().max(passwd_ns));
     if passwd_ns > u64::from(hs_budget) * 1_000_000 {
         // ADR-267: a check runs in one handler; dearer than the budget, the
         // watchdog acts (watchdog.action) on every password login.
         warn!(
-            "plaintext: one password check costs {} ms, more than the watchdog's handshake budget of {hs_budget} ms: \
+            "plaintext/websocket: one password check costs {} ms, more than the watchdog's handshake budget of {hs_budget} ms: \
              the watchdog acts on every password login (watchdog.action); hash the passwords with fewer iterations",
             passwd_ns / 1_000_000
         );
@@ -721,6 +723,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
     crate::mqtt_service::init_tickets(s.options.ticket_rotate_s);
     crate::plain::init();
+    crate::websocket::init();
     crate::dataplane::init(data_cores);
     crate::mqtt_service::prepare_trust_anchors();
     crate::dataplane::set_heap_reserve(s.options.heap_limit_mb);

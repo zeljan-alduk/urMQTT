@@ -2620,6 +2620,95 @@ plaintext() {
     done
 }
 
+# ADR-272: MQTT over secure WebSocket. The dev image's configuration plus a
+# [websocket] section, packed with the host tool, one image per mode;
+# scripts/ws-scenarios.py plays the clients: paho-mqtt over wss (what
+# applications use) and a raw client that writes every byte itself
+# (fragments, pings, refused upgrades, violations, a slow request).
+#   mtls      client certificates: QoS 0/1, a packet at the size limit, a
+#             fragmented message with a ping inside, close and abrupt close,
+#             the refusals (origin 403, subprotocol 400, version 426, path 404,
+#             body 400), text 1003, unmasked 1002, reserved bit 1002, a
+#             slowloris request cut at upgrade_timeout_s, a client without a
+#             certificate refused, SMOKE_WS_IDLE upgraded idle connections
+#             (default 10000 under hvf/kvm, 1000 under tcg) and the heap after
+#             them, the operator's $SYS counters
+#   password  logins inside TLS: pubsub with a TLS device, wrong password
+#             (CONNACK 4, close 1008), the section's ACL, clean sessions only,
+#             Origin optional but checked, the lock-out
+# Needs paho-mqtt (python3 -c 'import paho.mqtt') or uv to fetch it.
+websocket() {
+    [[ -z ${SMOKE_SCENARIOS:-} || websocket =~ $SMOKE_SCENARIOS ]] || return 0
+    local py=(python3 -I)
+    if ! python3 -I -c 'import paho.mqtt.client' 2>/dev/null; then
+        if command -v uv >/dev/null; then
+            py=(uv run --quiet --no-project --with 'paho-mqtt>=1.6,<3' python -I)
+        else
+            echo "  ✗ websocket scenarios need paho-mqtt (apt install python3-paho-mqtt) or uv"
+            FAILED=$((FAILED + 1))
+            return 0
+        fi
+    fi
+    local dir="$OUT/ws" tool="$ROOT/target/debug/urmqtt-config" wpt=${SMOKE_WS_PORT:-$((PORT + 2))}
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed"; FAILED=$((FAILED + 1)); return 0; }
+    local h
+    h=$(printf '%s\n' web-secret | "$tool" hash-password --iterations 3000)
+    sed -e 's/^mqtt_plain_port = 1883 .*/mqtt_plain_port = 0/' -e 's/^kernel_heap_mb = .*/kernel_heap_mb = 128/' \
+        "$ROOT/deploy/dev/config.toml" >"$dir/base.toml"
+    mkws() { # mkws <name> <[websocket] lines...>
+        local name=$1
+        shift
+        { cat "$dir/base.toml"; printf '\n[websocket]\nenabled = true\norigins = ["https://app.example.com"]\n'; printf '%s\n' "$@"; } >"$dir/$name.toml"
+        "$tool" pack "$dir/$name.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/$name.blob" >/dev/null
+    }
+    mkws mtls 'upgrade_timeout_s = 3' 'max_connections = 20000' 'max_connections_per_ip = 20000'
+    mkws password 'auth = "password"' "users = [{ id = \"web-1\", password_hash = \"$h\" }]" \
+        'max_failed_auths_per_ip = 3' 'lockout_s = 8' 'max_packet_size = 1024' \
+        'acl_subscribe = ["web/{id}/#", "devices/+/t"]'
+    local common=("mqtt: WebSocket listener on port 8084 \(wss://\.\.\./mqtt, TLS 1\.3, subprotocol mqtt\)" "^URMQTT READY$" "NOT:client: .* FAILED" "$NO_FAULT")
+    local name
+    for name in mtls password; do
+        local extra=() iso="$OUT/ws-$name.raw"
+        case $name in
+            mtls) extra=("origins: https://app\.example\.com" "websocket: 1 connection\(s\) refused: origin" "websocket: 1 connection\(s\) refused: timeout"
+                "websocket: [0-9]+ WebSocket protocol violation\(s\)"
+                "client: wss-mtls-pubsub-qos0-qos1 ok" "client: wss-max-packet-size ok" "client: wss-fragmented-message-and-ping ok"
+                "client: wss-abrupt-close-publishes-the-will ok" "client: wss-wrong-origin-403 ok" "client: wss-wrong-subprotocol-400 ok"
+                "client: wss-wrong-version-426 ok" "client: wss-wrong-path-404 ok" "client: wss-request-with-a-body-400 ok"
+                "client: wss-text-frame-1003 ok" "client: wss-unmasked-frame-1002 ok" "client: wss-reserved-bit-1002 ok"
+                "client: wss-slowloris-upgrade-cut-at-the-deadline ok" "client: wss-mtls-needs-a-client-certificate ok"
+                "client: wss-operator-reads-the-websocket-counters ok") ;;
+            password) extra=("websocket: one password check costs about [0-9]+ us \(3000 iterations" "password login inside TLS, 1 account\(s\)"
+                "websocket: login refused for 10\.0\.2\.2 \(wrong password\), 1 so far" "websocket: 10\.0\.2\.2 is locked out for 8 s after 3 failed login\(s\)"
+                "client: wss-password-pubsub-with-a-device ok" "client: wss-password-refusals-acl-and-clean-session ok"
+                "client: wss-origin-header-optional-but-checked ok" "client: wss-password-lockout ok") ;;
+        esac
+        MKIMG_EXTRA=(--config "$dir/$name.blob")
+        mkimg "$iso" "serve log=info"
+        MKIMG_EXTRA=()
+        for accel in $ACCELS; do
+            local log="$OUT/ws-$name-$accel.log" data="$OUT/ws-$name-$accel.img" status=0 idle=0
+            if [[ $name == mtls ]]; then
+                case $accel in tcg) idle=${SMOKE_WS_IDLE_TCG:-1000} ;; *) idle=${SMOKE_WS_IDLE:-10000} ;; esac
+            fi
+            fresh_disk "$iso" "$data"
+            start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883,$wpt:8084"
+            if wait_log "$log" "^URMQTT READY$" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+                bounded 900 "${py[@]}" "$ROOT/scripts/ws-scenarios.py" "$name" "$wpt" "$PORT" "$ROOT/deploy/dev" "$idle" >"$log.client" 2>&1 || status=$?
+                sleep 1
+            else
+                status=124
+            fi
+            kill_vm
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            local more=()
+            (( idle > 0 )) && more=("client: wss-$idle-idle-connections-no-leak ok")
+            check "websocket-$name [$accel]" "$log" "$status" "${common[@]}" "${extra[@]}" ${more[@]+"${more[@]}"}
+        done
+    done
+}
+
 # GICv2 (ADR-039), what KVM gives a guest on a GIC-400 host such as the
 # Raspberry Pi 4/5. HVF cannot emulate a GICv2, so this runs under TCG:
 # boot with ACPI and DT, then the TLS broker scenarios.
@@ -3873,6 +3962,14 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     exit
 fi
 
+# SMOKE_ONLY=websocket: the MQTT over WebSocket scenarios (ADR-272) of this architecture.
+if [[ ${SMOKE_ONLY:-} == websocket && $ARCH != universal ]]; then
+    websocket
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=hardening: the H4 scenarios of this architecture.
 if [[ ${SMOKE_ONLY:-} == hardening && $ARCH != universal ]]; then
     hardening_suite
@@ -4127,6 +4224,7 @@ scenario x86-disk-q35 "smoke" on \
 want config_packed && config_packed
 want release_kernel && release_kernel
 want plaintext && plaintext
+want websocket && websocket
 scenario x86-fault-unmapped-mmio "smoke test=data-abort" on \
     "EXCEPTION: #PF page fault" "page not present, read, supervisor mode" "NOT:URMQTT READY"
 SMP=8 scenario x86-smp8 "smoke" on \
@@ -4201,6 +4299,7 @@ scenario boot-dtb "smoke" off \
 want config_packed && config_packed
 want release_kernel && release_kernel
 want plaintext && plaintext
+want websocket && websocket
 scenario fault-data-abort "smoke test=data-abort" on \
     "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
     "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \

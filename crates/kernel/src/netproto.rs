@@ -56,6 +56,7 @@ fn is_mqtt_port(port: u16) -> bool {
     (CONFIG.network.mqtt_tls_port != 0 && port == CONFIG.network.mqtt_tls_port)
         || CONFIG.network.mqtt_plain_port == Some(port)
         || crate::plain::port() == Some(port)
+        || crate::websocket::port() == Some(port)
 }
 
 fn ip_str(a: [u8; 4]) -> alloc::string::String {

@@ -29,6 +29,9 @@ use crate::dataplane::{self, CoreMsg, Link, Tconn};
 use crate::db::{self, DbReq, DbResp, LogBatch, Restored};
 use crate::watchdog;
 
+/// The WebSocket listener's connections (ADR-272).
+mod ws;
+
 /// Reply bytes in flight from a home core to one relayed connection.
 const RELAY_CREDIT: usize = 32 * 1024;
 const RELAY_CHUNK: usize = 16 * 1024;
@@ -240,6 +243,8 @@ pub struct MqttService {
     /// The plaintext listener (P1, ADR-230); `None` unless the image's
     /// configuration switches it on.
     plain: Option<Box<crate::plain::PlainState>>,
+    /// The WebSocket listener (ADR-272); `None` unless switched on.
+    ws: Option<Box<crate::websocket::WsState>>,
 }
 
 /// This core's telemetry ring to the DB core.
@@ -391,6 +396,7 @@ pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
         fanout,
         control_ids: CONFIG.control.service_ids,
         plain: crate::plain::broker_policy(),
+        web: crate::websocket::broker_policy(),
     }
 }
 
@@ -457,6 +463,12 @@ pub fn prepare_trust_anchors() {
 /// This core's TLS server: the image's trust anchors by role and the
 /// revocation list shared with the control channel (H1).
 fn tls_server() -> Option<TlsServer> {
+    tls_server_with(true)
+}
+
+/// `client_auth` false: the same server asking for no client certificate,
+/// for the WebSocket listener's password mode (ADR-272).
+fn tls_server_with(client_auth: bool) -> Option<TlsServer> {
     let setup = ServerSetup {
         operational_ca_pems: urmqtt_config::CONFIG.trust.operational,
         bootstrap_ca_pems: urmqtt_config::CONFIG.trust.bootstrap,
@@ -470,7 +482,12 @@ fn tls_server() -> Option<TlsServer> {
         revocations: crate::control::revocations(),
         tickets: tickets(),
     };
-    match TlsServer::new(&setup) {
+    let made = if client_auth {
+        TlsServer::new(&setup)
+    } else {
+        TlsServer::new_server_only(&setup)
+    };
+    match made {
         Ok(s) => Some(s),
         Err(e) => {
             warn!("tls: server setup failed: {e:?}");
@@ -528,6 +545,7 @@ impl MqttService {
                 );
             }
             crate::plain::announce(dataplane::workers(n).len());
+            crate::websocket::announce(dataplane::workers(n).len());
         }
         let mut broker = Broker::new(broker_config(MAX_CONNS * n, n > 1));
         let mut homed = 0;
@@ -622,6 +640,7 @@ impl MqttService {
             ticket_rotations_seen: 0,
             sys: crate::sys::Sys::new(me, n),
             plain: crate::plain::PlainState::new(),
+            ws: crate::websocket::WsState::new(|| tls_server_with(false)),
         }
     }
 
@@ -701,6 +720,9 @@ impl MqttService {
         if let Some(pl) = &self.plain {
             p.push(pl.port());
         }
+        if let Some(w) = &self.ws {
+            p.push(w.port());
+        }
         p
     }
 
@@ -731,6 +753,11 @@ impl MqttService {
                 .plain
                 .as_mut()
                 .is_some_and(|p| p.syn_ok(ip, now_ms, heap_ok, behind));
+        }
+        // The WebSocket port: its own limits first, then the TLS admission
+        // like any TLS connection (ADR-272).
+        if self.is_ws_port(port) && !self.ws.as_mut().is_some_and(|w| w.syn_ok(ip, now_ms)) {
+            return false;
         }
         let tls = Some(port) != self.plain_port;
         let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
@@ -812,6 +839,9 @@ impl MqttService {
     fn drop_conn(&mut self, c: u32, now_ms: u64) {
         if let Some(p) = self.plain.as_mut() {
             p.release(c, (now_ms / 1000) as u32);
+        }
+        if let Some(w) = self.ws.as_mut() {
+            w.release(c, now_ms);
         }
         self.conns.remove(&c);
     }
@@ -909,12 +939,27 @@ impl MqttService {
         } else if !self.admit(tls, ip, now_ms) {
             return false;
         }
+        // The WebSocket listener counts its own connections (ADR-272).
+        let ws = self.is_ws_port(port);
+        if ws && !self.ws.as_mut().is_some_and(|w| w.accept(c, ip, now_ms)) {
+            self.adm.leave(ip, Outcome::Failed);
+            return false;
+        }
         let session = if tls {
-            match self.tls.as_ref().and_then(|t| t.accept().ok()) {
+            // Password mode over WebSocket: the server without client
+            // certificates; otherwise the TLS port's.
+            let server = match self.ws.as_ref().and_then(|w| w.server_only()) {
+                Some(s) if ws => Some(s),
+                _ => self.tls.as_ref(),
+            };
+            match server.and_then(|t| t.accept().ok()) {
                 Some(s) => Some(s),
                 None => {
                     // Admitted but no session could be built: give the slot back.
                     self.adm.leave(ip, Outcome::Failed);
+                    if let Some(w) = self.ws.as_mut() {
+                        w.release(c, now_ms);
+                    }
                     return false;
                 }
             }
@@ -971,7 +1016,9 @@ impl MqttService {
         self.conns
             .get(&c)
             .is_some_and(|k| match k.session.as_ref() {
-                Some(s) => !s.is_established(),
+                // A WebSocket connection is handshaking until its upgrade (and
+                // in password mode its login, a password check) is done.
+                Some(s) => !s.is_established() || (k.peer.is_none() && self.is_ws(c)),
                 None => k.peer.is_none() && self.plain.as_ref().is_some_and(|p| p.has(c)),
             })
     }
@@ -1020,24 +1067,33 @@ impl MqttService {
                     self.mark_blocked(c);
                     return;
                 }
-                let home = dataplane::home_of(&identity, self.n);
-                if let Some(dbl) = self.db.as_mut()
-                    && !bootstrap
-                {
-                    dbl.seen(&identity);
-                }
-                debug!(
-                    "tls: {identity} authenticated ({suite}{}{}) on core {}, session on core {home}",
-                    if resumed { ", resumed" } else { "" },
-                    if bootstrap { ", bootstrap role" } else { "" },
-                    self.me
-                );
-                if self.attach(c, home, Some(&identity), bootstrap, link, now_ms) {
-                    self.leave_flight(c, Leave::Done, now_ms);
+                // WebSocket (ADR-272): the session waits for the upgrade (whose
+                // request may already be in `self.app`, handled below).
+                if self.is_ws(c) {
+                    self.ws_tls_done(c, Some((identity, bootstrap)));
                 } else {
-                    self.start_close(c);
+                    let home = dataplane::home_of(&identity, self.n);
+                    if let Some(dbl) = self.db.as_mut()
+                        && !bootstrap
+                    {
+                        dbl.seen(&identity);
+                    }
+                    debug!(
+                        "tls: {identity} authenticated ({suite}{}{}) on core {}, session on core {home}",
+                        if resumed { ", resumed" } else { "" },
+                        if bootstrap { ", bootstrap role" } else { "" },
+                        self.me
+                    );
+                    if self.attach(c, home, Some(&identity), bootstrap, link, now_ms) {
+                        self.leave_flight(c, Leave::Done, now_ms);
+                    } else {
+                        self.start_close(c);
+                    }
                 }
             }
+            // Only the WebSocket listener's password mode has such sessions.
+            Ok(Event::EstablishedServerOnly { .. }) if self.is_ws(c) => self.ws_tls_done(c, None),
+            Ok(Event::EstablishedServerOnly { .. }) => self.start_close(c),
             Ok(Event::PeerClosed) => self.start_close(c),
             Ok(Event::None) => {}
             Err(e) => {
@@ -1046,8 +1102,13 @@ impl MqttService {
             }
         }
         if !self.app.is_empty() {
-            let app = core::mem::take(&mut self.app);
-            self.deliver(c, &app, link, now_ms);
+            let mut app = core::mem::take(&mut self.app);
+            if self.is_ws(c) {
+                self.ws_input(c, &mut app, link, now_ms);
+            } else {
+                self.deliver(c, &app, link, now_ms);
+            }
+            app.clear();
             self.app = app;
         }
         self.mark_blocked(c);
@@ -1055,6 +1116,9 @@ impl MqttService {
 
     /// The peer sent FIN: the session ends now (MQTT has no half-close).
     fn on_peer_closed(&mut self, c: u32, link: &mut Link, now_ms: u64) {
+        if let Some(w) = self.ws.as_mut() {
+            w.peer_gone(c);
+        }
         self.detach(c, link, now_ms);
         self.start_close(c);
         self.mark_blocked(c);
@@ -1229,7 +1293,7 @@ impl MqttService {
                     .get_mut(&c)
                     .map(|k| k.early.take())
                     .unwrap_or_default();
-                if self.attach_plain(c, home, identity, link, now_ms) {
+                if self.attach_plain(c, home, identity, false, link, now_ms) {
                     self.leave_flight(c, Leave::Done, now_ms);
                     self.deliver(c, &early, link, now_ms);
                 } else {
@@ -1253,12 +1317,14 @@ impl MqttService {
         self.mark_blocked(c);
     }
 
-    /// Like `attach`, for a plaintext connection of `identity`.
+    /// Like `attach`, for a plaintext connection of `identity`, or (`web`) a
+    /// WebSocket password connection (ADR-272).
     fn attach_plain(
         &mut self,
         c: u32,
         home: usize,
         identity: &str,
+        web: bool,
         link: &mut Link,
         now_ms: u64,
     ) -> bool {
@@ -1269,7 +1335,12 @@ impl MqttService {
             let Some(b) = self.broker.open(now_ms) else {
                 return false;
             };
-            if !self.broker.set_plain_identity(b, identity) {
+            let bound = if web {
+                self.broker.set_web_identity(b, identity)
+            } else {
+                self.broker.set_plain_identity(b, identity)
+            };
+            if !bound {
                 self.broker.closed(b, now_ms);
                 return false;
             }
@@ -1281,6 +1352,7 @@ impl MqttService {
                 CoreMsg::OpenPlain {
                     tconn: k.tconn,
                     identity: identity.into(),
+                    web,
                 },
             );
             k.peer = Some(Peer::Remote { home: home as u16 });
@@ -1312,6 +1384,10 @@ impl MqttService {
         {
             k.closing = true;
             if let Some(sess) = k.session.as_mut() {
+                // A WebSocket connection says goodbye in a close frame first.
+                if let Some(w) = self.ws.as_mut() {
+                    w.send_close(c, sess, k.pending.vec_mut());
+                }
                 sess.close(k.pending.vec_mut());
             }
             self.blocked.push(c);
@@ -1357,8 +1433,18 @@ impl MqttService {
                 }
                 None => link.send(peer, CoreMsg::Close { tconn }),
             },
-            CoreMsg::OpenPlain { tconn, identity } => match self.broker.open(now_ms) {
-                Some(b) if self.broker.set_plain_identity(b, &identity) => {
+            CoreMsg::OpenPlain {
+                tconn,
+                identity,
+                web,
+            } => match self.broker.open(now_ms) {
+                Some(b)
+                    if if web {
+                        self.broker.set_web_identity(b, &identity)
+                    } else {
+                        self.broker.set_plain_identity(b, &identity)
+                    } =>
+                {
                     self.remote.insert(
                         b,
                         Remote {
@@ -1461,6 +1547,9 @@ impl MqttService {
         self.by_broker.0.shrink();
         self.flights.0.shrink();
         self.remote.0.shrink();
+        if let Some(w) = self.ws.as_mut() {
+            w.shrink();
+        }
         for t in &mut self.by_tconn {
             t.0.shrink();
         }
@@ -1489,6 +1578,7 @@ impl MqttService {
             self.last_tick_ms = now_ms;
             self.broker.tick(now_ms);
             self.expire_handshakes(link, now_ms);
+            self.ws_expire(link, now_ms);
             self.publish_admission(now_ms);
             if let Some(p) = self.plain.as_mut() {
                 // The plaintext listener judges its exposure from the address
@@ -1649,7 +1739,9 @@ impl MqttService {
                 |id, role| {
                     !matches!(
                         role,
-                        urmqtt_broker::Role::Device | urmqtt_broker::Role::Plain
+                        urmqtt_broker::Role::Device
+                            | urmqtt_broker::Role::Plain
+                            | urmqtt_broker::Role::Web
                     ) || crate::control::admitted(id)
                 },
                 CloseReason::Disallowed,
@@ -1675,7 +1767,18 @@ impl MqttService {
                 let n = out.len();
                 match k.session.as_mut() {
                     Some(sess) => {
-                        if sess.send(out, k.pending.vec_mut()).is_err() {
+                        // WebSocket: in a binary frame (ADR-272).
+                        let r = match self.ws.as_mut().filter(|w| w.framed(c)) {
+                            Some(w) => w.send(
+                                c,
+                                sess,
+                                urmqtt_ws::frame::op::BINARY,
+                                out,
+                                k.pending.vec_mut(),
+                            ),
+                            None => sess.send(out, k.pending.vec_mut()),
+                        };
+                        if r.is_err() {
                             k.closing = true;
                         }
                     }
@@ -1741,7 +1844,17 @@ impl MqttService {
                 };
                 match k.session.as_mut() {
                     Some(sess) => {
-                        if sess.send(&data, k.pending.vec_mut()).is_err() {
+                        let r = match self.ws.as_mut().filter(|w| w.framed(c)) {
+                            Some(w) => w.send(
+                                c,
+                                sess,
+                                urmqtt_ws::frame::op::BINARY,
+                                &data,
+                                k.pending.vec_mut(),
+                            ),
+                            None => sess.send(&data, k.pending.vec_mut()),
+                        };
+                        if r.is_err() {
                             k.closing = true;
                         }
                     }
@@ -1758,6 +1871,9 @@ impl MqttService {
             if k.remote_close && k.outq.is_none() && !k.closing {
                 k.closing = true;
                 if let Some(sess) = k.session.as_mut() {
+                    if let Some(w) = self.ws.as_mut() {
+                        w.send_close(c, sess, k.pending.vec_mut());
+                    }
                     sess.close(k.pending.vec_mut());
                 }
             }

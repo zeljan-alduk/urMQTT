@@ -82,8 +82,13 @@ pub enum CoreMsg {
         bootstrap: bool,
     },
     /// Transport → home: a new connection of the plaintext listener, whose
-    /// login (P1, ADR-230) established `identity`.
-    OpenPlain { tconn: Tconn, identity: Box<str> },
+    /// login (P1, ADR-230) established `identity`; `web`: of the WebSocket
+    /// listener's password mode instead (ADR-272).
+    OpenPlain {
+        tconn: Tconn,
+        identity: Box<str>,
+        web: bool,
+    },
     /// Transport → home: plaintext MQTT bytes from the client.
     Input { tconn: Tconn, data: Vec<u8> },
     /// Transport → home: the connection is gone.

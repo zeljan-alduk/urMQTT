@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 
 use urmqtt_cfg::net::Cidr;
 use urmqtt_cfg::passwd::PasswordHash;
-use urmqtt_config::{PlainAuth, Plaintext};
+use urmqtt_config::{PlainAuth, PlainUser, Plaintext};
 
 /// Why a login was refused (for the log and the counters; the client only
 /// learns the CONNACK code).
@@ -123,6 +123,28 @@ impl<'a> Authenticator<'a> {
         }
     }
 
+    /// Password mode over `users`, the accounts of another listener (the
+    /// WebSocket one, ADR-272): the same check, the same decoy, the same
+    /// answers.
+    pub fn password_only(users: &'a [PlainUser]) -> Self {
+        let users: Vec<(&str, PasswordHash)> = users
+            .iter()
+            .filter_map(|u| PasswordHash::parse(u.hash).ok().map(|h| (u.id, h)))
+            .collect();
+        let iterations = users
+            .iter()
+            .map(|(_, h)| h.iterations())
+            .max()
+            .unwrap_or(urmqtt_cfg::passwd::DEFAULT_ITERATIONS);
+        Self {
+            mode: PlainAuth::Password,
+            users,
+            anonymous: "",
+            networks: Vec::new(),
+            decoy: PasswordHash::decoy(iterations),
+        }
+    }
+
     pub fn mode(&self) -> PlainAuth {
         self.mode
     }
@@ -189,6 +211,35 @@ mod tests {
     use super::*;
     use urmqtt_cfg::passwd;
     use urmqtt_config::{PlainNetwork, PlainUser};
+
+    /// ADR-272: the WebSocket listener's accounts, checked as in password
+    /// mode: credentials, unknown user, wrong password, success.
+    #[test]
+    fn password_only_checks_another_account_list() {
+        let hash = passwd::encode(b"secret", b"0123456789abcdef", 1000).unwrap();
+        let hash: &'static str = Box::leak(hash.into_boxed_str());
+        let users: &'static [PlainUser] = Box::leak(Box::new([PlainUser { id: "web-1", hash }]));
+        let a = Authenticator::password_only(users);
+        assert_eq!(a.mode(), PlainAuth::Password);
+        assert_eq!(a.max_iterations(), 1000);
+        let src = [10, 0, 0, 1];
+        assert_eq!(
+            a.authenticate(src, Some("web-1"), Some(b"secret")),
+            Verdict::Accept("web-1")
+        );
+        assert_eq!(
+            a.authenticate(src, Some("web-1"), Some(b"nope")),
+            Verdict::Reject(Rejection::WrongPassword)
+        );
+        assert_eq!(
+            a.authenticate(src, Some("web-2"), Some(b"secret")),
+            Verdict::Reject(Rejection::UnknownUser)
+        );
+        assert_eq!(
+            a.authenticate(src, None, None),
+            Verdict::Reject(Rejection::NoCredentials)
+        );
+    }
 
     /// A configuration with leaked slices (the kernel's are `'static` too).
     fn config(
