@@ -1,0 +1,191 @@
+# NOW-13b, ADR-270, FIRST version (1a80680 kernel: the interrupt armed at every sleep, no hold). Same rig and method as
+# now13b-rx-irq-rig.txt. Kept because it is the evidence for the 2 ms hold: with one data core (smp 2) the flood delivered
+# 261-263k/s against 325-340k/s polled and the 16 x 1000/s p99 was 20-21 ms against 12-14 ms, with 1-2k receive interrupts
+# a second; with 3 data cores (smp 4) no difference. Round 1's QEMU PID came from `pgrep -P` (the script printed it without
+# the process name); from round 2 the script names the process (all measured PIDs were qemu-system-aarch64: run-qemu.sh execs it).
+# The first irq smp 2 run's a0 overlapped 1 min of a `make check` on the same machine.
+# lock taken 2026-11-08T12:08:53Z round 1 smp 2
+== mode=irq smp=2 rtt_cfg=4ms qemu_pid=60258 2026-11-08T12:09:14Z
+boot: net: receive wake-up: interrupt (MSI-X via GICv2m SPI 80, to core 0); no polling while asleep
+a0 ping, no connection: rtt min/avg/max/mdev = 5.175/7.754/15.132/1.473 ms
+a1 ping, one idle connection: rtt min/avg/max/mdev = 5.739/7.824/13.240/1.079 ms
+a2 mqtt 1 pub/1 sub 5 msg/s, one idle connection: RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=5 sent_per_s=5 acked_per_s=0 delivered_per_s=5 lat_p50_ms=7.10 lat_p90_ms=8.29 lat_p99_ms=9.29 lat_max_ms=10.90 samples=100 gen_cpu=0.02 ready=2 failed=0 lost=0
+b0 qemu cpu, 0 connections, 60 s: 1.35 s = 2.3 % of one host CPU
+b1 qemu cpu, 100 of 100 connections idle, 60 s: 1.37 s = 2.3 % of one host CPU
+c rate=1000 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=1000 sent_per_s=16000 acked_per_s=0 delivered_per_s=16002 lat_p50_ms=6.17 lat_p90_ms=9.04 lat_p99_ms=19.75 lat_max_ms=59.04 samples=160033 gen_cpu=0.27 ready=32 failed=0 lost=0
+c rate=0 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=261533 acked_per_s=0 delivered_per_s=261373 lat_p50_ms=158.55 lat_p90_ms=318.85 lat_p99_ms=685.46 lat_max_ms=1022.15 samples=2613976 gen_cpu=0.35 ready=32 failed=0 lost=0
+core 0 statistics (last 6 windows):
+  dataplane: core 0: busy 3%, work 1% (rx 0%, of it tls 0%, poll 0%, tcp 0%, mesh 0%, nic 0%), 32 connection(s) accepted (1954 us of work, 398 us of it TLS, each), 6190 frame(s) dispatched, 318 receive interrupt(s), 175571 loop passes in 5001 ms, ...
+  dataplane: core 0: busy 30%, work 14% (rx 4%, of it tls 2%, poll 4%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 112628 frame(s) dispatched, 5906 receive interrupt(s), 1604017 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 31%, work 16% (rx 6%, of it tls 3%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 109282 frame(s) dispatched, 9016 receive interrupt(s), 1520578 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 64%, work 54% (rx 43%, of it tls 31%, poll 7%, tcp 1%, mesh 0%, nic 1%), 32 connection(s) accepted (85465 us of work, 49903 us of it TLS, each), 123968 frame(s) dispatched, 3856 receive interrupt(s), 762624 loop passes in 5000 ...
+  dataplane: core 0: busy 82%, work 75% (rx 63%, of it tls 46%, poll 8%, tcp 1%, mesh 0%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 106205 frame(s) dispatched, 2115 receive interrupt(s), 174384 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 69%, work 65% (rx 55%, of it tls 41%, poll 7%, tcp 1%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 129449 frame(s) dispatched, 791 receive interrupt(s), 163335 loop passes in 5004 ms, ...
+  [  256.296712] INFO  stalls: core 0: 2 late tick(s), worst 12346 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 256 of 256
+  [  258.870308] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 9166 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  266.296924] INFO  stalls: core 0: 5 late tick(s), worst 11506 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 243 of 256
+  [  266.296925] WARN  dataplane: frames dropped in 5000 ms: 0 for a worker core that is behind, 0 for the dispatcher, 0 for a full NIC queue (workers' frames), 76 for a full NIC queue (core 0's own); TCP retransmits them
+  [  268.873434] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 1099 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+
+== mode=poll smp=2 rtt_cfg=4ms qemu_pid=65936 2026-11-08T12:13:54Z
+boot: net: receive wake-up: polling every 200 us while connections exist (devices.virtio_net_interrupt = "off")
+a0 ping, no connection: rtt min/avg/max/mdev = 7.448/12.880/25.405/3.952 ms
+a1 ping, one idle connection: rtt min/avg/max/mdev = 5.446/7.953/22.831/2.131 ms
+a2 mqtt 1 pub/1 sub 5 msg/s, one idle connection: RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=5 sent_per_s=5 acked_per_s=0 delivered_per_s=5 lat_p50_ms=7.33 lat_p90_ms=8.41 lat_p99_ms=8.77 lat_max_ms=8.91 samples=100 gen_cpu=0.02 ready=2 failed=0 lost=0
+b0 qemu cpu, 0 connections, 60 s: 1.45 s = 2.4 % of one host CPU
+b1 qemu cpu, 100 of 100 connections idle, 60 s: 14.73 s = 24.5 % of one host CPU
+c rate=1000 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=1000 sent_per_s=16001 acked_per_s=0 delivered_per_s=15999 lat_p50_ms=6.11 lat_p90_ms=8.06 lat_p99_ms=14.30 lat_max_ms=25.20 samples=160000 gen_cpu=0.27 ready=32 failed=0 lost=0
+c rate=0 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=339671 acked_per_s=0 delivered_per_s=339468 lat_p50_ms=114.52 lat_p90_ms=313.95 lat_p99_ms=442.93 lat_max_ms=598.99 samples=3162359 gen_cpu=0.38 ready=32 failed=0 lost=0
+core 0 statistics (last 6 windows):
+  dataplane: core 0: busy 16%, work 5% (rx 0%, of it tls 0%, poll 1%, tcp 1%, mesh 1%, nic 1%), 32 connection(s) accepted (9141 us of work, 276 us of it TLS, each), 3522 frame(s) dispatched, 0 receive interrupt(s), 1557417 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 37%, work 17% (rx 4%, of it tls 2%, poll 5%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 111083 frame(s) dispatched, 0 receive interrupt(s), 2544020 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 39%, work 19% (rx 5%, of it tls 3%, poll 6%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 110366 frame(s) dispatched, 0 receive interrupt(s), 2334933 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 69%, work 58% (rx 45%, of it tls 33%, poll 8%, tcp 2%, mesh 0%, nic 1%), 32 connection(s) accepted (91540 us of work, 52779 us of it TLS, each), 143173 frame(s) dispatched, 0 receive interrupt(s), 1190404 loop passes in 5000 ...
+  dataplane: core 0: busy 90%, work 83% (rx 70%, of it tls 52%, poll 9%, tcp 2%, mesh 0%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 165495 frame(s) dispatched, 0 receive interrupt(s), 403559 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 71%, work 65% (rx 55%, of it tls 41%, poll 7%, tcp 1%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 129009 frame(s) dispatched, 0 receive interrupt(s), 480345 loop passes in 5009 ms, longest ...
+  [  166.152439] INFO  stalls: core 0: 3 late tick(s), worst 51785 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 0 of 256
+  [  171.152743] INFO  stalls: core 0: 2 late tick(s), worst 48465 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 0 of 256
+  [  258.374445] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 13620 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  261.154754] INFO  stalls: core 0: 0 late tick(s), worst 0 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 256 of 256
+  [  268.374298] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 2242 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+
+# lock released 2026-11-08T12:18:15Z
+# lock taken 2026-11-08T12:18:15Z round 1 smp 4
+== mode=irq smp=4 rtt_cfg=4ms qemu_pid=75883 2026-11-08T12:18:35Z
+boot: net: receive wake-up: interrupt (MSI-X via GICv2m SPI 80, to core 0); no polling while asleep
+a0 ping, no connection: rtt min/avg/max/mdev = 5.473/7.672/9.367/0.874 ms
+a1 ping, one idle connection: rtt min/avg/max/mdev = 5.570/7.623/13.073/1.105 ms
+a2 mqtt 1 pub/1 sub 5 msg/s, one idle connection: RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=5 sent_per_s=5 acked_per_s=0 delivered_per_s=5 lat_p50_ms=7.16 lat_p90_ms=11.14 lat_p99_ms=16.36 lat_max_ms=18.74 samples=100 gen_cpu=0.02 ready=2 failed=0 lost=0
+b0 qemu cpu, 0 connections, 60 s: 2.86 s = 4.8 % of one host CPU
+b1 qemu cpu, 100 of 100 connections idle, 60 s: 2.84 s = 4.7 % of one host CPU
+c rate=1000 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=1000 sent_per_s=16001 acked_per_s=0 delivered_per_s=16008 lat_p50_ms=5.43 lat_p90_ms=7.63 lat_p99_ms=12.18 lat_max_ms=19.32 samples=160096 gen_cpu=0.27 ready=32 failed=0 lost=0
+c rate=0 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=339341 acked_per_s=0 delivered_per_s=338982 lat_p50_ms=122.10 lat_p90_ms=237.45 lat_p99_ms=369.20 lat_max_ms=520.13 samples=3181776 gen_cpu=0.33 ready=32 failed=0 lost=0
+core 0 statistics (last 6 windows):
+  dataplane: core 0: busy 3%, work 1% (rx 0%, of it tls 0%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 7800 frame(s) dispatched, 188 receive interrupt(s), 132568 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 35%, work 21% (rx 0%, of it tls 0%, poll 4%, tcp 1%, mesh 1%, nic 13%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 267866 frame(s) dispatched, 8101 receive interrupt(s), 1698472 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 36%, work 21% (rx 0%, of it tls 0%, poll 4%, tcp 1%, mesh 1%, nic 13%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 269656 frame(s) dispatched, 8095 receive interrupt(s), 1752532 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 50%, work 28% (rx 0%, of it tls 0%, poll 5%, tcp 2%, mesh 2%, nic 17%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 314227 frame(s) dispatched, 4468 receive interrupt(s), 3131916 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 58%, work 31% (rx 0%, of it tls 0%, poll 6%, tcp 3%, mesh 3%, nic 18%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 330647 frame(s) dispatched, 2949 receive interrupt(s), 3955754 loop passes in 5002 ms, ...
+  dataplane: core 0: busy 49%, work 26% (rx 0%, of it tls 0%, poll 5%, tcp 3%, mesh 2%, nic 15%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 274357 frame(s) dispatched, 2834 receive interrupt(s), 3361729 loop passes in 5007 ms, ...
+  [   15.998142] WARN  EPHEMERAL: data is lost on reboot (live mode, 50 MiB RAM store)
+  [  258.879000] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 21167 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  258.919659] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 14911 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  268.886948] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 413 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  268.925735] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 1273 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+
+== mode=poll smp=4 rtt_cfg=4ms qemu_pid=80863 2026-11-08T12:23:15Z
+boot: net: receive wake-up: polling every 200 us while connections exist (devices.virtio_net_interrupt = "off")
+a0 ping, no connection: rtt min/avg/max/mdev = 6.437/11.809/19.129/3.116 ms
+a1 ping, one idle connection: rtt min/avg/max/mdev = 5.404/7.294/22.448/1.893 ms
+a2 mqtt 1 pub/1 sub 5 msg/s, one idle connection: RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=5 sent_per_s=5 acked_per_s=0 delivered_per_s=5 lat_p50_ms=7.14 lat_p90_ms=8.11 lat_p99_ms=8.36 lat_max_ms=8.78 samples=100 gen_cpu=0.02 ready=2 failed=0 lost=0
+b0 qemu cpu, 0 connections, 60 s: 2.85 s = 4.7 % of one host CPU
+b1 qemu cpu, 100 of 100 connections idle, 60 s: 17.94 s = 29.9 % of one host CPU
+c rate=1000 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=1000 sent_per_s=16001 acked_per_s=0 delivered_per_s=15994 lat_p50_ms=6.70 lat_p90_ms=12.33 lat_p99_ms=21.26 lat_max_ms=43.76 samples=159946 gen_cpu=0.32 ready=32 failed=0 lost=0
+c rate=0 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=114522 acked_per_s=0 delivered_per_s=114325 lat_p50_ms=254.87 lat_p90_ms=986.41 lat_p99_ms=1736.33 lat_max_ms=2587.26 samples=1143319 gen_cpu=0.29 ready=32 failed=0 lost=0
+core 0 statistics (last 6 windows):
+  dataplane: core 0: busy 36%, work 19% (rx 0%, of it tls 0%, poll 4%, tcp 2%, mesh 1%, nic 10%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 210669 frame(s) dispatched, 0 receive interrupt(s), 2156697 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 41%, work 22% (rx 0%, of it tls 0%, poll 4%, tcp 2%, mesh 2%, nic 13%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 228391 frame(s) dispatched, 0 receive interrupt(s), 2154008 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 50%, work 27% (rx 0%, of it tls 0%, poll 5%, tcp 2%, mesh 2%, nic 15%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 254991 frame(s) dispatched, 0 receive interrupt(s), 2918899 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 42%, work 21% (rx 0%, of it tls 0%, poll 4%, tcp 2%, mesh 2%, nic 11%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 131518 frame(s) dispatched, 0 receive interrupt(s), 1860254 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 37%, work 18% (rx 0%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 10%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 86112 frame(s) dispatched, 0 receive interrupt(s), 1218583 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 3%, work 1% (rx 0%, of it tls 0%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 1622 frame(s) dispatched, 0 receive interrupt(s), 134986 loop passes in 5001 ms, longest stall ...
+  [  258.887726] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 213 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  259.740012] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 2383 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  261.065882] INFO  stalls: core 0: 16 late tick(s), worst 8246 us; 2042 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 244 of 256
+  [  268.907331] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 15186 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  269.769207] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 461 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+
+# lock released 2026-11-08T12:27:36Z
+# lock taken 2026-11-08T12:27:36Z round 2 smp 2
+== mode=irq smp=2 rtt_cfg=4ms qemu_pid=2790 2026-11-08T12:27:55Z
+boot: net: receive wake-up: interrupt (MSI-X via GICv2m SPI 80, to core 0); no polling while asleep
+a0 ping, no connection: rtt min/avg/max/mdev = 5.801/7.419/10.640/1.187 ms
+a1 ping, one idle connection: rtt min/avg/max/mdev = 5.507/11.799/44.998/8.583 ms
+a2 mqtt 1 pub/1 sub 5 msg/s, one idle connection: RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=5 sent_per_s=5 acked_per_s=0 delivered_per_s=5 lat_p50_ms=7.02 lat_p90_ms=10.12 lat_p99_ms=17.73 lat_max_ms=20.50 samples=100 gen_cpu=0.02 ready=2 failed=0 lost=0
+b0 qemu cpu, 0 connections, 60 s: 1.40 s = 2.3 % of one host CPU
+b1 qemu cpu, 100 of 100 connections idle, 60 s: 1.42 s = 2.4 % of one host CPU
+c rate=1000 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=1000 sent_per_s=16000 acked_per_s=0 delivered_per_s=15998 lat_p50_ms=6.29 lat_p90_ms=10.11 lat_p99_ms=21.38 lat_max_ms=56.93 samples=159998 gen_cpu=0.27 ready=32 failed=0 lost=0
+c rate=0 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=262901 acked_per_s=0 delivered_per_s=262661 lat_p50_ms=106.34 lat_p90_ms=389.48 lat_p99_ms=961.32 lat_max_ms=1618.58 samples=2626771 gen_cpu=0.35 ready=32 failed=0 lost=0
+core 0 statistics (last 6 windows):
+  dataplane: core 0: busy 3%, work 1% (rx 0%, of it tls 0%, poll 0%, tcp 0%, mesh 0%, nic 0%), 32 connection(s) accepted (1987 us of work, 408 us of it TLS, each), 6509 frame(s) dispatched, 400 receive interrupt(s), 178875 loop passes in 5001 ms, ...
+  dataplane: core 0: busy 30%, work 14% (rx 4%, of it tls 2%, poll 4%, tcp 1%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 109595 frame(s) dispatched, 6614 receive interrupt(s), 1593188 loop passes in 5001 ms, ...
+  dataplane: core 0: busy 31%, work 16% (rx 6%, of it tls 4%, poll 5%, tcp 1%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 106584 frame(s) dispatched, 12109 receive interrupt(s), 1364773 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 64%, work 54% (rx 43%, of it tls 31%, poll 7%, tcp 1%, mesh 0%, nic 1%), 32 connection(s) accepted (85193 us of work, 48874 us of it TLS, each), 113844 frame(s) dispatched, 3810 receive interrupt(s), 639345 loop passes in 5007 ...
+  dataplane: core 0: busy 79%, work 73% (rx 62%, of it tls 45%, poll 8%, tcp 1%, mesh 0%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 117589 frame(s) dispatched, 1983 receive interrupt(s), 191038 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 69%, work 65% (rx 55%, of it tls 41%, poll 7%, tcp 1%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 128461 frame(s) dispatched, 933 receive interrupt(s), 171091 loop passes in 5002 ms, ...
+  [  256.286291] INFO  stalls: core 0: 4 late tick(s), worst 6300 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 237 of 256
+  [  259.042252] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 12841 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  261.293397] INFO  stalls: core 0: 5 late tick(s), worst 21850 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 214 of 256
+  [  266.293436] INFO  stalls: core 0: 5 late tick(s), worst 20755 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 233 of 256
+  [  269.047378] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 599 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+
+== mode=poll smp=2 rtt_cfg=4ms qemu_pid=15000(qemu-system-aarch64) 2026-11-08T12:32:36Z
+boot: net: receive wake-up: polling every 200 us while connections exist (devices.virtio_net_interrupt = "off")
+a0 ping, no connection: rtt min/avg/max/mdev = 6.581/12.194/18.969/3.405 ms
+a1 ping, one idle connection: rtt min/avg/max/mdev = 5.601/8.676/20.976/2.596 ms
+a2 mqtt 1 pub/1 sub 5 msg/s, one idle connection: RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=5 sent_per_s=5 acked_per_s=0 delivered_per_s=5 lat_p50_ms=7.01 lat_p90_ms=8.25 lat_p99_ms=9.05 lat_max_ms=9.11 samples=100 gen_cpu=0.02 ready=2 failed=0 lost=0
+b0 qemu cpu, 0 connections, 60 s: 1.41 s = 2.4 % of one host CPU
+b1 qemu cpu, 100 of 100 connections idle, 60 s: 16.66 s = 27.8 % of one host CPU
+c rate=1000 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=1000 sent_per_s=15999 acked_per_s=0 delivered_per_s=16000 lat_p50_ms=6.07 lat_p90_ms=7.75 lat_p99_ms=11.69 lat_max_ms=17.51 samples=160022 gen_cpu=0.23 ready=32 failed=0 lost=0
+c rate=0 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=325155 acked_per_s=0 delivered_per_s=325038 lat_p50_ms=143.76 lat_p90_ms=244.43 lat_p99_ms=361.95 lat_max_ms=1028.85 samples=3151520 gen_cpu=0.35 ready=32 failed=0 lost=0
+core 0 statistics (last 6 windows):
+  dataplane: core 0: busy 15%, work 5% (rx 0%, of it tls 0%, poll 1%, tcp 1%, mesh 1%, nic 1%), 9 connection(s) accepted (29524 us of work, 47 us of it TLS, each), 296 frame(s) dispatched, 0 receive interrupt(s), 1472766 loop passes in 5009 ms, longest ...
+  dataplane: core 0: busy 36%, work 16% (rx 4%, of it tls 2%, poll 5%, tcp 2%, mesh 1%, nic 2%), 23 connection(s) accepted (36739 us of work, 6202 us of it TLS, each), 107565 frame(s) dispatched, 0 receive interrupt(s), 2556179 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 36%, work 16% (rx 4%, of it tls 2%, poll 5%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 108103 frame(s) dispatched, 0 receive interrupt(s), 2559533 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 68%, work 57% (rx 44%, of it tls 32%, poll 7%, tcp 2%, mesh 0%, nic 1%), 32 connection(s) accepted (89313 us of work, 51400 us of it TLS, each), 139785 frame(s) dispatched, 0 receive interrupt(s), 1228602 loop passes in 5000 ...
+  dataplane: core 0: busy 89%, work 83% (rx 70%, of it tls 52%, poll 9%, tcp 2%, mesh 0%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 161910 frame(s) dispatched, 0 receive interrupt(s), 426131 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 78%, work 71% (rx 59%, of it tls 44%, poll 8%, tcp 1%, mesh 0%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 125525 frame(s) dispatched, 0 receive interrupt(s), 435593 loop passes in 5003 ms, longest ...
+  [   76.032525] INFO  stalls: core 0: 3 late tick(s), worst 27303 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 2 of 256
+  [  246.114169] INFO  stalls: core 0: 21 late tick(s), worst 69799 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 149 of 256
+  [  258.297495] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 45 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  268.297136] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 10029 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  271.117918] INFO  stalls: core 0: 8 late tick(s), worst 5951 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 227 of 256
+
+# lock released 2026-11-08T12:36:57Z
+# lock taken 2026-11-08T12:36:57Z round 2 smp 4
+== mode=irq smp=4 rtt_cfg=4ms qemu_pid=33543(qemu-system-aarch64) 2026-11-08T12:37:17Z
+boot: net: receive wake-up: interrupt (MSI-X via GICv2m SPI 80, to core 0); no polling while asleep
+a0 ping, no connection: rtt min/avg/max/mdev = 5.719/7.656/9.371/0.977 ms
+a1 ping, one idle connection: rtt min/avg/max/mdev = 5.616/7.520/15.220/1.216 ms
+a2 mqtt 1 pub/1 sub 5 msg/s, one idle connection: RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=5 sent_per_s=5 acked_per_s=0 delivered_per_s=5 lat_p50_ms=7.07 lat_p90_ms=8.15 lat_p99_ms=26.55 lat_max_ms=26.98 samples=100 gen_cpu=0.02 ready=2 failed=0 lost=0
+b0 qemu cpu, 0 connections, 60 s: 2.77 s = 4.6 % of one host CPU
+b1 qemu cpu, 100 of 100 connections idle, 60 s: 2.84 s = 4.7 % of one host CPU
+c rate=1000 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=1000 sent_per_s=16000 acked_per_s=0 delivered_per_s=16001 lat_p50_ms=6.02 lat_p90_ms=7.76 lat_p99_ms=11.35 lat_max_ms=18.11 samples=160030 gen_cpu=0.24 ready=32 failed=0 lost=0
+c rate=0 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=340195 acked_per_s=0 delivered_per_s=340098 lat_p50_ms=101.67 lat_p90_ms=274.35 lat_p99_ms=575.57 lat_max_ms=734.55 samples=3180632 gen_cpu=0.33 ready=32 failed=0 lost=0
+core 0 statistics (last 6 windows):
+  dataplane: core 0: busy 3%, work 1% (rx 0%, of it tls 0%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 8001 frame(s) dispatched, 190 receive interrupt(s), 147276 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 32%, work 20% (rx 0%, of it tls 0%, poll 3%, tcp 1%, mesh 1%, nic 14%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 246255 frame(s) dispatched, 5743 receive interrupt(s), 1422231 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 33%, work 21% (rx 0%, of it tls 0%, poll 4%, tcp 1%, mesh 1%, nic 14%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 248355 frame(s) dispatched, 6151 receive interrupt(s), 1500016 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 49%, work 27% (rx 0%, of it tls 0%, poll 5%, tcp 2%, mesh 2%, nic 17%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 293762 frame(s) dispatched, 4247 receive interrupt(s), 3025992 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 61%, work 32% (rx 0%, of it tls 0%, poll 6%, tcp 3%, mesh 3%, nic 18%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 340436 frame(s) dispatched, 3017 receive interrupt(s), 4255161 loop passes in 5000 ms, ...
+  dataplane: core 0: busy 48%, work 25% (rx 0%, of it tls 0%, poll 5%, tcp 3%, mesh 2%, nic 14%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 266384 frame(s) dispatched, 2237 receive interrupt(s), 3348043 loop passes in 5011 ms, ...
+  [   16.016278] WARN  EPHEMERAL: data is lost on reboot (live mode, 50 MiB RAM store)
+  [  259.055241] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 22675 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  259.106526] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 15881 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  269.055000] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 260 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  269.112251] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 796 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+
+== mode=poll smp=4 rtt_cfg=4ms qemu_pid=45648(qemu-system-aarch64) 2026-11-08T12:41:57Z
+boot: net: receive wake-up: polling every 200 us while connections exist (devices.virtio_net_interrupt = "off")
+a0 ping, no connection: rtt min/avg/max/mdev = 6.817/12.686/19.123/3.485 ms
+a1 ping, one idle connection: rtt min/avg/max/mdev = 5.946/7.583/12.082/1.049 ms
+a2 mqtt 1 pub/1 sub 5 msg/s, one idle connection: RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=5 sent_per_s=5 acked_per_s=0 delivered_per_s=5 lat_p50_ms=7.12 lat_p90_ms=8.78 lat_p99_ms=12.60 lat_max_ms=15.37 samples=100 gen_cpu=0.02 ready=2 failed=0 lost=0
+b0 qemu cpu, 0 connections, 60 s: 2.79 s = 4.7 % of one host CPU
+b1 qemu cpu, 100 of 100 connections idle, 60 s: 17.60 s = 29.3 % of one host CPU
+c rate=1000 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=1000 sent_per_s=15999 acked_per_s=0 delivered_per_s=15999 lat_p50_ms=6.03 lat_p90_ms=7.76 lat_p99_ms=12.34 lat_max_ms=27.70 samples=160006 gen_cpu=0.27 ready=32 failed=0 lost=0
+c rate=0 16 pairs qos0: RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=325947 acked_per_s=0 delivered_per_s=325497 lat_p50_ms=122.10 lat_p90_ms=268.86 lat_p99_ms=467.77 lat_max_ms=670.20 samples=3083096 gen_cpu=0.36 ready=32 failed=0 lost=0
+core 0 statistics (last 6 windows):
+  dataplane: core 0: busy 15%, work 5% (rx 0%, of it tls 0%, poll 1%, tcp 1%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 643 frame(s) dispatched, 0 receive interrupt(s), 1525586 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 39%, work 20% (rx 0%, of it tls 0%, poll 4%, tcp 2%, mesh 2%, nic 11%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 255057 frame(s) dispatched, 0 receive interrupt(s), 2619782 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 39%, work 20% (rx 0%, of it tls 0%, poll 4%, tcp 2%, mesh 2%, nic 11%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 256634 frame(s) dispatched, 0 receive interrupt(s), 2629841 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 53%, work 27% (rx 0%, of it tls 0%, poll 6%, tcp 3%, mesh 2%, nic 15%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 290446 frame(s) dispatched, 0 receive interrupt(s), 3717383 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 63%, work 33% (rx 0%, of it tls 0%, poll 6%, tcp 3%, mesh 3%, nic 19%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 321454 frame(s) dispatched, 0 receive interrupt(s), 4285041 loop passes in 5000 ms, longest ...
+  dataplane: core 0: busy 54%, work 28% (rx 0%, of it tls 0%, poll 5%, tcp 3%, mesh 2%, nic 15%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 265807 frame(s) dispatched, 0 receive interrupt(s), 3828392 loop passes in 5001 ms, longest ...
+  [  191.064867] INFO  stalls: core 0: 24 late tick(s), worst 63137 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 72 of 256
+  [  259.064347] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 40107 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  259.139310] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 11374 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  269.064753] WARN  mqtt: core 1 did not deliver, since the last report: QoS 0 1806 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+  [  269.143586] WARN  mqtt: core 2 did not deliver, since the last report: QoS 0 928 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+
+# lock released 2026-11-08T12:46:18Z
+DONE

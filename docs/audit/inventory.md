@@ -6,8 +6,8 @@
 
 | Crate | Path | src lines | tests/ lines | unsafe sites (justified) | `unsafe_code` lint |
 |---|---|---:|---:|---:|---|
-| `urmqtt-arch` | `crates/arch` | 396 | 0 | 0 (0) | deny |
-| `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 3631 | 0 | 101 (101) | deny |
+| `urmqtt-arch` | `crates/arch` | 401 | 0 | 0 (0) | deny |
+| `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 4195 | 0 | 109 (109) | deny |
 | `urmqtt-arch-x86_64` | `crates/arch-x86_64` | 6991 | 0 | 155 (155) | deny |
 | `urmqtt-attack` | `tools/attack` | 1092 | 0 | 0 (0) | default |
 | `urmqtt-broker` | `crates/broker` | 8891 | 3477 | 0 (0) | forbid |

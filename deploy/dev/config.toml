@@ -137,3 +137,9 @@ virtio_balloon = "auto"
 virtio_input = "auto"
 # virtio-vsock: the Diagnostic report, read-only, on vsock port 2883.
 virtio_vsock = "auto"
+# How the NIC wakes the core that owns it when a frame arrives (ADR-270):
+# "auto" (the default) uses the receive queue's MSI-X interrupt where the
+# platform has one (x86 local APIC, aarch64 GICv2m frame or GICv3 ITS), else
+# it polls every 200 us while connections exist; "off" always polls. "off"
+# needs a kernel that reads configuration format 11.
+# virtio_net_interrupt = "auto"

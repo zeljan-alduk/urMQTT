@@ -100,23 +100,25 @@ from them at the H10 commit (H0 baseline: 30 773 lines, 65 linked crates, 308
 | RustCrypto `cpufeatures` 0.2.17 and 0.3.1, vendored (X0b) | 675 + 598 lines | upstream sources plus one hunk each: on bare metal they ask the kernel's sealed dispatch (`urmqtt_cpu_has`). Reviewable with `diff -r` against the crates.io files ([vendor/README.md](../vendor/README.md)) |
 | Limine v12.9.4 (binary) | `BOOTAA64.EFI`, 331 776 bytes (and the x86_64 and BIOS loaders in the universal ISO) | pre-kernel; its configuration is enrolled (ADR-250), signing path ADR-251; **no project signing key exists**, so release loaders are unsigned |
 
-**`unsafe` in non-test code of the workspace:** 915 sites, **all 915 with a
+**`unsafe` in non-test code of the workspace:** 924 sites, **all 924 with a
 `// SAFETY:` comment or a `# Safety` section** (the tool crate `builder-wasm`
 accounts for 29 of them and the fake virtio device of the tests and fuzz targets,
 `virtio/src/fake.rs`, behind the `fake` feature, for 6; neither is in the image). In
-the image: 880 (889 and 860 at H10; the 9 added by ADR-255 are the aarch64 calls into
+the image: 889 (889 and 860 at H10; the 9 added by ADR-255 are the aarch64 calls into
 the assembly; the 3 added by ADR-256 are the virtio-gpu driver's request slots and
 framebuffer, and the console's slice of that framebuffer; the 3 added by ADR-257 are
 the shared queue allocation and the two bounds-checked DMA copies of `virtio/src/bus.rs`;
 the 5 added by ADR-259 are the AArch64 X25519 inline-assembly blocks, register-only,
-`options(pure, nomem, nostack)`).
+`options(pure, nomem, nostack)`; the 9 added by ADR-270 are the GICv3 ITS driver's register
+accessors, its cache clean, its command-queue and LPI-configuration writes, and the kernel's call
+of its `init`).
 
 | Crate | Sites (justified) | Crate lint |
 |---|---|---|
 | `urmqtt-store` | 302 (302) | deny, with `allow` on the FFI modules (`db`, `ffi`, `libc`, `vfs`, `init`, the log callback, the worker's half) |
 | `urmqtt-arch-x86_64` | 155 (155) | deny; port I/O, MSRs, control registers, interrupt entry |
-| `urmqtt-kernel` | 118 (118) | deny; `cpu_dispatch.rs` (the sealed section, the `urmqtt_cpu_has` export), boot requests, user mode |
-| `urmqtt-arch-aarch64` | 101 (101) | deny; all assembly and system registers, the ARMv8 CRC-32C intrinsics |
+| `urmqtt-kernel` | 119 (119) | deny; `cpu_dispatch.rs` (the sealed section, the `urmqtt_cpu_has` export), boot requests, user mode |
+| `urmqtt-arch-aarch64` | 109 (109) | deny; all assembly and system registers, the ARMv8 CRC-32C intrinsics, the GICv3 ITS (ADR-270) |
 | `urmqtt-mm` | 74 (74) | deny; frames, heap, slabs, key slab |
 | `urmqtt-dbworker` | 22 (22) | default; the worker's entry and syscall stub |
 | `urmqtt-nistz256` | 28 (28) | allow; the calls into the vendored P-256 assembly (x86_64 and aarch64) and the comb table's reinterpretation (ADR-130, ADR-255) |
@@ -169,6 +171,7 @@ not on bare metal for devices (DMA, see H4b).
 | ACPI tables | firmware | `platform/src/acpi.rs` | table lengths, MADT entry lengths | `acpi_parse` |
 | PCI configuration space, capabilities | firmware/devices | `pci/src/lib.rs` | capability list walk | **none** (gap H0-W9) |
 | virtio rings, config space, SCSI sense/INQUIRY | hypervisor/devices | `virtio/src/{queue,blk,net,scsi,transport}.rs` | ring sizes, descriptor ids | **none** (gap H0-W9) |
+| virtio-net's receive interrupt (ADR-270; MSI-X through the GICv2m frame, the GICv3 ITS or the local APIC; `devices.virtio_net_interrupt = "off"` turns it off) and the ITS's command-queue progress | hypervisor | `kernel/src/devices.rs` (`on_net_irq`: a counter only), `virtio/src/wake.rs`, `arch-aarch64/src/its.rs` | the queue asks for interrupts only while the dispatcher sleeps; a device that interrupts anyway costs a counter increment and an EOI per interrupt; every ITS register wait is bounded (10^7 polls), a stalled command fails the setup and the NIC is polled | host tests of the protocol, the mode machine and the ITS encodings; no fuzz target (no parser) |
 | virtio-gpu control-queue responses (ADR-256; only with `console.virtio_gpu` not `"off"`, the default) | hypervisor | `virtio/src/gpu.rs` (`parse_response`, `choose_mode`, `auto_choice`) | fixed-size copy of the response (at most 408 bytes); the device's written length is capped at the buffer; type, length and fence checked; a display info only whole; no device value is used as a pointer or an index; the mode is clamped to 640x480..1920x1080 and an 8 MiB budget; every wait has a timeout | `virtio_gpu_response` (narrows H0-W9 for this parser only) |
 | virtio-console port 0 receive buffers and transmit completions (ADR-258; only with `devices.virtio_console` not `"off"`, the default) | hypervisor | `virtio/src/console.rs`, `kernel/src/vdev/console.rs` | length clamped to the 64-byte buffer; heads checked against a slot map; received bytes into a fixed 256-byte ring (overflow dropped, counted); output never waits (full buffers drop, counted); the log only tries the device lock | `virtio_console_device` (the driver against a fake device with hostile completions) |
 | virtio-balloon `num_pages` and statistics completions (ADR-258; only with `devices.virtio_balloon` not `"off"`) | hypervisor | `virtio/src/balloon.rs`, `kernel/src/vdev/balloon.rs` | the request is only logged (never inflates, `actual` stays 0); statistics never claim more than the total; a completion for a head never posted is counted; the heap's numbers only tried from the tick | `virtio_balloon_device` |

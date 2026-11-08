@@ -228,6 +228,10 @@ release signed with it is v0.4.2.**
   numbers only (PERFORMANCE §13.5); a single subscriber on another shard asks the publisher's shard for the pause.
   Measured before and after main's ADR-268 (PERFORMANCE §13.5). Open: the VPS pair (netcup's one ARM core is where
   it should matter), the receive interrupt, the per-CPU heap cache.
+- Status (2026-11-08, branch `now13b-rx-irq`): the receive interrupt is in (ADR-270): MSI-X on x86_64 (local APIC) and
+  aarch64 (GICv2m frame, or the GICv3 ITS with a new minimal driver), the 200 us poll only as the fallback; rig numbers
+  in PERFORMANCE §7.5, measured again on top of ADR-268/269. Not yet run on either VPS (the netcup vITS and the
+  Contabo KVM are the targets). Open: the VPS pair, the per-CPU heap cache.
 
 **NOW-14. A limit on established TLS connections per source address.** S.
 - What: a per-address cap for established connections, like `plaintext.max_connections_per_ip` already has.

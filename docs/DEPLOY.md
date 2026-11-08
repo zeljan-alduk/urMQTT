@@ -233,6 +233,15 @@ report, also those without a driver (`no driver in this image`, `no driver`). An
 that reads configuration format 6 and was built with the driver; `urmqtt-config pack --iso` (and the builder page)
 refuses a template without it. The release images carry all four (`virtio-vps`, ADR-257).
 
+**The NIC's receive interrupt (ADR-270).** `devices.virtio_net_interrupt = "auto"` (the default) lets a frame that
+arrives after the NIC has been quiet for 2 ms wake the core that owns the NIC through the receive queue's MSI-X interrupt: on
+x86_64 through the local APIC, on aarch64 through a GICv2m frame or the GICv3 ITS (QEMU/KVM `virt`). Without one
+(no MSI-X on the device, no MSI target) the core polls every 200 us while connections exist, as before. The boot log
+says which: `net: receive wake-up: interrupt (MSI-X via ...)` or `net: receive wake-up: polling every 200 us ...
+(<reason>)`. A hypervisor that accepts the vector but never delivers it is noticed after eight frames that waited
+(`net: receive wake-up: 8 frames waited after a sleep without the receive interrupt; polling ...`) and the broker
+polls from then on. `"off"` forces polling (configuration format 11).
+
 **Single-disk model (S1, STORAGE-PLAN §2a).** The disk the VM boots from is
 the only one urMQTT writes:
 - It finds that disk by the GPT disk GUID the bootloader reports.

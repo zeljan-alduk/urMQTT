@@ -352,7 +352,7 @@ verified in the named milestone before it becomes Accepted).
 - **Per-CPU heap caches:** `urmqtt-mm::CachedHeap` keeps 7 size classes (32 B – 2 KiB, the buddy orders) per CPU, IRQs masked while touching them, and refills or drains 16 blocks per global-lock acquisition (≤ 32 KiB kept per class per CPU). That reduces the ticket-lock traffic (unfair to descheduled vCPUs) on the TLS-heavy path.
 - **Adaptive polling:** a core busy-polls while it has work and for 100 µs after, then sleeps in **WFI**. Producers wake a sleeping peer with an SGI. A Dekker-style handshake (flag store + SeqCst fence on the sleeper, ring push + SeqCst fence + flag load on the producer) avoids lost wake-ups.
   - WFE is not used: under HVF, QEMU treats WFE as a no-op, so WFE-based idle loops spun at 100 % of a host CPU and made every added vCPU *slower*.
-  - Core 0 has no RX interrupt yet (MSI-X for virtio-net is a later item), so the first packet after an idle period waits for the 10 ms tick.
+  - Core 0 has no RX interrupt yet (MSI-X for virtio-net is a later item), so the first packet after an idle period waits for the 10 ms tick. *Amended by ADR-224 (a 200 us poll while connections exist) and ADR-270 (the receive queue's MSI-X interrupt wakes core 0; the poll is the fallback).*
 - **virtio-net transmit** is asynchronous: 256 descriptors with their own bounce buffers, lazy reclaim, one kick per loop pass and only if the device asks for one (`VIRTQ_USED_F_NO_NOTIFY`). Received buffers are recycled with one kick per burst. Before, every frame cost two VM exits and a synchronous wait.
 - **smoltcp findings:**
   - In a simultaneous close smoltcp ignores the ACK carried by the peer's FIN and waits a full RTO (1 s) in CLOSING. TIME_WAIT lasts 10 s.
@@ -1690,7 +1690,7 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
 
 ## ADR-224 — A sleeping dispatcher polls the NIC every 200 us while connections exist (PERF)
 
-- **Status:** Accepted. Amends ADR-032 (adaptive polling).
+- **Status:** Accepted. Amends ADR-032 (adaptive polling). Amended by ADR-270: the poll is now the fallback for a NIC or platform without a receive interrupt.
 - **Evidence.** Rig, one idle MQTT connection open, ping through the bridge (RTT configured 4 ms plus the container's own path): **13.1 ms mean (6.8-21.0, deviation 3.3) before, 7.4 ms (5.3-10.3, deviation 1.2) after**. One flow, 1 KiB, QoS 0, same rig: 10 141 published and 4 297 delivered messages/s with 126 ms median latency before, 18 382 / 11 326 with 62 ms after. On the VPS, see PERFORMANCE.md section 7.
 - **Cause.** The virtio-net queues are polled; the driver sets up no receive interrupt (ADR-032). Core 0, which owns the NIC, spins for 100 us after the last piece of work and then sleeps in `wfi`/`hlt`. Nothing wakes it for a frame that arrives while it sleeps except the next 10 ms tick, or an IPI from a worker that has something to send, which a worker only has after core 0 has delivered the input. A flow whose window lets the sender pause between bursts (every flow over a 15 ms path, and every flow at a few thousand packets per second) paid 0 to 10 ms, 5 ms on average, at each pause, and the sender's ACK-clocked window inflated with it (the VPS showed Linux measuring 66 ms round trips for a path of 15 ms). Mosquitto sleeps in `epoll` and is woken by the NIC's interrupt. This was the "interrupt versus poll latency" suspect of the task, and it is a cause.
 - **Decision.** `Idle::poll_wake(ns)`: before sleeping, a core that asked for it programs the deadline timer to the earlier of the next tick and `now + ns`. The dispatcher asks for 200 us while any data core holds a connection (`dataplane::CONNECTIONS`), and for nothing otherwise (an empty broker still sleeps until the 10 ms tick). The timer interrupt that ends the sleep is the tick handler, which re-arms from the deadline, so the watchdog's lateness measure is unchanged. Cost: up to about 5 000 wake-ups a second on core 0 (a few percent of that core, which is otherwise idle at these rates) and none on the workers, which core 0 wakes by IPI.
@@ -2613,6 +2613,109 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   The cross-shard path is measured only on the rig's three data cores (point 2). A relayed publisher (transport core
   other than its home shard, `CoreMsg::Flow`) is exercised by the `--smp 4` runs whenever the RSS hash and the
   identity hash disagree, but no test isolates it.
+
+## ADR-270 — virtio-net's receive interrupt wakes the dispatcher; ADR-224's polling is the fallback (NOW-13, PERF)
+
+- **Status:** Accepted. Amends ADR-032 ("Core 0 has no RX interrupt") and ADR-224 (the 200 us poll is now the
+  fallback only). Configuration format 11 (8 is ADR-269's, 9 ADR-272's, 10 is unused, 12 is reserved for MQTT 5).
+- **Context.** Core 0 owns the NIC. It spins 100 us after its last piece of work and then sleeps in `wfi`/`hlt`;
+  since ADR-224 it programs the deadline timer at most 200 us ahead while connections exist, because nothing else
+  wakes it for a received frame. That costs up to 200 us of receive latency when idle, about 5 000 wake-ups a second
+  with idle connections (host CPU and power), and on a one-data-core machine the polling competes with the work.
+  Without connections it slept until the 10 ms tick, so even the first SYN of an idle broker waited for it.
+- **What the platforms allow.**
+  - x86_64: MSI-X to the boot CPU's local APIC (physical destination, fixed delivery, edge), as the boot disk already
+    used (X4): always available with a virtio-net that has MSI-X.
+  - aarch64, GICv2m frame: QEMU under HVF (GICv3 without an ITS) and every GICv2 guest (the Raspberry Pi path,
+    ADR-039) have one; an MSI is a write of the SPI number to the frame, the SPI is routed to core 0.
+  - aarch64, GICv3 ITS: QEMU under TCG and KVM's in-kernel vITS (the netcup ARM VPS: QEMU `virt` with
+    pcie-root-ports, its NIC at 07:00.0) have only an ITS. Until now no MSI at all there. New: a minimal ITS driver
+    (`crates/arch-aarch64/src/its.rs`), used **for the NIC only**.
+  - Neither (an aarch64 platform with no v2m frame and no usable ITS, a NIC without MSI-X): polling as before.
+- **Decision.**
+  1. **Vector.** At probe the NIC's MSI-X vector 0 gets a GICv2m SPI, an x86 vector or (no v2m frame, an ITS) an
+     LPI, with the handler `on_net_irq` (a counter, nothing else; the interrupt itself ended the `wfi`/`hlt`). Only
+     the receive queue signals it (`VirtioNet::new_with_msix`; a device that refuses the vector gets a polled queue:
+     the queue is set up again before it is enabled). The transmit queue never asks for one: its descriptors are
+     reclaimed lazily and a dispatcher with frames waiting for descriptors does not sleep (`moved |= !nic_q.is_empty()`,
+     ADR-223). The SPI is routed to core 0 when the dispatcher starts; LPIs go to collection 0, the boot CPU.
+  2. **Suppression protocol (virtio 1.x §2.7.7, §2.7.10, without `VIRTIO_F_EVENT_IDX`).** Both queues start with
+     `VIRTQ_AVAIL_F_NO_INTERRUPT` set. The dispatcher clears it only on its way to sleep (`SplitQueue::enable_interrupts`:
+     flag store, full fence, used-index load) and sets it again as soon as it is awake (`suppress_interrupts`). Either
+     the re-check sees the frame (then it does not sleep), or the device, which stores its used index before it reads
+     the flag, sees the flag clear and interrupts. While the dispatcher works the flag is set, so a flood is polled and
+     costs no interrupts (measured below); the flag is a hint the device may ignore, so a stray interrupt costs one
+     counter increment and an EOI.
+  3. **No lost wake-up in the CPU either.** `Idle::pass_armed` (and `pass`, for every core) now masks the CPU's
+     interrupts from the sleep announcement to the wait: an interrupt that fires after the last check (the NIC's, or a
+     wake SGI from a worker, which had the same window since ADR-032) stays pending and ends the `wfi` (AArch64 wakes on
+     a pending IRQ whatever PSTATE.I says) or is taken inside `sti; hlt` (x86), instead of being consumed by its
+     handler just before the core sleeps until the next tick.
+  4. **Mode machine (`urmqtt_virtio::wake::RxWake`, pure).** `Interrupt`: while the NIC moved a frame in the last
+     **2 ms** (`HOLD_NS`) and connections exist, the dispatcher polls exactly as ADR-224 did (200 us deadline, interrupt
+     not armed); once the NIC has been quiet for 2 ms, or without connections, it arms the interrupt and sleeps with no
+     deadline at all. `Polling(why)`: ADR-224's 200 us while connections exist. The hold is measured, not a guess: the
+     first version armed the interrupt at every idle gap, and on the rig with one data core a steady stream then woke
+     the dispatcher by an MSI once per gap, which cost a fifth of the QoS 0 flood rate and raised the 99th percentile at
+     16 000 messages/s (Evidence). A hypervisor that accepts the vector and
+     never delivers it would leave the dispatcher on the 10 ms tick: after **8 sleeps in a row** that ended with a
+     received frame waiting and the interrupt counter unchanged since the queue was armed, the mode falls back to
+     polling for good with a warning (`net: receive wake-up: 8 frames waited after a sleep without the receive
+     interrupt; polling every 200 us ...`). One such sleep is possible with a working interrupt (a frame landing between
+     the counter read and the ring read); eight in a row are not.
+  5. **Configuration.** `[devices] virtio_net_interrupt = "auto" | "off"` (tag 211, format 11). `"auto"`, the default,
+     writes nothing, so a configuration that does not set it keeps its format and boots on an older kernel; `"off"`
+     forces polling (a hypervisor whose interrupt misbehaves) and needs format 11.
+  6. **Boot line**, next to `net: virtio-net with N receive ...`: `net: receive wake-up: interrupt (MSI-X via GICv2m SPI
+     80 | GICv3 ITS LPI 8192 | local APIC vector 65, to core 0); polling only within 2 ms of NIC traffic`, or `net: receive wake-up:
+     polling every 200 us while connections exist (<reason>)` with the reason (`devices.virtio_net_interrupt = "off"`,
+     the device has no MSI-X, no MSI target, the ITS could not be set up, no free vector, the device refused it). The
+     dispatcher's 5 s statistics line counts `receive interrupt(s)`.
+- **The ITS driver.** On first use (the NIC, on a GICv3 with an ITS and no v2m frame): the boot CPU's redistributor
+  gets an LPI configuration table (8 KiB, LPIs 8192..16383) and a zeroed pending table (64 KiB aligned) and its LPIs
+  are enabled; the ITS, quiescent, gets a flat device table sized for the highest requester ID the PCI scan saw (4 KiB
+  pages first; an ITS with a fixed page size reads back its own and the table is sized again), a one-page collection
+  table, a one-page command queue, then `MAPC` (collection 0 to the boot CPU, by processor number or by address as
+  `GITS_TYPER.PTA` says) and `SYNC`. Per device `MAPD` (an ITT for two events), `MAPTI` (event 0 to the next LPI),
+  `INV`, `SYNC`; the message is `GITS_TRANSLATER` with data 0. Tables are declared inner shareable write-back; where
+  the ITS or redistributor reads back non-shareable, the configuration byte, the ITT and every command are cleaned to
+  the point of coherency. Every register wait is bounded; a stalled command fails the setup and the NIC is polled.
+  The **device ID is assumed to be the PCI requester ID** (QEMU `virt`'s `msi-map` and IORT are the identity); a
+  platform that maps it otherwise gets no interrupt, and point 4 falls back. That is why the boot disk does not use
+  the ITS: its self-test requires its completion interrupts and would fail the boot instead of falling back. The
+  kernel's handler table gained 16 LPI slots; the GIC's `Ack` no longer takes INTIDs from 8192 for "nothing pending".
+  9 new `unsafe` sites (register accessors, cache clean, command and configuration writes, the kernel's `init` call),
+  all justified (docs/audit/unsafe.md).
+- **Evidence.** Local rig (PERFORMANCE 7.3, RTT 4 ms configured, aarch64 HVF, the bench image with the default
+  configuration against the same image with `"off"`, two rounds per cell, `docs/perf-results/now13b-rx-irq-rig.txt`):
+  host CPU of the QEMU process with 100 idle mTLS connections **2.9 % against 28-29 %** of one host CPU on 2 vCPU and
+  **4.8-5.0 % against 31 %** on 4 vCPU (without connections both 2.6-5.1 %); ping without any MQTT connection 7.8-8.7 ms
+  mean against 12.7-14.8 ms (the 10 ms tick is gone); with one idle connection (ADR-224's method) 7.8-9.1 ms against
+  8.1-8.6 ms, unchanged; 16 x 1000 msg/s QoS 0 p50 6.0-6.2 ms and p99 11.4-12.2 ms against 6.1-6.2 and 11.0-12.3 ms;
+  16-pair QoS 0 flood 341k/346k against 338k/297k delivered/s on 2 vCPU, 306k/335k against 342k/345k on 4 vCPU (the
+  flood's spread between runs is that wide in both modes); 150-730 receive interrupts per 5 s window under the flood (no
+  storm). The first version without the hold (`now13b-rx-irq-rig-v1.txt`): the same idle gains, but on 2 vCPU the flood
+  delivered 261k/263k/s against 325k/340k/s and the p99 at 16 x 1000/s was 20-21 ms against 12-14 ms, with 1 000 to
+  2 000 receive interrupts a second; on 4 vCPU no difference.
+- **Verification.** Host tests: the suppression and re-check protocol against the queue's toy device
+  (`interrupt_suppression_and_recheck`, `interrupt_flag_leaves_the_ring_alone`), the mode machine (a working
+  interrupt keeps the mode over 10 000 sleeps, occasional races do not fall back, a silent one falls back exactly once
+  after 8, polling with and without connections), the ITS's `GITS_TYPER` decoding, table sizing (netcup's 07:00.0),
+  register values and the five command encodings against the architecture specification, format 11 and the key in
+  `urmqtt-cfg`, `urmqtt-config`, `urmqtt-config-schema`, `urmqtt-config` (tool) and the builder module. Smoke group
+  `net_irq` (`SMOKE_ONLY=misc`): the serving image with the default configuration says it uses the interrupt (aarch64
+  HVF: GICv2m SPI; aarch64 TCG: GICv3 ITS LPI, with the ITS line; x86_64 TCG: local APIC vector), carries three QoS 1
+  round trips over mutual TLS and its statistics count receive interrupts; the same with `virtio_net_interrupt =
+  "off"` says polling with that reason, carries the traffic and counts none. The `gicv2` group's TLS run now also
+  asserts the interrupt line (GICv2m SPI). The full MQTT scenario script passed by hand over the ITS (TCG) and the
+  local APIC (x86_64 TCG).
+- **Not verified / limits.** No real KVM host: the netcup ARM VPS (KVM vITS, NIC behind a root port at bus 7) and the
+  Contabo x86 VPS are the targets, and only a boot there shows whether the vITS maps the requester ID as QEMU does
+  and how the hypervisor's interrupt delivery and halt polling change latency and steal. HVF does not offer an ITS,
+  so the ITS ran under TCG only. `VIRTIO_F_EVENT_IDX` is not negotiated (the flag is only a hint; with event indices
+  the device could not interrupt at all while suppressed). The ITS serves one CPU (collection 0), one event per
+  device, LPIs 8192..16383, flat tables only (a device table needing more than 256 pages fails the setup), no
+  `msi-map`/IORT parsing.
 
 ## ADR-271 — QoS 2, exactly once: method B, the in-flight window for both QoS, packet ids in the store (NEXT-2)
 

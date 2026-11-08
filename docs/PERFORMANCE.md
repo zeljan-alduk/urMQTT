@@ -339,6 +339,28 @@ evidence; it cannot say who held the CPU. The Linux guest's `/proc/stat` showed 
   MSS (an MQTT flow's losses waited for the retransmission timer); fixed in ADR-268, on the rig with one data core
   and 1 % loss back to v0.4.2's numbers or above. The per-CPU heap cache, the receive interrupt and publisher
   back-pressure remain.
+  *2026-11-08 (ADR-270):* the receive interrupt is in: virtio-net's MSI-X wakes the dispatcher (x86_64 local APIC; aarch64
+  GICv2m frame or GICv3 ITS), ADR-224's 200 us poll stays while NIC traffic is recent (2 ms) and as the fallback. Local rig
+  (section 7.3, RTT 4 ms, HVF, two rounds per cell, `perf-results/now13b-rx-irq-rig.txt`), interrupt against polling forced
+  with `devices.virtio_net_interrupt = "off"` on the same image:
+
+  | | 2 vCPU (one data core), interrupt | 2 vCPU, polling | 4 vCPU, interrupt | 4 vCPU, polling |
+  |---|---|---|---|---|
+  | ping, no MQTT connection, mean | 8.7 / 8.5 ms | 14.2 / 14.1 ms | 8.3 / 7.8 ms | 14.8 / 12.7 ms |
+  | ping, one idle connection, mean (ADR-224's method) | 9.1 / 8.7 ms | 8.5 / 8.4 ms | 8.3 / 7.8 ms | 8.6 / 8.1 ms |
+  | 1 pub / 1 sub, 5 msg/s, p50 / p99 | 8.1 / 10.8, 8.1 / 11.0 ms | 8.1 / 9.9, 8.2 / 10.0 ms | 8.1 / 11.5, 7.3 / 9.5 ms | 7.5 / 10.5, 7.3 / 10.2 ms |
+  | host CPU of QEMU, 100 idle mTLS connections, 60 s | **2.9 / 2.9 %** | 29.2 / 28.2 % | **5.0 / 4.8 %** | 31.6 / 31.3 % |
+  | host CPU of QEMU, no connection | 2.8 / 2.8 % | 2.8 / 2.6 % | 5.1 / 4.5 % | 4.7 / 5.0 % |
+  | 16 x 1000 msg/s QoS 0, p50 / p99 | 6.1 / 11.6, 6.2 / 11.6 ms | 6.2 / 12.3, 6.1 / 12.1 ms | 6.1 / 12.2, 6.0 / 11.4 ms | 6.1 / 11.1, 6.1 / 11.0 ms |
+  | 16-pair QoS 0 flood, delivered/s | 341k, 346k | 338k, 297k | 306k, 335k | 342k, 345k |
+
+  What it buys: an idle broker answers the first packet without waiting for the 10 ms tick (about 6 ms off the mean here),
+  and idle connections no longer cost a tenth of a host CPU per hundred (the 200 us poll's 5 000 wake-ups a second are
+  gone). One idle connection's round trip is unchanged: ADR-224's poll already bounded it to 200 us, which the interrupt's
+  delivery under HVF does not beat. No storm: under the flood the dispatcher took 150-730 receive interrupts per 5 s window
+  for 110 000-335 000 frames. A first version that armed the interrupt at every idle gap lost a fifth of the flood rate on
+  one data core (261-263k/s) and had a p99 of 20-21 ms at 16 x 1000/s (`now13b-rx-irq-rig-v1.txt`), hence the 2 ms hold.
+  Not measured on a VPS yet (KVM's interrupt delivery and halt polling differ from HVF's).
 * **Stalls shorter than a millisecond** and the last part of every stall before a tick's deadline are still charged; with close-up ticks (1 ms) the error per tick is
   below 1 ms, so a drop now needs a handler that really ran for most of 20 ms or stalls of 20 ms in 1 ms pieces.
 * The comparison with Mosquitto is one session, one path, one generator at 60-77 % steal; two cells (1 KiB, 16 pairs; delivered rate of one flow)
@@ -782,7 +804,8 @@ Delivered messages per second unless said otherwise; median (min-max) of three r
 3. **On one ARM core, raw QoS 0 throughput belongs to Mosquitto, everything else to urMQTT.** Mosquitto's event loop
    does more QoS 0 work per core than ours: 58k against 44-47k delivered with 16 pairs, 49k against 12-22k on one 64 B
    flow, 6.1k against 2-3k on one 1 KiB flow. Our single core is spent on the publishers (accepting 183-187k/s that are
-   then dropped), on polling the NIC every 200 us (ADR-224) and on copies; the NIC's 256-descriptor transmit queue
+   then dropped), on polling the NIC every 200 us (ADR-224; since ADR-270 only while NIC traffic is recent, the receive
+   interrupt otherwise, not yet measured on this VPS) and on copies; the NIC's 256-descriptor transmit queue
    was full for 199,000-261,000 frames in the suite, nearly all in the fan-out runs (the netcup virtio-net offers no
    more than 256, so ADR-266's deeper queues could not help there; the first text of this section called these
    receive-queue overruns, but `frames/dropped/nic` counts transmit drops). Where the work is TLS, QoS 1 bookkeeping or fan-out, the same core beats Mosquitto's:

@@ -773,8 +773,9 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             // it suppressed except while this core sleeps.
             crate::irq::enable_spi(spi, 0);
             info!(
-                "net: receive wake-up: interrupt (MSI-X via {} {spi}, to core 0); no polling while asleep",
-                msi_name(spi)
+                "net: receive wake-up: interrupt (MSI-X via {} {spi}, to core 0); polling only within {} ms of NIC traffic",
+                msi_name(spi),
+                urmqtt_virtio::wake::HOLD_NS / 1_000_000
             );
         }
         _ => {

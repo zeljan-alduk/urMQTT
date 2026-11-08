@@ -2810,7 +2810,7 @@ net_irq() {
                     'dataplane: core 0: .* 0 receive interrupt\(s\)' 'NOT:dataplane: core 0: .* [1-9][0-9]* receive interrupt\(s\)')
             else
                 [[ $ARCH == aarch64 && $accel == tcg ]] && expect=('msi: GICv3 ITS at 0x8080000, device table for requester IDs')
-                expect+=('net: receive wake-up: interrupt \(MSI-X via (GICv2m SPI|GICv3 ITS LPI|local APIC vector) [0-9]+, to core 0\); no polling while asleep'
+                expect+=('net: receive wake-up: interrupt \(MSI-X via (GICv2m SPI|GICv3 ITS LPI|local APIC vector) [0-9]+, to core 0\); polling only within 2 ms of NIC traffic'
                     'dataplane: core 0: .* [1-9][0-9]* receive interrupt\(s\)' 'NOT:the receive interrupt never arrived')
             fi
             check "net-irq $mode [$accel]" "$log" "$status" "${expect[@]}" \

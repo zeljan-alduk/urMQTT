@@ -242,7 +242,7 @@ fn an_iso_is_probed_and_configured_in_place_like_the_tool_does() {
     let tpl = synthetic_template();
     let probe = core::iso_probe(&tpl).unwrap();
     assert!(
-        probe.contains(r#""format_version":9"#) && probe.contains(r#""supported":true"#),
+        probe.contains(r#""format_version":11"#) && probe.contains(r#""supported":true"#),
         "{probe}"
     );
     let blob = core::pack(&lab_toml(), &Files::new(), None, 1_900_000_000, None).unwrap();

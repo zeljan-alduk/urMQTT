@@ -57,6 +57,16 @@ All notable changes to this project are documented here. The format follows
   New key `limits.publisher_backpressure = "single" | "off"` (default `"single"`; `"off"` needs configuration format
   8), `$SYS/broker/messages/backpressure/{mode,paused,paused_ms,timeouts,holding}`, `"backpressure"` in the info
   reply, a `status` line, a boot line and a console line. `TcpStack::reset_recv_space`.
+- **virtio-net's receive interrupt** (ADR-270, NOW-13): a frame that arrives while the broker is idle wakes the core
+  that owns the NIC through the receive queue's MSI-X interrupt (x86_64 local APIC; aarch64 GICv2m frame, or the GICv3
+  ITS through a new minimal ITS driver, as on QEMU TCG and KVM `virt` such as the netcup ARM VPS) instead of ADR-224's
+  200 us poll once the NIC has been quiet for 2 ms (while traffic is recent it polls as before, which batches frames
+  better than one interrupt per idle gap). Interrupts are asked for only while that core sleeps (`VIRTQ_AVAIL_F_NO_INTERRUPT` otherwise, with a
+  re-check after enabling, the CPU's own interrupts masked until the wait), so a flood is polled without interrupts.
+  The poll stays as the fallback: no MSI-X, no MSI target, a refused vector, an ITS that cannot be set up, an interrupt
+  that never arrives (noticed after 8 frames that waited), or `[devices] virtio_net_interrupt = "off"` (new key,
+  configuration format 11; `"auto"`, the default, writes nothing). Boot line `net: receive wake-up: ...`; the
+  dispatcher's statistics count receive interrupts. Smoke group `net_irq`.
 - `docs/PERFORMANCE.md` §13: urMQTT v0.4.2, `main` (SACK, ADR-265/266) and Mosquitto 2.0.21 measured on two VPSes
   (Contabo x86_64 4 vCPU, netcup arm64 2 vCPU), each loaded from the other; raw files, tables and figures in
   `docs/perf-results/x11-2026-11-07/`, figures from the new `scripts/x11-charts.py`. Findings: with cores to use

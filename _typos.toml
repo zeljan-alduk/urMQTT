@@ -11,6 +11,8 @@ INDX = "INDX"
 # rustls API names (MessageEncrypter, encrypter())
 Encrypter = "Encrypter"
 encrypter = "encrypter"
+# GICv3 ITS register name (GITS_TRANSLATER, Arm IHI 0069)
+TRANSLATER = "TRANSLATER"
 # TCP retransmission timeout
 RTO = "RTO"
 # x86 Interrupt Stack Table
