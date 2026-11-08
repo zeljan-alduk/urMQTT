@@ -79,6 +79,19 @@ pub struct Drops {
     pub frames_nic: u64,
 }
 
+/// QoS 2 flows (exactly once, ADR-271), all cores, since boot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Qos2 {
+    /// QoS 2 PUBLISHes received with a new packet id.
+    pub received: u64,
+    /// QoS 2 PUBLISHes whose id was still held: answered, not routed again.
+    pub duplicates: u64,
+    /// Deliveries to clients completed with PUBCOMP.
+    pub completed: u64,
+    /// Connections closed for holding too many ids awaiting PUBREL.
+    pub inbound_full: u64,
+}
+
 /// The plaintext listener, as `$SYS/broker/plaintext/...` reports it (P1,
 /// ADR-230). Counters are since boot, all cores together.
 #[derive(Debug, Clone, Copy, Default)]
@@ -221,6 +234,7 @@ pub struct Info<'a> {
     /// `network.mtu`, or 1500.
     pub net_mtu: u16,
     pub drops: Drops,
+    pub qos2: Qos2,
     pub handshakes: Handshakes,
     /// Connections accepted per core since boot (how evenly the flows
     /// spread over the cores).
@@ -305,6 +319,11 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
     put("frames/dropped/steer", &d.frames_steer);
     put("frames/dropped/worker_tx", &d.frames_worker_tx);
     put("frames/dropped/nic", &d.frames_nic);
+    let q = &i.qos2;
+    put("messages/qos2/received", &q.received);
+    put("messages/qos2/duplicates", &q.duplicates);
+    put("messages/qos2/completed", &q.completed);
+    put("messages/qos2/inbound_full", &q.inbound_full);
     let h = &i.handshakes;
     put("handshakes/started", &h.started);
     put("handshakes/done", &h.done);
@@ -399,6 +418,7 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
         console_dropped: 0,
         net_mtu: 1500,
         drops: Drops::default(),
+        qos2: Qos2::default(),
         handshakes: Handshakes::default(),
         accepted: &accepted,
         plaintext: PlainInfo {
@@ -482,6 +502,7 @@ pub fn json(i: &Info<'_>) -> String {
         o,
         "}},\"console_dropped\":{},\"net\":{{\"mtu\":{}}},\"dropped\":{{\"slow_subscriber\":{},\"offline\":{},\"cross_core\":{},\
          \"qos1_queue_full\":{},\"publish_rate\":{},\"frames_steer\":{},\"frames_worker_tx\":{},\"frames_nic\":{}}},\
+         \"qos2\":{{\"received\":{},\"duplicates\":{},\"completed\":{},\"inbound_full\":{}}},\
          \"handshakes\":{{\"started\":{},\"done\":{},\"failed\":{},\
          \"timed_out\":{},\"refused\":{},\"syn_dropped\":{},\"in_flight\":{},\"in_flight_max\":{},\
          \"slow\":{},\"latency_sum_ms\":{},\"latency_max_ms\":{}}},\"accepted\":[",
@@ -495,6 +516,10 @@ pub fn json(i: &Info<'_>) -> String {
         d.frames_steer,
         d.frames_worker_tx,
         d.frames_nic,
+        i.qos2.received,
+        i.qos2.duplicates,
+        i.qos2.completed,
+        i.qos2.inbound_full,
         h.started,
         h.done,
         h.failed,
@@ -639,6 +664,14 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
         d.frames_steer,
         d.frames_worker_tx,
         d.frames_nic
+    ));
+    let q = &i.qos2;
+    out.push(alloc::format!(
+        "QoS 2: {} received, {} duplicate(s), {} completed, {} closed with ids full",
+        q.received,
+        q.duplicates,
+        q.completed,
+        q.inbound_full
     ));
     let p = &i.plaintext;
     if p.enabled {
@@ -833,6 +866,12 @@ mod tests {
             drops: Drops {
                 slow_subscriber: 3,
                 ..Drops::default()
+            },
+            qos2: Qos2 {
+                received: 4,
+                duplicates: 1,
+                completed: 2,
+                inbound_full: 0,
             },
             handshakes: Handshakes {
                 started: 9,
@@ -1058,6 +1097,10 @@ mod tests {
                 "$SYS/broker/frames/dropped/steer",
                 "$SYS/broker/frames/dropped/worker_tx",
                 "$SYS/broker/frames/dropped/nic",
+                "$SYS/broker/messages/qos2/received",
+                "$SYS/broker/messages/qos2/duplicates",
+                "$SYS/broker/messages/qos2/completed",
+                "$SYS/broker/messages/qos2/inbound_full",
                 "$SYS/broker/handshakes/started",
                 "$SYS/broker/handshakes/done",
                 "$SYS/broker/handshakes/failed",
@@ -1090,6 +1133,8 @@ mod tests {
         );
         assert_eq!(val("$SYS/broker/cpu/accepted/1"), Some("5"));
         assert_eq!(val("$SYS/broker/net/mtu"), Some("1460"));
+        assert_eq!(val("$SYS/broker/messages/qos2/received"), Some("4"));
+        assert_eq!(val("$SYS/broker/messages/qos2/duplicates"), Some("1"));
         // No payload is empty: an empty retained payload would clear it.
         assert!(got.iter().all(|(_, v)| !v.is_empty()));
         assert_eq!(val("$SYS/broker/plaintext/enabled"), Some("false"));
@@ -1117,6 +1162,7 @@ mod tests {
              \"connections_refused\":1,\"tls\":{\"server_cert_days\":90},\"time\":{\"source\":\"sntp\",\"offset_ms\":-12},\"entropy\":{\"source\":\"jitter+firmware\"},\"console_dropped\":0,\"net\":{\"mtu\":1460},\
              \"dropped\":{\"slow_subscriber\":3,\"offline\":0,\"cross_core\":0,\"qos1_queue_full\":0,\
              \"publish_rate\":0,\"frames_steer\":0,\"frames_worker_tx\":0,\"frames_nic\":0},\
+             \"qos2\":{\"received\":4,\"duplicates\":1,\"completed\":2,\"inbound_full\":0},\
              \"handshakes\":{\"started\":9,\"done\":8,\"failed\":0,\"timed_out\":0,\"refused\":0,\
              \"syn_dropped\":0,\"in_flight\":0,\"in_flight_max\":0,\"slow\":0,\"latency_sum_ms\":0,\
              \"latency_max_ms\":0},\"accepted\":[4,5],\"plaintext\":{\"enabled\":false},\"websocket\":{\"enabled\":false}}"
@@ -1169,7 +1215,7 @@ mod tests {
     #[test]
     fn status_is_a_few_short_lines() {
         let lines = status_lines(&info(&[10, 20]), "info", "debug");
-        assert_eq!(lines.len(), 10);
+        assert_eq!(lines.len(), 11);
         assert_eq!(lines[0], "urmqtt 0.1.0 aarch64 up 12 s");
         assert_eq!(lines[1], "cpu 2 core(s), busy % 10/20");
         assert!(lines[3].starts_with("clients 3 connected, 5 sessions"));
@@ -1179,7 +1225,11 @@ mod tests {
             lines[8],
             "dropped QoS0 slow 3 offline 0 xcore 0; QoS1 0; rate 0; frames 0/0/0"
         );
-        assert!(lines[9].starts_with("log level info (build maximum debug)"));
+        assert_eq!(
+            lines[9],
+            "QoS 2: 4 received, 1 duplicate(s), 2 completed, 0 closed with ids full"
+        );
+        assert!(lines[10].starts_with("log level info (build maximum debug)"));
         assert!(lines.iter().all(|l| l.len() < 120 && !l.contains('\n')));
     }
 

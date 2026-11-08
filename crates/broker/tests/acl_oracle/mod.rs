@@ -26,8 +26,16 @@
 //!    the subscriber's rights.
 //! 5. CONNACK codes (identity spoofing, bootstrap rules, will rights) and
 //!    `session_present` follow the session model; RETAIN is set only on
-//!    the replay after a SUBSCRIBE; in-flight QoS 1 stays within the
+//!    the replay after a SUBSCRIBE; in-flight QoS 1 and 2 stay within the
 //!    window; retained state stays within the configured limits.
+//! 6. QoS 2 (ADR-271): a PUBLISH whose id the session still holds (no
+//!    PUBREL yet, across reconnects, takeovers and a restore) is answered
+//!    with PUBREC and neither routed nor counted again; one id too many
+//!    closes the connection; every PUBREC answers an id the session holds
+//!    and every PUBREL is answered with PUBCOMP. Outbound, a message is
+//!    delivered to a session in one flow only: it is sent again only with
+//!    DUP and the same id, and never after the client's PUBREC; a PUBREL
+//!    comes only after our PUBREC.
 
 #![allow(dead_code)]
 
@@ -36,7 +44,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use std::sync::Arc;
 
-use urmqtt_broker::{Acl, Broker, CONTROL_TOPIC, CloseReason, Config, ConnId, MsgInner, Stats};
+use std::collections::BTreeMap;
+
+use urmqtt_broker::{
+    Acl, Broker, CONTROL_TOPIC, CloseReason, Config, ConnId, MIN_QOS2_IDS, MsgInner, Qos2Id, Stats,
+    StoredMsg,
+};
 use urmqtt_mqtt::{
     Connect, Error, Limits, Packet, Publish, QoS, Subscribe, SubscribeTopics, Unsubscribe,
     UnsubscribeTopics, Will, decode, encode, encoded_len,
@@ -65,6 +78,12 @@ pub const ACL: Acl = Acl {
 };
 
 pub const MAX_INFLIGHT: usize = 2;
+/// QoS 2 ids a session may hold awaiting PUBREL.
+pub const QOS2_IDS: usize = if MAX_INFLIGHT > MIN_QOS2_IDS {
+    MAX_INFLIGHT
+} else {
+    MIN_QOS2_IDS
+};
 pub const MAX_SUBS: usize = 4;
 pub const MAX_RETAINED_PER_DEVICE: usize = 2;
 pub const MAX_RETAINED_BYTES: usize = 600;
@@ -284,7 +303,17 @@ pub enum Op {
         slot: usize,
         filters: Vec<String>,
     },
+    /// Acknowledges every delivery in flight: PUBACK (QoS 1), PUBREC (QoS 2
+    /// not yet received), PUBCOMP (QoS 2 after the broker's PUBREL).
     Ack {
+        slot: usize,
+    },
+    /// Sends PUBREL for every QoS 2 id the slot's session holds.
+    Release {
+        slot: usize,
+    },
+    /// Sends again, with DUP, the QoS 2 PUBLISH of an id the session holds.
+    Dup {
         slot: usize,
     },
     Disconnect {
@@ -305,6 +334,10 @@ pub enum Op {
         who: usize,
         subs: Vec<(String, QoS)>,
         queued: usize,
+        /// The queued messages are QoS 2.
+        qos2: bool,
+        /// QoS 2 ids received from the client, awaiting its PUBREL: 1..=n.
+        ids: u16,
     },
     /// The store hands back a retained message.
     RestoreRetained {
@@ -420,10 +453,10 @@ impl Src<'_> {
     }
 
     fn qos(b: u8) -> QoS {
-        if b & 1 == 0 {
-            QoS::AtMostOnce
-        } else {
-            QoS::AtLeastOnce
+        match b & 3 {
+            1 => QoS::AtLeastOnce,
+            2 => QoS::ExactlyOnce,
+            _ => QoS::AtMostOnce,
         }
     }
 
@@ -487,12 +520,7 @@ pub fn decode_ops(data: &[u8]) -> Vec<Op> {
                 Op::Publish {
                     slot,
                     topic,
-                    qos: match (b1 >> 2) & 3 {
-                        0 | 3 => QoS::AtMostOnce,
-                        1 => QoS::AtLeastOnce,
-                        // QoS 2 is refused by closing the connection.
-                        _ => QoS::ExactlyOnce,
-                    },
+                    qos: Src::qos(b1 >> 2),
                     retain: b1 & 0x10 != 0,
                     empty: b1 & 0x20 != 0,
                     extra: usize::from(s.u8() % 32),
@@ -517,14 +545,19 @@ pub fn decode_ops(data: &[u8]) -> Vec<Op> {
                 ms: u64::from(s.u8()) * 500,
             },
             8 => Op::Ping { slot },
+            9 if b1 & 0x30 == 0x10 => Op::Release { slot },
+            9 if b1 & 0x30 == 0x20 => Op::Dup { slot },
             10 => {
                 let who = usize::from(b1 >> 2) % WHO.len();
                 let n = usize::from(b1 >> 6) % 3;
                 let subs = (0..n).map(|_| (s.topic(true), Src::qos(b1))).collect();
+                let q = s.u8();
                 Op::Restore {
                     who,
                     subs,
-                    queued: usize::from(s.u8() % 3),
+                    queued: usize::from(q % 3),
+                    qos2: q & 4 != 0,
+                    ids: u16::from(q >> 4) % 4,
                 }
             }
             11 => Op::RestoreRetained {
@@ -570,6 +603,18 @@ struct Expect {
     clean: bool,
 }
 
+/// A delivery to this connection that is not complete.
+#[derive(Clone, Copy, Debug)]
+struct Out {
+    qos: QoS,
+    /// QoS 2: our PUBREC is sent.
+    rec: bool,
+    /// QoS 2: the broker's PUBREL arrived.
+    rel: bool,
+    /// The registry entry of its payload, if it has one.
+    seq: Option<u32>,
+}
+
 struct Slot {
     c: ConnId,
     who: usize,
@@ -577,7 +622,9 @@ struct Slot {
     key: String,
     accepted: bool,
     expect: Option<Expect>,
-    inflight: BTreeSet<u16>,
+    inflight: BTreeMap<u16, Out>,
+    /// PUBRELs sent and not yet answered with PUBCOMP.
+    released: Vec<u16>,
     next_pid: u16,
     rx: Vec<u8>,
     /// Garbage may have left half a packet in the broker's input buffer.
@@ -591,6 +638,30 @@ struct Sess {
     /// Every filter granted to this session since it was created: a queued
     /// message may outlive an UNSUBSCRIBE.
     granted: HashSet<String>,
+    /// QoS 2 ids this client published and has not released: the broker
+    /// holds exactly these (method B).
+    awaiting: BTreeSet<u16>,
+    /// A QoS 2 publish went out on a connection with garbage in its input
+    /// buffer: what the broker holds is not known any more.
+    uncertain: bool,
+    /// QoS 2 deliveries to this session (not retained replays): payload
+    /// registry entry -> (packet id, our PUBREC sent).
+    q2: HashMap<u32, (u16, bool)>,
+}
+
+/// What a QoS 2 PUBLISH should do, by the session model.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Q2 {
+    /// Not QoS 2.
+    No,
+    /// A new id: PUBREC, then the same as QoS 1.
+    Fresh,
+    /// An id the session holds: PUBREC, nothing else.
+    Dup,
+    /// One id too many: the connection is closed, nothing else.
+    Full,
+    /// Not modelled (garbage before it).
+    Unknown,
 }
 
 /// A packet from the broker, owned.
@@ -602,8 +673,12 @@ enum Rx {
         qos: QoS,
         pid: Option<u16>,
         retain: bool,
+        dup: bool,
     },
     SubAck(Vec<u8>),
+    PubRec(u16),
+    PubRel(u16),
+    PubComp(u16),
     Other,
 }
 
@@ -676,7 +751,7 @@ impl Harness {
         self.steps += 1;
         let before = self.b.stats();
         // For a PUBLISH: the model's verdict, for the counter check.
-        let mut verdict: Option<(&str, bool, bool, QoS)> = None;
+        let mut verdict: Option<(&str, bool, bool, Q2)> = None;
         match op {
             Op::Connect {
                 slot,
@@ -721,7 +796,8 @@ impl Harness {
                         present,
                         clean: *clean,
                     }),
-                    inflight: BTreeSet::new(),
+                    inflight: BTreeMap::new(),
+                    released: Vec::new(),
                     next_pid: 1,
                     rx: Vec::new(),
                     dirty: false,
@@ -765,6 +841,27 @@ impl Harness {
                     s.next_pid = s.next_pid.wrapping_add(1).max(1);
                     Some(s.next_pid)
                 };
+                let key = s.key.clone();
+                let q2 = match (qos, pid, self.sessions.get_mut(&key)) {
+                    (QoS::ExactlyOnce, Some(p), Some(sess)) => {
+                        if dirty {
+                            sess.uncertain = true;
+                        }
+                        if sess.uncertain {
+                            sess.awaiting.insert(p);
+                            Q2::Unknown
+                        } else if sess.awaiting.contains(&p) {
+                            Q2::Dup
+                        } else if sess.awaiting.len() >= QOS2_IDS {
+                            Q2::Full
+                        } else {
+                            sess.awaiting.insert(p);
+                            Q2::Fresh
+                        }
+                    }
+                    (QoS::ExactlyOnce, _, _) => Q2::Unknown,
+                    _ => Q2::No,
+                };
                 let allowed = may_pub(kind, id, topic);
                 let control = topic == CONTROL_TOPIC && kind != Kind::Bootstrap && id == "svc";
                 let body = if *empty {
@@ -772,8 +869,8 @@ impl Harness {
                 } else {
                     self.payload(topic, allowed, *extra)
                 };
-                if !dirty {
-                    verdict = Some((topic, allowed, control, *qos));
+                if !dirty && q2 != Q2::Unknown {
+                    verdict = Some((topic, allowed, control, q2));
                 }
                 self.feed(
                     *slot,
@@ -816,12 +913,79 @@ impl Harness {
                 );
             }
             Op::Ack { slot } => {
+                let mut acks = Vec::new();
                 if let Some(s) = self.slots[*slot].as_mut() {
-                    let pids: Vec<u16> = std::mem::take(&mut s.inflight).into_iter().collect();
-                    for p in pids {
-                        self.feed(*slot, &Packet::PubAck(p));
+                    let key = s.key.clone();
+                    for (&p, o) in s.inflight.iter_mut() {
+                        match (o.qos, o.rec, o.rel) {
+                            (QoS::ExactlyOnce, false, _) => {
+                                o.rec = true;
+                                // Our PUBREC: the PUBLISH may not come again.
+                                if let Some(seq) = o.seq
+                                    && let Some(e) =
+                                        self.sessions.get_mut(&key).and_then(|x| x.q2.get_mut(&seq))
+                                {
+                                    e.1 = true;
+                                }
+                                acks.push(Packet::PubRec(p));
+                            }
+                            (QoS::ExactlyOnce, true, true) => acks.push(Packet::PubComp(p)),
+                            (QoS::ExactlyOnce, true, false) => {}
+                            _ => acks.push(Packet::PubAck(p)),
+                        }
                     }
+                    s.inflight
+                        .retain(|_, o| o.qos == QoS::ExactlyOnce && !(o.rec && o.rel));
                 }
+                for a in acks {
+                    self.feed(*slot, &a);
+                }
+            }
+            Op::Release { slot } => {
+                if !self.accepted(*slot) {
+                    return self.settle();
+                }
+                let s = self.slots[*slot].as_mut().expect("accepted");
+                let ids: Vec<u16> = self
+                    .sessions
+                    .get_mut(&s.key)
+                    .map(|x| std::mem::take(&mut x.awaiting).into_iter().collect())
+                    .unwrap_or_default();
+                s.released.extend(&ids);
+                for p in ids {
+                    self.feed(*slot, &Packet::PubRel(p));
+                }
+            }
+            Op::Dup { slot } => {
+                if !self.accepted(*slot) {
+                    return self.settle();
+                }
+                let s = self.slots[*slot].as_ref().expect("accepted");
+                let (dirty, key) = (s.dirty, s.key.clone());
+                let Some(sess) = self.sessions.get(&key) else {
+                    return self.settle();
+                };
+                let Some(&p) = sess.awaiting.iter().next() else {
+                    return self.settle();
+                };
+                let uncertain = sess.uncertain;
+                let topic = TOPICS[2];
+                // Never deliverable: a duplicate is never routed.
+                let body = self.payload(topic, false, 1);
+                if !dirty && !uncertain {
+                    verdict = Some((topic, false, false, Q2::Dup));
+                }
+                self.feed(
+                    *slot,
+                    &Packet::Publish(Publish {
+                        dup: true,
+                        qos: QoS::ExactlyOnce,
+                        retain: false,
+                        topic,
+                        packet_id: Some(p),
+                        payload: &body,
+                    }),
+                );
             }
             Op::Disconnect { slot } => self.feed(*slot, &Packet::Disconnect),
             Op::Drop { slot } => {
@@ -838,7 +1002,13 @@ impl Harness {
                     self.b.shrink();
                 }
             }
-            Op::Restore { who, subs, queued } => {
+            Op::Restore {
+                who,
+                subs,
+                queued,
+                qos2,
+                ids,
+            } => {
                 let (id, kind) = WHO[*who];
                 if kind == Kind::Bootstrap {
                     return self.settle();
@@ -851,10 +1021,21 @@ impl Harness {
                     .take(*queued)
                     .map(|t| (t.to_string(), self.payload(t, true, 0)))
                     .collect();
+                let qos = if *qos2 {
+                    QoS::ExactlyOnce
+                } else {
+                    QoS::AtLeastOnce
+                };
                 let ok = self.b.restore_session(
                     id,
                     subs.iter().map(|(f, q)| (f.as_str(), *q)),
-                    msgs.iter().map(|(t, p)| (t.as_str(), p.as_slice())),
+                    msgs.iter().map(|(t, p)| StoredMsg {
+                        topic: t,
+                        payload: p,
+                        qos,
+                        pid: None,
+                    }),
+                    (1..=*ids).map(Qos2Id::Received),
                 );
                 assert_eq!(ok, want, "restore_session({id:?})");
                 if ok {
@@ -863,6 +1044,7 @@ impl Harness {
                     // subscribes to now: its own topic counts as a filter.
                     sess.granted = subs.iter().map(|(f, _)| f.clone()).collect();
                     sess.granted.extend(msgs.iter().map(|(t, _)| t.clone()));
+                    sess.awaiting = (1..=*ids).collect();
                 }
             }
             Op::RestoreRetained { topic } => {
@@ -903,22 +1085,37 @@ impl Harness {
         }
         self.settle();
         self.sub = None;
-        if let Some((topic, allowed, control, qos)) = verdict {
-            self.check_deltas(&before, topic, allowed, control, qos);
+        if let Some((topic, allowed, control, q2)) = verdict {
+            self.check_deltas(&before, topic, allowed, control, q2);
         }
         self.check_global();
     }
 
     /// Counters after a PUBLISH against the model's verdict.
-    fn check_deltas(&self, before: &Stats, topic: &str, allowed: bool, control: bool, qos: QoS) {
+    fn check_deltas(&self, before: &Stats, topic: &str, allowed: bool, control: bool, q2: Q2) {
         let after = self.b.stats();
         let d = |a: u64, b: u64| a - b;
         let published = d(after.published, before.published);
         let acl = d(after.dropped_acl, before.dropped_acl);
         let ctl = d(after.control_received, before.control_received);
         let dropped_ctl = d(after.dropped_control, before.dropped_control);
-        let want = if qos == QoS::ExactlyOnce {
-            // Refused by closing the connection.
+        let q2_counts = (
+            d(after.qos2_received, before.qos2_received),
+            d(after.qos2_duplicates, before.qos2_duplicates),
+            d(after.qos2_inbound_full, before.qos2_inbound_full),
+        );
+        let q2_want = match q2 {
+            Q2::Fresh => (1, 0, 0),
+            Q2::Dup => (0, 1, 0),
+            Q2::Full => (0, 0, 1),
+            Q2::No | Q2::Unknown => (0, 0, 0),
+        };
+        assert_eq!(
+            q2_counts, q2_want,
+            "QoS 2 publish to {topic:?} ({q2:?}): (received, duplicates, inbound_full)"
+        );
+        let want = if matches!(q2, Q2::Dup | Q2::Full) {
+            // Answered (or refused) without being looked at again.
             (0, 0, 0, 0)
         } else if is_reserved(topic) {
             if control { (0, 0, 1, 0) } else { (0, 0, 0, 1) }
@@ -1025,8 +1222,12 @@ impl Harness {
                                 qos: p.qos,
                                 pid: p.packet_id,
                                 retain: p.retain,
+                                dup: p.dup,
                             },
                             Packet::SubAck(a) => Rx::SubAck(a.return_codes.to_vec()),
+                            Packet::PubRec(p) => Rx::PubRec(p),
+                            Packet::PubRel(p) => Rx::PubRel(p),
+                            Packet::PubComp(p) => Rx::PubComp(p),
                             _ => Rx::Other,
                         });
                         used += n;
@@ -1052,7 +1253,44 @@ impl Harness {
                 qos,
                 pid,
                 retain,
-            } => self.on_delivery(i, &topic, &payload, qos, pid, retain),
+                dup,
+            } => self.on_delivery(i, &topic, &payload, qos, pid, retain, dup),
+            Rx::PubRec(p) => {
+                // Only for an id this client published at QoS 2 and holds.
+                let s = self.slots[i].as_ref().expect("slot");
+                let sess = self.sessions.get(&s.key).expect("session");
+                assert!(
+                    sess.uncertain || sess.awaiting.contains(&p),
+                    "{:?}: PUBREC {p} for an id it does not hold",
+                    s.key
+                );
+            }
+            Rx::PubRel(p) => {
+                let s = self.slots[i].as_mut().expect("slot");
+                let o = s.inflight.entry(p).or_insert(Out {
+                    // Sent again after a reconnect: the flow started on an
+                    // earlier connection.
+                    qos: QoS::ExactlyOnce,
+                    rec: true,
+                    rel: false,
+                    seq: None,
+                });
+                assert!(
+                    o.qos == QoS::ExactlyOnce && o.rec,
+                    "{:?}: PUBREL {p} before our PUBREC",
+                    s.key
+                );
+                o.rel = true;
+                assert!(s.inflight.len() <= MAX_INFLIGHT, "{:?}: window", s.key);
+            }
+            Rx::PubComp(p) => {
+                let s = self.slots[i].as_mut().expect("slot");
+                let at = s.released.iter().position(|&x| x == p);
+                assert!(at.is_some(), "{:?}: PUBCOMP {p} without our PUBREL", s.key);
+                if let Some(at) = at {
+                    s.released.remove(at);
+                }
+            }
             Rx::Other => {}
         }
     }
@@ -1093,7 +1331,7 @@ impl Harness {
                 "{:?} was granted filter {filter:?} that reaches topics outside its rights",
                 WHO[s.who]
             );
-            assert!(*code <= 1 && *code <= *want as u8);
+            assert!(*code <= 2 && *code <= *want as u8);
             let key = s.key.clone();
             self.sessions
                 .get_mut(&key)
@@ -1103,6 +1341,7 @@ impl Harness {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn on_delivery(
         &mut self,
         i: usize,
@@ -1111,6 +1350,7 @@ impl Harness {
         qos: QoS,
         pid: Option<u16>,
         retain: bool,
+        dup: bool,
     ) {
         let s = self.slots[i].as_mut().expect("slot");
         assert!(s.accepted, "PUBLISH before CONNACK");
@@ -1152,16 +1392,51 @@ impl Harness {
                 "{ctx}: nobody may publish it"
             );
         }
-        if qos == QoS::AtLeastOnce {
-            s.inflight.insert(pid.expect("QoS 1 has an id"));
-            assert!(
-                s.inflight.len() <= MAX_INFLIGHT,
-                "{ctx}: {} unacknowledged",
-                s.inflight.len()
-            );
-        } else {
-            assert_eq!(qos, QoS::AtMostOnce);
+        let seq = (payload.len() >= 7 && payload[..3] == MAGIC)
+            .then(|| u32::from_le_bytes([payload[3], payload[4], payload[5], payload[6]]));
+        if qos == QoS::AtMostOnce {
+            return;
         }
+        let pid = pid.expect("QoS 1 and 2 have an id");
+        let key = s.key.clone();
+        // Exactly once: one flow per message and session; the PUBLISH comes
+        // again only with DUP, the same id, before our PUBREC.
+        if qos == QoS::ExactlyOnce
+            && !retain
+            && let Some(seq) = seq
+        {
+            let sess = self.sessions.get_mut(&key).expect("session");
+            match sess.q2.get(&seq) {
+                Some(&(p, rec)) => {
+                    assert!(
+                        dup && p == pid && !rec,
+                        "{ctx}: QoS 2 message {seq} delivered again (id {pid}, first {p}, dup {dup}, PUBREC sent {rec})"
+                    );
+                }
+                None => {
+                    sess.q2.insert(seq, (pid, false));
+                }
+            }
+        }
+        let s = self.slots[i].as_mut().expect("slot");
+        assert!(
+            !s.inflight.contains_key(&pid),
+            "{ctx}: id {pid} reused while in flight"
+        );
+        s.inflight.insert(
+            pid,
+            Out {
+                qos,
+                rec: false,
+                rel: false,
+                seq,
+            },
+        );
+        assert!(
+            s.inflight.len() <= MAX_INFLIGHT,
+            "{ctx}: {} unacknowledged",
+            s.inflight.len()
+        );
     }
 }
 

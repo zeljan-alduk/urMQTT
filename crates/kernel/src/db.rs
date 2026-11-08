@@ -2102,9 +2102,25 @@ impl Worker {
                     qos,
                 } => s.subscribe(&client_id, &filter, qos as u8),
                 PersistOp::Unsubscribe { client_id, filter } => s.unsubscribe(&client_id, &filter),
-                PersistOp::QueuePush { client_id, msg } => {
-                    s.queue_push(&client_id, &msg.topic, &msg.payload, 1)
-                }
+                PersistOp::QueuePush {
+                    client_id,
+                    msg,
+                    qos,
+                    pid,
+                } => s.queue_push_sent(
+                    &client_id,
+                    &msg.topic,
+                    &msg.payload,
+                    qos as u8,
+                    pid.unwrap_or(0),
+                ),
+                PersistOp::Qos2 { client_id, id } => s.qos2_id(
+                    &client_id,
+                    urmqtt_store::Qos2Id {
+                        released: matches!(id, urmqtt_broker::Qos2Id::Released(_)),
+                        pid: id.pid(),
+                    },
+                ),
                 PersistOp::QueueClear { client_id } => s.queue_clear(&client_id),
             },
         }

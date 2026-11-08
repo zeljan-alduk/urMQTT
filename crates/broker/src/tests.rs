@@ -61,6 +61,9 @@ enum Got {
         dup: bool,
     },
     PubAck(u16),
+    PubRec(u16),
+    PubRel(u16),
+    PubComp(u16),
     SubAck(u16, Vec<u8>),
     UnsubAck(u16),
     PingResp,
@@ -169,6 +172,9 @@ impl Client {
                             dup: p.dup,
                         },
                         Packet::PubAck(i) => Got::PubAck(i),
+                        Packet::PubRec(i) => Got::PubRec(i),
+                        Packet::PubRel(i) => Got::PubRel(i),
+                        Packet::PubComp(i) => Got::PubComp(i),
                         Packet::SubAck(s) => Got::SubAck(s.packet_id, s.return_codes.to_vec()),
                         Packet::UnsubAck(i) => Got::UnsubAck(i),
                         Packet::PingResp => Got::PingResp,
@@ -329,8 +335,8 @@ fn pubsub_with_wildcards_and_acl() {
             ],
             0
         ),
-        vec![Got::SubAck(2, vec![0x80, 1])],
-        "QoS 2 granted as 1"
+        vec![Got::SubAck(2, vec![0x80, 2])],
+        "QoS 2 granted (ADR-271)"
     );
     assert_eq!(
         d1.publish(
@@ -642,11 +648,8 @@ fn rate_limit_drops_excess() {
 }
 
 #[test]
-fn qos2_publish_is_refused_and_limits_hold() {
+fn packet_and_connection_limits_hold() {
     let mut b = Broker::new(cfg());
-    let (mut d1, _) = Client::connect(&mut b, "d1", true, None, 0);
-    d1.publish(&mut b, "devices/d1/x", b"x", QoS::ExactlyOnce, false, 0);
-    assert_eq!(b.close_requested(d1.c), Some(CloseReason::Unsupported));
     // Oversized packets are refused before buffering the body.
     let (d2, _) = Client::connect(&mut b, "d2", true, None, 0);
     b.input(d2.c, &[0x30, 0xff, 0xff, 0x03], 0);
@@ -732,9 +735,16 @@ fn client_id_must_match_certificate_identity() {
     assert_eq!(cl.recv(&mut b), vec![Got::ConnAck(false, 0)]);
 }
 
-/// Stored sessions: subscriptions and queued (topic, payload) messages.
-type StoredSessions =
-    std::collections::BTreeMap<String, (Vec<(String, QoS)>, Vec<(String, Vec<u8>)>)>;
+/// A stored session: subscriptions, queued (topic, payload, QoS, packet id
+/// if in flight) messages and the QoS 2 ids of unfinished flows.
+#[derive(Default, Debug, Clone, PartialEq)]
+struct StoredSession {
+    subs: Vec<(String, QoS)>,
+    queue: Vec<(String, Vec<u8>, QoS, Option<u16>)>,
+    ids: Vec<Qos2Id>,
+}
+
+type StoredSessions = std::collections::BTreeMap<String, StoredSession>;
 
 /// A model of the durable store: applies persist ops like the SQLite store.
 #[derive(Default, Debug)]
@@ -770,24 +780,39 @@ impl Model {
                         .sessions
                         .get_mut(&*client_id)
                         .expect("FK: session first");
-                    s.0.retain(|(f, _)| *f != *filter);
-                    s.0.push((filter.to_string(), qos));
+                    s.subs.retain(|(f, _)| *f != *filter);
+                    s.subs.push((filter.to_string(), qos));
                 }
                 PersistOp::Unsubscribe { client_id, filter } => {
                     if let Some(s) = self.sessions.get_mut(&*client_id) {
-                        s.0.retain(|(f, _)| *f != *filter);
+                        s.subs.retain(|(f, _)| *f != *filter);
                     }
                 }
-                PersistOp::QueuePush { client_id, msg } => {
+                PersistOp::QueuePush {
+                    client_id,
+                    msg,
+                    qos,
+                    pid,
+                } => {
                     let s = self
                         .sessions
                         .get_mut(&*client_id)
                         .expect("FK: session first");
-                    s.1.push((msg.topic.to_string(), msg.payload.to_vec()));
+                    s.queue
+                        .push((msg.topic.to_string(), msg.payload.to_vec(), qos, pid));
+                }
+                PersistOp::Qos2 { client_id, id } => {
+                    let s = self
+                        .sessions
+                        .get_mut(&*client_id)
+                        .expect("FK: session first");
+                    assert!(!s.ids.contains(&id), "primary key ({client_id}, {id:?})");
+                    s.ids.push(id);
                 }
                 PersistOp::QueueClear { client_id } => {
                     if let Some(s) = self.sessions.get_mut(&*client_id) {
-                        s.1.clear();
+                        s.queue.clear();
+                        s.ids.clear();
                     }
                 }
             }
@@ -802,11 +827,17 @@ impl Model {
         for (t, (p, q)) in &self.retained {
             b.restore_retained(t, p, *q);
         }
-        for (id, (subs, queue)) in &self.sessions {
+        for (id, s) in &self.sessions {
             b.restore_session(
                 id,
-                subs.iter().map(|(f, q)| (f.as_str(), *q)),
-                queue.iter().map(|(t, p)| (t.as_str(), p.as_slice())),
+                s.subs.iter().map(|(f, q)| (f.as_str(), *q)),
+                s.queue.iter().map(|(t, p, qos, pid)| StoredMsg {
+                    topic: t,
+                    payload: p,
+                    qos: *qos,
+                    pid: *pid,
+                }),
+                s.ids.iter().copied(),
             );
         }
         b
@@ -842,7 +873,7 @@ fn persisted_state_survives_a_restart() {
     m.apply(&mut b);
     assert_eq!(m.retained.len(), 1);
     assert_eq!(m.sessions.len(), 1);
-    assert_eq!(m.sessions["d2"].1.len(), 2);
+    assert_eq!(m.sessions["d2"].queue.len(), 2);
 
     // "Reboot": a fresh broker restored from the model.
     let mut b = m.restore();
@@ -853,13 +884,22 @@ fn persisted_state_survives_a_restart() {
     assert_eq!(
         got,
         vec![
-            publish("devices/d2/cmd/a", b"1", 1, Some(1), false),
+            // In flight when it went offline: sent again with its packet
+            // id and DUP (4.4, ADR-271), also after the restart.
+            Got::Publish {
+                topic: "devices/d2/cmd/a".into(),
+                payload: b"1".to_vec(),
+                qos: 1,
+                pid: Some(1),
+                retain: false,
+                dup: true
+            },
             publish("devices/d2/cmd/b", b"2", 1, Some(2), false),
         ]
     );
     m.apply(&mut b);
     assert!(
-        m.sessions["d2"].1.is_empty(),
+        m.sessions["d2"].queue.is_empty(),
         "queue back in RAM after reconnect"
     );
     // The restored subscription routes live traffic.
@@ -879,7 +919,7 @@ fn persisted_state_survives_a_restart() {
     // d2 never acknowledged a and b: the disconnect snapshot keeps them.
     d2.disconnect(&mut b, 0);
     m.apply(&mut b);
-    assert_eq!(m.sessions["d2"].1.len(), 2);
+    assert_eq!(m.sessions["d2"].queue.len(), 2);
     let _ = Client::connect(&mut b, "d2", true, None, 0);
     m.apply(&mut b);
     assert!(m.sessions.is_empty());
@@ -890,19 +930,25 @@ fn restore_drops_what_the_policy_no_longer_allows() {
     let mut m = Model::default();
     m.sessions.insert(
         "d1".into(),
-        (
-            vec![
+        StoredSession {
+            subs: vec![
                 ("devices/d1/cmd/#".into(), QoS::AtLeastOnce),
                 ("devices/d2/cmd/#".into(), QoS::AtLeastOnce),
             ],
-            vec![("devices/d1/cmd/x".into(), b"q".to_vec())],
-        ),
+            queue: vec![(
+                "devices/d1/cmd/x".into(),
+                b"q".to_vec(),
+                QoS::AtLeastOnce,
+                None,
+            )],
+            ids: vec![],
+        },
     );
-    m.sessions.insert("bad/id".into(), (vec![], vec![]));
+    m.sessions.insert("bad/id".into(), StoredSession::default());
     let mut b = m.restore();
     m.apply(&mut b);
     assert_eq!(
-        m.sessions["d1"].0,
+        m.sessions["d1"].subs,
         vec![("devices/d1/cmd/#".into(), QoS::AtLeastOnce)]
     );
     assert!(!m.sessions.contains_key("bad/id"));
@@ -1135,7 +1181,7 @@ fn device_scoped_subscriptions_share_one_filter() {
         ..cfg()
     });
     let nodes = r.stats().topic_nodes;
-    assert!(r.restore_session("dev3", [("devices/dev3/cmd/#", QoS::AtLeastOnce)], []));
+    assert!(r.restore_session("dev3", [("devices/dev3/cmd/#", QoS::AtLeastOnce)], [], []));
     assert_eq!(r.stats().topic_nodes, nodes);
     let (mut s2, _) = Client::connect(&mut r, "backend", true, None, 0);
     let (mut d3, _) = Client::connect(&mut r, "dev3", false, None, 0);
@@ -2490,3 +2536,6 @@ fn a_web_session_has_its_own_rate_and_no_retain() {
         "retain = false: delivered, not retained"
     );
 }
+
+#[path = "qos2_tests.rs"]
+mod qos2;

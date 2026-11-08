@@ -47,6 +47,10 @@ pub struct Shard {
     dropped_offline: AtomicU64,
     dropped_queue_full: AtomicU64,
     dropped_rate: AtomicU64,
+    qos2_received: AtomicU64,
+    qos2_duplicates: AtomicU64,
+    qos2_completed: AtomicU64,
+    qos2_inbound_full: AtomicU64,
 }
 
 impl Shard {
@@ -62,6 +66,10 @@ impl Shard {
             dropped_offline: AtomicU64::new(0),
             dropped_queue_full: AtomicU64::new(0),
             dropped_rate: AtomicU64::new(0),
+            qos2_received: AtomicU64::new(0),
+            qos2_duplicates: AtomicU64::new(0),
+            qos2_completed: AtomicU64::new(0),
+            qos2_inbound_full: AtomicU64::new(0),
         }
     }
 }
@@ -188,6 +196,12 @@ impl Sys {
         s.dropped_queue_full
             .store(st.dropped_queue_full, Ordering::Relaxed);
         s.dropped_rate.store(st.dropped_rate, Ordering::Relaxed);
+        s.qos2_received.store(st.qos2_received, Ordering::Relaxed);
+        s.qos2_duplicates
+            .store(st.qos2_duplicates, Ordering::Relaxed);
+        s.qos2_completed.store(st.qos2_completed, Ordering::Relaxed);
+        s.qos2_inbound_full
+            .store(st.qos2_inbound_full, Ordering::Relaxed);
     }
 
     /// New kernel log lines to `$SYS/console/out`.
@@ -311,7 +325,12 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
     let (mut online, mut sessions, mut subs, mut published, mut delivered) = (0, 0, 0, 0, 0);
     let mut retained = 0;
     let mut drops = urmqtt_broker::sys::Drops::default();
+    let mut qos2 = urmqtt_broker::sys::Qos2::default();
     for s in SHARDS.iter() {
+        qos2.received += s.qos2_received.load(Ordering::Relaxed);
+        qos2.duplicates += s.qos2_duplicates.load(Ordering::Relaxed);
+        qos2.completed += s.qos2_completed.load(Ordering::Relaxed);
+        qos2.inbound_full += s.qos2_inbound_full.load(Ordering::Relaxed);
         drops.slow_subscriber += s.dropped_backpressure.load(Ordering::Relaxed);
         drops.offline += s.dropped_offline.load(Ordering::Relaxed);
         drops.qos1_queue_full += s.dropped_queue_full.load(Ordering::Relaxed);
@@ -358,6 +377,7 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
         console_dropped: CONSOLE_DROPPED.load(Ordering::Relaxed),
         net_mtu: crate::netproto::mtu().0,
         drops,
+        qos2,
         handshakes: {
             let t = dataplane::handshake_totals();
             urmqtt_broker::sys::Handshakes {

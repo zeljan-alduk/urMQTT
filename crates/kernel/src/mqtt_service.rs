@@ -497,11 +497,7 @@ fn tls_server_with(client_auth: bool) -> Option<TlsServer> {
 }
 
 fn qos_of(q: u8) -> QoS {
-    if q == 1 {
-        QoS::AtLeastOnce
-    } else {
-        QoS::AtMostOnce
-    }
+    QoS::from_bits(q).unwrap_or(QoS::AtMostOnce)
 }
 
 impl MqttService {
@@ -566,9 +562,19 @@ impl MqttService {
                     sess.subscriptions
                         .iter()
                         .map(|(f, q)| (f.as_str(), qos_of(*q))),
-                    sess.queued
-                        .iter()
-                        .map(|q| (q.topic.as_str(), q.payload.as_slice())),
+                    sess.queued.iter().map(|q| urmqtt_broker::StoredMsg {
+                        topic: &q.topic,
+                        payload: &q.payload,
+                        qos: qos_of(q.qos),
+                        pid: (q.pid != 0).then_some(q.pid),
+                    }),
+                    sess.qos2_ids.iter().map(|i| {
+                        if i.released {
+                            urmqtt_broker::Qos2Id::Released(i.pid)
+                        } else {
+                            urmqtt_broker::Qos2Id::Received(i.pid)
+                        }
+                    }),
                 );
             }
         }

@@ -171,6 +171,65 @@ fn bootstrap_identities_get_no_operational_rights() {
     assert_eq!(h.b.stats().control_received, 0);
 }
 
+/// QoS 2 (ADR-271): the oracle's exactly-once checks run on duplicates,
+/// a reconnect that reuses held ids, releases, the outbound four-packet
+/// flow, a restored session's ids and a QoS 2 will.
+#[test]
+fn directed_qos2() {
+    let q2 = QoS::ExactlyOnce;
+    let t = "devices/d1/telemetry/t";
+    let ops = vec![
+        connect(0, D1, false),
+        connect(2, SVC, true),
+        Op::Subscribe {
+            slot: 2,
+            filters: vec![("devices/+/telemetry/#".into(), q2)],
+        },
+        publish(0, t, q2, false), // id 2
+        publish(0, t, q2, false), // id 3
+        Op::Dup { slot: 0 },
+        Op::Ack { slot: 2 }, // PUBREC both
+        Op::Ack { slot: 2 }, // PUBCOMP both, after the PUBRELs
+        // The device drops and comes back: its ids restart at 2, which the
+        // session still holds.
+        Op::Drop { slot: 0 },
+        connect(0, D1, false),
+        publish(0, t, q2, false), // id 2 again: a duplicate
+        Op::Release { slot: 0 },
+        publish(0, t, q2, false), // id 3, released: new
+        Op::Ack { slot: 2 },
+        Op::Ack { slot: 2 },
+        // A restored session holding ids 1 to 3, queued QoS 2 messages.
+        Op::Restore {
+            who: D2,
+            subs: vec![("devices/d2/cmd/#".into(), q2)],
+            queued: 2,
+            qos2: true,
+            ids: 3,
+        },
+        connect(1, D2, false),
+        publish(1, "devices/d2/telemetry/t", q2, false), // id 2: held
+        Op::Ack { slot: 1 },
+        Op::Ack { slot: 1 },
+        Op::Release { slot: 1 },
+        // A QoS 2 will.
+        Op::Connect {
+            slot: 3,
+            who: EXP,
+            claim: EXP,
+            clean: true,
+            will: Some(("fleet/x/y".into(), true, q2)),
+        },
+        Op::Drop { slot: 3 },
+    ];
+    let h = run(&ops);
+    let st = h.b.stats();
+    assert_eq!(st.qos2_received, 3, "{st:?}");
+    assert_eq!(st.qos2_duplicates, 3, "{st:?}");
+    assert!(st.qos2_completed >= 3, "{st:?}");
+    assert_eq!(st.wills_published, 1, "{st:?}");
+}
+
 /// Every seed of the fuzz target is a regression test.
 #[test]
 fn fuzz_seeds_replay() {

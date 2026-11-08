@@ -1,5 +1,5 @@
 //! MQTT 3.1.1 broker core: sessions, topic tree, subscriptions, routing,
-//! QoS 0/1, retained messages, Last Will, keepalive, ACL and limits.
+//! QoS 0/1/2, retained messages, Last Will, keepalive, ACL and limits.
 //!
 //! The broker is *sans-IO*: the transport feeds bytes in with [`Broker::input`]
 //! and drains bytes from [`Broker::output`]; time comes in as milliseconds.
@@ -216,12 +216,39 @@ pub struct ControlMsg {
     pub payload: Box<[u8]>,
 }
 
+/// A QoS 2 packet identifier a session holds between two packets of the
+/// exactly-once flow (MQTT 3.1.1 4.3.3, ADR-271).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Qos2Id {
+    /// Received from the client with a QoS 2 PUBLISH (PUBREC sent), awaiting
+    /// its PUBREL. A PUBLISH with this id is a duplicate until then.
+    Received(u16),
+    /// Sent to the client: it acknowledged the PUBLISH with PUBREC, the PUBREL
+    /// is sent, its PUBCOMP is awaited. The message itself is delivered.
+    Released(u16),
+}
+
+/// A message of a stored session, as the store hands it back
+/// ([`Broker::restore_session`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredMsg<'a> {
+    pub topic: &'a str,
+    pub payload: &'a [u8],
+    /// The QoS it is delivered at: 1 or 2.
+    pub qos: QoS,
+    /// In flight when the session went offline: the PUBLISH was sent with
+    /// this packet id and not acknowledged (no PUBACK, no PUBREC). It is
+    /// sent again with that id and DUP set (4.4). `None`: queued, not sent.
+    pub pid: Option<u16>,
+}
+
 /// A change to durable broker state, for the DB core (ADR-030).
 ///
 /// Persistent sessions are stored with their subscriptions; their queued
-/// QoS 1 messages are stored while they are offline (a snapshot at
-/// disconnect, then each new message). While a session is online its
-/// in-flight state lives in RAM only.
+/// QoS 1 and 2 messages are stored while they are offline (a snapshot at
+/// disconnect, then each new message), with the packet ids of unfinished
+/// flows (ADR-271). While a session is online its in-flight state lives in
+/// RAM only.
 #[derive(Debug, Clone)]
 pub enum PersistOp {
     /// Set a retained message; an empty payload clears it.
@@ -245,10 +272,20 @@ pub enum PersistOp {
         client_id: Box<str>,
         filter: Box<str>,
     },
+    /// Appends a message to the session's stored queue: at `qos` (1 or 2),
+    /// in flight with packet id `pid` or (`None`) not sent yet.
     QueuePush {
         client_id: Box<str>,
         msg: Msg,
+        qos: QoS,
+        pid: Option<u16>,
     },
+    /// Records a packet id of an unfinished QoS 2 flow (ADR-271).
+    Qos2 {
+        client_id: Box<str>,
+        id: Qos2Id,
+    },
+    /// Clears the stored queue and the QoS 2 packet ids of the session.
     QueueClear {
         client_id: Box<str>,
     },
@@ -303,6 +340,17 @@ pub struct Stats {
     /// Operator requests dropped: the backlog was full or the session's
     /// publish rate was exceeded (O1, O2).
     pub dropped_sys: u64,
+    /// QoS 2 PUBLISHes received with a new packet id (PUBREC sent; routed
+    /// unless the ACL or the rate refused them), ADR-271.
+    pub qos2_received: u64,
+    /// QoS 2 PUBLISHes with a packet id still awaiting its PUBREL: answered
+    /// with PUBREC again and not routed again.
+    pub qos2_duplicates: u64,
+    /// Outbound QoS 2 deliveries completed (PUBCOMP received).
+    pub qos2_completed: u64,
+    /// Connections closed because they held more QoS 2 packet ids awaiting
+    /// PUBREL than [`Broker::qos2_id_limit`] allows.
+    pub qos2_inbound_full: u64,
 }
 
 struct Will {
@@ -373,14 +421,43 @@ impl Conn {
     }
 }
 
+/// Where an outbound QoS 1 or 2 delivery stands (MQTT 3.1.1 4.3.2, 4.3.3;
+/// the state machine of ADR-271).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    /// QoS 1: PUBLISH sent, awaiting PUBACK.
+    Puback,
+    /// QoS 2: PUBLISH sent, awaiting PUBREC.
+    Pubrec,
+    /// QoS 2: PUBREL sent, awaiting PUBCOMP. The message is delivered and
+    /// no longer held.
+    Pubcomp,
+}
+
+/// One outbound delivery in flight (16 bytes, as the QoS 1 pair it replaces).
+#[derive(Debug, Clone)]
+struct Flight {
+    pid: u16,
+    flow: Flow,
+    /// `None` once the PUBREL is sent.
+    msg: Option<Msg>,
+}
+
 #[derive(Default)]
 struct Pending {
-    inflight: Vec<(u16, Msg)>,
-    queue: VecDeque<Msg>,
+    /// Sent and not completed, in the order sent (resent in this order).
+    inflight: Vec<Flight>,
+    /// Not sent yet, with the QoS each is delivered at (1 or 2).
+    queue: VecDeque<(Msg, QoS)>,
+    /// QoS 2 packet ids received from the client and acknowledged with
+    /// PUBREC, awaiting its PUBREL (method B of 4.3.3: the message is routed
+    /// on arrival and only the id is kept). Bounded by
+    /// [`Broker::qos2_id_limit`].
+    received: Vec<u16>,
 }
 
 impl Session {
-    fn inflight(&self) -> &[(u16, Msg)] {
+    fn inflight(&self) -> &[Flight] {
         self.pending
             .as_deref()
             .map_or(&[], |p| p.inflight.as_slice())
@@ -390,21 +467,32 @@ impl Session {
         self.pending.as_ref().map_or(0, |p| p.queue.len())
     }
 
+    fn received(&self) -> &[u16] {
+        self.pending
+            .as_deref()
+            .map_or(&[], |p| p.received.as_slice())
+    }
+
     fn pending_mut(&mut self) -> &mut Pending {
         self.pending.get_or_insert_with(Default::default)
     }
 
-    /// Frees the queues once both are empty.
+    /// Frees the queues once all are empty.
     fn release_pending(&mut self) {
         if self
             .pending
             .as_ref()
-            .is_some_and(|p| p.inflight.is_empty() && p.queue.is_empty())
+            .is_some_and(|p| p.inflight.is_empty() && p.queue.is_empty() && p.received.is_empty())
         {
             self.pending = None;
         }
     }
 }
+
+/// The fewest QoS 2 packet ids a session may hold awaiting PUBREL, whatever
+/// `max_inflight` says: common clients pipeline up to 20 QoS 2 publishes
+/// (mosquitto's and paho's default windows), ADR-271.
+pub const MIN_QOS2_IDS: usize = 64;
 
 /// One subscription: an interned filter. A device-scoped filter
 /// (`<scope>/<own client id>/<rest>`, PROMPT §7.3) is stored as `rest`,
@@ -434,6 +522,25 @@ struct Session {
     clean: bool,
     /// The session exists in the durable store.
     persisted: bool,
+}
+
+impl Flow {
+    /// The QoS of the PUBLISH this flow delivers.
+    fn qos(self) -> QoS {
+        match self {
+            Flow::Puback => QoS::AtLeastOnce,
+            Flow::Pubrec | Flow::Pubcomp => QoS::ExactlyOnce,
+        }
+    }
+}
+
+impl Qos2Id {
+    /// The packet identifier.
+    pub fn pid(self) -> u16 {
+        match self {
+            Qos2Id::Received(p) | Qos2Id::Released(p) => p,
+        }
+    }
 }
 
 impl Session {
@@ -769,19 +876,30 @@ impl Broker {
             self.stats.retained_refused_bytes += 1;
             return;
         }
-        self.topics
-            .set_retained(topic, msg, qos.min(QoS::AtLeastOnce), None);
+        self.topics.set_retained(topic, msg, qos, None);
+    }
+
+    /// How many QoS 2 packet ids a session may hold awaiting the client's
+    /// PUBREL (`max_inflight`, at least [`MIN_QOS2_IDS`]). A client that
+    /// opens one more is disconnected (`qos2_inbound_full`); it sends the
+    /// PUBLISH again when it reconnects.
+    pub fn qos2_id_limit(&self) -> usize {
+        self.cfg.max_inflight.max(MIN_QOS2_IDS)
     }
 
     /// Restores an offline persistent session from the store. Subscriptions
     /// the current ACL no longer allows are dropped (and removed from the
-    /// store); limits apply as for live sessions. Returns false if the
-    /// client id is not acceptable any more (the session is deleted).
+    /// store); limits apply as for live sessions. Messages that were in
+    /// flight go back into flight with their packet ids (up to the window;
+    /// the rest are queued), then the queue; `ids` are the packet ids of
+    /// unfinished QoS 2 flows (ADR-271). Returns false if the client id is
+    /// not acceptable any more (the session is deleted).
     pub fn restore_session<'a>(
         &mut self,
         client_id: &str,
         subs: impl IntoIterator<Item = (&'a str, QoS)>,
-        queued: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+        queued: impl IntoIterator<Item = StoredMsg<'a>>,
+        ids: impl IntoIterator<Item = Qos2Id>,
     ) -> bool {
         if !Self::valid_identity(client_id) || self.find_session(client_id).is_some() {
             self.emit(PersistOp::SessionDelete {
@@ -792,10 +910,12 @@ impl Broker {
         let role = self.cfg.acl.role(client_id);
         let sid = self.insert_session(client_id, role, false, 0);
         let max_queued = self.cfg.max_queued;
+        let max_inflight = self.cfg.max_inflight;
+        let id_limit = self.qos2_id_limit();
         for (filter, qos) in subs {
             let ok = within_limits(filter, &self.cfg.limits, is_valid_topic_filter)
                 && self.cfg.acl.may_subscribe(role, client_id, filter)
-                && self.add_sub(sid, filter, qos.min(QoS::AtLeastOnce));
+                && self.add_sub(sid, filter, qos);
             if !ok {
                 self.emit(PersistOp::Unsubscribe {
                     client_id: client_id.into(),
@@ -805,15 +925,54 @@ impl Broker {
         }
         if let Some(s) = self.session(sid) {
             s.persisted = true;
-            for (topic, payload) in queued {
-                if s.queue_len() >= max_queued {
-                    break;
+            // Released ids first: their PUBLISH went out before any message
+            // still in flight. Duplicates and ids beyond the bound (the store
+            // is not trusted to keep them) are skipped.
+            let mut ids: Vec<Qos2Id> = ids.into_iter().filter(|i| i.pid() != 0).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            for id in ids {
+                let p = s.pending_mut();
+                match id {
+                    Qos2Id::Received(pid) if p.received.len() < id_limit => p.received.push(pid),
+                    Qos2Id::Released(pid) if p.inflight.len() < id_limit => {
+                        p.inflight.push(Flight {
+                            pid,
+                            flow: Flow::Pubcomp,
+                            msg: None,
+                        })
+                    }
+                    _ => {}
                 }
-                s.pending_mut().queue.push_back(Arc::new(MsgInner {
-                    topic: topic.into(),
-                    payload: payload.into(),
-                }));
             }
+            for m in queued {
+                let qos = m.qos.clamp(QoS::AtLeastOnce, QoS::ExactlyOnce);
+                let msg = Arc::new(MsgInner {
+                    topic: m.topic.into(),
+                    payload: m.payload.into(),
+                });
+                let p = s.pending_mut();
+                let pid = m.pid.filter(|&id| {
+                    id != 0
+                        && p.inflight.len() < max_inflight
+                        && !p.inflight.iter().any(|f| f.pid == id)
+                });
+                if let Some(pid) = pid {
+                    let flow = if qos == QoS::ExactlyOnce {
+                        Flow::Pubrec
+                    } else {
+                        Flow::Puback
+                    };
+                    p.inflight.push(Flight {
+                        pid,
+                        flow,
+                        msg: Some(msg),
+                    });
+                } else if p.queue.len() < max_queued {
+                    p.queue.push_back((msg, qos));
+                }
+            }
+            s.release_pending();
         }
         true
     }
@@ -1149,23 +1308,43 @@ impl Broker {
                 } else if let Some(s) = self.session(sid) {
                     s.set_conn(None);
                     // Snapshot what the device has not acknowledged yet:
-                    // in-flight first (older), then the queue.
+                    // in-flight first (older, with their packet ids), then
+                    // the queue, then the QoS 2 ids of unfinished flows.
                     if s.persisted {
                         let cid = s.client_id.clone();
-                        let msgs: Vec<Msg> = s
-                            .inflight()
-                            .iter()
-                            .map(|(_, m)| m.clone())
-                            .chain(s.pending.iter().flat_map(|p| p.queue.iter().cloned()))
-                            .collect();
-                        self.emit(PersistOp::QueueClear {
+                        let mut ops = alloc::vec![PersistOp::QueueClear {
                             client_id: cid.clone(),
-                        });
-                        for msg in msgs {
-                            self.emit(PersistOp::QueuePush {
-                                client_id: cid.clone(),
-                                msg,
+                        }];
+                        for f in s.inflight() {
+                            ops.push(match (&f.msg, f.flow) {
+                                (Some(msg), flow) => PersistOp::QueuePush {
+                                    client_id: cid.clone(),
+                                    msg: msg.clone(),
+                                    qos: flow.qos(),
+                                    pid: Some(f.pid),
+                                },
+                                (None, _) => PersistOp::Qos2 {
+                                    client_id: cid.clone(),
+                                    id: Qos2Id::Released(f.pid),
+                                },
                             });
+                        }
+                        for (msg, qos) in s.pending.iter().flat_map(|p| p.queue.iter()) {
+                            ops.push(PersistOp::QueuePush {
+                                client_id: cid.clone(),
+                                msg: msg.clone(),
+                                qos: *qos,
+                                pid: None,
+                            });
+                        }
+                        for &pid in s.received() {
+                            ops.push(PersistOp::Qos2 {
+                                client_id: cid.clone(),
+                                id: Qos2Id::Received(pid),
+                            });
+                        }
+                        for op in ops {
+                            self.emit(op);
                         }
                     }
                 }
@@ -1243,6 +1422,9 @@ impl Broker {
             _ if !connected => self.mark_close(c, CloseReason::ProtocolError),
             Packet::Publish(p) => self.on_publish(c, &p, now_ms),
             Packet::PubAck(id) => self.on_puback(c, id),
+            Packet::PubRec(id) => self.on_pubrec(c, id),
+            Packet::PubRel(id) => self.on_pubrel(c, id),
+            Packet::PubComp(id) => self.on_pubcomp(c, id),
             Packet::Subscribe(s) => {
                 let topics: Vec<(&str, QoS)> = s.topics.iter().collect();
                 self.on_subscribe(c, s.packet_id, &topics);
@@ -1261,15 +1443,10 @@ impl Broker {
                 }
                 self.mark_close(c, CloseReason::ClientDisconnect);
             }
-            // QoS 2 is not supported yet (PROMPT §7.1, documented); server-
-            // to-client packet types from a client are protocol errors.
-            Packet::PubRec(_)
-            | Packet::PubRel(_)
-            | Packet::PubComp(_)
-            | Packet::ConnAck(_)
-            | Packet::SubAck(_)
-            | Packet::UnsubAck(_)
-            | Packet::PingResp => self.mark_close(c, CloseReason::ProtocolError),
+            // Server-to-client packet types from a client are protocol errors.
+            Packet::ConnAck(_) | Packet::SubAck(_) | Packet::UnsubAck(_) | Packet::PingResp => {
+                self.mark_close(c, CloseReason::ProtocolError)
+            }
         }
     }
 
@@ -1404,7 +1581,7 @@ impl Broker {
                     topic: w.topic.into(),
                     payload: w.payload.into(),
                 }),
-                qos: w.qos.min(QoS::AtLeastOnce),
+                qos: w.qos,
                 retain: w.retain && self.cfg.may_retain(role),
                 owner: acl_name.into(),
             }),
@@ -1574,13 +1751,28 @@ impl Broker {
         let Some(sid) = self.conn(c).and_then(|k| k.session) else {
             return;
         };
-        if p.qos == QoS::ExactlyOnce {
-            // Not supported in v1 (PROMPT §7.1): no way to refuse in 3.1.1.
-            return self.mark_close(c, CloseReason::Unsupported);
-        }
-        // §3.3.5: an unauthorised publish is acknowledged and dropped.
-        if let Some(id) = p.packet_id {
-            self.send(c, &Packet::PubAck(id));
+        // §3.3.5: an unauthorised publish is acknowledged and dropped. At
+        // QoS 2 the id is kept until PUBREL whatever happens to the message
+        // (ADR-271, method B): a duplicate is answered and never routed, and
+        // a refused message completes its handshake like an accepted one.
+        match (p.qos, p.packet_id) {
+            (QoS::ExactlyOnce, Some(id)) => {
+                let limit = self.qos2_id_limit();
+                let Some(s) = self.session(sid) else { return };
+                if s.received().contains(&id) {
+                    self.stats.qos2_duplicates += 1;
+                    return self.send(c, &Packet::PubRec(id));
+                }
+                if s.received().len() >= limit {
+                    self.stats.qos2_inbound_full += 1;
+                    return self.mark_close(c, CloseReason::ProtocolError);
+                }
+                s.pending_mut().received.push(id);
+                self.stats.qos2_received += 1;
+                self.send(c, &Packet::PubRec(id));
+            }
+            (_, Some(id)) => self.send(c, &Packet::PubAck(id)),
+            (_, None) => {}
         }
         let Some((role, allowed)) = self
             .session(sid)
@@ -1688,7 +1880,7 @@ impl Broker {
         self.store_retained(msg, qos, Some(owner));
         self.emit(PersistOp::Retain {
             msg: msg.clone(),
-            qos: qos.min(QoS::AtLeastOnce),
+            qos,
         });
         true
     }
@@ -1733,20 +1925,37 @@ impl Broker {
         self.scratch = subs;
     }
 
+    /// The next packet id not in flight (the window is far below 65 535).
     fn alloc_pid(s: &mut Session) -> u16 {
         loop {
             let id = s.next_pid;
             s.next_pid = s.next_pid.checked_add(1).unwrap_or(1);
-            if !s.inflight().iter().any(|(p, _)| *p == id) {
+            if !s.inflight().iter().any(|f| f.pid == id) {
                 return id;
             }
         }
     }
 
+    /// Puts `msg` into flight at `qos` (1 or 2) with a new packet id.
+    fn start_flight(s: &mut Session, msg: &Msg, qos: QoS) -> u16 {
+        let pid = Self::alloc_pid(s);
+        let flow = if qos == QoS::ExactlyOnce {
+            Flow::Pubrec
+        } else {
+            Flow::Puback
+        };
+        s.pending_mut().inflight.push(Flight {
+            pid,
+            flow,
+            msg: Some(msg.clone()),
+        });
+        pid
+    }
+
     fn deliver(&mut self, sid: SessionId, msg: &Msg, qos: QoS, retain: bool) {
         enum Action {
             Send0(ConnId),
-            Send1(ConnId, u16),
+            Send(ConnId, u16),
             Queue,
             Drop,
             DropOffline,
@@ -1766,9 +1975,7 @@ impl Broker {
             (QoS::AtMostOnce, Some(_)) => Action::Drop,
             (QoS::AtMostOnce, None) => Action::DropOffline,
             (_, Some(c)) if room && s.inflight().len() < max_inflight && (s.queue_len() == 0) => {
-                let pid = Self::alloc_pid(s);
-                s.pending_mut().inflight.push((pid, msg.clone()));
-                Action::Send1(c, pid)
+                Action::Send(c, Self::start_flight(s, msg, qos))
             }
             // Offline persistent session, full window or backpressure.
             (_, Some(_)) => Action::Queue,
@@ -1777,16 +1984,14 @@ impl Broker {
         };
         match action {
             Action::Send0(c) => self.send_publish(c, msg, QoS::AtMostOnce, None, retain, false),
-            Action::Send1(c, pid) => {
-                self.send_publish(c, msg, QoS::AtLeastOnce, Some(pid), retain, false)
-            }
+            Action::Send(c, pid) => self.send_publish(c, msg, qos, Some(pid), retain, false),
             Action::Queue => {
                 let mut stored = None;
                 if let Some(s) = self.session(sid) {
                     if s.queue_len() >= max_queued {
                         self.stats.dropped_queue_full += 1;
                     } else {
-                        s.pending_mut().queue.push_back(msg.clone());
+                        s.pending_mut().queue.push_back((msg.clone(), qos));
                         // Offline: the store holds the queue (see PersistOp).
                         if s.conn().is_none() && s.persisted {
                             stored = Some(s.client_id.clone());
@@ -1797,6 +2002,8 @@ impl Broker {
                     self.emit(PersistOp::QueuePush {
                         client_id,
                         msg: msg.clone(),
+                        qos,
+                        pid: None,
                     });
                 }
             }
@@ -1828,13 +2035,18 @@ impl Broker {
         );
     }
 
-    /// Re-sends unacknowledged QoS 1 messages with DUP set (§4.4).
+    /// Re-sends what is in flight, in the order it was first sent (4.4):
+    /// unacknowledged PUBLISHes with DUP set and their original packet ids,
+    /// and the PUBRELs of QoS 2 flows awaiting PUBCOMP.
     fn resend_inflight(&mut self, sid: SessionId) {
         let Some(s) = self.session(sid) else { return };
         let Some(c) = s.conn() else { return };
-        let pending: Vec<(u16, Msg)> = s.inflight().to_vec();
-        for (pid, msg) in pending {
-            self.send_publish(c, &msg, QoS::AtLeastOnce, Some(pid), false, true);
+        let pending: Vec<Flight> = s.inflight().to_vec();
+        for f in pending {
+            match f.msg {
+                Some(msg) => self.send_publish(c, &msg, f.flow.qos(), Some(f.pid), false, true),
+                None => self.send(c, &Packet::PubRel(f.pid)),
+            }
         }
     }
 
@@ -1856,26 +2068,93 @@ impl Broker {
                 return;
             }
             let Some(s) = self.session(sid) else { return };
-            let Some(msg) = s.pending.as_mut().and_then(|p| p.queue.pop_front()) else {
+            let Some((msg, qos)) = s.pending.as_mut().and_then(|p| p.queue.pop_front()) else {
                 return;
             };
-            let pid = Self::alloc_pid(s);
-            s.pending_mut().inflight.push((pid, msg.clone()));
-            self.send_publish(c, &msg, QoS::AtLeastOnce, Some(pid), false, false);
+            let pid = Self::start_flight(s, &msg, qos);
+            self.send_publish(c, &msg, qos, Some(pid), false, false);
         }
+    }
+
+    /// Ends the flight `pid` if it awaits `flow`'s acknowledgement; true if
+    /// it did. An acknowledgement of another kind (a PUBACK for a QoS 2
+    /// delivery, a PUBCOMP before the PUBREL) changes nothing.
+    fn complete(&mut self, sid: SessionId, pid: u16, flow: Flow) -> bool {
+        let Some(s) = self.session(sid) else {
+            return false;
+        };
+        let mut done = false;
+        if let Some(p) = s.pending.as_mut()
+            && let Some(i) = p
+                .inflight
+                .iter()
+                .position(|f| f.pid == pid && f.flow == flow)
+        {
+            p.inflight.remove(i);
+            done = true;
+        }
+        s.release_pending();
+        done
     }
 
     fn on_puback(&mut self, c: ConnId, pid: u16) {
         let Some(sid) = self.conn(c).and_then(|k| k.session) else {
             return;
         };
+        if self.complete(sid, pid, Flow::Puback) {
+            self.pump(sid);
+        }
+    }
+
+    /// The client has the QoS 2 message (4.3.3): it is released, the
+    /// PUBREL goes out, the id stays in flight until PUBCOMP. A PUBREC for
+    /// an id already released or unknown (state lost) is answered with
+    /// PUBREL as well, so the client can complete; one for a QoS 1 flight
+    /// is ignored.
+    fn on_pubrec(&mut self, c: ConnId, pid: u16) {
+        let Some(sid) = self.conn(c).and_then(|k| k.session) else {
+            return;
+        };
+        let Some(s) = self.session(sid) else { return };
+        let flight = s
+            .pending
+            .as_mut()
+            .and_then(|p| p.inflight.iter_mut().find(|f| f.pid == pid));
+        match flight {
+            Some(f) if f.flow == Flow::Puback => return,
+            Some(f) => {
+                f.flow = Flow::Pubcomp;
+                f.msg = None;
+            }
+            None => {}
+        }
+        self.send(c, &Packet::PubRel(pid));
+    }
+
+    /// The client releases a QoS 2 message it sent (4.3.3): the id is
+    /// forgotten and PUBCOMP sent, also for an id not held (a PUBREL sent
+    /// again after our PUBCOMP was lost).
+    fn on_pubrel(&mut self, c: ConnId, pid: u16) {
+        let Some(sid) = self.conn(c).and_then(|k| k.session) else {
+            return;
+        };
         if let Some(s) = self.session(sid) {
             if let Some(p) = s.pending.as_mut() {
-                p.inflight.retain(|(x, _)| *x != pid);
+                p.received.retain(|&x| x != pid);
             }
             s.release_pending();
         }
-        self.pump(sid);
+        self.send(c, &Packet::PubComp(pid));
+    }
+
+    fn on_pubcomp(&mut self, c: ConnId, pid: u16) {
+        let Some(sid) = self.conn(c).and_then(|k| k.session) else {
+            return;
+        };
+        if self.complete(sid, pid, Flow::Pubcomp) {
+            self.stats.qos2_completed += 1;
+            self.pump(sid);
+        }
     }
 
     fn on_subscribe(&mut self, c: ConnId, packet_id: u16, topics: &[(&str, QoS)]) {
@@ -1889,8 +2168,7 @@ impl Broker {
             let Some(s) = self.sessions.get(sid) else {
                 return;
             };
-            // QoS 2 is granted as 1 (§3.9.3 permits a lower grant).
-            let qos = want.min(QoS::AtLeastOnce);
+            let qos = want;
             if !cfg.may_subscribe(s.role, s.acl_id(), filter) || !self.add_sub(sid, filter, qos) {
                 codes.push(SUBACK_FAILURE);
                 continue;
