@@ -2,3 +2,5 @@
 vendor/** linguist-vendored
 vendor/sqlite/sqlite3.c -diff
 vendor/sqlite/sqlite3.h -diff
+# Fuzz seeds are exact bytes (HTTP requests carry CRLF): never converted.
+fuzz/seeds/** binary
