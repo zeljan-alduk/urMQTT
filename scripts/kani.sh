@@ -25,7 +25,10 @@ rm -f Cargo.toml.bak
 # the run; any other harness that fails, and any failure WITH a counterexample ("Status: FAILURE"), does.
 # parse_any_segment is proven on an Apple M-series machine but does not finish within 3 minutes on the 4-core
 # CI runner.
-KNOWN_NOT_PROVEN=(decode_typed_packets decode_any_short_input topic_filter_any_short_string parse_rate_any_short_string parse_any_segment)
+# decode_any_short_stream and parse_one_symbolic_header (urmqtt-ws, ADR-272) did not finish within 3 minutes on an
+# Apple M-series machine even at 6 symbolic bytes of stream and 2 of header; the fuzz targets ws_frames and ws_upgrade
+# cover those parsers.
+KNOWN_NOT_PROVEN=(decode_typed_packets decode_any_short_input topic_filter_any_short_string parse_rate_any_short_string parse_any_segment decode_any_short_stream parse_one_symbolic_header)
 log="$(mktemp)"
 trap 'cp "$backup" Cargo.toml; rm -f "$backup" "$log"' EXIT
 for c in "${CRATES[@]}"; do

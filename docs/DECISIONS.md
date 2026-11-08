@@ -2463,8 +2463,9 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
     or not the listener is on; when on: the TLS listener on, a port of its own, accounts and origins with `password`,
     no accounts with `mtls`, no account id that is a service, operator or control identity.
 - **Conformance and testing.** Host: RFC 6455's accept and masking examples, RFC 3174's vectors, every refusal and
-  violation, split invariance and no-panic properties (proptest), Kani harnesses (any 16-byte stream split in two,
-  any 12-byte request, every header length), Miri. Fuzz: `ws_upgrade` (any request and policy; what is accepted is a
+  violation, split invariance and no-panic properties (proptest), Kani (`scan` on any 8 bytes and every header length
+  proven; the decoder and `parse` harnesses do not finish within the cap even at 6 and 2 symbolic bytes and are listed
+  as not proven), Miri. Fuzz: `ws_upgrade` (any request and policy; what is accepted is a
   complete request for the path with a well-formed 101 — it found that the `mqttv3.1` response did not fit its
   160-byte buffer, now 192 with a test) and `ws_frames` (the decoder against itself under arbitrary cuts: same
   events, same verdict, no message over its limit), 180 s each with no finding after the fix; `broker_input` now

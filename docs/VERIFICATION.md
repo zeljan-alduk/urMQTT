@@ -223,8 +223,10 @@ The `urmqtt-ws` crate is checked five ways, each for something the others miss:
   against itself: the same events and verdict however the stream is cut, no message over its limit, no payload it
   was not fed). Seeds in `fuzz/seeds/ws_*`. At ADR-272: 180 s each; `ws_upgrade` found the `mqttv3.1` response
   overflowing its buffer (fixed), then ran clean; `ws_frames` 21.8 million runs, clean.
-- **Kani** (`scripts/kani.sh urmqtt-ws`): any 16-byte stream fed in two pieces under any limit (no panic, no
-  overflow, data never longer than the input, a violation is final), any 12-byte request, every server header length.
+- **Kani** (`scripts/kani.sh urmqtt-ws`): proven: `scan` on any 8 bytes, every server header length. **Not proven**
+  (listed in `KNOWN_NOT_PROVEN`): the decoder on any 6-byte stream in two feeds and `parse` with a 2-byte symbolic
+  header line; CBMC does not finish them within the 3-minute cap (larger bounds were tried first). The fuzz targets
+  are what covers those two parsers.
 - **Miri**: the lib tests (the long-frame test runs two sizes under Miri).
 - **Autobahn|Testsuite** (conformance of the codec): `cargo run --release -p urmqtt-ws --example echo -- 0.0.0.0:19301`
   and `docker run --rm -v $PWD/docs/audit/ws-autobahn:/config -v /tmp/reports:/reports
