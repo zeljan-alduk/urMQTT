@@ -281,6 +281,7 @@ fn control_state_survives_and_migrates() {
                  ALTER TABLE retained DROP COLUMN expires_at; \
                  ALTER TABLE queued DROP COLUMN props; \
                  ALTER TABLE queued DROP COLUMN expires_at; \
+                 ALTER TABLE subscriptions DROP COLUMN sub_id; \
                  PRAGMA user_version = 1;",
             )
             .unwrap();

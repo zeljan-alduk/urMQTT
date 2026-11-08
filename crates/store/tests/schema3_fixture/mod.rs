@@ -225,7 +225,39 @@ pub fn want_mqtt5_session() -> SessionRecord {
             },
         ],
         qos2_ids: vec![],
+        sub_ids: vec![],
         expiry_s: Some(86_400),
         offline_since: Some(NOW as i64 + 60),
+    }
+}
+
+/// The MQTT 5.0 part 3 state of `schema5-shared` (ADR-275): a service's
+/// session with a shared subscription and Subscription Identifiers.
+pub fn write_shared_state(s: &mut urmqtt_store::Store) {
+    s.begin().unwrap();
+    s.session_upsert_expiry("backend", NOW as i64, Some(3_600))
+        .unwrap();
+    s.subscribe_v5("backend", "$share/workers/devices/+/telemetry", 1, 42)
+        .unwrap();
+    s.subscribe_v5("backend", "fleet/#", 2, 268_435_455)
+        .unwrap();
+    s.subscribe_v5("backend", "devices/+/status", 0, 0).unwrap();
+    s.commit().unwrap();
+}
+
+pub fn want_shared_session() -> SessionRecord {
+    SessionRecord {
+        client_id: "backend".into(),
+        subscriptions: vec![
+            ("$share/workers/devices/+/telemetry".into(), 1),
+            ("devices/+/status".into(), 0),
+            ("fleet/#".into(), 2),
+        ],
+        sub_ids: vec![
+            ("$share/workers/devices/+/telemetry".into(), 42),
+            ("fleet/#".into(), 268_435_455),
+        ],
+        expiry_s: Some(3_600),
+        ..SessionRecord::default()
     }
 }

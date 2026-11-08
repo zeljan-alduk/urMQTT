@@ -10,12 +10,13 @@
 //!    applies), its subscription's options are its QoS, its messages have no
 //!    properties and no expiry. MQTT 5.0 state can be written to it
 //!    afterwards, and it opens again as schema 4 without migrating twice.
-//! 2. The code still writes the same bytes for a schema 4 database holding
-//!    QoS 2 and MQTT 5.0 state (`schema4-mqtt5`): `golden_schema4_bytes.rs`.
+//! 2. `schema4-mqtt5` is frozen since schema 5 (ADR-275): the schema 4
+//!    database with QoS 2 and MQTT 5.0 state the code wrote then, the input
+//!    of the 4 to 5 migration tests (`golden_schema5.rs`).
 //! 3. That frozen file opens and hands back exactly that state.
 //!
-//! And a power cut at any write of the 3 to 4 migration leaves schema 3 or
-//! 4 with every row.
+//! And a power cut at any write of the 3 to 5 migrations leaves schema 3, 4
+//! or 5 with every row.
 
 mod schema3_fixture;
 
@@ -30,7 +31,7 @@ fn a_schema_3_database_migrates_and_keeps_every_row() {
     let m = load("schema3-qos2");
     mount(&m);
     let (mut s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (3, 4));
+    assert_eq!((info.schema_from, info.schema_to), (3, 5));
     let sessions = s.sessions().unwrap();
     let want = want_qos2_session();
     assert_eq!(sessions, vec![want.clone()]);
@@ -102,7 +103,7 @@ fn a_schema_3_database_migrates_and_keeps_every_row() {
     drop(s);
     mount(&m);
     let (s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (4, 4));
+    assert_eq!((info.schema_from, info.schema_to), (5, 5));
     assert_eq!(s.db().query_text("PRAGMA integrity_check").unwrap(), "ok");
     assert_eq!(
         s.db()
@@ -118,7 +119,7 @@ fn the_frozen_schema4_image_holds_its_mqtt5_state() {
     let m = load("schema4-mqtt5");
     mount(&m);
     let (mut s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (4, 4));
+    assert_eq!((info.schema_from, info.schema_to), (4, 5));
     assert_eq!(
         s.sessions().unwrap(),
         vec![want_qos2_session(), want_mqtt5_session()]
@@ -144,7 +145,7 @@ fn a_power_cut_during_the_migration_leaves_schema_3_or_4() {
     drop(open().unwrap());
     let total = probe.write_count() - before;
     assert!(total > 0);
-    let (mut old, mut new) = (0, 0);
+    let (mut old, mut new, mut five) = (0, 0, 0);
     for n in 1..=total {
         for torn in [false, true] {
             for keep in [false, true] {
@@ -172,6 +173,7 @@ fn a_power_cut_during_the_migration_leaves_schema_3_or_4() {
                 match info.schema_from {
                     3 => old += 1,
                     4 => new += 1,
+                    5 => five += 1,
                     v => panic!("write {n}: schema {v}"),
                 }
                 assert_eq!(s.db().query_text("PRAGMA integrity_check").unwrap(), "ok");
@@ -185,7 +187,7 @@ fn a_power_cut_during_the_migration_leaves_schema_3_or_4() {
         }
     }
     assert!(
-        old > 0 && new > 0,
-        "both outcomes seen: {old} old, {new} new"
+        old > 0 && new > 0 && five > 0,
+        "every outcome seen: {old} at 3, {new} at 4, {five} at 5"
     );
 }

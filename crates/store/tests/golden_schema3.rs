@@ -1,5 +1,6 @@
 //! Golden database schema 3 (QoS 2, ADR-271), and the way on to schema 4
-//! (MQTT 5.0, ADR-274: `golden_schema4.rs`).
+//! (MQTT 5.0, ADR-274: `golden_schema4.rs`) and 5 (ADR-275:
+//! `golden_schema5.rs`).
 //!
 //! Schema 3 rebuilds the `retained`, `subscriptions` and `queued` tables
 //! (their QoS CHECK allows 2; a queued row records the packet id it was in
@@ -27,8 +28,8 @@ fn a_schema_2_database_migrates_and_keeps_every_row() {
     let m = load("v2-data");
     mount(&m);
     let (mut s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (2, 4));
-    assert_eq!(urmqtt_store::schema::VERSION, 4);
+    assert_eq!((info.schema_from, info.schema_to), (2, 5));
+    assert_eq!(urmqtt_store::schema::VERSION, 5);
     let r = s.retained().unwrap();
     assert_eq!(
         r.iter()
@@ -97,7 +98,7 @@ fn a_schema_2_database_migrates_and_keeps_every_row() {
     // Reopened: current already, nothing to migrate.
     mount(&m);
     let (s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (4, 4));
+    assert_eq!((info.schema_from, info.schema_to), (5, 5));
     assert_eq!(s.db().query_text("PRAGMA integrity_check").unwrap(), "ok");
 }
 
@@ -107,14 +108,14 @@ fn the_frozen_schema3_image_holds_its_qos2_state() {
     let m = load("schema3-qos2");
     mount(&m);
     let (mut s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (3, 4));
+    assert_eq!((info.schema_from, info.schema_to), (3, 5));
     assert_eq!(s.sessions().unwrap(), vec![want_qos2_session()]);
     let r = s.retained().unwrap();
     assert_eq!((r[0].topic.as_str(), r[0].qos), ("fleet/fw", 2));
 }
 
 /// A power cut at every write of the migrations (cut or torn, the device's
-/// cache dropped or kept): the next open finds schema 2, 3 or 4, never
+/// cache dropped or kept): the next open finds schema 2, 3, 4 or 5, never
 /// anything in between, migrates if needed, and every row is there.
 #[test]
 fn a_power_cut_during_the_migration_leaves_schema_2_or_3() {
@@ -128,7 +129,7 @@ fn a_power_cut_during_the_migration_leaves_schema_2_or_3() {
     drop(open().unwrap());
     let total = probe.write_count() - before;
     assert!(total > 0);
-    let (mut old, mut mid, mut new) = (0, 0, 0);
+    let (mut old, mut mid, mut mid4, mut new) = (0, 0, 0, 0);
     for n in 1..=total {
         for torn in [false, true] {
             for keep in [false, true] {
@@ -156,7 +157,8 @@ fn a_power_cut_during_the_migration_leaves_schema_2_or_3() {
                 match info.schema_from {
                     2 => old += 1,
                     3 => mid += 1,
-                    4 => new += 1,
+                    4 => mid4 += 1,
+                    5 => new += 1,
                     v => panic!("write {n}: schema {v}"),
                 }
                 assert_eq!(s.db().query_text("PRAGMA integrity_check").unwrap(), "ok");
@@ -169,7 +171,7 @@ fn a_power_cut_during_the_migration_leaves_schema_2_or_3() {
         }
     }
     assert!(
-        old > 0 && mid > 0 && new > 0,
-        "every outcome seen: {old} at 2, {mid} at 3, {new} at 4"
+        old > 0 && mid > 0 && mid4 > 0 && new > 0,
+        "every outcome seen: {old} at 2, {mid} at 3, {mid4} at 4, {new} at 5"
     );
 }

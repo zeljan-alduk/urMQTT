@@ -142,6 +142,14 @@ pub const MIGRATIONS: &[&str] = &[
     ALTER TABLE queued ADD COLUMN props BLOB;
     ALTER TABLE queued ADD COLUMN expires_at INTEGER;
     ",
+    // 5 (MQTT 5.0 part 3, ADR-275): a subscription records its Subscription
+    // Identifier (0: none; every older row has none). A shared subscription
+    // is a row like any other, its filter `$share/{group}/{filter}`. A column
+    // is added (no rebuild).
+    "
+    ALTER TABLE subscriptions ADD COLUMN sub_id INTEGER NOT NULL DEFAULT 0
+        CHECK (sub_id BETWEEN 0 AND 268435455);
+    ",
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;

@@ -128,6 +128,9 @@ pub struct SessionRecord {
     /// (filter, Subscription Options byte): its QoS in bits 0-1; a row of
     /// schema 3 or older holds its QoS alone (schema 4, ADR-274).
     pub subscriptions: Vec<(String, u8)>,
+    /// (filter, Subscription Identifier) of the subscriptions that have one
+    /// (schema 5, ADR-275), in the order of `subscriptions`.
+    pub sub_ids: Vec<(String, u32)>,
     pub queued: Vec<Queued>,
     pub qos2_ids: Vec<Qos2Id>,
     /// Its Session Expiry Interval; `None`: stored before schema 4 (the
@@ -297,11 +300,12 @@ fn open_inner() -> Result<(Store, OpenInfo)> {
             "SELECT client_id, expiry_s, offline_since FROM sessions ORDER BY client_id",
         )?,
         sub_set: db.prepare(
-            "INSERT INTO subscriptions (client_id, filter, qos, options) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (client_id, filter) DO UPDATE SET qos = excluded.qos, options = excluded.options",
+            "INSERT INTO subscriptions (client_id, filter, qos, options, sub_id) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (client_id, filter) DO UPDATE SET qos = excluded.qos, options = excluded.options,
+                 sub_id = excluded.sub_id",
         )?,
         sub_del: db.prepare("DELETE FROM subscriptions WHERE client_id = ?1 AND filter = ?2")?,
-        sub_all: db.prepare("SELECT client_id, filter, options FROM subscriptions ORDER BY client_id, filter")?,
+        sub_all: db.prepare("SELECT client_id, filter, options, sub_id FROM subscriptions ORDER BY client_id, filter")?,
         queue_push: db.prepare(
             "INSERT INTO queued (client_id, topic, payload, qos, pid, props, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -565,11 +569,25 @@ impl Store {
 
     /// A subscription with its Subscription Options byte (QoS in bits 0-1).
     pub fn subscribe_options(&mut self, client_id: &str, filter: &str, options: u8) -> Result<()> {
+        self.subscribe_v5(client_id, filter, options, 0)
+    }
+
+    /// A subscription with its Subscription Options byte and Subscription
+    /// Identifier (0: none; schema 5, ADR-275). Re-subscribing replaces
+    /// both.
+    pub fn subscribe_v5(
+        &mut self,
+        client_id: &str,
+        filter: &str,
+        options: u8,
+        sub_id: u32,
+    ) -> Result<()> {
         let s = &mut self.s.sub_set;
         s.bind_text(1, client_id)?;
         s.bind_text(2, filter)?;
         s.bind_i64(3, i64::from((options & 3).min(2)))?;
         s.bind_i64(4, i64::from(options))?;
+        s.bind_i64(5, i64::from(sub_id))?;
         Ok(s.run()?)
     }
 
@@ -690,6 +708,11 @@ impl Store {
                         // The options byte (the CHECK keeps it in 0..=255).
                         let options = u8::try_from(s.i64(2)).unwrap_or(0);
                         rec.subscriptions.push((s.text(1).into(), options));
+                        // The CHECK keeps it in 0..=268 435 455.
+                        let id = u32::try_from(s.i64(3)).unwrap_or(0);
+                        if id != 0 {
+                            rec.sub_ids.push((s.text(1).into(), id));
+                        }
                     }
                 }
                 Ok::<(), Error>(())
