@@ -132,9 +132,9 @@ maine-smp2-loss0 handshake threads=128 rep=2 RESULT mode=handshake threads=128 c
 maine-smp2-loss0 handshake threads=128 rep=3 RESULT mode=handshake threads=128 conn_per_s=1909 errors=0 lat_p50_ms=66.7 lat_p99_ms=76.9 tcp_p50_ms=16.7 tls_p50_ms=33.8 tls_p99_ms=40.9 gen_cpu=0.39 tcp_p99=21.1 retx=0 fast=0
 # [   16.034036] INFO  dataplane: 1 data core(s), each with its own network stack, TLS and broker shard
 # [   16.037304] INFO  net: virtio-net with 256 receive and 256 transmit descriptor(s)
-fixe-smp2-loss0 handshake threads=128 rep=1 RESULT mode=handshake threads=128 conn_per_s=1902 errors=0 lat_p50_ms=66.7 lat_p99_ms=94.8 tcp_p50_ms=16.5 tls_p50_ms=33.9 tls_p99_ms=48.0 gen_cpu=0.44 tcp_p99=27.1 retx=0 fast=0
-fixe-smp2-loss0 handshake threads=128 rep=2 RESULT mode=handshake threads=128 conn_per_s=1926 errors=0 lat_p50_ms=66.0 lat_p99_ms=77.8 tcp_p50_ms=16.6 tls_p50_ms=33.6 tls_p99_ms=42.4 gen_cpu=0.41 tcp_p99=23.7 retx=0 fast=0
-fixe-smp2-loss0 handshake threads=128 rep=3 RESULT mode=handshake threads=128 conn_per_s=1918 errors=0 lat_p50_ms=66.3 lat_p99_ms=75.3 tcp_p50_ms=16.6 tls_p50_ms=33.8 tls_p99_ms=41.2 gen_cpu=0.40 tcp_p99=21.8 retx=0 fast=0
+fix-smp2-loss0 handshake threads=128 rep=1 RESULT mode=handshake threads=128 conn_per_s=1902 errors=0 lat_p50_ms=66.7 lat_p99_ms=94.8 tcp_p50_ms=16.5 tls_p50_ms=33.9 tls_p99_ms=48.0 gen_cpu=0.44 tcp_p99=27.1 retx=0 fast=0
+fix-smp2-loss0 handshake threads=128 rep=2 RESULT mode=handshake threads=128 conn_per_s=1926 errors=0 lat_p50_ms=66.0 lat_p99_ms=77.8 tcp_p50_ms=16.6 tls_p50_ms=33.6 tls_p99_ms=42.4 gen_cpu=0.41 tcp_p99=23.7 retx=0 fast=0
+fix-smp2-loss0 handshake threads=128 rep=3 RESULT mode=handshake threads=128 conn_per_s=1918 errors=0 lat_p50_ms=66.3 lat_p99_ms=75.3 tcp_p50_ms=16.6 tls_p50_ms=33.8 tls_p99_ms=41.2 gen_cpu=0.40 tcp_p99=21.8 retx=0 fast=0
 # [   16.048302] INFO  dataplane: 1 data core(s), each with its own network stack, TLS and broker shard
 # [   16.052489] INFO  net: virtio-net with 256 receive and 256 transmit descriptor(s)
 mainf-smp2-loss0 handshake threads=128 rep=1 RESULT mode=handshake threads=128 conn_per_s=1929 errors=0 lat_p50_ms=65.8 lat_p99_ms=74.8 tcp_p50_ms=16.4 tls_p50_ms=33.5 tls_p99_ms=40.5 gen_cpu=0.40 tcp_p99=21.6 retx=0 fast=0
