@@ -2490,7 +2490,7 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
     seeds (`fuzz/seeds/broker_input/`, new: duplicates, a resume after a drop, a QoS 2 will and retained message)
     replay in `cargo test`, and a test checks that they reach the QoS 2 counters.
   - Store: `golden_schema3.rs` (the frozen schema 2 database of `v2-data` migrates and keeps every row; the rebuilt
-    tables' CHECKs and index; QoS 2 rows written, cleared and cascaded; a power cut at every write of the migration,
+    tables' QoS checks and index; QoS 2 rows written, cleared and cascaded; a power cut at every write of the migration,
     cut or torn, cache kept or dropped, leaves schema 2 or 3 with every row), `golden_schema3_bytes.rs` (a schema 3
     database with QoS 2 state is written byte for byte as `schema3-qos2.txt`), `golden_v2.rs` (`v2-data` stays the
     frozen schema 2 image; the same steps now write `v2-data-schema3`).
