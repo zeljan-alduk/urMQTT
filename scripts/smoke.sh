@@ -723,7 +723,11 @@ mqtt_qos2() {
 # back with its queue (properties kept, the short message expired, the
 # expiry counted down) and its No Local option. A third image with
 # mqtt5.enabled = false answers a 5.0 CONNECT with CONNACK 0x84 and still
-# serves 3.1.1. Needs the mosquitto clients and paho-mqtt (or uv).
+# serves 3.1.1. A fourth image (ADR-275, four vCPUs, `worker-*` service ids on
+# the development port) shares a group among three 5.0 and one 3.1.1 paho
+# workers, then mosquitto_sub members: each message to exactly one member,
+# round robin, each with its Subscription Identifier.
+# Needs the mosquitto clients and paho-mqtt (or uv).
 mqtt5_mosquitto() {
     local d="$ROOT/deploy/dev" out
     tls() { echo "--cafile $d/ca.pem --cert $d/$1.pem --key $d/$1.key"; }
@@ -806,6 +810,38 @@ mqtt5_mosquitto() {
     }
 }
 
+# mqtt5_mosquitto_shared <dev port>: a shared group of a 5.0 mosquitto_sub
+# (Subscription Identifier 9, printed with %S) and a 3.1.1 one on the
+# development port; device-001 publishes 12 QoS 1 messages over mTLS.
+mqtt5_mosquitto_shared() {
+    local dport=$1 d="$ROOT/deploy/dev" a b
+    a=$(mktemp)
+    b=$(mktemp)
+    mosquitto_sub -h 127.0.0.1 -p "$dport" -V mqttv5 -i worker-m -q 1 -t '$share/m/devices/+/telemetry/#' \
+        -D subscribe subscription-identifier 9 -F '%p sid:%S' -W 8 >"$a" 2>/dev/null &
+    local sa=$!
+    mosquitto_sub -h 127.0.0.1 -p "$dport" -V mqttv311 -i worker-n -q 1 -t '$share/m/devices/+/telemetry/#' \
+        -W 8 >"$b" 2>/dev/null &
+    local sb=$!
+    sleep 1.5
+    local i
+    for ((i = 0; i < 12; i++)); do
+        mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv5 -i device-001 --cafile "$d/ca.pem" \
+            --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" -q 1 \
+            -t devices/device-001/telemetry/m -m "m$i" || true
+    done
+    wait "$sa" "$sb" || true
+    local na nb
+    na=$(grep -c '^m' "$a" || true)
+    nb=$(grep -c '^m' "$b" || true)
+    if (( na + nb == 12 && na > 0 && nb > 0 )) && ! grep -v ' sid:9$' "$a" | grep -q .; then
+        echo "client: mosq-shared-group-v5-and-v311 ok ($na + $nb)"
+    else
+        echo "client: mosq-shared-group-v5-and-v311 FAILED ($na + $nb): $(tr '\n' '|' <"$a") / $(tr '\n' '|' <"$b")"
+    fi
+    rm -f "$a" "$b"
+}
+
 mqtt5() {
     [[ -z ${SMOKE_SCENARIOS:-} || mqtt5 =~ $SMOKE_SCENARIOS ]] || return 0
     command -v mosquitto_pub >/dev/null || { echo "  ✗ mqtt5 scenarios need the mosquitto clients"; FAILED=$((FAILED + 1)); return 0; }
@@ -827,6 +863,12 @@ mqtt5() {
     "$tool" pack "$dir/off.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/off.blob" >/dev/null
     MKIMG_EXTRA=(--config "$dir/off.blob")
     mkimg "$OUT/mqtt5-off.raw" "serve"
+    # ADR-275: services by prefix on the development port, for a group of
+    # several workers (the dev certificates have one service).
+    sed -e 's/^service_ids = \["backend"\]/service_ids = ["backend", "worker-*"]/' "$ROOT/deploy/dev/config.toml" >"$dir/shared.toml"
+    "$tool" pack "$dir/shared.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/shared.blob" >/dev/null
+    MKIMG_EXTRA=(--config "$dir/shared.blob")
+    mkimg "$OUT/mqtt5-shared.raw" "serve"
     MKIMG_EXTRA=()
     local c=("$ROOT/scripts/mqtt5-scenarios.py" "$PORT" --tls "$ROOT/deploy/dev" --phase)
     local d="$ROOT/deploy/dev"
@@ -850,14 +892,16 @@ mqtt5() {
             kill_vm
             cat "$log.client" >>"$log" 2>/dev/null || true
             if [[ $phase == 1 ]]; then
-                check "mqtt5-live [$accel]" "$log" "$status" "storage: data disk formatted" "schema v4 \(from v0\)" \
+                check "mqtt5-live [$accel]" "$log" "$status" "storage: data disk formatted" "schema v5 \(from v0\)" \
                     "client: mqtt5-connack-announces-the-limits ok" "client: mqtt5-and-311-on-one-port ok" \
                     "client: mqtt5-properties-forwarded ok" "client: mqtt5-properties-stripped-for-a-311-subscriber ok" \
                     "client: mqtt5-request-response ok" "client: mqtt5-topic-alias-resolved ok" \
                     "client: mqtt5-unknown-alias-disconnect-0x94 ok" "client: mqtt5-receive-maximum-bounds-the-window ok" \
                     "client: mqtt5-maximum-packet-size-honoured ok" "client: mqtt5-no-local ok" \
                     "client: mqtt5-retain-handling-and-retain-as-published ok" "client: mqtt5-puback-0x87-outside-the-acl ok" \
-                    "client: mqtt5-suback-0x87-and-0x9e ok" "client: mqtt5-suback-0xa1-subscription-identifier ok" \
+                    "client: mqtt5-suback-0x87-and-a-share-granted ok" "client: mqtt5-subscription-identifier-granted ok" \
+                    "client: mqtt5-subscription-identifiers-in-one-publish ok" \
+                    "client: mqtt5-shared-no-retained-on-subscribe ok" "client: mqtt5-shared-delivers-with-its-identifier ok" \
                     "client: mqtt5-unsuback-0x11 ok" "client: mqtt5-takeover-disconnect-0x8e ok" \
                     "client: mqtt5-auth-disconnect-0x82 ok" "client: mqtt5-session-expiry ok" \
                     "client: mqtt5-message-expiry ok" "client: mqtt5-will-delay ok" \
@@ -868,11 +912,12 @@ mqtt5() {
                 # The short session must have run out while the broker is down.
                 sleep 9
             else
-                check "mqtt5-after-restart [$accel]" "$log" "$status" "storage: data disk opened" "schema v4 \(from v4\)" \
+                check "mqtt5-after-restart [$accel]" "$log" "$status" "storage: data disk opened" "schema v5 \(from v5\)" \
                     "persistent session\(s\) homed here \(1 expired while down, dropped\)" \
                     "client: mqtt5-session-expired-while-the-broker-was-down ok" \
                     "client: mqtt5-restart-keeps-the-queue-properties-and-expiry ok" \
-                    "client: mqtt5-restart-keeps-the-subscription-options ok" "NOT:FAILED" "$NO_FAULT"
+                    "client: mqtt5-restart-keeps-the-subscription-options ok" \
+                    "client: mqtt5-restart-keeps-the-shared-subscription-and-identifier ok" "NOT:FAILED" "$NO_FAULT"
             fi
         done
         # mqtt5.enabled = false: 5.0 refused with CONNACK 0x84, 3.1.1 served.
@@ -904,6 +949,24 @@ mqtt5() {
         cat "$log.client" >>"$log" 2>/dev/null || true
         check "mqtt5-disabled [$accel]" "$log" "$status" "client: mqtt5-disabled-connack-0x84 ok" \
             "client: mqtt5-disabled-311-still-served ok" "NOT:FAILED" "$NO_FAULT"
+        # Shared subscriptions across the four vCPUs (ADR-275).
+        local dport=$((PORT + 1))
+        log="$OUT/mqtt5-shared-$accel.log"
+        status=0
+        fresh_disk "$OUT/mqtt5-shared.raw" "$OUT/mqtt5-shared-$accel.img"
+        start_vm "$log" --disk "$OUT/mqtt5-shared-$accel.img" --accel "$accel" --fwd "$PORT:8883,$dport:1883"
+        if wait_log "$log" "TLS 1.3 listener on port 8883" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+            bounded 120 "${py[@]}" "${c[@]}" shared --dev "$dport" >"$log.client" 2>&1 || status=$?
+            bounded 60 mqtt5_mosquitto_shared "$dport" >>"$log.client" 2>&1 || status=$?
+        else
+            status=124
+        fi
+        kill_vm
+        cat "$log.client" >>"$log" 2>/dev/null || true
+        check "mqtt5-shared [$accel]" "$log" "$status" "client: mqtt5-shared-joined-across-cores ok" \
+            "client: mqtt5-shared-each-message-once ok" "client: mqtt5-shared-round-robin-over-the-members ok" \
+            "client: mqtt5-shared-identifier-per-member ok" "client: mqtt5-shared-unsubscribe-leaves-the-group ok" \
+            "client: mosq-shared-group-v5-and-v311 ok" "NOT:FAILED" "$NO_FAULT"
     done
 }
 

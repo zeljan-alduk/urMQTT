@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015 # `cond && say ok || say FAILED` is intended: say only prints, never fails
-# Store schema 3 -> 4 on a real disk (ADR-274): a data disk written by an
-# older kernel (schema 3, e.g. main before MQTT 5.0) is booted by this one.
+# Store schema N -> N+1 on a real disk (ADR-274: 3 -> 4; ADR-275: 4 -> 5): a
+# data disk written by an older kernel (e.g. main before the change) is booted
+# by this one.
 #
-#   scripts/mqtt5-migration-check.sh OLD_KERNEL [--port PORT] [--accel hvf|tcg] [--work DIR]
+#   scripts/mqtt5-migration-check.sh OLD_KERNEL [--from N] [--port PORT] [--accel hvf|tcg] [--work DIR]
+#
+# --from: the schema the old kernel writes (default 4, the schema before
+# MQTT 5.0 part 3; 3 for a kernel from before part 2).
 #
 # 1. The old kernel serves a fresh disk (one per client script); its own era's clients leave state:
 #    qos2-scenarios.py phase 1 (QoS 2 flows in the middle of every step, a
@@ -11,11 +15,11 @@
 #    session with a queued QoS 1 command); QEMU is killed (SIGKILL).
 # 2. The disk's boot partition gets this tree's kernel (the data partition
 #    kept, as an offline kernel update does); it boots, migrates the database
-#    (`schema v4 (from v3)`), restores the sessions, and the phase 2 clients
+#    (`schema vN+1 (from vN)`), restores the sessions, and the phase 2 clients
 #    find every flow, the queue and the retained message.
 # 3. urmqtt-disk verify and export-db read the migrated disk; the exported
-#    database has the schema 4 columns and the old sessions with expiry
-#    unknown (NULL: the 3.1.1 default applies).
+#    database has the new schema's columns (4: expiry and options; 5: the
+#    Subscription Identifier) and the old sessions.
 # Prints "check: <name> ok|FAILED" lines; exits non-zero on a failure.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,14 +28,17 @@ shift
 PORT=48883
 ACCEL=hvf
 WORK=${TMPDIR:-/tmp}/urmqtt-mqtt5-migration
+FROM=4
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --from) FROM=$2; shift 2 ;;
         --port) PORT=$2; shift 2 ;;
         --accel) ACCEL=$2; shift 2 ;;
         --work) WORK=$2; shift 2 ;;
         *) echo "unknown argument $1" >&2; exit 2 ;;
     esac
 done
+TO=$((FROM + 1))
 NEW="$ROOT/target/aarch64-unknown-none/release/urmqtt"
 D="$ROOT/deploy/dev"
 mkdir -p "$WORK"
@@ -78,7 +85,7 @@ for case in qos2 persist; do
     "${cmd[@]}" 1 >"$WORK/$case-old.client" 2>&1 || true
     sleep 1
     stop
-    grep -aq "schema v3 (from v0)" "$WORK/$case-old.log" && say "$case: old-kernel-wrote-schema-3" ok || say "$case: old-kernel-wrote-schema-3" FAILED
+    grep -aq "schema v$FROM (from v0)" "$WORK/$case-old.log" && say "$case: old-kernel-wrote-schema-$FROM" ok || say "$case: old-kernel-wrote-schema-$FROM" FAILED
     grep -q "FAILED" "$WORK/$case-old.client" && say "$case: old-kernel-phase-1" FAILED || say "$case: old-kernel-phase-1" ok
     # 2. This kernel on the same disk (the ESP starts at 1 MiB in every image).
     dd if="$WORK/new.esp" of="$disk" bs=1048576 seek=1 conv=notrunc status=none
@@ -87,7 +94,7 @@ for case in qos2 persist; do
     stop
     grep -a "db: sqlite\|db: restored" "$WORK/$case-new.log" | sed 's/^/  /'
     sed 's/^/  /' "$WORK/$case-new.client"
-    grep -aq "schema v4 (from v3)" "$WORK/$case-new.log" && say "$case: migrated-at-boot" ok || say "$case: migrated-at-boot" FAILED
+    grep -aq "schema v$TO (from v$FROM)" "$WORK/$case-new.log" && say "$case: migrated-at-boot" ok || say "$case: migrated-at-boot" FAILED
     grep -aqE "db: restored [0-9]+ retained message\(s\), [1-9][0-9]* persistent session\(s\)" "$WORK/$case-new.log" \
         && say "$case: sessions-restored" ok || say "$case: sessions-restored" FAILED
     if grep -q "ok" "$WORK/$case-new.client" && ! grep -q "FAILED" "$WORK/$case-new.client"; then
@@ -104,8 +111,14 @@ for case in qos2 persist; do
     if command -v sqlite3 >/dev/null; then
         v=$(sqlite3 "$WORK/$case.db" "PRAGMA user_version")
         cols=$(sqlite3 "$WORK/$case.db" "SELECT group_concat(name) FROM pragma_table_info('sessions')")
-        echo "  export: user_version $v, sessions columns $cols"
-        [[ $v == 4 && $cols == *expiry_s* && $cols == *offline_since* ]] && say "$case: export-has-schema-4" ok || say "$case: export-has-schema-4" FAILED
+        subcols=$(sqlite3 "$WORK/$case.db" "SELECT group_concat(name) FROM pragma_table_info('subscriptions')")
+        echo "  export: user_version $v, sessions columns $cols, subscriptions columns $subcols"
+        ok=1
+        [[ $v == "$TO" && $cols == *expiry_s* && $cols == *offline_since* && $subcols == *options* ]] || ok=0
+        if (( TO >= 5 )); then
+            [[ $subcols == *sub_id* && $(sqlite3 "$WORK/$case.db" "SELECT count(*) FROM subscriptions WHERE sub_id != 0") == 0 ]] || ok=0
+        fi
+        ((ok)) && say "$case: export-has-schema-$TO" ok || say "$case: export-has-schema-$TO" FAILED
     fi
 done
 echo "migration-check: $fails failure(s); logs in $WORK"

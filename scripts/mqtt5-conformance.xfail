@@ -2,8 +2,6 @@
 # conformance image (scripts/mqtt5-conformance.sh --boot: the plaintext
 # listener, open login mode). docs/MQTT5-CONFORMANCE.md section 2.
 # suite        test                            phase   reason
-client_test5   test_shared_subscriptions       part3   shared subscriptions arrive in part 3 (ADR-273 rule 16): SUBACK 0x9E today
-client_test5   test_subscribe_identifiers      part3   subscription identifiers arrive in part 3 (ADR-273 rule 17): SUBACK 0xA1 today
 client_test5   test_offline_message_queueing   always  plaintext sessions are never persistent (ADR-230): Session Expiry is granted 0; covered over mTLS (smoke mqtt5)
 client_test5   test_redelivery_on_reconnect    always  plaintext sessions are never persistent (ADR-230); covered over mTLS (smoke mqtt5, mqtt_qos2)
 client_test5   test_session_expiry             always  plaintext sessions are never persistent (ADR-230); covered over mTLS (smoke mqtt5-session-expiry)

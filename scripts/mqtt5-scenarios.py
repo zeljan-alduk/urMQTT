@@ -16,6 +16,9 @@ live      every rule on one boot: CONNACK properties, both versions on one
 persist1  leaves state for a restart: device-005 with Session Expiry 3600,
           offline, a No Local subscription, two queued commands with
           properties (one expiring in 4 s); device-003 with Session Expiry 5.
+shared    (with --dev PORT, the development port of a multicore image whose
+          service ids include worker-*): a shared group of three 5.0 and one
+          3.1.1 worker, each message to exactly one, round robin, identifiers.
 persist2  after the broker was killed and booted again (at least 8 s
           later): device-005's session is back with its queue (properties
           kept, the short one expired, the expiry counted down) and its No
@@ -256,8 +259,9 @@ def connack_properties():
         rc == 0
         and getattr(p, "ReceiveMaximum", None) == 32
         and getattr(p, "TopicAliasMaximum", None) == 10
-        and getattr(p, "SharedSubscriptionAvailable", None) == 0
-        and getattr(p, "SubscriptionIdentifierAvailable", None) == 0
+        # Both available (ADR-275): not announced, absent means 1.
+        and getattr(p, "SharedSubscriptionAvailable", None) is None
+        and getattr(p, "SubscriptionIdentifierAvailable", None) is None
         and getattr(p, "MaximumPacketSize", 0) > 0
     )
     d.stop()
@@ -396,10 +400,22 @@ def reason_codes():
     d = C("device-001").connect()
     rc = d.pub("fleet/not-mine", b"x", qos=1)
     report("mqtt5-puback-0x87-outside-the-acl", rc == 0x87, f"{rc}")
-    codes = d.sub(("devices/device-002/cmd/#", opts(1)), ("$share/g/devices/device-001/cmd/#", opts(0)))
-    report("mqtt5-suback-0x87-and-0x9e", codes == [0x87, 0x9E], f"{codes}")
-    codes = d.sub(("devices/device-001/cmd/#", opts(0)), SubscriptionIdentifier=5)
-    report("mqtt5-suback-0xa1-subscription-identifier", codes == [0xA1], f"{codes}")
+    # A share is judged by the filter inside it (ADR-275).
+    codes = d.sub(("devices/device-002/cmd/#", opts(1)), ("$share/g/devices/device-001/cmd/#", opts(0)),
+                  ("$share/g/devices/device-002/cmd/#", opts(0)))
+    report("mqtt5-suback-0x87-and-a-share-granted", codes == [0x87, 0, 0x87], f"{codes}")
+    codes = d.sub(("devices/device-001/cmd/#", opts(1)), SubscriptionIdentifier=5)
+    codes2 = d.sub(("devices/device-001/cmd/x/#", opts(1)), SubscriptionIdentifier=268435455)
+    report("mqtt5-subscription-identifier-granted", codes == [1] and codes2 == [1], f"{codes} {codes2}")
+    # One PUBLISH with the identifiers of both matching subscriptions; the
+    # share of the same session gets its own copy, without them.
+    be = C("backend").connect()
+    be.pub("devices/device-001/cmd/x", b"ids", qos=1)
+    wait_until(lambda: len(d.msgs) >= 2, 5)
+    time.sleep(0.3)
+    ids = sorted(tuple(sorted(getattr(m.properties, "SubscriptionIdentifier", []) or [])) for m in d.msgs)
+    report("mqtt5-subscription-identifiers-in-one-publish", ids == [(), (5, 268435455)], f"{ids}")
+    be.stop()
     n = len(d.unsubacks)
     d.c.unsubscribe(["devices/device-001/cmd/none"])
     wait_until(lambda: len(d.unsubacks) > n, 5)
@@ -484,6 +500,27 @@ def will_delay():
     be.stop()
 
 
+def shared_over_tls():
+    """A share with one member over mTLS: no retained message on its SUBSCRIBE
+    (4.8.2), deliveries with its identifier; a 3.1.1 share too."""
+    d = C("device-001").connect()
+    d.pub("devices/device-001/telemetry/r", b"kept", qos=1, retain=True)
+    be = C("backend").connect()
+    codes = be.sub(("$share/tls/devices/+/telemetry/#", opts(1)), SubscriptionIdentifier=11)
+    time.sleep(0.5)
+    no_retained = codes == [1] and not be.msgs
+    d.pub("devices/device-001/telemetry/r", b"", qos=1, retain=True)  # cleared
+    for i in range(3):
+        d.pub("devices/device-001/telemetry/s", b"%d" % i, qos=1)
+    wait_until(lambda: len(be.msgs) >= 4, 5)
+    got = [(m.payload, getattr(m.properties, "SubscriptionIdentifier", None)) for m in be.msgs]
+    report("mqtt5-shared-no-retained-on-subscribe", no_retained, f"{codes}")
+    ok = [p for p, _ in got if p != b""] == [b"0", b"1", b"2"] and all(i == [11] for _, i in got)
+    report("mqtt5-shared-delivers-with-its-identifier", ok, f"{got}")
+    be.stop()
+    d.stop()
+
+
 def sys_counters():
     op = C("operator").connect()
     op.sub(("$SYS/broker/clients/connected/v5", opts(0)), ("$SYS/broker/disconnects/sent/0x8e", opts(0)),
@@ -502,7 +539,12 @@ def persist1():
     d3 = C("device-003").connect(clean=True, SessionExpiryInterval=5)
     d3.sub(("devices/device-003/cmd/#", opts(1)))
     d3.stop()
-    be = C("backend").connect()
+    # ADR-275: a persistent shared subscription with an identifier, stored.
+    keep = C("backend").connect(clean=True, SessionExpiryInterval=3600)
+    keep.sub(("$share/keep/devices/device-001/state/#", opts(1)), SubscriptionIdentifier=42)
+    keep.stop()
+    # (The same session: a clean start would end the one just stored.)
+    be = C("backend").connect(clean=False, SessionExpiryInterval=3600)
     be.pub("devices/device-005/cmd/keep", b"k", qos=1, MessageExpiryInterval=3600, UserProperty=[("p", "1")],
            ContentType="text/plain")
     be.pub("devices/device-005/cmd/brief", b"b", qos=1, MessageExpiryInterval=4)
@@ -532,13 +574,85 @@ def persist2():
     report("mqtt5-restart-keeps-the-subscription-options", not d.msgs, f"{[m.topic for m in d.msgs]}")
     d.c.disconnect(properties=props(PacketTypes.DISCONNECT, SessionExpiryInterval=0))
     d.stop(clean=False)
+    # The shared subscription and its identifier came back (schema 5).
+    keep = C("backend").connect(clean=False, SessionExpiryInterval=3600)
+    present = keep.connack[0]
+    dev = C("device-001").connect()
+    dev.pub("devices/device-001/state/s", b"after", qos=1)
+    wait_until(lambda: keep.msgs, 5)
+    got = [(m.payload, getattr(m.properties, "SubscriptionIdentifier", None)) for m in keep.msgs]
+    report("mqtt5-restart-keeps-the-shared-subscription-and-identifier", present and got == [(b"after", [42])],
+           f"present={present} {got}")
+    dev.stop()
+    keep.c.disconnect(properties=props(PacketTypes.DISCONNECT, SessionExpiryInterval=0))
+    keep.stop(clean=False)
+
+
+def shared_dev_port():
+    """Shared subscriptions on a multicore broker (ADR-275): three 5.0 workers
+    and a 3.1.1 one (the development port: client id = identity, `worker-*`
+    are services) share a group; device-001 publishes over mTLS. Each message
+    goes to exactly one worker, every worker gets some, each delivery to a
+    5.0 worker carries its own identifier."""
+    dev_port = int(args[args.index("--dev") + 1])
+
+    def worker(cid, sid, v5=True):
+        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=cid,
+                        protocol=mqtt.MQTTv5 if v5 else mqtt.MQTTv311)
+        got = []
+        subacks = []
+        c.on_message = lambda cl, u, m: got.append((m.payload, getattr(m.properties, "SubscriptionIdentifier", None)
+                                                     if v5 else None, m.qos))
+        c.on_subscribe = lambda cl, u, mid, rc, p: subacks.append([r.value for r in rc])
+        if v5:
+            c.connect("127.0.0.1", dev_port, 30, clean_start=True)
+        else:
+            c.connect("127.0.0.1", dev_port, 30)
+        c.loop_start()
+        if v5:
+            c.subscribe([("$share/workers/devices/+/telemetry/#", opts(1))],
+                        properties=props(PacketTypes.SUBSCRIBE, SubscriptionIdentifier=sid))
+        else:
+            c.subscribe([("$share/workers/devices/+/telemetry/#", 1)])
+        wait_until(lambda: subacks, 5)
+        return c, got, subacks
+
+    ws = [worker("worker-1", 1), worker("worker-2", 2), worker("worker-3", 3), worker("worker-4", 4, v5=False)]
+    report("mqtt5-shared-joined-across-cores", all(s == [[1]] for _, _, s in ws), f"{[s for _, _, s in ws]}")
+    d = C("device-001").connect()
+    n = 40
+    for i in range(n):
+        d.pub("devices/device-001/telemetry/w", b"%d" % i, qos=1)
+    wait_until(lambda: sum(len(g) for _, g, _ in ws) >= n, 10)
+    time.sleep(0.5)
+    payloads = sorted(int(p) for _, g, _ in ws for p, _, _ in g)
+    counts = [len(g) for _, g, _ in ws]
+    report("mqtt5-shared-each-message-once", payloads == list(range(n)), f"counts {counts}")
+    report("mqtt5-shared-round-robin-over-the-members", all(c > 0 for c in counts), f"counts {counts}")
+    ids_ok = all(sid == [k + 1] for k, (_, g, _) in enumerate(ws[:3]) for _, sid, _ in g)
+    report("mqtt5-shared-identifier-per-member", ids_ok)
+    # One worker leaves: the others get everything.
+    ws[0][0].unsubscribe("$share/workers/devices/+/telemetry/#")
+    time.sleep(0.5)
+    before = [len(g) for _, g, _ in ws]
+    for i in range(n, n + 9):
+        d.pub("devices/device-001/telemetry/w", b"%d" % i, qos=1)
+    wait_until(lambda: sum(len(g) for _, g, _ in ws) >= n + 9, 10)
+    time.sleep(0.5)
+    after = [len(g) - b for (_, g, _), b in zip(ws, before)]
+    report("mqtt5-shared-unsubscribe-leaves-the-group", after[0] == 0 and sum(after) == 9, f"{after}")
+    for c, _, _ in ws:
+        c.disconnect()
+        c.loop_stop()
+    d.stop()
 
 
 def main():
     try:
         if PHASE == "live":
             for f in (connack_properties, both_versions, forwarding, aliases, flow_control, subscription_options,
-                      reason_codes, server_disconnects, session_expiry, message_expiry, will_delay, sys_counters):
+                      reason_codes, server_disconnects, session_expiry, message_expiry, will_delay, shared_over_tls,
+                      sys_counters):
                 try:
                     f()
                 except Exception as e:  # one scenario's failure must not hide the others
@@ -547,6 +661,8 @@ def main():
             persist1()
         elif PHASE == "persist2":
             persist2()
+        elif PHASE == "shared":
+            shared_dev_port()
     except Exception as e:
         report(PHASE, False, f"exception {e!r}")
     sys.exit(0 if results and all(results) else 1)
