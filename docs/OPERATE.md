@@ -139,7 +139,7 @@ first). The reply topic is fixed (an MQTT 5.0 operator client may send a Respons
 console does not use it: replies stay on the fixed topic for both versions):
 
 ```json
-{"version":"0.4.2","uptime_s":42,"arch":"aarch64","cpu":{"cores":4,"busy":[2,1,0,0]},
+{"version":"0.5.0","uptime_s":42,"arch":"aarch64","cpu":{"cores":4,"busy":[2,1,0,0]},
  "memory":{"total":33554432,"used":1503744},"disk":{"total":57651200,"used":78288},
  "clients":{"connected":1,"total":1},"subscriptions":1,"retained":0,
  "messages":{"received":0,"sent":21},"connections_refused":0,
