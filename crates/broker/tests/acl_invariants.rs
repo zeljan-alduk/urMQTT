@@ -242,3 +242,51 @@ fn fuzz_seeds_replay() {
     }
     assert!(n > 0, "no seeds in {}", dir.display());
 }
+
+/// The minimised `broker_acl` crash of 2026-11-08: a restored session has
+/// a QoS 2 message queued; when its device connects the broker sends the
+/// PUBLISH (id 1); the device's next bytes are "garbage" to the oracle but
+/// happen to be a well-formed PUBREC for id 1 (`50 02 00 01`). The broker
+/// answers with PUBREL 1, as the sender must on PUBREC (MQTT 3.1.1 4.3.3).
+/// The oracle had only counted its own PUBRECs and took that PUBREL for one
+/// sent before the client's PUBREC.
+#[test]
+fn a_pubrec_inside_garbage_is_answered_with_pubrel() {
+    const SX: usize = 7;
+    let ops = vec![
+        Op::Restore {
+            who: SX,
+            subs: vec![],
+            queued: 1,
+            qos2: true,
+            ids: 0,
+        },
+        connect(1, SX, false),
+        Op::Garbage {
+            slot: 1,
+            bytes: vec![0x50, 0x02, 0x00, 0x01],
+        },
+        Op::Ack { slot: 1 },
+    ];
+    let h = run(&ops);
+    assert_eq!(
+        h.b.stats().qos2_completed,
+        1,
+        "PUBREC (garbage), PUBREL, our PUBCOMP"
+    );
+}
+
+/// The second `broker_acl` find of the same kind: garbage that is a
+/// well-formed PUBREL for an id nobody holds (`62 02 36 00`). The broker
+/// answers PUBCOMP 13824 (4.3.3: a PUBREL is always answered with PUBCOMP).
+#[test]
+fn a_pubrel_inside_garbage_is_answered_with_pubcomp() {
+    let ops = vec![
+        connect(1, D1, true),
+        Op::Garbage {
+            slot: 1,
+            bytes: vec![0x62, 0x02, 0x36, 0x00],
+        },
+    ];
+    run(&ops);
+}

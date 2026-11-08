@@ -207,7 +207,16 @@ held id and every PUBREL is answered, that a message reaches a session in one
 flow only (again only with DUP and its id, never after our PUBREC) and that a
 broker PUBREL follows our PUBREC. Garbage on a connection ends those checks
 for its session: from then on the broker may read any packet, a PUBREL among
-them, in what the connection sends.
+them, in what the connection sends. Likewise, after garbage on a connection the
+oracle no longer judges the broker's PUBREL against its own PUBRECs, its PUBCOMP
+against its own PUBRELs, or that connection's window: the garbage may itself be a
+well-formed PUBREC, PUBREL, PUBACK or PUBCOMP that the broker answers as 4.3.3
+requires (seeds `qos2_pubrec_inside_garbage`, `qos2_pubrel_inside_garbage`,
+2026-11-08; and a PUBREC in garbage for an id not in flight, answered with
+PUBREL while the id stays free: `qos2_pubrec_for_a_free_id_in_garbage`); and a `Dup` sent while the session's ids are not known may be a new
+message to the broker, so its payload is then judged by the publisher's rights
+(seed `qos2_dup_of_an_unknown_id`). Garbage never starts with a SUBSCRIBE either:
+the oracle pairs every SUBACK with its own SUBSCRIBE.
 
 ### QoS 2 against a reference model
 

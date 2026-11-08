@@ -574,9 +574,12 @@ pub fn decode_ops(data: &[u8]) -> Vec<Op> {
             _ => {
                 let n = usize::from(s.u8() % 12);
                 let mut bytes: Vec<u8> = (0..n).map(|_| s.u8()).collect();
-                // Never a PUBLISH: the oracle knows every publish it sends.
+                // Never a PUBLISH or a SUBSCRIBE: the oracle knows every
+                // publish it sends and matches each SUBACK to its SUBSCRIBE.
+                // (Acknowledgements in garbage are allowed: the checks of a
+                // dirty connection allow for the broker's answers to them.)
                 if let Some(b) = bytes.first_mut()
-                    && *b >> 4 == 3
+                    && matches!(*b >> 4, 3 | 8)
                 {
                     *b |= 0xF0;
                 }
@@ -984,7 +987,7 @@ impl Harness {
                     return self.settle();
                 }
                 let s = self.slots[*slot].as_ref().expect("accepted");
-                let (dirty, key) = (s.dirty, s.key.clone());
+                let (dirty, key, (id, kind)) = (s.dirty, s.key.clone(), WHO[s.who]);
                 let Some(sess) = self.sessions.get(&key) else {
                     return self.settle();
                 };
@@ -993,8 +996,12 @@ impl Harness {
                 };
                 let uncertain = sess.uncertain;
                 let topic = TOPICS[2];
-                // Never deliverable: a duplicate is never routed.
-                let body = self.payload(topic, false, 1);
+                // A duplicate is never routed: its payload is never
+                // deliverable. When the held ids are not known (garbage on a
+                // connection of this session), the broker may not hold this
+                // id and rightly takes the PUBLISH as a new message: then the
+                // publisher's rights decide, as for any publish.
+                let body = self.payload(topic, (dirty || uncertain) && may_pub(kind, id, topic), 1);
                 if !dirty && !uncertain {
                     verdict = Some((topic, false, false, Q2::Dup));
                 }
@@ -1300,6 +1307,14 @@ impl Harness {
             }
             Rx::PubRel(p) => {
                 let s = self.slots[i].as_mut().expect("slot");
+                // The broker answers a PUBREC for an id it does not have in
+                // flight with PUBREL too (so a client that kept state the
+                // broker lost can finish, 4.3.3); the id stays free. On a
+                // connection with garbage such a PUBREC may have been in the
+                // garbage: nothing is in flight then.
+                if s.dirty && !s.inflight.contains_key(&p) {
+                    return;
+                }
                 let o = s.inflight.entry(p).or_insert(Out {
                     // Sent again after a reconnect: the flow started on an
                     // earlier connection.
@@ -1308,18 +1323,33 @@ impl Harness {
                     rel: false,
                     seq: None,
                 });
+                // Garbage on this connection may itself have been a
+                // well-formed PUBREC (or PUBACK, PUBCOMP) that the broker
+                // answered as 4.3.3 requires: then neither the order nor the
+                // window can be judged from our own acknowledgements.
                 assert!(
-                    o.qos == QoS::ExactlyOnce && o.rec,
+                    o.qos == QoS::ExactlyOnce && (o.rec || s.dirty),
                     "{:?}: PUBREL {p} before our PUBREC",
                     s.key
                 );
+                o.rec = true;
                 o.rel = true;
-                assert!(s.inflight.len() <= MAX_INFLIGHT, "{:?}: window", s.key);
+                assert!(
+                    s.dirty || s.inflight.len() <= MAX_INFLIGHT,
+                    "{:?}: window",
+                    s.key
+                );
             }
             Rx::PubComp(p) => {
                 let s = self.slots[i].as_mut().expect("slot");
                 let at = s.released.iter().position(|&x| x == p);
-                assert!(at.is_some(), "{:?}: PUBCOMP {p} without our PUBREL", s.key);
+                // (Garbage may itself have been a PUBREL, which the broker
+                // answers whatever the id, 4.3.3.)
+                assert!(
+                    at.is_some() || s.dirty,
+                    "{:?}: PUBCOMP {p} without our PUBREL",
+                    s.key
+                );
                 if let Some(at) = at {
                     s.released.remove(at);
                 }
@@ -1464,8 +1494,10 @@ impl Harness {
             }
         }
         let s = self.slots[i].as_mut().expect("slot");
+        // (Garbage may have completed a flight with a PUBACK or PUBCOMP of
+        // its own: on such a connection the broker may rightly reuse the id.)
         assert!(
-            !s.inflight.contains_key(&pid),
+            s.dirty || !s.inflight.contains_key(&pid),
             "{ctx}: id {pid} reused while in flight"
         );
         s.inflight.insert(
@@ -1478,7 +1510,7 @@ impl Harness {
             },
         );
         assert!(
-            s.inflight.len() <= MAX_INFLIGHT,
+            s.dirty || s.inflight.len() <= MAX_INFLIGHT,
             "{ctx}: {} unacknowledged",
             s.inflight.len()
         );
