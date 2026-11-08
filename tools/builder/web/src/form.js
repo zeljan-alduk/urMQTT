@@ -197,7 +197,7 @@ function renderSections() {
   for (const s of app.model.sections) {
     const count = h('span', { class: 'ub-badge changed', hidden: true });
     const resetBtn = h('button', { class: 'ub-btn small secondary', type: 'button', text: t('section.reset'), hidden: true, on: { click: () => resetSection(s) } });
-    const banner = s.id === 'plaintext' ? buildPlaintextBanner() : null;
+    const banner = s.id === 'plaintext' ? buildPlaintextBanner() : s.id === 'websocket' ? buildWebsocketNote() : null;
     const details = h('details', { class: 'ub-card', id: `sec-${s.id}`, open: open.has(s.id) },
       h('summary', {}, h('span', { class: 'ub-title' }, h('h2', { text: t('section.' + s.id) }), count), icon('chevron', 'ub-chev')),
       h('div', { class: 'ub-tools', style: 'justify-content:flex-end;margin:-4px 0 10px' }, resetBtn),

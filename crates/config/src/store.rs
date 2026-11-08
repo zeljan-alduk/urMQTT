@@ -207,7 +207,7 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
         .users
         .split_at_mut_checked(fields::MAX_PLAIN_USERS)
         .unwrap_or_default();
-    let mut accounts = |slots: &'static mut [PlainUser], t: u16| -> &'static [PlainUser] {
+    let accounts = |slots: &'static mut [PlainUser], t: u16| -> &'static [PlainUser] {
         let mut n = 0;
         for (i, (slot, (id, hash))) in slots
             .iter_mut()
@@ -729,9 +729,13 @@ mod tests {
         b.bool(tag::WS_ENABLED, true).unwrap();
         b.variant(tag::WS_AUTH, 1).unwrap();
         b.uint(tag::WS_PORT, 443).unwrap();
-        b.strs(tag::WS_ORIGINS, &["https://app.example.com"]).unwrap();
-        b.strs(tag::WS_USERS, &[format!("web-1 {hash}"), format!("web-2 {hash}")])
+        b.strs(tag::WS_ORIGINS, &["https://app.example.com"])
             .unwrap();
+        b.strs(
+            tag::WS_USERS,
+            &[format!("web-1 {hash}"), format!("web-2 {hash}")],
+        )
+        .unwrap();
         b.rate(tag::WS_PUBLISH_RATE, 3, 1000).unwrap();
         let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
         let blob = Blob::parse(bytes).unwrap();

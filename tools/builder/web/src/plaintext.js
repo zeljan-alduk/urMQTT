@@ -22,6 +22,18 @@ async function askRisk(prefix, points, strong) {
   return v === 'yes';
 }
 
+/**
+ * A short note inside the WebSocket section while it is on with password logins (ADR-272): not a warning (the
+ * listener is inside TLS), only what the validator will ask for.
+ */
+function buildWebsocketNote() {
+  const el = h('p', { class: 'ub-help ub-ws-note', id: 'ub-ws-note', hidden: true, text: t('websocket.note') });
+  const sync = () => {
+    el.hidden = !(app.state.values['websocket.enabled'] === true && app.state.values['websocket.auth'] === 'password');
+  };
+  return { el, sync };
+}
+
 /** The warning inside the section while plaintext MQTT is on; red while it accepts every address. */
 function buildPlaintextBanner() {
   const text = h('p', { class: 'ub-strong' });
@@ -40,7 +52,7 @@ function buildPlaintextBanner() {
 
 // --- the accounts editor ---------------------------------------------------------
 
-/** A row for `plaintext.users`: a list of accounts (id, password set or not). Same controller as buildRow. */
+/** A row for an account list (`plaintext.users`, `websocket.users`): accounts (id, password set or not). Same controller as buildRow. */
 function buildUsersRow(f) {
   const id = nextId('f');
   const max = f.max_items || 256;
@@ -239,7 +251,8 @@ function buildUsersRow(f) {
       for (const is of issues) {
         let r = is.row;
         if (r === undefined) {
-          const m = /^plaintext\.users\[(\d+)\]/.exec(is.path || '');
+          const prefix = `${f.id}[`;
+          const m = (is.path || '').startsWith(prefix) ? /^(\d+)\]/.exec(is.path.slice(prefix.length)) : null;
           if (m) r = rows[Number(m[1])];
         }
         if (r === undefined) general.push(is.message);

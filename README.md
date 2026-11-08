@@ -578,6 +578,21 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `plaintext.lockout_s` | 1–86 400 (300) | How long a locked-out address gets no answer |
 | `plaintext.acl_publish`, `plaintext.acl_subscribe` | topic filters, up to 16, `{id}` = identity (`devices/{id}/#`, `devices/{id}/cmd/#`) | What a plaintext client may publish and subscribe to; never `$SYS` |
 | `plaintext.retain` | bool, default `false` | May plaintext clients publish retained messages (otherwise delivered, not stored) |
+| `websocket.enabled` | bool, default `false` | **MQTT over secure WebSocket** (`wss://`, TLS 1.3, subprotocol `mqtt`) for browsers and web stacks (ADR-272). Needs the TLS listener (`network.mqtt_tls_port` not 0), whose certificate and key it uses. Any `[websocket]` key set needs configuration format 9 |
+| `websocket.port` | 1–65535 (8084) | Its TCP port; not the TLS, plaintext or development port |
+| `websocket.path` | `"/..."`, up to 64 characters (`"/mqtt"`) | The URL path clients connect to (`wss://host:8084/mqtt`); letters, digits and `- . _ ~ /` only, no `.` or `..` segments. Any other path is answered 404 |
+| `websocket.auth` | `"mtls"` (default) \| `"password"` | `mtls`: a client certificate, exactly as on the TLS port (identity, roles, revocation, the broker's limits and ACL). `password`: no client certificate; a user name and password from `websocket.users`, checked inside TLS, with the section's own limits and ACL below |
+| `websocket.origins` | exact origins, up to 16 (`[]`) | Web pages allowed to connect, as browsers send them: `"https://app.example.com"`, `"http://localhost:3000"` (lower case, no path, no trailing slash, no default port, no wildcard, not `null`). An upgrade from another origin gets 403. **Required** with `auth = "password"`; empty with `mtls` admits any origin |
+| `websocket.users` | `[{ id = "...", password_hash = "..." }]` (up to 256) | The accounts of `auth = "password"`, as in `plaintext.users` (hash from `urmqtt-config hash-password` or the builder page); refused with `mtls`; an id may not be a service, operator or control identity |
+| `websocket.upgrade_timeout_s` | 1–10 (5) | Seconds from the TCP connection to a complete upgrade request (TLS handshake included) |
+| `websocket.max_connections` | 1–1 000 000 (1000) | WebSocket connections, all cores |
+| `websocket.max_connections_per_ip` | 1–65 535 (16) | Of those, from one source address |
+| `websocket.max_packet_size` | 64 – 268 435 455 (16 384) | `password` only: largest MQTT packet a client may send (with `mtls`, `limits.max_packet_size`) |
+| `websocket.publish_rate_per_device` | `"N/s"`, `"N/m"`, `"N/h"` (`"10/s"`) | `password` only: token bucket per session |
+| `websocket.max_failed_auths_per_ip` | 1–1000 (5) | `password` only: failed logins from one address, within `lockout_s`, that lock it out |
+| `websocket.lockout_s` | 1–86 400 (300) | `password` only: how long a locked-out address gets no answer |
+| `websocket.acl_publish`, `websocket.acl_subscribe` | topic filters, up to 16, `{id}` = account id (`web/{id}/#`) | `password` only: what a client may publish and subscribe to; never `$` topics |
+| `websocket.retain` | bool, default `false` | `password` only: may clients publish retained messages |
 | `tls.identity_field` | `"cn"` \| `"san_uri"` | Certificate field that becomes the `device_id` |
 | `tls.resumption` | bool | TLS 1.3 PSK session resumption |
 | `tls.revocation_list` | file name or `""` | Revoked client-certificate serials (hex, one per line); runtime revocations come on top (H1) |

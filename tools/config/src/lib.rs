@@ -198,7 +198,7 @@ fn value_text(f: &fields::Field, blob: &Blob<'_>) -> String {
             .unwrap_or("?")
             .to_owned(),
         Kind::Str { .. } => format!("{:?}", blob.str(t)),
-        // The accounts of the plaintext listener are shown without their
+        // The accounts (plaintext.users, websocket.users) are shown without their
         // hashes (they are not secrets of the image, but they are not for a
         // screen or a log either).
         Kind::Strs { .. } if f.item == fields::Item::User => {
@@ -272,6 +272,23 @@ pub fn plaintext_summary(b: &Blob<'_>) -> Option<String> {
     ))
 }
 
+/// One line about the WebSocket listener when it is on with password logins
+/// (ADR-272): those clients show no certificate, so whoever ships the image has
+/// to know. `None` when it is off or uses client certificates (mtls).
+pub fn websocket_summary(b: &Blob<'_>) -> Option<String> {
+    use fields::tag;
+    if !b.bool(tag::WS_ENABLED) || b.variant(tag::WS_AUTH) != 1 {
+        return None;
+    }
+    Some(format!(
+        "MQTT over WebSocket ON with PASSWORD logins (inside TLS, no client certificate): port {}, path {:?}, {} account(s), origins {}",
+        b.uint(tag::WS_PORT),
+        b.str(tag::WS_PATH),
+        b.strs(tag::WS_USERS).count(),
+        b.strs(tag::WS_ORIGINS).collect::<Vec<_>>().join(", ")
+    ))
+}
+
 /// Whether the configuration allows the CPU-jitter entropy fallback
 /// (`entropy.fallback = "jitter"`, the default; ADR-038, ADR-263).
 pub fn jitter_allowed(b: &Blob<'_>) -> bool {
@@ -290,7 +307,7 @@ pub fn entropy_warning(b: &Blob<'_>) -> Option<String> {
     })
 }
 
-/// The stored hash of `password` for the plaintext listener
+/// The stored hash of `password` for the plaintext or WebSocket listener
 /// (`pbkdf2-sha256$iterations$salt$key`, see `urmqtt_cfg::passwd`). The caller
 /// supplies the salt (16 to 32 random bytes); the command line takes it from
 /// the operating system, the browser from `crypto.getRandomValues`.
@@ -340,6 +357,9 @@ pub fn describe(blob_bytes: &[u8], all: bool) -> Result<String, String> {
     let _ = writeln!(o, "env:         {env}");
     if let Some(p) = plaintext_summary(&b) {
         let _ = writeln!(o, "warning:     {p}");
+    }
+    if let Some(w) = websocket_summary(&b) {
+        let _ = writeln!(o, "warning:     {w}");
     }
     let _ = writeln!(
         o,
@@ -394,9 +414,10 @@ pub fn verify_blob(blob_bytes: &[u8], dev: bool) -> Result<String, String> {
         "complete: a kernel will serve with it"
     };
     let plaintext = plaintext_summary(&b).map_or_else(String::new, |p| format!("\nwarning: {p}"));
+    let websocket = websocket_summary(&b).map_or_else(String::new, |w| format!("\nwarning: {w}"));
     let entropy = entropy_warning(&b).map_or_else(String::new, |w| format!("\nWARNING: {w}"));
     Ok(format!(
-        "ok: fingerprint {}, {}, {served}{plaintext}{entropy}",
+        "ok: fingerprint {}, {}, {served}{plaintext}{websocket}{entropy}",
         Hex(b.fingerprint()),
         if b.signature().is_some() {
             "signed"

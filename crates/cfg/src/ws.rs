@@ -81,7 +81,11 @@ pub fn check_origin(o: &str) -> Result<(), &'static str> {
     };
     let _ = host;
     if let Some(p) = port {
-        if p.is_empty() || p.len() > 5 || !p.bytes().all(|b| b.is_ascii_digit()) || p.starts_with('0') {
+        if p.is_empty()
+            || p.len() > 5
+            || !p.bytes().all(|b| b.is_ascii_digit())
+            || p.starts_with('0')
+        {
             return Err("an origin's port is 1 to 65535");
         }
         if p.parse::<u32>().map_or(true, |n| n > 65_535) {
@@ -105,7 +109,9 @@ mod tests {
         for ok in ["/mqtt", "/", "/a/b-c_d.e~f", "/ws/mqtt"] {
             assert_eq!(check_path(ok), Ok(()), "{ok}");
         }
-        for bad in ["", "mqtt", "/mqtt?x", "/a b", "/a/../b", "/./x", "/é", "/%20"] {
+        for bad in [
+            "", "mqtt", "/mqtt?x", "/a b", "/a/../b", "/./x", "/é", "/%20",
+        ] {
             assert!(check_path(bad).is_err(), "{bad}");
         }
         assert!(check_path(&format!("/{}", "a".repeat(64))).is_err());

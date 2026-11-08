@@ -1,0 +1,21 @@
+# A lab configuration with MQTT over secure WebSocket switched on with
+# password logins (ADR-272): two accounts (the hashes of plain.toml, made with
+# Python's hashlib.pbkdf2_hmac for "correct horse" and "sensor-2-secret"), two
+# allowed web origins and a tightened ACL. Used by the tests of urmqtt-config.
+[network]
+mode = "static"
+address = "192.0.2.10/24"
+gateway = "192.0.2.1"
+
+[websocket]
+enabled = true
+auth = "password"
+path = "/mqtt"
+origins = ["https://app.example.com", "http://localhost:3000"]
+users = [
+  { id = "browser-1", password_hash = "pbkdf2-sha256$1000$00112233445566778899aabbccddeeff$4c5805526868c915a4cba43d75ec6b0a07152bb7b9ca30501c96ea0f91886829" },
+  { id = "browser-2", password_hash = "pbkdf2-sha256$1000$00112233445566778899aabbccddeeff$d8e0e2fe5529c9a22ab5544ab7731dee2bd812edd94059f6f97ff26be82c319b" },
+]
+max_connections = 200
+lockout_s = 120
+acl_publish = ["web/{id}/out/#"]

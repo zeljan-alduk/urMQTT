@@ -54,13 +54,13 @@ function persist() {
   } catch { /* some embedders forbid it */ }
   try {
     const pub = x => (x ? { pem: x.pem, summary: x.summary } : null);
-    // The plaintext accounts hold password hashes: in memory only, like private keys.
+    // The accounts hold password hashes: in memory only, like private keys.
     const values = Object.fromEntries(Object.entries(s.values).filter(([id]) => {
       const f = app.model.byId.get(id);
       return !(f && isUserList(f));
     }));
     // Only how many accounts there were (a number), so that a reload can say they are gone.
-    const accounts = completeUsers(s.values['plaintext.users']).length || (app.accountsForgotten ? 1 : 0);
+    const accounts = app.model.fields.filter(isUserList).reduce((n, f) => n + completeUsers(s.values[f.id]).length, 0) || (app.accountsForgotten ? 1 : 0);
     sessionStorage.setItem(STORE_KEY, JSON.stringify({
       v: 1, accounts, values, name: s.name, preset: s.preset, release: s.release,
       files: { cert: pub(s.files.cert), control: pub(s.files.control), operational: s.files.operational.map(pub), bootstrap: s.files.bootstrap.map(pub) },
@@ -144,8 +144,8 @@ function refresh() {
   for (const [id, code] of Object.entries(built.local)) {
     issues.push({ field: app.model.byId.get(id), path: id, message: t('err.' + code) });
   }
-  const users = app.model.byId.get('plaintext.users');
-  if (users && isApplicable(users, app.state)) {
+  for (const users of app.model.fields.filter(isUserList)) {
+    if (!isApplicable(users, app.state)) continue;
     for (const p of userProblems(app.state.values[users.id])) {
       issues.push({ field: users, path: users.id, row: p.row, message: t(p.kind === 'password' ? 'plaintext.need-password' : 'plaintext.need-id') });
     }

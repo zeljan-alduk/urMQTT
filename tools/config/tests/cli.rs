@@ -748,6 +748,84 @@ fn the_plaintext_fixture_matches_its_golden_blob_and_is_announced() {
     assert!(!off.contains("plaintext"), "{off}");
 }
 
+/// ADR-272: a password WebSocket listener is announced by `pack`, `show` and
+/// `verify` (port, path, accounts, origins), its hashes are never printed, and
+/// the blob needs format 9. With client certificates (mtls) nothing is
+/// announced.
+#[test]
+fn the_websocket_fixture_is_announced_and_its_hashes_are_not_shown() {
+    let out = tmp("websocket.blob");
+    let text = ok(&run(bin()
+        .arg("pack")
+        .arg(fixtures().join("websocket.toml"))
+        .arg("--out")
+        .arg(&out)));
+    let warning = "warning: MQTT over WebSocket ON with PASSWORD logins (inside TLS, no client certificate): port 8084, path \"/mqtt\", 2 account(s), origins https://app.example.com, http://localhost:3000";
+    assert!(text.contains(warning), "{text}");
+    assert!(!text.contains("plaintext"), "{text}");
+    let blob = std::fs::read(&out).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 9);
+    let shown = ok(&run(bin().arg("show").arg(&out)));
+    assert!(shown.contains("urmqtt-cfg version 9"), "{shown}");
+    assert!(
+        shown.contains("warning:     MQTT over WebSocket ON with PASSWORD logins"),
+        "{shown}"
+    );
+    assert!(shown.contains("[websocket]"), "{shown}");
+    assert!(shown.contains("  auth = password"), "{shown}");
+    assert!(
+        shown.contains(
+            "  users = [\"browser-1 (pbkdf2-sha256, 1000 iterations)\", \"browser-2 (pbkdf2-sha256, 1000 iterations)\"]"
+        ),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("  origins = [\"https://app.example.com\", \"http://localhost:3000\"]"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("  acl_publish = [\"web/{id}/out/#\"]"),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("4c580552") && !shown.contains("d8e0e2fe"),
+        "the hashes are not printed: {shown}"
+    );
+    // Every key, with the defaults marked.
+    let all = ok(&run(bin().arg("show").arg(&out).arg("--all")));
+    assert!(all.contains("  port = 8084  (default)"), "{all}");
+    assert!(all.contains("  upgrade_timeout_s = 5  (default)"), "{all}");
+    // A release kernel accepts it, and says so too.
+    assert!(ok(&run(bin().arg("verify").arg(&out))).contains(warning));
+    // mtls: no announcement.
+    let cfg = tmp("websocket-mtls.toml");
+    std::fs::write(&cfg, "[websocket]\nenabled = true\n").unwrap();
+    let mtls = tmp("websocket-mtls.blob");
+    let text = ok(&run(bin().arg("pack").arg(&cfg).arg("--out").arg(&mtls)));
+    assert!(!text.contains("WebSocket"), "{text}");
+    let shown = ok(&run(bin().arg("show").arg(&mtls)));
+    assert!(!shown.contains("warning"), "{shown}");
+    assert!(shown.contains("[websocket]\n  enabled = true"), "{shown}");
+    // A password listener without an origin list is refused, naming the key.
+    let cfg = tmp("websocket-no-origins.toml");
+    let fixture = std::fs::read_to_string(fixtures().join("websocket.toml")).unwrap();
+    std::fs::write(
+        &cfg,
+        fixture.replace(
+            "origins = [\"https://app.example.com\", \"http://localhost:3000\"]\n",
+            "",
+        ),
+    )
+    .unwrap();
+    let o = run(bin().arg("pack").arg(&cfg).arg("--out").arg(tmp("x.blob")));
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("websocket.origins"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
 #[test]
 fn hash_password_reads_the_password_from_stdin() {
     use std::io::Write;
@@ -935,8 +1013,9 @@ fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
 
 /// The templates of the published releases, configured by this tool (and by the builder page, which runs the
 /// same code): v0.2.0's kernel reads configuration format 2, v0.2.1's 3, v0.3.0's 4, v0.4.0's and v0.4.1's 6,
-/// this one 7. A configuration that needs no newer format than the template's kernel reads is written into it as
-/// before; one that needs more (the virtio-gpu console: 5, a `[devices]` key: 6, `network.mtu`: 7) is refused with the reason, before a byte
+/// this one 9. A configuration that needs no newer format than the template's kernel reads is written into it as
+/// before; one that needs more (the virtio-gpu console: 5, a `[devices]` key: 6, `network.mtu`: 7, a `[websocket]`
+/// key: 9) is refused with the reason, before a byte
 /// of the template changes, instead of giving an image whose kernel would refuse it at boot.
 #[test]
 fn templates_of_earlier_releases_take_what_their_kernel_reads() {
@@ -957,6 +1036,10 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
     b.uint(tag::NET_MTU, 1460).unwrap();
     let mtu = b.finish(false).unwrap();
     assert_eq!(header(&mtu), 7);
+    let mut b = Builder::new();
+    b.uint(tag::WS_PORT, 9443).unwrap();
+    let ws = b.finish(false).unwrap();
+    assert_eq!(header(&ws), 9);
     for (release, reads) in [
         ("v0.2.0", 2u16),
         ("v0.2.1", 3),
@@ -974,6 +1057,7 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             ("console.virtio_gpu", &gpu, 5u16),
             ("[devices]", &input, 6),
             ("network.mtu", &mtu, 7),
+            ("[websocket]", &ws, 9),
         ] {
             match image::configure_iso(&tpl, blob) {
                 Ok(_) => assert!(

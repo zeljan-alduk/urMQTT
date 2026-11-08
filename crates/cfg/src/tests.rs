@@ -970,7 +970,9 @@ fn websocket_rules() {
     assert_eq!(Blob::parse(&ok).unwrap().version(), 9);
     // Off and untouched: the base format.
     assert_eq!(
-        Blob::parse(&Builder::new().finish(false).unwrap()).unwrap().version(),
+        Blob::parse(&Builder::new().finish(false).unwrap())
+            .unwrap()
+            .version(),
         2
     );
     // Ports.
@@ -998,12 +1000,14 @@ fn websocket_rules() {
     assert_eq!(b.finish(false).unwrap_err().key, "websocket.users");
     b.strs(tag::WS_USERS, &[user("web-1")]).unwrap();
     assert_eq!(b.finish(false).unwrap_err().key, "websocket.origins");
-    b.strs(tag::WS_ORIGINS, &["https://app.example.com"]).unwrap();
+    b.strs(tag::WS_ORIGINS, &["https://app.example.com"])
+        .unwrap();
     assert!(b.finish(false).is_ok());
     // Roles.
     let mut r = base();
     r.variant(tag::WS_AUTH, 1).unwrap();
-    r.strs(tag::WS_ORIGINS, &["https://app.example.com"]).unwrap();
+    r.strs(tag::WS_ORIGINS, &["https://app.example.com"])
+        .unwrap();
     r.strs(tag::WS_USERS, &[user("ops")]).unwrap();
     r.strs(tag::ACL_OPERATOR_IDS, &["ops"]).unwrap();
     assert_eq!(r.finish(false).unwrap_err().key, "websocket.users");
@@ -1014,7 +1018,10 @@ fn websocket_rules() {
     // Well-formed whether on or off.
     for (t, bad) in [
         (tag::WS_ORIGINS, vec!["https://App.example.com".to_string()]),
-        (tag::WS_ORIGINS, vec!["https://a.b".into(), "https://a.b".into()]),
+        (
+            tag::WS_ORIGINS,
+            vec!["https://a.b".into(), "https://a.b".into()],
+        ),
         (tag::WS_USERS, vec![user("a"), user("a")]),
         (tag::WS_USERS, vec!["nohash".into()]),
         (tag::WS_ACL_PUBLISH, vec!["$SYS/#".into()]),

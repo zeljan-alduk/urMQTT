@@ -517,6 +517,7 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     b.bool(tag::CTL_ALLOW_UNREVOKE, cfg.control.allow_unrevoke)?;
     b.uint(tag::CTL_MAX_AGE, u64::from(cfg.control.max_message_age_s))?;
     build_plaintext(&mut b, &cfg.plaintext)?;
+    build_websocket(&mut b, &cfg.websocket)?;
     // ADR-256: "off" is the default and writes nothing (the blob keeps its
     // version); "auto" and "on" need format 5.
     b.variant(
@@ -581,6 +582,45 @@ fn build_plaintext(b: &mut Builder, p: &crate::Plaintext) -> Result<(), urmqtt_c
     b.strs(tag::PL_ACL_PUBLISH, &p.acl_publish)?;
     b.strs(tag::PL_ACL_SUBSCRIBE, &p.acl_subscribe)?;
     b.bool(tag::PL_RETAIN, p.retain)?;
+    Ok(())
+}
+
+/// The `[websocket]` section (ADR-272). As for `[plaintext]`, values equal
+/// to their default are left out by the builder: a configuration that does
+/// not use the section keeps its format version; any key set needs format 9.
+fn build_websocket(b: &mut Builder, w: &crate::Websocket) -> Result<(), urmqtt_cfg::CfgError> {
+    use urmqtt_cfg::plain::user_entry;
+    b.bool(tag::WS_ENABLED, w.enabled)?;
+    b.uint(tag::WS_PORT, u64::from(w.port))?;
+    b.str(tag::WS_PATH, &w.path)?;
+    b.variant(
+        tag::WS_AUTH,
+        match w.auth {
+            crate::WebsocketAuth::Mtls => 0,
+            crate::WebsocketAuth::Password => 1,
+        },
+    )?;
+    b.strs(tag::WS_ORIGINS, &w.origins)?;
+    let users: Vec<String> = w
+        .users
+        .iter()
+        .map(|u| user_entry(&u.id, &u.password_hash))
+        .collect();
+    b.strs(tag::WS_USERS, &users)?;
+    b.uint(tag::WS_UPGRADE_TIMEOUT, u64::from(w.upgrade_timeout_s))?;
+    b.uint(tag::WS_MAX_CONNS, u64::from(w.max_connections))?;
+    b.uint(tag::WS_MAX_PER_IP, u64::from(w.max_connections_per_ip))?;
+    b.uint(tag::WS_MAX_PACKET, u64::from(w.max_packet_size))?;
+    b.rate(
+        tag::WS_PUBLISH_RATE,
+        w.publish_rate_per_device.tokens,
+        w.publish_rate_per_device.per_ms,
+    )?;
+    b.uint(tag::WS_MAX_FAILS, u64::from(w.max_failed_auths_per_ip))?;
+    b.uint(tag::WS_LOCKOUT, u64::from(w.lockout_s))?;
+    b.strs(tag::WS_ACL_PUBLISH, &w.acl_publish)?;
+    b.strs(tag::WS_ACL_SUBSCRIBE, &w.acl_subscribe)?;
+    b.bool(tag::WS_RETAIN, w.retain)?;
     Ok(())
 }
 

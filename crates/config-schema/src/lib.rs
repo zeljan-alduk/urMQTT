@@ -109,6 +109,9 @@ struct RawConfig {
     /// Optional: without it there is no plaintext listener (P1, ADR-229).
     #[serde(default)]
     plaintext: RawPlaintext,
+    /// Optional: without it there is no WebSocket listener (ADR-272).
+    #[serde(default)]
+    websocket: RawWebsocket,
     /// Optional: without it the console stays on the bootloader's framebuffer (ADR-256).
     #[serde(default)]
     console: RawConsole,
@@ -303,6 +306,71 @@ impl Default for RawPlaintext {
             acl_publish: default_strs("plaintext.acl_publish"),
             acl_subscribe: default_strs("plaintext.acl_subscribe"),
             retain: default_bool("plaintext.retain"),
+        }
+    }
+}
+
+/// How a WebSocket client proves who it is (ADR-272).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebsocketAuth {
+    /// A client certificate, as on the TLS port.
+    Mtls,
+    /// An MQTT user name and password from `websocket.users`, inside TLS.
+    Password,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawWebsocket {
+    enabled: bool,
+    port: u16,
+    path: String,
+    auth: WebsocketAuth,
+    origins: Vec<String>,
+    users: Vec<PlainUser>,
+    upgrade_timeout_s: u32,
+    max_connections: u32,
+    max_connections_per_ip: u32,
+    max_packet_size: u32,
+    publish_rate_per_device: String,
+    max_failed_auths_per_ip: u32,
+    lockout_s: u32,
+    acl_publish: Vec<String>,
+    acl_subscribe: Vec<String>,
+    retain: bool,
+}
+
+impl Default for RawWebsocket {
+    fn default() -> Self {
+        let u32_of = |k: &str| u32::try_from(default_uint(k)).unwrap_or(u32::MAX);
+        let rate = match default_of("websocket.publish_rate_per_device") {
+            Some(urmqtt_cfg::fields::Kind::Rate { tokens, per_ms }) => {
+                pack::rate_text(tokens, per_ms)
+            }
+            _ => "10/s".to_owned(),
+        };
+        let path = match default_of("websocket.path") {
+            Some(urmqtt_cfg::fields::Kind::Str { default, .. }) => default.to_owned(),
+            _ => "/mqtt".to_owned(),
+        };
+        Self {
+            enabled: default_bool("websocket.enabled"),
+            port: u16::try_from(default_uint("websocket.port")).unwrap_or(0),
+            path,
+            auth: WebsocketAuth::Mtls,
+            origins: default_strs("websocket.origins"),
+            users: Vec::new(),
+            upgrade_timeout_s: u32_of("websocket.upgrade_timeout_s"),
+            max_connections: u32_of("websocket.max_connections"),
+            max_connections_per_ip: u32_of("websocket.max_connections_per_ip"),
+            max_packet_size: u32_of("websocket.max_packet_size"),
+            publish_rate_per_device: rate,
+            max_failed_auths_per_ip: u32_of("websocket.max_failed_auths_per_ip"),
+            lockout_s: u32_of("websocket.lockout_s"),
+            acl_publish: default_strs("websocket.acl_publish"),
+            acl_subscribe: default_strs("websocket.acl_subscribe"),
+            retain: default_bool("websocket.retain"),
         }
     }
 }
@@ -780,8 +848,34 @@ pub struct Config {
     pub registry: RegistryMode,
     pub control: Control,
     pub plaintext: Plaintext,
+    pub websocket: Websocket,
     pub console: Console,
     pub devices: Devices,
+}
+
+/// MQTT over secure WebSocket (NEXT-5, ADR-272). Off by default; the other
+/// keys are inert while `enabled` is false.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Websocket {
+    pub enabled: bool,
+    pub port: u16,
+    /// The request path, e.g. `/mqtt`.
+    pub path: String,
+    pub auth: WebsocketAuth,
+    /// Allowed `Origin` values, exact.
+    pub origins: Vec<String>,
+    /// `auth = "password"`: the accounts.
+    pub users: Vec<PlainUser>,
+    pub upgrade_timeout_s: u32,
+    pub max_connections: u32,
+    pub max_connections_per_ip: u32,
+    pub max_packet_size: u32,
+    pub publish_rate_per_device: Rate,
+    pub max_failed_auths_per_ip: u32,
+    pub lockout_s: u32,
+    pub acl_publish: Vec<String>,
+    pub acl_subscribe: Vec<String>,
+    pub retain: bool,
 }
 
 /// The `[console]` section (ADR-256).
@@ -909,6 +1003,15 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         &control,
         &mut errors,
     );
+    let websocket = validate_websocket(
+        &raw.websocket,
+        &network,
+        &plaintext,
+        &limits,
+        &acl,
+        &control,
+        &mut errors,
+    );
 
     if !errors.is_empty() {
         return Err(errors);
@@ -930,6 +1033,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         registry: raw.registry.mode,
         control,
         plaintext,
+        websocket,
         console: Console {
             virtio_gpu: raw.console.virtio_gpu,
         },
@@ -1140,13 +1244,7 @@ fn validate_plaintext_enabled(
     control: &Control,
     errors: &mut Vec<ConfigError>,
 ) {
-    let other_role = |id: &str| {
-        acl.service_ids.iter().any(|p| match p.strip_suffix('*') {
-            Some(prefix) => id.starts_with(prefix),
-            None => p == id,
-        }) || acl.operator_ids.iter().any(|o| o == id)
-            || control.service_ids.iter().any(|c| c == id)
-    };
+    let other_role = |id: &str| holds_other_role(acl, control, id);
     const ROLE: &str = "is also an acl.service_ids, acl.operator_ids or control.service_ids identity: plaintext clients never hold those roles, pick another name";
     if raw.allow_from_anywhere && !raw.allow_from.is_empty() {
         errors.push(err(
@@ -1255,6 +1353,213 @@ fn validate_plaintext_enabled(
                 }
             }
         }
+    }
+}
+
+/// Whether `id` is a service, operator or control identity: password and
+/// plaintext logins never hold those roles.
+fn holds_other_role(acl: &Acl, control: &Control, id: &str) -> bool {
+    acl.service_ids.iter().any(|p| match p.strip_suffix('*') {
+        Some(prefix) => id.starts_with(prefix),
+        None => p == id,
+    }) || acl.operator_ids.iter().any(|o| o == id)
+        || control.service_ids.iter().any(|c| c == id)
+}
+
+/// The `[websocket]` section (ADR-272). The same rules as `urmqtt_cfg::check`
+/// applies to a blob, with messages that name the offending entry. Entries
+/// must be well formed whether or not the listener is on; what the listener
+/// needs is checked when it is on.
+fn validate_websocket(
+    raw: &RawWebsocket,
+    network: &Network,
+    plaintext: &Plaintext,
+    limits: &Limits,
+    acl: &Acl,
+    control: &Control,
+    errors: &mut Vec<ConfigError>,
+) -> Websocket {
+    use urmqtt_cfg::fields::{MAX_PLAIN_ACL, MAX_PLAIN_USERS, MAX_WS_ORIGINS};
+    use urmqtt_cfg::{plain, ws};
+
+    if raw.port == 0 {
+        errors.push(err("websocket.port", "must be a non-zero port"));
+    }
+    for (key, v, min, max) in [
+        (
+            "websocket.upgrade_timeout_s",
+            raw.upgrade_timeout_s,
+            1,
+            urmqtt_cfg::fields::MAX_WS_UPGRADE_TIMEOUT_S as u32,
+        ),
+        (
+            "websocket.max_connections",
+            raw.max_connections,
+            1,
+            1_000_000,
+        ),
+        (
+            "websocket.max_connections_per_ip",
+            raw.max_connections_per_ip,
+            1,
+            65_535,
+        ),
+        (
+            "websocket.max_failed_auths_per_ip",
+            raw.max_failed_auths_per_ip,
+            1,
+            1000,
+        ),
+        ("websocket.lockout_s", raw.lockout_s, 1, 86_400),
+    ] {
+        if !(min..=max).contains(&v) {
+            errors.push(err(key, format!("must be in {min}..={max}")));
+        }
+    }
+    if !(MIN_PACKET_SIZE..=MQTT_MAX_PACKET_SIZE).contains(&raw.max_packet_size) {
+        errors.push(err(
+            "websocket.max_packet_size",
+            format!("must be in {MIN_PACKET_SIZE}..={MQTT_MAX_PACKET_SIZE}"),
+        ));
+    }
+    let publish_rate_per_device = parse_rate(&raw.publish_rate_per_device).unwrap_or_else(|m| {
+        errors.push(err("websocket.publish_rate_per_device", m));
+        Rate {
+            tokens: 0,
+            per_ms: 0,
+        }
+    });
+    if let Err(m) = ws::check_path(&raw.path) {
+        errors.push(err("websocket.path", format!("{:?} {m}", raw.path)));
+    }
+
+    // Lists: their sizes first (the kernel's arrays), then each entry.
+    for (key, len, max) in [
+        ("websocket.origins", raw.origins.len(), MAX_WS_ORIGINS),
+        ("websocket.users", raw.users.len(), MAX_PLAIN_USERS),
+        (
+            "websocket.acl_publish",
+            raw.acl_publish.len(),
+            MAX_PLAIN_ACL,
+        ),
+        (
+            "websocket.acl_subscribe",
+            raw.acl_subscribe.len(),
+            MAX_PLAIN_ACL,
+        ),
+    ] {
+        if len > max {
+            errors.push(err(key, format!("at most {max} entries")));
+        }
+    }
+    for (i, o) in raw.origins.iter().enumerate() {
+        let path = format!("websocket.origins[{i}]");
+        if let Err(m) = ws::check_origin(o) {
+            errors.push(err(&path, format!("{o:?}: {m}")));
+        } else if raw.origins.iter().take(i).any(|x| x == o) {
+            errors.push(err(&path, format!("{o:?} is listed twice")));
+        }
+    }
+    for (i, u) in raw.users.iter().enumerate() {
+        let path = format!("websocket.users[{i}]");
+        if let Err(m) = plain::check_identity(&u.id) {
+            errors.push(err(&format!("{path}.id"), format!("{:?}: {m}", u.id)));
+        } else if raw.users.iter().take(i).any(|o| o.id == u.id) {
+            errors.push(err(
+                &format!("{path}.id"),
+                format!("{:?} is listed twice", u.id),
+            ));
+        }
+        if let Err(m) = urmqtt_cfg::passwd::PasswordHash::parse(&u.password_hash) {
+            errors.push(err(&format!("{path}.password_hash"), m.msg()));
+        }
+    }
+    for (key, list) in [
+        ("websocket.acl_publish", &raw.acl_publish),
+        ("websocket.acl_subscribe", &raw.acl_subscribe),
+    ] {
+        for (i, f) in list.iter().enumerate() {
+            let path = format!("{key}[{i}]");
+            if let Err(m) = check_topic_filter(f, limits, Placeholder::Allowed) {
+                errors.push(err(&path, m));
+            } else if f.starts_with('$') {
+                errors.push(err(&path, "no filter may start with $ (broker topics)"));
+            }
+        }
+    }
+
+    if raw.enabled {
+        // wss:// is TLS: it rides on the TLS listener's certificate, key and
+        // trust anchors.
+        if network.mqtt_tls_port == 0 {
+            errors.push(err(
+                "websocket.enabled",
+                "needs the TLS listener (network.mqtt_tls_port not 0): wss:// uses its certificate and key",
+            ));
+        } else if raw.port == network.mqtt_tls_port {
+            errors.push(err(
+                "websocket.port",
+                "must differ from network.mqtt_tls_port",
+            ));
+        }
+        if network.mqtt_plain_port == Some(raw.port) {
+            errors.push(err(
+                "websocket.port",
+                "must differ from network.mqtt_plain_port",
+            ));
+        }
+        if plaintext.enabled && raw.port == plaintext.port {
+            errors.push(err("websocket.port", "must differ from plaintext.port"));
+        }
+        match raw.auth {
+            WebsocketAuth::Password => {
+                if raw.users.is_empty() {
+                    errors.push(err(
+                        "websocket.users",
+                        "auth = \"password\" needs at least one account",
+                    ));
+                }
+                if raw.origins.is_empty() {
+                    errors.push(err(
+                        "websocket.origins",
+                        "required with auth = \"password\": the web pages (https://app.example.com) that may connect; without it any web site a user visits could log in with the browser's help",
+                    ));
+                }
+                const ROLE: &str = "is also an acl.service_ids, acl.operator_ids or control.service_ids identity: password logins over WebSocket never hold those roles, pick another name";
+                for (i, u) in raw.users.iter().enumerate() {
+                    if holds_other_role(acl, control, &u.id) {
+                        errors.push(err(
+                            &format!("websocket.users[{i}].id"),
+                            format!("{:?} {ROLE}", u.id),
+                        ));
+                    }
+                }
+            }
+            WebsocketAuth::Mtls => {
+                if !raw.users.is_empty() {
+                    errors.push(err("websocket.users", "only used with auth = \"password\""));
+                }
+            }
+        }
+    }
+
+    Websocket {
+        enabled: raw.enabled,
+        port: raw.port,
+        path: raw.path.clone(),
+        auth: raw.auth,
+        origins: raw.origins.clone(),
+        users: raw.users.clone(),
+        upgrade_timeout_s: raw.upgrade_timeout_s,
+        max_connections: raw.max_connections,
+        max_connections_per_ip: raw.max_connections_per_ip,
+        max_packet_size: raw.max_packet_size,
+        publish_rate_per_device,
+        max_failed_auths_per_ip: raw.max_failed_auths_per_ip,
+        lockout_s: raw.lockout_s,
+        acl_publish: raw.acl_publish.clone(),
+        acl_subscribe: raw.acl_subscribe.clone(),
+        retain: raw.retain,
     }
 }
 
@@ -2131,6 +2436,8 @@ mod plain_tests;
 mod tests;
 #[cfg(test)]
 mod tls_off_tests;
+#[cfg(test)]
+mod websocket_tests;
 
 #[cfg(kani)]
 mod proofs;

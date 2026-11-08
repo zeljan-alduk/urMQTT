@@ -26,7 +26,7 @@ export const HIDDEN = new Set(['storage.encryption', 'storage.disk_key']);
 export const SECTION_ORDER = [
   'network', 'tls', 'trust', 'control', 'limits', 'acl', 'storage',
   'observability', 'time', 'watchdog', 'memory', 'registry', 'entropy', 'cpu',
-  'console', 'devices', 'plaintext',
+  'console', 'devices', 'plaintext', 'websocket',
 ];
 
 /** Examples shown as the placeholder of fields that have no default. */
@@ -38,6 +38,7 @@ export const EXAMPLES = {
   'time.servers': '192.0.2.123',
   'plaintext.allow_from': '10.0.0.0/8',
   'plaintext.ip_identities': '10.0.1.0/24 plc',
+  'websocket.origins': 'https://app.example.com',
 };
 
 /** Builds the form model from the exported schema. */
@@ -99,7 +100,7 @@ export function defaultText(f) {
 export const isListType = f => f.type === 'string_list' || f.type === 'socket_addr_list';
 export const isFileType = f => f.type === 'pem' || f.type === 'pem_list' || f.type === 'ed25519_public_key';
 /**
- * The accounts of the plaintext listener (P1): the state holds
+ * The accounts of a password listener (`plaintext.users`, P1; `websocket.users`, ADR-272): the state holds
  * `[{id, hash}]`, never a clear password; the TOML gets
  * `{ id = ..., password_hash = ... }` tables.
  */
@@ -135,7 +136,7 @@ export const DRAFT_HASH = 'pbkdf2-sha256$100000$' + '00'.repeat(16) + '$' + '00'
 /**
  * The rows of the accounts editor, as the validator should see them: every row
  * with an id, a row without a password carrying [DRAFT_HASH]. `rows[k]` is the
- * editor row of the validator's `plaintext.users[k]`.
+ * editor row of the validator's `plaintext.users[k]` (or `websocket.users[k]`).
  */
 export function draftUsers(v) {
   const rows = [];
@@ -397,6 +398,13 @@ export function applyPreset(id) {
 
 // --- visibility ----------------------------------------------------------------------
 
+/** `[websocket]` keys that mean something only with `auth = "password"` (with mtls the broker's own limits and ACL apply). */
+const WEBSOCKET_PASSWORD_ONLY = new Set([
+  'websocket.users', 'websocket.max_packet_size', 'websocket.publish_rate_per_device',
+  'websocket.max_failed_auths_per_ip', 'websocket.lockout_s', 'websocket.acl_publish',
+  'websocket.acl_subscribe', 'websocket.retain',
+]);
+
 /** Whether a field applies given the network mode (static/auto fields). */
 export function isApplicable(f, state) {
   const mode = state.values['network.mode'] || 'dhcp';
@@ -411,6 +419,11 @@ export function isApplicable(f, state) {
     if (f.id === 'plaintext.users') return auth === 'password';
     if (f.id === 'plaintext.anonymous_identity') return auth === 'anonymous';
     if (f.id === 'plaintext.ip_identities') return auth === 'ip';
+  }
+  // MQTT over WebSocket (ADR-272): the same, and what only password logins use.
+  if (f.section === 'websocket' && f.id !== 'websocket.enabled') {
+    if (state.values['websocket.enabled'] !== true) return false;
+    if (WEBSOCKET_PASSWORD_ONLY.has(f.id)) return (state.values['websocket.auth'] || 'mtls') === 'password';
   }
   return true;
 }

@@ -70,7 +70,7 @@ function otherValue(f) {
     case 'bool': return !f.default;
     case 'uint': return String(f.default < f.max ? f.default + 1 : f.default - 1);
     case 'enum': return f.variants.find(v => v !== f.default);
-    case 'string': return f.id === 'env' ? 'staging' : 'x';
+    case 'string': return f.id === 'env' ? 'staging' : f.id === 'websocket.path' ? '/ws' : 'x';
     case 'rate': return '5/m';
     case 'cidr': return '10.1.2.3/24';
     case 'ipv4': return '10.1.2.1';
@@ -82,6 +82,7 @@ function otherValue(f) {
       if (f.id === 'cpu.disable') return ['aes'];
       if (f.id === 'tls.revoked_serials') return ['0a1b2c'];
       if (f.id === 'acl.service_ids' || f.id === 'acl.operator_ids' || f.id === 'control.service_ids') return ['svc-one'];
+      if (f.id === 'websocket.origins') return ['https://app.example.com'];
       return ['lab/{id}/#'];
     case 'socket_addr_list': return ['10.1.2.3'];
     default: return null;
@@ -105,6 +106,14 @@ test('every field can be changed on its own and the validator accepts it or blam
       if (f.id === 'plaintext.anonymous_identity') s.values['plaintext.auth'] = 'anonymous';
       if (f.id === 'plaintext.ip_identities') s.values['plaintext.auth'] = 'ip';
       if (f.id === 'plaintext.auth') s.values['plaintext.users'] = otherValue(model.byId.get('plaintext.users'));
+    }
+    // WebSocket fields (ADR-272) only exist while it is on; the password ones with auth = "password", its accounts and origins.
+    if (f.section === 'websocket' && f.id !== 'websocket.enabled') {
+      s.values['websocket.enabled'] = true;
+      const withMtls = ['websocket.port', 'websocket.path', 'websocket.origins', 'websocket.upgrade_timeout_s', 'websocket.max_connections', 'websocket.max_connections_per_ip'];
+      if (!withMtls.includes(f.id)) {
+        Object.assign(s.values, { 'websocket.auth': 'password', 'websocket.origins': ['https://app.example.com'], 'websocket.users': otherValue(model.byId.get('websocket.users')) });
+      }
     }
     s.values[f.id] = v;
     if (f.id === 'plaintext.enabled') Object.assign(s.values, { 'plaintext.allow_from': ['10.0.0.0/8'], 'plaintext.users': otherValue(model.byId.get('plaintext.users')) });
