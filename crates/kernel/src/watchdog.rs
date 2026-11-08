@@ -493,38 +493,42 @@ impl core::fmt::Display for ConnName {
     }
 }
 
+/// Spins for `ms` of *running* time as the watchdog counts it (the elapsed
+/// time minus what this core's ticks credited as stalls), for the self-tests
+/// that must be reported. On a loaded host a TCG vCPU is descheduled for tens
+/// of milliseconds, its ticks arrive late, the watchdog rightly credits that
+/// (ADR-221), and a spin of a fixed elapsed time then may never reach the
+/// budget in running time (seen on main and on branches alike: 0 ms credited
+/// on an idle host, 20 to 40 ms with other VMs running). Bounded at 20 times
+/// `ms` in elapsed time.
+fn spin_running(ms: u64) {
+    let me = crate::smp::current();
+    // Relaxed: written by this core's tick handler only.
+    let credited = || DISCOUNT.get(me).map_or(0, |d| d.load(Ordering::Relaxed));
+    let (start, c0) = (time::now(), credited());
+    let run = time::ns_to_ticks(ms * 1_000_000);
+    let cap = start + run.saturating_mul(20);
+    loop {
+        let now = time::now();
+        let running = now
+            .saturating_sub(start)
+            .saturating_sub(credited().saturating_sub(c0));
+        if running >= run || now >= cap {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+}
+
 /// `test=watchdog-handshake` (dev): a handshake-class handler that stays at
 /// half its budget (nothing is reported: the ordinary 20 ms budget would
 /// have fired), then one that overruns it (reported against the handshake
 /// budget).
-///
-/// Each spin lasts `ms` of *running* time, as the watchdog counts it (the
-/// elapsed time minus what it credited as stalls), not of elapsed time: on a
-/// loaded host a TCG vCPU is descheduled for tens of milliseconds, the ticks
-/// arrive late, the watchdog rightly credits that, and a spin of a fixed
-/// elapsed time then never reaches the budget in running time (seen on main
-/// and on branches alike: 0 ms credited on an idle host, 20 to 30 ms with
-/// other VMs running). Bounded at 20 times its length in elapsed time.
 pub fn self_test_handshake() {
     let budget = budget_ms(Phase::Handshake as u8);
     let spin = |ms: u64| {
         let _g = enter(Phase::Handshake, Some(43));
-        let me = crate::smp::current();
-        // Relaxed: written by this core's tick handler only.
-        let credited = || DISCOUNT.get(me).map_or(0, |d| d.load(Ordering::Relaxed));
-        let (start, c0) = (time::now(), credited());
-        let run = time::ns_to_ticks(ms * 1_000_000);
-        let cap = start + run.saturating_mul(20);
-        loop {
-            let now = time::now();
-            let running = now
-                .saturating_sub(start)
-                .saturating_sub(credited().saturating_sub(c0));
-            if running >= run || now >= cap {
-                break;
-            }
-            core::hint::spin_loop();
-        }
+        spin_running(ms);
     };
     spin(budget / 2);
     // Let a tick run; the report, if any, would be in the log by now.
@@ -534,10 +538,7 @@ pub fn self_test_handshake() {
 /// `test=watchdog`: a handler that overruns its budget on purpose.
 pub fn self_test() {
     let _g = enter(Phase::SelfTest, Some(42));
-    let end = time::now() + time::ns_to_ticks(50_000_000);
-    while time::now() < end {
-        core::hint::spin_loop();
-    }
+    spin_running(50);
 }
 
 /// `test=watchdog-stall` (dev): a handler that is stalled for 45 ms (interrupts
@@ -560,10 +561,7 @@ pub fn self_test_stall() {
         }
     }
     let _g = enter(Phase::SelfTest, Some(45));
-    let end = time::now() + time::ns_to_ticks(50_000_000);
-    while time::now() < end {
-        core::hint::spin_loop();
-    }
+    spin_running(50);
 }
 
 /// `test=watchdog-lockwait` (dev): a handler that spends 50 ms waiting for a
@@ -582,8 +580,5 @@ pub fn self_test_lockwait() {
         lock_wait(time::now().saturating_sub(t0));
     }
     let _g = enter(Phase::SelfTest, Some(47));
-    let end = time::now() + time::ns_to_ticks(50_000_000);
-    while time::now() < end {
-        core::hint::spin_loop();
-    }
+    spin_running(50);
 }

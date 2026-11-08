@@ -162,6 +162,8 @@ All notable changes to this project are documented here. The format follows
   alike, about half the runs): its self-test spun a fixed elapsed time, and the late ticks of a descheduled vCPU are
   credited as stalls (ADR-221), so the spin never reached the budget in running time. It now spins its length in
   running time as the watchdog counts it (bounded at 20 times that elapsed); 10 of 10 with and without host load.
+- `$SYS/query/info` could report `clients.connected` 0 to an operator that had just reconnected: the answer used
+  the counters each shard reports once a second. The answering shard (the asker's home) now refreshes its own first.
 - A retained message replayed for a new subscription while the session's in-flight window was full was sent from
   the queue with RETAIN 0 (QoS 1, since M9; MQTT 3.1.1 3.3.1.3 requires 1). It keeps RETAIN now, also when it is sent
   again after a reconnect. Found by the `broker_acl` fuzzer's new QoS 2 checks (ADR-271).
