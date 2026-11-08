@@ -134,6 +134,21 @@ pub struct Mqtt5Info {
     pub disconnects: [u64; crate::REASON_SLOTS],
     /// 5.0 CONNECT packets the broker refused, by CONNACK reason code.
     pub refused: [u64; crate::REASON_SLOTS],
+    /// Shared subscriptions (ADR-275): groups and members now (on their
+    /// owners), messages delivered to members, dropped (QoS 0 without a
+    /// member online, handed on too often), handed to another member, joins
+    /// refused by a limit.
+    pub shared_groups: u64,
+    pub shared_members: u64,
+    pub shared_delivered: u64,
+    pub shared_dropped: u64,
+    pub shared_redispatched: u64,
+    pub shared_refused: u64,
+    /// Retained messages whose Message Expiry Interval runs (the sweep's
+    /// list, summed over the shards' replicas).
+    pub retained_expiring: u64,
+    /// Bytes held by the 5.0 connections' topic-alias tables.
+    pub alias_bytes: u64,
 }
 
 impl Default for Mqtt5Info {
@@ -148,14 +163,22 @@ impl Default for Mqtt5Info {
             wills_pending: 0,
             disconnects: [0; crate::REASON_SLOTS],
             refused: [0; crate::REASON_SLOTS],
+            shared_groups: 0,
+            shared_members: 0,
+            shared_delivered: 0,
+            shared_dropped: 0,
+            shared_redispatched: 0,
+            shared_refused: 0,
+            retained_expiring: 0,
+            alias_bytes: 0,
         }
     }
 }
 
 /// The DISCONNECT reason codes the broker sends, as `$SYS` reports them
 /// (`disconnects/sent/0x8e`); the rest are counted under `other`.
-pub const DISCONNECT_CODES: [u8; 13] = [
-    0x81, 0x82, 0x83, 0x87, 0x8d, 0x8e, 0x8f, 0x90, 0x93, 0x94, 0x95, 0x98, 0x9a,
+pub const DISCONNECT_CODES: [u8; 14] = [
+    0x81, 0x82, 0x83, 0x87, 0x8b, 0x8d, 0x8e, 0x8f, 0x90, 0x93, 0x94, 0x95, 0x98, 0x9a,
 ];
 /// The CONNACK reason codes of refused 5.0 CONNECT packets, as `$SYS` reports them
 /// (`connections/refused/v5/0x87`).
@@ -439,6 +462,14 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
     put("sessions/expiring", &m.sessions_expiring);
     put("wills/delayed", &m.wills_delayed);
     put("wills/pending", &m.wills_pending);
+    put("retained/expiring", &m.retained_expiring);
+    put("memory/topic_aliases", &m.alias_bytes);
+    put("shared/groups", &m.shared_groups);
+    put("shared/members", &m.shared_members);
+    put("shared/messages/delivered", &m.shared_delivered);
+    put("shared/messages/dropped", &m.shared_dropped);
+    put("shared/messages/redispatched", &m.shared_redispatched);
+    put("shared/joins/refused", &m.shared_refused);
     let (sent, other) = by_code(&m.disconnects, &DISCONNECT_CODES);
     for (code, n) in DISCONNECT_CODES.iter().zip(sent) {
         put(&alloc::format!("disconnects/sent/0x{code:02x}"), &n);
@@ -674,14 +705,23 @@ pub fn json(i: &Info<'_>) -> String {
         o,
         ",\"mqtt5\":{{\"connected\":{},\"messages_expired\":{},\"dropped_too_large\":{},\
          \"sessions_expired\":{},\"sessions_expiring\":{},\"wills_delayed\":{},\"wills_pending\":{},\
-         \"disconnects\":{{",
+         \"retained_expiring\":{},\"topic_alias_bytes\":{},\"shared\":{{\"groups\":{},\"members\":{},\"delivered\":{},\"dropped\":{},\
+         \"redispatched\":{},\"refused\":{}}},\"disconnects\":{{",
         m.connected,
         m.messages_expired,
         m.dropped_too_large,
         m.sessions_expired,
         m.sessions_expiring,
         m.wills_delayed,
-        m.wills_pending
+        m.wills_pending,
+        m.retained_expiring,
+        m.alias_bytes,
+        m.shared_groups,
+        m.shared_members,
+        m.shared_delivered,
+        m.shared_dropped,
+        m.shared_redispatched,
+        m.shared_refused
     );
     let (sent, other) = by_code(&m.disconnects, &DISCONNECT_CODES);
     for (code, n) in DISCONNECT_CODES.iter().zip(sent) {
@@ -857,6 +897,15 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
         m.dropped_too_large,
         m.wills_delayed,
         m.wills_pending
+    ));
+    out.push(alloc::format!(
+        "shared: {} group(s), {} member(s); {} delivered, {} dropped, {} handed on, {} join(s) refused",
+        m.shared_groups,
+        m.shared_members,
+        m.shared_delivered,
+        m.shared_dropped,
+        m.shared_redispatched,
+        m.shared_refused
     ));
     let p = &i.plaintext;
     if p.enabled {
@@ -1317,10 +1366,19 @@ mod tests {
                 "$SYS/broker/sessions/expiring",
                 "$SYS/broker/wills/delayed",
                 "$SYS/broker/wills/pending",
+                "$SYS/broker/retained/expiring",
+                "$SYS/broker/memory/topic_aliases",
+                "$SYS/broker/shared/groups",
+                "$SYS/broker/shared/members",
+                "$SYS/broker/shared/messages/delivered",
+                "$SYS/broker/shared/messages/dropped",
+                "$SYS/broker/shared/messages/redispatched",
+                "$SYS/broker/shared/joins/refused",
                 "$SYS/broker/disconnects/sent/0x81",
                 "$SYS/broker/disconnects/sent/0x82",
                 "$SYS/broker/disconnects/sent/0x83",
                 "$SYS/broker/disconnects/sent/0x87",
+                "$SYS/broker/disconnects/sent/0x8b",
                 "$SYS/broker/disconnects/sent/0x8d",
                 "$SYS/broker/disconnects/sent/0x8e",
                 "$SYS/broker/disconnects/sent/0x8f",
@@ -1425,8 +1483,10 @@ mod tests {
              \"syn_dropped\":0,\"in_flight\":0,\"in_flight_max\":0,\"slow\":0,\"latency_sum_ms\":0,\
              \"latency_max_ms\":0},\"accepted\":[4,5],\
              \"mqtt5\":{\"connected\":1,\"messages_expired\":6,\"dropped_too_large\":0,\"sessions_expired\":0,\
-             \"sessions_expiring\":0,\"wills_delayed\":0,\"wills_pending\":0,\"disconnects\":{\"0x81\":0,\"0x82\":0,\
-             \"0x83\":0,\"0x87\":0,\"0x8d\":0,\"0x8e\":2,\"0x8f\":0,\"0x90\":0,\"0x93\":0,\"0x94\":0,\"0x95\":0,\
+             \"sessions_expiring\":0,\"wills_delayed\":0,\"wills_pending\":0,\"retained_expiring\":0,\"topic_alias_bytes\":0,\
+             \"shared\":{\"groups\":0,\"members\":0,\"delivered\":0,\"dropped\":0,\"redispatched\":0,\"refused\":0},\
+             \"disconnects\":{\"0x81\":0,\"0x82\":0,\
+             \"0x83\":0,\"0x87\":0,\"0x8b\":0,\"0x8d\":0,\"0x8e\":2,\"0x8f\":0,\"0x90\":0,\"0x93\":0,\"0x94\":0,\"0x95\":0,\
              \"0x98\":0,\"0x9a\":0,\"other\":1},\"refused\":{\"0x80\":0,\"0x81\":0,\"0x82\":0,\"0x83\":0,\"0x84\":0,\
              \"0x85\":0,\"0x86\":0,\"0x87\":3,\"0x88\":0,\"0x8c\":0,\"0x95\":0,\"0x9a\":0,\"other\":0}},\
              \"plaintext\":{\"enabled\":false},\"websocket\":{\"enabled\":false}}"
@@ -1479,7 +1539,7 @@ mod tests {
     #[test]
     fn status_is_a_few_short_lines() {
         let lines = status_lines(&info(&[10, 20]), "info", "debug");
-        assert_eq!(lines.len(), 14);
+        assert_eq!(lines.len(), 15);
         assert_eq!(lines[0], "urmqtt 0.1.0 aarch64 up 12 s");
         assert_eq!(lines[1], "cpu 2 core(s), busy % 10/20");
         assert!(lines[3].starts_with("clients 3 connected, 5 sessions"));
@@ -1502,7 +1562,8 @@ mod tests {
             "MQTT 5.0: 1 of 3 client(s), 3 DISCONNECT(s) sent, 3 CONNECT(s) refused"
         );
         assert!(lines[12].starts_with("expiry: sessions 0 expired"));
-        assert!(lines[13].starts_with("log level info (build maximum debug)"));
+        assert!(lines[13].starts_with("shared: 0 group(s), 0 member(s)"));
+        assert!(lines[14].starts_with("log level info (build maximum debug)"));
         assert!(lines.iter().all(|l| l.len() < 120 && !l.contains('\n')));
     }
 

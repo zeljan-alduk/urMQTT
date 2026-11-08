@@ -540,6 +540,10 @@ pub struct Stats {
     pub shared_refused: u64,
     /// Retained messages with a running Message Expiry Interval.
     pub retained_expiring: usize,
+    /// Bytes the 5.0 connections' topic-alias tables hold (slots and
+    /// topics, ADR-275); each is at most `topic_alias_maximum` × (16 +
+    /// `max_topic_len`).
+    pub alias_bytes: usize,
 }
 
 impl Default for Stats {
@@ -585,6 +589,7 @@ impl Default for Stats {
             shared_redispatched: 0,
             shared_refused: 0,
             retained_expiring: 0,
+            alias_bytes: 0,
         }
     }
 }
@@ -967,6 +972,8 @@ pub struct Broker {
     /// SUBACKs waiting for owners on other shards.
     subacks: Vec<shared::Suback>,
     next_token: u32,
+    /// [`Broker::shut_down`] was called: no Will goes out any more.
+    stopping: bool,
 }
 
 /// The scope level of the device ACL: the first level of a device
@@ -1066,6 +1073,7 @@ impl Broker {
             shared_out: Vec::new(),
             subacks: Vec::new(),
             next_token: 0,
+            stopping: false,
         }
     }
 
@@ -1160,6 +1168,40 @@ impl Broker {
             }
         }
         any
+    }
+
+    /// Closes connection `c` for `why`: a 5.0 connection with a session is
+    /// told so first (DISCONNECT 0x98 for [`CloseReason::Disallowed`], e.g. a
+    /// revoked certificate, ADR-275), then the transport closes it after its
+    /// output, as for any close the broker asks for.
+    pub fn disconnect_conn(&mut self, c: ConnId, why: CloseReason) {
+        self.mark_close(c, why);
+    }
+
+    /// The broker is about to stop (the console's `reboot`, ADR-275): every
+    /// 5.0 connection with a session is told DISCONNECT 0x8B (Server shutting
+    /// down) and closed; 3.1.1 has no way to say it, so its connections are
+    /// left for the reset. From now on a closing connection publishes no
+    /// Will and arms none: the reboot is not the client's failure (the Will
+    /// of a reset broker never went out before either), and its session, if
+    /// persistent, is found again after the restart. Returns how many were
+    /// told.
+    pub fn shut_down(&mut self) -> usize {
+        self.stopping = true;
+        let told: Vec<ConnId> = self
+            .conns
+            .iter()
+            .filter(|(_, k)| k.session.is_some() && k.v5().is_some() && k.close.is_none())
+            .map(|(c, _)| c)
+            .collect();
+        for &c in &told {
+            self.close_with(
+                c,
+                CloseReason::Refused(ReasonCode::ServerShuttingDown as u8),
+                Some(ReasonCode::ServerShuttingDown),
+            );
+        }
+        told.len()
     }
 
     /// Connections that got output or a close request since the last call,
@@ -2066,6 +2108,9 @@ impl Broker {
         };
         self.flow_forget(c);
         self.forget_subacks(c);
+        if let Some(v) = conn.v5() {
+            self.stats.alias_bytes = self.stats.alias_bytes.saturating_sub(v5::alias_bytes(v));
+        }
         if conn.session.is_some() {
             self.online = self.online.saturating_sub(1);
             if conn.v5().is_some() {
@@ -2079,7 +2124,7 @@ impl Broker {
         let expiry = attached
             .and_then(|sid| self.sessions.get(sid))
             .map_or(0, |s| s.expiry_s);
-        if let Some(w) = conn.extra.and_then(|e| e.will) {
+        if let Some(w) = conn.extra.and_then(|e| e.will).filter(|_| !self.stopping) {
             match attached {
                 Some(sid) if expiry > 0 && w.delay_s > 0 => {
                     let delay = w.delay_s.min(expiry);
@@ -2226,7 +2271,7 @@ impl Broker {
         let mut due = Vec::new();
         self.will_at.take_due(self.now_ms, SWEEP_PER_TICK, &mut due);
         for sid in due.drain(..) {
-            if let Some(w) = self.wills.remove(&sid) {
+            if let Some(w) = self.wills.remove(&sid).filter(|_| !self.stopping) {
                 self.publish_will(w);
             }
         }
@@ -2871,7 +2916,7 @@ impl Broker {
                 client_id: s.client_id,
             });
         }
-        if let Some(w) = will {
+        if let Some(w) = will.filter(|_| !self.stopping) {
             self.publish_will(w);
         }
     }

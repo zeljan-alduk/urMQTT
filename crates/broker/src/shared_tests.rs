@@ -935,3 +935,160 @@ fn expired_retained_messages_are_swept_even_if_nobody_reads_them() {
     b.tick(100_000);
     assert_eq!(b.stats().retained, 1);
 }
+
+// ---- reason codes of part 3 (ADR-275) --------------------------------------------
+
+#[test]
+fn shut_down_tells_5_0_clients_0x8b_and_publishes_no_will() {
+    let mut b = Broker::new(cfg());
+    let w = watcher(&mut b, 0);
+    let mut w = w;
+    let (mut d, _) = C5::connect(&mut b, "d1", true, &[], Some(will(0)), 0);
+    let (mut d2, _) = C5::connect(
+        &mut b,
+        "d2",
+        true,
+        &[Prop::SessionExpiryInterval(60)],
+        Some(Will5 {
+            topic: "devices/d2/will",
+            payload: b"gone",
+            qos: QoS::AtMostOnce,
+            retain: false,
+            properties: Props::EMPTY,
+        }),
+        0,
+    );
+    let c4 = connect4(&mut b, "d4", true, 0);
+    assert_eq!(
+        b.shut_down(),
+        3,
+        "the watcher, d1 and d2; not the 3.1.1 one"
+    );
+    assert_eq!(
+        d.recv(&mut b),
+        [G::Disconnect(0x8b, Some("server shutting down".into()))]
+    );
+    assert_eq!(d2.recv(&mut b).len(), 1);
+    assert_eq!(b.close_requested(d.c), Some(CloseReason::Refused(0x8b)));
+    assert_eq!(b.close_requested(c4), None);
+    b.closed(d.c, 0);
+    b.closed(d2.c, 0);
+    b.closed(c4, 0);
+    w.recv(&mut b);
+    assert_eq!(b.stats().wills_published, 0);
+    assert_eq!(b.stats().wills_pending, 0);
+    assert_eq!(b.stats().disconnects_sent[0x0b], 3);
+}
+
+#[test]
+fn a_revoked_or_disallowed_connection_is_told_0x98_before_the_close() {
+    let mut b = Broker::new(cfg());
+    let (mut d, _) = C5::connect_as(&mut b, Some("d1"), "d1", true, &[], None, 0);
+    b.disconnect_conn(d.c, CloseReason::Disallowed);
+    assert_eq!(
+        d.recv(&mut b),
+        [G::Disconnect(0x98, Some("administrative action".into()))]
+    );
+    assert_eq!(b.close_requested(d.c), Some(CloseReason::Disallowed));
+    // A 3.1.1 one is just closed.
+    let c4 = connect4(&mut b, "d4", true, 0);
+    b.disconnect_conn(c4, CloseReason::Disallowed);
+    assert!(b.output(c4).is_empty());
+    assert_eq!(b.close_requested(c4), Some(CloseReason::Disallowed));
+}
+
+#[test]
+fn enhanced_authentication_is_refused_in_every_form() {
+    let mut b = Broker::new(cfg());
+    // CONNECT with an Authentication Method: CONNACK 0x8C [MQTT-4.12.0-1].
+    for props in [
+        &[Prop::AuthenticationMethod("SCRAM-SHA-256")][..],
+        &[
+            Prop::AuthenticationMethod("SCRAM-SHA-1"),
+            Prop::AuthenticationData(b"n,,n=user,r=abc"),
+        ][..],
+    ] {
+        let (c, ack) = C5::connect(&mut b, "d1", true, props, None, 0);
+        assert_eq!(ack.code(), 0x8c);
+        assert_eq!(
+            ack.props().reason_string(),
+            Some("enhanced authentication is not supported")
+        );
+        assert_eq!(b.close_requested(c.c), Some(CloseReason::Rejected));
+    }
+    assert_eq!(b.stats().connack_refused[0x0c], 2);
+    // AUTH after a CONNECT without a method: DISCONNECT 0x82 (§4.12).
+    let (mut d, _) = C5::connect(&mut b, "d1", true, &[], None, 0);
+    for reason in [
+        ReasonCode::ContinueAuthentication,
+        ReasonCode::ReAuthenticate,
+    ] {
+        let (mut e, _) = C5::connect(&mut b, "d2", true, &[], None, 0);
+        e.send(
+            &mut b,
+            &P5::Auth(urmqtt_mqtt::v5::Auth {
+                reason,
+                properties: Props::List(&[Prop::AuthenticationMethod("SCRAM-SHA-256")]),
+            }),
+            0,
+        );
+        assert_eq!(
+            e.recv(&mut b),
+            [G::Disconnect(0x82, Some("protocol error".into()))]
+        );
+        b.closed(e.c, 0);
+    }
+    // AUTH as the first packet: no CONNECT, closed without an answer.
+    let first = C5::open(&mut b, 0);
+    first.send(
+        &mut b,
+        &P5::Auth(urmqtt_mqtt::v5::Auth {
+            reason: ReasonCode::ContinueAuthentication,
+            properties: Props::List(&[Prop::AuthenticationMethod("SCRAM-SHA-256")]),
+        }),
+        0,
+    );
+    assert!(b.output(first.c).is_empty());
+    assert_eq!(b.close_requested(first.c), Some(CloseReason::ProtocolError));
+    assert!(d.recv(&mut b).is_empty());
+}
+
+#[test]
+fn topic_alias_tables_are_counted() {
+    let mut b = Broker::new(cfg());
+    let (mut d, _) = C5::connect(&mut b, "d1", true, &[], None, 0);
+    assert_eq!(b.stats().alias_bytes, 0, "nothing until the first alias");
+    d.publish(
+        &mut b,
+        "devices/d1/a",
+        b"",
+        QoS::AtMostOnce,
+        false,
+        &[Prop::TopicAlias(1)],
+        0,
+    );
+    let table = 10 * core::mem::size_of::<Option<Box<str>>>();
+    assert_eq!(b.stats().alias_bytes, table + "devices/d1/a".len());
+    // Re-pointed to a longer topic; then used without a topic: unchanged.
+    d.publish(
+        &mut b,
+        "devices/d1/abc",
+        b"",
+        QoS::AtMostOnce,
+        false,
+        &[Prop::TopicAlias(1)],
+        0,
+    );
+    d.publish(
+        &mut b,
+        "",
+        b"",
+        QoS::AtMostOnce,
+        false,
+        &[Prop::TopicAlias(1)],
+        0,
+    );
+    assert_eq!(b.stats().alias_bytes, table + "devices/d1/abc".len());
+    b.closed(d.c, 0);
+    assert_eq!(b.stats().alias_bytes, 0);
+}

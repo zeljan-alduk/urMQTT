@@ -355,10 +355,14 @@ impl Broker {
                 return self.close5(c, ReasonCode::TopicAliasInvalid);
             }
             let i = usize::from(alias - 1);
-            let Some(v) = self.conn(c).and_then(Conn::v5_mut) else {
+            let Some(v) = self.conns.get_mut(c).and_then(Conn::v5_mut) else {
                 return;
             };
+            // Counted in `Stats::alias_bytes` (ADR-275): the table, then the
+            // topics it holds.
+            let mut grown = 0usize;
             let table = v.aliases.get_or_insert_with(|| {
+                grown = alias_table_bytes(max);
                 (0..max)
                     .map(|_| None)
                     .collect::<Vec<_>>()
@@ -367,6 +371,7 @@ impl Broker {
             let Some(slot) = table.get_mut(i) else {
                 return self.close5(c, ReasonCode::TopicAliasInvalid);
             };
+            let mut freed = 0usize;
             if p.topic.is_empty() {
                 // Taken out while the message is handled (no copy), put back
                 // below.
@@ -375,8 +380,11 @@ impl Broker {
                     None => return self.close5(c, ReasonCode::TopicAliasInvalid),
                 }
             } else {
+                freed = slot.as_ref().map_or(0, |t| t.len());
+                grown += p.topic.len();
                 *slot = Some(p.topic.into());
             }
+            self.stats.alias_bytes = (self.stats.alias_bytes + grown).saturating_sub(freed);
         }
         let topic: &str = match &held {
             Some((_, t)) => t,
@@ -507,6 +515,19 @@ impl Broker {
         }
         self.mark_close(c, CloseReason::ClientDisconnect);
     }
+}
+
+/// The bytes an alias table of `max` slots takes besides its topics.
+pub(crate) fn alias_table_bytes(max: u16) -> usize {
+    usize::from(max) * core::mem::size_of::<Option<Box<str>>>()
+}
+
+/// The bytes the alias table of `v` holds: the slots and the topics.
+pub(crate) fn alias_bytes(v: &V5State) -> usize {
+    v.aliases.as_ref().map_or(0, |t| {
+        t.len() * core::mem::size_of::<Option<Box<str>>>()
+            + t.iter().flatten().map(|s| s.len()).sum::<usize>()
+    })
 }
 
 /// The properties a stored message never keeps (ADR-273 rule 2): Topic
