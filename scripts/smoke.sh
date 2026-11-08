@@ -659,6 +659,57 @@ mqtt_persist() {
     done
 }
 
+# QoS 2, exactly once (ADR-271), over mTLS. Boot 1 (fresh disk):
+# scripts/qos2-scenarios.py speaks MQTT itself: the same PUBLISH three times
+# before PUBREL is delivered once, and an inbound and an outbound flow of a
+# persistent session survive a kill of the client in the middle; paho-mqtt
+# (through uv, when it is installed) pipelines QoS 2 publishes and drains an
+# offline queue at QoS 2, each message exactly once; then a session is left
+# in the middle of every flow, its client killed, and QEMU killed (SIGKILL).
+# Boot 2 on the same disk: the store hands the flows back, and they resume
+# with their packet ids (PUBREL, PUBLISH with DUP, the held inbound id still
+# suppresses its duplicate) and complete.
+mqtt_qos2() {
+    local iso="$OUT/mqtt-qos2.raw" paho=()
+    mkimg "$iso" "serve"
+    command -v uv >/dev/null && paho=("client: paho-qos2-pipelined-exactly-once ok" "client: paho-qos2-offline-queue-exactly-once ok")
+    for accel in $ACCELS; do
+        local data="$OUT/mqtt-qos2-$accel.img"
+        fresh_disk "$iso" "$data"
+        for phase in 1 2; do
+            local log="$OUT/mqtt-qos2-$accel-$phase.log" status=0
+            start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
+            # The lease comes some 60 ms after READY; a SYN in between is dropped.
+            if wait_log "$log" "TLS 1.3 listener on port 8883" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+                if [[ $phase == 1 ]]; then
+                    bounded 120 python3 -I "$ROOT/scripts/qos2-scenarios.py" "$PORT" --tls "$ROOT/deploy/dev" --phase live \
+                        >"$log.client" 2>&1 || status=$?
+                    if (( ${#paho[@]} )); then
+                        bounded 180 uv run -q --no-project --with 'paho-mqtt>=2,<3' python -I "$ROOT/scripts/qos2-paho.py" \
+                            "$PORT" --tls "$ROOT/deploy/dev" >>"$log.client" 2>&1 || status=$?
+                    fi
+                fi
+                bounded 120 python3 -I "$ROOT/scripts/qos2-scenarios.py" "$PORT" --tls "$ROOT/deploy/dev" --phase "$phase" \
+                    >>"$log.client" 2>&1 || status=$?
+            else
+                status=124
+            fi
+            kill_vm
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            if [[ $phase == 1 ]]; then
+                check "mqtt-qos2-before-kill [$accel]" "$log" "$status" "storage: data disk formatted" \
+                    "client: qos2-duplicates-delivered-once ok" "client: qos2-inbound-flow-survives-a-client-kill ok" \
+                    "client: qos2-outbound-flow-survives-a-client-kill ok" "${paho[@]}" \
+                    "client: qos2-restart-phase1 ok" "NOT:FAILED" "$NO_FAULT"
+            else
+                check "mqtt-qos2-after-restart [$accel]" "$log" "$status" "storage: data disk opened" \
+                    "db: restored [0-9]+ retained message\(s\), 1 persistent session\(s\) with 1 queued message\(s\)" \
+                    "client: qos2-restart-resumes-every-flow ok" "NOT:FAILED" "$NO_FAULT"
+            fi
+        done
+    done
+}
+
 # M16: reconnect storms. Admission pretends the heap has 8 MiB, so 3000
 # devices do not all fit: each round all connect at once (retrying, like
 # devices with backoff), then all drop without DISCONNECT. The kernel must
@@ -3945,6 +3996,7 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want config_packed && config_packed
     want release_kernel && release_kernel
     want plaintext && plaintext
+    want mqtt_qos2 && mqtt_qos2
     want storm && storm
     want fin_wait2 && fin_wait2
     want attack_raw && attack_raw
@@ -4372,6 +4424,7 @@ if command -v mosquitto_pub >/dev/null && command -v mosquitto_sub >/dev/null; t
         python3 -I "$ROOT/scripts/mqtt-scenarios.py" -- \
         "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
         "client: qos1-after-reconnect ok" "client: acl-subscribe-denied ok" "client: retained-limit ok" \
+        "client: qos2-pubsub-exactly-once ok" "client: qos2-after-reconnect ok" "client: qos2-retained ok" \
         "broker: 1 retained message\(s\) not retained on core [0-9]+ \(1 over an identity's limit of 32" "NOT:FAILED" "$NO_FAULT"
     # M10: the same scenarios over TLS 1.3 with mutual TLS, plus the four
     # handshakes/CONNECTs that must be refused.
@@ -4379,6 +4432,7 @@ if command -v mosquitto_pub >/dev/null && command -v mosquitto_sub >/dev/null; t
         python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$ROOT/deploy/dev" -- \
         "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
         "client: qos1-after-reconnect ok" "client: acl-subscribe-denied ok" "client: retained-limit ok" \
+        "client: qos2-pubsub-exactly-once ok" "client: qos2-after-reconnect ok" "client: qos2-retained ok" \
         "client: tls-wrong-ca-rejected ok" "client: tls-expired-rejected ok" \
         "client: tls-client-id-mismatch-rejected ok" "client: tls-revoked-rejected ok" \
         "tls: device-001 authenticated \(TLS13_" "invalid peer certificate: UnknownIssuer" \
@@ -4576,6 +4630,7 @@ done
 if command -v mosquitto_pub >/dev/null; then
     want mqtt_persist && mqtt_persist
 fi
+want mqtt_qos2 && mqtt_qos2
 want storm && storm
 want fin_wait2 && fin_wait2
 want attack_raw && attack_raw

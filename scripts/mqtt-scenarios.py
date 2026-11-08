@@ -119,8 +119,33 @@ report("retained-limit", len(held) == 32, f"{len(held)} retained {serr}")
 for i in range(33):
     pub("device-005", f"devices/device-005/r/{i}", "", "-r", "-n")
 
+# 7. QoS 2 (ADR-271): granted at 2, published at 2, delivered exactly once
+#    (a second copy would arrive within the 3 s the subscriber waits).
+s = sub_start("backend", "-t", "devices/device-001/telemetry/q2", "-q", "2", "-C", "2", "-W", "3")
+settle()
+rc, err = pub("device-001", "devices/device-001/telemetry/q2", "once", "-q", "2")
+out, serr = sub_wait(s)
+report("qos2-pubsub-exactly-once", rc == 0 and out == "devices/device-001/telemetry/q2 once", f"{out!r} {err} {serr}")
+
+# 8. QoS 2 to a persistent session while it is away; a retained QoS 2
+#    message replayed at QoS 2 (mosquitto_sub -d prints the QoS it got).
+setup = subprocess.run(["mosquitto_sub", *base("device-005"), "-c", "-q", "2", "-t",
+                        "devices/device-005/cmd/#", "-E"], capture_output=True, text=True, timeout=TIMEOUT)
+rc, err = pub("backend", "devices/device-005/cmd/q2", "queued", "-q", "2")
+s = sub_start("device-005", "-c", "-q", "2", "-t", "devices/device-005/cmd/#", "-C", "1", "-W", "10")
+out, serr = sub_wait(s)
+subprocess.run(["mosquitto_sub", *base("device-005"), "-t", "devices/device-005/cmd/#", "-E"],
+               capture_output=True, text=True, timeout=TIMEOUT)
+report("qos2-after-reconnect", setup.returncode == 0 and rc == 0 and out == "devices/device-005/cmd/q2 queued",
+       f"{out!r} {setup.stderr.strip()} {err} {serr}")
+rc, err = pub("device-001", "devices/device-001/fw2", "2.0.0", "-q", "2", "-r")
+r = subprocess.run(["mosquitto_sub", *base("backend"), "-t", "devices/+/fw2", "-q", "2", "-C", "1", "-W", "10", "-d"],
+                   capture_output=True, text=True, timeout=TIMEOUT)
+pub("device-001", "devices/device-001/fw2", "", "-r", "-n")
+report("qos2-retained", rc == 0 and "q2, r1" in r.stdout and "2.0.0" in r.stdout, f"{r.stdout.strip()!r} {err}")
+
 if TLS:
-    # 7-10. Each of these must be refused (PROMPT M10 acceptance).
+    # 9-12. Each of these must be refused (PROMPT M10 acceptance).
     for name, cid, cert in [
         ("tls-wrong-ca-rejected", "device-001", "negative/rogue-device"),
         ("tls-expired-rejected", "device-002", "negative/expired-device"),

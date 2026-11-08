@@ -75,8 +75,9 @@ selection() {
         # simulations) run for more than 25 minutes each under Miri; they run
         # natively in `cargo test`.
         # Skipped: compact:: (60 000-step loop), and the tests that insert
-        # hundreds of retained messages or run 10 000 iterations.
-        urmqtt-broker) only=(--skip compact:: --skip console_lines_are_replayed --skip clearing_retained_messages --skip unsubscribed_filters_leave --skip many_sessions_route --skip retained_per_device_limit --skip retained_byte_budget --skip hot_state_stays_small) ;;
+        # hundreds of retained messages or run 10 000 iterations; the QoS 2 id
+        # wrap (65 534 deliveries, ADR-271).
+        urmqtt-broker) only=(--skip compact:: --skip console_lines_are_replayed --skip clearing_retained_messages --skip unsubscribed_filters_leave --skip many_sessions_route --skip retained_per_device_limit --skip retained_byte_budget --skip hot_state_stays_small --skip an_id_awaiting_pubcomp_is_not_reused_when_the_ids_wrap) ;;
         urmqtt-tcp) only=(cookie:: refused:: scripts:: seq:: siphash::) ;;
         # The TLS record layer, tickets, rng and the secret-capture table keep their Miri run.
         # provider:: (the P-256 and X25519 table arithmetic, X9/PERF work after H5), kat::, bench:: and
