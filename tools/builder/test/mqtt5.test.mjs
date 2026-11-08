@@ -99,7 +99,8 @@ test('with MQTT 5.0 off its other keys are not shown and not written', () => {
   const shown = () => model.fields.filter(x => x.section === 'mqtt5' && isApplicable(x, s)).map(x => x.name);
   assert.equal(shown().length, 7);
   Object.assign(s.values, { 'mqtt5.enabled': false, 'mqtt5.receive_maximum': '8' });
-  assert.deepEqual(shown(), ['enabled']);
+  // Shared subscriptions apply to 3.1.1 clients too (ADR-275): they stay.
+  assert.deepEqual(shown(), ['enabled', 'shared_subscriptions']);
   assert.deepEqual(changedIds(model, s), ['mqtt5.enabled']);
   assert.equal(buildToml(model, s).toml, '[mqtt5]\nenabled = false\n');
   // The expiry limits apply to MQTT 3.1.1 too: they stay.

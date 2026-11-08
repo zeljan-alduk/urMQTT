@@ -428,12 +428,12 @@ export function isApplicable(f, state) {
     if (state.values['websocket.enabled'] !== true) return false;
     if (WEBSOCKET_PASSWORD_ONLY.has(f.id)) return (state.values['websocket.auth'] || 'mtls') === 'password';
   }
-  // MQTT 5.0 (ADR-273 rule 21): on by default; its other keys mean nothing while it is off.
-  if (f.section === 'mqtt5' && f.id !== 'mqtt5.enabled' && state.values['mqtt5.enabled'] === false) return false;
-  // The shared-group limits (ADR-275) bound nothing while shared subscriptions are off (as written: with MQTT 5.0
-  // off the switch is not written and stays on, for 3.1.1 clients).
-  if (SHARED_GROUP_LIMITS.has(f.id) && state.values['mqtt5.enabled'] !== false &&
-    state.values['mqtt5.shared_subscriptions'] === false) return false;
+  // MQTT 5.0 (ADR-273 rule 21): on by default; its other keys mean nothing while it is off, except shared
+  // subscriptions, which 3.1.1 clients use too (ADR-275).
+  if (f.section === 'mqtt5' && f.id !== 'mqtt5.enabled' && f.id !== 'mqtt5.shared_subscriptions' &&
+    state.values['mqtt5.enabled'] === false) return false;
+  // The shared-group limits (ADR-275) bound nothing while shared subscriptions are off.
+  if (SHARED_GROUP_LIMITS.has(f.id) && state.values['mqtt5.shared_subscriptions'] === false) return false;
   return true;
 }
 

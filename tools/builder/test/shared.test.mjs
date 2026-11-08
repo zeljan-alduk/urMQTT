@@ -73,15 +73,19 @@ test('the validator names the key: 0 and 65536 are refused', () => {
   }
 });
 
-test('with shared subscriptions off the limits are not shown and not written; with MQTT 5.0 off they stay (3.1.1)', () => {
+test('with shared subscriptions off the limits are not shown and not written, also with MQTT 5.0 off (3.1.1 clients share too)', () => {
   const s = emptyState();
   const shown = () => KEYS.filter(id => isApplicable(model.byId.get(id), s));
   assert.deepEqual(shown(), KEYS);
   Object.assign(s.values, { 'mqtt5.shared_subscriptions': false, 'limits.max_shared_groups': '64' });
   assert.deepEqual(shown(), []);
   assert.deepEqual(changedIds(model, s), ['mqtt5.shared_subscriptions']);
-  // MQTT 5.0 off: the switch is not written, shared subscriptions stay on for 3.1.1 clients.
+  // MQTT 5.0 off: the switch is still shown and written (it applies to 3.1.1 clients).
   s.values['mqtt5.enabled'] = false;
+  assert.ok(isApplicable(model.byId.get('mqtt5.shared_subscriptions'), s));
+  assert.deepEqual(shown(), []);
+  assert.deepEqual(changedIds(model, s), ['mqtt5.enabled', 'mqtt5.shared_subscriptions']);
+  s.values['mqtt5.shared_subscriptions'] = true;
   assert.deepEqual(shown(), KEYS);
   assert.deepEqual(changedIds(model, s), ['mqtt5.enabled', 'limits.max_shared_groups']);
 });
