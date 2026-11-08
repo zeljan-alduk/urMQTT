@@ -430,6 +430,20 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
         tag::LIM_PUBLISHER_BACKPRESSURE,
         l.publisher_backpressure.variant(),
     )?;
+    // ADR-273: at their defaults these write nothing (the blob keeps its
+    // version); a value set needs format 12.
+    b.uint(
+        tag::LIM_MAX_SESSION_EXPIRY,
+        u64::from(l.max_session_expiry_s),
+    )?;
+    b.uint(
+        tag::LIM_DEFAULT_SESSION_EXPIRY,
+        u64::from(l.default_session_expiry_s),
+    )?;
+    b.uint(
+        tag::LIM_MAX_MESSAGE_EXPIRY,
+        u64::from(l.max_message_expiry_s),
+    )?;
     let a = &cfg.acl;
     b.strs(tag::ACL_DEVICE_PUBLISH, &a.device_publish)?;
     b.strs(tag::ACL_DEVICE_SUBSCRIBE, &a.device_subscribe)?;
@@ -523,6 +537,7 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     b.uint(tag::CTL_MAX_AGE, u64::from(cfg.control.max_message_age_s))?;
     build_plaintext(&mut b, &cfg.plaintext)?;
     build_websocket(&mut b, &cfg.websocket)?;
+    build_mqtt5(&mut b, &cfg.mqtt5)?;
     // ADR-256: "off" is the default and writes nothing (the blob keeps its
     // version); "auto" and "on" need format 5.
     b.variant(
@@ -631,6 +646,29 @@ fn build_websocket(b: &mut Builder, w: &crate::Websocket) -> Result<(), urmqtt_c
     b.strs(tag::WS_ACL_PUBLISH, &w.acl_publish)?;
     b.strs(tag::WS_ACL_SUBSCRIBE, &w.acl_subscribe)?;
     b.bool(tag::WS_RETAIN, w.retain)?;
+    Ok(())
+}
+
+/// The `[mqtt5]` section (ADR-273 rule 21). Values equal to their default
+/// are left out: a configuration that does not touch the section keeps its
+/// format version; any key set needs format 12.
+fn build_mqtt5(b: &mut Builder, m: &crate::Mqtt5) -> Result<(), urmqtt_cfg::CfgError> {
+    b.bool(tag::MQTT5_ENABLED, m.enabled)?;
+    b.uint(tag::MQTT5_RECEIVE_MAXIMUM, u64::from(m.receive_maximum))?;
+    b.uint(
+        tag::MQTT5_TOPIC_ALIAS_MAXIMUM,
+        u64::from(m.topic_alias_maximum),
+    )?;
+    b.uint(
+        tag::MQTT5_MAX_USER_PROPERTIES,
+        u64::from(m.max_user_properties),
+    )?;
+    b.uint(tag::MQTT5_MAX_KEEP_ALIVE, u64::from(m.max_keep_alive_s))?;
+    b.bool(tag::MQTT5_SHARED_SUBSCRIPTIONS, m.shared_subscriptions)?;
+    b.bool(
+        tag::MQTT5_SUBSCRIPTION_IDENTIFIERS,
+        m.subscription_identifiers,
+    )?;
     Ok(())
 }
 

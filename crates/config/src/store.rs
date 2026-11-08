@@ -20,7 +20,7 @@ use urmqtt_cfg::{CfgError, fields};
 
 use crate::{
     Acl, BuildConfig, Cidr, Console, Control, Cpu, DEV_KERNEL, Devices, DiscardMode, Entropy,
-    IdentityField, Ipv4Cidr, Limits, LogLevel, Memory, Network, NetworkMode, Observability,
+    IdentityField, Ipv4Cidr, Limits, LogLevel, Memory, Mqtt5, Network, NetworkMode, Observability,
     PlainAuth, PlainNetwork, PlainUser, Plaintext, Rate, Registry, SocketAddrV4, Storage,
     StorageMode, Time, Tls, Trust, VirtioGpuMode, Watchdog, WatchdogAction, Websocket, WsAuth,
 };
@@ -303,6 +303,9 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             max_handshakes_in_flight_per_ip: u32_of(tag::LIM_HANDSHAKES_IP),
             // 0: "single" (the default, and every blob before format 8).
             publisher_backpressure: b.variant(tag::LIM_PUBLISHER_BACKPRESSURE) == 0,
+            max_session_expiry_s: u32_of(tag::LIM_MAX_SESSION_EXPIRY),
+            default_session_expiry_s: u32_of(tag::LIM_DEFAULT_SESSION_EXPIRY),
+            max_message_expiry_s: u32_of(tag::LIM_MAX_MESSAGE_EXPIRY),
         },
         acl: Acl {
             device_publish,
@@ -436,6 +439,15 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             acl_publish: ws_acl_publish,
             acl_subscribe: ws_acl_subscribe,
             retain: b.bool(tag::WS_RETAIN),
+        },
+        mqtt5: Mqtt5 {
+            enabled: b.bool(tag::MQTT5_ENABLED),
+            receive_maximum: u32_of(tag::MQTT5_RECEIVE_MAXIMUM),
+            topic_alias_maximum: u32_of(tag::MQTT5_TOPIC_ALIAS_MAXIMUM),
+            max_user_properties: u32_of(tag::MQTT5_MAX_USER_PROPERTIES),
+            max_keep_alive_s: u32_of(tag::MQTT5_MAX_KEEP_ALIVE),
+            shared_subscriptions: b.bool(tag::MQTT5_SHARED_SUBSCRIPTIONS),
+            subscription_identifiers: b.bool(tag::MQTT5_SUBSCRIPTION_IDENTIFIERS),
         },
         console: Console {
             virtio_gpu: match b.variant(tag::CON_VIRTIO_GPU) {
@@ -770,6 +782,70 @@ mod tests {
         assert_eq!(blob.version(), 8);
         let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
         assert!(!build(&blob, arena).limits.publisher_backpressure);
+    }
+
+    /// ADR-273 rule 21: the `[mqtt5]` section and the expiry limits have the
+    /// documented defaults (the empty blob, and every blob before format 12)
+    /// and are decoded when set.
+    #[test]
+    fn the_mqtt5_section_and_expiry_limits_are_decoded() {
+        use urmqtt_cfg::build::Builder;
+        let m = CONFIG.mqtt5;
+        assert!(m.enabled && m.shared_subscriptions && m.subscription_identifiers);
+        assert_eq!(
+            (
+                m.receive_maximum,
+                m.topic_alias_maximum,
+                m.max_user_properties,
+                m.max_keep_alive_s
+            ),
+            (32, 10, 16, 0)
+        );
+        let l = CONFIG.limits;
+        assert_eq!(
+            (
+                l.max_session_expiry_s,
+                l.default_session_expiry_s,
+                l.max_message_expiry_s
+            ),
+            (2_592_000, 2_592_000, 0)
+        );
+        let mut b = Builder::new();
+        b.bool(tag::MQTT5_ENABLED, false).unwrap();
+        b.uint(tag::MQTT5_RECEIVE_MAXIMUM, 65_535).unwrap();
+        b.uint(tag::MQTT5_TOPIC_ALIAS_MAXIMUM, 0).unwrap();
+        b.uint(tag::MQTT5_MAX_USER_PROPERTIES, 1024).unwrap();
+        b.uint(tag::MQTT5_MAX_KEEP_ALIVE, 300).unwrap();
+        b.bool(tag::MQTT5_SHARED_SUBSCRIPTIONS, false).unwrap();
+        b.bool(tag::MQTT5_SUBSCRIPTION_IDENTIFIERS, false).unwrap();
+        b.uint(tag::LIM_MAX_SESSION_EXPIRY, u64::from(u32::MAX))
+            .unwrap();
+        b.uint(tag::LIM_DEFAULT_SESSION_EXPIRY, 86_400).unwrap();
+        b.uint(tag::LIM_MAX_MESSAGE_EXPIRY, 3600).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 12);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        let m = c.mqtt5;
+        assert!(!m.enabled && !m.shared_subscriptions && !m.subscription_identifiers);
+        assert_eq!(
+            (
+                m.receive_maximum,
+                m.topic_alias_maximum,
+                m.max_user_properties,
+                m.max_keep_alive_s
+            ),
+            (65_535, 0, 1024, 300)
+        );
+        assert_eq!(
+            (
+                c.limits.max_session_expiry_s,
+                c.limits.default_session_expiry_s,
+                c.limits.max_message_expiry_s
+            ),
+            (u32::MAX, 86_400, 3600)
+        );
     }
 
     /// NOW-19, ADR-264: `network.mtu` is unset by default (the empty blob,

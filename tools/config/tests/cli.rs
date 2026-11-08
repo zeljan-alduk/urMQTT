@@ -826,6 +826,78 @@ fn the_websocket_fixture_is_announced_and_its_hashes_are_not_shown() {
     );
 }
 
+/// ADR-273 rule 21: the `[mqtt5]` keys and the expiry limits pack into
+/// format 12, `show` lists them under their sections (the limits of format 12
+/// with the other limits, one `[limits]` heading), a release kernel accepts
+/// the blob, and a default session expiry above the maximum is refused naming
+/// both keys.
+#[test]
+fn the_mqtt5_fixture_packs_into_format_12() {
+    let out = tmp("mqtt5.blob");
+    let text = ok(&run(bin()
+        .arg("pack")
+        .arg(fixtures().join("mqtt5.toml"))
+        .arg("--out")
+        .arg(&out)));
+    assert!(!text.contains("warning"), "{text}");
+    let blob = std::fs::read(&out).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 12);
+    let shown = ok(&run(bin().arg("show").arg(&out)));
+    assert!(shown.contains("urmqtt-cfg version 12"), "{shown}");
+    assert!(
+        shown.contains(
+            "[limits]\n  max_packet_size = 8192\n  max_session_expiry_s = 86400\n  default_session_expiry_s = 3600\n  max_message_expiry_s = 3600\n"
+        ),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(
+            "[mqtt5]\n  receive_maximum = 8\n  topic_alias_maximum = 32\n  max_user_properties = 4\n  max_keep_alive_s = 300\n"
+        ),
+        "{shown}"
+    );
+    // Every key, with the defaults marked, each section once.
+    let all = ok(&run(bin().arg("show").arg(&out).arg("--all")));
+    assert!(all.contains("  enabled = true  (default)"), "{all}");
+    assert!(
+        all.contains("  subscription_identifiers = true  (default)"),
+        "{all}"
+    );
+    for heading in ["[limits]", "[network]", "[mqtt5]"] {
+        assert_eq!(all.matches(heading).count(), 1, "{heading}: {all}");
+    }
+    assert!(ok(&run(bin().arg("verify").arg(&out))).starts_with("ok: "));
+    // The 3.1.1 default above the maximum is refused, naming both keys.
+    let cfg = tmp("mqtt5-expiry.toml");
+    let fixture = std::fs::read_to_string(fixtures().join("mqtt5.toml")).unwrap();
+    std::fs::write(
+        &cfg,
+        fixture.replace(
+            "default_session_expiry_s = 3600",
+            "default_session_expiry_s = 86401",
+        ),
+    )
+    .unwrap();
+    let o = run(bin().arg("pack").arg(&cfg).arg("--out").arg(tmp("x5.blob")));
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("limits.default_session_expiry_s")
+            && err.contains("limits.max_session_expiry_s"),
+        "{err}"
+    );
+    // Out of range.
+    let cfg = tmp("mqtt5-range.toml");
+    std::fs::write(&cfg, "[mqtt5]\nreceive_maximum = 0\n").unwrap();
+    let o = run(bin().arg("pack").arg(&cfg).arg("--out").arg(tmp("x6.blob")));
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("mqtt5.receive_maximum"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
 #[test]
 fn hash_password_reads_the_password_from_stdin() {
     use std::io::Write;
@@ -1013,9 +1085,10 @@ fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
 
 /// The templates of the published releases, configured by this tool (and by the builder page, which runs the
 /// same code): v0.2.0's kernel reads configuration format 2, v0.2.1's 3, v0.3.0's 4, v0.4.0's and v0.4.1's 6,
-/// this one 9. A configuration that needs no newer format than the template's kernel reads is written into it as
+/// this one 12. A configuration that needs no newer format than the template's kernel reads is written into it as
 /// before; one that needs more (the virtio-gpu console: 5, a `[devices]` key: 6, `network.mtu`: 7,
-/// `limits.publisher_backpressure = "off"`: 8, a `[websocket]` key: 9) is refused with the reason, before a byte
+/// `limits.publisher_backpressure = "off"`: 8, a `[websocket]` key: 9, `devices.virtio_net_interrupt = "off"`: 11,
+/// an `[mqtt5]` key or an expiry limit: 12) is refused with the reason, before a byte
 /// of the template changes, instead of giving an image whose kernel would refuse it at boot.
 #[test]
 fn templates_of_earlier_releases_take_what_their_kernel_reads() {
@@ -1048,6 +1121,10 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
     b.variant(tag::DEV_NET_INTERRUPT, 1).unwrap();
     let net_irq = b.finish(false).unwrap();
     assert_eq!(header(&net_irq), 11);
+    let mut b = Builder::new();
+    b.uint(tag::MQTT5_RECEIVE_MAXIMUM, 8).unwrap();
+    let m5 = b.finish(false).unwrap();
+    assert_eq!(header(&m5), 12);
     for (release, reads) in [
         ("v0.2.0", 2u16),
         ("v0.2.1", 3),
@@ -1071,6 +1148,7 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             ("[websocket]", &ws, 9),
             ("limits.publisher_backpressure", &bp, 8),
             ("devices.virtio_net_interrupt", &net_irq, 11),
+            ("[mqtt5]", &m5, 12),
         ] {
             match image::configure_iso(&tpl, blob) {
                 Ok(_) => assert!(

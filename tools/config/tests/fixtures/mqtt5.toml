@@ -1,0 +1,21 @@
+# A lab configuration that tunes MQTT 5.0 and the expiry limits (ADR-273 rule
+# 21, configuration format 12): a smaller Receive Maximum, more topic aliases,
+# fewer user properties, a Server Keep Alive cap, one day of session expiry
+# (an hour for MQTT 3.1.1 persistent sessions) and a one-hour cap on message
+# expiry. Used by the tests of urmqtt-config.
+[network]
+mode = "static"
+address = "192.0.2.10/24"
+gateway = "192.0.2.1"
+
+[limits]
+max_packet_size = 8192
+max_session_expiry_s = 86400
+default_session_expiry_s = 3600
+max_message_expiry_s = 3600
+
+[mqtt5]
+receive_maximum = 8
+topic_alias_maximum = 32
+max_user_properties = 4
+max_keep_alive_s = 300

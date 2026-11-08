@@ -213,10 +213,17 @@ fn structural_attacks_fail_closed() {
     let mut over = record(tag::NET_MODE, &[0]);
     over[2] = 200;
     assert!(Blob::parse(&assemble(&over)).is_err());
-    // A version this code does not know (0, and one above the newest).
-    for unknown in [0u8, 12, 13] {
+    // A version this code does not know (0, 10 which no format ever used, and
+    // one above the newest).
+    for unknown in [0u8, 10, 13, 14] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
+    }
+    // The versions of the formats that came after 7, each its own feature
+    // (8 back-pressure, 9 WebSocket, 11 the receive interrupt, 12 MQTT 5.0).
+    for known in [8u8, 9, 11, 12] {
+        let v = with_version(&assemble(&ok), known);
+        assert_eq!(Blob::parse(&v).map(|b| b.version()), Ok(u16::from(known)));
     }
 }
 
@@ -236,7 +243,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 11));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 12));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -245,7 +252,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[11, 0],
+        &[12, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -1110,4 +1117,86 @@ fn websocket_rules() {
     let mut b = Builder::new();
     b.str(tag::WS_PATH, "/a/../b").unwrap();
     assert_eq!(b.finish(false).unwrap_err().key, "websocket.path");
+}
+
+/// ADR-273 rule 21: the `[mqtt5]` section and the expiry limits. Defaults
+/// write nothing and keep the base format; any of them set needs format 12;
+/// values outside their ranges are refused by the builder (and the blob
+/// parser); the default session expiry may not exceed the maximum.
+#[test]
+fn mqtt5_rules() {
+    // Untouched, or spelled out at the defaults: no record, the base format.
+    let mut d = Builder::new();
+    d.bool(tag::MQTT5_ENABLED, true).unwrap();
+    d.uint(tag::MQTT5_RECEIVE_MAXIMUM, 32).unwrap();
+    d.uint(tag::MQTT5_TOPIC_ALIAS_MAXIMUM, 10).unwrap();
+    d.uint(tag::MQTT5_MAX_USER_PROPERTIES, 16).unwrap();
+    d.uint(tag::MQTT5_MAX_KEEP_ALIVE, 0).unwrap();
+    d.bool(tag::MQTT5_SHARED_SUBSCRIPTIONS, true).unwrap();
+    d.bool(tag::MQTT5_SUBSCRIPTION_IDENTIFIERS, true).unwrap();
+    d.uint(tag::LIM_MAX_SESSION_EXPIRY, 2_592_000).unwrap();
+    d.uint(tag::LIM_DEFAULT_SESSION_EXPIRY, 2_592_000).unwrap();
+    d.uint(tag::LIM_MAX_MESSAGE_EXPIRY, 0).unwrap();
+    assert_eq!(d.finish(false).unwrap(), empty());
+    // Any one set: format 12.
+    type Set = fn(&mut Builder);
+    let sets: [Set; 10] = [
+        |b| b.bool(tag::MQTT5_ENABLED, false).unwrap(),
+        |b| b.uint(tag::MQTT5_RECEIVE_MAXIMUM, 1).unwrap(),
+        |b| b.uint(tag::MQTT5_TOPIC_ALIAS_MAXIMUM, 0).unwrap(),
+        |b| b.uint(tag::MQTT5_MAX_USER_PROPERTIES, 1024).unwrap(),
+        |b| b.uint(tag::MQTT5_MAX_KEEP_ALIVE, 600).unwrap(),
+        |b| b.bool(tag::MQTT5_SHARED_SUBSCRIPTIONS, false).unwrap(),
+        |b| b.bool(tag::MQTT5_SUBSCRIPTION_IDENTIFIERS, false).unwrap(),
+        |b| {
+            b.uint(tag::LIM_MAX_SESSION_EXPIRY, u64::from(u32::MAX))
+                .unwrap()
+        },
+        |b| b.uint(tag::LIM_DEFAULT_SESSION_EXPIRY, 3600).unwrap(),
+        |b| b.uint(tag::LIM_MAX_MESSAGE_EXPIRY, 86_400).unwrap(),
+    ];
+    for set in sets {
+        let mut b = Builder::new();
+        set(&mut b);
+        let blob = b.finish(false).unwrap();
+        let p = Blob::parse(&blob).unwrap();
+        assert_eq!(p.version(), 12);
+        assert_eq!(p.present().count(), 1);
+    }
+    // Ranges.
+    let mut b = Builder::new();
+    for (t, v) in [
+        (tag::MQTT5_RECEIVE_MAXIMUM, 0u64),
+        (tag::MQTT5_RECEIVE_MAXIMUM, 65_536),
+        (tag::MQTT5_TOPIC_ALIAS_MAXIMUM, 65_536),
+        (tag::MQTT5_MAX_USER_PROPERTIES, 1025),
+        (tag::MQTT5_MAX_KEEP_ALIVE, 65_536),
+        (tag::LIM_MAX_SESSION_EXPIRY, 1 << 32),
+        (tag::LIM_DEFAULT_SESSION_EXPIRY, 1 << 32),
+        (tag::LIM_MAX_MESSAGE_EXPIRY, 1 << 32),
+    ] {
+        assert!(b.uint(t, v).is_err(), "{t} = {v}");
+    }
+    // The default session expiry within the maximum.
+    let mut b = Builder::new();
+    b.uint(tag::LIM_MAX_SESSION_EXPIRY, 3600).unwrap();
+    assert_eq!(
+        b.finish(false).unwrap_err().key,
+        "limits.default_session_expiry_s"
+    );
+    b.uint(tag::LIM_DEFAULT_SESSION_EXPIRY, 3600).unwrap();
+    assert!(b.finish(false).is_ok());
+    b.uint(tag::LIM_DEFAULT_SESSION_EXPIRY, 0).unwrap();
+    assert!(b.finish(false).is_ok());
+    let mut b = Builder::new();
+    b.uint(tag::LIM_DEFAULT_SESSION_EXPIRY, u64::from(u32::MAX))
+        .unwrap();
+    assert!(b.finish(false).is_err());
+    b.uint(tag::LIM_MAX_SESSION_EXPIRY, u64::from(u32::MAX))
+        .unwrap();
+    assert!(b.finish(false).is_ok());
+    // A blob of an older format cannot hold them.
+    let rec = record(tag::MQTT5_RECEIVE_MAXIMUM, &64u32.to_le_bytes());
+    assert!(Blob::parse(&with_version(&assemble(&rec), 9)).is_err());
+    assert!(Blob::parse(&with_version(&assemble(&rec), 12)).is_ok());
 }

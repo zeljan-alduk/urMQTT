@@ -26,7 +26,7 @@ export const HIDDEN = new Set(['storage.encryption', 'storage.disk_key']);
 export const SECTION_ORDER = [
   'network', 'tls', 'trust', 'control', 'limits', 'acl', 'storage',
   'observability', 'time', 'watchdog', 'memory', 'registry', 'entropy', 'cpu',
-  'console', 'devices', 'plaintext', 'websocket',
+  'console', 'devices', 'plaintext', 'websocket', 'mqtt5',
 ];
 
 /** Examples shown as the placeholder of fields that have no default. */
@@ -425,6 +425,8 @@ export function isApplicable(f, state) {
     if (state.values['websocket.enabled'] !== true) return false;
     if (WEBSOCKET_PASSWORD_ONLY.has(f.id)) return (state.values['websocket.auth'] || 'mtls') === 'password';
   }
+  // MQTT 5.0 (ADR-273 rule 21): on by default; its other keys mean nothing while it is off.
+  if (f.section === 'mqtt5' && f.id !== 'mqtt5.enabled' && state.values['mqtt5.enabled'] === false) return false;
   return true;
 }
 

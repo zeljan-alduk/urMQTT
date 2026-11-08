@@ -654,6 +654,10 @@ fn websocket(b: &Blob<'_>, max_len: u64, max_levels: u64) -> Result<(), CfgError
     Ok(())
 }
 
+/// The refusal of a default session expiry above the maximum (ADR-273).
+pub const SESSION_EXPIRY_MSG: &str =
+    "must not exceed limits.max_session_expiry_s (the longest expiry any session is granted)";
+
 /// Checks the limits and returns `(max_topic_len, max_topic_levels)`.
 fn limits(b: &Blob<'_>) -> Result<(u64, u64), CfgError> {
     let packet = b.uint(tag::LIM_PACKET);
@@ -673,6 +677,11 @@ fn limits(b: &Blob<'_>) -> Result<(u64, u64), CfgError> {
             "limits.max_retained_bytes",
             "must be in 1..=an eighth of memory.kernel_heap_mb",
         ));
+    }
+    // ADR-273 rule 4: a 3.1.1 persistent session gets no more than a 5.0
+    // client could be granted.
+    if b.uint(tag::LIM_DEFAULT_SESSION_EXPIRY) > b.uint(tag::LIM_MAX_SESSION_EXPIRY) {
+        return Err(err("limits.default_session_expiry_s", SESSION_EXPIRY_MSG));
     }
     Ok((topic, b.uint(tag::LIM_TOPIC_LEVELS)))
 }

@@ -162,6 +162,15 @@ pub struct Limits {
     /// whose QoS 0 message has one subscriber, and that one is full (true,
     /// "single", the default), or always read and drop (false, "off").
     pub publisher_backpressure: bool,
+    /// The longest Session Expiry Interval granted, seconds, to 5.0 clients
+    /// and 3.1.1 persistent sessions alike; `u32::MAX`: never (ADR-273).
+    pub max_session_expiry_s: u32,
+    /// The Session Expiry Interval of a 3.1.1 persistent session
+    /// (clean_session 0), seconds; at most `max_session_expiry_s`.
+    pub default_session_expiry_s: u32,
+    /// The longest Message Expiry Interval a publisher may ask for, seconds;
+    /// 0: no cap (ADR-273 rule 5).
+    pub max_message_expiry_s: u32,
 }
 
 /// Topic filter patterns; `{id}` expands to the session's device id.
@@ -551,6 +560,28 @@ pub struct Websocket {
     pub retain: bool,
 }
 
+/// MQTT 5.0 (NEXT-3, ADR-273 rule 21). On by default.
+#[derive(Debug, Clone, Copy)]
+pub struct Mqtt5 {
+    /// Accept CONNECTs with protocol level 5 on every listener; false: CONNACK 0x84.
+    pub enabled: bool,
+    /// The announced Receive Maximum (1..=65535): QoS 2 publications a 5.0
+    /// client may have awaiting PUBREL; one more is DISCONNECT 0x93.
+    pub receive_maximum: u32,
+    /// The announced Topic Alias Maximum (0..=65535, client to server only);
+    /// 0 disables aliases.
+    pub topic_alias_maximum: u32,
+    /// User Properties per property block (0..=1024); more: refused (0x83).
+    pub max_user_properties: u32,
+    /// 0: the client's keep alive; otherwise the most a 5.0 client gets
+    /// (Server Keep Alive in CONNACK). 0..=65535.
+    pub max_keep_alive_s: u32,
+    /// Reserved for part 3 (rule 16): announced as 0 today whatever this says.
+    pub shared_subscriptions: bool,
+    /// Reserved for part 3 (rule 17): announced as 0 today whatever this says.
+    pub subscription_identifiers: bool,
+}
+
 /// The complete configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildConfig {
@@ -572,6 +603,7 @@ pub struct BuildConfig {
     pub trust: Trust,
     pub plaintext: Plaintext,
     pub websocket: Websocket,
+    pub mqtt5: Mqtt5,
     pub console: Console,
     pub devices: Devices,
 }

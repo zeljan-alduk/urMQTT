@@ -46,6 +46,9 @@ fn topic_filter_any_short_string() {
         max_handshakes_in_flight_per_core: 1,
         max_handshakes_in_flight_per_ip: 1,
         publisher_backpressure: crate::PublisherBackpressure::Single,
+        max_session_expiry_s: 0,
+        default_session_expiry_s: 0,
+        max_message_expiry_s: 0,
     };
     let ph = if kani::any() {
         Placeholder::Allowed

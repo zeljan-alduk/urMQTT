@@ -380,8 +380,23 @@ pub fn describe(blob_bytes: &[u8], all: bool) -> Result<String, String> {
         );
     }
     let _ = writeln!(o);
-    let mut section = "";
+    // Fields grouped by section, sections in the order of their first field:
+    // a field added to a section later (a higher tag, e.g. `network.mtu` or
+    // the expiry limits of format 12) is shown with its section.
+    let mut order: Vec<&str> = Vec::new();
     for f in fields::FIELDS {
+        let sec = f.key.split_once('.').map_or("", |(s, _)| s);
+        if !order.contains(&sec) {
+            order.push(sec);
+        }
+    }
+    let grouped = order.iter().flat_map(|s| {
+        fields::FIELDS
+            .iter()
+            .filter(move |f| f.key.split_once('.').map_or("", |(x, _)| x) == *s)
+    });
+    let mut section = "";
+    for f in grouped {
         if !f.stored {
             continue;
         }

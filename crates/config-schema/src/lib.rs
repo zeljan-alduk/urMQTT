@@ -112,6 +112,9 @@ struct RawConfig {
     /// Optional: without it there is no WebSocket listener (ADR-272).
     #[serde(default)]
     websocket: RawWebsocket,
+    /// Optional: without it MQTT 5.0 is on with the defaults (ADR-273).
+    #[serde(default)]
+    mqtt5: RawMqtt5,
     /// Optional: without it the console stays on the bootloader's framebuffer (ADR-256).
     #[serde(default)]
     console: RawConsole,
@@ -402,6 +405,49 @@ impl Default for RawWebsocket {
     }
 }
 
+/// The `[mqtt5]` section (ADR-273 rule 21).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawMqtt5 {
+    enabled: bool,
+    receive_maximum: u32,
+    topic_alias_maximum: u32,
+    max_user_properties: u32,
+    max_keep_alive_s: u32,
+    shared_subscriptions: bool,
+    subscription_identifiers: bool,
+}
+
+fn default_u32(key: &str) -> u32 {
+    u32::try_from(default_uint(key)).unwrap_or(u32::MAX)
+}
+
+impl Default for RawMqtt5 {
+    fn default() -> Self {
+        Self {
+            enabled: default_bool("mqtt5.enabled"),
+            receive_maximum: default_u32("mqtt5.receive_maximum"),
+            topic_alias_maximum: default_u32("mqtt5.topic_alias_maximum"),
+            max_user_properties: default_u32("mqtt5.max_user_properties"),
+            max_keep_alive_s: default_u32("mqtt5.max_keep_alive_s"),
+            shared_subscriptions: default_bool("mqtt5.shared_subscriptions"),
+            subscription_identifiers: default_bool("mqtt5.subscription_identifiers"),
+        }
+    }
+}
+
+fn default_max_session_expiry_s() -> u32 {
+    default_u32("limits.max_session_expiry_s")
+}
+
+fn default_default_session_expiry_s() -> u32 {
+    default_u32("limits.default_session_expiry_s")
+}
+
+fn default_max_message_expiry_s() -> u32 {
+    default_u32("limits.max_message_expiry_s")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawTrust {
@@ -516,6 +562,13 @@ struct RawLimits {
     handshakes_per_core_per_sec: u32,
     max_handshakes_in_flight_per_core: u32,
     max_handshakes_in_flight_per_ip: u32,
+    /// Optional (format 12, ADR-273): the defaults of the field table.
+    #[serde(default = "default_max_session_expiry_s")]
+    max_session_expiry_s: u32,
+    #[serde(default = "default_default_session_expiry_s")]
+    default_session_expiry_s: u32,
+    #[serde(default = "default_max_message_expiry_s")]
+    max_message_expiry_s: u32,
     /// NOW-13, ADR-269; optional ("single" when absent).
     #[serde(default)]
     publisher_backpressure: PublisherBackpressure,
@@ -811,6 +864,14 @@ pub struct Limits {
     pub max_handshakes_in_flight_per_ip: u32,
     /// NOW-13, ADR-269.
     pub publisher_backpressure: PublisherBackpressure,
+    /// The longest Session Expiry Interval granted, seconds; `u32::MAX`:
+    /// never (ADR-273 rule 4).
+    pub max_session_expiry_s: u32,
+    /// The Session Expiry Interval of a 3.1.1 persistent session, seconds;
+    /// at most `max_session_expiry_s`.
+    pub default_session_expiry_s: u32,
+    /// The longest Message Expiry Interval a publisher may ask for; 0: no cap.
+    pub max_message_expiry_s: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -903,8 +964,28 @@ pub struct Config {
     pub control: Control,
     pub plaintext: Plaintext,
     pub websocket: Websocket,
+    pub mqtt5: Mqtt5,
     pub console: Console,
     pub devices: Devices,
+}
+
+/// MQTT 5.0 (NEXT-3, ADR-273 rule 21). On by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mqtt5 {
+    /// Accept protocol level 5 on every listener; false: CONNACK 0x84.
+    pub enabled: bool,
+    /// The announced Receive Maximum, 1..=65535.
+    pub receive_maximum: u32,
+    /// The announced Topic Alias Maximum, 0..=65535; 0 disables aliases.
+    pub topic_alias_maximum: u32,
+    /// User Properties per property block, 0..=1024.
+    pub max_user_properties: u32,
+    /// 0: the client's keep alive; otherwise Server Keep Alive. 0..=65535.
+    pub max_keep_alive_s: u32,
+    /// Reserved for part 3 (rule 16): announced as 0 today.
+    pub shared_subscriptions: bool,
+    /// Reserved for part 3 (rule 17): announced as 0 today.
+    pub subscription_identifiers: bool,
 }
 
 /// MQTT over secure WebSocket (NEXT-5, ADR-272). Off by default; the other
@@ -1066,6 +1147,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         &control,
         &mut errors,
     );
+    let mqtt5 = validate_mqtt5(&raw.mqtt5, &mut errors);
 
     if !errors.is_empty() {
         return Err(errors);
@@ -1088,6 +1170,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         control,
         plaintext,
         websocket,
+        mqtt5,
         console: Console {
             virtio_gpu: raw.console.virtio_gpu,
         },
@@ -1617,6 +1700,32 @@ fn validate_websocket(
     }
 }
 
+/// The `[mqtt5]` section (ADR-273 rule 21): the ranges of the field table,
+/// with messages that name the key.
+fn validate_mqtt5(raw: &RawMqtt5, errors: &mut Vec<ConfigError>) -> Mqtt5 {
+    for (key, v) in [
+        ("mqtt5.receive_maximum", raw.receive_maximum),
+        ("mqtt5.topic_alias_maximum", raw.topic_alias_maximum),
+        ("mqtt5.max_user_properties", raw.max_user_properties),
+        ("mqtt5.max_keep_alive_s", raw.max_keep_alive_s),
+    ] {
+        if let Some(urmqtt_cfg::fields::Kind::UInt { min, max, .. }) = default_of(key)
+            && !(min..=max).contains(&u64::from(v))
+        {
+            errors.push(err(key, format!("must be in {min}..={max}")));
+        }
+    }
+    Mqtt5 {
+        enabled: raw.enabled,
+        receive_maximum: raw.receive_maximum,
+        topic_alias_maximum: raw.topic_alias_maximum,
+        max_user_properties: raw.max_user_properties,
+        max_keep_alive_s: raw.max_keep_alive_s,
+        shared_subscriptions: raw.shared_subscriptions,
+        subscription_identifiers: raw.subscription_identifiers,
+    }
+}
+
 fn validate_trust(raw: &RawTrust, errors: &mut Vec<ConfigError>) -> Trust {
     if raw.operational.is_empty() {
         errors.push(err("trust.operational", "at least one CA file is required"));
@@ -2032,6 +2141,18 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
             per_ms: 0,
         }
     });
+    // ADR-273 rule 4: a 3.1.1 persistent session gets no more than a 5.0
+    // client could be granted.
+    if raw.default_session_expiry_s > raw.max_session_expiry_s {
+        errors.push(err(
+            "limits.default_session_expiry_s",
+            format!(
+                "{} {}",
+                raw.default_session_expiry_s,
+                urmqtt_cfg::check::SESSION_EXPIRY_MSG
+            ),
+        ));
+    }
     Limits {
         max_connections_per_core: raw.max_connections_per_core,
         max_packet_size: raw.max_packet_size,
@@ -2047,6 +2168,9 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
         max_handshakes_in_flight_per_core: raw.max_handshakes_in_flight_per_core,
         max_handshakes_in_flight_per_ip: raw.max_handshakes_in_flight_per_ip,
         publisher_backpressure: raw.publisher_backpressure,
+        max_session_expiry_s: raw.max_session_expiry_s,
+        default_session_expiry_s: raw.default_session_expiry_s,
+        max_message_expiry_s: raw.max_message_expiry_s,
     }
 }
 
@@ -2483,6 +2607,8 @@ mod console_tests;
 mod devices_tests;
 #[cfg(test)]
 mod encryption_tests;
+#[cfg(test)]
+mod mqtt5_tests;
 #[cfg(test)]
 mod mtu_tests;
 #[cfg(test)]

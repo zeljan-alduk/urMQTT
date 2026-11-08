@@ -29,10 +29,14 @@ pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// `limits.publisher_backpressure` (ADR-269: "off" on a kernel that pauses publishers regardless would be
 /// ignored, so it is refused by the version); version 9 adds the `[websocket]` section (ADR-272: a kernel without
 /// the listener must refuse an image that asks for it); version 11 adds `devices.virtio_net_interrupt` (ADR-270;
-/// 10 is unused, 12 is reserved for MQTT 5). The records of 2 and 3 are the same: the packer writes
-/// the lowest version that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind
-/// still boots every image that does not use what came later.
-pub const FORMAT_VERSION: u16 = 11;
+/// 10 is unused); version 12 adds the `[mqtt5]` section and the session and message expiry limits (ADR-273 rule
+/// 21: a kernel that does not know them would ignore the operator's expiry policy). The records of 2 and 3 are the
+/// same: the packer writes the lowest version that can hold the configuration ([`BASE_VERSION`]), so a kernel of
+/// the older kind still boots every image that does not use what came later.
+pub const FORMAT_VERSION: u16 = 12;
+
+/// The one version between [`FORMAT_MIN`] and [`FORMAT_VERSION`] no format ever had.
+pub const UNUSED_VERSION: u16 = 10;
 /// The version a configuration is written in unless it needs a newer one.
 pub const BASE_VERSION: u16 = 2;
 /// The oldest format version it still reads. Blobs of the older versions stay
@@ -183,7 +187,9 @@ impl<'a> Blob<'a> {
             return Err(bad("not a urmqtt-cfg blob (bad magic)"));
         }
         let version = bytes.get(8..).and_then(le16).ok_or(bad("truncated"))?;
-        if !(FORMAT_MIN..=FORMAT_VERSION).contains(&version) {
+        // Version 10 was never used by any format: unknown, like one above
+        // the newest.
+        if !(FORMAT_MIN..=FORMAT_VERSION).contains(&version) || version == UNUSED_VERSION {
             return Err(bad("unsupported format version"));
         }
         if bytes.get(10..).and_then(le16) != Some(0) {

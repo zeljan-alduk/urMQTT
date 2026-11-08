@@ -292,6 +292,19 @@ pub mod tag {
     pub const WS_ACL_PUBLISH: u16 = 243;
     pub const WS_ACL_SUBSCRIBE: u16 = 244;
     pub const WS_RETAIN: u16 = 245;
+    // MQTT 5.0 (NEXT-3, ADR-273 rule 21): format version 12. The expiry
+    // limits belong to `[limits]` but came with 5.0 (tags are ascending, so
+    // they follow the older fields here).
+    pub const LIM_MAX_SESSION_EXPIRY: u16 = 250;
+    pub const LIM_DEFAULT_SESSION_EXPIRY: u16 = 251;
+    pub const LIM_MAX_MESSAGE_EXPIRY: u16 = 252;
+    pub const MQTT5_ENABLED: u16 = 253;
+    pub const MQTT5_RECEIVE_MAXIMUM: u16 = 254;
+    pub const MQTT5_TOPIC_ALIAS_MAXIMUM: u16 = 255;
+    pub const MQTT5_MAX_USER_PROPERTIES: u16 = 256;
+    pub const MQTT5_MAX_KEEP_ALIVE: u16 = 257;
+    pub const MQTT5_SHARED_SUBSCRIPTIONS: u16 = 258;
+    pub const MQTT5_SUBSCRIPTION_IDENTIFIERS: u16 = 259;
 }
 
 use tag as t;
@@ -319,6 +332,10 @@ pub const MAX_WS_ORIGIN_LEN: usize = 255;
 pub const MAX_WS_PATH_LEN: usize = 64;
 /// The upgrade deadline's range, seconds (at most the handshake timeout).
 pub const MAX_WS_UPGRADE_TIMEOUT_S: u64 = 10;
+/// Most User Properties in one MQTT 5.0 property block (`mqtt5.max_user_properties`).
+pub const MAX_MQTT5_USER_PROPERTIES: u64 = 1024;
+/// The default Session Expiry Interval cap, seconds (30 days, ADR-273 rule 4).
+pub const DEFAULT_SESSION_EXPIRY_S: u64 = 2_592_000;
 /// Whether the console drives a virtio-gpu device (ADR-256).
 pub const VIRTIO_GPU_MODES: &[&str] = &["off", "auto", "on"];
 /// Whether an optional virtio driver runs (`[devices]`, ADR-257).
@@ -1335,6 +1352,97 @@ pub static FIELDS: &[Field] = &[
             "auth = password: let clients publish retained messages. Off: such a message is delivered but not retained.",
         ),
         9,
+    ),
+    // MQTT 5.0 (NEXT-3, ADR-273 rule 21): format version 12.
+    since(
+        f(
+            t::LIM_MAX_SESSION_EXPIRY,
+            "limits.max_session_expiry_s",
+            uint(4, 0, U32, DEFAULT_SESSION_EXPIRY_S),
+            "The longest Session Expiry Interval granted, in seconds, to MQTT 5.0 clients and to 3.1.1 persistent sessions alike; a session offline longer is deleted with its subscriptions and queue. 4294967295 = never expire. Format 12.",
+        ),
+        12,
+    ),
+    since(
+        f(
+            t::LIM_DEFAULT_SESSION_EXPIRY,
+            "limits.default_session_expiry_s",
+            uint(4, 0, U32, DEFAULT_SESSION_EXPIRY_S),
+            "The Session Expiry Interval of an MQTT 3.1.1 persistent session (clean_session 0), in seconds; at most limits.max_session_expiry_s. Format 12.",
+        ),
+        12,
+    ),
+    since(
+        f(
+            t::LIM_MAX_MESSAGE_EXPIRY,
+            "limits.max_message_expiry_s",
+            uint(4, 0, U32, 0),
+            "The longest Message Expiry Interval a publisher may ask for, in seconds (retained and queued messages included); 0: no cap. Format 12.",
+        ),
+        12,
+    ),
+    since(
+        f(
+            t::MQTT5_ENABLED,
+            "mqtt5.enabled",
+            Kind::Bool(true),
+            "Accept MQTT 5.0 clients (CONNECT with protocol level 5) on every listener. Off: they are answered CONNACK 0x84 (unsupported protocol version) and closed; MQTT 3.1.1 is always accepted. Format 12.",
+        ),
+        12,
+    ),
+    since(
+        f(
+            t::MQTT5_RECEIVE_MAXIMUM,
+            "mqtt5.receive_maximum",
+            uint(4, 1, 65_535, 32),
+            "Receive Maximum announced to MQTT 5.0 clients: QoS 2 publications a client may have awaiting PUBREL; one more is DISCONNECT 0x93. Format 12.",
+        ),
+        12,
+    ),
+    since(
+        f(
+            t::MQTT5_TOPIC_ALIAS_MAXIMUM,
+            "mqtt5.topic_alias_maximum",
+            uint(4, 0, 65_535, 10),
+            "Topic Alias Maximum announced to MQTT 5.0 clients (client to broker only); 0 disables aliases. A connection that uses aliases may hold up to topic_alias_maximum × (limits.max_topic_len + 16) bytes. Format 12.",
+        ),
+        12,
+    ),
+    since(
+        f(
+            t::MQTT5_MAX_USER_PROPERTIES,
+            "mqtt5.max_user_properties",
+            uint(4, 0, MAX_MQTT5_USER_PROPERTIES, 16),
+            "User Properties allowed in one MQTT 5.0 property block; a packet with more is refused (0x83). Format 12.",
+        ),
+        12,
+    ),
+    since(
+        f(
+            t::MQTT5_MAX_KEEP_ALIVE,
+            "mqtt5.max_keep_alive_s",
+            uint(4, 0, 65_535, 0),
+            "0: an MQTT 5.0 client keeps the keep alive it asked for. Otherwise the longest keep alive, in seconds, a 5.0 client gets (announced as Server Keep Alive in CONNACK). Format 12.",
+        ),
+        12,
+    ),
+    since(
+        f(
+            t::MQTT5_SHARED_SUBSCRIPTIONS,
+            "mqtt5.shared_subscriptions",
+            Kind::Bool(true),
+            "Reserved for shared subscriptions ($share/group/filter, a later release): today the broker announces Shared Subscription Available 0 and answers a $share/ filter with SUBACK 0x9E whatever this says. Format 12.",
+        ),
+        12,
+    ),
+    since(
+        f(
+            t::MQTT5_SUBSCRIPTION_IDENTIFIERS,
+            "mqtt5.subscription_identifiers",
+            Kind::Bool(true),
+            "Reserved for subscription identifiers (a later release): today the broker announces Subscription Identifier Available 0 and answers a SUBSCRIBE that carries one with SUBACK 0xA1 whatever this says. Format 12.",
+        ),
+        12,
     ),
 ];
 

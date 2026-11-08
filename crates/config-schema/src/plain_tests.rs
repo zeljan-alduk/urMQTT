@@ -440,7 +440,7 @@ fn the_toml_path_and_the_blob_check_agree() {
 #[test]
 fn the_schema_describes_the_section() {
     let json = schema_json();
-    assert!(json.contains("\"format_version\":11,\"format_min\":1"));
+    assert!(json.contains("\"format_version\":12,\"format_min\":1"));
     for key in [
         "enabled",
         "port",
