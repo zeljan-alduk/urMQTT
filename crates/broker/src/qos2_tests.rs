@@ -593,9 +593,9 @@ fn qos2_crosses_shards_like_qos1() {
     pub2(&mut d1, &mut a, "devices/d1/t", b"x", 6, false);
     pub2(&mut d1, &mut a, "devices/d1/t", b"x", 6, true);
     // The home shard routes once; the other delivers with its own ids.
-    let routes: Vec<(Msg, QoS, bool)> = a.drain_routes().collect();
+    let routes: Vec<(Msg, QoS, bool, Option<ConnId>)> = a.drain_routes().collect();
     assert_eq!(routes.len(), 1);
-    for (m, q, r) in routes {
+    for (m, q, r, _) in routes {
         assert_eq!(q, QoS::ExactlyOnce);
         b.route_remote(&m, q, r);
     }

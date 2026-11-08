@@ -24,6 +24,7 @@ extern crate alloc;
 
 pub mod acl;
 mod compact;
+mod flow;
 pub mod sys;
 mod topics;
 
@@ -40,6 +41,7 @@ use urmqtt_mqtt::{
 };
 
 pub use acl::{Acl, Role};
+pub use flow::{FlowStats, PublisherBackpressure};
 pub use topics::{NodeId, Topics};
 
 pub use compact::Buf;
@@ -95,6 +97,9 @@ pub struct Config {
     /// The rules of password sessions on the WebSocket listener (ADR-272);
     /// `None`: this broker serves none.
     pub web: Option<PlainPolicy>,
+    /// Stop reading a publisher whose only recipient cannot keep up, instead
+    /// of dropping its QoS 0 messages (NOW-13, ADR-269; [`flow`]).
+    pub publisher_backpressure: PublisherBackpressure,
 }
 
 /// What a plaintext session may do and how much (P1, ADR-229, ADR-230). The
@@ -374,6 +379,12 @@ struct Conn {
     close: Option<CloseReason>,
     /// Listed in `ready` since the last `drain_ready`.
     ready: bool,
+    /// Publisher back-pressure state ([`flow`], ADR-269): 0 while input is
+    /// parsed as it arrives.
+    flow: u8,
+    /// Sessions on this shard the last PUBLISH went to (saturating; 255
+    /// before the first), for a pause asked by another shard (ADR-269).
+    last_local: u8,
 }
 
 #[derive(Default)]
@@ -596,7 +607,7 @@ pub struct Broker {
     scratch: Vec<(SessionId, QoS)>,
     ops: Vec<PersistOp>,
     telemetry: Vec<Msg>,
-    routes: Vec<(Msg, QoS, bool)>,
+    routes: Vec<(Msg, QoS, bool, Option<ConnId>)>,
     control: Vec<ControlMsg>,
     /// Retained messages held per identity, for identities homed here.
     retained_by: BTreeMap<Box<str>, u32>,
@@ -619,6 +630,11 @@ pub struct Broker {
     /// Counter for the client ids this shard gives plaintext clients that
     /// bring none (MQTT 3.1.1 3.1.3.1; mosquitto's tools send none).
     plain_seq: u64,
+    /// Publishers paused for their only recipient (ADR-269).
+    flow: flow::Flow,
+    /// While a routed message is delivered: a connection that may take it
+    /// beyond `max_outbound_bytes`, up to the given length (ADR-269).
+    flow_allow: Option<(ConnId, usize)>,
 }
 
 /// The scope level of the device ACL: the first level of a device
@@ -703,6 +719,8 @@ impl Broker {
             console: VecDeque::new(),
             sys_in: Vec::new(),
             plain_seq: 0,
+            flow: flow::Flow::default(),
+            flow_allow: None,
         }
     }
 
@@ -831,15 +849,41 @@ impl Broker {
 
     /// Takes the messages routed here since the last call, for the other
     /// shards: (message, publish QoS, retain).
-    pub fn drain_routes(&mut self) -> alloc::vec::Drain<'_, (Msg, QoS, bool)> {
+    /// The fourth field is the publishing connection (ADR-269: the shards
+    /// that deliver it say so, [`Broker::note_remote_recipients`]).
+    pub fn drain_routes(&mut self) -> alloc::vec::Drain<'_, (Msg, QoS, bool, Option<ConnId>)> {
         self.routes.drain(..)
     }
 
     /// Routes a message accepted by another shard to this shard's
     /// subscribers. A retained message updates this shard's replica; the
-    /// originating shard alone persists it.
-    pub fn route_remote(&mut self, msg: &Msg, qos: QoS, retain: bool) {
-        self.route_local(msg, qos, retain, false);
+    /// originating shard alone persists it. Returns how many sessions here
+    /// it was for.
+    pub fn route_remote(&mut self, msg: &Msg, qos: QoS, retain: bool) -> usize {
+        self.route_local(msg, qos, retain, false).n
+    }
+
+    /// [`Broker::route_remote`] for a message whose publisher is known:
+    /// connection `origin.1` on shard `origin.0`. If it went to one session
+    /// here and that one is full, the origin is asked to pause the publisher
+    /// ([`Broker::drain_remote_flow`], ADR-269).
+    pub fn route_remote_from(
+        &mut self,
+        msg: &Msg,
+        qos: QoS,
+        retain: bool,
+        origin: Option<(u16, ConnId)>,
+        now_ms: u64,
+    ) -> usize {
+        // A subscriber whose publisher was asked to pause takes what is
+        // already on its way beyond the usual buffer (ADR-269).
+        self.flow_allow = origin.and_then(|o| self.overshoot_for(o));
+        let to = self.route_local(msg, qos, retain, false);
+        self.flow_allow = None;
+        if let Some(o) = origin {
+            self.remote_single(o, to, now_ms);
+        }
+        to.n
     }
 
     /// Takes the accepted telemetry PUBLISHes since the last call (in order).
@@ -1143,6 +1187,8 @@ impl Broker {
             keepalive_ms: 0,
             close: None,
             ready: false,
+            flow: 0,
+            last_local: u8::MAX,
         };
         Some(self.conns.insert(conn))
     }
@@ -1198,8 +1244,26 @@ impl Broker {
         self.sessions.get_mut(s)
     }
 
-    /// Bytes received on `c`. Processes every complete packet.
+    /// Bytes received on `c`. Processes every complete packet, unless the
+    /// connection's input is held for back-pressure (ADR-269): then the bytes
+    /// wait for [`Broker::poll_flow`].
     pub fn input(&mut self, c: ConnId, data: &[u8], now_ms: u64) {
+        let Some(conn) = self.conn(c) else { return };
+        if conn.close.is_some() {
+            return;
+        }
+        conn.last_rx_ms = now_ms;
+        conn.inbuf.extend_from_slice(data);
+        if conn.flow != 0 {
+            self.held_input(c, now_ms);
+            return;
+        }
+        self.parse(c, now_ms, usize::MAX);
+    }
+
+    /// Processes the complete packets in `c`'s input buffer, at most about
+    /// `budget` bytes of them; stops early when `c` gets paused (ADR-269).
+    fn parse(&mut self, c: ConnId, now_ms: u64, budget: usize) -> flow::Stop {
         // A login connection (plaintext, P1; WebSocket password, ADR-272) has
         // a packet limit of its own. For every other connection this costs
         // the test of a box that is `None` once the connection is attached.
@@ -1216,37 +1280,40 @@ impl Broker {
             None => self.cfg.limits,
         };
         let limit = limits.max_packet_size as usize + INBUF_SLACK;
-        let Some(conn) = self.conn(c) else { return };
-        if conn.close.is_some() {
-            return;
-        }
-        conn.last_rx_ms = now_ms;
-        conn.inbuf.extend_from_slice(data);
-        loop {
-            let Some(conn) = self.conn(c) else { return };
+        let Some(conn) = self.conn(c) else {
+            return flow::Stop::Gone;
+        };
+        // Decoded in place, consumed once at the end: a held input (ADR-269)
+        // can be a megabyte of small packets.
+        let buf = conn.inbuf.take();
+        let mut off = 0usize;
+        let mut keep = true;
+        let stop = loop {
+            let Some(conn) = self.conns.get(c) else {
+                break flow::Stop::Gone;
+            };
             if conn.close.is_some() {
-                return;
+                break flow::Stop::Gone;
             }
-            let buf = conn.inbuf.take();
-            match decode(&buf, &limits) {
+            if conn.flow & flow::PAUSED != 0 {
+                break flow::Stop::Paused;
+            }
+            if off >= budget {
+                break flow::Stop::Budget;
+            }
+            let rest = buf.get(off..).unwrap_or(&[]);
+            match decode(rest, &limits) {
                 Ok((packet, used)) => {
                     self.handle(c, packet, now_ms);
-                    if let Some(conn) = self.conn(c) {
-                        let mut buf = buf;
-                        buf.drain(..used.min(buf.len()));
-                        // Idle connections keep no buffer (M15).
-                        conn.inbuf.set(buf);
-                    }
+                    off += used;
                 }
                 Err(CodecError::Incomplete(_)) => {
-                    let too_big = buf.len() > limit;
-                    if let Some(conn) = self.conn(c) {
-                        conn.inbuf.set(buf);
-                        if too_big {
-                            conn.close = Some(CloseReason::ProtocolError);
-                        }
+                    if rest.len() > limit
+                        && let Some(conn) = self.conn(c)
+                    {
+                        conn.close = Some(CloseReason::ProtocolError);
                     }
-                    return;
+                    break flow::Stop::Incomplete;
                 }
                 Err(CodecError::UnsupportedProtocolLevel(_)) => {
                     self.send(
@@ -1257,14 +1324,23 @@ impl Broker {
                         }),
                     );
                     self.mark_close(c, CloseReason::Unsupported);
-                    return;
+                    keep = false;
+                    break flow::Stop::Gone;
                 }
                 Err(_) => {
                     self.mark_close(c, CloseReason::ProtocolError);
-                    return;
+                    keep = false;
+                    break flow::Stop::Gone;
                 }
             }
+        };
+        if keep && let Some(conn) = self.conn(c) {
+            let mut buf = buf;
+            buf.drain(..off.min(buf.len()));
+            // Idle connections keep no buffer (M15).
+            conn.inbuf.set(buf);
         }
+        stop
     }
 
     /// Bytes waiting to be sent on `c`.
@@ -1294,6 +1370,7 @@ impl Broker {
         let Some(conn) = self.conns.remove(c) else {
             return;
         };
+        self.flow_forget(c);
         if conn.session.is_some() {
             self.online = self.online.saturating_sub(1);
         }
@@ -1301,7 +1378,7 @@ impl Broker {
             && let Some(w) = conn.extra.and_then(|e| e.will)
         {
             self.stats.wills_published += 1;
-            self.route(&w.msg, w.qos, w.retain.then_some(&*w.owner));
+            self.route(&w.msg, w.qos, w.retain.then_some(&*w.owner), None);
         }
         if let Some(sid) = conn.session {
             let (detach, clean) = match self.session(sid) {
@@ -1378,7 +1455,10 @@ impl Broker {
     /// connections, so it is kept off the per-packet path.
     pub fn tick(&mut self, now_ms: u64) {
         for (i, k) in self.conns.iter_mut() {
+            // A connection whose input is held for back-pressure is alive:
+            // its PINGREQ waits in the held bytes (ADR-269).
             if k.close.is_none()
+                && k.flow == 0
                 && k.keepalive_ms > 0
                 && now_ms.saturating_sub(k.last_rx_ms) > u64::from(k.keepalive_ms) * 3 / 2
             {
@@ -1850,18 +1930,25 @@ impl Broker {
         // A retained publish of a plaintext client is delivered but not
         // retained unless the configuration allows it (P1).
         let retain = p.retain && self.cfg.may_retain(role);
-        self.route(&msg, p.qos, retain.then_some(&*allowed));
+        let to = self.route(&msg, p.qos, retain.then_some(&*allowed), Some(c));
+        self.after_publish(c, to, now_ms);
     }
 
     /// Delivers `msg` to every matching subscriber; retains it for `owner`
     /// if asked and within the limits. Other shards retain it only if this
     /// one did.
-    fn route(&mut self, msg: &Msg, qos: QoS, retain_for: Option<&str>) {
+    fn route(
+        &mut self,
+        msg: &Msg,
+        qos: QoS,
+        retain_for: Option<&str>,
+        origin: Option<ConnId>,
+    ) -> flow::Recipients {
         let retain = retain_for.is_some_and(|o| self.retain(msg, qos, o));
         if self.cfg.fanout {
-            self.routes.push((msg.clone(), qos, retain));
+            self.routes.push((msg.clone(), qos, retain, origin));
         }
-        self.route_local(msg, qos, retain, true);
+        self.route_local(msg, qos, retain, true)
     }
 
     /// Retains `msg` for `owner` here, within the per-identity limit and
@@ -1912,7 +1999,7 @@ impl Broker {
         }
     }
 
-    fn route_local(&mut self, msg: &Msg, qos: QoS, retain: bool, origin: bool) {
+    fn route_local(&mut self, msg: &Msg, qos: QoS, retain: bool, origin: bool) -> flow::Recipients {
         if retain && !origin {
             // A replica of what another shard accepted (it checked the
             // limits; the shards hold the same set).
@@ -1928,7 +2015,15 @@ impl Broker {
         for &(sid, sub_qos) in &subs {
             self.deliver(sid, msg, qos.min(sub_qos), false);
         }
+        let to = flow::Recipients {
+            n: subs.len(),
+            one: match subs.as_slice() {
+                [(sid, sub_qos)] => Some((*sid, qos.min(*sub_qos))),
+                _ => None,
+            },
+        };
         self.scratch = subs;
+        to
     }
 
     /// The next packet id not in flight (the window is far below 65 535).
@@ -1973,9 +2068,14 @@ impl Broker {
         let Some(conn) = self.sessions.get(sid).map(|s| s.conn()) else {
             return;
         };
+        let allow = self.flow_allow;
         let room = conn
-            .and_then(|c| self.conns.get(c))
-            .is_some_and(|k| k.close.is_none() && k.outbuf.len() < max_out);
+            .and_then(|c| Some((c, self.conns.get(c)?)))
+            .is_some_and(|(c, k)| {
+                k.close.is_none()
+                    && (k.outbuf.len() < max_out
+                        || allow.is_some_and(|(a, cap)| a == c && k.outbuf.len() < cap))
+            });
         let Some(s) = self.session(sid) else { return };
         let action = match (qos, conn) {
             (QoS::AtMostOnce, Some(c)) if room => Action::Send0(c),

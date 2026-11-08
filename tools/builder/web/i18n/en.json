@@ -140,6 +140,8 @@
   "enum.devices.virtio_vsock.on": "when found, warn if missing",
   "enum.websocket.auth.mtls": "client certificate, as on the TLS port",
   "enum.websocket.auth.password": "user name and password (for browsers)",
+  "enum.limits.publisher_backpressure.single": "pause a publisher whose only subscriber is full",
+  "enum.limits.publisher_backpressure.off": "always read; drop for a slow subscriber",
   "err.int": "Must be a whole number.",
   "err.enum": "Not one of the allowed values.",
   "bar.title": "Summary",

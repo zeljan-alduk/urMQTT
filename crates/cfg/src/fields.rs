@@ -201,6 +201,8 @@ pub mod tag {
     pub const LIM_HANDSHAKES_PER_SEC: u16 = 50;
     pub const LIM_HANDSHAKES_CORE: u16 = 51;
     pub const LIM_HANDSHAKES_IP: u16 = 52;
+    // Publisher back-pressure (NOW-13, ADR-269): format version 8.
+    pub const LIM_PUBLISHER_BACKPRESSURE: u16 = 53;
     pub const ACL_DEVICE_PUBLISH: u16 = 60;
     pub const ACL_DEVICE_SUBSCRIBE: u16 = 61;
     pub const ACL_SERVICE_IDS: u16 = 62;
@@ -299,6 +301,8 @@ pub const ENCRYPTION_MODES: &[&str] = &["off", "aes-256-xts"];
 pub const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 pub const ENTROPY_FALLBACKS: &[&str] = &["jitter", "none"];
 pub const REGISTRY_MODES: &[&str] = &["open", "allowlist"];
+/// `limits.publisher_backpressure` (ADR-269); the first is the default.
+pub const BACKPRESSURE_MODES: &[&str] = &["single", "off"];
 pub const WATCHDOG_ACTIONS: &[&str] = &["log", "drop", "reset"];
 /// How a plaintext client proves who it is (P1).
 pub const PLAINTEXT_AUTH: &[&str] = &["password", "anonymous", "ip"];
@@ -541,6 +545,19 @@ pub static FIELDS: &[Field] = &[
         "limits.max_handshakes_in_flight_per_ip",
         uint(4, 1, U32, 32),
         "Of those, from one source address.",
+    ),
+    // limits, continued (NOW-13, ADR-269)
+    since(
+        f(
+            t::LIM_PUBLISHER_BACKPRESSURE,
+            "limits.publisher_backpressure",
+            Kind::Enum {
+                variants: BACKPRESSURE_MODES,
+                default: 0,
+            },
+            "What happens when a QoS 0 message has a single subscriber and that subscriber reads slower than it is published. single (the default): the broker stops reading the publisher until the subscriber has caught up (its TCP window closes, at most 0.5 s at a time), as Mosquitto does; with two or more subscribers it still drops for the slow one. off: the publisher is always read and the slow subscriber's messages are dropped (counted in $SYS/broker/messages/dropped/slow_subscriber). Format 8.",
+        ),
+        8,
     ),
     // acl
     f(

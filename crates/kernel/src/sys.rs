@@ -51,6 +51,11 @@ pub struct Shard {
     qos2_duplicates: AtomicU64,
     qos2_completed: AtomicU64,
     qos2_inbound_full: AtomicU64,
+    /// Publisher back-pressure (ADR-269): pauses, ms paused, ran out, held now.
+    bp_paused: AtomicU64,
+    bp_paused_ms: AtomicU64,
+    bp_timeouts: AtomicU64,
+    bp_holding: AtomicU64,
 }
 
 impl Shard {
@@ -70,6 +75,10 @@ impl Shard {
             qos2_duplicates: AtomicU64::new(0),
             qos2_completed: AtomicU64::new(0),
             qos2_inbound_full: AtomicU64::new(0),
+            bp_paused: AtomicU64::new(0),
+            bp_paused_ms: AtomicU64::new(0),
+            bp_timeouts: AtomicU64::new(0),
+            bp_holding: AtomicU64::new(0),
         }
     }
 }
@@ -101,6 +110,8 @@ pub struct Sys {
     /// queue full, publish rate; and when the last line was written.
     drops_seen: [u64; 4],
     drops_logged_ms: u64,
+    /// Publisher pauses (and ms paused, pauses that ran out) at the last line.
+    bp_seen: (u64, u64, u64),
 }
 
 impl Sys {
@@ -118,6 +129,7 @@ impl Sys {
             reboot_at_ms: None,
             drops_seen: [0; 4],
             drops_logged_ms: 0,
+            bp_seen: (0, 0, 0),
         }
     }
 
@@ -155,6 +167,7 @@ impl Sys {
     /// Writes this shard's counters for the readers.
     fn report(&mut self, broker: &Broker, now_ms: u64) {
         let st = broker.stats();
+        let fs = broker.flow_stats();
         // Loss under overload is deliberate and bounded, and never silent: at
         // most one line every 10 s per core, with the counts by cause.
         let now = [
@@ -163,22 +176,39 @@ impl Sys {
             st.dropped_queue_full,
             st.dropped_rate,
         ];
-        if now != self.drops_seen && now_ms.saturating_sub(self.drops_logged_ms) >= 10_000 {
+        let bp = (fs.pauses, fs.paused_ms, fs.timeouts);
+        if (now != self.drops_seen || bp != self.bp_seen)
+            && now_ms.saturating_sub(self.drops_logged_ms) >= 10_000
+        {
             let d = |i: usize| {
                 now.get(i)
                     .copied()
                     .unwrap_or(0)
                     .saturating_sub(self.drops_seen.get(i).copied().unwrap_or(0))
             };
-            urmqtt_log::warn!(
-                "mqtt: core {} did not deliver, since the last report: QoS 0 {} to a slow subscriber, {} to an offline one; QoS 1 {} (queue full); {} publish(es) over the rate limit",
-                self.me,
-                d(0),
-                d(1),
-                d(2),
-                d(3)
-            );
+            if now != self.drops_seen {
+                urmqtt_log::warn!(
+                    "mqtt: core {} did not deliver, since the last report: QoS 0 {} to a slow subscriber, {} to an offline one; QoS 1 {} (queue full); {} publish(es) over the rate limit",
+                    self.me,
+                    d(0),
+                    d(1),
+                    d(2),
+                    d(3)
+                );
+            }
+            if bp != self.bp_seen {
+                // ADR-269: the other side of "slow subscriber": publishers
+                // that were not read instead.
+                urmqtt_log::info!(
+                    "mqtt: core {} paused {} publisher(s) for a full single subscriber since the last report, {} ms in all, {} ran out (read and dropped again)",
+                    self.me,
+                    bp.0 - self.bp_seen.0,
+                    bp.1 - self.bp_seen.1,
+                    bp.2 - self.bp_seen.2
+                );
+            }
             self.drops_seen = now;
+            self.bp_seen = bp;
             self.drops_logged_ms = now_ms;
         }
         let Some(s) = SHARDS.get(self.me) else { return };
@@ -202,6 +232,10 @@ impl Sys {
         s.qos2_completed.store(st.qos2_completed, Ordering::Relaxed);
         s.qos2_inbound_full
             .store(st.qos2_inbound_full, Ordering::Relaxed);
+        s.bp_paused.store(fs.pauses, Ordering::Relaxed);
+        s.bp_paused_ms.store(fs.paused_ms, Ordering::Relaxed);
+        s.bp_timeouts.store(fs.timeouts, Ordering::Relaxed);
+        s.bp_holding.store(fs.holding, Ordering::Relaxed);
     }
 
     /// New kernel log lines to `$SYS/console/out`.
@@ -326,11 +360,19 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
     let mut retained = 0;
     let mut drops = urmqtt_broker::sys::Drops::default();
     let mut qos2 = urmqtt_broker::sys::Qos2::default();
+    let mut bp = urmqtt_broker::sys::Backpressure {
+        single: crate::backpressure::enabled(),
+        ..Default::default()
+    };
     for s in SHARDS.iter() {
         qos2.received += s.qos2_received.load(Ordering::Relaxed);
         qos2.duplicates += s.qos2_duplicates.load(Ordering::Relaxed);
         qos2.completed += s.qos2_completed.load(Ordering::Relaxed);
         qos2.inbound_full += s.qos2_inbound_full.load(Ordering::Relaxed);
+        bp.paused += s.bp_paused.load(Ordering::Relaxed);
+        bp.paused_ms += s.bp_paused_ms.load(Ordering::Relaxed);
+        bp.timeouts += s.bp_timeouts.load(Ordering::Relaxed);
+        bp.holding += s.bp_holding.load(Ordering::Relaxed);
         drops.slow_subscriber += s.dropped_backpressure.load(Ordering::Relaxed);
         drops.offline += s.dropped_offline.load(Ordering::Relaxed);
         drops.qos1_queue_full += s.dropped_queue_full.load(Ordering::Relaxed);
@@ -378,6 +420,7 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
         net_mtu: crate::netproto::mtu().0,
         drops,
         qos2,
+        backpressure: bp,
         handshakes: {
             let t = dataplane::handshake_totals();
             urmqtt_broker::sys::Handshakes {

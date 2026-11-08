@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use urmqtt_broker::{Acl, Broker, Config, PlainPolicy};
+use urmqtt_broker::{Acl, Broker, Config, PlainPolicy, PublisherBackpressure};
 use urmqtt_mqtt::Limits;
 
 pub const ACL: Acl = Acl {
@@ -59,6 +59,8 @@ pub fn cfg() -> Config {
             rate_period_ms: 1000,
             retain: true,
         }),
+        // ADR-269: publishers paused for a full single recipient.
+        publisher_backpressure: PublisherBackpressure::Single,
     }
 }
 
@@ -85,7 +87,10 @@ pub fn run(data: &[u8]) -> Broker {
                     b.closed(c, now);
                 }
             }
-            1 => b.tick(now),
+            1 => {
+                b.tick(now);
+                b.poll_flow(now);
+            }
             2 => b.shrink(),
             _ => {
                 let Some(entry) = conns.get_mut(slot) else {
@@ -114,16 +119,39 @@ pub fn run(data: &[u8]) -> Broker {
                 if let Some(c) = *entry {
                     b.input(c, body, now);
                     let n = b.output(c).len();
-                    assert!(n <= 64 * 1024, "output unbounded: {n}");
+                    // A subscriber waited for by another shard's publisher may
+                    // take 256 KiB beyond its 16 KiB buffer (ADR-269).
+                    assert!(n <= 320 * 1024, "output unbounded: {n}");
                     b.consumed(c, n);
                 }
             }
         }
         b.drain_persist().for_each(drop);
         let _ = b.drain_telemetry().count();
+        // A few routed messages come back as if from another shard, with their
+        // publisher (ADR-269: a full single subscriber asks for a pause).
+        let routes: Vec<_> = b.drain_routes().take(4).collect();
+        for (m, q, r, o) in routes {
+            let _ = b.route_remote_from(&m, q, r, o.map(|c| (1, c)), now);
+        }
         let _ = b.drain_routes().count();
         let mut ready = Vec::new();
         b.drain_ready(&mut ready);
+        let mut flow = Vec::new();
+        b.drain_flow(&mut flow);
+        // What other shards say about this shard's publishers (ADR-269):
+        // delivered there, full there, drained there.
+        if let Some(Some(c)) = conns.get(usize::from(chunk.len() as u8 & 3)) {
+            let shard = u16::from(chunk[0] >> 6);
+            match chunk.len() % 7 {
+                0 => b.note_remote_recipients(*c, shard, u32::from(chunk[0] & 3), now),
+                1 => b.remote_full(*c, shard, now),
+                2 => b.remote_drained(*c, shard, now),
+                _ => {}
+            }
+        }
+        let mut remote = Vec::new();
+        b.drain_remote_flow(&mut remote);
     }
     b
 }

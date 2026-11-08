@@ -11,6 +11,7 @@ runs at the time of writing are in `docs/PROGRESS.md` (entry H5).
 | ACL fuzzer | `make acl-fuzz ACL_FUZZ_SECS=600` | `fuzz` (scheduled) | Stateful, model-checked access rules of the broker |
 | ACL fuzzer, coverage-guided | `make fuzz T=broker_acl` | `fuzz` (scheduled), fuzz smoke | A second, independent ACL oracle under libFuzzer, with the QoS 2 exactly-once rules; also a proptest in `cargo test` |
 | QoS 2 reference model | `cargo test -p urmqtt-broker --test qos2_model` | `test` | The QoS 2 state machines (both directions, reconnects, restarts through the store) against a model of MQTT 3.1.1 4.3.3 and 4.4 |
+| Publisher back-pressure | `cargo test -p urmqtt-broker --lib flow_tests` | `test`, `miri` (three megabyte tests skipped) | ADR-269: pause and resume on one shard and across two wired shards, the deadlock cases (each other, a cycle of three, across shards), the bounds (500 ms, held input, overshoot), QoS 1 and 2 never paused for, a paused publisher's QoS 2 flows completing; the `broker_input` fuzz harness drives the pause, the remote notes and requests, and routes fed back with their publisher |
 | Coverage | `make coverage` (`scripts/fuzz-coverage.sh`) | none | Line coverage of fuzz targets |
 
 ## Miri

@@ -772,7 +772,13 @@ Delivered messages per second unless said otherwise; median (min-max) of three r
    whose single TCP stream cannot carry them (`messages/dropped/slow_subscriber` in the `.console` files); Mosquitto
    accepts 51k/s and delivers 51k/s because it stops reading the publisher instead (back-pressure). Both are legal for
    QoS 0; ours wins on delivered messages, theirs on "every accepted message arrives". The change that would make
-   urMQTT do the latter when the subscriber is the only consumer is the next NOW-13 item.
+   urMQTT do the latter when the subscriber is the only consumer is the next NOW-13 item. **Since ADR-269**
+   (`limits.publisher_backpressure = "single"`, the default) it does: a QoS 0 message whose only subscriber is full
+   pauses its publisher instead of being dropped, on the same shard or across shards; on the local rig accepted
+   equals delivered and `dropped/slow_subscriber` stays 0 on one flow (section 13.5). **Caveat on "delivered vs
+   accepted" in the tables above:** they were measured before ADR-269, so urMQTT's published/s there counts messages
+   it read and then dropped; with "single" a published/s figure is what was delivered, and the comparison with
+   Mosquitto's single-flow rows is like for like. The VPS rows have not been measured again.
 3. **On one ARM core, raw QoS 0 throughput belongs to Mosquitto, everything else to urMQTT.** Mosquitto's event loop
    does more QoS 0 work per core than ours: 58k against 44-47k delivered with 16 pairs, 49k against 12-22k on one 64 B
    flow, 6.1k against 2-3k on one 1 KiB flow. Our single core is spent on the publishers (accepting 183-187k/s that are
@@ -836,3 +842,72 @@ uv run --no-project --with matplotlib python3 scripts/x11-charts.py OUT "Contabo
 Contabo was switched between images with the Contabo API (custom images from the ISOs, `cntb reinstall instance`),
 netcup with the SCP API (ISO attach + power cycle; Debian via the image setup with `sshKeyIds`). Mosquitto measurements
 needed a Debian install on the measured VPS; the production image was restored on Contabo afterwards.
+
+### 13.5 Publisher back-pressure on the local rig (ADR-269, 2026-11-08)
+
+The same suite on the local WAN rig of section 7.3 (aarch64 guest under HVF on the Apple-silicon Mac, 12 ms RTT
+through `wan-bridge`, `urmqtt-loadgen` in the container), two runs per row, the images of
+`mkbench.sh --x11 --static 10.0.2.15/24 10.0.2.2` with `limits.publisher_backpressure` "single" (the default) and
+"off" (the behaviour before ADR-269; same kernel, so the difference is the policy alone). `--smp 2` is one data core
+and the database core, like netcup; `--smp 4` is three data cores, where a publisher and its subscriber are usually
+on different shards. Five other agents' builds and VMs shared the Mac, so the ranges are wide; each value below is
+"run 1 / run 2". Raw files and a summary: `perf-results/backpressure-2026-11-08/`.
+
+| one data core (`--smp 2`) | off: published / delivered | off: dropped | single: published / delivered | single: dropped |
+|---|---|---|---|---|
+| 1 flow, QoS 0, 64 B | 131k / 130k, 159k / 157k, 154k / 153k, 153k / 152k | 17-21k per run | 124k / 124k, 146k / 146k, 146k / 146k, 165k / 165k, 119k / 119k, 136k / 136k | 0 |
+| 1 flow, QoS 0, 1 KiB | 11.5k / 10.8k, 9.4k / 8.9k, 11.9k / 11.4k, 10.1k / 9.9k | 3-12k per run | 12.1k / 12.1k, 10.2k / 10.2k, 9.7k / 9.7k, 9.9k / 9.9k, 9.2k / 9.2k, 9.8k / 9.8k | 0 |
+| 1 flow, QoS 1, 64 B (delivered) | 966, 982 | | 978, 979, 946, 950 | |
+| 16 pairs, QoS 0, 64 B, flood | 236k / 235k, 261k / 261k | 26-34k | 256k / 256k, 269k / 268k, 251k / 251k, 262k / 262k | 0-112 |
+| 16 pairs, QoS 0, 1 KiB, flood | 21.0k / 20.9k, 21.6k / 21.5k | 3.0-3.5k | 21.3k / 21.3k, 20.5k / 20.5k | 0-28 |
+| 16 pairs, QoS 1, 64 B (delivered) | 16.6k, 16.7k | | 16.7k, 16.5k | |
+| 16 x 1000/s, QoS 0: p50 / p99 | 14 / 23 ms, 14 / 23 ms | | 14 / 20 ms, 14 / 20 ms | |
+| 16 x 1000/s, QoS 1: delivered; p50 / p99 | 16.0k; 15 / 24 ms, 15 / 22 ms | | 15.6k, 16.0k; 15 / 118 ms, 16 / 32 ms | |
+| fan-out 1 -> 100, flood (delivered) | 955k, 965k | 46-73 M | 910k, 906k | 56-75 M |
+| fan-out 1 -> 1000 at 10/s (delivered; p50) | 6.6k, 7.9k; 218, 138 ms | | 6.3k, 7.5k; 159, 142 ms | |
+
+| three data cores (`--smp 4`) | off: published / delivered | single, final build | single, same-shard pauses only (first build) |
+|---|---|---|---|
+| 1 flow, QoS 0, 64 B | 173k / 134k, 138k / 113k (160-500k dropped per run) | 146k / 146k, 143k / 143k (0 dropped) | 146k / 146k, 153k / 125k, 145k / 144k, 141k / 116k |
+| 1 flow, QoS 0, 1 KiB | 10.2k / 8.2k, 10.0k / 7.6k | 9.3k / 9.3k, 12.1k / 12.1k (0 dropped) | 9.4k / 7.4k, 10.4k / 8.1k, 10.4k / 8.2k, 11.0k / 8.7k |
+| 16 pairs, QoS 0, 64 B, flood | 224k / 224k, 229k / 229k | 235k / 235k, 248k / 247k | 231k / 231k, 244k / 244k |
+| 16 pairs, QoS 0, 1 KiB, flood | 20.7k / 20.6k, 20.4k / 20.3k | 19.7k / 19.7k, 19.9k / 19.9k | 21.4k / 21.3k, 19.7k / 19.6k |
+| 16 x 1000/s, QoS 0: p50 / p99 | 14 / 20 ms | 14 / 26 ms, 14 / 20 ms (cross-shard build) | |
+| fan-out 1 -> 100, flood (delivered) | 885k, 912k | 941k, 944k (no pause) | |
+| fan-out 1 -> 1000 at 10/s (delivered; p50) | 10.0k; 23, 24 ms | 10.0k; 23, 23 ms | |
+
+**After the rebase onto ADR-268** (the TCP sender's SACK loss detection changed under these numbers), one data
+core, three runs each (`post-off2.txt`, `post-on2.txt`):
+
+| one data core, after ADR-268 | off: published / delivered (dropped per run) | single: published / delivered (dropped) |
+|---|---|---|
+| 1 flow, QoS 0, 64 B | 145k / 144k, 152k / 151k, 148k / 146k (8-28k) | 126k / 126k, 116k / 116k, 145k / 145k (0) |
+| 1 flow, QoS 0, 1 KiB | 10.9k / 10.3k, 11.3k / 10.6k, 10.4k / 9.8k (9-14k) | 10.4k / 10.4k, 10.3k / 10.3k, 9.9k / 9.9k (0) |
+| 1 flow, QoS 1, 64 B (delivered) | 984, 974, 990 | 1005, 992, 989 |
+
+What it says:
+1. **On one flow nothing accepted is lost any more**: published equals delivered and `dropped/slow_subscriber` stays
+   0, on one data core and across shards (`--smp 4`, final build). Before, the same rig dropped 3-500k messages per
+   10 s run on one flow. The first build paused only when publisher and subscriber shared a shard; three data cores
+   then dropped as before (the "first build" column); the cross-shard request (ADR-269 point 2) alone still dropped
+   a quarter, because the routes on their way when the pause came overflowed the subscriber's 32 KiB buffer; the
+   256 KiB overshoot for a waited-for subscriber ended that.
+2. **On one fast data core 64 B delivers somewhat less, 1 KiB the same; on three cores both deliver more.** One
+   core: 64 B median 141k delivered (range 119-165k) with "single" against 152k (130-157k) with "off" before ADR-268,
+   126k (116-145k) against 146k (144-151k) after it: about 10 % less, the cost of many short pauses on a subscriber
+   that was keeping up with 85-95 % of the flood; 1 KiB 9.9k (9.2-12.1k) against
+   10.4k (8.9-11.4k), after ADR-268 10.3k against 10.3k. On this rig the subscriber's stream is not starved (the Mac's core is fast; "off" drops 1-14 %),
+   so there is little to win. Three cores: 64 B 143-146k against 113-134k, 1 KiB 9.3-12.1k against 7.6-8.2k. Where the
+   subscriber *is* starved by the publisher (netcup, section 13.2: 85-90 % dropped), the cycles no longer spent on
+   reading and dropping are expected to go to the subscriber; that is the VPS measurement still to do.
+3. **No regression elsewhere that the rig can see:** 16 pairs, QoS 1, the latency sweep, fan-out (never paused, as
+   designed) are within the run-to-run range (fan-out 1 -> 100 delivered 5 % less with "single" on one core and 5 %
+   more on three, with no pause in either: the machine, not the code). One QoS 1 run at 16 x 1000/s had a 118 ms p99 with "single" (the other
+   32 ms; "off" 22-24 ms); QoS 1 is never paused for, so it is attributed to the shared machine, not checked further.
+4. **Latency on a flooded single flow rises** (p50 51-318 ms against 72-157 ms): the messages wait in the
+   publisher's socket instead of being dropped, as with Mosquitto. At a rate the subscriber can take nothing pauses
+   (0 pauses in every steady-rate row).
+5. The pauses are short: 80 to 6,000 per 10 s flood, a fraction of a millisecond each on average
+   (`paused_ms` / `paused`), none ran out (`timeouts` 0 everywhere); most end before the TCP window update would be
+   worth sending (it is sent only when the window grows by an MSS), so the held input in the broker does the pacing
+   and TCP's window takes over only for longer stalls.

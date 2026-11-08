@@ -222,6 +222,12 @@ release signed with it is v0.4.2.**
   retransmission timer; the rig (one data core, 1 % loss) reproduces it and the fix brings v0.4.2's numbers back.
   Open: a VPS run to confirm on netcup, and the 1 s TCP-connect tail of the handshake run there (SYN-ACKs not
   answered; not seen on the rig, PERFORMANCE §13.3 point 4).
+- Status (2026-11-08, branch `now13b-backpressure`): publisher back-pressure is in (ADR-269,
+  `limits.publisher_backpressure`, default "single", configuration format 8): a QoS 0 message whose only subscriber
+  is full pauses its publisher's TCP stream (500 ms at most) instead of being dropped; fan-out keeps dropping. Rig
+  numbers only (PERFORMANCE §13.5); a single subscriber on another shard asks the publisher's shard for the pause.
+  Measured before and after main's ADR-268 (PERFORMANCE §13.5). Open: the VPS pair (netcup's one ARM core is where
+  it should matter), the receive interrupt, the per-CPU heap cache.
 
 **NOW-14. A limit on established TLS connections per source address.** S.
 - What: a per-address cap for established connections, like `plaintext.max_connections_per_ip` already has.

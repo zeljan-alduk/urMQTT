@@ -489,6 +489,31 @@ struct RawLimits {
     handshakes_per_core_per_sec: u32,
     max_handshakes_in_flight_per_core: u32,
     max_handshakes_in_flight_per_ip: u32,
+    /// NOW-13, ADR-269; optional ("single" when absent).
+    #[serde(default)]
+    publisher_backpressure: PublisherBackpressure,
+}
+
+/// `limits.publisher_backpressure` (NOW-13, ADR-269).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublisherBackpressure {
+    /// Pause a publisher whose QoS 0 message has one subscriber, and that one
+    /// cannot keep up (the default).
+    #[default]
+    Single,
+    /// Always read the publisher; QoS 0 to a full subscriber is dropped.
+    Off,
+}
+
+impl PublisherBackpressure {
+    /// The blob's variant (an index into `urmqtt_cfg::fields::BACKPRESSURE_MODES`).
+    pub const fn variant(self) -> u8 {
+        match self {
+            Self::Single => 0,
+            Self::Off => 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -757,6 +782,8 @@ pub struct Limits {
     pub handshakes_per_core_per_sec: u32,
     pub max_handshakes_in_flight_per_core: u32,
     pub max_handshakes_in_flight_per_ip: u32,
+    /// NOW-13, ADR-269.
+    pub publisher_backpressure: PublisherBackpressure,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1992,6 +2019,7 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
         handshakes_per_core_per_sec: raw.handshakes_per_core_per_sec,
         max_handshakes_in_flight_per_core: raw.max_handshakes_in_flight_per_core,
         max_handshakes_in_flight_per_ip: raw.max_handshakes_in_flight_per_ip,
+        publisher_backpressure: raw.publisher_backpressure,
     }
 }
 
@@ -2420,6 +2448,8 @@ pub fn check_expiry(pem: &[u8], now_unix: u64, min_days: u32) -> Result<u64, Str
 
 pub mod pack;
 
+#[cfg(test)]
+mod backpressure_tests;
 #[cfg(test)]
 mod console_tests;
 #[cfg(test)]

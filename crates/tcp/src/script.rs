@@ -8,6 +8,7 @@
 //! app send 100                   the application sends 100 bytes
 //! app close                      the application closes
 //! app mtu 1460                   the link MTU changed (DHCP option 26)
+//! app window 0 | default         the receive space (back-pressure, ADR-269)
 //! expect conns=1 data=100 peer_closed closed=reset
 //! ```
 //!
@@ -340,6 +341,8 @@ impl Runner {
             ["mtu", n] => self
                 .s
                 .set_mss(mss_for_mtu(n.parse().map_err(|e| format!("{e}"))?)),
+            // The application's back-pressure (ADR-269): the default window again.
+            ["window", "default"] => self.s.reset_recv_space(c),
             ["window", n] => self
                 .s
                 .set_recv_space(c, n.parse().map_err(|e| format!("{e}"))?),

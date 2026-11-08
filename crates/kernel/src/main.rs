@@ -21,6 +21,8 @@ use urmqtt_ws as _;
 mod cmdline;
 
 #[cfg(target_os = "none")]
+mod backpressure;
+#[cfg(target_os = "none")]
 mod boot;
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]
 mod boot_aarch64;

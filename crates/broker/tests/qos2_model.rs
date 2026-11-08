@@ -57,6 +57,7 @@ fn cfg() -> Config {
         control_ids: &[],
         plain: None,
         web: None,
+        publisher_backpressure: urmqtt_broker::PublisherBackpressure::Single,
     }
 }
 

@@ -421,3 +421,30 @@ app send 1500
 ",
     );
 }
+
+/// Back-pressure on a publisher (ADR-269): the application closes the
+/// receive space. What was promised still arrives and is taken (a window is
+/// never retracted), the window then reads 0 and a segment beyond it is not
+/// taken; "default" opens the whole window again in one update, never in
+/// small steps (no silly-window syndrome).
+#[test]
+fn the_application_closes_and_reopens_the_window() {
+    with_open(
+        "
+app window 0
+> nothing
+< P. seq=1 ack=1 len=1000
+> . ack=1001 win=64535
+< P. seq=1001 ack=1 len=64535
+> . ack=65536 win=0
+< P. seq=65536 ack=1 len=100     # beyond the closed window: not taken
+> . ack=65536 win=0
+expect data=65535
+app window default
+> . ack=65536 win=65535          # one update, the whole window
+< P. seq=65536 ack=1 len=100
+> . ack=65636 win=65535
+expect data=65635
+",
+    );
+}

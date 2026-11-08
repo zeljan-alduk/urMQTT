@@ -38,6 +38,7 @@ fn cfg() -> Config {
         control_ids: &["operator"],
         plain: None,
         web: None,
+        publisher_backpressure: PublisherBackpressure::Single,
     }
 }
 
@@ -1020,7 +1021,7 @@ fn shards_fan_out_publishes_and_retained_messages() {
         0,
     );
     d1.publish(&mut a, "devices/d1/fw", b"9", QoS::AtLeastOnce, true, 0);
-    for (m, q, r) in a.drain_routes().collect::<Vec<_>>() {
+    for (m, q, r, _) in a.drain_routes().collect::<Vec<_>>() {
         b.route_remote(&m, q, r);
     }
     assert_eq!(
@@ -1608,7 +1609,7 @@ fn refused_retained_messages_are_not_replicated() {
             0,
         );
     }
-    for (m, q, r) in a.drain_routes().collect::<Vec<_>>() {
+    for (m, q, r, _) in a.drain_routes().collect::<Vec<_>>() {
         b.route_remote(&m, q, r);
     }
     assert_eq!((a.stats().retained, b.stats().retained), (4, 4));
@@ -2537,5 +2538,7 @@ fn a_web_session_has_its_own_rate_and_no_retain() {
     );
 }
 
+#[path = "flow_tests.rs"]
+mod flow_tests;
 #[path = "qos2_tests.rs"]
 mod qos2;

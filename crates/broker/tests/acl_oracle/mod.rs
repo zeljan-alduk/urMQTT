@@ -47,8 +47,8 @@ use std::sync::Arc;
 use std::collections::BTreeMap;
 
 use urmqtt_broker::{
-    Acl, Broker, CONTROL_TOPIC, CloseReason, Config, ConnId, MIN_QOS2_IDS, MsgInner, Qos2Id, Stats,
-    StoredMsg,
+    Acl, Broker, CONTROL_TOPIC, CloseReason, Config, ConnId, MIN_QOS2_IDS, MsgInner,
+    PublisherBackpressure, Qos2Id, Stats, StoredMsg,
 };
 use urmqtt_mqtt::{
     Connect, Error, Limits, Packet, Publish, QoS, Subscribe, SubscribeTopics, Unsubscribe,
@@ -115,6 +115,7 @@ pub fn config() -> Config {
         // No plaintext listener: every connection here has a TLS identity.
         plain: None,
         web: None,
+        publisher_backpressure: PublisherBackpressure::Single,
     }
 }
 
@@ -1020,6 +1021,7 @@ impl Harness {
             Op::Tick { ms } => {
                 self.now += ms;
                 self.b.tick(self.now);
+                self.b.poll_flow(self.now);
                 if *ms == 0 {
                     self.b.shrink();
                 }

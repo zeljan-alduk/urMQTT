@@ -45,6 +45,9 @@ publish_rate_per_device = "5/s"
 handshakes_per_core_per_sec = 20
 max_handshakes_in_flight_per_core = 16
 max_handshakes_in_flight_per_ip = 4
+# publisher_backpressure = "single" # "single" (default): a publisher whose QoS 0 message has one subscriber
+#                             # that cannot keep up is paused (TCP window closed, 0.5 s at most) instead of
+#                             # its messages being dropped; "off": always read and drop. Format 8 for "off".
 
 [acl]
 # Each demo certificate (CN = its id) sees only demo/<its id>/#. No service, no operator, no control.

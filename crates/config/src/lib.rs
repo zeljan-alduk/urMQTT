@@ -158,6 +158,10 @@ pub struct Limits {
     /// Of those, from one source address (an unauthenticated peer cannot
     /// take every slot; devices behind one NAT share it).
     pub max_handshakes_in_flight_per_ip: u32,
+    /// `limits.publisher_backpressure` (NOW-13, ADR-269): pause a publisher
+    /// whose QoS 0 message has one subscriber, and that one is full (true,
+    /// "single", the default), or always read and drop (false, "off").
+    pub publisher_backpressure: bool,
 }
 
 /// Topic filter patterns; `{id}` expands to the session's device id.

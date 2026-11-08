@@ -281,6 +281,46 @@ fn format_2_is_written_and_format_1_is_still_read() {
     assert_eq!(d.finish(false).unwrap(), e);
 }
 
+/// NOW-13, ADR-269: `limits.publisher_backpressure` came with format 8.
+/// "single" (the default) writes nothing, so the blob keeps its version and
+/// boots on an older kernel; "off" needs version 8 (a version 7 blob holding
+/// it is refused).
+#[test]
+fn publisher_backpressure_needs_format_8_and_single_writes_nothing() {
+    let f = crate::fields::by_key("limits.publisher_backpressure").unwrap();
+    assert_eq!(
+        (f.tag, f.since, f.dev_only),
+        (tag::LIM_PUBLISHER_BACKPRESSURE, 8, false)
+    );
+    let mut single = Builder::new();
+    single.variant(tag::LIM_PUBLISHER_BACKPRESSURE, 0).unwrap();
+    assert_eq!(single.lowest_version(), 2);
+    assert_eq!(single.finish(false).unwrap(), empty());
+    assert_eq!(
+        Blob::parse(&empty())
+            .unwrap()
+            .variant(tag::LIM_PUBLISHER_BACKPRESSURE),
+        0
+    );
+    let mut off = Builder::new();
+    off.variant(tag::LIM_PUBLISHER_BACKPRESSURE, 1).unwrap();
+    assert_eq!(off.lowest_version(), 8);
+    assert!(off.finish_as(false, 7).is_err(), "version 7 cannot hold it");
+    let blob = off.finish(false).unwrap();
+    let p = Blob::parse(&blob).unwrap();
+    assert_eq!(
+        (p.version(), p.variant(tag::LIM_PUBLISHER_BACKPRESSURE)),
+        (8, 1)
+    );
+    check::check(&p, false).unwrap();
+    assert!(Blob::parse(&with_version(&blob, 7)).is_err());
+    assert!(
+        Builder::new()
+            .variant(tag::LIM_PUBLISHER_BACKPRESSURE, 2)
+            .is_err()
+    );
+}
+
 /// NOW-19, ADR-264: `network.mtu` came with format 7. 0 (the default: from
 /// DHCP, else 1500) writes nothing, so the blob keeps its version and boots
 /// on an older kernel; a value needs version 7 (a version 6 blob holding it

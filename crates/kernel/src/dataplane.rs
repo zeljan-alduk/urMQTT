@@ -99,8 +99,23 @@ pub enum CoreMsg {
     Output { tconn: Tconn, data: Vec<u8> },
     /// Home → transport: close after the pending output.
     Close { tconn: Tconn },
-    /// Shard → shard: a message routed at its origin.
-    Route { msg: Msg, qos: QoS, retain: bool },
+    /// Shard → shard: a message routed at its origin. `origin`: the
+    /// publishing broker connection there (`u32::MAX`: none, e.g. a will).
+    Route {
+        msg: Msg,
+        qos: QoS,
+        retain: bool,
+        origin: u32,
+    },
+    /// Shard → origin shard: messages of publisher `conn` were delivered here
+    /// lately, to `n` sessions: consumers the origin cannot see (ADR-269).
+    Seen { conn: u32, n: u32 },
+    /// Shard → origin shard: pause (`full`) or resume publisher `conn`, whose
+    /// only subscriber is here and full / drained (ADR-269).
+    Hold { conn: u32, full: bool },
+    /// Home → transport: close (`true`) or open again the TCP receive window
+    /// of a relayed publisher (back-pressure, ADR-269).
+    Flow { tconn: Tconn, closed: bool },
     /// Core 0 → all: the interface address or MTU changed (DHCP).
     IpConfig {
         addr: Option<([u8; 4], u8)>,

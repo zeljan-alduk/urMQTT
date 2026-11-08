@@ -245,6 +245,9 @@ pub struct MqttService {
     plain: Option<Box<crate::plain::PlainState>>,
     /// The WebSocket listener (ADR-272); `None` unless switched on.
     ws: Option<Box<crate::websocket::WsState>>,
+    /// Publisher back-pressure: window changes and notes to other shards
+    /// (ADR-269).
+    flow: crate::backpressure::FlowLink,
 }
 
 /// This core's telemetry ring to the DB core.
@@ -397,6 +400,11 @@ pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
         control_ids: CONFIG.control.service_ids,
         plain: crate::plain::broker_policy(),
         web: crate::websocket::broker_policy(),
+        publisher_backpressure: if CONFIG.limits.publisher_backpressure {
+            urmqtt_broker::PublisherBackpressure::Single
+        } else {
+            urmqtt_broker::PublisherBackpressure::Off
+        },
     }
 }
 
@@ -542,6 +550,15 @@ impl MqttService {
             }
             crate::plain::announce(dataplane::workers(n).len());
             crate::websocket::announce(dataplane::workers(n).len());
+            // ADR-269: what a slow single subscriber does to its publisher.
+            info!(
+                "mqtt: publisher back-pressure {}",
+                if CONFIG.limits.publisher_backpressure {
+                    "single (a publisher whose QoS 0 message has one full subscriber is paused, 500 ms at most)"
+                } else {
+                    "off (QoS 0 to a full subscriber is dropped)"
+                }
+            );
         }
         let mut broker = Broker::new(broker_config(MAX_CONNS * n, n > 1));
         let mut homed = 0;
@@ -647,6 +664,7 @@ impl MqttService {
             sys: crate::sys::Sys::new(me, n),
             plain: crate::plain::PlainState::new(),
             ws: crate::websocket::WsState::new(|| tls_server_with(false)),
+            flow: crate::backpressure::FlowLink::new(),
         }
     }
 
@@ -1509,7 +1527,36 @@ impl MqttService {
                     self.blocked.push(c);
                 }
             }
-            CoreMsg::Route { msg, qos, retain } => self.broker.route_remote(&msg, qos, retain),
+            CoreMsg::Route {
+                msg,
+                qos,
+                retain,
+                origin,
+            } => {
+                let from =
+                    (origin != crate::backpressure::NO_ORIGIN).then_some((peer as u16, origin));
+                let n = self
+                    .broker
+                    .route_remote_from(&msg, qos, retain, from, now_ms);
+                self.flow.delivered(peer, origin, n, link, now_ms);
+            }
+            // ---- publisher back-pressure (ADR-269) ----
+            CoreMsg::Seen { conn, n } => {
+                self.broker
+                    .note_remote_recipients(conn, peer as u16, n, now_ms)
+            }
+            CoreMsg::Hold { conn, full } => {
+                if full {
+                    self.broker.remote_full(conn, peer as u16, now_ms);
+                } else {
+                    self.broker.remote_drained(conn, peer as u16, now_ms);
+                }
+            }
+            CoreMsg::Flow { tconn, closed } => {
+                if let Some(c) = self.conn_of(tconn) {
+                    self.flow.window(c, tconn, closed);
+                }
+            }
             CoreMsg::IpConfig { .. } => {}
         }
     }
@@ -1549,6 +1596,7 @@ impl MqttService {
     fn shrink_inner(&mut self, tcp: &mut TcpStack) {
         tcp.shrink();
         self.broker.shrink();
+        self.flow.shrink();
         self.conns.0.shrink();
         self.by_broker.0.shrink();
         self.flights.0.shrink();
@@ -1603,6 +1651,8 @@ impl MqttService {
         watchdog::step(watchdog::Step::Sys);
         self.sys.poll(&mut self.broker, now_ms);
         watchdog::step(watchdog::Step::Ready);
+        // Publishers whose pause ended: a slice of their held input (ADR-269).
+        self.broker.poll_flow(now_ms);
         let mut ready = core::mem::take(&mut self.ready);
         self.broker.drain_ready(&mut ready);
         for b in ready.drain(..) {
@@ -1623,6 +1673,7 @@ impl MqttService {
         let mut again = core::mem::take(&mut self.ready);
         self.ready = ready;
         self.ready.append(&mut again);
+        self.flow_windows(tcp, link);
         // Hand pending bytes to TCP; finish closes.
         watchdog::step(watchdog::Step::Tcp);
         let mut blocked = core::mem::take(&mut self.blocked);
@@ -1637,7 +1688,7 @@ impl MqttService {
         }
         self.blocked.append(&mut still);
         watchdog::step(watchdog::Step::Routes);
-        for (msg, qos, retain) in self.broker.drain_routes() {
+        for (msg, qos, retain, origin) in self.broker.drain_routes() {
             for peer in dataplane::workers(self.n).filter(|&p| p != self.me) {
                 if qos == QoS::AtMostOnce && link.backlog_len(peer) > ROUTE_BACKLOG {
                     self.dropped_routes += 1;
@@ -1657,6 +1708,7 @@ impl MqttService {
                         msg: msg.clone(),
                         qos,
                         retain,
+                        origin: origin.unwrap_or(crate::backpressure::NO_ORIGIN),
                     },
                 );
             }
@@ -1761,6 +1813,42 @@ impl MqttService {
             );
         }
     }
+
+    // ---- publisher back-pressure (ADR-269) ----------------------------------
+
+    /// The broker's receive-window decisions: applied to this core's TCP for
+    /// a local session, sent to the transport core for a relayed one.
+    fn flow_windows(&mut self, tcp: &mut TcpStack, link: &mut Link) {
+        let mut events = Vec::new();
+        self.broker.drain_flow(&mut events);
+        for (b, closed) in events {
+            if let Some(&c) = self.by_broker.get(&b) {
+                if let Some(k) = self.conns.get(&c) {
+                    self.flow.window(c, k.tconn, closed);
+                }
+            } else if let Some(r) = self.remote.get(&b) {
+                link.send(
+                    usize::from(r.from),
+                    CoreMsg::Flow {
+                        tconn: r.tconn,
+                        closed,
+                    },
+                );
+            }
+        }
+        // Pauses and resumes asked of other shards' publishers.
+        let mut asks = Vec::new();
+        self.broker.drain_remote_flow(&mut asks);
+        for (shard, conn, full) in asks {
+            link.send(usize::from(shard), CoreMsg::Hold { conn, full });
+        }
+        let conns = &self.conns;
+        self.flow.apply(tcp, |c, tconn| {
+            conns.get(&c).is_some_and(|k| k.tconn == tconn)
+        });
+    }
+
+    // ---- end of publisher back-pressure ------------------------------------
 
     /// Broker output of a local session → TLS → `pending`.
     fn local_output(&mut self, c: u32, b: ConnId) {

@@ -140,6 +140,8 @@
   "enum.devices.virtio_vsock.on": "ko je najdena, opozori, če manjka",
   "enum.websocket.auth.mtls": "odjemalsko potrdilo, kot na vratih TLS",
   "enum.websocket.auth.password": "uporabniško ime in geslo (za brskalnike)",
+  "enum.limits.publisher_backpressure.single": "zaustavi izdajatelja, ko je njegov edini naročnik poln",
+  "enum.limits.publisher_backpressure.off": "vedno beri; zavrzi za počasnega naročnika",
   "err.int": "Mora biti celo število.",
   "err.enum": "Ni ena od dovoljenih vrednosti.",
   "bar.title": "Povzetek",

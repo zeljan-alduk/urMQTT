@@ -301,6 +301,8 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             handshakes_per_core_per_sec: u32_of(tag::LIM_HANDSHAKES_PER_SEC),
             max_handshakes_in_flight_per_core: u32_of(tag::LIM_HANDSHAKES_CORE),
             max_handshakes_in_flight_per_ip: u32_of(tag::LIM_HANDSHAKES_IP),
+            // 0: "single" (the default, and every blob before format 8).
+            publisher_backpressure: b.variant(tag::LIM_PUBLISHER_BACKPRESSURE) == 0,
         },
         acl: Acl {
             device_publish,
@@ -753,6 +755,21 @@ mod tests {
         assert_eq!(c.plaintext.users.len(), 1);
         assert_eq!(c.plaintext.users[0].id, "plain-1");
         assert_eq!(w.publish_rate_per_device.tokens, 3);
+    }
+
+    /// NOW-13, ADR-269: publisher back-pressure is on ("single") by default
+    /// (the empty blob, and every blob before format 8) and off when set so.
+    #[test]
+    fn publisher_backpressure_is_single_by_default() {
+        use urmqtt_cfg::build::Builder;
+        assert!(CONFIG.limits.publisher_backpressure);
+        let mut b = Builder::new();
+        b.variant(tag::LIM_PUBLISHER_BACKPRESSURE, 1).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 8);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        assert!(!build(&blob, arena).limits.publisher_backpressure);
     }
 
     /// NOW-19, ADR-264: `network.mtu` is unset by default (the empty blob,

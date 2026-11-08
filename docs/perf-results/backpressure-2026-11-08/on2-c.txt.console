@@ -1,0 +1,1059 @@
+### console single-flow qos=0 payload=64 rep=1
+[   15.186106] WARN  live: kernel heap 256 MiB instead of the configured 1024 MiB (the RAM store, 8 MiB SQLite heap and 128 MiB of kernel overhead leave no more): about 536870 connections instead of 2147483
+[   15.186936] INFO  msi: GICv2m frame at 0x8020000, SPIs 80..144
+[   15.187332] INFO  pci: ECAM 0x4010000000 buses 0-255, 4 function(s)
+[   15.187719] INFO  virtio: drivers in this image: net,blk,console,rng,balloon,scsi,gpu,input,vsock
+[   15.188080] INFO  pci 00:00.0 1b36:0008 class 06.00
+[   15.188461] INFO  pci 00:01.0 1af4:1005 class 00.ff virtio-rng
+[   15.189900] INFO  virtio: virtio-rng at 00:01.0: driven: entropy
+[   15.190303] INFO  pci 00:02.0 1af4:1004 class 01.00 virtio-scsi
+[   15.191973] INFO  scsi: 00:02.0 0 disk(s) with 512-byte blocks
+[   15.192289] INFO  virtio: virtio-scsi at 00:02.0: driven: 0 disk(s)
+[   15.192648] INFO  pci 00:03.0 1af4:1000 class 02.00 virtio-net
+[   15.194222] INFO  net: mac 52:54:00:12:34:56, link up
+[   15.194536] INFO  virtio: virtio-net at 00:03.0: driven: the network
+[   15.194906] INFO  entropy: 64 bytes from virtio-rng
+[   15.195188] INFO  entropy: ChaCha20 CSPRNG seeded
+[   15.195469] INFO  hardening: stack canary renewed from the CSPRNG (56 bits)
+[   15.195822] INFO  vm: page tables locked (2048 KiB read-only, no writable alias)
+[   15.196250] INFO  selftest: W^X ok (74893 leaf mappings audited, 0 W+X, text-only execute, guards unmapped, tables read-only)
+[   15.196893] INFO  crypto: ecc=nistz256-armv8 x25519=armv8 (P-256 and X25519 field arithmetic)
+[   15.418086] INFO  crypto-profile: x25519-base=8.51us x25519-dh=15.82us p256-base=9.83us p256-dh=26.96us ecdsa-sign=19.04us ecdsa-verify=27.91us ecdsa-verify-ca=8.44us hmac-sha256=0.46us sha256-block=0.11us aes-gcm-1k=1.87us chacha-1k=1.68us => handshake~127.85us (62% p...
+[   15.419391] INFO  watchdog: handshake budget 50 ms (calibrated), other handlers 20 ms, stuck-core reset at 2000 ms
+[   15.419952] INFO  timer: counter 24000000 Hz, virtual timer PPI 27, tick 10 ms
+[   15.520327] INFO  tick 10
+[   15.620327] INFO  tick 20
+[   15.670329] INFO  timer: irq latency (busy-poll, 25 samples) min=2041 avg=3928 p99<=32768 max=22458 ns
+[   15.774140] INFO  tick 30
+[   15.823837] INFO  tick 40
+[   15.923853] INFO  tick 50
+[   15.924066] INFO  timer: irq latency (wfi, 25 samples) min=83625 avg=3046629 p99<=8388608 max=4740833 ns
+[   15.924591] INFO  timer: 50 ticks in 504 ms
+[   15.931745] INFO  live: RAM store of 50 MiB ready
+[   15.932038] INFO  blk: self-test ok on the RAM store (4 KiB random pattern written, read back at sector 102392)
+[   15.932589] INFO  net: gratuitous ARP sent
+[   15.947757] INFO  net: rx ok, ARP reply from a2:7c:6c:3e:e5:cc
+[   15.948113] INFO  storage: discard: not applicable (the store is in RAM)
+[   15.948478] INFO  storage: RAM store (EPHEMERAL: lost on reboot) formatted (was blank) (50 MiB, uuid e8cba9a3…): db 24 MiB, wal 6 MiB, journal 1 MiB, telemetry 17 MiB; 8 telemetry partition(s), aligned to 1024 KiB, generation 1
+[   15.951566] INFO  dbworker: address space built: 700 KiB image, 256 KiB stack, 8 MiB heap, 1028 KiB shared window
+[   15.952613] INFO  db: sqlite 3.54.1 on the RAM store (EPHEMERAL): WAL, exclusive locking, quick_check ok in 0 ms, schema v2 (from v0), 11 page(s), heap 8 MiB
+[   15.953413] INFO  telemetry: log recovered in 0 ms: 0 record(s) in the 0 newest segment(s) read of 0, 0 torn tail(s) truncated, 0 expired (the other segments are known by their headers and checked by the scrubber); 8 partitions of 2 MiB
+[   15.954483] INFO  storage: misaligned_writes=0 of 45 device writes after startup (physical block 512 B, write granularity 512 B, optimal I/O 0 B)
+[   15.955169] INFO  db: restored 0 retained message(s), 0 persistent session(s) with 0 queued message(s), 0 revoked serial(s), 0 known device(s), control seq 0
+[   15.955942] INFO  scrub: off (storage.scrub_interval_h = 0)
+[   15.956245] INFO  control: channel off (no control.service_ids); registry open, 0 allowlisted identities; unrevoke off
+[   15.956854] INFO  cpu 1 online (hw id=0x1, el=1)
+[   15.957135] INFO  smp: 2/2 cpus online (1 application processors started)
+[   15.957482] INFO  ipi: 2/2 ordered pairs ping-pong ok, round trip avg=18541 ns max=23833 ns
+[   16.015112] INFO  smp: 2/2 cpus ticking on their own timer
+[   16.015440] INFO  db: DB core is cpu 1 (batches of 512 ops or 5 ms)
+[   16.015767] INFO  db: worker running on cpu 1
+[   16.016235] INFO  tls: 1 trust-anchor verification table(s), 148 KiB of heap (148 KiB requested)
+[   16.016616] INFO  mem: heap 256 MiB, 584 KiB in use; new connections refused below 64 MiB free
+[   16.017000] INFO  log: asynchronous: cores queue their lines, cpu 1 writes the serial port and the screen
+[   16.017005] INFO  dataplane: 1 data core(s), each with its own network stack, TLS and broker shard
+[   16.019934] WARN  EPHEMERAL: data is lost on reboot (live mode, 50 MiB RAM store)
+[   16.020419] INFO  net: virtio-net with 256 receive and 256 transmit descriptor(s)
+[   16.020524] INFO  mqtt: TLS 1.3 listener on port 8883 (mutual TLS, identity = certificate Cn, 0 revoked serial(s), 1 operational and 0 bootstrap CA file(s))
+[   16.020524] INFO  tls: session tickets under random per-boot keys, rotated every 43200 s of uptime (ticket lifetime 43200 s)
+[   16.020525] INFO  mqtt: publisher back-pressure single (a publisher whose QoS 0 message has one full subscriber is paused, 500 ms at most)
+[   16.020527] INFO  mqtt: shard 0/1 ready: 0 persistent session(s) homed here, telemetry partition 0
+[   16.020533] INFO  net: static address 10.0.2.15/24 gateway 10.0.2.2
+[   16.020533] INFO  net: mtu 1500 (default)
+[   16.020534] INFO  ops: syslog off, statsd off, health check every 10 s
+[   16.020535] INFO  tls: server certificate valid for 814 more day(s) (warnings from 60 days)
+[   16.020535] INFO  time: no SNTP servers (time.servers is empty): the wall clock is the firmware RTC (rtc)
+[   20.023310] INFO  mqtt: core 0 paused 25 publisher(s) for a full single subscriber since the last report, 17 ms in all, 0 ran out (read and dropped again)
+[   21.020191] INFO  tcp: core 0: 19142 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   21.020193] INFO  tcp: core 0: 424 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   21.020194] INFO  tcp: core 0: busiest sender: 173 KiB queued, 173 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1854 KiB, srtt 14 ms, rto 200 ms
+[   21.020684] INFO  dataplane: core 0: busy 25%, work 16% (rx 11%, of it tls 8%, poll 2%, tcp 1%, mesh 0%, nic 0%), 3 connection(s) accepted (281028 us of work, 142611 us of it TLS, each), 19187 frame(s) dispatched, 799123 loop passes in 5000 ms, longest stall 8780 us
+[   21.104291] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   25.959789] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 46 us, max 73 us per commit), 0 error(s)
+[   26.020222] INFO  tcp: core 0: 47574 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   26.020223] INFO  tcp: core 0: 423 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   26.020225] INFO  tcp: core 0: busiest sender: 194 KiB queued, 194 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1859 KiB, srtt 13 ms, rto 200 ms
+[   26.020226] INFO  mem: 3 connection(s), heap 1584 KiB in blocks (1178 KiB requested), frame buffers 382 KiB: 224618 B per connection in heap blocks (170696 B requested), frame buffers excluded
+[   26.020706] INFO  dataplane: core 0: busy 46%, work 33% (rx 23%, of it tls 18%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 47529 frame(s) dispatched, 1837914 loop passes in 5000 ms, longest stall 8813 us
+[   30.023021] INFO  mqtt: core 0 paused 101 publisher(s) for a full single subscriber since the last report, 64 ms in all, 0 ran out (read and dropped again)
+[   31.020006] INFO  tcp: core 0: 51475 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   31.020008] INFO  tcp: core 0: 521 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   31.020009] INFO  tcp: core 0: busiest sender: 181 KiB queued, 181 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1863 KiB, srtt 14 ms, rto 200 ms
+[   31.020823] INFO  dataplane: core 0: busy 51%, work 39% (rx 28%, of it tls 22%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 51476 frame(s) dispatched, 1533677 loop passes in 5000 ms, longest stall 8888 us
+SYSVAL $SYS/broker/arch=aarch64
+SYSVAL $SYS/broker/clients/connected=3
+SYSVAL $SYS/broker/clients/total=3
+SYSVAL $SYS/broker/connections/refused=0
+SYSVAL $SYS/broker/console/dropped=0
+SYSVAL $SYS/broker/cpu/accepted/0=3
+SYSVAL $SYS/broker/cpu/accepted/1=0
+SYSVAL $SYS/broker/cpu/busy/0=25
+SYSVAL $SYS/broker/cpu/busy/1=2
+SYSVAL $SYS/broker/cpu/cores=2
+SYSVAL $SYS/broker/disk/total=52428800
+SYSVAL $SYS/broker/disk/used=78288
+SYSVAL $SYS/broker/entropy/source=virtio-rng
+SYSVAL $SYS/broker/frames/dropped/nic=0
+SYSVAL $SYS/broker/frames/dropped/steer=0
+SYSVAL $SYS/broker/frames/dropped/worker_tx=0
+SYSVAL $SYS/broker/handshakes/done=3
+SYSVAL $SYS/broker/handshakes/failed=0
+SYSVAL $SYS/broker/handshakes/in_flight=0
+SYSVAL $SYS/broker/handshakes/in_flight_max=2
+SYSVAL $SYS/broker/handshakes/latency_max_ms=20
+SYSVAL $SYS/broker/handshakes/latency_sum_ms=57
+SYSVAL $SYS/broker/handshakes/refused=0
+SYSVAL $SYS/broker/handshakes/slow=0
+SYSVAL $SYS/broker/handshakes/started=3
+SYSVAL $SYS/broker/handshakes/syn_dropped=0
+SYSVAL $SYS/broker/handshakes/timed_out=0
+SYSVAL $SYS/broker/memory/total=268435456
+SYSVAL $SYS/broker/memory/used=1679872
+SYSVAL $SYS/broker/messages/backpressure/holding=0
+SYSVAL $SYS/broker/messages/backpressure/mode=single
+SYSVAL $SYS/broker/messages/backpressure/paused=79
+SYSVAL $SYS/broker/messages/backpressure/paused_ms=42
+SYSVAL $SYS/broker/messages/backpressure/timeouts=0
+SYSVAL $SYS/broker/messages/dropped/cross_core=0
+SYSVAL $SYS/broker/messages/dropped/offline=0
+SYSVAL $SYS/broker/messages/dropped/publish_rate=0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=0
+SYSVAL $SYS/broker/messages/received=659131
+SYSVAL $SYS/broker/messages/sent=659251
+SYSVAL $SYS/broker/net/mtu=1500
+SYSVAL $SYS/broker/plaintext/enabled=false
+SYSVAL $SYS/broker/retained=0
+SYSVAL $SYS/broker/subscriptions=3
+SYSVAL $SYS/broker/time/offset_ms=unknown
+SYSVAL $SYS/broker/time/source=rtc
+SYSVAL $SYS/broker/tls/server_cert_days=814
+SYSVAL $SYS/broker/uptime=26
+SYSVAL $SYS/broker/version=v0.4.2-19-g572afe3-dirty
+### console single-flow qos=0 payload=64 rep=2
+[   15.419391] INFO  watchdog: handshake budget 50 ms (calibrated), other handlers 20 ms, stuck-core reset at 2000 ms
+[   15.419952] INFO  timer: counter 24000000 Hz, virtual timer PPI 27, tick 10 ms
+[   15.520327] INFO  tick 10
+[   15.620327] INFO  tick 20
+[   15.670329] INFO  timer: irq latency (busy-poll, 25 samples) min=2041 avg=3928 p99<=32768 max=22458 ns
+[   15.774140] INFO  tick 30
+[   15.823837] INFO  tick 40
+[   15.923853] INFO  tick 50
+[   15.924066] INFO  timer: irq latency (wfi, 25 samples) min=83625 avg=3046629 p99<=8388608 max=4740833 ns
+[   15.924591] INFO  timer: 50 ticks in 504 ms
+[   15.931745] INFO  live: RAM store of 50 MiB ready
+[   15.932038] INFO  blk: self-test ok on the RAM store (4 KiB random pattern written, read back at sector 102392)
+[   15.932589] INFO  net: gratuitous ARP sent
+[   15.947757] INFO  net: rx ok, ARP reply from a2:7c:6c:3e:e5:cc
+[   15.948113] INFO  storage: discard: not applicable (the store is in RAM)
+[   15.948478] INFO  storage: RAM store (EPHEMERAL: lost on reboot) formatted (was blank) (50 MiB, uuid e8cba9a3…): db 24 MiB, wal 6 MiB, journal 1 MiB, telemetry 17 MiB; 8 telemetry partition(s), aligned to 1024 KiB, generation 1
+[   15.951566] INFO  dbworker: address space built: 700 KiB image, 256 KiB stack, 8 MiB heap, 1028 KiB shared window
+[   15.952613] INFO  db: sqlite 3.54.1 on the RAM store (EPHEMERAL): WAL, exclusive locking, quick_check ok in 0 ms, schema v2 (from v0), 11 page(s), heap 8 MiB
+[   15.953413] INFO  telemetry: log recovered in 0 ms: 0 record(s) in the 0 newest segment(s) read of 0, 0 torn tail(s) truncated, 0 expired (the other segments are known by their headers and checked by the scrubber); 8 partitions of 2 MiB
+[   15.954483] INFO  storage: misaligned_writes=0 of 45 device writes after startup (physical block 512 B, write granularity 512 B, optimal I/O 0 B)
+[   15.955169] INFO  db: restored 0 retained message(s), 0 persistent session(s) with 0 queued message(s), 0 revoked serial(s), 0 known device(s), control seq 0
+[   15.955942] INFO  scrub: off (storage.scrub_interval_h = 0)
+[   15.956245] INFO  control: channel off (no control.service_ids); registry open, 0 allowlisted identities; unrevoke off
+[   15.956854] INFO  cpu 1 online (hw id=0x1, el=1)
+[   15.957135] INFO  smp: 2/2 cpus online (1 application processors started)
+[   15.957482] INFO  ipi: 2/2 ordered pairs ping-pong ok, round trip avg=18541 ns max=23833 ns
+[   16.015112] INFO  smp: 2/2 cpus ticking on their own timer
+[   16.015440] INFO  db: DB core is cpu 1 (batches of 512 ops or 5 ms)
+[   16.015767] INFO  db: worker running on cpu 1
+[   16.016235] INFO  tls: 1 trust-anchor verification table(s), 148 KiB of heap (148 KiB requested)
+[   16.016616] INFO  mem: heap 256 MiB, 584 KiB in use; new connections refused below 64 MiB free
+[   16.017000] INFO  log: asynchronous: cores queue their lines, cpu 1 writes the serial port and the screen
+[   16.017005] INFO  dataplane: 1 data core(s), each with its own network stack, TLS and broker shard
+[   16.019934] WARN  EPHEMERAL: data is lost on reboot (live mode, 50 MiB RAM store)
+[   16.020419] INFO  net: virtio-net with 256 receive and 256 transmit descriptor(s)
+[   16.020524] INFO  mqtt: TLS 1.3 listener on port 8883 (mutual TLS, identity = certificate Cn, 0 revoked serial(s), 1 operational and 0 bootstrap CA file(s))
+[   16.020524] INFO  tls: session tickets under random per-boot keys, rotated every 43200 s of uptime (ticket lifetime 43200 s)
+[   16.020525] INFO  mqtt: publisher back-pressure single (a publisher whose QoS 0 message has one full subscriber is paused, 500 ms at most)
+[   16.020527] INFO  mqtt: shard 0/1 ready: 0 persistent session(s) homed here, telemetry partition 0
+[   16.020533] INFO  net: static address 10.0.2.15/24 gateway 10.0.2.2
+[   16.020533] INFO  net: mtu 1500 (default)
+[   16.020534] INFO  ops: syslog off, statsd off, health check every 10 s
+[   16.020535] INFO  tls: server certificate valid for 814 more day(s) (warnings from 60 days)
+[   16.020535] INFO  time: no SNTP servers (time.servers is empty): the wall clock is the firmware RTC (rtc)
+[   20.023310] INFO  mqtt: core 0 paused 25 publisher(s) for a full single subscriber since the last report, 17 ms in all, 0 ran out (read and dropped again)
+[   21.020191] INFO  tcp: core 0: 19142 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   21.020193] INFO  tcp: core 0: 424 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   21.020194] INFO  tcp: core 0: busiest sender: 173 KiB queued, 173 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1854 KiB, srtt 14 ms, rto 200 ms
+[   21.020684] INFO  dataplane: core 0: busy 25%, work 16% (rx 11%, of it tls 8%, poll 2%, tcp 1%, mesh 0%, nic 0%), 3 connection(s) accepted (281028 us of work, 142611 us of it TLS, each), 19187 frame(s) dispatched, 799123 loop passes in 5000 ms, longest stall 8780 us
+[   21.104291] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   25.959789] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 46 us, max 73 us per commit), 0 error(s)
+[   26.020222] INFO  tcp: core 0: 47574 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   26.020223] INFO  tcp: core 0: 423 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   26.020225] INFO  tcp: core 0: busiest sender: 194 KiB queued, 194 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1859 KiB, srtt 13 ms, rto 200 ms
+[   26.020226] INFO  mem: 3 connection(s), heap 1584 KiB in blocks (1178 KiB requested), frame buffers 382 KiB: 224618 B per connection in heap blocks (170696 B requested), frame buffers excluded
+[   26.020706] INFO  dataplane: core 0: busy 46%, work 33% (rx 23%, of it tls 18%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 47529 frame(s) dispatched, 1837914 loop passes in 5000 ms, longest stall 8813 us
+[   30.023021] INFO  mqtt: core 0 paused 101 publisher(s) for a full single subscriber since the last report, 64 ms in all, 0 ran out (read and dropped again)
+[   31.020006] INFO  tcp: core 0: 51475 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   31.020008] INFO  tcp: core 0: 521 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   31.020009] INFO  tcp: core 0: busiest sender: 181 KiB queued, 181 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1863 KiB, srtt 14 ms, rto 200 ms
+[   31.020823] INFO  dataplane: core 0: busy 51%, work 39% (rx 28%, of it tls 22%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 51476 frame(s) dispatched, 1533677 loop passes in 5000 ms, longest stall 8888 us
+[   36.026576] INFO  tcp: core 0: 4150 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[   36.026579] INFO  mem: 0 connection(s), heap 743 KiB in blocks (546 KiB requested), frame buffers 64 KiB: 0 B per connection in heap blocks (0 B requested), frame buffers excluded
+[   36.026633] INFO  dataplane: core 0: busy 17%, work 7% (rx 1%, of it tls 1%, poll 2%, tcp 1%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 4150 frame(s) dispatched, 1512333 loop passes in 5005 ms, longest stall 491 us
+[   40.035001] INFO  mqtt: core 0 paused 34 publisher(s) for a full single subscriber since the last report, 15 ms in all, 0 ran out (read and dropped again)
+[   41.026142] INFO  tcp: core 0: 34248 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   41.026144] INFO  tcp: core 0: 291 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   41.026145] INFO  tcp: core 0: busiest sender: 220 KiB queued, 220 KiB in flight, cwnd 849 KiB, ssthresh 1048576 KiB, peer window 4063 KiB, srtt 14 ms, rto 200 ms
+[   41.026634] INFO  dataplane: core 0: busy 35%, work 24% (rx 16%, of it tls 12%, poll 3%, tcp 1%, mesh 1%, nic 1%), 3 connection(s) accepted (402977 us of work, 211420 us of it TLS, each), 34248 frame(s) dispatched, 1537143 loop passes in 5000 ms, longest stall 3277 us
+[   41.193453] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   45.967166] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 20 us, max 23 us per commit), 0 error(s)
+[   46.026000] INFO  tcp: core 0: 54524 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   46.026002] INFO  tcp: core 0: 650 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   46.026003] INFO  tcp: core 0: busiest sender: 166 KiB queued, 166 KiB in flight, cwnd 874 KiB, ssthresh 1048576 KiB, peer window 4035 KiB, srtt 16 ms, rto 200 ms
+[   46.026005] INFO  mem: 3 connection(s), heap 1483 KiB in blocks (1118 KiB requested), frame buffers 276 KiB: 180128 B per connection in heap blocks (141140 B requested), frame buffers excluded
+[   46.027115] INFO  dataplane: core 0: busy 49%, work 37% (rx 26%, of it tls 20%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 54560 frame(s) dispatched, 1734760 loop passes in 5000 ms, longest stall 10363 us
+[   50.035000] INFO  mqtt: core 0 paused 77 publisher(s) for a full single subscriber since the last report, 41 ms in all, 0 ran out (read and dropped again)
+[   51.026234] INFO  tcp: core 0: 48558 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   51.026236] INFO  tcp: core 0: 479 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   51.027115] INFO  dataplane: core 0: busy 46%, work 33% (rx 23%, of it tls 18%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 48522 frame(s) dispatched, 1893537 loop passes in 5000 ms, longest stall 3636 us
+SYSVAL $SYS/broker/arch=aarch64
+SYSVAL $SYS/broker/clients/connected=3
+SYSVAL $SYS/broker/clients/total=3
+SYSVAL $SYS/broker/connections/refused=0
+SYSVAL $SYS/broker/console/dropped=0
+SYSVAL $SYS/broker/cpu/accepted/0=6
+SYSVAL $SYS/broker/cpu/accepted/1=0
+SYSVAL $SYS/broker/cpu/busy/0=35
+SYSVAL $SYS/broker/cpu/busy/1=2
+SYSVAL $SYS/broker/cpu/cores=2
+SYSVAL $SYS/broker/disk/total=52428800
+SYSVAL $SYS/broker/disk/used=94768
+SYSVAL $SYS/broker/entropy/source=virtio-rng
+SYSVAL $SYS/broker/frames/dropped/nic=0
+SYSVAL $SYS/broker/frames/dropped/steer=0
+SYSVAL $SYS/broker/frames/dropped/worker_tx=0
+SYSVAL $SYS/broker/handshakes/done=6
+SYSVAL $SYS/broker/handshakes/failed=0
+SYSVAL $SYS/broker/handshakes/in_flight=0
+SYSVAL $SYS/broker/handshakes/in_flight_max=2
+SYSVAL $SYS/broker/handshakes/latency_max_ms=17
+SYSVAL $SYS/broker/handshakes/latency_sum_ms=105
+SYSVAL $SYS/broker/handshakes/refused=0
+SYSVAL $SYS/broker/handshakes/slow=0
+SYSVAL $SYS/broker/handshakes/started=6
+SYSVAL $SYS/broker/handshakes/syn_dropped=0
+SYSVAL $SYS/broker/handshakes/timed_out=0
+SYSVAL $SYS/broker/memory/total=268435456
+SYSVAL $SYS/broker/memory/used=1552896
+SYSVAL $SYS/broker/messages/backpressure/holding=0
+SYSVAL $SYS/broker/messages/backpressure/mode=single
+SYSVAL $SYS/broker/messages/backpressure/paused=215
+SYSVAL $SYS/broker/messages/backpressure/paused_ms=126
+SYSVAL $SYS/broker/messages/backpressure/timeouts=0
+SYSVAL $SYS/broker/messages/dropped/cross_core=0
+SYSVAL $SYS/broker/messages/dropped/offline=0
+SYSVAL $SYS/broker/messages/dropped/publish_rate=0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=0
+SYSVAL $SYS/broker/messages/received=2388390
+SYSVAL $SYS/broker/messages/sent=2380228
+SYSVAL $SYS/broker/net/mtu=1500
+SYSVAL $SYS/broker/plaintext/enabled=false
+SYSVAL $SYS/broker/retained=0
+SYSVAL $SYS/broker/subscriptions=3
+SYSVAL $SYS/broker/time/offset_ms=unknown
+SYSVAL $SYS/broker/time/source=rtc
+SYSVAL $SYS/broker/tls/server_cert_days=814
+SYSVAL $SYS/broker/uptime=46
+SYSVAL $SYS/broker/version=v0.4.2-19-g572afe3-dirty
+### console single-flow qos=0 payload=1024 rep=1
+[   15.954483] INFO  storage: misaligned_writes=0 of 45 device writes after startup (physical block 512 B, write granularity 512 B, optimal I/O 0 B)
+[   15.955169] INFO  db: restored 0 retained message(s), 0 persistent session(s) with 0 queued message(s), 0 revoked serial(s), 0 known device(s), control seq 0
+[   15.955942] INFO  scrub: off (storage.scrub_interval_h = 0)
+[   15.956245] INFO  control: channel off (no control.service_ids); registry open, 0 allowlisted identities; unrevoke off
+[   15.956854] INFO  cpu 1 online (hw id=0x1, el=1)
+[   15.957135] INFO  smp: 2/2 cpus online (1 application processors started)
+[   15.957482] INFO  ipi: 2/2 ordered pairs ping-pong ok, round trip avg=18541 ns max=23833 ns
+[   16.015112] INFO  smp: 2/2 cpus ticking on their own timer
+[   16.015440] INFO  db: DB core is cpu 1 (batches of 512 ops or 5 ms)
+[   16.015767] INFO  db: worker running on cpu 1
+[   16.016235] INFO  tls: 1 trust-anchor verification table(s), 148 KiB of heap (148 KiB requested)
+[   16.016616] INFO  mem: heap 256 MiB, 584 KiB in use; new connections refused below 64 MiB free
+[   16.017000] INFO  log: asynchronous: cores queue their lines, cpu 1 writes the serial port and the screen
+[   16.017005] INFO  dataplane: 1 data core(s), each with its own network stack, TLS and broker shard
+[   16.019934] WARN  EPHEMERAL: data is lost on reboot (live mode, 50 MiB RAM store)
+[   16.020419] INFO  net: virtio-net with 256 receive and 256 transmit descriptor(s)
+[   16.020524] INFO  mqtt: TLS 1.3 listener on port 8883 (mutual TLS, identity = certificate Cn, 0 revoked serial(s), 1 operational and 0 bootstrap CA file(s))
+[   16.020524] INFO  tls: session tickets under random per-boot keys, rotated every 43200 s of uptime (ticket lifetime 43200 s)
+[   16.020525] INFO  mqtt: publisher back-pressure single (a publisher whose QoS 0 message has one full subscriber is paused, 500 ms at most)
+[   16.020527] INFO  mqtt: shard 0/1 ready: 0 persistent session(s) homed here, telemetry partition 0
+[   16.020533] INFO  net: static address 10.0.2.15/24 gateway 10.0.2.2
+[   16.020533] INFO  net: mtu 1500 (default)
+[   16.020534] INFO  ops: syslog off, statsd off, health check every 10 s
+[   16.020535] INFO  tls: server certificate valid for 814 more day(s) (warnings from 60 days)
+[   16.020535] INFO  time: no SNTP servers (time.servers is empty): the wall clock is the firmware RTC (rtc)
+[   20.023310] INFO  mqtt: core 0 paused 25 publisher(s) for a full single subscriber since the last report, 17 ms in all, 0 ran out (read and dropped again)
+[   21.020191] INFO  tcp: core 0: 19142 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   21.020193] INFO  tcp: core 0: 424 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   21.020194] INFO  tcp: core 0: busiest sender: 173 KiB queued, 173 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1854 KiB, srtt 14 ms, rto 200 ms
+[   21.020684] INFO  dataplane: core 0: busy 25%, work 16% (rx 11%, of it tls 8%, poll 2%, tcp 1%, mesh 0%, nic 0%), 3 connection(s) accepted (281028 us of work, 142611 us of it TLS, each), 19187 frame(s) dispatched, 799123 loop passes in 5000 ms, longest stall 8780 us
+[   21.104291] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   25.959789] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 46 us, max 73 us per commit), 0 error(s)
+[   26.020222] INFO  tcp: core 0: 47574 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   26.020223] INFO  tcp: core 0: 423 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   26.020225] INFO  tcp: core 0: busiest sender: 194 KiB queued, 194 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1859 KiB, srtt 13 ms, rto 200 ms
+[   26.020226] INFO  mem: 3 connection(s), heap 1584 KiB in blocks (1178 KiB requested), frame buffers 382 KiB: 224618 B per connection in heap blocks (170696 B requested), frame buffers excluded
+[   26.020706] INFO  dataplane: core 0: busy 46%, work 33% (rx 23%, of it tls 18%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 47529 frame(s) dispatched, 1837914 loop passes in 5000 ms, longest stall 8813 us
+[   30.023021] INFO  mqtt: core 0 paused 101 publisher(s) for a full single subscriber since the last report, 64 ms in all, 0 ran out (read and dropped again)
+[   31.020006] INFO  tcp: core 0: 51475 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   31.020008] INFO  tcp: core 0: 521 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   31.020009] INFO  tcp: core 0: busiest sender: 181 KiB queued, 181 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1863 KiB, srtt 14 ms, rto 200 ms
+[   31.020823] INFO  dataplane: core 0: busy 51%, work 39% (rx 28%, of it tls 22%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 51476 frame(s) dispatched, 1533677 loop passes in 5000 ms, longest stall 8888 us
+[   36.026576] INFO  tcp: core 0: 4150 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[   36.026579] INFO  mem: 0 connection(s), heap 743 KiB in blocks (546 KiB requested), frame buffers 64 KiB: 0 B per connection in heap blocks (0 B requested), frame buffers excluded
+[   36.026633] INFO  dataplane: core 0: busy 17%, work 7% (rx 1%, of it tls 1%, poll 2%, tcp 1%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 4150 frame(s) dispatched, 1512333 loop passes in 5005 ms, longest stall 491 us
+[   40.035001] INFO  mqtt: core 0 paused 34 publisher(s) for a full single subscriber since the last report, 15 ms in all, 0 ran out (read and dropped again)
+[   41.026142] INFO  tcp: core 0: 34248 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   41.026144] INFO  tcp: core 0: 291 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   41.026145] INFO  tcp: core 0: busiest sender: 220 KiB queued, 220 KiB in flight, cwnd 849 KiB, ssthresh 1048576 KiB, peer window 4063 KiB, srtt 14 ms, rto 200 ms
+[   41.026634] INFO  dataplane: core 0: busy 35%, work 24% (rx 16%, of it tls 12%, poll 3%, tcp 1%, mesh 1%, nic 1%), 3 connection(s) accepted (402977 us of work, 211420 us of it TLS, each), 34248 frame(s) dispatched, 1537143 loop passes in 5000 ms, longest stall 3277 us
+[   41.193453] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   45.967166] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 20 us, max 23 us per commit), 0 error(s)
+[   46.026000] INFO  tcp: core 0: 54524 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   46.026002] INFO  tcp: core 0: 650 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   46.026003] INFO  tcp: core 0: busiest sender: 166 KiB queued, 166 KiB in flight, cwnd 874 KiB, ssthresh 1048576 KiB, peer window 4035 KiB, srtt 16 ms, rto 200 ms
+[   46.026005] INFO  mem: 3 connection(s), heap 1483 KiB in blocks (1118 KiB requested), frame buffers 276 KiB: 180128 B per connection in heap blocks (141140 B requested), frame buffers excluded
+[   46.027115] INFO  dataplane: core 0: busy 49%, work 37% (rx 26%, of it tls 20%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 54560 frame(s) dispatched, 1734760 loop passes in 5000 ms, longest stall 10363 us
+[   50.035000] INFO  mqtt: core 0 paused 77 publisher(s) for a full single subscriber since the last report, 41 ms in all, 0 ran out (read and dropped again)
+[   51.026234] INFO  tcp: core 0: 48558 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   51.026236] INFO  tcp: core 0: 479 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   51.027115] INFO  dataplane: core 0: busy 46%, work 33% (rx 23%, of it tls 18%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 48522 frame(s) dispatched, 1893537 loop passes in 5000 ms, longest stall 3636 us
+[   56.033659] INFO  tcp: core 0: 6 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[   56.033664] INFO  mem: 0 connection(s), heap 748 KiB in blocks (549 KiB requested), frame buffers 64 KiB: 0 B per connection in heap blocks (0 B requested), frame buffers excluded
+[   56.033736] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 7 frame(s) dispatched, 1109201 loop passes in 5006 ms, longest stall 159 us
+[   56.214001] INFO  handshakes: core 0: 1 started, 1 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 1 at most; accept to done: mean 1...
+[   60.053194] INFO  mqtt: core 0 paused 1565 publisher(s) for a full single subscriber since the last report, 307 ms in all, 0 ran out (read and dropped again)
+[   61.033118] INFO  tcp: core 0: 36404 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   61.033120] INFO  tcp: core 0: 790 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   61.033121] INFO  tcp: core 0: busiest sender: 146 KiB queued, 146 KiB in flight, cwnd 858 KiB, ssthresh 1048576 KiB, peer window 4075 KiB, srtt 13 ms, rto 200 ms
+[   61.033937] INFO  dataplane: core 0: busy 32%, work 16% (rx 4%, of it tls 3%, poll 5%, tcp 2%, mesh 1%, nic 1%), 3 connection(s) accepted (273901 us of work, 51271 us of it TLS, each), 36404 frame(s) dispatched, 2316660 loop passes in 5000 ms, longest stall 1229 us
+[   61.214393] INFO  handshakes: core 0: 2 started, 2 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   65.970178] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 19 us, max 22 us per commit), 0 error(s)
+[   66.033000] INFO  tcp: core 0: 41136 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   66.033002] INFO  tcp: core 0: 478 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   66.033003] INFO  tcp: core 0: busiest sender: 153 KiB queued, 153 KiB in flight, cwnd 858 KiB, ssthresh 1048576 KiB, peer window 4080 KiB, srtt 14 ms, rto 200 ms
+[   66.033004] INFO  mem: 3 connection(s), heap 2015 KiB in blocks (1385 KiB requested), frame buffers 292 KiB: 354912 B per connection in heap blocks (227441 B requested), frame buffers excluded
+[   66.033937] INFO  dataplane: core 0: busy 33%, work 17% (rx 4%, of it tls 3%, poll 6%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 41136 frame(s) dispatched, 2360269 loop passes in 5000 ms, longest stall 892 us
+[   70.053184] INFO  mqtt: core 0 paused 3478 publisher(s) for a full single subscriber since the last report, 647 ms in all, 0 ran out (read and dropped again)
+[   71.033000] INFO  tcp: core 0: 25123 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   71.033002] INFO  tcp: core 0: 330 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   71.034194] INFO  dataplane: core 0: busy 30%, work 14% (rx 2%, of it tls 2%, poll 5%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 25123 frame(s) dispatched, 2478001 loop passes in 5000 ms, longest stall 683 us
+SYSVAL $SYS/broker/arch=aarch64
+SYSVAL $SYS/broker/clients/connected=3
+SYSVAL $SYS/broker/clients/total=3
+SYSVAL $SYS/broker/connections/refused=0
+SYSVAL $SYS/broker/console/dropped=0
+SYSVAL $SYS/broker/cpu/accepted/0=9
+SYSVAL $SYS/broker/cpu/accepted/1=0
+SYSVAL $SYS/broker/cpu/busy/0=32
+SYSVAL $SYS/broker/cpu/busy/1=2
+SYSVAL $SYS/broker/cpu/cores=2
+SYSVAL $SYS/broker/disk/total=52428800
+SYSVAL $SYS/broker/disk/used=111248
+SYSVAL $SYS/broker/entropy/source=virtio-rng
+SYSVAL $SYS/broker/frames/dropped/nic=0
+SYSVAL $SYS/broker/frames/dropped/steer=0
+SYSVAL $SYS/broker/frames/dropped/worker_tx=0
+SYSVAL $SYS/broker/handshakes/done=9
+SYSVAL $SYS/broker/handshakes/failed=0
+SYSVAL $SYS/broker/handshakes/in_flight=0
+SYSVAL $SYS/broker/handshakes/in_flight_max=2
+SYSVAL $SYS/broker/handshakes/latency_max_ms=18
+SYSVAL $SYS/broker/handshakes/latency_sum_ms=156
+SYSVAL $SYS/broker/handshakes/refused=0
+SYSVAL $SYS/broker/handshakes/slow=0
+SYSVAL $SYS/broker/handshakes/started=9
+SYSVAL $SYS/broker/handshakes/syn_dropped=0
+SYSVAL $SYS/broker/handshakes/timed_out=0
+SYSVAL $SYS/broker/memory/total=268435456
+SYSVAL $SYS/broker/memory/used=2118144
+SYSVAL $SYS/broker/messages/backpressure/holding=1
+SYSVAL $SYS/broker/messages/backpressure/mode=single
+SYSVAL $SYS/broker/messages/backpressure/paused=3716
+SYSVAL $SYS/broker/messages/backpressure/paused_ms=799
+SYSVAL $SYS/broker/messages/backpressure/timeouts=0
+SYSVAL $SYS/broker/messages/dropped/cross_core=0
+SYSVAL $SYS/broker/messages/dropped/offline=0
+SYSVAL $SYS/broker/messages/dropped/publish_rate=0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=0
+SYSVAL $SYS/broker/messages/received=3157695
+SYSVAL $SYS/broker/messages/sent=3142572
+SYSVAL $SYS/broker/net/mtu=1500
+SYSVAL $SYS/broker/plaintext/enabled=false
+SYSVAL $SYS/broker/retained=0
+SYSVAL $SYS/broker/subscriptions=3
+SYSVAL $SYS/broker/time/offset_ms=unknown
+SYSVAL $SYS/broker/time/source=rtc
+SYSVAL $SYS/broker/tls/server_cert_days=814
+SYSVAL $SYS/broker/uptime=66
+SYSVAL $SYS/broker/version=v0.4.2-19-g572afe3-dirty
+### console single-flow qos=0 payload=1024 rep=2
+[   16.020524] INFO  tls: session tickets under random per-boot keys, rotated every 43200 s of uptime (ticket lifetime 43200 s)
+[   16.020525] INFO  mqtt: publisher back-pressure single (a publisher whose QoS 0 message has one full subscriber is paused, 500 ms at most)
+[   16.020527] INFO  mqtt: shard 0/1 ready: 0 persistent session(s) homed here, telemetry partition 0
+[   16.020533] INFO  net: static address 10.0.2.15/24 gateway 10.0.2.2
+[   16.020533] INFO  net: mtu 1500 (default)
+[   16.020534] INFO  ops: syslog off, statsd off, health check every 10 s
+[   16.020535] INFO  tls: server certificate valid for 814 more day(s) (warnings from 60 days)
+[   16.020535] INFO  time: no SNTP servers (time.servers is empty): the wall clock is the firmware RTC (rtc)
+[   20.023310] INFO  mqtt: core 0 paused 25 publisher(s) for a full single subscriber since the last report, 17 ms in all, 0 ran out (read and dropped again)
+[   21.020191] INFO  tcp: core 0: 19142 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   21.020193] INFO  tcp: core 0: 424 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   21.020194] INFO  tcp: core 0: busiest sender: 173 KiB queued, 173 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1854 KiB, srtt 14 ms, rto 200 ms
+[   21.020684] INFO  dataplane: core 0: busy 25%, work 16% (rx 11%, of it tls 8%, poll 2%, tcp 1%, mesh 0%, nic 0%), 3 connection(s) accepted (281028 us of work, 142611 us of it TLS, each), 19187 frame(s) dispatched, 799123 loop passes in 5000 ms, longest stall 8780 us
+[   21.104291] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   25.959789] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 46 us, max 73 us per commit), 0 error(s)
+[   26.020222] INFO  tcp: core 0: 47574 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   26.020223] INFO  tcp: core 0: 423 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   26.020225] INFO  tcp: core 0: busiest sender: 194 KiB queued, 194 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1859 KiB, srtt 13 ms, rto 200 ms
+[   26.020226] INFO  mem: 3 connection(s), heap 1584 KiB in blocks (1178 KiB requested), frame buffers 382 KiB: 224618 B per connection in heap blocks (170696 B requested), frame buffers excluded
+[   26.020706] INFO  dataplane: core 0: busy 46%, work 33% (rx 23%, of it tls 18%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 47529 frame(s) dispatched, 1837914 loop passes in 5000 ms, longest stall 8813 us
+[   30.023021] INFO  mqtt: core 0 paused 101 publisher(s) for a full single subscriber since the last report, 64 ms in all, 0 ran out (read and dropped again)
+[   31.020006] INFO  tcp: core 0: 51475 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   31.020008] INFO  tcp: core 0: 521 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   31.020009] INFO  tcp: core 0: busiest sender: 181 KiB queued, 181 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1863 KiB, srtt 14 ms, rto 200 ms
+[   31.020823] INFO  dataplane: core 0: busy 51%, work 39% (rx 28%, of it tls 22%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 51476 frame(s) dispatched, 1533677 loop passes in 5000 ms, longest stall 8888 us
+[   36.026576] INFO  tcp: core 0: 4150 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[   36.026579] INFO  mem: 0 connection(s), heap 743 KiB in blocks (546 KiB requested), frame buffers 64 KiB: 0 B per connection in heap blocks (0 B requested), frame buffers excluded
+[   36.026633] INFO  dataplane: core 0: busy 17%, work 7% (rx 1%, of it tls 1%, poll 2%, tcp 1%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 4150 frame(s) dispatched, 1512333 loop passes in 5005 ms, longest stall 491 us
+[   40.035001] INFO  mqtt: core 0 paused 34 publisher(s) for a full single subscriber since the last report, 15 ms in all, 0 ran out (read and dropped again)
+[   41.026142] INFO  tcp: core 0: 34248 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   41.026144] INFO  tcp: core 0: 291 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   41.026145] INFO  tcp: core 0: busiest sender: 220 KiB queued, 220 KiB in flight, cwnd 849 KiB, ssthresh 1048576 KiB, peer window 4063 KiB, srtt 14 ms, rto 200 ms
+[   41.026634] INFO  dataplane: core 0: busy 35%, work 24% (rx 16%, of it tls 12%, poll 3%, tcp 1%, mesh 1%, nic 1%), 3 connection(s) accepted (402977 us of work, 211420 us of it TLS, each), 34248 frame(s) dispatched, 1537143 loop passes in 5000 ms, longest stall 3277 us
+[   41.193453] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   45.967166] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 20 us, max 23 us per commit), 0 error(s)
+[   46.026000] INFO  tcp: core 0: 54524 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   46.026002] INFO  tcp: core 0: 650 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   46.026003] INFO  tcp: core 0: busiest sender: 166 KiB queued, 166 KiB in flight, cwnd 874 KiB, ssthresh 1048576 KiB, peer window 4035 KiB, srtt 16 ms, rto 200 ms
+[   46.026005] INFO  mem: 3 connection(s), heap 1483 KiB in blocks (1118 KiB requested), frame buffers 276 KiB: 180128 B per connection in heap blocks (141140 B requested), frame buffers excluded
+[   46.027115] INFO  dataplane: core 0: busy 49%, work 37% (rx 26%, of it tls 20%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 54560 frame(s) dispatched, 1734760 loop passes in 5000 ms, longest stall 10363 us
+[   50.035000] INFO  mqtt: core 0 paused 77 publisher(s) for a full single subscriber since the last report, 41 ms in all, 0 ran out (read and dropped again)
+[   51.026234] INFO  tcp: core 0: 48558 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   51.026236] INFO  tcp: core 0: 479 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   51.027115] INFO  dataplane: core 0: busy 46%, work 33% (rx 23%, of it tls 18%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 48522 frame(s) dispatched, 1893537 loop passes in 5000 ms, longest stall 3636 us
+[   56.033659] INFO  tcp: core 0: 6 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[   56.033664] INFO  mem: 0 connection(s), heap 748 KiB in blocks (549 KiB requested), frame buffers 64 KiB: 0 B per connection in heap blocks (0 B requested), frame buffers excluded
+[   56.033736] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 7 frame(s) dispatched, 1109201 loop passes in 5006 ms, longest stall 159 us
+[   56.214001] INFO  handshakes: core 0: 1 started, 1 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 1 at most; accept to done: mean 1...
+[   60.053194] INFO  mqtt: core 0 paused 1565 publisher(s) for a full single subscriber since the last report, 307 ms in all, 0 ran out (read and dropped again)
+[   61.033118] INFO  tcp: core 0: 36404 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   61.033120] INFO  tcp: core 0: 790 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   61.033121] INFO  tcp: core 0: busiest sender: 146 KiB queued, 146 KiB in flight, cwnd 858 KiB, ssthresh 1048576 KiB, peer window 4075 KiB, srtt 13 ms, rto 200 ms
+[   61.033937] INFO  dataplane: core 0: busy 32%, work 16% (rx 4%, of it tls 3%, poll 5%, tcp 2%, mesh 1%, nic 1%), 3 connection(s) accepted (273901 us of work, 51271 us of it TLS, each), 36404 frame(s) dispatched, 2316660 loop passes in 5000 ms, longest stall 1229 us
+[   61.214393] INFO  handshakes: core 0: 2 started, 2 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   65.970178] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 19 us, max 22 us per commit), 0 error(s)
+[   66.033000] INFO  tcp: core 0: 41136 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   66.033002] INFO  tcp: core 0: 478 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   66.033003] INFO  tcp: core 0: busiest sender: 153 KiB queued, 153 KiB in flight, cwnd 858 KiB, ssthresh 1048576 KiB, peer window 4080 KiB, srtt 14 ms, rto 200 ms
+[   66.033004] INFO  mem: 3 connection(s), heap 2015 KiB in blocks (1385 KiB requested), frame buffers 292 KiB: 354912 B per connection in heap blocks (227441 B requested), frame buffers excluded
+[   66.033937] INFO  dataplane: core 0: busy 33%, work 17% (rx 4%, of it tls 3%, poll 6%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 41136 frame(s) dispatched, 2360269 loop passes in 5000 ms, longest stall 892 us
+[   70.053184] INFO  mqtt: core 0 paused 3478 publisher(s) for a full single subscriber since the last report, 647 ms in all, 0 ran out (read and dropped again)
+[   71.033000] INFO  tcp: core 0: 25123 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   71.033002] INFO  tcp: core 0: 330 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   71.034194] INFO  dataplane: core 0: busy 30%, work 14% (rx 2%, of it tls 2%, poll 5%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 25123 frame(s) dispatched, 2478001 loop passes in 5000 ms, longest stall 683 us
+[   75.972605] INFO  db: 1 op(s) in 1 commit(s) over 10 s (avg 30 us, max 30 us per commit), 0 error(s)
+[   76.033022] INFO  tcp: core 0: 19 seg(s) in, cookies 1 sent/1 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   76.033025] INFO  tcp: core 0: 0 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 1 connection(s) with window scaling, 1 with SACK
+[   76.033028] INFO  mem: 1 connection(s), heap 761 KiB in blocks (559 KiB requested), frame buffers 64 KiB: 13312 B per connection in heap blocks (10773 B requested), frame buffers excluded
+[   76.034404] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 1 connection(s) accepted (190032 us of work, 559 us of it TLS, each), 19 frame(s) dispatched, 842524 loop passes in 5000 ms, longest stall 154 us
+[   76.223167] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   80.073053] INFO  mqtt: core 0 paused 1736 publisher(s) for a full single subscriber since the last report, 399 ms in all, 0 ran out (read and dropped again)
+[   81.033148] INFO  tcp: core 0: 41679 seg(s) in, cookies 2 sent/2 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   81.033150] INFO  tcp: core 0: 1017 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 2 connection(s) with window scaling, 2 with SACK
+[   81.033151] INFO  tcp: core 0: busiest sender: 166 KiB queued, 166 KiB in flight, cwnd 798 KiB, ssthresh 1048576 KiB, peer window 2018 KiB, srtt 14 ms, rto 200 ms
+[   81.034405] INFO  dataplane: core 0: busy 35%, work 19% (rx 5%, of it tls 4%, poll 7%, tcp 2%, mesh 1%, nic 2%), 2 connection(s) accepted (483859 us of work, 107657 us of it TLS, each), 41679 frame(s) dispatched, 1864236 loop passes in 5000 ms, longest stall 1210 us
+[   85.980778] INFO  db: 2 op(s) in 1 commit(s) over 10 s (avg 22 us, max 22 us per commit), 0 error(s)
+[   86.033262] INFO  tcp: core 0: 43868 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   86.033268] INFO  tcp: core 0: 385 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   86.033269] INFO  tcp: core 0: busiest sender: 211 KiB queued, 211 KiB in flight, cwnd 798 KiB, ssthresh 1048576 KiB, peer window 2018 KiB, srtt 14 ms, rto 200 ms
+[   86.033270] INFO  mem: 3 connection(s), heap 1923 KiB in blocks (1184 KiB requested), frame buffers 196 KiB: 356202 B per connection in heap blocks (183380 B requested), frame buffers excluded
+[   86.034572] INFO  dataplane: core 0: busy 35%, work 20% (rx 6%, of it tls 4%, poll 7%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 43868 frame(s) dispatched, 1795121 loop passes in 5000 ms, longest stall 1034 us
+[   90.073202] INFO  mqtt: core 0 paused 3454 publisher(s) for a full single subscriber since the last report, 838 ms in all, 0 ran out (read and dropped again)
+[   91.033273] INFO  tcp: core 0: 19721 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+SYSVAL $SYS/broker/arch=aarch64
+SYSVAL $SYS/broker/clients/connected=3
+SYSVAL $SYS/broker/clients/total=3
+SYSVAL $SYS/broker/connections/refused=0
+SYSVAL $SYS/broker/console/dropped=0
+SYSVAL $SYS/broker/cpu/accepted/0=12
+SYSVAL $SYS/broker/cpu/accepted/1=0
+SYSVAL $SYS/broker/cpu/busy/0=35
+SYSVAL $SYS/broker/cpu/busy/1=2
+SYSVAL $SYS/broker/cpu/cores=2
+SYSVAL $SYS/broker/disk/total=52428800
+SYSVAL $SYS/broker/disk/used=127728
+SYSVAL $SYS/broker/entropy/source=virtio-rng
+SYSVAL $SYS/broker/frames/dropped/nic=0
+SYSVAL $SYS/broker/frames/dropped/steer=0
+SYSVAL $SYS/broker/frames/dropped/worker_tx=0
+SYSVAL $SYS/broker/handshakes/done=12
+SYSVAL $SYS/broker/handshakes/failed=0
+SYSVAL $SYS/broker/handshakes/in_flight=0
+SYSVAL $SYS/broker/handshakes/in_flight_max=0
+SYSVAL $SYS/broker/handshakes/latency_max_ms=0
+SYSVAL $SYS/broker/handshakes/latency_sum_ms=208
+SYSVAL $SYS/broker/handshakes/refused=0
+SYSVAL $SYS/broker/handshakes/slow=0
+SYSVAL $SYS/broker/handshakes/started=12
+SYSVAL $SYS/broker/handshakes/syn_dropped=0
+SYSVAL $SYS/broker/handshakes/timed_out=0
+SYSVAL $SYS/broker/memory/total=268435456
+SYSVAL $SYS/broker/memory/used=2032128
+SYSVAL $SYS/broker/messages/backpressure/holding=0
+SYSVAL $SYS/broker/messages/backpressure/mode=single
+SYSVAL $SYS/broker/messages/backpressure/paused=9048
+SYSVAL $SYS/broker/messages/backpressure/paused_ms=1973
+SYSVAL $SYS/broker/messages/backpressure/timeouts=0
+SYSVAL $SYS/broker/messages/dropped/cross_core=0
+SYSVAL $SYS/broker/messages/dropped/offline=0
+SYSVAL $SYS/broker/messages/dropped/publish_rate=0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=0
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=0
+SYSVAL $SYS/broker/messages/received=3283289
+SYSVAL $SYS/broker/messages/sent=3267482
+SYSVAL $SYS/broker/net/mtu=1500
+SYSVAL $SYS/broker/plaintext/enabled=false
+SYSVAL $SYS/broker/retained=0
+SYSVAL $SYS/broker/subscriptions=3
+SYSVAL $SYS/broker/time/offset_ms=unknown
+SYSVAL $SYS/broker/time/source=rtc
+SYSVAL $SYS/broker/tls/server_cert_days=814
+SYSVAL $SYS/broker/uptime=86
+SYSVAL $SYS/broker/version=v0.4.2-19-g572afe3-dirty
+### console single-flow qos=1 payload=64 rep=1
+[   31.020006] INFO  tcp: core 0: 51475 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   31.020008] INFO  tcp: core 0: 521 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   31.020009] INFO  tcp: core 0: busiest sender: 181 KiB queued, 181 KiB in flight, cwnd 944 KiB, ssthresh 1048576 KiB, peer window 1863 KiB, srtt 14 ms, rto 200 ms
+[   31.020823] INFO  dataplane: core 0: busy 51%, work 39% (rx 28%, of it tls 22%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 51476 frame(s) dispatched, 1533677 loop passes in 5000 ms, longest stall 8888 us
+[   36.026576] INFO  tcp: core 0: 4150 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[   36.026579] INFO  mem: 0 connection(s), heap 743 KiB in blocks (546 KiB requested), frame buffers 64 KiB: 0 B per connection in heap blocks (0 B requested), frame buffers excluded
+[   36.026633] INFO  dataplane: core 0: busy 17%, work 7% (rx 1%, of it tls 1%, poll 2%, tcp 1%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 4150 frame(s) dispatched, 1512333 loop passes in 5005 ms, longest stall 491 us
+[   40.035001] INFO  mqtt: core 0 paused 34 publisher(s) for a full single subscriber since the last report, 15 ms in all, 0 ran out (read and dropped again)
+[   41.026142] INFO  tcp: core 0: 34248 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   41.026144] INFO  tcp: core 0: 291 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   41.026145] INFO  tcp: core 0: busiest sender: 220 KiB queued, 220 KiB in flight, cwnd 849 KiB, ssthresh 1048576 KiB, peer window 4063 KiB, srtt 14 ms, rto 200 ms
+[   41.026634] INFO  dataplane: core 0: busy 35%, work 24% (rx 16%, of it tls 12%, poll 3%, tcp 1%, mesh 1%, nic 1%), 3 connection(s) accepted (402977 us of work, 211420 us of it TLS, each), 34248 frame(s) dispatched, 1537143 loop passes in 5000 ms, longest stall 3277 us
+[   41.193453] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   45.967166] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 20 us, max 23 us per commit), 0 error(s)
+[   46.026000] INFO  tcp: core 0: 54524 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   46.026002] INFO  tcp: core 0: 650 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   46.026003] INFO  tcp: core 0: busiest sender: 166 KiB queued, 166 KiB in flight, cwnd 874 KiB, ssthresh 1048576 KiB, peer window 4035 KiB, srtt 16 ms, rto 200 ms
+[   46.026005] INFO  mem: 3 connection(s), heap 1483 KiB in blocks (1118 KiB requested), frame buffers 276 KiB: 180128 B per connection in heap blocks (141140 B requested), frame buffers excluded
+[   46.027115] INFO  dataplane: core 0: busy 49%, work 37% (rx 26%, of it tls 20%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 54560 frame(s) dispatched, 1734760 loop passes in 5000 ms, longest stall 10363 us
+[   50.035000] INFO  mqtt: core 0 paused 77 publisher(s) for a full single subscriber since the last report, 41 ms in all, 0 ran out (read and dropped again)
+[   51.026234] INFO  tcp: core 0: 48558 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   51.026236] INFO  tcp: core 0: 479 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   51.027115] INFO  dataplane: core 0: busy 46%, work 33% (rx 23%, of it tls 18%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 48522 frame(s) dispatched, 1893537 loop passes in 5000 ms, longest stall 3636 us
+[   56.033659] INFO  tcp: core 0: 6 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[   56.033664] INFO  mem: 0 connection(s), heap 748 KiB in blocks (549 KiB requested), frame buffers 64 KiB: 0 B per connection in heap blocks (0 B requested), frame buffers excluded
+[   56.033736] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 7 frame(s) dispatched, 1109201 loop passes in 5006 ms, longest stall 159 us
+[   56.214001] INFO  handshakes: core 0: 1 started, 1 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 1 at most; accept to done: mean 1...
+[   60.053194] INFO  mqtt: core 0 paused 1565 publisher(s) for a full single subscriber since the last report, 307 ms in all, 0 ran out (read and dropped again)
+[   61.033118] INFO  tcp: core 0: 36404 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   61.033120] INFO  tcp: core 0: 790 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   61.033121] INFO  tcp: core 0: busiest sender: 146 KiB queued, 146 KiB in flight, cwnd 858 KiB, ssthresh 1048576 KiB, peer window 4075 KiB, srtt 13 ms, rto 200 ms
+[   61.033937] INFO  dataplane: core 0: busy 32%, work 16% (rx 4%, of it tls 3%, poll 5%, tcp 2%, mesh 1%, nic 1%), 3 connection(s) accepted (273901 us of work, 51271 us of it TLS, each), 36404 frame(s) dispatched, 2316660 loop passes in 5000 ms, longest stall 1229 us
+[   61.214393] INFO  handshakes: core 0: 2 started, 2 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   65.970178] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 19 us, max 22 us per commit), 0 error(s)
+[   66.033000] INFO  tcp: core 0: 41136 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   66.033002] INFO  tcp: core 0: 478 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   66.033003] INFO  tcp: core 0: busiest sender: 153 KiB queued, 153 KiB in flight, cwnd 858 KiB, ssthresh 1048576 KiB, peer window 4080 KiB, srtt 14 ms, rto 200 ms
+[   66.033004] INFO  mem: 3 connection(s), heap 2015 KiB in blocks (1385 KiB requested), frame buffers 292 KiB: 354912 B per connection in heap blocks (227441 B requested), frame buffers excluded
+[   66.033937] INFO  dataplane: core 0: busy 33%, work 17% (rx 4%, of it tls 3%, poll 6%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 41136 frame(s) dispatched, 2360269 loop passes in 5000 ms, longest stall 892 us
+[   70.053184] INFO  mqtt: core 0 paused 3478 publisher(s) for a full single subscriber since the last report, 647 ms in all, 0 ran out (read and dropped again)
+[   71.033000] INFO  tcp: core 0: 25123 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   71.033002] INFO  tcp: core 0: 330 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   71.034194] INFO  dataplane: core 0: busy 30%, work 14% (rx 2%, of it tls 2%, poll 5%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 25123 frame(s) dispatched, 2478001 loop passes in 5000 ms, longest stall 683 us
+[   75.972605] INFO  db: 1 op(s) in 1 commit(s) over 10 s (avg 30 us, max 30 us per commit), 0 error(s)
+[   76.033022] INFO  tcp: core 0: 19 seg(s) in, cookies 1 sent/1 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   76.033025] INFO  tcp: core 0: 0 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 1 connection(s) with window scaling, 1 with SACK
+[   76.033028] INFO  mem: 1 connection(s), heap 761 KiB in blocks (559 KiB requested), frame buffers 64 KiB: 13312 B per connection in heap blocks (10773 B requested), frame buffers excluded
+[   76.034404] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 1 connection(s) accepted (190032 us of work, 559 us of it TLS, each), 19 frame(s) dispatched, 842524 loop passes in 5000 ms, longest stall 154 us
+[   76.223167] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   80.073053] INFO  mqtt: core 0 paused 1736 publisher(s) for a full single subscriber since the last report, 399 ms in all, 0 ran out (read and dropped again)
+[   81.033148] INFO  tcp: core 0: 41679 seg(s) in, cookies 2 sent/2 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   81.033150] INFO  tcp: core 0: 1017 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 2 connection(s) with window scaling, 2 with SACK
+[   81.033151] INFO  tcp: core 0: busiest sender: 166 KiB queued, 166 KiB in flight, cwnd 798 KiB, ssthresh 1048576 KiB, peer window 2018 KiB, srtt 14 ms, rto 200 ms
+[   81.034405] INFO  dataplane: core 0: busy 35%, work 19% (rx 5%, of it tls 4%, poll 7%, tcp 2%, mesh 1%, nic 2%), 2 connection(s) accepted (483859 us of work, 107657 us of it TLS, each), 41679 frame(s) dispatched, 1864236 loop passes in 5000 ms, longest stall 1210 us
+[   85.980778] INFO  db: 2 op(s) in 1 commit(s) over 10 s (avg 22 us, max 22 us per commit), 0 error(s)
+[   86.033262] INFO  tcp: core 0: 43868 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   86.033268] INFO  tcp: core 0: 385 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   86.033269] INFO  tcp: core 0: busiest sender: 211 KiB queued, 211 KiB in flight, cwnd 798 KiB, ssthresh 1048576 KiB, peer window 2018 KiB, srtt 14 ms, rto 200 ms
+[   86.033270] INFO  mem: 3 connection(s), heap 1923 KiB in blocks (1184 KiB requested), frame buffers 196 KiB: 356202 B per connection in heap blocks (183380 B requested), frame buffers excluded
+[   86.034572] INFO  dataplane: core 0: busy 35%, work 20% (rx 6%, of it tls 4%, poll 7%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 43868 frame(s) dispatched, 1795121 loop passes in 5000 ms, longest stall 1034 us
+[   90.073202] INFO  mqtt: core 0 paused 3454 publisher(s) for a full single subscriber since the last report, 838 ms in all, 0 ran out (read and dropped again)
+[   91.033273] INFO  tcp: core 0: 19721 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   91.033276] INFO  tcp: core 0: 231 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   91.034573] INFO  dataplane: core 0: busy 30%, work 14% (rx 2%, of it tls 2%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 19721 frame(s) dispatched, 1922682 loop passes in 5000 ms, longest stall 3772 us
+[   95.986755] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 31 us, max 40 us per commit), 0 error(s)
+[   96.033000] INFO  tcp: core 0: 1591 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   96.033003] INFO  tcp: core 0: 0 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   96.033004] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 15 ms, rto 200 ms
+[   96.033007] INFO  mem: 3 connection(s), heap 785 KiB in blocks (577 KiB requested), frame buffers 70 KiB: 10730 B per connection in heap blocks (8301 B requested), frame buffers excluded
+[   96.034664] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 3 connection(s) accepted (65817 us of work, 1788 us of it TLS, each), 1591 frame(s) dispatched, 653738 loop passes in 5000 ms, longest stall 16246 us
+[   96.034667] INFO  stalls: core 0: 30 late tick(s), worst 21453 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 34 of 256
+[   96.300002] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[  100.081001] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 4272 (queue full); 0 publish(es) over the rate limit
+[  101.033000] INFO  tcp: core 0: 9830 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  101.033006] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 14 ms, rto 200 ms
+[  101.034666] INFO  dataplane: core 0: busy 27%, work 10% (rx 0%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9830 frame(s) dispatched, 2198275 loop passes in 5000 ms, longest stall 2561 us
+[  106.033076] INFO  tcp: core 0: 9609 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  106.033079] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 15 ms, rto 200 ms
+[  106.033081] INFO  mem: 3 connection(s), heap 780 KiB in blocks (571 KiB requested), frame buffers 72 KiB: 8394 B per connection in heap blocks (5690 B requested), frame buffers excluded
+[  106.034818] INFO  dataplane: core 0: busy 27%, work 10% (rx 1%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9609 frame(s) dispatched, 2050485 loop passes in 5000 ms, longest stall 4247 us
+[  106.088005] INFO  stalls: core 1: 52 late tick(s), worst 22728 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 0 of 0
+[  110.081226] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 6278 (queue full); 0 publish(es) over the rate limit
+SYSVAL $SYS/broker/arch=aarch64
+SYSVAL $SYS/broker/clients/connected=3
+SYSVAL $SYS/broker/clients/total=3
+SYSVAL $SYS/broker/connections/refused=0
+SYSVAL $SYS/broker/console/dropped=0
+SYSVAL $SYS/broker/cpu/accepted/0=15
+SYSVAL $SYS/broker/cpu/accepted/1=0
+SYSVAL $SYS/broker/cpu/busy/0=27
+SYSVAL $SYS/broker/cpu/busy/1=2
+SYSVAL $SYS/broker/cpu/cores=2
+SYSVAL $SYS/broker/disk/total=52428800
+SYSVAL $SYS/broker/disk/used=144208
+SYSVAL $SYS/broker/entropy/source=virtio-rng
+SYSVAL $SYS/broker/frames/dropped/nic=0
+SYSVAL $SYS/broker/frames/dropped/steer=0
+SYSVAL $SYS/broker/frames/dropped/worker_tx=0
+SYSVAL $SYS/broker/handshakes/done=15
+SYSVAL $SYS/broker/handshakes/failed=0
+SYSVAL $SYS/broker/handshakes/in_flight=0
+SYSVAL $SYS/broker/handshakes/in_flight_max=0
+SYSVAL $SYS/broker/handshakes/latency_max_ms=0
+SYSVAL $SYS/broker/handshakes/latency_sum_ms=261
+SYSVAL $SYS/broker/handshakes/refused=0
+SYSVAL $SYS/broker/handshakes/slow=0
+SYSVAL $SYS/broker/handshakes/started=15
+SYSVAL $SYS/broker/handshakes/syn_dropped=0
+SYSVAL $SYS/broker/handshakes/timed_out=0
+SYSVAL $SYS/broker/memory/total=268435456
+SYSVAL $SYS/broker/memory/used=860160
+SYSVAL $SYS/broker/messages/backpressure/holding=0
+SYSVAL $SYS/broker/messages/backpressure/mode=single
+SYSVAL $SYS/broker/messages/backpressure/paused=10470
+SYSVAL $SYS/broker/messages/backpressure/paused_ms=2328
+SYSVAL $SYS/broker/messages/backpressure/timeouts=0
+SYSVAL $SYS/broker/messages/dropped/cross_core=0
+SYSVAL $SYS/broker/messages/dropped/offline=0
+SYSVAL $SYS/broker/messages/dropped/publish_rate=0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=8624
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=0
+SYSVAL $SYS/broker/messages/received=3334879
+SYSVAL $SYS/broker/messages/sent=3309448
+SYSVAL $SYS/broker/net/mtu=1500
+SYSVAL $SYS/broker/plaintext/enabled=false
+SYSVAL $SYS/broker/retained=0
+SYSVAL $SYS/broker/subscriptions=3
+SYSVAL $SYS/broker/time/offset_ms=unknown
+SYSVAL $SYS/broker/time/source=rtc
+SYSVAL $SYS/broker/tls/server_cert_days=814
+SYSVAL $SYS/broker/uptime=106
+SYSVAL $SYS/broker/version=v0.4.2-19-g572afe3-dirty
+### console single-flow qos=1 payload=64 rep=2
+[   51.026234] INFO  tcp: core 0: 48558 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   51.026236] INFO  tcp: core 0: 479 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   51.027115] INFO  dataplane: core 0: busy 46%, work 33% (rx 23%, of it tls 18%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 48522 frame(s) dispatched, 1893537 loop passes in 5000 ms, longest stall 3636 us
+[   56.033659] INFO  tcp: core 0: 6 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[   56.033664] INFO  mem: 0 connection(s), heap 748 KiB in blocks (549 KiB requested), frame buffers 64 KiB: 0 B per connection in heap blocks (0 B requested), frame buffers excluded
+[   56.033736] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 7 frame(s) dispatched, 1109201 loop passes in 5006 ms, longest stall 159 us
+[   56.214001] INFO  handshakes: core 0: 1 started, 1 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 1 at most; accept to done: mean 1...
+[   60.053194] INFO  mqtt: core 0 paused 1565 publisher(s) for a full single subscriber since the last report, 307 ms in all, 0 ran out (read and dropped again)
+[   61.033118] INFO  tcp: core 0: 36404 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   61.033120] INFO  tcp: core 0: 790 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   61.033121] INFO  tcp: core 0: busiest sender: 146 KiB queued, 146 KiB in flight, cwnd 858 KiB, ssthresh 1048576 KiB, peer window 4075 KiB, srtt 13 ms, rto 200 ms
+[   61.033937] INFO  dataplane: core 0: busy 32%, work 16% (rx 4%, of it tls 3%, poll 5%, tcp 2%, mesh 1%, nic 1%), 3 connection(s) accepted (273901 us of work, 51271 us of it TLS, each), 36404 frame(s) dispatched, 2316660 loop passes in 5000 ms, longest stall 1229 us
+[   61.214393] INFO  handshakes: core 0: 2 started, 2 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   65.970178] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 19 us, max 22 us per commit), 0 error(s)
+[   66.033000] INFO  tcp: core 0: 41136 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   66.033002] INFO  tcp: core 0: 478 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   66.033003] INFO  tcp: core 0: busiest sender: 153 KiB queued, 153 KiB in flight, cwnd 858 KiB, ssthresh 1048576 KiB, peer window 4080 KiB, srtt 14 ms, rto 200 ms
+[   66.033004] INFO  mem: 3 connection(s), heap 2015 KiB in blocks (1385 KiB requested), frame buffers 292 KiB: 354912 B per connection in heap blocks (227441 B requested), frame buffers excluded
+[   66.033937] INFO  dataplane: core 0: busy 33%, work 17% (rx 4%, of it tls 3%, poll 6%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 41136 frame(s) dispatched, 2360269 loop passes in 5000 ms, longest stall 892 us
+[   70.053184] INFO  mqtt: core 0 paused 3478 publisher(s) for a full single subscriber since the last report, 647 ms in all, 0 ran out (read and dropped again)
+[   71.033000] INFO  tcp: core 0: 25123 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   71.033002] INFO  tcp: core 0: 330 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   71.034194] INFO  dataplane: core 0: busy 30%, work 14% (rx 2%, of it tls 2%, poll 5%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 25123 frame(s) dispatched, 2478001 loop passes in 5000 ms, longest stall 683 us
+[   75.972605] INFO  db: 1 op(s) in 1 commit(s) over 10 s (avg 30 us, max 30 us per commit), 0 error(s)
+[   76.033022] INFO  tcp: core 0: 19 seg(s) in, cookies 1 sent/1 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   76.033025] INFO  tcp: core 0: 0 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 1 connection(s) with window scaling, 1 with SACK
+[   76.033028] INFO  mem: 1 connection(s), heap 761 KiB in blocks (559 KiB requested), frame buffers 64 KiB: 13312 B per connection in heap blocks (10773 B requested), frame buffers excluded
+[   76.034404] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 1 connection(s) accepted (190032 us of work, 559 us of it TLS, each), 19 frame(s) dispatched, 842524 loop passes in 5000 ms, longest stall 154 us
+[   76.223167] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   80.073053] INFO  mqtt: core 0 paused 1736 publisher(s) for a full single subscriber since the last report, 399 ms in all, 0 ran out (read and dropped again)
+[   81.033148] INFO  tcp: core 0: 41679 seg(s) in, cookies 2 sent/2 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   81.033150] INFO  tcp: core 0: 1017 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 2 connection(s) with window scaling, 2 with SACK
+[   81.033151] INFO  tcp: core 0: busiest sender: 166 KiB queued, 166 KiB in flight, cwnd 798 KiB, ssthresh 1048576 KiB, peer window 2018 KiB, srtt 14 ms, rto 200 ms
+[   81.034405] INFO  dataplane: core 0: busy 35%, work 19% (rx 5%, of it tls 4%, poll 7%, tcp 2%, mesh 1%, nic 2%), 2 connection(s) accepted (483859 us of work, 107657 us of it TLS, each), 41679 frame(s) dispatched, 1864236 loop passes in 5000 ms, longest stall 1210 us
+[   85.980778] INFO  db: 2 op(s) in 1 commit(s) over 10 s (avg 22 us, max 22 us per commit), 0 error(s)
+[   86.033262] INFO  tcp: core 0: 43868 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   86.033268] INFO  tcp: core 0: 385 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   86.033269] INFO  tcp: core 0: busiest sender: 211 KiB queued, 211 KiB in flight, cwnd 798 KiB, ssthresh 1048576 KiB, peer window 2018 KiB, srtt 14 ms, rto 200 ms
+[   86.033270] INFO  mem: 3 connection(s), heap 1923 KiB in blocks (1184 KiB requested), frame buffers 196 KiB: 356202 B per connection in heap blocks (183380 B requested), frame buffers excluded
+[   86.034572] INFO  dataplane: core 0: busy 35%, work 20% (rx 6%, of it tls 4%, poll 7%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 43868 frame(s) dispatched, 1795121 loop passes in 5000 ms, longest stall 1034 us
+[   90.073202] INFO  mqtt: core 0 paused 3454 publisher(s) for a full single subscriber since the last report, 838 ms in all, 0 ran out (read and dropped again)
+[   91.033273] INFO  tcp: core 0: 19721 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   91.033276] INFO  tcp: core 0: 231 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   91.034573] INFO  dataplane: core 0: busy 30%, work 14% (rx 2%, of it tls 2%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 19721 frame(s) dispatched, 1922682 loop passes in 5000 ms, longest stall 3772 us
+[   95.986755] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 31 us, max 40 us per commit), 0 error(s)
+[   96.033000] INFO  tcp: core 0: 1591 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   96.033003] INFO  tcp: core 0: 0 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   96.033004] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 15 ms, rto 200 ms
+[   96.033007] INFO  mem: 3 connection(s), heap 785 KiB in blocks (577 KiB requested), frame buffers 70 KiB: 10730 B per connection in heap blocks (8301 B requested), frame buffers excluded
+[   96.034664] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 3 connection(s) accepted (65817 us of work, 1788 us of it TLS, each), 1591 frame(s) dispatched, 653738 loop passes in 5000 ms, longest stall 16246 us
+[   96.034667] INFO  stalls: core 0: 30 late tick(s), worst 21453 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 34 of 256
+[   96.300002] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[  100.081001] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 4272 (queue full); 0 publish(es) over the rate limit
+[  101.033000] INFO  tcp: core 0: 9830 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  101.033006] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 14 ms, rto 200 ms
+[  101.034666] INFO  dataplane: core 0: busy 27%, work 10% (rx 0%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9830 frame(s) dispatched, 2198275 loop passes in 5000 ms, longest stall 2561 us
+[  106.033076] INFO  tcp: core 0: 9609 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  106.033079] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 15 ms, rto 200 ms
+[  106.033081] INFO  mem: 3 connection(s), heap 780 KiB in blocks (571 KiB requested), frame buffers 72 KiB: 8394 B per connection in heap blocks (5690 B requested), frame buffers excluded
+[  106.034818] INFO  dataplane: core 0: busy 27%, work 10% (rx 1%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9609 frame(s) dispatched, 2050485 loop passes in 5000 ms, longest stall 4247 us
+[  106.088005] INFO  stalls: core 1: 52 late tick(s), worst 22728 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 0 of 0
+[  110.081226] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 6278 (queue full); 0 publish(es) over the rate limit
+[  111.041981] INFO  tcp: core 0: 2388 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[  111.041987] INFO  dataplane: core 0: busy 21%, work 8% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 2388 frame(s) dispatched, 1368325 loop passes in 5007 ms, longest stall 3061 us
+[  115.993808] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 47 us, max 51 us per commit), 0 error(s)
+[  116.033001] INFO  mem: 3 connection(s), heap 785 KiB in blocks (577 KiB requested), frame buffers 70 KiB: 10794 B per connection in heap blocks (8295 B requested), frame buffers excluded
+[  116.041000] INFO  tcp: core 0: 3367 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  116.041003] INFO  tcp: core 0: 0 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[  116.041005] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 28 KiB, ssthresh 1048576 KiB, peer window 83 KiB, srtt 14 ms, rto 200 ms
+[  116.042170] INFO  dataplane: core 0: busy 16%, work 6% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 1%, nic 1%), 3 connection(s) accepted (107184 us of work, 7079 us of it TLS, each), 3367 frame(s) dispatched, 752948 loop passes in 5000 ms, longest stall 2086 us
+[  116.354058] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[  120.093001] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 4956 (queue full); 0 publish(es) over the rate limit
+[  121.041031] INFO  tcp: core 0: 9761 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  121.041035] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 14 ms, rto 200 ms
+[  121.042286] INFO  dataplane: core 0: busy 27%, work 10% (rx 1%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9762 frame(s) dispatched, 1472337 loop passes in 5000 ms, longest stall 8447 us
+[  126.033001] INFO  mem: 3 connection(s), heap 777 KiB in blocks (569 KiB requested), frame buffers 70 KiB: 7978 B per connection in heap blocks (5517 B requested), frame buffers excluded
+[  126.041000] INFO  tcp: core 0: 9678 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  126.041003] INFO  tcp: core 0: busiest sender: 2 KiB queued, 2 KiB in flight, cwnd 28 KiB, ssthresh 1048576 KiB, peer window 84 KiB, srtt 16 ms, rto 200 ms
+[  126.042506] INFO  dataplane: core 0: busy 27%, work 10% (rx 1%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9678 frame(s) dispatched, 1410098 loop passes in 5000 ms, longest stall 2702 us
+SYSVAL $SYS/broker/arch=aarch64
+SYSVAL $SYS/broker/clients/connected=3
+SYSVAL $SYS/broker/clients/total=3
+SYSVAL $SYS/broker/connections/refused=0
+SYSVAL $SYS/broker/console/dropped=0
+SYSVAL $SYS/broker/cpu/accepted/0=18
+SYSVAL $SYS/broker/cpu/accepted/1=0
+SYSVAL $SYS/broker/cpu/busy/0=27
+SYSVAL $SYS/broker/cpu/busy/1=2
+SYSVAL $SYS/broker/cpu/cores=2
+SYSVAL $SYS/broker/disk/total=52428800
+SYSVAL $SYS/broker/disk/used=160688
+SYSVAL $SYS/broker/entropy/source=virtio-rng
+SYSVAL $SYS/broker/frames/dropped/nic=0
+SYSVAL $SYS/broker/frames/dropped/steer=0
+SYSVAL $SYS/broker/frames/dropped/worker_tx=0
+SYSVAL $SYS/broker/handshakes/done=18
+SYSVAL $SYS/broker/handshakes/failed=0
+SYSVAL $SYS/broker/handshakes/in_flight=0
+SYSVAL $SYS/broker/handshakes/in_flight_max=0
+SYSVAL $SYS/broker/handshakes/latency_max_ms=0
+SYSVAL $SYS/broker/handshakes/latency_sum_ms=311
+SYSVAL $SYS/broker/handshakes/refused=0
+SYSVAL $SYS/broker/handshakes/slow=0
+SYSVAL $SYS/broker/handshakes/started=18
+SYSVAL $SYS/broker/handshakes/syn_dropped=0
+SYSVAL $SYS/broker/handshakes/timed_out=0
+SYSVAL $SYS/broker/memory/total=268435456
+SYSVAL $SYS/broker/memory/used=860160
+SYSVAL $SYS/broker/messages/backpressure/holding=0
+SYSVAL $SYS/broker/messages/backpressure/mode=single
+SYSVAL $SYS/broker/messages/backpressure/paused=10470
+SYSVAL $SYS/broker/messages/backpressure/paused_ms=2328
+SYSVAL $SYS/broker/messages/backpressure/timeouts=0
+SYSVAL $SYS/broker/messages/dropped/cross_core=0
+SYSVAL $SYS/broker/messages/dropped/offline=0
+SYSVAL $SYS/broker/messages/dropped/publish_rate=0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=19911
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=0
+SYSVAL $SYS/broker/messages/received=3358480
+SYSVAL $SYS/broker/messages/sent=3321945
+SYSVAL $SYS/broker/net/mtu=1500
+SYSVAL $SYS/broker/plaintext/enabled=false
+SYSVAL $SYS/broker/retained=0
+SYSVAL $SYS/broker/subscriptions=3
+SYSVAL $SYS/broker/time/offset_ms=unknown
+SYSVAL $SYS/broker/time/source=rtc
+SYSVAL $SYS/broker/tls/server_cert_days=814
+SYSVAL $SYS/broker/uptime=126
+SYSVAL $SYS/broker/version=v0.4.2-19-g572afe3-dirty
+### console throughput qos=0 payload=64 pairs=16 rep=1
+[   66.033937] INFO  dataplane: core 0: busy 33%, work 17% (rx 4%, of it tls 3%, poll 6%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 41136 frame(s) dispatched, 2360269 loop passes in 5000 ms, longest stall 892 us
+[   70.053184] INFO  mqtt: core 0 paused 3478 publisher(s) for a full single subscriber since the last report, 647 ms in all, 0 ran out (read and dropped again)
+[   71.033000] INFO  tcp: core 0: 25123 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   71.033002] INFO  tcp: core 0: 330 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   71.034194] INFO  dataplane: core 0: busy 30%, work 14% (rx 2%, of it tls 2%, poll 5%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 25123 frame(s) dispatched, 2478001 loop passes in 5000 ms, longest stall 683 us
+[   75.972605] INFO  db: 1 op(s) in 1 commit(s) over 10 s (avg 30 us, max 30 us per commit), 0 error(s)
+[   76.033022] INFO  tcp: core 0: 19 seg(s) in, cookies 1 sent/1 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   76.033025] INFO  tcp: core 0: 0 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 1 connection(s) with window scaling, 1 with SACK
+[   76.033028] INFO  mem: 1 connection(s), heap 761 KiB in blocks (559 KiB requested), frame buffers 64 KiB: 13312 B per connection in heap blocks (10773 B requested), frame buffers excluded
+[   76.034404] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 1 connection(s) accepted (190032 us of work, 559 us of it TLS, each), 19 frame(s) dispatched, 842524 loop passes in 5000 ms, longest stall 154 us
+[   76.223167] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[   80.073053] INFO  mqtt: core 0 paused 1736 publisher(s) for a full single subscriber since the last report, 399 ms in all, 0 ran out (read and dropped again)
+[   81.033148] INFO  tcp: core 0: 41679 seg(s) in, cookies 2 sent/2 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   81.033150] INFO  tcp: core 0: 1017 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 2 connection(s) with window scaling, 2 with SACK
+[   81.033151] INFO  tcp: core 0: busiest sender: 166 KiB queued, 166 KiB in flight, cwnd 798 KiB, ssthresh 1048576 KiB, peer window 2018 KiB, srtt 14 ms, rto 200 ms
+[   81.034405] INFO  dataplane: core 0: busy 35%, work 19% (rx 5%, of it tls 4%, poll 7%, tcp 2%, mesh 1%, nic 2%), 2 connection(s) accepted (483859 us of work, 107657 us of it TLS, each), 41679 frame(s) dispatched, 1864236 loop passes in 5000 ms, longest stall 1210 us
+[   85.980778] INFO  db: 2 op(s) in 1 commit(s) over 10 s (avg 22 us, max 22 us per commit), 0 error(s)
+[   86.033262] INFO  tcp: core 0: 43868 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   86.033268] INFO  tcp: core 0: 385 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   86.033269] INFO  tcp: core 0: busiest sender: 211 KiB queued, 211 KiB in flight, cwnd 798 KiB, ssthresh 1048576 KiB, peer window 2018 KiB, srtt 14 ms, rto 200 ms
+[   86.033270] INFO  mem: 3 connection(s), heap 1923 KiB in blocks (1184 KiB requested), frame buffers 196 KiB: 356202 B per connection in heap blocks (183380 B requested), frame buffers excluded
+[   86.034572] INFO  dataplane: core 0: busy 35%, work 20% (rx 6%, of it tls 4%, poll 7%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 43868 frame(s) dispatched, 1795121 loop passes in 5000 ms, longest stall 1034 us
+[   90.073202] INFO  mqtt: core 0 paused 3454 publisher(s) for a full single subscriber since the last report, 838 ms in all, 0 ran out (read and dropped again)
+[   91.033273] INFO  tcp: core 0: 19721 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   91.033276] INFO  tcp: core 0: 231 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   91.034573] INFO  dataplane: core 0: busy 30%, work 14% (rx 2%, of it tls 2%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 19721 frame(s) dispatched, 1922682 loop passes in 5000 ms, longest stall 3772 us
+[   95.986755] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 31 us, max 40 us per commit), 0 error(s)
+[   96.033000] INFO  tcp: core 0: 1591 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   96.033003] INFO  tcp: core 0: 0 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   96.033004] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 15 ms, rto 200 ms
+[   96.033007] INFO  mem: 3 connection(s), heap 785 KiB in blocks (577 KiB requested), frame buffers 70 KiB: 10730 B per connection in heap blocks (8301 B requested), frame buffers excluded
+[   96.034664] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 3 connection(s) accepted (65817 us of work, 1788 us of it TLS, each), 1591 frame(s) dispatched, 653738 loop passes in 5000 ms, longest stall 16246 us
+[   96.034667] INFO  stalls: core 0: 30 late tick(s), worst 21453 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 34 of 256
+[   96.300002] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[  100.081001] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 4272 (queue full); 0 publish(es) over the rate limit
+[  101.033000] INFO  tcp: core 0: 9830 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  101.033006] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 14 ms, rto 200 ms
+[  101.034666] INFO  dataplane: core 0: busy 27%, work 10% (rx 0%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9830 frame(s) dispatched, 2198275 loop passes in 5000 ms, longest stall 2561 us
+[  106.033076] INFO  tcp: core 0: 9609 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  106.033079] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 15 ms, rto 200 ms
+[  106.033081] INFO  mem: 3 connection(s), heap 780 KiB in blocks (571 KiB requested), frame buffers 72 KiB: 8394 B per connection in heap blocks (5690 B requested), frame buffers excluded
+[  106.034818] INFO  dataplane: core 0: busy 27%, work 10% (rx 1%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9609 frame(s) dispatched, 2050485 loop passes in 5000 ms, longest stall 4247 us
+[  106.088005] INFO  stalls: core 1: 52 late tick(s), worst 22728 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 0 of 0
+[  110.081226] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 6278 (queue full); 0 publish(es) over the rate limit
+[  111.041981] INFO  tcp: core 0: 2388 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[  111.041987] INFO  dataplane: core 0: busy 21%, work 8% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 2388 frame(s) dispatched, 1368325 loop passes in 5007 ms, longest stall 3061 us
+[  115.993808] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 47 us, max 51 us per commit), 0 error(s)
+[  116.033001] INFO  mem: 3 connection(s), heap 785 KiB in blocks (577 KiB requested), frame buffers 70 KiB: 10794 B per connection in heap blocks (8295 B requested), frame buffers excluded
+[  116.041000] INFO  tcp: core 0: 3367 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  116.041003] INFO  tcp: core 0: 0 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[  116.041005] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 28 KiB, ssthresh 1048576 KiB, peer window 83 KiB, srtt 14 ms, rto 200 ms
+[  116.042170] INFO  dataplane: core 0: busy 16%, work 6% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 1%, nic 1%), 3 connection(s) accepted (107184 us of work, 7079 us of it TLS, each), 3367 frame(s) dispatched, 752948 loop passes in 5000 ms, longest stall 2086 us
+[  116.354058] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[  120.093001] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 4956 (queue full); 0 publish(es) over the rate limit
+[  121.041031] INFO  tcp: core 0: 9761 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  121.041035] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 14 ms, rto 200 ms
+[  121.042286] INFO  dataplane: core 0: busy 27%, work 10% (rx 1%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9762 frame(s) dispatched, 1472337 loop passes in 5000 ms, longest stall 8447 us
+[  126.033001] INFO  mem: 3 connection(s), heap 777 KiB in blocks (569 KiB requested), frame buffers 70 KiB: 7978 B per connection in heap blocks (5517 B requested), frame buffers excluded
+[  126.041000] INFO  tcp: core 0: 9678 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  126.041003] INFO  tcp: core 0: busiest sender: 2 KiB queued, 2 KiB in flight, cwnd 28 KiB, ssthresh 1048576 KiB, peer window 84 KiB, srtt 16 ms, rto 200 ms
+[  126.042506] INFO  dataplane: core 0: busy 27%, work 10% (rx 1%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9678 frame(s) dispatched, 1410098 loop passes in 5000 ms, longest stall 2702 us
+[  130.104185] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 5422 (queue full); 0 publish(es) over the rate limit
+[  131.046500] INFO  tcp: core 0: 473 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[  131.046509] INFO  dataplane: core 0: busy 16%, work 5% (rx 0%, of it tls 0%, poll 1%, tcp 1%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 473 frame(s) dispatched, 1353124 loop passes in 5004 ms, longest stall 644 us
+[  136.004152] INFO  db: 33 op(s) in 2 commit(s) over 10 s (avg 22 us, max 28 us per commit), 0 error(s)
+[  136.033275] INFO  mem: 33 connection(s), heap 3478 KiB in blocks (2366 KiB requested), frame buffers 1024 KiB: 54941 B per connection in heap blocks (34169 B requested), frame buffers excluded
+[  136.046186] INFO  tcp: core 0: 78858 seg(s) in, cookies 33 sent/33 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 10 retransmission(s) (3 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 33 connection(s)
+[  136.046189] INFO  tcp: core 0: 6344 out-of-order segment(s) kept, 0 not kept, 89776 byte(s) held now; 33 connection(s) with window scaling, 33 with SACK
+[  136.046190] INFO  tcp: core 0: busiest sender: 26 KiB queued, 26 KiB in flight, cwnd 109 KiB, ssthresh 100 KiB, peer window 754 KiB, srtt 14 ms, rto 200 ms
+[  136.046596] INFO  dataplane: core 0: busy 51%, work 42% (rx 32%, of it tls 25%, poll 6%, tcp 1%, mesh 0%, nic 1%), 33 connection(s) accepted (64533 us of work, 39200 us of it TLS, each), 78858 frame(s) dispatched, 885969 loop passes in 5000 ms, longest stall 13692 us
+[  136.046596] INFO  stalls: core 0: 8 late tick(s), worst 5234 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 256 of 256
+[  136.464186] INFO  handshakes: core 0: 33 started, 33 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 32 at most; accept to done: mea...
+[  140.106114] INFO  mqtt: core 0 paused 663 publisher(s) for a full single subscriber since the last report, 453 ms in all, 0 ran out (read and dropped again)
+[  141.046000] INFO  tcp: core 0: 118899 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 33 connection(s)
+[  141.046002] INFO  tcp: core 0: 5235 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[  141.046003] INFO  tcp: core 0: busiest sender: 33 KiB queued, 33 KiB in flight, cwnd 216 KiB, ssthresh 216 KiB, peer window 2104 KiB, srtt 14 ms, rto 200 ms
+[  141.046824] INFO  dataplane: core 0: busy 71%, work 61% (rx 49%, of it tls 38%, poll 8%, tcp 2%, mesh 0%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 118903 frame(s) dispatched, 1106726 loop passes in 5000 ms, longest stall 1274 us
+[  146.033001] INFO  mem: 1 connection(s), heap 1735 KiB in blocks (1288 KiB requested), frame buffers 1024 KiB: 28032 B per connection in heap blocks (23992 B requested), frame buffers excluded
+[  146.046000] INFO  tcp: core 0: 113230 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[  146.046004] INFO  tcp: core 0: 4784 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[  146.046006] INFO  tcp: core 0: busiest sender: 2 KiB queued, 2 KiB in flight, cwnd 28 KiB, ssthresh 1048576 KiB, peer window 84 KiB, srtt 15 ms, rto 200 ms
+[  146.047110] INFO  dataplane: core 0: busy 69%, work 59% (rx 47%, of it tls 37%, poll 7%, tcp 2%, mesh 0%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 113226 frame(s) dispatched, 1089661 loop passes in 5000 ms, longest stall 1458 us
+SYSVAL $SYS/broker/arch=aarch64
+SYSVAL $SYS/broker/clients/connected=33
+SYSVAL $SYS/broker/clients/total=33
+SYSVAL $SYS/broker/connections/refused=0
+SYSVAL $SYS/broker/console/dropped=0
+SYSVAL $SYS/broker/cpu/accepted/0=51
+SYSVAL $SYS/broker/cpu/accepted/1=0
+SYSVAL $SYS/broker/cpu/busy/0=71
+SYSVAL $SYS/broker/cpu/busy/1=2
+SYSVAL $SYS/broker/cpu/cores=2
+SYSVAL $SYS/broker/disk/total=52428800
+SYSVAL $SYS/broker/disk/used=177168
+SYSVAL $SYS/broker/entropy/source=virtio-rng
+SYSVAL $SYS/broker/frames/dropped/nic=0
+SYSVAL $SYS/broker/frames/dropped/steer=0
+SYSVAL $SYS/broker/frames/dropped/worker_tx=0
+SYSVAL $SYS/broker/handshakes/done=51
+SYSVAL $SYS/broker/handshakes/failed=0
+SYSVAL $SYS/broker/handshakes/in_flight=0
+SYSVAL $SYS/broker/handshakes/in_flight_max=0
+SYSVAL $SYS/broker/handshakes/latency_max_ms=0
+SYSVAL $SYS/broker/handshakes/latency_sum_ms=951
+SYSVAL $SYS/broker/handshakes/refused=0
+SYSVAL $SYS/broker/handshakes/slow=0
+SYSVAL $SYS/broker/handshakes/started=51
+SYSVAL $SYS/broker/handshakes/syn_dropped=0
+SYSVAL $SYS/broker/handshakes/timed_out=0
+SYSVAL $SYS/broker/memory/total=268435456
+SYSVAL $SYS/broker/memory/used=1916928
+SYSVAL $SYS/broker/messages/backpressure/holding=0
+SYSVAL $SYS/broker/messages/backpressure/mode=single
+SYSVAL $SYS/broker/messages/backpressure/paused=11415
+SYSVAL $SYS/broker/messages/backpressure/paused_ms=2980
+SYSVAL $SYS/broker/messages/backpressure/timeouts=0
+SYSVAL $SYS/broker/messages/dropped/cross_core=0
+SYSVAL $SYS/broker/messages/dropped/offline=0
+SYSVAL $SYS/broker/messages/dropped/publish_rate=0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=20928
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=0
+SYSVAL $SYS/broker/messages/received=6424964
+SYSVAL $SYS/broker/messages/sent=6387662
+SYSVAL $SYS/broker/net/mtu=1500
+SYSVAL $SYS/broker/plaintext/enabled=false
+SYSVAL $SYS/broker/retained=0
+SYSVAL $SYS/broker/subscriptions=18
+SYSVAL $SYS/broker/time/offset_ms=unknown
+SYSVAL $SYS/broker/time/source=rtc
+SYSVAL $SYS/broker/tls/server_cert_days=814
+SYSVAL $SYS/broker/uptime=146
+SYSVAL $SYS/broker/version=v0.4.2-19-g572afe3-dirty
+### console throughput qos=0 payload=64 pairs=16 rep=2
+[   90.073202] INFO  mqtt: core 0 paused 3454 publisher(s) for a full single subscriber since the last report, 838 ms in all, 0 ran out (read and dropped again)
+[   91.033273] INFO  tcp: core 0: 19721 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[   91.033276] INFO  tcp: core 0: 231 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[   91.034573] INFO  dataplane: core 0: busy 30%, work 14% (rx 2%, of it tls 2%, poll 5%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 19721 frame(s) dispatched, 1922682 loop passes in 5000 ms, longest stall 3772 us
+[   95.986755] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 31 us, max 40 us per commit), 0 error(s)
+[   96.033000] INFO  tcp: core 0: 1591 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[   96.033003] INFO  tcp: core 0: 0 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[   96.033004] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 15 ms, rto 200 ms
+[   96.033007] INFO  mem: 3 connection(s), heap 785 KiB in blocks (577 KiB requested), frame buffers 70 KiB: 10730 B per connection in heap blocks (8301 B requested), frame buffers excluded
+[   96.034664] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 3 connection(s) accepted (65817 us of work, 1788 us of it TLS, each), 1591 frame(s) dispatched, 653738 loop passes in 5000 ms, longest stall 16246 us
+[   96.034667] INFO  stalls: core 0: 30 late tick(s), worst 21453 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 34 of 256
+[   96.300002] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[  100.081001] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 4272 (queue full); 0 publish(es) over the rate limit
+[  101.033000] INFO  tcp: core 0: 9830 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  101.033006] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 14 ms, rto 200 ms
+[  101.034666] INFO  dataplane: core 0: busy 27%, work 10% (rx 0%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 2%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9830 frame(s) dispatched, 2198275 loop passes in 5000 ms, longest stall 2561 us
+[  106.033076] INFO  tcp: core 0: 9609 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  106.033079] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 15 ms, rto 200 ms
+[  106.033081] INFO  mem: 3 connection(s), heap 780 KiB in blocks (571 KiB requested), frame buffers 72 KiB: 8394 B per connection in heap blocks (5690 B requested), frame buffers excluded
+[  106.034818] INFO  dataplane: core 0: busy 27%, work 10% (rx 1%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9609 frame(s) dispatched, 2050485 loop passes in 5000 ms, longest stall 4247 us
+[  106.088005] INFO  stalls: core 1: 52 late tick(s), worst 22728 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 0 of 0
+[  110.081226] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 6278 (queue full); 0 publish(es) over the rate limit
+[  111.041981] INFO  tcp: core 0: 2388 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[  111.041987] INFO  dataplane: core 0: busy 21%, work 8% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 2388 frame(s) dispatched, 1368325 loop passes in 5007 ms, longest stall 3061 us
+[  115.993808] INFO  db: 3 op(s) in 2 commit(s) over 10 s (avg 47 us, max 51 us per commit), 0 error(s)
+[  116.033001] INFO  mem: 3 connection(s), heap 785 KiB in blocks (577 KiB requested), frame buffers 70 KiB: 10794 B per connection in heap blocks (8295 B requested), frame buffers excluded
+[  116.041000] INFO  tcp: core 0: 3367 seg(s) in, cookies 3 sent/3 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  116.041003] INFO  tcp: core 0: 0 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 3 connection(s) with window scaling, 3 with SACK
+[  116.041005] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 28 KiB, ssthresh 1048576 KiB, peer window 83 KiB, srtt 14 ms, rto 200 ms
+[  116.042170] INFO  dataplane: core 0: busy 16%, work 6% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 1%, nic 1%), 3 connection(s) accepted (107184 us of work, 7079 us of it TLS, each), 3367 frame(s) dispatched, 752948 loop passes in 5000 ms, longest stall 2086 us
+[  116.354058] INFO  handshakes: core 0: 3 started, 3 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 2 at most; accept to done: mean 1...
+[  120.093001] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 4956 (queue full); 0 publish(es) over the rate limit
+[  121.041031] INFO  tcp: core 0: 9761 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  121.041035] INFO  tcp: core 0: busiest sender: 1 KiB queued, 1 KiB in flight, cwnd 14 KiB, ssthresh 1048576 KiB, peer window 80 KiB, srtt 14 ms, rto 200 ms
+[  121.042286] INFO  dataplane: core 0: busy 27%, work 10% (rx 1%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9762 frame(s) dispatched, 1472337 loop passes in 5000 ms, longest stall 8447 us
+[  126.033001] INFO  mem: 3 connection(s), heap 777 KiB in blocks (569 KiB requested), frame buffers 70 KiB: 7978 B per connection in heap blocks (5517 B requested), frame buffers excluded
+[  126.041000] INFO  tcp: core 0: 9678 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 3 connection(s)
+[  126.041003] INFO  tcp: core 0: busiest sender: 2 KiB queued, 2 KiB in flight, cwnd 28 KiB, ssthresh 1048576 KiB, peer window 84 KiB, srtt 16 ms, rto 200 ms
+[  126.042506] INFO  dataplane: core 0: busy 27%, work 10% (rx 1%, of it tls 0%, poll 3%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 9678 frame(s) dispatched, 1410098 loop passes in 5000 ms, longest stall 2702 us
+[  130.104185] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 0 to a slow subscriber, 0 to an offline one; QoS 1 5422 (queue full); 0 publish(es) over the rate limit
+[  131.046500] INFO  tcp: core 0: 473 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[  131.046509] INFO  dataplane: core 0: busy 16%, work 5% (rx 0%, of it tls 0%, poll 1%, tcp 1%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 473 frame(s) dispatched, 1353124 loop passes in 5004 ms, longest stall 644 us
+[  136.004152] INFO  db: 33 op(s) in 2 commit(s) over 10 s (avg 22 us, max 28 us per commit), 0 error(s)
+[  136.033275] INFO  mem: 33 connection(s), heap 3478 KiB in blocks (2366 KiB requested), frame buffers 1024 KiB: 54941 B per connection in heap blocks (34169 B requested), frame buffers excluded
+[  136.046186] INFO  tcp: core 0: 78858 seg(s) in, cookies 33 sent/33 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 10 retransmission(s) (3 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 33 connection(s)
+[  136.046189] INFO  tcp: core 0: 6344 out-of-order segment(s) kept, 0 not kept, 89776 byte(s) held now; 33 connection(s) with window scaling, 33 with SACK
+[  136.046190] INFO  tcp: core 0: busiest sender: 26 KiB queued, 26 KiB in flight, cwnd 109 KiB, ssthresh 100 KiB, peer window 754 KiB, srtt 14 ms, rto 200 ms
+[  136.046596] INFO  dataplane: core 0: busy 51%, work 42% (rx 32%, of it tls 25%, poll 6%, tcp 1%, mesh 0%, nic 1%), 33 connection(s) accepted (64533 us of work, 39200 us of it TLS, each), 78858 frame(s) dispatched, 885969 loop passes in 5000 ms, longest stall 13692 us
+[  136.046596] INFO  stalls: core 0: 8 late tick(s), worst 5234 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 256 of 256
+[  136.464186] INFO  handshakes: core 0: 33 started, 33 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 32 at most; accept to done: mea...
+[  140.106114] INFO  mqtt: core 0 paused 663 publisher(s) for a full single subscriber since the last report, 453 ms in all, 0 ran out (read and dropped again)
+[  141.046000] INFO  tcp: core 0: 118899 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 33 connection(s)
+[  141.046002] INFO  tcp: core 0: 5235 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[  141.046003] INFO  tcp: core 0: busiest sender: 33 KiB queued, 33 KiB in flight, cwnd 216 KiB, ssthresh 216 KiB, peer window 2104 KiB, srtt 14 ms, rto 200 ms
+[  141.046824] INFO  dataplane: core 0: busy 71%, work 61% (rx 49%, of it tls 38%, poll 8%, tcp 2%, mesh 0%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 118903 frame(s) dispatched, 1106726 loop passes in 5000 ms, longest stall 1274 us
+[  146.033001] INFO  mem: 1 connection(s), heap 1735 KiB in blocks (1288 KiB requested), frame buffers 1024 KiB: 28032 B per connection in heap blocks (23992 B requested), frame buffers excluded
+[  146.046000] INFO  tcp: core 0: 113230 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[  146.046004] INFO  tcp: core 0: 4784 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[  146.046006] INFO  tcp: core 0: busiest sender: 2 KiB queued, 2 KiB in flight, cwnd 28 KiB, ssthresh 1048576 KiB, peer window 84 KiB, srtt 15 ms, rto 200 ms
+[  146.047110] INFO  dataplane: core 0: busy 69%, work 59% (rx 47%, of it tls 37%, poll 7%, tcp 2%, mesh 0%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 113226 frame(s) dispatched, 1089661 loop passes in 5000 ms, longest stall 1458 us
+[  150.123002] WARN  mqtt: core 0 did not deliver, since the last report: QoS 0 55 to a slow subscriber, 0 to an offline one; QoS 1 0 (queue full); 0 publish(es) over the rate limit
+[  150.123007] INFO  mqtt: core 0 paused 291 publisher(s) for a full single subscriber since the last report, 205 ms in all, 0 ran out (read and dropped again)
+[  151.051079] INFO  tcp: core 0: 10 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 0 connection(s)
+[  151.051091] INFO  dataplane: core 0: busy 11%, work 3% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 10 frame(s) dispatched, 681855 loop passes in 5003 ms, longest stall 682 us
+[  151.472090] INFO  handshakes: core 0: 1 started, 1 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 1 at most; accept to done: mean 1...
+[  156.019611] INFO  db: 33 op(s) in 3 commit(s) over 10 s (avg 44 us, max 66 us per commit), 0 error(s)
+[  156.033097] INFO  mem: 33 connection(s), heap 3702 KiB in blocks (2441 KiB requested), frame buffers 1024 KiB: 61891 B per connection in heap blocks (36479 B requested), frame buffers excluded
+[  156.051057] INFO  tcp: core 0: 101584 seg(s) in, cookies 33 sent/33 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 4 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 33 connection(s)
+[  156.051059] INFO  tcp: core 0: 6880 out-of-order segment(s) kept, 0 not kept, 98464 byte(s) held now; 33 connection(s) with window scaling, 33 with SACK
+[  156.051060] INFO  tcp: core 0: busiest sender: 39 KiB queued, 39 KiB in flight, cwnd 49 KiB, ssthresh 7 KiB, peer window 272 KiB, srtt 14 ms, rto 200 ms
+[  156.051090] INFO  dataplane: core 0: busy 66%, work 55% (rx 42%, of it tls 33%, poll 8%, tcp 2%, mesh 1%, nic 1%), 33 connection(s) accepted (84399 us of work, 50881 us of it TLS, each), 101584 frame(s) dispatched, 1122593 loop passes in 5000 ms, longest stall 3642 us
+[  156.051091] INFO  stalls: core 0: 0 late tick(s), worst 0 us; 0 us waiting for locks; host steal 0 us; NIC backlog peak 0; NIC receive queue peak 256 of 256
+[  156.474337] INFO  handshakes: core 0: 32 started, 32 done, 0 failed, 0 timed out; 0 refused at the ACK (rate 0, core 0, address 0, memory 0, storage 0); 0 SYN(s) dropped (rate 0, core 0, address 0, memory 0, storage 0); in flight 0 now / 32 at most; accept to done: mea...
+[  160.129191] INFO  mqtt: core 0 paused 730 publisher(s) for a full single subscriber since the last report, 842 ms in all, 0 ran out (read and dropped again)
+[  161.051168] INFO  dataplane: core 0: busy 74%, work 65% (rx 52%, of it tls 41%, poll 8%, tcp 2%, mesh 0%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 127069 frame(s) dispatched, 982396 loop passes in 5000 ms, longest stall 1494 us
+[  161.051170] INFO  tcp: core 0: 127047 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 33 connection(s)
+[  161.051171] INFO  tcp: core 0: 5560 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[  161.051172] INFO  tcp: core 0: busiest sender: 51 KiB queued, 51 KiB in flight, cwnd 172 KiB, ssthresh 1048576 KiB, peer window 506 KiB, srtt 14 ms, rto 200 ms
+[  166.033212] INFO  mem: 1 connection(s), heap 775 KiB in blocks (572 KiB requested), frame buffers 64 KiB: 28160 B per connection in heap blocks (24176 B requested), frame buffers excluded
+[  166.051000] INFO  tcp: core 0: 88979 seg(s) in, cookies 0 sent/0 ok/0 bad, 0 table full, 0 SYN(s) dropped, 0 refused by the app, 0 repeat(s) of refused flows, 0 retransmission(s) (0 fast, 0 timeouts), RST 0 sent (0 rate-limited), 0 bad seg(s), 1 connection(s)
+[  166.051003] INFO  tcp: core 0: 3646 out-of-order segment(s) kept, 0 not kept, 0 byte(s) held now; 0 connection(s) with window scaling, 0 with SACK
+[  166.051005] INFO  tcp: core 0: busiest sender: 0 KiB queued, 0 KiB in flight, cwnd 28 KiB, ssthresh 1048576 KiB, peer window 83 KiB, srtt 16 ms, rto 200 ms
+[  166.051325] INFO  dataplane: core 0: busy 59%, work 48% (rx 37%, of it tls 29%, poll 6%, tcp 2%, mesh 1%, nic 1%), 0 connection(s) accepted (0 us of work, 0 us of it TLS, each), 88957 frame(s) dispatched, 1255308 loop passes in 5000 ms, longest stall 1474 us
+SYSVAL $SYS/broker/arch=aarch64
+SYSVAL $SYS/broker/clients/connected=1
+SYSVAL $SYS/broker/clients/total=1
+SYSVAL $SYS/broker/connections/refused=0
+SYSVAL $SYS/broker/console/dropped=0
+SYSVAL $SYS/broker/cpu/accepted/0=84
+SYSVAL $SYS/broker/cpu/accepted/1=0
+SYSVAL $SYS/broker/cpu/busy/0=74
+SYSVAL $SYS/broker/cpu/busy/1=2
+SYSVAL $SYS/broker/cpu/cores=2
+SYSVAL $SYS/broker/disk/total=52428800
+SYSVAL $SYS/broker/disk/used=201888
+SYSVAL $SYS/broker/entropy/source=virtio-rng
+SYSVAL $SYS/broker/frames/dropped/nic=0
+SYSVAL $SYS/broker/frames/dropped/steer=0
+SYSVAL $SYS/broker/frames/dropped/worker_tx=0
+SYSVAL $SYS/broker/handshakes/done=84
+SYSVAL $SYS/broker/handshakes/failed=0
+SYSVAL $SYS/broker/handshakes/in_flight=0
+SYSVAL $SYS/broker/handshakes/in_flight_max=0
+SYSVAL $SYS/broker/handshakes/latency_max_ms=0
+SYSVAL $SYS/broker/handshakes/latency_sum_ms=1582
+SYSVAL $SYS/broker/handshakes/refused=0
+SYSVAL $SYS/broker/handshakes/slow=0
+SYSVAL $SYS/broker/handshakes/started=84
+SYSVAL $SYS/broker/handshakes/syn_dropped=0
+SYSVAL $SYS/broker/handshakes/timed_out=0
+SYSVAL $SYS/broker/memory/total=268435456
+SYSVAL $SYS/broker/memory/used=939008
+SYSVAL $SYS/broker/messages/backpressure/holding=0
+SYSVAL $SYS/broker/messages/backpressure/mode=single
+SYSVAL $SYS/broker/messages/backpressure/paused=12370
+SYSVAL $SYS/broker/messages/backpressure/paused_ms=3974
+SYSVAL $SYS/broker/messages/backpressure/timeouts=0
+SYSVAL $SYS/broker/messages/dropped/cross_core=0
+SYSVAL $SYS/broker/messages/dropped/offline=0
+SYSVAL $SYS/broker/messages/dropped/publish_rate=0
+SYSVAL $SYS/broker/messages/dropped/qos1_queue_full=20928
+SYSVAL $SYS/broker/messages/dropped/slow_subscriber=55
+SYSVAL $SYS/broker/messages/received=9792602
+SYSVAL $SYS/broker/messages/sent=9595532
+SYSVAL $SYS/broker/net/mtu=1500
+SYSVAL $SYS/broker/plaintext/enabled=false
+SYSVAL $SYS/broker/retained=0
+SYSVAL $SYS/broker/subscriptions=2
+SYSVAL $SYS/broker/time/offset_ms=unknown
+SYSVAL $SYS/broker/time/source=rtc
+SYSVAL $SYS/broker/tls/server_cert_days=814
+SYSVAL $SYS/broker/uptime=166
+SYSVAL $SYS/broker/version=v0.4.2-19-g572afe3-dirty

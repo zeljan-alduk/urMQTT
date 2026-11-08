@@ -32,6 +32,8 @@ TOPICS = [
     "messages/received", "messages/sent", "connections/refused", "tls/server_cert_days",
     "console/dropped", "net/mtu", "handshakes/started", "handshakes/done", "handshakes/refused",
     "handshakes/latency_max_ms", "cpu/accepted/0",
+    # Publisher back-pressure (ADR-269): the mode and the pause counter.
+    "messages/backpressure/mode", "messages/backpressure/paused",
 ]
 
 
@@ -250,6 +252,7 @@ try:
         doc["arch"] in ("aarch64", "x86_64") and doc["cpu"]["cores"] == len(doc["cpu"]["busy"]) >= 1
         and doc["memory"]["total"] > 0 and doc["clients"]["connected"] >= 1 and doc["uptime_s"] >= 0
         and doc["version"] and "server_cert_days" in doc["tls"] and "messages" in doc and "disk" in doc
+        and doc["backpressure"]["mode"] in ("single", "off") and doc["backpressure"]["paused"] >= 0
     )
 except (IndexError, ValueError, KeyError, TypeError) as e:
     good = False

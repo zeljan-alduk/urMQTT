@@ -140,6 +140,8 @@
   "enum.devices.virtio_vsock.on": "когда найдено, предупреждать, если его нет",
   "enum.websocket.auth.mtls": "клиентский сертификат, как на порту TLS",
   "enum.websocket.auth.password": "имя пользователя и пароль (для браузеров)",
+  "enum.limits.publisher_backpressure.single": "приостановить издателя, если его единственный подписчик заполнен",
+  "enum.limits.publisher_backpressure.off": "всегда читать; отбрасывать для медленного подписчика",
   "err.int": "Должно быть целое число.",
   "err.enum": "Не одно из допустимых значений.",
   "bar.title": "Сводка",

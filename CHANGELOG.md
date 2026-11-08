@@ -47,6 +47,16 @@ All notable changes to this project are documented here. The format follows
   (`crates/broker/tests/qos2_model.rs`); the `broker_acl` oracle checks the exactly-once rules; `broker_input` has
   seeds (QoS 2), replayed by `cargo test`. `cargo run --release -p urmqtt-broker --example throughput` measures the
   broker core's routing rate.
+- **Publisher back-pressure** (ADR-269, ROADMAP NOW-13): when a QoS 0 message has a single subscriber and that
+  subscriber cannot keep up, the broker stops reading the publisher (its TCP receive window closes) until the
+  subscriber has caught up, instead of reading and dropping; as Mosquitto behaves on one flow. With several data cores
+  the subscriber's shard asks the publisher's shard for the pause and the resume. On the local rig one flow now
+  delivers everything it accepts (0 dropped, PERFORMANCE §13.5); the VPS pair is not measured yet. Fan-out to two or more
+  subscribers keeps dropping for a slow one; QoS 1 keeps its in-flight window. A pause lasts 500 ms at most (then 2 s of
+  read-and-drop), never forms a cycle, counts as alive for keep-alive, and holds at most the TCP window it promised.
+  New key `limits.publisher_backpressure = "single" | "off"` (default `"single"`; `"off"` needs configuration format
+  8), `$SYS/broker/messages/backpressure/{mode,paused,paused_ms,timeouts,holding}`, `"backpressure"` in the info
+  reply, a `status` line, a boot line and a console line. `TcpStack::reset_recv_space`.
 - `docs/PERFORMANCE.md` §13: urMQTT v0.4.2, `main` (SACK, ADR-265/266) and Mosquitto 2.0.21 measured on two VPSes
   (Contabo x86_64 4 vCPU, netcup arm64 2 vCPU), each loaded from the other; raw files, tables and figures in
   `docs/perf-results/x11-2026-11-07/`, figures from the new `scripts/x11-charts.py`. Findings: with cores to use

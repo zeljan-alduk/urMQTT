@@ -140,6 +140,8 @@
   "enum.devices.virtio_vsock.on": "ha megvan, figyelmeztet, ha hiányzik",
   "enum.websocket.auth.mtls": "kliens tanúsítvány, mint a TLS porton",
   "enum.websocket.auth.password": "felhasználónév és jelszó (böngészőkhöz)",
+  "enum.limits.publisher_backpressure.single": "a közzétevő szüneteltetése, ha egyetlen előfizetője tele van",
+  "enum.limits.publisher_backpressure.off": "mindig olvasás; eldobás a lassú előfizetőnek",
   "err.int": "Egész számnak kell lennie.",
   "err.enum": "Nem a megengedett értékek egyike.",
   "bar.title": "Összegzés",

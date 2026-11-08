@@ -140,6 +140,8 @@
   "enum.devices.virtio_vsock.on": "kad se pronađe, upozori ako nedostaje",
   "enum.websocket.auth.mtls": "klijentski certifikat, kao na TLS portu",
   "enum.websocket.auth.password": "korisničko ime i lozinka (za preglednike)",
+  "enum.limits.publisher_backpressure.single": "zaustavi izdavača kad je jedini pretplatnik pun",
+  "enum.limits.publisher_backpressure.off": "uvijek čitaj; odbaci za sporog pretplatnika",
   "err.int": "Mora biti cijeli broj.",
   "err.enum": "Nije jedna od dopuštenih vrijednosti.",
   "bar.title": "Sažetak",

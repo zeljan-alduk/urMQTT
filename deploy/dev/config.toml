@@ -33,6 +33,9 @@ publish_rate_per_device = "10/s"
 handshakes_per_core_per_sec = 2000
 max_handshakes_in_flight_per_core = 256   # concurrent TLS handshakes per core; more are refused
 max_handshakes_in_flight_per_ip = 32      # of those, from one source address
+# publisher_backpressure = "single" # "single" (default): a publisher whose QoS 0 message has one subscriber
+#                             # that cannot keep up is paused (TCP window closed, 0.5 s at most) instead of
+#                             # its messages being dropped; "off": always read and drop. Format 8 for "off".
 
 [acl]
 device_publish = ["devices/{id}/#"]

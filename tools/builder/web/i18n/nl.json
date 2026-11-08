@@ -140,6 +140,8 @@
   "enum.devices.virtio_vsock.on": "als het er is, waarschuwen als het ontbreekt",
   "enum.websocket.auth.mtls": "clientcertificaat, zoals op de TLS-poort",
   "enum.websocket.auth.password": "gebruikersnaam en wachtwoord (voor browsers)",
+  "enum.limits.publisher_backpressure.single": "uitgever pauzeren als zijn enige abonnee vol is",
+  "enum.limits.publisher_backpressure.off": "altijd lezen; weggooien voor een trage abonnee",
   "err.int": "Moet een geheel getal zijn.",
   "err.enum": "Geen van de toegestane waarden.",
   "bar.title": "Overzicht",

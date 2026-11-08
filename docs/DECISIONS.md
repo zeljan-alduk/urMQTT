@@ -2459,6 +2459,161 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
 - **Not verified.** The netcup VPS itself (the rig's loss is QEMU's and the bridge's, not netcup's host); the
   handshake tail there.
 
+## ADR-269 — Publisher back-pressure: a QoS 0 message with one full subscriber pauses its publisher's TCP stream instead of being dropped (NOW-13, `limits.publisher_backpressure`, configuration format 8)
+
+- **Status:** Accepted. Amends ADR-223 (QoS 0 to a full output buffer is dropped and counted: still the rule for
+  fan-out, and the fallback), ADR-032/M13 (cross-shard routing carries the publisher; two new mesh messages), ADR-033 (the TCP stack's
+  receive space, now closed and reopened by the application). Number reserved for this branch; ADR-268 and ADR-270 are
+  parallel branches, format 8 is this branch's (9 to 12 are reserved for others).
+- **Context.** PERFORMANCE §13: with one publisher and one subscriber flooding QoS 0, urMQTT accepted from the
+  publisher as fast as its core allowed (150-195k msg/s on netcup's one ARM data core) while the subscriber's single
+  TCP stream carried 12-22k/s; the rest was dropped (`messages/dropped/slow_subscriber`, hundreds of millions in the
+  suite), and the publisher's input took the CPU the subscriber's output needed (1 KiB: 0.1-3k delivered/s).
+  Mosquitto, single-threaded, in effect stops reading the publisher and delivers almost all it accepts (49k/s, 6.1k at
+  1 KiB, on the same core). Both are legal for QoS 0. For a single consumer, not reading is better on both counts:
+  nothing accepted is lost, and no cycles go into reading what will be dropped.
+- **Decision.**
+  1. **The signal and where it is evaluated.** The broker shard that owns the publisher's session decides, right
+     after routing each PUBLISH (`Broker::after_publish`, `crates/broker/src/flow.rs`). It pauses the publisher when:
+     the message went to exactly one session on this shard, at QoS 0 as delivered; that session's connection is not
+     the publisher, not closing, and its own input is not held; its output buffer (`Conn::outbuf`, the bytes not yet
+     taken by TLS/TCP) is at or above the **high-water mark, half of `max_outbound_bytes`** (16 KiB of the kernel's
+     32 KiB); the publisher is not in cool-down; and, with several shards, no other shard has reported delivering
+     this publisher's messages in the last second. The pause ends when that output buffer is at or below the
+     **low-water mark, a quarter** (8 KiB), when the recipient is gone or closing, or after **500 ms**. Rejected
+     signals: the relay credit (only exists for relayed connections, and measures the core-to-core hop, not the
+     subscriber's TCP); the existing `dropped_backpressure` path (by the time it fires a message is already lost, and
+     its rate says nothing about when to resume); the TCP send queue of the subscriber (on another core when relayed;
+     the broker's buffer is the last stage and fills only once TLS and TCP are full, so it is the same signal, later
+     and local).
+  2. **Several shards.** Every routed message is offered to every other shard (`Config::fanout`), so the origin
+     cannot see the whole recipient set by itself. Routes now carry the publishing connection
+     (`CoreMsg::Route::origin`); a shard that delivers one to n >= 1 sessions tells the origin
+     (`CoreMsg::Seen { conn, n }`, at most every 250 ms per publisher). The origin keeps, per publisher, which
+     shards reported and how many sessions, for a second (`REMOTE_SEEN_MS`), and decides:
+     - **subscriber here:** the single local recipient is full and no other shard reported in the last second;
+     - **subscriber on shard B:** B, which owns that subscriber, finds the message went to exactly one session of its
+       own, at QoS 0, whose input is not held and whose output is over the high-water mark; it records the wait and
+       sends `CoreMsg::Hold { full: true }` to the origin. The origin pauses only if the publisher's last message had
+       no recipient on the origin itself and no shard but B (and B with n = 1 only) reported in the last second. B
+       sends `Hold { full: false }` when that subscriber is at or below the low-water mark, gone, closing, or after
+       500 ms, so a lost or late message cannot hold the publisher longer than the origin's own bound.
+     - **a learning second:** with several shards a publisher is not paused during the second after its first full
+       recipient unless the other shards have already reported about it: the reports need a route and a message back,
+       and a publisher with a remote consumer must not be paused for a local one before the first report arrives.
+     The error goes one way: when in doubt (a report lost, a shard behind), the publisher is read and dropped for, as
+     before. Messages the origin accepted while the request travelled (one message each way on the mesh, plus the
+     routes already queued) are taken by B's subscriber beyond its 32 KiB buffer, up to **256 KiB more**
+     (`OVERSHOOT`; 4 MiB per shard in all), instead of being dropped; beyond that they are dropped as before. Without
+     this the first measurement on three data cores still dropped a quarter of a single flow: the pauses came, but
+     a 16 KiB margin between the high-water mark and the drop is less than one 32 KiB slice of held input. A relayed publisher's window is on its
+     transport core: the home shard sends `CoreMsg::Flow`. A late `Seen` or `Hold` naming a connection id that was
+     reused can at worst keep a new publisher from pausing for a second, or pause it for at most 500 ms.
+  3. **What is paused, and the head-of-line bound.** Parsing stops after the PUBLISH that caused it; the bytes that
+     follow are held unparsed in the connection's input buffer, in order, and the TCP receive window is closed. So
+     PINGREQ, DISCONNECT, PUBACK (for QoS 1 the broker sent to it), SUBSCRIBE and the next PUBLISH all wait, at most
+     500 ms. A CONNECT is never behind a pause (only a PUBLISH starts one, after CONNACK). When the pause ends the held
+     bytes are parsed in 32 KiB slices per loop pass (`DRAIN_SLICE`; one pass per slice keeps the watchdog's per-handler
+     budget), and the window opens only when no complete packet is left in them; a slice can pause it again (the
+     hysteresis between the marks). **Keep-alive** counts a paused connection as alive: `tick` skips it and the end of
+     the hold sets its last-receive time (a PINGREQ held behind the pause is answered then).
+  4. **No deadlock.** (a) A publisher is never paused for itself, nor for a recipient whose own input is held. No
+     cycle of pauses can exist: take the edge of a cycle created last, P paused for R; R is on the cycle, so it has its
+     own edge R -> S, created before and still there, so R was held when P -> R was created, which the rule forbids
+     (tests: `two_publishers_for_each_other_never_both_pause` in both orders, `a_cycle_of_three_cannot_close`). (b)
+     Waits outside the broker (a client that stops reading while its own write blocks, a subscriber that waits for
+     something only the paused publisher will send) are cut by the time bound: after 500 ms the publisher is read again
+     and is in **cool-down for 2 s** (read, its QoS 0 dropped as before), so a stuck subscriber costs its publisher at
+     most a 500 ms stall per 2.5 s and never more than today's drops (`the_pause_is_bounded_and_counts_as_alive`).
+     (c) Bounded memory: the window closes at the pause, so what arrives is what was already promised (at most
+     the 1 MiB scaled window); a connection holding more than 2 MiB plus a packet (a transport that does not close a
+     window) is released into cool-down; no new pause starts while a shard holds 16 MiB
+     (`held_input_is_bounded_without_a_window`).
+  5. **QoS 1 and QoS 2 are not paused for.** Only a delivery at QoS 0 (the publish's QoS and the subscription's, the
+     lower) can pause. QoS 2 (ADR-271) shares the in-flight window with QoS 1 and is left to it the same way. A
+     paused publisher's own QoS 2 control packets (its PUBREL for a message it published, its PUBREC or PUBCOMP for one
+     it was sent) wait in the held bytes like PINGREQ, at most 500 ms, and complete after the pause
+     (`qos2_flows_of_a_paused_publisher_complete_after_the_pause`, `qos2_deliveries_are_not_paused_for`). A QoS 2
+     publish to a QoS 0 subscription is a QoS 0 delivery and can pause its publisher, whose PUBREC then comes when
+     the PUBLISH is parsed. A QoS 1 delivery already waits in the session's in-flight window (`limits.max_inflight_qos1`) and queue,
+     and the publisher's own window waits for our PUBACKs, which go out as each PUBLISH is parsed; adding a pause would
+     throttle twice (`qos1_deliveries_are_not_paused_for`). A QoS 1 publish to a QoS 0 subscription is a QoS 0
+     delivery and can pause its publisher: its PUBACKs then come later, which is the back-pressure it should feel.
+  6. **WebSocket publishers (ADR-272).** A WebSocket connection is a TCP connection whose TLS plaintext goes through
+     the frame decoder (`crates/kernel/src/mqtt_service/ws.rs`) before the broker sees MQTT bytes. The pause closes
+     that TCP connection's window like any other, so the client stops sending frames; what was promised still arrives
+     and is decoded. The broker holds **decoded MQTT bytes**, not raw frames: the decoder has no reassembly buffer and
+     unmasks in place, so holding raw frames would mean a second buffer and a second decoder state per connection,
+     while decoded bytes are what the broker's parser and its bounds already work on (frame headers only make the
+     held amount smaller than the window). The frame layer keeps answering PING with PONG and a CLOSE ends the
+     session while the MQTT input is held, so a browser's WebSocket keep-alive is unaffected. A login connection (the
+     CONNECT not yet decided) is never paused: only a PUBLISH after CONNACK starts a pause.
+  7. **Fan-out keeps dropping.** Two or more recipients (on this shard, or any on another) never pause: one slow
+     subscriber must not slow the others (`fan_out_keeps_dropping`).
+  8. **TCP.** `TcpStack::set_recv_space(c, 0)` on pause; the advertised right edge is never moved left (RFC 9293
+     §3.8.6.2.1), so the window shrinks as the promised bytes arrive and reads 0 after them; a segment beyond it is
+     not taken and is answered with the current window, and the peer's persist timer probes. On resume the new
+     `TcpStack::reset_recv_space(c)` gives back the space the handshake gave (the 1 MiB scaled window, or 65 535)
+     in one window update: the window is all or nothing, so no small openings are announced (receiver-side
+     silly-window avoidance, RFC 1122 §4.2.3.3). A lost update is recovered by the peer's probe. Script test
+     `the_application_closes_and_reopens_the_window`; the H3 model tests and the other scripts are unchanged.
+  9. **Configuration.** `limits.publisher_backpressure = "single" | "off"`, tag 53 (the free tag after the other
+     `limits.*` keys), **default `"single"`**, justified by the measurements below. "single" writes no record, so a
+     configuration that keeps the default stays readable by every older kernel; "off" needs **format 8**: an older
+     kernel would refuse the unknown tag at boot, and the version moves that refusal to build time (the template check
+     of `urmqtt-config` and the builder page, as for ADR-256/257/264). The TOML form, the packer, the builder (choice
+     hints in the 15 site languages, AI translations, unreviewed) and the schema follow the field table.
+  10. **Observability.** `$SYS/broker/messages/backpressure/mode`, `paused` (pauses started), `paused_ms` (time
+     paused, ended pauses), `timeouts` (pauses that ran out), `holding` (publishers held now), the same under
+     `"backpressure"` in the info reply, a `status` line, the boot line `mqtt: publisher back-pressure single|off`,
+     and at most every 10 s per core `mqtt: core N paused P publisher(s) for a full single subscriber since the last
+     report, M ms in all, K ran out`.
+- **Measurements** (local rig only, PERFORMANCE §13.5, raw files in `perf-results/backpressure-2026-11-08/`; "off"
+  is the same kernel with the policy off, i.e. the behaviour before). One data core (`--smp 2`, like netcup): one
+  64 B flow delivered 119-165k/s with "single" against 130-157k with "off", 1 KiB 9.2-12.1k against 8.9-11.4k; with
+  "single" published equals delivered and nothing is dropped (off: 3-21k dropped per 10 s run). Three data cores
+  (`--smp 4`): 143-146k against 113-134k (64 B), 9.3-12.1k against 7.6-8.2k (1 KiB), 0 dropped against 160-500k per
+  run. 16 pairs, QoS 1, the 16 x 1000/s latency sweep and fan-out 1 -> 100 / 1 -> 1000 are within the run-to-run
+  range (fan-out is never paused). A flooded single flow's latency rises (messages wait in the publisher's socket
+  instead of being dropped). **The default is "single"**: fan-out, many pairs, QoS 1 and steady rates did not move beyond
+  the rig's noise, and one flow no longer loses what it accepted. The one cost measured is on the target case itself:
+  a 64 B flood on one fast core delivers about 10 % less after ADR-268 (below). "off" stays for a deployment that
+  prefers the most messages per second, or the newest message, over every message (the behaviour of v0.4.x); the
+  default is to be confirmed or reversed by the netcup measurement.
+- **Verification.** Broker: 19 scripted tests (`crates/broker/src/flow_tests.rs`: two and three connections on one
+  shard, and two shards wired as the kernel wires them: pause and resume across shards, refusals with a local or a
+  third-shard consumer, a leaving subscriber, the overshoot bound, publishers on two shards for each other), the
+  `$SYS` topic list, JSON and status line; the `broker_input` fuzz target runs with "single", `poll_flow`,
+  `drain_flow` and remote notes; the ACL oracle (`acl_invariants`, `broker_acl`) and `acl_model` run with "single"
+  and `poll_flow` and stay green. TCP: the window script. Configuration: format 8 and the checks (`urmqtt-cfg`,
+  `urmqtt-config`, `urmqtt-config-schema`, `tools/config`, the builder module). Parsing now decodes a held buffer in
+  place and consumes it once, instead of moving the rest of the buffer after every packet (a held megabyte of 64-byte
+  packets would have cost gigabytes of copying). The fuzz targets `broker_input` (now also cross-shard notes,
+  requests and routes fed back with their publisher), `plain_input` and `broker_acl` ran 60 s each without a finding.
+  Miri runs the flow tests except the two that hold megabytes on purpose (skip list in `scripts/miri.sh`). Smoke:
+  `mqtt-plain`, `mqtt-tls` and `sys-operator` (which now checks `messages/backpressure/mode` and `paused` and the
+  info reply's `backpressure`) pass on aarch64 (HVF) and x86_64 (TCG).
+- **Rejected.** Pausing for "all recipients full" (fan-out where every subscriber is slow): it would make the policy
+  depend on the slowest of many consumers; fan-out keeps dropping. A per-topic global subscriber count shared by the
+  shards: a structure every SUBSCRIBE would have to update on every core, for a decision the shards can make from the
+  routes they already exchange. Closing the window without holding input in the broker (stop the TCP stack from
+  delivering): the stack has no receive buffer (data is consumed as it arrives, ADR-033), and the bytes already
+  promised must go somewhere.
+- **After the rebase onto ADR-268, ADR-271 and ADR-272** (configuration formats: 8 is this ADR's, 9 the WebSocket
+  section's; 10 was allocated to QoS 2 and is unused, 11 to the receive-interrupt branch, 12 to MQTT 5, so 10 and 11
+  stay unknown to this tree). The rig numbers above ran without ADR-268's change of the TCP sender's loss detection;
+  one flow was measured again after the rebase (PERFORMANCE §13.5): 0 dropped with "single" as before; 1 KiB the same
+  as "off" (9.9-10.4k against 9.8-10.6k delivered); 64 B 116-145k against 144-151k, about 10 % less on this fast
+  core, where "off" loses only 5-15 % of the flood. That is the price of the pacing when the subscriber almost keeps
+  up; where it does not (netcup's §13.2: 85-90 % dropped) the measurement is still to be made, and "off" restores
+  the old behaviour.
+- **Not verified.** The real VPS pair: the numbers above are the local rig's, where one data core is a vCPU of an
+  Apple-silicon Mac under HVF behind a container bridge, not netcup's Neoverse N1; the expected effect on §13.2's
+  single-flow rows has to be measured there (same suite, `limits.publisher_backpressure` "single" against "off").
+  The cross-shard path is measured only on the rig's three data cores (point 2). A relayed publisher (transport core
+  other than its home shard, `CoreMsg::Flow`) is exercised by the `--smp 4` runs whenever the RSS hash and the
+  identity hash disagree, but no test isolates it.
+
 ## ADR-271 — QoS 2, exactly once: method B, the in-flight window for both QoS, packet ids in the store (NEXT-2)
 
 - **Status:** Accepted (2026-11-08). Amends ADR-028 ("QoS 2 publishes close the connection, and QoS 2 subscriptions

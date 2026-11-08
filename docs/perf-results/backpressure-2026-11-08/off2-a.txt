@@ -1,0 +1,125 @@
+# off2-a 2026-11-08T12:56:27Z host=10.0.2.15:8883 cores=0,1,2,3 reps=2
+# loadgen c9eb8776f80c kernel 6.10.14-linuxkit nproc=4
+## suite single
+GUARD load1=8.60 site_s=0.000021
+RUN single-flow qos=0 payload=64 rep=1
+loadgen: pubsub: 2 of 2 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1 subscriber(s), 1 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 130944/s, acknowledged 0/s, delivered 129542/s, lost connections 0
+loadgen: pubsub: generator cpu 0.08 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=0 sent_per_s=130944 acked_per_s=0 delivered_per_s=129542 lat_p50_ms=157.10 lat_p90_ms=169.31 lat_p99_ms=176.37 lat_max_ms=180.56 samples=200000 gen_cpu=0.08 ready=2 failed=0 lost=0
+HOSTCPU steal=0% idle=84% user+sys=12%
+CONSOLE new_watchdog_reports=0 new_aborted_connections=0 late_ticks_in_window=0 worst_us=0 host_steal_us_in_window=0 not_charged_lines_in_window=0
+DROPS console/dropped=0 frames/dropped/nic=0 frames/dropped/steer=0 frames/dropped/worker_tx=0 handshakes/syn_dropped=0 messages/backpressure/holding=0 messages/backpressure/mode=off messages/backpressure/paused=0 messages/backpressure/paused_ms=0 messages/backpressure/timeouts=0 messages/dropped/cross_core=0 messages/dropped/offline=0 messages/dropped/publish_rate=0 messages/dropped/qos1_queue_full=0 messages/dropped/slow_subscriber=20978 messages/received=764710 messages/sent=743852 
+GUARD load1=7.00 site_s=0.000043
+RUN single-flow qos=0 payload=64 rep=2
+loadgen: pubsub: 2 of 2 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1 subscriber(s), 1 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 158654/s, acknowledged 0/s, delivered 157431/s, lost connections 0
+loadgen: pubsub: generator cpu 0.09 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=64 rate=0 sent_per_s=158654 acked_per_s=0 delivered_per_s=157431 lat_p50_ms=71.95 lat_p90_ms=89.12 lat_p99_ms=95.94 lat_max_ms=99.69 samples=200000 gen_cpu=0.09 ready=2 failed=0 lost=0
+HOSTCPU steal=0% idle=83% user+sys=12%
+CONSOLE new_watchdog_reports=0 new_aborted_connections=0 late_ticks_in_window=0 worst_us=0 host_steal_us_in_window=0 not_charged_lines_in_window=0
+DROPS console/dropped=0 frames/dropped/nic=0 frames/dropped/steer=0 frames/dropped/worker_tx=0 handshakes/syn_dropped=0 messages/backpressure/holding=0 messages/backpressure/mode=off messages/backpressure/paused=0 messages/backpressure/paused_ms=0 messages/backpressure/timeouts=0 messages/dropped/cross_core=0 messages/dropped/offline=0 messages/dropped/publish_rate=0 messages/dropped/qos1_queue_full=0 messages/dropped/slow_subscriber=39697 messages/received=2652164 messages/sent=2591472 
+GUARD load1=6.36 site_s=0.000020
+RUN single-flow qos=0 payload=1024 rep=1
+loadgen: pubsub: 2 of 2 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1 subscriber(s), 1 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 11506/s, acknowledged 0/s, delivered 10805/s, lost connections 0
+loadgen: pubsub: generator cpu 0.04 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=1024 rate=0 sent_per_s=11506 acked_per_s=0 delivered_per_s=10805 lat_p50_ms=84.94 lat_p90_ms=116.50 lat_p99_ms=155.06 lat_max_ms=185.32 samples=108061 gen_cpu=0.04 ready=2 failed=0 lost=0
+HOSTCPU steal=0% idle=85% user+sys=11%
+CONSOLE new_watchdog_reports=0 new_aborted_connections=0 late_ticks_in_window=0 worst_us=0 host_steal_us_in_window=0 not_charged_lines_in_window=0
+DROPS console/dropped=0 frames/dropped/nic=0 frames/dropped/steer=0 frames/dropped/worker_tx=0 handshakes/syn_dropped=0 messages/backpressure/holding=0 messages/backpressure/mode=off messages/backpressure/paused=0 messages/backpressure/paused_ms=0 messages/backpressure/timeouts=0 messages/dropped/cross_core=0 messages/dropped/offline=0 messages/dropped/publish_rate=0 messages/dropped/qos1_queue_full=0 messages/dropped/slow_subscriber=52234 messages/received=3719050 messages/sent=3636907 
+GUARD load1=6.13 site_s=0.000034
+RUN single-flow qos=0 payload=1024 rep=2
+loadgen: pubsub: 2 of 2 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1 subscriber(s), 1 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 9430/s, acknowledged 0/s, delivered 8893/s, lost connections 0
+loadgen: pubsub: generator cpu 0.04 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=0 payload=1024 rate=0 sent_per_s=9430 acked_per_s=0 delivered_per_s=8893 lat_p50_ms=74.15 lat_p90_ms=104.40 lat_p99_ms=139.85 lat_max_ms=161.28 samples=88939 gen_cpu=0.04 ready=2 failed=0 lost=0
+HOSTCPU steal=0% idle=85% user+sys=11%
+CONSOLE new_watchdog_reports=0 new_aborted_connections=0 late_ticks_in_window=0 worst_us=0 host_steal_us_in_window=0 not_charged_lines_in_window=0
+DROPS console/dropped=0 frames/dropped/nic=0 frames/dropped/steer=0 frames/dropped/worker_tx=0 handshakes/syn_dropped=0 messages/backpressure/holding=0 messages/backpressure/mode=off messages/backpressure/paused=0 messages/backpressure/paused_ms=0 messages/backpressure/timeouts=0 messages/dropped/cross_core=0 messages/dropped/offline=0 messages/dropped/publish_rate=0 messages/dropped/qos1_queue_full=0 messages/dropped/slow_subscriber=60401 messages/received=3854326 messages/sent=3763434 
+GUARD load1=5.16 site_s=0.000039
+RUN single-flow qos=1 payload=64 rep=1
+loadgen: pubsub: 2 of 2 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1 subscriber(s), 1 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 1859/s, acknowledged 1859/s, delivered 966/s, lost connections 0
+loadgen: pubsub: generator cpu 0.03 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=1 payload=64 rate=0 sent_per_s=1859 acked_per_s=1859 delivered_per_s=966 lat_p50_ms=80.26 lat_p90_ms=88.88 lat_p99_ms=97.06 lat_max_ms=99.30 samples=9664 gen_cpu=0.03 ready=2 failed=0 lost=0
+HOSTCPU steal=0% idle=94% user+sys=4%
+CONSOLE new_watchdog_reports=0 new_aborted_connections=0 late_ticks_in_window=0 worst_us=0 host_steal_us_in_window=0 not_charged_lines_in_window=0
+DROPS console/dropped=0 frames/dropped/nic=0 frames/dropped/steer=0 frames/dropped/worker_tx=0 handshakes/syn_dropped=0 messages/backpressure/holding=0 messages/backpressure/mode=off messages/backpressure/paused=0 messages/backpressure/paused_ms=0 messages/backpressure/timeouts=0 messages/dropped/cross_core=0 messages/dropped/offline=0 messages/dropped/publish_rate=0 messages/dropped/qos1_queue_full=7809 messages/dropped/slow_subscriber=62458 messages/received=3905629 messages/sent=3804564 
+GUARD load1=4.68 site_s=0.000039
+RUN single-flow qos=1 payload=64 rep=2
+loadgen: pubsub: 2 of 2 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 1 publisher(s), 1 subscriber(s), 1 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 1872/s, acknowledged 1872/s, delivered 982/s, lost connections 0
+loadgen: pubsub: generator cpu 0.03 cores (process total, all threads)
+RESULT mode=pubsub pubs=1 subs=1 topics=1 qos=1 payload=64 rate=0 sent_per_s=1872 acked_per_s=1872 delivered_per_s=982 lat_p50_ms=77.31 lat_p90_ms=87.06 lat_p99_ms=93.94 lat_max_ms=97.95 samples=9824 gen_cpu=0.03 ready=2 failed=0 lost=0
+HOSTCPU steal=0% idle=94% user+sys=4%
+CONSOLE new_watchdog_reports=0 new_aborted_connections=0 late_ticks_in_window=0 worst_us=0 host_steal_us_in_window=0 not_charged_lines_in_window=0
+DROPS console/dropped=0 frames/dropped/nic=0 frames/dropped/steer=0 frames/dropped/worker_tx=0 handshakes/syn_dropped=0 messages/backpressure/holding=0 messages/backpressure/mode=off messages/backpressure/paused=0 messages/backpressure/paused_ms=0 messages/backpressure/timeouts=0 messages/dropped/cross_core=0 messages/dropped/offline=0 messages/dropped/publish_rate=0 messages/dropped/qos1_queue_full=19390 messages/dropped/slow_subscriber=62458 messages/received=3930035 messages/sent=3817590 
+## suite throughput
+GUARD load1=4.21 site_s=0.000026
+RUN throughput qos=0 payload=64 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 235627/s, acknowledged 0/s, delivered 235075/s, lost connections 0
+loadgen: pubsub: generator cpu 0.29 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=235627 acked_per_s=0 delivered_per_s=235075 lat_p50_ms=259.10 lat_p90_ms=590.06 lat_p99_ms=1062.30 lat_max_ms=1286.99 samples=2350884 gen_cpu=0.29 ready=32 failed=0 lost=0
+HOSTCPU steal=0% idle=74% user+sys=25%
+CONSOLE new_watchdog_reports=0 new_aborted_connections=0 late_ticks_in_window=41 worst_us=24535 host_steal_us_in_window=0 not_charged_lines_in_window=0
+DROPS console/dropped=0 frames/dropped/nic=0 frames/dropped/steer=0 frames/dropped/worker_tx=0 handshakes/syn_dropped=0 messages/backpressure/holding=0 messages/backpressure/mode=off messages/backpressure/paused=0 messages/backpressure/paused_ms=0 messages/backpressure/timeouts=0 messages/dropped/cross_core=0 messages/dropped/offline=0 messages/dropped/publish_rate=0 messages/dropped/qos1_queue_full=21166 messages/dropped/slow_subscriber=96504 messages/received=6594444 messages/sent=6446409 
+GUARD load1=7.27 site_s=0.000020
+RUN throughput qos=0 payload=64 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 261383/s, acknowledged 0/s, delivered 260700/s, lost connections 0
+loadgen: pubsub: generator cpu 0.29 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=64 rate=0 sent_per_s=261383 acked_per_s=0 delivered_per_s=260700 lat_p50_ms=149.23 lat_p90_ms=461.30 lat_p99_ms=671.76 lat_max_ms=880.58 samples=2607523 gen_cpu=0.29 ready=32 failed=0 lost=0
+HOSTCPU steal=0% idle=73% user+sys=26%
+CONSOLE new_watchdog_reports=0 new_aborted_connections=0 late_ticks_in_window=49 worst_us=24535 host_steal_us_in_window=0 not_charged_lines_in_window=0
+DROPS console/dropped=0 frames/dropped/nic=0 frames/dropped/steer=0 frames/dropped/worker_tx=0 handshakes/syn_dropped=0 messages/backpressure/holding=0 messages/backpressure/mode=off messages/backpressure/paused=0 messages/backpressure/paused_ms=0 messages/backpressure/timeouts=0 messages/dropped/cross_core=0 messages/dropped/offline=0 messages/dropped/publish_rate=0 messages/dropped/qos1_queue_full=21166 messages/dropped/slow_subscriber=122455 messages/received=10093546 messages/sent=9850437 
+GUARD load1=9.16 site_s=0.000035
+RUN throughput qos=0 payload=1024 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 20987/s, acknowledged 0/s, delivered 20899/s, lost connections 0
+loadgen: pubsub: generator cpu 0.18 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=0 sent_per_s=20987 acked_per_s=0 delivered_per_s=20899 lat_p50_ms=160.41 lat_p90_ms=675.55 lat_p99_ms=1630.93 lat_max_ms=1992.09 samples=209010 gen_cpu=0.18 ready=32 failed=0 lost=0
+HOSTCPU steal=0% idle=77% user+sys=22%
+CONSOLE new_watchdog_reports=0 new_aborted_connections=0 late_ticks_in_window=49 worst_us=24535 host_steal_us_in_window=0 not_charged_lines_in_window=0
+DROPS console/dropped=0 frames/dropped/nic=0 frames/dropped/steer=0 frames/dropped/worker_tx=0 handshakes/syn_dropped=0 messages/backpressure/holding=0 messages/backpressure/mode=off messages/backpressure/paused=0 messages/backpressure/paused_ms=0 messages/backpressure/timeouts=0 messages/dropped/cross_core=0 messages/dropped/offline=0 messages/dropped/publish_rate=0 messages/dropped/qos1_queue_full=21166 messages/dropped/slow_subscriber=125474 messages/received=10433264 messages/sent=10126471 
+GUARD load1=9.22 site_s=0.000033
+RUN throughput qos=0 payload=1024 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 0, 1024 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 21647/s, acknowledged 0/s, delivered 21514/s, lost connections 0
+loadgen: pubsub: generator cpu 0.18 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=0 payload=1024 rate=0 sent_per_s=21647 acked_per_s=0 delivered_per_s=21514 lat_p50_ms=146.67 lat_p90_ms=636.98 lat_p99_ms=1140.01 lat_max_ms=1644.18 samples=215139 gen_cpu=0.18 ready=32 failed=0 lost=0
+HOSTCPU steal=0% idle=77% user+sys=22%
+CONSOLE new_watchdog_reports=0 new_aborted_connections=0 late_ticks_in_window=49 worst_us=24535 host_steal_us_in_window=0 not_charged_lines_in_window=0
+DROPS console/dropped=0 frames/dropped/nic=0 frames/dropped/steer=0 frames/dropped/worker_tx=0 handshakes/syn_dropped=0 messages/backpressure/holding=0 messages/backpressure/mode=off messages/backpressure/paused=0 messages/backpressure/paused_ms=0 messages/backpressure/timeouts=0 messages/dropped/cross_core=0 messages/dropped/offline=0 messages/dropped/publish_rate=0 messages/dropped/qos1_queue_full=21166 messages/dropped/slow_subscriber=129004 messages/received=10516703 messages/sent=10206554 
+GUARD load1=10.13 site_s=0.000036
+RUN throughput qos=1 payload=64 pairs=16 rep=1
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 31321/s, acknowledged 31321/s, delivered 16575/s, lost connections 0
+loadgen: pubsub: generator cpu 0.15 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=0 sent_per_s=31321 acked_per_s=31321 delivered_per_s=16575 lat_p50_ms=71.17 lat_p90_ms=78.41 lat_p99_ms=86.56 lat_max_ms=292.22 samples=165757 gen_cpu=0.15 ready=32 failed=0 lost=0
+HOSTCPU steal=0% idle=84% user+sys=15%
+CONSOLE new_watchdog_reports=0 new_aborted_connections=0 late_ticks_in_window=12 worst_us=9800 host_steal_us_in_window=0 not_charged_lines_in_window=0
+DROPS console/dropped=0 frames/dropped/nic=0 frames/dropped/steer=0 frames/dropped/worker_tx=0 handshakes/syn_dropped=0 messages/backpressure/holding=0 messages/backpressure/mode=off messages/backpressure/paused=0 messages/backpressure/paused_ms=0 messages/backpressure/timeouts=0 messages/dropped/cross_core=0 messages/dropped/offline=0 messages/dropped/publish_rate=0 messages/dropped/qos1_queue_full=93107 messages/dropped/slow_subscriber=129844 messages/received=10853785 messages/sent=10464948 
+GUARD load1=9.89 site_s=0.000032
+RUN throughput qos=1 payload=64 pairs=16 rep=2
+loadgen: pubsub: 32 of 32 clients ready in 0.1 s, 0 failed
+loadgen: pubsub: 16 publisher(s), 16 subscriber(s), 16 topic(s), QoS 1, 64 B, rate max/publisher, window 10.0 s
+loadgen: pubsub: published 31501/s, acknowledged 31501/s, delivered 16660/s, lost connections 0
+loadgen: pubsub: generator cpu 0.15 cores (process total, all threads)
+RESULT mode=pubsub pubs=16 subs=16 topics=16 qos=1 payload=64 rate=0 sent_per_s=31501 acked_per_s=31501 delivered_per_s=16660 lat_p50_ms=71.05 lat_p90_ms=78.00 lat_p99_ms=83.26 lat_max_ms=93.23 samples=166608 gen_cpu=0.15 ready=32 failed=0 lost=0
+HOSTCPU steal=0% idle=82% user+sys=16%
+CONSOLE new_watchdog_reports=0 new_aborted_connections=0 late_ticks_in_window=4 worst_us=9800 host_steal_us_in_window=0 not_charged_lines_in_window=0
+DROPS console/dropped=0 frames/dropped/nic=0 frames/dropped/steer=0 frames/dropped/worker_tx=0 handshakes/syn_dropped=0 messages/backpressure/holding=0 messages/backpressure/mode=off messages/backpressure/paused=0 messages/backpressure/paused_ms=0 messages/backpressure/timeouts=0 messages/dropped/cross_core=0 messages/dropped/offline=0 messages/dropped/publish_rate=0 messages/dropped/qos1_queue_full=295876 messages/dropped/slow_subscriber=129844 messages/received=11287622 messages/sent=10695361 
+# done 2026-11-08T13:00:14Z

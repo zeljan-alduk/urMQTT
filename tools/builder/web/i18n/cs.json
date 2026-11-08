@@ -140,6 +140,8 @@
   "enum.devices.virtio_vsock.on": "když je nalezeno, varovat, pokud chybí",
   "enum.websocket.auth.mtls": "klientský certifikát, jako na portu TLS",
   "enum.websocket.auth.password": "uživatelské jméno a heslo (pro prohlížeče)",
+  "enum.limits.publisher_backpressure.single": "pozastavit vydavatele, jehož jediný odběratel je plný",
+  "enum.limits.publisher_backpressure.off": "vždy číst; zahazovat pro pomalého odběratele",
   "err.int": "Musí to být celé číslo.",
   "err.enum": "Není to jedna z povolených hodnot.",
   "bar.title": "Souhrn",

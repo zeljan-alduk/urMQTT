@@ -158,7 +158,7 @@ console_end() {
     steal=$(grep -o 'host steal [0-9]* us' "$DIR/console.out" | sort -u | awk '{n+=$3} END{printf "host_steal_us_in_window=%d", n}')
     excused=$(grep -c 'not charged' "$DIR/console.out")
     echo "CONSOLE new_watchdog_reports=$over new_aborted_connections=$drop $late $steal not_charged_lines_in_window=$excused" | tee -a "$OUT"
-    grep -E 'SYSVAL .*(dropped|messages/(received|sent))' "$DIR/console.out" | sed 's/SYSVAL \$SYS\/broker\///' | tr '\n' ' ' | sed 's/^/DROPS /' | tee -a "$OUT"
+    grep -E 'SYSVAL .*(dropped|backpressure|messages/(received|sent))' "$DIR/console.out" | sed 's/SYSVAL \$SYS\/broker\///' | tr '\n' ' ' | sed 's/^/DROPS /' | tee -a "$OUT"
     echo | tee -a "$OUT" >/dev/null
 }
 

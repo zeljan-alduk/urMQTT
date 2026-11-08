@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use urmqtt_broker::{Acl, Broker, Config, ConnId, PersistOp};
+use urmqtt_broker::{Acl, Broker, Config, ConnId, PersistOp, PublisherBackpressure};
 use urmqtt_mqtt::{
     Connect, ConnectReturnCode, Limits, Packet, Publish, QoS, Subscribe, SubscribeTopics,
     Unsubscribe, UnsubscribeTopics, Will, decode, encode, encoded_len,
@@ -64,6 +64,7 @@ fn cfg() -> Config {
         control_ids: &["backend"],
         plain: None,
         web: None,
+        publisher_backpressure: PublisherBackpressure::Single,
     }
 }
 
@@ -342,6 +343,7 @@ impl Run<'_> {
             7..=10 => {
                 self.log.push(format!("tick {}", self.now));
                 self.b.tick(self.now);
+                self.b.poll_flow(self.now);
             }
             11..=12 => self.b.shrink(),
             13..=17 => self.connect(slot),
@@ -605,7 +607,7 @@ impl Run<'_> {
         }
         // Everything else the broker hands out.
         let routes: Vec<_> = self.b.drain_routes().collect();
-        for (m, _, _) in routes {
+        for (m, _, _, _) in routes {
             self.check_payload(
                 &m.payload,
                 &m.topic,

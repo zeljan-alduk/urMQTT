@@ -1,0 +1,92 @@
+# ADR-269 on the local WAN rig (PERFORMANCE §13.5). Per configuration, each run's value separated by '/':
+# published/s, delivered/s, latency p50 and p99 (ms), and from the broker's $SYS counters (refreshed every 10 s, so
+# one run's change can show in the next): QoS 0 dropped for a slow subscriber, publisher pauses, pauses that ran out.
+# onN/offN: limits.publisher_backpressure single/off, QEMU --smp N. on4-localonly: before the cross-shard requests;
+# on4-noovershoot: cross-shard requests without the 256 KiB overshoot; on4-a: the final build. on4-a.txt.console holds
+# the consoles of all three on4-a sessions (x11-bench appends).
+## off2-a.txt
+single-flow qos=0 payload=64               sent   130944/158654 deliv   129542/157431 p50    157/72 p99      176/96 slowdrop       20978/18719 pauses         0/0 tmo 0/0
+single-flow qos=0 payload=1024             sent      11506/9430 deliv      10805/8893 p50     85/74 p99     155/140 slowdrop        12537/8167 pauses         0/0 tmo 0/0
+single-flow qos=1 payload=64               sent       1859/1872 deliv         966/982 p50     80/77 p99       97/94 slowdrop            2057/0 pauses         0/0 tmo 0/0
+throughput qos=0 payload=64 pairs=16       sent   235627/261383 deliv   235075/260700 p50   259/149 p99    1062/672 slowdrop       34046/25951 pauses         0/0 tmo 0/0
+throughput qos=0 payload=1024 pairs=16     sent     20987/21647 deliv     20899/21514 p50   160/147 p99   1631/1140 slowdrop         3019/3530 pauses         0/0 tmo 0/0
+throughput qos=1 payload=64 pairs=16       sent     31321/31501 deliv     16575/16660 p50     71/71 p99       87/83 slowdrop             840/0 pauses         0/0 tmo 0/0
+## on2-a.txt
+single-flow qos=0 payload=64               sent   124238/146259 deliv   124291/146265 p50    318/84 p99     427/101 slowdrop               0/0 pauses      203/93 tmo 0/0
+single-flow qos=0 payload=1024             sent     12143/10169 deliv     12139/10164 p50   202/195 p99     383/256 slowdrop               0/0 pauses   4051/5660 tmo 0/0
+single-flow qos=1 payload=64               sent       1875/1896 deliv         978/979 p50     79/78 p99      97/113 slowdrop               0/0 pauses      1819/0 tmo 0/0
+throughput qos=0 payload=64 pairs=16       sent   256342/268605 deliv   255661/268286 p50   116/155 p99    1752/956 slowdrop             0/112 pauses     862/978 tmo 0/0
+throughput qos=0 payload=1024 pairs=16     sent     21298/20533 deliv     21269/20501 p50   157/188 p99    1868/691 slowdrop              28/0 pauses    1565/754 tmo 0/0
+throughput qos=1 payload=64 pairs=16       sent     31802/31440 deliv     16672/16491 p50     71/71 p99       83/84 slowdrop               0/0 pauses       611/0 tmo 0/0
+## on2-c.txt
+single-flow qos=0 payload=64               sent   119113/135503 deliv   119154/135500 p50    114/66 p99      171/77 slowdrop               0/0 pauses      79/136 tmo 0/0
+single-flow qos=0 payload=1024             sent       9167/9835 deliv       9165/9830 p50   113/132 p99     182/174 slowdrop               0/0 pauses   3501/5332 tmo 0/0
+single-flow qos=1 payload=64               sent       1832/1825 deliv         946/950 p50     82/81 p99      103/96 slowdrop               0/0 pauses      1422/0 tmo 0/0
+throughput qos=0 payload=64 pairs=16       sent   250820/262364 deliv   250764/262306 p50   349/259 p99     782/994 slowdrop              0/55 pauses     945/955 tmo 0/0
+## off2-b.txt
+sweep qos=0 payload=64 rate=1000 pairs=16  sent     16000/16002 deliv     15995/16000 p50     14/14 p99       23/23 slowdrop               0/0 pauses         0/0 tmo 0/0
+sweep qos=1 payload=64 rate=1000 pairs=16  sent     16000/15999 deliv     16002/16006 p50     15/15 p99       24/22 slowdrop               0/0 pauses         0/0 tmo 0/0
+single-flow qos=0 payload=1024             sent     11886/10122 deliv      11410/9938 p50    104/76 p99     151/102 slowdrop         6437/3109 pauses         0/0 tmo 0/0
+single-flow qos=0 payload=64               sent   153902/153278 deliv   152994/152197 p50     88/96 p99     104/109 slowdrop       16735/21070 pauses         0/0 tmo 0/0
+fanout qos=0 subs=100 rate=50              sent           50/50 deliv       5000/4999 p50     18/18 p99       25/26 slowdrop               0/0 pauses         0/0 tmo 0/0
+fanout qos=0 subs=1000 rate=10             sent           10/10 deliv       6610/7940 p50   218/138 p99   5933/5725 slowdrop               0/0 pauses         0/0 tmo 0/0
+fanout qos=1 subs=100 rate=50              sent           50/50 deliv       5000/5009 p50     17/16 p99       21/23 slowdrop               0/0 pauses         0/0 tmo 0/0
+fanout qos=0 subs=100 rate=0               sent     65659/65217 deliv   954563/964904 p50   202/204 p99   1153/1011 slowdrop 46377188/73231536 pauses         0/0 tmo 0/0
+## on2-b.txt
+sweep qos=0 payload=64 rate=1000 pairs=16  sent     16000/15999 deliv     16001/15996 p50     14/14 p99       20/20 slowdrop               0/0 pauses         0/0 tmo 0/0
+sweep qos=1 payload=64 rate=1000 pairs=16  sent     15975/16004 deliv     15627/16009 p50     15/16 p99      118/32 slowdrop               0/0 pauses         0/0 tmo 0/0
+single-flow qos=0 payload=1024             sent       9730/9865 deliv       9731/9868 p50   194/123 p99     249/176 slowdrop               0/0 pauses   3758/5512 tmo 0/0
+single-flow qos=0 payload=64               sent   146433/165484 deliv   146294/165182 p50    171/51 p99      203/58 slowdrop             0/183 pauses     577/109 tmo 0/0
+fanout qos=0 subs=100 rate=50              sent           50/50 deliv       4997/4995 p50     17/18 p99       25/28 slowdrop               0/0 pauses         0/0 tmo 0/0
+fanout qos=0 subs=1000 rate=10             sent           10/10 deliv       6273/7501 p50   159/142 p99   6022/5824 slowdrop               0/0 pauses         0/0 tmo 0/0
+fanout qos=1 subs=100 rate=50              sent           50/50 deliv       5000/5000 p50     17/17 p99       24/22 slowdrop               0/0 pauses         0/0 tmo 0/0
+fanout qos=0 subs=100 rate=0               sent     77678/64210 deliv   909713/906003 p50   200/214 p99   1039/1040 slowdrop 55943394/75419702 pauses         0/0 tmo 0/0
+## off4-a.txt
+single-flow qos=0 payload=64               sent 172859/137647/146121/155179 deliv 133827/112827/145994/128557 p50 83/138/319/92 p99 105/165/374/109 slowdrop 181773/504859/23133/219406 pauses     0/0/0/0 tmo 0/0/0/0
+single-flow qos=0 payload=1024             sent 10183/9963/9566/11077 deliv 8179/7649/7357/8071 p50 128/64/81/97 p99 201/105/132/160 slowdrop 152114/29238/26524/13339 pauses     0/0/0/0 tmo 0/0/0/0
+single-flow qos=1 payload=64               sent       1842/1788 deliv         958/920 p50     81/85 p99      98/104 slowdrop            6634/0 pauses         0/0 tmo 0/0
+throughput qos=0 payload=64 pairs=16       sent   224112/229429 deliv   223663/229025 p50   280/226 p99     746/839 slowdrop       60799/16114 pauses         0/0 tmo 0/0
+throughput qos=0 payload=1024 pairs=16     sent     20675/20404 deliv     20591/20296 p50   166/245 p99   1157/1085 slowdrop         4074/7656 pauses         0/0 tmo 0/0
+throughput qos=1 payload=64 pairs=16       sent     31129/30809 deliv     16410/16192 p50     72/72 p99       86/90 slowdrop             428/0 pauses         0/0 tmo 0/0
+sweep qos=0 payload=64 rate=1000 pairs=16  sent     16001/15999 deliv     16003/16000 p50     14/14 p99       20/19 slowdrop               0/0 pauses         0/0 tmo 0/0
+## on4-localonly.txt
+single-flow qos=0 payload=64               sent 145616/153334/144581/140744 deliv 145585/124858/144172/116133 p50 90/175/53/187 p99 111/224/66/241 slowdrop 0/162206/0/161709 pauses     0/0/0/0 tmo 0/0/0/0
+single-flow qos=0 payload=1024             sent 9437/10434/10435/11023 deliv 7409/8128/8226/8672 p50 119/103/90/94 p99 171/143/132/134 slowdrop 210333/28790/26990/30457 pauses     0/0/0/0 tmo 0/0/0/0
+single-flow qos=1 payload=64               sent       1806/1816 deliv         944/933 p50     82/84 p99     101/102 slowdrop            6098/0 pauses         0/0 tmo 0/0
+throughput qos=0 payload=64 pairs=16       sent   231486/244478 deliv   231267/244171 p50   144/253 p99    1077/869 slowdrop        1603/28207 pauses     793/436 tmo 0/0
+throughput qos=0 payload=1024 pairs=16     sent     21371/19674 deliv     21308/19646 p50   159/261 p99    1407/985 slowdrop         3625/2445 pauses     950/857 tmo 0/0
+throughput qos=1 payload=64 pairs=16       sent     30980/31253 deliv     16471/16037 p50     72/72 p99       88/98 slowdrop             180/0 pauses       202/0 tmo 0/0
+sweep qos=0 payload=64 rate=1000 pairs=16  sent     16001/16000 deliv     16002/16000 p50     14/14 p99       19/19 slowdrop               0/0 pauses         0/0 tmo 0/0
+## on4-noovershoot.txt
+single-flow qos=0 payload=64               sent 156243/160355/168213/172247 deliv 126835/129966/135303/136023 p50 133/144/97/221 p99 164/170/117/272 slowdrop 202710/383260/325276/483469 pauses 1237/2610/2754/2810 tmo 0/0/0/0
+single-flow qos=0 payload=1024             sent 11660/10496/9382/10036 deliv 8871/7834/7002/7379 p50 81/119/165/121 p99 122/157/249/184 slowdrop 164260/37762/15621/38209 pauses 2652/2742/1032/2632 tmo 0/0/0/0
+single-flow qos=1 payload=64               sent       1805/1798 deliv         926/931 p50     83/83 p99     122/105 slowdrop            6850/0 pauses       661/0 tmo 0/0
+throughput qos=0 payload=64 pairs=16       sent   240913/242141 deliv   240534/242097 p50   141/200 p99     519/559 slowdrop        9013/34573 pauses     728/268 tmo 0/0
+throughput qos=0 payload=1024 pairs=16     sent     15871/21510 deliv     15841/21425 p50   233/170 p99   1471/1573 slowdrop         3215/3917 pauses   1069/1098 tmo 0/0
+throughput qos=1 payload=64 pairs=16       sent     31069/31199 deliv     16390/16228 p50     72/72 p99       86/85 slowdrop             313/0 pauses       520/0 tmo 0/0
+sweep qos=0 payload=64 rate=1000 pairs=16  sent     16000/15999 deliv     15998/15998 p50     14/14 p99       26/20 slowdrop               0/0 pauses         0/0 tmo 0/0
+sweep qos=1 payload=64 rate=1000 pairs=16  sent     15999/16002 deliv     15966/15402 p50     15/16 p99      98/132 slowdrop               0/0 pauses         0/0 tmo 0/0
+## on4-a.txt
+single-flow qos=0 payload=64               sent   145873/143006 deliv   145788/143042 p50   182/158 p99     222/205 slowdrop               0/0 pauses   1138/2964 tmo 0/0
+single-flow qos=0 payload=1024             sent      9335/12117 deliv      9318/12130 p50     78/65 p99      151/98 slowdrop               0/0 pauses   2334/2920 tmo 0/0
+single-flow qos=1 payload=64               sent       1865/1780 deliv         968/922 p50     80/83 p99      96/130 slowdrop               0/0 pauses       621/0 tmo 0/0
+throughput qos=0 payload=64 pairs=16       sent   235470/247725 deliv   235308/247421 p50   278/144 p99    1190/942 slowdrop       27720/22211 pauses     786/265 tmo 0/0
+throughput qos=0 payload=1024 pairs=16     sent     19745/19905 deliv     19718/19889 p50   150/208 p99   2140/1501 slowdrop         5068/4810 pauses   1074/1314 tmo 0/0
+## off4-b.txt
+fanout qos=0 subs=100 rate=50              sent           50/50 deliv       5000/5006 p50     17/18 p99       25/25 slowdrop               0/0 pauses         0/0 tmo 0/0
+fanout qos=0 subs=1000 rate=10             sent           10/10 deliv      10000/9999 p50     23/24 p99       34/37 slowdrop               0/0 pauses         0/0 tmo 0/0
+fanout qos=1 subs=100 rate=50              sent           50/50 deliv       5009/5000 p50     16/16 p99       22/23 slowdrop               0/0 pauses         0/0 tmo 0/0
+fanout qos=0 subs=100 rate=0               sent     63703/54024 deliv   885254/911967 p50   237/295 p99   1296/1398 slowdrop 56411698/54972370 pauses         0/0 tmo 0/0
+## on4-b.txt
+fanout qos=0 subs=100 rate=50              sent           50/50 deliv       5000/5008 p50     17/18 p99       24/25 slowdrop               0/0 pauses         0/0 tmo 0/0
+fanout qos=0 subs=1000 rate=10             sent           10/10 deliv       9998/9999 p50     23/23 p99       43/36 slowdrop               0/0 pauses         0/0 tmo 0/0
+fanout qos=1 subs=100 rate=50              sent           50/50 deliv       5000/5000 p50     16/16 p99       23/27 slowdrop               0/0 pauses         0/0 tmo 0/0
+fanout qos=0 subs=100 rate=0               sent     70138/57062 deliv   941098/944442 p50   215/255 p99   1027/1163 slowdrop 63925031/55919715 pauses         0/0 tmo 0/0
+## /Users/aldo/dev/urMQTT-now13b-b/docs/perf-results/backpressure-2026-11-08/post-off2.txt
+single-flow qos=0 payload=64               sent 145311/151876/147716 deliv 143751/150554/146289 p50 67/81/131 p99   98/99/150 slowdrop  7578/21694/27851 pauses       0/0/0 tmo 0/0/0
+single-flow qos=0 payload=1024             sent 10942/11347/10434 deliv 10283/10629/9758 p50 84/66/102 p99  120/88/158 slowdrop   14245/8642/9827 pauses       0/0/0 tmo 0/0/0
+single-flow qos=1 payload=64               sent  1907/1874/1908 deliv     984/974/990 p50  79/80/79 p99    92/91/90 slowdrop           926/0/0 pauses       0/0/0 tmo 0/0/0
+## /Users/aldo/dev/urMQTT-now13b-b/docs/perf-results/backpressure-2026-11-08/post-on2.txt
+single-flow qos=0 payload=64               sent 125811/116022/144859 deliv 125764/116029/144856 p50 179/86/99 p99 215/111/125 slowdrop             0/0/0 pauses 142/139/155 tmo 0/0/0
+single-flow qos=0 payload=1024             sent 10440/10264/9889 deliv 10445/10262/9875 p50  99/75/72 p99 146/122/109 slowdrop             0/0/0 pauses 3987/5933/4843 tmo 0/0/0
+single-flow qos=1 payload=64               sent  1928/1903/1910 deliv    1005/992/989 p50  77/78/79 p99    90/94/91 slowdrop            11/0/0 pauses     461/0/0 tmo 0/0/0

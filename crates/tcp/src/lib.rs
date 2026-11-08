@@ -588,6 +588,24 @@ impl TcpStack {
         }
     }
 
+    /// Gives `c` back the receive space it had when it was accepted (the
+    /// default window), after [`TcpStack::set_recv_space`] closed it: the
+    /// publisher back-pressure's "resume" (ADR-269). Window and space are all
+    /// or nothing there, so the receiver never announces a small opening
+    /// (no silly-window syndrome, RFC 1122 §4.2.3.3).
+    pub fn reset_recv_space(&mut self, c: ConnId) {
+        let (wnd, scaled) = (self.cfg.rcv_wnd, self.cfg.rcv_wnd_scaled);
+        let Some(k) = self.conns.get(c) else { return };
+        // What the handshake gave it: the scaled window if scaling was
+        // negotiated (then the shift fits it), else the unscaled one.
+        let space = if k.rcv_shift > 0 {
+            scaled.max(u32::from(wnd))
+        } else {
+            u32::from(wnd)
+        };
+        self.set_recv_space(c, space);
+    }
+
     /// Queues `data`; returns how many bytes were accepted.
     pub fn send(&mut self, c: ConnId, data: &[u8]) -> usize {
         let (base, cap) = (self.cfg.tx_max, self.cfg.tx_cap);

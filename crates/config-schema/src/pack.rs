@@ -425,6 +425,11 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
         tag::LIM_HANDSHAKES_IP,
         u64::from(l.max_handshakes_in_flight_per_ip),
     )?;
+    // NOW-13, ADR-269: "single" (the default) writes nothing; "off" needs format 8.
+    b.variant(
+        tag::LIM_PUBLISHER_BACKPRESSURE,
+        l.publisher_backpressure.variant(),
+    )?;
     let a = &cfg.acl;
     b.strs(tag::ACL_DEVICE_PUBLISH, &a.device_publish)?;
     b.strs(tag::ACL_DEVICE_SUBSCRIBE, &a.device_subscribe)?;

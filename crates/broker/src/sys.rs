@@ -92,6 +92,28 @@ pub struct Qos2 {
     pub inbound_full: u64,
 }
 
+/// Publisher back-pressure (NOW-13, ADR-269), all shards together:
+/// `$SYS/broker/messages/backpressure/...`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Backpressure {
+    /// `limits.publisher_backpressure` is "single" (else "off").
+    pub single: bool,
+    /// Publishers paused because their only subscriber was full.
+    pub paused: u64,
+    /// Milliseconds they spent paused (ended pauses).
+    pub paused_ms: u64,
+    /// Pauses that ran out (0.5 s) and fell back to dropping.
+    pub timeouts: u64,
+    /// Publishers whose input is held now.
+    pub holding: u64,
+}
+
+impl Backpressure {
+    pub const fn mode(&self) -> &'static str {
+        if self.single { "single" } else { "off" }
+    }
+}
+
 /// The plaintext listener, as `$SYS/broker/plaintext/...` reports it (P1,
 /// ADR-230). Counters are since boot, all cores together.
 #[derive(Debug, Clone, Copy, Default)]
@@ -235,6 +257,8 @@ pub struct Info<'a> {
     pub net_mtu: u16,
     pub drops: Drops,
     pub qos2: Qos2,
+    /// Publisher back-pressure (NOW-13, ADR-269).
+    pub backpressure: Backpressure,
     pub handshakes: Handshakes,
     /// Connections accepted per core since boot (how evenly the flows
     /// spread over the cores).
@@ -324,6 +348,12 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
     put("messages/qos2/duplicates", &q.duplicates);
     put("messages/qos2/completed", &q.completed);
     put("messages/qos2/inbound_full", &q.inbound_full);
+    let bp = &i.backpressure;
+    put("messages/backpressure/mode", &bp.mode());
+    put("messages/backpressure/paused", &bp.paused);
+    put("messages/backpressure/paused_ms", &bp.paused_ms);
+    put("messages/backpressure/timeouts", &bp.timeouts);
+    put("messages/backpressure/holding", &bp.holding);
     let h = &i.handshakes;
     put("handshakes/started", &h.started);
     put("handshakes/done", &h.done);
@@ -419,6 +449,7 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
         net_mtu: 1500,
         drops: Drops::default(),
         qos2: Qos2::default(),
+        backpressure: Backpressure::default(),
         handshakes: Handshakes::default(),
         accepted: &accepted,
         plaintext: PlainInfo {
@@ -503,6 +534,7 @@ pub fn json(i: &Info<'_>) -> String {
         "}},\"console_dropped\":{},\"net\":{{\"mtu\":{}}},\"dropped\":{{\"slow_subscriber\":{},\"offline\":{},\"cross_core\":{},\
          \"qos1_queue_full\":{},\"publish_rate\":{},\"frames_steer\":{},\"frames_worker_tx\":{},\"frames_nic\":{}}},\
          \"qos2\":{{\"received\":{},\"duplicates\":{},\"completed\":{},\"inbound_full\":{}}},\
+         \"backpressure\":{{\"mode\":\"{}\",\"paused\":{},\"paused_ms\":{},\"timeouts\":{},\"holding\":{}}},\
          \"handshakes\":{{\"started\":{},\"done\":{},\"failed\":{},\
          \"timed_out\":{},\"refused\":{},\"syn_dropped\":{},\"in_flight\":{},\"in_flight_max\":{},\
          \"slow\":{},\"latency_sum_ms\":{},\"latency_max_ms\":{}}},\"accepted\":[",
@@ -520,6 +552,11 @@ pub fn json(i: &Info<'_>) -> String {
         i.qos2.duplicates,
         i.qos2.completed,
         i.qos2.inbound_full,
+        i.backpressure.mode(),
+        i.backpressure.paused,
+        i.backpressure.paused_ms,
+        i.backpressure.timeouts,
+        i.backpressure.holding,
         h.started,
         h.done,
         h.failed,
@@ -672,6 +709,15 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
         q.duplicates,
         q.completed,
         q.inbound_full
+    ));
+    let bp = &i.backpressure;
+    out.push(alloc::format!(
+        "backpressure {}: {} publisher pause(s), {} ms paused, {} ran out, {} held now",
+        bp.mode(),
+        bp.paused,
+        bp.paused_ms,
+        bp.timeouts,
+        bp.holding
     ));
     let p = &i.plaintext;
     if p.enabled {
@@ -872,6 +918,13 @@ mod tests {
                 duplicates: 1,
                 completed: 2,
                 inbound_full: 0,
+            },
+            backpressure: Backpressure {
+                single: true,
+                paused: 4,
+                paused_ms: 120,
+                timeouts: 1,
+                holding: 0,
             },
             handshakes: Handshakes {
                 started: 9,
@@ -1101,6 +1154,11 @@ mod tests {
                 "$SYS/broker/messages/qos2/duplicates",
                 "$SYS/broker/messages/qos2/completed",
                 "$SYS/broker/messages/qos2/inbound_full",
+                "$SYS/broker/messages/backpressure/mode",
+                "$SYS/broker/messages/backpressure/paused",
+                "$SYS/broker/messages/backpressure/paused_ms",
+                "$SYS/broker/messages/backpressure/timeouts",
+                "$SYS/broker/messages/backpressure/holding",
                 "$SYS/broker/handshakes/started",
                 "$SYS/broker/handshakes/done",
                 "$SYS/broker/handshakes/failed",
@@ -1135,6 +1193,14 @@ mod tests {
         assert_eq!(val("$SYS/broker/net/mtu"), Some("1460"));
         assert_eq!(val("$SYS/broker/messages/qos2/received"), Some("4"));
         assert_eq!(val("$SYS/broker/messages/qos2/duplicates"), Some("1"));
+        assert_eq!(
+            val("$SYS/broker/messages/backpressure/mode"),
+            Some("single")
+        );
+        assert_eq!(
+            val("$SYS/broker/messages/backpressure/paused_ms"),
+            Some("120")
+        );
         // No payload is empty: an empty retained payload would clear it.
         assert!(got.iter().all(|(_, v)| !v.is_empty()));
         assert_eq!(val("$SYS/broker/plaintext/enabled"), Some("false"));
@@ -1163,6 +1229,7 @@ mod tests {
              \"dropped\":{\"slow_subscriber\":3,\"offline\":0,\"cross_core\":0,\"qos1_queue_full\":0,\
              \"publish_rate\":0,\"frames_steer\":0,\"frames_worker_tx\":0,\"frames_nic\":0},\
              \"qos2\":{\"received\":4,\"duplicates\":1,\"completed\":2,\"inbound_full\":0},\
+             \"backpressure\":{\"mode\":\"single\",\"paused\":4,\"paused_ms\":120,\"timeouts\":1,\"holding\":0},\
              \"handshakes\":{\"started\":9,\"done\":8,\"failed\":0,\"timed_out\":0,\"refused\":0,\
              \"syn_dropped\":0,\"in_flight\":0,\"in_flight_max\":0,\"slow\":0,\"latency_sum_ms\":0,\
              \"latency_max_ms\":0},\"accepted\":[4,5],\"plaintext\":{\"enabled\":false},\"websocket\":{\"enabled\":false}}"
@@ -1215,7 +1282,7 @@ mod tests {
     #[test]
     fn status_is_a_few_short_lines() {
         let lines = status_lines(&info(&[10, 20]), "info", "debug");
-        assert_eq!(lines.len(), 11);
+        assert_eq!(lines.len(), 12);
         assert_eq!(lines[0], "urmqtt 0.1.0 aarch64 up 12 s");
         assert_eq!(lines[1], "cpu 2 core(s), busy % 10/20");
         assert!(lines[3].starts_with("clients 3 connected, 5 sessions"));
@@ -1229,7 +1296,11 @@ mod tests {
             lines[9],
             "QoS 2: 4 received, 1 duplicate(s), 2 completed, 0 closed with ids full"
         );
-        assert!(lines[10].starts_with("log level info (build maximum debug)"));
+        assert_eq!(
+            lines[10],
+            "backpressure single: 4 publisher pause(s), 120 ms paused, 1 ran out, 0 held now"
+        );
+        assert!(lines[11].starts_with("log level info (build maximum debug)"));
         assert!(lines.iter().all(|l| l.len() < 120 && !l.contains('\n')));
     }
 
