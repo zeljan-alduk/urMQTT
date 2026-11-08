@@ -2,10 +2,8 @@
 //! Integers and property-block lengths. Run with `make kani`; compiled only
 //! under `cfg(kani)`.
 
-use super::{
-    Limits, MAX_VARINT, PropertyContext, props::RawProps, read_varint, validate_properties,
-    varint_len, write_varint,
-};
+use super::decode::Reader;
+use super::{MAX_VARINT, Property, read_varint, varint_len, write_varint};
 
 /// Every value up to the maximum encodes in `varint_len` bytes and decodes
 /// back; larger values are refused.
@@ -41,29 +39,37 @@ fn read_varint_any_bytes() {
     }
 }
 
-/// Any property block of up to 6 bytes in any context: validation never
-/// panics, and an accepted block is consumed exactly: the encoded lengths
-/// of the properties it holds add up to the Property Length. Response Topic
-/// and User Property (topic and UTF-8 checks over two strings) are left out
-/// to keep CBMC within its budget; the string arithmetic is the same as
-/// Content Type's, which stays in.
-#[kani::proof]
-#[kani::unwind(8)]
-fn property_block_lengths() {
-    let bytes: [u8; 6] = kani::any();
-    for b in bytes {
-        kani::assume(b != 0x08 && b != 0x26);
+/// The UTF-8 validator, replaced for CBMC (which does not finish it within
+/// its budget): accepts or refuses at will and keeps the length, which is
+/// all the length arithmetic depends on. The validator itself is the 3.1.1
+/// one (`core::str::from_utf8` plus the U+0000 check), tested and fuzzed.
+fn any_utf8(bytes: &[u8]) -> Result<&str, super::Error> {
+    const A: &str = "aaaa";
+    match A.get(..bytes.len()) {
+        Some(s) if kani::any() => Ok(s),
+        _ => Err(super::Error::InvalidUtf8),
     }
+}
+
+fn any_topic_name(_: &str) -> bool {
+    kani::any()
+}
+
+/// One property (identifier and up to 4 value bytes, any bytes, strings
+/// included): parsing never panics, and what it consumes is exactly the
+/// property's `encoded_len`, so a block's Property Length and the sum over
+/// its properties agree (the whole-block statement is also checked by the
+/// `mqtt5_props` fuzz target). Needs `-Z stubbing` (scripts/kani.sh).
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::stub(super::decode::utf8, any_utf8)]
+#[kani::stub(crate::validate::is_valid_topic_name, any_topic_name)]
+fn property_length_arithmetic() {
+    let bytes: [u8; 5] = kani::any();
     let len: usize = kani::any();
     kani::assume(len <= bytes.len());
-    let i: usize = kani::any();
-    kani::assume(i < PropertyContext::ALL.len());
-    let raw = &bytes[..len];
-    if validate_properties(raw, PropertyContext::ALL[i], &Limits::PROTOCOL_MAX).is_ok() {
-        let mut sum = 0usize;
-        for p in RawProps::new(raw) {
-            sum += p.encoded_len();
-        }
-        assert_eq!(sum, len);
+    let mut r = Reader::new(&bytes[..len]);
+    if let Ok(p) = Property::parse(&mut r) {
+        assert_eq!(len - r.remaining(), p.encoded_len());
     }
 }

@@ -6,7 +6,7 @@ runs at the time of writing are in `docs/PROGRESS.md` (entry H5).
 | Tool | Command | CI job | Covers |
 |---|---|---|---|
 | Miri | `make miri` (`scripts/miri.sh [crate...]`) | `miri` | Undefined behaviour and aliasing in the host unit tests of mqtt, timer-wheel, net, tcp (subset), broker (subset), tls, cfg (the configuration blob decoder) and config (the write-once `.bss` arena of the loaded configuration: its one `unsafe` module) |
-| Kani | `make kani` (`scripts/kani.sh`) | `kani` | Bounded proofs: MQTT decoder, TCP segment parser, TLS record header, config checks, timer-wheel arithmetic |
+| Kani | `make kani` (`scripts/kani.sh`) | `kani` | Bounded proofs: MQTT decoder, MQTT 5.0 varint and property-block lengths, TCP segment parser, TLS record header, config checks, timer-wheel arithmetic |
 | Sanitizers | `make sanitize` (`scripts/sanitize.sh`) | `sanitize` | ASan on Rust and on the C SQLite amalgamation, trapping UBSan on the C side, over the host test suites |
 | ACL fuzzer | `make acl-fuzz ACL_FUZZ_SECS=600` | `fuzz` (scheduled) | Stateful, model-checked access rules of the broker |
 | ACL fuzzer, coverage-guided | `make fuzz T=broker_acl` | `fuzz` (scheduled), fuzz smoke | A second, independent ACL oracle under libFuzzer; also a proptest in `cargo test` |
@@ -108,6 +108,9 @@ at the time of writing (Kani 0.68.0, Apple M-series, 3 minute cap):
 | timer-wheel `slot_of_is_always_a_valid_slot` | every `now` below 2^62, every deadline | PROVEN |
 | timer-wheel `skip_target_moves_forward_within_limit` | same | PROVEN |
 | mqtt `decode_any_short_input` | 6 bytes, any limits | NOT PROVEN: CBMC timed out (also at 10 bytes, 3 min) |
+| mqtt `v5::proofs::varint_round_trip` | every u32 | PROVEN: values up to 268 435 455 encode in `varint_len` bytes and decode back, larger ones are refused |
+| mqtt `v5::proofs::read_varint_any_bytes` | any 5 bytes, any prefix | PROVEN: an accepted varint is in range, 1 to 4 bytes, inside the input, minimal |
+| mqtt `v5::proofs::property_length_arithmetic` | one property, up to 5 bytes, every identifier | PROVEN (34 s) with the UTF-8 and topic-name checks stubbed (`-Z stubbing`; they keep the length): parsing never panics and consumes exactly `encoded_len`. A whole 6-byte block in any context timed out at 8 min, with or without the string identifiers |
 | mqtt `decode_typed_packets` | CONNECT/PUBLISH/SUBSCRIBE/UNSUBSCRIBE, 6-byte body | NOT PROVEN: timed out (also at a 14-byte body, 3 min) |
 | config `parse_rate_any_short_string` | 5 bytes | NOT PROVEN: timed out at 2 min |
 | config `check_topic_filter` | 5 bytes | NOT PROVEN: timed out at 2 min |

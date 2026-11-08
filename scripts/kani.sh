@@ -32,7 +32,7 @@ for c in "${CRATES[@]}"; do
     echo "== kani: $c"
     # Hard cap per harness: one that does not finish is NOT PROVEN, not passed.
     # shellcheck disable=SC2086 # KANI_ARGS is a list of options
-    cargo kani -p "$c" -Z unstable-options --harness-timeout "${KANI_TIMEOUT:-3m}" ${KANI_ARGS:-} 2>&1 | tee -a "$log" || true
+    cargo kani -p "$c" -Z unstable-options -Z stubbing --harness-timeout "${KANI_TIMEOUT:-3m}" ${KANI_ARGS:-} 2>&1 | tee -a "$log" || true
 done
 failed=0
 if grep -q 'Status: FAILURE' "$log"; then
