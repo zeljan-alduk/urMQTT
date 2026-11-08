@@ -11,6 +11,10 @@ on:
         description: Skip a Miri job whose inputs match an earlier green run (ADR-262); off runs Miri in full
         type: boolean
         default: true
+      mqtt5-conformance:
+        description: Also run the Eclipse Paho MQTT 5.0/3.1.1 interoperability suite against a booted broker (ADR-275, about 40 min under TCG)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -486,6 +490,43 @@ jobs:
         run: |
           cargo fetch --locked
           python3 scripts/sbom.py --strict --check
+
+  # The Eclipse Paho interoperability suite (docs/MQTT5-CONFORMANCE.md,
+  # ADR-275) on the development port, against its expected-failure list
+  # (scripts/mqtt5-conformance-dev.xfail). Optional: only when dispatched by
+  # hand with mqtt5-conformance (each test boots nothing new, but the suite's
+  # own waits add up under TCG). The suite is cloned at its pinned commit by
+  # the harness. The same by hand: scripts/mqtt5-conformance.sh --boot
+  # --listener dev.
+  mqtt5-conformance:
+    name: MQTT 5.0 conformance (Paho suite, QEMU TCG)
+    if: github.event_name == 'workflow_dispatch' && inputs.mqtt5-conformance
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: kernel
+          bare-metal-c: "true"
+      - name: Install QEMU, UEFI firmware and ISO tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-arm qemu-efi-aarch64 qemu-utils xorriso mtools
+      - run: make certs
+      - run: make build
+      - name: Paho interoperability suite, development port
+        run: scripts/mqtt5-conformance.sh --boot --listener dev --accel tcg --timeout 180 --work "$RUNNER_TEMP/conformance"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: mqtt5-conformance-logs
+          path: |
+            ${{ runner.temp }}/conformance/logs
+            ${{ runner.temp }}/conformance/image/serial.log
+          if-no-files-found: ignore
 
   fuzz-smoke:
     name: Fuzz smoke (60 s per target)
