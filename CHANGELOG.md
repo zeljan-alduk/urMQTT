@@ -6,6 +6,75 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-09
+
+The **MQTT 5.0 and QoS 2 release**: everything since v0.4.2 (the first release signed with the release key
+`721316B961DCB94B`, which signs this one too). Three headline features: **QoS 2, exactly once** (ADR-271);
+**MQTT over secure WebSocket** in the kernel (`wss://`, ADR-272, off by default); and **MQTT 5.0** beside 3.1.1 on
+every listener (the codec, ADR-273; broker semantics with session and message expiry, reason codes, properties, flow
+control and topic aliases from the client, ADR-274; shared subscriptions and Subscription Identifiers, ADR-275), with
+only enhanced authentication refused (CONNACK 0x8C). With them, the performance work of ROADMAP NOW-13: TCP recovery
+from SACK blocks (ADR-265) and its loss detection counting the flow's own segments, which fixes the QoS 1 regression
+of the SACK build on one core (ADR-268); deeper virtio-net queues (ADR-266); publisher back-pressure when a QoS 0
+message has a single full subscriber (ADR-269); and the virtio-net receive interrupt with probation, verification
+and a polling fallback (ADR-270). The two-VPS comparison against Mosquitto 2.0.21 (docs/PERFORMANCE.md section 13,
+2026-11-07/08) measured v0.4.2 and the SACK build of that day; ADR-268 to ADR-270 have rig numbers only. Also:
+plaintext password hashes at 100 000 PBKDF2 iterations by default (ADR-267), the watchdog self-test and
+`$SYS/query/info` fixes, and a hashed paho-mqtt for CI's smoke scenarios.
+
+### Upgrading from v0.4.2
+
+- **The database migrates from schema 2 to schema 5 on the first boot, one way.** The kernel (and `urmqtt-disk`, when
+  it opens the disk) runs the migrations 2 to 3 (ADR-271), 3 to 4 (ADR-274) and 4 to 5 (ADR-275) in order, each in one
+  transaction; a power cut leaves a whole intermediate schema with every row. **A v0.4.2 kernel refuses the migrated
+  database** (`schema version 5 is newer than this build`) **and every backup snapshot the new kernel takes** (a
+  snapshot records its schema). If you may want to go back, take a backup before the update, with the VM stopped: a
+  copy of the whole data disk, or v0.4.2's `urmqtt-disk backup DISK --write` followed by `urmqtt-disk backup-extract
+  DISK OUT` (which does not change the disk) to keep the snapshot outside it; a v0.5.0 `urmqtt-disk` that writes to
+  the disk migrates the database first. The data-disk layout itself (v2.1) does not change.
+- **Configuration formats go up to 13** (the kernel reads 1 to 9 and 11 to 13; 10 was never used and is refused). A
+  configuration is written with the format of its newest key that is not at its default: `network.mtu` 7 (ADR-264),
+  `limits.publisher_backpressure = "off"` 8 (ADR-269), `[websocket]` 9 (ADR-272), `devices.virtio_net_interrupt = "off"`
+  11 (ADR-270), any `[mqtt5]` key or `limits.max_session_expiry_s` / `default_session_expiry_s` /
+  `max_message_expiry_s` 12 (ADR-274), `limits.max_shared_groups` / `max_shared_group_members` 13 (ADR-275). A
+  configuration that sets none of them keeps format 7 or lower, packs into the v0.4.2 template as before, and boots
+  either kernel. One that sets a new key is refused when packed into an older template ("needs configuration format
+  N, which this template's kernel does not read (it reads up to 7): use a newer release"), so no older kernel boots
+  with a key it would ignore. The v0.5.0 template declares format 13. The builder page (rebuilt for format 13) picks
+  the newest release that reads what the form asks for and greys out a release whose template it cannot read;
+  `urmqtt-config pack --iso/--image` refuses as above.
+- **Behaviour changes with an unchanged configuration:**
+  - **Persistent sessions expire after 30 days offline**, 3.1.1 sessions (`clean_session = 0`) included; they were kept
+    forever. Raise `limits.default_session_expiry_s` and `limits.max_session_expiry_s` (4 294 967 295 = never;
+    format 12) before the update if your devices sleep longer.
+  - **`mqtt5.enabled` is on**: a CONNECT with protocol level 5 is served on every listener (v0.4.2 refused it).
+    `mqtt5.enabled = false` (format 12) answers it with CONNACK 0x84.
+  - **`limits.publisher_backpressure = "single"`**: a QoS 0 publisher whose only subscriber cannot keep up is paused
+    (its TCP window closes, at most 500 ms at a time) instead of having its messages dropped. `"off"` (format 8) restores
+    v0.4.2's behaviour.
+  - **`devices.virtio_net_interrupt = "auto"`**: the receive interrupt wakes the NIC's core when the device offers
+    MSI-X and it is verified; otherwise, and after 8 frames that waited without it, the broker polls as v0.4.2 did
+    (a boot line says which). `"off"` (format 11) forces the polling.
+  - **A connection the broker closes** (keep-alive timeout, a protocol error, a takeover) **ends its session and
+    publishes its Will at once**, not when TCP is done with the socket.
+  - **QoS 2 is served**: a QoS 2 PUBLISH is answered with PUBREC (v0.4.2 closed the connection), subscriptions are
+    granted QoS 2; `limits.max_inflight_qos1` now counts QoS 1 and QoS 2 deliveries.
+  - New plaintext password hashes from `urmqtt-config hash-password` and the builder cost 100 000 PBKDF2 iterations;
+    existing hashes keep their own count.
+- **New listener only if you turn it on**: the WebSocket port (8084) opens only with `[websocket] enabled = true`.
+- **Rollback to v0.4.2**: pack the same configuration (formats 7 or lower) into the v0.4.2 template, and give it a data
+  disk it can read: the backup taken before the update, or a new one. docs/RELEASE.md section 6.
+
+**Limits, stated plainly.** Alpha: fit for trials and pilots whose operator reads docs/KNOWN-ISSUES.md, not for
+unattended production. MQTT 5.0 is complete except enhanced authentication (refused, CONNACK 0x8C) and topic aliases
+sent by the broker; the Eclipse Paho suite passes 25 of 27 (5.0) and 8 of 10 (3.1.1) on the development port, the rest
+expected failures by design (docs/MQTT5-CONFORMANCE.md). Wills live in RAM (lost at a restart, not sent at
+`reboot`); QoS 2 is exactly once across disconnects and restarts while the client is away, not across a broker crash
+while it is connected (AUDIT A271-W1). The receive interrupt has run under QEMU only (HVF, TCG with the GICv3 ITS,
+x86_64 TCG), publisher back-pressure and ADR-268 on the local rig only; **nothing of this release ran on a VPS**, and
+nothing on physical hardware. The x86_64 unit tests and the x86_64 and universal-ISO smoke suites are not in CI. The
+new builder texts are AI translations, unreviewed. The rest of v0.4.2's limits is unchanged.
+
 ### Added
 
 - **MQTT 5.0 shared subscriptions and Subscription Identifiers** (ROADMAP NEXT-3 part 3, ADR-275; NEXT-3 is done
@@ -185,6 +254,9 @@ All notable changes to this project are documented here. The format follows
 - `scripts/smoke.sh`: the plaintext and `attack-app` scenarios wait for the DHCP lease before their clients start.
   `URMQTT READY` and the listener line come some 60 ms before the lease; a SYN in between is dropped and a client
   that does not retry sees no CONNACK (two CI runs on 2026-11-07, `plaintext-registry` and `plaintext-lockout`).
+- CI's smoke jobs install paho-mqtt 2.1.0 from a hashed requirements file (`scripts/ci-requirements.txt`, a wheel
+  with its SHA-256, `--require-hashes --only-binary`) into a virtual environment, instead of Ubuntu's 1.6.1 package;
+  the QoS 2, WebSocket and MQTT 5.0 scenarios run on the same client library locally and in CI.
 
 ### Fixed
 
@@ -668,7 +740,8 @@ production images embed the operator's own keys and are built with
 - M1: Bootable UEFI ISO, console, decoded exception reports, PSCI, `make run`/`smoke`, CI smoke job.
 - M0: CI and CD: lint, host tests, kernel build, cargo-deny, fuzzing, CodeQL, Scorecard, Dependabot and a release workflow with provenance.
 
-[Unreleased]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/zeljan-alduk/urMQTT/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/zeljan-alduk/urMQTT/compare/v0.3.0...v0.4.0
