@@ -306,6 +306,8 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             max_session_expiry_s: u32_of(tag::LIM_MAX_SESSION_EXPIRY),
             default_session_expiry_s: u32_of(tag::LIM_DEFAULT_SESSION_EXPIRY),
             max_message_expiry_s: u32_of(tag::LIM_MAX_MESSAGE_EXPIRY),
+            max_shared_groups: u32_of(tag::LIM_MAX_SHARED_GROUPS),
+            max_shared_group_members: u32_of(tag::LIM_MAX_SHARED_GROUP_MEMBERS),
         },
         acl: Acl {
             device_publish,
@@ -845,6 +847,34 @@ mod tests {
                 c.limits.max_message_expiry_s
             ),
             (u32::MAX, 86_400, 3600)
+        );
+    }
+
+    /// ADR-275: the shared-subscription group limits have the documented
+    /// defaults (the empty blob, and every blob before format 13) and are
+    /// decoded when set.
+    #[test]
+    fn the_shared_group_limits_are_decoded() {
+        use urmqtt_cfg::build::Builder;
+        let l = CONFIG.limits;
+        assert_eq!(
+            (l.max_shared_groups, l.max_shared_group_members),
+            (1024, 1024)
+        );
+        let mut b = Builder::new();
+        b.uint(tag::LIM_MAX_SHARED_GROUPS, 65_535).unwrap();
+        b.uint(tag::LIM_MAX_SHARED_GROUP_MEMBERS, 1).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 13);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        assert_eq!(
+            (
+                c.limits.max_shared_groups,
+                c.limits.max_shared_group_members
+            ),
+            (65_535, 1)
         );
     }
 

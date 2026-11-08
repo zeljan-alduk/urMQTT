@@ -898,6 +898,67 @@ fn the_mqtt5_fixture_packs_into_format_12() {
     );
 }
 
+/// ADR-275: the shared-subscription group limits pack into format 13,
+/// `show` lists them with the other limits (one `[limits]` heading), a
+/// release kernel accepts the blob, and a value out of range is refused
+/// naming the key.
+#[test]
+fn the_shared_groups_fixture_packs_into_format_13() {
+    let out = tmp("shared.blob");
+    let text = ok(&run(bin()
+        .arg("pack")
+        .arg(fixtures().join("shared.toml"))
+        .arg("--out")
+        .arg(&out)));
+    assert!(!text.contains("warning"), "{text}");
+    let blob = std::fs::read(&out).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 13);
+    let shown = ok(&run(bin().arg("show").arg(&out)));
+    assert!(shown.contains("urmqtt-cfg version 13"), "{shown}");
+    assert!(
+        shown.contains(
+            "[limits]\n  max_packet_size = 8192\n  max_shared_groups = 64\n  max_shared_group_members = 8\n"
+        ),
+        "{shown}"
+    );
+    let all = ok(&run(bin().arg("show").arg(&out).arg("--all")));
+    assert_eq!(all.matches("[limits]").count(), 1, "{all}");
+    assert!(ok(&run(bin().arg("verify").arg(&out))).starts_with("ok: "));
+    // Defaults spelled out: no record, the base format.
+    let cfg = tmp("shared-default.toml");
+    std::fs::write(
+        &cfg,
+        "[limits]\nmax_shared_groups = 1024\nmax_shared_group_members = 1024\n",
+    )
+    .unwrap();
+    let def = tmp("shared-default.blob");
+    ok(&run(bin().arg("pack").arg(&cfg).arg("--out").arg(&def)));
+    let blob = std::fs::read(&def).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 2);
+    // Out of range.
+    for (n, set) in [
+        ("max_shared_groups", "max_shared_groups = 0"),
+        (
+            "max_shared_group_members",
+            "max_shared_group_members = 65536",
+        ),
+    ] {
+        let cfg = tmp(&format!("shared-{n}.toml"));
+        std::fs::write(&cfg, format!("[limits]\n{set}\n")).unwrap();
+        let o = run(bin()
+            .arg("pack")
+            .arg(&cfg)
+            .arg("--out")
+            .arg(tmp(&format!("shared-{n}.blob"))));
+        assert!(!o.status.success(), "{set}");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            err.contains(&format!("limits.{n}")) && err.contains("1..=65535"),
+            "{err}"
+        );
+    }
+}
+
 #[test]
 fn hash_password_reads_the_password_from_stdin() {
     use std::io::Write;
@@ -1085,10 +1146,10 @@ fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
 
 /// The templates of the published releases, configured by this tool (and by the builder page, which runs the
 /// same code): v0.2.0's kernel reads configuration format 2, v0.2.1's 3, v0.3.0's 4, v0.4.0's and v0.4.1's 6,
-/// this one 12. A configuration that needs no newer format than the template's kernel reads is written into it as
+/// this one 13. A configuration that needs no newer format than the template's kernel reads is written into it as
 /// before; one that needs more (the virtio-gpu console: 5, a `[devices]` key: 6, `network.mtu`: 7,
 /// `limits.publisher_backpressure = "off"`: 8, a `[websocket]` key: 9, `devices.virtio_net_interrupt = "off"`: 11,
-/// an `[mqtt5]` key or an expiry limit: 12) is refused with the reason, before a byte
+/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13) is refused with the reason, before a byte
 /// of the template changes, instead of giving an image whose kernel would refuse it at boot.
 #[test]
 fn templates_of_earlier_releases_take_what_their_kernel_reads() {
@@ -1125,6 +1186,10 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
     b.uint(tag::MQTT5_RECEIVE_MAXIMUM, 8).unwrap();
     let m5 = b.finish(false).unwrap();
     assert_eq!(header(&m5), 12);
+    let mut b = Builder::new();
+    b.uint(tag::LIM_MAX_SHARED_GROUPS, 64).unwrap();
+    let shared = b.finish(false).unwrap();
+    assert_eq!(header(&shared), 13);
     for (release, reads) in [
         ("v0.2.0", 2u16),
         ("v0.2.1", 3),
@@ -1134,6 +1199,8 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
         ("v0.4.2", 7),
         // A tree with ADR-269 and without ADR-272.
         ("format 8", 8),
+        // A tree with MQTT 5.0 parts 1 and 2 (ADR-273/274), without ADR-275.
+        ("format 12", 12),
         ("this tree", urmqtt_cfg::FORMAT_VERSION),
     ] {
         let empty = Builder::new().finish_as(false, reads).unwrap();
@@ -1149,6 +1216,7 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             ("limits.publisher_backpressure", &bp, 8),
             ("devices.virtio_net_interrupt", &net_irq, 11),
             ("[mqtt5]", &m5, 12),
+            ("limits.max_shared_groups", &shared, 13),
         ] {
             match image::configure_iso(&tpl, blob) {
                 Ok(_) => assert!(

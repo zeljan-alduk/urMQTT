@@ -305,6 +305,9 @@ pub mod tag {
     pub const MQTT5_MAX_KEEP_ALIVE: u16 = 257;
     pub const MQTT5_SHARED_SUBSCRIPTIONS: u16 = 258;
     pub const MQTT5_SUBSCRIPTION_IDENTIFIERS: u16 = 259;
+    // MQTT 5.0 part 3 (ADR-275): format version 13.
+    pub const LIM_MAX_SHARED_GROUPS: u16 = 260;
+    pub const LIM_MAX_SHARED_GROUP_MEMBERS: u16 = 261;
 }
 
 use tag as t;
@@ -1431,7 +1434,7 @@ pub static FIELDS: &[Field] = &[
             t::MQTT5_SHARED_SUBSCRIPTIONS,
             "mqtt5.shared_subscriptions",
             Kind::Bool(true),
-            "Reserved for shared subscriptions ($share/group/filter, a later release): today the broker announces Shared Subscription Available 0 and answers a $share/ filter with SUBACK 0x9E whatever this says. Format 12.",
+            "Shared subscriptions ($share/{group}/{filter}, MQTT 5.0 4.8.2; also for 3.1.1 clients): each matching message goes to one member of the group. Off: CONNACK announces Shared Subscription Available 0 and a $share/ filter gets SUBACK 0x9E (3.1.1: 0x80). Format 12.",
         ),
         12,
     ),
@@ -1440,9 +1443,28 @@ pub static FIELDS: &[Field] = &[
             t::MQTT5_SUBSCRIPTION_IDENTIFIERS,
             "mqtt5.subscription_identifiers",
             Kind::Bool(true),
-            "Reserved for subscription identifiers (a later release): today the broker announces Subscription Identifier Available 0 and answers a SUBSCRIBE that carries one with SUBACK 0xA1 whatever this says. Format 12.",
+            "Subscription Identifiers (MQTT 5.0 3.8.2.1.2): returned in each PUBLISH the subscription matched. Off: CONNACK announces Subscription Identifier Available 0 and a SUBSCRIBE that carries one gets SUBACK 0xA1. Format 12.",
         ),
         12,
+    ),
+    // MQTT 5.0 part 3 (ADR-275): format version 13.
+    since(
+        f(
+            t::LIM_MAX_SHARED_GROUPS,
+            "limits.max_shared_groups",
+            uint(4, 1, 65_535, 1024),
+            "Shared-subscription groups ($share/{group}/{filter}) one data core may own; a SUBSCRIBE that would create one more gets SUBACK 0x97 (MQTT 5.0) / 0x80 (3.1.1). Each group lives on one core chosen by a hash of (role class, group, filter). Format 13.",
+        ),
+        13,
+    ),
+    since(
+        f(
+            t::LIM_MAX_SHARED_GROUP_MEMBERS,
+            "limits.max_shared_group_members",
+            uint(4, 1, 65_535, 1024),
+            "Members one shared-subscription group may have; one more gets SUBACK 0x97 / 0x80. Format 13.",
+        ),
+        13,
     ),
 ];
 

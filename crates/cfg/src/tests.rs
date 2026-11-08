@@ -215,13 +215,14 @@ fn structural_attacks_fail_closed() {
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, 10 which no format ever used, and
     // one above the newest).
-    for unknown in [0u8, 10, 13, 14] {
+    for unknown in [0u8, 10, 14, 15] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
     // The versions of the formats that came after 7, each its own feature
-    // (8 back-pressure, 9 WebSocket, 11 the receive interrupt, 12 MQTT 5.0).
-    for known in [8u8, 9, 11, 12] {
+    // (8 back-pressure, 9 WebSocket, 11 the receive interrupt, 12 MQTT 5.0,
+    // 13 the shared-group limits).
+    for known in [8u8, 9, 11, 12, 13] {
         let v = with_version(&assemble(&ok), known);
         assert_eq!(Blob::parse(&v).map(|b| b.version()), Ok(u16::from(known)));
     }
@@ -243,7 +244,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 12));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 13));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -252,7 +253,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[12, 0],
+        &[13, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -1199,4 +1200,36 @@ fn mqtt5_rules() {
     let rec = record(tag::MQTT5_RECEIVE_MAXIMUM, &64u32.to_le_bytes());
     assert!(Blob::parse(&with_version(&assemble(&rec), 9)).is_err());
     assert!(Blob::parse(&with_version(&assemble(&rec), 12)).is_ok());
+}
+
+/// ADR-275: the shared-subscription group limits. Defaults write nothing and
+/// keep the base format; either set needs format 13; 0 and 65536 are refused;
+/// a blob of format 12 cannot hold them.
+#[test]
+fn shared_group_limits() {
+    let mut d = Builder::new();
+    d.uint(tag::LIM_MAX_SHARED_GROUPS, 1024).unwrap();
+    d.uint(tag::LIM_MAX_SHARED_GROUP_MEMBERS, 1024).unwrap();
+    assert_eq!(d.finish(false).unwrap(), empty());
+    for t in [
+        tag::LIM_MAX_SHARED_GROUPS,
+        tag::LIM_MAX_SHARED_GROUP_MEMBERS,
+    ] {
+        for v in [1u64, 65_535] {
+            let mut b = Builder::new();
+            b.uint(t, v).unwrap();
+            let blob = b.finish(false).unwrap();
+            let p = Blob::parse(&blob).unwrap();
+            assert_eq!(p.version(), 13, "{t} = {v}");
+            assert_eq!(p.present().count(), 1);
+            assert_eq!(p.uint(t), v);
+        }
+        let mut b = Builder::new();
+        for v in [0u64, 65_536] {
+            assert!(b.uint(t, v).is_err(), "{t} = {v}");
+        }
+        let rec = record(t, &64u32.to_le_bytes());
+        assert!(Blob::parse(&with_version(&assemble(&rec), 12)).is_err());
+        assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_ok());
+    }
 }

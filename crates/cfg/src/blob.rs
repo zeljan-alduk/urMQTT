@@ -30,10 +30,12 @@ pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// ignored, so it is refused by the version); version 9 adds the `[websocket]` section (ADR-272: a kernel without
 /// the listener must refuse an image that asks for it); version 11 adds `devices.virtio_net_interrupt` (ADR-270;
 /// 10 is unused); version 12 adds the `[mqtt5]` section and the session and message expiry limits (ADR-273 rule
-/// 21: a kernel that does not know them would ignore the operator's expiry policy). The records of 2 and 3 are the
-/// same: the packer writes the lowest version that can hold the configuration ([`BASE_VERSION`]), so a kernel of
-/// the older kind still boots every image that does not use what came later.
-pub const FORMAT_VERSION: u16 = 12;
+/// 21: a kernel that does not know them would ignore the operator's expiry policy); version 13 adds
+/// `limits.max_shared_groups` and `limits.max_shared_group_members` (ADR-275: a kernel that does not know them
+/// would ignore the operator's bound). The records of 2 and 3 are the same: the packer writes the lowest version
+/// that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind still boots every image that
+/// does not use what came later.
+pub const FORMAT_VERSION: u16 = 13;
 
 /// The one version between [`FORMAT_MIN`] and [`FORMAT_VERSION`] no format ever had.
 pub const UNUSED_VERSION: u16 = 10;

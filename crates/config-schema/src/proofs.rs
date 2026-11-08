@@ -49,6 +49,8 @@ fn topic_filter_any_short_string() {
         max_session_expiry_s: 0,
         default_session_expiry_s: 0,
         max_message_expiry_s: 0,
+        max_shared_groups: 1,
+        max_shared_group_members: 1,
     };
     let ph = if kani::any() {
         Placeholder::Allowed

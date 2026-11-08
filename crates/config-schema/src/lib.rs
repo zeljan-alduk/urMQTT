@@ -448,6 +448,14 @@ fn default_max_message_expiry_s() -> u32 {
     default_u32("limits.max_message_expiry_s")
 }
 
+fn default_max_shared_groups() -> u32 {
+    default_u32("limits.max_shared_groups")
+}
+
+fn default_max_shared_group_members() -> u32 {
+    default_u32("limits.max_shared_group_members")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawTrust {
@@ -569,6 +577,11 @@ struct RawLimits {
     default_session_expiry_s: u32,
     #[serde(default = "default_max_message_expiry_s")]
     max_message_expiry_s: u32,
+    /// Optional (format 13, ADR-275): the defaults of the field table.
+    #[serde(default = "default_max_shared_groups")]
+    max_shared_groups: u32,
+    #[serde(default = "default_max_shared_group_members")]
+    max_shared_group_members: u32,
     /// NOW-13, ADR-269; optional ("single" when absent).
     #[serde(default)]
     publisher_backpressure: PublisherBackpressure,
@@ -872,6 +885,12 @@ pub struct Limits {
     pub default_session_expiry_s: u32,
     /// The longest Message Expiry Interval a publisher may ask for; 0: no cap.
     pub max_message_expiry_s: u32,
+    /// Shared-subscription groups one data core may own, 1..=65535; one
+    /// more: SUBACK 0x97 / 0x80 (ADR-275).
+    pub max_shared_groups: u32,
+    /// Members one shared-subscription group may have, 1..=65535; one more:
+    /// SUBACK 0x97 / 0x80 (ADR-275).
+    pub max_shared_group_members: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -982,9 +1001,11 @@ pub struct Mqtt5 {
     pub max_user_properties: u32,
     /// 0: the client's keep alive; otherwise Server Keep Alive. 0..=65535.
     pub max_keep_alive_s: u32,
-    /// Reserved for part 3 (rule 16): announced as 0 today.
+    /// Shared subscriptions (rule 16), also for 3.1.1 clients; false:
+    /// announced as 0 and a `$share/` filter gets SUBACK 0x9E (3.1.1: 0x80).
     pub shared_subscriptions: bool,
-    /// Reserved for part 3 (rule 17): announced as 0 today.
+    /// Subscription Identifiers (rule 17); false: announced as 0 and a
+    /// SUBSCRIBE that carries one gets SUBACK 0xA1.
     pub subscription_identifiers: bool,
 }
 
@@ -2153,6 +2174,21 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
             ),
         ));
     }
+    // ADR-275: the shared-subscription group limits, ranges of the field
+    // table.
+    for (key, v) in [
+        ("limits.max_shared_groups", raw.max_shared_groups),
+        (
+            "limits.max_shared_group_members",
+            raw.max_shared_group_members,
+        ),
+    ] {
+        if let Some(urmqtt_cfg::fields::Kind::UInt { min, max, .. }) = default_of(key)
+            && !(min..=max).contains(&u64::from(v))
+        {
+            errors.push(err(key, format!("must be in {min}..={max}")));
+        }
+    }
     Limits {
         max_connections_per_core: raw.max_connections_per_core,
         max_packet_size: raw.max_packet_size,
@@ -2171,6 +2207,8 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
         max_session_expiry_s: raw.max_session_expiry_s,
         default_session_expiry_s: raw.default_session_expiry_s,
         max_message_expiry_s: raw.max_message_expiry_s,
+        max_shared_groups: raw.max_shared_groups,
+        max_shared_group_members: raw.max_shared_group_members,
     }
 }
 
@@ -2615,6 +2653,8 @@ mod mtu_tests;
 mod pack_tests;
 #[cfg(test)]
 mod plain_tests;
+#[cfg(test)]
+mod shared_group_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

@@ -171,6 +171,13 @@ pub struct Limits {
     /// The longest Message Expiry Interval a publisher may ask for, seconds;
     /// 0: no cap (ADR-273 rule 5).
     pub max_message_expiry_s: u32,
+    /// Shared-subscription groups (`$share/{group}/{filter}`) one data core
+    /// may own, 1..=65535; one more: SUBACK 0x97 (5.0) / 0x80 (3.1.1)
+    /// (ADR-275).
+    pub max_shared_groups: u32,
+    /// Members one shared-subscription group may have, 1..=65535; one more:
+    /// SUBACK 0x97 / 0x80 (ADR-275).
+    pub max_shared_group_members: u32,
 }
 
 /// Topic filter patterns; `{id}` expands to the session's device id.
@@ -576,9 +583,12 @@ pub struct Mqtt5 {
     /// 0: the client's keep alive; otherwise the most a 5.0 client gets
     /// (Server Keep Alive in CONNACK). 0..=65535.
     pub max_keep_alive_s: u32,
-    /// Reserved for part 3 (rule 16): announced as 0 today whatever this says.
+    /// Shared subscriptions (`$share/{group}/{filter}`, rule 16), also for
+    /// 3.1.1 clients; false: Shared Subscription Available 0 and SUBACK 0x9E
+    /// (3.1.1: 0x80) for a `$share/` filter.
     pub shared_subscriptions: bool,
-    /// Reserved for part 3 (rule 17): announced as 0 today whatever this says.
+    /// Subscription Identifiers (rule 17); false: Subscription Identifier
+    /// Available 0 and SUBACK 0xA1 for a SUBSCRIBE that carries one.
     pub subscription_identifiers: bool,
 }
 

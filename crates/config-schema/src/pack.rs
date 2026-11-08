@@ -444,6 +444,13 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
         tag::LIM_MAX_MESSAGE_EXPIRY,
         u64::from(l.max_message_expiry_s),
     )?;
+    // ADR-275: at their defaults these write nothing; a value set needs
+    // format 13.
+    b.uint(tag::LIM_MAX_SHARED_GROUPS, u64::from(l.max_shared_groups))?;
+    b.uint(
+        tag::LIM_MAX_SHARED_GROUP_MEMBERS,
+        u64::from(l.max_shared_group_members),
+    )?;
     let a = &cfg.acl;
     b.strs(tag::ACL_DEVICE_PUBLISH, &a.device_publish)?;
     b.strs(tag::ACL_DEVICE_SUBSCRIBE, &a.device_subscribe)?;
