@@ -1,5 +1,6 @@
-//! What the schema 3 golden tests share (ADR-271): the disk helpers and
-//! the QoS 2 state the golden file holds.
+//! What the schema 3 and 4 golden tests share (ADR-271, ADR-274): the disk
+//! helpers, the QoS 2 state of `schema3-qos2` and the MQTT 5.0 state of
+//! `schema4-mqtt5`.
 
 #![allow(dead_code)]
 
@@ -50,8 +51,12 @@ pub fn path(name: &str) -> PathBuf {
 }
 
 pub fn sparse(m: &MemDisk) -> String {
-    let mut out = String::from(
-        "# urMQTT data disk, layout v2.0, database schema 3 (QoS 2): every non-zero 512-byte sector as `lba hex`\n",
+    sparse_titled(m, "database schema 3 (QoS 2)")
+}
+
+pub fn sparse_titled(m: &MemDisk, what: &str) -> String {
+    let mut out = format!(
+        "# urMQTT data disk, layout v2.0, {what}: every non-zero 512-byte sector as `lba hex`\n"
     );
     let _ = writeln!(out, "size {DISK_BYTES}");
     let sector = SECTOR as usize;
@@ -135,6 +140,7 @@ pub fn want_qos2_session() -> SessionRecord {
         payload: p.into(),
         qos,
         pid,
+        ..Queued::default()
     };
     SessionRecord {
         client_id: "device-002".into(),
@@ -158,5 +164,68 @@ pub fn want_qos2_session() -> SessionRecord {
                 pid: 6,
             },
         ],
+        ..SessionRecord::default()
+    }
+}
+
+/// The MQTT 5.0 state of `schema4-mqtt5` (ADR-274): a session with its
+/// Session Expiry Interval, offline since a known time, a subscription with
+/// options, queued and retained messages with properties and expiry.
+pub fn write_mqtt5_state(s: &mut urmqtt_store::Store) {
+    s.begin().unwrap();
+    s.retain_v5(
+        "fleet/notice",
+        b"maintenance",
+        1,
+        Some(&PROPS),
+        Some(NOW as i64 + 3600),
+    )
+    .unwrap();
+    s.session_upsert_expiry("device-005", NOW as i64, Some(86_400))
+        .unwrap();
+    // QoS 1, No Local, Retain As Published, Retain Handling 1.
+    s.subscribe_options("device-005", "devices/device-005/cmd/#", 0x1d)
+        .unwrap();
+    s.queue_push_v5("device-005", mqtt5_queued().as_ref())
+        .unwrap();
+    s.queue_push("device-005", "devices/device-005/cmd/plain", b"p", 1)
+        .unwrap();
+    s.session_offline("device-005", NOW as i64 + 60).unwrap();
+    s.commit().unwrap();
+}
+
+/// A property block: Content Type "text/plain", User Property k=v.
+pub const PROPS: [u8; 20] = [
+    0x03, 0, 10, b't', b'e', b'x', b't', b'/', b'p', b'l', b'a', b'i', b'n', 0x26, 0, 1, b'k', 0,
+    1, b'v',
+];
+
+fn mqtt5_queued() -> Queued {
+    Queued {
+        topic: "devices/device-005/cmd/fw".into(),
+        payload: b"fw".to_vec(),
+        qos: 2,
+        pid: 0,
+        props: Some(PROPS.to_vec()),
+        expires_at: Some(NOW as i64 + 600),
+    }
+}
+
+pub fn want_mqtt5_session() -> SessionRecord {
+    SessionRecord {
+        client_id: "device-005".into(),
+        subscriptions: vec![("devices/device-005/cmd/#".into(), 0x1d)],
+        queued: vec![
+            mqtt5_queued(),
+            Queued {
+                topic: "devices/device-005/cmd/plain".into(),
+                payload: b"p".to_vec(),
+                qos: 1,
+                ..Queued::default()
+            },
+        ],
+        qos2_ids: vec![],
+        expiry_s: Some(86_400),
+        offline_since: Some(NOW as i64 + 60),
     }
 }

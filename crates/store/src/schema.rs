@@ -118,6 +118,30 @@ pub const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (client_id, released, pid)
     ) STRICT, WITHOUT ROWID;
     ",
+    // 4 (MQTT 5.0, ADR-274): session and message expiry, subscription
+    // options, forwarded properties. Columns are added (no rebuild: the
+    // existing CHECKs stay right). A session records its Session Expiry
+    // Interval (NULL: stored before schema 4, the configured 3.1.1 default
+    // applies) and the wall-clock time it went offline (NULL: online, or not
+    // known). A subscription records its Subscription Options byte (its QoS
+    // bits are `qos`; every older row gets its QoS alone). A retained or
+    // queued message records its MQTT 5.0 properties (NULL: none) and when
+    // its Message Expiry Interval ends, in wall-clock seconds (NULL: never).
+    "
+    ALTER TABLE sessions ADD COLUMN expiry_s INTEGER
+        CHECK (expiry_s IS NULL OR expiry_s BETWEEN 0 AND 4294967295);
+    ALTER TABLE sessions ADD COLUMN offline_since INTEGER;
+
+    ALTER TABLE subscriptions ADD COLUMN options INTEGER NOT NULL DEFAULT 0
+        CHECK (options BETWEEN 0 AND 255);
+    UPDATE subscriptions SET options = qos;
+
+    ALTER TABLE retained ADD COLUMN props BLOB;
+    ALTER TABLE retained ADD COLUMN expires_at INTEGER;
+
+    ALTER TABLE queued ADD COLUMN props BLOB;
+    ALTER TABLE queued ADD COLUMN expires_at INTEGER;
+    ",
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;

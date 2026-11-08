@@ -70,7 +70,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 pub use disk::{BackupRegion, BlockDevice, Disk, DiskError, IoError, MemDisk, Opened};
 pub use ram::RamDisk;
-pub use store::{OpenInfo, Qos2Id, Queued, Retained, SessionRecord, Store, StoreError, open};
+pub use store::{
+    OpenInfo, Qos2Id, Queued, QueuedRef, Retained, SessionRecord, Store, StoreError, open,
+};
 pub use vfs::Platform;
 
 #[cfg(any(direct_vfs, feature = "loopback"))]

@@ -270,10 +270,17 @@ fn control_state_survives_and_migrates() {
         assert_eq!(s.allowlist().unwrap(), vec!["device-001".to_string()]);
         // Turn it back into a v1 database (as an M17 image left it; the
         // tables migration 3 rebuilds keep their newer shape, which it reads
-        // as well).
+        // as well; the columns migration 4 adds go).
         s.db()
             .exec(
                 "DROP TABLE control_state; DROP TABLE allowlist; DROP TABLE qos2_ids; \
+                 ALTER TABLE sessions DROP COLUMN expiry_s; \
+                 ALTER TABLE sessions DROP COLUMN offline_since; \
+                 ALTER TABLE subscriptions DROP COLUMN options; \
+                 ALTER TABLE retained DROP COLUMN props; \
+                 ALTER TABLE retained DROP COLUMN expires_at; \
+                 ALTER TABLE queued DROP COLUMN props; \
+                 ALTER TABLE queued DROP COLUMN expires_at; \
                  PRAGMA user_version = 1;",
             )
             .unwrap();

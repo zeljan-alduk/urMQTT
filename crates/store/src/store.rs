@@ -61,14 +61,19 @@ impl core::fmt::Display for StoreError {
 
 pub type Result<T> = core::result::Result<T, StoreError>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Retained {
     pub topic: String,
     pub payload: Vec<u8>,
     pub qos: u8,
+    /// Its MQTT 5.0 properties (schema 4, ADR-274); `None`: none.
+    pub props: Option<Vec<u8>>,
+    /// When its Message Expiry Interval ends, wall-clock seconds; `None`:
+    /// never.
+    pub expires_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Queued {
     pub topic: String,
     pub payload: Vec<u8>,
@@ -77,6 +82,35 @@ pub struct Queued {
     /// The packet id it was in flight with when the session went offline;
     /// 0: not sent yet (schema 3, ADR-271; every row of schema 2 is 0).
     pub pid: u16,
+    /// Its MQTT 5.0 properties (schema 4, ADR-274); `None`: none.
+    pub props: Option<Vec<u8>>,
+    /// When its Message Expiry Interval ends, wall-clock seconds; `None`:
+    /// never.
+    pub expires_at: Option<i64>,
+}
+
+/// A message to queue, borrowed ([`Store::queue_push_v5`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueuedRef<'a> {
+    pub topic: &'a str,
+    pub payload: &'a [u8],
+    pub qos: u8,
+    pub pid: u16,
+    pub props: Option<&'a [u8]>,
+    pub expires_at: Option<i64>,
+}
+
+impl Queued {
+    pub fn as_ref(&self) -> QueuedRef<'_> {
+        QueuedRef {
+            topic: &self.topic,
+            payload: &self.payload,
+            qos: self.qos,
+            pid: self.pid,
+            props: self.props.as_deref(),
+            expires_at: self.expires_at,
+        }
+    }
 }
 
 /// A packet id of an unfinished QoS 2 flow (schema 3, ADR-271).
@@ -91,9 +125,17 @@ pub struct Qos2Id {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SessionRecord {
     pub client_id: String,
+    /// (filter, Subscription Options byte): its QoS in bits 0-1; a row of
+    /// schema 3 or older holds its QoS alone (schema 4, ADR-274).
     pub subscriptions: Vec<(String, u8)>,
     pub queued: Vec<Queued>,
     pub qos2_ids: Vec<Qos2Id>,
+    /// Its Session Expiry Interval; `None`: stored before schema 4 (the
+    /// configured 3.1.1 default applies).
+    pub expiry_s: Option<u32>,
+    /// When it went offline, wall-clock seconds; `None`: it was online (the
+    /// broker stopped with it connected) or the time is not known.
+    pub offline_since: Option<i64>,
 }
 
 /// What [`Store::open`] did, for the boot log.
@@ -122,6 +164,7 @@ struct Stmts {
     retained_del: Stmt,
     retained_all: Stmt,
     session_upsert: Stmt,
+    session_offline: Stmt,
     session_del: Stmt,
     session_all: Stmt,
     sub_set: Stmt,
@@ -232,28 +275,41 @@ fn open_inner() -> Result<(Store, OpenInfo)> {
         allow_del: db.prepare("DELETE FROM allowlist WHERE id = ?1")?,
         allow_all: db.prepare("SELECT id FROM allowlist ORDER BY id")?,
         retained_set: db.prepare(
-            "INSERT INTO retained (topic, payload, qos) VALUES (?1, ?2, ?3)
-             ON CONFLICT (topic) DO UPDATE SET payload = excluded.payload, qos = excluded.qos",
+            "INSERT INTO retained (topic, payload, qos, props, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (topic) DO UPDATE SET payload = excluded.payload, qos = excluded.qos,
+                 props = excluded.props, expires_at = excluded.expires_at",
         )?,
         retained_del: db.prepare("DELETE FROM retained WHERE topic = ?1")?,
-        retained_all: db.prepare("SELECT topic, payload, qos FROM retained ORDER BY topic")?,
+        retained_all: db.prepare(
+            "SELECT topic, payload, qos, props, expires_at FROM retained ORDER BY topic",
+        )?,
+        // Online again (or new): no offline time.
         session_upsert: db.prepare(
-            "INSERT INTO sessions (client_id, updated) VALUES (?1, ?2)
-             ON CONFLICT (client_id) DO UPDATE SET updated = excluded.updated",
+            "INSERT INTO sessions (client_id, updated, expiry_s, offline_since) VALUES (?1, ?2, ?3, NULL)
+             ON CONFLICT (client_id) DO UPDATE SET updated = excluded.updated,
+                 expiry_s = excluded.expiry_s, offline_since = NULL",
+        )?,
+        session_offline: db.prepare(
+            "UPDATE sessions SET offline_since = ?2, updated = ?2 WHERE client_id = ?1",
         )?,
         session_del: db.prepare("DELETE FROM sessions WHERE client_id = ?1")?,
-        session_all: db.prepare("SELECT client_id FROM sessions ORDER BY client_id")?,
+        session_all: db.prepare(
+            "SELECT client_id, expiry_s, offline_since FROM sessions ORDER BY client_id",
+        )?,
         sub_set: db.prepare(
-            "INSERT INTO subscriptions (client_id, filter, qos) VALUES (?1, ?2, ?3)
-             ON CONFLICT (client_id, filter) DO UPDATE SET qos = excluded.qos",
+            "INSERT INTO subscriptions (client_id, filter, qos, options) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (client_id, filter) DO UPDATE SET qos = excluded.qos, options = excluded.options",
         )?,
         sub_del: db.prepare("DELETE FROM subscriptions WHERE client_id = ?1 AND filter = ?2")?,
-        sub_all: db.prepare("SELECT client_id, filter, qos FROM subscriptions ORDER BY client_id, filter")?,
+        sub_all: db.prepare("SELECT client_id, filter, options FROM subscriptions ORDER BY client_id, filter")?,
         queue_push: db.prepare(
-            "INSERT INTO queued (client_id, topic, payload, qos, pid) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO queued (client_id, topic, payload, qos, pid, props, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?,
         queue_clear: db.prepare("DELETE FROM queued WHERE client_id = ?1")?,
-        queue_all: db.prepare("SELECT client_id, topic, payload, qos, pid FROM queued ORDER BY client_id, seq")?,
+        queue_all: db.prepare(
+            "SELECT client_id, topic, payload, qos, pid, props, expires_at FROM queued ORDER BY client_id, seq",
+        )?,
         qos2_add: db.prepare(
             "INSERT INTO qos2_ids (client_id, released, pid) VALUES (?1, ?2, ?3)
              ON CONFLICT (client_id, released, pid) DO NOTHING",
@@ -412,6 +468,19 @@ impl Store {
 
     /// Stores a retained message; an empty payload deletes it (§3.3.1.3).
     pub fn retain(&mut self, topic: &str, payload: &[u8], qos: u8) -> Result<()> {
+        self.retain_v5(topic, payload, qos, None, None)
+    }
+
+    /// Stores a retained message with its MQTT 5.0 properties and expiry
+    /// (wall-clock seconds); an empty payload deletes it.
+    pub fn retain_v5(
+        &mut self,
+        topic: &str,
+        payload: &[u8],
+        qos: u8,
+        props: Option<&[u8]>,
+        expires_at: Option<i64>,
+    ) -> Result<()> {
         if payload.is_empty() {
             let s = &mut self.s.retained_del;
             s.bind_text(1, topic)?;
@@ -421,6 +490,13 @@ impl Store {
         s.bind_text(1, topic)?;
         s.bind_blob(2, payload)?;
         s.bind_i64(3, i64::from(qos.min(2)))?;
+        // Unbound parameters are NULL (`reset` clears the bindings).
+        if let Some(p) = props {
+            s.bind_blob(4, p)?;
+        }
+        if let Some(t) = expires_at {
+            s.bind_i64(5, t)?;
+        }
         Ok(s.run()?)
     }
 
@@ -433,6 +509,8 @@ impl Store {
                     topic: s.text(0).into(),
                     payload: s.blob(1).into(),
                     qos: qos_of(s.i64(2)),
+                    props: (!s.is_null(3)).then(|| s.blob(3).into()),
+                    expires_at: (!s.is_null(4)).then(|| s.i64(4)),
                 });
             }
             Ok::<(), Error>(())
@@ -442,8 +520,32 @@ impl Store {
         Ok(out)
     }
 
+    /// Creates or updates a session without a Session Expiry Interval (as
+    /// before schema 4: the 3.1.1 default applies), online.
     pub fn session_upsert(&mut self, client_id: &str, now_unix: i64) -> Result<()> {
+        self.session_upsert_expiry(client_id, now_unix, None)
+    }
+
+    /// Creates or updates a session with its Session Expiry Interval and
+    /// marks it online (no offline time).
+    pub fn session_upsert_expiry(
+        &mut self,
+        client_id: &str,
+        now_unix: i64,
+        expiry_s: Option<u32>,
+    ) -> Result<()> {
         let s = &mut self.s.session_upsert;
+        s.bind_text(1, client_id)?;
+        s.bind_i64(2, now_unix)?;
+        if let Some(e) = expiry_s {
+            s.bind_i64(3, i64::from(e))?;
+        }
+        Ok(s.run()?)
+    }
+
+    /// The session went offline at `now_unix`: its expiry runs from there.
+    pub fn session_offline(&mut self, client_id: &str, now_unix: i64) -> Result<()> {
+        let s = &mut self.s.session_offline;
         s.bind_text(1, client_id)?;
         s.bind_i64(2, now_unix)?;
         Ok(s.run()?)
@@ -456,11 +558,18 @@ impl Store {
         Ok(s.run()?)
     }
 
+    /// A subscription with its QoS alone (a 3.1.1 one).
     pub fn subscribe(&mut self, client_id: &str, filter: &str, qos: u8) -> Result<()> {
+        self.subscribe_options(client_id, filter, qos.min(2))
+    }
+
+    /// A subscription with its Subscription Options byte (QoS in bits 0-1).
+    pub fn subscribe_options(&mut self, client_id: &str, filter: &str, options: u8) -> Result<()> {
         let s = &mut self.s.sub_set;
         s.bind_text(1, client_id)?;
         s.bind_text(2, filter)?;
-        s.bind_i64(3, i64::from(qos.min(2)))?;
+        s.bind_i64(3, i64::from((options & 3).min(2)))?;
+        s.bind_i64(4, i64::from(options))?;
         Ok(s.run()?)
     }
 
@@ -492,12 +601,33 @@ impl Store {
         qos: u8,
         pid: u16,
     ) -> Result<()> {
+        self.queue_push_v5(
+            client_id,
+            QueuedRef {
+                topic,
+                payload,
+                qos,
+                pid,
+                props: None,
+                expires_at: None,
+            },
+        )
+    }
+
+    /// Queues a message with everything it carries (schema 4).
+    pub fn queue_push_v5(&mut self, client_id: &str, m: QueuedRef<'_>) -> Result<()> {
         let s = &mut self.s.queue_push;
         s.bind_text(1, client_id)?;
-        s.bind_text(2, topic)?;
-        s.bind_blob(3, payload)?;
-        s.bind_i64(4, i64::from(qos.min(2)))?;
-        s.bind_i64(5, i64::from(pid))?;
+        s.bind_text(2, m.topic)?;
+        s.bind_blob(3, m.payload)?;
+        s.bind_i64(4, i64::from(m.qos.min(2)))?;
+        s.bind_i64(5, i64::from(m.pid))?;
+        if let Some(p) = m.props {
+            s.bind_blob(6, p)?;
+        }
+        if let Some(t) = m.expires_at {
+            s.bind_i64(7, t)?;
+        }
         Ok(s.run()?)
     }
 
@@ -534,6 +664,10 @@ impl Store {
                 while s.step()? == Step::Row {
                     out.push(SessionRecord {
                         client_id: s.text(0).into(),
+                        expiry_s: (!s.is_null(1))
+                            .then(|| u32::try_from(s.i64(1)).ok())
+                            .flatten(),
+                        offline_since: (!s.is_null(2)).then(|| s.i64(2)),
                         ..SessionRecord::default()
                     });
                 }
@@ -553,7 +687,9 @@ impl Store {
                     if let Some(i) = find(&mut out, s.text(0))
                         && let Some(rec) = out.get_mut(i)
                     {
-                        rec.subscriptions.push((s.text(1).into(), qos_of(s.i64(2))));
+                        // The options byte (the CHECK keeps it in 0..=255).
+                        let options = u8::try_from(s.i64(2)).unwrap_or(0);
+                        rec.subscriptions.push((s.text(1).into(), options));
                     }
                 }
                 Ok::<(), Error>(())
@@ -573,6 +709,8 @@ impl Store {
                             payload: s.blob(2).into(),
                             qos: qos_of(s.i64(3)),
                             pid: u16::try_from(s.i64(4)).unwrap_or(0),
+                            props: (!s.is_null(5)).then(|| s.blob(5).into()),
+                            expires_at: (!s.is_null(6)).then(|| s.i64(6)),
                         });
                     }
                 }
