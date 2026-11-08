@@ -67,7 +67,7 @@ fn a_schema_3_database_migrates_and_keeps_every_row() {
     ] {
         assert!(cols.contains(c), "{c} in {cols}");
     }
-    // MQTT 5.0 state goes in; the CHECKs hold.
+    // MQTT 5.0 state goes in; the CHECK constraints hold.
     write_mqtt5_state(&mut s);
     let sessions = s.sessions().unwrap();
     assert_eq!(sessions.len(), 2);

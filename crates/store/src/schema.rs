@@ -120,7 +120,7 @@ pub const MIGRATIONS: &[&str] = &[
     ",
     // 4 (MQTT 5.0, ADR-274): session and message expiry, subscription
     // options, forwarded properties. Columns are added (no rebuild: the
-    // existing CHECKs stay right). A session records its Session Expiry
+    // existing CHECK constraints stay right). A session records its Session Expiry
     // Interval (NULL: stored before schema 4, the configured 3.1.1 default
     // applies) and the wall-clock time it went offline (NULL: online, or not
     // known). A subscription records its Subscription Options byte (its QoS

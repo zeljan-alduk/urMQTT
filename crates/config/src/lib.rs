@@ -563,7 +563,7 @@ pub struct Websocket {
 /// MQTT 5.0 (NEXT-3, ADR-273 rule 21). On by default.
 #[derive(Debug, Clone, Copy)]
 pub struct Mqtt5 {
-    /// Accept CONNECTs with protocol level 5 on every listener; false: CONNACK 0x84.
+    /// Accept CONNECT packets with protocol level 5 on every listener; false: CONNACK 0x84.
     pub enabled: bool,
     /// The announced Receive Maximum (1..=65535): QoS 2 publications a 5.0
     /// client may have awaiting PUBREL; one more is DISCONNECT 0x93.

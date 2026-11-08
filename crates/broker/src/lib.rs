@@ -492,9 +492,9 @@ pub struct Stats {
     pub wills_pending: usize,
     /// Offline sessions with a running expiry now.
     pub sessions_expiring: usize,
-    /// Server-sent DISCONNECTs by reason code (index code − 0x80).
+    /// Server-sent DISCONNECT packets by reason code (index code − 0x80).
     pub disconnects_sent: [u64; REASON_SLOTS],
-    /// 5.0 CONNECTs refused, by CONNACK reason code (index code − 0x80).
+    /// 5.0 CONNECT packets refused, by CONNACK reason code (index code − 0x80).
     pub connack_refused: [u64; REASON_SLOTS],
 }
 

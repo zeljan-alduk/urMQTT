@@ -130,9 +130,9 @@ pub struct Mqtt5Info {
     /// Wills armed with a Will Delay Interval; armed now.
     pub wills_delayed: u64,
     pub wills_pending: u64,
-    /// Server DISCONNECTs sent, by reason code (index code − 0x80).
+    /// Server DISCONNECT packets sent, by reason code (index code − 0x80).
     pub disconnects: [u64; crate::REASON_SLOTS],
-    /// 5.0 CONNECTs the broker refused, by CONNACK reason code.
+    /// 5.0 CONNECT packets the broker refused, by CONNACK reason code.
     pub refused: [u64; crate::REASON_SLOTS],
 }
 
@@ -157,7 +157,7 @@ impl Default for Mqtt5Info {
 pub const DISCONNECT_CODES: [u8; 13] = [
     0x81, 0x82, 0x83, 0x87, 0x8d, 0x8e, 0x8f, 0x90, 0x93, 0x94, 0x95, 0x98, 0x9a,
 ];
-/// The CONNACK reason codes of refused 5.0 CONNECTs, as `$SYS` reports them
+/// The CONNACK reason codes of refused 5.0 CONNECT packets, as `$SYS` reports them
 /// (`connections/refused/v5/0x87`).
 pub const CONNACK_CODES: [u8; 12] = [
     0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x8c, 0x95, 0x9a,
