@@ -258,15 +258,23 @@ def wait_msgs(c, n, timeout=8):
 
 
 def sys_value(topic):
-    """One $SYS value, read by the operator over TLS (mutual)."""
-    c = paho_client("operator", cert="services/operator", ws=False)
-    if connect(c, TLS) != 0:
+    """One retained $SYS value, read by the operator over TLS (mutual), in a
+    process of its own: paho's loop uses select(), which cannot take the
+    descriptors of a process that holds thousands of sockets."""
+    import subprocess
+
+    cert = os.path.join(DIR, "services/operator")
+    try:
+        out = subprocess.run(
+            ["mosquitto_sub", "-h", "127.0.0.1", "-p", str(TLS), "--cafile", os.path.join(DIR, "ca.pem"),
+             "--cert", cert + ".pem", "--key", cert + ".key", "--insecure", "-i", "operator",
+             "-t", topic, "-C", "1", "-W", "8", "-V", "mqttv311"],
+            capture_output=True, timeout=15, text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return None
-    c.subscribe(topic, 0)
-    wait_msgs(c, 1, 6)
-    c.disconnect()
-    c.loop_stop()
-    return c.got[0][1].decode() if c.got else None
+    v = out.stdout.strip()
+    return v or None
 
 
 # ---- mtls mode -------------------------------------------------------------
@@ -435,11 +443,12 @@ def mtls_needs_a_certificate():
         return True, type(e).__name__
 
 
-def idle_connections():
-    before = sys_value("$SYS/broker/memory/used")
+def idle_round(req):
+    """Opens IDLE upgraded connections (no MQTT inside), holds them, reads the
+    heap with them open, closes them; returns (sockets, failures, seconds,
+    memory used with them)."""
     socks, errors = [], 0
     t0 = time.time()
-    req = request()
     lock = threading.Lock()
 
     def opener(n):
@@ -467,24 +476,42 @@ def idle_connections():
     for t in threads:
         t.join()
     opened = time.time() - t0
-    # $SYS is refreshed every 10 s: wait for a value taken with them open.
+    # $SYS is refreshed every 10 s: wait for values taken with them open.
     time.sleep(11)
     during = sys_value("$SYS/broker/memory/used")
     conns = sys_value("$SYS/broker/websocket/connections")
+    n = len(socks)
     for w in socks:
         w.close()
-    n = len(socks)
-    # The service returns memory left by a peak every 10 s, and $SYS is
-    # refreshed every 10 s.
-    time.sleep(22)
-    after = sys_value("$SYS/broker/memory/used")
-    left = sys_value("$SYS/broker/websocket/connections")
-    b, d, a = (int(x) if x else -1 for x in (before, during, after))
-    per = (d - b) // max(n, 1)
-    ok = n >= IDLE // 16 * 16 and errors == 0 and a >= 0 and a <= b + (1 << 20) and left == "0"
+    return n, errors, opened, during, conns
+
+
+def idle_connections():
+    req = request()
+    time.sleep(11)
+    before = int(sys_value("$SYS/broker/memory/used") or -1)
+    out = []
+    for _ in range(2):
+        n, errors, opened, during, conns = idle_round(req)
+        # The service returns memory a peak left every 10 s; $SYS is refreshed
+        # every 10 s.
+        time.sleep(22)
+        after = int(sys_value("$SYS/broker/memory/used") or -1)
+        left = sys_value("$SYS/broker/websocket/connections")
+        out.append((n, errors, opened, int(during or -1), conns, after, left))
+    (n1, e1, o1, d1, c1, a1, l1), (n2, e2, o2, d2, c2, a2, l2) = out
+    want = IDLE // 16 * 16
+    per = (d1 - before) // max(n1, 1)
+    # A leak grows with every round; what a peak leaves behind does not.
+    ok = (
+        n1 == n2 == want and e1 == e2 == 0 and int(c1 or 0) >= want and int(c2 or 0) >= want and l1 == l2 == "0"
+        and min(before, d1, a1, d2, a2) >= 0 and a2 <= a1 + (512 << 10)
+    )
     return ok, (
-        f"{n} upgraded idle connections in {opened:.0f} s ({errors} failed), $SYS connections {conns}; "
-        f"memory used {b >> 10} KiB before, {d >> 10} KiB with them ({per} B each), {a >> 10} KiB after; connections after {left}"
+        f"two rounds of {want} upgraded idle connections (opened in {o1:.0f} s and {o2:.0f} s, {e1 + e2} failed, "
+        f"$SYS connections {c1}/{c2}); memory used {before >> 10} KiB before, {d1 >> 10} KiB with them "
+        f"({per} B each, TLS and WebSocket state and the broker's connection), {a1 >> 10} KiB after the first round, "
+        f"{d2 >> 10} KiB with the second, {a2 >> 10} KiB after it; connections after {l1}/{l2}"
     )
 
 
