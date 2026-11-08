@@ -39,7 +39,7 @@ All notable changes to this project are documented here. The format follows
   QoS 2. A persistent session resumes every flow after a reconnect (PUBLISH with DUP and PUBREL, with their ids) and,
   while it is offline, across a restart. A client may hold `max(max_inflight_qos1, 64)` ids awaiting PUBREL; one more
   closes its connection. New counters `$SYS/broker/messages/qos2/{received,duplicates,completed,inbound_full}`, also in
-  the info reply and the `status` command. No configuration change: the format stays 7. Not across a crash of the
+  the info reply and the `status` command. No configuration change (no new key, no format bump). Not across a crash of the
   broker while the client is connected (KNOWN-ISSUES section 5, AUDIT A271-W1).
 - Smoke group `mqtt_qos2` (both architectures, also in `SMOKE_ONLY=misc`): duplicates, a client killed in the middle
   of each flow, paho-mqtt interop (through `uv` when installed), and a restart of the VM in the middle of every flow;

@@ -2427,7 +2427,7 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
      common clients' default windows (mosquitto and paho Python pipeline up to 20), and a larger window raises it. One
      id more closes the connection (`qos2_inbound_full`; a persistent session keeps its ids, and the client sends the
      PUBLISH again after it reconnects). A held id costs 2 bytes: at most 128 bytes per session at the default. So
-     the configuration format stays at 7 and no `limits.*` key is added (format 10 stays unused by this branch). The
+     no `limits.*` key is added and the configuration format does not change (format 10, reserved for it, stays unused). The
      key's name says QoS 1; its documentation now says both.
      Memory: an in-flight entry stays 16 bytes (`Flight { pid: u16, flow, msg: Option<Msg> }`, as the `(u16, Msg)` it
      replaces); a queued entry grows from 8 to 16 bytes (its QoS); the held ids live in the same boxed `Pending` as

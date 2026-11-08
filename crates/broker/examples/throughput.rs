@@ -48,6 +48,7 @@ fn cfg() -> Config {
         fanout: false,
         control_ids: &[],
         plain: None,
+        web: None,
     }
 }
 
