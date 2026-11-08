@@ -3430,6 +3430,9 @@ docs/MQTT5-CONFORMANCE.md).
    member's own shard delivers it, with the QoS and options of that member's subscription: a
    `SharedMsg::Deliver` over the mesh (`CoreMsg::Shared`) carries the message's `Arc`, so a delivery costs no copy;
    the owner keeps 12 bytes per member and one entry per group. A shard that owns no group pays one branch per message.
+   The mesh is bounded as for routes: a QoS 0 delivery to a core whose backlog is over the QoS 0 route limit is
+   dropped and counted with the dropped routes; joins, leaves and QoS 1 and 2 deliveries are always sent (QoS 1 and
+   2 routes are not dropped either).
 2. **Joining waits for the owner** (*decided*). A SUBSCRIBE whose group is owned by another shard sends a
    `Join` and parks its SUBACK until the owner's `Joined`; the connection's input is held meanwhile (a flow bit,
    `flow::WAIT_SUBACK`, beside ADR-269's), so the client's next packets keep their order. Two things follow: a limit
