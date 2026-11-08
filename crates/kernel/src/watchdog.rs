@@ -497,12 +497,32 @@ impl core::fmt::Display for ConnName {
 /// half its budget (nothing is reported: the ordinary 20 ms budget would
 /// have fired), then one that overruns it (reported against the handshake
 /// budget).
+///
+/// Each spin lasts `ms` of *running* time, as the watchdog counts it (the
+/// elapsed time minus what it credited as stalls), not of elapsed time: on a
+/// loaded host a TCG vCPU is descheduled for tens of milliseconds, the ticks
+/// arrive late, the watchdog rightly credits that, and a spin of a fixed
+/// elapsed time then never reaches the budget in running time (seen on main
+/// and on branches alike: 0 ms credited on an idle host, 20 to 30 ms with
+/// other VMs running). Bounded at 20 times its length in elapsed time.
 pub fn self_test_handshake() {
     let budget = budget_ms(Phase::Handshake as u8);
     let spin = |ms: u64| {
         let _g = enter(Phase::Handshake, Some(43));
-        let end = time::now() + time::ns_to_ticks(ms * 1_000_000);
-        while time::now() < end {
+        let me = crate::smp::current();
+        // Relaxed: written by this core's tick handler only.
+        let credited = || DISCOUNT.get(me).map_or(0, |d| d.load(Ordering::Relaxed));
+        let (start, c0) = (time::now(), credited());
+        let run = time::ns_to_ticks(ms * 1_000_000);
+        let cap = start + run.saturating_mul(20);
+        loop {
+            let now = time::now();
+            let running = now
+                .saturating_sub(start)
+                .saturating_sub(credited().saturating_sub(c0));
+            if running >= run || now >= cap {
+                break;
+            }
             core::hint::spin_loop();
         }
     };
