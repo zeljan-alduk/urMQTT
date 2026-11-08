@@ -7,7 +7,10 @@
 //!
 //! 1. The code still writes the same bytes when it formats a disk or stores
 //!    data with no backup region (so a v2.0 disk that is never upgraded stays
-//!    exactly as it was).
+//!    exactly as it was). The database inside is SQLite's: since schema 3
+//!    (QoS 2, ADR-271) the same steps write `v2-data-schema3`, while
+//!    `v2-data` stays frozen with its schema 2 database, the input of the
+//!    migration tests (`golden_schema3.rs`).
 //! 2. The frozen files, loaded as disks, open; `Disk::ensure_backup` adds
 //!    the backup region with one superblock write; and the data they hold is
 //!    still there afterwards (`tests/backup.rs` goes on from there).
@@ -162,14 +165,14 @@ fn v2_with_data() {
         .unwrap();
     store.commit().unwrap();
     drop(store);
-    compare("v2-data", &m);
+    compare("v2-data-schema3", &m);
 }
 
 /// The frozen files open as v2 disks, and carry the data they were made with.
 #[test]
 fn the_frozen_files_open_and_hold_their_data() {
     let _g = lock();
-    for name in ["v2-fresh", "v2-data"] {
+    for name in ["v2-fresh", "v2-data", "v2-data-schema3"] {
         let m = load(name);
         let (disk, how) = Disk::open(m.device(), || [9; 16]).unwrap();
         assert_eq!(how, urmqtt_store::Opened::Existing, "{name}");
@@ -181,7 +184,7 @@ fn the_frozen_files_open_and_hold_their_data() {
             "{name}: a v2.0 disk has no backup region"
         );
         assert_eq!(disk.layout().minor, 0, "{name}");
-        if name == "v2-data" {
+        if name != "v2-fresh" {
             assert!(disk.file_size(FileKind::Db) > 0);
         }
     }

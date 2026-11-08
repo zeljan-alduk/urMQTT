@@ -72,7 +72,20 @@ pub struct Retained {
 pub struct Queued {
     pub topic: String,
     pub payload: Vec<u8>,
+    /// 1 or 2 (0 and anything else are read as 1 by the broker).
     pub qos: u8,
+    /// The packet id it was in flight with when the session went offline;
+    /// 0: not sent yet (schema 3, ADR-271; every row of schema 2 is 0).
+    pub pid: u16,
+}
+
+/// A packet id of an unfinished QoS 2 flow (schema 3, ADR-271).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Qos2Id {
+    /// false: received from the client, awaiting its PUBREL; true: released
+    /// to the client, awaiting its PUBCOMP.
+    pub released: bool,
+    pub pid: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -80,6 +93,7 @@ pub struct SessionRecord {
     pub client_id: String,
     pub subscriptions: Vec<(String, u8)>,
     pub queued: Vec<Queued>,
+    pub qos2_ids: Vec<Qos2Id>,
 }
 
 /// What [`Store::open`] did, for the boot log.
@@ -116,6 +130,9 @@ struct Stmts {
     queue_push: Stmt,
     queue_clear: Stmt,
     queue_all: Stmt,
+    qos2_add: Stmt,
+    qos2_clear: Stmt,
+    qos2_all: Stmt,
     selftest_ins: Stmt,
     selftest_all: Stmt,
     selftest_clear: Stmt,
@@ -233,10 +250,16 @@ fn open_inner() -> Result<(Store, OpenInfo)> {
         sub_del: db.prepare("DELETE FROM subscriptions WHERE client_id = ?1 AND filter = ?2")?,
         sub_all: db.prepare("SELECT client_id, filter, qos FROM subscriptions ORDER BY client_id, filter")?,
         queue_push: db.prepare(
-            "INSERT INTO queued (client_id, topic, payload, qos) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO queued (client_id, topic, payload, qos, pid) VALUES (?1, ?2, ?3, ?4, ?5)",
         )?,
         queue_clear: db.prepare("DELETE FROM queued WHERE client_id = ?1")?,
-        queue_all: db.prepare("SELECT client_id, topic, payload, qos FROM queued ORDER BY client_id, seq")?,
+        queue_all: db.prepare("SELECT client_id, topic, payload, qos, pid FROM queued ORDER BY client_id, seq")?,
+        qos2_add: db.prepare(
+            "INSERT INTO qos2_ids (client_id, released, pid) VALUES (?1, ?2, ?3)
+             ON CONFLICT (client_id, released, pid) DO NOTHING",
+        )?,
+        qos2_clear: db.prepare("DELETE FROM qos2_ids WHERE client_id = ?1")?,
+        qos2_all: db.prepare("SELECT client_id, released, pid FROM qos2_ids ORDER BY client_id, released, pid")?,
         selftest_ins: db.prepare("INSERT INTO selftest (seq, data, crc) VALUES (?1, ?2, ?3)")?,
         selftest_all: db.prepare("SELECT seq, data, crc FROM selftest ORDER BY seq")?,
         selftest_clear: db.prepare("DELETE FROM selftest")?,
@@ -256,8 +279,9 @@ fn open_inner() -> Result<(Store, OpenInfo)> {
     ))
 }
 
+/// A stored QoS; anything outside 0..=2 (the CHECK forbids it) reads as 0.
 fn qos_of(v: i64) -> u8 {
-    u8::from(v == 1)
+    u8::try_from(v).ok().filter(|q| *q <= 2).unwrap_or(0)
 }
 
 impl Store {
@@ -396,7 +420,7 @@ impl Store {
         let s = &mut self.s.retained_set;
         s.bind_text(1, topic)?;
         s.bind_blob(2, payload)?;
-        s.bind_i64(3, i64::from(qos.min(1)))?;
+        s.bind_i64(3, i64::from(qos.min(2)))?;
         Ok(s.run()?)
     }
 
@@ -436,7 +460,7 @@ impl Store {
         let s = &mut self.s.sub_set;
         s.bind_text(1, client_id)?;
         s.bind_text(2, filter)?;
-        s.bind_i64(3, i64::from(qos.min(1)))?;
+        s.bind_i64(3, i64::from(qos.min(2)))?;
         Ok(s.run()?)
     }
 
@@ -447,6 +471,7 @@ impl Store {
         Ok(s.run()?)
     }
 
+    /// Queues a message that was not sent yet.
     pub fn queue_push(
         &mut self,
         client_id: &str,
@@ -454,21 +479,53 @@ impl Store {
         payload: &[u8],
         qos: u8,
     ) -> Result<()> {
+        self.queue_push_sent(client_id, topic, payload, qos, 0)
+    }
+
+    /// Queues a message that was in flight with packet id `pid` (0: not
+    /// sent), at `qos` 1 or 2.
+    pub fn queue_push_sent(
+        &mut self,
+        client_id: &str,
+        topic: &str,
+        payload: &[u8],
+        qos: u8,
+        pid: u16,
+    ) -> Result<()> {
         let s = &mut self.s.queue_push;
         s.bind_text(1, client_id)?;
         s.bind_text(2, topic)?;
         s.bind_blob(3, payload)?;
-        s.bind_i64(4, i64::from(qos.min(1)))?;
+        s.bind_i64(4, i64::from(qos.min(2)))?;
+        s.bind_i64(5, i64::from(pid))?;
         Ok(s.run()?)
     }
 
+    /// Records a packet id of an unfinished QoS 2 flow (ADR-271). Id 0 is
+    /// not one, and is not stored.
+    pub fn qos2_id(&mut self, client_id: &str, id: Qos2Id) -> Result<()> {
+        if id.pid == 0 {
+            return Ok(());
+        }
+        let s = &mut self.s.qos2_add;
+        s.bind_text(1, client_id)?;
+        s.bind_i64(2, i64::from(id.released))?;
+        s.bind_i64(3, i64::from(id.pid))?;
+        Ok(s.run()?)
+    }
+
+    /// Clears the queue and the QoS 2 packet ids of a session.
     pub fn queue_clear(&mut self, client_id: &str) -> Result<()> {
         let s = &mut self.s.queue_clear;
+        s.bind_text(1, client_id)?;
+        s.run()?;
+        let s = &mut self.s.qos2_clear;
         s.bind_text(1, client_id)?;
         Ok(s.run()?)
     }
 
-    /// Every persistent session with its subscriptions and queue.
+    /// Every persistent session with its subscriptions, queue and QoS 2
+    /// packet ids.
     pub fn sessions(&mut self) -> Result<Vec<SessionRecord>> {
         let mut out: Vec<SessionRecord> = Vec::new();
         {
@@ -515,6 +572,26 @@ impl Store {
                             topic: s.text(1).into(),
                             payload: s.blob(2).into(),
                             qos: qos_of(s.i64(3)),
+                            pid: u16::try_from(s.i64(4)).unwrap_or(0),
+                        });
+                    }
+                }
+                Ok::<(), Error>(())
+            })();
+            s.reset();
+            r?;
+        }
+        {
+            let s = &mut self.s.qos2_all;
+            let r = (|| {
+                while s.step()? == Step::Row {
+                    if let Some(i) = find(&mut out, s.text(0))
+                        && let Some(rec) = out.get_mut(i)
+                        && let Ok(pid) = u16::try_from(s.i64(2))
+                    {
+                        rec.qos2_ids.push(Qos2Id {
+                            released: s.i64(1) != 0,
+                            pid,
                         });
                     }
                 }

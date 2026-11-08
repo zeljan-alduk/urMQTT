@@ -268,9 +268,14 @@ fn control_state_survives_and_migrates() {
             "image-listed stays"
         );
         assert_eq!(s.allowlist().unwrap(), vec!["device-001".to_string()]);
-        // Turn it back into a v1 database (as an M17 image left it).
+        // Turn it back into a v1 database (as an M17 image left it; the
+        // tables migration 3 rebuilds keep their newer shape, which it reads
+        // as well).
         s.db()
-            .exec("DROP TABLE control_state; DROP TABLE allowlist; PRAGMA user_version = 1;")
+            .exec(
+                "DROP TABLE control_state; DROP TABLE allowlist; DROP TABLE qos2_ids; \
+                 PRAGMA user_version = 1;",
+            )
             .unwrap();
     }
     let (mut s, _) = mount(&m);
@@ -281,7 +286,10 @@ fn control_state_survives_and_migrates() {
     );
     assert!(s.allowlist().unwrap().is_empty());
     assert_eq!(s.revoked().unwrap(), vec!["0c".to_string()], "v1 data kept");
-    assert_eq!(s.db().query_i64("PRAGMA user_version").unwrap(), 2);
+    assert_eq!(
+        s.db().query_i64("PRAGMA user_version").unwrap(),
+        urmqtt_store::schema::VERSION
+    );
 }
 
 /// O3: SQLite and the broker store run unchanged on the RAM block device
