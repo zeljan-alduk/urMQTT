@@ -10,7 +10,7 @@
 | `urmqtt-arch-aarch64` | `crates/arch-aarch64` | 4195 | 0 | 109 (109) | deny |
 | `urmqtt-arch-x86_64` | `crates/arch-x86_64` | 6991 | 0 | 155 (155) | deny |
 | `urmqtt-attack` | `tools/attack` | 1092 | 0 | 0 (0) | default |
-| `urmqtt-broker` | `crates/broker` | 12761 | 4837 | 0 (0) | forbid |
+| `urmqtt-broker` | `crates/broker` | 12892 | 4851 | 0 (0) | forbid |
 | `urmqtt-builder-wasm` | `tools/builder/wasm` | 1201 | 0 | 30 (30) | deny |
 | `urmqtt-cfg` | `crates/cfg` | 5699 | 0 | 0 (0) | forbid |
 | `urmqtt-config` | `crates/config` | 1672 | 0 | 10 (10) | deny |
@@ -43,7 +43,7 @@
 | `urmqtt-virtio` | `crates/virtio` | 6724 | 0 | 30 (30) | deny |
 | `urmqtt-ws` | `crates/ws` | 1785 | 0 | 0 (0) | forbid |
 | `urmqtt-x25519` | `crates/x25519` | 1365 | 0 | 8 (8) | default |
-| **total** | | **130246** | | **926 (926)** | |
+| **total** | | **130377** | | **926 (926)** | |
 
 ## Vendored components
 

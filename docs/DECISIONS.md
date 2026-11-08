@@ -3333,11 +3333,21 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
 15. **Configuration format 12**: the `[mqtt5]` keys of rule 21 and `limits.max_session_expiry_s`,
     `limits.default_session_expiry_s`, `limits.max_message_expiry_s`. `mqtt5.shared_subscriptions` and
     `mqtt5.subscription_identifiers` are accepted and reserved: part 3 gives them effect (no format bump then).
+    Formats 8 (ADR-269), 9 (ADR-272), 11 (ADR-270) and 12 are valid; 10, which no format ever had, is refused like
+    an unknown version (`urmqtt_cfg::blob::UNUSED_VERSION`), by the parser and by `finish_as`.
 16. **A broker-closed connection ends its session at once** (*found by the Paho suite*, both versions). When the
     broker asks to close a connection (keep alive, a protocol error, a takeover, a 5.0 DISCONNECT), the kernel used
     to end the broker session, and so publish the Will, only when TCP was done; a client that never closes its socket
     held that back until the FIN_WAIT2 timeout. Now the session ends when its last bytes are handed to TCP (locally,
     and on the home core of a relayed connection, whose transport core then finds no relay when TCP is done).
+17. **With publisher back-pressure** (ADR-269, merged before this part). The held input of a paused publisher goes
+    through the same version dispatch as live input (`Broker::parse` picks the codec per connection), so a paused
+    5.0 publisher's PINGREQ, PUBREL, PUBCOMP and QoS 2 PUBLISHes wait at most 500 ms and are then parsed as 5.0; the
+    Receive Maximum counts them as without the pause (`v5_tests::a_paused_5_0_publisher_is_answered_within_the_bound`).
+    No Local skips are not recipients: a message whose only other match is its publisher's own No Local subscription
+    has none and never pauses anyone. A held connection is exempt from the keep alive for both versions (no
+    DISCONNECT 0x8D while held). `Conn` keeps its 48 B with the back-pressure bytes and the 5.0 refusal code by
+    storing the keep alive in seconds (`u16`) instead of milliseconds.
 
 ### Memory
 

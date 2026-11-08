@@ -23,7 +23,8 @@ All notable changes to this project are documented here. The format follows
   `sessions/expiring`, `wills/delayed`, `wills/pending`, `disconnects/sent/0xNN`, `connections/refused/v5/0xNN`.
   Configuration format 12: `[mqtt5]` (`enabled`, `receive_maximum`, `topic_alias_maximum`, `max_user_properties`,
   `max_keep_alive_s`, and the reserved part-3 keys), `limits.max_session_expiry_s`,
-  `limits.default_session_expiry_s`, `limits.max_message_expiry_s`; the builder page has the section. Database
+  `limits.default_session_expiry_s`, `limits.max_message_expiry_s`; the builder page has the section (formats 8, 9,
+  11 and 12 are valid, 10 is refused as unknown). Database
   schema 4 (session expiry and offline time, subscription options, message properties and expiry), migrated at boot
   from schema 3. Verified by host tests per rule, the QoS 2 reference model and the ACL oracle extended to 5.0
   sessions, fuzz seeds, the smoke group `mqtt5` (paho-mqtt 2.x and mosquitto `-V mqttv5` over mTLS, a restart on
