@@ -795,6 +795,10 @@ struct Sess {
     granted_rap: HashSet<String>,
     /// Its subscriptions now (Retain Handling 1).
     current: HashSet<String>,
+    /// Retained messages a SUBSCRIBE of this session may have replayed: a
+    /// replay that waits in the queue (window full) arrives later, after
+    /// the SUBSCRIBE, and No Local does not apply to it.
+    replayed: HashSet<u32>,
 }
 
 /// What a QoS 2 PUBLISH should do, by the session model.
@@ -1954,6 +1958,11 @@ impl Harness {
             let key = s.key.clone();
             let sess = self.sessions.get_mut(&key).expect("session");
             sess.current.insert(filter.clone());
+            sess.replayed.extend(self.retained_seqs.iter().filter(|q| {
+                self.sent
+                    .get(**q as usize)
+                    .is_some_and(|m| matches(filter, &m.topic))
+            }));
             if opts & 0x04 == 0 {
                 sess.granted_local.insert(filter.clone());
             }
@@ -2137,7 +2146,12 @@ impl Harness {
         let replay = retain && self.sub.as_ref().is_some_and(|(slot, _)| *slot == i);
         if let Some(m) = entry {
             // No Local: its own message only through a subscription without.
-            if m.from.as_deref() == Some(s.key.as_str()) && !replay {
+            let queued_replay = retain
+                && (payload.len() >= 7)
+                && sess.replayed.contains(&u32::from_le_bytes([
+                    payload[3], payload[4], payload[5], payload[6],
+                ]));
+            if m.from.as_deref() == Some(s.key.as_str()) && !replay && !queued_replay {
                 assert!(
                     sess.granted_local.iter().any(|f| matches(f, topic)),
                     "{ctx}: its own message despite No Local"
