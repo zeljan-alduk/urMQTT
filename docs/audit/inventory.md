@@ -41,9 +41,9 @@
 | `urmqtt-tls` | `crates/tls` | 5113 | 1333 | 0 (0) | forbid |
 | `urmqtt-usys` | `crates/usys` | 477 | 0 | 8 (8) | default |
 | `urmqtt-virtio` | `crates/virtio` | 6276 | 0 | 30 (30) | deny |
-| `urmqtt-ws` | `crates/ws` | 1766 | 0 | 0 (0) | forbid |
+| `urmqtt-ws` | `crates/ws` | 1785 | 0 | 0 (0) | forbid |
 | `urmqtt-x25519` | `crates/x25519` | 1365 | 0 | 8 (8) | default |
-| **total** | | **120048** | | **917 (917)** | |
+| **total** | | **120067** | | **917 (917)** | |
 
 ## Vendored components
 
