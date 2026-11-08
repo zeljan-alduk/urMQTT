@@ -1479,7 +1479,10 @@ impl Harness {
                 }
                 let key = s.key.clone();
                 let mine = self.sessions.get(&key).is_some_and(|x| x.conn == Some(s.c));
-                if *end
+                // Behind garbage the DISCONNECT may be read as the body of a
+                // half packet: its expiry change is not sent then.
+                let end = *end && !s.dirty;
+                if end
                     && mine
                     && let Some(sess) = self.sessions.get_mut(&key)
                 {
@@ -1494,7 +1497,7 @@ impl Harness {
                         } else {
                             m5::ReasonCode::Success
                         },
-                        properties: if *end {
+                        properties: if end {
                             m5::Properties::List(&props)
                         } else {
                             m5::Properties::EMPTY
