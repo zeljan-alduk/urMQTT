@@ -114,6 +114,77 @@ impl Backpressure {
     }
 }
 
+/// MQTT 5.0 (ADR-273, ADR-274), all cores, since boot unless said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mqtt5Info {
+    /// 5.0 clients connected now (part of `clients_connected`).
+    pub connected: u64,
+    /// Messages not delivered because their Message Expiry Interval passed.
+    pub messages_expired: u64,
+    /// Deliveries above a client's Maximum Packet Size, dropped.
+    pub dropped_too_large: u64,
+    /// Sessions ended by their Session Expiry Interval (both versions).
+    pub sessions_expired: u64,
+    /// Offline sessions whose expiry runs now.
+    pub sessions_expiring: u64,
+    /// Wills armed with a Will Delay Interval; armed now.
+    pub wills_delayed: u64,
+    pub wills_pending: u64,
+    /// Server DISCONNECTs sent, by reason code (index code − 0x80).
+    pub disconnects: [u64; crate::REASON_SLOTS],
+    /// 5.0 CONNECTs the broker refused, by CONNACK reason code.
+    pub refused: [u64; crate::REASON_SLOTS],
+}
+
+impl Default for Mqtt5Info {
+    fn default() -> Self {
+        Self {
+            connected: 0,
+            messages_expired: 0,
+            dropped_too_large: 0,
+            sessions_expired: 0,
+            sessions_expiring: 0,
+            wills_delayed: 0,
+            wills_pending: 0,
+            disconnects: [0; crate::REASON_SLOTS],
+            refused: [0; crate::REASON_SLOTS],
+        }
+    }
+}
+
+/// The DISCONNECT reason codes the broker sends, as `$SYS` reports them
+/// (`disconnects/sent/0x8e`); the rest are counted under `other`.
+pub const DISCONNECT_CODES: [u8; 13] = [
+    0x81, 0x82, 0x83, 0x87, 0x8d, 0x8e, 0x8f, 0x90, 0x93, 0x94, 0x95, 0x98, 0x9a,
+];
+/// The CONNACK reason codes of refused 5.0 CONNECTs, as `$SYS` reports them
+/// (`connections/refused/v5/0x87`).
+pub const CONNACK_CODES: [u8; 12] = [
+    0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x8c, 0x95, 0x9a,
+];
+
+/// The counters of `codes` from `slots` (index code − 0x80), and the sum of
+/// the others.
+pub fn by_code<const N: usize>(
+    slots: &[u64; crate::REASON_SLOTS],
+    codes: &[u8; N],
+) -> ([u64; N], u64) {
+    let mut out = [0u64; N];
+    let mut other = 0;
+    for (i, n) in slots.iter().enumerate() {
+        let code = 0x80 + i as u8;
+        match codes.iter().position(|&c| c == code) {
+            Some(k) => {
+                if let Some(o) = out.get_mut(k) {
+                    *o = *n;
+                }
+            }
+            None => other += n,
+        }
+    }
+    (out, other)
+}
+
 /// The plaintext listener, as `$SYS/broker/plaintext/...` reports it (P1,
 /// ADR-230). Counters are since boot, all cores together.
 #[derive(Debug, Clone, Copy, Default)]
@@ -259,6 +330,7 @@ pub struct Info<'a> {
     pub qos2: Qos2,
     /// Publisher back-pressure (NOW-13, ADR-269).
     pub backpressure: Backpressure,
+    pub mqtt5: Mqtt5Info,
     pub handshakes: Handshakes,
     /// Connections accepted per core since boot (how evenly the flows
     /// spread over the cores).
@@ -354,6 +426,29 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
     put("messages/backpressure/paused_ms", &bp.paused_ms);
     put("messages/backpressure/timeouts", &bp.timeouts);
     put("messages/backpressure/holding", &bp.holding);
+    // MQTT 5.0 (ADR-274): clients per version, expiry, the reasons given.
+    let m = &i.mqtt5;
+    put(
+        "clients/connected/v311",
+        &i.clients_connected.saturating_sub(m.connected),
+    );
+    put("clients/connected/v5", &m.connected);
+    put("messages/expired", &m.messages_expired);
+    put("messages/dropped/too_large", &m.dropped_too_large);
+    put("sessions/expired", &m.sessions_expired);
+    put("sessions/expiring", &m.sessions_expiring);
+    put("wills/delayed", &m.wills_delayed);
+    put("wills/pending", &m.wills_pending);
+    let (sent, other) = by_code(&m.disconnects, &DISCONNECT_CODES);
+    for (code, n) in DISCONNECT_CODES.iter().zip(sent) {
+        put(&alloc::format!("disconnects/sent/0x{code:02x}"), &n);
+    }
+    put("disconnects/sent/other", &other);
+    let (refused, other) = by_code(&m.refused, &CONNACK_CODES);
+    for (code, n) in CONNACK_CODES.iter().zip(refused) {
+        put(&alloc::format!("connections/refused/v5/0x{code:02x}"), &n);
+    }
+    put("connections/refused/v5/other", &other);
     let h = &i.handshakes;
     put("handshakes/started", &h.started);
     put("handshakes/done", &h.done);
@@ -450,6 +545,7 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
         drops: Drops::default(),
         qos2: Qos2::default(),
         backpressure: Backpressure::default(),
+        mqtt5: Mqtt5Info::default(),
         handshakes: Handshakes::default(),
         accepted: &accepted,
         plaintext: PlainInfo {
@@ -573,6 +669,30 @@ pub fn json(i: &Info<'_>) -> String {
         let _ = write!(o, "{}{a}", if n == 0 { "" } else { "," });
     }
     o.push(']');
+    let m = &i.mqtt5;
+    let _ = write!(
+        o,
+        ",\"mqtt5\":{{\"connected\":{},\"messages_expired\":{},\"dropped_too_large\":{},\
+         \"sessions_expired\":{},\"sessions_expiring\":{},\"wills_delayed\":{},\"wills_pending\":{},\
+         \"disconnects\":{{",
+        m.connected,
+        m.messages_expired,
+        m.dropped_too_large,
+        m.sessions_expired,
+        m.sessions_expiring,
+        m.wills_delayed,
+        m.wills_pending
+    );
+    let (sent, other) = by_code(&m.disconnects, &DISCONNECT_CODES);
+    for (code, n) in DISCONNECT_CODES.iter().zip(sent) {
+        let _ = write!(o, "\"0x{code:02x}\":{n},");
+    }
+    let _ = write!(o, "\"other\":{other}}},\"refused\":{{");
+    let (refused, other) = by_code(&m.refused, &CONNACK_CODES);
+    for (code, n) in CONNACK_CODES.iter().zip(refused) {
+        let _ = write!(o, "\"0x{code:02x}\":{n},");
+    }
+    let _ = write!(o, "\"other\":{other}}}}}");
     let p = &i.plaintext;
     let _ = write!(o, ",\"plaintext\":{{\"enabled\":{}", p.enabled);
     if p.enabled {
@@ -718,6 +838,25 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
         bp.paused_ms,
         bp.timeouts,
         bp.holding
+    ));
+    let m = &i.mqtt5;
+    let disconnects: u64 = m.disconnects.iter().sum();
+    let refused: u64 = m.refused.iter().sum();
+    out.push(alloc::format!(
+        "MQTT 5.0: {} of {} client(s), {} DISCONNECT(s) sent, {} CONNECT(s) refused",
+        m.connected,
+        i.clients_connected,
+        disconnects,
+        refused
+    ));
+    out.push(alloc::format!(
+        "expiry: sessions {} expired, {} running; messages {} expired, {} too large; wills {} delayed, {} armed",
+        m.sessions_expired,
+        m.sessions_expiring,
+        m.messages_expired,
+        m.dropped_too_large,
+        m.wills_delayed,
+        m.wills_pending
     ));
     let p = &i.plaintext;
     if p.enabled {
@@ -925,6 +1064,17 @@ mod tests {
                 paused_ms: 120,
                 timeouts: 1,
                 holding: 0,
+            },
+            mqtt5: {
+                let mut m = Mqtt5Info {
+                    connected: 1,
+                    messages_expired: 6,
+                    ..Mqtt5Info::default()
+                };
+                m.disconnects[0x0e] = 2;
+                m.disconnects[0x1f] = 1;
+                m.refused[0x07] = 3;
+                m
             },
             handshakes: Handshakes {
                 started: 9,
@@ -1159,6 +1309,41 @@ mod tests {
                 "$SYS/broker/messages/backpressure/paused_ms",
                 "$SYS/broker/messages/backpressure/timeouts",
                 "$SYS/broker/messages/backpressure/holding",
+                "$SYS/broker/clients/connected/v311",
+                "$SYS/broker/clients/connected/v5",
+                "$SYS/broker/messages/expired",
+                "$SYS/broker/messages/dropped/too_large",
+                "$SYS/broker/sessions/expired",
+                "$SYS/broker/sessions/expiring",
+                "$SYS/broker/wills/delayed",
+                "$SYS/broker/wills/pending",
+                "$SYS/broker/disconnects/sent/0x81",
+                "$SYS/broker/disconnects/sent/0x82",
+                "$SYS/broker/disconnects/sent/0x83",
+                "$SYS/broker/disconnects/sent/0x87",
+                "$SYS/broker/disconnects/sent/0x8d",
+                "$SYS/broker/disconnects/sent/0x8e",
+                "$SYS/broker/disconnects/sent/0x8f",
+                "$SYS/broker/disconnects/sent/0x90",
+                "$SYS/broker/disconnects/sent/0x93",
+                "$SYS/broker/disconnects/sent/0x94",
+                "$SYS/broker/disconnects/sent/0x95",
+                "$SYS/broker/disconnects/sent/0x98",
+                "$SYS/broker/disconnects/sent/0x9a",
+                "$SYS/broker/disconnects/sent/other",
+                "$SYS/broker/connections/refused/v5/0x80",
+                "$SYS/broker/connections/refused/v5/0x81",
+                "$SYS/broker/connections/refused/v5/0x82",
+                "$SYS/broker/connections/refused/v5/0x83",
+                "$SYS/broker/connections/refused/v5/0x84",
+                "$SYS/broker/connections/refused/v5/0x85",
+                "$SYS/broker/connections/refused/v5/0x86",
+                "$SYS/broker/connections/refused/v5/0x87",
+                "$SYS/broker/connections/refused/v5/0x88",
+                "$SYS/broker/connections/refused/v5/0x8c",
+                "$SYS/broker/connections/refused/v5/0x95",
+                "$SYS/broker/connections/refused/v5/0x9a",
+                "$SYS/broker/connections/refused/v5/other",
                 "$SYS/broker/handshakes/started",
                 "$SYS/broker/handshakes/done",
                 "$SYS/broker/handshakes/failed",
@@ -1201,6 +1386,12 @@ mod tests {
             val("$SYS/broker/messages/backpressure/paused_ms"),
             Some("120")
         );
+        assert_eq!(val("$SYS/broker/clients/connected/v5"), Some("1"));
+        assert_eq!(val("$SYS/broker/clients/connected/v311"), Some("2"));
+        assert_eq!(val("$SYS/broker/messages/expired"), Some("6"));
+        assert_eq!(val("$SYS/broker/disconnects/sent/0x8e"), Some("2"));
+        assert_eq!(val("$SYS/broker/disconnects/sent/other"), Some("1"));
+        assert_eq!(val("$SYS/broker/connections/refused/v5/0x87"), Some("3"));
         // No payload is empty: an empty retained payload would clear it.
         assert!(got.iter().all(|(_, v)| !v.is_empty()));
         assert_eq!(val("$SYS/broker/plaintext/enabled"), Some("false"));
@@ -1232,7 +1423,13 @@ mod tests {
              \"backpressure\":{\"mode\":\"single\",\"paused\":4,\"paused_ms\":120,\"timeouts\":1,\"holding\":0},\
              \"handshakes\":{\"started\":9,\"done\":8,\"failed\":0,\"timed_out\":0,\"refused\":0,\
              \"syn_dropped\":0,\"in_flight\":0,\"in_flight_max\":0,\"slow\":0,\"latency_sum_ms\":0,\
-             \"latency_max_ms\":0},\"accepted\":[4,5],\"plaintext\":{\"enabled\":false},\"websocket\":{\"enabled\":false}}"
+             \"latency_max_ms\":0},\"accepted\":[4,5],\
+             \"mqtt5\":{\"connected\":1,\"messages_expired\":6,\"dropped_too_large\":0,\"sessions_expired\":0,\
+             \"sessions_expiring\":0,\"wills_delayed\":0,\"wills_pending\":0,\"disconnects\":{\"0x81\":0,\"0x82\":0,\
+             \"0x83\":0,\"0x87\":0,\"0x8d\":0,\"0x8e\":2,\"0x8f\":0,\"0x90\":0,\"0x93\":0,\"0x94\":0,\"0x95\":0,\
+             \"0x98\":0,\"0x9a\":0,\"other\":1},\"refused\":{\"0x80\":0,\"0x81\":0,\"0x82\":0,\"0x83\":0,\"0x84\":0,\
+             \"0x85\":0,\"0x86\":0,\"0x87\":3,\"0x88\":0,\"0x8c\":0,\"0x95\":0,\"0x9a\":0,\"other\":0}},\
+             \"plaintext\":{\"enabled\":false},\"websocket\":{\"enabled\":false}}"
         );
         let mut unknown = info(&[]);
         unknown.server_cert_days = None;
@@ -1282,7 +1479,7 @@ mod tests {
     #[test]
     fn status_is_a_few_short_lines() {
         let lines = status_lines(&info(&[10, 20]), "info", "debug");
-        assert_eq!(lines.len(), 12);
+        assert_eq!(lines.len(), 14);
         assert_eq!(lines[0], "urmqtt 0.1.0 aarch64 up 12 s");
         assert_eq!(lines[1], "cpu 2 core(s), busy % 10/20");
         assert!(lines[3].starts_with("clients 3 connected, 5 sessions"));
@@ -1300,7 +1497,12 @@ mod tests {
             lines[10],
             "backpressure single: 4 publisher pause(s), 120 ms paused, 1 ran out, 0 held now"
         );
-        assert!(lines[11].starts_with("log level info (build maximum debug)"));
+        assert_eq!(
+            lines[11],
+            "MQTT 5.0: 1 of 3 client(s), 3 DISCONNECT(s) sent, 3 CONNECT(s) refused"
+        );
+        assert!(lines[12].starts_with("expiry: sessions 0 expired"));
+        assert!(lines[13].starts_with("log level info (build maximum debug)"));
         assert!(lines.iter().all(|l| l.len() < 120 && !l.contains('\n')));
     }
 
