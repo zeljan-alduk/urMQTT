@@ -2078,3 +2078,139 @@ fn resends_after_a_reconnect_respect_the_new_receive_maximum() {
         "{got:?}"
     );
 }
+
+// ---- publisher back-pressure (ADR-269) with 5.0 clients -------------------
+
+fn wire5(p: &P5<'_>) -> Vec<u8> {
+    let mut out = vec![0u8; urmqtt_mqtt::v5::encoded_len(p).unwrap()];
+    urmqtt_mqtt::v5::encode(p, &mut out).unwrap();
+    out
+}
+
+fn ack5(packet_id: u16) -> Ack<'static> {
+    Ack {
+        packet_id,
+        reason: ReasonCode::Success,
+        properties: Props::EMPTY,
+    }
+}
+
+fn publish5(topic: &str, qos: QoS, pid: Option<u16>, payload: &[u8]) -> Vec<u8> {
+    wire5(&P5::Publish(Publish5 {
+        dup: false,
+        qos,
+        retain: false,
+        topic,
+        packet_id: pid,
+        properties: Props::EMPTY,
+        payload,
+    }))
+}
+
+/// A 5.0 publisher paused for its one full QoS 0 subscriber (ADR-269): its
+/// PINGREQ, PUBREL and PUBCOMP and two more QoS 2 PUBLISHes wait in the held
+/// bytes at most 500 ms, are parsed as 5.0 and answered after, and the
+/// Receive Maximum counts exactly what it would have without the pause: the
+/// next unreleased one is DISCONNECT 0x93.
+#[test]
+fn a_paused_5_0_publisher_is_answered_within_the_bound() {
+    use crate::flow::PAUSE_MAX_MS;
+    let mut b = Broker::new(Config {
+        mqtt5: Mqtt5Policy {
+            receive_maximum: 2,
+            ..Mqtt5Policy::DEFAULT
+        },
+        rate_tokens: 1_000_000,
+        max_outbound_bytes: 1024,
+        max_queued: 1000,
+        ..cfg()
+    });
+    let (mut sub, _) = C5::connect(&mut b, "backend2", true, &[], None, 0);
+    sub.subscribe(&mut b, &[("fleet/b", q(QoS::AtMostOnce))], 0);
+    let (mut pubr, _) = C5::connect(&mut b, "backend", true, &[], None, 0);
+    pubr.subscribe(&mut b, &[("fleet/a", q(QoS::ExactlyOnce))], 0);
+    // pubr's QoS 2 publish (id 1) waits for its PUBREL.
+    assert_eq!(
+        pubr.publish_id(
+            &mut b,
+            "fleet/x",
+            b"q2",
+            QoS::ExactlyOnce,
+            false,
+            &[],
+            Some(1),
+            1
+        ),
+        [G::Ack(5, 1, 0)]
+    );
+    // A QoS 2 message to pubr: PUBREC from pubr, PUBREL back, its PUBCOMP
+    // still owed.
+    sub.publish_id(
+        &mut b,
+        "fleet/a",
+        b"to-a",
+        QoS::ExactlyOnce,
+        false,
+        &[],
+        Some(5),
+        1,
+    );
+    sub.send(&mut b, &P5::PubRel(ack5(5)), 1);
+    let to_a = pubr
+        .recv(&mut b)
+        .into_iter()
+        .find_map(|g| match g {
+            G::Publish { pid: Some(p), .. } => Some(p),
+            _ => None,
+        })
+        .unwrap();
+    pubr.send(&mut b, &P5::PubRec(ack5(to_a)), 1);
+    assert_eq!(pubr.recv(&mut b), [G::Ack(6, to_a, 0)]);
+    // The flood fills sub (which never reads), then the rest is held.
+    let mut bytes = Vec::new();
+    for i in 0..300u32 {
+        let mut payload = i.to_be_bytes().to_vec();
+        payload.resize(64, 0);
+        bytes.extend(publish5("fleet/b", QoS::AtMostOnce, None, &payload));
+    }
+    bytes.extend(wire5(&P5::PingReq));
+    bytes.extend(wire5(&P5::PubRel(ack5(1))));
+    bytes.extend(wire5(&P5::PubComp(ack5(to_a))));
+    bytes.extend(publish5("fleet/x", QoS::ExactlyOnce, Some(2), b"q2"));
+    bytes.extend(publish5("fleet/x", QoS::ExactlyOnce, Some(3), b"q2"));
+    b.input(pubr.c, &bytes, 2);
+    assert!(b.input_held(pubr.c));
+    assert!(pubr.recv(&mut b).is_empty(), "nothing answered while held");
+    b.poll_flow(1 + PAUSE_MAX_MS);
+    assert!(b.input_held(pubr.c), "before the bound");
+    b.poll_flow(2 + PAUSE_MAX_MS);
+    while b.input_held(pubr.c) {
+        b.poll_flow(2 + PAUSE_MAX_MS);
+    }
+    assert_eq!(
+        pubr.recv(&mut b),
+        [
+            G::PingResp,
+            G::Ack(7, 1, 0),
+            G::Ack(5, 2, 0),
+            G::Ack(5, 3, 0)
+        ]
+    );
+    assert_eq!(b.close_requested(pubr.c), None);
+    // Ids 2 and 3 unreleased: a third is one above the Receive Maximum.
+    assert_eq!(
+        pubr.publish_id(
+            &mut b,
+            "fleet/x",
+            b"q2",
+            QoS::ExactlyOnce,
+            false,
+            &[],
+            Some(4),
+            3
+        ),
+        [G::Disconnect(0x93, Some("receive maximum exceeded".into()))]
+    );
+    let fs = b.flow_stats();
+    assert_eq!((fs.pauses, fs.timeouts, fs.holding), (1, 1, 0));
+}
