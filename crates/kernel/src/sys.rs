@@ -236,6 +236,7 @@ impl Sys {
         s.bp_paused_ms.store(fs.paused_ms, Ordering::Relaxed);
         s.bp_timeouts.store(fs.timeouts, Ordering::Relaxed);
         s.bp_holding.store(fs.holding, Ordering::Relaxed);
+        crate::mqtt5::report(self.me, &st);
     }
 
     /// New kernel log lines to `$SYS/console/out`.
@@ -421,6 +422,7 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
         drops,
         qos2,
         backpressure: bp,
+        mqtt5: crate::mqtt5::info(),
         handshakes: {
             let t = dataplane::handshake_totals();
             urmqtt_broker::sys::Handshakes {

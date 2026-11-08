@@ -26,7 +26,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use urmqtt_config::{CONFIG, PlainAuth};
 use urmqtt_log::{info, warn};
-use urmqtt_mqtt::Connect;
 use urmqtt_net::admission::{Admission, Limits as AdmissionLimits, Outcome};
 use urmqtt_plain::{AllowList, Authenticator, Exposure, Limits, Open, Sources, Syn, Verdict};
 use urmqtt_sync::sync::{OnceCell, SpinLock};
@@ -516,7 +515,7 @@ impl PlainState {
     }
 
     /// Decides the CONNECT of connection `c` (the packet is parsed already).
-    pub fn decide(&mut self, c: u32, p: &Connect<'_>, now_ms: u64) -> Decision {
+    pub fn decide(&mut self, c: u32, p: &crate::mqtt5::ConnectView<'_>, now_ms: u64) -> Decision {
         let Some(pc) = self.conns.get(c).copied() else {
             return Decision::Refuse(5);
         };

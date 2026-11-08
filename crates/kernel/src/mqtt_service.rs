@@ -405,6 +405,7 @@ pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
         } else {
             urmqtt_broker::PublisherBackpressure::Off
         },
+        mqtt5: crate::mqtt5::broker_policy(),
     }
 }
 
@@ -504,10 +505,6 @@ fn tls_server_with(client_auth: bool) -> Option<TlsServer> {
     }
 }
 
-fn qos_of(q: u8) -> QoS {
-    QoS::from_bits(q).unwrap_or(QoS::AtMostOnce)
-}
-
 impl MqttService {
     /// The MQTT service of data core `me` (of `n`): the broker shard for
     /// the sessions whose home is `me`, and the connections TCP accepts on
@@ -562,38 +559,9 @@ impl MqttService {
         }
         let mut broker = Broker::new(broker_config(MAX_CONNS * n, n > 1));
         let mut homed = 0;
+        let mut expired = 0;
         if let Some(r) = restored {
-            // Every shard keeps a replica of the retained messages; each
-            // persistent session goes to its home shard.
-            for m in &r.retained {
-                broker.restore_retained(&m.topic, &m.payload, qos_of(m.qos));
-            }
-            for sess in r
-                .sessions
-                .iter()
-                .filter(|s| dataplane::home_of(&s.client_id, n) == me)
-            {
-                homed += 1;
-                broker.restore_session(
-                    &sess.client_id,
-                    sess.subscriptions
-                        .iter()
-                        .map(|(f, q)| (f.as_str(), qos_of(*q))),
-                    sess.queued.iter().map(|q| urmqtt_broker::StoredMsg {
-                        topic: &q.topic,
-                        payload: &q.payload,
-                        qos: qos_of(q.qos),
-                        pid: (q.pid != 0).then_some(q.pid),
-                    }),
-                    sess.qos2_ids.iter().map(|i| {
-                        if i.released {
-                            urmqtt_broker::Qos2Id::Released(i.pid)
-                        } else {
-                            urmqtt_broker::Qos2Id::Received(i.pid)
-                        }
-                    }),
-                );
-            }
+            crate::mqtt5::restore(&mut broker, r, me, n, &mut homed, &mut expired);
         }
         let db = db::endpoints(me)
             .filter(|_| db::active())
@@ -618,7 +586,7 @@ impl MqttService {
             });
         if dataplane::workers(n).contains(&me) {
             info!(
-                "mqtt: shard {me}/{n} ready: {homed} persistent session(s) homed here, telemetry partition {}",
+                "mqtt: shard {me}/{n} ready: {homed} persistent session(s) homed here ({expired} expired while down, dropped), telemetry partition {}",
                 if log.is_some() {
                     db::partition_of(me) as isize
                 } else {
@@ -1221,12 +1189,17 @@ impl MqttService {
         };
         k.early.extend_from_slice(data);
         let limit = CONFIG.limits.max_packet_size as usize + 5;
-        let home = match urmqtt_mqtt::decode(k.early.as_slice(), &urmqtt_mqtt::Limits::PROTOCOL_MAX)
-        {
-            Ok((urmqtt_mqtt::Packet::Connect(p), _)) => {
+        // Either version (ADR-273 rule 1); a 5.0 client without a client id
+        // is named by the shard it lands on: this one.
+        let home = match crate::mqtt5::peek_connect(
+            k.early.as_slice(),
+            &urmqtt_mqtt::Limits::PROTOCOL_MAX,
+            limit,
+        ) {
+            crate::mqtt5::Peek::Connect(p) if !p.client_id.is_empty() => {
                 Some(dataplane::home_of(p.client_id, self.n))
             }
-            Err(urmqtt_mqtt::Error::Incomplete(_)) if k.early.len() <= limit => None,
+            crate::mqtt5::Peek::Wait => None,
             _ => Some(self.me),
         };
         let Some(home) = home.map(|h| {
@@ -1257,11 +1230,13 @@ impl MqttService {
         };
         k.early.extend_from_slice(data);
         let limit = CONFIG.plaintext.max_packet_size as usize + 5;
-        let decoded = urmqtt_mqtt::decode(k.early.as_slice(), &crate::plain::mqtt_limits());
+        // Either version: the protocol level picks the decoder (ADR-273).
+        let decoded =
+            crate::mqtt5::peek_connect(k.early.as_slice(), &crate::plain::mqtt_limits(), limit);
         // What to do once the borrow of the packet is over.
         enum Next {
             Wait,
-            Refuse(u8),
+            Refuse(u8, bool),
             Garbage,
             Accept {
                 identity: &'static str,
@@ -1270,30 +1245,30 @@ impl MqttService {
             },
         }
         let next = match decoded {
-            Ok((urmqtt_mqtt::Packet::Connect(p), _)) => {
+            crate::mqtt5::Peek::Connect(p) => {
                 match self.plain.as_mut().map(|pl| pl.decide(c, &p, now_ms)) {
                     Some(crate::plain::Decision::Accept(identity)) => Next::Accept {
                         identity,
                         key: urmqtt_broker::plain_session_key(identity, p.client_id),
                         no_id: p.client_id.is_empty(),
                     },
-                    Some(crate::plain::Decision::Refuse(code)) => Next::Refuse(code),
-                    None => Next::Refuse(3),
+                    Some(crate::plain::Decision::Refuse(code)) => Next::Refuse(code, p.v5),
+                    None => Next::Refuse(3, p.v5),
                 }
             }
-            Err(urmqtt_mqtt::Error::Incomplete(_)) if k.early.len() <= limit => Next::Wait,
-            // An MQTT 5 client (this broker speaks 3.1.1): told so, not a bad login.
-            Err(urmqtt_mqtt::Error::UnsupportedProtocolLevel(_)) => Next::Refuse(1),
-            _ => Next::Garbage,
+            crate::mqtt5::Peek::Wait => Next::Wait,
+            // A protocol level this broker does not take: told so, not a bad login.
+            crate::mqtt5::Peek::Unsupported { v5 } => Next::Refuse(1, v5),
+            crate::mqtt5::Peek::Garbage => Next::Garbage,
         };
         match next {
             Next::Wait => {}
-            Next::Refuse(code) => self.refuse_plain(c, code),
+            Next::Refuse(code, v5) => self.refuse_plain(c, code, v5),
             Next::Garbage => {
                 if let Some(pl) = self.plain.as_mut() {
                     pl.garbage(c, now_ms);
                 }
-                self.refuse_plain(c, 0);
+                self.refuse_plain(c, 0, false);
             }
             Next::Accept {
                 identity,
@@ -1328,13 +1303,15 @@ impl MqttService {
     }
 
     /// Answers a refused plaintext CONNECT (`code` 0: nothing to say, as for
-    /// bytes that are no MQTT) and closes after it.
-    fn refuse_plain(&mut self, c: u32, code: u8) {
+    /// bytes that are no MQTT) in the client's version and closes after it.
+    fn refuse_plain(&mut self, c: u32, code: u8, v5: bool) {
         if let Some(k) = self.conns.get_mut(&c) {
             k.early.take();
             if code != 0 {
-                // CONNACK: session not present, the return code.
-                k.pending.extend_from_slice(&[0x20, 0x02, 0x00, code]);
+                // CONNACK: session not present, the return (reason) code.
+                let (bytes, n) = crate::mqtt5::refusal(code, v5);
+                k.pending
+                    .extend_from_slice(bytes.get(..n).unwrap_or_default());
             }
         }
         self.start_close(c);
@@ -2093,6 +2070,7 @@ fn finish(broker: &mut Broker, c: ConnId, now_ms: u64) {
             Some(CloseReason::Rejected) => "rejected",
             Some(CloseReason::Unsupported) => "unsupported",
             Some(CloseReason::Disallowed) => "no longer on the allowlist",
+            Some(CloseReason::Refused(_)) => "refused (MQTT 5.0 DISCONNECT)",
             None => "network closed, will published if set",
         },
         st.sessions,

@@ -248,6 +248,17 @@ fn now_unix() -> i64 {
     crate::boot::now_unix().unwrap_or(0) as i64
 }
 
+/// When a message's Message Expiry Interval ends, in wall-clock seconds for
+/// the store (ADR-273 rule 5): the broker keeps it on the uptime clock in
+/// ms, which is this core's too. Rounded up, so a stored message never
+/// outlives its interval by less than it had.
+fn expires_at(msg: &urmqtt_broker::MsgInner) -> Option<i64> {
+    (msg.expires_ms != 0).then(|| {
+        let left_ms = msg.expires_ms.saturating_sub(now_ms());
+        now_unix().saturating_add(i64::try_from(left_ms.div_ceil(1000)).unwrap_or(i64::MAX))
+    })
+}
+
 fn platform() -> Platform {
     Platform {
         random: |buf| {
@@ -2093,26 +2104,43 @@ impl Worker {
             // Handled in `step`, never batched.
             DbReq::Control { .. } => Ok(()),
             DbReq::Persist(op) => match op {
-                PersistOp::Retain { msg, qos } => s.retain(&msg.topic, &msg.payload, qos as u8),
-                PersistOp::SessionUpsert { client_id } => s.session_upsert(&client_id, now_unix()),
+                PersistOp::Retain { msg, qos } => s.retain_v5(
+                    &msg.topic,
+                    &msg.payload,
+                    qos as u8,
+                    msg.props.as_deref(),
+                    expires_at(&msg),
+                ),
+                PersistOp::SessionUpsert {
+                    client_id,
+                    expiry_s,
+                } => s.session_upsert_expiry(&client_id, now_unix(), Some(expiry_s)),
+                PersistOp::SessionOffline { client_id } => {
+                    s.session_offline(&client_id, now_unix())
+                }
                 PersistOp::SessionDelete { client_id } => s.session_delete(&client_id),
                 PersistOp::Subscribe {
                     client_id,
                     filter,
-                    qos,
-                } => s.subscribe(&client_id, &filter, qos as u8),
+                    options,
+                    ..
+                } => s.subscribe_options(&client_id, &filter, options),
                 PersistOp::Unsubscribe { client_id, filter } => s.unsubscribe(&client_id, &filter),
                 PersistOp::QueuePush {
                     client_id,
                     msg,
                     qos,
                     pid,
-                } => s.queue_push_sent(
+                } => s.queue_push_v5(
                     &client_id,
-                    &msg.topic,
-                    &msg.payload,
-                    qos as u8,
-                    pid.unwrap_or(0),
+                    urmqtt_store::QueuedRef {
+                        topic: &msg.topic,
+                        payload: &msg.payload,
+                        qos: qos as u8,
+                        pid: pid.unwrap_or(0),
+                        props: msg.props.as_deref(),
+                        expires_at: expires_at(&msg),
+                    },
                 ),
                 PersistOp::Qos2 { client_id, id } => s.qos2_id(
                     &client_id,
@@ -2280,6 +2308,8 @@ pub fn log_writer(core: usize) -> ! {
                 alloc::sync::Arc::new(MsgInner {
                     topic: topic.clone(),
                     payload: Box::new(payload),
+                    props: None,
+                    expires_ms: 0,
                 }),
             ));
             seq += 1;

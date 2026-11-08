@@ -180,7 +180,7 @@ impl MqttService {
         let limit = urmqtt_config::CONFIG.websocket.max_packet_size as usize + 5;
         enum Next {
             Wait,
-            Refuse(u8),
+            Refuse(u8, bool),
             Garbage,
             Accept {
                 identity: &'static str,
@@ -188,31 +188,33 @@ impl MqttService {
                 no_id: bool,
             },
         }
-        let decoded = urmqtt_mqtt::decode(k.early.as_slice(), &crate::websocket::mqtt_limits());
+        // Either version: the protocol level picks the decoder (ADR-273).
+        let decoded =
+            crate::mqtt5::peek_connect(k.early.as_slice(), &crate::websocket::mqtt_limits(), limit);
         let next = match decoded {
-            Ok((urmqtt_mqtt::Packet::Connect(p), _)) => {
+            crate::mqtt5::Peek::Connect(p) => {
                 match self.ws.as_mut().map(|w| w.decide(c, &p, now_ms)) {
                     Some(Decision::Accept(identity)) => Next::Accept {
                         identity,
                         key: urmqtt_broker::web_session_key(identity, p.client_id),
                         no_id: p.client_id.is_empty(),
                     },
-                    Some(Decision::Refuse(code)) => Next::Refuse(code),
-                    None => Next::Refuse(3),
+                    Some(Decision::Refuse(code)) => Next::Refuse(code, p.v5),
+                    None => Next::Refuse(3, p.v5),
                 }
             }
-            Err(urmqtt_mqtt::Error::Incomplete(_)) if k.early.len() <= limit => Next::Wait,
-            Err(urmqtt_mqtt::Error::UnsupportedProtocolLevel(_)) => Next::Refuse(1),
-            _ => Next::Garbage,
+            crate::mqtt5::Peek::Wait => Next::Wait,
+            crate::mqtt5::Peek::Unsupported { v5 } => Next::Refuse(1, v5),
+            crate::mqtt5::Peek::Garbage => Next::Garbage,
         };
         match next {
             Next::Wait => {}
-            Next::Refuse(code) => self.ws_refuse(c, code),
+            Next::Refuse(code, v5) => self.ws_refuse(c, code, v5),
             Next::Garbage => {
                 if let Some(w) = self.ws.as_mut() {
                     w.garbage(c, now_ms);
                 }
-                self.ws_refuse(c, 0);
+                self.ws_refuse(c, 0, false);
             }
             Next::Accept {
                 identity,
@@ -249,17 +251,19 @@ impl MqttService {
 
     /// A refused login: the CONNACK (`code` 0: none, the bytes were no MQTT)
     /// in a frame, then a close frame 1008 (policy violation).
-    fn ws_refuse(&mut self, c: u32, code: u8) {
+    fn ws_refuse(&mut self, c: u32, code: u8, v5: bool) {
         if let (Some(k), Some(w)) = (self.conns.get_mut(&c), self.ws.as_mut()) {
             k.early.take();
             if code != 0
                 && let Some(sess) = k.session.as_mut()
             {
+                // In the client's version (ADR-273 rule 14).
+                let (bytes, n) = crate::mqtt5::refusal(code, v5);
                 let _ = w.send(
                     c,
                     sess,
                     op::BINARY,
-                    &[0x20, 0x02, 0x00, code],
+                    bytes.get(..n).unwrap_or_default(),
                     k.pending.vec_mut(),
                 );
             }

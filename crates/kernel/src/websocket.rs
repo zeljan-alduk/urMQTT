@@ -38,7 +38,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use urmqtt_broker::sys::{WS_REFUSALS, WsInfo, ws_close_index};
 use urmqtt_config::{CONFIG, WsAuth};
 use urmqtt_log::{info, warn};
-use urmqtt_mqtt::Connect;
 use urmqtt_plain::{Authenticator, Limits, Open, Sources, Syn, Verdict};
 use urmqtt_sync::sync::{OnceCell, SpinLock};
 use urmqtt_tls::{TlsError, TlsSession};
@@ -825,7 +824,7 @@ impl WsState {
     }
 
     /// Decides the CONNECT of password connection `c` (parsed already).
-    pub fn decide(&mut self, c: u32, p: &Connect<'_>, now_ms: u64) -> Decision {
+    pub fn decide(&mut self, c: u32, p: &crate::mqtt5::ConnectView<'_>, now_ms: u64) -> Decision {
         let (Some(w), Some(auth)) = (self.conns.get(c), self.auth.as_ref()) else {
             return Decision::Refuse(5);
         };
