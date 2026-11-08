@@ -141,6 +141,9 @@ fn open(host: &str, port: u16, id: &Identity, keepalive: u16) -> Result<Tls, Str
     Ok(tls)
 }
 
+/// Connections the TCP and TLS slowloris stages open at once.
+const SLOWLORIS_THREADS: usize = 32;
+
 /// Slowloris: open `clients` connections that each reach `stage` and then
 /// stall, holding them for `duration`. The broker's per-IP in-flight cap
 /// refuses the excess and the handshake timeout reaps the rest; since every
@@ -155,17 +158,57 @@ pub fn slowloris(
 ) -> Result<(), String> {
     let mut held: Vec<Box<dyn std::any::Any>> = Vec::new();
     let mut opened = 0usize;
-    for i in 0..clients {
+    // TCP only: connect and send nothing. TLS: a partial record, so the server
+    // buffers and waits. Both connect from several threads at once, as a real
+    // slowloris does: one connection at a time measured the emulator's pace of
+    // accepting forwarded connections (QEMU's user network under TCG accepts a
+    // waiting connection only when its main loop runs, about once a second when
+    // the guest programs no timer), not the broker's admission (ADR-270).
+    if matches!(stage, "tcp" | "tls") {
+        let threads = clients.clamp(1, SLOWLORIS_THREADS);
+        let host = host.to_owned();
+        let workers: Vec<_> = (0..threads)
+            .map(|t| {
+                let host = host.clone();
+                let stage = stage.to_owned();
+                std::thread::spawn(move || {
+                    let mut mine = Vec::new();
+                    for _ in (t..clients).step_by(threads) {
+                        let r = tcp(&host, tls_port).and_then(|mut s| {
+                            if stage == "tls" {
+                                // A partial TLS record: a handshake header promising
+                                // 512 bytes, of which only 4 arrive.
+                                s.write_all(&[0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x00])
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            Ok(s)
+                        });
+                        // Refused connections are the expected outcome past the
+                        // per-IP in-flight cap; keep going.
+                        if let Ok(s) = r {
+                            mine.push(s);
+                        }
+                    }
+                    mine
+                })
+            })
+            .collect();
+        for w in workers {
+            for s in w.join().unwrap_or_default() {
+                held.push(Box::new(s));
+                opened += 1;
+            }
+        }
+    }
+    // The MQTT stage: one connection after the other (each makes its own
+    // client certificate).
+    let sequential = if matches!(stage, "tcp" | "tls") {
+        0
+    } else {
+        clients
+    };
+    for i in 0..sequential {
         let r = match stage {
-            // TCP only: connect and send nothing.
-            "tcp" => tcp(host, tls_port).map(|s| Box::new(s) as Box<dyn std::any::Any>),
-            // A partial TLS record: a handshake header promising 512 bytes,
-            // of which only 4 arrive, so the server buffers and waits.
-            "tls" => tcp(host, tls_port).and_then(|mut s| {
-                s.write_all(&[0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x00])
-                    .map_err(|e| e.to_string())?;
-                Ok(Box::new(s) as Box<dyn std::any::Any>)
-            }),
             // Full TLS, then a CONNECT fixed header promising more bytes
             // that never come.
             "mqtt" => {

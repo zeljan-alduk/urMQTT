@@ -3009,8 +3009,9 @@ net_irq() {
                     'dataplane: core 0: .* 0 receive interrupt\(s\)' 'NOT:dataplane: core 0: .* [1-9][0-9]* receive interrupt\(s\)')
             else
                 [[ $ARCH == aarch64 && $accel == tcg ]] && expect=('msi: GICv3 ITS at 0x8080000, device table for requester IDs')
-                expect+=('net: receive wake-up: interrupt \(MSI-X via (GICv2m SPI|GICv3 ITS LPI|local APIC vector) [0-9]+, to core 0\); polling only within 2 ms of NIC traffic'
-                    'dataplane: core 0: .* [1-9][0-9]* receive interrupt\(s\)' 'NOT:the receive interrupt never arrived')
+                expect+=('net: receive wake-up: interrupt \(MSI-X via (GICv2m SPI|GICv3 ITS LPI|local APIC vector) [0-9]+, to core 0\), on probation until 3 frames'
+                    'net: receive interrupt verified: 3 frames woke core 0 by it'
+                    'dataplane: core 0: .* [1-9][0-9]* receive interrupt\(s\)' 'NOT:the receive interrupt did not arrive')
             fi
             check "net-irq $mode [$accel]" "$log" "$status" "${expect[@]}" \
                 "client: net-irq-qos1 1 ok" "client: net-irq-qos1 2 ok" "client: net-irq-qos1 3 ok" "NOT:FAILED" "$NO_FAULT"
@@ -3053,7 +3054,7 @@ gicv2() {
     kill_vm
     cat "$log.client" >>"$log" 2>/dev/null || true
     check "gicv2 mqtt-tls [tcg]" "$log" "$status" "gic: v2 at" \
-        "net: receive wake-up: interrupt \(MSI-X via GICv2m SPI [0-9]+, to core 0\)" \
+        "net: receive wake-up: interrupt \(MSI-X via GICv2m SPI [0-9]+, to core 0\)" "net: receive interrupt verified" \
         "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
         "client: qos1-after-reconnect ok" "client: tls-revoked-rejected ok" "NOT:FAILED" "$NO_FAULT"
 }

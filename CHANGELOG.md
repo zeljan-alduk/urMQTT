@@ -164,6 +164,13 @@ All notable changes to this project are documented here. The format follows
   running time as the watchdog counts it (bounded at 20 times that elapsed); 10 of 10 with and without host load.
 - `$SYS/query/info` could report `clients.connected` 0 to an operator that had just reconnected: the answer used
   the counters each shard reports once a second. The answering shard (the asker's home) now refreshes its own first.
+- The receive interrupt (ADR-270) is verified before it is trusted: it starts on probation (armed, with a 1 ms poll
+  deadline while connections exist) until three frames have woken core 0 by it (`net: receive interrupt verified`),
+  and falls back to polling after 8 frames that waited without it, before the verification or among any 32 later;
+  a delivery that works only sometimes no longer escapes the fallback. The dispatcher's statistics count armed sleeps
+  and misses. The CI failure of `attack-app [tcg]` (Ubuntu's QEMU 8.2.2) was not the interrupt: the scenario's
+  slowloris opened its connections one at a time, and QEMU's user network under TCG accepted them only as fast as
+  its main loop ran; `urmqtt-attack slowloris` now connects from 32 threads (ADR-270 amendment).
 - A retained message replayed for a new subscription while the session's in-flight window was full was sent from
   the queue with RETAIN 0 (QoS 1, since M9; MQTT 3.1.1 3.3.1.3 requires 1). It keeps RETAIN now, also when it is sent
   again after a reconnect. Found by the `broker_acl` fuzzer's new QoS 2 checks (ADR-271).

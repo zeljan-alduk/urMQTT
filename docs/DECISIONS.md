@@ -2725,6 +2725,42 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   the device could not interrupt at all while suppressed). The ITS serves one CPU (collection 0), one event per
   device, LPIs 8192..16383, flat tables only (a device table needing more than 256 pages fails the setup), no
   `msi-map`/IORT parsing.
+- **Amendment (after the merge, the CI failure of `attack-app [tcg]`).** CI's aarch64 misc job (Ubuntu 24.04,
+  QEMU 8.2.2, TCG, the GICv3 ITS) failed `attack-app` twice after this ADR merged: the admission line ("too many
+  handshakes in flight") was missing. Reproduced in Docker with Ubuntu's QEMU 8.2.2 (scripts and raw numbers in
+  `docs/perf-results/rx-irq-fix-qemu82/`), and the cause is **not** a lost or late receive interrupt:
+  - Interrupt delivery works on QEMU 8.2.2: 0 of 39 050 armed sleeps in six attack runs ended with a frame waiting
+    and no interrupt (a new statistic, below); a TCP echo round trip with 50 ms gaps 0.89-0.99 ms median with the interrupt against
+    0.74-0.85 ms polled and 0.84 ms on the kernel before this ADR; sequential mutual-TLS handshakes 2.4-2.6 ms median
+    against 3.4-3.7 ms polled.
+  - The scenario's slowloris stages opened their 200 connections **one after the other**, and QEMU's user network
+    under TCG accepted a waiting forwarded connection only when QEMU's main loop ran: the guest saw the SYNs in
+    batches of two or three about once a second (pcap), so a 200-connection stage took 45-57 s polled and 55-69 s with
+    the interrupt. Under TCG the guest's timer is a QEMU timer served by that main loop, so the 200 us deadline of
+    ADR-224 woke it 5 000 times a second; without it (the interrupt) the accept pace fell by about a fifth. A kernel
+    with the interrupt **and** the 200 us deadline (a test build) was as fast as polling (51 s, 12 and 9 refusals).
+    The assertion needs more than 32 handshakes in flight from one address on a core within the 10 s handshake
+    timeout; at one accepted connection every 225-345 ms it was marginal in every mode: at least one refusal in 3
+    of 3 runs of the kernel before this ADR, 5 of 6 polled, 4 of 7 with the interrupt (CI: 0 of 2).
+  - **Fix of the test, not a weaker one:** `urmqtt-attack slowloris` opens its TCP and TLS stage connections from
+    32 threads at once, as a real slowloris does; the stages then take 7-11 s on QEMU 8.2.2 and the per-address cap
+    refuses 14-20 times in every mode (interrupt three runs, polled, the kernel before this ADR). No kernel
+    behaviour depends on QEMU's main loop on KVM or HVF, where the guest's timer does not run through it.
+- **Probation and a windowed miss rule (part of the amendment).** Whatever the cause there, a fallback that only
+  counted 8 misses *in a row* would not have caught an interrupt that arrives for some frames only (any hit resets
+  it). Now: the interrupt starts **on probation**: armed before every sleep, with a 1 ms poll deadline while
+  connections exist (longer than 200 us so that an emulated interrupt controller's late delivery is not counted as
+  a miss), until 3 sleeps were ended by it (the boot's DHCP, ARP and ICMP replies do that within its first
+  seconds): `net: receive interrupt verified: 3 frames woke core 0 by it (N ms after boot); no polling while the
+  NIC is quiet`. 8 misses before that, or 8 misses among any 32 armed sleeps that ended with a frame afterwards,
+  fall back to polling for good with a warning (`net: receive wake-up: 8 frames waited after sleeps without the
+  receive interrupt; polling every 200 us ...`). Before verification a broken delivery costs at most 1 ms per frame;
+  after it, a frame waits for the 10 ms tick at most until the fallback, which needs at most 8 such frames among 32.
+  The dispatcher's statistics line counts the armed sleeps and the misses (`N receive interrupt(s) (M armed
+  sleep(s), K ended with a frame and no interrupt)`). Host tests: probation and its deadline, verification, a
+  silent interrupt on probation, an interrupt that works for one frame in five on probation and for three in four
+  after verification (both fall back), one race in eight never falling back. Smoke `net_irq` asserts the
+  probation and the verification lines; `gicv2` the verification.
 
 ## ADR-271 — QoS 2, exactly once: method B, the in-flight window for both QoS, packet ids in the store (NEXT-2)
 

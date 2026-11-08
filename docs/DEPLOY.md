@@ -237,8 +237,9 @@ refuses a template without it. The release images carry all four (`virtio-vps`, 
 arrives after the NIC has been quiet for 2 ms wake the core that owns the NIC through the receive queue's MSI-X interrupt: on
 x86_64 through the local APIC, on aarch64 through a GICv2m frame or the GICv3 ITS (QEMU/KVM `virt`). Without one
 (no MSI-X on the device, no MSI target) the core polls every 200 us while connections exist, as before. The boot log
-says which: `net: receive wake-up: interrupt (MSI-X via ...)` or `net: receive wake-up: polling every 200 us ...
-(<reason>)`. A hypervisor that accepts the vector but never delivers it is noticed after eight frames that waited
+says which: `net: receive wake-up: interrupt (MSI-X via ...), on probation ...` followed within the first seconds by
+`net: receive interrupt verified: 3 frames woke core 0 by it`, or `net: receive wake-up: polling every 200 us ...
+(<reason>)`. A hypervisor that accepts the vector but does not deliver it (always, or for some frames) is noticed after eight frames that waited
 (`net: receive wake-up: 8 frames waited after a sleep without the receive interrupt; polling ...`) and the broker
 polls from then on. `"off"` forces polling (configuration format 11).
 

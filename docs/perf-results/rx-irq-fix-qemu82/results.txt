@@ -1,0 +1,70 @@
+# rx-irq-fix: the CI failure of attack-app [tcg] after ADR-270 (main ece37f7), reproduced with Ubuntu 24.04's
+# QEMU 8.2.2 (TCG, aarch64 virt, GICv3 ITS) in Docker on an Apple M-series Mac (Dockerfile here; repro.sh boots the
+# smoke image `serve log=info` with run-qemu.sh in the container and runs the attack-app stages there).
+# Kernels: "base" = main 322fe03 (before ADR-270); "auto" = ece37f7 (+ the armed-sleep statistic for the later runs);
+# "off" = ece37f7 with devices.virtio_net_interrupt = "off"; "varA" = auto with the 200 us deadline kept while armed
+# (a test build, never committed). Columns: seconds for the slowloris tcp / tls stages (200 connections each),
+# admission refusal lines in the serial log (the smoke assertion needs at least one).
+#
+# 1. Sequential slowloris (the attacker before this branch)
+base1  refusals=4   max-in-flight/core=32
+base2  refusals=1   max-in-flight/core=32
+base3  refusals=7   max-in-flight/core=32
+auto2  refusals=2   max-in-flight/core=32
+auto3  refusals=0   max-in-flight/core=23
+auto4  refusals=0   max-in-flight/core=28
+auto5  refusals=3   max-in-flight/core=32
+off2   refusals=7   max-in-flight/core=32
+off3   refusals=7   max-in-flight/core=32
+off4   refusals=0   max-in-flight/core=31
+t-auto1 tcp=55.275268164 s tls=34.810915710 s  refusals=2
+t-off1 tcp=45.054856383 s tls=27.650695123 s  refusals=15
+A1 tcp=51.210607037 s tls=28.664902374 s  refusals=12
+A2 tcp=51.202254218 s tls=37.882704073 s  refusals=9
+I1 tcp=68.578710837 s tls=44.030633701 s  refusals=0
+I2 tcp=57.333273540 s tls=46.076281826 s  refusals=1
+O1 tcp=57.345310207 s tls=39.932983047 s  refusals=1
+O2 tcp=48.152071494 s tls=26.612983956 s  refusals=17
+# (t-*, A*, I*, O*: auto = interrupt, off = polling, A = varA)
+
+# 2. Interrupt delivery: armed sleeps of core 0 and those that ended with a frame and no interrupt, summed over auto5, I1, I2, P1-P3
+armed 39050 missed 0
+
+# 3. Round trips (rtt.sh: TCP echo on port 7, 100 with 50 ms gaps and 300 back to back; 40 sequential mTLS handshakes)
+== base #1
+echo rtt ms: p50 0.84 p90 1.56 max 9.25 n=100 gap=0.05
+echo rtt ms: p50 0.39 p90 0.68 max 8.05 n=300 gap=0.0
+tls handshake: p50 2.7 ms p90 5.1 ms max 22.8 n=40
+== auto #1
+echo rtt ms: p50 0.89 p90 1.25 max 13.23 n=100 gap=0.05
+echo rtt ms: p50 0.34 p90 0.59 max 2.01 n=300 gap=0.0
+tls handshake: p50 2.6 ms p90 8.1 ms max 27.4 n=40
+== off #1
+echo rtt ms: p50 0.74 p90 1.16 max 7.85 n=100 gap=0.05
+echo rtt ms: p50 0.28 p90 0.59 max 8.38 n=300 gap=0.0
+tls handshake: p50 3.4 ms p90 19.1 ms max 41.9 n=40
+== base #2
+echo rtt ms: p50 0.84 p90 1.43 max 9.55 n=100 gap=0.05
+echo rtt ms: p50 0.34 p90 0.68 max 6.62 n=300 gap=0.0
+tls handshake: p50 3.4 ms p90 14.4 ms max 24.3 n=40
+== auto #2
+echo rtt ms: p50 0.99 p90 1.37 max 11.09 n=100 gap=0.05
+echo rtt ms: p50 0.23 p90 0.34 max 2.55 n=300 gap=0.0
+tls handshake: p50 2.4 ms p90 6.7 ms max 18.8 n=40
+== off #2
+echo rtt ms: p50 0.85 p90 1.71 max 11.33 n=100 gap=0.05
+echo rtt ms: p50 0.23 p90 0.45 max 3.60 n=300 gap=0.0
+tls handshake: p50 3.7 ms p90 19.3 ms max 34.8 n=40
+DONE
+
+# 4. pcap of 40 sequential stalled connects (pcap.sh, pcap-syn.py): guest SYN-ACK delay and SYN arrival
+p-auto: conns 40 synack delay ms p50 1.70 max 8.44; SYN retransmits 0; gap between connects ms p50 0.5
+p-off: conns 40 synack delay ms p50 1.67 max 8.57; SYN retransmits 0; gap between connects ms p50 0.5
+# SYNs reached the guest in batches of 2-3 about 1.02 s apart in both modes (timeline in the ADR).
+
+# 5. Concurrent slowloris (32 threads, this branch's attacker), same QEMU 8.2.2
+P1 --clients=7.172983656 --clients=9.218358296  0 refused by admission 0 refused by admission  refusals=20 interrupt
+P2 --clients=11.293623741 --clients=10.234638005  0 refused by admission 0 refused by admission  refusals=18 interrupt
+P3 --clients=9.177870713 --clients=9.215263962  0 refused by admission 0 refused by admission  refusals=14 interrupt
+PO1 --clients=8.189752296 --clients=11.257016505  0 refused by admission 0 refused by admission  refusals=15 polling
+PB1 --clients=7.186748295 --clients=9.216831338  0 refused by admission 0 refused by admission  refusals=20 

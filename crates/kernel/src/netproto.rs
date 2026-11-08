@@ -20,7 +20,7 @@ use urmqtt_net::dhcp;
 use urmqtt_net::iface::{Event, Iface, Rx};
 use urmqtt_tcp::{App, CloseReason, ConnId, Endpoint, TcpStack, mss_for_mtu};
 use urmqtt_virtio::net::{MTU_FRAME, VirtioNet};
-use urmqtt_virtio::wake::{Mode, RxWake, Why};
+use urmqtt_virtio::wake::{Change, Mode, RxWake, Why};
 
 use crate::dataplane::{self, CoreMsg, DropSite, Frame, Link, POOL_MAX, new_frame};
 use crate::db::Restored;
@@ -773,8 +773,10 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             // it suppressed except while this core sleeps.
             crate::irq::enable_spi(spi, 0);
             info!(
-                "net: receive wake-up: interrupt (MSI-X via {} {spi}, to core 0); polling only within {} ms of NIC traffic",
+                "net: receive wake-up: interrupt (MSI-X via {} {spi}, to core 0), on probation until {} frames have \
+                 woken this core by it; polling only within {} ms of NIC traffic once verified",
                 msi_name(spi),
+                urmqtt_virtio::wake::VERIFY_HITS,
                 urmqtt_virtio::wake::HOLD_NS / 1_000_000
             );
         }
@@ -1092,13 +1094,33 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             },
             || link.pending() || net.rx_pending() || !local.is_empty(),
         );
-        if slept && irq && wake.after_sleep(devices::net_irqs(), net.rx_pending()) {
-            warn!(
-                "net: receive wake-up: {} frames waited after a sleep without the receive interrupt; \
-                 polling every {} us while connections exist from now on",
+        let (irqs_now, waiting) = (devices::net_irqs(), net.rx_pending());
+        if slept && irq {
+            // Relaxed: statistics.
+            dataplane::NIC_ARMED_SLEEPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if waiting && irqs_now == wake.irqs_at_arm() {
+                dataplane::NIC_MISSED_WAKES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let change = if slept && irq {
+            wake.after_sleep(irqs_now, waiting)
+        } else {
+            Change::None
+        };
+        match change {
+            Change::Verified => info!(
+                "net: receive interrupt verified: {} frames woke core 0 by it ({} ms after boot); no polling while the NIC is quiet",
+                urmqtt_virtio::wake::VERIFY_HITS,
+                time::uptime_ns() / 1_000_000
+            ),
+            Change::FellBack => warn!(
+                "net: receive wake-up: {} frames waited after sleeps without the receive interrupt; \
+                 polling every {} us while connections exist from now on ({})",
                 urmqtt_virtio::wake::MISSES_BEFORE_POLLING,
-                NIC_POLL_NS / 1000
-            );
+                NIC_POLL_NS / 1000,
+                Why::Silent.text()
+            ),
+            Change::None => {}
         }
     }
 }

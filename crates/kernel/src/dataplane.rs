@@ -267,6 +267,15 @@ impl Idle {
         } else {
             0
         };
+        // Relaxed: statistics of core 0's armed sleeps (ADR-270).
+        let (armed, missed) = if me == 0 {
+            (
+                NIC_ARMED_SLEEPS.swap(0, Ordering::Relaxed),
+                NIC_MISSED_WAKES.swap(0, Ordering::Relaxed),
+            )
+        } else {
+            (0, 0)
+        };
         let nic_irqs = if me == 0 {
             let n = crate::devices::net_irqs();
             let d = n.wrapping_sub(self.last_nic_irqs);
@@ -309,7 +318,8 @@ impl Idle {
             urmqtt_log::info!(
                 "dataplane: core {me}: busy {busy}%, work {}% (rx {}%, of it tls {}%, poll {}%, tcp {}%, mesh {}%, nic {}%), \
                  {acc} connection(s) accepted ({} us of work, {} us of it TLS, each), {frames} frame(s) dispatched, \
-                 {nic_irqs} receive interrupt(s), {} loop passes in {} ms, longest stall {} us",
+                 {nic_irqs} receive interrupt(s) ({armed} armed sleep(s), {missed} ended with a frame and no interrupt), \
+                 {} loop passes in {} ms, longest stall {} us",
                 pct(p.work()),
                 pct(p.rx),
                 pct(tls),
@@ -452,6 +462,11 @@ impl Default for Idle {
         Self::new()
     }
 }
+
+/// Core 0's sleeps with the receive interrupt armed, and those of them that
+/// ended with a received frame waiting and no receive interrupt (ADR-270).
+pub static NIC_ARMED_SLEEPS: AtomicU64 = AtomicU64::new(0);
+pub static NIC_MISSED_WAKES: AtomicU64 = AtomicU64::new(0);
 
 /// Loop passes per core: the health check's evidence of progress (M16).
 pub static LOOPS: [AtomicU64; crate::smp::MAX_CPUS] =
