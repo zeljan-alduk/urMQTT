@@ -212,6 +212,8 @@ jobs:
   #             (virtio_devices: console, balloon, keyboard; QMP stats and key events), ...)
   #   hardening the H4 scenarios (MTE, ...)
   #   secrecy   H8, the production-image warning and the key-bytes scan
+  #   websocket MQTT over secure WebSocket (ADR-272): paho-mqtt over wss and a raw client, both modes,
+  #             1000 idle connections under TCG (SMOKE_WS_IDLE_TCG)
   # NOT in CI yet: the x86_64 and universal-ISO suites (--arch x86_64 and
   # --arch universal, SMOKE_ONLY=diag|install|migrated|config|template|
   # integrity|install-rules|secureboot). They need qemu-system-x86, OVMF
@@ -241,6 +243,8 @@ jobs:
             only: hardening
           - group: secrecy
             only: secrecy
+          - group: websocket
+            only: websocket
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -252,7 +256,7 @@ jobs:
       - name: Install QEMU, UEFI firmware and ISO tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-system-arm qemu-efi-aarch64 qemu-utils xorriso mtools mosquitto-clients sqlite3
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-arm qemu-efi-aarch64 qemu-utils xorriso mtools mosquitto-clients sqlite3 python3-paho-mqtt
           qemu-system-aarch64 --version | head -1
       - run: make certs
       # The secrecy group also checks a release kernel: build it before

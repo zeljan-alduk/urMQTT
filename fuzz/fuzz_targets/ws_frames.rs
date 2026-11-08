@@ -102,6 +102,9 @@ fuzz_target!(|data: &[u8]| {
         .sum();
     assert!(data_len <= stream.len());
     if !cfg.text {
-        assert!(!evs.iter().any(|e| matches!(e, Ev::Data(_, true) | Ev::End(true))));
+        assert!(
+            !evs.iter()
+                .any(|e| matches!(e, Ev::Data(_, true) | Ev::End(true)))
+        );
     }
 });

@@ -2474,7 +2474,10 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   End to end (smoke group `websocket`, both architectures): paho-mqtt over wss and a raw client against the real
   kernel in QEMU; QoS 0/1, a packet at the size limit and one over, a fragmented message with a ping inside, clean and
   abrupt close, every refusal, the violations, a slowloris request cut at the deadline, no certificate refused,
-  10 000 upgraded idle connections and the heap after them, password logins, the ACL, clean sessions, the lock-out.
+  two rounds of 10 000 upgraded idle connections and the heap after each, password logins, the ACL, clean sessions,
+  the lock-out. A real browser: headless Chrome 156 with MQTT.js 5.10.1 (`scripts/ws-browser-test.mjs`, by hand)
+  logs in from an allowed origin, publishes and receives at QoS 0 and 1, gets CONNACK 4 for a wrong password, and
+  gets no connection from another origin.
 - **Alternatives.** The external bridge as a product (no TCB change, but a second process to deploy and secure, and
   the broker sees the bridge's address and identity, not the client's). Reassembling messages before the broker
   (a buffer per connection sized by the client, for nothing MQTT needs). Accepting `permessage-deflate` (a
@@ -2485,8 +2488,9 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   namespaces).
 - **Consequences.** The TCB grows by the crate `urmqtt-ws` (1 766 lines in docs/audit/inventory.md, of which about
   1 000 are the upgrade, the frames and SHA-1 and the rest tests and proofs) and about 1 250 lines of kernel (the
-  listener's state and the connection glue). A WebSocket connection costs the TLS connection plus about 260 bytes of decoder
-  state while open (measured in the idle scenario). Not done: run-time accounts (NOW-15, as for plaintext), stored
+  listener's state and the connection glue). An idle WebSocket connection costs 734 bytes of heap
+  (HVF, 10 000 upgraded connections, TLS session, WebSocket state and the broker's connection together; an idle TLS
+  connection is 494, M15), and two rounds of 10 000 leave the heap where one round did (5 655 and 5 671 KiB). Not done: run-time accounts (NOW-15, as for plaintext), stored
   sessions for password logins, compression, HTTP/2 or HTTP/3 WebSocket (RFC 8441/9220), `ws://` without TLS.
 
 ## ADR-273 — MQTT 5.0: a strict zero-copy codec now, broker semantics in two phases (NEXT-3, D-13)

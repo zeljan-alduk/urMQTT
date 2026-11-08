@@ -10,7 +10,11 @@ use libfuzzer_sys::fuzz_target;
 use urmqtt_ws::upgrade::{self, Policy, Refusal, Scan};
 
 const PATHS: [&str; 3] = ["/mqtt", "/", "/a/b"];
-const ORIGINS: [&[&str]; 3] = [&[], &["https://app.example.com"], &["http://localhost:3000", "https://x.y"]];
+const ORIGINS: [&[&str]; 3] = [
+    &[],
+    &["https://app.example.com"],
+    &["http://localhost:3000", "https://x.y"],
+];
 
 fuzz_target!(|data: &[u8]| {
     let Some((&sel, req)) = data.split_first() else {
@@ -39,7 +43,11 @@ fuzz_target!(|data: &[u8]| {
             let n = a.response(&mut out);
             assert!(out[..n].starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
             assert!(out[..n].ends_with(b"\r\n\r\n"));
-            assert!(a.accept_value().iter().all(|c| c.is_ascii_alphanumeric() || b"+/=".contains(c)));
+            assert!(
+                a.accept_value()
+                    .iter()
+                    .all(|c| c.is_ascii_alphanumeric() || b"+/=".contains(c))
+            );
             assert_eq!(a.accept_value()[27], b'=');
         }
         Err(r) => assert!(Refusal::ALL.contains(&r) && r.response().starts_with(b"HTTP/1.1 4")),
