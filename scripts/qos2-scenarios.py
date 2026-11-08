@@ -290,7 +290,9 @@ def phase1():
     b.kill()
     # Far longer than one DB batch: the disconnect snapshot is durable.
     time.sleep(1.0)
-    ok = [p[4] for p in pubs] == [1, 2] and rel == [("PUBREL", 1)] and rec == [("PUBREC", 9)] and delivered == [b"held"]
+    ids = [p[4] for p in pubs]
+    ok = (len(ids) == 2 and ids[0] != ids[1] and rel == [("PUBREL", ids[0])] and rec == [("PUBREC", 9)]
+          and delivered == [b"held"])
     return ok, f"pubs={pubs} rel={rel} rec={rec} delivered={delivered}"
 
 
@@ -300,17 +302,21 @@ def phase2():
     d = Client("device-002", clean=False)
     present = d.present
     resent = d.packets()
-    want = [("PUBREL", 1), ("PUBLISH", CMD, b"restart-1", 2, 2, True)]
+    # The ids of before (1 and 2 on a fresh disk; the session may have used
+    # some already): the released one, then the one still in flight.
+    p1 = resent[0][1] if resent and resent[0][0] == "PUBREL" else 1
+    p2 = resent[1][4] if len(resent) > 1 and resent[1][0] == "PUBLISH" else 2
+    want = [("PUBREL", p1), ("PUBLISH", CMD, b"restart-1", 2, p2, True)]
     # The inbound id 9 is still held: the PUBLISH again is a duplicate.
     d.publish(STATE, b"held", 9, dup=True)
     rec = d.packets()
     dup_routed = drain_backend(b)
     d.ack(PUBREL, 9)
     comp = d.packets()
-    d.ack(PUBCOMP, 1)
-    d.ack(PUBREC, 2)
+    d.ack(PUBCOMP, p1)
+    d.ack(PUBREC, p2)
     rel = d.packets()
-    d.ack(PUBCOMP, 2)
+    d.ack(PUBCOMP, p2)
     # Released: id 9 starts a new message now.
     d.publish(STATE, b"new", 9)
     rec2 = d.packets()
@@ -320,7 +326,8 @@ def phase2():
     d.kill()
     b.kill()
     ok = (present and resent == want and rec == [("PUBREC", 9)] and dup_routed == []
-          and comp == [("PUBCOMP", 9)] and rel == [("PUBREL", 2)] and rec2 == [("PUBREC", 9)] and after == [b"new"])
+          and p1 != p2 and comp == [("PUBCOMP", 9)] and rel == [("PUBREL", p2)] and rec2 == [("PUBREC", 9)]
+          and after == [b"new"])
     return ok, f"present={present} resent={resent} rec={rec} dup_routed={dup_routed} comp={comp} rel={rel} after={after}"
 
 

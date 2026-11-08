@@ -3996,6 +3996,8 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want config_packed && config_packed
     want release_kernel && release_kernel
     want plaintext && plaintext
+    # The broker's state across a restart (QoS 1 and QoS 2): the default run has these too.
+    command -v mosquitto_pub >/dev/null && want mqtt_persist && mqtt_persist
     want mqtt_qos2 && mqtt_qos2
     want storm && storm
     want fin_wait2 && fin_wait2
