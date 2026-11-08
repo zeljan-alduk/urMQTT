@@ -52,6 +52,15 @@ img() { # img <kernel> <name>
 }
 img "$OLD" old
 img "$NEW" new
+# The update goes into a partition of the old ESP's size: the new kernel's
+# files copied into a copy of the old ESP (its FAT has room: the image is
+# sized at twice its payload), so a kernel that grew past a MiB boundary does
+# not overwrite the start of the data partition.
+cp "$WORK/old.esp" "$WORK/upd.esp"
+rm -rf "$WORK/espfiles"
+mkdir -p "$WORK/espfiles"
+MTOOLS_SKIP_CHECK=1 mcopy -s -n -i "$WORK/new.esp" ::/ "$WORK/espfiles/"
+(cd "$WORK/espfiles" && MTOOLS_SKIP_CHECK=1 mcopy -s -o -i "$WORK/upd.esp" ./* ::/)
 
 boot() { # boot <disk> <log>
     "$ROOT/scripts/run-qemu.sh" --serial "$2" --headless --disk "$1" --accel "$ACCEL" \
@@ -88,7 +97,11 @@ for case in qos2 persist; do
     grep -aq "schema v$FROM (from v0)" "$WORK/$case-old.log" && say "$case: old-kernel-wrote-schema-$FROM" ok || say "$case: old-kernel-wrote-schema-$FROM" FAILED
     grep -q "FAILED" "$WORK/$case-old.client" && say "$case: old-kernel-phase-1" FAILED || say "$case: old-kernel-phase-1" ok
     # 2. This kernel on the same disk (the ESP starts at 1 MiB in every image).
-    dd if="$WORK/new.esp" of="$disk" bs=1048576 seek=1 conv=notrunc status=none
+    dd if="$WORK/upd.esp" of="$disk" bs=1048576 seek=1 conv=notrunc status=none
+    # The old data partition (right after the ESP) still holds its superblock.
+    off=$(( (1 + $(wc -c <"$WORK/old.esp") / 1048576) * 1048576 ))
+    magic=$(dd if="$disk" bs=1 skip="$off" count=8 status=none)
+    [[ $magic == URMQTTDK ]] && say "$case: old-data-kept-by-the-update" ok || say "$case: old-data-kept-by-the-update" FAILED
     boot "$disk" "$WORK/$case-new.log"
     "${cmd[@]}" 2 >"$WORK/$case-new.client" 2>&1 || true
     stop
