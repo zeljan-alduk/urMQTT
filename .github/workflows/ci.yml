@@ -257,8 +257,16 @@ jobs:
       - name: Install QEMU, UEFI firmware and ISO tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-system-arm qemu-efi-aarch64 qemu-utils xorriso mtools mosquitto-clients sqlite3 python3-paho-mqtt
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-arm qemu-efi-aarch64 qemu-utils xorriso mtools mosquitto-clients sqlite3 python3-venv
           qemu-system-aarch64 --version | head -1
+      # paho-mqtt 2.x for the MQTT 5.0, QoS 2 and WebSocket scenarios (the apt package is 1.6.1): a virtual environment
+      # first on PATH, one pinned wheel with its hash (scripts/ci-requirements.txt), nothing else installed.
+      - name: Install paho-mqtt 2.x (pinned, hashed)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/smoke-venv"
+          "$RUNNER_TEMP/smoke-venv/bin/pip" install --quiet --require-hashes --only-binary=:all: -r scripts/ci-requirements.txt
+          echo "$RUNNER_TEMP/smoke-venv/bin" >> "$GITHUB_PATH"
+          python3 -I -c 'import paho.mqtt as p; print("paho-mqtt", p.__version__)'
       - run: make certs
       # The secrecy group also checks a release kernel: build it before
       # `make smoke` rebuilds the dev kernel at the same path.

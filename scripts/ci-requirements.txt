@@ -1,0 +1,6 @@
+# Python packages the CI smoke scenarios need, installed into a virtual environment with
+# `pip install --require-hashes --only-binary=:all: -r scripts/ci-requirements.txt` (same pin and hash as every run:
+# the apt package of Ubuntu 24.04 is paho-mqtt 1.6.1, the MQTT 5.0 scenarios need 2.x).
+# paho-mqtt 2.1.0, wheel, released 2024-04-29 (https://pypi.org/project/paho-mqtt/2.1.0/#files)
+paho-mqtt==2.1.0 \
+    --hash=sha256:6db9ba9b34ed5bc6b6e3812718c7e06e2fd7444540df2455d2c51bd58808feee
