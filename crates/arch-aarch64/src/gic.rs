@@ -32,6 +32,11 @@ const GICD_CTLR_ENABLE: u32 = (1 << 4) | (1 << 1) | 1;
 const GICR_CTLR: usize = 0x0000;
 const GICR_TYPER: usize = 0x0008;
 const GICR_WAKER: usize = 0x0014;
+const GICR_PROPBASER: usize = 0x0070;
+const GICR_PENDBASER: usize = 0x0078;
+const GICR_CTLR_ENABLE_LPIS: u32 = 1;
+const GICR_TYPER_PLPIS: u64 = 1;
+const GICD_TYPER_LPIS: u32 = 1 << 17;
 const GICR_CTLR_RWP: u32 = 1 << 3;
 const GICR_TYPER_LAST: u64 = 1 << 4;
 const GICR_TYPER_VLPIS: u64 = 1 << 1;
@@ -76,6 +81,14 @@ pub struct Gicv3 {
 #[derive(Debug, Clone, Copy)]
 pub struct Redistributor {
     base: usize,
+}
+
+impl Redistributor {
+    /// Bytes from the start of the redistributor region (for its physical
+    /// address).
+    pub fn offset(&self, gic: &Gicv3) -> usize {
+        self.base - gic.gicr
+    }
 }
 
 fn rd32(addr: usize) -> u32 {
@@ -187,6 +200,42 @@ impl Gicv3 {
             wr32(rd.base + GICR_IPRIORITYR + i, prio);
         }
         wait_clear(rd.base + GICR_CTLR, GICR_CTLR_RWP)
+    }
+
+    /// The distributor supports LPIs (`GICD_TYPER.LPIS`; ADR-270).
+    pub fn has_lpis(&self) -> bool {
+        rd32(self.gicd + GICD_TYPER) & GICD_TYPER_LPIS != 0
+    }
+
+    /// INTID bits the distributor supports (`GICD_TYPER.IDbits` + 1).
+    pub fn id_bits(&self) -> u32 {
+        ((rd32(self.gicd + GICD_TYPER) >> 19) & 0x1f) + 1
+    }
+
+    /// `rd` supports physical LPIs and has them off (they can be set up).
+    pub fn rd_has_lpis(&self, rd: Redistributor) -> bool {
+        rd64(rd.base + GICR_TYPER) & GICR_TYPER_PLPIS != 0
+            && rd32(rd.base + GICR_CTLR) & GICR_CTLR_ENABLE_LPIS == 0
+    }
+
+    /// `rd`'s processor number (`GICR_TYPER.Processor_Number`), the ITS's
+    /// collection target when it does not use physical addresses.
+    pub fn processor_number(&self, rd: Redistributor) -> u32 {
+        ((rd64(rd.base + GICR_TYPER) >> 8) & 0xffff) as u32
+    }
+
+    /// Programs `rd`'s LPI configuration and pending tables and enables
+    /// LPIs. Returns whether the redistributor accepted shareable memory
+    /// (else the caller cleans the configuration table's cache lines).
+    pub fn enable_lpis(&self, rd: Redistributor, propbaser: u64, pendbaser: u64) -> bool {
+        wr64(rd.base + GICR_PROPBASER, propbaser);
+        let shared = (rd64(rd.base + GICR_PROPBASER) >> 10) & 0b11 != 0;
+        wr64(rd.base + GICR_PENDBASER, pendbaser);
+        crate::cpu::dsb_sy();
+        let ctlr = rd32(rd.base + GICR_CTLR);
+        wr32(rd.base + GICR_CTLR, ctlr | GICR_CTLR_ENABLE_LPIS);
+        crate::cpu::dsb_sy();
+        shared
     }
 
     /// Enables SGI/PPI `intid` (< 32) on the CPU owning `rd`.

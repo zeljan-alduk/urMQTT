@@ -1684,8 +1684,8 @@ grow_online() {
     telemetry='telemetry: log recovered in [0-9]+ ms: 600 record\(s\)'
     mkimg "$serve" "serve"
     for accel in $ACCELS; do
-        # aarch64 TCG gives the guest a GICv3 with an ITS, which the kernel does not use
-        # for MSI-X (HVF has the GICv2m frame): the disk is polled, no resize notification.
+        # aarch64 TCG gives the guest a GICv3 with an ITS, which the kernel uses for the NIC only
+        # (ADR-270; HVF has the GICv2m frame): the disk is polled, no resize notification.
         if [[ $ARCH == aarch64 && $accel == tcg ]]; then
             echo "  - grow-online [tcg] skipped: no MSI-X (ITS) on aarch64 TCG, the grown disk is taken up at the next boot"
             continue
@@ -2761,8 +2761,8 @@ websocket() {
 }
 
 # NOW-13, ADR-270: the NIC's receive interrupt. The serving image with the default configuration says which
-# wake-up its dispatcher uses (the MSI-X interrupt where the platform has an MSI target: GICv2m under HVF and
-# on a GICv2, the local APIC on x86; polling on aarch64 TCG, whose GICv3 has only an ITS) and carries MQTT
+# wake-up its dispatcher uses (the MSI-X interrupt: GICv2m under HVF and on a GICv2, the GICv3 ITS under TCG,
+# the local APIC on x86) and carries MQTT
 # traffic with it; the same with devices.virtio_net_interrupt = "off" polls and carries it too. The
 # dispatcher's statistics show the receive interrupts it took, and none when it polls.
 net_irq() {
@@ -2808,10 +2808,9 @@ net_irq() {
             if [[ $mode == off ]]; then
                 expect=('net: receive wake-up: polling every 200 us while connections exist \(devices.virtio_net_interrupt = "off"\)'
                     'dataplane: core 0: .* 0 receive interrupt\(s\)' 'NOT:dataplane: core 0: .* [1-9][0-9]* receive interrupt\(s\)')
-            elif [[ $ARCH == aarch64 && $accel == tcg ]]; then
-                expect=('net: receive wake-up: polling every 200 us while connections exist \(no MSI target')
             else
-                expect=('net: receive wake-up: interrupt \(MSI-X via (GICv2m SPI|local APIC vector) [0-9]+, to core 0\); no polling while asleep'
+                [[ $ARCH == aarch64 && $accel == tcg ]] && expect=('msi: GICv3 ITS at 0x8080000, device table for requester IDs')
+                expect+=('net: receive wake-up: interrupt \(MSI-X via (GICv2m SPI|GICv3 ITS LPI|local APIC vector) [0-9]+, to core 0\); no polling while asleep'
                     'dataplane: core 0: .* [1-9][0-9]* receive interrupt\(s\)' 'NOT:the receive interrupt never arrived')
             fi
             check "net-irq $mode [$accel]" "$log" "$status" "${expect[@]}" \

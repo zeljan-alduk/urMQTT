@@ -433,8 +433,15 @@ pub fn map_stacks(cpu: u64) -> Result<(), MapError> {
 /// Zeroed, physically contiguous frames for device DMA, reached through
 /// the HHDM: (virtual address, physical address, bytes).
 pub fn dma_alloc(bytes: usize) -> Option<(usize, u64, usize)> {
+    dma_alloc_aligned(bytes, 1)
+}
+
+/// [`dma_alloc`] aligned to `align` bytes (a multiple of the page size, or
+/// less): the GICv3 ITS's tables (ADR-270).
+pub fn dma_alloc_aligned(bytes: usize, align: usize) -> Option<(usize, u64, usize)> {
     let pages = bytes.div_ceil(PAGE_SIZE as usize).max(1);
-    let pa = FRAMES.lock().as_mut()?.alloc_contiguous(pages, 1)?;
+    let align = align.div_ceil(PAGE_SIZE as usize).max(1);
+    let pa = FRAMES.lock().as_mut()?.alloc_contiguous(pages, align)?;
     let va = (hhdm() + pa) as usize;
     let len = pages * PAGE_SIZE as usize;
     // SAFETY: freshly allocated RAM, mapped RW in the HHDM, owned by the caller.

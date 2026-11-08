@@ -36,6 +36,12 @@ pub mod msi {
     pub use super::imp::msi::{Frame, TYPER};
 }
 
+/// The GICv3 ITS: MSIs as LPIs (ADR-270).
+#[cfg(target_os = "none")]
+pub mod its {
+    pub use super::imp::its::{FRAME_LEN, Its, ItsError, LPI_BASE, Mem};
+}
+
 /// Memory tagging (FEAT_MTE2; ADR-174).
 #[cfg(target_os = "none")]
 pub mod mte {

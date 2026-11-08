@@ -42,12 +42,22 @@ const NIC_BACKLOG: usize = 4096;
 const POOL_IDLE: usize = 32;
 /// How often the dispatcher polls the NIC while it sleeps and connections exist.
 const NIC_POLL_NS: u64 = 200_000;
-/// What the NIC's MSI-X message targets (ADR-270's boot line).
-#[cfg(target_arch = "aarch64")]
-const MSI_NAME: &str = "GICv2m SPI";
-#[cfg(target_arch = "x86_64")]
-const MSI_NAME: &str = "local APIC vector";
 const POOL_IDLE_MS: u64 = 1_000;
+
+/// What the NIC's MSI-X message targets (ADR-270's boot line): an LPI of
+/// the GICv3 ITS (8192 and up) or a GICv2m SPI; a local APIC vector on x86.
+#[cfg(target_arch = "aarch64")]
+fn msi_name(intid: u32) -> &'static str {
+    if intid >= 8192 {
+        "GICv3 ITS LPI"
+    } else {
+        "GICv2m SPI"
+    }
+}
+#[cfg(target_arch = "x86_64")]
+fn msi_name(_intid: u32) -> &'static str {
+    "local APIC vector"
+}
 /// Messages taken from each peer per pass.
 const MSG_BURST: usize = 256;
 /// A serving dispatcher handles frames for its own connections this long
@@ -762,7 +772,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             crate::irq::enable_spi(spi, 0);
             info!(
                 "net: receive wake-up: interrupt (MSI-X via {} {spi}, to core 0); no polling while asleep",
-                MSI_NAME
+                msi_name(spi)
             );
         }
         _ => {

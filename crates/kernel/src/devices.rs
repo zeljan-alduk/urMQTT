@@ -706,8 +706,22 @@ fn setup_msix<C: ConfigSpace>(
     bdf: Bdf,
     frame: Option<&mut msi::Frame>,
 ) -> Result<u32, Why> {
+    setup_msix_with(cfg, bdf, || {
+        let frame = frame.ok_or(Why::NoMsiSource)?;
+        let spi = frame.alloc().ok_or(Why::NoVector)?;
+        let (address, data) = frame.compose(spi);
+        Ok((spi, address, data))
+    })
+}
+
+/// Points MSI-X vector 0 of `bdf` at the message `source` hands out (the
+/// interrupt number, address and data) and enables MSI-X.
+fn setup_msix_with<C: ConfigSpace>(
+    cfg: &mut C,
+    bdf: Bdf,
+    source: impl FnOnce() -> Result<(u32, u64, u32), Why>,
+) -> Result<u32, Why> {
     let info = pci::msix(cfg, bdf).ok_or(Why::NoMsix)?;
-    let frame = frame.ok_or(Why::NoMsiSource)?;
     let Some(Bar::Memory { base, .. }) = pci::bar(cfg, bdf, info.table_bar) else {
         return Err(Why::TableUnmapped);
     };
@@ -716,8 +730,7 @@ fn setup_msix<C: ConfigSpace>(
         u64::from(info.table_size) * 16,
     )
     .map_err(|_| Why::TableUnmapped)?;
-    let spi = frame.alloc().ok_or(Why::NoVector)?;
-    let (address, data) = frame.compose(spi);
+    let (id, address, data) = source()?;
     let entry = pci::msix_entry(address, data, false);
     for (i, w) in entry.iter().enumerate() {
         // SAFETY: entry 0 of the just-mapped MSI-X table.
@@ -725,7 +738,93 @@ fn setup_msix<C: ConfigSpace>(
     }
     pci::msix_enable(cfg, bdf, &info, true);
     pci::enable(cfg, bdf, pci::CMD_INTX_DISABLE);
-    Ok(spi)
+    Ok(id)
+}
+
+/// The GICv3 ITS for the NIC's MSI (ADR-270), set up on first use: when
+/// the platform has an ITS and no GICv2m frame (QEMU TCG, KVM such as the
+/// netcup ARM VPS). Only the NIC uses it: its fallback (polling after missed
+/// wake-ups) covers a platform whose ITS maps devices differently, which the
+/// boot disk's self-test, which requires its interrupts, would not.
+#[cfg(target_arch = "aarch64")]
+struct ItsSource {
+    its: u64,
+    gicr: u64,
+    max_device: u32,
+    state: Option<Result<urmqtt_arch::its::Its, ()>>,
+}
+
+#[cfg(target_arch = "aarch64")]
+impl ItsSource {
+    fn new(platform: &PlatformInfo, functions: &pci::Functions) -> Option<Self> {
+        let i = platform.interrupts?;
+        let urmqtt_platform::GicCpu::V3 { gicr } = i.gic.cpu else {
+            return None;
+        };
+        let max_device = functions
+            .iter()
+            .map(|f| requester_id(f.bdf))
+            .max()
+            .unwrap_or(0);
+        Some(Self {
+            its: i.gic.its?,
+            gicr: gicr.0,
+            max_device,
+            state: None,
+        })
+    }
+
+    /// Maps `bdf`'s event 0 to an LPI: (LPI, address, data).
+    fn map(&mut self, bdf: Bdf) -> Result<(u32, u64, u32), Why> {
+        let (its, gicr, max) = (self.its, self.gicr, self.max_device);
+        let state = self.state.get_or_insert_with(|| match irq::its_init(its, gicr, max) {
+            Ok(i) => {
+                info!("msi: GICv3 ITS at {its:#x}, device table for requester IDs 0..={max:#x}, LPIs to core 0");
+                Ok(i)
+            }
+            Err(e) => {
+                warn!("msi: the GICv3 ITS at {its:#x} could not be set up: {e}");
+                Err(())
+            }
+        });
+        let its = state.as_mut().map_err(|()| Why::ItsFailed)?;
+        its.map_msi(requester_id(bdf), &mut irq::its_mem)
+            .map_err(|e| {
+                warn!("msi: the ITS refused {bdf}: {e:?}");
+                Why::ItsFailed
+            })
+    }
+}
+
+/// The NIC's MSI-X vector: the GICv2m frame or the local APIC as for the
+/// disks, else (aarch64) the GICv3 ITS.
+#[cfg(target_arch = "aarch64")]
+fn net_msix<C: ConfigSpace>(
+    cfg: &mut C,
+    bdf: Bdf,
+    frame: &mut Option<msi::Frame>,
+    its: &mut Option<ItsSource>,
+) -> Result<u32, Why> {
+    match (frame.as_mut(), its.as_mut()) {
+        (None, Some(its)) => setup_msix_with(cfg, bdf, || its.map(bdf)),
+        (frame, _) => setup_msix(cfg, bdf, frame),
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn net_msix<C: ConfigSpace>(
+    cfg: &mut C,
+    bdf: Bdf,
+    frame: &mut Option<msi::Frame>,
+    _its: &mut Option<()>,
+) -> Result<u32, Why> {
+    setup_msix(cfg, bdf, frame.as_mut())
+}
+
+/// A PCI function's requester ID: the ITS device ID on QEMU's `virt`.
+#[cfg(target_arch = "aarch64")]
+fn requester_id(bdf: Bdf) -> u32 {
+    (u32::from(bdf.bus) << 8) | (u32::from(bdf.dev) << 3) | u32::from(bdf.func)
 }
 
 /// Enumerates PCIe, maps and initialises the virtio devices and seeds the
@@ -910,6 +1009,10 @@ fn probe_pci(
     };
     let mut v2m = msi_frame(platform);
     let functions = pci::enumerate(&ecam, bus_start, bus_end);
+    #[cfg(target_arch = "aarch64")]
+    let mut its = ItsSource::new(platform, &functions);
+    #[cfg(target_arch = "x86_64")]
+    let mut its: Option<()> = None;
     info!("pci: {how}, {} function(s)", functions.len());
     info!(
         "virtio: drivers in this image: {}",
@@ -1180,7 +1283,7 @@ fn probe_pci(
                 {
                     Err(Why::Configured)
                 } else {
-                    setup_msix(&mut ecam, f.bdf, v2m.as_mut())
+                    net_msix(&mut ecam, f.bdf, &mut v2m, &mut its)
                 };
                 let net = VirtioNet::new_with_msix(t, env, msix.ok().map(|_| 0))?;
                 devs.net_wake = match msix {

@@ -22,6 +22,19 @@ pub type Handler = fn(u32);
 
 const MAX_INTID: usize = 1020;
 static HANDLERS: [AtomicUsize; MAX_INTID] = [const { AtomicUsize::new(0) }; MAX_INTID];
+/// LPIs (GICv3 ITS, ADR-270) from 8192: a few, for the NIC.
+const LPI_FIRST: u32 = 8192;
+const MAX_LPIS: usize = 16;
+static LPI_HANDLERS: [AtomicUsize; MAX_LPIS] = [const { AtomicUsize::new(0) }; MAX_LPIS];
+
+/// The handler slot of `intid`: an SPI/PPI/SGI, or one of the first LPIs.
+fn slot(intid: u32) -> Option<&'static AtomicUsize> {
+    if intid >= LPI_FIRST {
+        LPI_HANDLERS.get((intid - LPI_FIRST) as usize)
+    } else {
+        HANDLERS.get(intid as usize)
+    }
+}
 /// The platform's interrupt controller (a GIC, or the local and I/O APICs).
 static GIC: OnceCell<Controller> = OnceCell::new();
 
@@ -121,6 +134,53 @@ pub fn init_apic(
     ))
 }
 
+/// Brings up the GICv3 ITS at physical `its_pa` for MSIs (ADR-270), on the
+/// boot CPU (collection 0 targets it), with a device table covering
+/// requester IDs up to `max_device`. `gicr_pa` is the redistributor
+/// region's physical address. Must run before the page tables lock.
+#[cfg(target_arch = "aarch64")]
+pub fn its_init(
+    its_pa: u64,
+    gicr_pa: u64,
+    max_device: u32,
+) -> Result<urmqtt_arch::its::Its, alloc::string::String> {
+    use urmqtt_arch::its::{FRAME_LEN, Its};
+    let g = GIC
+        .get()
+        .and_then(Controller::v3_gic)
+        .ok_or("not a GICv3")?;
+    let Some(Local::V3(rd)) = smp::this().gic.get().copied() else {
+        return Err("no redistributor for this CPU".into());
+    };
+    let base = memory::map_mmio(its_pa, FRAME_LEN).map_err(|_| "cannot map the ITS frames")?;
+    let rd_pa = gicr_pa + rd.offset(g) as u64;
+    // SAFETY: `base` maps the ITS frames for good; `rd` is this (the boot)
+    // CPU's redistributor and nothing enabled its LPIs; the memory comes
+    // fresh and zeroed from the DMA allocator and is never freed.
+    unsafe {
+        Its::init(
+            g,
+            rd,
+            rd_pa,
+            base as usize,
+            its_pa,
+            max_device,
+            &mut its_mem,
+        )
+    }
+    .map_err(|e| alloc::format!("{e:?}"))
+}
+
+/// Memory for the ITS's tables: zeroed, contiguous, aligned, kept for good.
+#[cfg(target_arch = "aarch64")]
+pub fn its_mem(bytes: usize, align: usize) -> Option<urmqtt_arch::its::Mem> {
+    crate::vm::dma_alloc_aligned(bytes, align).map(|(va, pa, len)| urmqtt_arch::its::Mem {
+        va,
+        pa,
+        len,
+    })
+}
+
 /// True on a GICv2.
 #[cfg(target_arch = "aarch64")]
 pub fn is_v2() -> bool {
@@ -133,7 +193,7 @@ pub fn max_cpus() -> usize {
 }
 
 pub fn register(intid: u32, h: Handler) {
-    if let Some(slot) = HANDLERS.get(intid as usize) {
+    if let Some(slot) = slot(intid) {
         // Release: a core that observes the pointer may call it.
         slot.store(h as usize, Ordering::Release);
     }
@@ -180,9 +240,7 @@ pub fn dispatch() {
         }
         let intid = ack.intid;
         // Acquire: pairs with the Release in `register`.
-        let raw = HANDLERS
-            .get(intid as usize)
-            .map_or(0, |s| s.load(Ordering::Acquire));
+        let raw = slot(intid).map_or(0, |s| s.load(Ordering::Acquire));
         if raw == 0 {
             // Relaxed: statistics only.
             UNHANDLED_COUNT.fetch_add(1, Ordering::Relaxed);

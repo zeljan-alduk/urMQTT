@@ -28,9 +28,11 @@ pub enum Why {
     Configured,
     /// The device has no MSI-X capability.
     NoMsix,
-    /// The platform offers no MSI target this kernel drives (aarch64: a
-    /// GICv3 with an ITS and no GICv2m frame).
+    /// The platform offers no MSI target (aarch64: neither a GICv2m frame
+    /// nor a GICv3 ITS).
     NoMsiSource,
+    /// The GICv3 ITS could not be set up (the kernel logs why).
+    ItsFailed,
     /// Every MSI vector or SPI of the platform is already in use.
     NoVector,
     /// The MSI-X table could not be mapped.
@@ -47,7 +49,8 @@ impl Why {
         match self {
             Self::Configured => "devices.virtio_net_interrupt = \"off\"",
             Self::NoMsix => "the device has no MSI-X",
-            Self::NoMsiSource => "no MSI target on this platform (a GICv3 ITS is not driven)",
+            Self::NoMsiSource => "no MSI target on this platform (no GICv2m frame, no GICv3 ITS)",
+            Self::ItsFailed => "the GICv3 ITS could not be set up",
             Self::NoVector => "no free MSI vector",
             Self::TableUnmapped => "the MSI-X table could not be mapped",
             Self::Rejected => "the device refused the MSI-X vector",
@@ -225,6 +228,7 @@ mod tests {
             Why::Configured,
             Why::NoMsix,
             Why::NoMsiSource,
+            Why::ItsFailed,
             Why::NoVector,
             Why::TableUnmapped,
             Why::Rejected,

@@ -16,6 +16,7 @@
 pub mod crc;
 pub mod esr;
 pub mod features;
+pub mod its;
 pub mod msi;
 pub mod paging;
 

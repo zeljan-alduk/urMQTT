@@ -35,9 +35,10 @@ pub struct Ack {
 }
 
 impl Ack {
-    /// No interrupt is pending (or a special INTID): stop dispatching.
+    /// No interrupt is pending (or a special INTID): stop dispatching. LPIs
+    /// (8192 and up, ADR-270) are interrupts.
     pub fn is_none(&self) -> bool {
-        self.intid >= SPURIOUS
+        (SPURIOUS..crate::its::LPI_BASE).contains(&self.intid)
     }
 
     /// The controller reported a spurious interrupt (INTID 1023).
@@ -74,6 +75,14 @@ impl Controller {
         match self {
             Self::V3(g) => g.lines(),
             Self::V2(g) => g.lines(),
+        }
+    }
+
+    /// The GICv3, for the ITS (ADR-270).
+    pub fn v3_gic(&self) -> Option<&Gicv3> {
+        match self {
+            Self::V3(g) => Some(g),
+            Self::V2(_) => None,
         }
     }
 
