@@ -319,10 +319,14 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
   architectures. Open: exactly once across a broker crash while the client is connected (AUDIT A271-W1).
 
 **NEXT-3. MQTT 5.0.** L.
-- Status: **part 1: codec + design done** (`urmqtt_mqtt::v5`, ADR-273, `docs/MQTT5-CONFORMANCE.md`); part 2 (version
-  negotiation, reason codes, session/message expiry, will delay, flow control, packet size, topic aliases, keep alive,
-  assigned id, subscription options) after NEXT-2; part 3 (shared subscriptions, subscription identifiers,
-  conformance suite). D-13 answered: full 5.0 in phases.
+- Status: **part 1: codec + design done** (`urmqtt_mqtt::v5`, ADR-273, `docs/MQTT5-CONFORMANCE.md`); **part 2: done
+  (ADR-274)**: version negotiation on every listener, CONNACK and acknowledgement reason codes, server DISCONNECT,
+  session expiry (NEXT-4), message expiry, will delay, Receive Maximum and Maximum Packet Size both ways, topic
+  aliases (client to broker), Server Keep Alive, assigned id, subscription options, property forwarding across
+  versions and cores, enhanced authentication refused (0x8C); store schema 4, configuration format 12, smoke group
+  `mqtt5`, the Paho interoperability suite (`scripts/mqtt5-conformance.sh`, results in docs/MQTT5-CONFORMANCE.md).
+  Part 3 (shared subscriptions, subscription identifiers, enhanced auth if wanted; ADR-275 onwards) is open. D-13
+  answered: full 5.0 in phases.
 - What: protocol level 5 alongside 3.1.1: properties, reason codes, session and message expiry, topic aliases,
   response topic and correlation data, user properties, flow control (receive maximum); shared subscriptions as a
   separate decision.
@@ -332,9 +336,12 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
   per-connection figure (M15) must be re-established. Dependency: NEXT-2 (QoS 2 is part of the 5.0 spec).
 - Verify: an MQTT 5 conformance suite (to be chosen), mosquitto 5 clients, re-measured bytes per idle connection.
 
-**NEXT-4. Expiry of offline persistent sessions.** S to M.
-- Status: designed into NEXT-3 part 2 (ADR-273 rule 4: `limits.max_session_expiry_s` for both versions, the
-  session row gains `expiry_s` and `offline_since`).
+**NEXT-4. Expiry of offline persistent sessions.** S to M. **Done with NEXT-3 part 2 (ADR-274).**
+- Status: done. Every session has a Session Expiry Interval; 3.1.1 persistent sessions get
+  `limits.default_session_expiry_s` (30 days), capped by `limits.max_session_expiry_s`; offline sessions expire in a
+  bounded sweep (64 per 100 ms tick), sessions that expired while the broker was down are dropped at boot; the
+  session row has `expiry_s` and `offline_since` (schema 4). Verified by host tests at the bound, the QoS 2 reference
+  model with time and restarts, the ACL oracle, and the smoke group `mqtt5` across a restart.
 - What: a configured maximum age for an offline persistent session and its queue (3.1.1 has none; 5.0 brings
   Session Expiry Interval).
 - Why: I found no expiry in the broker (`Broker::tick` handles keepalive only); sessions are bounded by the number

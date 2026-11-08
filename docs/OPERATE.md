@@ -82,6 +82,12 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/messages/dropped/qos1_queue_full`, `publish_rate` | QoS 1 messages not queued (the session's queue was full), publishes refused by the per-identity rate limit |
 | `$SYS/broker/messages/qos2/received`, `duplicates` | QoS 2 PUBLISHes received with a new packet id; those whose id was still held (no PUBREL yet), answered with PUBREC again and not delivered again (ADR-271) |
 | `$SYS/broker/messages/qos2/completed`, `inbound_full` | QoS 2 deliveries to clients completed with PUBCOMP; connections closed because the client held more QoS 2 ids awaiting PUBREL than `max(limits.max_inflight_qos1, 64)` (normally 0) |
+| `$SYS/broker/clients/connected/v311`, `v5` | Connected clients by protocol version (ADR-274) |
+| `$SYS/broker/messages/expired`, `messages/dropped/too_large` | Messages not delivered because their MQTT 5.0 Message Expiry Interval had passed (from a queue, a retained replay, a restore); deliveries dropped because they exceeded a 5.0 client's Maximum Packet Size |
+| `$SYS/broker/sessions/expired`, `sessions/expiring` | Sessions ended by their Session Expiry Interval (both versions; a 3.1.1 persistent session has `limits.default_session_expiry_s`, 30 days), also those that ran out while the broker was down; offline sessions whose expiry runs now |
+| `$SYS/broker/wills/delayed`, `wills/pending` | Wills armed with a 5.0 Will Delay Interval since boot; armed now |
+| `$SYS/broker/disconnects/sent/0x8e` ... `0x9a`, `other` | DISCONNECT packets the broker sent to 5.0 clients, by reason code: 0x81 malformed, 0x82 protocol error, 0x83 a limit (User Properties), 0x8d keep alive, 0x8e session taken over, 0x8f/0x90 topic filter/name, 0x93 Receive Maximum, 0x94 topic alias, 0x95 packet too large, 0x98 administrative (the allowlist), 0x9a retain not available |
+| `$SYS/broker/connections/refused/v5/0x84` ... `other` | 5.0 CONNECT packets refused, by CONNACK reason code: 0x84 MQTT 5.0 disabled (`mqtt5.enabled = false`), 0x85 client id, 0x86 user name or password, 0x87 not authorized, 0x8c an Authentication Method (enhanced authentication is not offered), 0x9a a retained Will without retain, 0x81/0x82 a malformed CONNECT |
 | `$SYS/broker/frames/dropped/steer`, `worker_tx`, `nic` | network frames dropped because a worker core, the dispatcher, or the NIC queue plus the dispatcher's 4 096-frame backlog was full; TCP retransmits them. Normally 0 |
 | `$SYS/broker/handshakes/started` | connections admitted (TCP established, admission said yes) |
 | `$SYS/broker/handshakes/done`, `failed`, `timed_out` | TLS handshakes completed, ended before completing, not finished within 10 s |
@@ -124,7 +130,8 @@ outward.
 
 **Query.** Publish anything (an empty payload will do) to `$SYS/query/info`;
 the answer is one JSON document on `$SYS/query/info/response` (subscribe
-first). MQTT 3.1.1 has no Response Topic property, so the reply topic is fixed:
+first). The reply topic is fixed (an MQTT 5.0 operator client may send a Response Topic since ADR-274, but the
+console does not use it: replies stay on the fixed topic for both versions):
 
 ```json
 {"version":"0.4.2","uptime_s":42,"arch":"aarch64","cpu":{"cores":4,"busy":[2,1,0,0]},
@@ -151,6 +158,26 @@ the core). The statsd names are `handshakes.{started,done,failed,timed_out,slow,
 (counters), `handshakes.{in_flight,in_flight_max,latency_max_ms}` (gauges) and
 `frames.dropped.{steer,worker_tx,nic_tx,nic_tx_local}` (a frame lost to a full ring
 or NIC queue is retransmitted by TCP a second or more later).
+
+## MQTT 5.0 (ADR-274)
+
+Every listener speaks MQTT 3.1.1 and 5.0; each connection keeps the version of its CONNECT. Things an operator
+sees differently with 5.0 clients:
+
+- **Reason codes.** A refused publish is acknowledged with 0x87 (not authorized) or 0x97 (the publish rate); a
+  refused subscription with 0x87, 0x97 (the subscription limit), 0x9E (`$share/`) or 0xA1 (a Subscription
+  Identifier); a closed connection gets a DISCONNECT that names the reason (`disconnects/sent/...` above). A 3.1.1
+  client gets what it always got (acknowledged and dropped, 0x80, a silent close).
+- **Session expiry for everybody.** A persistent session expires when it has been offline longer than its Session
+  Expiry Interval: what a 5.0 client asked for, at most `limits.max_session_expiry_s`, or for a 3.1.1 client with
+  `clean_session = 0` `limits.default_session_expiry_s`; both are 30 days by default. Devices that sleep longer need
+  the two raised (4 294 967 295 never expires). The boot log reports per shard how many sessions ran out while the
+  broker was down (`mqtt: shard N/M ready: ... (K expired while down, dropped)`).
+- **Message expiry** a publisher sets is honoured in queues, retained messages and across a restart;
+  `limits.max_message_expiry_s` caps it. **Will delay** holds a Will back for its interval (at most the session's
+  expiry) and drops it when the client is back in time.
+- **What is not there yet:** shared subscriptions, subscription identifiers and enhanced authentication (part 3);
+  the broker never sends topic aliases. `mqtt5.enabled = false` refuses 5.0 clients with CONNACK 0x84.
 
 ## The console (O2)
 

@@ -126,7 +126,8 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | ACL (`devices/{id}/#` by default), service identities, per-device rate limits | ✅ M9 |
 | | Operator role: retained `$SYS/broker/#` statistics every 10 s, `$SYS/query/info`, a console over MQTT (`$SYS/console/{out,in}`: log lines, `help`, `status`, `log level`, `reboot`), mTLS only, audit-logged | ✅ O1, O2 |
 | | MQTT over secure WebSocket (`wss://.../mqtt`, subprotocol `mqtt`) for browsers: a bounded HTTP Upgrade, a streaming RFC 6455 codec without reassembly, client certificate or a password inside TLS, an origin allowlist; Autobahn\|Testsuite clean | ✅ NEXT-5 (ADR-272) |
-| | MQTT 5.0 | 📋 later |
+| | MQTT 5.0 beside 3.1.1 on every listener (TLS, plaintext, WebSocket): properties forwarded (user properties, content type, response topic and correlation data, payload format), reason codes on every acknowledgement and server DISCONNECT, session expiry (also for 3.1.1 persistent sessions: 30 days by default), message expiry, will delay, Receive Maximum and Maximum Packet Size both ways, topic aliases (client to broker), subscription options (No Local, Retain As Published, Retain Handling), assigned client id, Server Keep Alive; Paho interoperability suite and Mosquitto `-V mqttv5` clients | ✅ NEXT-3 part 2 (ADR-273, ADR-274) |
+| | MQTT 5.0 shared subscriptions (`$share/`), subscription identifiers, enhanced authentication (AUTH): refused cleanly (SUBACK 0x9E / 0xA1, CONNACK 0x8C) | 📋 NEXT-3 part 3 |
 | **Storage** | SQLite over a raw-disk VFS (WAL, exclusive), quick_check at boot; since H6 SQLite runs as an unprivileged program (EL0 / ring 3), not in the kernel | ✅ M11, ✅ H6 |
 | | One disk: data in a partition of the boot disk (virtio-blk or virtio-scsi), created on the first boot, crash-safe; other disks never touched | ✅ S1 |
 | | `urmqtt-disk`: offline info, verify, export (SQLite, telemetry), import devices, kernel update | ✅ S1 |
@@ -262,6 +263,9 @@ subscription; heap blocks including allocator rounding, frame-buffer pool exclud
 | 960 | 531 B |
 | 9 922 | 494 B |
 | 10 197 | 474 B |
+
+An MQTT 5.0 connection keeps a 24-byte state box and its connection's side box for its life: at 2000 connections
+it measured 670 B against 509 B for 3.1.1 on the same kernel (ADR-274).
 
 The frame-buffer pool is a fixed ~2 MiB (≈ 200 B per connection at 10k, ≈ 2 B at 1M). 100k and 1M
 connections could not be generated on the development host. QEMU user networking on macOS stopped
@@ -1306,7 +1310,7 @@ after it, and the bare-metal drivers are the commercial edition's scope ([docs/E
 
 riscv64 is a later, separate step (PROMPT-x86_64.md §9).
 
-Later: MQTT 5.0, IPv6, cold-session compression, an export bridge,
+Later: MQTT 5.0 shared subscriptions and subscription identifiers, IPv6, cold-session compression, an export bridge,
 and ACPI-only validation on real ARM clouds.
 
 ## Contributing

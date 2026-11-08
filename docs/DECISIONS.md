@@ -3230,3 +3230,135 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
 - **Not done here.** Any broker or kernel change. The kernel does not call the 5.0 codec, so the image does not
   grow: release kernels with and without `pub mod v5;` are the same size (aarch64 3 573 176 B, `.text` +4 B of
   layout noise; x86_64 3 732 016 B, identical sections).
+
+## ADR-274 — MQTT 5.0 part 2: broker semantics as built, and where they differ from ADR-273 (NEXT-3, NEXT-4)
+
+- **Status:** Accepted (part 2 of NEXT-3; NEXT-4 closes with it). Implements ADR-273 rules 1 to 15 and 18 to 21 except
+  the part-3 rows (shared subscriptions, subscription identifiers, enhanced authentication), and records every
+  departure from it. ADR-275 to 278 stay reserved for part 3.
+- **Context.** ADR-273 decided the broker side of MQTT 5.0 and left it to part 2 to build. This ADR is what was
+  built, the decisions ADR-273 left open (marked *decided*) and what differs from its text (marked *deviation*).
+
+### What is built
+
+1. **Version-neutral core.** `crates/broker/src/v5.rs` holds the 5.0 shim: `ConnectIn`, `WillIn`, `PublishIn` (the
+   version-neutral events of rule 1), the 5.0-only handlers (`on_connect5`, `on_publish5`, `handle5`,
+   `on_disconnect5`, `reject5`, `send5`, `close5`) and `V5State` (24 B: client Receive Maximum, Maximum Packet Size,
+   Request Problem Information, whether the CONNECT asked for expiry 0, the alias table pointer). The first packet's
+   protocol level picks the decoder; a connection that negotiated 5.0 keeps its `V5State` in the connection's
+   `Extra` box and uses the 5.0 codec both ways. 3.1.1 is byte-identical: its tests are unchanged except one that
+   sent a level-5 CONNECT (now levels 3, 6 and 255), and `qos01_allocs` still counts 9 allocations per QoS 0 and 15
+   per QoS 1 message.
+2. **Mixed fan-out** (rule 2). `MsgInner` gains `props: Option<Box<[u8]>>` (the PUBLISH block minus Topic Alias,
+   Subscription Identifier and Message Expiry Interval) and `expires_ms: u64`; the cross-core route carries the same
+   `Arc`, so a 3.1.1 message costs no allocation and no copy (`MsgInner` is 56 B instead of 32, inside the same `Arc`
+   allocation). A 5.0 subscriber gets `Properties::Forward` plus the remaining expiry; a 3.1.1 one topic and payload.
+3. **Session expiry** (rule 4, NEXT-4). `Session.clean: bool` became `expiry_s: u32` (the session stays 64 B).
+   0 ends the session at close; `u32::MAX` never expires and is granted only when `limits.max_session_expiry_s` is
+   `u32::MAX`; 3.1.1 `clean_session = 0` gets `limits.default_session_expiry_s` (*deviation*: a key of its own, both
+   default 30 days, the default at most the maximum; ADR-273 used the maximum). Bootstrap, plaintext and WebSocket
+   password sessions: a 5.0 client is granted 0 and told so in CONNACK, a 3.1.1 one is refused as before. A
+   DISCONNECT may change the interval, from 0 to non-zero is 0x82.
+4. **Expiry deadlines** (*deviation*: not the timer wheel). Offline sessions with a finite expiry and Wills armed
+   with a delay are kept in two ordered sets of (deadline, session) with the reverse map (`crates/broker/src/expiry.rs`):
+   a session that comes back cancels its deadline by its id, so the 64-byte session needs no `TimerId` (it has no room
+   left), and only waiting sessions pay (two tree entries each). `Broker::tick` (every 100 ms) ends at most 64 of each
+   (`SWEEP_PER_TICK`), so an expiry storm is spread over ticks within the watchdog's budget.
+5. **Expired while the broker was down** (*decided*: at boot, not at first touch). The store records the wall-clock
+   time a session went offline (`SessionOffline`, cleared by `SessionUpsert` when it is back); at restore a session
+   whose interval has run is deleted from the store and not loaded (counted, `mqtt: shard N/M ready: ... (K expired
+   while down, dropped)`). Reasons: memory and the store are freed at once, no lazily-expired state needs a check on
+   every lookup, and boot is the one moment without traffic and watchdog pressure. A session stored before schema 4
+   has no recorded expiry: the 3.1.1 default applies from the restore. Without a wall clock the downtime is not
+   counted (the latest recorded offline time stands for "now").
+6. **Message expiry** (rule 5). An absolute deadline on the broker's ms clock beside the message; each delivery
+   states the remaining seconds (rounded up, never 0); a message past it is dropped from queues, retained replays and
+   restores (counted). An interval of 0 means "no expiry" (*decided*, as Mosquitto). `limits.max_message_expiry_s`
+   caps an explicit interval only (*decided*: a message without one, and every 3.1.1 message, never expires). Retained
+   messages expire lazily on read (an expired one found by a replay is cleared there and in the store) and at restore
+   (*deviation*: no periodic sweep; an expired retained message nobody reads keeps its bytes until it is replaced or
+   the broker restarts). The store keeps the deadline in wall-clock seconds.
+7. **Will delay** (rule 6). An armed Will lives in a side map keyed by session (*deviation*: not in the session),
+   published at `min(delay, session expiry)` or when the session ends (expiry, a clean-start takeover). A reconnect
+   within the delay cancels it; on a takeover that resumes the session the old connection's delayed Will is dropped
+   at the takeover. DISCONNECT 0x00 discards the Will; every other code keeps it (0x04 asks for it, §3.1.2.5). The
+   Will's Message Expiry runs from its publication. Wills are not persisted (as in 3.1.1).
+8. **Flow control** (rules 7, 8). The window to a 5.0 client is `min(max_inflight, its Receive Maximum)`, QoS 1 and 2
+   together; *deviation found by the ACL oracle*: after a reconnect the flights owed a resend are marked unsent and
+   resent only as the new connection's Receive Maximum allows (`Flight.sent`, in the padding of the 16-byte flight);
+   a 3.1.1 client gets them all at once as before. Inbound, only QoS 2 ids awaiting PUBREL count (QoS 1 is
+   acknowledged on receipt): one above `mqtt5.receive_maximum` is DISCONNECT 0x93; a QoS 2 PUBLISH refused with a
+   failure code (0x87, 0x97) ends its flow and holds no id (§4.3.3). A delivery above the client's Maximum Packet
+   Size is dropped as if sent (also an in-flight one at resend), counted `dropped_too_large`; a reason string that
+   would not fit a CONNACK or DISCONNECT is left out.
+9. **Topic aliases** (rule 9), client to server only; the table (`Box<[Option<Box<str>>]>`, 16 B per slot plus the
+   topics) is allocated on the first alias; an aliased PUBLISH takes its topic out of the table while it is handled,
+   so no copy. 0x94 for an alias above the maximum or unknown. *Deviation*: the table is not counted in the kernel's
+   per-connection accounting (memprof); its bound is documented instead (`topic_alias_maximum` × (16 + topic)).
+10. **Subscription options** (rule 12) in the byte the trie keeps per subscriber (the `SubOpts` of the 5.0 Options
+    byte; 3.1.1 is QoS only), persisted in `subscriptions.options`. *Decided*: overlapping subscriptions of one
+    session give one delivery with the options merged (highest QoS, No Local only if every matching subscription has
+    it, Retain As Published if any has it). No Local compares the publisher's session on the shard that routes it
+    (where that session lives); a Will has no publisher session. Retain As Published keeps RETAIN when the shard
+    retained the message (*deviation*: a retained publish the limits refused to retain is delivered with RETAIN 0).
+11. **Reason codes** (rules 13, 14). PUBACK/PUBREC 0x87 (ACL, the reserved namespace, `$SYS/` without the operator
+    role), 0x97 (publish rate, a full control or `$SYS` backlog); SUBACK 0x87, 0x97 (subscription limit), 0x9E,
+    0xA1; UNSUBACK 0x00/0x11; PUBREL/PUBCOMP always 0x00 (an unknown id is answered as in 3.1.1). Server DISCONNECT
+    for 5.0 connections: decoder errors with their code (0x81, 0x82, 0x83, 0x8F, 0x90, 0x95), 0x8D, 0x8E, 0x93, 0x94,
+    0x98 (allowlist), 0x9A (Retain without Retain Available), 0x82 (AUTH, a client Subscription Identifier in
+    PUBLISH, a second CONNECT, DISCONNECT raising expiry from 0). CONNACK refusals: 0x84 (`mqtt5.enabled` off),
+    0x85, 0x86, 0x87, 0x88, 0x8C (Authentication Method), 0x9A (retained Will without Retain Available), a decoder
+    error's code. Reason strings are fixed text, only on CONNACK and DISCONNECT, only with Request Problem Information.
+    *Not used* (deviation, no path for them): 0x8B (no orderly shutdown path; `reboot` stops the machine), 0x96 (no
+    rate path closes a connection: over the rate a publish is refused with 0x97 and the connection stays), 0x89, 0x8A
+    and 0x9F (admission, lock-out and the login rate refuse at the SYN, before there is a CONNECT to answer).
+    Revoked certificates are cut at the transport without a DISCONNECT (nothing more is sent to a revoked identity);
+    an identity that leaves the allowlist gets 0x98.
+12. **CONNACK properties.** Receive Maximum, Maximum Packet Size (the listener's), Topic Alias Maximum (when > 0),
+    Retain Available 0 (login roles without `retain`), Subscription Identifier and Shared Subscription Available 0,
+    Session Expiry Interval when it differs from the request, Server Keep Alive when `mqtt5.max_keep_alive_s` holds a
+    client to less (or to it, for keep alive 0), Assigned Client Identifier (TLS: the certificate's identity; a login:
+    the generated tail; the development port: `auto-N`). Maximum QoS, Wildcard Subscription Available and Response
+    Information are not sent (QoS 2 and wildcards are available; no response information).
+13. **Store schema 4** (`crates/store/src/schema.rs`): columns added, no table rebuilt (the CHECK constraints of schema 3 stay
+    right): `sessions.expiry_s` (NULL for older rows), `sessions.offline_since`, `subscriptions.options` (older rows:
+    their QoS), `retained.props`, `retained.expires_at`, `queued.props`, `queued.expires_at`. A stored property block is
+    validated again at restore (dropped if it does not validate; the message is kept).
+14. **Kernel.** `crates/kernel/src/mqtt5.rs`: the login paths (plaintext, WebSocket password, development port) peek
+    at the CONNECT with the decoder its level picks and answer a refused 5.0 login with a 5.0 CONNACK; the restore;
+    the per-shard `$SYS` counters. `$SYS/broker/clients/connected/v311` and `/v5` (*deviation* from the name
+    `clients/mqtt5`), `messages/expired`, `messages/dropped/too_large`, `sessions/expired` and `/expiring`,
+    `wills/delayed` and `/pending`, `disconnects/sent/0xNN` and `connections/refused/v5/0xNN` (fixed lists, `other`
+    for the rest), the same in the info query and two `status` lines.
+15. **Configuration format 12**: the `[mqtt5]` keys of rule 21 and `limits.max_session_expiry_s`,
+    `limits.default_session_expiry_s`, `limits.max_message_expiry_s`. `mqtt5.shared_subscriptions` and
+    `mqtt5.subscription_identifiers` are accepted and reserved: part 3 gives them effect (no format bump then).
+16. **A broker-closed connection ends its session at once** (*found by the Paho suite*, both versions). When the
+    broker asks to close a connection (keep alive, a protocol error, a takeover, a 5.0 DISCONNECT), the kernel used
+    to end the broker session, and so publish the Will, only when TCP was done; a client that never closes its socket
+    held that back until the FIN_WAIT2 timeout. Now the session ends when its last bytes are handed to TCP (locally,
+    and on the home core of a relayed connection, whose transport core then finds no relay when TCP is done).
+
+### Memory
+
+`Conn` stays 48 B and `Session` 64 B. A 3.1.1 connection pays nothing new at rest; with a Will its `Extra` box is 72 B
+instead of 56 (the Will's delay and expiry, the `V5State` pointer). A 5.0 connection keeps an `Extra` (72 B) and a
+`V5State` (24 B) for its life, about 96 B of heap more than an idle 3.1.1 one, plus the alias table once used. Each
+session waiting for its expiry or an armed Will costs two B-tree entries. `MsgInner` is 24 B larger per message.
+Measured (HVF, 4 vCPU, 2000 mTLS connections each with one QoS 1 subscription, `urmqtt-loadgen hold --subscribe 1`,
+`--mqtt5 1` for 5.0, the first full `mem:` report): the previous kernel 494 B per connection in heap blocks (468 B
+requested), this one 509 B (477 B) for 3.1.1 and 670 B (573 B) for 5.0. The 3.1.1 difference is no per-connection
+cost: it is the new retained `$SYS` topics, about 18 KiB over three shards whatever the connection count; 5.0 adds
+96 B requested (161 B in blocks) per connection.
+
+### Verification
+
+Unit tests per rule and reason-code path (`crates/broker/src/v5_tests.rs`, 35), `qos2_model` with half its cases a
+5.0 device (Receive Maximum both ways, session expiry with time and restarts), `acl_model` with mixed versions, the
+ACL oracle (`broker_acl`) with 5.0 operations and checks for No Local, Retain As Published, Retain Handling, message
+and session expiry and the 5.0 window (mutation-checked against broken broker variants), new seeds for `broker_input`
+and `broker_acl`, store golden files and power-cut tests for schema 3 to 4, the smoke group `mqtt5` (paho-mqtt 2.x
+and mosquitto clients over mTLS, a restart on the same disk, an image with `mqtt5.enabled = false`), a schema 3 disk
+written by the previous kernel booted by this one (`scripts/mqtt5-migration-check.sh`), and the Paho interoperability
+suite over the plaintext listener and the development port (`scripts/mqtt5-conformance.sh`, results in
+docs/MQTT5-CONFORMANCE.md).

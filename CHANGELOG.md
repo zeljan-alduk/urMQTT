@@ -8,6 +8,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **MQTT 5.0 in the broker** (ROADMAP NEXT-3 part 2, ADR-274): every listener (TLS, plaintext, WebSocket) accepts
+  MQTT 5.0 beside 3.1.1, chosen per connection by the CONNECT's protocol level (`mqtt5.enabled`, on by default;
+  off: CONNACK 0x84). Properties are forwarded to 5.0 subscribers (user properties, content type, response topic,
+  correlation data, payload format indicator), also across cores and in retained messages and stored queues, and
+  stripped for 3.1.1 subscribers; reason codes on CONNACK, PUBACK, PUBREC, SUBACK, UNSUBACK and a server DISCONNECT
+  instead of a silent close (0x8E takeover, 0x8D keep alive, 0x93 Receive Maximum, 0x94 topic alias, 0x95 packet
+  size, 0x98 allowlist, 0x9A retain, ...), reason strings when the client allows them; Session Expiry Interval,
+  Message Expiry Interval, Will Delay Interval; Receive Maximum and Maximum Packet Size both ways; topic aliases from
+  the client; subscription options (No Local, Retain As Published, Retain Handling); assigned client identifier;
+  Server Keep Alive (`mqtt5.max_keep_alive_s`). Shared subscriptions, subscription identifiers and enhanced
+  authentication are refused cleanly (SUBACK 0x9E / 0xA1, CONNACK 0x8C) until part 3. New `$SYS/broker/` topics:
+  `clients/connected/v311` and `/v5`, `messages/expired`, `messages/dropped/too_large`, `sessions/expired`,
+  `sessions/expiring`, `wills/delayed`, `wills/pending`, `disconnects/sent/0xNN`, `connections/refused/v5/0xNN`.
+  Configuration format 12: `[mqtt5]` (`enabled`, `receive_maximum`, `topic_alias_maximum`, `max_user_properties`,
+  `max_keep_alive_s`, and the reserved part-3 keys), `limits.max_session_expiry_s`,
+  `limits.default_session_expiry_s`, `limits.max_message_expiry_s`; the builder page has the section. Database
+  schema 4 (session expiry and offline time, subscription options, message properties and expiry), migrated at boot
+  from schema 3. Verified by host tests per rule, the QoS 2 reference model and the ACL oracle extended to 5.0
+  sessions, fuzz seeds, the smoke group `mqtt5` (paho-mqtt 2.x and mosquitto `-V mqttv5` over mTLS, a restart on
+  the same disk, `mqtt5.enabled = false`), a schema 3 disk of the previous kernel booted by this one, and the Eclipse
+  Paho interoperability suite (`scripts/mqtt5-conformance.sh`, expected failures listed and justified in
+  docs/MQTT5-CONFORMANCE.md).
 - **MQTT 5.0 codec** (`urmqtt_mqtt::v5`, ROADMAP NEXT-3 part 1, ADR-273): all 15 packet types including AUTH,
   properties checked against the specification's per-packet table, duplicate and value rules, reason codes per
   packet, subscription options, shared-subscription syntax; zero-copy and allocation-free like the 3.1.1 codec,
@@ -81,6 +103,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Behaviour change: 3.1.1 persistent sessions expire** (ROADMAP NEXT-4, ADR-274). A session with
+  `clean_session = 0` used to be kept forever while offline; it now has the Session Expiry Interval
+  `limits.default_session_expiry_s` (30 days by default, at most `limits.max_session_expiry_s`; 4 294 967 295 means
+  never). Offline longer than that, the session is deleted with its subscriptions and queued messages, also when
+  the time ran out while the broker was down (dropped at the next boot, logged per shard). A device that sleeps
+  longer than 30 days comes back to an empty session: raise the two keys before updating if your fleet needs that.
+- **Database schema 4** (ADR-274): `sessions.expiry_s` and `sessions.offline_since`, `subscriptions.options`,
+  `retained` and `queued` gain `props` and `expires_at`. Columns are added in the migration's transaction (no table
+  is rebuilt); a schema 3 database is migrated when the kernel or `urmqtt-disk` opens it, and a power cut at any
+  write of the migration leaves schema 3 or 4 with every row (golden files `schema3-qos2` frozen, `schema4-mqtt5`
+  new). A kernel before this one refuses a schema 4 database (newer than this build).
 - **Database schema 3** (ADR-271): `retained`, `subscriptions` and `queued` accept QoS 2 (the tables are rebuilt with
   every row in the migration's transaction), a queued message records the packet id it was in flight with, and
   `qos2_ids` holds the ids of unfinished QoS 2 flows. A schema 2 database is migrated when the kernel or
@@ -120,6 +153,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A connection the broker itself closed (keep alive timeout, a protocol error, a takeover) published its Will only
+  when TCP was done with the connection, which a client that never closes its socket drags out to the FIN_WAIT2
+  timeout: the Eclipse Paho suite's `test_keepalive` (3.1.1 and 5.0) and `test_will_message` failed. The session now
+  ends as soon as its last bytes are handed to TCP (ADR-274).
 - A retained message replayed for a new subscription while the session's in-flight window was full was sent from
   the queue with RETAIN 0 (QoS 1, since M9; MQTT 3.1.1 3.3.1.3 requires 1). It keeps RETAIN now, also when it is sent
   again after a reconnect. Found by the `broker_acl` fuzzer's new QoS 2 checks (ADR-271).

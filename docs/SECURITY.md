@@ -68,8 +68,8 @@ which says what it gives up.
 | TLS handshake | rustls (no_std, own RustCrypto provider) | upstream fuzzing; mTLS scenarios in smoke (wrong CA, expired, mismatch, revoked) |
 | TLS records after the handshake | `urmqtt-tls::record` (own) | unit tests; fuzz `tls_record` (garbage rejected, sealed records round-trip, any changed byte fails) |
 | Client certificate identity and serial | `urmqtt-tls::identity` (x509-cert) | fuzz `x509_identity` |
-| MQTT packets | `urmqtt-mqtt` (own, `forbid(unsafe_code)`) | spec and property tests; mosquitto interop; fuzz `mqtt_decode`; the MQTT 5.0 codec (not reachable yet, ADR-273): spec-table tests, captured Mosquitto and paho interop, fuzz `mqtt5_packet`, `mqtt5_props`, Kani |
-| MQTT session behaviour, QoS 2 flows (ADR-271) | `urmqtt-broker` (own, `forbid(unsafe_code)`) | host tests (18 for QoS 2), the `qos2_model` proptest; fuzz `broker_input` and `broker_acl` (QoS 2 seeds) |
+| MQTT packets | `urmqtt-mqtt` (own, `forbid(unsafe_code)`) | spec and property tests; mosquitto interop; fuzz `mqtt_decode`; the MQTT 5.0 codec (ADR-273, reachable since ADR-274): spec-table tests, captured Mosquitto and paho interop, fuzz `mqtt5_packet`, `mqtt5_props`, Kani; the Eclipse Paho interoperability suite |
+| MQTT session behaviour, QoS 2 flows (ADR-271), MQTT 5.0 semantics (ADR-274) | `urmqtt-broker` (own, `forbid(unsafe_code)`) | host tests (18 for QoS 2, 35 for 5.0), the `qos2_model` proptest (3.1.1 and 5.0 devices), `acl_model` (mixed versions); fuzz `broker_input` and `broker_acl` (QoS 2 and 5.0 seeds) |
 | Disk superblock and size table | `urmqtt-store::layout` | fuzz `disk_layout` |
 | Telemetry log on the disk | `urmqtt-store::telemetry` | crash and torn-write tests; fuzz `telemetry_recover` |
 | SQLite database file | SQLite 3.54.1 (vendored), **in the unprivileged database worker** (H6, ADR-210 to ADR-212) | EL0 / ring 3 in its own address space; fault containment and restart (smoke `worker-contain`, `worker-fault`); `quick_check` at boot, `SQLITE_DBCONFIG_DEFENSIVE`; upstream fuzzing |

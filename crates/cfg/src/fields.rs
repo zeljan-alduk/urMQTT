@@ -273,7 +273,7 @@ pub mod tag {
     // The link MTU (NOW-19, ADR-264): format version 7.
     pub const NET_MTU: u16 = 195;
     // The NIC's receive interrupt (NOW-13, ADR-270): format version 11
-    // (10 is unused, 12 is reserved for MQTT 5).
+    // (10 is unused, 12 is MQTT 5.0's).
     pub const DEV_NET_INTERRUPT: u16 = 211;
     // MQTT over WebSocket (NEXT-5, ADR-272): format version 9.
     pub const WS_ENABLED: u16 = 230;

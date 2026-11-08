@@ -2,15 +2,15 @@
 
 How the broker's MQTT 5.0 support (parts 2 and 3 of NEXT-3) will be tested. Part 1 (the codec, `urmqtt_mqtt::v5`)
 is tested on its own: tests from the specification's tables, captured client traffic, fuzzing and Kani (ADR-273).
-This document covers the broker. The harness is `scripts/mqtt5-conformance.sh`; until part 2 lands it is a stub that
-prints what it would run.
+This document covers the broker. The harness is `scripts/mqtt5-conformance.sh` (part 2, ADR-274); results are in
+section 2.
 
 ## 1. The three layers
 
 | Layer | What | Where | Gate |
 |---|---|---|---|
 | Codec | Packets as bytes: every packet type, property, reason code and malformed form | `crates/mqtt/src/v5/tests.rs`, `crates/mqtt/tests/mqtt5_interop.rs` (fixtures in `crates/mqtt/tests/fixtures/v5/`), fuzz `mqtt5_packet` and `mqtt5_props` | `cargo test`, CI fuzz |
-| Broker semantics, host | Each ADR-273 rule as a sans-IO test over the in-memory transport (expiry with a fake clock, mixed-version fan-out, aliases, Receive Maximum, shared groups across shards) | `crates/broker/src/tests.rs` (part 2/3) | `cargo test` |
+| Broker semantics, host | Each ADR-273 rule as a sans-IO test over the in-memory transport (expiry with a fake clock, mixed-version fan-out, aliases, Receive Maximum, reason codes per path); the QoS 2 reference model with 5.0 devices; the ACL oracle with 5.0 sessions | `crates/broker/src/v5_tests.rs`, `tests/qos2_model.rs`, `tests/acl_model.rs`, `tests/acl_oracle/` (fuzz `broker_acl`), seeds of `broker_input` | `cargo test` |
 | Interoperability | Third-party clients against a booted broker | Eclipse Paho interoperability suite; Mosquitto clients `-V mqttv5` | `scripts/mqtt5-conformance.sh` (part 2: manual and in the smoke group; part 3: CI) |
 
 ## 2. Eclipse Paho interoperability suite
@@ -30,12 +30,14 @@ prints what it would run.
   `myclientid3`, `clientid` and an empty id; topics `TopicA`, `TopicA/B`, `Topic/C`, `TopicA/C`, `/TopicA`, `$SYS/...`
   read; the topic `test/nosubscribe` refused (`test_subscribe_failure` expects SUBACK 0x80); persistent sessions for
   `test_offline_message_queueing`, `test_redelivery_on_reconnect`, `test_session_expiry`.
-- **urMQTT setup.** A dev image (`deploy/conformance/`, part 2) with the plaintext listener on (P1, ADR-230) in its
-  open login mode, `plaintext.allow_from` the host, `plaintext.acl_publish = ["#"]`,
-  `plaintext.acl_subscribe` = everything except `test/nosubscribe` (a filter list that covers the suite's topics),
-  `plaintext.retain = true`, and the ADR-273 defaults for `[mqtt5]`. Plaintext sessions are never persistent
-  (ADR-230), so the three persistent-session tests are expected failures there; session expiry is covered by the
-  host tests and by Mosquitto clients over mTLS (section 3), where sessions persist.
+- **urMQTT setup.** `scripts/mqtt5-conformance.sh --boot` packs the dev configuration with its development port
+  off and the plaintext listener on (P1, ADR-230) in its open login mode (`auth = "anonymous"`), `allow_from` the
+  QEMU host, `acl_publish = acl_subscribe = ["#"]`, `retain = true`, the publish rate (1000/s), packet size (64 KiB)
+  and per-address connection limits raised for the suite, and `mqtt5.max_keep_alive_s = 60`; it boots that image in
+  QEMU with the plaintext port forwarded. The ACL allows `#` because the suite cleans retained messages through a
+  `#` subscription between tests (and ACLs have no deny rules), so `test/nosubscribe` is granted. Plaintext
+  sessions are never persistent (ADR-230): the tests that need a stored session are expected failures there and
+  are covered over mTLS by the smoke group `mqtt5` (section 3), where sessions persist.
 
 ### Baseline: the suite against Mosquitto
 
@@ -57,24 +59,63 @@ Mosquitto's failures, all on the broker side, none a suite bug we must work arou
 | `test_server_keep_alive` | No Server Keep Alive without `max_keepalive`; the test expects 60 for a keep alive of 120 |
 | `test_will_delay` | The will arrived after 2.4-2.9 s instead of 4 +/- 1 s |
 
-The urMQTT design passes several of these by construction: 0x93 (ADR-273 rule 7), one delivery per session with
-every identifier (rule 17), Server Keep Alive (rule 10 with `mqtt5.max_keep_alive_s = 60` in the conformance image),
-the ACL refusal (rule 13), the timer-wheel Will Delay (rule 6).
+The urMQTT design passes several of these by construction: 0x93 (ADR-273 rule 7), Server Keep Alive (rule 10 with
+`mqtt5.max_keep_alive_s = 60` in the conformance image), the Will Delay (rule 6).
 
-### Expected-failure list
+### Results against urMQTT (part 2, ADR-274)
 
-`scripts/mqtt5-conformance.xfail`, one line per test that is allowed to fail, created by part 2:
+Measured 2026-11-08, aarch64 kernel of this branch under QEMU/HVF on macOS, one vCPU (`--smp 1`, see "Ordering"
+below), `scripts/mqtt5-conformance.sh --boot`, each test in its own process:
 
-```
-# suite        test                            phase   reason
-client_test5   test_shared_subscriptions       part3   shared subscriptions arrive in part 3 (ADR-273 rule 16)
-client_test5   test_subscribe_identifiers      part3   subscription identifiers arrive in part 3 (rule 17)
-client_test5   test_offline_message_queueing   always  plaintext sessions are never persistent (ADR-230)
-client_test5   test_redelivery_on_reconnect    always  plaintext sessions are never persistent (ADR-230)
-client_test5   test_session_expiry             always  plaintext sessions are never persistent (ADR-230); covered over mTLS
-client_test    test_offline_message_queueing   always  as above, 3.1.1
-client_test    test_redelivery_on_reconnect    always  as above, 3.1.1
-```
+| Suite | Listener | Passed | Expected failures | Failed | Time |
+|---|---|---|---|---|---|
+| `client_test5.py` (5.0) | plaintext, open login (the reference run) | **17 of 27** | 10 | 0 | 367 s for both suites |
+| `client_test.py` (3.1.1) | plaintext, open login | **6 of 10** | 3 | 0 | |
+| `client_test5.py` (5.0) | development port (`--listener dev`: sessions persist) | **23 of 27** | 4 | 0 | 399 s for both suites |
+| `client_test.py` (3.1.1) | development port | **8 of 10** | 2 | 0 | |
+
+Per test, 5.0 on the plaintext listener (P passed, X expected failure, with its reason):
+
+| Test | urMQTT | Mosquitto 2.1.2 | Why it fails on urMQTT |
+|---|---|---|---|
+| `test_basic`, `test_retained_message`, `test_will_message`, `test_zero_length_clientid`, `test_overlapping_subscriptions`, `test_keepalive`, `test_dollar_topics`, `test_unsubscribe`, `test_user_properties`, `test_payload_format`, `test_subscribe_options`, `test_assigned_clientid`, `test_request_response`, `test_maximum_packet_size`, `test_server_keep_alive`, `test_flow_control1`, `test_flow_control2` | P (17) | P except `test_server_keep_alive`, `test_flow_control2` | |
+| `test_offline_message_queueing`, `test_redelivery_on_reconnect`, `test_session_expiry`, `test_publication_expiry`, `test_client_topic_alias` | X | P | each needs a stored session (Session Expiry > 0, Clean Start 0 to resume it); plaintext sessions are never persistent (ADR-230) and are granted Session Expiry 0. Over a listener whose sessions persist they pass (development port, below; the smoke group `mqtt5` covers them over mTLS with paho and Mosquitto clients) |
+| `test_will_delay` | X | F (timing) | the same: Session Expiry 0 ends the session at the close, and the Will goes out then (§3.1.2.5). Over mTLS the delay is honoured (smoke `mqtt5-will-delay`: 3.0 s for a delay of 3) |
+| `test_server_topic_alias` | X | P | the broker never sends topic aliases (ADR-273 rule 9: no per-subscriber alias state); the client's aliases to the broker pass (`test_client_topic_alias` up to its stored-session step, smoke `mqtt5-topic-alias-resolved`) |
+| `test_subscribe_failure` | X | F | the conformance ACL allows `#` because the suite cleans retained messages through a `#` subscription and ACLs have no deny rules, so `test/nosubscribe` is granted. A refused filter gets 0x87 Not authorized (ADR-273 rule 13), not the 0x80 the test expects (smoke `mqtt5-suback-0x87-and-0x9e`) |
+| `test_shared_subscriptions`, `test_subscribe_identifiers` | X (part 3) | P, F | part 3 (ADR-273 rules 16, 17): SUBACK 0x9E and 0xA1 today |
+
+3.1.1 on the plaintext listener: `test_retained_messages`, `test_zero_length_clientid`, `test_overlapping_subscriptions`,
+`test_keepalive`, `test_dollar_topics`, `test_unsubscribe` pass; `test_offline_message_queueing` and
+`test_redelivery_on_reconnect` need a stored session, `test_subscribe_failure` the ACL as above.
+
+On the development port (`--listener dev`: the client id is the identity, sessions persist as on the TLS port, the
+device ACL opened to `#`) the stored-session tests pass too: `test_offline_message_queueing`,
+`test_redelivery_on_reconnect`, `test_session_expiry` (Session Expiry 1 s honoured), `test_publication_expiry`,
+`test_client_topic_alias` and `test_will_delay` (5.0), `test_offline_message_queueing` and
+`test_redelivery_on_reconnect` (3.1.1). Left: `test_shared_subscriptions`, `test_subscribe_identifiers` (part 3),
+`test_server_topic_alias`, `test_subscribe_failure` (both suites, as above) and 3.1.1 `test_zero_length_clientid`:
+there the client id is the identity, so a 3.1.1 CONNECT without one names nobody and is refused with 0x02, as 3.1.1
+§3.1.3.1 allows (unchanged from 3.1.1-only builds; a 5.0 client is assigned an id and passes).
+
+Two fixes came out of the runs: a Will of a connection the broker closed (keep alive) went out only when TCP was done
+with the connection, which the suite's client drags out to the FIN_WAIT2 timeout (`test_keepalive` in both suites,
+`test_will_message`; fixed in the kernel, ADR-274 item 16); and the suite's `-h` option is read as `--help` (a
+substring test), so the harness passes the port only.
+
+**Ordering.** `test_subscribe_options` and `test_request_response` subscribe client B and publish from client A
+without waiting for B's SUBACK. Across cores (more than one vCPU) B's SUBSCRIBE and A's PUBLISH reach their home
+shards by different paths, and the broker keeps no order between two connections (ADR-032; MQTT does not require
+one), so with 4 vCPUs `test_subscribe_options` failed in all three full runs and `test_request_response` in one
+(B got nothing). Waiting for the SUBACK, as a client
+must to know its subscription is in effect, both pass every time (reproduced with the suite's own client). The
+reference run therefore has one vCPU.
+
+### Expected-failure lists
+
+`scripts/mqtt5-conformance.xfail` (plaintext listener, the reference run) and `scripts/mqtt5-conformance-dev.xfail`
+(development port), one line per test that is allowed to fail, each with its reason; the files are the source of
+truth, the table above repeats them.
 
 Rules of the list:
 - Columns are whitespace-separated; `suite` is the script name without `.py`, `test` the unittest method name,
@@ -85,10 +126,14 @@ Rules of the list:
 - The harness prints one line per test (`PASS`, `FAIL`, `XFAIL`, `XPASS`, `TIMEOUT`) and a summary, and exits non-zero
   on any `FAIL`, `TIMEOUT` or `XPASS`.
 
-## 3. Mosquitto clients
+## 3. Mosquitto clients and paho-mqtt over mTLS (smoke group `mqtt5`)
 
-Mosquitto 2.x clients with `-V mqttv5`, over mTLS with the dev certificates (sessions persist there) and over the
-plaintext listener. Each line is a scenario of the smoke group `mqtt5` (part 2), with what it checks:
+The smoke group `mqtt5` (`scripts/smoke.sh`, both architectures; `scripts/mqtt5-scenarios.py` for paho-mqtt 2.x and a
+raw client, `mqtt5_mosquitto` for the Mosquitto clients) runs over mTLS with the dev certificates, where sessions
+persist, then restarts the VM on the same disk and checks what the store kept. Its client lines are the evidence for
+what the plaintext listener cannot show (stored sessions, will delay). The table is the original plan; the group
+checks more (CONNACK properties, request/response, No Local, Retain As Published and Handling, reason codes per path,
+the server's DISCONNECT packets, `$SYS`, the restart):
 
 | Scenario | Command (abridged) | Checks |
 |---|---|---|
@@ -107,14 +152,19 @@ plaintext listener. Each line is a scenario of the smoke group `mqtt5` (part 2),
 
 `scripts/mqtt5-capture.sh` records client and broker bytes through `scripts/mqtt-record.py` (a TCP proxy) for
 Mosquitto 2.x clients and paho-mqtt 2.x (`scripts/mqtt5-capture-paho.py`) against a local Mosquitto; the files are the
-codec's fixtures. Part 2 points the same proxy at urMQTT and compares, scenario by scenario, the packet types and
-properties urMQTT sends with Mosquitto's (not the bytes: reason codes and announced limits differ by design, ADR-273).
+codec's fixtures. The planned side-by-side capture against urMQTT was not made in part 2: the interoperability suite
+and the smoke group check the packets urMQTT sends directly (properties, reason codes, announced limits). It moves to
+part 3.
 
 ## 5. Running it
 
 ```
-scripts/mqtt5-conformance.sh --mosquitto     # the baseline above, against a local Mosquitto (part 2)
-scripts/mqtt5-conformance.sh --port 1883     # against a booted urMQTT (part 2)
+scripts/mqtt5-conformance.sh --boot                    # the reference run: build, boot (one vCPU), run, stop
+scripts/mqtt5-conformance.sh --boot --listener dev     # the development port, where sessions persist
+scripts/mqtt5-conformance.sh --boot --smp 4            # more cores (see "Ordering")
+scripts/mqtt5-conformance.sh --port 1883               # against a broker already running
+scripts/mqtt5-conformance.sh --mosquitto               # the baseline, against a local Mosquitto
 ```
 
-Until part 2 the script prints the plan and exits 0.
+The suite is cloned at its pinned commit into `$TMPDIR/urmqtt-mqtt5-conformance` (`--work` changes it); each test's
+output is kept under `logs/` there. Exit status non-zero on any FAIL, TIMEOUT or XPASS.

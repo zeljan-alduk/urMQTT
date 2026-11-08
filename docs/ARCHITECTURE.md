@@ -174,8 +174,11 @@ and calls synchronously, on the core that owns the store:
 
 ## 6. Broker
 
-- MQTT 3.1.1 first, then 5.0. QoS 0, 1 and 2 (QoS 2 since ADR-271: method B, the session's home core holds the
-  packet ids, fan-out to other cores is an ordinary routed message).
+- MQTT 3.1.1 and 5.0 (5.0 since ADR-274: the CONNECT's protocol level picks the codec per connection, one
+  version-neutral broker core; properties travel with the message's `Arc` across cores; session and message expiry,
+  will delay, flow control, topic aliases from the client, subscription options; shared subscriptions and
+  subscription identifiers in part 3). QoS 0, 1 and 2 (QoS 2 since ADR-271: method B, the session's home core holds
+  the packet ids, fan-out to other cores is an ordinary routed message).
 - Supported packets and features: CONNECT/CONNACK, PUBLISH/PUBACK, PUBREC/PUBREL/PUBCOMP, SUBSCRIBE/SUBACK, UNSUBSCRIBE/UNSUBACK, PINGREQ/PINGRESP, DISCONNECT, wildcards `+` and `#`, retained messages, LWT, clean and persistent sessions with bounded offline queues.
 - Topic interning: each core has a topic trie, and sessions store 32-bit node ids. Fan-out to other cores sends a compact routing message (payload handle + topic id), guided by a "which cores have subscribers" bitmask per node.
 - Reconnects to a different core go through the session directory (ADR-011).

@@ -26,8 +26,9 @@ every PCI function they see, whichever edition the image is.
 
 Everything in this repository, now and in future releases:
 
-- **The protocol:** the MQTT codec and broker (today MQTT 3.1.1 with QoS 0, 1 and 2; MQTT 5.0, MQTT over
-  WebSocket and the other protocol features of [ROADMAP.md](ROADMAP.md) when they are built), the optional
+- **The protocol:** the MQTT codec and broker (today MQTT 3.1.1 and 5.0 with QoS 0, 1 and 2, MQTT over secure
+  WebSocket; MQTT 5.0 shared subscriptions and the other protocol features of [ROADMAP.md](ROADMAP.md) when they are
+  built), the optional
   plaintext listener, the signed control channel, `$SYS`, syslog and statsd.
 - **The network stack:** the own TCP/IP stack and DHCP client, IPv4 today and IPv6 when it is built.
 - **Security:** TLS 1.3 with mutual TLS and its crypto, the entropy sources, the exploit mitigations, boot
