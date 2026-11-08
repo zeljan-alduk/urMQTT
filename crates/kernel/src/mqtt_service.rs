@@ -1710,10 +1710,25 @@ impl MqttService {
             }
         }
         // Shared subscriptions: joins, leaves and deliveries for other
-        // shards (ADR-275), never dropped (a QoS 0 delivery is one message,
-        // as its route was).
+        // shards (ADR-275). A QoS 0 delivery to a core that is behind is
+        // dropped like a QoS 0 route (counted with them), so a flood cannot
+        // grow the backlog without bound; everything else is sent.
         for (to, m) in self.broker.drain_shared() {
-            link.send(usize::from(to), CoreMsg::Shared(m));
+            let peer = usize::from(to);
+            if matches!(
+                m,
+                urmqtt_broker::SharedMsg::Deliver {
+                    qos: QoS::AtMostOnce,
+                    ..
+                }
+            ) && link.backlog_len(peer) > ROUTE_BACKLOG
+            {
+                self.dropped_routes += 1;
+                // Relaxed: statistics.
+                dataplane::ROUTE_DROPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            link.send(peer, CoreMsg::Shared(m));
         }
         watchdog::step(watchdog::Step::Control);
         // Control messages go to the DB core unchanged; it authenticates
