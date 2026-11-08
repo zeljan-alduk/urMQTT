@@ -195,15 +195,18 @@ delivery (live, queued, retained replay, will, remote, restored) inside the
 receiver's rights and a granted filter, never reserved, never `$SYS`, never
 another device's topic, and from an allowed publisher; a SUBACK grant only
 for a filter wholly inside the rights; CONNACK codes and `session_present`
-against a session model; RETAIN only on the replay of the receiver's own
-SUBSCRIBE; unacknowledged QoS 1 and QoS 2 within `max_inflight`; retained count and
+against a session model; RETAIN only on a replay for the receiver's own
+SUBSCRIBE (during it, or at QoS 1 and 2 later from the queue or again after a
+reconnect) and only on a message published, willed or restored retained; unacknowledged QoS 1 and QoS 2 within `max_inflight`; retained count and
 bytes within the limits. QoS 2 (ADR-271): the oracle holds each session's QoS 2
 ids (across reconnects, takeovers and restores, with the operations `Release`
 and `Dup`) and checks that a PUBLISH with a held id is answered and neither
 routed nor counted, that one id too many closes, that every PUBREC answers a
 held id and every PUBREL is answered, that a message reaches a session in one
 flow only (again only with DUP and its id, never after our PUBREC) and that a
-broker PUBREL follows our PUBREC.
+broker PUBREL follows our PUBREC. Garbage on a connection ends those checks
+for its session: from then on the broker may read any packet, a PUBREL among
+them, in what the connection sends.
 
 ### QoS 2 against a reference model
 

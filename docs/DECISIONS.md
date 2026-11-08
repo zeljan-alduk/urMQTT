@@ -2478,7 +2478,14 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
     and checks that a duplicate is answered and neither routed nor counted, that one id too many closes, that every
     PUBREC answers a held id and every PUBREL is answered, that a message reaches a session in one flow only (sent
     again only with DUP and its id, never after our PUBREC) and that a PUBREL comes only after our PUBREC; new
-    operations `Release` and `Dup`, QoS 2 subscriptions and restores with held ids; 3 new seeds; a directed test.
+    operations `Release` and `Dup`, QoS 2 subscriptions and restores with held ids; 6 new seeds; a directed test.
+    After garbage on a connection the broker may read any packet in what follows (a PUBREL among them), so the
+    oracle stops judging that session's QoS 2 ids from then on (two of its own false positives, now seeds). 120 s
+    runs: `broker_acl` 468 968 executions and `broker_input` 2 733 499, clean. Its first 120 s found a bug older than
+    QoS 2: a retained message replayed for a SUBSCRIBE while the in-flight
+    window was full went to the queue and came out with RETAIN 0 (QoS 1 since M9; 3.3.1.3 requires 1). Queue entries
+    and flights now carry the flag (still 16 bytes), resends keep it; the oracle's RETAIN rule was widened to such
+    queued replays and tightened to messages that were published, willed or restored retained.
   - `broker_input`: the harness moved to `crates/broker/tests/input_harness/` (the fuzz target includes it), its
     seeds (`fuzz/seeds/broker_input/`, new: duplicates, a resume after a drop, a QoS 2 will and retained message)
     replay in `cargo test`, and a test checks that they reach the QoS 2 counters.

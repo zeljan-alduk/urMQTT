@@ -928,12 +928,16 @@ impl Harness {
                 let mut acks = Vec::new();
                 if let Some(s) = self.slots[*slot].as_mut() {
                     let key = s.key.clone();
+                    // Garbage may have left half a packet in the broker's input
+                    // buffer: then our PUBREC may never be read as one.
+                    let dirty = s.dirty;
                     for (&p, o) in s.inflight.iter_mut() {
                         match (o.qos, o.rec, o.rel) {
                             (QoS::ExactlyOnce, false, _) => {
                                 o.rec = true;
                                 // Our PUBREC: the PUBLISH may not come again.
-                                if let Some(seq) = o.seq
+                                if !dirty
+                                    && let Some(seq) = o.seq
                                     && let Some(e) =
                                         self.sessions.get_mut(&key).and_then(|x| x.q2.get_mut(&seq))
                                 {
@@ -958,10 +962,16 @@ impl Harness {
                     return self.settle();
                 }
                 let s = self.slots[*slot].as_mut().expect("accepted");
+                let dirty = s.dirty;
                 let ids: Vec<u16> = self
                     .sessions
                     .get_mut(&s.key)
-                    .map(|x| std::mem::take(&mut x.awaiting).into_iter().collect())
+                    .map(|x| {
+                        // Behind garbage our PUBRELs may never be read as such:
+                        // what the broker still holds is not known any more.
+                        x.uncertain |= dirty;
+                        std::mem::take(&mut x.awaiting).into_iter().collect()
+                    })
                     .unwrap_or_default();
                 s.released.extend(&ids);
                 for p in ids {
@@ -1092,6 +1102,14 @@ impl Harness {
             Op::Garbage { slot, bytes } => {
                 if let Some(s) = self.slots[*slot].as_mut() {
                     s.dirty = true;
+                    // From here on the broker may read any packet in what this
+                    // connection sends (a PUBREL among them): the session's
+                    // QoS 2 ids are not known any more.
+                    if let Some(sess) = self.sessions.get_mut(&s.key)
+                        && sess.conn == Some(s.c)
+                    {
+                        sess.uncertain = true;
+                    }
                     self.b.input(s.c, bytes, self.now);
                 }
             }

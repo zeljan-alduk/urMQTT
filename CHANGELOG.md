@@ -98,6 +98,12 @@ All notable changes to this project are documented here. The format follows
   `URMQTT READY` and the listener line come some 60 ms before the lease; a SYN in between is dropped and a client
   that does not retry sees no CONNACK (two CI runs on 2026-11-07, `plaintext-registry` and `plaintext-lockout`).
 
+### Fixed
+
+- A retained message replayed for a new subscription while the session's in-flight window was full was sent from
+  the queue with RETAIN 0 (QoS 1, since M9; MQTT 3.1.1 3.3.1.3 requires 1). It keeps RETAIN now, also when it is sent
+  again after a reconnect. Found by the `broker_acl` fuzzer's new QoS 2 checks (ADR-271).
+
 ## [0.4.2] - 2026-11-06
 
 The **first release signed with the project's release key** (`minisign.pub`, key id `721316B961DCB94B`; the former
