@@ -103,6 +103,15 @@ All notable changes to this project are documented here. The format follows
 - A retained message replayed for a new subscription while the session's in-flight window was full was sent from
   the queue with RETAIN 0 (QoS 1, since M9; MQTT 3.1.1 3.3.1.3 requires 1). It keeps RETAIN now, also when it is sent
   again after a reconnect. Found by the `broker_acl` fuzzer's new QoS 2 checks (ADR-271).
+- **QoS 1 on one data core was 10-30 % slower than v0.4.2 since ADR-265** (PERFORMANCE §13.3 point 4): the SACK loss
+  detection counted "more than two segments above a hole" in full 1448-byte segments, which an MQTT flow of
+  100-byte messages with a few of them in flight seldom reached, and no longer acted on three duplicate ACKs, so its
+  losses waited for the retransmission timer (200 ms or more) and restarted from a one-segment window. It now counts
+  the flow's own segment size and three duplicate ACKs with new SACK blocks start a recovery, as RFC 6675 has it
+  (ADR-268). A new per-core log line says how the retransmissions came about (`tcp: core N: retransmissions: R
+  recoveries started, T by the timer, S segment(s) resent in recoveries`); the "timeouts" of the existing line are
+  connections given up, which hid the timer. On the local rig with one data core and 1 % loss, 16 x 1000 QoS 1
+  messages/s deliver 13.4k/s again (v0.4.2 13.0k, before the fix 9.0k); with three data cores QoS 1 is the same or up to 8 % better without loss and 23-46 % better at 1 % loss.
 
 ## [0.4.2] - 2026-11-06
 

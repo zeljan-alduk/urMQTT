@@ -217,6 +217,11 @@ release signed with it is v0.4.2.**
   on one ARM core Mosquitto keeps QoS 0 throughput and the SACK build is 10-30 % behind v0.4.2 on QoS 1 (a regression
   to resolve before v0.5.0). Next: publisher back-pressure when the subscriber is the only consumer, the receive
   interrupt, the per-CPU heap cache, the QoS 1 regression on one core.
+- Status (2026-11-08, later): the QoS 1 regression on one core is found and fixed (ADR-268): ADR-265's SACK loss
+  detection counted segments in full MSS and ignored duplicate ACKs, so an MQTT flow's losses waited for the
+  retransmission timer; the rig (one data core, 1 % loss) reproduces it and the fix brings v0.4.2's numbers back.
+  Open: a VPS run to confirm on netcup, and the 1 s TCP-connect tail of the handshake run there (SYN-ACKs not
+  answered; not seen on the rig, PERFORMANCE §13.3 point 4).
 
 **NOW-14. A limit on established TLS connections per source address.** S.
 - What: a per-address cap for established connections, like `plaintext.max_connections_per_ip` already has.

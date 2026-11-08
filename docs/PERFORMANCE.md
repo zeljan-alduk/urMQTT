@@ -335,7 +335,10 @@ evidence; it cannot say who held the CPU. The Linux guest's `/proc/stat` showed 
   the NIC asks for 1024 descriptors with a receive-queue statistic (ADR-266; no gain on the rig). *2026-11-08:* measured on both
   VPSes against Mosquitto, section 13: on 4 vCPU one 64 B flow is now ahead of Mosquitto's (87k against 51k delivered/s) and 1 KiB
   inside its range; on one ARM core Mosquitto still wins QoS 0 throughput, and the SACK build is behind v0.4.2 on QoS 1 there
-  (13.3, point 4). The per-CPU heap cache, the receive interrupt and publisher back-pressure remain.
+  (13.3, point 4). *2026-11-08, later:* that QoS 1 regression is ADR-265's loss detection counting segments in full
+  MSS (an MQTT flow's losses waited for the retransmission timer); fixed in ADR-268, on the rig with one data core
+  and 1 % loss back to v0.4.2's numbers or above. The per-CPU heap cache, the receive interrupt and publisher
+  back-pressure remain.
 * **Stalls shorter than a millisecond** and the last part of every stall before a tick's deadline are still charged; with close-up ticks (1 ms) the error per tick is
   below 1 ms, so a drop now needs a handler that really ran for most of 20 ms or stalls of 20 ms in 1 ms pieces.
 * The comparison with Mosquitto is one session, one path, one generator at 60-77 % steal; two cells (1 KiB, 16 pairs; delivered rate of one flow)
@@ -751,7 +754,7 @@ Delivered messages per second unless said otherwise; median (min-max) of three r
 | Fan-out 1 -> 100, QoS 0, flood (delivered) | 105k | **124k** | 86k |
 | Fan-out 1 -> 1000 at 10/s (delivered; p50) | 8,192; 227 ms | 8,639; 222 ms | **9,841; 56 ms** |
 | 20,000 idle mTLS connections: memory held | 10.7 MB heap | 10.8 MB heap | **546 MB RSS** |
-| NIC receive-queue overruns in the suite (`frames/dropped/nic`) | 199,141 | 260,911 | n/a |
+| Frames dropped for a full NIC transmit queue in the suite (`frames/dropped/nic`; corrected 2026-11-08, see point 4) | 199,141 | 260,911 | n/a |
 | Lost connections, any run | 0 | 0 | 0 |
 
 ### 13.3 What the numbers say
@@ -773,18 +776,33 @@ Delivered messages per second unless said otherwise; median (min-max) of three r
 3. **On one ARM core, raw QoS 0 throughput belongs to Mosquitto, everything else to urMQTT.** Mosquitto's event loop
    does more QoS 0 work per core than ours: 58k against 44-47k delivered with 16 pairs, 49k against 12-22k on one 64 B
    flow, 6.1k against 2-3k on one 1 KiB flow. Our single core is spent on the publishers (accepting 183-187k/s that are
-   then dropped), on polling the NIC every 200 us (ADR-224) and on copies; the NIC's 256-descriptor receive queue
-   overran 199,000-261,000 times in the suite (the netcup virtio-net offers no more than 256, so ADR-266's deeper
-   queues could not help there). Where the work is TLS, QoS 1 bookkeeping or fan-out, the same core beats Mosquitto's:
+   then dropped), on polling the NIC every 200 us (ADR-224) and on copies; the NIC's 256-descriptor transmit queue
+   was full for 199,000-261,000 frames in the suite, nearly all in the fan-out runs (the netcup virtio-net offers no
+   more than 256, so ADR-266's deeper queues could not help there; the first text of this section called these
+   receive-queue overruns, but `frames/dropped/nic` counts transmit drops). Where the work is TLS, QoS 1 bookkeeping or fan-out, the same core beats Mosquitto's:
    2x the handshakes, 2.6x the QoS 1 messages with 64 pairs, 1.2-1.4x the fan-out, half the p50 at steady QoS 0 rates,
    and QoS 1 latency in tens of milliseconds where Mosquitto's is in hundreds (its p99 under QoS 1 load is above 2 s
    on both machines).
 4. **The SACK build is not uniformly better on one core.** On netcup `main` is 10-30 % behind v0.4.2 on QoS 1 (16 pairs
    14.1k against 17.5k delivered, 64 pairs 42k against 52k, 16 x 1000/s 8.8k against 13.0k) and on the handshake run
-   (820 against 923, with a 1.1 s p99 tail from a ~1 s retransmission timeout that v0.4.2 did not show). The candidates
-   are the congestion-window change (cut to 70 % on a fast retransmit, growth only while the window is used) on short
-   QoS 1 exchanges and the per-segment ACK work on a saturated core; it is a regression to resolve before v0.5.0, with
-   the `.ss` samples of these runs as the evidence (`netcup-urmqtt-sack.txt.ss`).
+   (820 against 923, with a 1.1 s p99 tail). *Found and fixed (ADR-268, 2026-11-08):* the netcup path loses segments
+   in both builds (thousands of retransmissions per QoS 1 run against a few dozen on Contabo); v0.4.2 repaired them
+   with fast retransmits (16 x 1000/s: 2,024 of 2,088), the SACK build with the retransmission timer (only 355 of
+   3,256 fast; the console's "timeouts" counts connections given up, which hid it; the busiest sender sat at `cwnd
+   1-4 KiB, ssthresh 2 KiB, rto 200-400 ms`). ADR-265's `IsLost` counted "three segments above the hole" in full
+   1448-byte segments, some 25 of an MQTT flow's 100-byte ones, and no longer acted on three duplicate ACKs. Neither
+   the CPU (40-46 % busy) nor the transmit ring (732 drops in all QoS 1 runs) nor the window rules were the cause.
+   On the local rig with one data core and netcup's loss (1 %) the regression reproduces and the fix removes it:
+   16 x 1000/s 13.0k (v0.4.2), 9.0k (`main`), 13.4k (fix); 16 pairs 12.2k, 10.0k, 12.5k; 64 pairs 47.7k, 42.2k,
+   49.8k delivered/s; on three data cores the fix adds 0-8 % without loss and 23-46 % at 1 % loss (tables in ADR-268,
+   raw `perf-results/adr268-rig.txt`). To be confirmed on netcup.
+   The handshake tail is something else: it is in the TCP connect time (`tcp connect` p99 1.02-1.05 s in all nine
+   runs, v0.4.2 0.06-0.19 s), i.e. Linux sending its SYN again after 1 s, with 1.5-3 % of our SYN-ACKs never
+   answered (cookies sent minus validated; v0.4.2: 0.1-0.2 %). The SYN-ACK code is the same in both builds and the rig
+   does not show it (tcp connect p99 20-22 ms for both without loss, 1.04 s for all three builds at 1 % loss); it
+   stays open until it is captured on the VPS. Also: `frames/dropped/nic` in the table above counts frames dropped
+   because the NIC's **transmit** queue was full (`DropSite::NicTx`), not receive-queue overruns; those the guest
+   cannot see (ADR-266's queue-peak line is the only hint).
 5. **Memory for idle connections is urMQTT's clearest win, and the earlier text (section 3.2) understated it.**
    20,000 idle mTLS connections cost urMQTT 10.7-17.9 MB of heap in total (there is no other memory: the kernel has no
    process, no page cache, no per-socket kernel state outside that heap), about 0.5-0.9 KB each. Mosquitto's process

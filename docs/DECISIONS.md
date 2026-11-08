@@ -2358,6 +2358,107 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
 - **Not done.** The kernel on a real VPS (the estimate above stands in for it); the load generator's login rate at
   100 000 (expected about 19 a second per data core under HVF); the 3.5x gap between kernel and host per iteration.
 
+## ADR-268 — SACK loss detection counts the flow's own segments, and three duplicate ACKs with new blocks start a recovery (NOW-13, PERF)
+
+- **Status:** Accepted. Amends ADR-265 point 2. Parts 3 to 5 of ADR-265 (recovery, ACK on arrival, window
+  validation) stay as they are: the evidence below points at loss detection only.
+- **Context.** PERFORMANCE §13.2/13.3 point 4: on the netcup ARM64 VPS (one data core) `main` 318f60b was 10-30 %
+  behind v0.4.2 on QoS 1 (16 pairs 14.1k against 17.5k delivered/s, 64 pairs 42k against 52k, 16 x 1000/s 8.8k
+  against 13.0k), while on the 4-vCPU x86 VPS it was ahead. The raw `.console` files say why:
+  * the netcup path loses segments in both builds (thousands of retransmissions per QoS 1 run; Contabo's runs
+    have a few dozen), so loss recovery decides the rate there and not on Contabo;
+  * v0.4.2 repaired them with fast retransmits (16 x 1000/s: 2,024 of 2,088 retransmissions fast), the SACK
+    build mostly without (355 of 3,256; 16 pairs flood: 1,235-3,071 of 10,189-21,975). The counter "timeouts"
+    in that line counts connections given up, not timer expiries, which hid the rest: they were retransmission
+    timeouts, and the busiest-sender line (ADR-266) showed what follows a timeout: `cwnd 1-4 KiB, ssthresh
+    2 KiB, rto 200-400 ms` (the floor of `on_timeout`, the doubled RTO);
+  * the CPU was not the limit (data core 40-46 % busy in those runs), and the NIC's transmit drops were 732 in
+    the whole QoS 1 part of the suite: neither the per-segment ACK work nor the transmit ring.
+  The cause is ADR-265's `IsLost`: "more than two segments SACKed above the hole" was counted as `> 2 * MSS`
+  bytes. An MQTT flow sends segments of 60-300 bytes (a PUBLISH or a PUBACK in its TLS record) and holds a few
+  of them in flight (QoS 1: the peer's receive maximum, the publisher waiting for its PUBACKs); 2 x 1448 bytes
+  above a hole were some 25 such segments, which the flow seldom had, so the hole waited for the retransmission
+  timer (200 ms after an RTT sample, doubling) and the window restarted from one segment. And because a SACK
+  peer's duplicate ACKs no longer counted once it reported blocks, NewReno's three duplicate ACKs, which v0.4.2
+  acted on, were gone too.
+- **Decision.**
+  1. **A segment is the flow's own.** The sender keeps a running average (weight 1/4) of the length of the data
+     segments the application decided (full ones and those that sent all that was queued; a segment the window
+     cut short says nothing about the flow) in its boxed `Sender` (`seg`, 2 bytes; `Conn` unchanged at 112
+     bytes). `IsLost` counts "more than two segments" in that size, at most the MSS: three 120-byte segments
+     above a hole make it lost, two do not. A bulk transfer's segments are full, so nothing changes for it.
+  2. **DupThresh duplicate ACKs** (RFC 6675 §5, "DupAcks >= DupThresh"): a duplicate ACK from a SACK peer counts
+     when its blocks report new data (RFC 6675 §2: one per segment that arrived above the hole); three of them
+     with a hole at `snd_una` start the recovery as `IsLost` does, after the same reordering window. A duplicate
+     ACK without blocks from a peer that reports blocks still does not count (ADR-265).
+  3. The SACK recovery resends a hole while the pipe leaves room for one of the flow's segments (not a full MSS:
+     a window cut to a few small segments still repairs them).
+  4. A new counter, retransmission timer expiries (`Stats::rto_fired`), and a per-core log line every 5 s with
+     retransmissions: `tcp: core N: retransmissions: R recoveries started, T by the timer, S segment(s) resent in
+     recoveries`, so the next run on a VPS shows the split. (A first attempt put the count into the existing line;
+     that line is near the console's record width and its end, `0 connection(s)`, which the `attack-*` smoke
+     scenarios look for, was cut off.)
+- **The 1 s handshake tail** (netcup, the SACK build only: `tcp connect` p99 1.02-1.05 s in all nine runs,
+  v0.4.2 0.06-0.19 s) is not a retransmission timeout of ours: it is in the TCP connect time, i.e. the client
+  sent its SYN again after Linux's 1 s, and the console shows 1.5-3 % of SYN-ACKs (cookies sent minus cookies
+  validated) never answered against 0.1-0.2 % with v0.4.2. The SYN-ACK path is the same code in both builds.
+  On the rig the handshake run shows no such tail for either build (TCP connect p99 20-22 ms without
+  added loss; 1.04 s for all three builds at 1 % loss, where SYNs and SYN-ACKs are lost at random), so it is not
+  reproduced and stays open: a capture on the VPS (`scripts/x11-capture.sh`) of the SYN-ACKs that go unanswered
+  is the next step. Nothing in this change touches the SYN path.
+- **Security properties.** No parser change (the SACK blocks come from the same `wire.rs` code). The segment size
+  is our own sending history; a peer can only influence it by its window, and window-cut segments are not
+  counted. A peer that lies in its blocks could already make holes count as lost (ADR-265); it now needs three
+  small segments' worth of claims instead of three full ones, and what it gets is the same: our own data sent
+  again, at most once per hole, inside `cwnd` and its own window.
+- **Verification.** `cargo test -p urmqtt-tcp` (84 tests, 5 new). New: `small_segments_count_in_their_own_size`
+  (board), `a_lost_small_segment_is_resent_after_three_segments_above_it`,
+  `two_small_segments_above_a_hole_are_not_a_loss`, `two_small_holes_are_both_repaired_without_a_timeout`, and
+  a model of a QoS 1 stream (`a_stream_of_small_messages_recovers_without_the_timer`: 120-byte messages, at most
+  16 unacknowledged, 0.5-2 % loss). Against ADR-265's rule the first and third fail (no retransmission at all
+  before the timer) and in the model every loss was a timeout (21 of 21 retransmissions, 6.4 s for what takes
+  2.2 s now). ADR-265's tests pass unchanged; the lossy reordering bulk transfer showed why window-cut segments
+  must not count (with them, 7 needless retransmissions under 4 ms of jitter).
+  `tcp_segment` fuzzed 120 s on the M-series Mac (2.4 million runs, no finding). Smoke (`SMOKE_ONLY=misc`,
+  groups `storm`, `fin_wait2`, `attack_raw`, `net_mtu`, `attack_app`) on aarch64 HVF and x86_64 TCG: 10 of 10
+  each; the aarch64 core group (`SMOKE_NO_GROUPS=1`, MQTT end to end) 52 of 52.
+- **Numbers (local rig).** Local WAN rig (PERFORMANCE 7.3: aarch64 HVF on the M-series Mac, `urmqtt-loadgen`
+  in a Linux container behind `wan-bridge`, 12 ms RTT), `--smp 2` (boot log `dataplane: 1 data core(s)`, as on
+  netcup) and `--smp 4` (3 data cores); v0.4.2 (tag), `main` cfe9fa1 (= 318f60b's code) and this change; 3 runs per
+  cell, median (min-max) of delivered messages/s; "fast" counts recoveries started, of all retransmissions. The
+  rig's own loss is about 0.3 % (bursts); "1 %" adds 1 % per direction at random, about what the netcup path loses.
+  Raw: `docs/perf-results/adr268-rig.txt`.
+
+  | one data core, 1 % loss | v0.4.2 | main | ADR-268 |
+  |---|---|---|---|
+  | 16 pairs, QoS 1, flood | 12.2k (12.2-12.3k) | 10.0k (9.9-10.2k) | **12.5k** (9.7-12.8k) |
+  | 64 pairs, QoS 1, flood (main and ADR-268: 6 runs, 2 boots each, alternating) | 47.7k (47.6-48.6k) | 42.2k (40.3-42.8k) | **49.8k** (48.3-51.1k) |
+  | 16 x 1000/s, QoS 1 | 13.0k (13.0-13.7k) | 9.0k (9.0-9.3k) | **13.4k** (12.3-13.7k) |
+  | 16 x 1000/s: fast / all retransmissions | 1,021 / 1,225 | 3 / 591 | 1,015 / 1,270 |
+  | handshakes/s, 128 threads (TCP connect p99) | 1,248 (1.04 s) | 1,218 (1.04 s) | 1,232 (1.04 s) |
+
+  | one data core, no added loss | v0.4.2 | main | ADR-268 |
+  |---|---|---|---|
+  | 16 pairs, QoS 1, flood | 15.3k (15.3-15.5k) | 14.0k (13.9-14.1k) | **15.3k** (14.8-15.6k) |
+  | 64 pairs, QoS 1, flood (main and ADR-268: 6 runs, 2 boots each, alternating; the core is saturated and the rig's noise is large) | 38.1k (34.8-40.9k) | 36.7k (29.7-43.2k) | 36.6k (32.9-48.2k) |
+  | 16 x 1000/s, QoS 1 | 16.0k | 16.0k | 16.0k |
+  | handshakes/s, 128 threads (TCP connect p99; main and ADR-268 alternating, 6 runs each) | 2,009 (22 ms) | 1,921 (22 ms) | 1,917 (22 ms) |
+
+  | three data cores (`--smp 4`) | main, no added loss | ADR-268 | main, 1 % loss | ADR-268 |
+  |---|---|---|---|---|
+  | 16 pairs, QoS 1, flood | 16.1k (15.5-16.3k) | 16.4k (16.4-16.5k) | 10.2k (10.2-10.5k) | **12.8k** (12.7-12.8k) |
+  | 64 pairs, QoS 1, flood | 40.6k (39.7-41.1k) | **43.7k** (42.4-44.9k) | 37.6k (37.4-39.3k) | **46.2k** (44.9-46.8k) |
+  | 16 x 1000/s, QoS 1 | 16.0k | 16.0k | 9.3k (8.9-9.8k) | **13.6k** (13.5-13.7k) |
+  | handshakes/s, 128 threads | 1,815 | 1,809 | 1,214 | 1,191 |
+
+  With one data core and netcup's loss the rig shows the regression as the VPS did (16 x 1000/s: 9.0k against
+  13.0k there, 8.8k against 13.0k on netcup) and this change removes it; on three cores it adds 0-8 % without loss
+  and 23-46 % at 1 % loss, so the x86 VPS's gain is kept. The rig was shared with five other agents' builds and
+  QEMU runs (timing-sensitive runs took a lock, builds did not): single boots vary, which is why the 64-pair cells
+  were measured again alternating the two kernels.
+- **Not verified.** The netcup VPS itself (the rig's loss is QEMU's and the bridge's, not netcup's host); the
+  handshake tail there.
+
 ## ADR-271 — QoS 2, exactly once: method B, the in-flight window for both QoS, packet ids in the store (NEXT-2)
 
 - **Status:** Accepted (2026-11-08). Amends ADR-028 ("QoS 2 publishes close the connection, and QoS 2 subscriptions
