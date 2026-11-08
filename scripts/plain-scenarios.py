@@ -62,7 +62,12 @@ def pkt(first, body):
 
 def connect_pkt(client_id, user=None, password=None, clean=True, keepalive=60, level=4, will=None):
     flags = (0x02 if clean else 0) | (0x80 if user is not None else 0) | (0x40 if password is not None else 0)
-    body = mstr("MQTT") + bytes([level, flags]) + struct.pack(">H", keepalive) + mstr(client_id)
+    body = mstr("MQTT") + bytes([level, flags]) + struct.pack(">H", keepalive)
+    if level == 5:
+        # MQTT 5.0: a Session Expiry Interval of an hour (a plaintext session
+        # is granted 0), so the property block is not empty.
+        body += b"\x05\x11" + struct.pack(">I", 3600)
+    body += mstr(client_id)
     if user is not None:
         body += mstr(user)
     if password is not None:
@@ -222,8 +227,13 @@ def password_mode():
     c, code = login(S1, "stored", clean=False)
     report("stored-session-refused", code == 5, f"CONNACK {code}")
     c.close()
-    c, code = plain("v5", S1[0], S1[1], level=5)
-    report("mqtt5-client-told-the-version", code == 1, f"CONNACK {code}")
+    # MQTT 5.0 (ADR-274): served on this listener too; a stored session is not
+    # refused but granted Session Expiry 0 (told in the CONNACK).
+    c, code = plain("v5", S1[0], S1[1], level=5, clean=False)
+    report("mqtt5-client-logs-in-without-a-stored-session", code == 0, f"CONNACK reason {code}")
+    c.close()
+    c, code = plain("v5", S1[0], "wrong", level=5)
+    report("mqtt5-wrong-password-0x86", code == 0x86, f"CONNACK reason {code}")
     c.close()
     # A client id is free (mosquitto's default one has a slash), but there must be one.
     c, code = login(S1, "mosqpub/4711-host")

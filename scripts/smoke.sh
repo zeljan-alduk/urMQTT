@@ -2827,6 +2827,7 @@ plaintext() {
                 "control: 1 publish\(es\) to \\\$urmqtt/ by identities without control rights dropped"
                 "client: default-client-publishes ok" "client: default-client-receives-a-command ok" "client: acl-publish-only-own-topics ok"
                 "client: acl-subscribe-only-own-commands ok" "client: no-sys-subscribe ok" "client: stored-session-refused ok" "client: client-id-with-a-slash-is-fine ok" "client: empty-client-id-is-named-by-the-broker ok" "client: empty-client-id-with-a-stored-session-refused ok"
+                "client: mqtt5-client-logs-in-without-a-stored-session ok" "client: mqtt5-wrong-password-0x86 ok"
                 "client: retained-publish-not-retained ok" "client: packet-limit ok" "client: one-login-many-client-ids ok"
                 "client: publish-rate-limited ok" "client: operator-reads-the-plaintext-counters ok"
                 "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" "client: qos1-after-reconnect ok"
