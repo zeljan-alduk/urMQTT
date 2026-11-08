@@ -813,6 +813,7 @@ mqtt5_mosquitto() {
 # mqtt5_mosquitto_shared <dev port>: a shared group of a 5.0 mosquitto_sub
 # (Subscription Identifier 9, printed with %S) and a 3.1.1 one on the
 # development port; device-001 publishes 12 QoS 1 messages over mTLS.
+# shellcheck disable=SC2016 # '$share/...' is a literal MQTT topic filter, not an expansion
 mqtt5_mosquitto_shared() {
     local dport=$1 d="$ROOT/deploy/dev" a b
     a=$(mktemp)
