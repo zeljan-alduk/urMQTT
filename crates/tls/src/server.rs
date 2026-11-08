@@ -507,6 +507,9 @@ pub struct TlsServer {
     identity_field: IdentityField,
     revoked: Arc<RevocationList>,
     roles: Arc<RoleVerifiers>,
+    /// A client certificate is required (mutual TLS). False only for
+    /// [`TlsServer::new_server_only`].
+    client_auth: bool,
 }
 
 /// Every certificate in `pems`, into one root store.
@@ -562,7 +565,24 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 }
 
 impl TlsServer {
+    /// The mutual-TLS server: every client proves an identity with a
+    /// certificate of a configured trust anchor.
     pub fn new(setup: &ServerSetup<'_>) -> Result<Self, TlsError> {
+        Self::build(setup, true)
+    }
+
+    /// A server that asks for no client certificate (ADR-272), for the
+    /// WebSocket listener's password mode, where a browser logs in with an
+    /// MQTT user name and password inside the TLS session instead. The
+    /// session reports [`Event::EstablishedServerOnly`], never an identity;
+    /// the caller must authenticate the client some other way. No session
+    /// tickets are issued (a ticket of this server must never resume on the
+    /// mutual-TLS one, and resumption is not worth a second key set here).
+    pub fn new_server_only(setup: &ServerSetup<'_>) -> Result<Self, TlsError> {
+        Self::build(setup, false)
+    }
+
+    fn build(setup: &ServerSetup<'_>, client_auth: bool) -> Result<Self, TlsError> {
         let provider = Arc::new(crate::provider::provider());
         let operational = roots(setup.operational_ca_pems)?;
         if operational.is_empty() {
@@ -595,16 +615,21 @@ impl TlsServer {
             .map_err(|_| TlsError::Config("server certificate PEM is invalid"))?;
         let key = PrivateKeyDer::from_pem_slice(setup.key_pem)
             .map_err(|_| TlsError::Config("server key PEM is invalid"))?;
-        let mut config = ServerConfig::builder_with_details(provider, Arc::new(KernelTime))
+        let versions = ServerConfig::builder_with_details(provider, Arc::new(KernelTime))
             .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|_| TlsError::Config("protocol versions"))?
-            .with_client_cert_verifier(verifier)
+            .map_err(|_| TlsError::Config("protocol versions"))?;
+        let with_auth = if client_auth {
+            versions.with_client_cert_verifier(verifier)
+        } else {
+            versions.with_no_client_auth()
+        };
+        let mut config = with_auth
             .with_single_cert(chain, key)
             .map_err(|_| TlsError::Config("server certificate/key mismatch or unsupported key"))?;
         config.enable_secret_extraction = true;
         config.key_log = Arc::new(SecretCapture);
         config.max_early_data_size = 0;
-        if setup.resumption {
+        if setup.resumption && client_auth {
             config.ticketer = Arc::new(crate::ticket::Ticketer(setup.tickets.clone()));
             config.send_tls13_tickets = 1;
         } else {
@@ -615,6 +640,7 @@ impl TlsServer {
             identity_field: setup.identity_field,
             revoked,
             roles,
+            client_auth,
         })
     }
 
@@ -629,6 +655,7 @@ impl TlsServer {
                 roles: self.roles.clone(),
             })),
             identity_field: self.identity_field,
+            client_auth: self.client_auth,
         })
     }
 }
@@ -692,6 +719,12 @@ pub enum Event {
         /// [`serial_tag`] of the client certificate's serial.
         serial_tag: u64,
     },
+    /// The handshake of a [`TlsServer::new_server_only`] session finished:
+    /// the channel is encrypted and the server authenticated, the client is
+    /// not (ADR-272).
+    EstablishedServerOnly {
+        suite: &'static str,
+    },
     /// The peer closed the TLS session (close_notify).
     PeerClosed,
 }
@@ -699,6 +732,8 @@ pub enum Event {
 pub struct TlsSession {
     state: State,
     identity_field: IdentityField,
+    /// A client certificate was required ([`TlsServer::client_auth`]).
+    client_auth: bool,
 }
 
 /// ClientHello.random from the first record (RFC 8446 §4.1.2).
@@ -857,35 +892,19 @@ impl TlsSession {
         } = *hs;
         let random = random.ok_or(TlsError::NotTls)?;
         let resumed = conn.handshake_kind() == Some(HandshakeKind::Resumed);
-        // A ticket outlives a revocation (it is issued before, and the list
-        // changes with a new image of possibly the same version): resumed
-        // sessions are checked again (M16).
-        let peer = conn.peer_certificates().unwrap_or(&[]);
-        let Some(ee) = peer.first() else {
-            return Err(TlsError::NoIdentity);
+        // Without client authentication (ADR-272) there is no certificate to
+        // check; a session of such a server never resumes (no tickets).
+        let client = if self.client_auth {
+            Some(Self::client_identity(
+                &conn,
+                resumed,
+                &revoked,
+                &roles,
+                self.identity_field,
+            )?)
+        } else {
+            None
         };
-        if resumed && revoked.is_revoked(ee) {
-            return Err(TlsError::Handshake(
-                "resumed session of a revoked certificate".into(),
-            ));
-        }
-        // A full handshake recorded the role during verification. A resumed
-        // one verified nothing: the chain from the ticket is checked again
-        // now, which also refuses a certificate that has expired since or
-        // whose CA was removed from this image.
-        let role = match take_role(ee) {
-            Some(r) if !resumed => r,
-            _ => {
-                let now = KernelTime
-                    .current_time()
-                    .ok_or_else(|| TlsError::Handshake("no wall clock".into()))?;
-                roles
-                    .verify(ee, peer.get(1..).unwrap_or(&[]), now)
-                    .map(|(_, r)| r)?
-            }
-        };
-        let serial_tag = identity::serial(ee).map_or(0, |s| serial_tag(&s));
-        let ident = identity::identity(ee, self.identity_field);
         let (secrets, kernel) = conn.dangerous_into_kernel_connection()?;
         drop(kernel);
         let (rx_secret, tx_secret) =
@@ -925,7 +944,6 @@ impl TlsSession {
         if !same {
             return Err(TlsError::Internal("captured secrets do not match"));
         }
-        let identity = ident.ok_or(TlsError::NoIdentity)?;
         let inbuf = (!inbuf.is_empty()).then(|| Box::new(inbuf));
         let mut open = Open { rec, inbuf };
         let ev = drain_records(&mut open, tx, app)?;
@@ -934,13 +952,59 @@ impl TlsSession {
         } else {
             State::Open(open)
         };
-        Ok(Event::Established {
-            identity,
-            suite: suite.name(),
-            resumed,
-            role,
-            serial_tag,
+        Ok(match client {
+            Some((identity, role, serial_tag)) => Event::Established {
+                identity,
+                suite: suite.name(),
+                resumed,
+                role,
+                serial_tag,
+            },
+            None => Event::EstablishedServerOnly {
+                suite: suite.name(),
+            },
         })
+    }
+
+    /// The client certificate's identity, role and serial tag, checked again
+    /// for a resumed session.
+    fn client_identity(
+        conn: &UnbufferedServerConnection,
+        resumed: bool,
+        revoked: &RevocationList,
+        roles: &RoleVerifiers,
+        identity_field: IdentityField,
+    ) -> Result<(String, CertRole, u64), TlsError> {
+        // A ticket outlives a revocation (it is issued before, and the list
+        // changes with a new image of possibly the same version): resumed
+        // sessions are checked again (M16).
+        let peer = conn.peer_certificates().unwrap_or(&[]);
+        let Some(ee) = peer.first() else {
+            return Err(TlsError::NoIdentity);
+        };
+        if resumed && revoked.is_revoked(ee) {
+            return Err(TlsError::Handshake(
+                "resumed session of a revoked certificate".into(),
+            ));
+        }
+        // A full handshake recorded the role during verification. A resumed
+        // one verified nothing: the chain from the ticket is checked again
+        // now, which also refuses a certificate that has expired since or
+        // whose CA was removed from this image.
+        let role = match take_role(ee) {
+            Some(r) if !resumed => r,
+            _ => {
+                let now = KernelTime
+                    .current_time()
+                    .ok_or_else(|| TlsError::Handshake("no wall clock".into()))?;
+                roles
+                    .verify(ee, peer.get(1..).unwrap_or(&[]), now)
+                    .map(|(_, r)| r)?
+            }
+        };
+        let serial_tag = identity::serial(ee).map_or(0, |s| serial_tag(&s));
+        let ident = identity::identity(ee, identity_field);
+        Ok((ident.ok_or(TlsError::NoIdentity)?, role, serial_tag))
     }
 
     /// Encrypts application data for the peer.

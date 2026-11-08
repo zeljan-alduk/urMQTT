@@ -739,3 +739,81 @@ fn server_side_handshake_cost() {
         samples.len()
     );
 }
+
+/// ADR-272: the server for the WebSocket listener's password mode asks for
+/// no certificate; a client without one completes the handshake and the
+/// session reports no identity; application data flows both ways; no ticket
+/// is issued. The mutual-TLS server refuses the same client.
+#[test]
+fn a_server_only_session_has_no_client_identity() {
+    let Some(d) = dev() else {
+        return eprintln!("no dev certs, run make certs");
+    };
+    setup_globals();
+    let ca = read(&d.join("ca.pem"));
+    let cert = read(&d.join("server.pem"));
+    let key = read(&d.join("server.key"));
+    let setup = ServerSetup {
+        operational_ca_pems: &[&ca],
+        bootstrap_ca_pems: &[],
+        cert_pem: &cert,
+        key_pem: &key,
+        identity_field: IdentityField::Cn,
+        resumption: true,
+        revocations: Arc::new(RevocationList::from_hex(&[])),
+        tickets: tickets(),
+    };
+    let srv = TlsServer::new_server_only(&setup).unwrap();
+    let mut roots = RootCertStore::empty();
+    for c in CertificateDer::pem_file_iter(d.join("ca.pem")).unwrap() {
+        roots.add(c.unwrap()).unwrap();
+    }
+    let no_cert = Arc::new(
+        ClientConfig::builder_with_provider(Arc::new(urmqtt_tls::provider::provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    let (mut client, mut session, r) = connect(&srv, no_cert.clone());
+    let events = r.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::EstablishedServerOnly { .. })),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::Established { .. })),
+        "never an identity"
+    );
+    assert!(session.is_established());
+    let mut app = Vec::new();
+    client
+        .writer()
+        .write_all(b"GET /mqtt HTTP/1.1\r\n")
+        .unwrap();
+    pump(&mut client, &mut session, &mut app).unwrap();
+    assert_eq!(app, b"GET /mqtt HTTP/1.1\r\n");
+    let mut tx = Vec::new();
+    session.send(b"HTTP/1.1 101", &mut tx).unwrap();
+    let mut rd = &tx[..];
+    client.read_tls(&mut rd).unwrap();
+    client.process_new_packets().unwrap();
+    let mut got = [0u8; 12];
+    std::io::Read::read_exact(&mut client.reader(), &mut got).unwrap();
+    assert_eq!(&got, b"HTTP/1.1 101");
+    // No resumption: a second connection is a full handshake again.
+    let (_, _, r) = connect(&srv, no_cert.clone());
+    assert!(
+        r.unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::EstablishedServerOnly { .. }))
+    );
+    // The mutual-TLS server does not take a client without a certificate.
+    let mtls = server(&d, IdentityField::Cn, &[]);
+    let (_, session, r) = connect(&mtls, no_cert);
+    assert!(r.is_err() || !session.is_established());
+}
