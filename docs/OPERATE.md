@@ -86,8 +86,13 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/messages/expired`, `messages/dropped/too_large` | Messages not delivered because their MQTT 5.0 Message Expiry Interval had passed (from a queue, a retained replay, a restore); deliveries dropped because they exceeded a 5.0 client's Maximum Packet Size |
 | `$SYS/broker/sessions/expired`, `sessions/expiring` | Sessions ended by their Session Expiry Interval (both versions; a 3.1.1 persistent session has `limits.default_session_expiry_s`, 30 days), also those that ran out while the broker was down; offline sessions whose expiry runs now |
 | `$SYS/broker/wills/delayed`, `wills/pending` | Wills armed with a 5.0 Will Delay Interval since boot; armed now |
-| `$SYS/broker/disconnects/sent/0x8e` ... `0x9a`, `other` | DISCONNECT packets the broker sent to 5.0 clients, by reason code: 0x81 malformed, 0x82 protocol error, 0x83 a limit (User Properties), 0x8d keep alive, 0x8e session taken over, 0x8f/0x90 topic filter/name, 0x93 Receive Maximum, 0x94 topic alias, 0x95 packet too large, 0x98 administrative (the allowlist), 0x9a retain not available |
+| `$SYS/broker/disconnects/sent/0x81` ... `0x9a`, `other` | DISCONNECT packets the broker sent to 5.0 clients, by reason code: 0x81 malformed, 0x82 protocol error (also an AUTH packet: enhanced authentication is not offered), 0x83 a limit (User Properties), 0x87 not authorized, 0x8b server shutting down (the console's `reboot`, ADR-275), 0x8d keep alive, 0x8e session taken over, 0x8f/0x90 topic filter/name, 0x93 Receive Maximum, 0x94 topic alias, 0x95 packet too large, 0x98 administrative (the allowlist, a revoked certificate), 0x9a retain not available. 0x96, 0x89, 0x8a and 0x9f are never sent (ADR-275) |
 | `$SYS/broker/connections/refused/v5/0x84` ... `other` | 5.0 CONNECT packets refused, by CONNACK reason code: 0x84 MQTT 5.0 disabled (`mqtt5.enabled = false`), 0x85 client id, 0x86 user name or password, 0x87 not authorized, 0x8c an Authentication Method (enhanced authentication is not offered), 0x9a a retained Will without retain, 0x81/0x82 a malformed CONNECT |
+| `$SYS/broker/shared/groups`, `shared/members` | Shared-subscription groups and their members now, counted on the data core that owns each group (ADR-275) |
+| `$SYS/broker/shared/messages/delivered`, `dropped`, `redispatched` | Messages handed to one member of a group; dropped (QoS 0 with no member online or whose member was gone, a message handed on more than 4 times); handed to another member because the first one's session ended or it was gone |
+| `$SYS/broker/shared/joins/refused` | Shared SUBSCRIBEs refused by `limits.max_shared_groups` or `limits.max_shared_group_members` (SUBACK 0x97, 3.1.1 0x80) |
+| `$SYS/broker/retained/expiring` | Retained messages with a Message Expiry Interval waiting for the sweep, summed over the data cores' replicas (each core holds every retained message) |
+| `$SYS/broker/memory/topic_aliases` | Bytes held by 5.0 clients' topic-alias tables (at most `mqtt5.topic_alias_maximum` × (16 + `limits.max_topic_len`) per connection, 2 720 B with the defaults); part of `memory/used` |
 | `$SYS/broker/frames/dropped/steer`, `worker_tx`, `nic` | network frames dropped because a worker core, the dispatcher, or the NIC queue plus the dispatcher's 4 096-frame backlog was full; TCP retransmits them. Normally 0 |
 | `$SYS/broker/handshakes/started` | connections admitted (TCP established, admission said yes) |
 | `$SYS/broker/handshakes/done`, `failed`, `timed_out` | TLS handshakes completed, ended before completing, not finished within 10 s |
@@ -159,14 +164,15 @@ the core). The statsd names are `handshakes.{started,done,failed,timed_out,slow,
 `frames.dropped.{steer,worker_tx,nic_tx,nic_tx_local}` (a frame lost to a full ring
 or NIC queue is retransmitted by TCP a second or more later).
 
-## MQTT 5.0 (ADR-274)
+## MQTT 5.0 (ADR-274, ADR-275)
 
 Every listener speaks MQTT 3.1.1 and 5.0; each connection keeps the version of its CONNECT. Things an operator
 sees differently with 5.0 clients:
 
 - **Reason codes.** A refused publish is acknowledged with 0x87 (not authorized) or 0x97 (the publish rate); a
-  refused subscription with 0x87, 0x97 (the subscription limit), 0x9E (`$share/`) or 0xA1 (a Subscription
-  Identifier); a closed connection gets a DISCONNECT that names the reason (`disconnects/sent/...` above). A 3.1.1
+  refused subscription with 0x87, 0x97 (the subscription limit, a shared-group limit), 0x9E (`$share/` while
+  `mqtt5.shared_subscriptions = false`) or 0xA1 (a Subscription Identifier while `mqtt5.subscription_identifiers =
+  false`); a closed connection gets a DISCONNECT that names the reason (`disconnects/sent/...` above). A 3.1.1
   client gets what it always got (acknowledged and dropped, 0x80, a silent close).
 - **Session expiry for everybody.** A persistent session expires when it has been offline longer than its Session
   Expiry Interval: what a 5.0 client asked for, at most `limits.max_session_expiry_s`, or for a 3.1.1 client with
@@ -174,10 +180,63 @@ sees differently with 5.0 clients:
   the two raised (4 294 967 295 never expires). The boot log reports per shard how many sessions ran out while the
   broker was down (`mqtt: shard N/M ready: ... (K expired while down, dropped)`).
 - **Message expiry** a publisher sets is honoured in queues, retained messages and across a restart;
-  `limits.max_message_expiry_s` caps it. **Will delay** holds a Will back for its interval (at most the session's
+  `limits.max_message_expiry_s` caps it. Expired retained messages are cleared by a sweep (at most 64 per 100 ms
+  tick, ADR-275) and when read. **Will delay** holds a Will back for its interval (at most the session's
   expiry) and drops it when the client is back in time.
-- **What is not there yet:** shared subscriptions, subscription identifiers and enhanced authentication (part 3);
-  the broker never sends topic aliases. `mqtt5.enabled = false` refuses 5.0 clients with CONNACK 0x84.
+- **A revoked certificate** (a revocation on the control channel) gets DISCONNECT 0x98 from the core that holds its
+  session, then the close; the connection is cut after 1 s whatever happens. A connection still in its handshake is
+  cut at once.
+- **What is not there, by decision (ADR-275):** enhanced authentication (a CONNECT with an Authentication Method gets
+  CONNACK 0x8C, an AUTH packet DISCONNECT 0x82); topic aliases from the broker (it never sends one; a client's
+  aliases to the broker work); MQTT 3.1. Wills live in RAM: a broker restart loses them. `mqtt5.enabled = false`
+  refuses 5.0 clients with CONNACK 0x84.
+
+### Shared subscriptions (ADR-275)
+
+A client subscribes to `$share/{group}/{filter}` (MQTT 5.0 and 3.1.1 alike); every client that subscribes with the
+same group name and filter joins the group, and each matching message goes to **one** member instead of to all.
+Use it to spread work over several consumers (backends reading `devices/+/telemetry`, say).
+
+- **Groups are per role class.** A group is (role class, group name, filter); the classes are device, service,
+  operator, bootstrap, plaintext and WebSocket login. A device and a service that both subscribe to
+  `$share/g/fleet/#` are in two groups, and each group gets every message: no message crosses from one role to
+  another through a group. The ACL judges the filter after `$share/{group}/` with the subscribe rules of the role
+  (`$share/workers/fleet/#` needs the right to subscribe to `fleet/#`; the group name is not a topic).
+- **Round robin over the online members.** Each group lives on one data core (chosen by a hash of class, name and
+  filter); that core hands each message to the next member that is online, and the member's own core delivers it at
+  min(QoS of the publish, QoS of the member's subscription). With no member online, QoS 0 is dropped
+  (`shared/messages/dropped`) and QoS 1 and 2 go to the queue of the next offline persistent member. A message
+  handed to a member stays with it while its session lives; when the session ends (a clean session closed, its
+  expiry), its unacknowledged QoS 1 messages and its queue go to another member (`shared/messages/redispatched`),
+  QoS 2 in flight never.
+- **No retained messages** are sent for a shared subscription (other filters of the same SUBSCRIBE get theirs).
+  No Local on a share is a protocol error (DISCONNECT 0x82).
+- **The SUBACK waits for the group's core** when it is another core (at most 2 s, then 0x80), so a message published
+  after the SUBACK reaches the new member, and a limit is reported in the SUBACK.
+- **Limits:** `limits.max_shared_groups` (groups one data core may own) and `limits.max_shared_group_members`
+  (members per group), 1024 each, 1 to 65 535; one more is SUBACK 0x97 (3.1.1: 0x80) and counted in
+  `shared/joins/refused`. A shared subscription also counts against `limits.max_subscriptions_per_session`. Each
+  group costs its owner about 120 B plus its name and filter twice, each member 12 B.
+- **Persistence:** a persistent session's shared subscriptions are stored like the others and join their groups
+  again at boot.
+- **`$SYS` through a share** (operators) gets only the `$SYS` messages of the core that owns the group; subscribe to
+  `$SYS/broker/#` directly for the full figures.
+- `mqtt5.shared_subscriptions = false` turns them off: CONNACK says Shared Subscription Available 0 and a `$share/`
+  filter gets SUBACK 0x9E (3.1.1: 0x80).
+
+The console's `status` has a line `shared: N group(s), N member(s); N delivered, N dropped, N handed on, N join(s)
+refused`, and the info reply a `"shared":{...}` object inside `"mqtt5"`, with `"retained_expiring"` and
+`"topic_alias_bytes"` beside it.
+
+### Subscription identifiers (ADR-275)
+
+A 5.0 SUBSCRIBE may carry a Subscription Identifier (1 to 268 435 455); it applies to every filter of that
+SUBSCRIBE. Each PUBLISH the broker sends carries the identifiers of all the session's subscriptions that matched the
+message (one PUBLISH per message, not one per subscription); a delivery through a shared subscription carries that
+subscription's identifier only. Subscribing again to the same filter replaces the identifier (without one: removes
+it). Identifiers are stored with a persistent session (database schema 5) and count against the client's Maximum
+Packet Size. A 3.1.1 subscriber never sees one. `mqtt5.subscription_identifiers = false`: CONNACK says Subscription
+Identifier Available 0 and a SUBSCRIBE that carries one gets SUBACK 0xA1.
 
 ## The console (O2)
 
@@ -193,7 +252,7 @@ sees differently with 5.0 clients:
 | `help` | lists the commands |
 | `status` | version, CPU, memory, disk, clients, messages, certificate, log level |
 | `log level <error\|warn\|info\|debug\|trace>` | lowers or raises the log level (never above the build-time maximum) |
-| `reboot` | resets the machine after 1 s |
+| `reboot` | resets the machine after 1 s; in that second every MQTT 5.0 client is told DISCONNECT 0x8B and closed, and no Will is published (ADR-275) |
 
 Anything else is refused (`error: unknown command; try: help`). There is no
 shell. At most 5 commands in a burst, then one every 2 s. Every command is

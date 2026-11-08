@@ -8,6 +8,35 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **MQTT 5.0 shared subscriptions and Subscription Identifiers** (ROADMAP NEXT-3 part 3, ADR-275; NEXT-3 is done
+  with it). `$share/{group}/{filter}` for 5.0 and 3.1.1 clients: a group is (role class, group, filter), so a device
+  and a service never share one; it lives on one owner data core, which hands each message round robin to one online
+  member at that member's QoS (min of publish and subscription); with no member online QoS 0 is dropped and QoS 1 and
+  2 go to an offline persistent member's queue. No retained messages on a share, No Local on a share is DISCONNECT
+  0x82, the ACL judges the filter after `$share/{group}/`. A SUBSCRIBE whose group lives on another core waits for
+  that core before its SUBACK. When a member's session ends, its unacknowledged QoS 1 messages and its queue go to
+  another member (QoS 2 in flight never). `limits.max_shared_groups` (per data core) and
+  `limits.max_shared_group_members`, 1024 each: one more is SUBACK 0x97 (3.1.1: 0x80). Subscription Identifiers: one
+  per subscription, every matching identifier in one PUBLISH per message, stored with persistent sessions. CONNACK
+  announces both (by leaving the properties out) unless `mqtt5.shared_subscriptions` or
+  `mqtt5.subscription_identifiers` is `false`. Enhanced authentication is refused for good (CONNACK 0x8C; an AUTH
+  after the CONNECT: DISCONNECT 0x82). Part 2's loose ends: retained messages with a Message Expiry Interval are
+  swept (64 per 100 ms tick) instead of only cleared when read; the console's `reboot` tells 5.0 clients DISCONNECT
+  0x8B and publishes no Will; a revoked certificate gets DISCONNECT 0x98 before the close (cut after 1 s anyway); the
+  topic-alias tables are counted in the memory statistics. 0x96, 0x89, 0x8A and 0x9F are never sent, by design. New
+  `$SYS/broker/` topics: `shared/groups`, `shared/members`, `shared/messages/delivered`, `/dropped`,
+  `/redispatched`, `shared/joins/refused`, `retained/expiring`, `memory/topic_aliases`, `disconnects/sent/0x8b`;
+  the info query gains `retained_expiring`, `topic_alias_bytes` and `mqtt5.shared`, the console's `status` a
+  `shared:` line. Configuration format 13 (the two limits; formats 8, 9, 11, 12 and 13 are valid, 10 is refused);
+  the builder page has both limits and keeps `mqtt5.shared_subscriptions` shown with MQTT 5.0 off, since 3.1.1
+  clients share too. Database schema 5 (`subscriptions.sub_id`). The 3.1.1 QoS 0 and QoS 1 routing still makes 9 and
+  15 allocations per message; the release kernel grows by 64 112 B (aarch64, 4 127 976 B) and 86 736 B (x86_64,
+  4 308 600 B). Verified by 20 host tests (`shared_tests.rs`), a new reference-model proptest (`shared_model`: each
+  group exactly once through one member, never across roles; mutation-checked), the ACL oracle, `acl_model` and
+  `qos2_model` with shares, fuzz seeds `mqtt5_shared_and_ids` and `mqtt5_shared_groups`, store golden and power-cut
+  tests for schema 4 to 5, the smoke group `mqtt5` (shares over mTLS, a restart keeping a shared subscription with
+  its identifier, a four-vCPU image with a group of paho and mosquitto workers), and the Paho suite (results in
+  docs/MQTT5-CONFORMANCE.md; an optional CI job `mqtt5-conformance` runs it under TCG when dispatched by hand).
 - **MQTT 5.0 in the broker** (ROADMAP NEXT-3 part 2, ADR-274): every listener (TLS, plaintext, WebSocket) accepts
   MQTT 5.0 beside 3.1.1, chosen per connection by the CONNECT's protocol level (`mqtt5.enabled`, on by default;
   off: CONNACK 0x84). Properties are forwarded to 5.0 subscribers (user properties, content type, response topic,
@@ -17,8 +46,8 @@ All notable changes to this project are documented here. The format follows
   size, 0x98 allowlist, 0x9A retain, ...), reason strings when the client allows them; Session Expiry Interval,
   Message Expiry Interval, Will Delay Interval; Receive Maximum and Maximum Packet Size both ways; topic aliases from
   the client; subscription options (No Local, Retain As Published, Retain Handling); assigned client identifier;
-  Server Keep Alive (`mqtt5.max_keep_alive_s`). Shared subscriptions, subscription identifiers and enhanced
-  authentication are refused cleanly (SUBACK 0x9E / 0xA1, CONNACK 0x8C) until part 3. New `$SYS/broker/` topics:
+  Server Keep Alive (`mqtt5.max_keep_alive_s`). Shared subscriptions and subscription identifiers came with part 3
+  (next entry); enhanced authentication stays refused (CONNACK 0x8C). New `$SYS/broker/` topics:
   `clients/connected/v311` and `/v5`, `messages/expired`, `messages/dropped/too_large`, `sessions/expired`,
   `sessions/expiring`, `wills/delayed`, `wills/pending`, `disconnects/sent/0xNN`, `connections/refused/v5/0xNN`.
   Configuration format 12: `[mqtt5]` (`enabled`, `receive_maximum`, `topic_alias_maximum`, `max_user_properties`,
@@ -110,6 +139,11 @@ All notable changes to this project are documented here. The format follows
   never). Offline longer than that, the session is deleted with its subscriptions and queued messages, also when
   the time ran out while the broker was down (dropped at the next boot, logged per shard). A device that sleeps
   longer than 30 days comes back to an empty session: raise the two keys before updating if your fleet needs that.
+- **Database schema 5** (ADR-275): `subscriptions.sub_id` (`INTEGER NOT NULL DEFAULT 0`, 0..=268 435 455, 0 = no
+  Subscription Identifier), added in the migration's transaction (no table is rebuilt); a schema 4 database is
+  migrated when the kernel or `urmqtt-disk` opens it, and a power cut at any write of the migration leaves schema 4
+  or 5 with every row (golden files `schema4-mqtt5` frozen, `schema5-shared` new). A kernel before this one refuses
+  a schema 5 database.
 - **Database schema 4** (ADR-274): `sessions.expiry_s` and `sessions.offline_since`, `subscriptions.options`,
   `retained` and `queued` gain `props` and `expires_at`. Columns are added in the migration's transaction (no table
   is rebuilt); a schema 3 database is migrated when the kernel or `urmqtt-disk` opens it, and a power cut at any

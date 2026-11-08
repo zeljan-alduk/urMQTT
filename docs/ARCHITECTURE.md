@@ -176,12 +176,17 @@ and calls synchronously, on the core that owns the store:
 
 - MQTT 3.1.1 and 5.0 (5.0 since ADR-274: the CONNECT's protocol level picks the codec per connection, one
   version-neutral broker core; properties travel with the message's `Arc` across cores; session and message expiry,
-  will delay, flow control, topic aliases from the client, subscription options; shared subscriptions and
-  subscription identifiers in part 3). QoS 0, 1 and 2 (QoS 2 since ADR-271: method B, the session's home core holds
+  will delay, flow control, topic aliases from the client, subscription options; since ADR-275 subscription
+  identifiers and shared subscriptions). QoS 0, 1 and 2 (QoS 2 since ADR-271: method B, the session's home core holds
   the packet ids, fan-out to other cores is an ordinary routed message).
 - Supported packets and features: CONNECT/CONNACK, PUBLISH/PUBACK, PUBREC/PUBREL/PUBCOMP, SUBSCRIBE/SUBACK, UNSUBSCRIBE/UNSUBACK, PINGREQ/PINGRESP, DISCONNECT, wildcards `+` and `#`, retained messages, LWT, clean and persistent sessions with bounded offline queues.
 - Topic interning: each core has a topic trie, and sessions store 32-bit node ids. Fan-out to other cores sends a compact routing message (payload handle + topic id), guided by a "which cores have subscribers" bitmask per node.
 - Reconnects to a different core go through the session directory (ADR-011).
+- Shared subscriptions (`$share/{group}/{filter}`, ADR-275): a group is (role class, group, filter) and lives on one
+  owner shard chosen by a hash of the three. Every message already reaches every shard, so the owner sees it once and
+  hands it round robin to one online member; the member's shard delivers it (`CoreMsg::Shared` carries the message's
+  `Arc`). A SUBSCRIBE whose group lives on another shard holds its SUBACK and the connection's next packets until the
+  owner has the member; a delivery that finds its member gone goes back to the owner for another.
 - The default ACL lets a device publish to `devices/{id}/#` and subscribe to `devices/{id}/cmd/#`. Patterns are configurable. ACL checks never touch the DB.
 - Every limit (packet size, topic length and levels, subscriptions, in-flight messages, queue depth, publish rate, connections per core) is a compile-time constant from `deploy/<env>/config.toml`.
 

@@ -318,15 +318,21 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
   paho-mqtt interop, and the smoke group `mqtt_qos2` (client and VM killed in the middle of every flow) on both
   architectures. Open: exactly once across a broker crash while the client is connected (AUDIT A271-W1).
 
-**NEXT-3. MQTT 5.0.** L.
+**NEXT-3. MQTT 5.0.** L. **Done (parts 1 to 3: ADR-273, ADR-274, ADR-275).**
 - Status: **part 1: codec + design done** (`urmqtt_mqtt::v5`, ADR-273, `docs/MQTT5-CONFORMANCE.md`); **part 2: done
   (ADR-274)**: version negotiation on every listener, CONNACK and acknowledgement reason codes, server DISCONNECT,
   session expiry (NEXT-4), message expiry, will delay, Receive Maximum and Maximum Packet Size both ways, topic
   aliases (client to broker), Server Keep Alive, assigned id, subscription options, property forwarding across
   versions and cores, enhanced authentication refused (0x8C); store schema 4, configuration format 12, smoke group
   `mqtt5`, the Paho interoperability suite (`scripts/mqtt5-conformance.sh`, results in docs/MQTT5-CONFORMANCE.md).
-  Part 3 (shared subscriptions, subscription identifiers, enhanced auth if wanted; ADR-275 onwards) is open. D-13
-  answered: full 5.0 in phases.
+  **Part 3: done (ADR-275)**: shared subscriptions (`$share/{group}/{filter}`, also for 3.1.1 clients; a group per
+  role class on one owner shard, round robin over its online members, `limits.max_shared_groups` and
+  `limits.max_shared_group_members`), Subscription Identifiers (stored, schema 5), enhanced authentication refused for
+  good (0x8C; SCRAM would need its own ADR), and part 2's loose ends: a retained-expiry sweep, DISCONNECT 0x8B at
+  `reboot`, 0x98 for a revoked certificate, the topic-alias tables counted; configuration format 13, the smoke group
+  `mqtt5` with shared groups over four vCPUs, an optional CI job `mqtt5-conformance` (the Paho suite under TCG).
+  Left by decision (KNOWN-ISSUES): no AUTH exchange, no topic aliases from the broker, Wills not persisted across a
+  restart. D-13 answered: full 5.0 in phases.
 - What: protocol level 5 alongside 3.1.1: properties, reason codes, session and message expiry, topic aliases,
   response topic and correlation data, user properties, flow control (receive maximum); shared subscriptions as a
   separate decision.
@@ -504,7 +510,7 @@ Questions, not assumptions. Each blocks one or more items above.
 | D-10 | Disk key outside the image: TPM sealing (ADR-254), network key release, confidential VMs, or "the ISO is a secret" for good? | LATER-7 |
 | D-11 | Which clouds after KVM VPSes, if any: AWS, GCP, Azure? Each is at least one large driver. | LATER-2, LATER-3 |
 | D-12 | Is bare metal still a goal before 1.0, and is the Intel PC available for the inventory? | LATER-4, LATER-5 |
-| D-13 | MQTT 5.0: full, or a subset (properties, reason codes, session expiry) first? Shared subscriptions in or out? **Answered by the owner: full MQTT 5.0, in phases (ADR-273: codec and design done; broker in parts 2 and 3; shared subscriptions in part 3).** (QoS 2, which 5.0 needs, is done: NEXT-2, ADR-271.) | NEXT-3 |
+| D-13 | MQTT 5.0: full, or a subset (properties, reason codes, session expiry) first? Shared subscriptions in or out? **Answered by the owner: full MQTT 5.0, in phases (ADR-273: codec and design done; broker in parts 2 and 3; shared subscriptions in part 3). Done: ADR-274 (part 2), ADR-275 (part 3, shared subscriptions and subscription identifiers in, enhanced authentication refused).** (QoS 2, which 5.0 needs, is done: NEXT-2, ADR-271.) | NEXT-3 |
 | D-14 | D1: deploy the demo broker, on which machine and name? | D1 |
 | D-15 | A support period (CRA) and an LTS line, before or at 1.0? | VULNERABILITY-HANDLING §6 |
 | D-16 | Should a stricter, memory-hard password hash (Argon2) be added for plaintext accounts? (PROGRESS P1, open.) **Answered 2026-11-07 (ADR-267): not now.** PBKDF2 stays; its default goes from 10 000 to 100 000 iterations (at most 200 000, below OWASP's 600 000 because a check runs in one go on a data core for every login); the login admission keeps half of each core whatever a check costs. Argon2id would reserve its memory per data core (OWASP's minimum is 19 MiB) and add a vetted `no_std` crate to the TCB, for passwords that plaintext MQTT sends in the clear anyway. Revisit with run-time accounts (NOW-15), or once a check can be split across handler runs. | plaintext |
