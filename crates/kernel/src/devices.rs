@@ -1352,7 +1352,7 @@ fn probe_pci(
     #[cfg(feature = "virtio-gpu")]
     virtio_gpu_console(&mut ecam, env, gpu, &displays);
     #[cfg(not(feature = "virtio-gpu"))]
-    let _ = (gpu, &displays);
+    let _ = (gpu, &displays, env);
     vdev::check_configuration();
     crate::iommu::summary();
     Ok(())

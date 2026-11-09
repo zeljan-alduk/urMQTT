@@ -43,7 +43,7 @@ pub const FECTL_IM: u32 = 1 << 31;
 /// What CAP and ECAP say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Caps {
-    /// Domain IDs: 2^(4 + 2 * ND).
+    /// Domain IDs: 2^(4 + 2n), n the CAP field in bits 2:0.
     pub domains: u32,
     /// Supported adjusted guest address widths (bit 1 = 39-bit 3-level,
     /// bit 2 = 48-bit 4-level, bit 3 = 57-bit 5-level).
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn domain_ids_are_bounded() {
         let mut unit = Unit::new();
-        // ND = 0: 16 domains, 0 reserved.
+        // CAP bits 2:0 = 0: 16 domains, 0 reserved.
         unit.r.set64(CAP, QEMU_CAP & !7);
         let mut m = Mem::default();
         let mut v = Vtd::init(&mut unit, &mut m).unwrap();

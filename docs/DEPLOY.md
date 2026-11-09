@@ -243,6 +243,23 @@ says which: `net: receive wake-up: interrupt (MSI-X via ...), on probation ...` 
 (`net: receive wake-up: 8 frames waited after a sleep without the receive interrupt; polling ...`) and the broker
 polls from then on. `"off"` forces polling (configuration format 11).
 
+**DMA isolation through the IOMMU (H4b, ADR-305 to ADR-307).** `devices.iommu` decides whether the broker drives
+the machine's IOMMU (Intel VT-d from the ACPI DMAR table, AMD-Vi from IVRS, Arm SMMUv3 from IORT or the device
+tree). `"off"` (the default) leaves it as the firmware set it, as every release before; the boot log names an IOMMU
+it found (`iommu: ...: not used (devices.iommu = "off")`). With `"auto"` or `"require"` every device's DMA is
+blocked from before the first driver runs, and each device the broker drives gets a domain holding only its own
+buffers; the boot log shows each domain and a summary (`iommu: active: 1 unit(s), 3 device domain(s), ...`), and
+`$SYS/broker/iommu/faults` counts blocked accesses. `"require"` refuses to boot when there is no IOMMU, a unit does
+not come up, or a driven device is outside every unit's scope or bypasses it (a virtio device must offer
+VIRTIO_F_ACCESS_PLATFORM: in QEMU `iommu_platform=on,disable-legacy=on`); `"auto"` warns and goes on. Use
+`"require"` on bare metal and under a hypervisor whose device models you do not trust; in an ordinary VPS the
+devices are the hypervisor's and an emulated IOMMU slows every DMA, so `"off"` stays the default. QEMU:
+`-device intel-iommu,caching-mode=on` (q35; under KVM with `-machine kernel-irqchip=split` when `intremap=on`),
+`-device amd-iommu,dma-remap=on`, or `-machine virt,iommu=smmuv3`; `scripts/run-qemu.sh --iommu intel|amd|smmuv3`
+does all of it. Any value but `"off"` needs a kernel that reads configuration format 18 (v0.6.0 or newer); an older
+template refuses the configuration (`urmqtt-config pack --iso`, the builder page). Tested against QEMU 11.1's
+models only, not on real hardware; interrupt remapping is not enabled (ADR-307).
+
 **Single-disk model (S1, STORAGE-PLAN §2a).** The disk the VM boots from is
 the only one urMQTT writes:
 - It finds that disk by the GPT disk GUID the bootloader reports.

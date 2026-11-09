@@ -136,7 +136,8 @@ impl Env for KEnv {
 }
 
 enum Driver {
-    Vtd(Vtd<Mmio>),
+    /// Boxed: its per-bus context-table list is 2 KiB.
+    Vtd(alloc::boxed::Box<Vtd<Mmio>>),
     Amd(AmdVi<Mmio>),
     Smmu(Smmu<Mmio>),
 }
@@ -366,7 +367,7 @@ fn bring_up(kind: Kind, base: u64, max_id: u32) -> Result<Unit, Error> {
             Ok(Unit {
                 kind,
                 base,
-                drv: Driver::Vtd(v),
+                drv: Driver::Vtd(alloc::boxed::Box::new(v)),
                 env,
             })
         }

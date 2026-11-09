@@ -44,7 +44,7 @@ mod arm {
     pub const VALID_TABLE: u64 = 0b11;
     pub const ATTR_INDEX_SHIFT: u32 = 2;
     /// AP[1]: unprivileged access too (a PCI request may be either).
-    pub const AP_EL0: u64 = 1 << 6;
+    pub const AP_UNPRIV: u64 = 1 << 6;
     /// AP[2]: read only.
     pub const AP_RO: u64 = 1 << 7;
     pub const SH_INNER: u64 = 0b11 << 8;
@@ -83,7 +83,7 @@ impl Format {
                 let attr = if access.device { 1 } else { 0 };
                 a | arm::VALID_TABLE
                     | (attr << arm::ATTR_INDEX_SHIFT)
-                    | arm::AP_EL0
+                    | arm::AP_UNPRIV
                     | if access.write { 0 } else { arm::AP_RO }
                     | if access.device { 0 } else { arm::SH_INNER }
                     | arm::AF

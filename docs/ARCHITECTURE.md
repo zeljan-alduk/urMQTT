@@ -42,7 +42,7 @@ builds only, enforced at build time).
 5. **Platform.** DTB or ACPI tables are reduced to one `PlatformInfo` (CPUs, GIC, timer IRQs, UART, PCIe ECAM, PSCI conduit).
 6. **Interrupts, time, entropy.** The GIC comes up (GICv3 distributor and redistributors, or a GICv2 distributor and CPU interface on GIC-400 hosts, ADR-039), along with the generic timer, the CSPRNG seeded from `RNDR` or virtio-rng. With no entropy source, the kernel halts with a clear error.
 7. **SMP.** The application processors start (Limine MP or PSCI `CPU_ON`). Per-CPU data lives behind `TPIDR_EL1`.
-8. **Devices.** PCIe enumeration, then virtio-blk (data disk), virtio-net (queues per core) and virtio-rng.
+8. **Devices.** PCIe enumeration; with `devices.iommu` not `off`, the IOMMU (VT-d, AMD-Vi or SMMUv3) comes up blocking every device's DMA (H4b, ADR-305); then virtio-blk (data disk), virtio-net (queues per core) and virtio-rng, each given an IOMMU domain with only its own buffers as it allocates them.
 9. **Storage.** The data disk superblock is checked, SQLite opens in WAL + `locking_mode=EXCLUSIVE`, `PRAGMA quick_check` runs, and telemetry segments are recovered.
 10. **Network.** DHCPv4 (or static), then the TLS listener on 8883.
 11. The kernel prints `URMQTT READY`.
@@ -216,4 +216,5 @@ print identical summaries.
 - `kernel` depends on everything. Nothing depends on `kernel`.
 - The host-testable crates (`timer-wheel`, `tcp`, `mqtt`, `broker`, `tls` record layer, `net` parsing, `config`, `platform` parsers) never touch registers. Hardware access sits behind traits implemented in `arch-aarch64`, `virtio` and `kernel`.
 - `broker` is tested end to end over an in-memory transport.
+- The IOMMU drivers (`iommu`) are host-testable too: registers and table memory are traits the kernel implements (ADR-305).
 - `unsafe` is allowed only in `arch-aarch64`, `mm`, `pci`, `virtio`, `store` (FFI) and minimal `kernel` glue, and every block carries a `// SAFETY:` comment (enforced by `clippy::undocumented_unsafe_blocks`).
