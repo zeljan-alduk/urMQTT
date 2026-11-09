@@ -215,6 +215,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "control_account"
+path = "fuzz_targets/control_account.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "gpt_parse"
 path = "fuzz_targets/gpt_parse.rs"
 test = false
