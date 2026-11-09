@@ -1210,11 +1210,11 @@ pub enum Probe {
     /// Both superblock slots blank: it would be formatted.
     Blank,
     Plain,
-    /// Encrypted; `slots` is empty (all `None`) when the key is in the
-    /// image only.
+    /// Encrypted; `slots` says which key slots are in use (none when the
+    /// key is in the image only).
     Encrypted {
         uuid: [u8; 16],
-        slots: KeySlots,
+        slots: [bool; SLOTS],
     },
 }
 
@@ -1233,7 +1233,7 @@ pub fn probe(dev: &mut dyn BlockDevice) -> Result<Probe, DiskError> {
         Some((l, _)) if !l.encrypted() => Probe::Plain,
         Some((l, _)) => Probe::Encrypted {
             uuid: l.uuid,
-            slots: l.key_slots,
+            slots: l.key_slots.map(|s| s.is_some()),
         },
     })
 }

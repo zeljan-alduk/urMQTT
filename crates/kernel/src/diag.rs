@@ -303,7 +303,7 @@ pub fn run(
 
 /// One typed character from the serial port, the PS/2 keyboard, a
 /// virtio-console or a virtio-input keyboard (ADR-258).
-fn read_byte(ps2: &mut Ps2) -> Option<u8> {
+pub(crate) fn read_byte(ps2: &mut Ps2) -> Option<u8> {
     if let Some(b) = urmqtt_log::read_serial_byte() {
         return Some(b);
     }

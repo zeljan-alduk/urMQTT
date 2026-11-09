@@ -328,6 +328,9 @@ pub mod tag {
     // apart from the others of v0.6.0 so that items built in parallel do not
     // collide.
     pub const DEV_IOMMU: u16 = 318;
+    // A disk key that is not in the image (LATER-7, ADR-328): format
+    // version 22, a tag apart from the other v0.6.0 items.
+    pub const ST_DISK_KEY_SOURCE: u16 = 365;
 }
 
 use tag as t;
@@ -337,6 +340,9 @@ pub const IDENTITY_FIELDS: &[&str] = &["cn", "san_uri"];
 pub const STORAGE_MODES: &[&str] = &["disk", "auto", "ram"];
 pub const DISCARD_MODES: &[&str] = &["auto", "off"];
 pub const ENCRYPTION_MODES: &[&str] = &["off", "aes-256-xts"];
+/// Where the disk key of an encrypted data partition comes from
+/// (`storage.disk_key_source`, ADR-328); the first is the default.
+pub const DISK_KEY_SOURCES: &[&str] = &["image", "console"];
 pub const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 pub const ENTROPY_FALLBACKS: &[&str] = &["jitter", "none"];
 pub const REGISTRY_MODES: &[&str] = &["open", "allowlist"];
@@ -1619,6 +1625,19 @@ pub static FIELDS: &[Field] = &[
             "A trial boot not confirmed within this many seconds resets the machine, which uses one of its trial boots; 0: it waits as long as it runs. When not 0, longer than update.confirm_after_s. Format 17.",
         ),
         17,
+    ),
+    // A disk key that is not in the image (LATER-7, ADR-328): format 22.
+    since(
+        f(
+            t::ST_DISK_KEY_SOURCE,
+            "storage.disk_key_source",
+            Kind::Enum {
+                variants: DISK_KEY_SOURCES,
+                default: 0,
+            },
+            "Where the key of an encrypted data partition comes from. image (the default): storage.disk_key, inside the image, so whoever has the ISO can read a copied disk. console: the image holds no key; the disk key is wrapped under a passphrase in the data partition's header, and the kernel asks for the passphrase on the console (serial, VNC keyboard or virtio-console) at every boot, before the store opens and before any listener: an unattended reboot waits for an operator. Needs storage.encryption and no storage.disk_key. Format 22.",
+        ),
+        22,
     ),
 ];
 

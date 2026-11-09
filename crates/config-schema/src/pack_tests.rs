@@ -253,6 +253,9 @@ fn enum_variants_agree() {
             if f.key == "storage.encryption" && *v != "off" {
                 continue; // needs a key file; covered by encryption_tests
             }
+            if f.key == "storage.disk_key_source" && *v != "image" {
+                continue; // needs encryption; covered by encryption_tests
+            }
             let t = pack_plain(&with(f.key, &format!("{v:?}"))).is_ok();
             let mut b = Builder::new();
             b.variant(f.tag, i as u8).unwrap();

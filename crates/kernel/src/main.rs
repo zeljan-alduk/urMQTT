@@ -106,6 +106,8 @@ mod time_sync;
 #[cfg(target_os = "none")]
 mod trap;
 #[cfg(target_os = "none")]
+mod unlock;
+#[cfg(target_os = "none")]
 mod vdev;
 #[cfg(target_os = "none")]
 mod vm;

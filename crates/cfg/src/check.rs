@@ -761,10 +761,25 @@ fn storage(b: &Blob<'_>, dev: bool) -> Result<(), CfgError> {
             }
         }
     }
-    // Encryption at rest (S7): on needs a usable key, off takes none.
+    // Encryption at rest (S7): on needs a usable key, off takes none. With
+    // the key from the console (LATER-7, ADR-328) the image holds none.
     let on = b.variant(tag::ST_ENCRYPTION) != 0;
     let key = b.bin(tag::ST_DISK_KEY);
-    if on {
+    let console = b.variant(tag::ST_DISK_KEY_SOURCE) != 0;
+    if console {
+        if !on {
+            return Err(err(
+                "storage.disk_key_source",
+                "\"console\" only with storage.encryption = \"aes-256-xts\"",
+            ));
+        }
+        if !key.is_empty() {
+            return Err(err(
+                "storage.disk_key",
+                "not with storage.disk_key_source = \"console\": the point is that the image holds no key",
+            ));
+        }
+    } else if on {
         if crate::diskkey::check_key(key).is_err() {
             return Err(err(
                 "storage.disk_key",

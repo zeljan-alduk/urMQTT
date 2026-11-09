@@ -29,7 +29,9 @@
 use aes::Aes256;
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
+/// Re-exported so the kernel wipes key material without its own dependency.
+pub use zeroize::Zeroizing;
 
 pub use urmqtt_cfg::diskkey::KEY_BYTES;
 
@@ -204,6 +206,15 @@ fn derive(
 
 const N: usize = KEY_BYTES / 8;
 
+/// One AES block from the integrity value and a 64-bit block.
+fn join(a: &[u8; 8], r: &[u8; 8]) -> GenericArray<u8, aes::cipher::consts::U16> {
+    let mut b = GenericArray::from([0u8; 16]);
+    let (hi, lo) = b.split_at_mut(8);
+    hi.copy_from_slice(a);
+    lo.copy_from_slice(r);
+    b
+}
+
 /// RFC 3394 section 2.2.1 over `r` in place (n = `r.len()` 64-bit blocks);
 /// returns the integrity value `A`.
 pub fn wrap_blocks(kek: &[u8; 32], r: &mut [[u8; 8]]) -> [u8; 8] {
@@ -212,15 +223,14 @@ pub fn wrap_blocks(kek: &[u8; 32], r: &mut [[u8; 8]]) -> [u8; 8] {
     let mut a = KW_IV;
     for j in 0..6u64 {
         for (i, ri) in r.iter_mut().enumerate() {
-            let mut b = GenericArray::from([0u8; 16]);
-            b[..8].copy_from_slice(&a);
-            b[8..].copy_from_slice(ri);
+            let mut b = join(&a, ri);
             aes.encrypt_block(&mut b);
             let t = n * j + i as u64 + 1;
-            for ((o, x), y) in a.iter_mut().zip(&b[..8]).zip(t.to_be_bytes()) {
+            let (hi, lo) = b.split_at(8);
+            for ((o, x), y) in a.iter_mut().zip(hi).zip(t.to_be_bytes()) {
                 *o = x ^ y;
             }
-            ri.copy_from_slice(&b[8..]);
+            ri.copy_from_slice(lo);
             b.zeroize();
         }
     }
@@ -235,14 +245,15 @@ pub fn unwrap_blocks(kek: &[u8; 32], mut a: [u8; 8], r: &mut [[u8; 8]]) -> bool 
     for j in (0..6u64).rev() {
         for (i, ri) in r.iter_mut().enumerate().rev() {
             let t = n * j + i as u64 + 1;
-            let mut b = GenericArray::from([0u8; 16]);
-            for ((o, x), y) in b[..8].iter_mut().zip(&a).zip(t.to_be_bytes()) {
-                *o = x ^ y;
+            let mut x = a;
+            for (o, y) in x.iter_mut().zip(t.to_be_bytes()) {
+                *o ^= y;
             }
-            b[8..].copy_from_slice(ri);
+            let mut b = join(&x, ri);
             aes.decrypt_block(&mut b);
-            a.copy_from_slice(&b[..8]);
-            ri.copy_from_slice(&b[8..]);
+            let (hi, lo) = b.split_at(8);
+            a.copy_from_slice(hi);
+            ri.copy_from_slice(lo);
             b.zeroize();
         }
     }
@@ -252,7 +263,7 @@ pub fn unwrap_blocks(kek: &[u8; 32], mut a: [u8; 8], r: &mut [[u8; 8]]) -> bool 
 /// RFC 3394 key wrap of the 64-byte disk key.
 pub fn wrap(kek: &[u8; 32], key: &[u8; KEY_BYTES]) -> [u8; WRAPPED_BYTES] {
     let mut r = Zeroizing::new([[0u8; 8]; N]);
-    for (ri, c) in r.iter_mut().zip(key.chunks_exact(8)) {
+    for (ri, c) in r.iter_mut().zip(key.as_chunks::<8>().0) {
         ri.copy_from_slice(c);
     }
     let a = wrap_blocks(kek, &mut r[..]);
@@ -270,7 +281,7 @@ pub fn unwrap(kek: &[u8; 32], c: &[u8; WRAPPED_BYTES]) -> Option<Zeroizing<[u8; 
     let mut a = [0u8; 8];
     a.copy_from_slice(c.get(..8)?);
     let mut r = Zeroizing::new([[0u8; 8]; N]);
-    for (ri, ch) in r.iter_mut().zip(c.get(8..)?.chunks_exact(8)) {
+    for (ri, ch) in r.iter_mut().zip(c.get(8..)?.as_chunks::<8>().0) {
         ri.copy_from_slice(ch);
     }
     if !unwrap_blocks(kek, a, &mut r[..]) {

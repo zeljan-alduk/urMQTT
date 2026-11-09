@@ -7,7 +7,7 @@ import test from 'node:test';
 
 import { buildModel, buildToml, changedIds, decodeHash, emptyState, encodeHash, importToml, isApplicable } from '../web/src/core.js';
 import { loadBuilder } from '../web/src/wasm.js';
-import { WASM, haveWasm } from './helpers.mjs';
+import { FORMAT, WASM, haveWasm } from './helpers.mjs';
 
 if (!haveWasm()) {
   console.log(`skipped: needs ${WASM} (make builder)`);
@@ -28,7 +28,7 @@ const withPlaintext = s => Object.assign(s.values, {
 });
 
 test('the limit is in [limits], off by default, 0 to 1024, the only key of format 15', () => {
-  assert.equal(model.formatVersion, 18);
+  assert.equal(model.formatVersion, FORMAT);
   assert.ok(model.sections.find(s => s.id === 'limits').fields.some(f => f.id === ID));
   const f = model.byId.get(ID);
   assert.deepEqual([f.default, f.min, f.max, f.since], [0, 0, 1024, 15]);

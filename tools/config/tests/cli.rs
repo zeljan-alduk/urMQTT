@@ -1239,7 +1239,7 @@ fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
 /// this one 18. A configuration that needs no newer format than the template's kernel reads is written into it as
 /// before; one that needs more (the virtio-gpu console: 5, a `[devices]` key: 6, `network.mtu`: 7,
 /// `limits.publisher_backpressure = "off"`: 8, a `[websocket]` key: 9, `devices.virtio_net_interrupt = "off"`: 11,
-/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13, `limits.max_connections_per_ip`: 14, `limits.max_runtime_accounts`: 15, a `[metrics]` key: 16, an `[update]` key: 17, `devices.iommu`: 18) is refused with the reason, before a byte
+/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13, `limits.max_connections_per_ip`: 14, `limits.max_runtime_accounts`: 15, a `[metrics]` key: 16, an `[update]` key: 17, `devices.iommu`: 18, `storage.disk_key_source = "console"`: 22) is refused with the reason, before a byte
 /// of the template changes, instead of giving an image whose kernel would refuse it at boot.
 #[test]
 fn templates_of_earlier_releases_take_what_their_kernel_reads() {
@@ -1300,6 +1300,11 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
     b.variant(tag::DEV_IOMMU, 2).unwrap();
     let iommu = b.finish(false).unwrap();
     assert_eq!(header(&iommu), 18);
+    let mut b = Builder::new();
+    b.variant(tag::ST_ENCRYPTION, 1).unwrap();
+    b.variant(tag::ST_DISK_KEY_SOURCE, 1).unwrap();
+    let console_key = b.finish(false).unwrap();
+    assert_eq!(header(&console_key), 22);
     for (release, reads) in [
         ("v0.2.0", 2u16),
         ("v0.2.1", 3),
@@ -1320,6 +1325,8 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
         ("format 16", 16),
         // A tree with the A/B update keys (ADR-297), without the IOMMU key (ADR-305).
         ("format 17", 17),
+        // A tree with the IOMMU key (ADR-305), without the console disk key source (ADR-328).
+        ("format 18", 18),
         ("this tree", urmqtt_cfg::FORMAT_VERSION),
     ] {
         let empty = Builder::new().finish_as(false, reads).unwrap();
@@ -1341,6 +1348,7 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             ("[metrics]", &metrics, 16),
             ("update.confirm", &update, 17),
             ("devices.iommu", &iommu, 18),
+            ("storage.disk_key_source", &console_key, 22),
         ] {
             match image::configure_iso(&tpl, blob) {
                 Ok(_) => assert!(

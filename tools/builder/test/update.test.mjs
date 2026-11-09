@@ -7,7 +7,7 @@ import test from 'node:test';
 
 import { buildModel, buildToml, changedIds, decodeHash, emptyState, encodeHash, importToml } from '../web/src/core.js';
 import { loadBuilder } from '../web/src/wasm.js';
-import { WASM, haveWasm } from './helpers.mjs';
+import { FORMAT, WASM, haveWasm } from './helpers.mjs';
 
 if (!haveWasm()) {
   console.log(`skipped: needs ${WASM} (make builder)`);
@@ -22,7 +22,7 @@ const version = blob => blob[8] | (blob[9] << 8);
 const KEYS = ['update.confirm', 'update.confirm_after_s', 'update.trial_timeout_s'];
 
 test('the section is last, with the documented defaults and ranges, the only keys of format 17', () => {
-  assert.equal(model.formatVersion, 18);
+  assert.equal(model.formatVersion, FORMAT);
   const ids = model.sections.map(s => s.id);
   assert.equal(ids.indexOf('update'), ids.indexOf('mqtt5') + 1);
   const update = model.sections.find(s => s.id === 'update').fields.map(f => [f.id, f.default]);

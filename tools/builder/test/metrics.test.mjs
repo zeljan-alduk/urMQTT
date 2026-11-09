@@ -7,7 +7,7 @@ import test from 'node:test';
 
 import { buildModel, buildToml, changedIds, decodeHash, emptyState, encodeHash, importToml, isApplicable } from '../web/src/core.js';
 import { loadBuilder } from '../web/src/wasm.js';
-import { WASM, haveWasm } from './helpers.mjs';
+import { FORMAT, WASM, haveWasm } from './helpers.mjs';
 
 if (!haveWasm()) {
   console.log(`skipped: needs ${WASM} (make builder)`);
@@ -22,7 +22,7 @@ const version = blob => blob[8] | (blob[9] << 8);
 const KEYS = ['enabled', 'port', 'allow_from', 'max_connections', 'max_connections_per_ip', 'request_timeout_s'].map(k => `metrics.${k}`);
 
 test('the six keys are in their own section with the documented defaults, the only keys of format 16', () => {
-  assert.equal(model.formatVersion, 18);
+  assert.equal(model.formatVersion, FORMAT);
   const section = model.sections.find(s => s.id === 'metrics');
   assert.deepEqual(section.fields.map(f => f.id), KEYS);
   assert.deepEqual(model.fields.filter(x => x.since === 16).map(x => x.id), KEYS);

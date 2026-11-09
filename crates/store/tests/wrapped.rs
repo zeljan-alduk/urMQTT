@@ -85,7 +85,7 @@ fn a_wrapped_disk_opens_with_its_passphrase_and_nothing_else() {
     match probe(m.device().as_mut()).unwrap() {
         Probe::Encrypted { uuid, slots } => {
             assert_eq!(uuid, UUID);
-            assert!(slots[0].is_some() && slots[1].is_none());
+            assert_eq!(slots, [true, false]);
         }
         p => panic!("{p:?}"),
     }

@@ -271,7 +271,9 @@ fn read_files(
             Err(m) => errors.push(cerr("tls.key", m)),
         }
     }
+    // With the key from the console (LATER-7) there is no file to read.
     if cfg.storage.encryption == crate::EncryptionMode::Aes256Xts
+        && cfg.storage.disk_key_source == crate::DiskKeySource::Image
         && let Some(b) = read(&mut errors, "storage.disk_key", &cfg.storage.disk_key)
     {
         match urmqtt_cfg::diskkey::parse_key_file(&b) {
@@ -505,6 +507,8 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     if let Some(k) = &f.disk_key {
         b.bin(tag::ST_DISK_KEY, k)?;
     }
+    // ADR-328: "image" is the default and writes nothing; "console" needs format 22.
+    b.variant(tag::ST_DISK_KEY_SOURCE, s.disk_key_source.variant())?;
     b.bool(tag::ST_REQUIRE_FLUSH, s.require_flush)?;
     b.bool(tag::ST_REQUIRE_DATA_DISK, s.require_data_disk)?;
     b.bool(tag::ST_REFUSE_ON_CORRUPTION, s.refuse_on_corruption)?;

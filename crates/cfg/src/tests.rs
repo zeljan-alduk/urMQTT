@@ -215,15 +215,16 @@ fn structural_attacks_fail_closed() {
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, 10 which no format ever used, and
     // one above the newest).
-    for unknown in [0u8, 10, 19, 20] {
+    for unknown in [0u8, 10, 19, 20, 21, 23] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
     // The versions of the formats that came after 7, each its own feature
     // (8 back-pressure, 9 WebSocket, 11 the receive interrupt, 12 MQTT 5.0,
     // 13 the shared-group limits, 14 the per-address connection limit, 15 the run-time
-    // account limit, 16 the metrics endpoint, 17 the A/B update keys, 18 the IOMMU).
-    for known in [8u8, 9, 11, 12, 13, 14, 15, 16, 17, 18] {
+    // account limit, 16 the metrics endpoint, 17 the A/B update keys, 18 the IOMMU,
+    // 22 the disk key source; 19 to 21 are other v0.6.0 items, unknown here).
+    for known in [8u8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 22] {
         let v = with_version(&assemble(&ok), known);
         assert_eq!(Blob::parse(&v).map(|b| b.version()), Ok(u16::from(known)));
     }
@@ -245,7 +246,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 18));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 22));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -254,7 +255,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[18, 0],
+        &[22, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -404,6 +405,67 @@ fn net_interrupt_needs_format_11_and_auto_writes_nothing() {
     assert!(Blob::parse(&with_version(&blob, 10)).is_err());
     assert!(Blob::parse(&with_version(&blob, 7)).is_err());
     assert!(Builder::new().variant(tag::DEV_NET_INTERRUPT, 2).is_err());
+}
+
+/// LATER-7, ADR-328: `storage.disk_key_source` came with format 22. "image"
+/// (the default) writes nothing, so every existing configuration keeps its
+/// version; "console" needs 22 (an older kernel refuses the image by its
+/// version rather than look for a key that is not there), encryption on and
+/// no key in the image.
+#[test]
+fn disk_key_source_needs_format_22_encryption_and_no_key() {
+    use crate::fields::DISK_KEY_SOURCES;
+    let f = crate::fields::by_key("storage.disk_key_source").unwrap();
+    assert_eq!(
+        (f.tag, f.since, f.dev_only),
+        (tag::ST_DISK_KEY_SOURCE, 22, false)
+    );
+    assert_eq!(DISK_KEY_SOURCES, ["image", "console"]);
+    let mut img = Builder::new();
+    img.variant(tag::ST_DISK_KEY_SOURCE, 0).unwrap();
+    assert_eq!(img.finish(false).unwrap(), empty());
+    assert_eq!(
+        Blob::parse(&empty())
+            .unwrap()
+            .variant(tag::ST_DISK_KEY_SOURCE),
+        0
+    );
+    // Console, encryption on, no key: format 22, accepted.
+    let mut b = Builder::new();
+    b.variant(tag::ST_ENCRYPTION, 1).unwrap();
+    b.variant(tag::ST_DISK_KEY_SOURCE, 1).unwrap();
+    assert_eq!(b.lowest_version(), 22);
+    assert!(b.finish_as(false, 18).is_err());
+    assert!(
+        b.finish_as(false, 21).is_err(),
+        "21 is not this code's format"
+    );
+    let blob = b.finish(false).unwrap();
+    let p = Blob::parse(&blob).unwrap();
+    assert_eq!((p.version(), p.variant(tag::ST_DISK_KEY_SOURCE)), (22, 1));
+    check::check(&p, false).unwrap();
+    assert!(Blob::parse(&with_version(&blob, 18)).is_err());
+    // Console without encryption.
+    let mut b = Builder::new();
+    b.variant(tag::ST_DISK_KEY_SOURCE, 1).unwrap();
+    let e = b.finish(false).unwrap_err();
+    assert!(
+        format!("{e:?}").contains("storage.disk_key_source"),
+        "{e:?}"
+    );
+    // Console with a key in the image.
+    let mut b = Builder::new();
+    b.variant(tag::ST_ENCRYPTION, 1).unwrap();
+    b.variant(tag::ST_DISK_KEY_SOURCE, 1).unwrap();
+    let k: [u8; 64] = core::array::from_fn(|i| i as u8);
+    b.bin(tag::ST_DISK_KEY, &k).unwrap();
+    let e = b.finish(false).unwrap_err();
+    assert!(format!("{e:?}").contains("storage.disk_key"), "{e:?}");
+    // The image source with encryption still needs its key.
+    let mut b = Builder::new();
+    b.variant(tag::ST_ENCRYPTION, 1).unwrap();
+    assert!(b.finish(false).is_err());
+    assert!(Builder::new().variant(tag::ST_DISK_KEY_SOURCE, 2).is_err());
 }
 
 /// LATER-5, ADR-305: `devices.iommu` came with format 18. "off" (the
