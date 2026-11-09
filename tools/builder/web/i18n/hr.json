@@ -153,6 +153,8 @@
   "enum.devices.iommu.off": "ostaje kako ga je postavio firmver",
   "enum.devices.iommu.auto": "kad ga stroj ima",
   "enum.devices.iommu.require": "bez njega ne pokreće se",
+  "enum.devices.virtio_net_queues.auto": "jedan po podatkovnoj jezgri kad mrežna kartica usmjerava tokove (RSS)",
+  "enum.devices.virtio_net_queues.single": "uvijek jedan, jezgra 0 usmjerava svaki okvir",
   "enum.websocket.auth.mtls": "klijentski certifikat, kao na TLS portu",
   "enum.websocket.auth.password": "korisničko ime i lozinka (za preglednike)",
   "enum.limits.publisher_backpressure.single": "zaustavi izdavača kad je jedini pretplatnik pun",

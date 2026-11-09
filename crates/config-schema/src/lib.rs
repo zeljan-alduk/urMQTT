@@ -215,6 +215,29 @@ impl NetInterrupt {
     }
 }
 
+/// How many virtio-net queue pairs the NIC uses (`devices.virtio_net_queues`,
+/// ADR-313).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetQueues {
+    /// One per data core where the device steers flows itself (MQ with
+    /// RSS), else one (the default).
+    #[default]
+    Auto,
+    /// Always one.
+    Single,
+}
+
+impl NetQueues {
+    /// The blob's variant (an index into `urmqtt_cfg::fields::NET_QUEUE_MODES`).
+    pub const fn variant(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::Single => 1,
+        }
+    }
+}
+
 /// DMA remapping (`devices.iommu`, ADR-305).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -240,7 +263,8 @@ impl IommuMode {
 }
 
 /// The `[devices]` section (ADR-257): one key per optional virtio driver, the
-/// NIC's receive interrupt (ADR-270) and DMA remapping (ADR-305).
+/// NIC's receive interrupt (ADR-270) and queue pairs (ADR-313), and DMA
+/// remapping (ADR-305).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Devices {
@@ -250,6 +274,9 @@ pub struct Devices {
     /// `devices.iommu` (format 18).
     #[serde(default)]
     pub iommu: IommuMode,
+    /// `devices.virtio_net_queues` (format 19).
+    #[serde(default)]
+    pub virtio_net_queues: NetQueues,
     #[serde(default)]
     pub virtio_console: DeviceMode,
     #[serde(default)]

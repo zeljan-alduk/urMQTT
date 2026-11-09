@@ -153,6 +153,8 @@
   "enum.devices.iommu.off": "se deja como lo configuró el firmware",
   "enum.devices.iommu.auto": "si la máquina tiene uno",
   "enum.devices.iommu.require": "negarse a arrancar sin él",
+  "enum.devices.virtio_net_queues.auto": "uno por núcleo de datos cuando la tarjeta reparte los flujos (RSS)",
+  "enum.devices.virtio_net_queues.single": "siempre uno, el núcleo 0 reparte cada trama",
   "enum.websocket.auth.mtls": "certificado de cliente, como en el puerto TLS",
   "enum.websocket.auth.password": "usuario y contraseña (para navegadores)",
   "enum.limits.publisher_backpressure.single": "pausar al publicador cuyo único suscriptor está lleno",

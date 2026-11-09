@@ -153,6 +153,8 @@
   "enum.devices.iommu.off": "úgy marad, ahogy a firmware beállította",
   "enum.devices.iommu.auto": "ha a gépen van",
   "enum.devices.iommu.require": "nélküle nem indul el",
+  "enum.devices.virtio_net_queues.auto": "adatmagonként egy, ha a hálózati kártya osztja szét a folyamokat (RSS)",
+  "enum.devices.virtio_net_queues.single": "mindig egy, a 0. mag osztja szét a kereteket",
   "enum.websocket.auth.mtls": "kliens tanúsítvány, mint a TLS porton",
   "enum.websocket.auth.password": "felhasználónév és jelszó (böngészőkhöz)",
   "enum.limits.publisher_backpressure.single": "a közzétevő szüneteltetése, ha egyetlen előfizetője tele van",

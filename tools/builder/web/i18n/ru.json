@@ -153,6 +153,8 @@
   "enum.devices.iommu.off": "оставить, как настроила прошивка",
   "enum.devices.iommu.auto": "если в машине он есть",
   "enum.devices.iommu.require": "без него не запускаться",
+  "enum.devices.virtio_net_queues.auto": "по одной на ядро данных, когда сетевая карта распределяет потоки (RSS)",
+  "enum.devices.virtio_net_queues.single": "всегда одна, ядро 0 распределяет каждый кадр",
   "enum.websocket.auth.mtls": "клиентский сертификат, как на порту TLS",
   "enum.websocket.auth.password": "имя пользователя и пароль (для браузеров)",
   "enum.limits.publisher_backpressure.single": "приостановить издателя, если его единственный подписчик заполнен",

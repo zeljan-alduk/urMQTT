@@ -22,7 +22,7 @@ const version = blob => blob[8] | (blob[9] << 8);
 const KEYS = ['update.confirm', 'update.confirm_after_s', 'update.trial_timeout_s'];
 
 test('the section is last, with the documented defaults and ranges, the only keys of format 17', () => {
-  assert.equal(model.formatVersion, 18);
+  assert.equal(model.formatVersion, 19);
   const ids = model.sections.map(s => s.id);
   assert.equal(ids.indexOf('update'), ids.indexOf('mqtt5') + 1);
   const update = model.sections.find(s => s.id === 'update').fields.map(f => [f.id, f.default]);
