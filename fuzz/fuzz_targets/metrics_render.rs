@@ -9,7 +9,7 @@
 use libfuzzer_sys::fuzz_target;
 use urmqtt_broker::metrics::{Own, render};
 use urmqtt_broker::sys::{
-    Backpressure, Drops, Handshakes, Info, Mqtt5Info, PlainInfo, Qos2, WsInfo,
+    Backpressure, Drops, Handshakes, Info, IommuSys, Mqtt5Info, PerAddress, PlainInfo, Qos2, WsInfo,
 };
 
 fn take<'a>(d: &mut &'a [u8], n: usize) -> &'a [u8] {
@@ -31,7 +31,7 @@ fn num(d: &mut &[u8]) -> u64 {
 
 fuzz_target!(|data: &[u8]| {
     let mut d = data;
-    let text: Vec<String> = (0..7)
+    let text: Vec<String> = (0..9)
         .map(|_| {
             let n = usize::from(take(&mut d, 1).first().copied().unwrap_or(0)) % 24;
             String::from_utf8_lossy(take(&mut d, n)).into_owned()
@@ -113,6 +113,24 @@ fuzz_target!(|data: &[u8]| {
             latency_max_ms: num(&mut d),
         },
         accepted: &accepted,
+        per_address: PerAddress {
+            limit: num(&mut d),
+            established: num(&mut d),
+            addresses: num(&mut d),
+            peak: num(&mut d),
+            syn_dropped: num(&mut d),
+            refused: num(&mut d),
+            untracked: num(&mut d),
+        },
+        iommu: IommuSys {
+            mode: &text[7],
+            state: &text[8],
+            units: num(&mut d),
+            domains: num(&mut d),
+            pages: num(&mut d),
+            faults: num(&mut d),
+            overflows: num(&mut d),
+        },
         plaintext: PlainInfo {
             enabled: sign.first().is_some_and(|b| b & 4 == 4),
             port: num(&mut d) as u16,

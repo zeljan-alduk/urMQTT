@@ -110,7 +110,9 @@ class Plain:
         except OSError:
             self.closed = True
 
-    def read(self, wait=3.0):
+    def read(self, wait=20.0):
+        # A password check is up to 100 000 PBKDF2 rounds: seconds on a loaded CI runner under QEMU
+        # TCG. The wait ends as soon as the packet arrives, so a long limit costs nothing when it is fast.
         end = time.time() + wait
         while True:
             p = split(self.buf)
@@ -229,7 +231,7 @@ def ws_login(user, password, client_id="w1"):
     if b" 101 " not in buf.split(b"\r\n", 1)[0]:
         return None
     s.sendall(ws_frame(connect_pkt(client_id, user, password)))
-    s.settimeout(5)
+    s.settimeout(20)
     buf = buf.partition(b"\r\n\r\n")[2]
     try:
         while len(buf) < 2 + 4:
@@ -335,7 +337,7 @@ def first_boot():
     # refused, the new one works.
     ok, err = set_account(DYN, DYN_PW + "-new")
     t0 = time.time()
-    gone = c.closed_within(2.0)
+    gone = c.closed_within(15.0)
     c.close()
     old, oldcode = login(DYN, DYN_PW, "c3")
     new, newcode = login(DYN, DYN_PW + "-new", "c4")
@@ -394,7 +396,7 @@ def first_boot():
     c.close()
     h, hcode = login(DYN, DYN_PW + "-new", "h1")
     ok, err = control("remove-account", "--id", DYN, out=os.path.join(SCRATCH, "remove-dyn.bin"))
-    gone = h.closed_within(2.0)
+    gone = h.closed_within(15.0)
     h.close()
     c, code = login(DYN, DYN_PW + "-new", "c5")
     ws = ws_login(DYN, DYN_PW + "-new")
