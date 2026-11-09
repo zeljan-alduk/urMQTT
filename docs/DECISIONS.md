@@ -4597,7 +4597,9 @@ device the kernel does not drive is unaffected; one for a driven device would be
 3. **The session is sans-IO** (`ClientSession`): `write`/`flush` encrypt only after the handshake (data written
    before waits, a test checks it), `close` queues a close_notify after the data, `is_closed` after ours or the
    peer's. An unfinished record is held up to 16 KiB + 261 bytes (`MAX_PENDING_IN`), more ends the session as
-   not TLS. Errors are rustls's, logged with their text (`invalid peer certificate: UnknownIssuer`).
+   not TLS; during the handshake six records' worth (`MAX_PENDING_HANDSHAKE`), because rustls joins the server's
+   Certificate message (up to 64 KiB) across records in the caller's buffer (review fix: a chain over one record
+   was refused as not TLS, `a_chain_larger_than_one_record_is_accepted`). Errors are rustls's, logged with their text (`invalid peer certificate: UnknownIssuer`).
 4. **What it adds to the trusted base:** rustls's client handshake state machine and webpki's server-certificate
    path (EKU serverAuth, name matching) become reachable from the network, but only from the configured
    destination, and only after a TCP connection the broker itself opened. The crypto provider and record

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use urmqtt_tls::client::{ClientSession, MAX_PENDING_IN, TlsClient};
+use urmqtt_tls::client::{ClientSession, MAX_PENDING_HANDSHAKE, MAX_PENDING_IN, TlsClient};
 use urmqtt_tls::rng::{EntropyPool, Source};
 use urmqtt_tls::{
     Event, IdentityField, RevocationList, ServerSetup, TicketKeys, TlsError, TlsServer, TlsSession,
@@ -193,7 +193,7 @@ fn a_peer_that_is_not_tls_is_cut_off() {
     let r = c.input(&[22, 3, 3, 0x40, 0x00], &mut tx, &mut app);
     assert!(r.is_ok(), "{r:?}");
     let mut res = Ok(());
-    for _ in 0..(MAX_PENDING_IN / 1024 + 2) {
+    for _ in 0..(MAX_PENDING_HANDSHAKE / 1024 + 2) {
         res = c.input(&[0u8; 1024], &mut tx, &mut app);
         if res.is_err() {
             break;

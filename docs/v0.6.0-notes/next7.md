@@ -60,7 +60,8 @@ One outbound connection (core 0; `outbound::MAX_ACTIVE` 4, at most 64 per stack)
 the SYN to a finished TLS handshake; backoff 1 s doubling to 300 s, equal jitter, reset after 10 s up; ARP for the
 next hop first (3 requests, 1 s apart); record queue `log_tls_queue_kb` (256 KiB), oldest dropped, drops reported at
 most once a minute; 64 KiB of ciphertext waiting for TCP; 16 KiB of received plaintext (more dropped); an
-unfinished TLS record 16 KiB + 261 bytes; TLS 1.3 only, no resumption, no early data; the wall clock is required
+unfinished TLS record 16 KiB + 261 bytes (six records' worth during the handshake: a certificate chain of up to
+64 KiB is accepted); TLS 1.3 only, no resumption, no early data; the wall clock is required
 (the link waits for it).
 
 ## Deliberately NOT done (ADR-319; each is in `left_out`)

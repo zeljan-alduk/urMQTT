@@ -31,6 +31,13 @@ use crate::server::{KernelTime, TlsError};
 /// More means the peer is not speaking TLS.
 pub const MAX_PENDING_IN: usize = 16 * 1024 + 256 + 5;
 
+/// Most bytes of unfinished input during the handshake. rustls joins a
+/// handshake message that spans records in the caller's buffer, so the
+/// whole server Certificate message (a chain of up to 64 KiB, rustls'
+/// limit for a handshake message: five full records) waits here until its
+/// last record arrives, with the start of the next record behind it.
+pub const MAX_PENDING_HANDSHAKE: usize = 6 * MAX_PENDING_IN;
+
 pub struct ClientSetup<'a> {
     pub ca_pem: &'a [u8],
     pub cert_pem: &'a [u8],
@@ -144,6 +151,12 @@ impl ClientSession {
     /// Application bytes queued and not yet encrypted.
     pub fn pending(&self) -> usize {
         self.outbox.len()
+    }
+
+    /// Bytes from the server held because they do not finish a record (or,
+    /// during the handshake, a handshake message) yet.
+    pub fn pending_input(&self) -> usize {
+        self.inbuf.len()
     }
 
     /// Queues application data (sent as soon as the handshake allows).
@@ -262,9 +275,15 @@ impl ClientSession {
                 self.inbuf.drain(..discard.min(self.inbuf.len()));
             }
             if stop {
-                // What is left is an unfinished record; a peer that sends
-                // more than one record's worth of it is not speaking TLS.
-                if self.inbuf.len() > MAX_PENDING_IN {
+                // What is left is an unfinished record (during the
+                // handshake: an unfinished handshake message); a peer that
+                // sends more than that is not speaking TLS.
+                let bound = if self.established {
+                    MAX_PENDING_IN
+                } else {
+                    MAX_PENDING_HANDSHAKE
+                };
+                if self.inbuf.len() > bound {
                     self.closed = true;
                     return Err(TlsError::NotTls);
                 }
