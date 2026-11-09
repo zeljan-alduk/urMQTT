@@ -312,6 +312,14 @@ pub mod tag {
     pub const LIM_MAX_CONNECTIONS_PER_IP: u16 = 270;
     // Run-time password accounts (NOW-15, ADR-285): format version 15.
     pub const LIM_MAX_RUNTIME_ACCOUNTS: u16 = 275;
+    // The Prometheus endpoint (NEXT-9, ADR-290): format version 16. Tags 262 to
+    // 299 are left to the other items of the release.
+    pub const METRICS_ENABLED: u16 = 300;
+    pub const METRICS_PORT: u16 = 301;
+    pub const METRICS_ALLOW_FROM: u16 = 302;
+    pub const METRICS_MAX_CONNS: u16 = 303;
+    pub const METRICS_MAX_PER_IP: u16 = 304;
+    pub const METRICS_REQUEST_TIMEOUT: u16 = 305;
 }
 
 use tag as t;
@@ -366,6 +374,10 @@ pub const MAX_PLAIN_NETWORKS: usize = 64;
 pub const MAX_PLAIN_USERS: usize = 256;
 pub const MAX_PLAIN_IP_IDENTITIES: usize = 64;
 pub const MAX_PLAIN_ACL: usize = 16;
+/// Most entries of `metrics.allow_from` (a scrape comes from a few hosts).
+pub const MAX_METRICS_NETWORKS: usize = 16;
+/// The request deadline's range of the metrics endpoint, seconds.
+pub const MAX_METRICS_TIMEOUT_S: u64 = 30;
 /// Longest identity (a user name, the anonymous identity, an `ip_identities` id).
 pub const MAX_IDENTITY_LEN: usize = 64;
 
@@ -1489,6 +1501,68 @@ pub static FIELDS: &[Field] = &[
             "Password accounts the signed control channel may hold on the data disk (set-account, remove-account), for the plaintext and WebSocket listeners in password mode; 0 (the default): the control channel refuses account commands. Needs control.service_ids and a data disk. Format 15.",
         ),
         15,
+    ),
+    // The Prometheus endpoint (NEXT-9, ADR-290): format version 16.
+    since(
+        f(
+            t::METRICS_ENABLED,
+            "metrics.enabled",
+            Kind::Bool(false),
+            "Serve the broker's numbers in the Prometheus text format (and OpenMetrics) as HTTP on metrics.port, to the networks in metrics.allow_from only. Plain HTTP, read-only, no client data in it. Off by default. Format 16.",
+        ),
+        16,
+    ),
+    since(
+        f(
+            t::METRICS_PORT,
+            "metrics.port",
+            uint(2, 1, 65_535, 9100),
+            "TCP port of the metrics endpoint (GET /metrics); different from every other listener's port.",
+        ),
+        16,
+    ),
+    since(
+        items(
+            f(
+                t::METRICS_ALLOW_FROM,
+                "metrics.allow_from",
+                Kind::Strs {
+                    max_items: MAX_METRICS_NETWORKS as u16,
+                    max_len: 18,
+                    default: &[],
+                },
+                "Networks (a.b.c.d/len, for example 10.0.0.0/8) that may scrape. Required when metrics are enabled; there is no \"anywhere\". Any other address gets no answer at all and the broker keeps no state for it.",
+            ),
+            Item::Cidr,
+        ),
+        16,
+    ),
+    since(
+        f(
+            t::METRICS_MAX_CONNS,
+            "metrics.max_connections",
+            uint(1, 1, 64, 8),
+            "Metrics connections held at once on each data core; more are refused. One scrape is one short connection.",
+        ),
+        16,
+    ),
+    since(
+        f(
+            t::METRICS_MAX_PER_IP,
+            "metrics.max_connections_per_ip",
+            uint(1, 1, 16, 2),
+            "Metrics connections held at once from one source address on each data core.",
+        ),
+        16,
+    ),
+    since(
+        f(
+            t::METRICS_REQUEST_TIMEOUT,
+            "metrics.request_timeout_s",
+            uint(1, 1, MAX_METRICS_TIMEOUT_S, 5),
+            "Seconds from the TCP connection to the end of the answer; a slower client is cut off (slowloris). Prometheus scrapes in well under a second.",
+        ),
+        16,
     ),
 ];
 

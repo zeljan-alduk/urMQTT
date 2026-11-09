@@ -724,6 +724,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     crate::mqtt_service::init_tickets(s.options.ticket_rotate_s);
     crate::plain::init();
     crate::websocket::init();
+    crate::metrics::init();
     crate::dataplane::init(data_cores);
     crate::mqtt_service::prepare_trust_anchors();
     crate::dataplane::set_heap_reserve(s.options.heap_limit_mb);

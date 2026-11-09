@@ -573,6 +573,24 @@ pub struct Websocket {
     pub retain: bool,
 }
 
+/// The Prometheus endpoint (NEXT-9, ADR-290). Off unless the image's
+/// configuration says so; the other fields mean nothing while `enabled` is
+/// false.
+#[derive(Debug, Clone, Copy)]
+pub struct Metrics {
+    pub enabled: bool,
+    pub port: u16,
+    /// Networks that may scrape; never empty while enabled (the check refuses
+    /// it), and there is no "anywhere".
+    pub allow_from: &'static [Cidr],
+    /// Connections held at once on one data core.
+    pub max_connections: u32,
+    /// ... from one source address on one data core.
+    pub max_connections_per_ip: u32,
+    /// Seconds from the TCP connection to the end of the answer.
+    pub request_timeout_s: u32,
+}
+
 /// MQTT 5.0 (NEXT-3, ADR-273 rule 21). On by default.
 #[derive(Debug, Clone, Copy)]
 pub struct Mqtt5 {
@@ -619,6 +637,7 @@ pub struct BuildConfig {
     pub trust: Trust,
     pub plaintext: Plaintext,
     pub websocket: Websocket,
+    pub metrics: Metrics,
     pub mqtt5: Mqtt5,
     pub console: Console,
     pub devices: Devices,

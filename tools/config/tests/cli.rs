@@ -826,6 +826,56 @@ fn the_websocket_fixture_is_announced_and_its_hashes_are_not_shown() {
     );
 }
 
+/// ADR-290: the `[metrics]` section packs into format 16, `pack` and `show`
+/// warn that an unencrypted endpoint is on and name its allow-list, a release
+/// kernel accepts the blob, and an enabled endpoint without an allow-list is
+/// refused naming the key.
+#[test]
+fn the_metrics_fixture_packs_into_format_16() {
+    let out = tmp("metrics.blob");
+    let text = ok(&run(bin()
+        .arg("pack")
+        .arg(fixtures().join("metrics.toml"))
+        .arg("--out")
+        .arg(&out)));
+    let warning = "warning: Prometheus metrics ON (plain HTTP, no login): port 9273, scrapes allowed from 192.0.2.0/24, 10.8.0.5/32";
+    assert!(text.contains(warning), "{text}");
+    let blob = std::fs::read(&out).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 16);
+    let shown = ok(&run(bin().arg("show").arg(&out)));
+    assert!(shown.contains("urmqtt-cfg version 16"), "{shown}");
+    assert!(
+        shown.contains("warning:     Prometheus metrics ON"),
+        "{shown}"
+    );
+    assert!(shown.contains("[metrics]\n  enabled = true"), "{shown}");
+    assert!(
+        shown.contains("  allow_from = [\"192.0.2.0/24\", \"10.8.0.5/32\"]"),
+        "{shown}"
+    );
+    assert!(shown.contains("  port = 9273"), "{shown}");
+    let verified = ok(&run(bin().arg("verify").arg(&out)));
+    assert!(
+        verified.contains("warning: Prometheus metrics ON"),
+        "{verified}"
+    );
+    // No allow-list: refused, naming the key.
+    let cfg = tmp("metrics-no-allow.toml");
+    let fixture = std::fs::read_to_string(fixtures().join("metrics.toml")).unwrap();
+    std::fs::write(
+        &cfg,
+        fixture.replace("allow_from = [\"192.0.2.0/24\", \"10.8.0.5/32\"]\n", ""),
+    )
+    .unwrap();
+    let o = run(bin().arg("pack").arg(&cfg).arg("--out").arg(tmp("x.blob")));
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("metrics.allow_from"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
 /// ADR-273 rule 21: the `[mqtt5]` keys and the expiry limits pack into
 /// format 12, `show` lists them under their sections (the limits of format 12
 /// with the other limits, one `[limits]` heading), a release kernel accepts
@@ -1186,10 +1236,10 @@ fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
 
 /// The templates of the published releases, configured by this tool (and by the builder page, which runs the
 /// same code): v0.2.0's kernel reads configuration format 2, v0.2.1's 3, v0.3.0's 4, v0.4.0's and v0.4.1's 6,
-/// this one 15. A configuration that needs no newer format than the template's kernel reads is written into it as
+/// this one 16. A configuration that needs no newer format than the template's kernel reads is written into it as
 /// before; one that needs more (the virtio-gpu console: 5, a `[devices]` key: 6, `network.mtu`: 7,
 /// `limits.publisher_backpressure = "off"`: 8, a `[websocket]` key: 9, `devices.virtio_net_interrupt = "off"`: 11,
-/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13, `limits.max_connections_per_ip`: 14, `limits.max_runtime_accounts`: 15) is refused with the reason, before a byte
+/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13, `limits.max_connections_per_ip`: 14, `limits.max_runtime_accounts`: 15, a `[metrics]` key: 16) is refused with the reason, before a byte
 /// of the template changes, instead of giving an image whose kernel would refuse it at boot.
 #[test]
 fn templates_of_earlier_releases_take_what_their_kernel_reads() {
@@ -1238,6 +1288,10 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
     b.uint(tag::LIM_MAX_RUNTIME_ACCOUNTS, 16).unwrap();
     let accounts = b.finish(false).unwrap();
     assert_eq!(header(&accounts), 15);
+    let mut b = Builder::new();
+    b.uint(tag::METRICS_PORT, 9273).unwrap();
+    let metrics = b.finish(false).unwrap();
+    assert_eq!(header(&metrics), 16);
     for (release, reads) in [
         ("v0.2.0", 2u16),
         ("v0.2.1", 3),
@@ -1252,6 +1306,8 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
         ("format 13", 13),
         // A tree with the per-address connection limit (ADR-280), without run-time accounts (ADR-285).
         ("format 14", 14),
+        // A tree with run-time accounts (ADR-285), without ADR-290.
+        ("format 15", 15),
         ("this tree", urmqtt_cfg::FORMAT_VERSION),
     ] {
         let empty = Builder::new().finish_as(false, reads).unwrap();
@@ -1270,6 +1326,7 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             ("limits.max_shared_groups", &shared, 13),
             ("limits.max_connections_per_ip", &per_ip, 14),
             ("limits.max_runtime_accounts", &accounts, 15),
+            ("[metrics]", &metrics, 16),
         ] {
             match image::configure_iso(&tpl, blob) {
                 Ok(_) => assert!(

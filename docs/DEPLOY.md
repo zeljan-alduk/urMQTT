@@ -327,7 +327,10 @@ kernel and keep the data, use `urmqtt-disk update-boot` or
 
 Only TCP 8883 is served. Allow it inbound. Allow UDP from the VM to your syslog
 and statsd collectors (`observability.*`) if configured, plus DHCP. Nothing else
-is needed.
+is needed, unless the image turns on an optional listener (all off by default):
+the Prometheus endpoint (`[metrics]`, TCP 9100 by default, **inbound from the monitoring host only**: the
+configuration's `allow_from` is the broker's own filter, the firewall is the second one; OPERATE.md "Metrics for
+Prometheus").
 
 ## 5. Generic KVM / Proxmox (aarch64 host)
 

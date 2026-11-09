@@ -219,6 +219,8 @@ jobs:
   #   secrecy   H8, the production-image warning and the key-bytes scan
   #   websocket MQTT over secure WebSocket (ADR-272): paho-mqtt over wss and a raw client, both modes,
   #             1000 idle connections under TCG (SMOKE_WS_IDLE_TCG)
+  #   metrics   the Prometheus endpoint (ADR-290): the text formats, the refusals, the slowloris cut, the limits,
+  #             the numbers against the info query (stdlib client, mosquitto clients for the traffic)
   # NOT in CI yet: the x86_64 and universal-ISO suites (--arch x86_64 and
   # --arch universal, SMOKE_ONLY=diag|install|migrated|config|template|
   # integrity|install-rules|secureboot). They need qemu-system-x86, OVMF
@@ -250,6 +252,8 @@ jobs:
             only: secrecy
           - group: websocket
             only: websocket
+          - group: metrics
+            only: metrics
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -343,7 +347,7 @@ jobs:
       matrix:
         include:
           - name: protocol crates
-            crates: "urmqtt-mqtt urmqtt-timer-wheel urmqtt-net urmqtt-tcp urmqtt-broker urmqtt-ws"
+            crates: "urmqtt-mqtt urmqtt-timer-wheel urmqtt-net urmqtt-tcp urmqtt-broker urmqtt-ws urmqtt-http"
           - name: tls
             crates: "urmqtt-tls"
           - name: cfg

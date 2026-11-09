@@ -139,7 +139,7 @@ fn the_handle_interface_round_trips() {
     assert!(ub_buf_len(s) > 1000);
     ub_buf_free(s);
     assert_eq!(ub_abi_version(), core::ABI_VERSION);
-    assert_eq!(ub_format_version(), 15);
+    assert_eq!(ub_format_version(), 16);
 }
 
 /// P1: the page hashes a plaintext account's password in the module, with a
@@ -242,7 +242,7 @@ fn an_iso_is_probed_and_configured_in_place_like_the_tool_does() {
     let tpl = synthetic_template();
     let probe = core::iso_probe(&tpl).unwrap();
     assert!(
-        probe.contains(r#""format_version":15"#) && probe.contains(r#""supported":true"#),
+        probe.contains(r#""format_version":16"#) && probe.contains(r#""supported":true"#),
         "{probe}"
     );
     let blob = core::pack(&lab_toml(), &Files::new(), None, 1_900_000_000, None).unwrap();

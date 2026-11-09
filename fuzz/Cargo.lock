@@ -1078,6 +1078,7 @@ dependencies = [
  "urmqtt-cfg",
  "urmqtt-config-schema",
  "urmqtt-control",
+ "urmqtt-http",
  "urmqtt-mqtt",
  "urmqtt-net",
  "urmqtt-plain",
@@ -1088,6 +1089,10 @@ dependencies = [
  "urmqtt-virtio",
  "urmqtt-ws",
 ]
+
+[[package]]
+name = "urmqtt-http"
+version = "0.5.0"
 
 [[package]]
 name = "urmqtt-mm"

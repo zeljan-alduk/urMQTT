@@ -2,7 +2,8 @@
 
 An **operator** connects with mutual TLS like any device and gets two things:
 statistics under `$SYS/broker/` (O1) and a console under `$SYS/console/`
-(O2). No VNC session, no serial port. Design and limits: ADR-060 and
+(O2). No VNC session, no serial port. A Prometheus scrape target is an option
+of its own ("Metrics for Prometheus" below). Design and limits: ADR-060 and
 SECURITY.md ("Operator role").
 
 ## Who is an operator
@@ -188,6 +189,114 @@ address and one limit; a limit the site reaches shows as `per_address/refused`
 and `syn_dropped` growing while that site's devices fail to reconnect. The
 plaintext listener has its own `plaintext.max_connections_per_ip` and is not
 counted here.
+## Metrics for Prometheus (ADR-290 to ADR-294)
+
+The same numbers as `$SYS/broker/...`, as a Prometheus scrape target served by the kernel itself: no exporter to run.
+**Off by default**; an image that does not name `[metrics]` opens no new port and boots exactly as before.
+
+```toml
+[metrics]
+enabled = true
+allow_from = ["10.0.0.0/24"]   # required: the networks that may scrape (the Prometheus server's address)
+# port = 9100                  # TCP port (GET /metrics)
+# max_connections = 8          # at once, on each data core
+# max_connections_per_ip = 2   # at once from one address, on each data core
+# request_timeout_s = 5        # from the connection to the end of the answer
+```
+
+The builder page has the section (Prometheus metrics); `urmqtt-config pack` and `verify` print a warning line while it
+is on. Configuration format 16: an older kernel refuses the image by its version.
+
+**What it is, and is not.** Plain HTTP/1.1, `GET /metrics` (and `HEAD`), no TLS, no login; the protection is the
+allow-list, applied to the SYN: an address outside it gets no answer at all and the kernel keeps nothing for it.
+Anything else (another path, a query string, a body, a second request, a method but GET and HEAD) gets a fixed
+refusal (404, 400, 405, 431, 505) and the connection closes after every answer. At most 8 connections per core, 2
+per address and core, 20 scrapes per second and core; a request not finished within `request_timeout_s` is cut.
+**Put only the monitoring host's network in `allow_from`, never a public one** (the boot log warns if you do). The
+text can be read by anyone on the path (no TLS) and by anyone who can forge an allowed address: if either matters,
+scrape through a TLS-terminating proxy on a host inside the network, or keep the endpoint off and use an exporter that
+subscribes to `$SYS` as an operator. What the text contains: counters and gauges of the broker; **never a client id,
+user name, topic, address or certificate** (no label is chosen by a client, so a client cannot add a series).
+
+Prometheus (`prometheus.yml`; port and address are the broker's):
+
+```yaml
+scrape_configs:
+  - job_name: urmqtt
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["10.0.0.5:9100"]
+        labels: { site: "vps-1" }
+```
+
+Prometheus asks for OpenMetrics when it can and the broker answers in the format it prefers
+(`application/openmetrics-text; version=1.0.0`, else the text format 0.0.4); `curl http://10.0.0.5:9100/metrics` shows
+the text format. 13 KiB with four cores; about 170 series, fixed by the core count and the configuration.
+
+**Names** (an interface: a change is in the CHANGELOG). `urmqtt_` prefix, base units (`_seconds`, `_bytes`,
+`_ratio`), counters end in `_total` and restart at 0 on every boot (Prometheus treats that as a counter reset).
+Every `$SYS/broker/...` topic has one; this is the mapping for the ones to build alerts on:
+
+| Metric | Type | From `$SYS/broker/` | Meaning |
+|---|---|---|---|
+| `urmqtt_uptime_seconds` | gauge | `uptime` | seconds since boot (`resets()` or `changes()` catch a reboot) |
+| `urmqtt_clients_connected` | gauge | `clients/connected` | sessions attached to a connection; `_by_version{version="3.1.1"\|"5"}` splits it |
+| `urmqtt_sessions`, `urmqtt_subscriptions`, `urmqtt_retained_messages` | gauge | `clients/total`, `subscriptions`, `retained` | held state |
+| `urmqtt_messages_received_total`, `urmqtt_messages_sent_total` | counter | `messages/received`, `sent` | PUBLISH in and out (`rate()` is messages per second) |
+| `urmqtt_messages_dropped_total{reason}` | counter | `messages/dropped/*` | `slow_subscriber`, `offline`, `cross_core`, `qos1_queue_full`, `publish_rate`, `too_large`: never silent |
+| `urmqtt_frames_dropped_total{reason}` | counter | `frames/dropped/*` | `steer`, `worker_tx`, `nic`: overload; TCP resends them |
+| `urmqtt_connections_refused_total` | counter | `connections/refused` | refused at the final ACK |
+| `urmqtt_mqtt5_connections_refused_total{code}`, `urmqtt_mqtt5_disconnects_sent_total{code}` | counter | `connections/refused/v5/*`, `disconnects/sent/*` | MQTT 5.0 reason codes (`0x87`, `0x8e`, ..., `other`) |
+| `urmqtt_handshakes_{started,done,failed,timed_out,refused,syn_dropped,slow}_total` | counter | `handshakes/*` | TLS admission (OPERATE "Handshake admission") |
+| `urmqtt_handshakes_in_flight`, `urmqtt_handshakes_in_flight_max` | gauge | `handshakes/in_flight`, `in_flight_max` | now, and the largest on one core in the last 5 s |
+| `urmqtt_handshakes_latency_seconds_total`, `..._latency_max_seconds` | counter, gauge | `handshakes/latency_sum_ms`, `latency_max_ms` | the mean over a window is `rate(latency_seconds_total) / rate(handshakes_done_total)` |
+| `urmqtt_cpu_busy_ratio{core}` | gauge | `cpu/busy/N` | 0 to 1 over the last 5 s; `urmqtt_cpu_cores` is the count |
+| `urmqtt_core_connections_accepted_total{core}` | counter | `cpu/accepted/N` | how evenly flows spread over the cores |
+| `urmqtt_memory_heap_bytes`, `urmqtt_memory_heap_used_bytes` | gauge | `memory/total`, `used` | kernel heap |
+| `urmqtt_disk_bytes`, `urmqtt_disk_used_bytes` | gauge | `disk/total`, `used` | data layout (0 without a disk) |
+| `urmqtt_tls_server_certificate_expiry_seconds` | gauge | `tls/server_cert_days` | whole days times 86 400; **absent** without a wall clock |
+| `urmqtt_time_offset_seconds` | gauge | `time/offset_ms` | last SNTP step; **absent** until measured |
+| `urmqtt_version_info{version}`, `_arch_info{arch}`, `_time_source_info{source}`, `_entropy_source_info{source}` | gauge (1) | `version`, `arch`, `time/source`, `entropy/source` | the text is the label |
+| `urmqtt_listener_*{listener="plaintext"\|"websocket"}`, `urmqtt_websocket_*`, `urmqtt_plaintext_*` | gauge, counter | `plaintext/*`, `websocket/*` | `urmqtt_listener_enabled` is 0 for a listener that is off, and no other series exists for it |
+| `urmqtt_metrics_*` | gauge, counter | (the endpoint's own) | connections, accepted, refused by reason (`source`, `limit`), requests by result (`ok`, `malformed`, `too_large`, `method`, `version`, `not_found`), timeouts |
+
+The full list is `urmqtt_broker::metrics::RULES` (`crates/broker/src/metrics.rs`); a test fails when a `$SYS` topic
+has no metric.
+
+Alert rules that need nothing but these (adjust to taste):
+
+```yaml
+groups:
+  - name: urmqtt
+    rules:
+      - alert: UrmqttDown
+        expr: up{job="urmqtt"} == 0
+        for: 2m
+      - alert: UrmqttRebooted
+        expr: changes(urmqtt_uptime_seconds[10m]) > 0 and urmqtt_uptime_seconds < 600
+      - alert: UrmqttCertificateExpires
+        expr: urmqtt_tls_server_certificate_expiry_seconds < 14 * 86400
+      - alert: UrmqttDroppingMessages
+        expr: sum(rate(urmqtt_messages_dropped_total{reason=~"slow_subscriber|qos1_queue_full|cross_core"}[5m])) > 0
+        for: 10m
+      - alert: UrmqttHandshakesFailing
+        expr: rate(urmqtt_handshakes_failed_total[5m]) + rate(urmqtt_handshakes_timed_out_total[5m]) > 1
+        for: 10m
+      - alert: UrmqttBusy
+        expr: max(urmqtt_cpu_busy_ratio) > 0.9
+        for: 15m
+      - alert: UrmqttHeapNearlyFull
+        expr: urmqtt_memory_heap_used_bytes / urmqtt_memory_heap_bytes > 0.9
+        for: 10m
+      - alert: UrmqttClockWrong
+        expr: abs(urmqtt_time_offset_seconds) > 5
+```
+
+Without Grafana: `curl -s http://10.0.0.5:9100/metrics | grep -v '^#'` is the whole interface, and Prometheus's own
+expression browser graphs any of the above. Log shipping stays plain UDP (syslog, statsd): TLS for it needs an outbound
+TCP connection the kernel cannot make yet (ADR-294).
 
 ## MQTT 5.0 (ADR-274, ADR-275)
 

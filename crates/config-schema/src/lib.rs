@@ -112,6 +112,9 @@ struct RawConfig {
     /// Optional: without it there is no WebSocket listener (ADR-272).
     #[serde(default)]
     websocket: RawWebsocket,
+    /// Optional: without it there is no Prometheus endpoint (ADR-290).
+    #[serde(default)]
+    metrics: RawMetrics,
     /// Optional: without it MQTT 5.0 is on with the defaults (ADR-273).
     #[serde(default)]
     mqtt5: RawMqtt5,
@@ -336,6 +339,32 @@ impl Default for RawPlaintext {
             acl_publish: default_strs("plaintext.acl_publish"),
             acl_subscribe: default_strs("plaintext.acl_subscribe"),
             retain: default_bool("plaintext.retain"),
+        }
+    }
+}
+
+/// The `[metrics]` section as written (NEXT-9, ADR-290).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawMetrics {
+    enabled: bool,
+    port: u16,
+    allow_from: Vec<String>,
+    max_connections: u32,
+    max_connections_per_ip: u32,
+    request_timeout_s: u32,
+}
+
+impl Default for RawMetrics {
+    fn default() -> Self {
+        let u32_of = |k: &str| u32::try_from(default_uint(k)).unwrap_or(u32::MAX);
+        Self {
+            enabled: default_bool("metrics.enabled"),
+            port: u16::try_from(default_uint("metrics.port")).unwrap_or(0),
+            allow_from: default_strs("metrics.allow_from"),
+            max_connections: u32_of("metrics.max_connections"),
+            max_connections_per_ip: u32_of("metrics.max_connections_per_ip"),
+            request_timeout_s: u32_of("metrics.request_timeout_s"),
         }
     }
 }
@@ -1003,6 +1032,7 @@ pub struct Config {
     pub control: Control,
     pub plaintext: Plaintext,
     pub websocket: Websocket,
+    pub metrics: Metrics,
     pub mqtt5: Mqtt5,
     pub console: Console,
     pub devices: Devices,
@@ -1027,6 +1057,19 @@ pub struct Mqtt5 {
     /// Subscription Identifiers (rule 17); false: announced as 0 and a
     /// SUBSCRIBE that carries one gets SUBACK 0xA1.
     pub subscription_identifiers: bool,
+}
+
+/// The Prometheus endpoint (NEXT-9, ADR-290). Off by default; the other keys
+/// are inert while `enabled` is false.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Metrics {
+    pub enabled: bool,
+    pub port: u16,
+    /// Networks that may scrape (`a.b.c.d/len`), required while enabled.
+    pub allow_from: Vec<String>,
+    pub max_connections: u32,
+    pub max_connections_per_ip: u32,
+    pub request_timeout_s: u32,
 }
 
 /// MQTT over secure WebSocket (NEXT-5, ADR-272). Off by default; the other
@@ -1188,6 +1231,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         &control,
         &mut errors,
     );
+    let metrics = validate_metrics(&raw.metrics, &network, &plaintext, &websocket, &mut errors);
     let mqtt5 = validate_mqtt5(&raw.mqtt5, &mut errors);
 
     if !errors.is_empty() {
@@ -1211,6 +1255,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         control,
         plaintext,
         websocket,
+        metrics,
         mqtt5,
         console: Console {
             virtio_gpu: raw.console.virtio_gpu,
@@ -1542,6 +1587,94 @@ fn holds_other_role(acl: &Acl, control: &Control, id: &str) -> bool {
         None => p == id,
     }) || acl.operator_ids.iter().any(|o| o == id)
         || control.service_ids.iter().any(|c| c == id)
+}
+
+/// The `[metrics]` section (ADR-290). The same rules as `urmqtt_cfg::check`
+/// applies to a blob, with messages that name the offending entry.
+fn validate_metrics(
+    raw: &RawMetrics,
+    network: &Network,
+    plaintext: &Plaintext,
+    websocket: &Websocket,
+    errors: &mut Vec<ConfigError>,
+) -> Metrics {
+    use urmqtt_cfg::fields::{MAX_METRICS_NETWORKS, MAX_METRICS_TIMEOUT_S};
+    use urmqtt_cfg::net::Cidr;
+    use urmqtt_cfg::plain;
+
+    if raw.port == 0 {
+        errors.push(err("metrics.port", "must be a non-zero port"));
+    }
+    for (key, v, min, max) in [
+        ("metrics.max_connections", raw.max_connections, 1, 64),
+        (
+            "metrics.max_connections_per_ip",
+            raw.max_connections_per_ip,
+            1,
+            16,
+        ),
+        (
+            "metrics.request_timeout_s",
+            raw.request_timeout_s,
+            1,
+            MAX_METRICS_TIMEOUT_S as u32,
+        ),
+    ] {
+        if !(min..=max).contains(&v) {
+            errors.push(err(key, format!("must be in {min}..={max}")));
+        }
+    }
+    if raw.allow_from.len() > MAX_METRICS_NETWORKS {
+        errors.push(err(
+            "metrics.allow_from",
+            format!("at most {MAX_METRICS_NETWORKS} entries"),
+        ));
+    }
+    let mut nets: Vec<Cidr> = Vec::new();
+    for (i, s) in raw.allow_from.iter().enumerate() {
+        let path = format!("metrics.allow_from[{i}]");
+        match plain::parse_allow(s) {
+            Ok(c) if nets.contains(&c) => {
+                errors.push(err(&path, format!("{s:?} is listed twice")));
+            }
+            Ok(c) => nets.push(c),
+            Err(m) => errors.push(err(&path, format!("{s:?}: {m}"))),
+        }
+    }
+    if raw.enabled {
+        if raw.allow_from.is_empty() {
+            errors.push(err(
+                "metrics.allow_from",
+                "required when metrics are enabled: the networks that may scrape (for example 10.0.0.0/8); there is no \"anywhere\"",
+            ));
+        }
+        if network.mqtt_tls_port != 0 && raw.port == network.mqtt_tls_port {
+            errors.push(err(
+                "metrics.port",
+                "must differ from network.mqtt_tls_port",
+            ));
+        }
+        if network.mqtt_plain_port == Some(raw.port) {
+            errors.push(err(
+                "metrics.port",
+                "must differ from network.mqtt_plain_port",
+            ));
+        }
+        if plaintext.enabled && raw.port == plaintext.port {
+            errors.push(err("metrics.port", "must differ from plaintext.port"));
+        }
+        if websocket.enabled && raw.port == websocket.port {
+            errors.push(err("metrics.port", "must differ from websocket.port"));
+        }
+    }
+    Metrics {
+        enabled: raw.enabled,
+        port: raw.port,
+        allow_from: raw.allow_from.clone(),
+        max_connections: raw.max_connections,
+        max_connections_per_ip: raw.max_connections_per_ip,
+        request_timeout_s: raw.request_timeout_s,
+    }
 }
 
 /// The `[websocket]` section (ADR-272). The same rules as `urmqtt_cfg::check`
@@ -2672,6 +2805,8 @@ mod console_tests;
 mod devices_tests;
 #[cfg(test)]
 mod encryption_tests;
+#[cfg(test)]
+mod metrics_tests;
 #[cfg(test)]
 mod mqtt5_tests;
 #[cfg(test)]

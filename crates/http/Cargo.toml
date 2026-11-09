@@ -1,0 +1,18 @@
+[package]
+name = "urmqtt-http"
+description = "The metrics endpoint's HTTP/1.1 request reader (ADR-290): one bounded GET or HEAD request, fixed refusals, a closed connection after every answer. no_std, no allocation, host-tested and fuzzed."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1.12"

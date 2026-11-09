@@ -3192,6 +3192,66 @@ accounts() {
     done
 }
 
+# NEXT-9, ADR-290: the Prometheus endpoint. The dev image's configuration plus a [metrics] section, packed with the
+# host tool, one image per mode; scripts/metrics-scenarios.py (standard library) plays the scraper.
+#   allow  allow_from covers the host (10.0.2.0/24): the text format 0.0.4 and OpenMetrics by Accept, HEAD, the fixed
+#          refusals (404, 405, 505, 400 for garbage, a body and bare LF, 431), one answer per connection, a request in
+#          pieces, a slowloris cut at request_timeout_s, the per-address limit, the endpoint's own counters, the numbers
+#          against the info query and the $SYS topics (the operator), counters that follow real traffic
+#   deny   allow_from does not cover the host: not one byte comes back, and the boot log counts the dropped SYNs
+metrics() {
+    [[ -z ${SMOKE_SCENARIOS:-} || metrics =~ $SMOKE_SCENARIOS ]] || return 0
+    if ! command -v mosquitto_pub >/dev/null || ! command -v mosquitto_sub >/dev/null; then
+        echo "  ✗ the metrics scenarios need the mosquitto clients"; FAILED=$((FAILED + 1)); return 0
+    fi
+    local dir="$OUT/metrics" tool="$ROOT/target/debug/urmqtt-config" mpt=${SMOKE_METRICS_PORT:-$((PORT + 3))}
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed"; FAILED=$((FAILED + 1)); return 0; }
+    sed -e 's/^mqtt_plain_port = 1883 .*/mqtt_plain_port = 0/' "$ROOT/deploy/dev/config.toml" >"$dir/base.toml"
+    mkm() { # mkm <name> <[metrics] lines...>
+        local name=$1
+        shift
+        { cat "$dir/base.toml"; printf '\n[metrics]\nenabled = true\n'; printf '%s\n' "$@"; } >"$dir/$name.toml"
+        "$tool" pack "$dir/$name.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/$name.blob" >/dev/null
+    }
+    mkm allow 'allow_from = ["10.0.2.0/24"]' 'max_connections = 4' 'max_connections_per_ip = 2' 'request_timeout_s = 3'
+    mkm deny 'allow_from = ["192.0.2.0/24"]'
+    local common=("^URMQTT READY$" "NOT:client: .* FAILED" "$NO_FAULT")
+    local name
+    for name in allow deny; do
+        local extra=() iso="$OUT/metrics-$name.raw"
+        case $name in
+            allow) extra=("metrics: Prometheus endpoint on port 9100 \(plain HTTP, NOT ENCRYPTED, no login: GET /metrics\); scrapes allowed from 10\.0\.2\.0/24"
+                "at most 4 connection\(s\), 2 per address, per core; 20 scrape\(s\)/s per core; answer within 3 s"
+                "metrics: [0-9]+ metrics SYN\(s\) or connection\(s\) dropped for a limit"
+                "client: metrics-prometheus-text-0.0.4 ok" "client: metrics-openmetrics-negotiated ok" "client: metrics-head-has-no-body ok"
+                "client: metrics-refusals-404-405-505-400-431 ok" "client: metrics-pipelined-request-answered-once ok"
+                "client: metrics-request-in-pieces ok" "client: metrics-slowloris-cut-at-the-deadline ok"
+                "client: metrics-per-address-limit-opened ok" "client: metrics-listener-counters ok"
+                "client: metrics-agree-with-the-info-query ok" "client: metrics-counters-follow-traffic ok") ;;
+            deny) extra=("scrapes allowed from 192\.0\.2\.0/24" "metrics: [0-9]+ SYN\(s\) from addresses outside metrics\.allow_from dropped without an answer"
+                "client: metrics-outside-allow-from-gets-no-bytes ok") ;;
+        esac
+        MKIMG_EXTRA=(--config "$dir/$name.blob")
+        mkimg "$iso" "serve log=info"
+        MKIMG_EXTRA=()
+        for accel in $ACCELS; do
+            local log="$OUT/metrics-$name-$accel.log" data="$OUT/metrics-$name-$accel.img" status=0
+            fresh_disk "$iso" "$data"
+            start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883,$mpt:9100"
+            if wait_log "$log" "^URMQTT READY$" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+                bounded 300 python3 -I "$ROOT/scripts/metrics-scenarios.py" "$name" "$mpt" "$PORT" "$ROOT/deploy/dev" >"$log.client" 2>&1 || status=$?
+                sleep 1
+            else
+                status=124
+            fi
+            kill_vm
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            check "metrics-$name [$accel]" "$log" "$status" "${common[@]}" "${extra[@]}"
+        done
+    done
+}
+
 # NOW-13, ADR-270: the NIC's receive interrupt. The serving image with the default configuration says which
 # wake-up its dispatcher uses (the MSI-X interrupt: GICv2m under HVF and on a GICv2, the GICv3 ITS under TCG,
 # the local APIC on x86) and carries MQTT
@@ -4521,6 +4581,14 @@ if [[ ${SMOKE_ONLY:-} == websocket && $ARCH != universal ]]; then
     exit
 fi
 
+# SMOKE_ONLY=metrics: the Prometheus endpoint scenarios (ADR-290) of this architecture.
+if [[ ${SMOKE_ONLY:-} == metrics && $ARCH != universal ]]; then
+    metrics
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=hardening: the H4 scenarios of this architecture.
 if [[ ${SMOKE_ONLY:-} == hardening && $ARCH != universal ]]; then
     hardening_suite
@@ -4777,6 +4845,7 @@ want release_kernel && release_kernel
 want plaintext && plaintext
 want websocket && websocket
 want accounts && accounts
+want metrics && metrics
 scenario x86-fault-unmapped-mmio "smoke test=data-abort" on \
     "EXCEPTION: #PF page fault" "page not present, read, supervisor mode" "NOT:URMQTT READY"
 SMP=8 scenario x86-smp8 "smoke" on \
@@ -4853,6 +4922,7 @@ want release_kernel && release_kernel
 want plaintext && plaintext
 want websocket && websocket
 want accounts && accounts
+want metrics && metrics
 scenario fault-data-abort "smoke test=data-abort" on \
     "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
     "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \

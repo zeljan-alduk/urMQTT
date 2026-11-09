@@ -213,7 +213,7 @@ pub fn by_code<const N: usize>(
     codes: &[u8; N],
 ) -> ([u64; N], u64) {
     let mut out = [0u64; N];
-    let mut other = 0;
+    let mut other = 0u64;
     for (i, n) in slots.iter().enumerate() {
         let code = 0x80 + i as u8;
         match codes.iter().position(|&c| c == code) {
@@ -222,7 +222,7 @@ pub fn by_code<const N: usize>(
                     *o = *n;
                 }
             }
-            None => other += n,
+            None => other = other.saturating_add(*n),
         }
     }
     (out, other)

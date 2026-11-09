@@ -117,6 +117,8 @@ test('every field can be changed on its own and the validator accepts it or blam
     }
     // The run-time account limit (ADR-285) is shown where an account can log in.
     if (f.id === 'limits.max_runtime_accounts') Object.assign(s.values, { 'plaintext.enabled': true, 'plaintext.allow_from': ['10.0.0.0/8'], 'plaintext.users': otherValue(model.byId.get('plaintext.users')) });
+    // The Prometheus endpoint (ADR-290) only exists while it is on, and needs its allow-list.
+    if (f.section === 'metrics') Object.assign(s.values, { 'metrics.enabled': true, 'metrics.allow_from': ['10.0.0.0/8'] });
     s.values[f.id] = v;
     if (f.id === 'plaintext.enabled') Object.assign(s.values, { 'plaintext.allow_from': ['10.0.0.0/8'], 'plaintext.users': otherValue(model.byId.get('plaintext.users')) });
     if (f.id === 'plaintext.users') Object.assign(s.values, { 'plaintext.enabled': true, 'plaintext.allow_from': ['10.0.0.0/8'] });

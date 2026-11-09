@@ -1,0 +1,2 @@
+GET http://x/metrics HTTP/1.1
+

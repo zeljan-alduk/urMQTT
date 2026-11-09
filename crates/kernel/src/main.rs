@@ -11,6 +11,7 @@ extern crate alloc;
 
 // Crates not wired in yet are still linked so the bare-metal build checks them.
 use urmqtt_broker as _;
+use urmqtt_http as _;
 use urmqtt_mqtt as _;
 use urmqtt_net as _;
 use urmqtt_plain as _;
@@ -72,6 +73,8 @@ mod logtest;
 mod memory;
 #[cfg(all(target_os = "none", feature = "memprof", target_arch = "x86_64"))]
 mod memprof;
+#[cfg(target_os = "none")]
+mod metrics;
 #[cfg(target_os = "none")]
 mod mqtt5;
 #[cfg(target_os = "none")]

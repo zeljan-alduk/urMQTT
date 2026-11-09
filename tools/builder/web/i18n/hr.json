@@ -77,6 +77,7 @@
   "section.console": "Prikaz konzole",
   "section.devices": "Virtio uređaji",
   "section.websocket": "MQTT preko WebSocketa",
+  "section.metrics": "Prometheus metrike",
   "section.mqtt5": "MQTT 5.0",
   "section.misc": "Okruženje",
   "section.changed": "Promijenjeno: {n}",

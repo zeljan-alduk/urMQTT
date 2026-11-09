@@ -29,6 +29,7 @@ pub mod acl;
 mod compact;
 mod expiry;
 mod flow;
+pub mod metrics;
 mod shared;
 pub mod sys;
 mod topics;

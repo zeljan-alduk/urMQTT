@@ -77,6 +77,7 @@
   "section.console": "Visualizzazione della console",
   "section.devices": "Dispositivi virtio",
   "section.websocket": "MQTT su WebSocket",
+  "section.metrics": "Metriche Prometheus",
   "section.mqtt5": "MQTT 5.0",
   "section.misc": "Ambiente",
   "section.changed": "Modificati: {n}",

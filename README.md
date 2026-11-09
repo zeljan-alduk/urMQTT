@@ -84,7 +84,7 @@ urMQTT removes all of the layers except the broker:
 
 | | Typical broker on Linux | urMQTT |
 |---|---|---|
-| Exposed services | SSH, broker, often a metrics/admin port | **TCP 8883** (MQTT over TLS 1.3 + mTLS); a plaintext MQTT port (P1) and a secure WebSocket port (`wss://`, 8084, ADR-272) only if the image's configuration turns them on (both off by default) |
+| Exposed services | SSH, broker, often a metrics/admin port | **TCP 8883** (MQTT over TLS 1.3 + mTLS); a plaintext MQTT port (P1), a secure WebSocket port (`wss://`, 8084, ADR-272) and a Prometheus metrics port (plain HTTP, 9100, to an allow-list, ADR-290) only if the image's configuration turns them on (all off by default) |
 | Code in the image | Kernel, userland, libc, OpenSSL, runtime | **One Rust ELF** (+ vendored SQLite) |
 | Remote management | Shell, config files, package updates | **No shell, no login.** Revocations and the allowlist by signed control messages (H1); `$SYS` statistics and a small console over MQTT for operator certificates (O1, O2). A new version or configuration is a new image |
 | Memory per idle connection | Kilobytes (socket buffers, TLS objects, heap) | **Target ≤ 512 B** |
@@ -276,7 +276,7 @@ falls as fixed slab chunks amortize, so it does not grow with the connection cou
 
 ### Security model
 
-- **One port.** TCP 8883: TLS 1.3 only, client certificates required, signed by the CA in the image's configuration. The MQTT client id must equal the certificate's device id. Two more ports exist only when an image turns them on: plaintext MQTT for trusted networks (P1) and MQTT over secure WebSocket (ADR-272: TLS 1.3, a client certificate or a password checked inside TLS, an origin allowlist).
+- **One port.** TCP 8883: TLS 1.3 only, client certificates required, signed by the CA in the image's configuration. The MQTT client id must equal the certificate's device id. Three more ports exist only when an image turns them on: plaintext MQTT for trusted networks (P1), MQTT over secure WebSocket (ADR-272: TLS 1.3, a client certificate or a password checked inside TLS, an origin allowlist) and the Prometheus endpoint (ADR-290: read-only plain HTTP to an allow-list of networks, no client data in it).
 - **No ways in.** No shell, console input, SSH, admin API, dynamic code, network-reachable SQL or filesystem.
 - **Memory safety.** Rust, with `forbid(unsafe_code)` in the protocol crates, every `unsafe` block justified with a `// SAFETY:` comment (lint-enforced), and no panics on external input (clippy denies `unwrap`, `expect`, indexing and `panic!` in data-path crates).
 - **Exploit mitigation.**
@@ -602,6 +602,11 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `websocket.lockout_s` | 1–86 400 (300) | `password` only: how long a locked-out address gets no answer |
 | `websocket.acl_publish`, `websocket.acl_subscribe` | topic filters, up to 16, `{id}` = account id (`web/{id}/#`) | `password` only: what a client may publish and subscribe to; never `$` topics |
 | `websocket.retain` | bool, default `false` | `password` only: may clients publish retained messages |
+| `metrics.enabled` | bool, default `false` | **Prometheus endpoint** (ADR-290): `GET /metrics` as plain HTTP/1.1 (text format 0.0.4, OpenMetrics when asked), every `$SYS` number as a metric, no client data in it. Needs `metrics.allow_from`. Any `[metrics]` key set needs configuration format 16 |
+| `metrics.port` | 1–65535 (9100) | Its TCP port; not another listener's |
+| `metrics.allow_from` | networks `a.b.c.d/len`, up to 16 (`[]`) | The networks that may scrape; **required** when enabled, never "anywhere"; any other address gets no answer at all |
+| `metrics.max_connections`, `metrics.max_connections_per_ip` | 1–64 (8), 1–16 (2) | Connections at once on each data core, and of those from one address |
+| `metrics.request_timeout_s` | 1–30 (5) | Seconds from the connection to the end of the answer; a slower client is cut |
 | `tls.identity_field` | `"cn"` \| `"san_uri"` | Certificate field that becomes the `device_id` |
 | `tls.resumption` | bool | TLS 1.3 PSK session resumption |
 | `tls.revocation_list` | file name or `""` | Revoked client-certificate serials (hex, one per line); runtime revocations come on top (H1) |
@@ -1291,6 +1296,7 @@ results in [docs/PROGRESS.md](docs/PROGRESS.md)):
 | ✅ | **C1** Runtime configuration and the builder page | one release kernel for everyone, the configuration a validated blob in the image (`urmqtt-config pack`); the builder page writes the same bytes in the browser (ADR-215 to ADR-228) |
 | ✅ | **P1** Optional plaintext MQTT | off by default; `allow_from` required; password, anonymous or by-network identities with narrower rights than a certificate (ADR-229 to ADR-231) |
 | ✅ | **NEXT-5** MQTT over secure WebSocket | `[websocket]`, off by default; `wss://` only; `mtls` or a password inside TLS; origin allowlist; Autobahn, fuzz, Kani, smoke (ADR-272) |
+| ✅ | **NEXT-9** Prometheus metrics | `[metrics]`, off by default; `GET /metrics` as plain HTTP to an allow-list of networks; every `$SYS` number as a metric with stable names, units and bounded labels; text 0.0.4 and OpenMetrics; fuzz, smoke (ADR-290 to ADR-294) |
 | 🚧 | **D1** Public demo broker | built, not deployed (PROGRESS D1) |
 
 **Order** ([docs/PLAN.md](docs/PLAN.md)):

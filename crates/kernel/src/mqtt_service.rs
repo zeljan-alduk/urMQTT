@@ -258,6 +258,8 @@ pub struct MqttService {
     /// The run-time accounts this core last applied (ADR-285), to tell which
     /// changed.
     accounts_seen: urmqtt_plain::Accounts,
+    /// The Prometheus endpoint (ADR-290); `None` unless switched on.
+    metrics: Option<Box<crate::metrics::MetricsState>>,
     /// Publisher back-pressure: window changes and notes to other shards
     /// (ADR-269).
     flow: crate::backpressure::FlowLink,
@@ -563,6 +565,7 @@ impl MqttService {
             }
             crate::plain::announce(dataplane::workers(n).len());
             crate::websocket::announce(dataplane::workers(n).len());
+            crate::metrics::announce(dataplane::workers(n).len());
             // ADR-269: what a slow single subscriber does to its publisher.
             info!(
                 "mqtt: publisher back-pressure {}",
@@ -657,6 +660,7 @@ impl MqttService {
             plain: crate::plain::PlainState::new(),
             ws: crate::websocket::WsState::new(|| tls_server_with(false)),
             accounts_seen: crate::control::accounts(),
+            metrics: crate::metrics::MetricsState::new(),
             flow: crate::backpressure::FlowLink::new(),
             revoking: Vec::new(),
         }
@@ -741,6 +745,9 @@ impl MqttService {
         if let Some(w) = &self.ws {
             p.push(w.port());
         }
+        if let Some(m) = &self.metrics {
+            p.push(m.port());
+        }
         p
     }
 
@@ -771,6 +778,14 @@ impl MqttService {
                 .plain
                 .as_mut()
                 .is_some_and(|p| p.syn_ok(ip, now_ms, heap_ok, behind));
+        }
+        // The metrics port: its allow-list and limits only (ADR-290).
+        if self.is_metrics_port(port) {
+            let heap_ok = self.heap_ok(now_ms);
+            return self
+                .metrics
+                .as_mut()
+                .is_some_and(|m| m.syn_ok(ip, now_ms, heap_ok));
         }
         // The WebSocket port: its own limits first, then the TLS admission
         // like any TLS connection (ADR-272).
@@ -815,6 +830,11 @@ impl MqttService {
     /// (not the development port, which has no policy).
     fn is_plain_policy_port(&self, port: u16) -> bool {
         self.plain.as_ref().is_some_and(|p| p.port() == port)
+    }
+
+    /// Whether `port` is the Prometheus endpoint's.
+    fn is_metrics_port(&self, port: u16) -> bool {
+        self.metrics.as_ref().is_some_and(|m| m.port() == port)
     }
 
     /// Admission for a new connection (PROMPT §6, M16): free heap above the
@@ -908,6 +928,9 @@ impl MqttService {
         if let Some(w) = self.ws.as_mut() {
             w.release(c, now_ms);
         }
+        if let Some(m) = self.metrics.as_mut() {
+            m.release(c);
+        }
         self.conns.remove(&c);
     }
 
@@ -992,8 +1015,20 @@ impl MqttService {
     fn on_accept(&mut self, c: u32, port: u16, ip: [u8; 4], now_ms: u64) -> bool {
         // The plaintext port has an admission of its own (P1, ADR-230).
         let policy = self.is_plain_policy_port(port);
-        let tls = !policy && Some(port) != self.plain_port;
-        if policy {
+        // The Prometheus endpoint: plain HTTP with an admission of its own
+        // (ADR-290); no TLS, no handshake, no session.
+        let metrics = self.is_metrics_port(port);
+        let tls = !policy && !metrics && Some(port) != self.plain_port;
+        if metrics {
+            let heap_ok = self.heap_ok(now_ms);
+            let admitted = self
+                .metrics
+                .as_mut()
+                .is_some_and(|m| m.accept(c, ip, now_ms, heap_ok));
+            if !admitted {
+                return false;
+            }
+        } else if policy {
             let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
             let admitted = self
                 .plain
@@ -1052,8 +1087,9 @@ impl MqttService {
                 serial_tag: 0,
             },
         );
-        // (A plaintext connection's flight is kept by its listener.)
-        if !policy {
+        // (A plaintext connection's flight is kept by its listener; a metrics
+        // connection has none, only a deadline of its own.)
+        if !policy && !metrics {
             self.flights.insert(
                 c,
                 Flight {
@@ -1068,11 +1104,13 @@ impl MqttService {
             let conns = &self.conns;
             self.handshakes.retain(|p| p.pending(conns));
         }
-        self.handshakes.push_back(Pending {
-            at_ms: now_ms,
-            c,
-            tconn,
-        });
+        if !metrics {
+            self.handshakes.push_back(Pending {
+                at_ms: now_ms,
+                c,
+                tconn,
+            });
+        }
         dataplane::count_accept(self.me);
         true
     }
@@ -1257,6 +1295,9 @@ impl MqttService {
     /// then attaches to its home shard. Garbage goes to this core's shard,
     /// which rejects it.
     fn sniff_connect(&mut self, c: u32, data: &[u8], link: &mut Link, now_ms: u64) {
+        if self.metrics.as_ref().is_some_and(|m| m.has(c)) {
+            return self.metrics_input(c, data);
+        }
         if self.plain.as_ref().is_some_and(|p| p.has(c)) {
             return self.plain_connect(c, data, link, now_ms);
         }
@@ -1293,6 +1334,38 @@ impl MqttService {
             self.deliver(c, &early, link, now_ms);
         } else {
             self.start_close(c);
+        }
+    }
+
+    /// Bytes of a metrics connection (ADR-290): held until the request is
+    /// complete (at most 2 KiB are kept), then answered once and closed.
+    fn metrics_input(&mut self, c: u32, data: &[u8]) {
+        let Some(k) = self.conns.get_mut(&c) else {
+            return;
+        };
+        k.early.extend_from_slice(data);
+        let Some(answer) = self.metrics.as_mut().map(|m| m.request(k.early.as_slice())) else {
+            return;
+        };
+        match answer {
+            crate::metrics::Answer::Wait => {}
+            crate::metrics::Answer::Send(bytes) => {
+                k.early.take();
+                k.pending.extend_from_slice(&bytes);
+                self.start_close(c);
+                self.mark_blocked(c);
+            }
+        }
+    }
+
+    /// Metrics connections that did not finish by their deadline: reset.
+    fn metrics_expire(&mut self, now_ms: u64) {
+        let Some(late) = self.metrics.as_mut().map(|m| m.expire(now_ms)) else {
+            return;
+        };
+        for c in late {
+            self.drop_conn(c, now_ms);
+            self.aborts.push(c);
         }
     }
 
@@ -1664,6 +1737,9 @@ impl MqttService {
         if let Some(w) = self.ws.as_mut() {
             w.shrink();
         }
+        if let Some(m) = self.metrics.as_mut() {
+            m.shrink();
+        }
         for t in &mut self.by_tconn {
             t.0.shrink();
         }
@@ -1694,6 +1770,7 @@ impl MqttService {
             self.cut_revoked(now_ms);
             self.expire_handshakes(link, now_ms);
             self.ws_expire(link, now_ms);
+            self.metrics_expire(now_ms);
             self.publish_admission(now_ms);
             if let Some(p) = self.plain.as_mut() {
                 // The plaintext listener judges its exposure from the address

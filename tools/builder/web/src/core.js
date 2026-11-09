@@ -26,7 +26,7 @@ export const HIDDEN = new Set(['storage.encryption', 'storage.disk_key']);
 export const SECTION_ORDER = [
   'network', 'tls', 'trust', 'control', 'limits', 'acl', 'storage',
   'observability', 'time', 'watchdog', 'memory', 'registry', 'entropy', 'cpu',
-  'console', 'devices', 'plaintext', 'websocket', 'mqtt5',
+  'console', 'devices', 'plaintext', 'websocket', 'mqtt5', 'metrics',
 ];
 
 /** Examples shown as the placeholder of fields that have no default. */
@@ -39,6 +39,7 @@ export const EXAMPLES = {
   'plaintext.allow_from': '10.0.0.0/8',
   'plaintext.ip_identities': '10.0.1.0/24 plc',
   'websocket.origins': 'https://app.example.com',
+  'metrics.allow_from': '10.0.0.0/8',
 };
 
 /** Builds the form model from the exported schema. */
@@ -435,6 +436,8 @@ export function isApplicable(f, state) {
     if (state.values['websocket.enabled'] !== true) return false;
     if (WEBSOCKET_PASSWORD_ONLY.has(f.id)) return (state.values['websocket.auth'] || 'mtls') === 'password';
   }
+  // The Prometheus endpoint (ADR-290): nothing but the switch while it is off.
+  if (f.section === 'metrics' && f.id !== 'metrics.enabled' && state.values['metrics.enabled'] !== true) return false;
   // MQTT 5.0 (ADR-273 rule 21): on by default; its other keys mean nothing while it is off, except shared
   // subscriptions, which 3.1.1 clients use too (ADR-275).
   if (f.section === 'mqtt5' && f.id !== 'mqtt5.enabled' && f.id !== 'mqtt5.shared_subscriptions' &&
