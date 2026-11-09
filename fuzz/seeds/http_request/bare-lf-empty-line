@@ -1,0 +1,16 @@
+GET /metrics HTTP/1.1
+Host: 10.0.0ccept: appVication/openmetrics-text;version=2.0.0;q=0.5,text/plain;version=0.0.4;q=абЫк v
+X-6: v
+X-7: v
+X-8: vt: x9: v
+X-10: v
+X-11: v
+X-12: v
+X-13: vv
+
+
+: v
+
+4,*/*;q=0.1
+Accept-Encoding: gzip
+X-Prometheus-Scrape-Timeout-Seconds: 1pt-En

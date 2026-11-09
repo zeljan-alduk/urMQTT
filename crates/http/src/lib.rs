@@ -315,14 +315,12 @@ pub fn parse(req: &[u8]) -> Result<Request<'_>, Refusal> {
     let mut accept: &[u8] = &[];
     let mut seen_accept = false;
     let mut first = true;
-    // The last element after the final "\n" is empty, and so is the one
-    // before it (the empty line): stop at the first empty line.
+    // The request is its lines up to the empty one; the empty line is the
+    // last thing in it (checked after the loop).
+    let mut ended = false;
     for raw in &mut lines {
         let Some(line) = raw.strip_suffix(b"\r") else {
-            // The final fragment after the last LF is empty and has no CR.
-            if raw.is_empty() {
-                break;
-            }
+            // A line that ends in a bare LF (or the end of the input).
             return Err(Refusal::Malformed);
         };
         if line.contains(&b'\r') {
@@ -359,6 +357,7 @@ pub fn parse(req: &[u8]) -> Result<Request<'_>, Refusal> {
             continue;
         }
         if line.is_empty() {
+            ended = true;
             break;
         }
         headers += 1;
@@ -396,6 +395,11 @@ pub fn parse(req: &[u8]) -> Result<Request<'_>, Refusal> {
                 accept = value;
             }
         }
+    }
+    // The empty line ends the request: nothing, not even a stray LF, follows
+    // it (what `scan` delimited is exactly this).
+    if !ended || lines.next() != Some(&[][..]) || lines.next().is_some() {
+        return Err(Refusal::Malformed);
     }
     let (Some(method), Some(target)) = (method, target) else {
         return Err(Refusal::Malformed);
