@@ -1050,6 +1050,7 @@ name = "urmqtt-control"
 version = "0.5.0"
 dependencies = [
  "ed25519-dalek",
+ "urmqtt-cfg",
 ]
 
 [[package]]

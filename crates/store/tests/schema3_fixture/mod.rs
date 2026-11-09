@@ -261,3 +261,33 @@ pub fn want_shared_session() -> SessionRecord {
         ..SessionRecord::default()
     }
 }
+
+/// A stored PBKDF2 hash text (1000 iterations: the store keeps the text as
+/// it is; it never parses it).
+pub const HASH_A: &str = "pbkdf2-sha256$1000$00112233445566778899aabbccddeeff$e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0";
+pub const HASH_B: &str = "pbkdf2-sha256$1000$ffeeddccbbaa99887766554433221100$a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2";
+
+/// The run-time accounts of `schema6-accounts` (NOW-15, ADR-285): two
+/// accounts, one of them replaced once (new hash and class).
+pub fn write_accounts_state(s: &mut urmqtt_store::Store) {
+    s.begin().unwrap();
+    s.account_set("sensor-1", HASH_A, 0, 11, NOW as i64)
+        .unwrap();
+    s.account_set("dash", HASH_A, 1, 11, NOW as i64).unwrap();
+    s.account_set("gone", HASH_A, 2, 11, NOW as i64).unwrap();
+    s.set_control_seq(11).unwrap();
+    s.commit().unwrap();
+    s.begin().unwrap();
+    s.account_set("dash", HASH_B, 2, 12, NOW as i64 + 1)
+        .unwrap();
+    s.account_del("gone").unwrap();
+    s.set_control_seq(12).unwrap();
+    s.commit().unwrap();
+}
+
+pub fn want_accounts() -> Vec<(String, String, u8)> {
+    vec![
+        ("dash".into(), HASH_B.into(), 2),
+        ("sensor-1".into(), HASH_A.into(), 0),
+    ]
+}

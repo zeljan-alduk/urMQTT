@@ -187,6 +187,13 @@ and calls synchronously, on the core that owns the store:
   hands it round robin to one online member; the member's shard delivers it (`CoreMsg::Shared` carries the message's
   `Arc`). A SUBSCRIBE whose group lives on another shard holds its SUBACK and the connection's next packets until the
   owner has the member; a delivery that finds its member gone goes back to the owner for another.
+- Password accounts added at run time (NOW-15, ADR-285 to ADR-287): the signed control channel's `set-account` and
+  `remove-account` are applied on the DB core in one transaction with the sequence number (store schema 6, table
+  `accounts`, hashes only), published with the revocations and the allowlist under the same epoch, and picked up by every
+  data core's plaintext and WebSocket authenticator (`Authenticator::set_runtime`, image accounts first). An account's
+  class (full, read-only, write-only) is asked by the broker at each publish, Will and SUBSCRIBE of a login session
+  (`Broker::set_login_class`) and only narrows the listener's patterns; a removed or changed account's live logins are
+  closed.
 - The default ACL lets a device publish to `devices/{id}/#` and subscribe to `devices/{id}/cmd/#`. Patterns are configurable. ACL checks never touch the DB.
 - Every limit (packet size, topic length and levels, subscriptions, in-flight messages, queue depth, publish rate, connections per core) is a compile-time constant from `deploy/<env>/config.toml`.
 

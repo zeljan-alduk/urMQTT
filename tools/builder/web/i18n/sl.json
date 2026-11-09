@@ -94,6 +94,7 @@
   "field.range.limits.max_shared_groups": "1 do 65535 skupin na enem podatkovnem jedru (privzeto 1024); še ena: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.limits.max_shared_group_members": "1 do 65535 članov v eni skupini (privzeto 1024); še en: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.limits.max_connections_per_ip": "0 do 1000000 vzpostavljenih povezav TLS z enega izvornega naslova, vsa jedra skupaj (privzeto 1024); 0: brez omejitve. Naprave za istim NAT si delijo naslov.",
+  "field.range.limits.max_runtime_accounts": "0 (privzeto): nadzorni kanal zavrača ukaze za račune. Sicer od 1 do 1024 računov z geslom, ki jih podpisana nadzorna sporočila lahko dodajo med delovanjem (potrebuje control.service_ids in podatkovni disk).",
   "field.range.mqtt5.max_keep_alive_s": "0 (privzeto): keep alive, ki ga zahteva odjemalec. Sicer od 1 do 65535 sekund.",
   "unit.ms": "Milisekunde.",
   "unit.mb": "Megabajti.",

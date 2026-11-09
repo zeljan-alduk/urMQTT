@@ -457,6 +457,11 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
         tag::LIM_MAX_CONNECTIONS_PER_IP,
         u64::from(l.max_connections_per_ip),
     )?;
+    // ADR-285: 0 (the default) writes nothing; a value set needs format 15.
+    b.uint(
+        tag::LIM_MAX_RUNTIME_ACCOUNTS,
+        u64::from(l.max_runtime_accounts),
+    )?;
     let a = &cfg.acl;
     b.strs(tag::ACL_DEVICE_PUBLISH, &a.device_publish)?;
     b.strs(tag::ACL_DEVICE_SUBSCRIBE, &a.device_subscribe)?;

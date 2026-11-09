@@ -94,6 +94,7 @@
   "field.range.limits.max_shared_groups": "1–65535 csoport egy adatmagon (alapértelmezés 1024); még egy: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.limits.max_shared_group_members": "1–65535 tag egy csoportban (alapértelmezés 1024); még egy: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.limits.max_connections_per_ip": "0 és 1000000 közötti számú felépített TLS-kapcsolat egy forráscímről, az összes magon együtt (alapértelmezés 1024); 0: nincs korlát. Egy NAT mögötti eszközök közös címen osztoznak.",
+  "field.range.limits.max_runtime_accounts": "0 (alapértelmezett): a vezérlőcsatorna elutasítja a fiókparancsokat. Egyébként 1 és 1024 közötti jelszavas fiók, amelyet aláírt vezérlőüzenetek adhatnak hozzá futás közben (control.service_ids és adatlemez kell hozzá).",
   "field.range.mqtt5.max_keep_alive_s": "0 (alapértelmezés): a kliens által kért keep alive. Egyébként 1–65535 másodperc.",
   "unit.ms": "Ezredmásodperc.",
   "unit.mb": "Megabájt.",

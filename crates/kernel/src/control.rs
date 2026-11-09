@@ -12,6 +12,12 @@
 //!   whose certificate is now revoked or whose identity left the allowlist.
 //!   New handshakes read the sets directly.
 //!
+//! Password accounts (NOW-15, ADR-285) ride the same channel: `set-account`
+//! and `remove-account` change the table in the store (PBKDF2 hashes only),
+//! and every data core reloads the accounts of its plaintext and WebSocket
+//! listeners on the new epoch and closes the live logins of an account that
+//! was removed or changed.
+//!
 //! Every rejection is counted by reason and logged rate-limited, without
 //! message content.
 
@@ -20,11 +26,12 @@ use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use urmqtt_config::CONFIG;
 use urmqtt_control::{Command, Policy, Reject};
 use urmqtt_log::{info, warn};
+use urmqtt_plain::{Account, Accounts};
 use urmqtt_store::Store;
 use urmqtt_sync::sync::{OnceCell, SpinLock};
 use urmqtt_tls::RevocationList;
@@ -54,6 +61,11 @@ static REVOKED: OnceCell<Arc<RevocationList>> = OnceCell::new();
 /// for the live-connection scan.
 static REVOKED_TAGS: SpinLock<Option<Arc<Vec<u32>>>> = SpinLock::new(None);
 static ALLOWED: SpinLock<Option<Arc<BTreeSet<Box<str>>>>> = SpinLock::new(None);
+/// The run-time password accounts, sorted by id (ADR-285).
+static ACCOUNTS: SpinLock<Option<Accounts>> = SpinLock::new(None);
+/// Their number, so that the class lookup of a login session costs nothing
+/// when there are none.
+static ACCOUNT_COUNT: AtomicUsize = AtomicUsize::new(0);
 static ALLOWLIST_MODE: AtomicBool = AtomicBool::new(false);
 /// Bumped after every applied change (Release), read by every data core
 /// (Acquire) before it looks at the sets.
@@ -94,12 +106,17 @@ fn hex_bytes(h: &str) -> Option<Vec<u8>> {
 /// The sets at boot: revocations from the store (or the image without
 /// storage) and the stored allowlist. `allowlist_mode` is the
 /// configuration's mode, or the dev command line's stricter override.
-pub fn init(revoked_hex: &[String], allowlist: &[String], allowlist_mode: bool) {
+pub fn init(
+    revoked_hex: &[String],
+    allowlist: &[String],
+    accounts: &[(String, String, u8)],
+    allowlist_mode: bool,
+) {
     let list = Arc::new(RevocationList::new(Vec::new()));
     let _ = REVOKED.set(list);
     // Relaxed: set before the data plane starts.
     ALLOWLIST_MODE.store(allowlist_mode, Ordering::Relaxed);
-    publish(revoked_hex, allowlist);
+    publish(revoked_hex, allowlist, accounts);
     info!(
         "control: {}; registry {}, {} allowlisted identit{}; unrevoke {}",
         if CONFIG.control.service_ids.is_empty() {
@@ -123,10 +140,17 @@ pub fn init(revoked_hex: &[String], allowlist: &[String], allowlist_mode: bool) 
             "off"
         }
     );
+    if CONFIG.limits.max_runtime_accounts > 0 {
+        info!(
+            "control: run-time password accounts on: {} stored, at most {}",
+            accounts.len(),
+            CONFIG.limits.max_runtime_accounts
+        );
+    }
 }
 
 /// Replaces the sets every core reads and bumps the epoch.
-fn publish(revoked_hex: &[String], allowlist: &[String]) {
+fn publish(revoked_hex: &[String], allowlist: &[String], accounts: &[(String, String, u8)]) {
     let serials: Vec<Vec<u8>> = revoked_hex.iter().filter_map(|h| hex_bytes(h)).collect();
     let mut tags: Vec<u32> = serials
         .iter()
@@ -141,6 +165,18 @@ fn publish(revoked_hex: &[String], allowlist: &[String]) {
     *ALLOWED.lock() = Some(Arc::new(
         allowlist.iter().map(|s| s.as_str().into()).collect(),
     ));
+    // A stored hash that no longer parses can never log in.
+    let mut list: Vec<Account> = accounts
+        .iter()
+        // The image wins: a row for an id the image itself lists since
+        // (or names as a service, operator or control identity) is inert, so
+        // that it neither narrows nor closes the image's own account.
+        .filter(|(id, _, _)| !reserved_id(id))
+        .filter_map(|(id, hash, class)| Account::parse(id, hash, *class))
+        .collect();
+    list.sort_by(|a, b| a.id.cmp(&b.id));
+    ACCOUNT_COUNT.store(list.len(), Ordering::Relaxed);
+    *ACCOUNTS.lock() = Some(Arc::new(list));
     // Release: the sets above are visible to a core that sees the epoch.
     EPOCH.fetch_add(1, Ordering::Release);
 }
@@ -152,6 +188,45 @@ pub fn revocations() -> Arc<RevocationList> {
         // Only before `init`: an empty list, never shared.
         None => Arc::new(RevocationList::new(Vec::new())),
     }
+}
+
+/// The run-time password accounts, sorted by id.
+pub fn accounts() -> Accounts {
+    ACCOUNTS.lock().clone().unwrap_or_default()
+}
+
+/// The ACL class byte of the run-time account `id` (0, full, when there is
+/// none): the broker asks at every publish and SUBSCRIBE of a login session.
+pub fn account_class(id: &str) -> u8 {
+    // Relaxed: a hint; the lock decides.
+    if ACCOUNT_COUNT.load(Ordering::Relaxed) == 0 {
+        return 0;
+    }
+    let guard = ACCOUNTS.lock();
+    let Some(list) = guard.as_ref() else { return 0 };
+    list.binary_search_by(|a| a.id.as_str().cmp(id))
+        .ok()
+        .and_then(|i| list.get(i))
+        .map_or(0, |a| a.class)
+}
+
+/// Whether some listener of this image checks passwords: without one a
+/// run-time account could never log in.
+pub fn password_listener() -> bool {
+    use urmqtt_config::{PlainAuth, WsAuth};
+    (CONFIG.plaintext.enabled && CONFIG.plaintext.auth == PlainAuth::Password)
+        || (CONFIG.websocket.enabled
+            && CONFIG.network.mqtt_tls_port != 0
+            && CONFIG.websocket.auth == WsAuth::Password)
+}
+
+/// Whether the image itself lists a password account `id` (on either
+/// listener), or names it as a service, operator or control identity: such
+/// an id cannot be a run-time account (the image wins).
+fn reserved_id(id: &str) -> bool {
+    CONFIG.plaintext.users.iter().any(|u| u.id == id)
+        || CONFIG.websocket.users.iter().any(|u| u.id == id)
+        || exempt(id)
 }
 
 pub fn epoch() -> u64 {
@@ -213,6 +288,7 @@ fn policy() -> Policy {
         max_message_age_s: u64::from(CONFIG.control.max_message_age_s),
         allow_unrevoke: CONFIG.control.allow_unrevoke,
         allowlist_mode: allowlist_mode(),
+        accounts: CONFIG.limits.max_runtime_accounts > 0,
     }
 }
 
@@ -260,11 +336,32 @@ fn apply(
     {
         return Err(Reject::ImageListed);
     }
+    if m.command == Command::SetAccount {
+        if !password_listener() {
+            return Err(Reject::NoPasswordListener);
+        }
+        for item in &m.items {
+            let a = urmqtt_control::parse_account(item)?;
+            if reserved_id(a.id) {
+                return Err(Reject::AccountShadowsImage);
+            }
+        }
+    }
     let now = crate::boot::now_unix().unwrap_or(0) as i64;
     let r = (|| {
         store.begin()?;
         for item in &m.items {
             match m.command {
+                Command::SetAccount => {
+                    // The decoder checked the item; a failure here is a bug
+                    // and leaves the row alone.
+                    if let Ok(a) = urmqtt_control::parse_account(item) {
+                        store.account_set(a.id, a.hash, a.class as u8, m.seq, now)?;
+                    }
+                }
+                Command::RemoveAccount => {
+                    store.account_del(core::str::from_utf8(item).unwrap_or_default())?
+                }
                 Command::Revoke => store.revoke(&serial_hex(item), "control", now)?,
                 Command::Unrevoke => store.unrevoke(&serial_hex(item))?,
                 Command::Allow => {
@@ -275,12 +372,23 @@ fn apply(
                 }
             }
         }
+        let count = store.account_count()?;
+        if m.command.on_accounts() && count > i64::from(CONFIG.limits.max_runtime_accounts) {
+            // Nothing is stored and the sequence number is not used up.
+            store.rollback();
+            return Ok::<_, urmqtt_store::StoreError>(None);
+        }
         store.set_control_seq(m.seq)?;
         store.commit()?;
-        Ok::<_, urmqtt_store::StoreError>((store.revoked()?, store.allowlist()?))
+        Ok(Some((
+            store.revoked()?,
+            store.allowlist()?,
+            store.accounts()?,
+        )))
     })();
-    let (revoked, allowed) = match r {
-        Ok(v) => v,
+    let (revoked, allowed, accounts) = match r {
+        Ok(Some(v)) => v,
+        Ok(None) => return Err(Reject::AccountLimit),
         Err(e) => {
             store.rollback();
             warn!("control: storing seq {} failed: {e}", m.seq);
@@ -288,7 +396,31 @@ fn apply(
         }
     };
     *last_seq = m.seq;
-    publish(&revoked, &allowed);
+    if m.command.on_accounts() {
+        // Audit: which accounts changed and how, never a hash or a password.
+        for item in &m.items {
+            match m.command {
+                Command::SetAccount => {
+                    if let Ok(a) = urmqtt_control::parse_account(item) {
+                        info!(
+                            "control: seq {} from {from}: password account {} set (class {}, {} run-time account(s))",
+                            m.seq,
+                            a.id,
+                            a.class.name(),
+                            accounts.len()
+                        );
+                    }
+                }
+                _ => info!(
+                    "control: seq {} from {from}: password account {} removed ({} run-time account(s) left)",
+                    m.seq,
+                    core::str::from_utf8(item).unwrap_or("?"),
+                    accounts.len()
+                ),
+            }
+        }
+    }
+    publish(&revoked, &allowed, &accounts);
     wake_data_cores();
     Ok((m.command, m.items.len(), m.seq))
 }

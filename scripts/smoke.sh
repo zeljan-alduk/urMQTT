@@ -3098,6 +3098,100 @@ websocket() {
     done
 }
 
+# NOW-15 (ADR-285): password accounts added, changed and removed at run time by signed control messages
+# (`urmqtt-control set-account`, `remove-account`), on the plaintext listener and over secure WebSocket at
+# once. The dev configuration plus a [plaintext] section (one account of the image) and a [websocket] section,
+# both in password mode, and limits.max_runtime_accounts = 3; one image, two boots of the same disk with a
+# power cut (SIGKILL) between them. scripts/accounts-scenarios.py plays the operator and the clients; the
+# serial log is checked for the audit lines and for the absence of every password and hash.
+accounts() {
+    [[ -z ${SMOKE_SCENARIOS:-} || accounts =~ $SMOKE_SCENARIOS ]] || return 0
+    command -v mosquitto_pub >/dev/null || { echo "  ✗ accounts scenarios need the mosquitto clients"; FAILED=$((FAILED + 1)); return 0; }
+    local dir="$OUT/accounts" tool="$ROOT/target/debug/urmqtt-config" ppt=${SMOKE_PLAIN_PORT:-$((PORT + 1))} wpt=${SMOKE_WS_PORT:-$((PORT + 2))}
+    local ctl="$ROOT/target/release/urmqtt-control"
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed"; FAILED=$((FAILED + 1)); return 0; }
+    [[ -x $ctl ]] || (cd "$ROOT" && cargo build --release --locked -q -p urmqtt-control-tool) || { echo "  ✗ urmqtt-control build failed"; FAILED=$((FAILED + 1)); return 0; }
+    local h
+    h=$(printf '%s\n' img-secret | "$tool" hash-password --iterations 3000)
+    sed -e 's/^mqtt_plain_port = 1883 .*/mqtt_plain_port = 0/' "$ROOT/deploy/dev/config.toml" |
+        awk '{ print } /^\[limits\]/ { print "max_runtime_accounts = 3" }' >"$dir/accounts.toml"
+    {
+        printf '\n[plaintext]\nenabled = true\nallow_from = ["10.0.2.0/24"]\nmax_failed_auths_per_ip = 1000\n'
+        printf 'users = [{ id = "img-1", password_hash = "%s" }]\n' "$h"
+        printf '\n[websocket]\nenabled = true\norigins = ["https://app.example.com"]\nauth = "password"\nmax_failed_auths_per_ip = 1000\n'
+        printf 'users = [{ id = "web-1", password_hash = "%s" }]\n' "$h"
+    } >>"$dir/accounts.toml"
+    "$tool" pack "$dir/accounts.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/accounts.blob" >/dev/null
+    local iso="$OUT/accounts.raw" d="$ROOT/deploy/dev"
+    MKIMG_EXTRA=(--config "$dir/accounts.blob")
+    mkimg "$iso" "serve log=info"
+    MKIMG_EXTRA=()
+    local fwd="$PORT:8883,$ppt:1883,$wpt:8084"
+    for accel in $ACCELS; do
+        # Run-time accounts are sized for a hash of up to 100 000 iterations (ADR-285): under x86_64 TCG, software
+        # emulation makes one check take 5 to 8 s (the boot log warns), so the login rate is below one a second and
+        # the scenario measures the emulator. aarch64 TCG and every KVM or HVF run are fine.
+        if [[ ${ARCH:-} == x86_64 && $accel == tcg ]]; then
+            echo "  - accounts [$accel] skipped: a password check takes seconds under x86_64 software emulation (use kvm)"
+            continue
+        fi
+        local log1="$OUT/accounts-$accel-1.log" log2="$OUT/accounts-$accel-2.log" data="$OUT/accounts-$accel.img" status=0
+        local scratch="$dir/scratch-$accel"
+        rm -rf "$scratch" "$log1.client" "$log2.client"
+        mkdir -p "$scratch"
+        fresh_disk "$iso" "$data"
+        start_vm "$log1" --disk "$data" --accel "$accel" --fwd "$fwd"
+        if wait_log "$log1" "^URMQTT READY$" && wait_log "$log1" "net: dhcp lease 10\.0\.2\.15"; then
+            bounded 600 python3 -I "$ROOT/scripts/accounts-scenarios.py" first "$ppt" "$wpt" "$PORT" "$d" "$ctl" "$scratch" >"$log1.client" 2>&1 || status=$?
+            sleep 1
+        else
+            status=124
+        fi
+        kill_vm
+        cat "$log1.client" >>"$log1" 2>/dev/null || true
+        check "accounts-run-time [$accel]" "$log1" "$status" \
+            "control: run-time password accounts on: 0 stored, at most 3" \
+            "control: seq [0-9]+ from operator: password account dyn-1 set \(class full, 1 run-time account\(s\)\)" \
+            "control: seq [0-9]+ from operator: password account viewer set \(class read-only" \
+            "control: seq [0-9]+ from operator: password account feeder set \(class write-only" \
+            "control: seq [0-9]+ from operator: password account dyn-1 removed \(2 run-time account\(s\) left\)" \
+            "control: message from operator rejected: account_shadows_image" \
+            "control: message from operator rejected: account_limit" \
+            "control: core [0-9]+: [1-9][0-9]* live connection\(s\) closed" \
+            "plaintext: login refused for 10\.0\.2\.2 \(wrong password\)" \
+            "websocket: login refused for 10\.0\.2\.2 \(wrong password\)" \
+            "client: image-account-logs-in ok" "client: account-unknown-before-it-is-added ok" \
+            "client: account-unknown-over-wss-before-it-is-added ok" "client: set-account-logs-in-on-both-listeners ok" \
+            "client: account-acl-is-the-listeners ok" "client: changed-password-cuts-the-live-login ok" \
+            "client: image-account-wins ok" "client: read-only-account-subscribes-but-cannot-publish ok" \
+            "client: read-only-account-cannot-set-a-will ok" "client: write-only-account-publishes-but-cannot-subscribe ok" \
+            "client: account-limit-refuses-one-more ok" "client: removed-account-is-cut-and-refused ok" \
+            "client: removal-makes-room-under-the-limit ok" "client: tool-refuses-bad-input ok" \
+            "NOT:dyn-secret" "NOT:viewer-secret" "NOT:feeder-secret" "NOT:extra-secret" "NOT:attacker-chosen" "NOT:pbkdf2-sha256\\$" \
+            "NOT:client: .* FAILED" "$NO_FAULT"
+        if [[ $status -eq 0 ]]; then
+            start_vm "$log2" --disk "$data" --accel "$accel" --fwd "$fwd"
+            if wait_log "$log2" "^URMQTT READY$" && wait_log "$log2" "net: dhcp lease 10\.0\.2\.15"; then
+                bounded 600 python3 -I "$ROOT/scripts/accounts-scenarios.py" second "$ppt" "$wpt" "$PORT" "$d" "$ctl" "$scratch" >"$log2.client" 2>&1 || status=$?
+                sleep 1
+            else
+                status=124
+            fi
+            kill_vm
+            cat "$log2.client" >>"$log2" 2>/dev/null || true
+            check "accounts-persist [$accel]" "$log2" "$status" \
+                "control: run-time password accounts on: 3 stored, at most 3" \
+                "control: message from operator rejected: replay" \
+                "client: accounts-survive-a-power-cut ok" "client: account-class-survives-a-power-cut ok" \
+                "client: removed-account-stays-removed ok" "client: replayed-set-account-is-refused ok" \
+                "client: replayed-remove-account-is-refused ok" \
+                "NOT:dyn-secret" "NOT:viewer-secret" "NOT:feeder-secret" "NOT:extra-secret" "NOT:pbkdf2-sha256\\$" \
+                "NOT:client: .* FAILED" "$NO_FAULT"
+        fi
+    done
+}
+
 # NOW-13, ADR-270: the NIC's receive interrupt. The serving image with the default configuration says which
 # wake-up its dispatcher uses (the MSI-X interrupt: GICv2m under HVF and on a GICv2, the GICv3 ITS under TCG,
 # the local APIC on x86) and carries MQTT
@@ -4395,6 +4489,7 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want config_packed && config_packed
     want release_kernel && release_kernel
     want plaintext && plaintext
+    want accounts && accounts
     # The broker's state across a restart (QoS 1 and QoS 2): the default run has these too.
     command -v mosquitto_pub >/dev/null && want mqtt_persist && mqtt_persist
     want mqtt_qos2 && mqtt_qos2
@@ -4681,6 +4776,7 @@ want config_packed && config_packed
 want release_kernel && release_kernel
 want plaintext && plaintext
 want websocket && websocket
+want accounts && accounts
 scenario x86-fault-unmapped-mmio "smoke test=data-abort" on \
     "EXCEPTION: #PF page fault" "page not present, read, supervisor mode" "NOT:URMQTT READY"
 SMP=8 scenario x86-smp8 "smoke" on \
@@ -4756,6 +4852,7 @@ want config_packed && config_packed
 want release_kernel && release_kernel
 want plaintext && plaintext
 want websocket && websocket
+want accounts && accounts
 scenario fault-data-abort "smoke test=data-abort" on \
     "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
     "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \

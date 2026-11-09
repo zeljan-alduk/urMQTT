@@ -296,6 +296,57 @@ Never commit the key (`deploy/*/services/` is git-ignored). A stolen operator
 certificate is revoked like any other, with the control channel
 (`urmqtt-control revoke`), which also closes its live session.
 
+## Password accounts at run time (NOW-15, ADR-285)
+
+Plaintext and WebSocket password accounts can be added, changed and removed
+without a new image, through the signed control channel (the same
+`urmqtt-control` tool, certificate and offline key as `revoke`).
+
+**Switch it on in the image.** It is off by default. Set
+`limits.max_runtime_accounts` (0 to 1024; the builder page shows it under
+Limits once a listener takes passwords) in a configuration that has a
+`[plaintext]` section with `auth = "password"` and/or a `[websocket]` section
+with `auth = "password"`, the TLS listener, `control.service_ids` and a data
+disk. The configuration is then written in format 15 (a v0.5.x kernel template
+refuses it).
+
+```sh
+# add or change an account: the password is read from standard input, hashed
+# here (100 000 iterations unless --iterations says fewer) and only the hash is signed
+printf '%s\n' "$PASSWORD" | urmqtt-control set-account --id sensor-9 --password-stdin \
+    --class full --env prod --key control.key --host broker.example --ca ca.pem \
+    --client-cert operator.pem --client-key operator.key
+# or give a hash made by `urmqtt-config hash-password`
+urmqtt-control set-account --id dash-1 --hash 'pbkdf2-sha256$100000$...' --class read-only ...
+urmqtt-control remove-account --id sensor-9 --id dash-1 ...
+```
+
+- **Classes.** `full` (the listener's `acl_publish` and `acl_subscribe`),
+  `read-only` (subscribes, publishes nothing, no Will), `write-only` (publishes,
+  subscribes to nothing). A class only narrows the listener's patterns.
+- **Effect.** At once, on both listeners. A removed account, a changed password
+  or a changed class closes that account's live connections (5.0 clients get
+  DISCONNECT 0x98) and the next login uses the new state. The accounts are kept
+  on the data disk and survive reboots; a new disk has none.
+- **Limits.** At most `limits.max_runtime_accounts` accounts, 8 per message, ids
+  of `A-Z a-z 0-9 - _ . :` up to 64 characters, hashes of at most 100 000
+  iterations. An id the image itself lists as an account, or names as a
+  service, operator or control identity, is refused (the image wins). A message
+  that would exceed the limit changes nothing.
+- **Result.** A PUBACK means received, as for every control message. The log
+  says `control: seq N from operator: password account sensor-9 set (class full,
+  K run-time account(s))` or `... rejected: <reason>` with the reason one of
+  `accounts_disabled`, `account_limit`, `no_password_listener`,
+  `account_shadows_image`, `malformed`, `replay`, `expired`, ...; the counters
+  are `urmqtt.control.rejected.<reason>`. No log line, metric or message holds a
+  password or a hash.
+- **Keep your own list.** There is no command that lists accounts. The boot log
+  says how many are stored. Messages are per disk: replacing the disk loses the
+  run-time accounts, the image's own stay.
+- **Upgrading.** The first boot of a v0.6.0 kernel migrates the data disk to
+  schema 6 (one way; a v0.5.x kernel refuses it). Nothing else changes until an
+  image sets `limits.max_runtime_accounts`.
+
 ## The data disk in the console (S2, S3)
 
 These lines appear in `$SYS/console/out` (and on the serial port, and in

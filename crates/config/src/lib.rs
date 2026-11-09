@@ -181,6 +181,9 @@ pub struct Limits {
     /// Established TLS connections (MQTT and WebSocket) one source address
     /// may hold at once, all cores together; 0: no limit (NOW-14, ADR-280).
     pub max_connections_per_ip: u32,
+    /// Password accounts the control channel may hold on the data disk
+    /// (NOW-15, ADR-285); 0: the control channel refuses account commands.
+    pub max_runtime_accounts: u32,
 }
 
 /// Topic filter patterns; `{id}` expands to the session's device id.

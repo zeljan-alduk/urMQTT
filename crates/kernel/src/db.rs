@@ -205,6 +205,8 @@ pub struct Restored {
     pub revoked: Vec<String>,
     /// The device allowlist (H1).
     pub allowlist: Vec<String>,
+    /// The run-time password accounts as `(id, hash, class)` (ADR-285).
+    pub accounts: Vec<(String, String, u8)>,
     pub retained: Vec<Retained>,
     pub sessions: Vec<SessionRecord>,
 }
@@ -771,6 +773,7 @@ fn load(store: &mut Store) -> Result<Restored, StoreError> {
     Ok(Restored {
         revoked: store.revoked()?,
         allowlist: store.allowlist()?,
+        accounts: store.accounts()?,
         retained: store.retained()?,
         sessions: store.sessions()?,
     })

@@ -94,6 +94,7 @@
   "field.range.limits.max_shared_groups": "1 až 65535 skupín na jednom dátovom jadre (predvolené 1024); ďalšia: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.limits.max_shared_group_members": "1 až 65535 členov v jednej skupine (predvolené 1024); ďalší: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.limits.max_connections_per_ip": "0 až 1000000 nadviazaných TLS spojení z jednej zdrojovej adresy, všetky jadrá spolu (predvolené 1024); 0: bez obmedzenia. Zariadenia za jedným NAT zdieľajú adresu.",
+  "field.range.limits.max_runtime_accounts": "0 (predvolené): riadiaci kanál odmieta príkazy na účty. Inak 1 až 1024 účtov s heslom, ktoré môžu podpísané riadiace správy pridať za prevádzky (vyžaduje control.service_ids a dátový disk).",
   "field.range.mqtt5.max_keep_alive_s": "0 (predvolené): keep alive, ktorý si klient vyžiada. Inak 1 až 65535 sekúnd.",
   "unit.ms": "Milisekundy.",
   "unit.mb": "Megabajty.",

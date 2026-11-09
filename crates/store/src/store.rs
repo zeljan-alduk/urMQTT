@@ -163,6 +163,10 @@ struct Stmts {
     allow_add: Stmt,
     allow_del: Stmt,
     allow_all: Stmt,
+    account_set: Stmt,
+    account_del: Stmt,
+    account_all: Stmt,
+    account_count: Stmt,
     retained_set: Stmt,
     retained_del: Stmt,
     retained_all: Stmt,
@@ -277,6 +281,14 @@ fn open_inner() -> Result<(Store, OpenInfo)> {
         )?,
         allow_del: db.prepare("DELETE FROM allowlist WHERE id = ?1")?,
         allow_all: db.prepare("SELECT id FROM allowlist ORDER BY id")?,
+        account_set: db.prepare(
+            "INSERT INTO accounts (id, hash, class, added_at, seq) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (id) DO UPDATE SET hash = excluded.hash, class = excluded.class,
+                 seq = excluded.seq",
+        )?,
+        account_del: db.prepare("DELETE FROM accounts WHERE id = ?1")?,
+        account_all: db.prepare("SELECT id, hash, class FROM accounts ORDER BY id")?,
+        account_count: db.prepare("SELECT count(*) FROM accounts")?,
         retained_set: db.prepare(
             "INSERT INTO retained (topic, payload, qos, props, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT (topic) DO UPDATE SET payload = excluded.payload, qos = excluded.qos,
@@ -446,6 +458,60 @@ impl Store {
         s.reset();
         r?;
         Ok(out)
+    }
+
+    /// Adds a password account or replaces its hash and class (NOW-15,
+    /// ADR-285). `hash` is the stored PBKDF2 text, never a password. Call
+    /// inside the transaction that applies the control message.
+    pub fn account_set(
+        &mut self,
+        id: &str,
+        hash: &str,
+        class: u8,
+        seq: u64,
+        now_unix: i64,
+    ) -> Result<()> {
+        let s = &mut self.s.account_set;
+        s.bind_text(1, id)?;
+        s.bind_text(2, hash)?;
+        s.bind_i64(3, i64::from(class))?;
+        s.bind_i64(4, now_unix)?;
+        s.bind_i64(5, i64::try_from(seq).unwrap_or(i64::MAX))?;
+        Ok(s.run()?)
+    }
+
+    /// Removes a run-time account (no error if there is none).
+    pub fn account_del(&mut self, id: &str) -> Result<()> {
+        let s = &mut self.s.account_del;
+        s.bind_text(1, id)?;
+        Ok(s.run()?)
+    }
+
+    /// Every run-time account as `(id, hash, class)`, ordered by id.
+    pub fn accounts(&mut self) -> Result<Vec<(String, String, u8)>> {
+        let s = &mut self.s.account_all;
+        let mut out = Vec::new();
+        let r = (|| {
+            while s.step()? == Step::Row {
+                let class = u8::try_from(s.i64(2)).unwrap_or(u8::MAX);
+                out.push((String::from(s.text(0)), String::from(s.text(1)), class));
+            }
+            Ok::<(), Error>(())
+        })();
+        s.reset();
+        r?;
+        Ok(out)
+    }
+
+    /// How many run-time accounts there are.
+    pub fn account_count(&mut self) -> Result<i64> {
+        let s = &mut self.s.account_count;
+        let n = match s.step()? {
+            Step::Row => s.i64(0),
+            Step::Done => 0,
+        };
+        s.reset();
+        Ok(n)
     }
 
     /// Discards the open transaction.

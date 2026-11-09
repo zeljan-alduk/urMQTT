@@ -9,7 +9,8 @@
 //!    data with no backup region (so a v2.0 disk that is never upgraded stays
 //!    exactly as it was). The database inside is SQLite's: since schema 4
 //!    (MQTT 5.0, ADR-274) the same steps write `v2-data-schema4` and since
-//!    schema 5 (ADR-275) `v2-data-schema5`, while
+//!    schema 5 (ADR-275) `v2-data-schema5` and since schema 6 (ADR-285)
+//!    `v2-data-schema6`, while
 //!    `v2-data` stays frozen with its schema 2 database, the input of the
 //!    migration tests (`golden_schema3.rs`), and `v2-data-schema3` with the
 //!    schema 3 one the same steps wrote before.
@@ -167,7 +168,7 @@ fn v2_with_data() {
         .unwrap();
     store.commit().unwrap();
     drop(store);
-    compare("v2-data-schema5", &m);
+    compare("v2-data-schema6", &m);
 }
 
 /// The frozen files open as v2 disks, and carry the data they were made with.
@@ -180,6 +181,7 @@ fn the_frozen_files_open_and_hold_their_data() {
         "v2-data-schema3",
         "v2-data-schema4",
         "v2-data-schema5",
+        "v2-data-schema6",
     ] {
         let m = load(name);
         let (disk, how) = Disk::open(m.device(), || [9; 16]).unwrap();

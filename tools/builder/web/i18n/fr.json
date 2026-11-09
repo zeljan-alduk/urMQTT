@@ -94,6 +94,7 @@
   "field.range.limits.max_shared_groups": "1 à 65535 groupes sur un cœur de données (1024 par défaut) ; un de plus : SUBACK 0x97 (3.1.1 : 0x80).",
   "field.range.limits.max_shared_group_members": "1 à 65535 membres dans un groupe (1024 par défaut) ; un de plus : SUBACK 0x97 (3.1.1 : 0x80).",
   "field.range.limits.max_connections_per_ip": "0 à 1000000 connexions TLS établies depuis une même adresse source, tous cœurs confondus (1024 par défaut) ; 0 : pas de limite. Les appareils derrière un même NAT partagent une adresse.",
+  "field.range.limits.max_runtime_accounts": "0 (par défaut) : le canal de contrôle refuse les commandes de comptes. Sinon 1 à 1024 comptes à mot de passe que des messages de contrôle signés peuvent ajouter en service (nécessite control.service_ids et un disque de données).",
   "field.range.mqtt5.max_keep_alive_s": "0 (par défaut) : le keep-alive demandé par le client. Sinon de 1 à 65535 secondes.",
   "unit.ms": "Millisecondes.",
   "unit.mb": "Mégaoctets.",

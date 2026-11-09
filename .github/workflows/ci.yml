@@ -210,7 +210,7 @@ jobs:
   #             time, watchdog, crash logs); SMOKE_NO_GROUPS=1 skips the guarded ones
   #   storage-* the disk scenarios (SMOKE_ONLY=storage), in two halves
   #   live      the live-mode scenarios
-  #   misc      the other guarded ones (configuration, release kernel, plaintext, QoS 2 (mqtt_qos2), storm,
+  #   misc      the other guarded ones (configuration, release kernel, plaintext, run-time accounts (accounts), QoS 2 (mqtt_qos2), storm,
   #             fin_wait2, attacks,
   #             the link MTU (net_mtu),
   #             the virtio-gpu console with its QMP screendumps, the optional virtio drivers

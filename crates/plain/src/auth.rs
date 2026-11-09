@@ -15,6 +15,8 @@
 //! identity: the configuration check refuses such names, and the broker gives
 //! every plaintext session the plaintext role whatever its name is.
 
+use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use urmqtt_cfg::net::Cidr;
@@ -43,6 +45,31 @@ impl Rejection {
         }
     }
 }
+
+/// A password account added at run time through the control channel (NOW-15,
+/// ADR-285): the id, the parsed PBKDF2 hash (never a password) and the ACL
+/// class byte (`urmqtt_control::AccountClass`; the broker applies it).
+#[derive(Clone, PartialEq, Eq)]
+pub struct Account {
+    pub id: String,
+    pub hash: PasswordHash,
+    pub class: u8,
+}
+
+impl Account {
+    /// From a stored row: `None` if the hash text does not parse (such a row
+    /// can never log in).
+    pub fn parse(id: &str, hash: &str, class: u8) -> Option<Self> {
+        Some(Self {
+            id: id.into(),
+            hash: PasswordHash::parse(hash).ok()?,
+            class,
+        })
+    }
+}
+
+/// Every run-time account, sorted by id (for a binary search).
+pub type Accounts = Arc<Vec<Account>>;
 
 /// The outcome of [`Authenticator::authenticate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +124,11 @@ pub struct Authenticator<'a> {
     networks: Vec<(Cidr, &'a str)>,
     /// What a login for an unknown user is checked against.
     decoy: PasswordHash,
+    /// Accounts added at run time (ADR-285), sorted by id. The image's
+    /// accounts win: an id in both is the image's.
+    runtime: Option<Accounts>,
+    /// The most iterations of the accounts of the image alone.
+    image_iterations: u32,
 }
 
 impl<'a> Authenticator<'a> {
@@ -120,6 +152,8 @@ impl<'a> Authenticator<'a> {
             anonymous: p.anonymous_identity,
             networks: p.ip_identities.iter().map(|n| (n.net, n.id)).collect(),
             decoy: PasswordHash::decoy(iterations),
+            runtime: None,
+            image_iterations: iterations,
         }
     }
 
@@ -142,7 +176,22 @@ impl<'a> Authenticator<'a> {
             anonymous: "",
             networks: Vec::new(),
             decoy: PasswordHash::decoy(iterations),
+            runtime: None,
+            image_iterations: iterations,
         }
+    }
+
+    /// Replaces the accounts added at run time (`None`: none). In password
+    /// mode only; the decoy then costs as much as the dearest account of
+    /// either kind, so an unknown user still takes as long as a known one.
+    pub fn set_runtime(&mut self, accounts: Option<Accounts>) {
+        let dearest = accounts
+            .as_ref()
+            .and_then(|a| a.iter().map(|x| x.hash.iterations()).max())
+            .unwrap_or(0)
+            .max(self.image_iterations);
+        self.decoy = PasswordHash::decoy(dearest);
+        self.runtime = accounts;
     }
 
     pub fn mode(&self) -> PlainAuth {
@@ -159,8 +208,14 @@ impl<'a> Authenticator<'a> {
         }
     }
 
+    /// The accounts of the image.
     pub fn accounts(&self) -> usize {
         self.users.len()
+    }
+
+    /// The accounts added at run time.
+    pub fn runtime_accounts(&self) -> usize {
+        self.runtime.as_ref().map_or(0, |a| a.len())
     }
 
     /// Decides a CONNECT from `src` with the credentials it carried.
@@ -169,7 +224,7 @@ impl<'a> Authenticator<'a> {
         src: [u8; 4],
         username: Option<&str>,
         password: Option<&[u8]>,
-    ) -> Verdict<'a> {
+    ) -> Verdict<'_> {
         match self.mode {
             PlainAuth::Anonymous => Verdict::Accept(self.anonymous),
             PlainAuth::Ip => {
@@ -186,11 +241,20 @@ impl<'a> Authenticator<'a> {
         }
     }
 
-    fn password(&self, username: Option<&str>, password: Option<&[u8]>) -> Verdict<'a> {
-        let account = username.and_then(|u| self.users.iter().find(|(id, _)| *id == u));
+    fn password(&self, username: Option<&str>, password: Option<&[u8]>) -> Verdict<'_> {
+        let image = username.and_then(|u| self.users.iter().find(|(id, _)| *id == u));
+        let account: Option<(&str, &PasswordHash)> = match image {
+            Some((id, h)) => Some((*id, h)),
+            None => username.and_then(|u| {
+                let list = self.runtime.as_ref()?;
+                let i = list.binary_search_by(|a| a.id.as_str().cmp(u)).ok()?;
+                let a = list.get(i)?;
+                Some((a.id.as_str(), &a.hash))
+            }),
+        };
         // One hash on every path.
         let (hash, ok_identity) = match account {
-            Some((id, h)) => (h, Some(*id)),
+            Some((id, h)) => (h, Some(id)),
             None => (&self.decoy, None),
         };
         let matched = hash.verify(password.unwrap_or(&[]));
@@ -211,6 +275,110 @@ mod tests {
     use super::*;
     use urmqtt_cfg::passwd;
     use urmqtt_config::{PlainNetwork, PlainUser};
+
+    fn runtime(list: &[(&str, &str, u32, u8)]) -> Accounts {
+        let mut v: Vec<Account> = list
+            .iter()
+            .map(|(id, pw, it, class)| Account {
+                id: (*id).into(),
+                hash: PasswordHash::parse(
+                    &passwd::encode(pw.as_bytes(), b"0123456789abcdef", *it).unwrap(),
+                )
+                .unwrap(),
+                class: *class,
+            })
+            .collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        Arc::new(v)
+    }
+
+    /// NOW-15, ADR-285: accounts added at run time log in, in both
+    /// authenticators; the image's accounts win; a removed or changed one is
+    /// gone at the next `set_runtime`; unknown, wrong and missing credentials
+    /// are told alike as before.
+    #[test]
+    fn runtime_accounts_log_in_and_the_image_wins() {
+        let hash = passwd::encode(b"image-pw", b"0123456789abcdef", 1000).unwrap();
+        let hash: &'static str = Box::leak(hash.into_boxed_str());
+        let users: &'static [PlainUser] = Box::leak(Box::new([PlainUser { id: "img", hash }]));
+        let mut a = Authenticator::password_only(users);
+        let src = [10, 0, 0, 1];
+        assert_eq!(
+            a.authenticate(src, Some("dyn"), Some(b"dyn-pw")),
+            Verdict::Reject(Rejection::UnknownUser)
+        );
+        a.set_runtime(Some(runtime(&[
+            ("zed", "zed-pw", 2000, 0),
+            ("dyn", "dyn-pw", 3000, 1),
+            ("img", "other-pw", 1000, 0),
+        ])));
+        assert_eq!(a.runtime_accounts(), 3);
+        assert_eq!(a.max_iterations(), 3000, "the decoy costs the dearest");
+        assert_eq!(
+            a.authenticate(src, Some("dyn"), Some(b"dyn-pw")),
+            Verdict::Accept("dyn")
+        );
+        assert_eq!(
+            a.authenticate(src, Some("zed"), Some(b"zed-pw")),
+            Verdict::Accept("zed")
+        );
+        assert_eq!(
+            a.authenticate(src, Some("dyn"), Some(b"zed-pw")),
+            Verdict::Reject(Rejection::WrongPassword)
+        );
+        assert_eq!(
+            a.authenticate(src, Some("dyn"), None),
+            Verdict::Reject(Rejection::NoCredentials)
+        );
+        // The image's account of that id decides, not the run-time one.
+        assert_eq!(
+            a.authenticate(src, Some("img"), Some(b"image-pw")),
+            Verdict::Accept("img")
+        );
+        assert_eq!(
+            a.authenticate(src, Some("img"), Some(b"other-pw")),
+            Verdict::Reject(Rejection::WrongPassword)
+        );
+        // Replaced: the old password stops working at once.
+        a.set_runtime(Some(runtime(&[("dyn", "new-pw", 1000, 2)])));
+        assert_eq!(
+            a.authenticate(src, Some("dyn"), Some(b"dyn-pw")),
+            Verdict::Reject(Rejection::WrongPassword)
+        );
+        assert_eq!(
+            a.authenticate(src, Some("dyn"), Some(b"new-pw")),
+            Verdict::Accept("dyn")
+        );
+        assert_eq!(a.max_iterations(), 1000);
+        // Removed.
+        a.set_runtime(None);
+        assert_eq!(a.runtime_accounts(), 0);
+        assert_eq!(
+            a.authenticate(src, Some("dyn"), Some(b"new-pw")),
+            Verdict::Reject(Rejection::UnknownUser)
+        );
+    }
+
+    /// The plaintext authenticator takes them in password mode, and in no
+    /// other mode.
+    #[test]
+    fn runtime_accounts_only_count_in_password_mode() {
+        let p = config(PlainAuth::Password, &[], &[], "");
+        let mut a = Authenticator::new(&p);
+        a.set_runtime(Some(runtime(&[("dyn", "pw", 1000, 0)])));
+        assert_eq!(
+            a.authenticate([1, 2, 3, 4], Some("dyn"), Some(b"pw")),
+            Verdict::Accept("dyn")
+        );
+        let p = config(PlainAuth::Anonymous, &[], &[], "anon");
+        let mut a = Authenticator::new(&p);
+        a.set_runtime(Some(runtime(&[("dyn", "pw", 1000, 0)])));
+        assert_eq!(a.max_iterations(), 0);
+        assert_eq!(
+            a.authenticate([1, 2, 3, 4], Some("dyn"), Some(b"wrong")),
+            Verdict::Accept("anon")
+        );
+    }
 
     /// ADR-272: the WebSocket listener's accounts, checked as in password
     /// mode: credentials, unknown user, wrong password, success.

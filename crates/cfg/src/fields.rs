@@ -310,6 +310,8 @@ pub mod tag {
     pub const LIM_MAX_SHARED_GROUP_MEMBERS: u16 = 261;
     // NOW-14 (ADR-280): format version 14.
     pub const LIM_MAX_CONNECTIONS_PER_IP: u16 = 270;
+    // Run-time password accounts (NOW-15, ADR-285): format version 15.
+    pub const LIM_MAX_RUNTIME_ACCOUNTS: u16 = 275;
 }
 
 use tag as t;
@@ -1477,6 +1479,16 @@ pub static FIELDS: &[Field] = &[
             "Established TLS connections (MQTT and WebSocket) one source address may hold at once, all cores together; 0: no limit. Over it the SYN gets no answer (or the final ACK a RST) before any TLS work, and the refusal is counted (`$SYS/broker/connections/per_address/...`). Devices behind one NAT share an address, so size it for the largest site. The handshakes in flight per address are bounded separately (`limits.max_handshakes_in_flight_per_ip`). Format 14.",
         ),
         14,
+    ),
+    // Run-time password accounts (NOW-15, ADR-285): format version 15.
+    since(
+        f(
+            t::LIM_MAX_RUNTIME_ACCOUNTS,
+            "limits.max_runtime_accounts",
+            uint(2, 0, 1_024, 0),
+            "Password accounts the signed control channel may hold on the data disk (set-account, remove-account), for the plaintext and WebSocket listeners in password mode; 0 (the default): the control channel refuses account commands. Needs control.service_ids and a data disk. Format 15.",
+        ),
+        15,
     ),
 ];
 

@@ -460,6 +460,10 @@ fn default_max_shared_group_members() -> u32 {
     default_u32("limits.max_shared_group_members")
 }
 
+fn default_max_runtime_accounts() -> u32 {
+    default_u32("limits.max_runtime_accounts")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawTrust {
@@ -589,6 +593,9 @@ struct RawLimits {
     /// Optional (format 14, ADR-280): the default of the field table.
     #[serde(default = "default_max_connections_per_ip")]
     max_connections_per_ip: u32,
+    /// Optional (format 15, ADR-285): 0, no run-time accounts.
+    #[serde(default = "default_max_runtime_accounts")]
+    max_runtime_accounts: u32,
     /// NOW-13, ADR-269; optional ("single" when absent).
     #[serde(default)]
     publisher_backpressure: PublisherBackpressure,
@@ -901,6 +908,9 @@ pub struct Limits {
     /// Established TLS connections one source address may hold at once,
     /// 0..=1000000; 0: no limit (NOW-14, ADR-280).
     pub max_connections_per_ip: u32,
+    /// Password accounts the control channel may hold on the data disk,
+    /// 0..=1024; 0: the control channel refuses account commands (ADR-285).
+    pub max_runtime_accounts: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2194,6 +2204,7 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
         ),
         // ADR-280.
         ("limits.max_connections_per_ip", raw.max_connections_per_ip),
+        ("limits.max_runtime_accounts", raw.max_runtime_accounts),
     ] {
         if let Some(urmqtt_cfg::fields::Kind::UInt { min, max, .. }) = default_of(key)
             && !(min..=max).contains(&u64::from(v))
@@ -2222,6 +2233,7 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
         max_shared_groups: raw.max_shared_groups,
         max_shared_group_members: raw.max_shared_group_members,
         max_connections_per_ip: raw.max_connections_per_ip,
+        max_runtime_accounts: raw.max_runtime_accounts,
     }
 }
 
@@ -2668,6 +2680,8 @@ mod mtu_tests;
 mod pack_tests;
 #[cfg(test)]
 mod plain_tests;
+#[cfg(test)]
+mod runtime_accounts_tests;
 #[cfg(test)]
 mod shared_group_tests;
 #[cfg(test)]

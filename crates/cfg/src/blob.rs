@@ -32,11 +32,10 @@ pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// 10 is unused); version 12 adds the `[mqtt5]` section and the session and message expiry limits (ADR-273 rule
 /// 21: a kernel that does not know them would ignore the operator's expiry policy); version 13 adds
 /// `limits.max_shared_groups` and `limits.max_shared_group_members` (ADR-275: a kernel that does not know them
-/// would ignore the operator's bound); version 14 adds `limits.max_connections_per_ip` (ADR-280: a kernel that
-/// does not know it would not limit the connections of one address). The records of 2 and 3 are the same: the packer writes the lowest version
+/// would ignore the operator's bound); version 14 adds `limits.max_connections_per_ip` (ADR-280: a kernel that does not know it would not limit the connections of one address); version 15 adds `limits.max_runtime_accounts` (ADR-285: a kernel that does not know it would refuse the control channel's account commands anyway, but the operator's bound would not be what the image says). The records of 2 and 3 are the same: the packer writes the lowest version
 /// that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind still boots every image that
 /// does not use what came later.
-pub const FORMAT_VERSION: u16 = 14;
+pub const FORMAT_VERSION: u16 = 15;
 
 /// The one version between [`FORMAT_MIN`] and [`FORMAT_VERSION`] no format ever had.
 pub const UNUSED_VERSION: u16 = 10;

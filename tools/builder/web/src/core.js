@@ -408,6 +408,13 @@ const WEBSOCKET_PASSWORD_ONLY = new Set([
 /** The limits that bound shared subscriptions (ADR-275, format 13). */
 const SHARED_GROUP_LIMITS = new Set(['limits.max_shared_groups', 'limits.max_shared_group_members']);
 
+/** Whether a password login exists on some listener (plaintext.auth defaults to "password", websocket.auth to "mtls"). */
+function passwordListener(state) {
+  const v = state.values;
+  return (v['plaintext.enabled'] === true && (v['plaintext.auth'] || 'password') === 'password') ||
+    (v['websocket.enabled'] === true && v['websocket.auth'] === 'password');
+}
+
 /** Whether a field applies given the network mode (static/auto fields). */
 export function isApplicable(f, state) {
   const mode = state.values['network.mode'] || 'dhcp';
@@ -432,6 +439,8 @@ export function isApplicable(f, state) {
   // subscriptions, which 3.1.1 clients use too (ADR-275).
   if (f.section === 'mqtt5' && f.id !== 'mqtt5.enabled' && f.id !== 'mqtt5.shared_subscriptions' &&
     state.values['mqtt5.enabled'] === false) return false;
+  // Run-time password accounts (ADR-285) need the control channel (so the TLS listener) and a listener that takes passwords.
+  if (f.id === 'limits.max_runtime_accounts' && (tlsOff(state) || !passwordListener(state))) return false;
   // The shared-group limits (ADR-275) bound nothing while shared subscriptions are off.
   if (SHARED_GROUP_LIMITS.has(f.id) && state.values['mqtt5.shared_subscriptions'] === false) return false;
   return true;

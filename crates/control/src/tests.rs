@@ -24,6 +24,7 @@ const POLICY: Policy = Policy {
     max_message_age_s: 600,
     allow_unrevoke: false,
     allowlist_mode: true,
+    accounts: true,
 };
 
 fn msg(seq: u64, command: Command, items: &[&[u8]]) -> Message {
@@ -247,4 +248,143 @@ fn max_len_message_fits() {
     let wire = sign("dev", &m);
     assert_eq!(wire.len(), MAX_LEN);
     assert!(verify("dev", &PUB, &wire).is_ok());
+}
+
+/// NOW-15 (ADR-285): the account commands.
+mod accounts {
+    use super::*;
+
+    const HASH: &str = "pbkdf2-sha256$1000$00112233445566778899aabbccddeeff$\
+        e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0";
+
+    fn item(class: AccountClass, id: &str) -> Vec<u8> {
+        encode_account(class, id, HASH).unwrap()
+    }
+
+    #[test]
+    fn a_set_account_message_round_trips_and_verifies() {
+        let m = Message {
+            items: vec![
+                item(AccountClass::Full, "sensor-1"),
+                item(AccountClass::ReadOnly, "dash"),
+            ],
+            ..msg(5, Command::SetAccount, &[])
+        };
+        let wire = sign("dev", &m);
+        let got = verify("dev", &PUB, &wire).unwrap();
+        assert_eq!(got, m);
+        let a = parse_account(&got.items[1]).unwrap();
+        assert_eq!(
+            (a.class, a.id, a.hash),
+            (AccountClass::ReadOnly, "dash", HASH)
+        );
+        assert!(verify("prod", &PUB, &wire).is_err());
+        assert_eq!(Command::from_name("set-account"), Some(Command::SetAccount));
+        assert_eq!(
+            Command::from_name("remove-account"),
+            Some(Command::RemoveAccount)
+        );
+    }
+
+    #[test]
+    fn a_remove_account_message_names_ids() {
+        let m = msg(6, Command::RemoveAccount, &[b"sensor-1", b"dash"]);
+        let wire = sign("dev", &m);
+        assert_eq!(verify("dev", &PUB, &wire).unwrap(), m);
+    }
+
+    #[test]
+    fn bad_items_are_malformed() {
+        let enc = |m: Message| encode_body(&m);
+        // ids with a space, a slash, empty, too long, not UTF-8
+        for id in ["a b", "a/b", "", &"x".repeat(65)] {
+            let mut it = vec![0u8, id.len() as u8];
+            it.extend_from_slice(id.as_bytes());
+            it.extend_from_slice(HASH.as_bytes());
+            let m = Message {
+                items: vec![it],
+                ..msg(1, Command::SetAccount, &[])
+            };
+            assert!(enc(m).is_none(), "{id:?}");
+        }
+        let good = item(AccountClass::Full, "ok");
+        // class out of range
+        let mut bad = good.clone();
+        bad[0] = 3;
+        assert_eq!(parse_account(&bad), Err(Reject::Malformed));
+        // hash garbage, trailing byte, too many iterations, too few
+        for h in [
+            "plain-text-password",
+            &format!("{HASH}0"),
+            "pbkdf2-sha256$100001$00112233445566778899aabbccddeeff$e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0",
+            "pbkdf2-sha256$999$00112233445566778899aabbccddeeff$e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0e5b0",
+        ] {
+            assert!(encode_account(AccountClass::Full, "ok", h).is_none(), "{h}");
+        }
+        // the id length byte runs past the item
+        assert_eq!(parse_account(&[0, 200, b'a']), Err(Reject::Malformed));
+        assert_eq!(parse_account(&[]), Err(Reject::Malformed));
+        // an id of remove-account must be an identity too
+        for id in [&b"a b"[..], b"$sys", b"", b"\xff"] {
+            assert!(encode_body(&msg(1, Command::RemoveAccount, &[id])).is_none());
+        }
+    }
+
+    #[test]
+    fn one_id_once_per_message_and_a_bounded_count() {
+        let a = item(AccountClass::Full, "same");
+        let b = item(AccountClass::ReadOnly, "same");
+        let m = Message {
+            items: vec![a, b],
+            ..msg(1, Command::SetAccount, &[])
+        };
+        assert!(encode_body(&m).is_none(), "the same id twice, other class");
+        let dup = msg(1, Command::RemoveAccount, &[b"x", b"x"]);
+        assert!(encode_body(&dup).is_none());
+        let many: Vec<Vec<u8>> = (0..=MAX_ACCOUNT_ITEMS)
+            .map(|i| item(AccountClass::Full, &format!("u{i}")))
+            .collect();
+        let m = Message {
+            items: many.clone(),
+            ..msg(1, Command::SetAccount, &[])
+        };
+        assert!(encode_body(&m).is_none(), "one over the bound");
+        let m = Message {
+            items: many[..MAX_ACCOUNT_ITEMS].to_vec(),
+            ..msg(1, Command::SetAccount, &[])
+        };
+        assert!(encode_body(&m).is_some());
+    }
+
+    #[test]
+    fn the_policy_gates_accounts_and_replay_still_applies() {
+        let m = msg(7, Command::RemoveAccount, &[b"u"]);
+        let off = Policy {
+            accounts: false,
+            ..POLICY
+        };
+        assert_eq!(check(&m, Some(NOW), 0, &off), Err(Reject::AccountsDisabled));
+        assert_eq!(check(&m, Some(NOW), 0, &POLICY), Ok(()));
+        assert_eq!(check(&m, Some(NOW), 7, &POLICY), Err(Reject::Replay));
+        assert_eq!(check(&m, Some(NOW), 8, &POLICY), Err(Reject::Replay));
+        assert_eq!(check(&m, None, 0, &POLICY), Err(Reject::NoClock));
+        // the allowlist mode is not needed for accounts
+        let open = Policy {
+            allowlist_mode: false,
+            ..POLICY
+        };
+        assert_eq!(check(&m, Some(NOW), 0, &open), Ok(()));
+    }
+
+    #[test]
+    fn a_v1_decoder_view_of_an_account_command_stays_bounded() {
+        let items: Vec<Vec<u8>> = (0..MAX_ACCOUNT_ITEMS)
+            .map(|i| encode_account(AccountClass::WriteOnly, &format!("{:0>64}", i), HASH).unwrap())
+            .collect();
+        let m = Message {
+            items,
+            ..msg(1, Command::SetAccount, &[])
+        };
+        assert!(sign("dev", &m).len() <= MAX_LEN);
+    }
 }
