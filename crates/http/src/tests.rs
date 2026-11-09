@@ -142,9 +142,15 @@ fn every_refusal() {
         ),
         (b"\r\n\r\n".to_vec(), Refusal::Malformed),
         // An empty line in the middle with more behind it: not "the end".
-        (b"GET /metrics HTTP/1.1\r\n\r\nx: y\r\n\r\n".to_vec(), Refusal::Malformed),
+        (
+            b"GET /metrics HTTP/1.1\r\n\r\nx: y\r\n\r\n".to_vec(),
+            Refusal::Malformed,
+        ),
         // The fuzzer's find: a bare LF as an empty line before the real end.
-        (b"GET /metrics HTTP/1.1\r\nHost: x\r\n\n\r\n\r\n".to_vec(), Refusal::Malformed),
+        (
+            b"GET /metrics HTTP/1.1\r\nHost: x\r\n\n\r\n\r\n".to_vec(),
+            Refusal::Malformed,
+        ),
         (
             b"GET /metrics HTTP/1.1\r\nHost: x".to_vec(),
             Refusal::Malformed,

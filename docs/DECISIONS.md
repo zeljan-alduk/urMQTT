@@ -3647,7 +3647,7 @@ shard rather than per broker (point 6). (e) Wills are not persisted (point 15).
      (`blob::RESERVED_VERSIONS`), because other items of the release allocate them; the release merge removes each
      entry as its item lands (notes file).
 - **Consequences.** README's "TCP 8883 only" gains a third optional port (off by default, like the plaintext and
-  WebSocket ones). The kernel grows by SIZE_PLACEHOLDER. The trusted computing base grows by `urmqtt-http` (about 420
+  WebSocket ones). The release kernels of this tree are 3 971 144 B (aarch64) and 4 149 824 B (x86_64) (`make build ENV=prod`). The trusted computing base grows by `urmqtt-http` (about 420
   lines, no unsafe), `broker/src/metrics.rs` (about 400 lines of code and 500 of tests, no unsafe) and
   `kernel/src/metrics.rs` (about 340 lines): AUDIT row, fuzz targets `http_request` and `metrics_render`, the smoke group `metrics`.
 
