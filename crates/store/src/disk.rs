@@ -11,10 +11,13 @@ use alloc::vec::Vec;
 
 use urmqtt_sync::sync::SpinLock;
 
+use zeroize::Zeroizing;
+
 use crate::crypt::{CryptDev, DiskKey, KEY_BYTES};
+use crate::keyslot::{KeySlot, KeySlots, SLOTS};
 use crate::layout::{
-    BLOCK, CONVERT_LBA, CONVERT_MAGIC, FLAG_ENCRYPTED, FileKind, Layout, LayoutError, Params,
-    Region, RegionKind, SB_SLOT_LBA, SECTOR, SIZE_SLOT_LBA, SizeTable, Topology,
+    BLOCK, CONVERT_LBA, CONVERT_MAGIC, FLAG_ENCRYPTED, FLAG_WRAPPED, FileKind, Layout, LayoutError,
+    Params, Region, RegionKind, SB_SLOT_LBA, SECTOR, SIZE_SLOT_LBA, SizeTable, Topology,
 };
 
 /// A 512-byte-sector block device (virtio-blk in the kernel, memory in tests).
@@ -218,6 +221,20 @@ pub enum DiskError {
     /// An offline conversion (`urmqtt-disk encrypt|decrypt|rekey`) was
     /// interrupted: the disk is half converted until it is resumed.
     ConversionPending,
+    /// LATER-7: the disk is encrypted with a key from the image only; it
+    /// has no key slot a passphrase could open.
+    NotWrapped,
+    /// LATER-7: no key slot opens with this passphrase.
+    WrongPassphrase,
+    /// LATER-7: a key slot opened, but the key it holds does not match the
+    /// superblock's key check: the header was edited or put together from
+    /// two disks. Refused before anything is read with it.
+    KeySlotMismatch,
+    /// LATER-7: the operation would leave a wrapped disk with no key slot
+    /// (use [`Disk::unwrap_key_slots`] to go back to an image key).
+    LastKeySlot,
+    /// The disk is blank: nothing to unlock.
+    Blank,
 }
 
 impl From<IoError> for DiskError {
@@ -325,11 +342,24 @@ impl Disk {
     /// must match its key check (`WrongKey`, before anything is written).
     /// Without a key an encrypted disk is refused (`KeyRequired`) and
     /// a plain one opens as before.
+    ///
+    /// A wrapped disk (LATER-7) opens here too, with the key its slots hold
+    /// (from [`unlock`], or an image key that is the same key).
     pub fn open_keyed(
+        dev: Box<dyn BlockDevice>,
+        uuid: impl FnOnce() -> [u8; 16],
+        partitions: u32,
+        key: Option<&[u8; KEY_BYTES]>,
+    ) -> Result<(Self, Opened), DiskError> {
+        Self::open_inner(dev, uuid, partitions, key, &mut None)
+    }
+
+    fn open_inner(
         mut dev: Box<dyn BlockDevice>,
         uuid: impl FnOnce() -> [u8; 16],
         partitions: u32,
         key: Option<&[u8; KEY_BYTES]>,
+        seal: &mut Option<KeySlot>,
     ) -> Result<(Self, Opened), DiskError> {
         let total = dev.sectors();
         let topo = dev.topology();
@@ -368,6 +398,10 @@ impl Disk {
                     let dk = DiskKey::new(k);
                     layout.flags |= FLAG_ENCRYPTED;
                     layout.key_check = dk.key_check(&layout.uuid);
+                    if let Some(s) = seal.take() {
+                        layout.flags |= FLAG_WRAPPED;
+                        layout.key_slots[0] = Some(s);
+                    }
                     dev = Box::new(CryptDev::new(dev, dk));
                 }
                 let sizes = SizeTable::default();
@@ -384,6 +418,30 @@ impl Disk {
                 Ok((disk, Opened::Formatted))
             }
         }
+    }
+
+    /// Formats a **blank** disk encrypted with `key`, the key wrapped into
+    /// key slot 0 by `seal` (given the new disk's UUID), so that the image
+    /// need not hold it (LATER-7, ADR-325). Anything but a blank disk is
+    /// refused before a byte is written; the order of writes is the one of
+    /// [`open_keyed`](Self::open_keyed) (the superblock last).
+    pub fn format_sealed(
+        dev: Box<dyn BlockDevice>,
+        uuid: impl FnOnce() -> [u8; 16],
+        partitions: u32,
+        key: &[u8; KEY_BYTES],
+        seal: impl FnOnce(&[u8; 16]) -> KeySlot,
+    ) -> Result<Self, DiskError> {
+        let mut dev = dev;
+        if !matches!(probe(dev.as_mut())?, Probe::Blank) {
+            return Err(DiskError::Layout(LayoutError::UnknownData));
+        }
+        let id = uuid();
+        let slot = seal(&id);
+        let mut sealed = Some(slot);
+        let (disk, how) = Self::open_inner(dev, || id, partitions, Some(key), &mut sealed)?;
+        debug_assert_eq!(how, Opened::Formatted);
+        Ok(disk)
     }
 
     /// The read-only view of a layout-v1 disk, for the offline migration
@@ -641,6 +699,105 @@ impl Disk {
 
     pub fn topology(&self) -> Topology {
         self.topo
+    }
+
+    /// Puts `slot` into key slot `idx` (or empties it) on an encrypted disk
+    /// (LATER-7, ADR-327): the passphrase rotation, without rewriting data.
+    /// The caller sealed `slot` with this disk's key (from [`unlock`]). A
+    /// disk with a key from the image becomes wrapped by its first slot.
+    /// Emptying the last slot is refused ([`DiskError::LastKeySlot`]).
+    ///
+    /// Two superblock writes, each flushed: the new layout into the slot
+    /// not in force (generation + 1; a cut before it completes leaves the
+    /// old key slots in force), then the same layout into the other one
+    /// (generation + 2), so that no superblock keeps the old wrap of a
+    /// passphrase that was changed because it leaked. A cut between the
+    /// two leaves the old wrap in the older superblock until
+    /// [`scrub_key_slots`](Self::scrub_key_slots) (the kernel calls it at
+    /// every boot, the tool after every key command).
+    pub fn set_key_slot(&mut self, idx: usize, slot: Option<KeySlot>) -> Result<(), DiskError> {
+        if !self.layout.encrypted() {
+            return Err(DiskError::NotEncrypted);
+        }
+        if idx >= SLOTS {
+            return Err(DiskError::Layout(LayoutError::Inconsistent));
+        }
+        let mut slots = self.layout.key_slots;
+        if let Some(s) = slots.get_mut(idx) {
+            *s = slot;
+        }
+        if slots.iter().all(Option::is_none) {
+            return Err(DiskError::LastKeySlot);
+        }
+        self.write_key_slots(slots)
+    }
+
+    /// Empties every key slot of a wrapped disk: its key must then come
+    /// from the image again (`storage.disk_key_source = "image"`), the way
+    /// back to a kernel that predates LATER-7. Same two writes as
+    /// [`set_key_slot`](Self::set_key_slot).
+    pub fn unwrap_key_slots(&mut self) -> Result<(), DiskError> {
+        if !self.layout.wrapped() {
+            return Err(DiskError::NotWrapped);
+        }
+        self.write_key_slots([None; SLOTS])
+    }
+
+    fn write_key_slots(&mut self, slots: KeySlots) -> Result<(), DiskError> {
+        let mut next = self.layout.clone();
+        next.key_slots = slots;
+        if slots.iter().any(Option::is_some) {
+            next.flags |= FLAG_WRAPPED;
+        } else {
+            next.flags &= !FLAG_WRAPPED;
+        }
+        self.dev.flush()?;
+        for _ in 0..2 {
+            next.generation = self.layout.generation + 1;
+            let slot = 1 - self.sb_slot;
+            self.write_dev(
+                SB_SLOT_LBA.get(slot).copied().unwrap_or(SB_SLOT_LBA[0]),
+                &next.encode(),
+            )?;
+            self.dev.flush()?;
+            self.layout = next.clone();
+            self.sb_slot = slot;
+        }
+        Ok(())
+    }
+
+    /// Brings the superblock not in force up to the key slots of the one in
+    /// force, if they differ (LATER-7): after a passphrase change that was
+    /// cut between its two writes, the older superblock may still hold the
+    /// old wrap. One superblock write (generation + 1), flushed; `true` if
+    /// it wrote. A damaged or blank other slot is overwritten as well: it
+    /// is no way back either way.
+    pub fn scrub_key_slots(&mut self) -> Result<bool, DiskError> {
+        if self.layout.is_v1_view() {
+            return Ok(false);
+        }
+        let other = 1 - self.sb_slot;
+        let lba = SB_SLOT_LBA.get(other).copied().unwrap_or(SB_SLOT_LBA[0]);
+        let mut raw = [0u8; BLOCK];
+        self.dev.read(lba, &mut raw)?;
+        let same = match Layout::decode(&raw, self.dev.sectors()) {
+            Ok(Some(l)) => l.key_slots == self.layout.key_slots,
+            // A blank slot holds nothing; a damaged one (a write torn in
+            // the middle of a change) is wiped if key slot bytes are left.
+            Ok(None) => true,
+            Err(_) => !raw_has_key_slots(&raw),
+        };
+        if same {
+            return Ok(false);
+        }
+        let mut next = self.layout.clone();
+        next.generation += 1;
+        self.dev.flush()?;
+        self.write_dev(lba, &next.encode())?;
+        self.dev.flush()?;
+        self.layout = next;
+        self.sb_slot = other;
+        Ok(true)
     }
 
     /// The superblock slot (0 = A at LBA 0, 1 = B at LBA 24) in force.
@@ -1035,6 +1192,83 @@ impl Disk {
 
 fn gran_of(t: &Topology) -> usize {
     t.write_gran().max(t.logical as usize)
+}
+
+/// Whether a superblock's raw bytes hold anything in the key slot area.
+fn raw_has_key_slots(raw: &[u8; BLOCK]) -> bool {
+    raw.get(
+        crate::layout::KEY_SLOTS_AT
+            ..crate::layout::KEY_SLOTS_AT + SLOTS * crate::keyslot::SLOT_BYTES,
+    )
+    .is_some_and(|a| a.iter().any(|&x| x != 0))
+}
+
+/// What a data partition is, read without writing (LATER-7): what the
+/// kernel must ask for before it can open it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    /// Both superblock slots blank: it would be formatted.
+    Blank,
+    Plain,
+    /// Encrypted; `slots` is empty (all `None`) when the key is in the
+    /// image only.
+    Encrypted {
+        uuid: [u8; 16],
+        slots: KeySlots,
+    },
+}
+
+/// Reads the superblock (nothing else, nothing written). An interrupted
+/// conversion is [`DiskError::ConversionPending`]; a damaged or foreign
+/// superblock is its layout error.
+pub fn probe(dev: &mut dyn BlockDevice) -> Result<Probe, DiskError> {
+    let (a, b) = read_slots(dev)?;
+    let mut rec = [0u8; BLOCK];
+    dev.read(CONVERT_LBA, &mut rec)?;
+    if rec.get(..8) == Some(&CONVERT_MAGIC[..]) {
+        return Err(DiskError::ConversionPending);
+    }
+    Ok(match Layout::select(&a, &b, dev.sectors())? {
+        None => Probe::Blank,
+        Some((l, _)) if !l.encrypted() => Probe::Plain,
+        Some((l, _)) => Probe::Encrypted {
+            uuid: l.uuid,
+            slots: l.key_slots,
+        },
+    })
+}
+
+/// The disk key of a wrapped disk, from the first key slot `passphrase`
+/// opens, and that slot's index (LATER-7). Every slot in use is tried (each
+/// costs its PBKDF2 iterations). The key is checked against the
+/// superblock's key check before it is returned. Nothing is written.
+pub fn unlock(
+    dev: &mut dyn BlockDevice,
+    passphrase: &[u8],
+) -> Result<(Zeroizing<[u8; KEY_BYTES]>, usize), DiskError> {
+    let (a, b) = read_slots(dev)?;
+    let mut rec = [0u8; BLOCK];
+    dev.read(CONVERT_LBA, &mut rec)?;
+    if rec.get(..8) == Some(&CONVERT_MAGIC[..]) {
+        return Err(DiskError::ConversionPending);
+    }
+    let (layout, _) = Layout::select(&a, &b, dev.sectors())?.ok_or(DiskError::Blank)?;
+    if !layout.encrypted() {
+        return Err(DiskError::NotEncrypted);
+    }
+    if !layout.wrapped() {
+        return Err(DiskError::NotWrapped);
+    }
+    for (i, s) in layout.key_slots.iter().enumerate() {
+        let Some(s) = s else { continue };
+        if let Some(k) = s.open(passphrase, &layout.uuid) {
+            if !DiskKey::new(&k).matches(&layout.uuid, &layout.key_check) {
+                return Err(DiskError::KeySlotMismatch);
+            }
+            return Ok((k, i));
+        }
+    }
+    Err(DiskError::WrongPassphrase)
 }
 
 fn read_slots(dev: &mut dyn BlockDevice) -> Result<([u8; BLOCK], [u8; BLOCK]), DiskError> {
