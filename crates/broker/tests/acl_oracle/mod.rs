@@ -2157,19 +2157,28 @@ impl Harness {
         {
             let sess = self.sessions.get_mut(&key).expect("session");
             // A shared and an ordinary subscription are two ways in.
-            // (The same filter text may be both: `$share/g/fleet/#` and
-            // `fleet/#` are two subscriptions, so the ordinary side is read
-            // from the full filters the session holds, not from the inner
-            // text the shared set and the grants share.)
-            let two_ways = sess.shared.iter().any(|f| matches(f, topic))
-                && sess
-                    .current
-                    .iter()
-                    .any(|f| !is_share(f) && matches(f, topic));
+            // Every subscription the message matches is one way in: all the
+            // ordinary ones together (one copy), each shared filter by
+            // itself (`$share/g/fleet/#` and `fleet/#` are two, and so are
+            // `$share/g/fleet/all` and `$share/g/fleet/#`). Read from the
+            // full filters the session holds, not from the inner text the
+            // shared set and the grants share.
+            let ways = sess
+                .current
+                .iter()
+                .filter(|f| is_share(f) && matches(inner(f), topic))
+                .count()
+                + usize::from(
+                    sess.current
+                        .iter()
+                        .any(|f| !is_share(f) && matches(f, topic)),
+                );
+            let two_ways = ways >= 2;
             match sess.q2.get(&seq) {
-                Some(&(p, rec)) if two_ways && (!dup || p != pid) => {
-                    sess.q2.insert(seq, (pid, rec));
-                }
+                // Two flows with two ids carry the one message: one record
+                // per message cannot follow both, and each flow's id is
+                // still checked below (an id reused while in flight).
+                _ if two_ways => {}
                 Some(&(p, rec)) => {
                     assert!(
                         dup && p == pid && !rec,
