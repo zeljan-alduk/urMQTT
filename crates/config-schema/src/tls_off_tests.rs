@@ -76,7 +76,7 @@ fn both_listeners_and_tls_only_stay_format_2() {
 #[test]
 fn the_newest_format_can_be_asked_for_and_never_a_lower_one_than_needed() {
     let empty = run("", true).unwrap();
-    assert_eq!(Blob::parse(&empty).unwrap().version(), 13);
+    assert_eq!(Blob::parse(&empty).unwrap().version(), 18);
     assert_eq!(
         pack(
             "",

@@ -178,14 +178,41 @@ impl NetInterrupt {
     }
 }
 
-/// The `[devices]` section (ADR-257): one key per optional virtio driver, and
-/// the NIC's receive interrupt (ADR-270).
+/// DMA remapping (`devices.iommu`, ADR-305).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IommuMode {
+    /// Left as the firmware set it (the default).
+    #[default]
+    Off,
+    /// Used when present, else a warning.
+    Auto,
+    /// Refuse to boot without it.
+    Require,
+}
+
+impl IommuMode {
+    /// The blob's variant (an index into `urmqtt_cfg::fields::IOMMU_MODES`).
+    pub const fn variant(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Auto => 1,
+            Self::Require => 2,
+        }
+    }
+}
+
+/// The `[devices]` section (ADR-257): one key per optional virtio driver, the
+/// NIC's receive interrupt (ADR-270) and DMA remapping (ADR-305).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Devices {
     /// Not an optional driver: virtio-net always runs (ADR-270).
     #[serde(default)]
     pub virtio_net_interrupt: NetInterrupt,
+    /// `devices.iommu` (format 18).
+    #[serde(default)]
+    pub iommu: IommuMode,
     #[serde(default)]
     pub virtio_console: DeviceMode,
     #[serde(default)]

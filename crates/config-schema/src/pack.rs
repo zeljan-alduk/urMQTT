@@ -568,6 +568,8 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
         tag::DEV_NET_INTERRUPT,
         cfg.devices.virtio_net_interrupt.variant(),
     )?;
+    // ADR-305: "off" is the default and writes nothing; the others need format 18.
+    b.variant(tag::DEV_IOMMU, cfg.devices.iommu.variant())?;
     Ok(b)
 }
 

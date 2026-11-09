@@ -1146,10 +1146,10 @@ fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
 
 /// The templates of the published releases, configured by this tool (and by the builder page, which runs the
 /// same code): v0.2.0's kernel reads configuration format 2, v0.2.1's 3, v0.3.0's 4, v0.4.0's and v0.4.1's 6,
-/// this one 13. A configuration that needs no newer format than the template's kernel reads is written into it as
+/// v0.5.0's 13, this one 18. A configuration that needs no newer format than the template's kernel reads is written into it as
 /// before; one that needs more (the virtio-gpu console: 5, a `[devices]` key: 6, `network.mtu`: 7,
 /// `limits.publisher_backpressure = "off"`: 8, a `[websocket]` key: 9, `devices.virtio_net_interrupt = "off"`: 11,
-/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13) is refused with the reason, before a byte
+/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13, `devices.iommu`: 18) is refused with the reason, before a byte
 /// of the template changes, instead of giving an image whose kernel would refuse it at boot.
 #[test]
 fn templates_of_earlier_releases_take_what_their_kernel_reads() {
@@ -1190,6 +1190,10 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
     b.uint(tag::LIM_MAX_SHARED_GROUPS, 64).unwrap();
     let shared = b.finish(false).unwrap();
     assert_eq!(header(&shared), 13);
+    let mut b = Builder::new();
+    b.variant(tag::DEV_IOMMU, 2).unwrap();
+    let iommu = b.finish(false).unwrap();
+    assert_eq!(header(&iommu), 18);
     for (release, reads) in [
         ("v0.2.0", 2u16),
         ("v0.2.1", 3),
@@ -1201,6 +1205,7 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
         ("format 8", 8),
         // A tree with MQTT 5.0 parts 1 and 2 (ADR-273/274), without ADR-275.
         ("format 12", 12),
+        ("v0.5.0", 13),
         ("this tree", urmqtt_cfg::FORMAT_VERSION),
     ] {
         let empty = Builder::new().finish_as(false, reads).unwrap();
@@ -1217,6 +1222,7 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             ("devices.virtio_net_interrupt", &net_irq, 11),
             ("[mqtt5]", &m5, 12),
             ("limits.max_shared_groups", &shared, 13),
+            ("devices.iommu", &iommu, 18),
         ] {
             match image::configure_iso(&tpl, blob) {
                 Ok(_) => assert!(

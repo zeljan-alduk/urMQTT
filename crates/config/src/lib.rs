@@ -301,6 +301,36 @@ impl NetInterrupt {
     }
 }
 
+/// DMA remapping (`devices.iommu`, ADR-305).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Iommu {
+    /// The IOMMU is left as the firmware set it (the default).
+    Off,
+    /// Used when present and covering the driven devices, else a warning.
+    Auto,
+    /// Refuse to boot without it.
+    Require,
+}
+
+impl Iommu {
+    /// The TOML word.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Require => "require",
+        }
+    }
+
+    const fn from_variant(v: u8) -> Self {
+        match v {
+            1 => Self::Auto,
+            2 => Self::Require,
+            _ => Self::Off,
+        }
+    }
+}
+
 /// The `[devices]` section (ADR-257): one mode per optional virtio driver,
 /// in the order of `urmqtt_cfg::fields::DEVICE_KEYS`, and the NIC's receive
 /// interrupt (ADR-270).
@@ -309,12 +339,15 @@ pub struct Devices {
     modes: [DeviceMode; urmqtt_cfg::fields::DEVICE_KEYS.len()],
     /// `devices.virtio_net_interrupt`.
     pub virtio_net_interrupt: NetInterrupt,
+    /// `devices.iommu`.
+    pub iommu: Iommu,
 }
 
 impl Devices {
     pub const OFF: Self = Self {
         modes: [DeviceMode::Off; urmqtt_cfg::fields::DEVICE_KEYS.len()],
         virtio_net_interrupt: NetInterrupt::Auto,
+        iommu: Iommu::Off,
     };
 
     /// The mode of `key` (`devices.virtio_console`, ...); `None` for a key
@@ -342,6 +375,7 @@ impl Devices {
         }
         d.virtio_net_interrupt =
             NetInterrupt::from_variant(get(urmqtt_cfg::fields::tag::DEV_NET_INTERRUPT));
+        d.iommu = Iommu::from_variant(get(urmqtt_cfg::fields::tag::DEV_IOMMU));
         d
     }
 }

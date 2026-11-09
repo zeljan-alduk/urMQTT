@@ -308,6 +308,10 @@ pub mod tag {
     // MQTT 5.0 part 3 (ADR-275): format version 13.
     pub const LIM_MAX_SHARED_GROUPS: u16 = 260;
     pub const LIM_MAX_SHARED_GROUP_MEMBERS: u16 = 261;
+    // DMA remapping (LATER-5, H4b, ADR-305): format version 18. The tag is
+    // apart from the others of v0.6.0 so that items built in parallel do not
+    // collide.
+    pub const DEV_IOMMU: u16 = 318;
 }
 
 use tag as t;
@@ -347,6 +351,8 @@ pub const DEVICE_MODES: &[&str] = &["off", "auto", "on"];
 /// ADR-270): the receive queue's MSI-X interrupt where the platform has one,
 /// or polling.
 pub const NET_INTERRUPT_MODES: &[&str] = &["auto", "off"];
+/// DMA remapping (`devices.iommu`, ADR-305); the first is the default.
+pub const IOMMU_MODES: &[&str] = &["off", "auto", "require"];
 /// The `[devices]` keys, one per optional virtio driver (ADR-257): tag, key
 /// and the driver's feature (as `urmqtt_virtio::registry::KINDS` names it; a
 /// test there keeps the two equal).
@@ -1465,6 +1471,19 @@ pub static FIELDS: &[Field] = &[
             "Members one shared-subscription group may have; one more gets SUBACK 0x97 / 0x80. Format 13.",
         ),
         13,
+    ),
+    // DMA remapping (LATER-5, ADR-305): format version 18.
+    since(
+        f(
+            t::DEV_IOMMU,
+            "devices.iommu",
+            Kind::Enum {
+                variants: IOMMU_MODES,
+                default: 0,
+            },
+            "DMA remapping through the machine's IOMMU (Intel VT-d, AMD-Vi, Arm SMMUv3): each device the broker drives can reach only the memory the kernel gave it, and a DMA anywhere else is blocked and counted. off (the default): the IOMMU is left as the firmware set it (in a VM the hypervisor's devices are trusted, and an emulated IOMMU costs throughput). auto: used when the firmware describes one that covers the devices, else a warning and the broker runs without. require: refuse to boot unless every driven device is behind a working IOMMU (bare metal, a hypervisor you do not trust). Format 18.",
+        ),
+        18,
     ),
 ];
 

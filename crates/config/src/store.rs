@@ -917,6 +917,30 @@ mod tests {
         );
     }
 
+    /// ADR-305: `devices.iommu` is off by default (the empty blob, and every
+    /// blob before format 18); auto and require are decoded.
+    #[test]
+    fn the_iommu_is_off_by_default_and_decoded() {
+        use crate::Iommu;
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.devices.iommu, Iommu::Off);
+        for (v, want) in [(1u8, Iommu::Auto), (2, Iommu::Require)] {
+            let mut b = Builder::new();
+            b.variant(tag::DEV_IOMMU, v).unwrap();
+            let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+            let blob = Blob::parse(bytes).unwrap();
+            assert_eq!(blob.version(), 18);
+            let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+            let d = build(&blob, arena).devices;
+            assert_eq!(d.iommu, want);
+            assert_eq!(d.virtio_net_interrupt, crate::NetInterrupt::Auto);
+        }
+        assert_eq!(
+            [Iommu::Off.name(), Iommu::Auto.name(), Iommu::Require.name()],
+            urmqtt_cfg::fields::IOMMU_MODES
+        );
+    }
+
     /// ADR-257: every `[devices]` key is off by default (the empty blob, and
     /// every blob before format 6); auto and on are decoded per key.
     #[test]

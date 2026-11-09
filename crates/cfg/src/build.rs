@@ -4,9 +4,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use crate::blob::{
-    self, BASE_VERSION, Blob, FORMAT_VERSION, HEADER_LEN, MAGIC, SIG_KEY_LEN, SIG_LEN,
-};
+use crate::blob::{self, BASE_VERSION, Blob, HEADER_LEN, MAGIC, SIG_KEY_LEN, SIG_LEN};
 use crate::fields::{self, Field, Kind};
 use crate::{CfgError, err};
 
@@ -145,7 +143,8 @@ impl Builder {
     /// set (ADR-256), 6 with a `[devices]` key set (ADR-257), 7 with `network.mtu` set (ADR-264), 8 with
     /// `limits.publisher_backpressure` set (ADR-269), 9 with a `[websocket]` key set (ADR-272), 11 with
     /// `devices.virtio_net_interrupt` set (ADR-270), 12 with an `[mqtt5]` key or an expiry limit set (ADR-273), 13
-    /// with a shared-group limit set (ADR-275). A field at its default writes no record.
+    /// with a shared-group limit set (ADR-275), 18 with `devices.iommu` set (ADR-305). A field at its default writes
+    /// no record.
     pub fn lowest_version(&self) -> u16 {
         let tls_off = self
             .records
@@ -178,10 +177,7 @@ impl Builder {
     /// configuration of a template ISO, which is how a template says what its kernel reads). A version
     /// below [`lowest_version`](Self::lowest_version) is refused.
     pub fn finish_as(&self, dev_allowed: bool, version: u16) -> Result<Vec<u8>, CfgError> {
-        if version < self.lowest_version()
-            || version > FORMAT_VERSION
-            || version == blob::UNUSED_VERSION
-        {
+        if version < self.lowest_version() || !blob::known_version(version) {
             return Err(err(
                 "blob",
                 "this configuration needs a newer format version than the one asked for",

@@ -32,13 +32,23 @@ pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// 10 is unused); version 12 adds the `[mqtt5]` section and the session and message expiry limits (ADR-273 rule
 /// 21: a kernel that does not know them would ignore the operator's expiry policy); version 13 adds
 /// `limits.max_shared_groups` and `limits.max_shared_group_members` (ADR-275: a kernel that does not know them
-/// would ignore the operator's bound). The records of 2 and 3 are the same: the packer writes the lowest version
+/// would ignore the operator's bound); version 18 adds `devices.iommu` (ADR-305: a kernel that does not know it would
+/// run without the DMA isolation the operator required; 14 to 17 belong to other items of v0.6.0 and are unknown
+/// to this code until they are merged). The records of 2 and 3 are the same: the packer writes the lowest version
 /// that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind still boots every image that
 /// does not use what came later.
-pub const FORMAT_VERSION: u16 = 13;
+pub const FORMAT_VERSION: u16 = 18;
 
 /// The one version between [`FORMAT_MIN`] and [`FORMAT_VERSION`] no format ever had.
 pub const UNUSED_VERSION: u16 = 10;
+/// The versions between [`FORMAT_MIN`] and [`FORMAT_VERSION`] this code does not read: 10, which no format ever
+/// had, and 14 to 17, the formats of other v0.6.0 items (the release merge removes the ones it brings in).
+pub const UNUSED_VERSIONS: &[u16] = &[UNUSED_VERSION, 14, 15, 16, 17];
+
+/// Whether this code reads format `version`.
+pub fn known_version(version: u16) -> bool {
+    (FORMAT_MIN..=FORMAT_VERSION).contains(&version) && !UNUSED_VERSIONS.contains(&version)
+}
 /// The version a configuration is written in unless it needs a newer one.
 pub const BASE_VERSION: u16 = 2;
 /// The oldest format version it still reads. Blobs of the older versions stay
@@ -189,9 +199,9 @@ impl<'a> Blob<'a> {
             return Err(bad("not a urmqtt-cfg blob (bad magic)"));
         }
         let version = bytes.get(8..).and_then(le16).ok_or(bad("truncated"))?;
-        // Version 10 was never used by any format: unknown, like one above
-        // the newest.
-        if !(FORMAT_MIN..=FORMAT_VERSION).contains(&version) || version == UNUSED_VERSION {
+        // Version 10 was never used by any format (and 14 to 17 are not
+        // this code's): unknown, like one above the newest.
+        if !known_version(version) {
             return Err(bad("unsupported format version"));
         }
         if bytes.get(10..).and_then(le16) != Some(0) {
