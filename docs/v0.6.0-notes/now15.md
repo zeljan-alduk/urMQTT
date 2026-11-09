@@ -58,6 +58,15 @@ power cut at every write; `golden_schema6_bytes.rs`; `golden_v2.rs`), `crates/cf
 `accounts` (`SMOKE_ONLY=misc SMOKE_GROUPS=accounts`: `accounts-run-time`, `accounts-persist`; both listeners, class,
 limit, shadowing, a power cut, replay, no password or hash in the serial log).
 
+## Validation notes
+
+aarch64 smoke group `accounts` passes under HVF and TCG; the plaintext, websocket and control scenarios still pass. The
+x86_64 release kernel builds and its clippy is clean; the `accounts` smoke group is skipped under x86_64 TCG (software
+emulation makes one 100 000-iteration check take 5 to 8 seconds, so the login rate is below one a second) and should be
+run with KVM on the x86_64 VPS: `SMOKE_ONLY=misc SMOKE_GROUPS=accounts scripts/smoke.sh --arch x86_64 --accels kvm`.
+`tools/builder` tests: one pre-existing failure outside this item in the headless-browser "result card" test (it needs a
+release template ISO), the rest pass with the new module.
+
 ## Deliberately not done
 
 Per-account ACL patterns (three classes instead); listing accounts over the network; a bulk import (8 per message, one

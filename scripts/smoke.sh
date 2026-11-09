@@ -3056,6 +3056,13 @@ accounts() {
     MKIMG_EXTRA=()
     local fwd="$PORT:8883,$ppt:1883,$wpt:8084"
     for accel in $ACCELS; do
+        # Run-time accounts are sized for a hash of up to 100 000 iterations (ADR-285): under x86_64 TCG, software
+        # emulation makes one check take 5 to 8 s (the boot log warns), so the login rate is below one a second and
+        # the scenario measures the emulator. aarch64 TCG and every KVM or HVF run are fine.
+        if [[ ${ARCH:-} == x86_64 && $accel == tcg ]]; then
+            echo "  - accounts [$accel] skipped: a password check takes seconds under x86_64 software emulation (use kvm)"
+            continue
+        fi
         local log1="$OUT/accounts-$accel-1.log" log2="$OUT/accounts-$accel-2.log" data="$OUT/accounts-$accel.img" status=0
         local scratch="$dir/scratch-$accel"
         rm -rf "$scratch" "$log1.client" "$log2.client"
