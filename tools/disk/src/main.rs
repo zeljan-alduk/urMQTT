@@ -64,12 +64,31 @@
 //!                                                disk is refused by the kernel until a run that was cut
 //!                                                is resumed (--resume, same keys); the journal (default
 //!                                                DISK.convert-journal) must be kept until then. Without
-//!                                                --write the run happens on an in-memory overlay
+//!                                                --write the run happens on an in-memory overlay. A
+//!                                                conversion empties the key slots (they wrap the old key)
+//! urmqtt-disk keys DISK                          the key slots (LATER-7): the disk key wrapped under
+//!                                                passphrases, not in the image; no key needed
+//! urmqtt-disk keys DISK add (--key FILE | --passphrase-file FILE) --new-passphrase-file FILE
+//!                    [--slot N] [--iterations N] --write
+//!                                                wrap the key under a new passphrase (an image-key disk
+//!                                                becomes one for storage.disk_key_source = "console")
+//! urmqtt-disk keys DISK change (--key FILE | --passphrase-file FILE) --new-passphrase-file FILE
+//!                    [--slot N] [--iterations N] --write
+//!                                                a new passphrase for a slot (the one the old one opens)
+//! urmqtt-disk keys DISK remove --slot N (--key FILE | --passphrase-file FILE) --write
+//!                                                empty a slot (never the last)
+//! urmqtt-disk keys DISK unwrap (--key FILE | --passphrase-file FILE --key-out FILE) --write
+//!                                                empty every slot: the key must come from the image
+//!                                                again (storage.disk_key; the way back to v0.5)
+//!                                                Key changes rewrite the superblock only (two writes,
+//!                                                each flushed); without --write on an overlay
 //! ```
 //!
 //! `--key FILE` goes with every other command that reads an encrypted disk
 //! (`info`, `verify`, `export-*`, `scrub`, `backup*`, `grow`, `import-devices`):
-//! 64 raw bytes or 128 hex digits.
+//! 64 raw bytes or 128 hex digits. `--passphrase-file FILE` instead opens a
+//! disk whose key is in its key slots (LATER-7): the file's bytes without
+//! one final newline.
 //!
 //! Test hooks (images only): `fixture-v1 DISK [--populate] --write` builds a
 //! layout-v1 data partition (the kernel only reads v2), and `--fault SPEC`
@@ -90,6 +109,7 @@ use urmqtt_disk::config;
 use urmqtt_disk::convert::{self, FileJournal, Key, MemJournal};
 use urmqtt_disk::dev::{FileDisk, Overlay, S, Shared};
 use urmqtt_disk::host::{self, mib, now_unix, open_store};
+use urmqtt_disk::keys;
 use urmqtt_disk::migrate;
 use urmqtt_disk::slots as ab;
 use urmqtt_store::fault::{FaultDevice, FaultSpec};
@@ -1200,6 +1220,120 @@ fn grow_cmd(path: &str, ratio: u32, write: bool, fault: Option<&str>) -> Result<
 
 // --- scrub (S6) -----------------------------------------------------------------------
 
+struct KeysArgs {
+    write: bool,
+    fault: Option<String>,
+    passphrase: Option<String>,
+    new_passphrase: Option<String>,
+    key_out: Option<String>,
+    slot: Option<usize>,
+    iterations: u32,
+}
+
+/// `urmqtt-disk keys DISK [add|change|remove|unwrap]` (LATER-7, ADR-327).
+fn keys_cmd(path: &str, sub: Option<&str>, a: KeysArgs) -> Result<(), String> {
+    let op = match sub {
+        None | Some("list") => {
+            let (base, found) = overlay(path)?;
+            let mut part = data_part(path, Box::new(base), &found)?;
+            print!("{}", keys::list(&mut part)?);
+            return Ok(());
+        }
+        Some("add") => keys::Op::Add,
+        Some("change") => keys::Op::Change,
+        Some("remove") => keys::Op::Remove,
+        Some("unwrap") => keys::Op::Unwrap,
+        Some(o) => {
+            return Err(format!(
+                "keys: unknown command {o:?} (add, change, remove, unwrap)"
+            ));
+        }
+    };
+    let auth = match (&a.passphrase, KEY.get()) {
+        (Some(p), None) => keys::Auth::Passphrase(keys::read_passphrase(p)?),
+        (None, Some(k)) => keys::Auth::Key(urmqtt_store::keyslot::Zeroizing::new(*k)),
+        _ => return Err("keys: give --key FILE or --passphrase-file FILE".into()),
+    };
+    let new = a
+        .new_passphrase
+        .as_deref()
+        .map(keys::read_passphrase)
+        .transpose()?;
+    if op == keys::Op::Unwrap && matches!(auth, keys::Auth::Passphrase(_)) && a.key_out.is_none() {
+        return Err("unwrap with a passphrase: give --key-out FILE, where the key is written (the image needs it from now on)".into());
+    }
+    let mut dev: Box<dyn BlockDevice> = if a.write {
+        writable(path, a.fault.as_deref())?
+    } else {
+        Box::new(Overlay::new(Box::new(FileDisk::open(path, false)?)))
+    };
+    let found = inspect(dev.as_mut())?;
+    let mut part = data_part(path, dev, &found)?;
+    // The key for --key-out, before the slots go.
+    let key_out = match (&a.key_out, op) {
+        (Some(_), keys::Op::Unwrap) => Some(keys::key_of(&mut part, &auth)?.0),
+        (Some(_), _) => return Err("--key-out goes with `keys DISK unwrap` only".into()),
+        _ => None,
+    };
+    let mut salt = [0u8; 32];
+    File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut salt))
+        .map_err(|e| format!("/dev/urandom: {e}"))?;
+    let done = keys::apply(
+        Box::new(part),
+        op,
+        &auth,
+        a.slot,
+        new.as_ref().map(|p| p.as_slice()),
+        a.iterations,
+        salt,
+    )?;
+    if let (Some(out), Some(k)) = (&a.key_out, &key_out) {
+        if a.write {
+            write_secret(out, keys::key_hex(k).as_bytes())?;
+            println!(
+                "keys: the disk key was written to {out} (128 hex digits): it is the storage.disk_key of the image from now on; keep it secret"
+            );
+        } else {
+            println!("keys: dry run: the key would be written to {out}");
+        }
+    }
+    let what = match (done.op, done.slot) {
+        (keys::Op::Add, Some(s)) => format!("key slot {s}: the disk key is wrapped under the new passphrase"),
+        (keys::Op::Change, Some(s)) => format!("key slot {s}: new passphrase; the old one no longer opens the disk"),
+        (keys::Op::Remove, Some(s)) => format!("key slot {s}: emptied"),
+        _ => "every key slot emptied: the key must come from the image (storage.disk_key_source = \"image\", storage.disk_key)".into(),
+    };
+    println!(
+        "keys: {what}{}{}",
+        if done.scrubbed {
+            "; the older superblock was brought up to date"
+        } else {
+            ""
+        },
+        if a.write {
+            ""
+        } else {
+            " (dry run on an overlay: nothing was written; add --write)"
+        }
+    );
+    Ok(())
+}
+
+/// Writes a secret file readable by its owner only.
+fn write_secret(path: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("{path}: {e} (it must not exist yet)"))?;
+    f.write_all(bytes)
+        .and_then(|()| f.sync_all())
+        .map_err(|e| format!("{path}: {e}"))
+}
+
 fn convert_cmd(
     path: &str,
     from: Option<Key>,
@@ -1253,7 +1387,7 @@ fn convert_cmd(
         r.chunks_skipped,
         if r.resumed { ", resumed" } else { "" },
         if to.is_some() {
-            "; the disk is now encrypted: boot it with the key in the ISO's configuration (storage.disk_key)"
+            "; the disk is now encrypted: boot it with the key in the ISO's configuration (storage.disk_key), or wrap it under a passphrase with `urmqtt-disk keys DISK add --key FILE` (any key slots were emptied: they wrapped the old key)"
         } else {
             "; the disk is now plain"
         }
@@ -1524,6 +1658,9 @@ fn run(args: &[String]) -> Result<(), String> {
         KEY.set(load_key(&k)?)
             .map_err(|_| "--key given twice".to_string())?;
     }
+    if opt("--key").is_some() && opt("--passphrase-file").is_some() {
+        return Err("give --key FILE or --passphrase-file FILE, not both".into());
+    }
     let pos: Vec<&String> = {
         let mut v = Vec::new();
         let mut skip = false;
@@ -1581,7 +1718,37 @@ fn run(args: &[String]) -> Result<(), String> {
             },
         )
     };
+    // LATER-7: a passphrase opens the key slots; every command but `keys`
+    // (which takes it as its authorisation) then runs with the key.
+    if let Some(p) = opt("--passphrase-file")
+        && pos.first().map(|s| s.as_str()) != Some("keys")
+    {
+        let pass = keys::read_passphrase(&p)?;
+        let path = arg(1, "DISK")?;
+        let (base, found) = overlay(path)?;
+        let mut part = data_part(path, Box::new(base), &found)?;
+        let (k, _) = urmqtt_store::disk::unlock(&mut part, &pass).map_err(keys::disk_error)?;
+        KEY.set(*k).map_err(|_| "--key given twice".to_string())?;
+    }
     match pos.first().map(|s| s.as_str()) {
+        Some("keys") => keys_cmd(
+            arg(1, "DISK")?,
+            pos.get(2).map(|s| s.as_str()),
+            KeysArgs {
+                write: flag("--write"),
+                fault: opt("--fault"),
+                passphrase: opt("--passphrase-file"),
+                new_passphrase: opt("--new-passphrase-file"),
+                key_out: opt("--key-out"),
+                slot: opt("--slot")
+                    .map(|s| s.parse::<usize>().map_err(|e| format!("--slot: {e}")))
+                    .transpose()?,
+                iterations: opt("--iterations")
+                    .map(|s| s.parse::<u32>().map_err(|e| format!("--iterations: {e}")))
+                    .transpose()?
+                    .unwrap_or(urmqtt_store::keyslot::DEFAULT_ITERATIONS),
+            },
+        ),
         Some("slots") => {
             let sub = arg(1, "status|stage|activate|confirm|rollback")?;
             let path = arg(2, "DISK")?;

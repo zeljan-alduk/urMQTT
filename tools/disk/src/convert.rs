@@ -31,7 +31,7 @@ use urmqtt_store::BlockDevice;
 use urmqtt_store::crc::crc32c;
 use urmqtt_store::crypt::{DiskKey, KEY_BYTES};
 use urmqtt_store::layout::{
-    BLOCK, CONVERT_LBA, CONVERT_MAGIC, FLAG_ENCRYPTED, Layout, SB_SLOT_LBA, SECTOR,
+    BLOCK, CONVERT_LBA, CONVERT_MAGIC, FLAG_ENCRYPTED, FLAG_WRAPPED, Layout, SB_SLOT_LBA, SECTOR,
 };
 
 pub type Key = [u8; KEY_BYTES];
@@ -331,6 +331,11 @@ pub fn convert(
     // The superblock last, into the other slot, with the next generation.
     let mut l2 = layout.clone();
     l2.generation += 1;
+    // LATER-7: the key slots wrap the old key; they go with it (a wrapped
+    // disk becomes one whose key comes from the image: `urmqtt-disk keys
+    // DISK add` wraps the new one).
+    l2.flags &= !FLAG_WRAPPED;
+    l2.key_slots = [None; urmqtt_store::keyslot::SLOTS];
     if to.is_some() {
         l2.flags |= FLAG_ENCRYPTED;
         l2.key_check = ct;
