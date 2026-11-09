@@ -4316,6 +4316,226 @@ time.sleep(1)
     done
 }
 
+# NEXT-11 (ADR-295 to ADR-299): A/B boot slots. Every image of the group carries the development
+# configuration with `[update]` set for the test (a short confirmation delay, or operator confirmation),
+# so the configuration the disk keeps across staging (carried over like update-boot) is that one.
+# ab_images <name> <toml lines>: MKIMG_EXTRA for that configuration.
+ab_images() {
+    local cfg="$OUT/ab-$1-config.toml"
+    mkdir -p "$OUT"
+    { cat "$ROOT/deploy/dev/config.toml"; printf '\n[update]\n%s\n' "$2"; } >"$cfg"
+    MKIMG_EXTRA=(--config "$cfg" --config-root "$ROOT/deploy/dev")
+}
+
+# ab_lba <disk> <A|B>: the first LBA of that slot's region, as `urmqtt-disk slots status` prints it.
+ab_lba() {
+    "$DISK_TOOL" slots status "$1" | sed -nE "s/^slot $2 \[[a-z]+\]: LBA ([0-9]+)\..*/\1/p"
+}
+
+# ab_put <disk> <A|B> <image>: <image>'s ESP over that slot's region, in place (a test hook: the slot then
+# holds another kernel command line; its staging commitment no longer matches, which only a switch to it
+# checks).
+ab_put() {
+    dd if="$3.esp" of="$1" bs=512 seek="$(ab_lba "$1" "$2")" conv=notrunc status=none
+}
+
+# ab_tool <log> <args...>: urmqtt-disk with its output appended to <log>.
+ab_tool() {
+    local log=$1
+    shift
+    echo "\$ urmqtt-disk $*" >>"$log"
+    "$DISK_TOOL" "$@" >>"$log" 2>&1
+}
+
+ab_slots() {
+    build_disk_tool || {
+        echo "  ✗ ab-slots needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local base="$OUT/ab-base.raw" serve="$OUT/ab-serve.raw" bad="$OUT/ab-bad.raw" n
+    ab_images fast 'confirm_after_s = 2'
+    mkimg "$base" "smoke"
+    mkimg "$serve" "serve"
+    mkimg "$bad" "smoke test=ab-bad"
+    for n in 1 3; do mkimg "$OUT/ab-cut-$n.raw" "smoke test=disk-fault:stop-after-write=$n"; done
+    MKIMG_EXTRA=()
+    local slot='\((v|[0-9a-f]{7})[^)]*\)'
+    for accel in $ACCELS; do
+        local disk="$OUT/ab-$accel.img" log status=0 tlog="$OUT/ab-$accel-tool.log"
+        # 1. The first boot reserves the standby slot; the running one is A, confirmed.
+        log="$OUT/ab-first-$accel.log"
+        rm -f "$tlog"
+        fresh_disk "$base" "$disk" 128m
+        boot "$log" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        ab_tool "$log" slots status "$disk" || status=1
+        check "ab-first-boot [$accel]" "$log" "$status" \
+            "gpt: standby boot slot reserved next to the EFI system partition" \
+            "boot: slot A $slot, confirmed; standby: empty" "^URMQTT READY$" \
+            "slot A \[active\]: LBA 2048\..* confirmed, as installed" "slot B \[standby\]: .*: empty" "$NO_FAULT"
+        local first
+        first=$(mktemp "$OUT/ab-first-disk.XXXXXX")
+        cp "$disk" "$first"
+        # 2. An update that confirms itself: staged into B, activated, healthy for 2 s.
+        status=0
+        log="$OUT/ab-confirm-$accel.log"
+        rm -f "$log"
+        ab_tool "$log" slots stage "$disk" --esp "$serve.esp" --unsigned --write || status=1
+        ab_tool "$log" slots activate "$disk" --tries 2 --write || status=1
+        boot_until "$log.boot" "boot: slot B confirmed" --disk "$disk" --accel "$accel" || status=$?
+        cat "$log.boot" >>"$log"
+        ab_tool "$log" slots status "$disk" || status=1
+        check "ab-update-confirms [$accel]" "$log" "$status" \
+            "slot B holds" "slot B $slot is the boot entry, on trial for 2 boot\(s\); slot A $slot is the way back" \
+            "boot: slot B $slot ON TRIAL: 1 trial boot\(s\) left after this one; confirmed after 2 s" \
+            "mqtt: TLS 1.3 listener on port" "boot: slot B confirmed \(healthy for 2 s: store open, listener up\)" \
+            "slot B \[active\]: .*: confirmed, staged" "slot A \[standby\]: .*: confirmed, as installed" "$NO_FAULT"
+        # 3. A bad update: two trial boots that never come up, then slot A by itself.
+        status=0
+        log="$OUT/ab-bad-$accel.log"
+        rm -f "$log"
+        cp "$first" "$disk"
+        ab_tool "$log" slots stage "$disk" --esp "$bad.esp" --unsigned --write || status=1
+        ab_tool "$log" slots activate "$disk" --tries 2 --write || status=1
+        for n in 1 2 3 4; do
+            boot "$log.$n" --disk "$disk" --accel "$accel" --headless --no-net || true
+            { echo "--- boot $n"; cat "$log.$n"; } >>"$log"
+        done
+        ab_tool "$log" slots status "$disk" || status=1
+        check "ab-bad-update-rolls-back [$accel]" "$log" "$status" \
+            "ON TRIAL: 1 trial boot\(s\) left after this one" "ab-bad: this kernel does not come up" \
+            "ON TRIAL: 0 trial boot\(s\) left after this one" \
+            "boot: slot B gave up: no trial boots left and no confirmation; slot A $slot is active again, resetting" \
+            "boot: slot A $slot, confirmed; standby: .* \(not bootable" "^URMQTT READY$" \
+            "slot B \[standby\]: .*BAD" "$NO_FAULT"
+        # 4. A power cut in the offline switch (the tool killed after its N-th write): the next boot
+        #    finds A (cut before the primary table changed: the valid primary is in force) or B on
+        #    trial (cut after the primary's entries: the firmware takes the complete backup).
+        for n in 1 2 3; do
+            status=0
+            log="$OUT/ab-cut-tool-$n-$accel.log"
+            rm -f "$log"
+            cp "$first" "$disk"
+            ab_tool "$log" slots stage "$disk" --esp "$base.esp" --unsigned --write || status=1
+            ab_tool "$log" slots activate "$disk" --write --fault "stop-after-write=$n" && status=1
+            boot "$log.boot" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+            cat "$log.boot" >>"$log"
+            local want="boot: slot A $slot, confirmed; standby: .*the way back"
+            [[ $n -ge 3 ]] && want="boot: slot B $slot ON TRIAL: 2 trial boot\(s\) left after this one"
+            check "ab-power-cut activate after write $n [$accel]" "$log" "$status" \
+                "injecting .*stop_after_writes: Some\($n\)" "$want" "^URMQTT READY$" "$NO_FAULT"
+        done
+        # 5. A power cut in the kernel's own write (the trial count): B's kernel stops after its N-th
+        #    write; B is then given a kernel that does not cut, and the trial goes on with one or two
+        #    of its three trial boots counted, never a broken table.
+        for n in 1 3; do
+            status=0
+            log="$OUT/ab-cut-kernel-$n-$accel.log"
+            rm -f "$log"
+            cp "$first" "$disk"
+            ab_tool "$log" slots stage "$disk" --esp "$OUT/ab-cut-$n.raw.esp" --unsigned --write || status=1
+            ab_tool "$log" slots activate "$disk" --tries 3 --write || status=1
+            boot "$log.1" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+            ab_put "$disk" B "$base"
+            boot "$log.2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+            { echo "--- boot 1"; cat "$log.1"; echo "--- boot 2"; cat "$log.2"; } >>"$log"
+            check "ab-power-cut trial count after write $n [$accel]" "$log" "$status" \
+                "disk-fault: power cut injected during the boot-slot step" \
+                "boot: slot B $slot ON TRIAL: [12] trial boot\(s\) left after this one" "^URMQTT READY$" "$NO_FAULT"
+        done
+        rm -f "$first"
+    done
+    ab_control
+    ab_release
+}
+
+# NEXT-11 (ADR-298): an operator confirms a trial over the control channel, a confirmation for another
+# disk is refused, and boot-rollback goes back to the previous slot.
+ab_control() {
+    local ctl="$ROOT/target/release/urmqtt-control" d="$ROOT/deploy/dev"
+    (cd "$ROOT" && cargo build --release --locked -q -p urmqtt-control-tool) || ctl=""
+    if [[ -z $ctl ]]; then
+        echo "  ✗ ab-control needs urmqtt-control"
+        FAILED=$((FAILED + 1))
+        return
+    fi
+    local base="$OUT/ab-op-base.raw" serve="$OUT/ab-op-serve.raw"
+    ab_images op 'confirm = "operator"'
+    mkimg "$base" "smoke"
+    mkimg "$serve" "serve"
+    MKIMG_EXTRA=()
+    local tls=(--port "$PORT" --ca "$d/ca.pem" --client-cert "$d/services/operator.pem" --client-key "$d/services/operator.key")
+    local slot='\((v|[0-9a-f]{7})[^)]*\)'
+    for accel in $ACCELS; do
+        local disk="$OUT/ab-op-$accel.img" log="$OUT/ab-control-$accel.log" status=0 guid
+        rm -f "$log" "$log.client"
+        fresh_disk "$base" "$disk" 128m
+        boot "$log.0" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        guid=$("$DISK_TOOL" slots status "$disk" | sed -nE 's/^disk GUID ([0-9a-f-]+) .*/\1/p')
+        ab_tool "$log" slots stage "$disk" --esp "$serve.esp" --unsigned --write || status=1
+        ab_tool "$log" slots activate "$disk" --write || status=1
+        start_vm "$log.1" --disk "$disk" --accel "$accel" --fwd "$PORT:8883"
+        if wait_log "$log.1" "TLS 1.3 listener"; then
+            "$ctl" boot-confirm --disk-guid 00000000-0000-4000-8000-000000000000 --env dev --key "$d/control.key" \
+                "${tls[@]}" >>"$log.client" 2>&1 || status=1
+            wait_log "$log.1" "rejected: other_disk" || status=124
+            "$ctl" boot-confirm --disk-guid "$guid" --env dev --key "$d/control.key" "${tls[@]}" >>"$log.client" 2>&1 || status=1
+            wait_log "$log.1" "boot: slot B confirmed \(boot-confirm control message\)" || status=124
+            "$ctl" boot-rollback --disk-guid "$guid" --env dev --key "$d/control.key" "${tls[@]}" >>"$log.client" 2>&1 || status=1
+            # The broker resets: QEMU (-no-reboot) exits.
+            local waited=0
+            while kill -0 "$VM_PID" 2>/dev/null && ((waited < TIMEOUT * 10)); do
+                sleep 0.1
+                waited=$((waited + 1))
+            done
+        else
+            status=124
+        fi
+        kill_vm
+        boot "$log.2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        { echo "--- boot 0"; cat "$log.0"; echo "--- boot 1"; cat "$log.1"; cat "$log.client"; echo "--- boot 2"; cat "$log.2"; } >>"$log"
+        check "ab-control-confirm-and-rollback [$accel]" "$log" "$status" \
+            "ON TRIAL: 2 trial boot\(s\) left after this one; waiting for a boot-confirm control message" \
+            "control: message from operator rejected: other_disk" \
+            "boot: slot B confirmed \(boot-confirm control message\)" \
+            "boot: boot-rollback control message: slot A is active again, slot B is marked bad; resetting" \
+            "boot: slot A $slot, confirmed; standby: .* \(not bootable" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
+# NEXT-11 (ADR-299): a release image is staged only with its signature (a throwaway minisign key made
+# here; never the release key), and the staged kernel boots on trial.
+ab_release() {
+    if ! command -v minisign >/dev/null; then
+        echo "  - ab-release skipped: no minisign on this machine (the Rust tests cover the signature check)"
+        return 0
+    fi
+    local base="$OUT/ab-base.raw" k="$OUT/ab-release-key" rel="$OUT/ab-release/urmqtt-test-universal.img"
+    mkdir -p "$OUT/ab-release"
+    rm -f "$k.pub" "$k.sec"
+    minisign -G -W -p "$k.pub" -s "$k.sec" >/dev/null 2>&1 || { echo "  ✗ ab-release: minisign -G failed"; FAILED=$((FAILED + 1)); return; }
+    cp "$base" "$rel"
+    (cd "$OUT/ab-release" && shasum -a 256 "$(basename "$rel")" >SHA256SUMS)
+    minisign -S -s "$k.sec" -m "$OUT/ab-release/SHA256SUMS" >/dev/null 2>&1 || { echo "  ✗ ab-release: minisign -S failed"; FAILED=$((FAILED + 1)); return; }
+    local slot='\((v|[0-9a-f]{7})[^)]*\)'
+    for accel in $ACCELS; do
+        local disk="$OUT/ab-release-$accel.img" log="$OUT/ab-release-$accel.log" status=0
+        rm -f "$log"
+        fresh_disk "$base" "$disk" 128m
+        boot "$log.0" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        ab_tool "$log" slots stage "$disk" --image "$rel" --sums "$OUT/ab-release/SHA256SUMS" \
+            --sig "$OUT/ab-release/SHA256SUMS.minisig" --pubkey "$ROOT/minisign.pub" --write && status=1
+        ab_tool "$log" slots stage "$disk" --image "$rel" --sums "$OUT/ab-release/SHA256SUMS" \
+            --sig "$OUT/ab-release/SHA256SUMS.minisig" --pubkey "$k.pub" --write || status=1
+        ab_tool "$log" slots activate "$disk" --write || status=1
+        boot "$log.1" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        cat "$log.1" >>"$log"
+        check "ab-release-image-signed [$accel]" "$log" "$status" \
+            "not one of the given keys" "release signature ok: SHA256SUMS signed by key [0-9A-F]{16}" \
+            "boot: slot B $slot ON TRIAL: 2 trial boot\(s\) left" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
 # SMOKE_ONLY=misc: the scenarios of the default run that are guarded by `want` and belong to no other
 # group (the default run with SMOKE_NO_GROUPS=1 skips exactly these, so CI runs both and loses nothing).
 if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
@@ -4399,6 +4619,16 @@ if [[ ${SMOKE_ONLY:-} == storage && $ARCH != universal ]]; then
         echo "  ✗ disk-tool needs sqlite3 and the mosquitto clients"
         FAILED=$((FAILED + 1))
     fi
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=ab: the A/B boot slots of this architecture (NEXT-11, ADR-295 to ADR-299): the first boot,
+# an update that confirms, one that rolls back, power cuts in the offline switch and in the kernel's
+# trial count, the operator's confirm and rollback over the control channel, a signed release image.
+if [[ ${SMOKE_ONLY:-} == ab && $ARCH != universal ]]; then
+    ab_slots
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit

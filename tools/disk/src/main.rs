@@ -762,11 +762,10 @@ fn disk_store_schema(path: &str) -> Option<u32> {
 }
 
 fn slots_status(path: &str) -> Result<(), String> {
+    // On an overlay: a table a cut left torn is repaired in memory only.
     let mut dev = Overlay::new(Box::new(FileDisk::open(path, false)?));
-    let disk_guid = gpt::disk_guid(&mut dev)
-        .map_err(|e| format!("{e:?}"))?
-        .ok_or("no valid GPT")?;
     let s = read_slots(&mut dev)?;
+    let disk_guid = s.table.header.disk_guid;
     println!(
         "disk GUID {disk_guid} (the --disk-guid of urmqtt-control boot-confirm/boot-rollback)"
     );
