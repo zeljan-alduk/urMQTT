@@ -22,10 +22,11 @@ export const FILE_KEYS = {
 /** The file slots that hold a list of PEM files (at most 8 each). */
 export const LIST_SLOTS = ['operational', 'bootstrap', 'logca'];
 
-/** Fields the page does not offer. Disk encryption (S7, ADR-240) needs a key
- * dialog (generate, save, import) the page does not have yet; it is set with
- * `urmqtt-config pack` and the TOML (docs/OPERATE.md). */
-export const HIDDEN = new Set(['storage.encryption', 'storage.disk_key']);
+/** Fields the page does not offer. A disk key in the image (S7, ADR-240) needs a
+ * key dialog (generate, save, import) the page does not have yet; it is set with
+ * `urmqtt-config pack` and the TOML (docs/OPERATE.md). Encryption whose key is a
+ * passphrase typed at the console (LATER-7, ADR-328) needs no file and is offered. */
+export const HIDDEN = new Set(['storage.disk_key']);
 
 /** Section order of the form and which sections open by default. */
 export const SECTION_ORDER = [
@@ -339,7 +340,9 @@ export function buildToml(model, state, { draft = false } = {}) {
 export function fieldForPath(model, path) {
   if (!path) return null;
   // "acl.device_publish[0]" names an entry of the list field.
-  const key = path.replace(/\[\d+\](\.\w+)?$/, '');
+  let key = path.replace(/\[\d+\](\.\w+)?$/, '');
+  // The key file is not on the page (ADR-328): its problems are shown at the choice of where the key comes from.
+  if (key === 'storage.disk_key') key = 'storage.disk_key_source';
   return model.byId.get(key) || model.byToml.get(key) || null;
 }
 
@@ -452,6 +455,8 @@ export function isApplicable(f, state) {
     state.values['mqtt5.enabled'] === false) return false;
   // Run-time password accounts (ADR-285) need the control channel (so the TLS listener) and a listener that takes passwords.
   if (f.id === 'limits.max_runtime_accounts' && (tlsOff(state) || !passwordListener(state))) return false;
+  // Where the disk key comes from (ADR-328) means something only with encryption on.
+  if (f.id === 'storage.disk_key_source') return state.values['storage.encryption'] === 'aes-256-xts';
   // The shared-group limits (ADR-275) bound nothing while shared subscriptions are off.
   if (SHARED_GROUP_LIMITS.has(f.id) && state.values['mqtt5.shared_subscriptions'] === false) return false;
   return true;
@@ -503,6 +508,10 @@ export function evaluateRisks(model, state, info) {
   if (val('registry.mode') === 'open') risks.push({ id: 'registry-open', level: 'note' });
   if (val('entropy.fallback') === 'none') risks.push({ id: 'entropy-none', level: 'note' });
   if (tlsOff(state)) risks.push({ id: 'tls-off', level: 'confirm' });
+  // ADR-328: no key in the image means a person at the console after every reboot.
+  if (val('storage.encryption') === 'aes-256-xts' && val('storage.disk_key_source') === 'console') {
+    risks.push({ id: 'console-unlock', level: 'confirm' });
+  }
   if (val('plaintext.enabled')) {
     risks.push({ id: 'plaintext-on', level: 'confirm' });
     if (val('plaintext.allow_from_anywhere')) risks.push({ id: 'plaintext-anywhere', level: 'confirm' });

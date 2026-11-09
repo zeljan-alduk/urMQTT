@@ -181,10 +181,30 @@ fn superblock_and_region_entries() {
     l = l.with_backup(0).unwrap();
     assert_eq!(l.minor, urmqtt_store::layout::MINOR);
     // Encrypted (S7): the flag and a recognisable key check.
-    l.flags = urmqtt_store::layout::FLAG_LEGACY_TELEMETRY | urmqtt_store::layout::FLAG_ENCRYPTED;
+    // The key slots (LATER-7): the wrapped flag and two recognisable slots.
+    l.flags = urmqtt_store::layout::FLAG_LEGACY_TELEMETRY
+        | urmqtt_store::layout::FLAG_ENCRYPTED
+        | urmqtt_store::layout::FLAG_WRAPPED;
     let kc: Vec<u8> = (0..32u8).map(|i| 0xa0 + i).collect();
     l.key_check.copy_from_slice(&kc);
+    let slot = |seed: u8, iterations: u32| urmqtt_store::keyslot::KeySlot {
+        iterations,
+        salt: core::array::from_fn(|i| seed.wrapping_add(i as u8)),
+        wrapped: core::array::from_fn(|i| seed.wrapping_mul(3).wrapping_add(i as u8) | 1),
+    };
+    l.key_slots = [Some(slot(0x10, 300_000)), Some(slot(0x60, 1_000_000))];
     let b = l.encode();
+    let mut slots_bytes = Vec::new();
+    for s in l.key_slots.iter().flatten() {
+        let raw = b[3168 + slots_bytes.len()..3168 + slots_bytes.len() + 128].to_vec();
+        let mut e = BTreeMap::new();
+        e.insert("kind", le32(1));
+        e.insert("iterations", le32(s.iterations));
+        e.insert("salt", s.salt.to_vec());
+        e.insert("wrapped", s.wrapped.to_vec());
+        check("key_slot", &raw, &e, &BTreeMap::new());
+        slots_bytes.extend(raw);
+    }
     let mut regions = Vec::new();
     for (i, r) in l.regions.iter().enumerate() {
         let entry = b[64 + 24 * i..64 + 24 * (i + 1)].to_vec();
@@ -204,9 +224,10 @@ fn superblock_and_region_entries() {
     e.insert("generation", le64(l.generation));
     e.insert("partitions", le32(12));
     e.insert("align_sectors", le32(4096));
-    e.insert("flags", le32(3));
+    e.insert("flags", le32(7));
     e.insert("minor", le32(1));
     e.insert("key_check", kc);
+    e.insert("key_slots", slots_bytes);
     e.insert("regions", regions);
     e.insert("crc", crc_of(&b, BLOCK));
     check("superblock", &b, &e, &BTreeMap::new());

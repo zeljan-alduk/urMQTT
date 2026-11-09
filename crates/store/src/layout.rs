@@ -20,6 +20,7 @@
 use alloc::vec::Vec;
 
 use crate::crc::crc32c;
+use crate::keyslot::{self, KeySlots};
 
 pub const SECTOR: u64 = 512;
 pub const BLOCK: usize = 4096;
@@ -70,10 +71,19 @@ pub const FLAG_V1_VIEW: u32 = 1 << 31;
 /// A reader that predates S7 refuses the unknown flag bit (`Inconsistent`),
 /// so no minor version is spent on it.
 pub const FLAG_ENCRYPTED: u32 = 2;
-const STORED_FLAGS: u32 = FLAG_LEGACY_TELEMETRY | FLAG_ENCRYPTED;
+/// The disk key is wrapped in the superblock's key slots (LATER-7, ADR-325):
+/// it is not in the image, an operator's passphrase unwraps it. Only with
+/// [`FLAG_ENCRYPTED`] and at least one slot in use. A reader that predates
+/// LATER-7 refuses the unknown bit (`Inconsistent`), as S7 did.
+pub const FLAG_WRAPPED: u32 = 4;
+const STORED_FLAGS: u32 = FLAG_LEGACY_TELEMETRY | FLAG_ENCRYPTED | FLAG_WRAPPED;
 /// Where the key check lives in the superblock: right after the 128 region
 /// entries the format allows.
 const KEY_CHECK_AT: usize = REGIONS_AT + MAX_REGIONS * REGION_BYTES;
+/// Where the key slots live: right after the key check (3168), two slots
+/// of 128 bytes; all zero unless [`FLAG_WRAPPED`] is set.
+pub const KEY_SLOTS_AT: usize = KEY_CHECK_AT + 32;
+const KEY_SLOTS_END: usize = KEY_SLOTS_AT + keyslot::SLOTS * keyslot::SLOT_BYTES;
 
 /// Files the VFS maps onto regions. Their logical sizes live in the size
 /// table, in this order.
@@ -228,6 +238,9 @@ pub struct Layout {
     /// HMAC-SHA256 of the disk key over a constant and the UUID (all zero
     /// while the disk is not encrypted). Never the key.
     pub key_check: [u8; 32],
+    /// The disk key wrapped under passphrases (LATER-7); all `None` unless
+    /// `flags` has [`FLAG_WRAPPED`].
+    pub key_slots: KeySlots,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,6 +367,7 @@ impl Layout {
             generation: 1,
             flags: 0,
             key_check: [0; 32],
+            key_slots: [None; keyslot::SLOTS],
         };
         l.validate()?;
         Ok(l)
@@ -451,6 +465,11 @@ impl Layout {
 
     pub fn encrypted(&self) -> bool {
         self.flags & FLAG_ENCRYPTED != 0
+    }
+
+    /// The disk key is in the key slots, not in the image (LATER-7).
+    pub fn wrapped(&self) -> bool {
+        self.flags & FLAG_WRAPPED != 0
     }
 
     pub fn legacy_telemetry(&self) -> bool {
@@ -619,6 +638,7 @@ impl Layout {
             generation: self.generation + 1,
             flags: self.flags & STORED_FLAGS,
             key_check: self.key_check,
+            key_slots: self.key_slots,
         };
         l.validate()?;
         Ok(Some(l))
@@ -637,6 +657,11 @@ impl Layout {
         put(&mut b, 56, &(self.flags & STORED_FLAGS).to_le_bytes());
         put(&mut b, 60, &self.minor.to_le_bytes());
         put(&mut b, KEY_CHECK_AT, &self.key_check);
+        if self.wrapped()
+            && let Some(area) = b.get_mut(KEY_SLOTS_AT..KEY_SLOTS_END)
+        {
+            keyslot::encode_all(&self.key_slots, area);
+        }
         for (i, r) in self.regions.iter().take(MAX_REGIONS).enumerate() {
             let at = REGIONS_AT + i * REGION_BYTES;
             put(&mut b, at, &(r.kind as u32).to_le_bytes());
@@ -693,6 +718,25 @@ impl Layout {
         }
         let mut key_check = [0u8; 32];
         key_check.copy_from_slice(b.get(KEY_CHECK_AT..KEY_CHECK_AT + 32).unwrap_or(&[0; 32]));
+        // LATER-7: key slots only on a wrapped encrypted disk, and then at
+        // least one; elsewhere the area is zero, like every byte the format
+        // does not use.
+        let flags = u32_at(b, 56);
+        let area = b
+            .get(KEY_SLOTS_AT..KEY_SLOTS_END)
+            .ok_or(LayoutError::Inconsistent)?;
+        let key_slots = if flags & FLAG_WRAPPED != 0 {
+            let s = keyslot::decode_all(area).map_err(|_| LayoutError::Inconsistent)?;
+            if flags & FLAG_ENCRYPTED == 0 || s.iter().all(Option::is_none) {
+                return Err(LayoutError::Inconsistent);
+            }
+            s
+        } else {
+            if area.iter().any(|&x| x != 0) {
+                return Err(LayoutError::Inconsistent);
+            }
+            [None; keyslot::SLOTS]
+        };
         let l = Self {
             uuid,
             total_sectors: formatted,
@@ -701,8 +745,9 @@ impl Layout {
             partitions: u32_at(b, 48),
             align_sectors: u32_at(b, 52),
             minor,
-            flags: u32_at(b, 56),
+            flags,
             key_check,
+            key_slots,
         };
         l.validate()?;
         Ok(Some(l))
@@ -814,6 +859,7 @@ pub mod v1 {
             generation: 0,
             flags: FLAG_V1_VIEW | FLAG_LEGACY_TELEMETRY,
             key_check: [0; 32],
+            key_slots: [None; keyslot::SLOTS],
         }
     }
 

@@ -775,6 +775,28 @@ pub enum DiscardMode {
     Off,
 }
 
+/// Where the key of an encrypted data partition comes from
+/// (`storage.disk_key_source`, LATER-7, ADR-328).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskKeySource {
+    /// `storage.disk_key`, inside the image (the default).
+    #[default]
+    Image,
+    /// A passphrase typed on the console at boot; no key in the image.
+    Console,
+}
+
+impl DiskKeySource {
+    /// The blob's variant (an index into `urmqtt_cfg::fields::DISK_KEY_SOURCES`).
+    pub const fn variant(self) -> u8 {
+        match self {
+            Self::Image => 0,
+            Self::Console => 1,
+        }
+    }
+}
+
 /// Encryption of the data partition at rest (S7, ADR-240).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum EncryptionMode {
@@ -840,9 +862,12 @@ struct RawStorage {
     /// encrypted at rest (S7, ADR-240).
     #[serde(default = "default_encryption")]
     encryption: EncryptionMode,
-    /// The key file (only with encryption).
+    /// The key file (only with encryption and the image as the source).
     #[serde(default)]
     disk_key: String,
+    /// `"image"` (default) or `"console"` (LATER-7, format 22).
+    #[serde(default)]
+    disk_key_source: DiskKeySource,
     require_flush: bool,
     require_data_disk: bool,
     refuse_on_corruption: bool,
@@ -1083,8 +1108,11 @@ pub struct Storage {
     pub scrub_io_budget_mb_s: u32,
     /// Encryption at rest (S7).
     pub encryption: EncryptionMode,
-    /// Name of the key file, empty when encryption is off.
+    /// Name of the key file, empty when encryption is off or the key comes
+    /// from the console.
     pub disk_key: String,
+    /// Where the disk key comes from (LATER-7, format 22).
+    pub disk_key_source: DiskKeySource,
     pub require_flush: bool,
     /// Without a data disk: refuse to serve (true) or run in memory only.
     pub require_data_disk: bool,
@@ -2761,12 +2789,23 @@ fn validate_storage(
     if raw.grow_ratio_db > 100 {
         errors.push(err("storage.grow_ratio_db", "must be in 0..=100 (percent)"));
     }
-    match (raw.encryption, raw.disk_key.is_empty()) {
-        (EncryptionMode::Aes256Xts, true) => errors.push(err(
+    match (raw.encryption, raw.disk_key.is_empty(), raw.disk_key_source) {
+        // LATER-7 (ADR-328): the console source needs encryption and takes
+        // no key file; the same rules as `urmqtt_cfg::check`.
+        (EncryptionMode::Off, _, DiskKeySource::Console) => errors.push(err(
+            "storage.disk_key_source",
+            "\"console\" only with storage.encryption = \"aes-256-xts\"",
+        )),
+        (EncryptionMode::Aes256Xts, false, DiskKeySource::Console) => errors.push(err(
+            "storage.disk_key",
+            "not with storage.disk_key_source = \"console\": the point is that the image holds no key",
+        )),
+        (EncryptionMode::Aes256Xts, true, DiskKeySource::Console) => {}
+        (EncryptionMode::Aes256Xts, true, DiskKeySource::Image) => errors.push(err(
             "storage.disk_key",
             "required with storage.encryption = \"aes-256-xts\": the name of a file with the key",
         )),
-        (EncryptionMode::Off, false) => errors.push(err(
+        (EncryptionMode::Off, false, DiskKeySource::Image) => errors.push(err(
             "storage.disk_key",
             "only with storage.encryption = \"aes-256-xts\"",
         )),
@@ -2799,6 +2838,7 @@ fn validate_storage(
         scrub_io_budget_mb_s: raw.scrub_io_budget_mb_s,
         encryption: raw.encryption,
         disk_key: raw.disk_key.clone(),
+        disk_key_source: raw.disk_key_source,
         require_flush: raw.require_flush,
         require_data_disk: raw.require_data_disk,
         refuse_on_corruption: raw.refuse_on_corruption,

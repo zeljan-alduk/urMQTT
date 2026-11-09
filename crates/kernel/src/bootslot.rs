@@ -61,6 +61,15 @@ static NO_WAY_BACK: AtomicBool = AtomicBool::new(false);
 /// The automatic confirmation failed to write: not before this uptime (ms)
 /// again, so a failing disk does not flood the log from every DB-core step.
 static CONFIRM_RETRY_MS: AtomicU64 = AtomicU64::new(0);
+/// Milliseconds the boot spent waiting for an operator at the console (the
+/// disk passphrase, LATER-7): not charged to `update.trial_timeout_s`, so a
+/// trial boot that waited for a person is not rolled back for it (ADR-326).
+static WAITED_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Credits `ms` of waiting for an operator to the trial timeout.
+pub fn credit_wait(ms: u64) {
+    WAITED_MS.fetch_add(ms, Ordering::Relaxed);
+}
 /// Between two attempts of a failed automatic confirmation.
 const CONFIRM_RETRY_EVERY_MS: u64 = 5_000;
 /// The boot disk's GPT disk GUID, for the control messages that name it.
@@ -275,7 +284,8 @@ pub fn poll(now_ms: u64) -> bool {
     }
     let u = CONFIG.update;
     let timeout_ms = u64::from(u.trial_timeout_s) * 1000;
-    if timeout_ms > 0 && now_ms >= timeout_ms && !NO_WAY_BACK.load(Ordering::Relaxed) {
+    let running_ms = now_ms.saturating_sub(WAITED_MS.load(Ordering::Relaxed));
+    if timeout_ms > 0 && running_ms >= timeout_ms && !NO_WAY_BACK.load(Ordering::Relaxed) {
         error!(
             "boot: slot {} was not confirmed within update.trial_timeout_s = {} s: resetting (the attempt counts)",
             slot().unwrap_or('?'),

@@ -3,7 +3,8 @@
 # Boots an urMQTT ISO (or raw disk image) in QEMU (aarch64 virt, UEFI).
 #
 #   scripts/run-qemu.sh --iso ISO | --disk RAW [--accel hvf|tcg|kvm] [--smp N] [--mem 512M]
-#                       [--data IMG] [--bus blk|scsi] [--cpu MODEL] [--gic 3|2] [--no-rng] [--acpi on|off] [--serial FILE] [--headless]
+#                       [--data IMG] [--bus blk|scsi] [--cpu MODEL] [--gic 3|2] [--no-rng] [--acpi on|off] [--serial FILE]
+#                       [--serial-in SOCKET] [--headless]
 #                       [--pcap FILE] [--gdb] [--no-net] [--fwd HOST:GUEST,...]
 #                       [--blk-props 'physical_block_size=4096,opt_io_size=65536,...']
 #                       [--disk-format raw|qcow2] [--discard unmap]
@@ -53,6 +54,9 @@
 # VGA BAR the firmware scans out of.
 #
 # Without --serial the serial console is on stdio. Ctrl-A X quits QEMU.
+# --serial-in SOCKET (with --serial FILE): the serial port is also a Unix socket a test
+# can type into (the disk passphrase of storage.disk_key_source = "console", LATER-7);
+# what the guest writes still goes to FILE.
 # Option ROMs are disabled (romfile=): no iPXE in the firmware, faster boot.
 set -euo pipefail
 
@@ -64,6 +68,7 @@ FWD="1883:1883,8883:8883"
 DGRAM=""
 TAP=""
 SECURE_VARS=""
+SERIAL_IN=""
 GPU=""
 IOMMU=""
 EXTRA=()
@@ -88,6 +93,7 @@ while [[ $# -gt 0 ]]; do
         --data) DATA=$2; shift 2 ;;
         --acpi) ACPI=$2; shift 2 ;;
         --serial) SERIAL=$2; shift 2 ;;
+        --serial-in) SERIAL_IN=$2; shift 2 ;;
         --headless) HEADLESS=1; shift ;;
         --pcap) PCAP=$2; shift 2 ;;
         --gdb) GDB=1; shift ;;
@@ -243,7 +249,9 @@ if [[ $ARCH == x86_64 ]]; then
     else
         X86ARGS+=(-nic none)
     fi
-    if [[ -n "$SERIAL" ]]; then
+    if [[ -n "$SERIAL" && -n "$SERIAL_IN" ]]; then
+        X86ARGS+=(-chardev "socket,id=serial0,path=$SERIAL_IN,server=on,wait=off,logfile=$SERIAL" -serial chardev:serial0 -monitor none)
+    elif [[ -n "$SERIAL" ]]; then
         X86ARGS+=(-serial "file:$SERIAL" -monitor none)
     elif [[ $HEADLESS -eq 1 ]]; then
         X86ARGS+=(-serial stdio -monitor none)
@@ -367,7 +375,9 @@ else
     # Without this QEMU adds a default NIC (with an iPXE option ROM).
     ARGS+=(-nic none)
 fi
-if [[ -n "$SERIAL" ]]; then
+if [[ -n "$SERIAL" && -n "$SERIAL_IN" ]]; then
+    ARGS+=(-chardev "socket,id=serial0,path=$SERIAL_IN,server=on,wait=off,logfile=$SERIAL" -serial chardev:serial0 -monitor none)
+elif [[ -n "$SERIAL" ]]; then
     ARGS+=(-serial "file:$SERIAL" -monitor none)
 elif [[ $HEADLESS -eq 1 ]]; then
     ARGS+=(-serial stdio -monitor none)

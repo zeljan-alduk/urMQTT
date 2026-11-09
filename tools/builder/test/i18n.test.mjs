@@ -47,7 +47,7 @@ test('every key the code asks for exists in English', { skip: !haveWasm() && 'ne
   for (const s of model.sections) used.add(`section.${s.id}`);
   for (const id of [...Object.keys(PRESETS), 'defaults']) { used.add(`preset.${id}`); used.add(`preset.${id}.desc`); }
   for (const slot of ['cert', 'key', 'operational', 'bootstrap', 'logca', 'control', 'signing']) { used.add(`cert.title.${slot}`); used.add(`cert.help.${slot}`); }
-  for (const id of ['cannot-serve', 'ram-storage', 'wide-acl', 'watchdog-reset', 'cpu-disable', 'no-time', 'no-control', 'registry-open', 'entropy-none', 'entropy-jitter', 'plaintext-on', 'plaintext-anywhere', 'plaintext-anonymous', 'plaintext-public-address']) {
+  for (const id of ['cannot-serve', 'ram-storage', 'wide-acl', 'watchdog-reset', 'cpu-disable', 'no-time', 'no-control', 'registry-open', 'entropy-none', 'entropy-jitter', 'plaintext-on', 'plaintext-anywhere', 'plaintext-anonymous', 'plaintext-public-address', 'console-unlock']) {
     used.add(`risk.${id}.title`); used.add(`risk.${id}.text`);
   }
   for (const c of ['weak', 'mismatch', 'empty', 'format', 'version', 'params', 'auth', 'snapshot', 'storage', 'other']) used.add(`project.err.${c}`);

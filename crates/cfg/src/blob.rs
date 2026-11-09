@@ -41,17 +41,18 @@ pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// know it would run without the DMA isolation the operator required); version 19 adds `devices.virtio_net_queues`
 /// (ADR-313: a kernel that does not know it would not keep the single queue the operator asked for); version 20 adds the
 /// `observability.log_tls*` keys (ADR-318: a kernel that does not know them would not ship the log where the operator
-/// asked, without a word). The records of 2 and 3 are the same: the packer writes the lowest version
-/// that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind still boots every image that
-/// does not use what came later.
-pub const FORMAT_VERSION: u16 = 20;
+/// asked, without a word); version 22 adds `storage.disk_key_source` (ADR-328: a kernel that does not know it would find
+/// no key and refuse the disk, or worse, an operator would believe the key is not in the image when an older template
+/// put one there; 21 was reserved for LATER-6, which needed no key, and no format has it). The records of 2 and 3 are
+/// the same: the packer writes the lowest version that can hold the configuration ([`BASE_VERSION`]), so a kernel of
+/// the older kind still boots every image that does not use what came later.
+pub const FORMAT_VERSION: u16 = 22;
 
 /// The one version between [`FORMAT_MIN`] and [`FORMAT_VERSION`] no format ever had.
 pub const UNUSED_VERSION: u16 = 10;
 /// The versions between [`FORMAT_MIN`] and [`FORMAT_VERSION`] this code does not read: 10, which no format ever
-/// had, and any format allocated to an item of a release that is not merged yet (the release merge removes it as
-/// that item lands).
-pub const UNUSED_VERSIONS: &[u16] = &[UNUSED_VERSION];
+/// had, and 21, reserved for LATER-6 (ADR-320), which needed no configuration key: no format has it.
+pub const UNUSED_VERSIONS: &[u16] = &[UNUSED_VERSION, 21];
 
 /// Whether this code reads format `version`.
 pub fn known_version(version: u16) -> bool {

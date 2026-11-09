@@ -363,6 +363,10 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             scrub_io_budget_mb_s: u32_of(tag::ST_SCRUB_BUDGET),
             encryption: b.variant(tag::ST_ENCRYPTION) != 0,
             disk_key: crate::Secret(b.bin(tag::ST_DISK_KEY)),
+            disk_key_source: match b.variant(tag::ST_DISK_KEY_SOURCE) {
+                1 => crate::DiskKeySource::Console,
+                _ => crate::DiskKeySource::Image,
+            },
             require_flush: b.bool(tag::ST_REQUIRE_FLUSH),
             require_data_disk: b.bool(tag::ST_REQUIRE_DATA_DISK),
             refuse_on_corruption: b.bool(tag::ST_REFUSE_ON_CORRUPTION),
@@ -1132,6 +1136,29 @@ mod tests {
         assert_eq!(
             [NetQueues::Auto.name(), NetQueues::Single.name()],
             urmqtt_cfg::fields::NET_QUEUE_MODES
+        );
+    }
+
+    /// ADR-328: `storage.disk_key_source` is "image" by default (the empty
+    /// blob, and every blob before format 22); "console" is decoded.
+    #[test]
+    fn the_disk_key_source_is_the_image_by_default_and_decoded() {
+        use crate::DiskKeySource;
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.storage.disk_key_source, DiskKeySource::Image);
+        let mut b = Builder::new();
+        b.variant(tag::ST_ENCRYPTION, 1).unwrap();
+        b.variant(tag::ST_DISK_KEY_SOURCE, 1).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 22);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let s = build(&blob, arena).storage;
+        assert_eq!(s.disk_key_source, DiskKeySource::Console);
+        assert!(s.encryption && s.disk_key.0.is_empty());
+        assert_eq!(
+            [DiskKeySource::Image.name(), DiskKeySource::Console.name()],
+            urmqtt_cfg::fields::DISK_KEY_SOURCES
         );
     }
 

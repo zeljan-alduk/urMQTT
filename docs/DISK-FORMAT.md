@@ -4,7 +4,7 @@ The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0, S2, S3, S
 Since S1 the "data disk" is the **data partition of the boot disk** (§0);
 everything below §0 is relative to that partition's first sector. Layout v2
 (S2) adds alignment, the partition count and an A/B superblock; S3 adds the
-grow (§9); S5 adds minor version 1 and the backup region (§12); S6 reads without writing (§13); S7 adds optional encryption at rest (§14, a flag and a key check in the superblock, no new version). Layout v1 (S0/S1) is described only as far as `urmqtt-disk migrate`
+grow (§9); S5 adds minor version 1 and the backup region (§12); S6 reads without writing (§13); S7 adds optional encryption at rest (§14, a flag and a key check in the superblock, no new version); LATER-7 (v0.6.0) adds key slots, the disk key wrapped under passphrases so that the image need not hold it (§14.2, a flag and 256 bytes of the superblock, no new version). Layout v1 (S0/S1) is described only as far as `urmqtt-disk migrate`
 reads it (§10). The data has **no
 filesystem**: the kernel accesses it raw, as a superblock, a region table and
 fixed regions. The code is in `crates/store`
@@ -257,10 +257,11 @@ segments are 4 KiB aligned, but not 1 MiB aligned.
 | 40 | 8 | u64 | generation | 1 at format, plus 1 with every superblock write |
 | 48 | 4 | u32 | partitions | telemetry partitions, 1 to 64 |
 | 52 | 4 | u32 | align_sectors | alignment unit `A` in sectors: a multiple of 2048, at most 131072 |
-| 56 | 4 | u32 | flags | bit 0: the telemetry ring is a v1 ring kept in place (§5.2); bit 1: the disk is encrypted (§14); other bits must be 0 |
+| 56 | 4 | u32 | flags | bit 0: the telemetry ring is a v1 ring kept in place (§5.2); bit 1: the disk is encrypted (§14); bit 2: the disk key is wrapped in the key slots (§14.2, only with bit 1); other bits must be 0 |
 | 60 | 4 | u32 | minor | minor version: `0` (no backup region, every disk formatted before S5) or `1` (the layout may have a backup region, §12) |
 | 64 | 24 | region[] | regions | `region_count` entries of §3.1, back to back (up to offset 3136) |
 | 3136 | 32 | bytes | key_check | encrypted disks (flags bit 1): HMAC-SHA-256, keyed with the disk key, of `urMQTT disk key check v1` followed by the 16-byte `uuid`; all zero on a plain disk (§14) |
+| 3168 | 256 | bytes | key_slots | two key slots of §14.2, back to back (flags bit 2); all zero otherwise |
 | 4092 | 4 | crc32c | crc | over bytes 0..4092 |
 
 The word at 60 was reserved-and-zero up to S4, and a reader of that age refuses a
@@ -293,7 +294,7 @@ order (§9). The other kinds appear once.
 **Validity of one slot** (`Layout::decode`):
 1. The 4096 bytes are all zero: the slot is **blank**.
 2. Otherwise the magic must match, or the result is `UnknownData`: foreign data, never formatted over.
-3. The CRC must match; `version` must be 2 (1 is `OldVersion`); `region_count` ≤ 128; every `kind` must be known; `flags` has only bit 0; `minor` is 0 or 1.
+3. The CRC must match; `version` must be 2 (1 is `OldVersion`); `region_count` ≤ 128; every `kind` must be known; `flags` has only bits 0 to 2; `minor` is 0 or 1. With bit 2 (key slots), bit 1 is set and at least one key slot is in use and valid (§14.2); without it the key slot area is all zero.
 4. `total_sectors` ≤ the device size and a multiple of 8; `partitions` and `align_sectors` in range.
 5. Regions are non-empty, a multiple of 8 sectors long, start at or after `align_sectors`, do not overlap and end within `total_sectors`. Every region except scratch starts on a multiple of `align_sectors`; the first telemetry extent is exempt when flag bit 0 is set.
 6. Database, WAL and journal regions exist; WAL, journal, scratch and backup have one extent. Telemetry and scratch are optional for the reader.
@@ -833,13 +834,62 @@ the same keys puts back the chunk the journal holds if it is the one the
 watermark points at, and carries on. Tested with a power cut (clean and torn,
 cache dropped and kept) at every write of each of the three procedures.
 
+### 14.2 Key slots: a disk key that is not in the image (LATER-7, ADR-325 to ADR-329)
+
+With `flags` bit 2 the disk key is not expected from the configuration: it
+is held, wrapped, in the superblock's **key slots**, each a copy of the 64-byte
+disk key encrypted under a key derived from an operator's passphrase. The
+kernel asks for the passphrase on the console (`storage.disk_key_source =
+"console"`); `urmqtt-disk` takes it with `--passphrase-file`. The data is
+encrypted exactly as in §14; only where its key comes from changes.
+
+<!-- struct: key_slot size=128 -->
+| Offset | Size | Type | Field | Description |
+|---|---|---|---|---|
+| 0 | 4 | u32 | kind | `0` empty (then all 128 bytes are zero), `1` passphrase: PBKDF2-HMAC-SHA-256 and AES-256 key wrap; any other value is refused |
+| 4 | 4 | u32 | iterations | PBKDF2 iterations, 10 000 to 10 000 000 (300 000 by default); outside that range the superblock is refused |
+| 8 | 32 | bytes | salt | random, chosen when the slot is written |
+| 40 | 72 | bytes | wrapped | the disk key wrapped with RFC 3394 AES key wrap (default initial value `A6A6A6A6A6A6A6A6`), the 8-byte integrity value first |
+
+Bytes 112..128 are zero.
+
+- **Derivation.** The key-encryption key is the 32-byte PBKDF2-HMAC-SHA-256 of
+  the passphrase (its bytes as typed: printable ASCII, 12 to 256 characters)
+  with the salt `urMQTT disk key slot v1` ‖ `uuid` ‖ `salt` and `iterations`
+  iterations. The UUID binds the slot to its disk: a slot copied to another
+  disk does not open.
+- **Unlocking.** Every slot in use is tried in order. A wrong passphrase fails
+  the key wrap's integrity check (a 2^-64 chance of a false positive); the key
+  a slot yields must then match `key_check`, or the disk is refused (an edited
+  header, or a slot from another key: `KeySlotMismatch`). Nothing is read with
+  a key that failed.
+- **Changing a slot** (adding, replacing, emptying) writes the whole new
+  superblock into the slot not in force (generation + 1) and flushes, then the
+  same into the other slot (generation + 2) and flushes. A cut before the first
+  write completes leaves the old slots in force; after it, the new ones. A cut
+  between the two leaves the replaced wrap in the older superblock until the
+  next open: the kernel (at every boot) and the tool (after every key command)
+  overwrite an older superblock whose key slots differ from the ones in force.
+  The data is never rewritten; the disk key stays the same.
+- **The last slot** is never emptied by a slot change; emptying all of them is
+  an explicit step (`urmqtt-disk keys DISK unwrap`) that clears bit 2: the key
+  must then come from the image again (§14).
+- **A conversion** (`urmqtt-disk encrypt | decrypt | rekey`, §14.1) changes the
+  disk key, so it empties the key slots (they wrapped the old key) and clears
+  bit 2 when it switches the superblock.
+- **Older readers.** A reader that predates LATER-7 refuses the unknown `flags`
+  bit (`Inconsistent`), as S7 did; no minor version and no store schema are
+  spent. The way back to such a kernel is `urmqtt-disk keys DISK unwrap
+  --key-out FILE` and an image with that key (`storage.disk_key`).
+
 ## 15. What checks this document (S8)
 
 | What | Where | Covers |
 |---|---|---|
-| Field tables against the encoder | `crates/store/tests/disk_format_spec.rs` | every `<!-- struct -->` table: superblock (with the encryption flag and key check), region entry, size table, telemetry header, segment header, record, migration record, backup headers |
+| Field tables against the encoder | `crates/store/tests/disk_format_spec.rs` | every `<!-- struct -->` table: superblock (with the encryption and wrapped flags, the key check and the key slots), key slot, region entry, size table, telemetry header, segment header, record, migration record, backup headers |
 | Golden images, one per layout version | `crates/store/tests/golden_v1.rs` (v1: fresh, telemetry, torn), `golden_v2.rs` (v2.0: fresh, with data; `v2-data` keeps its schema 2 database, `v2-data-schema3` its schema 3 one, `v2-data-schema4` its schema 4 one, `v2-data-schema5` frozen, `v2-data-schema6` is what the same steps write now), `golden_v21.rs` (v2.1 with a backup region and data; the same encrypted with a fixed key) | the code still writes the same bytes, the frozen files still open, an encrypted image opens only with its key |
 | The database schema (§5.1.1) | `crates/store/tests/golden_schema3.rs`, `golden_schema4.rs`, `golden_schema5.rs`, `golden_schema6.rs`, `golden_schema6_bytes.rs` (`schema6-accounts.txt`; `schema3-qos2.txt`, `schema4-mqtt5.txt` and `schema5-shared.txt` frozen), `sqlite.rs`; `scripts/mqtt5-migration-check.sh` (a disk of schema 4, or 3 with `--from 3`, written by the previous kernel, booted by this one) | the frozen schema 2 database migrates to 5 with every row, the frozen schema 3 database (QoS 2 state) and the frozen schema 4 database (MQTT 5.0 state) migrate to 5 with every row, each also after a power cut at any write of the migration (an intermediate version found whole, never a half-done step); the CHECK on `sub_id` holds; the frozen schema 5 database migrates to 6 with every row and an empty `accounts` table, also after a power cut at any write of the migration; the CHECK constraints of `accounts` hold; a schema 6 database with QoS 2, MQTT 5.0, shared-subscription and account state is written byte for byte and reads back |
-| Fuzz targets | `fuzz/fuzz_targets/disk_layout.rs` (superblock slots v2 and the v1 view, size table, the migration record), `disk_backup.rs` (slot header and control block), `disk_crypt.rs` (the sector cipher, the key-file parser, an encrypted disk with damaged sectors opened with the right key, a wrong key and none), `telemetry_recover.rs` (segments and records) | no panic, accepted structures round-trip, a wrong key never opens a disk; CI runs every file in `fuzz/fuzz_targets` (`.github/workflows/fuzz.yml` builds the matrix from the directory) |
+| Key slots (§14.2) | `crates/store/src/keyslot/tests.rs` (RFC 3394 vectors, the slot codec, the passphrase rules, the console line editor), `crates/store/tests/wrapped.rs` (format, unlock, every edit of the header with and without a CRC, rotation, a power cut at every write of a rotation and of a sealed format), `tools/disk/tests/keys.rs` (`keys` and `--passphrase-file`, a cut at every write through the tool, `rekey` empties the slots), smoke `SMOKE_ONLY=unlock` | the key slot table above; a passphrase change never leaves neither passphrase working |
+| Fuzz targets | `fuzz/fuzz_targets/disk_layout.rs` (superblock slots v2 and the v1 view, size table, the migration record), `disk_backup.rs` (slot header and control block), `disk_crypt.rs` (the sector cipher, the key-file parser, an encrypted disk with damaged sectors opened with the right key, a wrong key and none), `disk_keyslot.rs` (the key slot decoder, the key unwrap, an edited header unlocked with the right and a wrong passphrase, the console line editor), `telemetry_recover.rs` (segments and records) | no panic, accepted structures round-trip, a wrong key never opens a disk; CI runs every file in `fuzz/fuzz_targets` (`.github/workflows/fuzz.yml` builds the matrix from the directory) |
 | Procedures under power cuts | `tools/disk/tests/migrate.rs`, `convert.rs`, `crates/store/tests/grow.rs`, `backup.rs`, `scripts/fault-loop.sh` | migrate, grow, backup, encrypt, decrypt and rekey end in a valid disk with all its data after a cut at every write |
 | Boot slots (§0a) | `crates/store/src/slots/tests.rs`, `tools/disk/tests/slots.rs`, fuzz `boot_slots`, smoke `SMOKE_ONLY=ab` | the first boot with slots, stage, activate, the trial count, confirm, both rollbacks and the switch back, each cut at every write (host: clean and torn, cache lost and kept; QEMU: the offline switch after writes 1 to 3 and the kernel's trial count after writes 1 and 3, on aarch64 edk2 and x86_64 OVMF) |

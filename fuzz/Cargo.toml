@@ -348,3 +348,10 @@ path = "fuzz_targets/seal_pins.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "disk_keyslot"
+path = "fuzz_targets/disk_keyslot.rs"
+test = false
+doc = false
+bench = false

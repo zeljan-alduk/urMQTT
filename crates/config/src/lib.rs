@@ -504,11 +504,36 @@ pub struct Storage {
     pub scrub_io_budget_mb_s: u32,
     /// AES-256-XTS over the data partition (S7, ADR-240).
     pub encryption: bool,
-    /// The 64-byte disk key, empty when `encryption` is off.
+    /// The 64-byte disk key, empty when `encryption` is off or the key
+    /// comes from the console.
     pub disk_key: Secret,
+    /// Where the disk key comes from (`storage.disk_key_source`, LATER-7,
+    /// ADR-328).
+    pub disk_key_source: DiskKeySource,
     pub require_flush: bool,
     pub require_data_disk: bool,
     pub refuse_on_corruption: bool,
+}
+
+/// Where the key of an encrypted data partition comes from
+/// (`storage.disk_key_source`, ADR-328).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskKeySource {
+    /// `storage.disk_key`, in the image (the default, S7).
+    Image,
+    /// A passphrase typed on the console unwraps the key held in the data
+    /// partition's key slots; the image holds no key.
+    Console,
+}
+
+impl DiskKeySource {
+    /// The TOML word.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Console => "console",
+        }
+    }
 }
 
 /// Key material that never prints: `Debug` shows only its length.

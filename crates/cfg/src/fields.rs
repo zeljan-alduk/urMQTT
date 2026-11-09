@@ -337,6 +337,9 @@ pub mod tag {
     pub const OBS_LOG_TLS_NAME: u16 = 451;
     pub const OBS_LOG_TLS_CA: u16 = 452;
     pub const OBS_LOG_TLS_QUEUE_KB: u16 = 453;
+    // A disk key that is not in the image (LATER-7, ADR-328): format
+    // version 22, a tag apart from the other v0.6.0 items.
+    pub const ST_DISK_KEY_SOURCE: u16 = 365;
 }
 
 use tag as t;
@@ -346,6 +349,9 @@ pub const IDENTITY_FIELDS: &[&str] = &["cn", "san_uri"];
 pub const STORAGE_MODES: &[&str] = &["disk", "auto", "ram"];
 pub const DISCARD_MODES: &[&str] = &["auto", "off"];
 pub const ENCRYPTION_MODES: &[&str] = &["off", "aes-256-xts"];
+/// Where the disk key of an encrypted data partition comes from
+/// (`storage.disk_key_source`, ADR-328); the first is the default.
+pub const DISK_KEY_SOURCES: &[&str] = &["image", "console"];
 pub const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 pub const ENTROPY_FALLBACKS: &[&str] = &["jitter", "none"];
 pub const REGISTRY_MODES: &[&str] = &["open", "allowlist"];
@@ -1640,6 +1646,18 @@ pub static FIELDS: &[Field] = &[
     // virtio-net multiqueue (NEXT-6, ADR-313): format version 19.
     since(
         f(
+            t::ST_DISK_KEY_SOURCE,
+            "storage.disk_key_source",
+            Kind::Enum {
+                variants: DISK_KEY_SOURCES,
+                default: 0,
+            },
+            "Where the key of an encrypted data partition comes from. image (the default): storage.disk_key, inside the image, so whoever has the ISO can read a copied disk. console: the image holds no key; the disk key is wrapped under a passphrase in the data partition's header, and the kernel asks for the passphrase on the console (serial, VNC keyboard or virtio-console) at every boot, before the store opens and before any listener: an unattended reboot waits for an operator. Needs storage.encryption and no storage.disk_key. Format 22.",
+        ),
+        22,
+    ),
+    since(
+        f(
             t::DEV_NET_QUEUES,
             "devices.virtio_net_queues",
             Kind::Enum {
@@ -1693,6 +1711,7 @@ pub static FIELDS: &[Field] = &[
         ),
         20,
     ),
+    // A disk key that is not in the image (LATER-7, ADR-328): format 22.
 ];
 
 /// The field with this tag.

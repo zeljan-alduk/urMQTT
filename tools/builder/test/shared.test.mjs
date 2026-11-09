@@ -7,7 +7,7 @@ import test from 'node:test';
 
 import { buildModel, buildToml, changedIds, decodeHash, emptyState, encodeHash, importToml, isApplicable } from '../web/src/core.js';
 import { loadBuilder } from '../web/src/wasm.js';
-import { WASM, haveWasm } from './helpers.mjs';
+import { FORMAT, WASM, haveWasm } from './helpers.mjs';
 
 if (!haveWasm()) {
   console.log(`skipped: needs ${WASM} (make builder)`);
@@ -22,7 +22,7 @@ const version = blob => blob[8] | (blob[9] << 8);
 const KEYS = ['limits.max_shared_groups', 'limits.max_shared_group_members'];
 
 test('the two limits are in [limits] with the documented defaults and ranges, the only keys of format 13', () => {
-  assert.equal(model.formatVersion, 20);
+  assert.equal(model.formatVersion, FORMAT);
   const limits = model.sections.find(s => s.id === 'limits').fields.map(f => f.id);
   for (const id of KEYS) {
     assert.ok(limits.includes(id), id);

@@ -440,7 +440,7 @@ fn the_toml_path_and_the_blob_check_agree() {
 #[test]
 fn the_schema_describes_the_section() {
     let json = schema_json();
-    assert!(json.contains("\"format_version\":20,\"format_min\":1"));
+    assert!(json.contains("\"format_version\":22,\"format_min\":1"));
     for key in [
         "enabled",
         "port",
@@ -472,12 +472,11 @@ fn the_schema_describes_the_section() {
     assert_eq!(json.matches("\"item\":\"ip_identity\"").count(), 1);
     // plaintext.allow_from and metrics.allow_from (ADR-290).
     assert_eq!(json.matches("\"item\":\"cidr\"").count(), 2);
-    // Version 2 fields say so; older ones are version 1. (Counted by the
-    // whole number: "since":20 is not a version 2 field.)
-    let since = |n: &str| {
-        json.split("\"since\":")
-            .skip(1)
-            .filter(|r| r.split(|c: char| !c.is_ascii_digit()).next() == Some(n))
+    // Version 2 fields say so; older ones are version 1.
+    // (Counted as a whole number: "since":22 is not "since":2.)
+    let since = |v: &str| {
+        json.match_indices(&format!("\"since\":{v}"))
+            .filter(|(i, m)| !json[i + m.len()..].starts_with(|c: char| c.is_ascii_digit()))
             .count()
     };
     assert_eq!(since("2"), 17);

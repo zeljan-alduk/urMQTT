@@ -1131,7 +1131,8 @@ Optional and off by default. It protects the data partition (registry,
 retained and queued messages, telemetry, the backups) when a **volume or a
 snapshot is taken away**: the cloud provider's snapshot, a copy of the disk
 image, a disk pulled from a machine. It does **not** protect against whoever
-holds the ISO (the key is in its configuration) or the running machine.
+holds the ISO (the key is in its configuration) or the running machine;
+for that, see "A disk key that is not in the image" below.
 
 1. Make a key, once, and keep it somewhere that is not the repository:
    `head -c 64 /dev/urandom | xxd -p -c 200 > disk.key` (128 hex digits; 64 raw
@@ -1170,6 +1171,51 @@ XTS gives confidentiality, not integrity: a flipped bit scrambles 16 bytes of
 data (the checksums and the scrubber find it), and two snapshots can be mixed
 sector by sector. The partition table, the superblock and the sizes are not
 encrypted. Costs are in docs/PERFORMANCE.md.
+
+### A disk key that is not in the image (LATER-7, ADR-325 to ADR-329)
+
+With the steps above the disk key is in the ISO, so a copy of the ISO reads a copied disk. To keep the key out of
+the image, let the kernel ask for a passphrase on the console at every boot:
+
+```toml
+[storage]
+encryption = "aes-256-xts"
+disk_key_source = "console"   # no disk_key: the image holds no key (configuration format 22)
+```
+
+The builder page offers it too (Storage: encryption, then "where the disk key comes from"). What it costs: **the
+broker does not start after any reboot until someone types the passphrase** on the provider's serial or VNC
+console (OPERATE.md, "The disk passphrase at the console"). Choose it when a broker that stays down is better
+than a broker whose image reads its disk.
+
+1. **A new disk:** boot it and watch the console. The first boot asks for a new passphrase twice, makes a random
+   disk key and formats the data partition with the key wrapped under the passphrase (key slot 0). Use a
+   generated passphrase of 20 characters or more (`openssl rand -base64 24`): the header can be copied and
+   guessed offline at one PBKDF2 (300 000 iterations) per guess, so a short or common one protects little.
+2. **Every later boot** stops at `Disk passphrase (or "change" to change it):`. Typing `change` there changes it
+   (the current one, then the new one twice); only the header is rewritten.
+3. **Offline**, with the VM stopped, the passphrase goes in a file (its bytes without the final newline; keep it on
+   tmpfs and delete it after):
+   - `urmqtt-disk keys DISK` lists the two key slots (no key needed);
+   - `urmqtt-disk keys DISK add --passphrase-file cur.txt --new-passphrase-file rec.txt --write` adds a
+     **recovery passphrase** in the free slot (keep it sealed, offline);
+   - `urmqtt-disk keys DISK change --passphrase-file cur.txt --new-passphrase-file new.txt --write`, `keys DISK
+     remove --slot N ...` (never the last one);
+   - `--passphrase-file FILE` opens the disk for `info`, `verify`, `export-*`, `scrub`, `backup*`, `grow`,
+     `import-devices`, `rekey`, `decrypt`.
+   `--iterations N` (10 000 to 10 000 000, default 300 000) sets the cost of a new slot. Without `--write` every
+   key command runs on an overlay and changes nothing. A power cut in the middle leaves the old passphrase or the
+   new one working, never neither.
+4. **An existing image-key disk** (the steps above) moves without a rewrite: `urmqtt-disk keys DISK add --key
+   disk.key --new-passphrase-file new.txt --write`, then the image with `disk_key_source = "console"`. Every old
+   ISO still holds that key, though: to make them useless, first `urmqtt-disk rekey DISK --key disk.key --key-new
+   fresh.key --write` (a full rewrite), then `keys DISK add --key fresh.key ...`, then delete `fresh.key`. A
+   `rekey` or `decrypt` empties the key slots (they wrapped the old key).
+5. **Back to an image key** (or to a v0.5.x kernel, which refuses a disk with key slots):
+   `urmqtt-disk keys DISK unwrap --passphrase-file cur.txt --key-out disk.key --write` writes the key to
+   `disk.key` (mode 0600) and empties the slots; then the image with `disk_key = "disk.key"`.
+
+Not done: sealing the key to a TPM, a network unlock, a key on a separate device (ADR-329).
 
 ### Disk safety, as before
 

@@ -43,6 +43,7 @@ pub mod fault;
 mod ffi;
 pub mod gpt;
 pub mod install;
+pub mod keyslot;
 pub mod layout;
 #[cfg(all(target_os = "none", feature = "worker"))]
 #[allow(unsafe_code)] // libc functions SQLite links against
