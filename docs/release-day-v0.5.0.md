@@ -130,7 +130,7 @@ cargo build --release -p urmqtt-config-tool
 (cd /tmp/urmqtt-v0.5.0 && ~/dev/urMQTT/target/release/urmqtt-config check-release --keyring ~/dev/urMQTT/keys/release-keys.json --tag v0.5.0 --sums SHA256SUMS urmqtt-*)
 target/release/urmqtt-config verify /tmp/urmqtt-v0.5.0/urmqtt-v0.5.0.img      # the empty configuration, format 13
 make dist ENV=release && grep 'urmqtt-v0.5.0.elf' build/dist/SHA256SUMS
-grep 'urmqtt-v0.5.0.elf' /tmp/urmqtt-v0.5.0/SHA256SUMS   # the same line: the release kernel is reproducible anywhere
+grep 'urmqtt-v0.5.0.elf' /tmp/urmqtt-v0.5.0/SHA256SUMS   # the same line only with clang 18.1.3 (Ubuntu 24.04 runner); a Mac's clang differs and so does the ELF (checked on release day: clang 23.1.1)
 ```
 
 The `.iso` and `.img` lines match only with the runner's xorriso and mtools (Ubuntu 24.04 arm64), not necessarily on

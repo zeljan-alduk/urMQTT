@@ -71,8 +71,11 @@ sums; the builder page uses the template only):
    make dist ENV=release      # build/dist/: the files of the table above and SHA256SUMS
    ```
 
-   `make repro ENV=release` needs no `deploy/` directory (a release holds no key). The kernels are reproducible across
-   hosts: the line of `urmqtt-vX.Y.Z.elf` in your `SHA256SUMS` must equal the workflow's. The ISO and raw image are
+   `make repro ENV=release` needs no `deploy/` directory (a release holds no key). The kernels are reproducible with the same
+   toolchain: rustc is pinned, but the C compiler (clang, used for SQLite) is the host's and its version is embedded in the
+   kernel (`COMPILER=clang-...`). The line of `urmqtt-vX.Y.Z.elf` in your `SHA256SUMS` equals the workflow's only with
+   the runner's clang (18.1.3, Ubuntu 24.04); a Mac with another clang gets a different ELF (found at v0.5.0: clang 23.1.1
+   gave 3,904,880 bytes against the published 3,925,296). The ISO and raw image are
    identical only with the same xorriso and mtools versions (docs/DEPLOY.md section 3), so a macOS ISO need not equal the
    Linux runner's; compare those on Ubuntu 24.04 arm64.
 
@@ -308,7 +311,7 @@ The release kernel and images with an empty configuration; configure them with t
 
 | File | What |
 |---|---|
-| `urmqtt-v0.5.0.elf` | the release kernel for aarch64 (no certificate or key in it; reproducible from the tag with `make dist ENV=release`) |
+| `urmqtt-v0.5.0.elf` | the release kernel for aarch64 (no certificate or key in it; reproducible from the tag with `make dist ENV=release` on Ubuntu 24.04 arm64 with clang 18.1.3, the release runner's toolchain) |
 | `urmqtt-v0.5.0.iso` | the universal ISO (aarch64 UEFI, x86_64 UEFI and BIOS) with the empty configuration: byte for byte the template |
 | `urmqtt-v0.5.0.img` | its raw disk image; `urmqtt-config pack --image` configures it |
 | `urmqtt-template-v0.5.0-universal.iso` | the same ISO under the template name the builder page and the mirror use |

@@ -55,7 +55,7 @@ cmp urmqtt-vX.Y.Z.iso urmqtt-template-vX.Y.Z-universal.iso
 gh attestation verify urmqtt-vX.Y.Z.elf --repo zeljan-alduk/urMQTT
 gh attestation verify urmqtt-vX.Y.Z.iso --repo zeljan-alduk/urMQTT --predicate-type https://cyclonedx.org/bom
 cd ~/dev/urMQTT && git switch --detach vX.Y.Z && make dist ENV=release && grep 'urmqtt-vX.Y.Z.elf' build/dist/SHA256SUMS
-grep 'urmqtt-vX.Y.Z.elf' /tmp/urmqtt-vX.Y.Z/SHA256SUMS   # the same line: the release kernel is reproducible anywhere
+grep 'urmqtt-vX.Y.Z.elf' /tmp/urmqtt-vX.Y.Z/SHA256SUMS   # the same line only with the runner's clang (18.1.3, Ubuntu 24.04); another clang gives another ELF
 ```
 
 The images with a configuration (a throwaway PKI from scripts/pki.sh, not the dev certificates):

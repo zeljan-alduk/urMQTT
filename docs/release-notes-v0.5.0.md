@@ -19,7 +19,7 @@ The release kernel and images with an empty configuration; configure them with t
 
 | File | What |
 |---|---|
-| `urmqtt-v0.5.0.elf` | the release kernel for aarch64 (no certificate or key in it; reproducible from the tag with `make dist ENV=release`) |
+| `urmqtt-v0.5.0.elf` | the release kernel for aarch64 (no certificate or key in it; reproducible from the tag with `make dist ENV=release` on Ubuntu 24.04 arm64 with clang 18.1.3, the release runner's toolchain) |
 | `urmqtt-v0.5.0.iso` | the universal ISO (aarch64 UEFI, x86_64 UEFI and BIOS) with the empty configuration: byte for byte the template |
 | `urmqtt-v0.5.0.img` | its raw disk image; `urmqtt-config pack --image` configures it |
 | `urmqtt-template-v0.5.0-universal.iso` | the same ISO under the template name the builder page and the mirror use |
