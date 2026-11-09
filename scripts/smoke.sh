@@ -973,6 +973,17 @@ mqtt5() {
     done
 }
 
+# per_address_limit_blob <n>: prints the path of a configuration blob (the dev configuration with
+# limits.max_connections_per_ip = <n>, ADR-280).
+per_address_limit_blob() {
+    local n=$1 dir="$OUT/connlimit" tool="$ROOT/target/debug/urmqtt-config"
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed" >&2; FAILED=$((FAILED + 1)); return 1; }
+    awk -v n="$n" '{ print } /^\[limits\]$/ { print "max_connections_per_ip = " n }' "$ROOT/deploy/dev/config.toml" >"$dir/limit-$n.toml"
+    "$tool" pack "$dir/limit-$n.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/limit-$n.blob" >/dev/null || return 1
+    echo "$dir/limit-$n.blob"
+}
+
 # M16: reconnect storms. Admission pretends the heap has 8 MiB, so 3000
 # devices do not all fit: each round all connect at once (retrying, like
 # devices with backoff), then all drop without DISCONNECT. The kernel must
@@ -985,8 +996,13 @@ storm() {
     if [[ ! -x "$loadgen" ]]; then
         (cd "$ROOT" && cargo build --release -q -p urmqtt-loadgen) || return 0
     fi
-    local iso="$OUT/storm.raw"
+    local iso="$OUT/storm.raw" nolimit
+    # 3000 devices from one address: the per-address limit on established connections (ADR-280, default
+    # 1024) is not what this scenario measures, so it is off here.
+    nolimit=$(per_address_limit_blob 0) || return 0
+    MKIMG_EXTRA=(--config "$nolimit")
     mkimg "$iso" "serve log=info heap_limit_mb=8"
+    MKIMG_EXTRA=()
     for accel in $ACCELS; do
         local log="$OUT/storm-$accel.log" data="$OUT/storm-$accel.img" status=0
         fresh_disk "$iso" "$data"
@@ -1276,6 +1292,63 @@ attack_app() {
             "attack: keepalive-abuse sent 5000 PINGREQ" \
             "attack: identities [0-9]+ connected" \
             "NOT:memory allocation of" "$NO_FAULT"
+    done
+}
+
+# NOW-14 (ADR-280): the limit on established TLS connections per source address, with a limit of 6 on a
+# four-vCPU guest (the connections of one address spread over the cores by the hash of the 4-tuple, so a limit
+# each core kept for itself would let 6 per core through). tools/attack `established-flood` opens 10 full TLS
+# sessions from one address: exactly 6 get in, a close frees exactly one place, closing all frees all (no place
+# leaks through the refusals or the closes). The operator then reads the counters in $SYS.
+conn_limit() {
+    [[ -z ${SMOKE_SCENARIOS:-} || conn_limit =~ $SMOKE_SCENARIOS ]] || return 0
+    local attack="$ROOT/target/release/urmqtt-attack"
+    if [[ ! -x "$attack" ]]; then
+        (cd "$ROOT" && cargo build --release -q -p urmqtt-attack) || {
+            echo "  ✗ urmqtt-attack build failed"; FAILED=$((FAILED + 1)); return 0; }
+    fi
+    local blob
+    blob=$(per_address_limit_blob 6) || return 0
+    local iso="$OUT/connlimit.raw"
+    MKIMG_EXTRA=(--config "$blob")
+    mkimg "$iso" "serve log=info"
+    MKIMG_EXTRA=()
+    for accel in $ACCELS; do
+        local log="$OUT/connlimit-$accel.log" data="$OUT/connlimit-$accel.img" status=0
+        fresh_disk "$iso" "$data"
+        start_vm "$log" --disk "$data" --accel "$accel" --smp 4 --fwd "$PORT:8883"
+        if wait_log "$log" "TLS 1.3 listener on port 8883" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+            local c=(--port "$PORT" --certs "$ROOT/deploy/dev")
+            {
+                "$attack" established-flood "${c[@]}" --clients 10 --count 6
+                if command -v mosquitto_sub >/dev/null; then
+                    local d="$ROOT/deploy/dev" sys
+                    # The retained $SYS values are refreshed every 10 s.
+                    sleep 12
+                    # shellcheck disable=SC2016
+                    sys=$(mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i operator --cafile "$d/ca.pem" \
+                        --cert "$d/services/operator.pem" --key "$d/services/operator.key" \
+                        -t '$SYS/broker/connections/per_address/#' -v -C 7 -W 40 2>&1 | tr '\n' ' ') || true
+                    echo "client: sys-per-address: $sys"
+                fi
+            } >"$log.client" 2>&1 || status=$?
+            sleep 1
+        else
+            status=124
+        fi
+        kill_vm
+        cat "$log.client" >>"$log" 2>/dev/null || true
+        local extra=()
+        command -v mosquitto_sub >/dev/null && extra=(
+            "client: sys-per-address: .*connections/per_address/limit 6"
+            "connections/per_address/(syn_dropped|refused) [1-9]")
+        check "conn-limit [$accel]" "$log" "$status" \
+            "limits: at most 6 established connection\(s\) per source address" \
+            "attack: established-flood round 1: 6 of 10 connected, 4 refused" \
+            "attack: established-flood a closed connection freed exactly one place" \
+            "attack: established-flood round 2: 6 of 10 connected, 4 refused after every connection closed" \
+            "admission: [0-9]+ (connection\(s\) refused|SYN\(s\) dropped without an answer on core [0-9]+): too many established connections from one address" \
+            ${extra[@]+"${extra[@]}"} "NOT:memory allocation of" "$NO_FAULT"
     done
 }
 
@@ -4332,6 +4405,7 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want net_mtu && net_mtu
     want net_irq && net_irq
     want attack_app && attack_app
+    want conn_limit && conn_limit
     want observability && observability
     want no_hw_rng && no_hw_rng
     command -v mosquitto_sub >/dev/null && want entropy_option && entropy_option
@@ -4968,6 +5042,7 @@ want attack_raw && attack_raw
 want net_mtu && net_mtu
 want net_irq && net_irq
 want attack_app && attack_app
+want conn_limit && conn_limit
 want observability && observability
 want first_boot && first_boot
 want first_boot_crash && first_boot_crash

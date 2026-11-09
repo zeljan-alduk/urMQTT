@@ -97,7 +97,7 @@ fn parse() -> Result<Opts, String> {
 }
 
 const USAGE: &str = "usage: urmqtt-attack \
-    syn-flood|ack-flood|rst-flood|mtu-probe|slowloris|half-records|max-packets|topic-flood|sub-flood|keepalive-abuse|identities \
+    syn-flood|ack-flood|rst-flood|mtu-probe|slowloris|half-records|max-packets|topic-flood|sub-flood|keepalive-abuse|identities|established-flood \
     [options]";
 
 fn raw_transport(o: &Opts) -> Result<raw::Transport, String> {
@@ -118,6 +118,9 @@ fn run(o: &Opts) -> Result<(), String> {
         "sub-flood" => app::sub_flood(&o.host, o.port, &o.certs, o.filters)?,
         "keepalive-abuse" => app::keepalive_abuse(&o.host, o.port, &o.certs, o.pings)?,
         "identities" => app::many_identities(&o.host, o.port, &o.certs, o.clients)?,
+        "established-flood" => {
+            app::established_flood(&o.host, o.port, &o.certs, o.clients, o.count as usize)?
+        }
         other => return Err(format!("unknown mode {other}\n{USAGE}")),
     }
     Ok(())

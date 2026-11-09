@@ -820,7 +820,7 @@ pub fn set_bench_limits(on: bool) {
     BENCH_LIMITS.store(on, Ordering::Relaxed);
     if on {
         urmqtt_log::warn!(
-            "limits: BENCH LIMITS on (dev command line): {} handshakes in flight per core and per address, {} handshakes/s per core; never for production",
+            "limits: BENCH LIMITS on (dev command line): {} handshakes in flight per core and per address, {} handshakes/s per core, no limit on established connections per address; never for production",
             BENCH_ADMISSION.per_core,
             BENCH_ADMISSION.rate_per_sec
         );

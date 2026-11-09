@@ -118,15 +118,32 @@ fn subscribe_packet(packet_id: u16, filters: &[String]) -> Vec<u8> {
 }
 
 fn tcp(host: &str, port: u16) -> Result<TcpStream, String> {
+    tcp_within(host, port, Duration::from_secs(10))
+}
+
+/// Like [`tcp`] with `read` as the read timeout.
+fn tcp_within(host: &str, port: u16, read: Duration) -> Result<TcpStream, String> {
     let s = TcpStream::connect((host, port)).map_err(|e| format!("connect: {e}"))?;
     s.set_nodelay(true).ok();
-    s.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    s.set_read_timeout(Some(read)).ok();
     Ok(s)
 }
 
 /// A full TLS 1.3 handshake and MQTT CONNECT/CONNACK.
 fn open(host: &str, port: u16, id: &Identity, keepalive: u16) -> Result<Tls, String> {
-    let sock = tcp(host, port)?;
+    open_within(host, port, id, keepalive, Duration::from_secs(10))
+}
+
+/// [`open`] that gives up after `read` without an answer (a SYN the broker
+/// drops never is one).
+fn open_within(
+    host: &str,
+    port: u16,
+    id: &Identity,
+    keepalive: u16,
+    read: Duration,
+) -> Result<Tls, String> {
+    let sock = tcp_within(host, port, read)?;
     let name = ServerName::try_from("localhost").map_err(|e| e.to_string())?;
     let conn = ClientConnection::new(id.1.clone(), name).map_err(|e| e.to_string())?;
     let mut tls = StreamOwned::new(conn, sock);
@@ -472,5 +489,66 @@ pub fn many_identities(host: &str, tls_port: u16, certs: &str, n: usize) -> Resu
         "attack: identities {ok} connected, {refused} refused, from one address in {} ms",
         start.elapsed().as_millis()
     );
+    Ok(())
+}
+
+/// The per-address limit on established connections (ADR-280): one source
+/// address opens `clients` full TLS sessions and keeps them. The broker must
+/// let exactly `limit` through and refuse the rest; closing one frees exactly
+/// one place; closing all of them frees all (no place leaks through the
+/// refusals or the close). Fails (exit status 1) when a count differs.
+pub fn established_flood(
+    host: &str,
+    tls_port: u16,
+    certs: &str,
+    clients: usize,
+    limit: usize,
+) -> Result<(), String> {
+    let ids = identities(certs, clients + 1, "est")?;
+    let wait = Duration::from_secs(4);
+    let fill = |held: &mut Vec<Tls>| -> (usize, usize) {
+        let (mut ok, mut refused) = (0, 0);
+        for id in ids.iter().take(clients) {
+            match open_within(host, tls_port, id, 60, wait) {
+                Ok(t) => {
+                    ok += 1;
+                    held.push(t);
+                }
+                Err(_) => refused += 1,
+            }
+        }
+        (ok, refused)
+    };
+    let mut held = Vec::new();
+    let (ok, refused) = fill(&mut held);
+    println!(
+        "attack: established-flood round 1: {ok} of {clients} connected, {refused} refused, from one address (limit {limit})"
+    );
+    if ok != limit {
+        return Err(format!("round 1: {ok} connected, expected {limit}"));
+    }
+    // One goes away: exactly one place is free (a different identity takes it).
+    drop(held.pop());
+    std::thread::sleep(Duration::from_secs(1));
+    let spare = ids.get(clients).ok_or("no spare identity")?;
+    match open_within(host, tls_port, spare, 60, wait) {
+        Ok(t) => held.push(t),
+        Err(e) => return Err(format!("the place of a closed connection was not freed: {e}")),
+    }
+    if open_within(host, tls_port, ids.first().ok_or("no identity")?, 60, wait).is_ok() {
+        return Err("one connection more than the limit got in after a close".into());
+    }
+    println!("attack: established-flood a closed connection freed exactly one place");
+    // All go away: all places are free again.
+    drop(held);
+    std::thread::sleep(Duration::from_secs(2));
+    let mut again = Vec::new();
+    let (ok, refused) = fill(&mut again);
+    println!(
+        "attack: established-flood round 2: {ok} of {clients} connected, {refused} refused after every connection closed"
+    );
+    if ok != limit {
+        return Err(format!("round 2: {ok} connected, expected {limit}: a place leaked"));
+    }
     Ok(())
 }
