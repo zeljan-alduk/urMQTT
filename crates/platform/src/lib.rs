@@ -17,6 +17,7 @@
 pub mod acpi;
 pub mod aml;
 pub mod fdt;
+pub mod iommu;
 pub mod x86;
 
 use acpi::{Acpi, PhysMemory};
@@ -163,6 +164,10 @@ pub struct PlatformInfo {
     /// The x86 half (APICs, power management, HPET, `_S5`), present only when
     /// ACPI describes an x86 machine. On x86 `cpus` holds APIC IDs.
     pub x86: Option<x86::X86Info>,
+    /// IOMMUs (H4b, ADR-305): VT-d, AMD-Vi or SMMUv3 units and the PCI IDs
+    /// they translate. Not part of the summary (`Display`), which predates
+    /// it; the kernel logs it on its own line.
+    pub iommu: iommu::IommuInfo,
 }
 
 /// Early discovery used to be a subset; it is now the full description.
@@ -378,6 +383,23 @@ fn interrupts_from_acpi<M: PhysMemory>(
     }))
 }
 
+/// The IOMMU tables of an ACPI machine: DMAR (VT-d), IVRS (AMD-Vi), IORT
+/// (SMMUv3); a machine has at most one kind, the first found wins. A table
+/// that fails its checksum is not used (no IOMMU), and does not stop the rest
+/// of the discovery: `devices.iommu = "require"` then refuses to boot.
+fn iommu_from_acpi<M: PhysMemory>(acpi: &Acpi<'_, M>) -> iommu::IommuInfo {
+    if let Ok(Some(t)) = acpi.find(b"DMAR") {
+        return iommu::parse_dmar(&t);
+    }
+    if let Ok(Some(t)) = acpi.find(b"IVRS") {
+        return iommu::parse_ivrs(&t);
+    }
+    if let Ok(Some(t)) = acpi.find(b"IORT") {
+        return iommu::parse_iort(&t);
+    }
+    iommu::IommuInfo::default()
+}
+
 /// Early discovery from a device tree.
 pub fn early_from_fdt(fdt: &Fdt<'_>) -> Result<EarlyPlatform, fdt::FdtError> {
     let uart = fdt
@@ -402,6 +424,8 @@ pub fn early_from_fdt(fdt: &Fdt<'_>) -> Result<EarlyPlatform, fdt::FdtError> {
         cpus: cpus_from_fdt(fdt)?,
         pcie: pcie_from_fdt(fdt)?,
         x86: None,
+        // As for ACPI: a malformed IOMMU description means no IOMMU.
+        iommu: iommu::from_fdt(fdt).unwrap_or_default(),
     })
 }
 
@@ -455,5 +479,6 @@ pub fn early_from_acpi<M: PhysMemory>(
         cpus,
         pcie,
         x86,
+        iommu: iommu_from_acpi(acpi),
     })
 }

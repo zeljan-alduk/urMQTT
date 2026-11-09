@@ -334,6 +334,40 @@ pub struct WsInfo<'a> {
     pub closes_abrupt: u64,
 }
 
+/// DMA remapping (H4b, ADR-305): `$SYS/broker/iommu/...`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IommuSys<'a> {
+    /// `devices.iommu`: `off`, `auto` or `require`.
+    pub mode: &'a str,
+    /// `off` (not used), `none` (no IOMMU found), `failed` (found, not
+    /// working: auto went on without), `active`.
+    pub state: &'a str,
+    /// Units translating.
+    pub units: u64,
+    /// Devices with a domain of their own.
+    pub domains: u64,
+    /// Pages mapped for device DMA.
+    pub pages: u64,
+    /// Blocked DMA and unit errors read from the fault logs.
+    pub faults: u64,
+    /// Times a unit's fault log overflowed (faults lost).
+    pub overflows: u64,
+}
+
+impl Default for IommuSys<'_> {
+    fn default() -> Self {
+        Self {
+            mode: "off",
+            state: "off",
+            units: 0,
+            domains: 0,
+            pages: 0,
+            faults: 0,
+            overflows: 0,
+        }
+    }
+}
+
 /// Everything `$SYS/broker/...` and the info query report.
 #[derive(Debug, Clone, Copy)]
 pub struct Info<'a> {
@@ -382,6 +416,7 @@ pub struct Info<'a> {
     pub accepted: &'a [u64],
     pub plaintext: PlainInfo<'a>,
     pub websocket: WsInfo<'a>,
+    pub iommu: IommuSys<'a>,
 }
 
 /// The name of what seeded the random number generator, for
@@ -451,6 +486,14 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
     put("entropy/source", &i.entropy_source);
     put("console/dropped", &i.console_dropped);
     put("net/mtu", &i.net_mtu);
+    let io = &i.iommu;
+    put("iommu/mode", &io.mode);
+    put("iommu/state", &io.state);
+    put("iommu/units", &io.units);
+    put("iommu/domains", &io.domains);
+    put("iommu/pages", &io.pages);
+    put("iommu/faults", &io.faults);
+    put("iommu/overflows", &io.overflows);
     let d = &i.drops;
     put("messages/dropped/slow_subscriber", &d.slow_subscriber);
     put("messages/dropped/offline", &d.offline);
@@ -618,6 +661,7 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
             enabled: true,
             ..WsInfo::default()
         },
+        iommu: IommuSys::default(),
     };
     let mut v = alloc::vec::Vec::new();
     topics(&info, |t, _| v.push(t.into()));
@@ -774,6 +818,16 @@ pub fn json(i: &Info<'_>) -> String {
         let _ = write!(o, "\"0x{code:02x}\":{n},");
     }
     let _ = write!(o, "\"other\":{other}}}}}");
+    let io = &i.iommu;
+    o.push_str(",\"iommu\":{\"mode\":");
+    json_str(&mut o, io.mode);
+    o.push_str(",\"state\":");
+    json_str(&mut o, io.state);
+    let _ = write!(
+        o,
+        ",\"units\":{},\"domains\":{},\"pages\":{},\"faults\":{},\"overflows\":{}}}",
+        io.units, io.domains, io.pages, io.faults, io.overflows
+    );
     let p = &i.plaintext;
     let _ = write!(o, ",\"plaintext\":{{\"enabled\":{}", p.enabled);
     if p.enabled {
@@ -882,6 +936,19 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
             "tls server certificate valid for {d} day(s)"
         )),
         None => out.push("tls server certificate lifetime unknown (no wall clock)".into()),
+    }
+    let io = &i.iommu;
+    if io.mode != "off" || io.state != "off" {
+        out.push(alloc::format!(
+            "iommu {} ({}): {} unit(s), {} device domain(s), {} page(s) mapped, {} fault(s), {} overflow(s)",
+            io.state,
+            io.mode,
+            io.units,
+            io.domains,
+            io.pages,
+            io.faults,
+            io.overflows
+        ));
     }
     match i.time_offset_ms {
         Some(o) => out.push(alloc::format!(
@@ -1198,7 +1265,52 @@ mod tests {
             accepted: &[4, 5],
             plaintext: PlainInfo::default(),
             websocket: WsInfo::default(),
+            iommu: IommuSys::default(),
         }
+    }
+
+    /// ADR-305: the IOMMU's topics are always published (off by default),
+    /// the query carries them as an object, and `status` gets a line once it
+    /// is configured.
+    #[test]
+    fn the_iommu_is_reported() {
+        let mut i = info(&[10]);
+        let mut got = alloc::vec::Vec::new();
+        topics(&i, |t, v| got.push((t.to_owned(), v.to_owned())));
+        let val = |g: &[(String, String)], t: &str| {
+            g.iter().find(|(k, _)| k == t).map(|(_, v)| v.clone())
+        };
+        assert_eq!(val(&got, "$SYS/broker/iommu/mode").as_deref(), Some("off"));
+        assert_eq!(val(&got, "$SYS/broker/iommu/faults").as_deref(), Some("0"));
+        assert!(
+            !status_lines(&i, "info", "debug")
+                .iter()
+                .any(|l| l.starts_with("iommu"))
+        );
+        i.iommu = IommuSys {
+            mode: "require",
+            state: "active",
+            units: 1,
+            domains: 3,
+            pages: 900,
+            faults: 2,
+            overflows: 0,
+        };
+        let mut got = alloc::vec::Vec::new();
+        topics(&i, |t, v| got.push((t.to_owned(), v.to_owned())));
+        assert_eq!(
+            val(&got, "$SYS/broker/iommu/state").as_deref(),
+            Some("active")
+        );
+        assert_eq!(val(&got, "$SYS/broker/iommu/faults").as_deref(), Some("2"));
+        assert_eq!(val(&got, "$SYS/broker/iommu/domains").as_deref(), Some("3"));
+        let j = json(&i);
+        assert!(
+            j.contains("\"iommu\":{\"mode\":\"require\",\"state\":\"active\",\"units\":1,\"domains\":3,\"pages\":900,\"faults\":2,\"overflows\":0}"),
+            "{j}"
+        );
+        assert!(status_lines(&i, "info", "debug").iter().any(|l| l
+            == "iommu active (require): 1 unit(s), 3 device domain(s), 900 page(s) mapped, 2 fault(s), 0 overflow(s)"));
     }
 
     #[test]
@@ -1406,6 +1518,13 @@ mod tests {
                 "$SYS/broker/entropy/source",
                 "$SYS/broker/console/dropped",
                 "$SYS/broker/net/mtu",
+                "$SYS/broker/iommu/mode",
+                "$SYS/broker/iommu/state",
+                "$SYS/broker/iommu/units",
+                "$SYS/broker/iommu/domains",
+                "$SYS/broker/iommu/pages",
+                "$SYS/broker/iommu/faults",
+                "$SYS/broker/iommu/overflows",
                 "$SYS/broker/messages/dropped/slow_subscriber",
                 "$SYS/broker/messages/dropped/offline",
                 "$SYS/broker/messages/dropped/cross_core",
@@ -1570,6 +1689,7 @@ mod tests {
              \"0x83\":0,\"0x87\":0,\"0x8b\":0,\"0x8d\":0,\"0x8e\":2,\"0x8f\":0,\"0x90\":0,\"0x93\":0,\"0x94\":0,\"0x95\":0,\
              \"0x98\":0,\"0x9a\":0,\"other\":1},\"refused\":{\"0x80\":0,\"0x81\":0,\"0x82\":0,\"0x83\":0,\"0x84\":0,\
              \"0x85\":0,\"0x86\":0,\"0x87\":3,\"0x88\":0,\"0x8c\":0,\"0x95\":0,\"0x9a\":0,\"other\":0}},\
+             \"iommu\":{\"mode\":\"off\",\"state\":\"off\",\"units\":0,\"domains\":0,\"pages\":0,\"faults\":0,\"overflows\":0},\
              \"plaintext\":{\"enabled\":false},\"websocket\":{\"enabled\":false}}"
         );
         let mut unknown = info(&[]);

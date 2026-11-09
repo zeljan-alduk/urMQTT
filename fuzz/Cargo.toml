@@ -14,6 +14,7 @@ urmqtt-cfg = { path = "../crates/cfg", features = ["alloc"] }
 urmqtt-config-schema = { path = "../crates/config-schema" }
 urmqtt-mqtt = { path = "../crates/mqtt" }
 urmqtt-platform = { path = "../crates/platform" }
+urmqtt-iommu = { path = "../crates/iommu" }
 urmqtt-store = { path = "../crates/store" }
 urmqtt-tcp = { path = "../crates/tcp" }
 urmqtt-net = { path = "../crates/net" }
@@ -64,6 +65,13 @@ bench = false
 [[bin]]
 name = "config_parse"
 path = "fuzz_targets/config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iommu_tables"
+path = "fuzz_targets/iommu_tables.rs"
 test = false
 doc = false
 bench = false

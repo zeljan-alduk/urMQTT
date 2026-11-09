@@ -1079,6 +1079,7 @@ dependencies = [
  "urmqtt-config-schema",
  "urmqtt-control",
  "urmqtt-http",
+ "urmqtt-iommu",
  "urmqtt-mqtt",
  "urmqtt-net",
  "urmqtt-plain",
@@ -1092,6 +1093,10 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-http"
+version = "0.5.0"
+
+[[package]]
+name = "urmqtt-iommu"
 version = "0.5.0"
 
 [[package]]

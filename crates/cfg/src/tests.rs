@@ -215,15 +215,15 @@ fn structural_attacks_fail_closed() {
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, 10 which no format ever used, and
     // one above the newest).
-    for unknown in [0u8, 10, 18, 19] {
+    for unknown in [0u8, 10, 19, 20] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
     // The versions of the formats that came after 7, each its own feature
     // (8 back-pressure, 9 WebSocket, 11 the receive interrupt, 12 MQTT 5.0,
     // 13 the shared-group limits, 14 the per-address connection limit, 15 the run-time
-    // account limit, 16 the metrics endpoint, 17 the A/B update keys).
-    for known in [8u8, 9, 11, 12, 13, 14, 15, 16, 17] {
+    // account limit, 16 the metrics endpoint, 17 the A/B update keys, 18 the IOMMU).
+    for known in [8u8, 9, 11, 12, 13, 14, 15, 16, 17, 18] {
         let v = with_version(&assemble(&ok), known);
         assert_eq!(Blob::parse(&v).map(|b| b.version()), Ok(u16::from(known)));
     }
@@ -245,7 +245,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 17));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 18));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -254,7 +254,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[17, 0],
+        &[18, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -404,6 +404,40 @@ fn net_interrupt_needs_format_11_and_auto_writes_nothing() {
     assert!(Blob::parse(&with_version(&blob, 10)).is_err());
     assert!(Blob::parse(&with_version(&blob, 7)).is_err());
     assert!(Builder::new().variant(tag::DEV_NET_INTERRUPT, 2).is_err());
+}
+
+/// LATER-5, ADR-305: `devices.iommu` came with format 18. "off" (the
+/// default) writes nothing, so every existing configuration keeps its version
+/// and boots on an older kernel; "auto" and "require" need version 18, which an
+/// older kernel refuses by the version (it would run without the isolation).
+#[test]
+fn iommu_needs_format_18_and_off_writes_nothing() {
+    use crate::fields::IOMMU_MODES;
+    let f = crate::fields::by_key("devices.iommu").unwrap();
+    assert_eq!((f.tag, f.since, f.dev_only), (tag::DEV_IOMMU, 18, false));
+    assert_eq!(IOMMU_MODES, ["off", "auto", "require"]);
+    let mut off = Builder::new();
+    off.variant(tag::DEV_IOMMU, 0).unwrap();
+    assert_eq!(off.lowest_version(), 2);
+    assert_eq!(off.finish(false).unwrap(), empty());
+    assert_eq!(Blob::parse(&empty()).unwrap().variant(tag::DEV_IOMMU), 0);
+    for v in [1u8, 2] {
+        let mut b = Builder::new();
+        b.variant(tag::DEV_IOMMU, v).unwrap();
+        assert_eq!(b.lowest_version(), 18);
+        assert!(b.finish_as(false, 13).is_err());
+        assert!(
+            b.finish_as(false, 17).is_err(),
+            "17 is not this code's format"
+        );
+        let blob = b.finish(false).unwrap();
+        let p = Blob::parse(&blob).unwrap();
+        assert_eq!((p.version(), p.variant(tag::DEV_IOMMU)), (18, v));
+        check::check(&p, false).unwrap();
+        // An older format cannot hold it.
+        assert!(Blob::parse(&with_version(&blob, 13)).is_err());
+    }
+    assert!(Builder::new().variant(tag::DEV_IOMMU, 3).is_err());
 }
 
 /// ADR-257: the `[devices]` keys came with format 6, one enum each. Off (the

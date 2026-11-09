@@ -31,6 +31,12 @@ pub mod crc {
     pub use super::imp::crc::crc32c_update;
 }
 
+/// Cache maintenance for devices that do not snoop (H4b, ADR-305).
+#[cfg(target_os = "none")]
+pub mod cache {
+    pub use super::imp::cpu::clean_dcache_range as clean_to_device;
+}
+
 /// Message-signalled interrupts.
 pub mod msi {
     pub use super::imp::msi::{Frame, TYPER};
@@ -39,7 +45,7 @@ pub mod msi {
 /// The GICv3 ITS: MSIs as LPIs (ADR-270).
 #[cfg(target_os = "none")]
 pub mod its {
-    pub use super::imp::its::{FRAME_LEN, Its, ItsError, LPI_BASE, Mem};
+    pub use super::imp::its::{FRAME_LEN, Its, ItsError, LPI_BASE, Mem, TRANSLATER};
 }
 
 /// Memory tagging (FEAT_MTE2; ADR-174).

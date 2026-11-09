@@ -143,3 +143,33 @@ fn the_net_interrupt_key() {
         );
     }
 }
+
+/// ADR-305: `devices.iommu = "off" | "auto" | "require"`, off by default and
+/// writing nothing (the blob keeps its version), the others format 18.
+#[test]
+fn iommu_off_by_default_and_format_18_otherwise() {
+    use crate::IommuMode;
+    use urmqtt_cfg::fields::tag;
+    assert_eq!(parse("dev", DEV).unwrap().devices.iommu, IommuMode::Off);
+    let base = without_devices(DEV);
+    for (word, mode, variant) in [
+        ("auto", IommuMode::Auto, 1u8),
+        ("require", IommuMode::Require, 2),
+    ] {
+        let t = format!("{base}\n[devices]\niommu = \"{word}\"\n");
+        assert_eq!(parse("dev", &t).unwrap().devices.iommu, mode);
+        let blob = run(&format!("[devices]\niommu = \"{word}\"\n")).unwrap();
+        let p = Blob::parse(&blob).unwrap();
+        assert_eq!((p.version(), p.variant(tag::DEV_IOMMU)), (18, variant));
+        urmqtt_cfg::check::check(&p, false).unwrap();
+    }
+    // Off is byte for byte the configuration without the key.
+    assert_eq!(
+        run("").unwrap(),
+        run("[devices]\niommu = \"off\"\n").unwrap()
+    );
+    for bad in ["\"on\"", "true", "\"Require\""] {
+        let t = format!("{base}\n[devices]\niommu = {bad}\n");
+        assert!(parse("dev", &t).is_err(), "iommu = {bad}");
+    }
+}

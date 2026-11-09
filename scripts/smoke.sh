@@ -3353,6 +3353,120 @@ gicv2() {
         "client: qos1-after-reconnect ok" "client: tls-revoked-rejected ok" "NOT:FAILED" "$NO_FAULT"
 }
 
+# H4b, ADR-305 to ADR-307: DMA remapping through QEMU's IOMMUs (aarch64: the virt machine's SMMUv3, by ACPI
+# IORT and by device tree; x86_64: intel-iommu and amd-iommu on q35). With `devices.iommu = "require"` every
+# driven device gets a domain of its own, `test=iommu-dma` makes the entropy device write outside it and the
+# write must be blocked (the page untouched) and counted; the same request with the IOMMU off reaches the page
+# (the control: the test can see a write). A full MQTT round trip over mutual TLS runs with translation on.
+# `require` refuses a machine without an IOMMU and a virtio device that bypasses it (no
+# VIRTIO_F_ACCESS_PLATFORM); `auto` goes on without one.
+iommu_cfg() {
+    local mode=$1 out=$2
+    awk -v m="$mode" '{ print } /^\[devices\]/ { print "iommu = \"" m "\"" }' "$ROOT/deploy/dev/config.toml" >"$out"
+}
+
+iommu_suite() {
+    local d="$ROOT/deploy/dev" kinds accel kind
+    mkdir -p "$OUT"
+    if [[ $ARCH == x86_64 ]]; then kinds="intel amd"; else kinds="smmuv3"; fi
+    iommu_cfg require "$OUT/iommu-require.toml"
+    iommu_cfg auto "$OUT/iommu-auto.toml"
+    MKIMG_EXTRA=(--config "$OUT/iommu-require.toml" --config-root "$d")
+    mkimg "$OUT/iommu-require-dma.raw" "smoke test=iommu-dma"
+    mkimg "$OUT/iommu-require-serve.raw" "serve"
+    MKIMG_EXTRA=(--config "$OUT/iommu-auto.toml" --config-root "$d")
+    mkimg "$OUT/iommu-auto.raw" "smoke"
+    MKIMG_EXTRA=()
+    mkimg "$OUT/iommu-off-dma.raw" "smoke test=iommu-dma"
+    local blocked=('iommu: test: virtio-rng [0-9a-f:.]+ asked to write 64 bytes at 0x[0-9a-f]+ \(outside its domain\): .*; the page is untouched; [1-9][0-9]* fault\(s\) recorded'
+        'iommu: test: DMA outside the domain blocked and counted'
+        "iommu: test: the fault was read by core 0's tick"
+        'iommu: fault 1: (VT-d|AMD-Vi|SMMUv3) 0x[0-9a-f]+: pci [0-9a-f:.]+ .* blocked'
+        'iommu: active: 1 unit\(s\), [2-9] device domain\(s\), [0-9]+ page\(s\) mapped for devices, [0-9]+ KiB of tables, 0 device\(s\) without isolation'
+        '^URMQTT READY$' 'NOT:DMA outside the domain NOT blocked' "$NO_FAULT")
+    for kind in $kinds; do
+        local name unit
+        case $kind in intel) unit="VT-d" ;; amd) unit="AMD-Vi" ;; *) unit="SMMUv3" ;; esac
+        for accel in $ACCELS; do
+            local acpis="on"
+            [[ $ARCH == aarch64 && $accel == tcg ]] && acpis="on off"
+            local acpi
+            for acpi in $acpis; do
+                local extra=()
+                [[ $ARCH == aarch64 ]] && extra=(--acpi "$acpi")
+                name="iommu-dma $kind"
+                [[ $ARCH == aarch64 ]] && name+=" acpi=$acpi"
+                name+=" [$accel]"
+                local log="$OUT/iommu-dma-$kind-$acpi-$accel.log" data="$OUT/iommu-dma-$kind-$acpi-$accel.img" status=0
+                fresh_disk "$OUT/iommu-require-dma.raw" "$data"
+                boot "$log" --disk "$data" --accel "$accel" --headless --no-net --smp 2 --iommu "$kind" ${extra[@]+"${extra[@]}"} || status=$?
+                check "$name" "$log" "$status" "iommu: $unit at 0x[0-9a-f]+: .*(translation on|enabled): every (device blocked|stream aborted)" \
+                    "${blocked[@]}"
+            done
+            # The control: the same request with the IOMMU off reaches the page.
+            local log="$OUT/iommu-off-$kind-$accel.log" data="$OUT/iommu-off-$kind-$accel.img" status=0
+            fresh_disk "$OUT/iommu-off-dma.raw" "$data"
+            boot "$log" --disk "$data" --accel "$accel" --headless --no-net --smp 2 --iommu "$kind" || status=$?
+            check "iommu-off control $kind [$accel]" "$log" "$status" \
+                "iommu: $unit@0x[0-9a-f]+/.*: not used \(devices.iommu = \"off\"\)" \
+                'iommu: test: virtio-rng .*; the page is WRITTEN; 0 fault\(s\) recorded' '^URMQTT READY$' \
+                'NOT:iommu: active' "$NO_FAULT"
+            # MQTT over mutual TLS with every device translated.
+            if command -v mosquitto_pub >/dev/null; then
+                log="$OUT/iommu-mqtt-$kind-$accel.log" data="$OUT/iommu-mqtt-$kind-$accel.img" status=0
+                fresh_disk "$OUT/iommu-require-serve.raw" "$data"
+                start_vm "$log" --disk "$data" --accel "$accel" --iommu "$kind" --fwd "$PORT:8883"
+                if wait_log "$log" "TLS 1.3 listener on port 8883"; then
+                    # A first connection warms the path (the guest's first SYN-ACK waits for ARP and the
+                    # client retransmits after seconds; the first scenario's subscriber has 1 s).
+                    mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
+                        --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" \
+                        -t devices/device-001/warmup -m x >/dev/null 2>&1 || true
+                    python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$d" "$PORT" >"$log.client" 2>&1 || status=$?
+                    # One fault poll after the traffic.
+                    sleep 1
+                else
+                    status=124
+                fi
+                kill_vm
+                cat "$log.client" >>"$log" 2>/dev/null || true
+                check "iommu-mqtt $kind [$accel]" "$log" "$status" \
+                    'iommu: active: 1 unit\(s\), [3-9] device domain\(s\)' 'iommu: pci [0-9a-f:.]+: own domain on' \
+                    "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
+                    "client: qos1-after-reconnect ok" "client: tls-revoked-rejected ok" "NOT:FAILED" \
+                    'NOT:iommu: fault' "$NO_FAULT"
+            else
+                echo "  ✗ iommu-mqtt needs the mosquitto clients"; FAILED=$((FAILED + 1))
+            fi
+        done
+    done
+    accel=${ACCELS%% *}
+    # `require` on a machine without an IOMMU: refused, with the reason.
+    local log="$OUT/iommu-require-absent.log" data="$OUT/iommu-require-absent.img" status=0
+    fresh_disk "$OUT/iommu-require-dma.raw" "$data"
+    boot "$log" --disk "$data" --accel "$accel" --headless --no-net --smp 2 || status=$?
+    [[ $status -eq 124 ]] || status=0
+    check "iommu-require without an IOMMU [$accel]" "$log" "$status" \
+        'iommu: the firmware describes no IOMMU .*devices.iommu = "require" refuses to run without DMA isolation' \
+        'NOT:URMQTT READY'
+    # `require` with a virtio device that bypasses the IOMMU (no iommu_platform): refused.
+    kind=${kinds%% *}
+    log="$OUT/iommu-require-bypass.log" data="$OUT/iommu-require-bypass.img" status=0
+    fresh_disk "$OUT/iommu-require-dma.raw" "$data"
+    QEMU_IOMMU_PLATFORM=off boot "$log" --disk "$data" --accel "$accel" --headless --no-net --smp 2 --iommu "$kind" || status=$?
+    [[ $status -eq 124 ]] || status=0
+    check "iommu-require with a bypassing device [$accel]" "$log" "$status" \
+        'does not offer VIRTIO_F_ACCESS_PLATFORM, so it bypasses the IOMMU.*refuses to run without DMA isolation' \
+        'NOT:URMQTT READY'
+    # `auto` without an IOMMU: a warning, then the broker as before.
+    log="$OUT/iommu-auto-absent.log" data="$OUT/iommu-auto-absent.img" status=0
+    fresh_disk "$OUT/iommu-auto.raw" "$data"
+    boot "$log" --disk "$data" --accel "$accel" --headless --no-net --smp 2 || status=$?
+    check "iommu-auto without an IOMMU [$accel]" "$log" "$status" \
+        'iommu: the firmware describes no IOMMU .*going on without DMA isolation for it \(devices.iommu = "auto"\)' \
+        '^URMQTT READY$' "$NO_FAULT"
+}
+
 [[ -f "$KERNEL" ]] || { echo "error: $KERNEL not found (make build)" >&2; exit 1; }
 rm -f "$OUT"/*.iso "$OUT"/*.iso.disk "$OUT"/*.raw "$OUT"/*.raw.esp
 [[ $ARCH != universal || -f "$KERNEL_X86" ]] || { echo "error: $KERNEL_X86 not found (make build ARCH=x86_64)" >&2; exit 1; }
@@ -4821,6 +4935,7 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     [[ $ARCH == aarch64 ]] && want gicv2 && gicv2
     want virtio_gpu && virtio_gpu
     want virtio_devices && virtio_devices
+    want iommu_suite && iommu_suite
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit
@@ -4837,6 +4952,9 @@ fi
 # SMOKE_ONLY=metrics: the Prometheus endpoint scenarios (ADR-290) of this architecture.
 if [[ ${SMOKE_ONLY:-} == metrics && $ARCH != universal ]]; then
     metrics
+# SMOKE_ONLY=iommu: the H4b DMA-remapping scenarios of this architecture (ADR-305 to ADR-307).
+if [[ ${SMOKE_ONLY:-} == iommu && $ARCH != universal ]]; then
+    iommu_suite
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit
@@ -5508,6 +5626,7 @@ want no_hw_rng && no_hw_rng
 command -v mosquitto_sub >/dev/null && want entropy_option && entropy_option
 [[ $ARCH == aarch64 ]] && want gicv2 && gicv2
 want virtio_gpu && virtio_gpu
+want iommu_suite && iommu_suite
 
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
 pcap_has_garp() {

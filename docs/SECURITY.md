@@ -74,6 +74,7 @@ which says what it gives up.
 | Telemetry log on the disk | `urmqtt-store::telemetry` | crash and torn-write tests; fuzz `telemetry_recover` |
 | SQLite database file | SQLite 3.54.1 (vendored), **in the unprivileged database worker** (H6, ADR-210 to ADR-212) | EL0 / ring 3 in its own address space; fault containment and restart (smoke `worker-contain`, `worker-fault`); `quick_check` at boot, `SQLITE_DBCONFIG_DEFENSIVE`; upstream fuzzing |
 | Firmware tables (DTB, ACPI) | `urmqtt-platform` | fuzz `fdt_parse`, `acpi_parse` (trusted source, fuzzed anyway) |
+| IOMMU descriptions (DMAR, IVRS, IORT, `arm,smmu-v3` and `iommu-map`) and the units' fault records (ADR-305, ADR-306; read only with `devices.iommu` not `"off"`, except the description, which is parsed at every boot) | `urmqtt-platform::iommu`, `urmqtt-iommu` (own, `deny(unsafe_code)`, no `unsafe`) | host tests with QEMU's table shapes and a QEMU 11.1 DTB; models of the three units; fuzz `iommu_tables`; smoke `SMOKE_ONLY=iommu` |
 | Control messages (`$urmqtt/control`, H1) | `urmqtt-control` (own, `forbid(unsafe_code)`, fixed layout) + `ed25519-dalek` `verify_strict` | RFC 8032 vectors, round trip, every flipped byte fails; fuzz `control_message`; smoke `control-*` |
 | First packet of a plaintext connection, its CONNECT credentials, the `[plaintext]` entries (CIDRs, accounts, password hashes) | `urmqtt-mqtt` (the same decoder as TLS), `urmqtt-plain` and `urmqtt-cfg::{net,passwd,plain}` (own, `forbid(unsafe_code)` in `urmqtt-plain`) | fuzz `mqtt_decode`, `broker_input` (plaintext connections included), `plain_input` (parsers, allow-list and the table of source addresses against a model); 25 host tests in `urmqtt-plain`; smoke `plaintext-*` |
 | The metrics endpoint's HTTP request (one GET or HEAD, at most 2 KiB and 24 header lines; ADR-290 to ADR-293, only when `metrics.enabled`) and the `metrics.allow_from` entries | `urmqtt-http` (own, `no_std`, `forbid(unsafe_code)`, no allocation), `urmqtt-cfg::plain` (the CIDR grammar) | host tests and proptest; fuzz `http_request` (found a bare-LF delimiter disagreement in its first run) and `metrics_render`; smoke `metrics-*` |
@@ -874,6 +875,21 @@ check so a wrong key is refused before anything is read (`docs/DISK-FORMAT.md`
   `/dev/urandom`.
 - **No hardware AES: refused**, never a silent software fallback.
 
+### DMA isolation (H4b, ADR-305 to ADR-307)
+
+With `devices.iommu = "auto"` or `"require"` the kernel drives the machine's IOMMU (Intel VT-d, AMD-Vi, Arm
+SMMUv3) before any driver runs: from then on every device's DMA is blocked, and each device the broker drives
+gets a translation domain of its own holding exactly the pages the kernel allocated for it (its virtqueues and
+buffers; on a GIC also the MSI doorbell page). A device that writes anywhere else (the page tables, the key
+slab, another device's buffers) is stopped by the unit; the fault is read by core 0 every 100 ms (at most 16
+per unit per poll), counted in `$SYS/broker/iommu/faults` and logged (ADR-306). A virtio device that does not
+use the platform's translation (no VIRTIO_F_ACCESS_PLATFORM) is treated as a device without isolation.
+`require` refuses to boot when there is no IOMMU, a unit fails, or a driven device is outside every unit's
+scope or bypasses it; `auto` goes on with a warning; `off` (the default) leaves the IOMMU as the firmware set
+it. What it does not cover: interrupt remapping, reserved regions the firmware lists, more than 4 units or 32
+ID ranges per unit, and any hardware other than QEMU's models (ADR-307). The firmware tables it reads (DMAR,
+IVRS, IORT, the device tree) are fuzzed (`iommu_tables`).
+
 ### Supply chain
 
 Pinned nightly toolchain and `Cargo.lock`; `--locked` builds; cargo-deny
@@ -905,5 +921,6 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 | No DMA isolation (IOMMU) on bare metal. | Deferred with bare metal (ADR-176); irrelevant to a VPS, whose devices are the hypervisor's. | None needed for a VM. |
 | A kernel that dies before its block driver runs is not counted as a failed A/B trial. | The bootloader keeps no boot counter the kernel could use (ADR-295, ADR-296); the counter is the kernel's. | The trial timeout and every later crash are counted; `urmqtt-disk slots rollback` offline. A loader-level one-shot entry (BLI) would close it (LATER-6). |
 | Downgrade protection is the offline tool's rule, not the firmware's. | No version counter or `dbx` exists (H8-W6, LATER-6); an attacker who can write the disk can write any older signed image. | `slots stage` refuses an older release (unless `--allow-downgrade`) and a kernel older than the store's schema, always; release images are staged only with their minisign signature. |
+| DMA isolation is off by default, and only tested against QEMU's IOMMU models. | `devices.iommu` (ADR-305) gives every driven device a domain with only its own pages, through VT-d, AMD-Vi or SMMUv3; it is `off` by default because a VPS's devices are the hypervisor's and an emulated IOMMU slows every DMA. Not run on real hardware; interrupt remapping is not enabled; reserved regions (RMRR/IVMD/RMR) are not mapped (ADR-307). With a GICv2m frame a device can still raise any SPI of the frame. | `devices.iommu = "require"` on bare metal or under a hypervisor whose device models you do not trust: the broker then refuses to boot without a working IOMMU covering every driven device, and `$SYS/broker/iommu/faults` counts blocked DMA. |
 | The hypervisor sees everything. | Out of scope. | Choose the host. |
 | 100k and 1M connections are not measured on the development host. | QEMU user networking on macOS stops near 10 240 sockets. | The per-connection footprint is flat from 1k to 10k (ADR-034); the storm test scales the heap down instead of the clients up. |

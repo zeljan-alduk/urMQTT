@@ -4307,3 +4307,169 @@ thrown, no mutated file opens unless every field the cipher uses is unchanged); 
 (a) 600 000 rounds of PBKDF2 rather than a memory-hard KDF (point 2). (b) The disk-key dialog is not part of this
 change (point 10). (c) The page is deployed by the owner later: this changes `app.js`, `app.css` and the `i18n/*.json`
 only, and the aldotech-web repository was not touched.
+## ADR-305 — DMA remapping: VT-d, AMD-Vi and SMMUv3 behind `devices.iommu` (LATER-5, H4b)
+
+- **Status:** Accepted (LATER-5). Supersedes the deferral of ADR-176 for the code; bare metal itself stays
+  deferred (LATER-4). ADR-306 is the fault path, ADR-307 the verification and what is not done. ADR-308 and
+  ADR-309 stay free.
+- **Context.** Every device the kernel drives could write anywhere in RAM: a buggy or hostile device (on bare
+  metal its firmware; in a VM a device model of a hypervisor that is not trusted) reaches the page tables, the
+  key slab and the code. The firmware describes the machine's IOMMUs in ACPI (DMAR for Intel VT-d, IVRS for
+  AMD-Vi, IORT for Arm SMMUv3) or in the device tree (`arm,smmu-v3` and the PCIe host's `iommu-map`). QEMU
+  emulates all three (`intel-iommu`, `amd-iommu,dma-remap=on`, `virt,iommu=smmuv3`).
+
+### Decisions
+
+1. **One key, three words, `off` by default.** `devices.iommu = "off" | "auto" | "require"` (configuration
+   format 18, tag 318). `off` leaves the IOMMU exactly as the firmware left it (in practice: translation off)
+   and only names it in the log: the behaviour of v0.5.0. `auto` brings up every unit the firmware describes
+   and goes on, with a warning, where it cannot (no IOMMU, a unit that fails, a device outside every unit's
+   scope or bypassing it). `require` turns each of those into a refusal to boot with the reason.
+   *Decided* (the owner was away): the default is `off`, not `auto`. The release targets KVM VPSes, whose
+   devices are the hypervisor's (trusted, ADR-176); an emulated IOMMU costs every DMA a table walk in the
+   device model, which would silently slow a host that happens to expose one; and an existing configuration
+   must behave as before. Bare metal, or a host whose device models are not trusted, should say `require`
+   (OPERATE.md). When bare metal is supported (LATER-4) the default for a bare-metal image is the owner's
+   call; this ADR recommends `require` there.
+2. **Where it sits in the boot.** After the PCI scan and before the first driver: `iommu::init` brings every
+   unit up with translation on and **nothing mapped**, so from that moment every device's DMA (including one a
+   firmware left running) is blocked. A unit that was already enabled by the firmware is turned off first and
+   reprogrammed. The register frames are mapped like any MMIO, before the page tables lock.
+3. **A domain per device, identity mapped, only its own pages.** Every DMA allocation of a driver goes through
+   `devices::KernelEnv`, which now knows the device it allocates for (`KernelEnv::device(bdf)`); the first
+   allocation creates the device's domain (VT-d context entry and domain ID, AMD-Vi device table entry and
+   domain, SMMUv3 stream table entry, context descriptor and ASID) and each allocation maps exactly its pages,
+   read-write, at I/O virtual address = physical address. Nothing is ever unmapped: the kernel's DMA memory
+   lives as long as the device. Work after bring-up uses `KernelEnv::RUNTIME`, which allocates nothing; an
+   allocation for no named device is mapped nowhere and warned about once. Identity mapping keeps every driver
+   unchanged (the address a driver gives the device is the same with and without translation) and makes the
+   choice of `off` safe at any time.
+4. **Page tables.** One radix builder for three encodings (`crates/iommu/src/pt.rs`): VT-d second-level
+   tables (R/W on every level), AMD-Vi v1 host tables (PR, next level, IR/IW on every level), Arm VMSAv8-64
+   stage 1 with a 4 KiB granule (AF set, never executable, inner-shareable write-back; MAIR index 1 device
+   memory for the doorbell). 4 levels (48 bits) where the unit supports them, else 3 (39 bits); an address
+   beyond is refused. 4 KiB pages only (no large pages: the mappings are small and exact).
+5. **The drivers.** VT-d in legacy mode (root and context tables), register-based invalidation (global context
+   cache and IOTLB after every change, which caching mode needs), the write-buffer flush where CAP asks;
+   a unit whose firmware enabled interrupt remapping is refused (`auto` goes on without it) because taking it
+   over needs the queued invalidation this driver does not implement. AMD-Vi with a device table for all 65 536
+   IDs, every entry "valid, translation valid, mode 0, no read, no write" (blocked) until attached, a one-page
+   command buffer (INVALIDATE_DEVTAB_ENTRY, INVALIDATE_IOMMU_PAGES, COMPLETION_WAIT with a store) and a
+   one-page event log. SMMUv3 with a linear stream table sized for the highest stream ID the scan found, every
+   entry invalid (abort) until attached, stage 1 through one context descriptor per stream (stage 2 is not
+   in QEMU's default model and not needed), a 256-entry command queue (CFGI_STE, CFGI_ALL, TLBI_NH_ASID,
+   TLBI_NSNH_ALL, CMD_SYNC with its error checked) and a 128-entry event queue. Every wait for a unit is
+   bounded (100 ms) and a timeout is a bring-up failure. The drivers have no `unsafe`: registers are a
+   `Regs` trait and the memory the unit reads an `Env` trait, implemented by `kernel/src/iommu.rs`.
+6. **Coherency.** VT-d reports it (ECAP.C), SMMUv3 too (IDR0.COHACC); for a unit that does not snoop, every
+   table and queue write is cleaned to the point of coherency (`urmqtt_arch::cache::clean_to_device`: `clflush`
+   and `mfence`, or `dc cvac` and `dsb sy`). AMD-Vi walks are declared coherent (Control.Coherent).
+7. **MSIs.** Interrupt remapping is not enabled on any unit (VT-d, AMD-Vi): with it off an MSI is an interrupt
+   request, not a DMA, and passes as before. On a GIC an MSI is a write to the ITS's translation page or the
+   GICv2m frame, which the SMMU translates like any DMA: that one page is mapped into every domain as device
+   memory. With the ITS the device can only signal events of its own device ID; with a GICv2m frame it can
+   raise any SPI of the frame (as without an IOMMU).
+8. **virtio and VIRTIO_F_ACCESS_PLATFORM.** A virtio device that does not offer this feature uses physical
+   addresses *around* the IOMMU (virtio 1.x §6; QEMU's devices do so unless `iommu_platform=on`). The transport
+   now accepts the feature whenever it is offered (harmless without translation: the addresses are identity)
+   and tells the environment; with translation active a device without it is a device without isolation:
+   refused by `require`, warned about by `auto`.
+9. **Scope from the firmware.** `crates/platform/src/iommu.rs` reduces DMAR, IVRS, IORT and the device tree to
+   units (kind, register base, segment) with the requester IDs each translates and the ID it sees for them
+   (the stream ID of an SMMU, the device ID of AMD-Vi, an alias where IVRS says so). An explicit scope wins over
+   a unit that takes "all the rest". What a parser cannot represent is counted and never guessed: a DMAR scope
+   behind a bridge, a variable-length IVRS entry it does not know (the rest of that block is not read), an IORT
+   mapping flagged single. Nor is the catch-all unit guessed for an ID another unit may claim through such an
+   entry (a bridge's scope: every bus above the bridge's; an unknown, truncated or dropped entry, or a dropped
+   unit: every ID): such a device gets no unit, which `require` refuses, instead of a domain on the catch-all
+   that its DMA never goes through (it would be blocked, or not translated at all behind a dropped unit, while
+   the kernel counted it as isolated). Two functions the unit sees with the same ID (an IVRS alias) share one
+   domain, said in the log and the summary line: the unit cannot tell them apart. Reserved regions the firmware asks to keep mapped (RMRR, IVMD, RMR) are counted and
+   logged, not mapped: the kernel drives only virtio devices, which have none. At most 4 units and 32 ID ranges
+   per unit (QEMU 11.1 lists every device of the root bus in DMAR and IVRS one by one). A table that fails its
+   checksum means no IOMMU, and does not stop the rest of the discovery.
+10. **What an operator sees.** At boot: the description (`iommu: VT-d@0xfed90000/0:... (devices.iommu =
+   "require")`), each unit's bring-up, each device's domain, and one summary line (units, domains, pages
+   mapped, KiB of tables, devices without isolation). `$SYS/broker/iommu/{mode,state,units,domains,pages,
+   faults,overflows}`, an `iommu` object in the info query and a `status` line when the key is not `off`.
+11. **Configuration format 18.** The only key of the format; `off` writes nothing, so every existing
+   configuration keeps its format number and boots on v0.5.0. A blob of format 18 is refused by an older kernel
+   by its version (it would run without the isolation it was told to require). Formats 14 to 17 belong to the
+   other items of v0.6.0 and are unknown to this branch until the release merge (`blob::UNUSED_VERSIONS`).
+   The tag is 318, away from the tags the other items take, so the merge does not collide.
+
+### For the owner
+
+(a) The default `off` (point 1). (b) `require` refuses a unit with firmware-enabled interrupt remapping
+(point 5). (c) Reserved regions are not honoured (point 9): a real machine whose firmware lists an RMRR for a
+device the kernel does not drive is unaffected; one for a driven device would be (none exists today).
+
+## ADR-306 — IOMMU faults are polled, bounded, counted and logged; no fault interrupt (LATER-5, H4b)
+
+- **Status:** Accepted (LATER-5).
+- **Context.** A blocked DMA is recorded by the unit (VT-d fault recording registers, the AMD-Vi event log, the
+  SMMUv3 event queue). A hostile device can produce faults as fast as it can issue requests; a fault must
+  never be silently ignored and its handling must not be a way to stall a core.
+
+1. **Polling, not interrupts.** Core 0's tick reads the fault logs every 100 ms (every tenth of core 0's own
+   10 ms ticks: the global tick count interleaves every core's, so core 0 could see the same residue each time),
+   trying the IOMMU lock only (a poll that meets the bring-up or a mapping is skipped). The fault-event
+   interrupts stay masked (VT-d FECTL.IM, AMD-Vi EventIntEn off, SMMUv3 IRQ_CTRL 0). *Decided*: an interrupt
+   would add an interrupt route per unit (an MSI of its own, which on aarch64 would itself go through the
+   ITS) to tell the kernel something it only counts and logs; polling bounds the cost by construction.
+2. **Bounded.** At most 16 records per unit per poll (the next poll continues), so a fault storm costs core 0
+   at most 160 register or memory reads per unit per second. Indices from the unit are masked to its ring
+   (AMD-Vi head and tail, SMMUv3 producer and consumer) and a garbage index reads nothing.
+3. **Counted and logged.** Every record read is counted (`$SYS/broker/iommu/faults`) and acknowledged (VT-d
+   F bit and PFO, AMD-Vi head and the overflow bit, which also restarts the stopped log, SMMUv3 consumer with
+   the overflow flag acknowledged). The first 16 faults are logged one line each (`iommu: fault N: <unit>
+   <base>: pci <bdf> write to|access to <address> blocked (reason <code>)`), then only every power of two, so
+   a storm costs the log a few lines. A log overflow (faults lost) is counted
+   (`$SYS/broker/iommu/overflows`) and logged.
+4. **No action on a fault.** The device is not reset or detached: its DMA already did not happen, and the
+   driver's own timeouts handle a device that stops answering. `require` does not stop the broker for a
+   fault at run time: the isolation did its job.
+
+## ADR-307 — IOMMU verification, and what LATER-5 does not do (LATER-5, H4b)
+
+- **Status:** Accepted (LATER-5).
+
+1. **Host tests.** `crates/platform/src/iommu_tests.rs` (DMAR, IVRS, IORT with QEMU's shapes, ranges,
+   aliases, RMRR/IVMD, malformed and truncated tables, every prefix of every table), the QEMU `virt` DTB with
+   an SMMUv3 (`tests/fixtures/qemu-virt-smmuv3.dtb`, `dumpdtb` of QEMU 11.1). `crates/iommu`: each driver
+   against a model of its unit that walks the in-memory tables as the hardware would and answers DMA: only an
+   attached device reaches only its pages (and on SMMUv3 the doorbell); unattached devices, other devices'
+   pages, IDs beyond the tables are refused; bring-up with the firmware's state left on; a unit that never
+   answers times out; fault and event decoding, bounds and overflow; domain and ASID limits. Configuration:
+   format 18 written only for `auto` and `require`, refused by format 13 and by the unknown 17; the CLI's
+   template check (a v0.5.0 template refuses a `devices.iommu` configuration with the reason); the builder
+   page's model (`tools/builder/test/iommu.test.mjs`).
+2. **Fuzzing.** `iommu_tables`: arbitrary bytes as DMAR, IVRS, IORT, a device tree, or unit fault records;
+   ranges must stay inside the requester-ID space; seeds from QEMU's shapes. Two minutes: 14.6 million runs,
+   no finding.
+3. **QEMU smoke, `SMOKE_ONLY=iommu`.** Per IOMMU (aarch64: SMMUv3 under HVF and TCG, ACPI and device tree;
+   x86_64: VT-d and AMD-Vi under TCG): `iommu-dma` with `require` and `test=iommu-dma` (dev only), which makes
+   the entropy device write 64 bytes into a page outside its domain: the page must stay untouched, at least
+   one fault counted, by core 0's tick alone within a second (the test runs after the tick starts, and reads
+   the logs itself only after that second), the fault line name the device; `iommu-off control`, the same request with
+   `devices.iommu = "off"`: the page is written (so the test can see a write); `iommu-mqtt`, the full MQTT
+   round trip over mutual TLS (`mqtt-scenarios.py`) with every device translated and no fault. Then:
+   `require` on a machine without an IOMMU and with a virtio device that bypasses it (no `iommu_platform`)
+   refuses to boot with the reason; `auto` without one boots and warns. `scripts/run-qemu.sh --iommu
+   intel|amd|smmuv3` adds the unit and `iommu_platform=on,disable-legacy=on` to every virtio device.
+4. **Not done (listed, not hidden).**
+   - No real hardware: VT-d, AMD-Vi and SMMUv3 ran only as QEMU 11.1 models. Bare metal stays LATER-4.
+   - Interrupt remapping is not enabled (point 7 of ADR-305); a unit whose firmware enabled it is refused.
+   - VT-d: no queued invalidation, no scalable mode, no 5-level tables, no device-TLB (ATS); AMD-Vi: no
+     interrupt remapping, no exclusion range, no IOTLB (ATS); SMMUv3: no two-level stream table, no stage 2,
+     no PRI or ATS, no stall model, and a non-coherent unit's cache maintenance is untested (QEMU's are
+     coherent).
+   - RMRR, IVMD and RMR are counted, not mapped; DMAR scopes behind a bridge are not followed.
+   - At most 4 units and 32 ID ranges per unit; more are counted and their devices are not translated, nor
+     given to the catch-all unit, so `require` refuses them.
+   - QEMU's AMD-Vi model writes its IO_PAGE_FAULT events in a layout where this decoder reads address 0 and
+     no write flag; the device and the event type are right. Checked against the specification only.
+   - The cost of translation is not measured: an emulated IOMMU makes every DMA a table walk in QEMU, real
+     hardware has IOTLBs; `make bench` was not run with an IOMMU.
+   - intel-iommu under KVM needs the split irqchip (`run-qemu.sh` adds it); not run here (no KVM host).
+   - Fault interrupts (ADR-306) and unmapping are deliberately absent.

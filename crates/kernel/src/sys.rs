@@ -485,6 +485,7 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
         accepted: accepted.get(..cores).unwrap_or(&[]),
         plaintext: crate::plain::info(),
         websocket: crate::websocket::info(),
+        iommu: crate::iommu::sys(),
     }
 }
 

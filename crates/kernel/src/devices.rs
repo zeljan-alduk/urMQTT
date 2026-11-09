@@ -109,12 +109,33 @@ impl ConfigSpace for Cfg {
     }
 }
 
-/// The kernel side of the virtio `Env`.
-pub struct KernelEnv;
+/// The kernel side of the virtio `Env`: DMA memory for one device, which the
+/// IOMMU (when one is in use, ADR-305) maps into that device's domain.
+pub struct KernelEnv {
+    dev: Option<Bdf>,
+}
+
+impl KernelEnv {
+    /// For the work after bring-up, which allocates no DMA memory.
+    pub const RUNTIME: Self = Self { dev: None };
+
+    /// For the bring-up of the device at `bdf`.
+    pub const fn device(bdf: Bdf) -> Self {
+        Self { dev: Some(bdf) }
+    }
+}
 
 impl Env for KernelEnv {
     fn dma_alloc(&self, bytes: usize) -> Option<DmaRegion> {
-        vm::dma_alloc(bytes).map(|(va, pa, len)| DmaRegion { va, pa, len })
+        let (va, pa, len) = vm::dma_alloc(bytes)?;
+        crate::iommu::map(self.dev, pa, len);
+        Some(DmaRegion { va, pa, len })
+    }
+
+    fn platform_access(&self, offered: bool) {
+        if let (Some(bdf), false) = (self.dev, offered) {
+            crate::iommu::bypass(bdf);
+        }
     }
 
     fn now_ns(&self) -> u64 {
@@ -226,31 +247,31 @@ impl DataDisk {
         }
         let r = v.as_slice();
         match self {
-            Self::Blk(b) if b.unmap.discard => b.discard(&KernelEnv, r),
-            Self::Blk(b) => b.write_zeroes(&KernelEnv, r),
-            Self::Scsi(s) if s.unmap.discard => s.discard(&KernelEnv, r),
-            Self::Scsi(s) => s.write_zeroes(&KernelEnv, r),
+            Self::Blk(b) if b.unmap.discard => b.discard(&KernelEnv::RUNTIME, r),
+            Self::Blk(b) => b.write_zeroes(&KernelEnv::RUNTIME, r),
+            Self::Scsi(s) if s.unmap.discard => s.discard(&KernelEnv::RUNTIME, r),
+            Self::Scsi(s) => s.write_zeroes(&KernelEnv::RUNTIME, r),
         }
     }
 
     pub fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), urmqtt_virtio::VirtioError> {
         match self {
-            Self::Blk(b) => b.read(&KernelEnv, sector, buf),
-            Self::Scsi(s) => s.read(&KernelEnv, sector, buf),
+            Self::Blk(b) => b.read(&KernelEnv::RUNTIME, sector, buf),
+            Self::Scsi(s) => s.read(&KernelEnv::RUNTIME, sector, buf),
         }
     }
 
     pub fn write(&mut self, sector: u64, data: &[u8]) -> Result<(), urmqtt_virtio::VirtioError> {
         match self {
-            Self::Blk(b) => b.write(&KernelEnv, sector, data),
-            Self::Scsi(s) => s.write(&KernelEnv, sector, data),
+            Self::Blk(b) => b.write(&KernelEnv::RUNTIME, sector, data),
+            Self::Scsi(s) => s.write(&KernelEnv::RUNTIME, sector, data),
         }
     }
 
     pub fn flush(&mut self) -> Result<(), urmqtt_virtio::VirtioError> {
         match self {
-            Self::Blk(b) => b.flush(&KernelEnv),
-            Self::Scsi(s) => s.flush(&KernelEnv),
+            Self::Blk(b) => b.flush(&KernelEnv::RUNTIME),
+            Self::Scsi(s) => s.flush(&KernelEnv::RUNTIME),
         }
     }
 }
@@ -354,6 +375,8 @@ pub struct Devices {
     /// The disk Limine booted from (the only disk ever written).
     pub blk: Option<DataDisk>,
     pub rng: Option<VirtioRng>,
+    /// Where the entropy device is (the IOMMU test, ADR-307).
+    pub rng_bdf: Option<Bdf>,
     pub blk_msix_spi: Option<u32>,
     /// The NIC's receive interrupt (ADR-270): its SPI or vector, and the
     /// dispatcher's wake-up mode.
@@ -474,6 +497,7 @@ pub static DEVICES: SpinLock<Devices> = SpinLock::new(Devices {
     net: None,
     blk: None,
     rng: None,
+    rng_bdf: None,
     blk_msix_spi: None,
     net_msix_spi: None,
     net_wake: Mode::Polling(Why::NoMsix),
@@ -581,7 +605,7 @@ pub fn entropy_source_name() -> &'static str {
 /// test; returns how many it got (0 without the device).
 pub fn sample_virtio_rng(out: &mut [u8]) -> usize {
     match DEVICES.lock().rng.as_mut() {
-        Some(rng) => rng.fill(&KernelEnv, out).unwrap_or(0),
+        Some(rng) => rng.fill(&KernelEnv::RUNTIME, out).unwrap_or(0),
         None => 0,
     }
 }
@@ -835,7 +859,7 @@ fn requester_id(bdf: Bdf) -> u32 {
 /// Enumerates PCIe, maps and initialises the virtio devices and seeds the
 /// CSPRNG. Must run before the page tables are locked.
 pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), ProbeError> {
-    let env = KernelEnv;
+    let env = KernelEnv::RUNTIME;
     let mut pool = EntropyPool::new();
     let mut facts = EntropyFacts {
         bootloader_values: bootloader_entropy.iter().filter(|v| **v != 0).count() as u32,
@@ -848,6 +872,7 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
         net: None,
         blk: None,
         rng: None,
+        rng_bdf: None,
         blk_msix_spi: None,
         net_msix_spi: None,
         net_wake: Mode::Polling(Why::NoMsix),
@@ -1014,6 +1039,9 @@ fn probe_pci(
     };
     let mut v2m = msi_frame(platform);
     let functions = pci::enumerate(&ecam, bus_start, bus_end);
+    // DMA remapping (ADR-305): up before any driver, every device blocked
+    // until it is given a domain.
+    crate::iommu::init(platform, functions.iter().map(|f| f.bdf));
     #[cfg(target_arch = "aarch64")]
     let mut its = ItsSource::new(platform, &functions);
     #[cfg(target_arch = "x86_64")]
@@ -1068,6 +1096,9 @@ fn probe_pci(
         let (Some(ty), Some(kind)) = (ty, kind) else {
             continue;
         };
+        // DMA memory of this device goes into its own IOMMU domain (ADR-305).
+        let dev_env = KernelEnv::device(f.bdf);
+        let env = &dev_env;
         // Every type without a path of its own (ADR-257): the table decides.
         if !matches!(vdev::driver(ty).map(|d| d.path), Some(vdev::Path::Builtin)) {
             vdev::probe_generic(&mut ecam, env, f.bdf, f.device, ty);
@@ -1129,6 +1160,7 @@ fn probe_pci(
                     transport(&mut ecam, f.bdf, &caps, true)?,
                     env,
                 )?);
+                devs.rng_bdf = Some(f.bdf);
                 vdev::record(f.bdf, ty, State::Driven, "entropy");
             }
             DeviceType::Block => {
@@ -1325,8 +1357,9 @@ fn probe_pci(
     #[cfg(feature = "virtio-gpu")]
     virtio_gpu_console(&mut ecam, env, gpu, &displays);
     #[cfg(not(feature = "virtio-gpu"))]
-    let _ = (gpu, &displays);
+    let _ = (gpu, &displays, env);
     vdev::check_configuration();
+    crate::iommu::summary();
     Ok(())
 }
 
@@ -1361,7 +1394,12 @@ fn memory_bars<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> alloc::vec::Vec<(u8, u6
 /// display problem never stops the broker), loudly. The outcome is also
 /// recorded for the Diagnostic report (`virtio: virtio-gpu at ...`).
 #[cfg(feature = "virtio-gpu")]
-fn virtio_gpu_console(cfg: &mut Cfg, env: &KernelEnv, gpu: Option<(Bdf, u16)>, displays: &[Bdf]) {
+fn virtio_gpu_console(
+    cfg: &mut Cfg,
+    _runtime: &KernelEnv,
+    gpu: Option<(Bdf, u16)>,
+    displays: &[Bdf],
+) {
     use urmqtt_config::VirtioGpuMode;
     let mode = urmqtt_config::CONFIG.console.virtio_gpu;
     let Some((bdf, device)) = gpu else {
@@ -1415,6 +1453,9 @@ fn virtio_gpu_console(cfg: &mut Cfg, env: &KernelEnv, gpu: Option<(Bdf, u16)>, d
             }
         }
     };
+    // Its DMA memory goes into its own IOMMU domain (ADR-305).
+    let gpu_env = KernelEnv::device(bdf);
+    let env = &gpu_env;
     let caps = find_caps(cfg, bdf);
     if caps.support(device, true) != Support::Modern {
         warn!("console: virtio-gpu at pci {bdf}: no virtio 1.0 capabilities, not used ({why})");
@@ -1717,10 +1758,78 @@ fn arp_frame(mac: [u8; 6], op: u16, sender_ip: [u8; 4], target_ip: [u8; 4]) -> [
     f
 }
 
+/// `test=iommu-dma` (dev only, ADR-307): makes the entropy device write into
+/// a page that is not in its IOMMU domain, then reports whether the page
+/// stayed untouched and how many faults the units recorded meanwhile. With
+/// the IOMMU off the same request reaches the page (the control run). The
+/// entropy device is not used again afterwards (the CSPRNG is seeded).
+pub fn iommu_dma_test() {
+    let mut devs = DEVICES.lock();
+    let bdf = devs.rng_bdf;
+    let Some(rng) = devs.rng.as_mut() else {
+        warn!("iommu: test: no virtio-rng device, the DMA test needs one");
+        return;
+    };
+    // A page no device's domain holds: allocated outside `KernelEnv`.
+    let Some((va, pa, len)) = vm::dma_alloc(4096) else {
+        warn!("iommu: test: no memory");
+        return;
+    };
+    let before = crate::iommu::faults();
+    let r = rng.request_at(&KernelEnv::RUNTIME, pa, 64, 500_000_000);
+    devs.rng = None;
+    drop(devs);
+    // First core 0's tick alone (it reads the logs every 100 ms): the test
+    // runs on core 0 with interrupts on. Then, if it saw nothing within a
+    // second, the logs read here, so a broken tick poll shows as such.
+    let t0 = time::uptime_ns();
+    while crate::iommu::faults() == before && time::uptime_ns() - t0 < 1_000_000_000 {
+        core::hint::spin_loop();
+    }
+    let by_tick = crate::iommu::faults() != before;
+    let t0 = time::uptime_ns();
+    while crate::iommu::faults() == before && time::uptime_ns() - t0 < 1_000_000_000 {
+        crate::iommu::poll();
+        core::hint::spin_loop();
+    }
+    // SAFETY: the page was just allocated (zeroed, HHDM-mapped, `len`
+    // bytes) and is owned here; only read.
+    let page = unsafe { core::slice::from_raw_parts(va as *const u8, len) };
+    let written = page.iter().any(|b| *b != 0);
+    let faults = crate::iommu::faults() - before;
+    info!(
+        "iommu: test: virtio-rng {} asked to write 64 bytes at {pa:#x} (outside its domain): {}; the page is {}; {faults} fault(s) recorded",
+        bdf.map_or_else(
+            || alloc::string::String::from("?"),
+            |b| alloc::format!("{b}")
+        ),
+        match r {
+            Ok(n) => alloc::format!("the device answered {n} byte(s)"),
+            Err(e) => alloc::format!("no answer ({e:?})"),
+        },
+        if written { "WRITTEN" } else { "untouched" }
+    );
+    if crate::iommu::active() {
+        info!(
+            "iommu: test: the fault was {}",
+            if by_tick {
+                "read by core 0's tick"
+            } else {
+                "NOT read by core 0's tick within a second"
+            }
+        );
+        if !written && faults > 0 {
+            info!("iommu: test: DMA outside the domain blocked and counted");
+        } else {
+            warn!("iommu: test: DMA outside the domain NOT blocked or not counted");
+        }
+    }
+}
+
 /// Sends a gratuitous ARP announcement and an ARP request for the QEMU user
 /// network gateway, then waits briefly for any reply (RX path check).
 pub fn net_selftest() -> Result<(), &'static str> {
-    let env = KernelEnv;
+    let env = KernelEnv::RUNTIME;
     let mut devs = DEVICES.lock();
     let Some(net) = devs.net.as_mut() else {
         warn!("net: no virtio-net device, self-test skipped");

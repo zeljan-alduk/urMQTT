@@ -16,7 +16,8 @@ Weaknesses are listed even when they are not fixed. Where a protection has no
 test, that is listed as a gap too: an untested protection does not count.
 
 **What this release does not claim.** It targets a **VPS (KVM)**. Bare metal is
-not claimed: no IOMMU (H4b), no Secure Boot enforced for release images (the loaders are
+not claimed: DMA isolation exists (H4b, `devices.iommu`, ADR-305) but is off by default and tested only against
+QEMU's IOMMU models, no Secure Boot enforced for release images (the loaders are
 unsigned by any project key; the signing path exists and is tested on x86_64 OVMF only, H8), no TPM
 sealing (a spike, ADR-254), no native NIC or disk drivers (X12 to X16). The `unsafe` and
 inventory tables below include the code that exists for bare metal (x86_64
@@ -101,7 +102,7 @@ from them at the H10 commit (H0 baseline: 30 773 lines, 65 linked crates, 308
 | RustCrypto `cpufeatures` 0.2.17 and 0.3.1, vendored (X0b) | 675 + 598 lines | upstream sources plus one hunk each: on bare metal they ask the kernel's sealed dispatch (`urmqtt_cpu_has`). Reviewable with `diff -r` against the crates.io files ([vendor/README.md](../vendor/README.md)) |
 | Limine v12.9.4 (binary) | `BOOTAA64.EFI`, 331 776 bytes (and the x86_64 and BIOS loaders in the universal ISO) | pre-kernel; its configuration is enrolled (ADR-250), signing path ADR-251; **no project signing key exists**, so release loaders are unsigned |
 
-**`unsafe` in non-test code of the workspace:** 924 sites, **all 924 with a
+**`unsafe` in non-test code of the workspace:** 936 sites, **all 936 with a
 `// SAFETY:` comment or a `# Safety` section** (the tool crate `builder-wasm`
 accounts for 29 of them and the fake virtio device of the tests and fuzz targets,
 `virtio/src/fake.rs`, behind the `fake` feature, for 6; neither is in the image). In
@@ -112,14 +113,16 @@ the shared queue allocation and the two bounds-checked DMA copies of `virtio/src
 the 5 added by ADR-259 are the AArch64 X25519 inline-assembly blocks, register-only,
 `options(pure, nomem, nostack)`; the 9 added by ADR-270 are the GICv3 ITS driver's register
 accessors, its cache clean, its command-queue and LPI-configuration writes, and the kernel's call
-of its `init`).
+of its `init`; the 10 added by ADR-305 are the IOMMU units' register accessors and the HHDM accesses to their
+tables in `kernel/src/iommu.rs`, the cache clean for a non-coherent unit on each architecture, and the
+`test=iommu-dma` read of its probe page; the `iommu` crate itself has none).
 
 | Crate | Sites (justified) | Crate lint |
 |---|---|---|
 | `urmqtt-store` | 302 (302) | deny, with `allow` on the FFI modules (`db`, `ffi`, `libc`, `vfs`, `init`, the log callback, the worker's half) |
-| `urmqtt-arch-x86_64` | 155 (155) | deny; port I/O, MSRs, control registers, interrupt entry |
-| `urmqtt-kernel` | 119 (119) | deny; `cpu_dispatch.rs` (the sealed section, the `urmqtt_cpu_has` export), boot requests, user mode |
-| `urmqtt-arch-aarch64` | 109 (109) | deny; all assembly and system registers, the ARMv8 CRC-32C intrinsics, the GICv3 ITS (ADR-270) |
+| `urmqtt-arch-x86_64` | 157 (157) | deny; port I/O, MSRs, control registers, interrupt entry |
+| `urmqtt-kernel` | 126 (126) | deny; `cpu_dispatch.rs` (the sealed section, the `urmqtt_cpu_has` export), boot requests, user mode, the IOMMU glue (ADR-305) |
+| `urmqtt-arch-aarch64` | 110 (110) | deny; all assembly and system registers, the ARMv8 CRC-32C intrinsics, the GICv3 ITS (ADR-270) |
 | `urmqtt-mm` | 74 (74) | deny; frames, heap, slabs, key slab |
 | `urmqtt-dbworker` | 22 (22) | default; the worker's entry and syscall stub |
 | `urmqtt-nistz256` | 28 (28) | allow; the calls into the vendored P-256 assembly (x86_64 and aarch64) and the comb table's reinterpretation (ADR-130, ADR-255) |
@@ -132,7 +135,7 @@ of its `init`).
 
 `mqtt`, `broker`, `tls`, `timer-wheel`, `cfg`, `config-schema`, `control`,
 `plain`, `sntp` and `dispatch` are `forbid(unsafe_code)`. `tcp`, `net`, `pci`,
-`platform`, `diag` and the `arch` facade are `deny` and contain none. A new
+`platform`, `diag`, `iommu` and the `arch` facade are `deny` and contain none. A new
 `unsafe` site without a `// SAFETY:` comment shows up in the generated
 inventory as **no**; the CI check fails on a stale inventory, and the count
 above is 0 unjustified at this commit. A justification is a claim to review,
@@ -146,7 +149,8 @@ Who controls the input decides how hostile it can be. **Network** means
 anyone who can reach port 8883 (the only open port), or the LAN for
 ARP/DHCP. **Volume** means anyone with access to the data disk (a cloud
 snapshot, a stolen disk). **Firmware/hypervisor** is trusted in a VM, but
-not on bare metal for devices (DMA, see H4b).
+not on bare metal for devices (DMA: with `devices.iommu = "require"` each driven device reaches only its own
+pages, ADR-305).
 
 | Input | Who controls it | Parser | Bounded by | Fuzz target |
 |---|---|---|---|---|
@@ -174,6 +178,8 @@ not on bare metal for devices (DMA, see H4b).
 | Worker protocol: rows, handles, messages, VFS system calls | the worker (untrusted) | `store/src/remote.rs`, `store/src/vfs.rs::syscall`, `usys/src/proto.rs` | bounds-checked readers, type checks, file numbers 0 to 3, offsets and lengths checked, sleep clamped | `usys` host tests; the whole store suite through the protocol (`loopback`, 131 tests) |
 | Device tree | firmware | `platform/src/fdt.rs` | blob size, node depth | `fdt_parse` |
 | ACPI tables | firmware | `platform/src/acpi.rs` | table lengths, MADT entry lengths | `acpi_parse` |
+| IOMMU descriptions: DMAR, IVRS, IORT, the device tree's `arm,smmu-v3` and `iommu-map` (ADR-305) | firmware | `platform/src/iommu.rs` | structure and entry lengths checked against the table; at most 4 units and 32 ID ranges per unit (more counted); an unknown variable-length IVRS entry ends that block; IDs clamped to 16 bits | `iommu_tables` |
+| IOMMU fault records: VT-d fault recording registers, the AMD-Vi event log, the SMMUv3 event queue (ADR-306; only with `devices.iommu` not `"off"`) | the device that faulted, through the unit | `iommu/src/{vtd,amdvi,smmuv3}.rs` (`poll_faults`, the decoders) | at most 16 per unit per poll (every 100 ms, core 0's tick, the lock only tried); indices masked to the ring, a garbage index reads nothing; the values are only counted and logged | `iommu_tables` (decoders); host tests against unit models |
 | PCI configuration space, capabilities | firmware/devices | `pci/src/lib.rs` | capability list walk | **none** (gap H0-W9) |
 | virtio rings, config space, SCSI sense/INQUIRY | hypervisor/devices | `virtio/src/{queue,blk,net,scsi,transport}.rs` | ring sizes, descriptor ids | **none** (gap H0-W9) |
 | virtio-net's receive interrupt (ADR-270; MSI-X through the GICv2m frame, the GICv3 ITS or the local APIC; `devices.virtio_net_interrupt = "off"` turns it off) and the ITS's command-queue progress | hypervisor | `kernel/src/devices.rs` (`on_net_irq`: a counter only), `virtio/src/wake.rs`, `arch-aarch64/src/its.rs` | the queue asks for interrupts only while the dispatcher sleeps; the interrupt is on probation (a 1 ms deadline kept) until 3 frames verify it, and 8 frames that waited without it fall back to polling; a device that interrupts anyway costs a counter increment and an EOI per interrupt; every ITS register wait is bounded (10^7 polls), a stalled command fails the setup and the NIC is polled | host tests of the protocol, the mode machine and the ITS encodings; no fuzz target (no parser) |
@@ -263,6 +269,7 @@ scenario (`scripts/smoke.sh`), a host test or a CI job. "**none**" is a gap.
 | Image secrecy: a warning for a production image built outside CI; no key bytes in logs or repro output | `mkiso.sh`, `scripts/secret-scan.py`, `scripts/repro.sh` (H8, ADR-252) | `SMOKE_ONLY=secrecy` (server key and disk key scanned for in the serial logs of an encrypted boot and both refusals, dev and release kernels; the scan must find them in the image), the scan in `make repro` | aarch64 (repro: the image it builds) |
 | SBOM, vet, advisory job, vulnerability process | `scripts/sbom.py`, `supply-chain/`, CI (H9, ADR-190 to ADR-193) | CI jobs; 53 of 67 kernel-linked crate versions are cargo-vet *exemptions*, not audits ([audit/vet-exemptions.md](audit/vet-exemptions.md)) | n/a |
 | Static analysis: CodeQL (Rust, Actions) and OpenSSF Scorecard, every alert triaged | `.github/workflows/codeql.yml`, `.github/codeql/codeql-config.yml` (tests and fuzz targets excluded), `scorecard.yml` | [audit/codeql-triage.md](audit/codeql-triage.md): 137 alerts read on 2026-11-07; no hard-coded secret in production code; 1 fixed (base image pinned), 132 dismissed with a named reason, 4 repository-posture alerts left to the owner ([CSV](audit/codeql-triage-2026-11-07.csv)) | n/a |
+| DMA remapping (optional, `devices.iommu`, off by default): every device blocked from bring-up on, a domain per driven device with only its own pages (identity mapped; on a GIC the MSI doorbell page), a virtio device without VIRTIO_F_ACCESS_PLATFORM treated as unisolated, faults polled, bounded, counted and logged; `require` refuses to boot without it | `iommu` crate (VT-d, AMD-Vi, SMMUv3; no `unsafe`), `platform/src/iommu.rs`, `kernel/src/iommu.rs`, `virtio/src/transport.rs` (ADR-305 to ADR-307) | host tests against unit models that walk the tables; `iommu_tables` fuzzing; `SMOKE_ONLY=iommu`: `iommu-dma` (a device's write outside its domain leaves the page untouched and is counted, with the `off` control that sees the write), `iommu-mqtt` (mTLS round trip translated), refusals without an IOMMU and with a bypassing device. **Not tested:** real hardware, KVM, a non-coherent unit | both (QEMU models) |
 | virtio-gpu console (optional, off by default): DMA only into memory allocated for it, the device lock only tried, every wait bounded | `virtio/src/gpu.rs`, `kernel/src/gpucon.rs`, `log` presenter hooks (ADR-256) | host tests (encoding, parsing, mode, `auto`), `virtio_gpu_response` fuzzing, smoke `virtio-gpu-*` (QMP screendump checked; `off`: not started); real machine: netcup VPS 500 ARM G12.5 | both |
 | The optional virtio drivers (console, balloon, input, vsock; each off by default): a driver configured but not compiled in is refused at pack time and warned about at boot; every device listed with its state | `virtio/src/registry.rs`, `kernel/src/vdev/`, `cfg/src/drivers.rs`, `config/tools image.rs` (ADR-257) | host tests (the table's const check, registry and key tables equal, marker found, `pack --kernel` refusal), smoke `virtio-devices: every key off, listed and not driven` | both |
 | virtio-console, -balloon, -input, -vsock: lengths clamped, heads checked, loops bounded, nothing waits for the device, locks only tried from the log, the tick and the prompts; the balloon never inflates | `virtio/src/{console,balloon,input,vsock}.rs`, `kernel/src/vdev/` (ADR-258) | host tests against `fake::FakeBus`, fuzz `virtio_console_device`, `virtio_balloon_device`, `virtio_input_event`, `virtio_vsock_packet`, smoke `virtio-devices: *` (QMP stats, balloon request refused, `WIPE` typed on the virtio keyboard and on the virtio-console); vsock: host tests and fuzzing only | aarch64 (smoke); both (build) |
@@ -302,7 +309,7 @@ mutual TLS devices, and the image treated as a secret.
 | H0-W6 | ~~**Random-number failures ignored** in two places: `let _ = fill_global(...)` for the cookie key and the DHCP xid~~ | low | `netproto.rs` | **fixed in H1:** both are fatal now. The generator's `Err` without a source is already host-tested; the kernel paths cannot be reached in a test because boot refuses earlier |
 | H0-W7 | ~~`urmqtt-store` had no `unsafe_code` lint.~~ Its docs confined unsafe to the FFI modules, but nothing enforced it | low | `store/src/lib.rs` | **fixed in H0:** `#![deny(unsafe_code)]`, `allow` only on `db`, `ffi`, `libc`, `vfs`, `init` and the log callback |
 | H0-W8 | **SQLite parses a database from the volume without fuzzing of crafted images** | ~~medium (a crafted volume reaches 254k lines of C at EL1)~~ **low after H6**: a bug is contained in an unprivileged worker (ADR-210); the remaining harm is wrong answers (an empty revocation list), a restart storm (storage unavailable), and speculative leaks (no KPTI) | SQLite | **narrowed in H6** (EL0 / ring 3, restart, `worker-contain`, `worker-fault`); still open: no fuzz run of crafted database images under ASan (the `sanitize` job runs the store suites, not crafted files) |
-| H0-W9 | **No fuzzing of PCI and virtio parsing** (hostile or buggy devices: on bare metal, and virtio under a hostile hypervisor) | medium on bare metal, low in a VM (the hypervisor is trusted) | `pci`, `virtio` | **open.** H5 did not add targets for them; with H4b (IOMMU) deferred to bare metal. Proposed for the external audit (§8) |
+| H0-W9 | **No fuzzing of PCI and virtio parsing** (hostile or buggy devices: on bare metal, and virtio under a hostile hypervisor) | medium on bare metal, low in a VM (the hypervisor is trusted) | `pci`, `virtio` | **open.** H5 did not add targets for them. Narrowed by H4b (ADR-305): with `devices.iommu = "require"` a device's DMA reaches only its own pages, so a hostile device's reach is its own buffers and what the driver parses from them. Proposed for the external audit (§8) |
 | H0-W10 | **No test proves page tables are read-only after the lock** | low (the lock exists; the proof is missing) | `vm::lock` | **open.** The boot audit line `selftest: W^X ok (… tables read-only)` checks the mappings, and `sealed-write` covers the sealed section, but no scenario writes to a table and expects a fault |
 | H0-W11 | ~~**No test for "prod ignores the command line"**~~ | low | `cmdline.rs` | **fixed in H1:** the kernel binary runs host tests; `production_ignores_every_option` |
 | H0-W12 | ~~**The data disk is chosen by "not partitioned" instead of by identity**~~ | medium on bare metal | `kernel/src/devices.rs` | **fixed in S1** (ADR-051): the boot disk by its GPT disk GUID; other disks only read (smoke `first-boot`, `scsi-boot` check a second disk is byte-identical) |
@@ -357,7 +364,7 @@ package. The ones an auditor should weigh first:
 |---|---|---|
 | **The image holds the server private key and, with encryption at rest, the disk key.** A copy of the ISO is a copy of both. | No secure key store in a VM. TPM or vTPM sealing was studied (ADR-254) and not built: it needs a TPM driver and a new configuration format, protects a copied disk but not the install ISO, and a vTPM's state travels with the VM. A production image built outside CI warns (ADR-252). | SECURITY.md residual risks; ADR-240, ADR-252, ADR-254 |
 | **No Secure Boot for release images, no measured boot, BIOS path unprotected.** The configuration is enrolled into the loaders and the kernel and module are pinned (H8, ADR-250), but nothing signs the loaders: whoever can rewrite `BOOTX64.EFI`, `limine-bios.sys` or the MBR defeats both. The signing path exists (ADR-251) and has no project key; a signed ISO cannot be configured afterwards and an installed disk does not boot under Secure Boot. | The release targets a VPS, whose firmware and loader are the host's. | PLAN.md (first release scope); §3b; ADR-250, ADR-251 |
-| **No IOMMU (H4b), and no fuzzing of PCI and virtio parsing (H0-W9).** | VM devices are the hypervisor's, which is trusted; both matter on bare metal. | SECURITY.md; H0-W9 |
+| **DMA isolation off by default and unproven on hardware (H4b), and no fuzzing of PCI and virtio parsing (H0-W9).** | VM devices are the hypervisor's, which is trusted; `devices.iommu` (ADR-305) is `off` by default and ran only against QEMU's VT-d, AMD-Vi and SMMUv3 models, without interrupt remapping or reserved regions (ADR-307). | SECURITY.md; ADR-305 to ADR-307; H0-W9 |
 | **SQLite is 254k lines of C.** Contained (EL0 / ring 3, restart on fault), not eliminated: the kernel trusts the worker's *answers* (an empty revocation list from a compromised worker un-revokes certificates), there is no KPTI and no PCID, and PAC keys are shared on aarch64. | ADR-210; the remaining cost of isolation. | PROGRESS.md H6, "Not done / honest limits" |
 | **No forward-edge CFI (kCFI crashes the pinned compiler), no MTE on x86_64, on HVF or on most clouds; the HHDM base is fixed.** | ADR-174, ADR-175. | SECURITY.md residual risks |
 | **Constant-time evidence covers the tag checks, our one secret comparison, since ADR-255 P-256 key generation, ECDH and signing (key and nonce), and since ADR-259 the X25519 ladder of the shared secret (Docker on the M4 Pro only)** (`make ct`, dudect-style, measured in Docker on an Apple M4 Pro and on the GitHub arm64 runner, a Neoverse N2 VM; not on the Neoverse N1 VPS, and never with PSTATE.DIT set on a server core, A255-W2); the X25519 key share (dalek's table) and Ed25519 are not measured here. | A black-box test bounds only what it can resolve at its sample size, on the machine it ran on; the code is designed for constant time (upstream's argument for the assembly; ADR-259's for the X25519 field arithmetic). | CRYPTO.md, ADR-255, ADR-259 |

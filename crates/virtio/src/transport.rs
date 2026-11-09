@@ -238,13 +238,15 @@ impl Transport {
             self.common.write32(DEVICE_FEATURE_SELECT, half);
             offered |= u64::from(self.common.read32(DEVICE_FEATURE)) << (32 * half);
         }
-        let accepted = match negotiate_features(offered, wanted, required) {
-            Ok(f) => f,
-            Err(e) => {
-                self.add_status(STATUS_FAILED);
-                return Err(e);
-            }
-        };
+        env.platform_access(offered & crate::F_ACCESS_PLATFORM != 0);
+        let accepted =
+            match negotiate_features(offered, wanted | crate::F_ACCESS_PLATFORM, required) {
+                Ok(f) => f,
+                Err(e) => {
+                    self.add_status(STATUS_FAILED);
+                    return Err(e);
+                }
+            };
         for half in 0..2u32 {
             self.common.write32(DRIVER_FEATURE_SELECT, half);
             self.common

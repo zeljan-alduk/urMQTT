@@ -32,23 +32,26 @@ pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// 10 is unused); version 12 adds the `[mqtt5]` section and the session and message expiry limits (ADR-273 rule
 /// 21: a kernel that does not know them would ignore the operator's expiry policy); version 13 adds
 /// `limits.max_shared_groups` and `limits.max_shared_group_members` (ADR-275: a kernel that does not know them
-/// would ignore the operator's bound); version 14 adds `limits.max_connections_per_ip` (ADR-280: a kernel that does not know it would not limit the connections of one address); version 15 adds `limits.max_runtime_accounts` (ADR-285: the operator's bound would not be what the image says); version 16 adds the `[metrics]` section (ADR-290: a kernel without the
-/// endpoint would ignore a request for it, and an operator who asked for an allow-list must never get a kernel
-/// that answers everybody); version 17 adds the `[update]` section (ADR-297: a kernel that does not
-/// know it would confirm a trial boot by its own defaults, or never, against the operator's choice). The records of 2 and 3 are the same: the packer writes the lowest version
+/// would ignore the operator's bound); version 14 adds `limits.max_connections_per_ip` (ADR-280: a kernel that does not know it would not limit the
+/// connections of one address); version 15 adds `limits.max_runtime_accounts` (ADR-285: the operator's bound would not be
+/// what the image says); version 16 adds the `[metrics]` section (ADR-290: a kernel without the endpoint would ignore a
+/// request for it, and an operator who asked for an allow-list must never get a kernel that answers everybody); version
+/// 17 adds the `[update]` section (ADR-297: a kernel that does not know it would confirm a trial boot by its own
+/// defaults, or never, against the operator's choice); version 18 adds `devices.iommu` (ADR-305: a kernel that does not
+/// know it would run without the DMA isolation the operator required). The records of 2 and 3 are the same: the packer writes the lowest version
 /// that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind still boots every image that
 /// does not use what came later.
-pub const FORMAT_VERSION: u16 = 17;
+pub const FORMAT_VERSION: u16 = 18;
 
 /// The one version between [`FORMAT_MIN`] and [`FORMAT_VERSION`] no format ever had.
 pub const UNUSED_VERSION: u16 = 10;
-/// Versions below [`FORMAT_VERSION`] that this tree does not know: allocated to other items of a release whose
-/// branch is not merged yet. Refused like [`UNUSED_VERSION`]. Empty once every item has landed.
-pub const RESERVED_VERSIONS: [u16; 0] = [];
+/// The versions between [`FORMAT_MIN`] and [`FORMAT_VERSION`] this code does not read: 10, which no format ever
+/// had, and any format allocated to an item of a release that is not merged yet (none now).
+pub const UNUSED_VERSIONS: &[u16] = &[UNUSED_VERSION];
 
-/// Whether `version` is one no format of this tree had (refused by the parser and the builder).
-pub fn is_unused_version(version: u16) -> bool {
-    version == UNUSED_VERSION || RESERVED_VERSIONS.contains(&version)
+/// Whether this code reads format `version`.
+pub fn known_version(version: u16) -> bool {
+    (FORMAT_MIN..=FORMAT_VERSION).contains(&version) && !UNUSED_VERSIONS.contains(&version)
 }
 /// The version a configuration is written in unless it needs a newer one.
 pub const BASE_VERSION: u16 = 2;
@@ -200,9 +203,9 @@ impl<'a> Blob<'a> {
             return Err(bad("not a urmqtt-cfg blob (bad magic)"));
         }
         let version = bytes.get(8..).and_then(le16).ok_or(bad("truncated"))?;
-        // Version 10 was never used by any format, and a reserved one is not known
-        // to this tree: unknown, like one above the newest.
-        if !(FORMAT_MIN..=FORMAT_VERSION).contains(&version) || is_unused_version(version) {
+        // Version 10 was never used by any format (or one reserved for
+        // an unmerged item): unknown, like one above the newest.
+        if !known_version(version) {
             return Err(bad("unsupported format version"));
         }
         if bytes.get(10..).and_then(le16) != Some(0) {

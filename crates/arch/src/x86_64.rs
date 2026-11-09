@@ -38,6 +38,12 @@ pub mod mem {
     pub use super::imp::mem::{copy, fast_rep, set, set_fast_rep};
 }
 
+/// Cache maintenance for devices that do not snoop (H4b, ADR-305).
+#[cfg(target_os = "none")]
+pub mod cache {
+    pub use super::imp::cpu::clean_dcache_range as clean_to_device;
+}
+
 /// Message-signalled interrupts.
 pub mod msi {
     pub use super::imp::msi::{Frame, TYPER};

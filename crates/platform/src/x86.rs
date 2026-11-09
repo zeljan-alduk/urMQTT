@@ -52,6 +52,10 @@ impl<T: Copy, const N: usize> FixedVec<T, N> {
         self.items.get(..self.len).unwrap_or(&[])
     }
 
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        self.items.get_mut(..self.len).unwrap_or(&mut [])
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }

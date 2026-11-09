@@ -47,6 +47,7 @@ only a request reader, `urmqtt_broker::metrics::render` over the same `Info` as 
 7. **SMP.** The application processors start (Limine MP or PSCI `CPU_ON`). Per-CPU data lives behind `TPIDR_EL1`.
 8. **Devices.** PCIe enumeration, then virtio-blk (data disk), virtio-net (queues per core) and virtio-rng.
 8b. **Boot slots** (A/B updates, ADR-295, ADR-296). On the boot disk, right after the GPT first-boot steps: a slot on trial uses one of its attempts, or the boot entry switches back to the previous slot (and the machine resets) when none is left. The DB core later confirms a healthy trial (`update.confirm_after_s` with the store open and a listener up). The kernel writes partition-table sectors only, never an ESP.
+8. **Devices.** PCIe enumeration; with `devices.iommu` not `off`, the IOMMU (VT-d, AMD-Vi or SMMUv3) comes up blocking every device's DMA (H4b, ADR-305); then virtio-blk (data disk), virtio-net (queues per core) and virtio-rng, each given an IOMMU domain with only its own buffers as it allocates them.
 9. **Storage.** The data disk superblock is checked, SQLite opens in WAL + `locking_mode=EXCLUSIVE`, `PRAGMA quick_check` runs, and telemetry segments are recovered.
 10. **Network.** DHCPv4 (or static), then the TLS listener on 8883.
 11. The kernel prints `URMQTT READY`.
@@ -227,4 +228,5 @@ print identical summaries.
 - `kernel` depends on everything. Nothing depends on `kernel`.
 - The host-testable crates (`timer-wheel`, `tcp`, `mqtt`, `broker`, `tls` record layer, `net` parsing, `config`, `platform` parsers) never touch registers. Hardware access sits behind traits implemented in `arch-aarch64`, `virtio` and `kernel`.
 - `broker` is tested end to end over an in-memory transport.
+- The IOMMU drivers (`iommu`) are host-testable too: registers and table memory are traits the kernel implements (ADR-305).
 - `unsafe` is allowed only in `arch-aarch64`, `mm`, `pci`, `virtio`, `store` (FFI) and minimal `kernel` glue, and every block carries a `// SAFETY:` comment (enforced by `clippy::undocumented_unsafe_blocks`).

@@ -12,6 +12,7 @@ members = [
     "crates/diag",
     "crates/dispatch",
     "crates/http",
+    "crates/iommu",
     "crates/kernel",
     "crates/log",
     "crates/mm",
