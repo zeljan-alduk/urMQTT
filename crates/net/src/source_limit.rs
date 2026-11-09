@@ -389,7 +389,11 @@ mod tests {
                     t.close(k);
                 }
             } else {
-                let want = if *n >= 5 { Open::TooMany } else { Open::Counted };
+                let want = if *n >= 5 {
+                    Open::TooMany
+                } else {
+                    Open::Counted
+                };
                 assert_eq!(t.syn_ok(k), *n < 5);
                 assert_eq!(t.open(k), want);
                 if want == Open::Counted {

@@ -10,6 +10,7 @@ use core::sync::atomic::Ordering;
 
 use urmqtt_config::{CONFIG, LogLevel, SocketAddrV4};
 use urmqtt_log::{Record, error, info, warn};
+use urmqtt_net::admission::REASONS;
 use urmqtt_net::iface::Iface;
 
 use crate::dataplane;
@@ -48,8 +49,8 @@ pub struct Ops {
 #[derive(Default, Clone, Copy)]
 struct Counters {
     accepted: u64,
-    refused: [u64; 5],
-    syn_dropped: [u64; 5],
+    refused: [u64; REASONS],
+    syn_dropped: [u64; REASONS],
     hs: dataplane::HsTotals,
     dropped_by: [u64; 4],
     watchdog: u64,

@@ -56,6 +56,26 @@ pub struct Handshakes {
     pub latency_max_ms: u64,
 }
 
+/// The limit on established TLS connections per source address (NOW-14,
+/// ADR-280), as `$SYS/broker/connections/per_address/...` reports it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PerAddress {
+    /// `limits.max_connections_per_ip`; 0: no limit (the rest stays 0).
+    pub limit: u64,
+    /// Connections the table counts now, all cores.
+    pub established: u64,
+    /// Distinct addresses holding at least one.
+    pub addresses: u64,
+    /// The most one address has held at once since boot.
+    pub peak: u64,
+    /// SYNs dropped without an answer because the address was at its limit.
+    pub syn_dropped: u64,
+    /// Connections refused at the final ACK for the same reason (a RST).
+    pub refused: u64,
+    /// Connections let through uncounted because the table was full.
+    pub untracked: u64,
+}
+
 /// Messages and frames the broker did not deliver, by cause (PERF, ADR-223).
 /// QoS 0 loss under overload is deliberate and bounded; it is also counted
 /// here, per cause, so that it is never silent.
@@ -355,6 +375,8 @@ pub struct Info<'a> {
     pub backpressure: Backpressure,
     pub mqtt5: Mqtt5Info,
     pub handshakes: Handshakes,
+    /// The per-address limit on established connections (ADR-280).
+    pub per_address: PerAddress,
     /// Connections accepted per core since boot (how evenly the flows
     /// spread over the cores).
     pub accepted: &'a [u64],
@@ -492,6 +514,14 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
     put("handshakes/slow", &h.slow);
     put("handshakes/latency_sum_ms", &h.latency_sum_ms);
     put("handshakes/latency_max_ms", &h.latency_max_ms);
+    let a = &i.per_address;
+    put("connections/per_address/limit", &a.limit);
+    put("connections/per_address/established", &a.established);
+    put("connections/per_address/addresses", &a.addresses);
+    put("connections/per_address/peak", &a.peak);
+    put("connections/per_address/syn_dropped", &a.syn_dropped);
+    put("connections/per_address/refused", &a.refused);
+    put("connections/per_address/untracked", &a.untracked);
     for (core, a) in i.accepted.iter().enumerate() {
         put(&alloc::format!("cpu/accepted/{core}"), a);
     }
@@ -578,6 +608,7 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
         backpressure: Backpressure::default(),
         mqtt5: Mqtt5Info::default(),
         handshakes: Handshakes::default(),
+        per_address: PerAddress::default(),
         accepted: &accepted,
         plaintext: PlainInfo {
             enabled: true,
@@ -653,6 +684,7 @@ pub fn json(i: &Info<'_>) -> String {
         None => o.push_str("null"),
     }
     let h = &i.handshakes;
+    let a = &i.per_address;
     let d = &i.drops;
     o.push_str("},\"entropy\":{\"source\":");
     json_str(&mut o, i.entropy_source);
@@ -664,7 +696,9 @@ pub fn json(i: &Info<'_>) -> String {
          \"backpressure\":{{\"mode\":\"{}\",\"paused\":{},\"paused_ms\":{},\"timeouts\":{},\"holding\":{}}},\
          \"handshakes\":{{\"started\":{},\"done\":{},\"failed\":{},\
          \"timed_out\":{},\"refused\":{},\"syn_dropped\":{},\"in_flight\":{},\"in_flight_max\":{},\
-         \"slow\":{},\"latency_sum_ms\":{},\"latency_max_ms\":{}}},\"accepted\":[",
+         \"slow\":{},\"latency_sum_ms\":{},\"latency_max_ms\":{}}},\
+         \"per_address\":{{\"limit\":{},\"established\":{},\"addresses\":{},\"peak\":{},\"syn_dropped\":{},\
+         \"refused\":{},\"untracked\":{}}},\"accepted\":[",
         i.console_dropped,
         i.net_mtu,
         d.slow_subscriber,
@@ -694,7 +728,14 @@ pub fn json(i: &Info<'_>) -> String {
         h.in_flight_max,
         h.slow,
         h.latency_sum_ms,
-        h.latency_max_ms
+        h.latency_max_ms,
+        a.limit,
+        a.established,
+        a.addresses,
+        a.peak,
+        a.syn_dropped,
+        a.refused,
+        a.untracked
     );
     for (n, a) in i.accepted.iter().enumerate() {
         let _ = write!(o, "{}{a}", if n == 0 { "" } else { "," });
@@ -879,6 +920,21 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
         bp.timeouts,
         bp.holding
     ));
+    let pa = &i.per_address;
+    if pa.limit == 0 {
+        out.push("per address limit: none".into());
+    } else {
+        out.push(alloc::format!(
+            "per address limit {}: {} conn(s) from {} addr(s), peak {}; refused {} SYN / {} ACK; {} untracked",
+            pa.limit,
+            pa.established,
+            pa.addresses,
+            pa.peak,
+            pa.syn_dropped,
+            pa.refused,
+            pa.untracked
+        ));
+    }
     let m = &i.mqtt5;
     let disconnects: u64 = m.disconnects.iter().sum();
     let refused: u64 = m.refused.iter().sum();
@@ -1129,6 +1185,15 @@ mod tests {
                 started: 9,
                 done: 8,
                 ..Handshakes::default()
+            },
+            per_address: PerAddress {
+                limit: 1024,
+                established: 3,
+                addresses: 2,
+                peak: 2,
+                syn_dropped: 5,
+                refused: 1,
+                untracked: 0,
             },
             accepted: &[4, 5],
             plaintext: PlainInfo::default(),
@@ -1413,6 +1478,13 @@ mod tests {
                 "$SYS/broker/handshakes/slow",
                 "$SYS/broker/handshakes/latency_sum_ms",
                 "$SYS/broker/handshakes/latency_max_ms",
+                "$SYS/broker/connections/per_address/limit",
+                "$SYS/broker/connections/per_address/established",
+                "$SYS/broker/connections/per_address/addresses",
+                "$SYS/broker/connections/per_address/peak",
+                "$SYS/broker/connections/per_address/syn_dropped",
+                "$SYS/broker/connections/per_address/refused",
+                "$SYS/broker/connections/per_address/untracked",
                 "$SYS/broker/cpu/accepted/0",
                 "$SYS/broker/cpu/accepted/1",
                 "$SYS/broker/plaintext/enabled",
@@ -1428,6 +1500,14 @@ mod tests {
         assert_eq!(val("$SYS/broker/time/offset_ms"), Some("-12"));
         assert_eq!(val("$SYS/broker/entropy/source"), Some("jitter+firmware"));
         assert_eq!(val("$SYS/broker/handshakes/done"), Some("8"));
+        assert_eq!(
+            val("$SYS/broker/connections/per_address/limit"),
+            Some("1024")
+        );
+        assert_eq!(
+            val("$SYS/broker/connections/per_address/syn_dropped"),
+            Some("5")
+        );
         assert_eq!(
             val("$SYS/broker/messages/dropped/slow_subscriber"),
             Some("3")
@@ -1481,7 +1561,8 @@ mod tests {
              \"backpressure\":{\"mode\":\"single\",\"paused\":4,\"paused_ms\":120,\"timeouts\":1,\"holding\":0},\
              \"handshakes\":{\"started\":9,\"done\":8,\"failed\":0,\"timed_out\":0,\"refused\":0,\
              \"syn_dropped\":0,\"in_flight\":0,\"in_flight_max\":0,\"slow\":0,\"latency_sum_ms\":0,\
-             \"latency_max_ms\":0},\"accepted\":[4,5],\
+             \"latency_max_ms\":0},\"per_address\":{\"limit\":1024,\"established\":3,\"addresses\":2,\"peak\":2,\
+             \"syn_dropped\":5,\"refused\":1,\"untracked\":0},\"accepted\":[4,5],\
              \"mqtt5\":{\"connected\":1,\"messages_expired\":6,\"dropped_too_large\":0,\"sessions_expired\":0,\
              \"sessions_expiring\":0,\"wills_delayed\":0,\"wills_pending\":0,\"retained_expiring\":0,\"topic_alias_bytes\":0,\
              \"shared\":{\"groups\":0,\"members\":0,\"delivered\":0,\"dropped\":0,\"redispatched\":0,\"refused\":0},\
@@ -1539,7 +1620,7 @@ mod tests {
     #[test]
     fn status_is_a_few_short_lines() {
         let lines = status_lines(&info(&[10, 20]), "info", "debug");
-        assert_eq!(lines.len(), 15);
+        assert_eq!(lines.len(), 16);
         assert_eq!(lines[0], "urmqtt 0.1.0 aarch64 up 12 s");
         assert_eq!(lines[1], "cpu 2 core(s), busy % 10/20");
         assert!(lines[3].starts_with("clients 3 connected, 5 sessions"));
@@ -1559,11 +1640,15 @@ mod tests {
         );
         assert_eq!(
             lines[11],
+            "per address limit 1024: 3 conn(s) from 2 addr(s), peak 2; refused 5 SYN / 1 ACK; 0 untracked"
+        );
+        assert_eq!(
+            lines[12],
             "MQTT 5.0: 1 of 3 client(s), 3 DISCONNECT(s) sent, 3 CONNECT(s) refused"
         );
-        assert!(lines[12].starts_with("expiry: sessions 0 expired"));
-        assert!(lines[13].starts_with("shared: 0 group(s), 0 member(s)"));
-        assert!(lines[14].starts_with("log level info (build maximum debug)"));
+        assert!(lines[13].starts_with("expiry: sessions 0 expired"));
+        assert!(lines[14].starts_with("shared: 0 group(s), 0 member(s)"));
+        assert!(lines[15].starts_with("log level info (build maximum debug)"));
         assert!(lines.iter().all(|l| l.len() < 120 && !l.contains('\n')));
     }
 

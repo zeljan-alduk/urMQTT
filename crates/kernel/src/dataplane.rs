@@ -28,6 +28,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 use urmqtt_arch::{cpu, time};
 use urmqtt_broker::Msg;
 use urmqtt_mqtt::QoS;
+use urmqtt_net::admission::REASONS;
 use urmqtt_sync::spsc::{Consumer, Producer, Spsc};
 use urmqtt_sync::sync::OnceCell;
 use urmqtt_virtio::net::MTU_FRAME;
@@ -607,9 +608,9 @@ pub struct HsShared {
     pub failed: AtomicU64,
     pub timed_out: AtomicU64,
     /// Refused at the final ACK, by `urmqtt_net::admission::Reason`.
-    pub refused: [AtomicU64; 5],
+    pub refused: [AtomicU64; REASONS],
     /// SYNs dropped without a SYN-ACK, by reason.
-    pub syn_dropped: [AtomicU64; 5],
+    pub syn_dropped: [AtomicU64; REASONS],
     pub latency_sum_ms: AtomicU64,
     /// Completed handshakes slower than 250 ms.
     pub slow: AtomicU64,
@@ -628,8 +629,8 @@ impl HsShared {
             done: AtomicU64::new(0),
             failed: AtomicU64::new(0),
             timed_out: AtomicU64::new(0),
-            refused: [const { AtomicU64::new(0) }; 5],
-            syn_dropped: [const { AtomicU64::new(0) }; 5],
+            refused: [const { AtomicU64::new(0) }; REASONS],
+            syn_dropped: [const { AtomicU64::new(0) }; REASONS],
             latency_sum_ms: AtomicU64::new(0),
             slow: AtomicU64::new(0),
             in_flight: AtomicU32::new(0),
@@ -652,12 +653,12 @@ pub fn refused_total() -> u64 {
 }
 
 /// Refusals at the final ACK, per `Reason`, all cores.
-pub fn refused_by_reason() -> [u64; 5] {
+pub fn refused_by_reason() -> [u64; REASONS] {
     core::array::from_fn(|i| hs_sum(|h| h.refused.get(i).map_or(0, |r| r.load(Ordering::Relaxed))))
 }
 
 /// SYNs dropped without an answer, per `Reason`, all cores.
-pub fn syn_dropped_by_reason() -> [u64; 5] {
+pub fn syn_dropped_by_reason() -> [u64; REASONS] {
     core::array::from_fn(|i| {
         hs_sum(|h| {
             h.syn_dropped

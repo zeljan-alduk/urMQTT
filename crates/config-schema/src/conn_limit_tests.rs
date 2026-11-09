@@ -65,8 +65,9 @@ fn refusals_name_their_key() {
     for v in [1_000_001u64, 4_294_967_295] {
         let e = pack_toml(&format!("[limits]\nmax_connections_per_ip = {v}\n")).unwrap_err();
         assert!(
-            e.iter().any(|x| x.path == "limits.max_connections_per_ip"
-                && x.message.contains("0..=1000000")),
+            e.iter()
+                .any(|x| x.path == "limits.max_connections_per_ip"
+                    && x.message.contains("0..=1000000")),
             "{v}: {e:?}"
         );
     }
@@ -80,7 +81,16 @@ fn refusals_name_their_key() {
 
 #[test]
 fn the_toml_path_and_the_blob_check_agree() {
-    for v in [0u64, 1, 1023, 1024, 1025, 1_000_000, 1_000_001, 4_294_967_295] {
+    for v in [
+        0u64,
+        1,
+        1023,
+        1024,
+        1025,
+        1_000_000,
+        1_000_001,
+        4_294_967_295,
+    ] {
         let toml = format!("[limits]\nmax_connections_per_ip = {v}\n");
         let by_toml = pack_toml(&toml).is_ok();
         let mut b = Builder::new();

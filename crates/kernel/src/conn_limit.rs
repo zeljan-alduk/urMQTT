@@ -111,5 +111,8 @@ pub fn close(ip: [u8; 4]) {
 /// The numbers `$SYS` reports.
 pub fn info() -> (u64, Stats) {
     let limit = LIMIT.load(Ordering::Relaxed);
-    (limit, TABLE.get().map_or(Stats::default(), |t| t.lock().stats()))
+    (
+        limit,
+        TABLE.get().map_or(Stats::default(), |t| t.lock().stats()),
+    )
 }

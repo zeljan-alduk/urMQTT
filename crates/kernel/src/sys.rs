@@ -464,6 +464,24 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
                 latency_max_ms: u64::from(t.latency_max_ms),
             }
         },
+        per_address: {
+            let (limit, t) = crate::conn_limit::info();
+            urmqtt_broker::sys::PerAddress {
+                limit,
+                established: t.established,
+                addresses: u64::from(t.addresses),
+                peak: u64::from(t.peak),
+                syn_dropped: dataplane::syn_dropped_by_reason()
+                    .get(urmqtt_net::admission::Reason::PerIpEstablished as usize)
+                    .copied()
+                    .unwrap_or(0),
+                refused: dataplane::refused_by_reason()
+                    .get(urmqtt_net::admission::Reason::PerIpEstablished as usize)
+                    .copied()
+                    .unwrap_or(0),
+                untracked: t.untracked,
+            }
+        },
         accepted: accepted.get(..cores).unwrap_or(&[]),
         plaintext: crate::plain::info(),
         websocket: crate::websocket::info(),

@@ -359,6 +359,34 @@ mod tests {
         assert_eq!(a.stats().refused[Reason::PerIp as usize], 1);
     }
 
+    /// ADR-280: the established-connections limit lives in the kernel's shared
+    /// table, but its refusals are counted per core with the others, under
+    /// their own reason, and never change in-flight state.
+    #[test]
+    fn established_per_address_refusals_are_counted_under_their_own_reason() {
+        let mut a = adm(10, 10, 10);
+        a.count_syn_dropped(Reason::PerIpEstablished);
+        a.count_syn_dropped(Reason::PerIpEstablished);
+        a.count_refused(Reason::PerIpEstablished);
+        let s = a.stats();
+        let i = Reason::PerIpEstablished as usize;
+        assert_eq!((s.syn_dropped[i], s.refused[i]), (2, 1));
+        assert_eq!((s.syn_dropped_total(), s.refused_total()), (2, 1));
+        // The in-flight per-address reason is a different counter.
+        assert_eq!(s.refused[Reason::PerIp as usize], 0);
+        assert_eq!((a.in_flight(), s.started), (0, 0));
+        assert_eq!(Reason::ALL.len(), REASONS);
+        assert_eq!(Reason::PerIpEstablished.name(), "per_ip_established");
+        // Names are unique (they are metric names).
+        for x in Reason::ALL {
+            assert_eq!(
+                Reason::ALL.iter().filter(|y| y.name() == x.name()).count(),
+                1
+            );
+            assert_eq!(Reason::ALL.get(x as usize), Some(&x));
+        }
+    }
+
     #[test]
     fn per_core_limit_and_leaving_frees_slots() {
         let mut a = adm(2, 10, 1000);

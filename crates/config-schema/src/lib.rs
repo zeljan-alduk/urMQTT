@@ -2193,10 +2193,7 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
             raw.max_shared_group_members,
         ),
         // ADR-280.
-        (
-            "limits.max_connections_per_ip",
-            raw.max_connections_per_ip,
-        ),
+        ("limits.max_connections_per_ip", raw.max_connections_per_ip),
     ] {
         if let Some(urmqtt_cfg::fields::Kind::UInt { min, max, .. }) = default_of(key)
             && !(min..=max).contains(&u64::from(v))
@@ -2656,6 +2653,8 @@ pub mod pack;
 #[cfg(test)]
 mod backpressure_tests;
 #[cfg(test)]
+mod conn_limit_tests;
+#[cfg(test)]
 mod console_tests;
 #[cfg(test)]
 mod devices_tests;
@@ -2665,8 +2664,6 @@ mod encryption_tests;
 mod mqtt5_tests;
 #[cfg(test)]
 mod mtu_tests;
-#[cfg(test)]
-mod conn_limit_tests;
 #[cfg(test)]
 mod pack_tests;
 #[cfg(test)]
