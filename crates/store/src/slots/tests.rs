@@ -407,6 +407,65 @@ fn a_newer_store_schema_needs_a_one_way_activation() {
         rollback(m.device().as_mut()),
         Err(SlotError::NotEligible(NotEligible::Bad))
     );
+    // The firmware boots the stranded old slot while B is still on trial:
+    // it is not adopted (that would clear its mark and make a kernel that
+    // cannot read the store the confirmed slot); nothing is written.
+    let gs = slots(&m).standby_guid();
+    let before = m.raw(0, 64 * MIB);
+    assert_eq!(
+        boot_step(m.device().as_mut(), Some(gs), 5).unwrap(),
+        Boot::StandbyBooted { slot: 'A' }
+    );
+    assert_eq!(m.raw(0, 64 * MIB), before);
+    let s = slots(&m);
+    assert!(s.standby_slot().state.bad && s.active().state.trial);
+}
+
+#[test]
+fn an_in_place_update_of_the_active_slot_is_resealed() {
+    let m = ab_disk();
+    let g = slots(&m).esp_guid();
+    stage_seed(&m, 1, 5);
+    activate(m.device().as_mut(), ACT).unwrap();
+    assert!(confirm(m.device().as_mut()).unwrap());
+    // B (sealed at staging) is overwritten in place, as `update-boot
+    // --in-place` does; then an update into A is staged and activated, so
+    // B is the way back.
+    let in_place = |m: &MemDisk| {
+        let b = slots(m).active();
+        m.device().write(b.first_lba, &esp(7)).unwrap();
+    };
+    let stale = ab_disk();
+    stage_seed(&stale, 1, 5);
+    activate(stale.device().as_mut(), ACT).unwrap();
+    assert!(confirm(stale.device().as_mut()).unwrap());
+    in_place(&stale);
+    stage_seed(&stale, 2, 5);
+    activate(stale.device().as_mut(), ACT).unwrap();
+    assert_eq!(
+        rollback(stale.device().as_mut()),
+        Err(SlotError::NotEligible(NotEligible::Changed)),
+        "without the reseal the way back is lost"
+    );
+    in_place(&m);
+    assert_eq!(reseal_active(m.device().as_mut(), "v0.6.7", 6), Ok(()));
+    let a = slots(&m).active();
+    assert_eq!((a.label.as_str(), a.state.schema), ("v0.6.7", 6));
+    assert!(a.state.sealed && !a.state.trial && !a.state.bad);
+    stage_seed(&m, 2, 6);
+    activate(m.device().as_mut(), ACT).unwrap();
+    assert_eq!(rollback(m.device().as_mut()), Ok(('A', 'B')));
+    assert_eq!(active_bytes(&m), esp(7));
+    // Never during a trial (the commitment is the way back's).
+    activate(m.device().as_mut(), Activation { retry: true, ..ACT }).unwrap();
+    assert_eq!(
+        boot_step(m.device().as_mut(), Some(g), 6).unwrap(),
+        Boot::Trial { slot: 'A', left: 1 }
+    );
+    assert_eq!(
+        reseal_active(m.device().as_mut(), "x", 6),
+        Err(SlotError::TrialPending)
+    );
 }
 
 #[test]

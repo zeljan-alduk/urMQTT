@@ -553,7 +553,8 @@ pub enum Boot {
     /// so too, and this boot continues.
     AdoptedStandby { slot: char },
     /// The standby booted while the active slot is confirmed (firmware
-    /// fell back on a damaged ESP): nothing written.
+    /// fell back on a damaged ESP), or while it is on trial but the standby
+    /// is not a way back (marked bad or empty): nothing written.
     StandbyBooted { slot: char },
     /// The trial is over but there is nothing to go back to: this boot
     /// continues on the trial slot.
@@ -596,7 +597,11 @@ pub fn boot_step(
     // the ESP entry, which comes first; take it for that.
     let g = booted.unwrap_or_else(|| s.esp_guid());
     if g == s.standby_guid() {
-        if !active.state.trial {
+        // Adopt the standby only as the way back it was kept as: never one
+        // marked bad (a one-way migration stranded it: its kernel cannot read
+        // the store, and clearing the mark would make it look eligible) or
+        // empty. Anything else is reported and left as it is.
+        if !active.state.trial || standby.state.bad || standby.state.empty {
             return Ok(Boot::StandbyBooted { slot: ls });
         }
         let back = State {
@@ -709,9 +714,12 @@ pub fn rollback(dev: &mut dyn BlockDevice) -> Result<(char, char), SlotError> {
     Ok((s.letter(&active), s.letter(&standby)))
 }
 
-/// After a one-way store migration on a trial boot: the standby's kernel
-/// can no longer read the store, so it is marked bad (no automatic return
-/// to it). `Ok(false)`: nothing to do.
+/// Once the store is open at `own_schema` (after its migrations): a standby
+/// whose kernel writes an older schema can no longer read the store, so it
+/// is marked bad (no automatic or operator's return to it). Run at every
+/// boot, not only the one that migrated: a cut between the migration and
+/// this write, or a migration by an in-place kernel change, is caught by
+/// the next boot that opens the store. `Ok(false)`: nothing to do.
 pub fn strand_standby(dev: &mut dyn BlockDevice, own_schema: u8) -> Result<bool, SlotError> {
     let Some(s) = read(dev)? else {
         return Ok(false);
@@ -726,6 +734,31 @@ pub fn strand_standby(dev: &mut dyn BlockDevice, own_schema: u8) -> Result<bool,
     };
     s.commit(dev, &s.with_states(s.active().state, st))?;
     Ok(true)
+}
+
+/// After the active slot's region was overwritten in place (`urmqtt-disk
+/// update-boot --in-place`): its label, store schema and commitment are
+/// brought up to date in one table write, so that the slot is still a way
+/// back after a later activation (a stale commitment would make it
+/// [`NotEligible::Changed`]) and the downgrade rules judge the release it
+/// now holds. Refused while the active slot is on trial.
+pub fn reseal_active(dev: &mut dyn BlockDevice, label: &str, schema: u8) -> Result<(), SlotError> {
+    let s = read(dev)?.ok_or(SlotError::NotAb)?;
+    let active = s.active();
+    if active.state.trial {
+        return Err(SlotError::TrialPending);
+    }
+    let sha = region_sha256(dev, active.first_lba, active.sectors())?;
+    let st = State {
+        sealed: true,
+        schema,
+        ..active.state
+    };
+    let mut entries = s.with_states(st, s.standby_slot().state);
+    if let Some(e) = entries.get_mut(s.esp) {
+        e.name = slot_name(label, Some(commitment(&sha)));
+    }
+    s.commit(dev, &entries)
 }
 
 /// What [`stage`] wrote.

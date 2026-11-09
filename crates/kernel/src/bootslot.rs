@@ -54,6 +54,15 @@ static ONE_WAY: AtomicBool = AtomicBool::new(false);
 static SLOT: AtomicU8 = AtomicU8::new(0);
 /// When a listener came up (uptime ms).
 static LISTENING_SINCE_MS: AtomicU64 = AtomicU64::new(0);
+/// The trial is over and there is no way back ([`Boot::Exhausted`]): a
+/// reset by the trial timeout would only boot this slot again, so the
+/// timeout does not apply (the confirmation still does).
+static NO_WAY_BACK: AtomicBool = AtomicBool::new(false);
+/// The automatic confirmation failed to write: not before this uptime (ms)
+/// again, so a failing disk does not flood the log from every DB-core step.
+static CONFIRM_RETRY_MS: AtomicU64 = AtomicU64::new(0);
+/// Between two attempts of a failed automatic confirmation.
+const CONFIRM_RETRY_EVERY_MS: u64 = 5_000;
 /// The boot disk's GPT disk GUID, for the control messages that name it.
 static DISK_GUID: SpinLock<Option<Guid>> = SpinLock::new(None);
 
@@ -199,8 +208,9 @@ pub fn at_boot(dev: &mut dyn BlockDevice, booted: Option<Guid>) -> Result<(), Sl
         } => {
             SLOT.store(letter(slot), Ordering::Relaxed);
             TRIAL.store(true, Ordering::Relaxed);
+            NO_WAY_BACK.store(true, Ordering::Relaxed);
             error!(
-                "boot: slot {slot} ({}): {}, but there is no way back (the previous slot: {}); booting it anyway",
+                "boot: slot {slot} ({}): {}, but there is no way back (the previous slot: {}); booting it anyway (no trial timeout)",
                 label(active),
                 why.text(),
                 n.text()
@@ -215,20 +225,27 @@ fn with_whole_disk<R>(f: impl FnOnce(&mut dyn BlockDevice) -> R) -> Option<R> {
     urmqtt_store::vfs::with_disk(|d| d.device_mut().whole_disk().map(f)).flatten()
 }
 
-/// After the store opened (schema `from` before its migrations): a trial
-/// boot of a one-way update that migrated the store marks the previous slot
-/// bad, since its kernel cannot read the store any more.
+/// After the store opened (schema `from` before its migrations, now this
+/// kernel's): a standby whose kernel writes an older schema cannot read the
+/// store any more and is marked bad. Checked at every boot that opened the
+/// disk store, not only on the trial boot that migrated it: a power cut
+/// between the migration's commit and this write, or a store migrated by a
+/// kernel replaced in place (`update-boot --in-place`), would otherwise
+/// leave a way back that cannot read the store (a read and no write when
+/// there is nothing to do).
 pub fn after_store(from: i64) {
-    if !TRIAL.load(Ordering::Relaxed) || from >= i64::from(own_schema()) {
-        return;
-    }
-    if !ONE_WAY.load(Ordering::Relaxed) {
+    if SLOT.load(Ordering::Relaxed) == 0 || crate::live::ephemeral() {
         return;
     }
     match with_whole_disk(|d| slots::strand_standby(d, own_schema())) {
         Some(Ok(true)) => warn!(
-            "boot: the store migrated from schema {from} to {}: the previous slot cannot read it any more and is no longer a way back (one-way update)",
-            own_schema()
+            "boot: the store is at schema {} (from {from}){}: the previous slot cannot read it and is no longer a way back",
+            own_schema(),
+            if ONE_WAY.load(Ordering::Relaxed) {
+                " (one-way update)"
+            } else {
+                ""
+            }
         ),
         Some(Ok(false)) | None => {}
         Some(Err(e)) => warn!("boot: marking the previous slot after the migration failed: {e:?}"),
@@ -258,7 +275,7 @@ pub fn poll(now_ms: u64) -> bool {
     }
     let u = CONFIG.update;
     let timeout_ms = u64::from(u.trial_timeout_s) * 1000;
-    if timeout_ms > 0 && now_ms >= timeout_ms {
+    if timeout_ms > 0 && now_ms >= timeout_ms && !NO_WAY_BACK.load(Ordering::Relaxed) {
         error!(
             "boot: slot {} was not confirmed within update.trial_timeout_s = {} s: resetting (the attempt counts)",
             slot().unwrap_or('?'),
@@ -270,14 +287,20 @@ pub fn poll(now_ms: u64) -> bool {
         return false;
     }
     let since = LISTENING_SINCE_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(since) < u64::from(u.confirm_after_s) * 1000 {
+    if now_ms.saturating_sub(since) < u64::from(u.confirm_after_s) * 1000
+        || now_ms < CONFIRM_RETRY_MS.load(Ordering::Relaxed)
+    {
         return false;
     }
     if let Err(e) = confirm_now(&alloc::format!(
         "healthy for {} s: store open, listener up",
         u.confirm_after_s
     )) {
-        warn!("boot: the confirmation could not be written ({e:?}); trying again");
+        CONFIRM_RETRY_MS.store(now_ms + CONFIRM_RETRY_EVERY_MS, Ordering::Relaxed);
+        warn!(
+            "boot: the confirmation could not be written ({e:?}); trying again in {} s",
+            CONFIRM_RETRY_EVERY_MS / 1000
+        );
         return false;
     }
     true
