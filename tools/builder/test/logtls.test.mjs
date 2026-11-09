@@ -23,7 +23,7 @@ const version = blob => blob[8] | (blob[9] << 8);
 const KEYS = ['observability.log_tls', 'observability.log_tls_name', 'observability.log_tls_ca', 'observability.log_tls_queue_kb'];
 
 test('the keys are in the observability section, the only ones of format 20, with their defaults', () => {
-  assert.equal(model.formatVersion, 20);
+  assert.equal(model.formatVersion, 22);
   const obs = model.sections.find(s => s.id === 'observability').fields.map(f => f.id);
   for (const id of KEYS) assert.ok(obs.includes(id), id);
   assert.deepEqual(model.fields.filter(x => x.since === 20).map(x => x.id), KEYS);

@@ -23,7 +23,7 @@ const version = blob => blob[8] | (blob[9] << 8);
 const ID = 'devices.virtio_net_queues';
 
 test('the key is in [devices], auto by default, the only key of format 19', () => {
-  assert.equal(model.formatVersion, 19);
+  assert.equal(model.formatVersion, 22);
   const devices = model.sections.find(s => s.id === 'devices').fields.map(f => f.id);
   assert.ok(devices.includes(ID));
   const f = model.byId.get(ID);
