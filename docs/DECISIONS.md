@@ -3664,20 +3664,28 @@ shard rather than per broker (point 6). (e) Wills are not persisted (point 15).
   2. **Going back.** No attempt left, or a trial kernel that writes a newer store schema than the standby's kernel
      reads without a one-way activation (ADR-299): if the standby is eligible (staged or as installed, confirmed,
      not bad, its commitment intact) the table switches back, the trial slot is marked bad, and the kernel resets.
-     If the standby is not eligible the trial kernel keeps booting, saying so (there is nothing better to run).
+     If the standby is not eligible the trial kernel keeps booting, saying so (there is nothing better to run), and
+     the trial timeout no longer resets it (a reset would boot the same slot again; the confirmation still applies).
      Firmware that booted the *standby* while the active slot is on trial (the new ESP did not load at all) is
-     adopted: the table says so, the trial slot is marked bad, the boot goes on.
+     adopted: the table says so, the trial slot is marked bad, the boot goes on. A standby marked bad (stranded by a
+     one-way migration) or empty is never adopted: the boot is reported and nothing is written.
   3. **Healthy means serving.** `update.confirm = "auto"` (default): the DB core confirms the trial once the store
      is open and the first data core's listeners are up (a TLS listener whose setup failed is not up) for
      `update.confirm_after_s` seconds (default 60). `"operator"`: only a `boot-confirm` control message (ADR-298)
      or `urmqtt-disk slots confirm` does. A trial not confirmed after `update.trial_timeout_s` (default 900; 0:
      never) resets the machine, which uses an attempt: a kernel that hangs without a crash still ends in a switch
      back. A trial that is degraded (no store) is never confirmed and fails by its timeout or its fatal error.
-  4. **One-way store migrations.** When the store migrates on a trial boot of a one-way activation, the standby is
-     marked bad right after the migration (`after_store`): its kernel cannot read the store any more, so neither
-     the automatic return nor an operator's rollback switches to it.
+  4. **One-way store migrations.** Every boot that opens the disk store checks the standby (`after_store`): a
+     standby whose kernel writes an older schema than the store now is marked bad (its kernel cannot read the store
+     any more), so neither the automatic return nor an operator's rollback switches to it. Checking at every boot,
+     not only on the one that migrated, catches a power cut between the migration's commit and that table write
+     and a store migrated by a kernel replaced in place. Residual: a cut in exactly that window on the *last* trial
+     boot switches back before the next store open (A296-W1, AUDIT); the old kernel then refuses the store with
+     its schema error, and `urmqtt-disk slots activate --retry --one-way` returns to the new slot.
   5. **An in-place kernel change** (`update-boot --in-place`, a test's `dd`) is noticed by the recorded schema:
-     the active slot's schema field is brought up to date in one table write.
+     the active slot's schema field is brought up to date in one table write. `update-boot --in-place` itself
+     also re-seals the slot (label, schema, commitment to the new bytes, `slots::reseal_active`): a stale
+     commitment would refuse it as the way back after the next activation.
   6. The build note: a 64-byte static (`urMQTT-buildnote`, the version, the A/B protocol, the store schema, the
      configuration formats read) that the boot log prints, so the linker keeps it and the offline tool finds it in
      an ESP image.
@@ -3745,7 +3753,10 @@ shard rather than per broker (point 6). (e) Wills are not persisted (point 15).
      and not judged). A configuration of a format the kernel cannot read is refused. A store schema newer than the
      active kernel's needs `activate --one-way` (ADR-296 point 4). A kernel of another A/B protocol is refused by
      name.
-  5. `update-boot` refuses a disk with two slots unless `--in-place` (and never while a slot is on trial).
+  5. `update-boot` refuses a disk with two slots unless `--in-place` (and never while a slot is on trial); with
+     `--in-place` it re-seals the active slot after the write (ADR-296 point 5).
+  6. `slots rollback` refuses a previous slot whose kernel writes an older store schema than the store on the
+     disk (when the store can be read), as `stage` does.
 - **Left out, with the reason.** (a) **Converting a pre-v0.6.0 disk** to two slots: its data partition starts right
   after the ESP, so the room needs the data moved (or the ESP halved, which needs a FAT writer); a re-install with
   export and import is the path. (b) **Version counters / anti-rollback in firmware** (H8-W6 proper, LATER-6): the

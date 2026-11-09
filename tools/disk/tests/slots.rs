@@ -585,3 +585,57 @@ fn a_single_slot_disk_is_told_to_use_update_boot() {
     // update-boot still works on it.
     ok(&["update-boot", s(&p), "--esp", s(&new), "--write"]);
 }
+
+/// `update-boot --in-place` on an A/B disk: the active slot's label, schema
+/// and commitment follow its new bytes, so it is still a way back after the
+/// next activation (a stale commitment would refuse the rollback as
+/// "its bytes are not what was staged").
+#[test]
+fn an_in_place_update_keeps_the_slot_a_way_back() {
+    let base = esp(Some("v0.6.0"), 5, 17, &config_slot(false), 0);
+    let d = ab_disk("in-place.img", &base);
+    let staged = |v: &str, seed: u8| {
+        let p = write(
+            &format!("in-place-{v}.esp"),
+            &esp(Some(v), 5, 17, &config_slot(false), seed),
+        );
+        ok(&[
+            "slots",
+            "stage",
+            s(&d),
+            "--esp",
+            s(&p),
+            "--unsigned",
+            "--write",
+        ]);
+        ok(&["slots", "activate", s(&d), "--write"]);
+        ok(&["slots", "confirm", s(&d), "--write"]);
+    };
+    staged("v0.6.1", 1);
+    let p = write(
+        "in-place-v0.6.2.esp",
+        &esp(Some("v0.6.2"), 5, 17, &config_slot(false), 2),
+    );
+    let t = ok(&[
+        "update-boot",
+        s(&d),
+        "--esp",
+        s(&p),
+        "--in-place",
+        "--write",
+    ]);
+    assert!(t.contains("now records v0.6.2"), "{t}");
+    let st = status(&d);
+    assert!(
+        st.contains("slot B [active]")
+            && st.contains("v0.6.2 (store schema 5): confirmed, staged, commitment"),
+        "{st}"
+    );
+    staged("v0.6.3", 3);
+    let t = ok(&["slots", "rollback", s(&d), "--write"]);
+    assert!(
+        t.contains("slot B is the boot entry again, slot A is marked bad"),
+        "{t}"
+    );
+    assert!(status(&d).contains("v0.6.2 (store schema 5): confirmed"));
+}

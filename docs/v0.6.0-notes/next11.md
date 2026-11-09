@@ -29,7 +29,10 @@
   `--allow-downgrade`; a newer store schema only with `activate --one-way` (after its migration ran, the previous
   slot is marked bad: there is no way back past a one-way migration).
 - `urmqtt-disk update-boot` refuses a disk with two slots (it would overwrite the running slot with no way back);
-  `--in-place` does it anyway, never during a trial.
+  `--in-place` does it anyway, never during a trial; it then re-seals the slot (label, schema, commitment) so it stays a valid way back.
+- `slots rollback` refuses a previous slot whose kernel cannot read the store on the disk (older store schema).
+- A trial with no way back left (`... booting it anyway (no trial timeout)`) is not reset by `update.trial_timeout_s`.
+- A standby marked bad (stranded by a one-way migration) is never adopted if the firmware boots it during a trial.
 - Every kernel prints `build: <version> (A/B protocol 1, store schema N, configuration formats up to M)`.
 
 ## Configuration keys (format 17)

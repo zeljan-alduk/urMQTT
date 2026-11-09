@@ -658,6 +658,7 @@ fn update_boot(
     let mut dev = FileDisk::open(path, write)?;
     // An A/B disk (ADR-299): the running slot would be overwritten in place,
     // with no way back if the new kernel fails.
+    let ab = matches!(slots::read(&mut dev), Ok(Some(_)));
     if let Ok(Some(s)) = slots::read(&mut dev) {
         if !in_place {
             return Err(format!(
@@ -701,10 +702,25 @@ fn update_boot(
         );
         return Ok(());
     }
+    let note = slots::find_notes(&esp).into_iter().next();
     dev.write(e.first_lba, &esp)
         .map_err(|e| format!("write: {e:?}"))?;
     dev.flush().map_err(|e| format!("flush: {e:?}"))?;
     eprintln!("update-boot: {path}: ESP replaced, data partition kept");
+    if ab {
+        // The slot's label, schema and commitment follow its new bytes
+        // (ADR-299): a stale commitment would make it unusable as the way
+        // back after the next activation.
+        let label = note.as_ref().map_or("in-place", |n| n.version.as_str());
+        let schema = note
+            .as_ref()
+            .and_then(|n| u8::try_from(n.schema).ok())
+            .unwrap_or(0);
+        slots::reseal_active(&mut dev, label, schema).map_err(|e| ab::slot_error(&e))?;
+        eprintln!(
+            "update-boot: the active slot now records {label} and a commitment to its new bytes"
+        );
+    }
     Ok(())
 }
 
@@ -941,7 +957,22 @@ fn slots_confirm(path: &str, a: &SlotArgs) -> Result<(), String> {
 }
 
 fn slots_rollback(path: &str, a: &SlotArgs) -> Result<(), String> {
+    let db_schema = disk_store_schema(path);
     let mut dev = slot_device(path, a)?;
+    // The way back must read the store as it is now (the kernel marks such a
+    // slot bad when it opens the store; this covers a store migrated by a
+    // kernel that never got to that point).
+    let s = read_slots(dev.as_mut())?;
+    let standby = s.standby_slot();
+    if let Some(db) = db_schema
+        && !standby.state.empty
+        && u32::from(standby.state.schema) < db
+    {
+        return Err(format!(
+            "the previous slot's kernel ({}) writes store schema {}, the store on the disk is schema {db}: it would refuse the store (a store migration is one-way). Never allowed",
+            standby.label, standby.state.schema
+        ));
+    }
     let (from, to) = slots::rollback(dev.as_mut()).map_err(|e| ab::slot_error(&e))?;
     println!(
         "rollback: slot {to} is the boot entry again, slot {from} is marked bad{}",

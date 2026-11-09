@@ -286,9 +286,9 @@ Procedures are in [DEPLOY.md](DEPLOY.md) section 8b. The lines a boot prints:
 | `boot: slot B was not confirmed within update.trial_timeout_s = T s: resetting (the attempt counts)` | the trial ran out of time |
 | `boot: slot B gave up: <why>; slot A (...) is active again, resetting` | the automatic return: the update failed (no trial boots left, or a store schema change that was not activated as one-way); the next boot runs the previous release and the failed slot is marked bad. Look at the failed boots' logs |
 | `boot: ... the firmware booted the previous slot: the new one did not even load ...` | the new ESP did not boot at all; the firmware fell back, the table now agrees |
-| `boot: slot B (...): no trial boots left ..., but there is no way back (...); booting it anyway` | the previous slot is unusable (empty, bad, changed, or its kernel cannot read the migrated store); fix or re-stage offline |
+| `boot: slot B (...): no trial boots left ..., but there is no way back (...); booting it anyway (no trial timeout)` | the previous slot is unusable (empty, bad, changed, or its kernel cannot read the migrated store); the trial timeout does not reset this boot; fix or re-stage offline |
 | `boot: the firmware booted the standby slot X although the active slot is confirmed ...` | the active ESP may be damaged; nothing was changed. `urmqtt-disk slots status`, then re-stage |
-| `boot: the store migrated from schema N to M: the previous slot cannot read it any more ...` | a one-way update ran its migration: no automatic return any more |
+| `boot: the store is at schema M (from N) ...: the previous slot cannot read it and is no longer a way back` | the store's schema is newer than the previous slot's kernel (a one-way update ran its migration, or a kernel replaced in place did): no automatic or operator's return to it any more |
 | `boot: boot-rollback control message: slot A is active again, slot B is marked bad; resetting` | an operator's rollback |
 | `control: message from ... rejected: other_disk` / `boot_refused` | a boot command for another disk GUID / with nothing to confirm or nowhere to go back to |
 
