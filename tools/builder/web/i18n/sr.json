@@ -93,6 +93,7 @@
   "field.range.limits.max_message_expiry_s": "0 (podrazumevano): bez ograničenja. Inače od 1 do 4294967295 sekundi.",
   "field.range.limits.max_shared_groups": "1 do 65535 grupa na jednom jezgru za podatke (podrazumevano 1024); još jedna: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.limits.max_shared_group_members": "1 do 65535 članova u jednoj grupi (podrazumevano 1024); još jedan: SUBACK 0x97 (3.1.1: 0x80).",
+  "field.range.limits.max_runtime_accounts": "0 (podrazumevano): kontrolni kanal odbija naredbe za naloge. Inače 1 do 1024 naloga sa lozinkom koje potpisane kontrolne poruke smeju da dodaju u radu (potrebni su control.service_ids i disk za podatke).",
   "field.range.mqtt5.max_keep_alive_s": "0 (podrazumevano): keep alive koji traži klijent. Inače od 1 do 65535 sekundi.",
   "unit.ms": "Милисекунде.",
   "unit.mb": "Мегабајти.",

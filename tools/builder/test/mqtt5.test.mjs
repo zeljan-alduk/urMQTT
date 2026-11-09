@@ -21,7 +21,7 @@ const pack = toml => b.pack({ toml, now: NOW });
 const version = blob => blob[8] | (blob[9] << 8);
 
 test('the section comes after websocket with the documented defaults; the expiry limits are in [limits]', () => {
-  assert.equal(model.formatVersion, 13);
+  assert.equal(model.formatVersion, 15);
   const ids = model.sections.map(s => s.id);
   assert.equal(ids.indexOf('mqtt5'), ids.indexOf('websocket') + 1);
   const mqtt5 = model.sections.find(s => s.id === 'mqtt5').fields.map(f => [f.name, f.default]);

@@ -22,7 +22,7 @@ const version = blob => blob[8] | (blob[9] << 8);
 const KEYS = ['limits.max_shared_groups', 'limits.max_shared_group_members'];
 
 test('the two limits are in [limits] with the documented defaults and ranges, the only keys of format 13', () => {
-  assert.equal(model.formatVersion, 13);
+  assert.equal(model.formatVersion, 15);
   const limits = model.sections.find(s => s.id === 'limits').fields.map(f => f.id);
   for (const id of KEYS) {
     assert.ok(limits.includes(id), id);

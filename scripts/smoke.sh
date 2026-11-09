@@ -3047,6 +3047,7 @@ accounts() {
         printf '\n[plaintext]\nenabled = true\nallow_from = ["10.0.2.0/24"]\nmax_failed_auths_per_ip = 1000\n'
         printf 'users = [{ id = "img-1", password_hash = "%s" }]\n' "$h"
         printf '\n[websocket]\nenabled = true\norigins = ["https://app.example.com"]\nauth = "password"\nmax_failed_auths_per_ip = 1000\n'
+        printf 'users = [{ id = "web-1", password_hash = "%s" }]\n' "$h"
     } >>"$dir/accounts.toml"
     "$tool" pack "$dir/accounts.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/accounts.blob" >/dev/null
     local iso="$OUT/accounts.raw" d="$ROOT/deploy/dev"

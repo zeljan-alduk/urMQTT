@@ -1,0 +1,16 @@
+# A lab configuration that lets the signed control channel add and remove
+# password accounts at run time (ADR-285, configuration format 15): up to 16
+# of them, for the plaintext listener (password mode, one account of its own).
+# Used by the tests of urmqtt-config.
+[network]
+mode = "static"
+address = "192.0.2.10/24"
+gateway = "192.0.2.1"
+
+[limits]
+max_runtime_accounts = 16
+
+[plaintext]
+enabled = true
+allow_from = ["10.0.0.0/8"]
+users = [{ id = "sensor-1", password_hash = "pbkdf2-sha256$1000$00112233445566778899aabbccddeeff$4c5805526868c915a4cba43d75ec6b0a07152bb7b9ca30501c96ea0f91886829" }]

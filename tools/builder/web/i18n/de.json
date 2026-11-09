@@ -93,6 +93,7 @@
   "field.range.limits.max_message_expiry_s": "0 (Standard): keine Obergrenze. Sonst 1 bis 4294967295 Sekunden.",
   "field.range.limits.max_shared_groups": "1 bis 65535 Gruppen auf einem Datenkern (Standard 1024); eine weitere: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.limits.max_shared_group_members": "1 bis 65535 Mitglieder in einer Gruppe (Standard 1024); ein weiteres: SUBACK 0x97 (3.1.1: 0x80).",
+  "field.range.limits.max_runtime_accounts": "0 (Standard): der Steuerkanal lehnt Kontobefehle ab. Sonst 1 bis 1024 Passwortkonten, die signierte Steuernachrichten im Betrieb anlegen dürfen (braucht control.service_ids und einen Datenträger).",
   "field.range.mqtt5.max_keep_alive_s": "0 (Standard): das Keep-Alive, das der Client wünscht. Sonst 1 bis 65535 Sekunden.",
   "unit.ms": "Millisekunden.",
   "unit.mb": "Megabyte.",

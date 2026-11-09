@@ -115,6 +115,8 @@ test('every field can be changed on its own and the validator accepts it or blam
         Object.assign(s.values, { 'websocket.auth': 'password', 'websocket.origins': ['https://app.example.com'], 'websocket.users': otherValue(model.byId.get('websocket.users')) });
       }
     }
+    // The run-time account limit (ADR-285) is shown where an account can log in.
+    if (f.id === 'limits.max_runtime_accounts') Object.assign(s.values, { 'plaintext.enabled': true, 'plaintext.allow_from': ['10.0.0.0/8'], 'plaintext.users': otherValue(model.byId.get('plaintext.users')) });
     s.values[f.id] = v;
     if (f.id === 'plaintext.enabled') Object.assign(s.values, { 'plaintext.allow_from': ['10.0.0.0/8'], 'plaintext.users': otherValue(model.byId.get('plaintext.users')) });
     if (f.id === 'plaintext.users') Object.assign(s.values, { 'plaintext.enabled': true, 'plaintext.allow_from': ['10.0.0.0/8'] });

@@ -93,6 +93,7 @@
   "field.range.limits.max_message_expiry_s": "0 (the default): no cap. Otherwise 1 to 4294967295 seconds.",
   "field.range.limits.max_shared_groups": "1 to 65535 groups on one data core (default 1024); one more: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.limits.max_shared_group_members": "1 to 65535 members in one group (default 1024); one more: SUBACK 0x97 (3.1.1: 0x80).",
+  "field.range.limits.max_runtime_accounts": "0 (default): the control channel refuses account commands. Otherwise 1 to 1024 password accounts that signed control messages may add at run time (needs control.service_ids and a data disk).",
   "field.range.mqtt5.max_keep_alive_s": "0 (the default): the client's own keep alive. Otherwise 1 to 65535 seconds.",
   "unit.ms": "Milliseconds.",
   "unit.mb": "Megabytes.",

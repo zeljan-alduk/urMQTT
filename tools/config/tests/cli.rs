@@ -959,6 +959,46 @@ fn the_shared_groups_fixture_packs_into_format_13() {
     }
 }
 
+/// ADR-285: the run-time account limit packs into format 15, `show` lists it,
+/// a release kernel accepts the blob, 0 spelled out writes nothing (the base
+/// format), and a value out of range is refused naming the key.
+#[test]
+fn the_accounts_fixture_packs_into_format_15() {
+    let out = tmp("accounts.blob");
+    let text = ok(&run(bin()
+        .arg("pack")
+        .arg(fixtures().join("accounts.toml"))
+        .arg("--out")
+        .arg(&out)));
+    // The plaintext listener warns, as it always does; the limit is no warning.
+    assert!(text.contains("plaintext MQTT ON"), "{text}");
+    let blob = std::fs::read(&out).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 15);
+    let shown = ok(&run(bin().arg("show").arg(&out)));
+    assert!(shown.contains("urmqtt-cfg version 15"), "{shown}");
+    assert!(shown.contains("max_runtime_accounts = 16"), "{shown}");
+    assert!(ok(&run(bin().arg("verify").arg(&out))).starts_with("ok: "));
+    let cfg = tmp("accounts-default.toml");
+    std::fs::write(&cfg, "[limits]\nmax_runtime_accounts = 0\n").unwrap();
+    let def = tmp("accounts-default.blob");
+    ok(&run(bin().arg("pack").arg(&cfg).arg("--out").arg(&def)));
+    let blob = std::fs::read(&def).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 2);
+    let cfg = tmp("accounts-range.toml");
+    std::fs::write(&cfg, "[limits]\nmax_runtime_accounts = 1025\n").unwrap();
+    let o = run(bin()
+        .arg("pack")
+        .arg(&cfg)
+        .arg("--out")
+        .arg(tmp("accounts-range.blob")));
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("limits.max_runtime_accounts") && err.contains("0..=1024"),
+        "{err}"
+    );
+}
+
 #[test]
 fn hash_password_reads_the_password_from_stdin() {
     use std::io::Write;
