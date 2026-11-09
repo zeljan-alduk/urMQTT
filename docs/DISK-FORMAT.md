@@ -1,4 +1,4 @@
-# Data disk format, layout version 2 (minor 1)
+# Data disk format, layout version 2 (minor 1); boot slots "A/B 1"
 
 The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0, S2, S3, S5, S6, S7, S8).
 Since S1 the "data disk" is the **data partition of the boot disk** (§0);
@@ -95,6 +95,72 @@ one of three states:
 The host test `first_boot_survives_a_crash_at_every_write` checks every write,
 cut cleanly or torn, with and without the volatile cache surviving. Smoke
 `first-boot-crash` does the same in the kernel at four points.
+
+## 0a. Boot slots: A/B (boot disk layout "A/B 1", v0.6.0, ADR-295 to ADR-299)
+
+A disk whose first boot ran a v0.6.0 or later kernel has **two boot slots**:
+two regions of the ESP's size, each able to hold a complete EFI system
+partition. The data partition is not involved.
+
+```
+LBA 2048 ..        slot A: the region of the image's ESP
+1 MiB aligned ..   slot B: a region of the same size, reserved at the first boot
+1 MiB aligned ..   urMQTT data partition (§1 onward), the last partition, as before
+```
+
+| Entry | Type GUID | Covers | Attributes |
+|---|---|---|---|
+| EFI system partition | `C12A7328-F81F-11D2-BA4B-00A0C93EC93B` | the **active** slot: what firmware and Limine boot | bit 1 clear; bits 48..63: the active slot's state |
+| urMQTT boot slot | `8F3A6E21-5C7B-4D19-A2E4-6B0C9D513F7E` | the **standby** slot | bit 1 set (UEFI: no Block I/O for it); bits 48..63: the standby's state |
+
+The ESP entry comes before the standby entry in the array (with the BIOS
+boot partition of the universal image: entries 1 and 2, the data partition
+3; all four in the array's first sector). Each entry keeps its type, unique
+GUID and position for life; **switching slots exchanges the ranges, the
+names and the state bits of the two entries** in one table write (§0's
+order: the backup copy first, then the primary, entries before header). A
+cut leaves the old table in force (a valid old primary) or the new one (a
+new primary, or a torn primary whose complete backup firmware and the
+kernel take). The kernel and the tool repair a valid backup that differs
+from a valid primary *from the primary*, which is what firmware booted.
+
+The state is the two high bytes (6 and 7, the type-specific bits 48..63) of
+an entry's attribute word, little-endian like the rest of the table:
+
+<!-- struct: slot_state size=2 -->
+| Offset | Size | Type | Field | Description |
+|---|---|---|---|---|
+| 0 | 1 | u8 | flags | bits 0..2 (attribute bits 48..50): **tries**, trial boots left (0..7, meaningful while on trial); bit 3: **trial**, activated and not confirmed; bit 4: **bad**, failed its trial, rolled back from, or its kernel can no longer read the store (a one-way migration ran), never switched to automatically; bit 5: **one_way**, its activation allowed a store schema newer than the other slot's kernel reads; bit 6: **sealed**, the name carries the commitment of a staged region; bit 7: **empty**, nothing staged here (also during a staging run) |
+| 1 | 1 | u8 | schema | the store schema (§5.1.1) the slot's kernel writes; 0: not known |
+
+**The name** (UTF-16LE, 36 units): the release label (the kernel's version,
+`git describe`), and for a sealed slot `|` and 16 lower-case hex digits: the
+first 8 bytes of the SHA-256 of the **whole region** as staged (the ESP image
+followed by zeros to the end of the region). A `|` in a label is written as
+`/`. Slot A, as the image installed it, is not sealed.
+
+**Eligible** to be switched to: not empty, not bad, not on trial, and for a
+sealed slot its region still hashes to the commitment.
+
+**Who writes what.**
+
+| Write | Who | When |
+|---|---|---|
+| the standby entry, created with the data partition (state: empty; the active slot labelled with the running kernel's version and schema); the first 32 KiB of slot B zeroed first | kernel (`gpt::prepare_with`) | the first boot, if the data partition keeps its 16 MiB minimum after slot B; otherwise the disk stays single-slot |
+| trial count (tries − 1) | kernel | every boot of a slot on trial, before the store opens |
+| switch back (the trial slot marked bad) | kernel | a trial with no tries left or a one-way schema change not allowed, if the standby is eligible; then a reset |
+| adopt the standby (the trial slot marked bad) | kernel | the firmware booted the standby during a trial |
+| confirm (trial cleared) | kernel, `slots confirm` | `update.confirm_after_s` of health, or a `boot-confirm` control message |
+| standby marked bad | kernel | after a one-way store migration on a trial boot |
+| switch (operator's rollback; the slot left marked bad) | kernel (`boot-rollback`), `slots rollback` | on request |
+| stage: standby marked empty; the region written, flushed, read back, hashed; sealed with label, schema, commitment | `urmqtt-disk slots stage` | offline |
+| activate: the staged standby becomes the ESP with `trial` and `tries` (1..7), the old ESP the standby | `urmqtt-disk slots activate` | offline |
+
+The kernel writes table sectors only, never a slot region.
+
+**Older kernels** (v0.5.x) ignore the standby entry (they find their data
+partition by type, and it is still last). A disk prepared by them has its
+data partition right after the ESP and **stays single-slot** (`update-boot`).
 
 **Classification of the data partition** (`Disk::open` on the partition):
 - blank → formatted (§6);
@@ -768,3 +834,4 @@ cache dropped and kept) at every write of each of the three procedures.
 | The database schema (§5.1.1) | `crates/store/tests/golden_schema3.rs`, `golden_schema4.rs`, `golden_schema5.rs`, `golden_schema5_bytes.rs` (`schema5-shared.txt`; `schema3-qos2.txt` and `schema4-mqtt5.txt` frozen), `sqlite.rs`; `scripts/mqtt5-migration-check.sh` (a disk of schema 4, or 3 with `--from 3`, written by the previous kernel, booted by this one) | the frozen schema 2 database migrates to 5 with every row, the frozen schema 3 database (QoS 2 state) and the frozen schema 4 database (MQTT 5.0 state) migrate to 5 with every row, each also after a power cut at any write of the migration (an intermediate version found whole, never a half-done step); the CHECK on `sub_id` holds; a schema 5 database with QoS 2, MQTT 5.0 and shared-subscription state (identifiers included) is written byte for byte and reads back |
 | Fuzz targets | `fuzz/fuzz_targets/disk_layout.rs` (superblock slots v2 and the v1 view, size table, the migration record), `disk_backup.rs` (slot header and control block), `disk_crypt.rs` (the sector cipher, the key-file parser, an encrypted disk with damaged sectors opened with the right key, a wrong key and none), `telemetry_recover.rs` (segments and records) | no panic, accepted structures round-trip, a wrong key never opens a disk; CI runs every file in `fuzz/fuzz_targets` (`.github/workflows/fuzz.yml` builds the matrix from the directory) |
 | Procedures under power cuts | `tools/disk/tests/migrate.rs`, `convert.rs`, `crates/store/tests/grow.rs`, `backup.rs`, `scripts/fault-loop.sh` | migrate, grow, backup, encrypt, decrypt and rekey end in a valid disk with all its data after a cut at every write |
+| Boot slots (§0a) | `crates/store/src/slots/tests.rs`, `tools/disk/tests/slots.rs`, fuzz `boot_slots`, smoke `SMOKE_ONLY=ab` | the first boot with slots, stage, activate, the trial count, confirm, both rollbacks and the switch back, each cut at every write (host: clean and torn, cache lost and kept; QEMU: the offline switch after writes 1 to 3 and the kernel's trial count after writes 1 and 3, on aarch64 edk2 and x86_64 OVMF) |
