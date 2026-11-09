@@ -187,6 +187,14 @@ pub fn run(
             );
             power::off()
         }
+        Err(install::InstallError::SealedToOther) => {
+            error!(
+                "install: the installation image is sealed for Secure Boot to another configuration than this boot's \
+                 (its limine.conf pins the module); the installed disk would not boot; nothing written to {name}. \
+                 Rebuild the signed image with this configuration (scripts/sign-loaders.sh sign-iso)"
+            );
+            power::off()
+        }
         Err(e) if fault.is_some() => {
             warn!("disk-fault: power cut injected during the installation ({e:?}), powering off");
             power::off()

@@ -253,7 +253,11 @@ fn info(path: &str) -> Result<(), String> {
     );
     if let Some(e) = t.entries.iter().find(|e| e.type_guid == gpt::ESP_TYPE) {
         match read_esp(&mut dev, e) {
-            Ok(esp) => println!("{}", config::describe(&config::read(&esp))),
+            Ok(esp) => println!(
+                "{}\n{}",
+                config::describe(&config::read(&esp)),
+                config::describe_seal(&esp)
+            ),
             Err(m) => println!("config: unreadable ({m})"),
         }
     }
@@ -689,10 +693,11 @@ fn update_boot(
     let old = read_esp(&mut dev, e)?;
     let (esp, what) = config::carry_over(&old, esp, policy)?;
     println!(
-        "update-boot: {}\nupdate-boot: before: {}\nupdate-boot: after:  {}",
+        "update-boot: {}\nupdate-boot: before: {}\nupdate-boot: after:  {}\nupdate-boot: {}",
         what,
         config::describe(&config::read(&old)),
         config::describe(&config::read(&esp)),
+        config::describe_seal(&esp),
     );
     if !write {
         println!(
@@ -859,8 +864,9 @@ fn slots_stage(path: &str, a: &SlotArgs) -> Result<(), String> {
     let old = ab::read_region(dev.as_mut(), active.first_lba, active.sectors())?;
     let (esp, what) = config::carry_over(&old, esp, &a.policy)?;
     println!(
-        "stage: {what}; the configuration: {}",
-        config::describe(&config::read(&esp))
+        "stage: {what}; the configuration: {}\nstage: {}",
+        config::describe(&config::read(&esp)),
+        config::describe_seal(&esp)
     );
     if let Some(f) = ab::config_format(&esp)
         && f > note.cfg_format
