@@ -61,13 +61,11 @@ impl SourceKey {
     /// The key of an IPv6 source address: its /64 prefix. (Used by NEXT-1;
     /// tested here so the key is settled before the stack exists.)
     pub const fn v6(ip: [u8; 16]) -> Self {
-        let mut hi = 0u64;
-        let mut i = 0;
-        while i < 8 {
-            hi = (hi << 8) | ip[i] as u64;
-            i += 1;
+        let [a, b, c, d, e, f, g, h, ..] = ip;
+        Self {
+            hi: u64::from_be_bytes([a, b, c, d, e, f, g, h]),
+            lo: 0,
         }
-        Self { hi, lo: 0 }
     }
 
     const fn is_none(self) -> bool {

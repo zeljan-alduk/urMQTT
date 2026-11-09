@@ -533,7 +533,11 @@ pub fn established_flood(
     let spare = ids.get(clients).ok_or("no spare identity")?;
     match open_within(host, tls_port, spare, 60, wait) {
         Ok(t) => held.push(t),
-        Err(e) => return Err(format!("the place of a closed connection was not freed: {e}")),
+        Err(e) => {
+            return Err(format!(
+                "the place of a closed connection was not freed: {e}"
+            ));
+        }
     }
     if open_within(host, tls_port, ids.first().ok_or("no identity")?, 60, wait).is_ok() {
         return Err("one connection more than the limit got in after a close".into());
@@ -548,7 +552,9 @@ pub fn established_flood(
         "attack: established-flood round 2: {ok} of {clients} connected, {refused} refused after every connection closed"
     );
     if ok != limit {
-        return Err(format!("round 2: {ok} connected, expected {limit}: a place leaked"));
+        return Err(format!(
+            "round 2: {ok} connected, expected {limit}: a place leaked"
+        ));
     }
     Ok(())
 }

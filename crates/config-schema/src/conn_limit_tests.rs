@@ -115,5 +115,8 @@ fn the_schema_describes_the_key() {
 #[test]
 fn the_bench_template_has_no_limit() {
     let text = include_str!("../../../deploy/bench/config.toml");
-    assert_eq!(parse("prod", text).unwrap().limits.max_connections_per_ip, 0);
+    assert_eq!(
+        parse("prod", text).unwrap().limits.max_connections_per_ip,
+        0
+    );
 }
