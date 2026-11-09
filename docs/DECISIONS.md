@@ -4584,7 +4584,7 @@ device the kernel does not drive is unaffected; one for a driven device would be
      Offline: `urmqtt-disk keys DISK add | change | remove | unwrap` with `--key FILE` or `--passphrase-file FILE`
      as the authorisation, `--new-passphrase-file FILE`, `--slot N`, `--iterations N`, a dry run without
      `--write`. `remove` never empties the last slot; `unwrap` empties them all and, with a passphrase, writes the
-     key to `--key-out FILE` (mode 0600, refused if it exists): the way back to an image key and to v0.5.
+     key to `--key-out FILE` (mode 0600, refused if it exists; written and synced before the slots are emptied, so a refused file never leaves the key nowhere): the way back to an image key and to v0.5.
   4. **The disk key itself** is rotated by the existing offline `urmqtt-disk rekey` (ADR-240: every sector
      rewritten, journalled, resumable). It now opens a wrapped disk with `--passphrase-file`, and empties the key
      slots and clears the wrapped flag when it switches the superblock: they wrap the old key. The operator then
