@@ -313,6 +313,17 @@ impl Ops {
                 "g",
             );
             add("logtls.failures", l::FAILURES.load(Ordering::Relaxed), "g");
+            add("logtls.attempts", l::ATTEMPTS.load(Ordering::Relaxed), "g");
+            add(
+                "logtls.bytes_out",
+                l::BYTES_OUT.load(Ordering::Relaxed),
+                "g",
+            );
+            add(
+                "logtls.rx_dropped_bytes",
+                l::RX_DROPPED.load(Ordering::Relaxed),
+                "g",
+            );
         }
         // Live mode (O3): 1 while the data lives in RAM and is lost at a reboot.
         add(

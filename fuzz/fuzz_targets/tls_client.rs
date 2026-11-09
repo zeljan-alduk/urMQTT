@@ -13,17 +13,7 @@ use urmqtt_tls::client::TlsClient;
 use urmqtt_tls::rng::{EntropyPool, Source};
 
 /// A CA nobody has the key of (generated once, the key thrown away).
-const FUZZ_CA: &[u8] = b"-----BEGIN CERTIFICATE-----
-MIIBWzCCAQCgAwIBAgIUYvD5d8kJ2EhjB8qW90y6uI5/ak0wCgYIKoZIzj0EAwIw
-EjEQMA4GA1UEAwwHZnV6eiBDQTAgFw0yNjExMDkxOTUzNDhaGA8yMTI2MTAxNjE5
-NTM0OFowEjEQMA4GA1UEAwwHZnV6eiBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEH
-A0IABLZ+el4NLVVt58tWLdW59pAeAXCe4Rqq72Iv/FyswX1Q5P49xx7r67dQ+SPf
-yYCoSRrV8VAuE/l9/q8oPijrKwCjMjAwMB0GA1UdDgQWBBR9mNCdpneJTx+8JjJf
-VEb/FoplxjAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0kAMEYCIQC9dGXU
-F//wVibwTuY7VhNQ2c5BsIS1tDoeshOlp7cd/QIhANDSm8BBprBhC9Epg3gPGSbc
-r8B4E31PtKYomy17Siv/
------END CERTIFICATE-----
-";
+const FUZZ_CA: &[u8] = include_bytes!("tls_client_ca.pem");
 
 fn client() -> &'static TlsClient {
     static C: OnceLock<TlsClient> = OnceLock::new();

@@ -29,6 +29,11 @@ pub static DROPPED: AtomicU64 = AtomicU64::new(0);
 pub static UP: AtomicU64 = AtomicU64::new(0);
 pub static CONNECTS: AtomicU64 = AtomicU64::new(0);
 pub static FAILURES: AtomicU64 = AtomicU64::new(0);
+/// Connections started, TLS bytes written, received bytes dropped (a
+/// collector sends nothing).
+pub static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+pub static BYTES_OUT: AtomicU64 = AtomicU64::new(0);
+pub static RX_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// Whether log shipping over TLS is configured (statsd says nothing of it
 /// otherwise).
 pub fn configured() -> bool {
@@ -97,10 +102,6 @@ impl LogShip {
         }
     }
 
-    pub fn link(&mut self) -> &mut TlsLink {
-        &mut self.link
-    }
-
     pub fn owns(&self, c: ConnId) -> bool {
         self.link.owns(c)
     }
@@ -147,6 +148,9 @@ impl LogShip {
         UP.store(u64::from(self.link.is_up()), Ordering::Relaxed);
         CONNECTS.store(s.up, Ordering::Relaxed);
         FAILURES.store(s.failures, Ordering::Relaxed);
+        ATTEMPTS.store(s.attempts, Ordering::Relaxed);
+        BYTES_OUT.store(s.bytes_out, Ordering::Relaxed);
+        RX_DROPPED.store(s.rx_dropped, Ordering::Relaxed);
         if self.queue.dropped > self.reported_drops
             && now_ms.saturating_sub(self.last_drop_report) >= DROP_REPORT_MS
         {

@@ -4473,3 +4473,213 @@ device the kernel does not drive is unaffected; one for a driven device would be
      hardware has IOTLBs; `make bench` was not run with an IOMMU.
    - intel-iommu under KVM needs the split irqchip (`run-qemu.sh` adds it); not run here (no KVM host).
    - Fault interrupts (ADR-306) and unmapping are deliberately absent.
+
+## ADR-315 — An active open in the TCP stack: SYN-SENT, RFC 6528 sequence numbers, ephemeral ports (NEXT-7, D-6)
+
+- **Status:** Accepted (NEXT-7). Amends ADR-033 ("passive open only"): the stack can now open connections, but
+  only where the kernel allows it (`TcpStack::set_max_active`, 0 by default) and only to destinations the image's
+  configuration names (ADR-318). D-6 ("is an outbound TCP client acceptable at all?") is answered by the owner's
+  request to build NEXT-7 for v0.6.0, with the bounds of this ADR and ADR-318.
+- **Context.** Bridging (NEXT-8), TLS log shipping (NEXT-9's left-over, ADR-294), a DNS client (NEXT-10), NTS and
+  any cluster protocol (LATER-1) need the broker to start a connection. The stack had no SYN-SENT state, no
+  initial sequence number of its own (the SYN cookie was its only ISN) and no notion of a local port it chose.
+
+1. **Off unless allowed.** `TcpStack::connect` fails with `ConnectError::NotAllowed` while the stack's limit of
+   active connections is 0, which is the default; the kernel raises it on core 0 only, and only when an outbound
+   user is configured (today `observability.log_tls`, ADR-318; `outbound::MAX_ACTIVE` = 4). The worker cores'
+   stacks never open a connection. At most 64 per stack (`MAX_ACTIVE_LIMIT`). A connection also needs a local
+   address (`NoAddress` before the DHCP lease), a unicast destination that is not our own address
+   (`BadDestination`: 0.0.0.0/8, 127.0.0.0/8 and 224.0.0.0/3 are refused, port 0 too), room in the connection
+   table (`TableFull`, the same table and `max_conns` as the server side) and a free 4-tuple (`PortInUse`).
+2. **SYN-SENT is the only half-open state, and it is bounded.** The server side keeps none (SYN cookies, ADR-033);
+   an active open keeps its `Conn` from the SYN on, so the number of them is bounded by point 1, not by a peer.
+3. **The SYN** carries the link's MSS, SACK-permitted, timestamps (TSval = the stack's clock) and, when the stack
+   is configured for scaling (`rcv_wnd_scaled` > 0), the window-scale shift the server side uses. Its window is
+   the unscaled `rcv_wnd`. It is retransmitted with the doubling RTO (1, 2, 4, 8, 16 s; the SYNs leave at 0, 1,
+   3, 7, 15 and 31 s) and the connection is given up at 63 s with `CloseReason::Timeout` (`SYN_RETRIES` = 5,
+   1 to 10 with `set_syn_retries`). The same ISS every time.
+4. **The initial sequence number** is RFC 6528's: SipHash-2-4 of (local address, local port, remote address,
+   remote port) under a 128-bit secret, plus a clock of 250 ticks per millisecond (4 µs). The secret is two
+   SipHash outputs of the SYN-cookie key under the domain `urmqtt-tcp-isn` (a PRF of a random per-boot key: it
+   tells nothing about the cookie key). The cookie key rotates (H3); the ISN key is fixed per stack, which RFC
+   6528 allows (the clock moves the ISN).
+5. **The SYN-SENT rules are RFC 9293 §3.10.7.3:** an ACK that does not acknowledge exactly our SYN gets a RST at
+   its acknowledgement number (unless it is a RST) and changes nothing; a RST is believed only with an
+   acceptable ACK (then `CloseReason::Refused`, new); a RST without an ACK, a bare ACK and a bare SYN are dropped.
+   **No simultaneous open** (*decided*): a SYN without an ACK is dropped, not answered from SYN-RECEIVED; the
+   two sides' retransmissions resolve it, and no configured destination opens connections to us. SYN and FIN
+   together are refused by the parser, as on the server side.
+6. **Options from the SYN-ACK:** MSS (absent: 536; below 536: the connection is refused with a RST, as the server
+   side refuses such a SYN, H3), window scaling only when both offered it (a shift above 14 is used as 14, RFC
+   7323 §2.3), SACK when the peer permits it, timestamps when the peer sends them. The SYN-ACK's window is not
+   scaled (RFC 7323 §2.2). The SYN's round trip is the first RTT sample unless the SYN was retransmitted (Karn);
+   then the data's RTO starts at 3 s (RFC 6298 §5.7). Data on the SYN-ACK is delivered after `connected`.
+7. **After the handshake the connection is the server side's**: the same `Conn`, congestion control, SACK,
+   out-of-order buffer, persist timer, RFC 5961 checks and close states (no TIME-WAIT, ADR-033). `send` takes
+   nothing in SYN-SENT; `close` in SYN-SENT sends the FIN after the handshake; `abort` in SYN-SENT sends a bare
+   RST at ISS + 1.
+8. **Ephemeral ports** (*decided*): 49152 to 65535 (RFC 6335's dynamic range). `TcpStack::ephemeral_port` starts
+   the search at a keyed hash (the ISN secret) of the destination, a counter and the clock (RFC 6056 algorithm 3
+   in spirit), and skips a port that a listener of this stack has, that the caller reserves, or that the same
+   4-tuple already uses. The kernel reserves every port it steers (`netproto::reserved_port`: the TLS, plaintext,
+   WebSocket and metrics listeners and the echo port), so **the replies to an outbound connection are never
+   steered to a worker core**: core 0's dispatcher keeps every TCP frame whose destination port is not a
+   listener's, and core 0 owns the outbound connections. No TIME-WAIT on our side means a 4-tuple could be
+   reused within 2 MSL; the random start makes that one chance in 16 384 per connection, and the fresh ISN
+   makes an old segment fall outside the window.
+9. **The `App` trait** gains `connected(c)` with a default that ignores it, so the server-side applications are
+   unchanged; a failed open ends in `closed(c, Refused | Timeout)`. New counters: `active_opens`,
+   `active_established`, `active_refused`, `active_timeouts`, `syn_retransmits`.
+10. **Verification.** `crates/tcp/src/active_tests.rs` (the SYN's options, negotiation with and without options,
+    the retransmission schedule and the give-up, Karn after a lost SYN, every SYN-SENT rule, a tiny MSS, data on
+    the SYN-ACK, close and abort in SYN-SENT, every `ConnectError`, the port choice against listeners, reserved
+    ports and used tuples, the ISN's key and clock, the server and client sides on one stack) and **our client
+    against our own server over a link that drops (0 to 10 %), duplicates and reorders** (40 seeds, 200 000
+    bytes up and 50 000 down, closed normally; a dead link ends in `Timeout`). `model_active.rs`: the H3
+    proptest model extended to the active open (ROADMAP NEXT-7 "Verify"; checked to fail when its give-up time
+    is wrong). Fuzz `tcp_active` (two minutes: 1.05 million runs, no finding). The `Conn` stays within 112 bytes
+    (the size test).
+
+## ADR-316 — Outbound connections in the kernel: one internal API on core 0, a reconnect policy, bounded queues (NEXT-7)
+
+- **Status:** Accepted (NEXT-7). The users after this item (NEXT-8 export bridge, NEXT-10 DNS, a later TLS client
+  of another kind) build on it; NEXT-7's own user is ADR-318.
+- **Context.** A user of an outbound connection should not have to know about ARP, the dispatcher, ephemeral
+  ports, TLS state or retry timing, and none of those may grow without bound when the far end is slow or gone.
+
+1. **Core 0 owns every outbound connection.** It owns the NIC, answers ARP, holds the DHCP lease, and its
+   dispatcher keeps every TCP frame whose destination port is not a steered listener's (ADR-315 point 8). The
+   connection lives in core 0's `TcpStack`; its events reach the user through core 0's `App` (`CoreApp`, which
+   asks the owner first, then the echo service, then MQTT).
+2. **`crates/kernel/src/outbound.rs`, `TlsLink`:** `new(what, destination, server name, anchors)`, `poll(now,
+   iface, tcp, reserved, emit)` from core 0's loop, the four TCP events (`on_connected`, `on_data`,
+   `on_peer_closed`, `on_closed`, routed by `owns(c)`), and for its user `is_up`, `room`, `write`,
+   `take_received` and `stats`. TCP events never touch the stack (it is borrowed while it calls them): they
+   leave bytes and requests (close, abort with a reason) that `poll` carries out.
+3. **The reconnect policy is sans-IO and host-tested** (`urmqtt_tcp::dial::Dialer`, `Policy::DEFAULT`): the first
+   attempt at once; ARP for the next hop first (3 requests 1 s apart, then the attempt counts as failed), since
+   the interface drops a segment for an unknown neighbour; a connection must be *up* (for TLS: the handshake
+   done) within 30 s or it is aborted; after a failure the wait is `min(300 s, 1 s · 2^(n-1))`, half fixed and
+   half random (equal jitter, from the CSPRNG's seed; not a secret); a connection that was up for 10 s or more
+   resets the backoff when it ends, a shorter one counts as a failure, so a peer that accepts and closes at once
+   is retried at the backoff's pace. The link also waits for the wall clock: certificates are checked against
+   it, and without one every handshake would fail (it says so once).
+4. **Bounds.** Ciphertext waiting for the TCP send queue: 64 KiB; plaintext received from the peer: 16 KiB (more
+   is dropped and counted); `room()` lets the user write only while TLS and TCP hold less than 64 KiB together,
+   which is also the most a broken connection can lose. A user's own queue is `urmqtt_tcp::queue::RecordQueue`:
+   whole records within a byte bound, the oldest dropped (and counted) to make room, a record larger than the
+   bound refused; nothing grows with the peer's stall (the NEXT-8 requirement "a stalled upstream must not grow
+   the heap" holds for it by construction).
+5. **Delivery is at most once** (*decided*): a record handed to a connection that then breaks is not sent again
+   (TCP does not say what the peer read). A user that needs more needs an acknowledgement in its own protocol
+   (an MQTT bridge has PUBACK; NEXT-8).
+6. **Logging.** Each attempt that fails says why and when the next one is (`warn`), a connection that comes up
+   says so with the certificate name it verified (`info`); lines are per attempt, and the backoff bounds their
+   rate.
+
+## ADR-317 — The outbound TLS client: TLS 1.3, the configured anchors only, the name, the wall clock (NEXT-7)
+
+- **Status:** Accepted (NEXT-7). `urmqtt_tls::client`, built with the `client` feature, is now in every image (it
+  was for dev images' self-tests only, M17).
+- **Context.** A broker that ships its log or bridges its messages to a server it does not authenticate gives
+  them to whoever can answer on the path. rustls (already in the image) has the client state machine and webpki's
+  server verification; the question is what it trusts.
+
+1. **`TlsClient::verifying(anchors)`**: the server's chain is verified against the configured PEM anchors and
+   **nothing else** (no system or built-in root store; a configuration with no usable anchor is refused at boot
+   and the user stays off). Name verification is webpki's: the configured DNS name, or, when none is configured,
+   the destination's IPv4 address, which must then be an IP SAN of the certificate. Validity is checked against
+   the kernel's wall clock (`KernelTime`, the same as the server side); without a clock the handshake fails (a
+   test proves it), and the link waits for one (ADR-316 point 3).
+2. **TLS 1.3 only, no resumption, no early data, no client certificate** (*decided*). A collector that requires
+   client authentication is not supported by NEXT-7 (ADR-319); reusing the server's key for it would mix the
+   broker's identity as a server with a client identity the CA did not issue for that purpose.
+3. **The session is sans-IO** (`ClientSession`): `write`/`flush` encrypt only after the handshake (data written
+   before waits, a test checks it), `close` queues a close_notify after the data, `is_closed` after ours or the
+   peer's. An unfinished record is held up to 16 KiB + 261 bytes (`MAX_PENDING_IN`), more ends the session as
+   not TLS. Errors are rustls's, logged with their text (`invalid peer certificate: UnknownIssuer`).
+4. **What it adds to the trusted base:** rustls's client handshake state machine and webpki's server-certificate
+   path (EKU serverAuth, name matching) become reachable from the network, but only from the configured
+   destination, and only after a TCP connection the broker itself opened. The crypto provider and record
+   protection are the same as the server side's. No new crate and no new `unsafe`. AUDIT.md §1, §2.
+5. **Verification.** `crates/tls/tests/outbound_client.rs` (our client against our server-only server: DNS name,
+   second DNS name, IP SAN; data after the handshake; close_notify; a wrong name, an IP not in the certificate
+   and an unknown issuer each fail; no anchors refused; not-TLS bytes and an oversized pending record cut off),
+   `outbound_no_clock.rs`; fuzz `tls_client` (arbitrary server bytes after the ClientHello: never established,
+   no application data, bounded answers; seeds include a real server flight; two minutes: 1.5 million runs, no
+   finding); the smoke scenarios of ADR-318.
+
+## ADR-318 — Log shipping over TLS, the first user; `observability.log_tls*`, configuration format 20 (NEXT-7)
+
+- **Status:** Accepted (NEXT-7). Closes the "TLS for log shipping" left-over of ADR-294 for the syslog path
+  (statsd stays UDP, ADR-319). Off by default.
+- **Context.** SECURITY.md's residual risk "Syslog and statsd are plain UDP": the log lines say which identities
+  connect, from where, and what was refused. A collector reachable only over the internet could not be used.
+
+1. **The keys** (`[observability]`, tags 450 to 453, **format 20**; format 19 belongs to another v0.6.0 item and
+   is refused like 10 until it lands): `log_tls` (`"a.b.c.d:port"`, an IPv4 literal: there is no DNS, NEXT-10;
+   empty: off), `log_tls_name` (the DNS name the collector's certificate carries; empty: its address, as an IP
+   SAN), `log_tls_ca` (PEM files, 1 to 8, required with `log_tls`; read and checked by the packer like the
+   operational CAs, valid for `trust.min_anchor_days`), `log_tls_queue_kb` (16 to 4096, default 256). The rules
+   (in `urmqtt_cfg::check`, the kernel's own check, and in the TOML path with the same messages): anchors
+   required with a collector; a unicast address (not 0/8, 127/8, 224/3) and a port; a valid DNS name (RFC 1123
+   labels, no wildcard, not an IPv4 literal); **no collector key without a collector** (a leftover is a mistake,
+   said, not ignored). Unset, the keys write nothing and the blob keeps its version; set, they need format 20,
+   so a kernel that does not know them refuses the image by its version instead of not shipping without a word.
+   `urmqtt-config pack`, `show` and `verify` print the outbound connection; the builder page has the keys and a
+   `logca` file slot (machine-translated labels, 15 languages).
+2. **The message** is the one the UDP path sends (RFC 5424, facility local0, the record's own time), framed by
+   octet counting (RFC 5425 §4.3, `MSG-LEN SP SYSLOG-MSG`) over TLS 1.3 (ADR-317) to the collector, port of the
+   operator's choice (6514 is RFC 5425's).
+3. **One drain for both paths.** `ops.rs` takes the records from the log ring every 100 ms; with only the UDP
+   collector configured they stay in the ring until it is reachable (as before); with the TLS collector they are
+   taken every time into its queue (`log_tls_queue_kb`), and a UDP collector that is unreachable at that moment
+   misses them (counted as unsent, as the UDP path always counts). The queue keeps the newest records; the
+   dropped ones are reported in the log at most once a minute and counted.
+4. **Records from boot are not lost** while the collector is still unreachable: they wait in the queue (smoke:
+   the collector receives the `memmap` lines of the first second).
+5. **Statsd** (when configured) gains `urmqtt.logtls.up`, `.records_sent`, `.records_dropped` (counters),
+   `.connections`, `.failures`, `.attempts`, `.bytes_out` and `.rx_dropped_bytes` (gauges of the totals).
+6. **Smoke, `SMOKE_ONLY=logtls`** (aarch64 under HVF and TCG, x86_64 under TCG): `scripts/logtls-sink.py`, a
+   Python TLS 1.3 collector on the host's loopback (the guest's 10.0.2.2) with a certificate the scenario makes
+   from the dev CA for `logsink.test` and 10.0.2.2; the broker connects, verifies, and the collector receives
+   well-formed RFC 5425 frames with the boot's records and the live ones; the collector is stopped and started
+   again, the broker notices, reconnects after its backoff, and the collector receives the line that says so. A
+   second scenario gives the collector a self-signed certificate with the same names: the handshake fails with
+   `invalid peer certificate: UnknownIssuer`, the broker says when it tries again, and the collector receives
+   no message. CI runs the group.
+
+## ADR-319 — What NEXT-7 does not do, and what upgrading means (NEXT-7)
+
+- **Status:** Accepted (NEXT-7).
+
+1. **Upgrade.** A configuration without `observability.log_tls` is the blob it was; the kernel opens no
+   connection (core 0's stack is allowed none) and the network surface is unchanged. The only visible change is
+   the boot line `ops: syslog …, statsd …, log over TLS off, …`. Store schema unchanged (no store change).
+2. **Downgrade.** An image with `log_tls` set is format 20; an older kernel refuses it at boot by the version
+   (the operator sees why), and `urmqtt-config` refuses to put it into an older template. Without the keys, a
+   v0.6.0 image runs on an older kernel as before.
+3. **Security effects** (SECURITY.md, AUDIT.md). The broker now starts connections, but only to the address the
+   image names: no peer, device, control message or `$SYS` topic can choose a destination, so there is **no
+   server-side request forgery from remote input**; whoever writes the configuration chooses where the log goes,
+   as with the UDP collectors. The trusted base grows by the TCP active open (own code, fuzzed and modelled) and
+   rustls's client path with webpki's server verification (third party, reachable from the configured peer
+   only). The log lines leave the private network encrypted and to an authenticated collector.
+4. **Not done (listed, not hidden):**
+   - **No DNS** (NEXT-10): the collector is an IPv4 address; the certificate name is checked, the address is not
+     looked up.
+   - **No client certificate** for the collector (ADR-317 point 2); a collector that requires one refuses the
+     broker.
+   - **Statsd stays plain UDP**; only the syslog path has a TLS form. `$SYS` and the Prometheus endpoint do not
+     show the log connection (statsd and the log do).
+   - **At-most-once delivery** (ADR-316 point 5): up to 64 KiB written into a connection that then breaks can be
+     lost; no RFC 5424 sequence id, no application acknowledgement (RFC 5425 has none).
+   - **No IPv6**, no proxy, no simultaneous open, no TCP keepalive on the outbound connection (a collector that
+     vanishes silently is noticed when data is not acknowledged: the retransmissions give up after about four
+     minutes, or at once when it resets).
+   - **No export bridge, no webhooks, no NTS, no clustering** (NEXT-8, LATER-1): the API of ADR-316 is their
+     base; each needs its own ADR, configuration and limits.
+   - Only one outbound user exists, so `outbound::MAX_ACTIVE` (4) is not reached; the limit is tested in the
+     stack (`connect_refuses_what_it_must`), not with several users in a kernel.
+   - No performance measurement of the TLS client's handshake cost on core 0 (one handshake per connection;
+     with the backoff at most one every second).

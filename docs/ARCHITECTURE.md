@@ -14,7 +14,7 @@ aarch64 ELF that contains everything needed to be an MQTT broker:
 │  broker  ─ sessions · topic trie · subscriptions · QoS · retained · LWT · ACL    │
 │  mqtt    ─ zero-copy 3.1.1/5.0 codec                                             │
 │  tls     ─ rustls handshake → own TLS 1.3 record layer                           │
-│  tcp     ─ server-only TCP, SYN cookies       net ─ Eth/ARP/IPv4/ICMP/DHCPv4     │
+│  tcp     ─ TCP, SYN cookies, active open      net ─ Eth/ARP/IPv4/ICMP/DHCPv4     │
 │  store   ─ raw-disk VFS · SQL in Rust · per-core telemetry log · worker proxy    │
 │  dbworker ─ SQLite (C, vendored) as an EL0 / ring-3 program (own address space)  │
 │  virtio  ─ net · blk · rng      pci ─ ECAM · BARs · MSI-X                        │
@@ -34,6 +34,16 @@ builds only, enforced at build time), and the optional ones an image's configura
 default: a plaintext MQTT port (P1), a secure WebSocket port (ADR-272) and the Prometheus endpoint (ADR-290: plain
 HTTP on 9100, `GET /metrics`, to an allow-list of networks; it has no session, no TLS state and no broker connection,
 only a request reader, `urmqtt_broker::metrics::render` over the same `Info` as `$SYS`, and a deadline).
+
+The broker opens a connection of its own only when the configuration names a destination (NEXT-7, ADR-315 to
+ADR-319): today the TLS log collector of `observability.log_tls`. Core 0 owns such connections. Its TCP stack is the
+only one allowed an active open (`TcpStack::set_max_active`), from an ephemeral port that no listener has, so the
+dispatcher never steers the replies to a worker. `kernel/src/outbound.rs` (`TlsLink`) is the internal API every
+outbound user goes through: the reconnect policy (`urmqtt_tcp::dial`: ARP first, a 30 s deadline to be up, a jittered
+exponential backoff to 5 minutes), TLS 1.3 verified against the configured anchors only (`urmqtt_tls::client`),
+bounded buffers (64 KiB of ciphertext, 16 KiB received), and the user's own bounded queue
+(`urmqtt_tcp::queue::RecordQueue`). `kernel/src/logship.rs` is its first user (RFC 5425 framing of the syslog
+messages); an export bridge (NEXT-8) and a DNS client (NEXT-10) are the next.
 
 ## 2. Boot sequence
 
@@ -176,6 +186,9 @@ and calls synchronously, on the core that owns the store:
 - The handshake runs through rustls in `no_std` mode with a pure-Rust crypto provider. Admission control is a per-core token bucket plus handshake limits per core and per source address, and one table shared by all cores that bounds the established connections of a source address (`limits.max_connections_per_ip`, ADR-280: checked at the SYN, counted at the final ACK before a token is taken, given back in the one function every close path ends in). Every handshake phase has a timeout. Resumption uses PSK tickets.
 - After the handshake the traffic keys are extracted and the rustls object is dropped. A minimal record layer (AES-128-GCM, ChaCha20-Poly1305) decrypts in place and encrypts directly into TX buffers (KeyUpdate: ADR-012).
 - Revoked serials are stored in SQLite and mirrored read-only on every data core. A handshake never waits for the DB.
+- Outbound (NEXT-7, ADR-317): a TLS 1.3 client (`urmqtt_tls::client`, rustls's client state machine and webpki's
+  server verification) for the connections the broker opens; no client certificate, the configured trust anchors
+  only, the configured name (or the address as an IP SAN), the wall clock required. Its session stays sans-IO.
 
 ## 6. Broker
 
