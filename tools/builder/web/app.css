@@ -313,3 +313,8 @@ dialog.ub-dialog.narrow { width: min(520px, calc(100vw - 24px)); }
 .ub-field[data-filtered="true"], .ub-card[data-filtered="true"] { display: none; }
 /* In the simple view the bar keeps to the essentials: the name and the tools are elsewhere or advanced. */
 .ub[data-mode="simple"] .ub-bar .ub-name, .ub[data-mode="simple"] .ub-bar .ub-tools { display: none; }
+
+/* NOW-16: the project and secrets card */
+.ub-project { margin-top: 16px; }
+.ub-project-status.bad { color: var(--ub-err); }
+.ub-project-status.ok { color: var(--ub-ok); }
