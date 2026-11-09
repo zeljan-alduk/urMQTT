@@ -22,7 +22,7 @@ const version = blob => blob[8] | (blob[9] << 8);
 const KEY = 'limits.max_connections_per_ip';
 
 test('the key is in [limits] with the documented default and range, the only key of format 14', () => {
-  assert.equal(model.formatVersion, 14);
+  assert.equal(model.formatVersion, 18);
   assert.ok(model.sections.find(s => s.id === 'limits').fields.some(f => f.id === KEY));
   const f = model.byId.get(KEY);
   assert.deepEqual([f.default, f.min, f.max, f.since], [1024, 0, 1000000, 14]);
