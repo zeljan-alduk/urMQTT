@@ -4657,3 +4657,11 @@ device the kernel does not drive is unaffected; one for a driven device would be
     polled (200 us while they have connections).
   - One pair per CPU is set up at probe, the DB core's included (4 MiB at 1024 descriptors, never used).
   - The per-pair 5 s console line exists only with multiqueue (`$SYS` and the metrics have the counters always).
+  - A device that answers the RSS command **after** the one-second timeout is not handled: the driver has gone back
+    to one pair and nobody polls pairs 1.., so a device that applied the table late would put those flows on
+    queues no core reads (their clients would time out). QEMU handles the control queue as soon as it is kicked,
+    so this needs a broken device;
+    `devices.virtio_net_queues = "single"` avoids the command altogether. Recovering would need a device reset or
+    core 0 draining the abandoned pairs.
+  - A device whose `max_virtqueue_pairs` is 0x8000 (the specification's maximum) has its control queue at index
+    0x10000, which no 16-bit queue number names: it gets one pair (`Single::QueueSetup`).

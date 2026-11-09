@@ -46,7 +46,8 @@
 
 - At most 16 pairs; one per CPU is set up at probe (the store's DB core's pair is never used). Each pair: two queues
   of up to 1024 descriptors with 2 KiB buffers (4 MiB at 1024, 1 MiB at QEMU's default 256).
-- The RSS configuration must be accepted within 1 s, else one pair.
+- The RSS configuration must be accepted within 1 s, else one pair. A device that applied it later anyway would
+  steer flows to pairs no core reads (QEMU answers at once; see ADR-314, not done; `"single"` avoids it).
 - With more data cores than pairs, the cores without a pair are served through pair 0 by core 0.
 - A 128-entry table splits flows unevenly over 3, 5, 6 or 7 cores (7: +3.9 % / -1.6 % of a fair share); without
   multiqueue the steering is the hash modulo the workers, as before. Home shards (persistent sessions) unchanged.
