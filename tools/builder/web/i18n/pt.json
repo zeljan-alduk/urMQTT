@@ -93,6 +93,7 @@
   "field.range.limits.max_message_expiry_s": "0 (predefinição): sem limite. Caso contrário, de 1 a 4294967295 segundos.",
   "field.range.limits.max_shared_groups": "De 1 a 65535 grupos num núcleo de dados (predefinição 1024); mais um: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.limits.max_shared_group_members": "De 1 a 65535 membros num grupo (predefinição 1024); mais um: SUBACK 0x97 (3.1.1: 0x80).",
+  "field.range.limits.max_connections_per_ip": "De 0 a 1000000 ligações TLS estabelecidas a partir de um endereço de origem, todos os núcleos em conjunto (predefinição 1024); 0: sem limite. Os dispositivos atrás de um NAT partilham o endereço.",
   "field.range.mqtt5.max_keep_alive_s": "0 (predefinição): o keep alive pedido pelo cliente. Caso contrário, de 1 a 65535 segundos.",
   "unit.ms": "Milissegundos.",
   "unit.mb": "Megabytes.",

@@ -93,6 +93,7 @@
   "field.range.limits.max_message_expiry_s": "0 (standaard): geen bovengrens. Anders 1 tot 4294967295 seconden.",
   "field.range.limits.max_shared_groups": "1 tot 65535 groepen op één datakern (standaard 1024); één meer: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.limits.max_shared_group_members": "1 tot 65535 leden in één groep (standaard 1024); één meer: SUBACK 0x97 (3.1.1: 0x80).",
+  "field.range.limits.max_connections_per_ip": "0 tot 1000000 tot stand gebrachte TLS-verbindingen vanaf één bronadres, alle kernen samen (standaard 1024); 0: geen limiet. Apparaten achter één NAT delen een adres.",
   "field.range.mqtt5.max_keep_alive_s": "0 (standaard): de keep-alive die de client vraagt. Anders 1 tot 65535 seconden.",
   "unit.ms": "Milliseconden.",
   "unit.mb": "Megabytes.",

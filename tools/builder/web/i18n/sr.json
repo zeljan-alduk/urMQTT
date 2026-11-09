@@ -93,6 +93,7 @@
   "field.range.limits.max_message_expiry_s": "0 (podrazumevano): bez ograničenja. Inače od 1 do 4294967295 sekundi.",
   "field.range.limits.max_shared_groups": "1 do 65535 grupa na jednom jezgru za podatke (podrazumevano 1024); još jedna: SUBACK 0x97 (3.1.1: 0x80).",
   "field.range.limits.max_shared_group_members": "1 do 65535 članova u jednoj grupi (podrazumevano 1024); još jedan: SUBACK 0x97 (3.1.1: 0x80).",
+  "field.range.limits.max_connections_per_ip": "0 do 1000000 uspostavljenih TLS veza sa jedne izvorne adrese, sva jezgra zajedno (podrazumevano 1024); 0: bez ograničenja. Uređaji iza istog NAT-a dele adresu.",
   "field.range.mqtt5.max_keep_alive_s": "0 (podrazumevano): keep alive koji traži klijent. Inače od 1 do 65535 sekundi.",
   "unit.ms": "Милисекунде.",
   "unit.mb": "Мегабајти.",
