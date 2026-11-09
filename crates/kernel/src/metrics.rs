@@ -243,7 +243,15 @@ impl MetricsState {
             return false;
         }
         if self.adm.admit(ip, true, now_ms, heap_ok, false).is_err() {
-            bump(&STATS.refused_limit);
+            // A refusal at the final ACK (the SYN cookie was valid, the limit was
+            // reached in between) is logged like one at the SYN: which of the two
+            // sees the limit depends on the timing, so the line must not.
+            let n = bump(&STATS.refused_limit);
+            self.log_every_power_of_two(
+                1,
+                n,
+                "metrics SYN(s) or connection(s) dropped for a limit (connections, per address, scrape rate, memory)",
+            );
             return false;
         }
         STATS.open.fetch_add(1, Ordering::AcqRel);
