@@ -3,3 +3,12 @@ number,rule,location,class,reason,comment
 173,rust/hard-coded-cryptographic-value,crates/plain/src/auth.rs:301,a,used in tests,"Same module: fixed test salt in runtime_accounts_log_in_and_the_image_wins (#[cfg(test)] mod tests, 1000 iterations). Not a secret."
 174,rust/hard-coded-cryptographic-value,crates/plain/src/auth.rs:301,a,used in tests,"Same test: second flow of the fixed test salt into passwd::encode. Not a secret."
 175,rust/cleartext-logging,crates/broker/src/sys.rs:1310,a,used in tests,"Assertion message in the #[cfg(test)] IOMMU test printing a hand-built Info (counters, no credentials) when the assert fails."
+176,rust/hard-coded-cryptographic-value,crates/tcp/src/model_active.rs:404,a,used in tests,"byte(i, tag) test payload pattern in the #[cfg(test)] active-open reference model; not a salt or key."
+177,rust/hard-coded-cryptographic-value,crates/tcp/src/model_active.rs:581,a,used in tests,Same model: payload pattern for the application send.
+178,rust/hard-coded-cryptographic-value,crates/tcp/src/model_active.rs:678,a,used in tests,Same model: expected stream in an assertion.
+179,rust/hard-coded-cryptographic-value,crates/tcp/src/model_active.rs:696,a,used in tests,Same model: expected peer stream in an assertion.
+180,rust/hard-coded-cryptographic-value,crates/kernel/src/db.rs:332,b,false positive,Zero-initialised key buffer overwritten with storage.disk_key (length checked) before use.
+181,rust/hard-coded-cryptographic-value,crates/kernel/src/unlock.rs:138,b,false positive,Zero-initialised buffer filled by the kernel CSPRNG before return; error otherwise.
+182,rust/hard-coded-cryptographic-value,crates/store/src/keyslot.rs:198,b,false positive,"Scratch buffer filled with label, UUID and the real salt by put() before PBKDF2."
+183,rust/hard-coded-cryptographic-value,tools/control/src/main.rs:300,b,false positive,"Zero-initialised salt filled from /dev/urandom (read_exact, error otherwise) before use."
+184,rust/hard-coded-cryptographic-value,tools/disk/src/main.rs:1297,b,false positive,"Zero-initialised salt filled from /dev/urandom (read_exact, error otherwise) before use."
