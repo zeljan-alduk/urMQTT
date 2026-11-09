@@ -86,7 +86,8 @@ fuzz_target!(|data: &[u8]| {
     let m = MemDisk::sparse(DISK_BYTES as u64);
     let mut dev = m.device();
     for (lba, n) in [(0, 34), (2048, ESP_SECTORS), (total - 33, 33)] {
-        dev.write(lba as u64, &img[lba * 512..(lba + n) * 512]).unwrap();
+        dev.write(lba as u64, &img[lba * 512..(lba + n) * 512])
+            .unwrap();
     }
     dev.flush().unwrap();
     let before = gpt::read_table(dev.as_mut(), 1).ok().flatten();
