@@ -2674,10 +2674,7 @@ impl Broker {
         let will = match &p.will {
             // A will is published by the broker on the client's behalf: it
             // must never be a way into `$SYS/` (the console input).
-            Some(w)
-                if acl::sys(w.topic)
-                    || !self.may_publish(role, acl_name, w.topic) =>
-            {
+            Some(w) if acl::sys(w.topic) || !self.may_publish(role, acl_name, w.topic) => {
                 return self.reject(c, ConnectReturnCode::NotAuthorized);
             }
             // A 5.0 client is told when it cannot have a retained Will

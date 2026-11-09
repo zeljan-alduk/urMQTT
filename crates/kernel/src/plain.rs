@@ -97,6 +97,14 @@ fn auth_name() -> &'static str {
     }
 }
 
+/// The run-time accounts as the authenticator takes them: only when the
+/// image enables them (`limits.max_runtime_accounts`) and has none else to say.
+pub fn runtime_accounts() -> Option<urmqtt_plain::Accounts> {
+    (CONFIG.limits.max_runtime_accounts > 0)
+        .then(crate::control::accounts)
+        .filter(|a| !a.is_empty())
+}
+
 /// Times a password check at the dearest configured account and returns its
 /// cost in nanoseconds (0: no password mode). The watchdog's handshake budget
 /// is sized for it (boot calls this before calibrating) and so is the rate at
@@ -106,7 +114,13 @@ pub fn measure() -> u64 {
     if !p.enabled || p.auth != PlainAuth::Password {
         return 0;
     }
-    let iterations = u64::from(Authenticator::new(p).max_iterations());
+    // Run-time accounts (ADR-285) are at most as dear as the default.
+    let runtime = if CONFIG.limits.max_runtime_accounts > 0 {
+        urmqtt_control::MAX_ACCOUNT_ITERATIONS
+    } else {
+        0
+    };
+    let iterations = u64::from(Authenticator::new(p).max_iterations().max(runtime));
     const PROBE: u32 = 128;
     let mut best = u64::MAX;
     for _ in 0..3 {
@@ -272,7 +286,7 @@ pub fn announce(cores: usize) {
 /// What the listener is told when a CONNECT is decided.
 pub enum Decision {
     /// The identity the session gets.
-    Accept(&'static str),
+    Accept(String),
     /// The CONNACK return code to answer with; the connection closes.
     Refuse(u8),
 }
@@ -314,7 +328,11 @@ impl PlainState {
         let needs_token = p.auth == PlainAuth::Password;
         Some(Box::new(Self {
             port: p.port,
-            auth: Authenticator::new(p),
+            auth: {
+                let mut a = Authenticator::new(p);
+                a.set_runtime(runtime_accounts());
+                a
+            },
             adm: Admission::new(AdmissionLimits {
                 per_core: l.max_handshakes_in_flight_per_core,
                 per_ip: l.max_handshakes_in_flight_per_ip,
@@ -329,6 +347,12 @@ impl PlainState {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// The run-time accounts changed (control epoch, ADR-285).
+    pub fn set_accounts(&mut self, accounts: urmqtt_plain::Accounts) {
+        self.auth
+            .set_runtime(Some(accounts).filter(|a| !a.is_empty()));
     }
 
     /// Whether `c` is a connection of this listener.
@@ -519,10 +543,15 @@ impl PlainState {
         let Some(pc) = self.conns.get(c).copied() else {
             return Decision::Refuse(5);
         };
-        let verdict = self.auth.authenticate(pc.ip, p.username, p.password);
+        // Owned, so that the authenticator is free again (it borrows the
+        // identity of a run-time account from its table).
+        let verdict = match self.auth.authenticate(pc.ip, p.username, p.password) {
+            Verdict::Accept(id) => Ok(String::from(id)),
+            v @ Verdict::Reject(why) => Err((why, v.connack_code())),
+        };
         let identity = match verdict {
-            Verdict::Accept(id) => id,
-            Verdict::Reject(why) => {
+            Ok(id) => id,
+            Err((why, code)) => {
                 let n = bump(&STATS.auth_failed);
                 if n.is_power_of_two() {
                     let [a, b, cc, d] = pc.ip;
@@ -533,7 +562,7 @@ impl PlainState {
                     );
                 }
                 self.fail(c, now_ms);
-                return Decision::Refuse(verdict.connack_code().unwrap_or(5));
+                return Decision::Refuse(code.unwrap_or(5));
             }
         };
         if let Some(shared) = Self::shared() {
@@ -554,7 +583,7 @@ impl PlainState {
             return Decision::Refuse(5);
         }
         // The registry's allowlist applies to plaintext identities too (H1).
-        if !crate::control::admitted(identity) {
+        if !crate::control::admitted(&identity) {
             let n = bump(&STATS.refused_registry);
             if n.is_power_of_two() {
                 warn!(

@@ -689,8 +689,8 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         .collect();
     let allowlist_mode = urmqtt_config::CONFIG.registry.allowlist || s.options.allowlist;
     match restored.as_ref() {
-        Some(r) => crate::control::init(&r.revoked, &r.allowlist, allowlist_mode),
-        None => crate::control::init(&image_revoked, &[], allowlist_mode),
+        Some(r) => crate::control::init(&r.revoked, &r.allowlist, &r.accounts, allowlist_mode),
+        None => crate::control::init(&image_revoked, &[], &[], allowlist_mode),
     }
     if allowlist_mode && restored.is_none() {
         warn!(

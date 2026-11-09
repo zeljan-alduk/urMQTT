@@ -51,7 +51,8 @@ fn a_value_needs_format_15_and_one_record() {
 fn the_range_is_checked_and_names_the_key() {
     let e = pack_toml("[limits]\nmax_runtime_accounts = 1025\n").unwrap_err();
     assert!(
-        e.iter().any(|x| x.to_string().contains("max_runtime_accounts")),
+        e.iter()
+            .any(|x| x.to_string().contains("max_runtime_accounts")),
         "{e:?}"
     );
     assert!(pack_toml("[limits]\nmax_runtime_accounts = -1\n").is_err());

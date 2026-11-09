@@ -56,6 +56,18 @@ pub struct Account {
     pub class: u8,
 }
 
+impl Account {
+    /// From a stored row: `None` if the hash text does not parse (such a row
+    /// can never log in).
+    pub fn parse(id: &str, hash: &str, class: u8) -> Option<Self> {
+        Some(Self {
+            id: id.into(),
+            hash: PasswordHash::parse(hash).ok()?,
+            class,
+        })
+    }
+}
+
 /// Every run-time account, sorted by id (for a binary search).
 pub type Accounts = Arc<Vec<Account>>;
 

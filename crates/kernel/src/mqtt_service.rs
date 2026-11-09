@@ -248,6 +248,9 @@ pub struct MqttService {
     plain: Option<Box<crate::plain::PlainState>>,
     /// The WebSocket listener (ADR-272); `None` unless switched on.
     ws: Option<Box<crate::websocket::WsState>>,
+    /// The run-time accounts this core last applied (ADR-285), to tell which
+    /// changed.
+    accounts_seen: urmqtt_plain::Accounts,
     /// Publisher back-pressure: window changes and notes to other shards
     /// (ADR-269).
     flow: crate::backpressure::FlowLink,
@@ -564,6 +567,8 @@ impl MqttService {
             );
         }
         let mut broker = Broker::new(broker_config(MAX_CONNS * n, n > 1));
+        // The ACL class of a run-time password account (ADR-285).
+        broker.set_login_class(crate::control::account_class);
         // Shared groups are owned by the worker shards (ADR-275); set before
         // the restore, whose sessions join their groups again.
         let w = dataplane::workers(n);
@@ -642,6 +647,7 @@ impl MqttService {
             sys: crate::sys::Sys::new(me, n),
             plain: crate::plain::PlainState::new(),
             ws: crate::websocket::WsState::new(|| tls_server_with(false)),
+            accounts_seen: crate::control::accounts(),
             flow: crate::backpressure::FlowLink::new(),
             revoking: Vec::new(),
         }
@@ -1250,7 +1256,7 @@ impl MqttService {
             Refuse(u8, bool),
             Garbage,
             Accept {
-                identity: &'static str,
+                identity: String,
                 key: String,
                 no_id: bool,
             },
@@ -1259,8 +1265,8 @@ impl MqttService {
             crate::mqtt5::Peek::Connect(p) => {
                 match self.plain.as_mut().map(|pl| pl.decide(c, &p, now_ms)) {
                     Some(crate::plain::Decision::Accept(identity)) => Next::Accept {
+                        key: urmqtt_broker::plain_session_key(&identity, p.client_id),
                         identity,
-                        key: urmqtt_broker::plain_session_key(identity, p.client_id),
                         no_id: p.client_id.is_empty(),
                     },
                     Some(crate::plain::Decision::Refuse(code)) => Next::Refuse(code, p.v5),
@@ -1303,7 +1309,7 @@ impl MqttService {
                     .get_mut(&c)
                     .map(|k| k.early.take())
                     .unwrap_or_default();
-                if self.attach_plain(c, home, identity, false, link, now_ms) {
+                if self.attach_plain(c, home, &identity, false, link, now_ms) {
                     self.leave_flight(c, Leave::Done, now_ms);
                     self.deliver(c, &early, link, now_ms);
                 } else {
@@ -1835,6 +1841,7 @@ impl MqttService {
                 CloseReason::Disallowed,
             ) as u64;
         }
+        closed += self.apply_accounts();
         if closed > 0 {
             crate::control::LIVE_CLOSED.fetch_add(closed, core::sync::atomic::Ordering::Relaxed);
             info!(
@@ -1842,6 +1849,40 @@ impl MqttService {
                 self.me
             );
         }
+    }
+
+    /// The run-time password accounts changed (ADR-285): hands the new table
+    /// to this core's plaintext and WebSocket listeners and closes the live
+    /// logins of an account that was removed or whose password or class
+    /// changed (the sessions homed here; a closed one gets a 5.0 DISCONNECT
+    /// 0x98). Returns how many.
+    fn apply_accounts(&mut self) -> u64 {
+        let new = crate::control::accounts();
+        if Arc::ptr_eq(&new, &self.accounts_seen) {
+            return 0;
+        }
+        let old = core::mem::replace(&mut self.accounts_seen, new.clone());
+        if let Some(p) = self.plain.as_mut() {
+            p.set_accounts(new.clone());
+        }
+        if let Some(w) = self.ws.as_mut() {
+            w.set_accounts(new.clone());
+        }
+        let changed: Vec<&str> = old
+            .iter()
+            .filter(|a| new.iter().find(|b| b.id == a.id) != Some(*a))
+            .map(|a| a.id.as_str())
+            .collect();
+        if changed.is_empty() {
+            return 0;
+        }
+        self.broker.disconnect_unless(
+            |id, role| {
+                !matches!(role, urmqtt_broker::Role::Plain | urmqtt_broker::Role::Web)
+                    || !changed.contains(&id)
+            },
+            CloseReason::Disallowed,
+        ) as u64
     }
 
     /// Revoked connections still open after their grace: cut at the
