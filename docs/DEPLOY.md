@@ -456,41 +456,49 @@ and without a hypervisor timing leaf the boot stops (`no usable time base`).
 DSDT's `_S5` sleep type, and the reset register) and then QEMU's ports under a
 hypervisor. On real hardware this path has never run.
 
-## 5d. Secure Boot (H8, ADR-250, ADR-251)
+## 5d. Secure Boot (H8, LATER-6: ADR-250, ADR-251, ADR-320 to ADR-324)
 
-**Status: the signing path and the x86_64 OVMF test are done; nothing here has run on real
-hardware, on Proxmox or on aarch64 firmware.** The first release targets a KVM VPS, whose
-firmware and boot chain belong to the host; most VPS images boot with Secure Boot off. Use this
+**Status: tested in QEMU on x86_64 (OVMF Secure Boot, SMM) and aarch64 (AAVMF Secure Boot), with keys
+enrolled and enforcement on; not on Proxmox, real hardware or a cloud's firmware.** The first release targets a
+KVM VPS, whose firmware and boot chain belong to the host; most VPS images boot with Secure Boot off. Use this
 section when you control the firmware (your own hypervisor, a test PC).
 
 **What it protects, and what it does not.** The firmware verifies the signature of the loader
 (`BOOTX64.EFI`, `BOOTAA64.EFI`). The loader then checks its enrolled hash of `limine.conf`, and the
 hashes of the kernel and of the configuration module that the file names (under Secure Boot Limine
 refuses any file without one). So firmware, signature, loader, configuration, kernel and
-configuration are one chain. It does **not** cover: the BIOS path (no signatures exist there),
-rollback to an older, correctly signed image (there is no version counter and no `dbx` entries
-are made), or a machine whose firmware lets whoever has physical access change the keys.
+configuration are one chain, on the ISO, on the raw disk image and on the disk the installer writes. It does
+**not** cover: the BIOS path (no signatures exist there), rollback to an older, correctly signed image that you
+did not revoke (there is no version counter; `dbx` revokes single images, ADR-322), or a machine whose firmware
+lets whoever has physical access change the keys.
 
-**Two limits of this design, both tested and both fail closed:**
+**Sign after you configure; the result is sealed (ADR-320, ADR-321).** The enrolled hash covers the module hash
+of your configuration, so a signed ISO cannot be configured again (`urmqtt-config pack --iso` and the builder page
+refuse it). Configure the template first (builder page, or `urmqtt-config pack --iso`), then sign the configured
+ISO with your own key; the kernels are taken from it unchanged:
 
-1. **Sign after you configure.** The enrolled hash covers the module hash of your configuration,
-   so `urmqtt-config pack --iso` on a *signed* ISO changes a signed loader and breaks its
-   signature; the firmware then answers "Access Denied". Build the image with its configuration
-   and the signature in one step, with your own key:
-   `scripts/mkiso.sh --universal ... --config my/config.toml --sb-key db.key --sb-cert db.crt`
-   (or `make universal` with the same two options passed through `MKISO_ARGS`). The template ISO of a
-   release is **not** signed with a key you trust; to use Secure Boot you build the image yourself
-   from the release artifacts (`make universal`), or sign with your own key as above.
-2. **An installed disk does not boot under Secure Boot.** The installed disk's `limine.conf` names the
-   configuration module without a hash (ADR-217: a configuration written later must not trip the
-   loader), and Limine refuses a file with no hash when Secure Boot is active ("Secure Boot is active
-   and URI ... has no associated hash"). Booting the ISO (live mode) works. Running an installed
-   disk under Secure Boot needs a per-machine ESP (module pinned, loader re-enrolled and re-signed
-   by you): **not done**.
+```
+scripts/sign-loaders.sh sign-iso db.key db.crt urmqtt-configured.iso urmqtt-signed.iso \
+    --disk-out urmqtt-signed.img --esp-out urmqtt-signed.esp
+```
+
+`--config my/config.toml` signs a template with a configuration instead; building from source does the same with
+`scripts/mkiso.sh --universal ... --config my/config.toml --sb-key db.key --sb-cert db.crt`. The release template
+ISO is **not** signed with a key you trust.
+
+A signed image is **sealed**: the installed disk's `limine.conf` pins your configuration too, so the disk the
+installer writes, the raw image and an A/B slot boot with Secure Boot enforced. The installer, `urmqtt-disk`
+(`update-boot`, `create`, `slots stage`) and `urmqtt-config` refuse to put any other configuration into a sealed
+image, before they write anything, because its loader would refuse the disk. A new configuration is a new signed
+image (sign-iso), put on the disk as an A/B update (section 8b). `urmqtt-disk info` prints the state
+(`secure boot: sealed to its configuration` / `not sealed`). `mkiso.sh --no-seal` builds the unsealed signed
+image of v0.5.0 (an installed disk then does not boot under Secure Boot; kept as the tests' control).
 
 **Keys.** `scripts/sign-loaders.sh gen-keys build/secureboot` makes a throwaway PK, KEK and db
 (RSA 2048) for tests; they protect nothing. A real key is generated offline, kept offline (an HSM or an
 air-gapped machine), and never enters this repository (`*.key`, `*.pem` and `build/` are ignored).
+[secure-boot-keys.md](secure-boot-keys.md) has the procedures: generating, enrolling, signing, revoking one
+image through `dbx` (`scripts/sign-loaders.sh authenticode` gives the hashes), rotating db, and a leak.
 `scripts/sign-loaders.sh sign KEY CERT IN OUT` signs one EFI binary with `sbsign` (`apt install
 sbsigntool`) or `osslsigncode` (`brew install osslsigncode`); `verify CERT FILE` checks it. The signing
 time is `SOURCE_DATE_EPOCH`, so the same key and loader give the same bytes (the smoke scenario
@@ -509,8 +517,22 @@ scripts/run-qemu.sh --arch x86_64 --iso build/signed.iso --secure-vars build/var
 
 `ovmf-vars` enrolls PK, KEK and db in the variable store and turns Secure Boot on (the machine is
 `q35,smm=on` with a secure pflash; `--secure-vars` does that). An unsigned or foreign-signed image
-shows `BdsDxe: failed to load ... Access Denied`. CI runs `SMOKE_ONLY=secureboot scripts/smoke.sh
---arch universal` (with `SMOKE_REQUIRE_SB=1`, so that missing tools fail instead of skipping).
+shows `BdsDxe: failed to load ... Access Denied`; `--dbx-hash HASH` (repeatable) also puts a revoked loader's
+Authenticode hash into `dbx`.
+
+**QEMU on aarch64 with AAVMF (tested, ADR-323).** Needs AAVMF's Secure Boot build: `AAVMF_CODE.secboot.fd` and
+`AAVMF_VARS.fd` of Debian/Ubuntu `qemu-efi-aarch64` (`/usr/share/AAVMF/`; elsewhere, point
+`URMQTT_FIRMWARE_SECURE_AA64` at the code file). The QEMU that Homebrew ships has no aarch64 Secure Boot build:
+
+```
+scripts/sign-loaders.sh ovmf-vars build/secureboot /usr/share/AAVMF/AAVMF_VARS.fd build/aavmf-sb.fd
+scripts/run-qemu.sh --disk build/signed.img --secure-vars build/aavmf-sb.fd
+```
+
+**The test.** `SMOKE_ONLY=secureboot scripts/smoke.sh --arch universal` (with `SMOKE_REQUIRE_SB=1`, so that a
+missing tool or firmware fails instead of skipping) runs every case above on both architectures. It is not in
+CI (the universal suites are run by hand, docs/RELEASE.md); `URMQTT_VIRT_FW_VARS`, `URMQTT_FIRMWARE_SECURE_AA64`
+and `URMQTT_FIRMWARE_VARS_AA64` point at tools and firmware outside the standard paths.
 
 **Proxmox (not tested).** Create the VM with OVMF and an EFI disk *without* the pre-enrolled
 Microsoft keys, then put your keys into its variable store:
@@ -531,7 +553,7 @@ Secure Boot, "Erase all keys" / "Custom mode"), copy `db.der` (and, to enroll a 
 `KEK.der`) to a FAT USB stick, enroll `db.der` as an authorized signature through the firmware menu (or
 with `efi-updatevar` / `sbctl enroll-keys` from a Linux), turn Secure Boot on, and boot the ISO. If the
 board offers only the Microsoft keys, the alternative is MOK through `shim`, which this project does
-not ship: that choice is open (ADR-251). The Intel test PC of SECURITY-PLAN H8 was not available when
+not ship (ADR-324: it would move the root of trust to Microsoft's key and the shim vendor's). The Intel test PC of SECURITY-PLAN H8 was not available when
 this was written.
 
 ## 5c. Load testing a server from one address: the bench profile (PERF, ADR-082)
@@ -840,9 +862,12 @@ different copies, from the primary (what the next boot does too).
 running slot, with no way back); `--in-place` does it anyway, never while a slot
 is on trial.
 
-**Secure Boot (LATER-6).** The switch changes which partition is the ESP, not a
-byte inside one, so a signed per-machine ESP works in either slot unchanged;
-stage it with `--replace-config` so its own pinned configuration stays.
+**Secure Boot (LATER-6, ADR-320).** The switch changes which partition is the ESP, not a
+byte inside one, so a signed, sealed ESP (`sign-iso ... --esp-out`) works in either slot unchanged.
+`slots stage` keeps the disk's configuration by default; an ESP sealed to the same configuration is
+staged as it is, one sealed to another is refused (its loader would refuse the slot) unless
+`--replace-config` takes the ESP's own. Both slots then boot with Secure Boot enforced (tested:
+an update to a sealed ESP boots on trial under OVMF Secure Boot).
 
 ## 9. The data disk: layout v2, migrating a v1 disk, growing (S2, S3)
 
