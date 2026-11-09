@@ -153,6 +153,8 @@
   "enum.devices.iommu.off": "ponechat, jak jej nastavil firmware",
   "enum.devices.iommu.auto": "když jej stroj má",
   "enum.devices.iommu.require": "bez něj odmítnout start",
+  "enum.devices.virtio_net_queues.auto": "jeden na datové jádro, když síťová karta směruje toky (RSS)",
+  "enum.devices.virtio_net_queues.single": "vždy jeden, jádro 0 směruje každý rámec",
   "enum.websocket.auth.mtls": "klientský certifikát, jako na portu TLS",
   "enum.websocket.auth.password": "uživatelské jméno a heslo (pro prohlížeče)",
   "enum.limits.publisher_backpressure.single": "pozastavit vydavatele, jehož jediný odběratel je plný",

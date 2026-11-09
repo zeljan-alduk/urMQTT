@@ -328,6 +328,9 @@ pub mod tag {
     // apart from the others of v0.6.0 so that items built in parallel do not
     // collide.
     pub const DEV_IOMMU: u16 = 318;
+    // virtio-net queue pairs (NEXT-6, ADR-313): format version 19, a tag
+    // apart for the same reason.
+    pub const DEV_NET_QUEUES: u16 = 395;
 }
 
 use tag as t;
@@ -369,6 +372,10 @@ pub const DEVICE_MODES: &[&str] = &["off", "auto", "on"];
 /// ADR-270): the receive queue's MSI-X interrupt where the platform has one,
 /// or polling.
 pub const NET_INTERRUPT_MODES: &[&str] = &["auto", "off"];
+/// How many virtio-net queue pairs the NIC gets (`devices.virtio_net_queues`,
+/// ADR-313): one per data core where the device steers flows itself (RSS), or
+/// always one. The first is the default.
+pub const NET_QUEUE_MODES: &[&str] = &["auto", "single"];
 /// DMA remapping (`devices.iommu`, ADR-305); the first is the default.
 pub const IOMMU_MODES: &[&str] = &["off", "auto", "require"];
 /// The `[devices]` keys, one per optional virtio driver (ADR-257): tag, key
@@ -1619,6 +1626,19 @@ pub static FIELDS: &[Field] = &[
             "A trial boot not confirmed within this many seconds resets the machine, which uses one of its trial boots; 0: it waits as long as it runs. When not 0, longer than update.confirm_after_s. Format 17.",
         ),
         17,
+    ),
+    // virtio-net multiqueue (NEXT-6, ADR-313): format version 19.
+    since(
+        f(
+            t::DEV_NET_QUEUES,
+            "devices.virtio_net_queues",
+            Kind::Enum {
+                variants: NET_QUEUE_MODES,
+                default: 0,
+            },
+            "How many receive/transmit queue pairs the virtio-net NIC uses. auto (the default): one per data core when the device offers multiqueue with RSS (VIRTIO_NET_F_MQ and VIRTIO_NET_F_RSS, e.g. QEMU's virtio-net-pci with mq=on,rss=on on a multi-queue tap), so each core receives and sends its own flows and core 0 stops copying every frame; otherwise one pair, as before. single: always one pair (the dispatcher on core 0 steers every frame), for a host whose multiqueue misbehaves. Format 19.",
+        ),
+        19,
     ),
 ];
 

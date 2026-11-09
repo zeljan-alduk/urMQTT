@@ -153,6 +153,8 @@
   "enum.devices.iommu.off": "lasciato come lo imposta il firmware",
   "enum.devices.iommu.auto": "se la macchina ne ha uno",
   "enum.devices.iommu.require": "rifiutare l'avvio senza",
+  "enum.devices.virtio_net_queues.auto": "uno per core dati quando la scheda distribuisce i flussi (RSS)",
+  "enum.devices.virtio_net_queues.single": "sempre uno, il core 0 distribuisce ogni frame",
   "enum.websocket.auth.mtls": "certificato client, come sulla porta TLS",
   "enum.websocket.auth.password": "nome utente e password (per i browser)",
   "enum.limits.publisher_backpressure.single": "sospendere l'editore il cui unico abbonato è pieno",

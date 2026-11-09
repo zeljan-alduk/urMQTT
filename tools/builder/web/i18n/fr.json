@@ -153,6 +153,8 @@
   "enum.devices.iommu.off": "laissé tel que le micrologiciel l'a configuré",
   "enum.devices.iommu.auto": "si la machine en a un",
   "enum.devices.iommu.require": "refuser de démarrer sans",
+  "enum.devices.virtio_net_queues.auto": "un par cœur de données quand la carte répartit les flux (RSS)",
+  "enum.devices.virtio_net_queues.single": "toujours un, le cœur 0 répartit chaque trame",
   "enum.websocket.auth.mtls": "certificat client, comme sur le port TLS",
   "enum.websocket.auth.password": "nom d'utilisateur et mot de passe (pour les navigateurs)",
   "enum.limits.publisher_backpressure.single": "suspendre l'éditeur dont l'unique abonné est plein",

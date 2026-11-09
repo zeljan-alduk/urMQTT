@@ -599,6 +599,8 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     )?;
     // ADR-305: "off" is the default and writes nothing; the others need format 18.
     b.variant(tag::DEV_IOMMU, cfg.devices.iommu.variant())?;
+    // ADR-313: "auto" is the default and writes nothing; "single" needs format 19.
+    b.variant(tag::DEV_NET_QUEUES, cfg.devices.virtio_net_queues.variant())?;
     Ok(b)
 }
 

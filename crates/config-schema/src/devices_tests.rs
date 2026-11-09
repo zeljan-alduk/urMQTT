@@ -173,3 +173,34 @@ fn iommu_off_by_default_and_format_18_otherwise() {
         assert!(parse("dev", &t).is_err(), "iommu = {bad}");
     }
 }
+
+/// ADR-313: `devices.virtio_net_queues = "auto" | "single"`, auto by default
+/// and writing nothing (the blob keeps its version), single format 19.
+#[test]
+fn net_queues_auto_by_default_and_format_19_for_single() {
+    use crate::NetQueues;
+    use urmqtt_cfg::fields::tag;
+    assert_eq!(
+        parse("dev", DEV).unwrap().devices.virtio_net_queues,
+        NetQueues::Auto
+    );
+    let base = without_devices(DEV);
+    let t = format!("{base}\n[devices]\nvirtio_net_queues = \"single\"\n");
+    assert_eq!(
+        parse("dev", &t).unwrap().devices.virtio_net_queues,
+        NetQueues::Single
+    );
+    let blob = run("[devices]\nvirtio_net_queues = \"single\"\n").unwrap();
+    let p = Blob::parse(&blob).unwrap();
+    assert_eq!((p.version(), p.variant(tag::DEV_NET_QUEUES)), (19, 1));
+    urmqtt_cfg::check::check(&p, false).unwrap();
+    // Auto is byte for byte the configuration without the key.
+    assert_eq!(
+        run("").unwrap(),
+        run("[devices]\nvirtio_net_queues = \"auto\"\n").unwrap()
+    );
+    for bad in ["\"multi\"", "true", "4", "\"Single\""] {
+        let t = format!("{base}\n[devices]\nvirtio_net_queues = {bad}\n");
+        assert!(parse("dev", &t).is_err(), "virtio_net_queues = {bad}");
+    }
+}

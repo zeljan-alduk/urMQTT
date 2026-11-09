@@ -3313,6 +3313,141 @@ net_irq() {
     done
 }
 
+# NEXT-6 (ADR-310 to ADR-314): virtio-net multiqueue with RSS. First on QEMU's
+# user network, which offers MQ and RSS with mq=on,rss=on but only one pair: the
+# NIC falls back to one pair and says why (and with devices.virtio_net_queues =
+# "single" asks for nothing); MQTT over mutual TLS works either way. Then the
+# tap rig (scripts/mq-rig.sh): a multi-queue tap with 2 or 4 pairs, where each
+# worker core must receive its own flows on its own pair (frames received, none
+# forwarded) and the round trips must work. The rig needs Linux with a tap
+# device and root or sudo (a CI runner), or URMQTT_MQ_DOCKER=<image> with
+# docker (macOS: docs/perf-results/next6-mq/Dockerfile); otherwise it is skipped.
+mq_suite() {
+    if ! command -v mosquitto_pub >/dev/null || ! command -v mosquitto_sub >/dev/null; then
+        echo "  ✗ the mq scenarios need the mosquitto clients"; FAILED=$((FAILED + 1)); return 0
+    fi
+    local d="$ROOT/deploy/dev" single="$OUT/mq-single-config.toml" tls=(--cafile "$ROOT/deploy/dev/ca.pem")
+    mkdir -p "$OUT"
+    awk '{ print } /^\[devices\]/ { print "virtio_net_queues = \"single\"" }' "$d/config.toml" >"$single"
+    mkimg "$OUT/mq-auto.raw" "serve"
+    MKIMG_EXTRA=(--config "$single" --config-root "$d")
+    mkimg "$OUT/mq-single.raw" "serve"
+    MKIMG_EXTRA=()
+    local accel mode
+    for accel in $ACCELS; do
+        for mode in auto single; do
+            local log="$OUT/mq-user-$mode-$accel.log" data="$OUT/mq-user-$mode-$accel.img" status=0 expect=()
+            fresh_disk "$OUT/mq-$mode.raw" "$data"
+            export QEMU_NIC_PROPS="mq=on,rss=on,vectors=10"
+            if [[ $ARCH == x86_64 ]]; then
+                start_vm "$log" --arch x86_64 --disk "$data" --accel "$accel" --fwd "$PORT:8883"
+            else
+                start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
+            fi
+            unset QEMU_NIC_PROPS
+            if wait_log "$log" "TLS 1.3 listener on port 8883" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+                {
+                    local i
+                    for i in 1 2 3; do
+                        mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i backend "${tls[@]}" \
+                            --cert "$d/services/backend.pem" --key "$d/services/backend.key" \
+                            -t devices/device-001/mq -q 1 -C 1 -W 30 >"$log.got" 2>&1 &
+                        local spid=$!
+                        sleep 1.5
+                        mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i device-001 "${tls[@]}" \
+                            --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" \
+                            -t devices/device-001/mq -q 1 -m "mq $i" || echo "client: publish failed"
+                        wait "$spid" || echo "client: subscriber failed"
+                        if [[ $(cat "$log.got") == "mq $i" ]]; then echo "client: mq-qos1 $i ok"; else echo "client: mq-qos1 $i FAILED"; fi
+                    done
+                } >"$log.client" 2>&1
+            else
+                status=124
+            fi
+            kill_vm
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            if [[ $mode == auto ]]; then
+                expect=('net: one queue pair: the device offers one queue pair \(max_virtqueue_pairs < 2\)')
+            else
+                expect=('NOT:net: one queue pair')
+            fi
+            check "mq-user $mode [$accel]" "$log" "$status" "${expect[@]}" \
+                "net: dispatcher mode: core 0 owns the single virtio-net queue pair" "NOT:net: multiqueue" \
+                "client: mq-qos1 1 ok" "client: mq-qos1 2 ok" "client: mq-qos1 3 ok" "NOT:FAILED" "$NO_FAULT"
+        done
+    done
+    mq_tap
+}
+
+# mq_tap: the multiqueue scenarios on a tap (see mq_suite).
+mq_tap() {
+    local runner=()
+    if [[ $(uname -s) == Linux && -e /dev/net/tun ]] && { [[ $(id -u) -eq 0 ]] || sudo -n true 2>/dev/null; }; then
+        runner=()
+    elif [[ -n ${URMQTT_MQ_DOCKER:-} ]] && command -v docker >/dev/null; then
+        runner=(docker run --rm --cap-add NET_ADMIN --device /dev/net/tun -v "$ROOT:$ROOT" -w "$ROOT" "$URMQTT_MQ_DOCKER")
+    else
+        echo "  - mq tap scenarios skipped (need Linux with /dev/net/tun and root or sudo, or URMQTT_MQ_DOCKER=<image> with docker)"
+        return 0
+    fi
+    local d="$ROOT/deploy/dev" cfg="$OUT/mq-static-config.toml" iso="$OUT/mq-static-live.iso"
+    awk '{ if ($0 ~ /^mode = "dhcp"/) { print "mode = \"static\""; print "address = \"10.77.0.2/24\""; print "gateway = \"10.77.0.1\"" } else print }' \
+        "$d/config.toml" >"$cfg"
+    MKIMG_EXTRA=(--config "$cfg" --config-root "$d")
+    mkimg "$OUT/mq-static.raw" "serve"
+    MKIMG_EXTRA=()
+    if [[ ! -f "$iso" ]]; then
+        if [[ $ARCH == x86_64 ]]; then
+            "$ROOT/scripts/mkiso.sh" --arch x86_64 --live --kernel "$KERNEL" --out "$iso" --cmdline "serve" \
+                --config "$cfg" --config-root "$d" >/dev/null
+        else
+            URMQTT_MENU_TIMEOUT=0 "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve" \
+                --config "$cfg" --config-root "$d" >/dev/null
+        fi
+    fi
+    # medium smp queues pairs [gic]: pairs = the pairs in use (the store's DB
+    # core is the last CPU, on a disk and in RAM alike, so 4 CPUs are 3 data
+    # cores).
+    # Two CPUs are one data core (the store's core is the other, in RAM too):
+    # one pair, and the line says why.
+    local cases=("disk 4 4 3" "disk 3 3 2" "disk 4 2 2" "iso 2 2 1")
+    [[ $ARCH == aarch64 ]] && cases+=("disk 4 4 3 2")
+    local c
+    for c in "${cases[@]}"; do
+        local medium smp q pairs gic name log status=0 expect=() k
+        read -r medium smp q pairs gic <<<"$c"
+        name="mq-tap-$medium-smp$smp-q$q${gic:+-gic$gic}"
+        log="$OUT/$name.log"
+        local args=(--arch "$ARCH" --smp "$smp" --queues "$q" --log "$log" --rounds 12)
+        if [[ $medium == disk ]]; then args+=(--disk "$OUT/mq-static.raw"); else args+=(--iso "$iso"); fi
+        [[ -n $gic ]] && args+=(--gic "$gic")
+        rm -f "$log"
+        ${runner[@]+"${runner[@]}"} "$ROOT/scripts/mq-rig.sh" "${args[@]}" >"$log.rig" 2>&1 || status=$?
+        if (( pairs > 1 )); then
+            expect=("net: multiqueue: $pairs queue pairs \(the device offers $q\)")
+        else
+            expect=("net: one queue pair: one data core \(the NIC offers $q" "NOT:net: multiqueue")
+        fi
+        expect+=("client: mq-qos1 12 ok")
+        for ((k = 1; k < pairs; k++)); do
+            expect+=("net: queue pair $k on core $k: "
+                "net: queue pair $k \(core $k\): [1-9][0-9]* frame\(s\) received, [0-9]+ sent, 0 forwarded to core 0")
+            # The MSI-X vector reaches every core through the local APIC and a
+            # GICv2m SPI; the GICv3 ITS serves core 0 only (ADR-311).
+            if [[ $ARCH == x86_64 || -n $gic ]]; then
+                expect+=("net: receive interrupt of queue pair $k verified")
+            else
+                expect+=("net: queue pair $k on core $k: .*polling every 200 us while this core has connections \(this platform's MSI target reaches core 0 only")
+            fi
+        done
+        local data_cores=$((smp - 1))
+        (( pairs > 1 && data_cores > pairs )) && expect+=("flows of the $((data_cores - pairs)) core\(s\) without a pair")
+        check "$name [tcg]" "$log" "$status" "${expect[@]}" \
+            "NOT:net: queue pair [1-9][0-9]* \(core [0-9]+\): [0-9]+ frame\(s\) received, [0-9]+ sent, [1-9][0-9]* forwarded" \
+            "NOT:client: mq-qos1 [0-9]+ FAILED" "NOT:did not come up" "NOT:the receive interrupt did not arrive" "$NO_FAULT"
+    done
+}
+
 # GICv2 (ADR-039), what KVM gives a guest on a GIC-400 host such as the
 # Raspberry Pi 4/5. HVF cannot emulate a GICv2, so this runs under TCG:
 # boot with ACPI and DT, then the TLS broker scenarios.
@@ -4936,6 +5071,14 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want virtio_gpu && virtio_gpu
     want virtio_devices && virtio_devices
     want iommu_suite && iommu_suite
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=mq: virtio-net multiqueue with RSS (NEXT-6, ADR-310 to ADR-314) on this architecture.
+if [[ ${SMOKE_ONLY:-} == mq && $ARCH != universal ]]; then
+    mq_suite
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit

@@ -243,6 +243,20 @@ says which: `net: receive wake-up: interrupt (MSI-X via ...), on probation ...` 
 (`net: receive wake-up: 8 frames waited after a sleep without the receive interrupt; polling ...`) and the broker
 polls from then on. `"off"` forces polling (configuration format 11).
 
+**More than one NIC queue (NEXT-6, ADR-310 to ADR-314).** With `devices.virtio_net_queues = "auto"` (the default)
+the broker gives each data core its own virtio-net queue pair when the device offers multiqueue **with** receive-side
+scaling (`VIRTIO_NET_F_MQ`, `VIRTIO_NET_F_CTRL_VQ` and `VIRTIO_NET_F_RSS`): the device then hashes every TCP/IPv4
+flow onto the queue of the core that owns it (the broker programs the key and the table), and core 0 no longer copies
+every frame. Nothing to do on most VPSes: their NIC has one queue, or several without RSS, and the broker uses one
+pair as before (`net: one queue pair: <reason>` says why when the device offered more). On your own QEMU/KVM host:
+a multi-queue tap and `-device virtio-net-pci,...,mq=on,rss=on,vectors=2N+2` with `-netdev tap,...,queues=N`, N the
+vCPUs (QEMU computes RSS in software when it cannot load its eBPF program, which needs `vhost=off` then; with vhost
+it needs eBPF RSS). libvirt: `<driver name='qemu' queues='N' rss='on'/>` on the interface. With storage the last
+CPU is the store's core, so 2 vCPUs are one data core and use one pair; 4 vCPUs use 3. The boot log says
+`net: multiqueue: P queue pairs (the device offers N), RSS ...` and one `net: queue pair k on core k: ...` line per
+worker. `"single"` (configuration format 19) keeps one pair whatever the device offers, for a host whose
+multiqueue misbehaves. Each pair costs up to 4 MiB of memory (two 1024-descriptor queues with their buffers).
+
 **DMA isolation through the IOMMU (H4b, ADR-305 to ADR-307).** `devices.iommu` decides whether the broker drives
 the machine's IOMMU (Intel VT-d from the ACPI DMAR table, AMD-Vi from IVRS, Arm SMMUv3 from IORT or the device
 tree). `"off"` (the default) leaves it as the firmware set it, as every release before; the boot log names an IOMMU

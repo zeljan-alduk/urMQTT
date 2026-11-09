@@ -215,15 +215,16 @@ fn structural_attacks_fail_closed() {
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, 10 which no format ever used, and
     // one above the newest).
-    for unknown in [0u8, 10, 19, 20] {
+    for unknown in [0u8, 10, 20, 21] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
     // The versions of the formats that came after 7, each its own feature
     // (8 back-pressure, 9 WebSocket, 11 the receive interrupt, 12 MQTT 5.0,
     // 13 the shared-group limits, 14 the per-address connection limit, 15 the run-time
-    // account limit, 16 the metrics endpoint, 17 the A/B update keys, 18 the IOMMU).
-    for known in [8u8, 9, 11, 12, 13, 14, 15, 16, 17, 18] {
+    // account limit, 16 the metrics endpoint, 17 the A/B update keys, 18 the IOMMU,
+    // 19 the NIC's queue pairs).
+    for known in [8u8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19] {
         let v = with_version(&assemble(&ok), known);
         assert_eq!(Blob::parse(&v).map(|b| b.version()), Ok(u16::from(known)));
     }
@@ -245,7 +246,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 18));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 19));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -254,7 +255,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[18, 0],
+        &[19, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -404,6 +405,40 @@ fn net_interrupt_needs_format_11_and_auto_writes_nothing() {
     assert!(Blob::parse(&with_version(&blob, 10)).is_err());
     assert!(Blob::parse(&with_version(&blob, 7)).is_err());
     assert!(Builder::new().variant(tag::DEV_NET_INTERRUPT, 2).is_err());
+}
+
+/// NEXT-6, ADR-313: `devices.virtio_net_queues` came with format 19. "auto"
+/// (the default) writes nothing, so every existing configuration keeps its
+/// version and boots on an older kernel; "single" needs version 19, which an
+/// older kernel refuses by the version (it would not know to keep one pair).
+#[test]
+fn net_queues_need_format_19_and_auto_writes_nothing() {
+    use crate::fields::NET_QUEUE_MODES;
+    let f = crate::fields::by_key("devices.virtio_net_queues").unwrap();
+    assert_eq!(
+        (f.tag, f.since, f.dev_only),
+        (tag::DEV_NET_QUEUES, 19, false)
+    );
+    assert_eq!(NET_QUEUE_MODES, ["auto", "single"]);
+    let mut auto = Builder::new();
+    auto.variant(tag::DEV_NET_QUEUES, 0).unwrap();
+    assert_eq!(auto.lowest_version(), 2);
+    assert_eq!(auto.finish(false).unwrap(), empty());
+    assert_eq!(
+        Blob::parse(&empty()).unwrap().variant(tag::DEV_NET_QUEUES),
+        0
+    );
+    let mut b = Builder::new();
+    b.variant(tag::DEV_NET_QUEUES, 1).unwrap();
+    assert_eq!(b.lowest_version(), 19);
+    assert!(b.finish_as(false, 18).is_err());
+    let blob = b.finish(false).unwrap();
+    let p = Blob::parse(&blob).unwrap();
+    assert_eq!((p.version(), p.variant(tag::DEV_NET_QUEUES)), (19, 1));
+    check::check(&p, false).unwrap();
+    // An older format cannot hold it.
+    assert!(Blob::parse(&with_version(&blob, 18)).is_err());
+    assert!(Builder::new().variant(tag::DEV_NET_QUEUES, 2).is_err());
 }
 
 /// LATER-5, ADR-305: `devices.iommu` came with format 18. "off" (the

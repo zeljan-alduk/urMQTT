@@ -9,7 +9,8 @@
 use libfuzzer_sys::fuzz_target;
 use urmqtt_broker::metrics::{Own, render};
 use urmqtt_broker::sys::{
-    Backpressure, Drops, Handshakes, Info, IommuSys, Mqtt5Info, PerAddress, PlainInfo, Qos2, WsInfo,
+    Backpressure, Drops, Handshakes, Info, IommuSys, Mqtt5Info, NetQueueSys, PerAddress, PlainInfo,
+    Qos2, WsInfo,
 };
 
 fn take<'a>(d: &mut &'a [u8], n: usize) -> &'a [u8] {
@@ -42,6 +43,14 @@ fuzz_target!(|data: &[u8]| {
         .map(|_| take(&mut d, 1).first().copied().unwrap_or(0))
         .collect();
     let accepted: Vec<u64> = (0..cores).map(|_| num(&mut d)).collect();
+    let queues: Vec<NetQueueSys> = (0..cores.min(16))
+        .map(|_| NetQueueSys {
+            received: num(&mut d),
+            sent: num(&mut d),
+            forwarded: num(&mut d),
+            interrupts: num(&mut d),
+        })
+        .collect();
     let mut m5 = Mqtt5Info::default();
     for s in m5.disconnects.iter_mut().chain(m5.refused.iter_mut()) {
         *s = num(&mut d);
@@ -75,6 +84,7 @@ fuzz_target!(|data: &[u8]| {
         entropy_source: &text[3],
         console_dropped: num(&mut d),
         net_mtu: num(&mut d) as u16,
+        net_queues: &queues,
         drops: Drops {
             slow_subscriber: num(&mut d),
             offline: num(&mut d),

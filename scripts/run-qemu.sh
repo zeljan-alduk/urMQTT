@@ -7,7 +7,7 @@
 #                       [--pcap FILE] [--gdb] [--no-net] [--fwd HOST:GUEST,...]
 #                       [--blk-props 'physical_block_size=4096,opt_io_size=65536,...']
 #                       [--disk-format raw|qcow2] [--discard unmap]
-#                       [--dgram LOCAL:REMOTE] [--gpu virtio|virtio-vga] [--iommu intel|amd|smmuv3] [-- extra qemu args]
+#                       [--dgram LOCAL:REMOTE] [--tap IFNAME[:QUEUES]] [--gpu virtio|virtio-vga] [--iommu intel|amd|smmuv3] [-- extra qemu args]
 #
 # --disk boots the raw GPT image (mkraw.py) as a virtio-blk disk, like a
 # KVM host or a cloud server would; the data disk is a second virtio-blk.
@@ -25,6 +25,10 @@
 # --dgram LOCAL:REMOTE replaces user networking with a raw L2 datagram
 # socket (QEMU binds UDP LOCAL, sends to REMOTE): a host process is then the
 # whole network and can inject arbitrary frames (H3 adversarial tests).
+# --tap IFNAME[:QUEUES] replaces user networking with an existing tap device
+# (Linux; created by the caller, multi_queue when QUEUES > 1, see
+# scripts/mq-rig.sh). With QUEUES > 1 the NIC gets that many queue pairs with
+# RSS (mq=on,rss=on,vectors=2*QUEUES+2), NEXT-6's multiqueue (ADR-310).
 # QEMU_NIC_PROPS (environment) is appended to the virtio-net-pci device, e.g.
 # QEMU_NIC_PROPS=rx_queue_size=1024 for the deeper receive queue (ADR-266;
 # QEMU's default is 256, and it keeps tx_queue_size at 256 without vhost-user).
@@ -55,6 +59,7 @@ DISKFMT=raw DRIVEOPTS=""
 ISO="" DISK="" BUS=blk CPU_MODEL="" GIC=3 RNG=1 ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
 FWD="1883:1883,8883:8883"
 DGRAM=""
+TAP=""
 SECURE_VARS=""
 GPU=""
 IOMMU=""
@@ -86,6 +91,7 @@ while [[ $# -gt 0 ]]; do
         --no-net) NET=0; shift ;;
         --fwd) FWD=$2; shift 2 ;;
         --dgram) DGRAM=$2; shift 2 ;;
+        --tap) TAP=$2; shift 2 ;;
         --gpu) GPU=$2; shift 2 ;;
         --iommu) IOMMU=$2; shift 2 ;;
         --) shift; EXTRA=("$@"); break ;;
@@ -105,6 +111,19 @@ fi
 # (environment) leaves the devices bypassing it (the refusal's smoke scenario).
 IOMMU_PROPS=",disable-legacy=on,iommu_platform=on"
 [[ ${QEMU_IOMMU_PLATFORM:-on} == off ]] && IOMMU_PROPS=""
+# --tap: the netdev and, for more than one queue pair, the NIC's multiqueue
+# properties (two vectors per pair, one for the configuration, one for the
+# control queue, as QEMU's documentation suggests).
+TAPDEV="" MQPROPS=""
+if [[ -n "$TAP" ]]; then
+    TAPQ=1
+    [[ $TAP == *:* ]] && TAPQ=${TAP##*:}
+    TAPDEV="tap,id=n0,ifname=${TAP%%:*},script=no,downscript=no,vhost=off"
+    if (( TAPQ > 1 )); then
+        TAPDEV+=",queues=$TAPQ"
+        MQPROPS=",mq=on,rss=on,vectors=$((2 * TAPQ + 2))"
+    fi
+fi
 if [[ $ARCH == x86_64 ]]; then
     case $MACHINE in q35|pc) ;; *) echo "error: --machine q35|pc" >&2; exit 2 ;; esac
     case $FIRMWARE in uefi|bios) ;; *) echo "error: --firmware uefi|bios" >&2; exit 2 ;; esac
@@ -202,7 +221,9 @@ if [[ $ARCH == x86_64 ]]; then
     fi
     [[ $RNG -eq 1 ]] && X86ARGS+=(-device virtio-rng-pci,romfile=)
     if [[ $NET -eq 1 ]]; then
-        if [[ -n "$DGRAM" ]]; then
+        if [[ -n "$TAPDEV" ]]; then
+            NETDEV=$TAPDEV
+        elif [[ -n "$DGRAM" ]]; then
             NETDEV="dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port=${DGRAM%%:*}"
             NETDEV+=",remote.type=inet,remote.host=127.0.0.1,remote.port=${DGRAM##*:}"
         else
@@ -214,7 +235,7 @@ if [[ $ARCH == x86_64 ]]; then
                 done
             fi
         fi
-        X86ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
+        X86ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=$MQPROPS${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
         [[ -n "$PCAP" ]] && X86ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
     else
         X86ARGS+=(-nic none)
@@ -306,7 +327,9 @@ if [[ -n "$DATA" ]]; then
     fi
 fi
 if [[ $NET -eq 1 ]]; then
-    if [[ -n "$DGRAM" ]]; then
+    if [[ -n "$TAPDEV" ]]; then
+        NETDEV=$TAPDEV
+    elif [[ -n "$DGRAM" ]]; then
         # Raw L2: the guest's single virtio-net NIC talks to a host process
         # over a UDP datagram socket pair, one Ethernet frame per datagram
         # (H3, tools/attack). QEMU binds LOCAL and sends to REMOTE.
@@ -321,7 +344,7 @@ if [[ $NET -eq 1 ]]; then
             done
         fi
     fi
-    ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
+    ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=$MQPROPS${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
     [[ -n "$PCAP" ]] && ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
 else
     # Without this QEMU adds a default NIC (with an iPXE option ROM).

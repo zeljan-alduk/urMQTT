@@ -153,6 +153,8 @@
   "enum.devices.iommu.off": "left as the firmware set it",
   "enum.devices.iommu.auto": "when the machine has one",
   "enum.devices.iommu.require": "refuse to boot without one",
+  "enum.devices.virtio_net_queues.auto": "one per data core when the NIC steers flows (RSS)",
+  "enum.devices.virtio_net_queues.single": "always one, core 0 steers every frame",
   "enum.websocket.auth.mtls": "client certificate, as on the TLS port",
   "enum.websocket.auth.password": "user name and password (for browsers)",
   "enum.limits.publisher_backpressure.single": "pause a publisher whose only subscriber is full",

@@ -334,6 +334,17 @@ pub struct WsInfo<'a> {
     pub closes_abrupt: u64,
 }
 
+/// One virtio-net queue pair's counters (NEXT-6, ADR-312): frames received
+/// and sent on it, frames of another core's flow that its core forwarded to
+/// core 0, and its receive interrupts. Pair `k` belongs to data core `k`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NetQueueSys {
+    pub received: u64,
+    pub sent: u64,
+    pub forwarded: u64,
+    pub interrupts: u64,
+}
+
 /// DMA remapping (H4b, ADR-305): `$SYS/broker/iommu/...`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IommuSys<'a> {
@@ -403,6 +414,8 @@ pub struct Info<'a> {
     /// The link MTU in use, bytes (NOW-19, ADR-264): from DHCP option 26,
     /// `network.mtu`, or 1500.
     pub net_mtu: u16,
+    /// The NIC's queue pairs in use (one without multiqueue; NEXT-6, ADR-312).
+    pub net_queues: &'a [NetQueueSys],
     pub drops: Drops,
     pub qos2: Qos2,
     /// Publisher back-pressure (NOW-13, ADR-269).
@@ -486,6 +499,13 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
     put("entropy/source", &i.entropy_source);
     put("console/dropped", &i.console_dropped);
     put("net/mtu", &i.net_mtu);
+    put("net/queues", &i.net_queues.len());
+    for (k, q) in i.net_queues.iter().enumerate() {
+        put(&alloc::format!("net/queue/received/{k}"), &q.received);
+        put(&alloc::format!("net/queue/sent/{k}"), &q.sent);
+        put(&alloc::format!("net/queue/forwarded/{k}"), &q.forwarded);
+        put(&alloc::format!("net/queue/interrupts/{k}"), &q.interrupts);
+    }
     let io = &i.iommu;
     put("iommu/mode", &io.mode);
     put("iommu/state", &io.state);
@@ -624,6 +644,8 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
 pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
     let busy = alloc::vec![0u8; cores];
     let accepted = alloc::vec![0u64; cores];
+    // One NIC queue pair: the per-pair topics repeat for each pair in use.
+    let queues = [NetQueueSys::default()];
     let info = Info {
         version: "",
         uptime_s: 0,
@@ -646,6 +668,7 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
         entropy_source: "",
         console_dropped: 0,
         net_mtu: 1500,
+        net_queues: &queues,
         drops: Drops::default(),
         qos2: Qos2::default(),
         backpressure: Backpressure::default(),
@@ -734,7 +757,7 @@ pub fn json(i: &Info<'_>) -> String {
     json_str(&mut o, i.entropy_source);
     let _ = write!(
         o,
-        "}},\"console_dropped\":{},\"net\":{{\"mtu\":{}}},\"dropped\":{{\"slow_subscriber\":{},\"offline\":{},\"cross_core\":{},\
+        "}},\"console_dropped\":{},\"net\":{{\"mtu\":{},\"queues\":[{}]}},\"dropped\":{{\"slow_subscriber\":{},\"offline\":{},\"cross_core\":{},\
          \"qos1_queue_full\":{},\"publish_rate\":{},\"frames_steer\":{},\"frames_worker_tx\":{},\"frames_nic\":{}}},\
          \"qos2\":{{\"received\":{},\"duplicates\":{},\"completed\":{},\"inbound_full\":{}}},\
          \"backpressure\":{{\"mode\":\"{}\",\"paused\":{},\"paused_ms\":{},\"timeouts\":{},\"holding\":{}}},\
@@ -745,6 +768,17 @@ pub fn json(i: &Info<'_>) -> String {
          \"refused\":{},\"untracked\":{}}},\"accepted\":[",
         i.console_dropped,
         i.net_mtu,
+        i.net_queues
+            .iter()
+            .map(|q| alloc::format!(
+                "{{\"received\":{},\"sent\":{},\"forwarded\":{},\"interrupts\":{}}}",
+                q.received,
+                q.sent,
+                q.forwarded,
+                q.interrupts
+            ))
+            .collect::<alloc::vec::Vec<_>>()
+            .join(","),
         d.slow_subscriber,
         d.offline,
         d.cross_core,
@@ -1220,6 +1254,12 @@ mod tests {
             entropy_source: "jitter+firmware",
             console_dropped: 0,
             net_mtu: 1460,
+            net_queues: &[NetQueueSys {
+                received: 7,
+                sent: 9,
+                forwarded: 0,
+                interrupts: 2,
+            }],
             drops: Drops {
                 slow_subscriber: 3,
                 ..Drops::default()
@@ -1518,6 +1558,11 @@ mod tests {
                 "$SYS/broker/entropy/source",
                 "$SYS/broker/console/dropped",
                 "$SYS/broker/net/mtu",
+                "$SYS/broker/net/queues",
+                "$SYS/broker/net/queue/received/0",
+                "$SYS/broker/net/queue/sent/0",
+                "$SYS/broker/net/queue/forwarded/0",
+                "$SYS/broker/net/queue/interrupts/0",
                 "$SYS/broker/iommu/mode",
                 "$SYS/broker/iommu/state",
                 "$SYS/broker/iommu/units",
@@ -1633,6 +1678,9 @@ mod tests {
         );
         assert_eq!(val("$SYS/broker/cpu/accepted/1"), Some("5"));
         assert_eq!(val("$SYS/broker/net/mtu"), Some("1460"));
+        assert_eq!(val("$SYS/broker/net/queues"), Some("1"));
+        assert_eq!(val("$SYS/broker/net/queue/received/0"), Some("7"));
+        assert_eq!(val("$SYS/broker/net/queue/interrupts/0"), Some("2"));
         assert_eq!(val("$SYS/broker/messages/qos2/received"), Some("4"));
         assert_eq!(val("$SYS/broker/messages/qos2/duplicates"), Some("1"));
         assert_eq!(
@@ -1673,7 +1721,7 @@ mod tests {
              \"cpu\":{\"cores\":2,\"busy\":[10,20]},\"memory\":{\"total\":1000,\"used\":400},\
              \"disk\":{\"total\":0,\"used\":0},\"clients\":{\"connected\":3,\"total\":5},\
              \"subscriptions\":7,\"retained\":2,\"messages\":{\"received\":100,\"sent\":250},\
-             \"connections_refused\":1,\"tls\":{\"server_cert_days\":90},\"time\":{\"source\":\"sntp\",\"offset_ms\":-12},\"entropy\":{\"source\":\"jitter+firmware\"},\"console_dropped\":0,\"net\":{\"mtu\":1460},\
+             \"connections_refused\":1,\"tls\":{\"server_cert_days\":90},\"time\":{\"source\":\"sntp\",\"offset_ms\":-12},\"entropy\":{\"source\":\"jitter+firmware\"},\"console_dropped\":0,\"net\":{\"mtu\":1460,\"queues\":[{\"received\":7,\"sent\":9,\"forwarded\":0,\"interrupts\":2}]},\
              \"dropped\":{\"slow_subscriber\":3,\"offline\":0,\"cross_core\":0,\"qos1_queue_full\":0,\
              \"publish_rate\":0,\"frames_steer\":0,\"frames_worker_tx\":0,\"frames_nic\":0},\
              \"qos2\":{\"received\":4,\"duplicates\":1,\"completed\":2,\"inbound_full\":0},\

@@ -4473,3 +4473,195 @@ device the kernel does not drive is unaffected; one for a driven device would be
      hardware has IOTLBs; `make bench` was not run with an IOMMU.
    - intel-iommu under KVM needs the split irqchip (`run-qemu.sh` adds it); not run here (no KVM host).
    - Fault interrupts (ADR-306) and unmapping are deliberately absent.
+
+## ADR-310 — virtio-net multiqueue: one queue pair per data core, only with the device's RSS (NEXT-6)
+
+- **Status:** Accepted (NEXT-6). Amends ADR-032 ("NIC: dispatcher mode only (v1) ... virtio-net multiqueue + RSS is
+  **not implemented**") and ADR-266 (the queue sizes now hold per pair).
+- **Context.** ADR-032 put the whole NIC on core 0: it copies every received frame out of the DMA ring, classifies
+  it and pushes it over a ring to the worker that owns the flow, and transmits every frame the workers send back.
+  On a busy broker core 0 is the one core that touches every frame, and every frame crosses two cores. virtio
+  1.x offers more queue pairs (`VIRTIO_NET_F_MQ`, §5.1.6.5.5) and, since 1.2, receive-side scaling that the driver
+  programs (`VIRTIO_NET_F_RSS`, §5.1.6.5.7: hash types, a Toeplitz key, an indirection table). The kernel's
+  steering is the Microsoft Toeplitz hash of the 4-tuple with the Microsoft key, chosen in ADR-032 so that a NIC
+  with RSS could agree; the test host to try it was the open question (D-9). QEMU's user network, the only
+  backend on macOS without root, has one queue; a multi-queue **tap** on Linux has any number, and QEMU's
+  virtio-net computes RSS itself (in software, or in eBPF when it can load it).
+- **Decision.**
+  1. **Negotiation.** With `devices.virtio_net_queues = "auto"` (the default, ADR-313) the driver asks for one pair
+     per CPU (the data cores are not known before the store opens; at most 16, `MAX_PAIRS`) and offers to accept
+     `VIRTIO_NET_F_MQ`, `VIRTIO_NET_F_CTRL_VQ` and `VIRTIO_NET_F_RSS`. It uses more than one pair only when the
+     device accepted **all three**, its `max_virtqueue_pairs` is at least 2, and its RSS takes a 40-byte key, a
+     128-entry indirection table and the TCP/IPv4 hash (`rss_max_key_size`, `rss_max_indirection_table_length`,
+     `supported_hash_types`; every field checked, `net::plan`). Pairs = min(asked, 16, the device's maximum).
+     Anything less is **one pair, exactly as before**, with the reason on the boot line (`net: one queue pair:
+     ...`). `"single"` asks for one pair and negotiates none of the three.
+  2. **No multiqueue without RSS.** A device that offers MQ but not RSS (the common KVM setup: libvirt
+     `<driver queues='N'/>` with vhost, and no eBPF RSS) would place flows by its own hash, which the kernel cannot
+     know; Linux tap's automatic steering even moves a flow to the queue of the guest's last transmit, so frames of
+     one flow could arrive on two queues and be reordered between cores. MQ is still negotiated there (harmless:
+     multiqueue starts disabled until the driver configures it, §5.1.6.5.5) but only pair 0 is set up and used.
+  3. **Bring-up.** Pairs 0..n-1 (receive queue 2k, transmit queue 2k+1) and the control queue (index
+     2 × `max_virtqueue_pairs`) are set up before `DRIVER_OK`; pair 0 is used at once. When the data cores are known
+     (`netproto::prepare`, before they start), the RSS configuration goes out on the control queue (ADR-311);
+     only if the device answers `VIRTIO_NET_OK` for that very chain, within one second, are pairs 1.. handed to
+     their cores. Otherwise one pair: the device keeps steering to pair 0 alone, the other pairs are dropped
+     unused (`Single::Refused`).
+  4. **One pair per data core.** Pair c belongs to data core c (pair 0 to core 0, the dispatcher). The pairs in
+     use are min(pairs set up, data cores); with more cores than pairs, the cores without a pair are served by
+     core 0 as before (ADR-311). With storage, the last CPU is the DB core (ADR-030, in RAM as on a disk), so a
+     2-vCPU machine has one data core and uses one pair (`net: one queue pair: one data core (the NIC offers 2;
+     two or more data cores would use them)`).
+  5. **The queue pair moves to its core.** `urmqtt_virtio::net::NetQueue` holds a pair's two rings, its bounce
+     buffers and a copy of the notification window (`bus::Kick`, a `Doorbell` for virtio-pci), so the core that
+     owns it receives, transmits, recycles and kicks without any lock or shared state. `VirtioNet` keeps pair 0
+     (reached through `Deref`, so core 0's code is unchanged) and the control queue.
+  6. **Hash report is not negotiated** (`VIRTIO_NET_F_HASH_REPORT`). It would add 8 bytes to every header and
+     report a hash the kernel must not trust anyway; the queue a frame arrives on already carries the device's
+     decision, and the worker checks it by computing the same hash (ADR-311).
+  7. **Memory.** Each pair has two queues of up to 1024 descriptors (what the device allows, ADR-266) with 2 KiB
+     bounce buffers: 4 MiB per pair at 1024, 1 MiB at QEMU's default of 256. A pair is set up per CPU, including
+     the DB core's, which is never used (one pair's worth of DMA memory wasted on a machine with storage; a
+     smaller first guess would need the store's decision before the NIC's).
+- **Upgrade.** A device that offers neither MQ nor RSS (QEMU's default, `mq=off`) is driven as in v0.5.0, bit for
+  bit. A device that offers MQ (with or without RSS) now has MQ, the control queue and, when offered, RSS
+  negotiated; with RSS and enough pairs the broker switches to one pair per data core at the first boot. There is
+  no stored state: going back to v0.5.0, or to `"single"`, is a reboot.
+- **Verification.** See ADR-314.
+
+## ADR-311 — Steering: one table for the kernel and the device; a frame of another core goes to core 0; a receive interrupt per pair (NEXT-6)
+
+- **Status:** Accepted (NEXT-6). Amends ADR-032 (`core_of_flow`), ADR-270 (the receive interrupt, now per pair).
+- **Decision.**
+  1. **One indirection table.** RSS picks `table[hash mod 128]`; the kernel picked `hash mod workers`, which a
+     128-entry table can only match for a power of two. Once the device has accepted the table, the kernel's
+     steering becomes the same lookup (`urmqtt_net::rss::core_by_table`: `first + (h mod 128) mod count`, which is
+     the table's entry, a test checks both for every hash of a sample): entry i names core `workers.start + i mod
+     workers.len()`, and the device's entry is that core's pair, or pair 0 when that core has none (more cores than
+     pairs). Without multiqueue the steering stays `hash mod workers`, unchanged. A 128-entry table cannot split
+     evenly over 3, 5, 6 or 7 cores (7 cores: 19 or 18 entries, +3.9 % / -1.6 % of a fair share); the spread test
+     over one source address and every ephemeral port range allows 6 % (it allows 4 % for the modulo).
+     **Home shards (`home_of`, persisted sessions) are untouched:** only the transport core of a flow follows the
+     table.
+  2. **Key and hash type.** The Microsoft key (`rss::DEFAULT_KEY`, ADR-032) and `VIRTIO_NET_RSS_HASH_TYPE_TCPv4`
+     only, `unclassified_queue = 0`: ARP, ICMP, UDP (DHCP, SNTP, syslog/statsd replies) and anything else the device
+     does not hash go to pair 0, i.e. to core 0, which keeps ARP, DHCP, ICMP and the echo port (ADR-032). TCP over
+     IPv4 to any port is hashed; the dispatcher's rule decides as before: a TCP frame to an MQTT port (the TLS,
+     plaintext, WebSocket and metrics listeners) belongs to the core of its flow, anything else to core 0.
+  3. **A worker checks every frame.** Core c takes frames from its own pair, classifies each with the dispatcher's
+     rule (`netproto::owner`) and keeps it only if the flow is c's. Any other frame (a TCP frame to a port core 0
+     serves, or a frame a device misplaced) is **forwarded to core 0** over the existing c→0 ring, tagged
+     (`FrameBuf::rx`), and core 0 steers it exactly as if it had arrived on pair 0 (to its owner, or to its own
+     stack). A device that steered by another hash would therefore cost a hop per frame, never a lost or
+     misdelivered frame. **No reordering within a flow:** a flow's frames all arrive on one queue (the table does
+     not change after boot), and both paths (own queue; queue → c→0 ring → core 0 → 0→c ring) are FIFO. Counted per
+     pair (`forwarded`, ADR-312); the smoke rig requires it to stay 0 for MQTT traffic.
+  4. **Transmit on the own pair.** A worker with a pair queues its frames on its own transmit queue, directly; a
+     full queue keeps up to 4096 frames waiting in order (ADR-223's rule, per pair), beyond that it drops (counted
+     as a NIC drop). A worker without a pair, and core 0, transmit as before.
+  5. **The receive interrupt per pair (ADR-270 generalised).** Pair k's receive queue signals MSI-X entry k. At
+     probe the entries 1.. get their own interrupt (a further GICv2m SPI, or a further local APIC vector) and are
+     written **masked**, because the APIC ID of core k is not known before the other CPUs start; core k, when it
+     starts, aims entry k at itself (`devices::route_net_queue`: the SPI routed to it in the distributor, or the MSI
+     address rewritten with its APIC ID) and unmasks it. Each pair has its own `RxWake` with ADR-270's suppression
+     protocol, hold, **probation and polling fallback**, its own counters and its own boot lines (`net: queue pair k
+     on core k: ...; receive wake-up: interrupt (MSI-X via local APIC vector 66, to core 1), on probation ...`,
+     `net: receive interrupt of queue pair k verified: ...`, the fallback warning). A worker polls its pair while it
+     has connections of its own (its flows arrive there), at 200 us (polling) or 1 ms (probation), as core 0 does.
+  6. **Where a pair is polled.** The GICv3 ITS as set up by ADR-270 has one collection (core 0): pairs 1.. are
+     polled there (`Why::CoreZeroOnly`), as is a core whose APIC ID is above 254 (8-bit MSI destination), a pair
+     beyond the MSI-X table (`vectors` too small), or when `devices.virtio_net_interrupt = "off"`.
+  7. **Unsafe.** No new `unsafe`: the MSI-X table writes are the existing one (entry 0, ADR-270) generalised to
+     entry k behind a bounds check against the table size read from the capability (`MsixTable::write`); the
+     driver's buffer accesses moved from `VirtioNet` to `NetQueue` unchanged.
+
+## ADR-312 — Per-pair counters and what the operator sees (NEXT-6)
+
+- **Status:** Accepted (NEXT-6).
+- **Decision.** Each pair counts, on the core that owns it: frames received, frames sent, frames forwarded to core 0,
+  frames that found its transmit queue full, armed sleeps and those that ended with a frame and no interrupt, the
+  most frames seen waiting in its receive queue; the interrupt counter is per pair. They appear:
+  1. in `$SYS/broker/net/queues` (the pairs in use, 1 without multiqueue) and `$SYS/broker/net/queue/{received,
+     sent, forwarded, interrupts}/<pair>`; in the info query's JSON as `"net":{"mtu":..,"queues":[{"received":..,
+     "sent":..,"forwarded":..,"interrupts":..}, ...]}`; on the metrics endpoint as `urmqtt_network_queue_pairs` and
+     `urmqtt_network_queue_frames_{received,sent,forwarded}_total{queue="k"}`,
+     `urmqtt_network_queue_interrupts_total{queue="k"}` (`queue` is a new bounded label: at most 16 values, from
+     the kernel). Without multiqueue there is one pair, pair 0, and its counters are the whole NIC's. New topics
+     only: nothing existing changed name or meaning;
+  2. every 5 s on the console while a pair moves frames (multiqueue only): `net: queue pair k (core k): R frame(s)
+     received, S sent, F forwarded to core 0, T with the transmit queue full, I receive interrupt(s) (A armed
+     sleep(s), M ended with a frame and no interrupt), receive queue peak P of N`;
+  3. at boot: `net: multiqueue: P queue pairs (the device offers M), RSS with the Toeplitz key and a 128-entry
+     table: ...` or `net: one queue pair: <reason>`, and one line per worker pair (descriptors, wake-up mode).
+
+## ADR-313 — `devices.virtio_net_queues = "auto" | "single"`, configuration format 19 (NEXT-6)
+
+- **Status:** Accepted (NEXT-6). Tag 395 (apart from the other v0.6.0 items' tags so that items built in parallel do
+  not collide), format 19 (reserved for this item).
+- **Decision.** `"auto"`, the default, writes no record, so every existing configuration keeps its format and boots
+  on an older kernel: an upgrade to this kernel turns multiqueue on by itself where the device offers MQ and RSS
+  (ADR-310 point 1), and only there. `"single"` asks for one pair and negotiates none of MQ, the control queue
+  and RSS (the device is driven exactly as by v0.5.0); it needs format 19, so an older kernel refuses the image
+  instead of ignoring the request. Why default on: the change is not on the network surface (the same ports and
+  protocols; the hypervisor's device is already trusted, ADR-270), it falls back to one pair whenever anything
+  is missing or refused, and a host offers MQ with RSS only when its operator configured it (QEMU `mq=on,rss=on`
+  with a multi-queue tap, or vhost with eBPF RSS). `"single"` is the escape for a host whose multiqueue
+  misbehaves. Schema, the `urmqtt-config` tool, the builder page (translations in all 15 languages) and the
+  template check (a v0.5.0 or format-18 template refuses `"single"` with the reason) know the key.
+
+## ADR-314 — Multiqueue: how it was verified, what it gains, what is not done (NEXT-6)
+
+- **Status:** Accepted (NEXT-6).
+- **Verification.**
+  1. **Host tests.** `crates/virtio/src/net/tests.rs` against the fake device (which can now play the control
+     queue): one pair negotiates nothing new and works as before; `plan` checks every configuration field (no MQ,
+     MQ without RSS or without the control queue, 0/1/0x8001 pairs, a short key, a short table, no TCP/IPv4
+     hash); the RSS command's layout byte for byte; four pairs with RSS hand out pairs 1..3 once and only after the
+     device's OK, each receiving and transmitting on its own queues with its own doorbell; a refusal, silence, an
+     answer for another chain or without the byte all leave one pair working; a table naming a pair not in use is
+     never sent; fewer pairs than asked; a second pair or the control queue that cannot be set up; hostile used
+     entries on a taken pair; a full transmit queue counted. `crates/net/src/rss.rs`: the table and the
+     computation agree; one source address spreads over 2..8 workers by the table. `$SYS`, JSON and metrics tests
+     with two pairs; configuration format 19 in `urmqtt-cfg`, `-config`, `-config-schema`, the CLI's template test
+     and the builder (`tools/builder/test/netqueues.test.mjs`).
+  2. **Fuzzing.** `virtio_net_mq`: any offered features, multiqueue/RSS fields, queue sizes, answer to the RSS
+     command (none, refusal, wrong head, no byte), then completions on any queue for any head and length; the
+     pairs never exceed what was asked, the driver's limit or the device's maximum, a pair leaves the driver only
+     after an accepted table, frames never exceed the buffer. Two minutes on the M4 Pro: 124 000 runs (slow by
+     design: a silent device costs the driver's one-second timeout on the fake clock), no finding.
+  3. **QEMU smoke, `SMOKE_ONLY=mq`** (both architectures). On QEMU's user network with `mq=on,rss=on` (MQ and RSS
+     offered, one pair): the fallback line and three QoS 1 round trips over mutual TLS; with `"single"` no line
+     and the same round trips. Then the tap rig (`scripts/mq-rig.sh`, Linux; on the Mac inside Docker with
+     `URMQTT_MQ_DOCKER=urmqtt-mq-rig`, `docs/perf-results/next6-mq/Dockerfile`, QEMU 8.2.2 TCG): a multi-queue tap
+     with `mq=on,rss=on,vectors=2N+2`, 12 QoS 1 round trips over mutual TLS on 24 new connections, and per worker
+     pair: frames received, **none forwarded** (the device's RSS and the kernel's table agree), the wake-up mode
+     (aarch64 GICv3 ITS: polled with the reason; x86_64 local APIC and aarch64 GICv2m: the interrupt verified on
+     the worker's core). Cases: 4 vCPUs and 4 queues (3 data cores, 3 pairs), 3 vCPUs and 3 queues (2 pairs), 4
+     vCPUs and 2 queues (2 pairs; the third core's flows through pair 0 and core 0), 2 vCPUs and 2 queues (one
+     data core: one pair, and the line says so), and on aarch64 4 vCPUs with a GICv2. QEMU loaded its eBPF RSS
+     program nowhere (Docker's kernel refused it) and used its software RSS, which computes the same Toeplitz hash.
+  4. Regression: `SMOKE_ONLY=misc` `net_irq` (the single pair's receive interrupt, auto and off) on aarch64 HVF;
+     the metrics group (the new label).
+- **Gain.** Measured on the local rig only (PERFORMANCE.md section 14): QEMU TCG inside Docker's 4-CPU VM on the
+  Mac, where the guest's vCPUs, QEMU's network thread and the load generator share four host CPUs. The numbers are
+  in section 14 with what they can and cannot say; no KVM host was used (none is available to this work, D-9),
+  so the gain on a real hypervisor is unmeasured.
+- **Not done (listed, not hidden).**
+  - No KVM host: vhost-net with eBPF RSS (how a cloud would offer it), real interrupt delivery to vCPUs other
+    than 0, and the throughput gain on a hypervisor are not verified. The rig's TCG cannot show a CPU gain fairly.
+  - MQ without RSS stays one pair (point 2 of ADR-310), even though such hosts are common; using their queues
+    (with protection against a flow moving between queues) is a later item.
+  - No hash report (ADR-310 point 6); no IPv6 hash types (no IPv6, NEXT-1); no change of the table at run time
+    (a core cannot be taken out of service).
+  - The GICv3 ITS serves core 0 only, so on an ITS-only aarch64 host (the netcup ARM VPS, TCG) worker pairs are
+    polled (200 us while they have connections).
+  - One pair per CPU is set up at probe, the DB core's included (4 MiB at 1024 descriptors, never used).
+  - The per-pair 5 s console line exists only with multiqueue (`$SYS` and the metrics have the counters always).
+  - A device that answers the RSS command **after** the one-second timeout is not handled: the driver has gone back
+    to one pair and nobody polls pairs 1.., so a device that applied the table late would put those flows on
+    queues no core reads (their clients would time out). QEMU handles the control queue as soon as it is kicked,
+    so this needs a broken device;
+    `devices.virtio_net_queues = "single"` avoids the command altogether. Recovering would need a device reset or
+    core 0 draining the abandoned pairs.
+  - A device whose `max_virtqueue_pairs` is 0x8000 (the specification's maximum) has its control queue at index
+    0x10000, which no 16-bit queue number names: it gets one pair (`Single::QueueSetup`).

@@ -340,6 +340,34 @@ impl NetInterrupt {
     }
 }
 
+/// How many virtio-net queue pairs the NIC uses (`devices.virtio_net_queues`,
+/// ADR-313).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetQueues {
+    /// One per data core where the device steers flows itself (MQ with RSS),
+    /// else one (the default).
+    Auto,
+    /// Always one: core 0 steers every frame.
+    Single,
+}
+
+impl NetQueues {
+    /// The TOML word.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Single => "single",
+        }
+    }
+
+    const fn from_variant(v: u8) -> Self {
+        match v {
+            1 => Self::Single,
+            _ => Self::Auto,
+        }
+    }
+}
+
 /// DMA remapping (`devices.iommu`, ADR-305).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Iommu {
@@ -380,6 +408,8 @@ pub struct Devices {
     pub virtio_net_interrupt: NetInterrupt,
     /// `devices.iommu`.
     pub iommu: Iommu,
+    /// `devices.virtio_net_queues`.
+    pub virtio_net_queues: NetQueues,
 }
 
 impl Devices {
@@ -387,6 +417,7 @@ impl Devices {
         modes: [DeviceMode::Off; urmqtt_cfg::fields::DEVICE_KEYS.len()],
         virtio_net_interrupt: NetInterrupt::Auto,
         iommu: Iommu::Off,
+        virtio_net_queues: NetQueues::Auto,
     };
 
     /// The mode of `key` (`devices.virtio_console`, ...); `None` for a key
@@ -415,6 +446,7 @@ impl Devices {
         d.virtio_net_interrupt =
             NetInterrupt::from_variant(get(urmqtt_cfg::fields::tag::DEV_NET_INTERRUPT));
         d.iommu = Iommu::from_variant(get(urmqtt_cfg::fields::tag::DEV_IOMMU));
+        d.virtio_net_queues = NetQueues::from_variant(get(urmqtt_cfg::fields::tag::DEV_NET_QUEUES));
         d
     }
 }

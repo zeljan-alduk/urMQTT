@@ -18,7 +18,8 @@
 //!   restarts from 0 at boot, which Prometheus handles as a counter reset); a
 //!   gauge is a value that goes both ways;
 //! - **labels are bounded and come from the kernel, never from a client**:
-//!   `core` (at most 64), a reason or code from a closed list, a listener
+//!   `core` (at most 64), `queue` (a NIC queue pair, at most 16, ADR-312),
+//!   a reason or code from a closed list, a listener
 //!   name, a version string. There is no client id, user name, topic, address
 //!   or certificate in any label, so the number of series is fixed by the
 //!   image's configuration and the core count and cannot be grown by anyone
@@ -543,6 +544,35 @@ pub static RULES: &[Rule] = &[
         "urmqtt_network_mtu_bytes",
         "The link MTU in use.",
     ),
+    g(
+        "net/queues",
+        "urmqtt_network_queue_pairs",
+        "virtio-net queue pairs in use (1 without multiqueue).",
+    ),
+    c(
+        "net/queue/received",
+        "urmqtt_network_queue_frames_received_total",
+        "Frames received on a NIC queue pair (the pair of the core with the same number).",
+    )
+    .by("queue"),
+    c(
+        "net/queue/sent",
+        "urmqtt_network_queue_frames_sent_total",
+        "Frames sent on a NIC queue pair.",
+    )
+    .by("queue"),
+    c(
+        "net/queue/forwarded",
+        "urmqtt_network_queue_frames_forwarded_total",
+        "Frames a core received on its own pair for another core's flow and passed to core 0.",
+    )
+    .by("queue"),
+    c(
+        "net/queue/interrupts",
+        "urmqtt_network_queue_interrupts_total",
+        "Receive interrupts of a NIC queue pair.",
+    )
+    .by("queue"),
     // The plaintext and WebSocket listeners: one family per fact, the
     // listener a label, so a dashboard sums or splits them.
     r(

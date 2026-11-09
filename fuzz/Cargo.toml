@@ -161,6 +161,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "virtio_net_mq"
+path = "fuzz_targets/virtio_net_mq.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "disk_crypt"
 path = "fuzz_targets/disk_crypt.rs"
 test = false

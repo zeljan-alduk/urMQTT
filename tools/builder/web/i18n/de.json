@@ -153,6 +153,8 @@
   "enum.devices.iommu.off": "so belassen, wie die Firmware sie einrichtet",
   "enum.devices.iommu.auto": "wenn die Maschine eine hat",
   "enum.devices.iommu.require": "ohne eine nicht starten",
+  "enum.devices.virtio_net_queues.auto": "einer pro Datenkern, wenn die Netzwerkkarte Flows verteilt (RSS)",
+  "enum.devices.virtio_net_queues.single": "immer einer, Kern 0 verteilt jeden Frame",
   "enum.websocket.auth.mtls": "Client-Zertifikat, wie am TLS-Port",
   "enum.websocket.auth.password": "Benutzername und Passwort (für Browser)",
   "enum.limits.publisher_backpressure.single": "Publisher anhalten, wenn sein einziger Abonnent voll ist",

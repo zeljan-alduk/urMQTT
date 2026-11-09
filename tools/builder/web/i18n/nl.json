@@ -153,6 +153,8 @@
   "enum.devices.iommu.off": "laten zoals de firmware het instelt",
   "enum.devices.iommu.auto": "als de machine er een heeft",
   "enum.devices.iommu.require": "zonder weigeren te starten",
+  "enum.devices.virtio_net_queues.auto": "één per datakern als de netwerkkaart stromen verdeelt (RSS)",
+  "enum.devices.virtio_net_queues.single": "altijd één, kern 0 verdeelt elk frame",
   "enum.websocket.auth.mtls": "clientcertificaat, zoals op de TLS-poort",
   "enum.websocket.auth.password": "gebruikersnaam en wachtwoord (voor browsers)",
   "enum.limits.publisher_backpressure.single": "uitgever pauzeren als zijn enige abonnee vol is",

@@ -100,13 +100,13 @@ NIC RX buffer ─▶ IPv4/TCP validate ─▶ TLS decrypt in place ─▶ MQTT p
 
 ### Multicore NIC
 
-The NIC mode is chosen at boot from the virtio feature bits and logged:
+The NIC mode is chosen at boot from the virtio feature bits and logged (ADR-032, ADR-310 to ADR-314):
 
 | Mode | When | How |
 |---|---|---|
-| RSS | `VIRTIO_NET_F_RSS` | The device hashes the 4-tuple to one queue per core |
-| Multiqueue, no RSS | `VIRTIO_NET_F_MQ` | The device's own steering, with fallback dispatch for flows that land on the wrong core |
-| Fallback dispatcher | single queue | Core 0 computes a Toeplitz-style hash and forwards descriptors (not copies) through SPSC rings; TX goes through per-core queues or back to the owner |
+| Multiqueue with RSS | `VIRTIO_NET_F_MQ`, `_CTRL_VQ` and `_RSS` offered, the device's RSS takes a 40-byte key, a 128-entry table and the TCP/IPv4 hash, two or more data cores, `devices.virtio_net_queues = "auto"` | One queue pair per data core (pair c for core c, at most 16). The kernel programs the device's RSS with the Microsoft Toeplitz key and the same 128-entry indirection table its own steering then uses, so a TCP/IPv4 flow lands on the queue of the core that owns it; everything unhashed (ARP, ICMP, UDP) goes to pair 0 (core 0). Each core receives, transmits and is woken (its own MSI-X vector, ADR-270's probation and fallback per pair) on its own pair; a frame that is not the core's own (another listener's port, a misplaced frame) goes to core 0 over the c→0 ring and is steered as if it had arrived on pair 0. Cores beyond the pairs are served through pair 0 as below |
+| Multiqueue without RSS | `VIRTIO_NET_F_MQ` only | Not used: the device's own steering cannot be matched and may move a flow between queues (reordering). One pair, as below, and the boot line says why |
+| Dispatcher | one queue pair | Core 0 owns the NIC: it computes the Toeplitz hash, moves each received frame (one copy out of the DMA ring) through an SPSC ring to the core that owns the flow, and transmits the frames the cores send back over their c→0 rings |
 
 ## 4. Memory per connection
 
