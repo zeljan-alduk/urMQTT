@@ -308,6 +308,7 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             max_message_expiry_s: u32_of(tag::LIM_MAX_MESSAGE_EXPIRY),
             max_shared_groups: u32_of(tag::LIM_MAX_SHARED_GROUPS),
             max_shared_group_members: u32_of(tag::LIM_MAX_SHARED_GROUP_MEMBERS),
+            max_runtime_accounts: u32_of(tag::LIM_MAX_RUNTIME_ACCOUNTS),
         },
         acl: Acl {
             device_publish,
@@ -876,6 +877,22 @@ mod tests {
             ),
             (65_535, 1)
         );
+    }
+
+    /// ADR-285: the run-time account limit is 0 by default (the empty blob,
+    /// and every blob before format 15) and decoded when set.
+    #[test]
+    fn the_runtime_account_limit_is_decoded() {
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.limits.max_runtime_accounts, 0);
+        let mut b = Builder::new();
+        b.uint(tag::LIM_MAX_RUNTIME_ACCOUNTS, 1_024).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 15);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        assert_eq!(c.limits.max_runtime_accounts, 1_024);
     }
 
     /// NOW-19, ADR-264: `network.mtu` is unset by default (the empty blob,

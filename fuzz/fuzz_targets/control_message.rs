@@ -31,6 +31,7 @@ fuzz_target!(|data: &[u8]| {
             max_message_age_s: 600,
             allow_unrevoke: data.len() % 2 == 0,
             allowlist_mode: data.len() % 3 == 0,
+            accounts: data.len() % 5 != 0,
         };
         for now in [None, Some(m.not_before), Some(m.not_after), Some(u64::MAX)] {
             let _ = urmqtt_control::check(&m, now, m.seq.wrapping_sub(1), &p);

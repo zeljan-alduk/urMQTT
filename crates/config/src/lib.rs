@@ -178,6 +178,9 @@ pub struct Limits {
     /// Members one shared-subscription group may have, 1..=65535; one more:
     /// SUBACK 0x97 / 0x80 (ADR-275).
     pub max_shared_group_members: u32,
+    /// Password accounts the control channel may hold on the data disk
+    /// (NOW-15, ADR-285); 0: the control channel refuses account commands.
+    pub max_runtime_accounts: u32,
 }
 
 /// Topic filter patterns; `{id}` expands to the session's device id.

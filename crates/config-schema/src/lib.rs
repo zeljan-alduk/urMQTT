@@ -456,6 +456,10 @@ fn default_max_shared_group_members() -> u32 {
     default_u32("limits.max_shared_group_members")
 }
 
+fn default_max_runtime_accounts() -> u32 {
+    default_u32("limits.max_runtime_accounts")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawTrust {
@@ -582,6 +586,9 @@ struct RawLimits {
     max_shared_groups: u32,
     #[serde(default = "default_max_shared_group_members")]
     max_shared_group_members: u32,
+    /// Optional (format 15, ADR-285): 0, no run-time accounts.
+    #[serde(default = "default_max_runtime_accounts")]
+    max_runtime_accounts: u32,
     /// NOW-13, ADR-269; optional ("single" when absent).
     #[serde(default)]
     publisher_backpressure: PublisherBackpressure,
@@ -891,6 +898,9 @@ pub struct Limits {
     /// Members one shared-subscription group may have, 1..=65535; one more:
     /// SUBACK 0x97 / 0x80 (ADR-275).
     pub max_shared_group_members: u32,
+    /// Password accounts the control channel may hold on the data disk,
+    /// 0..=1024; 0: the control channel refuses account commands (ADR-285).
+    pub max_runtime_accounts: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2182,6 +2192,7 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
             "limits.max_shared_group_members",
             raw.max_shared_group_members,
         ),
+        ("limits.max_runtime_accounts", raw.max_runtime_accounts),
     ] {
         if let Some(urmqtt_cfg::fields::Kind::UInt { min, max, .. }) = default_of(key)
             && !(min..=max).contains(&u64::from(v))
@@ -2209,6 +2220,7 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
         max_message_expiry_s: raw.max_message_expiry_s,
         max_shared_groups: raw.max_shared_groups,
         max_shared_group_members: raw.max_shared_group_members,
+        max_runtime_accounts: raw.max_runtime_accounts,
     }
 }
 
@@ -2653,6 +2665,8 @@ mod mtu_tests;
 mod pack_tests;
 #[cfg(test)]
 mod plain_tests;
+#[cfg(test)]
+mod runtime_accounts_tests;
 #[cfg(test)]
 mod shared_group_tests;
 #[cfg(test)]

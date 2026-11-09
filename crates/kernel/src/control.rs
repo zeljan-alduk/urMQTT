@@ -213,6 +213,7 @@ fn policy() -> Policy {
         max_message_age_s: u64::from(CONFIG.control.max_message_age_s),
         allow_unrevoke: CONFIG.control.allow_unrevoke,
         allowlist_mode: allowlist_mode(),
+        accounts: CONFIG.limits.max_runtime_accounts > 0,
     }
 }
 

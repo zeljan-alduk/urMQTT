@@ -215,14 +215,14 @@ fn structural_attacks_fail_closed() {
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, 10 which no format ever used, and
     // one above the newest).
-    for unknown in [0u8, 10, 14, 15] {
+    for unknown in [0u8, 10, 16, 17] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
     // The versions of the formats that came after 7, each its own feature
     // (8 back-pressure, 9 WebSocket, 11 the receive interrupt, 12 MQTT 5.0,
-    // 13 the shared-group limits).
-    for known in [8u8, 9, 11, 12, 13] {
+    // 13 the shared-group limits, 15 the run-time account limit).
+    for known in [8u8, 9, 11, 12, 13, 15] {
         let v = with_version(&assemble(&ok), known);
         assert_eq!(Blob::parse(&v).map(|b| b.version()), Ok(u16::from(known)));
     }
@@ -244,7 +244,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 13));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 15));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -253,7 +253,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[13, 0],
+        &[15, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -1232,4 +1232,27 @@ fn shared_group_limits() {
         assert!(Blob::parse(&with_version(&assemble(&rec), 12)).is_err());
         assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_ok());
     }
+}
+
+/// ADR-285: `limits.max_runtime_accounts`. 0 is the default and writes
+/// nothing (the base format); any other value in 1..=1024 needs format 15;
+/// 1025 is refused; a blob of format 13 cannot hold it.
+#[test]
+fn runtime_account_limit() {
+    let t = tag::LIM_MAX_RUNTIME_ACCOUNTS;
+    let mut d = Builder::new();
+    d.uint(t, 0).unwrap();
+    assert_eq!(d.finish(false).unwrap(), empty());
+    for v in [1u64, 1_024] {
+        let mut b = Builder::new();
+        b.uint(t, v).unwrap();
+        let bytes = b.finish(false).unwrap();
+        let p = Blob::parse(&bytes).unwrap();
+        assert_eq!(p.version(), 15, "{v}");
+        assert_eq!(p.uint(t), v);
+    }
+    assert!(Builder::new().uint(t, 1_025).is_err());
+    let rec = record(t, &64u16.to_le_bytes());
+    assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_err());
+    assert!(Blob::parse(&with_version(&assemble(&rec), 15)).is_ok());
 }

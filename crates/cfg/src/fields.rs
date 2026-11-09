@@ -308,6 +308,8 @@ pub mod tag {
     // MQTT 5.0 part 3 (ADR-275): format version 13.
     pub const LIM_MAX_SHARED_GROUPS: u16 = 260;
     pub const LIM_MAX_SHARED_GROUP_MEMBERS: u16 = 261;
+    // Run-time password accounts (NOW-15, ADR-285): format version 15.
+    pub const LIM_MAX_RUNTIME_ACCOUNTS: u16 = 270;
 }
 
 use tag as t;
@@ -1465,6 +1467,16 @@ pub static FIELDS: &[Field] = &[
             "Members one shared-subscription group may have; one more gets SUBACK 0x97 / 0x80. Format 13.",
         ),
         13,
+    ),
+    // Run-time password accounts (NOW-15, ADR-285): format version 15.
+    since(
+        f(
+            t::LIM_MAX_RUNTIME_ACCOUNTS,
+            "limits.max_runtime_accounts",
+            uint(2, 0, 1_024, 0),
+            "Password accounts the signed control channel may hold on the data disk (set-account, remove-account), for the plaintext and WebSocket listeners in password mode; 0 (the default): the control channel refuses account commands. Needs control.service_ids and a data disk. Format 15.",
+        ),
+        15,
     ),
 ];
 
