@@ -1,0 +1,7 @@
+GET /metrics HTTP/1.1
+Host: 10.0.0.5:9100
+User-Agent: Prometheus/2.53.0
+Accept: application/openmetrics-text;version=1.0.0;q=0.5,text/plain;version=0.0.4;q=0.4,*/*;q=0.1
+Accept-Encoding: gzip
+X-Prometheus-Scrape-Timeout-Seconds: 10
+

@@ -22,6 +22,7 @@ urmqtt-broker = { path = "../crates/broker" }
 urmqtt-control = { path = "../crates/control" }
 urmqtt-plain = { path = "../crates/plain" }
 urmqtt-ws = { path = "../crates/ws" }
+urmqtt-http = { path = "../crates/http" }
 urmqtt-arch-aarch64 = { path = "../crates/arch-aarch64" }
 urmqtt-arch-x86_64 = { path = "../crates/arch-x86_64" }
 urmqtt-virtio = { path = "../crates/virtio", features = ["fake"] }
@@ -42,6 +43,20 @@ members = ["."]
 [[bin]]
 name = "cfg_blob"
 path = "fuzz_targets/cfg_blob.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_request"
+path = "fuzz_targets/http_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metrics_render"
+path = "fuzz_targets/metrics_render.rs"
 test = false
 doc = false
 bench = false
