@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { WASM, haveWasm } from './helpers.mjs';
-import { buildModel, emptyState } from '../web/src/core.js';
+import { buildModel, emptyState, isUserList } from '../web/src/core.js';
 import { loadBuilder } from '../web/src/wasm.js';
 import {
   ENVELOPE_FORMAT, KDF_ITERATIONS, MIN_PASSPHRASE, VaultError, fromB64, hasSecrets, openValue, parseEnvelope, sealValue,
@@ -188,6 +188,17 @@ test('the snapshot of the state: what is sealed comes back, nothing hostile gets
   assert.equal(hostile.preset, '');
   assert.equal(hostile.release, '');
   assert.equal({}.polluted, undefined);
+  // Typing rules of the address: a bool field refuses a string, a string field a bool, an enum a stranger.
+  const bool = model.fields.find(f => f.type === 'bool' && !isUserList(f));
+  const en = model.fields.find(f => f.type === 'enum');
+  const str = model.fields.find(f => f.type === 'string');
+  assert.ok(bool && en && str);
+  const typed = stateFromSnapshot(model, { snapshot: 1, state: { values: { [bool.id]: 'yes', [en.id]: 'no-such-variant', [str.id]: true }, preset: 'nonsense' } });
+  assert.equal(typed.values[bool.id], undefined);
+  assert.equal(typed.values[en.id], undefined);
+  assert.equal(typed.values[str.id], undefined);
+  assert.equal(typed.preset, '');
+  assert.equal(stateFromSnapshot(model, { snapshot: 1, state: { values: { [en.id]: en.variants[0] } } }).values[en.id], en.variants[0]);
   for (const bad of [null, 5, 'x', {}, { snapshot: 2, state: {} }, { snapshot: 1 }, { snapshot: 1, state: 5 }]) {
     assert.throws(() => stateFromSnapshot(model, bad), VaultError);
   }

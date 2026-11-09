@@ -4,7 +4,7 @@
 // PBKDF2-HMAC-SHA-256 (600 000 rounds, random 16-byte salt) derives a non-extractable AES-256-GCM key; each seal
 // uses a fresh random 12-byte nonce; the envelope header is authenticated as additional data. The passphrase
 // is never stored, never put in the address and never sent anywhere. No DOM here: the Node tests run this file.
-import { emptyState, isUserList } from './core.js';
+import { emptyState, isListType, isUserList, PRESETS } from './core.js';
 
 export const ENVELOPE_FORMAT = 'urmqtt-project';
 export const ENVELOPE_VERSION = 1;
@@ -143,10 +143,12 @@ export function stateFromSnapshot(model, snap) {
     if (isUserList(f)) {
       if (!Array.isArray(v)) continue;
       s.values[id] = v.slice(0, 1000).filter(u => u && typeof u === 'object').map(u => ({ id: vStr(u.id, 256) ?? '', hash: vStr(u.hash, 1000) ?? '' }));
-    } else if (typeof v === 'boolean' || typeof v === 'string') {
-      s.values[id] = v;
-    } else if (Array.isArray(v) && v.length <= 10000 && v.every(x => typeof x === 'string')) {
-      s.values[id] = v.slice();
+    } else if (f.type === 'bool' ? typeof v === 'boolean'
+      : f.type === 'enum' ? typeof v === 'string' && f.variants.includes(v)
+        : isListType(f) ? Array.isArray(v) && v.length <= 10000 && v.every(x => typeof x === 'string')
+          : typeof v === 'string') {
+      // Same typing rules as an address (decodeHash): a value of the wrong type for its field never reaches the form.
+      s.values[id] = isListType(f) ? v.slice() : v;
     }
   }
   const f = src.files && typeof src.files === 'object' ? src.files : {};
@@ -160,7 +162,7 @@ export function stateFromSnapshot(model, snap) {
     s.signing = { pem: g.pem, publicKey: g.publicKey, signerId: g.signerId, summary: g.summary };
   }
   s.name = (vStr(src.name, 40) ?? '');
-  s.preset = (vStr(src.preset, 40) ?? '');
+  s.preset = typeof src.preset === 'string' && PRESETS[src.preset] ? src.preset : '';
   s.release = (vStr(src.release, 100) ?? '');
   if (typeof src.advanced === 'boolean') s.advanced = src.advanced;
   return s;
