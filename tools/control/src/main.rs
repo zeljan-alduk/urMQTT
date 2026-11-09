@@ -6,6 +6,11 @@
 //! urmqtt-control unrevoke --cert device.pem | --serial HEX  [...]
 //! urmqtt-control allow    --id device-001 [...]
 //! urmqtt-control disallow --id device-001 [...]
+//! urmqtt-control set-account --id sensor-9 --password-stdin [--class full|read-only|write-only]
+//!                            [--iterations N]      add a password account, or change one
+//! urmqtt-control set-account --id sensor-9 --hash 'pbkdf2-sha256$...'   (a hash made by
+//!                            `urmqtt-config hash-password`; the broker never sees a password)
+//! urmqtt-control remove-account --id sensor-9 [--id ...]
 //!
 //! signing (one of):
 //!   --key control.key          Ed25519 PKCS#8 PEM (dev; keep prod keys offline)
@@ -32,6 +37,12 @@
 //! applied: the broker acknowledges and then authenticates. The outcome is
 //! in the broker's log (`control: seq N … applied` or `rejected: reason`)
 //! and its statsd counters.
+//!
+//! `set-account` hashes the password (read from standard input, one line) here, with a random salt
+//! from the operating system, PBKDF2-HMAC-SHA-256, 100 000 iterations unless `--iterations` says
+//! fewer (the broker refuses more). Only the hash is signed and sent, and nothing prints a
+//! password or a hash. The image must have `limits.max_runtime_accounts` > 0 and a listener in
+//! password mode (`plaintext.auth` or `websocket.auth` = "password").
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -43,7 +54,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
-use urmqtt_control::{Command, Message};
+use urmqtt_control::{AccountClass, Command, Message};
 
 #[derive(Default)]
 struct Opts {
@@ -64,6 +75,10 @@ struct Opts {
     client_id: Option<String>,
     no_publish: bool,
     public_key: Option<String>,
+    class: Option<String>,
+    hash: Option<String>,
+    password_stdin: bool,
+    iterations: Option<u32>,
 }
 
 fn now() -> Duration {
@@ -149,6 +164,12 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--client-id" => o.client_id = Some(v()?),
             "--no-publish" => o.no_publish = true,
             "--pub" => o.public_key = Some(v()?),
+            "--class" => o.class = Some(v()?),
+            "--hash" => o.hash = Some(v()?),
+            "--password-stdin" => o.password_stdin = true,
+            "--iterations" => {
+                o.iterations = Some(v()?.parse().map_err(|e| format!("--iterations: {e}"))?)
+            }
             _ => return Err(format!("unknown option {k}")),
         }
     }
@@ -194,9 +215,75 @@ fn sign(o: &Opts, input: &[u8]) -> Result<[u8; 64], String> {
     }
 }
 
+/// The one `set-account` item: the id, the class and the hash, made here
+/// from the password on standard input or taken from `--hash`.
+fn account_item(o: &Opts) -> Result<Vec<u8>, String> {
+    if !o.serials.is_empty() || o.ids.len() != 1 {
+        return Err("set-account takes exactly one --id (and no --cert or --serial)".into());
+    }
+    let class = match o.class.as_deref() {
+        None => AccountClass::Full,
+        Some(c) => AccountClass::from_name(c)
+            .ok_or_else(|| format!("--class {c:?}: use full, read-only or write-only"))?,
+    };
+    let hash = match (&o.hash, o.password_stdin) {
+        (Some(h), false) => h.clone(),
+        (None, true) => {
+            let mut line = String::new();
+            std::io::stdin()
+                .read_line(&mut line)
+                .map_err(|e| format!("stdin: {e}"))?;
+            let pw = line.trim_end_matches(['\n', '\r']);
+            if pw.is_empty() {
+                return Err("the password on standard input is empty".into());
+            }
+            if pw.len() > urmqtt_cfg::passwd::MAX_PASSWORD {
+                return Err(format!(
+                    "a password is at most {} bytes",
+                    urmqtt_cfg::passwd::MAX_PASSWORD
+                ));
+            }
+            let iterations = o
+                .iterations
+                .unwrap_or(urmqtt_cfg::passwd::DEFAULT_ITERATIONS);
+            let mut salt = [0u8; 16];
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| f.read_exact(&mut salt))
+                .map_err(|e| format!("/dev/urandom: {e}"))?;
+            urmqtt_cfg::passwd::encode(pw.as_bytes(), &salt, iterations)
+                .map_err(|e| format!("password hash: {}", e.msg()))?
+        }
+        _ => return Err("set-account needs exactly one of --password-stdin and --hash".into()),
+    };
+    urmqtt_control::encode_account(class, &o.ids[0], &hash).ok_or_else(|| {
+        format!(
+            "invalid account: the id uses A-Z a-z 0-9 - _ . : (at most 64), the hash must be pbkdf2-sha256 with at most {} iterations",
+            urmqtt_control::MAX_ACCOUNT_ITERATIONS
+        )
+    })
+}
+
+/// What a message names, for the tool's own output: serials in hex, ids as
+/// text, and for an account item the id and class (never the hash).
+fn describe(command: Command, item: &[u8]) -> String {
+    if command == Command::SetAccount {
+        return match urmqtt_control::parse_account(item) {
+            Ok(a) => format!("{} ({})", a.id, a.class.name()),
+            Err(_) => "?".into(),
+        };
+    }
+    if command.on_serials() {
+        to_hex(item)
+    } else {
+        String::from_utf8_lossy(item).into_owned()
+    }
+}
+
 fn build(command: Command, o: &Opts) -> Result<Vec<u8>, String> {
     let env = o.env.as_deref().ok_or("--env is required")?;
-    let items: Vec<Vec<u8>> = if command.on_serials() {
+    let items: Vec<Vec<u8>> = if command == Command::SetAccount {
+        vec![account_item(o)?]
+    } else if command.on_serials() {
         if !o.ids.is_empty() {
             return Err(format!(
                 "{} takes --cert or --serial, not --id",
@@ -213,6 +300,13 @@ fn build(command: Command, o: &Opts) -> Result<Vec<u8>, String> {
         }
         o.ids.iter().map(|s| s.as_bytes().to_vec()).collect()
     };
+    if command != Command::SetAccount && (o.hash.is_some() || o.password_stdin || o.class.is_some())
+    {
+        return Err(format!(
+            "{} takes no --hash, --password-stdin or --class",
+            command.name()
+        ));
+    }
     let t = now();
     let not_before = o.not_before.unwrap_or(t.as_secs().saturating_sub(60));
     let m = Message {
@@ -223,7 +317,7 @@ fn build(command: Command, o: &Opts) -> Result<Vec<u8>, String> {
         items,
     };
     let body = urmqtt_control::encode_body(&m).ok_or(
-        "invalid message: 1..=64 unique items; serials 1..=20 bytes; ids without / + # NUL or a leading $",
+        "invalid message: 1..=64 unique items (accounts: 1..=8); serials 1..=20 bytes; ids without / + # NUL or a leading $; account ids A-Z a-z 0-9 - _ . :",
     )?;
     let sig = sign(o, &urmqtt_control::signing_input(env, &body))?;
     let mut wire = body;
@@ -237,11 +331,7 @@ fn build(command: Command, o: &Opts) -> Result<Vec<u8>, String> {
         m.items.len(),
         m.items
             .iter()
-            .map(|i| if command.on_serials() {
-                to_hex(i)
-            } else {
-                String::from_utf8_lossy(i).into_owned()
-            })
+            .map(|i| describe(command, i))
             .collect::<Vec<_>>()
             .join(" "),
         wire.len()
@@ -374,11 +464,7 @@ fn show(path: &str, o: &Opts) -> Result<(), String> {
         m.not_after,
         m.items
             .iter()
-            .map(|i| if m.command.on_serials() {
-                to_hex(i)
-            } else {
-                String::from_utf8_lossy(i).into_owned()
-            })
+            .map(|i| describe(m.command, i))
             .collect::<Vec<_>>()
             .join(" ")
     );
@@ -387,7 +473,7 @@ fn show(path: &str, o: &Opts) -> Result<(), String> {
 
 fn run(args: &[String]) -> Result<(), String> {
     let (cmd, rest) = args.split_first().ok_or(
-        "usage: urmqtt-control revoke|unrevoke|allow|disallow|publish-file|show [options] (see --help)",
+        "usage: urmqtt-control revoke|unrevoke|allow|disallow|set-account|remove-account|publish-file|show [options] (see --help)",
     )?;
     match cmd.as_str() {
         "--help" | "-h" | "help" => {
