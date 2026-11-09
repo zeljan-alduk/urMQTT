@@ -77,6 +77,7 @@
   "section.console": "Consoleweergave",
   "section.devices": "Virtio-apparaten",
   "section.websocket": "MQTT via WebSocket",
+  "section.metrics": "Prometheus-metrics",
   "section.mqtt5": "MQTT 5.0",
   "section.misc": "Omgeving",
   "section.changed": "{n} gewijzigd",
