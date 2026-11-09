@@ -359,8 +359,10 @@ upstream Proxmox):
    disk: the data lives in a partition of `virtio0`.
 4. Add a serial port (`serial0: socket`) to read the log with `qm terminal <vmid>`.
 
-**Updating** replaces only the kernel and keeps the data partition. With the
-VM stopped, run `urmqtt-disk update-boot <disk> --esp <the new image's ESP>
+**Updating** replaces only the kernel and keeps the data partition. A disk
+installed by v0.6.0 or later has two boot slots: use `urmqtt-disk slots stage`
+and `slots activate` (section 8b), which keep the old kernel as the way back.
+On a single-slot disk, with the VM stopped, run `urmqtt-disk update-boot <disk> --esp <the new image's ESP>
 --write` on the disk image or volume, or copy MiB 1 to 9 of the new raw image
 (its EFI system partition) over the same bytes of the disk:
 `dd if=new.img of=<disk> bs=1M skip=1 seek=1 count=8 conv=notrunc`. The
@@ -714,6 +716,107 @@ restarts the service.
 - **Seeding devices offline:** `urmqtt-disk import-devices DISK ids.txt
   [--allowlist] --write` adds device ids to the registry and, for allowlist
   mode, to the allowlist.
+
+## 8b. Updating an installed disk: A/B boot slots (v0.6.0, NEXT-11, ADR-295 to ADR-299)
+
+A disk whose **first boot** ran v0.6.0 or later has two boot slots: the one it
+runs (A at first) and a standby of the same size, reserved next to it at that
+boot (`gpt: standby boot slot reserved ...` in the log). An update goes to the
+standby while the running slot stays untouched; the new kernel boots **on
+trial**, confirms itself once it serves, and if it does not, the machine
+returns to the previous slot by itself. The data partition is never written by
+any of this. A disk installed by an earlier release keeps one slot: update it
+with `update-boot` as before (`urmqtt-disk slots status` says which you have).
+
+**1. Look** (the VM may run; this only reads):
+
+```sh
+urmqtt-disk slots status /dev/vdb
+# disk GUID 3ce59d26-441c-4362-8dc1-61e6836d29c5 (the --disk-guid of urmqtt-control boot-confirm/boot-rollback)
+# slot A [active]: LBA 2048..22527 (10 MiB): v0.6.0 (store schema 5): confirmed, as installed
+# slot B [standby]: LBA 22528..43007 (10 MiB): empty
+```
+
+**2. Stage** the release with the VM stopped. From a published release, the
+signature is checked first (the same check as `urmqtt-config check-release`
+and the builder page); your configuration stays, as with `update-boot`:
+
+```sh
+urmqtt-disk slots stage /dev/vdb --image urmqtt-template-v0.6.1-universal.img \
+    --sums SHA256SUMS --sig SHA256SUMS.minisig --pubkey minisign.pub --write
+# stage: release signature ok: SHA256SUMS signed by key ..., ... has SHA-256 ...
+# stage: kernel v0.6.1 (A/B protocol 1, store schema 5, configuration formats up to 17)
+# stage: configuration: kept the disk's own; ...
+# stage: slot B holds v0.6.1 now, SHA-256 of the slot ...
+```
+
+An image you built yourself (`--esp build/...esp` or an unsigned `--image`)
+needs `--unsigned`. Without `--write` every `slots` command rehearses on an
+in-memory copy and changes nothing.
+
+**3. Activate**, still offline:
+
+```sh
+urmqtt-disk slots activate /dev/vdb --write          # --tries N, 1 to 7 trial boots (default 3)
+# activate: slot B (v0.6.1) is the boot entry, on trial for 3 boot(s); slot A (v0.6.0) is the way back
+```
+
+**4. Start the VM.** The log says `boot: slot B (v0.6.1) ON TRIAL: 2 trial
+boot(s) left after this one; confirmed after 60 s ...`. Once the store is open
+and the listener has been up for `update.confirm_after_s` (default 60):
+`boot: slot B confirmed (healthy for 60 s: store open, listener up)`. From then
+on slot A (the previous release) is the standby: `slots rollback` (offline) or
+a `boot-rollback` control message brings it back.
+
+**What happens when the new kernel is bad.** Each boot of a slot on trial uses
+one attempt **before** the store, the network or the other cores start. A crash,
+a fatal error, a watchdog reset or a trial that is not confirmed within
+`update.trial_timeout_s` (default 900 s; it then resets) all end in a reboot;
+when no attempt is left the kernel switches the boot entry back to the previous
+slot, marks the new one bad, and resets into the previous release:
+`boot: slot B gave up: no trial boots left and no confirmation; slot A (v0.6.0)
+is active again, resetting`. **Not covered:** a kernel that dies before its
+block driver runs (in the bootloader, or very early) is not counted and boots
+again until an operator runs `slots rollback` offline (ADR-296).
+
+**Operator confirmation.** With `[update] confirm = "operator"` the kernel does
+not confirm itself; send
+
+```sh
+urmqtt-control boot-confirm --disk-guid <GUID> --env prod --sign-cmd '...' \
+    --ca ca.pem --client-cert operator.pem --client-key operator.key --host <broker>
+```
+
+within `update.trial_timeout_s` (or set it to 0 to wait as long as the trial
+runs), or `boot-rollback` to go back now (the broker resets). Offline:
+`urmqtt-disk slots confirm|rollback DISK --write`.
+
+**Rules the tool enforces** (refused before anything is written):
+
+| Refused | Unless |
+|---|---|
+| a kernel from before v0.6.0 (no build note: it would never confirm) | never; use `update-boot` |
+| a kernel whose store schema is older than the store on the disk (it would refuse the store; migrations are one-way) | never |
+| an older release than the one running (rollback protection) | `--allow-downgrade` |
+| a configuration format the new kernel cannot read | a newer release, or `--config` with one it reads |
+| a release image whose signature or SHA-256 does not check out | `--unsigned` (your own build) |
+| staging while the running slot is on trial (the standby is its way back) | confirm or roll back first |
+| activating a slot that failed or was rolled back from | `activate --retry` |
+| activating a kernel with a newer store schema than the running one (once it migrated the store, the old one cannot read it) | `activate --one-way`: the automatic return still works until the migration has run; after it the previous slot is marked bad |
+
+**Power cuts.** Every command writes in an order where a cut leaves the disk as
+before or as after (DISK-FORMAT §0a): a cut while staging leaves an *empty*
+standby (stage again), a cut while switching leaves the old slot or the new one
+on trial. `slots` commands repair a partition table a cut left with two
+different copies, from the primary (what the next boot does too).
+
+**`update-boot` on a disk with two slots** is refused (it would overwrite the
+running slot, with no way back); `--in-place` does it anyway, never while a slot
+is on trial.
+
+**Secure Boot (LATER-6).** The switch changes which partition is the ESP, not a
+byte inside one, so a signed per-machine ESP works in either slot unchanged;
+stage it with `--replace-config` so its own pinned configuration stays.
 
 ## 9. The data disk: layout v2, migrating a v1 disk, growing (S2, S3)
 

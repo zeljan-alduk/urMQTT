@@ -129,6 +129,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | MQTT 5.0 beside 3.1.1 on every listener (TLS, plaintext, WebSocket): properties forwarded (user properties, content type, response topic and correlation data, payload format), reason codes on every acknowledgement and server DISCONNECT, session expiry (also for 3.1.1 persistent sessions: 30 days by default), message expiry, will delay, Receive Maximum and Maximum Packet Size both ways, topic aliases (client to broker), subscription options (No Local, Retain As Published, Retain Handling), assigned client id, Server Keep Alive; Paho interoperability suite and Mosquitto `-V mqttv5` clients | ✅ NEXT-3 part 2 (ADR-273, ADR-274) |
 | | MQTT 5.0 shared subscriptions (`$share/{group}/{filter}`, also for 3.1.1 clients): a group per role class, round robin over its online members, bounded by `limits.max_shared_groups` and `limits.max_shared_group_members`; Subscription Identifiers (stored with persistent sessions); retained-message expiry swept; DISCONNECT 0x8B at `reboot`, 0x98 for a revoked certificate | ✅ NEXT-3 part 3 (ADR-275) |
 | | Not supported, by decision: enhanced authentication (AUTH: CONNACK 0x8C); topic aliases from the broker to clients (never sent); MQTT 3.1 (protocol level 3) | by decision (ADR-275) |
+| **Updates** | A/B boot slots: a release staged offline into the standby slot after its minisign signature is checked, a boot counter and a health confirmation, automatic return to the previous slot, power-cut safe (one partition-table write), downgrade rules; `boot-confirm` and `boot-rollback` control messages | ✅ NEXT-11 (ADR-295 to ADR-299) |
 | **Storage** | SQLite over a raw-disk VFS (WAL, exclusive), quick_check at boot; since H6 SQLite runs as an unprivileged program (EL0 / ring 3), not in the kernel | ✅ M11, ✅ H6 |
 | | One disk: data in a partition of the boot disk (virtio-blk or virtio-scsi), created on the first boot, crash-safe; other disks never touched | ✅ S1 |
 | | `urmqtt-disk`: offline info, verify, export (SQLite, telemetry), import devices, kernel update | ✅ S1 |
@@ -629,6 +630,9 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `mqtt5.max_keep_alive_s` | 0–65 535 (0) | 0: a 5.0 client keeps the keep alive it asked for; otherwise the most it gets (Server Keep Alive in CONNACK) |
 | `mqtt5.shared_subscriptions` | bool, default `true` | Shared subscriptions (`$share/{group}/{filter}`, MQTT 5.0 4.8.2; also for 3.1.1 clients): each matching message goes to one member of the group. `false`: CONNACK announces Shared Subscription Available 0 and a `$share/` filter gets SUBACK 0x9E (3.1.1: 0x80) |
 | `mqtt5.subscription_identifiers` | bool, default `true` | Subscription Identifiers (MQTT 5.0 3.8.2.1.2): returned in each PUBLISH the subscription matched. `false`: CONNACK announces Subscription Identifier Available 0 and a SUBSCRIBE that carries one gets SUBACK 0xA1 |
+| `update.confirm` | `auto` (default) \| `operator` | After an A/B update (`urmqtt-disk slots activate`, NEXT-11): the new kernel confirms itself once healthy, or waits for a `boot-confirm` control message; unconfirmed, the previous slot returns by itself (ADR-296). Any `[update]` key set needs configuration format 17 |
+| `update.confirm_after_s` | 0–86 400 (60) | Seconds a trial boot must serve (store open, listener up) before the automatic confirmation |
+| `update.trial_timeout_s` | 0–86 400 (900) | A trial boot not confirmed this long resets (one attempt used); 0: never. In auto mode 0 or longer than `confirm_after_s` |
 | `acl.device_publish`, `acl.device_subscribe` | topic filters, `{id}` = device id | Default device rights |
 | `acl.service_ids` | ids or `prefix*` | Identities with service rights (backends) |
 | `acl.service_publish`, `acl.service_subscribe` | topic filters | Service rights |
@@ -1057,8 +1061,10 @@ Production images set `observability.syslog_udp` and `metrics_udp` to collectors
 
 An image is the entire deployment: the kernel and its configuration (CA, server certificate and key) are all inside it.
 The VM has one disk: the raw image written to it, the rest becomes the data partition on the first boot.
-Upgrading replaces only the EFI system partition (`urmqtt-disk update-boot`, or `scripts/kvm-host/install.sh`
-again) and keeps the data.
+Upgrading replaces only the EFI system partition and keeps the data. A disk installed by v0.6.0 or later has two
+boot slots: `urmqtt-disk slots stage` writes a signed release into the standby, `slots activate` makes it the boot
+entry on trial, and a kernel that does not confirm itself is replaced by the previous one automatically
+(docs/DEPLOY.md section 8b). Older disks update with `urmqtt-disk update-boot` (or `scripts/kvm-host/install.sh`).
 
 | Target | Path | Status |
 |---|---|---|
