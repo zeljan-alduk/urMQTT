@@ -1,0 +1,10 @@
+number,rule,location,class,reason,comment
+163,rust/hard-coded-cryptographic-value,crates/config/src/store.rs:740,a,used in tests,"Test password ""pw"" and a fixed salt for PBKDF2 (1000 iterations) in the WebSocket section decode test (#[cfg(test)] mod tests). Not a secret."
+164,rust/hard-coded-cryptographic-value,crates/config/src/store.rs:740,a,used in tests,"Same line as 163, the salt flow: fixed test salt in the WebSocket section decode test."
+165,rust/hard-coded-cryptographic-value,crates/plain/src/auth.rs:219,a,used in tests,"Test password ""secret"" and a fixed 16-byte salt (PBKDF2, 1000 iterations) in the ADR-272 WebSocket account test (#[cfg(test)] mod tests). Not a secret."
+166,rust/hard-coded-cryptographic-value,crates/plain/src/auth.rs:219,a,used in tests,"Same line as 165, the salt flow."
+167,rust/cleartext-logging,crates/broker/src/sys.rs:1191,b,false positive,"Assertion message printing the $SYS info JSON in a test: accounts is a count, server_cert_days a number of days, not credentials."
+168,rust/cleartext-logging,crates/broker/src/sys.rs:1192,b,false positive,"As 167."
+169,rust/cleartext-logging,crates/broker/src/sys.rs:1197,b,false positive,"As 167."
+170,PinnedDependenciesID,docs/perf-results/rx-irq-fix-qemu82/Dockerfile:1,c,fixed,"Base image ubuntu:24.04 pinned by digest. Closes when the scanner runs again on main."
+171,PinnedDependenciesID,docs/perf-results/rx-irq-fix-qemu82/Dockerfile.ci:1,c,fixed,"Was FROM a local image (urmqtt-wan, not pinnable); now the same pinned ubuntu:24.04 digest with the packages that image added. Closes when the scanner runs again on main."

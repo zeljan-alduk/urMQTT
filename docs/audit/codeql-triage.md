@@ -8,6 +8,7 @@ per alert: number, rule, location, class, the dismissal reason given to GitHub, 
 | Triage | Alerts | Log |
 |---|---|---|
 | 2026-11-07, main at v0.4.2 (55d33ca) | 137 open | [codeql-triage-2026-11-07.csv](codeql-triage-2026-11-07.csv) |
+| 2026-11-09, main at v0.5.0 (58531b1) | 9 open | [codeql-triage-2026-11-09.csv](codeql-triage-2026-11-09.csv) |
 
 ## Classes
 
