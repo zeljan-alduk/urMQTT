@@ -3188,6 +3188,11 @@ iommu_suite() {
                 fresh_disk "$OUT/iommu-require-serve.raw" "$data"
                 start_vm "$log" --disk "$data" --accel "$accel" --iommu "$kind" --fwd "$PORT:8883"
                 if wait_log "$log" "TLS 1.3 listener on port 8883"; then
+                    # A first connection warms the path (the guest's first SYN-ACK waits for ARP and the
+                    # client retransmits after seconds; the first scenario's subscriber has 1 s).
+                    mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
+                        --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" \
+                        -t devices/device-001/warmup -m x >/dev/null 2>&1 || true
                     python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$d" "$PORT" >"$log.client" 2>&1 || status=$?
                     # One fault poll after the traffic.
                     sleep 1

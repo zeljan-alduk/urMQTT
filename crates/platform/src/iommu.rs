@@ -20,7 +20,7 @@ use crate::x86::FixedVec;
 /// Most IOMMU units described (further ones are counted in `dropped`).
 pub const MAX_UNITS: usize = 4;
 /// Most requester-ID ranges per unit.
-pub const MAX_RANGES: usize = 8;
+pub const MAX_RANGES: usize = 32;
 
 /// The kind of an IOMMU unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
