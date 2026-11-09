@@ -11,11 +11,14 @@
 #![allow(clippy::type_complexity)]
 
 use crate::{
-    barrier, cpu, crc, entropy, features, ipi, irq, msi, paging, percpu, power, time, trap,
+    barrier, cache, cpu, crc, entropy, features, ipi, irq, msi, paging, percpu, power, time, trap,
 };
 
 // barrier
 const BARRIER_DOORBELL: fn() = barrier::doorbell;
+
+// cache
+const CACHE_CLEAN_TO_DEVICE: fn(usize, usize) = cache::clean_to_device;
 
 // cpu
 const CPU_HALT: fn() -> ! = cpu::halt;

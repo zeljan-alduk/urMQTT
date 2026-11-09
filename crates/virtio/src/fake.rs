@@ -27,6 +27,8 @@ pub struct FakeEnv {
     pub now: Cell<u64>,
     /// Refuse allocations after this many (None: never).
     pub dma_budget: Cell<Option<usize>>,
+    /// What the last negotiation said about VIRTIO_F_ACCESS_PLATFORM.
+    pub platform: Cell<Option<bool>>,
     mem: RefCell<Vec<Vec<u64>>>,
 }
 
@@ -48,6 +50,10 @@ impl Env for FakeEnv {
             pa: va as u64,
             len: words * 8,
         })
+    }
+
+    fn platform_access(&self, offered: bool) {
+        self.platform.set(Some(offered));
     }
 
     fn now_ns(&self) -> u64 {
@@ -196,8 +202,14 @@ impl FakeBus {
 }
 
 impl Bus for FakeBus {
-    fn init<E: Env>(&self, _env: &E, wanted: u64, required: u64) -> Result<u64, VirtioError> {
-        let f = crate::transport::negotiate_features(self.offered, wanted, required)?;
+    fn init<E: Env>(&self, env: &E, wanted: u64, required: u64) -> Result<u64, VirtioError> {
+        // As `Transport::init` does (ADR-305).
+        env.platform_access(self.offered & crate::F_ACCESS_PLATFORM != 0);
+        let f = crate::transport::negotiate_features(
+            self.offered,
+            wanted | crate::F_ACCESS_PLATFORM,
+            required,
+        )?;
         if self.reject_features {
             return Err(VirtioError::FeaturesRejected);
         }

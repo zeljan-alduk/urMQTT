@@ -213,6 +213,9 @@ pub struct BootOptions {
     /// `registry=allowlist`: allowlist mode even if the configuration says
     /// "open" (stricter only, for tests of one image in both modes).
     pub allowlist: bool,
+    /// `test=iommu-dma` (dev only, ADR-307): the entropy device is made to
+    /// write outside its IOMMU domain after the probe.
+    pub iommu_dma: bool,
     /// Options that were present but rejected or unknown.
     pub ignored: usize,
 }
@@ -291,6 +294,7 @@ impl BootOptions {
                 "test=gp" => o.test_fault = Some(TestFault::GeneralProtection),
                 "test=df" => o.test_fault = Some(TestFault::DoubleFault),
                 "test=crypto-bench" => o.crypto_bench = true,
+                "test=iommu-dma" => o.iommu_dma = true,
                 #[cfg(feature = "selftest")]
                 "test=keyslab-zero" => o.keyslab_zero = true,
                 #[cfg(feature = "selftest")]

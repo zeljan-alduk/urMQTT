@@ -1653,6 +1653,7 @@ dependencies = [
  "urmqtt-control",
  "urmqtt-diag",
  "urmqtt-dispatch",
+ "urmqtt-iommu",
  "urmqtt-log",
  "urmqtt-mm",
  "urmqtt-mqtt",

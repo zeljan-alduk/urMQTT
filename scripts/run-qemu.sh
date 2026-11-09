@@ -7,7 +7,7 @@
 #                       [--pcap FILE] [--gdb] [--no-net] [--fwd HOST:GUEST,...]
 #                       [--blk-props 'physical_block_size=4096,opt_io_size=65536,...']
 #                       [--disk-format raw|qcow2] [--discard unmap]
-#                       [--dgram LOCAL:REMOTE] [--gpu virtio|virtio-vga] [-- extra qemu args]
+#                       [--dgram LOCAL:REMOTE] [--gpu virtio|virtio-vga] [--iommu intel|amd|smmuv3] [-- extra qemu args]
 #
 # --disk boots the raw GPT image (mkraw.py) as a virtio-blk disk, like a
 # KVM host or a cloud server would; the data disk is a second virtio-blk.
@@ -57,6 +57,7 @@ FWD="1883:1883,8883:8883"
 DGRAM=""
 SECURE_VARS=""
 GPU=""
+IOMMU=""
 EXTRA=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -86,6 +87,7 @@ while [[ $# -gt 0 ]]; do
         --fwd) FWD=$2; shift 2 ;;
         --dgram) DGRAM=$2; shift 2 ;;
         --gpu) GPU=$2; shift 2 ;;
+        --iommu) IOMMU=$2; shift 2 ;;
         --) shift; EXTRA=("$@"); break ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -96,6 +98,13 @@ else
     [[ -f "$ISO" ]] || { echo "error: ISO '$ISO' not found (run make iso)" >&2; exit 1; }
 fi
 
+# With an IOMMU, every virtio device goes through it: VIRTIO_F_ACCESS_PLATFORM
+# (iommu_platform=on, which needs a modern-only device). Without the flag QEMU's
+# virtio devices bypass the IOMMU, as the specification allows (ADR-305).
+# IOMMU_PROPS is appended to every virtio PCI device then; QEMU_IOMMU_PLATFORM=off
+# (environment) leaves the devices bypassing it (the refusal's smoke scenario).
+IOMMU_PROPS=",disable-legacy=on,iommu_platform=on"
+[[ ${QEMU_IOMMU_PLATFORM:-on} == off ]] && IOMMU_PROPS=""
 if [[ $ARCH == x86_64 ]]; then
     case $MACHINE in q35|pc) ;; *) echo "error: --machine q35|pc" >&2; exit 2 ;; esac
     case $FIRMWARE in uefi|bios) ;; *) echo "error: --firmware uefi|bios" >&2; exit 2 ;; esac
@@ -115,6 +124,19 @@ if [[ $ARCH == x86_64 ]]; then
     fi
     X86ARGS=(-machine "$MACHINE_ARG" -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
         -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04)
+    # An emulated IOMMU (H4b, ADR-305), created before the PCI devices it translates.
+    case $IOMMU in
+        "") ;;
+        intel) [[ $MACHINE == q35 ]] || { echo "error: --iommu intel needs --machine q35" >&2; exit 2; }
+            X86ARGS+=(-device intel-iommu,caching-mode=on,intremap=on,aw-bits=48) ;;
+        amd) [[ $MACHINE == q35 ]] || { echo "error: --iommu amd needs --machine q35" >&2; exit 2; }
+            X86ARGS+=(-device amd-iommu,dma-remap=on) ;;
+        *) echo "error: --iommu intel|amd (x86_64)" >&2; exit 2 ;;
+    esac
+    if [[ $IOMMU == intel && $ACCEL == kvm ]]; then
+        # Interrupt remapping under KVM needs the split irqchip.
+        X86ARGS[1]="${X86ARGS[1]},kernel-irqchip=split"
+    fi
     case $GPU in
         "") ;;
         virtio) X86ARGS+=(-vga none -device virtio-gpu-pci,id=gpu0) ;;
@@ -205,6 +227,11 @@ if [[ $ARCH == x86_64 ]]; then
         X86ARGS+=(-serial mon:stdio)
     fi
     [[ $GDB -eq 1 ]] && X86ARGS+=(-s -S)
+    if [[ -n $IOMMU ]]; then
+        for i in "${!X86ARGS[@]}"; do
+            [[ ${X86ARGS[$i]} =~ ^virtio-[a-z]+-pci, ]] && X86ARGS[i]+=$IOMMU_PROPS
+        done
+    fi
     exec qemu-system-x86_64 "${X86ARGS[@]}" ${EXTRA[@]+"${EXTRA[@]}"}
 fi
 
@@ -237,6 +264,7 @@ firmware() {
     exit 1
 }
 FW=$(firmware)
+[[ -z $IOMMU || $IOMMU == smmuv3 ]] || { echo "error: --iommu smmuv3 (aarch64)" >&2; exit 2; }
 [[ $GIC == 2 || $GIC == 3 ]] || { echo "error: --gic 3|2" >&2; exit 2; }
 
 case $GPU in
@@ -245,7 +273,7 @@ case $GPU in
     *) echo "error: --gpu virtio (aarch64)" >&2; exit 2 ;;
 esac
 ARGS=(
-    -machine "virt,gic-version=$GIC,acpi=$ACPI${URMQTT_MTE:+,mte=on}"
+    -machine "virt,gic-version=$GIC,acpi=$ACPI${URMQTT_MTE:+,mte=on}${IOMMU:+,iommu=$IOMMU}"
     -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
     -bios "$FW"
     "${DISPLAY_DEV[@]}"
@@ -313,4 +341,9 @@ if [[ $GDB -eq 1 ]]; then
     echo "  aarch64-elf-gdb target/aarch64-unknown-none/release/urmqtt -ex 'target remote :1234'" >&2
 fi
 
+if [[ -n $IOMMU ]]; then
+    for i in "${!ARGS[@]}"; do
+        [[ ${ARGS[$i]} =~ ^virtio-[a-z]+-pci, ]] && ARGS[i]+=$IOMMU_PROPS
+    done
+fi
 exec qemu-system-aarch64 "${ARGS[@]}" ${EXTRA[@]+"${EXTRA[@]}"}

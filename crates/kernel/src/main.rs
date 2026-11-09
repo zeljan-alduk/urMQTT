@@ -57,6 +57,8 @@ mod hardtest;
 #[cfg(target_os = "none")]
 mod install;
 #[cfg(target_os = "none")]
+mod iommu;
+#[cfg(target_os = "none")]
 mod irq;
 #[cfg(target_os = "none")]
 mod jitter;

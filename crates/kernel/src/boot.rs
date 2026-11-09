@@ -572,6 +572,9 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     if let Some(fault) = s.options.test_fault {
         run_test_fault(fault, s.features);
     }
+    if s.options.iommu_dma {
+        devices::iommu_dma_test();
+    }
     #[cfg(feature = "selftest")]
     if s.options.keyslab_zero {
         crate::hardtest::keyslab_zero();

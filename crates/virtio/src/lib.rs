@@ -49,6 +49,11 @@ pub use transport::{Region, Support, Transport, VirtioCaps, find_caps};
 
 pub const VENDOR: u16 = 0x1af4;
 pub const F_VERSION_1: u64 = 1 << 32;
+/// VIRTIO_F_ACCESS_PLATFORM (virtio 1.x §6): the device reaches memory
+/// through the platform's DMA translation (an IOMMU) instead of bypassing
+/// it. Accepted whenever offered (ADR-305): the kernel's device addresses
+/// are identity mapped, so they mean the same with or without translation.
+pub const F_ACCESS_PLATFORM: u64 = 1 << 33;
 
 /// Device types (virtio 1.x §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +122,10 @@ impl From<QueueError> for VirtioError {
 pub trait Env {
     /// Zeroed, physically contiguous memory the device may access.
     fn dma_alloc(&self, bytes: usize) -> Option<DmaRegion>;
+    /// Told during feature negotiation whether the device offered
+    /// [`F_ACCESS_PLATFORM`]: one that does not bypasses any IOMMU, which the
+    /// kernel must know (ADR-305). The default ignores it.
+    fn platform_access(&self, _offered: bool) {}
     /// Monotonic nanoseconds, for timeouts.
     fn now_ns(&self) -> u64;
 }
@@ -443,6 +452,21 @@ mod tests {
         // A wrong page code is ignored.
         b0[1] = 0xb1;
         assert_eq!(BlockTopology::from_scsi(512, None, Some(&b0)).opt_io, 0);
+    }
+
+    /// ADR-305: VIRTIO_F_ACCESS_PLATFORM is accepted whenever the device
+    /// offers it, never asked for otherwise, and the environment is told.
+    #[test]
+    fn access_platform_is_accepted_when_offered_and_reported() {
+        use crate::bus::Bus;
+        use crate::fake::{FakeBus, FakeEnv};
+        for offered in [F_VERSION_1, F_VERSION_1 | F_ACCESS_PLATFORM] {
+            let env = FakeEnv::default();
+            let bus = FakeBus::new(offered, &[8], 0);
+            let got = bus.init(&env, 0, F_VERSION_1).unwrap();
+            assert_eq!(got, offered);
+            assert_eq!(env.platform.get(), Some(offered & F_ACCESS_PLATFORM != 0));
+        }
     }
 
     #[test]

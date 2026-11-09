@@ -137,3 +137,21 @@ pub fn tlb_flush_all() {
     dsb_ish();
     isb();
 }
+
+/// Cleans the data cache over `[va, va + len)` to the point of coherency and
+/// waits for it: what a device that does not snoop the caches (an IOMMU whose
+/// table walks are not coherent, H4b) needs before it reads memory the CPU
+/// wrote. 64-byte lines (the smallest on the cores this runs on).
+pub fn clean_dcache_range(va: usize, len: usize) {
+    let mut a = va & !63;
+    let end = va.saturating_add(len);
+    while a < end {
+        // SAFETY: a cache clean writes dirty lines back to memory and has no
+        // other effect; `va` is a mapped kernel address (a clean of an
+        // unmapped one faults like a load, and the callers pass memory they
+        // own).
+        unsafe { asm!("dc cvac, {}", in(reg) a, options(nostack, preserves_flags)) };
+        a += 64;
+    }
+    dsb_sy();
+}

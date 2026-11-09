@@ -143,3 +143,20 @@ pub fn enable_extended_state() -> u64 {
     }
     xcr0
 }
+
+/// Writes the cache lines over `[va, va + len)` back to memory (`clflush`)
+/// and orders them before later stores (`mfence`): what a device that does
+/// not snoop the caches (a VT-d unit without ECAP.C, H4b) needs before it
+/// reads memory the CPU wrote. 64-byte lines.
+pub fn clean_dcache_range(va: usize, len: usize) {
+    let mut a = va & !63;
+    let end = va.saturating_add(len);
+    while a < end {
+        // SAFETY: `clflush` writes a line back and invalidates it; it has no
+        // other effect, and the callers pass mapped memory they own.
+        unsafe { asm!("clflush [{}]", in(reg) a, options(nostack, preserves_flags)) };
+        a += 64;
+    }
+    // SAFETY: a fence only orders memory accesses.
+    unsafe { asm!("mfence", options(nostack, preserves_flags)) };
+}

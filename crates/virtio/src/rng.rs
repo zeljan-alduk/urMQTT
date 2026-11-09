@@ -36,6 +36,29 @@ impl VirtioRng {
         })
     }
 
+    /// Asks the device to write `len` bytes of entropy at physical address
+    /// `pa`, which need not be memory this driver owns: the IOMMU's negative
+    /// test (`test=iommu-dma`, ADR-307) points it outside the device's domain
+    /// and expects the write to be blocked. Returns the length the device
+    /// reported. A blocked DMA usually leaves the request unanswered (a
+    /// timeout) and the device marks itself broken: after this call the
+    /// driver must not be used again.
+    pub fn request_at<E: Env>(
+        &mut self,
+        env: &E,
+        pa: u64,
+        len: u32,
+        timeout_ns: u64,
+    ) -> Result<u32, VirtioError> {
+        self.q.add(&[Buf {
+            pa,
+            len,
+            device_writes: true,
+        }])?;
+        self.t.notify(self.notify_off, 0);
+        wait_used(env, &mut self.q, timeout_ns, "rng").map(|(_, n)| n)
+    }
+
     /// Fills `out` with device entropy. Returns the bytes produced.
     pub fn fill<E: Env>(&mut self, env: &E, out: &mut [u8]) -> Result<usize, VirtioError> {
         let mut done = 0usize;
