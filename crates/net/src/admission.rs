@@ -32,15 +32,23 @@ pub enum Reason {
     Storage = 3,
     /// `limits.max_handshakes_in_flight_per_ip` reached for the address.
     PerIp = 4,
+    /// `limits.max_connections_per_ip` established connections reached for
+    /// the address (NOW-14, ADR-280). Decided by the kernel against the
+    /// shared [`crate::source_limit::SourceTable`], counted here per core.
+    PerIpEstablished = 5,
 }
 
+/// How many [`Reason`]s there are (the length of the counter arrays).
+pub const REASONS: usize = 6;
+
 impl Reason {
-    pub const ALL: [Reason; 5] = [
+    pub const ALL: [Reason; REASONS] = [
         Self::Rate,
         Self::InFlight,
         Self::Memory,
         Self::Storage,
         Self::PerIp,
+        Self::PerIpEstablished,
     ];
 
     /// For log lines.
@@ -51,6 +59,7 @@ impl Reason {
             Self::Memory => "heap below the free reserve",
             Self::Storage => "the DB core is behind",
             Self::PerIp => "too many handshakes in flight from one address",
+            Self::PerIpEstablished => "too many established connections from one address",
         }
     }
 
@@ -62,6 +71,7 @@ impl Reason {
             Self::Memory => "memory",
             Self::Storage => "storage",
             Self::PerIp => "per_ip",
+            Self::PerIpEstablished => "per_ip_established",
         }
     }
 }
@@ -103,9 +113,9 @@ pub struct Stats {
     /// Not finished within the timeout.
     pub timed_out: u64,
     /// Refused at the final ACK, by [`Reason`].
-    pub refused: [u64; 5],
+    pub refused: [u64; REASONS],
     /// SYNs dropped without a SYN-ACK, by [`Reason`].
-    pub syn_dropped: [u64; 5],
+    pub syn_dropped: [u64; REASONS],
     /// Sum of the latencies of completed handshakes (accept to done), ms.
     pub latency_sum_ms: u64,
     /// Completed handshakes per latency bucket ([`LATENCY_BOUNDS_MS`]).
@@ -222,6 +232,18 @@ impl Admission {
         }
     }
 
+    /// A SYN dropped for `r` by a check that lives outside this struct (the
+    /// established-connections table, ADR-280): counted with the others.
+    pub fn count_syn_dropped(&mut self, r: Reason) {
+        bump(&mut self.stats.syn_dropped, r);
+    }
+
+    /// A connection refused at the final ACK for `r` by a check that lives
+    /// outside this struct: counted with the others.
+    pub fn count_refused(&mut self, r: Reason) {
+        bump(&mut self.stats.refused, r);
+    }
+
     /// A SYN from `ip`: whether to answer it. A refusal is counted as a
     /// dropped SYN; nothing else changes (no token is taken).
     pub fn syn_check(
@@ -302,7 +324,7 @@ impl Admission {
     }
 }
 
-fn bump(counts: &mut [u64; 5], r: Reason) {
+fn bump(counts: &mut [u64; REASONS], r: Reason) {
     if let Some(n) = counts.get_mut(r as usize) {
         *n += 1;
     }
@@ -335,6 +357,34 @@ mod tests {
         a.leave(A, Outcome::Done { latency_ms: 10 });
         assert!(a.admit(A, true, 0, true, false).is_ok());
         assert_eq!(a.stats().refused[Reason::PerIp as usize], 1);
+    }
+
+    /// ADR-280: the established-connections limit lives in the kernel's shared
+    /// table, but its refusals are counted per core with the others, under
+    /// their own reason, and never change in-flight state.
+    #[test]
+    fn established_per_address_refusals_are_counted_under_their_own_reason() {
+        let mut a = adm(10, 10, 10);
+        a.count_syn_dropped(Reason::PerIpEstablished);
+        a.count_syn_dropped(Reason::PerIpEstablished);
+        a.count_refused(Reason::PerIpEstablished);
+        let s = a.stats();
+        let i = Reason::PerIpEstablished as usize;
+        assert_eq!((s.syn_dropped[i], s.refused[i]), (2, 1));
+        assert_eq!((s.syn_dropped_total(), s.refused_total()), (2, 1));
+        // The in-flight per-address reason is a different counter.
+        assert_eq!(s.refused[Reason::PerIp as usize], 0);
+        assert_eq!((a.in_flight(), s.started), (0, 0));
+        assert_eq!(Reason::ALL.len(), REASONS);
+        assert_eq!(Reason::PerIpEstablished.name(), "per_ip_established");
+        // Names are unique (they are metric names).
+        for x in Reason::ALL {
+            assert_eq!(
+                Reason::ALL.iter().filter(|y| y.name() == x.name()).count(),
+                1
+            );
+            assert_eq!(Reason::ALL.get(x as usize), Some(&x));
+        }
     }
 
     #[test]

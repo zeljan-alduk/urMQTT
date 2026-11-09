@@ -728,6 +728,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     crate::mqtt_service::prepare_trust_anchors();
     crate::dataplane::set_heap_reserve(s.options.heap_limit_mb);
     crate::dataplane::set_bench_limits(s.options.bench_limits);
+    crate::conn_limit::init(s.options.bench_limits);
     crate::time_sync::set_dev_server(s.options.sntp_server);
     if s.options.db_test == Some(crate::cmdline::DbTest::DpBench) {
         #[cfg(feature = "selftest")]

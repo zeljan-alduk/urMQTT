@@ -3583,3 +3583,84 @@ results of the runs are in docs/MQTT5-CONFORMANCE.md and in the branch report.
 (a) No Will at `reboot` (point 17). (b) Shared subscriptions for 3.1.1 clients (point 5). (c) No member online:
 QoS 1/2 queued for an offline persistent member rather than dropped (point 3). (d) `limits.max_shared_groups` per
 shard rather than per broker (point 6). (e) Wills are not persisted (point 15).
+
+## ADR-280 — A limit on established TLS connections per source address (NOW-14)
+
+- **Status:** Accepted. Implements ROADMAP NOW-14. Configuration format 14; no store schema change. ADR-281 to
+  284 stay free.
+- **Context.** After ADR-080 only the handshakes *in flight* were limited per source address
+  (`limits.max_handshakes_in_flight_per_ip`, per data core): a client that finished its handshakes could hold as
+  many established TLS connections as the heap allowed (TODO.md "Known limits", AUDIT.md §6b). The plaintext and
+  WebSocket listeners already had `max_connections_per_ip` of their own (ADR-230, ADR-272); the TLS port had none.
+
+### What was built
+
+1. **`limits.max_connections_per_ip`**, format 14 (tag 270), 0 to 1 000 000, default **1024**, 0 = no limit.
+   Counted for every TLS connection, MQTT port and WebSocket port together (a WebSocket connection is a TLS
+   connection first); not for the plaintext port (its own limit) or the development port. Safe by default: the
+   default applies to every existing configuration, including those written before format 14, because a key at
+   its default writes no record (an untouched configuration keeps its lowest format and a v0.5.0 kernel still
+   boots it). **Upgrade effect:** one source address can now hold at most 1024 established TLS connections where
+   before it could hold any number; 1024 is far above any single device and above most NATs. Below it nothing
+   changes. A site with more than 1024 devices behind one address (a carrier NAT, QEMU's user network in a test)
+   sets a larger value or 0 (the benchmark template `deploy/bench/config.toml` sets 0, and so does the dev
+   command-line word `limits=bench`). **Downgrade:** a configuration that sets the key (any value but 1024)
+   carries format 14 and a v0.5.0 or older kernel refuses it at boot ("needs configuration format 14", the same
+   check as for every newer key); one that does not set it boots on any kernel.
+2. **One table for all cores** (`urmqtt_net::source_limit::SourceTable`, host-tested; `kernel/src/conn_limit.rs`
+   holds it behind a spin lock, built once at boot). *Decided:* the limit is global, not per core. A client's
+   connections spread over the cores by the hash of the 4-tuple (ADR-032), so a per-core limit would be
+   `cores` times the configured one. The cost is one short lock hold per SYN, per accept and per close of a TLS
+   connection, which is what the plaintext table (ADR-230) already costs; the handshake itself costs
+   milliseconds. A per-core counter would not be cheaper by more than that. *Per-core accounting is kept where it
+   is useful:* each core counts its own refusals with the admission counters (`Reason::PerIpEstablished`,
+   statsd `refused.per_ip_established` and `syn_dropped.per_ip_established`, the `handshakes: core N:` log
+   line, which also says how many counted connections the core holds).
+3. **The key** is `SourceKey`, 128 bits: an IPv4 address is `::ffff:a.b.c.d`; an IPv6 address (NEXT-1) is its
+   **/64 prefix** in the high half with a zero low half (one subscriber holds a whole /64, so counting full
+   addresses would be no limit). The two spaces cannot meet, and a test pins that. The table is a fixed set of
+   eight-slot buckets hashed under a per-boot random key (the plaintext table's design, ADR-230), 32 768 slots
+   (768 KiB). A slot is entered only at the final ACK (a flood of spoofed SYNs leaves no trace) and freed at 0.
+4. **Where it is checked, cheapest first.**
+   - *SYN* (`MqttService::syn_ok`): a read-only lookup, before the heap check, the token bucket and everything
+     else. Over the limit: no SYN-ACK, no state, the client's TCP retries after its backoff. Counted as
+     `syn_dropped` with the new reason.
+   - *Final ACK* (`admit`): counted **before** admission takes a handshake token, so a refusal burns no token;
+     if admission then refuses (memory, rate, in flight), the place is given back at once. Over the limit
+     (a race with another core's accept): RST, counted as `refused`.
+   - *Close*: `drop_conn` is the one function every close path ends in (peer FIN, reset, TCP timeout, handshake
+     timeout, watchdog abort, and the early failures inside `on_accept`) and it gives the place back exactly
+     once (a per-core map from connection id to address; a connection the table did not count has no entry).
+5. **How it composes with the in-flight limit.** They are independent bounds on one address, checked in this
+   order: established count (SYN), then per-core in-flight and per-address in-flight and the rate (ADR-080).
+   A connection counts as established from its final ACK to its close, so it is counted *during* its handshake
+   too: the in-flight limit (default 32 per core, 96 on three workers) bounds how fast an address can add
+   connections and the established limit bounds the total. With the defaults the in-flight limit binds first for
+   a burst and the established limit for a long-running holder. They have separate counters and separate
+   reasons (`per_ip`, `per_ip_established`).
+6. **A full bucket fails open** (*decided*). If all eight slots of an address's bucket hold other live addresses
+   the new connection is let through uncounted and `per_address/untracked` counts it; its close does nothing.
+   Refusing it would turn a hash collision (or more than 32 768 simultaneous addresses) into an outage for a
+   legitimate device. It does not weaken the limit for the address it exists for: an address that already has a
+   slot keeps it for as long as it holds a connection, and an attacker cannot aim addresses at a bucket without
+   the boot key.
+7. **Counters.** `$SYS/broker/connections/per_address/{limit,established,addresses,peak,syn_dropped,refused,
+   untracked}`, the same in the JSON info reply (`per_address`), one `per address limit ...` line in the
+   console's `status`, statsd per reason, the 5 s log line, and a boot line (`limits: at most N established
+   connection(s) per source address`). Refusals are logged at powers of two like the other admission refusals.
+8. **Not done, on purpose.** No per-identity limit (a device's identity is known only after the handshake; the
+   session takeover already bounds it to one connection). No per-network (/24) grouping for IPv4. No eviction of an
+   old connection to make room. No allow-list exempting an address (raise the limit, or 0). The plaintext port
+   keeps its own limit and is not counted twice.
+
+### Verification
+
+Host tests in `crates/net/src/source_limit.rs` (the bound and one close freeing one place, thousands of
+connections from one address, a model over 20 000 random operations, the full bucket, the zero key, the IPv6
+prefix key never meeting an IPv4 key) and `admission.rs` (the new counters); `config-schema` and `cfg` tests (format
+14 per value, 0 included, range and agreement of the TOML path with the blob check); the CLI tool and builder
+tests; fuzz target `source_limit` (the table against a model under arbitrary operations, seeds, 2 minutes: 5.4
+million runs, clean); `tools/attack` `established-flood` (6 of 10 connected, a close frees exactly one place,
+closing all frees all) and the smoke group `conn-limit` (aarch64 under HVF and x86_64 under TCG, a limit of 6 on
+four vCPUs, the `$SYS` counters read by the operator); the `storm` scenario runs with the limit off (3000 devices
+from one address).

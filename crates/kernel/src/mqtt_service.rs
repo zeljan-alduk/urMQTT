@@ -19,12 +19,13 @@ use urmqtt_broker::{Acl, Broker, Buf, CloseReason, Config, ConnId};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{debug, info, warn};
 use urmqtt_mqtt::{Limits, QoS};
-use urmqtt_net::admission::{Admission, Outcome};
+use urmqtt_net::admission::{Admission, Outcome, REASONS, Reason};
 use urmqtt_sync::spsc::{Consumer, Producer};
 use urmqtt_sync::sync::OnceCell;
 use urmqtt_tcp::{Endpoint, TcpStack};
 use urmqtt_tls::{CertRole, Event, IdentityField, ServerSetup, TicketKeys, TlsServer, TlsSession};
 
+use crate::conn_limit;
 use crate::dataplane::{self, CoreMsg, Link, Tconn};
 use crate::db::{self, DbReq, DbResp, LogBatch, Restored};
 use crate::watchdog;
@@ -209,10 +210,16 @@ pub struct MqttService {
     adm: Admission,
     /// The connections `adm` counts as in flight.
     flights: Slab<Flight>,
+    /// Established TLS connections of this core that the per-address table
+    /// counts (NOW-14, ADR-280): connection id to its source address. Given
+    /// back in `drop_conn`, the one place every close path ends in.
+    sources: Slab<[u8; 4]>,
+    /// `sources`' length (how many this core holds), for the report.
+    sources_held: u32,
     /// Refusals and dropped SYNs already logged, by [`Reason`]: the log
     /// lines come at powers of two.
-    logged: [u64; 5],
-    logged_syn: [u64; 5],
+    logged: [u64; REASONS],
+    logged_syn: [u64; REASONS],
     /// The heap check takes the allocator's global lock; once per
     /// millisecond is enough for a reserve of megabytes.
     heap_ok: bool,
@@ -617,9 +624,11 @@ impl MqttService {
             handshakes: VecDeque::new(),
             app: Vec::new(),
             flights: Slab::new(),
+            sources: Slab::new(),
+            sources_held: 0,
             adm: Admission::new(dataplane::admission_limits()),
-            logged: [0; 5],
-            logged_syn: [0; 5],
+            logged: [0; REASONS],
+            logged_syn: [0; REASONS],
             heap_ok: true,
             heap_checked_ms: u64::MAX,
             last_report_ms: 0,
@@ -763,9 +772,17 @@ impl MqttService {
             return false;
         }
         let tls = Some(port) != self.plain_port;
-        let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
-        let Err(r) = self.adm.syn_check(ip, tls, now_ms, heap_ok, behind) else {
-            return true;
+        // Established connections per address (ADR-280), before anything
+        // that costs: no token, no state, no packet.
+        let r = if tls && !conn_limit::syn_ok(ip) {
+            self.adm.count_syn_dropped(Reason::PerIpEstablished);
+            Reason::PerIpEstablished
+        } else {
+            let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
+            let Err(r) = self.adm.syn_check(ip, tls, now_ms, heap_ok, behind) else {
+                return true;
+            };
+            r
         };
         let n = self
             .adm
@@ -797,10 +814,38 @@ impl MqttService {
     /// Admission for a new connection (PROMPT §6, M16): free heap above the
     /// reserve, fewer than the in-flight limits, and for TLS a handshake
     /// token. Refusals cost no crypto work and are logged rate-limited.
-    fn admit(&mut self, tls: bool, ip: [u8; 4], now_ms: u64) -> bool {
-        let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
-        let Err(r) = self.adm.admit(ip, tls, now_ms, heap_ok, behind) else {
-            return true;
+    ///
+    /// For TLS the established-connections table (ADR-280) is asked first, so
+    /// a refusal for it burns no handshake token; if admission then refuses,
+    /// the place is given back. On success the connection `c` is remembered in
+    /// `sources` when the table counted it.
+    fn admit(&mut self, c: u32, tls: bool, ip: [u8; 4], now_ms: u64) -> bool {
+        use conn_limit::Counted;
+        let placed = if tls {
+            conn_limit::open(ip)
+        } else {
+            Counted::No
+        };
+        let r = if placed == Counted::Refuse {
+            self.adm.count_refused(Reason::PerIpEstablished);
+            Reason::PerIpEstablished
+        } else {
+            let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
+            match self.adm.admit(ip, tls, now_ms, heap_ok, behind) {
+                Ok(()) => {
+                    if placed == Counted::Yes {
+                        self.sources.insert(c, ip);
+                        self.sources_held += 1;
+                    }
+                    return true;
+                }
+                Err(r) => {
+                    if placed == Counted::Yes {
+                        conn_limit::close(ip);
+                    }
+                    r
+                }
+            }
         };
         let n = self
             .adm
@@ -837,9 +882,20 @@ impl MqttService {
         }
     }
 
+    /// Gives back the place `c` holds in the per-address table, once.
+    fn release_source(&mut self, c: u32) {
+        if let Some(ip) = self.sources.remove(&c) {
+            self.sources_held = self.sources_held.saturating_sub(1);
+            conn_limit::close(ip);
+        }
+    }
+
     /// Forgets the connection `c`: gives back what the plaintext listener
-    /// counted for it, and drops the transport state.
+    /// and the per-address table counted for it, and drops the transport
+    /// state. Every way a connection ends (peer close, reset, TCP timeout,
+    /// handshake timeout, watchdog abort) comes here.
     fn drop_conn(&mut self, c: u32, now_ms: u64) {
+        self.release_source(c);
         if let Some(p) = self.plain.as_mut() {
             p.release(c, (now_ms / 1000) as u32);
         }
@@ -897,26 +953,27 @@ impl MqttService {
         {
             return;
         }
-        let by = |a: &[u64; 5], b: &[u64; 5]| {
+        let by = |a: &[u64; REASONS], b: &[u64; REASONS]| {
             let g = |i: usize| {
                 a.get(i)
                     .copied()
                     .unwrap_or(0)
                     .saturating_sub(b.get(i).copied().unwrap_or(0))
             };
-            (g(0), g(1), g(4), g(2), g(3))
+            (g(0), g(1), g(4), g(2), g(3), g(5))
         };
-        let (r, c, i, m, db) = by(&w.refused, &prev.refused);
-        let (sr, sc, si, sm, sdb) = by(&w.syn_dropped, &prev.syn_dropped);
+        let (r, c, i, m, db, e) = by(&w.refused, &prev.refused);
+        let (sr, sc, si, sm, sdb, se) = by(&w.syn_dropped, &prev.syn_dropped);
         info!(
             "handshakes: core {me}: {started} started, {done} done, {} failed, {} timed out; \
-             {refused} refused at the ACK (rate {r}, core {c}, address {i}, memory {m}, storage {db}); \
-             {syn} SYN(s) dropped (rate {sr}, core {sc}, address {si}, memory {sm}, storage {sdb}); \
-             in flight {} now / {} at most; accept to done: mean {} ms, max {} ms, {} over 250 ms, {} over 1 s",
+             {refused} refused at the ACK (rate {r}, core {c}, address {i}, memory {m}, storage {db}, established per address {e}); \
+             {syn} SYN(s) dropped (rate {sr}, core {sc}, address {si}, memory {sm}, storage {sdb}, established per address {se}); \
+             in flight {} now / {} at most, {} established from counted addresses; accept to done: mean {} ms, max {} ms, {} over 250 ms, {} over 1 s",
             d(w.failed, prev.failed),
             d(w.timed_out, prev.timed_out),
             self.adm.in_flight(),
             w.window_in_flight_max,
+            self.sources_held,
             d(w.latency_sum_ms, prev.latency_sum_ms) / done.max(1),
             w.window_latency_max_ms,
             d(w.slower_than(3), prev.slower_than(3)),
@@ -939,13 +996,14 @@ impl MqttService {
             if !admitted {
                 return false;
             }
-        } else if !self.admit(tls, ip, now_ms) {
+        } else if !self.admit(c, tls, ip, now_ms) {
             return false;
         }
         // The WebSocket listener counts its own connections (ADR-272).
         let ws = self.is_ws_port(port);
         if ws && !self.ws.as_mut().is_some_and(|w| w.accept(c, ip, now_ms)) {
             self.adm.leave(ip, Outcome::Failed);
+            self.release_source(c);
             return false;
         }
         let session = if tls {
@@ -960,6 +1018,7 @@ impl MqttService {
                 None => {
                     // Admitted but no session could be built: give the slot back.
                     self.adm.leave(ip, Outcome::Failed);
+                    self.release_source(c);
                     if let Some(w) = self.ws.as_mut() {
                         w.release(c, now_ms);
                     }

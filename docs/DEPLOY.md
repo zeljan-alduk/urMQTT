@@ -516,7 +516,8 @@ this was written.
 
 The production limits protect the server from one slow or abusive source:
 `max_handshakes_in_flight_per_ip = 32` (per data core), `max_handshakes_in_flight_per_core = 256`
-and `handshakes_per_core_per_sec = 2000`. A load generator on a laptop is one source
+and `handshakes_per_core_per_sec = 2000`; established connections are limited per address too
+(`max_connections_per_ip = 1024`, all cores together, ADR-280). A load generator on a laptop is one source
 address, so against the production defaults it measures the per-address limit
 (about 32 handshakes in flight on each worker core), not the server. For that,
 and only for that, there is a bench profile:
@@ -665,7 +666,8 @@ GICv2 or a GICv3.
 clients connect to the Pi's address; forward TCP 8883 on your router to reach
 it from outside. Every client then appears to come from one address (QEMU's
 NAT), so `limits.max_handshakes_in_flight_per_ip` applies to all of them
-together. With a Linux bridge on the Pi's Ethernet (`nmcli con add type bridge
+together, and so does `limits.max_connections_per_ip` (default 1024 established
+connections: raise it for more than a thousand devices, or use the bridge below). With a Linux bridge on the Pi's Ethernet (`nmcli con add type bridge
 ifname br0` and the Ethernet connection as its port), `--net bridge:br0` puts
 the VM on the LAN with its own DHCP address and real client addresses.
 

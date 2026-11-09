@@ -168,7 +168,7 @@ and calls synchronously, on the core that owns the store:
 
 - TLS 1.3 only, with mutual TLS: device certificates must chain to a CA in the image's configuration.
 - `device_id` is taken from the configured field (`cn` or `san_uri`), and the MQTT client id must match it.
-- The handshake runs through rustls in `no_std` mode with a pure-Rust crypto provider. Admission control is a per-core token bucket. Every handshake phase has a timeout. Resumption uses PSK tickets.
+- The handshake runs through rustls in `no_std` mode with a pure-Rust crypto provider. Admission control is a per-core token bucket plus handshake limits per core and per source address, and one table shared by all cores that bounds the established connections of a source address (`limits.max_connections_per_ip`, ADR-280: checked at the SYN, counted at the final ACK before a token is taken, given back in the one function every close path ends in). Every handshake phase has a timeout. Resumption uses PSK tickets.
 - After the handshake the traffic keys are extracted and the rustls object is dropped. A minimal record layer (AES-128-GCM, ChaCha20-Poly1305) decrypts in place and encrypts directly into TX buffers (KeyUpdate: ADR-012).
 - Revoked serials are stored in SQLite and mirrored read-only on every data core. A handshake never waits for the DB.
 

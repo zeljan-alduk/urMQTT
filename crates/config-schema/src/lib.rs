@@ -452,6 +452,10 @@ fn default_max_shared_groups() -> u32 {
     default_u32("limits.max_shared_groups")
 }
 
+fn default_max_connections_per_ip() -> u32 {
+    default_u32("limits.max_connections_per_ip")
+}
+
 fn default_max_shared_group_members() -> u32 {
     default_u32("limits.max_shared_group_members")
 }
@@ -582,6 +586,9 @@ struct RawLimits {
     max_shared_groups: u32,
     #[serde(default = "default_max_shared_group_members")]
     max_shared_group_members: u32,
+    /// Optional (format 14, ADR-280): the default of the field table.
+    #[serde(default = "default_max_connections_per_ip")]
+    max_connections_per_ip: u32,
     /// NOW-13, ADR-269; optional ("single" when absent).
     #[serde(default)]
     publisher_backpressure: PublisherBackpressure,
@@ -891,6 +898,9 @@ pub struct Limits {
     /// Members one shared-subscription group may have, 1..=65535; one more:
     /// SUBACK 0x97 / 0x80 (ADR-275).
     pub max_shared_group_members: u32,
+    /// Established TLS connections one source address may hold at once,
+    /// 0..=1000000; 0: no limit (NOW-14, ADR-280).
+    pub max_connections_per_ip: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2182,6 +2192,8 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
             "limits.max_shared_group_members",
             raw.max_shared_group_members,
         ),
+        // ADR-280.
+        ("limits.max_connections_per_ip", raw.max_connections_per_ip),
     ] {
         if let Some(urmqtt_cfg::fields::Kind::UInt { min, max, .. }) = default_of(key)
             && !(min..=max).contains(&u64::from(v))
@@ -2209,6 +2221,7 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
         max_message_expiry_s: raw.max_message_expiry_s,
         max_shared_groups: raw.max_shared_groups,
         max_shared_group_members: raw.max_shared_group_members,
+        max_connections_per_ip: raw.max_connections_per_ip,
     }
 }
 
@@ -2639,6 +2652,8 @@ pub mod pack;
 
 #[cfg(test)]
 mod backpressure_tests;
+#[cfg(test)]
+mod conn_limit_tests;
 #[cfg(test)]
 mod console_tests;
 #[cfg(test)]

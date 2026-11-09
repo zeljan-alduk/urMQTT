@@ -24,6 +24,7 @@ pub mod dhcp;
 pub mod iface;
 pub mod ipv4;
 pub mod rss;
+pub mod source_limit;
 
 /// What the dispatcher needs to know about a received Ethernet frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

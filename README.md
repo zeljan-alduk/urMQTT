@@ -617,6 +617,7 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `limits.handshakes_per_core_per_sec` | > 0 | Handshake admission control (reconnect storms) |
 | `limits.max_handshakes_in_flight_per_core` | > 0 | Concurrent handshakes per core; more are refused |
 | `limits.max_handshakes_in_flight_per_ip` | > 0 | Of those, from one source address |
+| `limits.max_connections_per_ip` | 0 – 1 000 000 (1024) | Established TLS connections (MQTT and WebSocket) one source address may hold at once, all cores together; 0: no limit. Over it the SYN gets no answer before any TLS work, and the refusal is counted in `$SYS/broker/connections/per_address/*`. Devices behind one NAT share an address. Set (0 included), it needs configuration format 14 (ADR-280) |
 | `limits.max_session_expiry_s` | 0 – 4 294 967 295 (2 592 000 = 30 days) | The longest Session Expiry Interval granted, to MQTT 5.0 clients and 3.1.1 persistent sessions alike; 4 294 967 295 = never expire (ADR-273). Set, it needs configuration format 12, like every key below |
 | `limits.default_session_expiry_s` | 0 – 4 294 967 295 (2 592 000) | The Session Expiry Interval of a 3.1.1 persistent session (`clean_session` 0); at most `limits.max_session_expiry_s` |
 | `limits.max_message_expiry_s` | 0 – 4 294 967 295 (0) | The longest Message Expiry Interval a publisher may ask for; 0: no cap |

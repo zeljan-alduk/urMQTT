@@ -187,6 +187,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "source_limit"
+path = "fuzz_targets/source_limit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "plain_input"
 path = "fuzz_targets/plain_input.rs"
 test = false

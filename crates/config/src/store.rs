@@ -308,6 +308,7 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             max_message_expiry_s: u32_of(tag::LIM_MAX_MESSAGE_EXPIRY),
             max_shared_groups: u32_of(tag::LIM_MAX_SHARED_GROUPS),
             max_shared_group_members: u32_of(tag::LIM_MAX_SHARED_GROUP_MEMBERS),
+            max_connections_per_ip: u32_of(tag::LIM_MAX_CONNECTIONS_PER_IP),
         },
         acl: Acl {
             device_publish,
@@ -876,6 +877,24 @@ mod tests {
             ),
             (65_535, 1)
         );
+    }
+
+    /// NOW-14, ADR-280: `limits.max_connections_per_ip` is 1024 by default (the
+    /// empty blob, and every blob before format 14) and decoded when set,
+    /// 0 (no limit) included.
+    #[test]
+    fn the_connection_limit_per_address_is_decoded() {
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.limits.max_connections_per_ip, 1024);
+        for v in [0u64, 7] {
+            let mut b = Builder::new();
+            b.uint(tag::LIM_MAX_CONNECTIONS_PER_IP, v).unwrap();
+            let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+            let blob = Blob::parse(bytes).unwrap();
+            assert_eq!(blob.version(), 14);
+            let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+            assert_eq!(build(&blob, arena).limits.max_connections_per_ip, v as u32);
+        }
     }
 
     /// NOW-19, ADR-264: `network.mtu` is unset by default (the empty blob,
