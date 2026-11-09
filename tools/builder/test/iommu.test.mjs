@@ -23,7 +23,7 @@ const version = blob => blob[8] | (blob[9] << 8);
 const ID = 'devices.iommu';
 
 test('the key is in [devices], off by default, the only key of format 18', () => {
-  assert.equal(model.formatVersion, 18);
+  assert.equal(model.formatVersion, 20);
   const devices = model.sections.find(s => s.id === 'devices').fields.map(f => f.id);
   assert.ok(devices.includes(ID));
   const f = model.byId.get(ID);

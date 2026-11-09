@@ -262,6 +262,7 @@ pub fn check(b: &Blob<'_>, dev_allowed: bool) -> Result<(), CfgError> {
         }
     }
     time(b)?;
+    log_tls(b)?;
     for (key, t) in [
         ("observability.syslog_udp", tag::OBS_SYSLOG),
         ("observability.metrics_udp", tag::OBS_METRICS),
@@ -652,6 +653,66 @@ fn websocket(b: &Blob<'_>, max_len: u64, max_levels: u64) -> Result<(), CfgError
         }
     } else if users > 0 {
         return Err(err("websocket.users", "only used with auth = \"password\""));
+    }
+    Ok(())
+}
+
+/// The refusals of the log shipping keys (ADR-318), shared with the TOML path.
+pub const LOG_TLS_CA_MSG: &str =
+    "required when observability.log_tls is set (the collector's trust anchors)";
+pub const LOG_TLS_UNUSED_MSG: &str = "only allowed with observability.log_tls";
+pub const LOG_TLS_ADDR_MSG: &str = "must be a unicast IPv4 address (not 0.0.0.0/8, 127.0.0.0/8, multicast or broadcast) and a port other than 0";
+pub const LOG_TLS_NAME_MSG: &str = "must be a DNS name: labels of letters, digits and '-' (not first or last), 1 to 63 bytes each, dots between, at most 253 bytes";
+
+/// Whether `name` is a DNS name a certificate can carry (RFC 1123 §2.1 host
+/// names, case-insensitive; no wildcard, no trailing dot, not all digits in
+/// the last label, so that an IPv4 literal is not mistaken for one).
+pub fn valid_dns_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > fields::MAX_LOG_TLS_NAME_LEN {
+        return false;
+    }
+    let mut last_numeric = false;
+    for label in name.split('.') {
+        let b = label.as_bytes();
+        let (Some(first), Some(last)) = (b.first(), b.last()) else {
+            return false;
+        };
+        if b.len() > 63
+            || *first == b'-'
+            || *last == b'-'
+            || !b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
+        {
+            return false;
+        }
+        last_numeric = b.iter().all(u8::is_ascii_digit);
+    }
+    !last_numeric
+}
+
+/// `observability.log_tls*` (ADR-318): a collector needs its trust anchors;
+/// the other keys mean nothing without a collector.
+fn log_tls(b: &Blob<'_>) -> Result<(), CfgError> {
+    let Some((addr, port)) = b.addr(tag::OBS_LOG_TLS) else {
+        for (key, t) in [
+            ("observability.log_tls_name", tag::OBS_LOG_TLS_NAME),
+            ("observability.log_tls_ca", tag::OBS_LOG_TLS_CA),
+            ("observability.log_tls_queue_kb", tag::OBS_LOG_TLS_QUEUE_KB),
+        ] {
+            if b.raw(t).is_some() {
+                return Err(err(key, LOG_TLS_UNUSED_MSG));
+            }
+        }
+        return Ok(());
+    };
+    if port == 0 || matches!(addr[0], 0 | 127 | 224..=255) {
+        return Err(err("observability.log_tls", LOG_TLS_ADDR_MSG));
+    }
+    if b.bins(tag::OBS_LOG_TLS_CA).next().is_none() {
+        return Err(err("observability.log_tls_ca", LOG_TLS_CA_MSG));
+    }
+    let name = b.str(tag::OBS_LOG_TLS_NAME);
+    if !name.is_empty() && !valid_dns_name(name) {
+        return Err(err("observability.log_tls_name", LOG_TLS_NAME_MSG));
     }
     Ok(())
 }

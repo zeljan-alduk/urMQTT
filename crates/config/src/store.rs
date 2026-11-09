@@ -31,8 +31,9 @@ use crate::{
 /// entries are text; the typed lists have arrays of their own; checked by a
 /// test).
 const STR_SLOTS: usize = 1568;
-/// Operational plus bootstrap CAs at their maxima.
-const PEM_SLOTS: usize = 16;
+/// Operational plus bootstrap CAs, and the log collector's anchors
+/// (ADR-318), at their maxima.
+const PEM_SLOTS: usize = 24;
 const ADDR_SLOTS: usize = fields::MAX_TIME_SERVERS;
 /// The plaintext lists (P1): networks, accounts, per-network identities.
 const NET_SLOTS: usize = fields::MAX_PLAIN_NETWORKS;
@@ -178,6 +179,7 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
     };
     let operational = pem_list(tag::TRUST_OPERATIONAL);
     let bootstrap = pem_list(tag::TRUST_BOOTSTRAP);
+    let log_tls_ca = pem_list(tag::OBS_LOG_TLS_CA);
     let mut n = 0;
     for (i, (slot, (ip, port))) in arena
         .addrs
@@ -375,6 +377,10 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             },
             syslog_udp: sock(tag::OBS_SYSLOG),
             metrics_udp: sock(tag::OBS_METRICS),
+            log_tls: sock(tag::OBS_LOG_TLS),
+            log_tls_name: b.str(tag::OBS_LOG_TLS_NAME),
+            log_tls_ca,
+            log_tls_queue_kb: u32_of(tag::OBS_LOG_TLS_QUEUE_KB),
         },
         watchdog: Watchdog {
             handler_budget_ms: u32_of(tag::WD_HANDLER),
@@ -994,6 +1000,45 @@ mod tests {
         let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
         let c = build(&blob, arena);
         assert_eq!(c.limits.max_runtime_accounts, 1_024);
+    }
+
+    /// ADR-318: the log shipping keys are off by default (the empty blob,
+    /// and every blob before format 20) and decoded when set.
+    #[test]
+    fn the_log_tls_keys_are_decoded() {
+        use urmqtt_cfg::build::Builder;
+        let o = CONFIG.observability;
+        assert_eq!(
+            (
+                o.log_tls,
+                o.log_tls_name,
+                o.log_tls_ca.len(),
+                o.log_tls_queue_kb
+            ),
+            (None, "", 0, 256)
+        );
+        let mut b = Builder::new();
+        b.addr(tag::OBS_LOG_TLS, [10, 0, 2, 2], 6514).unwrap();
+        b.str(tag::OBS_LOG_TLS_NAME, "logs.example.com").unwrap();
+        b.bins(tag::OBS_LOG_TLS_CA, &[b"ca-a".to_vec(), b"ca-b".to_vec()])
+            .unwrap();
+        b.uint(tag::OBS_LOG_TLS_QUEUE_KB, 64).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 20);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        let o = c.observability;
+        assert_eq!(
+            o.log_tls,
+            Some(SocketAddrV4 {
+                addr: [10, 0, 2, 2],
+                port: 6514
+            })
+        );
+        assert_eq!(o.log_tls_name, "logs.example.com");
+        assert_eq!(o.log_tls_ca, &[&b"ca-a"[..], &b"ca-b"[..]]);
+        assert_eq!(o.log_tls_queue_kb, 64);
     }
 
     /// ADR-297: the `[update]` keys have the documented defaults (the empty

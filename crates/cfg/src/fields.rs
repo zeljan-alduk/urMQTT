@@ -328,6 +328,12 @@ pub mod tag {
     // apart from the others of v0.6.0 so that items built in parallel do not
     // collide.
     pub const DEV_IOMMU: u16 = 318;
+    // Log shipping over TLS on the outbound TCP client (NEXT-7, ADR-318):
+    // format version 20. Apart from the other items' tags of v0.6.0.
+    pub const OBS_LOG_TLS: u16 = 450;
+    pub const OBS_LOG_TLS_NAME: u16 = 451;
+    pub const OBS_LOG_TLS_CA: u16 = 452;
+    pub const OBS_LOG_TLS_QUEUE_KB: u16 = 453;
 }
 
 use tag as t;
@@ -392,6 +398,10 @@ pub const MAX_METRICS_NETWORKS: usize = 16;
 pub const MAX_METRICS_TIMEOUT_S: u64 = 30;
 /// Longest identity (a user name, the anonymous identity, an `ip_identities` id).
 pub const MAX_IDENTITY_LEN: usize = 64;
+/// Longest `observability.log_tls_name` (a DNS name, RFC 1035 §2.3.4).
+pub const MAX_LOG_TLS_NAME_LEN: usize = 253;
+/// Most trust anchors of `observability.log_tls_ca`.
+pub const MAX_LOG_TLS_CAS: usize = 8;
 
 /// Every field, in ascending tag order.
 pub static FIELDS: &[Field] = &[
@@ -1619,6 +1629,49 @@ pub static FIELDS: &[Field] = &[
             "A trial boot not confirmed within this many seconds resets the machine, which uses one of its trial boots; 0: it waits as long as it runs. When not 0, longer than update.confirm_after_s. Format 17.",
         ),
         17,
+    ),
+    // Log shipping over TLS (NEXT-7, ADR-318): format version 20.
+    since(
+        f(
+            t::OBS_LOG_TLS,
+            "observability.log_tls",
+            Kind::Addr,
+            "Collector for the log records over TLS 1.3 (RFC 5425 syslog framing; a.b.c.d:port, an IPv4 address, no DNS); empty: off. The broker opens this one outbound connection; it needs observability.log_tls_ca. Format 20.",
+        ),
+        20,
+    ),
+    since(
+        f(
+            t::OBS_LOG_TLS_NAME,
+            "observability.log_tls_name",
+            Kind::Str {
+                max: MAX_LOG_TLS_NAME_LEN as u16,
+                default: "",
+            },
+            "The name the collector's certificate must carry (a DNS name); empty: its IPv4 address, which must then be an IP SAN of the certificate. Format 20.",
+        ),
+        20,
+    ),
+    since(
+        f(
+            t::OBS_LOG_TLS_CA,
+            "observability.log_tls_ca",
+            Kind::BinList {
+                max_items: MAX_LOG_TLS_CAS as u8,
+                max: 65_536,
+            },
+            "CA certificates (PEM) the collector's certificate must chain to; the only trust anchors of the log connection. Required with observability.log_tls. Format 20.",
+        ),
+        20,
+    ),
+    since(
+        f(
+            t::OBS_LOG_TLS_QUEUE_KB,
+            "observability.log_tls_queue_kb",
+            uint(4, 16, 4096, 256),
+            "KiB of log records kept for the TLS collector while it is unreachable; the oldest are dropped (and counted) beyond. Format 20.",
+        ),
+        20,
     ),
 ];
 

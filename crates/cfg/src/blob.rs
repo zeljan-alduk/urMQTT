@@ -38,16 +38,19 @@ pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// request for it, and an operator who asked for an allow-list must never get a kernel that answers everybody); version
 /// 17 adds the `[update]` section (ADR-297: a kernel that does not know it would confirm a trial boot by its own
 /// defaults, or never, against the operator's choice); version 18 adds `devices.iommu` (ADR-305: a kernel that does not
-/// know it would run without the DMA isolation the operator required). The records of 2 and 3 are the same: the packer writes the lowest version
+/// know it would run without the DMA isolation the operator required); version 20 adds the `observability.log_tls*` keys
+/// (ADR-318: a kernel that does not know them would not ship the log where the operator asked, without a word; 19
+/// is allocated to another item of the v0.6.0 release). The records of 2 and 3 are the same: the packer writes the lowest version
 /// that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind still boots every image that
 /// does not use what came later.
-pub const FORMAT_VERSION: u16 = 18;
+pub const FORMAT_VERSION: u16 = 20;
 
 /// The one version between [`FORMAT_MIN`] and [`FORMAT_VERSION`] no format ever had.
 pub const UNUSED_VERSION: u16 = 10;
 /// The versions between [`FORMAT_MIN`] and [`FORMAT_VERSION`] this code does not read: 10, which no format ever
-/// had, and any format allocated to an item of a release that is not merged yet (none now).
-pub const UNUSED_VERSIONS: &[u16] = &[UNUSED_VERSION];
+/// had, and any format allocated to an item of a release that is not merged yet (19, another v0.6.0 item's: the
+/// release merge removes it as that item lands).
+pub const UNUSED_VERSIONS: &[u16] = &[UNUSED_VERSION, 19];
 
 /// Whether this code reads format `version`.
 pub fn known_version(version: u16) -> bool {

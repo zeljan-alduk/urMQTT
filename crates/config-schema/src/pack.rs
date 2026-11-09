@@ -222,6 +222,8 @@ struct Files {
     control_key: Option<[u8; 32]>,
     cert_not_after: u64,
     disk_key: Option<[u8; urmqtt_cfg::diskkey::KEY_BYTES]>,
+    /// The log collector's trust anchors (ADR-318).
+    log_tls_ca: Vec<Vec<u8>>,
 }
 
 fn read_files(
@@ -249,6 +251,7 @@ fn read_files(
         control_key: None,
         cert_not_after: 0,
         disk_key: None,
+        log_tls_ca: Vec::new(),
     };
     if supplied.contains("tls.cert")
         && let Some(b) = read(&mut errors, "tls.cert", &cfg.tls.cert)
@@ -321,6 +324,20 @@ fn read_files(
                 }
                 Err(m) => errors.push(cerr(key, format!("{name}: {m}"))),
             }
+        }
+    }
+    // ADR-318: the log collector's trust anchors, checked like the
+    // operational ones (a certificate, valid for trust.min_anchor_days).
+    for name in &cfg.observability.log_tls_ca {
+        let key = "observability.log_tls_ca";
+        let Some(b) = read(&mut errors, key, name) else {
+            continue;
+        };
+        match check_pem(&b, PemKind::Certificate)
+            .and_then(|()| check_expiry(&b, now, cfg.trust.min_anchor_days))
+        {
+            Ok(_) => files.log_tls_ca.push(b),
+            Err(m) => errors.push(cerr(key, format!("{name}: {m}"))),
         }
     }
     if supplied.contains("control.public_key")
@@ -521,6 +538,15 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
         let (ip, port) = sock(x);
         b.addr(tag::OBS_METRICS, ip, port)?;
     }
+    // ADR-318: unset, the log shipping keys write nothing (the blob keeps
+    // its version); set, they need format 20.
+    if let Some(x) = &o.log_tls {
+        let (ip, port) = sock(x);
+        b.addr(tag::OBS_LOG_TLS, ip, port)?;
+    }
+    b.str(tag::OBS_LOG_TLS_NAME, &o.log_tls_name)?;
+    b.bins(tag::OBS_LOG_TLS_CA, &f.log_tls_ca)?;
+    b.uint(tag::OBS_LOG_TLS_QUEUE_KB, u64::from(o.log_tls_queue_kb))?;
     b.uint(tag::WD_HANDLER, u64::from(cfg.watchdog.handler_budget_ms))?;
     b.uint(
         tag::WD_HANDSHAKE,
