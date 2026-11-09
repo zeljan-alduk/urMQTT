@@ -2553,3 +2553,124 @@ fn a_web_session_has_its_own_rate_and_no_retain() {
 mod flow_tests;
 #[path = "qos2_tests.rs"]
 mod qos2;
+
+// ---- the ACL class of a password account (NOW-15, ADR-285) -----------------
+
+fn class_of(id: &str) -> u8 {
+    match id {
+        "viewer" => CLASS_READ_ONLY,
+        "feeder" => CLASS_WRITE_ONLY,
+        _ => CLASS_FULL,
+    }
+}
+
+/// A read-only account subscribes and receives but publishes nothing, not even
+/// a Will; a write-only one publishes but subscribes to nothing; a full one
+/// does both under the listener's own rules; classes narrow only.
+#[test]
+fn an_account_class_only_narrows_the_listeners_rules() {
+    for web in [false, true] {
+        let mut cfg = plain_cfg();
+        if web {
+            cfg.web = cfg.plain;
+            cfg.plain = None;
+        }
+        let mut b = Broker::new(cfg);
+        b.set_login_class(class_of);
+        let login = |b: &mut Broker, id: &str, will: Option<MqttWill<'_>>| {
+            let mut c = Client {
+                c: b.open(0).unwrap(),
+                rx: Vec::new(),
+                pending: Vec::new(),
+            };
+            let ok = if web {
+                b.set_web_identity(c.c, id)
+            } else {
+                b.set_plain_identity(c.c, id)
+            };
+            assert!(ok);
+            c.send(
+                b,
+                &Packet::Connect(Connect {
+                    protocol_level: 4,
+                    clean_session: true,
+                    keep_alive: 10,
+                    client_id: "cid",
+                    will,
+                    username: Some(id),
+                    password: Some(b"x"),
+                }),
+                0,
+            );
+            let mut got = c.recv(b);
+            let ack = got.remove(0);
+            c.pending = got;
+            (c, ack)
+        };
+        // The read-only account: subscribes, never publishes.
+        let (mut ro, ack) = login(&mut b, "viewer", None);
+        assert_eq!(ack, Got::ConnAck(false, 0));
+        assert_eq!(
+            ro.subscribe(&mut b, 1, &[("announce/#", QoS::AtMostOnce)], 0),
+            vec![Got::SubAck(1, vec![0])]
+        );
+        let before = b.stats().dropped_acl;
+        ro.publish(&mut b, "devices/viewer/t", b"x", QoS::AtMostOnce, false, 0);
+        assert_eq!(b.stats().dropped_acl, before + 1, "web={web}");
+        // A Will is a publish: refused at CONNECT.
+        let (_, ack) = login(
+            &mut b,
+            "viewer",
+            Some(MqttWill {
+                topic: "devices/viewer/will",
+                payload: b"gone",
+                qos: QoS::AtMostOnce,
+                retain: false,
+            }),
+        );
+        assert_eq!(ack, Got::ConnAck(false, 5), "web={web}");
+        // The write-only account: publishes, subscribes to nothing.
+        let (mut wo, ack) = login(&mut b, "feeder", None);
+        assert_eq!(ack, Got::ConnAck(false, 0));
+        assert_eq!(
+            wo.subscribe(&mut b, 1, &[("announce/#", QoS::AtMostOnce)], 0),
+            vec![Got::SubAck(1, vec![0x80])]
+        );
+        let before = b.stats().dropped_acl;
+        wo.publish(&mut b, "announce/x", b"n", QoS::AtMostOnce, false, 0);
+        // `announce/#` is no publish pattern of the listener: still refused
+        // (a class never widens).
+        assert_eq!(b.stats().dropped_acl, before + 1, "web={web}");
+        let (mut feeder_sub, _) = (login(&mut b, "full", None).0, ());
+        assert_eq!(
+            feeder_sub.subscribe(&mut b, 1, &[("devices/full/cmd/#", QoS::AtMostOnce)], 0),
+            vec![Got::SubAck(1, vec![0])]
+        );
+        let before = b.stats().dropped_acl;
+        wo.publish(&mut b, "devices/feeder/t", b"1", QoS::AtMostOnce, false, 0);
+        assert_eq!(b.stats().dropped_acl, before, "own topic is allowed");
+        // A full account: publish and subscribe as the listener says.
+        feeder_sub.publish(&mut b, "devices/full/t", b"1", QoS::AtMostOnce, false, 0);
+        assert_eq!(b.stats().dropped_acl, before, "full account publishes");
+    }
+}
+
+/// A certificate identity named like an account is not affected by the
+/// class lookup (only the login roles have classes).
+#[test]
+fn the_class_lookup_does_not_touch_certificate_identities() {
+    let mut b = Broker::new(cfg());
+    b.set_login_class(|_| CLASS_READ_ONLY);
+    let (mut d, ack) = Client::connect(&mut b, "device-001", true, None, 0);
+    assert_eq!(ack, Got::ConnAck(false, 0));
+    let before = b.stats().dropped_acl;
+    d.publish(
+        &mut b,
+        "devices/device-001/telemetry/t",
+        b"1",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(b.stats().dropped_acl, before);
+}

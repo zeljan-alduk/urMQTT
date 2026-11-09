@@ -265,6 +265,31 @@ impl Config {
     }
 }
 
+/// The ACL class of a password account on the plaintext or WebSocket
+/// listener (NOW-15, ADR-285): a function from the account's identity to a
+/// class byte, set by the kernel from its run-time account table. A class
+/// only narrows what the listener's `acl_*` patterns allow.
+pub type LoginClass = fn(&str) -> u8;
+/// The listener's rules, unchanged.
+pub const CLASS_FULL: u8 = 0;
+/// Subscribes under the listener's rules; no publish, no Will.
+pub const CLASS_READ_ONLY: u8 = 1;
+/// Publishes under the listener's rules; no subscription.
+pub const CLASS_WRITE_ONLY: u8 = 2;
+
+/// May a session of `role` and ACL name `id` do what `publish` says, as its
+/// account class sees it? Only the login roles have classes.
+fn class_allows(class_of: Option<LoginClass>, role: Role, id: &str, publish: bool) -> bool {
+    if !matches!(role, Role::Plain | Role::Web) {
+        return true;
+    }
+    match class_of.map_or(CLASS_FULL, |f| f(id)) {
+        CLASS_READ_ONLY => !publish,
+        CLASS_WRITE_ONLY => publish,
+        _ => true,
+    }
+}
+
 /// Session-key prefix of bootstrap identities (H1). A real client id can
 /// never start with `$` or contain `/`, so a bootstrap session never meets
 /// an operational session of the same id: it can neither take it over nor
@@ -903,6 +928,9 @@ impl Session {
 
 pub struct Broker {
     cfg: Config,
+    /// The class of a password account (NOW-15, ADR-285); `None`: every
+    /// account is [`CLASS_FULL`].
+    login_class: Option<LoginClass>,
     conns: Slab<Conn>,
     sessions: Slab<Session>,
     /// Client id → session (the id itself lives in the session).
@@ -1037,6 +1065,7 @@ impl Broker {
     pub fn new(cfg: Config) -> Self {
         Self {
             cfg,
+            login_class: None,
             conns: Slab::new(),
             sessions: Slab::new(),
             by_client: Index::default(),
@@ -1864,6 +1893,18 @@ impl Broker {
         }
     }
 
+    /// Sets how the class of a password account is looked up (NOW-15,
+    /// ADR-285). It is asked at every publish, Will and SUBSCRIBE of a login
+    /// session, so a changed class acts at once.
+    pub fn set_login_class(&mut self, f: LoginClass) {
+        self.login_class = Some(f);
+    }
+
+    /// [`Config::may_publish`] narrowed by the account class.
+    fn may_publish(&self, role: Role, id: &str, topic: &str) -> bool {
+        class_allows(self.login_class, role, id, true) && self.cfg.may_publish(role, id, topic)
+    }
+
     /// Binds the identity the login of plaintext connection `c` established
     /// (before its CONNECT, P1). The connection then has the plaintext limits
     /// and the plaintext role, and its client id is free: the session is named
@@ -2633,7 +2674,10 @@ impl Broker {
         let will = match &p.will {
             // A will is published by the broker on the client's behalf: it
             // must never be a way into `$SYS/` (the console input).
-            Some(w) if acl::sys(w.topic) || !self.cfg.may_publish(role, acl_name, w.topic) => {
+            Some(w)
+                if acl::sys(w.topic)
+                    || !self.may_publish(role, acl_name, w.topic) =>
+            {
                 return self.reject(c, ConnectReturnCode::NotAuthorized);
             }
             // A 5.0 client is told when it cannot have a retained Will
@@ -3084,7 +3128,7 @@ impl Broker {
         // O1, O2: `$SYS/` belongs to operators. What they publish there is
         // a request to the kernel, never routed and never retained.
         if acl::sys(p.topic) {
-            if !self.cfg.may_publish(role, allowed, p.topic) {
+            if !self.may_publish(role, allowed, p.topic) {
                 self.stats.dropped_acl += 1;
                 return Verdict::Dropped(ReasonCode::NotAuthorized);
             }
@@ -3104,7 +3148,7 @@ impl Broker {
             });
             return Verdict::Taken;
         }
-        if !self.cfg.may_publish(role, allowed, p.topic) {
+        if !self.may_publish(role, allowed, p.topic) {
             self.stats.dropped_acl += 1;
             return Verdict::Dropped(ReasonCode::NotAuthorized);
         }
@@ -3604,6 +3648,7 @@ impl Broker {
         };
         let is5 = self.is_v5(c);
         let cfg = self.cfg;
+        let class_of = self.login_class;
         let fail = |code: ReasonCode| if is5 { code as u8 } else { SUBACK_FAILURE };
         let mut codes: Vec<u8> = Vec::with_capacity(topics.len());
         let mut granted: Vec<(&str, SubOpts, bool)> = Vec::new();
@@ -3631,7 +3676,9 @@ impl Broker {
                 }
             }
             let inner = share.map_or(filter, |(_, f)| f);
-            if !cfg.may_subscribe(s.role, s.acl_id(), inner) {
+            if !cfg.may_subscribe(s.role, s.acl_id(), inner)
+                || !class_allows(class_of, s.role, s.acl_id(), false)
+            {
                 codes.push(fail(ReasonCode::NotAuthorized));
                 continue;
             }
