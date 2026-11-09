@@ -142,7 +142,7 @@ def prometheus_text():
     assert s["urmqtt_cpu_cores"] == "4", s["urmqtt_cpu_cores"]
     # No per-client labels: every label name is on the bounded list.
     labels = {k.split("{", 1)[1].split("=", 1)[0] for k in s if "{" in k}
-    allowed = {"core", "reason", "code", "listener", "result", "direction", "side", "version", "arch", "source", "mode", "auth"}
+    allowed = {"core", "reason", "code", "listener", "result", "direction", "side", "version", "arch", "source", "mode", "state", "auth"}
     assert labels <= allowed, labels - allowed
     return True, f"{len(s)} series"
 
