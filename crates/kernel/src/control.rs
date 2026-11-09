@@ -168,6 +168,10 @@ fn publish(revoked_hex: &[String], allowlist: &[String], accounts: &[(String, St
     // A stored hash that no longer parses can never log in.
     let mut list: Vec<Account> = accounts
         .iter()
+        // The image wins: a row for an id the image itself lists since
+        // (or names as a service, operator or control identity) is inert, so
+        // that it neither narrows nor closes the image's own account.
+        .filter(|(id, _, _)| !reserved_id(id))
         .filter_map(|(id, hash, class)| Account::parse(id, hash, *class))
         .collect();
     list.sort_by(|a, b| a.id.cmp(&b.id));
