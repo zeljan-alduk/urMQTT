@@ -10,12 +10,16 @@
 #                                                     DIR's PK/KEK/db enrolled, Secure Boot on, and the given
 #                                                     Authenticode hashes in dbx (needs virt-fw-vars,
 #                                                     `pip install virt-firmware`)
-#   scripts/sign-loaders.sh sign-iso KEY CERT IN.iso OUT.iso [--config FILE [--root DIR]]
+#   scripts/sign-loaders.sh sign-iso KEY CERT IN.iso OUT.iso [--template TPL.iso] [--config FILE [--root DIR]]
 #                                    [--disk-out IMG] [--esp-out IMG] [--allow-empty] [-- MKISO-ARGS...]
 #                                                     the signed, sealed image of a configured ISO (from the
 #                                                     builder page or `urmqtt-config pack --iso`) or of a
 #                                                     template with --config: its own kernels, re-built
-#                                                     around them with mkiso.sh (LATER-6, ADR-321)
+#                                                     around them with mkiso.sh (LATER-6, ADR-321).
+#                                                     --template: the release template whose minisign
+#                                                     signature you checked; IN's kernels must be its kernels
+#                                                     byte for byte (without it, nothing ties IN's kernels to
+#                                                     a release: you sign whatever kernels IN carries)
 #   scripts/sign-loaders.sh authenticode FILE...      the Authenticode SHA-256 of EFI loaders (for db/dbx)
 #
 # What is signed. The firmware verifies only the PE/COFF loaders `BOOTX64.EFI` and
@@ -126,14 +130,15 @@ case $cmd in
         python3 -I "$ROOT/scripts/authenticode.py" "$@"
         ;;
     sign-iso)
-        [[ $# -ge 4 ]] || die "usage: sign-iso KEY CERT IN.iso OUT.iso [--config FILE [--root DIR]] [--disk-out IMG] [--esp-out IMG] [--allow-empty] [-- MKISO-ARGS...]"
+        [[ $# -ge 4 ]] || die "usage: sign-iso KEY CERT IN.iso OUT.iso [--template TPL.iso] [--config FILE [--root DIR]] [--disk-out IMG] [--esp-out IMG] [--allow-empty] [-- MKISO-ARGS...]"
         key=$1 cert=$2 in=$3 out=$4
         shift 4
-        config="" root="" extra=() allow_empty=0
+        config="" root="" extra=() allow_empty=0 template=""
         while [[ $# -gt 0 ]]; do
             case $1 in
                 --config) config=$2; shift 2 ;;
                 --root) root=$2; shift 2 ;;
+                --template) template=$2; shift 2 ;;
                 --disk-out|--esp-out) extra+=("$1" "$2"); shift 2 ;;
                 --allow-empty) allow_empty=1; shift ;;
                 # The rest goes to mkiso.sh as it is (tests: the --cmdline the unsigned image was built with).
@@ -144,6 +149,7 @@ case $cmd in
         [[ -f $key && -f $cert && -f $in ]] || die "sign-iso: key, certificate or image missing"
         [[ -z $config || -f $config ]] || die "sign-iso: $config not found"
         [[ -z $root || -n $config ]] || die "sign-iso: --root goes with --config"
+        [[ -z $template || -f $template ]] || die "sign-iso: $template not found"
         command -v xorriso >/dev/null || die "xorriso not found (brew install xorriso / apt install xorriso)"
         signer >/dev/null
         tmp=$(mktemp -d)
@@ -164,6 +170,20 @@ for k in ("urmqtt-aarch64.elf", "urmqtt-x86-64.elf"):
     if f"#{h}" not in conf:
         sys.exit(1)
 PY
+        # The menu check above only says that IN is consistent with itself: whoever made IN chose both its
+        # kernels and its menu. What ties them to a release is the template the operator verified
+        # (minisign, DEPLOY.md section 3): its kernels must be IN's, byte for byte.
+        if [[ -n $template ]]; then
+            mkdir "$tmp/tpl"
+            for f in boot/urmqtt-aarch64.elf boot/urmqtt-x86-64.elf; do
+                xorriso -osirrox on -indev "$template" -extract "/$f" "$tmp/tpl/${f##*/}" >/dev/null 2>&1 \
+                    || die "sign-iso: $template has no /$f: not a universal urMQTT ISO"
+                cmp -s "$tmp/tpl/${f##*/}" "$tmp/${f##*/}" \
+                    || die "sign-iso: ${f##*/} of $in is not the one of $template: refusing to sign kernels that are not the release's"
+            done
+        else
+            echo "sign-iso: NOTE: no --template: the kernels of $in are checked only against its own menu; pass the release template whose minisign signature you verified (--template) to tie them to the release" >&2
+        fi
         cfgtool() { (cd "$ROOT" && cargo run -q --locked -p urmqtt-config-tool --bin urmqtt-config -- "$@"); }
         if [[ -n $config ]]; then
             cfg=$(cd "$(dirname "$config")" && pwd)/$(basename "$config")

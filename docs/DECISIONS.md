@@ -4528,6 +4528,12 @@ device the kernel does not drive is unaffected; one for a driven device would be
   on trial and an ESP sealed to another configuration is refused by `slots stage`; and (aarch64, no Secure Boot
   needed) the installer started from an image whose own configuration was swapped for another one refuses it and
   leaves the target disk's bytes unchanged.
+- **Review addition: a sealed disk does not take an unsealed ESP by accident.** The A/B switch changes which partition
+  is the ESP, so if the firmware refuses the new slot's loader (unsigned) or Limine refuses its configuration (no
+  hash), the trial never starts and nothing rolls back: the machine stays down until someone reaches its console.
+  The release's own `.img` is such an ESP. `urmqtt-disk slots stage` and `update-boot` therefore refuse an unsealed
+  ESP when the disk's running ESP is sealed (`config::keep_sealed`), unless `--allow-unsealed` (a machine without
+  Secure Boot), which prints a warning. Tested on the host and in smoke `secureboot` (the A/B check).
 - **Alternatives.** Patching the pin at install time in the kernel (a FAT writer in the kernel, and a re-signed loader:
   the kernel has no signing key, so this cannot work); a configuration partition outside the ESP (Limine reads only
   the boot volume); hashing nothing and turning off Limine's check (not possible under Secure Boot, and it would drop
@@ -4550,6 +4556,12 @@ device the kernel does not drive is unaffected; one for a driven device would be
   pins them; the operator verified the template's minisign signature first, DEPLOY.md section 3). It needs a checkout
   of the release's tag (mkiso.sh, the vendored Limine) but no Rust toolchain for the kernel; the configuration tool is
   built by cargo.
+- **Review addition: `--template`.** The menu check ties the kernels only to the configured ISO's own menu, and
+  whoever made that ISO chose both; the configured ISO itself carries no release signature (configuring changes its
+  bytes). `--template TPL.iso` names the release template whose minisign signature the operator verified, and
+  `sign-iso` refuses unless the configured ISO's two kernels are the template's, byte for byte. Without it, sign-iso
+  prints a NOTE saying the kernels were not tied to a release. Smoke: `sign-iso refuses kernels that are not the
+  release template's`.
 - **Equivalence.** The result is byte for byte the direct signed build of the same kernels and configuration (smoke:
   `sign-iso of the configured unsigned ISO is the direct signed build`), so either path gives the same image to
   attest.

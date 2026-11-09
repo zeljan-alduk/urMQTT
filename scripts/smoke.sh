@@ -3913,7 +3913,7 @@ universal_secureboot() {
     # The template signed as ADR-251 built it (not sealed): the firmware's view of configured-after-signing.
     mkuniversal "$tpl" "smoke" --empty-config --no-seal --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
     mkuniversal "$sealed_tpl" "smoke" --empty-config --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
-    mkuniversal "$unsealed" "smoke" --no-seal --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    mkuniversal "$unsealed" "smoke" --no-seal --sb-key "$keys/db.key" --sb-cert "$keys/db.crt" --esp-out "$OUT/sb-unsealed.esp"
     mkuniversal "$inst" "smoke" --install-cmdline "install install-countdown=1" --install-default \
         --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
     mkuniversal "$other_cfg" "smoke" --config "$OUT/cfgpack/signed.blob" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt" \
@@ -3930,10 +3930,14 @@ universal_secureboot() {
         FAILED=$((FAILED + 1))
     fi
     rm -f "$again" "$again.disk"
-    # sign-iso (ADR-321): the signed image of a configured, unsigned one is the direct signed build.
+    # sign-iso (ADR-321): the signed image of a configured, unsigned one is the direct signed build; its kernels
+    # are checked against the (verified) release template's.
+    local utpl="$OUT/sb-template-unsigned.iso" why
+    rm -f "$utpl" "$OUT/sb-template-signed-by-accident.iso"
+    mkuniversal "$utpl" "smoke" --empty-config
     local resigned="$OUT/sb-resigned.iso"
     rm -f "$resigned"
-    if "$sb" sign-iso "$keys/db.key" "$keys/db.crt" "$unsigned" "$resigned" -- --cmdline smoke >/dev/null 2>&1 \
+    if "$sb" sign-iso "$keys/db.key" "$keys/db.crt" "$unsigned" "$resigned" --template "$utpl" -- --cmdline smoke >/dev/null 2>&1 \
         && cmp -s "$signed" "$resigned"; then
         echo "  ✓ secureboot: sign-iso of the configured unsigned ISO is the direct signed build, byte for byte"
         PASSED=$((PASSED + 1))
@@ -3941,10 +3945,20 @@ universal_secureboot() {
         echo "  ✗ secureboot: sign-iso failed or differs from the direct signed build"
         FAILED=$((FAILED + 1))
     fi
+    # A configured ISO whose kernels are not the template's is not signed (its own menu cannot vouch for them).
+    local otpl="$OUT/sb-template-other-kernel.iso" resigned2="$OUT/sb-resigned-other.iso"
+    rm -f "$otpl" "$resigned2"
+    python3 -I "$ROOT/scripts/tamper.py" "$utpl" --file "$KERNEL_X86" --out "$otpl" >/dev/null
+    why=$("$sb" sign-iso "$keys/db.key" "$keys/db.crt" "$unsigned" "$resigned2" --template "$otpl" -- --cmdline smoke 2>&1 || true)
+    if [[ ! -e "$resigned2" && $why == *"is not the one of"* ]]; then
+        echo "  ✓ secureboot: sign-iso refuses kernels that are not the release template's"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ secureboot: sign-iso with another template's kernels: $why"
+        FAILED=$((FAILED + 1))
+    fi
+    rm -f "$otpl"
     # An unconfigured template is not signed by accident: sign-iso wants a configuration.
-    local utpl="$OUT/sb-template-unsigned.iso" why
-    rm -f "$utpl" "$OUT/sb-template-signed-by-accident.iso"
-    mkuniversal "$utpl" "smoke" --empty-config
     why=$("$sb" sign-iso "$keys/db.key" "$keys/db.crt" "$utpl" "$OUT/sb-template-signed-by-accident.iso" 2>&1 || true)
     if [[ ! -e "$OUT/sb-template-signed-by-accident.iso" && $why == *"configuration of"*"is empty"* ]]; then
         echo "  ✓ secureboot: sign-iso refuses an unconfigured template"
@@ -4049,13 +4063,16 @@ universal_secureboot() {
         local abst=0
         rm -f "$ablog"
         if ab_tool "$ablog" slots stage "$d" --esp "$OUT/sb-other.esp" --unsigned --write; then abst=1; fi
+        # A sealed disk does not take an unsealed ESP (a release image, say): the firmware would refuse it.
+        if ab_tool "$ablog" slots stage "$d" --esp "$OUT/sb-unsealed.esp" --unsigned --write; then abst=1; fi
         ab_tool "$ablog" slots stage "$d" --esp "$OUT/sb-signed.esp" --unsigned --write || abst=1
         ab_tool "$ablog" slots activate "$d" --write || abst=1
         sb_boot ab-trial "$d" disk
         cat "$log" >>"$ablog"
         [[ $abst -eq 0 ]] || status=$abst
-        check "secureboot: A/B update to a sealed ESP boots on trial under Secure Boot; an ESP sealed to another configuration is refused" \
+        check "secureboot: A/B update to a sealed ESP boots on trial under Secure Boot; an ESP sealed to another configuration or an unsealed one is refused" \
             "$ablog" "$status" "is sealed for Secure Boot to the configuration module" \
+            "the disk's ESP is sealed for Secure Boot and the new one is not" \
             "secure boot: sealed to its configuration" "boot: slot B $slot ON TRIAL" "^URMQTT READY$" "NOT:Access Denied" "$NO_FAULT"
         # The installer under Secure Boot (x86_64 UEFI), then its disk under Secure Boot.
         local t="$OUT/secureboot-installed.img" ilog="$OUT/secureboot-install.log"

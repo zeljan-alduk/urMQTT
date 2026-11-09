@@ -15,6 +15,7 @@
 //!                                                on a larger disk, optionally configured; the first
 //!                                                boot formats the data
 //! urmqtt-disk update-boot DISK --esp ESP --write [--config BLOB|SLOT | --keep-config | --replace-config]
+//!                    [--allow-unsealed]
 //!                                                replace the kernel (ESP), keep the data. The disk's
 //!                                                configuration slot (C1c) is kept whenever it holds a
 //!                                                real configuration (the default, whatever the new ESP
@@ -25,9 +26,12 @@
 //!                                                messages name
 //! urmqtt-disk slots stage DISK (--image RELEASE.img --sums SHA256SUMS --sig SHA256SUMS.minisig
 //!                    --pubkey minisign.pub [--pubkey ...] | --esp ESP --unsigned | --image IMG --unsigned)
-//!                    [--config BLOB|SLOT | --keep-config | --replace-config] [--allow-downgrade] --write
+//!                    [--config BLOB|SLOT | --keep-config | --replace-config] [--allow-downgrade]
+//!                    [--allow-unsealed] --write
 //!                                                write the standby slot (the configuration is carried
-//!                                                over as update-boot does); the data is not touched
+//!                                                over as update-boot does); the data is not touched.
+//!                                                A disk sealed for Secure Boot (ADR-320) takes only a
+//!                                                sealed ESP unless --allow-unsealed
 //! urmqtt-disk slots activate DISK [--tries N] [--one-way] [--retry] [--allow-downgrade] --write
 //!                                                make the staged slot the boot entry, on trial: it must
 //!                                                confirm itself (or an operator confirms it) within
@@ -656,6 +660,7 @@ fn update_boot(
     esp: &str,
     write: bool,
     in_place: bool,
+    allow_unsealed: bool,
     policy: &config::Policy,
 ) -> Result<(), String> {
     let esp = std::fs::read(esp).map_err(|e| format!("{esp}: {e}"))?;
@@ -692,6 +697,9 @@ fn update_boot(
     // unless the new ESP is configured itself (or the caller says otherwise).
     let old = read_esp(&mut dev, e)?;
     let (esp, what) = config::carry_over(&old, esp, policy)?;
+    if let Some(w) = config::keep_sealed(&old, &esp, allow_unsealed)? {
+        eprintln!("update-boot: {w}");
+    }
     println!(
         "update-boot: {}\nupdate-boot: before: {}\nupdate-boot: after:  {}\nupdate-boot: {}",
         what,
@@ -742,6 +750,8 @@ struct SlotArgs {
     pubkeys: Vec<String>,
     unsigned: bool,
     allow_downgrade: bool,
+    /// Stage an unsealed ESP onto a disk whose active slot is sealed (ADR-320).
+    allow_unsealed: bool,
     tries: u8,
     one_way: bool,
     retry: bool,
@@ -863,6 +873,9 @@ fn slots_stage(path: &str, a: &SlotArgs) -> Result<(), String> {
     let active = s.active();
     let old = ab::read_region(dev.as_mut(), active.first_lba, active.sectors())?;
     let (esp, what) = config::carry_over(&old, esp, &a.policy)?;
+    if let Some(w) = config::keep_sealed(&old, &esp, a.allow_unsealed)? {
+        eprintln!("stage: {w}");
+    }
     println!(
         "stage: {what}; the configuration: {}\nstage: {}",
         config::describe(&config::read(&esp)),
@@ -1551,6 +1564,7 @@ fn run(args: &[String]) -> Result<(), String> {
                         | "--replace-config"
                         | "--unsigned"
                         | "--allow-downgrade"
+                        | "--allow-unsealed"
                         | "--one-way"
                         | "--retry"
                         | "--in-place"
@@ -1606,6 +1620,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     .collect(),
                 unsigned: flag("--unsigned"),
                 allow_downgrade: flag("--allow-downgrade"),
+                allow_unsealed: flag("--allow-unsealed"),
                 tries: opt("--tries")
                     .map(|t| {
                         t.parse::<u8>()
@@ -1657,6 +1672,7 @@ fn run(args: &[String]) -> Result<(), String> {
             &opt("--esp").ok_or("--esp ESP is required")?,
             flag("--write"),
             flag("--in-place"),
+            flag("--allow-unsealed"),
             &policy()?,
         ),
         Some("migrate") => migrate_cmd(

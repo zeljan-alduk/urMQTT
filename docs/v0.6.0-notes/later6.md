@@ -21,7 +21,9 @@ ADR-323 (aarch64 enforcement on AAVMF, H8-W4), ADR-324 (keys: procedures, not ke
 - **`scripts/sign-loaders.sh sign-iso KEY CERT configured.iso signed.iso [--disk-out IMG] [--esp-out IMG]`**: sign an
   ISO that the builder page or `urmqtt-config pack --iso` configured, with your own key, without building a kernel
   (the kernels are taken from the image and must be the ones its menu pins). `--config FILE` signs a template with a
-  configuration instead. The result is byte for byte the direct `mkiso.sh --config ... --sb-key ...` build. An
+  configuration instead. The result is byte for byte the direct `mkiso.sh --config ... --sb-key ...` build. `--template TPL.iso` (the
+  verified release template) requires the configured ISO's kernels to be the template's, byte for byte; without it
+  sign-iso prints a NOTE that the kernels were checked only against the ISO's own menu. An
   unconfigured template is refused unless `--allow-empty`.
 - **Revocation:** `scripts/sign-loaders.sh authenticode FILE...` prints the Authenticode SHA-256 of a loader (what
   `dbx` matches); `ovmf-vars DIR IN OUT --dbx-hash HASH` puts it into an OVMF/AAVMF variable store. The procedure for
@@ -33,7 +35,7 @@ ADR-323 (aarch64 enforcement on AAVMF, H8-W4), ADR-324 (keys: procedures, not ke
   as the tests' control).
 - docs/secure-boot-keys.md: generating PK/KEK/db offline, enrolling, signing, revoking one image, rotating db, a
   leaked key. DEPLOY.md section 5d rewritten (the "two limits" are gone or narrowed).
-- Smoke `SMOKE_ONLY=secureboot --arch universal` grew from 10 to 29 checks (x86_64 OVMF and aarch64 AAVMF, both
+- Smoke `SMOKE_ONLY=secureboot --arch universal` grew from 10 to 30 checks (x86_64 OVMF and aarch64 AAVMF, both
   enforcing); new fuzz target `seal_pins`.
 
 ## Configuration, store, formats
@@ -47,7 +49,10 @@ ADR-323 (aarch64 enforcement on AAVMF, H8-W4), ADR-324 (keys: procedures, not ke
 - Nothing changes for existing images, disks and configurations: an unsealed disk (every disk installed so far) is
   treated exactly as before by every tool.
 - A disk installed from a sealed image is tied to its configuration. A new configuration means a new signed image
-  (`sign-iso ... --esp-out`), staged into the standby slot (`urmqtt-disk slots stage --esp ... --unsigned`). A disk
+  (`sign-iso ... --esp-out`), staged into the standby slot (`urmqtt-disk slots stage --esp ... --unsigned
+  --replace-config`). A sealed disk refuses an unsealed ESP (the release's own `.img`, for one) in `slots stage` and
+  `update-boot`: under Secure Boot the firmware would refuse the new slot before any trial, so nothing would roll
+  back; `--allow-unsealed` does it on a machine without Secure Boot. A disk
   prepared before v0.6.0 has one slot and takes `update-boot` with the sealed ESP.
 - Downgrading a sealed disk to v0.5.0 tools: v0.5.0's `urmqtt-disk update-boot` does not know seals and would carry the
   disk's configuration into a sealed ESP of another configuration, leaving a disk its loader refuses (fail closed, no

@@ -133,6 +133,33 @@ pub fn describe_seal(esp: &[u8]) -> String {
     }
 }
 
+/// Refuses to replace a sealed ESP (one that boots under Secure Boot) with
+/// an unsealed one, unless `allow` (`--allow-unsealed`): on a machine with
+/// Secure Boot enforced the new ESP's loader or Limine refuses it, and the
+/// firmware has no other ESP to fall back to (an A/B switch changes which
+/// partition is the ESP, so the trial never starts and nothing rolls back).
+/// The official release images are unsigned and unsealed, so this is the
+/// trap a routine update of a sealed disk would fall into (ADR-320).
+pub fn keep_sealed(old: &[u8], new: &[u8], allow: bool) -> Result<Option<String>, String> {
+    if !seal(old).sealed() || seal(new).sealed() {
+        return Ok(None);
+    }
+    if allow {
+        return Ok(Some(
+            "WARNING: the disk's ESP is sealed for Secure Boot and the new one is not (--allow-unsealed): \
+             it does not boot with Secure Boot enforced"
+                .into(),
+        ));
+    }
+    Err(
+        "the disk's ESP is sealed for Secure Boot and the new one is not (an unsigned release image, or one built \
+         without --sb-key): with Secure Boot enforced the firmware or Limine refuses it and there is no way back \
+         short of the console. Stage an ESP signed and sealed with your key (scripts/sign-loaders.sh sign-iso ... \
+         --esp-out; docs/DEPLOY.md, Secure Boot), or say --allow-unsealed if this machine runs without Secure Boot"
+            .into(),
+    )
+}
+
 /// The new ESP with its configuration slot decided; the second value says
 /// what was done. A new ESP that is sealed for Secure Boot (ADR-320) takes
 /// only the configuration it pins: anything else is refused here, because
@@ -392,5 +419,26 @@ mod tests {
         // An open ESP behaves exactly as before.
         let (_, what) = carry_over(&esp(&other), esp(&mine), &Policy::Auto).unwrap();
         assert!(!what.contains("sealed"), "{what}");
+    }
+
+    /// A sealed disk (it boots under Secure Boot) does not take an unsealed ESP by accident: the
+    /// firmware would refuse it and nothing rolls back. --allow-unsealed does it with a warning.
+    #[test]
+    fn a_sealed_disk_does_not_take_an_unsealed_esp_by_accident() {
+        let mine = slot(SlotKind::Boot, 9000);
+        let sealed = sealed_esp(&mine, &mine);
+        let open = esp(&mine);
+        let e = keep_sealed(&sealed, &open, false).unwrap_err();
+        assert!(
+            e.contains("--allow-unsealed") && e.contains("sign-iso"),
+            "{e}"
+        );
+        let w = keep_sealed(&sealed, &open, true).unwrap().unwrap();
+        assert!(w.contains("WARNING"), "{w}");
+        // Sealed to sealed, open to anything, and an old disk without a slot: nothing to say.
+        assert_eq!(keep_sealed(&sealed, &sealed, false), Ok(None));
+        assert_eq!(keep_sealed(&open, &open, false), Ok(None));
+        assert_eq!(keep_sealed(&open, &sealed, false), Ok(None));
+        assert_eq!(keep_sealed(&[0u8; 8192], &open, false), Ok(None));
     }
 }

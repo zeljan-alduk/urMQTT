@@ -59,16 +59,20 @@ Check: an unsigned urMQTT ISO must now fail with `Access Denied` (or `Security V
 ## 3. Sign an image
 
 Configure first (builder page or `urmqtt-config pack --iso`), then sign the configured ISO; the kernels stay the
-release's (ADR-321):
+release's (ADR-321). `--template` names the release template whose minisign signature you verified (DEPLOY.md
+section 3): the configured ISO's kernels must be its kernels, byte for byte. Without it nothing ties them to the
+release (the configured ISO's own menu vouches only for itself), and you would sign whatever kernels it carries:
 
 ```bash
 scripts/sign-loaders.sh sign-iso ~/sb-keys/db.key ~/sb-keys/db.crt urmqtt-configured.iso urmqtt-signed.iso \
-    --disk-out urmqtt-signed.img --esp-out urmqtt-signed.esp
+    --template urmqtt-template-<version>-universal.iso --disk-out urmqtt-signed.img --esp-out urmqtt-signed.esp
 ```
 
 The result is **sealed** to that configuration (ADR-320): the installed disk boots under Secure Boot, and every tool
 refuses to put another configuration into it. A new configuration is a new signed image, put on the installed disk as
-an A/B update (`urmqtt-disk slots stage --esp urmqtt-signed.esp --unsigned`, DEPLOY.md section 8b).
+an A/B update (`urmqtt-disk slots stage DISK --esp urmqtt-signed.esp --unsigned --replace-config --write`: the
+new configuration is the ESP's own; DEPLOY.md section 8b). A sealed disk refuses an unsealed ESP, such as the
+release's own `.img` (`--allow-unsealed` on a machine without Secure Boot).
 
 Check: `scripts/sign-loaders.sh verify ~/sb-keys/db.crt` on `/EFI/BOOT/BOOTX64.EFI` and `BOOTAA64.EFI` of the ISO
 (`xorriso -osirrox on -indev urmqtt-signed.iso -extract /EFI/BOOT/BOOTX64.EFI x.efi`); `urmqtt-disk info` on an
@@ -88,7 +92,8 @@ scripts/sign-loaders.sh authenticode iso-x64.efi iso-aa64.efi disk-x64.efi disk-
 
 - QEMU/OVMF/AAVMF: `scripts/sign-loaders.sh ovmf-vars ~/sb-keys VARS.fd NEW-VARS.fd --dbx-hash HASH ...` (tested).
 - Real firmware: an authenticated `dbx` append signed with KEK, e.g. with efitools:
-  `efisiglist -o revoke.esl -t sha256 -b <hash>` (one per hash, concatenated), then
+  `hash-to-efi-sig-list iso-x64.efi iso-aa64.efi disk-x64.efi disk-aa64.efi revoke.esl` (it computes the same
+  Authenticode SHA-256 from the loaders; compare its output with the hashes above), then
   `sign-efi-sig-list -a -k KEK.key -c KEK.crt dbx revoke.esl revoke.auth`, and `efi-updatevar -a -f revoke.auth dbx`
   from a Linux on that machine, or the firmware menu. Not tested here.
 

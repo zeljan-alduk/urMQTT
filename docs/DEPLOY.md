@@ -475,11 +475,13 @@ lets whoever has physical access change the keys.
 **Sign after you configure; the result is sealed (ADR-320, ADR-321).** The enrolled hash covers the module hash
 of your configuration, so a signed ISO cannot be configured again (`urmqtt-config pack --iso` and the builder page
 refuse it). Configure the template first (builder page, or `urmqtt-config pack --iso`), then sign the configured
-ISO with your own key; the kernels are taken from it unchanged:
+ISO with your own key; the kernels are taken from it unchanged, and `--template` checks that they are the ones
+of the release template whose signature you verified (section 3; without it the configured ISO vouches only for
+itself, and sign-iso says so):
 
 ```
 scripts/sign-loaders.sh sign-iso db.key db.crt urmqtt-configured.iso urmqtt-signed.iso \
-    --disk-out urmqtt-signed.img --esp-out urmqtt-signed.esp
+    --template urmqtt-template-<version>-universal.iso --disk-out urmqtt-signed.img --esp-out urmqtt-signed.esp
 ```
 
 `--config my/config.toml` signs a template with a configuration instead; building from source does the same with
@@ -850,6 +852,7 @@ runs), or `boot-rollback` to go back now (the broker resets). Offline:
 | a release image whose signature or SHA-256 does not check out | `--unsigned` (your own build) |
 | staging while the running slot is on trial (the standby is its way back) | confirm or roll back first |
 | activating a slot that failed or was rolled back from | `activate --retry` |
+| an ESP that is not sealed for Secure Boot onto a disk whose running slot is (ADR-320: under Secure Boot the firmware refuses it and nothing rolls back; a release image is unsealed) | `--allow-unsealed` (the machine runs without Secure Boot); also `update-boot` |
 | activating a kernel with a newer store schema than the running one (once it migrated the store, the old one cannot read it) | `activate --one-way`: the automatic return still works until the migration has run; after it the previous slot is marked bad |
 
 **Power cuts.** Every command writes in an order where a cut leaves the disk as
@@ -867,7 +870,10 @@ byte inside one, so a signed, sealed ESP (`sign-iso ... --esp-out`) works in eit
 `slots stage` keeps the disk's configuration by default; an ESP sealed to the same configuration is
 staged as it is, one sealed to another is refused (its loader would refuse the slot) unless
 `--replace-config` takes the ESP's own. Both slots then boot with Secure Boot enforced (tested:
-an update to a sealed ESP boots on trial under OVMF Secure Boot).
+an update to a sealed ESP boots on trial under OVMF Secure Boot). The reverse is refused too: a disk whose running
+slot is sealed does not take an unsealed ESP (`slots stage`, `update-boot`), because with Secure Boot
+enforced the firmware would refuse the new slot before any trial starts, and no rollback follows; the
+release's own unsigned `.img` is such an ESP. `--allow-unsealed` does it on a machine without Secure Boot.
 
 ## 9. The data disk: layout v2, migrating a v1 disk, growing (S2, S3)
 
