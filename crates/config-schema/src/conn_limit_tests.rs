@@ -109,3 +109,11 @@ fn the_schema_describes_the_key() {
     );
     assert!(json.contains("\"since\":14"));
 }
+
+/// The benchmark template sets no limit (one load generator is one address);
+/// it is the only shipped configuration that names the key.
+#[test]
+fn the_bench_template_has_no_limit() {
+    let text = include_str!("../../../deploy/bench/config.toml");
+    assert_eq!(parse("prod", text).unwrap().limits.max_connections_per_ip, 0);
+}

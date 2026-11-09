@@ -47,6 +47,7 @@ publish_rate_per_device = "10/s"
 handshakes_per_core_per_sec = 100000
 max_handshakes_in_flight_per_core = 4096  # concurrent TLS handshakes per core; more are refused
 max_handshakes_in_flight_per_ip = 4096    # of those, from one source address
+max_connections_per_ip = 0                # BENCH: no limit on established connections per address (production: 1024; format 14)
 # publisher_backpressure = "single" # "single" (default): a publisher whose QoS 0 message has one subscriber
 #                             # that cannot keep up is paused (TCP window closed, 0.5 s at most) instead of
 #                             # its messages being dropped; "off": always read and drop. Format 8 for "off".
