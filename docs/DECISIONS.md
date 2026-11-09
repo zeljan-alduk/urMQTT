@@ -3737,14 +3737,17 @@ shard rather than per broker (point 6). (e) Wills are not persisted (point 15).
      first run, that a bare LF between two header lines was read as the end of the request while the real end was
      later** (a smuggling shape, no effect on this endpoint since it serves no state, but a parser that disagrees
      with its own delimiter); fixed (`parse` now requires that the empty line is the last thing it is given), the
-     input kept as a seed and a test; 15.4 million executions clean afterwards (120 s). The smoke scenarios send each
+     input kept as a seed and a test; 15.4 million executions clean afterwards (120 s). `metrics_render` (arbitrary numbers and text in every `Info`
+     field) found that `sys::by_code` added the counters of the reason codes it does not list without saturating;
+     fixed, 125 000 executions clean afterwards. The smoke scenarios send each
      refusal, garbage, a request in five pieces and two pipelined requests.
 
 ## ADR-293 — Admission and deadlines of the metrics listener: slowloris, per-address limits, a scrape rate (NEXT-9)
 
 - **Status:** Accepted (2026-11-09). Part of ADR-290.
 - **Context.** The listener is reachable by every host on the allowed networks, and an HTTP connection costs a socket,
-  a buffer and (for the answer) about 20 KiB of text and 50 to 300 microseconds of work to make it.
+  a buffer and (for the answer) about 13 KiB of text and 60 to 350 microseconds of work to make it (measured on HVF with
+  four cores).
 - **Decision.**
   1. **At the SYN**, in this order: the allow-list (a refused address gets no answer, counted by
      `urmqtt_metrics_refused_total{reason="source"}`, logged at powers of two), then the core's admission

@@ -30,7 +30,10 @@ There is no scheduler, no processes, no filesystem, no shell and no console
 input. The one exception to "no processes, no syscalls" is the **database
 worker** (section 4b): SQLite runs as an unprivileged program with twelve VFS
 system calls (and `exit`), called synchronously by the kernel. The only listening socket is TCP 8883 (plus 1883 in dev
-builds only, enforced at build time).
+builds only, enforced at build time), and the optional ones an image's configuration turns on, each off by
+default: a plaintext MQTT port (P1), a secure WebSocket port (ADR-272) and the Prometheus endpoint (ADR-290: plain
+HTTP on 9100, `GET /metrics`, to an allow-list of networks; it has no session, no TLS state and no broker connection,
+only a request reader, `urmqtt_broker::metrics::render` over the same `Info` as `$SYS`, and a deadline).
 
 ## 2. Boot sequence
 

@@ -276,3 +276,33 @@ The `urmqtt-ws` crate is checked five ways, each for something the others miss:
 End to end, the smoke group `websocket` (`SMOKE_ONLY=websocket scripts/smoke.sh [--arch x86_64]`) runs
 `scripts/ws-scenarios.py` (paho-mqtt over wss and a raw client) against the kernel in QEMU.
 
+### The Prometheus endpoint (NEXT-9, ADR-290 to ADR-294)
+
+`urmqtt-http` (the request reader) and `urmqtt_broker::metrics` (the exposition) are checked four ways:
+
+- **Host tests** (`cargo test -p urmqtt-http`, `cargo test -p urmqtt-broker metrics`): every refusal of the request
+  reader (405, 505, 400 for a body, chunking, bare LF, folding, a second `Content-Length`, 431), the negotiation of the
+  format by quality value (Prometheus 2 and 3 headers, malformed values), the bounds, `scan` over every prefix, properties
+  over arbitrary and mutated bytes; for the exposition: **every `$SYS` topic has exactly one metric or a stated reason**
+  (with both listeners on, at 1, 4 and 64 cores) and every rule matches a topic; the rules are well formed (names,
+  `_total` on exactly the counters, base units, bounded label names, no family split in two runs, no duplicate
+  series); a strict reader of both text formats accepts the output and finds the same series in both; the numbers
+  are the `$SYS` numbers (spot checks of every family); unknown values are absent; label values are escaped; the series do not
+  depend on the traffic; the size is bounded.
+- **Configuration** (`cargo test -p urmqtt-cfg -p urmqtt-config -p urmqtt-config-schema -p urmqtt-config-tool`, `make builder-test`):
+  defaults write nothing and keep the old format; any key set is format 16; ranges, the required allow-list, the port
+  collisions; the TOML path and the blob check agree over a grid; templates of earlier releases refuse the section.
+- **Fuzzing**: `make fuzz T=http_request` (any bytes: `scan` and `parse` agree on what a request is, whatever is
+  accepted is a GET or HEAD for an ASCII target with no bare LF and no `Transfer-Encoding`, every refusal is a fixed
+  answer, the same prefix gives the same `scan`) and `make fuzz T=metrics_render` (arbitrary numbers and text in every
+  `Info` field: every line is a comment or a sample, label values never split a line). Seeds in
+  `fuzz/seeds/http_request` (25) and `fuzz/seeds/metrics_render`. At ADR-290: 120 s each; `http_request` found the
+  bare-LF delimiter disagreement (fixed) and then ran 15.4 million executions clean; `metrics_render` found an unchecked
+  addition in `sys::by_code` (now saturating) and then ran 125 000 executions clean (each renders twice).
+- **End to end**, the smoke group `metrics` (`SMOKE_ONLY=metrics scripts/smoke.sh [--arch x86_64]`) runs
+  `scripts/metrics-scenarios.py` (standard library only) against the kernel in QEMU: the text, OpenMetrics by `Accept`,
+  `HEAD`, nine refusals, one answer for two pipelined requests, a request in five pieces, a slowloris cut at the
+  deadline, the per-address limit, the endpoint's own counters, the numbers against the info query and a retained
+  `$SYS` topic read by the operator, counters that follow 25 real publishes, and a second image whose allow-list does
+  not cover the host and gets not one byte.
+
