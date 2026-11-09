@@ -1279,6 +1279,21 @@ fn keys_cmd(path: &str, sub: Option<&str>, a: KeysArgs) -> Result<(), String> {
     File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut salt))
         .map_err(|e| format!("/dev/urandom: {e}"))?;
+    // The key file is written (and synced) before the slots are emptied:
+    // were it written after, a refused file (one that exists already, a
+    // missing directory, a full disk) would leave the key nowhere at all.
+    if let (Some(out), Some(k)) = (&a.key_out, &key_out) {
+        if a.write {
+            write_secret(out, keys::key_hex(k).as_bytes())?;
+            println!(
+                "keys: the disk key was written to {out} (128 hex digits): it is the storage.disk_key of the image from now on; keep it secret"
+            );
+        } else if std::path::Path::new(out).exists() {
+            return Err(format!("{out}: exists already (it must not exist yet)"));
+        } else {
+            println!("keys: dry run: the key would be written to {out}");
+        }
+    }
     let done = keys::apply(
         Box::new(part),
         op,
@@ -1288,16 +1303,6 @@ fn keys_cmd(path: &str, sub: Option<&str>, a: KeysArgs) -> Result<(), String> {
         a.iterations,
         salt,
     )?;
-    if let (Some(out), Some(k)) = (&a.key_out, &key_out) {
-        if a.write {
-            write_secret(out, keys::key_hex(k).as_bytes())?;
-            println!(
-                "keys: the disk key was written to {out} (128 hex digits): it is the storage.disk_key of the image from now on; keep it secret"
-            );
-        } else {
-            println!("keys: dry run: the key would be written to {out}");
-        }
-    }
     let what = match (done.op, done.slot) {
         (keys::Op::Add, Some(s)) => format!("key slot {s}: the disk key is wrapped under the new passphrase"),
         (keys::Op::Change, Some(s)) => format!("key slot {s}: new passphrase; the old one no longer opens the disk"),

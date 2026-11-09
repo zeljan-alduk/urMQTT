@@ -307,6 +307,25 @@ fn the_key_commands_end_to_end() {
         &["keys", p, "unwrap", "--passphrase-file", s(&new), "--write"],
         "--key-out FILE",
     );
+    // A key file that cannot be written (it exists already) is refused
+    // before the slots go: otherwise the key would be left nowhere.
+    let taken = write("taken.key", b"something else\n");
+    for w in [&["--write"][..], &[][..]] {
+        let mut args = vec![
+            "keys",
+            p,
+            "unwrap",
+            "--passphrase-file",
+            s(&new),
+            "--key-out",
+            s(&taken),
+        ];
+        args.extend_from_slice(w);
+        refused(&args, "exists");
+    }
+    assert_eq!(std::fs::read(&taken).unwrap(), b"something else\n");
+    assert!(ok(&["keys", p]).contains("key slot 0: passphrase"));
+    ok(&["verify", p, "--passphrase-file", s(&new)]);
     let out = tmp("unwrapped.key");
     let _ = std::fs::remove_file(&out);
     ok(&[
