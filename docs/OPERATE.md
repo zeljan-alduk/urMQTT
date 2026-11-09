@@ -487,6 +487,32 @@ trial before the automatic confirmation; `trial_timeout_s` (default 900; 0:
 never) after which an unconfirmed trial resets and uses an attempt. In auto
 mode the timeout must be 0 or longer than the delay.
 
+## The disk passphrase at the console (LATER-7, ADR-325 to ADR-329)
+
+With `storage.disk_key_source = "console"` the image holds no disk key: the data partition's key is wrapped under a
+passphrase in its header, and **every boot stops before the store opens, every port closed, until someone types the
+passphrase** on the VM's console: the provider's serial console or its VNC console (keyboard), a virtio-console or a
+virtio-input keyboard. Nothing typed is echoed or logged. A reboot you did not plan (a crash, `watchdog.action =
+"reset"`, the provider's maintenance, an A/B update) therefore needs a person at the console: watch for the line
+below in your remote log.
+
+| Line | Meaning |
+|---|---|
+| `storage: the data partition is blank: it is formatted encrypted, its key wrapped under a passphrase typed now` | the first boot: type a new passphrase twice (12 to 256 printable ASCII characters; generate it, e.g. `openssl rand -base64 24`, and keep it where you keep the CA key). Without it the data cannot be read by anyone, you included |
+| `storage: data partition formatted with a new key, wrapped under the console passphrase in key slot 0 (300000 PBKDF2 iterations)` | done; the broker starts |
+| `storage: the data partition is locked: waiting for the disk passphrase on the console`, repeated every minute | the broker is down until the passphrase is typed (the prompt is `Disk passphrase (or "change" to change it):`) |
+| `storage: wrong disk passphrase (N so far)` | a wrong passphrase; asked again after 2 s. Never the text typed. Many of these from nobody you know: someone has your provider panel |
+| `storage: data partition unlocked with the console passphrase (key slot N)` / `storage: unlocked after N wrong disk passphrase(s)` | opened; which slot (0: daily, 1: e.g. a recovery passphrase) |
+| `storage: the disk passphrase of key slot N was changed; the old one no longer opens the disk` | `change` was typed at the prompt, then the current passphrase and the new one twice. Only the header was rewritten |
+| `storage: the older superblock still held a replaced key slot (a passphrase change was interrupted); it now matches` | a passphrase change was cut by a power loss between its two writes; the old wrap is gone now |
+| `storage: refused reason=not-wrapped` | the disk's key is in no key slot (it was encrypted with an image key): add one offline, `urmqtt-disk keys DISK add --key FILE --write` |
+| `storage: refused reason=key-slot-mismatch` | the passphrase opened a slot whose key does not match the disk: the header was edited or assembled from two disks. Restore the disk from a backup you trust |
+
+The A/B trial timeout (`update.trial_timeout_s`) does not count the time the boot waited at the prompt.
+
+Offline, with the VM stopped (DEPLOY.md section 9): `urmqtt-disk keys DISK` lists the slots; `keys DISK add`,
+`change`, `remove`, `unwrap` change them; `--passphrase-file FILE` opens the disk for every other command.
+
 ## The data disk in the console (S2, S3)
 
 These lines appear in `$SYS/console/out` (and on the serial port, and in

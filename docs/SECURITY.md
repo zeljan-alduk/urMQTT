@@ -26,7 +26,8 @@ which says what it gives up.
 | Control signing key (Ed25519) | **Offline**, never in the image: a file on an operator machine (dev) or an HSM/KMS behind `urmqtt-control --sign-cmd` (prod). The image holds only the public key (`deploy/<env>/control.pub`). | Revoking, unrevoking and allowlisting devices at runtime. |
 | Trust anchors by role | `[trust] operational` and `bootstrap` CA lists, embedded | Which CA grants which rights; rotation with overlap. |
 | Plaintext accounts (P1, opt-in) | Salted PBKDF2 hashes in the image's configuration slot (ADR-231), and, with `limits.max_runtime_accounts`, in the data disk's `accounts` table (NOW-15, ADR-285, ADR-286); the passwords are never stored, logged or sent to the broker by the operator tool | Logging in on the plaintext port or over WebSocket as a device. The hashes are public to whoever holds the image or the disk: use long random passwords. |
-| Disk key (S7, opt-in) | In the image's configuration slot (`storage.disk_key`), and in RAM while the disk is open (the cipher's round keys, wiped on drop) | Reading a stolen volume or snapshot. Whoever has the ISO has it (ADR-240). |
+| Disk key (S7, opt-in) | In the image's configuration slot (`storage.disk_key`), and in RAM while the disk is open (the cipher's round keys, wiped on drop). With `storage.disk_key_source = "console"` (LATER-7) **not in the image**: wrapped in the data partition's key slots under passphrases, unwrapped at boot from what the operator types on the console | Reading a stolen volume or snapshot; with the console source, also whoever has the ISO. A passphrase guessed offline from a copied header (one PBKDF2 per guess) gives the key (ADR-240, ADR-325). |
+| Disk passphrases (LATER-7, opt-in) | Typed on the VM's console at boot, never stored, echoed or logged; the line buffer and the derived keys are wiped | Unlocking a copied disk. The provider's console and the hypervisor see it typed (ADR-326). |
 | Messages | In flight (RAM), retained and offline queues (SQLite), telemetry (log on the data disk) | Confidentiality and integrity of device data. |
 | Availability | — | The broker's purpose; the main target of a remote attacker. |
 
@@ -103,7 +104,7 @@ service, E elevation of privilege.
 | **WebSocket listener** (ADR-272, opt-in, `wss://` only) | `mtls`: the TLS port's certificate identity; `password`: no client certificate, a user name and password inside TLS, PBKDF2, lock-out; **an origin allowlist against cross-site WebSocket hijacking** (required with passwords) | TLS records; a strict upgrade (duplicate headers refused, no body, no extension) | per-identity counters, refusals by reason | inside TLS; nothing the client sent is echoed in an HTTP answer | upgrade deadline and 4 KiB bound (slowloris), the TLS admission, per-address and total caps, login rate, lock-out; no reassembly buffer, pongs only while output has room | password sessions have their own role (`Role::Web`): no service, operator or control rights, no `$SYS`, own ACL and namespace `$ws/` |
 | **Metrics endpoint** (ADR-290, opt-in, plain HTTP) | **none beyond the source address**: an allow-list of networks (required, never "anywhere") applied to the SYN; a forged allowed address is not defended (as plaintext `auth = "ip"`) | none: plain HTTP | counters for refused sources and limits, requests by result | no client data in the text: no label is chosen by a client; load, versions and refusal counts are visible to the allowed networks | 2 KiB and 24-header bound, GET and HEAD only, a fixed answer for everything else, one answer per connection, a deadline from the accept (slowloris), connections per core and per address, 20 scrapes a second per core | read-only: it writes no state and reaches neither the broker's data nor `$SYS`; **never put a public network in `allow_from`** |
 | **Configuration and image** (blob, ISO, builder page) | the blob is validated at every boot; signed form available; template ISO refuses to serve | tampered module refused by the loader's hash pin and the blob's fingerprint; **a rewritten ISO is not detected without Secure Boot (H8 open)** | — | the image holds the server key (and the disk key): treat it as a secret | an invalid blob stops boot (fail closed) | production ignores the kernel command line; the builder runs in the user's browser and sends nothing |
-| **Data volume** (layout, telemetry, backups) | UUID and CRC on every structure; a damaged or foreign partition is refused, never formatted | torn writes survive by design (A/B superblock, fault-injection loops); **a malicious rewrite of sectors is only detected by the CRCs** | — | optional AES-256-XTS (ADR-240): protects a stolen volume, not a stolen ISO | a full or failing disk: bounded ring, scrubbing, backup and restore | parsers fuzzed (`disk_layout`, `disk_backup`, `disk_crypt`, `telemetry_recover`); XTS has no integrity (sector swap and rollback are possible with write access to the volume) |
+| **Data volume** (layout, telemetry, backups) | UUID and CRC on every structure; a damaged or foreign partition is refused, never formatted | torn writes survive by design (A/B superblock, fault-injection loops); **a malicious rewrite of sectors is only detected by the CRCs** | — | optional AES-256-XTS (ADR-240): protects a stolen volume, and with the key from the console (ADR-325) a stolen ISO too | a full or failing disk: bounded ring, scrubbing, backup and restore | parsers fuzzed (`disk_layout`, `disk_backup`, `disk_crypt`, `disk_keyslot`, `telemetry_recover`); XTS has no integrity (sector swap and rollback are possible with write access to the volume) |
 | **SQLite worker** (EL0 / ring 3) | — | checked system calls, bounds on every offset and length | — | own address space; no kernel symbol, no allocator | 30 s overrun and fault restart the worker; a restart storm makes storage unavailable | a compromised worker cannot touch kernel memory (`worker-contain`); **the kernel trusts its answers (an empty revocation list un-revokes certificates), there is no KPTI** |
 | **Kernel** (memory, interrupts, boot) | — | W^X, locked page tables (**no test writes one**), guard pages, canary, KASLR, allocator checks | fault and panic reports redacted | no secret in logs or reports (`fault-secrets`, `panic-secret`) | watchdog and stuck-core reset | PAC, BTI, MTE (TCG only), poison on free; **no forward-edge CFI; the HHDM base is fixed** |
 | **Boot chain** (UEFI, Limine, kernel) | pinned by hash in `limine.conf`, which is enrolled into the loaders (ADR-250); **loaders not signed (H8)** | a flipped byte in the kernel, the configuration module or `limine.conf` is refused (`integrity-*`, `config-tampered-refused`) | — | — | a refused boot is the failure mode | the installer entry erases a disk for whoever can use the boot menu (physical or console access, which already allows that) |
@@ -874,6 +875,38 @@ check so a wrong key is refused before anything is read (`docs/DISK-FORMAT.md`
   length, equal halves and one repeated byte, nothing more. Generate it from
   `/dev/urandom`.
 - **No hardware AES: refused**, never a silent software fallback.
+
+### A disk key that is not in the image (LATER-7, ADR-325 to ADR-329)
+
+With `storage.disk_key_source = "console"` the configuration holds no disk
+key. The 64-byte key is random and is kept only wrapped, in up to two key
+slots of the data partition's (plaintext) superblock: RFC 3394 AES key wrap
+under PBKDF2-HMAC-SHA-256 of a passphrase, a per-slot salt and the disk's UUID
+(`docs/DISK-FORMAT.md` §14.2). The kernel asks for the passphrase on the
+console at every boot, before the store opens and before any listener exists.
+- **What it adds:** a copy of the ISO, of the installed ESP or of the image's
+  configuration no longer reads a copied data disk. The ISO still holds the
+  server's TLS private key (ADR-252).
+- **What the attacker gets instead:** the wrapped key in the superblock of a
+  copied volume, guessable offline at one PBKDF2 (300 000 iterations by
+  default, up to ten million per slot) per guess. **The passphrase is the
+  key:** generate one of 20 characters or more. The header's cost and format
+  cannot be edited downward (10 000 iterations at least), and an edited slot or
+  key check is refused before any data is read (the key check, ADR-240).
+- **Who can unlock:** whoever can type on the VM's console (the provider lets
+  them into the customer's panel) and knows a passphrase. Wrong attempts are
+  logged and paused 2 s each, with no lockout (an attacker at the console can
+  copy the disk and guess offline anyway).
+- **Availability:** no unattended restart. A crash, a watchdog reset or the
+  provider's maintenance leaves the broker down, every port closed, until a
+  person types the passphrase. The A/B trial timeout does not count the wait.
+- **Rotation:** a passphrase change rewrites only the header, twice, so that no
+  superblock keeps the old wrap (a cut between the two writes is repaired at the
+  next open); the disk key itself is rotated by the offline `urmqtt-disk rekey`
+  (a full rewrite), which empties the key slots.
+- **Not protected:** the hypervisor (it sees the passphrase typed and the key in
+  RAM), a stolen running VM, and the integrity of the data (XTS). No TPM, no
+  network unlock (ADR-329).
 
 ### DMA isolation (H4b, ADR-305 to ADR-307)
 

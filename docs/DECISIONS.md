@@ -4473,3 +4473,175 @@ device the kernel does not drive is unaffected; one for a driven device would be
      hardware has IOTLBs; `make bench` was not run with an IOMMU.
    - intel-iommu under KVM needs the split irqchip (`run-qemu.sh` adds it); not run here (no KVM host).
    - Fault interrupts (ADR-306) and unmapping are deliberately absent.
+
+## ADR-325 — Key slots: the disk key wrapped under passphrases in the superblock (LATER-7)
+
+- **Status:** Accepted (LATER-7). Amends ADR-240 (where the disk key comes from); the data's encryption is
+  unchanged.
+- **Context.** ADR-240 put the 64-byte AES-256-XTS disk key in the configuration, so whoever has the ISO (or the
+  installed ESP, or a backup of either) reads a copied data disk: S7 protects a stolen volume or snapshot and
+  nothing else (ADR-254, SECURITY.md). LATER-7 asks for a disk key that cannot be derived from the image alone, on
+  a VPS without a TPM first.
+- **Decision.**
+  1. **The key stays a random 64-byte key; passphrases wrap it.** The superblock gains `flags` bit 2 (wrapped)
+     and two **key slots** of 128 bytes at offset 3168 (DISK-FORMAT §14.2): kind, PBKDF2 iterations, a 32-byte
+     random salt and the disk key wrapped with RFC 3394 AES key wrap under PBKDF2-HMAC-SHA-256(passphrase,
+     `urMQTT disk key slot v1` ‖ uuid ‖ salt). The data stays under a full-entropy key whatever the passphrase is;
+     a passphrase change rewrites a superblock, not the disk (ADR-327); two slots let an operator keep a sealed
+     recovery passphrase beside the daily one.
+  2. **Two checks, in order.** The key wrap's 64-bit integrity value tells a wrong passphrase (`WrongPassphrase`);
+     the existing key check (HMAC of the unwrapped key over the UUID, ADR-240) then tells an intact header from
+     an edited one or a slot taken from another disk (`KeySlotMismatch`). Nothing is read with a key that failed
+     either check. The UUID in the derivation binds a slot to its disk.
+  3. **Bounds the header cannot move.** 10 000 to 10 000 000 iterations: fewer is refused (a header edited to
+     make guessing cheaper is not followed), more is refused (a header cannot make the boot derive for hours).
+     Unknown kinds, bytes in an empty slot, slots without the flag, the flag without encryption or without a
+     slot: `Inconsistent`, like every other malformed superblock.
+  4. **No version spent.** As in S7, the unknown flag bit is what makes an older kernel refuse the disk
+     (`Inconsistent`); no layout minor and **no store schema** (the reserved schema 7 is not used: the SQLite
+     database does not change). An image-key disk (S7) and a plain disk are byte for byte what they were.
+  5. **AES key wrap and PBKDF2 are written here or reused, no new dependency.** The wrap is 40 lines over the
+     `aes` crate the store already uses (checked against RFC 3394 §4.3 and §4.6, both ways, and a flipped bit);
+     PBKDF2 is `urmqtt_cfg::passwd::pbkdf2_hmac_sha256` (ADR-267). Argon2 would resist GPUs better and was not
+     taken for the same reason as in ADR-267: a new dependency and memory-hard code in the kernel for a boot
+     that runs it once; the cost is the operator's to raise (`--iterations`, up to ten million).
+  6. **The API.** `disk::probe` and `disk::unlock` read the superblock and nothing else; `Disk::format_sealed`
+     formats a blank disk with a key and its first slot (the superblock last, as every format);
+     `Disk::set_key_slot`, `unwrap_key_slots` and `scrub_key_slots` change slots (ADR-327).
+- **Testing.** `crates/store/src/keyslot/tests.rs`, `crates/store/tests/wrapped.rs` (seven edits of the header,
+  each without and with a recomputed CRC; another disk's slot; another key wrapped for this disk), the spec test
+  of the superblock and key slot tables, fuzz `disk_keyslot` (ADR-329).
+- **Consequences.** The superblock, which stays plaintext, now carries something an attacker can attack offline:
+  the wrapped key, guessable at one PBKDF2 per guess. The passphrase is therefore the key: a generated one of 20
+  characters or more (OPERATE.md) makes that moot; "summer2026!" does not.
+
+## ADR-326 — The disk passphrase at the console, before anything listens (LATER-7)
+
+- **Status:** Accepted (LATER-7).
+- **Context.** The ROADMAP entry lists four ways to keep the key out of the image: a TPM, a key released over
+  the network by an operator-authenticated step, a passphrase at the console, a key file on a separate device.
+  The first target is a KVM VPS without a TPM (ADR-254: few small providers offer a vTPM, and a vTPM's state
+  travels with the VM backup anyway).
+- **Decision.**
+  1. **The console.** `storage.disk_key_source = "console"` (ADR-328): at boot, on the boot CPU, in `db::init`,
+     the kernel asks for the passphrase on every console it reads: the serial port (a provider's serial console),
+     the PS/2 keyboard (a provider's VNC console), a virtio-console and a virtio-input keyboard, through the same
+     reader as the Diagnostic entry's prompts. The authentication is the provider's: whoever can type on the VM's
+     console is someone the provider let into the customer's panel, and must also know the passphrase.
+  2. **Nothing listens until the disk is open.** The prompt runs before the other cores start, before the TLS,
+     plaintext, WebSocket, metrics and control listeners exist (the smoke checks the order in the serial log). An
+     operator-authenticated unlock over the network was the alternative and was not built (ADR-329): it needs a
+     listener up while the store is sealed, a second TLS identity, and its own replay rules, for a step a console
+     does with no new surface.
+  3. **The availability trade-off, stated.** Every reboot (a crash, the watchdog's `reset`, the provider's host
+     maintenance, an A/B update) leaves the broker down, every port closed, until a person types the passphrase.
+     The prompt is shown again every minute and logged (`storage: waiting for the disk passphrase on the
+     console`), so a remote log shows why the broker is down. The time spent waiting is credited to
+     `update.trial_timeout_s` (ADR-296): a trial boot is not rolled back because nobody was at the console; the
+     confirmation delay still counts from the listeners. This mode is for operators who prefer a broker that stays
+     down to a broker whose image reads its disk.
+  4. **The first boot of a blank disk** asks for a new passphrase twice (the rules: 12 to 256 bytes of
+     printable ASCII, so a VNC keyboard and a serial terminal can both type it again), makes a random disk key
+     (the RNG the TLS code uses; a key that fails the S7 rules is drawn again), and formats the partition with
+     the key wrapped in slot 0 at 300 000 iterations (about 0.2 s on an Apple M-series core under HVF; it is paid
+     once per boot).
+  5. **A wrong passphrase** is answered after a 2 s pause (on top of the derivation) and asked again, for as long
+     as it takes; each one is a log line (`storage: wrong disk passphrase (N so far)`), never the text typed.
+     There is no lockout: an attacker at the console can as well copy the disk and guess offline, and a lockout
+     would only lock out the operator.
+  6. **No echo, no copy.** Nothing typed is echoed or logged. The line editor (`keyslot::LineEditor`, host-tested
+     and fuzzed) keeps printable ASCII in a fixed 256-byte buffer that it wipes after every line and on drop;
+     backspace, Ctrl-U, Ctrl-C and arrow-key escape sequences are handled; an overlong line is dropped whole. The
+     key-encryption key and the unwrapped key are `Zeroizing`. The disk key itself lives in the XTS layer's
+     round keys while the broker runs, as with an image key (ADR-240).
+  7. **An existing image-key disk** is refused in console mode with the way out (`urmqtt-disk keys DISK add --key
+     FILE`); a wrapped disk still opens with an image key that is its key (the way back, ADR-328).
+- **Alternatives.** A key file on a second virtio disk (as easy to copy as the image on a VPS); a key in
+  instance metadata (readable by whoever has the VM); a network unlock (ADR-329); a TPM (ADR-329).
+- **Consequences.** The image is no longer a secret for the disk's sake (it still holds the server's TLS key,
+  ADR-252). The broker cannot restart unattended. A malicious hypervisor still sees the passphrase being typed and
+  the key in RAM, as it sees everything (SECURITY.md).
+
+## ADR-327 — Rotating the disk key's wrap without a rewrite, and the disk key itself offline (LATER-7)
+
+- **Status:** Accepted (LATER-7).
+- **Decision.**
+  1. **A passphrase change rewrites only the superblock.** `Disk::set_key_slot` writes the new superblock (one
+     slot added, replaced or emptied) into the superblock slot not in force with generation + 1 and flushes,
+     then the same into the other one with generation + 2 and flushes. A cut before the first write completes
+     leaves the old passphrases working; after it, the new ones; never neither (tested at every write, clean and
+     torn, the cache lost and kept). The second write exists because a passphrase is changed when it leaked: the
+     older superblock must not keep its wrap.
+  2. **Scrubbing the older superblock.** A cut between the two writes leaves the replaced wrap in the older
+     superblock. `Disk::scrub_key_slots` rewrites an older superblock whose key slots differ from the ones in
+     force (or a damaged one with key slot bytes); the kernel calls it at every boot after the store opens, the
+     tool after every key command. It writes nothing on a disk without the difference.
+  3. **Where.** At the console, `change` instead of the passphrase: the current passphrase, the new one twice;
+     the slot the current one opened is rewrapped (`storage: the disk passphrase of key slot N was changed`).
+     Offline: `urmqtt-disk keys DISK add | change | remove | unwrap` with `--key FILE` or `--passphrase-file FILE`
+     as the authorisation, `--new-passphrase-file FILE`, `--slot N`, `--iterations N`, a dry run without
+     `--write`. `remove` never empties the last slot; `unwrap` empties them all and, with a passphrase, writes the
+     key to `--key-out FILE` (mode 0600, refused if it exists): the way back to an image key and to v0.5.
+  4. **The disk key itself** is rotated by the existing offline `urmqtt-disk rekey` (ADR-240: every sector
+     rewritten, journalled, resumable). It now opens a wrapped disk with `--passphrase-file`, and empties the key
+     slots and clears the wrapped flag when it switches the superblock: they wrap the old key. The operator then
+     wraps the new key (`keys DISK add --key NEWKEY`) and deletes the key file. Rekeying at boot was not built
+     (ADR-240's rule stands: the kernel never converts a disk).
+  5. **Store schema.** Unchanged; nothing here is one-way: `keys unwrap` returns the disk to S7's format.
+- **Testing.** `crates/store/tests/wrapped.rs` (rotation, a recovery slot, the last slot, the scrub, the cut at
+  every write), `tools/disk/tests/keys.rs` (the commands end to end, only superblock sectors change, a cut at
+  every write of `add` and `change` through the tool's library with the data intact, `rekey` empties the slots),
+  smoke `unlock-change` and `unlock-after-change`.
+
+## ADR-328 — `storage.disk_key_source`, configuration format 22 (LATER-7)
+
+- **Status:** Accepted (LATER-7).
+- **Decision.** `storage.disk_key_source = "image" | "console"` (tag 365, an enum, default `"image"`). `"image"`
+  writes no record, so every existing configuration keeps its format and boots on older kernels. `"console"`
+  needs **format 22** (19 to 21 belong to other v0.6.0 items and are refused by this tree like 10 until the
+  release merge), `storage.encryption = "aes-256-xts"`, and **no** `storage.disk_key` (the point is that the
+  image holds none); the TOML path and the kernel's blob check give the same refusals. An older kernel refuses a
+  format 22 image by its version rather than boot looking for a key that is not there; a v0.5.0 template refuses
+  it at build time with the reason (`urmqtt-config`, the builder page).
+- **The builder page** now offers `storage.encryption`, and `storage.disk_key_source` beside it while encryption
+  is on; `storage.disk_key` stays off the page (it needs a key dialog, ADR-240), and a problem with it is shown
+  at the source choice. Choosing `"console"` asks for a confirmation (the risk "The broker waits for a
+  passphrase at every boot"), in the 15 languages.
+- **Upgrade and downgrade.** Nothing changes for an image that does not set the key. Moving a running image-key
+  disk to console mode: `urmqtt-disk keys DISK add --key FILE --write` (offline, no rewrite), then the new image;
+  better, `rekey` to a fresh key first so that old ISOs no longer read it. Back to an image key, or to v0.5.x:
+  `urmqtt-disk keys DISK unwrap ... --key-out FILE --write` and an image with that key.
+
+## ADR-329 — What LATER-7 verifies, and what it does not do (LATER-7)
+
+- **Status:** Accepted (LATER-7).
+1. **Verification.** Host: the store's key slot unit tests and `wrapped.rs` (above), `tools/disk/tests/keys.rs`,
+   the configuration tests of `cfg`, `config`, `config-schema` and `tools/config` (format 22, the rules, the
+   templates of earlier releases), the builder page's `disk-key.test.mjs`. Fuzz `disk_keyslot`: the slot decoder
+   (accepted bytes re-encode exactly), the key unwrap (a success is the wrap's inverse), the line editor
+   (printable, bounded), and a superblock whose flags, key check and key slot area come from the input with a
+   valid CRC, unlocked with the right passphrase (any key it yields is the disk's own) and a wrong one (never);
+   seeds in `fuzz/seeds/disk_keyslot`; two minutes: 179 492 runs (the unlock path, which pays PBKDF2, on one input in
+   eight), no finding. QEMU (`SMOKE_ONLY=unlock`, aarch64 under HVF and TCG, x86_64 under TCG):
+   the first boot of a blank disk with a too-short passphrase refused, then the passphrase typed twice on the
+   serial port (`run-qemu.sh --serial-in`, a Unix socket); nothing listens before the unlock; the passphrase is
+   neither in the serial log nor on the disk, the data partition holds no SQLite header; a wrong passphrase then
+   the right one; `change` at the prompt; the old passphrase refused afterwards; the host tool lists the slot and
+   opens the disk with `--passphrase-file`; a header whose key check was edited (CRC recomputed) is refused after
+   the slot opens.
+2. **Not done (listed, not hidden).**
+   - **TPM 2.0 sealing.** Not built: `swtpm` is not installed on the development machine and installing it was
+     outside what this run could do, so it could not be tested end to end; ADR-254's analysis (a three-to-four-week
+     item, a TIS/CRB driver and a TPM2 command layer, PCR policy and its update workflow, a vTPM's state travelling
+     with the VM) stands. The key slot format leaves room for it (a slot kind 2, "sealed to a TPM").
+   - **Network unlock** (an operator's mTLS endpoint that holds the listeners closed until a signed unlock
+     message arrives): not built. It needs a TLS listener up while the store is sealed, an identity and replay
+     state that today live in the store, and a second operator path; the console needs none of it. A slot kind
+     for a key released by a key server would fit the same format.
+   - **A key file on a separate device**, **confidential VMs** (SEV-SNP, TDX): not built.
+   - **Rekey at boot** or online: no; `rekey` stays offline (ADR-240).
+   - **Unattended reboots** are impossible in console mode by design (ADR-326).
+   - **Integrity**: XTS still gives none (ADR-240); the key slots do not change that.
+   - The VNC keyboard path (PS/2 scancodes, virtio-input) was not exercised with a passphrase in QEMU; the
+     smoke types on the serial port. Those readers are the Diagnostic entry's, tested there (ADR-258).
+   - The memory of the running VM, and a hypervisor that logs keystrokes, are out of reach as before.

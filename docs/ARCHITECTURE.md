@@ -48,7 +48,7 @@ only a request reader, `urmqtt_broker::metrics::render` over the same `Info` as 
 8. **Devices.** PCIe enumeration, then virtio-blk (data disk), virtio-net (queues per core) and virtio-rng.
 8b. **Boot slots** (A/B updates, ADR-295, ADR-296). On the boot disk, right after the GPT first-boot steps: a slot on trial uses one of its attempts, or the boot entry switches back to the previous slot (and the machine resets) when none is left. The DB core later confirms a healthy trial (`update.confirm_after_s` with the store open and a listener up). The kernel writes partition-table sectors only, never an ESP.
 8. **Devices.** PCIe enumeration; with `devices.iommu` not `off`, the IOMMU (VT-d, AMD-Vi or SMMUv3) comes up blocking every device's DMA (H4b, ADR-305); then virtio-blk (data disk), virtio-net (queues per core) and virtio-rng, each given an IOMMU domain with only its own buffers as it allocates them.
-9. **Storage.** The data disk superblock is checked, SQLite opens in WAL + `locking_mode=EXCLUSIVE`, `PRAGMA quick_check` runs, and telemetry segments are recovered.
+9. **Storage.** The data disk superblock is checked, SQLite opens in WAL + `locking_mode=EXCLUSIVE`, `PRAGMA quick_check` runs, and telemetry segments are recovered. An encrypted disk opens with the key from the image (ADR-240), or, with `storage.disk_key_source = "console"`, with the key a passphrase typed on the console unwraps from the superblock's key slots (`kernel/src/unlock.rs`, ADR-325, ADR-326): the boot CPU waits there, before the other cores and every listener.
 10. **Network.** DHCPv4 (or static), then the TLS listener on 8883.
 11. The kernel prints `URMQTT READY`.
 
