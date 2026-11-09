@@ -50,6 +50,7 @@ test('every key the code asks for exists in English', { skip: !haveWasm() && 'ne
   for (const id of ['cannot-serve', 'ram-storage', 'wide-acl', 'watchdog-reset', 'cpu-disable', 'no-time', 'no-control', 'registry-open', 'entropy-none', 'entropy-jitter', 'plaintext-on', 'plaintext-anywhere', 'plaintext-anonymous', 'plaintext-public-address']) {
     used.add(`risk.${id}.title`); used.add(`risk.${id}.text`);
   }
+  for (const c of ['weak', 'mismatch', 'empty', 'format', 'version', 'params', 'auth', 'snapshot', 'storage', 'other']) used.add(`project.err.${c}`);
   for (const u of ['ms', 'mb', 's', 'min', 'h', 'days']) used.add(`unit.${u}`);
   for (const e of ['int', 'enum']) used.add(`err.${e}`);
   for (const rel of ['no-template', 'no-slot', 'no-signature', 'format-unsupported', 'unverified', 'removed']) used.add(`release.${rel}`);

@@ -607,7 +607,17 @@ What that gives you and what it does not:
   carries key material). The address bar holds the changed settings and
   `sessionStorage` the public certificates and the control public key, so that a
   reload does not lose the form; **a private key is held in memory only** and
-  must be chosen again after a reload.
+  must be chosen again after a reload, unless you save an **encrypted project**
+  (NOW-16, ADR-300): the whole form with the private key, the accounts and the
+  signing key is sealed in the browser with your passphrase (PBKDF2-HMAC-SHA-256,
+  600 000 rounds, AES-256-GCM, a new salt and nonce each time, the header
+  authenticated) into a `*.urmqtt-project` file, or into one encrypted copy in
+  the browser's storage that you ask for and can delete. The passphrase is never
+  stored and a lost one cannot be recovered. *Wipe secrets from memory* drops the
+  key, the accounts and the built image from the page, but JavaScript cannot
+  overwrite a string, so close the tab afterwards. The file is as sensitive as the
+  keys in it, and as strong as the passphrase: it can be attacked offline by
+  anyone who gets it.
 - **What you still trust.** The page is code that handles your private key and
   it is delivered by aldo.tech each time you open it: whoever can change what
   that site serves could serve a page that sends the key away. The page cannot

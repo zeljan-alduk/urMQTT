@@ -933,7 +933,7 @@ function renderShell() {
   const formHead = h('h2', { style: 'margin:10px 0 -4px' }, h('span', { class: 'ub-step', 'aria-hidden': 'true', text: '3' }), t('form.title'));
   ui.simple = renderSimple();
   ui.advanced = h('div', { class: 'ub-advanced' }, releaseCard, presetCard, formHead, renderAdvancedTools(), sections);
-  const main = h('div', { class: 'ub-main' }, ui.simple, ui.advanced);
+  const main = h('div', { class: 'ub-main' }, ui.simple, ui.advanced, renderProject());
   const layout = h('div', { class: 'ub-layout' }, main, renderBar());
   root.append(h('div', { class: 'ub-wrap' }, head, layout));
   renderPresets();

@@ -4225,3 +4225,85 @@ from one address).
   every downgrade rule, a cut at every write of each command, a single-slot disk); smoke `ab-release-image-signed`
   (a key made by `minisign -G` in the test; never the release key); `SMOKE_ONLY=ab --arch universal`: one universal
   disk, its standby reserved and a staged slot booted on trial on x86_64 BIOS, x86_64 UEFI and aarch64 UEFI.
+## ADR-300 — Encryption at rest on the builder page: an encrypted project file and an encrypted browser copy (NOW-16)
+
+- **Status:** Accepted. Implements the "private keys and configuration are encrypted in the browser before anything is
+  kept or exported" reading of NOW-16. Builds on ADR-226 (the page keeps no private key in storage) and ADR-231
+  (accounts are hashed in the browser). ADR-301 to 304 stay free. No configuration format, no store schema, no Rust
+  code and no kernel behaviour change: the work is in `tools/builder/web` only.
+- **Context.** Since ADR-226 the page holds a private key (and the account hashes and the optional signing key) in
+  memory only, so after a reload, or the next day, the operator picks the files again and types the accounts again.
+  That is safe and tiresome, and it pushes people to keep the key in a plain file next to the form. The page should
+  offer a way to keep a project that is not a plaintext secret, without changing the promise that nothing leaves the
+  browser and nothing secret is kept unprotected.
+
+### Decisions
+
+1. **What is sealed** (*decided*): the whole state of the form (the changed values, the certificates, the private
+   key, the control public key, the account list with the hashes, the signing key, the file name part, the preset),
+   as one JSON snapshot (`vault.js`, `snapshotState`). Everything or nothing, so a project is restored exactly (a
+   browser test compares the exported TOML before saving and after opening). The chosen release is *not* part of it:
+   it stays what the page has selected now, because the list of releases changes between visits.
+2. **Primitives** (*decided*): Web Crypto only, no script from anywhere. **PBKDF2-HMAC-SHA-256, 600 000 rounds** (the
+   OWASP 2023 figure for this PRF) with a random 16-byte salt derives a 256-bit key held as a **non-extractable**
+   `CryptoKey`; **AES-256-GCM**, a random 12-byte nonce, a 128-bit tag. Argon2 and scrypt are not in Web Crypto and a
+   WebAssembly KDF would add code to the page that has to be trusted and audited; 600 000 rounds take about 0.3 s on
+   a laptop and about 1 s on a phone. A new salt and a new nonce for every seal, so no key or nonce is ever reused.
+3. **The envelope** (*decided*), a JSON document, one object, exactly these fields (any other set is refused):
+   `format` = `urmqtt-project`, `version` = 1, `kdf` = `PBKDF2-HMAC-SHA256`, `iterations`, `salt`, `cipher` =
+   `AES-256-GCM`, `iv`, `data` (base64: ciphertext and tag). **The header is authenticated**: the additional data is
+   the text `format \n version \n kdf \n iterations \n cipher \n salt`, so a changed round count, label or salt fails
+   the tag instead of only deriving another key. The plaintext is padded with spaces (JSON ignores them) to a
+   multiple of 4096 bytes, so the size says little. An unknown `version` is refused with its own message; a later
+   envelope version will be a new `version`, never a silent change of this one.
+4. **A hostile file cannot hang or confuse the page** (*decided*): before any key is derived the page checks the
+   shape, the algorithm names, `iterations` between 200 000 and 5 000 000 (a lower figure would be a downgrade, a
+   higher one a way to freeze the tab), the salt and nonce lengths, the data length (a multiple of 4096 plus the
+   16-byte tag, at most 8 MiB) and the size of the whole file. The decrypted snapshot is rebuilt field by field
+   (`stateFromSnapshot`): unknown ids are dropped, every value is type-checked and length-limited, so a snapshot of
+   another page version or a forged one cannot put an object of a wrong shape into the form.
+5. **The passphrase** (*decided*): never stored, never in the address, never sent; it exists in the dialog's input
+   until the operation ends and the field is emptied when the dialog closes. NFKC-normalised before use, so the same
+   phrase typed on another keyboard or system opens the file. At least 12 characters when sealing (a length check,
+   not a strength meter: the page has no word list to judge with and says in words that a few unrelated words work),
+   asked twice. Opening does not impose the minimum, so an old file is never locked out by a later rule. A wrong
+   passphrase and a damaged file give the same answer on purpose.
+6. **Two places** (*decided*): (a) a project **file** the user saves (`*.urmqtt-project`) and opens again; (b) an
+   optional **copy in this browser** (`localStorage`, one key, `urmqtt-builder-vault-v1`), only as the same
+   envelope, written only when the user asks, with a button to restore it and one to delete it. The copy is never
+   written automatically, and `sessionStorage`, the address and the existing `localStorage` entry for the view mode
+   stay exactly as ADR-226 made them (no key, no hash, no account). A browser that refuses storage says so.
+7. **Wipe** (*decided*): a button that drops the private key, the signing key, the account list and the built image
+   (the ISO contains the key and the hashes) from the page: the references are cleared, the blob URL is revoked,
+   password fields are emptied. **Deliberately not claimed:** JavaScript cannot overwrite a string; the engine may
+   keep copies until its garbage collector runs. The page says so and asks to close the tab. What it does overwrite
+   is the buffers it owns (the passphrase bytes, the plaintext buffer after sealing and opening).
+8. **No network, no third party** (*decided*): nothing here makes a request; `Content-Security-Policy` stays
+   `default-src 'self'`, `connect-src 'self'`, and a browser test asserts that saving, opening and keeping make no
+   request and that the storage, the address and the document hold no key, account or passphrase afterwards.
+9. **The page text** (*decided*): 40 new `project.*` keys in all 15 languages, written in each language (not left in
+   English); the existing text test enforces the same keys and placeholders everywhere and fails an untranslated
+   long sentence.
+10. **Not done, on purpose** (*decided*): no automatic saving of the project, no "remember me", no password manager
+    integration beyond the browser's own `autocomplete` hints on the two password fields, no sync across devices, no
+    recovery of a lost passphrase (there is none by design), no encrypted *emulator* state, and **no dialog for the
+    disk key of configuration format 4** (generate in the browser, download, import): that is the other half of the
+    original NOW-16 text, it needs a configuration format number and belongs with LATER-7 (a disk key outside the
+    image); the page still hides `storage.encryption` and `storage.disk_key` (ADR-240).
+
+### Verification
+
+`tools/builder/test/vault.test.mjs` (envelope round trip, wrong and missing passphrase, NFKC, a weak passphrase,
+every field and bit position of tampering, 16 kinds of malformed or hostile envelope refused before key
+derivation, interoperability with Node's crypto in both directions, the snapshot and a hostile snapshot);
+`vault-page.test.mjs` (headless Chrome: no secret in the file, the page, the storage or the requests; the same TOML
+after a round trip; wrong passphrase and damaged file refused with the dialog open; wipe; the browser copy across a
+reload; no request leaves the origin); `vault-fuzz.test.mjs` with 13 seeds in `tools/builder/test/seeds/vault/`
+(mutation fuzzing of the envelope parser and the opening, run for 120 s: 909 558 inputs, only `VaultError` ever
+thrown, no mutated file opens unless every field the cipher uses is unchanged); the text test for 15 languages.
+
+### For the owner
+
+(a) 600 000 rounds of PBKDF2 rather than a memory-hard KDF (point 2). (b) The disk-key dialog is not part of this
+change (point 10). (c) The page is deployed by the owner later: this changes `app.js`, `app.css` and the `i18n/*.json`
+only, and the aldotech-web repository was not touched.
