@@ -895,7 +895,7 @@ mqtt5() {
             kill_vm
             cat "$log.client" >>"$log" 2>/dev/null || true
             if [[ $phase == 1 ]]; then
-                check "mqtt5-live [$accel]" "$log" "$status" "storage: data disk formatted" "schema v5 \(from v0\)" \
+                check "mqtt5-live [$accel]" "$log" "$status" "storage: data disk formatted" "schema v6 \(from v0\)" \
                     "client: mqtt5-connack-announces-the-limits ok" "client: mqtt5-and-311-on-one-port ok" \
                     "client: mqtt5-properties-forwarded ok" "client: mqtt5-properties-stripped-for-a-311-subscriber ok" \
                     "client: mqtt5-request-response ok" "client: mqtt5-topic-alias-resolved ok" \
@@ -915,7 +915,7 @@ mqtt5() {
                 # The short session must have run out while the broker is down.
                 sleep 9
             else
-                check "mqtt5-after-restart [$accel]" "$log" "$status" "storage: data disk opened" "schema v5 \(from v5\)" \
+                check "mqtt5-after-restart [$accel]" "$log" "$status" "storage: data disk opened" "schema v6 \(from v6\)" \
                     "persistent session\(s\) homed here \(1 expired while down, dropped\)" \
                     "client: mqtt5-session-expired-while-the-broker-was-down ok" \
                     "client: mqtt5-restart-keeps-the-queue-properties-and-expiry ok" \
