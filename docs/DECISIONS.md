@@ -3583,3 +3583,164 @@ results of the runs are in docs/MQTT5-CONFORMANCE.md and in the branch report.
 (a) No Will at `reboot` (point 17). (b) Shared subscriptions for 3.1.1 clients (point 5). (c) No member online:
 QoS 1/2 queued for an offline persistent member rather than dropped (point 3). (d) `limits.max_shared_groups` per
 shard rather than per broker (point 6). (e) Wills are not persisted (point 15).
+
+## ADR-285 — Password accounts at run time: two control commands, a limit, hashes made by the operator (NOW-15, configuration format 15)
+
+- **Status:** Accepted. Implements ROADMAP NOW-15 (closes the "not done" of PROGRESS P1, SECURITY.md's residual risk
+  and ADR-230's "later work"). ADR-286 to ADR-289 belong to it. Answers D-16's "revisit with run-time accounts": the
+  hash stays PBKDF2 (ADR-267), see point 8.
+- **Context.** A `[plaintext]` or `[websocket]` password account lived only in the image: adding a sensor, rotating a
+  password or removing a leaver meant a new image and a reboot, while certificate identities already had the signed
+  control channel (H1). The channel's checks (mutual TLS identity in `control.service_ids`, an offline Ed25519
+  signature, a persisted sequence number, a validity window, no state without a disk) are exactly what an account
+  change needs, so the accounts ride it instead of a second path.
+
+1. **Two commands on the existing channel.** `set-account` (5) adds an account or replaces its hash and class,
+   `remove-account` (6) removes one. The message is the H1 message (`URMQCTL1`, same header, same signature over the
+   same domain, same `seq`, window and freshness rules; `crates/control`). A kernel that does not know the commands
+   rejects the message as malformed. Nothing else changes: no existing command, byte or counter.
+2. **What an item is.** `set-account`: `class (1 byte) | id length (1) | id | hash`; `remove-account`: the id. At
+   most **8 items** per message (8 x 216 bytes), distinct ids. The id has the grammar of the `[plaintext]` section's
+   identities (`A-Z a-z 0-9 - _ . :`, 1 to 64, `urmqtt_cfg::plain::check_identity`: the same function the image
+   check uses, so an id the image would refuse is refused here). The hash is the stored text of `urmqtt_cfg::passwd`
+   (`pbkdf2-sha256$iterations$salt$key`) and is parsed by the decoder, which also bounds its **iterations to the
+   default, 100 000** (`MAX_ACCOUNT_ITERATIONS`; the image's own accounts may still use up to 200 000).
+3. **The broker never sees a password.** `urmqtt-control set-account --password-stdin` reads one line, draws a 16-byte
+   salt from the operating system, hashes it on the operator's machine (100 000 iterations unless `--iterations`
+   says fewer) and signs the hash. `--hash` takes a hash made by `urmqtt-config hash-password` or the builder page.
+   Neither the tool, the message, the store, the log nor a counter holds a password; the tool prints the id and the
+   class, never the hash. The password is in the MQTT CONNECT of the client as before (plaintext or inside TLS).
+4. **ACL class per account** (*decided*). `full` (0), `read-only` (1: subscribes under the listener's `acl_subscribe`,
+   publishes nothing, and its CONNECT with a Will is refused), `write-only` (2: publishes under `acl_publish`,
+   subscribes to nothing; SUBACK 0x80 / 0x87). A class only **narrows**: the listener's patterns still decide what
+   it may touch, and the reserved and system namespaces stay closed to all. A richer per-account ACL (own patterns)
+   was not built: it would put ACL text on the control wire and in the store, and the three classes cover the
+   common fleet cases (sensor, dashboard, gateway); the patterns stay the image's, reviewed with the image.
+5. **Where it applies** (*decided*). One table of accounts for both password listeners: a run-time account logs in on
+   the plaintext listener when `plaintext.auth = "password"` and on the WebSocket listener when `websocket.auth =
+   "password"`, as an image account of the same listener would; a different namespace per listener was not worth the
+   second message field. The sessions stay apart as before (`$plain/<id>/...`, `$ws/<id>/...`). `set-account` is
+   refused (`no_password_listener`) when no listener of the image takes passwords, since the account could never
+   log in.
+6. **The image wins** (*decided*). An id the image lists as an account of either listener, or reserves as a service,
+   operator or control identity (`acl.service_ids`, `acl.operator_ids`, `control.service_ids`), cannot be set:
+   `account_shadows_image`. So a run-time message can neither change a password the image fixed nor give a service
+   name a password; `remove-account` of such an id removes nothing (there is no run-time row). The allowlist (`registry.mode =
+   "allowlist"`) applies to these identities as to the image's.
+7. **A limit, off by default: `limits.max_runtime_accounts` (configuration format 15, tag 270).** 0 to 1 024, default
+   **0 = the control channel refuses account commands** (`accounts_disabled`). So an existing image changes nothing
+   and a new key is a deliberate act of the image's owner; the operator of the channel cannot turn the feature on for
+   an image that did not ask. A change that would leave more accounts than the limit is rolled back as a whole
+   (`account_limit`; the sequence number is not used up). The key is in the builder page's `[limits]`, shown where an
+   account could log in (a password listener and the TLS listener), with its text in the 15 languages.
+8. **Hash cost** (*decided*). The login admission rate and the watchdog's handshake budget are sized at boot from the
+   dearest account's cost (ADR-230, ADR-267). With run-time accounts on, that cost is taken as at least the default
+   (100 000 iterations; `plain::measure`, `websocket::measure`), and the decoy that an unknown user is hashed
+   against costs as much as the dearest account of either kind (`Authenticator::set_runtime`), so a login for an
+   unknown user still takes as long as one for a known user. Argon2id stays out (D-16): its memory per data core and
+   a vetted `no_std` crate would grow the TCB for passwords that plaintext MQTT sends in the clear anyway.
+9. **Refusals** (counted by reason like the existing ones, `urmqtt.control.rejected.<reason>`, logged at powers of two,
+   no content): `accounts_disabled`, `account_limit`, `no_password_listener`, `account_shadows_image`, and for bad
+   input (an id with a bad character, an empty or over-long id, an unknown class, a hash that does not parse, one with
+   more than 100 000 iterations, a trailing byte, a duplicate id, more than 8 items) `malformed`.
+
+## ADR-286 — Store schema 6: the `accounts` table, one-way and transactional (NOW-15)
+
+- **Status:** Accepted. Store schema number 6 (reserved for NOW-15).
+- **Context.** Accounts must survive a reboot and be applied together with the sequence number that authorised them,
+  like a revocation (H1).
+
+1. **The table.** Migration 6 (`crates/store/src/schema.rs`) is `CREATE TABLE accounts (id TEXT PRIMARY KEY, hash TEXT
+   NOT NULL CHECK (length(hash) BETWEEN 1 AND 150), class INTEGER NOT NULL CHECK (class BETWEEN 0 AND 2), added_at
+   INTEGER NOT NULL, seq INTEGER NOT NULL) STRICT, WITHOUT ROWID`. A table is added; no existing row or table changes.
+   150 is `urmqtt_cfg::passwd::MAX_ENCODED`. `added_at` is the wall clock of the first write, `seq` the message that
+   wrote the row last. **Only the hash is stored**; a password never reaches the store, and the hash is as public
+   as the image's own (SECURITY.md).
+2. **Transactional.** Each migration runs in its own transaction (`BEGIN`, the statements, `PRAGMA user_version`,
+   `COMMIT`; ROLLBACK on error), as 3 to 5 do. A power cut at any write of the 5 to 6 step leaves schema 5 or 6 with
+   every row (`golden_schema6.rs`, a cut at every write, torn or not, cache kept or dropped). **One way:** a kernel of
+   v0.5.0 or older refuses a schema 6 database (`schema version 6 is newer than this build`); there is no downgrade
+   path except the backup snapshots taken before the first boot of the new kernel (`urmqtt-disk`, DISK-FORMAT.md §12),
+   which a newer kernel also refuses to restore into an older one. Like 3 to 5 it happens at the first boot of the
+   new kernel, whether or not run-time accounts are used. Also in `urmqtt-disk` and in a backup restore.
+3. **Applied with the message.** `Store::account_set`, `account_del`, `accounts`, `account_count`; a control message
+   sets or removes its rows, checks the count against the limit, and sets the sequence number in one transaction.
+   Rows are read at boot (`db::load`) and handed to the control state with the revocations and the allowlist.
+4. **Goldens.** `schema5-shared` and `v2-data-schema5` are frozen (the input of the 5 to 6 tests); `schema6-accounts`
+   and `v2-data-schema6` are what the code writes now (`golden_schema6_bytes.rs`, `golden_v2.rs`). Tests: schema 5
+   migrates keeping every row with an empty table, the CHECK constraints hold, a rolled-back transaction leaves nothing, the
+   frozen schema 6 image reads back, the 2 to 6, 3 to 6 and 4 to 6 paths see every intermediate version.
+5. **Dropped at disk loss.** An account is state of the data disk like a revocation. A new disk has none, and the image's
+   own accounts are still there; the operator re-sends the messages (the tool keeps nothing; the runbook says so).
+
+## ADR-287 — Applying accounts: one table, every core, live logins cut (NOW-15)
+
+- **Status:** Accepted.
+- **Context.** Each data core has its own plaintext and WebSocket `Authenticator`, built from the static configuration
+  with `'static` slices; an account that changes at run time must reach all of them and must stop working for a
+  connection that already logged in.
+
+1. **One published table.** After the commit the DB core builds the table (`Vec<Account>`: id, parsed hash, class;
+   sorted by id) and publishes it in `crates/kernel/src/control.rs` with the revocations and the allowlist and bumps
+   the same **epoch**; every data core notices the epoch in its poll, hands the new `Arc` to its authenticators
+   (`Authenticator::set_runtime`, a binary search; the image's accounts are tried first) and reloads nothing else.
+   New logins see the new table at once; a login in progress on another core uses the table it started with.
+2. **Live logins are cut** (*decided*). A core compares its previous table with the new one and, for every id that
+   was removed or whose hash or class changed, closes the live plaintext and WebSocket sessions of that identity
+   homed on it (`Broker::disconnect_unless`, 5.0 DISCONNECT 0x98 like a revocation, the transport's 1 s grace),
+   counted in `urmqtt.control.live_closed`. A class change cuts as well: a subscription held by a client that is now
+   write-only must not live on. Cutting is the only way to make "remove" and "change the password" mean what an
+   operator expects; the cost is one reconnect.
+3. **The class is asked at every operation** (`Broker::set_login_class`, a function pointer into the kernel's table: a
+   relaxed atomic count short-circuits it while there are no accounts): publish, Will and SUBSCRIBE of a plaintext
+   or WebSocket session. It cannot widen: it is an extra `&&` after the listener's own pattern check. Certificate
+   identities never ask (only the two login roles do); a certificate named like an account is unaffected.
+4. **Identity strings.** The decision of a login is now an owned `String` (`plain::Decision::Accept`,
+   `websocket::Decision::Accept`), because a run-time account's id lives in the table, not in the image.
+5. **No new `unsafe`, no new dependency.** `urmqtt-control` gains a path dependency on `urmqtt-cfg` (the grammars of
+   the image check, already in the TCB); `urmqtt-control-tool` gains `urmqtt-cfg` with `std` for the hash.
+
+## ADR-288 — Audit, counters, operator tooling for run-time accounts (NOW-15)
+
+- **Status:** Accepted.
+
+1. **Audit lines** (log level info, always on, no secrets): `control: seq N from <publisher>: password account <id>
+   set (class <class>, K run-time account(s))`, `... removed (K run-time account(s) left)`, then the existing
+   `control: seq N from <publisher>: set-account of M item(s) applied`; a refusal is the existing `control: message
+   from <publisher> rejected: <reason> (n so far)`. At boot: `control: run-time password accounts on: N stored, at
+   most L`. The id is not a secret (it is the MQTT user name); no line holds a hash or a password, and the smoke
+   scenario scans the serial logs for both.
+2. **Counters.** The four new reasons are entries of `Reject::ALL`, so they appear in `$SYS` and statsd as
+   `urmqtt.control.rejected.<reason>` with the others; `urmqtt.control.applied` counts the messages.
+3. **`urmqtt-control set-account | remove-account`.** `set-account --id ID (--password-stdin | --hash H) [--class
+   full|read-only|write-only] [--iterations N]`, one account per message; `remove-account --id ID [--id ...]`.
+   Signing and publishing options are the existing ones (`--key` or `--sign-cmd`, `--env`, `--seq`, `--valid-for`,
+   `--out`, `--no-publish`). `show` prints ids and classes only. `urmqtt-config` (the image tool) is not involved:
+   an account is not configuration.
+4. **No query.** There is no command that lists accounts or hashes over the network (ROADMAP "out of scope": no general
+   query interface). The count is in the boot line and the audit lines; the operator keeps its own list.
+
+## ADR-289 — What NOW-15 does not do, and what upgrading it means (NOW-15)
+
+- **Status:** Accepted.
+
+1. **Upgrade effect.** Nothing, until the image asks. Format 15 is written only when `limits.max_runtime_accounts` is
+   not 0; an existing configuration keeps its format, and the kernel never accepts an account command without it. The
+   database is migrated to schema 6 at the first boot of the new kernel (one way, ADR-286), which is the one effect of
+   the upgrade itself.
+2. **Downgrade effect.** A v0.5.x kernel refuses a schema 6 database. Take a backup snapshot before the first boot of
+   the new kernel, or keep the old disk. A format 15 image does not boot on a v0.5.x kernel template (the
+   builder and the tool refuse the pairing by the version, as for formats 8 to 13).
+3. **Not done** (each is a later decision, not a gap in this one): per-account ACL patterns (point 4 of ADR-285);
+   listing accounts over the network (ADR-288 point 4); a TLS-client-certificate-less way to authorise the
+   operator (the channel stays mutual TLS plus signature); per-account rate limits (the listener's limits apply to
+   all); password expiry and age; account names for the TLS listener (certificates are its identities); an
+   Argon2id hash (D-16); a bulk import (8 per message, one message per account in the tool); copying
+   accounts between disks or into the image (`urmqtt-config` has `hash-password` for the image's own accounts).
+4. **Residual risks, in SECURITY.md.** The control signing key and a service identity together can add an account and
+   so get a login with the plaintext role's rights (ACL of the listener, no service, operator or control rights); the
+   hashes on the data disk allow offline guessing like the image's (long random passwords); a restored old disk brings
+   back old accounts and the old sequence number (as for revocations); accounts are per disk, not per image.
+5. **Concurrency.** A control message is handled whole on the DB core in its own transaction; two messages never
+   interleave. A data core that has not yet seen an epoch authenticates against the previous table for at most one
+   poll (microseconds to a few milliseconds), after which the live login of a removed account is cut.

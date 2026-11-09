@@ -87,7 +87,11 @@ fuzz_target!(|data: &[u8]| {
             let remove = rest[2] & 1 == 1;
             let tail = &rest[3..];
             let mut items = Vec::new();
-            for (i, chunk) in tail.chunks((tail.len() / n.max(1)).max(1)).take(n).enumerate() {
+            for (i, chunk) in tail
+                .chunks((tail.len() / n.max(1)).max(1))
+                .take(n)
+                .enumerate()
+            {
                 let id: String = chunk
                     .iter()
                     .take(8)

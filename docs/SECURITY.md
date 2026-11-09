@@ -25,7 +25,7 @@ which says what it gives up.
 | Device identities and the revocation list | CA embedded; revocations embedded and in SQLite | Who may connect. |
 | Control signing key (Ed25519) | **Offline**, never in the image: a file on an operator machine (dev) or an HSM/KMS behind `urmqtt-control --sign-cmd` (prod). The image holds only the public key (`deploy/<env>/control.pub`). | Revoking, unrevoking and allowlisting devices at runtime. |
 | Trust anchors by role | `[trust] operational` and `bootstrap` CA lists, embedded | Which CA grants which rights; rotation with overlap. |
-| Plaintext accounts (P1, opt-in) | Salted PBKDF2 hashes in the image's configuration slot (ADR-231); the passwords are never stored | Logging in on the plaintext port as a device. The hashes are public to whoever holds the image: use long random passwords. |
+| Plaintext accounts (P1, opt-in) | Salted PBKDF2 hashes in the image's configuration slot (ADR-231), and, with `limits.max_runtime_accounts`, in the data disk's `accounts` table (NOW-15, ADR-285, ADR-286); the passwords are never stored, logged or sent to the broker by the operator tool | Logging in on the plaintext port or over WebSocket as a device. The hashes are public to whoever holds the image or the disk: use long random passwords. |
 | Disk key (S7, opt-in) | In the image's configuration slot (`storage.disk_key`), and in RAM while the disk is open (the cipher's round keys, wiped on drop) | Reading a stolen volume or snapshot. Whoever has the ISO has it (ADR-240). |
 | Messages | In flight (RAM), retained and offline queues (SQLite), telemetry (log on the data disk) | Confidentiality and integrity of device data. |
 | Availability | — | The broker's purpose; the main target of a remote attacker. |
@@ -119,8 +119,11 @@ changes state without a new image, so it gets its own model.
   `$urmqtt/control` is not routed to anyone. It is handed to the control
   handler on the DB core.
 - Commands: `revoke` and `unrevoke` certificate serials (unrevoke only with
-  `control.allow_unrevoke`), and `allow` and `disallow` device ids for
-  `registry.mode = "allowlist"`.
+  `control.allow_unrevoke`), `allow` and `disallow` device ids for
+  `registry.mode = "allowlist"`, and, only when the image sets
+  `limits.max_runtime_accounts` above 0, `set-account` and `remove-account`
+  for password accounts of the plaintext and WebSocket listeners (NOW-15,
+  ADR-285: below).
 - No other effect exists. A control message cannot change configuration, run
   code, read data or open a port.
 
@@ -153,6 +156,27 @@ changes state without a new image, so it gets its own model.
   revoked, or whose identity left the allowlist.
 - A revoked device is refused at its next full handshake and at its next
   resumption.
+- An account that was removed, or whose password hash or class changed, has its
+  live plaintext and WebSocket logins closed by the cores that hold them; the
+  next login sees the new table.
+
+**Password accounts at run time (NOW-15, ADR-285 to ADR-289).**
+- The operator tool hashes the password (PBKDF2-HMAC-SHA-256, at most 100 000
+  iterations, a random salt) on the operator's machine and signs only the hash;
+  the broker never receives a password from the control channel, stores only
+  the hash (store schema 6) and logs only the account's id and class.
+- Same authentication as every other command (mTLS service identity, offline
+  signature, persisted sequence number, validity window, no durable storage
+  means refusal). Off unless the image sets `limits.max_runtime_accounts`; at
+  most that many accounts; at most 8 per message; ids use the identity
+  characters of `[plaintext]`; the image's own accounts and the service,
+  operator and control identities cannot be shadowed.
+- A class (`full`, `read-only`, `write-only`) only narrows what the listener's
+  `acl_*` patterns give; a run-time account never has the service, operator or
+  control role, no `$SYS`, no `$urmqtt/`.
+- Login behaves as for the image's accounts: one PBKDF2 per attempt whatever
+  the user name, the same answer for unknown user, wrong password and no
+  credentials, the lock-out and login rate of the listener.
 
 **Attackers and what stops them.**
 
@@ -163,7 +187,10 @@ changes state without a new image, so it gets its own model.
 | Compromised service identity | forge a command | Ed25519 signature | host vectors; smoke `control-forged` |
 | Network attacker who recorded a message | replay it | persisted `seq` | host test; smoke `control-replay` |
 | Anyone with an old message | delay it | validity window | host test; smoke `control-expired` |
-| Malformed message | crash or confuse the decoder | bounded, fixed layout; fuzz `control_message` | fuzz |
+| Malformed message | crash or confuse the decoder | bounded, fixed layout; fuzz `control_message`, `control_account` | fuzz |
+| Holder of a service identity or the signing key alone | add or change a password account | both are needed (as for every command); off unless the image sets `limits.max_runtime_accounts` | smoke `accounts-run-time`; host tests in `control` |
+| Anyone, in the log or on the wire of the control channel | read a password | the tool sends a hash; the broker logs the id and class only | smoke `accounts-run-time` scans the serial logs for every password and hash |
+| Holder of the signing key | give a service or operator name a password, or replace an image account's | refused (`account_shadows_image`); an account's rights are the listener's plaintext role, narrowed by its class | host tests; smoke `image-account-wins` |
 | Bootstrap identity | act as a device or service | bootstrap role: only `provision/{id}/#`, its own session namespace, never persistent | broker tests; smoke `bootstrap-role` |
 | Unknown device (allowlist mode) | connect | refused after the handshake, counted | smoke `registry-allowlist` |
 
@@ -829,7 +856,7 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 | Plaintext `auth = "ip"` trusts the source address. | An address on a shared segment can be forged. | Use it only where nobody can forge one; the boot report says so. |
 | The password hashes in an image allow offline guessing (PBKDF2 at GPU speed). | An image is a file; there is no hardware-backed store, and no memory-hard function in the kernel (D-16, not now: ADR-267). | Long random passwords (the builder generates them); treat the ISO as a secret; change passwords with a new image. |
 | Plaintext lock-out is by source address. | Devices behind one NAT share it; an attacker who shares it can lock the others out. | The allow-list is the better tool behind a NAT; raise `max_failed_auths_per_ip`. |
-| Plaintext accounts cannot be added or removed at run time. | It needs a signed control message type and a place to keep the hashes (listed as later work, ADR-230). | A new image; revoke an identity at once with `disallow` through the registry. |
+| Run-time password accounts (NOW-15, opt-in): the signing key together with a control service identity adds a login with the plaintext role's rights; the hashes on the data disk allow offline guessing like the image's; a restored old disk brings back old accounts and the old sequence number. | Same as the control channel's other residual risks (they are the same two keys and the same disk). Accounts are per disk, not per image. | Leave `limits.max_runtime_accounts` at 0 (the default) when the image's accounts are enough; long random passwords; offline key in an HSM (`--sign-cmd`); `remove-account` or `disallow` (allowlist mode) to cut one at once. |
 | Syslog and statsd are plain UDP. | No TLS sink in the kernel. | Collectors on a private network only. |
 | No hardware RNG on the cloud (Ampere Altra has no `RNDR`; virtio-rng may be absent). | Then the CSPRNG is seeded from CPU timing jitter, which is weaker evidence than a hardware source. | Health tests and a conservative estimate gate it (ADR-038), and it is logged at boot. The weak path is an explicit option (ADR-263): the builder, `urmqtt-config pack`, the boot log and `$SYS/broker/entropy/source` all say when it is allowed or was used. Prefer clouds with virtio-rng; `entropy.fallback = "none"` refuses to boot without a hardware source. |
 | Side channels in the crypto. | RustCrypto implementations are designed to be constant-time. The tag checks and our one secret comparison are checked by dudect-style timing tests (`make ct`, H2), but the asymmetric code (P-256, X25519, Ed25519) is not measured here. | ChaCha20-Poly1305 is offered alongside AES-128-GCM; docs/CRYPTO.md lists what is checked. |

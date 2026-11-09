@@ -695,6 +695,10 @@ restarts the service.
   - For a revocation that must survive even a lost disk, also add the
     serial to the image's revocation list at the next build.
   - Watch `urmqtt.control.applied` and `urmqtt.control.rejected.*`.
+- **Password accounts at run time (NOW-15):** with `limits.max_runtime_accounts` set (format 15), `urmqtt-control
+  set-account` and `remove-account` add, change and remove plaintext and WebSocket accounts without a new image
+  ([OPERATE.md](OPERATE.md)); they are kept on the data disk. The first boot of a v0.6.0 kernel migrates the
+  database to schema 6, one way: take a backup snapshot first if you may need to go back.
 - **Allowlist mode:** with `registry.mode = "allowlist"`, admit devices with
   `urmqtt-control allow --id …` and remove them with `disallow`
   ([PROVISIONING.md](PROVISIONING.md)).
