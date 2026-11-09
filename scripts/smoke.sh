@@ -1359,12 +1359,13 @@ first_boot() {
 # S1: a power cut at a write of the first boot (injected with
 # test=disk-fault, dev only); the next boot finishes the job. The host test
 # `first_boot_survives_a_crash_at_every_write` covers every write; these
-# cover the kernel path at the backup move, the head clearing, the new
-# backup copy and a torn primary.
+# cover the kernel path at the backup move (write 2), the data partition's
+# head clearing (6), the standby boot slot's head clearing (7, ADR-295), the
+# new backup copy (9) and a torn primary (10).
 first_boot_crash() {
     local good="$OUT/first-boot-crash-ok.raw" spec
     mkimg "$good" "smoke"
-    for spec in stop-after-write=2 stop-after-write=6 stop-after-write=8 tear-write=9:4; do
+    for spec in stop-after-write=2 stop-after-write=6 stop-after-write=7 stop-after-write=9 tear-write=10:4; do
         local img="$OUT/first-boot-crash-${spec//[=:]/-}.raw"
         mkimg "$img" "smoke test=disk-fault:$spec"
         for accel in $ACCELS; do

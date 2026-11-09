@@ -426,9 +426,13 @@ fn the_firmware_booting_the_standby_during_a_trial_is_adopted() {
         boot_step(m.device().as_mut(), Some(Guid([9; 16])), 5).unwrap(),
         Boot::Unknown
     );
+    // No partition GUID reported: taken for the ESP entry.
     assert_eq!(
         boot_step(m.device().as_mut(), None, 5).unwrap(),
-        Boot::Unknown
+        Boot::Confirmed {
+            slot: 'A',
+            schema_updated: false
+        }
     );
     stage_seed(&m, 1, 5);
     activate(m.device().as_mut(), ACT).unwrap();

@@ -94,7 +94,8 @@ one of three states:
 
 The host test `first_boot_survives_a_crash_at_every_write` checks every write,
 cut cleanly or torn, with and without the volatile cache surviving. Smoke
-`first-boot-crash` does the same in the kernel at four points.
+`first-boot-crash` does the same in the kernel at five points (the standby
+boot slot's head clearing among them, §0a).
 
 ## 0a. Boot slots: A/B (boot disk layout "A/B 1", v0.6.0, ADR-295 to ADR-299)
 

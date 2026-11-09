@@ -566,8 +566,9 @@ pub enum Boot {
 
 /// The kernel's step at every boot of an A/B disk, after
 /// [`gpt::prepare_with`] and before the store (ADR-296). `booted` is the
-/// partition GUID the bootloader reports for the kernel file, `own_schema`
-/// the store schema this kernel writes.
+/// partition GUID the bootloader reports for the kernel file (`None`: it
+/// reported none, taken as the ESP entry), `own_schema` the store schema this
+/// kernel writes.
 ///
 /// - Booted from the ESP, its slot confirmed: nothing (one write if the
 ///   recorded schema is not this kernel's: an in-place `update-boot`).
@@ -590,9 +591,10 @@ pub fn boot_step(
     let active = s.active();
     let standby = s.standby_slot();
     let (la, ls) = (s.letter(&active), s.letter(&standby));
-    let Some(g) = booted else {
-        return Ok(Boot::Unknown);
-    };
+    // A bootloader that reports no partition GUID (a BIOS path that leaves
+    // it zero): the kernel came from this disk, and firmware and Limine boot
+    // the ESP entry, which comes first; take it for that.
+    let g = booted.unwrap_or_else(|| s.esp_guid());
     if g == s.standby_guid() {
         if !active.state.trial {
             return Ok(Boot::StandbyBooted { slot: ls });

@@ -3654,8 +3654,9 @@ shard rather than per broker (point 6). (e) Wills are not persisted (point 15).
 - **Decision.**
   1. **Counted before anything else runs.** `bootslot::at_boot` runs right after the GPT first-boot steps, before
      the block self-test, the store, the network and the other cores. Limine reports the partition GUID of the
-     kernel file (`limine_file.gpt_part_uuid`, read from the raw structure like the disk GUID). Booted from the ESP
-     entry with its slot on trial and attempts left: one is used (a table write). A crash, a fatal error, a reset
+     kernel file (`limine_file.gpt_part_uuid`, read from the raw structure like the disk GUID; a loader that reports
+     none is taken to have booted the ESP entry, which firmware and Limine find first). Booted from the ESP entry
+     with its slot on trial and attempts left: one is used (a table write). A crash, a fatal error, a reset
      by the watchdog or a hang the operator resets after that point counts as a failed attempt. A kernel that dies
      *before* that point (in the bootloader, or before its block driver) is not counted: no loader help exists for
      it (ADR-295) and it loops until an operator rolls back offline. This is the known gap of a kernel-side
