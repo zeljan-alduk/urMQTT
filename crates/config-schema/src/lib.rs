@@ -2723,8 +2723,6 @@ mod backpressure_tests;
 #[cfg(test)]
 mod console_tests;
 #[cfg(test)]
-mod update_tests;
-#[cfg(test)]
 mod devices_tests;
 #[cfg(test)]
 mod encryption_tests;
@@ -2742,6 +2740,8 @@ mod shared_group_tests;
 mod tests;
 #[cfg(test)]
 mod tls_off_tests;
+#[cfg(test)]
+mod update_tests;
 #[cfg(test)]
 mod websocket_tests;
 

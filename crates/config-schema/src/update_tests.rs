@@ -40,10 +40,9 @@ fn the_defaults_are_the_documented_ones() {
             "{env}"
         );
     }
-    let blob = pack_toml(
-        "[update]\nconfirm = \"auto\"\nconfirm_after_s = 60\ntrial_timeout_s = 900\n",
-    )
-    .unwrap();
+    let blob =
+        pack_toml("[update]\nconfirm = \"auto\"\nconfirm_after_s = 60\ntrial_timeout_s = 900\n")
+            .unwrap();
     assert_eq!(blob, Builder::new().finish(false).unwrap());
     assert_eq!(Blob::parse(&blob).unwrap().version(), 2);
 }
@@ -93,9 +92,21 @@ fn any_key_set_needs_format_17() {
 #[test]
 fn refusals_name_their_keys() {
     for (text, key, what) in [
-        ("confirm_after_s = 86401", "update.confirm_after_s", "0..=86400"),
-        ("trial_timeout_s = 86401", "update.trial_timeout_s", "0..=86400"),
-        ("trial_timeout_s = 60", "update.trial_timeout_s", "longer than"),
+        (
+            "confirm_after_s = 86401",
+            "update.confirm_after_s",
+            "0..=86400",
+        ),
+        (
+            "trial_timeout_s = 86401",
+            "update.trial_timeout_s",
+            "0..=86400",
+        ),
+        (
+            "trial_timeout_s = 60",
+            "update.trial_timeout_s",
+            "longer than",
+        ),
         (
             "confirm_after_s = 120\ntrial_timeout_s = 100",
             "update.trial_timeout_s",

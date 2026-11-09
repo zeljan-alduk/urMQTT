@@ -554,8 +554,14 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
             crate::UpdateConfirm::Operator => 1,
         },
     )?;
-    b.uint(tag::UPD_CONFIRM_AFTER, u64::from(cfg.update.confirm_after_s))?;
-    b.uint(tag::UPD_TRIAL_TIMEOUT, u64::from(cfg.update.trial_timeout_s))?;
+    b.uint(
+        tag::UPD_CONFIRM_AFTER,
+        u64::from(cfg.update.confirm_after_s),
+    )?;
+    b.uint(
+        tag::UPD_TRIAL_TIMEOUT,
+        u64::from(cfg.update.trial_timeout_s),
+    )?;
     // ADR-256: "off" is the default and writes nothing (the blob keeps its
     // version); "auto" and "on" need format 5.
     b.variant(

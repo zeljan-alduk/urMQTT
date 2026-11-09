@@ -1263,7 +1263,7 @@ fn update_keys_need_format_17() {
         assert_eq!(p.version(), 17, "{t} = {v}");
         assert_eq!(p.present().count(), 1);
         assert!(check::check(&p, false).is_ok(), "{t} = {v}");
-        let rec = record(t, &p.raw(t).unwrap().to_vec());
+        let rec = record(t, p.raw(t).unwrap());
         assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_err());
         assert!(Blob::parse(&with_version(&assemble(&rec), 17)).is_ok());
     }

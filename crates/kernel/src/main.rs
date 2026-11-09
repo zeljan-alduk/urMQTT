@@ -29,6 +29,8 @@ mod boot_aarch64;
 #[cfg(all(target_os = "none", target_arch = "x86_64"))]
 mod boot_x86;
 #[cfg(target_os = "none")]
+mod bootslot;
+#[cfg(target_os = "none")]
 mod console;
 #[cfg(target_os = "none")]
 mod control;

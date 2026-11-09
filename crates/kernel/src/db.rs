@@ -525,6 +525,8 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
         cfg.sqlite_heap_mb
     );
 
+    // A/B (ADR-296): a one-way update that just migrated the store.
+    crate::bootslot::after_store(info.schema_from);
     let retention_ms = u64::from(cfg.retention_days) * 86_400_000;
     let now_s = crate::boot::now_unix().unwrap_or(0);
     let t1 = time::uptime_ns();
@@ -1693,6 +1695,7 @@ impl Worker {
         }
         did |= self.step_log(now_ms);
         did |= self.check_online_grow(now_ms);
+        did |= crate::bootslot::poll(now_ms);
         did |= self.step_discard(now_ms);
         did |= self.step_backup(now_ms);
         did |= self.step_scrub(now_ms);

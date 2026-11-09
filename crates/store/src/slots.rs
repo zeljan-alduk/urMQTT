@@ -187,8 +187,10 @@ impl Slot {
 /// become U+FFFD.
 pub fn name_text(name: &[u8; 72]) -> String {
     let units = name
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c.first().copied().unwrap_or(0), c.get(1).copied().unwrap_or(0)]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .take_while(|&u| u != 0);
     char::decode_utf16(units)
         .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
@@ -296,7 +298,10 @@ pub enum SlotError {
     /// The active slot is still on trial: confirm it or roll it back first.
     TrialPending,
     /// The image does not fit the slot.
-    TooLarge { image: u64, slot: u64 },
+    TooLarge {
+        image: u64,
+        slot: u64,
+    },
     /// What was read back is not what was written.
     ReadBack,
     /// The active slot is not on trial: nothing to confirm.
@@ -325,21 +330,27 @@ impl Slots {
     }
 
     pub fn active(&self) -> Slot {
-        self.entry(self.esp).map(Slot::from_entry).unwrap_or_else(|_| empty_slot())
+        self.entry(self.esp)
+            .map(Slot::from_entry)
+            .unwrap_or_else(|_| empty_slot())
     }
 
     pub fn standby_slot(&self) -> Slot {
-        self.entry(self.standby).map(Slot::from_entry).unwrap_or_else(|_| empty_slot())
+        self.entry(self.standby)
+            .map(Slot::from_entry)
+            .unwrap_or_else(|_| empty_slot())
     }
 
     /// The ESP entry's unique GUID: what Limine reports as the boot
     /// partition when the active slot booted.
     pub fn esp_guid(&self) -> Guid {
-        self.entry(self.esp).map_or(Guid::default(), |e| e.unique_guid)
+        self.entry(self.esp)
+            .map_or(Guid::default(), |e| e.unique_guid)
     }
 
     pub fn standby_guid(&self) -> Guid {
-        self.entry(self.standby).map_or(Guid::default(), |e| e.unique_guid)
+        self.entry(self.standby)
+            .map_or(Guid::default(), |e| e.unique_guid)
     }
 
     /// "A" for the region nearer the start of the disk, "B" for the other.
@@ -349,7 +360,11 @@ impl Slots {
         } else {
             self.active()
         };
-        if s.first_lba < other.first_lba { 'A' } else { 'B' }
+        if s.first_lba < other.first_lba {
+            'A'
+        } else {
+            'B'
+        }
     }
 
     /// The entries with new states for the active and the standby slot.
@@ -378,7 +393,9 @@ impl Slots {
         esp.last_lba = s.last_lba;
         esp.name = s.name;
         esp.attributes = (a.attributes & !STATE_MASK & !NO_BLOCK_IO) | new_active.encode();
-        let st = entries.get_mut(self.standby).ok_or(SlotError::Inconsistent)?;
+        let st = entries
+            .get_mut(self.standby)
+            .ok_or(SlotError::Inconsistent)?;
         st.first_lba = a.first_lba;
         st.last_lba = a.last_lba;
         st.name = a.name;
@@ -438,8 +455,7 @@ pub fn locate(entries: &[Entry]) -> Result<Option<(usize, usize)>, SlotError> {
 /// primary, the same backup at its end): `Ok(None)` on a single-slot disk.
 pub fn read(dev: &mut dyn BlockDevice) -> Result<Option<Slots>, SlotError> {
     let primary = gpt::read_table(dev, 1)?.ok_or(SlotError::NeedsRepair)?;
-    let backup =
-        gpt::read_table(dev, primary.header.backup_lba)?.ok_or(SlotError::NeedsRepair)?;
+    let backup = gpt::read_table(dev, primary.header.backup_lba)?.ok_or(SlotError::NeedsRepair)?;
     if backup.entries != primary.entries || backup.header.disk_guid != primary.header.disk_guid {
         return Err(SlotError::NeedsRepair);
     }
@@ -541,7 +557,11 @@ pub enum Boot {
     StandbyBooted { slot: char },
     /// The trial is over but there is nothing to go back to: this boot
     /// continues on the trial slot.
-    Exhausted { slot: char, why: Why, standby: NotEligible },
+    Exhausted {
+        slot: char,
+        why: Why,
+        standby: NotEligible,
+    },
 }
 
 /// The kernel's step at every boot of an A/B disk, after
@@ -733,7 +753,7 @@ pub fn stage(
         return Err(SlotError::TrialPending);
     }
     let room = standby.sectors() * SECTOR;
-    if esp.is_empty() || esp.len() as u64 > room || esp.len() as u64 % SECTOR != 0 {
+    if esp.is_empty() || esp.len() as u64 > room || !(esp.len() as u64).is_multiple_of(SECTOR) {
         return Err(SlotError::TooLarge {
             image: esp.len() as u64,
             slot: room,
@@ -866,6 +886,10 @@ const NOTE_TEXT: usize = 32;
 /// `magic[16] | note version u16 | A/B protocol u16 | store schema u32 |
 /// configuration format u16 | 0[6] | version text, NUL padded [32]`, all
 /// little-endian.
+// Every index is bounded by its loop against the fixed sizes (16, 2, 4, 32 of
+// 64 bytes); the kernel evaluates it in a static initialiser, where an
+// out-of-bounds index would be a compile error.
+#[allow(clippy::indexing_slicing)]
 pub const fn build_note(version: &str, schema: u32, cfg_format: u16) -> [u8; NOTE_LEN] {
     let mut n = [0u8; NOTE_LEN];
     let mut i = 0;

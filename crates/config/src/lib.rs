@@ -13,6 +13,8 @@
 
 mod store;
 pub use store::{CONFIG, ConfigHandle, LoadError, LoadInfo, info, load, load_defaults};
+/// The newest configuration format this build reads (the kernel's build note, ADR-296).
+pub use urmqtt_cfg::FORMAT_VERSION;
 pub use urmqtt_cfg::blob::Hex;
 
 /// How the console names the signer of a configuration: the first 8 bytes of

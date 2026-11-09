@@ -248,6 +248,9 @@ fn apply(
         payload,
     )?;
     urmqtt_control::check(&m, crate::boot::now_unix(), *last_seq, &policy())?;
+    if m.command.on_boot() {
+        return apply_boot(store, last_seq, &m);
+    }
     if m.command == Command::Unrevoke
         && m.items.iter().any(|s| {
             let h = serial_hex(s);
@@ -265,6 +268,8 @@ fn apply(
         store.begin()?;
         for item in &m.items {
             match m.command {
+                // Handled by `apply_boot` above.
+                Command::BootConfirm | Command::BootRollback => {}
                 Command::Revoke => store.revoke(&serial_hex(item), "control", now)?,
                 Command::Unrevoke => store.unrevoke(&serial_hex(item))?,
                 Command::Allow => {
@@ -291,6 +296,30 @@ fn apply(
     publish(&revoked, &allowed);
     wake_data_cores();
     Ok((m.command, m.items.len(), m.seq))
+}
+
+/// A boot command (ADR-298): its one item must be this boot disk's GUID.
+/// The sequence number commits first (a replay is refused even if the slot
+/// write fails), then the slot table changes; a rollback resets.
+fn apply_boot(
+    store: &mut Store,
+    last_seq: &mut u64,
+    m: &urmqtt_control::Message,
+) -> Result<(Command, usize, u64), Reject> {
+    let disk = m.items.first().ok_or(Reject::Malformed)?;
+    let r = (|| {
+        store.begin()?;
+        store.set_control_seq(m.seq)?;
+        store.commit()
+    })();
+    if let Err(e) = r {
+        store.rollback();
+        warn!("control: storing seq {} failed: {e}", m.seq);
+        return Err(Reject::StorageFailed);
+    }
+    *last_seq = m.seq;
+    crate::bootslot::control(m.command == Command::BootRollback, disk)?;
+    Ok((m.command, 1, m.seq))
 }
 
 /// Gets every core out of `wfi` so it notices the new epoch at once.

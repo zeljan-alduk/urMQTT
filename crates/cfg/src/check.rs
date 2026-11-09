@@ -656,14 +656,14 @@ fn websocket(b: &Blob<'_>, max_len: u64, max_levels: u64) -> Result<(), CfgError
 }
 
 /// The refusal of a trial timeout the automatic confirmation cannot beat (ADR-297).
-pub const TRIAL_TIMEOUT_MSG: &str =
-    "must be 0 or longer than update.confirm_after_s (a trial boot would reset before it could be confirmed)";
+pub const TRIAL_TIMEOUT_MSG: &str = "must be 0 or longer than update.confirm_after_s (a trial boot would reset before it could be confirmed)";
 
 /// `[update]` (ADR-297): a trial boot must be able to confirm itself before its
 /// timeout resets it.
 fn update(b: &Blob<'_>) -> Result<(), CfgError> {
     let timeout = b.uint(tag::UPD_TRIAL_TIMEOUT);
-    if b.variant(tag::UPD_CONFIRM) == 0 && timeout != 0 && timeout <= b.uint(tag::UPD_CONFIRM_AFTER) {
+    if b.variant(tag::UPD_CONFIRM) == 0 && timeout != 0 && timeout <= b.uint(tag::UPD_CONFIRM_AFTER)
+    {
         return Err(err("update.trial_timeout_s", TRIAL_TIMEOUT_MSG));
     }
     Ok(())

@@ -73,16 +73,26 @@ fn the_first_boot_reserves_the_standby_before_the_data_partition() {
     assert!(b.first_lba > a.last_lba);
     assert_eq!(a.sectors(), b.sectors());
     let data = t.data_partition().unwrap();
-    assert!(data.first_lba > b.last_lba && data.first_lba % ALIGN == 0);
+    assert!(data.first_lba > b.last_lba && data.first_lba.is_multiple_of(ALIGN));
     assert_eq!(a.label, "v0.6.0");
-    assert_eq!(a.state, State { schema: 5, ..State::default() });
+    assert_eq!(
+        a.state,
+        State {
+            schema: 5,
+            ..State::default()
+        }
+    );
     assert!(b.state.empty && !b.state.sealed);
     assert_eq!(t.entries[s.standby].attributes & NO_BLOCK_IO, NO_BLOCK_IO);
     assert_eq!(t.entries[s.esp].attributes & NO_BLOCK_IO, 0);
     assert_eq!((s.letter(&a), s.letter(&b)), ('A', 'B'));
     // The ESP's bytes are untouched; the standby's head is zero.
     assert_eq!(active_bytes(&m), esp(0));
-    assert!(m.raw(b.first_lba as usize * 512, 32 * 1024).iter().all(|&x| x == 0));
+    assert!(
+        m.raw(b.first_lba as usize * 512, 32 * 1024)
+            .iter()
+            .all(|&x| x == 0)
+    );
     // The next boot changes nothing.
     let before = m.raw(0, 64 * MIB);
     let (_, steps) = prepare_with(
@@ -187,7 +197,13 @@ fn the_first_boot_with_slots_survives_a_crash_at_every_write() {
 
 /// Stages `esp(seed)` into the standby with the note's version.
 fn stage_seed(m: &MemDisk, seed: u8, schema: u8) -> Staged {
-    stage(m.device().as_mut(), &esp(seed), &alloc::format!("v0.6.{seed}"), schema).unwrap()
+    stage(
+        m.device().as_mut(),
+        &esp(seed),
+        &alloc::format!("v0.6.{seed}"),
+        schema,
+    )
+    .unwrap()
 }
 
 const ACT: Activation = Activation {
@@ -217,7 +233,10 @@ fn an_update_that_confirms() {
     assert!(a.state.trial && a.state.tries == 2);
     assert_eq!(s.letter(&a), 'B');
     assert_eq!(s.table.entries[s.esp].attributes & NO_BLOCK_IO, 0);
-    assert_eq!(s.table.entries[s.standby].attributes & NO_BLOCK_IO, NO_BLOCK_IO);
+    assert_eq!(
+        s.table.entries[s.standby].attributes & NO_BLOCK_IO,
+        NO_BLOCK_IO
+    );
     // Staging again while on trial would destroy the way back.
     assert_eq!(
         stage(m.device().as_mut(), &esp(2), "x", 5),
@@ -280,14 +299,7 @@ fn an_update_that_never_confirms_rolls_back() {
         Err(SlotError::NotEligible(NotEligible::Bad))
     );
     assert_eq!(
-        activate(
-            m.device().as_mut(),
-            Activation {
-                retry: true,
-                ..ACT
-            }
-        )
-        .unwrap(),
+        activate(m.device().as_mut(), Activation { retry: true, ..ACT }).unwrap(),
         ('A', 'B')
     );
     assert!(slots(&m).active().state.trial);
@@ -333,14 +345,7 @@ fn an_exhausted_trial_without_a_way_back_keeps_running() {
     let m = ab_disk();
     let g = slots(&m).esp_guid();
     stage_seed(&m, 1, 5);
-    activate(
-        m.device().as_mut(),
-        Activation {
-            tries: 1,
-            ..ACT
-        },
-    )
-    .unwrap();
+    activate(m.device().as_mut(), Activation { tries: 1, ..ACT }).unwrap();
     // The previous slot (A, now standby) gets damaged... by being marked
     // bad (a one-way migration ran).
     let s = slots(&m);
@@ -421,7 +426,10 @@ fn the_firmware_booting_the_standby_during_a_trial_is_adopted() {
         boot_step(m.device().as_mut(), Some(Guid([9; 16])), 5).unwrap(),
         Boot::Unknown
     );
-    assert_eq!(boot_step(m.device().as_mut(), None, 5).unwrap(), Boot::Unknown);
+    assert_eq!(
+        boot_step(m.device().as_mut(), None, 5).unwrap(),
+        Boot::Unknown
+    );
     stage_seed(&m, 1, 5);
     activate(m.device().as_mut(), ACT).unwrap();
     assert_eq!(
@@ -447,9 +455,12 @@ fn an_in_place_kernel_update_refreshes_the_recorded_schema() {
     assert_eq!(slots(&m).active().state.schema, 6);
 }
 
+/// What a reader sees: the bytes the ESP points at, the active and standby states.
+type Seen = (Vec<u8>, State, State);
+
 /// The state a reader sees after a cut: what the firmware boots (the valid
 /// primary, else the backup) after the next boot's repair.
-fn after_crash(m: &MemDisk) -> (Vec<u8>, State, State) {
+fn after_crash(m: &MemDisk) -> Seen {
     prepare(m.device().as_mut(), counter()).unwrap();
     let s = slots(m);
     (active_bytes(m), s.active().state, s.standby_slot().state)
@@ -461,7 +472,7 @@ fn after_crash(m: &MemDisk) -> (Vec<u8>, State, State) {
 fn cut_everywhere(
     image: &[u8],
     op: &dyn Fn(&mut dyn BlockDevice) -> Result<(), SlotError>,
-    ok: &dyn Fn(&(Vec<u8>, State, State)) -> bool,
+    ok: &dyn Fn(&Seen) -> bool,
 ) -> u64 {
     let probe = MemDisk::from_image(image.to_vec());
     let mut f = FaultDevice::new(probe.device(), FaultSpec::default());
@@ -510,48 +521,44 @@ fn every_operation_survives_a_cut_at_every_write() {
     stage_seed(&m, 1, 5);
     let staged = m.raw(0, 64 * MIB);
     // Activation: A in force, or B on trial with both tries.
-    cut_everywhere(
-        &staged,
-        &|d| activate(d, ACT).map(|_| ()),
-        &|(bytes, a, b)| {
-            (*bytes == esp(0) && !a.trial && b.sealed)
-                || (*bytes == esp(1) && a.trial && a.tries == 2 && !b.trial)
-        },
-    );
+    cut_everywhere(&staged, &|d| activate(d, ACT).map(|_| ()), &|(
+        bytes,
+        a,
+        b,
+    )| {
+        (*bytes == esp(0) && !a.trial && b.sealed)
+            || (*bytes == esp(1) && a.trial && a.tries == 2 && !b.trial)
+    });
     activate(m.device().as_mut(), ACT).unwrap();
     let trial = m.raw(0, 64 * MIB);
     // A trial boot: two tries left, or one.
-    cut_everywhere(
-        &trial,
-        &|d| boot_step(d, Some(g), 5).map(|_| ()),
-        &|(bytes, a, _)| *bytes == esp(1) && a.trial && (a.tries == 2 || a.tries == 1),
-    );
+    cut_everywhere(&trial, &|d| boot_step(d, Some(g), 5).map(|_| ()), &|(
+        bytes,
+        a,
+        _,
+    )| {
+        *bytes == esp(1) && a.trial && (a.tries == 2 || a.tries == 1)
+    });
     // Confirmation: on trial, or confirmed.
-    cut_everywhere(
-        &trial,
-        &|d| confirm(d).map(|_| ()),
-        &|(bytes, a, _)| *bytes == esp(1) && (a.trial || !a.trial && !a.bad),
-    );
+    cut_everywhere(&trial, &|d| confirm(d).map(|_| ()), &|(bytes, a, _)| {
+        *bytes == esp(1) && (a.trial || !a.trial && !a.bad)
+    });
     // The automatic rollback: B on trial with no tries, or A in force and B bad.
     boot_step(m.device().as_mut(), Some(g), 5).unwrap();
     boot_step(m.device().as_mut(), Some(g), 5).unwrap();
     let spent = m.raw(0, 64 * MIB);
-    cut_everywhere(
-        &spent,
-        &|d| boot_step(d, Some(g), 5).map(|_| ()),
-        &|(bytes, a, b)| {
-            (*bytes == esp(1) && a.trial && a.tries == 0)
-                || (*bytes == esp(0) && !a.trial && !a.bad && b.bad)
-        },
-    );
+    cut_everywhere(&spent, &|d| boot_step(d, Some(g), 5).map(|_| ()), &|(
+        bytes,
+        a,
+        b,
+    )| {
+        (*bytes == esp(1) && a.trial && a.tries == 0)
+            || (*bytes == esp(0) && !a.trial && !a.bad && b.bad)
+    });
     // The operator's rollback.
-    cut_everywhere(
-        &trial,
-        &|d| rollback(d).map(|_| ()),
-        &|(bytes, a, b)| {
-            (*bytes == esp(1) && a.trial) || (*bytes == esp(0) && !a.trial && b.bad)
-        },
-    );
+    cut_everywhere(&trial, &|d| rollback(d).map(|_| ()), &|(bytes, a, b)| {
+        (*bytes == esp(1) && a.trial) || (*bytes == esp(0) && !a.trial && b.bad)
+    });
 }
 
 #[test]
@@ -607,7 +614,13 @@ fn tables_that_are_not_one_esp_and_one_standby_are_refused() {
 
 #[test]
 fn state_bits_round_trip_and_stay_in_their_field() {
-    for attr in [0u64, u64::MAX, 0x0123_4567_89ab_cdef, STATE_MASK, !STATE_MASK] {
+    for attr in [
+        0u64,
+        u64::MAX,
+        0x0123_4567_89ab_cdef,
+        STATE_MASK,
+        !STATE_MASK,
+    ] {
         let st = State::decode(attr);
         assert_eq!(st.encode(), attr & STATE_MASK);
         assert_eq!(st.encode() & !STATE_MASK, 0);
@@ -689,7 +702,10 @@ fn build_notes_are_found_and_checked() {
 fn versions_parse_like_git_describe() {
     assert_eq!(parse_version("v0.6.0"), Some((0, 6, 0, 0)));
     assert_eq!(parse_version("0.5.1"), Some((0, 5, 1, 0)));
-    assert_eq!(parse_version("v0.5.0-23-g6324d30-dirty"), Some((0, 5, 0, 23)));
+    assert_eq!(
+        parse_version("v0.5.0-23-g6324d30-dirty"),
+        Some((0, 5, 0, 23))
+    );
     assert_eq!(parse_version("v0.6.0-rc1"), Some((0, 6, 0, 0)));
     assert!(parse_version("6324d30").is_none());
     assert!(parse_version("v1.2").is_none());

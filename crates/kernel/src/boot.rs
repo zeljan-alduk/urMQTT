@@ -492,6 +492,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
     devices::set_boot_medium(medium);
     power::set_halt_on_fatal(medium.optical);
+    crate::bootslot::announce();
     // Live mode (O3): decided in stage 1, announced and enforced here.
     let live = match &s.storage {
         StoragePlan::Disk => false,
@@ -665,6 +666,11 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
             fatal_fmt(format_args!("storage: {msg}; refusing to serve"));
         }
         error!("storage: {msg}; running WITHOUT persistence (dev configuration)");
+    }
+    if s.options.ab_bad {
+        // A broken update, for the A/B smoke scenarios (dev only): the slot
+        // step above has counted the trial boot.
+        fatal("ab-bad: this kernel does not come up (test=ab-bad)");
     }
     if let Err(msg) = devices::blk_selftest() {
         fatal(msg);
@@ -1149,7 +1155,10 @@ fn install_image() -> Option<crate::install::Image> {
 /// the real one). These are read from the raw struct instead.
 const FILE_MEDIA_TYPE: usize = 40;
 const FILE_GPT_DISK_UUID: usize = 64;
-const FILE_STRUCT_MIN: usize = FILE_GPT_DISK_UUID + 16;
+/// The GPT unique GUID of the partition the file came from (A/B slots,
+/// ADR-296), right after the disk GUID.
+const FILE_GPT_PART_UUID: usize = FILE_GPT_DISK_UUID + 16;
+const FILE_STRUCT_MIN: usize = FILE_GPT_PART_UUID + 16;
 
 /// The boot volume Limine reports for the kernel file.
 fn boot_medium() -> devices::BootMedium {
@@ -1169,13 +1178,19 @@ fn boot_medium() -> devices::BootMedium {
         .map_or(u32::MAX, u32::from_le_bytes);
     let mut guid = [0u8; 16];
     guid.copy_from_slice(
-        raw.get(FILE_GPT_DISK_UUID..FILE_STRUCT_MIN)
+        raw.get(FILE_GPT_DISK_UUID..FILE_GPT_PART_UUID)
+            .unwrap_or(&[0; 16]),
+    );
+    let mut part = [0u8; 16];
+    part.copy_from_slice(
+        raw.get(FILE_GPT_PART_UUID..FILE_STRUCT_MIN)
             .unwrap_or(&[0; 16]),
     );
     devices::BootMedium {
         optical: media == limine::file::LIMINE_MEDIA_TYPE_OPTICAL,
         // Already in GPT's on-disk byte order (little-endian fields).
         disk_guid: (guid != [0; 16]).then_some(urmqtt_store::gpt::Guid(guid)),
+        part_guid: (part != [0; 16]).then_some(urmqtt_store::gpt::Guid(part)),
     }
 }
 

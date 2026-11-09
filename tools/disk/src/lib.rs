@@ -7,3 +7,4 @@ pub mod convert;
 pub mod dev;
 pub mod host;
 pub mod migrate;
+pub mod slots;

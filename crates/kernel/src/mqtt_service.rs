@@ -553,6 +553,11 @@ impl MqttService {
             }
             crate::plain::announce(dataplane::workers(n).len());
             crate::websocket::announce(dataplane::workers(n).len());
+            // A/B (ADR-296): the listeners are up, a trial boot's health
+            // clock starts (a TLS listener whose setup failed is not up).
+            if CONFIG.network.mqtt_tls_port == 0 || tls.is_some() {
+                crate::bootslot::set_listening();
+            }
             // ADR-269: what a slow single subscriber does to its publisher.
             info!(
                 "mqtt: publisher back-pressure {}",

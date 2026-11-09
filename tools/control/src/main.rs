@@ -518,7 +518,10 @@ mod tests {
 
     #[test]
     fn a_boot_command_takes_exactly_one_disk_guid() {
-        let key = format!("{}/../../deploy/dev/control.key", env!("CARGO_MANIFEST_DIR"));
+        let key = format!(
+            "{}/../../deploy/dev/control.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
         let opts = |extra: &[&str]| {
             let mut a: Vec<String> = ["--env", "dev", "--key", &key, "--no-publish"]
                 .iter()
@@ -534,7 +537,13 @@ mod tests {
         assert_eq!(m.command, Command::BootConfirm);
         assert_eq!(m.items, vec![disk_guid(g).unwrap()]);
         assert!(build(Command::BootRollback, &opts(&[])).is_err());
-        assert!(build(Command::BootRollback, &opts(&["--disk-guid", g, "--id", "x"])).is_err());
+        assert!(
+            build(
+                Command::BootRollback,
+                &opts(&["--disk-guid", g, "--id", "x"])
+            )
+            .is_err()
+        );
         assert!(build(Command::Allow, &opts(&["--disk-guid", g])).is_err());
     }
 }
