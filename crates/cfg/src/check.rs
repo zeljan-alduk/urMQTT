@@ -169,6 +169,7 @@ pub fn check(b: &Blob<'_>, dev_allowed: bool) -> Result<(), CfgError> {
     let (max_len, max_levels) = limits;
     plaintext(b, max_len, max_levels)?;
     websocket(b, max_len, max_levels)?;
+    metrics(b)?;
     filters(
         "acl.device_publish",
         b,
@@ -657,6 +658,51 @@ fn websocket(b: &Blob<'_>, max_len: u64, max_levels: u64) -> Result<(), CfgError
 /// The refusal of a default session expiry above the maximum (ADR-273).
 pub const SESSION_EXPIRY_MSG: &str =
     "must not exceed limits.max_session_expiry_s (the longest expiry any session is granted)";
+
+/// The `[metrics]` section (ADR-290). As for `[plaintext]`: what is written is
+/// well formed whether or not the endpoint is on; what it needs is checked
+/// when it is on. There is no "anywhere": a metrics endpoint without an
+/// allow-list is not a configuration.
+fn metrics(b: &Blob<'_>) -> Result<(), CfgError> {
+    use crate::plain;
+
+    for (n, s) in b.strs(tag::METRICS_ALLOW_FROM).enumerate() {
+        plain::parse_allow(s).map_err(|m| err("metrics.allow_from", m))?;
+        if b.strs(tag::METRICS_ALLOW_FROM).take(n).any(|o| o == s) {
+            return Err(err("metrics.allow_from", "a network is listed twice"));
+        }
+    }
+    if !b.bool(tag::METRICS_ENABLED) {
+        return Ok(());
+    }
+    if b.strs(tag::METRICS_ALLOW_FROM).next().is_none() {
+        return Err(err(
+            "metrics.allow_from",
+            "required when metrics are enabled: the networks that may scrape (for example 10.0.0.0/8); there is no \"anywhere\"",
+        ));
+    }
+    let port = b.uint(tag::METRICS_PORT);
+    let tls_port = b.uint(tag::NET_TLS_PORT);
+    if tls_port != 0 && port == tls_port {
+        return Err(err(
+            "metrics.port",
+            "must differ from network.mqtt_tls_port",
+        ));
+    }
+    if port == b.uint(tag::NET_PLAIN_PORT) {
+        return Err(err(
+            "metrics.port",
+            "must differ from network.mqtt_plain_port",
+        ));
+    }
+    if b.bool(tag::PL_ENABLED) && port == b.uint(tag::PL_PORT) {
+        return Err(err("metrics.port", "must differ from plaintext.port"));
+    }
+    if b.bool(tag::WS_ENABLED) && port == b.uint(tag::WS_PORT) {
+        return Err(err("metrics.port", "must differ from websocket.port"));
+    }
+    Ok(())
+}
 
 /// Checks the limits and returns `(max_topic_len, max_topic_levels)`.
 fn limits(b: &Blob<'_>) -> Result<(u64, u64), CfgError> {

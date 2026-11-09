@@ -215,14 +215,15 @@ fn structural_attacks_fail_closed() {
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, 10 which no format ever used, and
     // one above the newest).
-    for unknown in [0u8, 10, 14, 15] {
+    for unknown in [0u8, 10, 14, 15, 17, 18] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
     // The versions of the formats that came after 7, each its own feature
     // (8 back-pressure, 9 WebSocket, 11 the receive interrupt, 12 MQTT 5.0,
-    // 13 the shared-group limits).
-    for known in [8u8, 9, 11, 12, 13] {
+    // 13 the shared-group limits, 16 the metrics endpoint; 14 and 15 belong to other
+    // items of the release and are refused here).
+    for known in [8u8, 9, 11, 12, 13, 16] {
         let v = with_version(&assemble(&ok), known);
         assert_eq!(Blob::parse(&v).map(|b| b.version()), Ok(u16::from(known)));
     }
@@ -244,7 +245,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 13));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 16));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -253,7 +254,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[13, 0],
+        &[16, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -1232,4 +1233,110 @@ fn shared_group_limits() {
         assert!(Blob::parse(&with_version(&assemble(&rec), 12)).is_err());
         assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_ok());
     }
+}
+
+/// ADR-290: the `[metrics]` section. Defaults write nothing and keep the base
+/// format; any key set needs format 16; ranges are enforced; the endpoint
+/// needs an allow-list and a port of its own; a blob of format 13 cannot hold
+/// the keys.
+#[test]
+fn metrics_rules() {
+    let mut d = Builder::new();
+    d.bool(tag::METRICS_ENABLED, false).unwrap();
+    d.uint(tag::METRICS_PORT, 9100).unwrap();
+    d.strs(tag::METRICS_ALLOW_FROM, &[] as &[&str]).unwrap();
+    d.uint(tag::METRICS_MAX_CONNS, 8).unwrap();
+    d.uint(tag::METRICS_MAX_PER_IP, 2).unwrap();
+    d.uint(tag::METRICS_REQUEST_TIMEOUT, 5).unwrap();
+    assert_eq!(d.finish(false).unwrap(), empty());
+
+    for (t, lo, hi) in [
+        (tag::METRICS_PORT, 1u64, 65_535u64),
+        (tag::METRICS_MAX_CONNS, 1, 64),
+        (tag::METRICS_MAX_PER_IP, 1, 16),
+        (tag::METRICS_REQUEST_TIMEOUT, 1, 30),
+    ] {
+        for v in [lo, hi] {
+            let mut b = Builder::new();
+            b.uint(t, v).unwrap();
+            let blob = b.finish(false).unwrap();
+            let p = Blob::parse(&blob).unwrap();
+            assert_eq!(p.version(), 16, "{t} = {v}");
+            assert_eq!(p.uint(t), v);
+        }
+        let mut b = Builder::new();
+        for v in [0u64, hi + 1] {
+            assert!(b.uint(t, v).is_err(), "{t} = {v}");
+        }
+        let rec = record(
+            t,
+            &lo.to_le_bytes()[..match t {
+                tag::METRICS_PORT => 2,
+                _ => 1,
+            }],
+        );
+        assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_err());
+        assert!(Blob::parse(&with_version(&assemble(&rec), 16)).is_ok());
+    }
+
+    let check = |build: &dyn Fn(&mut Builder)| {
+        let mut b = Builder::new();
+        build(&mut b);
+        // `finish` runs the semantic check.
+        b.finish(true).map(|_| ())
+    };
+    // Enabled needs an allow-list.
+    let e = check(&|b| b.bool(tag::METRICS_ENABLED, true).unwrap()).unwrap_err();
+    assert_eq!(e.key, "metrics.allow_from");
+    assert!(
+        check(&|b| {
+            b.bool(tag::METRICS_ENABLED, true).unwrap();
+            b.strs(tag::METRICS_ALLOW_FROM, &["10.0.0.0/8", "192.168.1.5/32"])
+                .unwrap();
+        })
+        .is_ok()
+    );
+    // Entries: well formed always, no 0.0.0.0/0, no duplicates.
+    for bad in ["0.0.0.0/0", "10.0.0.0", "10.0.0.0/33", "x", ""] {
+        let e = check(&|b| b.strs(tag::METRICS_ALLOW_FROM, &[bad]).unwrap()).unwrap_err();
+        assert_eq!(e.key, "metrics.allow_from", "{bad}");
+    }
+    let e = check(&|b| {
+        b.strs(tag::METRICS_ALLOW_FROM, &["10.0.0.0/8", "10.0.0.0/8"])
+            .unwrap();
+    })
+    .unwrap_err();
+    assert!(e.msg.contains("twice"));
+    // The port is its own.
+    let on = |b: &mut Builder, port: u64| {
+        b.bool(tag::METRICS_ENABLED, true).unwrap();
+        b.strs(tag::METRICS_ALLOW_FROM, &["10.0.0.0/8"]).unwrap();
+        b.uint(tag::METRICS_PORT, port).unwrap();
+    };
+    let e = check(&|b| on(b, 8883)).unwrap_err();
+    assert_eq!(e.key, "metrics.port");
+    let e = check(&|b| {
+        on(b, 1883);
+        b.str(tag::ENV, "dev").unwrap();
+        b.uint(tag::NET_PLAIN_PORT, 1883).unwrap();
+    })
+    .unwrap_err();
+    assert_eq!(e.key, "metrics.port");
+    let e = check(&|b| {
+        on(b, 8084);
+        b.bool(tag::WS_ENABLED, true).unwrap();
+    })
+    .unwrap_err();
+    assert_eq!(e.key, "metrics.port");
+    let e = check(&|b| {
+        on(b, 1884);
+        b.bool(tag::PL_ENABLED, true).unwrap();
+        b.uint(tag::PL_PORT, 1884).unwrap();
+        b.strs(tag::PL_ALLOW_FROM, &["10.0.0.0/8"]).unwrap();
+        b.variant(tag::PL_AUTH, 1).unwrap();
+    })
+    .unwrap_err();
+    assert_eq!(e.key, "metrics.port");
+    // Off: the other keys mean nothing, and a port equal to another is fine.
+    assert!(check(&|b| b.uint(tag::METRICS_PORT, 8883).unwrap()).is_ok());
 }

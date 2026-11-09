@@ -289,6 +289,23 @@ pub fn websocket_summary(b: &Blob<'_>) -> Option<String> {
     ))
 }
 
+/// One line about the metrics endpoint when it is on (ADR-290): an HTTP port
+/// without encryption or a login, protected only by its allow-list, so whoever
+/// ships the image has to know. `None` when it is off.
+pub fn metrics_summary(b: &Blob<'_>) -> Option<String> {
+    use fields::tag;
+    if !b.bool(tag::METRICS_ENABLED) {
+        return None;
+    }
+    Some(format!(
+        "Prometheus metrics ON (plain HTTP, no login): port {}, scrapes allowed from {}",
+        b.uint(tag::METRICS_PORT),
+        b.strs(tag::METRICS_ALLOW_FROM)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 /// Whether the configuration allows the CPU-jitter entropy fallback
 /// (`entropy.fallback = "jitter"`, the default; ADR-038, ADR-263).
 pub fn jitter_allowed(b: &Blob<'_>) -> bool {
@@ -361,6 +378,9 @@ pub fn describe(blob_bytes: &[u8], all: bool) -> Result<String, String> {
     if let Some(w) = websocket_summary(&b) {
         let _ = writeln!(o, "warning:     {w}");
     }
+    if let Some(m) = metrics_summary(&b) {
+        let _ = writeln!(o, "warning:     {m}");
+    }
     let _ = writeln!(
         o,
         "entropy:     {}",
@@ -430,9 +450,10 @@ pub fn verify_blob(blob_bytes: &[u8], dev: bool) -> Result<String, String> {
     };
     let plaintext = plaintext_summary(&b).map_or_else(String::new, |p| format!("\nwarning: {p}"));
     let websocket = websocket_summary(&b).map_or_else(String::new, |w| format!("\nwarning: {w}"));
+    let metrics = metrics_summary(&b).map_or_else(String::new, |m| format!("\nwarning: {m}"));
     let entropy = entropy_warning(&b).map_or_else(String::new, |w| format!("\nWARNING: {w}"));
     Ok(format!(
-        "ok: fingerprint {}, {}, {served}{plaintext}{websocket}{entropy}",
+        "ok: fingerprint {}, {}, {served}{plaintext}{websocket}{metrics}{entropy}",
         Hex(b.fingerprint()),
         if b.signature().is_some() {
             "signed"

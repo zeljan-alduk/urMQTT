@@ -440,7 +440,7 @@ fn the_toml_path_and_the_blob_check_agree() {
 #[test]
 fn the_schema_describes_the_section() {
     let json = schema_json();
-    assert!(json.contains("\"format_version\":13,\"format_min\":1"));
+    assert!(json.contains("\"format_version\":16,\"format_min\":1"));
     for key in [
         "enabled",
         "port",
@@ -470,7 +470,8 @@ fn the_schema_describes_the_section() {
     // Accounts: plaintext.users and websocket.users (ADR-272).
     assert_eq!(json.matches("\"item\":\"user\"").count(), 2);
     assert_eq!(json.matches("\"item\":\"ip_identity\"").count(), 1);
-    assert_eq!(json.matches("\"item\":\"cidr\"").count(), 1);
+    // plaintext.allow_from and metrics.allow_from (ADR-290).
+    assert_eq!(json.matches("\"item\":\"cidr\"").count(), 2);
     // Version 2 fields say so; older ones are version 1.
     assert_eq!(json.matches("\"since\":2").count(), 17);
     assert!(json.contains("\"since\":1"));

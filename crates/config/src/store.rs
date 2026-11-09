@@ -20,9 +20,10 @@ use urmqtt_cfg::{CfgError, fields};
 
 use crate::{
     Acl, BuildConfig, Cidr, Console, Control, Cpu, DEV_KERNEL, Devices, DiscardMode, Entropy,
-    IdentityField, Ipv4Cidr, Limits, LogLevel, Memory, Mqtt5, Network, NetworkMode, Observability,
-    PlainAuth, PlainNetwork, PlainUser, Plaintext, Rate, Registry, SocketAddrV4, Storage,
-    StorageMode, Time, Tls, Trust, VirtioGpuMode, Watchdog, WatchdogAction, Websocket, WsAuth,
+    IdentityField, Ipv4Cidr, Limits, LogLevel, Memory, Metrics, Mqtt5, Network, NetworkMode,
+    Observability, PlainAuth, PlainNetwork, PlainUser, Plaintext, Rate, Registry, SocketAddrV4,
+    Storage, StorageMode, Time, Tls, Trust, VirtioGpuMode, Watchdog, WatchdogAction, Websocket,
+    WsAuth,
 };
 
 /// Room for every plain-text string list of the field table at its
@@ -37,6 +38,8 @@ const ADDR_SLOTS: usize = fields::MAX_TIME_SERVERS;
 const NET_SLOTS: usize = fields::MAX_PLAIN_NETWORKS;
 /// The accounts of `plaintext.users` and of `websocket.users` (ADR-272).
 const USER_SLOTS: usize = 2 * fields::MAX_PLAIN_USERS;
+/// `metrics.allow_from` (ADR-290).
+const METRICS_NET_SLOTS: usize = fields::MAX_METRICS_NETWORKS;
 const IPID_SLOTS: usize = fields::MAX_PLAIN_IP_IDENTITIES;
 
 const NO_NET: Cidr = Cidr { addr: 0, prefix: 0 };
@@ -46,6 +49,7 @@ struct Arena {
     pems: [&'static [u8]; PEM_SLOTS],
     addrs: [SocketAddrV4; ADDR_SLOTS],
     nets: [Cidr; NET_SLOTS],
+    metrics_nets: [Cidr; METRICS_NET_SLOTS],
     users: [PlainUser; USER_SLOTS],
     ipids: [PlainNetwork; IPID_SLOTS],
 }
@@ -60,6 +64,7 @@ impl Arena {
                 port: 0,
             }; ADDR_SLOTS],
             nets: [NO_NET; NET_SLOTS],
+            metrics_nets: [NO_NET; METRICS_NET_SLOTS],
             users: [PlainUser { id: "", hash: "" }; USER_SLOTS],
             ipids: [PlainNetwork {
                 net: NO_NET,
@@ -202,6 +207,21 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
         n_nets = i + 1;
     }
     let allow_from: &'static [Cidr] = arena.nets.get(..n_nets).unwrap_or_default();
+    // The metrics endpoint's allow-list (ADR-290), the same way.
+    let mut n_metrics = 0;
+    for (i, (slot, c)) in arena
+        .metrics_nets
+        .iter_mut()
+        .zip(
+            b.strs(tag::METRICS_ALLOW_FROM)
+                .filter_map(|s| Cidr::parse(s).ok()),
+        )
+        .enumerate()
+    {
+        *slot = c;
+        n_metrics = i + 1;
+    }
+    let metrics_allow: &'static [Cidr] = arena.metrics_nets.get(..n_metrics).unwrap_or_default();
     // Accounts: the plaintext ones first, then the WebSocket ones (ADR-272).
     let (pl_slots, ws_slots) = arena
         .users
@@ -442,6 +462,14 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             acl_subscribe: ws_acl_subscribe,
             retain: b.bool(tag::WS_RETAIN),
         },
+        metrics: Metrics {
+            enabled: b.bool(tag::METRICS_ENABLED),
+            port: u16::try_from(b.uint(tag::METRICS_PORT)).unwrap_or(0),
+            allow_from: metrics_allow,
+            max_connections: u32_of(tag::METRICS_MAX_CONNS),
+            max_connections_per_ip: u32_of(tag::METRICS_MAX_PER_IP),
+            request_timeout_s: u32_of(tag::METRICS_REQUEST_TIMEOUT),
+        },
         mqtt5: Mqtt5 {
             enabled: b.bool(tag::MQTT5_ENABLED),
             receive_maximum: u32_of(tag::MQTT5_RECEIVE_MAXIMUM),
@@ -611,7 +639,7 @@ mod tests {
             .sum();
         assert!(total <= STR_SLOTS, "{total} > {STR_SLOTS}");
         for (item, slots) in [
-            (fields::Item::Cidr, NET_SLOTS),
+            (fields::Item::Cidr, NET_SLOTS + METRICS_NET_SLOTS),
             (fields::Item::User, USER_SLOTS),
             (fields::Item::IpIdentity, IPID_SLOTS),
         ] {
@@ -769,6 +797,52 @@ mod tests {
         assert_eq!(c.plaintext.users.len(), 1);
         assert_eq!(c.plaintext.users[0].id, "plain-1");
         assert_eq!(w.publish_rate_per_device.tokens, 3);
+    }
+
+    /// ADR-290: the metrics endpoint is off by default with the documented
+    /// defaults, and a configuration decodes its allow-list.
+    #[test]
+    fn the_metrics_section_is_off_by_default_and_decoded() {
+        use urmqtt_cfg::build::Builder;
+        let m = CONFIG.metrics;
+        assert!(!m.enabled && m.allow_from.is_empty());
+        assert_eq!(
+            (
+                m.port,
+                m.max_connections,
+                m.max_connections_per_ip,
+                m.request_timeout_s
+            ),
+            (9100, 8, 2, 5)
+        );
+        let mut b = Builder::new();
+        b.bool(tag::METRICS_ENABLED, true).unwrap();
+        b.strs(tag::METRICS_ALLOW_FROM, &["10.0.0.0/8", "192.168.7.9/32"])
+            .unwrap();
+        b.uint(tag::METRICS_PORT, 9273).unwrap();
+        b.uint(tag::METRICS_MAX_CONNS, 3).unwrap();
+        b.uint(tag::METRICS_MAX_PER_IP, 1).unwrap();
+        b.uint(tag::METRICS_REQUEST_TIMEOUT, 30).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 16);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let m = build(&blob, arena).metrics;
+        assert!(m.enabled);
+        assert_eq!(
+            (
+                m.port,
+                m.max_connections,
+                m.max_connections_per_ip,
+                m.request_timeout_s
+            ),
+            (9273, 3, 1, 30)
+        );
+        assert_eq!(m.allow_from.len(), 2);
+        assert!(m.allow_from[0].contains(u32::from_be_bytes([10, 1, 2, 3])));
+        assert!(!m.allow_from[0].contains(u32::from_be_bytes([11, 1, 2, 3])));
+        assert!(m.allow_from[1].contains(u32::from_be_bytes([192, 168, 7, 9])));
+        assert!(!m.allow_from[1].contains(u32::from_be_bytes([192, 168, 7, 8])));
     }
 
     /// NOW-13, ADR-269: publisher back-pressure is on ("single") by default

@@ -544,6 +544,7 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     b.uint(tag::CTL_MAX_AGE, u64::from(cfg.control.max_message_age_s))?;
     build_plaintext(&mut b, &cfg.plaintext)?;
     build_websocket(&mut b, &cfg.websocket)?;
+    build_metrics(&mut b, &cfg.metrics)?;
     build_mqtt5(&mut b, &cfg.mqtt5)?;
     // ADR-256: "off" is the default and writes nothing (the blob keeps its
     // version); "auto" and "on" need format 5.
@@ -676,6 +677,19 @@ fn build_mqtt5(b: &mut Builder, m: &crate::Mqtt5) -> Result<(), urmqtt_cfg::CfgE
         tag::MQTT5_SUBSCRIPTION_IDENTIFIERS,
         m.subscription_identifiers,
     )?;
+    Ok(())
+}
+
+/// The `[metrics]` section (ADR-290). Values equal to their default are left
+/// out by the builder: a configuration that does not use the section keeps its
+/// format version; any key set needs format 16.
+fn build_metrics(b: &mut Builder, m: &crate::Metrics) -> Result<(), urmqtt_cfg::CfgError> {
+    b.bool(tag::METRICS_ENABLED, m.enabled)?;
+    b.uint(tag::METRICS_PORT, u64::from(m.port))?;
+    b.strs(tag::METRICS_ALLOW_FROM, &m.allow_from)?;
+    b.uint(tag::METRICS_MAX_CONNS, u64::from(m.max_connections))?;
+    b.uint(tag::METRICS_MAX_PER_IP, u64::from(m.max_connections_per_ip))?;
+    b.uint(tag::METRICS_REQUEST_TIMEOUT, u64::from(m.request_timeout_s))?;
     Ok(())
 }
 
