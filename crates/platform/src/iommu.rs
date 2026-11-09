@@ -476,7 +476,7 @@ pub fn from_fdt(f: &Fdt<'_>) -> Result<IommuInfo, FdtError> {
     let segment = host.prop_u32("linux,pci-domain")?.unwrap_or(0) as u16;
     let map = host.prop("iommu-map")?.unwrap_or(&[]);
     let mut translated = false;
-    for e in map.chunks_exact(16) {
+    for e in map.as_chunks::<16>().0 {
         let rid_base = fdt::read_cells(e, 0, 1) as u32;
         let ph = fdt::read_cells(e, 4, 1) as u32;
         let out = fdt::read_cells(e, 8, 1) as u32;

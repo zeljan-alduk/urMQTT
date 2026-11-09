@@ -154,11 +154,19 @@ fn qemu_virt_smmuv3_and_iommu_map() {
     let p = early_from_fdt(&fdt).unwrap();
     let units = p.iommu.units.as_slice();
     assert_eq!(units.len(), 1);
-    assert_eq!((units[0].kind, units[0].base, units[0].coherent), (Kind::SmmuV3, 0x0905_0000, true));
+    assert_eq!(
+        (units[0].kind, units[0].base, units[0].coherent),
+        (Kind::SmmuV3, 0x0905_0000, true)
+    );
     assert_eq!(p.iommu.unit_for(0, 0x0010), Some((0, 0x10)));
     assert_eq!(p.iommu.untranslated_hosts, 0);
     // The machines without an SMMU describe none.
     for blob in [HVF_GIC3, TCG_GIC3, TCG_GIC2] {
-        assert!(early_from_fdt(&Fdt::new(blob).unwrap()).unwrap().iommu.is_empty());
+        assert!(
+            early_from_fdt(&Fdt::new(blob).unwrap())
+                .unwrap()
+                .iommu
+                .is_empty()
+        );
     }
 }

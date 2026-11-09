@@ -43,7 +43,10 @@ fn dmar_qemu_include_all() {
     let i = parse_dmar(&sdt(b"DMAR", &t));
     assert_eq!(i.units.len(), 1);
     let u = i.units.as_slice()[0];
-    assert_eq!((u.kind, u.base, u.segment, u.all), (Kind::VtD, 0xfed9_0000, 0, true));
+    assert_eq!(
+        (u.kind, u.base, u.segment, u.all),
+        (Kind::VtD, 0xfed9_0000, 0, true)
+    );
     assert_eq!(u.unsupported, 0);
     assert_eq!((i.address_bits, i.dmar_flags), (48, 1));
     // Every function of segment 0 is translated with its own requester ID.
@@ -140,7 +143,10 @@ fn ivrs_qemu_all_deduplicated() {
     let i = parse_ivrs(&sdt(b"IVRS", &t));
     assert_eq!(i.units.len(), 1);
     let u = i.units.as_slice()[0];
-    assert_eq!((u.kind, u.base, u.self_id, u.all), (Kind::AmdVi, 0xfed8_0000, 8, true));
+    assert_eq!(
+        (u.kind, u.base, u.self_id, u.all),
+        (Kind::AmdVi, 0xfed8_0000, 8, true)
+    );
     assert_eq!(u.unsupported, 0);
     assert_eq!(i.unit_for(0, 0x20), Some((0, 0x20)));
 }
@@ -230,7 +236,10 @@ fn iort_qemu_root_complex_through_smmu() {
     let i = parse_iort(&sdt(b"IORT", &t));
     assert_eq!(i.units.len(), 1);
     let u = i.units.as_slice()[0];
-    assert_eq!((u.kind, u.base, u.coherent), (Kind::SmmuV3, 0x0905_0000, true));
+    assert_eq!(
+        (u.kind, u.base, u.coherent),
+        (Kind::SmmuV3, 0x0905_0000, true)
+    );
     assert_eq!(i.untranslated_hosts, 0);
     assert_eq!(i.unit_for(0, 0x0010), Some((0, 0x10)));
     assert_eq!(i.unit_for(0, 0xffff), Some((0, 0xffff)));
@@ -284,6 +293,9 @@ fn display_lists_ranges() {
         alias: false,
     });
     i.units.push(u);
-    assert_eq!(i.to_string(), "SMMUv3@0x9050000/0:0x0+65536->0x0 reserved=0");
+    assert_eq!(
+        i.to_string(),
+        "SMMUv3@0x9050000/0:0x0+65536->0x0 reserved=0"
+    );
     assert_eq!(IommuInfo::default().to_string(), "none");
 }
