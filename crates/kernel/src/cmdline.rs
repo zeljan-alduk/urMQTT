@@ -195,6 +195,10 @@ pub struct BootOptions {
     /// `test=log-sync` (dev only): keep the synchronous log path (the
     /// "before" of ADR-090), for comparison.
     pub log_sync: bool,
+    /// `test=ab-bad` (dev only): a kernel that does not come up: it stops
+    /// with a fatal error right after the boot-slot step, as a broken update
+    /// would (the A/B smoke scenarios, ADR-296).
+    pub ab_bad: bool,
     /// `test=log-cost` (dev only): measure every log call and report the
     /// mean and worst every 5 s (`log: cost ...`). `slow-log` implies it.
     pub log_cost: bool,
@@ -342,6 +346,8 @@ impl BootOptions {
                         o.slow_log_us = Some(us);
                     } else if w == "test=log-sync" {
                         o.log_sync = true;
+                    } else if w == "test=ab-bad" {
+                        o.ab_bad = true;
                     } else if w == "test=log-cost" {
                         o.log_cost = true;
                     } else if let Some(ms) = w

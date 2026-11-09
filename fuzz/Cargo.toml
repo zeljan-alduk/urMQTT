@@ -244,6 +244,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "boot_slots"
+path = "fuzz_targets/boot_slots.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "gpt_parse"
 path = "fuzz_targets/gpt_parse.rs"
 test = false

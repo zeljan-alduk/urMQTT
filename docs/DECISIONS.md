@@ -4040,3 +4040,188 @@ from one address).
      changes.
   9. **A `metrics/` retained `$SYS` summary is not added**: the `$SYS` tree is unchanged (a subscriber sees exactly
      what it saw), and the listener's own counters are not published there.
+## ADR-295 — A/B updates: the boot entry is the partition table (NEXT-11)
+
+- **Status:** Accepted (NEXT-11, with ADR-296 to ADR-299). ADR-217's offline `update-boot` stays for disks that
+  have one boot slot; AUDIT H8-W6 (no downgrade protection) is narrowed, not closed (ADR-299).
+- **Context.** An update was `urmqtt-disk update-boot`: the VM stopped, the ESP overwritten in place, no way back
+  if the new kernel does not come up. PLAN decision 6 and ROADMAP NEXT-11 ask for two kernel and configuration
+  sets, a boot counter and an automatic return. What constrains the design (checked, not assumed):
+  1. **Limine has no boot counter and reads no mutable state** that the kernel could write. Its configuration is
+     enrolled into the loaders (ADR-250): changing one byte of `limine.conf` (a `default_entry`, a second entry)
+     needs the loaders re-enrolled, i.e. three more files written, and under Secure Boot (LATER-6) re-signed by
+     the key owner. Switching by editing `limine.conf` is therefore neither atomic nor compatible with Secure
+     Boot. Limine 12.9.4 does read the Boot Loader Interface variables `LoaderEntryOneShot`/`LoaderEntryDefault`
+     (its binary has `bli_get_oneshot_entry`), the standard boot-once mechanism, but the kernel has no UEFI
+     runtime services, the BIOS path has no variables, and QEMU's aarch64 `-bios` firmware keeps none across a
+     reset.
+  2. **Firmware boots the EFI system partition the partition table names.** Both UEFI (removable-media path,
+     `\EFI\BOOT\BOOT*.EFI` on the ESP) and Limine's BIOS stage find the boot volume through the GPT.
+  3. **The kernel already writes the partition table** at the first boot, crash-safely (S1, `gpt::prepare`:
+     backup copy first, then the primary, entries before header, a torn primary repaired from the backup), and
+     UEFI firmware does the same repair (edk2 restores a damaged primary from the backup before it boots).
+- **Decision.**
+  1. **Two regions, one boot entry.** The installed disk gets a second region the size of its ESP, between the ESP
+     and the data partition (*slot A* is the region nearer the start, *slot B* the other). Exactly one GPT entry has
+     the EFI system partition type; it covers the *active* slot. A second entry of the new type
+     `8F3A6E21-5C7B-4D19-A2E4-6B0C9D513F7E` ("urMQTT boot slot") covers the *standby*. Switching moves the two
+     ranges between the two entries in **one table write** (`gpt::write_table`): a power cut leaves the old table
+     in force (the primary is still valid) or the new one (a new primary, or a torn primary that firmware, Limine's
+     UEFI path and the kernel replace by the complete new backup). Nothing reads a half-written table.
+  2. **What stays with the entry, what moves with the region.** Each entry keeps its type, its unique GUID and its
+     place in the array: the ESP entry is always before the standby, and only the standby has UEFI attribute bit 1
+     ("no Block I/O protocol"). A firmware boot option that names the ESP by partition GUID (a stored `Boot####`)
+     therefore follows the switch, and firmware that enumerates partitions finds the active slot first or alone.
+     The **slot state** lives in the type-specific attribute bits 48..63 and moves with the region: trial boots
+     left (3 bits, at most 7), *trial*, *bad*, *one-way*, *sealed*, *empty*, and the store schema the slot's kernel
+     writes (8 bits). The **name** (36 UTF-16 units) holds the release label and, for a staged slot, `|` and 16 hex
+     digits: the first 8 bytes of the SHA-256 of the whole region, written when it was staged (a commitment checked
+     before anything switches to it; it catches a cut or a changed slot, not an attacker who can write the disk,
+     who could write anything).
+  3. **Where the B region comes from.** The kernel reserves it at the first boot, in the same table write that
+     creates the data partition (`gpt::prepare_with`), when the data partition keeps its 16 MiB minimum after it;
+     its first 32 KiB are zeroed so no stale filesystem could be taken for a boot volume. A disk prepared before
+     v0.6.0 has its data partition right after the ESP and keeps one slot: moving the data to make room is not
+     done (left out, ADR-299). New installs therefore cost the size of one ESP (10 MiB for the aarch64 image, about
+     20 MiB for the universal one).
+  4. **The kernel never writes an ESP region.** Only the offline tool writes the standby (ADR-299); the kernel
+     writes partition-table sectors only (the trial count, the confirmation, a switch back; ADR-296).
+  5. **Secure Boot (LATER-6) needs nothing from this but a signed ESP per slot.** No loader step was added: the
+     same signed loader, enrolled `limine.conf` and pinned kernels boot from either region, because the switch
+     changes which partition is the ESP, not a byte inside one. What LATER-6 must provide is the per-machine signed
+     ESP (H8-W1); `slots stage` then writes that ESP as it is (`--replace-config` keeps its own pinned
+     configuration). The interface a loader-level mechanism would replace this with is the BLI one-shot entry
+     (boot B once; the firmware falls back to the default if it fails before the kernel runs); recorded as the
+     upgrade path when the kernel gets UEFI runtime services, not built.
+- **Verified on firmware, not only in host tests.** Smoke `ab` (aarch64 edk2 under HVF, x86_64 OVMF under TCG): the
+  offline switch cut after its first, second and third write boots A, A, and B on trial; after the third (the
+  primary's entries new, its header old) the firmware took the backup and repaired the primary itself.
+- **Alternatives.** Editing `default_entry` and re-enrolling the loaders (three files, not atomic, breaks Secure
+  Boot). Two complete ESP partitions chosen by firmware boot order (needs variables; nothing on BIOS). A kernel
+  that chain-loads the other slot's kernel (a second loader, in the kernel). A third "boot state" partition or
+  file (a new write path for no gain: the table already has room for the state). Firmware variables through the
+  BLI (above).
+- **Consequences.** DISK-FORMAT.md §0a. `urmqtt_store::slots` is the one implementation (kernel and tool), host
+  tested with a cut at every write of every operation; fuzz target `boot_slots`.
+
+## ADR-296 — A/B updates in the kernel: count first, confirm when healthy, go back by itself (NEXT-11)
+
+- **Status:** Accepted.
+- **Decision.**
+  1. **Counted before anything else runs.** `bootslot::at_boot` runs right after the GPT first-boot steps, before
+     the block self-test, the store, the network and the other cores. Limine reports the partition GUID of the
+     kernel file (`limine_file.gpt_part_uuid`, read from the raw structure like the disk GUID; a loader that reports
+     none is taken to have booted the ESP entry, which firmware and Limine find first). Booted from the ESP entry
+     with its slot on trial and attempts left: one is used (a table write). A crash, a fatal error, a reset
+     by the watchdog or a hang the operator resets after that point counts as a failed attempt. A kernel that dies
+     *before* that point (in the bootloader, or before its block driver) is not counted: no loader help exists for
+     it (ADR-295) and it loops until an operator rolls back offline. This is the known gap of a kernel-side
+     counter; the BLI one-shot entry would close it.
+  2. **Going back.** No attempt left, or a trial kernel that writes a newer store schema than the standby's kernel
+     reads without a one-way activation (ADR-299): if the standby is eligible (staged or as installed, confirmed,
+     not bad, its commitment intact) the table switches back, the trial slot is marked bad, and the kernel resets.
+     If the standby is not eligible the trial kernel keeps booting, saying so (there is nothing better to run), and
+     the trial timeout no longer resets it (a reset would boot the same slot again; the confirmation still applies).
+     Firmware that booted the *standby* while the active slot is on trial (the new ESP did not load at all) is
+     adopted: the table says so, the trial slot is marked bad, the boot goes on. A standby marked bad (stranded by a
+     one-way migration) or empty is never adopted: the boot is reported and nothing is written.
+  3. **Healthy means serving.** `update.confirm = "auto"` (default): the DB core confirms the trial once the store
+     is open and the first data core's listeners are up (a TLS listener whose setup failed is not up) for
+     `update.confirm_after_s` seconds (default 60). `"operator"`: only a `boot-confirm` control message (ADR-298)
+     or `urmqtt-disk slots confirm` does. A trial not confirmed after `update.trial_timeout_s` (default 900; 0:
+     never) resets the machine, which uses an attempt: a kernel that hangs without a crash still ends in a switch
+     back. A trial that is degraded (no store) is never confirmed and fails by its timeout or its fatal error.
+  4. **One-way store migrations.** Every boot that opens the disk store checks the standby (`after_store`): a
+     standby whose kernel writes an older schema than the store now is marked bad (its kernel cannot read the store
+     any more), so neither the automatic return nor an operator's rollback switches to it. Checking at every boot,
+     not only on the one that migrated, catches a power cut between the migration's commit and that table write
+     and a store migrated by a kernel replaced in place. Residual: a cut in exactly that window on the *last* trial
+     boot switches back before the next store open (A296-W1, AUDIT); the old kernel then refuses the store with
+     its schema error, and `urmqtt-disk slots activate --retry --one-way` returns to the new slot.
+  5. **An in-place kernel change** (`update-boot --in-place`, a test's `dd`) is noticed by the recorded schema:
+     the active slot's schema field is brought up to date in one table write. `update-boot --in-place` itself
+     also re-seals the slot (label, schema, commitment to the new bytes, `slots::reseal_active`): a stale
+     commitment would refuse it as the way back after the next activation.
+  6. The build note: a 64-byte static (`urMQTT-buildnote`, the version, the A/B protocol, the store schema, the
+     configuration formats read) that the boot log prints, so the linker keeps it and the offline tool finds it in
+     an ESP image.
+- **Logged** (OPERATE.md): `boot: slot X (...), confirmed; standby: ...`, `... ON TRIAL: N trial boot(s) left ...`,
+  `boot: slot X confirmed (...)`, `boot: slot X gave up: ...; slot Y ... is active again, resetting`, the standby
+  and exhaustion warnings.
+- **Testing.** Host: `crates/store/src/slots/tests.rs` (18 tests, every operation cut at every write, clean and
+  torn, the cache lost and kept). QEMU (`SMOKE_ONLY=ab`, aarch64 HVF and x86_64 TCG): the first boot, an update
+  that confirms after 2 s of health, `test=ab-bad` (dev: a fatal error right after the slot step) rolling back
+  after two trial boots, the trial count cut after its first and third write (`test=disk-fault`), and the control
+  messages.
+- **Alternatives.** Counting in the data partition (needs the store's layout before the counter; an encrypted disk
+  needs the key first; and a v0.5.0 kernel in the other slot would not understand it). Confirming at `URMQTT READY`
+  (before a client could connect; the delay exists to see a listener survive).
+
+## ADR-297 — The `[update]` section, configuration format 17 (NEXT-11)
+
+- **Status:** Accepted.
+- **Decision.** `update.confirm` (`"auto"` | `"operator"`, tag 340), `update.confirm_after_s` (0..=86400, default
+  60, tag 341), `update.trial_timeout_s` (0..=86400, default 900, tag 342). At their defaults they write nothing,
+  so an existing configuration keeps its format and every older kernel still boots it; any other value needs
+  **format 17** (14 to 16 are other v0.6.0 items, refused by this tree like 10 until the release merge). A kernel
+  that does not know the section would confirm by its own defaults (or never), against the operator's choice:
+  hence the version. Cross-field rule (in `urmqtt_cfg::check` and the TOML path, the same message): in auto mode
+  the timeout is 0 or longer than the confirmation delay. The builder page shows the section after `[mqtt5]`.
+- **Upgrade effect.** None for existing images: no key set means auto, 60 s, 900 s. A disk installed by v0.6.0 has
+  a standby slot (ADR-295), whatever the configuration.
+
+## ADR-298 — `boot-confirm` and `boot-rollback` control messages (NEXT-11)
+
+- **Status:** Accepted. Extends the control channel of H1 (docs/SECURITY.md "Control channel").
+- **Decision.** Commands 7 (`boot-confirm`) and 8 (`boot-rollback`); 5 and 6 belong to another v0.6.0 item. Their
+  one item is the 16-byte GPT disk GUID of the boot disk (as the table stores it), so a control key that signs
+  for many brokers cannot confirm or roll back the wrong machine (`other_disk`). Authentication, freshness and
+  replay are the channel's own: the sequence number is committed first, then the slot table changes; a refused
+  slot operation is `boot_refused` (nothing on trial, nothing eligible to return to). `boot-rollback` resets the
+  machine after the switch. `urmqtt-control boot-confirm|boot-rollback --disk-guid GUID`; `urmqtt-disk slots
+  status` and the boot log print the GUID.
+- **What it adds to the threat model.** Whoever holds the control key and a control identity can force a return to
+  the previous slot (a reset, and the previous release) or confirm a bad one; both were already in reach of that
+  attacker through revocations (a denial of service). It cannot install anything: the slots hold only what an
+  operator staged offline.
+
+## ADR-299 — `urmqtt-disk slots`: staging from a signed release, downgrade rules (NEXT-11)
+
+- **Status:** Accepted. Narrows AUDIT H8-W6.
+- **Decision.**
+  1. `slots status | stage | activate | confirm | rollback`, offline (the VM stopped), each a dry run on an
+     in-memory overlay without `--write`, each with `--fault` for the power-cut tests. A table a cut left with two
+     different copies is repaired from the primary first (what the next boot does).
+  2. **Stage** writes the standby: it is marked empty (a table write), the region written (the ESP, zeros to its
+     end) and flushed, read back and hashed, and only then sealed with the label, the schema and the commitment (a
+     table write). A cut leaves an empty standby, never a half-written one that looks staged. Refused while the
+     active slot is on trial (the standby is its way back). The configuration is carried over as `update-boot` does
+     (ADR-217): the disk's own unless `--config` or `--replace-config`.
+  3. **The release signature.** `--image RELEASE.img` is staged only with `--sums SHA256SUMS --sig
+     SHA256SUMS.minisig --pubkey minisign.pub` (several keys allowed, the signature picks one, as the builder page
+     does): the signature verified (`urmqtt-config-tool::release`, the same code as `check-release`), the image's
+     SHA-256 listed under its file name. `--esp` (an own build) and an unsigned image need `--unsigned`, said in the
+     output.
+  4. **Downgrade rules.** A kernel without a build note (before v0.6.0) is refused: it would never confirm. A
+     kernel whose store schema is older than the store on the disk is refused, always (it would refuse the store;
+     the schema migrations are one-way, DISK-FORMAT §5.1.1). An older release than the active slot's is refused
+     unless `--allow-downgrade` (versions as `git describe` prints them; a label that is not a version is reported
+     and not judged). A configuration of a format the kernel cannot read is refused. A store schema newer than the
+     active kernel's needs `activate --one-way` (ADR-296 point 4). A kernel of another A/B protocol is refused by
+     name.
+  5. `update-boot` refuses a disk with two slots unless `--in-place` (and never while a slot is on trial); with
+     `--in-place` it re-seals the active slot after the write (ADR-296 point 5).
+  6. `slots rollback` refuses a previous slot whose kernel writes an older store schema than the store on the
+     disk (when the store can be read), as `stage` does.
+- **Left out, with the reason.** (a) **Converting a pre-v0.6.0 disk** to two slots: its data partition starts right
+  after the ESP, so the room needs the data moved (or the ESP halved, which needs a FAT writer); a re-install with
+  export and import is the path. (b) **Version counters / anti-rollback in firmware** (H8-W6 proper, LATER-6): the
+  rules above stop an operator's mistake, not an attacker who can write the disk. (c) **Staging from the running
+  broker** (an online update over the network): needs NEXT-7 or an upload path into the kernel, and an ESP writer in
+  the kernel; the kernel writes no ESP today. (d) `$SYS` topics for the slot state: the boot log and the tool say it.
+  (e) Power cuts on the BIOS path: the universal image's BIOS boot of a staged slot is tested (`SMOKE_ONLY=ab
+  --arch universal`: Limine's BIOS stage boots the region the ESP entry covers), the cut points only under UEFI.
+- **Testing.** `tools/disk/tests/slots.rs` (through the binary: the whole cycle, the signature with a throwaway key,
+  every downgrade rule, a cut at every write of each command, a single-slot disk); smoke `ab-release-image-signed`
+  (a key made by `minisign -G` in the test; never the release key); `SMOKE_ONLY=ab --arch universal`: one universal
+  disk, its standby reserved and a staged slot booted on trial on x86_64 BIOS, x86_64 UEFI and aarch64 UEFI.

@@ -369,6 +369,69 @@ fn backup_slot_header_and_control_block() {
     assert_eq!(Control::decode(&b, &[1; 16]), None);
 }
 
+/// DISK-FORMAT §0a: the slot state in bytes 6 and 7 of a GPT entry's
+/// attribute word (NEXT-11, ADR-295).
+#[test]
+fn slot_state() {
+    use urmqtt_store::slots::{STATE_MASK, State};
+    let st = State {
+        tries: 5,
+        trial: true,
+        bad: true,
+        one_way: true,
+        sealed: true,
+        empty: true,
+        schema: 0x5a,
+    };
+    let attr = st.encode();
+    assert_eq!(attr & !STATE_MASK, 0, "the state stays in bits 48..63");
+    let b = &attr.to_le_bytes()[6..8];
+    let mut e = BTreeMap::new();
+    e.insert("flags", vec![0b1111_1101]);
+    e.insert("schema", vec![0x5a]);
+    check("slot_state", b, &e, &BTreeMap::new());
+    // One flag at a time: each is the bit the spec names.
+    for (bit, s) in [
+        (
+            3,
+            State {
+                trial: true,
+                ..State::default()
+            },
+        ),
+        (
+            4,
+            State {
+                bad: true,
+                ..State::default()
+            },
+        ),
+        (
+            5,
+            State {
+                one_way: true,
+                ..State::default()
+            },
+        ),
+        (
+            6,
+            State {
+                sealed: true,
+                ..State::default()
+            },
+        ),
+        (
+            7,
+            State {
+                empty: true,
+                ..State::default()
+            },
+        ),
+    ] {
+        assert_eq!(s.encode().to_le_bytes()[6], 1 << bit, "bit {bit}");
+    }
+}
+
 #[test]
 fn migration_record() {
     let r = urmqtt_store::mig::Record {

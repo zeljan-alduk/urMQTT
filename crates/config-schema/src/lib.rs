@@ -124,6 +124,40 @@ struct RawConfig {
     /// Optional: without it every optional virtio driver is off (ADR-257).
     #[serde(default)]
     devices: Devices,
+    /// Optional: without it a trial boot confirms itself after 60 s of
+    /// health and resets after 900 s unconfirmed (ADR-297).
+    #[serde(default)]
+    update: RawUpdate,
+}
+
+/// Who confirms a trial boot after an A/B update (`update.confirm`, ADR-297).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateConfirm {
+    /// The kernel, after `confirm_after_s` of health (the default).
+    #[default]
+    Auto,
+    /// An operator, with a `boot-confirm` control message.
+    Operator,
+}
+
+/// The `[update]` section (NEXT-11, ADR-297).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawUpdate {
+    confirm: UpdateConfirm,
+    confirm_after_s: u32,
+    trial_timeout_s: u32,
+}
+
+impl Default for RawUpdate {
+    fn default() -> Self {
+        Self {
+            confirm: UpdateConfirm::Auto,
+            confirm_after_s: default_u32("update.confirm_after_s"),
+            trial_timeout_s: default_u32("update.trial_timeout_s"),
+        }
+    }
 }
 
 /// Whether an optional virtio driver runs (`[devices]`, ADR-257).
@@ -1036,6 +1070,18 @@ pub struct Config {
     pub mqtt5: Mqtt5,
     pub console: Console,
     pub devices: Devices,
+    pub update: Update,
+}
+
+/// A/B updates (NEXT-11, ADR-297): how a trial boot is confirmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Update {
+    pub confirm: UpdateConfirm,
+    /// Seconds of health before an automatic confirmation, 0..=86400.
+    pub confirm_after_s: u32,
+    /// Seconds after which an unconfirmed trial boot resets, 0 (never) or
+    /// longer than `confirm_after_s` in auto mode; 0..=86400.
+    pub trial_timeout_s: u32,
 }
 
 /// MQTT 5.0 (NEXT-3, ADR-273 rule 21). On by default.
@@ -1233,6 +1279,7 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
     );
     let metrics = validate_metrics(&raw.metrics, &network, &plaintext, &websocket, &mut errors);
     let mqtt5 = validate_mqtt5(&raw.mqtt5, &mut errors);
+    let update = validate_update(&raw.update, &mut errors);
 
     if !errors.is_empty() {
         return Err(errors);
@@ -1261,7 +1308,41 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
             virtio_gpu: raw.console.virtio_gpu,
         },
         devices: raw.devices,
+        update,
     })
+}
+
+/// The `[update]` section (ADR-297): the ranges of the field table and the
+/// rule of `urmqtt_cfg::check` (an automatic confirmation must come before
+/// the trial timeout), with messages that name the key.
+fn validate_update(raw: &RawUpdate, errors: &mut Vec<ConfigError>) -> Update {
+    let mut ok = true;
+    for (key, v) in [
+        ("update.confirm_after_s", raw.confirm_after_s),
+        ("update.trial_timeout_s", raw.trial_timeout_s),
+    ] {
+        if let Some(urmqtt_cfg::fields::Kind::UInt { min, max, .. }) = default_of(key)
+            && !(min..=max).contains(&u64::from(v))
+        {
+            errors.push(err(key, format!("must be in {min}..={max}")));
+            ok = false;
+        }
+    }
+    if ok
+        && raw.confirm == UpdateConfirm::Auto
+        && raw.trial_timeout_s != 0
+        && raw.trial_timeout_s <= raw.confirm_after_s
+    {
+        errors.push(err(
+            "update.trial_timeout_s",
+            urmqtt_cfg::check::TRIAL_TIMEOUT_MSG,
+        ));
+    }
+    Update {
+        confirm: raw.confirm,
+        confirm_after_s: raw.confirm_after_s,
+        trial_timeout_s: raw.trial_timeout_s,
+    }
 }
 
 /// The `[plaintext]` section (P1, ADR-229). The same rules as
@@ -2823,6 +2904,8 @@ mod shared_group_tests;
 mod tests;
 #[cfg(test)]
 mod tls_off_tests;
+#[cfg(test)]
+mod update_tests;
 #[cfg(test)]
 mod websocket_tests;
 

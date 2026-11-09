@@ -320,6 +320,10 @@ pub mod tag {
     pub const METRICS_MAX_CONNS: u16 = 303;
     pub const METRICS_MAX_PER_IP: u16 = 304;
     pub const METRICS_REQUEST_TIMEOUT: u16 = 305;
+    // A/B updates (NEXT-11, ADR-297): format version 17.
+    pub const UPD_CONFIRM: u16 = 340;
+    pub const UPD_CONFIRM_AFTER: u16 = 341;
+    pub const UPD_TRIAL_TIMEOUT: u16 = 342;
 }
 
 use tag as t;
@@ -335,6 +339,8 @@ pub const REGISTRY_MODES: &[&str] = &["open", "allowlist"];
 /// `limits.publisher_backpressure` (ADR-269); the first is the default.
 pub const BACKPRESSURE_MODES: &[&str] = &["single", "off"];
 pub const WATCHDOG_ACTIONS: &[&str] = &["log", "drop", "reset"];
+/// Who confirms a trial boot after an A/B update (`update.confirm`, ADR-297).
+pub const UPDATE_CONFIRM_MODES: &[&str] = &["auto", "operator"];
 /// How a plaintext client proves who it is (P1).
 pub const PLAINTEXT_AUTH: &[&str] = &["password", "anonymous", "ip"];
 /// How a WebSocket client proves who it is (ADR-272).
@@ -1563,6 +1569,37 @@ pub static FIELDS: &[Field] = &[
             "Seconds from the TCP connection to the end of the answer; a slower client is cut off (slowloris). Prometheus scrapes in well under a second.",
         ),
         16,
+    ),
+    // A/B updates (NEXT-11, ADR-297): format version 17.
+    since(
+        f(
+            t::UPD_CONFIRM,
+            "update.confirm",
+            Kind::Enum {
+                variants: UPDATE_CONFIRM_MODES,
+                default: 0,
+            },
+            "Who confirms a new kernel after an A/B update (urmqtt-disk slots activate): auto, once the store is open and a listener has been up for update.confirm_after_s; or operator, with a boot-confirm control message (urmqtt-control). Unconfirmed, it is replaced by the previous slot after its trial boots. Format 17.",
+        ),
+        17,
+    ),
+    since(
+        f(
+            t::UPD_CONFIRM_AFTER,
+            "update.confirm_after_s",
+            uint(4, 0, 86_400, 60),
+            "update.confirm = auto: seconds a trial boot must serve (store open, listener up) before it is confirmed. Format 17.",
+        ),
+        17,
+    ),
+    since(
+        f(
+            t::UPD_TRIAL_TIMEOUT,
+            "update.trial_timeout_s",
+            uint(4, 0, 86_400, 900),
+            "A trial boot not confirmed within this many seconds resets the machine, which uses one of its trial boots; 0: it waits as long as it runs. When not 0, longer than update.confirm_after_s. Format 17.",
+        ),
+        17,
     ),
 ];
 

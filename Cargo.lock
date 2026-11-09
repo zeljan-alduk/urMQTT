@@ -1626,7 +1626,10 @@ dependencies = [
 name = "urmqtt-disk-tool"
 version = "0.5.0"
 dependencies = [
+ "base64ct",
+ "ed25519-dalek",
  "urmqtt-cfg",
+ "urmqtt-config-tool",
  "urmqtt-store",
 ]
 

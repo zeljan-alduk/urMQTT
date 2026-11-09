@@ -48,6 +48,21 @@ pub fn open_store(disk: Disk) -> Result<Store, String> {
         .map_err(|e| e.to_string())
 }
 
+/// The schema the store on `disk` is at, before any migration this build
+/// would run (0 for a store never opened). The caller passes an overlay:
+/// opening runs the migrations.
+pub fn store_schema(disk: Disk) -> Result<u32, String> {
+    static FIRST: AtomicBool = AtomicBool::new(true);
+    let heap: &'static mut [u8] = if FIRST.swap(false, Ordering::Relaxed) {
+        Box::leak(vec![0u8; 256 << 20].into_boxed_slice())
+    } else {
+        Box::leak(Vec::new().into_boxed_slice())
+    };
+    urmqtt_store::init(heap, disk, platform()).map_err(|e| e.to_string())?;
+    let (_, info) = urmqtt_store::open().map_err(|e| e.to_string())?;
+    u32::try_from(info.schema_from).map_err(|_| "negative schema".to_string())
+}
+
 pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

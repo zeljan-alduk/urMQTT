@@ -455,6 +455,32 @@ urmqtt-control remove-account --id sensor-9 --id dash-1 ...
 - **Upgrading.** The first boot of a v0.6.0 kernel migrates the data disk to
   schema 6 (one way; a v0.5.x kernel refuses it). Nothing else changes until an
   image sets `limits.max_runtime_accounts`.
+## Boot slots and updates (NEXT-11, ADR-295 to ADR-299)
+
+Procedures are in [DEPLOY.md](DEPLOY.md) section 8b. The lines a boot prints:
+
+| Line | Meaning |
+|---|---|
+| `build: v0.6.1 (A/B protocol 1, store schema 5, configuration formats up to 17)` | what this kernel is (its build note, which `urmqtt-disk slots stage` reads) |
+| `gpt: standby boot slot reserved next to the EFI system partition ...` | the first boot of a new disk made room for A/B updates |
+| `boot: one boot slot (a disk prepared before v0.6.0) ...` | this disk updates with `update-boot` only |
+| `boot: slot A (v0.6.0), confirmed; standby: empty` / `standby: v0.6.1 (the way back)` | the normal case; the standby is what a rollback would boot |
+| `boot: slot B (v0.6.1) ON TRIAL: N trial boot(s) left after this one; confirmed after S s ...` / `waiting for a boot-confirm control message` | an update is on trial: it is confirmed by itself (`update.confirm = "auto"`) or by you (`"operator"`) |
+| `boot: slot B confirmed (healthy for S s: store open, listener up)` / `(boot-confirm control message)` | the update is final; the previous slot is the standby |
+| `boot: slot B was not confirmed within update.trial_timeout_s = T s: resetting (the attempt counts)` | the trial ran out of time |
+| `boot: slot B gave up: <why>; slot A (...) is active again, resetting` | the automatic return: the update failed (no trial boots left, or a store schema change that was not activated as one-way); the next boot runs the previous release and the failed slot is marked bad. Look at the failed boots' logs |
+| `boot: ... the firmware booted the previous slot: the new one did not even load ...` | the new ESP did not boot at all; the firmware fell back, the table now agrees |
+| `boot: slot B (...): no trial boots left ..., but there is no way back (...); booting it anyway (no trial timeout)` | the previous slot is unusable (empty, bad, changed, or its kernel cannot read the migrated store); the trial timeout does not reset this boot; fix or re-stage offline |
+| `boot: the firmware booted the standby slot X although the active slot is confirmed ...` | the active ESP may be damaged; nothing was changed. `urmqtt-disk slots status`, then re-stage |
+| `boot: the store is at schema M (from N) ...: the previous slot cannot read it and is no longer a way back` | the store's schema is newer than the previous slot's kernel (a one-way update ran its migration, or a kernel replaced in place did): no automatic or operator's return to it any more |
+| `boot: boot-rollback control message: slot A is active again, slot B is marked bad; resetting` | an operator's rollback |
+| `control: message from ... rejected: other_disk` / `boot_refused` | a boot command for another disk GUID / with nothing to confirm or nowhere to go back to |
+
+`[update]` (configuration format 17; all optional): `confirm = "auto"` (the
+default) or `"operator"`; `confirm_after_s` (default 60) seconds of a healthy
+trial before the automatic confirmation; `trial_timeout_s` (default 900; 0:
+never) after which an unconfirmed trial resets and uses an attempt. In auto
+mode the timeout must be 0 or longer than the delay.
 
 ## The data disk in the console (S2, S3)
 

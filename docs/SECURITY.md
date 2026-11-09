@@ -125,9 +125,14 @@ changes state without a new image, so it gets its own model.
   `registry.mode = "allowlist"`, and, only when the image sets
   `limits.max_runtime_accounts` above 0, `set-account` and `remove-account`
   for password accounts of the plaintext and WebSocket listeners (NOW-15,
-  ADR-285: below).
+  ADR-285: below); since v0.6.0 `boot-confirm` and
+  `boot-rollback` for the A/B boot slots (ADR-298), whose one item is the
+  boot disk's GPT GUID, so a message for one machine is refused by every
+  other (`other_disk`).
 - No other effect exists. A control message cannot change configuration, run
-  code, read data or open a port.
+  code, read data or open a port. The boot commands only confirm the slot on
+  trial or switch back to the slot an operator staged before; they cannot put
+  anything new on the disk.
 
 **Authenticated twice.**
 1. *mTLS identity:* the publisher must be an operational (not bootstrap)
@@ -193,6 +198,7 @@ changes state without a new image, so it gets its own model.
 | Holder of a service identity or the signing key alone | add or change a password account | both are needed (as for every command); off unless the image sets `limits.max_runtime_accounts` | smoke `accounts-run-time`; host tests in `control` |
 | Anyone, in the log or on the wire of the control channel | read a password | the tool sends a hash; the broker logs the id and class only | smoke `accounts-run-time` scans the serial logs for every password and hash |
 | Holder of the signing key | give a service or operator name a password, or replace an image account's | refused (`account_shadows_image`); an account's rights are the listener's plaintext role, narrowed by its class | host tests; smoke `image-account-wins` |
+| Holder of the control key and a control identity | force the previous release (`boot-rollback`) or confirm a bad one | the same two secrets as a revocation; the message names one disk GUID; the previous slot must be eligible (confirmed, its staging commitment intact) | host tests; smoke `ab-control-confirm-and-rollback` |
 | Bootstrap identity | act as a device or service | bootstrap role: only `provision/{id}/#`, its own session namespace, never persistent | broker tests; smoke `bootstrap-role` |
 | Unknown device (allowlist mode) | connect | refused after the handshake, counted | smoke `registry-allowlist` |
 
@@ -887,5 +893,7 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 | No forward-edge control-flow integrity on the Rust and C indirect calls. | kCFI crashes the pinned compiler on the dependency graph (ADR-175). | BTI on aarch64, W^X, PAC, KASLR. |
 | No memory tagging on x86_64, on HVF or on most clouds; the SQLite arena and DMA buffers are never tagged. | FEAT_MTE2 is rare in VPS hardware (ADR-174). | The software checks of ADR-170. |
 | No DMA isolation (IOMMU) on bare metal. | Deferred with bare metal (ADR-176); irrelevant to a VPS, whose devices are the hypervisor's. | None needed for a VM. |
+| A kernel that dies before its block driver runs is not counted as a failed A/B trial. | The bootloader keeps no boot counter the kernel could use (ADR-295, ADR-296); the counter is the kernel's. | The trial timeout and every later crash are counted; `urmqtt-disk slots rollback` offline. A loader-level one-shot entry (BLI) would close it (LATER-6). |
+| Downgrade protection is the offline tool's rule, not the firmware's. | No version counter or `dbx` exists (H8-W6, LATER-6); an attacker who can write the disk can write any older signed image. | `slots stage` refuses an older release (unless `--allow-downgrade`) and a kernel older than the store's schema, always; release images are staged only with their minisign signature. |
 | The hypervisor sees everything. | Out of scope. | Choose the host. |
 | 100k and 1M connections are not measured on the development host. | QEMU user networking on macOS stops near 10 240 sockets. | The per-connection footprint is flat from 1k to 10k (ADR-034); the storm test scales the heap down instead of the clients up. |

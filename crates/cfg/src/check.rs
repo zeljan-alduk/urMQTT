@@ -165,6 +165,7 @@ pub fn check(b: &Blob<'_>, dev_allowed: bool) -> Result<(), CfgError> {
     }
 
     network(b, dev)?;
+    update(b)?;
     let limits = limits(b)?;
     let (max_len, max_levels) = limits;
     plaintext(b, max_len, max_levels)?;
@@ -651,6 +652,20 @@ fn websocket(b: &Blob<'_>, max_len: u64, max_levels: u64) -> Result<(), CfgError
         }
     } else if users > 0 {
         return Err(err("websocket.users", "only used with auth = \"password\""));
+    }
+    Ok(())
+}
+
+/// The refusal of a trial timeout the automatic confirmation cannot beat (ADR-297).
+pub const TRIAL_TIMEOUT_MSG: &str = "must be 0 or longer than update.confirm_after_s (a trial boot would reset before it could be confirmed)";
+
+/// `[update]` (ADR-297): a trial boot must be able to confirm itself before its
+/// timeout resets it.
+fn update(b: &Blob<'_>) -> Result<(), CfgError> {
+    let timeout = b.uint(tag::UPD_TRIAL_TIMEOUT);
+    if b.variant(tag::UPD_CONFIRM) == 0 && timeout != 0 && timeout <= b.uint(tag::UPD_CONFIRM_AFTER)
+    {
+        return Err(err("update.trial_timeout_s", TRIAL_TIMEOUT_MSG));
     }
     Ok(())
 }

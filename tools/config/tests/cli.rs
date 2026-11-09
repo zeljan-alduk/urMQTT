@@ -1236,10 +1236,10 @@ fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
 
 /// The templates of the published releases, configured by this tool (and by the builder page, which runs the
 /// same code): v0.2.0's kernel reads configuration format 2, v0.2.1's 3, v0.3.0's 4, v0.4.0's and v0.4.1's 6,
-/// this one 16. A configuration that needs no newer format than the template's kernel reads is written into it as
+/// this one 17. A configuration that needs no newer format than the template's kernel reads is written into it as
 /// before; one that needs more (the virtio-gpu console: 5, a `[devices]` key: 6, `network.mtu`: 7,
 /// `limits.publisher_backpressure = "off"`: 8, a `[websocket]` key: 9, `devices.virtio_net_interrupt = "off"`: 11,
-/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13, `limits.max_connections_per_ip`: 14, `limits.max_runtime_accounts`: 15, a `[metrics]` key: 16) is refused with the reason, before a byte
+/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13, `limits.max_connections_per_ip`: 14, `limits.max_runtime_accounts`: 15, a `[metrics]` key: 16, an `[update]` key: 17) is refused with the reason, before a byte
 /// of the template changes, instead of giving an image whose kernel would refuse it at boot.
 #[test]
 fn templates_of_earlier_releases_take_what_their_kernel_reads() {
@@ -1292,6 +1292,10 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
     b.uint(tag::METRICS_PORT, 9273).unwrap();
     let metrics = b.finish(false).unwrap();
     assert_eq!(header(&metrics), 16);
+    let mut b = Builder::new();
+    b.variant(tag::UPD_CONFIRM, 1).unwrap();
+    let update = b.finish(false).unwrap();
+    assert_eq!(header(&update), 17);
     for (release, reads) in [
         ("v0.2.0", 2u16),
         ("v0.2.1", 3),
@@ -1308,6 +1312,8 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
         ("format 14", 14),
         // A tree with run-time accounts (ADR-285), without ADR-290.
         ("format 15", 15),
+        // A tree with the metrics section (ADR-290), without the A/B update keys (ADR-297).
+        ("format 16", 16),
         ("this tree", urmqtt_cfg::FORMAT_VERSION),
     ] {
         let empty = Builder::new().finish_as(false, reads).unwrap();
@@ -1327,6 +1333,7 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             ("limits.max_connections_per_ip", &per_ip, 14),
             ("limits.max_runtime_accounts", &accounts, 15),
             ("[metrics]", &metrics, 16),
+            ("update.confirm", &update, 17),
         ] {
             match image::configure_iso(&tpl, blob) {
                 Ok(_) => assert!(

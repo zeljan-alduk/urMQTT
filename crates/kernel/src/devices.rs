@@ -334,6 +334,10 @@ pub struct BootMedium {
     pub optical: bool,
     /// The GPT disk GUID of the boot disk, if it has a GPT.
     pub disk_guid: Option<Guid>,
+    /// The GPT unique GUID of the partition the kernel was loaded from: the
+    /// ESP entry, or the standby boot slot if the firmware booted that
+    /// (ADR-296).
+    pub part_guid: Option<Guid>,
 }
 
 /// The boot disk with its data partition, ready for the store.
@@ -482,6 +486,7 @@ pub static DEVICES: SpinLock<Devices> = SpinLock::new(Devices {
 static BOOT_MEDIUM: SpinLock<BootMedium> = SpinLock::new(BootMedium {
     optical: false,
     disk_guid: None,
+    part_guid: None,
 });
 
 /// Records where the kernel was loaded from (before [`probe`]).
@@ -1499,7 +1504,15 @@ pub fn prepare_boot_disk(fault: Option<FaultSpec>) -> Result<(), &'static str> {
         b
     };
     let total = dev.sectors();
-    match gpt::prepare(dev.as_mut(), random) {
+    // A/B boot slots (ADR-295): the first boot reserves the standby next to
+    // the ESP, labelled with this kernel's version and store schema.
+    let opts = gpt::Options {
+        boot_slot: Some(urmqtt_store::slots::Init {
+            label: crate::VERSION,
+            schema: crate::bootslot::own_schema(),
+        }),
+    };
+    match gpt::prepare_with(dev.as_mut(), random, opts) {
         Ok((part, steps)) => {
             if steps.repaired_primary {
                 warn!("gpt: primary table was damaged, restored from the backup");
@@ -1516,6 +1529,22 @@ pub fn prepare_boot_disk(fault: Option<FaultSpec>) -> Result<(), &'static str> {
                     (total * 512) >> 20,
                     (part.sectors() * 512) >> 20
                 );
+            }
+            if steps.created_boot_slot {
+                info!(
+                    "gpt: standby boot slot reserved next to the EFI system partition (A/B updates: urmqtt-disk slots, docs/DEPLOY.md)"
+                );
+            }
+            // The slot step (ADR-296): count a trial boot or go back, before
+            // anything else runs from this kernel.
+            if let Err(e) = crate::bootslot::at_boot(dev.as_mut(), boot_medium().part_guid) {
+                if fault.is_some() {
+                    warn!(
+                        "disk-fault: power cut injected during the boot-slot step ({e:?}), powering off"
+                    );
+                    crate::power::off()
+                }
+                warn!("boot: the boot-slot step failed ({e:?}); booting without A/B");
             }
             let guid = gpt::disk_guid(dev.as_mut()).ok().flatten();
             info!(

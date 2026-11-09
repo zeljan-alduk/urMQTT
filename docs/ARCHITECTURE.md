@@ -46,6 +46,7 @@ only a request reader, `urmqtt_broker::metrics::render` over the same `Info` as 
 6. **Interrupts, time, entropy.** The GIC comes up (GICv3 distributor and redistributors, or a GICv2 distributor and CPU interface on GIC-400 hosts, ADR-039), along with the generic timer, the CSPRNG seeded from `RNDR` or virtio-rng. With no entropy source, the kernel halts with a clear error.
 7. **SMP.** The application processors start (Limine MP or PSCI `CPU_ON`). Per-CPU data lives behind `TPIDR_EL1`.
 8. **Devices.** PCIe enumeration, then virtio-blk (data disk), virtio-net (queues per core) and virtio-rng.
+8b. **Boot slots** (A/B updates, ADR-295, ADR-296). On the boot disk, right after the GPT first-boot steps: a slot on trial uses one of its attempts, or the boot entry switches back to the previous slot (and the machine resets) when none is left. The DB core later confirms a healthy trial (`update.confirm_after_s` with the store open and a listener up). The kernel writes partition-table sectors only, never an ESP.
 9. **Storage.** The data disk superblock is checked, SQLite opens in WAL + `locking_mode=EXCLUSIVE`, `PRAGMA quick_check` runs, and telemetry segments are recovered.
 10. **Network.** DHCPv4 (or static), then the TLS listener on 8883.
 11. The kernel prints `URMQTT READY`.

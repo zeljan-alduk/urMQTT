@@ -22,8 +22,8 @@ use crate::{
     Acl, BuildConfig, Cidr, Console, Control, Cpu, DEV_KERNEL, Devices, DiscardMode, Entropy,
     IdentityField, Ipv4Cidr, Limits, LogLevel, Memory, Metrics, Mqtt5, Network, NetworkMode,
     Observability, PlainAuth, PlainNetwork, PlainUser, Plaintext, Rate, Registry, SocketAddrV4,
-    Storage, StorageMode, Time, Tls, Trust, VirtioGpuMode, Watchdog, WatchdogAction, Websocket,
-    WsAuth,
+    Storage, StorageMode, Time, Tls, Trust, Update, UpdateConfirm, VirtioGpuMode, Watchdog,
+    WatchdogAction, Websocket, WsAuth,
 };
 
 /// Room for every plain-text string list of the field table at its
@@ -489,6 +489,14 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             },
         },
         devices: Devices::from_variants(|t| b.variant(t)),
+        update: Update {
+            confirm: match b.variant(tag::UPD_CONFIRM) {
+                1 => UpdateConfirm::Operator,
+                _ => UpdateConfirm::Auto,
+            },
+            confirm_after_s: u32_of(tag::UPD_CONFIRM_AFTER),
+            trial_timeout_s: u32_of(tag::UPD_TRIAL_TIMEOUT),
+        },
     }
 }
 
@@ -986,6 +994,39 @@ mod tests {
         let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
         let c = build(&blob, arena);
         assert_eq!(c.limits.max_runtime_accounts, 1_024);
+    }
+
+    /// ADR-297: the `[update]` keys have the documented defaults (the empty
+    /// blob, and every blob before format 17) and are decoded when set.
+    #[test]
+    fn the_update_keys_are_decoded() {
+        use urmqtt_cfg::build::Builder;
+        let u = CONFIG.update;
+        assert_eq!(
+            (u.confirm, u.confirm_after_s, u.trial_timeout_s),
+            (UpdateConfirm::Auto, 60, 900)
+        );
+        let mut b = Builder::new();
+        b.variant(tag::UPD_CONFIRM, 1).unwrap();
+        b.uint(tag::UPD_CONFIRM_AFTER, 5).unwrap();
+        b.uint(tag::UPD_TRIAL_TIMEOUT, 0).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 17);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        assert_eq!(
+            (
+                c.update.confirm,
+                c.update.confirm_after_s,
+                c.update.trial_timeout_s
+            ),
+            (UpdateConfirm::Operator, 5, 0)
+        );
+        assert_eq!(
+            (UpdateConfirm::Auto.name(), UpdateConfirm::Operator.name()),
+            ("auto", "operator")
+        );
     }
 
     /// NOW-19, ADR-264: `network.mtu` is unset by default (the empty blob,

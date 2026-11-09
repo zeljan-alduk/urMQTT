@@ -42,7 +42,7 @@ fuzz_target!(|data: &[u8]| {
     //    input) makes it fail.
     if data.len() >= 26 {
         let u = |i: usize| u64::from_le_bytes(data[i..i + 8].try_into().unwrap());
-        let cmd = Command::from_byte(1 + data[24] % 6).unwrap();
+        let cmd = Command::from_byte(1 + data[24] % 8).unwrap();
         let items: Vec<Vec<u8>> = data[26..]
             .split(|&b| b == b',')
             .map(|i| i.to_vec())
