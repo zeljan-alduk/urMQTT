@@ -13,7 +13,9 @@ use urmqtt_tls::client::TlsClient;
 use urmqtt_tls::rng::{EntropyPool, Source};
 
 /// A CA nobody has the key of (generated once, the key thrown away).
-const FUZZ_CA: &[u8] = include_bytes!("tls_client_ca.pem");
+/// A public, self-signed test CA (CN=fuzz CA, no key anywhere): the trust anchor the client
+/// verifies the fuzzed server against. Inline, because certificate files are never committed (ADR-004).
+const FUZZ_CA: &[u8] = b"-----BEGIN CERTIFICATE-----\nMIIBWzCCAQCgAwIBAgIUYvD5d8kJ2EhjB8qW90y6uI5/ak0wCgYIKoZIzj0EAwIw\nEjEQMA4GA1UEAwwHZnV6eiBDQTAgFw0yNjExMDkxOTUzNDhaGA8yMTI2MTAxNjE5\nNTM0OFowEjEQMA4GA1UEAwwHZnV6eiBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEH\nA0IABLZ+el4NLVVt58tWLdW59pAeAXCe4Rqq72Iv/FyswX1Q5P49xx7r67dQ+SPf\nyYCoSRrV8VAuE/l9/q8oPijrKwCjMjAwMB0GA1UdDgQWBBR9mNCdpneJTx+8JjJf\nVEb/FoplxjAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0kAMEYCIQC9dGXU\nF//wVibwTuY7VhNQ2c5BsIS1tDoeshOlp7cd/QIhANDSm8BBprBhC9Epg3gPGSbc\nr8B4E31PtKYomy17Siv/\n-----END CERTIFICATE-----\n";
 
 fn client() -> &'static TlsClient {
     static C: OnceLock<TlsClient> = OnceLock::new();
