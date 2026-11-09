@@ -248,3 +248,43 @@ fn max_len_message_fits() {
     assert_eq!(wire.len(), MAX_LEN);
     assert!(verify("dev", &PUB, &wire).is_ok());
 }
+
+/// ADR-298: the boot commands carry exactly one item, a 16-byte disk GUID;
+/// they round-trip, verify like any other command, and the unknown
+/// numbers around them (5 and 6, 9) stay malformed for this decoder.
+#[test]
+fn boot_commands_carry_one_disk_guid() {
+    let guid = [0x42u8; DISK_GUID_LEN];
+    for c in [Command::BootConfirm, Command::BootRollback] {
+        assert!(c.on_boot() && !c.on_serials());
+        assert_eq!(Command::from_name(c.name()), Some(c));
+        assert_eq!(Command::from_byte(c as u8), Some(c));
+        let m = msg(9, c, &[&guid]);
+        let wire = sign("dev", &m);
+        assert_eq!(verify("dev", &PUB, &wire), Ok(m.clone()));
+        assert_eq!(check(&m, Some(NOW), 8, &POLICY), Ok(()));
+        // Not in allowlist mode: still allowed (not an allowlist command).
+        let open = Policy {
+            allowlist_mode: false,
+            ..POLICY
+        };
+        assert_eq!(check(&m, Some(NOW), 8, &open), Ok(()));
+        for items in [
+            vec![&guid[..15]],
+            vec![&[0x42u8; 17][..]],
+            vec![&guid[..], &[0x43u8; 16][..]],
+        ] {
+            assert_eq!(encode_body(&msg(9, c, &items)), None, "{c:?} {items:?}");
+        }
+    }
+    assert_eq!(
+        (Command::BootConfirm as u8, Command::BootRollback as u8),
+        (7, 8)
+    );
+    let good = encode_body(&msg(1, Command::BootConfirm, &[&guid])).unwrap();
+    for unknown in [5u8, 6, 9, 0] {
+        let mut b = good.clone();
+        b[32] = unknown;
+        assert_eq!(decode_body(&b), Err(Reject::Malformed), "{unknown}");
+    }
+}

@@ -6,6 +6,10 @@
 //! urmqtt-control unrevoke --cert device.pem | --serial HEX  [...]
 //! urmqtt-control allow    --id device-001 [...]
 //! urmqtt-control disallow --id device-001 [...]
+//! urmqtt-control boot-confirm  --disk-guid GUID [...]   confirm the boot slot on trial (ADR-298)
+//! urmqtt-control boot-rollback --disk-guid GUID [...]   go back to the previous boot slot and reset
+//!                                (GUID: the boot disk's GPT disk GUID, as the broker's boot log and
+//!                                `urmqtt-disk slots status` print it)
 //!
 //! signing (one of):
 //!   --key control.key          Ed25519 PKCS#8 PEM (dev; keep prod keys offline)
@@ -48,6 +52,7 @@ use urmqtt_control::{Command, Message};
 #[derive(Default)]
 struct Opts {
     serials: Vec<Vec<u8>>,
+    disk_guids: Vec<Vec<u8>>,
     ids: Vec<String>,
     key: Option<String>,
     sign_cmd: Option<String>,
@@ -88,6 +93,51 @@ fn to_hex(b: &[u8]) -> String {
 
 fn read(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{path}: {e}"))
+}
+
+/// A GUID in its printed (RFC 4122) form, as the 16 bytes GPT stores: the
+/// first three fields little-endian.
+fn disk_guid(s: &str) -> Result<Vec<u8>, String> {
+    let bad = || format!("{s:?}: not a GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)");
+    let groups: Vec<&str> = s.split('-').collect();
+    if groups.iter().map(|g| g.len()).collect::<Vec<_>>() != [8, 4, 4, 4, 12] {
+        return Err(bad());
+    }
+    let b = hex(&groups.concat()).map_err(|_| bad())?;
+    let mut g = vec![b[3], b[2], b[1], b[0], b[5], b[4], b[7], b[6]];
+    g.extend_from_slice(&b[8..]);
+    Ok(g)
+}
+
+/// The printed form of a GUID stored as GPT does.
+fn guid_text(g: &[u8]) -> String {
+    if g.len() != 16 {
+        return to_hex(g);
+    }
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{}-{}",
+        g[3],
+        g[2],
+        g[1],
+        g[0],
+        g[5],
+        g[4],
+        g[7],
+        g[6],
+        to_hex(&g[8..10]),
+        to_hex(&g[10..])
+    )
+}
+
+/// An item as the operator wrote it.
+fn item_text(command: Command, i: &[u8]) -> String {
+    if command.on_serials() {
+        to_hex(i)
+    } else if command.on_boot() {
+        guid_text(i)
+    } else {
+        String::from_utf8_lossy(i).into_owned()
+    }
 }
 
 /// The serial number of the (first) certificate in a PEM file.
@@ -132,6 +182,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--serial" => o.serials.push(hex(&v()?)?),
             "--cert" => o.serials.push(serial_of(&v()?)?),
             "--id" => o.ids.push(v()?),
+            "--disk-guid" => o.disk_guids.push(disk_guid(&v()?)?),
             "--key" => o.key = Some(v()?),
             "--sign-cmd" => o.sign_cmd = Some(v()?),
             "--env" => o.env = Some(v()?),
@@ -196,7 +247,17 @@ fn sign(o: &Opts, input: &[u8]) -> Result<[u8; 64], String> {
 
 fn build(command: Command, o: &Opts) -> Result<Vec<u8>, String> {
     let env = o.env.as_deref().ok_or("--env is required")?;
-    let items: Vec<Vec<u8>> = if command.on_serials() {
+    let items: Vec<Vec<u8>> = if command.on_boot() {
+        if !o.ids.is_empty() || !o.serials.is_empty() || o.disk_guids.len() != 1 {
+            return Err(format!(
+                "{} takes exactly one --disk-guid, nothing else",
+                command.name()
+            ));
+        }
+        o.disk_guids.clone()
+    } else if !o.disk_guids.is_empty() {
+        return Err(format!("{} does not take --disk-guid", command.name()));
+    } else if command.on_serials() {
         if !o.ids.is_empty() {
             return Err(format!(
                 "{} takes --cert or --serial, not --id",
@@ -223,7 +284,7 @@ fn build(command: Command, o: &Opts) -> Result<Vec<u8>, String> {
         items,
     };
     let body = urmqtt_control::encode_body(&m).ok_or(
-        "invalid message: 1..=64 unique items; serials 1..=20 bytes; ids without / + # NUL or a leading $",
+        "invalid message: 1..=64 unique items; serials 1..=20 bytes; ids without / + # NUL or a leading $; one disk GUID for a boot command",
     )?;
     let sig = sign(o, &urmqtt_control::signing_input(env, &body))?;
     let mut wire = body;
@@ -237,11 +298,7 @@ fn build(command: Command, o: &Opts) -> Result<Vec<u8>, String> {
         m.items.len(),
         m.items
             .iter()
-            .map(|i| if command.on_serials() {
-                to_hex(i)
-            } else {
-                String::from_utf8_lossy(i).into_owned()
-            })
+            .map(|i| item_text(command, i))
             .collect::<Vec<_>>()
             .join(" "),
         wire.len()
@@ -374,11 +431,7 @@ fn show(path: &str, o: &Opts) -> Result<(), String> {
         m.not_after,
         m.items
             .iter()
-            .map(|i| if m.command.on_serials() {
-                to_hex(i)
-            } else {
-                String::from_utf8_lossy(i).into_owned()
-            })
+            .map(|i| item_text(m.command, i))
             .collect::<Vec<_>>()
             .join(" ")
     );
@@ -387,7 +440,7 @@ fn show(path: &str, o: &Opts) -> Result<(), String> {
 
 fn run(args: &[String]) -> Result<(), String> {
     let (cmd, rest) = args.split_first().ok_or(
-        "usage: urmqtt-control revoke|unrevoke|allow|disallow|publish-file|show [options] (see --help)",
+        "usage: urmqtt-control revoke|unrevoke|allow|disallow|boot-confirm|boot-rollback|publish-file|show [options] (see --help)",
     )?;
     match cmd.as_str() {
         "--help" | "-h" | "help" => {
@@ -433,5 +486,55 @@ fn main() {
     if let Err(e) = run(&args) {
         eprintln!("urmqtt-control: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The printed GUID and the bytes the partition table stores (ADR-298):
+    /// the first three fields are little-endian.
+    #[test]
+    fn disk_guids_parse_in_gpt_order() {
+        let g = disk_guid("c12a7328-f81f-11d2-ba4b-00a0c93ec93b").unwrap();
+        assert_eq!(
+            g,
+            [
+                0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e,
+                0xc9, 0x3b
+            ]
+        );
+        assert_eq!(guid_text(&g), "c12a7328-f81f-11d2-ba4b-00a0c93ec93b");
+        for bad in [
+            "",
+            "c12a7328f81f11d2ba4b00a0c93ec93b",
+            "c12a7328-f81f-11d2-ba4b-00a0c93ec93",
+            "x12a7328-f81f-11d2-ba4b-00a0c93ec93b",
+        ] {
+            assert!(disk_guid(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_boot_command_takes_exactly_one_disk_guid() {
+        let key = format!("{}/../../deploy/dev/control.key", env!("CARGO_MANIFEST_DIR"));
+        let opts = |extra: &[&str]| {
+            let mut a: Vec<String> = ["--env", "dev", "--key", &key, "--no-publish"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            a.extend(extra.iter().map(|s| s.to_string()));
+            parse(&a).unwrap()
+        };
+        let g = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
+        let wire = build(Command::BootConfirm, &opts(&["--disk-guid", g])).unwrap();
+        let (body, _) = urmqtt_control::split(&wire).unwrap();
+        let m = urmqtt_control::decode_body(body).unwrap();
+        assert_eq!(m.command, Command::BootConfirm);
+        assert_eq!(m.items, vec![disk_guid(g).unwrap()]);
+        assert!(build(Command::BootRollback, &opts(&[])).is_err());
+        assert!(build(Command::BootRollback, &opts(&["--disk-guid", g, "--id", "x"])).is_err());
+        assert!(build(Command::Allow, &opts(&["--disk-guid", g])).is_err());
     }
 }

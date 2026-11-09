@@ -12,13 +12,17 @@
 //! | 8 | 8 | `seq`, u64 LE, strictly increasing, never 0 |
 //! | 16 | 8 | `not_before`, Unix seconds, u64 LE |
 //! | 24 | 8 | `not_after`, Unix seconds, u64 LE |
-//! | 32 | 1 | command: 1 revoke, 2 unrevoke, 3 allow, 4 disallow |
+//! | 32 | 1 | command: 1 revoke, 2 unrevoke, 3 allow, 4 disallow, 7 boot-confirm, 8 boot-rollback |
 //! | 33 | 1 | item count, 1..=[`MAX_ITEMS`] |
 //! | 34 | … | items: a length byte, then that many bytes |
 //! | end − 64 | 64 | Ed25519 signature |
 //!
 //! Revoke items are certificate serials (big-endian bytes, 1..=20, the
-//! RFC 5280 bound). Allowlist items are device ids (UTF-8, valid MQTT
+//! RFC 5280 bound). A boot command (ADR-298) has exactly one item, the 16
+//! bytes of the boot disk's GPT disk GUID as the partition table stores it:
+//! the message names the machine it is for, so one control key can serve
+//! many brokers without a confirmation for one reaching another. (5 and 6
+//! are allocated to another item of v0.6.0.) Allowlist items are device ids (UTF-8, valid MQTT
 //! identities: no `/`, `+`, `#`, NUL or leading `$`, at most
 //! [`MAX_ID_LEN`] bytes). Items must be unique. Nothing may follow the
 //! signature.
@@ -64,6 +68,10 @@ pub enum Command {
     Unrevoke = 2,
     Allow = 3,
     Disallow = 4,
+    /// Confirms the boot slot on trial after an A/B update (ADR-298).
+    BootConfirm = 7,
+    /// Switches back to the previous boot slot and resets (ADR-298).
+    BootRollback = 8,
 }
 
 impl Command {
@@ -73,6 +81,8 @@ impl Command {
             2 => Some(Self::Unrevoke),
             3 => Some(Self::Allow),
             4 => Some(Self::Disallow),
+            7 => Some(Self::BootConfirm),
+            8 => Some(Self::BootRollback),
             _ => None,
         }
     }
@@ -83,13 +93,28 @@ impl Command {
             Self::Unrevoke => "unrevoke",
             Self::Allow => "allow",
             Self::Disallow => "disallow",
+            Self::BootConfirm => "boot-confirm",
+            Self::BootRollback => "boot-rollback",
         }
     }
 
     pub fn from_name(s: &str) -> Option<Self> {
-        [Self::Revoke, Self::Unrevoke, Self::Allow, Self::Disallow]
-            .into_iter()
-            .find(|c| c.name() == s)
+        [
+            Self::Revoke,
+            Self::Unrevoke,
+            Self::Allow,
+            Self::Disallow,
+            Self::BootConfirm,
+            Self::BootRollback,
+        ]
+        .into_iter()
+        .find(|c| c.name() == s)
+    }
+
+    /// Whether the command is about the boot slots (its one item is a disk
+    /// GUID, ADR-298).
+    pub const fn on_boot(self) -> bool {
+        matches!(self, Self::BootConfirm | Self::BootRollback)
     }
 
     /// Whether the items are certificate serials (else device ids).
@@ -135,10 +160,16 @@ pub enum Reject {
     ImageListed,
     /// The store could not commit the change.
     StorageFailed,
+    /// A boot command for another machine (its disk GUID is not this
+    /// boot disk's), ADR-298.
+    OtherDisk,
+    /// A boot command the boot slots cannot carry out: no A/B slots, nothing
+    /// on trial to confirm, or nothing eligible to go back to.
+    BootRefused,
 }
 
 impl Reject {
-    pub const ALL: [Reject; 13] = [
+    pub const ALL: [Reject; 15] = [
         Self::Malformed,
         Self::BadSignature,
         Self::Replay,
@@ -152,6 +183,8 @@ impl Reject {
         Self::Unauthorized,
         Self::ImageListed,
         Self::StorageFailed,
+        Self::OtherDisk,
+        Self::BootRefused,
     ];
 
     /// Metric and log name (no message content, ever).
@@ -170,6 +203,8 @@ impl Reject {
             Self::Unauthorized => "unauthorized",
             Self::ImageListed => "image_listed",
             Self::StorageFailed => "storage_failed",
+            Self::OtherDisk => "other_disk",
+            Self::BootRefused => "boot_refused",
         }
     }
 
@@ -177,6 +212,9 @@ impl Reject {
         Self::ALL.iter().position(|&r| r == self).unwrap_or(0)
     }
 }
+
+/// Bytes of a boot command's item: a GPT disk GUID.
+pub const DISK_GUID_LEN: usize = 16;
 
 /// A device id as the broker accepts it (the same rule as MQTT CONNECT).
 pub fn valid_id(id: &[u8]) -> bool {
@@ -240,6 +278,9 @@ pub fn decode_body(b: &[u8]) -> Result<Message, Reject> {
     if seq == 0 || n == 0 || n > MAX_ITEMS || not_after < not_before {
         return Err(Reject::Malformed);
     }
+    if command.on_boot() && n != 1 {
+        return Err(Reject::Malformed);
+    }
     let mut items: Vec<Vec<u8>> = Vec::with_capacity(n);
     let mut off = HEADER;
     for _ in 0..n {
@@ -247,6 +288,8 @@ pub fn decode_body(b: &[u8]) -> Result<Message, Reject> {
         let item = b.get(off + 1..off + 1 + len).ok_or(Reject::Malformed)?;
         let ok = if command.on_serials() {
             (1..=MAX_SERIAL_LEN).contains(&len)
+        } else if command.on_boot() {
+            len == DISK_GUID_LEN
         } else {
             valid_id(item)
         };
