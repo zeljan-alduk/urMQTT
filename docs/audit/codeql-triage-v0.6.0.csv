@@ -1,0 +1,5 @@
+number,rule,location,class,reason,comment
+172,rust/hard-coded-cryptographic-value,crates/plain/src/auth.rs:285,a,used in tests,"Fixed test salt 0123456789abcdef for PBKDF2 in the accounts helper of the #[cfg(test)] module (NOW-15 run-time accounts test). Not a secret; same pattern as 163/164."
+173,rust/hard-coded-cryptographic-value,crates/plain/src/auth.rs:301,a,used in tests,"Same module: fixed test salt in runtime_accounts_log_in_and_the_image_wins (#[cfg(test)] mod tests, 1000 iterations). Not a secret."
+174,rust/hard-coded-cryptographic-value,crates/plain/src/auth.rs:301,a,used in tests,"Same test: second flow of the fixed test salt into passwd::encode. Not a secret."
+175,rust/cleartext-logging,crates/broker/src/sys.rs:1310,a,used in tests,"Assertion message in the #[cfg(test)] IOMMU test printing a hand-built Info (counters, no credentials) when the assert fails."
