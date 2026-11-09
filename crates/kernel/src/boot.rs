@@ -524,7 +524,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     devices::set_install_mode(s.options.install || s.options.diag || s.options.diag_serve);
     // PCIe and virtio (M6): all device MMIO must be mapped before the lock.
     if let Some(p) = s.platform.as_ref() {
-        match devices::probe(p, &s.boot_entropy) {
+        match devices::probe(p, &s.boot_entropy, s.cpus) {
             Ok(()) => {}
             Err(devices::ProbeError::NoEntropy)
                 if !urmqtt_config::CONFIG.entropy.jitter_fallback =>

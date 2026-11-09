@@ -46,7 +46,7 @@ pub mod cache {
 
 /// Message-signalled interrupts.
 pub mod msi {
-    pub use super::imp::msi::{Frame, TYPER};
+    pub use super::imp::msi::{Frame, TYPER, message};
 }
 
 /// Per-CPU identity and secondary-CPU start.

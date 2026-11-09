@@ -319,8 +319,9 @@ impl MetricsState {
 fn scrape(method: Method, format: Format) -> Vec<u8> {
     let mut busy = [0u8; crate::smp::MAX_CPUS];
     let mut accepted = [0u64; crate::smp::MAX_CPUS];
+    let mut queues = [urmqtt_broker::sys::NetQueueSys::default(); urmqtt_virtio::net::MAX_PAIRS];
     let t0 = urmqtt_arch::time::uptime_ns();
-    let info = crate::sys::collect(&mut busy, &mut accepted);
+    let info = crate::sys::collect(&mut busy, &mut accepted, &mut queues);
     let body = urmqtt_broker::metrics::render(&info, &own(), matches!(format, Format::OpenMetrics));
     urmqtt_log::debug!(
         "metrics: scrape rendered {} bytes in {} us",

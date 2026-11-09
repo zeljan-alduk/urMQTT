@@ -6,10 +6,14 @@
 //! is the dispatcher only and cores `1..n` are the MQTT workers
 //! ([`workers`]). Cores share nothing but SPSC rings:
 //!
-//! - **Frames:** core 0 owns the single virtio-net queue pair. It steers
-//!   each received TCP frame to the core chosen by the Toeplitz hash of the
-//!   4-tuple, sending the buffer itself (no further copy) over a 0→c ring.
-//!   Cores send their frames back over a c→0 ring for transmission.
+//! - **Frames:** core 0 owns the NIC's first virtio-net queue pair. It
+//!   steers each received TCP frame to the core chosen by the Toeplitz hash
+//!   of the 4-tuple, sending the buffer itself (no further copy) over a 0→c
+//!   ring. Cores send their frames back over a c→0 ring for transmission.
+//!   With a multiqueue NIC whose RSS steers flows itself (NEXT-6, ADR-311),
+//!   core c owns pair c: it receives its flows and transmits on its own
+//!   queue, and the c→0 ring carries only the frames the device put on c's
+//!   queue that belong to another core (counted as forwarded).
 //! - **Sessions:** a session lives on its *home* core, `fnv1a(client id) %
 //!   n`, so takeover and persistence stay core-local. A connection accepted
 //!   on another core (its *transport* core keeps TCP and TLS) is relayed to
@@ -43,6 +47,10 @@ pub const POOL_MAX: usize = 512;
 /// A frame buffer that moves between cores without copying.
 pub struct FrameBuf {
     pub len: usize,
+    /// On a c→0 ring: a frame core c received on its own NIC queue that
+    /// belongs to another core, for core 0 to steer (ADR-311); otherwise a
+    /// frame to transmit. Set by whoever pushes it.
+    pub rx: bool,
     pub data: [u8; MTU_FRAME],
 }
 
@@ -57,6 +65,7 @@ pub fn new_frame() -> Frame {
     FRAMES.fetch_add(1, Ordering::Relaxed);
     Box::new(FrameBuf {
         len: 0,
+        rx: false,
         data: [0; MTU_FRAME],
     })
 }
@@ -874,10 +883,77 @@ pub fn home_of(client_id: &str, n: usize) -> usize {
     pick(h, n)
 }
 
-/// The data core that owns a TCP flow (dispatcher and NIC RSS agree).
+/// The data core that owns a TCP flow: the hash modulo the workers, or,
+/// once the NIC's RSS steers flows ([`steer_by_table`]), the indirection
+/// table the device uses, so both agree (ADR-311).
 pub fn core_of_flow(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, n: usize) -> usize {
-    pick(urmqtt_net::rss::ipv4_tcp(src, dst, sport, dport), n)
+    let h = urmqtt_net::rss::ipv4_tcp(src, dst, sport, dport);
+    // Relaxed: set once before the other data cores start.
+    if STEER_BY_TABLE.load(Ordering::Relaxed) {
+        let w = workers(n);
+        urmqtt_net::rss::core_by_table(h, w.start, w.len())
+    } else {
+        pick(h, n)
+    }
 }
+
+/// The NIC steers flows by RSS: the software steering follows its table.
+static STEER_BY_TABLE: AtomicBool = AtomicBool::new(false);
+
+/// Switches the software steering to the RSS table (core 0, before the other
+/// data cores start, and only once the device took the same table).
+pub fn steer_by_table() {
+    // Relaxed: before the other data cores start (their start publishes it).
+    STEER_BY_TABLE.store(true, Ordering::Relaxed);
+}
+
+/// The RSS table's entries as cores, for `n` data cores (ADR-311).
+pub fn steer_table(n: usize) -> [usize; urmqtt_net::rss::TABLE_LEN] {
+    let w = workers(n);
+    urmqtt_net::rss::table(w.start, w.len())
+}
+
+/// The data cores (the mesh's size; 1 before `init`).
+pub fn data_cores() -> usize {
+    MESH.get().map_or(1, |m| m.n)
+}
+
+/// One NIC queue pair's counters (ADR-312), kept by the core that owns it:
+/// what it received and sent, what it forwarded to core 0 (frames of another
+/// core's flow), what found its transmit queue full, its armed sleeps and
+/// those that ended with a frame and no interrupt, and the most frames seen
+/// waiting in its receive queue. Relaxed: statistics.
+pub struct QueueCounters {
+    pub received: AtomicU64,
+    pub sent: AtomicU64,
+    pub forwarded: AtomicU64,
+    pub tx_full: AtomicU64,
+    pub armed: AtomicU64,
+    pub missed: AtomicU64,
+    pub peak: AtomicU64,
+    pub size: AtomicU64,
+}
+
+impl QueueCounters {
+    const fn new() -> Self {
+        Self {
+            received: AtomicU64::new(0),
+            sent: AtomicU64::new(0),
+            forwarded: AtomicU64::new(0),
+            tx_full: AtomicU64::new(0),
+            armed: AtomicU64::new(0),
+            missed: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
+            size: AtomicU64::new(0),
+        }
+    }
+}
+
+/// Per pair (index = pair = the core that owns it).
+pub static QUEUES: [QueueCounters; urmqtt_virtio::net::MAX_PAIRS] =
+    [const { QueueCounters::new() }; urmqtt_virtio::net::MAX_PAIRS];
+/// Queue pairs in use (1: the dispatcher's single pair).
+pub static QUEUE_PAIRS: AtomicU64 = AtomicU64::new(1);
 
 /// One core's ends of the mesh.
 pub struct Link {

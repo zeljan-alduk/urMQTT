@@ -8,7 +8,7 @@
 
 #![allow(unsafe_code)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
 
@@ -24,7 +24,7 @@ use urmqtt_tls::rng::{Csprng, EntropyPool, Source};
 use urmqtt_virtio::blk::VirtioBlk;
 #[cfg(feature = "virtio-gpu")]
 use urmqtt_virtio::gpu::{AutoChoice, VirtioGpu, auto_choice};
-use urmqtt_virtio::net::VirtioNet;
+use urmqtt_virtio::net::{MAX_PAIRS, VirtioNet};
 use urmqtt_virtio::registry::{self, State};
 use urmqtt_virtio::rng::VirtioRng;
 use urmqtt_virtio::scsi::{DiskInfo, ScsiDisk, VirtioScsi};
@@ -750,25 +750,189 @@ fn setup_msix_with<C: ConfigSpace>(
     bdf: Bdf,
     source: impl FnOnce() -> Result<(u32, u64, u32), Why>,
 ) -> Result<u32, Why> {
+    setup_msix_queues(cfg, bdf, source, 1, |_| Err(Why::NoVector)).map(|(id, _)| id)
+}
+
+/// An MSI-X table: where it is mapped, and its entries.
+#[derive(Clone, Copy)]
+struct MsixTable {
+    va: usize,
+    entries: u16,
+}
+
+impl MsixTable {
+    /// Writes entry `k` (bounds-checked against the table).
+    fn write(&self, k: u16, address: u64, data: u32, masked: bool) {
+        if k >= self.entries {
+            return;
+        }
+        let at = self.va + usize::from(k) * 16;
+        for (i, w) in pci::msix_entry(address, data, masked).iter().enumerate() {
+            // SAFETY: entry `k` (< the table size read from the capability)
+            // of the table mapped as device memory in `setup_msix_queues`.
+            unsafe { ((at + 4 * i) as *mut u32).write_volatile(*w) };
+        }
+    }
+}
+
+/// [`setup_msix_with`] for a device with `want` queues (the NIC's pairs,
+/// NEXT-6, ADR-311): entry 0 as before; entries 1.. get what `more(k)` hands
+/// out, written **masked** (the core that will own the queue is not known
+/// yet; [`route_net_queue`] aims and unmasks it), or the reason there is
+/// none (also for entries beyond the table). Returns entry 0's interrupt
+/// and the table with the others.
+#[allow(clippy::type_complexity)]
+fn setup_msix_queues<C: ConfigSpace>(
+    cfg: &mut C,
+    bdf: Bdf,
+    source: impl FnOnce() -> Result<(u32, u64, u32), Why>,
+    want: usize,
+    mut more: impl FnMut(u16) -> Result<(u32, u64, u32), Why>,
+) -> Result<(u32, NetQueueVectors), Why> {
     let info = pci::msix(cfg, bdf).ok_or(Why::NoMsix)?;
     let Some(Bar::Memory { base, .. }) = pci::bar(cfg, bdf, info.table_bar) else {
         return Err(Why::TableUnmapped);
     };
-    let table = map(
+    let va = map(
         base + u64::from(info.table_offset),
         u64::from(info.table_size) * 16,
     )
     .map_err(|_| Why::TableUnmapped)?;
+    let table = MsixTable {
+        va,
+        entries: info.table_size,
+    };
     let (id, address, data) = source()?;
-    let entry = pci::msix_entry(address, data, false);
-    for (i, w) in entry.iter().enumerate() {
-        // SAFETY: entry 0 of the just-mapped MSI-X table.
-        unsafe { ((table + 4 * i) as *mut u32).write_volatile(*w) };
+    table.write(0, address, data, false);
+    let mut v = NetQueueVectors {
+        table: Some(table),
+        irq: [Err(Why::NoVector); MAX_PAIRS],
+    };
+    for k in 1..want.min(MAX_PAIRS) {
+        let e = k as u16;
+        let got = if e < table.entries {
+            more(e)
+        } else {
+            Err(Why::NoVector)
+        };
+        if let Ok((_, address, data)) = got {
+            table.write(e, address, data, true);
+        }
+        if let Some(slot) = v.irq.get_mut(k) {
+            *slot = got;
+        }
     }
     pci::msix_enable(cfg, bdf, &info, true);
     pci::enable(cfg, bdf, pci::CMD_INTX_DISABLE);
+    Ok((id, v))
+}
+
+/// The NIC's receive interrupts of pairs 1.. (NEXT-6, ADR-311): the table
+/// and, per pair, the interrupt and its message, or why the pair is polled.
+pub struct NetQueueVectors {
+    table: Option<MsixTable>,
+    irq: [Result<(u32, u64, u32), Why>; MAX_PAIRS],
+}
+
+impl NetQueueVectors {
+    const NONE: Self = Self {
+        table: None,
+        irq: [Err(Why::NoMsix); MAX_PAIRS],
+    };
+
+    fn all(why: Why) -> Self {
+        Self {
+            table: None,
+            irq: [Err(why); MAX_PAIRS],
+        }
+    }
+
+    /// Whether pair `k` has a vector (its MSI-X entry is `k`).
+    fn has(&self, k: u16) -> bool {
+        self.irq.get(usize::from(k)).is_some_and(Result::is_ok)
+    }
+}
+
+static NET_QUEUE_VECTORS: SpinLock<NetQueueVectors> = SpinLock::new(NetQueueVectors::NONE);
+
+/// Receive interrupts per pair (pair 0 is [`net_irqs`]), and the interrupt
+/// number each pair's handler answers to (0: none).
+static NET_QUEUE_IRQS: [AtomicU64; MAX_PAIRS] = [const { AtomicU64::new(0) }; MAX_PAIRS];
+static NET_QUEUE_INTID: [AtomicU32; MAX_PAIRS] = [const { AtomicU32::new(0) }; MAX_PAIRS];
+
+/// Receive interrupts of pair `k` so far (statistics, and the wake-up
+/// machine of the core that owns the pair).
+pub fn net_queue_irqs(k: usize) -> u64 {
+    if k == 0 {
+        return net_irqs();
+    }
+    // Relaxed: a counter compared with an earlier reading on the core that
+    // takes the interrupt.
+    NET_QUEUE_IRQS
+        .get(k)
+        .map_or(0, |c| c.load(Ordering::Relaxed))
+}
+
+/// Why pair `k` has no receive interrupt (for its boot line).
+pub fn net_queue_why(k: usize) -> Why {
+    match NET_QUEUE_VECTORS.lock().irq.get(k) {
+        Some(Err(why)) => *why,
+        _ => Why::NoVector,
+    }
+}
+
+/// A receive interrupt of pair 1..: only counted, as [`on_net_irq`].
+fn on_net_queue_irq(intid: u32) {
+    for (k, id) in NET_QUEUE_INTID.iter().enumerate().skip(1) {
+        // Relaxed: written before the vector was unmasked.
+        if id.load(Ordering::Relaxed) == intid {
+            if let Some(c) = NET_QUEUE_IRQS.get(k) {
+                // Relaxed: see `net_queue_irqs`.
+                c.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
+    }
+}
+
+/// Aims pair `k`'s receive interrupt at logical CPU `cpu` (the core that
+/// owns the pair, on that core when it starts) and unmasks it. Returns the
+/// interrupt for the boot line, or why the pair stays polled.
+pub fn route_net_queue(k: usize, cpu: usize) -> Result<u32, Why> {
+    let v = NET_QUEUE_VECTORS.lock();
+    let (id, address, data) = v.irq.get(k).copied().unwrap_or(Err(Why::NoVector))?;
+    let table = v.table.ok_or(Why::TableUnmapped)?;
+    #[cfg(target_arch = "aarch64")]
+    let (address, data) = {
+        // A GICv2m SPI: the distributor routes it; the message is the same.
+        irq::enable_spi(id, cpu);
+        (address, data)
+    };
+    #[cfg(target_arch = "x86_64")]
+    let (address, data) = {
+        let _ = (address, data);
+        // Relaxed: written before the CPU was started.
+        let apic = crate::smp::CPUS
+            .get(cpu)
+            .map_or(u64::MAX, |c| c.mpidr.load(Ordering::Relaxed));
+        if apic > 0xfe {
+            return Err(Why::CoreZeroOnly);
+        }
+        msi::message(apic, id)
+    };
+    if let Some(slot) = NET_QUEUE_INTID.get(k) {
+        // Relaxed: the handler reads it only after the unmask below.
+        slot.store(id, Ordering::Relaxed);
+    }
+    table.write(k as u16, address, data, false);
     Ok(id)
 }
+
+/// Queue pairs to ask the NIC for (ADR-313): one per CPU (the data cores
+/// are not known before the store is opened; a DB core's pair is set up and
+/// never used), at most [`MAX_PAIRS`], or one with
+/// `devices.virtio_net_queues = "single"`.
+static NET_WANT_PAIRS: AtomicUsize = AtomicUsize::new(1);
 
 /// The GICv3 ITS for the NIC's MSI (ADR-270), set up on first use: when
 /// the platform has an ITS and no GICv2m frame (QEMU TCG, KVM such as the
@@ -827,27 +991,73 @@ impl ItsSource {
 
 /// The NIC's MSI-X vector: the GICv2m frame or the local APIC as for the
 /// disks, else (aarch64) the GICv3 ITS.
+/// Pairs 1.. get further SPIs of the GICv2m frame; the ITS serves core 0
+/// only (one collection, ADR-270), so with it they are polled (ADR-311).
 #[cfg(target_arch = "aarch64")]
 fn net_msix<C: ConfigSpace>(
     cfg: &mut C,
     bdf: Bdf,
     frame: &mut Option<msi::Frame>,
     its: &mut Option<ItsSource>,
-) -> Result<u32, Why> {
+    want: usize,
+) -> Result<(u32, NetQueueVectors), Why> {
     match (frame.as_mut(), its.as_mut()) {
-        (None, Some(its)) => setup_msix_with(cfg, bdf, || its.map(bdf)),
-        (frame, _) => setup_msix(cfg, bdf, frame),
+        (None, Some(its)) => {
+            setup_msix_queues(cfg, bdf, || its.map(bdf), want, |_| Err(Why::CoreZeroOnly))
+        }
+        (Some(frame), _) => {
+            let first = frame.alloc().ok_or(Why::NoVector);
+            let f = *frame;
+            setup_msix_queues(
+                cfg,
+                bdf,
+                || {
+                    let spi = first?;
+                    let (a, d) = f.compose(spi);
+                    Ok((spi, a, d))
+                },
+                want,
+                |_| {
+                    let spi = frame.alloc().ok_or(Why::NoVector)?;
+                    let (a, d) = frame.compose(spi);
+                    Ok((spi, a, d))
+                },
+            )
+        }
+        (None, None) => Err(Why::NoMsiSource),
     }
 }
 
+/// Pairs 1.. get further vectors of the local APIC; the destination is
+/// written when the pair's core is known ([`route_net_queue`]).
 #[cfg(target_arch = "x86_64")]
 fn net_msix<C: ConfigSpace>(
     cfg: &mut C,
     bdf: Bdf,
     frame: &mut Option<msi::Frame>,
     _its: &mut Option<()>,
-) -> Result<u32, Why> {
-    setup_msix(cfg, bdf, frame.as_mut())
+    want: usize,
+) -> Result<(u32, NetQueueVectors), Why> {
+    let Some(frame) = frame.as_mut() else {
+        return Err(Why::NoMsiSource);
+    };
+    let first = frame.alloc().ok_or(Why::NoVector);
+    let f = *frame;
+    setup_msix_queues(
+        cfg,
+        bdf,
+        || {
+            let v = first?;
+            let (a, d) = f.compose(v);
+            Ok((v, a, d))
+        },
+        want,
+        |_| {
+            let v = frame.alloc().ok_or(Why::NoVector)?;
+            let (a, d) = frame.compose(v);
+            Ok((v, a, d))
+        },
+    )
 }
 
 /// A PCI function's requester ID: the ITS device ID on QEMU's `virt`.
@@ -858,7 +1068,19 @@ fn requester_id(bdf: Bdf) -> u32 {
 
 /// Enumerates PCIe, maps and initialises the virtio devices and seeds the
 /// CSPRNG. Must run before the page tables are locked.
-pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), ProbeError> {
+pub fn probe(
+    platform: &PlatformInfo,
+    bootloader_entropy: &[u64],
+    cpus: u64,
+) -> Result<(), ProbeError> {
+    let want =
+        if urmqtt_config::CONFIG.devices.virtio_net_queues == urmqtt_config::NetQueues::Single {
+            1
+        } else {
+            (cpus as usize).clamp(1, MAX_PAIRS)
+        };
+    // Relaxed: read by this CPU in `probe_pci` below.
+    NET_WANT_PAIRS.store(want, Ordering::Relaxed);
     let env = KernelEnv::RUNTIME;
     let mut pool = EntropyPool::new();
     let mut facts = EntropyFacts {
@@ -1315,14 +1537,29 @@ fn probe_pci(
                 // receive queue, unless the configuration forces polling.
                 // Sizing the BARs (in `transport`) comes first, as for blk.
                 let t = transport(&mut ecam, f.bdf, &caps, false)?;
-                let msix = if urmqtt_config::CONFIG.devices.virtio_net_interrupt
+                // Relaxed: stored by this CPU in `probe`.
+                let want = NET_WANT_PAIRS.load(Ordering::Relaxed);
+                let (msix, vectors) = if urmqtt_config::CONFIG.devices.virtio_net_interrupt
                     == urmqtt_config::NetInterrupt::Off
                 {
-                    Err(Why::Configured)
+                    (Err(Why::Configured), NetQueueVectors::all(Why::Configured))
                 } else {
-                    net_msix(&mut ecam, f.bdf, &mut v2m, &mut its)
+                    match net_msix(&mut ecam, f.bdf, &mut v2m, &mut its, want) {
+                        Ok((spi, v)) => (Ok(spi), v),
+                        Err(why) => (Err(why), NetQueueVectors::all(why)),
+                    }
                 };
-                let net = VirtioNet::new_with_msix(t, env, msix.ok().map(|_| 0))?;
+                // Pair k's receive queue signals MSI-X entry k (NEXT-6, ADR-311).
+                let net = VirtioNet::new_multi(t, env, want, |k| {
+                    let ok = if k == 0 { msix.is_ok() } else { vectors.has(k) };
+                    ok.then_some(k)
+                })?;
+                for r in vectors.irq.iter().skip(1).flatten() {
+                    // Counted from now on; aimed at the pair's core and
+                    // unmasked when that core starts.
+                    irq::register(r.0, on_net_queue_irq);
+                }
+                *NET_QUEUE_VECTORS.lock() = vectors;
                 devs.net_wake = match msix {
                     Ok(spi) if net.rx_irq => {
                         // Counted, and acknowledged, from now on; routed to

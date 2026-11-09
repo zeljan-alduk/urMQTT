@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::sys::{
-    self, Backpressure, Drops, Handshakes, Info, IommuSys, Mqtt5Info, PerAddress, PlainInfo, Qos2,
-    WsInfo, topic_names,
+    self, Backpressure, Drops, Handshakes, Info, IommuSys, Mqtt5Info, NetQueueSys, PerAddress,
+    PlainInfo, Qos2, WsInfo, topic_names,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,6 +32,20 @@ fn full<'a>(busy: &'a [u8], accepted: &'a [u64]) -> Info<'a> {
         entropy_source: "virtio-rng+rndr",
         console_dropped: 2,
         net_mtu: 1500,
+        net_queues: &[
+            NetQueueSys {
+                received: 40,
+                sent: 41,
+                forwarded: 0,
+                interrupts: 3,
+            },
+            NetQueueSys {
+                received: 50,
+                sent: 51,
+                forwarded: 1,
+                interrupts: 4,
+            },
+        ],
         drops: Drops {
             slow_subscriber: 1,
             offline: 2,
@@ -286,6 +300,7 @@ fn rules_are_well_formed() {
                 matches!(
                     *l,
                     "core"
+                        | "queue"
                         | "reason"
                         | "code"
                         | "listener"

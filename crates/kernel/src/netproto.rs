@@ -1,12 +1,17 @@
 //! Per-core network loops on the own stack (M14, ADR-033; multicore since
 //! M13, ADR-032).
 //!
-//! Core 0 owns the single virtio-net queue pair. It steers TCP frames for
-//! the MQTT ports to their flow's worker core (Toeplitz hash) and keeps
+//! Core 0 owns the NIC's first virtio-net queue pair. It steers TCP frames
+//! for the MQTT ports to their flow's worker core (Toeplitz hash) and keeps
 //! everything else: ARP, ICMP echo, DHCP and the dev echo port. It also
 //! transmits the frames the workers send back. Every data core runs its
 //! own `urmqtt-net` interface and `urmqtt-tcp` stack with the same
 //! addresses; core 0 publishes the DHCP lease to the others.
+//!
+//! With a multiqueue NIC whose RSS steers flows (NEXT-6, ADR-311), worker
+//! c owns pair c: the device puts c's flows on it, c transmits on it, and
+//! a frame that is not c's goes to core 0 over the c→0 ring (forwarded) to
+//! be steered as if it had arrived on pair 0.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
@@ -19,8 +24,12 @@ use urmqtt_net::Class;
 use urmqtt_net::dhcp;
 use urmqtt_net::iface::{Event, Iface, Rx};
 use urmqtt_tcp::{App, CloseReason, ConnId, Endpoint, TcpStack, mss_for_mtu};
-use urmqtt_virtio::net::{MTU_FRAME, VirtioNet};
+use urmqtt_virtio::bus::Doorbell;
+use urmqtt_virtio::net::{MAX_PAIRS, MTU_FRAME, NetQueue, RSS_TABLE_LEN, VirtioNet};
 use urmqtt_virtio::wake::{Change, Mode, RxWake, Why};
+
+// The device's table and the kernel's steering are the same table (ADR-311).
+const _: () = assert!(RSS_TABLE_LEN == urmqtt_net::rss::TABLE_LEN);
 
 use crate::dataplane::{self, CoreMsg, DropSite, Frame, Link, POOL_MAX, new_frame};
 use crate::db::Restored;
@@ -479,6 +488,9 @@ static MAC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0
 static RESTORED: urmqtt_sync::sync::SpinLock<Option<Arc<Restored>>> =
     urmqtt_sync::sync::SpinLock::new(None);
 static NIC: urmqtt_sync::sync::SpinLock<Option<VirtioNet>> = urmqtt_sync::sync::SpinLock::new(None);
+/// The NIC's pairs 1.. for the worker cores that own them (ADR-311).
+static NET_QUEUES: urmqtt_sync::sync::SpinLock<[Option<NetQueue<Doorbell>>; MAX_PAIRS]> =
+    urmqtt_sync::sync::SpinLock::new([const { None }; MAX_PAIRS]);
 /// The NIC's receive interrupt (its SPI or vector) and the dispatcher's
 /// wake-up mode, handed over with the NIC (ADR-270).
 static NIC_WAKE: urmqtt_sync::sync::SpinLock<(Option<u32>, Mode)> =
@@ -492,15 +504,149 @@ pub fn prepare(restored: Option<Arc<Restored>>) {
         let mut devs = devices::DEVICES.lock();
         (devs.net.take(), devs.net_msix_spi, devs.net_wake)
     };
-    let Some(net) = net else {
+    let Some(mut net) = net else {
         return;
     };
+    multiqueue(&mut net, dataplane::data_cores());
     *NIC_WAKE.lock() = (spi, wake);
     let m = net.mac;
     let packed = u64::from_be_bytes([0, 0, m[0], m[1], m[2], m[3], m[4], m[5]]);
     // Release: read by the other data cores when they start.
     MAC.store(packed, core::sync::atomic::Ordering::Release);
     *NIC.lock() = Some(net);
+}
+
+/// With two or more pairs set up and two or more data cores: programs the
+/// device's RSS with the steering table (ADR-311), switches the software
+/// steering to it and hands pairs 1.. to their cores. Pair c belongs to core
+/// c; the table sends the flows of a core without a pair (more cores than
+/// pairs) to pair 0, where core 0 steers them as before. Anything else
+/// leaves one pair, which [`run_core0`] reports.
+fn multiqueue(net: &mut VirtioNet, n: usize) {
+    if net.pairs < 2 {
+        return;
+    }
+    let active = usize::from(net.pairs).min(n);
+    let cores = dataplane::steer_table(n);
+    let table: [u16; RSS_TABLE_LEN] = core::array::from_fn(|i| {
+        let c = cores.get(i).copied().unwrap_or(0);
+        if c < active { c as u16 } else { 0 }
+    });
+    if net
+        .enable_rss(
+            &devices::KernelEnv::RUNTIME,
+            &table,
+            active as u16,
+            &urmqtt_net::rss::DEFAULT_KEY,
+        )
+        .is_err()
+    {
+        return;
+    }
+    dataplane::steer_by_table();
+    // Relaxed: statistics, written before the other data cores start.
+    dataplane::QUEUE_PAIRS.store(active as u64, core::sync::atomic::Ordering::Relaxed);
+    let mut qs = NET_QUEUES.lock();
+    for k in 1..active {
+        if let Some(slot) = qs.get_mut(k) {
+            *slot = net.take_queue(k as u16);
+        }
+    }
+}
+
+/// Logs a NIC queue pair's counters every 5 s while it moves frames
+/// (multiqueue only, ADR-312).
+struct QueueLog {
+    pair: usize,
+    next_ms: u64,
+    last: [u64; 6],
+    last_irqs: u64,
+}
+
+impl QueueLog {
+    fn new(pair: usize, now: u64) -> Self {
+        Self {
+            pair,
+            next_ms: now + TcpStatsLog::EVERY_MS,
+            last: [0; 6],
+            last_irqs: devices::net_queue_irqs(pair),
+        }
+    }
+
+    fn tick(&mut self, now: u64) {
+        if now < self.next_ms {
+            return;
+        }
+        self.next_ms = now + TcpStatsLog::EVERY_MS;
+        let Some(c) = dataplane::QUEUES.get(self.pair) else {
+            return;
+        };
+        let r = core::sync::atomic::Ordering::Relaxed;
+        // Relaxed: statistics.
+        let now_v = [
+            c.received.load(r),
+            c.sent.load(r),
+            c.forwarded.load(r),
+            c.tx_full.load(r),
+            c.armed.load(r),
+            c.missed.load(r),
+        ];
+        let irqs = devices::net_queue_irqs(self.pair);
+        let d = |i: usize| {
+            now_v
+                .get(i)
+                .copied()
+                .unwrap_or(0)
+                .saturating_sub(self.last.get(i).copied().unwrap_or(0))
+        };
+        if d(0) != 0 || d(1) != 0 {
+            info!(
+                "net: queue pair {} (core {}): {} frame(s) received, {} sent, {} forwarded to core 0, {} with the transmit queue full, \
+                 {} receive interrupt(s) ({} armed sleep(s), {} ended with a frame and no interrupt), receive queue peak {} of {}",
+                self.pair,
+                crate::smp::current(),
+                d(0),
+                d(1),
+                d(2),
+                d(3),
+                irqs.wrapping_sub(self.last_irqs),
+                d(4),
+                d(5),
+                c.peak.swap(0, r),
+                c.size.load(r),
+            );
+        }
+        self.last = now_v;
+        self.last_irqs = irqs;
+    }
+}
+
+/// Publishes a pair's counters (Relaxed: statistics).
+fn publish_queue(pair: usize, q: &NetQueue<Doorbell>, forwarded: u64) {
+    if let Some(c) = dataplane::QUEUES.get(pair) {
+        let r = core::sync::atomic::Ordering::Relaxed;
+        c.received.store(q.stats.received, r);
+        c.sent.store(q.stats.sent, r);
+        c.tx_full.store(q.stats.tx_full, r);
+        c.forwarded.store(forwarded, r);
+        c.peak.fetch_max(u64::from(q.rx_queued()), r);
+    }
+}
+
+/// The core a frame belongs to when it is a TCP frame of an MQTT flow (the
+/// dispatcher's rule); `None`: core 0's (ARP, ICMP, DHCP, the echo port).
+fn owner(frame: &[u8], n: usize) -> Option<usize> {
+    match urmqtt_net::classify(frame) {
+        Class::Tcp {
+            src,
+            dst,
+            sport,
+            dport,
+        } if n > 1 && is_mqtt_port(dport) => {
+            Some(dataplane::core_of_flow(src, dst, sport, dport, n))
+        }
+        _ => None,
+    }
 }
 
 /// The restored state for core 0 (also kept for the other cores).
@@ -537,6 +683,42 @@ pub fn run(me: usize, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     }
 }
 
+/// The wake-up mode of worker `me`'s own NIC pair (ADR-311): its MSI-X
+/// vector aimed at this core, or why it is polled. Logs the boot line.
+fn worker_queue_wake(me: usize, q: &NetQueue<Doorbell>) -> Mode {
+    let mode = if q.msix_rejected {
+        Mode::Polling(Why::Rejected)
+    } else if !q.rx_irq {
+        Mode::Polling(devices::net_queue_why(me))
+    } else {
+        match devices::route_net_queue(me, me) {
+            Ok(id) => {
+                info!(
+                    "net: queue pair {me} on core {me}: {} receive and {} transmit descriptor(s); receive wake-up: \
+                     interrupt (MSI-X via {} {id}, to core {me}), on probation until {} frames have woken this core by it",
+                    q.rx_size,
+                    q.tx_size,
+                    msi_name(id),
+                    urmqtt_virtio::wake::VERIFY_HITS,
+                );
+                return Mode::Interrupt;
+            }
+            Err(why) => Mode::Polling(why),
+        }
+    };
+    if let Mode::Polling(why) = mode {
+        info!(
+            "net: queue pair {me} on core {me}: {} receive and {} transmit descriptor(s); receive wake-up: \
+             polling every {} us while this core has connections ({})",
+            q.rx_size,
+            q.tx_size,
+            NIC_POLL_NS / 1000,
+            why.text()
+        );
+    }
+    mode
+}
+
 fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
     let (Some(mut rx), Some(mut tx)) = (link.frames_in.take(), link.frames_out.take()) else {
         warn!("net: core {me} has no frame rings, idling");
@@ -544,6 +726,25 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
             cpu::wait_for_interrupt();
         }
     };
+    let n = link.n;
+    // This core's own NIC pair, when the device steers flows (ADR-311).
+    let mut nq: Option<NetQueue<Doorbell>> = NET_QUEUES.lock().get_mut(me).and_then(Option::take);
+    let mut wake = RxWake::new(Mode::Polling(Why::NoMsix));
+    let mut qlog = nq.as_ref().map(|_| QueueLog::new(me, now_ms()));
+    if let Some(q) = nq.as_ref() {
+        wake = RxWake::new(worker_queue_wake(me, q));
+        if let Some(c) = dataplane::QUEUES.get(me) {
+            // Relaxed: statistics.
+            c.size
+                .store(u64::from(q.rx_size), core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let mut last_traffic_ns = 0u64;
+    let mut forwarded = 0u64;
+    // Received on the own pair, this core's; frames waiting for transmit
+    // descriptors of the own pair (a full queue is a reason to wait, ADR-223).
+    let mut inq: VecDeque<Frame> = VecDeque::new();
+    let mut nic_q: VecDeque<Frame> = VecDeque::new();
     let mut iface = Iface::new(mac(), false, None, now_ms());
     let mut mqtt = MqttService::new(restored.as_deref(), me, link.n);
     // Until core 0 says otherwise (its IpConfig carries the MTU in use).
@@ -558,26 +759,76 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
         let now = now_ms();
         cookies.tick(&mut tcp, now);
         tcpstats.tick(&tcp, now);
+        if let Some(l) = qlog.as_mut() {
+            l.tick(now);
+        }
         let t = time::uptime_ns();
         let mut activity = drain_mesh(&mut link, &mut mqtt, &mut iface, &mut tcp, now);
         idle.prof.mesh += time::uptime_ns() - t;
         let mut sent = false;
+        // The own pair: this core's flows stay, anything else goes to core 0.
+        if let Some(q) = nq.as_mut() {
+            let t = time::uptime_ns();
+            for _ in 0..RX_BURST {
+                let mut f = pool.pop().unwrap_or_else(new_frame);
+                match q.recv(&mut f.data) {
+                    Ok(Some(len)) => f.len = len,
+                    _ => {
+                        pool.push(f);
+                        break;
+                    }
+                }
+                activity = true;
+                if owner(f.data.get(..f.len).unwrap_or(&[]), n) == Some(me) {
+                    inq.push_back(f);
+                } else {
+                    f.rx = true;
+                    match tx.push(f) {
+                        Ok(()) => {
+                            forwarded += 1;
+                            sent = true;
+                        }
+                        Err(f) => {
+                            dataplane::drop_frame(DropSite::WorkerTx);
+                            pool.push(f);
+                        }
+                    }
+                }
+            }
+            idle.prof.disp += time::uptime_ns() - t;
+        }
         let mut done: Vec<Frame> = Vec::new();
         {
             let mut emit = |f: &[u8]| {
+                if let Some(q) = nq.as_mut() {
+                    if nic_q.is_empty() && q.queue(f).is_ok() {
+                        return;
+                    }
+                    if nic_q.len() >= NIC_BACKLOG {
+                        dataplane::drop_frame(DropSite::NicTx);
+                        return;
+                    }
+                }
                 let mut frame = pool.pop().unwrap_or_else(new_frame);
                 let n = f.len().min(MTU_FRAME);
                 frame.len = n;
+                frame.rx = false;
                 if let (Some(d), Some(s)) = (frame.data.get_mut(..n), f.get(..n)) {
                     d.copy_from_slice(s);
+                }
+                if nq.is_some() {
+                    nic_q.push_back(frame);
+                    return;
                 }
                 if tx.push(frame).is_err() {
                     dataplane::drop_frame(DropSite::WorkerTx);
                 }
                 sent = true;
             };
-            for _ in 0..RX_BURST {
-                let Some(f) = rx.pop() else { break };
+            for _ in 0..RX_BURST * 2 {
+                let Some(f) = inq.pop_front().or_else(|| rx.pop()) else {
+                    break;
+                };
                 activity = true;
                 let t = time::uptime_ns();
                 if let Rx::Tcp { src, seg } =
@@ -615,6 +866,24 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
             tcp.flush(now, &mut |dst, s| iface.send_tcp(dst, s, &mut emit));
             idle.prof.tcp += time::uptime_ns() - t;
         }
+        if let Some(q) = nq.as_mut() {
+            let before = q.stats.sent;
+            while let Some(f) = nic_q.front() {
+                if q.queue(f.data.get(..f.len).unwrap_or(&[])).is_err() {
+                    break;
+                }
+                if let Some(f) = nic_q.pop_front() {
+                    done.push(f);
+                }
+            }
+            q.flush();
+            if q.stats.sent != before || activity {
+                last_traffic_ns = time::uptime_ns();
+            }
+            publish_queue(me, q, forwarded);
+            // Still waiting for descriptors: keep this core polling.
+            activity |= !nic_q.is_empty();
+        }
         link.flush();
         pool.append(&mut done);
         pool.truncate(POOL_MAX);
@@ -634,9 +903,68 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
         if sent {
             dataplane::wake(0);
         }
-        idle.pass(activity || sent || tcp.has_pending(), || {
-            link.pending() || !rx.is_empty()
-        });
+        let busy = activity || sent || tcp.has_pending() || !inq.is_empty();
+        let Some(q) = nq.as_ref() else {
+            idle.pass(busy, || link.pending() || !rx.is_empty());
+            continue;
+        };
+        // The own pair: ADR-270's wake-up, per queue (ADR-311). This core's
+        // own connections decide the poll: its flows arrive on its pair.
+        let plan = wake.plan(
+            tcp.connections() > 0,
+            time::uptime_ns().saturating_sub(last_traffic_ns),
+            NIC_POLL_NS,
+        );
+        idle.poll_wake(plan.poll_ns);
+        let irq = plan.arm;
+        if irq {
+            wake.armed(devices::net_queue_irqs(me));
+        }
+        let slept = idle.pass_armed(
+            busy,
+            |on| {
+                if !irq {
+                    false
+                } else if on {
+                    q.rx_irq_arm()
+                } else {
+                    q.rx_irq_disarm();
+                    false
+                }
+            },
+            || link.pending() || !rx.is_empty() || q.rx_pending(),
+        );
+        let (irqs_now, waiting) = (devices::net_queue_irqs(me), q.rx_pending());
+        if slept
+            && irq
+            && let Some(c) = dataplane::QUEUES.get(me)
+        {
+            // Relaxed: statistics.
+            c.armed.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if waiting && irqs_now == wake.irqs_at_arm() {
+                c.missed.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let change = if slept && irq {
+            wake.after_sleep(irqs_now, waiting)
+        } else {
+            Change::None
+        };
+        match change {
+            Change::Verified => info!(
+                "net: receive interrupt of queue pair {me} verified: {} frames woke core {me} by it ({} ms after boot); no polling while the queue is quiet",
+                urmqtt_virtio::wake::VERIFY_HITS,
+                time::uptime_ns() / 1_000_000
+            ),
+            Change::FellBack => warn!(
+                "net: receive wake-up of queue pair {me}: {} frames waited after sleeps without the receive interrupt; \
+                 polling every {} us while core {me} has connections from now on ({})",
+                urmqtt_virtio::wake::MISSES_BEFORE_POLLING,
+                NIC_POLL_NS / 1000,
+                Why::Silent.text()
+            ),
+            Change::None => {}
+        }
     }
 }
 
@@ -664,33 +992,7 @@ fn dispatch(
         }
         moved = true;
         dataplane::DISPATCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        match urmqtt_net::classify(f.data.get(..f.len).unwrap_or(&[])) {
-            Class::Tcp {
-                src,
-                dst,
-                sport,
-                dport,
-            } if n > 1 && is_mqtt_port(dport) => {
-                let core = dataplane::core_of_flow(src, dst, sport, dport, n);
-                if core == 0 {
-                    local.push_back(f);
-                } else if let Some(tx) = link.steer.get_mut(core).and_then(Option::as_mut) {
-                    match tx.push(f) {
-                        Ok(()) => steered = true,
-                        Err(f) => {
-                            dataplane::drop_frame(DropSite::Steer);
-                            pool.push(f);
-                        }
-                    }
-                }
-            }
-            _ => local.push_back(f),
-        }
-    }
-    if steered {
-        for core in 1..n {
-            dataplane::wake(core);
-        }
+        steered |= steer(f, n, &mut link.steer, pool, local);
     }
     // Frames from the workers go to the NIC. A full transmit queue is a
     // reason to wait, not to drop: they stay here (up to NIC_BACKLOG) and
@@ -710,9 +1012,16 @@ fn dispatch(
     }
     for rx in link.collect.iter_mut().flatten() {
         while nic_q.len() < NIC_BACKLOG {
-            let Some(f) = rx.pop() else { break };
+            let Some(mut f) = rx.pop() else { break };
             moved = true;
             dataplane::DISPATCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if f.rx {
+                // Received on a worker's own pair, not that worker's flow
+                // (ADR-311): steered as if it had arrived here.
+                f.rx = false;
+                steered |= steer(f, n, &mut link.steer, pool, local);
+                continue;
+            }
             if nic_q.is_empty() && net.queue(f.data.get(..f.len).unwrap_or(&[])).is_ok() {
                 if pool.len() < POOL_MAX {
                     pool.push(f);
@@ -723,10 +1032,47 @@ fn dispatch(
             }
         }
     }
+    if steered {
+        for core in 1..n {
+            dataplane::wake(core);
+        }
+    }
     // Still waiting for descriptors: keep this core polling.
     moved |= !nic_q.is_empty();
     net.flush();
     moved
+}
+
+/// Steers one received frame (the dispatcher's rule): a TCP frame of an
+/// MQTT flow to the core that owns the flow, everything else to core 0's
+/// own stack. Returns whether it went to another core.
+fn steer(
+    f: Frame,
+    n: usize,
+    steer: &mut [Option<urmqtt_sync::spsc::Producer<'static, Frame, { dataplane::FRAME_RING }>>],
+    pool: &mut Vec<Frame>,
+    local: &mut VecDeque<Frame>,
+) -> bool {
+    match owner(f.data.get(..f.len).unwrap_or(&[]), n) {
+        Some(core) if core != 0 => match steer.get_mut(core).and_then(Option::as_mut) {
+            Some(tx) => match tx.push(f) {
+                Ok(()) => true,
+                Err(f) => {
+                    dataplane::drop_frame(DropSite::Steer);
+                    pool.push(f);
+                    false
+                }
+            },
+            None => {
+                pool.push(f);
+                false
+            }
+        },
+        _ => {
+            local.push_back(f);
+            false
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -800,7 +1146,36 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         u64::from(net.rx_size),
         core::sync::atomic::Ordering::Relaxed,
     );
-    if n > 1 {
+    // Relaxed: written by `prepare` on this CPU.
+    let pairs = dataplane::QUEUE_PAIRS.load(core::sync::atomic::Ordering::Relaxed) as usize;
+    if let Some(c) = dataplane::QUEUES.first() {
+        // Relaxed: statistics.
+        c.size.store(
+            u64::from(net.rx_size),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    let mut qlog = (pairs > 1).then(|| QueueLog::new(0, now_ms()));
+    if n > 1 && pairs > 1 {
+        info!(
+            "net: multiqueue: {pairs} queue pairs (the device offers {}), RSS with the Toeplitz key and a {}-entry table: \
+             core c of 1..={} receives and sends its own flows on pair c; pair 0 (core 0) takes ARP, ICMP, DHCP{}, \
+             and core 0 steers what arrives there{}",
+            net.limits.max_pairs,
+            RSS_TABLE_LEN,
+            pairs - 1,
+            if n > pairs {
+                alloc::format!(" and the flows of the {} core(s) without a pair", n - pairs)
+            } else {
+                alloc::string::String::new()
+            },
+            if dataplane::dispatcher_serves() {
+                "; core 0 is among the workers (cpu.dispatcher_serves)"
+            } else {
+                ""
+            }
+        );
+    } else if n > 1 {
         info!(
             "net: dispatcher mode: core 0 owns the single virtio-net queue pair and steers MQTT flows to {} worker core(s) (Toeplitz hash){}",
             dataplane::workers(n).len(),
@@ -810,6 +1185,22 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
                 ""
             }
         );
+    }
+    // Why not one pair per core (ADR-310); not said where nothing was asked
+    // of the device that a plain one could not answer.
+    if pairs == 1 {
+        use urmqtt_virtio::net::Single;
+        if net.pairs > 1 {
+            info!(
+                "net: one queue pair: one data core (the NIC offers {}; two or more data cores would use them)",
+                net.limits.max_pairs
+            );
+        } else if let Some(why) = net.single
+            && why != Single::NotAsked
+            && (why != Single::NoMq || net.features & urmqtt_virtio::net::F_MQ != 0)
+        {
+            info!("net: one queue pair: {}", why.text());
+        }
     }
     let mut xid = [0u8; 4];
     // Fail closed (H0-W6), as for the cookie key.
@@ -875,8 +1266,14 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             );
         }
         dataplane::mem_report(now, &mut mem_last, &mut mem_conns);
+        if let Some(l) = qlog.as_mut() {
+            l.tick(now);
+        }
         let t = time::uptime_ns();
         let mut activity = dispatch(&mut net, &mut link, &mut pool, &mut local, &mut nic_q);
+        if pairs > 1 {
+            publish_queue(0, &net, 0);
+        }
         if activity {
             last_traffic_ns = time::uptime_ns();
         }
@@ -1099,8 +1496,14 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         if slept && irq {
             // Relaxed: statistics.
             dataplane::NIC_ARMED_SLEEPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if let Some(c) = dataplane::QUEUES.first() {
+                c.armed.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
             if waiting && irqs_now == wake.irqs_at_arm() {
                 dataplane::NIC_MISSED_WAKES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if let Some(c) = dataplane::QUEUES.first() {
+                    c.missed.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
         let change = if slept && irq {

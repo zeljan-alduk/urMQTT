@@ -14,10 +14,11 @@
 use alloc::string::String;
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-use urmqtt_broker::sys::{self, Command, Info, Level, Limiter, Refused};
+use urmqtt_broker::sys::{self, Command, Info, Level, Limiter, NetQueueSys, Refused};
 use urmqtt_broker::{Broker, SysKind, SysRequest};
 use urmqtt_config::LogLevel;
 use urmqtt_log::{debug, warn};
+use urmqtt_virtio::net::MAX_PAIRS;
 
 use crate::dataplane;
 use crate::smp::MAX_CPUS;
@@ -153,7 +154,8 @@ impl Sys {
         if now_ms >= self.next_refresh_ms {
             self.next_refresh_ms = now_ms + REFRESH_MS;
             let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
-            let info = collect(&mut busy, &mut accepted);
+            let mut queues = [NetQueueSys::default(); MAX_PAIRS];
+            let info = collect(&mut busy, &mut accepted, &mut queues);
             sys::topics(&info, |t, v| broker.sys_publish_retained(t, v.as_bytes()));
             if let Some(report) = crate::diag::served_report() {
                 broker.sys_publish_retained("$SYS/diag/report", report.as_bytes());
@@ -300,7 +302,8 @@ impl Sys {
         // connected after that report.
         self.report(broker, now_ms);
         let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
-        let info = collect(&mut busy, &mut accepted);
+        let mut queues = [NetQueueSys::default(); MAX_PAIRS];
+        let info = collect(&mut busy, &mut accepted, &mut queues);
         broker.sys_publish(sys::QUERY_INFO_RESPONSE, sys::json(&info).as_bytes());
     }
 
@@ -339,7 +342,8 @@ impl Sys {
             }
             Command::Status => {
                 let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
-                let info = collect(&mut busy, &mut accepted);
+                let mut queues = [NetQueueSys::default(); MAX_PAIRS];
+                let info = collect(&mut busy, &mut accepted, &mut queues);
                 for l in sys::status_lines(
                     &info,
                     level_name(urmqtt_log::level()),
@@ -373,9 +377,29 @@ impl Sys {
 }
 
 /// The numbers of all cores: what `$SYS/broker/...`, `status` and the query
-/// report. `busy` holds the per-core percentages (and bounds the core count).
-pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPUS]) -> Info<'a> {
+/// report. `busy` holds the per-core percentages (and bounds the core count);
+/// `queues` the NIC's queue pairs in use (ADR-312).
+pub fn collect<'a>(
+    busy: &'a mut [u8; MAX_CPUS],
+    accepted: &'a mut [u64; MAX_CPUS],
+    queues: &'a mut [NetQueueSys; MAX_PAIRS],
+) -> Info<'a> {
     let cores = crate::smp::count().clamp(1, MAX_CPUS);
+    // Relaxed: statistics.
+    let pairs = (dataplane::QUEUE_PAIRS.load(Ordering::Relaxed) as usize).clamp(1, MAX_PAIRS);
+    for (k, (q, c)) in queues
+        .iter_mut()
+        .zip(dataplane::QUEUES.iter())
+        .enumerate()
+        .take(pairs)
+    {
+        *q = NetQueueSys {
+            received: c.received.load(Ordering::Relaxed),
+            sent: c.sent.load(Ordering::Relaxed),
+            forwarded: c.forwarded.load(Ordering::Relaxed),
+            interrupts: crate::devices::net_queue_irqs(k),
+        };
+    }
     for (b, a) in busy.iter_mut().zip(BUSY.iter()) {
         *b = a.load(Ordering::Relaxed);
     }
@@ -444,6 +468,7 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
         entropy_source: crate::devices::entropy_source_name(),
         console_dropped: CONSOLE_DROPPED.load(Ordering::Relaxed),
         net_mtu: crate::netproto::mtu().0,
+        net_queues: queues.get(..pairs).unwrap_or(&[]),
         drops,
         qos2,
         backpressure: bp,
