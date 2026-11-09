@@ -834,6 +834,11 @@ struct Sess {
     granted_rap: HashSet<String>,
     /// Its subscriptions now (Retain Handling 1).
     current: HashSet<String>,
+    /// Subscriptions it dropped (UNSUBSCRIBE), each with the first message
+    /// registry entry published after: a message published before still
+    /// had that way in, and the copy queued through it may still come
+    /// (§3.10.4: buffered messages MAY still be delivered).
+    left: Vec<(u32, String)>,
     /// Filters (inside the share) of its shared subscriptions, granted at
     /// some point (ADR-275).
     shared: HashSet<String>,
@@ -1169,9 +1174,12 @@ impl Harness {
                     return self.settle();
                 }
                 let s = self.slots[*slot].as_ref().expect("accepted");
+                let next = self.sent.len() as u32;
                 if let Some(sess) = self.sessions.get_mut(&s.key) {
                     for f in filters {
-                        sess.current.remove(f);
+                        if sess.current.remove(f) {
+                            sess.left.push((next, f.clone()));
+                        }
                     }
                 }
                 let list: Vec<&str> = filters.iter().map(String::as_str).collect();
@@ -1635,6 +1643,7 @@ impl Harness {
                     sess.granted.extend(msgs.iter().map(|(t, _)| t.clone()));
                     sess.granted_local = sess.granted.clone();
                     sess.current = subs.iter().map(|(f, _)| f.clone()).collect();
+                    sess.left.clear();
                     sess.awaiting = (1..=*ids).collect();
                     // Stored before schema 4: the 3.1.1 default, from now.
                     sess.expiry = DEFAULT_EXPIRY;
@@ -2156,23 +2165,24 @@ impl Harness {
             && let Some(seq) = seq
         {
             let sess = self.sessions.get_mut(&key).expect("session");
-            // A shared and an ordinary subscription are two ways in.
             // Every subscription the message matches is one way in: all the
             // ordinary ones together (one copy), each shared filter by
             // itself (`$share/g/fleet/#` and `fleet/#` are two, and so are
             // `$share/g/fleet/all` and `$share/g/fleet/#`). Read from the
             // full filters the session holds, not from the inner text the
-            // shared set and the grants share.
-            let ways = sess
+            // shared set and the grants share; and from those it dropped
+            // after the message was published: the copy queued through one
+            // may still come after the UNSUBSCRIBE.
+            let held: HashSet<&String> = sess
                 .current
+                .iter()
+                .chain(sess.left.iter().filter(|(at, _)| *at > seq).map(|(_, f)| f))
+                .collect();
+            let ways = held
                 .iter()
                 .filter(|f| is_share(f) && matches(inner(f), topic))
                 .count()
-                + usize::from(
-                    sess.current
-                        .iter()
-                        .any(|f| !is_share(f) && matches(f, topic)),
-                );
+                + usize::from(held.iter().any(|f| !is_share(f) && matches(f, topic)));
             let two_ways = ways >= 2;
             match sess.q2.get(&seq) {
                 // Two flows with two ids carry the one message: one record
