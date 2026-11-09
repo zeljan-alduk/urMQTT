@@ -263,6 +263,8 @@ Every `$SYS/broker/...` topic has one; this is the mapping for the ones to build
 | `urmqtt_time_offset_seconds` | gauge | `time/offset_ms` | last SNTP step; **absent** until measured |
 | `urmqtt_version_info{version}`, `_arch_info{arch}`, `_time_source_info{source}`, `_entropy_source_info{source}` | gauge (1) | `version`, `arch`, `time/source`, `entropy/source` | the text is the label |
 | `urmqtt_listener_*{listener="plaintext"\|"websocket"}`, `urmqtt_websocket_*`, `urmqtt_plaintext_*` | gauge, counter | `plaintext/*`, `websocket/*` | `urmqtt_listener_enabled` is 0 for a listener that is off, and no other series exists for it |
+| `urmqtt_connections_per_address_*` (`limit`, `established`, `addresses`, `peak` gauges; `syn_dropped_total`, `refused_total`, `untracked_total` counters) | gauge, counter | `connections/per_address/*` | the limit on established TLS connections per source address (ADR-280): an address at its limit shows as `refused` and `syn_dropped` growing |
+| `urmqtt_iommu_mode_info{mode}`, `urmqtt_iommu_state_info{state}`, `urmqtt_iommu_units`, `_domains`, `_pages`, `urmqtt_iommu_faults_total`, `urmqtt_iommu_fault_overflows_total` | gauge, counter | `iommu/*` | DMA remapping (ADR-305): what the IOMMU gave, and the DMA it blocked (any fault is worth an alert) |
 | `urmqtt_metrics_*` | gauge, counter | (the endpoint's own) | connections, accepted, refused by reason (`source`, `limit`), requests by result (`ok`, `malformed`, `too_large`, `method`, `version`, `not_found`), timeouts |
 
 The full list is `urmqtt_broker::metrics::RULES` (`crates/broker/src/metrics.rs`); a test fails when a `$SYS` topic

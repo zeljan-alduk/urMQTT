@@ -4,7 +4,8 @@
 
 use super::*;
 use crate::sys::{
-    self, Backpressure, Drops, Handshakes, Info, Mqtt5Info, PlainInfo, Qos2, WsInfo, topic_names,
+    self, Backpressure, Drops, Handshakes, Info, IommuSys, Mqtt5Info, PerAddress, PlainInfo, Qos2,
+    WsInfo, topic_names,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -92,6 +93,24 @@ fn full<'a>(busy: &'a [u8], accepted: &'a [u64]) -> Info<'a> {
             latency_max_ms: 250,
         },
         accepted,
+        per_address: PerAddress {
+            limit: 1024,
+            established: 5,
+            addresses: 3,
+            peak: 4,
+            syn_dropped: 6,
+            refused: 7,
+            untracked: 1,
+        },
+        iommu: IommuSys {
+            mode: "require",
+            state: "active",
+            units: 1,
+            domains: 3,
+            pages: 40,
+            faults: 2,
+            overflows: 0,
+        },
         plaintext: PlainInfo {
             enabled: true,
             port: 1884,
@@ -277,6 +296,7 @@ fn rules_are_well_formed() {
                         | "arch"
                         | "source"
                         | "mode"
+                        | "state"
                         | "auth"
                 ),
                 "{}: label {l} is not on the list of bounded labels",

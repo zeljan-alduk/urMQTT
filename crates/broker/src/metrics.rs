@@ -320,6 +320,78 @@ pub static RULES: &[Rule] = &[
         "MQTT 5.0 CONNECT packets refused, by CONNACK reason code.",
     )
     .by("code"),
+    g(
+        "connections/per_address/limit",
+        "urmqtt_connections_per_address_limit",
+        "limits.max_connections_per_ip: established TLS connections one source address may hold (0: no limit).",
+    ),
+    g(
+        "connections/per_address/established",
+        "urmqtt_connections_per_address_established",
+        "Established TLS connections the per-address table counts now, all cores.",
+    ),
+    g(
+        "connections/per_address/addresses",
+        "urmqtt_connections_per_address_addresses",
+        "Distinct source addresses holding at least one counted connection.",
+    ),
+    g(
+        "connections/per_address/peak",
+        "urmqtt_connections_per_address_peak",
+        "The most connections one source address has held at once since boot.",
+    ),
+    c(
+        "connections/per_address/syn_dropped",
+        "urmqtt_connections_per_address_syn_dropped_total",
+        "SYNs dropped without an answer because the source address was at its limit.",
+    ),
+    c(
+        "connections/per_address/refused",
+        "urmqtt_connections_per_address_refused_total",
+        "Connections refused with a RST at the final ACK because the source address was at its limit.",
+    ),
+    c(
+        "connections/per_address/untracked",
+        "urmqtt_connections_per_address_untracked_total",
+        "Connections let through uncounted because the address's bucket was full.",
+    ),
+    info(
+        "iommu/mode",
+        "urmqtt_iommu_mode_info",
+        "mode",
+        "devices.iommu: off, auto or require.",
+    ),
+    info(
+        "iommu/state",
+        "urmqtt_iommu_state_info",
+        "state",
+        "off, none (no IOMMU found), failed (found, not working) or active.",
+    ),
+    g(
+        "iommu/units",
+        "urmqtt_iommu_units",
+        "IOMMU units translating.",
+    ),
+    g(
+        "iommu/domains",
+        "urmqtt_iommu_domains",
+        "Devices with a DMA domain of their own.",
+    ),
+    g(
+        "iommu/pages",
+        "urmqtt_iommu_pages",
+        "Pages mapped for device DMA.",
+    ),
+    c(
+        "iommu/faults",
+        "urmqtt_iommu_faults_total",
+        "Blocked DMA accesses and unit errors read from the fault logs.",
+    ),
+    c(
+        "iommu/overflows",
+        "urmqtt_iommu_fault_overflows_total",
+        "Times a unit's fault log overflowed (faults lost).",
+    ),
     c(
         "disconnects/sent",
         "urmqtt_mqtt5_disconnects_sent_total",
