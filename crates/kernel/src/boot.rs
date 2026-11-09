@@ -572,9 +572,6 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     if let Some(fault) = s.options.test_fault {
         run_test_fault(fault, s.features);
     }
-    if s.options.iommu_dma {
-        devices::iommu_dma_test();
-    }
     #[cfg(feature = "selftest")]
     if s.options.keyslab_zero {
         crate::hardtest::keyslab_zero();
@@ -626,6 +623,11 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     crate::watchdog::install_lock_accounting();
 
     tick_selftest(timer_line);
+    // After the tick is running: the test also checks that core 0's tick
+    // reads the IOMMU fault logs (ADR-306).
+    if s.options.iommu_dma {
+        devices::iommu_dma_test();
+    }
     if s.options.diag {
         crate::diag::run(&s.options, s.cpus, &s.features, s.medium);
     }

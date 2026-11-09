@@ -3656,7 +3656,12 @@ shard rather than per broker (point 6). (e) Wills are not persisted (point 15).
    (the stream ID of an SMMU, the device ID of AMD-Vi, an alias where IVRS says so). An explicit scope wins over
    a unit that takes "all the rest". What a parser cannot represent is counted and never guessed: a DMAR scope
    behind a bridge, a variable-length IVRS entry it does not know (the rest of that block is not read), an IORT
-   mapping flagged single. Reserved regions the firmware asks to keep mapped (RMRR, IVMD, RMR) are counted and
+   mapping flagged single. Nor is the catch-all unit guessed for an ID another unit may claim through such an
+   entry (a bridge's scope: every bus above the bridge's; an unknown, truncated or dropped entry, or a dropped
+   unit: every ID): such a device gets no unit, which `require` refuses, instead of a domain on the catch-all
+   that its DMA never goes through (it would be blocked, or not translated at all behind a dropped unit, while
+   the kernel counted it as isolated). Two functions the unit sees with the same ID (an IVRS alias) share one
+   domain, said in the log and the summary line: the unit cannot tell them apart. Reserved regions the firmware asks to keep mapped (RMRR, IVMD, RMR) are counted and
    logged, not mapped: the kernel drives only virtio devices, which have none. At most 4 units and 32 ID ranges
    per unit (QEMU 11.1 lists every device of the root bus in DMAR and IVRS one by one). A table that fails its
    checksum means no IOMMU, and does not stop the rest of the discovery.
@@ -3683,7 +3688,8 @@ device the kernel does not drive is unaffected; one for a driven device would be
   SMMUv3 event queue). A hostile device can produce faults as fast as it can issue requests; a fault must
   never be silently ignored and its handling must not be a way to stall a core.
 
-1. **Polling, not interrupts.** Core 0's tick reads the fault logs every 100 ms (every tenth 10 ms tick),
+1. **Polling, not interrupts.** Core 0's tick reads the fault logs every 100 ms (every tenth of core 0's own
+   10 ms ticks: the global tick count interleaves every core's, so core 0 could see the same residue each time),
    trying the IOMMU lock only (a poll that meets the bring-up or a mapping is skipped). The fault-event
    interrupts stay masked (VT-d FECTL.IM, AMD-Vi EventIntEn off, SMMUv3 IRQ_CTRL 0). *Decided*: an interrupt
    would add an interrupt route per unit (an MSI of its own, which on aarch64 would itself go through the
@@ -3721,7 +3727,8 @@ device the kernel does not drive is unaffected; one for a driven device would be
 3. **QEMU smoke, `SMOKE_ONLY=iommu`.** Per IOMMU (aarch64: SMMUv3 under HVF and TCG, ACPI and device tree;
    x86_64: VT-d and AMD-Vi under TCG): `iommu-dma` with `require` and `test=iommu-dma` (dev only), which makes
    the entropy device write 64 bytes into a page outside its domain: the page must stay untouched, at least
-   one fault counted, the fault line name the device; `iommu-off control`, the same request with
+   one fault counted, by core 0's tick alone within a second (the test runs after the tick starts, and reads
+   the logs itself only after that second), the fault line name the device; `iommu-off control`, the same request with
    `devices.iommu = "off"`: the page is written (so the test can see a write); `iommu-mqtt`, the full MQTT
    round trip over mutual TLS (`mqtt-scenarios.py`) with every device translated and no fault. Then:
    `require` on a machine without an IOMMU and with a virtio device that bypasses it (no `iommu_platform`)
@@ -3735,7 +3742,8 @@ device the kernel does not drive is unaffected; one for a driven device would be
      no PRI or ATS, no stall model, and a non-coherent unit's cache maintenance is untested (QEMU's are
      coherent).
    - RMRR, IVMD and RMR are counted, not mapped; DMAR scopes behind a bridge are not followed.
-   - At most 4 units and 32 ID ranges per unit; more are counted and their devices are not translated.
+   - At most 4 units and 32 ID ranges per unit; more are counted and their devices are not translated, nor
+     given to the catch-all unit, so `require` refuses them.
    - QEMU's AMD-Vi model writes its IO_PAGE_FAULT events in a layout where this decoder reads address 0 and
      no write flag; the device and the event type are right. Checked against the specification only.
    - The cost of translation is not measured: an emulated IOMMU makes every DMA a table walk in QEMU, real

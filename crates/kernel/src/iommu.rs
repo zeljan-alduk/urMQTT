@@ -180,6 +180,9 @@ impl Unit {
 struct Domain {
     bdf: Bdf,
     unit: usize,
+    /// The ID the unit sees: two functions with the same one (an IVRS alias,
+    /// a shared stream ID) are one domain to the unit, so they share it.
+    id: u32,
     tables: Tables,
     tag: u16,
 }
@@ -193,8 +196,10 @@ struct State {
     /// MSI doorbell pages every domain maps (aarch64: the ITS's
     /// translation frame, the GICv2m frame).
     doorbells: [Option<u64>; 2],
-    /// Devices that DMA without translation (auto only).
-    uncovered: u32,
+    /// Devices that DMA without translation (auto only), each counted once.
+    uncovered: Vec<Bdf>,
+    /// Functions that share another's domain (the same ID on the unit).
+    shared: Vec<Bdf>,
 }
 
 static STATE: SpinLock<Option<State>> = SpinLock::new(None);
@@ -308,7 +313,8 @@ pub fn init(platform: &PlatformInfo, functions: impl Iterator<Item = Bdf>) {
         units,
         domains: Vec::new(),
         doorbells,
-        uncovered: 0,
+        uncovered: Vec::new(),
+        shared: Vec::new(),
     });
 }
 
@@ -421,15 +427,38 @@ fn domain_of(s: &mut State, bdf: Bdf) -> Option<usize> {
     if let Some(i) = s.domains.iter().position(|d| d.bdf == bdf) {
         return Some(i);
     }
+    // Refused once already: counted and logged then, not on every allocation.
+    if s.uncovered.contains(&bdf) {
+        return None;
+    }
     let Some((ui, id)) = s.info.unit_for(s.segment, rid(bdf)) else {
-        s.uncovered += 1;
-        refuse(format_args!(
-            "pci {bdf} is not behind any IOMMU the firmware describes"
-        ));
+        s.uncovered.push(bdf);
+        if s.info.unclear(s.segment, rid(bdf)) {
+            refuse(format_args!(
+                "pci {bdf} may be behind a unit whose scope the firmware tables do not let the kernel represent \
+                 (a bridge's sub-hierarchy, an unknown entry, more units or ranges than it keeps), not the catch-all one"
+            ));
+        } else {
+            refuse(format_args!(
+                "pci {bdf} is not behind any IOMMU the firmware describes"
+            ));
+        }
         return None;
     };
+    if let Some(i) = s.domains.iter().position(|d| d.unit == ui && d.id == id) {
+        // The unit cannot tell the two apart: one domain, and the log says
+        // they are not isolated from each other.
+        let other = s.domains.get(i).map(|d| d.bdf);
+        if let Some(o) = other {
+            warn!(
+                "iommu: pci {bdf} reaches its unit with the same ID ({id:#x}) as pci {o}: they share one domain and are not isolated from each other"
+            );
+        }
+        s.shared.push(bdf);
+        return Some(i);
+    }
     let Some(unit) = s.units.get_mut(ui).and_then(Option::as_mut) else {
-        s.uncovered += 1;
+        s.uncovered.push(bdf);
         refuse(format_args!(
             "pci {bdf} is behind a unit that did not come up"
         ));
@@ -438,7 +467,7 @@ fn domain_of(s: &mut State, bdf: Bdf) -> Option<usize> {
     let (mut tables, tag) = match unit.attach(id) {
         Ok(d) => d,
         Err(e) => {
-            s.uncovered += 1;
+            s.uncovered.push(bdf);
             refuse(format_args!("pci {bdf}: no domain: {e}"));
             return None;
         }
@@ -468,6 +497,7 @@ fn domain_of(s: &mut State, bdf: Bdf) -> Option<usize> {
     s.domains.push(Domain {
         bdf,
         unit: ui,
+        id,
         tables,
         tag,
     });
@@ -482,8 +512,10 @@ pub fn bypass(bdf: Bdf) {
     if !active() {
         return;
     }
-    if let Some(s) = STATE.lock().as_mut() {
-        s.uncovered += 1;
+    if let Some(s) = STATE.lock().as_mut()
+        && !s.uncovered.contains(&bdf)
+    {
+        s.uncovered.push(bdf);
     }
     refuse(format_args!(
         "pci {bdf}: the virtio device does not offer VIRTIO_F_ACCESS_PLATFORM, so it bypasses the IOMMU \
@@ -604,12 +636,17 @@ pub fn summary() {
     let g = STATE.lock();
     let Some(s) = g.as_ref() else { return };
     info!(
-        "iommu: active: {} unit(s), {} device domain(s), {} page(s) mapped for devices, {} KiB of tables, {} device(s) without isolation",
+        "iommu: active: {} unit(s), {} device domain(s), {} page(s) mapped for devices, {} KiB of tables, {} device(s) without isolation{}",
         UNITS.load(Ordering::Relaxed),
         s.domains.len(),
         PAGES.load(Ordering::Relaxed),
         PAGES_TABLES.load(Ordering::Relaxed) * 4,
-        s.uncovered
+        s.uncovered.len(),
+        if s.shared.is_empty() {
+            alloc::string::String::new()
+        } else {
+            alloc::format!(", {} sharing another's domain", s.shared.len())
+        }
     );
 }
 

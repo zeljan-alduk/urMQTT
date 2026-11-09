@@ -3152,6 +3152,7 @@ iommu_suite() {
     mkimg "$OUT/iommu-off-dma.raw" "smoke test=iommu-dma"
     local blocked=('iommu: test: virtio-rng [0-9a-f:.]+ asked to write 64 bytes at 0x[0-9a-f]+ \(outside its domain\): .*; the page is untouched; [1-9][0-9]* fault\(s\) recorded'
         'iommu: test: DMA outside the domain blocked and counted'
+        "iommu: test: the fault was read by core 0's tick"
         'iommu: fault 1: (VT-d|AMD-Vi|SMMUv3) 0x[0-9a-f]+: pci [0-9a-f:.]+ .* blocked'
         'iommu: active: 1 unit\(s\), [2-9] device domain\(s\), [0-9]+ page\(s\) mapped for devices, [0-9]+ KiB of tables, 0 device\(s\) without isolation'
         '^URMQTT READY$' 'NOT:DMA outside the domain NOT blocked' "$NO_FAULT")

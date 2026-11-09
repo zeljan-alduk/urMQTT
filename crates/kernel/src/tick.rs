@@ -51,9 +51,17 @@ fn on_tick(_intid: u32) {
     crate::vdev::tick();
     // DMA remapping (ADR-305): core 0 reads the IOMMU fault logs every 100 ms,
     // a bounded number per unit, only trying the lock.
-    if crate::smp::current() == 0 && TICKS.load(Ordering::Relaxed).is_multiple_of(10) {
+    // This core's own count: the global one interleaves every core's ticks,
+    // so core 0 could see the same residue every time and never poll.
+    if crate::smp::current() == 0 && core0_polls(crate::smp::this().ticks.load(Ordering::Relaxed)) {
         crate::iommu::poll();
     }
+}
+
+/// Whether core 0's tick number `own` (its own count, from 1) is one that
+/// reads the IOMMU fault logs: every tenth, 100 ms at the 10 ms tick.
+const fn core0_polls(own: u64) -> bool {
+    own.is_multiple_of(10)
 }
 
 /// Starts the tick with `period_ns` on this core, delivered as `intid`.

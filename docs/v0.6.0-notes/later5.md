@@ -41,7 +41,8 @@ ADRs: ADR-305 (design), ADR-306 (faults), ADR-307 (verification and what is not 
 - Default `off` (a KVM VPS's devices are the hypervisor's, and an emulated IOMMU slows every DMA). Recommended:
   `require` on bare metal or under a hypervisor whose device models are not trusted.
 - At most 4 IOMMU units and 32 requester-ID ranges per unit are used (more are counted; their devices are not
-  translated, which `require` refuses). Page tables: 4 KiB pages, 48-bit (or 39-bit) identity mapping.
+  translated, which `require` refuses). A device that a unit's unrepresentable scope entry (a DMAR bridge scope,
+  an unknown IVRS entry) may cover is not given to the catch-all unit either: `require` refuses it. Page tables: 4 KiB pages, 48-bit (or 39-bit) identity mapping.
 - Memory: AMD-Vi needs a 2 MiB device table; VT-d and SMMUv3 a few pages per device (40 to 60 KiB for three
   devices in QEMU).
 

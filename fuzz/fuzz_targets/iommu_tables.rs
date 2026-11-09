@@ -1,7 +1,8 @@
 //! IOMMU discovery and fault records (H4b, ADR-305): arbitrary bytes as a
 //! DMAR, IVRS or IORT table, a device tree, or the records a unit writes into
 //! its fault log. The first byte picks which. Nothing may panic, every
-//! described range must stay inside the 16-bit requester-ID space, and the
+//! described range must stay inside the 16-bit requester-ID space, a
+//! catch-all unit never answers for an ID another unit may claim, and the
 //! summary line must format.
 #![no_main]
 
@@ -24,6 +25,10 @@ fn check(info: &IommuInfo) {
     for rid in [0u16, 0x8, 0x10, 0x18, 0xff, 0x100, 0xffff] {
         if let Some((i, _)) = info.unit_for(0, rid) {
             assert!(i < info.units.len());
+            // A catch-all answer only where no other unit may claim the ID.
+            if info.units.as_slice()[i].explicit(rid).is_none() {
+                assert!(!info.unclear(0, rid));
+            }
         }
     }
 }

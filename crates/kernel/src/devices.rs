@@ -1750,7 +1750,14 @@ pub fn iommu_dma_test() {
     let r = rng.request_at(&KernelEnv::RUNTIME, pa, 64, 500_000_000);
     devs.rng = None;
     drop(devs);
-    // The units' logs, read here rather than waiting for the tick.
+    // First core 0's tick alone (it reads the logs every 100 ms): the test
+    // runs on core 0 with interrupts on. Then, if it saw nothing within a
+    // second, the logs read here, so a broken tick poll shows as such.
+    let t0 = time::uptime_ns();
+    while crate::iommu::faults() == before && time::uptime_ns() - t0 < 1_000_000_000 {
+        core::hint::spin_loop();
+    }
+    let by_tick = crate::iommu::faults() != before;
     let t0 = time::uptime_ns();
     while crate::iommu::faults() == before && time::uptime_ns() - t0 < 1_000_000_000 {
         crate::iommu::poll();
@@ -1774,6 +1781,14 @@ pub fn iommu_dma_test() {
         if written { "WRITTEN" } else { "untouched" }
     );
     if crate::iommu::active() {
+        info!(
+            "iommu: test: the fault was {}",
+            if by_tick {
+                "read by core 0's tick"
+            } else {
+                "NOT read by core 0's tick within a second"
+            }
+        );
         if !written && faults > 0 {
             info!("iommu: test: DMA outside the domain blocked and counted");
         } else {

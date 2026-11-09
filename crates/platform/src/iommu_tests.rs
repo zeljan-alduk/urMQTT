@@ -83,9 +83,109 @@ fn dmar_scopes_rmrr_and_order() {
     assert_eq!(i.units.len(), 2);
     assert_eq!(i.reserved_regions, 1);
     assert_eq!(i.units.as_slice()[0].unsupported, 1);
-    // 00:02.0 belongs to the first unit, everything else to the catch-all.
+    // 00:02.0 belongs to the first unit, the rest of bus 0 to the catch-all.
     assert_eq!(i.unit_for(0, 0x10), Some((0, 0x10)));
     assert_eq!(i.unit_for(0, 0x18), Some((1, 0x18)));
+    assert!(!i.unclear(0, 0x18));
+    // Behind the bridge 00:1c.0 (bus 1 and above) a device may be the first
+    // unit's: no unit rather than the catch-all, whose domain it would never
+    // use.
+    assert_eq!(i.unit_for(0, 0x0100), None);
+    assert!(i.unclear(0, 0x0100));
+    assert_eq!(i.unit_for(0, 0xff00), None);
+    // Another segment is not affected.
+    assert!(!i.unclear(1, 0x0100));
+}
+
+/// A unit beyond [`MAX_UNITS`], or a unit whose explicit ranges overflowed,
+/// may be the one a device's DMA goes through: the catch-all is no answer.
+#[test]
+fn dropped_units_and_ranges_make_the_catch_all_unclear() {
+    let drhd = |base: u64, all: bool, scopes: &[[u8; 8]]| {
+        let mut d = vec![0u8; 16];
+        d[4] = u8::from(all);
+        d[8..16].copy_from_slice(&base.to_le_bytes());
+        for s in scopes {
+            d.extend_from_slice(s);
+        }
+        let l = d.len() as u16;
+        d[2..4].copy_from_slice(&l.to_le_bytes());
+        d
+    };
+    let header = || {
+        let mut b = vec![38u8, 0];
+        b.extend_from_slice(&[0; 10]);
+        b
+    };
+    // Five units with one endpoint each, then the catch-all: the fifth and
+    // the catch-all do not fit.
+    let mut b = header();
+    for n in 0..5u8 {
+        b.extend_from_slice(&drhd(
+            0x1000 * u64::from(n + 1),
+            false,
+            &[[1, 8, 0, 0, 0, 0, n + 1, 0]],
+        ));
+    }
+    b.extend_from_slice(&drhd(0xfed9_0000, true, &[]));
+    let t = table(b"DMAR", &b);
+    let i = parse_dmar(&sdt(b"DMAR", &t));
+    assert_eq!((i.units.len(), i.units.dropped), (4, 2));
+    assert_eq!(i.unit_for(0, 0x08), Some((0, 0x08)));
+    // 00:05.0 was the fifth unit's: not translated, so no unit.
+    assert_eq!(i.unit_for(0, 0x28), None);
+    // Four units with an endpoint and the catch-all fit; a dropped one makes
+    // every fallback unclear.
+    let mut b = header();
+    for n in 0..3u8 {
+        b.extend_from_slice(&drhd(
+            0x1000 * u64::from(n + 1),
+            false,
+            &[[1, 8, 0, 0, 0, 0, n + 1, 0]],
+        ));
+    }
+    b.extend_from_slice(&drhd(0xfed9_0000, true, &[]));
+    let t = table(b"DMAR", &b);
+    let i = parse_dmar(&sdt(b"DMAR", &t));
+    assert_eq!((i.units.len(), i.units.dropped), (4, 0));
+    assert_eq!(i.unit_for(0, 0x28), Some((3, 0x28)));
+    // One unit with more endpoints than MAX_RANGES: those it could not keep
+    // may be any ID.
+    let scopes: Vec<[u8; 8]> = (0..=MAX_RANGES as u8)
+        .map(|n| [1, 8, 0, 0, 0, 1, n / 8, n % 8])
+        .collect();
+    let mut b = header();
+    b.extend_from_slice(&drhd(0x1000, false, &scopes));
+    b.extend_from_slice(&drhd(0xfed9_0000, true, &[]));
+    let t = table(b"DMAR", &b);
+    let i = parse_dmar(&sdt(b"DMAR", &t));
+    assert_eq!(i.units.as_slice()[0].ranges.dropped, 1);
+    assert_eq!(i.unit_for(0, 0x0100), Some((0, 0x0100)));
+    assert_eq!(i.unit_for(0, 0x0008), None);
+    assert!(i.unclear(0, 0x0008));
+}
+
+/// An ACPI namespace device names no PCI function: the catch-all still
+/// takes every function of the segment.
+#[test]
+fn dmar_namespace_device_leaves_the_catch_all_clear() {
+    let mut b = vec![38u8, 0];
+    b.extend_from_slice(&[0; 10]);
+    let mut d1 = vec![0u8; 16];
+    d1[8..16].copy_from_slice(&0x1000u64.to_le_bytes());
+    d1.extend_from_slice(&[5, 8, 0, 0, 1, 0, 0x15, 0]);
+    let l = d1.len() as u16;
+    d1[2..4].copy_from_slice(&l.to_le_bytes());
+    let mut d2 = vec![0u8; 16];
+    d2[2..4].copy_from_slice(&16u16.to_le_bytes());
+    d2[4] = 1;
+    d2[8..16].copy_from_slice(&0xfed9_0000u64.to_le_bytes());
+    b.extend_from_slice(&d1);
+    b.extend_from_slice(&d2);
+    let t = table(b"DMAR", &b);
+    let i = parse_dmar(&sdt(b"DMAR", &t));
+    assert_eq!(i.units.as_slice()[0].unsupported, 1);
+    assert_eq!(i.unit_for(0, 0x0300), Some((1, 0x0300)));
 }
 
 #[test]

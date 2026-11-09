@@ -90,12 +90,31 @@ pub struct Unit {
     /// devices, unknown entry types): the devices they name are treated as
     /// not translated.
     pub unsupported: u16,
+    /// Requester IDs on this bus number and above may belong to this unit
+    /// through a scope entry that could not be represented (a bridge's
+    /// sub-hierarchy starts one bus above the bridge; an unknown or dropped
+    /// entry makes it 0, every bus). Such an ID is not given to a catch-all
+    /// unit: the catch-all would get a domain the device never uses while
+    /// its DMA goes through this unit (or, for a dropped unit, through none).
+    pub unclear_bus: Option<u16>,
 }
 
 impl Unit {
     /// The ID this unit sees for `rid` through an explicit range.
     pub fn explicit(&self, rid: u16) -> Option<u32> {
         self.ranges.as_slice().iter().find_map(|r| r.translate(rid))
+    }
+
+    /// Requester IDs from bus `bus` up may be this unit's through an entry
+    /// that could not be represented.
+    fn unclear_from(&mut self, bus: u16) {
+        self.unsupported = self.unsupported.saturating_add(1);
+        self.unclear_bus = Some(self.unclear_bus.map_or(bus, |b| b.min(bus)));
+    }
+
+    /// Whether `rid` may be this unit's without an explicit range saying so.
+    fn may_claim(&self, rid: u16) -> bool {
+        self.ranges.dropped > 0 || self.unclear_bus.is_some_and(|b| (rid >> 8) >= b)
     }
 }
 
@@ -121,7 +140,8 @@ impl IommuInfo {
     }
 
     /// The unit that translates PCI function `rid` of `segment` and the ID it
-    /// sees: an explicit scope first, then a unit that takes all the rest.
+    /// sees: an explicit scope first, then a unit that takes all the rest,
+    /// unless [`unclear`](Self::unclear) says the rest is not known.
     pub fn unit_for(&self, segment: u16, rid: u16) -> Option<(usize, u32)> {
         let units = self.units.as_slice();
         let seg = |u: &&Unit| u.segment == segment;
@@ -131,12 +151,33 @@ impl IommuInfo {
             .filter(|(_, u)| seg(u))
             .find_map(|(i, u)| u.explicit(rid).map(|id| (i, id)))
             .or_else(|| {
-                units
-                    .iter()
-                    .enumerate()
-                    .find(|(_, u)| seg(u) && u.all)
-                    .map(|(i, _)| (i, u32::from(rid)))
+                let (i, _) = units.iter().enumerate().find(|(_, u)| seg(u) && u.all)?;
+                (!self.unclear_for(segment, rid, i)).then_some((i, u32::from(rid)))
             })
+    }
+
+    /// Whether `rid` of `segment`, named by no explicit scope, may still be
+    /// another unit's than the catch-all: a unit was dropped ([`MAX_UNITS`]),
+    /// or another unit of the segment has scope entries that could not be
+    /// represented and may cover it. [`unit_for`](Self::unit_for) then gives
+    /// no unit (`require` refuses) instead of a guess that would put the
+    /// device's domain on a unit its DMA does not go through.
+    pub fn unclear(&self, segment: u16, rid: u16) -> bool {
+        self.units
+            .as_slice()
+            .iter()
+            .position(|u| u.segment == segment && u.all)
+            .is_some_and(|i| self.unclear_for(segment, rid, i))
+    }
+
+    fn unclear_for(&self, segment: u16, rid: u16, catch_all: usize) -> bool {
+        self.units.dropped > 0
+            || self
+                .units
+                .as_slice()
+                .iter()
+                .enumerate()
+                .any(|(j, u)| j != catch_all && u.segment == segment && u.may_claim(rid))
     }
 
     /// Adds `u`, or merges it into a unit already listed at the same
@@ -209,13 +250,16 @@ fn dmar_scopes(mut b: &[u8], u: &mut Unit) {
     while let (Some(ty), Some(len)) = (u8_at(b, 0), u8_at(b, 1)) {
         let len = usize::from(len);
         let Some(s) = b.get(..len).filter(|_| len >= 6) else {
-            u.unsupported = u.unsupported.saturating_add(1);
+            u.unclear_from(0);
             return;
         };
         b = b.get(len..).unwrap_or(&[]);
         match ty {
             // I/O APIC and HPET: interrupt sources, not DMA masters we drive.
             3 | 4 => {}
+            // An ACPI namespace device: not a PCI function, so it claims none
+            // of the IDs the kernel drives.
+            5 => u.unsupported = u.unsupported.saturating_add(1),
             1 if len == 8 => {
                 let (Some(bus), Some(dev), Some(func)) = (u8_at(s, 5), u8_at(s, 6), u8_at(s, 7))
                 else {
@@ -229,7 +273,10 @@ fn dmar_scopes(mut b: &[u8], u: &mut Unit) {
                     alias: false,
                 });
             }
-            _ => u.unsupported = u.unsupported.saturating_add(1),
+            // A bridge's sub-hierarchy, or an endpoint behind bridges: every
+            // device it names sits on a bus above the scope's start bus.
+            1 | 2 => u.unclear_from(u8_at(s, 5).map_or(0, |bus| u16::from(bus) + 1)),
+            _ => u.unclear_from(0),
         }
     }
 }
@@ -283,12 +330,12 @@ fn ivhd_entries(mut b: &[u8], u: &mut Unit) {
             },
             _ => {
                 // Variable length we do not know: nothing after it can be read.
-                u.unsupported = u.unsupported.saturating_add(1);
+                u.unclear_from(0);
                 return;
             }
         };
         let Some(e) = b.get(..len) else {
-            u.unsupported = u.unsupported.saturating_add(1);
+            u.unclear_from(0);
             return;
         };
         b = b.get(len..).unwrap_or(&[]);
@@ -318,11 +365,13 @@ fn ivhd_entries(mut b: &[u8], u: &mut Unit) {
                         alias: alias.is_some(),
                     });
                 }
-                _ => u.unsupported = u.unsupported.saturating_add(1),
+                _ => u.unclear_from(0),
             },
-            // Special devices (I/O APIC, HPET) and ACPI namespace devices.
+            // Special devices (I/O APIC, HPET).
             0x48 => {}
-            _ => u.unsupported = u.unsupported.saturating_add(1),
+            // An ACPI device: not a PCI function the kernel drives.
+            0xf0 => u.unsupported = u.unsupported.saturating_add(1),
+            _ => u.unclear_from(0),
         }
     }
 }
