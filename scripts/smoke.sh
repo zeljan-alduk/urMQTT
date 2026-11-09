@@ -4450,6 +4450,38 @@ ab_slots() {
     ab_release
 }
 
+# NEXT-11 (ADR-295) on the universal image: the same disk, its standby reserved by the first boot, an
+# update staged and activated, on x86_64 BIOS (Limine's BIOS stage finds the boot volume through the
+# partition table: the ESP entry, never the standby), x86_64 UEFI and aarch64 UEFI. Each machine boots the
+# staged slot on trial.
+ab_universal() {
+    build_disk_tool || {
+        echo "  ✗ ab-universal needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local iso="$OUT/ab-universal.iso" row
+    mkuniversal "$iso" "smoke" --esp-out "$OUT/ab-universal.esp"
+    local slot='\((v|[0-9a-f]{7})[^)]*\)'
+    local rows=("x86-bios|x86-bios|tcg" "x86-uefi|x86-uefi|tcg" "aa64|aa64|hvf")
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name kind accel <<<"$row"
+        [[ $kind == aa64 && " $ACCELS " != *" $accel "* ]] && continue
+        local log="$OUT/ab-universal-$name.log" data="$OUT/ab-universal-$name.img" status=0
+        rm -f "$log"
+        fresh_disk "$iso.disk" "$data" 128m
+        u_run "$kind" "$accel" "$log.0" disk "$data" || status=$?
+        ab_tool "$log" slots stage "$data" --esp "$OUT/ab-universal.esp" --unsigned --write || status=1
+        ab_tool "$log" slots activate "$data" --write || status=1
+        u_run "$kind" "$accel" "$log.1" disk "$data" || status=$?
+        { echo "--- boot 0"; cat "$log.0"; echo "--- boot 1"; cat "$log.1"; } >>"$log"
+        check "ab-universal-$name" "$log" "$status" \
+            "gpt: standby boot slot reserved next to the EFI system partition" \
+            "boot: slot A $slot, confirmed; standby: empty" "slot B holds" \
+            "boot: slot B $slot ON TRIAL: 2 trial boot\(s\) left after this one" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
 # NEXT-11 (ADR-298): an operator confirms a trial over the control channel, a confirmation for another
 # disk is refused, and boot-rollback goes back to the previous slot.
 ab_control() {
@@ -4656,6 +4688,14 @@ fi
 # limits which machine runs them.
 if [[ ${SMOKE_ONLY:-} == diag && $ARCH == universal ]]; then
     universal_diag
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=ab (universal): the A/B boot slots of one disk on x86_64 BIOS and UEFI and aarch64 UEFI (NEXT-11).
+if [[ ${SMOKE_ONLY:-} == ab && $ARCH == universal ]]; then
+    ab_universal
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit

@@ -77,8 +77,8 @@ Control commands: `boot-confirm` = 7, `boot-rollback` = 8 (5 and 6 belong to NOW
 - **Online staging** (an update over the network into the running broker): needs NEXT-7 or an upload path and an
   ESP writer in the kernel; the kernel writes no ESP.
 - **`$SYS` topics for the slot state**: the boot log and `urmqtt-disk slots status` carry it.
-- **The universal image's BIOS path** is not in the `ab` smoke group (aarch64 edk2 and x86_64 OVMF are);
-  Limine's BIOS stage finds its volume through the same partition table, ESP entry first.
+- **Power cuts on the BIOS path**: the universal image boots a staged slot on x86_64 BIOS, x86_64 UEFI and
+  aarch64 UEFI (`SMOKE_ONLY=ab --arch universal`); the cut points are tested under UEFI only.
 - **Secure Boot** (LATER-6): nothing here blocks it (the switch changes which partition is the ESP, no loader
   step was added); a per-machine signed ESP is staged with `--replace-config`. Not tested under Secure Boot.
 
@@ -86,4 +86,5 @@ Control commands: `boot-confirm` = 7, `boot-rollback` = 8 (5 and 6 belong to NOW
 
 `cargo test` (store, cfg, config, config-schema, control, urmqtt-disk, urmqtt-control, urmqtt-config), clippy on
 the workspace and both kernels, `make build` aarch64 and x86_64, `SMOKE_ONLY=ab` on aarch64 (HVF) and x86_64 (TCG)
-10/10 each, fuzz `boot_slots` and `control_message` 2 minutes each, the builder tests, `cargo vet`.
+10/10 each and on the universal image (x86_64 BIOS and UEFI, aarch64) 3/3, the storage group's first-boot,
+power-cut, grow, backup, SCSI and disk-tool scenarios on aarch64 (55/55), fuzz `boot_slots` and `control_message` 2 minutes each, the builder tests, `cargo vet`.

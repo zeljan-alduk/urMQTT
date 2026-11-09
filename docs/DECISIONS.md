@@ -3752,8 +3752,9 @@ shard rather than per broker (point 6). (e) Wills are not persisted (point 15).
   rules above stop an operator's mistake, not an attacker who can write the disk. (c) **Staging from the running
   broker** (an online update over the network): needs NEXT-7 or an upload path into the kernel, and an ESP writer in
   the kernel; the kernel writes no ESP today. (d) `$SYS` topics for the slot state: the boot log and the tool say it.
-  (e) The BIOS path of the universal image is not exercised by the `ab` group (x86_64 OVMF and aarch64 edk2 are);
-  Limine's BIOS stage finds its volume through the same table, ESP entry first.
+  (e) Power cuts on the BIOS path: the universal image's BIOS boot of a staged slot is tested (`SMOKE_ONLY=ab
+  --arch universal`: Limine's BIOS stage boots the region the ESP entry covers), the cut points only under UEFI.
 - **Testing.** `tools/disk/tests/slots.rs` (through the binary: the whole cycle, the signature with a throwaway key,
   every downgrade rule, a cut at every write of each command, a single-slot disk); smoke `ab-release-image-signed`
-  (a key made by `minisign -G` in the test; never the release key).
+  (a key made by `minisign -G` in the test; never the release key); `SMOKE_ONLY=ab --arch universal`: one universal
+  disk, its standby reserved and a staged slot booted on trial on x86_64 BIOS, x86_64 UEFI and aarch64 UEFI.
