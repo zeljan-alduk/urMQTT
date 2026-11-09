@@ -32,15 +32,23 @@ pub enum Reason {
     Storage = 3,
     /// `limits.max_handshakes_in_flight_per_ip` reached for the address.
     PerIp = 4,
+    /// `limits.max_connections_per_ip` established connections reached for
+    /// the address (NOW-14, ADR-280). Decided by the kernel against the
+    /// shared [`crate::source_limit::SourceTable`], counted here per core.
+    PerIpEstablished = 5,
 }
 
+/// How many [`Reason`]s there are (the length of the counter arrays).
+pub const REASONS: usize = 6;
+
 impl Reason {
-    pub const ALL: [Reason; 5] = [
+    pub const ALL: [Reason; REASONS] = [
         Self::Rate,
         Self::InFlight,
         Self::Memory,
         Self::Storage,
         Self::PerIp,
+        Self::PerIpEstablished,
     ];
 
     /// For log lines.
@@ -51,6 +59,7 @@ impl Reason {
             Self::Memory => "heap below the free reserve",
             Self::Storage => "the DB core is behind",
             Self::PerIp => "too many handshakes in flight from one address",
+            Self::PerIpEstablished => "too many established connections from one address",
         }
     }
 
@@ -62,6 +71,7 @@ impl Reason {
             Self::Memory => "memory",
             Self::Storage => "storage",
             Self::PerIp => "per_ip",
+            Self::PerIpEstablished => "per_ip_established",
         }
     }
 }
@@ -103,9 +113,9 @@ pub struct Stats {
     /// Not finished within the timeout.
     pub timed_out: u64,
     /// Refused at the final ACK, by [`Reason`].
-    pub refused: [u64; 5],
+    pub refused: [u64; REASONS],
     /// SYNs dropped without a SYN-ACK, by [`Reason`].
-    pub syn_dropped: [u64; 5],
+    pub syn_dropped: [u64; REASONS],
     /// Sum of the latencies of completed handshakes (accept to done), ms.
     pub latency_sum_ms: u64,
     /// Completed handshakes per latency bucket ([`LATENCY_BOUNDS_MS`]).
@@ -222,6 +232,18 @@ impl Admission {
         }
     }
 
+    /// A SYN dropped for `r` by a check that lives outside this struct (the
+    /// established-connections table, ADR-280): counted with the others.
+    pub fn count_syn_dropped(&mut self, r: Reason) {
+        bump(&mut self.stats.syn_dropped, r);
+    }
+
+    /// A connection refused at the final ACK for `r` by a check that lives
+    /// outside this struct: counted with the others.
+    pub fn count_refused(&mut self, r: Reason) {
+        bump(&mut self.stats.refused, r);
+    }
+
     /// A SYN from `ip`: whether to answer it. A refusal is counted as a
     /// dropped SYN; nothing else changes (no token is taken).
     pub fn syn_check(
@@ -302,7 +324,7 @@ impl Admission {
     }
 }
 
-fn bump(counts: &mut [u64; 5], r: Reason) {
+fn bump(counts: &mut [u64; REASONS], r: Reason) {
     if let Some(n) = counts.get_mut(r as usize) {
         *n += 1;
     }

@@ -308,6 +308,8 @@ pub mod tag {
     // MQTT 5.0 part 3 (ADR-275): format version 13.
     pub const LIM_MAX_SHARED_GROUPS: u16 = 260;
     pub const LIM_MAX_SHARED_GROUP_MEMBERS: u16 = 261;
+    // NOW-14 (ADR-280): format version 14.
+    pub const LIM_MAX_CONNECTIONS_PER_IP: u16 = 270;
 }
 
 use tag as t;
@@ -1465,6 +1467,16 @@ pub static FIELDS: &[Field] = &[
             "Members one shared-subscription group may have; one more gets SUBACK 0x97 / 0x80. Format 13.",
         ),
         13,
+    ),
+    // NOW-14 (ADR-280): format version 14.
+    since(
+        f(
+            t::LIM_MAX_CONNECTIONS_PER_IP,
+            "limits.max_connections_per_ip",
+            uint(4, 0, 1_000_000, 1024),
+            "Established TLS connections (MQTT and WebSocket) one source address may hold at once, all cores together; 0: no limit. Over it the SYN gets no answer (or the final ACK a RST) before any TLS work, and the refusal is counted (`$SYS/broker/connections/per_address/...`). Devices behind one NAT share an address, so size it for the largest site. The handshakes in flight per address are bounded separately (`limits.max_handshakes_in_flight_per_ip`). Format 14.",
+        ),
+        14,
     ),
 ];
 
