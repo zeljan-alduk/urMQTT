@@ -451,6 +451,12 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
         tag::LIM_MAX_SHARED_GROUP_MEMBERS,
         u64::from(l.max_shared_group_members),
     )?;
+    // ADR-280: the default writes nothing; any other value (0 included)
+    // needs format 14.
+    b.uint(
+        tag::LIM_MAX_CONNECTIONS_PER_IP,
+        u64::from(l.max_connections_per_ip),
+    )?;
     let a = &cfg.acl;
     b.strs(tag::ACL_DEVICE_PUBLISH, &a.device_publish)?;
     b.strs(tag::ACL_DEVICE_SUBSCRIBE, &a.device_subscribe)?;

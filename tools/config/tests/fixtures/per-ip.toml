@@ -1,0 +1,11 @@
+# A lab configuration that bounds the established TLS connections of one
+# source address (ADR-280, configuration format 14): at most 200. Used by the
+# tests of urmqtt-config.
+[network]
+mode = "static"
+address = "192.0.2.10/24"
+gateway = "192.0.2.1"
+
+[limits]
+max_packet_size = 8192
+max_connections_per_ip = 200

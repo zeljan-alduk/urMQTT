@@ -1146,10 +1146,10 @@ fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
 
 /// The templates of the published releases, configured by this tool (and by the builder page, which runs the
 /// same code): v0.2.0's kernel reads configuration format 2, v0.2.1's 3, v0.3.0's 4, v0.4.0's and v0.4.1's 6,
-/// this one 13. A configuration that needs no newer format than the template's kernel reads is written into it as
+/// this one 14. A configuration that needs no newer format than the template's kernel reads is written into it as
 /// before; one that needs more (the virtio-gpu console: 5, a `[devices]` key: 6, `network.mtu`: 7,
 /// `limits.publisher_backpressure = "off"`: 8, a `[websocket]` key: 9, `devices.virtio_net_interrupt = "off"`: 11,
-/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13) is refused with the reason, before a byte
+/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13, `limits.max_connections_per_ip`: 14) is refused with the reason, before a byte
 /// of the template changes, instead of giving an image whose kernel would refuse it at boot.
 #[test]
 fn templates_of_earlier_releases_take_what_their_kernel_reads() {
@@ -1190,6 +1190,10 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
     b.uint(tag::LIM_MAX_SHARED_GROUPS, 64).unwrap();
     let shared = b.finish(false).unwrap();
     assert_eq!(header(&shared), 13);
+    let mut b = Builder::new();
+    b.uint(tag::LIM_MAX_CONNECTIONS_PER_IP, 64).unwrap();
+    let per_ip = b.finish(false).unwrap();
+    assert_eq!(header(&per_ip), 14);
     for (release, reads) in [
         ("v0.2.0", 2u16),
         ("v0.2.1", 3),
@@ -1201,6 +1205,8 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
         ("format 8", 8),
         // A tree with MQTT 5.0 parts 1 and 2 (ADR-273/274), without ADR-275.
         ("format 12", 12),
+        // A tree with the shared-group limits, without ADR-280.
+        ("format 13", 13),
         ("this tree", urmqtt_cfg::FORMAT_VERSION),
     ] {
         let empty = Builder::new().finish_as(false, reads).unwrap();
@@ -1217,6 +1223,7 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             ("devices.virtio_net_interrupt", &net_irq, 11),
             ("[mqtt5]", &m5, 12),
             ("limits.max_shared_groups", &shared, 13),
+            ("limits.max_connections_per_ip", &per_ip, 14),
         ] {
             match image::configure_iso(&tpl, blob) {
                 Ok(_) => assert!(
@@ -1235,4 +1242,53 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             }
         }
     }
+}
+
+/// ADR-280: `limits.max_connections_per_ip` packs into format 14 (0, "no
+/// limit", included), `show` lists it, a release kernel accepts the blob, the
+/// default writes nothing, and a value out of range is refused naming the key.
+#[test]
+fn the_connection_limit_fixture_packs_into_format_14() {
+    let out = tmp("per-ip.blob");
+    let text = ok(&run(bin()
+        .arg("pack")
+        .arg(fixtures().join("per-ip.toml"))
+        .arg("--out")
+        .arg(&out)));
+    assert!(!text.contains("warning"), "{text}");
+    let blob = std::fs::read(&out).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 14);
+    let shown = ok(&run(bin().arg("show").arg(&out)));
+    assert!(shown.contains("urmqtt-cfg version 14"), "{shown}");
+    assert!(
+        shown.contains("[limits]\n  max_packet_size = 8192\n  max_connections_per_ip = 200\n"),
+        "{shown}"
+    );
+    assert!(ok(&run(bin().arg("verify").arg(&out))).starts_with("ok: "));
+    // 0 is a value, not an absence.
+    let cfg = tmp("per-ip-0.toml");
+    std::fs::write(&cfg, "[limits]\nmax_connections_per_ip = 0\n").unwrap();
+    let off = tmp("per-ip-0.blob");
+    ok(&run(bin().arg("pack").arg(&cfg).arg("--out").arg(&off)));
+    let blob = std::fs::read(&off).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 14);
+    // The default spelled out: no record, the base format.
+    std::fs::write(&cfg, "[limits]\nmax_connections_per_ip = 1024\n").unwrap();
+    let def = tmp("per-ip-default.blob");
+    ok(&run(bin().arg("pack").arg(&cfg).arg("--out").arg(&def)));
+    let blob = std::fs::read(&def).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 2);
+    // Out of range.
+    std::fs::write(&cfg, "[limits]\nmax_connections_per_ip = 1000001\n").unwrap();
+    let o = run(bin()
+        .arg("pack")
+        .arg(&cfg)
+        .arg("--out")
+        .arg(tmp("per-ip-bad.blob")));
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("limits.max_connections_per_ip") && err.contains("0..=1000000"),
+        "{err}"
+    );
 }
