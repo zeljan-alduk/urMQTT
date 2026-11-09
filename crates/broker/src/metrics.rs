@@ -18,7 +18,8 @@
 //!   restarts from 0 at boot, which Prometheus handles as a counter reset); a
 //!   gauge is a value that goes both ways;
 //! - **labels are bounded and come from the kernel, never from a client**:
-//!   `core` (at most 64), a reason or code from a closed list, a listener
+//!   `core` (at most 64), `queue` (a NIC queue pair, at most 16, ADR-312),
+//!   a reason or code from a closed list, a listener
 //!   name, a version string. There is no client id, user name, topic, address
 //!   or certificate in any label, so the number of series is fixed by the
 //!   image's configuration and the core count and cannot be grown by anyone
