@@ -68,6 +68,10 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/retained` | retained messages of devices (not these topics) |
 | `$SYS/broker/messages/received`, `sent` | accepted publishes, deliveries |
 | `$SYS/broker/connections/refused` | refused by admission control |
+| `$SYS/broker/connections/per_address/limit` | `limits.max_connections_per_ip`, 0 when there is no limit (then the rest stays 0) |
+| `$SYS/broker/connections/per_address/established`, `addresses`, `peak` | TLS connections the per-address table counts now (all cores), distinct source addresses holding one, the most one address has held at once since boot |
+| `$SYS/broker/connections/per_address/syn_dropped`, `refused` | SYNs dropped without an answer, and connections refused with a RST at the final ACK, because the address was at the limit (since boot) |
+| `$SYS/broker/connections/per_address/untracked` | connections let through uncounted because the table was full (more than 32 768 addresses at once, or a bucket collision); normally 0 |
 | `$SYS/broker/tls/server_cert_days` | days until the server certificate expires (`unknown` without a wall clock) |
 | `$SYS/broker/time/source` | where the wall clock comes from: `rtc` (firmware clock at boot), `sntp` (corrected by SNTP, ADR-100) or `unknown` (no usable clock: certificate checks and control messages are refused) |
 | `$SYS/broker/time/offset_ms` | the last SNTP offset against the clock as it was, in ms (`unknown` until one was measured against a known clock; a refused offset is shown too, and logged) |
@@ -146,6 +150,7 @@ console does not use it: replies stay on the fixed topic for both versions):
  "tls":{"server_cert_days":824},"time":{"source":"sntp","offset_ms":-12},"console_dropped":0,
  "handshakes":{"started":0,"done":0,"failed":0,"timed_out":0,"refused":0,"syn_dropped":0,
  "in_flight":0,"in_flight_max":0,"slow":0,"latency_sum_ms":0,"latency_max_ms":0},
+ "per_address":{"limit":1024,"established":0,"addresses":0,"peak":0,"syn_dropped":0,"refused":0,"untracked":0},
  "accepted":[0,0,0,0]}
 ```
 
@@ -155,7 +160,8 @@ and each counts for itself: a SYN may be dropped without an answer
 may be refused with a RST (`refused`, `refused.<reason>`), and an admitted
 connection ends as `done`, `failed` or `timed_out`. Reasons: `rate` (token
 bucket), `in_flight` (per core), `per_ip` (per source address), `memory`,
-`storage`. The same numbers are in the kernel log every 5 s, one
+`storage`, `per_ip_established` (the per-address limit on *established*
+connections, see below). The same numbers are in the kernel log every 5 s, one
 `handshakes: core N:` line per core, next to `tcp: core N:` (cookies, SYNs
 dropped, refused flows, retransmissions) and `dataplane: core N:` (busy, work
 by category, microseconds of work per accepted connection, longest stall of
@@ -163,6 +169,25 @@ the core). The statsd names are `handshakes.{started,done,failed,timed_out,slow,
 (counters), `handshakes.{in_flight,in_flight_max,latency_max_ms}` (gauges) and
 `frames.dropped.{steer,worker_tx,nic_tx,nic_tx_local}` (a frame lost to a full ring
 or NIC queue is retransmitted by TCP a second or more later).
+
+**The limit on established connections per source address (NOW-14, ADR-280).**
+`limits.max_connections_per_ip` (default 1024; 0: no limit) bounds how many TLS
+connections (the MQTT port and the WebSocket port together) one IPv4 address may
+hold at once, all cores added up: the per-address handshake limit above only
+covers handshakes still in flight, so a client that finishes its handshakes could
+otherwise hold thousands of connections. An address at its limit gets no SYN-ACK
+(its TCP retries after its backoff, nothing is kept, no handshake token and no
+crypto is spent); a connection that slips past the SYN check is refused with a
+RST at the final ACK. Both are counted per core with the other refusals
+(`syn_dropped.per_ip_established` and `refused.per_ip_established` in statsd, the
+`established per address` figure in the `handshakes: core N:` log line) and in
+total under `$SYS/broker/connections/per_address/*`; the console's `status` shows
+one `per address limit ...` line. **Size it for the largest site:** devices behind
+one NAT (a factory, a mobile carrier's gateway, QEMU's user network) share one
+address and one limit; a limit the site reaches shows as `per_address/refused`
+and `syn_dropped` growing while that site's devices fail to reconnect. The
+plaintext listener has its own `plaintext.max_connections_per_ip` and is not
+counted here.
 
 ## MQTT 5.0 (ADR-274, ADR-275)
 

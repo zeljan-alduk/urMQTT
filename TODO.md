@@ -43,4 +43,4 @@ in [docs/PROGRESS.md](docs/PROGRESS.md).
 
 - No driver for SR-IOV NICs (Mellanox VFs), NVMe, AWS ENA or Google gVNIC, so AWS and Google Cloud are not supported.
 - At most 8 CPUs on a GICv2 (an architectural limit).
-- No limit on established connections per source address.
+- Established TLS connections per source address are limited (`limits.max_connections_per_ip`, default 1024, ADR-280); the limit is per IPv4 address (an IPv6 /64 prefix reuses the key when NEXT-1 lands), so many devices behind one NAT must be sized for.
