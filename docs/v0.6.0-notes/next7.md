@@ -70,6 +70,8 @@ unfinished TLS record 16 KiB + 261 bytes (six records' worth during the handshak
 - No client certificate for the collector (a collector that requires mutual TLS refuses the broker).
 - Statsd stays plain UDP; `$SYS` and the Prometheus endpoint do not report the log connection (statsd and the log do).
 - At-most-once delivery: up to 64 KiB written into a connection that then breaks may be lost.
+  Once the collector has closed its side (FIN or close_notify) nothing more is written into that connection: the
+  records wait for the next one.
 - No IPv6, no proxy, no simultaneous open, no TCP keepalive on the outbound connection.
 - No export bridge, webhooks, NTS or clustering (NEXT-8, LATER-1): the API is their base.
 - Only one outbound user exists; several users at once in one kernel are not exercised (the stack's limit is).

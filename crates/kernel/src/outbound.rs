@@ -64,6 +64,9 @@ pub struct TlsLink {
     /// A TCP event asked for something only `poll` can do (it holds the
     /// stack): close our side, or abort with the reason.
     close_pending: bool,
+    /// The peer has ended the connection (FIN or close_notify): nothing more
+    /// is written into it, so what waits stays queued for the next one.
+    closing: bool,
     fail: Option<String>,
     /// The wall clock was missing at the last poll (said once).
     waiting_clock: bool,
@@ -107,6 +110,7 @@ impl TlsLink {
             tx: Vec::new(),
             rx: Vec::new(),
             close_pending: false,
+            closing: false,
             fail: None,
             waiting_clock: false,
             rx_dropped: 0,
@@ -120,7 +124,9 @@ impl TlsLink {
 
     /// The TLS handshake is done and data can be written.
     pub fn is_up(&self) -> bool {
-        self.dialer.is_up() && self.session.as_ref().is_some_and(|s| !s.is_closed())
+        self.dialer.is_up()
+            && !self.closing
+            && self.session.as_ref().is_some_and(|s| !s.is_closed())
     }
 
     /// Plaintext bytes [`TlsLink::write`] takes now without growing the
@@ -246,6 +252,7 @@ impl TlsLink {
                         self.tx.clear();
                         self.rx.clear();
                         self.close_pending = false;
+                        self.closing = false;
                     }
                     Err(e) => {
                         self.dialer.failed(now_ms);
@@ -334,13 +341,19 @@ impl TlsLink {
         if closed {
             // The peer's close_notify: we close too.
             self.close_pending = true;
+            self.closing = true;
         }
     }
 
     /// The peer sent FIN: our side closes after what is queued.
     pub fn on_peer_closed(&mut self, c: ConnId) {
         if self.owns(c) {
+            // A collector that sent FIN is going away (a half-closed
+            // collector that still reads is not a thing): records written
+            // now would be lost with it, so none are (they wait in the
+            // user's queue for the next connection).
             self.close_pending = true;
+            self.closing = true;
         }
     }
 
