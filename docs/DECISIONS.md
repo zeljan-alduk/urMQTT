@@ -4525,7 +4525,9 @@ device the kernel does not drive is unaffected; one for a driven device would be
   (x86_64 OVMF Secure Boot and aarch64 AAVMF Secure Boot, both enforcing): the sealed raw disk boots; the disk the
   installer writes while running under Secure Boot boots on x86_64 and on aarch64; a tampered kernel on the sealed
   disk is refused by Limine; the unsealed disk is still refused (the control); an A/B update to a sealed ESP boots
-  on trial and an ESP sealed to another configuration is refused by `slots stage`.
+  on trial and an ESP sealed to another configuration is refused by `slots stage`; and (aarch64, no Secure Boot
+  needed) the installer started from an image whose own configuration was swapped for another one refuses it and
+  leaves the target disk's bytes unchanged.
 - **Alternatives.** Patching the pin at install time in the kernel (a FAT writer in the kernel, and a re-signed loader:
   the kernel has no signing key, so this cannot work); a configuration partition outside the ESP (Limine reads only
   the boot volume); hashing nothing and turning off Limine's check (not possible under Secure Boot, and it would drop

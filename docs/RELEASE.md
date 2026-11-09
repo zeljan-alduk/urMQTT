@@ -48,7 +48,7 @@ sums; the builder page uses the template only):
    make supply-chain                                # cargo-vet, cargo-deny, SBOM check (Linux; see the caveat in PROGRESS)
    scripts/smoke.sh --accels "hvf tcg"              # aarch64 full suite (macOS)
    scripts/smoke.sh --arch x86_64
-   scripts/smoke.sh --arch universal
+   scripts/smoke.sh --arch universal               # includes secureboot: SMOKE_REQUIRE_SB=1 with virt-fw-vars and AAVMF_CODE.secboot.fd (DEPLOY.md 5d)
    make repro                                       # prod, built twice; needs deploy/prod/{ca.pem,server.pem,server.key,control.pub}
    make repro ENV=release                           # the release assets built twice (no deploy/ needed); from the rotation on
    ```

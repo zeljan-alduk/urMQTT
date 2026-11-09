@@ -33,7 +33,7 @@ ADR-323 (aarch64 enforcement on AAVMF, H8-W4), ADR-324 (keys: procedures, not ke
   as the tests' control).
 - docs/secure-boot-keys.md: generating PK/KEK/db offline, enrolling, signing, revoking one image, rotating db, a
   leaked key. DEPLOY.md section 5d rewritten (the "two limits" are gone or narrowed).
-- Smoke `SMOKE_ONLY=secureboot --arch universal` grew from 10 to 28 checks (x86_64 OVMF and aarch64 AAVMF, both
+- Smoke `SMOKE_ONLY=secureboot --arch universal` grew from 10 to 29 checks (x86_64 OVMF and aarch64 AAVMF, both
   enforcing); new fuzz target `seal_pins`.
 
 ## Configuration, store, formats
