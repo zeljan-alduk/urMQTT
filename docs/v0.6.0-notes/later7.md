@@ -86,7 +86,7 @@ key, rotation, recovery slot, last slot, unwrap, a power cut at every write of a
 `change`, `rekey` empties the slots), `crates/cfg`, `crates/config`, `crates/config-schema`, `tools/config` (format
 22, rules, templates), `tools/builder/test/disk-key.test.mjs`, fuzz `disk_keyslot` (seeds in
 `fuzz/seeds/disk_keyslot`; 179 492 runs in 2 minutes, no finding), smoke group **`unlock`** (`SMOKE_ONLY=unlock`,
-also a CI shard): aarch64 HVF and TCG, x86_64 TCG, 7 checks each.
+also a CI shard): aarch64 HVF and TCG, x86_64 TCG, 8 checks each (the eighth: a RAM store asks for nothing).
 
 ## Deliberately not done
 

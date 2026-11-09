@@ -139,7 +139,10 @@ fn the_handle_interface_round_trips() {
     assert!(ub_buf_len(s) > 1000);
     ub_buf_free(s);
     assert_eq!(ub_abi_version(), core::ABI_VERSION);
-    assert_eq!(ub_format_version(), u32::from(urmqtt_cfg::blob::FORMAT_VERSION));
+    assert_eq!(
+        ub_format_version(),
+        u32::from(urmqtt_cfg::blob::FORMAT_VERSION)
+    );
 }
 
 /// P1: the page hashes a plaintext account's password in the module, with a
