@@ -28,8 +28,8 @@ fn a_schema_2_database_migrates_and_keeps_every_row() {
     let m = load("v2-data");
     mount(&m);
     let (mut s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (2, 5));
-    assert_eq!(urmqtt_store::schema::VERSION, 5);
+    assert_eq!((info.schema_from, info.schema_to), (2, 6));
+    assert_eq!(urmqtt_store::schema::VERSION, 6);
     let r = s.retained().unwrap();
     assert_eq!(
         r.iter()
@@ -98,7 +98,7 @@ fn a_schema_2_database_migrates_and_keeps_every_row() {
     // Reopened: current already, nothing to migrate.
     mount(&m);
     let (s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (5, 5));
+    assert_eq!((info.schema_from, info.schema_to), (6, 6));
     assert_eq!(s.db().query_text("PRAGMA integrity_check").unwrap(), "ok");
 }
 
@@ -108,7 +108,7 @@ fn the_frozen_schema3_image_holds_its_qos2_state() {
     let m = load("schema3-qos2");
     mount(&m);
     let (mut s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (3, 5));
+    assert_eq!((info.schema_from, info.schema_to), (3, 6));
     assert_eq!(s.sessions().unwrap(), vec![want_qos2_session()]);
     let r = s.retained().unwrap();
     assert_eq!((r[0].topic.as_str(), r[0].qos), ("fleet/fw", 2));
@@ -129,7 +129,7 @@ fn a_power_cut_during_the_migration_leaves_schema_2_or_3() {
     drop(open().unwrap());
     let total = probe.write_count() - before;
     assert!(total > 0);
-    let (mut old, mut mid, mut mid4, mut new) = (0, 0, 0, 0);
+    let (mut old, mut mid, mut mid4, mut mid5, mut new) = (0, 0, 0, 0, 0);
     for n in 1..=total {
         for torn in [false, true] {
             for keep in [false, true] {
@@ -158,7 +158,8 @@ fn a_power_cut_during_the_migration_leaves_schema_2_or_3() {
                     2 => old += 1,
                     3 => mid += 1,
                     4 => mid4 += 1,
-                    5 => new += 1,
+                    5 => mid5 += 1,
+                    6 => new += 1,
                     v => panic!("write {n}: schema {v}"),
                 }
                 assert_eq!(s.db().query_text("PRAGMA integrity_check").unwrap(), "ok");
@@ -171,7 +172,7 @@ fn a_power_cut_during_the_migration_leaves_schema_2_or_3() {
         }
     }
     assert!(
-        old > 0 && mid > 0 && mid4 > 0 && new > 0,
-        "every outcome seen: {old} at 2, {mid} at 3, {mid4} at 4, {new} at 5"
+        old > 0 && mid > 0 && mid4 > 0 && mid5 > 0 && new > 0,
+        "every outcome seen: {old} at 2, {mid} at 3, {mid4} at 4, {mid5} at 5, {new} at 6"
     );
 }

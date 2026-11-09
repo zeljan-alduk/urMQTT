@@ -12,8 +12,8 @@
 //!    that state (`schema5-shared`): `golden_schema5_bytes.rs`.
 //! 3. That frozen file opens and hands back exactly that state.
 //!
-//! And a power cut at any write of the 4 to 5 migration leaves schema 4 or
-//! 5 with every row.
+//! And a power cut at any write of the 4 to 6 migration leaves schema 4, 5 or
+//! 6 with every row.
 
 mod schema3_fixture;
 
@@ -29,7 +29,7 @@ fn a_schema_4_database_migrates_and_keeps_every_row() {
     let m = load("schema4-mqtt5");
     mount(&m);
     let (mut s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (4, 5));
+    assert_eq!((info.schema_from, info.schema_to), (4, 6));
     let before = vec![want_qos2_session(), want_mqtt5_session()];
     assert_eq!(s.sessions().unwrap(), before);
     assert!(s.sessions().unwrap().iter().all(|r| r.sub_ids.is_empty()));
@@ -62,7 +62,7 @@ fn a_schema_4_database_migrates_and_keeps_every_row() {
     drop(s);
     mount(&m);
     let (s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (5, 5));
+    assert_eq!((info.schema_from, info.schema_to), (6, 6));
     assert_eq!(s.db().query_text("PRAGMA integrity_check").unwrap(), "ok");
     assert_eq!(
         s.db()
@@ -78,7 +78,7 @@ fn the_frozen_schema5_image_holds_its_shared_state() {
     let m = load("schema5-shared");
     mount(&m);
     let (mut s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (5, 5));
+    assert_eq!((info.schema_from, info.schema_to), (5, 6));
     assert_eq!(
         s.sessions().unwrap(),
         vec![
@@ -89,8 +89,8 @@ fn the_frozen_schema5_image_holds_its_shared_state() {
     );
 }
 
-/// A power cut at every write of the 4 to 5 migration (cut or torn, the
-/// device's cache dropped or kept): the next open finds schema 4 or 5, never
+/// A power cut at every write of the 4 to 6 migration (cut or torn, the
+/// device's cache dropped or kept): the next open finds schema 4, 5 or 6, never
 /// anything in between, migrates if needed, and every row is there.
 #[test]
 fn a_power_cut_during_the_migration_leaves_schema_4_or_5() {
@@ -104,7 +104,7 @@ fn a_power_cut_during_the_migration_leaves_schema_4_or_5() {
     drop(open().unwrap());
     let total = probe.write_count() - before;
     assert!(total > 0);
-    let (mut old, mut new) = (0, 0);
+    let (mut old, mut new, mut six) = (0, 0, 0);
     for n in 1..=total {
         for torn in [false, true] {
             for keep in [false, true] {
@@ -132,6 +132,7 @@ fn a_power_cut_during_the_migration_leaves_schema_4_or_5() {
                 match info.schema_from {
                     4 => old += 1,
                     5 => new += 1,
+                    6 => six += 1,
                     v => panic!("write {n}: schema {v}"),
                 }
                 assert_eq!(s.db().query_text("PRAGMA integrity_check").unwrap(), "ok");
@@ -145,7 +146,7 @@ fn a_power_cut_during_the_migration_leaves_schema_4_or_5() {
         }
     }
     assert!(
-        old > 0 && new > 0,
-        "both outcomes seen: {old} old, {new} new"
+        old > 0 && new > 0 && six > 0,
+        "every outcome seen: {old} at 4, {new} at 5, {six} at 6"
     );
 }

@@ -264,17 +264,26 @@ mod accounts {
     #[test]
     fn a_set_account_message_round_trips_and_verifies() {
         let m = Message {
-            items: vec![item(AccountClass::Full, "sensor-1"), item(AccountClass::ReadOnly, "dash")],
+            items: vec![
+                item(AccountClass::Full, "sensor-1"),
+                item(AccountClass::ReadOnly, "dash"),
+            ],
             ..msg(5, Command::SetAccount, &[])
         };
         let wire = sign("dev", &m);
         let got = verify("dev", &PUB, &wire).unwrap();
         assert_eq!(got, m);
         let a = parse_account(&got.items[1]).unwrap();
-        assert_eq!((a.class, a.id, a.hash), (AccountClass::ReadOnly, "dash", HASH));
+        assert_eq!(
+            (a.class, a.id, a.hash),
+            (AccountClass::ReadOnly, "dash", HASH)
+        );
         assert!(verify("prod", &PUB, &wire).is_err());
         assert_eq!(Command::from_name("set-account"), Some(Command::SetAccount));
-        assert_eq!(Command::from_name("remove-account"), Some(Command::RemoveAccount));
+        assert_eq!(
+            Command::from_name("remove-account"),
+            Some(Command::RemoveAccount)
+        );
     }
 
     #[test]
@@ -292,7 +301,10 @@ mod accounts {
             let mut it = vec![0u8, id.len() as u8];
             it.extend_from_slice(id.as_bytes());
             it.extend_from_slice(HASH.as_bytes());
-            let m = Message { items: vec![it], ..msg(1, Command::SetAccount, &[]) };
+            let m = Message {
+                items: vec![it],
+                ..msg(1, Command::SetAccount, &[])
+            };
             assert!(enc(m).is_none(), "{id:?}");
         }
         let good = item(AccountClass::Full, "ok");
@@ -322,30 +334,45 @@ mod accounts {
     fn one_id_once_per_message_and_a_bounded_count() {
         let a = item(AccountClass::Full, "same");
         let b = item(AccountClass::ReadOnly, "same");
-        let m = Message { items: vec![a, b], ..msg(1, Command::SetAccount, &[]) };
+        let m = Message {
+            items: vec![a, b],
+            ..msg(1, Command::SetAccount, &[])
+        };
         assert!(encode_body(&m).is_none(), "the same id twice, other class");
         let dup = msg(1, Command::RemoveAccount, &[b"x", b"x"]);
         assert!(encode_body(&dup).is_none());
         let many: Vec<Vec<u8>> = (0..=MAX_ACCOUNT_ITEMS)
             .map(|i| item(AccountClass::Full, &format!("u{i}")))
             .collect();
-        let m = Message { items: many.clone(), ..msg(1, Command::SetAccount, &[]) };
+        let m = Message {
+            items: many.clone(),
+            ..msg(1, Command::SetAccount, &[])
+        };
         assert!(encode_body(&m).is_none(), "one over the bound");
-        let m = Message { items: many[..MAX_ACCOUNT_ITEMS].to_vec(), ..msg(1, Command::SetAccount, &[]) };
+        let m = Message {
+            items: many[..MAX_ACCOUNT_ITEMS].to_vec(),
+            ..msg(1, Command::SetAccount, &[])
+        };
         assert!(encode_body(&m).is_some());
     }
 
     #[test]
     fn the_policy_gates_accounts_and_replay_still_applies() {
         let m = msg(7, Command::RemoveAccount, &[b"u"]);
-        let off = Policy { accounts: false, ..POLICY };
+        let off = Policy {
+            accounts: false,
+            ..POLICY
+        };
         assert_eq!(check(&m, Some(NOW), 0, &off), Err(Reject::AccountsDisabled));
         assert_eq!(check(&m, Some(NOW), 0, &POLICY), Ok(()));
         assert_eq!(check(&m, Some(NOW), 7, &POLICY), Err(Reject::Replay));
         assert_eq!(check(&m, Some(NOW), 8, &POLICY), Err(Reject::Replay));
         assert_eq!(check(&m, None, 0, &POLICY), Err(Reject::NoClock));
         // the allowlist mode is not needed for accounts
-        let open = Policy { allowlist_mode: false, ..POLICY };
+        let open = Policy {
+            allowlist_mode: false,
+            ..POLICY
+        };
         assert_eq!(check(&m, Some(NOW), 0, &open), Ok(()));
     }
 
@@ -354,7 +381,10 @@ mod accounts {
         let items: Vec<Vec<u8>> = (0..MAX_ACCOUNT_ITEMS)
             .map(|i| encode_account(AccountClass::WriteOnly, &format!("{:0>64}", i), HASH).unwrap())
             .collect();
-        let m = Message { items, ..msg(1, Command::SetAccount, &[]) };
+        let m = Message {
+            items,
+            ..msg(1, Command::SetAccount, &[])
+        };
         assert!(sign("dev", &m).len() <= MAX_LEN);
     }
 }

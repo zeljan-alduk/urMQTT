@@ -117,7 +117,7 @@ impl Command {
             Self::RemoveAccount,
         ]
         .into_iter()
-            .find(|c| c.name() == s)
+        .find(|c| c.name() == s)
     }
 
     /// Whether the items are certificate serials (else device ids).
@@ -483,7 +483,9 @@ pub fn check(m: &Message, now: Option<u64>, last_seq: u64, p: &Policy) -> Result
     match m.command {
         Command::Unrevoke if !p.allow_unrevoke => Err(Reject::UnrevokeDisabled),
         Command::Allow | Command::Disallow if !p.allowlist_mode => Err(Reject::NotAllowlistMode),
-        Command::SetAccount | Command::RemoveAccount if !p.accounts => Err(Reject::AccountsDisabled),
+        Command::SetAccount | Command::RemoveAccount if !p.accounts => {
+            Err(Reject::AccountsDisabled)
+        }
         _ => Ok(()),
     }
 }
