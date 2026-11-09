@@ -4473,3 +4473,151 @@ device the kernel does not drive is unaffected; one for a driven device would be
      hardware has IOTLBs; `make bench` was not run with an IOMMU.
    - intel-iommu under KVM needs the split irqchip (`run-qemu.sh` adds it); not run here (no KVM host).
    - Fault interrupts (ADR-306) and unmapping are deliberately absent.
+
+## ADR-320 — Sealed images: the installed disk pins its configuration, so it boots under Secure Boot (LATER-6, H8-W1)
+
+- **Status:** Accepted. Amends ADR-217 (the installed disk lists the configuration module without a hash) for signed
+  images only, and ADR-250/ADR-251. Closes AUDIT H8-W1.
+- **Context.** Under UEFI Secure Boot Limine refuses every file that its `limine.conf` names without a hash ("Secure
+  Boot is active and URI `boot():/boot/urmqtt.cfg` has no associated hash"). ADR-217 left the installed disk's module
+  unhashed on purpose: the installer writes the configuration it booted with into the installation image's
+  unconfigured slot, and the image (pinned by the ISO's menu) must not depend on the configuration. So a disk
+  installed from a signed ISO, the raw `.img` of a signed build and an ESP staged into an A/B slot did not boot with
+  Secure Boot enforced (asserted as `installed-disk-known-limit`). ADR-251 said the fix was "a per-machine ESP whose
+  module is pinned and whose loader is re-enrolled and re-signed by the key's owner at install time".
+- **What was found.** No per-machine step is needed. A signed image is already built for one configuration (ADR-251,
+  limit 1: configure, then sign), and the bytes the installer writes into the slot are exactly the ISO's own
+  `urmqtt.cfg` module (the boot slot, marker `SLOT`). Its BLAKE2b is known when the image is built.
+- **Decision.**
+  1. **Sealing.** `scripts/mkiso.sh --universal --seal` (the default with `--sb-key`; `--no-seal` turns it off) writes
+     `module_path: boot():/boot/urmqtt.cfg#<blake2b of the configured slot>` into the installed disk's no-menu
+     `limine.conf` as well, before the ESP's loaders are enrolled and signed. The installation image keeps its
+     unconfigured slot (ADR-217: the customer's keys are not in it a second time); what changes is that its
+     `limine.conf` names the configuration the installer will write. The same ESP is in `--esp-out` and in
+     `--disk-out` (both patched with that slot), so the raw image boots too. Unsigned images are not sealed: their
+     behaviour, hashes and bytes are unchanged.
+  2. **Everything that puts a configuration into a sealed image puts only that one in, or refuses before writing.**
+     The pins are found by text (`urmqtt_cfg::seal`, no FAT parsing; the slot itself is skipped so a configuration's
+     own strings cannot look like a pin) and compared with the BLAKE2b of the slot as it would be on the disk:
+     - the **installer** (`write_image_with`, `write_boot_image_with`) refuses an image sealed to another
+       configuration, or a sealed image with no configuration, with `InstallError::SealedToOther`, before its first
+       write, and says on the console which image to rebuild; the disk is untouched;
+     - **`urmqtt-disk update-boot`, `create` and `slots stage`** (`config::carry_over`, the one place) refuse when the
+       resulting ESP's pins are not its slot's: the disk keeps its own configuration by default (ADR-217), so an ESP
+       sealed to another one is refused with the two ways out (`--replace-config`, or a sealed ESP for the disk's
+       configuration); `info`, `update-boot` and `stage` print the seal state;
+     - **`urmqtt-config pack --iso`** (and the builder page, the same code) refuses a sealed ISO: its installation
+       image (pinned by the menu) and its signed loaders would have to change. `pack --raw` takes only the pinned
+       configuration.
+  3. **A/B (NEXT-11).** The slot switch changes which partition is the ESP, not a byte inside one (ADR-295 point 5),
+     so each slot is a complete sealed, signed ESP and the chain covers both. A sealed ESP is staged as it is;
+     the carry-over rule above keeps a disk from getting a slot whose loader would refuse it.
+  4. **The kernel's TCB grows by the pin scanner** (`seal.rs`, about 60 lines, no `unsafe`) and by BLAKE2b, which the
+     installer now links (it was host-only). Both run only in `install` and only over the installation image, which
+     Limine already checked against the menu's hash.
+- **Upgrade effect.** None for existing images, disks or configurations: an unsigned image is built exactly as before,
+  and a disk without pins behaves as before in every tool. A disk installed from a sealed image is tied to its
+  configuration: changing the configuration means a new sealed ESP (ADR-321), staged into the standby slot.
+- **Testing.** Host: `urmqtt_cfg::seal` (open, matching, differing, upper-case, every cut-off length, the slot
+  skipped), the installer (`a_sealed_image_installs_only_its_own_configuration`: its own slot installs, another or
+  none writes nothing, one of two copies changed is refused), `urmqtt-disk` (`a_sealed_esp_takes_only_the_configuration_it_pins`),
+  `urmqtt-config` (`a_sealed_image_is_not_configured_afterwards`). Fuzz: `seal_pins`. QEMU, `SMOKE_ONLY=secureboot`
+  (x86_64 OVMF Secure Boot and aarch64 AAVMF Secure Boot, both enforcing): the sealed raw disk boots; the disk the
+  installer writes while running under Secure Boot boots on x86_64 and on aarch64; a tampered kernel on the sealed
+  disk is refused by Limine; the unsealed disk is still refused (the control); an A/B update to a sealed ESP boots
+  on trial and an ESP sealed to another configuration is refused by `slots stage`.
+- **Alternatives.** Patching the pin at install time in the kernel (a FAT writer in the kernel, and a re-signed loader:
+  the kernel has no signing key, so this cannot work); a configuration partition outside the ESP (Limine reads only
+  the boot volume); hashing nothing and turning off Limine's check (not possible under Secure Boot, and it would drop
+  the configuration from the chain); a unified kernel image signed per machine (ADR-251: loses Limine's multi-arch
+  menu and the BIOS path).
+
+## ADR-321 — `sign-iso`: configure, then sign, without building a kernel (LATER-6, H8-W2)
+
+- **Status:** Accepted. Narrows AUDIT H8-W2 (the limit stays a property of the format, the tooling is now there).
+- **Context.** The template ISO cannot be configured after signing (ADR-251 limit 1): the configuration's hash is in
+  the enrolled `limine.conf`, the enrolled hash is in the signed loader. The builder page cannot sign (it would need
+  the private key). The only documented path was to build the image from source with `--config` and `--sb-key`.
+- **Decision.** `scripts/sign-loaders.sh sign-iso KEY CERT IN.iso OUT.iso` takes a **configured** universal ISO (from
+  the builder page or `urmqtt-config pack --iso`), extracts its two kernels and its configuration slot with xorriso,
+  checks that the kernels are the ones its menu pins, and rebuilds the image around them with `mkiso.sh --universal
+  --config SLOT --sb-key KEY --sb-cert CERT` (signed, sealed: ADR-320); `--config FILE` signs a template with a TOML,
+  blob or slot instead, `--disk-out`/`--esp-out` keep the raw disk and the ESP for an installed disk's A/B update.
+  It then checks both loaders' signatures. An unconfigured template is refused unless `--allow-empty` (a signed
+  template is sealed to the empty configuration and is useless). The kernels stay the release's, byte for byte (Limine
+  pins them; the operator verified the template's minisign signature first, DEPLOY.md section 3). It needs a checkout
+  of the release's tag (mkiso.sh, the vendored Limine) but no Rust toolchain for the kernel; the configuration tool is
+  built by cargo.
+- **Equivalence.** The result is byte for byte the direct signed build of the same kernels and configuration (smoke:
+  `sign-iso of the configured unsigned ISO is the direct signed build`), so either path gives the same image to
+  attest.
+- **Not done.** Re-signing inside the builder page (refused: the key would be in the browser); re-signing an ISO in
+  place without rebuilding it (the signed loaders are larger than the unsigned ones, which would need a FAT and ISO
+  9660 writer; rebuilding is simpler and reproducible).
+
+## ADR-322 — Revocation and downgrade under Secure Boot: `dbx` by Authenticode hash; no version counter (LATER-6, H8-W6)
+
+- **Status:** Accepted. Narrows AUDIT H8-W6 further (ADR-299 narrowed it for the offline tool).
+- **Context.** An older image that is correctly signed boots: Secure Boot has no notion of versions, Limine has no
+  rollback index, and the kernel has no UEFI runtime services to keep a counter in a variable.
+- **Decision.**
+  1. **Revocation is by `dbx`.** Every signed loader of this project is a distinct binary (its enrolled
+     `limine.conf` hash differs per configuration and per release), so the firmware's own denylist of image hashes
+     revokes exactly one image: an old release's, or one built for a configuration that leaked. `scripts/sign-loaders.sh
+     authenticode FILE...` prints the Authenticode SHA-256 the firmware matches (`scripts/authenticode.py`, standard
+     library only; equal to osslsigncode's computed digest, tested), and `ovmf-vars ... --dbx-hash HASH` puts it into an
+     OVMF or AAVMF variable store. Revoking a key instead (a new `db` certificate, the old one in `dbx`) revokes every
+     image it signed; the procedure is in docs/secure-boot-keys.md.
+  2. **Each ESP has two loaders** (the ISO's, enrolled with the menu, and the installed disk's, enrolled with the
+     no-menu configuration): revoking an image means both hashes (and the other architecture's).
+  3. **Not built: a monotonic version counter.** It needs a place the firmware or the loader protects and the kernel
+     can read: an authenticated UEFI variable (runtime services in the kernel), a TPM NV index (ADR-254), or a loader
+     with a rollback index. None exists here; ADR-299's offline rule (an older release is refused unless
+     `--allow-downgrade`) stays the operator-side protection.
+- **Testing.** Smoke `secureboot`: the signed ISO's loader hash in `dbx` makes x86_64 OVMF and aarch64 AAVMF answer
+  `Access Denied`; the same `dbx` lets another signed loader (the sealed disk's) boot.
+- **What it does not give.** A signed `dbx` update for real firmware (an authenticated variable signed by the KEK,
+  `sign-efi-sig-list` from efitools) is a documented procedure, not a tool of this repository; nothing revokes an image
+  automatically when a release is superseded.
+
+## ADR-323 — Secure Boot enforcement on aarch64, tested with AAVMF (LATER-6, H8-W4)
+
+- **Status:** Accepted. Closes the aarch64 part of AUDIT H8-W4; Proxmox and a physical PC remain untested.
+- **Context.** ADR-251 limit 3: the AArch64 edk2 that QEMU ships on macOS does not enforce Secure Boot, and
+  `run-qemu.sh` boots aarch64 with `-bios` (no variable store), so the aarch64 loader's signature was only checked
+  offline.
+- **Decision.** `run-qemu.sh --secure-vars FILE` now works on aarch64: AAVMF's Secure Boot build
+  (`AAVMF_CODE.secboot.fd` of Debian/Ubuntu `qemu-efi-aarch64`, or `URMQTT_FIRMWARE_SECURE_AA64`) as the read-only
+  pflash unit and FILE as the variable store (both 64 MiB; `snapshot=on`, never written back). The store is made from
+  `AAVMF_VARS.fd` by the same `sign-loaders.sh ovmf-vars` (virt-fw-vars handles both layouts). Arm has no SMM, so a
+  guest could write the variables itself; that is irrelevant for a test of enforcement. Ubuntu 24.04's AAVMF
+  (2024.02) enforces: an unsigned image is `Access Denied`, the EFI shell a `Security Violation`.
+- **Testing.** Smoke `secureboot` on aarch64 (HVF here, TCG elsewhere): the signed ISO and the sealed disk boot; the
+  unsigned image, the image signed by another key and the dbx-revoked loader are refused; the unsealed disk is refused
+  by Limine; a tampered aarch64 kernel on the sealed disk is refused; the disk installed under Secure Boot on x86_64
+  boots under Secure Boot on aarch64. Without AAVMF Secure Boot firmware the scenario says that aarch64 enforcement was
+  NOT tested and falls back to the offline signature check (a failure with `SMOKE_REQUIRE_SB=1`).
+- **Not done.** CI does not run the universal suites at all (ci.yml says why); the Secure Boot group needs an x86_64
+  kernel, OVMF, virt-firmware and a signer on the runner, and was run by hand on macOS (HVF for aarch64, TCG for
+  x86_64). Real Arm firmware (a cloud's, a board's) is untested.
+
+## ADR-324 — Secure Boot keys: procedures, not keys; MOK and a release-signed image are not done (LATER-6, D-2)
+
+- **Status:** Accepted. The custody decision itself stays the maintainer's (ROADMAP D-2, ADR-251).
+- **Decision.**
+  1. **Who signs.** Secure Boot images are signed by whoever controls the firmware the image boots on: the operator's
+     own PK/KEK/db (docs/secure-boot-keys.md). This repository and its CI hold no Secure Boot key; the release
+     workflow publishes unsigned images, as before. A project key that releases are signed with is possible later
+     without a format change (sign-iso with that key in the release workflow), and is the maintainer's decision.
+  2. **Custody procedures** (docs/secure-boot-keys.md, in the style of release-key-rotation.md): generate PK, KEK and db
+     offline, keep PK and KEK offline (they only sign variable updates), keep db where images are signed (an HSM through
+     PKCS#11 with `sbsign --engine pkcs11`, or an offline machine), the files to enroll (`*.der`), a rotation that
+     enrolls the new db certificate before the old one goes into `dbx`, and what to do after a leak. Test keys are made
+     by `gen-keys` under `build/` and never leave it.
+  3. **Shim and MOK: not done.** They need a shim signed by Microsoft that this project would ship and keep current, and
+     they move the root of trust from the owner's key to Microsoft's and to the shim's vendor certificate. Firmware
+     that offers only the Microsoft keys cannot boot these images under Secure Boot; that is listed, not solved.
+  4. **Not done either:** the boot-once entry (BLI `LoaderEntryOneShot`, A295-W1; needs UEFI runtime services in the
+     kernel), measured boot/TPM (ADR-254, LATER-7), the BIOS path (no signatures exist, H8-W3), Proxmox and physical
+     hardware tests (H8-W4), a configuration key that is not in the image (LATER-7). No configuration key and no store
+     schema change: configuration format 21, reserved for LATER-6, is not used.

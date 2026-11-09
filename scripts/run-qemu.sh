@@ -35,7 +35,10 @@
 # Linux x86_64 with /dev/kvm) or kvm. The isa-debug-exit device is always
 # attached (dev images use it as a fallback power-off). --secure-vars FILE (H8) boots the
 # Secure Boot build of OVMF (SMM, q35) with FILE as its variable store, which must have the
-# keys enrolled (scripts/sign-loaders.sh ovmf-vars); FILE is never written back. --gic and --acpi
+# keys enrolled (scripts/sign-loaders.sh ovmf-vars); FILE is never written back. On aarch64
+# (LATER-6, ADR-323) --secure-vars FILE boots the Secure Boot build of AAVMF (Debian/Ubuntu
+# qemu-efi-aarch64: /usr/share/AAVMF/AAVMF_CODE.secboot.fd, or URMQTT_FIRMWARE_SECURE_AA64) as
+# pflash with FILE (made from AAVMF_VARS.fd the same way) as its variable store. --gic and --acpi
 # are aarch64-only; --bus, --data, --fwd, --pcap and --dgram work as on
 # aarch64.
 #
@@ -264,6 +267,20 @@ firmware() {
     exit 1
 }
 FW=$(firmware)
+FW_ARGS=(-bios "$FW")
+if [[ -n "$SECURE_VARS" ]]; then
+    # LATER-6: AAVMF with Secure Boot (no SMM on Arm: the variable store is not protected from
+    # the guest, which is fine for a test of enforcement). Both pflash units are 64 MiB.
+    [[ -f "$SECURE_VARS" ]] || { echo "error: --secure-vars FILE: $SECURE_VARS not found" >&2; exit 2; }
+    SFW=""
+    for c in "${URMQTT_FIRMWARE_SECURE_AA64:-}" /usr/share/AAVMF/AAVMF_CODE.secboot.fd \
+        /usr/share/edk2/aarch64/QEMU_EFI.secboot.fd; do
+        [[ -n "$c" && -f "$c" ]] && { SFW=$c; break; }
+    done
+    [[ -n "$SFW" ]] || { echo "error: no aarch64 Secure Boot firmware (AAVMF_CODE.secboot.fd) found; set URMQTT_FIRMWARE_SECURE_AA64" >&2; exit 1; }
+    FW_ARGS=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$SFW"
+        -drive "if=pflash,format=raw,unit=1,snapshot=on,file=$SECURE_VARS")
+fi
 [[ -z $IOMMU || $IOMMU == smmuv3 ]] || { echo "error: --iommu smmuv3 (aarch64)" >&2; exit 2; }
 [[ $GIC == 2 || $GIC == 3 ]] || { echo "error: --gic 3|2" >&2; exit 2; }
 
@@ -275,7 +292,7 @@ esac
 ARGS=(
     -machine "virt,gic-version=$GIC,acpi=$ACPI${URMQTT_MTE:+,mte=on}${IOMMU:+,iommu=$IOMMU}"
     -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
-    -bios "$FW"
+    "${FW_ARGS[@]}"
     "${DISPLAY_DEV[@]}"
     -display none -no-reboot
 )
