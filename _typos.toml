@@ -1,5 +1,5 @@
 [files]
-extend-exclude = ["vendor/", "*.pem", "*.key", "Cargo.lock", "fuzz/Cargo.lock", "tools/builder/web/i18n/", "tools/builder/site/products_i18n.py", "tools/builder/demo/i18n/", "tools/builder/site/demo.py"]
+extend-exclude = ["vendor/", "docs/perf-results/*/*.console", "docs/perf-results/*/*.ss", "*.pem", "*.key", "Cargo.lock", "fuzz/Cargo.lock", "tools/builder/web/i18n/", "tools/builder/site/products_i18n.py", "tools/builder/demo/i18n/", "tools/builder/site/demo.py"]
 
 [default.extend-words]
 # ELF dynamic relocation section names (.rela.dyn)

@@ -2157,11 +2157,15 @@ impl Harness {
         {
             let sess = self.sessions.get_mut(&key).expect("session");
             // A shared and an ordinary subscription are two ways in.
+            // (The same filter text may be both: `$share/g/fleet/#` and
+            // `fleet/#` are two subscriptions, so the ordinary side is read
+            // from the full filters the session holds, not from the inner
+            // text the shared set and the grants share.)
             let two_ways = sess.shared.iter().any(|f| matches(f, topic))
                 && sess
-                    .granted
+                    .current
                     .iter()
-                    .any(|f| matches(f, topic) && !sess.shared.contains(f));
+                    .any(|f| !is_share(f) && matches(f, topic));
             match sess.q2.get(&seq) {
                 Some(&(p, rec)) if two_ways && (!dup || p != pid) => {
                     sess.q2.insert(seq, (pid, rec));
