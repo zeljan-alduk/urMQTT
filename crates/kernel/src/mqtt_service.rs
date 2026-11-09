@@ -624,7 +624,7 @@ impl MqttService {
                 }
             );
         }
-        Self {
+        let mut svc = Self {
             me,
             n,
             broker,
@@ -668,7 +668,11 @@ impl MqttService {
             metrics: crate::metrics::MetricsState::new(),
             flow: crate::backpressure::FlowLink::new(),
             revoking: Vec::new(),
-        }
+        };
+        // The first `$SYS` pass is made here, not in the watched loop (ADR-072).
+        svc.sys
+            .start(&mut svc.broker, urmqtt_arch::time::uptime_ns() / 1_000_000);
+        svc
     }
 
     /// Retained messages delivered but not retained (H3): counted for the

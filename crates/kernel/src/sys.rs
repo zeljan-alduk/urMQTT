@@ -142,6 +142,29 @@ impl Sys {
         }
     }
 
+    /// The first pass, when the shard is made and before its loop runs (so
+    /// outside the handler watchdog): the first report, every retained
+    /// `$SYS/broker/...` topic and the first console lines.
+    ///
+    /// The first pass does once what later passes do in part: each retained
+    /// topic is new to the shard (an entry made, not replaced) and, under an
+    /// emulator (TCG), every line of this code runs for the first time and is
+    /// translated then. In the loop that cost was charged to the output
+    /// handler's `sys` step: 22 to 24 ms of running time on a CI runner with
+    /// v0.5, 27 ms once v0.6.0 added 14 topics (per address limit, IOMMU),
+    /// over the 25 ms budget of the slow-log scenarios. Here no connection
+    /// waits for it, and the loop's passes after it are the steady ones.
+    pub fn start(&mut self, broker: &mut Broker, now_ms: u64) {
+        if !self.active {
+            return;
+        }
+        self.next_stats_ms = now_ms + STATS_MS;
+        self.report(broker, now_ms);
+        self.next_refresh_ms = now_ms + REFRESH_MS;
+        refresh(broker);
+        self.console(broker);
+    }
+
     /// One loop pass: counters, console lines, due topics, requests.
     pub fn poll(&mut self, broker: &mut Broker, now_ms: u64) {
         if !self.active {
@@ -153,13 +176,7 @@ impl Sys {
         }
         if now_ms >= self.next_refresh_ms {
             self.next_refresh_ms = now_ms + REFRESH_MS;
-            let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
-            let mut queues = [NetQueueSys::default(); MAX_PAIRS];
-            let info = collect(&mut busy, &mut accepted, &mut queues);
-            sys::topics(&info, |t, v| broker.sys_publish_retained(t, v.as_bytes()));
-            if let Some(report) = crate::diag::served_report() {
-                broker.sys_publish_retained("$SYS/diag/report", report.as_bytes());
-            }
+            refresh(broker);
         }
         self.console(broker);
         let requests: alloc::vec::Vec<SysRequest> = broker.drain_sys_requests().collect();
@@ -373,6 +390,18 @@ impl Sys {
                 STOPPING.store(true, Ordering::Relaxed);
             }
         }
+    }
+}
+
+/// Publishes every retained `$SYS/broker/...` topic (and the served
+/// diagnostics report) into this shard.
+fn refresh(broker: &mut Broker) {
+    let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
+    let mut queues = [NetQueueSys::default(); MAX_PAIRS];
+    let info = collect(&mut busy, &mut accepted, &mut queues);
+    sys::topics(&info, |t, v| broker.sys_publish_retained(t, v.as_bytes()));
+    if let Some(report) = crate::diag::served_report() {
+        broker.sys_publish_retained("$SYS/diag/report", report.as_bytes());
     }
 }
 
