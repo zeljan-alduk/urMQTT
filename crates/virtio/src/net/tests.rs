@@ -312,6 +312,20 @@ fn a_second_pair_that_cannot_be_set_up_leaves_one() {
     bus.queue_max[4] = 0;
     let net = VirtioNet::new_multi(&bus, &env, 2, |_| None).unwrap();
     assert_eq!((net.pairs, net.single), (1, Some(Single::QueueSetup)));
+    // max_virtqueue_pairs = 0x8000 (the specification's maximum): the control
+    // queue would be queue 0x10000, which no 16-bit queue number names; it
+    // must not wrap to queue 0 (pair 0's receive queue, already set up).
+    assert_eq!(ctrl_index(0x8000), None);
+    assert_eq!(ctrl_index(0x7fff), Some(0xfffe));
+    let bus = device(MQ_ALL, 2);
+    cfg(&bus, 0x8000, 40, 128, HASH_TCPV4);
+    let mut net = VirtioNet::new_multi(&bus, &env, 2, |_| None).unwrap();
+    assert_eq!((net.pairs, net.single), (1, Some(Single::QueueSetup)));
+    assert!(!bus.queues.borrow()[2].enabled, "no pair set up for it");
+    assert!(net.take_queue(1).is_none());
+    deliver(&bus, 0, &[3u8; 64]);
+    let mut out = [0u8; MTU_FRAME];
+    assert_eq!(net.recv(&mut out).unwrap(), Some(64));
     // Pair 0 itself absent is an error, as before.
     let mut bus = device(0, 1);
     bus.queue_max[0] = 0;

@@ -200,8 +200,12 @@ pub const fn rx_index(k: u16) -> u16 {
 pub const fn tx_index(k: u16) -> u16 {
     2 * k + 1
 }
-pub const fn ctrl_index(max_pairs: u16) -> u16 {
-    2 * max_pairs
+/// `None` when the index does not fit a 16-bit queue number: §5.1.4 allows
+/// `max_virtqueue_pairs` up to 0x8000, whose control queue (0x10000) no
+/// `queue_select` can name; such a device gets one pair (wrapping to 0 would
+/// set up pair 0's receive queue a second time as the control queue).
+pub const fn ctrl_index(max_pairs: u16) -> Option<u16> {
+    max_pairs.checked_mul(2)
 }
 
 /// Per-queue counters, kept by the core that owns the queue.
@@ -571,6 +575,8 @@ impl<B: Bus> VirtioNet<B> {
         vector: &impl Fn(u16) -> Option<u16>,
         more: &mut [Option<NetQueue<B::Kick>>; MAX_PAIRS],
     ) -> Result<((SplitQueue, usize, u16), DmaRegion), ()> {
+        // Checked first: no pair is set up for a control queue that cannot be.
+        let ci = ctrl_index(max_pairs).ok_or(())?;
         for k in 1..n {
             let pair = k as u16;
             let q = NetQueue::new(bus, env, pair, vector(pair)).map_err(|_| ())?;
@@ -578,7 +584,6 @@ impl<B: Bus> VirtioNet<B> {
                 *slot = Some(q);
             }
         }
-        let ci = ctrl_index(max_pairs);
         let (q, off) = crate::bus::make_queue(bus, env, ci, 8).map_err(|_| ())?;
         let region = env.dma_alloc(4096).ok_or(())?;
         Ok(((q, off, ci), region))

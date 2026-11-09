@@ -27,7 +27,10 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     let want = usize::from(next() % 20);
-    let max_pairs = u16::from_le_bytes([next(), next() % 4]);
+    // Mostly small, sometimes anything (0x8000 and above: a control queue
+    // index that does not fit 16 bits).
+    let (lo, hi) = (next(), next());
+    let max_pairs = u16::from_le_bytes([lo, if hi & 0x80 != 0 { hi } else { hi % 4 }]);
     let key = next();
     let table_max = u16::from_le_bytes([next(), next()]);
     let hash = u32::from_le_bytes([next(), next(), next(), next()]);
@@ -52,7 +55,7 @@ fuzz_target!(|data: &[u8]| {
     let ack = next();
     let ctrl = ctrl_index(max_pairs);
     *bus.responder.borrow_mut() = Some(Box::new(move |b: &FakeBus, q: u16| {
-        if q != ctrl || ack_mode == 0 {
+        if Some(q) != ctrl || ack_mode == 0 {
             return;
         }
         while let Some((head, segs)) = b.pop(q) {
@@ -77,6 +80,7 @@ fuzz_target!(|data: &[u8]| {
         assert!(offered & (F_MQ | F_CTRL_VQ | F_RSS) == F_MQ | F_CTRL_VQ | F_RSS);
         assert!(usize::from(key) >= RSS_KEY_LEN && usize::from(table_max) >= RSS_TABLE_LEN);
         assert!(net.single.is_none());
+        assert!(ctrl.is_some(), "a control queue index that fits 16 bits");
     }
     assert!(net.take_queue(1).is_none(), "no pair leaves before RSS");
     let active = u16::from(next() % 18);
