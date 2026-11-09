@@ -249,7 +249,7 @@ def main():
             order.append(broker)
     colors = {b: SERIES[i] for i, b in enumerate(order)}
     vpses = list(data)
-    footer = ("urMQTT X11 suite (scripts/x11-bench.sh), 2026-11-07. Each VPS measured from the other VPS as the load "
+    footer = ("urMQTT X11 suite (scripts/x11-bench.sh), 2026-11-07 to 11-09. Each VPS measured from the other VPS as the load "
               "generator; same generator for every broker on a machine; 3 repetitions, median and min-max.")
 
     # 1. Handshakes: lines over generator threads.

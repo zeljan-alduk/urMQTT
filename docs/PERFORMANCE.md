@@ -948,3 +948,37 @@ What it says:
    (`paused_ms` / `paused`), none ran out (`timeouts` 0 everywhere); most end before the TCP window update would be
    worth sending (it is sent only when the window grows by an MSS), so the held input in the broker does the pacing
    and TCP's window takes over only for longer stalls.
+
+### 13.6 The same two VPSes with urMQTT at e053399 (v0.5.0), 2026-11-08/09
+
+The suite of 13.1 to 13.4 again, same machines, same generators (each VPS loaded from the other), 3 repetitions, with the
+`main` build at `e053399` (an ancestor of the v0.5.0 tag: QoS 1 loss detection in the flow's own segments, ADR-268;
+publisher back-pressure, ADR-269; receive interrupt, ADR-270; QoS 2, MQTT 5 and WebSocket). Mosquitto 2.0.21, v0.4.2 and
+the SACK build were **not** re-run: their cells are the files of 2026-11-07/08. Raw files:
+`perf-results/x11-2026-11-07/{contabo,netcup}-urmqtt-main-e053399.txt` (+ `.console`, `.ss`); figures with four brokers:
+`perf-results/x11-2026-11-07/charts-v0.5.0/`. Medians (delivered per second unless noted):
+
+| cell | Contabo Mosquitto | v0.4.2 | SACK build | e053399 | netcup Mosquitto | v0.4.2 | SACK build | e053399 |
+|---|---|---|---|---|---|---|---|---|
+| mTLS handshakes/s, 128 threads | 639 | 1830 | 1956 | 1960 | 419 | 923 | 820 | 757 (366-1501) |
+| QoS 0, 64 B, 16 pairs | 60420 | 125142 | 201120 | 205492 | 57920 | 46545 | 43692 | 173717 |
+| QoS 1, 64 B, 16 pairs | 18870 | 22358 | 22293 | 26042 | 14805 | 17463 | 14056 | 26499 |
+| QoS 1, 64 B, 64 pairs | 29990 | 50064 | 68956 | 58481 | 20142 | 51845 | 42448 | 63993 |
+| one flow, QoS 0, 64 B | 50743 | 33898 | 48044 | 97261 | 48660 | 11806 | 22289 | 155718 |
+| one flow, QoS 1, 64 B | 1064 | 1933 | 2360 | 2043 | 959 | 1245 | 938 | 2243 |
+
+What it shows and what it does not:
+
+- On the one ARM core the QoS 0 delivery rate went from about a quarter of the offered load to 95 % of it, and QoS 1 with
+  16 pairs from 14.1k (SACK build) to 26.5k, so ADR-268's regression is gone there. The attribution to the individual
+  changes is by design and counters, not by ablation.
+- **The RX interrupt was not confirmed on netcup in this run** (no armed sleeps counted; the boot log was not captured), so
+  the ARM result is from back-pressure and the loss detection; the interrupt is an open item on that platform.
+- The ARM handshake cell at 128 threads is noisy (366 to 1501) and below v0.4.2's median; no ranking is claimed. The
+  ~1.1 s tail of the SACK build was not reproduced, and not explained.
+- x86, 64 QoS 1 pairs: the SACK build's median (69.0k) is above e053399's (58.5k), ranges overlapping.
+- QoS 1 floods deliver about half of what they acknowledge (the per-subscriber queue is bounded: `qos1_queue_full`).
+- `frames/dropped/nic` counts frames dropped because the **transmit** queue was full (the first text of 13.3 called it a
+  receive overrun; it is not).
+- Idle memory: netcup 3.8 MB at 5000 connections, 10.7 MB at 20000; Contabo 10.0 MB and 17.8 MB (baseline 9.5 MB for four
+  cores); Mosquitto 4.9 MB at 5000.
