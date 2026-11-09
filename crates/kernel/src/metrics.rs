@@ -319,8 +319,14 @@ impl MetricsState {
 fn scrape(method: Method, format: Format) -> Vec<u8> {
     let mut busy = [0u8; crate::smp::MAX_CPUS];
     let mut accepted = [0u64; crate::smp::MAX_CPUS];
+    let t0 = urmqtt_arch::time::uptime_ns();
     let info = crate::sys::collect(&mut busy, &mut accepted);
     let body = urmqtt_broker::metrics::render(&info, &own(), matches!(format, Format::OpenMetrics));
+    urmqtt_log::debug!(
+        "metrics: scrape rendered {} bytes in {} us",
+        body.len(),
+        urmqtt_arch::time::uptime_ns().saturating_sub(t0) / 1000
+    );
     let mut head = [0u8; urmqtt_http::MAX_HEAD];
     let n = urmqtt_http::ok_head(format, body.len(), &mut head);
     let mut out = Vec::with_capacity(n + body.len());

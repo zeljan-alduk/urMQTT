@@ -3583,3 +3583,217 @@ results of the runs are in docs/MQTT5-CONFORMANCE.md and in the branch report.
 (a) No Will at `reboot` (point 17). (b) Shared subscriptions for 3.1.1 clients (point 5). (c) No member online:
 QoS 1/2 queued for an offline persistent member rather than dropped (point 3). (d) `limits.max_shared_groups` per
 shard rather than per broker (point 6). (e) Wills are not persisted (point 15).
+
+## ADR-290 — A Prometheus endpoint in the kernel: plain HTTP on its own port, an allow-list, default off (NEXT-9, D-7)
+
+- **Status:** Accepted (2026-11-09, v0.6.0). Answers D-7 ("an external exporter, or an HTTP port on the broker?") for
+  the case the owner delegated to the implementation: **an HTTP port on the broker**, off by default. Configuration
+  format 16 (14 and 15 belong to other items of the release). ADR-291 to ADR-294 are this item's too.
+- **Context.** The kernel reports its numbers over `$SYS/broker/...` (retained, every 10 s), the info query, statsd and
+  syslog over UDP. A production fleet is monitored with Prometheus: a server that scrapes `GET /metrics` over HTTP,
+  every few seconds, from a list of targets. The two ways in are an exporter outside the image that subscribes to
+  `$SYS` over MQTT (the image stays unchanged; the exporter needs an operator identity and one more process to run
+  and patch) and an HTTP endpoint in the kernel (no extra process, and the numbers are fresh at the moment of the
+  scrape; but README says "TCP 8883 only", and an HTTP request parser joins the trusted computing base). The owner was
+  not available to choose, and the decision has to be safe to make for him: so the endpoint is built, **off by
+  default**, and an operator who prefers an exporter outside loses nothing (the `$SYS` tree is unchanged).
+- **Decision.**
+  1. **One listener, `metrics.port` (default 9100), plain HTTP/1.1, `GET /metrics` only**, switched on with
+     `metrics.enabled` (default false). Everything else of HTTP is refused (ADR-292). No TLS, no login.
+  2. **Access control is an allow-list of networks applied to the SYN** (`metrics.allow_from`, at most 16 entries, at
+     least one when enabled, **no "anywhere" and no `0.0.0.0/0`**, the plaintext listener's machinery and wording): an
+     address outside it gets no answer and the kernel keeps no state, so the port is invisible to a scanner outside the
+     list and cannot be used to fill tables. The decision between this and mutual TLS with an operator-class identity
+     (the other option the ROADMAP entry named) is *decided*: the allow-list. Reasons: (a) Prometheus, the
+     consumer, speaks HTTP and an optional `tls_config` with client certificates; every deployment that wants TLS
+     there puts a TLS-terminating proxy or a service mesh in front of its targets already, and **the numbers are not
+     secret in the sense of the broker's data** (the next paragraph); (b) mutual TLS on this port would run a full
+     TLS handshake (about 2 ms of CPU on a core, ADR-080) per scrape, for a request that costs microseconds, and put
+     the metrics port into the TLS admission's budget; (c) it needs a new certificate role ("metrics scraper") through
+     the image, the registry and the revocation list, a change of the trust model for a read-only number sheet.
+     **mTLS on the metrics port is left out (listed in the notes file) and stays open**: it can be added later as a
+     second mode (`metrics.tls = true`) without changing anything decided here.
+  3. **The threat model.** *What the endpoint reveals:* the broker's load and its counters (clients connected, messages
+     per second, refusals by reason, memory, uptime, the version, the architecture, the time source). It reveals **no
+     payload, topic, client id, user name, certificate, serial or address of any client**: no label of any metric is
+     chosen by a client (ADR-291), so nothing a client does adds a series and nothing a client sends appears in the text.
+     *What an attacker with access learns:* the broker's version (for a known-vulnerability search), how busy it is
+     (when to attack), whether an attack works (the refusal counters answer it), the number of cores. These are the
+     same numbers `$SYS` gives an operator; the allow-list is what keeps them from the Internet. *What the attacker
+     can do to the endpoint:* open connections (bounded per core, per address and by rate, ADR-293), send a malformed or
+     slow request (a fixed refusal or a deadline, ADR-292/293), request the text often (a token per connection, 20 a
+     second per core). *What it cannot do:* change anything (read-only: no state is written), reach the broker's
+     data, reach `$SYS` or the console, or cost more than one bounded buffer per connection. *What is not defended:*
+     an attacker **on the allowed network** who can forge a source address can read the text (the same limit as
+     plaintext `auth = "ip"`, said in the boot log and SECURITY.md), and a passive attacker on the path can read it
+     (plain HTTP). **Never put a public network in `allow_from`**: the boot log warns when an entry reaches a public
+     address, and `urmqtt-config pack`, `verify` and `show` say that an unencrypted endpoint is on.
+  4. **The numbers are the `$SYS` numbers**, from the same `Info` the retained topics and the info query read
+     (`urmqtt_broker::metrics::render`, ADR-291), so there is no second collection that could disagree with them,
+     and a new `$SYS` counter cannot be added without a decision about its metric (a test walks every topic).
+  5. **A listener of its own in the MQTT service**, beside the plaintext and WebSocket ones (`crates/kernel/src/metrics.rs`,
+     hooks in `mqtt_service.rs`), steered to the worker cores like the other ports. It has no session, no broker
+     connection, no TLS state and no handshake slot: a connection is a `Conn` with a request buffer and a deadline.
+  6. **Format 16 and what it means for upgrades.** `[metrics]` is six keys (tags 300 to 305: `enabled`, `port`,
+     `allow_from`, `max_connections`, `max_connections_per_ip`, `request_timeout_s`), each since format 16, so an
+     image that does not touch the section is the blob it always was (format 2 or whatever it needed), and **an
+     existing configuration boots unchanged on the new kernel with no new listening port**. An image with the section
+     set needs a kernel that knows it: an older kernel refuses the blob by its version, which is the point (it would
+     otherwise ignore the allow-list the operator asked for; `urmqtt-config` and the builder page refuse to put such a
+     configuration into an older template, naming the format). **Downgrading** a kernel under a format-16 blob is
+     refused at boot (the blob's version), and the older kernel's own configuration must be used. The kernel has no
+     store schema change.
+  7. **Reserved versions.** `FORMAT_VERSION` is 16 in this tree and 14 and 15 are refused as unknown
+     (`blob::RESERVED_VERSIONS`), because other items of the release allocate them; the release merge removes each
+     entry as its item lands (notes file).
+- **Consequences.** README's "TCP 8883 only" gains a third optional port (off by default, like the plaintext and
+  WebSocket ones). The kernel grows by SIZE_PLACEHOLDER. The trusted computing base grows by `urmqtt-http` (about 420
+  lines, no unsafe), `broker/src/metrics.rs` (about 400 lines of code and 500 of tests, no unsafe) and
+  `kernel/src/metrics.rs` (about 340 lines): AUDIT row, fuzz targets `http_request` and `metrics_render`, the smoke group `metrics`.
+
+## ADR-291 — Metric names, types, units and labels are an interface (NEXT-9)
+
+- **Status:** Accepted (2026-11-09). Part of ADR-290.
+- **Context.** A dashboard and an alert rule hold metric names for years. The `$SYS` topic names are a tree meant to
+  be read by people (`handshakes/in_flight_max`); Prometheus wants flat snake-case names with a unit, `_total` on
+  counters, labels for dimensions, and **a series count that does not depend on what clients do**.
+- **Decision.**
+  1. **One table, `urmqtt_broker::metrics::RULES`, maps every `$SYS/broker/...` topic to a metric**; the text is made
+     from the topics (`sys::topics`) so a value cannot differ from `$SYS`. Two tests keep it honest: every topic the
+     broker can publish (with both optional listeners on and 64 cores) has exactly one rule or a line in `NOT_EXPOSED`
+     with its reason, and every rule matches a topic. Two topics are not exposed: `plaintext/allow_from` (the
+     operator's network plan, text) and `websocket/path` (text without a number).
+  2. **Names.** `urmqtt_` prefix; `[a-z0-9_]`; **base units in the name** (`_seconds`, `_bytes`, `_ratio`; a test
+     refuses `ms`, `days`, `percent`, `kb`, `mb`, `us` as a word of any name): milliseconds become seconds
+     (`urmqtt_handshakes_latency_seconds_total`, `urmqtt_backpressure_paused_seconds_total`,
+     `urmqtt_time_offset_seconds`, decimal with three places, no floating point in the kernel), percent becomes a
+     ratio with two places (`urmqtt_cpu_busy_ratio`), the certificate's days become seconds (whole days times 86 400;
+     `urmqtt_tls_server_certificate_expiry_seconds`, the alert is `< 14 * 86400`).
+  3. **Counters and gauges are decided per topic and checked.** A *counter* is a number that only grows while the
+     machine is up (it restarts from 0 at boot, which Prometheus reads as a counter reset); its name ends in `_total`.
+     A *gauge* goes both ways and never ends in `_total` (a test checks both). Notable cases: messages received, sent,
+     dropped, handshakes started, done, refused, `handshakes/latency_sum_ms` (a counter: the sum, with
+     `handshakes/done` as the count, gives the mean over any window), `handshakes/in_flight_max` and
+     `latency_max_ms` (gauges: a maximum over the last 5 s window, not a counter), `cpu/accepted/N` (a counter per
+     core), `clients/connected` and the retained, subscription and session counts (gauges), `uptime` (a gauge in
+     seconds).
+  4. **Labels are bounded and come from the kernel.** The only label names are `core`, `reason`, `code`, `listener`,
+     `result`, `direction`, `side`, `version`, `arch`, `source`, `mode`, `auth`, and a test refuses any other. Their
+     values are: a core number (at most 64), a reason from a closed list (`slow_subscriber`, `offline`, ..., `steer`,
+     `nic`), a reason code of MQTT 5.0 (the codes the broker sends, plus `other`), a listener name (`plaintext`,
+     `websocket`), a protocol version, a close code. **No client id, user name, topic, address, certificate or any
+     other text a client chose is ever a label value**; the series set depends only on the core count and the
+     configuration (a test changes every counter and checks that the series are the same).
+  4a. **Text values are `_info` gauges**: the sample is 1 and the text is the value of a label
+     (`urmqtt_version_info{version="0.6.0"}`, `urmqtt_arch_info`, `urmqtt_time_source_info`, `urmqtt_entropy_source_info`,
+     `urmqtt_backpressure_info`, `urmqtt_listener_auth_info{listener,auth}`). Values are escaped (`\`, `"`, newline).
+  5. **Unknown is absent, not zero.** `$SYS` says `unknown` for the certificate's days (no wall clock) and the SNTP
+     offset (none measured); the metric is left out then, so an alert on `< 14 days` does not fire at boot and
+     `absent()` says what it says.
+  6. **Per-core numbers** are `urmqtt_cpu_busy_ratio{core}` (gauge, the last window) and
+     `urmqtt_core_connections_accepted_total{core}`; `urmqtt_cpu_cores` says how many. There are no per-client
+     numbers and none will be added: that is what the logs and the telemetry store are for.
+  7. **The endpoint's own metrics** (`urmqtt_metrics_*`: connections, accepted, refused by reason, requests by result,
+     timeouts) are appended; they are not `$SYS` topics because the listener is a measurement of the exporter, not of
+     the broker.
+  8. **The text.** Prometheus text format 0.0.4 by default (`text/plain; version=0.0.4; charset=utf-8`), one
+     `# HELP` and `# TYPE` per family, the samples under them, nothing else. **OpenMetrics 1.0.0 text** when `Accept`
+     prefers it by quality value (`application/openmetrics-text` with a quality above every range that also takes
+     the classic text: `text/plain`, `text/*`, `*/*`): counter families are named without `_total` in `# TYPE`, the samples keep it, and
+     `# EOF` ends the body. It costs about 20 lines, so it is in. Prometheus 2.x and 3.x both negotiate it by their
+     default `Accept` header (a test uses both). The size is about 13 KiB with four cores and bounded (a test: under
+     48 KiB for 64 cores).
+  9. **Stability.** A name, a type, a unit or a label set is changed only with a CHANGELOG entry; a new `$SYS` topic
+     gets a new metric (the first test fails until it does). The names are documented in OPERATE.md.
+
+## ADR-292 — The HTTP request reader: one bounded request, fixed answers, one answer per connection (NEXT-9)
+
+- **Status:** Accepted (2026-11-09). Part of ADR-290. Grows the trusted computing base: AUDIT row, fuzz target.
+- **Context.** The listener has to read an HTTP request from a network host and decide in a bounded way what to do. As
+  for ADR-272's upgrade parser, the question is how little of HTTP to accept.
+- **Decision.** A new `no_std` crate, **`urmqtt-http`**: `forbid(unsafe_code)`, no allocation, clippy's `unwrap`,
+  `expect`, `indexing` and `panic` denials, host-tested, fuzzed, no dependency.
+  1. **Bounds before any work.** The request (line and headers, to the empty line) is at most **2048 bytes and 24
+     header lines**; `scan` looks for the end of headers in the first 2048 bytes and says wait, complete or too large
+     (431). The kernel buffers at most what `scan` allows (one received segment more) and never starts parsing before
+     the empty line. The request target is at most 128 bytes.
+  2. **What is accepted.** `GET` and `HEAD` (HEAD gets the head of the answer, with the length, without the body;
+     everything else is 405 with `Allow: GET, HEAD`), `HTTP/1.1` and `HTTP/1.0` (others 505), an origin-form target
+     (`/` and visible ASCII, no `#`; the caller serves exactly `/metrics`, so a query string or any other path is
+     404), CRLF line ends only (a bare LF anywhere is 400), no line folding, token header names, no control
+     characters in values, no body (`Content-Length` absent or `0`, once) and no `Transfer-Encoding`. Syntax errors
+     are 400 whatever else the request says. **A request that ends its headers with an empty line and is followed by
+     anything is cut at the empty line** (pipelined requests are not read; ADR-290's "one answer"): `scan` delimits it
+     and `parse` refuses a stray LF before the real end, which the fuzz target found (below).
+  3. **`Accept` is read for one decision**, OpenMetrics or the classic text (ADR-291 point 8), by quality value, with
+     malformed values counting as 0. Nothing else in any header is acted on, and no header is echoed.
+  4. **The answers are fixed**: `200` with `Content-Type`, `Connection: close` and the exact `Content-Length`; or a
+     status line with `Connection: close` and `Content-Length: 0` (400, 404, 405, 431, 505). **No answer contains
+     anything the client sent**, no `Server`, no date, no keep-alive, no chunking, no compression (`Accept-Encoding`
+     is ignored), no redirect, no second request. The connection closes after the answer (FIN after the bytes).
+  5. **Verification.** 10 host tests (every refusal, the negotiation by quality, the bounds, split feeds, property
+     tests over arbitrary and mutated requests); the fuzz target `http_request` with 25 seeds (Prometheus 2 and 3
+     requests, curl, HEAD, HTTP/1.0, every refusal, a TLS ClientHello, many headers, pipelining): **it found, in its
+     first run, that a bare LF between two header lines was read as the end of the request while the real end was
+     later** (a smuggling shape, no effect on this endpoint since it serves no state, but a parser that disagrees
+     with its own delimiter); fixed (`parse` now requires that the empty line is the last thing it is given), the
+     input kept as a seed and a test; 15.4 million executions clean afterwards (120 s). The smoke scenarios send each
+     refusal, garbage, a request in five pieces and two pipelined requests.
+
+## ADR-293 — Admission and deadlines of the metrics listener: slowloris, per-address limits, a scrape rate (NEXT-9)
+
+- **Status:** Accepted (2026-11-09). Part of ADR-290.
+- **Context.** The listener is reachable by every host on the allowed networks, and an HTTP connection costs a socket,
+  a buffer and (for the answer) about 20 KiB of text and 50 to 300 microseconds of work to make it.
+- **Decision.**
+  1. **At the SYN**, in this order: the allow-list (a refused address gets no answer, counted by
+     `urmqtt_metrics_refused_total{reason="source"}`, logged at powers of two), then the core's admission
+     (`urmqtt_net::admission::Admission`, the TLS and plaintext listeners' own mechanism, an instance of its own):
+     connections in flight on the core (`metrics.max_connections`, default 8), from one address
+     (`metrics.max_connections_per_ip`, default 2), a **token per connection, 20 a second per core** (burst 20), and
+     the heap reserve (not the DB backlog: a scrape needs no storage). A refusal is no SYN-ACK and no state
+     (`reason="limit"`). The same checks run again at the final ACK.
+  2. **Limits are per core**, not for the whole machine: a connection's core is chosen by the flow hash, an
+     allowed host with several scrapers can therefore hold `cores x max_connections_per_ip` connections. This is
+     deliberate (no shared lock on a hot path; the TLS admission works the same way) and bounded by the core count.
+  3. **A deadline from the accept to the end of the answer**, `metrics.request_timeout_s` (default 5, 1 to 30), kept
+     in an ordered queue per core and checked on the 100 ms tick (`MetricsState::expire`): a connection that has
+     not finished by then is reset and counted (`urmqtt_metrics_timeouts_total`). It covers a request that never
+     ends (headers dripped one byte a second: the deadline is not extended by activity), a client that never reads
+     the answer, and a connection that never sends a byte. A smoke scenario sends a drip and sees the cut at 3.1 s
+     of a 3 s deadline.
+  4. **Memory per connection** is the request buffer (at most 2 KiB plus one segment while reading) and the answer
+     (about 13 KiB with four cores, made only after the request is complete and valid, held until TCP has taken
+     it); with the defaults a core holds at most 8 x 15 KiB, four cores 32 x 15 KiB at the worst moment.
+  5. **No effect on the broker.** The metrics connections have no session and no flight in the handshake
+     admission: a flood of scrapes does not use a TLS handshake slot, and a flood of handshakes does not refuse a
+     scrape (the heap reserve is shared, as it must be).
+  6. **The kernel's watchdog budget** applies to the rendering like any input handler (10 ms; a render took 56 to 345 us on HVF with four
+     cores in the smoke scenario, `metrics: scrape rendered N bytes in M us` at debug level; the token bucket keeps
+     scrapes from adding up).
+
+## ADR-294 — What the metrics item does not do, and why (NEXT-9)
+
+- **Status:** Accepted (2026-11-09). Part of ADR-290. Everything below is a deliberate cut, listed so it is not
+  proposed again without a new reason (ROADMAP section 5 gets the entries the owner decides to keep).
+- **Decision.**
+  1. **No TLS for log shipping.** The ROADMAP entry asked for "TLS for log shipping once NEXT-7 exists". Syslog and
+     statsd are UDP datagrams the kernel *sends*; TLS needs an outbound TCP connection, which the kernel cannot make
+     before NEXT-7 (the outbound TCP client). Left as a **documented non-goal of this release**; the SECURITY.md
+     residual risk "Syslog and statsd are plain UDP" stays as it is, with this pointer.
+  2. **No mutual TLS on the metrics port** (ADR-290 point 2): the allow-list is the control. A TLS mode is a possible
+     later addition.
+  3. **No push** (Pushgateway, remote write, OTLP): needs outbound connections (NEXT-7).
+  4. **No histograms.** The handshake latency is a sum, a count (`handshakes/done`), a maximum and a count over
+     250 ms; a histogram would need new counters in the hot path of the handshake admission (its bucket counts exist
+     in `Admission` as `latency` buckets but are not shared across cores as `$SYS` numbers). Not exposed until `$SYS`
+     has them.
+  5. **No per-client, per-topic or per-identity series** (ADR-291 point 6), and no `process_*` or `go_*` families:
+     there is no process.
+  6. **No authentication of scrapes** (no basic auth, no token): a secret in an image that every Prometheus job would
+     have to hold buys little over the allow-list for numbers of this kind and adds a credential to rotate.
+  7. **No IPv6 address in `allow_from`**: the kernel has no IPv6 (NEXT-1).
+  8. **No new dependency**: the endpoint uses the standard library's `core` and `alloc` only; no `cargo vet` entry
+     changes.
+  9. **A `metrics/` retained `$SYS` summary is not added**: the `$SYS` tree is unchanged (a subscriber sees exactly
+     what it saw), and the listener's own counters are not published there.
