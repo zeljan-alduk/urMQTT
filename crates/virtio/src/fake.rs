@@ -13,10 +13,12 @@
     clippy::multiple_unsafe_ops_per_block
 )]
 
+use std::boxed::Box;
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::vec::Vec;
 
-use crate::bus::Bus;
+use crate::bus::{Bus, Kick};
 use crate::queue::{DESC_F_NEXT, DESC_F_WRITE, Layout, SplitQueue};
 use crate::{DmaRegion, Env, VirtioError};
 
@@ -89,8 +91,23 @@ pub struct FakeBus {
     pub queues: RefCell<Vec<QueueState>>,
     pub cfg: RefCell<Vec<u8>>,
     pub generation: Cell<u8>,
-    pub notified: RefCell<Vec<u16>>,
+    /// Queues kicked, in order (shared with the doorbells queues take away).
+    pub notified: Rc<RefCell<Vec<u16>>>,
     pub driver_ok: Cell<bool>,
+    /// Plays the device when the driver kicks a queue through the bus (a
+    /// control queue that the driver waits on): called with the queue.
+    #[allow(clippy::type_complexity)]
+    pub responder: RefCell<Option<Box<dyn FnMut(&FakeBus, u16)>>>,
+}
+
+/// The doorbell of a queue that left the driver: records the kicks.
+#[derive(Clone)]
+pub struct FakeKick(Rc<RefCell<Vec<u16>>>);
+
+impl Kick for FakeKick {
+    fn kick(&self, _off: usize, idx: u16) {
+        self.0.borrow_mut().push(idx);
+    }
 }
 
 impl FakeBus {
@@ -103,8 +120,9 @@ impl FakeBus {
             queues: RefCell::new(vec![QueueState::default(); queue_max.len()]),
             cfg: RefCell::new(vec![0; cfg_len]),
             generation: Cell::new(0),
-            notified: RefCell::new(Vec::new()),
+            notified: Rc::new(RefCell::new(Vec::new())),
             driver_ok: Cell::new(false),
+            responder: RefCell::new(None),
         }
     }
 
@@ -202,6 +220,10 @@ impl FakeBus {
 }
 
 impl Bus for FakeBus {
+    type Kick = FakeKick;
+    fn kicker(&self) -> FakeKick {
+        FakeKick(Rc::clone(&self.notified))
+    }
     fn init<E: Env>(&self, env: &E, wanted: u64, required: u64) -> Result<u64, VirtioError> {
         // As `Transport::init` does (ADR-305).
         env.platform_access(self.offered & crate::F_ACCESS_PLATFORM != 0);
@@ -251,6 +273,13 @@ impl Bus for FakeBus {
 
     fn notify(&self, _off: usize, idx: u16) {
         self.notified.borrow_mut().push(idx);
+        // The responder may complete buffers (it borrows the queues), so it
+        // is taken out while it runs.
+        let r = self.responder.borrow_mut().take();
+        if let Some(mut r) = r {
+            r(self, idx);
+            *self.responder.borrow_mut() = Some(r);
+        }
     }
 
     fn config_generation(&self) -> u8 {

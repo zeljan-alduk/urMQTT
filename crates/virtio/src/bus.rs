@@ -5,10 +5,37 @@
 //! the device can come from a test.
 
 use crate::queue::SplitQueue;
-use crate::transport::Transport;
+use crate::transport::{Region, Transport};
 use crate::{Env, VirtioError};
 
+/// A queue's doorbell on its own, so the queue can move to the core that
+/// owns it without the rest of the transport (virtio-net's queue pairs,
+/// NEXT-6, ADR-310).
+pub trait Kick {
+    /// Kicks queue `idx` at notification offset `off`.
+    fn kick(&self, off: usize, idx: u16);
+}
+
+/// The virtio-pci notification window, copied out of the [`Transport`].
+#[derive(Debug, Clone, Copy)]
+pub struct Doorbell {
+    notify: Region,
+}
+
+impl Kick for Doorbell {
+    fn kick(&self, off: usize, idx: u16) {
+        // As `Transport::notify`: ring updates (normal memory) must be
+        // visible before the device sees the doorbell (device memory).
+        urmqtt_arch::barrier::doorbell();
+        self.notify.write16(off, idx);
+    }
+}
+
 pub trait Bus {
+    /// The doorbell a queue takes with it ([`Kick`]).
+    type Kick: Kick;
+    /// This bus's doorbell, for a queue that leaves the driver.
+    fn kicker(&self) -> Self::Kick;
     /// Reset and feature negotiation (virtio 1.x §3.1.1, steps 1-6).
     fn init<E: Env>(&self, env: &E, wanted: u64, required: u64) -> Result<u64, VirtioError>;
     /// Largest size the device supports for queue `idx` (0: unavailable).
@@ -34,6 +61,12 @@ pub trait Bus {
 }
 
 impl Bus for Transport {
+    type Kick = Doorbell;
+    fn kicker(&self) -> Doorbell {
+        Doorbell {
+            notify: self.notify,
+        }
+    }
     fn init<E: Env>(&self, env: &E, wanted: u64, required: u64) -> Result<u64, VirtioError> {
         Transport::init(self, env, wanted, required)
     }
@@ -76,6 +109,10 @@ impl Bus for Transport {
 
 /// A borrowed bus is a bus (the tests keep the fake device to play it).
 impl<T: Bus> Bus for &T {
+    type Kick = T::Kick;
+    fn kicker(&self) -> T::Kick {
+        (**self).kicker()
+    }
     fn init<E: Env>(&self, env: &E, wanted: u64, required: u64) -> Result<u64, VirtioError> {
         (**self).init(env, wanted, required)
     }
