@@ -15,8 +15,9 @@
 # (new source ports, so the flows spread over the queue pairs); the client
 # prints "client: mq-qos1 <i> ok|FAILED". After them one statistics window
 # (5 s) passes, so the per-pair counters are in the log. --bench SECONDS adds
-# a QoS 0 flood with urmqtt-loadgen (--loadgen, a Linux build) and prints its
-# RESULT line: the throughput figures of docs/PERFORMANCE.md 13.7.
+# urmqtt-loadgen runs (--loadgen, a Linux build): mutual-TLS handshakes from 32
+# threads and a QoS 0 flood on 8 pairs, each SECONDS long, and prints their
+# RESULT lines (docs/PERFORMANCE.md section 14).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -108,8 +109,14 @@ sleep 1
         if [[ $(cat "$LOG.got") == "mq $i" ]]; then echo "client: mq-qos1 $i ok"; else echo "client: mq-qos1 $i FAILED"; fi
     done
     if (( BENCH > 0 )) && [[ -x "$LOADGEN" ]]; then
-        "$LOADGEN" pubsub --host "$GUEST" --port 8883 --certs "$D" --pairs 8 --qos 0 --size 64 \
-            --duration "$BENCH" 2>&1 | grep -E '^(RESULT|loadgen: (pubsub|errors))' | sed 's/^/client: /' || true
+        # Full mutual-TLS handshakes from 32 threads, then a QoS 0 flood on 8
+        # independent pairs (the image runs with limits=bench: one source
+        # address may open this many).
+        "$LOADGEN" handshake --host "$GUEST" --port 8883 --certs "$D" --prefix "h$RANDOM" --threads 32 \
+            --duration "$BENCH" 2>&1 | grep -E '^RESULT' | sed 's/^/client: /' || true
+        "$LOADGEN" pubsub --host "$GUEST" --port 8883 --certs "$D" --prefix "p$RANDOM" --publishers 8 \
+            --subscribers 8 --topics 8 --qos 0 --payload 64 --rate 0 --duration "$BENCH" 2>&1 \
+            | grep -E '^RESULT' | sed 's/^/client: /' || true
     fi
     # One statistics window with the traffic in it.
     sleep 6

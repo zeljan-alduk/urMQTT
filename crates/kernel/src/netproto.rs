@@ -1271,9 +1271,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         }
         let t = time::uptime_ns();
         let mut activity = dispatch(&mut net, &mut link, &mut pool, &mut local, &mut nic_q);
-        if pairs > 1 {
-            publish_queue(0, &net, 0);
-        }
+        publish_queue(0, &net, 0);
         if activity {
             last_traffic_ns = time::uptime_ns();
         }
