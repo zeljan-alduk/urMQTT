@@ -306,6 +306,25 @@ pub fn metrics_summary(b: &Blob<'_>) -> Option<String> {
     ))
 }
 
+/// One line about the outbound connection when log shipping over TLS is set
+/// (ADR-318): the broker then opens a connection of its own, so whoever ships
+/// the image should see where to. `None` when it is off.
+pub fn outbound_summary(b: &Blob<'_>) -> Option<String> {
+    use fields::tag;
+    let (a, port) = b.addr(tag::OBS_LOG_TLS)?;
+    let name = b.str(tag::OBS_LOG_TLS_NAME);
+    Some(format!(
+        "log records shipped over TLS to {}.{}.{}.{}:{port} (certificate name {}, {} trust anchor file(s), {} KiB queue): one outbound connection",
+        a[0],
+        a[1],
+        a[2],
+        a[3],
+        if name.is_empty() { "the address" } else { name },
+        b.bins(tag::OBS_LOG_TLS_CA).count(),
+        b.uint(tag::OBS_LOG_TLS_QUEUE_KB),
+    ))
+}
+
 /// Whether the configuration allows the CPU-jitter entropy fallback
 /// (`entropy.fallback = "jitter"`, the default; ADR-038, ADR-263).
 pub fn jitter_allowed(b: &Blob<'_>) -> bool {
@@ -381,6 +400,9 @@ pub fn describe(blob_bytes: &[u8], all: bool) -> Result<String, String> {
     if let Some(m) = metrics_summary(&b) {
         let _ = writeln!(o, "warning:     {m}");
     }
+    if let Some(x) = outbound_summary(&b) {
+        let _ = writeln!(o, "outbound:    {x}");
+    }
     let _ = writeln!(
         o,
         "entropy:     {}",
@@ -451,9 +473,10 @@ pub fn verify_blob(blob_bytes: &[u8], dev: bool) -> Result<String, String> {
     let plaintext = plaintext_summary(&b).map_or_else(String::new, |p| format!("\nwarning: {p}"));
     let websocket = websocket_summary(&b).map_or_else(String::new, |w| format!("\nwarning: {w}"));
     let metrics = metrics_summary(&b).map_or_else(String::new, |m| format!("\nwarning: {m}"));
+    let outbound = outbound_summary(&b).map_or_else(String::new, |x| format!("\noutbound: {x}"));
     let entropy = entropy_warning(&b).map_or_else(String::new, |w| format!("\nWARNING: {w}"));
     Ok(format!(
-        "ok: fingerprint {}, {}, {served}{plaintext}{websocket}{metrics}{entropy}",
+        "ok: fingerprint {}, {}, {served}{plaintext}{websocket}{metrics}{outbound}{entropy}",
         Hex(b.fingerprint()),
         if b.signature().is_some() {
             "signed"

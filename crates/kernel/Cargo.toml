@@ -40,7 +40,8 @@ urmqtt-log = { path = "../log" }
 urmqtt-mm = { path = "../mm" }
 urmqtt-pci = { path = "../pci" }
 urmqtt-platform = { path = "../platform" }
-urmqtt-tls = { path = "../tls" }
+# The TLS client is in every image: outbound connections (NEXT-7, ADR-317).
+urmqtt-tls = { path = "../tls", features = ["client"] }
 urmqtt-usys = { path = "../usys" }
 # The drivers the kernel always runs (network, disks, entropy); the others
 # come with the virtio-* features below (ADR-257).

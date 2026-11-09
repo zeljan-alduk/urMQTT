@@ -144,6 +144,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | ≤ 512 B per idle TLS connection (494 B measured at 10k), no per-device trie nodes | ✅ M15 |
 | **Ops** | Handler watchdog (log / drop / reset), health check, rate-limited logs | ✅ M16 |
 | | Syslog (RFC 5424) and statsd metrics over UDP to private collectors | ✅ M16 |
+| | Syslog over TLS 1.3 (RFC 5425) to a collector verified against configured CAs, on an outbound TCP client that opens connections only to configured destinations; off by default | ✅ NEXT-7 |
 | | Admission that survives reconnect storms: free-heap reserve, in-flight limits per core and per source address | ✅ M16 |
 
 ## Architecture
@@ -666,6 +667,8 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `devices.virtio_net_interrupt` | `"auto"` (default) \| `"off"` | How the NIC wakes the core that owns it: `auto` takes the receive queue's MSI-X interrupt where the platform has one (x86 local APIC, aarch64 GICv2m frame or GICv3 ITS) and polls only otherwise; `off` always polls (every 200 us while connections exist). The boot line `net: receive wake-up: ...` says which. `off` needs configuration format 11 (ADR-270) |
 | `devices.virtio_net_queues` | `"auto"` (default) \| `"single"` | How many virtio-net queue pairs the NIC uses: `auto` takes one per data core when the device offers multiqueue with RSS (`VIRTIO_NET_F_MQ` and `VIRTIO_NET_F_RSS`), so each core receives and sends its own flows; otherwise one pair, as before. `single` always uses one. The boot line `net: multiqueue: ...` or `net: one queue pair: <reason>` says which. `single` needs configuration format 19 (ADR-310 to ADR-314) |
 | `observability.syslog_udp`, `metrics_udp` | `""` or `"a.b.c.d:port"` | Private syslog and statsd collectors |
+| `observability.log_tls` | `""` (default) or `"a.b.c.d:port"` | A syslog collector over TLS 1.3 (RFC 5425 framing): the broker's one outbound connection. Needs `log_tls_ca` and configuration format 20 (ADR-318) |
+| `observability.log_tls_name`, `log_tls_ca`, `log_tls_queue_kb` | DNS name or `""`; 1–8 PEM files; 16–4096 (256) | The name the collector's certificate must carry (`""`: its address, as an IP SAN), the CAs it must chain to (the only trust anchors of that connection), the KiB of records kept while it is unreachable |
 | `watchdog.handler_budget_ms` | 1–10 000 | Time budget of an ordinary handler |
 | `watchdog.handshake_budget_ms` | 0, 1–900 | Budget of a TLS handshake step; 0 (default) = 10x the handshake cost measured at boot, 50–500 ms (ADR-071) |
 | `watchdog.action` | `log` \| `drop` \| `reset` | What happens on overrun (ADR-035); a core stuck for 100 budgets always resets |
@@ -1062,7 +1065,9 @@ make run
 # urmqtt.refused.memory:0|c
 ```
 
-Production images set `observability.syslog_udp` and `metrics_udp` to collectors on a private network.
+Production images set `observability.syslog_udp` and `metrics_udp` to collectors on a private network, or ship
+the log over TLS to a collector anywhere (`observability.log_tls`, NEXT-7): `scripts/logtls-sink.py` is a minimal
+RFC 5425 collector for trying it (`SMOKE_ONLY=logtls scripts/smoke.sh` runs it against a VM).
 
 ## Deployment
 

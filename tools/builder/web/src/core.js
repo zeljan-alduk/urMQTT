@@ -15,7 +15,12 @@ export const FILE_KEYS = {
   'trust.bootstrap': { slot: 'bootstrap', file: 'bootstrap-%d.pem', list: true },
   'control.public_key': { slot: 'control', file: 'control.pub' },
   'tls.revoked_serials': { slot: 'revoked', file: 'revoked.txt' },
+  // The log collector's trust anchors (NEXT-7, ADR-318).
+  'observability.log_tls_ca': { slot: 'logca', file: 'log-ca-%d.pem', list: true },
 };
+
+/** The file slots that hold a list of PEM files (at most 8 each). */
+export const LIST_SLOTS = ['operational', 'bootstrap', 'logca'];
 
 /** Fields the page does not offer. Disk encryption (S7, ADR-240) needs a key
  * dialog (generate, save, import) the page does not have yet; it is set with
@@ -35,6 +40,8 @@ export const EXAMPLES = {
   'network.gateway': '192.0.2.1',
   'observability.syslog_udp': '192.0.2.50:514',
   'observability.metrics_udp': '192.0.2.51:8125',
+  'observability.log_tls': '192.0.2.52:6514',
+  'observability.log_tls_name': 'logs.example.com',
   'time.servers': '192.0.2.123',
   'plaintext.allow_from': '10.0.0.0/8',
   'plaintext.ip_identities': '10.0.1.0/24 plc',
@@ -231,7 +238,7 @@ export function emptyState() {
     values: {},          // field id -> raw value, only what the user changed
     files: {             // imported material; never leaves the page, never stored by key
       cert: null, key: null, control: null,
-      operational: [], bootstrap: [],
+      operational: [], bootstrap: [], logca: [],
     },
     signing: null,       // { pem, publicKey, signerId } (never stored)
     name: '',            // output file name part
@@ -262,7 +269,8 @@ export function fileIsSet(f, state) {
 
 /** Names of the virtual files for a list slot: ca-1.pem, ca-2.pem ... */
 export function listFileNames(slot, n) {
-  const pattern = slot === 'operational' ? 'ca-%d.pem' : 'bootstrap-%d.pem';
+  const key = Object.values(FILE_KEYS).find(k => k.slot === slot && k.list);
+  const pattern = key ? key.file : 'bootstrap-%d.pem';
   return Array.from({ length: n }, (_, i) => pattern.replace('%d', String(i + 1)));
 }
 
@@ -343,7 +351,7 @@ export function fieldForPath(model, path) {
  * Files are not read here: the caller asks the user for `needFiles`.
  */
 export function importToml(model, json, base = emptyState()) {
-  const state = { ...base, values: {}, files: { ...base.files, operational: [], bootstrap: [] } };
+  const state = { ...base, values: {}, files: { ...base.files, operational: [], bootstrap: [], logca: [] } };
   const unknown = [];
   const needFiles = [];
   const visit = (section, key, value) => {

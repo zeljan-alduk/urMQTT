@@ -8,6 +8,7 @@ const SLOT_KINDS = {
   key: { list: false, accept: '.pem,.key,.txt' },
   operational: { list: true, accept: '.pem,.crt,.cer,.txt' },
   bootstrap: { list: true, accept: '.pem,.crt,.cer,.txt' },
+  logca: { list: true, accept: '.pem,.crt,.cer,.txt' },
   control: { list: false, accept: '.pem,.pub,.key,.txt' },
   signing: { list: false, accept: '.pem,.key,.txt' },
 };
@@ -52,7 +53,7 @@ function analyzeSlot(slot, pem, label) {
     return { ok: false, node: box };
   };
   try {
-    if (slot === 'cert' || slot === 'operational' || slot === 'bootstrap') {
+    if (slot === 'cert' || slot === 'operational' || slot === 'bootstrap' || slot === 'logca') {
       if (/PRIVATE KEY/.test(pem)) return fail(t('cert.is-a-key'));
       const certs = b.certInfo(pem);
       certs.forEach((c, i) => box.append(certBlock(c, i, certs.length)));

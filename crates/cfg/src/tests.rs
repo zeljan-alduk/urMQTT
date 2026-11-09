@@ -215,7 +215,7 @@ fn structural_attacks_fail_closed() {
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, 10 which no format ever used, and
     // one above the newest).
-    for unknown in [0u8, 10, 20, 21] {
+    for unknown in [0u8, 10, 21] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
@@ -223,8 +223,8 @@ fn structural_attacks_fail_closed() {
     // (8 back-pressure, 9 WebSocket, 11 the receive interrupt, 12 MQTT 5.0,
     // 13 the shared-group limits, 14 the per-address connection limit, 15 the run-time
     // account limit, 16 the metrics endpoint, 17 the A/B update keys, 18 the IOMMU,
-    // 19 the NIC's queue pairs).
-    for known in [8u8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19] {
+    // 19 the NIC's queue pairs, 20 log shipping over TLS).
+    for known in [8u8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] {
         let v = with_version(&assemble(&ok), known);
         assert_eq!(Blob::parse(&v).map(|b| b.version()), Ok(u16::from(known)));
     }
@@ -246,7 +246,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 19));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 20));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -255,7 +255,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[19, 0],
+        &[20, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -1514,5 +1514,143 @@ fn update_keys_need_format_17() {
             Ok(blob) => assert!(check::check(&Blob::parse(&blob).unwrap(), false).is_ok()),
             Err(e) => assert_eq!(e.key, "update.trial_timeout_s"),
         }
+    }
+}
+
+/// ADR-318: the `observability.log_tls*` keys of format 20. At their
+/// defaults they write nothing; any of them set needs format 20, which an
+/// older blob cannot hold; a collector needs its trust anchors and the other
+/// keys need a collector; the address must be a unicast one.
+#[test]
+fn log_tls_keys_need_format_20() {
+    const CA: &[u8] = b"-----BEGIN CERTIFICATE-----\nMA==\n-----END CERTIFICATE-----\n";
+    let mut d = Builder::new();
+    d.str(tag::OBS_LOG_TLS_NAME, "").unwrap();
+    d.uint(tag::OBS_LOG_TLS_QUEUE_KB, 256).unwrap();
+    assert_eq!(d.finish(false).unwrap(), empty());
+    let full = |name: &str, addr: [u8; 4], port: u16| {
+        let mut b = Builder::new();
+        b.addr(tag::OBS_LOG_TLS, addr, port).unwrap();
+        b.bins(tag::OBS_LOG_TLS_CA, &[CA.to_vec()]).unwrap();
+        b.str(tag::OBS_LOG_TLS_NAME, name).unwrap();
+        b.uint(tag::OBS_LOG_TLS_QUEUE_KB, 64).unwrap();
+        b
+    };
+    let blob = full("logs.example.com", [10, 0, 2, 2], 6514)
+        .finish(false)
+        .unwrap();
+    let p = Blob::parse(&blob).unwrap();
+    assert_eq!(p.version(), 20);
+    assert_eq!(p.present().count(), 4);
+    assert_eq!(p.addr(tag::OBS_LOG_TLS), Some(([10, 0, 2, 2], 6514)));
+    assert_eq!(p.str(tag::OBS_LOG_TLS_NAME), "logs.example.com");
+    assert_eq!(p.bins(tag::OBS_LOG_TLS_CA).count(), 1);
+    // A blob of format 18 cannot hold any of them.
+    for t in [
+        tag::OBS_LOG_TLS,
+        tag::OBS_LOG_TLS_NAME,
+        tag::OBS_LOG_TLS_CA,
+        tag::OBS_LOG_TLS_QUEUE_KB,
+    ] {
+        let rec = record(t, p.raw(t).unwrap());
+        assert!(
+            Blob::parse(&with_version(&assemble(&rec), 18)).is_err(),
+            "{t}"
+        );
+        assert!(
+            Blob::parse(&with_version(&assemble(&rec), 20)).is_ok(),
+            "{t}"
+        );
+    }
+    // The empty name is the default (the address is the name).
+    assert!(full("", [192, 0, 2, 7], 6514).finish(false).is_ok());
+    // The rules, with the key they name.
+    for (b, key) in [
+        (full("", [127, 0, 0, 1], 6514), "observability.log_tls"),
+        (full("", [0, 0, 0, 0], 6514), "observability.log_tls"),
+        (full("", [224, 0, 0, 1], 6514), "observability.log_tls"),
+        (
+            full("", [255, 255, 255, 255], 6514),
+            "observability.log_tls",
+        ),
+        (full("", [10, 0, 0, 1], 0), "observability.log_tls"),
+        (
+            full("bad_name", [10, 0, 0, 1], 6514),
+            "observability.log_tls_name",
+        ),
+        (
+            full("10.0.0.1", [10, 0, 0, 1], 6514),
+            "observability.log_tls_name",
+        ),
+        (
+            full("-a.example", [10, 0, 0, 1], 6514),
+            "observability.log_tls_name",
+        ),
+        (
+            full("a..example", [10, 0, 0, 1], 6514),
+            "observability.log_tls_name",
+        ),
+    ] {
+        assert_eq!(b.finish(false).map_err(|e| e.key), Err(key));
+    }
+    let mut b = Builder::new();
+    b.addr(tag::OBS_LOG_TLS, [10, 0, 0, 1], 6514).unwrap();
+    assert_eq!(
+        b.finish(false).map_err(|e| e.key),
+        Err("observability.log_tls_ca")
+    );
+    for (t, key) in [
+        (tag::OBS_LOG_TLS_NAME, "observability.log_tls_name"),
+        (tag::OBS_LOG_TLS_CA, "observability.log_tls_ca"),
+        (tag::OBS_LOG_TLS_QUEUE_KB, "observability.log_tls_queue_kb"),
+    ] {
+        let mut b = Builder::new();
+        match t {
+            tag::OBS_LOG_TLS_NAME => b.str(t, "logs.example.com").unwrap(),
+            tag::OBS_LOG_TLS_CA => b.bins(t, &[CA.to_vec()]).unwrap(),
+            _ => b.uint(t, 64).unwrap(),
+        }
+        assert_eq!(b.finish(false).map_err(|e| e.key), Err(key));
+    }
+    // Ranges of the field table.
+    let mut b = Builder::new();
+    assert!(b.uint(tag::OBS_LOG_TLS_QUEUE_KB, 15).is_err());
+    assert!(b.uint(tag::OBS_LOG_TLS_QUEUE_KB, 4097).is_err());
+    assert!(b.str(tag::OBS_LOG_TLS_NAME, &"a".repeat(254)).is_err());
+    assert!(b.bins(tag::OBS_LOG_TLS_CA, &vec![CA.to_vec(); 9]).is_err());
+}
+
+#[test]
+fn dns_names() {
+    for ok in [
+        "localhost",
+        "logs.example.com",
+        "a-b.c",
+        "x1",
+        "1.example",
+        "A.EXAMPLE",
+    ] {
+        assert!(check::valid_dns_name(ok), "{ok}");
+    }
+    let long_label = "a".repeat(64);
+    let long_name = ["a"; 128].join(".");
+    assert!(check::valid_dns_name(&["a"; 127].join(".")), "253 bytes");
+    for bad in [
+        "",
+        ".",
+        "a.",
+        ".a",
+        "a..b",
+        "-a",
+        "a-",
+        "a_b",
+        "*.example.com",
+        "10.0.0.1",
+        "1.2",
+        "a b",
+        &long_label,
+        &long_name,
+    ] {
+        assert!(!check::valid_dns_name(bad), "{bad}");
     }
 }

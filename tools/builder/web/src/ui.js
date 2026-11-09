@@ -63,7 +63,7 @@ function persist() {
     const accounts = app.model.fields.filter(isUserList).reduce((n, f) => n + completeUsers(s.values[f.id]).length, 0) || (app.accountsForgotten ? 1 : 0);
     sessionStorage.setItem(STORE_KEY, JSON.stringify({
       v: 1, accounts, values, name: s.name, preset: s.preset, release: s.release,
-      files: { cert: pub(s.files.cert), control: pub(s.files.control), operational: s.files.operational.map(pub), bootstrap: s.files.bootstrap.map(pub) },
+      files: { cert: pub(s.files.cert), control: pub(s.files.control), operational: s.files.operational.map(pub), bootstrap: s.files.bootstrap.map(pub), logca: s.files.logca.map(pub) },
     }));
   } catch { /* private window: the form simply starts empty after a reload */ }
 }
@@ -91,6 +91,7 @@ function restore() {
     s.files.control = ok(saved.files.control);
     s.files.operational = (saved.files.operational || []).map(ok).filter(Boolean).slice(0, 8);
     s.files.bootstrap = (saved.files.bootstrap || []).map(ok).filter(Boolean).slice(0, 8);
+    s.files.logca = (saved.files.logca || []).map(ok).filter(Boolean).slice(0, 8);
   }
   // The accounts' hashes are never kept: after a reload the form says so.
   app.accountsForgotten = Boolean(saved && saved.v === 1 && Number(saved.accounts) > 0);

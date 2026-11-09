@@ -357,8 +357,10 @@ kernel and keep the data, use `urmqtt-disk update-boot` or
 `scripts/kvm-host/install.sh` instead.
 
 Only TCP 8883 is served. Allow it inbound. Allow UDP from the VM to your syslog
-and statsd collectors (`observability.*`) if configured, plus DHCP. Nothing else
-is needed, unless the image turns on an optional listener (all off by default):
+and statsd collectors (`observability.*`) if configured, plus DHCP, and with
+`observability.log_tls` (NEXT-7, ADR-318) **outbound** TCP from the VM to that
+collector's address and port: the broker's only outbound connection, from a port
+in 49152–65535. Nothing else is needed, unless the image turns on an optional listener (all off by default):
 the Prometheus endpoint (`[metrics]`, TCP 9100 by default, **inbound from the monitoring host only**: the
 configuration's `allow_from` is the broker's own filter, the firewall is the second one; OPERATE.md "Metrics for
 Prometheus").
@@ -714,8 +716,10 @@ restarts the service.
 ## 8. Operating
 
 - **Logs:** the serial console, plus RFC 5424 syslog over UDP to
-  `observability.syslog_udp`. Watch for `admission:`, `watchdog:`, `health:`
-  and `db:` lines.
+  `observability.syslog_udp`, and over TLS 1.3 to `observability.log_tls`
+  (RFC 5425 framing; the collector's certificate checked against
+  `observability.log_tls_ca`; OPERATE.md "Log shipping over TLS"). Watch for
+  `admission:`, `watchdog:`, `health:`, `db:` and `logtls:` lines.
 - **Metrics:** statsd to `observability.metrics_udp` every 10 s
   (`urmqtt.connections`, `urmqtt.heap.*`, `urmqtt.refused.*`, `urmqtt.health`,
   `urmqtt.tls.resume_refused.*`, `urmqtt.tls.tickets_issued`, …; see ADR-035

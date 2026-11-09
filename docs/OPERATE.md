@@ -302,8 +302,44 @@ groups:
 ```
 
 Without Grafana: `curl -s http://10.0.0.5:9100/metrics | grep -v '^#'` is the whole interface, and Prometheus's own
-expression browser graphs any of the above. Log shipping stays plain UDP (syslog, statsd): TLS for it needs an outbound
-TCP connection the kernel cannot make yet (ADR-294).
+expression browser graphs any of the above. Statsd stays plain UDP; the log can go over TLS (next section).
+
+## Log shipping over TLS (NEXT-7, ADR-315 to ADR-319)
+
+With `observability.log_tls` set, core 0 keeps one TLS 1.3 connection to that collector and sends it every log
+record, the same RFC 5424 message the UDP path sends, framed as RFC 5425 says (`MSG-LEN SP SYSLOG-MSG`). It is the
+only connection the broker opens itself, and it goes only to the address in the image.
+
+```toml
+[observability]
+log_tls = "198.51.100.20:6514"     # an IPv4 address: there is no DNS
+log_tls_name = "logs.example.com"  # the certificate's DNS name; "" = the address, as an IP SAN
+log_tls_ca = ["log-ca.pem"]        # the CA(s) of the collector's certificate, and nothing else
+log_tls_queue_kb = 256             # records kept while it is unreachable (16 to 4096)
+```
+
+This needs configuration format 20 (a v0.6.0 kernel). Collectors that speak it: rsyslog (`imtcp` with
+`StreamDriver.Name="gtls"`, `StreamDriver.Mode="1"`, `StreamDriver.AuthMode="anon"`: the broker presents no client
+certificate), syslog-ng (`network(transport("tls") tls(peer-verify(optional-untrusted)))`), Fluent Bit (`syslog`
+input, `mode tls`, `format rfc5424`), or `scripts/logtls-sink.py` for a try.
+
+What the console says:
+
+| Line | Meaning |
+|---|---|
+| `logtls: shipping log records over TLS to A:P (certificate name N, k trust anchor file(s), queue Q KiB)` | at boot: configured |
+| `logtls: log shipping over TLS is OFF: …` | at boot: the anchors in the image are unusable; the broker serves without it |
+| `logtls: waiting for the wall clock before connecting to A:P` | no clock yet (certificates are checked against it) |
+| `logtls: connected to A:P (TLS 1.3, certificate verified for "N")` | up |
+| `logtls: connection to A:P failed: TLS: Handshake("invalid peer certificate: UnknownIssuer"); next attempt in 4 s` | the collector's certificate is not from `log_tls_ca` (or `certificate not valid for name …`: another name; `certificate expired …`) |
+| `logtls: connection to A:P refused` / `timed out` / `reset by the peer` / `closed`, `; next attempt in N s` | the TCP connection; the wait doubles to 5 minutes and resets after a connection that lasted 10 s |
+| `logtls: N log record(s) dropped since the last report …` | the queue was full (at most once a minute) |
+
+Records from boot wait in the queue until the first connection, so the collector gets the whole boot. A record
+written into a connection that then breaks may be lost (at most 64 KiB; delivery is at most once, as over UDP).
+With statsd configured, `urmqtt.logtls.up`, `.records_sent`, `.records_dropped`, `.connections`, `.failures`, `.attempts`,
+`.bytes_out` and `.rx_dropped_bytes` say the same in numbers. The firewall must let the VM out to the collector (DEPLOY.md). Not done: DNS names, a client
+certificate, statsd over TLS, IPv6 (ADR-319).
 
 ## MQTT 5.0 (ADR-274, ADR-275)
 

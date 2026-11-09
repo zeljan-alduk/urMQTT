@@ -28,7 +28,7 @@ const withPlaintext = s => Object.assign(s.values, {
 });
 
 test('the limit is in [limits], off by default, 0 to 1024, the only key of format 15', () => {
-  assert.equal(model.formatVersion, 19);
+  assert.equal(model.formatVersion, 20);
   assert.ok(model.sections.find(s => s.id === 'limits').fields.some(f => f.id === ID));
   const f = model.byId.get(ID);
   assert.deepEqual([f.default, f.min, f.max, f.since], [0, 0, 1024, 15]);

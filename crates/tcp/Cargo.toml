@@ -1,6 +1,6 @@
 [package]
 name = "urmqtt-tcp"
-description = "Server-only TCP stack with SYN cookies and per-core connection tables."
+description = "TCP stack: SYN-cookie server side, per-core connection tables, and an active open for configured destinations."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

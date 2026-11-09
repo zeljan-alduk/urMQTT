@@ -526,6 +526,14 @@ pub struct Observability {
     pub log_level: LogLevel,
     pub syslog_udp: Option<SocketAddrV4>,
     pub metrics_udp: Option<SocketAddrV4>,
+    /// Log shipping over TLS (NEXT-7, ADR-318): the collector, if any.
+    pub log_tls: Option<SocketAddrV4>,
+    /// The name its certificate must carry; empty: its address.
+    pub log_tls_name: &'static str,
+    /// Its trust anchors (PEM).
+    pub log_tls_ca: &'static [&'static [u8]],
+    /// KiB of records kept while it is unreachable.
+    pub log_tls_queue_kb: u32,
 }
 
 #[derive(Debug, Clone, Copy)]

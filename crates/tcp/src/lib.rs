@@ -1,13 +1,21 @@
-//! Server-only TCP stack (M14, PROMPT §5.2, ADR-033).
+//! The TCP stack (M14, PROMPT §5.2, ADR-033): a server stack with a small
+//! client side for configured destinations (NEXT-7, ADR-315).
 //!
 //! Sans-IO: segments come in through [`TcpStack::input`] with an [`App`]
 //! that receives events synchronously, and leave through an `out` callback
 //! as finished TCP segments (the IPv4 layer wraps them). Time is passed in
 //! milliseconds.
 //!
-//! - **Passive open only.** SYN cookies are always on, so a half-open
-//!   connection holds no state. A connection exists from the handshake's
-//!   final ACK.
+//! - **Passive open with SYN cookies.** SYN cookies are always on, so a
+//!   half-open server connection holds no state. It exists from the
+//!   handshake's final ACK.
+//! - **Active open** ([`TcpStack::connect`], NEXT-7, ADR-315): off until the
+//!   kernel allows some ([`TcpStack::set_max_active`]); a SYN-SENT connection
+//!   is the only half-open state the stack keeps, bounded by that limit, with
+//!   an RFC 6528 initial sequence number, SYN retransmission with exponential
+//!   backoff and an ephemeral port that no listener and no steered port uses
+//!   ([`TcpStack::ephemeral_port`]). The reconnect policy above it is
+//!   [`dial`].
 //! - **Per-core table:** open addressing on the 4-tuple, O(1). No hot path
 //!   iterates over all connections. Timers sit in a hierarchical wheel
 //!   ([`urmqtt_timer_wheel`]).
@@ -55,8 +63,11 @@
 
 extern crate alloc;
 
+mod active;
 pub mod cc;
 pub mod cookie;
+pub mod dial;
+pub mod queue;
 pub mod seq;
 
 mod ooo;
@@ -68,7 +79,11 @@ pub mod table;
 pub mod wire;
 
 #[cfg(test)]
+mod active_tests;
+#[cfg(test)]
 mod model;
+#[cfg(test)]
+mod model_active;
 #[cfg(test)]
 mod ooo_tests;
 #[cfg(test)]
@@ -86,6 +101,10 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+pub use active::{
+    ConnectError, EPHEMERAL_FIRST, EPHEMERAL_LAST, MAX_ACTIVE_LIMIT, MAX_SYN_RETRIES, SYN_RETRIES,
+    unicast,
+};
 use cc::{Congestion, NewReno};
 use cookie::Cookies;
 use ooo::Ooo;
@@ -134,8 +153,12 @@ pub enum CloseReason {
     Normal,
     /// The peer sent RST.
     Reset,
-    /// Retransmissions (or FIN-WAIT-2) timed out.
+    /// Retransmissions (or FIN-WAIT-2) timed out; for an active open, the
+    /// SYN was retransmitted `syn_retries` times without an answer.
     Timeout,
+    /// An active open was refused: the peer answered the SYN with a RST, or
+    /// announced an MSS this stack cannot honour (NEXT-7).
+    Refused,
 }
 
 /// The application side of the stack, called synchronously from
@@ -156,6 +179,10 @@ pub trait App {
     fn peer_closed(&mut self, c: ConnId);
     /// The connection is gone; its id may be reused once this returns.
     fn closed(&mut self, c: ConnId, why: CloseReason);
+    /// An active open ([`TcpStack::connect`]) completed: data may be sent.
+    /// A failed one gets [`App::closed`] instead (NEXT-7). The default
+    /// ignores it (a server-only application never connects).
+    fn connected(&mut self, _c: ConnId) {}
 }
 
 #[derive(Debug, Clone)]
@@ -227,10 +254,23 @@ pub struct Stats {
     /// Connections that negotiated window scaling, and SACK.
     pub scaled: u64,
     pub sack_neg: u64,
+    /// Active opens (NEXT-7): SYNs sent for a new connection, ...
+    pub active_opens: u64,
+    /// ... connections they made, ...
+    pub active_established: u64,
+    /// ... refused by the peer (RST, or an MSS below 536), ...
+    pub active_refused: u64,
+    /// ... given up after the SYN retries, ...
+    pub active_timeouts: u64,
+    /// ... and SYNs sent again.
+    pub syn_retransmits: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
+    /// Our SYN is out, no answer yet (an active open, NEXT-7). `snd_una`
+    /// is the ISS, `snd_max` the ISS + 1.
+    SynSent,
     Established,
     /// Peer sent FIN, we have not closed yet.
     CloseWait,
@@ -469,6 +509,15 @@ pub struct TcpStack {
     ooo_used: usize,
     /// The timestamp clock (ms, wrapping), set on every entry.
     clock: u32,
+    /// Active opens (NEXT-7): the secret of the initial sequence numbers and
+    /// the ephemeral ports (RFC 6528, derived from the cookie key), the
+    /// connections this stack opened, how many it may have, and the SYN
+    /// retries before one is given up.
+    isn_key: [u8; 16],
+    active: Vec<ConnId>,
+    max_active: usize,
+    syn_retries: u8,
+    port_salt: u32,
     pub stats: Stats,
 }
 
@@ -497,6 +546,11 @@ impl TcpStack {
             buf: Vec::with_capacity(1600),
             ooo_used: 0,
             clock: now_ms as u32,
+            isn_key: active::isn_key(&cfg.cookie_key),
+            active: Vec::new(),
+            max_active: 0,
+            syn_retries: active::SYN_RETRIES,
+            port_salt: 0,
             cfg,
             stats: Stats::default(),
         }
@@ -629,11 +683,15 @@ impl TcpStack {
         n
     }
 
-    /// Closes our side after the queued data (FIN).
+    /// Closes our side after the queued data (FIN). In SYN-SENT the FIN
+    /// waits for the handshake (use [`TcpStack::abort`] to give up at once).
     pub fn close(&mut self, c: ConnId) {
         if let Some(k) = self.conn_mut(c)
             && !k.has(FIN_QUEUED)
-            && matches!(k.state, State::Established | State::CloseWait)
+            && matches!(
+                k.state,
+                State::Established | State::CloseWait | State::SynSent
+            )
         {
             k.set(FIN_QUEUED, true);
             self.mark_dirty(c);
@@ -643,12 +701,15 @@ impl TcpStack {
     /// Resets the connection now (RST). The application gets no `closed`.
     pub fn abort(&mut self, c: ConnId, out: &mut impl FnMut([u8; 4], &[u8])) {
         let Some(k) = self.conn(c) else { return };
+        // In SYN-SENT nothing of the peer's is acknowledged yet (RFC 9293
+        // §3.10.7.3): a bare RST at the sequence number after the SYN.
+        let syn_sent = k.state == State::SynSent;
         let o = Out {
             sport: k.key.lport,
             dport: k.key.rport,
             seq: k.snd_nxt,
-            ack: k.rcv_nxt,
-            flags: RST | ACK,
+            ack: if syn_sent { 0 } else { k.rcv_nxt },
+            flags: if syn_sent { RST } else { RST | ACK },
             window: 0,
             mss: None,
         };
@@ -662,6 +723,9 @@ impl TcpStack {
         let Some(k) = self.conns.remove(c) else {
             return;
         };
+        if !self.active.is_empty() {
+            self.active.retain(|&x| x != c);
+        }
         if let Some(o) = &k.ooo {
             self.ooo_used = self.ooo_used.saturating_sub(o.bytes());
             self.stats.ooo_bytes = self.ooo_used as u64;
@@ -1082,6 +1146,10 @@ impl TcpStack {
         out: &mut impl FnMut([u8; 4], &[u8]),
     ) {
         let Some(k) = self.conn(c) else { return };
+        if k.state == State::SynSent {
+            self.syn_sent(now_ms, c, h, payload, app, out);
+            return;
+        }
         let seg_len = payload.len() as u32 + u32::from(h.flags & FIN != 0);
         let wnd = k.window_bytes().max(1);
         // Acceptability (RFC 793 §3.3): the segment must overlap the window.
@@ -1584,6 +1652,11 @@ impl TcpStack {
     /// Sends what the windows allow (data, then FIN), from `snd_nxt`.
     /// Returns whether a segment went out (it carried the pending ACK).
     fn transmit(&mut self, now_ms: u64, c: ConnId, out: &mut impl FnMut([u8; 4], &[u8])) -> bool {
+        // Nothing but the SYN leaves before the handshake (NEXT-7): queued
+        // data and a queued FIN wait for it.
+        if self.conn(c).is_none_or(|k| k.state == State::SynSent) {
+            return false;
+        }
         // The holes of a SACK recovery go first; the loss itself may be decided now.
         self.sack_decide(c, now_ms);
         let mut sent_any = self.sack_resend(c, out);
@@ -1750,6 +1823,9 @@ impl TcpStack {
                         }
                         self.arm(c, now_ms, TimerKind::Persist, rto);
                     }
+                }
+                TimerKind::Retransmit if k.state == State::SynSent => {
+                    self.syn_timeout(now_ms, c, app, out);
                 }
                 TimerKind::Retransmit => {
                     if k.snd_una == k.snd_max {

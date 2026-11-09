@@ -896,6 +896,20 @@ struct RawObservability {
     log_level: LogLevel,
     syslog_udp: String,
     metrics_udp: String,
+    /// Optional (format 20, ADR-318): log shipping over TLS, off.
+    #[serde(default)]
+    log_tls: String,
+    #[serde(default)]
+    log_tls_name: String,
+    /// PEM files (paths relative to the configuration).
+    #[serde(default)]
+    log_tls_ca: Vec<String>,
+    #[serde(default = "default_log_tls_queue_kb")]
+    log_tls_queue_kb: u32,
+}
+
+fn default_log_tls_queue_kb() -> u32 {
+    default_u32("observability.log_tls_queue_kb")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1084,6 +1098,14 @@ pub struct Observability {
     pub log_level: LogLevel,
     pub syslog_udp: Option<SocketAddrV4>,
     pub metrics_udp: Option<SocketAddrV4>,
+    /// Log shipping over TLS (NEXT-7, ADR-318): the collector, ...
+    pub log_tls: Option<SocketAddrV4>,
+    /// ... the name its certificate carries (empty: its address), ...
+    pub log_tls_name: String,
+    /// ... the PEM files of its trust anchors (paths), ...
+    pub log_tls_ca: Vec<String>,
+    /// ... and the KiB of records kept while it is unreachable.
+    pub log_tls_queue_kb: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2797,10 +2819,67 @@ fn parse_optional_addr(key: &str, s: &str, errors: &mut Vec<ConfigError>) -> Opt
 }
 
 fn validate_observability(raw: &RawObservability, errors: &mut Vec<ConfigError>) -> Observability {
+    use urmqtt_cfg::check::{
+        LOG_TLS_ADDR_MSG, LOG_TLS_CA_MSG, LOG_TLS_NAME_MSG, LOG_TLS_UNUSED_MSG,
+    };
+    let log_tls = parse_optional_addr("observability.log_tls", &raw.log_tls, errors);
+    let queue_key = "observability.log_tls_queue_kb";
+    if let Some(urmqtt_cfg::fields::Kind::UInt { min, max, .. }) = default_of(queue_key)
+        && !(min..=max).contains(&u64::from(raw.log_tls_queue_kb))
+    {
+        errors.push(err(queue_key, format!("must be in {min}..={max}")));
+    }
+    if raw.log_tls_ca.len() > urmqtt_cfg::fields::MAX_LOG_TLS_CAS {
+        errors.push(err(
+            "observability.log_tls_ca",
+            format!("at most {} entries", urmqtt_cfg::fields::MAX_LOG_TLS_CAS),
+        ));
+    }
+    match log_tls {
+        Some(a) => {
+            if matches!(a.ip().octets()[0], 0 | 127 | 224..=255) {
+                errors.push(err(
+                    "observability.log_tls",
+                    format!("{a}: {LOG_TLS_ADDR_MSG}"),
+                ));
+            }
+            if raw.log_tls_ca.is_empty() {
+                errors.push(err("observability.log_tls_ca", LOG_TLS_CA_MSG));
+            }
+            if !raw.log_tls_name.is_empty() && !urmqtt_cfg::check::valid_dns_name(&raw.log_tls_name)
+            {
+                errors.push(err(
+                    "observability.log_tls_name",
+                    format!("{:?} {LOG_TLS_NAME_MSG}", raw.log_tls_name),
+                ));
+            }
+        }
+        // A key of the collector without the collector is a mistake, not a
+        // setting: said so instead of ignored.
+        None if raw.log_tls.is_empty() => {
+            for (key, set) in [
+                ("observability.log_tls_name", !raw.log_tls_name.is_empty()),
+                ("observability.log_tls_ca", !raw.log_tls_ca.is_empty()),
+                (
+                    queue_key,
+                    raw.log_tls_queue_kb != default_log_tls_queue_kb(),
+                ),
+            ] {
+                if set {
+                    errors.push(err(key, LOG_TLS_UNUSED_MSG));
+                }
+            }
+        }
+        None => {}
+    }
     Observability {
         log_level: raw.log_level,
         syslog_udp: parse_optional_addr("observability.syslog_udp", &raw.syslog_udp, errors),
         metrics_udp: parse_optional_addr("observability.metrics_udp", &raw.metrics_udp, errors),
+        log_tls,
+        log_tls_name: raw.log_tls_name.clone(),
+        log_tls_ca: raw.log_tls_ca.clone(),
+        log_tls_queue_kb: raw.log_tls_queue_kb,
     }
 }
 
@@ -2940,6 +3019,8 @@ mod console_tests;
 mod devices_tests;
 #[cfg(test)]
 mod encryption_tests;
+#[cfg(test)]
+mod log_tls_tests;
 #[cfg(test)]
 mod metrics_tests;
 #[cfg(test)]

@@ -49,7 +49,8 @@ urmqtt-nistz256 = { path = "../nistz256" }
 rfc6979 = { version = "0.6", default-features = false }
 
 [features]
-# The sans-IO TLS client, for in-kernel self-tests (dev images only, M17).
+# The sans-IO TLS client: the kernel's outbound connections (NEXT-7, ADR-317;
+# every image) and the in-kernel self-tests (dev images, M17).
 client = []
 # Per-stage timing of the server's handshakes (host profiling only, never in
 # the kernel): crates/tls/src/stages.rs, examples/handshake_profile.rs.
