@@ -49,6 +49,13 @@ pub fn note_of(esp: &[u8]) -> Result<Note, String> {
     let first = notes.first().cloned().ok_or(
         "the image's kernels carry no build note: they predate A/B updates (v0.6.0) and would never confirm a trial boot; update this disk with `urmqtt-disk update-boot` instead",
     )?;
+    if first.ab_protocol != slots::AB_PROTOCOL {
+        return Err(format!(
+            "the image's kernels speak A/B protocol {}, this tool protocol {}: use the urmqtt-disk of that release",
+            first.ab_protocol,
+            slots::AB_PROTOCOL
+        ));
+    }
     if notes.iter().any(|n| *n != first) {
         return Err(format!(
             "the image's kernels disagree about what they are ({} notes, not all equal): not one release",

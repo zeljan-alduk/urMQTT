@@ -937,6 +937,18 @@ fn le32(b: &[u8], o: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?))
 }
 
+impl Note {
+    /// The 64 bytes of this note (what [`build_note`] writes, with this
+    /// note's own A/B protocol); the version text is cut at 32 bytes.
+    pub fn encode(&self) -> [u8; NOTE_LEN] {
+        let mut n = build_note(&self.version, self.schema, self.cfg_format);
+        if let Some(p) = n.get_mut(18..20) {
+            p.copy_from_slice(&self.ab_protocol.to_le_bytes());
+        }
+        n
+    }
+}
+
 /// Decodes the note at the start of `b`: the magic, version 1, a protocol
 /// and a schema that are not 0, zero reserved bytes and a version text of
 /// printable ASCII followed only by NULs.
