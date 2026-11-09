@@ -978,7 +978,7 @@ What it shows and what it does not:
   ~1.1 s tail of the SACK build was not reproduced, and not explained.
 - x86, 64 QoS 1 pairs: the SACK build's median (69.0k) is above e053399's (58.5k), ranges overlapping.
 - QoS 1 floods deliver about half of what they acknowledge (the per-subscriber queue is bounded: `qos1_queue_full`).
-- `frames/dropped/nic` counts frames dropped because the **transmit** queue was full (the first text of 13.3 called it a
+- `frames/dropped/nic` counts frames dropped because the **transmit** queue was full (the first blog post called it a
   receive overrun; it is not).
 - Idle memory: netcup 3.8 MB at 5000 connections, 10.7 MB at 20000; Contabo 10.0 MB and 17.8 MB (baseline 9.5 MB for four
   cores); Mosquitto 4.9 MB at 5000.
