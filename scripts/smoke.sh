@@ -1868,6 +1868,224 @@ PY
     done
 }
 
+# type_line <socket> <text>: types <text> and Enter on the serial port of a VM started with
+# --serial-in <socket> (one byte at a time, as a person or a provider's console would).
+type_line() {
+    python3 -I -c '
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+for _ in range(200):
+    try:
+        s.connect(sys.argv[1])
+        break
+    except OSError:
+        time.sleep(0.1)
+for b in sys.argv[2].encode() + b"\r":
+    s.sendall(bytes([b]))
+    time.sleep(0.005)
+time.sleep(0.3)
+s.close()
+' "$1" "$2"
+}
+
+# data_lba <disk>: the first sector of the data partition (where its superblock slot A is: the
+# layout magic at a sector boundary, and slot B 24 sectors further).
+data_lba() {
+    python3 -I -c '
+import sys
+d = open(sys.argv[1], "rb").read()
+i = 0
+while True:
+    i = d.find(b"URMQTTDK", i)
+    if i < 0:
+        sys.exit("no data partition superblock")
+    if i % 512 == 0 and d[i + 24 * 512:i + 24 * 512 + 8] in (b"URMQTTDK", bytes(8)):
+        print(i // 512)
+        break
+    i += 1
+' "$1"
+}
+
+# wait_exit: waits until the VM of start_vm exits (a smoke image powers off at READY), or times out
+# (then it is killed). Returns 124 on timeout, else QEMU's status.
+wait_exit() {
+    local waited=0
+    while kill -0 "$VM_PID" 2>/dev/null; do
+        if (( waited >= TIMEOUT * 10 )); then
+            kill_vm
+            return 124
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    wait "$VM_PID"
+}
+
+# LATER-7 end to end (ADR-325 to ADR-329): a disk key that is not in the image. A dev configuration with
+# storage.encryption = "aes-256-xts" and storage.disk_key_source = "console" (no key file, format 22):
+#   1. a blank disk: the kernel asks for a new passphrase twice on the serial console, formats the
+#      data partition encrypted under a random key wrapped in key slot 0, and serves; nothing listens
+#      before the unlock; neither the passphrase nor a plaintext SQLite header is anywhere;
+#   2. a wrong passphrase is answered and asked again; the right one opens the disk;
+#   3. "change" at the prompt: the current passphrase, the new one twice; the slot is rewrapped;
+#   4. the old passphrase no longer opens it, the new one does;
+#   5. the host tool: `keys` lists the slot, --passphrase-file opens the disk for verify;
+#   6. an edited header (the key check changed, the CRC recomputed): the slot opens, the key does not
+#      match, the kernel refuses to serve;
+#   7. an image with the key in the image (the S7 way) on a wrapped disk: the key opens it too.
+storage_unlock() {
+    build_disk_tool || {
+        echo "  ✗ storage-unlock needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local ud=$DISK_TOOL dir="$OUT/unlock" tool="$ROOT/target/debug/urmqtt-config"
+    rm -rf "$dir"
+    mkdir -p "$dir/root"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool)
+    cp "$ROOT"/deploy/dev/* "$dir/root/" 2>/dev/null || true
+    sed -e 's/^\[storage\]/[storage]\nencryption = "aes-256-xts"\ndisk_key_source = "console"/' \
+        "$ROOT/deploy/dev/config.toml" >"$dir/console.toml"
+    "$tool" pack "$dir/console.toml" --env dev --root "$dir/root" --out "$dir/console.blob" >/dev/null ||
+        { echo "  ✗ storage-unlock: packing failed"; FAILED=$((FAILED + 1)); return; }
+    MKIMG_EXTRA=(--config "$dir/console.blob")
+    mkimg "$OUT/unlock-console.raw" "smoke"
+    MKIMG_EXTRA=()
+    local p1="first disk passphrase 11" p2="second disk passphrase 22" accel
+    for accel in $ACCELS; do
+        local disk="$OUT/unlock-$accel.img" status=0 l sock qd
+        qd=$(mktemp -d "${TMPDIR:-/tmp}/urmqtt-unlock.XXXXXX") || continue
+        sock="$qd/s.sock"
+        fresh_disk "$OUT/unlock-console.raw" "$disk"
+
+        # 1. First boot of a blank disk.
+        l="$OUT/unlock-$accel-1.log"
+        start_vm "$l" --serial-in "$sock" --disk "$disk" --accel "$accel" --fwd none
+        if wait_log "$l" "new disk passphrase"; then
+            type_line "$sock" "short"
+            wait_log "$l" "new disk passphrase" 2 && type_line "$sock" "$p1"
+            wait_log "$l" "the same passphrase again" && type_line "$sock" "$p1"
+        fi
+        wait_exit || status=$?
+        {
+            # Nothing listens before the disk is open: the first listener line comes after it.
+            local at_open at_listen
+            at_open=$(clean "$l" | grep -nE "storage: data partition (formatted|unlocked)" | head -1 | cut -d: -f1 || true)
+            at_listen=$(clean "$l" | grep -niE "listen" | grep -v "storage:" | head -1 | cut -d: -f1 || true)
+            if [[ -n $at_open && ( -z $at_listen || $at_listen -gt $at_open ) ]]; then echo "order: nothing listens before the unlock"; else echo "order: WRONG ($at_open $at_listen)"; fi
+            if grep -aqF "$p1" "$l"; then echo "secret: passphrase FOUND in the serial log"; else echo "secret: not in the serial log"; fi
+            dd if="$disk" of="$disk.data" bs=512 skip="$(data_lba "$disk")" status=none
+            if grep -aq "SQLite format 3" "$disk.data"; then echo "image: plaintext SQLite header FOUND"; else echo "image: no plaintext SQLite header"; fi
+            if grep -aqF "$p1" "$disk"; then echo "image: passphrase FOUND"; else echo "image: no passphrase"; fi
+        } >"$l.scan"
+        check "unlock-first-boot [$accel]" "$l" "$status" \
+            "storage: refused: too short" \
+            "storage: data partition formatted with a new key, wrapped under the console passphrase in key slot 0" \
+            "storage: encryption aes-256-xts \(key check ok, key from the console passphrase" \
+            "^URMQTT READY$" "NOT:refusing to serve" "$NO_FAULT"
+        check "unlock-first-boot-scan [$accel]" "$l.scan" 0 "order: nothing listens before the unlock" \
+            "secret: not in the serial log" "image: no plaintext SQLite header" "image: no passphrase"
+
+        # 2. A wrong passphrase, then the right one.
+        status=0
+        l="$OUT/unlock-$accel-2.log"
+        start_vm "$l" --serial-in "$sock" --disk "$disk" --accel "$accel" --fwd none
+        if wait_log "$l" "the data partition is locked"; then
+            type_line "$sock" "not the passphrase at all"
+            wait_log "$l" "storage: wrong passphrase" && wait_log "$l" "the data partition is locked\. Disk" 2 &&
+                type_line "$sock" "$p1"
+        fi
+        wait_exit || status=$?
+        check "unlock-wrong-then-right [$accel]" "$l" "$status" \
+            "storage: wrong disk passphrase \(1 so far\)" "storage: unlocked after 1 wrong disk passphrase" \
+            "storage: data partition unlocked with the console passphrase \(key slot 0\)" \
+            "db: sqlite .* quick_check ok" "^URMQTT READY$" "NOT:refusing to serve" "NOT:$p1" "$NO_FAULT"
+
+        # 3. "change" at the prompt.
+        status=0
+        l="$OUT/unlock-$accel-3.log"
+        start_vm "$l" --serial-in "$sock" --disk "$disk" --accel "$accel" --fwd none
+        if wait_log "$l" "the data partition is locked"; then
+            type_line "$sock" "change"
+            wait_log "$l" "current disk passphrase" && type_line "$sock" "$p1"
+            wait_log "$l" "new disk passphrase" && type_line "$sock" "$p2"
+            wait_log "$l" "the same passphrase again" && type_line "$sock" "$p2"
+        fi
+        wait_exit || status=$?
+        check "unlock-change [$accel]" "$l" "$status" \
+            "storage: the disk passphrase of key slot 0 was changed" "^URMQTT READY$" \
+            "NOT:refusing to serve" "NOT:$p1" "NOT:$p2" "$NO_FAULT"
+
+        # 4. The old one is refused, the new one opens.
+        status=0
+        l="$OUT/unlock-$accel-4.log"
+        start_vm "$l" --serial-in "$sock" --disk "$disk" --accel "$accel" --fwd none
+        if wait_log "$l" "the data partition is locked"; then
+            type_line "$sock" "$p1"
+            wait_log "$l" "storage: wrong passphrase" && wait_log "$l" "the data partition is locked\. Disk" 2 &&
+                type_line "$sock" "$p2"
+        fi
+        wait_exit || status=$?
+        check "unlock-after-change [$accel]" "$l" "$status" \
+            "storage: wrong disk passphrase \(1 so far\)" \
+            "storage: data partition unlocked with the console passphrase \(key slot 0\)" "^URMQTT READY$" \
+            "NOT:refusing to serve" "$NO_FAULT"
+
+        # 5. The host tool.
+        printf '%s\n' "$p2" >"$dir/p2"
+        printf '%s\n' "$p1" >"$dir/p1"
+        {
+            "$ud" keys "$disk" 2>&1
+            "$ud" verify "$disk" --passphrase-file "$dir/p1" 2>&1 || echo "tool: verify with the old passphrase refused"
+            "$ud" verify "$disk" --passphrase-file "$dir/p2" >/dev/null 2>&1 && echo "tool: verify with the passphrase exit 0"
+        } >"$disk.tool" 2>&1
+        check "unlock-disk-tool [$accel]" "$disk.tool" 0 \
+            "not in the image \(storage.disk_key_source = \"console\"\)" \
+            "key slot 0: passphrase, PBKDF2-HMAC-SHA-256 300000 iterations" "key slot 1: empty" \
+            "no key slot opens with this passphrase" "tool: verify with the old passphrase refused" \
+            "tool: verify with the passphrase exit 0"
+
+        # 6. An edited header: the key check of both superblocks changed, the CRC recomputed.
+        cp "$disk" "$disk.tampered"
+        python3 -I - "$disk.tampered" "$(data_lba "$disk")" <<'PY'
+import sys
+def crc32c(b):
+    c = 0xFFFFFFFF
+    for x in b:
+        c ^= x
+        for _ in range(8):
+            c = (c >> 1) ^ (0x82F63B78 if c & 1 else 0)
+    return c ^ 0xFFFFFFFF
+with open(sys.argv[1], "r+b") as f:
+    first = int(sys.argv[2])
+    for lba in (0, 24):
+        off = (first + lba) * 512
+        f.seek(off)
+        sb = bytearray(f.read(4096))
+        if sb[:8] != b"URMQTTDK":
+            continue
+        sb[3136] ^= 1
+        sb[4092:4096] = crc32c(bytes(sb[:4092])).to_bytes(4, "little")
+        f.seek(off)
+        f.write(sb)
+PY
+        status=0
+        l="$OUT/unlock-$accel-6.log"
+        start_vm "$l" --serial-in "$sock" --disk "$disk.tampered" --accel "$accel" --fwd none
+        if wait_log "$l" "the data partition is locked"; then
+            type_line "$sock" "$p2"
+            wait_log "$l" "refusing to serve" || status=124
+        else
+            status=124
+        fi
+        kill_vm
+        check "unlock-edited-header-refused [$accel]" "$l" "$status" \
+            "storage: refused reason=key-slot-mismatch" "the header was edited" "NOT:URMQTT READY"
+        rm -f "$disk.tampered"
+        rm -rf "$qd"
+    done
+}
+
 # S7 measurement (not a pass/fail check): the in-guest database benchmark and
 # the boot with encryption off and on, interleaved, SMOKE_BENCH_RUNS (5) runs
 # each. Reads the numbers out of the serial logs.
@@ -5012,6 +5230,16 @@ if [[ ${SMOKE_ONLY:-} == storage && $ARCH != universal ]]; then
         echo "  ✗ disk-tool needs sqlite3 and the mosquitto clients"
         FAILED=$((FAILED + 1))
     fi
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=unlock: a disk key that is not in the image (LATER-7, ADR-325 to ADR-329): the passphrase
+# typed on the serial console at the first boot, a wrong one, a change at the prompt, the host tool,
+# an edited header refused.
+if [[ ${SMOKE_ONLY:-} == unlock && $ARCH != universal ]]; then
+    storage_unlock
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit
