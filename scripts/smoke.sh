@@ -4055,23 +4055,31 @@ universal_integrity() {
     done
 }
 
-# H8 (ADR-251): UEFI Secure Boot, on x86_64 only. OVMF's Secure Boot build (SMM, q35) with the
-# development PK, KEK and db enrolled (scripts/sign-loaders.sh gen-keys, ovmf-vars) must boot the
-# universal ISO whose loaders are signed with the db key, and must refuse: the same image unsigned,
-# one signed with another key, and a signed image whose loader was changed after signing (what
-# `urmqtt-config pack --iso` does to an enrolled hash, so a signed ISO is configured BEFORE it is
-# signed). Under Secure Boot Limine still refuses a modified kernel or limine.conf, and it
-# refuses the installed disk, whose configuration module has no hash (ADR-217): a known limit,
-# asserted here so that a change of it is noticed. Needs openssl, sbsign or osslsigncode,
-# virt-fw-vars (pip install virt-firmware; PATH or URMQTT_VIRT_FW_VARS) and an OVMF with Secure
-# Boot (QEMU's edk2-x86_64-secure-code.fd, or OVMF_CODE.secboot.fd; URMQTT_FIRMWARE_SECURE and
-# URMQTT_FIRMWARE_VARS point elsewhere). Skipped, and said so, when one is missing;
-# SMOKE_REQUIRE_SB=1 (CI) turns that into a failure. aarch64: the AArch64 edk2 of this machine
-# does not enforce Secure Boot (an unsigned ISO boots with keys enrolled), so only the signature of
-# BOOTAA64.EFI is checked offline and the signed ISO is booted with Secure Boot off.
+# H8 (ADR-251) and LATER-6 (ADR-320 to ADR-323): UEFI Secure Boot. OVMF's Secure Boot build (SMM,
+# q35) and, when present, AAVMF's (aarch64), each with the development PK, KEK and db enrolled
+# (scripts/sign-loaders.sh gen-keys, ovmf-vars), must boot the universal ISO whose loaders are signed
+# with the db key, and must refuse: the same image unsigned, one signed with another key, and a signed
+# image whose loader was changed after signing (what `urmqtt-config pack --iso` did to an enrolled
+# hash before LATER-6; the tool now refuses a sealed image itself). Under Secure Boot Limine still
+# refuses a modified kernel or limine.conf.
+# LATER-6: a signed image is SEALED (the installed disk's limine.conf pins the configuration), so the
+# raw disk and the disk the installer writes UNDER Secure Boot boot with it enforced, on both
+# architectures; a tampered kernel on that disk is refused; an A/B update to a sealed ESP boots on
+# trial; `urmqtt-disk` refuses to stage an ESP sealed to another configuration; a loader whose
+# Authenticode hash is in dbx is refused (the revocation path, ADR-322); `sign-iso` of a configured
+# image is the direct signed build, byte for byte. The unsealed disk of ADR-251 is still refused
+# (the H8-W1 control, asserted so a change of it is noticed).
+# Needs openssl, sbsign or osslsigncode, virt-fw-vars (pip install virt-firmware; PATH or
+# URMQTT_VIRT_FW_VARS), an OVMF with Secure Boot (QEMU's edk2-x86_64-secure-code.fd, or
+# OVMF_CODE.secboot.fd; URMQTT_FIRMWARE_SECURE and URMQTT_FIRMWARE_VARS point elsewhere) and the urmqtt-disk
+# tool. Skipped, and said so, when one is missing; SMOKE_REQUIRE_SB=1 (CI) turns that into a failure.
+# aarch64: AAVMF_CODE.secboot.fd and AAVMF_VARS.fd (Debian/Ubuntu qemu-efi-aarch64;
+# URMQTT_FIRMWARE_SECURE_AA64, URMQTT_FIRMWARE_VARS_AA64). Without them the aarch64 part falls back to
+# the offline signature check of BOOTAA64.EFI and says that enforcement was NOT tested (a failure with
+# SMOKE_REQUIRE_SB=1). SMOKE_SB_X86=0 skips the x86_64 boots (TCG is slow on an arm64 host).
 # shellcheck disable=SC2016 # the patterns hold literal backticks
 universal_secureboot() {
-    local missing="" sbfw="" vars="" c
+    local missing="" sbfw="" vars="" c aafw="" aavars=""
     command -v openssl >/dev/null || missing="openssl"
     command -v sbsign >/dev/null || command -v osslsigncode >/dev/null || missing="$missing sbsign-or-osslsigncode"
     command -v "${URMQTT_VIRT_FW_VARS:-virt-fw-vars}" >/dev/null || missing="$missing virt-fw-vars"
@@ -4086,6 +4094,7 @@ universal_secureboot() {
         [[ -n "$c" && -f "$c" ]] && { vars=$c; break; }
     done
     [[ -n "$vars" ]] || missing="$missing ovmf-vars"
+    build_disk_tool || missing="$missing urmqtt-disk"
     if [[ -n "$missing" ]]; then
         if [[ -n "${SMOKE_REQUIRE_SB:-}" ]]; then
             echo "  ✗ universal-secureboot: missing:$missing"
@@ -4095,25 +4104,41 @@ universal_secureboot() {
         fi
         return 0
     fi
+    for c in "${URMQTT_FIRMWARE_SECURE_AA64:-}" /usr/share/AAVMF/AAVMF_CODE.secboot.fd; do
+        [[ -n "$c" && -f "$c" ]] && { aafw=$c; break; }
+    done
+    for c in "${URMQTT_FIRMWARE_VARS_AA64:-}" /usr/share/AAVMF/AAVMF_VARS.fd; do
+        [[ -n "$c" && -f "$c" ]] && { aavars=$c; break; }
+    done
     local sb="$ROOT/scripts/sign-loaders.sh" keys="$OUT/secureboot-keys" other="$OUT/secureboot-other"
     rm -rf "$keys" "$other"
+    rm -f "$OUT/secureboot-installed-x86.img"
     "$sb" gen-keys "$keys" >/dev/null
     "$sb" gen-keys "$other" >/dev/null
-    local svars="$OUT/secureboot-vars.fd"
+    local svars="$OUT/secureboot-vars.fd" asvars="$OUT/secureboot-aavmf-vars.fd"
     cp "$vars" "$svars"
     "$sb" ovmf-vars "$keys" "$vars" "$svars" 2>/dev/null
     local signed="$OUT/sb-signed.iso" unsigned="$OUT/sb-unsigned.iso" wrongkey="$OUT/sb-wrongkey.iso" tpl="$OUT/sb-template.iso"
+    local unsealed="$OUT/sb-unsealed.iso" sealed_tpl="$OUT/sb-template-sealed.iso" inst="$OUT/sb-install.iso"
+    local other_cfg="$OUT/sb-other.iso"
     export URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0
-    rm -f "$signed" "$signed.disk" "$unsigned" "$wrongkey" "$tpl"
-    mkuniversal "$signed" "smoke" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    rm -f "$signed" "$signed.disk" "$unsigned" "$unsigned.disk" "$wrongkey" "$tpl" "$unsealed" "$sealed_tpl" "$inst" "$other_cfg"
+    make_cfg_blobs
+    mkuniversal "$signed" "smoke" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt" --esp-out "$OUT/sb-signed.esp"
     mkuniversal "$unsigned" "smoke"
     mkuniversal "$wrongkey" "smoke" --sb-key "$other/db.key" --sb-cert "$other/db.crt"
-    mkuniversal "$tpl" "smoke" --empty-config --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
-    unset URMQTT_LIMINE_SERIAL URMQTT_MENU_TIMEOUT
+    # The template signed as ADR-251 built it (not sealed): the firmware's view of configured-after-signing.
+    mkuniversal "$tpl" "smoke" --empty-config --no-seal --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    mkuniversal "$sealed_tpl" "smoke" --empty-config --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    mkuniversal "$unsealed" "smoke" --no-seal --sb-key "$keys/db.key" --sb-cert "$keys/db.crt" --esp-out "$OUT/sb-unsealed.esp"
+    mkuniversal "$inst" "smoke" --install-cmdline "install install-countdown=1" --install-default \
+        --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    mkuniversal "$other_cfg" "smoke" --config "$OUT/cfgpack/signed.blob" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt" \
+        --esp-out "$OUT/sb-other.esp"
     # The same ISO signed twice is the same bytes (the signing time is SOURCE_DATE_EPOCH).
     local again="$OUT/sb-signed-again.iso"
     rm -f "$again"
-    URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$again" "smoke" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    mkuniversal "$again" "smoke" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
     if cmp -s "$signed" "$again"; then
         echo "  ✓ secureboot: the signed ISO is reproducible (same key, same bytes)"
         PASSED=$((PASSED + 1))
@@ -4122,48 +4147,253 @@ universal_secureboot() {
         FAILED=$((FAILED + 1))
     fi
     rm -f "$again" "$again.disk"
+    # sign-iso (ADR-321): the signed image of a configured, unsigned one is the direct signed build; its kernels
+    # are checked against the (verified) release template's.
+    local utpl="$OUT/sb-template-unsigned.iso" why
+    rm -f "$utpl" "$OUT/sb-template-signed-by-accident.iso"
+    mkuniversal "$utpl" "smoke" --empty-config
+    local resigned="$OUT/sb-resigned.iso"
+    rm -f "$resigned"
+    if "$sb" sign-iso "$keys/db.key" "$keys/db.crt" "$unsigned" "$resigned" --template "$utpl" -- --cmdline smoke >/dev/null 2>&1 \
+        && cmp -s "$signed" "$resigned"; then
+        echo "  ✓ secureboot: sign-iso of the configured unsigned ISO is the direct signed build, byte for byte"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ secureboot: sign-iso failed or differs from the direct signed build"
+        FAILED=$((FAILED + 1))
+    fi
+    # A configured ISO whose kernels are not the template's is not signed (its own menu cannot vouch for them).
+    local otpl="$OUT/sb-template-other-kernel.iso" resigned2="$OUT/sb-resigned-other.iso"
+    rm -f "$otpl" "$resigned2"
+    python3 -I "$ROOT/scripts/tamper.py" "$utpl" --file "$KERNEL_X86" --out "$otpl" >/dev/null
+    why=$("$sb" sign-iso "$keys/db.key" "$keys/db.crt" "$unsigned" "$resigned2" --template "$otpl" -- --cmdline smoke 2>&1 || true)
+    if [[ ! -e "$resigned2" && $why == *"is not the one of"* ]]; then
+        echo "  ✓ secureboot: sign-iso refuses kernels that are not the release template's"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ secureboot: sign-iso with another template's kernels: $why"
+        FAILED=$((FAILED + 1))
+    fi
+    rm -f "$otpl"
+    # An unconfigured template is not signed by accident: sign-iso wants a configuration.
+    why=$("$sb" sign-iso "$keys/db.key" "$keys/db.crt" "$utpl" "$OUT/sb-template-signed-by-accident.iso" 2>&1 || true)
+    if [[ ! -e "$OUT/sb-template-signed-by-accident.iso" && $why == *"configuration of"*"is empty"* ]]; then
+        echo "  ✓ secureboot: sign-iso refuses an unconfigured template"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ secureboot: sign-iso on an unconfigured template: $why"
+        FAILED=$((FAILED + 1))
+    fi
+    unset URMQTT_LIMINE_SERIAL URMQTT_MENU_TIMEOUT
     # The configured-after-signing image: the enrolled hash of the menu changes, the signature breaks.
-    make_cfg_blobs
     local patched="$OUT/sb-configured-after-signing.iso" tool="$ROOT/target/debug/urmqtt-config"
     "$tool" pack "$OUT/cfgpack/config.toml" --env dev --root "$ROOT/deploy/dev" \
         --sign "$ROOT/deploy/dev/control.key" --iso "$tpl" --out "$patched" >/dev/null 2>&1 \
         || { echo "  ✗ secureboot: pack --iso failed"; FAILED=$((FAILED + 1)); }
-    # Tampered copies of the signed ISO.
+    # ADR-320: a sealed image is not configured afterwards; the tool says why and what to do.
+    local refusal
+    refusal=$("$tool" pack "$OUT/cfgpack/config.toml" --env dev --root "$ROOT/deploy/dev" \
+        --iso "$sealed_tpl" --out "$OUT/sb-sealed-configured.iso" 2>&1 || true)
+    if [[ ! -e "$OUT/sb-sealed-configured.iso" && $refusal == *"sealed to its configuration"* && $refusal == *sign-iso* ]]; then
+        echo "  ✓ secureboot: pack --iso refuses a sealed (signed) image and names sign-iso"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ secureboot: pack --iso on a sealed image: $refusal"
+        FAILED=$((FAILED + 1))
+    fi
+    # Tampered copies of the signed ISO and of its sealed disk.
     local t_kernel="$OUT/sb-tampered-kernel.iso" t_conf="$OUT/sb-tampered-conf.iso"
+    local td_x86="$OUT/sb-tampered-disk-x86.img" td_a64="$OUT/sb-tampered-disk-a64.img"
     python3 -I "$ROOT/scripts/tamper.py" "$signed" --file "$KERNEL_X86" --out "$t_kernel" >/dev/null
     python3 -I "$ROOT/scripts/tamper.py" "$signed" --replace "editor_enabled: no" "editor_enabled: on" --out "$t_conf" >/dev/null
+    python3 -I "$ROOT/scripts/tamper.py" "$signed.disk" --file "$KERNEL_X86" --out "$td_x86" >/dev/null
+    python3 -I "$ROOT/scripts/tamper.py" "$signed.disk" --file "$KERNEL_A64" --out "$td_a64" >/dev/null
 
-    local x86='URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$' status log
-    sb_boot() { # sb_boot <label> <file> <how iso|disk>
-        local label=$1 file=$2 how=${3:-iso}
+    # The Authenticode hash of the signed loaders, for the dbx test (checked against osslsigncode's own).
+    local efi="$OUT/secureboot-BOOTX64.EFI" efi_a="$OUT/secureboot-BOOTAA64.EFI" ah="" ah_a=""
+    rm -f "$efi" "$efi_a"
+    xorriso -osirrox on -indev "$signed" -extract /EFI/BOOT/BOOTX64.EFI "$efi" -extract /EFI/BOOT/BOOTAA64.EFI "$efi_a" >/dev/null 2>&1 || true
+    ah=$("$sb" authenticode "$efi" 2>/dev/null | cut -d' ' -f1)
+    ah_a=$("$sb" authenticode "$efi_a" 2>/dev/null | cut -d' ' -f1)
+    if command -v osslsigncode >/dev/null; then
+        local want
+        want=$(osslsigncode verify -CAfile "$keys/db.crt" -in "$efi" 2>/dev/null | sed -n 's/^Calculated message digest *: *\([0-9A-Fa-f]*\).*/\1/p' | tr 'A-F' 'a-f')
+        if [[ -n $ah && $ah == "$want" ]]; then
+            echo "  ✓ secureboot: authenticode.py gives osslsigncode's digest of the signed BOOTX64.EFI"
+            PASSED=$((PASSED + 1))
+        else
+            echo "  ✗ secureboot: authenticode.py '$ah' != osslsigncode '$want'"
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+    # dbx holds the signed loaders' hashes: the firmware must refuse exactly those images.
+    local dvars="$OUT/secureboot-vars-dbx.fd"
+    cp "$vars" "$dvars"
+    "$sb" ovmf-vars "$keys" "$vars" "$dvars" --dbx-hash "${ah:-0000000000000000000000000000000000000000000000000000000000000000}" 2>/dev/null
+
+    local x86='URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$' a64re='URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$' status log
+    sb_boot() { # sb_boot <label> <file> <how iso|disk> [vars] [kind] [accel]
+        local label=$1 file=$2 how=${3:-iso} v=${4:-$svars} kind=${5:-x86-uefi} accel=${6:-tcg}
         log="$OUT/secureboot-$label.log" status=0
-        u_run x86-uefi tcg "$log" "$how" "$file" --secure-vars "$svars" || status=$?
+        u_run "$kind" "$accel" "$log" "$how" "$file" --secure-vars "$v" || status=$?
     }
-    sb_refused() { # sb_refused <label> <file> <pattern> [iso|disk]
-        local label=$1 file=$2 pat=$3 how=${4:-iso}
+    sb_refused() { # sb_refused <label> <file> <pattern> [iso|disk] [vars] [arch-args...]
+        local label=$1 file=$2 pat=$3 how=${4:-iso} v=${5:-$svars}
+        shift 5 2>/dev/null || shift $#
+        local args=("$@")
+        [[ ${#args[@]} -eq 0 ]] && args=(--arch x86_64 --accel tcg --smp 2)
         log="$OUT/secureboot-$label.log" status=0
-        boot_until "$log" "$pat" --arch x86_64 "--$how" "$file" --accel tcg --smp 2 --no-net --secure-vars "$svars" || status=$?
+        boot_until "$log" "$pat" "${args[@]}" "--$how" "$file" --no-net --secure-vars "$v" || status=$?
         check "secureboot: $label refused" "$log" "$status" "$pat" "NOT:URMQTT BOOT" "NOT:URMQTT READY"
     }
-    sb_boot signed "$signed"
-    check "secureboot: signed ISO boots with Secure Boot enforced" "$log" "$status" "$x86" "bootloader=Limine" "^URMQTT READY$" "NOT:Access Denied"
-    sb_refused unsigned "$unsigned" "Access Denied"
-    sb_refused wrong-key "$wrongkey" "Access Denied"
-    sb_refused configured-after-signing "$patched" "Access Denied"
-    sb_refused tampered-kernel "$t_kernel" 'PANIC: Blake2b hash for URI `boot\(\):/boot/urmqtt-x86-64\.elf` does not match'
-    sb_refused tampered-conf "$t_conf" "CHECKSUM MISMATCH FOR CONFIG FILE"
     local d="$OUT/secureboot-disk.img"
-    fresh_disk "$signed.disk" "$d"
-    sb_refused installed-disk-known-limit "$d" 'Secure Boot is active and URI `boot\(\):/boot/urmqtt\.cfg` has no associated hash' disk
-    # Without Secure Boot a signed loader is an ordinary one; BOOTAA64.EFI's signature checks offline.
-    local a64="${ACCELS%% *}" log2="$OUT/secureboot-aarch64-signed.log" st2=0
-    u_run aa64 "$a64" "$log2" iso "$signed" || st2=$?
-    check "secureboot: signed ISO boots on aarch64 (Secure Boot not enforced by this firmware)" "$log2" "$st2" \
-        'URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$' "^URMQTT READY$"
-    local efi="$OUT/secureboot-BOOTAA64.EFI"
-    rm -f "$efi"
-    xorriso -osirrox on -indev "$signed" -extract /EFI/BOOT/BOOTAA64.EFI "$efi" >/dev/null 2>&1 || true
-    if [[ -s "$efi" ]] && "$sb" verify "$keys/db.crt" "$efi" && ! "$sb" verify "$other/db.crt" "$efi"; then
+    if [[ ${SMOKE_SB_X86:-1} != 0 ]]; then
+        sb_boot signed "$signed"
+        check "secureboot: signed ISO boots with Secure Boot enforced" "$log" "$status" "$x86" "bootloader=Limine" "^URMQTT READY$" "NOT:Access Denied"
+        sb_refused unsigned "$unsigned" "Access Denied" iso "$svars"
+        sb_refused wrong-key "$wrongkey" "Access Denied" iso "$svars"
+        sb_refused configured-after-signing "$patched" "Access Denied" iso "$svars"
+        sb_refused tampered-kernel "$t_kernel" 'PANIC: Blake2b hash for URI `boot\(\):/boot/urmqtt-x86-64\.elf` does not match' iso "$svars"
+        sb_refused tampered-conf "$t_conf" "CHECKSUM MISMATCH FOR CONFIG FILE" iso "$svars"
+        # H8-W1 closed: the sealed raw disk boots with Secure Boot enforced; the unsealed one is the control.
+        fresh_disk "$signed.disk" "$d" 128m
+        sb_boot sealed-disk "$d" disk
+        check "secureboot: the sealed disk boots with Secure Boot enforced (x86_64)" "$log" "$status" "$x86" \
+            "boot: from a GPT disk" "boot: slot A .*confirmed; standby: empty" "^URMQTT READY$" "NOT:Access Denied" "$NO_FAULT"
+        fresh_disk "$unsealed.disk" "$OUT/secureboot-unsealed.img"
+        sb_refused unsealed-disk-control "$OUT/secureboot-unsealed.img" \
+            'Secure Boot is active and URI `boot\(\):/boot/urmqtt\.cfg` has no associated hash' disk "$svars"
+        local tdc="$OUT/secureboot-tampered-disk.img"
+        fresh_disk "$td_x86" "$tdc"
+        sb_refused tampered-kernel-on-sealed-disk "$tdc" 'PANIC: Blake2b hash for URI `boot\(\):/boot/urmqtt-x86-64\.elf` does not match' disk "$svars"
+        # The revocation path (ADR-322): the signed ISO loader's Authenticode hash in dbx (the hash is of that
+        # file: the installed disk's loader is enrolled with another limine.conf and is another binary).
+        sb_refused dbx-revoked-loader "$signed" "Access Denied" iso "$dvars"
+        fresh_disk "$signed.disk" "$OUT/secureboot-dbx-other.img" 128m
+        sb_boot dbx-other-loader "$OUT/secureboot-dbx-other.img" disk "$dvars"
+        check "secureboot: the same dbx leaves another signed loader alone (the sealed disk boots)" "$log" "$status" "$x86" \
+            "^URMQTT READY$" "NOT:Access Denied"
+        # A/B (NEXT-11) under Secure Boot: the sealed disk from above (its standby reserved by that first
+        # boot) takes a sealed ESP into slot B and boots it on trial; an ESP sealed to another configuration
+        # is refused by urmqtt-disk before anything is written.
+        local ablog="$OUT/secureboot-ab.log" slot='\((v|[0-9a-f]{7})[^)]*\)'
+        local abst=0
+        rm -f "$ablog"
+        if ab_tool "$ablog" slots stage "$d" --esp "$OUT/sb-other.esp" --unsigned --write; then abst=1; fi
+        # A sealed disk does not take an unsealed ESP (a release image, say): the firmware would refuse it.
+        if ab_tool "$ablog" slots stage "$d" --esp "$OUT/sb-unsealed.esp" --unsigned --write; then abst=1; fi
+        ab_tool "$ablog" slots stage "$d" --esp "$OUT/sb-signed.esp" --unsigned --write || abst=1
+        ab_tool "$ablog" slots activate "$d" --write || abst=1
+        sb_boot ab-trial "$d" disk
+        cat "$log" >>"$ablog"
+        [[ $abst -eq 0 ]] || status=$abst
+        check "secureboot: A/B update to a sealed ESP boots on trial under Secure Boot; an ESP sealed to another configuration or an unsealed one is refused" \
+            "$ablog" "$status" "is sealed for Secure Boot to the configuration module" \
+            "the disk's ESP is sealed for Secure Boot and the new one is not" \
+            "secure boot: sealed to its configuration" "boot: slot B $slot ON TRIAL" "^URMQTT READY$" "NOT:Access Denied" "$NO_FAULT"
+        # The installer under Secure Boot (x86_64 UEFI), then its disk under Secure Boot.
+        local t="$OUT/secureboot-installed.img" ilog="$OUT/secureboot-install.log"
+        rm -f "$t"
+        truncate -s 128m "$t"
+        status=0
+        u_run x86-uefi tcg "$ilog" iso "$inst" --secure-vars "$svars" \
+            -- -drive "if=none,id=t0,file=$t,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile= || status=$?
+        check "secureboot: the installer runs under Secure Boot" "$ilog" "$status" "install: done: [0-9]+ MiB written and verified" \
+            "NOT:Access Denied" "NOT:sealed for Secure Boot to another" "$NO_FAULT"
+        cp "$t" "$OUT/secureboot-installed-x86.img"
+        sb_boot installed-disk "$OUT/secureboot-installed-x86.img" disk
+        check "secureboot: the installed disk boots with Secure Boot enforced (x86_64)" "$log" "$status" "$x86" \
+            "boot: from a GPT disk" "^URMQTT READY$" "NOT:Access Denied" "NOT:no associated hash" "$NO_FAULT"
+    else
+        echo "  - secureboot: x86_64 boots skipped (SMOKE_SB_X86=0)"
+    fi
+    # aarch64 (H8-W4): AAVMF with Secure Boot, when this machine has it.
+    local a64="${ACCELS%% *}"
+    if [[ -n $aafw && -n $aavars ]]; then
+        export URMQTT_FIRMWARE_SECURE_AA64=$aafw
+        cp "$aavars" "$asvars"
+        "$sb" ovmf-vars "$keys" "$aavars" "$asvars" 2>/dev/null
+        local adbx="$OUT/secureboot-aavmf-dbx.fd"
+        "$sb" ovmf-vars "$keys" "$aavars" "$adbx" --dbx-hash "${ah_a:-0000000000000000000000000000000000000000000000000000000000000000}" 2>/dev/null
+        local aargs=(--accel "$a64" --smp 4)
+        sb_boot aa64-signed "$signed" iso "$asvars" aa64 "$a64"
+        check "secureboot: signed ISO boots with Secure Boot enforced (aarch64, AAVMF)" "$log" "$status" "$a64re" "^URMQTT READY$" "NOT:Access Denied"
+        sb_refused aa64-unsigned "$unsigned" "Access Denied" iso "$asvars" "${aargs[@]}"
+        sb_refused aa64-wrong-key "$wrongkey" "Access Denied" iso "$asvars" "${aargs[@]}"
+        local ad="$OUT/secureboot-aa64-disk.img"
+        fresh_disk "$signed.disk" "$ad" 128m
+        sb_boot aa64-sealed-disk "$ad" disk "$asvars" aa64 "$a64"
+        check "secureboot: the sealed disk boots with Secure Boot enforced (aarch64)" "$log" "$status" "$a64re" \
+            "boot: from a GPT disk" "^URMQTT READY$" "NOT:Access Denied" "$NO_FAULT"
+        fresh_disk "$unsealed.disk" "$OUT/secureboot-aa64-unsealed.img"
+        sb_refused aa64-unsealed-disk-control "$OUT/secureboot-aa64-unsealed.img" \
+            'Secure Boot is active and URI `boot\(\):/boot/urmqtt\.cfg` has no associated hash' disk "$asvars" "${aargs[@]}"
+        fresh_disk "$td_a64" "$OUT/secureboot-aa64-tampered.img"
+        sb_refused aa64-tampered-kernel-on-sealed-disk "$OUT/secureboot-aa64-tampered.img" \
+            'PANIC: Blake2b hash for URI `boot\(\):/boot/urmqtt-aarch64\.elf` does not match' disk "$asvars" "${aargs[@]}"
+        sb_refused aa64-dbx-revoked-loader "$signed" "Access Denied" iso "$adbx" "${aargs[@]}"
+        if [[ -f "$OUT/secureboot-installed-x86.img" ]]; then
+            cp "$OUT/secureboot-installed-x86.img" "$OUT/secureboot-installed-aa64.img"
+            sb_boot aa64-installed-disk "$OUT/secureboot-installed-aa64.img" disk "$asvars" aa64 "$a64"
+            check "secureboot: the disk installed under Secure Boot on x86_64 boots with it enforced on aarch64" "$log" "$status" \
+                "$a64re" "^URMQTT READY$" "NOT:Access Denied" "$NO_FAULT"
+        fi
+        unset URMQTT_FIRMWARE_SECURE_AA64
+    else
+        if [[ -n "${SMOKE_REQUIRE_SB:-}" ]]; then
+            echo "  ✗ secureboot: no AAVMF Secure Boot firmware (AAVMF_CODE.secboot.fd): aarch64 enforcement NOT tested"
+            FAILED=$((FAILED + 1))
+        else
+            echo "  - secureboot: no AAVMF Secure Boot firmware: aarch64 enforcement NOT tested (only the offline check below)"
+        fi
+        local log2="$OUT/secureboot-aarch64-signed.log" st2=0
+        u_run aa64 "$a64" "$log2" iso "$signed" || st2=$?
+        check "secureboot: signed ISO boots on aarch64 (Secure Boot not enforced by this firmware)" "$log2" "$st2" \
+            "$a64re" "^URMQTT READY$"
+    fi
+    # The installer refuses an image sealed to another configuration than the one it booted with, before it
+    # writes (ADR-320). Such an ISO cannot be made with the tools (pack --iso refuses a sealed image), so the
+    # test makes one: a sealed, unenrolled image whose own slot copies and menu hashes are swapped for another
+    # configuration, the installation image (and its pin) left alone. No Secure Boot needed (aarch64).
+    local swap="$OUT/sb-sealed-swapped.iso" tgt="$OUT/secureboot-refused-target.img" sum0 sum1
+    rm -f "$swap" "$swap.disk"
+    URMQTT_LIMINE_SERIAL=1 mkuniversal "$swap" "smoke" --seal --no-enroll --install-cmdline "install install-countdown=1" --install-default
+    python3 -I - "$swap" "$OUT/cfgpack/signed.blob" <<'PY'
+import hashlib, struct, sys
+iso_path, blob_path = sys.argv[1], sys.argv[2]
+SLOT, MARK = 256 * 1024, b"URMQTT-CFG-SLOT\0"
+iso = bytearray(open(iso_path, "rb").read())
+blob = open(blob_path, "rb").read()
+new = (MARK + blob).ljust(SLOT, b"\0")
+offs = [o for o in range(0, len(iso) - SLOT + 1, 512) if iso[o:o + 16] == MARK and iso[o + 16:o + 24] == b"URMQCFG\0"]
+assert len(offs) == 2, offs
+old_hash = hashlib.blake2b(bytes(iso[offs[0]:offs[0] + SLOT])).hexdigest().encode()
+new_hash = hashlib.blake2b(new).hexdigest().encode()
+for o in offs:
+    iso[o:o + SLOT] = new
+menu, nomenu = b"# Generated by scripts/mkiso.sh --universal: the menu", b"# Generated by scripts/mkiso.sh --universal. No menu"
+i = n = 0
+while (i := iso.find(b"urmqtt.cfg#" + old_hash, i)) >= 0:
+    start = max(iso.rfind(menu, 0, i), iso.rfind(nomenu, 0, i))
+    if iso[start:start + len(menu)] == menu:
+        iso[i + 11:i + 11 + 128] = new_hash
+        n += 1
+    i += 1
+assert n >= 3, n
+open(iso_path, "wb").write(iso)
+PY
+    rm -f "$tgt"
+    truncate -s 64m "$tgt"
+    sum0=$(shasum -a 256 "$tgt" | cut -d' ' -f1)
+    local rlog="$OUT/secureboot-installer-refuses.log" rst=0
+    u_run aa64 "$a64" "$rlog" iso "$swap" \
+        -- -drive "if=none,id=t0,file=$tgt,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile= || rst=$?
+    sum1=$(shasum -a 256 "$tgt" | cut -d' ' -f1)
+    [[ $sum0 == "$sum1" ]] || rst=1
+    check "secureboot: the installer refuses an image sealed to another configuration, and writes nothing" "$rlog" "$rst" \
+        "install: the installation image is sealed for Secure Boot to another configuration than this boot's" \
+        "nothing written to virtio-blk" "NOT:install: done" "$NO_FAULT"
+    if [[ -s "$efi_a" ]] && "$sb" verify "$keys/db.crt" "$efi_a" && ! "$sb" verify "$other/db.crt" "$efi_a"; then
         echo "  ✓ secureboot: BOOTAA64.EFI is signed by the db key and by no other (offline check)"
         PASSED=$((PASSED + 1))
     else

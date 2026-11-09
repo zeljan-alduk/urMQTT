@@ -159,6 +159,11 @@ pub fn check_drivers(blob: &[u8], image: &[u8]) -> Result<(), String> {
     }
 }
 
+/// Why a sealed ISO is not configured (ADR-320).
+pub const SEALED_ISO: &str = "this image is signed for Secure Boot and sealed to its configuration (the installed disk's \
+     limine.conf pins it): configuring it would break the signature. Configure the template, then sign the result with \
+     your key (scripts/sign-loaders.sh sign-iso; docs/DEPLOY.md, Secure Boot)";
+
 /// A copy of the template ISO with `blob` as its configuration: every boot
 /// slot replaced, every module hash in the `limine.conf` copies updated.
 pub fn configure_iso(iso: &[u8], blob: &[u8]) -> Result<Patched, String> {
@@ -218,6 +223,13 @@ pub fn configure_iso_in_place(iso: &mut [u8], blob: &[u8]) -> Result<String, Str
                 "a limine.conf at byte {r} names a different module hash than the slot's: the template is inconsistent"
             ));
         }
+    }
+    // LATER-6 (ADR-320): an image signed for Secure Boot also pins the configuration in the installed
+    // disk's limine.conf (inside the installation image, whose hash the menu pins, and under loaders
+    // whose signature covers the enrolled hash). None of that can be changed without the signing key.
+    let nomenu = conf_copies(iso, NOMENU_CONF_START)?;
+    if refs.iter().any(|r| nomenu.iter().any(|c| c.contains(r))) {
+        return Err(SEALED_ISO.into());
     }
     let new_hash = slot_hash(&new_slot);
     for o in &offs {
@@ -310,6 +322,17 @@ pub fn configure_raw(img: &[u8], blob: &[u8]) -> Result<Patched, String> {
     out.get_mut(off..off + SLOT_SIZE)
         .ok_or("slot is cut off")?
         .copy_from_slice(&new_slot);
+    // ADR-320: a sealed raw image (signed for Secure Boot) boots only with the configuration it pins.
+    if let urmqtt_cfg::seal::Seal::Differs { .. } =
+        urmqtt_cfg::seal::check(&out, off..off + SLOT_SIZE, &new_slot)
+    {
+        return Err(
+            "this image is sealed for Secure Boot to another configuration (its limine.conf pins the module): \
+             its loader would refuse this one. Sign an image for this configuration (scripts/sign-loaders.sh sign-iso \
+             --disk-out; docs/DEPLOY.md, Secure Boot)"
+                .into(),
+        );
+    }
     Ok(Patched {
         bytes: out,
         report: "configured: the slot of the disk image replaced".into(),

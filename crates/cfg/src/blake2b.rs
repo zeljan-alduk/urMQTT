@@ -1,6 +1,8 @@
 //! BLAKE2b-512 (RFC 7693), unkeyed, for the module hashes Limine checks
-//! (`path: ...#<hash>`). Only the host tools and the browser need it; the
-//! kernel does not. Checked against RFC 7693's test vector and Python's
+//! (`path: ...#<hash>`). The host tools and the browser use it, and since
+//! LATER-6 the kernel's installer does too: it checks that a sealed
+//! installation image pins the configuration it installs (`seal`, ADR-320).
+//! Checked against RFC 7693's test vector and Python's
 //! `hashlib.blake2b`.
 
 const IV: [u64; 8] = [

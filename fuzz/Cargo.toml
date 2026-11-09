@@ -341,3 +341,10 @@ path = "fuzz_targets/ws_frames.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "seal_pins"
+path = "fuzz_targets/seal_pins.rs"
+test = false
+doc = false
+bench = false

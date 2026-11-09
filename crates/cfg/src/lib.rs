@@ -37,6 +37,7 @@ pub mod fields;
 pub mod net;
 pub mod passwd;
 pub mod plain;
+pub mod seal;
 pub mod ws;
 
 pub use blob::{

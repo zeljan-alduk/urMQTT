@@ -519,6 +519,16 @@ Procedures are in [DEPLOY.md](DEPLOY.md) section 8b. The lines a boot prints:
 | `boot: boot-rollback control message: slot A is active again, slot B is marked bad; resetting` | an operator's rollback |
 | `control: message from ... rejected: other_disk` / `boot_refused` | a boot command for another disk GUID / with nothing to confirm or nowhere to go back to |
 
+**Secure Boot (LATER-6, ADR-320).** A disk installed from an image signed with
+your Secure Boot key is *sealed*: its `limine.conf` pins the configuration, so
+the loader refuses any other. `urmqtt-disk info` (and `update-boot`, `slots
+stage`) print `secure boot: sealed to its configuration` or `not sealed`; an ESP
+sealed to another configuration is refused before anything is written. The
+installer, started from a sealed image with a configuration that is not the one
+the image is sealed to, prints `install: the installation image is sealed for
+Secure Boot to another configuration than this boot's ...; nothing written`
+and powers off. Keys and revocation: [secure-boot-keys.md](secure-boot-keys.md).
+
 `[update]` (configuration format 17; all optional): `confirm = "auto"` (the
 default) or `"operator"`; `confirm_after_s` (default 60) seconds of a healthy
 trial before the automatic confirmation; `trial_timeout_s` (default 900; 0:
