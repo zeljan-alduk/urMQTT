@@ -144,3 +144,21 @@ fn full_summary_of_qemu_virt_hvf() {
     );
     assert_eq!(p.pcie.unwrap().ecam_size(), 256 << 20);
 }
+
+/// `qemu-system-aarch64 -machine virt,iommu=smmuv3,dumpdtb=...` (QEMU 11.1):
+/// the SMMUv3 at 0x9050000 and the PCIe host's `iommu-map` (ADR-305).
+#[test]
+fn qemu_virt_smmuv3_and_iommu_map() {
+    use urmqtt_platform::iommu::Kind;
+    let fdt = Fdt::new(include_bytes!("fixtures/qemu-virt-smmuv3.dtb")).unwrap();
+    let p = early_from_fdt(&fdt).unwrap();
+    let units = p.iommu.units.as_slice();
+    assert_eq!(units.len(), 1);
+    assert_eq!((units[0].kind, units[0].base, units[0].coherent), (Kind::SmmuV3, 0x0905_0000, true));
+    assert_eq!(p.iommu.unit_for(0, 0x0010), Some((0, 0x10)));
+    assert_eq!(p.iommu.untranslated_hosts, 0);
+    // The machines without an SMMU describe none.
+    for blob in [HVF_GIC3, TCG_GIC3, TCG_GIC2] {
+        assert!(early_from_fdt(&Fdt::new(blob).unwrap()).unwrap().iommu.is_empty());
+    }
+}
