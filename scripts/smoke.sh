@@ -4952,6 +4952,11 @@ fi
 # SMOKE_ONLY=metrics: the Prometheus endpoint scenarios (ADR-290) of this architecture.
 if [[ ${SMOKE_ONLY:-} == metrics && $ARCH != universal ]]; then
     metrics
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=iommu: the H4b DMA-remapping scenarios of this architecture (ADR-305 to ADR-307).
 if [[ ${SMOKE_ONLY:-} == iommu && $ARCH != universal ]]; then
     iommu_suite
