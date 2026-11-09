@@ -4554,7 +4554,10 @@ device the kernel does not drive is unaffected; one for a driven device would be
      backspace, Ctrl-U, Ctrl-C and arrow-key escape sequences are handled; an overlong line is dropped whole. The
      key-encryption key and the unwrapped key are `Zeroizing`. The disk key itself lives in the XTS layer's
      round keys while the broker runs, as with an image key (ADR-240).
-  7. **An existing image-key disk** is refused in console mode with the way out (`urmqtt-disk keys DISK add --key
+  7. **A RAM store** (the live entry, `storage.mode = "ram"`) is blank at every boot and lost at power-off: it
+     is encrypted under a random key of that boot and nothing is asked (`storage: RAM store: encrypted under a
+     random key of this boot, no passphrase asked`), so a live boot of a console-mode ISO still starts by itself.
+  8. **An existing image-key disk** is refused in console mode with the way out (`urmqtt-disk keys DISK add --key
      FILE`); a wrapped disk still opens with an image key that is its key (the way back, ADR-328).
 - **Alternatives.** A key file on a second virtio disk (as easy to copy as the image on a VPS); a key in
   instance metadata (readable by whoever has the VM); a network unlock (ADR-329); a TPM (ADR-329).

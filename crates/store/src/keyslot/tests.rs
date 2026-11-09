@@ -7,7 +7,7 @@ fn hex(s: &str) -> Vec<u8> {
 }
 
 fn blocks(b: &[u8]) -> Vec<[u8; 8]> {
-    b.chunks_exact(8).map(|c| c.try_into().unwrap()).collect()
+    b.as_chunks::<8>().0.to_vec()
 }
 
 fn kek() -> [u8; 32] {

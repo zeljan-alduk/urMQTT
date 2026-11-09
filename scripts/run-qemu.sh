@@ -226,7 +226,7 @@ if [[ $ARCH == x86_64 ]]; then
         X86ARGS+=(-nic none)
     fi
     if [[ -n "$SERIAL" && -n "$SERIAL_IN" ]]; then
-        X86ARGS+=(-chardev "socket,id=ser0,path=$SERIAL_IN,server=on,wait=off,logfile=$SERIAL" -serial chardev:ser0 -monitor none)
+        X86ARGS+=(-chardev "socket,id=serial0,path=$SERIAL_IN,server=on,wait=off,logfile=$SERIAL" -serial chardev:serial0 -monitor none)
     elif [[ -n "$SERIAL" ]]; then
         X86ARGS+=(-serial "file:$SERIAL" -monitor none)
     elif [[ $HEADLESS -eq 1 ]]; then
@@ -336,7 +336,7 @@ else
     ARGS+=(-nic none)
 fi
 if [[ -n "$SERIAL" && -n "$SERIAL_IN" ]]; then
-    ARGS+=(-chardev "socket,id=ser0,path=$SERIAL_IN,server=on,wait=off,logfile=$SERIAL" -serial chardev:ser0 -monitor none)
+    ARGS+=(-chardev "socket,id=serial0,path=$SERIAL_IN,server=on,wait=off,logfile=$SERIAL" -serial chardev:serial0 -monitor none)
 elif [[ -n "$SERIAL" ]]; then
     ARGS+=(-serial "file:$SERIAL" -monitor none)
 elif [[ $HEADLESS -eq 1 ]]; then

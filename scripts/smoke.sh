@@ -1932,7 +1932,7 @@ wait_exit() {
 #   5. the host tool: `keys` lists the slot, --passphrase-file opens the disk for verify;
 #   6. an edited header (the key check changed, the CRC recomputed): the slot opens, the key does not
 #      match, the kernel refuses to serve;
-#   7. an image with the key in the image (the S7 way) on a wrapped disk: the key opens it too.
+#   7. a RAM store (storage.mode = "ram") boots without asking: a random key of that boot.
 storage_unlock() {
     build_disk_tool || {
         echo "  ✗ storage-unlock needs urmqtt-disk"
@@ -1948,8 +1948,13 @@ storage_unlock() {
         "$ROOT/deploy/dev/config.toml" >"$dir/console.toml"
     "$tool" pack "$dir/console.toml" --env dev --root "$dir/root" --out "$dir/console.blob" >/dev/null ||
         { echo "  ✗ storage-unlock: packing failed"; FAILED=$((FAILED + 1)); return; }
+    sed -e 's/^mode = "auto"/mode = "ram"/' "$dir/console.toml" >"$dir/console-ram.toml"
+    "$tool" pack "$dir/console-ram.toml" --env dev --root "$dir/root" --out "$dir/console-ram.blob" >/dev/null ||
+        { echo "  ✗ storage-unlock: packing failed"; FAILED=$((FAILED + 1)); return; }
     MKIMG_EXTRA=(--config "$dir/console.blob")
     mkimg "$OUT/unlock-console.raw" "smoke"
+    MKIMG_EXTRA=(--config "$dir/console-ram.blob")
+    mkimg "$OUT/unlock-console-ram.raw" "smoke"
     MKIMG_EXTRA=()
     local p1="first disk passphrase 11" p2="second disk passphrase 22" accel
     for accel in $ACCELS; do
@@ -2082,6 +2087,17 @@ PY
         check "unlock-edited-header-refused [$accel]" "$l" "$status" \
             "storage: refused reason=key-slot-mismatch" "the header was edited" "NOT:URMQTT READY"
         rm -f "$disk.tampered"
+
+        # 7. A RAM store (storage.mode = "ram", the live entry's kind): nothing asked, a key of this boot.
+        status=0
+        l="$OUT/unlock-$accel-7.log"
+        fresh_disk "$OUT/unlock-console-ram.raw" "$disk.ram"
+        start_vm "$l" --serial-in "$sock" --disk "$disk.ram" --accel "$accel" --fwd none
+        wait_exit || status=$?
+        check "unlock-ram-store-asks-nothing [$accel]" "$l" "$status" \
+            "storage: RAM store: encrypted under a random key of this boot, no passphrase asked" "^URMQTT READY$" \
+            "NOT:Disk passphrase" "NOT:new disk passphrase" "$NO_FAULT"
+        rm -f "$disk.ram"
         rm -rf "$qd"
     done
 }

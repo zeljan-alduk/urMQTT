@@ -172,6 +172,14 @@ fn run(
     uuid: impl FnOnce() -> [u8; 16],
     partitions: u32,
 ) -> Result<(Disk, Opened), DiskError> {
+    // A RAM store (the live entry, `storage.mode = "ram"`) is blank at every
+    // boot and gone at power-off: nothing to protect with a passphrase, and
+    // nobody to wait for. It is encrypted under a random key of this boot.
+    if crate::live::ephemeral() {
+        let key = new_key()?;
+        info!("storage: RAM store: encrypted under a random key of this boot, no passphrase asked");
+        return Disk::open_keyed(dev, uuid, partitions, Some(&key));
+    }
     let mut ed = LineEditor::new();
     let mut ps2 = Ps2::default();
     match probe(dev.as_mut())? {

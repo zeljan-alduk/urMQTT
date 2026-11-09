@@ -505,6 +505,7 @@ below in your remote log.
 | `storage: data partition unlocked with the console passphrase (key slot N)` / `storage: unlocked after N wrong disk passphrase(s)` | opened; which slot (0: daily, 1: e.g. a recovery passphrase) |
 | `storage: the disk passphrase of key slot N was changed; the old one no longer opens the disk` | `change` was typed at the prompt, then the current passphrase and the new one twice. Only the header was rewritten |
 | `storage: the older superblock still held a replaced key slot (a passphrase change was interrupted); it now matches` | a passphrase change was cut by a power loss between its two writes; the old wrap is gone now |
+| `storage: RAM store: encrypted under a random key of this boot, no passphrase asked` | the live entry (a RAM store): nothing to unlock, nothing kept |
 | `storage: refused reason=not-wrapped` | the disk's key is in no key slot (it was encrypted with an image key): add one offline, `urmqtt-disk keys DISK add --key FILE --write` |
 | `storage: refused reason=key-slot-mismatch` | the passphrase opened a slot whose key does not match the disk: the header was edited or assembled from two disks. Restore the disk from a backup you trust |
 
