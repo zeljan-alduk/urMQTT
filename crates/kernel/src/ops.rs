@@ -64,6 +64,8 @@ struct Counters {
     live_closed: u64,
     tickets: urmqtt_tls::ticket::TicketStats,
     retained_refused: [u64; 2],
+    logtls_sent: u64,
+    logtls_dropped: u64,
 }
 
 fn counters(lost: u64, unsent: u64) -> Counters {
@@ -94,6 +96,8 @@ fn counters(lost: u64, unsent: u64) -> Counters {
         retained_refused: crate::mqtt_service::RETAINED_REFUSED
             .each_ref()
             .map(|r| r.load(Ordering::Relaxed)),
+        logtls_sent: crate::logship::SENT.load(Ordering::Relaxed),
+        logtls_dropped: crate::logship::DROPPED.load(Ordering::Relaxed),
     }
 }
 
@@ -139,9 +143,10 @@ impl Ops {
     pub fn new(now_ms: u64) -> Self {
         let o = &CONFIG.observability;
         info!(
-            "ops: syslog {}, statsd {}, health check every {} s",
+            "ops: syslog {}, statsd {}, log over TLS {}, health check every {} s",
             Addr(o.syslog_udp),
             Addr(o.metrics_udp),
+            Addr(o.log_tls),
             HEALTH_EVERY_MS / 1000
         );
         match server_cert_days() {
@@ -169,27 +174,56 @@ impl Ops {
         }
     }
 
-    /// Called from the network core's loop.
-    pub fn poll(&mut self, iface: &mut Iface, now_ms: u64, out: &mut impl FnMut(&[u8])) {
+    /// Called from the network core's loop. `ship`: log shipping over TLS
+    /// (NEXT-7, ADR-318), which takes every record as well.
+    pub fn poll(
+        &mut self,
+        iface: &mut Iface,
+        now_ms: u64,
+        out: &mut impl FnMut(&[u8]),
+        mut ship: Option<&mut crate::logship::LogShip>,
+    ) {
         if now_ms.saturating_sub(self.last_health_ms) >= HEALTH_EVERY_MS {
             self.last_health_ms = now_ms;
             self.health();
             check_server_cert();
         }
-        if let Some(dst) = self.syslog
+        if (self.syslog.is_some() || ship.is_some())
             && now_ms.saturating_sub(self.last_syslog_ms) >= SYSLOG_EVERY_MS
         {
             self.last_syslog_ms = now_ms;
-            // Records stay in the ring until the collector is reachable.
-            if self.reachable(iface, dst, now_ms, out) {
+            // Records stay in the ring until the UDP collector is reachable,
+            // unless the TLS shipper takes them: it keeps its own queue, and
+            // the UDP collector then misses what it could not be sent
+            // (counted as unsent).
+            let udp = self
+                .syslog
+                .filter(|&dst| self.reachable(iface, dst, now_ms, out));
+            if udp.is_some() || ship.is_some() {
                 let host = iface.addr();
                 let mut buf = String::new();
                 let mut unsent = 0;
+                let udp_configured = self.syslog.is_some();
                 self.lost += urmqtt_log::drain_records(|r| {
                     buf.clear();
                     syslog_line(&mut buf, r, host);
-                    if !iface.send_udp(dst.addr, SYSLOG_SPORT, dst.port, buf.as_bytes(), out) {
-                        unsent += 1;
+                    match udp {
+                        Some(dst) => {
+                            if !iface.send_udp(
+                                dst.addr,
+                                SYSLOG_SPORT,
+                                dst.port,
+                                buf.as_bytes(),
+                                out,
+                            ) {
+                                unsent += 1;
+                            }
+                        }
+                        None if udp_configured => unsent += 1,
+                        None => {}
+                    }
+                    if let Some(s) = ship.as_deref_mut() {
+                        s.push(&buf);
                     }
                 });
                 self.unsent += unsent;
@@ -259,6 +293,27 @@ impl Ops {
             "g",
         );
         add("health", u64::from(self.healthy), "g");
+        // Log shipping over TLS (ADR-318), when configured.
+        if crate::logship::configured() {
+            use crate::logship as l;
+            add("logtls.up", l::UP.load(Ordering::Relaxed), "g");
+            add(
+                "logtls.records_sent",
+                d(l::SENT.load(Ordering::Relaxed), prev.logtls_sent),
+                "c",
+            );
+            add(
+                "logtls.records_dropped",
+                d(l::DROPPED.load(Ordering::Relaxed), prev.logtls_dropped),
+                "c",
+            );
+            add(
+                "logtls.connections",
+                l::CONNECTS.load(Ordering::Relaxed),
+                "g",
+            );
+            add("logtls.failures", l::FAILURES.load(Ordering::Relaxed), "g");
+        }
         // Live mode (O3): 1 while the data lives in RAM and is lost at a reboot.
         add(
             "storage.ephemeral",

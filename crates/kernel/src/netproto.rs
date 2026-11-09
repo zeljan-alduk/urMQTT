@@ -398,15 +398,39 @@ impl EchoSvc {
     }
 }
 
-/// Core 0's TCP application: the echo port, then MQTT.
+/// Core 0's TCP application: its outbound connections (NEXT-7), the echo
+/// port, then MQTT.
 struct CoreApp<'a> {
     mqtt: TcpEvents<'a>,
     echo: Option<&'a mut EchoSvc>,
+    ship: Option<&'a mut crate::logship::LogShip>,
+    now_ms: u64,
+}
+
+impl CoreApp<'_> {
+    /// The log shipper, if `c` is its connection.
+    fn ship_of(&mut self, c: ConnId) -> Option<&mut crate::logship::LogShip> {
+        self.ship.as_deref_mut().filter(|s| s.owns(c))
+    }
+}
+
+/// Local ports the outbound connections must not use (ADR-315): every port
+/// a listener has and the dispatcher steers to a worker core, and the echo
+/// port. Replies to any other port stay on core 0, which owns the outbound
+/// connections.
+fn reserved_port(p: u16) -> bool {
+    is_mqtt_port(p) || p == ECHO_PORT
 }
 
 impl App for CoreApp<'_> {
     fn syn_ok(&mut self, port: u16, remote: [u8; 4]) -> bool {
         port == ECHO_PORT && self.echo.is_some() || self.mqtt.syn_ok(port, remote)
+    }
+
+    fn connected(&mut self, c: ConnId) {
+        if let Some(s) = self.ship_of(c) {
+            s.on_connected(c);
+        }
     }
 
     fn accept(&mut self, c: ConnId, port: u16, remote: Endpoint) -> bool {
@@ -420,6 +444,11 @@ impl App for CoreApp<'_> {
     }
 
     fn data(&mut self, c: ConnId, data: &[u8]) {
+        let now = self.now_ms;
+        if let Some(s) = self.ship_of(c) {
+            s.on_data(c, data, now);
+            return;
+        }
         if let Some((p, served, _)) = self.echo.as_mut().and_then(|e| e.conns.get_mut(&c)) {
             p.extend_from_slice(data);
             *served += data.len() as u64;
@@ -429,6 +458,10 @@ impl App for CoreApp<'_> {
     }
 
     fn peer_closed(&mut self, c: ConnId) {
+        if let Some(s) = self.ship_of(c) {
+            s.on_peer_closed(c);
+            return;
+        }
         if let Some((_, _, closed)) = self.echo.as_mut().and_then(|e| e.conns.get_mut(&c)) {
             *closed = true;
             return;
@@ -437,6 +470,11 @@ impl App for CoreApp<'_> {
     }
 
     fn closed(&mut self, c: ConnId, why: CloseReason) {
+        let now = self.now_ms;
+        if let Some(s) = self.ship_of(c) {
+            s.on_closed(c, why, now);
+            return;
+        }
         if let Some((_, served, _)) = self.echo.as_mut().and_then(|e| e.conns.remove(&c)) {
             info!("net: echo connection closed after {served} byte(s)");
             return;
@@ -860,6 +898,12 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     dataplane::set_baseline();
     let mut last_busy_ms = now_ms();
     let mut ops = crate::ops::Ops::new(now_ms());
+    // NEXT-7, ADR-318: the one outbound connection, when configured. Only
+    // core 0's stack may open connections, and only then.
+    let mut ship = crate::logship::LogShip::from_config(now_ms());
+    if ship.is_some() {
+        tcp.set_max_active(crate::outbound::MAX_ACTIVE);
+    }
     let mut sntp = crate::time_sync::TimeSync::new(now_ms());
     let mut cookies = CookieRotation::new(now_ms());
     let mut tcpstats = TcpStatsLog::new(now_ms());
@@ -904,6 +948,8 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
                                 now_ms: now,
                             },
                             echo: echo_svc.as_mut(),
+                            ship: ship.as_mut(),
+                            now_ms: now,
                         };
                         tcp.input(now, src, seg, &mut app, &mut |dst, s| {
                             iface.send_tcp(dst, s, &mut emit)
@@ -933,7 +979,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             if let Some(e) = iface.poll(now, &mut emit) {
                 events.push(e);
             }
-            ops.poll(&mut iface, now, &mut emit);
+            ops.poll(&mut iface, now, &mut emit, ship.as_mut());
             sntp.poll(&mut iface, now, &mut emit);
             if auto_pending
                 && let Some((address, gateway, deadline)) = auto_static
@@ -1035,6 +1081,9 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
             for c in mqtt.take_aborts() {
                 tcp.abort(c, &mut |dst, s| iface.send_tcp(dst, s, &mut emit));
             }
+            if let Some(s) = ship.as_mut() {
+                s.poll(now, &mut iface, &mut tcp, &reserved_port, &mut emit);
+            }
             {
                 let mut app = CoreApp {
                     mqtt: TcpEvents {
@@ -1043,6 +1092,8 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
                         now_ms: now,
                     },
                     echo: echo_svc.as_mut(),
+                    ship: ship.as_mut(),
+                    now_ms: now,
                 };
                 tcp.poll(now, &mut app, &mut |dst, s| {
                     iface.send_tcp(dst, s, &mut emit)

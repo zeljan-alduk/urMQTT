@@ -193,7 +193,8 @@ fn the_blob_check_refuses_what_the_toml_path_refuses() {
     let mut b = Builder::new();
     b.addr(tag::OBS_LOG_TLS, [10, 0, 2, 2], 6514).unwrap();
     assert_eq!(check(&b), Err("observability.log_tls_ca"));
-    b.bins(tag::OBS_LOG_TLS_CA, std::slice::from_ref(&pem)).unwrap();
+    b.bins(tag::OBS_LOG_TLS_CA, std::slice::from_ref(&pem))
+        .unwrap();
     assert!(check(&b).is_ok());
     b.str(tag::OBS_LOG_TLS_NAME, "under_score").unwrap();
     assert_eq!(check(&b), Err("observability.log_tls_name"));

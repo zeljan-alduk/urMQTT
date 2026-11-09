@@ -1397,6 +1397,88 @@ PY
     done
 }
 
+# NEXT-7, ADR-318: log shipping over TLS on the outbound TCP client. A local TLS collector
+# (scripts/logtls-sink.py, on the host's 127.0.0.1, the guest's 10.0.2.2) gets the log records as RFC 5425
+# frames over TLS 1.3, with the boot's records that waited in the queue; the collector goes away and comes back
+# and the broker reconnects after its backoff. A collector whose certificate is not from the configured CA gets
+# a ClientHello and nothing else: the handshake fails, the broker says why and when it tries again.
+logtls() {
+    [[ -z ${SMOKE_SCENARIOS:-} || logtls =~ $SMOKE_SCENARIOS ]] || return 0
+    local dir="$OUT/logtls" tool="$ROOT/target/debug/urmqtt-config" lp=${SMOKE_LOGTLS_PORT:-$((PORT + 5))}
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed"; FAILED=$((FAILED + 1)); return 0; }
+    local dev="$ROOT/deploy/dev" ossl=openssl
+    [[ -x /opt/homebrew/bin/openssl ]] && ossl=/opt/homebrew/bin/openssl
+    # The collector's certificate: from the dev CA (good) and self-signed (rogue), both for the name and the address.
+    "$ossl" ecparam -name prime256v1 -genkey -noout -out "$dir/sink.key" 2>/dev/null
+    printf 'subjectAltName=DNS:logsink.test,IP:10.0.2.2\nextendedKeyUsage=serverAuth\nbasicConstraints=critical,CA:FALSE\n' >"$dir/ext.cnf"
+    "$ossl" req -new -key "$dir/sink.key" -subj "/CN=logsink.test" -out "$dir/sink.csr" 2>/dev/null
+    "$ossl" x509 -req -in "$dir/sink.csr" -CA "$dev/ca.pem" -CAkey "$dev/ca.key" -CAcreateserial -days 30 \
+        -extfile "$dir/ext.cnf" -out "$dir/sink.pem" 2>/dev/null
+    "$ossl" req -x509 -new -key "$dir/sink.key" -subj "/CN=logsink.test" -days 30 \
+        -addext "subjectAltName=DNS:logsink.test,IP:10.0.2.2" -addext "basicConstraints=critical,CA:FALSE" \
+        -addext "extendedKeyUsage=serverAuth" -out "$dir/rogue.pem" 2>/dev/null
+    [[ -s $dir/sink.pem && -s $dir/rogue.pem ]] || { echo "  ✗ logtls: could not make the collector's certificates"; FAILED=$((FAILED + 1)); return 0; }
+    # The dev configuration with the collector added to its [observability] section.
+    sed -e "s|^metrics_udp = .*|&\nlog_tls = \"10.0.2.2:$lp\"\nlog_tls_name = \"logsink.test\"\nlog_tls_ca = [\"ca.pem\"]\nlog_tls_queue_kb = 512|" \
+        "$dev/config.toml" >"$dir/logtls.toml"
+    "$tool" pack "$dir/logtls.toml" --env dev --root "$dev" --out "$dir/logtls.blob" >"$dir/pack.out" || { echo "  ✗ logtls: pack failed"; FAILED=$((FAILED + 1)); return 0; }
+    local iso="$OUT/logtls.raw"
+    MKIMG_EXTRA=(--config "$dir/logtls.blob")
+    mkimg "$iso" "serve"
+    MKIMG_EXTRA=()
+    local addr="10\.0\.2\.2:$lp" accel
+    for accel in $ACCELS; do
+        local log="$OUT/logtls-$accel.log" data="$OUT/logtls-$accel.img" status=0 sink1="$OUT/logtls-$accel.sink1" sink2="$OUT/logtls-$accel.sink2" spid
+        rm -f "$sink1" "$sink2"
+        fresh_disk "$iso" "$data"
+        python3 -I "$ROOT/scripts/logtls-sink.py" "$lp" "$dir/sink.pem" "$dir/sink.key" "$sink1" 600 &
+        spid=$!
+        sleep 0.5
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
+        if wait_log "$log" "logtls: connected to $addr \(TLS 1\.3, certificate verified for \"logsink\.test\"\)" \
+            && wait_log "$sink1" "^sink: msg <1[0-9]+>1 .* mqtt: TLS 1\.3 listener on port 8883"; then
+            # The collector goes away; the broker notices and connects again once one listens.
+            kill "$spid" 2>/dev/null || true
+            wait "$spid" 2>/dev/null || true
+            wait_log "$log" "logtls: connection to $addr (closed|reset by the peer|refused|timed out)" || status=124
+            python3 -I "$ROOT/scripts/logtls-sink.py" "$lp" "$dir/sink.pem" "$dir/sink.key" "$sink2" 600 &
+            spid=$!
+            wait_log "$log" "logtls: connected to $addr" 2 || status=124
+            wait_log "$sink2" "^sink: msg .* logtls: connected to $addr" || status=124
+        else
+            status=124
+        fi
+        kill_vm
+        kill "$spid" 2>/dev/null || true
+        wait "$spid" 2>/dev/null || true
+        cat "$sink1" "$sink2" >>"$log" 2>/dev/null || true
+        check "logtls [$accel]" "$log" "$status" \
+            "ops: syslog 10\.0\.2\.2:5514, statsd 10\.0\.2\.2:8125, log over TLS $addr" \
+            "logtls: shipping log records over TLS to $addr \(certificate name logsink\.test, 1 trust anchor file\(s\), queue 512 KiB\)" \
+            "^sink: handshake ok, TLSv1\.3" \
+            "^sink: msg <1[0-9]+>1 [0-9T:.Z-]+ 10\.0\.2\.15 urmqtt cpu[0-9]+ [a-z0-9-]+ \[meta sysUpTime=\"[0-9]+\"\] " \
+            "^sink: msg .* boot: " "^sink: msg .* logtls: connection to $addr" \
+            "NOT:^sink: BAD FRAME" "NOT:^sink: handshake failed" "^URMQTT READY$" "$NO_FAULT"
+        # The rogue collector: same names, another issuer.
+        log="$OUT/logtls-rogue-$accel.log" status=0
+        rm -f "$sink1"
+        fresh_disk "$iso" "$data"
+        python3 -I "$ROOT/scripts/logtls-sink.py" "$lp" "$dir/rogue.pem" "$dir/sink.key" "$sink1" 600 &
+        spid=$!
+        sleep 0.5
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
+        wait_log "$log" "logtls: connection to $addr failed: TLS: Handshake\(\"invalid peer certificate: UnknownIssuer\"\); next attempt in [0-9]+ s" 2 || status=124
+        kill_vm
+        kill "$spid" 2>/dev/null || true
+        wait "$spid" 2>/dev/null || true
+        cat "$sink1" >>"$log" 2>/dev/null || true
+        check "logtls-rogue-collector [$accel]" "$log" "$status" \
+            "^sink: connection from 127\.0\.0\.1" "^sink: handshake failed" \
+            "NOT:logtls: connected to" "NOT:^sink: msg " "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
 # S1 (STORAGE-PLAN §2a): the first boot of the image on a larger disk
 # moves the backup GPT, gives the disk its own GUID and creates the data
 # partition; a second disk attached to the same VM stays byte for byte as
@@ -4957,6 +5039,15 @@ if [[ ${SMOKE_ONLY:-} == metrics && $ARCH != universal ]]; then
     exit
 fi
 
+# SMOKE_ONLY=logtls: log shipping over TLS on the outbound TCP client (NEXT-7, ADR-315 to ADR-319) of this
+# architecture.
+if [[ ${SMOKE_ONLY:-} == logtls && $ARCH != universal ]]; then
+    logtls
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=iommu: the H4b DMA-remapping scenarios of this architecture (ADR-305 to ADR-307).
 if [[ ${SMOKE_ONLY:-} == iommu && $ARCH != universal ]]; then
     iommu_suite
@@ -5240,6 +5331,7 @@ want plaintext && plaintext
 want websocket && websocket
 want accounts && accounts
 want metrics && metrics
+want logtls && logtls
 scenario x86-fault-unmapped-mmio "smoke test=data-abort" on \
     "EXCEPTION: #PF page fault" "page not present, read, supervisor mode" "NOT:URMQTT READY"
 SMP=8 scenario x86-smp8 "smoke" on \
@@ -5317,6 +5409,7 @@ want plaintext && plaintext
 want websocket && websocket
 want accounts && accounts
 want metrics && metrics
+want logtls && logtls
 scenario fault-data-abort "smoke test=data-abort" on \
     "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
     "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \

@@ -67,6 +67,7 @@ mod active;
 pub mod cc;
 pub mod cookie;
 pub mod dial;
+pub mod queue;
 pub mod seq;
 
 mod ooo;

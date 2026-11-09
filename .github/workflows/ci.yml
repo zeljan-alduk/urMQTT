@@ -222,6 +222,8 @@ jobs:
   #   metrics   the Prometheus endpoint (ADR-290): the text formats, the refusals, the slowloris cut, the limits,
   #             the numbers against the info query (stdlib client, mosquitto clients for the traffic)
   #   ab        the A/B boot slots (ADR-295 to ADR-299): update, rollback, power cuts, the operator's confirm and rollback
+  #   logtls    log shipping over TLS on the outbound TCP client (ADR-315 to ADR-319): a local TLS collector, a
+  #             reconnect, a collector with a certificate from another CA (scripts/logtls-sink.py, openssl)
   # NOT in CI yet: the x86_64 and universal-ISO suites (--arch x86_64 and
   # --arch universal, SMOKE_ONLY=diag|install|migrated|config|template|
   # integrity|install-rules|secureboot). They need qemu-system-x86, OVMF
@@ -257,6 +259,8 @@ jobs:
             only: metrics
           - group: ab
             only: ab
+          - group: logtls
+            only: logtls
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

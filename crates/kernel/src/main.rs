@@ -72,6 +72,8 @@ mod layout;
 #[cfg(target_os = "none")]
 mod live;
 #[cfg(target_os = "none")]
+mod logship;
+#[cfg(target_os = "none")]
 mod logtest;
 #[cfg(target_os = "none")]
 mod memory;
@@ -87,6 +89,8 @@ mod mqtt_service;
 mod netproto;
 #[cfg(target_os = "none")]
 mod ops;
+#[cfg(target_os = "none")]
+mod outbound;
 #[cfg(target_os = "none")]
 mod plain;
 #[cfg(target_os = "none")]
