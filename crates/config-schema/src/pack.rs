@@ -545,6 +545,17 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     build_plaintext(&mut b, &cfg.plaintext)?;
     build_websocket(&mut b, &cfg.websocket)?;
     build_mqtt5(&mut b, &cfg.mqtt5)?;
+    // ADR-297: at their defaults the `[update]` keys write nothing; any other
+    // value needs format 17.
+    b.variant(
+        tag::UPD_CONFIRM,
+        match cfg.update.confirm {
+            crate::UpdateConfirm::Auto => 0,
+            crate::UpdateConfirm::Operator => 1,
+        },
+    )?;
+    b.uint(tag::UPD_CONFIRM_AFTER, u64::from(cfg.update.confirm_after_s))?;
+    b.uint(tag::UPD_TRIAL_TIMEOUT, u64::from(cfg.update.trial_timeout_s))?;
     // ADR-256: "off" is the default and writes nothing (the blob keeps its
     // version); "auto" and "on" need format 5.
     b.variant(

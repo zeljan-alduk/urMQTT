@@ -215,14 +215,14 @@ fn structural_attacks_fail_closed() {
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, 10 which no format ever used, and
     // one above the newest).
-    for unknown in [0u8, 10, 14, 15] {
+    for unknown in [0u8, 10, 14, 15, 16, 18] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
     // The versions of the formats that came after 7, each its own feature
     // (8 back-pressure, 9 WebSocket, 11 the receive interrupt, 12 MQTT 5.0,
-    // 13 the shared-group limits).
-    for known in [8u8, 9, 11, 12, 13] {
+    // 13 the shared-group limits, 17 the A/B update keys).
+    for known in [8u8, 9, 11, 12, 13, 17] {
         let v = with_version(&assemble(&ok), known);
         assert_eq!(Blob::parse(&v).map(|b| b.version()), Ok(u16::from(known)));
     }
@@ -244,7 +244,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 13));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 17));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -253,7 +253,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[13, 0],
+        &[17, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -1231,5 +1231,65 @@ fn shared_group_limits() {
         let rec = record(t, &64u32.to_le_bytes());
         assert!(Blob::parse(&with_version(&assemble(&rec), 12)).is_err());
         assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_ok());
+    }
+}
+
+/// ADR-297: the `[update]` keys of format 17. At their defaults they write
+/// nothing (the blob keeps its version); any other value needs format 17, a
+/// format-13 blob cannot hold them, and the trial timeout must leave the
+/// automatic confirmation time to happen.
+#[test]
+fn update_keys_need_format_17() {
+    let mut d = Builder::new();
+    d.variant(tag::UPD_CONFIRM, 0).unwrap();
+    d.uint(tag::UPD_CONFIRM_AFTER, 60).unwrap();
+    d.uint(tag::UPD_TRIAL_TIMEOUT, 900).unwrap();
+    assert_eq!(d.finish(false).unwrap(), empty());
+    for (t, v) in [
+        (tag::UPD_CONFIRM, 1u64),
+        (tag::UPD_CONFIRM_AFTER, 0),
+        (tag::UPD_CONFIRM_AFTER, 899),
+        (tag::UPD_TRIAL_TIMEOUT, 0),
+        (tag::UPD_TRIAL_TIMEOUT, 86_400),
+    ] {
+        let mut b = Builder::new();
+        if t == tag::UPD_CONFIRM {
+            b.variant(t, v as u8).unwrap();
+        } else {
+            b.uint(t, v).unwrap();
+        }
+        let blob = b.finish(false).unwrap();
+        let p = Blob::parse(&blob).unwrap();
+        assert_eq!(p.version(), 17, "{t} = {v}");
+        assert_eq!(p.present().count(), 1);
+        assert!(check::check(&p, false).is_ok(), "{t} = {v}");
+        let rec = record(t, &p.raw(t).unwrap().to_vec());
+        assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_err());
+        assert!(Blob::parse(&with_version(&assemble(&rec), 17)).is_ok());
+    }
+    let mut b = Builder::new();
+    assert!(b.uint(tag::UPD_CONFIRM_AFTER, 86_401).is_err());
+    assert!(b.uint(tag::UPD_TRIAL_TIMEOUT, 86_401).is_err());
+    assert!(b.variant(tag::UPD_CONFIRM, 2).is_err());
+    // A timeout no longer than the confirmation delay: refused in auto mode,
+    // allowed when an operator confirms (the timeout is theirs to beat).
+    for (confirm, after, timeout, ok) in [
+        (0u8, 60u64, 60u64, false),
+        (0, 60, 59, false),
+        (0, 60, 61, true),
+        (0, 60, 0, true),
+        (1, 60, 30, true),
+    ] {
+        let mut b = Builder::new();
+        b.variant(tag::UPD_CONFIRM, confirm).unwrap();
+        b.uint(tag::UPD_CONFIRM_AFTER, after).unwrap();
+        b.uint(tag::UPD_TRIAL_TIMEOUT, timeout).unwrap();
+        // The builder runs the same check as the kernel.
+        let r = b.finish(false);
+        assert_eq!(r.is_ok(), ok, "{confirm} {after} {timeout}");
+        match r {
+            Ok(blob) => assert!(check::check(&Blob::parse(&blob).unwrap(), false).is_ok()),
+            Err(e) => assert_eq!(e.key, "update.trial_timeout_s"),
+        }
     }
 }

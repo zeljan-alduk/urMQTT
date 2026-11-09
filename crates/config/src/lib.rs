@@ -243,6 +243,37 @@ pub struct Console {
     pub virtio_gpu: VirtioGpuMode,
 }
 
+/// Who confirms a trial boot after an A/B update (`update.confirm`, ADR-297).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateConfirm {
+    /// The kernel itself, after `confirm_after_s` of health (the default).
+    Auto,
+    /// An operator, with a `boot-confirm` control message.
+    Operator,
+}
+
+impl UpdateConfirm {
+    /// The TOML word.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Operator => "operator",
+        }
+    }
+}
+
+/// The `[update]` section (NEXT-11, ADR-297): how a trial boot after an A/B
+/// update is confirmed.
+#[derive(Debug, Clone, Copy)]
+pub struct Update {
+    pub confirm: UpdateConfirm,
+    /// Seconds of health (store open, a listener up) before an automatic
+    /// confirmation.
+    pub confirm_after_s: u32,
+    /// A trial boot not confirmed this long resets; 0: never.
+    pub trial_timeout_s: u32,
+}
+
 /// Whether an optional virtio driver runs (`[devices]`, ADR-257).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceMode {
@@ -616,6 +647,7 @@ pub struct BuildConfig {
     pub mqtt5: Mqtt5,
     pub console: Console,
     pub devices: Devices,
+    pub update: Update,
 }
 
 impl BuildConfig {

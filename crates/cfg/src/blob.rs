@@ -32,13 +32,24 @@ pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// 10 is unused); version 12 adds the `[mqtt5]` section and the session and message expiry limits (ADR-273 rule
 /// 21: a kernel that does not know them would ignore the operator's expiry policy); version 13 adds
 /// `limits.max_shared_groups` and `limits.max_shared_group_members` (ADR-275: a kernel that does not know them
-/// would ignore the operator's bound). The records of 2 and 3 are the same: the packer writes the lowest version
-/// that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind still boots every image that
-/// does not use what came later.
-pub const FORMAT_VERSION: u16 = 13;
+/// would ignore the operator's bound); version 17 adds the `[update]` section (ADR-297: a kernel that does not
+/// know it would confirm a trial boot by its own defaults, or never, against the operator's choice; 14 to 16 are
+/// allocated to other items of the v0.6.0 release). The records of 2 and 3 are the same: the packer writes the
+/// lowest version that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind still boots
+/// every image that does not use what came later.
+pub const FORMAT_VERSION: u16 = 17;
 
 /// The one version between [`FORMAT_MIN`] and [`FORMAT_VERSION`] no format ever had.
 pub const UNUSED_VERSION: u16 = 10;
+/// Versions below [`FORMAT_VERSION`] that this tree does not know: allocated to other items of the v0.6.0
+/// release (14 to 16), whose branches define them. Refused like [`UNUSED_VERSION`]; the release merge removes
+/// the entry of each as its item lands.
+pub const RESERVED_VERSIONS: [u16; 3] = [14, 15, 16];
+
+/// Whether `version` is one no format of this tree had (refused by the parser and the builder).
+pub fn is_unused_version(version: u16) -> bool {
+    version == UNUSED_VERSION || RESERVED_VERSIONS.contains(&version)
+}
 /// The version a configuration is written in unless it needs a newer one.
 pub const BASE_VERSION: u16 = 2;
 /// The oldest format version it still reads. Blobs of the older versions stay
@@ -189,9 +200,9 @@ impl<'a> Blob<'a> {
             return Err(bad("not a urmqtt-cfg blob (bad magic)"));
         }
         let version = bytes.get(8..).and_then(le16).ok_or(bad("truncated"))?;
-        // Version 10 was never used by any format: unknown, like one above
-        // the newest.
-        if !(FORMAT_MIN..=FORMAT_VERSION).contains(&version) || version == UNUSED_VERSION {
+        // Version 10 was never used by any format, 14 to 16 are not known to
+        // this tree: unknown, like one above the newest.
+        if !(FORMAT_MIN..=FORMAT_VERSION).contains(&version) || is_unused_version(version) {
             return Err(bad("unsupported format version"));
         }
         if bytes.get(10..).and_then(le16) != Some(0) {

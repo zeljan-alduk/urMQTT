@@ -145,7 +145,8 @@ impl Builder {
     /// set (ADR-256), 6 with a `[devices]` key set (ADR-257), 7 with `network.mtu` set (ADR-264), 8 with
     /// `limits.publisher_backpressure` set (ADR-269), 9 with a `[websocket]` key set (ADR-272), 11 with
     /// `devices.virtio_net_interrupt` set (ADR-270), 12 with an `[mqtt5]` key or an expiry limit set (ADR-273), 13
-    /// with a shared-group limit set (ADR-275). A field at its default writes no record.
+    /// with a shared-group limit set (ADR-275), 17 with an `[update]` key set (ADR-297). A field at its default writes
+    /// no record.
     pub fn lowest_version(&self) -> u16 {
         let tls_off = self
             .records
@@ -180,7 +181,7 @@ impl Builder {
     pub fn finish_as(&self, dev_allowed: bool, version: u16) -> Result<Vec<u8>, CfgError> {
         if version < self.lowest_version()
             || version > FORMAT_VERSION
-            || version == blob::UNUSED_VERSION
+            || blob::is_unused_version(version)
         {
             return Err(err(
                 "blob",

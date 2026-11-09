@@ -1149,7 +1149,7 @@ fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
 /// this one 13. A configuration that needs no newer format than the template's kernel reads is written into it as
 /// before; one that needs more (the virtio-gpu console: 5, a `[devices]` key: 6, `network.mtu`: 7,
 /// `limits.publisher_backpressure = "off"`: 8, a `[websocket]` key: 9, `devices.virtio_net_interrupt = "off"`: 11,
-/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13) is refused with the reason, before a byte
+/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13, an `[update]` key: 17) is refused with the reason, before a byte
 /// of the template changes, instead of giving an image whose kernel would refuse it at boot.
 #[test]
 fn templates_of_earlier_releases_take_what_their_kernel_reads() {
@@ -1190,6 +1190,10 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
     b.uint(tag::LIM_MAX_SHARED_GROUPS, 64).unwrap();
     let shared = b.finish(false).unwrap();
     assert_eq!(header(&shared), 13);
+    let mut b = Builder::new();
+    b.variant(tag::UPD_CONFIRM, 1).unwrap();
+    let update = b.finish(false).unwrap();
+    assert_eq!(header(&update), 17);
     for (release, reads) in [
         ("v0.2.0", 2u16),
         ("v0.2.1", 3),
@@ -1201,6 +1205,8 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
         ("format 8", 8),
         // A tree with MQTT 5.0 parts 1 and 2 (ADR-273/274), without ADR-275.
         ("format 12", 12),
+        // v0.6.0 without the A/B update keys (ADR-297).
+        ("format 13", 13),
         ("this tree", urmqtt_cfg::FORMAT_VERSION),
     ] {
         let empty = Builder::new().finish_as(false, reads).unwrap();
@@ -1217,6 +1223,7 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             ("devices.virtio_net_interrupt", &net_irq, 11),
             ("[mqtt5]", &m5, 12),
             ("limits.max_shared_groups", &shared, 13),
+            ("update.confirm", &update, 17),
         ] {
             match image::configure_iso(&tpl, blob) {
                 Ok(_) => assert!(
