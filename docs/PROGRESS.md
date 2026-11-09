@@ -10,8 +10,8 @@ Tag `v0.5.0` on `9b5a095`; the workflow signed and attested the 7 assets. Checke
 `721316B961DCB94B`), templates (format 7 packs on v0.5.0 and v0.4.2 with the same fingerprint; format 13 packs on v0.5.0 and
 v0.4.2 refuses it), builder page (v0.5.0, format 13, built an ISO in the browser). **Finding:** a Mac build of the tag does
 not reproduce the published ELF because the C compiler differs (clang 23.1.1 here, 18.1.3 on the runner; the version is
-embedded in the kernel); RELEASE.md and the release notes now say so. Open: Contabo production image still v0.4.2-17
-(replacing it needs the owner's go-ahead); netcup RX interrupt unconfirmed in the 2026-11-09 run; ARM handshake noise.
+embedded in the kernel); RELEASE.md and the release notes now say so. Contabo production was replaced with v0.5.0 on 2026-11-09 (published template + deploy/prod config; checked with mTLS QoS 1,
+MQTT 5 QoS 2 and `$SYS/broker/version`; rollback image v0.4.2-17 kept). Open: netcup RX interrupt unconfirmed in the 2026-11-09 run; ARM handshake noise.
 Performance comparison: docs/PERFORMANCE.md 13.6 and the blog post `urmqtt-0-5-0-vs-mosquitto`.
 
 ## Release candidate v0.5.0 (2026-11-09)
