@@ -18,7 +18,8 @@ urmqtt-iommu = { path = "../crates/iommu" }
 urmqtt-store = { path = "../crates/store" }
 urmqtt-tcp = { path = "../crates/tcp" }
 urmqtt-net = { path = "../crates/net" }
-urmqtt-tls = { path = "../crates/tls" }
+# The client feature: the outbound TLS client (tls_client, NEXT-7).
+urmqtt-tls = { path = "../crates/tls", features = ["client"] }
 urmqtt-broker = { path = "../crates/broker" }
 urmqtt-control = { path = "../crates/control" }
 urmqtt-plain = { path = "../crates/plain" }
@@ -177,6 +178,20 @@ bench = false
 [[bin]]
 name = "tcp_segment"
 path = "fuzz_targets/tcp_segment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tcp_active"
+path = "fuzz_targets/tcp_active.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_client"
+path = "fuzz_targets/tls_client.rs"
 test = false
 doc = false
 bench = false

@@ -310,7 +310,7 @@ function buildSlot(f, id) {
 }
 
 function clearSlot(slot) {
-  if (slot === 'operational' || slot === 'bootstrap') app.state.files[slot] = [];
+  if (LIST_SLOTS.includes(slot)) app.state.files[slot] = [];
   else if (slot === 'revoked') delete app.state.values['tls.revoked_serials'];
   else app.state.files[slot] = null;
 }

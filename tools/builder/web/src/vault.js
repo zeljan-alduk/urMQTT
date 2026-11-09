@@ -157,6 +157,7 @@ export function stateFromSnapshot(model, snap) {
   s.files.control = vFileItem(f.control);
   s.files.operational = (Array.isArray(f.operational) ? f.operational : []).map(vFileItem).filter(Boolean).slice(0, 8);
   s.files.bootstrap = (Array.isArray(f.bootstrap) ? f.bootstrap : []).map(vFileItem).filter(Boolean).slice(0, 8);
+  s.files.logca = (Array.isArray(f.logca) ? f.logca : []).map(vFileItem).filter(Boolean).slice(0, 8);
   const g = src.signing;
   if (g && typeof g === 'object' && vStr(g.pem, 200000) !== null && vStr(g.publicKey, 200) !== null && vStr(g.signerId, 200) !== null && vStr(g.summary, 1000) !== null) {
     s.signing = { pem: g.pem, publicKey: g.publicKey, signerId: g.signerId, summary: g.summary };
