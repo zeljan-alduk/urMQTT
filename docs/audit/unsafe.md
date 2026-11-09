@@ -359,10 +359,10 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:164` | attribute | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:393` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:414` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:837` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot.rs:839` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:891` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/boot.rs:1166` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:841` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:893` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/boot.rs:1168` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot_aarch64.rs:191` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot_aarch64.rs:193` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/boot_aarch64.rs:205` | block | yes |
@@ -389,7 +389,7 @@ in the workspace crates' non-test code (`tests.rs` and `#[cfg(test)]` items excl
 | `urmqtt-kernel` | `crates/kernel/src/devices.rs:708` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/devices.rs:761` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/devices.rs:961` | block | yes |
-| `urmqtt-kernel` | `crates/kernel/src/devices.rs:1761` | block | yes |
+| `urmqtt-kernel` | `crates/kernel/src/devices.rs:1768` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/diag.rs:601` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/diag.rs:688` | block | yes |
 | `urmqtt-kernel` | `crates/kernel/src/gpucon.rs:68` | block | yes |
