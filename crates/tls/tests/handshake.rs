@@ -212,6 +212,63 @@ fn mtls_handshake_app_data_key_update_and_resumption() {
     );
 }
 
+/// PARSERS-1 (ADR-350): a client that sends many KeyUpdate(update_requested)
+/// records and reads nothing used to get one 27-byte answer queued per
+/// record, without bound (the kernel's per-connection `pending`). While the
+/// server is silent one answer now covers them all (RFC 8446 §4.6.3), and
+/// a stock rustls client accepts it: data flows both ways afterwards.
+#[test]
+fn many_key_update_requests_while_silent_queue_one_answer() {
+    let Some(d) = dev() else {
+        return eprintln!("no dev certs, run make certs");
+    };
+    setup_globals();
+    let srv = server(&d, IdentityField::Cn, &[]);
+    let cfg = client_config(&d, "devices/device-001");
+    let (mut client, mut session, r) = connect(&srv, cfg);
+    r.unwrap();
+    const N: usize = 2000;
+    let mut c2s = Vec::new();
+    for _ in 0..N {
+        client.refresh_traffic_keys().unwrap();
+        while client.wants_write() {
+            client.write_tls(&mut c2s).unwrap();
+        }
+    }
+    let mut s2c = Vec::new();
+    let mut app = Vec::new();
+    for chunk in c2s.chunks(1448) {
+        session.input(chunk, &mut s2c, &mut app).unwrap();
+    }
+    assert!(app.is_empty());
+    assert_eq!(s2c.len(), 27, "one KeyUpdate answer, not {N}");
+
+    // The client reads the single answer, then data flows both ways.
+    session.send(b"still here", &mut s2c).unwrap();
+    let mut rd = &s2c[..];
+    while !rd.is_empty() {
+        client.read_tls(&mut rd).unwrap();
+        client.process_new_packets().unwrap();
+    }
+    let mut got = [0u8; 10];
+    client.reader().read_exact(&mut got).unwrap();
+    assert_eq!(&got, b"still here");
+    client.writer().write_all(b"and back").unwrap();
+    let mut app = Vec::new();
+    pump(&mut client, &mut session, &mut app).unwrap();
+    assert_eq!(app, b"and back");
+
+    // Having spoken, the server answers the next request again.
+    client.refresh_traffic_keys().unwrap();
+    let mut c2s = Vec::new();
+    while client.wants_write() {
+        client.write_tls(&mut c2s).unwrap();
+    }
+    let mut s2c = Vec::new();
+    session.input(&c2s, &mut s2c, &mut Vec::new()).unwrap();
+    assert_eq!(s2c.len(), 27, "a fresh request after data is answered");
+}
+
 #[test]
 fn rogue_expired_and_revoked_are_rejected() {
     let Some(d) = dev() else { return };

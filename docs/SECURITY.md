@@ -873,6 +873,9 @@ Every resource is bounded. What happens at the limit is part of the design:
 | QoS 2 ids awaiting PUBREL | `max(limits.max_inflight_qos1, 64)` per session (ADR-271) | one more closes the connection, counted (`messages/qos2/inbound_full`) |
 | Publish rate per device | `limits.publish_rate_per_device` | dropped and counted |
 | Output buffered per connection | 32 KiB for deliveries; the broker's own answers (CONNACK, PINGRESP, acknowledgements, SUBACK) up to 32 KiB + `limits.max_packet_size` + 4 KiB (ADR-375) | QoS 0 dropped, QoS 1 queued; a client that sends without reading its answers has its input held and its TCP window closed until it reads; one that ignores the closed window is disconnected once 2 MiB are held (DISCONNECT 0x97) |
+
+| Output buffered per connection | 32 KiB | QoS 0 dropped, QoS 1 queued |
+| TLS KeyUpdate answers | one per period in which the broker sends nothing else (RFC 8446 §4.6.3; ADR-350) | further `update_requested` records are applied but not answered until the broker sends again |
 | Receive window | broker backpressure | TCP window closes |
 | Cross-core fan-out | 16 384 messages per core pair | QoS 0 dropped, QoS 1 kept |
 | Telemetry backlog | 65 536 records per core | dropped and counted |
