@@ -1065,30 +1065,38 @@ fin_wait2() {
 # injects 20 000 crafted segments. The broker must absorb them: SYN cookies
 # issued without per-connection state, the RFC 5961 RST/challenge rate cap
 # holding, RSTs for unknown connections dropped, and the heap never growing.
+# zero-window-close (NETDOS-1, ADR-355): 2 000 handshakes completed with a
+# zero-window ACK carrying no ClientHello, then silence. The broker queues an
+# alert and a FIN it can never send; each connection must still be reset at
+# its close deadline (one RST per handshake back to the tool, 0 connections
+# left), where before every one was held until reboot.
 attack_raw() {
     local attack="$ROOT/target/release/urmqtt-attack"
-    if [[ ! -x "$attack" ]]; then
+    if [[ ! -x "$attack" ]] || [[ "$ROOT/tools/attack/src/raw.rs" -nt "$attack" ]]; then
         (cd "$ROOT" && cargo build --release -q -p urmqtt-attack) || {
             echo "  ✗ urmqtt-attack build failed"; FAILED=$((FAILED + 1)); return 0; }
     fi
     local iso="$OUT/attack-raw.raw"
     mkimg "$iso" "serve log=info"
-    # mode|extra checks (beyond the common ones) ...
+    # mode|extra checks (beyond the common ones)|tool arguments
+    local flood="--count 20000 --pps 8000"
     local specs=(
-        "syn-flood|cookies [1-9][0-9]* sent/[0-9]+ ok/0 bad|attack: syn-flood sent 20000"
-        "ack-flood|RST [0-9]+ sent \([1-9][0-9]* rate-limited\)|attack: ack-flood sent 20000"
-        "rst-flood|RST 0 sent \(0 rate-limited\)|attack: rst-flood sent 20000"
+        "syn-flood|cookies [1-9][0-9]* sent/[0-9]+ ok/0 bad|attack: syn-flood sent 20000|$flood"
+        "ack-flood|RST [0-9]+ sent \([1-9][0-9]* rate-limited\)|attack: ack-flood sent 20000|$flood"
+        "rst-flood|RST 0 sent \(0 rate-limited\)|attack: rst-flood sent 20000|$flood"
+        "zero-window-close|close\(s\) not finished within 5000 ms reset|attack: zero-window-close sent 2000 SYN\(s\), [1-9][0-9]* handshake\(s\) .* \(every one freed\)|--count 2000 --pps 1000 --duration 40"
     )
     local n=0
     for accel in $ACCELS; do
         for spec in "${specs[@]}"; do
-            IFS='|' read -r mode p_counter p_client <<<"$spec"
+            IFS='|' read -r mode p_counter p_client args <<<"$spec"
             local log="$OUT/attack-$mode-$accel.log" data="$OUT/attack-$mode-$accel.img" status=0
             local lp=$((45000 + n * 2)) rp=$((45001 + n * 2)); n=$((n + 1))
             fresh_disk "$iso" "$data"
             # Start the tool first: it binds the socket and serves DHCP, then
             # blocks until the guest's boot-time lease, floods, and exits.
-            ("$attack" "$mode" --dgram "$lp:$rp" --port 8883 --count 20000 --pps 8000) \
+            # shellcheck disable=SC2086 # $args is a word list
+            ("$attack" "$mode" --dgram "$lp:$rp" --port 8883 $args) \
                 >"$log.client" 2>&1 &
             local apid=$!
             start_vm "$log" --disk "$data" --accel "$accel" --dgram "$lp:$rp"

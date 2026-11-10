@@ -832,3 +832,103 @@ fn a_refused_flow_is_not_admitted_by_its_next_segment() {
     assert_eq!(app.accepted.len(), 2);
     assert_eq!(s.connections(), 1);
 }
+
+/// NETDOS-1 (ADR-355): a peer that shuts its window and goes silent kept a
+/// connection the application had closed (an alert, then FIN, queued behind
+/// the window) for ever: the persist timer re-armed itself with no bound, so
+/// neither `MAX_RETRIES` nor `closed` was ever reached. A refused TLS
+/// handshake whose final ACK carried window 0 left about 500 bytes of heap
+/// per connection until reboot. Now the probes of a closed connection count
+/// like retransmissions and it is given up, with `closed(Timeout)`.
+#[test]
+fn zero_window_after_close_is_given_up() {
+    let (mut s, mut app, mut c, id) = established();
+    c.window = 0;
+    s.input(
+        1,
+        CLIENT,
+        &c.seg(c.snd_nxt, ACK, &[]),
+        &mut app,
+        &mut |_, _| {},
+    );
+    // The application answers (a TLS alert) and closes.
+    assert_eq!(s.send(id, &[0x15u8; 7]), 7);
+    s.close(id);
+    s.flush(2, &mut |_, _| {});
+    // The peer never sends anything again.
+    let mut now = 2;
+    while s.connections() == 1 && now < 24 * 3_600_000 {
+        now += 1000;
+        s.poll(now, &mut app, &mut |_, _| {});
+    }
+    assert_eq!(s.connections(), 0, "still held after {now} ms");
+    assert_eq!(app.closed, [(id, CloseReason::Timeout)]);
+    // The same bound as retransmissions (1 + 2 + ... + 60 s).
+    assert!(now <= 300_000, "given up only after {now} ms");
+    assert_eq!(s.stats.timeouts, 1);
+}
+
+/// A closed connection whose peer keeps answering the probes with window 0
+/// (alive, but never reading) is given up too: the answers acknowledge
+/// nothing new. One that takes a probe starts the count again.
+#[test]
+fn zero_window_after_close_with_answered_probes_is_given_up() {
+    let (mut s, mut app, mut c, id) = established();
+    c.window = 0;
+    s.input(
+        1,
+        CLIENT,
+        &c.seg(c.snd_nxt, ACK, &[]),
+        &mut app,
+        &mut |_, _| {},
+    );
+    assert_eq!(s.send(id, &[0x15u8; 7]), 7);
+    s.close(id);
+    s.flush(2, &mut |_, _| {});
+    let mut now = 2;
+    let mut probes = 0;
+    while s.connections() == 1 && now < 24 * 3_600_000 {
+        now += 1000;
+        let mut out = Vec::new();
+        s.poll(now, &mut app, &mut |_, b| out.push(b.to_vec()));
+        for _ in &out {
+            probes += 1;
+            s.input(
+                now,
+                CLIENT,
+                &c.seg(c.snd_nxt, ACK, &[]),
+                &mut app,
+                &mut |_, _| {},
+            );
+        }
+    }
+    assert_eq!(s.connections(), 0, "still held after {now} ms");
+    assert_eq!(app.closed, [(id, CloseReason::Timeout)]);
+    assert!(probes >= usize::from(MAX_RETRIES));
+}
+
+/// An open connection (no FIN queued) still waits for a shut window as long
+/// as it takes: only a closed one is bounded (ADR-355).
+#[test]
+fn zero_window_without_close_keeps_probing() {
+    let (mut s, mut app, mut c, id) = established();
+    c.window = 0;
+    s.input(
+        1,
+        CLIENT,
+        &c.seg(c.snd_nxt, ACK, &[]),
+        &mut app,
+        &mut |_, _| {},
+    );
+    assert_eq!(s.send(id, b"hello"), 5);
+    s.flush(2, &mut |_, _| {});
+    let mut now = 2;
+    let mut probes = 0;
+    while now < 3_600_000 {
+        now += 1000;
+        s.poll(now, &mut app, &mut |_, _| probes += 1);
+    }
+    assert_eq!(s.connections(), 1);
+    assert!(app.closed.is_empty());
+    assert!(probes > 50, "{probes} probe(s) in an hour");
+}
