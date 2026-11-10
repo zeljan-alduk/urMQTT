@@ -529,8 +529,8 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
 }
 
 /// Fills the store from `bytes`; the caller has won EMPTY -> FILLING.
-fn fill(bytes: &'static [u8], builtin: bool) -> Result<LoadInfo, CfgError> {
-    let b = Blob::parse(bytes)?;
+fn fill(bytes: &'static [u8], builtin: bool, ext: &[fields::Field]) -> Result<LoadInfo, CfgError> {
+    let b = Blob::parse_ext(bytes, ext)?;
     check::check(&b, DEV_KERNEL)?;
     let info = LoadInfo {
         fingerprint: *b.fingerprint(),
@@ -559,7 +559,7 @@ fn fill(bytes: &'static [u8], builtin: bool) -> Result<LoadInfo, CfgError> {
 /// The blob inside a slot file. A slot still marked as the installation
 /// image's template (an installed disk that was never configured) is read
 /// like any other: it holds the empty configuration.
-fn blob_in(slot: &[u8]) -> Result<&[u8], CfgError> {
+pub fn blob_in(slot: &[u8]) -> Result<&[u8], CfgError> {
     blob::slot_blob(slot, SlotKind::Boot)
         .or_else(|e| blob::slot_blob(slot, SlotKind::Disk).map_err(|_| e))
 }
@@ -569,9 +569,17 @@ fn blob_in(slot: &[u8]) -> Result<&[u8], CfgError> {
 /// error nothing is installed and the built-in defaults apply (the caller
 /// decides whether to stop).
 pub fn load(slot: &'static [u8]) -> Result<LoadInfo, LoadError> {
+    load_ext(slot, &[])
+}
+
+/// [`load`] for a kernel of an edition that declares the extension fields
+/// `ext` (NOW-18, ADR-337): their records in the reserved tag range are
+/// accepted and checked; the typed configuration is the same. With an empty
+/// `ext` this is `load`.
+pub fn load_ext(slot: &'static [u8], ext: &[fields::Field]) -> Result<LoadInfo, LoadError> {
     let bytes = blob_in(slot)?;
     begin()?;
-    match fill(bytes, false) {
+    match fill(bytes, false, ext) {
         Ok(info) => {
             STORE.state.store(READY, Ordering::Release);
             Ok(info)
@@ -601,7 +609,7 @@ pub fn load_defaults() -> LoadInfo {
         blob::write_empty(buf);
         let bytes: &'static [u8] = buf;
         // The empty blob always passes its own checks.
-        let _ = fill(bytes, true);
+        let _ = fill(bytes, true, &[]);
         STORE.state.store(READY, Ordering::Release);
     }
     wait_ready();
@@ -1404,6 +1412,47 @@ mod tests {
         other[..16].copy_from_slice(b"URMQTT-CFG-????\0");
         assert!(blob_in(&other).is_err());
         assert!(blob_in(&slot[..SLOT_MARKER.len() + 10]).is_err());
+    }
+
+    /// NOW-18 (ADR-337): a record in the reserved range is refused by `load`
+    /// (the open kernel) and the defaults stay; an edition's table makes the
+    /// same blob valid, and its open fields decode as without the record.
+    #[test]
+    fn an_extension_record_needs_the_editions_table() {
+        use urmqtt_cfg::blob::make_slot;
+        use urmqtt_cfg::build::Builder;
+        use urmqtt_cfg::fields::Kind;
+        let ext = [urmqtt_cfg::ext::field(
+            0xF000,
+            "ext.test.on",
+            Kind::Bool(false),
+            "",
+            2,
+        )];
+        let mut b = Builder::with_extensions(&ext).unwrap();
+        b.bool(0xF000, true).unwrap();
+        b.uint(tag::MEM_HEAP, 128).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let slot: &'static [u8] =
+            Box::leak(make_slot(SlotKind::Boot, bytes).unwrap().into_boxed_slice());
+        // What `load` (`fill`) parses first; `load` itself may find the store
+        // filled by another test, but never installs this blob.
+        assert_eq!(
+            Blob::parse(blob_in(slot).unwrap()).err().map(|e| e.msg),
+            Some("unknown field tag")
+        );
+        assert!(load(slot).is_err());
+        assert_ne!(CONFIG.memory.kernel_heap_mb, 128, "the blob was not installed");
+        let with = Blob::parse_ext(blob_in(slot).unwrap(), &ext).unwrap();
+        let mut plain = Builder::new();
+        plain.uint(tag::MEM_HEAP, 128).unwrap();
+        let plain: &'static [u8] = Box::leak(plain.finish(false).unwrap().into_boxed_slice());
+        let without = Blob::parse(plain).unwrap();
+        let arena = |_: ()| -> &'static mut Arena { Box::leak(Box::new(Arena::new())) };
+        assert_eq!(
+            format!("{:?}", build(&with, arena(()))),
+            format!("{:?}", build(&without, arena(())))
+        );
     }
 
     #[test]

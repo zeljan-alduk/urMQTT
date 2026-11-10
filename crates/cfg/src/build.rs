@@ -12,10 +12,8 @@ use crate::{CfgError, err};
 #[derive(Debug, Default, Clone)]
 pub struct Builder {
     records: BTreeMap<u16, Vec<u8>>,
-}
-
-fn field(tag: u16) -> Result<&'static Field, CfgError> {
-    fields::by_tag(tag).ok_or(err("blob", "unknown field tag"))
+    /// An edition's extension fields (NOW-18, ADR-337); empty for the open tools.
+    ext: Vec<Field>,
 }
 
 impl Builder {
@@ -23,15 +21,45 @@ impl Builder {
         Self::default()
     }
 
+    /// A builder that also accepts the extension fields `ext` of an edition
+    /// (their tags in the reserved range, [`crate::ext`]); the blob it writes
+    /// is validated with [`Blob::parse_ext`].
+    pub fn with_extensions(ext: &[Field]) -> Result<Self, CfgError> {
+        crate::ext::check(ext).map_err(|m| err("ext", m))?;
+        Ok(Self {
+            records: BTreeMap::new(),
+            ext: ext.to_vec(),
+        })
+    }
+
+    /// Declares an edition's extension fields on a builder that has none yet
+    /// (the packer adds them after the open fields are set).
+    pub fn add_extensions(&mut self, ext: &[Field]) -> Result<(), CfgError> {
+        crate::ext::check(ext).map_err(|m| err("ext", m))?;
+        if !self.ext.is_empty() {
+            return Err(err("ext", "the extension fields are already declared"));
+        }
+        self.ext = ext.to_vec();
+        Ok(())
+    }
+
+    /// The field of `tag`: one of the table, or one of this builder's extension fields.
+    fn field(&self, tag: u16) -> Result<Field, CfgError> {
+        fields::by_tag(tag)
+            .or_else(|| crate::ext::lookup(tag, &self.ext))
+            .copied()
+            .ok_or(err("blob", "unknown field tag"))
+    }
+
     /// Stores the already-encoded `value` of `tag` after checking its shape
     /// and range; a value equal to the default removes the record.
     pub fn set_raw(&mut self, tag: u16, value: &[u8]) -> Result<(), CfgError> {
-        let f = field(tag)?;
+        let f = self.field(tag)?;
         if !f.stored {
             return Ok(());
         }
-        blob::check_value(f, value)?;
-        if is_default(f, value) {
+        blob::check_value(&f, value)?;
+        if is_default(&f, value) {
             self.records.remove(&tag);
         } else {
             self.records.insert(tag, value.to_vec());
@@ -44,7 +72,7 @@ impl Builder {
     }
 
     pub fn uint(&mut self, tag: u16, v: u64) -> Result<(), CfgError> {
-        let f = field(tag)?;
+        let f = self.field(tag)?;
         let Kind::UInt { bytes, .. } = f.kind else {
             return Err(err(f.key, "not an integer field"));
         };
@@ -65,7 +93,7 @@ impl Builder {
     }
 
     pub fn strs<S: AsRef<str>>(&mut self, tag: u16, items: &[S]) -> Result<(), CfgError> {
-        let f = field(tag)?;
+        let f = self.field(tag)?;
         let mut v = Vec::new();
         for s in items {
             let s = s.as_ref();
@@ -75,7 +103,7 @@ impl Builder {
         }
         // An empty list is a real value when the default is not empty.
         if v.is_empty() && matches!(f.kind, Kind::Strs { default, .. } if !default.is_empty()) {
-            blob::check_value(f, &v)?;
+            blob::check_value(&f, &v)?;
             self.records.insert(tag, v);
             return Ok(());
         }
@@ -150,10 +178,13 @@ impl Builder {
             .records
             .iter()
             .any(|(t, v)| *t == crate::fields::tag::NET_TLS_PORT && v.iter().all(|b| *b == 0));
+        // An extension field's `since` counts like any other (ADR-337).
         let newest = self
             .records
             .keys()
-            .filter_map(|t| crate::fields::by_tag(*t))
+            .filter_map(|t| {
+                crate::fields::by_tag(*t).or_else(|| crate::ext::lookup(*t, &self.ext))
+            })
             .map(|f| f.since)
             .max()
             .unwrap_or(BASE_VERSION);
@@ -215,7 +246,7 @@ impl Builder {
                 "the configuration does not fit in a slot (256 KiB)",
             ));
         }
-        let parsed = Blob::parse(&out)?;
+        let parsed = Blob::parse_ext(&out, &self.ext)?;
         crate::check::check(&parsed, dev_allowed)?;
         Ok(out)
     }
@@ -260,7 +291,16 @@ pub fn sign(
     unsigned: &[u8],
     sign: impl FnOnce(&[u8]) -> ([u8; SIG_KEY_LEN], [u8; SIG_LEN]),
 ) -> Result<Vec<u8>, CfgError> {
-    let b = Blob::parse(unsigned)?;
+    sign_ext(unsigned, &[], sign)
+}
+
+/// [`sign`] for a blob with an edition's extension fields `ext` (ADR-337).
+pub fn sign_ext(
+    unsigned: &[u8],
+    ext: &[Field],
+    sign: impl FnOnce(&[u8]) -> ([u8; SIG_KEY_LEN], [u8; SIG_LEN]),
+) -> Result<Vec<u8>, CfgError> {
+    let b = Blob::parse_ext(unsigned, ext)?;
     if b.signature().is_some() {
         return Err(err("signature", "the blob is already signed"));
     }
@@ -269,7 +309,7 @@ pub fn sign(
     out.push(1);
     out.extend_from_slice(&key);
     out.extend_from_slice(&sig);
-    Blob::parse(&out)?;
+    Blob::parse_ext(&out, ext)?;
     Ok(out)
 }
 

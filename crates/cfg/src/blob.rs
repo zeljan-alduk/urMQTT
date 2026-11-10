@@ -156,7 +156,7 @@ fn le32(b: &[u8]) -> Option<u32> {
 }
 
 /// Little-endian integer of up to 8 bytes.
-fn le_uint(b: &[u8]) -> u64 {
+pub(crate) fn le_uint(b: &[u8]) -> u64 {
     let mut v = 0u64;
     for (i, x) in b.iter().take(8).enumerate() {
         v |= u64::from(*x) << (8 * i);
@@ -206,6 +206,14 @@ impl<'a> Blob<'a> {
     /// Parses and validates `bytes` (a blob, possibly followed by padding,
     /// which must be zero). Fails closed on anything unexpected.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, CfgError> {
+        Self::parse_ext(bytes, &[])
+    }
+
+    /// [`parse`](Self::parse) for a kernel or a tool that knows the extension
+    /// fields `ext` of an edition (NOW-18, ADR-337): a record in the reserved
+    /// range is accepted when `ext` declares its tag, and checked against that
+    /// field. With an empty `ext` this is `parse`, byte for byte the same verdicts.
+    pub fn parse_ext(bytes: &'a [u8], ext: &[Field]) -> Result<Self, CfgError> {
         let bad = |m| err("blob", m);
         if bytes.get(..8) != Some(&MAGIC[..]) {
             return Err(bad("not a urmqtt-cfg blob (bad magic)"));
@@ -266,6 +274,9 @@ impl<'a> Blob<'a> {
         {
             return Err(bad("data after the blob is not zero padding"));
         }
+        if crate::ext::check(ext).is_err() {
+            return Err(bad("the edition's extension field table is invalid"));
+        }
         let blob = Self {
             payload,
             fingerprint,
@@ -273,11 +284,11 @@ impl<'a> Blob<'a> {
             len,
             version,
         };
-        blob.check_records()?;
+        blob.check_records(ext)?;
         Ok(blob)
     }
 
-    fn check_records(&self) -> Result<(), CfgError> {
+    fn check_records(&self, ext: &[Field]) -> Result<(), CfgError> {
         let mut rest = self.payload;
         let mut last: Option<u16> = None;
         while !rest.is_empty() {
@@ -292,7 +303,9 @@ impl<'a> Blob<'a> {
                 ));
             }
             last = Some(tag);
-            let field = fields::by_tag(tag).ok_or(err("blob", "unknown field tag"))?;
+            let field = fields::by_tag(tag)
+                .or_else(|| crate::ext::lookup(tag, ext))
+                .ok_or(err("blob", "unknown field tag"))?;
             if !field.stored {
                 return Err(err(field.key, "this field is not stored in a blob"));
             }

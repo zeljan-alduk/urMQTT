@@ -33,6 +33,7 @@ pub mod build;
 pub mod check;
 pub mod diskkey;
 pub mod drivers;
+pub mod ext;
 pub mod fields;
 pub mod net;
 pub mod passwd;
@@ -68,5 +69,7 @@ impl fmt::Display for CfgError {
 #[cfg(any(test, feature = "std"))]
 impl std::error::Error for CfgError {}
 
+#[cfg(test)]
+mod ext_tests;
 #[cfg(test)]
 mod tests;
