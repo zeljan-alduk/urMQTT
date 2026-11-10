@@ -201,9 +201,11 @@ mod tests {
     /// UTF8/Printable CN: "operator". Such a subject now has no identity.
     #[test]
     fn a_subject_with_two_cns_or_a_cn_of_another_string_type_has_no_identity() {
+        // The certificates are the committed fuzz seeds (DER; *.pem files are
+        // never committed, ADR-004).
         // Subject CN=sensor_042 (T61String), CN=operator (PrintableString),
         // SAN URI urn:urmqtt:device:sensor_042.
-        let two = fixture(include_str!("../tests/data/two-cn.pem"));
+        let two = include_bytes!("../../../fuzz/seeds/x509_identity/two-cn.der").to_vec();
         assert_eq!(identity(&two, IdentityField::Cn), None);
         // The SAN URI is one and is what the CA wrote.
         assert_eq!(
@@ -211,17 +213,17 @@ mod tests {
             Some("sensor_042")
         );
         // One CN, but a T61String: not taken (it never was).
-        let t61 = fixture(include_str!("../tests/data/t61-cn.pem"));
+        let t61 = include_bytes!("../../../fuzz/seeds/x509_identity/t61-cn.der").to_vec();
         assert_eq!(identity(&t61, IdentityField::Cn), None);
         // Two identity URIs (device:device-1, service:operator): none.
-        let uris = fixture(include_str!("../tests/data/two-uri.pem"));
+        let uris = include_bytes!("../../../fuzz/seeds/x509_identity/two-uri.der").to_vec();
         assert_eq!(identity(&uris, IdentityField::SanUri), None);
         assert_eq!(
             identity(&uris, IdentityField::Cn).as_deref(),
             Some("device-1")
         );
         // The ordinary shape: O=Test, CN=device-1 (PrintableString), one URI.
-        let one = fixture(include_str!("../tests/data/one-cn.pem"));
+        let one = include_bytes!("../../../fuzz/seeds/x509_identity/one-cn.der").to_vec();
         assert_eq!(
             identity(&one, IdentityField::Cn).as_deref(),
             Some("device-1")

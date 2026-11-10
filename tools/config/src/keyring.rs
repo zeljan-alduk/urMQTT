@@ -320,7 +320,7 @@ pub fn verify(keys: &[RingKey], tag: &str, sums: &[u8], sig: &str) -> Result<Rin
     let comment = &signed.signature.trusted_comment;
     if comment_tag(comment) != Some(tag) {
         return Err(format!(
-            "the signature is for {}, not {tag} (trusted comment {comment:?}): a signed file of one release is never accepted as another (ADR-365)",
+            "the signature is for {}, not {tag}: SHA256SUMS signed with {what} is the release \"{comment}\", not {tag}; a signed file of one release is never accepted as another (ADR-365)",
             comment_tag(comment).unwrap_or("no release tag")
         ));
     }

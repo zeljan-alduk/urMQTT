@@ -80,10 +80,13 @@ fn an_old_signed_release_is_refused_under_a_newer_tag() {
             "{tag}: {e}"
         );
     }
-    // Its own tag (with or without the v) still verifies.
+    // Its own tag still verifies. A tag without the v is another string and is
+    // refused: the merged rule (ADR-381) compares the tag exactly, as the key
+    // ring, the page and the mirror spell it (`v0.5.0`), so this test no longer
+    // accepts "0.5.0".
     let v = keyring::verify(&keys, "v0.5.0", sums_v050, &sig_v050).unwrap();
     assert_eq!(v.key.name, "release");
-    assert!(keyring::verify(&keys, "0.5.0", sums_v050, &sig_v050).is_ok());
+    assert!(keyring::verify(&keys, "0.5.0", sums_v050, &sig_v050).is_err());
     // A comment that is not a release's names no tag: refused.
     let odd = sign(sums_v050, "signed by hand");
     assert!(keyring::verify(&keys, "v0.5.0", sums_v050, &odd).is_err());
