@@ -223,3 +223,30 @@ fn decrypt_survives_a_power_cut_at_every_write() {
     let _g = lock();
     cut_loop(Some(key(1)), None);
 }
+
+/// R060-S2 (ADR-371): the conversion journal holds the plaintext of the
+/// chunk being encrypted, and stays on disk after a cut until `--resume`:
+/// it is readable by its owner only (0600), also when a stale temporary
+/// file of an earlier run had wider permissions.
+#[cfg(unix)]
+#[test]
+fn the_conversion_journal_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    use urmqtt_disk::convert::{FileJournal, Journal};
+    let d = std::env::temp_dir().join(format!("urmqtt-disk-journal-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    let path = d.join("disk.convert-journal");
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, b"stale").unwrap();
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mut j = FileJournal(path.clone());
+    let chunk = b"PLAINTEXT CHUNK OF THE DISK".repeat(40);
+    j.save(7, &chunk).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(j.load().unwrap(), Some((7, chunk)));
+    j.clear().unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}

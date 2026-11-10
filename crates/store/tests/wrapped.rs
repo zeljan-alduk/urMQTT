@@ -418,3 +418,117 @@ fn a_power_cut_during_the_sealed_format_leaves_blank_or_formatted() {
         }
     }
 }
+
+/// R060-S1 (ADR-370): the format's one superblock write torn after 1 to
+/// 7 of its 8 sectors (the size table is already durable, slot B is zero)
+/// used to leave a partition that was neither blank nor valid
+/// (`BadChecksum` at every boot, refused for good). It is an interrupted
+/// format now: probed as blank and formatted again, plain and sealed.
+#[test]
+fn a_torn_superblock_write_during_the_format_is_formatted_again() {
+    use urmqtt_store::layout::FileKind;
+    let k = key(6);
+    // Writes of a format: 1 size table A, 2 size table B (zeros), 3 superblock A.
+    for sectors in 1..8u64 {
+        let tear = || FaultSpec {
+            tear_write: Some((3, sectors)),
+            ..FaultSpec::default()
+        };
+        // Plain (the image-less first boot of an unencrypted disk).
+        let m = MemDisk::sparse(64 * MIB);
+        assert!(Disk::open(Box::new(FaultDevice::new(m.device(), tear())), || UUID).is_err());
+        m.crash(|_| true);
+        assert_eq!(
+            probe(m.device().as_mut()),
+            Ok(Probe::Blank),
+            "plain, {sectors}"
+        );
+        let (mut d, how) = Disk::open(m.device(), || UUID).unwrap();
+        assert_eq!(how, Opened::Formatted, "plain, {sectors}");
+        d.write_at(RegionKind::Db, 0, DATA).unwrap();
+        d.set_file_size(FileKind::Db, DATA.len() as u64);
+        d.sync().unwrap();
+        drop(d);
+        let (mut d, how) = Disk::open(m.device(), || UUID).unwrap();
+        assert_eq!(how, Opened::Existing);
+        let mut got = vec![0u8; DATA.len()];
+        d.read_at(RegionKind::Db, 0, &mut got).unwrap();
+        assert_eq!(got, DATA);
+        drop(d);
+
+        // Sealed (the console passphrase's first boot).
+        let m = MemDisk::sparse(64 * MIB);
+        let f = FaultDevice::new(m.device(), tear());
+        let _ = Disk::format_sealed(Box::new(f), || UUID, 8, &k, |u| slot(&k, OLD, u, 2));
+        m.crash(|_| true);
+        assert_eq!(
+            probe(m.device().as_mut()),
+            Ok(Probe::Blank),
+            "sealed, {sectors}"
+        );
+        assert_eq!(
+            unlock(m.device().as_mut(), OLD).err(),
+            Some(DiskError::Blank)
+        );
+        let k2 = key(7);
+        let d = Disk::format_sealed(m.device(), || UUID, 8, &k2, |u| slot(&k2, NEW, u, 3)).unwrap();
+        drop(d);
+        let (got, _) = unlock(m.device().as_mut(), NEW).unwrap();
+        assert_eq!(*got, k2);
+    }
+}
+
+/// The other side of R060-S1: a damaged superblock is still refused,
+/// never formatted over, as soon as the disk may hold anything (a size was
+/// committed), and whenever slot B is in use.
+#[test]
+fn a_damaged_superblock_of_a_used_disk_is_still_refused() {
+    use urmqtt_store::layout::FileKind;
+    let damage = |m: &MemDisk| {
+        let mut sb = [0u8; BLOCK];
+        m.device().read(SB_SLOT_LBA[0], &mut sb).unwrap();
+        sb[200] ^= 1;
+        m.device().write(SB_SLOT_LBA[0], &sb).unwrap();
+    };
+    // Plain, one size committed.
+    let m = MemDisk::sparse(64 * MIB);
+    let (mut d, _) = Disk::open(m.device(), || UUID).unwrap();
+    d.write_at(RegionKind::Db, 0, DATA).unwrap();
+    d.set_file_size(FileKind::Db, DATA.len() as u64);
+    d.sync().unwrap();
+    drop(d);
+    damage(&m);
+    let bad = Some(DiskError::Layout(LayoutError::BadChecksum));
+    assert_eq!(Disk::open(m.device(), || UUID).err(), bad);
+    assert_eq!(probe(m.device().as_mut()).err(), bad);
+    // Even with its last sector zeroed like a torn write's: a size was
+    // committed, so it is not an interrupted format.
+    let mut sb = [0u8; BLOCK];
+    m.device().read(SB_SLOT_LBA[0], &mut sb).unwrap();
+    sb[BLOCK - 512..].fill(0);
+    m.device().write(SB_SLOT_LBA[0], &sb).unwrap();
+    assert_eq!(Disk::open(m.device(), || UUID).err(), bad);
+    assert_eq!(probe(m.device().as_mut()).err(), bad);
+
+    // Sealed with data (the fixture writes and syncs DATA).
+    let m = wrapped_disk();
+    damage(&m);
+    assert_eq!(probe(m.device().as_mut()).err(), bad);
+    assert_eq!(unlock(m.device().as_mut(), OLD).err(), bad);
+
+    // Plain, size-table slot B zeroed by hand but size slot A not the
+    // format's own: refused.
+    let m = MemDisk::sparse(64 * MIB);
+    let (mut d, _) = Disk::open(m.device(), || UUID).unwrap();
+    d.write_at(RegionKind::Db, 0, DATA).unwrap();
+    d.set_file_size(FileKind::Db, DATA.len() as u64);
+    d.sync().unwrap();
+    d.set_file_size(FileKind::Db, 1);
+    d.sync().unwrap(); // seq 2 in slot A
+    drop(d);
+    m.device()
+        .write(urmqtt_store::layout::SIZE_SLOT_LBA[1], &[0u8; BLOCK])
+        .unwrap();
+    damage(&m);
+    assert_eq!(Disk::open(m.device(), || UUID).err(), bad);
+}

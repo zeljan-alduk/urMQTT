@@ -23,7 +23,7 @@
 
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
@@ -81,8 +81,20 @@ impl Journal for FileJournal {
         b.extend_from_slice(raw);
         let crc = crc32c(&b);
         b.extend_from_slice(&crc.to_le_bytes());
+        // The chunk is the plaintext of a disk being encrypted: readable by
+        // the owner only, also when a stale temporary file of an earlier
+        // run was left with other permissions (R060-S2, ADR-371).
         let tmp = self.0.with_extension("tmp");
-        let mut f = File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = {
+            use std::os::unix::fs::OpenOptionsExt;
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)
+                .map_err(|e| format!("{}: {e}", tmp.display()))?
+        };
         f.write_all(&b).map_err(|e| format!("journal: {e}"))?;
         f.sync_all().map_err(|e| format!("journal: {e}"))?;
         std::fs::rename(&tmp, &self.0).map_err(|e| format!("journal: {e}"))
