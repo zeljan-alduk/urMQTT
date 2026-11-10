@@ -92,6 +92,17 @@ impl AllowList {
             Exposure::PublicAddressPrivateAllowList
         }
     }
+
+    /// The same for the broker's global IPv6 address (NEXT-1): `None` while
+    /// it has none, private when it is a unique local one (`fc00::/7`).
+    pub fn exposure6(&self, global: Option<[u8; 16]>) -> Exposure {
+        match global {
+            None => Exposure::Private,
+            Some(a) if a[0] & 0xfe == 0xfc => Exposure::Private,
+            Some(_) if self.reaches_public() => Exposure::Open,
+            Some(_) => Exposure::PublicAddressPrivateAllowList,
+        }
+    }
 }
 
 /// The private ranges as networks (RFC 1918, RFC 6598, link-local, loopback).
@@ -288,5 +299,27 @@ mod tests {
         assert!(a.reaches_public());
         assert!(!list(&["fd00::/8", "fe80::/64", "10.0.0.0/8"], false).reaches_public());
         assert!(list(&["fc00::/6"], false).reaches_public());
+    }
+
+    /// NEXT-1: the boot warning judges the global IPv6 address too, so a
+    /// broker with a private IPv4 address and a public IPv6 one is warned.
+    #[test]
+    fn exposure_of_the_global_ipv6_address() {
+        let p = |s: &str| urmqtt_cfg::net::parse_ipv6(s).unwrap();
+        let public = Some(p("2001:db8:1::10"));
+        let ula = Some(p("fd12:3456::10"));
+        let private = list(&["10.0.0.0/8", "fd00::/8"], false);
+        let wide = list(&["2001:db8::/32"], false);
+        let any = list(&[], true);
+        for l in [&private, &wide, &any] {
+            assert_eq!(l.exposure6(None), Exposure::Private);
+            assert_eq!(l.exposure6(ula), Exposure::Private);
+        }
+        assert_eq!(
+            private.exposure6(public),
+            Exposure::PublicAddressPrivateAllowList
+        );
+        assert_eq!(wide.exposure6(public), Exposure::Open);
+        assert_eq!(any.exposure6(public), Exposure::Open);
     }
 }

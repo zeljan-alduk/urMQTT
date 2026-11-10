@@ -1784,10 +1784,9 @@ impl MqttService {
             if let Some(p) = self.plain.as_mut() {
                 // The plaintext listener judges its exposure from the address
                 // the interface has now (one core says it).
-                p.tick(
-                    tcp.local_addr(),
-                    self.me == dataplane::workers(self.n).start,
-                );
+                let first = self.me == dataplane::workers(self.n).start;
+                p.tick(tcp.local_addr(), first);
+                p.tick6(tcp.local6().global, first);
             }
         }
         watchdog::step(watchdog::Step::Shrink);

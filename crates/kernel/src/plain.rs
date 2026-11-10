@@ -329,6 +329,8 @@ pub struct PlainState {
     conns: urmqtt_mm::slab::Slab<PlainConn>,
     /// The address the exposure was last judged for.
     last_addr: [u8; 4],
+    /// The global IPv6 address the exposure was last judged for (NEXT-1).
+    last_addr6: Option<[u8; 16]>,
     /// Refusals already logged, by kind (logged at powers of two).
     logged: [u64; 4],
 }
@@ -358,6 +360,7 @@ impl PlainState {
             needs_token,
             conns: urmqtt_mm::slab::Slab::new(),
             last_addr: [0; 4],
+            last_addr6: None,
             logged: [0; 4],
         }))
     }
@@ -640,6 +643,34 @@ impl PlainState {
             ),
             Exposure::Open => warn!(
                 "plaintext: this machine has a PUBLIC address ({a}.{b}.{c}.{d}) and the plaintext port admits public addresses: \
+                 everything on that port can be read and changed by anyone on the way. Narrow plaintext.allow_from, or use TLS."
+            ),
+        }
+    }
+
+    /// The same for the global IPv6 address (NEXT-1): with IPv6 on, the
+    /// plaintext port listens on it too, and a VPS's IPv6 address is public
+    /// even where its IPv4 one is not.
+    pub fn tick6(&mut self, global: Option<[u8; 16]>, first_core: bool) {
+        if global == self.last_addr6 {
+            return;
+        }
+        self.last_addr6 = global;
+        let (Some(g), true) = (global, first_core) else {
+            return;
+        };
+        let Some(shared) = Self::shared() else {
+            return;
+        };
+        let a = Addr::v6(g);
+        match shared.allow.exposure6(global) {
+            Exposure::Private => {}
+            Exposure::PublicAddressPrivateAllowList => warn!(
+                "plaintext: this machine has a public IPv6 address ({a}); only private networks may connect to the plaintext port, \
+                 which holds only while the network between them cannot forge an address. Keep a firewall in front."
+            ),
+            Exposure::Open => warn!(
+                "plaintext: this machine has a PUBLIC IPv6 address ({a}) and the plaintext port admits public addresses: \
                  everything on that port can be read and changed by anyone on the way. Narrow plaintext.allow_from, or use TLS."
             ),
         }

@@ -66,8 +66,7 @@ unknown next hop per second; IPv6 MTU 1280 to the link's (at most 1500, MSS 1440
 - Neighbour Discovery is unauthenticated (no SEND, no RA guard in the host); use `static` on a shared segment.
 - UDP over IPv6 is dropped: SNTP, syslog, statsd and log shipping over TLS stay IPv4; the outbound client's
   collector is an IPv4 address.
-- `plaintext.ip_identities` takes IPv4 networks only (an IPv6 client with `auth = "ip"` is refused); the
-  plaintext exposure warning judges the IPv4 address only.
+- `plaintext.ip_identities` takes IPv4 networks only (an IPv6 client with `auth = "ip"` is refused).
 - Checksum offload: none is negotiated with virtio-net, for either family (no offload fields).
 
 ## Verification
