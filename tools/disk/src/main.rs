@@ -25,7 +25,8 @@
 //!                                                region, release, state, the disk GUID the control
 //!                                                messages name
 //! urmqtt-disk slots stage DISK (--image RELEASE.img --sums SHA256SUMS --sig SHA256SUMS.minisig
-//!                    --pubkey minisign.pub [--pubkey ...] | --esp ESP --unsigned | --image IMG --unsigned)
+//!                    (--keyring keys/release-keys.json | --pubkey minisign.pub [--pubkey ...])
+//!                    | --esp ESP --unsigned | --image IMG --unsigned)
 //!                    [--config BLOB|SLOT | --keep-config | --replace-config] [--allow-downgrade]
 //!                    [--allow-unsealed] --write
 //!                                                write the standby slot (the configuration is carried
@@ -768,6 +769,8 @@ struct SlotArgs {
     sums: Option<String>,
     sig: Option<String>,
     pubkeys: Vec<String>,
+    /// The release key ring (`keys/release-keys.json`): key ranges and pins (SUPPLY-3).
+    keyring: Option<String>,
     unsigned: bool,
     allow_downgrade: bool,
     /// Stage an unsealed ESP onto a disk whose active slot is sealed (ADR-320).
@@ -846,25 +849,39 @@ fn slots_stage(path: &str, a: &SlotArgs) -> Result<(), String> {
                 "UNSIGNED image (--unsigned): nothing vouches for it".to_string()
             } else {
                 let (Some(sums), Some(sig)) = (&a.sums, &a.sig) else {
-                    return Err("--image needs --sums SHA256SUMS --sig SHA256SUMS.minisig --pubkey minisign.pub (or --unsigned for an image you built)".into());
+                    return Err("--image needs --sums SHA256SUMS --sig SHA256SUMS.minisig --keyring keys/release-keys.json (or --unsigned for an image you built)".into());
                 };
-                if a.pubkeys.is_empty() {
+                if a.keyring.is_some() && !a.pubkeys.is_empty() {
                     return Err(
-                        "--pubkey minisign.pub is required to check the release signature".into(),
+                        "give --keyring or --pubkey, not both (the key ring names its keys)".into(),
                     );
                 }
-                let keys = a
-                    .pubkeys
-                    .iter()
-                    .map(|k| std::fs::read_to_string(k).map_err(|e| format!("{k}: {e}")))
-                    .collect::<Result<Vec<_>, _>>()?;
                 let sums = std::fs::read(sums).map_err(|e| format!("{sums}: {e}"))?;
                 let sig = std::fs::read_to_string(sig).map_err(|e| format!("{sig}: {e}"))?;
                 let name = std::path::Path::new(img)
                     .file_name()
                     .and_then(|n| n.to_str())
                     .ok_or("the image path has no file name")?;
-                ab::verify_release(name, &bytes, &sums, &sig, &keys)?
+                if let Some(ring) = &a.keyring {
+                    // Key ranges and pins, the tag the signature names (SUPPLY-3, ADR-382).
+                    let keys = urmqtt_config_tool::keyring::load(std::path::Path::new(ring))?;
+                    ab::verify_release_ring(name, &bytes, &sums, &sig, &keys)?
+                } else {
+                    if a.pubkeys.is_empty() {
+                        return Err(
+                            "--keyring keys/release-keys.json (or --pubkey minisign.pub) is required to check the release signature".into(),
+                        );
+                    }
+                    eprintln!(
+                        "stage: --pubkey without --keyring: every given key is accepted for every tag (no key ranges, no pins); --keyring keys/release-keys.json checks them"
+                    );
+                    let keys = a
+                        .pubkeys
+                        .iter()
+                        .map(|k| std::fs::read_to_string(k).map_err(|e| format!("{k}: {e}")))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    ab::verify_release(name, &bytes, &sums, &sig, &keys)?
+                }
             };
             (ab::esp_of_image(&bytes)?, origin)
         }
@@ -1790,6 +1807,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     .filter(|(_, a)| *a == "--pubkey")
                     .filter_map(|(i, _)| args.get(i + 1).cloned())
                     .collect(),
+                keyring: opt("--keyring"),
                 unsigned: flag("--unsigned"),
                 allow_downgrade: flag("--allow-downgrade"),
                 allow_unsealed: flag("--allow-unsealed"),

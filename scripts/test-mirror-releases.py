@@ -695,6 +695,22 @@ class Scenarios(MirrorCase):
         self.assertPublished("v0.4.0", iso)
         self.assertEqual(self.document()["key_id"], self.keys["other"].key_id)
 
+    def test_d_a_signed_older_release_under_a_newer_tag_is_not_published(self) -> None:
+        """Security review of v0.6.0, SUPPLY-2: the SHA256SUMS and signature of v0.5.0 (valid, by the
+        trusted key) are served under the tag v0.6.0. The signature covers "urMQTT v0.5.0 ...": refused,
+        and the template is never fetched."""
+        iso = make_iso(seed=5)
+        rel = self.add_release("v0.6.0", iso=iso, sign=False)
+        signed = next(a.data for a in rel.assets if a.name == "SHA256SUMS")
+        rel.add_asset("SHA256SUMS.minisig", self.keys["good"].sign(signed, "urMQTT v0.5.0 release 0123456789abcdef"))
+        job = self.run_job()
+        self.assertEqual(job.code, 2, job.err)
+        self.assertCountEqual(self.fake.downloads(), ["SHA256SUMS", "SHA256SUMS.minisig"])
+        self.assertNothingPublished("v0.6.0")
+        e = self.entry("v0.6.0")
+        self.assertEqual((e["status"], e["verified"], e["reason"]), ("unverified", False, "verification-failed"))
+        self.assertIn("the signature is for v0.5.0, not v0.6.0", job.err)
+
     def test_d_tampered_sums_fail_the_signature(self) -> None:
         iso = make_iso(seed=3)
         rel = self.add_release("v0.4.0", iso=iso)
@@ -1299,7 +1315,10 @@ class Behaviour(MirrorCase):
         rel.add_asset("urmqtt-template-v0.2.0b-universal.iso", new)
         signed = sums_text({"urmqtt-template-v0.2.0b-universal.iso": new})
         rel.add_asset("SHA256SUMS", signed)
-        rel.add_asset("SHA256SUMS.minisig", self.keys["good"].sign(signed, "renamed"))
+        # (The comment names the tag, as the Release workflow writes it: the mirror binds the
+        # signature to the tag since the security review of v0.6.0, SUPPLY-2; this test was
+        # signed with the bare comment "renamed", which no release ever had.)
+        rel.add_asset("SHA256SUMS.minisig", self.keys["good"].sign(signed, "urMQTT v0.2.0 renamed"))
         self.assertEqual(self.run_job().code, 0)
         self.assertEqual(self.tag_files("v0.2.0"), ["SHA256SUMS", "SHA256SUMS.minisig", "meta.json", "urmqtt-template-v0.2.0b-universal.iso"])
         self.assertEqual(self.entry("v0.2.0")["template"]["file"], "urmqtt-template-v0.2.0b-universal.iso")
