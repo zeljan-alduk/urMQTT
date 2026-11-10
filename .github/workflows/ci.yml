@@ -108,6 +108,8 @@ jobs:
         run: |
           scripts/check-release-key.sh --allow-placeholder
           scripts/test-check-release-key.sh
+          python3 -I scripts/check-release-workflow.py
+          scripts/test-release-pipeline.sh
 
   test:
     name: Host tests (${{ matrix.os }})

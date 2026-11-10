@@ -825,17 +825,25 @@ urmqtt-disk slots status /dev/vdb
 ```
 
 **2. Stage** the release with the VM stopped. From a published release, the
-signature is checked first (the same check as `urmqtt-config check-release`
-and the builder page); your configuration stays, as with `update-boot`:
+signature is checked first, against the key ring `keys/release-keys.json` of
+a clone of the repository (the same rules as `urmqtt-config check-release
+--keyring` and the builder page: each key for its range of tags only, the former
+test key for its pinned releases only, the tag the one the signature names);
+your configuration stays, as with `update-boot`:
 
 ```sh
 urmqtt-disk slots stage /dev/vdb --image urmqtt-template-v0.6.1-universal.img \
-    --sums SHA256SUMS --sig SHA256SUMS.minisig --pubkey minisign.pub --write
-# stage: release signature ok: SHA256SUMS signed by key ..., ... has SHA-256 ...
+    --sums SHA256SUMS --sig SHA256SUMS.minisig --keyring keys/release-keys.json --write
+# stage: release signature ok: SHA256SUMS of v0.6.1 signed by key ... (release), ... has SHA-256 ...
 # stage: kernel v0.6.1 (A/B protocol 1, store schema 6, configuration formats up to 23)
 # stage: configuration: kept the disk's own; ...
 # stage: slot B holds v0.6.1 now, SHA-256 of the slot ...
 ```
+
+`--pubkey minisign.pub` instead of `--keyring` still works (without a clone),
+but then every key you name is accepted for every tag (no ranges, no pins; the
+tool says so): never pass the former test key `9229E05252D01F8E` there (security
+review of v0.6.0, SUPPLY-3, ADR-382).
 
 An image you built yourself (`--esp build/...esp` or an unsigned `--image`)
 needs `--unsigned`. Without `--write` every `slots` command rehearses on an

@@ -11,7 +11,12 @@
 //! 3. a key with `pinned` signs only the tags listed there, and only the
 //!    `SHA256SUMS` whose SHA-256 is the pinned one (a forged file signed with
 //!    a leaked key, labelled with an old tag, is refused);
-//! 4. the signature must verify.
+//! 4. the signature must verify;
+//! 5. the signed trusted comment (`urMQTT <tag> release <commit>`, written by
+//!    the Release workflow) must name `tag`: the tag a mirror or a file name
+//!    claims is not trusted, so the signed `SHA256SUMS` of an older release
+//!    cannot be passed off as a newer one (security review of v0.6.0,
+//!    SUPPLY-2, ADR-381).
 //!
 //! The ring is parsed by a small strict JSON reader (this crate has no JSON
 //! dependency, and the ring is the trust anchor: anything unexpected is an error).
@@ -215,6 +220,53 @@ pub fn parse(
     Ok(keys)
 }
 
+/// The tag a release's trusted comment names: `urMQTT v0.6.0 release <commit>`
+/// (and `urMQTT v0.4.1 dev <commit>` before the key rotation) gives `v0.6.0`.
+pub fn comment_tag(comment: &str) -> Option<&str> {
+    comment
+        .strip_prefix("urMQTT ")?
+        .split(char::is_whitespace)
+        .next()
+        .filter(|t| !t.is_empty())
+}
+
+/// Reads and parses the key ring at `path` (key files relative to it).
+pub fn load(path: &std::path::Path) -> Result<Vec<RingKey>, String> {
+    let dir = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    parse(&text, &mut |f| {
+        let p = dir.join(f);
+        std::fs::read_to_string(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))
+    })
+}
+
+/// Checks a release whose tag is the one its signed trusted comment names
+/// (a file from the computer, an image to stage): the signature is checked
+/// with the ring key it names, the tag is read from the authenticated
+/// comment, and then every rule of [`verify`] applies to that tag.
+pub fn verify_signed_tag(
+    keys: &[RingKey],
+    sums: &[u8],
+    sig: &str,
+) -> Result<(String, RingVerified), String> {
+    let texts: Vec<&str> = keys.iter().map(|k| k.text.as_str()).collect();
+    let first = release::verify_sums_any(&texts, sums, sig)?;
+    let tag = comment_tag(&first.signature.trusted_comment)
+        .ok_or_else(|| {
+            format!(
+                "the signed trusted comment {:?} names no release tag (expected \"urMQTT <tag> release <commit>\")",
+                first.signature.trusted_comment
+            )
+        })?
+        .to_owned();
+    let v = verify(keys, &tag, sums, sig)?;
+    Ok((tag, v))
+}
+
 /// Checks a release (`tag`, its `SHA256SUMS` bytes and signature) by the
 /// rules of the module documentation.
 pub fn verify(keys: &[RingKey], tag: &str, sums: &[u8], sig: &str) -> Result<RingVerified, String> {
@@ -259,6 +311,14 @@ pub fn verify(keys: &[RingKey], tag: &str, sums: &[u8], sig: &str) -> Result<Rin
         }
     }
     let signed = release::verify_sums(&key.text, sums, sig)?;
+    // Rule 5: the tag is the one the signature covers, not the one claimed.
+    let comment = &signed.signature.trusted_comment;
+    if comment_tag(comment) != Some(tag) {
+        return Err(format!(
+            "the signature is for {}, not {tag} (trusted comment {comment:?}): a signed release under another tag",
+            comment_tag(comment).unwrap_or("no release tag")
+        ));
+    }
     Ok(RingVerified {
         signed,
         key: key.clone(),
@@ -662,6 +722,43 @@ mod tests {
                 .unwrap_err()
                 .contains("not in the key ring")
         );
+    }
+
+    /// Security review of v0.6.0, SUPPLY-2: a mirror serves the correctly signed
+    /// SHA256SUMS of v0.5.0 under the tag v0.6.0 (the newest). The key may sign
+    /// both tags and the signature is valid, but it covers "urMQTT v0.5.0 ...":
+    /// refused, as is a comment that names no tag.
+    #[test]
+    fn a_signed_older_release_under_a_newer_tag_is_refused() {
+        let (release, sign) = throwaway(1, [1; 8]);
+        let ring = repo_ring(&release);
+        let sums = b"1111111111111111111111111111111111111111111111111111111111111111  urmqtt-template-v0.5.0-universal.iso\n";
+        let sig = sign(sums, "urMQTT v0.5.0 release 0123456789abcdef");
+        assert!(verify(&ring, "v0.5.0", sums, &sig).is_ok());
+        let e = verify(&ring, "v0.6.0", sums, &sig).unwrap_err();
+        assert!(e.contains("the signature is for v0.5.0, not v0.6.0"), "{e}");
+        // A prefix or a longer tag is not the tag.
+        for other in ["v0.5.0-rc.1", "v0.5", "0.5.0"] {
+            assert!(verify(&ring, other, sums, &sig).is_err(), "{other}");
+        }
+        let e = verify(
+            &ring,
+            "v0.5.0",
+            sums,
+            &sign(sums, "timestamp:0\tfile:SHA256SUMS"),
+        )
+        .unwrap_err();
+        assert!(e.contains("no release tag"), "{e}");
+        // The real v0.1.0 release (comment "urMQTT v0.1.0 dev <commit>") still verifies.
+        assert!(verify(&ring, "v0.1.0", SUMS, SIG).is_ok());
+        // The tag taken from the signed comment: the ring rules apply to it.
+        let (tag, v) = verify_signed_tag(&ring, sums, &sig).unwrap();
+        assert_eq!((tag.as_str(), v.key.name.as_str()), ("v0.5.0", "release"));
+        let e = verify_signed_tag(&ring, sums, &sign(sums, "urMQTT v0.4.1 release x")).unwrap_err();
+        assert!(e.contains("v0.4.2 and later"), "{e}");
+        assert_eq!(comment_tag("urMQTT v0.6.0 release abc"), Some("v0.6.0"));
+        assert_eq!(comment_tag("urMQTT  v0.6.0"), None);
+        assert_eq!(comment_tag("xurMQTT v0.6.0"), None);
     }
 
     #[test]

@@ -36,17 +36,34 @@ signing in CI: the secret's protection is GitHub's secret store plus your copy. 
 
 Check: `head -1 minisign.pub` prints `untrusted comment: minisign public key <16 hex digits>`, not `9229E05252D01F8E`.
 
-## 2. Put the secret into the repository secret
+## 2. Put the secret into the environment `release`
+
+The secret is an **environment secret** of the environment `release`, not a repository secret: only the Release
+workflow's `sign` job runs in that environment, it builds nothing, and it waits for your approval (security review of
+v0.6.0, SUPPLY-1, ADR-380). Once, create the environment with you as the required reviewer and `v*` tags as the only
+deployment source, then set the secret there and delete any repository secret of the same name:
 
 ```bash
-gh secret set MINISIGN_SECRET_KEY --repo zeljan-alduk/urMQTT < urmqtt-release.key
+me=$(gh api user -q .id)
+gh api -X PUT repos/zeljan-alduk/urMQTT/environments/release \
+    -F "reviewers[][type]=User" -F "reviewers[][id]=$me" \
+    -F "deployment_branch_policy[protected_branches]=false" -F "deployment_branch_policy[custom_branch_policies]=true"
+gh api -X POST repos/zeljan-alduk/urMQTT/environments/release/deployment-branch-policies -f name='v*' -f type=tag
+gh secret set MINISIGN_SECRET_KEY --repo zeljan-alduk/urMQTT --env release < urmqtt-release.key
+gh secret delete MINISIGN_SECRET_KEY --repo zeljan-alduk/urMQTT     # the old repository secret, if it exists
 ```
+
+Also protect the tags (Settings, Rules, a tag ruleset on `v*`: only you may create, update or delete them), so that
+nobody else with push access can start a release. The workflow itself refuses a tag whose commit is not on `main`
+(`scripts/check-release-tag.sh`).
 
 This replaces the test key's secret. From now on the test key's secret (wherever copies of it still exist, including
 your machine) signs nothing that anyone accepts for a tag after v0.4.1. Delete your local copies of the **test**
 secret key; they are no longer needed for anything.
 
-Check: Settings, Secrets and variables, Actions shows `MINISIGN_SECRET_KEY` updated today.
+Check: Settings, Environments, `release` shows the required reviewer, the deployment rule `v*` (tags) and the
+environment secret `MINISIGN_SECRET_KEY` updated today; Settings, Secrets and variables, Actions lists **no**
+repository secret of that name.
 
 ## 3. Commit the public key, in the branch, before merging
 
@@ -113,7 +130,8 @@ placeholder", step 3 is not in the checkout.
 
 ## 7. The first release with the new key
 
-Follow docs/RELEASE.md. The workflow now refuses to start without the key and the secret, publishes
+Follow docs/RELEASE.md. The workflow now refuses to start without the key, waits for your approval of the `sign` job
+(it fails there without the environment secret), publishes
 `urmqtt-<tag>.elf/.iso/.img`, the template, the SBOM, `SHA256SUMS` and its signature, and checks that the signature
 verifies with `minisign.pub`. Then, in an empty directory:
 
@@ -140,5 +158,11 @@ note.
   is under no signature); and the pins are as trustworthy as the repository: a compromised GitHub account could change
   them only through a commit to `keys/release-keys.json`, which shows in the history and reaches the page and the
   mirror only when they are rebuilt or reinstalled. Check it before steps 5 and 6: `git log -p keys/release-keys.json`.
+- **Where the key is used.** Only in the Release workflow's `sign` job (environment `release`, your approval): it
+  checks out `minisign.pub` alone, takes `SHA256SUMS` from the `build` job, signs it with the key on a pipe (never a
+  file) and runs no build code. The `build` job, which runs third-party code (build scripts, proc macros, apt
+  packages), holds no secret and no write permission; the `publish` job (attestations, the GitHub release) builds
+  nothing. `scripts/check-release-workflow.py` (CI) refuses a workflow that moves the key back next to the build
+  (ADR-380). Before you approve the `sign` job, look at the `build` job's log: the tag, its commit on `main`.
 - If the **new** secret leaks: generate another key, add it to `keys/release-keys.json` with `valid_from` the next tag,
   give the leaked key a `valid_to` of the last tag it signed, and repeat steps 2 to 6. Say so in an advisory.

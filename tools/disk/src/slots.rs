@@ -84,6 +84,35 @@ pub fn verify_release(
     ))
 }
 
+/// The release signature checked against the key ring (`keys/release-keys.json`,
+/// `--keyring`): the tag is the one the signed trusted comment names, and the
+/// key must be allowed to sign that tag (its range and, for the former test
+/// key, the pinned `SHA256SUMS`), as the builder page and `urmqtt-config
+/// check-release --keyring` require. Without the ring every `--pubkey` key is
+/// accepted for every tag (security review of v0.6.0, SUPPLY-3, ADR-382).
+pub fn verify_release_ring(
+    name: &str,
+    image: &[u8],
+    sums: &[u8],
+    sig: &str,
+    ring: &[urmqtt_config_tool::keyring::RingKey],
+) -> Result<String, String> {
+    let (tag, v) = urmqtt_config_tool::keyring::verify_signed_tag(ring, sums, sig)?;
+    let digest = v.signed.sums.check(name, image)?;
+    Ok(format!(
+        "release signature ok: SHA256SUMS of {tag} signed by key {} ({}{}{}), {name} has SHA-256 {}",
+        v.signed.signature.key_id,
+        v.key.name,
+        if v.key.former_test_key {
+            ", the project's former test key"
+        } else {
+            ""
+        },
+        if v.pinned { ", pinned SHA256SUMS" } else { "" },
+        urmqtt_config_tool::release::hex(&digest)
+    ))
+}
+
 /// The configuration format of the ESP's configured slot, if it has one.
 pub fn config_format(esp: &[u8]) -> Option<u16> {
     let [off] = find_slots(esp, SlotKind::Boot)[..] else {

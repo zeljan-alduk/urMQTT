@@ -5561,3 +5561,64 @@ device the kernel does not drive is unaffected; one for a driven device would be
      edition's slot that holds an `[ext]` key; an edition reconfigures its image by rebuilding it with its own
      packer and `mkiso.sh --config-slot`.
   5. **The private repository itself** (`urmqtt-enterprise`) is not created and nothing is published.
+
+## ADR-380 — The release key only in a signing job that builds nothing (security review of v0.6.0, SUPPLY-1)
+
+- **Status:** Accepted (v0.6.1).
+- **Context.** The Release workflow was one job: it ran `make dist` (about 26 third-party build scripts and proc
+  macros, `cargo run -p urmqtt-config-tool`, apt packages), then signed `SHA256SUMS` with the repository secret
+  `MINISIGN_SECRET_KEY`, written to `$RUNNER_TEMP/minisign.key`, and held contents, id-token and attestations write.
+  On a hosted runner every secret a job references is sent to the runner when the job starts, and the steps run as
+  one user with sudo, so code from any earlier step could read the key. Any `v*` tag, on any commit, started the
+  workflow from that commit. The key is passwordless: a leak signs every future release.
+- **Decision.** Three jobs. `build`: no secret, `contents: read` only; it first runs `scripts/check-release-tag.sh`
+  (a release tag whose commit is the workflow's and is on `origin/main`), then builds, checks and uploads the files.
+  `sign`: `environment: release` (a required reviewer and `v*` tags only, set in the repository settings; the key
+  is that environment's secret, not a repository secret), `contents: read` and `actions: read`; it checks out
+  `minisign.pub` alone (sparse), downloads the build's files with `gh run download`, signs `SHA256SUMS` with the key
+  on a pipe (`-s <(printf ...)`, never a file) and verifies with `minisign.pub`. `publish`: the attestations and
+  the GitHub release from the build's files and the signature; it checks out and builds nothing.
+  `scripts/check-release-workflow.py` (CI, "Release keys") refuses a workflow that references the key in more than
+  one job, signs outside the environment, writes the key to a file, builds, uses another action or holds a write
+  permission in the signing job, builds without the tag check or with a write permission, or checks out or builds
+  in a job with a write permission; `scripts/test-release-pipeline.sh` tests both checks (the old workflow fails
+  the shape check on 16 counts).
+- **Not done / limits.** The environment's protection rules and moving the secret are settings the owner makes once
+  (docs/release-key-rotation.md step 2); without them the workflow still signs, with a repository secret, but no
+  longer next to the build. A compromised build can still hand a wrong `SHA256SUMS` to the signing job (the reviewer
+  approves a run, not bytes); the build provenance attestation and `make repro` remain the check on what was built.
+  `actions/download-artifact` is not used because no reviewed pin of it was available offline; `gh` on the runner
+  image is used instead.
+
+## ADR-381 — The signed tag is the claimed tag (security review of v0.6.0, SUPPLY-2)
+
+- **Status:** Accepted (v0.6.1).
+- **Context.** The builder page, the mirror and `urmqtt-config check-release --keyring --tag` used the tag they were
+  given (from the mirror's unsigned `releases.json`, from GitHub, from the command line) for the key range and pins
+  only. A hostile mirror could list the correctly signed `SHA256SUMS` and template of v0.5.0 under v0.6.0; the page
+  verified it, labelled the build v0.6.0 and named the output after it.
+- **Decision.** The trusted comment the Release workflow signs is `urMQTT <tag> release <commit>` (before the key
+  rotation `urMQTT <tag> dev <commit>`; every signed release since v0.1.0 has this form). Its second word must be the
+  claimed tag, exactly: `commentTag` in `release.js`, `comment_tag` in `mirror-releases.py`, rule 5 of
+  `keyring::verify`. A file from the computer (no tag claimed) takes its tag from the signed comment, and the ranges
+  and pins apply to that tag (`keyring::verify_signed_tag`). Tests: `a_signed_older_release_under_a_newer_tag_is_refused`
+  (Rust), `release-binding.test.mjs` (the page with the real WebAssembly module),
+  `test_d_a_signed_older_release_under_a_newer_tag_is_not_published` (the mirror). A mirror test that signed with
+  the bare comment "renamed", which no release ever had, now signs with `urMQTT v0.2.0 renamed`.
+
+## ADR-382 — `slots stage --keyring` (security review of v0.6.0, SUPPLY-3)
+
+- **Status:** Accepted (v0.6.1).
+- **Decision.** `urmqtt-disk slots stage --image ... --keyring keys/release-keys.json` checks the release with the key
+  ring: the tag is the one the signed comment names, the key must cover it, the former test key only for its pinned
+  `SHA256SUMS` (`slots::verify_release_ring`, `keyring::verify_signed_tag`). docs/DEPLOY.md 8b uses it. `--pubkey`
+  alone still works (an operator without a clone), with a warning that no ranges and pins apply; `--keyring` and
+  `--pubkey` together are refused. Test: `stage_with_the_key_ring_refuses_the_former_test_key_for_a_new_tag`.
+
+## ADR-383 — Release links only to the release's GitHub pages (security review of v0.6.0, SUPPLY-4)
+
+- **Status:** Accepted (v0.6.1).
+- **Decision.** `loadReleases` keeps a release's `url` only when it is `https://github.com/<owner>/<repo>/releases/tag/<tag>`
+  for that release's tag, and `attestations` only when it is `https://github.com/<owner>/<repo>/attestations`, of the
+  list's `source` repository when it names one; anything else becomes `''` and is not shown as a link (as `source`
+  already was). Test: `release-binding.test.mjs`.

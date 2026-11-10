@@ -625,7 +625,21 @@ What that gives you and what it does not:
   forged file signed with it is refused (docs/RELEASE.md section 9). The mirror is **not** a
   trust anchor: a modified template or sums file fails the check, and a failed
   check blocks the build unless you override it in a dialog that says what is
-  wrong. A release the mirror cannot verify is not offered at all.
+  wrong. A release the mirror cannot verify is not offered at all. **The tag is
+  the signed one:** the signature's trusted comment (`urMQTT vX.Y.Z release
+  <commit>`) must name the tag the mirror lists the release under, so the
+  correctly signed files of an older release cannot be offered, labelled and
+  named as a newer one (ADR-381; the mirror and `urmqtt-config check-release
+  --keyring --tag` check the same). The release's "GitHub" and "attestations"
+  links from the mirror's list are shown only when they are that release's pages
+  on github.com (ADR-383).
+- **Where the release key is.** Only in the Release workflow's `sign` job, in
+  the GitHub environment `release` (a required reviewer, `v*` tags only). That
+  job builds nothing: the `build` job, which runs third-party build code, holds
+  no secret and no write permission and refuses a tag whose commit is not on
+  `main`, and the job that publishes and attests builds nothing either; the key
+  reaches minisign through a pipe, never a file (ADR-380,
+  `scripts/check-release-workflow.py` in CI).
 - **What leaves the browser.** Only plain GET requests to the page's own site,
   for the release list and the release files. Certificates, private keys, the
   optional signing key, the settings and the finished ISO are never sent
