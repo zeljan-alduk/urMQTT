@@ -817,3 +817,88 @@ fn a_server_only_session_has_no_client_identity() {
     let (_, session, r) = connect(&mtls, no_cert);
     assert!(r.is_err() || !session.is_established());
 }
+
+/// TLS records of a byte stream (5-byte header and its payload each).
+fn records(b: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 5 <= b.len() {
+        let len = u16::from_be_bytes([b[i + 3], b[i + 4]]) as usize;
+        out.push(b[i..i + 5 + len].to_vec());
+        i += 5 + len;
+    }
+    out
+}
+
+/// Security review v0.6.0, AUTHZ-8 (ADR-361): the revocation list was read
+/// only when the client's Certificate was verified (and again at Finished
+/// for resumed sessions only). A revocation applied between a full
+/// handshake's Certificate and its Finished therefore did not stop it, and
+/// the kernel's scan of live connections had already run: the device got an
+/// established connection after its revocation. Here the client's second
+/// flight is cut into 64-byte records and the serial is revoked before each
+/// one in turn; no split point may establish the revoked certificate.
+#[test]
+fn a_revocation_during_the_clients_flight_refuses_the_handshake() {
+    let Some(d) = dev() else { return };
+    setup_globals();
+    let der = CertificateDer::from_pem_file(d.join("devices/device-003.pem")).unwrap();
+    let serial = urmqtt_tls::identity::serial(&der).unwrap();
+    let cfg = {
+        let mut c = (*client_config(&d, "devices/device-003")).clone();
+        c.max_fragment_size = Some(64);
+        Arc::new(c)
+    };
+    let mut flight_records = 0;
+    for split in 0.. {
+        let revocations = Arc::new(RevocationList::new(Vec::new()));
+        let srv = server_with(&d, &["ca.pem"], &[], revocations.clone());
+        let mut client =
+            ClientConnection::new(cfg.clone(), ServerName::try_from("localhost").unwrap())
+                .unwrap();
+        let mut sess = srv.accept().unwrap();
+        let mut app = Vec::new();
+        // Flight 1 and the server's answer.
+        let mut c2s = Vec::new();
+        while client.wants_write() {
+            client.write_tls(&mut c2s).unwrap();
+        }
+        let mut s2c = Vec::new();
+        sess.input(&c2s, &mut s2c, &mut app).unwrap();
+        let mut rd = &s2c[..];
+        while !rd.is_empty() {
+            client.read_tls(&mut rd).unwrap();
+            client.process_new_packets().unwrap();
+        }
+        // Flight 2 (Certificate, CertificateVerify, Finished), record by record.
+        let mut c2s = Vec::new();
+        while client.wants_write() {
+            client.write_tls(&mut c2s).unwrap();
+        }
+        let recs = records(&c2s);
+        flight_records = recs.len();
+        if split >= recs.len() {
+            break;
+        }
+        let mut established = false;
+        for (i, r) in recs.iter().enumerate() {
+            if i == split {
+                revocations.replace(vec![serial.clone()]);
+            }
+            let mut out = Vec::new();
+            match sess.input(r, &mut out, &mut app) {
+                Ok(Event::Established { .. }) => established = true,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert!(revocations.is_revoked(der.as_ref()));
+        assert!(
+            !established,
+            "revoked before record {split} of {}: established",
+            recs.len()
+        );
+    }
+    // The flight was really cut (Certificate alone is several records).
+    assert!(flight_records > 3, "{flight_records} record(s)");
+}

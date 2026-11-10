@@ -977,15 +977,23 @@ impl TlsSession {
     ) -> Result<(String, CertRole, u64), TlsError> {
         // A ticket outlives a revocation (it is issued before, and the list
         // changes with a new image of possibly the same version): resumed
-        // sessions are checked again (M16).
+        // sessions are checked again (M16). A full handshake is checked
+        // again too (ADR-361): the list was read when the client's
+        // Certificate was verified, and a revocation applied between that
+        // and its Finished (a client may hold its flight back for up to the
+        // handshake timeout) would otherwise never reach this connection,
+        // since the cores scan only connections that were live when the
+        // control epoch changed.
         let peer = conn.peer_certificates().unwrap_or(&[]);
         let Some(ee) = peer.first() else {
             return Err(TlsError::NoIdentity);
         };
-        if resumed && revoked.is_revoked(ee) {
-            return Err(TlsError::Handshake(
-                "resumed session of a revoked certificate".into(),
-            ));
+        if revoked.is_revoked(ee) {
+            return Err(TlsError::Handshake(if resumed {
+                "resumed session of a revoked certificate".into()
+            } else {
+                "certificate revoked during the handshake".into()
+            }));
         }
         // A full handshake recorded the role during verification. A resumed
         // one verified nothing: the chain from the ticket is checked again
