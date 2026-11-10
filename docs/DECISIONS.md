@@ -5531,8 +5531,15 @@ device the kernel does not drive is unaffected; one for a driven device would be
   same devices lists them and drives none, logs nothing of an edition, and refuses the edition's configuration;
   the open `urmqtt-config` refuses the `[ext]` table. CI: the example's workspace is formatted, linted for the
   host and the kernel target, built in the Kernel job (dev and prod) and booted in the `edition` smoke group.
-  The full local validation of the release branch (every smoke group on both architectures, the host tests, the
-  clippy sets, the audit inventory) ran on this change (the notes file lists the runs).
+  The review re-ran the host tests of `cfg`, `config`, `config-schema`, `kernel` and `store`, the clippy sets of the
+  touched crates and the `edition` smoke group on aarch64 (HVF, TCG) and x86_64 (TCG). The other smoke groups were
+  started on this change but not all finished before the item closed; they are the release's full run, not this
+  item's evidence.
+- **The installer of an edition** (review): install mode copies the slot the kernel booted with onto the target
+  disk after parsing it (`urmqtt_store::install`). It parsed with the open table, so an edition's kernel booted with
+  an `[ext]` key refused to install ("no (single) unconfigured configuration slot"). It now parses with the image's
+  table (`write_image_ext`, `write_boot_image_ext`, given `ext::edition().config`); the open kernel passes the empty
+  table and is unchanged (host test `an_editions_installer_carries_its_extension_keys`).
 - **Not done (listed, not hidden).**
   1. **NIC, disk, entropy and timer interfaces.** The computed scope named "NIC/disk/RNG/timer traits". They are
      not in this change: the data path (`netproto`, `dataplane`, the RSS queues of ADR-310 to ADR-314) is written
@@ -5546,7 +5553,11 @@ device the kernel does not drive is unaffected; one for a driven device would be
   2. **Interrupts for an edition's device** (MSI-X vectors): drivers poll for now.
   3. **"Per-platform configuration sections"** beyond `[ext.<section>]`: the reserved table is the section
      mechanism; there is no schema export of extension keys for the builder page, which knows the open keys only.
-  4. **The universal ISO, the installer and Secure Boot signing of an edition's image** are not exercised: the
-     smoke group boots the edition's kernel from the raw image of `mkiso.sh --kernel`; `make universal` and
-     `make release-images` build the open image only.
+  4. **The universal ISO, the installer and Secure Boot signing of an edition's image** are not exercised in QEMU:
+     the smoke group boots the edition's kernel from the raw image of `mkiso.sh --kernel`; `make universal` and
+     `make release-images` build the open image only. The installer's handling of an edition's slot is host-tested
+     (above). The open host tools that find and read a slot in an image (`urmqtt-config` image patching and
+     `show`, `urmqtt-disk`, `urmqtt_cfg::blob::find_slots`) parse with the open table, so they do not see an
+     edition's slot that holds an `[ext]` key; an edition reconfigures its image by rebuilding it with its own
+     packer and `mkiso.sh --config-slot`.
   5. **The private repository itself** (`urmqtt-enterprise`) is not created and nothing is published.

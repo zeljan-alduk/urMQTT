@@ -55,6 +55,10 @@ use them. Store schema unchanged (5).
   next step for a commercial NIC or disk driver (gVNIC, ENA, NVMe).
 - No interrupts (MSI-X vectors) for an edition's device; drivers poll from the `tick` hook.
 - No builder-page or JSON-schema export of an edition's keys.
-- The universal ISO, the installer and Secure Boot signing were not exercised with an edition's kernel
-  (`make universal` and `make release-images` build the open image).
+- The universal ISO, the installer and Secure Boot signing were not exercised in QEMU with an edition's kernel
+  (`make universal` and `make release-images` build the open image). The installer carries an edition's slot,
+  `[ext]` keys included, onto the installed disk (host-tested); before the review it refused to install one.
+- The open host tools that find a slot in an image (`urmqtt-config` image patching and `show`, `urmqtt-disk`) do not
+  see an edition's slot with an `[ext]` key: rebuild the image with the edition's packer and
+  `mkiso.sh --config-slot` instead.
 - The private repository is not created; nothing is published to crates.io.

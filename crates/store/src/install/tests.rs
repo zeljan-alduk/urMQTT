@@ -398,3 +398,52 @@ fn a_sealed_image_installs_only_its_own_configuration() {
     )
     .unwrap();
 }
+
+/// NOW-18 (ADR-337): the kernel of an edition carries the slot it booted with,
+/// extension records included, when it is given the edition's table; without
+/// the table (the open kernel) the same slot is refused before anything is
+/// written, as any slot the open kernel cannot read.
+#[test]
+fn an_editions_installer_carries_its_extension_keys() {
+    use urmqtt_cfg::fields::Kind;
+    let ext = [urmqtt_cfg::ext::field(
+        0xF000,
+        "ext.test.on",
+        Kind::Bool(false),
+        "",
+        2,
+    )];
+    let mut b = Builder::with_extensions(&ext).unwrap();
+    b.bool(0xF000, true).unwrap();
+    b.uint(tag::NET_TLS_PORT, 9999).unwrap();
+    let mine = make_slot(SlotKind::Boot, &b.finish(false).unwrap()).unwrap();
+    let (template, _) = slots();
+    let e = esp_with_template(&template);
+    let img = gpt::raw_image(&e).unwrap();
+    let off = urmqtt_cfg::blob::find_slots(&img, SlotKind::Disk)[0];
+    // The open installer: refused, nothing written.
+    let blank = MemDisk::new(64 * MIB);
+    assert_eq!(
+        write_image_with(blank.device().as_mut(), &e, Some(&mine)),
+        Err(InstallError::NoConfigSlot)
+    );
+    assert_eq!(
+        write_boot_image_with(blank.device().as_mut(), &img, Some(&mine)),
+        Err(InstallError::NoConfigSlot)
+    );
+    assert!(blank.raw(0, 64 * MIB).iter().all(|&b| b == 0));
+    // The edition's installer: the slot is on the disk, the rest is the image.
+    let m = MemDisk::new(64 * MIB);
+    write_image_ext(m.device().as_mut(), &e, Some(&mine), &ext).unwrap();
+    let on_disk = m.raw(0, img.len());
+    assert_eq!(&on_disk[off..off + SLOT_SIZE], &mine[..]);
+    assert_eq!(&on_disk[..off], &img[..off]);
+    let whole = MemDisk::new(64 * MIB);
+    write_boot_image_ext(whole.device().as_mut(), &img, Some(&mine), &ext).unwrap();
+    assert_eq!(whole.raw(0, img.len()), on_disk);
+    // An open slot is still carried by an edition's installer.
+    let (_, open) = slots();
+    let o = MemDisk::new(64 * MIB);
+    write_image_ext(o.device().as_mut(), &e, Some(&open), &ext).unwrap();
+    assert_eq!(&o.raw(0, img.len())[off..off + SLOT_SIZE], &open[..]);
+}

@@ -167,9 +167,12 @@ pub fn run(
     }
     info!("install: writing {} MiB to {name}", image >> 20);
     let t0 = time::uptime_ns();
+    // The slot this boot loaded may hold the edition's keys (NOW-18, ADR-337):
+    // it is checked with the same table the boot accepted it with.
+    let ext = crate::ext::edition().config;
     let written = match source {
-        Image::Esp(esp) => install::write_image_with(dev.as_mut(), esp, config_slot),
-        Image::Disk(img) => install::write_boot_image_with(dev.as_mut(), img, config_slot),
+        Image::Esp(esp) => install::write_image_ext(dev.as_mut(), esp, config_slot, ext),
+        Image::Disk(img) => install::write_boot_image_ext(dev.as_mut(), img, config_slot, ext),
     };
     match written {
         Ok(n) => {
