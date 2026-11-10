@@ -12,3 +12,5 @@ number,rule,location,class,reason,comment
 182,rust/hard-coded-cryptographic-value,crates/store/src/keyslot.rs:198,b,false positive,"Scratch buffer filled with label, UUID and the real salt by put() before PBKDF2."
 183,rust/hard-coded-cryptographic-value,tools/control/src/main.rs:300,b,false positive,"Zero-initialised salt filled from /dev/urandom (read_exact, error otherwise) before use."
 184,rust/hard-coded-cryptographic-value,tools/disk/src/main.rs:1297,b,false positive,"Zero-initialised salt filled from /dev/urandom (read_exact, error otherwise) before use."
+185,actions/cache-poisoning/poisonable-step,.github/workflows/ci.yml:64,b,false positive,"Lint job (make certs), triggers pull_request and workflow_dispatch only. A pull request cache is scoped to the PR merge ref, never the default branch; on a dispatch run github.event.pull_request.head.sha is empty, so no untrusted code is fetched."
+186,actions/cache-poisoning/poisonable-step,.github/workflows/ci.yml:65,b,false positive,"As 185 (the rustfmt step of the same job)."
