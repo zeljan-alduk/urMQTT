@@ -207,6 +207,25 @@ value (jumbo frames) is used as 1500, which a jumbo network carries. The value i
 nothing; **with a static address on Google Cloud set `network.mtu = 1460`** (or the network's MTU). Setting it
 needs configuration format 7: a template of an earlier release refuses such a configuration when it is packed.
 
+**IPv6 (NEXT-1, ADR-330 to ADR-334).** Off by default. Where the provider's network sends Router Advertisements,
+`[network] ipv6 = "slaac"` is enough: the broker takes the first advertised /64 and the EUI-64 of its MAC, so its
+address is `<prefix>` + the interface identifier of the MAC (`52:54:00:12:34:56` gives `::5054:ff:fe12:3456`) and
+can go into DNS before the first boot. Many VPS providers (netcup among them) route a /64 to the VM but send no
+advertisements and expect a configured address and the router `fe80::1`:
+
+```toml
+[network]
+ipv6 = "static"
+ipv6_address = "2001:db8:1234::10/64"   # one address of the /64 the panel shows
+ipv6_gateway = "fe80::1"                # what the panel names as the IPv6 gateway
+```
+
+The boot log shows `net: ipv6 global address ... in use (duplicate address detection passed)`; `$SYS/broker/net/ipv6/*`
+and the console's `status` show the addresses (docs/OPERATE.md). Every listener then also takes IPv6 clients: a
+firewall in front must allow the same ports over IPv6, and `metrics.allow_from` / `plaintext.allow_from` need IPv6
+networks for IPv6 scrapers or clients. The configuration needs format 23 (a v0.6.0 template or newer). Not done:
+reassembly of fragments, ICMPv6 errors, DHCPv6, a second address (ADR-333).
+
 **The console on a virtio-gpu (ADR-256).** Some VMs (netcup ARM) have a virtio-gpu as their only display: the
 firmware draws its menu through it, but after boot the provider's console shows "Display output is not active"
 (the firmware resets the device; the framebuffer it handed over is RAM nothing shows). With

@@ -14,7 +14,7 @@ aarch64 ELF that contains everything needed to be an MQTT broker:
 │  broker  ─ sessions · topic trie · subscriptions · QoS · retained · LWT · ACL    │
 │  mqtt    ─ zero-copy 3.1.1/5.0 codec                                             │
 │  tls     ─ rustls handshake → own TLS 1.3 record layer                           │
-│  tcp     ─ TCP, SYN cookies, active open      net ─ Eth/ARP/IPv4/ICMP/DHCPv4     │
+│  tcp     ─ TCP, SYN cookies, active open      net ─ Eth/ARP/IPv4/DHCPv4/IPv6/ND  │
 │  store   ─ raw-disk VFS · SQL in Rust · per-core telemetry log · worker proxy    │
 │  dbworker ─ SQLite (C, vendored) as an EL0 / ring-3 program (own address space)  │
 │  virtio  ─ net · blk · rng      pci ─ ECAM · BARs · MSI-X                        │
@@ -101,12 +101,22 @@ One universal ISO boots both architectures (ADR-043); the crypto runs the portab
 ### Data path for one PUBLISH
 
 ```
-NIC RX buffer ─▶ IPv4/TCP validate ─▶ TLS decrypt in place ─▶ MQTT parse (borrowed)
+NIC RX buffer ─▶ IPv4 or IPv6/TCP validate ─▶ TLS decrypt in place ─▶ MQTT parse (borrowed)
    ─▶ ACL check (no DB) ─▶ rate limit ─▶ route: local subscribers + cross-core summary
    ─▶ payload stored once, refcounted ─▶ per-subscriber encrypt into TX buffer
    ─▶ PUBACK coalesced with the TCP ACK ─▶ NIC TX
    └▶ telemetry topics: append to this core's log segment (batched)
 ```
+
+### IPv6 beside IPv4 (NEXT-1, ADR-330 to ADR-334)
+
+One address type for both families (`net::addr::Addr`, IPv4 stored IPv4-mapped; the IPv6 parser refuses mapped
+addresses so the two never meet). Core 0's interface runs Neighbour Discovery, DAD and SLAAC (or a static
+address) and tells the other cores the addresses, router and MTU; the steering hashes the IPv6 4-tuple with the
+same Toeplitz key and table; the TCP stack sums the pseudo-header by family and answers a link-local peer from the
+link-local address and every other peer from the one global address, by the same rule the interface writes the
+header with. Every listener and every per-address limit takes both families; an IPv6 /64 is one source.
+Off by default (`network.ipv6`).
 
 ### Multicore NIC
 
@@ -114,7 +124,7 @@ The NIC mode is chosen at boot from the virtio feature bits and logged (ADR-032,
 
 | Mode | When | How |
 |---|---|---|
-| Multiqueue with RSS | `VIRTIO_NET_F_MQ`, `_CTRL_VQ` and `_RSS` offered, the device's RSS takes a 40-byte key, a 128-entry table and the TCP/IPv4 hash, two or more data cores, `devices.virtio_net_queues = "auto"` | One queue pair per data core (pair c for core c, at most 16). The kernel programs the device's RSS with the Microsoft Toeplitz key and the same 128-entry indirection table its own steering then uses, so a TCP/IPv4 flow lands on the queue of the core that owns it; everything unhashed (ARP, ICMP, UDP) goes to pair 0 (core 0). Each core receives, transmits and is woken (its own MSI-X vector, ADR-270's probation and fallback per pair) on its own pair; a frame that is not the core's own (another listener's port, a misplaced frame) goes to core 0 over the c→0 ring and is steered as if it had arrived on pair 0. Cores beyond the pairs are served through pair 0 as below |
+| Multiqueue with RSS | `VIRTIO_NET_F_MQ`, `_CTRL_VQ` and `_RSS` offered, the device's RSS takes a 40-byte key, a 128-entry table and the TCP/IPv4 hash, two or more data cores, `devices.virtio_net_queues = "auto"` | One queue pair per data core (pair c for core c, at most 16). The kernel programs the device's RSS with the Microsoft Toeplitz key and the same 128-entry indirection table its own steering then uses, so a TCP/IPv4 flow (and a TCP/IPv6 one where the device offers that hash type, ADR-333) lands on the queue of the core that owns it; everything unhashed (ARP, ICMP, ICMPv6, UDP) goes to pair 0 (core 0). Each core receives, transmits and is woken (its own MSI-X vector, ADR-270's probation and fallback per pair) on its own pair; a frame that is not the core's own (another listener's port, a misplaced frame) goes to core 0 over the c→0 ring and is steered as if it had arrived on pair 0. Cores beyond the pairs are served through pair 0 as below |
 | Multiqueue without RSS | `VIRTIO_NET_F_MQ` only | Not used: the device's own steering cannot be matched and may move a flow between queues (reordering). One pair, as below, and the boot line says why |
 | Dispatcher | one queue pair | Core 0 owns the NIC: it computes the Toeplitz hash, moves each received frame (one copy out of the DMA ring) through an SPSC ring to the core that owns the flow, and transmits the frames the cores send back over their c→0 rings |
 
@@ -132,6 +142,9 @@ budget below is the plan that M15 will measure against, not a measurement:
 | Connection table slot | ~16 B | open-addressing hash on the 4-tuple |
 | Timer wheel entries | ~32 B | retransmit and keepalive |
 | **Idle total** | **~300–400 B** | no per-connection RX/TX buffers while idle |
+
+With IPv6 (NEXT-1, ADR-330) the TCP control block holds a 16-byte address for both families: 128 bytes, checked
+by `connection_state_stays_small`.
 
 While idle there are no per-connection buffers. A pooled buffer is attached
 only while an MQTT frame or TLS record is incomplete, or while TX data is

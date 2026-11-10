@@ -116,7 +116,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | virtio-net multiqueue + RSS | 📋 later (needs tap/vhost to test) |
 | **Network** | Own DHCPv4 client, ARP, ICMP echo, strict IPv4 (no options, no fragments) | ✅ M14 |
 | | Own server-only TCP: SYN cookies, timing wheel, NewReno, ACK coalescing, no TIME_WAIT | ✅ M14 |
-| | IPv6 + SLAAC | 📋 later |
+| | IPv6 beside IPv4: SLAAC or a static address, DAD, Neighbour Discovery, every listener dual-stack (off by default) | ✅ NEXT-1 |
 | **TLS** | TLS 1.3 only, **mutual TLS**, device id from CN or SAN URI | ✅ M10 |
 | | rustls handshake, then own record layer (AES-128-GCM, ChaCha20-Poly1305, KeyUpdate) | ✅ M10 |
 | | Session resumption (PSK tickets under random keys rotated every 12 h), handshake admission control, revocation list | ✅ M10, H2 |
@@ -1135,7 +1135,8 @@ mode = "auto"                  # the ISO's live entry runs from RAM (ephemeral);
 
 `storage.mode = "disk"` refuses to start from the ISO's live entry, `"auto"` allows it with data in RAM,
 `"ram"` is always diskless. The checked-in file holds the author's test VPS; replace the address and
-gateway with yours. IPv6 is not supported. See [docs/DEPLOY.md](docs/DEPLOY.md) for provider notes.
+gateway with yours. IPv6 is off unless `network.ipv6` says `"slaac"` or `"static"` (format 23,
+[docs/OPERATE.md](docs/OPERATE.md#ipv6-next-1-adr-330-to-adr-334)). See [docs/DEPLOY.md](docs/DEPLOY.md) for provider notes.
 
 > [!CAUTION]
 > A prod image embeds your server private key, so treat the ISO itself as a secret. The images
@@ -1332,7 +1333,7 @@ after it, and the bare-metal drivers are the commercial edition's scope ([docs/E
 
 riscv64 is a later, separate step (PROMPT-x86_64.md §9).
 
-Later: IPv6, cold-session compression, an export bridge,
+Later: cold-session compression, an export bridge,
 and ACPI-only validation on real ARM clouds.
 
 ## Contributing
