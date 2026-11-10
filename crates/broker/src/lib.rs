@@ -333,10 +333,12 @@ const MAX_CONTROL_BACKLOG: usize = 64;
 /// connection whose CONNECT does not come within a reasonable time. The
 /// transport's own handshake deadline stops once the connection is handed
 /// to the broker; without this one a connection that never sent CONNECT
-/// was held forever (and its slot with it), and a CONNECT sent after its
-/// identity had been disallowed was accepted. Input before the CONNECT does
-/// not move it: a client that drips a byte at a time gets no longer.
-pub const CONNECT_TIMEOUT_MS: u64 = 10_000;
+/// was held forever, and its slot with it. Input before the CONNECT does not
+/// move it: a client that drips a byte at a time gets no longer. A minute,
+/// not the handshake's 10 s: a WebSocket page may upgrade before its MQTT
+/// library connects, and the deadline is about holding a slot for ever, not
+/// about authorisation (`disconnect_unless` covers these connections).
+pub const CONNECT_TIMEOUT_MS: u64 = 60_000;
 
 /// What an operator asked for on a `$SYS/` request topic (O1, O2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

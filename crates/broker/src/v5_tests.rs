@@ -2281,14 +2281,23 @@ fn a_connection_without_connect_is_closed_after_the_connect_timeout() {
     late.send(&mut b, &connect5("d3", 5), CONNECT_TIMEOUT_MS - 1);
     assert!(matches!(late.recv(&mut b)[0], G::ConnAck { code: 0, .. }));
     b.tick(CONNECT_TIMEOUT_MS + 1);
-    assert_eq!(b.close_requested(idle.c), Some(CloseReason::KeepAliveTimeout));
-    assert_eq!(b.close_requested(drip.c), Some(CloseReason::KeepAliveTimeout));
+    assert_eq!(
+        b.close_requested(idle.c),
+        Some(CloseReason::KeepAliveTimeout)
+    );
+    assert_eq!(
+        b.close_requested(drip.c),
+        Some(CloseReason::KeepAliveTimeout)
+    );
     // The keep alive runs from the CONNECT (1.5 x 5 s), not from `open`.
     assert_eq!(b.close_requested(late.c), None);
     b.tick(CONNECT_TIMEOUT_MS - 1 + 7_400);
     assert_eq!(b.close_requested(late.c), None);
     b.tick(CONNECT_TIMEOUT_MS - 1 + 7_600);
-    assert_eq!(b.close_requested(late.c), Some(CloseReason::KeepAliveTimeout));
+    assert_eq!(
+        b.close_requested(late.c),
+        Some(CloseReason::KeepAliveTimeout)
+    );
 }
 
 /// Security review v0.6.0, AUTHZ-4 (ADR-364): the Will was checked at
@@ -2363,13 +2372,20 @@ fn a_narrowed_accounts_will_is_dropped_with_its_login() {
         0,
     );
     assert_eq!(p.recv(&mut b)[0].code(), 0);
-    b.set_login_class(|id| if id == "bob" { CLASS_READ_ONLY } else { CLASS_FULL });
+    b.set_login_class(|id| {
+        if id == "bob" {
+            CLASS_READ_ONLY
+        } else {
+            CLASS_FULL
+        }
+    });
     let closed = b.disconnect_unless(|id, _| id != "bob", CloseReason::Disallowed);
     assert_eq!(closed, 1);
     b.closed(p.c, 10);
     let got = a.recv(&mut b);
     assert!(
-        !got.iter().any(|g| matches!(g, G::Publish { topic, .. } if topic == "lan/bob/status")),
+        !got.iter()
+            .any(|g| matches!(g, G::Publish { topic, .. } if topic == "lan/bob/status")),
         "{got:?}"
     );
 }

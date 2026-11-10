@@ -854,8 +854,7 @@ fn a_revocation_during_the_clients_flight_refuses_the_handshake() {
         let revocations = Arc::new(RevocationList::new(Vec::new()));
         let srv = server_with(&d, &["ca.pem"], &[], revocations.clone());
         let mut client =
-            ClientConnection::new(cfg.clone(), ServerName::try_from("localhost").unwrap())
-                .unwrap();
+            ClientConnection::new(cfg.clone(), ServerName::try_from("localhost").unwrap()).unwrap();
         let mut sess = srv.accept().unwrap();
         let mut app = Vec::new();
         // Flight 1 and the server's answer.

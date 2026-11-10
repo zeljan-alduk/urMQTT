@@ -3289,7 +3289,7 @@ plaintext() {
                 "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" "client: qos1-after-reconnect ok"
                 "client: tls-revoked-rejected ok") ;;
             lockout) extra=("plaintext: 10\.0\.2\.2 is locked out for 10 s after 3 failed login\(s\)" "plaintext: 1 SYN\(s\) from locked-out addresses dropped without an answer"
-                "client: locked-out-address-gets-no-answer ok" "client: login-works-again-after-the-lockout ok" "client: tls-is-not-locked-out ok") ;;
+                "client: a-login-inside-the-window-works ok" "client: locked-out-address-gets-no-answer ok" "client: login-works-again-after-the-lockout ok" "client: tls-is-not-locked-out ok") ;;
             refused) extra=("plaintext: 1 SYN\(s\) from addresses outside plaintext\.allow_from dropped without an answer"
                 "client: refused-source-gets-no-answer ok" "client: tls-works-beside-a-refused-plaintext-source ok" "NOT:login refused") ;;
             anonymous) extra=("mqtt: plaintext.auth = \"anonymous\"" "client: anonymous-default-clients ok" "client: anonymous-acl ok") ;;

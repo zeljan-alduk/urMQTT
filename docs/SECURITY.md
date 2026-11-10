@@ -169,7 +169,15 @@ changes state without a new image, so it gets its own model.
 - Each core closes its live connections whose certificate serial is newly
   revoked, or whose identity left the allowlist.
 - A revoked device is refused at its next full handshake and at its next
-  resumption.
+  resumption. A full handshake reads the list when the client's Certificate is
+  verified and again at its Finished, so a revocation that lands while a client
+  holds back the rest of its flight still refuses it (ADR-361, test
+  `a_revocation_during_the_clients_flight_refuses_the_handshake`).
+- An identity that leaves the allowlist loses its connections that have not sent
+  CONNECT yet as well as its sessions, and no connection waits for its CONNECT
+  longer than 60 s after its handshake (ADR-362).
+- The Will of a connection closed for any of these reasons (revoked, disallowed,
+  account removed or changed) is dropped, delayed or not (ADR-364).
 - An account that was removed, or whose password hash or class changed, has its
   live plaintext and WebSocket logins closed by the cores that hold them; the
   next login sees the new table.
@@ -332,7 +340,11 @@ exists only so that opening the port to everyone is never an accident.
 2. **Failed logins lock the source address out** (`max_failed_auths_per_ip`
    failures in `lockout_s` seconds: 5 in 300 by default). A locked-out address
    gets no SYN-ACK either. The count is by address, not by user name, so nobody
-   can lock a user out from elsewhere (smoke `plaintext-lockout`).
+   can lock a user out from elsewhere (smoke `plaintext-lockout`). A successful
+   login does not clear the count (an account holder could otherwise guess other
+   accounts' passwords between its own logins without end), and a CONNECT on a
+   connection the address opened before its lock-out is refused unjudged
+   (ADR-363, test `logins_between_failures_do_not_save_an_address_from_the_lockout`).
 3. **Logins cost CPU and are admitted at a rate** (a password check is about
    25 ms of one core at the default 100 000 iterations under HVF on the test
    machine, an estimated 50 ms on a VPS vCPU; the rate is sized from a
@@ -344,9 +356,11 @@ exists only so that opening the port to everyone is never an accident.
    OWASP's 600 000 for PBKDF2-HMAC-SHA-256 (ADR-267).
 4. **Whatever the reason, a refused login looks the same and takes the same
    time**: no credentials, unknown user and wrong password are all CONNACK 4 and
-   exactly one password hash is computed on each path (host tests
-   `every_refusal_is_a_bad_login_with_one_code` and
-   `the_work_does_not_depend_on_whether_the_user_exists` in `urmqtt-plain::auth`).
+   exactly one password hash is computed on each path, at the dearest iteration
+   count of all accounts even for a cheaper account's hash (ADR-364) (host tests
+   `every_refusal_is_a_bad_login_with_one_code`,
+   `the_work_does_not_depend_on_whether_the_user_exists` and
+   `a_cheaper_account_takes_as_long_as_an_unknown_user` in `urmqtt-plain::auth`).
 
 ### Authentication modes
 
@@ -753,6 +767,12 @@ power cut, and the broker goes on.
 
 - TLS 1.3 only, mutual TLS against the embedded trust anchors, the client id
   must equal the certificate's device id (smoke: `mqtt-tls`).
+- **The identity is unambiguous (ADR-360):** a subject with more than one CN, or
+  a CN that is not a UTF8String or PrintableString, has no identity, and nor has
+  a SAN with more than one `urn:urmqtt:` URI; `scripts/pki.sh sign-csr` builds
+  the subject itself and never copies a CSR's (test
+  `a_subject_with_two_cns_or_a_cn_of_another_string_type_has_no_identity`,
+  `scripts/test-pki.sh`).
 - **Trust anchors by role (H1, ADR-049):**
   - Operational CAs give device and service rights. Two side by side allow
     rotation with overlap (smoke `ca-rotation`).
@@ -818,7 +838,8 @@ Every resource is bounded. What happens at the limit is part of the design:
 | Plaintext connections | `plaintext.max_connections`, `plaintext.max_connections_per_ip` | SYN dropped without an answer, or refused at the ACK |
 | Failed plaintext logins from one address | `plaintext.max_failed_auths_per_ip` in `plaintext.lockout_s` | the address gets no SYN-ACK for `lockout_s` |
 | Password checks (CPU) | their own admission rate, sized from a boot-time measurement | SYN dropped before any hashing; TLS admission untouched |
-| Time to finish a handshake and CONNECT | 10 s (3 s while three quarters of the in-flight limit are taken) | connection aborted |
+| Time to finish a handshake (and, on the dev and plaintext ports, CONNECT) | 10 s (3 s while three quarters of the in-flight limit are taken) | connection aborted |
+| Time from the end of the handshake (WebSocket: the upgrade) to CONNECT | 60 s, not extended by partial input (ADR-362; before v0.6.1 there was none) | connection closed |
 | Free heap | `memory.min_free_mb` | new connections refused (smoke: `storm`) |
 | DB core backlog | 16 384 requests | new connections refused; registry updates skipped beyond 4 096 |
 | Connections per core | `limits.max_connections_per_core` | refused |

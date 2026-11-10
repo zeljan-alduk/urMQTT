@@ -63,7 +63,9 @@ Then `scripts/pki.sh check deploy/prod` (below) and build (docs/DEPLOY.md), or u
 The rules the script follows are the kernel's: ECDSA P-256 keys only (the TLS stack has no other), the control key
 Ed25519; a client certificate carries its identity as the subject CN **and** as the SAN URI `urn:urmqtt:device:<id>`
 or `urn:urmqtt:service:<id>`, so `tls.identity_field` can be `"cn"` (default) or `"san_uri"`; an identity is
-`[A-Za-z0-9][A-Za-z0-9._:-]*` (it becomes a topic level: no `/ + #`, no leading `$`); serials are random and positive,
+`[A-Za-z0-9][A-Za-z0-9._:-]*` (it becomes a topic level: no `/ + #`, no leading `$`); the subject has **exactly one
+CN**, a UTF8String or PrintableString, and the SAN exactly one `urn:urmqtt:` URI (the broker gives a certificate with
+two CNs, or two such URIs, no identity: ADR-360); serials are random and positive,
 so `revoked.txt` holds exactly what `openssl x509 -serial` prints, in lower case. Nothing that exists is overwritten;
 private keys are created 0600. Every certificate issued is logged in `issued.tsv` (serial, kind, id, expiry).
 
@@ -111,7 +113,8 @@ urmqtt-control revoke --serial <hex> ...                                  # and 
 ## Device certificates at scale
 
 Do not generate device keys centrally. The device makes its key (in a secure element where it has one) and a CSR with
-`CN=<device id>`; the factory or the enrollment service has the CA sign it (`scripts/pki.sh sign-csr` for a batch on the
+`CN=<device id>`; the factory or the enrollment service has the CA sign it with a subject it builds itself, never the
+CSR's copied (a CSR may carry two CNs that two readers take differently, ADR-360; `scripts/pki.sh sign-csr`, for a batch on the
 offline machine: `for c in csrs/*.csr; do scripts/pki.sh sign-csr ~/urmqtt-pki "$c"; done`), or, for a fleet that
 enrolls in the field, the bootstrap flow of [PROVISIONING.md](PROVISIONING.md): a factory certificate under the
 bootstrap CA, a CSR published on `provision/<id>/csr`, the operational certificate returned on `provision/<id>/cert` by

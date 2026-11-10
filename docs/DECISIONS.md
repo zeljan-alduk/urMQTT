@@ -1782,7 +1782,7 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   - **Filtering happens at the SYN, and costs no state.** `App::syn_ok` for the plaintext port asks, in this order: is the source in `allow_from` (or is `allow_from_anywhere` set), is it locked out, does it hold its maximum of connections, is the listener full, is there a login-rate token and is memory free. Any "no" is **no SYN-ACK**: the peer sees silence, as for a closed firewall, and the kernel keeps no connection, no timer and no table entry for it. The checks run again at the final ACK (state may have changed since the cookie was sent), and only then is the connection counted. A scan of the allowed networks therefore costs the broker one comparison per SYN.
   - **One table of source addresses for all cores** (`urmqtt-plain::Sources`, behind a spin lock): per address, its connections, its failures in the current window and its lock-out. It is a fixed set of 8-way buckets, hashed under a per-boot random key (the generator must be up or boot stops), sized at twice `max_connections`. An address is entered only when it opens a connection that passed the allow-list or fails a login, never for a SYN; a full bucket drops an idle slot, never one with a live connection or an active lock-out, and when none can be dropped the new connection is refused rather than left untracked. One table, not one per core, because a client's connections spread over the cores by the hash of their 4-tuple, and a lock-out that one core knew would be a lock-out in name only.
   - **Three login modes** (`urmqtt-plain::Authenticator`). *password* (the default): the MQTT user name picks an account, the password must match its PBKDF2 hash, the user name is the identity. Every refusal (no credentials, unknown user, wrong password) is the same CONNACK 4 and **exactly one hash is computed on every path** (a decoy hash with the dearest account's iteration count stands in for an unknown user, the comparison is constant time), so neither the answer nor the time says whether a user exists. *anonymous*: every client is `anonymous_identity`; credentials sent are ignored. *ip*: the longest matching network of `ip_identities` names the identity; a source in none gets CONNACK 5. The configuration check refuses an identity that is also an `acl.service_ids`, `acl.operator_ids` or `control.service_ids` entry, and an identity may only use `A-Z a-z 0-9 - _ . :` (no `$`, `/`, `+` or `#`), and the broker gives every plaintext session the plaintext role whatever its name is.
-  - **Lock-out.** A failed login (a CONNACK 4 or 5 from the checks above, an unreadable first packet, a first packet that is no CONNECT) counts against the **source address**; `max_failed_auths_per_ip` failures inside `lockout_s` lock the address out for `lockout_s`. A locked-out address gets no SYN-ACK (and the connections it already holds are not touched: they passed). A success clears the count. Failures are by address, not by user name, so a user name cannot be locked out by someone else, and a client behind one NAT shares its address's fate, which is the cost of the rule and is why the defaults (5 in 300 s) are generous for a legitimate typo.
+  - **Lock-out.** A failed login (a CONNACK 4 or 5 from the checks above, an unreadable first packet, a first packet that is no CONNECT) counts against the **source address**; `max_failed_auths_per_ip` failures inside `lockout_s` lock the address out for `lockout_s`. A locked-out address gets no SYN-ACK (and the connections it already holds are not touched: they passed; since ADR-363 a CONNECT on one of them is not judged while the lock-out runs). ~~A success clears the count.~~ A success does not clear the count (ADR-363: it let an account holder guess without end). Failures are by address, not by user name, so a user name cannot be locked out by someone else, and a client behind one NAT shares its address's fate, which is the cost of the rule and is why the defaults (5 in 300 s) are generous for a legitimate typo.
   - **A login costs CPU, so it is admitted at a rate.** Plaintext has its own `Admission` instance per core, not the TLS one: the TLS path is untouched. In password mode each new connection takes a token from a bucket whose rate is `0.5 s / (cost of one hash)` per core, measured at boot (`plaintext: one password check costs about N us`), at least 20 and at most the TLS handshake rate (**amended by ADR-267:** at least 1, so the half-core rule holds at any cost). The watchdog's handshake budget is calibrated with the dearer of a TLS handshake and a password check, and a plaintext connection that has not sent its CONNECT counts as handshaking for it.
   - **The identity is the user name, and it is the ACL's `{id}`.** A plaintext session's ACL name is its identity; the patterns are `plaintext.acl_publish` and `acl_subscribe` (`{id}` is replaced), not the device ACL. Several devices may share an identity (anonymous and ip modes always do).
   - **The session namespace is separate.** The session key is `$plain/<identity>/<client id>`. `$` cannot start a certificate identity or a client id the TLS side accepts, so a plaintext client cannot collide with, take over or be taken over by a TLS session. The client id itself is free text (Mosquitto's tools send `mosqpub/<pid>` or, for MQTT 3.1.1 without `-i`, nothing): a non-empty id is used as sent, an empty one with a clean session is named `auto-N` by the broker. Plaintext sessions are **clean only**: a CONNECT with `clean_session = 0` is answered CONNACK 5 (2 if the id is also empty), so there is no stored session to be read by the next client with the same name and no offline queue to fill.
@@ -5561,3 +5561,106 @@ device the kernel does not drive is unaffected; one for a driven device would be
      edition's slot that holds an `[ext]` key; an edition reconfigures its image by rebuilding it with its own
      packer and `mkiso.sh --config-slot`.
   5. **The private repository itself** (`urmqtt-enterprise`) is not created and nothing is published.
+
+## ADR-360 — A certificate identity is the subject's one CN, or the SAN's one identity URI (security review v0.6.0, AUTHZ-1)
+
+- **Status:** Accepted (security review of v0.6.0, lens authentication and authorisation).
+- **Problem.** `identity::common_name()` took the first CN that was a UTF8String or PrintableString and skipped CNs of
+  every other string type. `scripts/pki.sh sign-csr` read the first CN of any type (`openssl -nameopt multiline`) and
+  `openssl x509 -req` copied the CSR's whole subject. A CSR with CN#1 T61String `sensor_042` (OpenSSL's default string
+  mask picks T61String for a `_`) and CN#2 PrintableString `operator` was signed as device `sensor_042`, with the SAN
+  URI `urn:urmqtt:device:sensor_042`, and the broker authenticated it as `operator`: operator, control or service
+  rights, or another device's session and queue. `pki.sh check` was fooled the same way. Any enrollment service that
+  reads "the CN" with an ordinary X.509 library had the same gap.
+- **Decision.**
+  1. A subject with more than one CN, or with a CN that is neither a UTF8String nor a PrintableString, has **no
+     identity** (`identity()` returns `None`, the handshake ends with `NoIdentity`, as for a certificate without a CN).
+     A SAN with more than one `urn:urmqtt:` identity URI has none either (`identity_field = "san_uri"`). Two readers of
+     the same certificate can then no longer disagree about whom it names.
+  2. `pki.sh sign-csr` refuses a CSR whose subject has not exactly one CN, and builds the subject itself
+     (`-subj /O=<org>/CN=<id>`); the CSR contributes its public key and the CN's value only. Every leaf the script
+     signs (device, service, server) gets its subject that way.
+  3. `pki.sh check` fails a client certificate with more than one CN or more than one `urn:urmqtt:` SAN URI.
+  4. docs/PKI.md and docs/PROVISIONING.md state the rule for enrollment services and other CAs.
+- **Compatibility.** Certificates of `pki.sh` and `make certs` have one CN and one URI and keep their identities
+  (test `the_dev_certificates_keep_their_identities`). A certificate from another CA with two CNs stops working; it
+  was ambiguous.
+- **Verified.** Host tests `identity::tests::a_subject_with_two_cns_or_a_cn_of_another_string_type_has_no_identity`
+  (fixtures in `crates/tls/tests/data`, made with OpenSSL; before the fix the two-CN certificate gave `operator`) and
+  `the_dev_certificates_keep_their_identities`; `scripts/test-pki.sh` (sign-csr refuses the two-CN CSR and issues
+  nothing, a CSR with more subject fields is signed with the built subject, check refuses two CNs and two URIs).
+
+## ADR-361 — A full handshake checks the revocation list again at its Finished (security review v0.6.0, AUTHZ-8)
+
+- **Status:** Accepted (security review of v0.6.0).
+- **Problem.** The list was read when the client's Certificate was verified, and again in `finish_handshake` for
+  resumed sessions only (M16). A client may cut its second flight into several records and hold back the
+  CertificateVerify and Finished for up to the handshake timeout (10 s). A revocation applied in between did not stop
+  the handshake, and the cores' scan of live connections (at the control epoch change) had passed the connection
+  already, since it was not established then: the revoked device got an established connection and a session until
+  the next, unrelated, control change. This contradicted "a revoked device is refused at its next full handshake".
+- **Decision.** `client_identity()` checks `revoked.is_revoked(ee)` for every handshake (one binary search; the error
+  text of the resumed case is unchanged). Nothing more is needed in the kernel: `control::publish` replaces the shared
+  list before it bumps the epoch (Release, read with Acquire), so a core whose handshake still read the old list has not
+  yet seen the new epoch, and its scan, when it comes, finds the connection established and closes it.
+- **Verified.** `tls/tests/handshake.rs` `a_revocation_during_the_clients_flight_refuses_the_handshake`: a rustls
+  client with `max_fragment_size = 64` (the flight is 12 records), the serial revoked before each record in turn; no
+  split establishes the certificate (before the fix: "revoked before record 10 of 12: established").
+
+## ADR-362 — `disallow` reaches a connection before its CONNECT; a CONNECT deadline in the broker (security review v0.6.0, AUTHZ-9)
+
+- **Status:** Accepted (security review of v0.6.0).
+- **Problem.** The allowlist is checked at `Event::Established`; on a control change the cores close the identities
+  that left it through `Broker::disconnect_unless`, which walked sessions only. A connection that was authenticated
+  and handed to the broker but had not sent CONNECT has no session and was not closed. The transport's handshake
+  deadline ends at the hand-over and the broker timed only connections with a keep alive (which CONNECT sets), so such
+  a connection could wait for ever, holding its slot, and send its CONNECT after `disallow`; it was accepted.
+- **Decision.**
+  1. `disconnect_unless` also judges every connection that has a bound identity and no session yet, with the role its
+     CONNECT would get (the login's role, bootstrap, or the ACL's role of the identity).
+  2. `CONNECT_TIMEOUT_MS` (60 s): `tick` closes a connection that has no session that long after `open`. Input
+     before the CONNECT does not extend it (`last_rx_ms` moves only once there is a session; the CONNECT sets it, so
+     the keep alive still runs from the CONNECT). MQTT 3.1.1 §3.1.4 asks for such a deadline. The kernel's own paths
+     hand a connection over at its CONNECT (plaintext, dev port) or right before it (TLS, after the handshake;
+     WebSocket, after the upgrade), so a client that behaves sees no difference. A minute rather than the handshake's
+     10 s (which docs/SECURITY.md's limits table had claimed for "handshake and CONNECT"): the authorisation half of
+     the finding is closed by point 1, the deadline only bounds how long an authenticated client holds a slot, and a
+     web page may upgrade before its MQTT library connects (the smoke `wss-…-idle-connections-no-leak` holds
+     upgraded connections without CONNECT for about 11 s plus the time it takes to open them).
+- **Verified.** Broker tests `disallowing_an_identity_closes_its_connection_that_has_not_sent_connect` and
+  `a_connection_without_connect_is_closed_after_the_connect_timeout` (both failed before).
+
+## ADR-363 — A login no longer clears the failure count; a locked-out address is not judged (security review v0.6.0, AUTHZ-2)
+
+- **Status:** Accepted (security review of v0.6.0). Amends ADR-230 ("A success clears the count").
+- **Problem.** `Sources::succeeded()` reset the address's failure count, and the plaintext and WebSocket listeners
+  called it on every accepted password (before the clean-session and allowlist checks, so even a refused CONNECT
+  reset it). An account holder who logged in after every 4 wrong guesses at someone else's account was never locked
+  out (limit 5 in 300 s): guessing ran at the login admission rate. Separately, `decide()` never asked whether the
+  address was locked out, so each connection opened before the lock-out (up to `max_connections_per_ip`) still had one
+  guess judged.
+- **Decision.** Failures expire with their window only: `succeeded()` no longer touches the count (the listeners still
+  report successes there, so the rule lives in the table and is tested with it). Both `decide()` functions refuse a
+  CONNECT from an address that is locked out now (CONNACK 5, counted as `auth_failed`, no hash, no new failure). The
+  cost: a user who mistyped four times and then logged in has one more try inside the window, not five; the defaults
+  (5 in 300 s) still allow for typos.
+- **Verified.** `plain` host test `logins_between_failures_do_not_save_an_address_from_the_lockout` (before: 1200
+  guesses in 300 s from one address; now locked at the 5th). `it_matches_a_model`'s model no longer clears on a login.
+
+## ADR-364 — A withdrawn identity's Will is dropped; every password path costs the dearest count (security review v0.6.0, AUTHZ-4, AUTHZ-3)
+
+- **Status:** Accepted (security review of v0.6.0; two low findings fixed because the changes are small).
+- **The Will (AUTHZ-4).** The Will is checked against the ACL and the account class at CONNECT only, and `closed()`
+  published it, or armed it with its Will Delay Interval, whatever the close reason. A connection closed because its
+  certificate was revoked, its identity disallowed, or its run-time account removed or changed
+  (`CloseReason::Disallowed`, the only reason the kernel uses for these) therefore published a Will for rights it no
+  longer had, and a 5.0 device's delayed Will went out up to its delay after the revocation. `closed()` now drops the
+  Will of such a connection; every other close is unchanged. Not covered: a delayed Will already armed by an ordinary
+  close, whose identity is revoked while it waits (the session is offline; the Will goes out at its time, as before).
+  Tests `a_revoked_devices_delayed_will_is_dropped`, `a_narrowed_accounts_will_is_dropped_with_its_login`.
+- **The time of a refusal (AUTHZ-3).** An existing account's hash cost its own iterations, an unknown user the
+  decoy's (the dearest count). With accounts of mixed counts (allowed: `hash-password --iterations`, run-time
+  accounts, hashes from before ADR-267) a refusal's time said whether the user name exists. `password()` now spends
+  the difference on a throwaway derivation, so every path costs the dearest count; the admission rate and the watchdog
+  budget were sized for that count already (`max_iterations`). Test `a_cheaper_account_takes_as_long_as_an_unknown_user`
+  (1 000 against 40 000 iterations: 3.2 ms against 126.8 ms in a debug build before).
