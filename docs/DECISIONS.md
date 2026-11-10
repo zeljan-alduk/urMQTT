@@ -5561,3 +5561,75 @@ device the kernel does not drive is unaffected; one for a driven device would be
      edition's slot that holds an `[ext]` key; an edition reconfigures its image by rebuilding it with its own
      packer and `mkiso.sh --config-slot`.
   5. **The private repository itself** (`urmqtt-enterprise`) is not created and nothing is published.
+
+## ADR-375 — A client that sends without reading has its input held, not an output buffer without bound (v0.6.0 security review, BROKER-1)
+
+- **Status:** Accepted (v0.6.1). Amends ADR-269 (a third reason to hold a connection's input) and ADR-223 (the
+  output bound now covers the broker's own answers).
+- **Context.** `max_outbound_bytes` (the kernel's 32 KiB, `TX_BUF`) bounded deliveries only. The packets the broker
+  answers itself (CONNACK, PINGRESP, PUBACK for a refused QoS 1 PUBLISH, PUBREL for a PUBREC, SUBACK, UNSUBACK) were
+  appended to the connection's output whatever its length, and its input was parsed however full that output was.
+  An authenticated client that kept sending PINGREQ and never read turned what it sent 1:1 into heap (6.5 MB of
+  PINGREQ, 6.5 MB of output; 13.6 MB of mixed answers, 10 MB). The TCP stack's persist timer probes a zero window
+  without end and nothing closed the connection, so one device could exhaust the heap; a failed allocation panics and
+  the panic handler stops the VM. Found by the v0.6.0 security review (BROKER-1, medium).
+- **Decision.**
+  1. Before each packet, `Broker::parse` checks the connection's own output. At or above `max_outbound_bytes` +
+     `limits.max_packet_size` + `OUT_SLACK` (4 KiB; 40 KiB with the defaults) it stops, marks the connection
+     `flow::OUT_FULL` and asks the transport to close its receive window (the ADR-269 event). Deliveries stop at
+     `max_outbound_bytes` plus one packet, so a client that reads (or whose TCP receive buffer takes the bytes) never
+     reaches the mark; only answers to a client that does not read do.
+  2. `Broker::consumed` ends the hold once the output is down to `max_outbound_bytes`: the held bytes drain in
+     slices from the next `poll_flow`, as after a pause, and the window opens when they are parsed. Nothing is
+     dropped: every held packet is answered once the client reads.
+  3. A connection held for its own output is not exempt from keep alive (a paused publisher is, ADR-269): it does
+     not read, and its keep alive ends it (1.5 times the interval). Bytes that still arrive are held up to
+     `HOLD_CONN` (2 MiB) plus a packet; beyond, the transport ignored the closed window and the connection is closed
+     (`CloseReason::Refused(0x97)`, DISCONNECT Quota exceeded on 5.0).
+  4. No cycle of holds can form through this rule: it waits for the client's own TCP, never for another
+     connection, and `single_full` never pauses a publisher for a recipient whose input is held.
+- **Rejected.** Closing the connection as soon as its output passes a bound: a client reconnecting to a 3.1.1
+  persistent session is resent its whole window at once (`resend_owed`), which can legitimately exceed any small
+  bound, and would be closed in a loop. Holding is back-pressure; it costs a client that reads nothing.
+- **Verified.** `a_client_that_never_reads_cannot_grow_its_output_without_bound` (the output stays under the mark,
+  the window is closed once, a transport that ignores it gets the connection closed at `HOLD_CONN`),
+  `a_held_reader_gets_every_answer_once_it_reads_again` (10 000 PINGREQ sent without reading: all 10 000 PINGRESP
+  arrive once it reads, the window opens again, the connection stays); the ADR-269 tests unchanged; `broker_input`
+  fuzzing.
+
+## ADR-376 — Device-scoped filters are counted and pruned at zero (v0.6.0 security review, BROKER-5)
+
+- **Status:** Accepted (v0.6.1). Completes H0-W1's "unsubscribing removes unused nodes" for the device-scoped trie.
+- **Context.** A filter in a device's own scope (`devices/<id>/...`, PROMPT §7.3) is interned relative to the scope
+  in `Broker::scoped`, which every device shares, so that devices cost no trie nodes of their own. That trie held no
+  subscriber lists, and UNSUBSCRIBE and the session's end pruned only the main trie: every scoped filter ever
+  subscribed stayed with its nodes and path. SUBSCRIBE + UNSUBSCRIBE of fresh filters (one subscription at a time,
+  no rate limit) grew the heap by about 4.5 KB a pair (20 000 pairs: 89 MB), invisible to
+  `$SYS/broker/topic_nodes`, until the allocation failed and the VM stopped. Found by the v0.6.0 security review
+  (BROKER-5, medium).
+- **Decision.** A node of a trie counts the subscriptions that use it without a subscriber entry
+  (`Topics::hold` / `Topics::release`, a `u32` in each node). `Broker::add_sub` holds a new scoped filter (an existing
+  one only changes its options), `remove_sub` and `remove_session` release it, and at zero (and no subscriber, child
+  or retained message) its nodes are pruned as `Topics::unsubscribe` prunes the main trie. A filter two devices share
+  stays while one of them holds it.
+- **Rejected.** Subscriber lists in the scoped trie: they would cost an entry per device in the shared node that
+  the design avoids (`devices/<id>/cmd/#` is held by every device). A limit on distinct scoped filters per shard:
+  bounds the growth but keeps the leak.
+- **Verified.** `scoped_filters_leave_no_nodes_behind` (300 fresh filters subscribed and unsubscribed leave the
+  node count where it was; a shared filter survives one device leaving and still delivers; a clean session's end
+  and a takeover of a persistent session free the last hold); `device_scoped_subscriptions_share_one_filter`
+  unchanged.
+
+## ADR-377 — The in-flight window fits the packet ids (v0.6.0 security review, BROKER-2)
+
+- **Status:** Accepted (v0.6.1).
+- **Context.** `limits.max_inflight_qos1` was only checked to be above 0, and a 3.1.1 session's window is that value
+  unchanged. `alloc_pid` loops until it finds a packet id not in flight; with a window of 65 535 or more and a
+  subscriber that never acknowledges, the next delivery after 65 535 flights never returned and the watchdog
+  stopped the VM. Needs an operator to configure such a window (BROKER-2, low).
+- **Decision.** The schema accepts `limits.max_inflight_qos1` in 1..=65 535 (the field table's range, so runtime
+  changes are checked the same way), and `Broker::new` clamps `max_inflight` to `MAX_INFLIGHT` (65 535). A flight
+  starts only below the window, so fewer than 65 535 ids are in flight and `alloc_pid` finds one within 65 535 steps.
+  The configuration format is unchanged; a value above 65 535, which could only hang the broker, is now refused.
+- **Verified.** `the_inflight_window_fits_the_packet_id_space` (broker), `inflight_window_fits_the_packet_ids`
+  (schema: 65 536 refused, 65 535 accepted).

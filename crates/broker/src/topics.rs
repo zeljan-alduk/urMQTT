@@ -81,11 +81,18 @@ struct Node {
     /// The full filter, once the node is used as a subscription filter:
     /// sessions keep only the node id (PROMPT §7.3).
     path: Option<Box<str>>,
+    /// Subscriptions that use this filter without a subscriber entry: the
+    /// device-scoped filters of `Broker::scoped`, which every device shares
+    /// (ADR-376: pruned at zero, like `subs`).
+    holds: u32,
 }
 
 impl Node {
     fn unused(&self) -> bool {
-        self.children.is_empty() && self.subs.is_empty() && self.retained.is_none()
+        self.children.is_empty()
+            && self.subs.is_empty()
+            && self.holds == 0
+            && self.retained.is_none()
     }
 }
 
@@ -196,6 +203,29 @@ impl Topics {
         // The last subscriber gone: the filter's nodes go too, unless
         // something else still lives there (H3).
         if n.subs.is_empty()
+            && let Some(path) = n.path.clone()
+        {
+            self.prune(&path);
+        }
+    }
+
+    /// One more subscription uses filter `node` (interned by
+    /// [`Topics::intern_filter`]) without a subscriber entry (ADR-376).
+    pub fn hold(&mut self, node: NodeId) {
+        if let Some(n) = self.nodes.get_mut(node as usize) {
+            n.holds = n.holds.saturating_add(1);
+        }
+    }
+
+    /// One subscription less uses filter `node`: at zero, its nodes go, as
+    /// for [`Topics::unsubscribe`].
+    pub fn release(&mut self, node: NodeId) {
+        let Some(n) = self.nodes.get_mut(node as usize) else {
+            return;
+        };
+        n.holds = n.holds.saturating_sub(1);
+        if n.holds == 0
+            && n.subs.is_empty()
             && let Some(path) = n.path.clone()
         {
             self.prune(&path);

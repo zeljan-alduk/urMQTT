@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 
 use urmqtt_mqtt::QoS;
 
-use crate::{Broker, ConnId, SessionId};
+use crate::{Broker, CloseReason, ConnId, ReasonCode, SessionId};
 
 /// The policy (`limits.publisher_backpressure`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +51,10 @@ pub(crate) const DRAINING: u8 = 2;
 /// the input is held as for a pause, so later packets keep their order. Not
 /// a back-pressure state: the bits above leave it alone.
 pub(crate) const WAIT_SUBACK: u8 = 4;
+/// The connection's own output is over [`Broker::out_hold_limit`] (ADR-375):
+/// its input is held and its window closed until the transport took its
+/// output down to `max_outbound_bytes`; then it drains like a pause.
+pub(crate) const OUT_FULL: u8 = 8;
 
 /// Longest pause; then the publisher is read again, in cool-down.
 pub const PAUSE_MAX_MS: u64 = 500;
@@ -77,6 +81,13 @@ pub const HOLD_TOTAL: usize = 16 << 20;
 /// in cool-down (a transport that did not close its window).
 pub const HOLD_CONN: usize = 2 << 20;
 
+/// A connection's input is held while its output buffer is at or above
+/// `max_outbound_bytes` + `max_packet_size` + this (ADR-375): deliveries stop
+/// at `max_outbound_bytes` plus one packet, so only the packets the broker
+/// answers itself (CONNACK, PINGRESP, the acknowledgements, SUBACK) reach it,
+/// from a client that sends without reading.
+pub const OUT_SLACK: usize = 4096;
+
 /// Why [`Broker::parse`] stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stop {
@@ -88,6 +99,8 @@ pub(crate) enum Stop {
     Paused,
     /// The connection waits for a SUBACK (shared subscription, ADR-275).
     Waiting,
+    /// The connection's own output is full (ADR-375).
+    OutFull,
     /// The connection is gone or closing.
     Gone,
 }
@@ -261,7 +274,9 @@ impl Broker {
         };
         let was = k.flow;
         k.flow = PAUSED | (was & WAIT_SUBACK);
-        if was & DRAINING != 0 {
+        // Draining or held for its own output: the window is still closed
+        // (`parse` holds it again for its output if it is still full).
+        if was & (DRAINING | OUT_FULL) != 0 {
             // The window is still closed: no event.
             self.flow.draining.retain(|&x| x != c);
         } else {
@@ -360,8 +375,52 @@ impl Broker {
     /// Bytes arrived for a connection whose input is held.
     pub(crate) fn held_input(&mut self, c: ConnId, now_ms: u64) {
         let cap = HOLD_CONN + self.cfg.limits.max_packet_size as usize;
-        if self.conns.get(c).is_some_and(|k| k.inbuf.len() > cap) {
+        let Some(k) = self.conns.get(c).filter(|k| k.inbuf.len() > cap) else {
+            return;
+        };
+        if k.flow & OUT_FULL != 0 {
+            // It neither reads nor honours the closed window (ADR-375).
+            self.mark_close(c, CloseReason::Refused(ReasonCode::QuotaExceeded as u8));
+        } else {
             self.end_pause(c, now_ms, true);
+        }
+    }
+
+    /// The output length at which a connection's input is held (ADR-375).
+    pub(crate) fn out_hold_limit(&self) -> usize {
+        self.cfg
+            .max_outbound_bytes
+            .saturating_add(self.cfg.limits.max_packet_size as usize)
+            .saturating_add(OUT_SLACK)
+    }
+
+    /// `parse` found `c`'s output full: hold its input and close its window
+    /// (already closed while it drains).
+    pub(crate) fn hold_for_output(&mut self, c: ConnId) {
+        let Some(k) = self.conns.get_mut(c) else {
+            return;
+        };
+        let was = k.flow;
+        k.flow = OUT_FULL | (was & WAIT_SUBACK);
+        if was & (DRAINING | OUT_FULL) == 0 {
+            self.flow.events.push((c, true));
+        }
+        if was & DRAINING != 0 {
+            self.flow.draining.retain(|&x| x != c);
+        }
+    }
+
+    /// The transport took some of `c`'s output: once it is down to
+    /// `max_outbound_bytes`, the held input drains from the next
+    /// [`Broker::poll_flow`] on.
+    pub(crate) fn output_freed(&mut self, c: ConnId) {
+        let max_out = self.cfg.max_outbound_bytes;
+        if let Some(k) = self.conns.get_mut(c)
+            && k.flow & OUT_FULL != 0
+            && k.outbuf.len() <= max_out
+        {
+            k.flow = DRAINING | (k.flow & WAIT_SUBACK);
+            self.flow.draining.push(c);
         }
     }
 
@@ -428,8 +487,9 @@ impl Broker {
         let mut still = Vec::new();
         for c in draining {
             match self.parse(c, now_ms, DRAIN_SLICE) {
-                // Paused again: listed in `paused` (and the window is closed).
-                Stop::Paused => {}
+                // Paused again: listed in `paused` (and the window is closed);
+                // or held for its own output, until `output_freed`.
+                Stop::Paused | Stop::OutFull => {}
                 Stop::Budget | Stop::Waiting => still.push(c),
                 Stop::Incomplete | Stop::Gone => {
                     if let Some(k) = self.conns.get_mut(c) {

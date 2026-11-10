@@ -825,6 +825,12 @@ impl Session {
 /// (mosquitto's and paho's default windows), ADR-271.
 pub const MIN_QOS2_IDS: usize = 64;
 
+/// The largest in-flight window (`max_inflight`, ADR-377): the 65 535 packet
+/// ids. A session starts a flight only below its window, so fewer than this
+/// are in flight then and [`Broker::alloc_pid`] always finds a free id. A
+/// larger configured value is clamped to it (the schema refuses it).
+pub const MAX_INFLIGHT: usize = 65_535;
+
 /// One subscription: an interned filter. A device-scoped filter
 /// (`<scope>/<own client id>/<rest>`, PROMPT §7.3) is stored as `rest`,
 /// interned once for all devices in `Broker::scoped`, so devices cost no
@@ -1063,7 +1069,10 @@ fn within_limits(t: &str, limits: &Limits, valid: fn(&str) -> bool) -> bool {
 const INBUF_SLACK: usize = 5;
 
 impl Broker {
-    pub fn new(cfg: Config) -> Self {
+    pub fn new(mut cfg: Config) -> Self {
+        // ADR-377: a window beyond the packet ids would make `alloc_pid`
+        // spin; the configuration schema refuses it too.
+        cfg.max_inflight = cfg.max_inflight.min(MAX_INFLIGHT);
         Self {
             cfg,
             login_class: None,
@@ -1657,12 +1666,17 @@ impl Broker {
             }
         } else {
             match scoped_part(self.scope, &s.client_id, filter) {
-                Some(rel) => Sub {
-                    node: self.scoped.intern_filter(rel),
-                    opts,
-                    scoped: true,
-                    shared: false,
-                },
+                Some(rel) => {
+                    // Shared by every device: counted, pruned at zero (ADR-376).
+                    let node = self.scoped.intern_filter(rel);
+                    self.scoped.hold(node);
+                    Sub {
+                        node,
+                        opts,
+                        scoped: true,
+                        shared: false,
+                    }
+                }
                 None => {
                     let node = self.topics.intern_filter(filter);
                     self.topics.subscribe(node, sid, opts);
@@ -1696,7 +1710,9 @@ impl Broker {
             if sub.shared {
                 self.leave(sid, role, sub.node);
                 self.share_paths.unsubscribe(sub.node, sid);
-            } else if !sub.scoped {
+            } else if sub.scoped {
+                self.scoped.release(sub.node);
+            } else {
                 self.topics.unsubscribe(sub.node, sid);
             }
         }
@@ -2017,6 +2033,12 @@ impl Broker {
             if conn.flow & flow::WAIT_SUBACK != 0 {
                 break flow::Stop::Waiting;
             }
+            // A client that sends without reading what it is answered gets
+            // its input held, not an output buffer without bound (ADR-375).
+            if conn.outbuf.len() >= self.out_hold_limit() {
+                self.hold_for_output(c);
+                break flow::Stop::OutFull;
+            }
             if off >= budget {
                 break flow::Stop::Budget;
             }
@@ -2122,6 +2144,8 @@ impl Broker {
         if let Some(conn) = self.conn(c) {
             conn.outbuf.consume(n);
         }
+        // Input held for this output (ADR-375): drained once it is down.
+        self.output_freed(c);
         // Space freed: move queued QoS 1 messages into flight.
         if let Some(s) = self.conn(c).and_then(|k| k.session) {
             self.pump(s);
@@ -2290,9 +2314,10 @@ impl Broker {
         let mut late5 = Vec::new();
         for (i, k) in self.conns.iter_mut() {
             // A connection whose input is held for back-pressure is alive:
-            // its PINGREQ waits in the held bytes (ADR-269).
+            // its PINGREQ waits in the held bytes (ADR-269). One held for
+            // its own unread output is not (ADR-375): it does not read.
             if k.close.is_none()
-                && k.flow == 0
+                && k.flow & !flow::OUT_FULL == 0
                 && k.keepalive_s > 0
                 && now_ms.saturating_sub(k.last_rx_ms) > u64::from(k.keepalive_s) * 1500
             {
@@ -2914,8 +2939,12 @@ impl Broker {
         self.will_at.cancel(sid);
         let will = self.wills.remove(&sid);
         self.subs_total = self.subs_total.saturating_sub(s.subs.len());
-        for x in s.subs.as_slice().iter().filter(|x| !x.scoped && !x.shared) {
-            self.topics.unsubscribe(x.node, sid);
+        for x in s.subs.as_slice().iter().filter(|x| !x.shared) {
+            if x.scoped {
+                self.scoped.release(x.node);
+            } else {
+                self.topics.unsubscribe(x.node, sid);
+            }
         }
         if !self.sub_ids.is_empty() {
             let keys: Vec<(SessionId, u8, NodeId)> = self
@@ -3262,7 +3291,9 @@ impl Broker {
         to
     }
 
-    /// The next packet id not in flight (the window is far below 65 535).
+    /// The next packet id not in flight. Called only below the window, so
+    /// fewer than [`MAX_INFLIGHT`] (65 535) ids are in flight and one is
+    /// free: the loop ends within 65 535 steps (ADR-377).
     fn alloc_pid(s: &mut Session) -> u16 {
         loop {
             let id = s.next_pid;

@@ -715,3 +715,86 @@ fn qos2_flows_of_a_paused_publisher_complete_after_the_pause() {
     pubr.send(&mut b, &Packet::PubComp(to_a), 3);
     assert_eq!(b.close_requested(pubr.c), None);
 }
+
+/// BROKER-1 (v0.6.0 security review, ADR-375): a client that never reads
+/// and keeps sending packets the broker answers itself (PINGREQ, a PUBREC
+/// for an unknown id, a QoS 1 PUBLISH the ACL refuses) used to grow its
+/// output buffer without bound, the bytes it sent turned 1:1 into heap,
+/// until the allocation failed and the VM stopped. Now its input is held
+/// once its output is over `max_outbound_bytes` + `max_packet_size` +
+/// `OUT_SLACK`, its receive window is closed, and a transport that does not
+/// honour the window has the connection closed at `HOLD_CONN`.
+#[test]
+fn a_client_that_never_reads_cannot_grow_its_output_without_bound() {
+    use crate::flow::{HOLD_CONN, OUT_SLACK};
+    let cfg = flow_cfg();
+    let bound = cfg.max_outbound_bytes + cfg.limits.max_packet_size as usize + OUT_SLACK;
+    let mut b = Broker::new(cfg);
+    let (c, _) = Client::connect_tls(&mut b, "a", 0);
+    assert!(flow_events(&mut b).is_empty());
+    let mut burst = Vec::new();
+    for _ in 0..1024 {
+        burst.extend(wire(&Packet::PingReq));
+        burst.extend(wire(&Packet::PubRec(7)));
+        burst.extend(wire(&Packet::Publish(Publish {
+            dup: false,
+            qos: QoS::AtLeastOnce,
+            retain: false,
+            topic: "elsewhere/x",
+            packet_id: Some(9),
+            payload: b"",
+        })));
+    }
+    let mut sent = 0usize;
+    let mut most = 0usize;
+    for r in 0..256u64 {
+        if b.close_requested(c.c).is_some() {
+            break;
+        }
+        b.input(c.c, &burst, r * 100);
+        b.tick(r * 100);
+        b.poll_flow(r * 100);
+        sent += burst.len();
+        most = most.max(b.output(c.c).len());
+    }
+    assert!(most < bound + 16, "output {most} bytes, bound {bound}");
+    // The window was closed once (the transport stops reading) ...
+    assert_eq!(flow_events(&mut b), vec![(c.c, true)]);
+    // ... and this transport ignored it: closed once it held HOLD_CONN.
+    assert!(sent > HOLD_CONN + 4096, "sent {sent}");
+    assert_eq!(
+        b.close_requested(c.c),
+        Some(CloseReason::Refused(ReasonCode::QuotaExceeded as u8))
+    );
+}
+
+/// BROKER-1: the hold is back-pressure, not a penalty: a client that reads
+/// again gets every answer, in order, and its window opens again.
+#[test]
+fn a_held_reader_gets_every_answer_once_it_reads_again() {
+    let mut b = Broker::new(flow_cfg());
+    let (mut c, _) = Client::connect_tls(&mut b, "a", 0);
+    let mut bytes = Vec::new();
+    for _ in 0..10_000 {
+        bytes.extend(wire(&Packet::PingReq));
+    }
+    b.input(c.c, &bytes, 1);
+    assert!(b.input_held(c.c));
+    assert_eq!(flow_events(&mut b), vec![(c.c, true)]);
+    let mut pongs = 0;
+    let mut now = 1;
+    while pongs < 10_000 {
+        let got = c.recv(&mut b);
+        assert!(got.iter().all(|g| *g == Got::PingResp), "{got:?}");
+        pongs += got.len();
+        now += 1;
+        b.poll_flow(now);
+        b.tick(now);
+        assert!(now < 10_000, "stuck at {pongs}");
+    }
+    assert_eq!(pongs, 10_000);
+    assert!(!b.input_held(c.c));
+    assert_eq!(b.close_requested(c.c), None);
+    let ev = flow_events(&mut b);
+    assert_eq!(ev.last(), Some(&(c.c, false)), "{ev:?}");
+}
