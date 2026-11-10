@@ -20,10 +20,10 @@ use urmqtt_cfg::{CfgError, fields};
 
 use crate::{
     Acl, BuildConfig, Cidr, Console, Control, Cpu, DEV_KERNEL, Devices, DiscardMode, Entropy,
-    IdentityField, Ipv4Cidr, Limits, LogLevel, Memory, Metrics, Mqtt5, Network, NetworkMode,
-    Observability, PlainAuth, PlainNetwork, PlainUser, Plaintext, Rate, Registry, SocketAddrV4,
-    Storage, StorageMode, Time, Tls, Trust, Update, UpdateConfirm, VirtioGpuMode, Watchdog,
-    WatchdogAction, Websocket, WsAuth,
+    IdentityField, Ipv4Cidr, Ipv6, Limits, LogLevel, Memory, Metrics, Mqtt5, Net, Network,
+    NetworkMode, Observability, PlainAuth, PlainNetwork, PlainUser, Plaintext, Rate, Registry,
+    SocketAddrV4, Storage, StorageMode, Time, Tls, Trust, Update, UpdateConfirm, VirtioGpuMode,
+    Watchdog, WatchdogAction, Websocket, WsAuth,
 };
 
 /// Room for every plain-text string list of the field table at its
@@ -43,14 +43,15 @@ const USER_SLOTS: usize = 2 * fields::MAX_PLAIN_USERS;
 const METRICS_NET_SLOTS: usize = fields::MAX_METRICS_NETWORKS;
 const IPID_SLOTS: usize = fields::MAX_PLAIN_IP_IDENTITIES;
 
-const NO_NET: Cidr = Cidr { addr: 0, prefix: 0 };
+const NO_CIDR: Cidr = Cidr { addr: 0, prefix: 0 };
+const NO_NET: Net = Net::V4(NO_CIDR);
 
 struct Arena {
     strs: [&'static str; STR_SLOTS],
     pems: [&'static [u8]; PEM_SLOTS],
     addrs: [SocketAddrV4; ADDR_SLOTS],
-    nets: [Cidr; NET_SLOTS],
-    metrics_nets: [Cidr; METRICS_NET_SLOTS],
+    nets: [Net; NET_SLOTS],
+    metrics_nets: [Net; METRICS_NET_SLOTS],
     users: [PlainUser; USER_SLOTS],
     ipids: [PlainNetwork; IPID_SLOTS],
 }
@@ -68,7 +69,7 @@ impl Arena {
             metrics_nets: [NO_NET; METRICS_NET_SLOTS],
             users: [PlainUser { id: "", hash: "" }; USER_SLOTS],
             ipids: [PlainNetwork {
-                net: NO_NET,
+                net: NO_CIDR,
                 id: "",
             }; IPID_SLOTS],
         }
@@ -201,14 +202,14 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
         .iter_mut()
         .zip(
             b.strs(tag::PL_ALLOW_FROM)
-                .filter_map(|s| Cidr::parse(s).ok()),
+                .filter_map(|s| Net::parse(s).ok()),
         )
         .enumerate()
     {
         *slot = c;
         n_nets = i + 1;
     }
-    let allow_from: &'static [Cidr] = arena.nets.get(..n_nets).unwrap_or_default();
+    let allow_from: &'static [Net] = arena.nets.get(..n_nets).unwrap_or_default();
     // The metrics endpoint's allow-list (ADR-290), the same way.
     let mut n_metrics = 0;
     for (i, (slot, c)) in arena
@@ -216,14 +217,14 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
         .iter_mut()
         .zip(
             b.strs(tag::METRICS_ALLOW_FROM)
-                .filter_map(|s| Cidr::parse(s).ok()),
+                .filter_map(|s| Net::parse(s).ok()),
         )
         .enumerate()
     {
         *slot = c;
         n_metrics = i + 1;
     }
-    let metrics_allow: &'static [Cidr] = arena.metrics_nets.get(..n_metrics).unwrap_or_default();
+    let metrics_allow: &'static [Net] = arena.metrics_nets.get(..n_metrics).unwrap_or_default();
     // Accounts: the plaintext ones first, then the WebSocket ones (ADR-272).
     let (pl_slots, ws_slots) = arena
         .users
@@ -282,6 +283,22 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
         },
         _ => NetworkMode::Dhcp,
     };
+    // IPv6 (ADR-334): the check passed, so static has both keys parsed.
+    let ipv6 = match b.variant(tag::NET_IPV6) {
+        1 => Ipv6::Slaac,
+        2 => match (
+            urmqtt_cfg::net::parse_ipv6_address(b.str(tag::NET_IPV6_ADDRESS)),
+            urmqtt_cfg::net::parse_ipv6_gateway(b.str(tag::NET_IPV6_GATEWAY)),
+        ) {
+            (Ok((address, prefix_len)), Ok(gateway)) => Ipv6::Static {
+                address,
+                prefix_len,
+                gateway,
+            },
+            _ => Ipv6::Off,
+        },
+        _ => Ipv6::Off,
+    };
     let (tokens, per_ms) = b.rate(tag::LIM_PUBLISH_RATE);
     BuildConfig {
         env: b.str(tag::ENV),
@@ -296,6 +313,7 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             mtu: u16::try_from(b.uint(tag::NET_MTU))
                 .ok()
                 .filter(|m| u64::from(*m) >= fields::MIN_MTU),
+            ipv6,
         },
         tls: Tls {
             cert_pem: b.bin(tag::TLS_CERT),
@@ -859,10 +877,10 @@ mod tests {
             (9273, 3, 1, 30)
         );
         assert_eq!(m.allow_from.len(), 2);
-        assert!(m.allow_from[0].contains(u32::from_be_bytes([10, 1, 2, 3])));
-        assert!(!m.allow_from[0].contains(u32::from_be_bytes([11, 1, 2, 3])));
-        assert!(m.allow_from[1].contains(u32::from_be_bytes([192, 168, 7, 9])));
-        assert!(!m.allow_from[1].contains(u32::from_be_bytes([192, 168, 7, 8])));
+        assert!(m.allow_from[0].contains_v4([10, 1, 2, 3]));
+        assert!(!m.allow_from[0].contains_v4([11, 1, 2, 3]));
+        assert!(m.allow_from[1].contains_v4([192, 168, 7, 9]));
+        assert!(!m.allow_from[1].contains_v4([192, 168, 7, 8]));
     }
 
     /// NOW-13, ADR-269: publisher back-pressure is on ("single") by default
@@ -1309,9 +1327,9 @@ mod tests {
         assert!(p.enabled && p.retain && !p.allow_from_anywhere);
         assert_eq!(p.port, 1884);
         assert_eq!(p.allow_from.len(), 2);
-        assert!(p.allow_from[0].contains_octets([10, 9, 9, 9]));
-        assert!(!p.allow_from[0].contains_octets([11, 0, 0, 1]));
-        assert!(p.allow_from[1].contains_octets([192, 168, 1, 77]));
+        assert!(p.allow_from[0].contains_v4([10, 9, 9, 9]));
+        assert!(!p.allow_from[0].contains_v4([11, 0, 0, 1]));
+        assert!(p.allow_from[1].contains_v4([192, 168, 1, 77]));
         assert_eq!(p.users.len(), 2);
         assert_eq!(
             (p.users[0].id, p.users[0].hash),
@@ -1397,5 +1415,52 @@ mod tests {
         let slot: &'static [u8] = Box::leak(slot.into_boxed_slice());
         assert!(load(slot).is_err());
         assert_eq!(CONFIG.network.mqtt_tls_port, 8883);
+    }
+
+    /// ADR-334: IPv6 is off by default (the empty blob, and every blob
+    /// before format 23); slaac and static are decoded; IPv6 networks in an
+    /// allow-list come back typed beside the IPv4 ones.
+    #[test]
+    fn ipv6_is_off_by_default_and_decoded() {
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.network.ipv6, Ipv6::Off);
+        let mut b = Builder::new();
+        b.variant(tag::NET_IPV6, 2).unwrap();
+        b.str(tag::NET_IPV6_ADDRESS, "2001:db8:1::10/64").unwrap();
+        b.str(tag::NET_IPV6_GATEWAY, "fe80::1").unwrap();
+        b.strs(tag::METRICS_ALLOW_FROM, &["10.0.0.0/8", "2001:db8::/32"])
+            .unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 23);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        let mut addr = [0u8; 16];
+        addr[..6].copy_from_slice(&[0x20, 1, 0xd, 0xb8, 0, 1]);
+        addr[15] = 0x10;
+        let mut gw = [0u8; 16];
+        gw[..2].copy_from_slice(&[0xfe, 0x80]);
+        gw[15] = 1;
+        assert_eq!(
+            c.network.ipv6,
+            Ipv6::Static {
+                address: addr,
+                prefix_len: 64,
+                gateway: gw
+            }
+        );
+        assert_eq!(c.network.ipv6.name(), "static");
+        let m = c.metrics;
+        assert_eq!(m.allow_from.len(), 2);
+        assert!(m.allow_from[1].is_v6() && m.allow_from[1].contains_v6(&addr));
+        assert!(!m.allow_from[0].contains_v6(&addr));
+        let mut s = Builder::new();
+        s.variant(tag::NET_IPV6, 1).unwrap();
+        let bytes: &'static [u8] = Box::leak(s.finish(false).unwrap().into_boxed_slice());
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        assert_eq!(
+            build(&Blob::parse(bytes).unwrap(), arena).network.ipv6,
+            Ipv6::Slaac
+        );
     }
 }

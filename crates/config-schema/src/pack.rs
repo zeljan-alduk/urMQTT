@@ -385,6 +385,21 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     // NOW-19, ADR-264: absent (0) writes nothing, so the blob keeps its
     // version; a value needs format 7.
     b.uint(tag::NET_MTU, u64::from(cfg.network.mtu.unwrap_or(0)))?;
+    // ADR-334: "off" is the default and writes nothing; the others need format 23.
+    b.variant(tag::NET_IPV6, cfg.network.ipv6.variant())?;
+    if let crate::Ipv6Mode::Static {
+        address,
+        prefix_len,
+        gateway,
+    } = cfg.network.ipv6
+    {
+        let mut a = String::new();
+        let mut g = String::new();
+        let _ = urmqtt_cfg::net::write_ipv6(&mut a, &address);
+        let _ = urmqtt_cfg::net::write_ipv6(&mut g, &gateway);
+        b.str(tag::NET_IPV6_ADDRESS, &format!("{a}/{prefix_len}"))?;
+        b.str(tag::NET_IPV6_GATEWAY, &g)?;
+    }
     b.uint(
         tag::NET_PLAIN_PORT,
         u64::from(cfg.network.mqtt_plain_port.unwrap_or(0)),

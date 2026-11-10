@@ -7,12 +7,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use urmqtt_cfg::net::Cidr;
+use urmqtt_cfg::net::{Cidr, Cidr6, Net};
 
 /// Networks whose addresses may connect, or every address.
 #[derive(Debug, Clone)]
 pub struct AllowList {
-    nets: Vec<Cidr>,
+    /// IPv4 and (NEXT-1, ADR-334) IPv6 networks.
+    nets: Vec<Net>,
     anywhere: bool,
 }
 
@@ -29,7 +30,7 @@ pub enum Exposure {
 }
 
 impl AllowList {
-    pub fn new(nets: &[Cidr], anywhere: bool) -> Self {
+    pub fn new(nets: &[Net], anywhere: bool) -> Self {
         Self {
             nets: nets.to_vec(),
             anywhere,
@@ -41,8 +42,12 @@ impl AllowList {
         if self.anywhere {
             return true;
         }
-        let ip = u32::from_be_bytes(ip);
-        self.nets.iter().any(|n| n.contains(ip))
+        self.nets.iter().any(|n| n.contains_v4(ip))
+    }
+
+    /// Whether a SYN from the IPv6 address `ip` may be answered (NEXT-1).
+    pub fn allows6(&self, ip: &[u8; 16]) -> bool {
+        self.anywhere || self.nets.iter().any(|n| n.contains_v6(ip))
     }
 
     /// Every address is allowed (`allow_from_anywhere`).
@@ -50,7 +55,7 @@ impl AllowList {
         self.anywhere
     }
 
-    pub fn networks(&self) -> &[Cidr] {
+    pub fn networks(&self) -> &[Net] {
         &self.nets
     }
 
@@ -99,11 +104,25 @@ const PRIVATE: [(u32, u8); 6] = [
     (0x7f00_0000, 8),
 ];
 
-fn within_private(n: &Cidr) -> bool {
-    PRIVATE
-        .iter()
-        .filter_map(|(a, p)| Cidr::new(*a, *p))
-        .any(|p| p.contains_net(n))
+/// The IPv6 ones: unique local (fc00::/7), link-local (fe80::/10), loopback.
+const PRIVATE6: [([u8; 2], u8); 2] = [([0xfc, 0], 7), ([0xfe, 0x80], 10)];
+
+fn within_private(n: &Net) -> bool {
+    match n {
+        Net::V4(n) => PRIVATE
+            .iter()
+            .filter_map(|(a, p)| Cidr::new(*a, *p))
+            .any(|p| p.contains_net(n)),
+        Net::V6(n) => {
+            n.prefix == 128 && n.addr == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+                || PRIVATE6.iter().any(|([a, b], p)| {
+                    let mut x = [0u8; 16];
+                    x[0] = *a;
+                    x[1] = *b;
+                    Cidr6::new(x, *p).is_some_and(|p| p.contains_net(n))
+                })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -111,7 +130,7 @@ mod tests {
     use super::*;
 
     fn list(nets: &[&str], anywhere: bool) -> AllowList {
-        let nets: Vec<Cidr> = nets.iter().map(|s| Cidr::parse(s).unwrap()).collect();
+        let nets: Vec<Net> = nets.iter().map(|s| Net::parse(s).unwrap()).collect();
         AllowList::new(&nets, anywhere)
     }
 
@@ -189,7 +208,10 @@ mod tests {
                     Cidr::new(next() & Cidr::mask(p), p).unwrap()
                 })
                 .collect();
-            let a = AllowList::new(&nets, false);
+            let a = AllowList::new(
+                &nets.iter().copied().map(Net::V4).collect::<Vec<_>>(),
+                false,
+            );
             for _ in 0..200 {
                 let ip = if next() % 2 == 0 {
                     next()
@@ -246,5 +268,25 @@ mod tests {
         // A network that straddles a private range is not private.
         assert!(list(&["10.0.0.0/7"], false).reaches_public());
         assert!(!list(&["172.20.0.0/16"], false).reaches_public());
+    }
+
+    /// NEXT-1, ADR-334: IPv6 networks beside the IPv4 ones; neither family
+    /// matches the other's networks; anywhere takes both.
+    #[test]
+    fn ipv6_networks() {
+        let p = |s: &str| urmqtt_cfg::net::parse_ipv6(s).unwrap();
+        let a = list(&["10.0.0.0/8", "2001:db8:1::/48"], false);
+        assert!(a.allows6(&p("2001:db8:1:ffff::1")) && !a.allows6(&p("2001:db8:2::1")));
+        assert!(
+            !a.allows6(&p("::ffff:a00:1")),
+            "a mapped address is not an IPv4 one here"
+        );
+        assert!(a.allows([10, 1, 1, 1]));
+        assert!(list(&[], true).allows6(&p("2001:db8::1")));
+        assert!(!list(&[], false).allows6(&p("2001:db8::1")));
+        assert_eq!(a.describe(), "10.0.0.0/8, 2001:db8:1::/48");
+        assert!(a.reaches_public());
+        assert!(!list(&["fd00::/8", "fe80::/64", "10.0.0.0/8"], false).reaches_public());
+        assert!(list(&["fc00::/6"], false).reaches_public());
     }
 }
