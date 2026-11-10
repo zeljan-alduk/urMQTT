@@ -1296,7 +1296,9 @@ mod tests {
     #[test]
     fn no_address_from_a_multicast_or_zero_prefix() {
         for bad in [
-            [0xff, 3, 0x8f, 0x77, 0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0],
+            [
+                0xff, 3, 0x8f, 0x77, 0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
             [0; 16],
             [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ] {

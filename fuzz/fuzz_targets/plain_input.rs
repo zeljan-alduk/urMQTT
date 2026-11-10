@@ -3,11 +3,13 @@
 //! check of the per-source table under arbitrary sequences of operations.
 //! Parsing must return `Ok`/`Err` and never panic; whatever parses must
 //! round-trip; the table must keep exactly the connection counts the model
-//! keeps and never forget a live connection.
+//! keeps and never forget a live connection. The allow-list takes IPv6
+//! networks too (NEXT-1, ADR-334): an IPv6 network never admits an IPv4
+//! address and the other way round.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use urmqtt_cfg::net::Cidr;
+use urmqtt_cfg::net::{Cidr, Net};
 use urmqtt_cfg::passwd::PasswordHash;
 use urmqtt_cfg::plain::{check_identity, parse_allow, parse_ip_identity, parse_user};
 use urmqtt_plain::{AllowList, Limits, Open, Sources};
@@ -17,9 +19,13 @@ fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
     let _ = check_identity(&text);
     if let Ok(c) = parse_allow(&text) {
-        // What parses prints back to the same text and is a member of itself.
-        assert_eq!(Cidr::parse(&c.to_string()), Ok(c));
-        assert!(c.contains_octets(c.octets()));
+        // What parses prints back to a text of the same value and is a member
+        // of itself.
+        assert_eq!(Net::parse(&c.to_string()), Ok(c));
+        match c {
+            Net::V4(n) => assert!(c.contains_v4(n.octets())),
+            Net::V6(n) => assert!(c.contains_v6(&n.addr) && !c.contains_v4([0; 4])),
+        }
     }
     let _ = Cidr::parse(&text);
     if let Ok((_, hash)) = parse_user(&text) {
@@ -34,17 +40,26 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // The allow-list: any list of valid networks, any address.
-    let nets: Vec<Cidr> = text
+    let nets: Vec<Net> = text
         .lines()
-        .filter_map(|l| Cidr::parse(l.trim()).ok())
+        .filter_map(|l| Net::parse(l.trim()).ok())
         .take(16)
         .collect();
     let list = AllowList::new(&nets, false);
     for chunk in data.chunks_exact(4).take(32) {
         let ip = [chunk[0], chunk[1], chunk[2], chunk[3]];
-        let want = nets.iter().any(|n| n.contains_octets(ip));
+        let want = nets
+            .iter()
+            .any(|n| matches!(n, Net::V4(c) if c.contains_octets(ip)));
         assert_eq!(list.allows(ip), want);
         assert!(AllowList::new(&nets, true).allows(ip));
+    }
+    for chunk in data.chunks_exact(16).take(8) {
+        let ip: [u8; 16] = chunk.try_into().unwrap();
+        let want = nets
+            .iter()
+            .any(|n| matches!(n, Net::V6(c) if c.contains(&ip)));
+        assert_eq!(list.allows6(&ip), want);
     }
 
     // The per-source table against a model, over a small set of addresses so
