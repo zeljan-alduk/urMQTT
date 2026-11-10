@@ -515,6 +515,9 @@ jobs:
       - run: cargo vet --locked
       - name: Exemption list up to date (docs/audit/vet-exemptions.md)
         run: python3 scripts/vet-exemptions.py --check
+      # The example edition's own lockfile (NOW-18) holds no crate the workspace's does not.
+      - name: Example edition's lockfile is a subset of the workspace's
+        run: python3 scripts/check-lock-subset.py examples/edition/Cargo.lock Cargo.lock
       - name: SBOM builds and validates, vendored hashes match their files
         run: |
           cargo fetch --locked
