@@ -63,7 +63,7 @@ function persist() {
     const accounts = app.model.fields.filter(isUserList).reduce((n, f) => n + completeUsers(s.values[f.id]).length, 0) || (app.accountsForgotten ? 1 : 0);
     sessionStorage.setItem(STORE_KEY, JSON.stringify({
       v: 1, accounts, values, name: s.name, preset: s.preset, release: s.release,
-      files: { cert: pub(s.files.cert), control: pub(s.files.control), operational: s.files.operational.map(pub), bootstrap: s.files.bootstrap.map(pub) },
+      files: { cert: pub(s.files.cert), control: pub(s.files.control), operational: s.files.operational.map(pub), bootstrap: s.files.bootstrap.map(pub), logca: s.files.logca.map(pub) },
     }));
   } catch { /* private window: the form simply starts empty after a reload */ }
 }
@@ -91,6 +91,7 @@ function restore() {
     s.files.control = ok(saved.files.control);
     s.files.operational = (saved.files.operational || []).map(ok).filter(Boolean).slice(0, 8);
     s.files.bootstrap = (saved.files.bootstrap || []).map(ok).filter(Boolean).slice(0, 8);
+    s.files.logca = (saved.files.logca || []).map(ok).filter(Boolean).slice(0, 8);
   }
   // The accounts' hashes are never kept: after a reload the form says so.
   app.accountsForgotten = Boolean(saved && saved.v === 1 && Number(saved.accounts) > 0);
@@ -933,7 +934,7 @@ function renderShell() {
   const formHead = h('h2', { style: 'margin:10px 0 -4px' }, h('span', { class: 'ub-step', 'aria-hidden': 'true', text: '3' }), t('form.title'));
   ui.simple = renderSimple();
   ui.advanced = h('div', { class: 'ub-advanced' }, releaseCard, presetCard, formHead, renderAdvancedTools(), sections);
-  const main = h('div', { class: 'ub-main' }, ui.simple, ui.advanced);
+  const main = h('div', { class: 'ub-main' }, ui.simple, ui.advanced, renderProject());
   const layout = h('div', { class: 'ub-layout' }, main, renderBar());
   root.append(h('div', { class: 'ub-wrap' }, head, layout));
   renderPresets();

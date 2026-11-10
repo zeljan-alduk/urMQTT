@@ -402,6 +402,34 @@ fn write_copy(dev: &mut dyn BlockDevice, h: &Header, raw_entries: &[u8]) -> Resu
     dev.flush()
 }
 
+/// Rewrites both copies of a table whose primary header is `primary` (at
+/// LBA 1, its backup at `primary.backup_lba`) with the entries `entries`:
+/// the backup copy first, then the primary, each entries before header and
+/// flushed (the order of every table write in this module). A cut at any
+/// write leaves the old table in force (a valid old primary) or the new one
+/// (a valid new primary, or a torn primary with the new backup, which
+/// firmware, the bootloader's UEFI path and [`prepare`] all take).
+pub fn write_table(
+    dev: &mut dyn BlockDevice,
+    primary: &Header,
+    entries: &[Entry],
+) -> Result<Header, IoError> {
+    let raw = encode_entries(entries);
+    let header = Header {
+        entries_crc: crc32(&raw),
+        ..*primary
+    };
+    let backup = Header {
+        current_lba: header.backup_lba,
+        backup_lba: header.current_lba,
+        entries_lba: header.backup_lba.saturating_sub(ENTRY_SECTORS),
+        ..header
+    };
+    write_copy(dev, &backup, &raw)?;
+    write_copy(dev, &header, &raw)?;
+    Ok(header)
+}
+
 /// What [`prepare`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Steps {
@@ -416,6 +444,19 @@ pub struct Steps {
     /// The data partition was extended over free space at the end of a
     /// larger disk (STORAGE-PLAN S3).
     pub extended_partition: bool,
+    /// A second boot slot was reserved with the data partition (NEXT-11,
+    /// ADR-295, [`crate::slots`]).
+    pub created_boot_slot: bool,
+}
+
+/// What [`prepare_with`] does beyond [`prepare`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Options<'a> {
+    /// When the data partition is created: also reserve a second region the
+    /// size of the EFI system partition, before it, as the standby boot slot
+    /// (A/B updates, ADR-295), the running slot labelled with this version
+    /// and store schema. `None`: the single-slot layout of earlier releases.
+    pub boot_slot: Option<crate::slots::Init<'a>>,
 }
 
 /// The data partition, as LBAs of the whole disk.
@@ -445,7 +486,16 @@ pub const CLEARED_SECTORS: u64 = HEADER_SECTORS;
 /// crash-safe (module docs). `random` supplies 16 random bytes per call.
 pub fn prepare(
     dev: &mut dyn BlockDevice,
+    random: impl FnMut() -> [u8; 16],
+) -> Result<(DataPartition, Steps), GptError> {
+    prepare_with(dev, random, Options::default())
+}
+
+/// [`prepare`], and on the first boot the standby boot slot of `opts`.
+pub fn prepare_with(
+    dev: &mut dyn BlockDevice,
     mut random: impl FnMut() -> [u8; 16],
+    opts: Options<'_>,
 ) -> Result<(DataPartition, Steps), GptError> {
     let total = dev.sectors();
     if total < 2 * (ENTRY_SECTORS + 2) {
@@ -502,8 +552,12 @@ pub fn prepare(
         steps.moved_backup = true;
     }
     // A valid primary with a missing or damaged backup at the end (an
-    // interrupted reinstall cleared it, or the sector went bad): rewrite it.
-    if !steps.moved_backup && read_table(dev, last)?.is_none() {
+    // interrupted reinstall cleared it, or the sector went bad), or a valid
+    // backup that says something else (a table write cut after its backup
+    // copy, ADR-295: firmware boots by the valid primary, so the primary is
+    // what is in force): rewrite it.
+    let stale = |b: &Table| b.entries != t.entries || b.header.disk_guid != t.header.disk_guid;
+    if !steps.moved_backup && read_table(dev, last)?.as_ref().is_none_or(stale) {
         let backup = Header {
             current_lba: last,
             backup_lba: 1,
@@ -570,7 +624,21 @@ pub fn prepare(
         .map(|e| e.last_lba + 1)
         .max()
         .unwrap_or(t.header.first_usable);
-    let first = used_end.div_ceil(ALIGN) * ALIGN;
+    // 2a. The standby boot slot (ADR-295): a region the size of the EFI
+    // system partition between it and the data partition, if the data
+    // partition keeps its minimum after it.
+    let fits = |first: u64| {
+        first <= last_usable
+            && (last_usable + 1 - first) / BLOCK_SECTORS * BLOCK_SECTORS >= MIN_SECTORS
+    };
+    let slot = opts.boot_slot.and_then(|init| {
+        let (esp, _) = crate::slots::reservable(&t.entries)?;
+        let slot_first = used_end.div_ceil(ALIGN) * ALIGN;
+        let slot_last = slot_first + esp.sectors() - 1;
+        let data_first = (slot_last + 1).div_ceil(ALIGN) * ALIGN;
+        fits(data_first).then_some((init, slot_first, slot_last, data_first))
+    });
+    let first = slot.map_or(used_end.div_ceil(ALIGN) * ALIGN, |s| s.3);
     if first > last_usable {
         return Err(GptError::TooSmall);
     }
@@ -580,16 +648,25 @@ pub fn prepare(
         return Err(GptError::TooSmall);
     }
     let part_last = first + sectors - 1;
-    if t.entries.len() >= ENTRIES {
+    if t.entries.len() + usize::from(slot.is_some()) >= ENTRIES {
         return Err(GptError::TableFull);
     }
     // Blank head first: the partition classifies as new from the moment
     // its entry exists.
     let zeros = vec![0u8; (CLEARED_SECTORS * SECTOR) as usize];
     dev.write(first, &zeros)?;
+    if let Some((_, slot_first, _, _)) = slot {
+        // No stale filesystem at the head of the standby region, whatever
+        // the disk held: nothing could take it for a boot volume.
+        dev.write(slot_first, &zeros)?;
+    }
     dev.flush()?;
-    let unique = Guid::random(random());
     let mut entries = t.entries.clone();
+    if let Some((init, slot_first, slot_last, _)) = slot {
+        crate::slots::reserve(&mut entries, init, slot_first, slot_last, random());
+        steps.created_boot_slot = true;
+    }
+    let unique = Guid::random(random());
     entries.push(Entry::new(DATA_TYPE, unique, first, part_last, DATA_NAME));
     let raw = encode_entries(&entries);
     let header = Header {

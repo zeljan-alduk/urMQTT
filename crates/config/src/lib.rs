@@ -12,7 +12,11 @@
 #![deny(unsafe_code)]
 
 mod store;
-pub use store::{CONFIG, ConfigHandle, LoadError, LoadInfo, info, load, load_defaults};
+pub use store::{
+    CONFIG, ConfigHandle, LoadError, LoadInfo, blob_in, info, load, load_defaults, load_ext,
+};
+/// The newest configuration format this build reads (the kernel's build note, ADR-296).
+pub use urmqtt_cfg::FORMAT_VERSION;
 pub use urmqtt_cfg::blob::Hex;
 
 /// How the console names the signer of a configuration: the first 8 bytes of
@@ -99,6 +103,35 @@ pub struct Network {
     /// option 26, else 1500; a value (576..=9000) is used as it is, in every
     /// mode, and is the only source with a static address.
     pub mtu: Option<u16>,
+    /// `network.ipv6*` (NEXT-1, ADR-334).
+    pub ipv6: Ipv6,
+}
+
+/// IPv6 (`network.ipv6`, NEXT-1, ADR-334).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ipv6 {
+    /// IPv6 frames are dropped (the default, and every blob before format 23).
+    Off,
+    /// The link-local address and one global address from Router
+    /// Advertisements.
+    Slaac,
+    /// A configured address with its on-link prefix length, and the router.
+    Static {
+        address: [u8; 16],
+        prefix_len: u8,
+        gateway: [u8; 16],
+    },
+}
+
+impl Ipv6 {
+    /// The TOML word.
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Slaac => "slaac",
+            Self::Static { .. } => "static",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -178,6 +211,12 @@ pub struct Limits {
     /// Members one shared-subscription group may have, 1..=65535; one more:
     /// SUBACK 0x97 / 0x80 (ADR-275).
     pub max_shared_group_members: u32,
+    /// Established TLS connections (MQTT and WebSocket) one source address
+    /// may hold at once, all cores together; 0: no limit (NOW-14, ADR-280).
+    pub max_connections_per_ip: u32,
+    /// Password accounts the control channel may hold on the data disk
+    /// (NOW-15, ADR-285); 0: the control channel refuses account commands.
+    pub max_runtime_accounts: u32,
 }
 
 /// Topic filter patterns; `{id}` expands to the session's device id.
@@ -243,6 +282,37 @@ pub struct Console {
     pub virtio_gpu: VirtioGpuMode,
 }
 
+/// Who confirms a trial boot after an A/B update (`update.confirm`, ADR-297).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateConfirm {
+    /// The kernel itself, after `confirm_after_s` of health (the default).
+    Auto,
+    /// An operator, with a `boot-confirm` control message.
+    Operator,
+}
+
+impl UpdateConfirm {
+    /// The TOML word.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Operator => "operator",
+        }
+    }
+}
+
+/// The `[update]` section (NEXT-11, ADR-297): how a trial boot after an A/B
+/// update is confirmed.
+#[derive(Debug, Clone, Copy)]
+pub struct Update {
+    pub confirm: UpdateConfirm,
+    /// Seconds of health (store open, a listener up) before an automatic
+    /// confirmation.
+    pub confirm_after_s: u32,
+    /// A trial boot not confirmed this long resets; 0: never.
+    pub trial_timeout_s: u32,
+}
+
 /// Whether an optional virtio driver runs (`[devices]`, ADR-257).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceMode {
@@ -301,6 +371,64 @@ impl NetInterrupt {
     }
 }
 
+/// How many virtio-net queue pairs the NIC uses (`devices.virtio_net_queues`,
+/// ADR-313).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetQueues {
+    /// One per data core where the device steers flows itself (MQ with RSS),
+    /// else one (the default).
+    Auto,
+    /// Always one: core 0 steers every frame.
+    Single,
+}
+
+impl NetQueues {
+    /// The TOML word.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Single => "single",
+        }
+    }
+
+    const fn from_variant(v: u8) -> Self {
+        match v {
+            1 => Self::Single,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// DMA remapping (`devices.iommu`, ADR-305).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Iommu {
+    /// The IOMMU is left as the firmware set it (the default).
+    Off,
+    /// Used when present and covering the driven devices, else a warning.
+    Auto,
+    /// Refuse to boot without it.
+    Require,
+}
+
+impl Iommu {
+    /// The TOML word.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Require => "require",
+        }
+    }
+
+    const fn from_variant(v: u8) -> Self {
+        match v {
+            1 => Self::Auto,
+            2 => Self::Require,
+            _ => Self::Off,
+        }
+    }
+}
+
 /// The `[devices]` section (ADR-257): one mode per optional virtio driver,
 /// in the order of `urmqtt_cfg::fields::DEVICE_KEYS`, and the NIC's receive
 /// interrupt (ADR-270).
@@ -309,12 +437,18 @@ pub struct Devices {
     modes: [DeviceMode; urmqtt_cfg::fields::DEVICE_KEYS.len()],
     /// `devices.virtio_net_interrupt`.
     pub virtio_net_interrupt: NetInterrupt,
+    /// `devices.iommu`.
+    pub iommu: Iommu,
+    /// `devices.virtio_net_queues`.
+    pub virtio_net_queues: NetQueues,
 }
 
 impl Devices {
     pub const OFF: Self = Self {
         modes: [DeviceMode::Off; urmqtt_cfg::fields::DEVICE_KEYS.len()],
         virtio_net_interrupt: NetInterrupt::Auto,
+        iommu: Iommu::Off,
+        virtio_net_queues: NetQueues::Auto,
     };
 
     /// The mode of `key` (`devices.virtio_console`, ...); `None` for a key
@@ -342,6 +476,8 @@ impl Devices {
         }
         d.virtio_net_interrupt =
             NetInterrupt::from_variant(get(urmqtt_cfg::fields::tag::DEV_NET_INTERRUPT));
+        d.iommu = Iommu::from_variant(get(urmqtt_cfg::fields::tag::DEV_IOMMU));
+        d.virtio_net_queues = NetQueues::from_variant(get(urmqtt_cfg::fields::tag::DEV_NET_QUEUES));
         d
     }
 }
@@ -399,11 +535,36 @@ pub struct Storage {
     pub scrub_io_budget_mb_s: u32,
     /// AES-256-XTS over the data partition (S7, ADR-240).
     pub encryption: bool,
-    /// The 64-byte disk key, empty when `encryption` is off.
+    /// The 64-byte disk key, empty when `encryption` is off or the key
+    /// comes from the console.
     pub disk_key: Secret,
+    /// Where the disk key comes from (`storage.disk_key_source`, LATER-7,
+    /// ADR-328).
+    pub disk_key_source: DiskKeySource,
     pub require_flush: bool,
     pub require_data_disk: bool,
     pub refuse_on_corruption: bool,
+}
+
+/// Where the key of an encrypted data partition comes from
+/// (`storage.disk_key_source`, ADR-328).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskKeySource {
+    /// `storage.disk_key`, in the image (the default, S7).
+    Image,
+    /// A passphrase typed on the console unwraps the key held in the data
+    /// partition's key slots; the image holds no key.
+    Console,
+}
+
+impl DiskKeySource {
+    /// The TOML word.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Console => "console",
+        }
+    }
 }
 
 /// Key material that never prints: `Debug` shows only its length.
@@ -421,6 +582,14 @@ pub struct Observability {
     pub log_level: LogLevel,
     pub syslog_udp: Option<SocketAddrV4>,
     pub metrics_udp: Option<SocketAddrV4>,
+    /// Log shipping over TLS (NEXT-7, ADR-318): the collector, if any.
+    pub log_tls: Option<SocketAddrV4>,
+    /// The name its certificate must carry; empty: its address.
+    pub log_tls_name: &'static str,
+    /// Its trust anchors (PEM).
+    pub log_tls_ca: &'static [&'static [u8]],
+    /// KiB of records kept while it is unreachable.
+    pub log_tls_queue_kb: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -474,7 +643,7 @@ pub struct Trust {
 }
 
 /// A network, as the plaintext allow-list and `ip_identities` hold it.
-pub use urmqtt_cfg::net::Cidr;
+pub use urmqtt_cfg::net::{Cidr, Net};
 
 /// How a plaintext client proves who it is (P1, ADR-229).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,7 +679,8 @@ pub struct Plaintext {
     pub port: u16,
     /// Networks that may connect; empty and `allow_from_anywhere` false only
     /// while disabled (a configuration check refuses it otherwise).
-    pub allow_from: &'static [Cidr],
+    /// IPv4 and (format 23, ADR-334) IPv6 networks.
+    pub allow_from: &'static [Net],
     pub allow_from_anywhere: bool,
     pub auth: PlainAuth,
     pub anonymous_identity: &'static str,
@@ -567,6 +737,25 @@ pub struct Websocket {
     pub retain: bool,
 }
 
+/// The Prometheus endpoint (NEXT-9, ADR-290). Off unless the image's
+/// configuration says so; the other fields mean nothing while `enabled` is
+/// false.
+#[derive(Debug, Clone, Copy)]
+pub struct Metrics {
+    pub enabled: bool,
+    pub port: u16,
+    /// Networks that may scrape; never empty while enabled (the check refuses
+    /// it), and there is no "anywhere".
+    /// IPv4 and (format 23, ADR-334) IPv6 networks.
+    pub allow_from: &'static [Net],
+    /// Connections held at once on one data core.
+    pub max_connections: u32,
+    /// ... from one source address on one data core.
+    pub max_connections_per_ip: u32,
+    /// Seconds from the TCP connection to the end of the answer.
+    pub request_timeout_s: u32,
+}
+
 /// MQTT 5.0 (NEXT-3, ADR-273 rule 21). On by default.
 #[derive(Debug, Clone, Copy)]
 pub struct Mqtt5 {
@@ -613,9 +802,11 @@ pub struct BuildConfig {
     pub trust: Trust,
     pub plaintext: Plaintext,
     pub websocket: Websocket,
+    pub metrics: Metrics,
     pub mqtt5: Mqtt5,
     pub console: Console,
     pub devices: Devices,
+    pub update: Update,
 }
 
 impl BuildConfig {

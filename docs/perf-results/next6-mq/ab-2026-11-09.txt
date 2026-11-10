@@ -1,0 +1,92 @@
+21:05  up 7 days, 22:59, 9 users, load averages: 8.42 12.81 10.98
+== auto round 1 (load 2.60 3.06 3.00)
+client: RESULT mode=handshake threads=32 conn_per_s=562 errors=0 lat_p50_ms=55.9 lat_p99_ms=124.9 tcp_p50_ms=10.1 tls_p50_ms=34.6 tls_p99_ms=82.7 gen_cpu=0.11
+client: RESULT mode=pubsub pubs=8 subs=8 topics=8 qos=0 payload=64 rate=0 sent_per_s=70806 acked_per_s=0 delivered_per_s=0 lat_p50_ms=0.00 lat_p90_ms=0.00 lat_p99_ms=0.00 lat_max_ms=0.00 samples=0 gen_cpu=0.08 ready=8 failed=8 lost=0
+NFO  net: multiqueue: 3 queue pairs (the device offers 4), RSS with the Toeplitz key and a 128-entry tab
+12.861274 dataplane: core 2: busy 64%, work 61% (rx 55%, of it tls 51%, poll 3%, tcp 0%, mesh 1%, nic 0%), 877 connection(s) accepted (3529 
+12.863155 dataplane: core 1: busy 67%, work 62% (rx 56%, of it tls 51%, poll 3%, tcp 0%, mesh 1%, nic 0%), 868 connection(s) accepted (3637 
+12.939651 dataplane: core 0: busy 8%, work 2% (rx 0%, of it tls 0%, poll 0%, tcp 0%, mesh 0%, nic 1%), 0 connection(s) accepted (0 us of wor
+17.866582 dataplane: core 2: busy 99%, work 94% (rx 88%, of it tls 80%, poll 2%, tcp 0%, mesh 2%, nic 0%), 1390 connection(s) accepted (3420
+17.878301 dataplane: core 1: busy 100%, work 97% (rx 90%, of it tls 82%, poll 2%, tcp 0%, mesh 2%, nic 0%), 1439 connection(s) accepted (338
+17.965427 dataplane: core 0: busy 6%, work 2% (rx 0%, of it tls 0%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of wor
+22.871547 dataplane: core 2: busy 99%, work 94% (rx 87%, of it tls 79%, poll 2%, tcp 1%, mesh 2%, nic 0%), 1386 connection(s) accepted (3422
+22.921595 dataplane: core 1: busy 100%, work 97% (rx 91%, of it tls 84%, poll 2%, tcp 0%, mesh 2%, nic 0%), 1481 connection(s) accepted (332
+27.972872 dataplane: core 1: busy 100%, work 97% (rx 87%, of it tls 73%, poll 1%, tcp 0%, mesh 8%, nic 0%), 536 connection(s) accepted (9210
+27.974209 dataplane: core 2: busy 99%, work 96% (rx 86%, of it tls 72%, poll 1%, tcp 0%, mesh 7%, nic 0%), 519 connection(s) accepted (9468 
+32.978137 dataplane: core 1: busy 100%, work 99% (rx 86%, of it tls 69%, poll 0%, tcp 0%, mesh 12%, nic 0%), 0 connection(s) accepted (0 us 
+32.993384 dataplane: core 0: busy 2%, work 0% (rx 0%, of it tls 0%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of wor
+33.033446 dataplane: core 2: busy 100%, work 99% (rx 85%, of it tls 68%, poll 0%, tcp 0%, mesh 12%, nic 1%), 0 connection(s) accepted (0 us 
+37.988138 dataplane: core 1: busy 100%, work 99% (rx 87%, of it tls 59%, poll 0%, tcp 0%, mesh 10%, nic 0%), 0 connection(s) accepted (0 us 
+38.035871 dataplane: core 2: busy 100%, work 99% (rx 86%, of it tls 59%, poll 0%, tcp 0%, mesh 11%, nic 0%), 0 connection(s) accepted (0 us 
+43.005161 dataplane: core 1: busy 100%, work 98% (rx 87%, of it tls 71%, poll 0%, tcp 0%, mesh 9%, nic 0%), 0 connection(s) accepted (0 us o
+43.048264 dataplane: core 2: busy 100%, work 99% (rx 84%, of it tls 55%, poll 0%, tcp 0%, mesh 13%, nic 0%), 0 connection(s) accepted (0 us 
+== single round 1 (load 5.42 3.71 3.22)
+client: RESULT mode=handshake threads=32 conn_per_s=547 errors=0 lat_p50_ms=57.3 lat_p99_ms=121.9 tcp_p50_ms=4.1 tls_p50_ms=38.1 tls_p99_ms=91.8 gen_cpu=0.11
+client: RESULT mode=pubsub pubs=8 subs=8 topics=8 qos=0 payload=64 rate=0 sent_per_s=76880 acked_per_s=0 delivered_per_s=0 lat_p50_ms=0.00 lat_p90_ms=0.00 lat_p99_ms=0.00 lat_max_ms=0.00 samples=0 gen_cpu=0.08 ready=8 failed=8 lost=0
+14.042629 dataplane: core 1: busy 63%, work 60% (rx 55%, of it tls 51%, poll 3%, tcp 0%, mesh 0%, nic 0%), 897 connection(s) accepted (3379 
+14.053593 dataplane: core 0: busy 18%, work 8% (rx 0%, of it tls 0%, poll 1%, tcp 0%, mesh 0%, nic 4%), 0 connection(s) accepted (0 us of wo
+14.059124 dataplane: core 2: busy 65%, work 62% (rx 57%, of it tls 53%, poll 3%, tcp 0%, mesh 1%, nic 0%), 910 connection(s) accepted (3474 
+19.043779 dataplane: core 1: busy 98%, work 95% (rx 89%, of it tls 82%, poll 3%, tcp 0%, mesh 1%, nic 0%), 1326 connection(s) accepted (3604
+19.062958 dataplane: core 0: busy 29%, work 13% (rx 0%, of it tls 0%, poll 3%, tcp 1%, mesh 1%, nic 7%), 0 connection(s) accepted (0 us of w
+19.099759 dataplane: core 2: busy 97%, work 94% (rx 88%, of it tls 80%, poll 3%, tcp 0%, mesh 1%, nic 0%), 1310 connection(s) accepted (3619
+24.054752 dataplane: core 1: busy 97%, work 94% (rx 89%, of it tls 81%, poll 2%, tcp 0%, mesh 1%, nic 0%), 1404 connection(s) accepted (3369
+24.066016 dataplane: core 0: busy 28%, work 12% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 1%, nic 7%), 0 connection(s) accepted (0 us of w
+24.099764 dataplane: core 2: busy 98%, work 95% (rx 89%, of it tls 82%, poll 3%, tcp 0%, mesh 1%, nic 0%), 1392 connection(s) accepted (3420
+29.066027 dataplane: core 0: busy 26%, work 12% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 1%, nic 7%), 0 connection(s) accepted (0 us of w
+29.108825 dataplane: core 2: busy 99%, work 96% (rx 88%, of it tls 69%, poll 1%, tcp 0%, mesh 6%, nic 0%), 503 connection(s) accepted (9621 
+29.206816 dataplane: core 1: busy 99%, work 96% (rx 94%, of it tls 76%, poll 1%, tcp 0%, mesh 0%, nic 0%), 523 connection(s) accepted (9489 
+34.066207 dataplane: core 0: busy 26%, work 11% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 0%, nic 7%), 0 connection(s) accepted (0 us of w
+34.132691 dataplane: core 2: busy 100%, work 98% (rx 88%, of it tls 62%, poll 0%, tcp 0%, mesh 9%, nic 0%), 0 connection(s) accepted (0 us o
+34.243970 dataplane: core 1: busy 100%, work 98% (rx 98%, of it tls 75%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us o
+39.066214 dataplane: core 0: busy 26%, work 11% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 1%, nic 7%), 0 connection(s) accepted (0 us of w
+39.175089 dataplane: core 2: busy 100%, work 98% (rx 89%, of it tls 63%, poll 0%, tcp 0%, mesh 9%, nic 0%), 0 connection(s) accepted (0 us o
+39.249689 dataplane: core 1: busy 100%, work 98% (rx 98%, of it tls 73%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us o
+44.066239 dataplane: core 0: busy 27%, work 12% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 1%, nic 7%), 0 connection(s) accepted (0 us of w
+44.197290 dataplane: core 2: busy 100%, work 98% (rx 89%, of it tls 63%, poll 0%, tcp 0%, mesh 8%, nic 0%), 0 connection(s) accepted (0 us o
+44.293515 dataplane: core 1: busy 100%, work 99% (rx 99%, of it tls 64%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us o
+== auto round 2 (load 7.50 4.50 3.51)
+NFO  net: multiqueue: 3 queue pairs (the device offers 4), RSS with the Toeplitz key and a 128-entry tab
+12.710695 dataplane: core 2: busy 62%, work 59% (rx 53%, of it tls 49%, poll 2%, tcp 0%, mesh 1%, nic 0%), 847 connection(s) accepted (3498 
+12.712247 dataplane: core 1: busy 65%, work 61% (rx 56%, of it tls 51%, poll 2%, tcp 0%, mesh 1%, nic 0%), 862 connection(s) accepted (3588 
+12.785060 dataplane: core 0: busy 8%, work 2% (rx 0%, of it tls 0%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of wor
+17.714921 dataplane: core 2: busy 99%, work 95% (rx 89%, of it tls 81%, poll 2%, tcp 0%, mesh 2%, nic 0%), 1376 connection(s) accepted (3489
+17.718076 dataplane: core 1: busy 100%, work 96% (rx 90%, of it tls 83%, poll 2%, tcp 0%, mesh 2%, nic 0%), 1382 connection(s) accepted (351
+17.796668 dataplane: core 0: busy 5%, work 1% (rx 0%, of it tls 0%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of wor
+22.737203 dataplane: core 2: busy 99%, work 94% (rx 88%, of it tls 80%, poll 2%, tcp 0%, mesh 2%, nic 0%), 1155 connection(s) accepted (4120
+22.770359 dataplane: core 1: busy 99%, work 94% (rx 88%, of it tls 79%, poll 2%, tcp 1%, mesh 2%, nic 0%), 1148 connection(s) accepted (4179
+27.773538 dataplane: core 2: busy 100%, work 97% (rx 87%, of it tls 72%, poll 1%, tcp 0%, mesh 7%, nic 0%), 498 connection(s) accepted (9819
+27.774731 dataplane: core 1: busy 99%, work 96% (rx 88%, of it tls 72%, poll 1%, tcp 0%, mesh 5%, nic 0%), 478 connection(s) accepted (10078
+32.796220 dataplane: core 1: busy 100%, work 98% (rx 89%, of it tls 69%, poll 0%, tcp 0%, mesh 8%, nic 0%), 0 connection(s) accepted (0 us o
+32.797995 dataplane: core 2: busy 100%, work 98% (rx 87%, of it tls 65%, poll 0%, tcp 0%, mesh 9%, nic 0%), 0 connection(s) accepted (0 us o
+32.814959 dataplane: core 0: busy 2%, work 0% (rx 0%, of it tls 0%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us of wor
+37.797065 dataplane: core 1: busy 100%, work 98% (rx 91%, of it tls 64%, poll 0%, tcp 0%, mesh 6%, nic 0%), 0 connection(s) accepted (0 us o
+37.870217 dataplane: core 2: busy 100%, work 99% (rx 89%, of it tls 57%, poll 0%, tcp 0%, mesh 9%, nic 0%), 0 connection(s) accepted (0 us o
+42.831728 dataplane: core 1: busy 100%, work 98% (rx 91%, of it tls 64%, poll 0%, tcp 0%, mesh 6%, nic 0%), 0 connection(s) accepted (0 us o
+42.900211 dataplane: core 2: busy 100%, work 99% (rx 90%, of it tls 52%, poll 0%, tcp 0%, mesh 8%, nic 0%), 0 connection(s) accepted (0 us o
+== single round 2 (load 7.29 4.81 3.66)
+client: RESULT mode=handshake threads=32 conn_per_s=458 errors=0 lat_p50_ms=61.2 lat_p99_ms=252.5 tcp_p50_ms=4.9 tls_p50_ms=40.0 tls_p99_ms=172.1 gen_cpu=0.11
+client: RESULT mode=pubsub pubs=8 subs=8 topics=8 qos=0 payload=64 rate=0 sent_per_s=71565 acked_per_s=0 delivered_per_s=0 lat_p50_ms=0.00 lat_p90_ms=0.00 lat_p99_ms=0.00 lat_max_ms=0.00 samples=0 gen_cpu=0.09 ready=8 failed=8 lost=0
+13.082548 dataplane: core 1: busy 60%, work 57% (rx 53%, of it tls 49%, poll 2%, tcp 0%, mesh 0%, nic 0%), 836 connection(s) accepted (3456 
+13.095003 dataplane: core 0: busy 22%, work 10% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 0%, nic 5%), 0 connection(s) accepted (0 us of w
+13.098973 dataplane: core 2: busy 62%, work 60% (rx 55%, of it tls 51%, poll 2%, tcp 0%, mesh 0%, nic 0%), 854 connection(s) accepted (3540 
+18.090224 dataplane: core 1: busy 97%, work 93% (rx 88%, of it tls 79%, poll 3%, tcp 0%, mesh 1%, nic 0%), 1065 connection(s) accepted (4409
+18.098670 dataplane: core 0: busy 28%, work 13% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 1%, nic 7%), 0 connection(s) accepted (0 us of w
+18.100603 dataplane: core 2: busy 94%, work 90% (rx 85%, of it tls 76%, poll 2%, tcp 1%, mesh 1%, nic 0%), 1030 connection(s) accepted (4386
+23.098718 dataplane: core 1: busy 95%, work 92% (rx 86%, of it tls 78%, poll 2%, tcp 1%, mesh 1%, nic 0%), 1316 connection(s) accepted (3503
+23.098791 dataplane: core 0: busy 32%, work 13% (rx 0%, of it tls 0%, poll 3%, tcp 1%, mesh 1%, nic 7%), 0 connection(s) accepted (0 us of w
+23.125127 dataplane: core 2: busy 98%, work 94% (rx 88%, of it tls 80%, poll 2%, tcp 1%, mesh 1%, nic 0%), 1360 connection(s) accepted (3488
+28.104030 dataplane: core 0: busy 25%, work 12% (rx 0%, of it tls 0%, poll 2%, tcp 1%, mesh 1%, nic 7%), 0 connection(s) accepted (0 us of w
+28.136104 dataplane: core 2: busy 97%, work 94% (rx 87%, of it tls 69%, poll 1%, tcp 0%, mesh 4%, nic 0%), 227 connection(s) accepted (20754
+28.210027 dataplane: core 1: busy 97%, work 94% (rx 92%, of it tls 72%, poll 1%, tcp 0%, mesh 0%, nic 0%), 237 connection(s) accepted (20366
+33.104036 dataplane: core 0: busy 27%, work 13% (rx 0%, of it tls 0%, poll 2%, tcp 0%, mesh 0%, nic 8%), 0 connection(s) accepted (0 us of w
+33.160928 dataplane: core 2: busy 100%, work 98% (rx 90%, of it tls 62%, poll 0%, tcp 0%, mesh 7%, nic 0%), 0 connection(s) accepted (0 us o
+33.215833 dataplane: core 1: busy 100%, work 98% (rx 97%, of it tls 73%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us o
+38.119043 dataplane: core 0: busy 26%, work 12% (rx 0%, of it tls 0%, poll 2%, tcp 0%, mesh 1%, nic 8%), 0 connection(s) accepted (0 us of w
+38.213576 dataplane: core 2: busy 100%, work 98% (rx 88%, of it tls 61%, poll 0%, tcp 0%, mesh 10%, nic 0%), 0 connection(s) accepted (0 us 
+38.277156 dataplane: core 1: busy 100%, work 98% (rx 98%, of it tls 71%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us o
+43.119050 dataplane: core 0: busy 30%, work 15% (rx 0%, of it tls 0%, poll 3%, tcp 1%, mesh 0%, nic 9%), 0 connection(s) accepted (0 us of w
+43.249016 dataplane: core 2: busy 100%, work 98% (rx 85%, of it tls 59%, poll 0%, tcp 0%, mesh 13%, nic 0%), 0 connection(s) accepted (0 us 
+43.309039 dataplane: core 1: busy 100%, work 98% (rx 98%, of it tls 78%, poll 0%, tcp 0%, mesh 0%, nic 0%), 0 connection(s) accepted (0 us o
+48.121052 dataplane: core 0: busy 9%, work 3% (rx 0%, of it tls 0%, poll 0%, tcp 0%, mesh 0%, nic 1%), 0 connection(s) accepted (0 us of wor
+48.253997 dataplane: core 2: busy 10%, work 6% (rx 2%, of it tls 1%, poll 0%, tcp 0%, mesh 3%, nic 0%), 0 connection(s) accepted (0 us of wo
+21:08  up 7 days, 23:02, 9 users, load averages: 15.59 13.20 11.45

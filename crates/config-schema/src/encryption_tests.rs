@@ -114,3 +114,33 @@ fn the_blob_check_refuses_what_the_packer_would() {
     let blob = b.finish(false).unwrap();
     assert_eq!(Blob::parse(&blob).unwrap().version(), 4);
 }
+
+/// LATER-7 (ADR-328): `storage.disk_key_source = "console"` packs into
+/// format 22 with encryption on and no key in the blob; the default writes
+/// nothing; the TOML path refuses what the blob check refuses.
+#[test]
+fn the_console_key_source_packs_into_format_22_without_a_key() {
+    const CON: &str = "[storage]\nencryption = \"aes-256-xts\"\ndisk_key_source = \"console\"\n";
+    let blob = run(CON, &[]).unwrap();
+    let b = Blob::parse(&blob).unwrap();
+    assert_eq!(b.version(), 22);
+    assert_eq!(b.variant(tag::ST_ENCRYPTION), 1);
+    assert_eq!(b.variant(tag::ST_DISK_KEY_SOURCE), 1);
+    assert!(b.bin(tag::ST_DISK_KEY).is_empty());
+    urmqtt_cfg::check::check(&b, false).unwrap();
+    // The image source, written out, is the default: the S7 blob, format 4.
+    let img = format!("{ENC}disk_key_source = \"image\"\n");
+    assert_eq!(run(&img, &key()).unwrap(), run(ENC, &key()).unwrap());
+    // Console without encryption; console with a key file; an unknown word.
+    let e = run("[storage]\ndisk_key_source = \"console\"\n", &[]).unwrap_err();
+    assert!(has(&e, "storage.disk_key_source"), "{e:?}");
+    let e = run(&format!("{ENC}disk_key_source = \"console\"\n"), &key()).unwrap_err();
+    assert!(has(&e, "storage.disk_key"), "{e:?}");
+    assert!(
+        run(
+            "[storage]\nencryption = \"aes-256-xts\"\ndisk_key_source = \"tpm\"\n",
+            &[]
+        )
+        .is_err()
+    );
+}

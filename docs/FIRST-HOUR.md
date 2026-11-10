@@ -4,10 +4,12 @@ From nothing to a first MQTT message over mutual TLS, in about an hour. For a re
 Linux or macOS laptop. Nothing here needs our help: if a step fails, section 6 lists the usual causes with the log
 line each one prints, and section 7 says where to report the rest.
 
-urMQTT is **alpha**. Releases from v0.4.2 on are signed with the release key in `minisign.pub` and ship the
-release kernel and images with an empty configuration; v0.1.0 to v0.4.1 were signed with the former test key
-`9229E05252D01F8E` (pinned, docs/RELEASE.md section 9) and shipped dev builds. Read
-[KNOWN-ISSUES.md](KNOWN-ISSUES.md) before you put it anywhere that matters.
+urMQTT is **alpha**. This guide is written against **v0.6.0**: MQTT 3.1.1 and 5.0 with QoS 0 to 2 over TLS 1.3 and
+mutual TLS, plus, when you turn them on, secure WebSocket, password accounts that change at run time, a Prometheus
+endpoint, IPv6 and A/B updates with rollback (the last section, "Beyond the first hour", says how). Releases from v0.4.2
+on are signed with the release key in `minisign.pub` and ship the release kernel and images with an empty
+configuration; v0.1.0 to v0.4.1 were signed with the former test key `9229E05252D01F8E` (pinned, docs/RELEASE.md
+section 9) and shipped dev builds. Read [KNOWN-ISSUES.md](KNOWN-ISSUES.md) before you put it anywhere that matters.
 
 | Step | What | Time |
 |---|---|---|
@@ -19,6 +21,7 @@ release kernel and images with an empty configuration; v0.1.0 to v0.4.1 were sig
 | [5](#5-the-first-connection-5-minutes) | The first connection | 5 min |
 | [6](#6-when-it-does-not-work) | When it does not work | as needed |
 | [7](#7-where-to-report) | Where to report | |
+| [8](#beyond-the-first-hour) | Beyond the first hour: MQTT 5, WebSocket, accounts, metrics, IPv6, updates | as needed |
 
 What was run for this guide is listed at the end, in [Tested](#tested).
 
@@ -91,7 +94,7 @@ your settings are written into a copy of it.
 Open <https://aldo.tech/en/products/urmqtt-builder/>. Everything happens in the browser: your files never leave it.
 
 1. **Release.** The page picks the newest release that has a template and checks its signature and checksums
-   against the key built into the page (a green "Verified" chip). This guide was written against **v0.4.1**.
+   against the key built into the page (a green "Verified" chip). This guide was written against **v0.6.0**.
 2. **Where will it run?** "A VM or a lab machine" (DHCP; it also adds the Diagnostic boot entry) for QEMU on the
    laptop. "A server with a fixed address" for a VPS whose provider gives you an address and a gateway; "DHCP first,
    then a fixed address" if you are not sure the provider runs DHCP for a custom ISO.
@@ -123,11 +126,12 @@ download your ISO"). The template and its signed checksums:
 
 ```bash
 mkdir -p build/first-hour && cd build/first-hour
-V=v0.4.1
+V=v0.6.0
 for f in urmqtt-template-$V-universal.iso SHA256SUMS SHA256SUMS.minisig; do
   curl -fLO "https://github.com/zeljan-alduk/urMQTT/releases/download/$V/$f"
 done
-minisign -Vm SHA256SUMS -P RWSOH9BSUuApkkBWq/AZJ03Rn63oOYq+yXzC/vgI1PZ/i5yaE+SVzOWS   # the former test key (v0.1.0 to v0.4.1); from v0.4.2 on: -p minisign.pub at the tag
+curl -fLO "https://raw.githubusercontent.com/zeljan-alduk/urMQTT/$V/minisign.pub"
+minisign -Vm SHA256SUMS -p minisign.pub           # the release key 721316B961DCB94B (v0.4.2 and later); v0.1.0 to v0.4.1: the former test key, docs/RELEASE.md section 9
 shasum -a 256 -c SHA256SUMS --ignore-missing      # Linux: sha256sum -c SHA256SUMS --ignore-missing
 cd ../..
 ```
@@ -156,7 +160,7 @@ operational = ["ca.pem"]
 public_key = "control.pub"
 EOF
 target/release/urmqtt-config pack build/first-hour/config.toml --root deploy/dev \
-  --iso build/first-hour/urmqtt-template-v0.4.1-universal.iso --out build/first-hour/urmqtt-first.iso
+  --iso build/first-hour/urmqtt-template-v0.6.0-universal.iso --out build/first-hour/urmqtt-first.iso
 target/release/urmqtt-config show build/first-hour/urmqtt-first.iso      # fingerprint and every non-default value
 ```
 
@@ -250,7 +254,8 @@ scripts/run-qemu.sh --arch x86_64 --disk build/first-hour/disk.img      # x86_64
 **A good boot log** (aarch64 under HVF; the order and the numbers vary). The lines to look for:
 
 ```text
-URMQTT BOOT v0.4.1 cpu=4 mem=503
+URMQTT BOOT v0.6.0 cpu=4 mem=503
+INFO  build: v0.6.0 (A/B protocol 1, store schema 6, configuration formats up to 23)
 INFO  config: fingerprint 1435dd81...a6b1 (1773 bytes, unsigned), env=prod
 INFO  crypto: aes-gcm=armv8-aes ghash=armv8-pmull chacha=neon sha256=armv8-sha2 crc32c=armv8-crc toeplitz=bitwise
 INFO  crypto: known-answer tests passed (AES-128-GCM, ChaCha20-Poly1305, SHA-256, HMAC-SHA-256, CRC-32C)
@@ -304,8 +309,10 @@ shows its output: on netcup this was seen with `"on"` (ADR-256). `"auto"` choose
 [DEPLOY.md](DEPLOY.md) section 5b lists what the console should show, and section 4 the virtual hardware an image
 needs (virtio-net, one virtio-blk or virtio-scsi disk, UEFI or BIOS).
 
-Allow **TCP 8883 inbound** in the provider's firewall. Nothing else is needed (UDP out only if you configured syslog,
-statsd or SNTP).
+Allow **TCP 8883 inbound** in the provider's firewall. Nothing else is needed for the first message (UDP out only if
+you configured syslog, statsd or SNTP). The listeners you turn on later need their own rules: TCP 8084 for WebSocket,
+TCP 9100 for Prometheus, the same ports over IPv6 once `network.ipv6` is on, and TCP out to the collector for log
+shipping.
 
 ## 5. The first connection (5 minutes)
 
@@ -411,6 +418,63 @@ provider; under QEMU check the port forward (`--fwd`) and that no other program 
   image (it prints no key) and the hypervisor's device list. Never attach your ISO or a private key.
 - **A question:** the "Question" form.
 - First check [KNOWN-ISSUES.md](KNOWN-ISSUES.md): the limit you hit may be listed there, with its workaround.
+
+## Beyond the first hour
+
+Everything below is off in the image you just built, and each part is a few lines of configuration in the builder
+page's Advanced view or in `config.toml` (the page and `urmqtt-config pack` refuse a key that the chosen release's
+template cannot read, naming the format). The reference for each is in [OPERATE.md](OPERATE.md) and
+[DEPLOY.md](DEPLOY.md); [CHANGELOG.md](../CHANGELOG.md) 0.6.0 says what each costs and what it does not do.
+
+**MQTT 5.0 and QoS 2** need no setting: the CONNECT's protocol level chooses, on every listener. With the clients of
+step 5 (mosquitto 2.x):
+
+```bash
+D=deploy/dev
+mosquitto_pub -V mqttv5 -h localhost -p 8883 --cafile $D/ca.pem \
+  --cert $D/devices/device-001.pem --key $D/devices/device-001.key -i device-001 -q 2 \
+  -t devices/device-001/telemetry/temp -m 21.5
+```
+
+A QoS 2 publish is answered with PUBREC and completed exactly once; a persistent session resumes the flow after a
+reconnect. Shared subscriptions (`$share/group/filter`) work for 3.1.1 and 5.0 clients. What is not done (enhanced
+authentication, topic aliases from the broker): [KNOWN-ISSUES.md](KNOWN-ISSUES.md) section 2,
+[MQTT5-CONFORMANCE.md](MQTT5-CONFORMANCE.md).
+
+**Secure WebSocket** for browsers: `[websocket] enabled = true` opens `wss://<host>:8084/mqtt` with the TLS port's
+certificate (`auth = "mtls"` or `"password"`, an `origins` allow-list; DEPLOY.md, "MQTT over secure WebSocket for
+browsers").
+
+**Password accounts without a new image.** With a plaintext or WebSocket listener in `auth = "password"` mode and
+`limits.max_runtime_accounts = 64` (or more), the signed control channel adds and removes accounts while the broker
+runs (`urmqtt-control set-account --id sensor-9 --password-stdin`, `remove-account --id sensor-9`; OPERATE.md, "Password
+accounts at run time"). They are kept on the data disk.
+
+**Prometheus.** `[metrics] enabled = true` and `allow_from = ["<the Prometheus server's address>/32"]` serve `GET
+/metrics` on TCP 9100 to that network and nobody else (about 170 series; scrape configuration and alert rules in
+OPERATE.md, "Metrics for Prometheus"). Plain HTTP: keep it on a private network.
+
+**IPv6.** `[network] ipv6 = "slaac"` takes a global address from the router's advertisements; on a VPS with a /64
+routed to it use `ipv6 = "static"` with `ipv6_address = "2001:db8:1::10/64"` and `ipv6_gateway = "fe80::1"` (your
+provider's values). Every listener then takes IPv6 clients too, so allow the same ports in the provider's IPv6
+firewall; `$SYS/broker/net/ipv6/#` and the boot log (`net: ipv6 ...`) show what was configured. UDP (SNTP, syslog,
+statsd) stays IPv4 (OPERATE.md, "IPv6").
+
+**Updating with rollback.** A disk installed by v0.6.0 has two boot slots. With the VM stopped, `urmqtt-disk slots stage
+DISK --image urmqtt-vX.Y.Z.img --sums SHA256SUMS --sig SHA256SUMS.minisig --pubkey minisign.pub --write` puts the next
+release into the standby slot after checking its signature, and `urmqtt-disk slots activate DISK --write` boots it on
+trial: the kernel confirms itself when it has been healthy for a minute, or goes back to the previous release by itself
+(DEPLOY.md section 8b; a disk installed before v0.6.0 keeps `update-boot`). The data disk is not touched, but the
+first boot of a new release may migrate the database one way: read the release notes first.
+
+**A disk key that is not in the image.** `storage.encryption = "aes-256-xts"` with `storage.disk_key_source =
+"console"` wraps the disk key under a passphrase that you type on the VM's console at every boot, so a copy of the ISO no
+longer opens a copy of the data disk. The price: after any reboot the broker stays down until someone types it
+(OPERATE.md, "The disk passphrase at the console").
+
+Also available: `limits.max_connections_per_ip` (default 1024: devices behind one NAT share an address), DMA
+isolation with `devices.iommu`, Secure Boot with your own keys ([secure-boot-keys.md](secure-boot-keys.md)) and
+encrypted project files on the builder page ("Project and secrets").
 
 ## Tested
 

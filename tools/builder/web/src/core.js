@@ -15,18 +15,24 @@ export const FILE_KEYS = {
   'trust.bootstrap': { slot: 'bootstrap', file: 'bootstrap-%d.pem', list: true },
   'control.public_key': { slot: 'control', file: 'control.pub' },
   'tls.revoked_serials': { slot: 'revoked', file: 'revoked.txt' },
+  // The log collector's trust anchors (NEXT-7, ADR-318).
+  'observability.log_tls_ca': { slot: 'logca', file: 'log-ca-%d.pem', list: true },
 };
 
-/** Fields the page does not offer. Disk encryption (S7, ADR-240) needs a key
- * dialog (generate, save, import) the page does not have yet; it is set with
- * `urmqtt-config pack` and the TOML (docs/OPERATE.md). */
-export const HIDDEN = new Set(['storage.encryption', 'storage.disk_key']);
+/** The file slots that hold a list of PEM files (at most 8 each). */
+export const LIST_SLOTS = ['operational', 'bootstrap', 'logca'];
+
+/** Fields the page does not offer. A disk key in the image (S7, ADR-240) needs a
+ * key dialog (generate, save, import) the page does not have yet; it is set with
+ * `urmqtt-config pack` and the TOML (docs/OPERATE.md). Encryption whose key is a
+ * passphrase typed at the console (LATER-7, ADR-328) needs no file and is offered. */
+export const HIDDEN = new Set(['storage.disk_key']);
 
 /** Section order of the form and which sections open by default. */
 export const SECTION_ORDER = [
   'network', 'tls', 'trust', 'control', 'limits', 'acl', 'storage',
   'observability', 'time', 'watchdog', 'memory', 'registry', 'entropy', 'cpu',
-  'console', 'devices', 'plaintext', 'websocket', 'mqtt5',
+  'console', 'devices', 'plaintext', 'websocket', 'mqtt5', 'update',
 ];
 
 /** Examples shown as the placeholder of fields that have no default. */
@@ -35,10 +41,13 @@ export const EXAMPLES = {
   'network.gateway': '192.0.2.1',
   'observability.syslog_udp': '192.0.2.50:514',
   'observability.metrics_udp': '192.0.2.51:8125',
+  'observability.log_tls': '192.0.2.52:6514',
+  'observability.log_tls_name': 'logs.example.com',
   'time.servers': '192.0.2.123',
   'plaintext.allow_from': '10.0.0.0/8',
   'plaintext.ip_identities': '10.0.1.0/24 plc',
   'websocket.origins': 'https://app.example.com',
+  'metrics.allow_from': '10.0.0.0/8',
 };
 
 /** Builds the form model from the exported schema. */
@@ -230,7 +239,7 @@ export function emptyState() {
     values: {},          // field id -> raw value, only what the user changed
     files: {             // imported material; never leaves the page, never stored by key
       cert: null, key: null, control: null,
-      operational: [], bootstrap: [],
+      operational: [], bootstrap: [], logca: [],
     },
     signing: null,       // { pem, publicKey, signerId } (never stored)
     name: '',            // output file name part
@@ -261,7 +270,8 @@ export function fileIsSet(f, state) {
 
 /** Names of the virtual files for a list slot: ca-1.pem, ca-2.pem ... */
 export function listFileNames(slot, n) {
-  const pattern = slot === 'operational' ? 'ca-%d.pem' : 'bootstrap-%d.pem';
+  const key = Object.values(FILE_KEYS).find(k => k.slot === slot && k.list);
+  const pattern = key ? key.file : 'bootstrap-%d.pem';
   return Array.from({ length: n }, (_, i) => pattern.replace('%d', String(i + 1)));
 }
 
@@ -330,7 +340,9 @@ export function buildToml(model, state, { draft = false } = {}) {
 export function fieldForPath(model, path) {
   if (!path) return null;
   // "acl.device_publish[0]" names an entry of the list field.
-  const key = path.replace(/\[\d+\](\.\w+)?$/, '');
+  let key = path.replace(/\[\d+\](\.\w+)?$/, '');
+  // The key file is not on the page (ADR-328): its problems are shown at the choice of where the key comes from.
+  if (key === 'storage.disk_key') key = 'storage.disk_key_source';
   return model.byId.get(key) || model.byToml.get(key) || null;
 }
 
@@ -342,7 +354,7 @@ export function fieldForPath(model, path) {
  * Files are not read here: the caller asks the user for `needFiles`.
  */
 export function importToml(model, json, base = emptyState()) {
-  const state = { ...base, values: {}, files: { ...base.files, operational: [], bootstrap: [] } };
+  const state = { ...base, values: {}, files: { ...base.files, operational: [], bootstrap: [], logca: [] } };
   const unknown = [];
   const needFiles = [];
   const visit = (section, key, value) => {
@@ -408,6 +420,13 @@ const WEBSOCKET_PASSWORD_ONLY = new Set([
 /** The limits that bound shared subscriptions (ADR-275, format 13). */
 const SHARED_GROUP_LIMITS = new Set(['limits.max_shared_groups', 'limits.max_shared_group_members']);
 
+/** Whether a password login exists on some listener (plaintext.auth defaults to "password", websocket.auth to "mtls"). */
+function passwordListener(state) {
+  const v = state.values;
+  return (v['plaintext.enabled'] === true && (v['plaintext.auth'] || 'password') === 'password') ||
+    (v['websocket.enabled'] === true && v['websocket.auth'] === 'password');
+}
+
 /** Whether a field applies given the network mode (static/auto fields). */
 export function isApplicable(f, state) {
   const mode = state.values['network.mode'] || 'dhcp';
@@ -428,10 +447,16 @@ export function isApplicable(f, state) {
     if (state.values['websocket.enabled'] !== true) return false;
     if (WEBSOCKET_PASSWORD_ONLY.has(f.id)) return (state.values['websocket.auth'] || 'mtls') === 'password';
   }
+  // The Prometheus endpoint (ADR-290): nothing but the switch while it is off.
+  if (f.section === 'metrics' && f.id !== 'metrics.enabled' && state.values['metrics.enabled'] !== true) return false;
   // MQTT 5.0 (ADR-273 rule 21): on by default; its other keys mean nothing while it is off, except shared
   // subscriptions, which 3.1.1 clients use too (ADR-275).
   if (f.section === 'mqtt5' && f.id !== 'mqtt5.enabled' && f.id !== 'mqtt5.shared_subscriptions' &&
     state.values['mqtt5.enabled'] === false) return false;
+  // Run-time password accounts (ADR-285) need the control channel (so the TLS listener) and a listener that takes passwords.
+  if (f.id === 'limits.max_runtime_accounts' && (tlsOff(state) || !passwordListener(state))) return false;
+  // Where the disk key comes from (ADR-328) means something only with encryption on.
+  if (f.id === 'storage.disk_key_source') return state.values['storage.encryption'] === 'aes-256-xts';
   // The shared-group limits (ADR-275) bound nothing while shared subscriptions are off.
   if (SHARED_GROUP_LIMITS.has(f.id) && state.values['mqtt5.shared_subscriptions'] === false) return false;
   return true;
@@ -483,6 +508,10 @@ export function evaluateRisks(model, state, info) {
   if (val('registry.mode') === 'open') risks.push({ id: 'registry-open', level: 'note' });
   if (val('entropy.fallback') === 'none') risks.push({ id: 'entropy-none', level: 'note' });
   if (tlsOff(state)) risks.push({ id: 'tls-off', level: 'confirm' });
+  // ADR-328: no key in the image means a person at the console after every reboot.
+  if (val('storage.encryption') === 'aes-256-xts' && val('storage.disk_key_source') === 'console') {
+    risks.push({ id: 'console-unlock', level: 'confirm' });
+  }
   if (val('plaintext.enabled')) {
     risks.push({ id: 'plaintext-on', level: 'confirm' });
     if (val('plaintext.allow_from_anywhere')) risks.push({ id: 'plaintext-anywhere', level: 'confirm' });

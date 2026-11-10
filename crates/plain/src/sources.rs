@@ -20,6 +20,28 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+/// The source a slot counts (NEXT-1, ADR-332): one IPv4 address, or the /64
+/// of an IPv6 one (one subscriber holds a whole /64). The two never overlap:
+/// an IPv4 address is `::ffff:a.b.c.d`, an IPv6 /64 has its prefix in the
+/// high half and 0 in the low half. 0 is no source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Src(u128);
+
+impl From<[u8; 4]> for Src {
+    fn from(ip: [u8; 4]) -> Self {
+        if ip == [0; 4] {
+            return Self(0);
+        }
+        Self(0xffff_0000_0000 | u128::from(u32::from_be_bytes(ip)))
+    }
+}
+
+impl From<[u8; 16]> for Src {
+    fn from(ip: [u8; 16]) -> Self {
+        Self(u128::from_be_bytes(ip) >> 64 << 64)
+    }
+}
+
 /// Slots per bucket.
 const WAYS: usize = 8;
 
@@ -59,7 +81,7 @@ pub enum Open {
 #[derive(Debug, Clone, Copy, Default)]
 struct Slot {
     /// 0: free (0.0.0.0 is never a peer).
-    ip: u32,
+    ip: u128,
     conns: u16,
     fails: u16,
     /// Start of the current failure window, seconds.
@@ -113,17 +135,18 @@ impl Sources {
         self.slots.iter().filter(|s| s.ip != 0).count()
     }
 
-    fn base(&self, ip: u32) -> usize {
-        let h = (u64::from(ip) ^ self.key).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    fn base(&self, ip: u128) -> usize {
+        let folded = (ip as u64) ^ ((ip >> 64) as u64).rotate_left(23);
+        let h = (folded ^ self.key).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         ((h >> 32) as usize & (self.buckets - 1)) * WAYS
     }
 
-    fn bucket(&self, ip: u32) -> &[Slot] {
+    fn bucket(&self, ip: u128) -> &[Slot] {
         let b = self.base(ip);
         self.slots.get(b..b + WAYS).unwrap_or(&[])
     }
 
-    fn find(&self, ip: u32) -> Option<usize> {
+    fn find(&self, ip: u128) -> Option<usize> {
         let b = self.base(ip);
         self.bucket(ip)
             .iter()
@@ -132,7 +155,7 @@ impl Sources {
     }
 
     /// The slot of `ip`, made if there is room: a free slot, else an idle one.
-    fn find_or_make(&mut self, ip: u32, now: u32) -> Option<usize> {
+    fn find_or_make(&mut self, ip: u128, now: u32) -> Option<usize> {
         if let Some(i) = self.find(ip) {
             return Some(i);
         }
@@ -162,8 +185,8 @@ impl Sources {
     }
 
     /// What a SYN from `ip` meets. Never changes the table.
-    pub fn syn(&self, ip: [u8; 4], now: u32) -> Syn {
-        let ip = u32::from_be_bytes(ip);
+    pub fn syn(&self, ip: impl Into<Src>, now: u32) -> Syn {
+        let ip = ip.into().0;
         match self.find(ip).and_then(|i| self.slots.get(i)) {
             Some(s) if s.locked_until > now => Syn::LockedOut,
             Some(s) if u32::from(s.conns) >= self.limits.max_per_ip => Syn::TooMany,
@@ -172,8 +195,8 @@ impl Sources {
     }
 
     /// A connection from `ip` was accepted: counts it, or says why not.
-    pub fn open(&mut self, ip: [u8; 4], now: u32) -> Open {
-        let ip = u32::from_be_bytes(ip);
+    pub fn open(&mut self, ip: impl Into<Src>, now: u32) -> Open {
+        let ip = ip.into().0;
         if ip == 0 {
             return Open::Full;
         }
@@ -195,8 +218,8 @@ impl Sources {
     }
 
     /// A counted connection from `ip` ended.
-    pub fn close(&mut self, ip: [u8; 4], now: u32) {
-        let ip = u32::from_be_bytes(ip);
+    pub fn close(&mut self, ip: impl Into<Src>, now: u32) {
+        let ip = ip.into().0;
         let window = self.limits.lockout_s;
         if let Some(i) = self.find(ip)
             && let Some(s) = self.slots.get_mut(i)
@@ -209,8 +232,8 @@ impl Sources {
     }
 
     /// `ip` failed a login. Returns true if this one locked it out.
-    pub fn failed(&mut self, ip: [u8; 4], now: u32) -> bool {
-        let ip = u32::from_be_bytes(ip);
+    pub fn failed(&mut self, ip: impl Into<Src>, now: u32) -> bool {
+        let ip = ip.into().0;
         if ip == 0 {
             return false;
         }
@@ -240,8 +263,8 @@ impl Sources {
     }
 
     /// `ip` logged in: its failure count starts again.
-    pub fn succeeded(&mut self, ip: [u8; 4]) {
-        let ip = u32::from_be_bytes(ip);
+    pub fn succeeded(&mut self, ip: impl Into<Src>) {
+        let ip = ip.into().0;
         if let Some(i) = self.find(ip)
             && let Some(s) = self.slots.get_mut(i)
         {
@@ -250,13 +273,13 @@ impl Sources {
     }
 
     /// Whether `ip` is locked out at `now`.
-    pub fn locked_out(&self, ip: [u8; 4], now: u32) -> bool {
+    pub fn locked_out(&self, ip: impl Into<Src>, now: u32) -> bool {
         self.syn(ip, now) == Syn::LockedOut
     }
 
     /// Connections the table counts for `ip`.
-    pub fn connections(&self, ip: [u8; 4]) -> u32 {
-        let ip = u32::from_be_bytes(ip);
+    pub fn connections(&self, ip: impl Into<Src>) -> u32 {
+        let ip = ip.into().0;
         self.find(ip)
             .and_then(|i| self.slots.get(i))
             .map_or(0, |s| u32::from(s.conns))
@@ -421,12 +444,12 @@ mod tests {
         assert_eq!(t.capacity(), 64, "at least 8 buckets");
         // Find addresses of one bucket.
         let mut same: Vec<[u8; 4]> = Vec::new();
-        let target = t.base(u32::from_be_bytes([10, 0, 0, 1]));
+        let target = t.base(Src::from([10, 0, 0, 1]).0);
         let mut n = 0u32;
         while same.len() < 9 {
             let ip = (10u32 << 24) + n;
             n += 1;
-            if t.base(ip) == target {
+            if t.base(Src::from(ip.to_be_bytes()).0) == target {
                 same.push(ip.to_be_bytes());
             }
         }
@@ -454,13 +477,13 @@ mod tests {
                 lockout_s: 60,
             },
         );
-        let target = t.base(u32::from_be_bytes([10, 0, 0, 1]));
+        let target = t.base(Src::from([10, 0, 0, 1]).0);
         let mut same: Vec<[u8; 4]> = Vec::new();
         let mut n = 0u32;
         while same.len() < 10 {
             let ip = (10u32 << 24) + n;
             n += 1;
-            if t.base(ip) == target {
+            if t.base(Src::from(ip.to_be_bytes()).0) == target {
                 same.push(ip.to_be_bytes());
             }
         }
@@ -579,5 +602,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// NEXT-1, ADR-332: an IPv6 /64 is one source; it is apart from every
+    /// IPv4 address.
+    #[test]
+    fn an_ipv6_slash_64_is_one_source() {
+        let mut t = table(2, 3, 60);
+        let a = |last: u8, net: u8| {
+            let mut x = [0u8; 16];
+            x[..4].copy_from_slice(&[0x20, 1, 0xd, 0xb8]);
+            x[7] = net;
+            x[15] = last;
+            x
+        };
+        assert_eq!(t.open(a(1, 0), 0), Open::Ok);
+        assert_eq!(t.open(a(2, 0), 0), Open::Ok);
+        assert_eq!(t.open(a(3, 0), 0), Open::TooMany);
+        assert_eq!(t.syn(a(9, 0), 0), Syn::TooMany);
+        assert_eq!(t.open(a(1, 1), 0), Open::Ok);
+        assert_eq!(t.open([10, 0, 0, 1], 0), Open::Ok);
+        assert_eq!(t.connections(a(200, 0)), 2);
+        t.close(a(5, 0), 1);
+        assert_eq!(t.connections(a(1, 0)), 1);
+        assert_ne!(Src::from([0u8; 4]), Src::from([10, 0, 0, 1]));
+        assert_eq!(Src::from([0u8; 4]), Src::default());
     }
 }

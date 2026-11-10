@@ -32,13 +32,35 @@ pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// 10 is unused); version 12 adds the `[mqtt5]` section and the session and message expiry limits (ADR-273 rule
 /// 21: a kernel that does not know them would ignore the operator's expiry policy); version 13 adds
 /// `limits.max_shared_groups` and `limits.max_shared_group_members` (ADR-275: a kernel that does not know them
-/// would ignore the operator's bound). The records of 2 and 3 are the same: the packer writes the lowest version
-/// that can hold the configuration ([`BASE_VERSION`]), so a kernel of the older kind still boots every image that
-/// does not use what came later.
-pub const FORMAT_VERSION: u16 = 13;
+/// would ignore the operator's bound); version 14 adds `limits.max_connections_per_ip` (ADR-280: a kernel that does not know it would not limit the
+/// connections of one address); version 15 adds `limits.max_runtime_accounts` (ADR-285: the operator's bound would not be
+/// what the image says); version 16 adds the `[metrics]` section (ADR-290: a kernel without the endpoint would ignore a
+/// request for it, and an operator who asked for an allow-list must never get a kernel that answers everybody); version
+/// 17 adds the `[update]` section (ADR-297: a kernel that does not know it would confirm a trial boot by its own
+/// defaults, or never, against the operator's choice); version 18 adds `devices.iommu` (ADR-305: a kernel that does not
+/// know it would run without the DMA isolation the operator required); version 19 adds `devices.virtio_net_queues`
+/// (ADR-313: a kernel that does not know it would not keep the single queue the operator asked for); version 20 adds the
+/// `observability.log_tls*` keys (ADR-318: a kernel that does not know them would not ship the log where the operator
+/// asked, without a word); version 22 adds `storage.disk_key_source` (ADR-328: a kernel that does not know it would find
+/// no key and refuse the disk, or worse, an operator would believe the key is not in the image when an older template
+/// put one there; 21 was reserved for LATER-6, which needed no key, and no format has it); version 23 adds
+/// `network.ipv6`, `network.ipv6_address`, `network.ipv6_gateway` and IPv6 networks in `plaintext.allow_from` and
+/// `metrics.allow_from` (ADR-334: a kernel that does not know them would stay IPv4-only, or refuse an allow-list it
+/// cannot read, without saying why). The records of 2 and 3 are
+/// the same: the packer writes the lowest version that can hold the configuration ([`BASE_VERSION`]), so a kernel of
+/// the older kind still boots every image that does not use what came later.
+pub const FORMAT_VERSION: u16 = 23;
 
 /// The one version between [`FORMAT_MIN`] and [`FORMAT_VERSION`] no format ever had.
 pub const UNUSED_VERSION: u16 = 10;
+/// The versions between [`FORMAT_MIN`] and [`FORMAT_VERSION`] this code does not read: 10, which no format ever
+/// had, and 21, reserved for LATER-6 (ADR-320), which needed no configuration key: no format has it.
+pub const UNUSED_VERSIONS: &[u16] = &[UNUSED_VERSION, 21];
+
+/// Whether this code reads format `version`.
+pub fn known_version(version: u16) -> bool {
+    (FORMAT_MIN..=FORMAT_VERSION).contains(&version) && !UNUSED_VERSIONS.contains(&version)
+}
 /// The version a configuration is written in unless it needs a newer one.
 pub const BASE_VERSION: u16 = 2;
 /// The oldest format version it still reads. Blobs of the older versions stay
@@ -134,7 +156,7 @@ fn le32(b: &[u8]) -> Option<u32> {
 }
 
 /// Little-endian integer of up to 8 bytes.
-fn le_uint(b: &[u8]) -> u64 {
+pub(crate) fn le_uint(b: &[u8]) -> u64 {
     let mut v = 0u64;
     for (i, x) in b.iter().take(8).enumerate() {
         v |= u64::from(*x) << (8 * i);
@@ -184,14 +206,22 @@ impl<'a> Blob<'a> {
     /// Parses and validates `bytes` (a blob, possibly followed by padding,
     /// which must be zero). Fails closed on anything unexpected.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, CfgError> {
+        Self::parse_ext(bytes, &[])
+    }
+
+    /// [`parse`](Self::parse) for a kernel or a tool that knows the extension
+    /// fields `ext` of an edition (NOW-18, ADR-337): a record in the reserved
+    /// range is accepted when `ext` declares its tag, and checked against that
+    /// field. With an empty `ext` this is `parse`, byte for byte the same verdicts.
+    pub fn parse_ext(bytes: &'a [u8], ext: &[Field]) -> Result<Self, CfgError> {
         let bad = |m| err("blob", m);
         if bytes.get(..8) != Some(&MAGIC[..]) {
             return Err(bad("not a urmqtt-cfg blob (bad magic)"));
         }
         let version = bytes.get(8..).and_then(le16).ok_or(bad("truncated"))?;
-        // Version 10 was never used by any format: unknown, like one above
-        // the newest.
-        if !(FORMAT_MIN..=FORMAT_VERSION).contains(&version) || version == UNUSED_VERSION {
+        // Version 10 was never used by any format (or one reserved for
+        // an unmerged item): unknown, like one above the newest.
+        if !known_version(version) {
             return Err(bad("unsupported format version"));
         }
         if bytes.get(10..).and_then(le16) != Some(0) {
@@ -244,6 +274,9 @@ impl<'a> Blob<'a> {
         {
             return Err(bad("data after the blob is not zero padding"));
         }
+        if crate::ext::check(ext).is_err() {
+            return Err(bad("the edition's extension field table is invalid"));
+        }
         let blob = Self {
             payload,
             fingerprint,
@@ -251,11 +284,11 @@ impl<'a> Blob<'a> {
             len,
             version,
         };
-        blob.check_records()?;
+        blob.check_records(ext)?;
         Ok(blob)
     }
 
-    fn check_records(&self) -> Result<(), CfgError> {
+    fn check_records(&self, ext: &[Field]) -> Result<(), CfgError> {
         let mut rest = self.payload;
         let mut last: Option<u16> = None;
         while !rest.is_empty() {
@@ -270,7 +303,9 @@ impl<'a> Blob<'a> {
                 ));
             }
             last = Some(tag);
-            let field = fields::by_tag(tag).ok_or(err("blob", "unknown field tag"))?;
+            let field = fields::by_tag(tag)
+                .or_else(|| crate::ext::lookup(tag, ext))
+                .ok_or(err("blob", "unknown field tag"))?;
             if !field.stored {
                 return Err(err(field.key, "this field is not stored in a blob"));
             }
@@ -315,6 +350,12 @@ impl<'a> Blob<'a> {
         Records(self.payload)
             .find(|(t, _)| *t == tag)
             .map(|(_, v)| v)
+    }
+
+    /// Every record as (tag, value), in tag order, an edition's included
+    /// (ADR-337).
+    pub fn records(&self) -> impl Iterator<Item = (u16, &'a [u8])> + 'a {
+        Records(self.payload)
     }
 
     /// Every present record, in tag order.

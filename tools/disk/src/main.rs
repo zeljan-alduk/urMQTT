@@ -15,11 +15,31 @@
 //!                                                on a larger disk, optionally configured; the first
 //!                                                boot formats the data
 //! urmqtt-disk update-boot DISK --esp ESP --write [--config BLOB|SLOT | --keep-config | --replace-config]
+//!                    [--allow-unsealed]
 //!                                                replace the kernel (ESP), keep the data. The disk's
 //!                                                configuration slot (C1c) is kept whenever it holds a
 //!                                                real configuration (the default, whatever the new ESP
 //!                                                carries); --config sets one, --replace-config takes
 //!                                                the new ESP's own
+//! urmqtt-disk slots status DISK                  the two boot slots of an A/B disk (v0.6.0, NEXT-11):
+//!                                                region, release, state, the disk GUID the control
+//!                                                messages name
+//! urmqtt-disk slots stage DISK (--image RELEASE.img --sums SHA256SUMS --sig SHA256SUMS.minisig
+//!                    --pubkey minisign.pub [--pubkey ...] | --esp ESP --unsigned | --image IMG --unsigned)
+//!                    [--config BLOB|SLOT | --keep-config | --replace-config] [--allow-downgrade]
+//!                    [--allow-unsealed] --write
+//!                                                write the standby slot (the configuration is carried
+//!                                                over as update-boot does); the data is not touched.
+//!                                                A disk sealed for Secure Boot (ADR-320) takes only a
+//!                                                sealed ESP unless --allow-unsealed
+//! urmqtt-disk slots activate DISK [--tries N] [--one-way] [--retry] [--allow-downgrade] --write
+//!                                                make the staged slot the boot entry, on trial: it must
+//!                                                confirm itself (or an operator confirms it) within
+//!                                                N boots (default 3), else the previous slot returns
+//! urmqtt-disk slots confirm DISK --write          confirm the slot on trial
+//! urmqtt-disk slots rollback DISK --write         go back to the previous slot (the slot left is marked bad)
+//!                                                Without --write every slots command rehearses on an
+//!                                                in-memory overlay and changes nothing
 //! urmqtt-disk migrate DISK [--write] [--resume | --rollback [--force]]
 //!                    [--rollback-file FILE] [--align-mib N]
 //!                                                layout v1 -> v2. Without --write: the plan and the
@@ -48,12 +68,31 @@
 //!                                                disk is refused by the kernel until a run that was cut
 //!                                                is resumed (--resume, same keys); the journal (default
 //!                                                DISK.convert-journal) must be kept until then. Without
-//!                                                --write the run happens on an in-memory overlay
+//!                                                --write the run happens on an in-memory overlay. A
+//!                                                conversion empties the key slots (they wrap the old key)
+//! urmqtt-disk keys DISK                          the key slots (LATER-7): the disk key wrapped under
+//!                                                passphrases, not in the image; no key needed
+//! urmqtt-disk keys DISK add (--key FILE | --passphrase-file FILE) --new-passphrase-file FILE
+//!                    [--slot N] [--iterations N] --write
+//!                                                wrap the key under a new passphrase (an image-key disk
+//!                                                becomes one for storage.disk_key_source = "console")
+//! urmqtt-disk keys DISK change (--key FILE | --passphrase-file FILE) --new-passphrase-file FILE
+//!                    [--slot N] [--iterations N] --write
+//!                                                a new passphrase for a slot (the one the old one opens)
+//! urmqtt-disk keys DISK remove --slot N (--key FILE | --passphrase-file FILE) --write
+//!                                                empty a slot (never the last)
+//! urmqtt-disk keys DISK unwrap (--key FILE | --passphrase-file FILE --key-out FILE) --write
+//!                                                empty every slot: the key must come from the image
+//!                                                again (storage.disk_key; the way back to v0.5)
+//!                                                Key changes rewrite the superblock only (two writes,
+//!                                                each flushed); without --write on an overlay
 //! ```
 //!
 //! `--key FILE` goes with every other command that reads an encrypted disk
 //! (`info`, `verify`, `export-*`, `scrub`, `backup*`, `grow`, `import-devices`):
-//! 64 raw bytes or 128 hex digits.
+//! 64 raw bytes or 128 hex digits. `--passphrase-file FILE` instead opens a
+//! disk whose key is in its key slots (LATER-7): the file's bytes without
+//! one final newline.
 //!
 //! Test hooks (images only): `fixture-v1 DISK [--populate] --write` builds a
 //! layout-v1 data partition (the kernel only reads v2), and `--fault SPEC`
@@ -74,11 +113,14 @@ use urmqtt_disk::config;
 use urmqtt_disk::convert::{self, FileJournal, Key, MemJournal};
 use urmqtt_disk::dev::{FileDisk, Overlay, S, Shared};
 use urmqtt_disk::host::{self, mib, now_unix, open_store};
+use urmqtt_disk::keys;
 use urmqtt_disk::migrate;
+use urmqtt_disk::slots as ab;
 use urmqtt_store::fault::{FaultDevice, FaultSpec};
 use urmqtt_store::gpt::{self, DataPartition, Table};
 use urmqtt_store::layout::{FileKind, Layout, LayoutError, RegionKind, SECTOR, v1};
 use urmqtt_store::part::Partition;
+use urmqtt_store::slots;
 use urmqtt_store::telemetry::TelemetryLog;
 use urmqtt_store::{BlockDevice, Disk, DiskError, IoError, Opened};
 
@@ -235,7 +277,11 @@ fn info(path: &str) -> Result<(), String> {
     );
     if let Some(e) = t.entries.iter().find(|e| e.type_guid == gpt::ESP_TYPE) {
         match read_esp(&mut dev, e) {
-            Ok(esp) => println!("{}", config::describe(&config::read(&esp))),
+            Ok(esp) => println!(
+                "{}\n{}",
+                config::describe(&config::read(&esp)),
+                config::describe_seal(&esp)
+            ),
             Err(m) => println!("config: unreadable ({m})"),
         }
     }
@@ -629,9 +675,30 @@ fn read_esp(dev: &mut dyn BlockDevice, e: &gpt::Entry) -> Result<Vec<u8>, String
     Ok(buf)
 }
 
-fn update_boot(path: &str, esp: &str, write: bool, policy: &config::Policy) -> Result<(), String> {
+fn update_boot(
+    path: &str,
+    esp: &str,
+    write: bool,
+    in_place: bool,
+    allow_unsealed: bool,
+    policy: &config::Policy,
+) -> Result<(), String> {
     let esp = std::fs::read(esp).map_err(|e| format!("{esp}: {e}"))?;
     let mut dev = FileDisk::open(path, write)?;
+    // An A/B disk (ADR-299): the running slot would be overwritten in place,
+    // with no way back if the new kernel fails.
+    let ab = matches!(slots::read(&mut dev), Ok(Some(_)));
+    if let Ok(Some(s)) = slots::read(&mut dev) {
+        if !in_place {
+            return Err(format!(
+                "this disk has two boot slots: update it with `urmqtt-disk slots stage` and `slots activate` (the old kernel stays as the way back); --in-place overwrites the running slot {} anyway",
+                s.letter(&s.active())
+            ));
+        }
+        if s.active().state.trial {
+            return Err(ab::slot_error(&slots::SlotError::TrialPending));
+        }
+    }
     let f = inspect(&mut dev)?;
     let t = f.primary.as_ref().ok_or("no valid primary GPT")?;
     let e = t
@@ -650,11 +717,15 @@ fn update_boot(path: &str, esp: &str, write: bool, policy: &config::Policy) -> R
     // unless the new ESP is configured itself (or the caller says otherwise).
     let old = read_esp(&mut dev, e)?;
     let (esp, what) = config::carry_over(&old, esp, policy)?;
+    if let Some(w) = config::keep_sealed(&old, &esp, allow_unsealed)? {
+        eprintln!("update-boot: {w}");
+    }
     println!(
-        "update-boot: {}\nupdate-boot: before: {}\nupdate-boot: after:  {}",
+        "update-boot: {}\nupdate-boot: before: {}\nupdate-boot: after:  {}\nupdate-boot: {}",
         what,
         config::describe(&config::read(&old)),
         config::describe(&config::read(&esp)),
+        config::describe_seal(&esp),
     );
     if !write {
         println!(
@@ -664,10 +735,292 @@ fn update_boot(path: &str, esp: &str, write: bool, policy: &config::Policy) -> R
         );
         return Ok(());
     }
+    let note = slots::find_notes(&esp).into_iter().next();
     dev.write(e.first_lba, &esp)
         .map_err(|e| format!("write: {e:?}"))?;
     dev.flush().map_err(|e| format!("flush: {e:?}"))?;
     eprintln!("update-boot: {path}: ESP replaced, data partition kept");
+    if ab {
+        // The slot's label, schema and commitment follow its new bytes
+        // (ADR-299): a stale commitment would make it unusable as the way
+        // back after the next activation.
+        let label = note.as_ref().map_or("in-place", |n| n.version.as_str());
+        let schema = note
+            .as_ref()
+            .and_then(|n| u8::try_from(n.schema).ok())
+            .unwrap_or(0);
+        slots::reseal_active(&mut dev, label, schema).map_err(|e| ab::slot_error(&e))?;
+        eprintln!(
+            "update-boot: the active slot now records {label} and a commitment to its new bytes"
+        );
+    }
+    Ok(())
+}
+
+// --- A/B boot slots (NEXT-11) ---------------------------------------------------------
+
+/// The options of `urmqtt-disk slots`.
+struct SlotArgs {
+    write: bool,
+    fault: Option<String>,
+    image: Option<String>,
+    esp: Option<String>,
+    sums: Option<String>,
+    sig: Option<String>,
+    pubkeys: Vec<String>,
+    unsigned: bool,
+    allow_downgrade: bool,
+    /// Stage an unsealed ESP onto a disk whose active slot is sealed (ADR-320).
+    allow_unsealed: bool,
+    tries: u8,
+    one_way: bool,
+    retry: bool,
+    policy: config::Policy,
+}
+
+/// The device for a slots command: the disk (through the fault injector)
+/// with `--write`, an in-memory overlay otherwise.
+fn slot_device(path: &str, a: &SlotArgs) -> Result<Box<dyn BlockDevice>, String> {
+    if a.write {
+        writable(path, a.fault.as_deref())
+    } else {
+        Ok(Box::new(Overlay::new(Box::new(FileDisk::open(
+            path, false,
+        )?))))
+    }
+}
+
+fn read_slots(dev: &mut dyn BlockDevice) -> Result<slots::Slots, String> {
+    // A table write that was cut leaves the two copies different: the next
+    // boot repairs that from the primary (in force); so does this, first.
+    if matches!(slots::read(dev), Err(slots::SlotError::NeedsRepair)) {
+        gpt::prepare(dev, random).map_err(|e| format!("partition table: {e:?}"))?;
+        println!(
+            "slots: the partition table's copies differed: repaired from the primary (what the next boot does)"
+        );
+    }
+    slots::read(dev)
+        .map_err(|e| ab::slot_error(&e))?
+        .ok_or_else(|| ab::slot_error(&slots::SlotError::NotAb))
+}
+
+/// The store schema on the disk, read on an overlay (opening migrates).
+fn disk_store_schema(path: &str) -> Option<u32> {
+    let (dev, f) = overlay(path).ok()?;
+    let part = data_part(path, Box::new(dev.view()), &f).ok()?;
+    let disk = open_layout(part).ok()?;
+    host::store_schema(disk).ok()
+}
+
+fn slots_status(path: &str) -> Result<(), String> {
+    // On an overlay: a table a cut left torn is repaired in memory only.
+    let mut dev = Overlay::new(Box::new(FileDisk::open(path, false)?));
+    let s = read_slots(&mut dev)?;
+    let disk_guid = s.table.header.disk_guid;
+    println!(
+        "disk GUID {disk_guid} (the --disk-guid of urmqtt-control boot-confirm/boot-rollback)"
+    );
+    for x in [s.active(), s.standby_slot()] {
+        println!("{}", ab::describe(&s, &x));
+    }
+    let a = s.active();
+    if a.state.trial {
+        println!(
+            "next: the kernel confirms the trial itself (update.confirm = auto) or an operator sends boot-confirm; offline: `urmqtt-disk slots confirm {path} --write` or `slots rollback {path} --write`"
+        );
+    } else if s.standby_slot().state.sealed && !s.standby_slot().state.bad {
+        println!(
+            "the standby holds {}: `urmqtt-disk slots activate {path} --write` boots it on trial",
+            s.standby_slot().label
+        );
+    }
+    Ok(())
+}
+
+fn slots_stage(path: &str, a: &SlotArgs) -> Result<(), String> {
+    // 1. The image and what vouches for it.
+    let (esp, origin) = match (&a.image, &a.esp) {
+        (Some(img), None) => {
+            let bytes = std::fs::read(img).map_err(|e| format!("{img}: {e}"))?;
+            let origin = if a.unsigned {
+                "UNSIGNED image (--unsigned): nothing vouches for it".to_string()
+            } else {
+                let (Some(sums), Some(sig)) = (&a.sums, &a.sig) else {
+                    return Err("--image needs --sums SHA256SUMS --sig SHA256SUMS.minisig --pubkey minisign.pub (or --unsigned for an image you built)".into());
+                };
+                if a.pubkeys.is_empty() {
+                    return Err(
+                        "--pubkey minisign.pub is required to check the release signature".into(),
+                    );
+                }
+                let keys = a
+                    .pubkeys
+                    .iter()
+                    .map(|k| std::fs::read_to_string(k).map_err(|e| format!("{k}: {e}")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let sums = std::fs::read(sums).map_err(|e| format!("{sums}: {e}"))?;
+                let sig = std::fs::read_to_string(sig).map_err(|e| format!("{sig}: {e}"))?;
+                let name = std::path::Path::new(img)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or("the image path has no file name")?;
+                ab::verify_release(name, &bytes, &sums, &sig, &keys)?
+            };
+            (ab::esp_of_image(&bytes)?, origin)
+        }
+        (None, Some(e)) => {
+            if !a.unsigned {
+                return Err("--esp stages an ESP image you built: no release signature covers it; say so with --unsigned (or stage the release's .img with --sums, --sig and --pubkey)".into());
+            }
+            (
+                std::fs::read(e).map_err(|x| format!("{e}: {x}"))?,
+                "UNSIGNED ESP image (--esp --unsigned): nothing vouches for it".to_string(),
+            )
+        }
+        _ => return Err("give one of --image IMG or --esp ESP".into()),
+    };
+    println!("stage: {origin}");
+    // 2. What its kernels are.
+    let note = ab::note_of(&esp)?;
+    println!(
+        "stage: kernel {} (A/B protocol {}, store schema {}, configuration formats up to {})",
+        note.version, note.ab_protocol, note.schema, note.cfg_format
+    );
+    // 3. The disk, the configuration to carry over, the rules.
+    let db_schema = disk_store_schema(path);
+    let mut dev = slot_device(path, a)?;
+    let s = read_slots(dev.as_mut())?;
+    let active = s.active();
+    let old = ab::read_region(dev.as_mut(), active.first_lba, active.sectors())?;
+    let (esp, what) = config::carry_over(&old, esp, &a.policy)?;
+    if let Some(w) = config::keep_sealed(&old, &esp, a.allow_unsealed)? {
+        eprintln!("stage: {w}");
+    }
+    println!(
+        "stage: {what}; the configuration: {}\nstage: {}",
+        config::describe(&config::read(&esp)),
+        config::describe_seal(&esp)
+    );
+    if let Some(f) = ab::config_format(&esp)
+        && f > note.cfg_format
+    {
+        return Err(format!(
+            "the configuration is format {f}, this kernel reads formats up to {}: it would refuse it at boot",
+            note.cfg_format
+        ));
+    }
+    for w in ab::rules(&note, &active, db_schema, a.allow_downgrade)? {
+        println!("stage: warning: {w}");
+    }
+    let schema = u8::try_from(note.schema).map_err(|_| "store schema out of range")?;
+    // 4. The write.
+    let st =
+        slots::stage(dev.as_mut(), &esp, &note.version, schema).map_err(|e| ab::slot_error(&e))?;
+    println!(
+        "stage: slot {} holds {} now, SHA-256 of the slot {}{}",
+        st.slot,
+        note.version,
+        ab::hex(&st.sha256),
+        if a.write {
+            format!("; next: `urmqtt-disk slots activate {path} --write`")
+        } else {
+            " (dry run on an overlay: nothing was written; add --write with the VM stopped)".into()
+        }
+    );
+    Ok(())
+}
+
+fn slots_activate(path: &str, a: &SlotArgs) -> Result<(), String> {
+    let db_schema = disk_store_schema(path);
+    let mut dev = slot_device(path, a)?;
+    let s = read_slots(dev.as_mut())?;
+    let (active, standby) = (s.active(), s.standby_slot());
+    if standby.state.empty || !standby.state.sealed {
+        return Err(
+            "the standby slot holds nothing staged: `urmqtt-disk slots stage` first".into(),
+        );
+    }
+    let note = slots::Note {
+        ab_protocol: slots::AB_PROTOCOL,
+        schema: u32::from(standby.state.schema),
+        cfg_format: 0,
+        version: standby.label.clone(),
+    };
+    for w in ab::rules(&note, &active, db_schema, a.allow_downgrade)? {
+        println!("activate: warning: {w}");
+    }
+    let needs_one_way = standby.state.schema > active.state.schema;
+    if needs_one_way && !a.one_way {
+        return Err(format!(
+            "{} writes store schema {}, the running {} reads up to {}: once the new kernel has migrated the store there is no way back to the old one. Activate with --one-way to accept that (the automatic return still works until the migration ran)",
+            standby.label, standby.state.schema, active.label, active.state.schema
+        ));
+    }
+    let (from, to) = slots::activate(
+        dev.as_mut(),
+        slots::Activation {
+            tries: a.tries,
+            one_way: needs_one_way,
+            retry: a.retry,
+        },
+    )
+    .map_err(|e| ab::slot_error(&e))?;
+    println!(
+        "activate: slot {to} ({}) is the boot entry, on trial for {} boot(s); slot {from} ({}) is the way back{}",
+        standby.label,
+        a.tries.clamp(1, slots::MAX_TRIES),
+        active.label,
+        if a.write {
+            ""
+        } else {
+            " (dry run on an overlay: nothing was written; add --write with the VM stopped)"
+        }
+    );
+    Ok(())
+}
+
+fn slots_confirm(path: &str, a: &SlotArgs) -> Result<(), String> {
+    let mut dev = slot_device(path, a)?;
+    match slots::confirm(dev.as_mut()).map_err(|e| ab::slot_error(&e))? {
+        true => println!(
+            "confirm: the active slot is confirmed{}",
+            if a.write {
+                ""
+            } else {
+                " (dry run: nothing was written)"
+            }
+        ),
+        false => println!("confirm: the active slot was not on trial: nothing to do"),
+    }
+    Ok(())
+}
+
+fn slots_rollback(path: &str, a: &SlotArgs) -> Result<(), String> {
+    let db_schema = disk_store_schema(path);
+    let mut dev = slot_device(path, a)?;
+    // The way back must read the store as it is now (the kernel marks such a
+    // slot bad when it opens the store; this covers a store migrated by a
+    // kernel that never got to that point).
+    let s = read_slots(dev.as_mut())?;
+    let standby = s.standby_slot();
+    if let Some(db) = db_schema
+        && !standby.state.empty
+        && u32::from(standby.state.schema) < db
+    {
+        return Err(format!(
+            "the previous slot's kernel ({}) writes store schema {}, the store on the disk is schema {db}: it would refuse the store (a store migration is one-way). Never allowed",
+            standby.label, standby.state.schema
+        ));
+    }
+    let (from, to) = slots::rollback(dev.as_mut()).map_err(|e| ab::slot_error(&e))?;
+    println!(
+        "rollback: slot {to} is the boot entry again, slot {from} is marked bad{}",
+        if a.write {
+            ""
+        } else {
+            " (dry run: nothing was written)"
+        }
+    );
     Ok(())
 }
 
@@ -886,6 +1239,125 @@ fn grow_cmd(path: &str, ratio: u32, write: bool, fault: Option<&str>) -> Result<
 
 // --- scrub (S6) -----------------------------------------------------------------------
 
+struct KeysArgs {
+    write: bool,
+    fault: Option<String>,
+    passphrase: Option<String>,
+    new_passphrase: Option<String>,
+    key_out: Option<String>,
+    slot: Option<usize>,
+    iterations: u32,
+}
+
+/// `urmqtt-disk keys DISK [add|change|remove|unwrap]` (LATER-7, ADR-327).
+fn keys_cmd(path: &str, sub: Option<&str>, a: KeysArgs) -> Result<(), String> {
+    let op = match sub {
+        None | Some("list") => {
+            let (base, found) = overlay(path)?;
+            let mut part = data_part(path, Box::new(base), &found)?;
+            print!("{}", keys::list(&mut part)?);
+            return Ok(());
+        }
+        Some("add") => keys::Op::Add,
+        Some("change") => keys::Op::Change,
+        Some("remove") => keys::Op::Remove,
+        Some("unwrap") => keys::Op::Unwrap,
+        Some(o) => {
+            return Err(format!(
+                "keys: unknown command {o:?} (add, change, remove, unwrap)"
+            ));
+        }
+    };
+    let auth = match (&a.passphrase, KEY.get()) {
+        (Some(p), None) => keys::Auth::Passphrase(keys::read_passphrase(p)?),
+        (None, Some(k)) => keys::Auth::Key(urmqtt_store::keyslot::Zeroizing::new(*k)),
+        _ => return Err("keys: give --key FILE or --passphrase-file FILE".into()),
+    };
+    let new = a
+        .new_passphrase
+        .as_deref()
+        .map(keys::read_passphrase)
+        .transpose()?;
+    if op == keys::Op::Unwrap && matches!(auth, keys::Auth::Passphrase(_)) && a.key_out.is_none() {
+        return Err("unwrap with a passphrase: give --key-out FILE, where the key is written (the image needs it from now on)".into());
+    }
+    let mut dev: Box<dyn BlockDevice> = if a.write {
+        writable(path, a.fault.as_deref())?
+    } else {
+        Box::new(Overlay::new(Box::new(FileDisk::open(path, false)?)))
+    };
+    let found = inspect(dev.as_mut())?;
+    let mut part = data_part(path, dev, &found)?;
+    // The key for --key-out, before the slots go.
+    let key_out = match (&a.key_out, op) {
+        (Some(_), keys::Op::Unwrap) => Some(keys::key_of(&mut part, &auth)?.0),
+        (Some(_), _) => return Err("--key-out goes with `keys DISK unwrap` only".into()),
+        _ => None,
+    };
+    let mut salt = [0u8; 32];
+    File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut salt))
+        .map_err(|e| format!("/dev/urandom: {e}"))?;
+    // The key file is written (and synced) before the slots are emptied:
+    // were it written after, a refused file (one that exists already, a
+    // missing directory, a full disk) would leave the key nowhere at all.
+    if let (Some(out), Some(k)) = (&a.key_out, &key_out) {
+        if a.write {
+            write_secret(out, keys::key_hex(k).as_bytes())?;
+            println!(
+                "keys: the disk key was written to {out} (128 hex digits): it is the storage.disk_key of the image from now on; keep it secret"
+            );
+        } else if std::path::Path::new(out).exists() {
+            return Err(format!("{out}: exists already (it must not exist yet)"));
+        } else {
+            println!("keys: dry run: the key would be written to {out}");
+        }
+    }
+    let done = keys::apply(
+        Box::new(part),
+        op,
+        &auth,
+        a.slot,
+        new.as_ref().map(|p| p.as_slice()),
+        a.iterations,
+        salt,
+    )?;
+    let what = match (done.op, done.slot) {
+        (keys::Op::Add, Some(s)) => format!("key slot {s}: the disk key is wrapped under the new passphrase"),
+        (keys::Op::Change, Some(s)) => format!("key slot {s}: new passphrase; the old one no longer opens the disk"),
+        (keys::Op::Remove, Some(s)) => format!("key slot {s}: emptied"),
+        _ => "every key slot emptied: the key must come from the image (storage.disk_key_source = \"image\", storage.disk_key)".into(),
+    };
+    println!(
+        "keys: {what}{}{}",
+        if done.scrubbed {
+            "; the older superblock was brought up to date"
+        } else {
+            ""
+        },
+        if a.write {
+            ""
+        } else {
+            " (dry run on an overlay: nothing was written; add --write)"
+        }
+    );
+    Ok(())
+}
+
+/// Writes a secret file readable by its owner only.
+fn write_secret(path: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("{path}: {e} (it must not exist yet)"))?;
+    f.write_all(bytes)
+        .and_then(|()| f.sync_all())
+        .map_err(|e| format!("{path}: {e}"))
+}
+
 fn convert_cmd(
     path: &str,
     from: Option<Key>,
@@ -939,7 +1411,7 @@ fn convert_cmd(
         r.chunks_skipped,
         if r.resumed { ", resumed" } else { "" },
         if to.is_some() {
-            "; the disk is now encrypted: boot it with the key in the ISO's configuration (storage.disk_key)"
+            "; the disk is now encrypted: boot it with the key in the ISO's configuration (storage.disk_key), or wrap it under a passphrase with `urmqtt-disk keys DISK add --key FILE` (any key slots were emptied: they wrapped the old key)"
         } else {
             "; the disk is now plain"
         }
@@ -1210,6 +1682,9 @@ fn run(args: &[String]) -> Result<(), String> {
         KEY.set(load_key(&k)?)
             .map_err(|_| "--key given twice".to_string())?;
     }
+    if opt("--key").is_some() && opt("--passphrase-file").is_some() {
+        return Err("give --key FILE or --passphrase-file FILE, not both".into());
+    }
     let pos: Vec<&String> = {
         let mut v = Vec::new();
         let mut skip = false;
@@ -1229,6 +1704,12 @@ fn run(args: &[String]) -> Result<(), String> {
                         | "--populate"
                         | "--keep-config"
                         | "--replace-config"
+                        | "--unsigned"
+                        | "--allow-downgrade"
+                        | "--allow-unsealed"
+                        | "--one-way"
+                        | "--retry"
+                        | "--in-place"
                 );
                 continue;
             }
@@ -1241,7 +1722,101 @@ fn run(args: &[String]) -> Result<(), String> {
             .map(|s| s.as_str())
             .ok_or_else(|| format!("missing {what}"))
     };
+    let policy = || -> Result<config::Policy, String> {
+        Ok(
+            match (
+                opt("--config"),
+                flag("--keep-config"),
+                flag("--replace-config"),
+            ) {
+                (None, false, false) => config::Policy::Auto,
+                (None, true, false) => config::Policy::Keep,
+                (None, false, true) => config::Policy::Replace,
+                (Some(c), false, false) => config::Policy::Set(config::slot_from_file(
+                    &std::fs::read(&c).map_err(|e| format!("{c}: {e}"))?,
+                )?),
+                _ => {
+                    return Err(
+                        "give at most one of --config FILE, --keep-config, --replace-config".into(),
+                    );
+                }
+            },
+        )
+    };
+    // LATER-7: a passphrase opens the key slots; every command but `keys`
+    // (which takes it as its authorisation) then runs with the key.
+    if let Some(p) = opt("--passphrase-file")
+        && pos.first().map(|s| s.as_str()) != Some("keys")
+    {
+        let pass = keys::read_passphrase(&p)?;
+        let path = arg(1, "DISK")?;
+        let (base, found) = overlay(path)?;
+        let mut part = data_part(path, Box::new(base), &found)?;
+        let (k, _) = urmqtt_store::disk::unlock(&mut part, &pass).map_err(keys::disk_error)?;
+        KEY.set(*k).map_err(|_| "--key given twice".to_string())?;
+    }
     match pos.first().map(|s| s.as_str()) {
+        Some("keys") => keys_cmd(
+            arg(1, "DISK")?,
+            pos.get(2).map(|s| s.as_str()),
+            KeysArgs {
+                write: flag("--write"),
+                fault: opt("--fault"),
+                passphrase: opt("--passphrase-file"),
+                new_passphrase: opt("--new-passphrase-file"),
+                key_out: opt("--key-out"),
+                slot: opt("--slot")
+                    .map(|s| s.parse::<usize>().map_err(|e| format!("--slot: {e}")))
+                    .transpose()?,
+                iterations: opt("--iterations")
+                    .map(|s| s.parse::<u32>().map_err(|e| format!("--iterations: {e}")))
+                    .transpose()?
+                    .unwrap_or(urmqtt_store::keyslot::DEFAULT_ITERATIONS),
+            },
+        ),
+        Some("slots") => {
+            let sub = arg(1, "status|stage|activate|confirm|rollback")?;
+            let path = arg(2, "DISK")?;
+            let a = SlotArgs {
+                write: flag("--write"),
+                fault: opt("--fault"),
+                image: opt("--image"),
+                esp: opt("--esp"),
+                sums: opt("--sums"),
+                sig: opt("--sig"),
+                pubkeys: args
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| *a == "--pubkey")
+                    .filter_map(|(i, _)| args.get(i + 1).cloned())
+                    .collect(),
+                unsigned: flag("--unsigned"),
+                allow_downgrade: flag("--allow-downgrade"),
+                allow_unsealed: flag("--allow-unsealed"),
+                tries: opt("--tries")
+                    .map(|t| {
+                        t.parse::<u8>()
+                            .ok()
+                            .filter(|n| (1..=slots::MAX_TRIES).contains(n))
+                            .ok_or_else(|| format!("--tries: 1..={}", slots::MAX_TRIES))
+                    })
+                    .transpose()?
+                    .unwrap_or(slots::DEFAULT_TRIES),
+                one_way: flag("--one-way"),
+                retry: flag("--retry"),
+                policy: policy()?,
+            };
+            match sub {
+                "status" => slots_status(path),
+                "stage" => slots_stage(path, &a),
+                "activate" => slots_activate(path, &a),
+                "confirm" => slots_confirm(path, &a),
+                "rollback" => slots_rollback(path, &a),
+                other => Err(format!(
+                    "unknown slots command {other:?}: status, stage, activate, confirm, rollback"
+                )),
+            }
+        }
         Some("info") => info(arg(1, "DISK")?),
         Some("verify") => verify(arg(1, "DISK")?),
         Some("export-db") => export_db(arg(1, "DISK")?, arg(2, "OUT")?),
@@ -1264,31 +1839,14 @@ fn run(args: &[String]) -> Result<(), String> {
             opt("--size").map(|s| parse_size(&s)).transpose()?,
             opt("--config").as_deref(),
         ),
-        Some("update-boot") => {
-            let policy = match (
-                opt("--config"),
-                flag("--keep-config"),
-                flag("--replace-config"),
-            ) {
-                (None, false, false) => config::Policy::Auto,
-                (None, true, false) => config::Policy::Keep,
-                (None, false, true) => config::Policy::Replace,
-                (Some(c), false, false) => config::Policy::Set(config::slot_from_file(
-                    &std::fs::read(&c).map_err(|e| format!("{c}: {e}"))?,
-                )?),
-                _ => {
-                    return Err(
-                        "give at most one of --config FILE, --keep-config, --replace-config".into(),
-                    );
-                }
-            };
-            update_boot(
-                arg(1, "DISK")?,
-                &opt("--esp").ok_or("--esp ESP is required")?,
-                flag("--write"),
-                &policy,
-            )
-        }
+        Some("update-boot") => update_boot(
+            arg(1, "DISK")?,
+            &opt("--esp").ok_or("--esp ESP is required")?,
+            flag("--write"),
+            flag("--in-place"),
+            flag("--allow-unsealed"),
+            &policy()?,
+        ),
         Some("migrate") => migrate_cmd(
             arg(1, "DISK")?,
             &MigrateArgs {

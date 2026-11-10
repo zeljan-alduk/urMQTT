@@ -150,6 +150,20 @@ pub const MIGRATIONS: &[&str] = &[
     ALTER TABLE subscriptions ADD COLUMN sub_id INTEGER NOT NULL DEFAULT 0
         CHECK (sub_id BETWEEN 0 AND 268435455);
     ",
+    // 6 (NOW-15, ADR-285): password accounts added at run time through the
+    // signed control channel. Only the PBKDF2 hash is stored (the stored text
+    // of `urmqtt_cfg::passwd`), never a password. `class` is 0 full, 1
+    // read-only, 2 write-only; `seq` is the control message that last wrote
+    // the row. A table is added (no existing row changes).
+    "
+    CREATE TABLE accounts (
+        id TEXT PRIMARY KEY,
+        hash TEXT NOT NULL CHECK (length(hash) BETWEEN 1 AND 150),
+        class INTEGER NOT NULL CHECK (class BETWEEN 0 AND 2),
+        added_at INTEGER NOT NULL,
+        seq INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID;
+    ",
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;

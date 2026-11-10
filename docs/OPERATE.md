@@ -2,7 +2,8 @@
 
 An **operator** connects with mutual TLS like any device and gets two things:
 statistics under `$SYS/broker/` (O1) and a console under `$SYS/console/`
-(O2). No VNC session, no serial port. Design and limits: ADR-060 and
+(O2). No VNC session, no serial port. A Prometheus scrape target is an option
+of its own ("Metrics for Prometheus" below). Design and limits: ADR-060 and
 SECURITY.md ("Operator role").
 
 ## Who is an operator
@@ -68,12 +69,26 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/retained` | retained messages of devices (not these topics) |
 | `$SYS/broker/messages/received`, `sent` | accepted publishes, deliveries |
 | `$SYS/broker/connections/refused` | refused by admission control |
+| `$SYS/broker/connections/per_address/limit` | `limits.max_connections_per_ip`, 0 when there is no limit (then the rest stays 0) |
+| `$SYS/broker/connections/per_address/established`, `addresses`, `peak` | TLS connections the per-address table counts now (all cores), distinct source addresses holding one, the most one address has held at once since boot |
+| `$SYS/broker/connections/per_address/syn_dropped`, `refused` | SYNs dropped without an answer, and connections refused with a RST at the final ACK, because the address was at the limit (since boot) |
+| `$SYS/broker/connections/per_address/untracked` | connections let through uncounted because the table was full (more than 32 768 addresses at once, or a bucket collision); normally 0 |
 | `$SYS/broker/tls/server_cert_days` | days until the server certificate expires (`unknown` without a wall clock) |
 | `$SYS/broker/time/source` | where the wall clock comes from: `rtc` (firmware clock at boot), `sntp` (corrected by SNTP, ADR-100) or `unknown` (no usable clock: certificate checks and control messages are refused) |
 | `$SYS/broker/time/offset_ms` | the last SNTP offset against the clock as it was, in ms (`unknown` until one was measured against a known clock; a refused offset is shown too, and logged) |
 | `$SYS/broker/entropy/source` | what seeded the random number generator at boot: `virtio-rng`, `rndr` (aarch64) or `rdrand` (x86_64), `virtio-rng+rndr`, or the weak path `jitter+firmware` (`jitter` when the firmware gave no value; ADR-263, docs/DEPLOY.md "Entropy"). Also `"entropy":{"source":...}` in the info reply |
 | `$SYS/broker/console/dropped` | console lines lost to a slow reader |
 | `$SYS/broker/net/mtu` | the link MTU in use, bytes: `network.mtu`, else DHCP option 26, else 1500; at most 1500 (NOW-19, ADR-264). The boot line `net: mtu N (static\|dhcp\|default)` says where it came from; a lower value than the network's is safe, a higher one loses the large packets |
+| `$SYS/broker/net/ipv6/mode` | `off`, `slaac` or `static` (`network.ipv6`, NEXT-1, ADR-334) |
+| `$SYS/broker/net/ipv6/address/link_local`, `address/global` | the IPv6 addresses in use (RFC 5952 text; empty: none yet, still in duplicate address detection, or duplicate) |
+| `$SYS/broker/net/ipv6/router`, `mtu` | the IPv6 default router (empty: none) and the IPv6 MTU (the link's, or less from a Router Advertisement) |
+| `$SYS/broker/net/ipv6/frames_in`, `dropped`, `fragments`, `ext_headers` | IPv6 frames the interfaces of all cores took, and dropped: in all, fragments (never reassembled), extension headers that may not be skipped (ADR-330) |
+| `$SYS/broker/net/ipv6/dad_duplicate`, `prefixes_ignored` | addresses another node claimed (duplicate address detection; such an address is never used), and advertised prefixes not used (one global address only, ADR-331) |
+| `$SYS/broker/net/queues` | virtio-net queue pairs in use: 1, or one per data core with a multiqueue NIC whose RSS steers flows (NEXT-6, ADR-310). The boot line `net: multiqueue: ...` or `net: one queue pair: <reason>` says why |
+| `$SYS/broker/net/queue/received/<k>`, `sent/<k>`, `forwarded/<k>`, `interrupts/<k>` | per queue pair k (pair k belongs to data core k; ADR-312): frames received and sent on it, frames core k received there for another core's flow and passed to core 0 (should stay 0 for MQTT traffic: a growing number means the device does not hash as the broker programmed it, which costs a hop per frame but loses nothing), and its receive interrupts. Metrics `urmqtt_network_queue_*{queue="k"}`; every 5 s with multiqueue the console line `net: queue pair k (core k): ...` |
+| `$SYS/broker/iommu/mode`, `state` | DMA remapping (H4b, ADR-305): `devices.iommu` (`off`, `auto`, `require`) and what it gave: `off` (not used), `none` (no IOMMU described: `auto` went on without), `failed` (described, none came up), `active`. Also `"iommu":{...}` in the info reply and a `status` line `iommu <state> (<mode>): ...` when the key is not `off` |
+| `$SYS/broker/iommu/units`, `domains`, `pages` | units translating, devices with a domain of their own, pages mapped for device DMA. They do not change after boot |
+| `$SYS/broker/iommu/faults`, `overflows` | DMA the IOMMU blocked (and unit errors), read from the units' fault logs every 100 ms (ADR-306), and the times a unit's log overflowed and faults were lost. Any fault is a device writing or reading where it was not given memory: a broken device model, a hostile device, or a kernel bug; the first 16 are logged one line each (`iommu: fault N: <unit> <base>: pci <bdf> ...`), then every power of two. The broker keeps running: the access did not happen |
 | `$SYS/broker/messages/dropped/slow_subscriber` | QoS 0 messages not delivered because the subscriber's output buffer was full (it reads slower than the topic is published to). Deliberate, bounded, counted (ADR-223). With `limits.publisher_backpressure = "single"` (the default, ADR-269) a message with one subscriber pauses its publisher instead; what is left here is fan-out to two or more, QoS 0 from another core, and publishers in cool-down |
 | `$SYS/broker/messages/backpressure/mode` | `single` or `off`: `limits.publisher_backpressure` (NOW-13, ADR-269) |
 | `$SYS/broker/messages/backpressure/paused`, `paused_ms`, `timeouts`, `holding` | publishers paused because the only subscriber of their QoS 0 message was full (their TCP window closed instead of their messages being dropped), the milliseconds they spent paused, pauses that ran out after 500 ms (the publisher is then read and its messages dropped for 2 s), and publishers held now. Also `"backpressure":{...}` in the info reply, the `status` line `backpressure ...`, and at most every 10 s per core the console line `mqtt: core N paused P publisher(s) for a full single subscriber ...`. With `single`, a rising `paused` and a flat `dropped/slow_subscriber` is a subscriber setting its publisher's pace, as intended; a rising `timeouts` is a subscriber that stalls (or two clients that wait on each other) |
@@ -139,13 +154,14 @@ first). The reply topic is fixed (an MQTT 5.0 operator client may send a Respons
 console does not use it: replies stay on the fixed topic for both versions):
 
 ```json
-{"version":"0.5.0","uptime_s":42,"arch":"aarch64","cpu":{"cores":4,"busy":[2,1,0,0]},
+{"version":"0.6.0","uptime_s":42,"arch":"aarch64","cpu":{"cores":4,"busy":[2,1,0,0]},
  "memory":{"total":33554432,"used":1503744},"disk":{"total":57651200,"used":78288},
  "clients":{"connected":1,"total":1},"subscriptions":1,"retained":0,
  "messages":{"received":0,"sent":21},"connections_refused":0,
  "tls":{"server_cert_days":824},"time":{"source":"sntp","offset_ms":-12},"console_dropped":0,
  "handshakes":{"started":0,"done":0,"failed":0,"timed_out":0,"refused":0,"syn_dropped":0,
  "in_flight":0,"in_flight_max":0,"slow":0,"latency_sum_ms":0,"latency_max_ms":0},
+ "per_address":{"limit":1024,"established":0,"addresses":0,"peak":0,"syn_dropped":0,"refused":0,"untracked":0},
  "accepted":[0,0,0,0]}
 ```
 
@@ -155,7 +171,8 @@ and each counts for itself: a SYN may be dropped without an answer
 may be refused with a RST (`refused`, `refused.<reason>`), and an admitted
 connection ends as `done`, `failed` or `timed_out`. Reasons: `rate` (token
 bucket), `in_flight` (per core), `per_ip` (per source address), `memory`,
-`storage`. The same numbers are in the kernel log every 5 s, one
+`storage`, `per_ip_established` (the per-address limit on *established*
+connections, see below). The same numbers are in the kernel log every 5 s, one
 `handshakes: core N:` line per core, next to `tcp: core N:` (cookies, SYNs
 dropped, refused flows, retransmissions) and `dataplane: core N:` (busy, work
 by category, microseconds of work per accepted connection, longest stall of
@@ -163,6 +180,208 @@ the core). The statsd names are `handshakes.{started,done,failed,timed_out,slow,
 (counters), `handshakes.{in_flight,in_flight_max,latency_max_ms}` (gauges) and
 `frames.dropped.{steer,worker_tx,nic_tx,nic_tx_local}` (a frame lost to a full ring
 or NIC queue is retransmitted by TCP a second or more later).
+
+**The limit on established connections per source address (NOW-14, ADR-280).**
+`limits.max_connections_per_ip` (default 1024; 0: no limit) bounds how many TLS
+connections (the MQTT port and the WebSocket port together) one IPv4 address, or
+one IPv6 /64 (ADR-332), may hold at once, all cores added up: the per-address handshake limit above only
+covers handshakes still in flight, so a client that finishes its handshakes could
+otherwise hold thousands of connections. An address at its limit gets no SYN-ACK
+(its TCP retries after its backoff, nothing is kept, no handshake token and no
+crypto is spent); a connection that slips past the SYN check is refused with a
+RST at the final ACK. Both are counted per core with the other refusals
+(`syn_dropped.per_ip_established` and `refused.per_ip_established` in statsd, the
+`established per address` figure in the `handshakes: core N:` log line) and in
+total under `$SYS/broker/connections/per_address/*`; the console's `status` shows
+one `per address limit ...` line. **Size it for the largest site:** devices behind
+one NAT (a factory, a mobile carrier's gateway, QEMU's user network) share one
+address and one limit; a limit the site reaches shows as `per_address/refused`
+and `syn_dropped` growing while that site's devices fail to reconnect. The
+plaintext listener has its own `plaintext.max_connections_per_ip` and is not
+counted here.
+## More than one NIC queue (NEXT-6, ADR-310 to ADR-314)
+
+`devices.virtio_net_queues` is `"auto"` by default: when the virtio-net device offers multiqueue **with**
+receive-side scaling, each data core gets its own queue pair and the device spreads TCP flows over them (the broker
+programs the hash key and the table). On the usual VPS the NIC has one queue, or several without RSS, and the broker
+keeps one pair as before. When the device offered more than the broker used, the boot log says why
+(`net: one queue pair: <reason>`); with several pairs, a line `net: queue pair N (core C): ...` with the counters of
+that pair appears every 5 s while it moves frames. Set `"single"` (format 19) to force one pair if a host
+misbehaves; nothing else changes. Status in v0.6.0: tested under QEMU only (a multi-queue tap rig), not under KVM
+with vhost, and no throughput gain has been measured yet, so watch the first boot of `"auto"` on a new platform. How
+to build a multi-queue QEMU/KVM host is in docs/DEPLOY.md.
+
+## IPv6 (NEXT-1, ADR-330 to ADR-334)
+
+**Off by default.** With `network.ipv6 = "slaac"` the broker makes its link-local address (`fe80::` and the
+EUI-64 of its MAC) and one global address from the first /64 prefix the router advertises (the same interface
+identifier, so the address is known in advance: `<prefix>:5054:ff:fe12:3456` for the MAC `52:54:00:12:34:56`);
+with `"static"` it uses `network.ipv6_address` and `network.ipv6_gateway`. Every listener that takes IPv4 clients
+(TLS, WebSocket, plaintext, metrics) then takes IPv6 ones too. The boot log says each step:
+
+```text
+net: ipv6 slaac: link-local address fe80::5054:ff:fe12:3456 (EUI-64), global address from router advertisements
+net: ipv6 link-local address fe80::5054:ff:fe12:3456 in use (duplicate address detection passed)
+net: ipv6 default router fe80::1 (lifetime 1800 s)
+net: ipv6 global address 2001:db8:1:0:5054:ff:fe12:3456 in use (duplicate address detection passed)
+```
+
+What to look for: `... is in use by another node on the link (duplicate address detection): not used` (an error:
+another machine has that address; fix the static address, or the other machine), `no router advertisement after 3
+solicitations; link-local only` (the network sends no RAs: use `"static"`), `prefix ... advertised, not used` (a
+second prefix; only the first is used), `valid lifetime over, removed` (the router stopped advertising the prefix).
+The console's `status` has three `ipv6 ...` lines; the topics above and the `urmqtt_ipv6_*` metrics count what the
+interfaces took and dropped. Per-address limits count an IPv6 /64 as one address (ADR-332): devices behind one
+/64 share them as devices behind one IPv4 NAT do. `plaintext.allow_from` and `metrics.allow_from` take IPv6
+networks (`2001:db8::/32`); `plaintext.ip_identities` does not (an IPv6 client of `auth = "ip"` is refused).
+SNTP, syslog, statsd and log shipping stay IPv4.
+
+## Metrics for Prometheus (ADR-290 to ADR-294)
+
+The same numbers as `$SYS/broker/...`, as a Prometheus scrape target served by the kernel itself: no exporter to run.
+**Off by default**; an image that does not name `[metrics]` opens no new port and boots exactly as before.
+
+```toml
+[metrics]
+enabled = true
+allow_from = ["10.0.0.0/24"]   # required: the networks that may scrape (the Prometheus server's address)
+# port = 9100                  # TCP port (GET /metrics)
+# max_connections = 8          # at once, on each data core
+# max_connections_per_ip = 2   # at once from one address, on each data core
+# request_timeout_s = 5        # from the connection to the end of the answer
+```
+
+The builder page has the section (Prometheus metrics); `urmqtt-config pack` and `verify` print a warning line while it
+is on. Configuration format 16: an older kernel refuses the image by its version.
+
+**What it is, and is not.** Plain HTTP/1.1, `GET /metrics` (and `HEAD`), no TLS, no login; the protection is the
+allow-list, applied to the SYN: an address outside it gets no answer at all and the kernel keeps nothing for it.
+Anything else (another path, a query string, a body, a second request, a method but GET and HEAD) gets a fixed
+refusal (404, 400, 405, 431, 505) and the connection closes after every answer. At most 8 connections per core, 2
+per address and core, 20 scrapes per second and core; a request not finished within `request_timeout_s` is cut.
+**Put only the monitoring host's network in `allow_from`, never a public one** (the boot log warns if you do). The
+text can be read by anyone on the path (no TLS) and by anyone who can forge an allowed address: if either matters,
+scrape through a TLS-terminating proxy on a host inside the network, or keep the endpoint off and use an exporter that
+subscribes to `$SYS` as an operator. What the text contains: counters and gauges of the broker; **never a client id,
+user name, topic, address or certificate** (no label is chosen by a client, so a client cannot add a series).
+
+Prometheus (`prometheus.yml`; port and address are the broker's):
+
+```yaml
+scrape_configs:
+  - job_name: urmqtt
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["10.0.0.5:9100"]
+        labels: { site: "vps-1" }
+```
+
+Prometheus asks for OpenMetrics when it can and the broker answers in the format it prefers
+(`application/openmetrics-text; version=1.0.0`, else the text format 0.0.4); `curl http://10.0.0.5:9100/metrics` shows
+the text format. 13 KiB with four cores; about 170 series, fixed by the core count and the configuration.
+
+**Names** (an interface: a change is in the CHANGELOG). `urmqtt_` prefix, base units (`_seconds`, `_bytes`,
+`_ratio`), counters end in `_total` and restart at 0 on every boot (Prometheus treats that as a counter reset).
+Every `$SYS/broker/...` topic has one; this is the mapping for the ones to build alerts on:
+
+| Metric | Type | From `$SYS/broker/` | Meaning |
+|---|---|---|---|
+| `urmqtt_uptime_seconds` | gauge | `uptime` | seconds since boot (`resets()` or `changes()` catch a reboot) |
+| `urmqtt_clients_connected` | gauge | `clients/connected` | sessions attached to a connection; `_by_version{version="3.1.1"\|"5"}` splits it |
+| `urmqtt_sessions`, `urmqtt_subscriptions`, `urmqtt_retained_messages` | gauge | `clients/total`, `subscriptions`, `retained` | held state |
+| `urmqtt_messages_received_total`, `urmqtt_messages_sent_total` | counter | `messages/received`, `sent` | PUBLISH in and out (`rate()` is messages per second) |
+| `urmqtt_messages_dropped_total{reason}` | counter | `messages/dropped/*` | `slow_subscriber`, `offline`, `cross_core`, `qos1_queue_full`, `publish_rate`, `too_large`: never silent |
+| `urmqtt_frames_dropped_total{reason}` | counter | `frames/dropped/*` | `steer`, `worker_tx`, `nic`: overload; TCP resends them |
+| `urmqtt_connections_refused_total` | counter | `connections/refused` | refused at the final ACK |
+| `urmqtt_mqtt5_connections_refused_total{code}`, `urmqtt_mqtt5_disconnects_sent_total{code}` | counter | `connections/refused/v5/*`, `disconnects/sent/*` | MQTT 5.0 reason codes (`0x87`, `0x8e`, ..., `other`) |
+| `urmqtt_handshakes_{started,done,failed,timed_out,refused,syn_dropped,slow}_total` | counter | `handshakes/*` | TLS admission (OPERATE "Handshake admission") |
+| `urmqtt_handshakes_in_flight`, `urmqtt_handshakes_in_flight_max` | gauge | `handshakes/in_flight`, `in_flight_max` | now, and the largest on one core in the last 5 s |
+| `urmqtt_handshakes_latency_seconds_total`, `..._latency_max_seconds` | counter, gauge | `handshakes/latency_sum_ms`, `latency_max_ms` | the mean over a window is `rate(latency_seconds_total) / rate(handshakes_done_total)` |
+| `urmqtt_cpu_busy_ratio{core}` | gauge | `cpu/busy/N` | 0 to 1 over the last 5 s; `urmqtt_cpu_cores` is the count |
+| `urmqtt_core_connections_accepted_total{core}` | counter | `cpu/accepted/N` | how evenly flows spread over the cores |
+| `urmqtt_memory_heap_bytes`, `urmqtt_memory_heap_used_bytes` | gauge | `memory/total`, `used` | kernel heap |
+| `urmqtt_disk_bytes`, `urmqtt_disk_used_bytes` | gauge | `disk/total`, `used` | data layout (0 without a disk) |
+| `urmqtt_tls_server_certificate_expiry_seconds` | gauge | `tls/server_cert_days` | whole days times 86 400; **absent** without a wall clock |
+| `urmqtt_time_offset_seconds` | gauge | `time/offset_ms` | last SNTP step; **absent** until measured |
+| `urmqtt_version_info{version}`, `_arch_info{arch}`, `_time_source_info{source}`, `_entropy_source_info{source}` | gauge (1) | `version`, `arch`, `time/source`, `entropy/source` | the text is the label |
+| `urmqtt_listener_*{listener="plaintext"\|"websocket"}`, `urmqtt_websocket_*`, `urmqtt_plaintext_*` | gauge, counter | `plaintext/*`, `websocket/*` | `urmqtt_listener_enabled` is 0 for a listener that is off, and no other series exists for it |
+| `urmqtt_connections_per_address_*` (`limit`, `established`, `addresses`, `peak` gauges; `syn_dropped_total`, `refused_total`, `untracked_total` counters) | gauge, counter | `connections/per_address/*` | the limit on established TLS connections per source address (ADR-280): an address at its limit shows as `refused` and `syn_dropped` growing |
+| `urmqtt_iommu_mode_info{mode}`, `urmqtt_iommu_state_info{state}`, `urmqtt_iommu_units`, `_domains`, `_pages`, `urmqtt_iommu_faults_total`, `urmqtt_iommu_fault_overflows_total` | gauge, counter | `iommu/*` | DMA remapping (ADR-305): what the IOMMU gave, and the DMA it blocked (any fault is worth an alert) |
+| `urmqtt_metrics_*` | gauge, counter | (the endpoint's own) | connections, accepted, refused by reason (`source`, `limit`), requests by result (`ok`, `malformed`, `too_large`, `method`, `version`, `not_found`), timeouts |
+
+The full list is `urmqtt_broker::metrics::RULES` (`crates/broker/src/metrics.rs`); a test fails when a `$SYS` topic
+has no metric.
+
+Alert rules that need nothing but these (adjust to taste):
+
+```yaml
+groups:
+  - name: urmqtt
+    rules:
+      - alert: UrmqttDown
+        expr: up{job="urmqtt"} == 0
+        for: 2m
+      - alert: UrmqttRebooted
+        expr: changes(urmqtt_uptime_seconds[10m]) > 0 and urmqtt_uptime_seconds < 600
+      - alert: UrmqttCertificateExpires
+        expr: urmqtt_tls_server_certificate_expiry_seconds < 14 * 86400
+      - alert: UrmqttDroppingMessages
+        expr: sum(rate(urmqtt_messages_dropped_total{reason=~"slow_subscriber|qos1_queue_full|cross_core"}[5m])) > 0
+        for: 10m
+      - alert: UrmqttHandshakesFailing
+        expr: rate(urmqtt_handshakes_failed_total[5m]) + rate(urmqtt_handshakes_timed_out_total[5m]) > 1
+        for: 10m
+      - alert: UrmqttBusy
+        expr: max(urmqtt_cpu_busy_ratio) > 0.9
+        for: 15m
+      - alert: UrmqttHeapNearlyFull
+        expr: urmqtt_memory_heap_used_bytes / urmqtt_memory_heap_bytes > 0.9
+        for: 10m
+      - alert: UrmqttClockWrong
+        expr: abs(urmqtt_time_offset_seconds) > 5
+```
+
+Without Grafana: `curl -s http://10.0.0.5:9100/metrics | grep -v '^#'` is the whole interface, and Prometheus's own
+expression browser graphs any of the above. Statsd stays plain UDP; the log can go over TLS (next section).
+
+## Log shipping over TLS (NEXT-7, ADR-315 to ADR-319)
+
+With `observability.log_tls` set, core 0 keeps one TLS 1.3 connection to that collector and sends it every log
+record, the same RFC 5424 message the UDP path sends, framed as RFC 5425 says (`MSG-LEN SP SYSLOG-MSG`). It is the
+only connection the broker opens itself, and it goes only to the address in the image.
+
+```toml
+[observability]
+log_tls = "198.51.100.20:6514"     # an IPv4 address: there is no DNS
+log_tls_name = "logs.example.com"  # the certificate's DNS name; "" = the address, as an IP SAN
+log_tls_ca = ["log-ca.pem"]        # the CA(s) of the collector's certificate, and nothing else
+log_tls_queue_kb = 256             # records kept while it is unreachable (16 to 4096)
+```
+
+This needs configuration format 20 (a v0.6.0 kernel). Collectors that speak it: rsyslog (`imtcp` with
+`StreamDriver.Name="gtls"`, `StreamDriver.Mode="1"`, `StreamDriver.AuthMode="anon"`: the broker presents no client
+certificate), syslog-ng (`network(transport("tls") tls(peer-verify(optional-untrusted)))`), Fluent Bit (`syslog`
+input, `mode tls`, `format rfc5424`), or `scripts/logtls-sink.py` for a try.
+
+What the console says:
+
+| Line | Meaning |
+|---|---|
+| `logtls: shipping log records over TLS to A:P (certificate name N, k trust anchor file(s), queue Q KiB)` | at boot: configured |
+| `logtls: log shipping over TLS is OFF: …` | at boot: the anchors in the image are unusable; the broker serves without it |
+| `logtls: waiting for the wall clock before connecting to A:P` | no clock yet (certificates are checked against it) |
+| `logtls: connected to A:P (TLS 1.3, certificate verified for "N")` | up |
+| `logtls: connection to A:P failed: TLS: Handshake("invalid peer certificate: UnknownIssuer"); next attempt in 4 s` | the collector's certificate is not from `log_tls_ca` (or `certificate not valid for name …`: another name; `certificate expired …`) |
+| `logtls: connection to A:P refused` / `timed out` / `reset by the peer` / `closed`, `; next attempt in N s` | the TCP connection; the wait doubles to 5 minutes and resets after a connection that lasted 10 s |
+| `logtls: N log record(s) dropped since the last report …` | the queue was full (at most once a minute) |
+
+Records from boot wait in the queue until the first connection, so the collector gets the whole boot. A record
+written into a connection that then breaks may be lost (at most 64 KiB; delivery is at most once, as over UDP).
+With statsd configured, `urmqtt.logtls.up`, `.records_sent`, `.records_dropped`, `.connections`, `.failures`, `.attempts`,
+`.bytes_out` and `.rx_dropped_bytes` say the same in numbers. The firewall must let the VM out to the collector (DEPLOY.md). Not done: DNS names, a client
+certificate, statsd over TLS, IPv6 (ADR-319).
 
 ## MQTT 5.0 (ADR-274, ADR-275)
 
@@ -270,6 +489,120 @@ scripts/gen-operator-cert.sh deploy/prod alice 365  # another identity, 365 days
 Never commit the key (`deploy/*/services/` is git-ignored). A stolen operator
 certificate is revoked like any other, with the control channel
 (`urmqtt-control revoke`), which also closes its live session.
+
+## Password accounts at run time (NOW-15, ADR-285)
+
+Plaintext and WebSocket password accounts can be added, changed and removed
+without a new image, through the signed control channel (the same
+`urmqtt-control` tool, certificate and offline key as `revoke`).
+
+**Switch it on in the image.** It is off by default. Set
+`limits.max_runtime_accounts` (0 to 1024; the builder page shows it under
+Limits once a listener takes passwords) in a configuration that has a
+`[plaintext]` section with `auth = "password"` and/or a `[websocket]` section
+with `auth = "password"`, the TLS listener, `control.service_ids` and a data
+disk. The configuration is then written in format 15 (a v0.5.x kernel template
+refuses it).
+
+```sh
+# add or change an account: the password is read from standard input, hashed
+# here (100 000 iterations unless --iterations says fewer) and only the hash is signed
+printf '%s\n' "$PASSWORD" | urmqtt-control set-account --id sensor-9 --password-stdin \
+    --class full --env prod --key control.key --host broker.example --ca ca.pem \
+    --client-cert operator.pem --client-key operator.key
+# or give a hash made by `urmqtt-config hash-password`
+urmqtt-control set-account --id dash-1 --hash 'pbkdf2-sha256$100000$...' --class read-only ...
+urmqtt-control remove-account --id sensor-9 --id dash-1 ...
+```
+
+- **Classes.** `full` (the listener's `acl_publish` and `acl_subscribe`),
+  `read-only` (subscribes, publishes nothing, no Will), `write-only` (publishes,
+  subscribes to nothing). A class only narrows the listener's patterns.
+- **Effect.** At once, on both listeners. A removed account, a changed password
+  or a changed class closes that account's live connections (5.0 clients get
+  DISCONNECT 0x98) and the next login uses the new state. The accounts are kept
+  on the data disk and survive reboots; a new disk has none.
+- **Limits.** At most `limits.max_runtime_accounts` accounts, 8 per message, ids
+  of `A-Z a-z 0-9 - _ . :` up to 64 characters, hashes of at most 100 000
+  iterations. An id the image itself lists as an account, or names as a
+  service, operator or control identity, is refused (the image wins). A message
+  that would exceed the limit changes nothing.
+- **Result.** A PUBACK means received, as for every control message. The log
+  says `control: seq N from operator: password account sensor-9 set (class full,
+  K run-time account(s))` or `... rejected: <reason>` with the reason one of
+  `accounts_disabled`, `account_limit`, `no_password_listener`,
+  `account_shadows_image`, `malformed`, `replay`, `expired`, ...; the counters
+  are `urmqtt.control.rejected.<reason>`. No log line, metric or message holds a
+  password or a hash.
+- **Keep your own list.** There is no command that lists accounts. The boot log
+  says how many are stored. Messages are per disk: replacing the disk loses the
+  run-time accounts, the image's own stay.
+- **Upgrading.** The first boot of a v0.6.0 kernel migrates the data disk to
+  schema 6 (one way; a v0.5.x kernel refuses it). Nothing else changes until an
+  image sets `limits.max_runtime_accounts`.
+## Boot slots and updates (NEXT-11, ADR-295 to ADR-299)
+
+Procedures are in [DEPLOY.md](DEPLOY.md) section 8b. The lines a boot prints:
+
+| Line | Meaning |
+|---|---|
+| `build: v0.6.1 (A/B protocol 1, store schema 6, configuration formats up to 23)` | what this kernel is (its build note, which `urmqtt-disk slots stage` reads) |
+| `gpt: standby boot slot reserved next to the EFI system partition ...` | the first boot of a new disk made room for A/B updates |
+| `boot: one boot slot (a disk prepared before v0.6.0) ...` | this disk updates with `update-boot` only |
+| `boot: slot A (v0.6.0), confirmed; standby: empty` / `standby: v0.6.1 (the way back)` | the normal case; the standby is what a rollback would boot |
+| `boot: slot B (v0.6.1) ON TRIAL: N trial boot(s) left after this one; confirmed after S s ...` / `waiting for a boot-confirm control message` | an update is on trial: it is confirmed by itself (`update.confirm = "auto"`) or by you (`"operator"`) |
+| `boot: slot B confirmed (healthy for S s: store open, listener up)` / `(boot-confirm control message)` | the update is final; the previous slot is the standby |
+| `boot: slot B was not confirmed within update.trial_timeout_s = T s: resetting (the attempt counts)` | the trial ran out of time |
+| `boot: slot B gave up: <why>; slot A (...) is active again, resetting` | the automatic return: the update failed (no trial boots left, or a store schema change that was not activated as one-way); the next boot runs the previous release and the failed slot is marked bad. Look at the failed boots' logs |
+| `boot: ... the firmware booted the previous slot: the new one did not even load ...` | the new ESP did not boot at all; the firmware fell back, the table now agrees |
+| `boot: slot B (...): no trial boots left ..., but there is no way back (...); booting it anyway (no trial timeout)` | the previous slot is unusable (empty, bad, changed, or its kernel cannot read the migrated store); the trial timeout does not reset this boot; fix or re-stage offline |
+| `boot: the firmware booted the standby slot X although the active slot is confirmed ...` | the active ESP may be damaged; nothing was changed. `urmqtt-disk slots status`, then re-stage |
+| `boot: the store is at schema M (from N) ...: the previous slot cannot read it and is no longer a way back` | the store's schema is newer than the previous slot's kernel (a one-way update ran its migration, or a kernel replaced in place did): no automatic or operator's return to it any more |
+| `boot: boot-rollback control message: slot A is active again, slot B is marked bad; resetting` | an operator's rollback |
+| `control: message from ... rejected: other_disk` / `boot_refused` | a boot command for another disk GUID / with nothing to confirm or nowhere to go back to |
+
+**Secure Boot (LATER-6, ADR-320).** A disk installed from an image signed with
+your Secure Boot key is *sealed*: its `limine.conf` pins the configuration, so
+the loader refuses any other. `urmqtt-disk info` (and `update-boot`, `slots
+stage`) print `secure boot: sealed to its configuration` or `not sealed`; an ESP
+sealed to another configuration is refused before anything is written. The
+installer, started from a sealed image with a configuration that is not the one
+the image is sealed to, prints `install: the installation image is sealed for
+Secure Boot to another configuration than this boot's ...; nothing written`
+and powers off. Keys and revocation: [secure-boot-keys.md](secure-boot-keys.md).
+
+`[update]` (configuration format 17; all optional): `confirm = "auto"` (the
+default) or `"operator"`; `confirm_after_s` (default 60) seconds of a healthy
+trial before the automatic confirmation; `trial_timeout_s` (default 900; 0:
+never) after which an unconfirmed trial resets and uses an attempt. In auto
+mode the timeout must be 0 or longer than the delay.
+
+## The disk passphrase at the console (LATER-7, ADR-325 to ADR-329)
+
+With `storage.disk_key_source = "console"` the image holds no disk key: the data partition's key is wrapped under a
+passphrase in its header, and **every boot stops before the store opens, every port closed, until someone types the
+passphrase** on the VM's console: the provider's serial console or its VNC console (keyboard), a virtio-console or a
+virtio-input keyboard. Nothing typed is echoed or logged. A reboot you did not plan (a crash, `watchdog.action =
+"reset"`, the provider's maintenance, an A/B update) therefore needs a person at the console: watch for the line
+below in your remote log.
+
+| Line | Meaning |
+|---|---|
+| `storage: the data partition is blank: it is formatted encrypted, its key wrapped under a passphrase typed now` | the first boot: type a new passphrase twice (12 to 256 printable ASCII characters; generate it, e.g. `openssl rand -base64 24`, and keep it where you keep the CA key). Without it the data cannot be read by anyone, you included |
+| `storage: data partition formatted with a new key, wrapped under the console passphrase in key slot 0 (300000 PBKDF2 iterations)` | done; the broker starts |
+| `storage: the data partition is locked: waiting for the disk passphrase on the console`, repeated every minute | the broker is down until the passphrase is typed (the prompt is `Disk passphrase (or "change" to change it):`) |
+| `storage: wrong disk passphrase (N so far)` | a wrong passphrase; asked again after 2 s. Never the text typed. Many of these from nobody you know: someone has your provider panel |
+| `storage: data partition unlocked with the console passphrase (key slot N)` / `storage: unlocked after N wrong disk passphrase(s)` | opened; which slot (0: daily, 1: e.g. a recovery passphrase) |
+| `storage: the disk passphrase of key slot N was changed; the old one no longer opens the disk` | `change` was typed at the prompt, then the current passphrase and the new one twice. Only the header was rewritten |
+| `storage: the older superblock still held a replaced key slot (a passphrase change was interrupted); it now matches` | a passphrase change was cut by a power loss between its two writes; the old wrap is gone now |
+| `storage: RAM store: encrypted under a random key of this boot, no passphrase asked` | the live entry (a RAM store): nothing to unlock, nothing kept |
+| `storage: refused reason=not-wrapped` | the disk's key is in no key slot (it was encrypted with an image key): add one offline, `urmqtt-disk keys DISK add --key FILE --write` |
+| `storage: refused reason=key-slot-mismatch` | the passphrase opened a slot whose key does not match the disk: the header was edited or assembled from two disks. Restore the disk from a backup you trust |
+
+The A/B trial timeout (`update.trial_timeout_s`) does not count the time the boot waited at the prompt.
+
+Offline, with the VM stopped (DEPLOY.md section 9): `urmqtt-disk keys DISK` lists the slots; `keys DISK add`,
+`change`, `remove`, `unwrap` change them; `--passphrase-file FILE` opens the disk for every other command.
 
 ## The data disk in the console (S2, S3)
 

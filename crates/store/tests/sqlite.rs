@@ -273,7 +273,7 @@ fn control_state_survives_and_migrates() {
         // as well; the columns migration 4 adds go).
         s.db()
             .exec(
-                "DROP TABLE control_state; DROP TABLE allowlist; DROP TABLE qos2_ids; \
+                "DROP TABLE control_state; DROP TABLE allowlist; DROP TABLE qos2_ids; DROP TABLE accounts; \
                  ALTER TABLE sessions DROP COLUMN expiry_s; \
                  ALTER TABLE sessions DROP COLUMN offline_since; \
                  ALTER TABLE subscriptions DROP COLUMN options; \

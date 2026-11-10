@@ -895,7 +895,7 @@ mqtt5() {
             kill_vm
             cat "$log.client" >>"$log" 2>/dev/null || true
             if [[ $phase == 1 ]]; then
-                check "mqtt5-live [$accel]" "$log" "$status" "storage: data disk formatted" "schema v5 \(from v0\)" \
+                check "mqtt5-live [$accel]" "$log" "$status" "storage: data disk formatted" "schema v6 \(from v0\)" \
                     "client: mqtt5-connack-announces-the-limits ok" "client: mqtt5-and-311-on-one-port ok" \
                     "client: mqtt5-properties-forwarded ok" "client: mqtt5-properties-stripped-for-a-311-subscriber ok" \
                     "client: mqtt5-request-response ok" "client: mqtt5-topic-alias-resolved ok" \
@@ -915,7 +915,7 @@ mqtt5() {
                 # The short session must have run out while the broker is down.
                 sleep 9
             else
-                check "mqtt5-after-restart [$accel]" "$log" "$status" "storage: data disk opened" "schema v5 \(from v5\)" \
+                check "mqtt5-after-restart [$accel]" "$log" "$status" "storage: data disk opened" "schema v6 \(from v6\)" \
                     "persistent session\(s\) homed here \(1 expired while down, dropped\)" \
                     "client: mqtt5-session-expired-while-the-broker-was-down ok" \
                     "client: mqtt5-restart-keeps-the-queue-properties-and-expiry ok" \
@@ -973,6 +973,17 @@ mqtt5() {
     done
 }
 
+# per_address_limit_blob <n>: prints the path of a configuration blob (the dev configuration with
+# limits.max_connections_per_ip = <n>, ADR-280).
+per_address_limit_blob() {
+    local n=$1 dir="$OUT/connlimit" tool="$ROOT/target/debug/urmqtt-config"
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed" >&2; FAILED=$((FAILED + 1)); return 1; }
+    awk -v n="$n" '{ print } /^\[limits\]$/ { print "max_connections_per_ip = " n }' "$ROOT/deploy/dev/config.toml" >"$dir/limit-$n.toml"
+    "$tool" pack "$dir/limit-$n.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/limit-$n.blob" >/dev/null || return 1
+    echo "$dir/limit-$n.blob"
+}
+
 # M16: reconnect storms. Admission pretends the heap has 8 MiB, so 3000
 # devices do not all fit: each round all connect at once (retrying, like
 # devices with backoff), then all drop without DISCONNECT. The kernel must
@@ -985,8 +996,13 @@ storm() {
     if [[ ! -x "$loadgen" ]]; then
         (cd "$ROOT" && cargo build --release -q -p urmqtt-loadgen) || return 0
     fi
-    local iso="$OUT/storm.raw"
+    local iso="$OUT/storm.raw" nolimit
+    # 3000 devices from one address: the per-address limit on established connections (ADR-280, default
+    # 1024) is not what this scenario measures, so it is off here.
+    nolimit=$(per_address_limit_blob 0) || return 0
+    MKIMG_EXTRA=(--config "$nolimit")
     mkimg "$iso" "serve log=info heap_limit_mb=8"
+    MKIMG_EXTRA=()
     for accel in $ACCELS; do
         local log="$OUT/storm-$accel.log" data="$OUT/storm-$accel.img" status=0
         fresh_disk "$iso" "$data"
@@ -1279,6 +1295,63 @@ attack_app() {
     done
 }
 
+# NOW-14 (ADR-280): the limit on established TLS connections per source address, with a limit of 6 on a
+# four-vCPU guest (the connections of one address spread over the cores by the hash of the 4-tuple, so a limit
+# each core kept for itself would let 6 per core through). tools/attack `established-flood` opens 10 full TLS
+# sessions from one address: exactly 6 get in, a close frees exactly one place, closing all frees all (no place
+# leaks through the refusals or the closes). The operator then reads the counters in $SYS.
+conn_limit() {
+    [[ -z ${SMOKE_SCENARIOS:-} || conn_limit =~ $SMOKE_SCENARIOS ]] || return 0
+    local attack="$ROOT/target/release/urmqtt-attack"
+    if [[ ! -x "$attack" ]]; then
+        (cd "$ROOT" && cargo build --release -q -p urmqtt-attack) || {
+            echo "  ✗ urmqtt-attack build failed"; FAILED=$((FAILED + 1)); return 0; }
+    fi
+    local blob
+    blob=$(per_address_limit_blob 6) || return 0
+    local iso="$OUT/connlimit.raw"
+    MKIMG_EXTRA=(--config "$blob")
+    mkimg "$iso" "serve log=info"
+    MKIMG_EXTRA=()
+    for accel in $ACCELS; do
+        local log="$OUT/connlimit-$accel.log" data="$OUT/connlimit-$accel.img" status=0
+        fresh_disk "$iso" "$data"
+        start_vm "$log" --disk "$data" --accel "$accel" --smp 4 --fwd "$PORT:8883"
+        if wait_log "$log" "TLS 1.3 listener on port 8883" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+            local c=(--port "$PORT" --certs "$ROOT/deploy/dev")
+            {
+                "$attack" established-flood "${c[@]}" --clients 10 --count 6
+                if command -v mosquitto_sub >/dev/null; then
+                    local d="$ROOT/deploy/dev" sys
+                    # The retained $SYS values are refreshed every 10 s.
+                    sleep 12
+                    # shellcheck disable=SC2016
+                    sys=$(mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i operator --cafile "$d/ca.pem" \
+                        --cert "$d/services/operator.pem" --key "$d/services/operator.key" \
+                        -t '$SYS/broker/connections/per_address/#' -v -C 7 -W 40 2>&1 | tr '\n' ' ') || true
+                    echo "client: sys-per-address: $sys"
+                fi
+            } >"$log.client" 2>&1 || status=$?
+            sleep 1
+        else
+            status=124
+        fi
+        kill_vm
+        cat "$log.client" >>"$log" 2>/dev/null || true
+        local extra=()
+        command -v mosquitto_sub >/dev/null && extra=(
+            "client: sys-per-address: .*connections/per_address/limit 6"
+            "connections/per_address/(syn_dropped|refused) [1-9]")
+        check "conn-limit [$accel]" "$log" "$status" \
+            "limits: at most 6 established connection\(s\) per source address" \
+            "attack: established-flood round 1: 6 of 10 connected, 4 refused" \
+            "attack: established-flood a closed connection freed exactly one place" \
+            "attack: established-flood round 2: 6 of 10 connected, 4 refused after every connection closed" \
+            "admission: [0-9]+ (connection\(s\) refused|SYN\(s\) dropped without an answer on core [0-9]+): too many established connections from one address" \
+            ${extra[@]+"${extra[@]}"} "NOT:memory allocation of" "$NO_FAULT"
+    done
+}
+
 # M16: the dev configuration sends syslog to 10.0.2.2:5514 and statsd to
 # 10.0.2.2:8125, which QEMU user networking delivers to the host.
 observability() {
@@ -1324,6 +1397,88 @@ PY
     done
 }
 
+# NEXT-7, ADR-318: log shipping over TLS on the outbound TCP client. A local TLS collector
+# (scripts/logtls-sink.py, on the host's 127.0.0.1, the guest's 10.0.2.2) gets the log records as RFC 5425
+# frames over TLS 1.3, with the boot's records that waited in the queue; the collector goes away and comes back
+# and the broker reconnects after its backoff. A collector whose certificate is not from the configured CA gets
+# a ClientHello and nothing else: the handshake fails, the broker says why and when it tries again.
+logtls() {
+    [[ -z ${SMOKE_SCENARIOS:-} || logtls =~ $SMOKE_SCENARIOS ]] || return 0
+    local dir="$OUT/logtls" tool="$ROOT/target/debug/urmqtt-config" lp=${SMOKE_LOGTLS_PORT:-$((PORT + 5))}
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed"; FAILED=$((FAILED + 1)); return 0; }
+    local dev="$ROOT/deploy/dev" ossl=openssl
+    [[ -x /opt/homebrew/bin/openssl ]] && ossl=/opt/homebrew/bin/openssl
+    # The collector's certificate: from the dev CA (good) and self-signed (rogue), both for the name and the address.
+    "$ossl" ecparam -name prime256v1 -genkey -noout -out "$dir/sink.key" 2>/dev/null
+    printf 'subjectAltName=DNS:logsink.test,IP:10.0.2.2\nextendedKeyUsage=serverAuth\nbasicConstraints=critical,CA:FALSE\n' >"$dir/ext.cnf"
+    "$ossl" req -new -key "$dir/sink.key" -subj "/CN=logsink.test" -out "$dir/sink.csr" 2>/dev/null
+    "$ossl" x509 -req -in "$dir/sink.csr" -CA "$dev/ca.pem" -CAkey "$dev/ca.key" -CAcreateserial -days 30 \
+        -extfile "$dir/ext.cnf" -out "$dir/sink.pem" 2>/dev/null
+    "$ossl" req -x509 -new -key "$dir/sink.key" -subj "/CN=logsink.test" -days 30 \
+        -addext "subjectAltName=DNS:logsink.test,IP:10.0.2.2" -addext "basicConstraints=critical,CA:FALSE" \
+        -addext "extendedKeyUsage=serverAuth" -out "$dir/rogue.pem" 2>/dev/null
+    [[ -s $dir/sink.pem && -s $dir/rogue.pem ]] || { echo "  ✗ logtls: could not make the collector's certificates"; FAILED=$((FAILED + 1)); return 0; }
+    # The dev configuration with the collector added to its [observability] section.
+    sed -e "s|^metrics_udp = .*|&\nlog_tls = \"10.0.2.2:$lp\"\nlog_tls_name = \"logsink.test\"\nlog_tls_ca = [\"ca.pem\"]\nlog_tls_queue_kb = 512|" \
+        "$dev/config.toml" >"$dir/logtls.toml"
+    "$tool" pack "$dir/logtls.toml" --env dev --root "$dev" --out "$dir/logtls.blob" >"$dir/pack.out" || { echo "  ✗ logtls: pack failed"; FAILED=$((FAILED + 1)); return 0; }
+    local iso="$OUT/logtls.raw"
+    MKIMG_EXTRA=(--config "$dir/logtls.blob")
+    mkimg "$iso" "serve"
+    MKIMG_EXTRA=()
+    local addr="10\.0\.2\.2:$lp" accel
+    for accel in $ACCELS; do
+        local log="$OUT/logtls-$accel.log" data="$OUT/logtls-$accel.img" status=0 sink1="$OUT/logtls-$accel.sink1" sink2="$OUT/logtls-$accel.sink2" spid
+        rm -f "$sink1" "$sink2"
+        fresh_disk "$iso" "$data"
+        python3 -I "$ROOT/scripts/logtls-sink.py" "$lp" "$dir/sink.pem" "$dir/sink.key" "$sink1" 600 &
+        spid=$!
+        sleep 0.5
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
+        if wait_log "$log" "logtls: connected to $addr \(TLS 1\.3, certificate verified for \"logsink\.test\"\)" \
+            && wait_log "$sink1" "^sink: msg <1[0-9]+>1 .* mqtt: TLS 1\.3 listener on port 8883"; then
+            # The collector goes away; the broker notices and connects again once one listens.
+            kill "$spid" 2>/dev/null || true
+            wait "$spid" 2>/dev/null || true
+            wait_log "$log" "logtls: connection to $addr (closed|reset by the peer|refused|timed out)" || status=124
+            python3 -I "$ROOT/scripts/logtls-sink.py" "$lp" "$dir/sink.pem" "$dir/sink.key" "$sink2" 600 &
+            spid=$!
+            wait_log "$log" "logtls: connected to $addr" 2 || status=124
+            wait_log "$sink2" "^sink: msg .* logtls: connected to $addr" || status=124
+        else
+            status=124
+        fi
+        kill_vm
+        kill "$spid" 2>/dev/null || true
+        wait "$spid" 2>/dev/null || true
+        cat "$sink1" "$sink2" >>"$log" 2>/dev/null || true
+        check "logtls [$accel]" "$log" "$status" \
+            "ops: syslog 10\.0\.2\.2:5514, statsd 10\.0\.2\.2:8125, log over TLS $addr" \
+            "logtls: shipping log records over TLS to $addr \(certificate name logsink\.test, 1 trust anchor file\(s\), queue 512 KiB\)" \
+            "^sink: handshake ok, TLSv1\.3" \
+            "^sink: msg <1[0-9]+>1 [0-9T:.Z-]+ 10\.0\.2\.15 urmqtt cpu[0-9]+ [a-z0-9-]+ \[meta sysUpTime=\"[0-9]+\"\] " \
+            "^sink: msg .* boot: " "^sink: msg .* logtls: connection to $addr" \
+            "NOT:^sink: BAD FRAME" "NOT:^sink: handshake failed" "^URMQTT READY$" "$NO_FAULT"
+        # The rogue collector: same names, another issuer.
+        log="$OUT/logtls-rogue-$accel.log" status=0
+        rm -f "$sink1"
+        fresh_disk "$iso" "$data"
+        python3 -I "$ROOT/scripts/logtls-sink.py" "$lp" "$dir/rogue.pem" "$dir/sink.key" "$sink1" 600 &
+        spid=$!
+        sleep 0.5
+        start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
+        wait_log "$log" "logtls: connection to $addr failed: TLS: Handshake\(\"invalid peer certificate: UnknownIssuer\"\); next attempt in [0-9]+ s" 2 || status=124
+        kill_vm
+        kill "$spid" 2>/dev/null || true
+        wait "$spid" 2>/dev/null || true
+        cat "$sink1" >>"$log" 2>/dev/null || true
+        check "logtls-rogue-collector [$accel]" "$log" "$status" \
+            "^sink: connection from 127\.0\.0\.1" "^sink: handshake failed" \
+            "NOT:logtls: connected to" "NOT:^sink: msg " "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
 # S1 (STORAGE-PLAN §2a): the first boot of the image on a larger disk
 # moves the backup GPT, gives the disk its own GUID and creates the data
 # partition; a second disk attached to the same VM stays byte for byte as
@@ -1359,12 +1514,13 @@ first_boot() {
 # S1: a power cut at a write of the first boot (injected with
 # test=disk-fault, dev only); the next boot finishes the job. The host test
 # `first_boot_survives_a_crash_at_every_write` covers every write; these
-# cover the kernel path at the backup move, the head clearing, the new
-# backup copy and a torn primary.
+# cover the kernel path at the backup move (write 2), the data partition's
+# head clearing (6), the standby boot slot's head clearing (7, ADR-295), the
+# new backup copy (9) and a torn primary (10).
 first_boot_crash() {
     local good="$OUT/first-boot-crash-ok.raw" spec
     mkimg "$good" "smoke"
-    for spec in stop-after-write=2 stop-after-write=6 stop-after-write=8 tear-write=9:4; do
+    for spec in stop-after-write=2 stop-after-write=6 stop-after-write=7 stop-after-write=9 tear-write=10:4; do
         local img="$OUT/first-boot-crash-${spec//[=:]/-}.raw"
         mkimg "$img" "smoke test=disk-fault:$spec"
         for accel in $ACCELS; do
@@ -1791,6 +1947,240 @@ PY
         boot "$l" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
         check "decrypted-disk-boots-plain [$accel]" "$l" "$status" "storage: data disk opened" \
             "db: sqlite .* quick_check ok" "^URMQTT READY$" "NOT:encryption" "NOT:refusing to serve" "$NO_FAULT"
+    done
+}
+
+# type_line <socket> <text>: types <text> and Enter on the serial port of a VM started with
+# --serial-in <socket> (one byte at a time, as a person or a provider's console would).
+type_line() {
+    python3 -I -c '
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+for _ in range(200):
+    try:
+        s.connect(sys.argv[1])
+        break
+    except OSError:
+        time.sleep(0.1)
+for b in sys.argv[2].encode() + b"\r":
+    s.sendall(bytes([b]))
+    time.sleep(0.005)
+time.sleep(0.3)
+s.close()
+' "$1" "$2"
+}
+
+# data_lba <disk>: the first sector of the data partition (where its superblock slot A is: the
+# layout magic at a sector boundary, and slot B 24 sectors further).
+data_lba() {
+    python3 -I -c '
+import sys
+d = open(sys.argv[1], "rb").read()
+i = 0
+while True:
+    i = d.find(b"URMQTTDK", i)
+    if i < 0:
+        sys.exit("no data partition superblock")
+    if i % 512 == 0 and d[i + 24 * 512:i + 24 * 512 + 8] in (b"URMQTTDK", bytes(8)):
+        print(i // 512)
+        break
+    i += 1
+' "$1"
+}
+
+# wait_exit: waits until the VM of start_vm exits (a smoke image powers off at READY), or times out
+# (then it is killed). Returns 124 on timeout, else QEMU's status.
+wait_exit() {
+    local waited=0
+    while kill -0 "$VM_PID" 2>/dev/null; do
+        if (( waited >= TIMEOUT * 10 )); then
+            kill_vm
+            return 124
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    wait "$VM_PID"
+}
+
+# LATER-7 end to end (ADR-325 to ADR-329): a disk key that is not in the image. A dev configuration with
+# storage.encryption = "aes-256-xts" and storage.disk_key_source = "console" (no key file, format 22):
+#   1. a blank disk: the kernel asks for a new passphrase twice on the serial console, formats the
+#      data partition encrypted under a random key wrapped in key slot 0, and serves; nothing listens
+#      before the unlock; neither the passphrase nor a plaintext SQLite header is anywhere;
+#   2. a wrong passphrase is answered and asked again; the right one opens the disk;
+#   3. "change" at the prompt: the current passphrase, the new one twice; the slot is rewrapped;
+#   4. the old passphrase no longer opens it, the new one does;
+#   5. the host tool: `keys` lists the slot, --passphrase-file opens the disk for verify;
+#   6. an edited header (the key check changed, the CRC recomputed): the slot opens, the key does not
+#      match, the kernel refuses to serve;
+#   7. a RAM store (storage.mode = "ram") boots without asking: a random key of that boot.
+storage_unlock() {
+    build_disk_tool || {
+        echo "  ✗ storage-unlock needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local ud=$DISK_TOOL dir="$OUT/unlock" tool="$ROOT/target/debug/urmqtt-config"
+    rm -rf "$dir"
+    mkdir -p "$dir/root"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool)
+    cp "$ROOT"/deploy/dev/* "$dir/root/" 2>/dev/null || true
+    sed -e 's/^\[storage\]/[storage]\nencryption = "aes-256-xts"\ndisk_key_source = "console"/' \
+        "$ROOT/deploy/dev/config.toml" >"$dir/console.toml"
+    "$tool" pack "$dir/console.toml" --env dev --root "$dir/root" --out "$dir/console.blob" >/dev/null ||
+        { echo "  ✗ storage-unlock: packing failed"; FAILED=$((FAILED + 1)); return; }
+    sed -e 's/^mode = "auto"/mode = "ram"/' "$dir/console.toml" >"$dir/console-ram.toml"
+    "$tool" pack "$dir/console-ram.toml" --env dev --root "$dir/root" --out "$dir/console-ram.blob" >/dev/null ||
+        { echo "  ✗ storage-unlock: packing failed"; FAILED=$((FAILED + 1)); return; }
+    MKIMG_EXTRA=(--config "$dir/console.blob")
+    mkimg "$OUT/unlock-console.raw" "smoke"
+    MKIMG_EXTRA=(--config "$dir/console-ram.blob")
+    mkimg "$OUT/unlock-console-ram.raw" "smoke"
+    MKIMG_EXTRA=()
+    local p1="first disk passphrase 11" p2="second disk passphrase 22" accel
+    for accel in $ACCELS; do
+        local disk="$OUT/unlock-$accel.img" status=0 l sock qd
+        qd=$(mktemp -d "${TMPDIR:-/tmp}/urmqtt-unlock.XXXXXX") || continue
+        sock="$qd/s.sock"
+        fresh_disk "$OUT/unlock-console.raw" "$disk"
+
+        # 1. First boot of a blank disk.
+        l="$OUT/unlock-$accel-1.log"
+        start_vm "$l" --serial-in "$sock" --disk "$disk" --accel "$accel" --fwd none
+        if wait_log "$l" "new disk passphrase"; then
+            type_line "$sock" "short"
+            wait_log "$l" "new disk passphrase" 2 && type_line "$sock" "$p1"
+            wait_log "$l" "the same passphrase again" && type_line "$sock" "$p1"
+        fi
+        wait_exit || status=$?
+        {
+            # Nothing listens before the disk is open: the first listener line comes after it.
+            local at_open at_listen
+            at_open=$(clean "$l" | grep -nE "storage: data partition (formatted|unlocked)" | head -1 | cut -d: -f1 || true)
+            at_listen=$(clean "$l" | grep -niE "listen" | grep -v "storage:" | head -1 | cut -d: -f1 || true)
+            if [[ -n $at_open && ( -z $at_listen || $at_listen -gt $at_open ) ]]; then echo "order: nothing listens before the unlock"; else echo "order: WRONG ($at_open $at_listen)"; fi
+            if grep -aqF "$p1" "$l"; then echo "secret: passphrase FOUND in the serial log"; else echo "secret: not in the serial log"; fi
+            dd if="$disk" of="$disk.data" bs=512 skip="$(data_lba "$disk")" status=none
+            if grep -aq "SQLite format 3" "$disk.data"; then echo "image: plaintext SQLite header FOUND"; else echo "image: no plaintext SQLite header"; fi
+            if grep -aqF "$p1" "$disk"; then echo "image: passphrase FOUND"; else echo "image: no passphrase"; fi
+        } >"$l.scan"
+        check "unlock-first-boot [$accel]" "$l" "$status" \
+            "storage: refused: too short" \
+            "storage: data partition formatted with a new key, wrapped under the console passphrase in key slot 0" \
+            "storage: encryption aes-256-xts \(key check ok, key from the console passphrase" \
+            "^URMQTT READY$" "NOT:refusing to serve" "$NO_FAULT"
+        check "unlock-first-boot-scan [$accel]" "$l.scan" 0 "order: nothing listens before the unlock" \
+            "secret: not in the serial log" "image: no plaintext SQLite header" "image: no passphrase"
+
+        # 2. A wrong passphrase, then the right one.
+        status=0
+        l="$OUT/unlock-$accel-2.log"
+        start_vm "$l" --serial-in "$sock" --disk "$disk" --accel "$accel" --fwd none
+        if wait_log "$l" "the data partition is locked"; then
+            type_line "$sock" "not the passphrase at all"
+            wait_log "$l" "storage: wrong passphrase" && wait_log "$l" "the data partition is locked\. Disk" 2 &&
+                type_line "$sock" "$p1"
+        fi
+        wait_exit || status=$?
+        check "unlock-wrong-then-right [$accel]" "$l" "$status" \
+            "storage: wrong disk passphrase \(1 so far\)" "storage: unlocked after 1 wrong disk passphrase" \
+            "storage: data partition unlocked with the console passphrase \(key slot 0\)" \
+            "db: sqlite .* quick_check ok" "^URMQTT READY$" "NOT:refusing to serve" "NOT:$p1" "$NO_FAULT"
+
+        # 3. "change" at the prompt.
+        status=0
+        l="$OUT/unlock-$accel-3.log"
+        start_vm "$l" --serial-in "$sock" --disk "$disk" --accel "$accel" --fwd none
+        if wait_log "$l" "the data partition is locked"; then
+            type_line "$sock" "change"
+            wait_log "$l" "current disk passphrase" && type_line "$sock" "$p1"
+            wait_log "$l" "new disk passphrase" && type_line "$sock" "$p2"
+            wait_log "$l" "the same passphrase again" && type_line "$sock" "$p2"
+        fi
+        wait_exit || status=$?
+        check "unlock-change [$accel]" "$l" "$status" \
+            "storage: the disk passphrase of key slot 0 was changed" "^URMQTT READY$" \
+            "NOT:refusing to serve" "NOT:$p1" "NOT:$p2" "$NO_FAULT"
+
+        # 4. The old one is refused, the new one opens.
+        status=0
+        l="$OUT/unlock-$accel-4.log"
+        start_vm "$l" --serial-in "$sock" --disk "$disk" --accel "$accel" --fwd none
+        if wait_log "$l" "the data partition is locked"; then
+            type_line "$sock" "$p1"
+            wait_log "$l" "storage: wrong passphrase" && wait_log "$l" "the data partition is locked\. Disk" 2 &&
+                type_line "$sock" "$p2"
+        fi
+        wait_exit || status=$?
+        check "unlock-after-change [$accel]" "$l" "$status" \
+            "storage: wrong disk passphrase \(1 so far\)" \
+            "storage: data partition unlocked with the console passphrase \(key slot 0\)" "^URMQTT READY$" \
+            "NOT:refusing to serve" "$NO_FAULT"
+
+        # 5. The host tool.
+        printf '%s\n' "$p2" >"$dir/p2"
+        printf '%s\n' "$p1" >"$dir/p1"
+        {
+            "$ud" keys "$disk" 2>&1
+            "$ud" verify "$disk" --passphrase-file "$dir/p1" 2>&1 || echo "tool: verify with the old passphrase refused"
+            "$ud" verify "$disk" --passphrase-file "$dir/p2" >/dev/null 2>&1 && echo "tool: verify with the passphrase exit 0"
+        } >"$disk.tool" 2>&1
+        check "unlock-disk-tool [$accel]" "$disk.tool" 0 \
+            "not in the image \(storage.disk_key_source = \"console\"\)" \
+            "key slot 0: passphrase, PBKDF2-HMAC-SHA-256 300000 iterations" "key slot 1: empty" \
+            "no key slot opens with this passphrase" "tool: verify with the old passphrase refused" \
+            "tool: verify with the passphrase exit 0"
+
+        # 6. An edited header: the key check of both superblocks changed, the CRC recomputed.
+        cp "$disk" "$disk.tampered"
+        python3 -I - "$disk.tampered" "$(data_lba "$disk")" <<'PY'
+import sys
+def crc32c(b):
+    c = 0xFFFFFFFF
+    for x in b:
+        c ^= x
+        for _ in range(8):
+            c = (c >> 1) ^ (0x82F63B78 if c & 1 else 0)
+    return c ^ 0xFFFFFFFF
+with open(sys.argv[1], "r+b") as f:
+    first = int(sys.argv[2])
+    for lba in (0, 24):
+        off = (first + lba) * 512
+        f.seek(off)
+        sb = bytearray(f.read(4096))
+        if sb[:8] != b"URMQTTDK":
+            continue
+        sb[3136] ^= 1
+        sb[4092:4096] = crc32c(bytes(sb[:4092])).to_bytes(4, "little")
+        f.seek(off)
+        f.write(sb)
+PY
+        status=0
+        l="$OUT/unlock-$accel-6.log"
+        start_vm "$l" --serial-in "$sock" --disk "$disk.tampered" --accel "$accel" --fwd none
+        if wait_log "$l" "the data partition is locked"; then
+            type_line "$sock" "$p2"
+            wait_log "$l" "refusing to serve" || status=124
+        else
+            status=124
+        fi
+        kill_vm
+        check "unlock-edited-header-refused [$accel]" "$l" "$status" \
+            "storage: refused reason=key-slot-mismatch" "the header was edited" "NOT:URMQTT READY"
+        rm -f "$disk.tampered"
+
+        # 7. A RAM store (storage.mode = "ram", the live entry's kind): nothing asked, a key of this boot.
+        status=0
+        l="$OUT/unlock-$accel-7.log"
+        fresh_disk "$OUT/unlock-console-ram.raw" "$disk.ram"
+        start_vm "$l" --serial-in "$sock" --disk "$disk.ram" --accel "$accel" --fwd none
+        wait_exit || status=$?
+        check "unlock-ram-store-asks-nothing [$accel]" "$l" "$status" \
+            "storage: RAM store: encrypted under a random key of this boot, no passphrase asked" "^URMQTT READY$" \
+            "NOT:Disk passphrase" "NOT:new disk passphrase" "$NO_FAULT"
+        rm -f "$disk.ram"
+        rm -rf "$qd"
     done
 }
 
@@ -2970,7 +3360,10 @@ websocket() {
     local h
     h=$(printf '%s\n' web-secret | "$tool" hash-password --iterations 3000)
     sed -e 's/^mqtt_plain_port = 1883 .*/mqtt_plain_port = 0/' -e 's/^kernel_heap_mb = .*/kernel_heap_mb = 128/' \
-        "$ROOT/deploy/dev/config.toml" >"$dir/base.toml"
+        "$ROOT/deploy/dev/config.toml" |
+        # The scenarios hold up to 10000 idle connections from the one address QEMU's user network shows (1000 under
+        # TCG): beyond the default of limits.max_connections_per_ip (1024, ADR-280), so the base image raises it.
+        awk '{ print } /^\[limits\]/ { print "max_connections_per_ip = 20000" }' >"$dir/base.toml"
     mkws() { # mkws <name> <[websocket] lines...>
         local name=$1
         shift
@@ -3022,6 +3415,309 @@ websocket() {
             (( idle > 0 )) && more=("client: wss-$idle-idle-connections-no-leak ok")
             check "websocket-$name [$accel]" "$log" "$status" "${common[@]}" "${extra[@]}" ${more[@]+"${more[@]}"}
         done
+    done
+}
+
+# NOW-15 (ADR-285): password accounts added, changed and removed at run time by signed control messages
+# (`urmqtt-control set-account`, `remove-account`), on the plaintext listener and over secure WebSocket at
+# once. The dev configuration plus a [plaintext] section (one account of the image) and a [websocket] section,
+# both in password mode, and limits.max_runtime_accounts = 3; one image, two boots of the same disk with a
+# power cut (SIGKILL) between them. scripts/accounts-scenarios.py plays the operator and the clients; the
+# serial log is checked for the audit lines and for the absence of every password and hash.
+accounts() {
+    [[ -z ${SMOKE_SCENARIOS:-} || accounts =~ $SMOKE_SCENARIOS ]] || return 0
+    command -v mosquitto_pub >/dev/null || { echo "  ✗ accounts scenarios need the mosquitto clients"; FAILED=$((FAILED + 1)); return 0; }
+    local dir="$OUT/accounts" tool="$ROOT/target/debug/urmqtt-config" ppt=${SMOKE_PLAIN_PORT:-$((PORT + 1))} wpt=${SMOKE_WS_PORT:-$((PORT + 2))}
+    local ctl="$ROOT/target/release/urmqtt-control"
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed"; FAILED=$((FAILED + 1)); return 0; }
+    [[ -x $ctl ]] || (cd "$ROOT" && cargo build --release --locked -q -p urmqtt-control-tool) || { echo "  ✗ urmqtt-control build failed"; FAILED=$((FAILED + 1)); return 0; }
+    local h
+    h=$(printf '%s\n' img-secret | "$tool" hash-password --iterations 3000)
+    sed -e 's/^mqtt_plain_port = 1883 .*/mqtt_plain_port = 0/' "$ROOT/deploy/dev/config.toml" |
+        awk '{ print } /^\[limits\]/ { print "max_runtime_accounts = 3" }' >"$dir/accounts.toml"
+    {
+        printf '\n[plaintext]\nenabled = true\nallow_from = ["10.0.2.0/24"]\nmax_failed_auths_per_ip = 1000\n'
+        printf 'users = [{ id = "img-1", password_hash = "%s" }]\n' "$h"
+        printf '\n[websocket]\nenabled = true\norigins = ["https://app.example.com"]\nauth = "password"\nmax_failed_auths_per_ip = 1000\n'
+        printf 'users = [{ id = "web-1", password_hash = "%s" }]\n' "$h"
+    } >>"$dir/accounts.toml"
+    "$tool" pack "$dir/accounts.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/accounts.blob" >/dev/null
+    local iso="$OUT/accounts.raw" d="$ROOT/deploy/dev"
+    MKIMG_EXTRA=(--config "$dir/accounts.blob")
+    mkimg "$iso" "serve log=info"
+    MKIMG_EXTRA=()
+    local fwd="$PORT:8883,$ppt:1883,$wpt:8084"
+    for accel in $ACCELS; do
+        # Run-time accounts are sized for a hash of up to 100 000 iterations (ADR-285): under x86_64 TCG, software
+        # emulation makes one check take 5 to 8 s (the boot log warns), so the login rate is below one a second and
+        # the scenario measures the emulator. aarch64 TCG and every KVM or HVF run are fine.
+        if [[ ${ARCH:-} == x86_64 && $accel == tcg ]]; then
+            echo "  - accounts [$accel] skipped: a password check takes seconds under x86_64 software emulation (use kvm)"
+            continue
+        fi
+        local log1="$OUT/accounts-$accel-1.log" log2="$OUT/accounts-$accel-2.log" data="$OUT/accounts-$accel.img" status=0
+        local scratch="$dir/scratch-$accel"
+        rm -rf "$scratch" "$log1.client" "$log2.client"
+        mkdir -p "$scratch"
+        fresh_disk "$iso" "$data"
+        start_vm "$log1" --disk "$data" --accel "$accel" --fwd "$fwd"
+        if wait_log "$log1" "^URMQTT READY$" && wait_log "$log1" "net: dhcp lease 10\.0\.2\.15"; then
+            bounded 600 python3 -I "$ROOT/scripts/accounts-scenarios.py" first "$ppt" "$wpt" "$PORT" "$d" "$ctl" "$scratch" >"$log1.client" 2>&1 || status=$?
+            sleep 1
+        else
+            status=124
+        fi
+        kill_vm
+        cat "$log1.client" >>"$log1" 2>/dev/null || true
+        check "accounts-run-time [$accel]" "$log1" "$status" \
+            "control: run-time password accounts on: 0 stored, at most 3" \
+            "control: seq [0-9]+ from operator: password account dyn-1 set \(class full, 1 run-time account\(s\)\)" \
+            "control: seq [0-9]+ from operator: password account viewer set \(class read-only" \
+            "control: seq [0-9]+ from operator: password account feeder set \(class write-only" \
+            "control: seq [0-9]+ from operator: password account dyn-1 removed \(2 run-time account\(s\) left\)" \
+            "control: message from operator rejected: account_shadows_image" \
+            "control: message from operator rejected: account_limit" \
+            "control: core [0-9]+: [1-9][0-9]* live connection\(s\) closed" \
+            "plaintext: login refused for 10\.0\.2\.2 \(wrong password\)" \
+            "websocket: login refused for 10\.0\.2\.2 \(wrong password\)" \
+            "client: image-account-logs-in ok" "client: account-unknown-before-it-is-added ok" \
+            "client: account-unknown-over-wss-before-it-is-added ok" "client: set-account-logs-in-on-both-listeners ok" \
+            "client: account-acl-is-the-listeners ok" "client: changed-password-cuts-the-live-login ok" \
+            "client: image-account-wins ok" "client: read-only-account-subscribes-but-cannot-publish ok" \
+            "client: read-only-account-cannot-set-a-will ok" "client: write-only-account-publishes-but-cannot-subscribe ok" \
+            "client: account-limit-refuses-one-more ok" "client: removed-account-is-cut-and-refused ok" \
+            "client: removal-makes-room-under-the-limit ok" "client: tool-refuses-bad-input ok" \
+            "NOT:dyn-secret" "NOT:viewer-secret" "NOT:feeder-secret" "NOT:extra-secret" "NOT:attacker-chosen" "NOT:pbkdf2-sha256\\$" \
+            "NOT:client: .* FAILED" "$NO_FAULT"
+        if [[ $status -eq 0 ]]; then
+            start_vm "$log2" --disk "$data" --accel "$accel" --fwd "$fwd"
+            if wait_log "$log2" "^URMQTT READY$" && wait_log "$log2" "net: dhcp lease 10\.0\.2\.15"; then
+                bounded 600 python3 -I "$ROOT/scripts/accounts-scenarios.py" second "$ppt" "$wpt" "$PORT" "$d" "$ctl" "$scratch" >"$log2.client" 2>&1 || status=$?
+                sleep 1
+            else
+                status=124
+            fi
+            kill_vm
+            cat "$log2.client" >>"$log2" 2>/dev/null || true
+            check "accounts-persist [$accel]" "$log2" "$status" \
+                "control: run-time password accounts on: 3 stored, at most 3" \
+                "control: message from operator rejected: replay" \
+                "client: accounts-survive-a-power-cut ok" "client: account-class-survives-a-power-cut ok" \
+                "client: removed-account-stays-removed ok" "client: replayed-set-account-is-refused ok" \
+                "client: replayed-remove-account-is-refused ok" \
+                "NOT:dyn-secret" "NOT:viewer-secret" "NOT:feeder-secret" "NOT:extra-secret" "NOT:pbkdf2-sha256\\$" \
+                "NOT:client: .* FAILED" "$NO_FAULT"
+        fi
+    done
+}
+
+# NEXT-9, ADR-290: the Prometheus endpoint. The dev image's configuration plus a [metrics] section, packed with the
+# host tool, one image per mode; scripts/metrics-scenarios.py (standard library) plays the scraper.
+#   allow  allow_from covers the host (10.0.2.0/24): the text format 0.0.4 and OpenMetrics by Accept, HEAD, the fixed
+#          refusals (404, 405, 505, 400 for garbage, a body and bare LF, 431), one answer per connection, a request in
+#          pieces, a slowloris cut at request_timeout_s, the per-address limit, the endpoint's own counters, the numbers
+#          against the info query and the $SYS topics (the operator), counters that follow real traffic
+#   deny   allow_from does not cover the host: not one byte comes back, and the boot log counts the dropped SYNs
+metrics() {
+    [[ -z ${SMOKE_SCENARIOS:-} || metrics =~ $SMOKE_SCENARIOS ]] || return 0
+    if ! command -v mosquitto_pub >/dev/null || ! command -v mosquitto_sub >/dev/null; then
+        echo "  ✗ the metrics scenarios need the mosquitto clients"; FAILED=$((FAILED + 1)); return 0
+    fi
+    local dir="$OUT/metrics" tool="$ROOT/target/debug/urmqtt-config" mpt=${SMOKE_METRICS_PORT:-$((PORT + 3))}
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed"; FAILED=$((FAILED + 1)); return 0; }
+    sed -e 's/^mqtt_plain_port = 1883 .*/mqtt_plain_port = 0/' "$ROOT/deploy/dev/config.toml" >"$dir/base.toml"
+    mkm() { # mkm <name> <[metrics] lines...>
+        local name=$1
+        shift
+        { cat "$dir/base.toml"; printf '\n[metrics]\nenabled = true\n'; printf '%s\n' "$@"; } >"$dir/$name.toml"
+        "$tool" pack "$dir/$name.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/$name.blob" >/dev/null
+    }
+    mkm allow 'allow_from = ["10.0.2.0/24"]' 'max_connections = 4' 'max_connections_per_ip = 2' 'request_timeout_s = 3'
+    mkm deny 'allow_from = ["192.0.2.0/24"]'
+    local common=("^URMQTT READY$" "NOT:client: .* FAILED" "$NO_FAULT")
+    local name
+    for name in allow deny; do
+        local extra=() iso="$OUT/metrics-$name.raw"
+        case $name in
+            allow) extra=("metrics: Prometheus endpoint on port 9100 \(plain HTTP, NOT ENCRYPTED, no login: GET /metrics\); scrapes allowed from 10\.0\.2\.0/24"
+                "at most 4 connection\(s\), 2 per address, per core; 20 scrape\(s\)/s per core; answer within 3 s"
+                "metrics: [0-9]+ metrics SYN\(s\) or connection\(s\) dropped for a limit"
+                "client: metrics-prometheus-text-0.0.4 ok" "client: metrics-openmetrics-negotiated ok" "client: metrics-head-has-no-body ok"
+                "client: metrics-refusals-404-405-505-400-431 ok" "client: metrics-pipelined-request-answered-once ok"
+                "client: metrics-request-in-pieces ok" "client: metrics-slowloris-cut-at-the-deadline ok"
+                "client: metrics-per-address-limit-opened ok" "client: metrics-listener-counters ok"
+                "client: metrics-agree-with-the-info-query ok" "client: metrics-counters-follow-traffic ok") ;;
+            deny) extra=("scrapes allowed from 192\.0\.2\.0/24" "metrics: [0-9]+ SYN\(s\) from addresses outside metrics\.allow_from dropped without an answer"
+                "client: metrics-outside-allow-from-gets-no-bytes ok") ;;
+        esac
+        MKIMG_EXTRA=(--config "$dir/$name.blob")
+        mkimg "$iso" "serve log=info"
+        MKIMG_EXTRA=()
+        for accel in $ACCELS; do
+            local log="$OUT/metrics-$name-$accel.log" data="$OUT/metrics-$name-$accel.img" status=0
+            fresh_disk "$iso" "$data"
+            start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883,$mpt:9100"
+            if wait_log "$log" "^URMQTT READY$" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+                bounded 300 python3 -I "$ROOT/scripts/metrics-scenarios.py" "$name" "$mpt" "$PORT" "$ROOT/deploy/dev" >"$log.client" 2>&1 || status=$?
+                sleep 1
+            else
+                status=124
+            fi
+            kill_vm
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            check "metrics-$name [$accel]" "$log" "$status" "${common[@]}" "${extra[@]}"
+        done
+    done
+}
+
+# NEXT-1, ADR-330 to ADR-334: IPv6. Three images, each on this architecture's accelerators:
+# - ipv6-slirp: dual stack on QEMU's own user network (--net6 dual): SLAAC from QEMU's Router
+#   Advertisements (fec0::/64, router fe80::2) beside the DHCP lease; the $SYS topics, read over IPv4,
+#   name the IPv6 addresses.
+# - ipv6-only: no IPv4 at all (no DHCP server), the link is scripts/ipv6-relay.py on a dgram netdev: SLAAC
+#   from its RA (2001:db8:1::/64, MTU 1480), then an mTLS publish and subscribe over IPv6 (mosquitto through
+#   the relay), an echo answered, a fragment and an extension header that must not be skipped dropped and
+#   counted, a Neighbour Solicitation from off the link ignored.
+# - ipv6-static: dual stack through the relay, static IPv4 and static IPv6 (2001:db8:5::10/64, gateway
+#   fe80::1, RAs ignored): a message published over IPv4 reaches a subscriber over IPv6, and the metrics
+#   endpoint answers an IPv6 scrape from the IPv6 network its allow_from lists and nothing over IPv4.
+ipv6_suite() {
+    if ! command -v mosquitto_pub >/dev/null || ! command -v mosquitto_sub >/dev/null || ! command -v curl >/dev/null; then
+        echo "  ✗ the ipv6 scenarios need the mosquitto clients and curl"; FAILED=$((FAILED + 1)); return 0
+    fi
+    local dir="$OUT/ipv6" tool="$ROOT/target/debug/urmqtt-config" d="$ROOT/deploy/dev"
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed"; FAILED=$((FAILED + 1)); return 0; }
+    local base="$dir/base.toml"
+    sed -e 's/^mqtt_plain_port = 1883 .*/mqtt_plain_port = 0/' "$d/config.toml" >"$base"
+    # mk6 <name> <lines after [network]> [more TOML] [sed expression on the base]
+    mk6() {
+        local name=$1 net=$2 toml_tail=${3:-} edit=${4:-}
+        { sed -e "s|^\[network\]\$|[network]\n$net|" ${edit:+-e "$edit"} "$base"; [[ -n $toml_tail ]] && printf '\n%s\n' "$toml_tail"; } >"$dir/$name.toml"
+        "$tool" pack "$dir/$name.toml" --env dev --root "$d" --out "$dir/$name.blob" >/dev/null
+        MKIMG_EXTRA=(--config "$dir/$name.blob")
+        mkimg "$OUT/ipv6-$name.raw" "serve log=info"
+        MKIMG_EXTRA=()
+    }
+    mk6 slirp 'ipv6 = "slaac"'
+    mk6 only 'ipv6 = "slaac"'
+    # Static IPv6 and, since the relay serves no DHCP, static IPv4.
+    mk6 static 'ipv6 = "static"\nipv6_address = "2001:db8:5::10/64"\nipv6_gateway = "fe80::1"' \
+        "$(printf '[metrics]\nenabled = true\nallow_from = ["2001:db8:5::/64"]')" \
+        's|^mode = "dhcp".*|mode = "static"\naddress = "10.0.2.15/24"\ngateway = "10.0.2.2"|'
+    local mac=5054:ff:fe12:3456 common=("^URMQTT READY$" "NOT:client: .* FAILED" "$NO_FAULT" "NOT:panicked")
+    local p4=$((PORT + 40)) p6=$((PORT + 41)) p6b=$((PORT + 42)) pm6=$((PORT + 43)) pm4=$((PORT + 44)) n=0
+    pub() { # pub <port> <id> <topic> <message>
+        mosquitto_pub -h 127.0.0.1 -p "$1" -V mqttv311 -i "$2" --cafile "$d/ca.pem" --cert "$d/devices/$2.pem" \
+            --key "$d/devices/$2.key" -t "$3" -m "$4" -q 1
+    }
+    # sub_as <identity> <port> <count> <seconds> <topic...>: a subscription of a service (backend: devices/#)
+    # or the operator ($SYS); prints what came, never fails (the checks grep it). $SYS is refreshed every
+    # 10 s, so a reader of the IPv6 topics waits 13 s for the values after the addresses came up.
+    sub_as() {
+        local who=$1 port=$2 count=$3 secs=$4 args=()
+        shift 4
+        for t in "$@"; do args+=(-t "$t"); done
+        mosquitto_sub -h 127.0.0.1 -p "$port" -V mqttv311 -i "$who" --cafile "$d/ca.pem" --cert "$d/services/$who.pem" \
+            --key "$d/services/$who.key" "${args[@]}" -C "$count" -W "$secs" -v || true
+    }
+    for accel in $ACCELS; do
+        # Dual stack on QEMU's user network.
+        local log="$OUT/ipv6-slirp-$accel.log" data="$OUT/ipv6-slirp-$accel.img" status=0
+        fresh_disk "$OUT/ipv6-slirp.raw" "$data"
+        start_vm "$log" --disk "$data" --accel "$accel" --net6 dual --fwd "$p4:8883"
+        if wait_log "$log" "net: ipv6 global address fec0::$mac in use" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+            # shellcheck disable=SC2016  # the topics' $SYS is literal
+            sub_as operator "$p4" 99 13 '$SYS/broker/net/ipv6/address/global' '$SYS/broker/net/ipv6/router' \
+                '$SYS/broker/net/ipv6/mode' >"$log.client" 2>&1
+        else
+            status=124
+        fi
+        kill_vm
+        cat "$log.client" >>"$log" 2>/dev/null || true
+        check "ipv6-slirp [$accel]" "$log" "$status" "${common[@]}" \
+            "net: ipv6 slaac: link-local address fe80::$mac \(EUI-64\)" \
+            "net: ipv6 link-local address fe80::$mac in use \(duplicate address detection passed\)" \
+            "net: ipv6 default router fe80::2" \
+            "^\\\$SYS/broker/net/ipv6/address/global fec0::$mac$" "^\\\$SYS/broker/net/ipv6/router fe80::2$" \
+            "^\\\$SYS/broker/net/ipv6/mode slaac$"
+
+        # IPv6 only, through the relay.
+        local lp=$((46000 + n * 2)) rp=$((46001 + n * 2)); n=$((n + 1))
+        log="$OUT/ipv6-only-$accel.log"; data="$OUT/ipv6-only-$accel.img"; status=0
+        fresh_disk "$OUT/ipv6-only.raw" "$data"
+        python3 -I "$ROOT/scripts/ipv6-relay.py" --local "$rp" --remote "$lp" --guest6 "2001:db8:1::$mac" --prefix 2001:db8:1:: \
+            --mtu 1480 --listen "6:$p6:8883" --listen "6:$p6b:8883" --probe --seconds 600 >"$log.relay" 2>&1 &
+        local rpid=$!
+        start_vm "$log" --disk "$data" --accel "$accel" --dgram "$lp:$rp"
+        if wait_log "$log" "net: ipv6 global address 2001:db8:1:0:$mac in use" && sleep 4; then
+            {
+                sub_as backend "$p6" 1 30 'devices/device-001/v6' >"$log.sub" 2>&1 &
+                local spid=$!
+                sleep 3
+                pub "$p6b" device-001 devices/device-001/v6 "over ipv6" && echo "client: ipv6-publish ok" || echo "client: ipv6-publish FAILED"
+                wait "$spid"; grep -q "^devices/device-001/v6 over ipv6$" "$log.sub" \
+                    && echo "client: ipv6-subscribe-received ok" || echo "client: ipv6-subscribe-received FAILED"
+                cat "$log.sub"
+                # shellcheck disable=SC2016  # the topics' $SYS is literal
+                sub_as operator "$p6" 99 13 '$SYS/broker/net/ipv6/fragments' '$SYS/broker/net/ipv6/ext_headers' \
+                    '$SYS/broker/net/ipv6/mtu'
+            } >"$log.client" 2>&1
+        else
+            status=124
+        fi
+        kill_vm
+        kill "$rpid" 2>/dev/null || true
+        wait "$rpid" 2>/dev/null || true
+        cat "$log.client" "$log.relay" >>"$log" 2>/dev/null || true
+        check "ipv6-only [$accel]" "$log" "$status" "${common[@]}" \
+            "net: ipv6 default router fe80::1 \(lifetime 1800 s\)" "net: ipv6 mtu 1480 \(router advertisement\)" \
+            "NOT:net: dhcp lease" "relay: flow [0-9]+: connected to the guest over IPv6, its MSS 1420" \
+            "relay: echo reply from 2001:db8:1:0:$mac" "relay: MLD report" \
+            "client: ipv6-publish ok" "client: ipv6-subscribe-received ok" \
+            "^\\\$SYS/broker/net/ipv6/fragments [1-9]" "^\\\$SYS/broker/net/ipv6/ext_headers [1-9]" "^\\\$SYS/broker/net/ipv6/mtu 1480$"
+
+        # Dual stack through the relay, both addresses static; the metrics endpoint for an IPv6 network.
+        lp=$((46000 + n * 2)); rp=$((46001 + n * 2)); n=$((n + 1))
+        log="$OUT/ipv6-static-$accel.log"; data="$OUT/ipv6-static-$accel.img"; status=0
+        fresh_disk "$OUT/ipv6-static.raw" "$data"
+        python3 -I "$ROOT/scripts/ipv6-relay.py" --local "$rp" --remote "$lp" --guest6 2001:db8:5::10 --guest4 10.0.2.15 \
+            --router6 2001:db8:5::1 --listen "4:$p4:8883" --listen "6:$p6:8883" --listen "6:$pm6:9100" --listen "4:$pm4:9100" \
+            --seconds 600 >"$log.relay" 2>&1 &
+        rpid=$!
+        start_vm "$log" --disk "$data" --accel "$accel" --dgram "$lp:$rp"
+        if wait_log "$log" "net: ipv6 global address 2001:db8:5::10 in use" && sleep 2; then
+            {
+                sub_as backend "$p6" 1 30 'devices/device-002/cross' >"$log.sub" 2>&1 &
+                local spid=$!
+                sleep 3
+                pub "$p4" device-002 devices/device-002/cross "from ipv4" && echo "client: ipv4-publish ok" || echo "client: ipv4-publish FAILED"
+                wait "$spid"; grep -q "^devices/device-002/cross from ipv4$" "$log.sub" \
+                    && echo "client: ipv4-to-ipv6-delivery ok" || echo "client: ipv4-to-ipv6-delivery FAILED"
+                curl -s --max-time 10 "http://127.0.0.1:$pm6/metrics" >"$log.metrics" \
+                    && grep -q '^urmqtt_ipv6_mode_info{mode="static"} 1$' "$log.metrics" \
+                    && echo "client: metrics-over-ipv6 ok" || echo "client: metrics-over-ipv6 FAILED"
+                if curl -s --max-time 5 "http://127.0.0.1:$pm4/metrics" >/dev/null; then
+                    echo "client: metrics-over-ipv4-refused FAILED"
+                else
+                    echo "client: metrics-over-ipv4-refused ok"
+                fi
+            } >"$log.client" 2>&1
+        else
+            status=124
+        fi
+        kill_vm
+        kill "$rpid" 2>/dev/null || true
+        wait "$rpid" 2>/dev/null || true
+        cat "$log.client" "$log.relay" >>"$log" 2>/dev/null || true
+        check "ipv6-static [$accel]" "$log" "$status" "${common[@]}" \
+            "net: ipv6 static: 2001:db8:5::10/64 gateway fe80::1, link-local fe80::$mac" \
+            "net: static address 10\.0\.2\.15/24" "scrapes allowed from 2001:db8:5::/64" \
+            "relay: flow [0-9]+: connected to the guest over IPv4" "relay: flow [0-9]+: connected to the guest over IPv6, its MSS 1440" \
+            "client: ipv4-publish ok" "client: ipv4-to-ipv6-delivery ok" "client: metrics-over-ipv6 ok" "client: metrics-over-ipv4-refused ok" \
+            "metrics: [0-9]+ SYN\(s\) from addresses outside metrics\.allow_from dropped without an answer"
     done
 }
 
@@ -3085,6 +3781,141 @@ net_irq() {
     done
 }
 
+# NEXT-6 (ADR-310 to ADR-314): virtio-net multiqueue with RSS. First on QEMU's
+# user network, which offers MQ and RSS with mq=on,rss=on but only one pair: the
+# NIC falls back to one pair and says why (and with devices.virtio_net_queues =
+# "single" asks for nothing); MQTT over mutual TLS works either way. Then the
+# tap rig (scripts/mq-rig.sh): a multi-queue tap with 2 or 4 pairs, where each
+# worker core must receive its own flows on its own pair (frames received, none
+# forwarded) and the round trips must work. The rig needs Linux with a tap
+# device and root or sudo (a CI runner), or URMQTT_MQ_DOCKER=<image> with
+# docker (macOS: docs/perf-results/next6-mq/Dockerfile); otherwise it is skipped.
+mq_suite() {
+    if ! command -v mosquitto_pub >/dev/null || ! command -v mosquitto_sub >/dev/null; then
+        echo "  ✗ the mq scenarios need the mosquitto clients"; FAILED=$((FAILED + 1)); return 0
+    fi
+    local d="$ROOT/deploy/dev" single="$OUT/mq-single-config.toml" tls=(--cafile "$ROOT/deploy/dev/ca.pem")
+    mkdir -p "$OUT"
+    awk '{ print } /^\[devices\]/ { print "virtio_net_queues = \"single\"" }' "$d/config.toml" >"$single"
+    mkimg "$OUT/mq-auto.raw" "serve"
+    MKIMG_EXTRA=(--config "$single" --config-root "$d")
+    mkimg "$OUT/mq-single.raw" "serve"
+    MKIMG_EXTRA=()
+    local accel mode
+    for accel in $ACCELS; do
+        for mode in auto single; do
+            local log="$OUT/mq-user-$mode-$accel.log" data="$OUT/mq-user-$mode-$accel.img" status=0 expect=()
+            fresh_disk "$OUT/mq-$mode.raw" "$data"
+            export QEMU_NIC_PROPS="mq=on,rss=on,vectors=10"
+            if [[ $ARCH == x86_64 ]]; then
+                start_vm "$log" --arch x86_64 --disk "$data" --accel "$accel" --fwd "$PORT:8883"
+            else
+                start_vm "$log" --disk "$data" --accel "$accel" --fwd "$PORT:8883"
+            fi
+            unset QEMU_NIC_PROPS
+            if wait_log "$log" "TLS 1.3 listener on port 8883" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+                {
+                    local i
+                    for i in 1 2 3; do
+                        mosquitto_sub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i backend "${tls[@]}" \
+                            --cert "$d/services/backend.pem" --key "$d/services/backend.key" \
+                            -t devices/device-001/mq -q 1 -C 1 -W 30 >"$log.got" 2>&1 &
+                        local spid=$!
+                        sleep 1.5
+                        mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i device-001 "${tls[@]}" \
+                            --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" \
+                            -t devices/device-001/mq -q 1 -m "mq $i" || echo "client: publish failed"
+                        wait "$spid" || echo "client: subscriber failed"
+                        if [[ $(cat "$log.got") == "mq $i" ]]; then echo "client: mq-qos1 $i ok"; else echo "client: mq-qos1 $i FAILED"; fi
+                    done
+                } >"$log.client" 2>&1
+            else
+                status=124
+            fi
+            kill_vm
+            cat "$log.client" >>"$log" 2>/dev/null || true
+            if [[ $mode == auto ]]; then
+                expect=('net: one queue pair: the device offers one queue pair \(max_virtqueue_pairs < 2\)')
+            else
+                expect=('NOT:net: one queue pair')
+            fi
+            check "mq-user $mode [$accel]" "$log" "$status" "${expect[@]}" \
+                "net: dispatcher mode: core 0 owns the single virtio-net queue pair" "NOT:net: multiqueue" \
+                "client: mq-qos1 1 ok" "client: mq-qos1 2 ok" "client: mq-qos1 3 ok" "NOT:FAILED" "$NO_FAULT"
+        done
+    done
+    mq_tap
+}
+
+# mq_tap: the multiqueue scenarios on a tap (see mq_suite).
+mq_tap() {
+    local runner=()
+    if [[ $(uname -s) == Linux && -e /dev/net/tun ]] && { [[ $(id -u) -eq 0 ]] || sudo -n true 2>/dev/null; }; then
+        runner=()
+    elif [[ -n ${URMQTT_MQ_DOCKER:-} ]] && command -v docker >/dev/null; then
+        runner=(docker run --rm --cap-add NET_ADMIN --device /dev/net/tun -v "$ROOT:$ROOT" -w "$ROOT" "$URMQTT_MQ_DOCKER")
+    else
+        echo "  - mq tap scenarios skipped (need Linux with /dev/net/tun and root or sudo, or URMQTT_MQ_DOCKER=<image> with docker)"
+        return 0
+    fi
+    local d="$ROOT/deploy/dev" cfg="$OUT/mq-static-config.toml" iso="$OUT/mq-static-live.iso"
+    awk '{ if ($0 ~ /^mode = "dhcp"/) { print "mode = \"static\""; print "address = \"10.77.0.2/24\""; print "gateway = \"10.77.0.1\"" } else print }' \
+        "$d/config.toml" >"$cfg"
+    MKIMG_EXTRA=(--config "$cfg" --config-root "$d")
+    mkimg "$OUT/mq-static.raw" "serve"
+    MKIMG_EXTRA=()
+    if [[ ! -f "$iso" ]]; then
+        if [[ $ARCH == x86_64 ]]; then
+            "$ROOT/scripts/mkiso.sh" --arch x86_64 --live --kernel "$KERNEL" --out "$iso" --cmdline "serve" \
+                --config "$cfg" --config-root "$d" >/dev/null
+        else
+            URMQTT_MENU_TIMEOUT=0 "$ROOT/scripts/mkiso.sh" --kernel "$KERNEL" --out "$iso" --cmdline "serve" \
+                --config "$cfg" --config-root "$d" >/dev/null
+        fi
+    fi
+    # medium smp queues pairs [gic]: pairs = the pairs in use (the store's DB
+    # core is the last CPU, on a disk and in RAM alike, so 4 CPUs are 3 data
+    # cores).
+    # Two CPUs are one data core (the store's core is the other, in RAM too):
+    # one pair, and the line says why.
+    local cases=("disk 4 4 3" "disk 3 3 2" "disk 4 2 2" "iso 2 2 1")
+    [[ $ARCH == aarch64 ]] && cases+=("disk 4 4 3 2")
+    local c
+    for c in "${cases[@]}"; do
+        local medium smp q pairs gic name log status=0 expect=() k
+        read -r medium smp q pairs gic <<<"$c"
+        name="mq-tap-$medium-smp$smp-q$q${gic:+-gic$gic}"
+        log="$OUT/$name.log"
+        local args=(--arch "$ARCH" --smp "$smp" --queues "$q" --log "$log" --rounds 12)
+        if [[ $medium == disk ]]; then args+=(--disk "$OUT/mq-static.raw"); else args+=(--iso "$iso"); fi
+        [[ -n $gic ]] && args+=(--gic "$gic")
+        rm -f "$log"
+        ${runner[@]+"${runner[@]}"} "$ROOT/scripts/mq-rig.sh" "${args[@]}" >"$log.rig" 2>&1 || status=$?
+        if (( pairs > 1 )); then
+            expect=("net: multiqueue: $pairs queue pairs \(the device offers $q\)")
+        else
+            expect=("net: one queue pair: one data core \(the NIC offers $q" "NOT:net: multiqueue")
+        fi
+        expect+=("client: mq-qos1 12 ok")
+        for ((k = 1; k < pairs; k++)); do
+            expect+=("net: queue pair $k on core $k: "
+                "net: queue pair $k \(core $k\): [1-9][0-9]* frame\(s\) received, [0-9]+ sent, 0 forwarded to core 0")
+            # The MSI-X vector reaches every core through the local APIC and a
+            # GICv2m SPI; the GICv3 ITS serves core 0 only (ADR-311).
+            if [[ $ARCH == x86_64 || -n $gic ]]; then
+                expect+=("net: receive interrupt of queue pair $k verified")
+            else
+                expect+=("net: queue pair $k on core $k: .*polling every 200 us while this core has connections \(this platform's MSI target reaches core 0 only")
+            fi
+        done
+        local data_cores=$((smp - 1))
+        (( pairs > 1 && data_cores > pairs )) && expect+=("flows of the $((data_cores - pairs)) core\(s\) without a pair")
+        check "$name [tcg]" "$log" "$status" "${expect[@]}" \
+            "NOT:net: queue pair [1-9][0-9]* \(core [0-9]+\): [0-9]+ frame\(s\) received, [0-9]+ sent, [1-9][0-9]* forwarded" \
+            "NOT:client: mq-qos1 [0-9]+ FAILED" "NOT:did not come up" "NOT:the receive interrupt did not arrive" "$NO_FAULT"
+    done
+}
+
 # GICv2 (ADR-039), what KVM gives a guest on a GIC-400 host such as the
 # Raspberry Pi 4/5. HVF cannot emulate a GICv2, so this runs under TCG:
 # boot with ACPI and DT, then the TLS broker scenarios.
@@ -3123,6 +3954,210 @@ gicv2() {
         "net: receive wake-up: interrupt \(MSI-X via GICv2m SPI [0-9]+, to core 0\)" "net: receive interrupt verified" \
         "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
         "client: qos1-after-reconnect ok" "client: tls-revoked-rejected ok" "NOT:FAILED" "$NO_FAULT"
+}
+
+# H4b, ADR-305 to ADR-307: DMA remapping through QEMU's IOMMUs (aarch64: the virt machine's SMMUv3, by ACPI
+# IORT and by device tree; x86_64: intel-iommu and amd-iommu on q35). With `devices.iommu = "require"` every
+# driven device gets a domain of its own, `test=iommu-dma` makes the entropy device write outside it and the
+# write must be blocked (the page untouched) and counted; the same request with the IOMMU off reaches the page
+# (the control: the test can see a write). A full MQTT round trip over mutual TLS runs with translation on.
+# `require` refuses a machine without an IOMMU and a virtio device that bypasses it (no
+# VIRTIO_F_ACCESS_PLATFORM); `auto` goes on without one.
+# NOW-18 (ADR-335 to ADR-339): the kernel as a library. The example edition (examples/edition) is a second
+# kernel image built through the library's API, with a PCI driver for QEMU's edu device (1234:11e8), keys in
+# the reserved configuration range and every boot hook. It binds one edu device by its ID, reads a key of the
+# reserved range, leaves the second device spare and runs the hooks; the open image with the same devices
+# behaves as before (no edition line, no driver), and refuses a configuration with an extension key.
+edition() {
+    local dir="$OUT/edition" accel arch_dir=aarch64-unknown-none
+    [[ $ARCH == x86_64 ]] && arch_dir=x86_64-urmqtt-none
+    local ext_kernel="$ROOT/target/$arch_dir/release/urmqtt-example" packer="$ROOT/target/debug/urmqtt-example-config"
+    mkdir -p "$dir"
+    if ! (cd "$ROOT" && make -s edition-example ARCH="$ARCH" >"$dir/build.log" 2>&1); then
+        echo "  ✗ edition: make edition-example failed (see $dir/build.log)"
+        FAILED=$((FAILED + 1))
+        return
+    fi
+    cp "$ROOT/deploy/dev/config.toml" "$dir/ext.toml"
+    printf '\n[ext.example]\nedu_check = 0x12345678\n' >>"$dir/ext.toml"
+    cp "$ROOT/deploy/dev/config.toml" "$dir/off.toml"
+    printf '\n[ext.example]\nedu = "off"\n' >>"$dir/off.toml"
+    "$packer" "$dir/ext.toml" --env dev --root "$ROOT/deploy/dev" --out-slot "$dir/ext.cfg" >/dev/null
+    "$packer" "$dir/off.toml" --env dev --root "$ROOT/deploy/dev" --out-slot "$dir/off.cfg" >/dev/null
+    # The open packer refuses the `[ext]` table.
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool)
+    if "$ROOT/target/debug/urmqtt-config" pack "$dir/ext.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/open.blob" \
+        >"$dir/open-pack.log" 2>&1; then
+        echo "  ✗ edition: the open urmqtt-config packed an [ext] table"
+        FAILED=$((FAILED + 1))
+    else
+        echo "  ✓ edition: the open urmqtt-config refuses an [ext] table"
+        PASSED=$((PASSED + 1))
+    fi
+    local open_kernel=$KERNEL
+    rm -f "$OUT"/edition-*.raw
+    KERNEL=$ext_kernel
+    MKIMG_EXTRA=(--config-slot "$dir/ext.cfg")
+    mkimg "$OUT/edition-ext.raw" "smoke"
+    MKIMG_EXTRA=(--config-slot "$dir/off.cfg")
+    mkimg "$OUT/edition-off.raw" "smoke"
+    MKIMG_EXTRA=()
+    mkimg "$OUT/edition-plain.raw" "smoke"
+    KERNEL=$open_kernel
+    MKIMG_EXTRA=(--config-slot "$dir/ext.cfg")
+    mkimg "$OUT/edition-open-ext.raw" "smoke"
+    MKIMG_EXTRA=()
+    mkimg "$OUT/edition-open.raw" "smoke"
+    local edu=(-device edu -device edu)
+    for accel in $ACCELS; do
+        local log data status
+        log="$OUT/edition-ext-$accel.log" data="$OUT/edition-ext-$accel.img" status=0
+        fresh_disk "$OUT/edition-ext.raw" "$data"
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none -- "${edu[@]}" || status=$?
+        check "edition: the example image binds edu by its PCI ID, reads a reserved key, runs its hooks [$accel]" \
+            "$log" "$status" \
+            "edition: example: 1 PCI driver\(s\), 2 configuration key\(s\), hooks: early devices ready tick" \
+            "example: early hook: ext.example.edu_check = 0x12345678, ext.example.edu = \"auto\"" \
+            "pci [0-9a-f:.]+ 1234:11e8 class 00\.ff" \
+            "ext: example-edu at [0-9a-f:.]+: driven: edu 1\.0, liveness check 0x12345678 -> 0xedcba987" \
+            "ext: example-edu at [0-9a-f:.]+: spare \(it drives 1\)" \
+            "example: devices hook: 1 edu device\(s\) driven" \
+            "example: ready hook: [1-9][0-9]* tick\(s\) seen" \
+            "virtio: virtio-net at [0-9a-f:.]+: driven: the network" \
+            "^URMQTT READY$" "NOT:virtio: .*: failed" "$NO_FAULT"
+        log="$OUT/edition-off-$accel.log" data="$OUT/edition-off-$accel.img" status=0
+        fresh_disk "$OUT/edition-off.raw" "$data"
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none -- -device edu || status=$?
+        check "edition: a driver that refuses is reported, the boot goes on [$accel]" "$log" "$status" \
+            "example: early hook: ext.example.edu_check = 0x5a5a5a5a, ext.example.edu = \"off\"" \
+            "WARN  ext: example-edu at [0-9a-f:.]+: failed: ext.example.edu = \"off\"" \
+            "example: devices hook: 0 edu device\(s\) driven" "^URMQTT READY$" "$NO_FAULT"
+        log="$OUT/edition-plain-$accel.log" data="$OUT/edition-plain-$accel.img" status=0
+        fresh_disk "$OUT/edition-plain.raw" "$data"
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none || status=$?
+        check "edition: no edu device, no configuration of the edition: the defaults [$accel]" "$log" "$status" \
+            "example: early hook: ext.example.edu_check = 0x5a5a5a5a, ext.example.edu = \"auto\"" \
+            "example: devices hook: 0 edu device\(s\) driven" "NOT:ext: example-edu" "^URMQTT READY$" "$NO_FAULT"
+        # The open image: the same devices are listed and left alone, nothing of an edition is logged.
+        log="$OUT/edition-open-$accel.log" data="$OUT/edition-open-$accel.img" status=0
+        fresh_disk "$OUT/edition-open.raw" "$data"
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none -- "${edu[@]}" || status=$?
+        check "edition: the open image lists the edu devices and drives none, as before [$accel]" "$log" "$status" \
+            "pci [0-9a-f:.]+ 1234:11e8 class 00\.ff" "NOT:edition:" "NOT:ext: " "NOT:example" \
+            "^URMQTT READY$" "$NO_FAULT"
+        log="$OUT/edition-open-ext-$accel.log" data="$OUT/edition-open-ext-$accel.img" status=0
+        fresh_disk "$OUT/edition-open-ext.raw" "$data"
+        boot_until "$log" "resetting in 60 s" --disk "$data" --accel "$accel" --fwd none || status=$?
+        check "edition: the open image refuses a configuration with an extension key [$accel]" "$log" "$status" \
+            "fatal: configuration refused: blob: unknown field tag" "NOT:URMQTT READY"
+    done
+}
+
+iommu_cfg() {
+    local mode=$1 out=$2
+    awk -v m="$mode" '{ print } /^\[devices\]/ { print "iommu = \"" m "\"" }' "$ROOT/deploy/dev/config.toml" >"$out"
+}
+
+iommu_suite() {
+    local d="$ROOT/deploy/dev" kinds accel kind
+    mkdir -p "$OUT"
+    if [[ $ARCH == x86_64 ]]; then kinds="intel amd"; else kinds="smmuv3"; fi
+    iommu_cfg require "$OUT/iommu-require.toml"
+    iommu_cfg auto "$OUT/iommu-auto.toml"
+    MKIMG_EXTRA=(--config "$OUT/iommu-require.toml" --config-root "$d")
+    mkimg "$OUT/iommu-require-dma.raw" "smoke test=iommu-dma"
+    mkimg "$OUT/iommu-require-serve.raw" "serve"
+    MKIMG_EXTRA=(--config "$OUT/iommu-auto.toml" --config-root "$d")
+    mkimg "$OUT/iommu-auto.raw" "smoke"
+    MKIMG_EXTRA=()
+    mkimg "$OUT/iommu-off-dma.raw" "smoke test=iommu-dma"
+    local blocked=('iommu: test: virtio-rng [0-9a-f:.]+ asked to write 64 bytes at 0x[0-9a-f]+ \(outside its domain\): .*; the page is untouched; [1-9][0-9]* fault\(s\) recorded'
+        'iommu: test: DMA outside the domain blocked and counted'
+        "iommu: test: the fault was read by core 0's tick"
+        'iommu: fault 1: (VT-d|AMD-Vi|SMMUv3) 0x[0-9a-f]+: pci [0-9a-f:.]+ .* blocked'
+        'iommu: active: 1 unit\(s\), [2-9] device domain\(s\), [0-9]+ page\(s\) mapped for devices, [0-9]+ KiB of tables, 0 device\(s\) without isolation'
+        '^URMQTT READY$' 'NOT:DMA outside the domain NOT blocked' "$NO_FAULT")
+    for kind in $kinds; do
+        local name unit
+        case $kind in intel) unit="VT-d" ;; amd) unit="AMD-Vi" ;; *) unit="SMMUv3" ;; esac
+        for accel in $ACCELS; do
+            local acpis="on"
+            [[ $ARCH == aarch64 && $accel == tcg ]] && acpis="on off"
+            local acpi
+            for acpi in $acpis; do
+                local extra=()
+                [[ $ARCH == aarch64 ]] && extra=(--acpi "$acpi")
+                name="iommu-dma $kind"
+                [[ $ARCH == aarch64 ]] && name+=" acpi=$acpi"
+                name+=" [$accel]"
+                local log="$OUT/iommu-dma-$kind-$acpi-$accel.log" data="$OUT/iommu-dma-$kind-$acpi-$accel.img" status=0
+                fresh_disk "$OUT/iommu-require-dma.raw" "$data"
+                boot "$log" --disk "$data" --accel "$accel" --headless --no-net --smp 2 --iommu "$kind" ${extra[@]+"${extra[@]}"} || status=$?
+                check "$name" "$log" "$status" "iommu: $unit at 0x[0-9a-f]+: .*(translation on|enabled): every (device blocked|stream aborted)" \
+                    "${blocked[@]}"
+            done
+            # The control: the same request with the IOMMU off reaches the page.
+            local log="$OUT/iommu-off-$kind-$accel.log" data="$OUT/iommu-off-$kind-$accel.img" status=0
+            fresh_disk "$OUT/iommu-off-dma.raw" "$data"
+            boot "$log" --disk "$data" --accel "$accel" --headless --no-net --smp 2 --iommu "$kind" || status=$?
+            check "iommu-off control $kind [$accel]" "$log" "$status" \
+                "iommu: $unit@0x[0-9a-f]+/.*: not used \(devices.iommu = \"off\"\)" \
+                'iommu: test: virtio-rng .*; the page is WRITTEN; 0 fault\(s\) recorded' '^URMQTT READY$' \
+                'NOT:iommu: active' "$NO_FAULT"
+            # MQTT over mutual TLS with every device translated.
+            if command -v mosquitto_pub >/dev/null; then
+                log="$OUT/iommu-mqtt-$kind-$accel.log" data="$OUT/iommu-mqtt-$kind-$accel.img" status=0
+                fresh_disk "$OUT/iommu-require-serve.raw" "$data"
+                start_vm "$log" --disk "$data" --accel "$accel" --iommu "$kind" --fwd "$PORT:8883"
+                if wait_log "$log" "TLS 1.3 listener on port 8883"; then
+                    # A first connection warms the path (the guest's first SYN-ACK waits for ARP and the
+                    # client retransmits after seconds; the first scenario's subscriber has 1 s).
+                    mosquitto_pub -h 127.0.0.1 -p "$PORT" -V mqttv311 -i device-001 --cafile "$d/ca.pem" \
+                        --cert "$d/devices/device-001.pem" --key "$d/devices/device-001.key" \
+                        -t devices/device-001/warmup -m x >/dev/null 2>&1 || true
+                    python3 -I "$ROOT/scripts/mqtt-scenarios.py" --tls "$d" "$PORT" >"$log.client" 2>&1 || status=$?
+                    # One fault poll after the traffic.
+                    sleep 1
+                else
+                    status=124
+                fi
+                kill_vm
+                cat "$log.client" >>"$log" 2>/dev/null || true
+                check "iommu-mqtt $kind [$accel]" "$log" "$status" \
+                    'iommu: active: 1 unit\(s\), [3-9] device domain\(s\)' 'iommu: pci [0-9a-f:.]+: own domain on' \
+                    "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" \
+                    "client: qos1-after-reconnect ok" "client: tls-revoked-rejected ok" "NOT:FAILED" \
+                    'NOT:iommu: fault' "$NO_FAULT"
+            else
+                echo "  ✗ iommu-mqtt needs the mosquitto clients"; FAILED=$((FAILED + 1))
+            fi
+        done
+    done
+    accel=${ACCELS%% *}
+    # `require` on a machine without an IOMMU: refused, with the reason.
+    local log="$OUT/iommu-require-absent.log" data="$OUT/iommu-require-absent.img" status=0
+    fresh_disk "$OUT/iommu-require-dma.raw" "$data"
+    boot "$log" --disk "$data" --accel "$accel" --headless --no-net --smp 2 || status=$?
+    [[ $status -eq 124 ]] || status=0
+    check "iommu-require without an IOMMU [$accel]" "$log" "$status" \
+        'iommu: the firmware describes no IOMMU .*devices.iommu = "require" refuses to run without DMA isolation' \
+        'NOT:URMQTT READY'
+    # `require` with a virtio device that bypasses the IOMMU (no iommu_platform): refused.
+    kind=${kinds%% *}
+    log="$OUT/iommu-require-bypass.log" data="$OUT/iommu-require-bypass.img" status=0
+    fresh_disk "$OUT/iommu-require-dma.raw" "$data"
+    QEMU_IOMMU_PLATFORM=off boot "$log" --disk "$data" --accel "$accel" --headless --no-net --smp 2 --iommu "$kind" || status=$?
+    [[ $status -eq 124 ]] || status=0
+    check "iommu-require with a bypassing device [$accel]" "$log" "$status" \
+        'does not offer VIRTIO_F_ACCESS_PLATFORM, so it bypasses the IOMMU.*refuses to run without DMA isolation' \
+        'NOT:URMQTT READY'
+    # `auto` without an IOMMU: a warning, then the broker as before.
+    log="$OUT/iommu-auto-absent.log" data="$OUT/iommu-auto-absent.img" status=0
+    fresh_disk "$OUT/iommu-auto.raw" "$data"
+    boot "$log" --disk "$data" --accel "$accel" --headless --no-net --smp 2 || status=$?
+    check "iommu-auto without an IOMMU [$accel]" "$log" "$status" \
+        'iommu: the firmware describes no IOMMU .*going on without DMA isolation for it \(devices.iommu = "auto"\)' \
+        '^URMQTT READY$' "$NO_FAULT"
 }
 
 [[ -f "$KERNEL" ]] || { echo "error: $KERNEL not found (make build)" >&2; exit 1; }
@@ -3496,23 +4531,31 @@ universal_integrity() {
     done
 }
 
-# H8 (ADR-251): UEFI Secure Boot, on x86_64 only. OVMF's Secure Boot build (SMM, q35) with the
-# development PK, KEK and db enrolled (scripts/sign-loaders.sh gen-keys, ovmf-vars) must boot the
-# universal ISO whose loaders are signed with the db key, and must refuse: the same image unsigned,
-# one signed with another key, and a signed image whose loader was changed after signing (what
-# `urmqtt-config pack --iso` does to an enrolled hash, so a signed ISO is configured BEFORE it is
-# signed). Under Secure Boot Limine still refuses a modified kernel or limine.conf, and it
-# refuses the installed disk, whose configuration module has no hash (ADR-217): a known limit,
-# asserted here so that a change of it is noticed. Needs openssl, sbsign or osslsigncode,
-# virt-fw-vars (pip install virt-firmware; PATH or URMQTT_VIRT_FW_VARS) and an OVMF with Secure
-# Boot (QEMU's edk2-x86_64-secure-code.fd, or OVMF_CODE.secboot.fd; URMQTT_FIRMWARE_SECURE and
-# URMQTT_FIRMWARE_VARS point elsewhere). Skipped, and said so, when one is missing;
-# SMOKE_REQUIRE_SB=1 (CI) turns that into a failure. aarch64: the AArch64 edk2 of this machine
-# does not enforce Secure Boot (an unsigned ISO boots with keys enrolled), so only the signature of
-# BOOTAA64.EFI is checked offline and the signed ISO is booted with Secure Boot off.
+# H8 (ADR-251) and LATER-6 (ADR-320 to ADR-323): UEFI Secure Boot. OVMF's Secure Boot build (SMM,
+# q35) and, when present, AAVMF's (aarch64), each with the development PK, KEK and db enrolled
+# (scripts/sign-loaders.sh gen-keys, ovmf-vars), must boot the universal ISO whose loaders are signed
+# with the db key, and must refuse: the same image unsigned, one signed with another key, and a signed
+# image whose loader was changed after signing (what `urmqtt-config pack --iso` did to an enrolled
+# hash before LATER-6; the tool now refuses a sealed image itself). Under Secure Boot Limine still
+# refuses a modified kernel or limine.conf.
+# LATER-6: a signed image is SEALED (the installed disk's limine.conf pins the configuration), so the
+# raw disk and the disk the installer writes UNDER Secure Boot boot with it enforced, on both
+# architectures; a tampered kernel on that disk is refused; an A/B update to a sealed ESP boots on
+# trial; `urmqtt-disk` refuses to stage an ESP sealed to another configuration; a loader whose
+# Authenticode hash is in dbx is refused (the revocation path, ADR-322); `sign-iso` of a configured
+# image is the direct signed build, byte for byte. The unsealed disk of ADR-251 is still refused
+# (the H8-W1 control, asserted so a change of it is noticed).
+# Needs openssl, sbsign or osslsigncode, virt-fw-vars (pip install virt-firmware; PATH or
+# URMQTT_VIRT_FW_VARS), an OVMF with Secure Boot (QEMU's edk2-x86_64-secure-code.fd, or
+# OVMF_CODE.secboot.fd; URMQTT_FIRMWARE_SECURE and URMQTT_FIRMWARE_VARS point elsewhere) and the urmqtt-disk
+# tool. Skipped, and said so, when one is missing; SMOKE_REQUIRE_SB=1 (CI) turns that into a failure.
+# aarch64: AAVMF_CODE.secboot.fd and AAVMF_VARS.fd (Debian/Ubuntu qemu-efi-aarch64;
+# URMQTT_FIRMWARE_SECURE_AA64, URMQTT_FIRMWARE_VARS_AA64). Without them the aarch64 part falls back to
+# the offline signature check of BOOTAA64.EFI and says that enforcement was NOT tested (a failure with
+# SMOKE_REQUIRE_SB=1). SMOKE_SB_X86=0 skips the x86_64 boots (TCG is slow on an arm64 host).
 # shellcheck disable=SC2016 # the patterns hold literal backticks
 universal_secureboot() {
-    local missing="" sbfw="" vars="" c
+    local missing="" sbfw="" vars="" c aafw="" aavars=""
     command -v openssl >/dev/null || missing="openssl"
     command -v sbsign >/dev/null || command -v osslsigncode >/dev/null || missing="$missing sbsign-or-osslsigncode"
     command -v "${URMQTT_VIRT_FW_VARS:-virt-fw-vars}" >/dev/null || missing="$missing virt-fw-vars"
@@ -3527,6 +4570,7 @@ universal_secureboot() {
         [[ -n "$c" && -f "$c" ]] && { vars=$c; break; }
     done
     [[ -n "$vars" ]] || missing="$missing ovmf-vars"
+    build_disk_tool || missing="$missing urmqtt-disk"
     if [[ -n "$missing" ]]; then
         if [[ -n "${SMOKE_REQUIRE_SB:-}" ]]; then
             echo "  ✗ universal-secureboot: missing:$missing"
@@ -3536,25 +4580,41 @@ universal_secureboot() {
         fi
         return 0
     fi
+    for c in "${URMQTT_FIRMWARE_SECURE_AA64:-}" /usr/share/AAVMF/AAVMF_CODE.secboot.fd; do
+        [[ -n "$c" && -f "$c" ]] && { aafw=$c; break; }
+    done
+    for c in "${URMQTT_FIRMWARE_VARS_AA64:-}" /usr/share/AAVMF/AAVMF_VARS.fd; do
+        [[ -n "$c" && -f "$c" ]] && { aavars=$c; break; }
+    done
     local sb="$ROOT/scripts/sign-loaders.sh" keys="$OUT/secureboot-keys" other="$OUT/secureboot-other"
     rm -rf "$keys" "$other"
+    rm -f "$OUT/secureboot-installed-x86.img"
     "$sb" gen-keys "$keys" >/dev/null
     "$sb" gen-keys "$other" >/dev/null
-    local svars="$OUT/secureboot-vars.fd"
+    local svars="$OUT/secureboot-vars.fd" asvars="$OUT/secureboot-aavmf-vars.fd"
     cp "$vars" "$svars"
     "$sb" ovmf-vars "$keys" "$vars" "$svars" 2>/dev/null
     local signed="$OUT/sb-signed.iso" unsigned="$OUT/sb-unsigned.iso" wrongkey="$OUT/sb-wrongkey.iso" tpl="$OUT/sb-template.iso"
+    local unsealed="$OUT/sb-unsealed.iso" sealed_tpl="$OUT/sb-template-sealed.iso" inst="$OUT/sb-install.iso"
+    local other_cfg="$OUT/sb-other.iso"
     export URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0
-    rm -f "$signed" "$signed.disk" "$unsigned" "$wrongkey" "$tpl"
-    mkuniversal "$signed" "smoke" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    rm -f "$signed" "$signed.disk" "$unsigned" "$unsigned.disk" "$wrongkey" "$tpl" "$unsealed" "$sealed_tpl" "$inst" "$other_cfg"
+    make_cfg_blobs
+    mkuniversal "$signed" "smoke" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt" --esp-out "$OUT/sb-signed.esp"
     mkuniversal "$unsigned" "smoke"
     mkuniversal "$wrongkey" "smoke" --sb-key "$other/db.key" --sb-cert "$other/db.crt"
-    mkuniversal "$tpl" "smoke" --empty-config --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
-    unset URMQTT_LIMINE_SERIAL URMQTT_MENU_TIMEOUT
+    # The template signed as ADR-251 built it (not sealed): the firmware's view of configured-after-signing.
+    mkuniversal "$tpl" "smoke" --empty-config --no-seal --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    mkuniversal "$sealed_tpl" "smoke" --empty-config --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    mkuniversal "$unsealed" "smoke" --no-seal --sb-key "$keys/db.key" --sb-cert "$keys/db.crt" --esp-out "$OUT/sb-unsealed.esp"
+    mkuniversal "$inst" "smoke" --install-cmdline "install install-countdown=1" --install-default \
+        --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    mkuniversal "$other_cfg" "smoke" --config "$OUT/cfgpack/signed.blob" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt" \
+        --esp-out "$OUT/sb-other.esp"
     # The same ISO signed twice is the same bytes (the signing time is SOURCE_DATE_EPOCH).
     local again="$OUT/sb-signed-again.iso"
     rm -f "$again"
-    URMQTT_LIMINE_SERIAL=1 URMQTT_MENU_TIMEOUT=0 mkuniversal "$again" "smoke" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
+    mkuniversal "$again" "smoke" --sb-key "$keys/db.key" --sb-cert "$keys/db.crt"
     if cmp -s "$signed" "$again"; then
         echo "  ✓ secureboot: the signed ISO is reproducible (same key, same bytes)"
         PASSED=$((PASSED + 1))
@@ -3563,48 +4623,253 @@ universal_secureboot() {
         FAILED=$((FAILED + 1))
     fi
     rm -f "$again" "$again.disk"
+    # sign-iso (ADR-321): the signed image of a configured, unsigned one is the direct signed build; its kernels
+    # are checked against the (verified) release template's.
+    local utpl="$OUT/sb-template-unsigned.iso" why
+    rm -f "$utpl" "$OUT/sb-template-signed-by-accident.iso"
+    mkuniversal "$utpl" "smoke" --empty-config
+    local resigned="$OUT/sb-resigned.iso"
+    rm -f "$resigned"
+    if "$sb" sign-iso "$keys/db.key" "$keys/db.crt" "$unsigned" "$resigned" --template "$utpl" -- --cmdline smoke >/dev/null 2>&1 \
+        && cmp -s "$signed" "$resigned"; then
+        echo "  ✓ secureboot: sign-iso of the configured unsigned ISO is the direct signed build, byte for byte"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ secureboot: sign-iso failed or differs from the direct signed build"
+        FAILED=$((FAILED + 1))
+    fi
+    # A configured ISO whose kernels are not the template's is not signed (its own menu cannot vouch for them).
+    local otpl="$OUT/sb-template-other-kernel.iso" resigned2="$OUT/sb-resigned-other.iso"
+    rm -f "$otpl" "$resigned2"
+    python3 -I "$ROOT/scripts/tamper.py" "$utpl" --file "$KERNEL_X86" --out "$otpl" >/dev/null
+    why=$("$sb" sign-iso "$keys/db.key" "$keys/db.crt" "$unsigned" "$resigned2" --template "$otpl" -- --cmdline smoke 2>&1 || true)
+    if [[ ! -e "$resigned2" && $why == *"is not the one of"* ]]; then
+        echo "  ✓ secureboot: sign-iso refuses kernels that are not the release template's"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ secureboot: sign-iso with another template's kernels: $why"
+        FAILED=$((FAILED + 1))
+    fi
+    rm -f "$otpl"
+    # An unconfigured template is not signed by accident: sign-iso wants a configuration.
+    why=$("$sb" sign-iso "$keys/db.key" "$keys/db.crt" "$utpl" "$OUT/sb-template-signed-by-accident.iso" 2>&1 || true)
+    if [[ ! -e "$OUT/sb-template-signed-by-accident.iso" && $why == *"configuration of"*"is empty"* ]]; then
+        echo "  ✓ secureboot: sign-iso refuses an unconfigured template"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ secureboot: sign-iso on an unconfigured template: $why"
+        FAILED=$((FAILED + 1))
+    fi
+    unset URMQTT_LIMINE_SERIAL URMQTT_MENU_TIMEOUT
     # The configured-after-signing image: the enrolled hash of the menu changes, the signature breaks.
-    make_cfg_blobs
     local patched="$OUT/sb-configured-after-signing.iso" tool="$ROOT/target/debug/urmqtt-config"
     "$tool" pack "$OUT/cfgpack/config.toml" --env dev --root "$ROOT/deploy/dev" \
         --sign "$ROOT/deploy/dev/control.key" --iso "$tpl" --out "$patched" >/dev/null 2>&1 \
         || { echo "  ✗ secureboot: pack --iso failed"; FAILED=$((FAILED + 1)); }
-    # Tampered copies of the signed ISO.
+    # ADR-320: a sealed image is not configured afterwards; the tool says why and what to do.
+    local refusal
+    refusal=$("$tool" pack "$OUT/cfgpack/config.toml" --env dev --root "$ROOT/deploy/dev" \
+        --iso "$sealed_tpl" --out "$OUT/sb-sealed-configured.iso" 2>&1 || true)
+    if [[ ! -e "$OUT/sb-sealed-configured.iso" && $refusal == *"sealed to its configuration"* && $refusal == *sign-iso* ]]; then
+        echo "  ✓ secureboot: pack --iso refuses a sealed (signed) image and names sign-iso"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  ✗ secureboot: pack --iso on a sealed image: $refusal"
+        FAILED=$((FAILED + 1))
+    fi
+    # Tampered copies of the signed ISO and of its sealed disk.
     local t_kernel="$OUT/sb-tampered-kernel.iso" t_conf="$OUT/sb-tampered-conf.iso"
+    local td_x86="$OUT/sb-tampered-disk-x86.img" td_a64="$OUT/sb-tampered-disk-a64.img"
     python3 -I "$ROOT/scripts/tamper.py" "$signed" --file "$KERNEL_X86" --out "$t_kernel" >/dev/null
     python3 -I "$ROOT/scripts/tamper.py" "$signed" --replace "editor_enabled: no" "editor_enabled: on" --out "$t_conf" >/dev/null
+    python3 -I "$ROOT/scripts/tamper.py" "$signed.disk" --file "$KERNEL_X86" --out "$td_x86" >/dev/null
+    python3 -I "$ROOT/scripts/tamper.py" "$signed.disk" --file "$KERNEL_A64" --out "$td_a64" >/dev/null
 
-    local x86='URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$' status log
-    sb_boot() { # sb_boot <label> <file> <how iso|disk>
-        local label=$1 file=$2 how=${3:-iso}
+    # The Authenticode hash of the signed loaders, for the dbx test (checked against osslsigncode's own).
+    local efi="$OUT/secureboot-BOOTX64.EFI" efi_a="$OUT/secureboot-BOOTAA64.EFI" ah="" ah_a=""
+    rm -f "$efi" "$efi_a"
+    xorriso -osirrox on -indev "$signed" -extract /EFI/BOOT/BOOTX64.EFI "$efi" -extract /EFI/BOOT/BOOTAA64.EFI "$efi_a" >/dev/null 2>&1 || true
+    ah=$("$sb" authenticode "$efi" 2>/dev/null | cut -d' ' -f1)
+    ah_a=$("$sb" authenticode "$efi_a" 2>/dev/null | cut -d' ' -f1)
+    if command -v osslsigncode >/dev/null; then
+        local want
+        want=$(osslsigncode verify -CAfile "$keys/db.crt" -in "$efi" 2>/dev/null | sed -n 's/^Calculated message digest *: *\([0-9A-Fa-f]*\).*/\1/p' | tr 'A-F' 'a-f')
+        if [[ -n $ah && $ah == "$want" ]]; then
+            echo "  ✓ secureboot: authenticode.py gives osslsigncode's digest of the signed BOOTX64.EFI"
+            PASSED=$((PASSED + 1))
+        else
+            echo "  ✗ secureboot: authenticode.py '$ah' != osslsigncode '$want'"
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+    # dbx holds the signed loaders' hashes: the firmware must refuse exactly those images.
+    local dvars="$OUT/secureboot-vars-dbx.fd"
+    cp "$vars" "$dvars"
+    "$sb" ovmf-vars "$keys" "$vars" "$dvars" --dbx-hash "${ah:-0000000000000000000000000000000000000000000000000000000000000000}" 2>/dev/null
+
+    local x86='URMQTT BOOT [^ ]+ arch=x86_64 cpu=2 mem=[0-9]+$' a64re='URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$' status log
+    sb_boot() { # sb_boot <label> <file> <how iso|disk> [vars] [kind] [accel]
+        local label=$1 file=$2 how=${3:-iso} v=${4:-$svars} kind=${5:-x86-uefi} accel=${6:-tcg}
         log="$OUT/secureboot-$label.log" status=0
-        u_run x86-uefi tcg "$log" "$how" "$file" --secure-vars "$svars" || status=$?
+        u_run "$kind" "$accel" "$log" "$how" "$file" --secure-vars "$v" || status=$?
     }
-    sb_refused() { # sb_refused <label> <file> <pattern> [iso|disk]
-        local label=$1 file=$2 pat=$3 how=${4:-iso}
+    sb_refused() { # sb_refused <label> <file> <pattern> [iso|disk] [vars] [arch-args...]
+        local label=$1 file=$2 pat=$3 how=${4:-iso} v=${5:-$svars}
+        shift 5 2>/dev/null || shift $#
+        local args=("$@")
+        [[ ${#args[@]} -eq 0 ]] && args=(--arch x86_64 --accel tcg --smp 2)
         log="$OUT/secureboot-$label.log" status=0
-        boot_until "$log" "$pat" --arch x86_64 "--$how" "$file" --accel tcg --smp 2 --no-net --secure-vars "$svars" || status=$?
+        boot_until "$log" "$pat" "${args[@]}" "--$how" "$file" --no-net --secure-vars "$v" || status=$?
         check "secureboot: $label refused" "$log" "$status" "$pat" "NOT:URMQTT BOOT" "NOT:URMQTT READY"
     }
-    sb_boot signed "$signed"
-    check "secureboot: signed ISO boots with Secure Boot enforced" "$log" "$status" "$x86" "bootloader=Limine" "^URMQTT READY$" "NOT:Access Denied"
-    sb_refused unsigned "$unsigned" "Access Denied"
-    sb_refused wrong-key "$wrongkey" "Access Denied"
-    sb_refused configured-after-signing "$patched" "Access Denied"
-    sb_refused tampered-kernel "$t_kernel" 'PANIC: Blake2b hash for URI `boot\(\):/boot/urmqtt-x86-64\.elf` does not match'
-    sb_refused tampered-conf "$t_conf" "CHECKSUM MISMATCH FOR CONFIG FILE"
     local d="$OUT/secureboot-disk.img"
-    fresh_disk "$signed.disk" "$d"
-    sb_refused installed-disk-known-limit "$d" 'Secure Boot is active and URI `boot\(\):/boot/urmqtt\.cfg` has no associated hash' disk
-    # Without Secure Boot a signed loader is an ordinary one; BOOTAA64.EFI's signature checks offline.
-    local a64="${ACCELS%% *}" log2="$OUT/secureboot-aarch64-signed.log" st2=0
-    u_run aa64 "$a64" "$log2" iso "$signed" || st2=$?
-    check "secureboot: signed ISO boots on aarch64 (Secure Boot not enforced by this firmware)" "$log2" "$st2" \
-        'URMQTT BOOT [^ ]+ cpu=4 mem=[0-9]+$' "^URMQTT READY$"
-    local efi="$OUT/secureboot-BOOTAA64.EFI"
-    rm -f "$efi"
-    xorriso -osirrox on -indev "$signed" -extract /EFI/BOOT/BOOTAA64.EFI "$efi" >/dev/null 2>&1 || true
-    if [[ -s "$efi" ]] && "$sb" verify "$keys/db.crt" "$efi" && ! "$sb" verify "$other/db.crt" "$efi"; then
+    if [[ ${SMOKE_SB_X86:-1} != 0 ]]; then
+        sb_boot signed "$signed"
+        check "secureboot: signed ISO boots with Secure Boot enforced" "$log" "$status" "$x86" "bootloader=Limine" "^URMQTT READY$" "NOT:Access Denied"
+        sb_refused unsigned "$unsigned" "Access Denied" iso "$svars"
+        sb_refused wrong-key "$wrongkey" "Access Denied" iso "$svars"
+        sb_refused configured-after-signing "$patched" "Access Denied" iso "$svars"
+        sb_refused tampered-kernel "$t_kernel" 'PANIC: Blake2b hash for URI `boot\(\):/boot/urmqtt-x86-64\.elf` does not match' iso "$svars"
+        sb_refused tampered-conf "$t_conf" "CHECKSUM MISMATCH FOR CONFIG FILE" iso "$svars"
+        # H8-W1 closed: the sealed raw disk boots with Secure Boot enforced; the unsealed one is the control.
+        fresh_disk "$signed.disk" "$d" 128m
+        sb_boot sealed-disk "$d" disk
+        check "secureboot: the sealed disk boots with Secure Boot enforced (x86_64)" "$log" "$status" "$x86" \
+            "boot: from a GPT disk" "boot: slot A .*confirmed; standby: empty" "^URMQTT READY$" "NOT:Access Denied" "$NO_FAULT"
+        fresh_disk "$unsealed.disk" "$OUT/secureboot-unsealed.img"
+        sb_refused unsealed-disk-control "$OUT/secureboot-unsealed.img" \
+            'Secure Boot is active and URI `boot\(\):/boot/urmqtt\.cfg` has no associated hash' disk "$svars"
+        local tdc="$OUT/secureboot-tampered-disk.img"
+        fresh_disk "$td_x86" "$tdc"
+        sb_refused tampered-kernel-on-sealed-disk "$tdc" 'PANIC: Blake2b hash for URI `boot\(\):/boot/urmqtt-x86-64\.elf` does not match' disk "$svars"
+        # The revocation path (ADR-322): the signed ISO loader's Authenticode hash in dbx (the hash is of that
+        # file: the installed disk's loader is enrolled with another limine.conf and is another binary).
+        sb_refused dbx-revoked-loader "$signed" "Access Denied" iso "$dvars"
+        fresh_disk "$signed.disk" "$OUT/secureboot-dbx-other.img" 128m
+        sb_boot dbx-other-loader "$OUT/secureboot-dbx-other.img" disk "$dvars"
+        check "secureboot: the same dbx leaves another signed loader alone (the sealed disk boots)" "$log" "$status" "$x86" \
+            "^URMQTT READY$" "NOT:Access Denied"
+        # A/B (NEXT-11) under Secure Boot: the sealed disk from above (its standby reserved by that first
+        # boot) takes a sealed ESP into slot B and boots it on trial; an ESP sealed to another configuration
+        # is refused by urmqtt-disk before anything is written.
+        local ablog="$OUT/secureboot-ab.log" slot='\((v|[0-9a-f]{7})[^)]*\)'
+        local abst=0
+        rm -f "$ablog"
+        if ab_tool "$ablog" slots stage "$d" --esp "$OUT/sb-other.esp" --unsigned --write; then abst=1; fi
+        # A sealed disk does not take an unsealed ESP (a release image, say): the firmware would refuse it.
+        if ab_tool "$ablog" slots stage "$d" --esp "$OUT/sb-unsealed.esp" --unsigned --write; then abst=1; fi
+        ab_tool "$ablog" slots stage "$d" --esp "$OUT/sb-signed.esp" --unsigned --write || abst=1
+        ab_tool "$ablog" slots activate "$d" --write || abst=1
+        sb_boot ab-trial "$d" disk
+        cat "$log" >>"$ablog"
+        [[ $abst -eq 0 ]] || status=$abst
+        check "secureboot: A/B update to a sealed ESP boots on trial under Secure Boot; an ESP sealed to another configuration or an unsealed one is refused" \
+            "$ablog" "$status" "is sealed for Secure Boot to the configuration module" \
+            "the disk's ESP is sealed for Secure Boot and the new one is not" \
+            "secure boot: sealed to its configuration" "boot: slot B $slot ON TRIAL" "^URMQTT READY$" "NOT:Access Denied" "$NO_FAULT"
+        # The installer under Secure Boot (x86_64 UEFI), then its disk under Secure Boot.
+        local t="$OUT/secureboot-installed.img" ilog="$OUT/secureboot-install.log"
+        rm -f "$t"
+        truncate -s 128m "$t"
+        status=0
+        u_run x86-uefi tcg "$ilog" iso "$inst" --secure-vars "$svars" \
+            -- -drive "if=none,id=t0,file=$t,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile= || status=$?
+        check "secureboot: the installer runs under Secure Boot" "$ilog" "$status" "install: done: [0-9]+ MiB written and verified" \
+            "NOT:Access Denied" "NOT:sealed for Secure Boot to another" "$NO_FAULT"
+        cp "$t" "$OUT/secureboot-installed-x86.img"
+        sb_boot installed-disk "$OUT/secureboot-installed-x86.img" disk
+        check "secureboot: the installed disk boots with Secure Boot enforced (x86_64)" "$log" "$status" "$x86" \
+            "boot: from a GPT disk" "^URMQTT READY$" "NOT:Access Denied" "NOT:no associated hash" "$NO_FAULT"
+    else
+        echo "  - secureboot: x86_64 boots skipped (SMOKE_SB_X86=0)"
+    fi
+    # aarch64 (H8-W4): AAVMF with Secure Boot, when this machine has it.
+    local a64="${ACCELS%% *}"
+    if [[ -n $aafw && -n $aavars ]]; then
+        export URMQTT_FIRMWARE_SECURE_AA64=$aafw
+        cp "$aavars" "$asvars"
+        "$sb" ovmf-vars "$keys" "$aavars" "$asvars" 2>/dev/null
+        local adbx="$OUT/secureboot-aavmf-dbx.fd"
+        "$sb" ovmf-vars "$keys" "$aavars" "$adbx" --dbx-hash "${ah_a:-0000000000000000000000000000000000000000000000000000000000000000}" 2>/dev/null
+        local aargs=(--accel "$a64" --smp 4)
+        sb_boot aa64-signed "$signed" iso "$asvars" aa64 "$a64"
+        check "secureboot: signed ISO boots with Secure Boot enforced (aarch64, AAVMF)" "$log" "$status" "$a64re" "^URMQTT READY$" "NOT:Access Denied"
+        sb_refused aa64-unsigned "$unsigned" "Access Denied" iso "$asvars" "${aargs[@]}"
+        sb_refused aa64-wrong-key "$wrongkey" "Access Denied" iso "$asvars" "${aargs[@]}"
+        local ad="$OUT/secureboot-aa64-disk.img"
+        fresh_disk "$signed.disk" "$ad" 128m
+        sb_boot aa64-sealed-disk "$ad" disk "$asvars" aa64 "$a64"
+        check "secureboot: the sealed disk boots with Secure Boot enforced (aarch64)" "$log" "$status" "$a64re" \
+            "boot: from a GPT disk" "^URMQTT READY$" "NOT:Access Denied" "$NO_FAULT"
+        fresh_disk "$unsealed.disk" "$OUT/secureboot-aa64-unsealed.img"
+        sb_refused aa64-unsealed-disk-control "$OUT/secureboot-aa64-unsealed.img" \
+            'Secure Boot is active and URI `boot\(\):/boot/urmqtt\.cfg` has no associated hash' disk "$asvars" "${aargs[@]}"
+        fresh_disk "$td_a64" "$OUT/secureboot-aa64-tampered.img"
+        sb_refused aa64-tampered-kernel-on-sealed-disk "$OUT/secureboot-aa64-tampered.img" \
+            'PANIC: Blake2b hash for URI `boot\(\):/boot/urmqtt-aarch64\.elf` does not match' disk "$asvars" "${aargs[@]}"
+        sb_refused aa64-dbx-revoked-loader "$signed" "Access Denied" iso "$adbx" "${aargs[@]}"
+        if [[ -f "$OUT/secureboot-installed-x86.img" ]]; then
+            cp "$OUT/secureboot-installed-x86.img" "$OUT/secureboot-installed-aa64.img"
+            sb_boot aa64-installed-disk "$OUT/secureboot-installed-aa64.img" disk "$asvars" aa64 "$a64"
+            check "secureboot: the disk installed under Secure Boot on x86_64 boots with it enforced on aarch64" "$log" "$status" \
+                "$a64re" "^URMQTT READY$" "NOT:Access Denied" "$NO_FAULT"
+        fi
+        unset URMQTT_FIRMWARE_SECURE_AA64
+    else
+        if [[ -n "${SMOKE_REQUIRE_SB:-}" ]]; then
+            echo "  ✗ secureboot: no AAVMF Secure Boot firmware (AAVMF_CODE.secboot.fd): aarch64 enforcement NOT tested"
+            FAILED=$((FAILED + 1))
+        else
+            echo "  - secureboot: no AAVMF Secure Boot firmware: aarch64 enforcement NOT tested (only the offline check below)"
+        fi
+        local log2="$OUT/secureboot-aarch64-signed.log" st2=0
+        u_run aa64 "$a64" "$log2" iso "$signed" || st2=$?
+        check "secureboot: signed ISO boots on aarch64 (Secure Boot not enforced by this firmware)" "$log2" "$st2" \
+            "$a64re" "^URMQTT READY$"
+    fi
+    # The installer refuses an image sealed to another configuration than the one it booted with, before it
+    # writes (ADR-320). Such an ISO cannot be made with the tools (pack --iso refuses a sealed image), so the
+    # test makes one: a sealed, unenrolled image whose own slot copies and menu hashes are swapped for another
+    # configuration, the installation image (and its pin) left alone. No Secure Boot needed (aarch64).
+    local swap="$OUT/sb-sealed-swapped.iso" tgt="$OUT/secureboot-refused-target.img" sum0 sum1
+    rm -f "$swap" "$swap.disk"
+    URMQTT_LIMINE_SERIAL=1 mkuniversal "$swap" "smoke" --seal --no-enroll --install-cmdline "install install-countdown=1" --install-default
+    python3 -I - "$swap" "$OUT/cfgpack/signed.blob" <<'PY'
+import hashlib, struct, sys
+iso_path, blob_path = sys.argv[1], sys.argv[2]
+SLOT, MARK = 256 * 1024, b"URMQTT-CFG-SLOT\0"
+iso = bytearray(open(iso_path, "rb").read())
+blob = open(blob_path, "rb").read()
+new = (MARK + blob).ljust(SLOT, b"\0")
+offs = [o for o in range(0, len(iso) - SLOT + 1, 512) if iso[o:o + 16] == MARK and iso[o + 16:o + 24] == b"URMQCFG\0"]
+assert len(offs) == 2, offs
+old_hash = hashlib.blake2b(bytes(iso[offs[0]:offs[0] + SLOT])).hexdigest().encode()
+new_hash = hashlib.blake2b(new).hexdigest().encode()
+for o in offs:
+    iso[o:o + SLOT] = new
+menu, nomenu = b"# Generated by scripts/mkiso.sh --universal: the menu", b"# Generated by scripts/mkiso.sh --universal. No menu"
+i = n = 0
+while (i := iso.find(b"urmqtt.cfg#" + old_hash, i)) >= 0:
+    start = max(iso.rfind(menu, 0, i), iso.rfind(nomenu, 0, i))
+    if iso[start:start + len(menu)] == menu:
+        iso[i + 11:i + 11 + 128] = new_hash
+        n += 1
+    i += 1
+assert n >= 3, n
+open(iso_path, "wb").write(iso)
+PY
+    rm -f "$tgt"
+    truncate -s 64m "$tgt"
+    sum0=$(shasum -a 256 "$tgt" | cut -d' ' -f1)
+    local rlog="$OUT/secureboot-installer-refuses.log" rst=0
+    u_run aa64 "$a64" "$rlog" iso "$swap" \
+        -- -drive "if=none,id=t0,file=$tgt,format=raw,cache=none" -device virtio-blk-pci,drive=t0,romfile= || rst=$?
+    sum1=$(shasum -a 256 "$tgt" | cut -d' ' -f1)
+    [[ $sum0 == "$sum1" ]] || rst=1
+    check "secureboot: the installer refuses an image sealed to another configuration, and writes nothing" "$rlog" "$rst" \
+        "install: the installation image is sealed for Secure Boot to another configuration than this boot's" \
+        "nothing written to virtio-blk" "NOT:install: done" "$NO_FAULT"
+    if [[ -s "$efi_a" ]] && "$sb" verify "$keys/db.crt" "$efi_a" && ! "$sb" verify "$other/db.crt" "$efi_a"; then
         echo "  ✓ secureboot: BOOTAA64.EFI is signed by the db key and by no other (offline check)"
         PASSED=$((PASSED + 1))
     else
@@ -4316,12 +5581,265 @@ time.sleep(1)
     done
 }
 
+# NEXT-11 (ADR-295 to ADR-299): A/B boot slots. Every image of the group carries the development
+# configuration with `[update]` set for the test (a short confirmation delay, or operator confirmation),
+# so the configuration the disk keeps across staging (carried over like update-boot) is that one.
+# ab_images <name> <toml lines>: MKIMG_EXTRA for that configuration.
+ab_images() {
+    local cfg="$OUT/ab-$1-config.toml"
+    mkdir -p "$OUT"
+    { cat "$ROOT/deploy/dev/config.toml"; printf '\n[update]\n%s\n' "$2"; } >"$cfg"
+    MKIMG_EXTRA=(--config "$cfg" --config-root "$ROOT/deploy/dev")
+}
+
+# ab_lba <disk> <A|B>: the first LBA of that slot's region, as `urmqtt-disk slots status` prints it.
+ab_lba() {
+    "$DISK_TOOL" slots status "$1" | sed -nE "s/^slot $2 \[[a-z]+\]: LBA ([0-9]+)\..*/\1/p"
+}
+
+# ab_put <disk> <A|B> <image>: <image>'s ESP over that slot's region, in place (a test hook: the slot then
+# holds another kernel command line; its staging commitment no longer matches, which only a switch to it
+# checks).
+ab_put() {
+    dd if="$3.esp" of="$1" bs=512 seek="$(ab_lba "$1" "$2")" conv=notrunc status=none
+}
+
+# ab_tool <log> <args...>: urmqtt-disk with its output appended to <log>.
+ab_tool() {
+    local log=$1
+    shift
+    echo "\$ urmqtt-disk $*" >>"$log"
+    "$DISK_TOOL" "$@" >>"$log" 2>&1
+}
+
+ab_slots() {
+    build_disk_tool || {
+        echo "  ✗ ab-slots needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local base="$OUT/ab-base.raw" serve="$OUT/ab-serve.raw" bad="$OUT/ab-bad.raw" n
+    ab_images fast 'confirm_after_s = 2'
+    mkimg "$base" "smoke"
+    mkimg "$serve" "serve"
+    mkimg "$bad" "smoke test=ab-bad"
+    for n in 1 3; do mkimg "$OUT/ab-cut-$n.raw" "smoke test=disk-fault:stop-after-write=$n"; done
+    MKIMG_EXTRA=()
+    local slot='\((v|[0-9a-f]{7})[^)]*\)'
+    for accel in $ACCELS; do
+        local disk="$OUT/ab-$accel.img" log status=0 tlog="$OUT/ab-$accel-tool.log"
+        # 1. The first boot reserves the standby slot; the running one is A, confirmed.
+        log="$OUT/ab-first-$accel.log"
+        rm -f "$tlog"
+        fresh_disk "$base" "$disk" 128m
+        boot "$log" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        ab_tool "$log" slots status "$disk" || status=1
+        check "ab-first-boot [$accel]" "$log" "$status" \
+            "gpt: standby boot slot reserved next to the EFI system partition" \
+            "boot: slot A $slot, confirmed; standby: empty" "^URMQTT READY$" \
+            "slot A \[active\]: LBA 2048\..* confirmed, as installed" "slot B \[standby\]: .*: empty" "$NO_FAULT"
+        local first
+        first=$(mktemp "$OUT/ab-first-disk.XXXXXX")
+        cp "$disk" "$first"
+        # 2. An update that confirms itself: staged into B, activated, healthy for 2 s.
+        status=0
+        log="$OUT/ab-confirm-$accel.log"
+        rm -f "$log"
+        ab_tool "$log" slots stage "$disk" --esp "$serve.esp" --unsigned --write || status=1
+        ab_tool "$log" slots activate "$disk" --tries 2 --write || status=1
+        boot_until "$log.boot" "boot: slot B confirmed" --disk "$disk" --accel "$accel" || status=$?
+        cat "$log.boot" >>"$log"
+        ab_tool "$log" slots status "$disk" || status=1
+        check "ab-update-confirms [$accel]" "$log" "$status" \
+            "slot B holds" "slot B $slot is the boot entry, on trial for 2 boot\(s\); slot A $slot is the way back" \
+            "boot: slot B $slot ON TRIAL: 1 trial boot\(s\) left after this one; confirmed after 2 s" \
+            "mqtt: TLS 1.3 listener on port" "boot: slot B confirmed \(healthy for 2 s: store open, listener up\)" \
+            "slot B \[active\]: .*: confirmed, staged" "slot A \[standby\]: .*: confirmed, as installed" "$NO_FAULT"
+        # 3. A bad update: two trial boots that never come up, then slot A by itself.
+        status=0
+        log="$OUT/ab-bad-$accel.log"
+        rm -f "$log"
+        cp "$first" "$disk"
+        ab_tool "$log" slots stage "$disk" --esp "$bad.esp" --unsigned --write || status=1
+        ab_tool "$log" slots activate "$disk" --tries 2 --write || status=1
+        for n in 1 2 3 4; do
+            boot "$log.$n" --disk "$disk" --accel "$accel" --headless --no-net || true
+            { echo "--- boot $n"; cat "$log.$n"; } >>"$log"
+        done
+        ab_tool "$log" slots status "$disk" || status=1
+        check "ab-bad-update-rolls-back [$accel]" "$log" "$status" \
+            "ON TRIAL: 1 trial boot\(s\) left after this one" "ab-bad: this kernel does not come up" \
+            "ON TRIAL: 0 trial boot\(s\) left after this one" \
+            "boot: slot B gave up: no trial boots left and no confirmation; slot A $slot is active again, resetting" \
+            "boot: slot A $slot, confirmed; standby: .* \(not bootable" "^URMQTT READY$" \
+            "slot B \[standby\]: .*BAD" "$NO_FAULT"
+        # 4. A power cut in the offline switch (the tool killed after its N-th write): the next boot
+        #    finds A (cut before the primary table changed: the valid primary is in force) or B on
+        #    trial (cut after the primary's entries: the firmware takes the complete backup).
+        for n in 1 2 3; do
+            status=0
+            log="$OUT/ab-cut-tool-$n-$accel.log"
+            rm -f "$log"
+            cp "$first" "$disk"
+            ab_tool "$log" slots stage "$disk" --esp "$base.esp" --unsigned --write || status=1
+            ab_tool "$log" slots activate "$disk" --write --fault "stop-after-write=$n" && status=1
+            boot "$log.boot" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+            cat "$log.boot" >>"$log"
+            local want="boot: slot A $slot, confirmed; standby: .*the way back"
+            [[ $n -ge 3 ]] && want="boot: slot B $slot ON TRIAL: 2 trial boot\(s\) left after this one"
+            check "ab-power-cut activate after write $n [$accel]" "$log" "$status" \
+                "injecting .*stop_after_writes: Some\($n\)" "$want" "^URMQTT READY$" "$NO_FAULT"
+        done
+        # 5. A power cut in the kernel's own write (the trial count): B's kernel stops after its N-th
+        #    write; B is then given a kernel that does not cut, and the trial goes on with one or two
+        #    of its three trial boots counted, never a broken table.
+        for n in 1 3; do
+            status=0
+            log="$OUT/ab-cut-kernel-$n-$accel.log"
+            rm -f "$log"
+            cp "$first" "$disk"
+            ab_tool "$log" slots stage "$disk" --esp "$OUT/ab-cut-$n.raw.esp" --unsigned --write || status=1
+            ab_tool "$log" slots activate "$disk" --tries 3 --write || status=1
+            boot "$log.1" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+            ab_put "$disk" B "$base"
+            boot "$log.2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+            { echo "--- boot 1"; cat "$log.1"; echo "--- boot 2"; cat "$log.2"; } >>"$log"
+            check "ab-power-cut trial count after write $n [$accel]" "$log" "$status" \
+                "disk-fault: power cut injected during the boot-slot step" \
+                "boot: slot B $slot ON TRIAL: [12] trial boot\(s\) left after this one" "^URMQTT READY$" "$NO_FAULT"
+        done
+        rm -f "$first"
+    done
+    ab_control
+    ab_release
+}
+
+# NEXT-11 (ADR-295) on the universal image: the same disk, its standby reserved by the first boot, an
+# update staged and activated, on x86_64 BIOS (Limine's BIOS stage finds the boot volume through the
+# partition table: the ESP entry, never the standby), x86_64 UEFI and aarch64 UEFI. Each machine boots the
+# staged slot on trial.
+ab_universal() {
+    build_disk_tool || {
+        echo "  ✗ ab-universal needs urmqtt-disk"
+        FAILED=$((FAILED + 1))
+        return
+    }
+    local iso="$OUT/ab-universal.iso" row
+    mkuniversal "$iso" "smoke" --esp-out "$OUT/ab-universal.esp"
+    local slot='\((v|[0-9a-f]{7})[^)]*\)'
+    local rows=("x86-bios|x86-bios|tcg" "x86-uefi|x86-uefi|tcg" "aa64|aa64|hvf")
+    for row in "${rows[@]}"; do
+        IFS='|' read -r name kind accel <<<"$row"
+        [[ $kind == aa64 && " $ACCELS " != *" $accel "* ]] && continue
+        local log="$OUT/ab-universal-$name.log" data="$OUT/ab-universal-$name.img" status=0
+        rm -f "$log"
+        fresh_disk "$iso.disk" "$data" 128m
+        u_run "$kind" "$accel" "$log.0" disk "$data" || status=$?
+        ab_tool "$log" slots stage "$data" --esp "$OUT/ab-universal.esp" --unsigned --write || status=1
+        ab_tool "$log" slots activate "$data" --write || status=1
+        u_run "$kind" "$accel" "$log.1" disk "$data" || status=$?
+        { echo "--- boot 0"; cat "$log.0"; echo "--- boot 1"; cat "$log.1"; } >>"$log"
+        check "ab-universal-$name" "$log" "$status" \
+            "gpt: standby boot slot reserved next to the EFI system partition" \
+            "boot: slot A $slot, confirmed; standby: empty" "slot B holds" \
+            "boot: slot B $slot ON TRIAL: 2 trial boot\(s\) left after this one" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
+# NEXT-11 (ADR-298): an operator confirms a trial over the control channel, a confirmation for another
+# disk is refused, and boot-rollback goes back to the previous slot.
+ab_control() {
+    local ctl="$ROOT/target/release/urmqtt-control" d="$ROOT/deploy/dev"
+    (cd "$ROOT" && cargo build --release --locked -q -p urmqtt-control-tool) || ctl=""
+    if [[ -z $ctl ]]; then
+        echo "  ✗ ab-control needs urmqtt-control"
+        FAILED=$((FAILED + 1))
+        return
+    fi
+    local base="$OUT/ab-op-base.raw" serve="$OUT/ab-op-serve.raw"
+    ab_images op 'confirm = "operator"'
+    mkimg "$base" "smoke"
+    mkimg "$serve" "serve"
+    MKIMG_EXTRA=()
+    local tls=(--port "$PORT" --ca "$d/ca.pem" --client-cert "$d/services/operator.pem" --client-key "$d/services/operator.key")
+    local slot='\((v|[0-9a-f]{7})[^)]*\)'
+    for accel in $ACCELS; do
+        local disk="$OUT/ab-op-$accel.img" log="$OUT/ab-control-$accel.log" status=0 guid
+        rm -f "$log" "$log.client"
+        fresh_disk "$base" "$disk" 128m
+        boot "$log.0" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        guid=$("$DISK_TOOL" slots status "$disk" | sed -nE 's/^disk GUID ([0-9a-f-]+) .*/\1/p')
+        ab_tool "$log" slots stage "$disk" --esp "$serve.esp" --unsigned --write || status=1
+        ab_tool "$log" slots activate "$disk" --write || status=1
+        start_vm "$log.1" --disk "$disk" --accel "$accel" --fwd "$PORT:8883"
+        if wait_log "$log.1" "TLS 1.3 listener"; then
+            "$ctl" boot-confirm --disk-guid 00000000-0000-4000-8000-000000000000 --env dev --key "$d/control.key" \
+                "${tls[@]}" >>"$log.client" 2>&1 || status=1
+            wait_log "$log.1" "rejected: other_disk" || status=124
+            "$ctl" boot-confirm --disk-guid "$guid" --env dev --key "$d/control.key" "${tls[@]}" >>"$log.client" 2>&1 || status=1
+            wait_log "$log.1" "boot: slot B confirmed \(boot-confirm control message\)" || status=124
+            "$ctl" boot-rollback --disk-guid "$guid" --env dev --key "$d/control.key" "${tls[@]}" >>"$log.client" 2>&1 || status=1
+            # The broker resets: QEMU (-no-reboot) exits.
+            local waited=0
+            while kill -0 "$VM_PID" 2>/dev/null && ((waited < TIMEOUT * 10)); do
+                sleep 0.1
+                waited=$((waited + 1))
+            done
+        else
+            status=124
+        fi
+        kill_vm
+        boot "$log.2" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        { echo "--- boot 0"; cat "$log.0"; echo "--- boot 1"; cat "$log.1"; cat "$log.client"; echo "--- boot 2"; cat "$log.2"; } >>"$log"
+        check "ab-control-confirm-and-rollback [$accel]" "$log" "$status" \
+            "ON TRIAL: 2 trial boot\(s\) left after this one; waiting for a boot-confirm control message" \
+            "control: message from operator rejected: other_disk" \
+            "boot: slot B confirmed \(boot-confirm control message\)" \
+            "boot: boot-rollback control message: slot A is active again, slot B is marked bad; resetting" \
+            "boot: slot A $slot, confirmed; standby: .* \(not bootable" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
+# NEXT-11 (ADR-299): a release image is staged only with its signature (a throwaway minisign key made
+# here; never the release key), and the staged kernel boots on trial.
+ab_release() {
+    if ! command -v minisign >/dev/null; then
+        echo "  - ab-release skipped: no minisign on this machine (the Rust tests cover the signature check)"
+        return 0
+    fi
+    local base="$OUT/ab-base.raw" k="$OUT/ab-release-key" rel="$OUT/ab-release/urmqtt-test-universal.img"
+    mkdir -p "$OUT/ab-release"
+    rm -f "$k.pub" "$k.sec"
+    minisign -G -W -p "$k.pub" -s "$k.sec" >/dev/null 2>&1 || { echo "  ✗ ab-release: minisign -G failed"; FAILED=$((FAILED + 1)); return; }
+    cp "$base" "$rel"
+    (cd "$OUT/ab-release" && shasum -a 256 "$(basename "$rel")" >SHA256SUMS)
+    minisign -S -s "$k.sec" -m "$OUT/ab-release/SHA256SUMS" >/dev/null 2>&1 || { echo "  ✗ ab-release: minisign -S failed"; FAILED=$((FAILED + 1)); return; }
+    local slot='\((v|[0-9a-f]{7})[^)]*\)'
+    for accel in $ACCELS; do
+        local disk="$OUT/ab-release-$accel.img" log="$OUT/ab-release-$accel.log" status=0
+        rm -f "$log"
+        fresh_disk "$base" "$disk" 128m
+        boot "$log.0" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        ab_tool "$log" slots stage "$disk" --image "$rel" --sums "$OUT/ab-release/SHA256SUMS" \
+            --sig "$OUT/ab-release/SHA256SUMS.minisig" --pubkey "$ROOT/minisign.pub" --write && status=1
+        ab_tool "$log" slots stage "$disk" --image "$rel" --sums "$OUT/ab-release/SHA256SUMS" \
+            --sig "$OUT/ab-release/SHA256SUMS.minisig" --pubkey "$k.pub" --write || status=1
+        ab_tool "$log" slots activate "$disk" --write || status=1
+        boot "$log.1" --disk "$disk" --accel "$accel" --headless --no-net || status=$?
+        cat "$log.1" >>"$log"
+        check "ab-release-image-signed [$accel]" "$log" "$status" \
+            "not one of the given keys" "release signature ok: SHA256SUMS signed by key [0-9A-F]{16}" \
+            "boot: slot B $slot ON TRIAL: 2 trial boot\(s\) left" "^URMQTT READY$" "$NO_FAULT"
+    done
+}
+
 # SMOKE_ONLY=misc: the scenarios of the default run that are guarded by `want` and belong to no other
 # group (the default run with SMOKE_NO_GROUPS=1 skips exactly these, so CI runs both and loses nothing).
 if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want config_packed && config_packed
     want release_kernel && release_kernel
     want plaintext && plaintext
+    want accounts && accounts
     # The broker's state across a restart (QoS 1 and QoS 2): the default run has these too.
     command -v mosquitto_pub >/dev/null && want mqtt_persist && mqtt_persist
     want mqtt_qos2 && mqtt_qos2
@@ -4332,6 +5850,7 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want net_mtu && net_mtu
     want net_irq && net_irq
     want attack_app && attack_app
+    want conn_limit && conn_limit
     want observability && observability
     want no_hw_rng && no_hw_rng
     command -v mosquitto_sub >/dev/null && want entropy_option && entropy_option
@@ -4339,6 +5858,33 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     [[ $ARCH == aarch64 ]] && want gicv2 && gicv2
     want virtio_gpu && virtio_gpu
     want virtio_devices && virtio_devices
+    want iommu_suite && iommu_suite
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=edition: the kernel as a library (NOW-18, ADR-335 to ADR-339): the example edition's image with QEMU's
+# edu devices, and the open image beside it.
+if [[ ${SMOKE_ONLY:-} == edition && $ARCH != universal ]]; then
+    edition
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=ipv6: IPv6 (NEXT-1, ADR-330 to ADR-334) on this architecture: SLAAC on QEMU's user network, IPv6 only
+# and dual stack through scripts/ipv6-relay.py.
+if [[ ${SMOKE_ONLY:-} == ipv6 && $ARCH != universal ]]; then
+    ipv6_suite
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=mq: virtio-net multiqueue with RSS (NEXT-6, ADR-310 to ADR-314) on this architecture.
+if [[ ${SMOKE_ONLY:-} == mq && $ARCH != universal ]]; then
+    mq_suite
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit
@@ -4347,6 +5893,31 @@ fi
 # SMOKE_ONLY=websocket: the MQTT over WebSocket scenarios (ADR-272) of this architecture.
 if [[ ${SMOKE_ONLY:-} == websocket && $ARCH != universal ]]; then
     websocket
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=metrics: the Prometheus endpoint scenarios (ADR-290) of this architecture.
+if [[ ${SMOKE_ONLY:-} == metrics && $ARCH != universal ]]; then
+    metrics
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=logtls: log shipping over TLS on the outbound TCP client (NEXT-7, ADR-315 to ADR-319) of this
+# architecture.
+if [[ ${SMOKE_ONLY:-} == logtls && $ARCH != universal ]]; then
+    logtls
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=iommu: the H4b DMA-remapping scenarios of this architecture (ADR-305 to ADR-307).
+if [[ ${SMOKE_ONLY:-} == iommu && $ARCH != universal ]]; then
+    iommu_suite
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit
@@ -4404,6 +5975,26 @@ if [[ ${SMOKE_ONLY:-} == storage && $ARCH != universal ]]; then
     exit
 fi
 
+# SMOKE_ONLY=unlock: a disk key that is not in the image (LATER-7, ADR-325 to ADR-329): the passphrase
+# typed on the serial console at the first boot, a wrong one, a change at the prompt, the host tool,
+# an edited header refused.
+if [[ ${SMOKE_ONLY:-} == unlock && $ARCH != universal ]]; then
+    storage_unlock
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=ab: the A/B boot slots of this architecture (NEXT-11, ADR-295 to ADR-299): the first boot,
+# an update that confirms, one that rolls back, power cuts in the offline switch and in the kernel's
+# trial count, the operator's confirm and rollback over the control channel, a signed release image.
+if [[ ${SMOKE_ONLY:-} == ab && $ARCH != universal ]]; then
+    ab_slots
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
 # SMOKE_ONLY=secrecy (aarch64): H8, the production-image warning and the key-bytes scan of the serial logs
 # (SMOKE_RELEASE_KERNEL=<release kernel ELF> adds the release kernel with the production configuration).
 if [[ ${SMOKE_ONLY:-} == secrecy && $ARCH == aarch64 ]]; then
@@ -4425,6 +6016,14 @@ fi
 # limits which machine runs them.
 if [[ ${SMOKE_ONLY:-} == diag && $ARCH == universal ]]; then
     universal_diag
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=ab (universal): the A/B boot slots of one disk on x86_64 BIOS and UEFI and aarch64 UEFI (NEXT-11).
+if [[ ${SMOKE_ONLY:-} == ab && $ARCH == universal ]]; then
+    ab_universal
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit
@@ -4607,6 +6206,9 @@ want config_packed && config_packed
 want release_kernel && release_kernel
 want plaintext && plaintext
 want websocket && websocket
+want accounts && accounts
+want metrics && metrics
+want logtls && logtls
 scenario x86-fault-unmapped-mmio "smoke test=data-abort" on \
     "EXCEPTION: #PF page fault" "page not present, read, supervisor mode" "NOT:URMQTT READY"
 SMP=8 scenario x86-smp8 "smoke" on \
@@ -4682,6 +6284,9 @@ want config_packed && config_packed
 want release_kernel && release_kernel
 want plaintext && plaintext
 want websocket && websocket
+want accounts && accounts
+want metrics && metrics
+want logtls && logtls
 scenario fault-data-abort "smoke test=data-abort" on \
     "$BOOT_LINE" "EXCEPTION: synchronous, current EL, SP0" \
     "EC=0x25 data abort \(same EL\), read, translation fault" "FAR=0x" "x30=0x" \
@@ -4968,6 +6573,7 @@ want attack_raw && attack_raw
 want net_mtu && net_mtu
 want net_irq && net_irq
 want attack_app && attack_app
+want conn_limit && conn_limit
 want observability && observability
 want first_boot && first_boot
 want first_boot_crash && first_boot_crash
@@ -4995,6 +6601,7 @@ want no_hw_rng && no_hw_rng
 command -v mosquitto_sub >/dev/null && want entropy_option && entropy_option
 [[ $ARCH == aarch64 ]] && want gicv2 && gicv2
 want virtio_gpu && virtio_gpu
+want iommu_suite && iommu_suite
 
 # M6: the gratuitous ARP must be on the wire (QEMU filter-dump pcap).
 pcap_has_garp() {

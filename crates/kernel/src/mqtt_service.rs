@@ -19,12 +19,13 @@ use urmqtt_broker::{Acl, Broker, Buf, CloseReason, Config, ConnId};
 use urmqtt_config::CONFIG;
 use urmqtt_log::{debug, info, warn};
 use urmqtt_mqtt::{Limits, QoS};
-use urmqtt_net::admission::{Admission, Outcome};
+use urmqtt_net::admission::{Admission, Outcome, REASONS, Reason};
 use urmqtt_sync::spsc::{Consumer, Producer};
 use urmqtt_sync::sync::OnceCell;
-use urmqtt_tcp::{Endpoint, TcpStack};
+use urmqtt_tcp::{Addr, Endpoint, TcpStack};
 use urmqtt_tls::{CertRole, Event, IdentityField, ServerSetup, TicketKeys, TlsServer, TlsSession};
 
+use crate::conn_limit;
 use crate::dataplane::{self, CoreMsg, Link, Tconn};
 use crate::db::{self, DbReq, DbResp, LogBatch, Restored};
 use crate::watchdog;
@@ -140,7 +141,7 @@ struct Conn {
 /// has a byte budget (ADR-034).
 struct Flight {
     /// The peer's address, for the per-address limit.
-    ip: [u8; 4],
+    ip: Addr,
     /// When the connection was accepted (ms, wrapping), for the latency.
     t0_ms: u32,
 }
@@ -209,10 +210,16 @@ pub struct MqttService {
     adm: Admission,
     /// The connections `adm` counts as in flight.
     flights: Slab<Flight>,
+    /// Established TLS connections of this core that the per-address table
+    /// counts (NOW-14, ADR-280): connection id to its source address. Given
+    /// back in `drop_conn`, the one place every close path ends in.
+    sources: Slab<Addr>,
+    /// `sources`' length (how many this core holds), for the report.
+    sources_held: u32,
     /// Refusals and dropped SYNs already logged, by [`Reason`]: the log
     /// lines come at powers of two.
-    logged: [u64; 5],
-    logged_syn: [u64; 5],
+    logged: [u64; REASONS],
+    logged_syn: [u64; REASONS],
     /// The heap check takes the allocator's global lock; once per
     /// millisecond is enough for a reserve of megabytes.
     heap_ok: bool,
@@ -248,6 +255,11 @@ pub struct MqttService {
     plain: Option<Box<crate::plain::PlainState>>,
     /// The WebSocket listener (ADR-272); `None` unless switched on.
     ws: Option<Box<crate::websocket::WsState>>,
+    /// The run-time accounts this core last applied (ADR-285), to tell which
+    /// changed.
+    accounts_seen: urmqtt_plain::Accounts,
+    /// The Prometheus endpoint (ADR-290); `None` unless switched on.
+    metrics: Option<Box<crate::metrics::MetricsState>>,
     /// Publisher back-pressure: window changes and notes to other shards
     /// (ADR-269).
     flow: crate::backpressure::FlowLink,
@@ -553,6 +565,12 @@ impl MqttService {
             }
             crate::plain::announce(dataplane::workers(n).len());
             crate::websocket::announce(dataplane::workers(n).len());
+            crate::metrics::announce(dataplane::workers(n).len());
+            // A/B (ADR-296): the listeners are up, a trial boot's health
+            // clock starts (a TLS listener whose setup failed is not up).
+            if CONFIG.network.mqtt_tls_port == 0 || tls.is_some() {
+                crate::bootslot::set_listening();
+            }
             // ADR-269: what a slow single subscriber does to its publisher.
             info!(
                 "mqtt: publisher back-pressure {}",
@@ -564,6 +582,8 @@ impl MqttService {
             );
         }
         let mut broker = Broker::new(broker_config(MAX_CONNS * n, n > 1));
+        // The ACL class of a run-time password account (ADR-285).
+        broker.set_login_class(crate::control::account_class);
         // Shared groups are owned by the worker shards (ADR-275); set before
         // the restore, whose sessions join their groups again.
         let w = dataplane::workers(n);
@@ -604,7 +624,7 @@ impl MqttService {
                 }
             );
         }
-        Self {
+        let mut svc = Self {
             me,
             n,
             broker,
@@ -617,9 +637,11 @@ impl MqttService {
             handshakes: VecDeque::new(),
             app: Vec::new(),
             flights: Slab::new(),
+            sources: Slab::new(),
+            sources_held: 0,
             adm: Admission::new(dataplane::admission_limits()),
-            logged: [0; 5],
-            logged_syn: [0; 5],
+            logged: [0; REASONS],
+            logged_syn: [0; REASONS],
             heap_ok: true,
             heap_checked_ms: u64::MAX,
             last_report_ms: 0,
@@ -642,9 +664,15 @@ impl MqttService {
             sys: crate::sys::Sys::new(me, n),
             plain: crate::plain::PlainState::new(),
             ws: crate::websocket::WsState::new(|| tls_server_with(false)),
+            accounts_seen: crate::control::accounts(),
+            metrics: crate::metrics::MetricsState::new(),
             flow: crate::backpressure::FlowLink::new(),
             revoking: Vec::new(),
-        }
+        };
+        // The first `$SYS` pass is made here, not in the watched loop (ADR-072).
+        svc.sys
+            .start(&mut svc.broker, urmqtt_arch::time::uptime_ns() / 1_000_000);
+        svc
     }
 
     /// Retained messages delivered but not retained (H3): counted for the
@@ -726,6 +754,9 @@ impl MqttService {
         if let Some(w) = &self.ws {
             p.push(w.port());
         }
+        if let Some(m) = &self.metrics {
+            p.push(m.port());
+        }
         p
     }
 
@@ -748,7 +779,7 @@ impl MqttService {
     /// A SYN: answer it only if a connection from `ip` would be admitted
     /// now (PERF, ADR-080). A refusal here costs no state and no packet,
     /// and the client's TCP retries after its backoff instead of at once.
-    pub fn syn_ok(&mut self, port: u16, ip: [u8; 4], now_ms: u64) -> bool {
+    pub fn syn_ok(&mut self, port: u16, ip: Addr, now_ms: u64) -> bool {
         // The plaintext port: its allow-list, lock-out and limits (P1).
         if self.is_plain_policy_port(port) {
             let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
@@ -757,15 +788,31 @@ impl MqttService {
                 .as_mut()
                 .is_some_and(|p| p.syn_ok(ip, now_ms, heap_ok, behind));
         }
+        // The metrics port: its allow-list and limits only (ADR-290).
+        if self.is_metrics_port(port) {
+            let heap_ok = self.heap_ok(now_ms);
+            return self
+                .metrics
+                .as_mut()
+                .is_some_and(|m| m.syn_ok(ip, now_ms, heap_ok));
+        }
         // The WebSocket port: its own limits first, then the TLS admission
         // like any TLS connection (ADR-272).
         if self.is_ws_port(port) && !self.ws.as_mut().is_some_and(|w| w.syn_ok(ip, now_ms)) {
             return false;
         }
         let tls = Some(port) != self.plain_port;
-        let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
-        let Err(r) = self.adm.syn_check(ip, tls, now_ms, heap_ok, behind) else {
-            return true;
+        // Established connections per address (ADR-280), before anything
+        // that costs: no token, no state, no packet.
+        let r = if tls && !conn_limit::syn_ok(ip) {
+            self.adm.count_syn_dropped(Reason::PerIpEstablished);
+            Reason::PerIpEstablished
+        } else {
+            let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
+            let Err(r) = self.adm.syn_check(ip, tls, now_ms, heap_ok, behind) else {
+                return true;
+            };
+            r
         };
         let n = self
             .adm
@@ -794,13 +841,46 @@ impl MqttService {
         self.plain.as_ref().is_some_and(|p| p.port() == port)
     }
 
+    /// Whether `port` is the Prometheus endpoint's.
+    fn is_metrics_port(&self, port: u16) -> bool {
+        self.metrics.as_ref().is_some_and(|m| m.port() == port)
+    }
+
     /// Admission for a new connection (PROMPT §6, M16): free heap above the
     /// reserve, fewer than the in-flight limits, and for TLS a handshake
     /// token. Refusals cost no crypto work and are logged rate-limited.
-    fn admit(&mut self, tls: bool, ip: [u8; 4], now_ms: u64) -> bool {
-        let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
-        let Err(r) = self.adm.admit(ip, tls, now_ms, heap_ok, behind) else {
-            return true;
+    ///
+    /// For TLS the established-connections table (ADR-280) is asked first, so
+    /// a refusal for it burns no handshake token; if admission then refuses,
+    /// the place is given back. On success the connection `c` is remembered in
+    /// `sources` when the table counted it.
+    fn admit(&mut self, c: u32, tls: bool, ip: Addr, now_ms: u64) -> bool {
+        use conn_limit::Counted;
+        let placed = if tls {
+            conn_limit::open(ip)
+        } else {
+            Counted::No
+        };
+        let r = if placed == Counted::Refuse {
+            self.adm.count_refused(Reason::PerIpEstablished);
+            Reason::PerIpEstablished
+        } else {
+            let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
+            match self.adm.admit(ip, tls, now_ms, heap_ok, behind) {
+                Ok(()) => {
+                    if placed == Counted::Yes {
+                        self.sources.insert(c, ip);
+                        self.sources_held += 1;
+                    }
+                    return true;
+                }
+                Err(r) => {
+                    if placed == Counted::Yes {
+                        conn_limit::close(ip);
+                    }
+                    r
+                }
+            }
         };
         let n = self
             .adm
@@ -837,14 +917,28 @@ impl MqttService {
         }
     }
 
+    /// Gives back the place `c` holds in the per-address table, once.
+    fn release_source(&mut self, c: u32) {
+        if let Some(ip) = self.sources.remove(&c) {
+            self.sources_held = self.sources_held.saturating_sub(1);
+            conn_limit::close(ip);
+        }
+    }
+
     /// Forgets the connection `c`: gives back what the plaintext listener
-    /// counted for it, and drops the transport state.
+    /// and the per-address table counted for it, and drops the transport
+    /// state. Every way a connection ends (peer close, reset, TCP timeout,
+    /// handshake timeout, watchdog abort) comes here.
     fn drop_conn(&mut self, c: u32, now_ms: u64) {
+        self.release_source(c);
         if let Some(p) = self.plain.as_mut() {
             p.release(c, (now_ms / 1000) as u32);
         }
         if let Some(w) = self.ws.as_mut() {
             w.release(c, now_ms);
+        }
+        if let Some(m) = self.metrics.as_mut() {
+            m.release(c);
         }
         self.conns.remove(&c);
     }
@@ -897,26 +991,27 @@ impl MqttService {
         {
             return;
         }
-        let by = |a: &[u64; 5], b: &[u64; 5]| {
+        let by = |a: &[u64; REASONS], b: &[u64; REASONS]| {
             let g = |i: usize| {
                 a.get(i)
                     .copied()
                     .unwrap_or(0)
                     .saturating_sub(b.get(i).copied().unwrap_or(0))
             };
-            (g(0), g(1), g(4), g(2), g(3))
+            (g(0), g(1), g(4), g(2), g(3), g(5))
         };
-        let (r, c, i, m, db) = by(&w.refused, &prev.refused);
-        let (sr, sc, si, sm, sdb) = by(&w.syn_dropped, &prev.syn_dropped);
+        let (r, c, i, m, db, e) = by(&w.refused, &prev.refused);
+        let (sr, sc, si, sm, sdb, se) = by(&w.syn_dropped, &prev.syn_dropped);
         info!(
             "handshakes: core {me}: {started} started, {done} done, {} failed, {} timed out; \
-             {refused} refused at the ACK (rate {r}, core {c}, address {i}, memory {m}, storage {db}); \
-             {syn} SYN(s) dropped (rate {sr}, core {sc}, address {si}, memory {sm}, storage {sdb}); \
-             in flight {} now / {} at most; accept to done: mean {} ms, max {} ms, {} over 250 ms, {} over 1 s",
+             {refused} refused at the ACK (rate {r}, core {c}, address {i}, memory {m}, storage {db}, established per address {e}); \
+             {syn} SYN(s) dropped (rate {sr}, core {sc}, address {si}, memory {sm}, storage {sdb}, established per address {se}); \
+             in flight {} now / {} at most, {} established from counted addresses; accept to done: mean {} ms, max {} ms, {} over 250 ms, {} over 1 s",
             d(w.failed, prev.failed),
             d(w.timed_out, prev.timed_out),
             self.adm.in_flight(),
             w.window_in_flight_max,
+            self.sources_held,
             d(w.latency_sum_ms, prev.latency_sum_ms) / done.max(1),
             w.window_latency_max_ms,
             d(w.slower_than(3), prev.slower_than(3)),
@@ -926,11 +1021,23 @@ impl MqttService {
 
     // ---- TCP events (called from the stack, see `TcpEvents`) -------------
 
-    fn on_accept(&mut self, c: u32, port: u16, ip: [u8; 4], now_ms: u64) -> bool {
+    fn on_accept(&mut self, c: u32, port: u16, ip: Addr, now_ms: u64) -> bool {
         // The plaintext port has an admission of its own (P1, ADR-230).
         let policy = self.is_plain_policy_port(port);
-        let tls = !policy && Some(port) != self.plain_port;
-        if policy {
+        // The Prometheus endpoint: plain HTTP with an admission of its own
+        // (ADR-290); no TLS, no handshake, no session.
+        let metrics = self.is_metrics_port(port);
+        let tls = !policy && !metrics && Some(port) != self.plain_port;
+        if metrics {
+            let heap_ok = self.heap_ok(now_ms);
+            let admitted = self
+                .metrics
+                .as_mut()
+                .is_some_and(|m| m.accept(c, ip, now_ms, heap_ok));
+            if !admitted {
+                return false;
+            }
+        } else if policy {
             let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
             let admitted = self
                 .plain
@@ -939,13 +1046,14 @@ impl MqttService {
             if !admitted {
                 return false;
             }
-        } else if !self.admit(tls, ip, now_ms) {
+        } else if !self.admit(c, tls, ip, now_ms) {
             return false;
         }
         // The WebSocket listener counts its own connections (ADR-272).
         let ws = self.is_ws_port(port);
         if ws && !self.ws.as_mut().is_some_and(|w| w.accept(c, ip, now_ms)) {
             self.adm.leave(ip, Outcome::Failed);
+            self.release_source(c);
             return false;
         }
         let session = if tls {
@@ -960,6 +1068,7 @@ impl MqttService {
                 None => {
                     // Admitted but no session could be built: give the slot back.
                     self.adm.leave(ip, Outcome::Failed);
+                    self.release_source(c);
                     if let Some(w) = self.ws.as_mut() {
                         w.release(c, now_ms);
                     }
@@ -987,8 +1096,9 @@ impl MqttService {
                 serial_tag: 0,
             },
         );
-        // (A plaintext connection's flight is kept by its listener.)
-        if !policy {
+        // (A plaintext connection's flight is kept by its listener; a metrics
+        // connection has none, only a deadline of its own.)
+        if !policy && !metrics {
             self.flights.insert(
                 c,
                 Flight {
@@ -1003,11 +1113,13 @@ impl MqttService {
             let conns = &self.conns;
             self.handshakes.retain(|p| p.pending(conns));
         }
-        self.handshakes.push_back(Pending {
-            at_ms: now_ms,
-            c,
-            tconn,
-        });
+        if !metrics {
+            self.handshakes.push_back(Pending {
+                at_ms: now_ms,
+                c,
+                tconn,
+            });
+        }
         dataplane::count_accept(self.me);
         true
     }
@@ -1192,6 +1304,9 @@ impl MqttService {
     /// then attaches to its home shard. Garbage goes to this core's shard,
     /// which rejects it.
     fn sniff_connect(&mut self, c: u32, data: &[u8], link: &mut Link, now_ms: u64) {
+        if self.metrics.as_ref().is_some_and(|m| m.has(c)) {
+            return self.metrics_input(c, data);
+        }
         if self.plain.as_ref().is_some_and(|p| p.has(c)) {
             return self.plain_connect(c, data, link, now_ms);
         }
@@ -1231,6 +1346,38 @@ impl MqttService {
         }
     }
 
+    /// Bytes of a metrics connection (ADR-290): held until the request is
+    /// complete (at most 2 KiB are kept), then answered once and closed.
+    fn metrics_input(&mut self, c: u32, data: &[u8]) {
+        let Some(k) = self.conns.get_mut(&c) else {
+            return;
+        };
+        k.early.extend_from_slice(data);
+        let Some(answer) = self.metrics.as_mut().map(|m| m.request(k.early.as_slice())) else {
+            return;
+        };
+        match answer {
+            crate::metrics::Answer::Wait => {}
+            crate::metrics::Answer::Send(bytes) => {
+                k.early.take();
+                k.pending.extend_from_slice(&bytes);
+                self.start_close(c);
+                self.mark_blocked(c);
+            }
+        }
+    }
+
+    /// Metrics connections that did not finish by their deadline: reset.
+    fn metrics_expire(&mut self, now_ms: u64) {
+        let Some(late) = self.metrics.as_mut().map(|m| m.expire(now_ms)) else {
+            return;
+        };
+        for c in late {
+            self.drop_conn(c, now_ms);
+            self.aborts.push(c);
+        }
+    }
+
     /// The plaintext listener's first packet (P1, ADR-230): holds bytes until
     /// the CONNECT is complete, decides who the client is, and only then lets
     /// the broker see it, as a session of that identity on its home shard. A
@@ -1250,7 +1397,7 @@ impl MqttService {
             Refuse(u8, bool),
             Garbage,
             Accept {
-                identity: &'static str,
+                identity: String,
                 key: String,
                 no_id: bool,
             },
@@ -1259,8 +1406,8 @@ impl MqttService {
             crate::mqtt5::Peek::Connect(p) => {
                 match self.plain.as_mut().map(|pl| pl.decide(c, &p, now_ms)) {
                     Some(crate::plain::Decision::Accept(identity)) => Next::Accept {
+                        key: urmqtt_broker::plain_session_key(&identity, p.client_id),
                         identity,
-                        key: urmqtt_broker::plain_session_key(identity, p.client_id),
                         no_id: p.client_id.is_empty(),
                     },
                     Some(crate::plain::Decision::Refuse(code)) => Next::Refuse(code, p.v5),
@@ -1303,7 +1450,7 @@ impl MqttService {
                     .get_mut(&c)
                     .map(|k| k.early.take())
                     .unwrap_or_default();
-                if self.attach_plain(c, home, identity, false, link, now_ms) {
+                if self.attach_plain(c, home, &identity, false, link, now_ms) {
                     self.leave_flight(c, Leave::Done, now_ms);
                     self.deliver(c, &early, link, now_ms);
                 } else {
@@ -1552,7 +1699,7 @@ impl MqttService {
                     self.flow.window(c, tconn, closed);
                 }
             }
-            CoreMsg::IpConfig { .. } => {}
+            CoreMsg::IpConfig { .. } | CoreMsg::Ip6Config(_) => {}
         }
     }
 
@@ -1599,6 +1746,9 @@ impl MqttService {
         if let Some(w) = self.ws.as_mut() {
             w.shrink();
         }
+        if let Some(m) = self.metrics.as_mut() {
+            m.shrink();
+        }
         for t in &mut self.by_tconn {
             t.0.shrink();
         }
@@ -1629,14 +1779,14 @@ impl MqttService {
             self.cut_revoked(now_ms);
             self.expire_handshakes(link, now_ms);
             self.ws_expire(link, now_ms);
+            self.metrics_expire(now_ms);
             self.publish_admission(now_ms);
             if let Some(p) = self.plain.as_mut() {
                 // The plaintext listener judges its exposure from the address
                 // the interface has now (one core says it).
-                p.tick(
-                    tcp.local_addr(),
-                    self.me == dataplane::workers(self.n).start,
-                );
+                let first = self.me == dataplane::workers(self.n).start;
+                p.tick(tcp.local_addr(), first);
+                p.tick6(tcp.local6().global, first);
             }
         }
         watchdog::step(watchdog::Step::Shrink);
@@ -1835,6 +1985,7 @@ impl MqttService {
                 CloseReason::Disallowed,
             ) as u64;
         }
+        closed += self.apply_accounts();
         if closed > 0 {
             crate::control::LIVE_CLOSED.fetch_add(closed, core::sync::atomic::Ordering::Relaxed);
             info!(
@@ -1842,6 +1993,40 @@ impl MqttService {
                 self.me
             );
         }
+    }
+
+    /// The run-time password accounts changed (ADR-285): hands the new table
+    /// to this core's plaintext and WebSocket listeners and closes the live
+    /// logins of an account that was removed or whose password or class
+    /// changed (the sessions homed here; a closed one gets a 5.0 DISCONNECT
+    /// 0x98). Returns how many.
+    fn apply_accounts(&mut self) -> u64 {
+        let new = crate::control::accounts();
+        if Arc::ptr_eq(&new, &self.accounts_seen) {
+            return 0;
+        }
+        let old = core::mem::replace(&mut self.accounts_seen, new.clone());
+        if let Some(p) = self.plain.as_mut() {
+            p.set_accounts(new.clone());
+        }
+        if let Some(w) = self.ws.as_mut() {
+            w.set_accounts(new.clone());
+        }
+        let changed: Vec<&str> = old
+            .iter()
+            .filter(|a| new.iter().find(|b| b.id == a.id) != Some(*a))
+            .map(|a| a.id.as_str())
+            .collect();
+        if changed.is_empty() {
+            return 0;
+        }
+        self.broker.disconnect_unless(
+            |id, role| {
+                !matches!(role, urmqtt_broker::Role::Plain | urmqtt_broker::Role::Web)
+                    || !changed.contains(&id)
+            },
+            CloseReason::Disallowed,
+        ) as u64
     }
 
     /// Revoked connections still open after their grace: cut at the
@@ -2118,7 +2303,7 @@ pub struct TcpEvents<'a> {
 }
 
 impl urmqtt_tcp::App for TcpEvents<'_> {
-    fn syn_ok(&mut self, port: u16, remote: [u8; 4]) -> bool {
+    fn syn_ok(&mut self, port: u16, remote: Addr) -> bool {
         self.mqtt.syn_ok(port, remote, self.now_ms)
     }
 

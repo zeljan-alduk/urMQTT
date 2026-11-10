@@ -98,10 +98,11 @@ impl RefusedFlows {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::table::Addr;
 
     fn key(port: u16) -> Key {
         Key {
-            addr: [10, 0, 0, 1],
+            addr: Addr::v4([10, 0, 0, 1]),
             rport: port,
             lport: 8883,
         }

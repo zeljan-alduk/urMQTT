@@ -3,11 +3,13 @@
 # Boots an urMQTT ISO (or raw disk image) in QEMU (aarch64 virt, UEFI).
 #
 #   scripts/run-qemu.sh --iso ISO | --disk RAW [--accel hvf|tcg|kvm] [--smp N] [--mem 512M]
-#                       [--data IMG] [--bus blk|scsi] [--cpu MODEL] [--gic 3|2] [--no-rng] [--acpi on|off] [--serial FILE] [--headless]
+#                       [--data IMG] [--bus blk|scsi] [--cpu MODEL] [--gic 3|2] [--no-rng] [--acpi on|off] [--serial FILE]
+#                       [--serial-in SOCKET] [--headless]
 #                       [--pcap FILE] [--gdb] [--no-net] [--fwd HOST:GUEST,...]
+#                       [--net6 dual|only]
 #                       [--blk-props 'physical_block_size=4096,opt_io_size=65536,...']
 #                       [--disk-format raw|qcow2] [--discard unmap]
-#                       [--dgram LOCAL:REMOTE] [--gpu virtio|virtio-vga] [-- extra qemu args]
+#                       [--dgram LOCAL:REMOTE] [--tap IFNAME[:QUEUES]] [--gpu virtio|virtio-vga] [--iommu intel|amd|smmuv3] [-- extra qemu args]
 #
 # --disk boots the raw GPT image (mkraw.py) as a virtio-blk disk, like a
 # KVM host or a cloud server would; the data disk is a second virtio-blk.
@@ -22,9 +24,17 @@
 # the Raspberry Pi 4 and 5 (at most 8 CPUs).
 # --fwd replaces the default port forwards (1883 and 8883 on 127.0.0.1);
 # --fwd none disables them.
+# --net6 dual|only (NEXT-1) gives QEMU's user network IPv6 (prefix fec0::/64, router
+# fe80::2, Router Advertisements): dual keeps IPv4 (10.0.2.0/24), only turns it off.
+# QEMU's host forwards are IPv4 only (it refuses an IPv6 host or guest address), so
+# a host client reaches the guest over IPv6 through --dgram and scripts/ipv6-relay.py.
 # --dgram LOCAL:REMOTE replaces user networking with a raw L2 datagram
 # socket (QEMU binds UDP LOCAL, sends to REMOTE): a host process is then the
 # whole network and can inject arbitrary frames (H3 adversarial tests).
+# --tap IFNAME[:QUEUES] replaces user networking with an existing tap device
+# (Linux; created by the caller, multi_queue when QUEUES > 1, see
+# scripts/mq-rig.sh). With QUEUES > 1 the NIC gets that many queue pairs with
+# RSS (mq=on,rss=on,vectors=2*QUEUES+2), NEXT-6's multiqueue (ADR-310).
 # QEMU_NIC_PROPS (environment) is appended to the virtio-net-pci device, e.g.
 # QEMU_NIC_PROPS=rx_queue_size=1024 for the deeper receive queue (ADR-266;
 # QEMU's default is 256, and it keeps tx_queue_size at 256 without vhost-user).
@@ -35,7 +45,10 @@
 # Linux x86_64 with /dev/kvm) or kvm. The isa-debug-exit device is always
 # attached (dev images use it as a fallback power-off). --secure-vars FILE (H8) boots the
 # Secure Boot build of OVMF (SMM, q35) with FILE as its variable store, which must have the
-# keys enrolled (scripts/sign-loaders.sh ovmf-vars); FILE is never written back. --gic and --acpi
+# keys enrolled (scripts/sign-loaders.sh ovmf-vars); FILE is never written back. On aarch64
+# (LATER-6, ADR-323) --secure-vars FILE boots the Secure Boot build of AAVMF (Debian/Ubuntu
+# qemu-efi-aarch64: /usr/share/AAVMF/AAVMF_CODE.secboot.fd, or URMQTT_FIRMWARE_SECURE_AA64) as
+# pflash with FILE (made from AAVMF_VARS.fd the same way) as its variable store. --gic and --acpi
 # are aarch64-only; --bus, --data, --fwd, --pcap and --dgram work as on
 # aarch64.
 #
@@ -46,6 +59,9 @@
 # VGA BAR the firmware scans out of.
 #
 # Without --serial the serial console is on stdio. Ctrl-A X quits QEMU.
+# --serial-in SOCKET (with --serial FILE): the serial port is also a Unix socket a test
+# can type into (the disk passphrase of storage.disk_key_source = "console", LATER-7);
+# what the guest writes still goes to FILE.
 # Option ROMs are disabled (romfile=): no iPXE in the firmware, faster boot.
 set -euo pipefail
 
@@ -54,9 +70,22 @@ BLKPROPS=""
 DISKFMT=raw DRIVEOPTS=""
 ISO="" DISK="" BUS=blk CPU_MODEL="" GIC=3 RNG=1 ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
 FWD="1883:1883,8883:8883"
+NET6=""
+# The user network's IPv6 options for --net6 (NEXT-1).
+user_net6() {
+    case $NET6 in
+        "") return 0 ;;
+        dual) printf ',ipv4=on,ipv6=on' ;;
+        only) printf ',ipv4=off,ipv6=on' ;;
+        *) echo "run-qemu.sh: --net6 dual|only" >&2; exit 2 ;;
+    esac
+}
 DGRAM=""
+TAP=""
 SECURE_VARS=""
+SERIAL_IN=""
 GPU=""
+IOMMU=""
 EXTRA=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -79,13 +108,17 @@ while [[ $# -gt 0 ]]; do
         --data) DATA=$2; shift 2 ;;
         --acpi) ACPI=$2; shift 2 ;;
         --serial) SERIAL=$2; shift 2 ;;
+        --serial-in) SERIAL_IN=$2; shift 2 ;;
         --headless) HEADLESS=1; shift ;;
         --pcap) PCAP=$2; shift 2 ;;
         --gdb) GDB=1; shift ;;
         --no-net) NET=0; shift ;;
         --fwd) FWD=$2; shift 2 ;;
+        --net6) NET6=$2; shift 2 ;;
         --dgram) DGRAM=$2; shift 2 ;;
+        --tap) TAP=$2; shift 2 ;;
         --gpu) GPU=$2; shift 2 ;;
+        --iommu) IOMMU=$2; shift 2 ;;
         --) shift; EXTRA=("$@"); break ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -96,6 +129,26 @@ else
     [[ -f "$ISO" ]] || { echo "error: ISO '$ISO' not found (run make iso)" >&2; exit 1; }
 fi
 
+# With an IOMMU, every virtio device goes through it: VIRTIO_F_ACCESS_PLATFORM
+# (iommu_platform=on, which needs a modern-only device). Without the flag QEMU's
+# virtio devices bypass the IOMMU, as the specification allows (ADR-305).
+# IOMMU_PROPS is appended to every virtio PCI device then; QEMU_IOMMU_PLATFORM=off
+# (environment) leaves the devices bypassing it (the refusal's smoke scenario).
+IOMMU_PROPS=",disable-legacy=on,iommu_platform=on"
+[[ ${QEMU_IOMMU_PLATFORM:-on} == off ]] && IOMMU_PROPS=""
+# --tap: the netdev and, for more than one queue pair, the NIC's multiqueue
+# properties (two vectors per pair, one for the configuration, one for the
+# control queue, as QEMU's documentation suggests).
+TAPDEV="" MQPROPS=""
+if [[ -n "$TAP" ]]; then
+    TAPQ=1
+    [[ $TAP == *:* ]] && TAPQ=${TAP##*:}
+    TAPDEV="tap,id=n0,ifname=${TAP%%:*},script=no,downscript=no,vhost=off"
+    if (( TAPQ > 1 )); then
+        TAPDEV+=",queues=$TAPQ"
+        MQPROPS=",mq=on,rss=on,vectors=$((2 * TAPQ + 2))"
+    fi
+fi
 if [[ $ARCH == x86_64 ]]; then
     case $MACHINE in q35|pc) ;; *) echo "error: --machine q35|pc" >&2; exit 2 ;; esac
     case $FIRMWARE in uefi|bios) ;; *) echo "error: --firmware uefi|bios" >&2; exit 2 ;; esac
@@ -115,6 +168,19 @@ if [[ $ARCH == x86_64 ]]; then
     fi
     X86ARGS=(-machine "$MACHINE_ARG" -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
         -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04)
+    # An emulated IOMMU (H4b, ADR-305), created before the PCI devices it translates.
+    case $IOMMU in
+        "") ;;
+        intel) [[ $MACHINE == q35 ]] || { echo "error: --iommu intel needs --machine q35" >&2; exit 2; }
+            X86ARGS+=(-device intel-iommu,caching-mode=on,intremap=on,aw-bits=48) ;;
+        amd) [[ $MACHINE == q35 ]] || { echo "error: --iommu amd needs --machine q35" >&2; exit 2; }
+            X86ARGS+=(-device amd-iommu,dma-remap=on) ;;
+        *) echo "error: --iommu intel|amd (x86_64)" >&2; exit 2 ;;
+    esac
+    if [[ $IOMMU == intel && $ACCEL == kvm ]]; then
+        # Interrupt remapping under KVM needs the split irqchip.
+        X86ARGS[1]="${X86ARGS[1]},kernel-irqchip=split"
+    fi
     case $GPU in
         "") ;;
         virtio) X86ARGS+=(-vga none -device virtio-gpu-pci,id=gpu0) ;;
@@ -180,24 +246,29 @@ if [[ $ARCH == x86_64 ]]; then
     fi
     [[ $RNG -eq 1 ]] && X86ARGS+=(-device virtio-rng-pci,romfile=)
     if [[ $NET -eq 1 ]]; then
-        if [[ -n "$DGRAM" ]]; then
+        if [[ -n "$TAPDEV" ]]; then
+            NETDEV=$TAPDEV
+        elif [[ -n "$DGRAM" ]]; then
             NETDEV="dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port=${DGRAM%%:*}"
             NETDEV+=",remote.type=inet,remote.host=127.0.0.1,remote.port=${DGRAM##*:}"
         else
             NETDEV="user,id=n0"
-            if [[ "$FWD" != none ]]; then
+            if [[ "$FWD" != none && "$NET6" != only ]]; then
                 IFS=, read -r -a pairs <<< "$FWD"
                 for p in "${pairs[@]}"; do
                     NETDEV+=",hostfwd=tcp:127.0.0.1:${p%%:*}-:${p##*:}"
                 done
             fi
+            NETDEV+=$(user_net6)
         fi
-        X86ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
+        X86ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=$MQPROPS${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
         [[ -n "$PCAP" ]] && X86ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
     else
         X86ARGS+=(-nic none)
     fi
-    if [[ -n "$SERIAL" ]]; then
+    if [[ -n "$SERIAL" && -n "$SERIAL_IN" ]]; then
+        X86ARGS+=(-chardev "socket,id=serial0,path=$SERIAL_IN,server=on,wait=off,logfile=$SERIAL" -serial chardev:serial0 -monitor none)
+    elif [[ -n "$SERIAL" ]]; then
         X86ARGS+=(-serial "file:$SERIAL" -monitor none)
     elif [[ $HEADLESS -eq 1 ]]; then
         X86ARGS+=(-serial stdio -monitor none)
@@ -205,6 +276,11 @@ if [[ $ARCH == x86_64 ]]; then
         X86ARGS+=(-serial mon:stdio)
     fi
     [[ $GDB -eq 1 ]] && X86ARGS+=(-s -S)
+    if [[ -n $IOMMU ]]; then
+        for i in "${!X86ARGS[@]}"; do
+            [[ ${X86ARGS[$i]} =~ ^virtio-[a-z]+-pci, ]] && X86ARGS[i]+=$IOMMU_PROPS
+        done
+    fi
     exec qemu-system-x86_64 "${X86ARGS[@]}" ${EXTRA[@]+"${EXTRA[@]}"}
 fi
 
@@ -237,6 +313,21 @@ firmware() {
     exit 1
 }
 FW=$(firmware)
+FW_ARGS=(-bios "$FW")
+if [[ -n "$SECURE_VARS" ]]; then
+    # LATER-6: AAVMF with Secure Boot (no SMM on Arm: the variable store is not protected from
+    # the guest, which is fine for a test of enforcement). Both pflash units are 64 MiB.
+    [[ -f "$SECURE_VARS" ]] || { echo "error: --secure-vars FILE: $SECURE_VARS not found" >&2; exit 2; }
+    SFW=""
+    for c in "${URMQTT_FIRMWARE_SECURE_AA64:-}" /usr/share/AAVMF/AAVMF_CODE.secboot.fd \
+        /usr/share/edk2/aarch64/QEMU_EFI.secboot.fd; do
+        [[ -n "$c" && -f "$c" ]] && { SFW=$c; break; }
+    done
+    [[ -n "$SFW" ]] || { echo "error: no aarch64 Secure Boot firmware (AAVMF_CODE.secboot.fd) found; set URMQTT_FIRMWARE_SECURE_AA64" >&2; exit 1; }
+    FW_ARGS=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$SFW"
+        -drive "if=pflash,format=raw,unit=1,snapshot=on,file=$SECURE_VARS")
+fi
+[[ -z $IOMMU || $IOMMU == smmuv3 ]] || { echo "error: --iommu smmuv3 (aarch64)" >&2; exit 2; }
 [[ $GIC == 2 || $GIC == 3 ]] || { echo "error: --gic 3|2" >&2; exit 2; }
 
 case $GPU in
@@ -245,9 +336,9 @@ case $GPU in
     *) echo "error: --gpu virtio (aarch64)" >&2; exit 2 ;;
 esac
 ARGS=(
-    -machine "virt,gic-version=$GIC,acpi=$ACPI${URMQTT_MTE:+,mte=on}"
+    -machine "virt,gic-version=$GIC,acpi=$ACPI${URMQTT_MTE:+,mte=on}${IOMMU:+,iommu=$IOMMU}"
     -accel "$ACCEL" -cpu "$CPU" -smp "$SMP" -m "$MEM"
-    -bios "$FW"
+    "${FW_ARGS[@]}"
     "${DISPLAY_DEV[@]}"
     -display none -no-reboot
 )
@@ -278,7 +369,9 @@ if [[ -n "$DATA" ]]; then
     fi
 fi
 if [[ $NET -eq 1 ]]; then
-    if [[ -n "$DGRAM" ]]; then
+    if [[ -n "$TAPDEV" ]]; then
+        NETDEV=$TAPDEV
+    elif [[ -n "$DGRAM" ]]; then
         # Raw L2: the guest's single virtio-net NIC talks to a host process
         # over a UDP datagram socket pair, one Ethernet frame per datagram
         # (H3, tools/attack). QEMU binds LOCAL and sends to REMOTE.
@@ -286,20 +379,23 @@ if [[ $NET -eq 1 ]]; then
         NETDEV+=",remote.type=inet,remote.host=127.0.0.1,remote.port=${DGRAM##*:}"
     else
         NETDEV="user,id=n0"
-        if [[ "$FWD" != none ]]; then
+        if [[ "$FWD" != none && "$NET6" != only ]]; then
             IFS=, read -r -a pairs <<< "$FWD"
             for p in "${pairs[@]}"; do
                 NETDEV+=",hostfwd=tcp:127.0.0.1:${p%%:*}-:${p##*:}"
             done
         fi
+        NETDEV+=$(user_net6)
     fi
-    ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
+    ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=$MQPROPS${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
     [[ -n "$PCAP" ]] && ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
 else
     # Without this QEMU adds a default NIC (with an iPXE option ROM).
     ARGS+=(-nic none)
 fi
-if [[ -n "$SERIAL" ]]; then
+if [[ -n "$SERIAL" && -n "$SERIAL_IN" ]]; then
+    ARGS+=(-chardev "socket,id=serial0,path=$SERIAL_IN,server=on,wait=off,logfile=$SERIAL" -serial chardev:serial0 -monitor none)
+elif [[ -n "$SERIAL" ]]; then
     ARGS+=(-serial "file:$SERIAL" -monitor none)
 elif [[ $HEADLESS -eq 1 ]]; then
     ARGS+=(-serial stdio -monitor none)
@@ -313,4 +409,9 @@ if [[ $GDB -eq 1 ]]; then
     echo "  aarch64-elf-gdb target/aarch64-unknown-none/release/urmqtt -ex 'target remote :1234'" >&2
 fi
 
+if [[ -n $IOMMU ]]; then
+    for i in "${!ARGS[@]}"; do
+        [[ ${ARGS[$i]} =~ ^virtio-[a-z]+-pci, ]] && ARGS[i]+=$IOMMU_PROPS
+    done
+fi
 exec qemu-system-aarch64 "${ARGS[@]}" ${EXTRA[@]+"${EXTRA[@]}"}

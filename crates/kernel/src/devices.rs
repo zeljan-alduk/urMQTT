@@ -8,7 +8,7 @@
 
 #![allow(unsafe_code)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
 
@@ -24,7 +24,7 @@ use urmqtt_tls::rng::{Csprng, EntropyPool, Source};
 use urmqtt_virtio::blk::VirtioBlk;
 #[cfg(feature = "virtio-gpu")]
 use urmqtt_virtio::gpu::{AutoChoice, VirtioGpu, auto_choice};
-use urmqtt_virtio::net::VirtioNet;
+use urmqtt_virtio::net::{MAX_PAIRS, VirtioNet};
 use urmqtt_virtio::registry::{self, State};
 use urmqtt_virtio::rng::VirtioRng;
 use urmqtt_virtio::scsi::{DiskInfo, ScsiDisk, VirtioScsi};
@@ -109,12 +109,33 @@ impl ConfigSpace for Cfg {
     }
 }
 
-/// The kernel side of the virtio `Env`.
-pub struct KernelEnv;
+/// The kernel side of the virtio `Env`: DMA memory for one device, which the
+/// IOMMU (when one is in use, ADR-305) maps into that device's domain.
+pub struct KernelEnv {
+    dev: Option<Bdf>,
+}
+
+impl KernelEnv {
+    /// For the work after bring-up, which allocates no DMA memory.
+    pub const RUNTIME: Self = Self { dev: None };
+
+    /// For the bring-up of the device at `bdf`.
+    pub const fn device(bdf: Bdf) -> Self {
+        Self { dev: Some(bdf) }
+    }
+}
 
 impl Env for KernelEnv {
     fn dma_alloc(&self, bytes: usize) -> Option<DmaRegion> {
-        vm::dma_alloc(bytes).map(|(va, pa, len)| DmaRegion { va, pa, len })
+        let (va, pa, len) = vm::dma_alloc(bytes)?;
+        crate::iommu::map(self.dev, pa, len);
+        Some(DmaRegion { va, pa, len })
+    }
+
+    fn platform_access(&self, offered: bool) {
+        if let (Some(bdf), false) = (self.dev, offered) {
+            crate::iommu::bypass(bdf);
+        }
     }
 
     fn now_ns(&self) -> u64 {
@@ -226,31 +247,31 @@ impl DataDisk {
         }
         let r = v.as_slice();
         match self {
-            Self::Blk(b) if b.unmap.discard => b.discard(&KernelEnv, r),
-            Self::Blk(b) => b.write_zeroes(&KernelEnv, r),
-            Self::Scsi(s) if s.unmap.discard => s.discard(&KernelEnv, r),
-            Self::Scsi(s) => s.write_zeroes(&KernelEnv, r),
+            Self::Blk(b) if b.unmap.discard => b.discard(&KernelEnv::RUNTIME, r),
+            Self::Blk(b) => b.write_zeroes(&KernelEnv::RUNTIME, r),
+            Self::Scsi(s) if s.unmap.discard => s.discard(&KernelEnv::RUNTIME, r),
+            Self::Scsi(s) => s.write_zeroes(&KernelEnv::RUNTIME, r),
         }
     }
 
     pub fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), urmqtt_virtio::VirtioError> {
         match self {
-            Self::Blk(b) => b.read(&KernelEnv, sector, buf),
-            Self::Scsi(s) => s.read(&KernelEnv, sector, buf),
+            Self::Blk(b) => b.read(&KernelEnv::RUNTIME, sector, buf),
+            Self::Scsi(s) => s.read(&KernelEnv::RUNTIME, sector, buf),
         }
     }
 
     pub fn write(&mut self, sector: u64, data: &[u8]) -> Result<(), urmqtt_virtio::VirtioError> {
         match self {
-            Self::Blk(b) => b.write(&KernelEnv, sector, data),
-            Self::Scsi(s) => s.write(&KernelEnv, sector, data),
+            Self::Blk(b) => b.write(&KernelEnv::RUNTIME, sector, data),
+            Self::Scsi(s) => s.write(&KernelEnv::RUNTIME, sector, data),
         }
     }
 
     pub fn flush(&mut self) -> Result<(), urmqtt_virtio::VirtioError> {
         match self {
-            Self::Blk(b) => b.flush(&KernelEnv),
-            Self::Scsi(s) => s.flush(&KernelEnv),
+            Self::Blk(b) => b.flush(&KernelEnv::RUNTIME),
+            Self::Scsi(s) => s.flush(&KernelEnv::RUNTIME),
         }
     }
 }
@@ -334,6 +355,10 @@ pub struct BootMedium {
     pub optical: bool,
     /// The GPT disk GUID of the boot disk, if it has a GPT.
     pub disk_guid: Option<Guid>,
+    /// The GPT unique GUID of the partition the kernel was loaded from: the
+    /// ESP entry, or the standby boot slot if the firmware booted that
+    /// (ADR-296).
+    pub part_guid: Option<Guid>,
 }
 
 /// The boot disk with its data partition, ready for the store.
@@ -350,6 +375,8 @@ pub struct Devices {
     /// The disk Limine booted from (the only disk ever written).
     pub blk: Option<DataDisk>,
     pub rng: Option<VirtioRng>,
+    /// Where the entropy device is (the IOMMU test, ADR-307).
+    pub rng_bdf: Option<Bdf>,
     pub blk_msix_spi: Option<u32>,
     /// The NIC's receive interrupt (ADR-270): its SPI or vector, and the
     /// dispatcher's wake-up mode.
@@ -470,6 +497,7 @@ pub static DEVICES: SpinLock<Devices> = SpinLock::new(Devices {
     net: None,
     blk: None,
     rng: None,
+    rng_bdf: None,
     blk_msix_spi: None,
     net_msix_spi: None,
     net_wake: Mode::Polling(Why::NoMsix),
@@ -482,6 +510,7 @@ pub static DEVICES: SpinLock<Devices> = SpinLock::new(Devices {
 static BOOT_MEDIUM: SpinLock<BootMedium> = SpinLock::new(BootMedium {
     optical: false,
     disk_guid: None,
+    part_guid: None,
 });
 
 /// Records where the kernel was loaded from (before [`probe`]).
@@ -576,7 +605,7 @@ pub fn entropy_source_name() -> &'static str {
 /// test; returns how many it got (0 without the device).
 pub fn sample_virtio_rng(out: &mut [u8]) -> usize {
     match DEVICES.lock().rng.as_mut() {
-        Some(rng) => rng.fill(&KernelEnv, out).unwrap_or(0),
+        Some(rng) => rng.fill(&KernelEnv::RUNTIME, out).unwrap_or(0),
         None => 0,
     }
 }
@@ -721,25 +750,189 @@ fn setup_msix_with<C: ConfigSpace>(
     bdf: Bdf,
     source: impl FnOnce() -> Result<(u32, u64, u32), Why>,
 ) -> Result<u32, Why> {
+    setup_msix_queues(cfg, bdf, source, 1, |_| Err(Why::NoVector)).map(|(id, _)| id)
+}
+
+/// An MSI-X table: where it is mapped, and its entries.
+#[derive(Clone, Copy)]
+struct MsixTable {
+    va: usize,
+    entries: u16,
+}
+
+impl MsixTable {
+    /// Writes entry `k` (bounds-checked against the table).
+    fn write(&self, k: u16, address: u64, data: u32, masked: bool) {
+        if k >= self.entries {
+            return;
+        }
+        let at = self.va + usize::from(k) * 16;
+        for (i, w) in pci::msix_entry(address, data, masked).iter().enumerate() {
+            // SAFETY: entry `k` (< the table size read from the capability)
+            // of the table mapped as device memory in `setup_msix_queues`.
+            unsafe { ((at + 4 * i) as *mut u32).write_volatile(*w) };
+        }
+    }
+}
+
+/// [`setup_msix_with`] for a device with `want` queues (the NIC's pairs,
+/// NEXT-6, ADR-311): entry 0 as before; entries 1.. get what `more(k)` hands
+/// out, written **masked** (the core that will own the queue is not known
+/// yet; [`route_net_queue`] aims and unmasks it), or the reason there is
+/// none (also for entries beyond the table). Returns entry 0's interrupt
+/// and the table with the others.
+#[allow(clippy::type_complexity)]
+fn setup_msix_queues<C: ConfigSpace>(
+    cfg: &mut C,
+    bdf: Bdf,
+    source: impl FnOnce() -> Result<(u32, u64, u32), Why>,
+    want: usize,
+    mut more: impl FnMut(u16) -> Result<(u32, u64, u32), Why>,
+) -> Result<(u32, NetQueueVectors), Why> {
     let info = pci::msix(cfg, bdf).ok_or(Why::NoMsix)?;
     let Some(Bar::Memory { base, .. }) = pci::bar(cfg, bdf, info.table_bar) else {
         return Err(Why::TableUnmapped);
     };
-    let table = map(
+    let va = map(
         base + u64::from(info.table_offset),
         u64::from(info.table_size) * 16,
     )
     .map_err(|_| Why::TableUnmapped)?;
+    let table = MsixTable {
+        va,
+        entries: info.table_size,
+    };
     let (id, address, data) = source()?;
-    let entry = pci::msix_entry(address, data, false);
-    for (i, w) in entry.iter().enumerate() {
-        // SAFETY: entry 0 of the just-mapped MSI-X table.
-        unsafe { ((table + 4 * i) as *mut u32).write_volatile(*w) };
+    table.write(0, address, data, false);
+    let mut v = NetQueueVectors {
+        table: Some(table),
+        irq: [Err(Why::NoVector); MAX_PAIRS],
+    };
+    for k in 1..want.min(MAX_PAIRS) {
+        let e = k as u16;
+        let got = if e < table.entries {
+            more(e)
+        } else {
+            Err(Why::NoVector)
+        };
+        if let Ok((_, address, data)) = got {
+            table.write(e, address, data, true);
+        }
+        if let Some(slot) = v.irq.get_mut(k) {
+            *slot = got;
+        }
     }
     pci::msix_enable(cfg, bdf, &info, true);
     pci::enable(cfg, bdf, pci::CMD_INTX_DISABLE);
+    Ok((id, v))
+}
+
+/// The NIC's receive interrupts of pairs 1.. (NEXT-6, ADR-311): the table
+/// and, per pair, the interrupt and its message, or why the pair is polled.
+pub struct NetQueueVectors {
+    table: Option<MsixTable>,
+    irq: [Result<(u32, u64, u32), Why>; MAX_PAIRS],
+}
+
+impl NetQueueVectors {
+    const NONE: Self = Self {
+        table: None,
+        irq: [Err(Why::NoMsix); MAX_PAIRS],
+    };
+
+    fn all(why: Why) -> Self {
+        Self {
+            table: None,
+            irq: [Err(why); MAX_PAIRS],
+        }
+    }
+
+    /// Whether pair `k` has a vector (its MSI-X entry is `k`).
+    fn has(&self, k: u16) -> bool {
+        self.irq.get(usize::from(k)).is_some_and(Result::is_ok)
+    }
+}
+
+static NET_QUEUE_VECTORS: SpinLock<NetQueueVectors> = SpinLock::new(NetQueueVectors::NONE);
+
+/// Receive interrupts per pair (pair 0 is [`net_irqs`]), and the interrupt
+/// number each pair's handler answers to (0: none).
+static NET_QUEUE_IRQS: [AtomicU64; MAX_PAIRS] = [const { AtomicU64::new(0) }; MAX_PAIRS];
+static NET_QUEUE_INTID: [AtomicU32; MAX_PAIRS] = [const { AtomicU32::new(0) }; MAX_PAIRS];
+
+/// Receive interrupts of pair `k` so far (statistics, and the wake-up
+/// machine of the core that owns the pair).
+pub fn net_queue_irqs(k: usize) -> u64 {
+    if k == 0 {
+        return net_irqs();
+    }
+    // Relaxed: a counter compared with an earlier reading on the core that
+    // takes the interrupt.
+    NET_QUEUE_IRQS
+        .get(k)
+        .map_or(0, |c| c.load(Ordering::Relaxed))
+}
+
+/// Why pair `k` has no receive interrupt (for its boot line).
+pub fn net_queue_why(k: usize) -> Why {
+    match NET_QUEUE_VECTORS.lock().irq.get(k) {
+        Some(Err(why)) => *why,
+        _ => Why::NoVector,
+    }
+}
+
+/// A receive interrupt of pair 1..: only counted, as [`on_net_irq`].
+fn on_net_queue_irq(intid: u32) {
+    for (k, id) in NET_QUEUE_INTID.iter().enumerate().skip(1) {
+        // Relaxed: written before the vector was unmasked.
+        if id.load(Ordering::Relaxed) == intid {
+            if let Some(c) = NET_QUEUE_IRQS.get(k) {
+                // Relaxed: see `net_queue_irqs`.
+                c.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
+    }
+}
+
+/// Aims pair `k`'s receive interrupt at logical CPU `cpu` (the core that
+/// owns the pair, on that core when it starts) and unmasks it. Returns the
+/// interrupt for the boot line, or why the pair stays polled.
+pub fn route_net_queue(k: usize, cpu: usize) -> Result<u32, Why> {
+    let v = NET_QUEUE_VECTORS.lock();
+    let (id, address, data) = v.irq.get(k).copied().unwrap_or(Err(Why::NoVector))?;
+    let table = v.table.ok_or(Why::TableUnmapped)?;
+    #[cfg(target_arch = "aarch64")]
+    let (address, data) = {
+        // A GICv2m SPI: the distributor routes it; the message is the same.
+        irq::enable_spi(id, cpu);
+        (address, data)
+    };
+    #[cfg(target_arch = "x86_64")]
+    let (address, data) = {
+        let _ = (address, data);
+        // Relaxed: written before the CPU was started.
+        let apic = crate::smp::CPUS
+            .get(cpu)
+            .map_or(u64::MAX, |c| c.mpidr.load(Ordering::Relaxed));
+        if apic > 0xfe {
+            return Err(Why::CoreZeroOnly);
+        }
+        msi::message(apic, id)
+    };
+    if let Some(slot) = NET_QUEUE_INTID.get(k) {
+        // Relaxed: the handler reads it only after the unmask below.
+        slot.store(id, Ordering::Relaxed);
+    }
+    table.write(k as u16, address, data, false);
     Ok(id)
 }
+
+/// Queue pairs to ask the NIC for (ADR-313): one per CPU (the data cores
+/// are not known before the store is opened; a DB core's pair is set up and
+/// never used), at most [`MAX_PAIRS`], or one with
+/// `devices.virtio_net_queues = "single"`.
+static NET_WANT_PAIRS: AtomicUsize = AtomicUsize::new(1);
 
 /// The GICv3 ITS for the NIC's MSI (ADR-270), set up on first use: when
 /// the platform has an ITS and no GICv2m frame (QEMU TCG, KVM such as the
@@ -798,27 +991,73 @@ impl ItsSource {
 
 /// The NIC's MSI-X vector: the GICv2m frame or the local APIC as for the
 /// disks, else (aarch64) the GICv3 ITS.
+/// Pairs 1.. get further SPIs of the GICv2m frame; the ITS serves core 0
+/// only (one collection, ADR-270), so with it they are polled (ADR-311).
 #[cfg(target_arch = "aarch64")]
 fn net_msix<C: ConfigSpace>(
     cfg: &mut C,
     bdf: Bdf,
     frame: &mut Option<msi::Frame>,
     its: &mut Option<ItsSource>,
-) -> Result<u32, Why> {
+    want: usize,
+) -> Result<(u32, NetQueueVectors), Why> {
     match (frame.as_mut(), its.as_mut()) {
-        (None, Some(its)) => setup_msix_with(cfg, bdf, || its.map(bdf)),
-        (frame, _) => setup_msix(cfg, bdf, frame),
+        (None, Some(its)) => {
+            setup_msix_queues(cfg, bdf, || its.map(bdf), want, |_| Err(Why::CoreZeroOnly))
+        }
+        (Some(frame), _) => {
+            let first = frame.alloc().ok_or(Why::NoVector);
+            let f = *frame;
+            setup_msix_queues(
+                cfg,
+                bdf,
+                || {
+                    let spi = first?;
+                    let (a, d) = f.compose(spi);
+                    Ok((spi, a, d))
+                },
+                want,
+                |_| {
+                    let spi = frame.alloc().ok_or(Why::NoVector)?;
+                    let (a, d) = frame.compose(spi);
+                    Ok((spi, a, d))
+                },
+            )
+        }
+        (None, None) => Err(Why::NoMsiSource),
     }
 }
 
+/// Pairs 1.. get further vectors of the local APIC; the destination is
+/// written when the pair's core is known ([`route_net_queue`]).
 #[cfg(target_arch = "x86_64")]
 fn net_msix<C: ConfigSpace>(
     cfg: &mut C,
     bdf: Bdf,
     frame: &mut Option<msi::Frame>,
     _its: &mut Option<()>,
-) -> Result<u32, Why> {
-    setup_msix(cfg, bdf, frame.as_mut())
+    want: usize,
+) -> Result<(u32, NetQueueVectors), Why> {
+    let Some(frame) = frame.as_mut() else {
+        return Err(Why::NoMsiSource);
+    };
+    let first = frame.alloc().ok_or(Why::NoVector);
+    let f = *frame;
+    setup_msix_queues(
+        cfg,
+        bdf,
+        || {
+            let v = first?;
+            let (a, d) = f.compose(v);
+            Ok((v, a, d))
+        },
+        want,
+        |_| {
+            let v = frame.alloc().ok_or(Why::NoVector)?;
+            let (a, d) = frame.compose(v);
+            Ok((v, a, d))
+        },
+    )
 }
 
 /// A PCI function's requester ID: the ITS device ID on QEMU's `virt`.
@@ -829,8 +1068,20 @@ fn requester_id(bdf: Bdf) -> u32 {
 
 /// Enumerates PCIe, maps and initialises the virtio devices and seeds the
 /// CSPRNG. Must run before the page tables are locked.
-pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), ProbeError> {
-    let env = KernelEnv;
+pub fn probe(
+    platform: &PlatformInfo,
+    bootloader_entropy: &[u64],
+    cpus: u64,
+) -> Result<(), ProbeError> {
+    let want =
+        if urmqtt_config::CONFIG.devices.virtio_net_queues == urmqtt_config::NetQueues::Single {
+            1
+        } else {
+            (cpus as usize).clamp(1, MAX_PAIRS)
+        };
+    // Relaxed: read by this CPU in `probe_pci` below.
+    NET_WANT_PAIRS.store(want, Ordering::Relaxed);
+    let env = KernelEnv::RUNTIME;
     let mut pool = EntropyPool::new();
     let mut facts = EntropyFacts {
         bootloader_values: bootloader_entropy.iter().filter(|v| **v != 0).count() as u32,
@@ -843,6 +1094,7 @@ pub fn probe(platform: &PlatformInfo, bootloader_entropy: &[u64]) -> Result<(), 
         net: None,
         blk: None,
         rng: None,
+        rng_bdf: None,
         blk_msix_spi: None,
         net_msix_spi: None,
         net_wake: Mode::Polling(Why::NoMsix),
@@ -1009,6 +1261,9 @@ fn probe_pci(
     };
     let mut v2m = msi_frame(platform);
     let functions = pci::enumerate(&ecam, bus_start, bus_end);
+    // DMA remapping (ADR-305): up before any driver, every device blocked
+    // until it is given a domain.
+    crate::iommu::init(platform, functions.iter().map(|f| f.bdf));
     #[cfg(target_arch = "aarch64")]
     let mut its = ItsSource::new(platform, &functions);
     #[cfg(target_arch = "x86_64")]
@@ -1061,8 +1316,14 @@ fn probe_pci(
             },
         });
         let (Some(ty), Some(kind)) = (ty, kind) else {
+            // Not a virtio function this kernel knows: an edition's driver
+            // may bind it (ADR-336); the open edition has none.
+            crate::ext::probe_pci(&mut ecam, f);
             continue;
         };
+        // DMA memory of this device goes into its own IOMMU domain (ADR-305).
+        let dev_env = KernelEnv::device(f.bdf);
+        let env = &dev_env;
         // Every type without a path of its own (ADR-257): the table decides.
         if !matches!(vdev::driver(ty).map(|d| d.path), Some(vdev::Path::Builtin)) {
             vdev::probe_generic(&mut ecam, env, f.bdf, f.device, ty);
@@ -1124,6 +1385,7 @@ fn probe_pci(
                     transport(&mut ecam, f.bdf, &caps, true)?,
                     env,
                 )?);
+                devs.rng_bdf = Some(f.bdf);
                 vdev::record(f.bdf, ty, State::Driven, "entropy");
             }
             DeviceType::Block => {
@@ -1278,14 +1540,29 @@ fn probe_pci(
                 // receive queue, unless the configuration forces polling.
                 // Sizing the BARs (in `transport`) comes first, as for blk.
                 let t = transport(&mut ecam, f.bdf, &caps, false)?;
-                let msix = if urmqtt_config::CONFIG.devices.virtio_net_interrupt
+                // Relaxed: stored by this CPU in `probe`.
+                let want = NET_WANT_PAIRS.load(Ordering::Relaxed);
+                let (msix, vectors) = if urmqtt_config::CONFIG.devices.virtio_net_interrupt
                     == urmqtt_config::NetInterrupt::Off
                 {
-                    Err(Why::Configured)
+                    (Err(Why::Configured), NetQueueVectors::all(Why::Configured))
                 } else {
-                    net_msix(&mut ecam, f.bdf, &mut v2m, &mut its)
+                    match net_msix(&mut ecam, f.bdf, &mut v2m, &mut its, want) {
+                        Ok((spi, v)) => (Ok(spi), v),
+                        Err(why) => (Err(why), NetQueueVectors::all(why)),
+                    }
                 };
-                let net = VirtioNet::new_with_msix(t, env, msix.ok().map(|_| 0))?;
+                // Pair k's receive queue signals MSI-X entry k (NEXT-6, ADR-311).
+                let net = VirtioNet::new_multi(t, env, want, |k| {
+                    let ok = if k == 0 { msix.is_ok() } else { vectors.has(k) };
+                    ok.then_some(k)
+                })?;
+                for r in vectors.irq.iter().skip(1).flatten() {
+                    // Counted from now on; aimed at the pair's core and
+                    // unmasked when that core starts.
+                    irq::register(r.0, on_net_queue_irq);
+                }
+                *NET_QUEUE_VECTORS.lock() = vectors;
                 devs.net_wake = match msix {
                     Ok(spi) if net.rx_irq => {
                         // Counted, and acknowledged, from now on; routed to
@@ -1320,8 +1597,9 @@ fn probe_pci(
     #[cfg(feature = "virtio-gpu")]
     virtio_gpu_console(&mut ecam, env, gpu, &displays);
     #[cfg(not(feature = "virtio-gpu"))]
-    let _ = (gpu, &displays);
+    let _ = (gpu, &displays, env);
     vdev::check_configuration();
+    crate::iommu::summary();
     Ok(())
 }
 
@@ -1356,7 +1634,12 @@ fn memory_bars<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> alloc::vec::Vec<(u8, u6
 /// display problem never stops the broker), loudly. The outcome is also
 /// recorded for the Diagnostic report (`virtio: virtio-gpu at ...`).
 #[cfg(feature = "virtio-gpu")]
-fn virtio_gpu_console(cfg: &mut Cfg, env: &KernelEnv, gpu: Option<(Bdf, u16)>, displays: &[Bdf]) {
+fn virtio_gpu_console(
+    cfg: &mut Cfg,
+    _runtime: &KernelEnv,
+    gpu: Option<(Bdf, u16)>,
+    displays: &[Bdf],
+) {
     use urmqtt_config::VirtioGpuMode;
     let mode = urmqtt_config::CONFIG.console.virtio_gpu;
     let Some((bdf, device)) = gpu else {
@@ -1410,6 +1693,9 @@ fn virtio_gpu_console(cfg: &mut Cfg, env: &KernelEnv, gpu: Option<(Bdf, u16)>, d
             }
         }
     };
+    // Its DMA memory goes into its own IOMMU domain (ADR-305).
+    let gpu_env = KernelEnv::device(bdf);
+    let env = &gpu_env;
     let caps = find_caps(cfg, bdf);
     if caps.support(device, true) != Support::Modern {
         warn!("console: virtio-gpu at pci {bdf}: no virtio 1.0 capabilities, not used ({why})");
@@ -1499,7 +1785,15 @@ pub fn prepare_boot_disk(fault: Option<FaultSpec>) -> Result<(), &'static str> {
         b
     };
     let total = dev.sectors();
-    match gpt::prepare(dev.as_mut(), random) {
+    // A/B boot slots (ADR-295): the first boot reserves the standby next to
+    // the ESP, labelled with this kernel's version and store schema.
+    let opts = gpt::Options {
+        boot_slot: Some(urmqtt_store::slots::Init {
+            label: crate::VERSION,
+            schema: crate::bootslot::own_schema(),
+        }),
+    };
+    match gpt::prepare_with(dev.as_mut(), random, opts) {
         Ok((part, steps)) => {
             if steps.repaired_primary {
                 warn!("gpt: primary table was damaged, restored from the backup");
@@ -1516,6 +1810,22 @@ pub fn prepare_boot_disk(fault: Option<FaultSpec>) -> Result<(), &'static str> {
                     (total * 512) >> 20,
                     (part.sectors() * 512) >> 20
                 );
+            }
+            if steps.created_boot_slot {
+                info!(
+                    "gpt: standby boot slot reserved next to the EFI system partition (A/B updates: urmqtt-disk slots, docs/DEPLOY.md)"
+                );
+            }
+            // The slot step (ADR-296): count a trial boot or go back, before
+            // anything else runs from this kernel.
+            if let Err(e) = crate::bootslot::at_boot(dev.as_mut(), boot_medium().part_guid) {
+                if fault.is_some() {
+                    warn!(
+                        "disk-fault: power cut injected during the boot-slot step ({e:?}), powering off"
+                    );
+                    crate::power::off()
+                }
+                warn!("boot: the boot-slot step failed ({e:?}); booting without A/B");
             }
             let guid = gpt::disk_guid(dev.as_mut()).ok().flatten();
             info!(
@@ -1688,10 +1998,78 @@ fn arp_frame(mac: [u8; 6], op: u16, sender_ip: [u8; 4], target_ip: [u8; 4]) -> [
     f
 }
 
+/// `test=iommu-dma` (dev only, ADR-307): makes the entropy device write into
+/// a page that is not in its IOMMU domain, then reports whether the page
+/// stayed untouched and how many faults the units recorded meanwhile. With
+/// the IOMMU off the same request reaches the page (the control run). The
+/// entropy device is not used again afterwards (the CSPRNG is seeded).
+pub fn iommu_dma_test() {
+    let mut devs = DEVICES.lock();
+    let bdf = devs.rng_bdf;
+    let Some(rng) = devs.rng.as_mut() else {
+        warn!("iommu: test: no virtio-rng device, the DMA test needs one");
+        return;
+    };
+    // A page no device's domain holds: allocated outside `KernelEnv`.
+    let Some((va, pa, len)) = vm::dma_alloc(4096) else {
+        warn!("iommu: test: no memory");
+        return;
+    };
+    let before = crate::iommu::faults();
+    let r = rng.request_at(&KernelEnv::RUNTIME, pa, 64, 500_000_000);
+    devs.rng = None;
+    drop(devs);
+    // First core 0's tick alone (it reads the logs every 100 ms): the test
+    // runs on core 0 with interrupts on. Then, if it saw nothing within a
+    // second, the logs read here, so a broken tick poll shows as such.
+    let t0 = time::uptime_ns();
+    while crate::iommu::faults() == before && time::uptime_ns() - t0 < 1_000_000_000 {
+        core::hint::spin_loop();
+    }
+    let by_tick = crate::iommu::faults() != before;
+    let t0 = time::uptime_ns();
+    while crate::iommu::faults() == before && time::uptime_ns() - t0 < 1_000_000_000 {
+        crate::iommu::poll();
+        core::hint::spin_loop();
+    }
+    // SAFETY: the page was just allocated (zeroed, HHDM-mapped, `len`
+    // bytes) and is owned here; only read.
+    let page = unsafe { core::slice::from_raw_parts(va as *const u8, len) };
+    let written = page.iter().any(|b| *b != 0);
+    let faults = crate::iommu::faults() - before;
+    info!(
+        "iommu: test: virtio-rng {} asked to write 64 bytes at {pa:#x} (outside its domain): {}; the page is {}; {faults} fault(s) recorded",
+        bdf.map_or_else(
+            || alloc::string::String::from("?"),
+            |b| alloc::format!("{b}")
+        ),
+        match r {
+            Ok(n) => alloc::format!("the device answered {n} byte(s)"),
+            Err(e) => alloc::format!("no answer ({e:?})"),
+        },
+        if written { "WRITTEN" } else { "untouched" }
+    );
+    if crate::iommu::active() {
+        info!(
+            "iommu: test: the fault was {}",
+            if by_tick {
+                "read by core 0's tick"
+            } else {
+                "NOT read by core 0's tick within a second"
+            }
+        );
+        if !written && faults > 0 {
+            info!("iommu: test: DMA outside the domain blocked and counted");
+        } else {
+            warn!("iommu: test: DMA outside the domain NOT blocked or not counted");
+        }
+    }
+}
+
 /// Sends a gratuitous ARP announcement and an ARP request for the QEMU user
 /// network gateway, then waits briefly for any reply (RX path check).
 pub fn net_selftest() -> Result<(), &'static str> {
-    let env = KernelEnv;
+    let env = KernelEnv::RUNTIME;
     let mut devs = DEVICES.lock();
     let Some(net) = devs.net.as_mut() else {
         warn!("net: no virtio-net device, self-test skipped");

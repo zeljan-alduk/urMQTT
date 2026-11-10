@@ -4,9 +4,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use crate::blob::{
-    self, BASE_VERSION, Blob, FORMAT_VERSION, HEADER_LEN, MAGIC, SIG_KEY_LEN, SIG_LEN,
-};
+use crate::blob::{self, BASE_VERSION, Blob, HEADER_LEN, MAGIC, SIG_KEY_LEN, SIG_LEN};
 use crate::fields::{self, Field, Kind};
 use crate::{CfgError, err};
 
@@ -14,10 +12,8 @@ use crate::{CfgError, err};
 #[derive(Debug, Default, Clone)]
 pub struct Builder {
     records: BTreeMap<u16, Vec<u8>>,
-}
-
-fn field(tag: u16) -> Result<&'static Field, CfgError> {
-    fields::by_tag(tag).ok_or(err("blob", "unknown field tag"))
+    /// An edition's extension fields (NOW-18, ADR-337); empty for the open tools.
+    ext: Vec<Field>,
 }
 
 impl Builder {
@@ -25,15 +21,45 @@ impl Builder {
         Self::default()
     }
 
+    /// A builder that also accepts the extension fields `ext` of an edition
+    /// (their tags in the reserved range, [`crate::ext`]); the blob it writes
+    /// is validated with [`Blob::parse_ext`].
+    pub fn with_extensions(ext: &[Field]) -> Result<Self, CfgError> {
+        crate::ext::check(ext).map_err(|m| err("ext", m))?;
+        Ok(Self {
+            records: BTreeMap::new(),
+            ext: ext.to_vec(),
+        })
+    }
+
+    /// Declares an edition's extension fields on a builder that has none yet
+    /// (the packer adds them after the open fields are set).
+    pub fn add_extensions(&mut self, ext: &[Field]) -> Result<(), CfgError> {
+        crate::ext::check(ext).map_err(|m| err("ext", m))?;
+        if !self.ext.is_empty() {
+            return Err(err("ext", "the extension fields are already declared"));
+        }
+        self.ext = ext.to_vec();
+        Ok(())
+    }
+
+    /// The field of `tag`: one of the table, or one of this builder's extension fields.
+    fn field(&self, tag: u16) -> Result<Field, CfgError> {
+        fields::by_tag(tag)
+            .or_else(|| crate::ext::lookup(tag, &self.ext))
+            .copied()
+            .ok_or(err("blob", "unknown field tag"))
+    }
+
     /// Stores the already-encoded `value` of `tag` after checking its shape
     /// and range; a value equal to the default removes the record.
     pub fn set_raw(&mut self, tag: u16, value: &[u8]) -> Result<(), CfgError> {
-        let f = field(tag)?;
+        let f = self.field(tag)?;
         if !f.stored {
             return Ok(());
         }
-        blob::check_value(f, value)?;
-        if is_default(f, value) {
+        blob::check_value(&f, value)?;
+        if is_default(&f, value) {
             self.records.remove(&tag);
         } else {
             self.records.insert(tag, value.to_vec());
@@ -46,7 +72,7 @@ impl Builder {
     }
 
     pub fn uint(&mut self, tag: u16, v: u64) -> Result<(), CfgError> {
-        let f = field(tag)?;
+        let f = self.field(tag)?;
         let Kind::UInt { bytes, .. } = f.kind else {
             return Err(err(f.key, "not an integer field"));
         };
@@ -67,7 +93,7 @@ impl Builder {
     }
 
     pub fn strs<S: AsRef<str>>(&mut self, tag: u16, items: &[S]) -> Result<(), CfgError> {
-        let f = field(tag)?;
+        let f = self.field(tag)?;
         let mut v = Vec::new();
         for s in items {
             let s = s.as_ref();
@@ -77,7 +103,7 @@ impl Builder {
         }
         // An empty list is a real value when the default is not empty.
         if v.is_empty() && matches!(f.kind, Kind::Strs { default, .. } if !default.is_empty()) {
-            blob::check_value(f, &v)?;
+            blob::check_value(&f, &v)?;
             self.records.insert(tag, v);
             return Ok(());
         }
@@ -145,16 +171,18 @@ impl Builder {
     /// set (ADR-256), 6 with a `[devices]` key set (ADR-257), 7 with `network.mtu` set (ADR-264), 8 with
     /// `limits.publisher_backpressure` set (ADR-269), 9 with a `[websocket]` key set (ADR-272), 11 with
     /// `devices.virtio_net_interrupt` set (ADR-270), 12 with an `[mqtt5]` key or an expiry limit set (ADR-273), 13
-    /// with a shared-group limit set (ADR-275). A field at its default writes no record.
+    /// with a shared-group limit set (ADR-275), 14 with `limits.max_connections_per_ip` set (ADR-280), 15 with `limits.max_runtime_accounts` set (ADR-285), 16 with a `[metrics]` key set (ADR-290), 17 with an `[update]` key set (ADR-297), 18 with `devices.iommu` set (ADR-305), 19 with `devices.virtio_net_queues` set (ADR-313), 20 with an `observability.log_tls*` key set (ADR-318), 22 with `storage.disk_key_source` set (ADR-328), 23 with a `network.ipv6*` key set or an IPv6 network in an allow-list (ADR-334). A field at its default writes
+    /// no record.
     pub fn lowest_version(&self) -> u16 {
         let tls_off = self
             .records
             .iter()
             .any(|(t, v)| *t == crate::fields::tag::NET_TLS_PORT && v.iter().all(|b| *b == 0));
+        // An extension field's `since` counts like any other (ADR-337).
         let newest = self
             .records
             .keys()
-            .filter_map(|t| crate::fields::by_tag(*t))
+            .filter_map(|t| crate::fields::by_tag(*t).or_else(|| crate::ext::lookup(*t, &self.ext)))
             .map(|f| f.since)
             .max()
             .unwrap_or(BASE_VERSION);
@@ -164,7 +192,16 @@ impl Builder {
             .records
             .iter()
             .any(|(t, v)| *t == crate::fields::tag::ST_ENCRYPTION && v.iter().any(|b| *b != 0));
-        let floor = if encrypted {
+        // IPv6 networks in an allow-list (NEXT-1, ADR-334): the key predates
+        // format 23, the value does not.
+        let v6_nets = self.records.iter().any(|(t, v)| {
+            (*t == crate::fields::tag::PL_ALLOW_FROM
+                || *t == crate::fields::tag::METRICS_ALLOW_FROM)
+                && v.contains(&b':')
+        });
+        let floor = if v6_nets {
+            23
+        } else if encrypted {
             4
         } else if tls_off {
             3
@@ -178,10 +215,7 @@ impl Builder {
     /// configuration of a template ISO, which is how a template says what its kernel reads). A version
     /// below [`lowest_version`](Self::lowest_version) is refused.
     pub fn finish_as(&self, dev_allowed: bool, version: u16) -> Result<Vec<u8>, CfgError> {
-        if version < self.lowest_version()
-            || version > FORMAT_VERSION
-            || version == blob::UNUSED_VERSION
-        {
+        if version < self.lowest_version() || !blob::known_version(version) {
             return Err(err(
                 "blob",
                 "this configuration needs a newer format version than the one asked for",
@@ -210,7 +244,7 @@ impl Builder {
                 "the configuration does not fit in a slot (256 KiB)",
             ));
         }
-        let parsed = Blob::parse(&out)?;
+        let parsed = Blob::parse_ext(&out, &self.ext)?;
         crate::check::check(&parsed, dev_allowed)?;
         Ok(out)
     }
@@ -255,7 +289,16 @@ pub fn sign(
     unsigned: &[u8],
     sign: impl FnOnce(&[u8]) -> ([u8; SIG_KEY_LEN], [u8; SIG_LEN]),
 ) -> Result<Vec<u8>, CfgError> {
-    let b = Blob::parse(unsigned)?;
+    sign_ext(unsigned, &[], sign)
+}
+
+/// [`sign`] for a blob with an edition's extension fields `ext` (ADR-337).
+pub fn sign_ext(
+    unsigned: &[u8],
+    ext: &[Field],
+    sign: impl FnOnce(&[u8]) -> ([u8; SIG_KEY_LEN], [u8; SIG_LEN]),
+) -> Result<Vec<u8>, CfgError> {
+    let b = Blob::parse_ext(unsigned, ext)?;
     if b.signature().is_some() {
         return Err(err("signature", "the blob is already signed"));
     }
@@ -264,7 +307,7 @@ pub fn sign(
     out.push(1);
     out.extend_from_slice(&key);
     out.extend_from_slice(&sig);
-    Blob::parse(&out)?;
+    Blob::parse_ext(&out, ext)?;
     Ok(out)
 }
 

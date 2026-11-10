@@ -14,7 +14,7 @@ aarch64 ELF that contains everything needed to be an MQTT broker:
 │  broker  ─ sessions · topic trie · subscriptions · QoS · retained · LWT · ACL    │
 │  mqtt    ─ zero-copy 3.1.1/5.0 codec                                             │
 │  tls     ─ rustls handshake → own TLS 1.3 record layer                           │
-│  tcp     ─ server-only TCP, SYN cookies       net ─ Eth/ARP/IPv4/ICMP/DHCPv4     │
+│  tcp     ─ TCP, SYN cookies, active open      net ─ Eth/ARP/IPv4/DHCPv4/IPv6/ND  │
 │  store   ─ raw-disk VFS · SQL in Rust · per-core telemetry log · worker proxy    │
 │  dbworker ─ SQLite (C, vendored) as an EL0 / ring-3 program (own address space)  │
 │  virtio  ─ net · blk · rng      pci ─ ECAM · BARs · MSI-X                        │
@@ -30,11 +30,24 @@ There is no scheduler, no processes, no filesystem, no shell and no console
 input. The one exception to "no processes, no syscalls" is the **database
 worker** (section 4b): SQLite runs as an unprivileged program with twelve VFS
 system calls (and `exit`), called synchronously by the kernel. The only listening socket is TCP 8883 (plus 1883 in dev
-builds only, enforced at build time).
+builds only, enforced at build time), and the optional ones an image's configuration turns on, each off by
+default: a plaintext MQTT port (P1), a secure WebSocket port (ADR-272) and the Prometheus endpoint (ADR-290: plain
+HTTP on 9100, `GET /metrics`, to an allow-list of networks; it has no session, no TLS state and no broker connection,
+only a request reader, `urmqtt_broker::metrics::render` over the same `Info` as `$SYS`, and a deadline).
+
+The broker opens a connection of its own only when the configuration names a destination (NEXT-7, ADR-315 to
+ADR-319): today the TLS log collector of `observability.log_tls`. Core 0 owns such connections. Its TCP stack is the
+only one allowed an active open (`TcpStack::set_max_active`), from an ephemeral port that no listener has, so the
+dispatcher never steers the replies to a worker. `kernel/src/outbound.rs` (`TlsLink`) is the internal API every
+outbound user goes through: the reconnect policy (`urmqtt_tcp::dial`: ARP first, a 30 s deadline to be up, a jittered
+exponential backoff to 5 minutes), TLS 1.3 verified against the configured anchors only (`urmqtt_tls::client`),
+bounded buffers (64 KiB of ciphertext, 16 KiB received), and the user's own bounded queue
+(`urmqtt_tcp::queue::RecordQueue`). `kernel/src/logship.rs` is its first user (RFC 5425 framing of the syslog
+messages); an export bridge (NEXT-8) and a DNS client (NEXT-10) are the next.
 
 ## 2. Boot sequence
 
-1. **UEFI → Limine.** Limine loads the kernel at its fixed higher-half address and hands over a memory map, HHDM offset, framebuffer, DTB and/or RSDP, the MP (CPU) list and the date at boot, and the configuration slot as a module (`/boot/urmqtt.cfg`, pinned by blake2b in the ISO menu).
+1. **UEFI → Limine.** Limine loads the kernel at its fixed higher-half address and hands over a memory map, HHDM offset, framebuffer, DTB and/or RSDP, the MP (CPU) list and the date at boot, and the configuration slot as a module (`/boot/urmqtt.cfg`, pinned by blake2b in the ISO menu, and on an installed disk only when the image is signed for Secure Boot and therefore sealed to its configuration, ADR-320). Under Secure Boot the firmware checks the loader's signature first and Limine refuses any file without a hash (ADR-251).
 1b. **Configuration.** The first thing the kernel does: find the module, parse and re-validate the `urmqtt-cfg` blob (`crates/cfg`, ADR-215) and fill the typed `CONFIG` (`crates/config`, in `.bss`, no allocator needed), or stop with the reason; no module means the documented defaults. The heap size, log level and development switches all come from it. The fingerprint and signature state are logged once the console is up. A development kernel is the only build switch (`URMQTT_ENV=dev`); a release kernel refuses development options (ADR-216).
 2. **Early console.** The PL011 address comes from the DTB `stdout-path` or the ACPI SPCR table (with a dev fallback). The framebuffer text logger starts.
 3. **Exceptions.** The EL1 vector table is installed. Every synchronous exception prints a decoded ESR (exception class, ISS), ELR, FAR and SPSR. A panic logs, then calls PSCI `SYSTEM_RESET` (`SYSTEM_OFF` in smoke mode).
@@ -43,7 +56,9 @@ builds only, enforced at build time).
 6. **Interrupts, time, entropy.** The GIC comes up (GICv3 distributor and redistributors, or a GICv2 distributor and CPU interface on GIC-400 hosts, ADR-039), along with the generic timer, the CSPRNG seeded from `RNDR` or virtio-rng. With no entropy source, the kernel halts with a clear error.
 7. **SMP.** The application processors start (Limine MP or PSCI `CPU_ON`). Per-CPU data lives behind `TPIDR_EL1`.
 8. **Devices.** PCIe enumeration, then virtio-blk (data disk), virtio-net (queues per core) and virtio-rng.
-9. **Storage.** The data disk superblock is checked, SQLite opens in WAL + `locking_mode=EXCLUSIVE`, `PRAGMA quick_check` runs, and telemetry segments are recovered.
+8b. **Boot slots** (A/B updates, ADR-295, ADR-296). On the boot disk, right after the GPT first-boot steps: a slot on trial uses one of its attempts, or the boot entry switches back to the previous slot (and the machine resets) when none is left. The DB core later confirms a healthy trial (`update.confirm_after_s` with the store open and a listener up). The kernel writes partition-table sectors only, never an ESP.
+8. **Devices.** PCIe enumeration; with `devices.iommu` not `off`, the IOMMU (VT-d, AMD-Vi or SMMUv3) comes up blocking every device's DMA (H4b, ADR-305); then virtio-blk (data disk), virtio-net (queues per core) and virtio-rng, each given an IOMMU domain with only its own buffers as it allocates them.
+9. **Storage.** The data disk superblock is checked, SQLite opens in WAL + `locking_mode=EXCLUSIVE`, `PRAGMA quick_check` runs, and telemetry segments are recovered. An encrypted disk opens with the key from the image (ADR-240), or, with `storage.disk_key_source = "console"`, with the key a passphrase typed on the console unwraps from the superblock's key slots (`kernel/src/unlock.rs`, ADR-325, ADR-326): the boot CPU waits there, before the other cores and every listener.
 10. **Network.** DHCPv4 (or static), then the TLS listener on 8883.
 11. The kernel prints `URMQTT READY`.
 
@@ -86,22 +101,32 @@ One universal ISO boots both architectures (ADR-043); the crypto runs the portab
 ### Data path for one PUBLISH
 
 ```
-NIC RX buffer ─▶ IPv4/TCP validate ─▶ TLS decrypt in place ─▶ MQTT parse (borrowed)
+NIC RX buffer ─▶ IPv4 or IPv6/TCP validate ─▶ TLS decrypt in place ─▶ MQTT parse (borrowed)
    ─▶ ACL check (no DB) ─▶ rate limit ─▶ route: local subscribers + cross-core summary
    ─▶ payload stored once, refcounted ─▶ per-subscriber encrypt into TX buffer
    ─▶ PUBACK coalesced with the TCP ACK ─▶ NIC TX
    └▶ telemetry topics: append to this core's log segment (batched)
 ```
 
+### IPv6 beside IPv4 (NEXT-1, ADR-330 to ADR-334)
+
+One address type for both families (`net::addr::Addr`, IPv4 stored IPv4-mapped; the IPv6 parser refuses mapped
+addresses so the two never meet). Core 0's interface runs Neighbour Discovery, DAD and SLAAC (or a static
+address) and tells the other cores the addresses, router and MTU; the steering hashes the IPv6 4-tuple with the
+same Toeplitz key and table; the TCP stack sums the pseudo-header by family and answers a link-local peer from the
+link-local address and every other peer from the one global address, by the same rule the interface writes the
+header with. Every listener and every per-address limit takes both families; an IPv6 /64 is one source.
+Off by default (`network.ipv6`).
+
 ### Multicore NIC
 
-The NIC mode is chosen at boot from the virtio feature bits and logged:
+The NIC mode is chosen at boot from the virtio feature bits and logged (ADR-032, ADR-310 to ADR-314):
 
 | Mode | When | How |
 |---|---|---|
-| RSS | `VIRTIO_NET_F_RSS` | The device hashes the 4-tuple to one queue per core |
-| Multiqueue, no RSS | `VIRTIO_NET_F_MQ` | The device's own steering, with fallback dispatch for flows that land on the wrong core |
-| Fallback dispatcher | single queue | Core 0 computes a Toeplitz-style hash and forwards descriptors (not copies) through SPSC rings; TX goes through per-core queues or back to the owner |
+| Multiqueue with RSS | `VIRTIO_NET_F_MQ`, `_CTRL_VQ` and `_RSS` offered, the device's RSS takes a 40-byte key, a 128-entry table and the TCP/IPv4 hash, two or more data cores, `devices.virtio_net_queues = "auto"` | One queue pair per data core (pair c for core c, at most 16). The kernel programs the device's RSS with the Microsoft Toeplitz key and the same 128-entry indirection table its own steering then uses, so a TCP/IPv4 flow (and a TCP/IPv6 one where the device offers that hash type, ADR-333) lands on the queue of the core that owns it; everything unhashed (ARP, ICMP, ICMPv6, UDP) goes to pair 0 (core 0). Each core receives, transmits and is woken (its own MSI-X vector, ADR-270's probation and fallback per pair) on its own pair; a frame that is not the core's own (another listener's port, a misplaced frame) goes to core 0 over the c→0 ring and is steered as if it had arrived on pair 0. Cores beyond the pairs are served through pair 0 as below |
+| Multiqueue without RSS | `VIRTIO_NET_F_MQ` only | Not used: the device's own steering cannot be matched and may move a flow between queues (reordering). One pair, as below, and the boot line says why |
+| Dispatcher | one queue pair | Core 0 owns the NIC: it computes the Toeplitz hash, moves each received frame (one copy out of the DMA ring) through an SPSC ring to the core that owns the flow, and transmits the frames the cores send back over their c→0 rings |
 
 ## 4. Memory per connection
 
@@ -117,6 +142,9 @@ budget below is the plan that M15 will measure against, not a measurement:
 | Connection table slot | ~16 B | open-addressing hash on the 4-tuple |
 | Timer wheel entries | ~32 B | retransmit and keepalive |
 | **Idle total** | **~300–400 B** | no per-connection RX/TX buffers while idle |
+
+With IPv6 (NEXT-1, ADR-330) the TCP control block holds a 16-byte address for both families: 128 bytes, checked
+by `connection_state_stays_small`.
 
 While idle there are no per-connection buffers. A pooled buffer is attached
 only while an MQTT frame or TLS record is incomplete, or while TX data is
@@ -168,9 +196,12 @@ and calls synchronously, on the core that owns the store:
 
 - TLS 1.3 only, with mutual TLS: device certificates must chain to a CA in the image's configuration.
 - `device_id` is taken from the configured field (`cn` or `san_uri`), and the MQTT client id must match it.
-- The handshake runs through rustls in `no_std` mode with a pure-Rust crypto provider. Admission control is a per-core token bucket. Every handshake phase has a timeout. Resumption uses PSK tickets.
+- The handshake runs through rustls in `no_std` mode with a pure-Rust crypto provider. Admission control is a per-core token bucket plus handshake limits per core and per source address, and one table shared by all cores that bounds the established connections of a source address (`limits.max_connections_per_ip`, ADR-280: checked at the SYN, counted at the final ACK before a token is taken, given back in the one function every close path ends in). Every handshake phase has a timeout. Resumption uses PSK tickets.
 - After the handshake the traffic keys are extracted and the rustls object is dropped. A minimal record layer (AES-128-GCM, ChaCha20-Poly1305) decrypts in place and encrypts directly into TX buffers (KeyUpdate: ADR-012).
 - Revoked serials are stored in SQLite and mirrored read-only on every data core. A handshake never waits for the DB.
+- Outbound (NEXT-7, ADR-317): a TLS 1.3 client (`urmqtt_tls::client`, rustls's client state machine and webpki's
+  server verification) for the connections the broker opens; no client certificate, the configured trust anchors
+  only, the configured name (or the address as an IP SAN), the wall clock required. Its session stays sans-IO.
 
 ## 6. Broker
 
@@ -187,6 +218,13 @@ and calls synchronously, on the core that owns the store:
   hands it round robin to one online member; the member's shard delivers it (`CoreMsg::Shared` carries the message's
   `Arc`). A SUBSCRIBE whose group lives on another shard holds its SUBACK and the connection's next packets until the
   owner has the member; a delivery that finds its member gone goes back to the owner for another.
+- Password accounts added at run time (NOW-15, ADR-285 to ADR-287): the signed control channel's `set-account` and
+  `remove-account` are applied on the DB core in one transaction with the sequence number (store schema 6, table
+  `accounts`, hashes only), published with the revocations and the allowlist under the same epoch, and picked up by every
+  data core's plaintext and WebSocket authenticator (`Authenticator::set_runtime`, image accounts first). An account's
+  class (full, read-only, write-only) is asked by the broker at each publish, Will and SUBSCRIBE of a login session
+  (`Broker::set_login_class`) and only narrows the listener's patterns; a removed or changed account's live logins are
+  closed.
 - The default ACL lets a device publish to `devices/{id}/#` and subscribe to `devices/{id}/cmd/#`. Patterns are configurable. ACL checks never touch the DB.
 - Every limit (packet size, topic length and levels, subscriptions, in-flight messages, queue depth, publish rate, connections per core) is a compile-time constant from `deploy/<env>/config.toml`.
 
@@ -211,9 +249,53 @@ MADT, GTDT, MCFG, SPCR). The `platform` crate turns either source into one
 `PlatformInfo`, and M5 verifies that `-machine virt,acpi=on` and `acpi=off`
 print identical summaries.
 
+## 8b. The kernel as a library (NOW-18, ADR-335 to ADR-339)
+
+`crates/kernel` is a library (`urmqtt_kernel`) and a one-line binary. A kernel **image** is a binary crate that
+names its *edition* with `urmqtt_kernel::image!`; the open image is `crates/kernel/src/main.rs`:
+
+```rust
+#![cfg_attr(target_os = "none", no_std, no_main)]
+urmqtt_kernel::image!(urmqtt_kernel::ext::Edition::OPEN);
+```
+
+The macro checks the edition when the crate is compiled (`Edition::check`, a `const fn`) and defines the boot
+CPU's `urmqtt_kmain` (which the arch `_start` stubs call) as a call of the library's `kmain` with that edition.
+Everything the kernel does is the library's; an edition adds to it at four kinds of extension points, all in
+`urmqtt_kernel::ext`, and nothing else is reachable from outside:
+
+| Extension point | Type | When it runs | Rules |
+|---|---|---|---|
+| PCI drivers | `PciDriver { name, ids: &[PciId], max, probe }` | during the PCI scan, for every function no open driver claims | an ID is vendor:device, a vendor, or a class:subclass; a function with the virtio vendor `0x1AF4` is never offered, and an ID that names it is a build error (the open drivers bind as before, ADR-336); the first matching driver with room binds; `max` more are `spare` |
+| Device access | `PciDevice` (handed to `probe`) | in `probe` only | the function's own configuration space, `enable`, its memory BARs (`bar`, `map_bar`: a bounds-checked `Region` over at most 16 MiB, mapped before the page tables are locked), `dma_alloc` in the function's IOMMU domain (ADR-305) |
+| Configuration keys | `urmqtt_cfg::fields::Field` (`urmqtt_cfg::ext::field`) | read with `ext::config_bool/uint/variant/str/strs` | tags `0xF000..=0xFFFE`, keys `ext.<section>.<name>` (TOML `[ext.<section>]`), kinds Bool, UInt, Enum, Str, Strs; the open kernel and tools refuse such a record (ADR-337) |
+| Boot hooks | `Hooks { early, devices, ready, tick }` | `early`: heap and self-tests up, before interrupts and devices; `devices`: after the PCI scan, device memory still mappable; `ready`: just before `URMQTT READY`; `tick`: the boot CPU's 10 ms tick, interrupt context | plain `fn()`; a hook that cannot go on calls `ext::fatal` (ADR-338) |
+
+Boot log: an edition that adds anything prints `edition: <name>: <n> PCI driver(s), <m> configuration key(s),
+hooks: ...` once the heap is up; each bound function prints `ext: <driver> at <bdf>: driven: <detail>` (or
+`spare`, or a warning `failed: <why>`), and the Diagnostic report's PCI list names the driver. The open image runs
+the same code on empty tables and prints none of it.
+
+**Building an image elsewhere.** The library's build script hands its linker script and link flags to dependents
+(`links = "urmqtt-kernel"`: `DEP_URMQTT_KERNEL_LINKER_SCRIPT`, `DEP_URMQTT_KERNEL_LINK_ARGS`), and builds the
+database worker it embeds from this repository's checkout. An edition's workspace copies the three things Cargo does
+not take from a dependency: the `[patch.crates-io]` entries of the vendored crates, the `release` and `dev`
+profiles, and the kernel target's `rustflags` (`.cargo/config.toml`) with the Makefile's `-Zbuild-std`, path
+remapping, stack protector and PIE flags. `examples/edition` is such a workspace inside this repository (its own
+`[workspace]` and `Cargo.lock`): a driver for QEMU's `edu` device (1234:11e8) that maps BAR 0 and runs the device's
+liveness check with a value from `ext.example.edu_check`, every hook, and its own packer (`pack_ext` of
+`urmqtt-config-schema`). `make edition-example [ARCH=x86_64]` builds it; the smoke group `edition` boots it and the
+open image side by side; `scripts/mkiso.sh --config-slot` puts an edition's slot into an image unchecked (the
+open `urmqtt-config` cannot read it).
+
+The crates an edition's driver needs come re-exported from the library, so their versions are the kernel's:
+`urmqtt_kernel::cfg`, `urmqtt_kernel::log` (the `info!`/`warn!` macros), `urmqtt_kernel::pci`.
+
 ## 9. Crate dependency rules
 
-- `kernel` depends on everything. Nothing depends on `kernel`.
+- `kernel` depends on everything. Inside this repository nothing depends on `kernel`; an edition's image crate
+  does (§8b).
 - The host-testable crates (`timer-wheel`, `tcp`, `mqtt`, `broker`, `tls` record layer, `net` parsing, `config`, `platform` parsers) never touch registers. Hardware access sits behind traits implemented in `arch-aarch64`, `virtio` and `kernel`.
 - `broker` is tested end to end over an in-memory transport.
+- The IOMMU drivers (`iommu`) are host-testable too: registers and table memory are traits the kernel implements (ADR-305).
 - `unsafe` is allowed only in `arch-aarch64`, `mm`, `pci`, `virtio`, `store` (FFI) and minimal `kernel` glue, and every block carries a `// SAFETY:` comment (enforced by `clippy::undocumented_unsafe_blocks`).

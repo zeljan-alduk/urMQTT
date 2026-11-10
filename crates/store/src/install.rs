@@ -18,6 +18,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use urmqtt_cfg::fields::Field;
+
 use crate::disk::{BlockDevice, IoError};
 use crate::gpt::{self, ENTRY_SECTORS};
 use crate::layout::{MIN_SECTORS, SECTOR};
@@ -76,6 +78,11 @@ pub enum InstallError {
     /// than one) unconfigured configuration slot, or the slot is not a
     /// valid boot slot.
     NoConfigSlot,
+    /// The image is sealed for Secure Boot (LATER-6, ADR-320): its
+    /// `limine.conf` pins a configuration module, and the configuration to
+    /// be installed is not that one (or there is none). The disk would not
+    /// boot, so nothing is written.
+    SealedToOther,
 }
 
 impl From<IoError> for InstallError {
@@ -99,13 +106,31 @@ pub fn write_image(dev: &mut dyn BlockDevice, esp: &[u8]) -> Result<u64, Install
 }
 
 /// Where the installation image's unconfigured configuration slot is
-/// (C1c, ADR-217): exactly one, and `slot` must be a boot slot that parses.
-fn config_slot_offset(img: &[u8], slot: &[u8]) -> Result<usize, InstallError> {
+/// (C1c, ADR-217): exactly one, and `slot` must be a boot slot that parses
+/// with the extension fields `ext` of the image's edition (NOW-18, ADR-337;
+/// empty for the open edition, whose parse refuses every reserved tag).
+fn config_slot_offset(img: &[u8], slot: &[u8], ext: &[Field]) -> Result<usize, InstallError> {
     use urmqtt_cfg::blob::{Blob, SlotKind, find_slots, slot_blob};
-    let valid = slot_blob(slot, SlotKind::Boot).is_ok_and(|b| Blob::parse(b).is_ok());
+    let valid = slot_blob(slot, SlotKind::Boot).is_ok_and(|b| Blob::parse_ext(b, ext).is_ok());
     match (valid, find_slots(img, SlotKind::Disk).as_slice()) {
         (true, [off]) => Ok(*off),
         _ => Err(InstallError::NoConfigSlot),
+    }
+}
+
+/// Whether `img`, with `patch` (offset, slot) put in, would be refused by
+/// its own loader because it is sealed to another configuration (ADR-320).
+/// Checked before the first write: a refused install leaves the disk as it
+/// was.
+fn check_seal(img: &[u8], patch: Option<(usize, &[u8])>) -> Result<(), InstallError> {
+    use urmqtt_cfg::seal::{Seal, check};
+    let (skip, slot) = match patch {
+        Some((off, sl)) => (off..off.saturating_add(sl.len()), sl),
+        None => (0..0, &[][..]),
+    };
+    match check(img, skip, slot) {
+        Seal::Differs { .. } => Err(InstallError::SealedToOther),
+        Seal::Open | Seal::Matches { .. } => Ok(()),
     }
 }
 
@@ -117,14 +142,29 @@ pub fn write_image_with(
     esp: &[u8],
     slot: Option<&[u8]>,
 ) -> Result<u64, InstallError> {
+    write_image_ext(dev, esp, slot, &[])
+}
+
+/// [`write_image_with`] for the kernel of an edition that declares the
+/// extension fields `ext` (NOW-18, ADR-337): the slot it booted with may hold
+/// their records. With an empty `ext` this is `write_image_with`.
+pub fn write_image_ext(
+    dev: &mut dyn BlockDevice,
+    esp: &[u8],
+    slot: Option<&[u8]>,
+    ext: &[Field],
+) -> Result<u64, InstallError> {
     let mut img = gpt::raw_image(esp).ok_or(InstallError::BadImage)?;
+    let mut patch = None;
     if let Some(slot) = slot {
-        let off = config_slot_offset(&img, slot)?;
+        let off = config_slot_offset(&img, slot, ext)?;
         img.get_mut(off..off + slot.len())
             .ok_or(InstallError::NoConfigSlot)?
             .copy_from_slice(slot);
+        patch = Some((off, slot));
     }
-    write_boot_image(dev, &img)
+    check_seal(&img, patch)?;
+    write_patched(dev, &img, None)
 }
 
 /// Whether `img` is a whole disk image the installer can write: a multiple
@@ -163,10 +203,30 @@ pub fn write_boot_image_with(
     img: &[u8],
     slot: Option<&[u8]>,
 ) -> Result<u64, InstallError> {
+    write_boot_image_ext(dev, img, slot, &[])
+}
+
+/// [`write_boot_image_with`] for the kernel of an edition (as [`write_image_ext`]).
+pub fn write_boot_image_ext(
+    dev: &mut dyn BlockDevice,
+    img: &[u8],
+    slot: Option<&[u8]>,
+    ext: &[Field],
+) -> Result<u64, InstallError> {
     let patch = match slot {
-        Some(sl) => Some((config_slot_offset(img, sl)?, sl)),
+        Some(sl) => Some((config_slot_offset(img, sl, ext)?, sl)),
         None => None,
     };
+    check_seal(img, patch)?;
+    write_patched(dev, img, patch)
+}
+
+/// [`write_boot_image_with`] after the checks of the configuration and the seal.
+fn write_patched(
+    dev: &mut dyn BlockDevice,
+    img: &[u8],
+    patch: Option<(usize, &[u8])>,
+) -> Result<u64, InstallError> {
     if !is_boot_image(img) {
         return Err(InstallError::BadImage);
     }

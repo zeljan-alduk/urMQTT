@@ -222,6 +222,8 @@ struct Files {
     control_key: Option<[u8; 32]>,
     cert_not_after: u64,
     disk_key: Option<[u8; urmqtt_cfg::diskkey::KEY_BYTES]>,
+    /// The log collector's trust anchors (ADR-318).
+    log_tls_ca: Vec<Vec<u8>>,
 }
 
 fn read_files(
@@ -249,6 +251,7 @@ fn read_files(
         control_key: None,
         cert_not_after: 0,
         disk_key: None,
+        log_tls_ca: Vec::new(),
     };
     if supplied.contains("tls.cert")
         && let Some(b) = read(&mut errors, "tls.cert", &cfg.tls.cert)
@@ -271,7 +274,9 @@ fn read_files(
             Err(m) => errors.push(cerr("tls.key", m)),
         }
     }
+    // With the key from the console (LATER-7) there is no file to read.
     if cfg.storage.encryption == crate::EncryptionMode::Aes256Xts
+        && cfg.storage.disk_key_source == crate::DiskKeySource::Image
         && let Some(b) = read(&mut errors, "storage.disk_key", &cfg.storage.disk_key)
     {
         match urmqtt_cfg::diskkey::parse_key_file(&b) {
@@ -323,6 +328,20 @@ fn read_files(
             }
         }
     }
+    // ADR-318: the log collector's trust anchors, checked like the
+    // operational ones (a certificate, valid for trust.min_anchor_days).
+    for name in &cfg.observability.log_tls_ca {
+        let key = "observability.log_tls_ca";
+        let Some(b) = read(&mut errors, key, name) else {
+            continue;
+        };
+        match check_pem(&b, PemKind::Certificate)
+            .and_then(|()| check_expiry(&b, now, cfg.trust.min_anchor_days))
+        {
+            Ok(_) => files.log_tls_ca.push(b),
+            Err(m) => errors.push(cerr(key, format!("{name}: {m}"))),
+        }
+    }
     if supplied.contains("control.public_key")
         && let Some(b) = read(&mut errors, "control.public_key", &cfg.control.public_key)
     {
@@ -366,6 +385,21 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     // NOW-19, ADR-264: absent (0) writes nothing, so the blob keeps its
     // version; a value needs format 7.
     b.uint(tag::NET_MTU, u64::from(cfg.network.mtu.unwrap_or(0)))?;
+    // ADR-334: "off" is the default and writes nothing; the others need format 23.
+    b.variant(tag::NET_IPV6, cfg.network.ipv6.variant())?;
+    if let crate::Ipv6Mode::Static {
+        address,
+        prefix_len,
+        gateway,
+    } = cfg.network.ipv6
+    {
+        let mut a = String::new();
+        let mut g = String::new();
+        let _ = urmqtt_cfg::net::write_ipv6(&mut a, &address);
+        let _ = urmqtt_cfg::net::write_ipv6(&mut g, &gateway);
+        b.str(tag::NET_IPV6_ADDRESS, &format!("{a}/{prefix_len}"))?;
+        b.str(tag::NET_IPV6_GATEWAY, &g)?;
+    }
     b.uint(
         tag::NET_PLAIN_PORT,
         u64::from(cfg.network.mqtt_plain_port.unwrap_or(0)),
@@ -451,6 +485,17 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
         tag::LIM_MAX_SHARED_GROUP_MEMBERS,
         u64::from(l.max_shared_group_members),
     )?;
+    // ADR-280: the default writes nothing; any other value (0 included)
+    // needs format 14.
+    b.uint(
+        tag::LIM_MAX_CONNECTIONS_PER_IP,
+        u64::from(l.max_connections_per_ip),
+    )?;
+    // ADR-285: 0 (the default) writes nothing; a value set needs format 15.
+    b.uint(
+        tag::LIM_MAX_RUNTIME_ACCOUNTS,
+        u64::from(l.max_runtime_accounts),
+    )?;
     let a = &cfg.acl;
     b.strs(tag::ACL_DEVICE_PUBLISH, &a.device_publish)?;
     b.strs(tag::ACL_DEVICE_SUBSCRIBE, &a.device_subscribe)?;
@@ -494,6 +539,8 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     if let Some(k) = &f.disk_key {
         b.bin(tag::ST_DISK_KEY, k)?;
     }
+    // ADR-328: "image" is the default and writes nothing; "console" needs format 22.
+    b.variant(tag::ST_DISK_KEY_SOURCE, s.disk_key_source.variant())?;
     b.bool(tag::ST_REQUIRE_FLUSH, s.require_flush)?;
     b.bool(tag::ST_REQUIRE_DATA_DISK, s.require_data_disk)?;
     b.bool(tag::ST_REFUSE_ON_CORRUPTION, s.refuse_on_corruption)?;
@@ -510,6 +557,15 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
         let (ip, port) = sock(x);
         b.addr(tag::OBS_METRICS, ip, port)?;
     }
+    // ADR-318: unset, the log shipping keys write nothing (the blob keeps
+    // its version); set, they need format 20.
+    if let Some(x) = &o.log_tls {
+        let (ip, port) = sock(x);
+        b.addr(tag::OBS_LOG_TLS, ip, port)?;
+    }
+    b.str(tag::OBS_LOG_TLS_NAME, &o.log_tls_name)?;
+    b.bins(tag::OBS_LOG_TLS_CA, &f.log_tls_ca)?;
+    b.uint(tag::OBS_LOG_TLS_QUEUE_KB, u64::from(o.log_tls_queue_kb))?;
     b.uint(tag::WD_HANDLER, u64::from(cfg.watchdog.handler_budget_ms))?;
     b.uint(
         tag::WD_HANDSHAKE,
@@ -544,7 +600,25 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
     b.uint(tag::CTL_MAX_AGE, u64::from(cfg.control.max_message_age_s))?;
     build_plaintext(&mut b, &cfg.plaintext)?;
     build_websocket(&mut b, &cfg.websocket)?;
+    build_metrics(&mut b, &cfg.metrics)?;
     build_mqtt5(&mut b, &cfg.mqtt5)?;
+    // ADR-297: at their defaults the `[update]` keys write nothing; any other
+    // value needs format 17.
+    b.variant(
+        tag::UPD_CONFIRM,
+        match cfg.update.confirm {
+            crate::UpdateConfirm::Auto => 0,
+            crate::UpdateConfirm::Operator => 1,
+        },
+    )?;
+    b.uint(
+        tag::UPD_CONFIRM_AFTER,
+        u64::from(cfg.update.confirm_after_s),
+    )?;
+    b.uint(
+        tag::UPD_TRIAL_TIMEOUT,
+        u64::from(cfg.update.trial_timeout_s),
+    )?;
     // ADR-256: "off" is the default and writes nothing (the blob keeps its
     // version); "auto" and "on" need format 5.
     b.variant(
@@ -568,6 +642,10 @@ fn build(cfg: &Config, f: &Files) -> Result<Builder, urmqtt_cfg::CfgError> {
         tag::DEV_NET_INTERRUPT,
         cfg.devices.virtio_net_interrupt.variant(),
     )?;
+    // ADR-305: "off" is the default and writes nothing; the others need format 18.
+    b.variant(tag::DEV_IOMMU, cfg.devices.iommu.variant())?;
+    // ADR-313: "auto" is the default and writes nothing; "single" needs format 19.
+    b.variant(tag::DEV_NET_QUEUES, cfg.devices.virtio_net_queues.variant())?;
     Ok(b)
 }
 
@@ -679,6 +757,19 @@ fn build_mqtt5(b: &mut Builder, m: &crate::Mqtt5) -> Result<(), urmqtt_cfg::CfgE
     Ok(())
 }
 
+/// The `[metrics]` section (ADR-290). Values equal to their default are left
+/// out by the builder: a configuration that does not use the section keeps its
+/// format version; any key set needs format 16.
+fn build_metrics(b: &mut Builder, m: &crate::Metrics) -> Result<(), urmqtt_cfg::CfgError> {
+    b.bool(tag::METRICS_ENABLED, m.enabled)?;
+    b.uint(tag::METRICS_PORT, u64::from(m.port))?;
+    b.strs(tag::METRICS_ALLOW_FROM, &m.allow_from)?;
+    b.uint(tag::METRICS_MAX_CONNS, u64::from(m.max_connections))?;
+    b.uint(tag::METRICS_MAX_PER_IP, u64::from(m.max_connections_per_ip))?;
+    b.uint(tag::METRICS_REQUEST_TIMEOUT, u64::from(m.request_timeout_s))?;
+    Ok(())
+}
+
 /// Packs `toml_text` into an unsigned blob. A top-level `env = "..."` picks
 /// the environment (default `prod`). Missing keys take the defaults; every
 /// problem found is returned.
@@ -690,12 +781,35 @@ pub fn pack(toml_text: &str, opts: PackOptions<'_>) -> Result<Vec<u8>, Vec<Confi
 /// empty configuration of a template ISO, whose slot then tells what its kernel can read (ADR-233).
 pub fn pack_with(
     toml_text: &str,
+    opts: PackOptions<'_>,
+    newest_format: bool,
+) -> Result<Vec<u8>, Vec<ConfigError>> {
+    pack_ext(toml_text, opts, newest_format, &[])
+}
+
+/// [`pack_with`] for an edition built on this repository (NOW-18, ADR-337): the keys of its extension fields
+/// `ext` are read from the TOML table `[ext]` (`ext.<section>.<name>`, [`urmqtt_cfg::ext`]) and written in the
+/// reserved tag range. With an empty `ext` this is `pack_with`: an `[ext]` table is then an unknown key, as it is
+/// for the open `urmqtt-config` and the builder page.
+pub fn pack_ext(
+    toml_text: &str,
     mut opts: PackOptions<'_>,
     newest_format: bool,
+    ext: &[fields::Field],
 ) -> Result<Vec<u8>, Vec<ConfigError>> {
     let mut user: toml::Table = toml_text
         .parse()
         .map_err(|e: toml::de::Error| vec![cerr("", e.to_string())])?;
+    let ext_table = if ext.is_empty() {
+        None
+    } else {
+        urmqtt_cfg::ext::check(ext).map_err(|m| vec![cerr("ext", m)])?;
+        match user.remove("ext") {
+            None => Some(toml::Table::new()),
+            Some(toml::Value::Table(t)) => Some(t),
+            Some(_) => return Err(vec![cerr("ext", "must be a table")]),
+        }
+    };
     let toml_env = match user.remove("env") {
         None => None,
         Some(toml::Value::String(s)) => Some(s),
@@ -720,7 +834,10 @@ pub fn pack_with(
     let (text, supplied) = complete(&user)?;
     let cfg = parse(&env, &text)?;
     let files = read_files(&cfg, &supplied, &mut opts)?;
-    let builder = build(&cfg, &files).map_err(blob_err)?;
+    let mut builder = build(&cfg, &files).map_err(blob_err)?;
+    if let Some(t) = ext_table {
+        build_ext(&mut builder, &t, ext)?;
+    }
     // Packed for a dev kernel when the environment is dev; otherwise the
     // strictest check (a release kernel).
     if newest_format {
@@ -729,6 +846,87 @@ pub fn pack_with(
             .map_err(blob_err)
     } else {
         builder.finish(cfg.env == "dev").map_err(blob_err)
+    }
+}
+
+/// Every leaf of the `[ext]` table as (`ext.<path>`, value).
+fn ext_leaves<'t>(prefix: &str, t: &'t toml::Table, out: &mut Vec<(String, &'t toml::Value)>) {
+    for (k, v) in t {
+        let key = format!("{prefix}.{k}");
+        match v {
+            toml::Value::Table(sub) => ext_leaves(&key, sub, out),
+            _ => out.push((key, v)),
+        }
+    }
+}
+
+/// Encodes the `[ext]` table into `b` (ADR-337): every key must be a field of `ext`, every value of its kind.
+fn build_ext(
+    b: &mut Builder,
+    t: &toml::Table,
+    ext: &[fields::Field],
+) -> Result<(), Vec<ConfigError>> {
+    b.add_extensions(ext).map_err(blob_err)?;
+    let mut leaves = Vec::new();
+    ext_leaves("ext", t, &mut leaves);
+    let mut errors = Vec::new();
+    for (key, v) in leaves {
+        let Some(f) = urmqtt_cfg::ext::lookup_key(&key, ext) else {
+            errors.push(cerr(
+                &key,
+                "unknown key (not an extension field of this edition)",
+            ));
+            continue;
+        };
+        let wrong = |what: &str| cerr(&key, format!("must be {what}"));
+        let r = match (f.kind, v) {
+            (Kind::Bool(_), toml::Value::Boolean(x)) => {
+                b.bool(f.tag, *x).map_err(|e| cerr(&key, e.msg))
+            }
+            (Kind::UInt { .. }, toml::Value::Integer(x)) => match u64::try_from(*x) {
+                Ok(x) => b.uint(f.tag, x).map_err(|e| cerr(&key, e.msg)),
+                Err(_) => Err(cerr(&key, "out of range")),
+            },
+            (Kind::Enum { variants, .. }, toml::Value::String(x)) => {
+                match variants
+                    .iter()
+                    .position(|v| v == x)
+                    .and_then(|i| u8::try_from(i).ok())
+                {
+                    Some(i) => b.variant(f.tag, i).map_err(|e| cerr(&key, e.msg)),
+                    None => Err(cerr(
+                        &key,
+                        format!("must be one of {}", variants.join(", ")),
+                    )),
+                }
+            }
+            (Kind::Str { .. }, toml::Value::String(x)) => {
+                b.str(f.tag, x).map_err(|e| cerr(&key, e.msg))
+            }
+            (Kind::Strs { .. }, toml::Value::Array(a)) => {
+                let items: Option<Vec<&str>> = a.iter().map(toml::Value::as_str).collect();
+                match items {
+                    Some(items) => b.strs(f.tag, &items).map_err(|e| cerr(&key, e.msg)),
+                    None => Err(wrong("a list of strings")),
+                }
+            }
+            (Kind::Bool(_), _) => Err(wrong("true or false")),
+            (Kind::UInt { .. }, _) => Err(wrong("an integer")),
+            (Kind::Enum { .. } | Kind::Str { .. }, _) => Err(wrong("a string")),
+            (Kind::Strs { .. }, _) => Err(wrong("a list of strings")),
+            _ => Err(cerr(
+                &key,
+                "this kind of field is not allowed for an extension",
+            )),
+        };
+        if let Err(e) = r {
+            errors.push(e);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
     }
 }
 

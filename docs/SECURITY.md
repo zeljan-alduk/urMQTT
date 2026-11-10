@@ -25,8 +25,9 @@ which says what it gives up.
 | Device identities and the revocation list | CA embedded; revocations embedded and in SQLite | Who may connect. |
 | Control signing key (Ed25519) | **Offline**, never in the image: a file on an operator machine (dev) or an HSM/KMS behind `urmqtt-control --sign-cmd` (prod). The image holds only the public key (`deploy/<env>/control.pub`). | Revoking, unrevoking and allowlisting devices at runtime. |
 | Trust anchors by role | `[trust] operational` and `bootstrap` CA lists, embedded | Which CA grants which rights; rotation with overlap. |
-| Plaintext accounts (P1, opt-in) | Salted PBKDF2 hashes in the image's configuration slot (ADR-231); the passwords are never stored | Logging in on the plaintext port as a device. The hashes are public to whoever holds the image: use long random passwords. |
-| Disk key (S7, opt-in) | In the image's configuration slot (`storage.disk_key`), and in RAM while the disk is open (the cipher's round keys, wiped on drop) | Reading a stolen volume or snapshot. Whoever has the ISO has it (ADR-240). |
+| Plaintext accounts (P1, opt-in) | Salted PBKDF2 hashes in the image's configuration slot (ADR-231), and, with `limits.max_runtime_accounts`, in the data disk's `accounts` table (NOW-15, ADR-285, ADR-286); the passwords are never stored, logged or sent to the broker by the operator tool | Logging in on the plaintext port or over WebSocket as a device. The hashes are public to whoever holds the image or the disk: use long random passwords. |
+| Disk key (S7, opt-in) | In the image's configuration slot (`storage.disk_key`), and in RAM while the disk is open (the cipher's round keys, wiped on drop). With `storage.disk_key_source = "console"` (LATER-7) **not in the image**: wrapped in the data partition's key slots under passphrases, unwrapped at boot from what the operator types on the console | Reading a stolen volume or snapshot; with the console source, also whoever has the ISO. A passphrase guessed offline from a copied header (one PBKDF2 per guess) gives the key (ADR-240, ADR-325). |
+| Disk passphrases (LATER-7, opt-in) | Typed on the VM's console at boot, never stored, echoed or logged; the line buffer and the derived keys are wiped | Unlocking a copied disk. The provider's console and the hypervisor see it typed (ADR-326). |
 | Messages | In flight (RAM), retained and offline queues (SQLite), telemetry (log on the data disk) | Confidentiality and integrity of device data. |
 | Availability | — | The broker's purpose; the main target of a remote attacker. |
 
@@ -35,6 +36,7 @@ which says what it gives up.
 | Boundary | Trusted? | Notes |
 |---|---|---|
 | Network (TCP 8883, and the L2 segment) | **Untrusted** | Every byte is hostile until TLS client authentication completes, and stays untrusted as MQTT input afterwards. |
+| A configured outbound destination (NEXT-7, opt-in: the TLS log collector of `observability.log_tls`) | **Untrusted bytes, authenticated peer** | The broker connects to the address in the image and nowhere else; the peer must present a certificate that chains to `observability.log_tls_ca` for the configured name before a log record is sent. What it sends back is parsed as TCP and TLS only, and discarded. |
 | Plaintext listener (P1, opt-in, `plaintext.enabled`) | **Untrusted, and unencrypted** | Reachable only from `plaintext.allow_from`; a client holds the plaintext role (a narrower ACL, smaller packets, a lower rate, no `$SYS`, no control) and its traffic can be read and changed by anyone on the path. Chosen by the owner for a network the owner controls. |
 | Authenticated device | Partially | Restricted by the ACL and every limit below. A device can only harm itself and its own topics. |
 | Backend/service identity | More trusted | Wider ACL (`acl.service_*`). Still no query interface and no code execution. |
@@ -64,7 +66,10 @@ which says what it gives up.
 |---|---|---|
 | Ethernet, ARP, IPv4, ICMP, UDP | `urmqtt-net` (own) | unit tests; fuzz `net_frame` |
 | DHCP replies | `urmqtt-net::dhcp` (own) | unit tests; fuzz `net_frame` |
+| IPv6 header and extension headers, ICMPv6, Neighbour Discovery, SLAAC (NEXT-1, only with `network.ipv6` on) | `urmqtt-net::{ipv6,nd,addr}` (own) | unit tests; fuzz `ipv6_nd`, `net_frame`; smoke `ipv6` (relay probes: fragment, must-not-skip option, off-link NS) |
 | TCP segments | `urmqtt-tcp` (own) | 17 host tests incl. loss/duplication; fuzz `tcp_segment` |
+| TCP segments of an outbound connection: SYN-SENT and after (NEXT-7, ADR-315; only with an outbound user configured) | `urmqtt-tcp` (own, `active.rs`) | the SYN-SENT rules, our client against our server over a lossy link, the H3 model extended to the active open (`model_active`); fuzz `tcp_active` |
+| TLS handshake and records from a configured outbound peer (the log collector, ADR-317) | rustls client state machine, webpki server verification (third party), `urmqtt-tls::client` (own glue) | wrong name, unknown issuer, no clock, not-TLS bytes and an oversized record tested; fuzz `tls_client`; smoke `logtls-rogue-collector` |
 | TLS handshake | rustls (no_std, own RustCrypto provider) | upstream fuzzing; mTLS scenarios in smoke (wrong CA, expired, mismatch, revoked) |
 | TLS records after the handshake | `urmqtt-tls::record` (own) | unit tests; fuzz `tls_record` (garbage rejected, sealed records round-trip, any changed byte fails) |
 | Client certificate identity and serial | `urmqtt-tls::identity` (x509-cert) | fuzz `x509_identity` |
@@ -74,8 +79,10 @@ which says what it gives up.
 | Telemetry log on the disk | `urmqtt-store::telemetry` | crash and torn-write tests; fuzz `telemetry_recover` |
 | SQLite database file | SQLite 3.54.1 (vendored), **in the unprivileged database worker** (H6, ADR-210 to ADR-212) | EL0 / ring 3 in its own address space; fault containment and restart (smoke `worker-contain`, `worker-fault`); `quick_check` at boot, `SQLITE_DBCONFIG_DEFENSIVE`; upstream fuzzing |
 | Firmware tables (DTB, ACPI) | `urmqtt-platform` | fuzz `fdt_parse`, `acpi_parse` (trusted source, fuzzed anyway) |
+| IOMMU descriptions (DMAR, IVRS, IORT, `arm,smmu-v3` and `iommu-map`) and the units' fault records (ADR-305, ADR-306; read only with `devices.iommu` not `"off"`, except the description, which is parsed at every boot) | `urmqtt-platform::iommu`, `urmqtt-iommu` (own, `deny(unsafe_code)`, no `unsafe`) | host tests with QEMU's table shapes and a QEMU 11.1 DTB; models of the three units; fuzz `iommu_tables`; smoke `SMOKE_ONLY=iommu` |
 | Control messages (`$urmqtt/control`, H1) | `urmqtt-control` (own, `forbid(unsafe_code)`, fixed layout) + `ed25519-dalek` `verify_strict` | RFC 8032 vectors, round trip, every flipped byte fails; fuzz `control_message`; smoke `control-*` |
 | First packet of a plaintext connection, its CONNECT credentials, the `[plaintext]` entries (CIDRs, accounts, password hashes) | `urmqtt-mqtt` (the same decoder as TLS), `urmqtt-plain` and `urmqtt-cfg::{net,passwd,plain}` (own, `forbid(unsafe_code)` in `urmqtt-plain`) | fuzz `mqtt_decode`, `broker_input` (plaintext connections included), `plain_input` (parsers, allow-list and the table of source addresses against a model); 25 host tests in `urmqtt-plain`; smoke `plaintext-*` |
+| The metrics endpoint's HTTP request (one GET or HEAD, at most 2 KiB and 24 header lines; ADR-290 to ADR-293, only when `metrics.enabled`) and the `metrics.allow_from` entries | `urmqtt-http` (own, `no_std`, `forbid(unsafe_code)`, no allocation), `urmqtt-cfg::plain` (the CIDR grammar) | host tests and proptest; fuzz `http_request` (found a bare-LF delimiter disagreement in its first run) and `metrics_render`; smoke `metrics-*` |
 | WebSocket opening handshake (one HTTP/1.1 request, at most 4 KiB and 32 header lines) and RFC 6455 frames, `[websocket]` origins and paths (ADR-272) | `urmqtt-ws` (own, `no_std`, `forbid(unsafe_code)`, no allocation), `urmqtt-cfg::ws`; the MQTT bytes inside go to `urmqtt-mqtt` as on the TLS port | RFC 6455 and RFC 3174 vectors, proptest, Kani, Miri; fuzz `ws_upgrade`, `ws_frames`; Autobahn\|Testsuite (0 failed, docs/audit/ws-autobahn.md); smoke `websocket-*` |
 | Build-time configuration | `urmqtt-config-schema` | 38 tests; fuzz `config_parse`; invalid configuration fails the build |
 
@@ -92,20 +99,22 @@ service, E elevation of privilege.
 
 | Component | S | T | R | I | D | E |
 |---|---|---|---|---|---|---|
-| **Network stack** (Ethernet, ARP, IPv4, TCP) | forged SYN/ACK/RST: SYN cookies keyed (SipHash, rotating), RFC 5961 checks; **ARP and DHCP are unauthenticated on a shared segment (accepted, static addressing)** | segment injection: sequence and window checks, TLS above | — | none held: no state before the handshake | SYN, ACK, RST floods, slowloris: cookies, rate limits, per-address caps, admission (`tools/attack`) | a parser bug runs in ring 0: Rust, fuzzed (`net_frame`, `tcp_segment`), Kani, Miri |
+| **Network stack** (Ethernet, ARP, IPv4, IPv6, TCP) | forged SYN/ACK/RST: SYN cookies keyed (SipHash, rotating), RFC 5961 checks (both families); **ARP, DHCP and IPv6 Neighbour Discovery are unauthenticated on a shared segment (accepted, static addressing; IPv6 off by default)** | segment injection: sequence and window checks, TLS above | — | none held: no state before the handshake | SYN, ACK, RST floods, slowloris: cookies, rate limits, per-address caps, admission (`tools/attack`) | a parser bug runs in ring 0: Rust, fuzzed (`net_frame`, `ipv6_nd`, `tcp_segment`), Kani, Miri |
 | **TLS 1.3** (rustls handshake, own record layer) | mutual TLS, identity from the certificate (CN or SAN URI), revocation list, trust anchors by role; no 0-RTT | AEAD records, per-record keys, fatal alerts | — | forward secret; tickets under random per-boot keys; traffic secrets wiped (H0-W2) | handshake admission, in-flight caps, heap reserve, watchdog budget | rustls and webpki are third party (§6); hand-over code fuzzed and conformance-tested |
 | **MQTT broker** (codec, sessions, ACL, retained) | identity fixed by the certificate; client id must match | packet and topic limits, validated UTF-8 | per-identity counters, logs without payloads | device-scoped ACL (`{id}`), reserved namespaces, `$SYS` only for operators | per-device publish rate, subscription, in-flight, queue and retained bounds (AUDIT §6b) | no code path from a message to anything but routing; ACL fuzzer |
 | **Control channel** (signed revoke/unrevoke, registry) | Ed25519 signature from an offline key; only listed service identities may publish to it | sequence number, validity window, replay rejected; persisted | the sequence number and the log of each accepted message | — | verification before any work; rate limited like any publish | revocation is the only effect; unrevocation is off by default (`allow_unrevoke`); **theft of the signing key and a service identity is a residual risk** |
 | **Operator surface** (`$SYS`, console) | operator identities by exact id over mutual TLS | four fixed commands (`help`, `status`, `log level`, `reboot`), anything else refused; output replayed from a bounded ring | every command is logged with the identity and the text, refused or not | metrics carry no payloads or secrets | at most 5 commands in a burst then one per 2 s; a slow reader loses lines, never blocks the broker; **`reboot` is a denial of service in the wrong hands, which is why operator ids are exact** | no shell and no way to run code; the log level is never above the build-time maximum |
 | **Plaintext listener** (P1, opt-in) | **not authenticated by design** beyond the chosen login mode; `auth = "ip"` trusts the source address (documented) | none: nothing protects the path | per-identity counters | none: plaintext; a login can be replayed | SYN-time allow-list, per-address and total caps, lock-out, small packets, own rate | the plaintext role has no service, operator or control rights |
 | **WebSocket listener** (ADR-272, opt-in, `wss://` only) | `mtls`: the TLS port's certificate identity; `password`: no client certificate, a user name and password inside TLS, PBKDF2, lock-out; **an origin allowlist against cross-site WebSocket hijacking** (required with passwords) | TLS records; a strict upgrade (duplicate headers refused, no body, no extension) | per-identity counters, refusals by reason | inside TLS; nothing the client sent is echoed in an HTTP answer | upgrade deadline and 4 KiB bound (slowloris), the TLS admission, per-address and total caps, login rate, lock-out; no reassembly buffer, pongs only while output has room | password sessions have their own role (`Role::Web`): no service, operator or control rights, no `$SYS`, own ACL and namespace `$ws/` |
-| **Configuration and image** (blob, ISO, builder page) | the blob is validated at every boot; signed form available; template ISO refuses to serve | tampered module refused by the loader's hash pin and the blob's fingerprint; **a rewritten ISO is not detected without Secure Boot (H8 open)** | — | the image holds the server key (and the disk key): treat it as a secret | an invalid blob stops boot (fail closed) | production ignores the kernel command line; the builder runs in the user's browser and sends nothing |
-| **Data volume** (layout, telemetry, backups) | UUID and CRC on every structure; a damaged or foreign partition is refused, never formatted | torn writes survive by design (A/B superblock, fault-injection loops); **a malicious rewrite of sectors is only detected by the CRCs** | — | optional AES-256-XTS (ADR-240): protects a stolen volume, not a stolen ISO | a full or failing disk: bounded ring, scrubbing, backup and restore | parsers fuzzed (`disk_layout`, `disk_backup`, `disk_crypt`, `telemetry_recover`); XTS has no integrity (sector swap and rollback are possible with write access to the volume) |
+| **Metrics endpoint** (ADR-290, opt-in, plain HTTP) | **none beyond the source address**: an allow-list of networks (required, never "anywhere") applied to the SYN; a forged allowed address is not defended (as plaintext `auth = "ip"`) | none: plain HTTP | counters for refused sources and limits, requests by result | no client data in the text: no label is chosen by a client; load, versions and refusal counts are visible to the allowed networks | 2 KiB and 24-header bound, GET and HEAD only, a fixed answer for everything else, one answer per connection, a deadline from the accept (slowloris), connections per core and per address, 20 scrapes a second per core | read-only: it writes no state and reaches neither the broker's data nor `$SYS`; **never put a public network in `allow_from`** |
+| **Configuration and image** (blob, ISO, builder page) | the blob is validated at every boot; signed form available; template ISO refuses to serve | tampered module refused by the loader's hash pin and the blob's fingerprint; a rewritten ISO or disk is detected only under Secure Boot with your own signed, sealed image (LATER-6, ADR-320) | — | the image holds the server key (and the disk key): treat it as a secret | an invalid blob stops boot (fail closed) | production ignores the kernel command line; the builder runs in the user's browser and sends nothing |
+| **Data volume** (layout, telemetry, backups) | UUID and CRC on every structure; a damaged or foreign partition is refused, never formatted | torn writes survive by design (A/B superblock, fault-injection loops); **a malicious rewrite of sectors is only detected by the CRCs** | — | optional AES-256-XTS (ADR-240): protects a stolen volume, and with the key from the console (ADR-325) a stolen ISO too | a full or failing disk: bounded ring, scrubbing, backup and restore | parsers fuzzed (`disk_layout`, `disk_backup`, `disk_crypt`, `disk_keyslot`, `telemetry_recover`); XTS has no integrity (sector swap and rollback are possible with write access to the volume) |
 | **SQLite worker** (EL0 / ring 3) | — | checked system calls, bounds on every offset and length | — | own address space; no kernel symbol, no allocator | 30 s overrun and fault restart the worker; a restart storm makes storage unavailable | a compromised worker cannot touch kernel memory (`worker-contain`); **the kernel trusts its answers (an empty revocation list un-revokes certificates), there is no KPTI** |
 | **Kernel** (memory, interrupts, boot) | — | W^X, locked page tables (**no test writes one**), guard pages, canary, KASLR, allocator checks | fault and panic reports redacted | no secret in logs or reports (`fault-secrets`, `panic-secret`) | watchdog and stuck-core reset | PAC, BTI, MTE (TCG only), poison on free; **no forward-edge CFI; the HHDM base is fixed** |
-| **Boot chain** (UEFI, Limine, kernel) | pinned by hash in `limine.conf`, which is enrolled into the loaders (ADR-250); **loaders not signed (H8)** | a flipped byte in the kernel, the configuration module or `limine.conf` is refused (`integrity-*`, `config-tampered-refused`) | — | — | a refused boot is the failure mode | the installer entry erases a disk for whoever can use the boot menu (physical or console access, which already allows that) |
+| **Boot chain** (UEFI, Limine, kernel) | pinned by hash in `limine.conf`, which is enrolled into the loaders (ADR-250); loaders signed with the operator's own key when Secure Boot is used, and the installed disk then sealed to its configuration (ADR-251, ADR-320); **release images are unsigned** | a flipped byte in the kernel, the configuration module or `limine.conf` is refused (`integrity-*`, `config-tampered-refused`) | — | — | a refused boot is the failure mode | the installer entry erases a disk for whoever can use the boot menu (physical or console access, which already allows that) |
 | **Time** (RTC, SNTP) | unauthenticated NTP: median of several servers, bounded steps; **NTS out of scope** | lower bound is the build time | — | — | a wrong date refuses handshakes (fail closed) | — |
-| **Observability** (syslog, statsd, console) | plain UDP to a collector on a private network (accepted) | — | rate-limited logs | no payloads, keys or certificates in any sink | per-CPU rings drop rather than block | — |
+| **Outbound connections** (NEXT-7: the TLS log collector) | the collector's certificate must chain to `log_tls_ca` (the only anchors) for the configured name or address; no client certificate is offered | TLS 1.3 records; the collector's bytes are discarded | the log says each connection, failure and reconnect | the log lines leave encrypted; no secret, key or payload is in them | a slow or gone collector costs a bounded queue (`log_tls_queue_kb`) and 64 KiB of buffers; reconnects back off to 5 minutes | **destinations come only from the image: no request forgery from remote input**; a parser bug in rustls's client path or webpki is reachable from the configured peer only |
+| **Observability** (syslog, statsd, console) | plain UDP to a collector on a private network (accepted), or syslog over TLS (above) | — | rate-limited logs | no payloads, keys or certificates in any sink | per-CPU rings drop rather than block | — |
 | **Supply chain** (dependencies, build, release) | signed releases (minisign), SLSA provenance | reproducible builds (`make repro`), pinned toolchain and `Cargo.lock` | — | SBOM per release | — | 53 of 67 linked crate versions are cargo-vet exemptions, not audits (SUPPLY-CHAIN.md) |
 
 ## Control channel (H1)
@@ -119,10 +128,18 @@ changes state without a new image, so it gets its own model.
   `$urmqtt/control` is not routed to anyone. It is handed to the control
   handler on the DB core.
 - Commands: `revoke` and `unrevoke` certificate serials (unrevoke only with
-  `control.allow_unrevoke`), and `allow` and `disallow` device ids for
-  `registry.mode = "allowlist"`.
+  `control.allow_unrevoke`), `allow` and `disallow` device ids for
+  `registry.mode = "allowlist"`, and, only when the image sets
+  `limits.max_runtime_accounts` above 0, `set-account` and `remove-account`
+  for password accounts of the plaintext and WebSocket listeners (NOW-15,
+  ADR-285: below); since v0.6.0 `boot-confirm` and
+  `boot-rollback` for the A/B boot slots (ADR-298), whose one item is the
+  boot disk's GPT GUID, so a message for one machine is refused by every
+  other (`other_disk`).
 - No other effect exists. A control message cannot change configuration, run
-  code, read data or open a port.
+  code, read data or open a port. The boot commands only confirm the slot on
+  trial or switch back to the slot an operator staged before; they cannot put
+  anything new on the disk.
 
 **Authenticated twice.**
 1. *mTLS identity:* the publisher must be an operational (not bootstrap)
@@ -153,6 +170,27 @@ changes state without a new image, so it gets its own model.
   revoked, or whose identity left the allowlist.
 - A revoked device is refused at its next full handshake and at its next
   resumption.
+- An account that was removed, or whose password hash or class changed, has its
+  live plaintext and WebSocket logins closed by the cores that hold them; the
+  next login sees the new table.
+
+**Password accounts at run time (NOW-15, ADR-285 to ADR-289).**
+- The operator tool hashes the password (PBKDF2-HMAC-SHA-256, at most 100 000
+  iterations, a random salt) on the operator's machine and signs only the hash;
+  the broker never receives a password from the control channel, stores only
+  the hash (store schema 6) and logs only the account's id and class.
+- Same authentication as every other command (mTLS service identity, offline
+  signature, persisted sequence number, validity window, no durable storage
+  means refusal). Off unless the image sets `limits.max_runtime_accounts`; at
+  most that many accounts; at most 8 per message; ids use the identity
+  characters of `[plaintext]`; the image's own accounts and the service,
+  operator and control identities cannot be shadowed.
+- A class (`full`, `read-only`, `write-only`) only narrows what the listener's
+  `acl_*` patterns give; a run-time account never has the service, operator or
+  control role, no `$SYS`, no `$urmqtt/`.
+- Login behaves as for the image's accounts: one PBKDF2 per attempt whatever
+  the user name, the same answer for unknown user, wrong password and no
+  credentials, the lock-out and login rate of the listener.
 
 **Attackers and what stops them.**
 
@@ -163,7 +201,11 @@ changes state without a new image, so it gets its own model.
 | Compromised service identity | forge a command | Ed25519 signature | host vectors; smoke `control-forged` |
 | Network attacker who recorded a message | replay it | persisted `seq` | host test; smoke `control-replay` |
 | Anyone with an old message | delay it | validity window | host test; smoke `control-expired` |
-| Malformed message | crash or confuse the decoder | bounded, fixed layout; fuzz `control_message` | fuzz |
+| Malformed message | crash or confuse the decoder | bounded, fixed layout; fuzz `control_message`, `control_account` | fuzz |
+| Holder of a service identity or the signing key alone | add or change a password account | both are needed (as for every command); off unless the image sets `limits.max_runtime_accounts` | smoke `accounts-run-time`; host tests in `control` |
+| Anyone, in the log or on the wire of the control channel | read a password | the tool sends a hash; the broker logs the id and class only | smoke `accounts-run-time` scans the serial logs for every password and hash |
+| Holder of the signing key | give a service or operator name a password, or replace an image account's | refused (`account_shadows_image`); an account's rights are the listener's plaintext role, narrowed by its class | host tests; smoke `image-account-wins` |
+| Holder of the control key and a control identity | force the previous release (`boot-rollback`) or confirm a bad one | the same two secrets as a revocation; the message names one disk GUID; the previous slot must be eligible (confirmed, its staging commitment intact) | host tests; smoke `ab-control-confirm-and-rollback` |
 | Bootstrap identity | act as a device or service | bootstrap role: only `provision/{id}/#`, its own session namespace, never persistent | broker tests; smoke `bootstrap-role` |
 | Unknown device (allowlist mode) | connect | refused after the handshake, counted | smoke `registry-allowlist` |
 
@@ -379,6 +421,39 @@ parser with its own limits).
 | A password login becoming a service, an operator or the control channel; reaching a certificate session | `Role::Web`, own ACL, `$ws/` namespace, clean only; config check refuses ids with other roles | broker tests; `wss-password-refusals-acl-and-clean-session` |
 | A password on an unencrypted channel | No `ws://`; the password is checked inside TLS; the server-only TLS server issues no tickets | ADR-272; TLS test `a_server_only_session_has_no_client_identity` |
 
+## The metrics endpoint (ADR-290 to ADR-294)
+
+The `[metrics]` listener is off by default. When on it serves `GET /metrics` as plain HTTP/1.1 on its own port
+(9100), to the networks in `metrics.allow_from` and nobody else. It adds one HTTP request per connection to the
+attack surface, read by `urmqtt-http` (no allocation, fuzzed); the answer is made from the numbers `$SYS` reports.
+
+| Threat | Mitigation | Check |
+|---|---|---|
+| Anyone scans or reads the port | the allow-list is required and has no "anywhere"; applied to the SYN, so a refused address gets no answer and costs no state | `metrics-outside-allow-from-gets-no-bytes`; config tests |
+| The text leaks client data or lets a client add series | no label or value in any metric is chosen by a client; label names are a closed list; the series count depends on the core count and the configuration | `the_series_do_not_depend_on_the_traffic`, `rules_are_well_formed`; `metrics-prometheus-text-0.0.4` |
+| The text tells an attacker the version and the load | accepted: the same numbers an operator gets; the allow-list is the control; narrow it to the monitoring host | threat model in ADR-290 |
+| Reading or changing it on the path (plain HTTP) | accepted; scrape from inside a private network, or through a TLS-terminating proxy; mutual TLS on this port is not built (ADR-294) | ADR-290 |
+| A forged source address inside the allowed network | not defended (the same limit as plaintext `auth = "ip"`); keep the allowed network small and filtered | the boot log says so |
+| Slowloris, idle connections, a reader that never reads | the deadline from the accept (`request_timeout_s`), not extended by activity; the cut is counted | `metrics-slowloris-cut-at-the-deadline` |
+| Many connections, many scrapes | connections per core and per address, 20 scrapes a second per core, the heap reserve; none of it takes a TLS handshake slot | `metrics-per-address-limit-opened`, `metrics-listener-counters` |
+| Request smuggling and header confusion | one request, CRLF only, no folding, no body, no `Transfer-Encoding`, `Content-Length` once and 0; pipelined bytes are not read; no header is echoed | fuzz `http_request`; host tests; `metrics-refusals-404-405-505-400-431`, `metrics-pipelined-request-answered-once` |
+| A scrape slows the data path | the rendering is 60 to 350 microseconds with four cores, runs once per scrape under the watchdog's handler budget, and the rate is capped | ADR-293 |
+
+## Outbound connections and log shipping over TLS (NEXT-7, ADR-315 to ADR-319)
+
+Until v0.6.0 the broker never opened a connection (ADR-033). With `observability.log_tls` set it opens one: TLS 1.3
+to the log collector the image names. Nothing else can make it open a connection.
+
+| Threat | Mitigation | Check |
+|---|---|---|
+| A device, a control message or any remote input makes the broker connect somewhere (server-side request forgery) | there is no such path: the destination, its name and its trust anchors are fields of the image's configuration; the TCP stack refuses an active open unless the kernel allowed it (core 0 only, only with a configured user), and refuses 0/8, 127/8, multicast, broadcast and our own address | `connect_refuses_what_it_must`; ADR-315 point 1 |
+| Someone on the path or at the address impersonates the collector and reads the log | the certificate must chain to `log_tls_ca` (no other root store) and carry the configured DNS name or the address as an IP SAN, valid by the wall clock (none: no connection) | `outbound_client.rs`, `outbound_no_clock.rs`; smoke `logtls-rogue-collector` |
+| A hostile or broken collector attacks the broker through its answers | they are parsed only as TCP (the stack's own code, fuzzed and modelled) and TLS (rustls, webpki), then discarded; an unfinished record is held up to 16 KiB + 261 bytes (six times that during the handshake, for a certificate chain of up to 64 KiB), received plaintext up to 16 KiB | fuzz `tcp_active`, `tls_client`; AUDIT.md §2, §6b |
+| A slow or unreachable collector grows the heap or stalls the broker | the record queue is bounded (`log_tls_queue_kb`, oldest dropped and counted), the TLS and TCP buffers at 64 KiB, one connection, a 30 s deadline to be up, retries back off to 5 minutes; core 0 never waits for it | `RecordQueue` tests; `a_dead_link_ends_in_a_timeout_not_a_hang`; smoke `logtls` (collector restarted) |
+| The log reveals secrets | the same lines as the console and UDP syslog: no keys, payloads or certificates (`fault-secrets`, `panic-secret`) | existing H8 scenarios |
+| Predictable ports or sequence numbers let an off-path attacker inject into the connection | RFC 6528 ISN (keyed SipHash plus a 4 µs clock), a keyed random ephemeral port, the RFC 5961 checks of the server side, TLS above | `initial_sequence_numbers_are_keyed_and_move_with_the_clock`, `ephemeral_ports_avoid_listeners_reserved_ports_and_used_tuples` |
+| The firewall must now allow egress | one destination and port, from 49152–65535 (DEPLOY.md) | — |
+
 ## The public demo broker (D1)
 
 D1 (docs/PLAN.md, docs/DEPLOY.md section 11) is a urMQTT that **anyone on the internet may use**, so that people can try it
@@ -462,9 +537,14 @@ writes the raw boot image onto the machine's disk.
   - the kernel does not check the module's hash itself; the loader does, so the
     rule depends on the loader that the firmware starts (without Secure Boot,
     whoever can replace the loader on the boot medium controls this too);
-  - the installed disk's `limine.conf` has no `install` entry and its module has no
-    hash (ADR-217), so a person with write access to the ESP can add an entry with their
-    own image; the enrollment (ADR-250) is what stops the *configuration* edit there.
+  - the installed disk's `limine.conf` has no `install` entry and, unless the image is
+    sealed (signed for Secure Boot, ADR-320), its module has no hash (ADR-217), so a person
+    with write access to the ESP can replace the configuration module; the enrollment
+    (ADR-250) is what stops the *configuration file* edit there, and under Secure Boot
+    with a sealed image the loader's signature covers all of it;
+  - an installer started from a sealed image writes only the configuration that image is
+    sealed to (anything else is refused before the first write: `install: the installation
+    image is sealed for Secure Boot to another configuration`).
 - **Residual risk:** the installer erases the previous data partition. There
   is no "keep data" mode yet; an offline kernel update keeps data
   (`urmqtt-disk update-boot`).
@@ -554,7 +634,17 @@ What that gives you and what it does not:
   carries key material). The address bar holds the changed settings and
   `sessionStorage` the public certificates and the control public key, so that a
   reload does not lose the form; **a private key is held in memory only** and
-  must be chosen again after a reload.
+  must be chosen again after a reload, unless you save an **encrypted project**
+  (NOW-16, ADR-300): the whole form with the private key, the accounts and the
+  signing key is sealed in the browser with your passphrase (PBKDF2-HMAC-SHA-256,
+  600 000 rounds, AES-256-GCM, a new salt and nonce each time, the header
+  authenticated) into a `*.urmqtt-project` file, or into one encrypted copy in
+  the browser's storage that you ask for and can delete. The passphrase is never
+  stored and a lost one cannot be recovered. *Wipe secrets from memory* drops the
+  key, the accounts and the built image from the page, but JavaScript cannot
+  overwrite a string, so close the tab afterwards. The file is as sensitive as the
+  keys in it, and as strong as the passphrase: it can be attacked offline by
+  anyone who gets it.
 - **What you still trust.** The page is code that handles your private key and
   it is delivered by aldo.tech each time you open it: whoever can change what
   that site serves could serve a page that sends the key away. The page cannot
@@ -721,6 +811,9 @@ Every resource is bounded. What happens at the limit is part of the design:
 | New TLS handshakes per core | `limits.handshakes_per_core_per_sec` | SYN dropped without an answer, or refused (RST) at the ACK, before any crypto (ADR-080) |
 | Handshakes in flight per core | `limits.max_handshakes_in_flight_per_core` | SYN dropped, or refused at the ACK; a flow refused at the ACK is remembered for 1 s and not admitted again by its next segment |
 | … of those from one source address | `limits.max_handshakes_in_flight_per_ip` | refused (an unauthenticated peer cannot take every slot) |
+| Established TLS connections from one source address (ADR-280) | `limits.max_connections_per_ip` (1024, 0: off), one table for all cores | SYN dropped without an answer before any handshake work, or RST at the final ACK; `established-flood` in `tools/attack`, smoke `conn-limit`, fuzz `source_limit` |
+| IPv6 extension headers (ADR-330) | at most 4 headers and 256 bytes, 32 options per header; fragments dropped | dropped and counted (`net/ipv6/ext_headers`, `fragments`) |
+| Neighbour Discovery (ADR-331) | 32 neighbours per core; 8 prefixes per RA, one global address; 100 answers/s; one solicitation per unknown next hop per second | further input is ignored or counted (`prefixes_ignored`, `nd_limited`) |
 | Plaintext SYNs from outside `plaintext.allow_from` | `plaintext.allow_from` (mandatory) | no SYN-ACK, no state (P1) |
 | Plaintext connections | `plaintext.max_connections`, `plaintext.max_connections_per_ip` | SYN dropped without an answer, or refused at the ACK |
 | Failed plaintext logins from one address | `plaintext.max_failed_auths_per_ip` in `plaintext.lockout_s` | the address gets no SYN-ACK for `lockout_s` |
@@ -810,6 +903,53 @@ check so a wrong key is refused before anything is read (`docs/DISK-FORMAT.md`
   `/dev/urandom`.
 - **No hardware AES: refused**, never a silent software fallback.
 
+### A disk key that is not in the image (LATER-7, ADR-325 to ADR-329)
+
+With `storage.disk_key_source = "console"` the configuration holds no disk
+key. The 64-byte key is random and is kept only wrapped, in up to two key
+slots of the data partition's (plaintext) superblock: RFC 3394 AES key wrap
+under PBKDF2-HMAC-SHA-256 of a passphrase, a per-slot salt and the disk's UUID
+(`docs/DISK-FORMAT.md` §14.2). The kernel asks for the passphrase on the
+console at every boot, before the store opens and before any listener exists.
+- **What it adds:** a copy of the ISO, of the installed ESP or of the image's
+  configuration no longer reads a copied data disk. The ISO still holds the
+  server's TLS private key (ADR-252).
+- **What the attacker gets instead:** the wrapped key in the superblock of a
+  copied volume, guessable offline at one PBKDF2 (300 000 iterations by
+  default, up to ten million per slot) per guess. **The passphrase is the
+  key:** generate one of 20 characters or more. The header's cost and format
+  cannot be edited downward (10 000 iterations at least), and an edited slot or
+  key check is refused before any data is read (the key check, ADR-240).
+- **Who can unlock:** whoever can type on the VM's console (the provider lets
+  them into the customer's panel) and knows a passphrase. Wrong attempts are
+  logged and paused 2 s each, with no lockout (an attacker at the console can
+  copy the disk and guess offline anyway).
+- **Availability:** no unattended restart. A crash, a watchdog reset or the
+  provider's maintenance leaves the broker down, every port closed, until a
+  person types the passphrase. The A/B trial timeout does not count the wait.
+- **Rotation:** a passphrase change rewrites only the header, twice, so that no
+  superblock keeps the old wrap (a cut between the two writes is repaired at the
+  next open); the disk key itself is rotated by the offline `urmqtt-disk rekey`
+  (a full rewrite), which empties the key slots.
+- **Not protected:** the hypervisor (it sees the passphrase typed and the key in
+  RAM), a stolen running VM, and the integrity of the data (XTS). No TPM, no
+  network unlock (ADR-329).
+
+### DMA isolation (H4b, ADR-305 to ADR-307)
+
+With `devices.iommu = "auto"` or `"require"` the kernel drives the machine's IOMMU (Intel VT-d, AMD-Vi, Arm
+SMMUv3) before any driver runs: from then on every device's DMA is blocked, and each device the broker drives
+gets a translation domain of its own holding exactly the pages the kernel allocated for it (its virtqueues and
+buffers; on a GIC also the MSI doorbell page). A device that writes anywhere else (the page tables, the key
+slab, another device's buffers) is stopped by the unit; the fault is read by core 0 every 100 ms (at most 16
+per unit per poll), counted in `$SYS/broker/iommu/faults` and logged (ADR-306). A virtio device that does not
+use the platform's translation (no VIRTIO_F_ACCESS_PLATFORM) is treated as a device without isolation.
+`require` refuses to boot when there is no IOMMU, a unit fails, or a driven device is outside every unit's
+scope or bypasses it; `auto` goes on with a warning; `off` (the default) leaves the IOMMU as the firmware set
+it. What it does not cover: interrupt remapping, reserved regions the firmware lists, more than 4 units or 32
+ID ranges per unit, and any hardware other than QEMU's models (ADR-307). The firmware tables it reads (DMAR,
+IVRS, IORT, the device tree) are fuzzed (`iommu_tables`).
+
 ### Supply chain
 
 Pinned nightly toolchain and `Cargo.lock`; `--locked` builds; cargo-deny
@@ -824,18 +964,27 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 | Theft of the control signing key **and** a control service identity. | Both are needed; then arbitrary revocation (DoS) or, with `allow_unrevoke`, unrevocation. | Offline key in an HSM/KMS (`--sign-cmd`); `allow_unrevoke = false` (default); revocations that must survive anything also in the image. |
 | A restored old data-disk snapshot brings back old revocations and `seq`. | The disk is trusted not to be maliciously rolled back. | Image-listed revocations are re-applied at every boot; validity windows bound old messages. |
 | DHCP and ARP are unauthenticated. | IPv4 on a shared L2 segment has no defence against on-link spoofing. | Static addressing (`network.mode = "static"`) and a private network for the VM. |
+| IPv6 Neighbour Discovery and Router Advertisements are unauthenticated (no SEND, no RA guard in the host). | With `network.ipv6 = "slaac"`, a node on the link can advertise a router or a prefix, answer for the router's address or claim the broker's address (DAD: the broker then does not use it). IPv6 is off by default (ADR-334). | `"static"` (RAs are ignored) on a link the provider controls; the switch's RA guard; the limits stay per /64. |
+| A fragmented IPv6 packet is dropped, never reassembled, and no ICMPv6 error is sent (ADR-330). | A peer whose path needs fragments, or that waits for Packet Too Big, gets nothing. | TCP follows the MSS the broker announces (MTU - 60); the RA's MTU option or `network.mtu` for smaller links. |
 | Many source addresses defeat the per-address handshake limit. | A botnet can use the per-core in-flight and rate limits up. | Upstream filtering; the limits keep the broker alive for connected devices. |
+| Devices behind one NAT share the per-address limits (`limits.max_connections_per_ip`, 1024 by default, and the handshake limit), and an attacker behind the same NAT can use the shared limit up. | The source address is all the SYN has; counting is per IPv4 address and per IPv6 /64 prefix (ADR-332). Past 32 768 addresses at once the table lets a new address through uncounted (`per_address/untracked`), because refusing it for a hash collision would be an outage. | Size the limit for the largest site (0 turns it off); watch `per_address/refused`; mutual TLS still keeps strangers from a session, the limit only bounds what they can hold open. |
 | Plaintext MQTT (P1, only if enabled) gives up confidentiality, integrity and the broker's authenticity, and a sniffed login can be replayed. | That is what "no TLS" means. | Enable it only on a network the owner controls end to end; narrow `plaintext.allow_from`; keep a firewall in front; prefer `auth = "password"` over `anonymous` and `ip`. |
 | Plaintext `auth = "ip"` trusts the source address. | An address on a shared segment can be forged. | Use it only where nobody can forge one; the boot report says so. |
 | The password hashes in an image allow offline guessing (PBKDF2 at GPU speed). | An image is a file; there is no hardware-backed store, and no memory-hard function in the kernel (D-16, not now: ADR-267). | Long random passwords (the builder generates them); treat the ISO as a secret; change passwords with a new image. |
 | Plaintext lock-out is by source address. | Devices behind one NAT share it; an attacker who shares it can lock the others out. | The allow-list is the better tool behind a NAT; raise `max_failed_auths_per_ip`. |
-| Plaintext accounts cannot be added or removed at run time. | It needs a signed control message type and a place to keep the hashes (listed as later work, ADR-230). | A new image; revoke an identity at once with `disallow` through the registry. |
-| Syslog and statsd are plain UDP. | No TLS sink in the kernel. | Collectors on a private network only. |
+| Run-time password accounts (NOW-15, opt-in): the signing key together with a control service identity adds a login with the plaintext role's rights; the hashes on the data disk allow offline guessing like the image's; a restored old disk brings back old accounts and the old sequence number. | Same as the control channel's other residual risks (they are the same two keys and the same disk). Accounts are per disk, not per image. | Leave `limits.max_runtime_accounts` at 0 (the default) when the image's accounts are enough; long random passwords; offline key in an HSM (`--sign-cmd`); `remove-account` or `disallow` (allowlist mode) to cut one at once. |
+| Statsd is plain UDP, and so is syslog unless `observability.log_tls` is set. | NEXT-7 (ADR-318) gives the syslog path a TLS form; statsd has none (ADR-319). | Collectors on a private network only, or `log_tls` for the log. |
+| Log shipping over TLS (NEXT-7, opt-in): delivery is at most once, the collector is an IPv4 address (no DNS), the broker offers no client certificate. | ADR-316 point 5, ADR-317 point 2, ADR-319. Up to 64 KiB written into a connection that breaks may be lost; a full queue drops the oldest records (counted, reported). | Size `log_tls_queue_kb` for the longest collector outage you accept; give the collector a fixed address; the firewall should allow the VM out to that address and port only. |
+| The metrics endpoint (if enabled) is plain HTTP behind an address allow-list. | Mutual TLS on it is not built (ADR-290, ADR-294); a source address on a shared segment can be forged. | A small `metrics.allow_from` (the monitoring host), a firewall in front, or a TLS-terminating proxy; keep it off if the numbers must not be seen on the path.|
 | No hardware RNG on the cloud (Ampere Altra has no `RNDR`; virtio-rng may be absent). | Then the CSPRNG is seeded from CPU timing jitter, which is weaker evidence than a hardware source. | Health tests and a conservative estimate gate it (ADR-038), and it is logged at boot. The weak path is an explicit option (ADR-263): the builder, `urmqtt-config pack`, the boot log and `$SYS/broker/entropy/source` all say when it is allowed or was used. Prefer clouds with virtio-rng; `entropy.fallback = "none"` refuses to boot without a hardware source. |
 | Side channels in the crypto. | RustCrypto implementations are designed to be constant-time. The tag checks and our one secret comparison are checked by dudect-style timing tests (`make ct`, H2), but the asymmetric code (P-256, X25519, Ed25519) is not measured here. | ChaCha20-Poly1305 is offered alongside AES-128-GCM; docs/CRYPTO.md lists what is checked. |
 | The HHDM (direct map of all RAM) has a fixed base, so memory reachable through it (the heap's frames, packet buffers, the SQLite arena) is at a known address. | Randomising it means placing the kernel's windows around it (ADR-173). | The kernel image, the heap, the stacks and the page-table alias are randomised; the allocator checks of ADR-170 stay. |
 | No forward-edge control-flow integrity on the Rust and C indirect calls. | kCFI crashes the pinned compiler on the dependency graph (ADR-175). | BTI on aarch64, W^X, PAC, KASLR. |
 | No memory tagging on x86_64, on HVF or on most clouds; the SQLite arena and DMA buffers are never tagged. | FEAT_MTE2 is rare in VPS hardware (ADR-174). | The software checks of ADR-170. |
 | No DMA isolation (IOMMU) on bare metal. | Deferred with bare metal (ADR-176); irrelevant to a VPS, whose devices are the hypervisor's. | None needed for a VM. |
+| A kernel that dies before its block driver runs is not counted as a failed A/B trial. | The bootloader keeps no boot counter the kernel could use (ADR-295, ADR-296); the counter is the kernel's. | The trial timeout and every later crash are counted; `urmqtt-disk slots rollback` offline. A loader-level one-shot entry (BLI) would close it; it needs UEFI runtime services in the kernel, which LATER-6 did not add (ADR-324). |
+| Downgrade protection is the offline tool's rule, not the firmware's. | No version counter exists (H8-W6, ADR-322); an attacker who can write the disk can write any older signed image that was not revoked. | `slots stage` refuses an older release (unless `--allow-downgrade`) and a kernel older than the store's schema, always; release images are staged only with their minisign signature. Under Secure Boot, revoke a superseded or leaked image by its loaders' Authenticode hashes in `dbx` (docs/secure-boot-keys.md, tested in OVMF and AAVMF). |
+| Secure Boot rests on keys the operator holds, and nothing here is signed by the project. | Release images are unsigned (ADR-251, ADR-324); shim/MOK is not supported, so firmware that trusts only Microsoft's keys cannot boot them under Secure Boot; Proxmox, real PCs and cloud firmware are untested. | Your own PK/KEK/db, kept as docs/secure-boot-keys.md describes; `sign-iso` after configuring. |
+| DMA isolation is off by default, and only tested against QEMU's IOMMU models. | `devices.iommu` (ADR-305) gives every driven device a domain with only its own pages, through VT-d, AMD-Vi or SMMUv3; it is `off` by default because a VPS's devices are the hypervisor's and an emulated IOMMU slows every DMA. Not run on real hardware; interrupt remapping is not enabled; reserved regions (RMRR/IVMD/RMR) are not mapped (ADR-307). With a GICv2m frame a device can still raise any SPI of the frame. | `devices.iommu = "require"` on bare metal or under a hypervisor whose device models you do not trust: the broker then refuses to boot without a working IOMMU covering every driven device, and `$SYS/broker/iommu/faults` counts blocked DMA. |
 | The hypervisor sees everything. | Out of scope. | Choose the host. |
 | 100k and 1M connections are not measured on the development host. | QEMU user networking on macOS stops near 10 240 sockets. | The per-connection footprint is flat from 1k to 10k (ADR-034); the storm test scales the heap down instead of the clients up. |

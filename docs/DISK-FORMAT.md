@@ -1,10 +1,10 @@
-# Data disk format, layout version 2 (minor 1)
+# Data disk format, layout version 2 (minor 1); boot slots "A/B 1"
 
 The byte-level specification of the urMQTT data disk (STORAGE-PLAN S0, S2, S3, S5, S6, S7, S8).
 Since S1 the "data disk" is the **data partition of the boot disk** (§0);
 everything below §0 is relative to that partition's first sector. Layout v2
 (S2) adds alignment, the partition count and an A/B superblock; S3 adds the
-grow (§9); S5 adds minor version 1 and the backup region (§12); S6 reads without writing (§13); S7 adds optional encryption at rest (§14, a flag and a key check in the superblock, no new version). Layout v1 (S0/S1) is described only as far as `urmqtt-disk migrate`
+grow (§9); S5 adds minor version 1 and the backup region (§12); S6 reads without writing (§13); S7 adds optional encryption at rest (§14, a flag and a key check in the superblock, no new version); LATER-7 (v0.6.0) adds key slots, the disk key wrapped under passphrases so that the image need not hold it (§14.2, a flag and 256 bytes of the superblock, no new version). Layout v1 (S0/S1) is described only as far as `urmqtt-disk migrate`
 reads it (§10). The data has **no
 filesystem**: the kernel accesses it raw, as a superblock, a region table and
 fixed regions. The code is in `crates/store`
@@ -94,7 +94,74 @@ one of three states:
 
 The host test `first_boot_survives_a_crash_at_every_write` checks every write,
 cut cleanly or torn, with and without the volatile cache surviving. Smoke
-`first-boot-crash` does the same in the kernel at four points.
+`first-boot-crash` does the same in the kernel at five points (the standby
+boot slot's head clearing among them, §0a).
+
+## 0a. Boot slots: A/B (boot disk layout "A/B 1", v0.6.0, ADR-295 to ADR-299)
+
+A disk whose first boot ran a v0.6.0 or later kernel has **two boot slots**:
+two regions of the ESP's size, each able to hold a complete EFI system
+partition. The data partition is not involved.
+
+```
+LBA 2048 ..        slot A: the region of the image's ESP
+1 MiB aligned ..   slot B: a region of the same size, reserved at the first boot
+1 MiB aligned ..   urMQTT data partition (§1 onward), the last partition, as before
+```
+
+| Entry | Type GUID | Covers | Attributes |
+|---|---|---|---|
+| EFI system partition | `C12A7328-F81F-11D2-BA4B-00A0C93EC93B` | the **active** slot: what firmware and Limine boot | bit 1 clear; bits 48..63: the active slot's state |
+| urMQTT boot slot | `8F3A6E21-5C7B-4D19-A2E4-6B0C9D513F7E` | the **standby** slot | bit 1 set (UEFI: no Block I/O for it); bits 48..63: the standby's state |
+
+The ESP entry comes before the standby entry in the array (with the BIOS
+boot partition of the universal image: entries 1 and 2, the data partition
+3; all four in the array's first sector). Each entry keeps its type, unique
+GUID and position for life; **switching slots exchanges the ranges, the
+names and the state bits of the two entries** in one table write (§0's
+order: the backup copy first, then the primary, entries before header). A
+cut leaves the old table in force (a valid old primary) or the new one (a
+new primary, or a torn primary whose complete backup firmware and the
+kernel take). The kernel and the tool repair a valid backup that differs
+from a valid primary *from the primary*, which is what firmware booted.
+
+The state is the two high bytes (6 and 7, the type-specific bits 48..63) of
+an entry's attribute word, little-endian like the rest of the table:
+
+<!-- struct: slot_state size=2 -->
+| Offset | Size | Type | Field | Description |
+|---|---|---|---|---|
+| 0 | 1 | u8 | flags | bits 0..2 (attribute bits 48..50): **tries**, trial boots left (0..7, meaningful while on trial); bit 3: **trial**, activated and not confirmed; bit 4: **bad**, failed its trial, rolled back from, or its kernel can no longer read the store (a one-way migration ran), never switched to automatically; bit 5: **one_way**, its activation allowed a store schema newer than the other slot's kernel reads; bit 6: **sealed**, the name carries the commitment of a staged region; bit 7: **empty**, nothing staged here (also during a staging run) |
+| 1 | 1 | u8 | schema | the store schema (§5.1.1) the slot's kernel writes; 0: not known |
+
+**The name** (UTF-16LE, 36 units): the release label (the kernel's version,
+`git describe`), and for a sealed slot `|` and 16 lower-case hex digits: the
+first 8 bytes of the SHA-256 of the **whole region** as staged (the ESP image
+followed by zeros to the end of the region). A `|` in a label is written as
+`/`. Slot A, as the image installed it, is not sealed.
+
+**Eligible** to be switched to: not empty, not bad, not on trial, and for a
+sealed slot its region still hashes to the commitment.
+
+**Who writes what.**
+
+| Write | Who | When |
+|---|---|---|
+| the standby entry, created with the data partition (state: empty; the active slot labelled with the running kernel's version and schema); the first 32 KiB of slot B zeroed first | kernel (`gpt::prepare_with`) | the first boot, if the data partition keeps its 16 MiB minimum after slot B; otherwise the disk stays single-slot |
+| trial count (tries − 1) | kernel | every boot of a slot on trial, before the store opens |
+| switch back (the trial slot marked bad) | kernel | a trial with no tries left or a one-way schema change not allowed, if the standby is eligible; then a reset |
+| adopt the standby (the trial slot marked bad) | kernel | the firmware booted the standby during a trial |
+| confirm (trial cleared) | kernel, `slots confirm` | `update.confirm_after_s` of health, or a `boot-confirm` control message |
+| standby marked bad | kernel | after a one-way store migration on a trial boot |
+| switch (operator's rollback; the slot left marked bad) | kernel (`boot-rollback`), `slots rollback` | on request |
+| stage: standby marked empty; the region written, flushed, read back, hashed; sealed with label, schema, commitment | `urmqtt-disk slots stage` | offline |
+| activate: the staged standby becomes the ESP with `trial` and `tries` (1..7), the old ESP the standby | `urmqtt-disk slots activate` | offline |
+
+The kernel writes table sectors only, never a slot region.
+
+**Older kernels** (v0.5.x) ignore the standby entry (they find their data
+partition by type, and it is still last). A disk prepared by them has its
+data partition right after the ESP and **stays single-slot** (`update-boot`).
 
 **Classification of the data partition** (`Disk::open` on the partition):
 - blank → formatted (§6);
@@ -190,10 +257,11 @@ segments are 4 KiB aligned, but not 1 MiB aligned.
 | 40 | 8 | u64 | generation | 1 at format, plus 1 with every superblock write |
 | 48 | 4 | u32 | partitions | telemetry partitions, 1 to 64 |
 | 52 | 4 | u32 | align_sectors | alignment unit `A` in sectors: a multiple of 2048, at most 131072 |
-| 56 | 4 | u32 | flags | bit 0: the telemetry ring is a v1 ring kept in place (§5.2); bit 1: the disk is encrypted (§14); other bits must be 0 |
+| 56 | 4 | u32 | flags | bit 0: the telemetry ring is a v1 ring kept in place (§5.2); bit 1: the disk is encrypted (§14); bit 2: the disk key is wrapped in the key slots (§14.2, only with bit 1); other bits must be 0 |
 | 60 | 4 | u32 | minor | minor version: `0` (no backup region, every disk formatted before S5) or `1` (the layout may have a backup region, §12) |
 | 64 | 24 | region[] | regions | `region_count` entries of §3.1, back to back (up to offset 3136) |
 | 3136 | 32 | bytes | key_check | encrypted disks (flags bit 1): HMAC-SHA-256, keyed with the disk key, of `urMQTT disk key check v1` followed by the 16-byte `uuid`; all zero on a plain disk (§14) |
+| 3168 | 256 | bytes | key_slots | two key slots of §14.2, back to back (flags bit 2); all zero otherwise |
 | 4092 | 4 | crc32c | crc | over bytes 0..4092 |
 
 The word at 60 was reserved-and-zero up to S4, and a reader of that age refuses a
@@ -226,7 +294,7 @@ order (§9). The other kinds appear once.
 **Validity of one slot** (`Layout::decode`):
 1. The 4096 bytes are all zero: the slot is **blank**.
 2. Otherwise the magic must match, or the result is `UnknownData`: foreign data, never formatted over.
-3. The CRC must match; `version` must be 2 (1 is `OldVersion`); `region_count` ≤ 128; every `kind` must be known; `flags` has only bit 0; `minor` is 0 or 1.
+3. The CRC must match; `version` must be 2 (1 is `OldVersion`); `region_count` ≤ 128; every `kind` must be known; `flags` has only bits 0 to 2; `minor` is 0 or 1. With bit 2 (key slots), bit 1 is set and at least one key slot is in use and valid (§14.2); without it the key slot area is all zero.
 4. `total_sectors` ≤ the device size and a multiple of 8; `partitions` and `align_sectors` in range.
 5. Regions are non-empty, a multiple of 8 sectors long, start at or after `align_sectors`, do not overlap and end within `total_sectors`. Every region except scratch starts on a multiple of `align_sectors`; the first telemetry extent is exempt when flag bit 0 is set.
 6. Database, WAL and journal regions exist; WAL, journal, scratch and backup have one extent. Telemetry and scratch are optional for the reader.
@@ -297,6 +365,13 @@ build`), and so is a backup snapshot of one (§12.4, `schema_version`).
 | 3 | QoS 2, ADR-271 | `retained`, `subscriptions` and `queued` rebuilt (CHECK `qos IN (0, 1, 2)`; every row copied); `queued.pid` (`INTEGER NOT NULL DEFAULT 0`, 0..=65535): the packet id the message was in flight with when its session went offline, 0 for not sent (every row of version 2); `qos2_ids (client_id, released, pid)`, primary key all three, cascading with the session: QoS 2 packet ids received from the client and awaiting its PUBREL (`released` 0) or released to it and awaiting its PUBCOMP (`released` 1) |
 | 4 | MQTT 5.0, ADR-274 | columns added (no table rebuilt): `sessions.expiry_s` (`INTEGER`, NULL or 0..=4 294 967 295: the Session Expiry Interval; NULL for every row of version 3, which then gets the configured 3.1.1 default) and `sessions.offline_since` (wall-clock seconds the session went offline; NULL while online or not known), `subscriptions.options` (`INTEGER NOT NULL DEFAULT 0`, 0..=255: the MQTT 5.0 Subscription Options byte, its QoS bits equal to `qos`; every row of version 3 gets its `qos`), `retained.props` and `queued.props` (`BLOB`, NULL: the MQTT 5.0 properties forwarded with the message, without Topic Alias, Subscription Identifier and Message Expiry Interval) and `retained.expires_at` and `queued.expires_at` (`INTEGER`, wall-clock seconds the Message Expiry Interval ends; NULL: never) |
 | 5 | MQTT 5.0 part 3, ADR-275 | one column added (no table rebuilt): `subscriptions.sub_id` (`INTEGER NOT NULL DEFAULT 0`, CHECK 0..=268 435 455): the subscription's MQTT 5.0 Subscription Identifier, 0 for none (every row of version 4). A shared subscription is a row like any other, its `filter` the whole `$share/{group}/{filter}` |
+| 6 | NOW-15, ADR-285, ADR-286 | one table added (no existing row changes): `accounts` (`id TEXT PRIMARY KEY`, `hash TEXT NOT NULL` of 1..=150 bytes: the stored PBKDF2 text of `urmqtt_cfg::passwd`, never a password; `class INTEGER NOT NULL` 0..=2: full, read-only, write-only; `added_at`: wall-clock seconds of the first write; `seq`: the control message that wrote it last) `STRICT, WITHOUT ROWID`. Written by the control channel's `set-account` and `remove-account` in the transaction that also sets `control_state.seq`; empty for every database of version 5 |
+
+Since version 6 the control channel's password accounts are rows of `accounts`;
+migration 6 only creates the table (in its own transaction, one way: a kernel
+that reads up to schema 5 refuses the database). At boot the rows are read with
+the revocations and the allowlist; a row whose hash no longer parses is ignored
+(it can never log in) and stays until a message replaces or removes it.
 
 A session's `queued` rows and `qos2_ids` are written as one snapshot when it
 goes offline (cleared first) and cleared when it comes back; while it is
@@ -759,12 +834,62 @@ the same keys puts back the chunk the journal holds if it is the one the
 watermark points at, and carries on. Tested with a power cut (clean and torn,
 cache dropped and kept) at every write of each of the three procedures.
 
+### 14.2 Key slots: a disk key that is not in the image (LATER-7, ADR-325 to ADR-329)
+
+With `flags` bit 2 the disk key is not expected from the configuration: it
+is held, wrapped, in the superblock's **key slots**, each a copy of the 64-byte
+disk key encrypted under a key derived from an operator's passphrase. The
+kernel asks for the passphrase on the console (`storage.disk_key_source =
+"console"`); `urmqtt-disk` takes it with `--passphrase-file`. The data is
+encrypted exactly as in §14; only where its key comes from changes.
+
+<!-- struct: key_slot size=128 -->
+| Offset | Size | Type | Field | Description |
+|---|---|---|---|---|
+| 0 | 4 | u32 | kind | `0` empty (then all 128 bytes are zero), `1` passphrase: PBKDF2-HMAC-SHA-256 and AES-256 key wrap; any other value is refused |
+| 4 | 4 | u32 | iterations | PBKDF2 iterations, 10 000 to 10 000 000 (300 000 by default); outside that range the superblock is refused |
+| 8 | 32 | bytes | salt | random, chosen when the slot is written |
+| 40 | 72 | bytes | wrapped | the disk key wrapped with RFC 3394 AES key wrap (default initial value `A6A6A6A6A6A6A6A6`), the 8-byte integrity value first |
+
+Bytes 112..128 are zero.
+
+- **Derivation.** The key-encryption key is the 32-byte PBKDF2-HMAC-SHA-256 of
+  the passphrase (its bytes as typed: printable ASCII, 12 to 256 characters)
+  with the salt `urMQTT disk key slot v1` ‖ `uuid` ‖ `salt` and `iterations`
+  iterations. The UUID binds the slot to its disk: a slot copied to another
+  disk does not open.
+- **Unlocking.** Every slot in use is tried in order. A wrong passphrase fails
+  the key wrap's integrity check (a 2^-64 chance of a false positive); the key
+  a slot yields must then match `key_check`, or the disk is refused (an edited
+  header, or a slot from another key: `KeySlotMismatch`). Nothing is read with
+  a key that failed.
+- **Changing a slot** (adding, replacing, emptying) writes the whole new
+  superblock into the slot not in force (generation + 1) and flushes, then the
+  same into the other slot (generation + 2) and flushes. A cut before the first
+  write completes leaves the old slots in force; after it, the new ones. A cut
+  between the two leaves the replaced wrap in the older superblock until the
+  next open: the kernel (at every boot) and the tool (after every key command)
+  overwrite an older superblock whose key slots differ from the ones in force.
+  The data is never rewritten; the disk key stays the same.
+- **The last slot** is never emptied by a slot change; emptying all of them is
+  an explicit step (`urmqtt-disk keys DISK unwrap`) that clears bit 2: the key
+  must then come from the image again (§14).
+- **A conversion** (`urmqtt-disk encrypt | decrypt | rekey`, §14.1) changes the
+  disk key, so it empties the key slots (they wrapped the old key) and clears
+  bit 2 when it switches the superblock.
+- **Older readers.** A reader that predates LATER-7 refuses the unknown `flags`
+  bit (`Inconsistent`), as S7 did; no minor version and no store schema are
+  spent. The way back to such a kernel is `urmqtt-disk keys DISK unwrap
+  --key-out FILE` and an image with that key (`storage.disk_key`).
+
 ## 15. What checks this document (S8)
 
 | What | Where | Covers |
 |---|---|---|
-| Field tables against the encoder | `crates/store/tests/disk_format_spec.rs` | every `<!-- struct -->` table: superblock (with the encryption flag and key check), region entry, size table, telemetry header, segment header, record, migration record, backup headers |
-| Golden images, one per layout version | `crates/store/tests/golden_v1.rs` (v1: fresh, telemetry, torn), `golden_v2.rs` (v2.0: fresh, with data; `v2-data` keeps its schema 2 database, `v2-data-schema3` its schema 3 one, `v2-data-schema4` its schema 4 one, `v2-data-schema5` is what the same steps write now), `golden_v21.rs` (v2.1 with a backup region and data; the same encrypted with a fixed key) | the code still writes the same bytes, the frozen files still open, an encrypted image opens only with its key |
-| The database schema (§5.1.1) | `crates/store/tests/golden_schema3.rs`, `golden_schema4.rs`, `golden_schema5.rs`, `golden_schema5_bytes.rs` (`schema5-shared.txt`; `schema3-qos2.txt` and `schema4-mqtt5.txt` frozen), `sqlite.rs`; `scripts/mqtt5-migration-check.sh` (a disk of schema 4, or 3 with `--from 3`, written by the previous kernel, booted by this one) | the frozen schema 2 database migrates to 5 with every row, the frozen schema 3 database (QoS 2 state) and the frozen schema 4 database (MQTT 5.0 state) migrate to 5 with every row, each also after a power cut at any write of the migration (an intermediate version found whole, never a half-done step); the CHECK on `sub_id` holds; a schema 5 database with QoS 2, MQTT 5.0 and shared-subscription state (identifiers included) is written byte for byte and reads back |
-| Fuzz targets | `fuzz/fuzz_targets/disk_layout.rs` (superblock slots v2 and the v1 view, size table, the migration record), `disk_backup.rs` (slot header and control block), `disk_crypt.rs` (the sector cipher, the key-file parser, an encrypted disk with damaged sectors opened with the right key, a wrong key and none), `telemetry_recover.rs` (segments and records) | no panic, accepted structures round-trip, a wrong key never opens a disk; CI runs every file in `fuzz/fuzz_targets` (`.github/workflows/fuzz.yml` builds the matrix from the directory) |
+| Field tables against the encoder | `crates/store/tests/disk_format_spec.rs` | every `<!-- struct -->` table: superblock (with the encryption and wrapped flags, the key check and the key slots), key slot, region entry, size table, telemetry header, segment header, record, migration record, backup headers |
+| Golden images, one per layout version | `crates/store/tests/golden_v1.rs` (v1: fresh, telemetry, torn), `golden_v2.rs` (v2.0: fresh, with data; `v2-data` keeps its schema 2 database, `v2-data-schema3` its schema 3 one, `v2-data-schema4` its schema 4 one, `v2-data-schema5` frozen, `v2-data-schema6` is what the same steps write now), `golden_v21.rs` (v2.1 with a backup region and data; the same encrypted with a fixed key) | the code still writes the same bytes, the frozen files still open, an encrypted image opens only with its key |
+| The database schema (§5.1.1) | `crates/store/tests/golden_schema3.rs`, `golden_schema4.rs`, `golden_schema5.rs`, `golden_schema6.rs`, `golden_schema6_bytes.rs` (`schema6-accounts.txt`; `schema3-qos2.txt`, `schema4-mqtt5.txt` and `schema5-shared.txt` frozen), `sqlite.rs`; `scripts/mqtt5-migration-check.sh` (a disk of schema 4, or 3 with `--from 3`, written by the previous kernel, booted by this one) | the frozen schema 2 database migrates to 5 with every row, the frozen schema 3 database (QoS 2 state) and the frozen schema 4 database (MQTT 5.0 state) migrate to 5 with every row, each also after a power cut at any write of the migration (an intermediate version found whole, never a half-done step); the CHECK on `sub_id` holds; the frozen schema 5 database migrates to 6 with every row and an empty `accounts` table, also after a power cut at any write of the migration; the CHECK constraints of `accounts` hold; a schema 6 database with QoS 2, MQTT 5.0, shared-subscription and account state is written byte for byte and reads back |
+| Key slots (§14.2) | `crates/store/src/keyslot/tests.rs` (RFC 3394 vectors, the slot codec, the passphrase rules, the console line editor), `crates/store/tests/wrapped.rs` (format, unlock, every edit of the header with and without a CRC, rotation, a power cut at every write of a rotation and of a sealed format), `tools/disk/tests/keys.rs` (`keys` and `--passphrase-file`, a cut at every write through the tool, `rekey` empties the slots), smoke `SMOKE_ONLY=unlock` | the key slot table above; a passphrase change never leaves neither passphrase working |
+| Fuzz targets | `fuzz/fuzz_targets/disk_layout.rs` (superblock slots v2 and the v1 view, size table, the migration record), `disk_backup.rs` (slot header and control block), `disk_crypt.rs` (the sector cipher, the key-file parser, an encrypted disk with damaged sectors opened with the right key, a wrong key and none), `disk_keyslot.rs` (the key slot decoder, the key unwrap, an edited header unlocked with the right and a wrong passphrase, the console line editor), `telemetry_recover.rs` (segments and records) | no panic, accepted structures round-trip, a wrong key never opens a disk; CI runs every file in `fuzz/fuzz_targets` (`.github/workflows/fuzz.yml` builds the matrix from the directory) |
 | Procedures under power cuts | `tools/disk/tests/migrate.rs`, `convert.rs`, `crates/store/tests/grow.rs`, `backup.rs`, `scripts/fault-loop.sh` | migrate, grow, backup, encrypt, decrypt and rekey end in a valid disk with all its data after a cut at every write |
+| Boot slots (§0a) | `crates/store/src/slots/tests.rs`, `tools/disk/tests/slots.rs`, fuzz `boot_slots`, smoke `SMOKE_ONLY=ab` | the first boot with slots, stage, activate, the trial count, confirm, both rollbacks and the switch back, each cut at every write (host: clean and torn, cache lost and kept; QEMU: the offline switch after writes 1 to 3 and the kernel's trial count after writes 1 and 3, on aarch64 edk2 and x86_64 OVMF) |

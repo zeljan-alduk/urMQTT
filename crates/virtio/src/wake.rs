@@ -78,6 +78,10 @@ pub enum Why {
     Rejected,
     /// The interrupt was set up but never arrived (see [`MISSES_BEFORE_POLLING`]).
     Silent,
+    /// A queue of another core than 0 (NEXT-6, ADR-311), on a platform whose
+    /// MSI target reaches core 0 only: the GICv3 ITS as set up here (one
+    /// collection), or an x86 APIC ID above 254.
+    CoreZeroOnly,
 }
 
 impl Why {
@@ -92,6 +96,9 @@ impl Why {
             Self::TableUnmapped => "the MSI-X table could not be mapped",
             Self::Rejected => "the device refused the MSI-X vector",
             Self::Silent => "the receive interrupt did not arrive for frames that waited",
+            Self::CoreZeroOnly => {
+                "this platform's MSI target reaches core 0 only (the GICv3 ITS, or an APIC ID above 254)"
+            }
         }
     }
 }
@@ -485,6 +492,7 @@ mod tests {
             Why::TableUnmapped,
             Why::Rejected,
             Why::Silent,
+            Why::CoreZeroOnly,
         ] {
             assert!(!why.text().is_empty());
         }

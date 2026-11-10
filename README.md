@@ -11,7 +11,7 @@ Kernel, TCP/IP, TLS 1.3, MQTT and an embedded database in one Rust binary, boote
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zeljan-alduk/urMQTT/badge)](https://scorecard.dev/viewer/?uri=github.com/zeljan-alduk/urMQTT)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 ![Targets: aarch64, x86_64](https://img.shields.io/badge/targets-aarch64%20%7C%20x86__64-orange)
-![Status: alpha](https://img.shields.io/badge/status-alpha%20(v0.5.0)-orange)
+![Status: alpha](https://img.shields.io/badge/status-alpha%20(v0.6.0)-orange)
 
 </div>
 
@@ -29,11 +29,12 @@ commercial) · [security policy](SECURITY.md) (report vulnerabilities privately)
 > Details: [Configure and download your ISO](#configure-and-download-your-iso).
 
 > [!WARNING]
-> **urMQTT is alpha** ([v0.5.0](https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.5.0): the release
+> **urMQTT is alpha** ([v0.6.0](https://github.com/zeljan-alduk/urMQTT/releases/tag/v0.6.0): the release
 > kernel and a universal template ISO and raw image (aarch64 and x86_64) with an empty configuration, which the builder page or `urmqtt-config pack`
 > configures; signed with the release key in `minisign.pub`). It serves MQTT 3.1.1 and MQTT 5.0 (QoS 0, 1
 > and 2) over TLS 1.3 with mutual TLS and, only when an image's configuration turns them on, plain MQTT for a trusted
-> network (P1) and MQTT over secure WebSocket (ADR-272). It keeps its state in SQLite in a raw partition of the disk it boots from.
+> network (P1), MQTT over secure WebSocket (ADR-272), a Prometheus endpoint, IPv6 and password accounts that change at run time. It keeps its
+> state in SQLite in a raw partition of the disk it boots from, and updates with A/B boot slots and an automatic return to the previous release.
 >
 > It has run under QEMU with HVF and TCG, and on two real machines: a netcup aarch64 KVM VPS and a Contabo x86_64
 > KVM VPS (the latter at the H7 commit; the x86_64 code after it has not run on KVM). M0 to M17 are complete, and
@@ -84,7 +85,7 @@ urMQTT removes all of the layers except the broker:
 
 | | Typical broker on Linux | urMQTT |
 |---|---|---|
-| Exposed services | SSH, broker, often a metrics/admin port | **TCP 8883** (MQTT over TLS 1.3 + mTLS); a plaintext MQTT port (P1) and a secure WebSocket port (`wss://`, 8084, ADR-272) only if the image's configuration turns them on (both off by default) |
+| Exposed services | SSH, broker, often a metrics/admin port | **TCP 8883** (MQTT over TLS 1.3 + mTLS); a plaintext MQTT port (P1), a secure WebSocket port (`wss://`, 8084, ADR-272) and a Prometheus metrics port (plain HTTP, 9100, to an allow-list, ADR-290) only if the image's configuration turns them on (all off by default) |
 | Code in the image | Kernel, userland, libc, OpenSSL, runtime | **One Rust ELF** (+ vendored SQLite) |
 | Remote management | Shell, config files, package updates | **No shell, no login.** Revocations and the allowlist by signed control messages (H1); `$SYS` statistics and a small console over MQTT for operator certificates (O1, O2). A new version or configuration is a new image |
 | Memory per idle connection | Kilobytes (socket buffers, TLS objects, heap) | **Target ≤ 512 B** |
@@ -113,10 +114,11 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | **Devices** | PL011 UART, Limine framebuffer text log | ✅ M1 |
 | | PCIe ECAM, virtio-pci modern: net, blk, rng | ✅ M6 |
 | | Software dispatcher (Toeplitz/RSS hash) on one virtio-net queue pair | ✅ M13 |
-| | virtio-net multiqueue + RSS | 📋 later (needs tap/vhost to test) |
+| | virtio-net multiqueue with the device's RSS: one queue pair per data core (only where the device offers MQ and RSS; QEMU TCG tested, KVM not yet) | ✅ NEXT-6 |
+| | DMA remapping through the IOMMU (Intel VT-d, AMD-Vi, Arm SMMUv3), a domain per device, blocked DMA counted and logged (`devices.iommu`, off by default; QEMU's models only) | ✅ LATER-5 |
 | **Network** | Own DHCPv4 client, ARP, ICMP echo, strict IPv4 (no options, no fragments) | ✅ M14 |
 | | Own server-only TCP: SYN cookies, timing wheel, NewReno, ACK coalescing, no TIME_WAIT | ✅ M14 |
-| | IPv6 + SLAAC | 📋 later |
+| | IPv6 beside IPv4: SLAAC or a static address, DAD, Neighbour Discovery, every listener dual-stack (off by default) | ✅ NEXT-1 |
 | **TLS** | TLS 1.3 only, **mutual TLS**, device id from CN or SAN URI | ✅ M10 |
 | | rustls handshake, then own record layer (AES-128-GCM, ChaCha20-Poly1305, KeyUpdate) | ✅ M10 |
 | | Session resumption (PSK tickets under random keys rotated every 12 h), handshake admission control, revocation list | ✅ M10, H2 |
@@ -129,6 +131,7 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | MQTT 5.0 beside 3.1.1 on every listener (TLS, plaintext, WebSocket): properties forwarded (user properties, content type, response topic and correlation data, payload format), reason codes on every acknowledgement and server DISCONNECT, session expiry (also for 3.1.1 persistent sessions: 30 days by default), message expiry, will delay, Receive Maximum and Maximum Packet Size both ways, topic aliases (client to broker), subscription options (No Local, Retain As Published, Retain Handling), assigned client id, Server Keep Alive; Paho interoperability suite and Mosquitto `-V mqttv5` clients | ✅ NEXT-3 part 2 (ADR-273, ADR-274) |
 | | MQTT 5.0 shared subscriptions (`$share/{group}/{filter}`, also for 3.1.1 clients): a group per role class, round robin over its online members, bounded by `limits.max_shared_groups` and `limits.max_shared_group_members`; Subscription Identifiers (stored with persistent sessions); retained-message expiry swept; DISCONNECT 0x8B at `reboot`, 0x98 for a revoked certificate | ✅ NEXT-3 part 3 (ADR-275) |
 | | Not supported, by decision: enhanced authentication (AUTH: CONNACK 0x8C); topic aliases from the broker to clients (never sent); MQTT 3.1 (protocol level 3) | by decision (ADR-275) |
+| **Updates** | A/B boot slots: a release staged offline into the standby slot after its minisign signature is checked, a boot counter and a health confirmation, automatic return to the previous slot, power-cut safe (one partition-table write), downgrade rules; `boot-confirm` and `boot-rollback` control messages | ✅ NEXT-11 (ADR-295 to ADR-299) |
 | **Storage** | SQLite over a raw-disk VFS (WAL, exclusive), quick_check at boot; since H6 SQLite runs as an unprivileged program (EL0 / ring 3), not in the kernel | ✅ M11, ✅ H6 |
 | | One disk: data in a partition of the boot disk (virtio-blk or virtio-scsi), created on the first boot, crash-safe; other disks never touched | ✅ S1 |
 | | `urmqtt-disk`: offline info, verify, export (SQLite, telemetry), import devices, kernel update | ✅ S1 |
@@ -143,7 +146,14 @@ Legend: ✅ done · 🚧 in progress · 📋 planned (milestone)
 | | ≤ 512 B per idle TLS connection (494 B measured at 10k), no per-device trie nodes | ✅ M15 |
 | **Ops** | Handler watchdog (log / drop / reset), health check, rate-limited logs | ✅ M16 |
 | | Syslog (RFC 5424) and statsd metrics over UDP to private collectors | ✅ M16 |
+| | Syslog over TLS 1.3 (RFC 5425) to a collector verified against configured CAs, on an outbound TCP client that opens connections only to configured destinations; off by default | ✅ NEXT-7 |
 | | Admission that survives reconnect storms: free-heap reserve, in-flight limits per core and per source address | ✅ M16 |
+| | A limit on established TLS connections per source address (`limits.max_connections_per_ip`, 1024 by default; an IPv6 /64 is one address) | ✅ NOW-14 |
+| | Password accounts added and removed at run time through the signed control channel (`set-account`, `remove-account`; classes full, read-only, write-only; kept on the data disk) | ✅ NOW-15 |
+| **Security** | Secure Boot completed for installed disks: images signed with your own key are sealed to their configuration, `sign-iso` signs an ISO the builder configured, revocation by `dbx` hash, aarch64 enforcement tested; no release image is signed, no version counter ([docs/secure-boot-keys.md](docs/secure-boot-keys.md)) | ✅ LATER-6 (in part) |
+| | A disk key that is not in the image: wrapped under a passphrase typed on the console at every boot (`storage.disk_key_source = "console"`); TPM sealing and network unlock are not built | ✅ LATER-7 (in part) |
+| **Editions** | The kernel as a library (`urmqtt_kernel`): another repository builds its own image from these crates with PCI drivers by ID, reserved configuration tags and boot hooks; the open image is one line on top ([docs/EDITIONS.md](docs/EDITIONS.md)) | ✅ NOW-18 (in part) |
+| **Builder** | Encrypted project files and browser copies (PBKDF2, AES-256-GCM), in all 15 languages | ✅ NOW-16 (in part) |
 
 ## Architecture
 
@@ -276,7 +286,7 @@ falls as fixed slab chunks amortize, so it does not grow with the connection cou
 
 ### Security model
 
-- **One port.** TCP 8883: TLS 1.3 only, client certificates required, signed by the CA in the image's configuration. The MQTT client id must equal the certificate's device id. Two more ports exist only when an image turns them on: plaintext MQTT for trusted networks (P1) and MQTT over secure WebSocket (ADR-272: TLS 1.3, a client certificate or a password checked inside TLS, an origin allowlist).
+- **One port.** TCP 8883: TLS 1.3 only, client certificates required, signed by the CA in the image's configuration. The MQTT client id must equal the certificate's device id. Three more ports exist only when an image turns them on: plaintext MQTT for trusted networks (P1), MQTT over secure WebSocket (ADR-272: TLS 1.3, a client certificate or a password checked inside TLS, an origin allowlist) and the Prometheus endpoint (ADR-290: read-only plain HTTP to an allow-list of networks, no client data in it).
 - **No ways in.** No shell, console input, SSH, admin API, dynamic code, network-reachable SQL or filesystem.
 - **Memory safety.** Rust, with `forbid(unsafe_code)` in the protocol crates, every `unsafe` block justified with a `// SAFETY:` comment (lint-enforced), and no panics on external input (clippy denies `unwrap`, `expect`, indexing and `panic!` in data-path crates).
 - **Exploit mitigation.**
@@ -557,6 +567,7 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `network.mode` | `"dhcp"` \| `"static"` \| `"auto"` | Address configuration. DHCP lets one ISO serve many VMs; `auto` tries DHCP first and falls back to the static settings |
 | `network.address`, `network.gateway` | `"a.b.c.d/len"`, `"a.b.c.d"` | Required for `static` and `auto`, forbidden for `dhcp` |
 | `network.dhcp_timeout_s` | 3–120 (default 15) | `auto` only: how long to wait for a lease before the static settings are used (also used at once when a lease is lost) |
+| `network.ipv6`, `network.ipv6_address`, `network.ipv6_gateway` | `"off"` (default) \| `"slaac"` \| `"static"`; `2001:db8:1::10/64`; `fe80::1` | IPv6 beside IPv4 on every listener (format 23, NEXT-1): link-local plus one global address from the router's advertisements, or a static address and gateway. [docs/OPERATE.md](docs/OPERATE.md#ipv6-next-1-adr-330-to-adr-334) |
 | `network.mtu` | 0 or 576–9000 (default 0) | Largest IPv4 packet. 0: the MTU from DHCP option 26, else 1500; set it on a smaller network that does not announce it (Google Cloud with a static address: 1460). TCP segments follow it (MSS = MTU − 40); frames above 1500 bytes are never sent. Needs configuration format 7 (ADR-264, DEPLOY.md "Cloud networks and MTU") |
 | `network.mqtt_tls_port` | 0–65535 | MQTT over TLS listener (8883); 0 turns it off (only with `plaintext.enabled`, ADR-233) |
 | `network.mqtt_plain_port` | 0 or port | Development plaintext port (the identity is the client id); **non-zero only in `dev`**. A release image gets plaintext MQTT only from `[plaintext]` below |
@@ -602,6 +613,11 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `websocket.lockout_s` | 1–86 400 (300) | `password` only: how long a locked-out address gets no answer |
 | `websocket.acl_publish`, `websocket.acl_subscribe` | topic filters, up to 16, `{id}` = account id (`web/{id}/#`) | `password` only: what a client may publish and subscribe to; never `$` topics |
 | `websocket.retain` | bool, default `false` | `password` only: may clients publish retained messages |
+| `metrics.enabled` | bool, default `false` | **Prometheus endpoint** (ADR-290): `GET /metrics` as plain HTTP/1.1 (text format 0.0.4, OpenMetrics when asked), every `$SYS` number as a metric, no client data in it. Needs `metrics.allow_from`. Any `[metrics]` key set needs configuration format 16 |
+| `metrics.port` | 1–65535 (9100) | Its TCP port; not another listener's |
+| `metrics.allow_from` | networks `a.b.c.d/len`, up to 16 (`[]`) | The networks that may scrape; **required** when enabled, never "anywhere"; any other address gets no answer at all |
+| `metrics.max_connections`, `metrics.max_connections_per_ip` | 1–64 (8), 1–16 (2) | Connections at once on each data core, and of those from one address |
+| `metrics.request_timeout_s` | 1–30 (5) | Seconds from the connection to the end of the answer; a slower client is cut |
 | `tls.identity_field` | `"cn"` \| `"san_uri"` | Certificate field that becomes the `device_id` |
 | `tls.resumption` | bool | TLS 1.3 PSK session resumption |
 | `tls.revocation_list` | file name or `""` | Revoked client-certificate serials (hex, one per line); runtime revocations come on top (H1) |
@@ -617,6 +633,8 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `limits.handshakes_per_core_per_sec` | > 0 | Handshake admission control (reconnect storms) |
 | `limits.max_handshakes_in_flight_per_core` | > 0 | Concurrent handshakes per core; more are refused |
 | `limits.max_handshakes_in_flight_per_ip` | > 0 | Of those, from one source address |
+| `limits.max_connections_per_ip` | 0 – 1 000 000 (1024) | Established TLS connections (MQTT and WebSocket) one source address may hold at once, all cores together; 0: no limit. Over it the SYN gets no answer before any TLS work, and the refusal is counted in `$SYS/broker/connections/per_address/*`. Devices behind one NAT share an address. Set (0 included), it needs configuration format 14 (ADR-280) |
+| `limits.max_runtime_accounts` | 0 – 1024 (0) | Password accounts the signed control channel may add at run time (NOW-15, format 15); 0: the control channel refuses account commands |
 | `limits.max_session_expiry_s` | 0 – 4 294 967 295 (2 592 000 = 30 days) | The longest Session Expiry Interval granted, to MQTT 5.0 clients and 3.1.1 persistent sessions alike; 4 294 967 295 = never expire (ADR-273). Set, it needs configuration format 12, like every key below |
 | `limits.default_session_expiry_s` | 0 – 4 294 967 295 (2 592 000) | The Session Expiry Interval of a 3.1.1 persistent session (`clean_session` 0); at most `limits.max_session_expiry_s` |
 | `limits.max_message_expiry_s` | 0 – 4 294 967 295 (0) | The longest Message Expiry Interval a publisher may ask for; 0: no cap |
@@ -629,6 +647,9 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `mqtt5.max_keep_alive_s` | 0–65 535 (0) | 0: a 5.0 client keeps the keep alive it asked for; otherwise the most it gets (Server Keep Alive in CONNACK) |
 | `mqtt5.shared_subscriptions` | bool, default `true` | Shared subscriptions (`$share/{group}/{filter}`, MQTT 5.0 4.8.2; also for 3.1.1 clients): each matching message goes to one member of the group. `false`: CONNACK announces Shared Subscription Available 0 and a `$share/` filter gets SUBACK 0x9E (3.1.1: 0x80) |
 | `mqtt5.subscription_identifiers` | bool, default `true` | Subscription Identifiers (MQTT 5.0 3.8.2.1.2): returned in each PUBLISH the subscription matched. `false`: CONNACK announces Subscription Identifier Available 0 and a SUBSCRIBE that carries one gets SUBACK 0xA1 |
+| `update.confirm` | `auto` (default) \| `operator` | After an A/B update (`urmqtt-disk slots activate`, NEXT-11): the new kernel confirms itself once healthy, or waits for a `boot-confirm` control message; unconfirmed, the previous slot returns by itself (ADR-296). Any `[update]` key set needs configuration format 17 |
+| `update.confirm_after_s` | 0–86 400 (60) | Seconds a trial boot must serve (store open, listener up) before the automatic confirmation |
+| `update.trial_timeout_s` | 0–86 400 (900) | A trial boot not confirmed this long resets (one attempt used); 0: never. In auto mode 0 or longer than `confirm_after_s` |
 | `acl.device_publish`, `acl.device_subscribe` | topic filters, `{id}` = device id | Default device rights |
 | `acl.service_ids` | ids or `prefix*` | Identities with service rights (backends) |
 | `acl.service_publish`, `acl.service_subscribe` | topic filters | Service rights |
@@ -637,6 +658,7 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `memory.min_free_mb` | > 0, < heap | New connections are refused below this much free heap |
 | `entropy.fallback` | `jitter` (default) \| `none` | Without virtio-rng and `RNDR`/`RDRAND`: `jitter` seeds from health-tested CPU jitter and the firmware's values (weaker than a hardware source; the boot log, `$SYS/broker/entropy/source` and `urmqtt-config pack` say so); `none` refuses to boot (ADR-263) |
 | `storage.mode` | `disk` \| `auto` \| `ram` | Where the data lives (required outside dev). `auto`: the disk, but the ISO's live entry runs from RAM, ephemeral; `ram`: always RAM; `disk`: the live entry is refused (docs/DEPLOY.md, ADR-061) |
+| `storage.disk_key_source` | `"image"` (default) \| `"console"` | With `storage.encryption = "aes-256-xts"`: where the disk key comes from (LATER-7, format 22). `console`: a passphrase typed on the VM's console at every boot, the key wrapped in the superblock; needs no `storage.disk_key`. [docs/OPERATE.md](docs/OPERATE.md) |
 | `storage.ram_percent` | 2–50, default 10 | Live/RAM mode: share of RAM for the in-memory data store, subtracted from the connection budget (ADR-062) |
 | `storage.sqlite_heap_mb` | 1–4096 | Fixed SQLite `memsys5` heap |
 | `storage.telemetry_topics` | topic filters | PUBLISHes appended to the telemetry log |
@@ -653,8 +675,12 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `observability.log_level` | `error`…`trace` | |
 | `console.virtio_gpu` | `"off"` (default) \| `"auto"` \| `"on"` | Show the console on a virtio-gpu display (2D) for VMs whose firmware display is dead after boot (netcup ARM). `auto`: when the boot framebuffer is missing or is RAM nothing shows; `on`: whenever a virtio-gpu is found. Not `off` needs configuration format 5 (ADR-256) |
 | `devices.virtio_console`, `virtio_balloon`, `virtio_input`, `virtio_vsock` | `"off"` (default) \| `"auto"` \| `"on"` | The optional virtio drivers (ADR-257, ADR-258): a log copy and prompt input on a virtio-console, memory statistics for the host (never inflates), virtio keyboards for the Diagnostic prompts, the Diagnostic report on vsock port 2883. Not `off` needs configuration format 6 and a kernel with the driver |
+| `devices.iommu` | `"off"` (default) \| `"auto"` \| `"require"` | DMA remapping through the IOMMU (LATER-5, format 18): `auto` drives every unit the firmware describes and warns where it cannot, `require` refuses to boot there. [docs/SECURITY.md](docs/SECURITY.md) |
 | `devices.virtio_net_interrupt` | `"auto"` (default) \| `"off"` | How the NIC wakes the core that owns it: `auto` takes the receive queue's MSI-X interrupt where the platform has one (x86 local APIC, aarch64 GICv2m frame or GICv3 ITS) and polls only otherwise; `off` always polls (every 200 us while connections exist). The boot line `net: receive wake-up: ...` says which. `off` needs configuration format 11 (ADR-270) |
+| `devices.virtio_net_queues` | `"auto"` (default) \| `"single"` | How many virtio-net queue pairs the NIC uses: `auto` takes one per data core when the device offers multiqueue with RSS (`VIRTIO_NET_F_MQ` and `VIRTIO_NET_F_RSS`), so each core receives and sends its own flows; otherwise one pair, as before. `single` always uses one. The boot line `net: multiqueue: ...` or `net: one queue pair: <reason>` says which. `single` needs configuration format 19 (ADR-310 to ADR-314) |
 | `observability.syslog_udp`, `metrics_udp` | `""` or `"a.b.c.d:port"` | Private syslog and statsd collectors |
+| `observability.log_tls` | `""` (default) or `"a.b.c.d:port"` | A syslog collector over TLS 1.3 (RFC 5425 framing): the broker's one outbound connection. Needs `log_tls_ca` and configuration format 20 (ADR-318) |
+| `observability.log_tls_name`, `log_tls_ca`, `log_tls_queue_kb` | DNS name or `""`; 1–8 PEM files; 16–4096 (256) | The name the collector's certificate must carry (`""`: its address, as an IP SAN), the CAs it must chain to (the only trust anchors of that connection), the KiB of records kept while it is unreachable |
 | `watchdog.handler_budget_ms` | 1–10 000 | Time budget of an ordinary handler |
 | `watchdog.handshake_budget_ms` | 0, 1–900 | Budget of a TLS handshake step; 0 (default) = 10x the handshake cost measured at boot, 50–500 ms (ADR-071) |
 | `watchdog.action` | `log` \| `drop` \| `reset` | What happens on overrun (ADR-035); a core stuck for 100 budgets always resets |
@@ -1051,14 +1077,18 @@ make run
 # urmqtt.refused.memory:0|c
 ```
 
-Production images set `observability.syslog_udp` and `metrics_udp` to collectors on a private network.
+Production images set `observability.syslog_udp` and `metrics_udp` to collectors on a private network, or ship
+the log over TLS to a collector anywhere (`observability.log_tls`, NEXT-7): `scripts/logtls-sink.py` is a minimal
+RFC 5425 collector for trying it (`SMOKE_ONLY=logtls scripts/smoke.sh` runs it against a VM).
 
 ## Deployment
 
 An image is the entire deployment: the kernel and its configuration (CA, server certificate and key) are all inside it.
 The VM has one disk: the raw image written to it, the rest becomes the data partition on the first boot.
-Upgrading replaces only the EFI system partition (`urmqtt-disk update-boot`, or `scripts/kvm-host/install.sh`
-again) and keeps the data.
+Upgrading replaces only the EFI system partition and keeps the data. A disk installed by v0.6.0 or later has two
+boot slots: `urmqtt-disk slots stage` writes a signed release into the standby, `slots activate` makes it the boot
+entry on trial, and a kernel that does not confirm itself is replaced by the previous one automatically
+(docs/DEPLOY.md section 8b). Older disks update with `urmqtt-disk update-boot` (or `scripts/kvm-host/install.sh`).
 
 | Target | Path | Status |
 |---|---|---|
@@ -1117,7 +1147,8 @@ mode = "auto"                  # the ISO's live entry runs from RAM (ephemeral);
 
 `storage.mode = "disk"` refuses to start from the ISO's live entry, `"auto"` allows it with data in RAM,
 `"ram"` is always diskless. The checked-in file holds the author's test VPS; replace the address and
-gateway with yours. IPv6 is not supported. See [docs/DEPLOY.md](docs/DEPLOY.md) for provider notes.
+gateway with yours. IPv6 is off unless `network.ipv6` says `"slaac"` or `"static"` (format 23,
+[docs/OPERATE.md](docs/OPERATE.md#ipv6-next-1-adr-330-to-adr-334)). See [docs/DEPLOY.md](docs/DEPLOY.md) for provider notes.
 
 > [!CAUTION]
 > A prod image embeds your server private key, so treat the ISO itself as a secret. The images
@@ -1290,6 +1321,7 @@ results in [docs/PROGRESS.md](docs/PROGRESS.md)):
 | ✅ | **C1** Runtime configuration and the builder page | one release kernel for everyone, the configuration a validated blob in the image (`urmqtt-config pack`); the builder page writes the same bytes in the browser (ADR-215 to ADR-228) |
 | ✅ | **P1** Optional plaintext MQTT | off by default; `allow_from` required; password, anonymous or by-network identities with narrower rights than a certificate (ADR-229 to ADR-231) |
 | ✅ | **NEXT-5** MQTT over secure WebSocket | `[websocket]`, off by default; `wss://` only; `mtls` or a password inside TLS; origin allowlist; Autobahn, fuzz, Kani, smoke (ADR-272) |
+| ✅ | **NEXT-9** Prometheus metrics | `[metrics]`, off by default; `GET /metrics` as plain HTTP to an allow-list of networks; every `$SYS` number as a metric with stable names, units and bounded labels; text 0.0.4 and OpenMetrics; fuzz, smoke (ADR-290 to ADR-294) |
 | 🚧 | **D1** Public demo broker | built, not deployed (PROGRESS D1) |
 
 **Order** ([docs/PLAN.md](docs/PLAN.md)):
@@ -1313,7 +1345,7 @@ after it, and the bare-metal drivers are the commercial edition's scope ([docs/E
 
 riscv64 is a later, separate step (PROMPT-x86_64.md §9).
 
-Later: IPv6, cold-session compression, an export bridge,
+Later: cold-session compression, an export bridge,
 and ACPI-only validation on real ARM clouds.
 
 ## Contributing

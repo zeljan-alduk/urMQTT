@@ -215,14 +215,17 @@ fn structural_attacks_fail_closed() {
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, 10 which no format ever used, and
     // one above the newest).
-    for unknown in [0u8, 10, 14, 15] {
+    for unknown in [0u8, 10, 21, 24] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
     // The versions of the formats that came after 7, each its own feature
     // (8 back-pressure, 9 WebSocket, 11 the receive interrupt, 12 MQTT 5.0,
-    // 13 the shared-group limits).
-    for known in [8u8, 9, 11, 12, 13] {
+    // 13 the shared-group limits, 14 the per-address connection limit, 15 the run-time
+    // account limit, 16 the metrics endpoint, 17 the A/B update keys, 18 the IOMMU,
+    // 19 the NIC's queue pairs, 20 log shipping over TLS, 22 the disk key source, 23 IPv6; 21 was reserved for
+    // LATER-6, which needed no key).
+    for known in [8u8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23] {
         let v = with_version(&assemble(&ok), known);
         assert_eq!(Blob::parse(&v).map(|b| b.version()), Ok(u16::from(known)));
     }
@@ -244,7 +247,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 13));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 23));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -253,7 +256,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[13, 0],
+        &[23, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -403,6 +406,135 @@ fn net_interrupt_needs_format_11_and_auto_writes_nothing() {
     assert!(Blob::parse(&with_version(&blob, 10)).is_err());
     assert!(Blob::parse(&with_version(&blob, 7)).is_err());
     assert!(Builder::new().variant(tag::DEV_NET_INTERRUPT, 2).is_err());
+}
+
+/// NEXT-6, ADR-313: `devices.virtio_net_queues` came with format 19. "auto"
+/// (the default) writes nothing, so every existing configuration keeps its
+/// version and boots on an older kernel; "single" needs version 19, which an
+/// older kernel refuses by the version (it would not know to keep one pair).
+#[test]
+fn net_queues_need_format_19_and_auto_writes_nothing() {
+    use crate::fields::NET_QUEUE_MODES;
+    let f = crate::fields::by_key("devices.virtio_net_queues").unwrap();
+    assert_eq!(
+        (f.tag, f.since, f.dev_only),
+        (tag::DEV_NET_QUEUES, 19, false)
+    );
+    assert_eq!(NET_QUEUE_MODES, ["auto", "single"]);
+    let mut auto = Builder::new();
+    auto.variant(tag::DEV_NET_QUEUES, 0).unwrap();
+    assert_eq!(auto.lowest_version(), 2);
+    assert_eq!(auto.finish(false).unwrap(), empty());
+    assert_eq!(
+        Blob::parse(&empty()).unwrap().variant(tag::DEV_NET_QUEUES),
+        0
+    );
+    let mut b = Builder::new();
+    b.variant(tag::DEV_NET_QUEUES, 1).unwrap();
+    assert_eq!(b.lowest_version(), 19);
+    assert!(b.finish_as(false, 18).is_err());
+    let blob = b.finish(false).unwrap();
+    let p = Blob::parse(&blob).unwrap();
+    assert_eq!((p.version(), p.variant(tag::DEV_NET_QUEUES)), (19, 1));
+    check::check(&p, false).unwrap();
+    // An older format cannot hold it.
+    assert!(Blob::parse(&with_version(&blob, 18)).is_err());
+    assert!(Builder::new().variant(tag::DEV_NET_QUEUES, 2).is_err());
+}
+
+/// LATER-7, ADR-328: `storage.disk_key_source` came with format 22. "image"
+/// (the default) writes nothing, so every existing configuration keeps its
+/// version; "console" needs 22 (an older kernel refuses the image by its
+/// version rather than look for a key that is not there), encryption on and
+/// no key in the image.
+#[test]
+fn disk_key_source_needs_format_22_encryption_and_no_key() {
+    use crate::fields::DISK_KEY_SOURCES;
+    let f = crate::fields::by_key("storage.disk_key_source").unwrap();
+    assert_eq!(
+        (f.tag, f.since, f.dev_only),
+        (tag::ST_DISK_KEY_SOURCE, 22, false)
+    );
+    assert_eq!(DISK_KEY_SOURCES, ["image", "console"]);
+    let mut img = Builder::new();
+    img.variant(tag::ST_DISK_KEY_SOURCE, 0).unwrap();
+    assert_eq!(img.finish(false).unwrap(), empty());
+    assert_eq!(
+        Blob::parse(&empty())
+            .unwrap()
+            .variant(tag::ST_DISK_KEY_SOURCE),
+        0
+    );
+    // Console, encryption on, no key: format 22, accepted.
+    let mut b = Builder::new();
+    b.variant(tag::ST_ENCRYPTION, 1).unwrap();
+    b.variant(tag::ST_DISK_KEY_SOURCE, 1).unwrap();
+    assert_eq!(b.lowest_version(), 22);
+    assert!(b.finish_as(false, 18).is_err());
+    assert!(
+        b.finish_as(false, 21).is_err(),
+        "21 is not this code's format"
+    );
+    let blob = b.finish(false).unwrap();
+    let p = Blob::parse(&blob).unwrap();
+    assert_eq!((p.version(), p.variant(tag::ST_DISK_KEY_SOURCE)), (22, 1));
+    check::check(&p, false).unwrap();
+    assert!(Blob::parse(&with_version(&blob, 18)).is_err());
+    // Console without encryption.
+    let mut b = Builder::new();
+    b.variant(tag::ST_DISK_KEY_SOURCE, 1).unwrap();
+    let e = b.finish(false).unwrap_err();
+    assert!(
+        format!("{e:?}").contains("storage.disk_key_source"),
+        "{e:?}"
+    );
+    // Console with a key in the image.
+    let mut b = Builder::new();
+    b.variant(tag::ST_ENCRYPTION, 1).unwrap();
+    b.variant(tag::ST_DISK_KEY_SOURCE, 1).unwrap();
+    let k: [u8; 64] = core::array::from_fn(|i| i as u8);
+    b.bin(tag::ST_DISK_KEY, &k).unwrap();
+    let e = b.finish(false).unwrap_err();
+    assert!(format!("{e:?}").contains("storage.disk_key"), "{e:?}");
+    // The image source with encryption still needs its key.
+    let mut b = Builder::new();
+    b.variant(tag::ST_ENCRYPTION, 1).unwrap();
+    assert!(b.finish(false).is_err());
+    assert!(Builder::new().variant(tag::ST_DISK_KEY_SOURCE, 2).is_err());
+}
+
+/// LATER-5, ADR-305: `devices.iommu` came with format 18. "off" (the
+/// default) writes nothing, so every existing configuration keeps its version
+/// and boots on an older kernel; "auto" and "require" need version 18, which an
+/// older kernel refuses by the version (it would run without the isolation).
+#[test]
+fn iommu_needs_format_18_and_off_writes_nothing() {
+    use crate::fields::IOMMU_MODES;
+    let f = crate::fields::by_key("devices.iommu").unwrap();
+    assert_eq!((f.tag, f.since, f.dev_only), (tag::DEV_IOMMU, 18, false));
+    assert_eq!(IOMMU_MODES, ["off", "auto", "require"]);
+    let mut off = Builder::new();
+    off.variant(tag::DEV_IOMMU, 0).unwrap();
+    assert_eq!(off.lowest_version(), 2);
+    assert_eq!(off.finish(false).unwrap(), empty());
+    assert_eq!(Blob::parse(&empty()).unwrap().variant(tag::DEV_IOMMU), 0);
+    for v in [1u8, 2] {
+        let mut b = Builder::new();
+        b.variant(tag::DEV_IOMMU, v).unwrap();
+        assert_eq!(b.lowest_version(), 18);
+        assert!(b.finish_as(false, 13).is_err());
+        assert!(
+            b.finish_as(false, 17).is_err(),
+            "17 is not this code's format"
+        );
+        let blob = b.finish(false).unwrap();
+        let p = Blob::parse(&blob).unwrap();
+        assert_eq!((p.version(), p.variant(tag::DEV_IOMMU)), (18, v));
+        check::check(&p, false).unwrap();
+        // An older format cannot hold it.
+        assert!(Blob::parse(&with_version(&blob, 13)).is_err());
+    }
+    assert!(Builder::new().variant(tag::DEV_IOMMU, 3).is_err());
 }
 
 /// ADR-257: the `[devices]` keys came with format 6, one enum each. Off (the
@@ -1232,4 +1364,464 @@ fn shared_group_limits() {
         assert!(Blob::parse(&with_version(&assemble(&rec), 12)).is_err());
         assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_ok());
     }
+}
+
+/// NOW-14, ADR-280: `limits.max_connections_per_ip`. Its default (1024) writes
+/// nothing and keeps the base format; any other value, 0 (no limit) included,
+/// needs format 14; 1000001 is refused; a blob of format 13 cannot hold it.
+#[test]
+fn connections_per_ip_limit() {
+    let t = tag::LIM_MAX_CONNECTIONS_PER_IP;
+    let mut d = Builder::new();
+    d.uint(t, 1024).unwrap();
+    assert_eq!(d.finish(false).unwrap(), empty());
+    for v in [0u64, 1, 1_000_000] {
+        let mut b = Builder::new();
+        b.uint(t, v).unwrap();
+        let blob = b.finish(false).unwrap();
+        let p = Blob::parse(&blob).unwrap();
+        assert_eq!(p.version(), 14, "{v}");
+        assert_eq!(p.present().count(), 1);
+        assert_eq!(p.uint(t), v);
+    }
+    assert!(Builder::new().uint(t, 1_000_001).is_err());
+    let rec = record(t, &64u32.to_le_bytes());
+    assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_err());
+    assert!(Blob::parse(&with_version(&assemble(&rec), 14)).is_ok());
+}
+
+/// ADR-285: `limits.max_runtime_accounts`. 0 is the default and writes
+/// nothing (the base format); any other value in 1..=1024 needs format 15;
+/// 1025 is refused; a blob of format 13 cannot hold it.
+#[test]
+fn runtime_account_limit() {
+    let t = tag::LIM_MAX_RUNTIME_ACCOUNTS;
+    let mut d = Builder::new();
+    d.uint(t, 0).unwrap();
+    assert_eq!(d.finish(false).unwrap(), empty());
+    for v in [1u64, 1_024] {
+        let mut b = Builder::new();
+        b.uint(t, v).unwrap();
+        let bytes = b.finish(false).unwrap();
+        let p = Blob::parse(&bytes).unwrap();
+        assert_eq!(p.version(), 15, "{v}");
+        assert_eq!(p.uint(t), v);
+    }
+    assert!(Builder::new().uint(t, 1_025).is_err());
+    let rec = record(t, &64u16.to_le_bytes());
+    assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_err());
+    assert!(Blob::parse(&with_version(&assemble(&rec), 15)).is_ok());
+}
+
+/// ADR-290: the `[metrics]` section. Defaults write nothing and keep the base
+/// format; any key set needs format 16; ranges are enforced; the endpoint
+/// needs an allow-list and a port of its own; a blob of format 13 cannot hold
+/// the keys.
+#[test]
+fn metrics_rules() {
+    let mut d = Builder::new();
+    d.bool(tag::METRICS_ENABLED, false).unwrap();
+    d.uint(tag::METRICS_PORT, 9100).unwrap();
+    d.strs(tag::METRICS_ALLOW_FROM, &[] as &[&str]).unwrap();
+    d.uint(tag::METRICS_MAX_CONNS, 8).unwrap();
+    d.uint(tag::METRICS_MAX_PER_IP, 2).unwrap();
+    d.uint(tag::METRICS_REQUEST_TIMEOUT, 5).unwrap();
+    assert_eq!(d.finish(false).unwrap(), empty());
+
+    for (t, lo, hi) in [
+        (tag::METRICS_PORT, 1u64, 65_535u64),
+        (tag::METRICS_MAX_CONNS, 1, 64),
+        (tag::METRICS_MAX_PER_IP, 1, 16),
+        (tag::METRICS_REQUEST_TIMEOUT, 1, 30),
+    ] {
+        for v in [lo, hi] {
+            let mut b = Builder::new();
+            b.uint(t, v).unwrap();
+            let blob = b.finish(false).unwrap();
+            let p = Blob::parse(&blob).unwrap();
+            assert_eq!(p.version(), 16, "{t} = {v}");
+            assert_eq!(p.uint(t), v);
+        }
+        let mut b = Builder::new();
+        for v in [0u64, hi + 1] {
+            assert!(b.uint(t, v).is_err(), "{t} = {v}");
+        }
+        let rec = record(
+            t,
+            &lo.to_le_bytes()[..match t {
+                tag::METRICS_PORT => 2,
+                _ => 1,
+            }],
+        );
+        assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_err());
+        assert!(Blob::parse(&with_version(&assemble(&rec), 16)).is_ok());
+    }
+
+    let check = |build: &dyn Fn(&mut Builder)| {
+        let mut b = Builder::new();
+        build(&mut b);
+        // `finish` runs the semantic check.
+        b.finish(true).map(|_| ())
+    };
+    // Enabled needs an allow-list.
+    let e = check(&|b| b.bool(tag::METRICS_ENABLED, true).unwrap()).unwrap_err();
+    assert_eq!(e.key, "metrics.allow_from");
+    assert!(
+        check(&|b| {
+            b.bool(tag::METRICS_ENABLED, true).unwrap();
+            b.strs(tag::METRICS_ALLOW_FROM, &["10.0.0.0/8", "192.168.1.5/32"])
+                .unwrap();
+        })
+        .is_ok()
+    );
+    // Entries: well formed always, no 0.0.0.0/0, no duplicates.
+    for bad in ["0.0.0.0/0", "10.0.0.0", "10.0.0.0/33", "x", ""] {
+        let e = check(&|b| b.strs(tag::METRICS_ALLOW_FROM, &[bad]).unwrap()).unwrap_err();
+        assert_eq!(e.key, "metrics.allow_from", "{bad}");
+    }
+    let e = check(&|b| {
+        b.strs(tag::METRICS_ALLOW_FROM, &["10.0.0.0/8", "10.0.0.0/8"])
+            .unwrap();
+    })
+    .unwrap_err();
+    assert!(e.msg.contains("twice"));
+    // The port is its own.
+    let on = |b: &mut Builder, port: u64| {
+        b.bool(tag::METRICS_ENABLED, true).unwrap();
+        b.strs(tag::METRICS_ALLOW_FROM, &["10.0.0.0/8"]).unwrap();
+        b.uint(tag::METRICS_PORT, port).unwrap();
+    };
+    let e = check(&|b| on(b, 8883)).unwrap_err();
+    assert_eq!(e.key, "metrics.port");
+    let e = check(&|b| {
+        on(b, 1883);
+        b.str(tag::ENV, "dev").unwrap();
+        b.uint(tag::NET_PLAIN_PORT, 1883).unwrap();
+    })
+    .unwrap_err();
+    assert_eq!(e.key, "metrics.port");
+    let e = check(&|b| {
+        on(b, 8084);
+        b.bool(tag::WS_ENABLED, true).unwrap();
+    })
+    .unwrap_err();
+    assert_eq!(e.key, "metrics.port");
+    let e = check(&|b| {
+        on(b, 1884);
+        b.bool(tag::PL_ENABLED, true).unwrap();
+        b.uint(tag::PL_PORT, 1884).unwrap();
+        b.strs(tag::PL_ALLOW_FROM, &["10.0.0.0/8"]).unwrap();
+        b.variant(tag::PL_AUTH, 1).unwrap();
+    })
+    .unwrap_err();
+    assert_eq!(e.key, "metrics.port");
+    // Off: the other keys mean nothing, and a port equal to another is fine.
+    assert!(check(&|b| b.uint(tag::METRICS_PORT, 8883).unwrap()).is_ok());
+}
+
+/// ADR-297: the `[update]` keys of format 17. At their defaults they write
+/// nothing (the blob keeps its version); any other value needs format 17, a
+/// format-13 blob cannot hold them, and the trial timeout must leave the
+/// automatic confirmation time to happen.
+#[test]
+fn update_keys_need_format_17() {
+    let mut d = Builder::new();
+    d.variant(tag::UPD_CONFIRM, 0).unwrap();
+    d.uint(tag::UPD_CONFIRM_AFTER, 60).unwrap();
+    d.uint(tag::UPD_TRIAL_TIMEOUT, 900).unwrap();
+    assert_eq!(d.finish(false).unwrap(), empty());
+    for (t, v) in [
+        (tag::UPD_CONFIRM, 1u64),
+        (tag::UPD_CONFIRM_AFTER, 0),
+        (tag::UPD_CONFIRM_AFTER, 899),
+        (tag::UPD_TRIAL_TIMEOUT, 0),
+        (tag::UPD_TRIAL_TIMEOUT, 86_400),
+    ] {
+        let mut b = Builder::new();
+        if t == tag::UPD_CONFIRM {
+            b.variant(t, v as u8).unwrap();
+        } else {
+            b.uint(t, v).unwrap();
+        }
+        let blob = b.finish(false).unwrap();
+        let p = Blob::parse(&blob).unwrap();
+        assert_eq!(p.version(), 17, "{t} = {v}");
+        assert_eq!(p.present().count(), 1);
+        assert!(check::check(&p, false).is_ok(), "{t} = {v}");
+        let rec = record(t, p.raw(t).unwrap());
+        assert!(Blob::parse(&with_version(&assemble(&rec), 13)).is_err());
+        assert!(Blob::parse(&with_version(&assemble(&rec), 17)).is_ok());
+    }
+    let mut b = Builder::new();
+    assert!(b.uint(tag::UPD_CONFIRM_AFTER, 86_401).is_err());
+    assert!(b.uint(tag::UPD_TRIAL_TIMEOUT, 86_401).is_err());
+    assert!(b.variant(tag::UPD_CONFIRM, 2).is_err());
+    // A timeout no longer than the confirmation delay: refused in auto mode,
+    // allowed when an operator confirms (the timeout is theirs to beat).
+    for (confirm, after, timeout, ok) in [
+        (0u8, 60u64, 60u64, false),
+        (0, 60, 59, false),
+        (0, 60, 61, true),
+        (0, 60, 0, true),
+        (1, 60, 30, true),
+    ] {
+        let mut b = Builder::new();
+        b.variant(tag::UPD_CONFIRM, confirm).unwrap();
+        b.uint(tag::UPD_CONFIRM_AFTER, after).unwrap();
+        b.uint(tag::UPD_TRIAL_TIMEOUT, timeout).unwrap();
+        // The builder runs the same check as the kernel.
+        let r = b.finish(false);
+        assert_eq!(r.is_ok(), ok, "{confirm} {after} {timeout}");
+        match r {
+            Ok(blob) => assert!(check::check(&Blob::parse(&blob).unwrap(), false).is_ok()),
+            Err(e) => assert_eq!(e.key, "update.trial_timeout_s"),
+        }
+    }
+}
+
+/// ADR-318: the `observability.log_tls*` keys of format 20. At their
+/// defaults they write nothing; any of them set needs format 20, which an
+/// older blob cannot hold; a collector needs its trust anchors and the other
+/// keys need a collector; the address must be a unicast one.
+#[test]
+fn log_tls_keys_need_format_20() {
+    const CA: &[u8] = b"-----BEGIN CERTIFICATE-----\nMA==\n-----END CERTIFICATE-----\n";
+    let mut d = Builder::new();
+    d.str(tag::OBS_LOG_TLS_NAME, "").unwrap();
+    d.uint(tag::OBS_LOG_TLS_QUEUE_KB, 256).unwrap();
+    assert_eq!(d.finish(false).unwrap(), empty());
+    let full = |name: &str, addr: [u8; 4], port: u16| {
+        let mut b = Builder::new();
+        b.addr(tag::OBS_LOG_TLS, addr, port).unwrap();
+        b.bins(tag::OBS_LOG_TLS_CA, &[CA.to_vec()]).unwrap();
+        b.str(tag::OBS_LOG_TLS_NAME, name).unwrap();
+        b.uint(tag::OBS_LOG_TLS_QUEUE_KB, 64).unwrap();
+        b
+    };
+    let blob = full("logs.example.com", [10, 0, 2, 2], 6514)
+        .finish(false)
+        .unwrap();
+    let p = Blob::parse(&blob).unwrap();
+    assert_eq!(p.version(), 20);
+    assert_eq!(p.present().count(), 4);
+    assert_eq!(p.addr(tag::OBS_LOG_TLS), Some(([10, 0, 2, 2], 6514)));
+    assert_eq!(p.str(tag::OBS_LOG_TLS_NAME), "logs.example.com");
+    assert_eq!(p.bins(tag::OBS_LOG_TLS_CA).count(), 1);
+    // A blob of format 18 cannot hold any of them.
+    for t in [
+        tag::OBS_LOG_TLS,
+        tag::OBS_LOG_TLS_NAME,
+        tag::OBS_LOG_TLS_CA,
+        tag::OBS_LOG_TLS_QUEUE_KB,
+    ] {
+        let rec = record(t, p.raw(t).unwrap());
+        assert!(
+            Blob::parse(&with_version(&assemble(&rec), 18)).is_err(),
+            "{t}"
+        );
+        assert!(
+            Blob::parse(&with_version(&assemble(&rec), 20)).is_ok(),
+            "{t}"
+        );
+    }
+    // The empty name is the default (the address is the name).
+    assert!(full("", [192, 0, 2, 7], 6514).finish(false).is_ok());
+    // The rules, with the key they name.
+    for (b, key) in [
+        (full("", [127, 0, 0, 1], 6514), "observability.log_tls"),
+        (full("", [0, 0, 0, 0], 6514), "observability.log_tls"),
+        (full("", [224, 0, 0, 1], 6514), "observability.log_tls"),
+        (
+            full("", [255, 255, 255, 255], 6514),
+            "observability.log_tls",
+        ),
+        (full("", [10, 0, 0, 1], 0), "observability.log_tls"),
+        (
+            full("bad_name", [10, 0, 0, 1], 6514),
+            "observability.log_tls_name",
+        ),
+        (
+            full("10.0.0.1", [10, 0, 0, 1], 6514),
+            "observability.log_tls_name",
+        ),
+        (
+            full("-a.example", [10, 0, 0, 1], 6514),
+            "observability.log_tls_name",
+        ),
+        (
+            full("a..example", [10, 0, 0, 1], 6514),
+            "observability.log_tls_name",
+        ),
+    ] {
+        assert_eq!(b.finish(false).map_err(|e| e.key), Err(key));
+    }
+    let mut b = Builder::new();
+    b.addr(tag::OBS_LOG_TLS, [10, 0, 0, 1], 6514).unwrap();
+    assert_eq!(
+        b.finish(false).map_err(|e| e.key),
+        Err("observability.log_tls_ca")
+    );
+    for (t, key) in [
+        (tag::OBS_LOG_TLS_NAME, "observability.log_tls_name"),
+        (tag::OBS_LOG_TLS_CA, "observability.log_tls_ca"),
+        (tag::OBS_LOG_TLS_QUEUE_KB, "observability.log_tls_queue_kb"),
+    ] {
+        let mut b = Builder::new();
+        match t {
+            tag::OBS_LOG_TLS_NAME => b.str(t, "logs.example.com").unwrap(),
+            tag::OBS_LOG_TLS_CA => b.bins(t, &[CA.to_vec()]).unwrap(),
+            _ => b.uint(t, 64).unwrap(),
+        }
+        assert_eq!(b.finish(false).map_err(|e| e.key), Err(key));
+    }
+    // Ranges of the field table.
+    let mut b = Builder::new();
+    assert!(b.uint(tag::OBS_LOG_TLS_QUEUE_KB, 15).is_err());
+    assert!(b.uint(tag::OBS_LOG_TLS_QUEUE_KB, 4097).is_err());
+    assert!(b.str(tag::OBS_LOG_TLS_NAME, &"a".repeat(254)).is_err());
+    assert!(b.bins(tag::OBS_LOG_TLS_CA, &vec![CA.to_vec(); 9]).is_err());
+}
+
+#[test]
+fn dns_names() {
+    for ok in [
+        "localhost",
+        "logs.example.com",
+        "a-b.c",
+        "x1",
+        "1.example",
+        "A.EXAMPLE",
+    ] {
+        assert!(check::valid_dns_name(ok), "{ok}");
+    }
+    let long_label = "a".repeat(64);
+    let long_name = ["a"; 128].join(".");
+    assert!(check::valid_dns_name(&["a"; 127].join(".")), "253 bytes");
+    for bad in [
+        "",
+        ".",
+        "a.",
+        ".a",
+        "a..b",
+        "-a",
+        "a-",
+        "a_b",
+        "*.example.com",
+        "10.0.0.1",
+        "1.2",
+        "a b",
+        &long_label,
+        &long_name,
+    ] {
+        assert!(!check::valid_dns_name(bad), "{bad}");
+    }
+}
+
+/// NEXT-1, ADR-334: `network.ipv6*` came with format 23. "off" (the default)
+/// writes nothing, so every existing configuration keeps its version; slaac
+/// and static need 23, which an older kernel refuses by the version. An IPv6
+/// network in an allow-list needs 23 too (the key is older than the value).
+#[test]
+fn ipv6_needs_format_23_and_off_writes_nothing() {
+    use crate::fields::IPV6_MODES;
+    for (key, t) in [
+        ("network.ipv6", tag::NET_IPV6),
+        ("network.ipv6_address", tag::NET_IPV6_ADDRESS),
+        ("network.ipv6_gateway", tag::NET_IPV6_GATEWAY),
+    ] {
+        let f = crate::fields::by_key(key).unwrap();
+        assert_eq!((f.tag, f.since, f.dev_only), (t, 23, false), "{key}");
+    }
+    assert_eq!(IPV6_MODES, ["off", "slaac", "static"]);
+    let mut off = Builder::new();
+    off.variant(tag::NET_IPV6, 0).unwrap();
+    assert_eq!(off.lowest_version(), 2);
+    assert_eq!(off.finish(false).unwrap(), empty());
+    let mut slaac = Builder::new();
+    slaac.variant(tag::NET_IPV6, 1).unwrap();
+    assert_eq!(slaac.lowest_version(), 23);
+    assert!(slaac.finish_as(false, 22).is_err());
+    let blob = slaac.finish(false).unwrap();
+    let p = Blob::parse(&blob).unwrap();
+    assert_eq!((p.version(), p.variant(tag::NET_IPV6)), (23, 1));
+    check::check(&p, false).unwrap();
+    assert!(Blob::parse(&with_version(&blob, 22)).is_err());
+    assert!(Builder::new().variant(tag::NET_IPV6, 3).is_err());
+    // static: both keys, the gateway on the link.
+    let st = |addr: &str, gw: &str| {
+        let mut b = Builder::new();
+        b.variant(tag::NET_IPV6, 2).unwrap();
+        if !addr.is_empty() {
+            b.str(tag::NET_IPV6_ADDRESS, addr).unwrap();
+        }
+        if !gw.is_empty() {
+            b.str(tag::NET_IPV6_GATEWAY, gw).unwrap();
+        }
+        // `finish` runs the kernel's check.
+        let blob = b.finish(false).map_err(|e| e.key)?;
+        let p = Blob::parse(&blob).unwrap();
+        assert_eq!(p.version(), 23);
+        check::check(&p, false).map_err(|e| e.key)
+    };
+    assert_eq!(st("2001:db8:1::10/64", "fe80::1"), Ok(()));
+    assert_eq!(st("2001:db8:1::10/64", "2001:db8:1::1"), Ok(()));
+    assert_eq!(
+        st("2001:db8:1::10/64", "2001:db8:2::1"),
+        Err("network.ipv6_gateway")
+    );
+    assert_eq!(
+        st("2001:db8:1::10/64", "2001:db8:1::10"),
+        Err("network.ipv6_gateway")
+    );
+    assert_eq!(st("2001:db8:1::10/64", ""), Err("network.ipv6_gateway"));
+    assert_eq!(st("", "fe80::1"), Err("network.ipv6_address"));
+    assert_eq!(st("fe80::10/64", "fe80::1"), Err("network.ipv6_address"));
+    assert_eq!(st("2001:db8:1::10", "fe80::1"), Err("network.ipv6_address"));
+    assert_eq!(
+        st("2001:db8:1::10/64", "ff02::1"),
+        Err("network.ipv6_gateway")
+    );
+    // An address without static mode.
+    let mut b = Builder::new();
+    b.variant(tag::NET_IPV6, 1).unwrap();
+    b.str(tag::NET_IPV6_ADDRESS, "2001:db8:1::10/64").unwrap();
+    assert_eq!(b.finish(false).map_err(|e| e.key), Err("network.ipv6"));
+}
+
+/// ADR-334: an IPv6 network in an allow-list lifts the format to 23; the
+/// same network written twice in different text is a duplicate; a blob of an
+/// older format that holds one is refused by the check.
+#[test]
+fn ipv6_networks_in_allow_lists_need_format_23() {
+    let mut b = Builder::new();
+    b.strs(tag::METRICS_ALLOW_FROM, &["10.0.0.0/8".to_string()])
+        .unwrap();
+    assert!(b.lowest_version() < 23);
+    let mut b = Builder::new();
+    b.strs(
+        tag::METRICS_ALLOW_FROM,
+        &["10.0.0.0/8".to_string(), "2001:db8::/32".to_string()],
+    )
+    .unwrap();
+    assert_eq!(b.lowest_version(), 23);
+    assert!(b.finish_as(false, 22).is_err());
+    let blob = b.finish(false).unwrap();
+    check::check(&Blob::parse(&blob).unwrap(), false).unwrap();
+    let mut d = Builder::new();
+    d.strs(
+        tag::METRICS_ALLOW_FROM,
+        &["2001:db8::/32".to_string(), "2001:DB8:0::/32".to_string()],
+    )
+    .unwrap();
+    let e = d.finish(false).unwrap_err();
+    assert!(e.msg.contains("twice"), "{e:?}");
+    // A format 22 blob carrying one (not what a packer writes): refused.
+    let mut v = Builder::new();
+    v.strs(tag::PL_ALLOW_FROM, &["2001:db8::/32".to_string()])
+        .unwrap();
+    let blob = v.finish(false).unwrap();
+    let old = with_version(&blob, 22);
+    let p = Blob::parse(&old).unwrap();
+    let e = check::check(&p, false).unwrap_err();
+    assert!(e.msg.contains("format 23"), "{e:?}");
 }

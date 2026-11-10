@@ -80,3 +80,20 @@ it runs: the security steps below are not optional.
 - A key that is not "off" for a driver the image lacks is refused by
   `urmqtt-config pack --iso`/`--image`/`--kernel` (the kernel's
   `URMQTT-VIRTIO-DRIVERS:` marker) and warned about at boot.
+
+## A driver that is not virtio (out of tree)
+
+A driver for a device that is not virtio does not go into this repository
+([EDITIONS.md](EDITIONS.md) §6); it lives in an edition's own crate that uses
+the kernel as a library (NOW-18, ADR-335 to ADR-339,
+[ARCHITECTURE.md](ARCHITECTURE.md) §8b). It is a `urmqtt_kernel::ext::PciDriver`
+in the edition's `Edition`: its PCI IDs, a `max`, and a `probe` that gets a
+`PciDevice` (configuration space, memory BARs, DMA memory). Its configuration
+keys are fields in the reserved range (`urmqtt_cfg::ext::field`, keys
+`ext.<section>.<name>`). `examples/edition` is a complete one to copy: the
+driver (`src/edu.rs`), the key table shared with the packer (`src/lib.rs`), the
+build script that links the image, and the packer (`src/config.rs`). The same
+security steps apply to it as to a virtio driver: what the device returns is
+hostile input, every loop is bounded, and the edition's own fuzz targets and
+smoke tests are its audit evidence (the commercial edition publishes them,
+EDITIONS.md §4 point 5).

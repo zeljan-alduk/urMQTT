@@ -49,7 +49,7 @@ export PROPTEST_CASES="${PROPTEST_CASES:-32}" PROPTEST_DISABLE_FAILURE_PERSISTEN
 # connections instead of closing them (power-cut tests). LeakSanitizer
 # reports all of that. These binaries run with ASan and UBSan but with leak
 # detection off; every other test binary of the crate keeps it on.
-STORE_LEAKY_TESTS=" discard grow sqlite golden_schema3 golden_schema4 golden_schema5 "
+STORE_LEAKY_TESTS=" discard grow sqlite golden_schema3 golden_schema4 golden_schema5 golden_schema6 "
 for c in "${CRATES[@]}"; do
     echo "== asan+ubsan(C): $c"
     if [[ $c == urmqtt-store && $HOST != *apple-darwin ]]; then

@@ -12,16 +12,28 @@
 //! | 8 | 8 | `seq`, u64 LE, strictly increasing, never 0 |
 //! | 16 | 8 | `not_before`, Unix seconds, u64 LE |
 //! | 24 | 8 | `not_after`, Unix seconds, u64 LE |
-//! | 32 | 1 | command: 1 revoke, 2 unrevoke, 3 allow, 4 disallow |
-//! | 33 | 1 | item count, 1..=[`MAX_ITEMS`] |
+//! | 32 | 1 | command: 1 revoke, 2 unrevoke, 3 allow, 4 disallow, 5 set-account, 6 remove-account, 7 boot-confirm, 8 boot-rollback |
+//! | 33 | 1 | item count, 1..=[`MAX_ITEMS`] (1..=[`MAX_ACCOUNT_ITEMS`] for 5 and 6, exactly 1 for 7 and 8) |
 //! | 34 | … | items: a length byte, then that many bytes |
 //! | end − 64 | 64 | Ed25519 signature |
 //!
 //! Revoke items are certificate serials (big-endian bytes, 1..=20, the
-//! RFC 5280 bound). Allowlist items are device ids (UTF-8, valid MQTT
+//! RFC 5280 bound). A boot command (ADR-298) has exactly one item, the 16
+//! bytes of the boot disk's GPT disk GUID as the partition table stores it:
+//! the message names the machine it is for, so one control key can serve
+//! many brokers without a confirmation for one reaching another. (5 and 6
+//! are allocated to another item of v0.6.0.) Allowlist items are device ids (UTF-8, valid MQTT
 //! identities: no `/`, `+`, `#`, NUL or leading `$`, at most
 //! [`MAX_ID_LEN`] bytes). Items must be unique. Nothing may follow the
 //! signature.
+//!
+//! Password accounts (NOW-15, ADR-285) are items of commands 5 and 6. A
+//! `set-account` item is `class (1 byte) | id length (1 byte) | id | hash`,
+//! the hash being the stored form of `urmqtt_cfg::passwd` (PBKDF2, made by the
+//! operator's tool: the broker never sees a password). `class` is an
+//! [`AccountClass`]. A `remove-account` item is an id. Items of one message
+//! name distinct ids. Account ids use the identity characters of the
+//! `[plaintext]` section (`urmqtt_cfg::plain::check_identity`).
 //!
 //! The signature covers `DOMAIN || env || 0x00 || message-without-signature`.
 //! The environment name binds a message to one deployment, and a dev
@@ -53,6 +65,11 @@ pub const DOMAIN: &[u8] = b"urMQTT control message v1\0";
 pub const HEADER: usize = 34;
 pub const SIGNATURE: usize = 64;
 pub const MAX_ITEMS: usize = 64;
+/// Items of an account command (each is up to 216 bytes).
+pub const MAX_ACCOUNT_ITEMS: usize = 8;
+/// The most iterations a run-time account's hash may ask for: the cost the
+/// kernel sized the login admission and the watchdog budget for (ADR-285).
+pub const MAX_ACCOUNT_ITERATIONS: u32 = urmqtt_cfg::passwd::DEFAULT_ITERATIONS;
 pub const MAX_SERIAL_LEN: usize = 20;
 pub const MAX_ID_LEN: usize = 128;
 /// The largest valid message.
@@ -64,6 +81,14 @@ pub enum Command {
     Unrevoke = 2,
     Allow = 3,
     Disallow = 4,
+    /// Adds a password account or replaces its hash and class (NOW-15).
+    SetAccount = 5,
+    /// Removes a run-time password account (NOW-15).
+    RemoveAccount = 6,
+    /// Confirms the boot slot on trial after an A/B update (ADR-298).
+    BootConfirm = 7,
+    /// Switches back to the previous boot slot and resets (ADR-298).
+    BootRollback = 8,
 }
 
 impl Command {
@@ -73,6 +98,10 @@ impl Command {
             2 => Some(Self::Unrevoke),
             3 => Some(Self::Allow),
             4 => Some(Self::Disallow),
+            5 => Some(Self::SetAccount),
+            6 => Some(Self::RemoveAccount),
+            7 => Some(Self::BootConfirm),
+            8 => Some(Self::BootRollback),
             _ => None,
         }
     }
@@ -83,18 +112,134 @@ impl Command {
             Self::Unrevoke => "unrevoke",
             Self::Allow => "allow",
             Self::Disallow => "disallow",
+            Self::SetAccount => "set-account",
+            Self::RemoveAccount => "remove-account",
+            Self::BootConfirm => "boot-confirm",
+            Self::BootRollback => "boot-rollback",
         }
     }
 
     pub fn from_name(s: &str) -> Option<Self> {
-        [Self::Revoke, Self::Unrevoke, Self::Allow, Self::Disallow]
-            .into_iter()
-            .find(|c| c.name() == s)
+        [
+            Self::Revoke,
+            Self::Unrevoke,
+            Self::Allow,
+            Self::Disallow,
+            Self::SetAccount,
+            Self::RemoveAccount,
+            Self::BootConfirm,
+            Self::BootRollback,
+        ]
+        .into_iter()
+        .find(|c| c.name() == s)
+    }
+
+    /// Whether the command is about the boot slots (its one item is a disk
+    /// GUID, ADR-298).
+    pub const fn on_boot(self) -> bool {
+        matches!(self, Self::BootConfirm | Self::BootRollback)
     }
 
     /// Whether the items are certificate serials (else device ids).
     pub const fn on_serials(self) -> bool {
         matches!(self, Self::Revoke | Self::Unrevoke)
+    }
+
+    /// Whether the command is about password accounts.
+    pub const fn on_accounts(self) -> bool {
+        matches!(self, Self::SetAccount | Self::RemoveAccount)
+    }
+}
+
+/// What a run-time account may do on top of its listener's rules. A class
+/// only narrows: no class gives more than `plaintext.acl_*` or
+/// `websocket.acl_*` allow (ADR-285).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountClass {
+    /// The listener's publish and subscribe rules.
+    Full = 0,
+    /// Subscribes under the listener's rules, publishes nothing (no Will).
+    ReadOnly = 1,
+    /// Publishes under the listener's rules, subscribes to nothing.
+    WriteOnly = 2,
+}
+
+impl AccountClass {
+    pub const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Full),
+            1 => Some(Self::ReadOnly),
+            2 => Some(Self::WriteOnly),
+            _ => None,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::ReadOnly => "read-only",
+            Self::WriteOnly => "write-only",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        [Self::Full, Self::ReadOnly, Self::WriteOnly]
+            .into_iter()
+            .find(|c| c.name() == s)
+    }
+}
+
+/// One `set-account` item, borrowed from the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Account<'a> {
+    pub class: AccountClass,
+    pub id: &'a str,
+    pub hash: &'a str,
+}
+
+/// Parses a `set-account` item: `class | id length | id | hash`. Exact: the
+/// id is a plaintext identity, the hash a well-formed PBKDF2 text of at most
+/// [`MAX_ACCOUNT_ITERATIONS`], nothing follows it.
+pub fn parse_account(item: &[u8]) -> Result<Account<'_>, Reject> {
+    let class = item
+        .first()
+        .and_then(|&b| AccountClass::from_byte(b))
+        .ok_or(Reject::Malformed)?;
+    let id_len = usize::from(*item.get(1).ok_or(Reject::Malformed)?);
+    let id = item.get(2..2 + id_len).ok_or(Reject::Malformed)?;
+    let hash = item.get(2 + id_len..).ok_or(Reject::Malformed)?;
+    let id = core::str::from_utf8(id).map_err(|_| Reject::Malformed)?;
+    let hash = core::str::from_utf8(hash).map_err(|_| Reject::Malformed)?;
+    if urmqtt_cfg::plain::check_identity(id).is_err() {
+        return Err(Reject::Malformed);
+    }
+    let parsed = urmqtt_cfg::passwd::PasswordHash::parse(hash).map_err(|_| Reject::Malformed)?;
+    if parsed.iterations() > MAX_ACCOUNT_ITERATIONS {
+        return Err(Reject::Malformed);
+    }
+    Ok(Account { class, id, hash })
+}
+
+/// The item of a `set-account` message (the operator tool's side of
+/// [`parse_account`]); `None` if it would not parse.
+pub fn encode_account(class: AccountClass, id: &str, hash: &str) -> Option<Vec<u8>> {
+    let mut v = Vec::with_capacity(2 + id.len() + hash.len());
+    v.push(class as u8);
+    v.push(u8::try_from(id.len()).ok()?);
+    v.extend_from_slice(id.as_bytes());
+    v.extend_from_slice(hash.as_bytes());
+    (v.len() <= 255 && parse_account(&v).is_ok()).then_some(v)
+}
+
+/// The id an account item names (`set-account` and `remove-account`).
+fn account_item_id(command: Command, item: &[u8]) -> Result<&[u8], Reject> {
+    if command == Command::SetAccount {
+        Ok(parse_account(item)?.id.as_bytes())
+    } else if core::str::from_utf8(item).is_ok_and(|s| urmqtt_cfg::plain::check_identity(s).is_ok())
+    {
+        Ok(item)
+    } else {
+        Err(Reject::Malformed)
     }
 }
 
@@ -135,10 +280,26 @@ pub enum Reject {
     ImageListed,
     /// The store could not commit the change.
     StorageFailed,
+    /// An account command while `limits.max_runtime_accounts` is 0 (NOW-15).
+    AccountsDisabled,
+    /// The change would leave more run-time accounts than
+    /// `limits.max_runtime_accounts`.
+    AccountLimit,
+    /// No listener of this image takes passwords: an account could never
+    /// log in.
+    NoPasswordListener,
+    /// `set-account` for an id the image itself lists (the image wins).
+    AccountShadowsImage,
+    /// A boot command for another machine (its disk GUID is not this
+    /// boot disk's), ADR-298.
+    OtherDisk,
+    /// A boot command the boot slots cannot carry out: no A/B slots, nothing
+    /// on trial to confirm, or nothing eligible to go back to.
+    BootRefused,
 }
 
 impl Reject {
-    pub const ALL: [Reject; 13] = [
+    pub const ALL: [Reject; 19] = [
         Self::Malformed,
         Self::BadSignature,
         Self::Replay,
@@ -152,6 +313,12 @@ impl Reject {
         Self::Unauthorized,
         Self::ImageListed,
         Self::StorageFailed,
+        Self::AccountsDisabled,
+        Self::AccountLimit,
+        Self::NoPasswordListener,
+        Self::AccountShadowsImage,
+        Self::OtherDisk,
+        Self::BootRefused,
     ];
 
     /// Metric and log name (no message content, ever).
@@ -170,6 +337,12 @@ impl Reject {
             Self::Unauthorized => "unauthorized",
             Self::ImageListed => "image_listed",
             Self::StorageFailed => "storage_failed",
+            Self::AccountsDisabled => "accounts_disabled",
+            Self::AccountLimit => "account_limit",
+            Self::NoPasswordListener => "no_password_listener",
+            Self::AccountShadowsImage => "account_shadows_image",
+            Self::OtherDisk => "other_disk",
+            Self::BootRefused => "boot_refused",
         }
     }
 
@@ -177,6 +350,9 @@ impl Reject {
         Self::ALL.iter().position(|&r| r == self).unwrap_or(0)
     }
 }
+
+/// Bytes of a boot command's item: a GPT disk GUID.
+pub const DISK_GUID_LEN: usize = 16;
 
 /// A device id as the broker accepts it (the same rule as MQTT CONNECT).
 pub fn valid_id(id: &[u8]) -> bool {
@@ -237,7 +413,15 @@ pub fn decode_body(b: &[u8]) -> Result<Message, Reject> {
         .and_then(|&c| Command::from_byte(c))
         .ok_or(Reject::Malformed)?;
     let n = usize::from(*b.get(33).ok_or(Reject::Malformed)?);
-    if seq == 0 || n == 0 || n > MAX_ITEMS || not_after < not_before {
+    let max_items = if command.on_accounts() {
+        MAX_ACCOUNT_ITEMS
+    } else {
+        MAX_ITEMS
+    };
+    if seq == 0 || n == 0 || n > max_items || not_after < not_before {
+        return Err(Reject::Malformed);
+    }
+    if command.on_boot() && n != 1 {
         return Err(Reject::Malformed);
     }
     let mut items: Vec<Vec<u8>> = Vec::with_capacity(n);
@@ -245,12 +429,28 @@ pub fn decode_body(b: &[u8]) -> Result<Message, Reject> {
     for _ in 0..n {
         let len = usize::from(*b.get(off).ok_or(Reject::Malformed)?);
         let item = b.get(off + 1..off + 1 + len).ok_or(Reject::Malformed)?;
-        let ok = if command.on_serials() {
+        let dup = if command.on_accounts() {
+            // Distinct ids, whatever the hashes say.
+            let id = account_item_id(command, item)?;
+            for other in &items {
+                if account_item_id(command, other)? == id {
+                    return Err(Reject::Malformed);
+                }
+            }
+            false
+        } else {
+            items.iter().any(|i| i.as_slice() == item)
+        };
+        let ok = if command.on_accounts() {
+            true
+        } else if command.on_serials() {
             (1..=MAX_SERIAL_LEN).contains(&len)
+        } else if command.on_boot() {
+            len == DISK_GUID_LEN
         } else {
             valid_id(item)
         };
-        if !ok || items.iter().any(|i| i.as_slice() == item) {
+        if !ok || dup {
             return Err(Reject::Malformed);
         }
         items.push(item.to_vec());
@@ -297,6 +497,8 @@ pub struct Policy {
     pub max_message_age_s: u64,
     pub allow_unrevoke: bool,
     pub allowlist_mode: bool,
+    /// `limits.max_runtime_accounts` is not 0 (NOW-15).
+    pub accounts: bool,
 }
 
 /// Freshness, replay and permission checks on an authenticated message.
@@ -319,6 +521,9 @@ pub fn check(m: &Message, now: Option<u64>, last_seq: u64, p: &Policy) -> Result
     match m.command {
         Command::Unrevoke if !p.allow_unrevoke => Err(Reject::UnrevokeDisabled),
         Command::Allow | Command::Disallow if !p.allowlist_mode => Err(Reject::NotAllowlistMode),
+        Command::SetAccount | Command::RemoveAccount if !p.accounts => {
+            Err(Reject::AccountsDisabled)
+        }
         _ => Ok(()),
     }
 }

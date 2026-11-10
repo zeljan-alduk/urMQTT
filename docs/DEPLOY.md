@@ -52,7 +52,7 @@ page's result byte for byte:
 ```bash
 # my/config.toml names ca.pem, server.pem, server.key, control.pub next to it;
 # keys left out take the defaults (urmqtt-config schema lists them all)
-urmqtt-config pack my/config.toml --iso urmqtt-template-v0.5.0-universal.iso --out urmqtt-mine.iso
+urmqtt-config pack my/config.toml --iso urmqtt-template-v0.6.0-universal.iso --out urmqtt-mine.iso
 # configuration fingerprint: the same one the kernel prints at every boot
 urmqtt-config show urmqtt-mine.iso
 urmqtt-config verify urmqtt-mine.iso      # kernel's checks; all slot copies and module hashes agree
@@ -207,6 +207,25 @@ value (jumbo frames) is used as 1500, which a jumbo network carries. The value i
 nothing; **with a static address on Google Cloud set `network.mtu = 1460`** (or the network's MTU). Setting it
 needs configuration format 7: a template of an earlier release refuses such a configuration when it is packed.
 
+**IPv6 (NEXT-1, ADR-330 to ADR-334).** Off by default. Where the provider's network sends Router Advertisements,
+`[network] ipv6 = "slaac"` is enough: the broker takes the first advertised /64 and the EUI-64 of its MAC, so its
+address is `<prefix>` + the interface identifier of the MAC (`52:54:00:12:34:56` gives `::5054:ff:fe12:3456`) and
+can go into DNS before the first boot. Many VPS providers (netcup among them) route a /64 to the VM but send no
+advertisements and expect a configured address and the router `fe80::1`:
+
+```toml
+[network]
+ipv6 = "static"
+ipv6_address = "2001:db8:1234::10/64"   # one address of the /64 the panel shows
+ipv6_gateway = "fe80::1"                # what the panel names as the IPv6 gateway
+```
+
+The boot log shows `net: ipv6 global address ... in use (duplicate address detection passed)`; `$SYS/broker/net/ipv6/*`
+and the console's `status` show the addresses (docs/OPERATE.md). Every listener then also takes IPv6 clients: a
+firewall in front must allow the same ports over IPv6, and `metrics.allow_from` / `plaintext.allow_from` need IPv6
+networks for IPv6 scrapers or clients. The configuration needs format 23 (a v0.6.0 template or newer). Not done:
+reassembly of fragments, ICMPv6 errors, DHCPv6, a second address (ADR-333).
+
 **The console on a virtio-gpu (ADR-256).** Some VMs (netcup ARM) have a virtio-gpu as their only display: the
 firmware draws its menu through it, but after boot the provider's console shows "Display output is not active"
 (the firmware resets the device; the framebuffer it handed over is RAM nothing shows). With
@@ -242,6 +261,37 @@ says which: `net: receive wake-up: interrupt (MSI-X via ...), on probation ...` 
 (<reason>)`. A hypervisor that accepts the vector but does not deliver it (always, or for some frames) is noticed after eight frames that waited
 (`net: receive wake-up: 8 frames waited after a sleep without the receive interrupt; polling ...`) and the broker
 polls from then on. `"off"` forces polling (configuration format 11).
+
+**More than one NIC queue (NEXT-6, ADR-310 to ADR-314).** With `devices.virtio_net_queues = "auto"` (the default)
+the broker gives each data core its own virtio-net queue pair when the device offers multiqueue **with** receive-side
+scaling (`VIRTIO_NET_F_MQ`, `VIRTIO_NET_F_CTRL_VQ` and `VIRTIO_NET_F_RSS`): the device then hashes every TCP/IPv4
+flow onto the queue of the core that owns it (the broker programs the key and the table), and core 0 no longer copies
+every frame. Nothing to do on most VPSes: their NIC has one queue, or several without RSS, and the broker uses one
+pair as before (`net: one queue pair: <reason>` says why when the device offered more). On your own QEMU/KVM host:
+a multi-queue tap and `-device virtio-net-pci,...,mq=on,rss=on,vectors=2N+2` with `-netdev tap,...,queues=N`, N the
+vCPUs (QEMU computes RSS in software when it cannot load its eBPF program, which needs `vhost=off` then; with vhost
+it needs eBPF RSS). libvirt: `<driver name='qemu' queues='N' rss='on'/>` on the interface. With storage the last
+CPU is the store's core, so 2 vCPUs are one data core and use one pair; 4 vCPUs use 3. The boot log says
+`net: multiqueue: P queue pairs (the device offers N), RSS ...` and one `net: queue pair k on core k: ...` line per
+worker. `"single"` (configuration format 19) keeps one pair whatever the device offers, for a host whose
+multiqueue misbehaves. Each pair costs up to 4 MiB of memory (two 1024-descriptor queues with their buffers).
+
+**DMA isolation through the IOMMU (H4b, ADR-305 to ADR-307).** `devices.iommu` decides whether the broker drives
+the machine's IOMMU (Intel VT-d from the ACPI DMAR table, AMD-Vi from IVRS, Arm SMMUv3 from IORT or the device
+tree). `"off"` (the default) leaves it as the firmware set it, as every release before; the boot log names an IOMMU
+it found (`iommu: ...: not used (devices.iommu = "off")`). With `"auto"` or `"require"` every device's DMA is
+blocked from before the first driver runs, and each device the broker drives gets a domain holding only its own
+buffers; the boot log shows each domain and a summary (`iommu: active: 1 unit(s), 3 device domain(s), ...`), and
+`$SYS/broker/iommu/faults` counts blocked accesses. `"require"` refuses to boot when there is no IOMMU, a unit does
+not come up, or a driven device is outside every unit's scope or bypasses it (a virtio device must offer
+VIRTIO_F_ACCESS_PLATFORM: in QEMU `iommu_platform=on,disable-legacy=on`); `"auto"` warns and goes on. Use
+`"require"` on bare metal and under a hypervisor whose device models you do not trust; in an ordinary VPS the
+devices are the hypervisor's and an emulated IOMMU slows every DMA, so `"off"` stays the default. QEMU:
+`-device intel-iommu,caching-mode=on` (q35; under KVM with `-machine kernel-irqchip=split` when `intremap=on`),
+`-device amd-iommu,dma-remap=on`, or `-machine virt,iommu=smmuv3`; `scripts/run-qemu.sh --iommu intel|amd|smmuv3`
+does all of it. Any value but `"off"` needs a kernel that reads configuration format 18 (v0.6.0 or newer); an older
+template refuses the configuration (`urmqtt-config pack --iso`, the builder page). Tested against QEMU 11.1's
+models only, not on real hardware; interrupt remapping is not enabled (ADR-307).
 
 **Single-disk model (S1, STORAGE-PLAN §2a).** The disk the VM boots from is
 the only one urMQTT writes:
@@ -326,8 +376,13 @@ kernel and keep the data, use `urmqtt-disk update-boot` or
 `scripts/kvm-host/install.sh` instead.
 
 Only TCP 8883 is served. Allow it inbound. Allow UDP from the VM to your syslog
-and statsd collectors (`observability.*`) if configured, plus DHCP. Nothing else
-is needed.
+and statsd collectors (`observability.*`) if configured, plus DHCP, and with
+`observability.log_tls` (NEXT-7, ADR-318) **outbound** TCP from the VM to that
+collector's address and port: the broker's only outbound connection, from a port
+in 49152–65535. Nothing else is needed, unless the image turns on an optional listener (all off by default):
+the Prometheus endpoint (`[metrics]`, TCP 9100 by default, **inbound from the monitoring host only**: the
+configuration's `allow_from` is the broker's own filter, the firewall is the second one; OPERATE.md "Metrics for
+Prometheus").
 
 ## 5. Generic KVM / Proxmox (aarch64 host)
 
@@ -359,8 +414,10 @@ upstream Proxmox):
    disk: the data lives in a partition of `virtio0`.
 4. Add a serial port (`serial0: socket`) to read the log with `qm terminal <vmid>`.
 
-**Updating** replaces only the kernel and keeps the data partition. With the
-VM stopped, run `urmqtt-disk update-boot <disk> --esp <the new image's ESP>
+**Updating** replaces only the kernel and keeps the data partition. A disk
+installed by v0.6.0 or later has two boot slots: use `urmqtt-disk slots stage`
+and `slots activate` (section 8b), which keep the old kernel as the way back.
+On a single-slot disk, with the VM stopped, run `urmqtt-disk update-boot <disk> --esp <the new image's ESP>
 --write` on the disk image or volume, or copy MiB 1 to 9 of the new raw image
 (its EFI system partition) over the same bytes of the disk:
 `dd if=new.img of=<disk> bs=1M skip=1 seek=1 count=8 conv=notrunc`. The
@@ -434,41 +491,51 @@ and without a hypervisor timing leaf the boot stops (`no usable time base`).
 DSDT's `_S5` sleep type, and the reset register) and then QEMU's ports under a
 hypervisor. On real hardware this path has never run.
 
-## 5d. Secure Boot (H8, ADR-250, ADR-251)
+## 5d. Secure Boot (H8, LATER-6: ADR-250, ADR-251, ADR-320 to ADR-324)
 
-**Status: the signing path and the x86_64 OVMF test are done; nothing here has run on real
-hardware, on Proxmox or on aarch64 firmware.** The first release targets a KVM VPS, whose
-firmware and boot chain belong to the host; most VPS images boot with Secure Boot off. Use this
+**Status: tested in QEMU on x86_64 (OVMF Secure Boot, SMM) and aarch64 (AAVMF Secure Boot), with keys
+enrolled and enforcement on; not on Proxmox, real hardware or a cloud's firmware.** The first release targets a
+KVM VPS, whose firmware and boot chain belong to the host; most VPS images boot with Secure Boot off. Use this
 section when you control the firmware (your own hypervisor, a test PC).
 
 **What it protects, and what it does not.** The firmware verifies the signature of the loader
 (`BOOTX64.EFI`, `BOOTAA64.EFI`). The loader then checks its enrolled hash of `limine.conf`, and the
 hashes of the kernel and of the configuration module that the file names (under Secure Boot Limine
 refuses any file without one). So firmware, signature, loader, configuration, kernel and
-configuration are one chain. It does **not** cover: the BIOS path (no signatures exist there),
-rollback to an older, correctly signed image (there is no version counter and no `dbx` entries
-are made), or a machine whose firmware lets whoever has physical access change the keys.
+configuration are one chain, on the ISO, on the raw disk image and on the disk the installer writes. It does
+**not** cover: the BIOS path (no signatures exist there), rollback to an older, correctly signed image that you
+did not revoke (there is no version counter; `dbx` revokes single images, ADR-322), or a machine whose firmware
+lets whoever has physical access change the keys.
 
-**Two limits of this design, both tested and both fail closed:**
+**Sign after you configure; the result is sealed (ADR-320, ADR-321).** The enrolled hash covers the module hash
+of your configuration, so a signed ISO cannot be configured again (`urmqtt-config pack --iso` and the builder page
+refuse it). Configure the template first (builder page, or `urmqtt-config pack --iso`), then sign the configured
+ISO with your own key; the kernels are taken from it unchanged, and `--template` checks that they are the ones
+of the release template whose signature you verified (section 3; without it the configured ISO vouches only for
+itself, and sign-iso says so):
 
-1. **Sign after you configure.** The enrolled hash covers the module hash of your configuration,
-   so `urmqtt-config pack --iso` on a *signed* ISO changes a signed loader and breaks its
-   signature; the firmware then answers "Access Denied". Build the image with its configuration
-   and the signature in one step, with your own key:
-   `scripts/mkiso.sh --universal ... --config my/config.toml --sb-key db.key --sb-cert db.crt`
-   (or `make universal` with the same two options passed through `MKISO_ARGS`). The template ISO of a
-   release is **not** signed with a key you trust; to use Secure Boot you build the image yourself
-   from the release artifacts (`make universal`), or sign with your own key as above.
-2. **An installed disk does not boot under Secure Boot.** The installed disk's `limine.conf` names the
-   configuration module without a hash (ADR-217: a configuration written later must not trip the
-   loader), and Limine refuses a file with no hash when Secure Boot is active ("Secure Boot is active
-   and URI ... has no associated hash"). Booting the ISO (live mode) works. Running an installed
-   disk under Secure Boot needs a per-machine ESP (module pinned, loader re-enrolled and re-signed
-   by you): **not done**.
+```
+scripts/sign-loaders.sh sign-iso db.key db.crt urmqtt-configured.iso urmqtt-signed.iso \
+    --template urmqtt-template-<version>-universal.iso --disk-out urmqtt-signed.img --esp-out urmqtt-signed.esp
+```
+
+`--config my/config.toml` signs a template with a configuration instead; building from source does the same with
+`scripts/mkiso.sh --universal ... --config my/config.toml --sb-key db.key --sb-cert db.crt`. The release template
+ISO is **not** signed with a key you trust.
+
+A signed image is **sealed**: the installed disk's `limine.conf` pins your configuration too, so the disk the
+installer writes, the raw image and an A/B slot boot with Secure Boot enforced. The installer, `urmqtt-disk`
+(`update-boot`, `create`, `slots stage`) and `urmqtt-config` refuse to put any other configuration into a sealed
+image, before they write anything, because its loader would refuse the disk. A new configuration is a new signed
+image (sign-iso), put on the disk as an A/B update (section 8b). `urmqtt-disk info` prints the state
+(`secure boot: sealed to its configuration` / `not sealed`). `mkiso.sh --no-seal` builds the unsealed signed
+image of v0.5.0 (an installed disk then does not boot under Secure Boot; kept as the tests' control).
 
 **Keys.** `scripts/sign-loaders.sh gen-keys build/secureboot` makes a throwaway PK, KEK and db
 (RSA 2048) for tests; they protect nothing. A real key is generated offline, kept offline (an HSM or an
 air-gapped machine), and never enters this repository (`*.key`, `*.pem` and `build/` are ignored).
+[secure-boot-keys.md](secure-boot-keys.md) has the procedures: generating, enrolling, signing, revoking one
+image through `dbx` (`scripts/sign-loaders.sh authenticode` gives the hashes), rotating db, and a leak.
 `scripts/sign-loaders.sh sign KEY CERT IN OUT` signs one EFI binary with `sbsign` (`apt install
 sbsigntool`) or `osslsigncode` (`brew install osslsigncode`); `verify CERT FILE` checks it. The signing
 time is `SOURCE_DATE_EPOCH`, so the same key and loader give the same bytes (the smoke scenario
@@ -487,8 +554,22 @@ scripts/run-qemu.sh --arch x86_64 --iso build/signed.iso --secure-vars build/var
 
 `ovmf-vars` enrolls PK, KEK and db in the variable store and turns Secure Boot on (the machine is
 `q35,smm=on` with a secure pflash; `--secure-vars` does that). An unsigned or foreign-signed image
-shows `BdsDxe: failed to load ... Access Denied`. CI runs `SMOKE_ONLY=secureboot scripts/smoke.sh
---arch universal` (with `SMOKE_REQUIRE_SB=1`, so that missing tools fail instead of skipping).
+shows `BdsDxe: failed to load ... Access Denied`; `--dbx-hash HASH` (repeatable) also puts a revoked loader's
+Authenticode hash into `dbx`.
+
+**QEMU on aarch64 with AAVMF (tested, ADR-323).** Needs AAVMF's Secure Boot build: `AAVMF_CODE.secboot.fd` and
+`AAVMF_VARS.fd` of Debian/Ubuntu `qemu-efi-aarch64` (`/usr/share/AAVMF/`; elsewhere, point
+`URMQTT_FIRMWARE_SECURE_AA64` at the code file). The QEMU that Homebrew ships has no aarch64 Secure Boot build:
+
+```
+scripts/sign-loaders.sh ovmf-vars build/secureboot /usr/share/AAVMF/AAVMF_VARS.fd build/aavmf-sb.fd
+scripts/run-qemu.sh --disk build/signed.img --secure-vars build/aavmf-sb.fd
+```
+
+**The test.** `SMOKE_ONLY=secureboot scripts/smoke.sh --arch universal` (with `SMOKE_REQUIRE_SB=1`, so that a
+missing tool or firmware fails instead of skipping) runs every case above on both architectures. It is not in
+CI (the universal suites are run by hand, docs/RELEASE.md); `URMQTT_VIRT_FW_VARS`, `URMQTT_FIRMWARE_SECURE_AA64`
+and `URMQTT_FIRMWARE_VARS_AA64` point at tools and firmware outside the standard paths.
 
 **Proxmox (not tested).** Create the VM with OVMF and an EFI disk *without* the pre-enrolled
 Microsoft keys, then put your keys into its variable store:
@@ -509,14 +590,15 @@ Secure Boot, "Erase all keys" / "Custom mode"), copy `db.der` (and, to enroll a 
 `KEK.der`) to a FAT USB stick, enroll `db.der` as an authorized signature through the firmware menu (or
 with `efi-updatevar` / `sbctl enroll-keys` from a Linux), turn Secure Boot on, and boot the ISO. If the
 board offers only the Microsoft keys, the alternative is MOK through `shim`, which this project does
-not ship: that choice is open (ADR-251). The Intel test PC of SECURITY-PLAN H8 was not available when
+not ship (ADR-324: it would move the root of trust to Microsoft's key and the shim vendor's). The Intel test PC of SECURITY-PLAN H8 was not available when
 this was written.
 
 ## 5c. Load testing a server from one address: the bench profile (PERF, ADR-082)
 
 The production limits protect the server from one slow or abusive source:
 `max_handshakes_in_flight_per_ip = 32` (per data core), `max_handshakes_in_flight_per_core = 256`
-and `handshakes_per_core_per_sec = 2000`. A load generator on a laptop is one source
+and `handshakes_per_core_per_sec = 2000`; established connections are limited per address too
+(`max_connections_per_ip = 1024`, all cores together, ADR-280). A load generator on a laptop is one source
 address, so against the production defaults it measures the per-address limit
 (about 32 handshakes in flight on each worker core), not the server. For that,
 and only for that, there is a bench profile:
@@ -665,7 +747,8 @@ GICv2 or a GICv3.
 clients connect to the Pi's address; forward TCP 8883 on your router to reach
 it from outside. Every client then appears to come from one address (QEMU's
 NAT), so `limits.max_handshakes_in_flight_per_ip` applies to all of them
-together. With a Linux bridge on the Pi's Ethernet (`nmcli con add type bridge
+together, and so does `limits.max_connections_per_ip` (default 1024 established
+connections: raise it for more than a thousand devices, or use the bridge below). With a Linux bridge on the Pi's Ethernet (`nmcli con add type bridge
 ifname br0` and the Ethernet connection as its port), `--net bridge:br0` puts
 the VM on the LAN with its own DHCP address and real client addresses.
 
@@ -676,8 +759,10 @@ restarts the service.
 ## 8. Operating
 
 - **Logs:** the serial console, plus RFC 5424 syslog over UDP to
-  `observability.syslog_udp`. Watch for `admission:`, `watchdog:`, `health:`
-  and `db:` lines.
+  `observability.syslog_udp`, and over TLS 1.3 to `observability.log_tls`
+  (RFC 5425 framing; the collector's certificate checked against
+  `observability.log_tls_ca`; OPERATE.md "Log shipping over TLS"). Watch for
+  `admission:`, `watchdog:`, `health:`, `db:` and `logtls:` lines.
 - **Metrics:** statsd to `observability.metrics_udp` every 10 s
   (`urmqtt.connections`, `urmqtt.heap.*`, `urmqtt.refused.*`, `urmqtt.health`,
   `urmqtt.tls.resume_refused.*`, `urmqtt.tls.tickets_issued`, …; see ADR-035
@@ -695,6 +780,10 @@ restarts the service.
   - For a revocation that must survive even a lost disk, also add the
     serial to the image's revocation list at the next build.
   - Watch `urmqtt.control.applied` and `urmqtt.control.rejected.*`.
+- **Password accounts at run time (NOW-15):** with `limits.max_runtime_accounts` set (format 15), `urmqtt-control
+  set-account` and `remove-account` add, change and remove plaintext and WebSocket accounts without a new image
+  ([OPERATE.md](OPERATE.md)); they are kept on the data disk. The first boot of a v0.6.0 kernel migrates the
+  database to schema 6, one way: take a backup snapshot first if you may need to go back.
 - **Allowlist mode:** with `registry.mode = "allowlist"`, admit devices with
   `urmqtt-control allow --id …` and remove them with `disallow`
   ([PROVISIONING.md](PROVISIONING.md)).
@@ -714,6 +803,114 @@ restarts the service.
 - **Seeding devices offline:** `urmqtt-disk import-devices DISK ids.txt
   [--allowlist] --write` adds device ids to the registry and, for allowlist
   mode, to the allowlist.
+
+## 8b. Updating an installed disk: A/B boot slots (v0.6.0, NEXT-11, ADR-295 to ADR-299)
+
+A disk whose **first boot** ran v0.6.0 or later has two boot slots: the one it
+runs (A at first) and a standby of the same size, reserved next to it at that
+boot (`gpt: standby boot slot reserved ...` in the log). An update goes to the
+standby while the running slot stays untouched; the new kernel boots **on
+trial**, confirms itself once it serves, and if it does not, the machine
+returns to the previous slot by itself. The data partition is never written by
+any of this. A disk installed by an earlier release keeps one slot: update it
+with `update-boot` as before (`urmqtt-disk slots status` says which you have).
+
+**1. Look** (the VM may run; this only reads):
+
+```sh
+urmqtt-disk slots status /dev/vdb
+# disk GUID 3ce59d26-441c-4362-8dc1-61e6836d29c5 (the --disk-guid of urmqtt-control boot-confirm/boot-rollback)
+# slot A [active]: LBA 2048..22527 (10 MiB): v0.6.0 (store schema 6): confirmed, as installed
+# slot B [standby]: LBA 22528..43007 (10 MiB): empty
+```
+
+**2. Stage** the release with the VM stopped. From a published release, the
+signature is checked first (the same check as `urmqtt-config check-release`
+and the builder page); your configuration stays, as with `update-boot`:
+
+```sh
+urmqtt-disk slots stage /dev/vdb --image urmqtt-template-v0.6.1-universal.img \
+    --sums SHA256SUMS --sig SHA256SUMS.minisig --pubkey minisign.pub --write
+# stage: release signature ok: SHA256SUMS signed by key ..., ... has SHA-256 ...
+# stage: kernel v0.6.1 (A/B protocol 1, store schema 6, configuration formats up to 23)
+# stage: configuration: kept the disk's own; ...
+# stage: slot B holds v0.6.1 now, SHA-256 of the slot ...
+```
+
+An image you built yourself (`--esp build/...esp` or an unsigned `--image`)
+needs `--unsigned`. Without `--write` every `slots` command rehearses on an
+in-memory copy and changes nothing.
+
+**3. Activate**, still offline:
+
+```sh
+urmqtt-disk slots activate /dev/vdb --write          # --tries N, 1 to 7 trial boots (default 3)
+# activate: slot B (v0.6.1) is the boot entry, on trial for 3 boot(s); slot A (v0.6.0) is the way back
+```
+
+**4. Start the VM.** The log says `boot: slot B (v0.6.1) ON TRIAL: 2 trial
+boot(s) left after this one; confirmed after 60 s ...`. Once the store is open
+and the listener has been up for `update.confirm_after_s` (default 60):
+`boot: slot B confirmed (healthy for 60 s: store open, listener up)`. From then
+on slot A (the previous release) is the standby: `slots rollback` (offline) or
+a `boot-rollback` control message brings it back.
+
+**What happens when the new kernel is bad.** Each boot of a slot on trial uses
+one attempt **before** the store, the network or the other cores start. A crash,
+a fatal error, a watchdog reset or a trial that is not confirmed within
+`update.trial_timeout_s` (default 900 s; it then resets) all end in a reboot;
+when no attempt is left the kernel switches the boot entry back to the previous
+slot, marks the new one bad, and resets into the previous release:
+`boot: slot B gave up: no trial boots left and no confirmation; slot A (v0.6.0)
+is active again, resetting`. **Not covered:** a kernel that dies before its
+block driver runs (in the bootloader, or very early) is not counted and boots
+again until an operator runs `slots rollback` offline (ADR-296).
+
+**Operator confirmation.** With `[update] confirm = "operator"` the kernel does
+not confirm itself; send
+
+```sh
+urmqtt-control boot-confirm --disk-guid <GUID> --env prod --sign-cmd '...' \
+    --ca ca.pem --client-cert operator.pem --client-key operator.key --host <broker>
+```
+
+within `update.trial_timeout_s` (or set it to 0 to wait as long as the trial
+runs), or `boot-rollback` to go back now (the broker resets). Offline:
+`urmqtt-disk slots confirm|rollback DISK --write`.
+
+**Rules the tool enforces** (refused before anything is written):
+
+| Refused | Unless |
+|---|---|
+| a kernel from before v0.6.0 (no build note: it would never confirm) | never; use `update-boot` |
+| a kernel whose store schema is older than the store on the disk (it would refuse the store; migrations are one-way) | never |
+| an older release than the one running (rollback protection) | `--allow-downgrade` |
+| a configuration format the new kernel cannot read | a newer release, or `--config` with one it reads |
+| a release image whose signature or SHA-256 does not check out | `--unsigned` (your own build) |
+| staging while the running slot is on trial (the standby is its way back) | confirm or roll back first |
+| activating a slot that failed or was rolled back from | `activate --retry` |
+| an ESP that is not sealed for Secure Boot onto a disk whose running slot is (ADR-320: under Secure Boot the firmware refuses it and nothing rolls back; a release image is unsealed) | `--allow-unsealed` (the machine runs without Secure Boot); also `update-boot` |
+| activating a kernel with a newer store schema than the running one (once it migrated the store, the old one cannot read it) | `activate --one-way`: the automatic return still works until the migration has run; after it the previous slot is marked bad |
+
+**Power cuts.** Every command writes in an order where a cut leaves the disk as
+before or as after (DISK-FORMAT §0a): a cut while staging leaves an *empty*
+standby (stage again), a cut while switching leaves the old slot or the new one
+on trial. `slots` commands repair a partition table a cut left with two
+different copies, from the primary (what the next boot does too).
+
+**`update-boot` on a disk with two slots** is refused (it would overwrite the
+running slot, with no way back); `--in-place` does it anyway, never while a slot
+is on trial.
+
+**Secure Boot (LATER-6, ADR-320).** The switch changes which partition is the ESP, not a
+byte inside one, so a signed, sealed ESP (`sign-iso ... --esp-out`) works in either slot unchanged.
+`slots stage` keeps the disk's configuration by default; an ESP sealed to the same configuration is
+staged as it is, one sealed to another is refused (its loader would refuse the slot) unless
+`--replace-config` takes the ESP's own. Both slots then boot with Secure Boot enforced (tested:
+an update to a sealed ESP boots on trial under OVMF Secure Boot). The reverse is refused too: a disk whose running
+slot is sealed does not take an unsealed ESP (`slots stage`, `update-boot`), because with Secure Boot
+enforced the firmware would refuse the new slot before any trial starts, and no rollback follows; the
+release's own unsigned `.img` is such an ESP. `--allow-unsealed` does it on a machine without Secure Boot.
 
 ## 9. The data disk: layout v2, migrating a v1 disk, growing (S2, S3)
 
@@ -953,7 +1150,8 @@ Optional and off by default. It protects the data partition (registry,
 retained and queued messages, telemetry, the backups) when a **volume or a
 snapshot is taken away**: the cloud provider's snapshot, a copy of the disk
 image, a disk pulled from a machine. It does **not** protect against whoever
-holds the ISO (the key is in its configuration) or the running machine.
+holds the ISO (the key is in its configuration) or the running machine;
+for that, see "A disk key that is not in the image" below.
 
 1. Make a key, once, and keep it somewhere that is not the repository:
    `head -c 64 /dev/urandom | xxd -p -c 200 > disk.key` (128 hex digits; 64 raw
@@ -992,6 +1190,51 @@ XTS gives confidentiality, not integrity: a flipped bit scrambles 16 bytes of
 data (the checksums and the scrubber find it), and two snapshots can be mixed
 sector by sector. The partition table, the superblock and the sizes are not
 encrypted. Costs are in docs/PERFORMANCE.md.
+
+### A disk key that is not in the image (LATER-7, ADR-325 to ADR-329)
+
+With the steps above the disk key is in the ISO, so a copy of the ISO reads a copied disk. To keep the key out of
+the image, let the kernel ask for a passphrase on the console at every boot:
+
+```toml
+[storage]
+encryption = "aes-256-xts"
+disk_key_source = "console"   # no disk_key: the image holds no key (configuration format 22)
+```
+
+The builder page offers it too (Storage: encryption, then "where the disk key comes from"). What it costs: **the
+broker does not start after any reboot until someone types the passphrase** on the provider's serial or VNC
+console (OPERATE.md, "The disk passphrase at the console"). Choose it when a broker that stays down is better
+than a broker whose image reads its disk.
+
+1. **A new disk:** boot it and watch the console. The first boot asks for a new passphrase twice, makes a random
+   disk key and formats the data partition with the key wrapped under the passphrase (key slot 0). Use a
+   generated passphrase of 20 characters or more (`openssl rand -base64 24`): the header can be copied and
+   guessed offline at one PBKDF2 (300 000 iterations) per guess, so a short or common one protects little.
+2. **Every later boot** stops at `Disk passphrase (or "change" to change it):`. Typing `change` there changes it
+   (the current one, then the new one twice); only the header is rewritten.
+3. **Offline**, with the VM stopped, the passphrase goes in a file (its bytes without the final newline; keep it on
+   tmpfs and delete it after):
+   - `urmqtt-disk keys DISK` lists the two key slots (no key needed);
+   - `urmqtt-disk keys DISK add --passphrase-file cur.txt --new-passphrase-file rec.txt --write` adds a
+     **recovery passphrase** in the free slot (keep it sealed, offline);
+   - `urmqtt-disk keys DISK change --passphrase-file cur.txt --new-passphrase-file new.txt --write`, `keys DISK
+     remove --slot N ...` (never the last one);
+   - `--passphrase-file FILE` opens the disk for `info`, `verify`, `export-*`, `scrub`, `backup*`, `grow`,
+     `import-devices`, `rekey`, `decrypt`.
+   `--iterations N` (10 000 to 10 000 000, default 300 000) sets the cost of a new slot. Without `--write` every
+   key command runs on an overlay and changes nothing. A power cut in the middle leaves the old passphrase or the
+   new one working, never neither.
+4. **An existing image-key disk** (the steps above) moves without a rewrite: `urmqtt-disk keys DISK add --key
+   disk.key --new-passphrase-file new.txt --write`, then the image with `disk_key_source = "console"`. Every old
+   ISO still holds that key, though: to make them useless, first `urmqtt-disk rekey DISK --key disk.key --key-new
+   fresh.key --write` (a full rewrite), then `keys DISK add --key fresh.key ...`, then delete `fresh.key`. A
+   `rekey` or `decrypt` empties the key slots (they wrapped the old key).
+5. **Back to an image key** (or to a v0.5.x kernel, which refuses a disk with key slots):
+   `urmqtt-disk keys DISK unwrap --passphrase-file cur.txt --key-out disk.key --write` writes the key to
+   `disk.key` (mode 0600) and empties the slots; then the image with `disk_key = "disk.key"`.
+
+Not done: sealing the key to a TPM, a network unlock, a key on a separate device (ADR-329).
 
 ### Disk safety, as before
 

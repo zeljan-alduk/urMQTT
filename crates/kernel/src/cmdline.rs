@@ -195,6 +195,10 @@ pub struct BootOptions {
     /// `test=log-sync` (dev only): keep the synchronous log path (the
     /// "before" of ADR-090), for comparison.
     pub log_sync: bool,
+    /// `test=ab-bad` (dev only): a kernel that does not come up: it stops
+    /// with a fatal error right after the boot-slot step, as a broken update
+    /// would (the A/B smoke scenarios, ADR-296).
+    pub ab_bad: bool,
     /// `test=log-cost` (dev only): measure every log call and report the
     /// mean and worst every 5 s (`log: cost ...`). `slow-log` implies it.
     pub log_cost: bool,
@@ -213,6 +217,9 @@ pub struct BootOptions {
     /// `registry=allowlist`: allowlist mode even if the configuration says
     /// "open" (stricter only, for tests of one image in both modes).
     pub allowlist: bool,
+    /// `test=iommu-dma` (dev only, ADR-307): the entropy device is made to
+    /// write outside its IOMMU domain after the probe.
+    pub iommu_dma: bool,
     /// Options that were present but rejected or unknown.
     pub ignored: usize,
 }
@@ -291,6 +298,7 @@ impl BootOptions {
                 "test=gp" => o.test_fault = Some(TestFault::GeneralProtection),
                 "test=df" => o.test_fault = Some(TestFault::DoubleFault),
                 "test=crypto-bench" => o.crypto_bench = true,
+                "test=iommu-dma" => o.iommu_dma = true,
                 #[cfg(feature = "selftest")]
                 "test=keyslab-zero" => o.keyslab_zero = true,
                 #[cfg(feature = "selftest")]
@@ -342,6 +350,8 @@ impl BootOptions {
                         o.slow_log_us = Some(us);
                     } else if w == "test=log-sync" {
                         o.log_sync = true;
+                    } else if w == "test=ab-bad" {
+                        o.ab_bad = true;
                     } else if w == "test=log-cost" {
                         o.log_cost = true;
                     } else if let Some(ms) = w

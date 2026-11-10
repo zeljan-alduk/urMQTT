@@ -80,7 +80,8 @@ fn first_boot_moves_backup_creates_partition_and_is_idempotent() {
             moved_backup: true,
             repaired_backup: false,
             created_partition: true,
-            extended_partition: false
+            extended_partition: false,
+            created_boot_slot: false
         }
     );
     let total = (64 * MIB / 512) as u64;

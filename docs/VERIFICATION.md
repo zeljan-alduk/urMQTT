@@ -15,7 +15,10 @@ runs at the time of writing are in `docs/PROGRESS.md` (entry H5).
 | Shared subscriptions and identifiers, unit | `cargo test -p urmqtt-broker --lib shared_tests` | `test` | ADR-275 (20 tests): identifiers per rule (one PUBLISH, retained replays, queues, persistence, turned off), groups on one shard and across three (round robin, offline members, no retained, No Local refused, the ACL on the inner filter, roles never crossed, the SUBACK and next packet held until the owner answers, a join refused by a limit, a member gone, clean and persistent members leaving with unacknowledged messages), the retained sweep, DISCONNECT 0x8B at shutdown and 0x98 on revocation, enhanced authentication refused in every form, the topic-alias accounting |
 | Publisher back-pressure | `cargo test -p urmqtt-broker --lib flow_tests` | `test`, `miri` (three megabyte tests skipped) | ADR-269: pause and resume on one shard and across two wired shards, the deadlock cases (each other, a cycle of three, across shards), the bounds (500 ms, held input, overshoot), QoS 1 and 2 never paused for, a paused publisher's QoS 2 flows completing; the `broker_input` fuzz harness drives the pause, the remote notes and requests, and routes fed back with their publisher |
 | The NIC's receive interrupt | `cargo test -p urmqtt-virtio --lib wake queue::tests::interrupt`, `cargo test -p urmqtt-arch-aarch64 --lib its` | `test` | ADR-270: the suppression flag and the re-check after enabling against the queue's toy device (a completion before arming is found, one after it interrupts, a flood is suppressed), the mode machine (probation with a 1 ms deadline until 3 frames verify the interrupt, polling while traffic is recent, a working interrupt kept over 10 000 sleeps, a silent one and one that works for some frames only falling back), the ITS's register values, table sizing and command encodings; on QEMU the smoke group `net_irq` (interrupt and forced polling with traffic, aarch64 HVF/TCG and x86_64 TCG) |
+| virtio-net multiqueue with RSS | `cargo test -p urmqtt-virtio --lib net::`, `cargo test -p urmqtt-net --lib rss`; `make fuzz T=virtio_net_mq`; `SMOKE_ONLY=mq scripts/smoke.sh` (and `--arch x86_64`; the tap part on Linux as root or with sudo, or with `URMQTT_MQ_DOCKER=<image>`) | `test`, `fuzz`, smoke group `mq` where it runs | ADR-310 to ADR-314: negotiation only with MQ, the control queue and RSS, every device field checked, the RSS command's layout, pairs handed out only after the device's OK, refusals and silence leaving one pair, hostile completions on a taken pair; the kernel's table and the device's agree for every hash; in QEMU (multi-queue tap, software RSS, TCG) each worker receives its flows on its own pair with none forwarded, the receive interrupt verified per pair on x86_64 and on aarch64 with a GICv2m frame, and the fallback to one pair on QEMU's user network and with one data core. Not covered: a KVM host, vhost with eBPF RSS |
 | MQTT 5.0 interoperability | `scripts/mqtt5-conformance.sh --boot` | by hand (MQTT5-CONFORMANCE.md); `mqtt5-conformance` (optional, `workflow_dispatch`, development port under TCG) | The Eclipse Paho interoperability suite (`client_test5.py`, `client_test.py`) against a booted broker, each test in its own process, against an expected-failure list |
+| A/B boot slots under power cuts | `cargo test -p urmqtt-store --lib slots`, `cargo test -p urmqtt-disk-tool --test slots`; `make fuzz T=boot_slots`; `SMOKE_ONLY=ab scripts/smoke.sh` (and `--arch x86_64`, `--arch universal`) | `test`, `fuzz`, smoke group `ab` | ADR-295 to ADR-299: the first boot that reserves the standby, staging, activation, the kernel's trial count, confirmation, the automatic switch back and the operator's rollback, each cut at every write (clean and torn, the volatile cache lost and kept); the state read by firmware afterwards is the old one or the new one. In QEMU (edk2 aarch64, OVMF x86_64): the offline switch cut after writes 1 to 3, the trial count after writes 1 and 3, a bad update rolling back, the control messages; the universal image's staged slot booted on x86_64 BIOS and UEFI and aarch64. Not covered: power cuts on the BIOS path, a real VPS |
+| Key slots: a disk key that is not in the image | `cargo test -p urmqtt-store --lib keyslot`, `cargo test -p urmqtt-store --test wrapped`, `cargo test -p urmqtt-disk-tool --test keys`; `make fuzz T=disk_keyslot`; `SMOKE_ONLY=unlock scripts/smoke.sh` (and `--arch x86_64`) | `test`, `fuzz`, smoke group `unlock` | ADR-325 to ADR-329: RFC 3394 key wrap vectors, every edit of the header (with and without a valid CRC) refused or yielding the disk's own key, a passphrase change cut at every write (clean and torn, the cache lost and kept) leaving the old or the new passphrase, never neither, and no superblock with the old wrap once the next open scrubs it. In QEMU (aarch64 HVF and TCG, x86_64 TCG): the passphrase typed twice on the serial console at the first boot, nothing listening before it, a wrong one, `change` at the prompt, an edited header refused. Not covered: the VNC keyboard path with a passphrase, a real VPS console |
 | Coverage | `make coverage` (`scripts/fuzz-coverage.sh`) | none | Line coverage of fuzz targets |
 
 ## Miri
@@ -275,4 +278,34 @@ The `urmqtt-ws` crate is checked five ways, each for something the others miss:
 
 End to end, the smoke group `websocket` (`SMOKE_ONLY=websocket scripts/smoke.sh [--arch x86_64]`) runs
 `scripts/ws-scenarios.py` (paho-mqtt over wss and a raw client) against the kernel in QEMU.
+
+### The Prometheus endpoint (NEXT-9, ADR-290 to ADR-294)
+
+`urmqtt-http` (the request reader) and `urmqtt_broker::metrics` (the exposition) are checked four ways:
+
+- **Host tests** (`cargo test -p urmqtt-http`, `cargo test -p urmqtt-broker metrics`): every refusal of the request
+  reader (405, 505, 400 for a body, chunking, bare LF, folding, a second `Content-Length`, 431), the negotiation of the
+  format by quality value (Prometheus 2 and 3 headers, malformed values), the bounds, `scan` over every prefix, properties
+  over arbitrary and mutated bytes; for the exposition: **every `$SYS` topic has exactly one metric or a stated reason**
+  (with both listeners on, at 1, 4 and 64 cores) and every rule matches a topic; the rules are well formed (names,
+  `_total` on exactly the counters, base units, bounded label names, no family split in two runs, no duplicate
+  series); a strict reader of both text formats accepts the output and finds the same series in both; the numbers
+  are the `$SYS` numbers (spot checks of every family); unknown values are absent; label values are escaped; the series do not
+  depend on the traffic; the size is bounded.
+- **Configuration** (`cargo test -p urmqtt-cfg -p urmqtt-config -p urmqtt-config-schema -p urmqtt-config-tool`, `make builder-test`):
+  defaults write nothing and keep the old format; any key set is format 16; ranges, the required allow-list, the port
+  collisions; the TOML path and the blob check agree over a grid; templates of earlier releases refuse the section.
+- **Fuzzing**: `make fuzz T=http_request` (any bytes: `scan` and `parse` agree on what a request is, whatever is
+  accepted is a GET or HEAD for an ASCII target with no bare LF and no `Transfer-Encoding`, every refusal is a fixed
+  answer, the same prefix gives the same `scan`) and `make fuzz T=metrics_render` (arbitrary numbers and text in every
+  `Info` field: every line is a comment or a sample, label values never split a line). Seeds in
+  `fuzz/seeds/http_request` (25) and `fuzz/seeds/metrics_render`. At ADR-290: 120 s each; `http_request` found the
+  bare-LF delimiter disagreement (fixed) and then ran 15.4 million executions clean; `metrics_render` found an unchecked
+  addition in `sys::by_code` (now saturating) and then ran 125 000 executions clean (each renders twice).
+- **End to end**, the smoke group `metrics` (`SMOKE_ONLY=metrics scripts/smoke.sh [--arch x86_64]`) runs
+  `scripts/metrics-scenarios.py` (standard library only) against the kernel in QEMU: the text, OpenMetrics by `Accept`,
+  `HEAD`, nine refusals, one answer for two pipelined requests, a request in five pieces, a slowloris cut at the
+  deadline, the per-address limit, the endpoint's own counters, the numbers against the info query and a retained
+  `$SYS` topic read by the operator, counters that follow 25 real publishes, and a second image whose allow-list does
+  not cover the host and gets not one byte.
 

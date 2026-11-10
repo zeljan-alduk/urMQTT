@@ -32,8 +32,10 @@
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+use urmqtt_net::addr::Addr;
 
 use urmqtt_broker::sys::{WS_REFUSALS, WsInfo, ws_close_index};
 use urmqtt_config::{CONFIG, WsAuth};
@@ -132,8 +134,17 @@ pub fn measure() -> u64 {
     if port().is_none() || !password() {
         return 0;
     }
-    let iterations =
-        u64::from(Authenticator::password_only(CONFIG.websocket.users).max_iterations());
+    // Run-time accounts (ADR-285) are at most as dear as the default.
+    let runtime = if CONFIG.limits.max_runtime_accounts > 0 {
+        urmqtt_control::MAX_ACCOUNT_ITERATIONS
+    } else {
+        0
+    };
+    let iterations = u64::from(
+        Authenticator::password_only(CONFIG.websocket.users)
+            .max_iterations()
+            .max(runtime),
+    );
     const PROBE: u32 = 128;
     let mut best = u64::MAX;
     for _ in 0..3 {
@@ -299,7 +310,7 @@ pub fn announce(cores: usize) {
 
 /// What the login of a password connection decided.
 pub enum Decision {
-    Accept(&'static str),
+    Accept(String),
     /// The CONNACK return code to answer with; the connection closes.
     Refuse(u8),
 }
@@ -321,7 +332,7 @@ pub enum Phase {
 
 /// One WebSocket connection of this core.
 struct WsConn {
-    ip: [u8; 4],
+    ip: Addr,
     /// Accepted at (ms), also the upgrade queue's check that an entry is
     /// still this connection.
     at_ms: u64,
@@ -420,7 +431,11 @@ impl WsState {
             path: w.path,
             origins: w.origins,
             server_only,
-            auth: pw.then(|| Authenticator::password_only(w.users)),
+            auth: pw.then(|| {
+                let mut a = Authenticator::password_only(w.users);
+                a.set_runtime(crate::plain::runtime_accounts());
+                a
+            }),
             bucket: pw.then_some(Bucket {
                 rate: shared.login_rate,
                 tokens: shared.login_rate,
@@ -450,6 +465,13 @@ impl WsState {
 
     /// Output to `c` goes through [`send`](Self::send) (in frames, or
     /// nowhere once our close frame left).
+    /// The run-time accounts changed (control epoch, ADR-285).
+    pub fn set_accounts(&mut self, accounts: urmqtt_plain::Accounts) {
+        if let Some(a) = self.auth.as_mut() {
+            a.set_runtime(Some(accounts).filter(|a| !a.is_empty()));
+        }
+    }
+
     pub fn framed(&self, c: u32) -> bool {
         self.conns.contains(c)
     }
@@ -483,11 +505,15 @@ impl WsState {
 
     /// A SYN from `ip`: the listener's own limits (the core's TLS admission
     /// is asked after). Nothing is kept.
-    pub fn syn_ok(&mut self, ip: [u8; 4], now_ms: u64) -> bool {
+    pub fn syn_ok(&mut self, ip: Addr, now_ms: u64) -> bool {
         let Some(shared) = SHARED.get() else {
             return false;
         };
-        match shared.sources.lock().syn(ip, (now_ms / 1000) as u32) {
+        match shared
+            .sources
+            .lock()
+            .syn(crate::plain::src(ip), (now_ms / 1000) as u32)
+        {
             Syn::LockedOut => {
                 self.refused(REFUSED_LOCKED);
                 return false;
@@ -510,7 +536,7 @@ impl WsState {
 
     /// The final ACK of `c` from `ip`, after the TLS admission admitted it:
     /// counts it, or says no.
-    pub fn accept(&mut self, c: u32, ip: [u8; 4], now_ms: u64) -> bool {
+    pub fn accept(&mut self, c: u32, ip: Addr, now_ms: u64) -> bool {
         let Some(shared) = SHARED.get() else {
             return false;
         };
@@ -520,7 +546,11 @@ impl WsState {
         {
             Some(REFUSED_LIMIT)
         } else {
-            match shared.sources.lock().open(ip, (now_ms / 1000) as u32) {
+            match shared
+                .sources
+                .lock()
+                .open(crate::plain::src(ip), (now_ms / 1000) as u32)
+            {
                 Open::Ok => None,
                 Open::LockedOut => Some(REFUSED_LOCKED),
                 Open::TooMany | Open::Full => Some(REFUSED_LIMIT),
@@ -597,7 +627,10 @@ impl WsState {
             bump(&STATS.closes_abrupt);
         }
         if let Some(shared) = SHARED.get() {
-            shared.sources.lock().close(w.ip, (now_ms / 1000) as u32);
+            shared
+                .sources
+                .lock()
+                .close(crate::plain::src(w.ip), (now_ms / 1000) as u32);
         }
         STATS.open.fetch_sub(1, Ordering::AcqRel);
     }
@@ -829,10 +862,16 @@ impl WsState {
             return Decision::Refuse(5);
         };
         let ip = w.ip;
-        match auth.authenticate(ip, p.username, p.password) {
-            Verdict::Accept(identity) => {
+        // Owned, so that the authenticator is free again (it borrows the
+        // identity of a run-time account from its table).
+        let verdict = match auth.authenticate(ip.as_v4(), p.username, p.password) {
+            Verdict::Accept(id) => Ok(String::from(id)),
+            v @ Verdict::Reject(why) => Err((why, v.connack_code())),
+        };
+        match verdict {
+            Ok(identity) => {
                 if let Some(shared) = SHARED.get() {
-                    shared.sources.lock().succeeded(ip);
+                    shared.sources.lock().succeeded(crate::plain::src(ip));
                 }
                 bump(&STATS.auth_ok);
                 if p.client_id.is_empty() && !p.clean_session {
@@ -843,7 +882,7 @@ impl WsState {
                     return Decision::Refuse(5);
                 }
                 // The registry's allowlist applies to these identities too.
-                if !crate::control::admitted(identity) {
+                if !crate::control::admitted(&identity) {
                     let n = crate::control::REGISTRY_REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
                     if n.is_power_of_two() {
                         warn!(
@@ -854,18 +893,18 @@ impl WsState {
                 }
                 Decision::Accept(identity)
             }
-            v @ Verdict::Reject(why) => {
+            Err((why, code)) => {
                 let n = bump(&STATS.auth_failed);
                 if n.is_power_of_two() {
-                    let [a, b, cc, d] = ip;
+                    let a = ip;
                     // The user name is not printed: the client chose it.
                     warn!(
-                        "websocket: login refused for {a}.{b}.{cc}.{d} ({}), {n} so far",
+                        "websocket: login refused for {a} ({}), {n} so far",
                         why.text()
                     );
                 }
                 self.fail(ip, now_ms);
-                Decision::Refuse(v.connack_code().unwrap_or(5))
+                Decision::Refuse(code.unwrap_or(5))
             }
         }
     }
@@ -878,15 +917,19 @@ impl WsState {
         }
     }
 
-    fn fail(&mut self, ip: [u8; 4], now_ms: u64) {
+    fn fail(&mut self, ip: Addr, now_ms: u64) {
         let Some(shared) = SHARED.get() else {
             return;
         };
-        if shared.sources.lock().failed(ip, (now_ms / 1000) as u32) {
+        if shared
+            .sources
+            .lock()
+            .failed(crate::plain::src(ip), (now_ms / 1000) as u32)
+        {
             let n = bump(&STATS.lockouts);
-            let [a, b, c, d] = ip;
+            let a = ip;
             warn!(
-                "websocket: {a}.{b}.{c}.{d} is locked out for {} s after {} failed login(s) ({n} lock-out(s) so far)",
+                "websocket: {a} is locked out for {} s after {} failed login(s) ({n} lock-out(s) so far)",
                 CONFIG.websocket.lockout_s, CONFIG.websocket.max_failed_auths_per_ip
             );
         }

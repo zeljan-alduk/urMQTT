@@ -205,6 +205,8 @@ pub struct Restored {
     pub revoked: Vec<String>,
     /// The device allowlist (H1).
     pub allowlist: Vec<String>,
+    /// The run-time password accounts as `(id, hash, class)` (ADR-285).
+    pub accounts: Vec<(String, String, u8)>,
     pub retained: Vec<Retained>,
     pub sessions: Vec<SessionRecord>,
 }
@@ -328,6 +330,7 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
     // S7 (ADR-240): the disk key from the configuration. Without AES
     // instructions the kernel refuses rather than run XTS in software.
     let mut key = [0u8; urmqtt_store::crypt::KEY_BYTES];
+    let console = cfg.encryption && cfg.disk_key_source == urmqtt_config::DiskKeySource::Console;
     let key_ref = if cfg.encryption {
         if !urmqtt_store::crypt::hardware_aes() {
             return refuse_or_degrade(
@@ -337,15 +340,26 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
                 ),
             );
         }
-        if cfg.disk_key.0.len() != key.len() {
-            return refuse_or_degrade(false, format_args!("storage.disk_key is not 64 bytes"));
+        if console {
+            None
+        } else {
+            if cfg.disk_key.0.len() != key.len() {
+                return refuse_or_degrade(false, format_args!("storage.disk_key is not 64 bytes"));
+            }
+            key.copy_from_slice(cfg.disk_key.0);
+            Some(&key)
         }
-        key.copy_from_slice(cfg.disk_key.0);
-        Some(&key)
     } else {
         None
     };
-    let opened = Disk::open_keyed(dev, uuid, partitions, key_ref);
+    // LATER-7 (ADR-326): no key in the image; the console's passphrase
+    // unwraps the one in the data partition's key slots. Nothing listens
+    // yet, and nothing will until this returns.
+    let opened = if console {
+        crate::unlock::open(dev, uuid, partitions)
+    } else {
+        Disk::open_keyed(dev, uuid, partitions, key_ref)
+    };
     urmqtt_store::crypt::wipe(&mut key);
     let opened = match opened {
         Err(DiskError::KeyRequired) => {
@@ -371,6 +385,24 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
             return refuse_or_degrade(
                 false,
                 format_args!("storage.disk_key does not match the data partition's key check"),
+            );
+        }
+        Err(DiskError::NotWrapped) => {
+            error!("storage: refused reason=not-wrapped");
+            return refuse_or_degrade(
+                false,
+                format_args!(
+                    "storage.disk_key_source = \"console\" but the data partition's key is in no key slot (it was encrypted with a key from the image): add a passphrase offline with `urmqtt-disk keys DISK add --key FILE --write`"
+                ),
+            );
+        }
+        Err(DiskError::KeySlotMismatch) => {
+            error!("storage: refused reason=key-slot-mismatch");
+            return refuse_or_degrade(
+                false,
+                format_args!(
+                    "a key slot opened but the key it holds does not match the data partition's key check: the header was edited or assembled from two disks"
+                ),
             );
         }
         Err(DiskError::ConversionPending) => {
@@ -412,8 +444,27 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
     };
     if cfg.encryption {
         info!(
-            "storage: encryption aes-256-xts (key check ok; XTS gives confidentiality, not integrity)"
+            "storage: encryption aes-256-xts (key check ok, key from the {}; XTS gives confidentiality, not integrity)",
+            if console {
+                "console passphrase"
+            } else {
+                "image"
+            }
         );
+    }
+    // LATER-7 (ADR-327): an older superblock that still holds a key slot the
+    // newer one changed (a passphrase change cut between its two writes)
+    // is brought up to date, so no superblock keeps an old wrap.
+    match disk.scrub_key_slots() {
+        Ok(true) => warn!(
+            "storage: the older superblock still held a replaced key slot (a passphrase change was interrupted); it now matches"
+        ),
+        Ok(false) => {}
+        Err(e) if faulty => {
+            warn!("disk-fault: power cut injected while scrubbing key slots ({e:?}), powering off");
+            crate::power::off()
+        }
+        Err(e) => warn!("storage: scrubbing the older superblock's key slots failed: {e:?}"),
     }
     // S5: a layout without a backup region gets one (one superblock write,
     // ADR-160), before the discard queue is on so nothing queued can overlap.
@@ -525,6 +576,8 @@ pub fn init(test: Option<DbTest>, cpus: usize) -> Option<Restored> {
         cfg.sqlite_heap_mb
     );
 
+    // A/B (ADR-296): a one-way update that just migrated the store.
+    crate::bootslot::after_store(info.schema_from);
     let retention_ms = u64::from(cfg.retention_days) * 86_400_000;
     let now_s = crate::boot::now_unix().unwrap_or(0);
     let t1 = time::uptime_ns();
@@ -771,6 +824,7 @@ fn load(store: &mut Store) -> Result<Restored, StoreError> {
     Ok(Restored {
         revoked: store.revoked()?,
         allowlist: store.allowlist()?,
+        accounts: store.accounts()?,
         retained: store.retained()?,
         sessions: store.sessions()?,
     })
@@ -1693,6 +1747,7 @@ impl Worker {
         }
         did |= self.step_log(now_ms);
         did |= self.check_online_grow(now_ms);
+        did |= crate::bootslot::poll(now_ms);
         did |= self.step_discard(now_ms);
         did |= self.step_backup(now_ms);
         did |= self.step_scrub(now_ms);

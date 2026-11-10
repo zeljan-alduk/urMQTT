@@ -6,4 +6,6 @@ pub mod config;
 pub mod convert;
 pub mod dev;
 pub mod host;
+pub mod keys;
 pub mod migrate;
+pub mod slots;

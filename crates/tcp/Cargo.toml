@@ -1,6 +1,6 @@
 [package]
 name = "urmqtt-tcp"
-description = "Server-only TCP stack with SYN cookies and per-core connection tables."
+description = "TCP stack: SYN-cookie server side, per-core connection tables, and an active open for configured destinations."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,8 @@ workspace = true
 [dependencies]
 urmqtt-timer-wheel = { path = "../timer-wheel" }
 urmqtt-mm = { path = "../mm" }
+# NEXT-1: the address type of both families (ADR-330).
+urmqtt-net = { path = "../net" }
 
 [dev-dependencies]
 # H3: the stateful model test (src/model.rs).

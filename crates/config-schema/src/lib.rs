@@ -112,6 +112,9 @@ struct RawConfig {
     /// Optional: without it there is no WebSocket listener (ADR-272).
     #[serde(default)]
     websocket: RawWebsocket,
+    /// Optional: without it there is no Prometheus endpoint (ADR-290).
+    #[serde(default)]
+    metrics: RawMetrics,
     /// Optional: without it MQTT 5.0 is on with the defaults (ADR-273).
     #[serde(default)]
     mqtt5: RawMqtt5,
@@ -121,6 +124,40 @@ struct RawConfig {
     /// Optional: without it every optional virtio driver is off (ADR-257).
     #[serde(default)]
     devices: Devices,
+    /// Optional: without it a trial boot confirms itself after 60 s of
+    /// health and resets after 900 s unconfirmed (ADR-297).
+    #[serde(default)]
+    update: RawUpdate,
+}
+
+/// Who confirms a trial boot after an A/B update (`update.confirm`, ADR-297).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateConfirm {
+    /// The kernel, after `confirm_after_s` of health (the default).
+    #[default]
+    Auto,
+    /// An operator, with a `boot-confirm` control message.
+    Operator,
+}
+
+/// The `[update]` section (NEXT-11, ADR-297).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawUpdate {
+    confirm: UpdateConfirm,
+    confirm_after_s: u32,
+    trial_timeout_s: u32,
+}
+
+impl Default for RawUpdate {
+    fn default() -> Self {
+        Self {
+            confirm: UpdateConfirm::Auto,
+            confirm_after_s: default_u32("update.confirm_after_s"),
+            trial_timeout_s: default_u32("update.trial_timeout_s"),
+        }
+    }
 }
 
 /// Whether an optional virtio driver runs (`[devices]`, ADR-257).
@@ -178,14 +215,68 @@ impl NetInterrupt {
     }
 }
 
-/// The `[devices]` section (ADR-257): one key per optional virtio driver, and
-/// the NIC's receive interrupt (ADR-270).
+/// How many virtio-net queue pairs the NIC uses (`devices.virtio_net_queues`,
+/// ADR-313).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetQueues {
+    /// One per data core where the device steers flows itself (MQ with
+    /// RSS), else one (the default).
+    #[default]
+    Auto,
+    /// Always one.
+    Single,
+}
+
+impl NetQueues {
+    /// The blob's variant (an index into `urmqtt_cfg::fields::NET_QUEUE_MODES`).
+    pub const fn variant(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::Single => 1,
+        }
+    }
+}
+
+/// DMA remapping (`devices.iommu`, ADR-305).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IommuMode {
+    /// Left as the firmware set it (the default).
+    #[default]
+    Off,
+    /// Used when present, else a warning.
+    Auto,
+    /// Refuse to boot without it.
+    Require,
+}
+
+impl IommuMode {
+    /// The blob's variant (an index into `urmqtt_cfg::fields::IOMMU_MODES`).
+    pub const fn variant(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Auto => 1,
+            Self::Require => 2,
+        }
+    }
+}
+
+/// The `[devices]` section (ADR-257): one key per optional virtio driver, the
+/// NIC's receive interrupt (ADR-270) and queue pairs (ADR-313), and DMA
+/// remapping (ADR-305).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Devices {
     /// Not an optional driver: virtio-net always runs (ADR-270).
     #[serde(default)]
     pub virtio_net_interrupt: NetInterrupt,
+    /// `devices.iommu` (format 18).
+    #[serde(default)]
+    pub iommu: IommuMode,
+    /// `devices.virtio_net_queues` (format 19).
+    #[serde(default)]
+    pub virtio_net_queues: NetQueues,
     #[serde(default)]
     pub virtio_console: DeviceMode,
     #[serde(default)]
@@ -340,6 +431,32 @@ impl Default for RawPlaintext {
     }
 }
 
+/// The `[metrics]` section as written (NEXT-9, ADR-290).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawMetrics {
+    enabled: bool,
+    port: u16,
+    allow_from: Vec<String>,
+    max_connections: u32,
+    max_connections_per_ip: u32,
+    request_timeout_s: u32,
+}
+
+impl Default for RawMetrics {
+    fn default() -> Self {
+        let u32_of = |k: &str| u32::try_from(default_uint(k)).unwrap_or(u32::MAX);
+        Self {
+            enabled: default_bool("metrics.enabled"),
+            port: u16::try_from(default_uint("metrics.port")).unwrap_or(0),
+            allow_from: default_strs("metrics.allow_from"),
+            max_connections: u32_of("metrics.max_connections"),
+            max_connections_per_ip: u32_of("metrics.max_connections_per_ip"),
+            request_timeout_s: u32_of("metrics.request_timeout_s"),
+        }
+    }
+}
+
 /// How a WebSocket client proves who it is (ADR-272).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -452,8 +569,16 @@ fn default_max_shared_groups() -> u32 {
     default_u32("limits.max_shared_groups")
 }
 
+fn default_max_connections_per_ip() -> u32 {
+    default_u32("limits.max_connections_per_ip")
+}
+
 fn default_max_shared_group_members() -> u32 {
     default_u32("limits.max_shared_group_members")
+}
+
+fn default_max_runtime_accounts() -> u32 {
+    default_u32("limits.max_runtime_accounts")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -540,6 +665,50 @@ struct RawNetwork {
     /// 0: from DHCP option 26, else 1500 (NOW-19, ADR-264).
     #[serde(default)]
     mtu: u32,
+    /// IPv6 (NEXT-1, ADR-334, format 23).
+    #[serde(default)]
+    ipv6: Ipv6Kind,
+    #[serde(default)]
+    ipv6_address: Option<String>,
+    #[serde(default)]
+    ipv6_gateway: Option<String>,
+}
+
+/// `network.ipv6` (NEXT-1, ADR-334).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ipv6Kind {
+    #[default]
+    Off,
+    Slaac,
+    Static,
+}
+
+/// IPv6 as configured (NEXT-1, ADR-334).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Ipv6Mode {
+    /// IPv6 frames are dropped (the default).
+    #[default]
+    Off,
+    /// Addresses, router and MTU from Router Advertisements.
+    Slaac,
+    /// A configured address (with its prefix length) and default router.
+    Static {
+        address: [u8; 16],
+        prefix_len: u8,
+        gateway: [u8; 16],
+    },
+}
+
+impl Ipv6Mode {
+    /// The blob's variant (an index into `urmqtt_cfg::fields::IPV6_MODES`).
+    pub const fn variant(&self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Slaac => 1,
+            Self::Static { .. } => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -582,6 +751,12 @@ struct RawLimits {
     max_shared_groups: u32,
     #[serde(default = "default_max_shared_group_members")]
     max_shared_group_members: u32,
+    /// Optional (format 14, ADR-280): the default of the field table.
+    #[serde(default = "default_max_connections_per_ip")]
+    max_connections_per_ip: u32,
+    /// Optional (format 15, ADR-285): 0, no run-time accounts.
+    #[serde(default = "default_max_runtime_accounts")]
+    max_runtime_accounts: u32,
     /// NOW-13, ADR-269; optional ("single" when absent).
     #[serde(default)]
     publisher_backpressure: PublisherBackpressure,
@@ -642,6 +817,28 @@ pub enum DiscardMode {
     Auto,
     /// Never.
     Off,
+}
+
+/// Where the key of an encrypted data partition comes from
+/// (`storage.disk_key_source`, LATER-7, ADR-328).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskKeySource {
+    /// `storage.disk_key`, inside the image (the default).
+    #[default]
+    Image,
+    /// A passphrase typed on the console at boot; no key in the image.
+    Console,
+}
+
+impl DiskKeySource {
+    /// The blob's variant (an index into `urmqtt_cfg::fields::DISK_KEY_SOURCES`).
+    pub const fn variant(self) -> u8 {
+        match self {
+            Self::Image => 0,
+            Self::Console => 1,
+        }
+    }
 }
 
 /// Encryption of the data partition at rest (S7, ADR-240).
@@ -709,9 +906,12 @@ struct RawStorage {
     /// encrypted at rest (S7, ADR-240).
     #[serde(default = "default_encryption")]
     encryption: EncryptionMode,
-    /// The key file (only with encryption).
+    /// The key file (only with encryption and the image as the source).
     #[serde(default)]
     disk_key: String,
+    /// `"image"` (default) or `"console"` (LATER-7, format 22).
+    #[serde(default)]
+    disk_key_source: DiskKeySource,
     require_flush: bool,
     require_data_disk: bool,
     refuse_on_corruption: bool,
@@ -765,6 +965,20 @@ struct RawObservability {
     log_level: LogLevel,
     syslog_udp: String,
     metrics_udp: String,
+    /// Optional (format 20, ADR-318): log shipping over TLS, off.
+    #[serde(default)]
+    log_tls: String,
+    #[serde(default)]
+    log_tls_name: String,
+    /// PEM files (paths relative to the configuration).
+    #[serde(default)]
+    log_tls_ca: Vec<String>,
+    #[serde(default = "default_log_tls_queue_kb")]
+    log_tls_queue_kb: u32,
+}
+
+fn default_log_tls_queue_kb() -> u32 {
+    default_u32("observability.log_tls_queue_kb")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -819,6 +1033,8 @@ pub struct Network {
     /// `network.mtu`: `None` takes the MTU from DHCP (option 26), else 1500;
     /// with mode `static` the value is the only source (NOW-19, ADR-264).
     pub mtu: Option<u16>,
+    /// `network.ipv6*` (NEXT-1, ADR-334, format 23).
+    pub ipv6: Ipv6Mode,
 }
 
 /// The values `network.mtu` may take besides 0 (NOW-19, ADR-264).
@@ -891,6 +1107,12 @@ pub struct Limits {
     /// Members one shared-subscription group may have, 1..=65535; one more:
     /// SUBACK 0x97 / 0x80 (ADR-275).
     pub max_shared_group_members: u32,
+    /// Established TLS connections one source address may hold at once,
+    /// 0..=1000000; 0: no limit (NOW-14, ADR-280).
+    pub max_connections_per_ip: u32,
+    /// Password accounts the control channel may hold on the data disk,
+    /// 0..=1024; 0: the control channel refuses account commands (ADR-285).
+    pub max_runtime_accounts: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -932,8 +1154,11 @@ pub struct Storage {
     pub scrub_io_budget_mb_s: u32,
     /// Encryption at rest (S7).
     pub encryption: EncryptionMode,
-    /// Name of the key file, empty when encryption is off.
+    /// Name of the key file, empty when encryption is off or the key comes
+    /// from the console.
     pub disk_key: String,
+    /// Where the disk key comes from (LATER-7, format 22).
+    pub disk_key_source: DiskKeySource,
     pub require_flush: bool,
     /// Without a data disk: refuse to serve (true) or run in memory only.
     pub require_data_disk: bool,
@@ -947,6 +1172,14 @@ pub struct Observability {
     pub log_level: LogLevel,
     pub syslog_udp: Option<SocketAddrV4>,
     pub metrics_udp: Option<SocketAddrV4>,
+    /// Log shipping over TLS (NEXT-7, ADR-318): the collector, ...
+    pub log_tls: Option<SocketAddrV4>,
+    /// ... the name its certificate carries (empty: its address), ...
+    pub log_tls_name: String,
+    /// ... the PEM files of its trust anchors (paths), ...
+    pub log_tls_ca: Vec<String>,
+    /// ... and the KiB of records kept while it is unreachable.
+    pub log_tls_queue_kb: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -983,9 +1216,22 @@ pub struct Config {
     pub control: Control,
     pub plaintext: Plaintext,
     pub websocket: Websocket,
+    pub metrics: Metrics,
     pub mqtt5: Mqtt5,
     pub console: Console,
     pub devices: Devices,
+    pub update: Update,
+}
+
+/// A/B updates (NEXT-11, ADR-297): how a trial boot is confirmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Update {
+    pub confirm: UpdateConfirm,
+    /// Seconds of health before an automatic confirmation, 0..=86400.
+    pub confirm_after_s: u32,
+    /// Seconds after which an unconfirmed trial boot resets, 0 (never) or
+    /// longer than `confirm_after_s` in auto mode; 0..=86400.
+    pub trial_timeout_s: u32,
 }
 
 /// MQTT 5.0 (NEXT-3, ADR-273 rule 21). On by default.
@@ -1007,6 +1253,19 @@ pub struct Mqtt5 {
     /// Subscription Identifiers (rule 17); false: announced as 0 and a
     /// SUBSCRIBE that carries one gets SUBACK 0xA1.
     pub subscription_identifiers: bool,
+}
+
+/// The Prometheus endpoint (NEXT-9, ADR-290). Off by default; the other keys
+/// are inert while `enabled` is false.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Metrics {
+    pub enabled: bool,
+    pub port: u16,
+    /// Networks that may scrape (`a.b.c.d/len`), required while enabled.
+    pub allow_from: Vec<String>,
+    pub max_connections: u32,
+    pub max_connections_per_ip: u32,
+    pub request_timeout_s: u32,
 }
 
 /// MQTT over secure WebSocket (NEXT-5, ADR-272). Off by default; the other
@@ -1168,7 +1427,9 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         &control,
         &mut errors,
     );
+    let metrics = validate_metrics(&raw.metrics, &network, &plaintext, &websocket, &mut errors);
     let mqtt5 = validate_mqtt5(&raw.mqtt5, &mut errors);
+    let update = validate_update(&raw.update, &mut errors);
 
     if !errors.is_empty() {
         return Err(errors);
@@ -1191,12 +1452,47 @@ pub fn parse(env: &str, text: &str) -> Result<Config, Vec<ConfigError>> {
         control,
         plaintext,
         websocket,
+        metrics,
         mqtt5,
         console: Console {
             virtio_gpu: raw.console.virtio_gpu,
         },
         devices: raw.devices,
+        update,
     })
+}
+
+/// The `[update]` section (ADR-297): the ranges of the field table and the
+/// rule of `urmqtt_cfg::check` (an automatic confirmation must come before
+/// the trial timeout), with messages that name the key.
+fn validate_update(raw: &RawUpdate, errors: &mut Vec<ConfigError>) -> Update {
+    let mut ok = true;
+    for (key, v) in [
+        ("update.confirm_after_s", raw.confirm_after_s),
+        ("update.trial_timeout_s", raw.trial_timeout_s),
+    ] {
+        if let Some(urmqtt_cfg::fields::Kind::UInt { min, max, .. }) = default_of(key)
+            && !(min..=max).contains(&u64::from(v))
+        {
+            errors.push(err(key, format!("must be in {min}..={max}")));
+            ok = false;
+        }
+    }
+    if ok
+        && raw.confirm == UpdateConfirm::Auto
+        && raw.trial_timeout_s != 0
+        && raw.trial_timeout_s <= raw.confirm_after_s
+    {
+        errors.push(err(
+            "update.trial_timeout_s",
+            urmqtt_cfg::check::TRIAL_TIMEOUT_MSG,
+        ));
+    }
+    Update {
+        confirm: raw.confirm,
+        confirm_after_s: raw.confirm_after_s,
+        trial_timeout_s: raw.trial_timeout_s,
+    }
 }
 
 /// The `[plaintext]` section (P1, ADR-229). The same rules as
@@ -1289,7 +1585,7 @@ fn validate_plaintext(
             errors.push(err(key, format!("at most {max} entries")));
         }
     }
-    let mut nets: Vec<Cidr> = Vec::new();
+    let mut nets: Vec<urmqtt_cfg::net::Net> = Vec::new();
     for (i, s) in raw.allow_from.iter().enumerate() {
         match plain::parse_allow(s) {
             Ok(c) if nets.contains(&c) => {
@@ -1396,7 +1692,7 @@ fn validate_plaintext(
 /// its mode.
 fn validate_plaintext_enabled(
     raw: &RawPlaintext,
-    nets: &[urmqtt_cfg::net::Cidr],
+    nets: &[urmqtt_cfg::net::Net],
     network: &Network,
     acl: &Acl,
     control: &Control,
@@ -1499,7 +1795,9 @@ fn validate_plaintext_enabled(
                 if let Ok(net) = urmqtt_cfg::net::Cidr::parse(&e.from)
                     && net.prefix != 0
                     && !raw.allow_from_anywhere
-                    && !nets.iter().any(|a| a.contains_net(&net))
+                    && !nets
+                        .iter()
+                        .any(|a| a.contains_net(&urmqtt_cfg::net::Net::V4(net)))
                 {
                     errors.push(err(
                         &format!("{path}.from"),
@@ -1522,6 +1820,93 @@ fn holds_other_role(acl: &Acl, control: &Control, id: &str) -> bool {
         None => p == id,
     }) || acl.operator_ids.iter().any(|o| o == id)
         || control.service_ids.iter().any(|c| c == id)
+}
+
+/// The `[metrics]` section (ADR-290). The same rules as `urmqtt_cfg::check`
+/// applies to a blob, with messages that name the offending entry.
+fn validate_metrics(
+    raw: &RawMetrics,
+    network: &Network,
+    plaintext: &Plaintext,
+    websocket: &Websocket,
+    errors: &mut Vec<ConfigError>,
+) -> Metrics {
+    use urmqtt_cfg::fields::{MAX_METRICS_NETWORKS, MAX_METRICS_TIMEOUT_S};
+    use urmqtt_cfg::plain;
+
+    if raw.port == 0 {
+        errors.push(err("metrics.port", "must be a non-zero port"));
+    }
+    for (key, v, min, max) in [
+        ("metrics.max_connections", raw.max_connections, 1, 64),
+        (
+            "metrics.max_connections_per_ip",
+            raw.max_connections_per_ip,
+            1,
+            16,
+        ),
+        (
+            "metrics.request_timeout_s",
+            raw.request_timeout_s,
+            1,
+            MAX_METRICS_TIMEOUT_S as u32,
+        ),
+    ] {
+        if !(min..=max).contains(&v) {
+            errors.push(err(key, format!("must be in {min}..={max}")));
+        }
+    }
+    if raw.allow_from.len() > MAX_METRICS_NETWORKS {
+        errors.push(err(
+            "metrics.allow_from",
+            format!("at most {MAX_METRICS_NETWORKS} entries"),
+        ));
+    }
+    let mut nets: Vec<urmqtt_cfg::net::Net> = Vec::new();
+    for (i, s) in raw.allow_from.iter().enumerate() {
+        let path = format!("metrics.allow_from[{i}]");
+        match plain::parse_allow(s) {
+            Ok(c) if nets.contains(&c) => {
+                errors.push(err(&path, format!("{s:?} is listed twice")));
+            }
+            Ok(c) => nets.push(c),
+            Err(m) => errors.push(err(&path, format!("{s:?}: {m}"))),
+        }
+    }
+    if raw.enabled {
+        if raw.allow_from.is_empty() {
+            errors.push(err(
+                "metrics.allow_from",
+                "required when metrics are enabled: the networks that may scrape (for example 10.0.0.0/8); there is no \"anywhere\"",
+            ));
+        }
+        if network.mqtt_tls_port != 0 && raw.port == network.mqtt_tls_port {
+            errors.push(err(
+                "metrics.port",
+                "must differ from network.mqtt_tls_port",
+            ));
+        }
+        if network.mqtt_plain_port == Some(raw.port) {
+            errors.push(err(
+                "metrics.port",
+                "must differ from network.mqtt_plain_port",
+            ));
+        }
+        if plaintext.enabled && raw.port == plaintext.port {
+            errors.push(err("metrics.port", "must differ from plaintext.port"));
+        }
+        if websocket.enabled && raw.port == websocket.port {
+            errors.push(err("metrics.port", "must differ from websocket.port"));
+        }
+    }
+    Metrics {
+        enabled: raw.enabled,
+        port: raw.port,
+        allow_from: raw.allow_from.clone(),
+        max_connections: raw.max_connections,
+        max_connections_per_ip: raw.max_connections_per_ip,
+        request_timeout_s: raw.request_timeout_s,
+    }
 }
 
 /// The `[websocket]` section (ADR-272). The same rules as `urmqtt_cfg::check`
@@ -2020,6 +2405,76 @@ fn validate_network(
         mqtt_tls_port: raw.mqtt_tls_port,
         mqtt_plain_port,
         mtu,
+        ipv6: validate_ipv6(raw, errors),
+    }
+}
+
+/// `network.ipv6*` (NEXT-1, ADR-334): the same rules as the kernel's check.
+fn validate_ipv6(raw: &RawNetwork, errors: &mut Vec<ConfigError>) -> Ipv6Mode {
+    use urmqtt_cfg::net::{is_link_local6, parse_ipv6_address, parse_ipv6_gateway, same_prefix6};
+    // The field table's default is the empty string: absent.
+    let address = raw.ipv6_address.as_deref().filter(|s| !s.is_empty());
+    let gateway = raw.ipv6_gateway.as_deref().filter(|s| !s.is_empty());
+    match raw.ipv6 {
+        Ipv6Kind::Off | Ipv6Kind::Slaac => {
+            if address.is_some() || gateway.is_some() {
+                errors.push(err(
+                    "network.ipv6",
+                    "ipv6_address and ipv6_gateway are only allowed with ipv6 = \"static\"",
+                ));
+            }
+            if raw.ipv6 == Ipv6Kind::Slaac {
+                Ipv6Mode::Slaac
+            } else {
+                Ipv6Mode::Off
+            }
+        }
+        Ipv6Kind::Static => {
+            let addr = match address {
+                None => {
+                    errors.push(err(
+                        "network.ipv6_address",
+                        "required when ipv6 = \"static\"",
+                    ));
+                    None
+                }
+                Some(s) => parse_ipv6_address(s)
+                    .map_err(|m| errors.push(err("network.ipv6_address", format!("{s:?} {m}"))))
+                    .ok(),
+            };
+            let gw = match gateway {
+                None => {
+                    errors.push(err(
+                        "network.ipv6_gateway",
+                        "required when ipv6 = \"static\"",
+                    ));
+                    None
+                }
+                Some(s) => parse_ipv6_gateway(s)
+                    .map_err(|m| errors.push(err("network.ipv6_gateway", format!("{s:?} {m}"))))
+                    .ok(),
+            };
+            let (Some((address, prefix_len)), Some(gateway)) = (addr, gw) else {
+                return Ipv6Mode::Off;
+            };
+            if !is_link_local6(&gateway) && !same_prefix6(&address, &gateway, prefix_len) {
+                errors.push(err(
+                    "network.ipv6_gateway",
+                    "must be link-local (fe80::/10) or inside network.ipv6_address's prefix: the router has to be on the link",
+                ));
+            }
+            if gateway == address {
+                errors.push(err(
+                    "network.ipv6_gateway",
+                    "must not be the broker's own address",
+                ));
+            }
+            Ipv6Mode::Static {
+                address,
+                prefix_len,
+                gateway,
+            }
+        }
     }
 }
 
@@ -2182,6 +2637,9 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
             "limits.max_shared_group_members",
             raw.max_shared_group_members,
         ),
+        // ADR-280.
+        ("limits.max_connections_per_ip", raw.max_connections_per_ip),
+        ("limits.max_runtime_accounts", raw.max_runtime_accounts),
     ] {
         if let Some(urmqtt_cfg::fields::Kind::UInt { min, max, .. }) = default_of(key)
             && !(min..=max).contains(&u64::from(v))
@@ -2209,6 +2667,8 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
         max_message_expiry_s: raw.max_message_expiry_s,
         max_shared_groups: raw.max_shared_groups,
         max_shared_group_members: raw.max_shared_group_members,
+        max_connections_per_ip: raw.max_connections_per_ip,
+        max_runtime_accounts: raw.max_runtime_accounts,
     }
 }
 
@@ -2446,12 +2906,23 @@ fn validate_storage(
     if raw.grow_ratio_db > 100 {
         errors.push(err("storage.grow_ratio_db", "must be in 0..=100 (percent)"));
     }
-    match (raw.encryption, raw.disk_key.is_empty()) {
-        (EncryptionMode::Aes256Xts, true) => errors.push(err(
+    match (raw.encryption, raw.disk_key.is_empty(), raw.disk_key_source) {
+        // LATER-7 (ADR-328): the console source needs encryption and takes
+        // no key file; the same rules as `urmqtt_cfg::check`.
+        (EncryptionMode::Off, _, DiskKeySource::Console) => errors.push(err(
+            "storage.disk_key_source",
+            "\"console\" only with storage.encryption = \"aes-256-xts\"",
+        )),
+        (EncryptionMode::Aes256Xts, false, DiskKeySource::Console) => errors.push(err(
+            "storage.disk_key",
+            "not with storage.disk_key_source = \"console\": the point is that the image holds no key",
+        )),
+        (EncryptionMode::Aes256Xts, true, DiskKeySource::Console) => {}
+        (EncryptionMode::Aes256Xts, true, DiskKeySource::Image) => errors.push(err(
             "storage.disk_key",
             "required with storage.encryption = \"aes-256-xts\": the name of a file with the key",
         )),
-        (EncryptionMode::Off, false) => errors.push(err(
+        (EncryptionMode::Off, false, DiskKeySource::Image) => errors.push(err(
             "storage.disk_key",
             "only with storage.encryption = \"aes-256-xts\"",
         )),
@@ -2484,6 +2955,7 @@ fn validate_storage(
         scrub_io_budget_mb_s: raw.scrub_io_budget_mb_s,
         encryption: raw.encryption,
         disk_key: raw.disk_key.clone(),
+        disk_key_source: raw.disk_key_source,
         require_flush: raw.require_flush,
         require_data_disk: raw.require_data_disk,
         refuse_on_corruption: raw.refuse_on_corruption,
@@ -2504,10 +2976,67 @@ fn parse_optional_addr(key: &str, s: &str, errors: &mut Vec<ConfigError>) -> Opt
 }
 
 fn validate_observability(raw: &RawObservability, errors: &mut Vec<ConfigError>) -> Observability {
+    use urmqtt_cfg::check::{
+        LOG_TLS_ADDR_MSG, LOG_TLS_CA_MSG, LOG_TLS_NAME_MSG, LOG_TLS_UNUSED_MSG,
+    };
+    let log_tls = parse_optional_addr("observability.log_tls", &raw.log_tls, errors);
+    let queue_key = "observability.log_tls_queue_kb";
+    if let Some(urmqtt_cfg::fields::Kind::UInt { min, max, .. }) = default_of(queue_key)
+        && !(min..=max).contains(&u64::from(raw.log_tls_queue_kb))
+    {
+        errors.push(err(queue_key, format!("must be in {min}..={max}")));
+    }
+    if raw.log_tls_ca.len() > urmqtt_cfg::fields::MAX_LOG_TLS_CAS {
+        errors.push(err(
+            "observability.log_tls_ca",
+            format!("at most {} entries", urmqtt_cfg::fields::MAX_LOG_TLS_CAS),
+        ));
+    }
+    match log_tls {
+        Some(a) => {
+            if matches!(a.ip().octets()[0], 0 | 127 | 224..=255) {
+                errors.push(err(
+                    "observability.log_tls",
+                    format!("{a}: {LOG_TLS_ADDR_MSG}"),
+                ));
+            }
+            if raw.log_tls_ca.is_empty() {
+                errors.push(err("observability.log_tls_ca", LOG_TLS_CA_MSG));
+            }
+            if !raw.log_tls_name.is_empty() && !urmqtt_cfg::check::valid_dns_name(&raw.log_tls_name)
+            {
+                errors.push(err(
+                    "observability.log_tls_name",
+                    format!("{:?} {LOG_TLS_NAME_MSG}", raw.log_tls_name),
+                ));
+            }
+        }
+        // A key of the collector without the collector is a mistake, not a
+        // setting: said so instead of ignored.
+        None if raw.log_tls.is_empty() => {
+            for (key, set) in [
+                ("observability.log_tls_name", !raw.log_tls_name.is_empty()),
+                ("observability.log_tls_ca", !raw.log_tls_ca.is_empty()),
+                (
+                    queue_key,
+                    raw.log_tls_queue_kb != default_log_tls_queue_kb(),
+                ),
+            ] {
+                if set {
+                    errors.push(err(key, LOG_TLS_UNUSED_MSG));
+                }
+            }
+        }
+        None => {}
+    }
     Observability {
         log_level: raw.log_level,
         syslog_udp: parse_optional_addr("observability.syslog_udp", &raw.syslog_udp, errors),
         metrics_udp: parse_optional_addr("observability.metrics_udp", &raw.metrics_udp, errors),
+        log_tls,
+        log_tls_name: raw.log_tls_name.clone(),
+        log_tls_ca: raw.log_tls_ca.clone(),
+        log_tls_queue_kb: raw.log_tls_queue_kb,
     }
 }
 
@@ -2640,11 +3169,21 @@ pub mod pack;
 #[cfg(test)]
 mod backpressure_tests;
 #[cfg(test)]
+mod conn_limit_tests;
+#[cfg(test)]
 mod console_tests;
 #[cfg(test)]
 mod devices_tests;
 #[cfg(test)]
 mod encryption_tests;
+#[cfg(test)]
+mod ext_tests;
+#[cfg(test)]
+mod ipv6_tests;
+#[cfg(test)]
+mod log_tls_tests;
+#[cfg(test)]
+mod metrics_tests;
 #[cfg(test)]
 mod mqtt5_tests;
 #[cfg(test)]
@@ -2654,11 +3193,15 @@ mod pack_tests;
 #[cfg(test)]
 mod plain_tests;
 #[cfg(test)]
+mod runtime_accounts_tests;
+#[cfg(test)]
 mod shared_group_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tls_off_tests;
+#[cfg(test)]
+mod update_tests;
 #[cfg(test)]
 mod websocket_tests;
 

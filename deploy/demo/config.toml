@@ -141,3 +141,8 @@ virtio_vsock = "off"
 # it polls every 200 us while connections exist; "off" always polls. "off"
 # needs a kernel that reads configuration format 11.
 # virtio_net_interrupt = "auto"
+# How many virtio-net queue pairs (ADR-310 to ADR-314): "auto" (the default)
+# gives each data core its own pair when the device offers multiqueue with RSS
+# (QEMU: mq=on,rss=on on a multi-queue tap), else one pair as before; "single"
+# always uses one. "single" needs a kernel that reads configuration format 19.
+# virtio_net_queues = "auto"

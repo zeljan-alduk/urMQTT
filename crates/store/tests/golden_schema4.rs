@@ -31,7 +31,7 @@ fn a_schema_3_database_migrates_and_keeps_every_row() {
     let m = load("schema3-qos2");
     mount(&m);
     let (mut s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (3, 5));
+    assert_eq!((info.schema_from, info.schema_to), (3, 6));
     let sessions = s.sessions().unwrap();
     let want = want_qos2_session();
     assert_eq!(sessions, vec![want.clone()]);
@@ -103,7 +103,7 @@ fn a_schema_3_database_migrates_and_keeps_every_row() {
     drop(s);
     mount(&m);
     let (s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (5, 5));
+    assert_eq!((info.schema_from, info.schema_to), (6, 6));
     assert_eq!(s.db().query_text("PRAGMA integrity_check").unwrap(), "ok");
     assert_eq!(
         s.db()
@@ -119,7 +119,7 @@ fn the_frozen_schema4_image_holds_its_mqtt5_state() {
     let m = load("schema4-mqtt5");
     mount(&m);
     let (mut s, info) = open().unwrap();
-    assert_eq!((info.schema_from, info.schema_to), (4, 5));
+    assert_eq!((info.schema_from, info.schema_to), (4, 6));
     assert_eq!(
         s.sessions().unwrap(),
         vec![want_qos2_session(), want_mqtt5_session()]
@@ -145,7 +145,7 @@ fn a_power_cut_during_the_migration_leaves_schema_3_or_4() {
     drop(open().unwrap());
     let total = probe.write_count() - before;
     assert!(total > 0);
-    let (mut old, mut new, mut five) = (0, 0, 0);
+    let (mut old, mut new, mut five, mut six) = (0, 0, 0, 0);
     for n in 1..=total {
         for torn in [false, true] {
             for keep in [false, true] {
@@ -174,6 +174,7 @@ fn a_power_cut_during_the_migration_leaves_schema_3_or_4() {
                     3 => old += 1,
                     4 => new += 1,
                     5 => five += 1,
+                    6 => six += 1,
                     v => panic!("write {n}: schema {v}"),
                 }
                 assert_eq!(s.db().query_text("PRAGMA integrity_check").unwrap(), "ok");
@@ -187,7 +188,7 @@ fn a_power_cut_during_the_migration_leaves_schema_3_or_4() {
         }
     }
     assert!(
-        old > 0 && new > 0 && five > 0,
-        "every outcome seen: {old} at 3, {new} at 4, {five} at 5"
+        old > 0 && new > 0 && five > 0 && six > 0,
+        "every outcome seen: {old} at 3, {new} at 4, {five} at 5, {six} at 6"
     );
 }

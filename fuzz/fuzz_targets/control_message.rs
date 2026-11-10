@@ -31,6 +31,7 @@ fuzz_target!(|data: &[u8]| {
             max_message_age_s: 600,
             allow_unrevoke: data.len() % 2 == 0,
             allowlist_mode: data.len() % 3 == 0,
+            accounts: data.len() % 5 != 0,
         };
         for now in [None, Some(m.not_before), Some(m.not_after), Some(u64::MAX)] {
             let _ = urmqtt_control::check(&m, now, m.seq.wrapping_sub(1), &p);
@@ -41,7 +42,7 @@ fuzz_target!(|data: &[u8]| {
     //    input) makes it fail.
     if data.len() >= 26 {
         let u = |i: usize| u64::from_le_bytes(data[i..i + 8].try_into().unwrap());
-        let cmd = Command::from_byte(1 + data[24] % 4).unwrap();
+        let cmd = Command::from_byte(1 + data[24] % 8).unwrap();
         let items: Vec<Vec<u8>> = data[26..]
             .split(|&b| b == b',')
             .map(|i| i.to_vec())

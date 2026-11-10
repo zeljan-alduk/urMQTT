@@ -9,6 +9,7 @@ per alert: number, rule, location, class, the dismissal reason given to GitHub, 
 |---|---|---|
 | 2026-11-07, main at v0.4.2 (55d33ca) | 137 open | [codeql-triage-2026-11-07.csv](codeql-triage-2026-11-07.csv) |
 | 2026-11-09, main at v0.5.0 (58531b1) | 9 open | [codeql-triage-2026-11-09.csv](codeql-triage-2026-11-09.csv) |
+| 2026-11-09, release-v0.6.0 PR (a939046) | 13 open, 4 test code and 9 zero-initialised buffers or test models (PR #11, 8ee635e) | [codeql-triage-v0.6.0.csv](codeql-triage-v0.6.0.csv) |
 
 ## Classes
 

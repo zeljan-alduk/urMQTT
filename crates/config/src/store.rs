@@ -20,9 +20,10 @@ use urmqtt_cfg::{CfgError, fields};
 
 use crate::{
     Acl, BuildConfig, Cidr, Console, Control, Cpu, DEV_KERNEL, Devices, DiscardMode, Entropy,
-    IdentityField, Ipv4Cidr, Limits, LogLevel, Memory, Mqtt5, Network, NetworkMode, Observability,
-    PlainAuth, PlainNetwork, PlainUser, Plaintext, Rate, Registry, SocketAddrV4, Storage,
-    StorageMode, Time, Tls, Trust, VirtioGpuMode, Watchdog, WatchdogAction, Websocket, WsAuth,
+    IdentityField, Ipv4Cidr, Ipv6, Limits, LogLevel, Memory, Metrics, Mqtt5, Net, Network,
+    NetworkMode, Observability, PlainAuth, PlainNetwork, PlainUser, Plaintext, Rate, Registry,
+    SocketAddrV4, Storage, StorageMode, Time, Tls, Trust, Update, UpdateConfirm, VirtioGpuMode,
+    Watchdog, WatchdogAction, Websocket, WsAuth,
 };
 
 /// Room for every plain-text string list of the field table at its
@@ -30,22 +31,27 @@ use crate::{
 /// entries are text; the typed lists have arrays of their own; checked by a
 /// test).
 const STR_SLOTS: usize = 1568;
-/// Operational plus bootstrap CAs at their maxima.
-const PEM_SLOTS: usize = 16;
+/// Operational plus bootstrap CAs, and the log collector's anchors
+/// (ADR-318), at their maxima.
+const PEM_SLOTS: usize = 24;
 const ADDR_SLOTS: usize = fields::MAX_TIME_SERVERS;
 /// The plaintext lists (P1): networks, accounts, per-network identities.
 const NET_SLOTS: usize = fields::MAX_PLAIN_NETWORKS;
 /// The accounts of `plaintext.users` and of `websocket.users` (ADR-272).
 const USER_SLOTS: usize = 2 * fields::MAX_PLAIN_USERS;
+/// `metrics.allow_from` (ADR-290).
+const METRICS_NET_SLOTS: usize = fields::MAX_METRICS_NETWORKS;
 const IPID_SLOTS: usize = fields::MAX_PLAIN_IP_IDENTITIES;
 
-const NO_NET: Cidr = Cidr { addr: 0, prefix: 0 };
+const NO_CIDR: Cidr = Cidr { addr: 0, prefix: 0 };
+const NO_NET: Net = Net::V4(NO_CIDR);
 
 struct Arena {
     strs: [&'static str; STR_SLOTS],
     pems: [&'static [u8]; PEM_SLOTS],
     addrs: [SocketAddrV4; ADDR_SLOTS],
-    nets: [Cidr; NET_SLOTS],
+    nets: [Net; NET_SLOTS],
+    metrics_nets: [Net; METRICS_NET_SLOTS],
     users: [PlainUser; USER_SLOTS],
     ipids: [PlainNetwork; IPID_SLOTS],
 }
@@ -60,9 +66,10 @@ impl Arena {
                 port: 0,
             }; ADDR_SLOTS],
             nets: [NO_NET; NET_SLOTS],
+            metrics_nets: [NO_NET; METRICS_NET_SLOTS],
             users: [PlainUser { id: "", hash: "" }; USER_SLOTS],
             ipids: [PlainNetwork {
-                net: NO_NET,
+                net: NO_CIDR,
                 id: "",
             }; IPID_SLOTS],
         }
@@ -173,6 +180,7 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
     };
     let operational = pem_list(tag::TRUST_OPERATIONAL);
     let bootstrap = pem_list(tag::TRUST_BOOTSTRAP);
+    let log_tls_ca = pem_list(tag::OBS_LOG_TLS_CA);
     let mut n = 0;
     for (i, (slot, (ip, port))) in arena
         .addrs
@@ -194,14 +202,29 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
         .iter_mut()
         .zip(
             b.strs(tag::PL_ALLOW_FROM)
-                .filter_map(|s| Cidr::parse(s).ok()),
+                .filter_map(|s| Net::parse(s).ok()),
         )
         .enumerate()
     {
         *slot = c;
         n_nets = i + 1;
     }
-    let allow_from: &'static [Cidr] = arena.nets.get(..n_nets).unwrap_or_default();
+    let allow_from: &'static [Net] = arena.nets.get(..n_nets).unwrap_or_default();
+    // The metrics endpoint's allow-list (ADR-290), the same way.
+    let mut n_metrics = 0;
+    for (i, (slot, c)) in arena
+        .metrics_nets
+        .iter_mut()
+        .zip(
+            b.strs(tag::METRICS_ALLOW_FROM)
+                .filter_map(|s| Net::parse(s).ok()),
+        )
+        .enumerate()
+    {
+        *slot = c;
+        n_metrics = i + 1;
+    }
+    let metrics_allow: &'static [Net] = arena.metrics_nets.get(..n_metrics).unwrap_or_default();
     // Accounts: the plaintext ones first, then the WebSocket ones (ADR-272).
     let (pl_slots, ws_slots) = arena
         .users
@@ -260,6 +283,22 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
         },
         _ => NetworkMode::Dhcp,
     };
+    // IPv6 (ADR-334): the check passed, so static has both keys parsed.
+    let ipv6 = match b.variant(tag::NET_IPV6) {
+        1 => Ipv6::Slaac,
+        2 => match (
+            urmqtt_cfg::net::parse_ipv6_address(b.str(tag::NET_IPV6_ADDRESS)),
+            urmqtt_cfg::net::parse_ipv6_gateway(b.str(tag::NET_IPV6_GATEWAY)),
+        ) {
+            (Ok((address, prefix_len)), Ok(gateway)) => Ipv6::Static {
+                address,
+                prefix_len,
+                gateway,
+            },
+            _ => Ipv6::Off,
+        },
+        _ => Ipv6::Off,
+    };
     let (tokens, per_ms) = b.rate(tag::LIM_PUBLISH_RATE);
     BuildConfig {
         env: b.str(tag::ENV),
@@ -274,6 +313,7 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             mtu: u16::try_from(b.uint(tag::NET_MTU))
                 .ok()
                 .filter(|m| u64::from(*m) >= fields::MIN_MTU),
+            ipv6,
         },
         tls: Tls {
             cert_pem: b.bin(tag::TLS_CERT),
@@ -308,6 +348,8 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             max_message_expiry_s: u32_of(tag::LIM_MAX_MESSAGE_EXPIRY),
             max_shared_groups: u32_of(tag::LIM_MAX_SHARED_GROUPS),
             max_shared_group_members: u32_of(tag::LIM_MAX_SHARED_GROUP_MEMBERS),
+            max_connections_per_ip: u32_of(tag::LIM_MAX_CONNECTIONS_PER_IP),
+            max_runtime_accounts: u32_of(tag::LIM_MAX_RUNTIME_ACCOUNTS),
         },
         acl: Acl {
             device_publish,
@@ -339,6 +381,10 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             scrub_io_budget_mb_s: u32_of(tag::ST_SCRUB_BUDGET),
             encryption: b.variant(tag::ST_ENCRYPTION) != 0,
             disk_key: crate::Secret(b.bin(tag::ST_DISK_KEY)),
+            disk_key_source: match b.variant(tag::ST_DISK_KEY_SOURCE) {
+                1 => crate::DiskKeySource::Console,
+                _ => crate::DiskKeySource::Image,
+            },
             require_flush: b.bool(tag::ST_REQUIRE_FLUSH),
             require_data_disk: b.bool(tag::ST_REQUIRE_DATA_DISK),
             refuse_on_corruption: b.bool(tag::ST_REFUSE_ON_CORRUPTION),
@@ -353,6 +399,10 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             },
             syslog_udp: sock(tag::OBS_SYSLOG),
             metrics_udp: sock(tag::OBS_METRICS),
+            log_tls: sock(tag::OBS_LOG_TLS),
+            log_tls_name: b.str(tag::OBS_LOG_TLS_NAME),
+            log_tls_ca,
+            log_tls_queue_kb: u32_of(tag::OBS_LOG_TLS_QUEUE_KB),
         },
         watchdog: Watchdog {
             handler_budget_ms: u32_of(tag::WD_HANDLER),
@@ -442,6 +492,14 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             acl_subscribe: ws_acl_subscribe,
             retain: b.bool(tag::WS_RETAIN),
         },
+        metrics: Metrics {
+            enabled: b.bool(tag::METRICS_ENABLED),
+            port: u16::try_from(b.uint(tag::METRICS_PORT)).unwrap_or(0),
+            allow_from: metrics_allow,
+            max_connections: u32_of(tag::METRICS_MAX_CONNS),
+            max_connections_per_ip: u32_of(tag::METRICS_MAX_PER_IP),
+            request_timeout_s: u32_of(tag::METRICS_REQUEST_TIMEOUT),
+        },
         mqtt5: Mqtt5 {
             enabled: b.bool(tag::MQTT5_ENABLED),
             receive_maximum: u32_of(tag::MQTT5_RECEIVE_MAXIMUM),
@@ -459,12 +517,20 @@ fn build(b: &Blob<'static>, arena: &'static mut Arena) -> BuildConfig {
             },
         },
         devices: Devices::from_variants(|t| b.variant(t)),
+        update: Update {
+            confirm: match b.variant(tag::UPD_CONFIRM) {
+                1 => UpdateConfirm::Operator,
+                _ => UpdateConfirm::Auto,
+            },
+            confirm_after_s: u32_of(tag::UPD_CONFIRM_AFTER),
+            trial_timeout_s: u32_of(tag::UPD_TRIAL_TIMEOUT),
+        },
     }
 }
 
 /// Fills the store from `bytes`; the caller has won EMPTY -> FILLING.
-fn fill(bytes: &'static [u8], builtin: bool) -> Result<LoadInfo, CfgError> {
-    let b = Blob::parse(bytes)?;
+fn fill(bytes: &'static [u8], builtin: bool, ext: &[fields::Field]) -> Result<LoadInfo, CfgError> {
+    let b = Blob::parse_ext(bytes, ext)?;
     check::check(&b, DEV_KERNEL)?;
     let info = LoadInfo {
         fingerprint: *b.fingerprint(),
@@ -493,7 +559,7 @@ fn fill(bytes: &'static [u8], builtin: bool) -> Result<LoadInfo, CfgError> {
 /// The blob inside a slot file. A slot still marked as the installation
 /// image's template (an installed disk that was never configured) is read
 /// like any other: it holds the empty configuration.
-fn blob_in(slot: &[u8]) -> Result<&[u8], CfgError> {
+pub fn blob_in(slot: &[u8]) -> Result<&[u8], CfgError> {
     blob::slot_blob(slot, SlotKind::Boot)
         .or_else(|e| blob::slot_blob(slot, SlotKind::Disk).map_err(|_| e))
 }
@@ -503,9 +569,17 @@ fn blob_in(slot: &[u8]) -> Result<&[u8], CfgError> {
 /// error nothing is installed and the built-in defaults apply (the caller
 /// decides whether to stop).
 pub fn load(slot: &'static [u8]) -> Result<LoadInfo, LoadError> {
+    load_ext(slot, &[])
+}
+
+/// [`load`] for a kernel of an edition that declares the extension fields
+/// `ext` (NOW-18, ADR-337): their records in the reserved tag range are
+/// accepted and checked; the typed configuration is the same. With an empty
+/// `ext` this is `load`.
+pub fn load_ext(slot: &'static [u8], ext: &[fields::Field]) -> Result<LoadInfo, LoadError> {
     let bytes = blob_in(slot)?;
     begin()?;
-    match fill(bytes, false) {
+    match fill(bytes, false, ext) {
         Ok(info) => {
             STORE.state.store(READY, Ordering::Release);
             Ok(info)
@@ -535,7 +609,7 @@ pub fn load_defaults() -> LoadInfo {
         blob::write_empty(buf);
         let bytes: &'static [u8] = buf;
         // The empty blob always passes its own checks.
-        let _ = fill(bytes, true);
+        let _ = fill(bytes, true, &[]);
         STORE.state.store(READY, Ordering::Release);
     }
     wait_ready();
@@ -611,7 +685,7 @@ mod tests {
             .sum();
         assert!(total <= STR_SLOTS, "{total} > {STR_SLOTS}");
         for (item, slots) in [
-            (fields::Item::Cidr, NET_SLOTS),
+            (fields::Item::Cidr, NET_SLOTS + METRICS_NET_SLOTS),
             (fields::Item::User, USER_SLOTS),
             (fields::Item::IpIdentity, IPID_SLOTS),
         ] {
@@ -771,6 +845,52 @@ mod tests {
         assert_eq!(w.publish_rate_per_device.tokens, 3);
     }
 
+    /// ADR-290: the metrics endpoint is off by default with the documented
+    /// defaults, and a configuration decodes its allow-list.
+    #[test]
+    fn the_metrics_section_is_off_by_default_and_decoded() {
+        use urmqtt_cfg::build::Builder;
+        let m = CONFIG.metrics;
+        assert!(!m.enabled && m.allow_from.is_empty());
+        assert_eq!(
+            (
+                m.port,
+                m.max_connections,
+                m.max_connections_per_ip,
+                m.request_timeout_s
+            ),
+            (9100, 8, 2, 5)
+        );
+        let mut b = Builder::new();
+        b.bool(tag::METRICS_ENABLED, true).unwrap();
+        b.strs(tag::METRICS_ALLOW_FROM, &["10.0.0.0/8", "192.168.7.9/32"])
+            .unwrap();
+        b.uint(tag::METRICS_PORT, 9273).unwrap();
+        b.uint(tag::METRICS_MAX_CONNS, 3).unwrap();
+        b.uint(tag::METRICS_MAX_PER_IP, 1).unwrap();
+        b.uint(tag::METRICS_REQUEST_TIMEOUT, 30).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 16);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let m = build(&blob, arena).metrics;
+        assert!(m.enabled);
+        assert_eq!(
+            (
+                m.port,
+                m.max_connections,
+                m.max_connections_per_ip,
+                m.request_timeout_s
+            ),
+            (9273, 3, 1, 30)
+        );
+        assert_eq!(m.allow_from.len(), 2);
+        assert!(m.allow_from[0].contains_v4([10, 1, 2, 3]));
+        assert!(!m.allow_from[0].contains_v4([11, 1, 2, 3]));
+        assert!(m.allow_from[1].contains_v4([192, 168, 7, 9]));
+        assert!(!m.allow_from[1].contains_v4([192, 168, 7, 8]));
+    }
+
     /// NOW-13, ADR-269: publisher back-pressure is on ("single") by default
     /// (the empty blob, and every blob before format 8) and off when set so.
     #[test]
@@ -878,6 +998,112 @@ mod tests {
         );
     }
 
+    /// NOW-14, ADR-280: `limits.max_connections_per_ip` is 1024 by default (the
+    /// empty blob, and every blob before format 14) and decoded when set,
+    /// 0 (no limit) included.
+    #[test]
+    fn the_connection_limit_per_address_is_decoded() {
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.limits.max_connections_per_ip, 1024);
+        for v in [0u64, 7] {
+            let mut b = Builder::new();
+            b.uint(tag::LIM_MAX_CONNECTIONS_PER_IP, v).unwrap();
+            let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+            let blob = Blob::parse(bytes).unwrap();
+            assert_eq!(blob.version(), 14);
+            let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+            assert_eq!(build(&blob, arena).limits.max_connections_per_ip, v as u32);
+        }
+    }
+
+    /// ADR-285: the run-time account limit is 0 by default (the empty blob,
+    /// and every blob before format 15) and decoded when set.
+    #[test]
+    fn the_runtime_account_limit_is_decoded() {
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.limits.max_runtime_accounts, 0);
+        let mut b = Builder::new();
+        b.uint(tag::LIM_MAX_RUNTIME_ACCOUNTS, 1_024).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 15);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        assert_eq!(c.limits.max_runtime_accounts, 1_024);
+    }
+
+    /// ADR-318: the log shipping keys are off by default (the empty blob,
+    /// and every blob before format 20) and decoded when set.
+    #[test]
+    fn the_log_tls_keys_are_decoded() {
+        use urmqtt_cfg::build::Builder;
+        let o = CONFIG.observability;
+        assert_eq!(
+            (
+                o.log_tls,
+                o.log_tls_name,
+                o.log_tls_ca.len(),
+                o.log_tls_queue_kb
+            ),
+            (None, "", 0, 256)
+        );
+        let mut b = Builder::new();
+        b.addr(tag::OBS_LOG_TLS, [10, 0, 2, 2], 6514).unwrap();
+        b.str(tag::OBS_LOG_TLS_NAME, "logs.example.com").unwrap();
+        b.bins(tag::OBS_LOG_TLS_CA, &[b"ca-a".to_vec(), b"ca-b".to_vec()])
+            .unwrap();
+        b.uint(tag::OBS_LOG_TLS_QUEUE_KB, 64).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 20);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        let o = c.observability;
+        assert_eq!(
+            o.log_tls,
+            Some(SocketAddrV4 {
+                addr: [10, 0, 2, 2],
+                port: 6514
+            })
+        );
+        assert_eq!(o.log_tls_name, "logs.example.com");
+        assert_eq!(o.log_tls_ca, &[&b"ca-a"[..], &b"ca-b"[..]]);
+        assert_eq!(o.log_tls_queue_kb, 64);
+    }
+
+    /// ADR-297: the `[update]` keys have the documented defaults (the empty
+    /// blob, and every blob before format 17) and are decoded when set.
+    #[test]
+    fn the_update_keys_are_decoded() {
+        use urmqtt_cfg::build::Builder;
+        let u = CONFIG.update;
+        assert_eq!(
+            (u.confirm, u.confirm_after_s, u.trial_timeout_s),
+            (UpdateConfirm::Auto, 60, 900)
+        );
+        let mut b = Builder::new();
+        b.variant(tag::UPD_CONFIRM, 1).unwrap();
+        b.uint(tag::UPD_CONFIRM_AFTER, 5).unwrap();
+        b.uint(tag::UPD_TRIAL_TIMEOUT, 0).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 17);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        assert_eq!(
+            (
+                c.update.confirm,
+                c.update.confirm_after_s,
+                c.update.trial_timeout_s
+            ),
+            (UpdateConfirm::Operator, 5, 0)
+        );
+        assert_eq!(
+            (UpdateConfirm::Auto.name(), UpdateConfirm::Operator.name()),
+            ("auto", "operator")
+        );
+    }
+
     /// NOW-19, ADR-264: `network.mtu` is unset by default (the empty blob,
     /// and every blob before format 7) and decoded when set.
     #[test]
@@ -914,6 +1140,75 @@ mod tests {
         assert_eq!(
             (NetInterrupt::Auto.name(), NetInterrupt::Off.name()),
             ("auto", "off")
+        );
+    }
+
+    /// ADR-313: `devices.virtio_net_queues` is auto by default (the empty
+    /// blob, and every blob before format 19); single is decoded.
+    #[test]
+    fn the_net_queues_are_auto_by_default_and_decoded() {
+        use crate::NetQueues;
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.devices.virtio_net_queues, NetQueues::Auto);
+        let mut b = Builder::new();
+        b.variant(tag::DEV_NET_QUEUES, 1).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 19);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let d = build(&blob, arena).devices;
+        assert_eq!(d.virtio_net_queues, NetQueues::Single);
+        assert_eq!(d.virtio_net_interrupt, crate::NetInterrupt::Auto);
+        assert_eq!(
+            [NetQueues::Auto.name(), NetQueues::Single.name()],
+            urmqtt_cfg::fields::NET_QUEUE_MODES
+        );
+    }
+
+    /// ADR-328: `storage.disk_key_source` is "image" by default (the empty
+    /// blob, and every blob before format 22); "console" is decoded.
+    #[test]
+    fn the_disk_key_source_is_the_image_by_default_and_decoded() {
+        use crate::DiskKeySource;
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.storage.disk_key_source, DiskKeySource::Image);
+        let mut b = Builder::new();
+        b.variant(tag::ST_ENCRYPTION, 1).unwrap();
+        b.variant(tag::ST_DISK_KEY_SOURCE, 1).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 22);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let s = build(&blob, arena).storage;
+        assert_eq!(s.disk_key_source, DiskKeySource::Console);
+        assert!(s.encryption && s.disk_key.0.is_empty());
+        assert_eq!(
+            [DiskKeySource::Image.name(), DiskKeySource::Console.name()],
+            urmqtt_cfg::fields::DISK_KEY_SOURCES
+        );
+    }
+
+    /// ADR-305: `devices.iommu` is off by default (the empty blob, and every
+    /// blob before format 18); auto and require are decoded.
+    #[test]
+    fn the_iommu_is_off_by_default_and_decoded() {
+        use crate::Iommu;
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.devices.iommu, Iommu::Off);
+        for (v, want) in [(1u8, Iommu::Auto), (2, Iommu::Require)] {
+            let mut b = Builder::new();
+            b.variant(tag::DEV_IOMMU, v).unwrap();
+            let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+            let blob = Blob::parse(bytes).unwrap();
+            assert_eq!(blob.version(), 18);
+            let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+            let d = build(&blob, arena).devices;
+            assert_eq!(d.iommu, want);
+            assert_eq!(d.virtio_net_interrupt, crate::NetInterrupt::Auto);
+        }
+        assert_eq!(
+            [Iommu::Off.name(), Iommu::Auto.name(), Iommu::Require.name()],
+            urmqtt_cfg::fields::IOMMU_MODES
         );
     }
 
@@ -1040,9 +1335,9 @@ mod tests {
         assert!(p.enabled && p.retain && !p.allow_from_anywhere);
         assert_eq!(p.port, 1884);
         assert_eq!(p.allow_from.len(), 2);
-        assert!(p.allow_from[0].contains_octets([10, 9, 9, 9]));
-        assert!(!p.allow_from[0].contains_octets([11, 0, 0, 1]));
-        assert!(p.allow_from[1].contains_octets([192, 168, 1, 77]));
+        assert!(p.allow_from[0].contains_v4([10, 9, 9, 9]));
+        assert!(!p.allow_from[0].contains_v4([11, 0, 0, 1]));
+        assert!(p.allow_from[1].contains_v4([192, 168, 1, 77]));
         assert_eq!(p.users.len(), 2);
         assert_eq!(
             (p.users[0].id, p.users[0].hash),
@@ -1119,6 +1414,50 @@ mod tests {
         assert!(blob_in(&slot[..SLOT_MARKER.len() + 10]).is_err());
     }
 
+    /// NOW-18 (ADR-337): a record in the reserved range is refused by `load`
+    /// (the open kernel) and the defaults stay; an edition's table makes the
+    /// same blob valid, and its open fields decode as without the record.
+    #[test]
+    fn an_extension_record_needs_the_editions_table() {
+        use urmqtt_cfg::blob::make_slot;
+        use urmqtt_cfg::build::Builder;
+        use urmqtt_cfg::fields::Kind;
+        let ext = [urmqtt_cfg::ext::field(
+            0xF000,
+            "ext.test.on",
+            Kind::Bool(false),
+            "",
+            2,
+        )];
+        let mut b = Builder::with_extensions(&ext).unwrap();
+        b.bool(0xF000, true).unwrap();
+        b.uint(tag::MEM_HEAP, 128).unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let slot: &'static [u8] =
+            Box::leak(make_slot(SlotKind::Boot, bytes).unwrap().into_boxed_slice());
+        // What `load` (`fill`) parses first; `load` itself may find the store
+        // filled by another test, but never installs this blob.
+        assert_eq!(
+            Blob::parse(blob_in(slot).unwrap()).err().map(|e| e.msg),
+            Some("unknown field tag")
+        );
+        assert!(load(slot).is_err());
+        assert_ne!(
+            CONFIG.memory.kernel_heap_mb, 128,
+            "the blob was not installed"
+        );
+        let with = Blob::parse_ext(blob_in(slot).unwrap(), &ext).unwrap();
+        let mut plain = Builder::new();
+        plain.uint(tag::MEM_HEAP, 128).unwrap();
+        let plain: &'static [u8] = Box::leak(plain.finish(false).unwrap().into_boxed_slice());
+        let without = Blob::parse(plain).unwrap();
+        let arena = |_: ()| -> &'static mut Arena { Box::leak(Box::new(Arena::new())) };
+        assert_eq!(
+            format!("{:?}", build(&with, arena(()))),
+            format!("{:?}", build(&without, arena(())))
+        );
+    }
+
     #[test]
     fn a_bad_slot_is_refused_and_leaves_the_defaults() {
         assert!(matches!(load(&[0u8; 100]), Err(LoadError::Refused(_))));
@@ -1128,5 +1467,52 @@ mod tests {
         let slot: &'static [u8] = Box::leak(slot.into_boxed_slice());
         assert!(load(slot).is_err());
         assert_eq!(CONFIG.network.mqtt_tls_port, 8883);
+    }
+
+    /// ADR-334: IPv6 is off by default (the empty blob, and every blob
+    /// before format 23); slaac and static are decoded; IPv6 networks in an
+    /// allow-list come back typed beside the IPv4 ones.
+    #[test]
+    fn ipv6_is_off_by_default_and_decoded() {
+        use urmqtt_cfg::build::Builder;
+        assert_eq!(CONFIG.network.ipv6, Ipv6::Off);
+        let mut b = Builder::new();
+        b.variant(tag::NET_IPV6, 2).unwrap();
+        b.str(tag::NET_IPV6_ADDRESS, "2001:db8:1::10/64").unwrap();
+        b.str(tag::NET_IPV6_GATEWAY, "fe80::1").unwrap();
+        b.strs(tag::METRICS_ALLOW_FROM, &["10.0.0.0/8", "2001:db8::/32"])
+            .unwrap();
+        let bytes: &'static [u8] = Box::leak(b.finish(false).unwrap().into_boxed_slice());
+        let blob = Blob::parse(bytes).unwrap();
+        assert_eq!(blob.version(), 23);
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        let c = build(&blob, arena);
+        let mut addr = [0u8; 16];
+        addr[..6].copy_from_slice(&[0x20, 1, 0xd, 0xb8, 0, 1]);
+        addr[15] = 0x10;
+        let mut gw = [0u8; 16];
+        gw[..2].copy_from_slice(&[0xfe, 0x80]);
+        gw[15] = 1;
+        assert_eq!(
+            c.network.ipv6,
+            Ipv6::Static {
+                address: addr,
+                prefix_len: 64,
+                gateway: gw
+            }
+        );
+        assert_eq!(c.network.ipv6.name(), "static");
+        let m = c.metrics;
+        assert_eq!(m.allow_from.len(), 2);
+        assert!(m.allow_from[1].is_v6() && m.allow_from[1].contains_v6(&addr));
+        assert!(!m.allow_from[0].contains_v6(&addr));
+        let mut s = Builder::new();
+        s.variant(tag::NET_IPV6, 1).unwrap();
+        let bytes: &'static [u8] = Box::leak(s.finish(false).unwrap().into_boxed_slice());
+        let arena: &'static mut Arena = Box::leak(Box::new(Arena::new()));
+        assert_eq!(
+            build(&Blob::parse(bytes).unwrap(), arena).network.ipv6,
+            Ipv6::Slaac
+        );
     }
 }

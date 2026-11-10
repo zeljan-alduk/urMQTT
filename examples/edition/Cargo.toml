@@ -1,0 +1,71 @@
+# An edition built on the kernel library (NOW-18, ADR-335 to ADR-339): a
+# second kernel image with a PCI driver of its own (QEMU's `edu` test device,
+# 1234:11e8), configuration keys in the reserved range and boot hooks, plus
+# the packer for its configuration. It is its own Cargo workspace, outside the
+# repository's, so that it uses the library exactly as another repository
+# does (urmqtt-enterprise, docs/EDITIONS.md §5); only the paths differ (a git
+# dependency pinned to a tag there).
+#
+#   make edition-example [ARCH=x86_64]       the kernel and the packer
+#   SMOKE_ONLY=edition scripts/smoke.sh      boots it in QEMU with `-device edu`
+#
+# What an edition must copy from the repository's workspace is marked COPY.
+[package]
+name = "urmqtt-edition-example"
+description = "An example edition: the urMQTT kernel library with an extra PCI driver, configuration keys and boot hooks (NOW-18)."
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+test = true
+bench = false
+
+# The kernel image.
+[[bin]]
+name = "urmqtt-example"
+path = "src/main.rs"
+test = false
+bench = false
+
+# The edition's urmqtt-config: packs the open keys and the edition's `[ext]` keys.
+[[bin]]
+name = "urmqtt-example-config"
+path = "src/config.rs"
+test = false
+bench = false
+
+[dependencies]
+urmqtt-cfg = { path = "../../crates/cfg" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+urmqtt-kernel = { path = "../../crates/kernel" }
+
+[target.'cfg(not(target_os = "none"))'.dependencies]
+urmqtt-cfg = { path = "../../crates/cfg", features = ["std"] }
+urmqtt-config-schema = { path = "../../crates/config-schema" }
+
+[features]
+# Dev images carry the kernel's self-tests, as `make build ENV=dev` does.
+selftest = ["urmqtt-kernel/selftest"]
+
+# COPY: the patched RustCrypto crates the kernel needs (vendor/README.md, ADR-041, ADR-110).
+[patch.crates-io]
+cpufeatures = { path = "../../vendor/cpufeatures-0.3.1" }
+cpufeatures-02 = { package = "cpufeatures", path = "../../vendor/cpufeatures-0.2.17" }
+primeorder = { path = "../../vendor/primeorder-0.14.0" }
+
+# COPY: the kernel's profiles (panic = "abort" everywhere; one LTO unit).
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false

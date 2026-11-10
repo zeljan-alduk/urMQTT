@@ -7,7 +7,7 @@
 #                    [--cmdline STR] [--esp-out IMG] [--disk-out IMG]
 #                    [--install-cmdline STR] [--install-default]
 #                    [--diag-cmdline STR] [--diag-default] [--no-diag] [--no-enroll]
-#                    [--sb-key KEY --sb-cert CERT]
+#                    [--sb-key KEY --sb-cert CERT] [--seal | --no-seal]
 #
 # --universal (X10, ADR-043) builds ONE hybrid ISO for aarch64 UEFI, x86_64
 # UEFI and x86_64 BIOS: both kernels (urmqtt-<arch>.elf, ${ARCH} spelling of
@@ -64,6 +64,9 @@
 # slot (marked DISK), so the hash of the image pinned in the menus does not
 # depend on the configuration; the installer copies the booted slot into the
 # installed disk, whose limine.conf lists the module without a hash (ADR-217).
+# --config-slot FILE takes a slot file as it is, unchecked: the slot of an edition built on the kernel library,
+# whose configuration keys the open urmqtt-config does not know (NOW-18, ADR-337); the edition's own packer has
+# checked it (examples/edition: urmqtt-example-config --out-slot).
 #
 # The loaders' configuration is enrolled (H8, ADR-250): `limine enroll-config` writes
 # the blake2b of the exact limine.conf into each loader (BOOTAA64.EFI, BOOTX64.EFI and
@@ -78,7 +81,16 @@
 # scripts/sign-loaders.sh, after enrolling (the signature covers the enrolled hash). The
 # signed loaders are tied to the configuration: `urmqtt-config pack --iso` on a signed
 # ISO changes the enrolled hash and so breaks the signature (the firmware then refuses
-# the loader). Configure first, then sign: build with --config and --sb-key together.
+# the loader). Configure first, then sign: build with --config and --sb-key together
+# (scripts/sign-loaders.sh sign-iso does that from a configured or template ISO).
+#
+# --seal (LATER-6, ADR-320; the default with --sb-key, --no-seal turns it off) pins the
+# configuration module by blake2b in the installed disk's no-menu limine.conf too, so that an
+# installed disk (and --disk-out, --esp-out) boots under Secure Boot, where Limine refuses any
+# file without a hash. The installation image is then built for this one configuration: the
+# installer refuses to put any other one on a disk, `urmqtt-disk update-boot`/`slots stage` keep
+# only that one, and `urmqtt-config pack --iso` refuses the image. The installation image still
+# carries the unconfigured slot (ADR-217): the pin names the configuration the installer writes.
 #
 # Timestamps and the FAT volume serial are fixed (SOURCE_DATE_EPOCH, default:
 # last commit time) so identical inputs produce an identical image.
@@ -88,7 +100,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 ARCH=${URMQTT_ARCH:-aarch64}
 KERNEL="" OUT="" CMDLINE="" ESP_OUT="" INSTALL_CMDLINE="install" INSTALL_DEFAULT=0
 UNIVERSAL=0 KERNEL_A64="" KERNEL_X86="" DISK_OUT="" LIVE="" DIAG_CMDLINE="diag" DIAG_DEFAULT=0 NO_DIAG=0
-CONFIG="" CONFIG_ROOT="" EMPTY_CONFIG=0 ENROLL=1 SB_KEY="" SB_CERT=""
+CONFIG_SLOT=""
+CONFIG="" CONFIG_ROOT="" EMPTY_CONFIG=0 ENROLL=1 SB_KEY="" SB_CERT="" SEAL=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --arch) ARCH=$2; shift 2 ;;
@@ -108,7 +121,10 @@ while [[ $# -gt 0 ]]; do
         --no-enroll) ENROLL=0; shift ;;
         --sb-key) SB_KEY=$2; shift 2 ;;
         --sb-cert) SB_CERT=$2; shift 2 ;;
+        --seal) SEAL=1; shift ;;
+        --no-seal) SEAL=0; shift ;;
         --config) CONFIG=$2; shift 2 ;;
+        --config-slot) CONFIG_SLOT=$2; shift 2 ;;
         --config-root) CONFIG_ROOT=$2; shift 2 ;;
         --empty-config) EMPTY_CONFIG=1; shift ;;
         --live) LIVE=1; shift ;;
@@ -119,6 +135,14 @@ done
 if [[ -n "$SB_KEY$SB_CERT" ]]; then
     [[ $UNIVERSAL -eq 1 && -f "$SB_KEY" && -f "$SB_CERT" && $ENROLL -eq 1 ]] \
         || { echo "error: --sb-key and --sb-cert (existing files) go with --universal and an enrolled configuration" >&2; exit 2; }
+fi
+# Sealed by default when signed (ADR-320): an installed disk must boot under the Secure Boot the
+# image is signed for.
+if [[ -z $SEAL ]]; then
+    if [[ -n $SB_KEY ]]; then SEAL=1; else SEAL=0; fi
+fi
+if [[ $SEAL -eq 1 && $UNIVERSAL -ne 1 ]]; then
+    echo "error: --seal goes with --universal" >&2; exit 2
 fi
 if [[ $UNIVERSAL -eq 1 ]]; then
     [[ -n "$KERNEL_A64" && -n "$KERNEL_X86" && -n "$OUT" ]] \
@@ -156,7 +180,13 @@ blake2b() { python3 -I -c 'import hashlib,sys; print(hashlib.blake2b(open(sys.ar
 # --- the configuration slot -------------------------------------------------
 cfgtool() { (cd "$ROOT" && cargo run -q --locked -p urmqtt-config-tool --bin urmqtt-config -- "$@"); }
 CFG_ENV=${URMQTT_ENV:-dev}
-if [[ $EMPTY_CONFIG -eq 1 ]]; then
+if [[ -n "$CONFIG_SLOT" ]]; then
+    [[ -z "$CONFIG" && $EMPTY_CONFIG -eq 0 ]] || { echo "error: --config-slot excludes --config and --empty-config" >&2; exit 2; }
+    [[ $(wc -c < "$CONFIG_SLOT" | tr -d ' ') -eq 262144 && $(head -c 15 "$CONFIG_SLOT") == URMQTT-CFG-SLOT ]] \
+        || { echo "error: $CONFIG_SLOT is not a 256 KiB configuration slot" >&2; exit 1; }
+    cp "$CONFIG_SLOT" "$TMP/urmqtt.cfg"
+    echo "config: $CONFIG_SLOT (an edition's slot, not checked here)" >&2
+elif [[ $EMPTY_CONFIG -eq 1 ]]; then
     : > "$TMP/empty.toml"
     cfgtool pack "$TMP/empty.toml" --latest-format --out-slot "$TMP/urmqtt.cfg" | sed 's/^/config: empty (template): /' >&2
 elif [[ -n "$CONFIG" && "$CONFIG" != *.toml ]]; then
@@ -177,7 +207,9 @@ fi
 # at rest, the disk key, so who has the ISO has them. One that is built outside CI (GitHub
 # Actions sets CI) has been through this machine's disk, memory and shell history, and is
 # not the reproducible, attested image of a release. Said loudly, every time; not an error.
-SLOT_ENV=$(cfgtool show "$TMP/urmqtt.cfg" 2>/dev/null | sed -n 's/^env: *//p' | head -1)
+# (The open tool cannot read an edition's slot: the environment of the build is taken.)
+SLOT_ENV=""
+[[ -n "$CONFIG_SLOT" ]] || SLOT_ENV=$(cfgtool show "$TMP/urmqtt.cfg" 2>/dev/null | sed -n 's/^env: *//p' | head -1)
 if [[ $EMPTY_CONFIG -eq 0 && ${SLOT_ENV:-$CFG_ENV} != dev && -z ${CI:-} ]]; then
     {
         echo "================================================================================"
@@ -260,7 +292,9 @@ if [[ $UNIVERSAL -eq 1 ]]; then
         echo "editor_enabled: no"
         echo "hash_mismatch_panic: yes"
         [[ -n ${URMQTT_LIMINE_SERIAL:-} ]] && echo "serial: yes"
+        # Sealed (ADR-320): the module the installer writes, pinned like the ISO's.
         CFG_MODULE="boot():/boot/urmqtt.cfg"
+        [[ $SEAL -eq 1 ]] && CFG_MODULE="boot():/boot/urmqtt.cfg#$CFG_HASH"
         entries urMQTT "$CMDLINE" ""
         echo
         echo "# end of limine.conf"
@@ -390,7 +424,7 @@ if [[ $UNIVERSAL -eq 1 ]]; then
     if [[ -n "$DISK_OUT" ]]; then
         cp "$TMP/disk.img" "$DISK_OUT"; python3 -I "$ROOT/scripts/cfgslot.py" patch "$DISK_OUT" "$TMP/urmqtt.cfg"
     fi
-    echo "iso: $OUT ($(wc -c < "$OUT" | tr -d ' ') bytes, universal: aarch64 ${HASH_A64:0:16}…, x86-64 ${HASH_X86:0:16}…)"
+    echo "iso: $OUT ($(wc -c < "$OUT" | tr -d ' ') bytes, universal: aarch64 ${HASH_A64:0:16}…, x86-64 ${HASH_X86:0:16}…${SB_KEY:+, signed}$([[ $SEAL -eq 1 ]] && echo ", sealed to configuration ${CFG_HASH:0:16}…"))"
     exit 0
 fi
 

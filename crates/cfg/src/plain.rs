@@ -15,7 +15,7 @@
 //! packer joins the two values with one space, and no value contains a space.
 
 use crate::fields::MAX_IDENTITY_LEN;
-use crate::net::{Cidr, CidrError};
+use crate::net::{Cidr, CidrError, Net};
 use crate::passwd::{PasswdError, PasswordHash};
 
 /// An identity (an MQTT user name, the anonymous identity, a network's id): it
@@ -37,14 +37,25 @@ pub fn check_identity(id: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// An `allow_from` entry: a network, not `0.0.0.0/0` (which is spelled
-/// `allow_from_anywhere` so that it is never an accident).
-pub fn parse_allow(entry: &str) -> Result<Cidr, &'static str> {
-    let c = Cidr::parse(entry).map_err(CidrError::msg)?;
-    if c.prefix == 0 {
-        return Err("0.0.0.0/0 would allow every address: say so with allow_from_anywhere = true");
+/// An `allow_from` entry: an IPv4 network, or (NEXT-1, configuration format
+/// 23, ADR-334) an IPv6 one; not `0.0.0.0/0` nor `::/0` (which are spelled
+/// `allow_from_anywhere` so that they are never an accident).
+pub fn parse_allow(entry: &str) -> Result<Net, &'static str> {
+    let c = Net::parse(entry).map_err(CidrError::msg)?;
+    if c.prefix() == 0 {
+        return Err(if c.is_v6() {
+            "::/0 would allow every IPv6 address: say so with allow_from_anywhere = true"
+        } else {
+            "0.0.0.0/0 would allow every address: say so with allow_from_anywhere = true"
+        });
     }
     Ok(c)
+}
+
+/// Whether an allow-list entry (as the blob stores it) is an IPv6 network:
+/// such an entry needs configuration format 23 (ADR-334).
+pub fn is_v6_entry(entry: &str) -> bool {
+    entry.contains(':')
 }
 
 /// A `users` entry: the id and the parsed password hash.
@@ -118,8 +129,20 @@ mod tests {
 
     #[test]
     fn allow_entries() {
-        assert_eq!(parse_allow("10.0.0.0/8").unwrap().prefix, 8);
-        assert_eq!(parse_allow("192.168.1.7/32").unwrap().prefix, 32);
+        assert_eq!(parse_allow("10.0.0.0/8").unwrap().prefix(), 8);
+        assert_eq!(parse_allow("192.168.1.7/32").unwrap().prefix(), 32);
+        assert_eq!(parse_allow("2001:db8::/32").unwrap().prefix(), 32);
+        assert!(
+            parse_allow("::/0")
+                .unwrap_err()
+                .contains("allow_from_anywhere")
+        );
+        assert!(
+            parse_allow("2001:db8::1/32")
+                .unwrap_err()
+                .contains("below the prefix")
+        );
+        assert!(is_v6_entry("2001:db8::/32") && !is_v6_entry("10.0.0.0/8"));
         assert!(
             parse_allow("0.0.0.0/0")
                 .unwrap_err()

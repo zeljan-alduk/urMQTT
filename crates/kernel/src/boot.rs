@@ -159,10 +159,12 @@ enum StoragePlan {
 
 static STAGE2: SpinLock<Option<Stage2>> = SpinLock::new(None);
 
-// SAFETY: `urmqtt_kmain` is a unique symbol; the arch `_start` stubs call it once per boot, on
-// the boot CPU, with the C ABI and no arguments (see the comment above).
-#[unsafe(no_mangle)]
-extern "C" fn urmqtt_kmain() -> ! {
+/// The boot CPU's kernel: called once per boot by the image's `urmqtt_kmain`
+/// (`urmqtt_kernel::image!`, ADR-335), which the arch `_start` stubs call
+/// with the C ABI and no arguments.
+pub fn kmain(edition: &'static crate::ext::Edition) -> ! {
+    // The image's edition first: the configuration below may hold its keys.
+    crate::ext::install(edition);
     // The console first on x86, so that every later failure can say why.
     arch::early_console();
     arch_trap::set_handler(trap::handle);
@@ -185,9 +187,13 @@ extern "C" fn urmqtt_kmain() -> ! {
     // console exists; until then the built-in defaults are in effect.
     let config_slot = config_module();
     let config_result = match config_slot {
-        Some(slot) => urmqtt_config::load(slot),
+        // With the open edition's empty table this is `urmqtt_config::load`.
+        Some(slot) => urmqtt_config::load_ext(slot, edition.config),
         None => Ok(urmqtt_config::load_defaults()),
     };
+    if config_result.is_ok() {
+        crate::ext::load_config(config_slot);
+    }
     urmqtt_log::set_max_level(urmqtt_config::CONFIG.observability.log_level);
     let dev = urmqtt_config::CONFIG.dev();
     let early = discover(&mem);
@@ -480,6 +486,8 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         Ok(()) => fatal("crypto: CRC-32C known-answer test failed"),
         Err(name) => fatal_fmt(format_args!("crypto: {name} known-answer test failed")),
     }
+    // An edition's line and its `early` hook (ADR-338; nothing for the open edition).
+    crate::ext::early();
     // Interrupts and time (M3). Device mappings must precede the lock.
     let (timer_line, controller) = arch::init_interrupts(s.platform.as_ref(), s.cpus);
     info!("{controller}");
@@ -492,6 +500,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     }
     devices::set_boot_medium(medium);
     power::set_halt_on_fatal(medium.optical);
+    crate::bootslot::announce();
     // Live mode (O3): decided in stage 1, announced and enforced here.
     let live = match &s.storage {
         StoragePlan::Disk => false,
@@ -523,7 +532,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     devices::set_install_mode(s.options.install || s.options.diag || s.options.diag_serve);
     // PCIe and virtio (M6): all device MMIO must be mapped before the lock.
     if let Some(p) = s.platform.as_ref() {
-        match devices::probe(p, &s.boot_entropy) {
+        match devices::probe(p, &s.boot_entropy, s.cpus) {
             Ok(()) => {}
             Err(devices::ProbeError::NoEntropy)
                 if !urmqtt_config::CONFIG.entropy.jitter_fallback =>
@@ -539,6 +548,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
             )),
             Err(e) => fatal_fmt(format_args!("device probe failed: {e:?}")),
         }
+        crate::ext::after_probe();
     }
     s.boot_entropy = [0; ENTROPY_VALUES as usize];
     // The CSPRNG exists: renew the stack canary from it. Still safe: nothing
@@ -623,6 +633,11 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     crate::watchdog::install_lock_accounting();
 
     tick_selftest(timer_line);
+    // After the tick is running: the test also checks that core 0's tick
+    // reads the IOMMU fault logs (ADR-306).
+    if s.options.iommu_dma {
+        devices::iommu_dma_test();
+    }
     if s.options.diag {
         crate::diag::run(&s.options, s.cpus, &s.features, s.medium);
     }
@@ -666,6 +681,11 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         }
         error!("storage: {msg}; running WITHOUT persistence (dev configuration)");
     }
+    if s.options.ab_bad {
+        // A broken update, for the A/B smoke scenarios (dev only): the slot
+        // step above has counted the trial boot.
+        fatal("ab-bad: this kernel does not come up (test=ab-bad)");
+    }
     if let Err(msg) = devices::blk_selftest() {
         fatal(msg);
     }
@@ -689,8 +709,8 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         .collect();
     let allowlist_mode = urmqtt_config::CONFIG.registry.allowlist || s.options.allowlist;
     match restored.as_ref() {
-        Some(r) => crate::control::init(&r.revoked, &r.allowlist, allowlist_mode),
-        None => crate::control::init(&image_revoked, &[], allowlist_mode),
+        Some(r) => crate::control::init(&r.revoked, &r.allowlist, &r.accounts, allowlist_mode),
+        None => crate::control::init(&image_revoked, &[], &[], allowlist_mode),
     }
     if allowlist_mode && restored.is_none() {
         warn!(
@@ -724,10 +744,12 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     crate::mqtt_service::init_tickets(s.options.ticket_rotate_s);
     crate::plain::init();
     crate::websocket::init();
+    crate::metrics::init();
     crate::dataplane::init(data_cores);
     crate::mqtt_service::prepare_trust_anchors();
     crate::dataplane::set_heap_reserve(s.options.heap_limit_mb);
     crate::dataplane::set_bench_limits(s.options.bench_limits);
+    crate::conn_limit::init(s.options.bench_limits);
     crate::time_sync::set_dev_server(s.options.sntp_server);
     if s.options.db_test == Some(crate::cmdline::DbTest::DpBench) {
         #[cfg(feature = "selftest")]
@@ -800,6 +822,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     #[cfg(feature = "virtio-gpu")]
     crate::gpucon::report();
     crate::vdev::report();
+    crate::ext::before_ready();
     urmqtt_log::raw(format_args!("URMQTT READY\n"));
     if let Some(level) = s.options.log_level {
         info!("log: level {level:?} from the command line");
@@ -1149,7 +1172,10 @@ fn install_image() -> Option<crate::install::Image> {
 /// the real one). These are read from the raw struct instead.
 const FILE_MEDIA_TYPE: usize = 40;
 const FILE_GPT_DISK_UUID: usize = 64;
-const FILE_STRUCT_MIN: usize = FILE_GPT_DISK_UUID + 16;
+/// The GPT unique GUID of the partition the file came from (A/B slots,
+/// ADR-296), right after the disk GUID.
+const FILE_GPT_PART_UUID: usize = FILE_GPT_DISK_UUID + 16;
+const FILE_STRUCT_MIN: usize = FILE_GPT_PART_UUID + 16;
 
 /// The boot volume Limine reports for the kernel file.
 fn boot_medium() -> devices::BootMedium {
@@ -1169,13 +1195,19 @@ fn boot_medium() -> devices::BootMedium {
         .map_or(u32::MAX, u32::from_le_bytes);
     let mut guid = [0u8; 16];
     guid.copy_from_slice(
-        raw.get(FILE_GPT_DISK_UUID..FILE_STRUCT_MIN)
+        raw.get(FILE_GPT_DISK_UUID..FILE_GPT_PART_UUID)
+            .unwrap_or(&[0; 16]),
+    );
+    let mut part = [0u8; 16];
+    part.copy_from_slice(
+        raw.get(FILE_GPT_PART_UUID..FILE_STRUCT_MIN)
             .unwrap_or(&[0; 16]),
     );
     devices::BootMedium {
         optical: media == limine::file::LIMINE_MEDIA_TYPE_OPTICAL,
         // Already in GPT's on-disk byte order (little-endian fields).
         disk_guid: (guid != [0; 16]).then_some(urmqtt_store::gpt::Guid(guid)),
+        part_guid: (part != [0; 16]).then_some(urmqtt_store::gpt::Guid(part)),
     }
 }
 

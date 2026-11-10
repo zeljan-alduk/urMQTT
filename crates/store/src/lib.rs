@@ -43,6 +43,7 @@ pub mod fault;
 mod ffi;
 pub mod gpt;
 pub mod install;
+pub mod keyslot;
 pub mod layout;
 #[cfg(all(target_os = "none", feature = "worker"))]
 #[allow(unsafe_code)] // libc functions SQLite links against
@@ -55,6 +56,7 @@ pub mod ram;
 pub mod remote;
 pub mod schema;
 pub mod scrub;
+pub mod slots;
 pub mod store;
 pub mod telemetry;
 #[allow(unsafe_code)] // the VFS SQLite calls back into

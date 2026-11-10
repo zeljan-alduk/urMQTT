@@ -208,6 +208,11 @@ Every milestone ends with:
 - Intel VT-d / AMD-Vi / Arm SMMUv3: map only the DMA buffers each device needs; refuse to run on bare metal without an IOMMU unless config allows it.
 - Under a VM: a virtio-iommu is optional.
 - The x86 bare-metal part comes after X12–X14.
+- **Status (LATER-5, ADR-305 to ADR-307):** built against QEMU's models of all three units: `devices.iommu =
+  "off" | "auto" | "require"` (off by default, configuration format 18), a domain per driven device with only its
+  own pages, faults polled and counted, `require` refuses without isolation; smoke `SMOKE_ONLY=iommu`
+  (`iommu-dma` is the planned `iommu-dma-blocked`, with QEMU's own devices instead of a test device). Real
+  hardware, interrupt remapping and reserved regions are open (ADR-307).
 
 **Tests:** smoke scenarios `kaslr-differs` (two boots, different bases, dev log only), `stack-smash`, `mte-uaf`, `mte-overflow`, `double-free`, `keyslab-zero`, `fault-no-secrets`, and `iommu-dma-blocked` (QEMU `intel-iommu` / `smmuv3` with a test device). Costs go in `make bench`.
 

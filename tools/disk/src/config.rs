@@ -109,9 +109,86 @@ pub enum Policy {
     Set(Vec<u8>),
 }
 
+/// LATER-6 (ADR-320): whether `esp` is sealed for Secure Boot (its
+/// `limine.conf` pins the configuration module) and whether its own slot is
+/// the pinned one.
+pub fn seal(esp: &[u8]) -> urmqtt_cfg::seal::Seal {
+    use urmqtt_cfg::seal::check;
+    match read(esp) {
+        EspConfig::Configured { offset, .. } | EspConfig::Template { offset } => {
+            let slot = slot_at(esp, offset).unwrap_or(&[]);
+            check(esp, offset..offset + SLOT_SIZE, slot)
+        }
+        EspConfig::NoSlot => check(esp, 0..0, &[]),
+    }
+}
+
+/// One line for `urmqtt-disk info` and the update commands.
+pub fn describe_seal(esp: &[u8]) -> String {
+    use urmqtt_cfg::seal::Seal;
+    match seal(esp) {
+        Seal::Open => "secure boot: not sealed (the configuration module has no hash: this ESP does not boot with Secure Boot enforced)".into(),
+        Seal::Matches { .. } => "secure boot: sealed to its configuration (the module is pinned; the loaders must be signed by a key the firmware trusts)".into(),
+        Seal::Differs { .. } => "secure boot: SEALED TO ANOTHER CONFIGURATION: the loader refuses this ESP (Blake2b hash ... does not match)".into(),
+    }
+}
+
+/// Refuses to replace a sealed ESP (one that boots under Secure Boot) with
+/// an unsealed one, unless `allow` (`--allow-unsealed`): on a machine with
+/// Secure Boot enforced the new ESP's loader or Limine refuses it, and the
+/// firmware has no other ESP to fall back to (an A/B switch changes which
+/// partition is the ESP, so the trial never starts and nothing rolls back).
+/// The official release images are unsigned and unsealed, so this is the
+/// trap a routine update of a sealed disk would fall into (ADR-320).
+pub fn keep_sealed(old: &[u8], new: &[u8], allow: bool) -> Result<Option<String>, String> {
+    if !seal(old).sealed() || seal(new).sealed() {
+        return Ok(None);
+    }
+    if allow {
+        return Ok(Some(
+            "WARNING: the disk's ESP is sealed for Secure Boot and the new one is not (--allow-unsealed): \
+             it does not boot with Secure Boot enforced"
+                .into(),
+        ));
+    }
+    Err(
+        "the disk's ESP is sealed for Secure Boot and the new one is not (an unsigned release image, or one built \
+         without --sb-key): with Secure Boot enforced the firmware or Limine refuses it and there is no way back \
+         short of the console. Stage an ESP signed and sealed with your key (scripts/sign-loaders.sh sign-iso ... \
+         --esp-out; docs/DEPLOY.md, Secure Boot), or say --allow-unsealed if this machine runs without Secure Boot"
+            .into(),
+    )
+}
+
 /// The new ESP with its configuration slot decided; the second value says
-/// what was done.
-pub fn carry_over(
+/// what was done. A new ESP that is sealed for Secure Boot (ADR-320) takes
+/// only the configuration it pins: anything else is refused here, because
+/// the loader would refuse the disk.
+pub fn carry_over(old: &[u8], new: Vec<u8>, policy: &Policy) -> Result<(Vec<u8>, String), String> {
+    use urmqtt_cfg::seal::Seal;
+    let sealed = seal(&new).sealed();
+    let (out, what) = carry_over_open(old, new, policy)?;
+    match seal(&out) {
+        Seal::Differs { .. } => {
+            let pin = urmqtt_cfg::seal::first_pin(&out, 0..0)
+                .and_then(|p| p.get(..16))
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .unwrap_or_default();
+            Err(format!(
+                "the new ESP is sealed for Secure Boot to the configuration module with blake2b {pin}…, and the \
+                 configuration it would get ({what}) is a different one: its loader would refuse to boot. Take the \
+                 ESP's own with --replace-config, or seal an ESP for this configuration \
+                 (scripts/sign-loaders.sh sign-iso ... --esp-out; docs/DEPLOY.md, Secure Boot)"
+            ))
+        }
+        Seal::Matches { .. } if sealed => {
+            Ok((out, format!("{what}; sealed for Secure Boot to it")))
+        }
+        _ => Ok((out, what)),
+    }
+}
+
+fn carry_over_open(
     old: &[u8],
     mut new: Vec<u8>,
     policy: &Policy,
@@ -282,5 +359,86 @@ mod tests {
         let (out, what) = carry_over(&old, vec![0u8; 4096], &Policy::Auto).unwrap();
         assert_eq!(out, vec![0u8; 4096]);
         assert!(what.contains("no configuration slot"), "{what}");
+    }
+
+    /// An ESP sealed to `slot` (ADR-320): its limine.conf pins the module.
+    fn sealed_esp(own: &[u8], pinned_to: &[u8]) -> Vec<u8> {
+        let hex: String = urmqtt_cfg::blake2b::hash(pinned_to)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let mut v = esp(own);
+        let conf = format!("    module_path: boot():/boot/urmqtt.cfg#{hex}\n");
+        v[100..100 + conf.len()].copy_from_slice(conf.as_bytes());
+        v
+    }
+
+    #[test]
+    fn a_sealed_esp_takes_only_the_configuration_it_pins() {
+        let mine = slot(SlotKind::Boot, 9000);
+        let other = slot(SlotKind::Boot, 9001);
+        let sealed = sealed_esp(&mine, &mine);
+        assert!(describe_seal(&sealed).contains("sealed to its configuration"));
+        assert!(describe_seal(&esp(&mine)).contains("not sealed"));
+        // The disk has the same configuration: kept, and said so.
+        let (out, what) = carry_over(&esp(&mine), sealed.clone(), &Policy::Auto).unwrap();
+        assert!(what.contains("sealed for Secure Boot"), "{what}");
+        assert_eq!(out, sealed);
+        // The disk has another real one: Auto, Keep and Set are refused, with the way out named.
+        for p in [Policy::Auto, Policy::Keep, Policy::Set(other.clone())] {
+            let e = carry_over(&esp(&other), sealed.clone(), &p).unwrap_err();
+            assert!(
+                e.contains("--replace-config") && e.contains("sign-iso"),
+                "{p:?}: {e}"
+            );
+        }
+        // --replace-config takes the ESP's own, which is the pinned one.
+        let (out, _) = carry_over(&esp(&other), sealed.clone(), &Policy::Replace).unwrap();
+        assert_eq!(out, sealed);
+        // A fresh image (create) with the pinned configuration, and with another.
+        assert!(
+            carry_over(
+                &[],
+                sealed_esp(&template(), &mine),
+                &Policy::Set(mine.clone())
+            )
+            .is_ok()
+        );
+        assert!(
+            carry_over(
+                &[],
+                sealed_esp(&template(), &mine),
+                &Policy::Set(other.clone())
+            )
+            .is_err()
+        );
+        // The installation image's template slot under a pin is not bootable as it is.
+        let tpl = sealed_esp(&template(), &mine);
+        assert!(carry_over(&esp(&template()), tpl.clone(), &Policy::Auto).is_err());
+        assert!(describe_seal(&tpl).contains("ANOTHER CONFIGURATION"));
+        // An open ESP behaves exactly as before.
+        let (_, what) = carry_over(&esp(&other), esp(&mine), &Policy::Auto).unwrap();
+        assert!(!what.contains("sealed"), "{what}");
+    }
+
+    /// A sealed disk (it boots under Secure Boot) does not take an unsealed ESP by accident: the
+    /// firmware would refuse it and nothing rolls back. --allow-unsealed does it with a warning.
+    #[test]
+    fn a_sealed_disk_does_not_take_an_unsealed_esp_by_accident() {
+        let mine = slot(SlotKind::Boot, 9000);
+        let sealed = sealed_esp(&mine, &mine);
+        let open = esp(&mine);
+        let e = keep_sealed(&sealed, &open, false).unwrap_err();
+        assert!(
+            e.contains("--allow-unsealed") && e.contains("sign-iso"),
+            "{e}"
+        );
+        let w = keep_sealed(&sealed, &open, true).unwrap().unwrap();
+        assert!(w.contains("WARNING"), "{w}");
+        // Sealed to sealed, open to anything, and an old disk without a slot: nothing to say.
+        assert_eq!(keep_sealed(&sealed, &sealed, false), Ok(None));
+        assert_eq!(keep_sealed(&open, &open, false), Ok(None));
+        assert_eq!(keep_sealed(&open, &sealed, false), Ok(None));
+        assert_eq!(keep_sealed(&[0u8; 8192], &open, false), Ok(None));
     }
 }

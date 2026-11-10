@@ -826,6 +826,99 @@ fn the_websocket_fixture_is_announced_and_its_hashes_are_not_shown() {
     );
 }
 
+/// ADR-290: the `[metrics]` section packs into format 16, `pack` and `show`
+/// warn that an unencrypted endpoint is on and name its allow-list, a release
+/// kernel accepts the blob, and an enabled endpoint without an allow-list is
+/// refused naming the key.
+#[test]
+fn the_metrics_fixture_packs_into_format_16() {
+    let out = tmp("metrics.blob");
+    let text = ok(&run(bin()
+        .arg("pack")
+        .arg(fixtures().join("metrics.toml"))
+        .arg("--out")
+        .arg(&out)));
+    let warning = "warning: Prometheus metrics ON (plain HTTP, no login): port 9273, scrapes allowed from 192.0.2.0/24, 10.8.0.5/32";
+    assert!(text.contains(warning), "{text}");
+    let blob = std::fs::read(&out).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 16);
+    let shown = ok(&run(bin().arg("show").arg(&out)));
+    assert!(shown.contains("urmqtt-cfg version 16"), "{shown}");
+    assert!(
+        shown.contains("warning:     Prometheus metrics ON"),
+        "{shown}"
+    );
+    assert!(shown.contains("[metrics]\n  enabled = true"), "{shown}");
+    assert!(
+        shown.contains("  allow_from = [\"192.0.2.0/24\", \"10.8.0.5/32\"]"),
+        "{shown}"
+    );
+    assert!(shown.contains("  port = 9273"), "{shown}");
+    let verified = ok(&run(bin().arg("verify").arg(&out)));
+    assert!(
+        verified.contains("warning: Prometheus metrics ON"),
+        "{verified}"
+    );
+    // No allow-list: refused, naming the key.
+    let cfg = tmp("metrics-no-allow.toml");
+    let fixture = std::fs::read_to_string(fixtures().join("metrics.toml")).unwrap();
+    std::fs::write(
+        &cfg,
+        fixture.replace("allow_from = [\"192.0.2.0/24\", \"10.8.0.5/32\"]\n", ""),
+    )
+    .unwrap();
+    let o = run(bin().arg("pack").arg(&cfg).arg("--out").arg(tmp("x.blob")));
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("metrics.allow_from"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+/// ADR-318: log shipping over TLS packs into format 20 with the collector's
+/// trust anchor read from its file; `pack`, `show` and `verify` name the one
+/// outbound connection; a collector without anchors is refused naming the key.
+#[test]
+fn log_tls_packs_into_format_20_and_is_shown() {
+    if !have_dev_certs() {
+        return eprintln!("no dev certs, run make certs");
+    }
+    let ca = dev_dir().join("ca.pem");
+    let cfg = tmp("log-tls.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "[observability]\nlog_tls = \"192.0.2.50:6514\"\nlog_tls_name = \"logs.example.com\"\nlog_tls_ca = [{:?}]\n",
+            ca.display().to_string()
+        ),
+    )
+    .unwrap();
+    let out = tmp("log-tls.blob");
+    let text = ok(&run(bin().arg("pack").arg(&cfg).arg("--out").arg(&out)));
+    let line = "log records shipped over TLS to 192.0.2.50:6514 (certificate name logs.example.com, 1 trust anchor file(s), 256 KiB queue): one outbound connection";
+    assert!(text.contains(line), "{text}");
+    let blob = std::fs::read(&out).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 20);
+    let shown = ok(&run(bin().arg("show").arg(&out)));
+    assert!(shown.contains("urmqtt-cfg version 20"), "{shown}");
+    assert!(shown.contains(&format!("outbound:    {line}")), "{shown}");
+    let verified = ok(&run(bin().arg("verify").arg(&out)));
+    assert!(
+        verified.contains(&format!("outbound: {line}")),
+        "{verified}"
+    );
+    // No anchors: refused, naming the key.
+    std::fs::write(&cfg, "[observability]\nlog_tls = \"192.0.2.50:6514\"\n").unwrap();
+    let o = run(bin().arg("pack").arg(&cfg).arg("--out").arg(tmp("x.blob")));
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("observability.log_tls_ca"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
 /// ADR-273 rule 21: the `[mqtt5]` keys and the expiry limits pack into
 /// format 12, `show` lists them under their sections (the limits of format 12
 /// with the other limits, one `[limits]` heading), a release kernel accepts
@@ -957,6 +1050,46 @@ fn the_shared_groups_fixture_packs_into_format_13() {
             "{err}"
         );
     }
+}
+
+/// ADR-285: the run-time account limit packs into format 15, `show` lists it,
+/// a release kernel accepts the blob, 0 spelled out writes nothing (the base
+/// format), and a value out of range is refused naming the key.
+#[test]
+fn the_accounts_fixture_packs_into_format_15() {
+    let out = tmp("accounts.blob");
+    let text = ok(&run(bin()
+        .arg("pack")
+        .arg(fixtures().join("accounts.toml"))
+        .arg("--out")
+        .arg(&out)));
+    // The plaintext listener warns, as it always does; the limit is no warning.
+    assert!(text.contains("plaintext MQTT ON"), "{text}");
+    let blob = std::fs::read(&out).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 15);
+    let shown = ok(&run(bin().arg("show").arg(&out)));
+    assert!(shown.contains("urmqtt-cfg version 15"), "{shown}");
+    assert!(shown.contains("max_runtime_accounts = 16"), "{shown}");
+    assert!(ok(&run(bin().arg("verify").arg(&out))).starts_with("ok: "));
+    let cfg = tmp("accounts-default.toml");
+    std::fs::write(&cfg, "[limits]\nmax_runtime_accounts = 0\n").unwrap();
+    let def = tmp("accounts-default.blob");
+    ok(&run(bin().arg("pack").arg(&cfg).arg("--out").arg(&def)));
+    let blob = std::fs::read(&def).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 2);
+    let cfg = tmp("accounts-range.toml");
+    std::fs::write(&cfg, "[limits]\nmax_runtime_accounts = 1025\n").unwrap();
+    let o = run(bin()
+        .arg("pack")
+        .arg(&cfg)
+        .arg("--out")
+        .arg(tmp("accounts-range.blob")));
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("limits.max_runtime_accounts") && err.contains("0..=1024"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1146,10 +1279,10 @@ fn a_device_key_for_a_driver_the_kernel_lacks_is_refused() {
 
 /// The templates of the published releases, configured by this tool (and by the builder page, which runs the
 /// same code): v0.2.0's kernel reads configuration format 2, v0.2.1's 3, v0.3.0's 4, v0.4.0's and v0.4.1's 6,
-/// this one 13. A configuration that needs no newer format than the template's kernel reads is written into it as
+/// this one 20. A configuration that needs no newer format than the template's kernel reads is written into it as
 /// before; one that needs more (the virtio-gpu console: 5, a `[devices]` key: 6, `network.mtu`: 7,
 /// `limits.publisher_backpressure = "off"`: 8, a `[websocket]` key: 9, `devices.virtio_net_interrupt = "off"`: 11,
-/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13) is refused with the reason, before a byte
+/// an `[mqtt5]` key or an expiry limit: 12, a shared-group limit: 13, `limits.max_connections_per_ip`: 14, `limits.max_runtime_accounts`: 15, a `[metrics]` key: 16, an `[update]` key: 17, `devices.iommu`: 18, `devices.virtio_net_queues`: 19, an `observability.log_tls*` key: 20, `storage.disk_key_source = "console"`: 22, `network.ipv6` or an IPv6 network in an allow-list: 23) is refused with the reason, before a byte
 /// of the template changes, instead of giving an image whose kernel would refuse it at boot.
 #[test]
 fn templates_of_earlier_releases_take_what_their_kernel_reads() {
@@ -1190,6 +1323,52 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
     b.uint(tag::LIM_MAX_SHARED_GROUPS, 64).unwrap();
     let shared = b.finish(false).unwrap();
     assert_eq!(header(&shared), 13);
+    let mut b = Builder::new();
+    b.uint(tag::LIM_MAX_CONNECTIONS_PER_IP, 64).unwrap();
+    let per_ip = b.finish(false).unwrap();
+    assert_eq!(header(&per_ip), 14);
+    let mut b = Builder::new();
+    b.uint(tag::LIM_MAX_RUNTIME_ACCOUNTS, 16).unwrap();
+    let accounts = b.finish(false).unwrap();
+    assert_eq!(header(&accounts), 15);
+    let mut b = Builder::new();
+    b.uint(tag::METRICS_PORT, 9273).unwrap();
+    let metrics = b.finish(false).unwrap();
+    assert_eq!(header(&metrics), 16);
+    let mut b = Builder::new();
+    b.variant(tag::UPD_CONFIRM, 1).unwrap();
+    let update = b.finish(false).unwrap();
+    assert_eq!(header(&update), 17);
+    let mut b = Builder::new();
+    b.variant(tag::DEV_IOMMU, 2).unwrap();
+    let iommu = b.finish(false).unwrap();
+    assert_eq!(header(&iommu), 18);
+    let mut b = Builder::new();
+    b.variant(tag::DEV_NET_QUEUES, 1).unwrap();
+    let queues = b.finish(false).unwrap();
+    assert_eq!(header(&queues), 19);
+    let mut b = Builder::new();
+    b.addr(tag::OBS_LOG_TLS, [10, 0, 2, 2], 6514).unwrap();
+    b.bins(
+        tag::OBS_LOG_TLS_CA,
+        &[b"-----BEGIN CERTIFICATE-----\nMA==\n-----END CERTIFICATE-----\n".to_vec()],
+    )
+    .unwrap();
+    let log_tls = b.finish(false).unwrap();
+    assert_eq!(header(&log_tls), 20);
+    let mut b = Builder::new();
+    b.variant(tag::ST_ENCRYPTION, 1).unwrap();
+    b.variant(tag::ST_DISK_KEY_SOURCE, 1).unwrap();
+    let console_key = b.finish(false).unwrap();
+    assert_eq!(header(&console_key), 22);
+    let mut b = Builder::new();
+    b.variant(tag::NET_IPV6, 1).unwrap();
+    let ipv6 = b.finish(false).unwrap();
+    assert_eq!(header(&ipv6), 23);
+    let mut b = Builder::new();
+    b.strs(tag::METRICS_ALLOW_FROM, &["2001:db8::/32"]).unwrap();
+    let ipv6_net = b.finish(false).unwrap();
+    assert_eq!(header(&ipv6_net), 23);
     for (release, reads) in [
         ("v0.2.0", 2u16),
         ("v0.2.1", 3),
@@ -1201,6 +1380,21 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
         ("format 8", 8),
         // A tree with MQTT 5.0 parts 1 and 2 (ADR-273/274), without ADR-275.
         ("format 12", 12),
+        ("v0.5.0", 13),
+        // This release (v0.6.0): everything up to IPv6 (ADR-334).
+        ("v0.6.0", 23),
+        // A tree with the per-address connection limit (ADR-280), without run-time accounts (ADR-285).
+        ("format 14", 14),
+        // A tree with run-time accounts (ADR-285), without ADR-290.
+        ("format 15", 15),
+        // A tree with the metrics section (ADR-290), without the A/B update keys (ADR-297).
+        ("format 16", 16),
+        // A tree with the A/B update keys (ADR-297), without the IOMMU key (ADR-305).
+        ("format 17", 17),
+        // A tree with the IOMMU key (ADR-305), without the NIC's queue pairs (ADR-313), log shipping over TLS (ADR-318) or the console disk key source (ADR-328).
+        ("format 18", 18),
+        // A tree with the disk key source (ADR-328), without IPv6 (ADR-334).
+        ("format 22", 22),
         ("this tree", urmqtt_cfg::FORMAT_VERSION),
     ] {
         let empty = Builder::new().finish_as(false, reads).unwrap();
@@ -1217,6 +1411,16 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             ("devices.virtio_net_interrupt", &net_irq, 11),
             ("[mqtt5]", &m5, 12),
             ("limits.max_shared_groups", &shared, 13),
+            ("limits.max_connections_per_ip", &per_ip, 14),
+            ("limits.max_runtime_accounts", &accounts, 15),
+            ("[metrics]", &metrics, 16),
+            ("update.confirm", &update, 17),
+            ("devices.iommu", &iommu, 18),
+            ("devices.virtio_net_queues", &queues, 19),
+            ("observability.log_tls", &log_tls, 20),
+            ("storage.disk_key_source", &console_key, 22),
+            ("network.ipv6", &ipv6, 23),
+            ("metrics.allow_from (an IPv6 network)", &ipv6_net, 23),
         ] {
             match image::configure_iso(&tpl, blob) {
                 Ok(_) => assert!(
@@ -1235,4 +1439,84 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
             }
         }
     }
+}
+
+/// ADR-280: `limits.max_connections_per_ip` packs into format 14 (0, "no
+/// limit", included), `show` lists it, a release kernel accepts the blob, the
+/// default writes nothing, and a value out of range is refused naming the key.
+#[test]
+fn the_connection_limit_fixture_packs_into_format_14() {
+    let out = tmp("per-ip.blob");
+    let text = ok(&run(bin()
+        .arg("pack")
+        .arg(fixtures().join("per-ip.toml"))
+        .arg("--out")
+        .arg(&out)));
+    assert!(!text.contains("warning"), "{text}");
+    let blob = std::fs::read(&out).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 14);
+    let shown = ok(&run(bin().arg("show").arg(&out)));
+    assert!(shown.contains("urmqtt-cfg version 14"), "{shown}");
+    assert!(
+        shown.contains("[limits]\n  max_packet_size = 8192\n  max_connections_per_ip = 200\n"),
+        "{shown}"
+    );
+    assert!(ok(&run(bin().arg("verify").arg(&out))).starts_with("ok: "));
+    // 0 is a value, not an absence.
+    let cfg = tmp("per-ip-0.toml");
+    std::fs::write(&cfg, "[limits]\nmax_connections_per_ip = 0\n").unwrap();
+    let off = tmp("per-ip-0.blob");
+    ok(&run(bin().arg("pack").arg(&cfg).arg("--out").arg(&off)));
+    let blob = std::fs::read(&off).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 14);
+    // The default spelled out: no record, the base format.
+    std::fs::write(&cfg, "[limits]\nmax_connections_per_ip = 1024\n").unwrap();
+    let def = tmp("per-ip-default.blob");
+    ok(&run(bin().arg("pack").arg(&cfg).arg("--out").arg(&def)));
+    let blob = std::fs::read(&def).unwrap();
+    assert_eq!(u16::from_le_bytes([blob[8], blob[9]]), 2);
+    // Out of range.
+    std::fs::write(&cfg, "[limits]\nmax_connections_per_ip = 1000001\n").unwrap();
+    let o = run(bin()
+        .arg("pack")
+        .arg(&cfg)
+        .arg("--out")
+        .arg(tmp("per-ip-bad.blob")));
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("limits.max_connections_per_ip") && err.contains("0..=1000000"),
+        "{err}"
+    );
+}
+
+/// LATER-6 (ADR-320): an ISO signed for Secure Boot pins its configuration in the installed disk's
+/// no-menu limine.conf too. Configuring it would break the signature and the installation image's
+/// pinned hash, so `pack --iso` (and the builder page, the same code) refuses it with the way out;
+/// a sealed raw image takes only the configuration it pins.
+#[test]
+fn a_sealed_image_is_not_configured_afterwards() {
+    let (mut tpl, _) = synthetic_template();
+    let slot = make_slot(SlotKind::Boot, &empty_blob()).unwrap();
+    let hash: String = blake2b::hash(&slot)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let mut sealed_conf =
+        b"# Generated by scripts/mkiso.sh --universal. No menu and no editor.\n".to_vec();
+    sealed_conf
+        .extend_from_slice(format!("    module_path: boot():/boot/urmqtt.cfg#{hash}\n").as_bytes());
+    sealed_conf.extend_from_slice(b"# end of limine.conf\n");
+    tpl.extend_from_slice(&sealed_conf);
+    // The image as built is consistent.
+    image::verify(&tpl, true).unwrap();
+    let e = image::configure_iso(&tpl, &lab_blob()).err().unwrap();
+    assert!(e.contains("Secure Boot") && e.contains("sign-iso"), "{e}");
+    // A sealed raw image: its own configuration again is fine, another one is refused.
+    let mut raw = vec![0u8; 8192];
+    raw.extend_from_slice(&slot);
+    raw.extend_from_slice(&sealed_conf);
+    assert!(image::configure_raw(&raw, &empty_blob()).is_ok());
+    let e = image::configure_raw(&raw, &lab_blob()).err().unwrap();
+    assert!(e.contains("sealed for Secure Boot"), "{e}");
 }

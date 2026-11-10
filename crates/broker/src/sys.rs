@@ -56,6 +56,45 @@ pub struct Handshakes {
     pub latency_max_ms: u64,
 }
 
+/// IPv6 (NEXT-1, ADR-331), as `$SYS/broker/net/ipv6/...` reports it: the
+/// mode, the addresses in use (RFC 5952 text, empty: none), the default
+/// router, the MTU, and the counters of the interfaces (all cores).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Ipv6Sys<'a> {
+    /// `off`, `slaac` or `static`.
+    pub mode: &'a str,
+    pub link_local: &'a str,
+    pub global: &'a str,
+    pub router: &'a str,
+    pub mtu: u16,
+    pub frames_in: u64,
+    pub dropped: u64,
+    pub fragments: u64,
+    pub ext_headers: u64,
+    pub dad_duplicate: u64,
+    pub prefixes_ignored: u64,
+}
+
+/// The limit on established TLS connections per source address (NOW-14,
+/// ADR-280), as `$SYS/broker/connections/per_address/...` reports it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PerAddress {
+    /// `limits.max_connections_per_ip`; 0: no limit (the rest stays 0).
+    pub limit: u64,
+    /// Connections the table counts now, all cores.
+    pub established: u64,
+    /// Distinct addresses holding at least one.
+    pub addresses: u64,
+    /// The most one address has held at once since boot.
+    pub peak: u64,
+    /// SYNs dropped without an answer because the address was at its limit.
+    pub syn_dropped: u64,
+    /// Connections refused at the final ACK for the same reason (a RST).
+    pub refused: u64,
+    /// Connections let through uncounted because the table was full.
+    pub untracked: u64,
+}
+
 /// Messages and frames the broker did not deliver, by cause (PERF, ADR-223).
 /// QoS 0 loss under overload is deliberate and bounded; it is also counted
 /// here, per cause, so that it is never silent.
@@ -193,7 +232,7 @@ pub fn by_code<const N: usize>(
     codes: &[u8; N],
 ) -> ([u64; N], u64) {
     let mut out = [0u64; N];
-    let mut other = 0;
+    let mut other = 0u64;
     for (i, n) in slots.iter().enumerate() {
         let code = 0x80 + i as u8;
         match codes.iter().position(|&c| c == code) {
@@ -202,7 +241,7 @@ pub fn by_code<const N: usize>(
                     *o = *n;
                 }
             }
-            None => other += n,
+            None => other = other.saturating_add(*n),
         }
     }
     (out, other)
@@ -314,6 +353,51 @@ pub struct WsInfo<'a> {
     pub closes_abrupt: u64,
 }
 
+/// One virtio-net queue pair's counters (NEXT-6, ADR-312): frames received
+/// and sent on it, frames of another core's flow that its core forwarded to
+/// core 0, and its receive interrupts. Pair `k` belongs to data core `k`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NetQueueSys {
+    pub received: u64,
+    pub sent: u64,
+    pub forwarded: u64,
+    pub interrupts: u64,
+}
+
+/// DMA remapping (H4b, ADR-305): `$SYS/broker/iommu/...`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IommuSys<'a> {
+    /// `devices.iommu`: `off`, `auto` or `require`.
+    pub mode: &'a str,
+    /// `off` (not used), `none` (no IOMMU found), `failed` (found, not
+    /// working: auto went on without), `active`.
+    pub state: &'a str,
+    /// Units translating.
+    pub units: u64,
+    /// Devices with a domain of their own.
+    pub domains: u64,
+    /// Pages mapped for device DMA.
+    pub pages: u64,
+    /// Blocked DMA and unit errors read from the fault logs.
+    pub faults: u64,
+    /// Times a unit's fault log overflowed (faults lost).
+    pub overflows: u64,
+}
+
+impl Default for IommuSys<'_> {
+    fn default() -> Self {
+        Self {
+            mode: "off",
+            state: "off",
+            units: 0,
+            domains: 0,
+            pages: 0,
+            faults: 0,
+            overflows: 0,
+        }
+    }
+}
+
 /// Everything `$SYS/broker/...` and the info query report.
 #[derive(Debug, Clone, Copy)]
 pub struct Info<'a> {
@@ -349,17 +433,24 @@ pub struct Info<'a> {
     /// The link MTU in use, bytes (NOW-19, ADR-264): from DHCP option 26,
     /// `network.mtu`, or 1500.
     pub net_mtu: u16,
+    /// The NIC's queue pairs in use (one without multiqueue; NEXT-6, ADR-312).
+    pub net_queues: &'a [NetQueueSys],
+    /// IPv6 (NEXT-1, ADR-331).
+    pub ipv6: Ipv6Sys<'a>,
     pub drops: Drops,
     pub qos2: Qos2,
     /// Publisher back-pressure (NOW-13, ADR-269).
     pub backpressure: Backpressure,
     pub mqtt5: Mqtt5Info,
     pub handshakes: Handshakes,
+    /// The per-address limit on established connections (ADR-280).
+    pub per_address: PerAddress,
     /// Connections accepted per core since boot (how evenly the flows
     /// spread over the cores).
     pub accepted: &'a [u64],
     pub plaintext: PlainInfo<'a>,
     pub websocket: WsInfo<'a>,
+    pub iommu: IommuSys<'a>,
 }
 
 /// The name of what seeded the random number generator, for
@@ -429,6 +520,33 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
     put("entropy/source", &i.entropy_source);
     put("console/dropped", &i.console_dropped);
     put("net/mtu", &i.net_mtu);
+    put("net/queues", &i.net_queues.len());
+    for (k, q) in i.net_queues.iter().enumerate() {
+        put(&alloc::format!("net/queue/received/{k}"), &q.received);
+        put(&alloc::format!("net/queue/sent/{k}"), &q.sent);
+        put(&alloc::format!("net/queue/forwarded/{k}"), &q.forwarded);
+        put(&alloc::format!("net/queue/interrupts/{k}"), &q.interrupts);
+    }
+    let v6 = &i.ipv6;
+    put("net/ipv6/mode", &v6.mode);
+    put("net/ipv6/address/link_local", &v6.link_local);
+    put("net/ipv6/address/global", &v6.global);
+    put("net/ipv6/router", &v6.router);
+    put("net/ipv6/mtu", &v6.mtu);
+    put("net/ipv6/frames_in", &v6.frames_in);
+    put("net/ipv6/dropped", &v6.dropped);
+    put("net/ipv6/fragments", &v6.fragments);
+    put("net/ipv6/ext_headers", &v6.ext_headers);
+    put("net/ipv6/dad_duplicate", &v6.dad_duplicate);
+    put("net/ipv6/prefixes_ignored", &v6.prefixes_ignored);
+    let io = &i.iommu;
+    put("iommu/mode", &io.mode);
+    put("iommu/state", &io.state);
+    put("iommu/units", &io.units);
+    put("iommu/domains", &io.domains);
+    put("iommu/pages", &io.pages);
+    put("iommu/faults", &io.faults);
+    put("iommu/overflows", &io.overflows);
     let d = &i.drops;
     put("messages/dropped/slow_subscriber", &d.slow_subscriber);
     put("messages/dropped/offline", &d.offline);
@@ -492,6 +610,14 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
     put("handshakes/slow", &h.slow);
     put("handshakes/latency_sum_ms", &h.latency_sum_ms);
     put("handshakes/latency_max_ms", &h.latency_max_ms);
+    let a = &i.per_address;
+    put("connections/per_address/limit", &a.limit);
+    put("connections/per_address/established", &a.established);
+    put("connections/per_address/addresses", &a.addresses);
+    put("connections/per_address/peak", &a.peak);
+    put("connections/per_address/syn_dropped", &a.syn_dropped);
+    put("connections/per_address/refused", &a.refused);
+    put("connections/per_address/untracked", &a.untracked);
     for (core, a) in i.accepted.iter().enumerate() {
         put(&alloc::format!("cpu/accepted/{core}"), a);
     }
@@ -551,6 +677,8 @@ pub fn topics(i: &Info<'_>, mut f: impl FnMut(&str, &str)) {
 pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
     let busy = alloc::vec![0u8; cores];
     let accepted = alloc::vec![0u64; cores];
+    // One NIC queue pair: the per-pair topics repeat for each pair in use.
+    let queues = [NetQueueSys::default()];
     let info = Info {
         version: "",
         uptime_s: 0,
@@ -573,11 +701,14 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
         entropy_source: "",
         console_dropped: 0,
         net_mtu: 1500,
+        net_queues: &queues,
+        ipv6: Ipv6Sys::default(),
         drops: Drops::default(),
         qos2: Qos2::default(),
         backpressure: Backpressure::default(),
         mqtt5: Mqtt5Info::default(),
         handshakes: Handshakes::default(),
+        per_address: PerAddress::default(),
         accepted: &accepted,
         plaintext: PlainInfo {
             enabled: true,
@@ -587,6 +718,7 @@ pub fn topic_names(cores: usize) -> alloc::vec::Vec<String> {
             enabled: true,
             ..WsInfo::default()
         },
+        iommu: IommuSys::default(),
     };
     let mut v = alloc::vec::Vec::new();
     topics(&info, |t, _| v.push(t.into()));
@@ -653,20 +785,57 @@ pub fn json(i: &Info<'_>) -> String {
         None => o.push_str("null"),
     }
     let h = &i.handshakes;
+    let a = &i.per_address;
     let d = &i.drops;
     o.push_str("},\"entropy\":{\"source\":");
     json_str(&mut o, i.entropy_source);
     let _ = write!(
         o,
-        "}},\"console_dropped\":{},\"net\":{{\"mtu\":{}}},\"dropped\":{{\"slow_subscriber\":{},\"offline\":{},\"cross_core\":{},\
+        "}},\"console_dropped\":{},\"net\":{{\"mtu\":{},\"queues\":[{}],\"ipv6\":{}}},\"dropped\":{{\"slow_subscriber\":{},\"offline\":{},\"cross_core\":{},\
          \"qos1_queue_full\":{},\"publish_rate\":{},\"frames_steer\":{},\"frames_worker_tx\":{},\"frames_nic\":{}}},\
          \"qos2\":{{\"received\":{},\"duplicates\":{},\"completed\":{},\"inbound_full\":{}}},\
          \"backpressure\":{{\"mode\":\"{}\",\"paused\":{},\"paused_ms\":{},\"timeouts\":{},\"holding\":{}}},\
          \"handshakes\":{{\"started\":{},\"done\":{},\"failed\":{},\
          \"timed_out\":{},\"refused\":{},\"syn_dropped\":{},\"in_flight\":{},\"in_flight_max\":{},\
-         \"slow\":{},\"latency_sum_ms\":{},\"latency_max_ms\":{}}},\"accepted\":[",
+         \"slow\":{},\"latency_sum_ms\":{},\"latency_max_ms\":{}}},\
+         \"per_address\":{{\"limit\":{},\"established\":{},\"addresses\":{},\"peak\":{},\"syn_dropped\":{},\
+         \"refused\":{},\"untracked\":{}}},\"accepted\":[",
         i.console_dropped,
         i.net_mtu,
+        i.net_queues
+            .iter()
+            .map(|q| alloc::format!(
+                "{{\"received\":{},\"sent\":{},\"forwarded\":{},\"interrupts\":{}}}",
+                q.received,
+                q.sent,
+                q.forwarded,
+                q.interrupts
+            ))
+            .collect::<alloc::vec::Vec<_>>()
+            .join(","),
+        {
+            let v6 = &i.ipv6;
+            let mut j = alloc::string::String::from("{\"mode\":");
+            json_str(&mut j, v6.mode);
+            j.push_str(",\"link_local\":");
+            json_str(&mut j, v6.link_local);
+            j.push_str(",\"global\":");
+            json_str(&mut j, v6.global);
+            j.push_str(",\"router\":");
+            json_str(&mut j, v6.router);
+            let _ = write!(
+                j,
+                ",\"mtu\":{},\"frames_in\":{},\"dropped\":{},\"fragments\":{},\"ext_headers\":{},\"dad_duplicate\":{},\"prefixes_ignored\":{}}}",
+                v6.mtu,
+                v6.frames_in,
+                v6.dropped,
+                v6.fragments,
+                v6.ext_headers,
+                v6.dad_duplicate,
+                v6.prefixes_ignored
+            );
+            j
+        },
         d.slow_subscriber,
         d.offline,
         d.cross_core,
@@ -694,7 +863,14 @@ pub fn json(i: &Info<'_>) -> String {
         h.in_flight_max,
         h.slow,
         h.latency_sum_ms,
-        h.latency_max_ms
+        h.latency_max_ms,
+        a.limit,
+        a.established,
+        a.addresses,
+        a.peak,
+        a.syn_dropped,
+        a.refused,
+        a.untracked
     );
     for (n, a) in i.accepted.iter().enumerate() {
         let _ = write!(o, "{}{a}", if n == 0 { "" } else { "," });
@@ -733,6 +909,16 @@ pub fn json(i: &Info<'_>) -> String {
         let _ = write!(o, "\"0x{code:02x}\":{n},");
     }
     let _ = write!(o, "\"other\":{other}}}}}");
+    let io = &i.iommu;
+    o.push_str(",\"iommu\":{\"mode\":");
+    json_str(&mut o, io.mode);
+    o.push_str(",\"state\":");
+    json_str(&mut o, io.state);
+    let _ = write!(
+        o,
+        ",\"units\":{},\"domains\":{},\"pages\":{},\"faults\":{},\"overflows\":{}}}",
+        io.units, io.domains, io.pages, io.faults, io.overflows
+    );
     let p = &i.plaintext;
     let _ = write!(o, ",\"plaintext\":{{\"enabled\":{}", p.enabled);
     if p.enabled {
@@ -842,6 +1028,19 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
         )),
         None => out.push("tls server certificate lifetime unknown (no wall clock)".into()),
     }
+    let io = &i.iommu;
+    if io.mode != "off" || io.state != "off" {
+        out.push(alloc::format!(
+            "iommu {} ({}): {} unit(s), {} device domain(s), {} page(s) mapped, {} fault(s), {} overflow(s)",
+            io.state,
+            io.mode,
+            io.units,
+            io.domains,
+            io.pages,
+            io.faults,
+            io.overflows
+        ));
+    }
     match i.time_offset_ms {
         Some(o) => out.push(alloc::format!(
             "time source {}, last sntp offset {o} ms",
@@ -879,6 +1078,21 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
         bp.timeouts,
         bp.holding
     ));
+    let pa = &i.per_address;
+    if pa.limit == 0 {
+        out.push("per address limit: none".into());
+    } else {
+        out.push(alloc::format!(
+            "per address limit {}: {} conn(s) from {} addr(s), peak {}; refused {} SYN / {} ACK; {} untracked",
+            pa.limit,
+            pa.established,
+            pa.addresses,
+            pa.peak,
+            pa.syn_dropped,
+            pa.refused,
+            pa.untracked
+        ));
+    }
     let m = &i.mqtt5;
     let disconnects: u64 = m.disconnects.iter().sum();
     let refused: u64 = m.refused.iter().sum();
@@ -937,6 +1151,35 @@ pub fn status_lines(i: &Info<'_>, level: &str, max_level: &str) -> alloc::vec::V
             refused,
             w.auth_failed,
             w.lockouts
+        ));
+    }
+    // IPv6 (NEXT-1, ADR-331): three lines, each under 120 characters with
+    // the longest addresses.
+    let v6 = &i.ipv6;
+    if v6.mode == "off" || v6.mode.is_empty() {
+        out.push("ipv6 off".into());
+    } else {
+        fn or_none(s: &str) -> &str {
+            if s.is_empty() { "none" } else { s }
+        }
+        out.push(alloc::format!(
+            "ipv6 {}, mtu {}, router {}",
+            v6.mode,
+            v6.mtu,
+            or_none(v6.router)
+        ));
+        out.push(alloc::format!(
+            "ipv6 addresses {} {}",
+            or_none(v6.link_local),
+            or_none(v6.global)
+        ));
+        out.push(alloc::format!(
+            "ipv6 {} frame(s) in, {} dropped ({} fragment(s), {} ext. header(s)), {} duplicate address(es)",
+            v6.frames_in,
+            v6.dropped,
+            v6.fragments,
+            v6.ext_headers,
+            v6.dad_duplicate
         ));
     }
     out.push(alloc::format!(
@@ -1097,6 +1340,25 @@ mod tests {
             entropy_source: "jitter+firmware",
             console_dropped: 0,
             net_mtu: 1460,
+            net_queues: &[NetQueueSys {
+                received: 7,
+                sent: 9,
+                forwarded: 0,
+                interrupts: 2,
+            }],
+            ipv6: Ipv6Sys {
+                mode: "slaac",
+                link_local: "fe80::5054:ff:fe12:3456",
+                global: "fec0::5054:ff:fe12:3456",
+                router: "fe80::2",
+                mtu: 1500,
+                frames_in: 40,
+                dropped: 3,
+                fragments: 1,
+                ext_headers: 1,
+                dad_duplicate: 0,
+                prefixes_ignored: 0,
+            },
             drops: Drops {
                 slow_subscriber: 3,
                 ..Drops::default()
@@ -1130,10 +1392,64 @@ mod tests {
                 done: 8,
                 ..Handshakes::default()
             },
+            per_address: PerAddress {
+                limit: 1024,
+                established: 3,
+                addresses: 2,
+                peak: 2,
+                syn_dropped: 5,
+                refused: 1,
+                untracked: 0,
+            },
             accepted: &[4, 5],
             plaintext: PlainInfo::default(),
             websocket: WsInfo::default(),
+            iommu: IommuSys::default(),
         }
+    }
+
+    /// ADR-305: the IOMMU's topics are always published (off by default),
+    /// the query carries them as an object, and `status` gets a line once it
+    /// is configured.
+    #[test]
+    fn the_iommu_is_reported() {
+        let mut i = info(&[10]);
+        let mut got = alloc::vec::Vec::new();
+        topics(&i, |t, v| got.push((t.to_owned(), v.to_owned())));
+        let val = |g: &[(String, String)], t: &str| {
+            g.iter().find(|(k, _)| k == t).map(|(_, v)| v.clone())
+        };
+        assert_eq!(val(&got, "$SYS/broker/iommu/mode").as_deref(), Some("off"));
+        assert_eq!(val(&got, "$SYS/broker/iommu/faults").as_deref(), Some("0"));
+        assert!(
+            !status_lines(&i, "info", "debug")
+                .iter()
+                .any(|l| l.starts_with("iommu"))
+        );
+        i.iommu = IommuSys {
+            mode: "require",
+            state: "active",
+            units: 1,
+            domains: 3,
+            pages: 900,
+            faults: 2,
+            overflows: 0,
+        };
+        let mut got = alloc::vec::Vec::new();
+        topics(&i, |t, v| got.push((t.to_owned(), v.to_owned())));
+        assert_eq!(
+            val(&got, "$SYS/broker/iommu/state").as_deref(),
+            Some("active")
+        );
+        assert_eq!(val(&got, "$SYS/broker/iommu/faults").as_deref(), Some("2"));
+        assert_eq!(val(&got, "$SYS/broker/iommu/domains").as_deref(), Some("3"));
+        let j = json(&i);
+        assert!(
+            j.contains("\"iommu\":{\"mode\":\"require\",\"state\":\"active\",\"units\":1,\"domains\":3,\"pages\":900,\"faults\":2,\"overflows\":0}"),
+            "{j}"
+        );
+        assert!(status_lines(&i, "info", "debug").iter().any(|l| l
+            == "iommu active (require): 1 unit(s), 3 device domain(s), 900 page(s) mapped, 2 fault(s), 0 overflow(s)"));
     }
 
     #[test]
@@ -1341,6 +1657,29 @@ mod tests {
                 "$SYS/broker/entropy/source",
                 "$SYS/broker/console/dropped",
                 "$SYS/broker/net/mtu",
+                "$SYS/broker/net/queues",
+                "$SYS/broker/net/queue/received/0",
+                "$SYS/broker/net/queue/sent/0",
+                "$SYS/broker/net/queue/forwarded/0",
+                "$SYS/broker/net/queue/interrupts/0",
+                "$SYS/broker/net/ipv6/mode",
+                "$SYS/broker/net/ipv6/address/link_local",
+                "$SYS/broker/net/ipv6/address/global",
+                "$SYS/broker/net/ipv6/router",
+                "$SYS/broker/net/ipv6/mtu",
+                "$SYS/broker/net/ipv6/frames_in",
+                "$SYS/broker/net/ipv6/dropped",
+                "$SYS/broker/net/ipv6/fragments",
+                "$SYS/broker/net/ipv6/ext_headers",
+                "$SYS/broker/net/ipv6/dad_duplicate",
+                "$SYS/broker/net/ipv6/prefixes_ignored",
+                "$SYS/broker/iommu/mode",
+                "$SYS/broker/iommu/state",
+                "$SYS/broker/iommu/units",
+                "$SYS/broker/iommu/domains",
+                "$SYS/broker/iommu/pages",
+                "$SYS/broker/iommu/faults",
+                "$SYS/broker/iommu/overflows",
                 "$SYS/broker/messages/dropped/slow_subscriber",
                 "$SYS/broker/messages/dropped/offline",
                 "$SYS/broker/messages/dropped/cross_core",
@@ -1413,6 +1752,13 @@ mod tests {
                 "$SYS/broker/handshakes/slow",
                 "$SYS/broker/handshakes/latency_sum_ms",
                 "$SYS/broker/handshakes/latency_max_ms",
+                "$SYS/broker/connections/per_address/limit",
+                "$SYS/broker/connections/per_address/established",
+                "$SYS/broker/connections/per_address/addresses",
+                "$SYS/broker/connections/per_address/peak",
+                "$SYS/broker/connections/per_address/syn_dropped",
+                "$SYS/broker/connections/per_address/refused",
+                "$SYS/broker/connections/per_address/untracked",
                 "$SYS/broker/cpu/accepted/0",
                 "$SYS/broker/cpu/accepted/1",
                 "$SYS/broker/plaintext/enabled",
@@ -1429,11 +1775,29 @@ mod tests {
         assert_eq!(val("$SYS/broker/entropy/source"), Some("jitter+firmware"));
         assert_eq!(val("$SYS/broker/handshakes/done"), Some("8"));
         assert_eq!(
+            val("$SYS/broker/connections/per_address/limit"),
+            Some("1024")
+        );
+        assert_eq!(
+            val("$SYS/broker/connections/per_address/syn_dropped"),
+            Some("5")
+        );
+        assert_eq!(
             val("$SYS/broker/messages/dropped/slow_subscriber"),
             Some("3")
         );
         assert_eq!(val("$SYS/broker/cpu/accepted/1"), Some("5"));
         assert_eq!(val("$SYS/broker/net/mtu"), Some("1460"));
+        assert_eq!(val("$SYS/broker/net/queues"), Some("1"));
+        assert_eq!(val("$SYS/broker/net/queue/received/0"), Some("7"));
+        assert_eq!(val("$SYS/broker/net/queue/interrupts/0"), Some("2"));
+        assert_eq!(val("$SYS/broker/net/ipv6/mode"), Some("slaac"));
+        assert_eq!(
+            val("$SYS/broker/net/ipv6/address/global"),
+            Some("fec0::5054:ff:fe12:3456")
+        );
+        assert_eq!(val("$SYS/broker/net/ipv6/router"), Some("fe80::2"));
+        assert_eq!(val("$SYS/broker/net/ipv6/fragments"), Some("1"));
         assert_eq!(val("$SYS/broker/messages/qos2/received"), Some("4"));
         assert_eq!(val("$SYS/broker/messages/qos2/duplicates"), Some("1"));
         assert_eq!(
@@ -1474,14 +1838,15 @@ mod tests {
              \"cpu\":{\"cores\":2,\"busy\":[10,20]},\"memory\":{\"total\":1000,\"used\":400},\
              \"disk\":{\"total\":0,\"used\":0},\"clients\":{\"connected\":3,\"total\":5},\
              \"subscriptions\":7,\"retained\":2,\"messages\":{\"received\":100,\"sent\":250},\
-             \"connections_refused\":1,\"tls\":{\"server_cert_days\":90},\"time\":{\"source\":\"sntp\",\"offset_ms\":-12},\"entropy\":{\"source\":\"jitter+firmware\"},\"console_dropped\":0,\"net\":{\"mtu\":1460},\
+             \"connections_refused\":1,\"tls\":{\"server_cert_days\":90},\"time\":{\"source\":\"sntp\",\"offset_ms\":-12},\"entropy\":{\"source\":\"jitter+firmware\"},\"console_dropped\":0,\"net\":{\"mtu\":1460,\"queues\":[{\"received\":7,\"sent\":9,\"forwarded\":0,\"interrupts\":2}],\"ipv6\":{\"mode\":\"slaac\",\"link_local\":\"fe80::5054:ff:fe12:3456\",\"global\":\"fec0::5054:ff:fe12:3456\",\"router\":\"fe80::2\",\"mtu\":1500,\"frames_in\":40,\"dropped\":3,\"fragments\":1,\"ext_headers\":1,\"dad_duplicate\":0,\"prefixes_ignored\":0}},\
              \"dropped\":{\"slow_subscriber\":3,\"offline\":0,\"cross_core\":0,\"qos1_queue_full\":0,\
              \"publish_rate\":0,\"frames_steer\":0,\"frames_worker_tx\":0,\"frames_nic\":0},\
              \"qos2\":{\"received\":4,\"duplicates\":1,\"completed\":2,\"inbound_full\":0},\
              \"backpressure\":{\"mode\":\"single\",\"paused\":4,\"paused_ms\":120,\"timeouts\":1,\"holding\":0},\
              \"handshakes\":{\"started\":9,\"done\":8,\"failed\":0,\"timed_out\":0,\"refused\":0,\
              \"syn_dropped\":0,\"in_flight\":0,\"in_flight_max\":0,\"slow\":0,\"latency_sum_ms\":0,\
-             \"latency_max_ms\":0},\"accepted\":[4,5],\
+             \"latency_max_ms\":0},\"per_address\":{\"limit\":1024,\"established\":3,\"addresses\":2,\"peak\":2,\
+             \"syn_dropped\":5,\"refused\":1,\"untracked\":0},\"accepted\":[4,5],\
              \"mqtt5\":{\"connected\":1,\"messages_expired\":6,\"dropped_too_large\":0,\"sessions_expired\":0,\
              \"sessions_expiring\":0,\"wills_delayed\":0,\"wills_pending\":0,\"retained_expiring\":0,\"topic_alias_bytes\":0,\
              \"shared\":{\"groups\":0,\"members\":0,\"delivered\":0,\"dropped\":0,\"redispatched\":0,\"refused\":0},\
@@ -1489,6 +1854,7 @@ mod tests {
              \"0x83\":0,\"0x87\":0,\"0x8b\":0,\"0x8d\":0,\"0x8e\":2,\"0x8f\":0,\"0x90\":0,\"0x93\":0,\"0x94\":0,\"0x95\":0,\
              \"0x98\":0,\"0x9a\":0,\"other\":1},\"refused\":{\"0x80\":0,\"0x81\":0,\"0x82\":0,\"0x83\":0,\"0x84\":0,\
              \"0x85\":0,\"0x86\":0,\"0x87\":3,\"0x88\":0,\"0x8c\":0,\"0x95\":0,\"0x9a\":0,\"other\":0}},\
+             \"iommu\":{\"mode\":\"off\",\"state\":\"off\",\"units\":0,\"domains\":0,\"pages\":0,\"faults\":0,\"overflows\":0},\
              \"plaintext\":{\"enabled\":false},\"websocket\":{\"enabled\":false}}"
         );
         let mut unknown = info(&[]);
@@ -1539,7 +1905,7 @@ mod tests {
     #[test]
     fn status_is_a_few_short_lines() {
         let lines = status_lines(&info(&[10, 20]), "info", "debug");
-        assert_eq!(lines.len(), 15);
+        assert_eq!(lines.len(), 19);
         assert_eq!(lines[0], "urmqtt 0.1.0 aarch64 up 12 s");
         assert_eq!(lines[1], "cpu 2 core(s), busy % 10/20");
         assert!(lines[3].starts_with("clients 3 connected, 5 sessions"));
@@ -1559,11 +1925,24 @@ mod tests {
         );
         assert_eq!(
             lines[11],
+            "per address limit 1024: 3 conn(s) from 2 addr(s), peak 2; refused 5 SYN / 1 ACK; 0 untracked"
+        );
+        assert_eq!(
+            lines[12],
             "MQTT 5.0: 1 of 3 client(s), 3 DISCONNECT(s) sent, 3 CONNECT(s) refused"
         );
-        assert!(lines[12].starts_with("expiry: sessions 0 expired"));
-        assert!(lines[13].starts_with("shared: 0 group(s), 0 member(s)"));
-        assert!(lines[14].starts_with("log level info (build maximum debug)"));
+        assert!(lines[13].starts_with("expiry: sessions 0 expired"));
+        assert!(lines[14].starts_with("shared: 0 group(s), 0 member(s)"));
+        assert_eq!(lines[15], "ipv6 slaac, mtu 1500, router fe80::2");
+        assert_eq!(
+            lines[16],
+            "ipv6 addresses fe80::5054:ff:fe12:3456 fec0::5054:ff:fe12:3456"
+        );
+        assert_eq!(
+            lines[17],
+            "ipv6 40 frame(s) in, 3 dropped (1 fragment(s), 1 ext. header(s)), 0 duplicate address(es)"
+        );
+        assert!(lines[18].starts_with("log level info (build maximum debug)"));
         assert!(lines.iter().all(|l| l.len() < 120 && !l.contains('\n')));
     }
 

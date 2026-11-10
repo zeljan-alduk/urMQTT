@@ -15,6 +15,8 @@ bench = false
 workspace = true
 
 [dependencies]
+# The account id and password hash grammars (NOW-15): the same code the image's [plaintext] section uses.
+urmqtt-cfg = { path = "../cfg" }
 # Verification only in the kernel; strict (RFC 8032 + no small-order keys).
 ed25519-dalek = { version = "2.2", default-features = false }
 

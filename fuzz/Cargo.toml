@@ -14,14 +14,17 @@ urmqtt-cfg = { path = "../crates/cfg", features = ["alloc"] }
 urmqtt-config-schema = { path = "../crates/config-schema" }
 urmqtt-mqtt = { path = "../crates/mqtt" }
 urmqtt-platform = { path = "../crates/platform" }
+urmqtt-iommu = { path = "../crates/iommu" }
 urmqtt-store = { path = "../crates/store" }
 urmqtt-tcp = { path = "../crates/tcp" }
 urmqtt-net = { path = "../crates/net" }
-urmqtt-tls = { path = "../crates/tls" }
+# The client feature: the outbound TLS client (tls_client, NEXT-7).
+urmqtt-tls = { path = "../crates/tls", features = ["client"] }
 urmqtt-broker = { path = "../crates/broker" }
 urmqtt-control = { path = "../crates/control" }
 urmqtt-plain = { path = "../crates/plain" }
 urmqtt-ws = { path = "../crates/ws" }
+urmqtt-http = { path = "../crates/http" }
 urmqtt-arch-aarch64 = { path = "../crates/arch-aarch64" }
 urmqtt-arch-x86_64 = { path = "../crates/arch-x86_64" }
 urmqtt-virtio = { path = "../crates/virtio", features = ["fake"] }
@@ -47,8 +50,36 @@ doc = false
 bench = false
 
 [[bin]]
+name = "http_request"
+path = "fuzz_targets/http_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metrics_render"
+path = "fuzz_targets/metrics_render.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cfg_ext"
+path = "fuzz_targets/cfg_ext.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "config_parse"
 path = "fuzz_targets/config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iommu_tables"
+path = "fuzz_targets/iommu_tables.rs"
 test = false
 doc = false
 bench = false
@@ -138,6 +169,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "virtio_net_mq"
+path = "fuzz_targets/virtio_net_mq.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "disk_crypt"
 path = "fuzz_targets/disk_crypt.rs"
 test = false
@@ -159,8 +197,29 @@ doc = false
 bench = false
 
 [[bin]]
+name = "tcp_active"
+path = "fuzz_targets/tcp_active.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_client"
+path = "fuzz_targets/tls_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "net_frame"
 path = "fuzz_targets/net_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipv6_nd"
+path = "fuzz_targets/ipv6_nd.rs"
 test = false
 doc = false
 bench = false
@@ -182,6 +241,13 @@ bench = false
 [[bin]]
 name = "broker_input"
 path = "fuzz_targets/broker_input.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "source_limit"
+path = "fuzz_targets/source_limit.rs"
 test = false
 doc = false
 bench = false
@@ -210,6 +276,20 @@ bench = false
 [[bin]]
 name = "control_message"
 path = "fuzz_targets/control_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_account"
+path = "fuzz_targets/control_account.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "boot_slots"
+path = "fuzz_targets/boot_slots.rs"
 test = false
 doc = false
 bench = false
@@ -272,6 +352,20 @@ bench = false
 [[bin]]
 name = "ws_frames"
 path = "fuzz_targets/ws_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seal_pins"
+path = "fuzz_targets/seal_pins.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "disk_keyslot"
+path = "fuzz_targets/disk_keyslot.rs"
 test = false
 doc = false
 bench = false

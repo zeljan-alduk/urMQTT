@@ -183,7 +183,7 @@ impl MqttService {
             Refuse(u8, bool),
             Garbage,
             Accept {
-                identity: &'static str,
+                identity: String,
                 key: String,
                 no_id: bool,
             },
@@ -195,8 +195,8 @@ impl MqttService {
             crate::mqtt5::Peek::Connect(p) => {
                 match self.ws.as_mut().map(|w| w.decide(c, &p, now_ms)) {
                     Some(Decision::Accept(identity)) => Next::Accept {
+                        key: urmqtt_broker::web_session_key(&identity, p.client_id),
                         identity,
-                        key: urmqtt_broker::web_session_key(identity, p.client_id),
                         no_id: p.client_id.is_empty(),
                     },
                     Some(Decision::Refuse(code)) => Next::Refuse(code, p.v5),
@@ -236,7 +236,7 @@ impl MqttService {
                     .get_mut(&c)
                     .map(|k| k.early.take())
                     .unwrap_or_default();
-                if self.attach_plain(c, home, identity, true, link, now_ms) {
+                if self.attach_plain(c, home, &identity, true, link, now_ms) {
                     self.leave_flight(c, Leave::Done, now_ms);
                     if let Some(w) = self.ws.as_mut() {
                         w.opened(c);

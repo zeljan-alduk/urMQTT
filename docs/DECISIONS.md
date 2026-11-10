@@ -3583,3 +3583,1981 @@ results of the runs are in docs/MQTT5-CONFORMANCE.md and in the branch report.
 (a) No Will at `reboot` (point 17). (b) Shared subscriptions for 3.1.1 clients (point 5). (c) No member online:
 QoS 1/2 queued for an offline persistent member rather than dropped (point 3). (d) `limits.max_shared_groups` per
 shard rather than per broker (point 6). (e) Wills are not persisted (point 15).
+
+## ADR-280 — A limit on established TLS connections per source address (NOW-14)
+
+- **Status:** Accepted. Implements ROADMAP NOW-14. Configuration format 14; no store schema change. ADR-281 to
+  284 stay free.
+- **Context.** After ADR-080 only the handshakes *in flight* were limited per source address
+  (`limits.max_handshakes_in_flight_per_ip`, per data core): a client that finished its handshakes could hold as
+  many established TLS connections as the heap allowed (TODO.md "Known limits", AUDIT.md §6b). The plaintext and
+  WebSocket listeners already had `max_connections_per_ip` of their own (ADR-230, ADR-272); the TLS port had none.
+
+### What was built
+
+1. **`limits.max_connections_per_ip`**, format 14 (tag 270), 0 to 1 000 000, default **1024**, 0 = no limit.
+   Counted for every TLS connection, MQTT port and WebSocket port together (a WebSocket connection is a TLS
+   connection first); not for the plaintext port (its own limit) or the development port. Safe by default: the
+   default applies to every existing configuration, including those written before format 14, because a key at
+   its default writes no record (an untouched configuration keeps its lowest format and a v0.5.0 kernel still
+   boots it). **Upgrade effect:** one source address can now hold at most 1024 established TLS connections where
+   before it could hold any number; 1024 is far above any single device and above most NATs. Below it nothing
+   changes. A site with more than 1024 devices behind one address (a carrier NAT, QEMU's user network in a test)
+   sets a larger value or 0 (the benchmark template `deploy/bench/config.toml` sets 0, and so does the dev
+   command-line word `limits=bench`). **Downgrade:** a configuration that sets the key (any value but 1024)
+   carries format 14 and a v0.5.0 or older kernel refuses it at boot ("needs configuration format 14", the same
+   check as for every newer key); one that does not set it boots on any kernel.
+2. **One table for all cores** (`urmqtt_net::source_limit::SourceTable`, host-tested; `kernel/src/conn_limit.rs`
+   holds it behind a spin lock, built once at boot). *Decided:* the limit is global, not per core. A client's
+   connections spread over the cores by the hash of the 4-tuple (ADR-032), so a per-core limit would be
+   `cores` times the configured one. The cost is one short lock hold per SYN, per accept and per close of a TLS
+   connection, which is what the plaintext table (ADR-230) already costs; the handshake itself costs
+   milliseconds. A per-core counter would not be cheaper by more than that. *Per-core accounting is kept where it
+   is useful:* each core counts its own refusals with the admission counters (`Reason::PerIpEstablished`,
+   statsd `refused.per_ip_established` and `syn_dropped.per_ip_established`, the `handshakes: core N:` log
+   line, which also says how many counted connections the core holds).
+3. **The key** is `SourceKey`, 128 bits: an IPv4 address is `::ffff:a.b.c.d`; an IPv6 address (NEXT-1) is its
+   **/64 prefix** in the high half with a zero low half (one subscriber holds a whole /64, so counting full
+   addresses would be no limit). The two spaces cannot meet, and a test pins that. The table is a fixed set of
+   eight-slot buckets hashed under a per-boot random key (the plaintext table's design, ADR-230), 32 768 slots
+   (768 KiB). A slot is entered only at the final ACK (a flood of spoofed SYNs leaves no trace) and freed at 0.
+4. **Where it is checked, cheapest first.**
+   - *SYN* (`MqttService::syn_ok`): a read-only lookup, before the heap check, the token bucket and everything
+     else. Over the limit: no SYN-ACK, no state, the client's TCP retries after its backoff. Counted as
+     `syn_dropped` with the new reason.
+   - *Final ACK* (`admit`): counted **before** admission takes a handshake token, so a refusal burns no token;
+     if admission then refuses (memory, rate, in flight), the place is given back at once. Over the limit
+     (a race with another core's accept): RST, counted as `refused`.
+   - *Close*: `drop_conn` is the one function every close path ends in (peer FIN, reset, TCP timeout, handshake
+     timeout, watchdog abort, and the early failures inside `on_accept`) and it gives the place back exactly
+     once (a per-core map from connection id to address; a connection the table did not count has no entry).
+5. **How it composes with the in-flight limit.** They are independent bounds on one address, checked in this
+   order: established count (SYN), then per-core in-flight and per-address in-flight and the rate (ADR-080).
+   A connection counts as established from its final ACK to its close, so it is counted *during* its handshake
+   too: the in-flight limit (default 32 per core, 96 on three workers) bounds how fast an address can add
+   connections and the established limit bounds the total. With the defaults the in-flight limit binds first for
+   a burst and the established limit for a long-running holder. They have separate counters and separate
+   reasons (`per_ip`, `per_ip_established`).
+6. **A full bucket fails open** (*decided*). If all eight slots of an address's bucket hold other live addresses
+   the new connection is let through uncounted and `per_address/untracked` counts it; its close does nothing.
+   Refusing it would turn a hash collision (or more than 32 768 simultaneous addresses) into an outage for a
+   legitimate device. It does not weaken the limit for the address it exists for: an address that already has a
+   slot keeps it for as long as it holds a connection, and an attacker cannot aim addresses at a bucket without
+   the boot key.
+7. **Counters.** `$SYS/broker/connections/per_address/{limit,established,addresses,peak,syn_dropped,refused,
+   untracked}`, the same in the JSON info reply (`per_address`), one `per address limit ...` line in the
+   console's `status`, statsd per reason, the 5 s log line, and a boot line (`limits: at most N established
+   connection(s) per source address`). Refusals are logged at powers of two like the other admission refusals.
+8. **Not done, on purpose.** No per-identity limit (a device's identity is known only after the handshake; the
+   session takeover already bounds it to one connection). No per-network (/24) grouping for IPv4. No eviction of an
+   old connection to make room. No allow-list exempting an address (raise the limit, or 0). The plaintext port
+   keeps its own limit and is not counted twice.
+
+### Verification
+
+Host tests in `crates/net/src/source_limit.rs` (the bound and one close freeing one place, thousands of
+connections from one address, a model over 20 000 random operations, the full bucket, the zero key, the IPv6
+prefix key never meeting an IPv4 key) and `admission.rs` (the new counters); `config-schema` and `cfg` tests (format
+14 per value, 0 included, range and agreement of the TOML path with the blob check); the CLI tool and builder
+tests; fuzz target `source_limit` (the table against a model under arbitrary operations, seeds, 2 minutes: 5.4
+million runs, clean); `tools/attack` `established-flood` (6 of 10 connected, a close frees exactly one place,
+closing all frees all) and the smoke group `conn-limit` (aarch64 under HVF and x86_64 under TCG, a limit of 6 on
+four vCPUs, the `$SYS` counters read by the operator); the `storm` scenario runs with the limit off (3000 devices
+from one address).
+## ADR-285 — Password accounts at run time: two control commands, a limit, hashes made by the operator (NOW-15, configuration format 15)
+
+- **Status:** Accepted. Implements ROADMAP NOW-15 (closes the "not done" of PROGRESS P1, SECURITY.md's residual risk
+  and ADR-230's "later work"). ADR-286 to ADR-289 belong to it. Answers D-16's "revisit with run-time accounts": the
+  hash stays PBKDF2 (ADR-267), see point 8.
+- **Context.** A `[plaintext]` or `[websocket]` password account lived only in the image: adding a sensor, rotating a
+  password or removing a leaver meant a new image and a reboot, while certificate identities already had the signed
+  control channel (H1). The channel's checks (mutual TLS identity in `control.service_ids`, an offline Ed25519
+  signature, a persisted sequence number, a validity window, no state without a disk) are exactly what an account
+  change needs, so the accounts ride it instead of a second path.
+
+1. **Two commands on the existing channel.** `set-account` (5) adds an account or replaces its hash and class,
+   `remove-account` (6) removes one. The message is the H1 message (`URMQCTL1`, same header, same signature over the
+   same domain, same `seq`, window and freshness rules; `crates/control`). A kernel that does not know the commands
+   rejects the message as malformed. Nothing else changes: no existing command, byte or counter.
+2. **What an item is.** `set-account`: `class (1 byte) | id length (1) | id | hash`; `remove-account`: the id. At
+   most **8 items** per message (8 x 216 bytes), distinct ids. The id has the grammar of the `[plaintext]` section's
+   identities (`A-Z a-z 0-9 - _ . :`, 1 to 64, `urmqtt_cfg::plain::check_identity`: the same function the image
+   check uses, so an id the image would refuse is refused here). The hash is the stored text of `urmqtt_cfg::passwd`
+   (`pbkdf2-sha256$iterations$salt$key`) and is parsed by the decoder, which also bounds its **iterations to the
+   default, 100 000** (`MAX_ACCOUNT_ITERATIONS`; the image's own accounts may still use up to 200 000).
+3. **The broker never sees a password.** `urmqtt-control set-account --password-stdin` reads one line, draws a 16-byte
+   salt from the operating system, hashes it on the operator's machine (100 000 iterations unless `--iterations`
+   says fewer) and signs the hash. `--hash` takes a hash made by `urmqtt-config hash-password` or the builder page.
+   Neither the tool, the message, the store, the log nor a counter holds a password; the tool prints the id and the
+   class, never the hash. The password is in the MQTT CONNECT of the client as before (plaintext or inside TLS).
+4. **ACL class per account** (*decided*). `full` (0), `read-only` (1: subscribes under the listener's `acl_subscribe`,
+   publishes nothing, and its CONNECT with a Will is refused), `write-only` (2: publishes under `acl_publish`,
+   subscribes to nothing; SUBACK 0x80 / 0x87). A class only **narrows**: the listener's patterns still decide what
+   it may touch, and the reserved and system namespaces stay closed to all. A richer per-account ACL (own patterns)
+   was not built: it would put ACL text on the control wire and in the store, and the three classes cover the
+   common fleet cases (sensor, dashboard, gateway); the patterns stay the image's, reviewed with the image.
+5. **Where it applies** (*decided*). One table of accounts for both password listeners: a run-time account logs in on
+   the plaintext listener when `plaintext.auth = "password"` and on the WebSocket listener when `websocket.auth =
+   "password"`, as an image account of the same listener would; a different namespace per listener was not worth the
+   second message field. The sessions stay apart as before (`$plain/<id>/...`, `$ws/<id>/...`). `set-account` is
+   refused (`no_password_listener`) when no listener of the image takes passwords, since the account could never
+   log in.
+6. **The image wins** (*decided*). An id the image lists as an account of either listener, or reserves as a service,
+   operator or control identity (`acl.service_ids`, `acl.operator_ids`, `control.service_ids`), cannot be set:
+   `account_shadows_image`. So a run-time message can neither change a password the image fixed nor give a service
+   name a password; `remove-account` of such an id removes nothing (there is no run-time row). The allowlist (`registry.mode =
+   "allowlist"`) applies to these identities as to the image's.
+7. **A limit, off by default: `limits.max_runtime_accounts` (configuration format 15, tag 275; 270 is NOW-14's).** 0 to 1 024, default
+   **0 = the control channel refuses account commands** (`accounts_disabled`). So an existing image changes nothing
+   and a new key is a deliberate act of the image's owner; the operator of the channel cannot turn the feature on for
+   an image that did not ask. A change that would leave more accounts than the limit is rolled back as a whole
+   (`account_limit`; the sequence number is not used up). The key is in the builder page's `[limits]`, shown where an
+   account could log in (a password listener and the TLS listener), with its text in the 15 languages.
+8. **Hash cost** (*decided*). The login admission rate and the watchdog's handshake budget are sized at boot from the
+   dearest account's cost (ADR-230, ADR-267). With run-time accounts on, that cost is taken as at least the default
+   (100 000 iterations; `plain::measure`, `websocket::measure`), and the decoy that an unknown user is hashed
+   against costs as much as the dearest account of either kind (`Authenticator::set_runtime`), so a login for an
+   unknown user still takes as long as one for a known user. Argon2id stays out (D-16): its memory per data core and
+   a vetted `no_std` crate would grow the TCB for passwords that plaintext MQTT sends in the clear anyway.
+9. **Refusals** (counted by reason like the existing ones, `urmqtt.control.rejected.<reason>`, logged at powers of two,
+   no content): `accounts_disabled`, `account_limit`, `no_password_listener`, `account_shadows_image`, and for bad
+   input (an id with a bad character, an empty or over-long id, an unknown class, a hash that does not parse, one with
+   more than 100 000 iterations, a trailing byte, a duplicate id, more than 8 items) `malformed`.
+
+## ADR-286 — Store schema 6: the `accounts` table, one-way and transactional (NOW-15)
+
+- **Status:** Accepted. Store schema number 6 (reserved for NOW-15).
+- **Context.** Accounts must survive a reboot and be applied together with the sequence number that authorised them,
+  like a revocation (H1).
+
+1. **The table.** Migration 6 (`crates/store/src/schema.rs`) is `CREATE TABLE accounts (id TEXT PRIMARY KEY, hash TEXT
+   NOT NULL CHECK (length(hash) BETWEEN 1 AND 150), class INTEGER NOT NULL CHECK (class BETWEEN 0 AND 2), added_at
+   INTEGER NOT NULL, seq INTEGER NOT NULL) STRICT, WITHOUT ROWID`. A table is added; no existing row or table changes.
+   150 is `urmqtt_cfg::passwd::MAX_ENCODED`. `added_at` is the wall clock of the first write, `seq` the message that
+   wrote the row last. **Only the hash is stored**; a password never reaches the store, and the hash is as public
+   as the image's own (SECURITY.md).
+2. **Transactional.** Each migration runs in its own transaction (`BEGIN`, the statements, `PRAGMA user_version`,
+   `COMMIT`; ROLLBACK on error), as 3 to 5 do. A power cut at any write of the 5 to 6 step leaves schema 5 or 6 with
+   every row (`golden_schema6.rs`, a cut at every write, torn or not, cache kept or dropped). **One way:** a kernel of
+   v0.5.0 or older refuses a schema 6 database (`schema version 6 is newer than this build`); there is no downgrade
+   path except the backup snapshots taken before the first boot of the new kernel (`urmqtt-disk`, DISK-FORMAT.md §12),
+   which a newer kernel also refuses to restore into an older one. Like 3 to 5 it happens at the first boot of the
+   new kernel, whether or not run-time accounts are used. Also in `urmqtt-disk` and in a backup restore.
+3. **Applied with the message.** `Store::account_set`, `account_del`, `accounts`, `account_count`; a control message
+   sets or removes its rows, checks the count against the limit, and sets the sequence number in one transaction.
+   Rows are read at boot (`db::load`) and handed to the control state with the revocations and the allowlist.
+4. **Goldens.** `schema5-shared` and `v2-data-schema5` are frozen (the input of the 5 to 6 tests); `schema6-accounts`
+   and `v2-data-schema6` are what the code writes now (`golden_schema6_bytes.rs`, `golden_v2.rs`). Tests: schema 5
+   migrates keeping every row with an empty table, the CHECK constraints hold, a rolled-back transaction leaves nothing, the
+   frozen schema 6 image reads back, the 2 to 6, 3 to 6 and 4 to 6 paths see every intermediate version.
+5. **Dropped at disk loss.** An account is state of the data disk like a revocation. A new disk has none, and the image's
+   own accounts are still there; the operator re-sends the messages (the tool keeps nothing; the runbook says so).
+
+## ADR-287 — Applying accounts: one table, every core, live logins cut (NOW-15)
+
+- **Status:** Accepted.
+- **Context.** Each data core has its own plaintext and WebSocket `Authenticator`, built from the static configuration
+  with `'static` slices; an account that changes at run time must reach all of them and must stop working for a
+  connection that already logged in.
+
+1. **One published table.** After the commit the DB core builds the table (`Vec<Account>`: id, parsed hash, class;
+   sorted by id) and publishes it in `crates/kernel/src/control.rs` with the revocations and the allowlist and bumps
+   the same **epoch**; every data core notices the epoch in its poll, hands the new `Arc` to its authenticators
+   (`Authenticator::set_runtime`, a binary search; the image's accounts are tried first) and reloads nothing else.
+   New logins see the new table at once; a login in progress on another core uses the table it started with.
+2. **Live logins are cut** (*decided*). A core compares its previous table with the new one and, for every id that
+   was removed or whose hash or class changed, closes the live plaintext and WebSocket sessions of that identity
+   homed on it (`Broker::disconnect_unless`, 5.0 DISCONNECT 0x98 like a revocation, the transport's 1 s grace),
+   counted in `urmqtt.control.live_closed`. A class change cuts as well: a subscription held by a client that is now
+   write-only must not live on. Cutting is the only way to make "remove" and "change the password" mean what an
+   operator expects; the cost is one reconnect.
+3. **The class is asked at every operation** (`Broker::set_login_class`, a function pointer into the kernel's table: a
+   relaxed atomic count short-circuits it while there are no accounts): publish, Will and SUBSCRIBE of a plaintext
+   or WebSocket session. It cannot widen: it is an extra `&&` after the listener's own pattern check. Certificate
+   identities never ask (only the two login roles do); a certificate named like an account is unaffected.
+4. **Identity strings.** The decision of a login is now an owned `String` (`plain::Decision::Accept`,
+   `websocket::Decision::Accept`), because a run-time account's id lives in the table, not in the image.
+5. **No new `unsafe`, no new dependency.** `urmqtt-control` gains a path dependency on `urmqtt-cfg` (the grammars of
+   the image check, already in the TCB); `urmqtt-control-tool` gains `urmqtt-cfg` with `std` for the hash.
+
+## ADR-288 — Audit, counters, operator tooling for run-time accounts (NOW-15)
+
+- **Status:** Accepted.
+
+1. **Audit lines** (log level info, always on, no secrets): `control: seq N from <publisher>: password account <id>
+   set (class <class>, K run-time account(s))`, `... removed (K run-time account(s) left)`, then the existing
+   `control: seq N from <publisher>: set-account of M item(s) applied`; a refusal is the existing `control: message
+   from <publisher> rejected: <reason> (n so far)`. At boot: `control: run-time password accounts on: N stored, at
+   most L`. The id is not a secret (it is the MQTT user name); no line holds a hash or a password, and the smoke
+   scenario scans the serial logs for both.
+2. **Counters.** The four new reasons are entries of `Reject::ALL`, so they appear in `$SYS` and statsd as
+   `urmqtt.control.rejected.<reason>` with the others; `urmqtt.control.applied` counts the messages.
+3. **`urmqtt-control set-account | remove-account`.** `set-account --id ID (--password-stdin | --hash H) [--class
+   full|read-only|write-only] [--iterations N]`, one account per message; `remove-account --id ID [--id ...]`.
+   Signing and publishing options are the existing ones (`--key` or `--sign-cmd`, `--env`, `--seq`, `--valid-for`,
+   `--out`, `--no-publish`). `show` prints ids and classes only. `urmqtt-config` (the image tool) is not involved:
+   an account is not configuration.
+4. **No query.** There is no command that lists accounts or hashes over the network (ROADMAP "out of scope": no general
+   query interface). The count is in the boot line and the audit lines; the operator keeps its own list.
+
+## ADR-289 — What NOW-15 does not do, and what upgrading it means (NOW-15)
+
+- **Status:** Accepted.
+
+1. **Upgrade effect.** Nothing, until the image asks. Format 15 is written only when `limits.max_runtime_accounts` is
+   not 0; an existing configuration keeps its format, and the kernel never accepts an account command without it. The
+   database is migrated to schema 6 at the first boot of the new kernel (one way, ADR-286), which is the one effect of
+   the upgrade itself.
+2. **Downgrade effect.** A v0.5.x kernel refuses a schema 6 database. Take a backup snapshot before the first boot of
+   the new kernel, or keep the old disk. A format 15 image does not boot on a v0.5.x kernel template (the
+   builder and the tool refuse the pairing by the version, as for formats 8 to 13).
+3. **Not done** (each is a later decision, not a gap in this one): per-account ACL patterns (point 4 of ADR-285);
+   listing accounts over the network (ADR-288 point 4); a TLS-client-certificate-less way to authorise the
+   operator (the channel stays mutual TLS plus signature); per-account rate limits (the listener's limits apply to
+   all); password expiry and age; account names for the TLS listener (certificates are its identities); an
+   Argon2id hash (D-16); a bulk import (8 per message, one message per account in the tool); copying
+   accounts between disks or into the image (`urmqtt-config` has `hash-password` for the image's own accounts).
+4. **Residual risks, in SECURITY.md.** The control signing key and a service identity together can add an account and
+   so get a login with the plaintext role's rights (ACL of the listener, no service, operator or control rights); the
+   hashes on the data disk allow offline guessing like the image's (long random passwords); a restored old disk brings
+   back old accounts and the old sequence number (as for revocations); accounts are per disk, not per image.
+5. **Concurrency.** A control message is handled whole on the DB core in its own transaction; two messages never
+   interleave. A data core that has not yet seen an epoch authenticates against the previous table for at most one
+   poll (microseconds to a few milliseconds), after which the live login of a removed account is cut.
+## ADR-290 — A Prometheus endpoint in the kernel: plain HTTP on its own port, an allow-list, default off (NEXT-9, D-7)
+
+- **Status:** Accepted (2026-11-09, v0.6.0). Answers D-7 ("an external exporter, or an HTTP port on the broker?") for
+  the case the owner delegated to the implementation: **an HTTP port on the broker**, off by default. Configuration
+  format 16 (14 and 15 belong to other items of the release). ADR-291 to ADR-294 are this item's too.
+- **Context.** The kernel reports its numbers over `$SYS/broker/...` (retained, every 10 s), the info query, statsd and
+  syslog over UDP. A production fleet is monitored with Prometheus: a server that scrapes `GET /metrics` over HTTP,
+  every few seconds, from a list of targets. The two ways in are an exporter outside the image that subscribes to
+  `$SYS` over MQTT (the image stays unchanged; the exporter needs an operator identity and one more process to run
+  and patch) and an HTTP endpoint in the kernel (no extra process, and the numbers are fresh at the moment of the
+  scrape; but README says "TCP 8883 only", and an HTTP request parser joins the trusted computing base). The owner was
+  not available to choose, and the decision has to be safe to make for him: so the endpoint is built, **off by
+  default**, and an operator who prefers an exporter outside loses nothing (the `$SYS` tree is unchanged).
+- **Decision.**
+  1. **One listener, `metrics.port` (default 9100), plain HTTP/1.1, `GET /metrics` only**, switched on with
+     `metrics.enabled` (default false). Everything else of HTTP is refused (ADR-292). No TLS, no login.
+  2. **Access control is an allow-list of networks applied to the SYN** (`metrics.allow_from`, at most 16 entries, at
+     least one when enabled, **no "anywhere" and no `0.0.0.0/0`**, the plaintext listener's machinery and wording): an
+     address outside it gets no answer and the kernel keeps no state, so the port is invisible to a scanner outside the
+     list and cannot be used to fill tables. The decision between this and mutual TLS with an operator-class identity
+     (the other option the ROADMAP entry named) is *decided*: the allow-list. Reasons: (a) Prometheus, the
+     consumer, speaks HTTP and an optional `tls_config` with client certificates; every deployment that wants TLS
+     there puts a TLS-terminating proxy or a service mesh in front of its targets already, and **the numbers are not
+     secret in the sense of the broker's data** (the next paragraph); (b) mutual TLS on this port would run a full
+     TLS handshake (about 2 ms of CPU on a core, ADR-080) per scrape, for a request that costs microseconds, and put
+     the metrics port into the TLS admission's budget; (c) it needs a new certificate role ("metrics scraper") through
+     the image, the registry and the revocation list, a change of the trust model for a read-only number sheet.
+     **mTLS on the metrics port is left out (listed in the notes file) and stays open**: it can be added later as a
+     second mode (`metrics.tls = true`) without changing anything decided here.
+  3. **The threat model.** *What the endpoint reveals:* the broker's load and its counters (clients connected, messages
+     per second, refusals by reason, memory, uptime, the version, the architecture, the time source). It reveals **no
+     payload, topic, client id, user name, certificate, serial or address of any client**: no label of any metric is
+     chosen by a client (ADR-291), so nothing a client does adds a series and nothing a client sends appears in the text.
+     *What an attacker with access learns:* the broker's version (for a known-vulnerability search), how busy it is
+     (when to attack), whether an attack works (the refusal counters answer it), the number of cores. These are the
+     same numbers `$SYS` gives an operator; the allow-list is what keeps them from the Internet. *What the attacker
+     can do to the endpoint:* open connections (bounded per core, per address and by rate, ADR-293), send a malformed or
+     slow request (a fixed refusal or a deadline, ADR-292/293), request the text often (a token per connection, 20 a
+     second per core). *What it cannot do:* change anything (read-only: no state is written), reach the broker's
+     data, reach `$SYS` or the console, or cost more than one bounded buffer per connection. *What is not defended:*
+     an attacker **on the allowed network** who can forge a source address can read the text (the same limit as
+     plaintext `auth = "ip"`, said in the boot log and SECURITY.md), and a passive attacker on the path can read it
+     (plain HTTP). **Never put a public network in `allow_from`**: the boot log warns when an entry reaches a public
+     address, and `urmqtt-config pack`, `verify` and `show` say that an unencrypted endpoint is on.
+  4. **The numbers are the `$SYS` numbers**, from the same `Info` the retained topics and the info query read
+     (`urmqtt_broker::metrics::render`, ADR-291), so there is no second collection that could disagree with them,
+     and a new `$SYS` counter cannot be added without a decision about its metric (a test walks every topic).
+  5. **A listener of its own in the MQTT service**, beside the plaintext and WebSocket ones (`crates/kernel/src/metrics.rs`,
+     hooks in `mqtt_service.rs`), steered to the worker cores like the other ports. It has no session, no broker
+     connection, no TLS state and no handshake slot: a connection is a `Conn` with a request buffer and a deadline.
+  6. **Format 16 and what it means for upgrades.** `[metrics]` is six keys (tags 300 to 305: `enabled`, `port`,
+     `allow_from`, `max_connections`, `max_connections_per_ip`, `request_timeout_s`), each since format 16, so an
+     image that does not touch the section is the blob it always was (format 2 or whatever it needed), and **an
+     existing configuration boots unchanged on the new kernel with no new listening port**. An image with the section
+     set needs a kernel that knows it: an older kernel refuses the blob by its version, which is the point (it would
+     otherwise ignore the allow-list the operator asked for; `urmqtt-config` and the builder page refuse to put such a
+     configuration into an older template, naming the format). **Downgrading** a kernel under a format-16 blob is
+     refused at boot (the blob's version), and the older kernel's own configuration must be used. The kernel has no
+     store schema change.
+  7. **Reserved versions.** `FORMAT_VERSION` is 16 in this tree and 14 and 15 are refused as unknown
+     (`blob::RESERVED_VERSIONS`), because other items of the release allocate them; the release merge removes each
+     entry as its item lands (notes file).
+- **Consequences.** README's "TCP 8883 only" gains a third optional port (off by default, like the plaintext and
+  WebSocket ones). The release kernels of this tree are 3 971 144 B (aarch64) and 4 149 824 B (x86_64) (`make build ENV=prod`). The trusted computing base grows by `urmqtt-http` (about 420
+  lines, no unsafe), `broker/src/metrics.rs` (about 400 lines of code and 500 of tests, no unsafe) and
+  `kernel/src/metrics.rs` (about 340 lines): AUDIT row, fuzz targets `http_request` and `metrics_render`, the smoke group `metrics`.
+
+## ADR-291 — Metric names, types, units and labels are an interface (NEXT-9)
+
+- **Status:** Accepted (2026-11-09). Part of ADR-290.
+- **Context.** A dashboard and an alert rule hold metric names for years. The `$SYS` topic names are a tree meant to
+  be read by people (`handshakes/in_flight_max`); Prometheus wants flat snake-case names with a unit, `_total` on
+  counters, labels for dimensions, and **a series count that does not depend on what clients do**.
+- **Decision.**
+  1. **One table, `urmqtt_broker::metrics::RULES`, maps every `$SYS/broker/...` topic to a metric**; the text is made
+     from the topics (`sys::topics`) so a value cannot differ from `$SYS`. Two tests keep it honest: every topic the
+     broker can publish (with both optional listeners on and 64 cores) has exactly one rule or a line in `NOT_EXPOSED`
+     with its reason, and every rule matches a topic. Two topics are not exposed: `plaintext/allow_from` (the
+     operator's network plan, text) and `websocket/path` (text without a number).
+  2. **Names.** `urmqtt_` prefix; `[a-z0-9_]`; **base units in the name** (`_seconds`, `_bytes`, `_ratio`; a test
+     refuses `ms`, `days`, `percent`, `kb`, `mb`, `us` as a word of any name): milliseconds become seconds
+     (`urmqtt_handshakes_latency_seconds_total`, `urmqtt_backpressure_paused_seconds_total`,
+     `urmqtt_time_offset_seconds`, decimal with three places, no floating point in the kernel), percent becomes a
+     ratio with two places (`urmqtt_cpu_busy_ratio`), the certificate's days become seconds (whole days times 86 400;
+     `urmqtt_tls_server_certificate_expiry_seconds`, the alert is `< 14 * 86400`).
+  3. **Counters and gauges are decided per topic and checked.** A *counter* is a number that only grows while the
+     machine is up (it restarts from 0 at boot, which Prometheus reads as a counter reset); its name ends in `_total`.
+     A *gauge* goes both ways and never ends in `_total` (a test checks both). Notable cases: messages received, sent,
+     dropped, handshakes started, done, refused, `handshakes/latency_sum_ms` (a counter: the sum, with
+     `handshakes/done` as the count, gives the mean over any window), `handshakes/in_flight_max` and
+     `latency_max_ms` (gauges: a maximum over the last 5 s window, not a counter), `cpu/accepted/N` (a counter per
+     core), `clients/connected` and the retained, subscription and session counts (gauges), `uptime` (a gauge in
+     seconds).
+  4. **Labels are bounded and come from the kernel.** The only label names are `core`, `reason`, `code`, `listener`,
+     `result`, `direction`, `side`, `version`, `arch`, `source`, `mode`, `auth`, and a test refuses any other. Their
+     values are: a core number (at most 64), a reason from a closed list (`slow_subscriber`, `offline`, ..., `steer`,
+     `nic`), a reason code of MQTT 5.0 (the codes the broker sends, plus `other`), a listener name (`plaintext`,
+     `websocket`), a protocol version, a close code. **No client id, user name, topic, address, certificate or any
+     other text a client chose is ever a label value**; the series set depends only on the core count and the
+     configuration (a test changes every counter and checks that the series are the same).
+  4a. **Text values are `_info` gauges**: the sample is 1 and the text is the value of a label
+     (`urmqtt_version_info{version="0.6.0"}`, `urmqtt_arch_info`, `urmqtt_time_source_info`, `urmqtt_entropy_source_info`,
+     `urmqtt_backpressure_info`, `urmqtt_listener_auth_info{listener,auth}`). Values are escaped (`\`, `"`, newline).
+  5. **Unknown is absent, not zero.** `$SYS` says `unknown` for the certificate's days (no wall clock) and the SNTP
+     offset (none measured); the metric is left out then, so an alert on `< 14 days` does not fire at boot and
+     `absent()` says what it says.
+  6. **Per-core numbers** are `urmqtt_cpu_busy_ratio{core}` (gauge, the last window) and
+     `urmqtt_core_connections_accepted_total{core}`; `urmqtt_cpu_cores` says how many. There are no per-client
+     numbers and none will be added: that is what the logs and the telemetry store are for.
+  7. **The endpoint's own metrics** (`urmqtt_metrics_*`: connections, accepted, refused by reason, requests by result,
+     timeouts) are appended; they are not `$SYS` topics because the listener is a measurement of the exporter, not of
+     the broker.
+  8. **The text.** Prometheus text format 0.0.4 by default (`text/plain; version=0.0.4; charset=utf-8`), one
+     `# HELP` and `# TYPE` per family, the samples under them, nothing else. **OpenMetrics 1.0.0 text** when `Accept`
+     prefers it by quality value (`application/openmetrics-text` with a quality above every range that also takes
+     the classic text: `text/plain`, `text/*`, `*/*`): counter families are named without `_total` in `# TYPE`, the samples keep it, and
+     `# EOF` ends the body. It costs about 20 lines, so it is in. Prometheus 2.x and 3.x both negotiate it by their
+     default `Accept` header (a test uses both). The size is about 13 KiB with four cores and bounded (a test: under
+     48 KiB for 64 cores).
+  9. **Stability.** A name, a type, a unit or a label set is changed only with a CHANGELOG entry; a new `$SYS` topic
+     gets a new metric (the first test fails until it does). The names are documented in OPERATE.md.
+
+## ADR-292 — The HTTP request reader: one bounded request, fixed answers, one answer per connection (NEXT-9)
+
+- **Status:** Accepted (2026-11-09). Part of ADR-290. Grows the trusted computing base: AUDIT row, fuzz target.
+- **Context.** The listener has to read an HTTP request from a network host and decide in a bounded way what to do. As
+  for ADR-272's upgrade parser, the question is how little of HTTP to accept.
+- **Decision.** A new `no_std` crate, **`urmqtt-http`**: `forbid(unsafe_code)`, no allocation, clippy's `unwrap`,
+  `expect`, `indexing` and `panic` denials, host-tested, fuzzed, no dependency.
+  1. **Bounds before any work.** The request (line and headers, to the empty line) is at most **2048 bytes and 24
+     header lines**; `scan` looks for the end of headers in the first 2048 bytes and says wait, complete or too large
+     (431). The kernel buffers at most what `scan` allows (one received segment more) and never starts parsing before
+     the empty line. The request target is at most 128 bytes.
+  2. **What is accepted.** `GET` and `HEAD` (HEAD gets the head of the answer, with the length, without the body;
+     everything else is 405 with `Allow: GET, HEAD`), `HTTP/1.1` and `HTTP/1.0` (others 505), an origin-form target
+     (`/` and visible ASCII, no `#`; the caller serves exactly `/metrics`, so a query string or any other path is
+     404), CRLF line ends only (a bare LF anywhere is 400), no line folding, token header names, no control
+     characters in values, no body (`Content-Length` absent or `0`, once) and no `Transfer-Encoding`. Syntax errors
+     are 400 whatever else the request says. **A request that ends its headers with an empty line and is followed by
+     anything is cut at the empty line** (pipelined requests are not read; ADR-290's "one answer"): `scan` delimits it
+     and `parse` refuses a stray LF before the real end, which the fuzz target found (below).
+  3. **`Accept` is read for one decision**, OpenMetrics or the classic text (ADR-291 point 8), by quality value, with
+     malformed values counting as 0. Nothing else in any header is acted on, and no header is echoed.
+  4. **The answers are fixed**: `200` with `Content-Type`, `Connection: close` and the exact `Content-Length`; or a
+     status line with `Connection: close` and `Content-Length: 0` (400, 404, 405, 431, 505). **No answer contains
+     anything the client sent**, no `Server`, no date, no keep-alive, no chunking, no compression (`Accept-Encoding`
+     is ignored), no redirect, no second request. The connection closes after the answer (FIN after the bytes).
+  5. **Verification.** 10 host tests (every refusal, the negotiation by quality, the bounds, split feeds, property
+     tests over arbitrary and mutated requests); the fuzz target `http_request` with 25 seeds (Prometheus 2 and 3
+     requests, curl, HEAD, HTTP/1.0, every refusal, a TLS ClientHello, many headers, pipelining): **it found, in its
+     first run, that a bare LF between two header lines was read as the end of the request while the real end was
+     later** (a smuggling shape, no effect on this endpoint since it serves no state, but a parser that disagrees
+     with its own delimiter); fixed (`parse` now requires that the empty line is the last thing it is given), the
+     input kept as a seed and a test; 15.4 million executions clean afterwards (120 s). `metrics_render` (arbitrary numbers and text in every `Info`
+     field) found that `sys::by_code` added the counters of the reason codes it does not list without saturating;
+     fixed, 125 000 executions clean afterwards. The smoke scenarios send each
+     refusal, garbage, a request in five pieces and two pipelined requests.
+
+## ADR-293 — Admission and deadlines of the metrics listener: slowloris, per-address limits, a scrape rate (NEXT-9)
+
+- **Status:** Accepted (2026-11-09). Part of ADR-290.
+- **Context.** The listener is reachable by every host on the allowed networks, and an HTTP connection costs a socket,
+  a buffer and (for the answer) about 13 KiB of text and 60 to 350 microseconds of work to make it (measured on HVF with
+  four cores).
+- **Decision.**
+  1. **At the SYN**, in this order: the allow-list (a refused address gets no answer, counted by
+     `urmqtt_metrics_refused_total{reason="source"}`, logged at powers of two), then the core's admission
+     (`urmqtt_net::admission::Admission`, the TLS and plaintext listeners' own mechanism, an instance of its own):
+     connections in flight on the core (`metrics.max_connections`, default 8), from one address
+     (`metrics.max_connections_per_ip`, default 2), a **token per connection, 20 a second per core** (burst 20), and
+     the heap reserve (not the DB backlog: a scrape needs no storage). A refusal is no SYN-ACK and no state
+     (`reason="limit"`). The same checks run again at the final ACK.
+  2. **Limits are per core**, not for the whole machine: a connection's core is chosen by the flow hash, an
+     allowed host with several scrapers can therefore hold `cores x max_connections_per_ip` connections. This is
+     deliberate (no shared lock on a hot path; the TLS admission works the same way) and bounded by the core count.
+  3. **A deadline from the accept to the end of the answer**, `metrics.request_timeout_s` (default 5, 1 to 30), kept
+     in an ordered queue per core and checked on the 100 ms tick (`MetricsState::expire`): a connection that has
+     not finished by then is reset and counted (`urmqtt_metrics_timeouts_total`). It covers a request that never
+     ends (headers dripped one byte a second: the deadline is not extended by activity), a client that never reads
+     the answer, and a connection that never sends a byte. A smoke scenario sends a drip and sees the cut at 3.1 s
+     of a 3 s deadline.
+  4. **Memory per connection** is the request buffer (at most 2 KiB plus one segment while reading) and the answer
+     (about 13 KiB with four cores, made only after the request is complete and valid, held until TCP has taken
+     it); with the defaults a core holds at most 8 x 15 KiB, four cores 32 x 15 KiB at the worst moment.
+  5. **No effect on the broker.** The metrics connections have no session and no flight in the handshake
+     admission: a flood of scrapes does not use a TLS handshake slot, and a flood of handshakes does not refuse a
+     scrape (the heap reserve is shared, as it must be).
+  6. **The kernel's watchdog budget** applies to the rendering like any input handler (10 ms; a render took 56 to 345 us on HVF with four
+     cores in the smoke scenario, `metrics: scrape rendered N bytes in M us` at debug level; the token bucket keeps
+     scrapes from adding up).
+
+## ADR-294 — What the metrics item does not do, and why (NEXT-9)
+
+- **Status:** Accepted (2026-11-09). Part of ADR-290. Everything below is a deliberate cut, listed so it is not
+  proposed again without a new reason (ROADMAP section 5 gets the entries the owner decides to keep).
+- **Decision.**
+  1. **No TLS for log shipping.** The ROADMAP entry asked for "TLS for log shipping once NEXT-7 exists". Syslog and
+     statsd are UDP datagrams the kernel *sends*; TLS needs an outbound TCP connection, which the kernel cannot make
+     before NEXT-7 (the outbound TCP client). Left as a **documented non-goal of this release**; the SECURITY.md
+     residual risk "Syslog and statsd are plain UDP" stays as it is, with this pointer.
+  2. **No mutual TLS on the metrics port** (ADR-290 point 2): the allow-list is the control. A TLS mode is a possible
+     later addition.
+  3. **No push** (Pushgateway, remote write, OTLP): needs outbound connections (NEXT-7).
+  4. **No histograms.** The handshake latency is a sum, a count (`handshakes/done`), a maximum and a count over
+     250 ms; a histogram would need new counters in the hot path of the handshake admission (its bucket counts exist
+     in `Admission` as `latency` buckets but are not shared across cores as `$SYS` numbers). Not exposed until `$SYS`
+     has them.
+  5. **No per-client, per-topic or per-identity series** (ADR-291 point 6), and no `process_*` or `go_*` families:
+     there is no process.
+  6. **No authentication of scrapes** (no basic auth, no token): a secret in an image that every Prometheus job would
+     have to hold buys little over the allow-list for numbers of this kind and adds a credential to rotate.
+  7. **No IPv6 address in `allow_from`**: the kernel has no IPv6 (NEXT-1).
+  8. **No new dependency**: the endpoint uses the standard library's `core` and `alloc` only; no `cargo vet` entry
+     changes.
+  9. **A `metrics/` retained `$SYS` summary is not added**: the `$SYS` tree is unchanged (a subscriber sees exactly
+     what it saw), and the listener's own counters are not published there.
+## ADR-295 — A/B updates: the boot entry is the partition table (NEXT-11)
+
+- **Status:** Accepted (NEXT-11, with ADR-296 to ADR-299). ADR-217's offline `update-boot` stays for disks that
+  have one boot slot; AUDIT H8-W6 (no downgrade protection) is narrowed, not closed (ADR-299).
+- **Context.** An update was `urmqtt-disk update-boot`: the VM stopped, the ESP overwritten in place, no way back
+  if the new kernel does not come up. PLAN decision 6 and ROADMAP NEXT-11 ask for two kernel and configuration
+  sets, a boot counter and an automatic return. What constrains the design (checked, not assumed):
+  1. **Limine has no boot counter and reads no mutable state** that the kernel could write. Its configuration is
+     enrolled into the loaders (ADR-250): changing one byte of `limine.conf` (a `default_entry`, a second entry)
+     needs the loaders re-enrolled, i.e. three more files written, and under Secure Boot (LATER-6) re-signed by
+     the key owner. Switching by editing `limine.conf` is therefore neither atomic nor compatible with Secure
+     Boot. Limine 12.9.4 does read the Boot Loader Interface variables `LoaderEntryOneShot`/`LoaderEntryDefault`
+     (its binary has `bli_get_oneshot_entry`), the standard boot-once mechanism, but the kernel has no UEFI
+     runtime services, the BIOS path has no variables, and QEMU's aarch64 `-bios` firmware keeps none across a
+     reset.
+  2. **Firmware boots the EFI system partition the partition table names.** Both UEFI (removable-media path,
+     `\EFI\BOOT\BOOT*.EFI` on the ESP) and Limine's BIOS stage find the boot volume through the GPT.
+  3. **The kernel already writes the partition table** at the first boot, crash-safely (S1, `gpt::prepare`:
+     backup copy first, then the primary, entries before header, a torn primary repaired from the backup), and
+     UEFI firmware does the same repair (edk2 restores a damaged primary from the backup before it boots).
+- **Decision.**
+  1. **Two regions, one boot entry.** The installed disk gets a second region the size of its ESP, between the ESP
+     and the data partition (*slot A* is the region nearer the start, *slot B* the other). Exactly one GPT entry has
+     the EFI system partition type; it covers the *active* slot. A second entry of the new type
+     `8F3A6E21-5C7B-4D19-A2E4-6B0C9D513F7E` ("urMQTT boot slot") covers the *standby*. Switching moves the two
+     ranges between the two entries in **one table write** (`gpt::write_table`): a power cut leaves the old table
+     in force (the primary is still valid) or the new one (a new primary, or a torn primary that firmware, Limine's
+     UEFI path and the kernel replace by the complete new backup). Nothing reads a half-written table.
+  2. **What stays with the entry, what moves with the region.** Each entry keeps its type, its unique GUID and its
+     place in the array: the ESP entry is always before the standby, and only the standby has UEFI attribute bit 1
+     ("no Block I/O protocol"). A firmware boot option that names the ESP by partition GUID (a stored `Boot####`)
+     therefore follows the switch, and firmware that enumerates partitions finds the active slot first or alone.
+     The **slot state** lives in the type-specific attribute bits 48..63 and moves with the region: trial boots
+     left (3 bits, at most 7), *trial*, *bad*, *one-way*, *sealed*, *empty*, and the store schema the slot's kernel
+     writes (8 bits). The **name** (36 UTF-16 units) holds the release label and, for a staged slot, `|` and 16 hex
+     digits: the first 8 bytes of the SHA-256 of the whole region, written when it was staged (a commitment checked
+     before anything switches to it; it catches a cut or a changed slot, not an attacker who can write the disk,
+     who could write anything).
+  3. **Where the B region comes from.** The kernel reserves it at the first boot, in the same table write that
+     creates the data partition (`gpt::prepare_with`), when the data partition keeps its 16 MiB minimum after it;
+     its first 32 KiB are zeroed so no stale filesystem could be taken for a boot volume. A disk prepared before
+     v0.6.0 has its data partition right after the ESP and keeps one slot: moving the data to make room is not
+     done (left out, ADR-299). New installs therefore cost the size of one ESP (10 MiB for the aarch64 image, about
+     20 MiB for the universal one).
+  4. **The kernel never writes an ESP region.** Only the offline tool writes the standby (ADR-299); the kernel
+     writes partition-table sectors only (the trial count, the confirmation, a switch back; ADR-296).
+  5. **Secure Boot (LATER-6) needs nothing from this but a signed ESP per slot.** No loader step was added: the
+     same signed loader, enrolled `limine.conf` and pinned kernels boot from either region, because the switch
+     changes which partition is the ESP, not a byte inside one. What LATER-6 must provide is the per-machine signed
+     ESP (H8-W1); `slots stage` then writes that ESP as it is (`--replace-config` keeps its own pinned
+     configuration). The interface a loader-level mechanism would replace this with is the BLI one-shot entry
+     (boot B once; the firmware falls back to the default if it fails before the kernel runs); recorded as the
+     upgrade path when the kernel gets UEFI runtime services, not built.
+- **Verified on firmware, not only in host tests.** Smoke `ab` (aarch64 edk2 under HVF, x86_64 OVMF under TCG): the
+  offline switch cut after its first, second and third write boots A, A, and B on trial; after the third (the
+  primary's entries new, its header old) the firmware took the backup and repaired the primary itself.
+- **Alternatives.** Editing `default_entry` and re-enrolling the loaders (three files, not atomic, breaks Secure
+  Boot). Two complete ESP partitions chosen by firmware boot order (needs variables; nothing on BIOS). A kernel
+  that chain-loads the other slot's kernel (a second loader, in the kernel). A third "boot state" partition or
+  file (a new write path for no gain: the table already has room for the state). Firmware variables through the
+  BLI (above).
+- **Consequences.** DISK-FORMAT.md §0a. `urmqtt_store::slots` is the one implementation (kernel and tool), host
+  tested with a cut at every write of every operation; fuzz target `boot_slots`.
+
+## ADR-296 — A/B updates in the kernel: count first, confirm when healthy, go back by itself (NEXT-11)
+
+- **Status:** Accepted.
+- **Decision.**
+  1. **Counted before anything else runs.** `bootslot::at_boot` runs right after the GPT first-boot steps, before
+     the block self-test, the store, the network and the other cores. Limine reports the partition GUID of the
+     kernel file (`limine_file.gpt_part_uuid`, read from the raw structure like the disk GUID; a loader that reports
+     none is taken to have booted the ESP entry, which firmware and Limine find first). Booted from the ESP entry
+     with its slot on trial and attempts left: one is used (a table write). A crash, a fatal error, a reset
+     by the watchdog or a hang the operator resets after that point counts as a failed attempt. A kernel that dies
+     *before* that point (in the bootloader, or before its block driver) is not counted: no loader help exists for
+     it (ADR-295) and it loops until an operator rolls back offline. This is the known gap of a kernel-side
+     counter; the BLI one-shot entry would close it.
+  2. **Going back.** No attempt left, or a trial kernel that writes a newer store schema than the standby's kernel
+     reads without a one-way activation (ADR-299): if the standby is eligible (staged or as installed, confirmed,
+     not bad, its commitment intact) the table switches back, the trial slot is marked bad, and the kernel resets.
+     If the standby is not eligible the trial kernel keeps booting, saying so (there is nothing better to run), and
+     the trial timeout no longer resets it (a reset would boot the same slot again; the confirmation still applies).
+     Firmware that booted the *standby* while the active slot is on trial (the new ESP did not load at all) is
+     adopted: the table says so, the trial slot is marked bad, the boot goes on. A standby marked bad (stranded by a
+     one-way migration) or empty is never adopted: the boot is reported and nothing is written.
+  3. **Healthy means serving.** `update.confirm = "auto"` (default): the DB core confirms the trial once the store
+     is open and the first data core's listeners are up (a TLS listener whose setup failed is not up) for
+     `update.confirm_after_s` seconds (default 60). `"operator"`: only a `boot-confirm` control message (ADR-298)
+     or `urmqtt-disk slots confirm` does. A trial not confirmed after `update.trial_timeout_s` (default 900; 0:
+     never) resets the machine, which uses an attempt: a kernel that hangs without a crash still ends in a switch
+     back. A trial that is degraded (no store) is never confirmed and fails by its timeout or its fatal error.
+  4. **One-way store migrations.** Every boot that opens the disk store checks the standby (`after_store`): a
+     standby whose kernel writes an older schema than the store now is marked bad (its kernel cannot read the store
+     any more), so neither the automatic return nor an operator's rollback switches to it. Checking at every boot,
+     not only on the one that migrated, catches a power cut between the migration's commit and that table write
+     and a store migrated by a kernel replaced in place. Residual: a cut in exactly that window on the *last* trial
+     boot switches back before the next store open (A296-W1, AUDIT); the old kernel then refuses the store with
+     its schema error, and `urmqtt-disk slots activate --retry --one-way` returns to the new slot.
+  5. **An in-place kernel change** (`update-boot --in-place`, a test's `dd`) is noticed by the recorded schema:
+     the active slot's schema field is brought up to date in one table write. `update-boot --in-place` itself
+     also re-seals the slot (label, schema, commitment to the new bytes, `slots::reseal_active`): a stale
+     commitment would refuse it as the way back after the next activation.
+  6. The build note: a 64-byte static (`urMQTT-buildnote`, the version, the A/B protocol, the store schema, the
+     configuration formats read) that the boot log prints, so the linker keeps it and the offline tool finds it in
+     an ESP image.
+- **Logged** (OPERATE.md): `boot: slot X (...), confirmed; standby: ...`, `... ON TRIAL: N trial boot(s) left ...`,
+  `boot: slot X confirmed (...)`, `boot: slot X gave up: ...; slot Y ... is active again, resetting`, the standby
+  and exhaustion warnings.
+- **Testing.** Host: `crates/store/src/slots/tests.rs` (18 tests, every operation cut at every write, clean and
+  torn, the cache lost and kept). QEMU (`SMOKE_ONLY=ab`, aarch64 HVF and x86_64 TCG): the first boot, an update
+  that confirms after 2 s of health, `test=ab-bad` (dev: a fatal error right after the slot step) rolling back
+  after two trial boots, the trial count cut after its first and third write (`test=disk-fault`), and the control
+  messages.
+- **Alternatives.** Counting in the data partition (needs the store's layout before the counter; an encrypted disk
+  needs the key first; and a v0.5.0 kernel in the other slot would not understand it). Confirming at `URMQTT READY`
+  (before a client could connect; the delay exists to see a listener survive).
+
+## ADR-297 — The `[update]` section, configuration format 17 (NEXT-11)
+
+- **Status:** Accepted.
+- **Decision.** `update.confirm` (`"auto"` | `"operator"`, tag 340), `update.confirm_after_s` (0..=86400, default
+  60, tag 341), `update.trial_timeout_s` (0..=86400, default 900, tag 342). At their defaults they write nothing,
+  so an existing configuration keeps its format and every older kernel still boots it; any other value needs
+  **format 17** (14 to 16 are other v0.6.0 items, refused by this tree like 10 until the release merge). A kernel
+  that does not know the section would confirm by its own defaults (or never), against the operator's choice:
+  hence the version. Cross-field rule (in `urmqtt_cfg::check` and the TOML path, the same message): in auto mode
+  the timeout is 0 or longer than the confirmation delay. The builder page shows the section after `[mqtt5]`.
+- **Upgrade effect.** None for existing images: no key set means auto, 60 s, 900 s. A disk installed by v0.6.0 has
+  a standby slot (ADR-295), whatever the configuration.
+
+## ADR-298 — `boot-confirm` and `boot-rollback` control messages (NEXT-11)
+
+- **Status:** Accepted. Extends the control channel of H1 (docs/SECURITY.md "Control channel").
+- **Decision.** Commands 7 (`boot-confirm`) and 8 (`boot-rollback`); 5 and 6 belong to another v0.6.0 item. Their
+  one item is the 16-byte GPT disk GUID of the boot disk (as the table stores it), so a control key that signs
+  for many brokers cannot confirm or roll back the wrong machine (`other_disk`). Authentication, freshness and
+  replay are the channel's own: the sequence number is committed first, then the slot table changes; a refused
+  slot operation is `boot_refused` (nothing on trial, nothing eligible to return to). `boot-rollback` resets the
+  machine after the switch. `urmqtt-control boot-confirm|boot-rollback --disk-guid GUID`; `urmqtt-disk slots
+  status` and the boot log print the GUID.
+- **What it adds to the threat model.** Whoever holds the control key and a control identity can force a return to
+  the previous slot (a reset, and the previous release) or confirm a bad one; both were already in reach of that
+  attacker through revocations (a denial of service). It cannot install anything: the slots hold only what an
+  operator staged offline.
+
+## ADR-299 — `urmqtt-disk slots`: staging from a signed release, downgrade rules (NEXT-11)
+
+- **Status:** Accepted. Narrows AUDIT H8-W6.
+- **Decision.**
+  1. `slots status | stage | activate | confirm | rollback`, offline (the VM stopped), each a dry run on an
+     in-memory overlay without `--write`, each with `--fault` for the power-cut tests. A table a cut left with two
+     different copies is repaired from the primary first (what the next boot does).
+  2. **Stage** writes the standby: it is marked empty (a table write), the region written (the ESP, zeros to its
+     end) and flushed, read back and hashed, and only then sealed with the label, the schema and the commitment (a
+     table write). A cut leaves an empty standby, never a half-written one that looks staged. Refused while the
+     active slot is on trial (the standby is its way back). The configuration is carried over as `update-boot` does
+     (ADR-217): the disk's own unless `--config` or `--replace-config`.
+  3. **The release signature.** `--image RELEASE.img` is staged only with `--sums SHA256SUMS --sig
+     SHA256SUMS.minisig --pubkey minisign.pub` (several keys allowed, the signature picks one, as the builder page
+     does): the signature verified (`urmqtt-config-tool::release`, the same code as `check-release`), the image's
+     SHA-256 listed under its file name. `--esp` (an own build) and an unsigned image need `--unsigned`, said in the
+     output.
+  4. **Downgrade rules.** A kernel without a build note (before v0.6.0) is refused: it would never confirm. A
+     kernel whose store schema is older than the store on the disk is refused, always (it would refuse the store;
+     the schema migrations are one-way, DISK-FORMAT §5.1.1). An older release than the active slot's is refused
+     unless `--allow-downgrade` (versions as `git describe` prints them; a label that is not a version is reported
+     and not judged). A configuration of a format the kernel cannot read is refused. A store schema newer than the
+     active kernel's needs `activate --one-way` (ADR-296 point 4). A kernel of another A/B protocol is refused by
+     name.
+  5. `update-boot` refuses a disk with two slots unless `--in-place` (and never while a slot is on trial); with
+     `--in-place` it re-seals the active slot after the write (ADR-296 point 5).
+  6. `slots rollback` refuses a previous slot whose kernel writes an older store schema than the store on the
+     disk (when the store can be read), as `stage` does.
+- **Left out, with the reason.** (a) **Converting a pre-v0.6.0 disk** to two slots: its data partition starts right
+  after the ESP, so the room needs the data moved (or the ESP halved, which needs a FAT writer); a re-install with
+  export and import is the path. (b) **Version counters / anti-rollback in firmware** (H8-W6 proper, LATER-6): the
+  rules above stop an operator's mistake, not an attacker who can write the disk. (c) **Staging from the running
+  broker** (an online update over the network): needs NEXT-7 or an upload path into the kernel, and an ESP writer in
+  the kernel; the kernel writes no ESP today. (d) `$SYS` topics for the slot state: the boot log and the tool say it.
+  (e) Power cuts on the BIOS path: the universal image's BIOS boot of a staged slot is tested (`SMOKE_ONLY=ab
+  --arch universal`: Limine's BIOS stage boots the region the ESP entry covers), the cut points only under UEFI.
+- **Testing.** `tools/disk/tests/slots.rs` (through the binary: the whole cycle, the signature with a throwaway key,
+  every downgrade rule, a cut at every write of each command, a single-slot disk); smoke `ab-release-image-signed`
+  (a key made by `minisign -G` in the test; never the release key); `SMOKE_ONLY=ab --arch universal`: one universal
+  disk, its standby reserved and a staged slot booted on trial on x86_64 BIOS, x86_64 UEFI and aarch64 UEFI.
+## ADR-300 — Encryption at rest on the builder page: an encrypted project file and an encrypted browser copy (NOW-16)
+
+- **Status:** Accepted. Implements the "private keys and configuration are encrypted in the browser before anything is
+  kept or exported" reading of NOW-16. Builds on ADR-226 (the page keeps no private key in storage) and ADR-231
+  (accounts are hashed in the browser). ADR-301 to 304 stay free. No configuration format, no store schema, no Rust
+  code and no kernel behaviour change: the work is in `tools/builder/web` only.
+- **Context.** Since ADR-226 the page holds a private key (and the account hashes and the optional signing key) in
+  memory only, so after a reload, or the next day, the operator picks the files again and types the accounts again.
+  That is safe and tiresome, and it pushes people to keep the key in a plain file next to the form. The page should
+  offer a way to keep a project that is not a plaintext secret, without changing the promise that nothing leaves the
+  browser and nothing secret is kept unprotected.
+
+### Decisions
+
+1. **What is sealed** (*decided*): the whole state of the form (the changed values, the certificates, the private
+   key, the control public key, the account list with the hashes, the signing key, the file name part, the preset),
+   as one JSON snapshot (`vault.js`, `snapshotState`). Everything or nothing, so a project is restored exactly (a
+   browser test compares the exported TOML before saving and after opening). The chosen release is *not* part of it:
+   it stays what the page has selected now, because the list of releases changes between visits.
+2. **Primitives** (*decided*): Web Crypto only, no script from anywhere. **PBKDF2-HMAC-SHA-256, 600 000 rounds** (the
+   OWASP 2023 figure for this PRF) with a random 16-byte salt derives a 256-bit key held as a **non-extractable**
+   `CryptoKey`; **AES-256-GCM**, a random 12-byte nonce, a 128-bit tag. Argon2 and scrypt are not in Web Crypto and a
+   WebAssembly KDF would add code to the page that has to be trusted and audited; 600 000 rounds take about 0.3 s on
+   a laptop and about 1 s on a phone. A new salt and a new nonce for every seal, so no key or nonce is ever reused.
+3. **The envelope** (*decided*), a JSON document, one object, exactly these fields (any other set is refused):
+   `format` = `urmqtt-project`, `version` = 1, `kdf` = `PBKDF2-HMAC-SHA256`, `iterations`, `salt`, `cipher` =
+   `AES-256-GCM`, `iv`, `data` (base64: ciphertext and tag). **The header is authenticated**: the additional data is
+   the text `format \n version \n kdf \n iterations \n cipher \n salt`, so a changed round count, label or salt fails
+   the tag instead of only deriving another key. The plaintext is padded with spaces (JSON ignores them) to a
+   multiple of 4096 bytes, so the size says little. An unknown `version` is refused with its own message; a later
+   envelope version will be a new `version`, never a silent change of this one.
+4. **A hostile file cannot hang or confuse the page** (*decided*): before any key is derived the page checks the
+   shape, the algorithm names, `iterations` between 200 000 and 5 000 000 (a lower figure would be a downgrade, a
+   higher one a way to freeze the tab), the salt and nonce lengths, the data length (a multiple of 4096 plus the
+   16-byte tag, at most 8 MiB) and the size of the whole file. The decrypted snapshot is rebuilt field by field
+   (`stateFromSnapshot`): unknown ids are dropped, every value is type-checked and length-limited, so a snapshot of
+   another page version or a forged one cannot put an object of a wrong shape into the form.
+5. **The passphrase** (*decided*): never stored, never in the address, never sent; it exists in the dialog's input
+   until the operation ends and the field is emptied when the dialog closes. NFKC-normalised before use, so the same
+   phrase typed on another keyboard or system opens the file. At least 12 characters when sealing (a length check,
+   not a strength meter: the page has no word list to judge with and says in words that a few unrelated words work),
+   asked twice. Opening does not impose the minimum, so an old file is never locked out by a later rule. A wrong
+   passphrase and a damaged file give the same answer on purpose.
+6. **Two places** (*decided*): (a) a project **file** the user saves (`*.urmqtt-project`) and opens again; (b) an
+   optional **copy in this browser** (`localStorage`, one key, `urmqtt-builder-vault-v1`), only as the same
+   envelope, written only when the user asks, with a button to restore it and one to delete it. The copy is never
+   written automatically, and `sessionStorage`, the address and the existing `localStorage` entry for the view mode
+   stay exactly as ADR-226 made them (no key, no hash, no account). A browser that refuses storage says so.
+7. **Wipe** (*decided*): a button that drops the private key, the signing key, the account list and the built image
+   (the ISO contains the key and the hashes) from the page: the references are cleared, the blob URL is revoked,
+   password fields are emptied. **Deliberately not claimed:** JavaScript cannot overwrite a string; the engine may
+   keep copies until its garbage collector runs. The page says so and asks to close the tab. What it does overwrite
+   is the buffers it owns (the passphrase bytes, the plaintext buffer after sealing and opening).
+8. **No network, no third party** (*decided*): nothing here makes a request; `Content-Security-Policy` stays
+   `default-src 'self'`, `connect-src 'self'`, and a browser test asserts that saving, opening and keeping make no
+   request and that the storage, the address and the document hold no key, account or passphrase afterwards.
+9. **The page text** (*decided*): 40 new `project.*` keys in all 15 languages, written in each language (not left in
+   English); the existing text test enforces the same keys and placeholders everywhere and fails an untranslated
+   long sentence.
+10. **Not done, on purpose** (*decided*): no automatic saving of the project, no "remember me", no password manager
+    integration beyond the browser's own `autocomplete` hints on the two password fields, no sync across devices, no
+    recovery of a lost passphrase (there is none by design), no encrypted *emulator* state, and **no dialog for the
+    disk key of configuration format 4** (generate in the browser, download, import): that is the other half of the
+    original NOW-16 text, it needs a configuration format number and belongs with LATER-7 (a disk key outside the
+    image); the page still hides `storage.encryption` and `storage.disk_key` (ADR-240).
+
+### Verification
+
+`tools/builder/test/vault.test.mjs` (envelope round trip, wrong and missing passphrase, NFKC, a weak passphrase,
+every field and bit position of tampering, 16 kinds of malformed or hostile envelope refused before key
+derivation, interoperability with Node's crypto in both directions, the snapshot and a hostile snapshot);
+`vault-page.test.mjs` (headless Chrome: no secret in the file, the page, the storage or the requests; the same TOML
+after a round trip; wrong passphrase and damaged file refused with the dialog open; wipe; the browser copy across a
+reload; no request leaves the origin); `vault-fuzz.test.mjs` with 13 seeds in `tools/builder/test/seeds/vault/`
+(mutation fuzzing of the envelope parser and the opening, run for 120 s: 909 558 inputs, only `VaultError` ever
+thrown, no mutated file opens unless every field the cipher uses is unchanged); the text test for 15 languages.
+
+### For the owner
+
+(a) 600 000 rounds of PBKDF2 rather than a memory-hard KDF (point 2). (b) The disk-key dialog is not part of this
+change (point 10). (c) The page is deployed by the owner later: this changes `app.js`, `app.css` and the `i18n/*.json`
+only, and the aldotech-web repository was not touched.
+## ADR-305 — DMA remapping: VT-d, AMD-Vi and SMMUv3 behind `devices.iommu` (LATER-5, H4b)
+
+- **Status:** Accepted (LATER-5). Supersedes the deferral of ADR-176 for the code; bare metal itself stays
+  deferred (LATER-4). ADR-306 is the fault path, ADR-307 the verification and what is not done. ADR-308 and
+  ADR-309 stay free.
+- **Context.** Every device the kernel drives could write anywhere in RAM: a buggy or hostile device (on bare
+  metal its firmware; in a VM a device model of a hypervisor that is not trusted) reaches the page tables, the
+  key slab and the code. The firmware describes the machine's IOMMUs in ACPI (DMAR for Intel VT-d, IVRS for
+  AMD-Vi, IORT for Arm SMMUv3) or in the device tree (`arm,smmu-v3` and the PCIe host's `iommu-map`). QEMU
+  emulates all three (`intel-iommu`, `amd-iommu,dma-remap=on`, `virt,iommu=smmuv3`).
+
+### Decisions
+
+1. **One key, three words, `off` by default.** `devices.iommu = "off" | "auto" | "require"` (configuration
+   format 18, tag 318). `off` leaves the IOMMU exactly as the firmware left it (in practice: translation off)
+   and only names it in the log: the behaviour of v0.5.0. `auto` brings up every unit the firmware describes
+   and goes on, with a warning, where it cannot (no IOMMU, a unit that fails, a device outside every unit's
+   scope or bypassing it). `require` turns each of those into a refusal to boot with the reason.
+   *Decided* (the owner was away): the default is `off`, not `auto`. The release targets KVM VPSes, whose
+   devices are the hypervisor's (trusted, ADR-176); an emulated IOMMU costs every DMA a table walk in the
+   device model, which would silently slow a host that happens to expose one; and an existing configuration
+   must behave as before. Bare metal, or a host whose device models are not trusted, should say `require`
+   (OPERATE.md). When bare metal is supported (LATER-4) the default for a bare-metal image is the owner's
+   call; this ADR recommends `require` there.
+2. **Where it sits in the boot.** After the PCI scan and before the first driver: `iommu::init` brings every
+   unit up with translation on and **nothing mapped**, so from that moment every device's DMA (including one a
+   firmware left running) is blocked. A unit that was already enabled by the firmware is turned off first and
+   reprogrammed. The register frames are mapped like any MMIO, before the page tables lock.
+3. **A domain per device, identity mapped, only its own pages.** Every DMA allocation of a driver goes through
+   `devices::KernelEnv`, which now knows the device it allocates for (`KernelEnv::device(bdf)`); the first
+   allocation creates the device's domain (VT-d context entry and domain ID, AMD-Vi device table entry and
+   domain, SMMUv3 stream table entry, context descriptor and ASID) and each allocation maps exactly its pages,
+   read-write, at I/O virtual address = physical address. Nothing is ever unmapped: the kernel's DMA memory
+   lives as long as the device. Work after bring-up uses `KernelEnv::RUNTIME`, which allocates nothing; an
+   allocation for no named device is mapped nowhere and warned about once. Identity mapping keeps every driver
+   unchanged (the address a driver gives the device is the same with and without translation) and makes the
+   choice of `off` safe at any time.
+4. **Page tables.** One radix builder for three encodings (`crates/iommu/src/pt.rs`): VT-d second-level
+   tables (R/W on every level), AMD-Vi v1 host tables (PR, next level, IR/IW on every level), Arm VMSAv8-64
+   stage 1 with a 4 KiB granule (AF set, never executable, inner-shareable write-back; MAIR index 1 device
+   memory for the doorbell). 4 levels (48 bits) where the unit supports them, else 3 (39 bits); an address
+   beyond is refused. 4 KiB pages only (no large pages: the mappings are small and exact).
+5. **The drivers.** VT-d in legacy mode (root and context tables), register-based invalidation (global context
+   cache and IOTLB after every change, which caching mode needs), the write-buffer flush where CAP asks;
+   a unit whose firmware enabled interrupt remapping is refused (`auto` goes on without it) because taking it
+   over needs the queued invalidation this driver does not implement. AMD-Vi with a device table for all 65 536
+   IDs, every entry "valid, translation valid, mode 0, no read, no write" (blocked) until attached, a one-page
+   command buffer (INVALIDATE_DEVTAB_ENTRY, INVALIDATE_IOMMU_PAGES, COMPLETION_WAIT with a store) and a
+   one-page event log. SMMUv3 with a linear stream table sized for the highest stream ID the scan found, every
+   entry invalid (abort) until attached, stage 1 through one context descriptor per stream (stage 2 is not
+   in QEMU's default model and not needed), a 256-entry command queue (CFGI_STE, CFGI_ALL, TLBI_NH_ASID,
+   TLBI_NSNH_ALL, CMD_SYNC with its error checked) and a 128-entry event queue. Every wait for a unit is
+   bounded (100 ms) and a timeout is a bring-up failure. The drivers have no `unsafe`: registers are a
+   `Regs` trait and the memory the unit reads an `Env` trait, implemented by `kernel/src/iommu.rs`.
+6. **Coherency.** VT-d reports it (ECAP.C), SMMUv3 too (IDR0.COHACC); for a unit that does not snoop, every
+   table and queue write is cleaned to the point of coherency (`urmqtt_arch::cache::clean_to_device`: `clflush`
+   and `mfence`, or `dc cvac` and `dsb sy`). AMD-Vi walks are declared coherent (Control.Coherent).
+7. **MSIs.** Interrupt remapping is not enabled on any unit (VT-d, AMD-Vi): with it off an MSI is an interrupt
+   request, not a DMA, and passes as before. On a GIC an MSI is a write to the ITS's translation page or the
+   GICv2m frame, which the SMMU translates like any DMA: that one page is mapped into every domain as device
+   memory. With the ITS the device can only signal events of its own device ID; with a GICv2m frame it can
+   raise any SPI of the frame (as without an IOMMU).
+8. **virtio and VIRTIO_F_ACCESS_PLATFORM.** A virtio device that does not offer this feature uses physical
+   addresses *around* the IOMMU (virtio 1.x §6; QEMU's devices do so unless `iommu_platform=on`). The transport
+   now accepts the feature whenever it is offered (harmless without translation: the addresses are identity)
+   and tells the environment; with translation active a device without it is a device without isolation:
+   refused by `require`, warned about by `auto`.
+9. **Scope from the firmware.** `crates/platform/src/iommu.rs` reduces DMAR, IVRS, IORT and the device tree to
+   units (kind, register base, segment) with the requester IDs each translates and the ID it sees for them
+   (the stream ID of an SMMU, the device ID of AMD-Vi, an alias where IVRS says so). An explicit scope wins over
+   a unit that takes "all the rest". What a parser cannot represent is counted and never guessed: a DMAR scope
+   behind a bridge, a variable-length IVRS entry it does not know (the rest of that block is not read), an IORT
+   mapping flagged single. Nor is the catch-all unit guessed for an ID another unit may claim through such an
+   entry (a bridge's scope: every bus above the bridge's; an unknown, truncated or dropped entry, or a dropped
+   unit: every ID): such a device gets no unit, which `require` refuses, instead of a domain on the catch-all
+   that its DMA never goes through (it would be blocked, or not translated at all behind a dropped unit, while
+   the kernel counted it as isolated). Two functions the unit sees with the same ID (an IVRS alias) share one
+   domain, said in the log and the summary line: the unit cannot tell them apart. Reserved regions the firmware asks to keep mapped (RMRR, IVMD, RMR) are counted and
+   logged, not mapped: the kernel drives only virtio devices, which have none. At most 4 units and 32 ID ranges
+   per unit (QEMU 11.1 lists every device of the root bus in DMAR and IVRS one by one). A table that fails its
+   checksum means no IOMMU, and does not stop the rest of the discovery.
+10. **What an operator sees.** At boot: the description (`iommu: VT-d@0xfed90000/0:... (devices.iommu =
+   "require")`), each unit's bring-up, each device's domain, and one summary line (units, domains, pages
+   mapped, KiB of tables, devices without isolation). `$SYS/broker/iommu/{mode,state,units,domains,pages,
+   faults,overflows}`, an `iommu` object in the info query and a `status` line when the key is not `off`.
+11. **Configuration format 18.** The only key of the format; `off` writes nothing, so every existing
+   configuration keeps its format number and boots on v0.5.0. A blob of format 18 is refused by an older kernel
+   by its version (it would run without the isolation it was told to require). Formats 14 to 17 belong to the
+   other items of v0.6.0 and are unknown to this branch until the release merge (`blob::UNUSED_VERSIONS`).
+   The tag is 318, away from the tags the other items take, so the merge does not collide.
+
+### For the owner
+
+(a) The default `off` (point 1). (b) `require` refuses a unit with firmware-enabled interrupt remapping
+(point 5). (c) Reserved regions are not honoured (point 9): a real machine whose firmware lists an RMRR for a
+device the kernel does not drive is unaffected; one for a driven device would be (none exists today).
+
+## ADR-306 — IOMMU faults are polled, bounded, counted and logged; no fault interrupt (LATER-5, H4b)
+
+- **Status:** Accepted (LATER-5).
+- **Context.** A blocked DMA is recorded by the unit (VT-d fault recording registers, the AMD-Vi event log, the
+  SMMUv3 event queue). A hostile device can produce faults as fast as it can issue requests; a fault must
+  never be silently ignored and its handling must not be a way to stall a core.
+
+1. **Polling, not interrupts.** Core 0's tick reads the fault logs every 100 ms (every tenth of core 0's own
+   10 ms ticks: the global tick count interleaves every core's, so core 0 could see the same residue each time),
+   trying the IOMMU lock only (a poll that meets the bring-up or a mapping is skipped). The fault-event
+   interrupts stay masked (VT-d FECTL.IM, AMD-Vi EventIntEn off, SMMUv3 IRQ_CTRL 0). *Decided*: an interrupt
+   would add an interrupt route per unit (an MSI of its own, which on aarch64 would itself go through the
+   ITS) to tell the kernel something it only counts and logs; polling bounds the cost by construction.
+2. **Bounded.** At most 16 records per unit per poll (the next poll continues), so a fault storm costs core 0
+   at most 160 register or memory reads per unit per second. Indices from the unit are masked to its ring
+   (AMD-Vi head and tail, SMMUv3 producer and consumer) and a garbage index reads nothing.
+3. **Counted and logged.** Every record read is counted (`$SYS/broker/iommu/faults`) and acknowledged (VT-d
+   F bit and PFO, AMD-Vi head and the overflow bit, which also restarts the stopped log, SMMUv3 consumer with
+   the overflow flag acknowledged). The first 16 faults are logged one line each (`iommu: fault N: <unit>
+   <base>: pci <bdf> write to|access to <address> blocked (reason <code>)`), then only every power of two, so
+   a storm costs the log a few lines. A log overflow (faults lost) is counted
+   (`$SYS/broker/iommu/overflows`) and logged.
+4. **No action on a fault.** The device is not reset or detached: its DMA already did not happen, and the
+   driver's own timeouts handle a device that stops answering. `require` does not stop the broker for a
+   fault at run time: the isolation did its job.
+
+## ADR-307 — IOMMU verification, and what LATER-5 does not do (LATER-5, H4b)
+
+- **Status:** Accepted (LATER-5).
+
+1. **Host tests.** `crates/platform/src/iommu_tests.rs` (DMAR, IVRS, IORT with QEMU's shapes, ranges,
+   aliases, RMRR/IVMD, malformed and truncated tables, every prefix of every table), the QEMU `virt` DTB with
+   an SMMUv3 (`tests/fixtures/qemu-virt-smmuv3.dtb`, `dumpdtb` of QEMU 11.1). `crates/iommu`: each driver
+   against a model of its unit that walks the in-memory tables as the hardware would and answers DMA: only an
+   attached device reaches only its pages (and on SMMUv3 the doorbell); unattached devices, other devices'
+   pages, IDs beyond the tables are refused; bring-up with the firmware's state left on; a unit that never
+   answers times out; fault and event decoding, bounds and overflow; domain and ASID limits. Configuration:
+   format 18 written only for `auto` and `require`, refused by format 13 and by the unknown 17; the CLI's
+   template check (a v0.5.0 template refuses a `devices.iommu` configuration with the reason); the builder
+   page's model (`tools/builder/test/iommu.test.mjs`).
+2. **Fuzzing.** `iommu_tables`: arbitrary bytes as DMAR, IVRS, IORT, a device tree, or unit fault records;
+   ranges must stay inside the requester-ID space; seeds from QEMU's shapes. Two minutes: 14.6 million runs,
+   no finding.
+3. **QEMU smoke, `SMOKE_ONLY=iommu`.** Per IOMMU (aarch64: SMMUv3 under HVF and TCG, ACPI and device tree;
+   x86_64: VT-d and AMD-Vi under TCG): `iommu-dma` with `require` and `test=iommu-dma` (dev only), which makes
+   the entropy device write 64 bytes into a page outside its domain: the page must stay untouched, at least
+   one fault counted, by core 0's tick alone within a second (the test runs after the tick starts, and reads
+   the logs itself only after that second), the fault line name the device; `iommu-off control`, the same request with
+   `devices.iommu = "off"`: the page is written (so the test can see a write); `iommu-mqtt`, the full MQTT
+   round trip over mutual TLS (`mqtt-scenarios.py`) with every device translated and no fault. Then:
+   `require` on a machine without an IOMMU and with a virtio device that bypasses it (no `iommu_platform`)
+   refuses to boot with the reason; `auto` without one boots and warns. `scripts/run-qemu.sh --iommu
+   intel|amd|smmuv3` adds the unit and `iommu_platform=on,disable-legacy=on` to every virtio device.
+4. **Not done (listed, not hidden).**
+   - No real hardware: VT-d, AMD-Vi and SMMUv3 ran only as QEMU 11.1 models. Bare metal stays LATER-4.
+   - Interrupt remapping is not enabled (point 7 of ADR-305); a unit whose firmware enabled it is refused.
+   - VT-d: no queued invalidation, no scalable mode, no 5-level tables, no device-TLB (ATS); AMD-Vi: no
+     interrupt remapping, no exclusion range, no IOTLB (ATS); SMMUv3: no two-level stream table, no stage 2,
+     no PRI or ATS, no stall model, and a non-coherent unit's cache maintenance is untested (QEMU's are
+     coherent).
+   - RMRR, IVMD and RMR are counted, not mapped; DMAR scopes behind a bridge are not followed.
+   - At most 4 units and 32 ID ranges per unit; more are counted and their devices are not translated, nor
+     given to the catch-all unit, so `require` refuses them.
+   - QEMU's AMD-Vi model writes its IO_PAGE_FAULT events in a layout where this decoder reads address 0 and
+     no write flag; the device and the event type are right. Checked against the specification only.
+   - The cost of translation is not measured: an emulated IOMMU makes every DMA a table walk in QEMU, real
+     hardware has IOTLBs; `make bench` was not run with an IOMMU.
+   - intel-iommu under KVM needs the split irqchip (`run-qemu.sh` adds it); not run here (no KVM host).
+   - Fault interrupts (ADR-306) and unmapping are deliberately absent.
+
+## ADR-310 — virtio-net multiqueue: one queue pair per data core, only with the device's RSS (NEXT-6)
+
+- **Status:** Accepted (NEXT-6). Amends ADR-032 ("NIC: dispatcher mode only (v1) ... virtio-net multiqueue + RSS is
+  **not implemented**") and ADR-266 (the queue sizes now hold per pair).
+- **Context.** ADR-032 put the whole NIC on core 0: it copies every received frame out of the DMA ring, classifies
+  it and pushes it over a ring to the worker that owns the flow, and transmits every frame the workers send back.
+  On a busy broker core 0 is the one core that touches every frame, and every frame crosses two cores. virtio
+  1.x offers more queue pairs (`VIRTIO_NET_F_MQ`, §5.1.6.5.5) and, since 1.2, receive-side scaling that the driver
+  programs (`VIRTIO_NET_F_RSS`, §5.1.6.5.7: hash types, a Toeplitz key, an indirection table). The kernel's
+  steering is the Microsoft Toeplitz hash of the 4-tuple with the Microsoft key, chosen in ADR-032 so that a NIC
+  with RSS could agree; the test host to try it was the open question (D-9). QEMU's user network, the only
+  backend on macOS without root, has one queue; a multi-queue **tap** on Linux has any number, and QEMU's
+  virtio-net computes RSS itself (in software, or in eBPF when it can load it).
+- **Decision.**
+  1. **Negotiation.** With `devices.virtio_net_queues = "auto"` (the default, ADR-313) the driver asks for one pair
+     per CPU (the data cores are not known before the store opens; at most 16, `MAX_PAIRS`) and offers to accept
+     `VIRTIO_NET_F_MQ`, `VIRTIO_NET_F_CTRL_VQ` and `VIRTIO_NET_F_RSS`. It uses more than one pair only when the
+     device accepted **all three**, its `max_virtqueue_pairs` is at least 2, and its RSS takes a 40-byte key, a
+     128-entry indirection table and the TCP/IPv4 hash (`rss_max_key_size`, `rss_max_indirection_table_length`,
+     `supported_hash_types`; every field checked, `net::plan`). Pairs = min(asked, 16, the device's maximum).
+     Anything less is **one pair, exactly as before**, with the reason on the boot line (`net: one queue pair:
+     ...`). `"single"` asks for one pair and negotiates none of the three.
+  2. **No multiqueue without RSS.** A device that offers MQ but not RSS (the common KVM setup: libvirt
+     `<driver queues='N'/>` with vhost, and no eBPF RSS) would place flows by its own hash, which the kernel cannot
+     know; Linux tap's automatic steering even moves a flow to the queue of the guest's last transmit, so frames of
+     one flow could arrive on two queues and be reordered between cores. MQ is still negotiated there (harmless:
+     multiqueue starts disabled until the driver configures it, §5.1.6.5.5) but only pair 0 is set up and used.
+  3. **Bring-up.** Pairs 0..n-1 (receive queue 2k, transmit queue 2k+1) and the control queue (index
+     2 × `max_virtqueue_pairs`) are set up before `DRIVER_OK`; pair 0 is used at once. When the data cores are known
+     (`netproto::prepare`, before they start), the RSS configuration goes out on the control queue (ADR-311);
+     only if the device answers `VIRTIO_NET_OK` for that very chain, within one second, are pairs 1.. handed to
+     their cores. Otherwise one pair: the device keeps steering to pair 0 alone, the other pairs are dropped
+     unused (`Single::Refused`).
+  4. **One pair per data core.** Pair c belongs to data core c (pair 0 to core 0, the dispatcher). The pairs in
+     use are min(pairs set up, data cores); with more cores than pairs, the cores without a pair are served by
+     core 0 as before (ADR-311). With storage, the last CPU is the DB core (ADR-030, in RAM as on a disk), so a
+     2-vCPU machine has one data core and uses one pair (`net: one queue pair: one data core (the NIC offers 2;
+     two or more data cores would use them)`).
+  5. **The queue pair moves to its core.** `urmqtt_virtio::net::NetQueue` holds a pair's two rings, its bounce
+     buffers and a copy of the notification window (`bus::Kick`, a `Doorbell` for virtio-pci), so the core that
+     owns it receives, transmits, recycles and kicks without any lock or shared state. `VirtioNet` keeps pair 0
+     (reached through `Deref`, so core 0's code is unchanged) and the control queue.
+  6. **Hash report is not negotiated** (`VIRTIO_NET_F_HASH_REPORT`). It would add 8 bytes to every header and
+     report a hash the kernel must not trust anyway; the queue a frame arrives on already carries the device's
+     decision, and the worker checks it by computing the same hash (ADR-311).
+  7. **Memory.** Each pair has two queues of up to 1024 descriptors (what the device allows, ADR-266) with 2 KiB
+     bounce buffers: 4 MiB per pair at 1024, 1 MiB at QEMU's default of 256. A pair is set up per CPU, including
+     the DB core's, which is never used (one pair's worth of DMA memory wasted on a machine with storage; a
+     smaller first guess would need the store's decision before the NIC's).
+- **Upgrade.** A device that offers neither MQ nor RSS (QEMU's default, `mq=off`) is driven as in v0.5.0, bit for
+  bit. A device that offers MQ (with or without RSS) now has MQ, the control queue and, when offered, RSS
+  negotiated; with RSS and enough pairs the broker switches to one pair per data core at the first boot. There is
+  no stored state: going back to v0.5.0, or to `"single"`, is a reboot.
+- **Verification.** See ADR-314.
+
+## ADR-311 — Steering: one table for the kernel and the device; a frame of another core goes to core 0; a receive interrupt per pair (NEXT-6)
+
+- **Status:** Accepted (NEXT-6). Amends ADR-032 (`core_of_flow`), ADR-270 (the receive interrupt, now per pair).
+- **Decision.**
+  1. **One indirection table.** RSS picks `table[hash mod 128]`; the kernel picked `hash mod workers`, which a
+     128-entry table can only match for a power of two. Once the device has accepted the table, the kernel's
+     steering becomes the same lookup (`urmqtt_net::rss::core_by_table`: `first + (h mod 128) mod count`, which is
+     the table's entry, a test checks both for every hash of a sample): entry i names core `workers.start + i mod
+     workers.len()`, and the device's entry is that core's pair, or pair 0 when that core has none (more cores than
+     pairs). Without multiqueue the steering stays `hash mod workers`, unchanged. A 128-entry table cannot split
+     evenly over 3, 5, 6 or 7 cores (7 cores: 19 or 18 entries, +3.9 % / -1.6 % of a fair share); the spread test
+     over one source address and every ephemeral port range allows 6 % (it allows 4 % for the modulo).
+     **Home shards (`home_of`, persisted sessions) are untouched:** only the transport core of a flow follows the
+     table.
+  2. **Key and hash type.** The Microsoft key (`rss::DEFAULT_KEY`, ADR-032) and `VIRTIO_NET_RSS_HASH_TYPE_TCPv4`
+     only, `unclassified_queue = 0`: ARP, ICMP, UDP (DHCP, SNTP, syslog/statsd replies) and anything else the device
+     does not hash go to pair 0, i.e. to core 0, which keeps ARP, DHCP, ICMP and the echo port (ADR-032). TCP over
+     IPv4 to any port is hashed; the dispatcher's rule decides as before: a TCP frame to an MQTT port (the TLS,
+     plaintext, WebSocket and metrics listeners) belongs to the core of its flow, anything else to core 0.
+  3. **A worker checks every frame.** Core c takes frames from its own pair, classifies each with the dispatcher's
+     rule (`netproto::owner`) and keeps it only if the flow is c's. Any other frame (a TCP frame to a port core 0
+     serves, or a frame a device misplaced) is **forwarded to core 0** over the existing c→0 ring, tagged
+     (`FrameBuf::rx`), and core 0 steers it exactly as if it had arrived on pair 0 (to its owner, or to its own
+     stack). A device that steered by another hash would therefore cost a hop per frame, never a lost or
+     misdelivered frame. **No reordering within a flow:** a flow's frames all arrive on one queue (the table does
+     not change after boot), and both paths (own queue; queue → c→0 ring → core 0 → 0→c ring) are FIFO. Counted per
+     pair (`forwarded`, ADR-312); the smoke rig requires it to stay 0 for MQTT traffic.
+  4. **Transmit on the own pair.** A worker with a pair queues its frames on its own transmit queue, directly; a
+     full queue keeps up to 4096 frames waiting in order (ADR-223's rule, per pair), beyond that it drops (counted
+     as a NIC drop). A worker without a pair, and core 0, transmit as before.
+  5. **The receive interrupt per pair (ADR-270 generalised).** Pair k's receive queue signals MSI-X entry k. At
+     probe the entries 1.. get their own interrupt (a further GICv2m SPI, or a further local APIC vector) and are
+     written **masked**, because the APIC ID of core k is not known before the other CPUs start; core k, when it
+     starts, aims entry k at itself (`devices::route_net_queue`: the SPI routed to it in the distributor, or the MSI
+     address rewritten with its APIC ID) and unmasks it. Each pair has its own `RxWake` with ADR-270's suppression
+     protocol, hold, **probation and polling fallback**, its own counters and its own boot lines (`net: queue pair k
+     on core k: ...; receive wake-up: interrupt (MSI-X via local APIC vector 66, to core 1), on probation ...`,
+     `net: receive interrupt of queue pair k verified: ...`, the fallback warning). A worker polls its pair while it
+     has connections of its own (its flows arrive there), at 200 us (polling) or 1 ms (probation), as core 0 does.
+  6. **Where a pair is polled.** The GICv3 ITS as set up by ADR-270 has one collection (core 0): pairs 1.. are
+     polled there (`Why::CoreZeroOnly`), as is a core whose APIC ID is above 254 (8-bit MSI destination), a pair
+     beyond the MSI-X table (`vectors` too small), or when `devices.virtio_net_interrupt = "off"`.
+  7. **Unsafe.** No new `unsafe`: the MSI-X table writes are the existing one (entry 0, ADR-270) generalised to
+     entry k behind a bounds check against the table size read from the capability (`MsixTable::write`); the
+     driver's buffer accesses moved from `VirtioNet` to `NetQueue` unchanged.
+
+## ADR-312 — Per-pair counters and what the operator sees (NEXT-6)
+
+- **Status:** Accepted (NEXT-6).
+- **Decision.** Each pair counts, on the core that owns it: frames received, frames sent, frames forwarded to core 0,
+  frames that found its transmit queue full, armed sleeps and those that ended with a frame and no interrupt, the
+  most frames seen waiting in its receive queue; the interrupt counter is per pair. They appear:
+  1. in `$SYS/broker/net/queues` (the pairs in use, 1 without multiqueue) and `$SYS/broker/net/queue/{received,
+     sent, forwarded, interrupts}/<pair>`; in the info query's JSON as `"net":{"mtu":..,"queues":[{"received":..,
+     "sent":..,"forwarded":..,"interrupts":..}, ...]}`; on the metrics endpoint as `urmqtt_network_queue_pairs` and
+     `urmqtt_network_queue_frames_{received,sent,forwarded}_total{queue="k"}`,
+     `urmqtt_network_queue_interrupts_total{queue="k"}` (`queue` is a new bounded label: at most 16 values, from
+     the kernel). Without multiqueue there is one pair, pair 0, and its counters are the whole NIC's. New topics
+     only: nothing existing changed name or meaning;
+  2. every 5 s on the console while a pair moves frames (multiqueue only): `net: queue pair k (core k): R frame(s)
+     received, S sent, F forwarded to core 0, T with the transmit queue full, I receive interrupt(s) (A armed
+     sleep(s), M ended with a frame and no interrupt), receive queue peak P of N`;
+  3. at boot: `net: multiqueue: P queue pairs (the device offers M), RSS with the Toeplitz key and a 128-entry
+     table: ...` or `net: one queue pair: <reason>`, and one line per worker pair (descriptors, wake-up mode).
+
+## ADR-313 — `devices.virtio_net_queues = "auto" | "single"`, configuration format 19 (NEXT-6)
+
+- **Status:** Accepted (NEXT-6). Tag 395 (apart from the other v0.6.0 items' tags so that items built in parallel do
+  not collide), format 19 (reserved for this item).
+- **Decision.** `"auto"`, the default, writes no record, so every existing configuration keeps its format and boots
+  on an older kernel: an upgrade to this kernel turns multiqueue on by itself where the device offers MQ and RSS
+  (ADR-310 point 1), and only there. `"single"` asks for one pair and negotiates none of MQ, the control queue
+  and RSS (the device is driven exactly as by v0.5.0); it needs format 19, so an older kernel refuses the image
+  instead of ignoring the request. Why default on: the change is not on the network surface (the same ports and
+  protocols; the hypervisor's device is already trusted, ADR-270), it falls back to one pair whenever anything
+  is missing or refused, and a host offers MQ with RSS only when its operator configured it (QEMU `mq=on,rss=on`
+  with a multi-queue tap, or vhost with eBPF RSS). `"single"` is the escape for a host whose multiqueue
+  misbehaves. Schema, the `urmqtt-config` tool, the builder page (translations in all 15 languages) and the
+  template check (a v0.5.0 or format-18 template refuses `"single"` with the reason) know the key.
+
+## ADR-314 — Multiqueue: how it was verified, what it gains, what is not done (NEXT-6)
+
+- **Status:** Accepted (NEXT-6).
+- **Verification.**
+  1. **Host tests.** `crates/virtio/src/net/tests.rs` against the fake device (which can now play the control
+     queue): one pair negotiates nothing new and works as before; `plan` checks every configuration field (no MQ,
+     MQ without RSS or without the control queue, 0/1/0x8001 pairs, a short key, a short table, no TCP/IPv4
+     hash); the RSS command's layout byte for byte; four pairs with RSS hand out pairs 1..3 once and only after the
+     device's OK, each receiving and transmitting on its own queues with its own doorbell; a refusal, silence, an
+     answer for another chain or without the byte all leave one pair working; a table naming a pair not in use is
+     never sent; fewer pairs than asked; a second pair or the control queue that cannot be set up; hostile used
+     entries on a taken pair; a full transmit queue counted. `crates/net/src/rss.rs`: the table and the
+     computation agree; one source address spreads over 2..8 workers by the table. `$SYS`, JSON and metrics tests
+     with two pairs; configuration format 19 in `urmqtt-cfg`, `-config`, `-config-schema`, the CLI's template test
+     and the builder (`tools/builder/test/netqueues.test.mjs`).
+  2. **Fuzzing.** `virtio_net_mq`: any offered features, multiqueue/RSS fields, queue sizes, answer to the RSS
+     command (none, refusal, wrong head, no byte), then completions on any queue for any head and length; the
+     pairs never exceed what was asked, the driver's limit or the device's maximum, a pair leaves the driver only
+     after an accepted table, frames never exceed the buffer. Two minutes on the M4 Pro: 124 000 runs (slow by
+     design: a silent device costs the driver's one-second timeout on the fake clock), no finding.
+  3. **QEMU smoke, `SMOKE_ONLY=mq`** (both architectures). On QEMU's user network with `mq=on,rss=on` (MQ and RSS
+     offered, one pair): the fallback line and three QoS 1 round trips over mutual TLS; with `"single"` no line
+     and the same round trips. Then the tap rig (`scripts/mq-rig.sh`, Linux; on the Mac inside Docker with
+     `URMQTT_MQ_DOCKER=urmqtt-mq-rig`, `docs/perf-results/next6-mq/Dockerfile`, QEMU 8.2.2 TCG): a multi-queue tap
+     with `mq=on,rss=on,vectors=2N+2`, 12 QoS 1 round trips over mutual TLS on 24 new connections, and per worker
+     pair: frames received, **none forwarded** (the device's RSS and the kernel's table agree), the wake-up mode
+     (aarch64 GICv3 ITS: polled with the reason; x86_64 local APIC and aarch64 GICv2m: the interrupt verified on
+     the worker's core). Cases: 4 vCPUs and 4 queues (3 data cores, 3 pairs), 3 vCPUs and 3 queues (2 pairs), 4
+     vCPUs and 2 queues (2 pairs; the third core's flows through pair 0 and core 0), 2 vCPUs and 2 queues (one
+     data core: one pair, and the line says so), and on aarch64 4 vCPUs with a GICv2. QEMU loaded its eBPF RSS
+     program nowhere (Docker's kernel refused it) and used its software RSS, which computes the same Toeplitz hash.
+  4. Regression: `SMOKE_ONLY=misc` `net_irq` (the single pair's receive interrupt, auto and off) on aarch64 HVF;
+     the metrics group (the new label).
+- **Gain.** Measured on the local rig only (PERFORMANCE.md section 14): QEMU TCG inside Docker's 4-CPU VM on the
+  Mac, where the guest's vCPUs, QEMU's network thread and the load generator share four host CPUs. The numbers are
+  in section 14 with what they can and cannot say; no KVM host was used (none is available to this work, D-9),
+  so the gain on a real hypervisor is unmeasured.
+- **Not done (listed, not hidden).**
+  - No KVM host: vhost-net with eBPF RSS (how a cloud would offer it), real interrupt delivery to vCPUs other
+    than 0, and the throughput gain on a hypervisor are not verified. The rig's TCG cannot show a CPU gain fairly.
+  - MQ without RSS stays one pair (point 2 of ADR-310), even though such hosts are common; using their queues
+    (with protection against a flow moving between queues) is a later item.
+  - No hash report (ADR-310 point 6); no IPv6 hash types (no IPv6, NEXT-1); no change of the table at run time
+    (a core cannot be taken out of service).
+  - The GICv3 ITS serves core 0 only, so on an ITS-only aarch64 host (the netcup ARM VPS, TCG) worker pairs are
+    polled (200 us while they have connections).
+  - One pair per CPU is set up at probe, the DB core's included (4 MiB at 1024 descriptors, never used).
+  - The per-pair 5 s console line exists only with multiqueue (`$SYS` and the metrics have the counters always).
+  - A device that answers the RSS command **after** the one-second timeout is not handled: the driver has gone back
+    to one pair and nobody polls pairs 1.., so a device that applied the table late would put those flows on
+    queues no core reads (their clients would time out). QEMU handles the control queue as soon as it is kicked,
+    so this needs a broken device;
+    `devices.virtio_net_queues = "single"` avoids the command altogether. Recovering would need a device reset or
+    core 0 draining the abandoned pairs.
+  - A device whose `max_virtqueue_pairs` is 0x8000 (the specification's maximum) has its control queue at index
+    0x10000, which no 16-bit queue number names: it gets one pair (`Single::QueueSetup`).
+
+## ADR-315 — An active open in the TCP stack: SYN-SENT, RFC 6528 sequence numbers, ephemeral ports (NEXT-7, D-6)
+
+- **Status:** Accepted (NEXT-7). Amends ADR-033 ("passive open only"): the stack can now open connections, but
+  only where the kernel allows it (`TcpStack::set_max_active`, 0 by default) and only to destinations the image's
+  configuration names (ADR-318). D-6 ("is an outbound TCP client acceptable at all?") is answered by the owner's
+  request to build NEXT-7 for v0.6.0, with the bounds of this ADR and ADR-318.
+- **Context.** Bridging (NEXT-8), TLS log shipping (NEXT-9's left-over, ADR-294), a DNS client (NEXT-10), NTS and
+  any cluster protocol (LATER-1) need the broker to start a connection. The stack had no SYN-SENT state, no
+  initial sequence number of its own (the SYN cookie was its only ISN) and no notion of a local port it chose.
+
+1. **Off unless allowed.** `TcpStack::connect` fails with `ConnectError::NotAllowed` while the stack's limit of
+   active connections is 0, which is the default; the kernel raises it on core 0 only, and only when an outbound
+   user is configured (today `observability.log_tls`, ADR-318; `outbound::MAX_ACTIVE` = 4). The worker cores'
+   stacks never open a connection. At most 64 per stack (`MAX_ACTIVE_LIMIT`). A connection also needs a local
+   address (`NoAddress` before the DHCP lease), a unicast destination that is not our own address
+   (`BadDestination`: 0.0.0.0/8, 127.0.0.0/8 and 224.0.0.0/3 are refused, port 0 too), room in the connection
+   table (`TableFull`, the same table and `max_conns` as the server side) and a free 4-tuple (`PortInUse`).
+2. **SYN-SENT is the only half-open state, and it is bounded.** The server side keeps none (SYN cookies, ADR-033);
+   an active open keeps its `Conn` from the SYN on, so the number of them is bounded by point 1, not by a peer.
+3. **The SYN** carries the link's MSS, SACK-permitted, timestamps (TSval = the stack's clock) and, when the stack
+   is configured for scaling (`rcv_wnd_scaled` > 0), the window-scale shift the server side uses. Its window is
+   the unscaled `rcv_wnd`. It is retransmitted with the doubling RTO (1, 2, 4, 8, 16 s; the SYNs leave at 0, 1,
+   3, 7, 15 and 31 s) and the connection is given up at 63 s with `CloseReason::Timeout` (`SYN_RETRIES` = 5,
+   1 to 10 with `set_syn_retries`). The same ISS every time.
+4. **The initial sequence number** is RFC 6528's: SipHash-2-4 of (local address, local port, remote address,
+   remote port) under a 128-bit secret, plus a clock of 250 ticks per millisecond (4 µs). The secret is two
+   SipHash outputs of the SYN-cookie key under the domain `urmqtt-tcp-isn` (a PRF of a random per-boot key: it
+   tells nothing about the cookie key). The cookie key rotates (H3); the ISN key is fixed per stack, which RFC
+   6528 allows (the clock moves the ISN).
+5. **The SYN-SENT rules are RFC 9293 §3.10.7.3:** an ACK that does not acknowledge exactly our SYN gets a RST at
+   its acknowledgement number (unless it is a RST) and changes nothing; a RST is believed only with an
+   acceptable ACK (then `CloseReason::Refused`, new); a RST without an ACK, a bare ACK and a bare SYN are dropped.
+   **No simultaneous open** (*decided*): a SYN without an ACK is dropped, not answered from SYN-RECEIVED; the
+   two sides' retransmissions resolve it, and no configured destination opens connections to us. SYN and FIN
+   together are refused by the parser, as on the server side.
+6. **Options from the SYN-ACK:** MSS (absent: 536; below 536: the connection is refused with a RST, as the server
+   side refuses such a SYN, H3), window scaling only when both offered it (a shift above 14 is used as 14, RFC
+   7323 §2.3), SACK when the peer permits it, timestamps when the peer sends them. The SYN-ACK's window is not
+   scaled (RFC 7323 §2.2). The SYN's round trip is the first RTT sample unless the SYN was retransmitted (Karn);
+   then the data's RTO starts at 3 s (RFC 6298 §5.7). Data on the SYN-ACK is delivered after `connected`.
+7. **After the handshake the connection is the server side's**: the same `Conn`, congestion control, SACK,
+   out-of-order buffer, persist timer, RFC 5961 checks and close states (no TIME-WAIT, ADR-033). `send` takes
+   nothing in SYN-SENT; `close` in SYN-SENT sends the FIN after the handshake; `abort` in SYN-SENT sends a bare
+   RST at ISS + 1.
+8. **Ephemeral ports** (*decided*): 49152 to 65535 (RFC 6335's dynamic range). `TcpStack::ephemeral_port` starts
+   the search at a keyed hash (the ISN secret) of the destination, a counter and the clock (RFC 6056 algorithm 3
+   in spirit), and skips a port that a listener of this stack has, that the caller reserves, or that the same
+   4-tuple already uses. The kernel reserves every port it steers (`netproto::reserved_port`: the TLS, plaintext,
+   WebSocket and metrics listeners and the echo port), so **the replies to an outbound connection are never
+   steered to a worker core**: core 0's dispatcher keeps every TCP frame whose destination port is not a
+   listener's, and core 0 owns the outbound connections. No TIME-WAIT on our side means a 4-tuple could be
+   reused within 2 MSL; the random start makes that one chance in 16 384 per connection, and the fresh ISN
+   makes an old segment fall outside the window.
+9. **The `App` trait** gains `connected(c)` with a default that ignores it, so the server-side applications are
+   unchanged; a failed open ends in `closed(c, Refused | Timeout)`. New counters: `active_opens`,
+   `active_established`, `active_refused`, `active_timeouts`, `syn_retransmits`.
+10. **Verification.** `crates/tcp/src/active_tests.rs` (the SYN's options, negotiation with and without options,
+    the retransmission schedule and the give-up, Karn after a lost SYN, every SYN-SENT rule, a tiny MSS, data on
+    the SYN-ACK, close and abort in SYN-SENT, every `ConnectError`, the port choice against listeners, reserved
+    ports and used tuples, the ISN's key and clock, the server and client sides on one stack) and **our client
+    against our own server over a link that drops (0 to 10 %), duplicates and reorders** (40 seeds, 200 000
+    bytes up and 50 000 down, closed normally; a dead link ends in `Timeout`). `model_active.rs`: the H3
+    proptest model extended to the active open (ROADMAP NEXT-7 "Verify"; checked to fail when its give-up time
+    is wrong). Fuzz `tcp_active` (two minutes: 1.05 million runs, no finding). The `Conn` stays within 112 bytes
+    (the size test).
+
+## ADR-316 — Outbound connections in the kernel: one internal API on core 0, a reconnect policy, bounded queues (NEXT-7)
+
+- **Status:** Accepted (NEXT-7). The users after this item (NEXT-8 export bridge, NEXT-10 DNS, a later TLS client
+  of another kind) build on it; NEXT-7's own user is ADR-318.
+- **Context.** A user of an outbound connection should not have to know about ARP, the dispatcher, ephemeral
+  ports, TLS state or retry timing, and none of those may grow without bound when the far end is slow or gone.
+
+1. **Core 0 owns every outbound connection.** It owns the NIC, answers ARP, holds the DHCP lease, and its
+   dispatcher keeps every TCP frame whose destination port is not a steered listener's (ADR-315 point 8). The
+   connection lives in core 0's `TcpStack`; its events reach the user through core 0's `App` (`CoreApp`, which
+   asks the owner first, then the echo service, then MQTT).
+2. **`crates/kernel/src/outbound.rs`, `TlsLink`:** `new(what, destination, server name, anchors)`, `poll(now,
+   iface, tcp, reserved, emit)` from core 0's loop, the four TCP events (`on_connected`, `on_data`,
+   `on_peer_closed`, `on_closed`, routed by `owns(c)`), and for its user `is_up`, `room`, `write`,
+   `take_received` and `stats`. TCP events never touch the stack (it is borrowed while it calls them): they
+   leave bytes and requests (close, abort with a reason) that `poll` carries out.
+3. **The reconnect policy is sans-IO and host-tested** (`urmqtt_tcp::dial::Dialer`, `Policy::DEFAULT`): the first
+   attempt at once; ARP for the next hop first (3 requests 1 s apart, then the attempt counts as failed), since
+   the interface drops a segment for an unknown neighbour; a connection must be *up* (for TLS: the handshake
+   done) within 30 s or it is aborted; after a failure the wait is `min(300 s, 1 s · 2^(n-1))`, half fixed and
+   half random (equal jitter, from the CSPRNG's seed; not a secret); a connection that was up for 10 s or more
+   resets the backoff when it ends, a shorter one counts as a failure, so a peer that accepts and closes at once
+   is retried at the backoff's pace. The link also waits for the wall clock: certificates are checked against
+   it, and without one every handshake would fail (it says so once).
+4. **Bounds.** Ciphertext waiting for the TCP send queue: 64 KiB; plaintext received from the peer: 16 KiB (more
+   is dropped and counted); `room()` lets the user write only while TLS and TCP hold less than 64 KiB together,
+   which is also the most a broken connection can lose. A user's own queue is `urmqtt_tcp::queue::RecordQueue`:
+   whole records within a byte bound, the oldest dropped (and counted) to make room, a record larger than the
+   bound refused; nothing grows with the peer's stall (the NEXT-8 requirement "a stalled upstream must not grow
+   the heap" holds for it by construction).
+5. **Delivery is at most once** (*decided*): a record handed to a connection that then breaks is not sent again
+   (TCP does not say what the peer read). A user that needs more needs an acknowledgement in its own protocol
+   (an MQTT bridge has PUBACK; NEXT-8).
+6. **Logging.** Each attempt that fails says why and when the next one is (`warn`), a connection that comes up
+   says so with the certificate name it verified (`info`); lines are per attempt, and the backoff bounds their
+   rate.
+
+## ADR-317 — The outbound TLS client: TLS 1.3, the configured anchors only, the name, the wall clock (NEXT-7)
+
+- **Status:** Accepted (NEXT-7). `urmqtt_tls::client`, built with the `client` feature, is now in every image (it
+  was for dev images' self-tests only, M17).
+- **Context.** A broker that ships its log or bridges its messages to a server it does not authenticate gives
+  them to whoever can answer on the path. rustls (already in the image) has the client state machine and webpki's
+  server verification; the question is what it trusts.
+
+1. **`TlsClient::verifying(anchors)`**: the server's chain is verified against the configured PEM anchors and
+   **nothing else** (no system or built-in root store; a configuration with no usable anchor is refused at boot
+   and the user stays off). Name verification is webpki's: the configured DNS name, or, when none is configured,
+   the destination's IPv4 address, which must then be an IP SAN of the certificate. Validity is checked against
+   the kernel's wall clock (`KernelTime`, the same as the server side); without a clock the handshake fails (a
+   test proves it), and the link waits for one (ADR-316 point 3).
+2. **TLS 1.3 only, no resumption, no early data, no client certificate** (*decided*). A collector that requires
+   client authentication is not supported by NEXT-7 (ADR-319); reusing the server's key for it would mix the
+   broker's identity as a server with a client identity the CA did not issue for that purpose.
+3. **The session is sans-IO** (`ClientSession`): `write`/`flush` encrypt only after the handshake (data written
+   before waits, a test checks it), `close` queues a close_notify after the data, `is_closed` after ours or the
+   peer's. An unfinished record is held up to 16 KiB + 261 bytes (`MAX_PENDING_IN`), more ends the session as
+   not TLS; during the handshake six records' worth (`MAX_PENDING_HANDSHAKE`), because rustls joins the server's
+   Certificate message (up to 64 KiB) across records in the caller's buffer (review fix: a chain over one record
+   was refused as not TLS, `a_chain_larger_than_one_record_is_accepted`). Errors are rustls's, logged with their text (`invalid peer certificate: UnknownIssuer`).
+4. **What it adds to the trusted base:** rustls's client handshake state machine and webpki's server-certificate
+   path (EKU serverAuth, name matching) become reachable from the network, but only from the configured
+   destination, and only after a TCP connection the broker itself opened. The crypto provider and record
+   protection are the same as the server side's. No new crate and no new `unsafe`. AUDIT.md §1, §2.
+5. **Verification.** `crates/tls/tests/outbound_client.rs` (our client against our server-only server: DNS name,
+   second DNS name, IP SAN; data after the handshake; close_notify; a wrong name, an IP not in the certificate
+   and an unknown issuer each fail; no anchors refused; not-TLS bytes and an oversized pending record cut off),
+   `outbound_no_clock.rs`; fuzz `tls_client` (arbitrary server bytes after the ClientHello: never established,
+   no application data, bounded answers; seeds include a real server flight; two minutes: 1.5 million runs, no
+   finding); the smoke scenarios of ADR-318.
+
+## ADR-318 — Log shipping over TLS, the first user; `observability.log_tls*`, configuration format 20 (NEXT-7)
+
+- **Status:** Accepted (NEXT-7). Closes the "TLS for log shipping" left-over of ADR-294 for the syslog path
+  (statsd stays UDP, ADR-319). Off by default.
+- **Context.** SECURITY.md's residual risk "Syslog and statsd are plain UDP": the log lines say which identities
+  connect, from where, and what was refused. A collector reachable only over the internet could not be used.
+
+1. **The keys** (`[observability]`, tags 450 to 453, **format 20**; format 19 belongs to another v0.6.0 item and
+   is refused like 10 until it lands): `log_tls` (`"a.b.c.d:port"`, an IPv4 literal: there is no DNS, NEXT-10;
+   empty: off), `log_tls_name` (the DNS name the collector's certificate carries; empty: its address, as an IP
+   SAN), `log_tls_ca` (PEM files, 1 to 8, required with `log_tls`; read and checked by the packer like the
+   operational CAs, valid for `trust.min_anchor_days`), `log_tls_queue_kb` (16 to 4096, default 256). The rules
+   (in `urmqtt_cfg::check`, the kernel's own check, and in the TOML path with the same messages): anchors
+   required with a collector; a unicast address (not 0/8, 127/8, 224/3) and a port; a valid DNS name (RFC 1123
+   labels, no wildcard, not an IPv4 literal); **no collector key without a collector** (a leftover is a mistake,
+   said, not ignored). Unset, the keys write nothing and the blob keeps its version; set, they need format 20,
+   so a kernel that does not know them refuses the image by its version instead of not shipping without a word.
+   `urmqtt-config pack`, `show` and `verify` print the outbound connection; the builder page has the keys and a
+   `logca` file slot (machine-translated labels, 15 languages).
+2. **The message** is the one the UDP path sends (RFC 5424, facility local0, the record's own time), framed by
+   octet counting (RFC 5425 §4.3, `MSG-LEN SP SYSLOG-MSG`) over TLS 1.3 (ADR-317) to the collector, port of the
+   operator's choice (6514 is RFC 5425's).
+3. **One drain for both paths.** `ops.rs` takes the records from the log ring every 100 ms; with only the UDP
+   collector configured they stay in the ring until it is reachable (as before); with the TLS collector they are
+   taken every time into its queue (`log_tls_queue_kb`), and a UDP collector that is unreachable at that moment
+   misses them (counted as unsent, as the UDP path always counts). The queue keeps the newest records; the
+   dropped ones are reported in the log at most once a minute and counted.
+4. **Records from boot are not lost** while the collector is still unreachable: they wait in the queue (smoke:
+   the collector receives the `memmap` lines of the first second).
+5. **Statsd** (when configured) gains `urmqtt.logtls.up`, `.records_sent`, `.records_dropped` (counters),
+   `.connections`, `.failures`, `.attempts`, `.bytes_out` and `.rx_dropped_bytes` (gauges of the totals).
+6. **Smoke, `SMOKE_ONLY=logtls`** (aarch64 under HVF and TCG, x86_64 under TCG): `scripts/logtls-sink.py`, a
+   Python TLS 1.3 collector on the host's loopback (the guest's 10.0.2.2) with a certificate the scenario makes
+   from the dev CA for `logsink.test` and 10.0.2.2; the broker connects, verifies, and the collector receives
+   well-formed RFC 5425 frames with the boot's records and the live ones; the collector is stopped and started
+   again, the broker notices, reconnects after its backoff, and the collector receives the line that says so. A
+   second scenario gives the collector a self-signed certificate with the same names: the handshake fails with
+   `invalid peer certificate: UnknownIssuer`, the broker says when it tries again, and the collector receives
+   no message. CI runs the group.
+
+## ADR-319 — What NEXT-7 does not do, and what upgrading means (NEXT-7)
+
+- **Status:** Accepted (NEXT-7).
+
+1. **Upgrade.** A configuration without `observability.log_tls` is the blob it was; the kernel opens no
+   connection (core 0's stack is allowed none) and the network surface is unchanged. The only visible change is
+   the boot line `ops: syslog …, statsd …, log over TLS off, …`. Store schema unchanged (no store change).
+2. **Downgrade.** An image with `log_tls` set is format 20; an older kernel refuses it at boot by the version
+   (the operator sees why), and `urmqtt-config` refuses to put it into an older template. Without the keys, a
+   v0.6.0 image runs on an older kernel as before.
+3. **Security effects** (SECURITY.md, AUDIT.md). The broker now starts connections, but only to the address the
+   image names: no peer, device, control message or `$SYS` topic can choose a destination, so there is **no
+   server-side request forgery from remote input**; whoever writes the configuration chooses where the log goes,
+   as with the UDP collectors. The trusted base grows by the TCP active open (own code, fuzzed and modelled) and
+   rustls's client path with webpki's server verification (third party, reachable from the configured peer
+   only). The log lines leave the private network encrypted and to an authenticated collector.
+4. **Not done (listed, not hidden):**
+   - **No DNS** (NEXT-10): the collector is an IPv4 address; the certificate name is checked, the address is not
+     looked up.
+   - **No client certificate** for the collector (ADR-317 point 2); a collector that requires one refuses the
+     broker.
+   - **Statsd stays plain UDP**; only the syslog path has a TLS form. `$SYS` and the Prometheus endpoint do not
+     show the log connection (statsd and the log do).
+   - **At-most-once delivery** (ADR-316 point 5): up to 64 KiB written into a connection that then breaks can be
+     lost; no RFC 5424 sequence id, no application acknowledgement (RFC 5425 has none).
+   - **No IPv6**, no proxy, no simultaneous open, no TCP keepalive on the outbound connection (a collector that
+     vanishes silently is noticed when data is not acknowledged: the retransmissions give up after about four
+     minutes, or at once when it resets).
+   - **No export bridge, no webhooks, no NTS, no clustering** (NEXT-8, LATER-1): the API of ADR-316 is their
+     base; each needs its own ADR, configuration and limits.
+   - Only one outbound user exists, so `outbound::MAX_ACTIVE` (4) is not reached; the limit is tested in the
+     stack (`connect_refuses_what_it_must`), not with several users in a kernel.
+   - No performance measurement of the TLS client's handshake cost on core 0 (one handshake per connection;
+     with the backoff at most one every second).
+
+## ADR-320 — Sealed images: the installed disk pins its configuration, so it boots under Secure Boot (LATER-6, H8-W1)
+
+- **Status:** Accepted. Amends ADR-217 (the installed disk lists the configuration module without a hash) for signed
+  images only, and ADR-250/ADR-251. Closes AUDIT H8-W1.
+- **Context.** Under UEFI Secure Boot Limine refuses every file that its `limine.conf` names without a hash ("Secure
+  Boot is active and URI `boot():/boot/urmqtt.cfg` has no associated hash"). ADR-217 left the installed disk's module
+  unhashed on purpose: the installer writes the configuration it booted with into the installation image's
+  unconfigured slot, and the image (pinned by the ISO's menu) must not depend on the configuration. So a disk
+  installed from a signed ISO, the raw `.img` of a signed build and an ESP staged into an A/B slot did not boot with
+  Secure Boot enforced (asserted as `installed-disk-known-limit`). ADR-251 said the fix was "a per-machine ESP whose
+  module is pinned and whose loader is re-enrolled and re-signed by the key's owner at install time".
+- **What was found.** No per-machine step is needed. A signed image is already built for one configuration (ADR-251,
+  limit 1: configure, then sign), and the bytes the installer writes into the slot are exactly the ISO's own
+  `urmqtt.cfg` module (the boot slot, marker `SLOT`). Its BLAKE2b is known when the image is built.
+- **Decision.**
+  1. **Sealing.** `scripts/mkiso.sh --universal --seal` (the default with `--sb-key`; `--no-seal` turns it off) writes
+     `module_path: boot():/boot/urmqtt.cfg#<blake2b of the configured slot>` into the installed disk's no-menu
+     `limine.conf` as well, before the ESP's loaders are enrolled and signed. The installation image keeps its
+     unconfigured slot (ADR-217: the customer's keys are not in it a second time); what changes is that its
+     `limine.conf` names the configuration the installer will write. The same ESP is in `--esp-out` and in
+     `--disk-out` (both patched with that slot), so the raw image boots too. Unsigned images are not sealed: their
+     behaviour, hashes and bytes are unchanged.
+  2. **Everything that puts a configuration into a sealed image puts only that one in, or refuses before writing.**
+     The pins are found by text (`urmqtt_cfg::seal`, no FAT parsing; the slot itself is skipped so a configuration's
+     own strings cannot look like a pin) and compared with the BLAKE2b of the slot as it would be on the disk:
+     - the **installer** (`write_image_with`, `write_boot_image_with`) refuses an image sealed to another
+       configuration, or a sealed image with no configuration, with `InstallError::SealedToOther`, before its first
+       write, and says on the console which image to rebuild; the disk is untouched;
+     - **`urmqtt-disk update-boot`, `create` and `slots stage`** (`config::carry_over`, the one place) refuse when the
+       resulting ESP's pins are not its slot's: the disk keeps its own configuration by default (ADR-217), so an ESP
+       sealed to another one is refused with the two ways out (`--replace-config`, or a sealed ESP for the disk's
+       configuration); `info`, `update-boot` and `stage` print the seal state;
+     - **`urmqtt-config pack --iso`** (and the builder page, the same code) refuses a sealed ISO: its installation
+       image (pinned by the menu) and its signed loaders would have to change. `pack --raw` takes only the pinned
+       configuration.
+  3. **A/B (NEXT-11).** The slot switch changes which partition is the ESP, not a byte inside one (ADR-295 point 5),
+     so each slot is a complete sealed, signed ESP and the chain covers both. A sealed ESP is staged as it is;
+     the carry-over rule above keeps a disk from getting a slot whose loader would refuse it.
+  4. **The kernel's TCB grows by the pin scanner** (`seal.rs`, about 60 lines, no `unsafe`) and by BLAKE2b, which the
+     installer now links (it was host-only). Both run only in `install` and only over the installation image, which
+     Limine already checked against the menu's hash.
+- **Upgrade effect.** None for existing images, disks or configurations: an unsigned image is built exactly as before,
+  and a disk without pins behaves as before in every tool. A disk installed from a sealed image is tied to its
+  configuration: changing the configuration means a new sealed ESP (ADR-321), staged into the standby slot.
+- **Testing.** Host: `urmqtt_cfg::seal` (open, matching, differing, upper-case, every cut-off length, the slot
+  skipped), the installer (`a_sealed_image_installs_only_its_own_configuration`: its own slot installs, another or
+  none writes nothing, one of two copies changed is refused), `urmqtt-disk` (`a_sealed_esp_takes_only_the_configuration_it_pins`),
+  `urmqtt-config` (`a_sealed_image_is_not_configured_afterwards`). Fuzz: `seal_pins`. QEMU, `SMOKE_ONLY=secureboot`
+  (x86_64 OVMF Secure Boot and aarch64 AAVMF Secure Boot, both enforcing): the sealed raw disk boots; the disk the
+  installer writes while running under Secure Boot boots on x86_64 and on aarch64; a tampered kernel on the sealed
+  disk is refused by Limine; the unsealed disk is still refused (the control); an A/B update to a sealed ESP boots
+  on trial and an ESP sealed to another configuration is refused by `slots stage`; and (aarch64, no Secure Boot
+  needed) the installer started from an image whose own configuration was swapped for another one refuses it and
+  leaves the target disk's bytes unchanged.
+- **Review addition: a sealed disk does not take an unsealed ESP by accident.** The A/B switch changes which partition
+  is the ESP, so if the firmware refuses the new slot's loader (unsigned) or Limine refuses its configuration (no
+  hash), the trial never starts and nothing rolls back: the machine stays down until someone reaches its console.
+  The release's own `.img` is such an ESP. `urmqtt-disk slots stage` and `update-boot` therefore refuse an unsealed
+  ESP when the disk's running ESP is sealed (`config::keep_sealed`), unless `--allow-unsealed` (a machine without
+  Secure Boot), which prints a warning. Tested on the host and in smoke `secureboot` (the A/B check).
+- **Alternatives.** Patching the pin at install time in the kernel (a FAT writer in the kernel, and a re-signed loader:
+  the kernel has no signing key, so this cannot work); a configuration partition outside the ESP (Limine reads only
+  the boot volume); hashing nothing and turning off Limine's check (not possible under Secure Boot, and it would drop
+  the configuration from the chain); a unified kernel image signed per machine (ADR-251: loses Limine's multi-arch
+  menu and the BIOS path).
+
+## ADR-321 — `sign-iso`: configure, then sign, without building a kernel (LATER-6, H8-W2)
+
+- **Status:** Accepted. Narrows AUDIT H8-W2 (the limit stays a property of the format, the tooling is now there).
+- **Context.** The template ISO cannot be configured after signing (ADR-251 limit 1): the configuration's hash is in
+  the enrolled `limine.conf`, the enrolled hash is in the signed loader. The builder page cannot sign (it would need
+  the private key). The only documented path was to build the image from source with `--config` and `--sb-key`.
+- **Decision.** `scripts/sign-loaders.sh sign-iso KEY CERT IN.iso OUT.iso` takes a **configured** universal ISO (from
+  the builder page or `urmqtt-config pack --iso`), extracts its two kernels and its configuration slot with xorriso,
+  checks that the kernels are the ones its menu pins, and rebuilds the image around them with `mkiso.sh --universal
+  --config SLOT --sb-key KEY --sb-cert CERT` (signed, sealed: ADR-320); `--config FILE` signs a template with a TOML,
+  blob or slot instead, `--disk-out`/`--esp-out` keep the raw disk and the ESP for an installed disk's A/B update.
+  It then checks both loaders' signatures. An unconfigured template is refused unless `--allow-empty` (a signed
+  template is sealed to the empty configuration and is useless). The kernels stay the release's, byte for byte (Limine
+  pins them; the operator verified the template's minisign signature first, DEPLOY.md section 3). It needs a checkout
+  of the release's tag (mkiso.sh, the vendored Limine) but no Rust toolchain for the kernel; the configuration tool is
+  built by cargo.
+- **Review addition: `--template`.** The menu check ties the kernels only to the configured ISO's own menu, and
+  whoever made that ISO chose both; the configured ISO itself carries no release signature (configuring changes its
+  bytes). `--template TPL.iso` names the release template whose minisign signature the operator verified, and
+  `sign-iso` refuses unless the configured ISO's two kernels are the template's, byte for byte. Without it, sign-iso
+  prints a NOTE saying the kernels were not tied to a release. Smoke: `sign-iso refuses kernels that are not the
+  release template's`.
+- **Equivalence.** The result is byte for byte the direct signed build of the same kernels and configuration (smoke:
+  `sign-iso of the configured unsigned ISO is the direct signed build`), so either path gives the same image to
+  attest.
+- **Not done.** Re-signing inside the builder page (refused: the key would be in the browser); re-signing an ISO in
+  place without rebuilding it (the signed loaders are larger than the unsigned ones, which would need a FAT and ISO
+  9660 writer; rebuilding is simpler and reproducible).
+
+## ADR-322 — Revocation and downgrade under Secure Boot: `dbx` by Authenticode hash; no version counter (LATER-6, H8-W6)
+
+- **Status:** Accepted. Narrows AUDIT H8-W6 further (ADR-299 narrowed it for the offline tool).
+- **Context.** An older image that is correctly signed boots: Secure Boot has no notion of versions, Limine has no
+  rollback index, and the kernel has no UEFI runtime services to keep a counter in a variable.
+- **Decision.**
+  1. **Revocation is by `dbx`.** Every signed loader of this project is a distinct binary (its enrolled
+     `limine.conf` hash differs per configuration and per release), so the firmware's own denylist of image hashes
+     revokes exactly one image: an old release's, or one built for a configuration that leaked. `scripts/sign-loaders.sh
+     authenticode FILE...` prints the Authenticode SHA-256 the firmware matches (`scripts/authenticode.py`, standard
+     library only; equal to osslsigncode's computed digest, tested), and `ovmf-vars ... --dbx-hash HASH` puts it into an
+     OVMF or AAVMF variable store. Revoking a key instead (a new `db` certificate, the old one in `dbx`) revokes every
+     image it signed; the procedure is in docs/secure-boot-keys.md.
+  2. **Each ESP has two loaders** (the ISO's, enrolled with the menu, and the installed disk's, enrolled with the
+     no-menu configuration): revoking an image means both hashes (and the other architecture's).
+  3. **Not built: a monotonic version counter.** It needs a place the firmware or the loader protects and the kernel
+     can read: an authenticated UEFI variable (runtime services in the kernel), a TPM NV index (ADR-254), or a loader
+     with a rollback index. None exists here; ADR-299's offline rule (an older release is refused unless
+     `--allow-downgrade`) stays the operator-side protection.
+- **Testing.** Smoke `secureboot`: the signed ISO's loader hash in `dbx` makes x86_64 OVMF and aarch64 AAVMF answer
+  `Access Denied`; the same `dbx` lets another signed loader (the sealed disk's) boot.
+- **What it does not give.** A signed `dbx` update for real firmware (an authenticated variable signed by the KEK,
+  `sign-efi-sig-list` from efitools) is a documented procedure, not a tool of this repository; nothing revokes an image
+  automatically when a release is superseded.
+
+## ADR-323 — Secure Boot enforcement on aarch64, tested with AAVMF (LATER-6, H8-W4)
+
+- **Status:** Accepted. Closes the aarch64 part of AUDIT H8-W4; Proxmox and a physical PC remain untested.
+- **Context.** ADR-251 limit 3: the AArch64 edk2 that QEMU ships on macOS does not enforce Secure Boot, and
+  `run-qemu.sh` boots aarch64 with `-bios` (no variable store), so the aarch64 loader's signature was only checked
+  offline.
+- **Decision.** `run-qemu.sh --secure-vars FILE` now works on aarch64: AAVMF's Secure Boot build
+  (`AAVMF_CODE.secboot.fd` of Debian/Ubuntu `qemu-efi-aarch64`, or `URMQTT_FIRMWARE_SECURE_AA64`) as the read-only
+  pflash unit and FILE as the variable store (both 64 MiB; `snapshot=on`, never written back). The store is made from
+  `AAVMF_VARS.fd` by the same `sign-loaders.sh ovmf-vars` (virt-fw-vars handles both layouts). Arm has no SMM, so a
+  guest could write the variables itself; that is irrelevant for a test of enforcement. Ubuntu 24.04's AAVMF
+  (2024.02) enforces: an unsigned image is `Access Denied`, the EFI shell a `Security Violation`.
+- **Testing.** Smoke `secureboot` on aarch64 (HVF here, TCG elsewhere): the signed ISO and the sealed disk boot; the
+  unsigned image, the image signed by another key and the dbx-revoked loader are refused; the unsealed disk is refused
+  by Limine; a tampered aarch64 kernel on the sealed disk is refused; the disk installed under Secure Boot on x86_64
+  boots under Secure Boot on aarch64. Without AAVMF Secure Boot firmware the scenario says that aarch64 enforcement was
+  NOT tested and falls back to the offline signature check (a failure with `SMOKE_REQUIRE_SB=1`).
+- **Not done.** CI does not run the universal suites at all (ci.yml says why); the Secure Boot group needs an x86_64
+  kernel, OVMF, virt-firmware and a signer on the runner, and was run by hand on macOS (HVF for aarch64, TCG for
+  x86_64). Real Arm firmware (a cloud's, a board's) is untested.
+
+## ADR-324 — Secure Boot keys: procedures, not keys; MOK and a release-signed image are not done (LATER-6, D-2)
+
+- **Status:** Accepted. The custody decision itself stays the maintainer's (ROADMAP D-2, ADR-251).
+- **Decision.**
+  1. **Who signs.** Secure Boot images are signed by whoever controls the firmware the image boots on: the operator's
+     own PK/KEK/db (docs/secure-boot-keys.md). This repository and its CI hold no Secure Boot key; the release
+     workflow publishes unsigned images, as before. A project key that releases are signed with is possible later
+     without a format change (sign-iso with that key in the release workflow), and is the maintainer's decision.
+  2. **Custody procedures** (docs/secure-boot-keys.md, in the style of release-key-rotation.md): generate PK, KEK and db
+     offline, keep PK and KEK offline (they only sign variable updates), keep db where images are signed (an HSM through
+     PKCS#11 with `sbsign --engine pkcs11`, or an offline machine), the files to enroll (`*.der`), a rotation that
+     enrolls the new db certificate before the old one goes into `dbx`, and what to do after a leak. Test keys are made
+     by `gen-keys` under `build/` and never leave it.
+  3. **Shim and MOK: not done.** They need a shim signed by Microsoft that this project would ship and keep current, and
+     they move the root of trust from the owner's key to Microsoft's and to the shim's vendor certificate. Firmware
+     that offers only the Microsoft keys cannot boot these images under Secure Boot; that is listed, not solved.
+  4. **Not done either:** the boot-once entry (BLI `LoaderEntryOneShot`, A295-W1; needs UEFI runtime services in the
+     kernel), measured boot/TPM (ADR-254, LATER-7), the BIOS path (no signatures exist, H8-W3), Proxmox and physical
+     hardware tests (H8-W4), a configuration key that is not in the image (LATER-7). No configuration key and no store
+     schema change: configuration format 21, reserved for LATER-6, is not used.
+
+## ADR-325 — Key slots: the disk key wrapped under passphrases in the superblock (LATER-7)
+
+- **Status:** Accepted (LATER-7). Amends ADR-240 (where the disk key comes from); the data's encryption is
+  unchanged.
+- **Context.** ADR-240 put the 64-byte AES-256-XTS disk key in the configuration, so whoever has the ISO (or the
+  installed ESP, or a backup of either) reads a copied data disk: S7 protects a stolen volume or snapshot and
+  nothing else (ADR-254, SECURITY.md). LATER-7 asks for a disk key that cannot be derived from the image alone, on
+  a VPS without a TPM first.
+- **Decision.**
+  1. **The key stays a random 64-byte key; passphrases wrap it.** The superblock gains `flags` bit 2 (wrapped)
+     and two **key slots** of 128 bytes at offset 3168 (DISK-FORMAT §14.2): kind, PBKDF2 iterations, a 32-byte
+     random salt and the disk key wrapped with RFC 3394 AES key wrap under PBKDF2-HMAC-SHA-256(passphrase,
+     `urMQTT disk key slot v1` ‖ uuid ‖ salt). The data stays under a full-entropy key whatever the passphrase is;
+     a passphrase change rewrites a superblock, not the disk (ADR-327); two slots let an operator keep a sealed
+     recovery passphrase beside the daily one.
+  2. **Two checks, in order.** The key wrap's 64-bit integrity value tells a wrong passphrase (`WrongPassphrase`);
+     the existing key check (HMAC of the unwrapped key over the UUID, ADR-240) then tells an intact header from
+     an edited one or a slot taken from another disk (`KeySlotMismatch`). Nothing is read with a key that failed
+     either check. The UUID in the derivation binds a slot to its disk.
+  3. **Bounds the header cannot move.** 10 000 to 10 000 000 iterations: fewer is refused (a header edited to
+     make guessing cheaper is not followed), more is refused (a header cannot make the boot derive for hours).
+     Unknown kinds, bytes in an empty slot, slots without the flag, the flag without encryption or without a
+     slot: `Inconsistent`, like every other malformed superblock.
+  4. **No version spent.** As in S7, the unknown flag bit is what makes an older kernel refuse the disk
+     (`Inconsistent`); no layout minor and **no store schema** (the reserved schema 7 is not used: the SQLite
+     database does not change). An image-key disk (S7) and a plain disk are byte for byte what they were.
+  5. **AES key wrap and PBKDF2 are written here or reused, no new dependency.** The wrap is 40 lines over the
+     `aes` crate the store already uses (checked against RFC 3394 §4.3 and §4.6, both ways, and a flipped bit);
+     PBKDF2 is `urmqtt_cfg::passwd::pbkdf2_hmac_sha256` (ADR-267). Argon2 would resist GPUs better and was not
+     taken for the same reason as in ADR-267: a new dependency and memory-hard code in the kernel for a boot
+     that runs it once; the cost is the operator's to raise (`--iterations`, up to ten million).
+  6. **The API.** `disk::probe` and `disk::unlock` read the superblock and nothing else; `Disk::format_sealed`
+     formats a blank disk with a key and its first slot (the superblock last, as every format);
+     `Disk::set_key_slot`, `unwrap_key_slots` and `scrub_key_slots` change slots (ADR-327).
+- **Testing.** `crates/store/src/keyslot/tests.rs`, `crates/store/tests/wrapped.rs` (seven edits of the header,
+  each without and with a recomputed CRC; another disk's slot; another key wrapped for this disk), the spec test
+  of the superblock and key slot tables, fuzz `disk_keyslot` (ADR-329).
+- **Consequences.** The superblock, which stays plaintext, now carries something an attacker can attack offline:
+  the wrapped key, guessable at one PBKDF2 per guess. The passphrase is therefore the key: a generated one of 20
+  characters or more (OPERATE.md) makes that moot; "summer2026!" does not.
+
+## ADR-326 — The disk passphrase at the console, before anything listens (LATER-7)
+
+- **Status:** Accepted (LATER-7).
+- **Context.** The ROADMAP entry lists four ways to keep the key out of the image: a TPM, a key released over
+  the network by an operator-authenticated step, a passphrase at the console, a key file on a separate device.
+  The first target is a KVM VPS without a TPM (ADR-254: few small providers offer a vTPM, and a vTPM's state
+  travels with the VM backup anyway).
+- **Decision.**
+  1. **The console.** `storage.disk_key_source = "console"` (ADR-328): at boot, on the boot CPU, in `db::init`,
+     the kernel asks for the passphrase on every console it reads: the serial port (a provider's serial console),
+     the PS/2 keyboard (a provider's VNC console), a virtio-console and a virtio-input keyboard, through the same
+     reader as the Diagnostic entry's prompts. The authentication is the provider's: whoever can type on the VM's
+     console is someone the provider let into the customer's panel, and must also know the passphrase.
+  2. **Nothing listens until the disk is open.** The prompt runs before the other cores start, before the TLS,
+     plaintext, WebSocket, metrics and control listeners exist (the smoke checks the order in the serial log). An
+     operator-authenticated unlock over the network was the alternative and was not built (ADR-329): it needs a
+     listener up while the store is sealed, a second TLS identity, and its own replay rules, for a step a console
+     does with no new surface.
+  3. **The availability trade-off, stated.** Every reboot (a crash, the watchdog's `reset`, the provider's host
+     maintenance, an A/B update) leaves the broker down, every port closed, until a person types the passphrase.
+     The prompt is shown again every minute and logged (`storage: waiting for the disk passphrase on the
+     console`), so a remote log shows why the broker is down. The time spent waiting is credited to
+     `update.trial_timeout_s` (ADR-296): a trial boot is not rolled back because nobody was at the console; the
+     confirmation delay still counts from the listeners. This mode is for operators who prefer a broker that stays
+     down to a broker whose image reads its disk.
+  4. **The first boot of a blank disk** asks for a new passphrase twice (the rules: 12 to 256 bytes of
+     printable ASCII, so a VNC keyboard and a serial terminal can both type it again), makes a random disk key
+     (the RNG the TLS code uses; a key that fails the S7 rules is drawn again), and formats the partition with
+     the key wrapped in slot 0 at 300 000 iterations (about 0.2 s on an Apple M-series core under HVF; it is paid
+     once per boot).
+  5. **A wrong passphrase** is answered after a 2 s pause (on top of the derivation) and asked again, for as long
+     as it takes; each one is a log line (`storage: wrong disk passphrase (N so far)`), never the text typed.
+     There is no lockout: an attacker at the console can as well copy the disk and guess offline, and a lockout
+     would only lock out the operator.
+  6. **No echo, no copy.** Nothing typed is echoed or logged. The line editor (`keyslot::LineEditor`, host-tested
+     and fuzzed) keeps printable ASCII in a fixed 256-byte buffer that it wipes after every line and on drop;
+     backspace, Ctrl-U, Ctrl-C and arrow-key escape sequences are handled; an overlong line is dropped whole. The
+     key-encryption key and the unwrapped key are `Zeroizing`. The disk key itself lives in the XTS layer's
+     round keys while the broker runs, as with an image key (ADR-240).
+  7. **A RAM store** (the live entry, `storage.mode = "ram"`) is blank at every boot and lost at power-off: it
+     is encrypted under a random key of that boot and nothing is asked (`storage: RAM store: encrypted under a
+     random key of this boot, no passphrase asked`), so a live boot of a console-mode ISO still starts by itself.
+  8. **An existing image-key disk** is refused in console mode with the way out (`urmqtt-disk keys DISK add --key
+     FILE`); a wrapped disk still opens with an image key that is its key (the way back, ADR-328).
+- **Alternatives.** A key file on a second virtio disk (as easy to copy as the image on a VPS); a key in
+  instance metadata (readable by whoever has the VM); a network unlock (ADR-329); a TPM (ADR-329).
+- **Consequences.** The image is no longer a secret for the disk's sake (it still holds the server's TLS key,
+  ADR-252). The broker cannot restart unattended. A malicious hypervisor still sees the passphrase being typed and
+  the key in RAM, as it sees everything (SECURITY.md).
+
+## ADR-327 — Rotating the disk key's wrap without a rewrite, and the disk key itself offline (LATER-7)
+
+- **Status:** Accepted (LATER-7).
+- **Decision.**
+  1. **A passphrase change rewrites only the superblock.** `Disk::set_key_slot` writes the new superblock (one
+     slot added, replaced or emptied) into the superblock slot not in force with generation + 1 and flushes,
+     then the same into the other one with generation + 2 and flushes. A cut before the first write completes
+     leaves the old passphrases working; after it, the new ones; never neither (tested at every write, clean and
+     torn, the cache lost and kept). The second write exists because a passphrase is changed when it leaked: the
+     older superblock must not keep its wrap.
+  2. **Scrubbing the older superblock.** A cut between the two writes leaves the replaced wrap in the older
+     superblock. `Disk::scrub_key_slots` rewrites an older superblock whose key slots differ from the ones in
+     force (or a damaged one with key slot bytes); the kernel calls it at every boot after the store opens, the
+     tool after every key command. It writes nothing on a disk without the difference.
+  3. **Where.** At the console, `change` instead of the passphrase: the current passphrase, the new one twice;
+     the slot the current one opened is rewrapped (`storage: the disk passphrase of key slot N was changed`).
+     Offline: `urmqtt-disk keys DISK add | change | remove | unwrap` with `--key FILE` or `--passphrase-file FILE`
+     as the authorisation, `--new-passphrase-file FILE`, `--slot N`, `--iterations N`, a dry run without
+     `--write`. `remove` never empties the last slot; `unwrap` empties them all and, with a passphrase, writes the
+     key to `--key-out FILE` (mode 0600, refused if it exists; written and synced before the slots are emptied, so a refused file never leaves the key nowhere): the way back to an image key and to v0.5.
+  4. **The disk key itself** is rotated by the existing offline `urmqtt-disk rekey` (ADR-240: every sector
+     rewritten, journalled, resumable). It now opens a wrapped disk with `--passphrase-file`, and empties the key
+     slots and clears the wrapped flag when it switches the superblock: they wrap the old key. The operator then
+     wraps the new key (`keys DISK add --key NEWKEY`) and deletes the key file. Rekeying at boot was not built
+     (ADR-240's rule stands: the kernel never converts a disk).
+  5. **Store schema.** Unchanged; nothing here is one-way: `keys unwrap` returns the disk to S7's format.
+- **Testing.** `crates/store/tests/wrapped.rs` (rotation, a recovery slot, the last slot, the scrub, the cut at
+  every write), `tools/disk/tests/keys.rs` (the commands end to end, only superblock sectors change, a cut at
+  every write of `add` and `change` through the tool's library with the data intact, `rekey` empties the slots),
+  smoke `unlock-change` and `unlock-after-change`.
+
+## ADR-328 — `storage.disk_key_source`, configuration format 22 (LATER-7)
+
+- **Status:** Accepted (LATER-7).
+- **Decision.** `storage.disk_key_source = "image" | "console"` (tag 365, an enum, default `"image"`). `"image"`
+  writes no record, so every existing configuration keeps its format and boots on older kernels. `"console"`
+  needs **format 22** (19 to 21 belong to other v0.6.0 items and are refused by this tree like 10 until the
+  release merge), `storage.encryption = "aes-256-xts"`, and **no** `storage.disk_key` (the point is that the
+  image holds none); the TOML path and the kernel's blob check give the same refusals. An older kernel refuses a
+  format 22 image by its version rather than boot looking for a key that is not there; a v0.5.0 template refuses
+  it at build time with the reason (`urmqtt-config`, the builder page).
+- **The builder page** now offers `storage.encryption`, and `storage.disk_key_source` beside it while encryption
+  is on; `storage.disk_key` stays off the page (it needs a key dialog, ADR-240), and a problem with it is shown
+  at the source choice. Choosing `"console"` asks for a confirmation (the risk "The broker waits for a
+  passphrase at every boot"), in the 15 languages.
+- **Upgrade and downgrade.** Nothing changes for an image that does not set the key. Moving a running image-key
+  disk to console mode: `urmqtt-disk keys DISK add --key FILE --write` (offline, no rewrite), then the new image;
+  better, `rekey` to a fresh key first so that old ISOs no longer read it. Back to an image key, or to v0.5.x:
+  `urmqtt-disk keys DISK unwrap ... --key-out FILE --write` and an image with that key.
+
+## ADR-329 — What LATER-7 verifies, and what it does not do (LATER-7)
+
+- **Status:** Accepted (LATER-7).
+1. **Verification.** Host: the store's key slot unit tests and `wrapped.rs` (above), `tools/disk/tests/keys.rs`,
+   the configuration tests of `cfg`, `config`, `config-schema` and `tools/config` (format 22, the rules, the
+   templates of earlier releases), the builder page's `disk-key.test.mjs`. Fuzz `disk_keyslot`: the slot decoder
+   (accepted bytes re-encode exactly), the key unwrap (a success is the wrap's inverse), the line editor
+   (printable, bounded), and a superblock whose flags, key check and key slot area come from the input with a
+   valid CRC, unlocked with the right passphrase (any key it yields is the disk's own) and a wrong one (never);
+   seeds in `fuzz/seeds/disk_keyslot`; two minutes: 179 492 runs (the unlock path, which pays PBKDF2, on one input in
+   eight), no finding. QEMU (`SMOKE_ONLY=unlock`, aarch64 under HVF and TCG, x86_64 under TCG):
+   the first boot of a blank disk with a too-short passphrase refused, then the passphrase typed twice on the
+   serial port (`run-qemu.sh --serial-in`, a Unix socket); nothing listens before the unlock; the passphrase is
+   neither in the serial log nor on the disk, the data partition holds no SQLite header; a wrong passphrase then
+   the right one; `change` at the prompt; the old passphrase refused afterwards; the host tool lists the slot and
+   opens the disk with `--passphrase-file`; a header whose key check was edited (CRC recomputed) is refused after
+   the slot opens.
+2. **Not done (listed, not hidden).**
+   - **TPM 2.0 sealing.** Not built: `swtpm` is not installed on the development machine and installing it was
+     outside what this run could do, so it could not be tested end to end; ADR-254's analysis (a three-to-four-week
+     item, a TIS/CRB driver and a TPM2 command layer, PCR policy and its update workflow, a vTPM's state travelling
+     with the VM) stands. The key slot format leaves room for it (a slot kind 2, "sealed to a TPM").
+   - **Network unlock** (an operator's mTLS endpoint that holds the listeners closed until a signed unlock
+     message arrives): not built. It needs a TLS listener up while the store is sealed, an identity and replay
+     state that today live in the store, and a second operator path; the console needs none of it. A slot kind
+     for a key released by a key server would fit the same format.
+   - **A key file on a separate device**, **confidential VMs** (SEV-SNP, TDX): not built.
+   - **Rekey at boot** or online: no; `rekey` stays offline (ADR-240).
+   - **Unattended reboots** are impossible in console mode by design (ADR-326).
+   - **Integrity**: XTS still gives none (ADR-240); the key slots do not change that.
+   - The VNC keyboard path (PS/2 scancodes, virtio-input) was not exercised with a passphrase in QEMU; the
+     smoke types on the serial port. Those readers are the Diagnostic entry's, tested there (ADR-258).
+   - The memory of the running VM, and a hypervisor that logs keystrokes, are out of reach as before.
+
+## ADR-330 — IPv6 in the own stack: one address type, a strict header, no fragments (NEXT-1)
+
+- **Status:** Accepted. Implements the stack half of ROADMAP NEXT-1. Configuration format 23 (ADR-334); no store
+  schema change. ADR-330 to ADR-334 belong to this item.
+- **Context.** `crates/net` classified IPv6 as "everything else" and the TCP stack's addresses were `[u8; 4]`
+  throughout; the README promised "IPv6 + SLAAC later", and VPS providers (netcup) hand out a /64.
+
+### What was built
+
+1. **One address type** (`urmqtt_net::addr::Addr`, 16 bytes): an IPv4 address is stored IPv4-mapped
+   (`::ffff:a.b.c.d`), an IPv6 one as itself. *Decided* over an enum or a second TCP stack per family: one table,
+   one connection id space, one `App` interface; every limit, allow-list and log takes the same type. The two
+   families never collide because the IPv6 parser drops every packet whose source or destination is IPv4-mapped
+   (an IPv6 peer cannot pose as an IPv4 address in an allow-list), and every source whose first 64 bits are zero
+   (so an IPv6 /64 key is never 0, ADR-332). `Display` writes RFC 5952 text; IPv4 stays dotted.
+2. **The header** (`net/src/ipv6.rs`, own, `no_std`, no `unsafe`, no allocation on receive): version 6, the
+   payload length within the frame (Ethernet padding cut), no multicast or loopback source, no loopback or `::`
+   destination; TCP from `::` refused. **Extension headers** are walked with hard bounds: at most 4 headers and 256
+   bytes; Hop-by-Hop first only; Hop-by-Hop and Destination Options skipped when every option in them may be
+   (Pad1, PadN, Router Alert, or unknown with action bits 00), at most 32 options; a Routing header only with
+   Segments Left 0 (this host is no router). **Fragments are dropped and counted**, not reassembled: *decided*
+   because a TCP peer follows our MSS, the ICMPv6 this host takes is small, and reassembly is memory an attacker
+   chooses; ESP, AH, No Next Header and unknown upper layers are dropped too. Nothing sends an ICMPv6 error
+   (Parameter Problem, Packet Too Big): *decided* to keep the host silent towards malformed input; the cost is
+   that a peer learns nothing (it retries or times out).
+3. **ICMPv6** (`ipv6::parse_icmp6`): the checksum over the pseudo-header always; echo; Neighbour Discovery per RFC
+   4861 §6.1/§7.1 (hop limit 255, code 0, no extension header, minimum length, every option non-zero and within
+   the message, an RA only from a link-local source, an NS from `::` only to a solicited-node group and without
+   a link-layer option, no multicast target, a solicited NA never to a group). Router Advertisements keep at most
+   8 Prefix Information options (the rest counted); RDNSS is counted and ignored (the broker resolves no names);
+   Redirects are valid and ignored; MLD queries are answered (ADR-331).
+4. **TCP over IPv6** (`crates/tcp`): the pseudo-header by family in one function (`wire::checksum`: IPv4's when
+   both addresses are IPv4, else IPv6's with the 32-bit length); the MSS per family (`mss6_for_mtu`: MTU - 60, at
+   most 1440 under the 1500-byte frames, `TcpStack::set_mss6`); SYN cookies, timestamps, SACK, window scaling,
+   RFC 5961 and the active open unchanged. **No checksum offload** is negotiated with virtio-net, so software
+   computes both families on receive and transmit and there are no offload fields to fill (recorded because the
+   item asked for them). **Per-connection memory** grows from 112 to 128 bytes (the 4-tuple key holds 16-byte
+   addresses; M15 budget, `connection_state_stays_small` raised with the reason).
+5. **Off by default** (`network.ipv6 = "off"`, ADR-334): IPv6 frames are then dropped and counted as before the
+   item, and nothing about IPv4 changes but the address type.
+
+## ADR-331 — IPv6 addresses: link-local and one global one, DAD, SLAAC or static, the source rule (NEXT-1)
+
+- **Status:** Accepted (NEXT-1).
+- **Decision.**
+  1. **Addresses** (`net/src/nd.rs`, `Host6`): the link-local `fe80::` + the modified EUI-64 of the MAC, and **at
+     most one global address**: with SLAAC the first autonomous /64 prefix of the Router Advertisements + the same
+     EUI-64, or the configured static one. Further prefixes, prefixes other than /64, link-local, multicast and
+     all-zero prefixes make no address (the last two found by the `ipv6_nd` fuzzer); they are counted
+     (`net/ipv6/prefixes_ignored`, every advertisement) and logged once per prefix (the last 8 remembered; found in
+     review: a link with a second prefix wrote a log line with every Router Advertisement). *Decided:* EUI-64, neither RFC 8981 temporary addresses (a server's address
+     goes into DNS and firewalls; temporary addresses are for clients' privacy) nor RFC 7217 stable-opaque ones
+     (they need a secret that survives reboots, which the kernel would have to keep before the store opens, and
+     the operator could no longer predict the address from the MAC). The MAC is visible on the link anyway.
+  2. **DAD** (RFC 4862 §5.4): one solicitation from `::` per new address, then 1 s; an NA for it or a DAD probe of
+     another node in that second marks it duplicate, never used, logged as an error and counted. A tentative
+     address takes no traffic. Our preferred addresses are defended (an NS from `::` for one gets an NA to all
+     nodes); an NA from another node for one of them is counted, the address kept. An MLDv2 report joins the
+     solicited-node groups (from `::` while the link-local address is tentative, RFC 3590, else from it) so that
+     switches that snoop MLD deliver Neighbour Solicitations, and **every Multicast Listener Query** for all groups
+     or one of ours (link-local source, hop limit 1) is answered with a report, MLDv1 to an MLDv1 querier, at most
+     once a second (found in review: a Linux bridge with a querier otherwise stops delivering the groups after its
+     listener interval, about 260 s, and the router then cannot resolve a static address whose interface
+     identifier differs from the link-local one's).
+     No random delay before the first probe (one host per link segment of a VM).
+  3. **SLAAC** (RFC 4862 §5.5): three Router Solicitations 4 s apart once the link-local address is usable, then a
+     warning if no RA came; the default router and its lifetime, its link-layer address, the MTU (1280 to the
+     link's, ignored outside) and the prefixes from each RA, the two-hour rule of §5.5.3 (e); the address goes when
+     its valid lifetime ends. A deprecated address (preferred lifetime over) keeps serving: inbound connections
+     choose it, not this host. **Static** (`ipv6 = "static"`): the configured address with its on-link prefix and
+     the gateway (link-local, what VPS providers give, or inside the prefix), DAD on both addresses, Router
+     Advertisements ignored and counted.
+  4. **The source rule** (`addr::V6Locals::for_peer`): a link-local peer is answered from the link-local address,
+     every other one from the global address. The interface (which writes the IPv6 header) and the TCP stack
+     (which sums the pseudo-header) use the same function; a segment to the other address of ours is dropped and
+     counted (`wrong_local`), and a peer with no fitting address of ours gets nothing (`no_local`).
+  5. **Neighbours**: learned from every frame for us (a frame from off the link teaches the router's MAC, as for
+     IPv4), from NS options, NAs and the RA's source link-layer option; 32 entries per core, least recently seen
+     replaced. The owner solicits an unknown next hop (one NS per address per second, 4 addresses remembered) and
+     drops the segment that needed it (TCP retransmits). No NUD probing of stale entries: a peer that moved is
+     relearned from its next frame. Neighbour Discovery answers are limited to 100/s, echo replies share the IPv4
+     ICMP budget (100/s); no echo to a group.
+  6. **Cores**: core 0 owns the NIC and runs Neighbour Discovery; it publishes the addresses, router, on-link
+     prefix and MTU to the other cores (`CoreMsg::Ip6Config`), which take their steered TCP flows only. Events of
+     one RA beyond the first are queued (at most 32) and handed out by the next poll.
+  7. **Visible**: log lines for every address, router, MTU and DAD result; `$SYS/broker/net/ipv6/{mode,
+     address/link_local, address/global, router, mtu, frames_in, dropped, fragments, ext_headers, dad_duplicate,
+     prefixes_ignored}` (the counters summed over the cores' interfaces), the same in the JSON info reply under
+     `net.ipv6`, three `ipv6 ...` lines in the console's `status`, and the metrics `urmqtt_ipv6_*` (the addresses
+     are text and not exported as metrics).
+
+## ADR-332 — Every listener takes both families; an IPv6 /64 is one source for every per-address limit (NEXT-1)
+
+- **Status:** Accepted (NEXT-1).
+- **Decision.**
+  1. **Dual-stack listeners**: the TLS port, the WebSocket port, the plaintext port and the Prometheus endpoint
+     take IPv6 clients with no setting of their own; `network.ipv6` decides for all (a listener is an open port,
+     the address family is the network's question).
+  2. **The unit of an abusive source is the /64** of an IPv6 address (`SourceKey::of`, settled by NOW-14 and used
+     now): one subscriber holds a whole /64, so counting /128s would let one host take a limit 2^64 times. It is
+     the key of `limits.max_connections_per_ip` (ADR-280), of `limits.max_handshakes_in_flight_per_ip` (the
+     admission's address list, `Admission`), and of the plaintext and WebSocket address tables (connections per
+     address, failed logins and lock-outs: `plain::Src`, IPv4 address or /64, 128 bits per slot). *Accepted cost:*
+     devices behind one IPv6 /64 share the limits as devices behind one IPv4 NAT do (SECURITY.md).
+  3. **Allow-lists** (`plaintext.allow_from`, `metrics.allow_from`) take IPv6 networks beside IPv4 ones
+     (`cfg::net::Net`, strict parser: no zone, no embedded IPv4, no host bits; `::/0` refused like `0.0.0.0/0`, the
+     `*_anywhere` keys say "everything"). An IPv6 client never matches an IPv4 network and the other way round.
+     **Not done:** `plaintext.ip_identities` stays IPv4 (`auth = "ip"`): an IPv6 client of such a listener matches
+     no network and is refused with the "no network" reason.
+  4. Log lines name a client's address in its own text form (a lock-out, a refused login).
+
+## ADR-333 — Steering IPv6 flows, how NEXT-1 was verified, what it does not do (NEXT-1)
+
+- **Status:** Accepted (NEXT-1).
+1. **Steering.** The Toeplitz hash over the IPv6 4-tuple (source and destination of the IPv6 header, then the
+   ports, 36 bytes under the 40-byte Microsoft key; the specification's IPv6 vectors are a test) picks the core of
+   an IPv6 flow through the same table as IPv4 (ADR-311). The classifier uses the interface's own parser, so a
+   frame is steered by its TCP 4-tuple exactly when the core's interface would take it as TCP, and everything else
+   (ICMPv6, a fragment, malformed) goes to core 0 to be answered or dropped and counted. With multiqueue, the
+   driver asks the device for TCP/IPv6 hashing beside TCP/IPv4 where the device offers it (`HASH_TCPV6`, never a
+   type it does not offer; never the `_EX` types); otherwise IPv6 flows arrive on pair 0 and core 0 steers them.
+2. **Verification.** Host tests: `net` (the header and extension-header bounds, ND validation, RA parsing, DAD,
+   SLAAC, the two-hour rule, static mode, the source rule, rate limits, the interface's TCP in and out, the
+   classifier), `tcp` (the scripted RFC 9293/5961 cases rerun over IPv6, the MSS per family, both families in one
+   table, the local address per peer, the checksum against the IP layer's own), `cfg`/`config-schema`/`config`/
+   `plain`/`tools/config`/the builder page (format 23, the IPv6 text and networks, the /64 key), `virtio` (the RSS
+   hash types), `broker` (`$SYS`, JSON, console, metrics rules). Fuzz: `ipv6_nd` (new: the header, ICMPv6 and ND,
+   SLAAC and DAD driven by frames and time, the classifier against the parser, the configuration's IPv6 text;
+   two minutes, 3.35 million runs after the fix of the multicast-prefix finding), `net_frame` (now with SLAAC
+   started), `tcp_segment` (every input over both families). QEMU (`SMOKE_ONLY=ipv6`, aarch64 under HVF and TCG,
+   x86_64 under TCG): SLAAC against QEMU's own router beside DHCP (the addresses read from `$SYS` over IPv4);
+   IPv6 only through `scripts/ipv6-relay.py` (QEMU forwards host ports over IPv4 only, so the relay is the
+   guest's whole link on a dgram netdev and carries host sockets into the guest over IPv6): an mTLS publish and
+   subscribe over IPv6 with mosquitto, an echo answered, a fragment and a must-not-skip option dropped and counted,
+   the RA's MTU 1480 giving an MSS of 1420; dual stack with both addresses static: a message published over IPv4
+   delivered to a subscriber over IPv6, the metrics endpoint answering an IPv6 scrape from the IPv6 network in its
+   allow-list and nothing over IPv4. IPv4 unchanged: the existing `metrics`, `plaintext`, `storm`, attack,
+   `net_mtu` and `conn-limit` scenarios pass; the throughput rig (`scripts/bench.sh --relaxed`, HVF, three runs
+   each against `release-v0.6.0`) shows the in-guest handshake rate unchanged and the QEMU user-network rate
+   within its run-to-run spread (see the NEXT-1 notes for the numbers).
+3. **Not done (listed, not hidden).** Fragment reassembly; ICMPv6 errors (Packet Too Big, Parameter Problem,
+   Destination Unreachable) sent or acted on (no path MTU discovery beyond the RA's MTU); more than one global
+   address or prefix; temporary or stable-opaque addresses; DHCPv6 (an RA's M and O flags are ignored);
+   NUD probing; Secure Neighbour Discovery or RA guard (ND is unauthenticated, as ARP is); UDP over IPv6, so
+   SNTP, syslog, statsd and log shipping over TLS stay IPv4; the outbound TCP client over IPv6 (the stack can, the
+   configuration's collector is IPv4); `plaintext.ip_identities` with IPv6 networks; IPv6 in the dev-only command-line
+   words (an SNTP server for tests). The plaintext port's boot warning judges the global IPv6 address as it does
+   the IPv4 one (added in review: a VPS's IPv6 address is public even where its IPv4 one is not). A jumbogram is a
+   malformed packet.
+
+## ADR-334 — `network.ipv6`, `network.ipv6_address`, `network.ipv6_gateway` and IPv6 allow-list entries, configuration format 23 (NEXT-1)
+
+- **Status:** Accepted (NEXT-1). Tags 410 to 412 (apart from the other v0.6.0 items' tags); format 23 (reserved
+  for this item; 21 stays unused, ADR-320).
+- **Decision.** `network.ipv6 = "off" | "slaac" | "static"` (an enum, default `"off"`), `network.ipv6_address`
+  (`2001:db8:1::10/64`: a global unicast address with its on-link prefix length 1 to 128, host bits allowed) and
+  `network.ipv6_gateway` (`fe80::1` or an address inside that prefix, not the address itself), both required with
+  `static` and refused otherwise. *Off by default* because IPv6 opens the listeners to a second network surface;
+  `"off"` writes no record, so every existing configuration keeps its format and boots on older kernels.
+  `slaac` or `static` needs **format 23**; so does an IPv6 network in `plaintext.allow_from` or
+  `metrics.allow_from` (the key is older, the value is not: the packer lifts the format by the value, and the
+  kernel's check refuses an IPv6 entry in a blob of an older format). An older kernel refuses a format 23 image by
+  its version instead of booting IPv4-only, or refusing an allow-list it cannot read, without saying why. The TOML
+  path and the kernel's blob check give the same refusals (tested in both directions). The builder page shows the
+  three keys in `[network]` with the three choices in all 15 languages; a v0.5.0 or format-22 template refuses
+  them with the reason.
+- **Upgrade and downgrade.** Nothing changes for an image that does not set the keys: IPv6 frames are dropped as
+  before. Turning IPv6 on adds the listeners' IPv6 surface (every port that listens on IPv4 also listens on IPv6);
+  `metrics.allow_from` and `plaintext.allow_from` without IPv6 networks keep refusing every IPv6 client. Back to
+  v0.5.x or a format-22 kernel: remove the keys and the IPv6 allow-list entries.
+
+## ADR-335 — The kernel as a library: one crate, the open image is one line on top of it (NOW-18)
+
+- **Status:** Accepted (NOW-18). ADR-336 to ADR-339 are its parts. No configuration format number and no store
+  schema: nothing an operator writes or keeps changes.
+- **Context.** [EDITIONS.md](EDITIONS.md) §5: the commercial repository must build its own kernel image with
+  drivers for devices that are not virtio, depending on this repository's crates at a tag, without a fork. Until
+  now `crates/kernel` was a binary (`src/main.rs` declared every module), so another crate could not call into it,
+  and its tables (`virtio::registry::KINDS`, `vdev::DRIVERS`, the configuration tags) were closed lists.
+- **Decision.**
+  1. **A library and a one-line binary in the same package.** `src/main.rs` became `src/lib.rs` (crate name
+     `urmqtt_kernel`) by a `git mv`; the module declarations are unchanged, the modules stay private, and three
+     things are new: `pub mod ext` (the extension API, ADR-336 to ADR-338), the re-exports an edition's driver needs
+     at the kernel's versions (`urmqtt_kernel::cfg`, `::log`, `::pci`), and the hidden entry points `__kmain`
+     (target) and `__host_main` (host). `src/main.rs` is now `urmqtt_kernel::image!(urmqtt_kernel::ext::Edition::OPEN)`.
+     *Not* split into more crates (a "kernel-core" and a "kernel-bin", or the boot glue in a crate of its own): the
+     modules reach each other through `crate::` everywhere, and a split would have been thousands of lines of
+     path changes for the same result. The diff of the existing modules is the boot entry (below), three calls
+     into `ext`, and nothing else.
+  2. **`image!` owns the entry symbol.** The arch `_start` stubs call `urmqtt_kmain` (unchanged). That
+     `#[unsafe(no_mangle)] extern "C" fn` moved from `boot.rs` into the macro, which the image crate expands: it
+     calls `boot::kmain(&EDITION)` with the image's edition in a `static`. So the edition is a link-time constant
+     of the image, there is no global the library must be told about at run time, and an image without
+     `image!` does not link (no `urmqtt_kmain`). The macro also `const`-evaluates `Edition::check`: an edition
+     that breaks a rule (ADR-336, ADR-337) is a compile error of the image crate. On the host the macro defines
+     `main` (the old host stub, unchanged).
+  3. **`kmain` installs the edition first** (`ext::install`, a `OnceCell`), then loads the configuration with the
+     edition's key table (`urmqtt_config::load_ext`; with the open edition's empty table it is `load`, the same
+     function body).
+  4. **Linking an image elsewhere.** The library's build script already linked the open binary
+     (`rustc-link-arg-bins`: the linker script, `--no-dynamic-linker`, `-zmax-page-size=4096`). For dependents it
+     now also says them as `links` metadata (`links = "urmqtt-kernel"`; `DEP_URMQTT_KERNEL_LINKER_SCRIPT` and
+     `DEP_URMQTT_KERNEL_LINK_ARGS`), which an image's build script passes on (`examples/edition/build.rs`). The
+     database worker the kernel embeds is built by the same build script from the library's checkout, as before.
+     What Cargo does not take from a dependency an edition copies: the `[patch.crates-io]` entries of the vendored
+     crates, the `dev` and `release` profiles, the kernel target's `rustflags` and the Makefile's flags (written
+     down in `examples/edition/Cargo.toml`, marked COPY, and in ARCHITECTURE.md §8b).
+  5. **Nothing is published.** No crate goes to crates.io (`publish = false` stays); an edition depends on this
+     repository by a git dependency pinned to a release tag (EDITIONS.md §5).
+- **Behaviour of the open image.** The same, by construction and by test: every new path starts with an empty
+  table or an absent hook (ADR-336 to ADR-338), no log line is added, the configuration is parsed by the same
+  code (an empty extension table changes no verdict: `cfg` tests, fuzz `cfg_ext`), and the smoke group `edition`
+  boots the open image beside the example edition's with the same devices and checks that it logs nothing of an
+  edition and drives no `edu` device. Every other smoke group and host test ran unchanged (ADR-339).
+- **Reproducibility.** The image is still reproducible (built twice, byte-identical, `make repro`). It is *not*
+  byte-identical to the image before this change: the library's symbols carry the crate name `urmqtt_kernel`
+  instead of `urmqtt`, the boot entry is one call deeper, and the extension checks are code. `make repro` compares
+  two builds of one commit, which is what it promised ("identical before and after" in ROADMAP NOW-18 is read as
+  "`make repro` passes before and after", *decided*).
+
+## ADR-336 — An edition's PCI drivers: bound by ID, never to a virtio function (NOW-18)
+
+- **Status:** Accepted (NOW-18).
+- **Decision.**
+  1. **The table.** `Edition::pci_drivers: &[PciDriver]`, at most 32; a `PciDriver` is a name (`[a-z0-9-]`, at most
+     32 bytes, unique), its IDs (`PciId`: vendor:device, a whole vendor, or a class and subclass; every field
+     given must match), `max` (at least 1) and `probe: fn(&mut PciDevice) -> Result<String, String>`.
+  2. **The open drivers first, always.** The PCI scan (`devices::probe_pci`) is unchanged; a function is offered to
+     the edition only where the open kernel stops looking at it: when `registry::type_of` does not know it. On top
+     of that the library refuses three ways what would let an edition take a virtio device: an ID naming vendor
+     `0x1AF4` (or `0xFFFF`) is a compile error, `PciId::matches` is false for a `0x1AF4` function whatever the ID
+     says (a class ID such as 02:00 would otherwise match a transitional virtio-net), and `ext::probe_pci` returns
+     before any matching for such a function. Bridges are never offered. So an edition cannot change how the open
+     drivers bind (the risk ROADMAP NOW-18 names), and the const checks of `vdev/mod.rs` are untouched.
+  3. **Binding.** The first driver in table order whose IDs match binds the function if it drives fewer than `max`;
+     otherwise the function is `spare`. `probe` gets a `PciDevice` for that one function: its IDs, its
+     configuration space (reads and writes of its own 4 KiB, nothing else), `enable(bus_master)`, its memory BARs
+     as programmed by the firmware (`bar`), `map_bar(index, len)` (at most the BAR and at most 16 MiB, mapped as
+     device memory for the kernel's lifetime, returned as the bounds-checked `virtio::Region`) and `dma_alloc`
+     (zeroed, contiguous, mapped into the function's own IOMMU domain when an IOMMU is in use, ADR-305). Probing
+     happens during the scan, before the page tables are locked, which is why mapping is allowed only there.
+  4. **What is reported.** `ext: <driver> at <bdf>: driven: <detail>` (information), `spare (it drives <n>)`
+     (information) or `failed: <why>` (a warning; the boot goes on, as for a virtio driver that fails). A bound
+     function's driver name is in the Diagnostic report's PCI list (`PciSeen::driver`), so the report says which
+     edition's driver took which device. A function that matches no driver is listed as before.
+  5. **One new `unsafe`** (`ext.rs`, `PciDevice::map_bar`): `Region::new` over the range `memory::map_mmio` just
+     mapped (AUDIT.md §1). The open image never reaches it.
+- **Not decided here.** Interrupts (MSI-X) for an edition's device: a driver polls (from the `tick` hook) until an
+  interface for vectors exists (ADR-339).
+
+## ADR-337 — An edition's configuration keys: tags 0xF000 to 0xFFFE, the TOML table `[ext]` (NOW-18)
+
+- **Status:** Accepted (NOW-18). No configuration format number: no open key is added, and an extension field
+  states the oldest open format its edition's kernel reads (`Field::since`).
+- **Decision.**
+  1. **Reserved for good.** Tags `0xF000..=0xFFFE` (0xFFFF stays unused) and the TOML top-level table `[ext]` belong
+     to editions; no open field will ever use either (a `cfg` test checks the table). An extension key is
+     `ext.<section>.<name>` (`[a-z0-9_]` parts, at most 64 bytes), so an edition's driver keeps its keys under its
+     own section (`[ext.gvnic]`). Allowed kinds: `Bool`, `UInt` (1, 2, 4 or 8 bytes), `Enum`, `Str`, `Strs`, with a
+     default inside their own range; at most 256 fields; tags strictly ascending; keys unique; stored, not derived.
+     `urmqtt_cfg::ext::check` is a `const fn`, run by `image!` at compile time and again by every parser and
+     builder that is handed a table (a bad table refuses every blob rather than guess).
+  2. **Fail closed in the open edition.** `Blob::parse` is now `Blob::parse_ext(bytes, &[])`: a record in the
+     reserved range is an unknown tag, as before, so the open kernel refuses an image configured for an edition
+     (`fatal: configuration refused: blob: unknown field tag`, smoke `edition`), and the open `urmqtt-config` and
+     the builder page refuse an `[ext]` table (an unknown key). An image never boots ignoring the configuration of
+     a driver it does not have (the rule of ADR-257).
+  3. **An edition's tools.** `Blob::parse_ext` accepts exactly the declared tags and checks each value against its
+     field; `Builder::with_extensions` / `add_extensions`, `build::sign_ext`, `urmqtt_config::load_ext` (the
+     kernel) and `urmqtt_config_schema::pack::pack_ext` (the packer: the open TOML plus the `[ext]` table, every
+     key a declared field and every value of its kind) are the edition's side. With an empty table each is its open
+     counterpart. The typed configuration (`CONFIG`) never sees an extension record; an edition's code reads its
+     keys with `ext::config_bool/uint/variant/str/strs` (the configured value or the field's default, also with no
+     configuration module). `Blob::records` lists every record, the reserved ones included; `Blob::present` still
+     lists only the open ones.
+  4. **Images.** An edition's slot is made by its own packer (`examples/edition`: `urmqtt-example-config
+     --out-slot`); `scripts/mkiso.sh --config-slot FILE` puts it into an image unchecked (the open tool cannot
+     read it), after checking its size and marker. The open paths of `mkiso.sh` are unchanged.
+  5. **Format versions.** The packer writes the lowest format that holds the configuration, an extension field's
+     `since` included; the reader refuses a record whose `since` is newer than the blob's version, as for an open
+     field. A blob with extension records carries the same header, fingerprint and signature as any other.
+- **Upgrade and downgrade.** Nothing changes for an existing configuration or store: no open key, no record, no
+  schema. An edition's configuration cannot be booted by the open image (by design).
+
+## ADR-338 — An edition's boot hooks: four fixed points (NOW-18)
+
+- **Status:** Accepted (NOW-18).
+- **Decision.** `Hooks { early, devices, ready, tick }`, each an `Option<fn()>` run on the boot CPU:
+  `early` in stage 2 once the heap, the stack canary and the crypto self-tests are up (after the configuration is
+  reported, before interrupts and before any device is probed); `devices` after the PCI scan and every probe,
+  while device memory can still be mapped; `ready` after the drivers' READY reports, just before `URMQTT READY`;
+  `tick` every 10 ms in interrupt context (bounded work, try locks only, like `vdev::tick`). A hook returns nothing:
+  one that cannot go on logs, or stops the kernel with `ext::fatal` (the kernel's own `fatal`). An edition that
+  adds anything prints one line before its `early` hook (`edition: <name>: <n> PCI driver(s), <m> configuration
+  key(s), hooks: ...`); the open edition prints nothing. *Not* offered: hooks per core, per connection or on the
+  data path (the broker's hot paths stay closed), and a hook that runs before the configuration is loaded.
+
+## ADR-339 — How NOW-18 was verified, and what it does not do (NOW-18)
+
+- **Status:** Accepted (NOW-18).
+- **Verified.** Host tests: `cfg` (`ext_tests.rs`: the reserved range free of open fields, the open reader and
+  builder refusing a reserved tag, round trips and defaults of every allowed kind, range and shape checks, every
+  rule of the table check, signatures, every flipped bit), `config` (an extension record refused by `load`, the
+  typed configuration the same with and without it), `config-schema` (`ext_tests.rs`: the open packer refusing
+  `[ext]`, `pack_ext` writing the reserved tags and packing what `pack` packs without `[ext]`, named errors for
+  unknown keys and wrong values), `kernel` (`ext.rs`: the edition rules, a virtio function never matching any
+  ID). Fuzz target `cfg_ext` (blob payloads into `parse_ext`, TOML into `pack_ext`: the table only adds, a blob
+  without a reserved record means the same to both parsers, whatever `pack_ext` writes parses and passes the
+  kernel's checks, and equals `pack`'s output whenever `pack` accepts), with seeds. Smoke group `edition` on
+  aarch64 (HVF) and x86_64 (TCG): the example edition's image binds one of two `edu` devices by its PCI ID, maps
+  BAR 0, runs the liveness check with `ext.example.edu_check = 0x12345678` (`-> 0xedcba987`), leaves the second
+  spare, runs all four hooks (the tick count at READY is not zero), reports a driver that refuses
+  (`ext.example.edu = "off"`), uses the defaults without a configuration of its own; the open image with the
+  same devices lists them and drives none, logs nothing of an edition, and refuses the edition's configuration;
+  the open `urmqtt-config` refuses the `[ext]` table. CI: the example's workspace is formatted, linted for the
+  host and the kernel target, built in the Kernel job (dev and prod) and booted in the `edition` smoke group.
+  The review re-ran the host tests of `cfg`, `config`, `config-schema`, `kernel` and `store`, the clippy sets of the
+  touched crates and the `edition` smoke group on aarch64 (HVF, TCG) and x86_64 (TCG). The other smoke groups were
+  started on this change but not all finished before the item closed; they are the release's full run, not this
+  item's evidence.
+- **The installer of an edition** (review): install mode copies the slot the kernel booted with onto the target
+  disk after parsing it (`urmqtt_store::install`). It parsed with the open table, so an edition's kernel booted with
+  an `[ext]` key refused to install ("no (single) unconfigured configuration slot"). It now parses with the image's
+  table (`write_image_ext`, `write_boot_image_ext`, given `ext::edition().config`); the open kernel passes the empty
+  table and is unchanged (host test `an_editions_installer_carries_its_extension_keys`).
+- **Not done (listed, not hidden).**
+  1. **NIC, disk, entropy and timer interfaces.** The computed scope named "NIC/disk/RNG/timer traits". They are
+     not in this change: the data path (`netproto`, `dataplane`, the RSS queues of ADR-310 to ADR-314) is written
+     for `VirtioNet`, the store's disk selection (`devices::DataDisk`, the boot disk by GUID, install and
+     Diagnostic modes) for virtio-blk and virtio-scsi, and the entropy pool's sources are a fixed, audited list.
+     Opening each is a design of its own with the hot path at stake, and none was needed to prove the library
+     (the ROADMAP's NOW-18 asks for registration, ID binding and the reserved range). An edition's driver can
+     drive its device, read its keys and run code at boot today; it cannot yet become the broker's network or
+     storage. Timers are the architecture's (generic timer, local APIC), not a device's, on every platform the
+     editions name.
+  2. **Interrupts for an edition's device** (MSI-X vectors): drivers poll for now.
+  3. **"Per-platform configuration sections"** beyond `[ext.<section>]`: the reserved table is the section
+     mechanism; there is no schema export of extension keys for the builder page, which knows the open keys only.
+  4. **The universal ISO, the installer and Secure Boot signing of an edition's image** are not exercised in QEMU:
+     the smoke group boots the edition's kernel from the raw image of `mkiso.sh --kernel`; `make universal` and
+     `make release-images` build the open image only. The installer's handling of an edition's slot is host-tested
+     (above). The open host tools that find and read a slot in an image (`urmqtt-config` image patching and
+     `show`, `urmqtt-disk`, `urmqtt_cfg::blob::find_slots`) parse with the open table, so they do not see an
+     edition's slot that holds an `[ext]` key; an edition reconfigures its image by rebuilding it with its own
+     packer and `mkiso.sh --config-slot`.
+  5. **The private repository itself** (`urmqtt-enterprise`) is not created and nothing is published.

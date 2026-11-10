@@ -982,3 +982,40 @@ What it shows and what it does not:
   receive overrun; it is not).
 - Idle memory: netcup 3.8 MB at 5000 connections, 10.7 MB at 20000; Contabo 10.0 MB and 17.8 MB (baseline 9.5 MB for four
   cores); Mosquitto 4.9 MB at 5000.
+
+## 14. virtio-net multiqueue with RSS on the local rig (NEXT-6, ADR-314, 2026-11-09)
+
+**No throughput figure is claimed.** The only rig with a multi-queue tap available to this work is QEMU 8.2.2
+**TCG** inside Docker's 4-CPU Linux VM on the Mac (`docs/perf-results/next6-mq/`: `Dockerfile`, `bench.sh`, raw
+output `ab-2026-11-09.txt`), and the Mac was **not quiet**: other agents' builds and VMs kept its load average between
+8 and 16 (14 cores) during the runs. In that VM the guest's four vCPUs, QEMU's network thread and the load generator
+share four host CPUs, and TCG makes every TLS handshake about six times as expensive as under HVF. No KVM host was
+used (D-9).
+
+Set-up: the same aarch64 kernel and static configuration, `serve log=info limits=bench`, 4 vCPUs (3 data cores and the
+store's core), a 4-queue tap with `mq=on,rss=on,vectors=10`; `"auto"` (3 pairs in use, the worker queues polled,
+since TCG's GIC has only an ITS) against `devices.virtio_net_queues = "single"` (the dispatcher of v0.5.0). Two rounds
+each, alternating; `urmqtt-loadgen handshake --threads 32` for 15 s.
+
+| | mTLS handshakes/s (rounds 1, 2) | core 0 busy during the handshakes | workers busy |
+|---|---|---|---|
+| `"single"` (core 0 dispatches every frame) | 547, 458 | 26-32 % (7-9 % of it NIC work) | 94-100 % |
+| `"auto"` (one pair per data core) | 562, (round 2: no result line) | 5-8 % (0-1 % NIC work) | 94-100 % |
+
+What it shows and what it does not:
+
+- **Core 0's share of the frame work goes away**, which is what the change is for: with one pair, core 0 spent a
+  quarter to a third of its time moving every frame between the NIC and the workers; with a pair per core it only
+  answers ARP and the like. That observation does not depend on the rig's speed (the same counters, the same load,
+  each core's own busy time).
+- **The handshake rate does not change** here: the two workers are saturated by TLS under TCG (94-100 % busy, TLS
+  most of it), so freeing core 0 has nothing to give. On a machine where the workers are not the bottleneck (KVM,
+  small messages at high rates, many cores) the freed dispatcher and the second copy that no longer happens should
+  show; that is unmeasured. Where it **cannot** help: one data core (2 vCPUs with storage: one pair, nothing to
+  spread), a NIC without RSS (most VPS NICs today), and loads bound by TLS on the workers, as here.
+- The QoS 0 flood of `bench.sh` did not measure anything: its 8 subscribers were refused by the dev configuration's
+  ACL (`failed=8`, nothing delivered), so its `sent_per_s` is the publishers' write rate only. The run of round 2 with
+  `"auto"` printed no load-generator line (the rig's log has the broker side). Both are in the raw file; neither is
+  used above.
+- Re-measure on a KVM host with vhost and eBPF RSS (`scripts/mq-rig.sh --accel kvm --bench SECONDS`) before quoting a
+  gain.

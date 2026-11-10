@@ -131,7 +131,7 @@ fn present(now: bool) {
     let guard = if now { lock_bounded() } else { GPU.try_lock() };
     let Some(mut g) = guard else { return };
     let Some(gpu) = g.as_mut() else { return };
-    let env = KernelEnv;
+    let env = KernelEnv::RUNTIME;
     if now && gpu.busy() {
         let _ = gpu.wait_idle(&env, FORCE_WAIT_NS);
     }

@@ -14,10 +14,11 @@
 use alloc::string::String;
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-use urmqtt_broker::sys::{self, Command, Info, Level, Limiter, Refused};
+use urmqtt_broker::sys::{self, Command, Info, Level, Limiter, NetQueueSys, Refused};
 use urmqtt_broker::{Broker, SysKind, SysRequest};
 use urmqtt_config::LogLevel;
 use urmqtt_log::{debug, warn};
+use urmqtt_virtio::net::MAX_PAIRS;
 
 use crate::dataplane;
 use crate::smp::MAX_CPUS;
@@ -141,6 +142,29 @@ impl Sys {
         }
     }
 
+    /// The first pass, when the shard is made and before its loop runs (so
+    /// outside the handler watchdog): the first report, every retained
+    /// `$SYS/broker/...` topic and the first console lines.
+    ///
+    /// The first pass does once what later passes do in part: each retained
+    /// topic is new to the shard (an entry made, not replaced) and, under an
+    /// emulator (TCG), every line of this code runs for the first time and is
+    /// translated then. In the loop that cost was charged to the output
+    /// handler's `sys` step: 22 to 24 ms of running time on a CI runner with
+    /// v0.5, 27 ms once v0.6.0 added 14 topics (per address limit, IOMMU),
+    /// over the 25 ms budget of the slow-log scenarios. Here no connection
+    /// waits for it, and the loop's passes after it are the steady ones.
+    pub fn start(&mut self, broker: &mut Broker, now_ms: u64) {
+        if !self.active {
+            return;
+        }
+        self.next_stats_ms = now_ms + STATS_MS;
+        self.report(broker, now_ms);
+        self.next_refresh_ms = now_ms + REFRESH_MS;
+        refresh(broker);
+        self.console(broker);
+    }
+
     /// One loop pass: counters, console lines, due topics, requests.
     pub fn poll(&mut self, broker: &mut Broker, now_ms: u64) {
         if !self.active {
@@ -152,12 +176,7 @@ impl Sys {
         }
         if now_ms >= self.next_refresh_ms {
             self.next_refresh_ms = now_ms + REFRESH_MS;
-            let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
-            let info = collect(&mut busy, &mut accepted);
-            sys::topics(&info, |t, v| broker.sys_publish_retained(t, v.as_bytes()));
-            if let Some(report) = crate::diag::served_report() {
-                broker.sys_publish_retained("$SYS/diag/report", report.as_bytes());
-            }
+            refresh(broker);
         }
         self.console(broker);
         let requests: alloc::vec::Vec<SysRequest> = broker.drain_sys_requests().collect();
@@ -300,7 +319,9 @@ impl Sys {
         // connected after that report.
         self.report(broker, now_ms);
         let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
-        let info = collect(&mut busy, &mut accepted);
+        let mut queues = [NetQueueSys::default(); MAX_PAIRS];
+        let v6 = crate::netproto::v6_info();
+        let info = collect(&mut busy, &mut accepted, &mut queues, &v6);
         broker.sys_publish(sys::QUERY_INFO_RESPONSE, sys::json(&info).as_bytes());
     }
 
@@ -339,7 +360,9 @@ impl Sys {
             }
             Command::Status => {
                 let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
-                let info = collect(&mut busy, &mut accepted);
+                let mut queues = [NetQueueSys::default(); MAX_PAIRS];
+                let v6 = crate::netproto::v6_info();
+                let info = collect(&mut busy, &mut accepted, &mut queues, &v6);
                 for l in sys::status_lines(
                     &info,
                     level_name(urmqtt_log::level()),
@@ -372,10 +395,44 @@ impl Sys {
     }
 }
 
+/// Publishes every retained `$SYS/broker/...` topic (and the served
+/// diagnostics report) into this shard.
+fn refresh(broker: &mut Broker) {
+    let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
+    let mut queues = [NetQueueSys::default(); MAX_PAIRS];
+    let v6 = crate::netproto::v6_info();
+    let info = collect(&mut busy, &mut accepted, &mut queues, &v6);
+    sys::topics(&info, |t, v| broker.sys_publish_retained(t, v.as_bytes()));
+    if let Some(report) = crate::diag::served_report() {
+        broker.sys_publish_retained("$SYS/diag/report", report.as_bytes());
+    }
+}
+
 /// The numbers of all cores: what `$SYS/broker/...`, `status` and the query
-/// report. `busy` holds the per-core percentages (and bounds the core count).
-pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPUS]) -> Info<'a> {
+/// report. `busy` holds the per-core percentages (and bounds the core count);
+/// `queues` the NIC's queue pairs in use (ADR-312).
+pub fn collect<'a>(
+    busy: &'a mut [u8; MAX_CPUS],
+    accepted: &'a mut [u64; MAX_CPUS],
+    queues: &'a mut [NetQueueSys; MAX_PAIRS],
+    v6: &'a crate::netproto::V6Info,
+) -> Info<'a> {
     let cores = crate::smp::count().clamp(1, MAX_CPUS);
+    // Relaxed: statistics.
+    let pairs = (dataplane::QUEUE_PAIRS.load(Ordering::Relaxed) as usize).clamp(1, MAX_PAIRS);
+    for (k, (q, c)) in queues
+        .iter_mut()
+        .zip(dataplane::QUEUES.iter())
+        .enumerate()
+        .take(pairs)
+    {
+        *q = NetQueueSys {
+            received: c.received.load(Ordering::Relaxed),
+            sent: c.sent.load(Ordering::Relaxed),
+            forwarded: c.forwarded.load(Ordering::Relaxed),
+            interrupts: crate::devices::net_queue_irqs(k),
+        };
+    }
     for (b, a) in busy.iter_mut().zip(BUSY.iter()) {
         *b = a.load(Ordering::Relaxed);
     }
@@ -444,6 +501,20 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
         entropy_source: crate::devices::entropy_source_name(),
         console_dropped: CONSOLE_DROPPED.load(Ordering::Relaxed),
         net_mtu: crate::netproto::mtu().0,
+        net_queues: queues.get(..pairs).unwrap_or(&[]),
+        ipv6: urmqtt_broker::sys::Ipv6Sys {
+            mode: v6.mode,
+            link_local: &v6.link_local,
+            global: &v6.global,
+            router: &v6.router,
+            mtu: v6.mtu,
+            frames_in: v6.frames_in,
+            dropped: v6.dropped,
+            fragments: v6.fragments,
+            ext_headers: v6.ext_headers,
+            dad_duplicate: v6.dad_duplicate,
+            prefixes_ignored: v6.prefixes_ignored,
+        },
         drops,
         qos2,
         backpressure: bp,
@@ -464,9 +535,28 @@ pub fn collect<'a>(busy: &'a mut [u8; MAX_CPUS], accepted: &'a mut [u64; MAX_CPU
                 latency_max_ms: u64::from(t.latency_max_ms),
             }
         },
+        per_address: {
+            let (limit, t) = crate::conn_limit::info();
+            urmqtt_broker::sys::PerAddress {
+                limit,
+                established: t.established,
+                addresses: u64::from(t.addresses),
+                peak: u64::from(t.peak),
+                syn_dropped: dataplane::syn_dropped_by_reason()
+                    .get(urmqtt_net::admission::Reason::PerIpEstablished as usize)
+                    .copied()
+                    .unwrap_or(0),
+                refused: dataplane::refused_by_reason()
+                    .get(urmqtt_net::admission::Reason::PerIpEstablished as usize)
+                    .copied()
+                    .unwrap_or(0),
+                untracked: t.untracked,
+            }
+        },
         accepted: accepted.get(..cores).unwrap_or(&[]),
         plaintext: crate::plain::info(),
         websocket: crate::websocket::info(),
+        iommu: crate::iommu::sys(),
     }
 }
 

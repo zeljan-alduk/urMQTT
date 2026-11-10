@@ -165,10 +165,12 @@ pub fn check(b: &Blob<'_>, dev_allowed: bool) -> Result<(), CfgError> {
     }
 
     network(b, dev)?;
+    update(b)?;
     let limits = limits(b)?;
     let (max_len, max_levels) = limits;
     plaintext(b, max_len, max_levels)?;
     websocket(b, max_len, max_levels)?;
+    metrics(b)?;
     filters(
         "acl.device_publish",
         b,
@@ -260,6 +262,7 @@ pub fn check(b: &Blob<'_>, dev_allowed: bool) -> Result<(), CfgError> {
         }
     }
     time(b)?;
+    log_tls(b)?;
     for (key, t) in [
         ("observability.syslog_udp", tag::OBS_SYSLOG),
         ("observability.metrics_udp", tag::OBS_METRICS),
@@ -304,7 +307,70 @@ fn is_default(f: &fields::Field, v: &[u8]) -> bool {
     }
 }
 
+/// An allow-list: well-formed entries, none twice; an IPv6 network only in
+/// format 23 or later (ADR-334).
+fn allow_list(b: &Blob<'_>, t: u16, key: &'static str) -> Result<(), CfgError> {
+    use crate::plain;
+    for (n, s) in b.strs(t).enumerate() {
+        let net = plain::parse_allow(s).map_err(|m| err(key, m))?;
+        if net.is_v6() && b.version() < 23 {
+            return Err(err(key, "an IPv6 network needs configuration format 23"));
+        }
+        if b.strs(t)
+            .take(n)
+            .any(|o| plain::parse_allow(o).ok() == Some(net))
+        {
+            return Err(err(key, "a network is listed twice"));
+        }
+    }
+    Ok(())
+}
+
+/// `network.ipv6*` (NEXT-1, ADR-334).
+fn ipv6(b: &Blob<'_>) -> Result<(), CfgError> {
+    use crate::net::{is_link_local6, parse_ipv6_address, parse_ipv6_gateway, same_prefix6};
+    let mode = b.variant(tag::NET_IPV6); // 0 off, 1 slaac, 2 static
+    let (addr, gw) = (b.str(tag::NET_IPV6_ADDRESS), b.str(tag::NET_IPV6_GATEWAY));
+    if mode != 2 {
+        if !addr.is_empty() || !gw.is_empty() {
+            return Err(err(
+                "network.ipv6",
+                "ipv6_address and ipv6_gateway are only allowed with ipv6 = \"static\"",
+            ));
+        }
+        return Ok(());
+    }
+    if addr.is_empty() {
+        return Err(err(
+            "network.ipv6_address",
+            "required when ipv6 = \"static\"",
+        ));
+    }
+    if gw.is_empty() {
+        return Err(err(
+            "network.ipv6_gateway",
+            "required when ipv6 = \"static\"",
+        ));
+    }
+    let (a, len) = parse_ipv6_address(addr).map_err(|m| err("network.ipv6_address", m))?;
+    let g = parse_ipv6_gateway(gw).map_err(|m| err("network.ipv6_gateway", m))?;
+    if !is_link_local6(&g) && !same_prefix6(&a, &g, len) {
+        return Err(err(
+            "network.ipv6_gateway",
+            "must be link-local (fe80::/10) or inside network.ipv6_address's prefix: the router has to be on the link",
+        ));
+    }
+    if g == a {
+        return Err(err(
+            "network.ipv6_gateway",
+            "must not be the broker's own address",
+        ));
+    }
+    Ok(())
+}
+
 fn network(b: &Blob<'_>, dev: bool) -> Result<(), CfgError> {
+    ipv6(b)?;
     let mode = b.variant(tag::NET_MODE); // 0 dhcp, 1 static, 2 auto
     let has_addr = b.cidr(tag::NET_ADDRESS).is_some();
     let has_gw = b.ipv4(tag::NET_GATEWAY).is_some();
@@ -401,12 +467,7 @@ fn plaintext(b: &Blob<'_>, max_len: u64, max_levels: u64) -> Result<(), CfgError
     let (password, anonymous, by_ip) = (auth == 0, auth == 1, auth == 2);
 
     // Well-formed entries, enabled or not.
-    for (n, s) in b.strs(tag::PL_ALLOW_FROM).enumerate() {
-        plain::parse_allow(s).map_err(|m| err("plaintext.allow_from", m))?;
-        if b.strs(tag::PL_ALLOW_FROM).take(n).any(|o| o == s) {
-            return Err(err("plaintext.allow_from", "a network is listed twice"));
-        }
-    }
+    allow_list(b, tag::PL_ALLOW_FROM, "plaintext.allow_from")?;
     for (n, s) in b.strs(tag::PL_USERS).enumerate() {
         let (id, _) = plain::parse_user(s).map_err(|m| err("plaintext.users", m))?;
         let earlier = b.strs(tag::PL_USERS).take(n);
@@ -654,9 +715,121 @@ fn websocket(b: &Blob<'_>, max_len: u64, max_levels: u64) -> Result<(), CfgError
     Ok(())
 }
 
+/// The refusals of the log shipping keys (ADR-318), shared with the TOML path.
+pub const LOG_TLS_CA_MSG: &str =
+    "required when observability.log_tls is set (the collector's trust anchors)";
+pub const LOG_TLS_UNUSED_MSG: &str = "only allowed with observability.log_tls";
+pub const LOG_TLS_ADDR_MSG: &str = "must be a unicast IPv4 address (not 0.0.0.0/8, 127.0.0.0/8, multicast or broadcast) and a port other than 0";
+pub const LOG_TLS_NAME_MSG: &str = "must be a DNS name: labels of letters, digits and '-' (not first or last), 1 to 63 bytes each, dots between, at most 253 bytes";
+
+/// Whether `name` is a DNS name a certificate can carry (RFC 1123 §2.1 host
+/// names, case-insensitive; no wildcard, no trailing dot, not all digits in
+/// the last label, so that an IPv4 literal is not mistaken for one).
+pub fn valid_dns_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > fields::MAX_LOG_TLS_NAME_LEN {
+        return false;
+    }
+    let mut last_numeric = false;
+    for label in name.split('.') {
+        let b = label.as_bytes();
+        let (Some(first), Some(last)) = (b.first(), b.last()) else {
+            return false;
+        };
+        if b.len() > 63
+            || *first == b'-'
+            || *last == b'-'
+            || !b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
+        {
+            return false;
+        }
+        last_numeric = b.iter().all(u8::is_ascii_digit);
+    }
+    !last_numeric
+}
+
+/// `observability.log_tls*` (ADR-318): a collector needs its trust anchors;
+/// the other keys mean nothing without a collector.
+fn log_tls(b: &Blob<'_>) -> Result<(), CfgError> {
+    let Some((addr, port)) = b.addr(tag::OBS_LOG_TLS) else {
+        for (key, t) in [
+            ("observability.log_tls_name", tag::OBS_LOG_TLS_NAME),
+            ("observability.log_tls_ca", tag::OBS_LOG_TLS_CA),
+            ("observability.log_tls_queue_kb", tag::OBS_LOG_TLS_QUEUE_KB),
+        ] {
+            if b.raw(t).is_some() {
+                return Err(err(key, LOG_TLS_UNUSED_MSG));
+            }
+        }
+        return Ok(());
+    };
+    if port == 0 || matches!(addr[0], 0 | 127 | 224..=255) {
+        return Err(err("observability.log_tls", LOG_TLS_ADDR_MSG));
+    }
+    if b.bins(tag::OBS_LOG_TLS_CA).next().is_none() {
+        return Err(err("observability.log_tls_ca", LOG_TLS_CA_MSG));
+    }
+    let name = b.str(tag::OBS_LOG_TLS_NAME);
+    if !name.is_empty() && !valid_dns_name(name) {
+        return Err(err("observability.log_tls_name", LOG_TLS_NAME_MSG));
+    }
+    Ok(())
+}
+
+/// The refusal of a trial timeout the automatic confirmation cannot beat (ADR-297).
+pub const TRIAL_TIMEOUT_MSG: &str = "must be 0 or longer than update.confirm_after_s (a trial boot would reset before it could be confirmed)";
+
+/// `[update]` (ADR-297): a trial boot must be able to confirm itself before its
+/// timeout resets it.
+fn update(b: &Blob<'_>) -> Result<(), CfgError> {
+    let timeout = b.uint(tag::UPD_TRIAL_TIMEOUT);
+    if b.variant(tag::UPD_CONFIRM) == 0 && timeout != 0 && timeout <= b.uint(tag::UPD_CONFIRM_AFTER)
+    {
+        return Err(err("update.trial_timeout_s", TRIAL_TIMEOUT_MSG));
+    }
+    Ok(())
+}
+
 /// The refusal of a default session expiry above the maximum (ADR-273).
 pub const SESSION_EXPIRY_MSG: &str =
     "must not exceed limits.max_session_expiry_s (the longest expiry any session is granted)";
+
+/// The `[metrics]` section (ADR-290). As for `[plaintext]`: what is written is
+/// well formed whether or not the endpoint is on; what it needs is checked
+/// when it is on. There is no "anywhere": a metrics endpoint without an
+/// allow-list is not a configuration.
+fn metrics(b: &Blob<'_>) -> Result<(), CfgError> {
+    allow_list(b, tag::METRICS_ALLOW_FROM, "metrics.allow_from")?;
+    if !b.bool(tag::METRICS_ENABLED) {
+        return Ok(());
+    }
+    if b.strs(tag::METRICS_ALLOW_FROM).next().is_none() {
+        return Err(err(
+            "metrics.allow_from",
+            "required when metrics are enabled: the networks that may scrape (for example 10.0.0.0/8); there is no \"anywhere\"",
+        ));
+    }
+    let port = b.uint(tag::METRICS_PORT);
+    let tls_port = b.uint(tag::NET_TLS_PORT);
+    if tls_port != 0 && port == tls_port {
+        return Err(err(
+            "metrics.port",
+            "must differ from network.mqtt_tls_port",
+        ));
+    }
+    if port == b.uint(tag::NET_PLAIN_PORT) {
+        return Err(err(
+            "metrics.port",
+            "must differ from network.mqtt_plain_port",
+        ));
+    }
+    if b.bool(tag::PL_ENABLED) && port == b.uint(tag::PL_PORT) {
+        return Err(err("metrics.port", "must differ from plaintext.port"));
+    }
+    if b.bool(tag::WS_ENABLED) && port == b.uint(tag::WS_PORT) {
+        return Err(err("metrics.port", "must differ from websocket.port"));
+    }
+    Ok(())
+}
 
 /// Checks the limits and returns `(max_topic_len, max_topic_levels)`.
 fn limits(b: &Blob<'_>) -> Result<(u64, u64), CfgError> {
@@ -700,10 +873,25 @@ fn storage(b: &Blob<'_>, dev: bool) -> Result<(), CfgError> {
             }
         }
     }
-    // Encryption at rest (S7): on needs a usable key, off takes none.
+    // Encryption at rest (S7): on needs a usable key, off takes none. With
+    // the key from the console (LATER-7, ADR-328) the image holds none.
     let on = b.variant(tag::ST_ENCRYPTION) != 0;
     let key = b.bin(tag::ST_DISK_KEY);
-    if on {
+    let console = b.variant(tag::ST_DISK_KEY_SOURCE) != 0;
+    if console {
+        if !on {
+            return Err(err(
+                "storage.disk_key_source",
+                "\"console\" only with storage.encryption = \"aes-256-xts\"",
+            ));
+        }
+        if !key.is_empty() {
+            return Err(err(
+                "storage.disk_key",
+                "not with storage.disk_key_source = \"console\": the point is that the image holds no key",
+            ));
+        }
+    } else if on {
         if crate::diskkey::check_key(key).is_err() {
             return Err(err(
                 "storage.disk_key",

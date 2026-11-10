@@ -7,9 +7,11 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+pub use urmqtt_net::addr::Addr;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Key {
-    pub addr: [u8; 4],
+    pub addr: Addr,
     pub rport: u16,
     pub lport: u16,
 }
@@ -29,7 +31,21 @@ pub struct Table {
 
 pub(crate) fn mix(k: &Key, seed: u64) -> u64 {
     let mut h = seed ^ 0x9e37_79b9_7f4a_7c15;
-    let v = u64::from(u32::from_be_bytes(k.addr))
+    let o = k.addr.octets();
+    let [a, b, c, d, e, f, g, i, w, x, y, z, ..] = o;
+    // The high 96 bits (zero and 0xffff for IPv4) fold into the seed first;
+    // the low 32 and the ports are mixed as before (NEXT-1).
+    if !k.addr.is_v4() {
+        h ^= u64::from_le_bytes([a, b, c, d, e, f, g, i]);
+        h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        h ^= u64::from(u32::from_le_bytes([w, x, y, z]));
+        h = h.wrapping_mul(0x94d0_49bb_1331_11eb);
+    }
+    let low = k.addr.as_v4().unwrap_or_else(|| {
+        let [.., p, q, r, s] = o;
+        [p, q, r, s]
+    });
+    let v = u64::from(u32::from_be_bytes(low))
         | (u64::from(k.rport) << 32)
         | (u64::from(k.lport) << 48);
     h ^= v;
@@ -191,7 +207,28 @@ mod tests {
             x ^= x >> 7;
             x ^= x << 17;
             let k = Key {
-                addr: [10, 0, (x >> 8) as u8 & 3, (x >> 16) as u8],
+                addr: if x % 5 == 0 {
+                    Addr::v6([
+                        0x20,
+                        1,
+                        0xd,
+                        0xb8,
+                        0,
+                        0,
+                        0,
+                        (x >> 8) as u8 & 3,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        (x >> 16) as u8,
+                    ])
+                } else {
+                    Addr::v4([10, 0, (x >> 8) as u8 & 3, (x >> 16) as u8])
+                },
                 rport: (x >> 24) as u16 % 2000,
                 lport: 8883,
             };

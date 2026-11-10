@@ -22,6 +22,14 @@ bench = false
 [dependencies]
 urmqtt-cfg = { path = "../../crates/cfg", features = ["alloc"] }
 urmqtt-store = { path = "../../crates/store" }
+# The release signature check of `slots stage --image` (ADR-299): the same code
+# as `urmqtt-config check-release` and the builder page.
+urmqtt-config-tool = { path = "../config" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The A/B tests sign a throwaway release with a key made in the test.
+ed25519-dalek = { version = "2.2", default-features = false }
+base64ct = { version = "1.8", default-features = false, features = ["alloc"] }

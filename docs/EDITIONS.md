@@ -130,16 +130,29 @@ the exclusivity.
 - **One kernel.** The commercial repository depends on tagged releases of this repository's crates (as git
   dependencies pinned to a tag; the crates are not published on crates.io) and builds its own kernel image with
   the extra drivers. It does not fork the broker, the stack, the crypto or the storage.
-- **Drivers through the framework.** The extra drivers plug into the driver framework of ADR-257 the same way a
-  virtio driver does: a device table row, a configuration key, a state in the boot log and the Diagnostic report,
-  a refusal when a key names a driver the image lacks.
-- **Today this needs a patched kernel crate,** because the framework's tables (`registry::KINDS`,
-  `vdev::DRIVERS`) and the configuration tags are closed lists inside this repository. The planned fix is the
-  roadmap item "kernel as a library" ([ROADMAP.md](ROADMAP.md), NOW-18): a driver registration API for
-  out-of-tree drivers, generic PCI ID binding, and a reserved range of configuration tags, with the open
-  kernel's behaviour unchanged and `make repro` identical. **It is not done.**
+- **The kernel as a library** (NOW-18, ADR-335 to ADR-339, [ARCHITECTURE.md](ARCHITECTURE.md) §8b). `crates/kernel`
+  is a library and the open image is one line on top of it: `urmqtt_kernel::image!(Edition::OPEN)`. The commercial
+  repository's image is a binary crate that names its own `urmqtt_kernel::ext::Edition`:
+  - **PCI drivers bound by ID** (`PciDriver`, `PciId`): vendor:device, a vendor, or a class and subclass. A driver
+    is offered only the PCI functions no open driver claims; a function with the virtio vendor ID `0x1AF4` is never
+    offered, and an ID that names it does not compile. A bound function is named in the boot log
+    (`ext: <driver> at <bdf>: driven`) and in the Diagnostic report's PCI list. The driver gets its function's
+    configuration space, its memory BARs and DMA memory in its own IOMMU domain (`PciDevice`).
+  - **Configuration keys in a reserved range**: tags `0xF000..=0xFFFE`, TOML keys `ext.<section>.<name>`. No open
+    key will ever use either. The open kernel and the open `urmqtt-config` refuse a configuration that sets one
+    (an unknown tag), so an image configured for a driver it does not have never boots without a word; the
+    edition's kernel (`urmqtt_config::load_ext`) and packer (`pack_ext`, `sign_ext`) accept its own.
+  - **Boot hooks**: early (heap up, before devices), after the device probe, just before `URMQTT READY`, and the
+    boot CPU's 10 ms tick.
+  - `examples/edition` in this repository is a second image built that way from a workspace of its own (a driver
+    for QEMU's `edu` test device); CI builds and boots it (smoke group `edition`).
+- **What the library does not offer yet** (ADR-339): a NIC that is not virtio-net cannot be the broker's network
+  device, a disk that is not virtio-blk or virtio-scsi cannot hold the store, and an edition cannot add an
+  entropy source or a timer. The data path, the store's disk selection and the entropy pool are built on the
+  virtio devices; opening them to other devices is the next step of this work (an interface each, behind the
+  same rule: the open image's behaviour unchanged). A commercial NIC or disk driver needs these.
 - **The same configuration format.** A configuration that the open edition accepts means the same in the
-  commercial edition; keys for commercial drivers would use the reserved tag range, so they never collide with a
+  commercial edition; keys for commercial drivers use the reserved tag range, so they never collide with a
   future open key.
 - **The same tests.** The commercial kernel runs this repository's test suites as well as its own.
 
@@ -182,4 +195,5 @@ an official edition. This is a note, not legal text.
 - The terms of support and the service-level agreement, and how they relate to a support period for the open
   edition (ROADMAP D-15).
 - The order of the commercial targets after Google Cloud.
-- How the reserved configuration tag range and the registration API look in detail (NOW-18).
+- The interfaces for a NIC, a disk, an entropy source and a timer that is not virtio (ADR-339): which of them
+  the commercial targets need first, and how the data path takes a NIC it does not know.

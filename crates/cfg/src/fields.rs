@@ -308,6 +308,43 @@ pub mod tag {
     // MQTT 5.0 part 3 (ADR-275): format version 13.
     pub const LIM_MAX_SHARED_GROUPS: u16 = 260;
     pub const LIM_MAX_SHARED_GROUP_MEMBERS: u16 = 261;
+    // NOW-14 (ADR-280): format version 14.
+    pub const LIM_MAX_CONNECTIONS_PER_IP: u16 = 270;
+    // Run-time password accounts (NOW-15, ADR-285): format version 15.
+    pub const LIM_MAX_RUNTIME_ACCOUNTS: u16 = 275;
+    // The Prometheus endpoint (NEXT-9, ADR-290): format version 16. Tags 262 to
+    // 299 are left to the other items of the release.
+    pub const METRICS_ENABLED: u16 = 300;
+    pub const METRICS_PORT: u16 = 301;
+    pub const METRICS_ALLOW_FROM: u16 = 302;
+    pub const METRICS_MAX_CONNS: u16 = 303;
+    pub const METRICS_MAX_PER_IP: u16 = 304;
+    pub const METRICS_REQUEST_TIMEOUT: u16 = 305;
+    // A/B updates (NEXT-11, ADR-297): format version 17.
+    pub const UPD_CONFIRM: u16 = 340;
+    pub const UPD_CONFIRM_AFTER: u16 = 341;
+    pub const UPD_TRIAL_TIMEOUT: u16 = 342;
+    // DMA remapping (LATER-5, H4b, ADR-305): format version 18. The tag is
+    // apart from the others of v0.6.0 so that items built in parallel do not
+    // collide.
+    pub const DEV_IOMMU: u16 = 318;
+    // virtio-net queue pairs (NEXT-6, ADR-313): format version 19, a tag
+    // apart for the same reason.
+    pub const DEV_NET_QUEUES: u16 = 395;
+    // Log shipping over TLS on the outbound TCP client (NEXT-7, ADR-318):
+    // format version 20. Apart from the other items' tags of v0.6.0.
+    pub const OBS_LOG_TLS: u16 = 450;
+    pub const OBS_LOG_TLS_NAME: u16 = 451;
+    pub const OBS_LOG_TLS_CA: u16 = 452;
+    pub const OBS_LOG_TLS_QUEUE_KB: u16 = 453;
+    // A disk key that is not in the image (LATER-7, ADR-328): format
+    // version 22, a tag apart from the other v0.6.0 items.
+    pub const ST_DISK_KEY_SOURCE: u16 = 365;
+    // IPv6 (NEXT-1, ADR-334): format version 23, tags apart from the other
+    // v0.6.0 items.
+    pub const NET_IPV6: u16 = 410;
+    pub const NET_IPV6_ADDRESS: u16 = 411;
+    pub const NET_IPV6_GATEWAY: u16 = 412;
 }
 
 use tag as t;
@@ -317,12 +354,17 @@ pub const IDENTITY_FIELDS: &[&str] = &["cn", "san_uri"];
 pub const STORAGE_MODES: &[&str] = &["disk", "auto", "ram"];
 pub const DISCARD_MODES: &[&str] = &["auto", "off"];
 pub const ENCRYPTION_MODES: &[&str] = &["off", "aes-256-xts"];
+/// Where the disk key of an encrypted data partition comes from
+/// (`storage.disk_key_source`, ADR-328); the first is the default.
+pub const DISK_KEY_SOURCES: &[&str] = &["image", "console"];
 pub const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 pub const ENTROPY_FALLBACKS: &[&str] = &["jitter", "none"];
 pub const REGISTRY_MODES: &[&str] = &["open", "allowlist"];
 /// `limits.publisher_backpressure` (ADR-269); the first is the default.
 pub const BACKPRESSURE_MODES: &[&str] = &["single", "off"];
 pub const WATCHDOG_ACTIONS: &[&str] = &["log", "drop", "reset"];
+/// Who confirms a trial boot after an A/B update (`update.confirm`, ADR-297).
+pub const UPDATE_CONFIRM_MODES: &[&str] = &["auto", "operator"];
 /// How a plaintext client proves who it is (P1).
 pub const PLAINTEXT_AUTH: &[&str] = &["password", "anonymous", "ip"];
 /// How a WebSocket client proves who it is (ADR-272).
@@ -347,6 +389,15 @@ pub const DEVICE_MODES: &[&str] = &["off", "auto", "on"];
 /// ADR-270): the receive queue's MSI-X interrupt where the platform has one,
 /// or polling.
 pub const NET_INTERRUPT_MODES: &[&str] = &["auto", "off"];
+/// How many virtio-net queue pairs the NIC gets (`devices.virtio_net_queues`,
+/// ADR-313): one per data core where the device steers flows itself (RSS), or
+/// always one. The first is the default.
+pub const NET_QUEUE_MODES: &[&str] = &["auto", "single"];
+/// IPv6 (`network.ipv6`, ADR-334): off, addresses from Router
+/// Advertisements, or a configured one. The first is the default.
+pub const IPV6_MODES: &[&str] = &["off", "slaac", "static"];
+/// DMA remapping (`devices.iommu`, ADR-305); the first is the default.
+pub const IOMMU_MODES: &[&str] = &["off", "auto", "require"];
 /// The `[devices]` keys, one per optional virtio driver (ADR-257): tag, key
 /// and the driver's feature (as `urmqtt_virtio::registry::KINDS` names it; a
 /// test there keeps the two equal).
@@ -362,8 +413,16 @@ pub const MAX_PLAIN_NETWORKS: usize = 64;
 pub const MAX_PLAIN_USERS: usize = 256;
 pub const MAX_PLAIN_IP_IDENTITIES: usize = 64;
 pub const MAX_PLAIN_ACL: usize = 16;
+/// Most entries of `metrics.allow_from` (a scrape comes from a few hosts).
+pub const MAX_METRICS_NETWORKS: usize = 16;
+/// The request deadline's range of the metrics endpoint, seconds.
+pub const MAX_METRICS_TIMEOUT_S: u64 = 30;
 /// Longest identity (a user name, the anonymous identity, an `ip_identities` id).
 pub const MAX_IDENTITY_LEN: usize = 64;
+/// Longest `observability.log_tls_name` (a DNS name, RFC 1035 §2.3.4).
+pub const MAX_LOG_TLS_NAME_LEN: usize = 253;
+/// Most trust anchors of `observability.log_tls_ca`.
+pub const MAX_LOG_TLS_CAS: usize = 8;
 
 /// Every field, in ascending tag order.
 pub static FIELDS: &[Field] = &[
@@ -1466,6 +1525,238 @@ pub static FIELDS: &[Field] = &[
         ),
         13,
     ),
+    // NOW-14 (ADR-280): format version 14.
+    since(
+        f(
+            t::LIM_MAX_CONNECTIONS_PER_IP,
+            "limits.max_connections_per_ip",
+            uint(4, 0, 1_000_000, 1024),
+            "Established TLS connections (MQTT and WebSocket) one source address may hold at once, all cores together; 0: no limit. Over it the SYN gets no answer (or the final ACK a RST) before any TLS work, and the refusal is counted (`$SYS/broker/connections/per_address/...`). Devices behind one NAT share an address, so size it for the largest site. The handshakes in flight per address are bounded separately (`limits.max_handshakes_in_flight_per_ip`). Format 14.",
+        ),
+        14,
+    ),
+    // Run-time password accounts (NOW-15, ADR-285): format version 15.
+    since(
+        f(
+            t::LIM_MAX_RUNTIME_ACCOUNTS,
+            "limits.max_runtime_accounts",
+            uint(2, 0, 1_024, 0),
+            "Password accounts the signed control channel may hold on the data disk (set-account, remove-account), for the plaintext and WebSocket listeners in password mode; 0 (the default): the control channel refuses account commands. Needs control.service_ids and a data disk. Format 15.",
+        ),
+        15,
+    ),
+    // The Prometheus endpoint (NEXT-9, ADR-290): format version 16.
+    since(
+        f(
+            t::METRICS_ENABLED,
+            "metrics.enabled",
+            Kind::Bool(false),
+            "Serve the broker's numbers in the Prometheus text format (and OpenMetrics) as HTTP on metrics.port, to the networks in metrics.allow_from only. Plain HTTP, read-only, no client data in it. Off by default. Format 16.",
+        ),
+        16,
+    ),
+    since(
+        f(
+            t::METRICS_PORT,
+            "metrics.port",
+            uint(2, 1, 65_535, 9100),
+            "TCP port of the metrics endpoint (GET /metrics); different from every other listener's port.",
+        ),
+        16,
+    ),
+    since(
+        items(
+            f(
+                t::METRICS_ALLOW_FROM,
+                "metrics.allow_from",
+                Kind::Strs {
+                    max_items: MAX_METRICS_NETWORKS as u16,
+                    max_len: 18,
+                    default: &[],
+                },
+                "Networks (a.b.c.d/len, for example 10.0.0.0/8) that may scrape. Required when metrics are enabled; there is no \"anywhere\". Any other address gets no answer at all and the broker keeps no state for it.",
+            ),
+            Item::Cidr,
+        ),
+        16,
+    ),
+    since(
+        f(
+            t::METRICS_MAX_CONNS,
+            "metrics.max_connections",
+            uint(1, 1, 64, 8),
+            "Metrics connections held at once on each data core; more are refused. One scrape is one short connection.",
+        ),
+        16,
+    ),
+    since(
+        f(
+            t::METRICS_MAX_PER_IP,
+            "metrics.max_connections_per_ip",
+            uint(1, 1, 16, 2),
+            "Metrics connections held at once from one source address on each data core.",
+        ),
+        16,
+    ),
+    since(
+        f(
+            t::METRICS_REQUEST_TIMEOUT,
+            "metrics.request_timeout_s",
+            uint(1, 1, MAX_METRICS_TIMEOUT_S, 5),
+            "Seconds from the TCP connection to the end of the answer; a slower client is cut off (slowloris). Prometheus scrapes in well under a second.",
+        ),
+        16,
+    ),
+    // DMA remapping (LATER-5, ADR-305): format version 18.
+    since(
+        f(
+            t::DEV_IOMMU,
+            "devices.iommu",
+            Kind::Enum {
+                variants: IOMMU_MODES,
+                default: 0,
+            },
+            "DMA remapping through the machine's IOMMU (Intel VT-d, AMD-Vi, Arm SMMUv3): each device the broker drives can reach only the memory the kernel gave it, and a DMA anywhere else is blocked and counted. off (the default): the IOMMU is left as the firmware set it (in a VM the hypervisor's devices are trusted, and an emulated IOMMU costs throughput). auto: used when the firmware describes one that covers the devices, else a warning and the broker runs without. require: refuse to boot unless every driven device is behind a working IOMMU (bare metal, a hypervisor you do not trust). Format 18.",
+        ),
+        18,
+    ),
+    // A/B updates (NEXT-11, ADR-297): format version 17.
+    since(
+        f(
+            t::UPD_CONFIRM,
+            "update.confirm",
+            Kind::Enum {
+                variants: UPDATE_CONFIRM_MODES,
+                default: 0,
+            },
+            "Who confirms a new kernel after an A/B update (urmqtt-disk slots activate): auto, once the store is open and a listener has been up for update.confirm_after_s; or operator, with a boot-confirm control message (urmqtt-control). Unconfirmed, it is replaced by the previous slot after its trial boots. Format 17.",
+        ),
+        17,
+    ),
+    since(
+        f(
+            t::UPD_CONFIRM_AFTER,
+            "update.confirm_after_s",
+            uint(4, 0, 86_400, 60),
+            "update.confirm = auto: seconds a trial boot must serve (store open, listener up) before it is confirmed. Format 17.",
+        ),
+        17,
+    ),
+    since(
+        f(
+            t::UPD_TRIAL_TIMEOUT,
+            "update.trial_timeout_s",
+            uint(4, 0, 86_400, 900),
+            "A trial boot not confirmed within this many seconds resets the machine, which uses one of its trial boots; 0: it waits as long as it runs. When not 0, longer than update.confirm_after_s. Format 17.",
+        ),
+        17,
+    ),
+    // virtio-net multiqueue (NEXT-6, ADR-313): format version 19.
+    since(
+        f(
+            t::ST_DISK_KEY_SOURCE,
+            "storage.disk_key_source",
+            Kind::Enum {
+                variants: DISK_KEY_SOURCES,
+                default: 0,
+            },
+            "Where the key of an encrypted data partition comes from. image (the default): storage.disk_key, inside the image, so whoever has the ISO can read a copied disk. console: the image holds no key; the disk key is wrapped under a passphrase in the data partition's header, and the kernel asks for the passphrase on the console (serial, VNC keyboard or virtio-console) at every boot, before the store opens and before any listener: an unattended reboot waits for an operator. Needs storage.encryption and no storage.disk_key. Format 22.",
+        ),
+        22,
+    ),
+    since(
+        f(
+            t::DEV_NET_QUEUES,
+            "devices.virtio_net_queues",
+            Kind::Enum {
+                variants: NET_QUEUE_MODES,
+                default: 0,
+            },
+            "How many receive/transmit queue pairs the virtio-net NIC uses. auto (the default): one per data core when the device offers multiqueue with RSS (VIRTIO_NET_F_MQ and VIRTIO_NET_F_RSS, e.g. QEMU's virtio-net-pci with mq=on,rss=on on a multi-queue tap), so each core receives and sends its own flows and core 0 stops copying every frame; otherwise one pair, as before. single: always one pair (the dispatcher on core 0 steers every frame), for a host whose multiqueue misbehaves. Format 19.",
+        ),
+        19,
+    ),
+    // network, continued: IPv6 (NEXT-1, ADR-334), format version 23.
+    since(
+        f(
+            t::NET_IPV6,
+            "network.ipv6",
+            Kind::Enum {
+                variants: IPV6_MODES,
+                default: 0,
+            },
+            "IPv6 beside IPv4. off (the default): IPv6 frames are dropped and nothing listens on IPv6. slaac: the link-local address and one global address from the Router Advertisements (the first /64 with the A flag; interface identifier from the MAC, EUI-64), the default router and the MTU from them. static: network.ipv6_address and network.ipv6_gateway. Every listener (TLS, WebSocket, plaintext, metrics) then also takes IPv6 clients; the per-address limits count an IPv6 /64 as one address. Format 23.",
+        ),
+        23,
+    ),
+    since(
+        f(
+            t::NET_IPV6_ADDRESS,
+            "network.ipv6_address",
+            Kind::Str {
+                max: 64,
+                default: "",
+            },
+            "The IPv6 address with the length of its on-link prefix, e.g. 2001:db8:1::10/64; required with network.ipv6 = \"static\", not allowed otherwise. A global unicast address (the link-local one is made from the MAC). Format 23.",
+        ),
+        23,
+    ),
+    since(
+        f(
+            t::NET_IPV6_GATEWAY,
+            "network.ipv6_gateway",
+            Kind::Str {
+                max: 64,
+                default: "",
+            },
+            "The IPv6 default router, e.g. fe80::1 (link-local, what most VPS providers give) or an address within network.ipv6_address's prefix; required with network.ipv6 = \"static\", not allowed otherwise. Format 23.",
+        ),
+        23,
+    ),
+    // Log shipping over TLS (NEXT-7, ADR-318): format version 20.
+    since(
+        f(
+            t::OBS_LOG_TLS,
+            "observability.log_tls",
+            Kind::Addr,
+            "Collector for the log records over TLS 1.3 (RFC 5425 syslog framing; a.b.c.d:port, an IPv4 address, no DNS); empty: off. The broker opens this one outbound connection; it needs observability.log_tls_ca. Format 20.",
+        ),
+        20,
+    ),
+    since(
+        f(
+            t::OBS_LOG_TLS_NAME,
+            "observability.log_tls_name",
+            Kind::Str {
+                max: MAX_LOG_TLS_NAME_LEN as u16,
+                default: "",
+            },
+            "The name the collector's certificate must carry (a DNS name); empty: its IPv4 address, which must then be an IP SAN of the certificate. Format 20.",
+        ),
+        20,
+    ),
+    since(
+        f(
+            t::OBS_LOG_TLS_CA,
+            "observability.log_tls_ca",
+            Kind::BinList {
+                max_items: MAX_LOG_TLS_CAS as u8,
+                max: 65_536,
+            },
+            "CA certificates (PEM) the collector's certificate must chain to; the only trust anchors of the log connection. Required with observability.log_tls. Format 20.",
+        ),
+        20,
+    ),
+    since(
+        f(
+            t::OBS_LOG_TLS_QUEUE_KB,
+            "observability.log_tls_queue_kb",
+            uint(4, 16, 4096, 256),
+            "KiB of log records kept for the TLS collector while it is unreachable; the oldest are dropped (and counted) beyond. Format 20.",
+        ),
+        20,
+    ),
+    // A disk key that is not in the image (LATER-7, ADR-328): format 22.
 ];
 
 /// The field with this tag.
