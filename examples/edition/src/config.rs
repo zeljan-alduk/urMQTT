@@ -75,7 +75,11 @@ fn main() -> ExitCode {
                 eprintln!("{}: {e}", out.display());
                 return ExitCode::FAILURE;
             }
-            println!("packed {} ({} bytes, fingerprint {fp})", out.display(), blob.len());
+            println!(
+                "packed {} ({} bytes, fingerprint {fp})",
+                out.display(),
+                blob.len()
+            );
             ExitCode::SUCCESS
         }
         Err(errors) => {

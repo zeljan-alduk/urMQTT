@@ -861,30 +861,48 @@ fn ext_leaves<'t>(prefix: &str, t: &'t toml::Table, out: &mut Vec<(String, &'t t
 }
 
 /// Encodes the `[ext]` table into `b` (ADR-337): every key must be a field of `ext`, every value of its kind.
-fn build_ext(b: &mut Builder, t: &toml::Table, ext: &[fields::Field]) -> Result<(), Vec<ConfigError>> {
+fn build_ext(
+    b: &mut Builder,
+    t: &toml::Table,
+    ext: &[fields::Field],
+) -> Result<(), Vec<ConfigError>> {
     b.add_extensions(ext).map_err(blob_err)?;
     let mut leaves = Vec::new();
     ext_leaves("ext", t, &mut leaves);
     let mut errors = Vec::new();
     for (key, v) in leaves {
         let Some(f) = urmqtt_cfg::ext::lookup_key(&key, ext) else {
-            errors.push(cerr(&key, "unknown key (not an extension field of this edition)"));
+            errors.push(cerr(
+                &key,
+                "unknown key (not an extension field of this edition)",
+            ));
             continue;
         };
         let wrong = |what: &str| cerr(&key, format!("must be {what}"));
         let r = match (f.kind, v) {
-            (Kind::Bool(_), toml::Value::Boolean(x)) => b.bool(f.tag, *x).map_err(|e| cerr(&key, e.msg)),
+            (Kind::Bool(_), toml::Value::Boolean(x)) => {
+                b.bool(f.tag, *x).map_err(|e| cerr(&key, e.msg))
+            }
             (Kind::UInt { .. }, toml::Value::Integer(x)) => match u64::try_from(*x) {
                 Ok(x) => b.uint(f.tag, x).map_err(|e| cerr(&key, e.msg)),
                 Err(_) => Err(cerr(&key, "out of range")),
             },
             (Kind::Enum { variants, .. }, toml::Value::String(x)) => {
-                match variants.iter().position(|v| v == x).and_then(|i| u8::try_from(i).ok()) {
+                match variants
+                    .iter()
+                    .position(|v| v == x)
+                    .and_then(|i| u8::try_from(i).ok())
+                {
                     Some(i) => b.variant(f.tag, i).map_err(|e| cerr(&key, e.msg)),
-                    None => Err(cerr(&key, format!("must be one of {}", variants.join(", ")))),
+                    None => Err(cerr(
+                        &key,
+                        format!("must be one of {}", variants.join(", ")),
+                    )),
                 }
             }
-            (Kind::Str { .. }, toml::Value::String(x)) => b.str(f.tag, x).map_err(|e| cerr(&key, e.msg)),
+            (Kind::Str { .. }, toml::Value::String(x)) => {
+                b.str(f.tag, x).map_err(|e| cerr(&key, e.msg))
+            }
             (Kind::Strs { .. }, toml::Value::Array(a)) => {
                 let items: Option<Vec<&str>> = a.iter().map(toml::Value::as_str).collect();
                 match items {
@@ -896,13 +914,20 @@ fn build_ext(b: &mut Builder, t: &toml::Table, ext: &[fields::Field]) -> Result<
             (Kind::UInt { .. }, _) => Err(wrong("an integer")),
             (Kind::Enum { .. } | Kind::Str { .. }, _) => Err(wrong("a string")),
             (Kind::Strs { .. }, _) => Err(wrong("a list of strings")),
-            _ => Err(cerr(&key, "this kind of field is not allowed for an extension")),
+            _ => Err(cerr(
+                &key,
+                "this kind of field is not allowed for an extension",
+            )),
         };
         if let Err(e) = r {
             errors.push(e);
         }
     }
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 // --- the schema as JSON, for the web form ----------------------------------

@@ -33,7 +33,13 @@ pub const MAX_FIELDS: usize = 256;
 /// An extension field: stored, not derived, not dev-only, plain text items.
 /// `since` is the oldest format version whose kernel of this edition reads it
 /// (usually the format of the release the edition is built on).
-pub const fn field(tag: u16, key: &'static str, kind: Kind, help: &'static str, since: u16) -> Field {
+pub const fn field(
+    tag: u16,
+    key: &'static str,
+    kind: Kind,
+    help: &'static str,
+    since: u16,
+) -> Field {
     Field {
         tag,
         key,

@@ -37,7 +37,13 @@ const NAME: Field = field(
     "A label.",
     2,
 );
-const FLAG: Field = field(0xF003, "ext.example.flag", Kind::Bool(false), "A switch.", 2);
+const FLAG: Field = field(
+    0xF003,
+    "ext.example.flag",
+    Kind::Bool(false),
+    "A switch.",
+    2,
+);
 const LIST: Field = field(
     0xF010,
     "ext.other.list",
@@ -56,10 +62,14 @@ const _: () = assert!(ext::check(EXT).is_ok());
 fn no_open_field_is_in_the_reserved_range_or_the_ext_table() {
     for f in FIELDS {
         assert!(!ext::is_ext_tag(f.tag), "{} uses a reserved tag", f.key);
-        assert!(!f.key.starts_with(ext::KEY_PREFIX), "{} uses the [ext] table", f.key);
+        assert!(
+            !f.key.starts_with(ext::KEY_PREFIX),
+            "{} uses the [ext] table",
+            f.key
+        );
         assert!(f.key != "ext", "{}", f.key);
     }
-    assert!(FIRST_TAG < LAST_TAG && LAST_TAG < u16::MAX);
+    const { assert!(FIRST_TAG < LAST_TAG && LAST_TAG < u16::MAX) };
 }
 
 #[test]
@@ -80,8 +90,15 @@ fn an_open_reader_refuses_a_reserved_tag() {
 
 #[test]
 fn values_and_defaults_round_trip() {
-    let empty = Builder::with_extensions(EXT).unwrap().finish(false).unwrap();
-    assert_eq!(empty, Builder::new().finish(false).unwrap(), "defaults write nothing");
+    let empty = Builder::with_extensions(EXT)
+        .unwrap()
+        .finish(false)
+        .unwrap();
+    assert_eq!(
+        empty,
+        Builder::new().finish(false).unwrap(),
+        "defaults write nothing"
+    );
     let p = Blob::parse_ext(&empty, EXT).unwrap();
     assert_eq!(ext::uint_of(Some(&p), &QUEUES), 1);
     assert_eq!(ext::variant_of(Some(&p), &MODE), "auto");
@@ -107,7 +124,10 @@ fn values_and_defaults_round_trip() {
     assert_eq!(ext::variant_of(Some(&p), &MODE), "on");
     assert_eq!(ext::str_of(Some(&p), &NAME), "gvnic");
     assert!(ext::bool_of(Some(&p), &FLAG));
-    assert_eq!(ext::strs_of(Some(&p), &LIST).collect::<Vec<_>>(), ["x", "yy"]);
+    assert_eq!(
+        ext::strs_of(Some(&p), &LIST).collect::<Vec<_>>(),
+        ["x", "yy"]
+    );
     assert_eq!(p.uint(tag::NET_TLS_PORT), 9883);
     // An accessor of another kind yields the zero value, never a panic.
     assert_eq!(ext::uint_of(Some(&p), &NAME), 0);
@@ -120,7 +140,13 @@ fn values_and_defaults_round_trip() {
     })
     .unwrap();
     assert!(Blob::parse_ext(&signed, EXT).unwrap().signature().is_some());
-    assert!(build::sign(&bytes, |m| (sk.verifying_key().to_bytes(), sk.sign(m).to_bytes())).is_err());
+    assert!(
+        build::sign(&bytes, |m| (
+            sk.verifying_key().to_bytes(),
+            sk.sign(m).to_bytes()
+        ))
+        .is_err()
+    );
 }
 
 #[test]
@@ -137,7 +163,8 @@ fn ranges_and_shapes_of_extension_fields_are_checked() {
 
 #[test]
 fn a_bad_table_is_refused() {
-    let bad = |fields: &[Field]| ext::check(fields).is_err() && Builder::with_extensions(fields).is_err();
+    let bad =
+        |fields: &[Field]| ext::check(fields).is_err() && Builder::with_extensions(fields).is_err();
     let mut f = QUEUES;
     f.tag = 0x0100;
     assert!(bad(&[f]), "outside the range");
@@ -145,7 +172,15 @@ fn a_bad_table_is_refused() {
     f.tag = 0xFFFF;
     assert!(bad(&[f]), "0xFFFF is not in the range");
     assert!(bad(&[MODE, QUEUES]), "not ascending");
-    for key in ["queues", "ext.queues", "ext..x", "ext.a.", "ext.A.b", "ext.a-b.c", "net.mtu"] {
+    for key in [
+        "queues",
+        "ext.queues",
+        "ext..x",
+        "ext.a.",
+        "ext.A.b",
+        "ext.a-b.c",
+        "net.mtu",
+    ] {
         f = QUEUES;
         f.key = key;
         assert!(bad(&[f]), "{key}");

@@ -182,9 +182,7 @@ impl Builder {
         let newest = self
             .records
             .keys()
-            .filter_map(|t| {
-                crate::fields::by_tag(*t).or_else(|| crate::ext::lookup(*t, &self.ext))
-            })
+            .filter_map(|t| crate::fields::by_tag(*t).or_else(|| crate::ext::lookup(*t, &self.ext)))
             .map(|f| f.since)
             .max()
             .unwrap_or(BASE_VERSION);

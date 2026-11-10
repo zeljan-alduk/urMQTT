@@ -104,11 +104,13 @@ from them at the H10 commit (H0 baseline: 30 773 lines, 65 linked crates, 308
 | RustCrypto `cpufeatures` 0.2.17 and 0.3.1, vendored (X0b) | 675 + 598 lines | upstream sources plus one hunk each: on bare metal they ask the kernel's sealed dispatch (`urmqtt_cpu_has`). Reviewable with `diff -r` against the crates.io files ([vendor/README.md](../vendor/README.md)) |
 | Limine v12.9.4 (binary) | `BOOTAA64.EFI`, 331 776 bytes (and the x86_64 and BIOS loaders in the universal ISO) | pre-kernel; its configuration is enrolled (ADR-250), signing path ADR-251; **no project signing key exists**, so release loaders are unsigned |
 
-**`unsafe` in non-test code of the workspace:** 936 sites, **all 936 with a
+**`unsafe` in non-test code of the workspace:** 937 sites, **all 937 with a
 `// SAFETY:` comment or a `# Safety` section** (the tool crate `builder-wasm`
 accounts for 29 of them and the fake virtio device of the tests and fuzz targets,
 `virtio/src/fake.rs`, behind the `fake` feature, for 6; neither is in the image). In
-the image: 889 (889 and 860 at H10; the 9 added by ADR-255 are the aarch64 calls into
+the image: 890 (889 and 860 at H10; the 1 added by NOW-18 (ADR-336) is the `Region` over a BAR an edition's
+driver maps, `PciDevice::map_bar` in `kernel/src/ext.rs`, unused by the open image; the `no_mangle` of
+`urmqtt_kmain` moved from `boot.rs` into the `image!` macro of the same file; the 9 added by ADR-255 are the aarch64 calls into
 the assembly; the 3 added by ADR-256 are the virtio-gpu driver's request slots and
 framebuffer, and the console's slice of that framebuffer; the 3 added by ADR-257 are
 the shared queue allocation and the two bounds-checked DMA copies of `virtio/src/bus.rs`;
@@ -123,7 +125,7 @@ tables in `kernel/src/iommu.rs`, the cache clean for a non-coherent unit on each
 |---|---|---|
 | `urmqtt-store` | 302 (302) | deny, with `allow` on the FFI modules (`db`, `ffi`, `libc`, `vfs`, `init`, the log callback, the worker's half) |
 | `urmqtt-arch-x86_64` | 157 (157) | deny; port I/O, MSRs, control registers, interrupt entry |
-| `urmqtt-kernel` | 126 (126) | deny; `cpu_dispatch.rs` (the sealed section, the `urmqtt_cpu_has` export), boot requests, user mode, the IOMMU glue (ADR-305) |
+| `urmqtt-kernel` | 127 (127) | deny; `cpu_dispatch.rs` (the sealed section, the `urmqtt_cpu_has` export), boot requests, user mode, the IOMMU glue (ADR-305), an edition driver's BAR mapping (ADR-336) |
 | `urmqtt-arch-aarch64` | 110 (110) | deny; all assembly and system registers, the ARMv8 CRC-32C intrinsics, the GICv3 ITS (ADR-270) |
 | `urmqtt-mm` | 74 (74) | deny; frames, heap, slabs, key slab |
 | `urmqtt-dbworker` | 22 (22) | default; the worker's entry and syscall stub |
@@ -143,6 +145,17 @@ server-certificate verification (EKU serverAuth, name and IP SAN matching), both
 side; reachable only from the peer at the address the image names, after a TCP connection the broker opened, and
 only when `observability.log_tls` is set (off by default). There is **no request forgery from remote input**: no
 device, control message, `$SYS` topic or packet can choose or change a destination (ADR-319 point 3).
+
+**Growth of the trusted base in v0.6.0 by NOW-18 (ADR-335 to ADR-339), the kernel as a library:** no new crate, no
+new dependency, one new `unsafe` site (above). The kernel crate is now a library plus the open image's binary
+(`kernel/src/main.rs`, one macro call); the new code is `kernel/src/ext.rs` (the edition types, their `const fn`
+checks, the PCI binding, the hook calls, the extension key readers; about 350 lines without tests),
+`cfg/src/ext.rs` (the reserved tag range, the table check, `Blob::parse_ext`; about 280 lines) and
+`config-schema`'s `pack_ext`. In the open image all of it runs on empty tables: no PCI function is offered to any
+driver, no extension record is accepted, no hook is called, and nothing is logged (smoke `edition`: the open
+image beside the example edition's). What an edition adds is **its** trusted base, compiled into its image:
+its drivers run in kernel mode with the same privileges as the open drivers; the library's rules only keep them
+off virtio functions and keep their keys in their range (ADR-336, ADR-337).
 
 `mqtt`, `broker`, `tls`, `timer-wheel`, `cfg`, `config-schema`, `control`,
 `plain`, `sntp` and `dispatch` are `forbid(unsafe_code)`. `tcp`, `net`, `pci`,
@@ -207,7 +220,7 @@ pages, ADR-305).
 | virtio-input configuration (name, event bitmaps) and events (ADR-258; only with `devices.virtio_input` not `"off"`) | hypervisor (fed by the provider's VNC console) | `virtio/src/input.rs`, `kernel/src/vdev/input.rs` | the configuration's size clamped to the 128-byte union, the name to 32 printable bytes; an event only whole (8 bytes); key codes through a fixed table; at most 4 devices; typed bytes into a 256-byte ring | `virtio_input_event` |
 | virtio-vsock packets, credit and transport events (ADR-258; only with `devices.virtio_vsock` not `"off"`) | hypervisor and host processes (any CID the host routes) | `virtio/src/vsock.rs` (`Hdr::parse`, `Stack`), `kernel/src/vdev/vsock.rs` | one listening port (2883), only from CID 2, at most 4 connections, read-only (peer data counted and dropped), sends only within the peer's credit (never negative), payload counted from what the device delivered, 10 s idle and 2 s close timeouts, a reset never answered with a reset; **untested on a real device** | `virtio_vsock_packet` |
 | Limine responses (memory map, MP, date) | bootloader | `kernel/src/boot.rs` via the `limine` crate | — | none (trusted) |
-| Configuration (`deploy/<env>/config.toml`, PEMs, packed into the `urmqtt-cfg` blob of the image's slot; ADR-215, ADR-216) | operator, when the image is made | `config-schema` at pack time, `urmqtt-cfg` at every boot | fail closed: the kernel refuses a blob it does not understand, a dev option on a release kernel, a bad fingerprint or signature | `config_parse`, `cfg_blob` |
+| Configuration (`deploy/<env>/config.toml`, PEMs, packed into the `urmqtt-cfg` blob of the image's slot; ADR-215, ADR-216) | operator, when the image is made | `config-schema` at pack time, `urmqtt-cfg` at every boot | fail closed: the kernel refuses a blob it does not understand, a dev option on a release kernel, a bad fingerprint or signature; a record in the reserved range `0xF000..=0xFFFE` is an unknown tag unless the image's edition declares it (NOW-18, ADR-337: the open image declares none) | `config_parse`, `cfg_blob`, `cfg_ext` |
 | Kernel command line | operator (`limine.conf`) | `kernel/src/cmdline.rs` | **prod ignores every option** (dev only) | none (fixed words) |
 
 ---

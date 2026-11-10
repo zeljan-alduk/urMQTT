@@ -30,7 +30,13 @@ const MODE: Field = field(
     "Whether the driver runs.",
     2,
 );
-const ON: Field = field(0xF002, "ext.example.verbose", Kind::Bool(false), "Log more.", 2);
+const ON: Field = field(
+    0xF002,
+    "ext.example.verbose",
+    Kind::Bool(false),
+    "Log more.",
+    2,
+);
 const NAME: Field = field(
     0xF003,
     "ext.example.name",
@@ -102,7 +108,10 @@ fn extension_keys_are_packed_in_the_reserved_range() {
     assert_eq!(ext::variant_of(Some(&b), &MODE), "off");
     assert!(ext::bool_of(Some(&b), &ON));
     assert_eq!(ext::str_of(Some(&b), &NAME), "lab");
-    assert_eq!(ext::strs_of(Some(&b), &LIST).collect::<Vec<_>>(), ["a", "bc"]);
+    assert_eq!(
+        ext::strs_of(Some(&b), &LIST).collect::<Vec<_>>(),
+        ["a", "bc"]
+    );
     // Defaults write nothing.
     let defaults = packed("[ext.example]\nedu_check = 0x5a5a5a5a\nmode = \"auto\"\n").unwrap();
     assert_eq!(defaults, packed("").unwrap());
@@ -110,7 +119,9 @@ fn extension_keys_are_packed_in_the_reserved_range() {
 
 #[test]
 fn wrong_extension_keys_and_values_are_named() {
-    let e = errors("[ext.example]\nunknown = 1\nedu_check = -1\nmode = \"on\"\nverbose = 1\nname = \"too long name\"\n[ext.other.deep]\nlist = [1]\n");
+    let e = errors(
+        "[ext.example]\nunknown = 1\nedu_check = -1\nmode = \"on\"\nverbose = 1\nname = \"too long name\"\n[ext.other.deep]\nlist = [1]\n",
+    );
     let paths: Vec<&str> = e.iter().map(|(p, _)| p.as_str()).collect();
     for key in [
         "ext.example.unknown",

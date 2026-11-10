@@ -1442,7 +1442,10 @@ mod tests {
             Some("unknown field tag")
         );
         assert!(load(slot).is_err());
-        assert_ne!(CONFIG.memory.kernel_heap_mb, 128, "the blob was not installed");
+        assert_ne!(
+            CONFIG.memory.kernel_heap_mb, 128,
+            "the blob was not installed"
+        );
         let with = Blob::parse_ext(blob_in(slot).unwrap(), &ext).unwrap();
         let mut plain = Builder::new();
         plain.uint(tag::MEM_HEAP, 128).unwrap();

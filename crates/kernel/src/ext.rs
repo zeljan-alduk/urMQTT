@@ -77,7 +77,10 @@ impl Hooks {
     };
 
     const fn is_none(&self) -> bool {
-        self.early.is_none() && self.devices.is_none() && self.ready.is_none() && self.tick.is_none()
+        self.early.is_none()
+            && self.devices.is_none()
+            && self.ready.is_none()
+            && self.tick.is_none()
     }
 }
 
@@ -143,7 +146,10 @@ impl PciId {
         if vendor == VIRTIO_VENDOR {
             return false;
         }
-        eq16(self.vendor, vendor) && eq16(self.device, device) && eq8(self.class, class) && eq8(self.subclass, subclass)
+        eq16(self.vendor, vendor)
+            && eq16(self.device, device)
+            && eq8(self.class, class)
+            && eq8(self.subclass, subclass)
     }
 
     const fn check(&self) -> Result<(), &'static str> {
@@ -159,7 +165,9 @@ impl PciId {
         if let Some(v) = self.vendor
             && (v == VIRTIO_VENDOR || v == 0xffff)
         {
-            return Err("a PciId may not name the virtio vendor 0x1af4 (the open edition's drivers) or 0xffff");
+            return Err(
+                "a PciId may not name the virtio vendor 0x1af4 (the open edition's drivers) or 0xffff",
+            );
         }
         Ok(())
     }
@@ -428,9 +436,21 @@ mod kernel {
             e.name,
             e.pci_drivers.len(),
             e.config.len(),
-            if e.hooks.early.is_some() { " early" } else { "" },
-            if e.hooks.devices.is_some() { " devices" } else { "" },
-            if e.hooks.ready.is_some() { " ready" } else { "" },
+            if e.hooks.early.is_some() {
+                " early"
+            } else {
+                ""
+            },
+            if e.hooks.devices.is_some() {
+                " devices"
+            } else {
+                ""
+            },
+            if e.hooks.ready.is_some() {
+                " ready"
+            } else {
+                ""
+            },
             if e.hooks.tick.is_some() { " tick" } else { "" },
         );
         if let Some(h) = e.hooks.early {
@@ -466,11 +486,11 @@ mod kernel {
         if e.pci_drivers.is_empty() || f.vendor == VIRTIO_VENDOR || f.bridge {
             return;
         }
-        let Some(d) = e
-            .pci_drivers
-            .iter()
-            .find(|d| d.ids.iter().any(|id| id.matches(f.vendor, f.device, f.class, f.subclass)))
-        else {
+        let Some(d) = e.pci_drivers.iter().find(|d| {
+            d.ids
+                .iter()
+                .any(|id| id.matches(f.vendor, f.device, f.class, f.subclass))
+        }) else {
             return;
         };
         let bound = BOUND.lock().iter().filter(|(n, _)| *n == d.name).count();
@@ -545,14 +565,20 @@ mod kernel {
 
         /// Turns on memory decoding and, with `bus_master`, DMA.
         pub fn enable(&mut self, bus_master: bool) {
-            let bits = urmqtt_pci::CMD_MEMORY | if bus_master { urmqtt_pci::CMD_BUS_MASTER } else { 0 };
+            let bits = urmqtt_pci::CMD_MEMORY
+                | if bus_master {
+                    urmqtt_pci::CMD_BUS_MASTER
+                } else {
+                    0
+                };
             urmqtt_pci::enable(self.cfg, self.f.bdf, bits);
         }
 
         /// Memory BAR `index` as (physical base, size), as the firmware
         /// programmed it.
         pub fn bar(&mut self, index: u8) -> Option<(u64, u64)> {
-            let Some(Bar::Memory { base, .. }) = urmqtt_pci::bar(&*self.cfg, self.f.bdf, index) else {
+            let Some(Bar::Memory { base, .. }) = urmqtt_pci::bar(&*self.cfg, self.f.bdf, index)
+            else {
                 return None;
             };
             let size = urmqtt_pci::bar_size(self.cfg, self.f.bdf, index)?;

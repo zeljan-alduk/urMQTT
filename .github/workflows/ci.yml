@@ -66,6 +66,7 @@ jobs:
         run: |
           cargo fmt --all --check
           (cd fuzz && cargo fmt --check)
+          (cd examples/edition && cargo fmt --check)
       - name: clippy (host)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: clippy (aarch64-unknown-none)
@@ -75,6 +76,9 @@ jobs:
           # The virtio driver sets (ADR-257): every driver, and none of the optional ones.
           cargo clippy --locked -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --features virtio-all -p urmqtt-kernel --target aarch64-unknown-none -- -D warnings
           cargo clippy --locked -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --no-default-features -p urmqtt-kernel --target aarch64-unknown-none -- -D warnings
+          # The example edition, a kernel image built through the kernel library from its own workspace (NOW-18).
+          (cd examples/edition && cargo clippy --locked -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem --bin urmqtt-example --target aarch64-unknown-none --target-dir ../../target -- -D warnings)
+          (cd examples/edition && cargo clippy --locked --all-targets --target-dir ../../target -- -D warnings)
       - name: TCB inventory up to date (docs/audit, AUDIT.md)
         run: python3 scripts/audit-inventory.py --check
       - run: python3 scripts/check-known-issues.py   # docs/KNOWN-ISSUES.md cites only open AUDIT ids, ROADMAP items and ADRs that exist
@@ -168,6 +172,8 @@ jobs:
       # time: its configuration is data (ADR-216). Real prod secrets never
       # touch CI.
       - run: make build ENV=${{ matrix.env }}
+      # The kernel as a library (NOW-18): a second image, built from examples/edition's own workspace.
+      - run: make edition-example ENV=${{ matrix.env }}
       - name: Report kernel size
         run: |
           size=$(wc -c < target/aarch64-unknown-none/release/urmqtt)
@@ -228,6 +234,8 @@ jobs:
   #             at the prompt, the host tool, an edited header refused
   #   ipv6      IPv6 (ADR-330 to ADR-334): SLAAC on QEMU's user network, IPv6 only and dual stack through
   #             scripts/ipv6-relay.py (mTLS publish/subscribe over IPv6, the metrics endpoint for an IPv6 network)
+  #   edition   the kernel as a library (ADR-335 to ADR-339): the example edition's image (examples/edition) binds
+  #             QEMU's edu device by its PCI ID and reads a key of the reserved range; the open image beside it
   # NOT in CI yet: the x86_64 and universal-ISO suites (--arch x86_64 and
   # --arch universal, SMOKE_ONLY=diag|install|migrated|config|template|
   # integrity|install-rules|secureboot). They need qemu-system-x86, OVMF
@@ -269,6 +277,8 @@ jobs:
             only: unlock
           - group: ipv6
             only: ipv6
+          - group: edition
+            only: edition
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

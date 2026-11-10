@@ -63,9 +63,9 @@ mod devices;
 mod diag;
 #[cfg(all(target_os = "none", feature = "selftest"))]
 mod dpbench;
+pub mod ext;
 #[cfg(all(target_os = "none", feature = "virtio-gpu"))]
 mod gpucon;
-pub mod ext;
 #[cfg(target_os = "none")]
 mod hardening;
 #[cfg(all(target_os = "none", feature = "selftest"))]
