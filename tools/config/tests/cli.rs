@@ -1381,6 +1381,8 @@ fn templates_of_earlier_releases_take_what_their_kernel_reads() {
         // A tree with MQTT 5.0 parts 1 and 2 (ADR-273/274), without ADR-275.
         ("format 12", 12),
         ("v0.5.0", 13),
+        // This release (v0.6.0): everything up to IPv6 (ADR-334).
+        ("v0.6.0", 23),
         // A tree with the per-address connection limit (ADR-280), without run-time accounts (ADR-285).
         ("format 14", 14),
         // A tree with run-time accounts (ADR-285), without ADR-290.

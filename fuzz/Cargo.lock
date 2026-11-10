@@ -984,7 +984,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "urmqtt-arch"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "urmqtt-arch-aarch64",
  "urmqtt-arch-x86_64",
@@ -993,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-arch-aarch64"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "urmqtt-dispatch",
  "urmqtt-sync",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-arch-x86_64"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "font8x8",
  "urmqtt-dispatch",
@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-broker"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "urmqtt-mm",
  "urmqtt-mqtt",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-cfg"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ed25519-dalek",
  "sha2 0.11.1",
@@ -1028,14 +1028,14 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-config"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "urmqtt-cfg",
 ]
 
 [[package]]
 name = "urmqtt-config-schema"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "toml",
@@ -1047,7 +1047,7 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-control"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ed25519-dalek",
  "urmqtt-cfg",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-dispatch"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "urmqtt-sync",
 ]
@@ -1093,30 +1093,30 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-http"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "urmqtt-iommu"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "urmqtt-mm"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "urmqtt-sync",
 ]
 
 [[package]]
 name = "urmqtt-mqtt"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "urmqtt-net"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "urmqtt-nistz256"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cpufeatures 0.3.1",
  "p256",
@@ -1125,11 +1125,11 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-pci"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "urmqtt-plain"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "urmqtt-cfg",
  "urmqtt-config",
@@ -1137,11 +1137,11 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-platform"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "urmqtt-store"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aes",
  "cc",
@@ -1156,11 +1156,11 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-sync"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "urmqtt-tcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "urmqtt-mm",
  "urmqtt-net",
@@ -1169,11 +1169,11 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-timer-wheel"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "urmqtt-tls"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "chacha20poly1305",
@@ -1200,11 +1200,11 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-usys"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "urmqtt-virtio"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "urmqtt-arch",
  "urmqtt-pci",
@@ -1212,11 +1212,11 @@ dependencies = [
 
 [[package]]
 name = "urmqtt-ws"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "urmqtt-x25519"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cpufeatures 0.3.1",
 ]

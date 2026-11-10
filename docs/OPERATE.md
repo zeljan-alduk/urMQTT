@@ -154,7 +154,7 @@ first). The reply topic is fixed (an MQTT 5.0 operator client may send a Respons
 console does not use it: replies stay on the fixed topic for both versions):
 
 ```json
-{"version":"0.5.0","uptime_s":42,"arch":"aarch64","cpu":{"cores":4,"busy":[2,1,0,0]},
+{"version":"0.6.0","uptime_s":42,"arch":"aarch64","cpu":{"cores":4,"busy":[2,1,0,0]},
  "memory":{"total":33554432,"used":1503744},"disk":{"total":57651200,"used":78288},
  "clients":{"connected":1,"total":1},"subscriptions":1,"retained":0,
  "messages":{"received":0,"sent":21},"connections_refused":0,
@@ -534,7 +534,7 @@ Procedures are in [DEPLOY.md](DEPLOY.md) section 8b. The lines a boot prints:
 
 | Line | Meaning |
 |---|---|
-| `build: v0.6.1 (A/B protocol 1, store schema 5, configuration formats up to 17)` | what this kernel is (its build note, which `urmqtt-disk slots stage` reads) |
+| `build: v0.6.1 (A/B protocol 1, store schema 6, configuration formats up to 23)` | what this kernel is (its build note, which `urmqtt-disk slots stage` reads) |
 | `gpt: standby boot slot reserved next to the EFI system partition ...` | the first boot of a new disk made room for A/B updates |
 | `boot: one boot slot (a disk prepared before v0.6.0) ...` | this disk updates with `update-boot` only |
 | `boot: slot A (v0.6.0), confirmed; standby: empty` / `standby: v0.6.1 (the way back)` | the normal case; the standby is what a rollback would boot |

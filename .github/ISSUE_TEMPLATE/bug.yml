@@ -19,8 +19,8 @@ body:
     id: release
     attributes:
       label: Release or commit
-      description: The tag (for example v0.5.0) or the commit SHA. The boot log prints it in its first line (`URMQTT BOOT ...`).
-      placeholder: v0.5.0
+      description: The tag (for example v0.6.0) or the commit SHA. The boot log prints it in its first line (`URMQTT BOOT ...`).
+      placeholder: v0.6.0
     validations:
       required: true
   - type: dropdown

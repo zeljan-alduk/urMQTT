@@ -52,7 +52,7 @@ page's result byte for byte:
 ```bash
 # my/config.toml names ca.pem, server.pem, server.key, control.pub next to it;
 # keys left out take the defaults (urmqtt-config schema lists them all)
-urmqtt-config pack my/config.toml --iso urmqtt-template-v0.5.0-universal.iso --out urmqtt-mine.iso
+urmqtt-config pack my/config.toml --iso urmqtt-template-v0.6.0-universal.iso --out urmqtt-mine.iso
 # configuration fingerprint: the same one the kernel prints at every boot
 urmqtt-config show urmqtt-mine.iso
 urmqtt-config verify urmqtt-mine.iso      # kernel's checks; all slot copies and module hashes agree
@@ -820,7 +820,7 @@ with `update-boot` as before (`urmqtt-disk slots status` says which you have).
 ```sh
 urmqtt-disk slots status /dev/vdb
 # disk GUID 3ce59d26-441c-4362-8dc1-61e6836d29c5 (the --disk-guid of urmqtt-control boot-confirm/boot-rollback)
-# slot A [active]: LBA 2048..22527 (10 MiB): v0.6.0 (store schema 5): confirmed, as installed
+# slot A [active]: LBA 2048..22527 (10 MiB): v0.6.0 (store schema 6): confirmed, as installed
 # slot B [standby]: LBA 22528..43007 (10 MiB): empty
 ```
 
@@ -832,7 +832,7 @@ and the builder page); your configuration stays, as with `update-boot`:
 urmqtt-disk slots stage /dev/vdb --image urmqtt-template-v0.6.1-universal.img \
     --sums SHA256SUMS --sig SHA256SUMS.minisig --pubkey minisign.pub --write
 # stage: release signature ok: SHA256SUMS signed by key ..., ... has SHA-256 ...
-# stage: kernel v0.6.1 (A/B protocol 1, store schema 5, configuration formats up to 17)
+# stage: kernel v0.6.1 (A/B protocol 1, store schema 6, configuration formats up to 23)
 # stage: configuration: kept the disk's own; ...
 # stage: slot B holds v0.6.1 now, SHA-256 of the slot ...
 ```
