@@ -10,6 +10,7 @@
 //! (ADR-033, ADR-222).
 
 use crate::siphash::SipHasher;
+use crate::table::Addr;
 
 /// MSS values a cookie can encode (largest ≤ the peer's MSS is used).
 pub const MSS_TABLE: [u16; 8] = [536, 1024, 1200, 1300, 1360, 1400, 1440, 1460];
@@ -66,9 +67,9 @@ pub fn ts_decode(tsecr: u32) -> Opts {
 /// The connection a cookie is bound to (as seen by the server).
 #[derive(Debug, Clone, Copy)]
 pub struct Flow {
-    pub src: [u8; 4],
+    pub src: Addr,
     pub sport: u16,
-    pub dst: [u8; 4],
+    pub dst: Addr,
     pub dport: u16,
 }
 
@@ -93,9 +94,9 @@ impl Cookies {
 
     fn mac_with(key: &[u8; 16], t: u32, f: &Flow, client_isn: u32) -> u32 {
         let mut h = SipHasher::new(key);
-        h.write(&f.src);
+        h.write(f.src.wire());
         h.write(&f.sport.to_be_bytes());
-        h.write(&f.dst);
+        h.write(f.dst.wire());
         h.write(&f.dport.to_be_bytes());
         h.write(&client_isn.to_be_bytes());
         h.write(&t.to_be_bytes());
@@ -159,7 +160,7 @@ mod tests {
     #[test]
     fn valid_within_two_periods_and_bound_to_the_flow() {
         let c = Cookies::new([7; 16]);
-        let (a, b) = ([10, 0, 2, 2], [10, 0, 2, 15]);
+        let (a, b) = (Addr::v4([10, 0, 2, 2]), Addr::v4([10, 0, 2, 15]));
         let fl = |sport| Flow {
             src: a,
             sport,
@@ -188,9 +189,9 @@ mod tests {
     fn rotation_keeps_cookies_in_flight_valid() {
         let mut c = Cookies::new([7; 16]);
         let f = Flow {
-            src: [10, 0, 2, 2],
+            src: Addr::v4([10, 0, 2, 2]),
             sport: 40000,
-            dst: [10, 0, 2, 15],
+            dst: Addr::v4([10, 0, 2, 15]),
             dport: 8883,
         };
         let before = c.make(1000, &f, 1, 1460);

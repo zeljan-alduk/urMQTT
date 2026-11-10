@@ -19,6 +19,9 @@
 
 use alloc::vec::Vec;
 
+use crate::addr::Addr;
+use crate::source_limit::SourceKey;
+
 /// Why a connection was (or would be) refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
@@ -149,7 +152,8 @@ pub struct Admission {
     last_ms: u64,
     in_flight: u32,
     /// (address, connections in flight from it), distinct addresses only.
-    ips: Vec<(u32, u32)>,
+    /// Keyed by [`SourceKey`]: an IPv4 address or an IPv6 /64 (ADR-332).
+    ips: Vec<(SourceKey, u32)>,
     stats: Stats,
 }
 
@@ -175,8 +179,8 @@ impl Admission {
     }
 
     /// Of those, the ones from `ip`.
-    pub fn from_ip(&self, ip: [u8; 4]) -> u32 {
-        let ip = u32::from_be_bytes(ip);
+    pub fn from_ip(&self, ip: impl Into<Addr>) -> u32 {
+        let ip = SourceKey::of(ip.into());
         self.ips
             .iter()
             .find(|(a, _)| *a == ip)
@@ -210,7 +214,7 @@ impl Admission {
     /// has none).
     fn verdict(
         &mut self,
-        ip: [u8; 4],
+        ip: impl Into<Addr>,
         tls: bool,
         now_ms: u64,
         heap_ok: bool,
@@ -248,7 +252,7 @@ impl Admission {
     /// dropped SYN; nothing else changes (no token is taken).
     pub fn syn_check(
         &mut self,
-        ip: [u8; 4],
+        ip: impl Into<Addr>,
         tls: bool,
         now_ms: u64,
         heap_ok: bool,
@@ -267,12 +271,13 @@ impl Admission {
     /// [`leave`](Self::leave)) or says why not.
     pub fn admit(
         &mut self,
-        ip: [u8; 4],
+        ip: impl Into<Addr>,
         tls: bool,
         now_ms: u64,
         heap_ok: bool,
         db_behind: bool,
     ) -> Result<(), Reason> {
+        let ip: Addr = ip.into();
         if let Some(r) = self.verdict(ip, tls, now_ms, heap_ok, db_behind) {
             bump(&mut self.stats.refused, r);
             return Err(r);
@@ -281,7 +286,7 @@ impl Admission {
             self.tokens -= 1;
         }
         self.in_flight += 1;
-        let a = u32::from_be_bytes(ip);
+        let a = SourceKey::of(ip);
         match self.ips.iter_mut().find(|(x, _)| *x == a) {
             Some((_, n)) => *n += 1,
             None => self.ips.push((a, 1)),
@@ -294,9 +299,9 @@ impl Admission {
     /// An admitted connection from `ip` is no longer in flight. Call once
     /// per admitted connection; a second call for the same one would free a
     /// slot it does not hold, so the caller keeps a flag.
-    pub fn leave(&mut self, ip: [u8; 4], how: Outcome) {
+    pub fn leave(&mut self, ip: impl Into<Addr>, how: Outcome) {
         self.in_flight = self.in_flight.saturating_sub(1);
-        let a = u32::from_be_bytes(ip);
+        let a = SourceKey::of(ip.into());
         if let Some(i) = self.ips.iter().position(|(x, _)| *x == a)
             && let Some((_, n)) = self.ips.get_mut(i)
         {
@@ -495,5 +500,29 @@ mod tests {
         }
         assert_eq!(a.in_flight(), 0);
         assert!(a.ips.is_empty());
+    }
+
+    /// NEXT-1, ADR-332: the per-address bound counts an IPv6 /64 as one
+    /// source (one subscriber holds a whole /64), apart from every IPv4
+    /// address.
+    #[test]
+    fn an_ipv6_slash_64_is_one_source() {
+        let mut a = Admission::new(Limits {
+            rate_per_sec: 1000,
+            per_core: 100,
+            per_ip: 2,
+        });
+        let p = |last: u8, sub: u8| {
+            Addr::v6([0x20, 1, 0xd, 0xb8, 0, 0, 0, sub, 0, 0, 0, 0, 0, 0, 0, last])
+        };
+        assert!(a.admit(p(1, 0), true, 0, true, false).is_ok());
+        assert!(a.admit(p(2, 0), true, 0, true, false).is_ok());
+        assert_eq!(a.admit(p(3, 0), true, 0, true, false), Err(Reason::PerIp));
+        // Another /64 and an IPv4 address are other sources.
+        assert!(a.admit(p(1, 1), true, 0, true, false).is_ok());
+        assert!(a.admit([10, 0, 0, 1], true, 0, true, false).is_ok());
+        assert_eq!(a.from_ip(p(9, 0)), 2);
+        a.leave(p(1, 0), Outcome::Done { latency_ms: 1 });
+        assert_eq!(a.from_ip(p(77, 0)), 1);
     }
 }

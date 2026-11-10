@@ -69,11 +69,16 @@ pub(crate) fn isn_key(cookie_key: &[u8; 16]) -> [u8; 16] {
     k
 }
 
-/// Whether `a` can be the far end of a connection: not 0.0.0.0/8, not
-/// 127.0.0.0/8, not multicast or reserved (224.0.0.0/3, which includes the
-/// limited broadcast).
-pub fn unicast(a: [u8; 4]) -> bool {
-    !matches!(a[0], 0 | 127 | 224..=255)
+/// Whether `a` can be the far end of a connection: for IPv4 not 0.0.0.0/8,
+/// not 127.0.0.0/8, not multicast or reserved (224.0.0.0/3, which includes
+/// the limited broadcast); for IPv6 not `::/8` (the unspecified, loopback
+/// and IPv4-compatible addresses) and not multicast (NEXT-1).
+pub fn unicast(a: impl Into<Addr>) -> bool {
+    let a: Addr = a.into();
+    match a.as_v4() {
+        Some([first, ..]) => !matches!(first, 0 | 127 | 224..=255),
+        None => !matches!(a.octets(), [0 | 0xff, ..]),
+    }
 }
 
 impl TcpStack {
@@ -109,9 +114,11 @@ impl TcpStack {
     /// that moves by one every 4 µs (here: 250 per millisecond).
     pub(crate) fn isn(&self, key: &Key, now_ms: u64) -> u32 {
         let mut h = SipHasher::new(&self.isn_key);
-        h.write(&self.cfg.local_addr);
+        if let Some(l) = self.local_for(key.addr) {
+            h.write(l.wire());
+        }
         h.write(&key.lport.to_be_bytes());
-        h.write(&key.addr);
+        h.write(key.addr.wire());
         h.write(&key.rport.to_be_bytes());
         (h.finish() as u32).wrapping_add((now_ms as u32).wrapping_mul(250))
     }
@@ -129,7 +136,7 @@ impl TcpStack {
         let span = u32::from(EPHEMERAL_LAST - EPHEMERAL_FIRST) + 1;
         let mut h = SipHasher::new(&self.isn_key);
         h.write(b"port");
-        h.write(&remote.addr);
+        h.write(remote.addr.wire());
         h.write(&remote.port.to_be_bytes());
         h.write(&self.port_salt.to_le_bytes());
         h.write(&self.clock.to_le_bytes());
@@ -169,16 +176,16 @@ impl TcpStack {
         now_ms: u64,
         remote: Endpoint,
         lport: u16,
-        out: &mut impl FnMut([u8; 4], &[u8]),
+        out: &mut impl FnMut(Addr, &[u8]),
     ) -> Result<ConnId, ConnectError> {
         self.clock = now_ms as u32;
         if self.active.len() >= self.max_active {
             return Err(ConnectError::NotAllowed);
         }
-        let local = self.cfg.local_addr;
-        if local == [0; 4] {
-            return Err(ConnectError::NoAddress);
-        }
+        let local = match self.local_for(remote.addr) {
+            Some(l) if !l.is_unspecified() => l,
+            _ => return Err(ConnectError::NoAddress),
+        };
         if !unicast(remote.addr) || remote.addr == local || remote.port == 0 {
             return Err(ConnectError::BadDestination);
         }
@@ -202,7 +209,7 @@ impl TcpStack {
             return Err(ConnectError::PortInUse);
         }
         let iss = self.isn(&key, now_ms);
-        let mss = self.cfg.mss;
+        let mss = self.mss_of(remote.addr);
         let conn = Conn {
             key,
             state: State::SynSent,
@@ -246,7 +253,7 @@ impl TcpStack {
 
     /// Our SYN: the MSS of the link, and the options this stack can use
     /// (SACK-permitted, timestamps, window scaling when configured).
-    fn send_syn(&mut self, c: ConnId, out: &mut impl FnMut([u8; 4], &[u8])) {
+    fn send_syn(&mut self, c: ConnId, out: &mut impl FnMut(Addr, &[u8])) {
         let Some(k) = self.conn(c) else { return };
         let o = Out {
             sport: k.key.lport,
@@ -255,7 +262,7 @@ impl TcpStack {
             ack: 0,
             flags: SYN,
             window: self.cfg.rcv_wnd,
-            mss: Some(self.cfg.mss),
+            mss: Some(k.mss),
         };
         let x = Ext {
             sack_perm: true,
@@ -274,7 +281,7 @@ impl TcpStack {
         now_ms: u64,
         c: ConnId,
         app: &mut impl App,
-        out: &mut impl FnMut([u8; 4], &[u8]),
+        out: &mut impl FnMut(Addr, &[u8]),
     ) {
         let retries = self.syn_retries;
         let Some(k) = self.conn_mut(c) else { return };
@@ -301,7 +308,7 @@ impl TcpStack {
         h: &Header,
         payload: &[u8],
         app: &mut impl App,
-        out: &mut impl FnMut([u8; 4], &[u8]),
+        out: &mut impl FnMut(Addr, &[u8]),
     ) {
         let Some(k) = self.conn(c) else { return };
         let (iss, nxt) = (k.snd_una, k.snd_max);
@@ -351,8 +358,10 @@ impl TcpStack {
         }
         let offered_scale = self.cfg.rcv_wnd_scaled > 0;
         let our_shift = self.rcv_shift();
-        let (rcv_wnd, rcv_wnd_scaled, cfg_mss) =
-            (self.cfg.rcv_wnd, self.cfg.rcv_wnd_scaled, self.cfg.mss);
+        let (rcv_wnd, rcv_wnd_scaled) = (self.cfg.rcv_wnd, self.cfg.rcv_wnd_scaled);
+        let Some(cfg_mss) = self.conn(c).map(|k| self.mss_of(k.key.addr)) else {
+            return;
+        };
         let Some(k) = self.conn_mut(c) else { return };
         let mut flags = k.flags & FIN_QUEUED;
         if h.ts.is_some() {

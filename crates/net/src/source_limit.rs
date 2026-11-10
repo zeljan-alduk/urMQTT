@@ -58,13 +58,21 @@ impl SourceKey {
         }
     }
 
-    /// The key of an IPv6 source address: its /64 prefix. (Used by NEXT-1;
-    /// tested here so the key is settled before the stack exists.)
+    /// The key of an IPv6 source address: its /64 prefix (ADR-332).
     pub const fn v6(ip: [u8; 16]) -> Self {
         let [a, b, c, d, e, f, g, h, ..] = ip;
         Self {
             hi: u64::from_be_bytes([a, b, c, d, e, f, g, h]),
             lo: 0,
+        }
+    }
+
+    /// The key of a source address of either family: an IPv4 address, or
+    /// the /64 of an IPv6 one (NEXT-1, ADR-332).
+    pub const fn of(a: crate::addr::Addr) -> Self {
+        match a.as_v4() {
+            Some(v4) => Self::v4(v4),
+            None => Self::v6(a.octets()),
         }
     }
 

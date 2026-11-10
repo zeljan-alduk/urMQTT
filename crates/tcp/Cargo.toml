@@ -17,6 +17,8 @@ workspace = true
 [dependencies]
 urmqtt-timer-wheel = { path = "../timer-wheel" }
 urmqtt-mm = { path = "../mm" }
+# NEXT-1: the address type of both families (ADR-330).
+urmqtt-net = { path = "../net" }
 
 [dev-dependencies]
 # H3: the stateful model test (src/model.rs).

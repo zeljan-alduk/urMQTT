@@ -1,4 +1,4 @@
-//! TCP header parsing and emission with the IPv4 pseudo-header checksum.
+//! TCP header parsing and emission with the IPv4 or IPv6 pseudo-header checksum.
 
 pub const FIN: u8 = 0x01;
 pub const SYN: u8 = 0x02;
@@ -63,6 +63,8 @@ pub enum WireError {
     BadFlags,
 }
 
+use crate::table::Addr;
+
 fn be16(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?]))
 }
@@ -90,18 +92,23 @@ fn fold(mut acc: u32) -> u16 {
     !(acc as u16)
 }
 
-/// The TCP checksum over the IPv4 pseudo-header and `segment` (with its
-/// checksum field as it is).
-pub fn checksum(src: [u8; 4], dst: [u8; 4], segment: &[u8]) -> u16 {
-    let mut acc = sum(0, &src);
-    acc = sum(acc, &dst);
+/// The TCP checksum over the pseudo-header and `segment` (with its
+/// checksum field as it is): IPv4's (RFC 9293 §3.1) when both addresses are
+/// IPv4, else IPv6's (RFC 8200 §8.1: the 32-bit upper-layer length). No
+/// checksum offload is negotiated with the NIC, so this is the whole job on
+/// receive and on transmit, for both families (ADR-330).
+pub fn checksum(src: impl Into<Addr>, dst: impl Into<Addr>, segment: &[u8]) -> u16 {
+    let (src, dst) = (src.into(), dst.into());
+    let mut acc = sum(0, src.wire());
+    acc = sum(acc, dst.wire());
     acc += 6;
-    acc += segment.len() as u32;
+    let len = segment.len() as u32;
+    acc += (len >> 16) + (len & 0xffff);
     fold(sum(acc, segment))
 }
 
 /// Parses and validates a TCP segment received from `src` for `dst`.
-pub fn parse(src: [u8; 4], dst: [u8; 4], seg: &[u8]) -> Result<Header, WireError> {
+pub fn parse(src: impl Into<Addr>, dst: impl Into<Addr>, seg: &[u8]) -> Result<Header, WireError> {
     if seg.len() < HEADER {
         return Err(WireError::Truncated);
     }
@@ -188,7 +195,13 @@ pub struct Out {
 
 /// Writes header (+ MSS option) and `payload` into `buf` (cleared first)
 /// and fills in the checksum.
-pub fn emit(src: [u8; 4], dst: [u8; 4], o: &Out, payload: &[u8], buf: &mut alloc::vec::Vec<u8>) {
+pub fn emit(
+    src: impl Into<Addr>,
+    dst: impl Into<Addr>,
+    o: &Out,
+    payload: &[u8],
+    buf: &mut alloc::vec::Vec<u8>,
+) {
     emit_ext(src, dst, o, &Ext::NONE, payload, buf);
 }
 
@@ -196,8 +209,8 @@ pub fn emit(src: [u8; 4], dst: [u8; 4], o: &Out, payload: &[u8], buf: &mut alloc
 /// SYN-ACK `MSS, SACK-permitted, timestamps, NOP, window scale`; on other
 /// segments `NOP NOP timestamps` and then `NOP NOP SACK blocks`.
 pub fn emit_ext(
-    src: [u8; 4],
-    dst: [u8; 4],
+    src: impl Into<Addr>,
+    dst: impl Into<Addr>,
     o: &Out,
     x: &Ext,
     payload: &[u8],

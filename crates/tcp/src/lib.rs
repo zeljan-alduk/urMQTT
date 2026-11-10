@@ -96,6 +96,8 @@ mod script;
 mod scripts;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod v6_tests;
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -111,8 +113,10 @@ use ooo::Ooo;
 use refused::{RefusedFlows, Verdict};
 use sack::Board;
 use seq::{ge, gt, le, lt};
+pub use table::Addr;
 use table::{Key, Table};
 use urmqtt_mm::slab::Slab;
+use urmqtt_net::addr::V6Locals;
 use urmqtt_timer_wheel::{TimerId, Wheel};
 use wire::{ACK, Ext, FIN, Header, Out, PSH, RST, SYN};
 
@@ -126,6 +130,8 @@ pub const IPV4_TCP_HEADERS: u16 = 40;
 pub const MAX_MSS: u16 = 1460;
 /// Smallest MSS (RFC 9293 §3.7.1: 536, the IPv4 default; the cookie's lowest).
 pub const MIN_MSS: u16 = 536;
+/// IPv6 and TCP headers without options (NEXT-1).
+pub const IPV6_TCP_HEADERS: u16 = 60;
 
 /// The MSS for an IPv4 link MTU (NOW-19, ADR-264): `mtu - 40`, clamped to
 /// what this stack can send ([`MIN_MSS`]..=[`MAX_MSS`]). A segment then fills
@@ -141,9 +147,25 @@ pub const fn mss_for_mtu(mtu: u16) -> u16 {
     }
 }
 
+/// The MSS for an IPv6 path MTU (NEXT-1, ADR-330): `mtu - 60`, clamped to
+/// [`MIN_MSS`]..=[`MAX_MSS`] - 20 (the largest that fits this stack's
+/// 1500-byte frames under an IPv6 header).
+pub const fn mss6_for_mtu(mtu: u16) -> u16 {
+    let m = mtu.saturating_sub(IPV6_TCP_HEADERS);
+    let max = MAX_MSS - (IPV6_TCP_HEADERS - IPV4_TCP_HEADERS);
+    if m < MIN_MSS {
+        MIN_MSS
+    } else if m > max {
+        max
+    } else {
+        m
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Endpoint {
-    pub addr: [u8; 4],
+    /// IPv4 or IPv6 (NEXT-1).
+    pub addr: Addr,
     pub port: u16,
 }
 
@@ -168,7 +190,7 @@ pub trait App {
     /// it without a SYN-ACK: no state exists yet, and the peer's own TCP
     /// retransmits after its backoff (1 s, 2 s, ...). Used to shed load
     /// before any work is done (PERF, ADR-080). The default accepts all.
-    fn syn_ok(&mut self, _local_port: u16, _remote: [u8; 4]) -> bool {
+    fn syn_ok(&mut self, _local_port: u16, _remote: Addr) -> bool {
         true
     }
     /// A handshake completed; return false to refuse (the peer gets RST).
@@ -187,10 +209,12 @@ pub trait App {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// The IPv4 address (IPv6 ones: [`TcpStack::set_local6`]).
     pub local_addr: [u8; 4],
     pub ports: Vec<u16>,
     /// MSS we announce and the most a connection uses: [`mss_for_mtu`] of
-    /// the link MTU (clamped to [`MIN_MSS`]..=[`MAX_MSS`]).
+    /// the link MTU (clamped to [`MIN_MSS`]..=[`MAX_MSS`]). IPv6 connections
+    /// use [`TcpStack::set_mss6`]'s (20 bytes less until set).
     pub mss: u16,
     /// Receive window when the application has not set one (and the window
     /// announced on a SYN-ACK, which is never scaled).
@@ -218,6 +242,9 @@ pub struct Stats {
     pub segs_in: u64,
     pub segs_out: u64,
     pub bad_segments: u64,
+    /// Segments not sent or not taken because no address of ours fits the
+    /// peer's family and scope (an IPv6 peer while IPv6 is off, NEXT-1).
+    pub no_local: u64,
     pub cookies_sent: u64,
     pub cookies_ok: u64,
     pub cookies_bad: u64,
@@ -518,6 +545,9 @@ pub struct TcpStack {
     max_active: usize,
     syn_retries: u8,
     port_salt: u32,
+    /// The IPv6 addresses and MSS (NEXT-1, ADR-330, ADR-331).
+    local6: V6Locals,
+    mss6: u16,
     pub stats: Stats,
 }
 
@@ -551,6 +581,11 @@ impl TcpStack {
             max_active: 0,
             syn_retries: active::SYN_RETRIES,
             port_salt: 0,
+            local6: V6Locals::NONE,
+            mss6: cfg
+                .mss
+                .saturating_sub(IPV6_TCP_HEADERS - IPV4_TCP_HEADERS)
+                .max(MIN_MSS),
             cfg,
             stats: Stats::default(),
         }
@@ -561,6 +596,47 @@ impl TcpStack {
         self.cfg.local_addr = addr;
     }
 
+    /// Our IPv6 addresses (NEXT-1): a segment from an IPv6 peer is taken,
+    /// and answered, only with the address [`V6Locals::for_peer`] picks,
+    /// the rule the interface writes the IPv6 header by.
+    pub fn set_local6(&mut self, l: V6Locals) {
+        self.local6 = l;
+    }
+
+    pub fn local6(&self) -> V6Locals {
+        self.local6
+    }
+
+    /// The IPv6 path MTU changed: [`mss6_for_mtu`] for new IPv6
+    /// connections, and no open one sends more (as [`TcpStack::set_mss`]).
+    pub fn set_mss6(&mut self, mss: u16) {
+        let mss = mss.clamp(MIN_MSS, MAX_MSS);
+        self.mss6 = mss;
+        for (_, k) in self.conns.iter_mut() {
+            if !k.key.addr.is_v4() {
+                k.mss = k.mss.min(mss);
+            }
+        }
+    }
+
+    /// The address a segment to or from `remote` uses on our side.
+    fn local_for(&self, remote: Addr) -> Option<Addr> {
+        if remote.is_v4() {
+            Some(Addr::v4(self.cfg.local_addr))
+        } else {
+            self.local6.for_peer(&remote.octets()).map(Addr::v6)
+        }
+    }
+
+    /// The MSS we announce to and use with `remote`'s family.
+    fn mss_of(&self, remote: Addr) -> u16 {
+        if remote.is_v4() {
+            self.cfg.mss
+        } else {
+            self.mss6
+        }
+    }
+
     /// The link MTU changed (DHCP option 26, NOW-19): new connections
     /// announce and use `mss` (clamped to [`MIN_MSS`]..=[`MAX_MSS`]), and
     /// open ones never send a segment larger than it from now on (their
@@ -569,7 +645,9 @@ impl TcpStack {
         let mss = mss.clamp(MIN_MSS, MAX_MSS);
         self.cfg.mss = mss;
         for (_, k) in self.conns.iter_mut() {
-            k.mss = k.mss.min(mss);
+            if k.key.addr.is_v4() {
+                k.mss = k.mss.min(mss);
+            }
         }
     }
 
@@ -699,7 +777,7 @@ impl TcpStack {
     }
 
     /// Resets the connection now (RST). The application gets no `closed`.
-    pub fn abort(&mut self, c: ConnId, out: &mut impl FnMut([u8; 4], &[u8])) {
+    pub fn abort(&mut self, c: ConnId, out: &mut impl FnMut(Addr, &[u8])) {
         let Some(k) = self.conn(c) else { return };
         // In SYN-SENT nothing of the peer's is acknowledged yet (RFC 9293
         // §3.10.7.3): a bare RST at the sequence number after the SYN.
@@ -749,26 +827,24 @@ impl TcpStack {
         app.closed(c, why);
     }
 
-    fn emit(
-        &mut self,
-        dst: [u8; 4],
-        o: &Out,
-        payload: &[u8],
-        out: &mut impl FnMut([u8; 4], &[u8]),
-    ) {
+    fn emit(&mut self, dst: Addr, o: &Out, payload: &[u8], out: &mut impl FnMut(Addr, &[u8])) {
         self.emit_x(dst, o, &Ext::NONE, payload, out);
     }
 
     fn emit_x(
         &mut self,
-        dst: [u8; 4],
+        dst: Addr,
         o: &Out,
         x: &Ext,
         payload: &[u8],
-        out: &mut impl FnMut([u8; 4], &[u8]),
+        out: &mut impl FnMut(Addr, &[u8]),
     ) {
+        let Some(local) = self.local_for(dst) else {
+            self.stats.no_local += 1;
+            return;
+        };
         let mut buf = core::mem::take(&mut self.buf);
-        wire::emit_ext(self.cfg.local_addr, dst, o, x, payload, &mut buf);
+        wire::emit_ext(local, dst, o, x, payload, &mut buf);
         out(dst, &buf);
         self.buf = buf;
         self.stats.segs_out += 1;
@@ -794,10 +870,10 @@ impl TcpStack {
     fn reset_unknown(
         &mut self,
         now_ms: u64,
-        src: [u8; 4],
+        src: Addr,
         h: &Header,
         len: u32,
-        out: &mut impl FnMut([u8; 4], &[u8]),
+        out: &mut impl FnMut(Addr, &[u8]),
     ) {
         if h.flags & RST != 0 {
             return;
@@ -838,18 +914,25 @@ impl TcpStack {
         self.stats.rst_sent += 1;
     }
 
-    /// Processes one TCP segment from `src` to us.
+    /// Processes one TCP segment from `src` (IPv4 or IPv6) to us. The
+    /// interface only hands out segments to the address [`Self::local_for`]
+    /// picks for `src`; the checksum is verified against it.
     pub fn input(
         &mut self,
         now_ms: u64,
-        src: [u8; 4],
+        src: impl Into<Addr>,
         seg: &[u8],
         app: &mut impl App,
-        out: &mut impl FnMut([u8; 4], &[u8]),
+        out: &mut impl FnMut(Addr, &[u8]),
     ) {
+        let src: Addr = src.into();
         self.stats.segs_in += 1;
         self.clock = now_ms as u32;
-        let h = match wire::parse(src, self.cfg.local_addr, seg) {
+        let Some(local) = self.local_for(src) else {
+            self.stats.no_local += 1;
+            return;
+        };
+        let h = match wire::parse(src, local, seg) {
             Ok(h) => h,
             Err(_) => {
                 self.stats.bad_segments += 1;
@@ -873,19 +956,22 @@ impl TcpStack {
     fn listen(
         &mut self,
         now_ms: u64,
-        src: [u8; 4],
+        src: Addr,
         key: Key,
         h: &Header,
         payload: &[u8],
         app: &mut impl App,
-        out: &mut impl FnMut([u8; 4], &[u8]),
+        out: &mut impl FnMut(Addr, &[u8]),
     ) {
         if !self.cfg.ports.contains(&h.dport) {
             self.reset_unknown(now_ms, src, h, payload.len() as u32, out);
             return;
         }
         let now_s = now_ms / 1000;
-        let local = self.cfg.local_addr;
+        let Some(local) = self.local_for(src) else {
+            return;
+        };
+        let our_mss = self.mss_of(src);
         if h.flags & SYN != 0 && h.flags & ACK == 0 {
             // A peer asking for segments under 536 bytes cannot be served:
             // a cookie encodes nothing smaller, and sending more than the
@@ -915,7 +1001,7 @@ impl TcpStack {
                 ack: h.seq.wrapping_add(1),
                 flags: SYN | ACK,
                 window: self.cfg.rcv_wnd,
-                mss: Some(self.cfg.mss),
+                mss: Some(our_mss),
             };
             // Options only for a peer that offered timestamps: they carry the
             // rest through the cookie.
@@ -990,7 +1076,7 @@ impl TcpStack {
             self.reset_unknown(now_ms, src, h, payload.len() as u32, out);
             return;
         }
-        let mss = mss.min(self.cfg.mss);
+        let mss = mss.min(our_mss);
         // What the cookie carried (an ACK without timestamps negotiated nothing).
         let opts = match h.ts {
             Some((_, tsecr)) => cookie::ts_decode(tsecr),
@@ -1079,7 +1165,7 @@ impl TcpStack {
         sh
     }
 
-    fn send_ack_now(&mut self, c: ConnId, out: &mut impl FnMut([u8; 4], &[u8])) {
+    fn send_ack_now(&mut self, c: ConnId, out: &mut impl FnMut(Addr, &[u8])) {
         let Some(k) = self.conn(c) else { return };
         let x = self.ext_of(k, true);
         let Some(k) = self.conn_mut(c) else { return };
@@ -1143,7 +1229,7 @@ impl TcpStack {
         h: &Header,
         payload: &[u8],
         app: &mut impl App,
-        out: &mut impl FnMut([u8; 4], &[u8]),
+        out: &mut impl FnMut(Addr, &[u8]),
     ) {
         let Some(k) = self.conn(c) else { return };
         if k.state == State::SynSent {
@@ -1347,7 +1433,7 @@ impl TcpStack {
         h: &Header,
         pure: bool,
         app: &mut impl App,
-        out: &mut impl FnMut([u8; 4], &[u8]),
+        out: &mut impl FnMut(Addr, &[u8]),
     ) -> bool {
         let Some(k) = self.conn_mut(c) else {
             return false;
@@ -1576,7 +1662,7 @@ impl TcpStack {
 
     /// Sends the holes the scoreboard calls lost, each once, while the pipe
     /// leaves room for a segment.
-    fn sack_resend(&mut self, c: ConnId, out: &mut impl FnMut([u8; 4], &[u8])) -> bool {
+    fn sack_resend(&mut self, c: ConnId, out: &mut impl FnMut(Addr, &[u8])) -> bool {
         let mut sent = false;
         loop {
             let Some(k) = self.conn(c) else { return sent };
@@ -1615,7 +1701,7 @@ impl TcpStack {
         c: ConnId,
         from: u32,
         limit: usize,
-        out: &mut impl FnMut([u8; 4], &[u8]),
+        out: &mut impl FnMut(Addr, &[u8]),
     ) {
         let Some(k) = self.conn(c) else { return };
         let off = from.wrapping_sub(k.snd_una) as usize;
@@ -1651,7 +1737,7 @@ impl TcpStack {
 
     /// Sends what the windows allow (data, then FIN), from `snd_nxt`.
     /// Returns whether a segment went out (it carried the pending ACK).
-    fn transmit(&mut self, now_ms: u64, c: ConnId, out: &mut impl FnMut([u8; 4], &[u8])) -> bool {
+    fn transmit(&mut self, now_ms: u64, c: ConnId, out: &mut impl FnMut(Addr, &[u8])) -> bool {
         // Nothing but the SYN leaves before the handshake (NEXT-7): queued
         // data and a queued FIN wait for it.
         if self.conn(c).is_none_or(|k| k.state == State::SynSent) {
@@ -1774,7 +1860,7 @@ impl TcpStack {
         self.stats.cookie_rotations += 1;
     }
 
-    pub fn flush(&mut self, now_ms: u64, out: &mut impl FnMut([u8; 4], &[u8])) {
+    pub fn flush(&mut self, now_ms: u64, out: &mut impl FnMut(Addr, &[u8])) {
         self.clock = now_ms as u32;
         let dirty = core::mem::take(&mut self.dirty);
         for &c in &dirty {
@@ -1794,7 +1880,7 @@ impl TcpStack {
     }
 
     /// Runs expired timers (retransmission, persist, FIN-WAIT-2).
-    pub fn poll(&mut self, now_ms: u64, app: &mut impl App, out: &mut impl FnMut([u8; 4], &[u8])) {
+    pub fn poll(&mut self, now_ms: u64, app: &mut impl App, out: &mut impl FnMut(Addr, &[u8])) {
         self.clock = now_ms as u32;
         let mut due: Vec<u32> = Vec::new();
         self.wheel.advance(now_ms, |c| due.push(c));

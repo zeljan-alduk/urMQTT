@@ -29,6 +29,11 @@ pub(crate) const CLIENT: [u8; 4] = [10, 0, 2, 2];
 pub(crate) const PORT: u16 = 8883;
 pub(crate) const CPORT: u16 = 40000;
 pub(crate) const C_ISN: u32 = 1_000_000;
+/// The IPv6 pair the scripts also run over (NEXT-1, ADR-330).
+pub(crate) const SERVER6: [u8; 16] = [
+    0x20, 1, 0xd, 0xb8, 0, 1, 0, 0, 0x50, 0x54, 0, 0xff, 0xfe, 0x12, 0x34, 0x56,
+];
+pub(crate) const CLIENT6: [u8; 16] = [0x20, 1, 0xd, 0xb8, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
 
 pub fn cfg() -> Config {
     Config {
@@ -121,6 +126,7 @@ fn hex(s: &str) -> Result<Vec<u8>, String> {
 }
 
 /// A client segment with raw options and payload, checksum filled in.
+#[allow(clippy::too_many_arguments)]
 fn raw_segment(
     seq: u32,
     ack: u32,
@@ -129,14 +135,45 @@ fn raw_segment(
     urg: u16,
     opts: &[u8],
     len: usize,
+    (client, server): (Addr, Addr),
 ) -> Vec<u8> {
     let payload: Vec<u8> = (0..len).map(|i| i as u8).collect();
-    segment(CPORT, seq, ack, flags, win, urg, opts, &payload)
+    segment_between(
+        client, server, CPORT, seq, ack, flags, win, urg, opts, &payload,
+    )
 }
 
 /// A segment from the client's `port` (absolute numbers), checksummed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn segment(
+    port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    win: u16,
+    urg: u16,
+    opts: &[u8],
+    payload: &[u8],
+) -> Vec<u8> {
+    segment_between(
+        Addr::v4(CLIENT),
+        Addr::v4(SERVER),
+        port,
+        seq,
+        ack,
+        flags,
+        win,
+        urg,
+        opts,
+        payload,
+    )
+}
+
+/// [`segment`] between any two addresses (the checksum's pseudo-header).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn segment_between(
+    client: Addr,
+    server: Addr,
     port: u16,
     seq: u32,
     ack: u32,
@@ -160,7 +197,7 @@ pub(crate) fn segment(
     b.extend_from_slice(opts);
     b.resize(hlen, 0);
     b.extend_from_slice(payload);
-    let c = wire::checksum(CLIENT, SERVER, &b);
+    let c = wire::checksum(client, server, &b);
     b[16..18].copy_from_slice(&c.to_be_bytes());
     b
 }
@@ -175,6 +212,8 @@ pub struct Runner {
     /// The server's ISN once known, and its next sequence number (relative).
     s_isn: Option<u32>,
     snext: u32,
+    client: Addr,
+    server: Addr,
 }
 
 impl Runner {
@@ -188,7 +227,21 @@ impl Runner {
             cnext: 0,
             s_isn: None,
             snext: 0,
+            client: Addr::v4(CLIENT),
+            server: Addr::v4(SERVER),
         }
+    }
+
+    /// The same over IPv6: the stack's global address is [`SERVER6`].
+    pub fn v6(cfg: Config) -> Self {
+        let mut r = Self::with_config(cfg);
+        r.s.set_local6(urmqtt_net::addr::V6Locals {
+            link_local: None,
+            global: Some(SERVER6),
+        });
+        r.client = Addr::v6(CLIENT6);
+        r.server = Addr::v6(SERVER6);
+        r
     }
 
     /// What the kernel loop does after any event.
@@ -233,6 +286,7 @@ impl Runner {
             urg,
             &opts,
             len,
+            (self.client, self.server),
         );
         let mut adv = len as u32;
         if flags & (wire::SYN | wire::FIN) != 0 {
@@ -242,8 +296,10 @@ impl Runner {
             self.cnext = self.cnext.max(seq.wrapping_add(adv));
         }
         let mut q = Vec::new();
+        let client = self.client;
         self.s
-            .input(self.now, CLIENT, &seg, &mut self.app, &mut |_, b| {
+            .input(self.now, self.client, &seg, &mut self.app, &mut |d, b| {
+                assert_eq!(d, client);
                 q.push(b.to_vec())
             });
         self.out.extend(q);
@@ -263,7 +319,8 @@ impl Runner {
             .out
             .pop_front()
             .ok_or("expected a segment, got nothing")?;
-        let h = wire::parse(SERVER, CLIENT, &b).map_err(|e| format!("bad segment {e:?}"))?;
+        let h =
+            wire::parse(self.server, self.client, &b).map_err(|e| format!("bad segment {e:?}"))?;
         if h.flags & wire::SYN != 0 && self.s_isn.is_none() {
             self.s_isn = Some(h.seq);
         }
@@ -308,7 +365,7 @@ impl Runner {
     }
 
     fn describe(&self, b: &[u8]) -> String {
-        match wire::parse(SERVER, CLIENT, b) {
+        match wire::parse(self.server, self.client, b) {
             Ok(h) => {
                 let isn = self.s_isn.unwrap_or(h.seq);
                 format!(
@@ -408,6 +465,13 @@ impl Runner {
 /// Runs `script`; panics with the failing line.
 pub fn run(script: &str) {
     run_with(cfg(), script);
+}
+
+/// Runs `script` over IPv6 (NEXT-1); panics with the failing line.
+pub fn run6(script: &str) {
+    if let Err(e) = Runner::v6(cfg()).run(script) {
+        panic!("IPv6: {e}");
+    }
 }
 
 /// Runs `script` against a stack with `cfg`; panics with the failing line.

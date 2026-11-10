@@ -96,14 +96,14 @@ fn parse(seg: &[u8]) -> wire::Header {
 /// Connects to PEER:SINK and returns the connection, its port and the SYN.
 fn open(s: &mut TcpStack, now: u64) -> (ConnId, u16, wire::Header) {
     let remote = Endpoint {
-        addr: PEER,
+        addr: Addr::v4(PEER),
         port: SINK,
     };
     let lport = s.ephemeral_port(remote, |_| false).unwrap();
     let mut q = Vec::new();
     let c = s
         .connect(now, remote, lport, &mut |d, b| {
-            assert_eq!(d, PEER);
+            assert_eq!(d, Addr::v4(PEER));
             q.push(b.to_vec())
         })
         .unwrap();
@@ -496,10 +496,10 @@ fn close_before_the_handshake_sends_the_fin_after_it_and_abort_resets() {
 #[test]
 fn connect_refuses_what_it_must() {
     let remote = Endpoint {
-        addr: PEER,
+        addr: Addr::v4(PEER),
         port: SINK,
     };
-    let mut q = |_: [u8; 4], _: &[u8]| {};
+    let mut q = |_: Addr, _: &[u8]| {};
     // Off by default: a server stack never opens a connection.
     let mut s = TcpStack::new(cfg(ME, alloc::vec![LISTEN]), 0);
     assert_eq!(
@@ -523,7 +523,7 @@ fn connect_refuses_what_it_must() {
         ME,
     ] {
         let r = Endpoint {
-            addr: bad,
+            addr: bad.into(),
             port: SINK,
         };
         assert_eq!(
@@ -536,7 +536,7 @@ fn connect_refuses_what_it_must() {
         s.connect(
             0,
             Endpoint {
-                addr: PEER,
+                addr: Addr::v4(PEER),
                 port: 0
             },
             50000,
@@ -584,7 +584,7 @@ fn ephemeral_ports_avoid_listeners_reserved_ports_and_used_tuples() {
     let mut s = TcpStack::new(cfg(ME, alloc::vec![LISTEN, 50000, 60000]), 0);
     s.set_max_active(MAX_ACTIVE_LIMIT);
     let remote = Endpoint {
-        addr: PEER,
+        addr: Addr::v4(PEER),
         port: SINK,
     };
     let reserved = |p: u16| p % 2 == 1;
@@ -609,7 +609,7 @@ fn ephemeral_ports_avoid_listeners_reserved_ports_and_used_tuples() {
     assert_eq!(s.ephemeral_port(remote, only), None);
     // ... but the same port to another destination is a different tuple.
     let other = Endpoint {
-        addr: [10, 0, 2, 3],
+        addr: Addr::v4([10, 0, 2, 3]),
         port: SINK,
     };
     assert_eq!(s.ephemeral_port(other, only), Some(51234));
@@ -622,7 +622,7 @@ fn initial_sequence_numbers_are_keyed_and_move_with_the_clock() {
     c2.cookie_key = [10; 16];
     let b = TcpStack::new(c2, 0);
     let k = Key {
-        addr: PEER,
+        addr: Addr::v4(PEER),
         rport: SINK,
         lport: 50000,
     };
@@ -745,7 +745,7 @@ fn transfer(
     };
     let (mut ca, mut sa) = (Rec::default(), Rec::default());
     let remote = Endpoint {
-        addr: SRV,
+        addr: Addr::v4(SRV),
         port: SINK,
     };
     let lport = cli.ephemeral_port(remote, |_| false).unwrap();

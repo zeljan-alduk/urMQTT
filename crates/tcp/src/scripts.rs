@@ -4,7 +4,7 @@
 
 use alloc::format;
 
-use crate::script::{cfg, run, run_with};
+use crate::script::{cfg, run, run_with, run6};
 use crate::{MAX_MSS, MIN_MSS, cookie, mss_for_mtu};
 
 /// Three-way handshake through the SYN cookie, data both ways, the
@@ -447,4 +447,29 @@ app window default
 expect data=65635
 ",
     );
+}
+
+/// NEXT-1, ADR-330: the scripts that do not depend on the IPv4 MSS run
+/// again over IPv6, so the handshake through the cookie, the RFC 5961
+/// cases, out-of-window, overlap, urgent data and the close are the same
+/// for both families (the checksums use the IPv6 pseudo-header; the
+/// SYN-ACK announces 1500 - 60 = 1440).
+#[test]
+fn the_family_neutral_scripts_hold_over_ipv6() {
+    let v6 = |s: &str| s.replace("> S. seq=0 ack=1 mss=1460", "> S. seq=0 ack=1 mss=1440");
+    run6(&v6(HANDSHAKE));
+    for rest in [
+        // RFC 5961 §4, §3, §5.
+        "< S seq=500 mss=1460\n> . ack=1\nexpect conns=1\n",
+        "< R seq=100\n> . ack=1\nexpect conns=1\n< R seq=1\n> nothing\nexpect conns=0 closed=reset\n",
+        "< P. seq=1 ack=1000 len=10\n> . ack=1\nexpect data=0 conns=1\n",
+        // Out of window, overlap, urgent data.
+        "< P. seq=100001 ack=1 len=10\n> . ack=1\nexpect data=0\n< P. seq=1 ack=1 len=10\n> . ack=11\n",
+        "< P. seq=1 ack=1 len=100\n> . ack=101\n< P. seq=51 ack=1 len=100\n> . ack=151\nexpect data=150\n",
+        "< PU. seq=1 ack=1 len=20 urg=5\n> nothing\nexpect data=0 conns=1\n",
+    ] {
+        run6(&format!("{OPEN}{rest}"));
+    }
+    // The MSS: 1440 announced, a peer's 1460 cut to it, under 536 refused.
+    run6("< S seq=0 mss=65535\n> S. ack=1 mss=1440\n< S seq=0 mss=100\n> nothing\n");
 }
