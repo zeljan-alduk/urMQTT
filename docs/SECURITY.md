@@ -819,6 +819,7 @@ Every resource is bounded. What happens at the limit is part of the design:
 | Failed plaintext logins from one address | `plaintext.max_failed_auths_per_ip` in `plaintext.lockout_s` | the address gets no SYN-ACK for `lockout_s` |
 | Password checks (CPU) | their own admission rate, sized from a boot-time measurement | SYN dropped before any hashing; TLS admission untouched |
 | Time to finish a handshake and CONNECT | 10 s (3 s while three quarters of the in-flight limit are taken) | connection aborted |
+| Time to finish a close the broker started (refused handshake, CONNECT or upgrade, metrics answer, keepalive or protocol close), ADR-355 | 5 s (fixed); in TCP, a closed connection whose peer keeps its window shut is given up after the retransmission bound (8 probes, about 4 minutes) | connection reset (RST), counted in the log (`tcp: N close(s) not finished within 5000 ms reset`); smoke `attack-zero-window-close` |
 | Free heap | `memory.min_free_mb` | new connections refused (smoke: `storm`) |
 | DB core backlog | 16 384 requests | new connections refused; registry updates skipped beyond 4 096 |
 | Connections per core | `limits.max_connections_per_core` | refused |

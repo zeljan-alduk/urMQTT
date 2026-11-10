@@ -5561,3 +5561,43 @@ device the kernel does not drive is unaffected; one for a driven device would be
      edition's slot that holds an `[ext]` key; an edition reconfigures its image by rebuilding it with its own
      packer and `mkiso.sh --config-slot`.
   5. **The private repository itself** (`urmqtt-enterprise`) is not created and nothing is published.
+
+## ADR-355 — A close the broker starts has a deadline; a closed TCP connection behind a shut window is given up (NETDOS-1, NETDOS-2)
+
+- **Status:** Accepted (v0.6.1 security review).
+- **Problem.** A close relied on the peer to finish it. The broker queues its last bytes (a TLS alert, a
+  CONNACK refusal, a WebSocket close frame, a metrics answer) and TCP sends the FIN after them. A peer that
+  completed the handshake with a final ACK of window 0, carrying bytes that are no ClientHello, made the TLS
+  server refuse and close at once; the alert and the FIN then waited behind the shut window. TCP armed its
+  persist timer, which re-armed itself for ever without counting toward `MAX_RETRIES`; the service's handshake
+  deadline skips closing connections, and there is no TCP keepalive (ADR-033 leaves liveness to MQTT, and no
+  session existed). Nothing ever called `closed`, so the TCP slot, the service's `Conn`, the per-address counts
+  and about 500 bytes of heap per connection stayed until reboot, with one probe a minute each. In QEMU 52 268
+  such connections brought the heap to `memory.min_free_mb` and every new connection was refused (high: one
+  unauthenticated peer, about three small segments per connection). The same held for every other close the
+  broker starts: plaintext and WebSocket refusals, keepalive expiry, protocol errors (NETDOS-2, medium). With
+  an open window and a silent peer, the retransmission bound still held a closed connection about 243 s.
+- **Decision.**
+  1. **Service (all listeners):** `push_to_tcp`, the one place every close passes (each path that sets
+     `closing` lists the connection in `blocked`), gives a closing connection a deadline of
+     `CLOSE_LINGER_MS` = 5 s in `urmqtt_net::linger::Linger` (a FIFO of (time, connection, `tconn`)). A
+     connection still open with the same `tconn` at its deadline is detached, dropped (`drop_conn`, so the
+     per-address and listener counts are given back) and reset (RST), counted in the log at powers of two
+     (`tcp: N close(s) not finished within 5000 ms reset on core C`). A close that finishes normally leaves
+     its entry to be dropped when it reaches the front. The flag that says the deadline is set shares a byte
+     with `fin_sent` (`close_step`): `Conn` stays within its 152-byte budget (ADR-034).
+  2. **TCP:** once the application has closed (`FIN_QUEUED`), each persist probe counts like a
+     retransmission timeout and the connection is given up after `MAX_RETRIES` with `closed(Timeout)`. A probe
+     the peer takes moves `snd_una` and starts the count again; an open connection still waits for its window as
+     long as it takes (a reader that is merely slow is not cut). This is the bound for users of the TCP crate
+     other than the service (the outbound log link), and a second line behind the deadline.
+- **Why 5 s.** A close has at most 32 KiB of output behind it (`TX_BUF`) plus the FIN: seconds on any link a
+  device uses. The handshake deadline is 10 s (3 s under pressure); a close is cheaper to cut than a handshake,
+  since the session is already over and a reset loses only bytes the peer did not take. Under the attack the
+  held connections are the closes of the last 5 s, not every one since boot.
+- **Verified.** Host tests `zero_window_after_close_is_given_up`, `zero_window_after_close_with_answered_probes_is_given_up`
+  (both fail before the change), `zero_window_without_close_keeps_probing`, `zero_window_is_probed_then_resumes`
+  (unchanged) in `tcp`; `linger::tests` in `net` (`closes_that_never_finish_are_bounded_by_the_deadline`: 2 000
+  zero-window closes a second hold at most 5.1 s of them). Smoke `attack-zero-window-close` in the `attack_raw`
+  group: `urmqtt-attack zero-window-close` completes 2 000 handshakes with a zero-window ACK carrying non-TLS
+  bytes, and every one comes back as a RST, with the broker's reset count in the serial log.

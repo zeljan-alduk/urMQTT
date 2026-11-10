@@ -14,6 +14,7 @@
 //! ```text
 //! urmqtt-attack syn-flood  --dgram 45001:45002 --port 8883 --count 20000 --pps 5000
 //! urmqtt-attack mtu-probe  --dgram 45001:45002 --port 8883 --dhcp-mtu 1460
+//! urmqtt-attack zero-window-close --dgram 45001:45002 --port 8883 --count 2000 --pps 1000 --duration 30
 //! urmqtt-attack slowloris  --stage tls --port 18883 --clients 200 --duration 15
 //! urmqtt-attack topic-flood --port 18883 --topics 5000
 //! ```
@@ -97,7 +98,7 @@ fn parse() -> Result<Opts, String> {
 }
 
 const USAGE: &str = "usage: urmqtt-attack \
-    syn-flood|ack-flood|rst-flood|mtu-probe|slowloris|half-records|max-packets|topic-flood|sub-flood|keepalive-abuse|identities|established-flood \
+    syn-flood|ack-flood|rst-flood|mtu-probe|zero-window-close|slowloris|half-records|max-packets|topic-flood|sub-flood|keepalive-abuse|identities|established-flood \
     [options]";
 
 fn raw_transport(o: &Opts) -> Result<raw::Transport, String> {
@@ -111,6 +112,9 @@ fn run(o: &Opts) -> Result<(), String> {
         "ack-flood" => raw_transport(o)?.ack_flood(o.port, o.count, o.pps),
         "rst-flood" => raw_transport(o)?.rst_flood(o.port, o.count, o.pps),
         "mtu-probe" => raw_transport(o)?.mtu_probe(o.port)?,
+        "zero-window-close" => {
+            raw_transport(o)?.zero_window_close(o.port, o.count, o.pps, o.duration)
+        }
         "slowloris" => app::slowloris(&o.stage, &o.host, o.port, &o.certs, o.clients, o.duration)?,
         "half-records" => app::half_records(&o.host, o.port, &o.certs)?,
         "max-packets" => app::max_packets(&o.host, o.port, &o.certs, o.max_packet, o.count)?,

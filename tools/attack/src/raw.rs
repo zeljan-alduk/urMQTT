@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::wire::{self, ACK, Ip, Mac, RST, SYN};
+use crate::wire::{self, ACK, Ip, Mac, PSH, RST, SYN};
 
 /// The gateway/DHCP-server address this tool owns (QEMU slirp's default, so
 /// the dev configuration's syslog/statsd targets still resolve).
@@ -38,6 +38,11 @@ pub struct Transport {
     /// The MSS of the latest SYN-ACK, plus one (0: none seen).
     syn_ack_mss: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+    /// `zero-window-close`: the reader answers every SYN-ACK itself, with a
+    /// zero-window ACK that carries bytes the TLS server refuses, and counts
+    /// the answers here.
+    zero_window: Arc<AtomicBool>,
+    zero_window_acks: Arc<AtomicU64>,
 }
 
 /// A fixed DHCP reply (OFFER or ACK) built from the request, like QEMU's
@@ -92,6 +97,8 @@ impl Transport {
             leases: Arc::new(AtomicU64::new(0)),
             syn_ack_mss: Arc::new(AtomicU64::new(0)),
             stop: Arc::new(AtomicBool::new(false)),
+            zero_window: Arc::new(AtomicBool::new(false)),
+            zero_window_acks: Arc::new(AtomicU64::new(0)),
         };
         t.spawn_reader(sock, dhcp_mtu);
         // The guest must have a lease (so the broker is reachable) before we
@@ -115,6 +122,7 @@ impl Transport {
             self.stop.clone(),
         );
         let mss_seen = self.syn_ack_mss.clone();
+        let (zero_window, zw_acks) = (self.zero_window.clone(), self.zero_window_acks.clone());
         std::thread::spawn(move || {
             let mut buf = [0u8; 2048];
             while !stop.load(Ordering::Relaxed) {
@@ -161,7 +169,33 @@ impl Transport {
                 }
                 if p.proto == wire::PROTO_TCP {
                     let flags = p.l4.4;
-                    if flags & SYN != 0 && flags & ACK != 0 {
+                    if flags & SYN != 0 && flags & ACK != 0 && zero_window.load(Ordering::Relaxed) {
+                        syn_acks.fetch_add(1, Ordering::Relaxed);
+                        // Complete the handshake with window 0 and a record
+                        // that is no ClientHello, then never speak again.
+                        let (sport, dport, seq, ack, _) = p.l4;
+                        let mut junk = vec![
+                            0x16, 0x03, 0x01, 0x00, 0x30, 0x01, 0x00, 0x00, 0x2c, 0x03, 0x03,
+                        ];
+                        junk.extend_from_slice(&[0x5a; 32]);
+                        junk.extend_from_slice(&[0xff; 10]);
+                        let f = wire::tcp_frame(
+                            HOST_MAC,
+                            GUEST_MAC,
+                            p.dst_ip,
+                            p.src_ip,
+                            dport,
+                            sport,
+                            ack,
+                            seq.wrapping_add(1),
+                            ACK | PSH,
+                            0,
+                            None,
+                            &junk,
+                        );
+                        let _ = sock.send(&f);
+                        zw_acks.fetch_add(1, Ordering::Relaxed);
+                    } else if flags & SYN != 0 && flags & ACK != 0 {
                         syn_acks.fetch_add(1, Ordering::Relaxed);
                         if let Some(m) = p.mss {
                             mss_seen.store(u64::from(m) + 1, Ordering::Relaxed);
@@ -236,6 +270,80 @@ impl Transport {
             "attack: ack-flood sent {sent} ACK(s) to :{port}, {} RST(s) and {} challenge-ACK(s) back",
             self.rsts.load(Ordering::Relaxed),
             self.challenge_acks.load(Ordering::Relaxed)
+        );
+    }
+
+    /// NETDOS-1 (ADR-355): `count` handshakes from 16 on-link sources,
+    /// each completed with a zero-window ACK that carries bytes the TLS
+    /// server refuses, then silence. The broker queues an alert and a FIN it
+    /// can never send; it must still free every one of them (a reset after
+    /// its close deadline) instead of holding them until reboot. Waits up to
+    /// `wait_s` for the resets.
+    pub fn zero_window_close(&self, port: u16, count: u64, pps: u64, wait_s: u64) {
+        self.zero_window.store(true, Ordering::Relaxed);
+        let start = Instant::now();
+        // 16 sources: the guest keeps 32 IPv4 neighbours per core, and a
+        // reset to an evicted one is dropped while ARP resolves it, which
+        // would count as a connection still held.
+        for i in 0..count {
+            let src_ip = [SRC_NET[0], SRC_NET[1], SRC_NET[2], 50 + (i % 16) as u8];
+            let sport = 1024 + (i / 16) as u16;
+            let f = wire::tcp_frame(
+                HOST_MAC,
+                GUEST_MAC,
+                src_ip,
+                GUEST_IP,
+                sport,
+                port,
+                0x1000_0000u32.wrapping_add(i as u32 * 7919),
+                0,
+                SYN,
+                64240,
+                Some(1460),
+                &[],
+            );
+            self.send(&f);
+            if pps > 0 {
+                let due = Duration::from_secs_f64((i + 1) as f64 / pps as f64);
+                let elapsed = start.elapsed();
+                if due > elapsed {
+                    std::thread::sleep(due - elapsed);
+                }
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(wait_s);
+        let acked = || self.zero_window_acks.load(Ordering::Relaxed);
+        let rsts = || self.rsts.load(Ordering::Relaxed);
+        while Instant::now() < deadline && (acked() == 0 || rsts() < acked()) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let (a, r) = (acked(), rsts());
+        // One more SYN, answered normally (no state: a SYN cookie), so the
+        // guest's next TCP report (logged only after input) says how many
+        // connections it still holds.
+        self.zero_window.store(false, Ordering::Relaxed);
+        self.send(&wire::tcp_frame(
+            HOST_MAC,
+            GUEST_MAC,
+            [SRC_NET[0], SRC_NET[1], SRC_NET[2], 49],
+            GUEST_IP,
+            40_049,
+            port,
+            0x4242_4242,
+            0,
+            SYN,
+            64240,
+            Some(1460),
+            &[],
+        ));
+        std::thread::sleep(Duration::from_millis(500));
+        println!(
+            "attack: zero-window-close sent {count} SYN(s), {a} handshake(s) completed with a zero-window ACK, {r} RST(s) back{}",
+            if a > 0 && r >= a {
+                " (every one freed)"
+            } else {
+                " (connections still held)"
+            }
         );
     }
 
