@@ -26,7 +26,7 @@ which says what it gives up.
 | Control signing key (Ed25519) | **Offline**, never in the image: a file on an operator machine (dev) or an HSM/KMS behind `urmqtt-control --sign-cmd` (prod). The image holds only the public key (`deploy/<env>/control.pub`). | Revoking, unrevoking and allowlisting devices at runtime. |
 | Trust anchors by role | `[trust] operational` and `bootstrap` CA lists, embedded | Which CA grants which rights; rotation with overlap. |
 | Plaintext accounts (P1, opt-in) | Salted PBKDF2 hashes in the image's configuration slot (ADR-231), and, with `limits.max_runtime_accounts`, in the data disk's `accounts` table (NOW-15, ADR-285, ADR-286); the passwords are never stored, logged or sent to the broker by the operator tool | Logging in on the plaintext port or over WebSocket as a device. The hashes are public to whoever holds the image or the disk: use long random passwords. |
-| Disk key (S7, opt-in) | In the image's configuration slot (`storage.disk_key`), and in RAM while the disk is open (the cipher's round keys, wiped on drop). With `storage.disk_key_source = "console"` (LATER-7) **not in the image**: wrapped in the data partition's key slots under passphrases, unwrapped at boot from what the operator types on the console | Reading a stolen volume or snapshot; with the console source, also whoever has the ISO. A passphrase guessed offline from a copied header (one PBKDF2 per guess) gives the key (ADR-240, ADR-325). |
+| Disk key (S7, opt-in) | In the image's configuration slot (`storage.disk_key`), and in RAM while the disk is open (the cipher's round keys, wiped on drop). With `storage.disk_key_source = "console"` (LATER-7) **not in the image**: wrapped in the data partition's key slots under passphrases, unwrapped at boot from what the operator types on the console | Reading a stolen data volume that is not the boot disk; with the console source, also a snapshot of the whole disk and whoever has the ISO (with the key in the image, a snapshot of the single-disk VPS holds the key too: R060-S7, ADR-373). A passphrase guessed offline from a copied header (one PBKDF2 per guess) gives the key (ADR-240, ADR-325). |
 | Disk passphrases (LATER-7, opt-in) | Typed on the VM's console at boot, never stored, echoed or logged; the line buffer and the derived keys are wiped | Unlocking a copied disk. The provider's console and the hypervisor see it typed (ADR-326). |
 | Messages | In flight (RAM), retained and offline queues (SQLite), telemetry (log on the data disk) | Confidentiality and integrity of device data. |
 | Availability | — | The broker's purpose; the main target of a remote attacker. |
@@ -918,8 +918,16 @@ the two superblock slots is AES-256-XTS, one 512-byte sector per data unit,
 under a 64-byte key from the configuration; the superblock carries a keyed
 check so a wrong key is refused before anything is read (`docs/DISK-FORMAT.md`
 §14). What that does and does not do:
-- It protects a **stolen volume, snapshot or disk image**: registry, retained
-  and queued messages, telemetry and backups are unreadable without the key.
+- With the key in the image (`disk_key_source = "image"`, the default) it
+  protects the data partition only when it is taken **without the boot
+  partition**: the installer copies the image's configuration slot, key
+  included, to `/boot/urmqtt.cfg` on the ESP of the same disk (DISK-FORMAT §0),
+  so a **snapshot or copy of the whole single-disk VPS volume holds the key
+  next to the ciphertext and is readable** (R060-S7, ADR-373). What it does
+  protect: a copy of the data partition alone, released or reused blocks of
+  the provider's storage. Against a snapshot of the whole volume use
+  `disk_key_source = "console"` (the key is then in no image and on no disk,
+  only wrapped under passphrases).
 - It does **not** protect against a **stolen ISO** (the key is inside it: the
   configuration holds the TLS private key as well), against someone who can
   read the running machine's memory, or against the cloud provider's
@@ -970,7 +978,12 @@ console at every boot, before the store opens and before any listener exists.
 - **Rotation:** a passphrase change rewrites only the header, twice, so that no
   superblock keeps the old wrap (a cut between the two writes is repaired at the
   next open); the disk key itself is rotated by the offline `urmqtt-disk rekey`
-  (a full rewrite), which empties the key slots.
+  (a full rewrite), which empties the key slots. **A passphrase change does not
+  lock out a leaked passphrase** (R060-S3, ADR-372): the disk key stays the
+  same, so whoever holds an earlier copy of the header (a provider snapshot, a
+  backup of the image) and the old passphrase unwraps the key from that copy,
+  and it decrypts the current disk and everything written later. After a leak,
+  `urmqtt-disk rekey` (with the VM stopped), then `keys add` a fresh passphrase.
 - **Not protected:** the hypervisor (it sees the passphrase typed and the key in
   RAM), a stolen running VM, and the integrity of the data (XTS). No TPM, no
   network unlock (ADR-329).

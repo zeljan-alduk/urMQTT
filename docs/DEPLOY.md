@@ -1154,12 +1154,16 @@ takes under a minute at the default.
 
 ### Encryption at rest (S7, ADR-240)
 
-Optional and off by default. It protects the data partition (registry,
-retained and queued messages, telemetry, the backups) when a **volume or a
-snapshot is taken away**: the cloud provider's snapshot, a copy of the disk
-image, a disk pulled from a machine. It does **not** protect against whoever
-holds the ISO (the key is in its configuration) or the running machine;
-for that, see "A disk key that is not in the image" below.
+Optional and off by default. With the key in the image (this section) it
+protects the data partition (registry, retained and queued messages,
+telemetry, the backups) only when the partition is taken **without the boot
+partition next to it**. On the usual single-disk VPS it is not: the installer
+writes the image's configuration, key included, to `/boot/urmqtt.cfg` on the
+same disk, so **the cloud provider's snapshot or a copy of the whole disk image
+holds the key with the data and is readable** (R060-S7). It also does not
+protect against whoever holds the ISO (the key is in its configuration) or the
+running machine. Against snapshots and copies of the disk, use the key that is
+not in the image: see "A disk key that is not in the image" below.
 
 1. Make a key, once, and keep it somewhere that is not the repository:
    `head -c 64 /dev/urandom | xxd -p -c 200 > disk.key` (128 hex digits; 64 raw
@@ -1220,7 +1224,12 @@ than a broker whose image reads its disk.
    generated passphrase of 20 characters or more (`openssl rand -base64 24`): the header can be copied and
    guessed offline at one PBKDF2 (300 000 iterations) per guess, so a short or common one protects little.
 2. **Every later boot** stops at `Disk passphrase (or "change" to change it):`. Typing `change` there changes it
-   (the current one, then the new one twice); only the header is rewritten.
+   (the current one, then the new one twice); only the header is rewritten. The disk key stays the same, so a
+   change is a rotation, not a cure for a leak: an earlier copy of the header (a snapshot, a backup) still opens
+   with the old passphrase and decrypts today's disk. **If a passphrase leaked**, rotate the key itself with the VM
+   stopped: `urmqtt-disk rekey DISK --passphrase-file cur.txt --key-new fresh.key --write` (a full rewrite; it
+   empties the key slots), then `urmqtt-disk keys DISK add --key fresh.key --new-passphrase-file new.txt
+   --write`, then delete `fresh.key` (R060-S3).
 3. **Offline**, with the VM stopped, the passphrase goes in a file (its bytes without the final newline; keep it on
    tmpfs and delete it after):
    - `urmqtt-disk keys DISK` lists the two key slots (no key needed);

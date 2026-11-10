@@ -513,3 +513,68 @@ fn a_cut_at_every_write_of_a_key_change_leaves_one_passphrase() {
         start = m.raw(0, m.len() as usize);
     }
 }
+
+/// R060-S2 (ADR-371): the plaintext copies the tool writes of an
+/// encrypted disk (the database of `export-db`, a snapshot of
+/// `backup-extract`) are readable by their owner only (0600), also when
+/// the output file already existed with wider permissions.
+#[cfg(unix)]
+#[test]
+fn plaintext_copies_of_an_encrypted_disk_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let d = image_key_disk("private.img");
+    let p = s(&d);
+    let kf = key_file();
+    let db = write("private-db.sqlite", b"stale");
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+    ok(&["export-db", p, s(&db), "--key", s(&kf)]);
+    assert_eq!(&std::fs::read(&db).unwrap()[..16], b"SQLite format 3\0");
+    assert_eq!(mode(&db), 0o600);
+    ok(&["backup", p, "--key", s(&kf), "--write"]);
+    let snap = tmp("private-snap.sqlite");
+    let _ = std::fs::remove_file(&snap);
+    ok(&["backup-extract", p, s(&snap), "--key", s(&kf)]);
+    assert_eq!(&std::fs::read(&snap).unwrap()[..16], b"SQLite format 3\0");
+    assert_eq!(mode(&snap), 0o600);
+}
+
+/// R060-S4 (ADR-374): a new key slot cheaper than the default, or under
+/// a passphrase shorter than 20 characters, is accepted (the floor is the
+/// format's) but warned about; a generated passphrase at the default cost
+/// is not.
+#[test]
+fn a_weak_new_slot_is_warned_about() {
+    let d = image_key_disk("weak.img");
+    let p = s(&d);
+    let kf = key_file();
+    let short = pass("short", "Password1234");
+    let it = MIN_ITERATIONS.to_string();
+    let o = ok(&[
+        "keys",
+        p,
+        "add",
+        "--key",
+        s(&kf),
+        "--new-passphrase-file",
+        s(&short),
+        "--iterations",
+        &it,
+    ]);
+    assert!(o.contains("the new passphrase has 12 characters"), "{o}");
+    assert!(
+        o.contains("--iterations 10000 is below the default 300000"),
+        "{o}"
+    );
+    let long = pass("long", "a generated passphrase of 32 chars");
+    let o = ok(&[
+        "keys",
+        p,
+        "add",
+        "--key",
+        s(&kf),
+        "--new-passphrase-file",
+        s(&long),
+    ]);
+    assert!(!o.contains("warning"), "{o}");
+}

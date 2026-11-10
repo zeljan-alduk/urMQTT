@@ -5975,3 +5975,90 @@ device the kernel does not drive is unaffected; one for a driven device would be
   is unchanged.
 - **Verified.** Host test `kernel` `owned_frames::tests::only_lent_frames_are_reachable`; the `iommu` smoke group,
   where every table of VT-d, AMD-Vi and SMMUv3 goes through `KEnv`.
+
+## ADR-370 — A torn superblock write of the format is an interrupted format, formatted again (v0.6.0 security review, R060-S1)
+
+- **Status:** Accepted (v0.6.1). No layout version, no configuration format number and no store schema change:
+  the bytes a format writes are the same as in v0.6.0.
+- **Context.** A format writes size-table slot A (`seq` 0, all sizes 0), size-table slot B (zeros), flushes, then
+  writes superblock slot A in one 4 KiB write and flushes (DISK-FORMAT §6). On a device with 512-byte logical
+  sectors (virtio-blk's default) that write is not atomic, and the project's own fault model tears writes. Torn
+  after 1 to 7 sectors it left slot A with the magic and a bad CRC and slot B zero: `Layout::select` returned
+  `BadChecksum`, the partition was neither blank nor valid, and with `refuse_on_corruption` the kernel refused to
+  serve at every boot, with no tool to reformat it. The existing cut test of the sealed format stopped writes, it
+  never tore one.
+- **Decision.** `Disk::open*`, `probe` and `unlock` read the superblocks through `select_slots`, which takes
+  exactly the state of a torn format superblock for blank, so the format runs again (for the console passphrase:
+  the first-boot prompt again). All of these must hold: slot A starts with the magic and fails its CRC; slot A's
+  last sector, the one holding the CRC, is all zero (the write never completed, so the format never returned a
+  disk anything was written to: a completed superblock's CRC is in that sector, and no write, release or scrub
+  zeroes part of a superblock); slot B is all zero (no later superblock update, which always goes to the slot not
+  in force); size-table slot B does not decode (zeros, or on an encrypted disk the cipher's zeros: no size commit
+  since the format, the first goes to slot B); and size-table slot A, when it decodes (a plain disk), is the
+  format's own. Any other damage is still refused.
+- **Alternatives.** (a) Zero size-table slot B on the raw device even on an encrypted disk, to make "no commit"
+  readable without the key: changes the bytes of every new encrypted disk (`golden_v21` froze them), and is not
+  needed once the last sector is checked. (b) Treat any `BadChecksum` with slot B zero as blank: a formatted disk
+  whose superblock was never rewritten (most disks) would be formatted over after one flipped bit, losing data.
+  (c) A tool command to force a format: needs the operator and an offline step on a VM that did nothing wrong.
+- **Verified.** `crates/store/tests/wrapped.rs`: `a_torn_superblock_write_during_the_format_is_formatted_again`
+  (plain and sealed formats, the superblock write torn after 1 to 7 sectors: probed blank, formatted again, data
+  written and read back; fails on v0.6.0), `a_damaged_superblock_of_a_used_disk_is_still_refused` (a flipped bit,
+  and the last sector zeroed by hand on a disk with a committed size, plain and sealed: still `BadChecksum`).
+
+## ADR-371 — The plaintext files of `urmqtt-disk` are owner-only (v0.6.0 security review, R060-S2)
+
+- **Status:** Accepted (v0.6.1). No format change.
+- **Context.** `--key-out` was already written with mode 0600 and `create_new`. Three other outputs of the tool hold
+  the plaintext of an encrypted disk but were written at the umask's mode (0644 by default): the conversion
+  journal of `encrypt` (`DISK.convert-journal`, the plaintext of the 1 MiB chunk being rewritten, left on disk by
+  an interrupted run until `--resume`), and the files of `export-db` and `backup-extract` (the whole database:
+  account PBKDF2 hashes, revocations, retained and queued messages).
+- **Decision.** The journal's temporary file is removed if a stale one is there, created with `create_new` and mode
+  0600, synced and renamed. `export-db` and `backup-extract` write through `write_private`: mode 0600 on creation,
+  and set to 0600 before a byte is written when the file already existed; then synced. They still replace an
+  existing file (unlike `--key-out`), as they did.
+- **Verified.** `tools/disk/tests/convert.rs::the_conversion_journal_file_is_owner_only` (over a stale 0644
+  temporary file), `tools/disk/tests/keys.rs::plaintext_copies_of_an_encrypted_disk_are_owner_only` (over an
+  existing 0644 file, and a new one); both fail on v0.6.0.
+
+## ADR-372 — A passphrase change is a rotation, not a cure for a leak (v0.6.0 security review, R060-S3)
+
+- **Status:** Accepted (v0.6.1). Documentation and messages only.
+- **Context.** The console's `change` and `urmqtt-disk keys change` rewrap the same disk key under the new
+  passphrase (ADR-327). Whoever copied the superblock earlier (a provider snapshot, a backup of the image) and
+  learns the old passphrase unwraps the key from the copy, and it decrypts the current disk and everything written
+  later, until a full `rekey`. The kernel logged "the old one no longer opens the disk", and no document said
+  that a leaked passphrase needs a rekey.
+- **Decision.** Kept as designed: rotating the key is a full rewrite, offline (ADR-327 point 4), and a change that
+  rewrote the disk would make every rotation an outage. The log line (its prefix, which the smoke test checks, is
+  unchanged) and the tool's message now say that the disk key is the same and that a leaked passphrase needs
+  `urmqtt-disk rekey` then `keys add`; SECURITY.md ("A disk key that is not in the image"), DEPLOY.md and
+  OPERATE.md say it too.
+
+## ADR-373 — What a disk key in the image protects on a single-disk VPS (v0.6.0 security review, R060-S7)
+
+- **Status:** Accepted (v0.6.1). Documentation only.
+- **Context.** With `disk_key_source = "image"` the 64 key bytes are in the configuration blob, and the installer
+  writes the configuration slot to `/boot/urmqtt.cfg` on the ESP of the disk whose data partition it encrypts
+  (DISK-FORMAT §0). A snapshot or copy of a single-disk VPS volume therefore holds the key next to the ciphertext.
+  KNOWN-ISSUES section 1 said so; SECURITY.md ("It protects a stolen volume, snapshot or disk image") and DEPLOY.md
+  ("the cloud provider's snapshot, a copy of the disk image") promised the opposite.
+- **Decision.** Both now say what the image-key mode protects: a data partition taken without the boot partition
+  next to it (a copy of that partition alone, released or reused blocks of the provider's storage), not a snapshot
+  of the whole disk; against snapshots they point to `disk_key_source = "console"`. Moving the key off the boot
+  disk (a second volume for the data) is a deployment choice the documents can describe once it is tested.
+
+## ADR-374 — The cost of an offline guess at a disk passphrase: warned about, not raised yet (v0.6.0 security review, R060-S4)
+
+- **Status:** Accepted (v0.6.1). No format change.
+- **Context.** Each guess at a copied header costs one PBKDF2-HMAC-SHA-256, which is not memory-hard. The default is
+  300 000 iterations (OWASP asks 600 000 for PBKDF2-HMAC-SHA-256), a slot may name 10 000, and the passphrase rule
+  is 12 printable characters, which `Password1234` meets. One guess at 10 000 iterations took 0.59 ms on one core
+  of the review's host, so about 18 ms at the default.
+- **Decision.** For this release: `urmqtt-disk keys` warns when a new slot is below the default cost or its
+  passphrase is shorter than 20 characters (the length DEPLOY.md asks for), and KNOWN-ISSUES section 5 lists the
+  limit. Not done: raising the default doubles every boot's unlock (and the TCG smoke runs), raising the floor
+  would refuse existing slots, and a memory-hard slot kind (Argon2id) is a new slot kind in the format. They are
+  future work.
+- **Verified.** `tools/disk/tests/keys.rs::a_weak_new_slot_is_warned_about`.

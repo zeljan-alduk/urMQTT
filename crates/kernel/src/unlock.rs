@@ -246,7 +246,7 @@ fn run(
                             Some(KeySlot::seal(&key, p, &id, salt, DEFAULT_ITERATIONS)),
                         )?;
                         info!(
-                            "storage: the disk passphrase of key slot {slot} was changed; the old one no longer opens the disk"
+                            "storage: the disk passphrase of key slot {slot} was changed; the disk key is the same, so a copy of the old header still opens the disk with the old passphrase (if it leaked: urmqtt-disk rekey, then keys add)"
                         );
                         return Ok((disk, how));
                     }

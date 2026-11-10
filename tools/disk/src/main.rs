@@ -468,7 +468,7 @@ fn export_db(path: &str, out: &str) -> Result<(), String> {
     .ok_or("store not installed")?
     .map_err(|e| format!("reading the database: {e:?}"))?;
     drop(store);
-    std::fs::write(out, &bytes).map_err(|e| format!("{out}: {e}"))?;
+    write_private(out, &bytes)?;
     eprintln!(
         "export-db: {out}: {} bytes, WAL applied (in memory; {path} unchanged)",
         bytes.len()
@@ -1350,6 +1350,23 @@ fn keys_cmd(path: &str, sub: Option<&str>, a: KeysArgs) -> Result<(), String> {
         .as_deref()
         .map(keys::read_passphrase)
         .transpose()?;
+    // The header can be copied and guessed offline at one PBKDF2 per guess
+    // (R060-S4, ADR-374): say so when a new slot is cheaper than usual.
+    if let Some(p) = &new {
+        if p.len() < 20 {
+            eprintln!(
+                "keys: warning: the new passphrase has {} characters; a copied header is guessed offline at one PBKDF2 per guess: use a generated one of 20 or more (openssl rand -base64 24)",
+                p.len()
+            );
+        }
+        if a.iterations < urmqtt_store::keyslot::DEFAULT_ITERATIONS {
+            eprintln!(
+                "keys: warning: --iterations {} is below the default {}: every offline guess at the new slot is that much cheaper",
+                a.iterations,
+                urmqtt_store::keyslot::DEFAULT_ITERATIONS
+            );
+        }
+    }
     if op == keys::Op::Unwrap && matches!(auth, keys::Auth::Passphrase(_)) && a.key_out.is_none() {
         return Err("unwrap with a passphrase: give --key-out FILE, where the key is written (the image needs it from now on)".into());
     }
@@ -1396,7 +1413,7 @@ fn keys_cmd(path: &str, sub: Option<&str>, a: KeysArgs) -> Result<(), String> {
     )?;
     let what = match (done.op, done.slot) {
         (keys::Op::Add, Some(s)) => format!("key slot {s}: the disk key is wrapped under the new passphrase"),
-        (keys::Op::Change, Some(s)) => format!("key slot {s}: new passphrase; the old one no longer opens the disk"),
+        (keys::Op::Change, Some(s)) => format!("key slot {s}: new passphrase; the disk key is the same, so a copy of the old header still opens the disk with the old passphrase (if it leaked: rekey, then keys add)"),
         (keys::Op::Remove, Some(s)) => format!("key slot {s}: emptied"),
         _ => "every key slot emptied: the key must come from the image (storage.disk_key_source = \"image\", storage.disk_key)".into(),
     };
@@ -1426,6 +1443,27 @@ fn write_secret(path: &str, bytes: &[u8]) -> Result<(), String> {
         .open(path)
         .map_err(|e| format!("{path}: {e} (it must not exist yet)"))?;
     f.write_all(bytes)
+        .and_then(|()| f.sync_all())
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+/// Writes a plaintext copy of the store (the database of `export-db`, a
+/// snapshot of `backup-extract`): it holds the account hashes, revocations,
+/// retained and queued messages, which on an encrypted disk exist nowhere
+/// else in the clear. So it is readable by its owner only (0600, also when
+/// the file already existed, before a byte is written), and synced
+/// (R060-S2, ADR-371). Unlike `--key-out` it may replace an existing file.
+fn write_private(path: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("{path}: {e}"))?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .and_then(|()| f.write_all(bytes))
         .and_then(|()| f.sync_all())
         .map_err(|e| format!("{path}: {e}"))
 }
@@ -1678,7 +1716,7 @@ fn backup_extract(path: &str, out: &str, slot: Option<usize>) -> Result<(), Stri
         &mut data,
     )
     .map_err(|e| format!("{e:?}"))?;
-    std::fs::write(out, &data).map_err(|e| format!("{out}: {e}"))?;
+    write_private(out, &data)?;
     eprintln!(
         "backup-extract: {out}: snapshot seq {} of slot {i}, {} bytes, taken at unix {}",
         h.seq,

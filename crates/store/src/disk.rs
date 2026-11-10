@@ -370,7 +370,7 @@ impl Disk {
         if rec.get(..8) == Some(&CONVERT_MAGIC[..]) {
             return Err(DiskError::ConversionPending);
         }
-        match Layout::select(&a, &b, total)? {
+        match select_slots(dev.as_mut(), &a, &b, total)? {
             Some((layout, slot)) => {
                 match (layout.encrypted(), key) {
                     (false, None) => {}
@@ -407,7 +407,8 @@ impl Disk {
                 let sizes = SizeTable::default();
                 let mut disk = Self::assemble(dev, layout, sizes, 0, gran, topo);
                 // Size table first, superblock last: a crash in between
-                // leaves a blank-looking disk that is formatted again.
+                // leaves a blank-looking disk that is formatted again, and a
+                // torn superblock write is an interrupted format (§6).
                 let size_a = disk.sizes.encode();
                 disk.write_dev(SIZE_SLOT_LBA[0], &size_a)?;
                 disk.write_dev(SIZE_SLOT_LBA[1], &[0u8; BLOCK])?;
@@ -1228,7 +1229,8 @@ pub fn probe(dev: &mut dyn BlockDevice) -> Result<Probe, DiskError> {
     if rec.get(..8) == Some(&CONVERT_MAGIC[..]) {
         return Err(DiskError::ConversionPending);
     }
-    Ok(match Layout::select(&a, &b, dev.sectors())? {
+    let total = dev.sectors();
+    Ok(match select_slots(dev, &a, &b, total)? {
         None => Probe::Blank,
         Some((l, _)) if !l.encrypted() => Probe::Plain,
         Some((l, _)) => Probe::Encrypted {
@@ -1252,7 +1254,8 @@ pub fn unlock(
     if rec.get(..8) == Some(&CONVERT_MAGIC[..]) {
         return Err(DiskError::ConversionPending);
     }
-    let (layout, _) = Layout::select(&a, &b, dev.sectors())?.ok_or(DiskError::Blank)?;
+    let total = dev.sectors();
+    let (layout, _) = select_slots(dev, &a, &b, total)?.ok_or(DiskError::Blank)?;
     if !layout.encrypted() {
         return Err(DiskError::NotEncrypted);
     }
@@ -1269,6 +1272,52 @@ pub fn unlock(
         }
     }
     Err(DiskError::WrongPassphrase)
+}
+
+/// [`Layout::select`], except that the state a torn superblock write of the
+/// format leaves behind (see [`interrupted_format`]) reads as blank, so the
+/// format is simply done again (R060-S1, ADR-370).
+fn select_slots(
+    dev: &mut dyn BlockDevice,
+    a: &[u8; BLOCK],
+    b: &[u8; BLOCK],
+    total: u64,
+) -> Result<Option<(Layout, usize)>, DiskError> {
+    match Layout::select(a, b, total) {
+        Err(LayoutError::BadChecksum) if interrupted_format(dev, a, b)? => Ok(None),
+        r => Ok(r?),
+    }
+}
+
+/// True when the superblocks are exactly what the format leaves when its
+/// one superblock write (to slot A, the last write of the format) is torn:
+/// slot A starts with the magic but fails its checksum, and its last sector,
+/// the one holding the checksum, is all zero, so that write never completed
+/// and the format never returned a disk anyone could write to; slot B is all
+/// zero. A completed superblock's last sector is never zero (its checksum),
+/// and no write, release or scrub ever zeroes part of a superblock. As a
+/// further guard the size table must not show a commit since a format:
+/// slot B does not decode (zeros, or the cipher's zeros) and slot A, when it
+/// decodes, is the format's own (`seq` 0, every size 0). Every other damaged
+/// superblock is still refused.
+fn interrupted_format(
+    dev: &mut dyn BlockDevice,
+    a: &[u8; BLOCK],
+    b: &[u8; BLOCK],
+) -> Result<bool, DiskError> {
+    let last = a.get(BLOCK - SECTOR as usize..).unwrap_or(&[1]);
+    if a.get(..8) != Some(&crate::layout::MAGIC[..])
+        || last.iter().any(|&x| x != 0)
+        || b.iter().any(|&x| x != 0)
+    {
+        return Ok(false);
+    }
+    let mut sa = [0u8; BLOCK];
+    let mut sb = [0u8; BLOCK];
+    dev.read(SIZE_SLOT_LBA[0], &mut sa)?;
+    dev.read(SIZE_SLOT_LBA[1], &mut sb)?;
+    Ok(SizeTable::decode(&sb).is_none()
+        && SizeTable::decode(&sa).is_none_or(|t| t == SizeTable::default()))
 }
 
 fn read_slots(dev: &mut dyn BlockDevice) -> Result<([u8; BLOCK], [u8; BLOCK]), DiskError> {
