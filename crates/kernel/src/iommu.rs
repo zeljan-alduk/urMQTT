@@ -34,6 +34,7 @@ use urmqtt_platform::PlatformInfo;
 use urmqtt_platform::iommu::{IommuInfo, Kind};
 use urmqtt_sync::sync::SpinLock;
 
+use crate::owned_frames::OwnedFrames;
 use crate::{memory, vm};
 
 /// A unit's register frame, mapped as device memory by [`init`].
@@ -83,15 +84,25 @@ impl Regs for Mmio {
 /// Memory for the units: DMA frames reached through the HHDM.
 struct KEnv {
     coherent: bool,
+    /// The frames [`Env::alloc`] handed out: the only memory `read` and
+    /// `write` reach (ADR-347).
+    owned: OwnedFrames,
 }
 
 impl KEnv {
-    /// The HHDM address of `pa`, if `pa` is 8-byte aligned and in a frame
-    /// [`Env::alloc`] handed out (checked by the allocator's bookkeeping in
-    /// the debug sense only: the driver crate addresses nothing else, see
-    /// its `Env` contract).
-    fn va(pa: u64) -> Option<usize> {
-        pa.is_multiple_of(8).then(|| (vm::hhdm() + pa) as usize)
+    fn new(coherent: bool) -> Self {
+        Self {
+            coherent,
+            owned: OwnedFrames::default(),
+        }
+    }
+
+    /// The HHDM address of `pa`, if `pa` is 8-byte aligned and its
+    /// doubleword lies in a frame [`Env::alloc`] handed out. Anything else
+    /// is refused, so a logic bug in the safe `urmqtt-iommu` cannot reach
+    /// other kernel memory (ADR-347).
+    fn va(&self, pa: u64) -> Option<usize> {
+        (pa.is_multiple_of(8) && self.owned.contains(pa, 8)).then(|| (vm::hhdm() + pa) as usize)
     }
 }
 
@@ -101,24 +112,29 @@ impl Env for KEnv {
         let align = align_pages
             .max(1)
             .checked_mul(urmqtt_iommu::PAGE as usize)?;
-        let (_, pa, _) = vm::dma_alloc_aligned(bytes, align)?;
+        let (_, pa, len) = vm::dma_alloc_aligned(bytes, align)?;
+        // Frames for device tables are never freed; one the bookkeeping
+        // cannot record is leaked rather than handed out unreachable.
+        if !self.owned.add(pa, len as u64) {
+            return None;
+        }
         PAGES_TABLES.fetch_add(pages as u64, Ordering::Relaxed);
         Some(pa)
     }
 
     fn read(&self, pa: u64) -> u64 {
-        match Self::va(pa) {
-            // SAFETY: `pa` lies in a zeroed frame this module allocated with
-            // `vm::dma_alloc_aligned`, which the HHDM maps read-write for
-            // the kernel's lifetime (frames for device tables are never
-            // freed); 8-byte aligned.
+        match self.va(pa) {
+            // SAFETY: `va` checked that the doubleword lies in a zeroed
+            // frame this unit allocated with `vm::dma_alloc_aligned`, which
+            // the HHDM maps read-write for the kernel's lifetime (frames for
+            // device tables are never freed); 8-byte aligned.
             Some(va) => unsafe { (va as *const u64).read_volatile() },
             None => 0,
         }
     }
 
     fn write(&mut self, pa: u64, v: u64) {
-        if let Some(va) = Self::va(pa) {
+        if let Some(va) = self.va(pa) {
             // SAFETY: as in `read`.
             unsafe { (va as *mut u64).write_volatile(v) }
         }
@@ -354,9 +370,7 @@ fn bring_up(kind: Kind, base: u64, max_id: u32) -> Result<Unit, Error> {
             } else {
                 probe
             };
-            let mut env = KEnv {
-                coherent: caps.coherent,
-            };
+            let mut env = KEnv::new(caps.coherent);
             let v = Vtd::init(regs, &mut env)?;
             info!(
                 "iommu: VT-d at {base:#x}: {}-level tables, {} domains, caching mode {}, coherent {}, interrupt remapping {} (left off), translation on: every device blocked until it is given a domain",
@@ -380,7 +394,7 @@ fn bring_up(kind: Kind, base: u64, max_id: u32) -> Result<Unit, Error> {
         Kind::AmdVi => {
             let regs = map_frame(base, amdvi::FRAME_LEN)?;
             let efr = regs.read64(amdvi::EXT_FEATURE);
-            let mut env = KEnv { coherent: true };
+            let mut env = KEnv::new(true);
             let a = AmdVi::init(regs, &mut env)?;
             info!(
                 "iommu: AMD-Vi at {base:#x}: {}-level tables, device table for all 65536 IDs, extended features {efr:#x}, enabled: every device blocked until it is given a domain",
@@ -400,9 +414,7 @@ fn bring_up(kind: Kind, base: u64, max_id: u32) -> Result<Unit, Error> {
                 regs.read32(smmuv3::IDR1),
                 regs.read32(smmuv3::IDR5),
             );
-            let mut env = KEnv {
-                coherent: caps.coherent,
-            };
+            let mut env = KEnv::new(caps.coherent);
             let s = Smmu::init(regs, &mut env, max_id)?;
             info!(
                 "iommu: SMMUv3 at {base:#x}: stage 1, {}-level tables, {}-bit output, stream table for IDs 0..{}, coherent {}, enabled: every stream aborted until it is given a domain",

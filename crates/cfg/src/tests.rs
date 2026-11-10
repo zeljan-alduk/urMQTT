@@ -1334,6 +1334,23 @@ fn mqtt5_rules() {
     assert!(Blob::parse(&with_version(&assemble(&rec), 12)).is_ok());
 }
 
+/// ADR-346: `limits.max_topic_levels` is capped at 128 (the topic-tree walks
+/// recurse once per level on a data core's 128 KiB stack); it used to take
+/// any u32, which the kernel truncated to u16.
+#[test]
+fn topic_levels_are_capped() {
+    let t = tag::LIM_TOPIC_LEVELS;
+    let mut b = Builder::new();
+    b.uint(t, fields::MAX_TOPIC_LEVELS).unwrap();
+    let blob = b.finish(false).unwrap();
+    assert_eq!(Blob::parse(&blob).unwrap().uint(t), 128);
+    for v in [0u64, 129, 1000, 65_536, u64::from(u32::MAX)] {
+        assert!(Builder::new().uint(t, v).is_err(), "{v}");
+    }
+    let rec = record(t, &1000u32.to_le_bytes());
+    assert!(Blob::parse(&assemble(&rec)).is_err());
+}
+
 /// ADR-275: the shared-subscription group limits. Defaults write nothing and
 /// keep the base format; either set needs format 13; 0 and 65536 are refused;
 /// a blob of format 12 cannot hold them.
