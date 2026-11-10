@@ -566,6 +566,19 @@ impl PlainState {
         let Some(pc) = self.conns.get(c).copied() else {
             return Decision::Refuse(5);
         };
+        // An address locked out after this connection was opened is not
+        // judged (ADR-363): the connections it opened before the lock-out
+        // would otherwise each get one more guess. Refused without a hash,
+        // and not counted again.
+        if let Some(shared) = Self::shared()
+            && shared
+                .sources
+                .lock()
+                .locked_out(src(pc.ip), (now_ms / 1000) as u32)
+        {
+            bump(&STATS.auth_failed);
+            return Decision::Refuse(5);
+        }
         // Owned, so that the authenticator is free again (it borrows the
         // identity of a run-time account from its table).
         let verdict = match self
@@ -591,6 +604,7 @@ impl PlainState {
                 return Decision::Refuse(code.unwrap_or(5));
             }
         };
+        // (This does not clear the address's failure count, ADR-363.)
         if let Some(shared) = Self::shared() {
             shared.sources.lock().succeeded(src(pc.ip));
         }

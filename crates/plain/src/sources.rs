@@ -262,14 +262,14 @@ impl Sources {
         }
     }
 
-    /// `ip` logged in: its failure count starts again.
+    /// `ip` logged in. This does **not** clear its failure count (ADR-363):
+    /// it did (ADR-230), and then one account holder who logged in after
+    /// every `max_failures - 1` wrong guesses was never locked out and
+    /// guessed other accounts' passwords at the login rate. Failures expire
+    /// with their window only. The listeners still report every success
+    /// here, so that the rule lives in this table and is tested with it.
     pub fn succeeded(&mut self, ip: impl Into<Src>) {
-        let ip = ip.into().0;
-        if let Some(i) = self.find(ip)
-            && let Some(s) = self.slots.get_mut(i)
-        {
-            s.fails = 0;
-        }
+        let _ = ip;
     }
 
     /// Whether `ip` is locked out at `now`.
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn old_failures_expire_and_a_login_clears_the_count() {
+    fn old_failures_expire() {
         let mut t = table(8, 3, 100);
         assert!(!t.failed(A, 0));
         assert!(!t.failed(A, 50));
@@ -373,13 +373,37 @@ mod tests {
         assert!(!t.failed(A, 100));
         assert!(!t.failed(A, 101));
         assert!(t.failed(A, 102));
-        let mut t = table(8, 3, 100);
-        assert!(!t.failed(A, 0));
-        assert!(!t.failed(A, 1));
-        t.succeeded(A);
-        assert!(!t.failed(A, 2));
-        assert!(!t.failed(A, 3));
-        assert!(t.failed(A, 4));
+    }
+
+    /// Security review v0.6.0, AUTHZ-2 (ADR-363): a successful login cleared
+    /// the address's failure count (this test's predecessor asserted that it
+    /// did), so an account holder who logged in after every 4 wrong guesses
+    /// at another account (limit 5 in 300 s) was never locked out: 1200
+    /// guesses in 300 s from one address. Logins no longer touch the count:
+    /// the 5th failure inside the window locks, whatever logins came between.
+    #[test]
+    fn logins_between_failures_do_not_save_an_address_from_the_lockout() {
+        let mut t = table(16, 5, 300);
+        let mut guesses = 0;
+        'outer: for second in 0..300u32 {
+            for _ in 0..4 {
+                if t.open(A, second) != Open::Ok {
+                    break 'outer;
+                }
+                guesses += 1;
+                let locked = t.failed(A, second);
+                t.close(A, second);
+                if locked {
+                    break 'outer;
+                }
+            }
+            // The attacker's own account logs in.
+            assert_eq!(t.open(A, second), Open::Ok);
+            t.succeeded(A);
+            t.close(A, second);
+        }
+        assert_eq!(guesses, 5, "locked out at the 5th guess");
+        assert!(t.locked_out(A, 299));
     }
 
     #[test]
@@ -583,9 +607,11 @@ mod tests {
                         }
                         assert_eq!(t.failed(ip, now), locks, "failed {ip:?} at {now}");
                     }
+                    // A login leaves the count as it is (ADR-363; the
+                    // model cleared it before).
                     _ => {
-                        e.fails = 0;
                         t.succeeded(ip);
+                        assert_eq!(t.locked_out(ip, now), e.locked_until > now);
                     }
                 }
                 for probe in 1..=6u8 {
