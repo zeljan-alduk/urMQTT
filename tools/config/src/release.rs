@@ -103,15 +103,19 @@ pub fn verify_sums(pubkey: &str, sums: &[u8], sig: &str) -> Result<SignedSums, S
 /// several `minisign.pub` files) by the key id the signature names. A key
 /// rotation leaves old releases signed by the old key; this checks each
 /// release against the key that signed it, and refuses a signature by a key
-/// that is not in the list. Which tags a key may sign is the caller's rule
-/// (keys/release-keys.json; the builder page and the mirror enforce it).
+/// that is not in the list. A key of the key ring built into the tool
+/// (keys/release-keys.json) signs only what the ring allows it, for the tag
+/// its signed trusted comment names: the former test key, compromised, only
+/// its pinned releases (ADR-366). An operator's own key is not restricted.
 pub fn verify_sums_any(pubkeys: &[&str], sums: &[u8], sig: &str) -> Result<SignedSums, String> {
     let wanted = minisign::signature_key_id(sig)?;
     let mut known = Vec::new();
     for text in pubkeys {
         let pk = PublicKey::parse(text)?;
         if pk.key_id() == wanted {
-            return verify_sums(text, sums, sig);
+            let signed = verify_sums(text, sums, sig)?;
+            crate::keyring::check_builtin(sums, sig)?;
+            return Ok(signed);
         }
         known.push(pk.key_id());
     }

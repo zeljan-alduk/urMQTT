@@ -148,9 +148,13 @@ shasum -a 256 -c SHA256SUMS
 gh attestation verify urmqtt-dev-v0.4.1.elf --repo zeljan-alduk/urMQTT
 ```
 
-`urmqtt-config check-release --pubkey minisign.pub --pubkey keys/minisign-test-9229E05252D01F8E.pub --sums SHA256SUMS
-<files>` takes both keys and uses the one the signature names; it does not know the tag ranges (the page and the mirror
-enforce them: the test key is accepted for v0.1.0 to v0.4.1 only).
+`urmqtt-config check-release --keyring keys/release-keys.json --tag vX.Y.Z --sums SHA256SUMS <files>` checks a
+release by the key ring: the key the signature names must be in the ring and may sign that tag (the former test key
+v0.1.0 to v0.4.1 only, and for each of those tags only the published `SHA256SUMS`, pinned), and the signed trusted
+comment must name that tag (a signed file of one release is never accepted as another, ADR-365). The `--pubkey` form
+(`--pubkey minisign.pub --pubkey keys/minisign-test-9229E05252D01F8E.pub`) applies the same rules to every key of the
+ring built into the tool, with the tag the trusted comment names (ADR-366); prefer `--keyring` and `--tag`, which also
+say which release you expect.
 
 The template works without a toolchain (docs/DEPLOY.md section 1b):
 

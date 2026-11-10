@@ -76,6 +76,88 @@ fn find_all(data: &[u8], needle: &[u8]) -> Vec<usize> {
     out
 }
 
+/// The magic of the kernels' build note (crates/store/src/slots.rs `NOTE_MAGIC`,
+/// v0.6.0 and later): 64 bytes, `magic[16] | note version u16 = 1 | A/B protocol
+/// u16 | store schema u32 | configuration format u16 | 0[6] | version text [32]`.
+const NOTE_MAGIC: &[u8] = b"urMQTT-buildnote";
+
+/// The configuration formats the build notes in `image` say its kernels read
+/// (the lowest, if they differ), or None when it has no valid note (a release
+/// before v0.6.0). Decoded with the rules of `urmqtt_store::slots::parse_note`.
+pub fn notes_cfg_format(image: &[u8]) -> Option<u16> {
+    let le16 = |b: &[u8], o: usize| Some(u16::from_le_bytes(b.get(o..o + 2)?.try_into().ok()?));
+    let valid = |b: &[u8]| -> Option<u16> {
+        let b = b.get(..64)?;
+        let schema = u32::from_le_bytes(b.get(20..24)?.try_into().ok()?);
+        if le16(b, 16)? != 1 || le16(b, 18)? == 0 || schema == 0 {
+            return None;
+        }
+        if b.get(26..32)?.iter().any(|&x| x != 0) {
+            return None;
+        }
+        let text = b.get(32..)?;
+        let len = text.iter().position(|&x| x == 0).unwrap_or(text.len());
+        if len == 0
+            || text.get(len..)?.iter().any(|&x| x != 0)
+            || !text.get(..len)?.iter().all(|&x| (0x21..0x7f).contains(&x))
+        {
+            return None;
+        }
+        le16(b, 24).filter(|&f| f > 0)
+    };
+    find_all(image, NOTE_MAGIC)
+        .into_iter()
+        .filter_map(|at| image.get(at..).and_then(valid))
+        .min()
+}
+
+/// The configuration format a blob is written in (its bytes 8..10).
+fn format_of(blob: &[u8]) -> u16 {
+    blob.get(8..10)
+        .and_then(|v| <[u8; 2]>::try_from(v).ok())
+        .map_or(0, u16::from_le_bytes)
+}
+
+/// The newest configuration format the kernels of `image` read, and how that is
+/// known (ADR-367). `slots` are the image's configuration slots (`kind`,
+/// bytes). In order: the kernels' build note (v0.6.0 and later); else an empty
+/// (unconfigured) slot, whose format is the kernel's; else the format of the
+/// configuration already in the image, the most it is known to take. Never the
+/// format this tool writes: an image an older kernel would refuse at boot is
+/// never made.
+fn kernel_reads(image: &[u8], slots: &[(SlotKind, &[u8])]) -> (u16, &'static str) {
+    if let Some(f) = notes_cfg_format(image) {
+        return (f, "its kernels' build note says so");
+    }
+    let blobs: Vec<&[u8]> = slots
+        .iter()
+        .filter_map(|(k, s)| slot_blob(s, *k).ok())
+        .filter(|b| urmqtt_cfg::Blob::parse(b).is_ok())
+        .collect();
+    if let Some(b) = blobs
+        .iter()
+        .find(|b| urmqtt_cfg::Blob::parse(b).is_ok_and(|p| p.is_empty()))
+    {
+        return (format_of(b), "its unconfigured slot says so");
+    }
+    (
+        blobs.iter().map(|b| format_of(b)).min().unwrap_or(0),
+        "it has no build note and no unconfigured slot, so the format of the configuration in it is the most it is known to read; configure the template of its release instead",
+    )
+}
+
+/// Refuses `blob` when the kernels of `image` would not read its format.
+fn check_format(blob: &[u8], image: &[u8], slots: &[(SlotKind, &[u8])]) -> Result<(), String> {
+    let (reads, why) = kernel_reads(image, slots);
+    if format_of(blob) > reads {
+        return Err(format!(
+            "this configuration needs configuration format {}, which this image's kernel does not read (it reads up to {reads}: {why}): use a newer release",
+            format_of(blob)
+        ));
+    }
+    Ok(())
+}
+
 /// The byte ranges of the `limine.conf` copies that start with `start`.
 fn conf_copies(data: &[u8], start: &[u8]) -> Result<Vec<std::ops::Range<usize>>, String> {
     let mut out = Vec::new();
@@ -185,25 +267,19 @@ pub fn configure_iso_in_place(iso: &mut [u8], blob: &[u8]) -> Result<String, Str
     let old = old.ok_or(
         "no configuration slot found: this is not a template ISO of this format (build 0.1.x releases and earlier have none)",
     )?;
-    // The kernel of the template reads blobs up to the version its own empty slot has: a configuration
-    // that needs a newer one (the TLS listener off, ADR-233) would be refused at boot.
-    let version_of = |b: &[u8]| {
-        b.get(8..10)
-            .and_then(|v| <[u8; 2]>::try_from(v).ok())
-            .map_or(0, u16::from_le_bytes)
-    };
-    // Only an empty slot (a template) says what the kernel reads: once a configuration is in, its version
-    // is the configuration's, not the kernel's, so a configured image can be configured again.
-    let template_reads = slot_blob(&old, SlotKind::Boot)
+    // The kernel of the template reads blobs up to the format its build note (or its own empty slot) says:
+    // a configuration that needs a newer one (the TLS listener off, ADR-233) would be refused at boot.
+    // ADR-367: an image configured before is judged by the same rule, not by this tool's format; the
+    // installation image's unconfigured slot (DISK marker) still says what the kernel reads.
+    let disk = slots_of(iso, SlotKind::Disk)
         .ok()
-        .filter(|b| urmqtt_cfg::Blob::parse(b).is_ok_and(|p| p.is_empty()))
-        .map_or(urmqtt_cfg::FORMAT_VERSION, version_of);
-    if version_of(blob) > template_reads {
-        return Err(format!(
-            "this configuration needs configuration format {}, which this template's kernel does not read (it reads up to {template_reads}): use a newer release",
-            version_of(blob)
-        ));
-    }
+        .and_then(|(_, s)| s)
+        .unwrap_or_default();
+    check_format(
+        blob,
+        iso,
+        &[(SlotKind::Boot, &old[..]), (SlotKind::Disk, &disk[..])],
+    )?;
     check_drivers(blob, iso)?;
     let old_hash = slot_hash(&old);
     // The menu's limine.conf as the template has it, to find the loaders enrolled with it (H8).
@@ -317,8 +393,11 @@ pub fn configure_raw(img: &[u8], blob: &[u8]) -> Result<Patched, String> {
             ));
         }
     }
-    let mut out = img.to_vec();
     let off = offs[0];
+    // ADR-367: the format rule of configure_iso, here too.
+    let slot = img.get(off..off + SLOT_SIZE).ok_or("slot is cut off")?;
+    check_format(blob, img, &[(SlotKind::Disk, slot), (SlotKind::Boot, slot)])?;
+    let mut out = img.to_vec();
     out.get_mut(off..off + SLOT_SIZE)
         .ok_or("slot is cut off")?
         .copy_from_slice(&new_slot);

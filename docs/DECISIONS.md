@@ -5561,3 +5561,74 @@ device the kernel does not drive is unaffected; one for a driven device would be
      edition's slot that holds an `[ext]` key; an edition reconfigures its image by rebuilding it with its own
      packer and `mkiso.sh --config-slot`.
   5. **The private repository itself** (`urmqtt-enterprise`) is not created and nothing is published.
+
+## ADR-365 — A signed release is bound to its tag by the signed trusted comment (security review v0.6.0, BOOT-1)
+
+- **Status:** Accepted (security review of v0.6.0, lens boot chain and updates; same root cause as SUPPLY-2).
+- **Problem.** `keyring::verify(keys, tag, sums, sig)` and the builder page's `verifyWithKeys` checked that the key
+  the signature names may sign the tag the caller gives (its range, its pins), then the signature. The tag came
+  from the caller (the mirror's `releases.json`, `--tag`) and was never compared with the release the signature
+  is about. A genuinely signed older release (v0.5.0) was accepted as v0.6.0 or v9.9.9: the page offered and named
+  an older, possibly vulnerable template as the newer release. A/B updates were not affected (`slots stage` judges
+  the kernel by its own build note).
+- **Decision.** The signed trusted comment names the release: the release workflow has signed every release since
+  v0.1.0 with `urMQTT <tag> dev|release <commit>`. Both checks now take the tag from the comment's second word and
+  refuse when it is not the tag being checked (a leading `v` aside). The comment is covered by minisign's global
+  signature, so the binding is as strong as the signature. File names in `SHA256SUMS` are not required to carry
+  the tag: the comment already binds the whole file, and the names of the releases signed by the former test key
+  are pinned by SHA-256 anyway.
+- **Verified.** `an_old_signed_release_is_refused_under_a_newer_tag` (`tools/config/tests/release_tag.rs`), the
+  real v0.1.0 file still verifying; builder test `a signed older release listed under a newer tag is refused`
+  (`key-rotation.test.mjs`, the fixture's `signedAs`). Both fail on v0.6.0.
+- **Not done.** `scripts/mirror-releases.py` still does not compare the comment with the tag; the mirror is not a
+  trust anchor (the page checks again), and that script is the supply-chain lens's (SUPPLY-2).
+
+## ADR-366 — `--pubkey` mode applies the built-in key ring (security review v0.6.0, BOOT-2)
+
+- **Status:** Accepted.
+- **Problem.** `release::verify_sums_any` (`urmqtt-config check-release --pubkey`, `urmqtt-disk slots stage
+  --pubkey`) picked the key by the id the signature names and applied no range and no pin. docs/RELEASE.md told
+  users to pass the former test key, which is considered compromised: a file signed with it was accepted for any
+  tag and any content (a forged v0.6.1 `SHA256SUMS`), while `--keyring` refused the same bytes.
+- **Decision.** The tool carries the repository's key ring (`keys/release-keys.json` with `minisign.pub` and the
+  test key, `keyring::builtin`). When the key that made the signature is in it, `verify_sums_any` also applies
+  `keyring::verify` with the tag the signed trusted comment names (`keyring::check_untagged`): the former test key
+  signs only its six pinned files, the release key only tags from v0.4.2. A key that is not in the ring (an
+  operator's own release key) is not restricted. A ring that does not parse (a fork with the placeholder key) makes
+  the check fail closed. RELEASE.md section 9 now shows `--keyring` with `--tag`.
+- **Verified.** `the_former_test_key_is_held_to_the_ring_in_pubkey_mode`, `the_built_in_ring_is_the_repository_ring`
+  (`release_tag.rs`); the existing `verify_sums_any` tests with the real v0.1.0 file pass unchanged.
+
+## ADR-367 — The configuration format rule reads the kernels' build note (security review v0.6.0, BOOT-5, BOOT-6)
+
+- **Status:** Accepted.
+- **Problem.** `configure_iso_in_place` took what the kernel reads from the template's slot only while it was empty;
+  once configured, the limit became this tool's own `FORMAT_VERSION`, so an old template configured twice took a
+  format its kernel refuses at boot. `configure_raw` (`pack --image`) had no format rule at all. Both contradict
+  ADR-233 ("an image that an older kernel would refuse is never offered"). Effect: the broker does not start (fail
+  closed); operator position.
+- **Decision.** One rule, `image::kernel_reads`, for both: the configuration format in the kernels' build note
+  (v0.6.0 and later, the lowest if they differ; decoded by the rules of `urmqtt_store::slots::parse_note`), else the
+  format of an unconfigured slot (the ISO's installation image keeps its `DISK` slot empty), else the format of the
+  configuration already in the image (the most it is known to take; the error says to configure the template of
+  that release instead). Never the tool's own format. Configuration format and store schema numbers are unchanged.
+- **Verified.** `reconfiguring_a_configured_old_template_keeps_the_format_rule` (`tools/config/tests/cli.rs`),
+  `a_raw_image_is_not_configured_with_a_format_its_kernel_cannot_read` (`release_tag.rs`),
+  `the_config_tool_reads_the_build_note_like_the_store` (`tools/disk/tests/slots.rs`).
+
+## ADR-368 — `update-boot` applies the rules of `slots stage` (security review v0.6.0, BOOT-3)
+
+- **Status:** Accepted.
+- **Problem.** `urmqtt-disk update-boot --in-place` on an A/B disk wrote the ESP over the running slot without the
+  build note, the downgrade rule, the store schema rule or the configuration format rule, then resealed the slot as
+  a confirmed way back recording the older kernel. SECURITY.md said a kernel older than the store's schema is
+  refused "always".
+- **Decision.** `update_boot` reads the new ESP's build note. On an A/B disk a note is required (`ab::note_of`), and
+  `ab::rules` applies against the active slot (`--allow-downgrade` exists for update-boot too). On a disk with one
+  slot, a new kernel with a note is held to the format rule, the store schema rule and, when the running kernel has
+  a note, the downgrade rule (`ab::rules_for`); a kernel without a note (before v0.6.0) is judged by nothing, as
+  before (no note, no facts). Every refusal comes before the first write.
+- **Verified.** `an_in_place_update_keeps_the_downgrade_rules` (`tools/disk/tests/slots.rs`): the v0.5.9 ESP of
+  format 13 refused with the words of `slots stage`, an older store schema refused even with `--allow-downgrade`, an
+  older release refused without it and accepted with it, a note-less kernel refused; the disk unchanged by every
+  refusal.

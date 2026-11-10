@@ -622,7 +622,12 @@ What that gives you and what it does not:
   compromised** from the day the release key exists (its secret was a
   passwordless CI secret); it is accepted only for the six releases it signed,
   and for each only the `SHA256SUMS` whose SHA-256 the key ring pins, so a
-  forged file signed with it is refused (docs/RELEASE.md section 9). The mirror is **not** a
+  forged file signed with it is refused (docs/RELEASE.md section 9). The signed
+  trusted comment (`urMQTT vX.Y.Z release <commit>`) must name the tag the
+  mirror lists the release under: a genuinely signed older release offered as a
+  newer one is a failed check (ADR-365). `urmqtt-config check-release` applies
+  the same rules (`--keyring` with `--tag`; with `--pubkey`, the ring built into
+  the tool and the tag of the trusted comment, ADR-366). The mirror is **not** a
   trust anchor: a modified template or sums file fails the check, and a failed
   check blocks the build unless you override it in a dialog that says what is
   wrong. A release the mirror cannot verify is not offered at all.
@@ -983,7 +988,7 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 | No memory tagging on x86_64, on HVF or on most clouds; the SQLite arena and DMA buffers are never tagged. | FEAT_MTE2 is rare in VPS hardware (ADR-174). | The software checks of ADR-170. |
 | No DMA isolation (IOMMU) on bare metal. | Deferred with bare metal (ADR-176); irrelevant to a VPS, whose devices are the hypervisor's. | None needed for a VM. |
 | A kernel that dies before its block driver runs is not counted as a failed A/B trial. | The bootloader keeps no boot counter the kernel could use (ADR-295, ADR-296); the counter is the kernel's. | The trial timeout and every later crash are counted; `urmqtt-disk slots rollback` offline. A loader-level one-shot entry (BLI) would close it; it needs UEFI runtime services in the kernel, which LATER-6 did not add (ADR-324). |
-| Downgrade protection is the offline tool's rule, not the firmware's. | No version counter exists (H8-W6, ADR-322); an attacker who can write the disk can write any older signed image that was not revoked. | `slots stage` refuses an older release (unless `--allow-downgrade`) and a kernel older than the store's schema, always; release images are staged only with their minisign signature. Under Secure Boot, revoke a superseded or leaked image by its loaders' Authenticode hashes in `dbx` (docs/secure-boot-keys.md, tested in OVMF and AAVMF). |
+| Downgrade protection is the offline tool's rule, not the firmware's. | No version counter exists (H8-W6, ADR-322); an attacker who can write the disk can write any older signed image that was not revoked. | `slots stage` and `update-boot` (also `--in-place` on an A/B disk, ADR-368) refuse an older release (unless `--allow-downgrade`), a kernel older than the store's schema, always, and a configuration format the kernel does not read; on an A/B disk a kernel without a build note is refused. A single-slot disk updated to a kernel before v0.6.0 (no build note) is not judged. Release images are staged only with their minisign signature. Under Secure Boot, revoke a superseded or leaked image by its loaders' Authenticode hashes in `dbx` (docs/secure-boot-keys.md, tested in OVMF and AAVMF). |
 | Secure Boot rests on keys the operator holds, and nothing here is signed by the project. | Release images are unsigned (ADR-251, ADR-324); shim/MOK is not supported, so firmware that trusts only Microsoft's keys cannot boot them under Secure Boot; Proxmox, real PCs and cloud firmware are untested. | Your own PK/KEK/db, kept as docs/secure-boot-keys.md describes; `sign-iso` after configuring. |
 | DMA isolation is off by default, and only tested against QEMU's IOMMU models. | `devices.iommu` (ADR-305) gives every driven device a domain with only its own pages, through VT-d, AMD-Vi or SMMUv3; it is `off` by default because a VPS's devices are the hypervisor's and an emulated IOMMU slows every DMA. Not run on real hardware; interrupt remapping is not enabled; reserved regions (RMRR/IVMD/RMR) are not mapped (ADR-307). With a GICv2m frame a device can still raise any SPI of the frame. | `devices.iommu = "require"` on bare metal or under a hypervisor whose device models you do not trust: the broker then refuses to boot without a working IOMMU covering every driven device, and `$SYS/broker/iommu/faults` counts blocked DMA. |
 | The hypervisor sees everything. | Out of scope. | Choose the host. |
