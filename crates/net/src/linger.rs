@@ -130,11 +130,18 @@ mod tests {
     /// every one since boot.
     #[test]
     fn closes_that_never_finish_are_bounded_by_the_deadline() {
-        let mut l = Linger::new(5_000);
+        // Miri runs the same property over a tenth of the time span (the full
+        // one took 50 minutes there); the bound is the same function of it.
+        let (limit, span) = if cfg!(miri) {
+            (500u64, 3_000u64)
+        } else {
+            (5_000, 60_000)
+        };
+        let mut l = Linger::new(limit);
         let mut open: BTreeSet<u32> = BTreeSet::new();
         let mut held_max = 0;
         let mut due = Vec::new();
-        for t in 0..60_000u64 {
+        for t in 0..span {
             // 2 new zombie connections per millisecond (2 000 per second).
             for i in 0..2 {
                 let c = (t * 2 + i) as u32;
@@ -150,9 +157,10 @@ mod tests {
             }
             held_max = held_max.max(open.len());
         }
-        // 5.1 s of them (the deadline plus one 100 ms tick).
-        assert!(held_max <= 2 * 5_101, "{held_max} held");
-        assert!(l.len() <= 2 * 5_101);
+        // The deadline plus one 100 ms tick of them (5.1 s in the full run).
+        let bound = 2 * (limit as usize + 101);
+        assert!(held_max <= bound, "{held_max} held");
+        assert!(l.len() <= bound);
     }
 
     #[test]
