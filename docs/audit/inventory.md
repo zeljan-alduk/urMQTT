@@ -30,7 +30,7 @@
 | `urmqtt-log` | `crates/log` | 2040 | 128 | 12 (12) | deny |
 | `urmqtt-mm` | `crates/mm` | 2580 | 0 | 74 (74) | deny |
 | `urmqtt-mqtt` | `crates/mqtt` | 6008 | 456 | 0 (0) | forbid |
-| `urmqtt-net` | `crates/net` | 5827 | 0 | 0 (0) | deny |
+| `urmqtt-net` | `crates/net` | 5835 | 0 | 0 (0) | deny |
 | `urmqtt-nistz256` | `crates/nistz256` | 2025 | 0 | 28 (28) | allow |
 | `urmqtt-pci` | `crates/pci` | 762 | 0 | 0 (0) | deny |
 | `urmqtt-plain` | `crates/plain` | 1698 | 0 | 0 (0) | forbid |
@@ -45,7 +45,7 @@
 | `urmqtt-virtio` | `crates/virtio` | 7790 | 0 | 30 (30) | deny |
 | `urmqtt-ws` | `crates/ws` | 1785 | 0 | 0 (0) | forbid |
 | `urmqtt-x25519` | `crates/x25519` | 1365 | 0 | 8 (8) | default |
-| **total** | | **163684** | | **937 (937)** | |
+| **total** | | **163692** | | **937 (937)** | |
 
 ## Vendored components
 
